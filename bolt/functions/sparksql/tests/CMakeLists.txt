@@ -76,6 +76,7 @@ add_executable(
   RaiseErrorTest.cpp
   RandTest.cpp
   RegexFunctionsTest.cpp
+  SliceTest.cpp
   SizeTest.cpp
   SortArrayTest.cpp
   SparkArraySortTest.cpp

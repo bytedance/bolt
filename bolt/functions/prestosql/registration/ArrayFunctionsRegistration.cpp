@@ -34,12 +34,14 @@
 #include "bolt/functions/lib/ArrayRemoveNullFunction.h"
 #include "bolt/functions/lib/ArrayShuffle.h"
 #include "bolt/functions/lib/Repeat.h"
+#include "bolt/functions/lib/Slice.h"
 #include "bolt/functions/prestosql/ArrayConstructor.h"
 #include "bolt/functions/prestosql/ArrayContains.h"
 #include "bolt/functions/prestosql/ArrayFunctions.h"
 #include "bolt/functions/prestosql/ArraySort.h"
 #include "bolt/functions/prestosql/WidthBucketArray.h"
 #include "bolt/functions/sparksql/ArraySort.h"
+
 namespace bytedance::bolt::functions {
 extern void registerArrayConcatFunctions(const std::string& prefix);
 extern void registerArrayNGramsFunctions(const std::string& prefix);
@@ -149,13 +151,12 @@ void registerArrayFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_contains, prefix + "array_contains");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_except, prefix + "array_except");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_arrays_overlap, prefix + "arrays_overlap");
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_slice, prefix + "slice");
+  registerBigintSliceFunction(prefix);
   BOLT_REGISTER_VECTOR_FUNCTION(udf_zip, prefix + "zip");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_zip_with, prefix + "zip_with");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_position, prefix + "array_position");
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_element, prefix + "element");
-
   exec::registerStatefulVectorFunction(
       prefix + "shuffle", arrayShuffleSignatures(), makeArrayShuffle);
 

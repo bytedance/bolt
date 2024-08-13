@@ -66,6 +66,7 @@ bolt_add_library(
   MapUpdate.cpp
   Re2Functions.cpp
   Repeat.cpp
+  Slice.cpp
   SimpleComparisonMatcher.cpp
   Size.cpp
   StringEncodingUtils.cpp
