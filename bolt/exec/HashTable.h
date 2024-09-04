@@ -472,6 +472,14 @@ class BaseHashTable {
     return offThreadBuildTiming_;
   }
 
+  /// Copies the values at 'columnIndex' into 'result' for the 'rows.size' rows
+  /// pointed to by 'rows'. If an entry in 'rows' is null, sets corresponding
+  /// row in 'result' to null.
+  virtual void extractColumn(
+      folly::Range<char* const*> rows,
+      int32_t columnIndex,
+      const VectorPtr& result) = 0;
+
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
     // Each slot is 8 bytes.
@@ -868,6 +876,19 @@ class HashTable : public BaseHashTable {
 
   bool simdLayoutActive() const {
     return simdNormalizedKeyLayoutActive() || simdHashLayoutActive();
+  }
+
+  void extractColumn(
+      folly::Range<char* const*> rows,
+      int32_t columnIndex,
+      const VectorPtr& result) override {
+    RowContainer::extractColumn(
+        rows.data(),
+        rows.size(),
+        rows_->columnAt(columnIndex),
+        result,
+        false,
+        columnHasNulls_[columnIndex]);
   }
 
  private:
@@ -1366,6 +1387,10 @@ class HashTable : public BaseHashTable {
   // combined into a single probe hash table.
   std::vector<std::unique_ptr<HashTable<ignoreNullKeys>>> otherTables_;
   // Statistics maintained if kTrackLoads is set.
+
+  // Flags indicate whether each column in any build-side join hash table
+  // contains null values.
+  std::vector<bool> columnHasNulls_;
 
   // Number of times a row is looked up or inserted.
   mutable tsan_atomic<int64_t> numProbes_{0};

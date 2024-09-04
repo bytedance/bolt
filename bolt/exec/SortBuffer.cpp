@@ -662,7 +662,8 @@ void SortBuffer::getOutputWithSpill() {
             data_->columns(),
             outputRow,
             output_,
-            columnMap_);
+            columnMap_,
+            true);
         outputRow += rows.size();
         rows.clear();
       }
@@ -678,7 +679,8 @@ void SortBuffer::getOutputWithSpill() {
           data_->columns(),
           outputRow,
           output_,
-          columnMap_);
+          columnMap_,
+          true);
     }
 
     numOutputRows_ += output_->size();

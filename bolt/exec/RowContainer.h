@@ -302,6 +302,11 @@ class RowContainer {
     if (!nullOffsets_.empty()) {
       memset(row + nullByte(nullOffsets_[0]), 0xff, initialNulls_.size());
       bits::clearBit(row, freeFlagOffset_);
+      for (int32_t i = 0; i < columnHasNulls_.size(); ++i) {
+        if (columnAt(i).nullMask() != 0) {
+          columnHasNulls_[i] = true;
+        }
+      }
     }
   }
 
@@ -376,7 +381,8 @@ class RowContainer {
       auto mask = rowColumn.nullMask();
 
       for (auto r = 0; r < size; ++r) {
-        storeWithNulls<Kind>(decoded, r, isKey, rows[r], off, nullByte, mask);
+        storeWithNulls<Kind>(
+            decoded, r, isKey, rows[r], off, nullByte, mask, column);
       }
     }
   }
@@ -425,7 +431,8 @@ class RowContainer {
       RowColumn col,
       vector_size_t resultOffset,
       const VectorPtr& result,
-      bool exactSize = false);
+      bool exactSize = false,
+      bool columnHasNulls = true);
 
   /// Copies the values at 'col' into 'result' for the 'numRows' rows pointed to
   /// by 'rows'. If an entry in 'rows' is null, sets corresponding row in
@@ -435,8 +442,9 @@ class RowContainer {
       int32_t numRows,
       RowColumn col,
       const VectorPtr& result,
-      bool exactSize = false) {
-    extractColumn(rows, numRows, col, 0, result, exactSize);
+      bool exactSize = false,
+      bool columnHasNulls = true) {
+    extractColumn(rows, numRows, col, 0, result, exactSize, columnHasNulls);
   }
 
   /// Copies the values from the array pointed to by 'rows' at 'col' into
@@ -451,7 +459,8 @@ class RowContainer {
       RowColumn col,
       vector_size_t resultOffset,
       const VectorPtr& result,
-      bool exactSize = false);
+      bool exactSize = false,
+      bool columnHasNulls = true);
 
   /// Sets in result all locations with null values in col for rows (for numRows
   /// number of rows).
@@ -470,7 +479,13 @@ class RowContainer {
       int32_t columnIndex,
       const VectorPtr& result,
       bool exactSize = false) {
-    extractColumn(rows, numRows, columnAt(columnIndex), result, exactSize);
+    extractColumn(
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        result,
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Copies the values at 'columnIndex' into 'result' (starting at
@@ -484,7 +499,13 @@ class RowContainer {
       const VectorPtr& result,
       bool exactSize = false) {
     extractColumn(
-        rows, numRows, columnAt(columnIndex), resultOffset, result, exactSize);
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        resultOffset,
+        result,
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Copies the values at 'columnIndex' at positions in the 'rowNumbers' array
@@ -507,7 +528,8 @@ class RowContainer {
         columnAt(columnIndex),
         resultOffset,
         result,
-        exactSize);
+        exactSize,
+        columnHasNulls(columnIndex));
   }
 
   /// Sets in result all locations with null values in columnIndex for rows.
@@ -837,6 +859,14 @@ class RowContainer {
     return keyIndices_;
   }
 
+  bool columnHasNulls(int32_t columnIndex) const {
+    return columnHasNulls_[columnIndex];
+  }
+
+  const std::vector<bool>& columnHasNulls() const {
+    return columnHasNulls_;
+  }
+
   const std::vector<Accumulator>& accumulators() const {
     return accumulators_;
   }
@@ -953,7 +983,8 @@ class RowContainer {
       RowColumn column,
       int32_t resultOffset,
       const VectorPtr& result,
-      bool exactSize) {
+      bool exactSize,
+      bool columnHasNulls) {
     if (rowNumbers.size() > 0) {
       extractColumnTypedInternal<true, Kind>(
           rows,
@@ -962,10 +993,18 @@ class RowContainer {
           column,
           resultOffset,
           result,
-          exactSize);
+          exactSize,
+          columnHasNulls);
     } else {
       extractColumnTypedInternal<false, Kind>(
-          rows, rowNumbers, numRows, column, resultOffset, result, exactSize);
+          rows,
+          rowNumbers,
+          numRows,
+          column,
+          resultOffset,
+          result,
+          exactSize,
+          columnHasNulls);
     }
   }
 
@@ -977,7 +1016,8 @@ class RowContainer {
       RowColumn column,
       int32_t resultOffset,
       const VectorPtr& result,
-      bool exactSize) {
+      bool exactSize,
+      bool columnHasNulls) {
     // Resize the result vector before all copies.
     result->resize(numRows + resultOffset);
 
@@ -992,7 +1032,7 @@ class RowContainer {
     auto* flatResult = result->as<FlatVector<T>>();
     auto nullMask = column.nullMask();
     auto offset = column.offset();
-    if (!nullMask) {
+    if (!nullMask || !columnHasNulls) {
       extractValuesNoNulls<useRowNumbers, T>(
           rows,
           rowNumbers,
@@ -1032,7 +1072,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte,
-      uint8_t nullMask) {
+      uint8_t nullMask,
+      int32_t column) {
     using T = typename TypeTraits<Kind>::NativeType;
     if (decoded.isNullAt(index)) {
       row[nullByte] |= nullMask;
@@ -1052,6 +1093,7 @@ class RowContainer {
         // null. This is an error with valgrind/asan.
         *reinterpret_cast<T*>(row + offset) = T();
       }
+      updateColumnHasNulls(column);
       return;
     }
     if constexpr (std::is_same_v<T, StringView>) {
@@ -1321,7 +1363,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte = 0,
-      uint8_t nullMask = 0);
+      uint8_t nullMask = 0,
+      int32_t column = 0);
 
   template <bool useRowNumbers>
   static void extractComplexType(
@@ -1430,10 +1473,19 @@ class RowContainer {
   // Free any aggregates associated with the 'rows'.
   void freeAggregates(folly::Range<char**> rows);
 
+  void updateColumnHasNulls(int32_t columnIndex) {
+    columnHasNulls_[columnIndex] = true;
+  }
+
+  void updateColumnHasNulls(const char* row);
+
   const bool checkFree_ = false;
 
   const std::vector<TypePtr> keyTypes_;
   std::vector<column_index_t> keyIndices_;
+  // Monotonic null flags for keys and dependents. These stay set across clear()
+  // so they remain valid for rows already written to spill.
+  std::vector<bool> columnHasNulls_;
   const bool nullableKeys_;
   const bool isJoinBuild_;
 
@@ -1514,8 +1566,10 @@ inline void RowContainer::storeWithNulls<TypeKind::ROW>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1536,8 +1590,10 @@ inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1558,8 +1614,10 @@ inline void RowContainer::storeWithNulls<TypeKind::MAP>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(
+      decoded, index, isKey, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1580,12 +1638,14 @@ inline void RowContainer::storeWithNulls<TypeKind::HUGEINT>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
+    uint8_t nullMask,
+    int32_t column) {
   if (decoded.isNullAt(index)) {
     row[nullByte] |= nullMask;
     // Do not leave an uninitialized value in the case of a
     // null. This is an error with valgrind/asan.
     memset(row + offset, 0, sizeof(int128_t));
+    updateColumnHasNulls(column);
     return;
   }
   HugeInt::serialize(decoded.valueAt<int128_t>(index), row + offset);
@@ -1609,7 +1669,8 @@ inline void RowContainer::extractColumnTyped<TypeKind::OPAQUE>(
     RowColumn /*column*/,
     int32_t /*resultOffset*/,
     const VectorPtr& /*result*/,
-    bool exactSize /*exactSize*/) {
+    bool exactSize /*exactSize*/,
+    bool /*columnHasNulls*/) {
   BOLT_UNSUPPORTED("RowContainer doesn't support values of type OPAQUE");
 }
 
@@ -1619,7 +1680,8 @@ inline void RowContainer::extractColumn(
     RowColumn column,
     int32_t resultOffset,
     const VectorPtr& result,
-    bool exactSize) {
+    bool exactSize,
+    bool columnHasNulls) {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1629,7 +1691,8 @@ inline void RowContainer::extractColumn(
       column,
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      columnHasNulls);
 }
 
 inline void RowContainer::extractColumn(
@@ -1638,7 +1701,8 @@ inline void RowContainer::extractColumn(
     RowColumn column,
     int32_t resultOffset,
     const VectorPtr& result,
-    bool exactSize) {
+    bool exactSize,
+    bool columnHasNulls) {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1648,7 +1712,8 @@ inline void RowContainer::extractColumn(
       column,
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      columnHasNulls);
 }
 
 inline void RowContainer::extractNulls(
@@ -1919,7 +1984,10 @@ class HybridContainer {
       bool exactSize = false) {
     // keys
     if (isKey(columnIndex)) {
-      keys_->extractColumn(rows, numRows, columnIndex, resultOffset, result);
+      // Rows can come from other build containers whose nulls are not tracked
+      // by keys_.
+      RowContainer::extractColumn(
+          rows, numRows, keys_->columnAt(columnIndex), resultOffset, result);
     } else {
       // payloads
       // getRowIds should be called out of extracting projection columns
@@ -1961,8 +2029,10 @@ class HybridContainer {
       bool exactSize = false) {
     // keys
     if (isKey(columnIndex)) {
-      // exactSize was deprecated
-      keys_->extractColumn(rows, rowNumbers, columnIndex, resultOffset, result);
+      // Rows can come from other build containers whose nulls are not tracked
+      // by keys_.
+      RowContainer::extractColumn(
+          rows, rowNumbers, keys_->columnAt(columnIndex), resultOffset, result);
     } else {
       // payloads
       // getRowIds should be called out of extracting projection columns

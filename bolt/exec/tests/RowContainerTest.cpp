@@ -1733,20 +1733,22 @@ TEST_F(RowContainerTest, extractSerializedRow) {
     rowContainer.extractSerializedRows(
         folly::Range(rows.data(), rows.size()), serialized);
 
+    const auto expectedColumnHasNulls = rowContainer.columnHasNulls();
     rowContainer.clear();
     rows.clear();
+    RowContainer restored{rowType->children(), pool()};
 
     // Load serialized rows back.
     for (auto i = 0; i < data->size(); ++i) {
-      rows.push_back(rowContainer.newRow());
-      rowContainer.storeSerializedRow(*serialized, i, rows.back());
+      rows.push_back(restored.newRow());
+      restored.storeSerializedRow(*serialized, i, rows.back());
     }
+    EXPECT_EQ(restored.columnHasNulls(), expectedColumnHasNulls);
 
     // Extract into regular vector.
     auto copy = BaseVector::create<RowVector>(rowType, data->size(), pool());
     for (auto i = 0; i < copy->childrenSize(); ++i) {
-      rowContainer.extractColumn(
-          rows.data(), copy->size(), i, copy->childAt(i));
+      restored.extractColumn(rows.data(), copy->size(), i, copy->childAt(i));
     }
     assertEqualVectors(data, copy);
   }
@@ -1818,6 +1820,93 @@ TEST_F(RowContainerTest, DISABLED_ConvertBenchmark) {
     auto lambda = [&](auto data) { roundTrip(data); };
     benchmark("string_array_10K", lambda, 1000, data);
   }
+}
+
+TEST_F(RowContainerTest, columnHasNulls) {
+  auto rowContainer =
+      makeRowContainer({BIGINT(), BIGINT()}, {BIGINT(), BIGINT()}, false);
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    ASSERT_TRUE(!rowContainer->columnHasNulls(i));
+  }
+
+  const uint64_t kNumRows = 1000;
+  auto rowVector = makeRowVector(
+      {makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 5; }),
+       makeFlatVector<int64_t>(
+           kNumRows, [](auto row) { return row % 5; }, nullEvery(3)),
+       makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 7; }),
+       makeFlatVector<int64_t>(
+           kNumRows, [](auto row) { return row % 7; }, nullEvery(999))});
+
+  std::vector<char*> rows;
+  rows.reserve(kNumRows);
+
+  ASSERT_EQ(rowContainer->numRows(), 0);
+  SelectivityVector allRows(kNumRows);
+  for (size_t i = 0; i < kNumRows; i++) {
+    auto row = rowContainer->newRow();
+    rows.push_back(row);
+  }
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    DecodedVector decoded(*rowVector->childAt(i), allRows);
+    for (int j = 0; j < kNumRows; ++j) {
+      char* row = rows[j];
+      rowContainer->store(decoded, j, row, i);
+    }
+  }
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    if (i % 2 == 0) {
+      ASSERT_TRUE(!rowContainer->columnHasNulls(i));
+    } else {
+      ASSERT_TRUE(rowContainer->columnHasNulls(i));
+    }
+  }
+  // A null-free column must not allocate a nulls buffer on extraction.
+  for (int i = 0; i < rowContainer->columnTypes().size(); ++i) {
+    auto vector =
+        BaseVector::create(rowVector->childAt(i)->type(), kNumRows, pool());
+    rowContainer->extractColumn(rows.data(), kNumRows, i, vector);
+    if (i % 2 == 0) {
+      ASSERT_TRUE(!vector->mayHaveNulls());
+    } else {
+      ASSERT_TRUE(vector->mayHaveNulls());
+    }
+    vector->setNull(0, true);
+    rowContainer->extractColumn(rows.data(), kNumRows, i, vector);
+    EXPECT_EQ(vector->isNullAt(0), rowVector->childAt(i)->isNullAt(0));
+  }
+}
+
+TEST_F(RowContainerTest, hybridExtractKeysFromOtherContainer) {
+  auto local = makeRowContainer({BIGINT()}, {BIGINT()}, false);
+  auto other = makeRowContainer({BIGINT()}, {BIGINT()}, false);
+  auto values = makeNullableFlatVector<int64_t>({7, std::nullopt});
+  DecodedVector decoded(*values);
+  std::vector<char*> rows{local->newRow(), other->newRow(), nullptr};
+  local->store(decoded, 0, rows[0], 0);
+  other->store(decoded, 1, rows[1], 0);
+  ASSERT_FALSE(local->columnHasNulls(0));
+  ASSERT_TRUE(other->columnHasNulls(0));
+
+  HybridContainer hybrid({BIGINT()}, {BIGINT()}, local.get());
+  std::vector<HybridRowId> rowIds;
+  auto result = BaseVector::create(BIGINT(), rows.size(), pool());
+  hybrid.extractColumn(rows.data(), rows.size(), 0, result, rowIds);
+  assertEqualVectors(
+      makeNullableFlatVector<int64_t>({7, std::nullopt, std::nullopt}), result);
+
+  const std::vector<vector_size_t> rowNumbers{1, 0, 2, 1};
+  hybrid.extractColumn(
+      rows.data(),
+      folly::Range<const vector_size_t*>(rowNumbers.data(), rowNumbers.size()),
+      0,
+      0,
+      result,
+      rowIds);
+  assertEqualVectors(
+      makeNullableFlatVector<int64_t>(
+          {std::nullopt, 7, std::nullopt, std::nullopt}),
+      result);
 }
 
 BOLT_INSTANTIATE_TEST_SUITE_P(

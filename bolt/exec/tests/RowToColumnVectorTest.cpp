@@ -86,6 +86,24 @@ TEST_F(RowToColumnVectorTest, basic) {
   ASSERT_TRUE(ans->equalValueAt(expect.get(), 0, 0));
 }
 
+TEST_F(RowToColumnVectorTest, nullFree) {
+  auto data = std::make_unique<char[]>(sizeof(int32_t) + 1);
+  const int32_t value = 16;
+  std::memcpy(data.get(), &value, sizeof(value));
+  data[sizeof(value)] = 0;
+  auto row = data.get();
+  auto result = BaseVector::create<FlatVector<int32_t>>(INTEGER(), 1, pool());
+
+  rowToColumnVector(&row, 1, RowColumn(0, sizeof(value) * 8), 0, result, false);
+
+  EXPECT_FALSE(result->mayHaveNulls());
+  EXPECT_EQ(result->valueAt(0), value);
+
+  result->setNull(0, true);
+  rowToColumnVector(&row, 1, RowColumn(0, sizeof(value) * 8), 0, result, false);
+  EXPECT_FALSE(result->isNullAt(0));
+}
+
 TEST_F(RowToColumnVectorTest, string) {
   VectorPtr ans = makeFlatVector<StringView>(1, VARCHAR());
   auto data = std::make_unique<char[]>(100);

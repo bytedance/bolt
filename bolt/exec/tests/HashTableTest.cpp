@@ -1274,6 +1274,68 @@ TEST_P(HashTableTest, simdSkewedParallelBuildOverflow) {
   EXPECT_FALSE(table->hasDuplicateKeys());
 }
 
+TEST_P(HashTableTest, extractColumnUsesMergedNulls) {
+  auto makeTable = [&](int64_t firstKey, bool hasNull) {
+    std::vector<std::unique_ptr<VectorHasher>> hashers;
+    hashers.push_back(VectorHasher::create(BIGINT(), 0));
+    auto table = HashTable<false>::createForJoin(
+        std::move(hashers),
+        {BIGINT(), BIGINT()},
+        true,
+        false,
+        BaseHashTable::HashMode::kHash,
+        1,
+        pool(),
+        GetParam().jitRowEqVectors);
+    auto nullable = hasNull
+        ? makeNullableFlatVector<int64_t>({std::nullopt, firstKey + 21})
+        : makeNullableFlatVector<int64_t>({firstKey + 20, firstKey + 21});
+    auto input = makeRowVector(
+        {makeFlatVector<int64_t>({firstKey, firstKey + 1}),
+         makeFlatVector<int64_t>({firstKey + 10, firstKey + 11}),
+         nullable});
+    copyVectorsToTable({input}, 0, table.get());
+    return table;
+  };
+
+  auto table = makeTable(0, false);
+  auto other = makeTable(2, true);
+  ASSERT_FALSE(table->rows()->columnHasNulls(1));
+  ASSERT_FALSE(table->rows()->columnHasNulls(2));
+  ASSERT_TRUE(other->rows()->columnHasNulls(2));
+
+  std::vector<std::unique_ptr<BaseHashTable>> others;
+  others.push_back(std::move(other));
+  table->prepareJoinTable(std::move(others), executor_.get());
+
+  std::vector<char*> rows(4);
+  BaseHashTable::RowsIterator iterator;
+  int32_t numRows = 0;
+  while (auto count = table->listAllRows(
+             &iterator,
+             rows.size() - numRows,
+             RowContainer::kUnlimited,
+             rows.data() + numRows)) {
+    numRows += count;
+  }
+  ASSERT_EQ(numRows, rows.size());
+
+  auto nullFree = BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(rows.data(), rows.size()), 1, nullFree);
+  EXPECT_FALSE(nullFree->mayHaveNulls());
+
+  auto nullable = BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(rows.data(), rows.size()), 2, nullable);
+  EXPECT_TRUE(nullable->mayHaveNulls());
+  int32_t numNulls = 0;
+  for (vector_size_t i = 0; i < nullable->size(); ++i) {
+    numNulls += nullable->isNullAt(i);
+  }
+  EXPECT_EQ(numNulls, 1);
+}
+
 TEST_P(HashTableTest, groupBySpill) {
   auto type = ROW({"k1"}, {BIGINT()});
   testGroupBySpill(5'000'000, type, 1, 1000, 1000);

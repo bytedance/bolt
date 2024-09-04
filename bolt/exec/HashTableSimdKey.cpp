@@ -120,28 +120,6 @@ void buildKeyColumns(
   columns.clear();
   columns.reserve(lookup.hashers.size());
 
-  bool hasAnyNulls = false;
-  if constexpr (!ignoreNullKeys) {
-    for (const auto& hasher : lookup.hashers) {
-      if (hasher->decodedVector().mayHaveNulls()) {
-        hasAnyNulls = true;
-        break;
-      }
-    }
-    if (!hasAnyNulls) {
-      if (hasStoredNullKeys) {
-        hasAnyNulls = true;
-      } else if (columnHasNulls.empty()) {
-        for (int32_t i = 0; i < lookup.hashers.size(); ++i) {
-          if (rows->columnAt(i).nullMask() != 0) {
-            hasAnyNulls = true;
-            break;
-          }
-        }
-      }
-    }
-  }
-
   for (int32_t columnIndex = 0; columnIndex < lookup.hashers.size();
        ++columnIndex) {
     const auto& hasher = lookup.hashers[columnIndex];
@@ -197,17 +175,14 @@ void buildKeyColumns(
       }
     }
     const auto rowColumn = rows->columnAt(columnIndex);
-    bool hasColumnNulls = hasAnyNulls;
-    if (hasColumnNulls) {
-      const bool schemaNonNull = rowColumn.nullMask() == 0;
-      const bool inputHasNoNull = !decoded.mayHaveNulls();
-      const bool storedHasNoNull =
-          (columnIndex < static_cast<int32_t>(columnHasNulls.size()))
-          ? !columnHasNulls[columnIndex]
-          : (rowColumn.nullMask() == 0);
-      if (schemaNonNull || (inputHasNoNull && storedHasNoNull)) {
-        hasColumnNulls = false;
-      }
+    bool hasColumnNulls = false;
+    if constexpr (!ignoreNullKeys) {
+      const bool storedMayHaveNulls = hasStoredNullKeys ||
+          (columnIndex < static_cast<int32_t>(columnHasNulls.size())
+               ? columnHasNulls[columnIndex]
+               : true);
+      hasColumnNulls = rowColumn.nullMask() != 0 &&
+          (decoded.mayHaveNulls() || storedMayHaveNulls);
     }
 
     const vector_size_t* inputIndices = nullptr;
