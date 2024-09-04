@@ -2014,6 +2014,14 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
     hybridData_->setAllContainers(hybridDataChannel);
   }
 
+  columnHasNulls_ = rows_->columnHasNulls();
+  for (auto& other : otherTables_) {
+    for (int32_t i = 0; i < columnHasNulls_.size(); ++i) {
+      columnHasNulls_[i] =
+          columnHasNulls_[i] || other->rows()->columnHasNulls(i);
+    }
+  }
+
   bool useValueIds = mayUseValueIds(*this);
   if (useValueIds) {
     for (auto& other : otherTables_) {
@@ -2619,7 +2627,7 @@ void HashTable<ignoreNullKeys>::groupHashProbeSimd(HashLookup& lookup) {
       lookup.simdKeyColumns,
       rows_.get(),
       /*hasStoredNullKeys=*/false,
-      /*columnHasNulls=*/{});
+      rows_->columnHasNulls());
 
   lookup.simdActiveRows.resize(numProbes);
   lookup.simdActiveSlots.resize(numProbes);
@@ -2713,7 +2721,7 @@ void HashTable<ignoreNullKeys>::joinHashProbeSimd(HashLookup& lookup) {
       lookup.simdKeyColumns,
       rows_.get(),
       /*hasStoredNullKeys=*/false,
-      /*columnHasNulls=*/{});
+      columnHasNulls_);
 
   lookup.simdActiveRows.resize(numProbes);
   lookup.simdActiveSlots.resize(numProbes);

@@ -37,6 +37,7 @@
 #include "bolt/exec/HashPartitionFunction.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/RowContainer.h"
+#include "bolt/exec/RowToColumnVector.h"
 #include "bolt/exec/tests/utils/RowContainerTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 using namespace bytedance::bolt;
@@ -1662,7 +1663,14 @@ class RowBasedSpillTest : public SpillerTest,
 TEST_P(RowBasedSpillTest, row_based_spill) {
   const int numRows = 5'000;
 
-  setupSpillData(rowType_, numKeys_, numRows, 0);
+  setupSpillData(rowType_, numKeys_, numRows, 0, [](const RowVectorPtr& input) {
+    for (int32_t i = 0; i < input->childrenSize(); ++i) {
+      input->childAt(i)->clearAllNulls();
+      if (i % 2 == 1) {
+        input->childAt(i)->setNull(0, true);
+      }
+    }
+  });
   sortSpillData();
   // NOTE: target file size is ignored by aggregation output spiller type.
   setupSpiller(0, 1'000'000, false, 0, true);
@@ -1685,11 +1693,31 @@ TEST_P(RowBasedSpillTest, row_based_spill) {
         RowBasedSpillReadFile::create(fileInfo, pool(), false));
   }
   ASSERT_EQ(readerFiles.size(), 1);
+  const auto& types = rowType_->children();
+  std::vector<TypePtr> keys(types.begin(), types.begin() + numKeys_);
+  std::vector<TypePtr> dependents(types.begin() + numKeys_, types.end());
+  auto restored = makeRowContainer(keys, dependents, false);
+  auto rowInfo = spillPartition.files()[0].rowInfo.value();
   auto& indices = partitions_[0];
   size_t index = 0;
   std::vector<char*> readRows;
   while (readerFiles[0]->nextBatch(readRows)) {
+    for (int32_t i = 0; i < rowType_->size(); ++i) {
+      auto result =
+          BaseVector::create(rowType_->childAt(i), readRows.size(), pool());
+      rowToColumnVector(
+          readRows.data(),
+          readRows.size(),
+          rowInfo.rowColumns[i],
+          0,
+          result,
+          rowContainer_->columnHasNulls(i));
+      if (rowType_->childAt(i)->isPrimitiveType() && i % 2 == 0) {
+        EXPECT_FALSE(result->mayHaveNulls());
+      }
+    }
     for (auto row : readRows) {
+      restored->copySerializedRow(row, &rowInfo);
       char* writeRow = spillRows[indices[index++]];
       for (auto i = 0; i < rowContainer_->columns().size(); ++i) {
         auto writeColumn = rowContainer_->columnAt(i);
@@ -1745,6 +1773,19 @@ TEST_P(RowBasedSpillTest, row_based_spill) {
     }
   }
   ASSERT_EQ(index, numRows);
+  for (int32_t i = 0; i < rowType_->size(); ++i) {
+    EXPECT_EQ(restored->columnHasNulls(i), i % 2 == 1);
+  }
+  std::vector<char*> restoredRows(restored->numRows());
+  RowContainerIterator iterator;
+  ASSERT_EQ(
+      restored->listRows(&iterator, restoredRows.size(), restoredRows.data()),
+      restoredRows.size());
+  for (int32_t i = 0; i < rowType_->size(); ++i) {
+    auto result = BaseVector::create(rowType_->childAt(i), numRows, pool());
+    restored->extractColumn(restoredRows.data(), numRows, i, result);
+    EXPECT_EQ(result->mayHaveNulls(), i % 2 == 1);
+  }
 }
 
 TEST_P(RowBasedSpillTest, string_view_format) {

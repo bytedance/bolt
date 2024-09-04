@@ -147,8 +147,7 @@ void extractColumns(
             BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
       }
       child->resize(rows.size());
-      table->rows()->extractColumn(
-          rows.data(), rows.size(), projection.inputChannel, child);
+      table->extractColumn(rows, projection.inputChannel, child);
     }
   }
 }
@@ -1438,9 +1437,8 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
       }
     } else {
       for (auto& projection : filterTableProjections_) {
-        tableRows->extractColumn(
-            data,
-            numRows,
+        table_->extractColumn(
+            folly::Range<char* const*>(data, numRows),
             projection.inputChannel,
             filterTableInput_->childAt(projection.outputChannel));
       }
