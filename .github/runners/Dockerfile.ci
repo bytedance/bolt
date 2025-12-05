@@ -9,7 +9,7 @@ ARG DEB_REGION=""
 ARG HTTPS_PROXY=""
 
 RUN [ "$DEB_REGION" != "" ] && \
-    sed -i "s|http://deb.debian.org/debian|http://ftp.${DEB_REGION}.debian.org/debian|g" /etc/apt/sources.list.d/debian.sources \
+    sed -i "s|http://deb.debian.org/debian|http://ftp.${DEB_REGION}.debian.org/debian|g" /etc/apt/sources.list \
     || true
 
 # Install cmake
