@@ -50,6 +50,8 @@ RUN apt-get update && apt-get install -y \
         && apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io \
         && sed -i 's|ulimit -Hn 524288|ulimit -n 65536|g' /etc/init.d/docker
 
+RUN echo '{ "insecure-registries": ["bolt-registry:5000"] }' > /etc/docker/daemon.json
+
 # Copy in pipenv files
 COPY . /entrypoint
 WORKDIR /entrypoint

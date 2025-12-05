@@ -3,9 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ci
-      tags: 
-        - bolt-ci:latest
-    command: bash -c "Bolt CI Image"
+    image: localhost:5000/bolt-ci:latest
+    command: ["/bin/bash", "-c", "Bolt CI Image"]
   conan_server:
     build:
       context: .
@@ -18,7 +17,12 @@ services:
       - /tmp/conan-server:/var/conan/data:rw
     networks:
       - default
-    
+  bolt-registry:
+    image: registry:2
+    ports:
+      - "5000:5000"
+    volumes:
+      - /tmp/registry:/var/lib/registry:rw
   runner-large:
     extends:
       service: base-runner
@@ -28,6 +32,8 @@ services:
       - RUNNER_LABELS=large
       - GITHUB_RUNNER_TOKEN=${RUNNER_LARGE_TOKEN}
     privileged: true
+    volumes:
+      - docker-data-large:/var/lib/docker
     deploy:
       resources:
         limits:
@@ -39,6 +45,8 @@ services:
       service: base-runner
       file: runner-base-compose.yml
     privileged: true
+    volumes:
+      - docker-data-medium1:/var/lib/docker
     environment:
       - RUNNER_NAME=runner-medium-1
       - RUNNER_LABELS=medium
@@ -54,6 +62,8 @@ services:
       service: base-runner
       file: runner-base-compose.yml
     privileged: true
+    volumes:
+      - docker-data-medium2:/var/lib/docker
     environment:
       - RUNNER_NAME=runner-medium-2
       - RUNNER_LABELS=medium
@@ -69,6 +79,8 @@ services:
       service: base-runner
       file: runner-base-compose.yml
     privileged: true
+    volumes:
+      - docker-data-small:/var/lib/docker
     environment:
       - RUNNER_NAME=runner-small
       - RUNNER_LABELS=small
@@ -81,8 +93,7 @@ services:
 
 volumes:
   actions-cache:
-    driver: local
-    driver_opts:
-      o: bind
-      type: none
-      device: /tmp/actions-cache
+  docker-data-small:
+  docker-data-medium1:
+  docker-data-medium2:
+  docker-data-large:

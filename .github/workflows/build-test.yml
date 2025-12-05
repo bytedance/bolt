@@ -9,7 +9,7 @@ on:
 jobs:
   build-test:
     runs-on: [ self-hosted, large ]
-    container: bolt-ci:latest
+    container: bolt-registry:5000/bolt-ci:latest
     steps:
     - name: Cache ccache
       id: cache-ccache

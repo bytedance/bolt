@@ -9,7 +9,7 @@ on:
 jobs:
   format-check:
     runs-on: [ self-hosted, small ]
-    container: bolt-ci:latest
+    container: bolt-registry:5000/bolt-ci:latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
