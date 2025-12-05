@@ -1,0 +1,45 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CONAN_HOME: ${{ vars.BOLT_RUNNER_CONAN_HOME }}
+  CCACHE_DIR: ${{ vars.BOLT_RUNNER_CCACHE_DIR }}
+  CCACHE_MAX_SIZE: '100G'
+
+jobs:
+  build-test:
+    runs-on: [ self-hosted, large ]
+    container: 
+      image: bolt-registry:5000/bolt-ci:latest
+      volumes:
+        - ${{ vars.BOLT_RUNNER_CCACHE_DIR }}:${{ vars.BOLT_RUNNER_CCACHE_DIR }}
+    strategy:
+      matrix: 
+        build_type: [ release ]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+    - name: Add CI conan remote
+      run: |
+        source /root/venv/bin/activate
+        conan remote add --index=0 ci http://${{ vars.BOLT_RUNNER_CONAN_HOST }}:9300
+      
+    - name: Install Bolt dependencies
+      run: |
+        source /root/venv/bin/activate
+        ./scripts/install-bolt-deps.sh
+
+    - name: Bolt Build
+      run: |
+        source /root/venv/bin/activate
+        make ${{ matrix.build_type }}_with_test
+
+    - name: Run tests
+      run: |
+        source /root/venv/bin/activate
+        make unittest_${{ matrix.build_type }}
