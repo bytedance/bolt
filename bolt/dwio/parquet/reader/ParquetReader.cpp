@@ -80,6 +80,11 @@ class ReaderBase {
     return schemaWithId_;
   }
 
+  const std::unordered_map<std::string, thrift::LogicalType>&
+  schemaLogicalTypes() const {
+    return logicalTypesByPath_;
+  }
+
   bool isFileColumnNamesReadAsLowerCase() const {
     return options_.isFileColumnNamesReadAsLowerCase();
   }
@@ -146,9 +151,16 @@ class ReaderBase {
   RowTypePtr schema_;
   std::shared_ptr<const dwio::common::TypeWithId> schemaWithId_;
 
+  // Logical types keyed by dot-delimited field path from the root.
+  std::unordered_map<std::string, thrift::LogicalType> logicalTypesByPath_;
+
   // Map from row group index to pre-created loading BufferedInput.
   std::unordered_map<uint32_t, std::shared_ptr<dwio::common::BufferedInput>>
       inputs_;
+
+  void collectLogicalTypes(
+      const std::shared_ptr<const dwio::common::TypeWithId>& type,
+      const std::string& path);
 };
 
 ReaderBase::ReaderBase(
@@ -282,6 +294,9 @@ void ReaderBase::initializeSchema() {
       nullptr);
   schema_ = createRowType(
       schemaWithId_->getChildren(), isFileColumnNamesReadAsLowerCase());
+
+  logicalTypesByPath_.clear();
+  collectLogicalTypes(schemaWithId_, "");
 }
 
 std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
@@ -610,6 +625,35 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
 
   BOLT_FAIL("Unable to extract Parquet column info.")
   return nullptr;
+}
+
+void ReaderBase::collectLogicalTypes(
+    const std::shared_ptr<const dwio::common::TypeWithId>& type,
+    const std::string& path) {
+  auto parquetType = std::static_pointer_cast<const ParquetTypeWithId>(type);
+  if (parquetType->isLeaf()) {
+    if (parquetType->logicalType_.has_value()) {
+      if (!path.empty()) {
+        logicalTypesByPath_[path] = parquetType->logicalType_.value();
+      }
+    } else if (type->type()->kind() == TypeKind::ROW) {
+      // no-op for leaves of struct; handled via parent path
+    }
+    return;
+  }
+  if (type->type()->kind() == TypeKind::ROW) {
+    auto row = type->type()->asRow();
+    for (size_t i = 0; i < type->getChildren().size(); ++i) {
+      auto child = type->getChildren()[i];
+      auto childName = row.nameOf(i);
+      auto childPath = path.empty() ? childName : (path + "." + childName);
+      collectLogicalTypes(child, childPath);
+    }
+  } else {
+    for (auto& child : type->getChildren()) {
+      collectLogicalTypes(child, path);
+    }
+  }
 }
 
 TypePtr ReaderBase::convertType(
@@ -948,6 +992,87 @@ class ParquetRowReader::Impl {
         params,
         *options_.getScanSpec(),
         pool_);
+
+    // Annotate scan spec with logical type names before filtering row groups.
+    if (auto scanSpecPtr = options_.getScanSpec()) {
+      const auto& ltMap = readerBase_->schemaLogicalTypes();
+      auto& scanSpec = *scanSpecPtr;
+      auto annotate = [&](common::ScanSpec& spec,
+                          const std::string& basePath,
+                          const dwio::common::TypeWithId& twi,
+                          auto&& selfRef) -> void {
+        std::string path = basePath;
+        if (!spec.fieldName().empty()) {
+          if (basePath.empty() || basePath == "root" || basePath == "<root>" ||
+              basePath == "hive_schema") {
+            path = spec.fieldName();
+          } else {
+            path = basePath + "." + spec.fieldName();
+          }
+        }
+        auto it = ltMap.find(path);
+        if (it != ltMap.end()) {
+          // Convert thrift::LogicalType to a readable identifier
+          const auto& lt = it->second;
+          std::string name;
+          if (lt.__isset.INTEGER)
+            name = "INTEGER";
+          else if (lt.__isset.DECIMAL)
+            name = "DECIMAL";
+          else if (lt.__isset.STRING)
+            name = "STRING";
+          else if (lt.__isset.DATE)
+            name = "DATE";
+          else if (lt.__isset.TIME)
+            name = "TIME";
+          else if (lt.__isset.TIMESTAMP)
+            name = "TIMESTAMP";
+          else if (lt.__isset.UUID)
+            name = "UUID";
+          else if (lt.__isset.ENUM)
+            name = "ENUM";
+          else if (lt.__isset.UNKNOWN)
+            name = "UNKNOWN";
+          else if (lt.__isset.JSON)
+            name = "JSON";
+          else if (lt.__isset.BSON)
+            name = "BSON";
+          else if (lt.__isset.LIST)
+            name = "LIST";
+          else if (lt.__isset.MAP)
+            name = "MAP";
+          if (!spec.logicalTypeName().empty() &&
+              spec.logicalTypeName() != name) {
+            BOLT_FAIL(fmt::format(
+                "LogicalType mismatch for path {}: scanSpec={}, schema={}",
+                path,
+                spec.logicalTypeName(),
+                name));
+          }
+          spec.setLogicalTypeName(name);
+        }
+        VLOG(2) << "Annotate path=" << path << " field=" << spec.fieldName()
+                << " kind=" << static_cast<int>(twi.type()->kind())
+                << " assignedLogicalType=" << spec.logicalTypeName();
+        for (auto* child : spec.stableChildren()) {
+          // Best-effort: find child by name in TypeWithId if available
+          std::shared_ptr<const dwio::common::TypeWithId> childTwi;
+          if (twi.type()->kind() == TypeKind::ROW &&
+              twi.containsChild(child->fieldName())) {
+            childTwi = twi.childByName(child->fieldName());
+          } else {
+            childTwi = nullptr;
+          }
+          VLOG(2) << "Annotate child field=" << child->fieldName()
+                  << " childTwi=" << (childTwi ? "found" : "missing")
+                  << " basePath=" << path;
+          if (childTwi) {
+            selfRef(*child, path, *childTwi, selfRef);
+          }
+        }
+      };
+      annotate(scanSpec, "", *readerBase_->schemaWithId(), annotate);
+    }
 
     filterRowGroups();
     if (!rowGroupIds_.empty()) {

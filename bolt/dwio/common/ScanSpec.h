@@ -355,6 +355,13 @@ class ScanSpec {
     return statis_;
   }
 
+  const std::string& logicalTypeName() const {
+    return logicalTypeName_;
+  }
+  void setLogicalTypeName(const std::string& name) {
+    logicalTypeName_ = name;
+  }
+
  private:
   void reorder();
 
@@ -427,6 +434,8 @@ class ScanSpec {
   // If this node is map key/value or array element, filter will not be
   // propagated to parent.
   bool isArrayElementOrMapEntry_ = false;
+
+  std::string logicalTypeName_;
 
   // Only take the first maxArrayElementsCount_ elements from each array.
   vector_size_t maxArrayElementsCount_ =

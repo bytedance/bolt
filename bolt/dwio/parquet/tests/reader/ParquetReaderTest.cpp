@@ -100,6 +100,66 @@ TEST_F(ParquetReaderTest, parseDecimal) {
   EXPECT_EQ(a[0], 64830000);
 }
 
+TEST_F(ParquetReaderTest, varcharFilterAppliedOnlyForStringLogicalType) {
+  const std::string sample(getExampleFilePath("nation.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(sample, readerOptions);
+  auto schema = ROW({"nationkey", "name"}, {BIGINT(), VARCHAR()});
+  auto rowReaderOpts = getReaderOpts(schema);
+  auto scanSpec = makeScanSpec(schema);
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto nameSpec = scanSpec->childByName("name");
+  ASSERT_TRUE(nameSpec != nullptr);
+  EXPECT_EQ(nameSpec->logicalTypeName(), "STRING");
+}
+TEST_F(ParquetReaderTest, varcharSkipFilterWhenLogicalTypeMissing) {
+  const std::string sample(getExampleFilePath("sample.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(sample, readerOptions);
+  auto schema = sampleSchema();
+  auto rowReaderOpts = getReaderOpts(schema);
+  auto scanSpec = makeScanSpec(schema);
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto a = scanSpec->childByName("a");
+  auto b = scanSpec->childByName("b");
+  ASSERT_TRUE(a != nullptr);
+  ASSERT_TRUE(b != nullptr);
+  EXPECT_TRUE(a->logicalTypeName().empty());
+  EXPECT_TRUE(b->logicalTypeName().empty());
+}
+TEST_F(ParquetReaderTest, varcharFilterAppliedForStringLogicalType) {
+  const std::string filename("nation.parquet");
+  const std::string path(getExampleFilePath(filename));
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(path, readerOptions);
+  auto schema = ROW({"name"}, {VARCHAR()});
+  auto rowReaderOpts = getReaderOpts(schema);
+  auto scanSpec = makeScanSpec(schema);
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  // Filter on s: the logical type should be STRING, allowing pruning
+  FilterMap filters;
+  filters["name"] = std::make_unique<BytesRange>(
+      "x",
+      false /* lowerUnbounded */,
+      false /* lowerExclusive */,
+      "x",
+      false /* upperUnbounded */,
+      false /* upperExclusive */,
+      false /* nullAllowed */);
+  auto scanSpec2 = makeScanSpec(schema);
+  for (auto&& [col, f] : filters) {
+    scanSpec2->getOrCreateChild(Subfield(col))->setFilter(std::move(f));
+  }
+  rowReaderOpts.setScanSpec(scanSpec2);
+  auto rowReader2 = reader->createRowReader(rowReaderOpts);
+  auto result = BaseVector::create(schema, 0, leafPool_.get());
+  auto n = rowReader2->next(5, result);
+  EXPECT_GE(n, 0);
+}
+
 TEST_F(ParquetReaderTest, parseSample) {
   // sample.parquet holds two columns (a: BIGINT, b: DOUBLE) and
   // 20 rows (10 rows per group). Group offsets are 153 and 614.
@@ -1414,4 +1474,27 @@ TEST_F(ParquetReaderTest, struct_of_array_of_array) {
   constexpr int kBatchSize = 1000;
   while (rowReader->next(kBatchSize, result)) {
   }
+}
+
+TEST_F(ParquetReaderTest, readDisputedNoLogicalType) {
+  const std::string sample(getExampleFilePath("no_logical_type.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFileSchema(ROW({"disputed"}, {VARCHAR()}));
+  auto reader = createReader(sample, readerOptions);
+  auto rowType = ROW({"disputed"}, {VARCHAR()});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  auto scanSpec = makeScanSpec(rowType);
+  scanSpec->getOrCreateChild(Subfield("disputed"))
+      ->setFilter(exec::equal("Yes"));
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+  uint64_t total = 0;
+  for (;;) {
+    auto n = rowReader->next(1024, result);
+    if (n == 0)
+      break;
+    total += n;
+  }
+  EXPECT_GT(total, 0);
 }

@@ -68,18 +68,27 @@ void ParquetData::filterRowGroups(
     result.metadataFilterResults.emplace_back(
         scanSpec.metadataFilterNodeAt(i), std::vector<uint64_t>(nwords));
   }
-  for (auto i = 0; i < rowGroups_.size(); ++i) {
-    if (scanSpec.filter() && !rowGroupMatches(i, scanSpec.filter(), input)) {
-      bits::setBit(result.filterResult.data(), i);
-      continue;
-    }
-    for (int j = 0; j < scanSpec.numMetadataFilters(); ++j) {
-      auto* metadataFilter = scanSpec.metadataFilterAt(j);
-      if (!rowGroupMatches(i, metadataFilter, input)) {
-        bits::setBit(
-            result.metadataFilterResults[metadataFiltersStartIndex + j]
-                .second.data(),
-            i);
+  auto isVarchar = type_->type()->isVarchar();
+  auto lt = scanSpec.logicalTypeName();
+  if (isVarchar && (lt.empty() || lt != "STRING")) {
+    VLOG(1)
+        << "Skipping row group filter for VARCHAR column without logical type";
+    return;
+  }
+  if (scanSpec.filter() || scanSpec.numMetadataFilters() > 0) {
+    for (auto i = 0; i < rowGroups_.size(); ++i) {
+      if (scanSpec.filter() && !rowGroupMatches(i, scanSpec.filter(), input)) {
+        bits::setBit(result.filterResult.data(), i);
+        continue;
+      }
+      for (int j = 0; j < scanSpec.numMetadataFilters(); ++j) {
+        auto* metadataFilter = scanSpec.metadataFilterAt(j);
+        if (!rowGroupMatches(i, metadataFilter, input)) {
+          bits::setBit(
+              result.metadataFilterResults[metadataFiltersStartIndex + j]
+                  .second.data(),
+              i);
+        }
       }
     }
   }
