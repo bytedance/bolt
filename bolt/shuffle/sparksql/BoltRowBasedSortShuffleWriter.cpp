@@ -204,11 +204,10 @@ arrow::Status BoltRowBasedSortShuffleWriter::reclaimFixedSize(
     RETURN_NOT_OK(tryEvict());
     *actual =
         memoryBefore - (partitionBufferSize() + boltPool_->currentBytes());
-    if (*actual < 0)
-      [[unlikely]] {
-        LOG(INFO) << __FUNCTION__ << ": reclaim negative memory " << *actual;
-        *actual = 0;
-      }
+    if (*actual < 0) [[unlikely]] {
+      LOG(INFO) << __FUNCTION__ << ": reclaim negative memory " << *actual;
+      *actual = 0;
+    }
   } else {
     requestSpill_ = true;
     *actual = 0;

@@ -6832,7 +6832,8 @@ DEBUG_ONLY_TEST_F(HashJoinTest, minSpillableMemoryReservation) {
           memory::MemoryPool* pool = hashBuild->pool();
           const auto availableReservationBytes = pool->availableReservation();
           const auto currentUsedBytes = pool->currentBytes();
-          // Verifies we always have min reservation after ensuring the input.
+          // Verifies we always have min reservation after ensuring the
+          // input.
           ASSERT_GE(
               availableReservationBytes,
               currentUsedBytes * minSpillableReservationPct / 100);

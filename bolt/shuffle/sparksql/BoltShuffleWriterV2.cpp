@@ -672,10 +672,9 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
 
   SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingCreateRbFromBuffer]);
   auto numRows = partitionBufferBase_[partitionId];
-  if (numRows == 0)
-    [[unlikely]] {
-      return std::vector<std::shared_ptr<arrow::Buffer>>{};
-    }
+  if (numRows == 0) [[unlikely]] {
+    return std::vector<std::shared_ptr<arrow::Buffer>>{};
+  }
 
 #if V2_RUNTIME_CHECK
   uint64_t accumulatedNumRows = 0;
@@ -854,10 +853,9 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
   auto numRows = partitionBufferBase_[partitionId];
   BOLT_CHECK(batchCount == 1 && numRows == batchRows[0]);
 
-  if (numRows == 0)
-    [[unlikely]] {
-      return std::vector<std::shared_ptr<arrow::Buffer>>{};
-    }
+  if (numRows == 0) [[unlikely]] {
+    return std::vector<std::shared_ptr<arrow::Buffer>>{};
+  }
 
   const auto lengthBytes = numRows * kSizeOfBinaryArrayLengthBuffer;
   uint64_t validityBytes = arrow::bit_util::BytesForBits(numRows);
@@ -1015,10 +1013,9 @@ BoltShuffleWriterV2::assembleBuffersRowVectorMode(uint32_t partitionId) {
   const auto& batchRows = batchNumRows_[partitionId];
   const uint32_t batchCount = batchRows.size();
   auto numRows = partitionBufferBase_[partitionId];
-  if (numRows == 0)
-    [[unlikely]] {
-      return std::vector<std::shared_ptr<arrow::Buffer>>{};
-    }
+  if (numRows == 0) [[unlikely]] {
+    return std::vector<std::shared_ptr<arrow::Buffer>>{};
+  }
 
   ++rowVectorModeCompress_;
   const auto lengthBytes = numRows * kSizeOfBinaryArrayLengthBuffer;

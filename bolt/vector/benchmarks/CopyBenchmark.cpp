@@ -126,8 +126,8 @@ BENCHMARK_MULTI(copyArrayDictionaryEncoded) {
   auto elements = vectorMaker.flatVector<int32_t>(
       numElements, [](auto row) { return row % 23; });
   auto indices = makeIndices(numElements, pool.get(), [numElements](auto row) {
-    return (row * 13) % numElements; // 13 and numElements are coprime so this
-                                     // should shuffle them.
+    return (row * 13) % numElements; // 13 and numElements are coprime so
+                                     // this should shuffle them.
   });
   auto elementsDictionaryEncoded = BaseVector::wrapInDictionary(
       BufferPtr(nullptr), indices, numElements, elements);
@@ -289,8 +289,8 @@ BENCHMARK_MULTI(copyMapDictionaryEncoded) {
   auto values = vectorMaker.flatVector<int32_t>(
       numElements, [](auto row) { return row % 23; });
   auto indices = makeIndices(numElements, pool.get(), [numElements](auto row) {
-    return (row * 13) % numElements; // 13 and numElements are coprime so this
-                                     // should shuffle them.
+    return (row * 13) % numElements; // 13 and numElements are coprime so
+                                     // this should shuffle them.
   });
   auto keysDictionaryEncoded = BaseVector::wrapInDictionary(
       BufferPtr(nullptr), indices, numElements, values);

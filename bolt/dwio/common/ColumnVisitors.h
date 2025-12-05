@@ -731,8 +731,7 @@ class DictionaryColumnVisitor
             values),
         state_(reader->scanState().rawState),
         width_(
-            reader->fileType().type()->kind() == TypeKind::BIGINT
-                ? 8
+            reader->fileType().type()->kind() == TypeKind::BIGINT        ? 8
                 : reader->fileType().type()->kind() == TypeKind::INTEGER ? 4
                                                                          : 2) {}
 

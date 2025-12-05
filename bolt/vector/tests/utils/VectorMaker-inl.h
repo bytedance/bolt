@@ -68,9 +68,9 @@ BiasVectorPtr<EvalType<T>> VectorMaker::biasVector(
     // values at opposite ends of the int64 range do not overflow a
     // temporary signed value.
     uint64_t delta = max < 0 ? max - min
-                             : min < 0
-            ? static_cast<uint64_t>(max) + static_cast<uint64_t>(std::abs(min))
-            : max - min;
+        : min < 0
+        ? static_cast<uint64_t>(max) + static_cast<uint64_t>(std::abs(min))
+        : max - min;
 
     BOLT_CHECK(deltaAllowsBias<TEvalType>(delta));
 

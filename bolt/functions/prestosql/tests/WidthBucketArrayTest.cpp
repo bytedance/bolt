@@ -57,8 +57,8 @@ TEST_F(WidthBucketArrayTest, success) {
 
     assertEqualVectors(makeFlatVector<int64_t>(expected), result);
 
-    // Encode the bins array in a dictionary repeating each row of the original
-    // array twice.
+    // Encode the bins array in a dictionary repeating each row of the
+    // original array twice.
     auto newSize = binsVector->size() * 2;
     auto binsIndices = makeIndices(newSize, [](auto row) { return row / 2; });
 

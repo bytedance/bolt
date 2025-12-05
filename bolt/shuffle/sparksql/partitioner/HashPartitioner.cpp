@@ -49,8 +49,8 @@ arrow::Status HashPartitioner::compute(
         "lea (%[num_partitions],%[pid],1),%[tmp]\n"
         "test %[pid],%[pid]\n"
         "cmovs %[tmp],%[pid]\n"
-        : [ pid ] "+r"(pid)
-        : [ num_partitions ] "r"(numPartitions_), [ tmp ] "r"(0));
+        : [pid] "+r"(pid)
+        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
 #else
     if (pid < 0) {
       pid += numPartitions_;
@@ -83,8 +83,8 @@ arrow::Status HashPartitioner::precompute(
         "lea (%[num_partitions],%[pid],1),%[tmp]\n"
         "test %[pid],%[pid]\n"
         "cmovs %[tmp],%[pid]\n"
-        : [ pid ] "+r"(pid)
-        : [ num_partitions ] "r"(numPartitions_), [ tmp ] "r"(0));
+        : [pid] "+r"(pid)
+        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
 #else
     if (pid < 0) {
       pid += numPartitions_;

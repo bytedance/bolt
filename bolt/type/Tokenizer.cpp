@@ -116,8 +116,7 @@ std::unique_ptr<Subfield::PathElement> DefaultTokenizer::computeNext() {
 
   if (tryMatchSeparator(separators_->openBracket)) {
     std::unique_ptr<Subfield::PathElement> token =
-        tryMatchSeparator(separators_->quote)
-        ? matchQuotedSubscript()
+        tryMatchSeparator(separators_->quote)      ? matchQuotedSubscript()
         : tryMatchSeparator(separators_->wildCard) ? matchWildcardSubscript()
                                                    : matchUnquotedSubscript();
 

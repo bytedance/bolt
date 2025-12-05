@@ -192,12 +192,10 @@ class ZstdStreamCodec {
             srcSize_, inputStream->Read(MAX_COMPRESS_SIZE, compressBufferPtr_));
         srcPos_ = 0;
         if (srcSize_ == 0) {
-          if (frameFinished_)
-            [[likely]] {
-              eof = true;
-              break;
-            }
-          else {
+          if (frameFinished_) [[likely]] {
+            eof = true;
+            break;
+          } else {
             return arrow::Status::Invalid(
                 "inputStream no more data, but frame is not finished, dstPos = " +
                 std::to_string(dstPos) +
@@ -221,16 +219,15 @@ class ZstdStreamCodec {
       srcPos_ = inBuf.pos;
       dstPos = outBuf.pos;
 
-      if (ZSTD_isError(size))
-        [[unlikely]] {
-          return arrow::Status::Invalid(
-              "ZSTD_decompressStream error : " +
-              std::string(ZSTD_getErrorName(size)) + ", outputSize = " +
-              std::to_string(dstSize) + ", offset = " + std::to_string(offset) +
-              ", dstPos = " + std::to_string(dstPos) +
-              ", inputSize = " + std::to_string(srcSize_) +
-              ", inputPos = " + std::to_string(srcPos_));
-        }
+      if (ZSTD_isError(size)) [[unlikely]] {
+        return arrow::Status::Invalid(
+            "ZSTD_decompressStream error : " +
+            std::string(ZSTD_getErrorName(size)) + ", outputSize = " +
+            std::to_string(dstSize) + ", offset = " + std::to_string(offset) +
+            ", dstPos = " + std::to_string(dstPos) +
+            ", inputSize = " + std::to_string(srcSize_) +
+            ", inputPos = " + std::to_string(srcPos_));
+      }
 
       // we have completed a frame
       if (size == 0) {
@@ -304,12 +301,11 @@ class ZstdStreamCodec {
       do {
         auto ret = ZSTD_compressStream2(
             currentCCtx_, &outBuf, &inBuf, ZSTD_e_continue);
-        if (ZSTD_isError(ret))
-          [[unlikely]] {
-            return arrow::Status::Invalid(
-                "ZSTD_compressStream2 failed : " +
-                std::string(ZSTD_getErrorName(ret)));
-          }
+        if (ZSTD_isError(ret)) [[unlikely]] {
+          return arrow::Status::Invalid(
+              "ZSTD_compressStream2 failed : " +
+              std::string(ZSTD_getErrorName(ret)));
+        }
         if (ret > 0 && outBuf.pos == outBuf.size) {
           bytedance::bolt::NanosecondTimer timer1(&writeTime);
           RETURN_NOT_OK(outputStream->Write(outBuf.dst, outBuf.pos));
@@ -331,12 +327,11 @@ class ZstdStreamCodec {
       bytedance::bolt::NanosecondTimer timer(&compressTime);
       do {
         ret = ZSTD_compressStream2(currentCCtx_, &outBuf, &inBuf, ZSTD_e_end);
-        if (ZSTD_isError(ret))
-          [[unlikely]] {
-            return arrow::Status::Invalid(
-                "ZSTD_compressStream2 failed by ZSTD_e_end: " +
-                std::string(ZSTD_getErrorName(ret)));
-          }
+        if (ZSTD_isError(ret)) [[unlikely]] {
+          return arrow::Status::Invalid(
+              "ZSTD_compressStream2 failed by ZSTD_e_end: " +
+              std::string(ZSTD_getErrorName(ret)));
+        }
         if (ret > 0 && outBuf.pos == outBuf.size) {
           bytedance::bolt::NanosecondTimer timer1(&writeTime);
           RETURN_NOT_OK(outputStream->Write(outBuf.dst, outBuf.pos));
@@ -366,20 +361,18 @@ class ZstdStreamCodec {
     zstdCCtx2_ = ZSTD_createCCtx();
     ret = ZSTD_CCtx_setParameter(
         zstdCCtx2_, ZSTD_c_compressionLevel, compressionLevel_);
-    if (ZSTD_isError(ret))
-      [[unlikely]] {
-        return arrow::Status::Invalid(
-            "ZSTD_CCtx_setParameter 2 compressionLevel = " +
-            std::to_string(compressionLevel_));
-      }
+    if (ZSTD_isError(ret)) [[unlikely]] {
+      return arrow::Status::Invalid(
+          "ZSTD_CCtx_setParameter 2 compressionLevel = " +
+          std::to_string(compressionLevel_));
+    }
 
     ret = ZSTD_CCtx_setParameter(zstdCCtx2_, ZSTD_c_nbWorkers, kWorkerNumber);
-    if (ZSTD_isError(ret))
-      [[unlikely]] {
-        return arrow::Status::Invalid(
-            "ZSTD_CCtx_setParameter 2 ZSTD_c_nbWorkers = " +
-            std::to_string(kWorkerNumber));
-      }
+    if (ZSTD_isError(ret)) [[unlikely]] {
+      return arrow::Status::Invalid(
+          "ZSTD_CCtx_setParameter 2 ZSTD_c_nbWorkers = " +
+          std::to_string(kWorkerNumber));
+    }
 
     return arrow::Status::OK();
   }

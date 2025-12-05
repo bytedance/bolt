@@ -658,20 +658,19 @@ RowVectorPtr BoltColumnarBatchDeserializer::nextFromRows() {
     partialRow_ = tailBuffer_->mutable_data();
   }
 
-  if (outputRows.size())
-    [[likely]] {
-      bytedance::bolt::NanosecondTimer timer(&deserializeTime_);
-      bytedance::bolt::RowVectorPtr batch;
-      if (layout == RowVectorLayout::kColumnar) {
-        batch = row2ColConverter_->convert(outputRows);
-      } else {
-        batch = row2ColConverter_->convertToComposite(
-            outputRows, totalRowSize - outputRows.size() * sizeof(int32_t));
-      }
-      // free all memory used by rows if switch to ColumnarShuffleReader
-      releaseAllMemory ? rowBufferPool_->release() : rowBufferPool_->reset();
-      return batch;
+  if (outputRows.size()) [[likely]] {
+    bytedance::bolt::NanosecondTimer timer(&deserializeTime_);
+    bytedance::bolt::RowVectorPtr batch;
+    if (layout == RowVectorLayout::kColumnar) {
+      batch = row2ColConverter_->convert(outputRows);
+    } else {
+      batch = row2ColConverter_->convertToComposite(
+          outputRows, totalRowSize - outputRows.size() * sizeof(int32_t));
     }
+    // free all memory used by rows if switch to ColumnarShuffleReader
+    releaseAllMemory ? rowBufferPool_->release() : rowBufferPool_->reset();
+    return batch;
+  }
 
   rowBufferPool_->reset();
   BOLT_CHECK(reachEos_ == true, "empty batch but have not reaches eof");

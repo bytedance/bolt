@@ -1964,13 +1964,14 @@ DEBUG_ONLY_TEST_F(MergeJoinTest, failureOnRightSide) {
         // Only call this the first time, otherwise if we throw an exception
         // during Driver.close the process will crash.
         if (!enqueueCalled.load()) {
-          // The first time the right side calls enqueue, wait for the left side
-          // to call next.  Since enqueue never finished executing there won't
-          // be any data available and enqueue will create a consumerPromise_.
+          // The first time the right side calls enqueue, wait for the left
+          // side to call next.  Since enqueue never finished executing
+          // there won't be any data available and enqueue will create a
+          // consumerPromise_.
           enqueueCalled = true;
           nextCalledWait.await([&]() { return nextCalled.load(); });
-          // Throw an exception so that the task terminates and consumerPromise_
-          // is not fulfilled.
+          // Throw an exception so that the task terminates and
+          // consumerPromise_ is not fulfilled.
           BOLT_FAIL("Expected");
         }
       }));
