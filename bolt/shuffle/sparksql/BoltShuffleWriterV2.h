@@ -63,11 +63,9 @@ class BufferPool {
       startOfBuffer_ += size;
       bytesInBuffer_ -= size;
     } else {
-      if (size > kDefaultBufferSize)
-        [[unlikely]] { // large buffer
-          return allocateLargeBuffer(size, out);
-        }
-      else {
+      if (size > kDefaultBufferSize) [[unlikely]] { // large buffer
+        return allocateLargeBuffer(size, out);
+      } else {
         return allocateFromNextBuffer(size, out);
       }
     }
@@ -92,11 +90,9 @@ class BufferPool {
         return allocateFromNextBuffer(size, out);
       }
     } else {
-      if (size > kDefaultBufferSize)
-        [[unlikely]] { // large buffer
-          return allocateLargeBuffer(size, out);
-        }
-      else {
+      if (size > kDefaultBufferSize) [[unlikely]] { // large buffer
+        return allocateLargeBuffer(size, out);
+      } else {
         return allocateFromNextBuffer(size, out);
       }
     }

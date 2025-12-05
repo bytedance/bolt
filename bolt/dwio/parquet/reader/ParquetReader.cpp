@@ -976,8 +976,8 @@ class ParquetRowReader::Impl {
           ? rowGroups_[i].file_offset
           : rowGroups_[i].columns[0].meta_data.__isset.dictionary_page_offset
 
-              ? rowGroups_[i].columns[0].meta_data.dictionary_page_offset
-              : rowGroups_[i].columns[0].meta_data.data_page_offset;
+          ? rowGroups_[i].columns[0].meta_data.dictionary_page_offset
+          : rowGroups_[i].columns[0].meta_data.data_page_offset;
       BOLT_CHECK_GT(fileOffset, 0);
       auto rowGroupInRange =
           (fileOffset >= options_.getOffset() &&

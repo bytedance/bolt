@@ -221,7 +221,7 @@ void registerCountIfAggregate(const std::string& prefix) {
           core::AggregationNode::Step step,
           std::vector<TypePtr> argTypes,
           const TypePtr& /*resultType*/,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(argTypes.size(), 1, "{} takes one argument", name);
 

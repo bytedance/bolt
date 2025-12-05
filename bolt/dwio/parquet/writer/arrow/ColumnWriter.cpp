@@ -2151,9 +2151,9 @@ Status TypedColumnWriterImpl<DType>::WriteArrowDictionary(
     int64_t batch_num_values = 0;
     int64_t batch_num_spaced_values = 0;
     int64_t null_count = ::arrow::kUnknownNullCount;
-    // Bits is not null for nullable values.  At this point in the code we can't
-    // determine if the leaf array has the same null values as any parents it
-    // might have had so we need to recompute it from def levels.
+    // Bits is not null for nullable values.  At this point in the code we
+    // can't determine if the leaf array has the same null values as any
+    // parents it might have had so we need to recompute it from def levels.
     MaybeCalculateValidityBits(
         AddIfNotNull(def_levels, offset),
         batch_size,

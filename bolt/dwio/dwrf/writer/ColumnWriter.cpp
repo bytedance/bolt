@@ -419,10 +419,10 @@ class IntegerColumnWriter : public BaseColumnWriter {
     // dictionary encoder.
     auto totalElementCount = dictEncoder_.getTotalCount();
     return totalElementCount != 0 &&
-        // TODO: wonder if this should be final dictionary size instead. In that
-        // case, might be better off passing in the dict size and row size
-        // directly in order to prevent from being called before getting the
-        // actual final dict size.
+        // TODO: wonder if this should be final dictionary size instead. In
+        // that case, might be better off passing in the dict size and row
+        // size directly in order to prevent from being called before getting
+        // the actual final dict size.
         (static_cast<float>(dictEncoder_.size()) / totalElementCount) <=
         dictionaryKeySizeThreshold_;
   }

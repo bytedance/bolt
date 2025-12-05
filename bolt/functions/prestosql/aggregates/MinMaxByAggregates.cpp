@@ -97,7 +97,7 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         const std::string errorMessage = fmt::format(
             "Unknown input types for {} ({}) aggregation: {}",

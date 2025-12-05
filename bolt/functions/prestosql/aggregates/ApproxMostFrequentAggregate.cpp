@@ -391,7 +391,7 @@ void registerApproxMostFrequentAggregate(const std::string& prefix) {
           core::AggregationNode::Step step,
           const std::vector<TypePtr>&,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         auto& valueType = exec::isPartialOutput(step)
             ? resultType->childAt(2)->childAt(0)

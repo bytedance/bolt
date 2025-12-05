@@ -134,8 +134,8 @@ class SliceFunction : public exec::VectorFunction {
         rawOffsets[row] = start;
         rawSizes[row] = adjustLength(
             start,
-            // Indices are always 32-bit integers, template arguments are used
-            // to accommodate more data types.
+            // Indices are always 32-bit integers, template arguments are
+            // used to accommodate more data types.
             static_cast<vector_size_t>(decodedLength->valueAt<T>(row)),
             row,
             baseRawSizes,

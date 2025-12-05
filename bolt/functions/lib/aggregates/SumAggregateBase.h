@@ -85,8 +85,8 @@ class SumAggregateBase
         groups, numGroups, result, [&](char* group) {
           // 'ResultType' and 'TAccumulator' might not be same such as sum(real)
           // and we do an explicit type conversion here.
-          return (ResultType)(
-              *BaseAggregate::Aggregate::template value<TAccumulator>(group));
+          return (ResultType)(*BaseAggregate::Aggregate::template value<
+                              TAccumulator>(group));
         });
   }
 

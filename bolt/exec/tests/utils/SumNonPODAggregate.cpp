@@ -173,7 +173,7 @@ exec::AggregateRegistrationResult registerSumNonPODAggregate(
           bolt::core::AggregationNode::Step /*step*/,
           const std::vector<bolt::TypePtr>& /*argTypes*/,
           const bolt::TypePtr& /*resultType*/,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<bolt::exec::Aggregate> {
         return std::make_unique<SumNonPODAggregate>(bolt::BIGINT(), alignment);
       });

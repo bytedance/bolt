@@ -170,24 +170,24 @@ std::string errorMessage(fmt::string_view fmt, const Args&... args) {
 
 } // namespace detail
 
-#define _BOLT_THROW_IMPL(                                                     \
-    exception, exprStr, errorSource, errorCode, isRetriable, ...)             \
-  {                                                                           \
-    /* GCC 9.2.1 doesn't accept this code with constexpr. */                  \
-    static const ::bytedance::bolt::detail::BoltCheckFailArgs                 \
-        boltCheckFailArgs = {                                                 \
-            __FILE__,                                                         \
-            __LINE__,                                                         \
-            __FUNCTION__,                                                     \
-            exprStr,                                                          \
-            errorSource,                                                      \
-            errorCode,                                                        \
-            isRetriable};                                                     \
-    auto message = ::bytedance::bolt::detail::errorMessage(__VA_ARGS__);      \
-    ::bytedance::bolt::detail::boltCheckFail<                                 \
-        exception,                                                            \
-        typename ::bytedance::bolt::detail::BoltCheckFailStringType<decltype( \
-            message)>::type>(boltCheckFailArgs, message);                     \
+#define _BOLT_THROW_IMPL(                                                \
+    exception, exprStr, errorSource, errorCode, isRetriable, ...)        \
+  {                                                                      \
+    /* GCC 9.2.1 doesn't accept this code with constexpr. */             \
+    static const ::bytedance::bolt::detail::BoltCheckFailArgs            \
+        boltCheckFailArgs = {                                            \
+            __FILE__,                                                    \
+            __LINE__,                                                    \
+            __FUNCTION__,                                                \
+            exprStr,                                                     \
+            errorSource,                                                 \
+            errorCode,                                                   \
+            isRetriable};                                                \
+    auto message = ::bytedance::bolt::detail::errorMessage(__VA_ARGS__); \
+    ::bytedance::bolt::detail::boltCheckFail<                            \
+        exception,                                                       \
+        typename ::bytedance::bolt::detail::BoltCheckFailStringType<     \
+            decltype(message)>::type>(boltCheckFailArgs, message);       \
   }
 
 #define _BOLT_CHECK_AND_THROW_IMPL(                                            \

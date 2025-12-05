@@ -488,7 +488,6 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
       mode));
 }
 
-
 arrow::Status BlockPayload::serialize(arrow::io::OutputStream* outputStream) {
   switch (type_) {
     case Type::kUncompressed: {

@@ -230,8 +230,12 @@ class PrefixSortRunner {
       const detail::PrefixSortIterator& b,
       const detail::PrefixSortIterator& c,
       TCompare cmp) {
-    return cmp(*a, *b) < 0 ? (cmp(*b, *c) < 0 ? b : cmp(*a, *c) < 0 ? c : a)
-                           : (cmp(*b, *c) > 0 ? b : cmp(*a, *c) > 0 ? c : a);
+    return cmp(*a, *b) < 0 ? (cmp(*b, *c) < 0       ? b
+                                  : cmp(*a, *c) < 0 ? c
+                                                    : a)
+                           : (cmp(*b, *c) > 0       ? b
+                                  : cmp(*a, *c) > 0 ? c
+                                                    : a);
   }
 
   template <typename TCompare>

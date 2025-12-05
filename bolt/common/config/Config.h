@@ -195,7 +195,8 @@ FOLLY_ALWAYS_INLINE bool CHECK_SWITCH_IN_ABTEST(
     AB_MODE switchValue,
     bool isControlGroup) {
   return (switchValue == ABTEST) ? isControlGroup
-                                 : (switchValue == ON) ? true : false;
+      : (switchValue == ON)      ? true
+                                 : false;
 }
 
 FOLLY_ALWAYS_INLINE std::unordered_set<std::string> splitToStrSet(

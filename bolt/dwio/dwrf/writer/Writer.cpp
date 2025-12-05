@@ -450,11 +450,12 @@ void Writer::flushStripe(bool close) {
     const auto nodeId = stream.encodingKey().node();
     proto::Stream* s = encodingManager.addStreamToFooter(nodeId, currentIndex);
 
-    // set offset only when needed, ie. when offset of current stream cannot be
-    // calculated based on offset and length of previous stream. In that case,
-    // it must be that current stream and previous stream doesn't belong to same
-    // encryption group or neither are encrypted. So the logic is simplified to
-    // check if group index are the same for current and previous stream
+    // set offset only when needed, ie. when offset of current stream cannot
+    // be calculated based on offset and length of previous stream. In that
+    // case, it must be that current stream and previous stream doesn't
+    // belong to same encryption group or neither are encrypted. So the
+    // logic is simplified to check if group index are the same for current
+    // and previous stream
     if (offset > 0 && lastIndex != currentIndex) {
       s->set_offset(offset);
     }
