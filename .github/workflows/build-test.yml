@@ -10,8 +10,9 @@ jobs:
   build-test:
     runs-on: [ self-hosted, large ]
     container: bolt-registry:5000/bolt-ci:latest
-    matrix: 
-      build_type: [ release, debug ]
+    strategy:
+      matrix: 
+        build_type: [ release, debug ]
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
