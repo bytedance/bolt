@@ -86,6 +86,7 @@ RUN source ~/venv/bin/activate && \
 
 # Configure default conan profile to use the mold linker
 RUN cat >> ~/.conan2/profiles/default <<EOF
+
 [conf]
 tools.build:exelinkflags=['-B/usr/libexec/mold', '-Wl,--allow-multiple-definition']
 tools.build:sharedlinkflags=['-B/usr/libexec/mold', '-Wl,--allow-multiple-definition']
