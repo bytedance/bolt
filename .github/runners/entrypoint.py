@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 import os
+import requests
+
+def create_registration_token(token, org_name, repo_name):
+    url = f"https://api.github.com/repos/{org_name}/{repo_name}/actions/runners/registration-token"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    response = requests.post(url, headers=headers)
+    response.raise_for_status()
+    return response.json()["token"]
 
 def main():
     # ensure all variables are set, error message should include unset variables
@@ -17,7 +29,7 @@ def main():
     if unset_vars:
         raise ValueError(f"Variables {', '.join(unset_vars)} must be set")
 
-    registration_token = os.environ["GITHUB_RUNNER_TOKEN"]
+    gh_auth_token = os.environ["GITHUB_RUNNER_TOKEN"]
     runner_name = f"{os.environ['RUNNER_HOSTNAME']}-{os.environ['RUNNER_NAME']}"
     org_name = os.environ["ORGANIZATION_NAME"]
     repo_name = os.environ["REPOSITORY_NAME"]
@@ -28,6 +40,8 @@ def main():
     
     # starting docker
     os.system("service docker start")
+    # create a registration token for the runner
+    registration_token = create_registration_token(gh_auth_token, org_name, repo_name)
 
     print("Configuring the runner...")
     # Execute /actions-runner/config.sh with the token and labels

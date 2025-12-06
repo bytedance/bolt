@@ -30,10 +30,10 @@ services:
     environment:
       - RUNNER_NAME=runner-large
       - RUNNER_LABELS=large
-      - GITHUB_RUNNER_TOKEN=${RUNNER_LARGE_TOKEN}
     privileged: true
     volumes:
       - docker-data-large:/var/lib/docker
+      - ccache:/tmp/.ccache
     deploy:
       resources:
         limits:
@@ -47,10 +47,10 @@ services:
     privileged: true
     volumes:
       - docker-data-medium1:/var/lib/docker
+      - ccache:/tmp/.ccache
     environment:
       - RUNNER_NAME=runner-medium-1
       - RUNNER_LABELS=medium
-      - GITHUB_RUNNER_TOKEN=${RUNNER_MEDIUM_1_TOKEN}
     deploy:
       resources:
         limits:
@@ -64,10 +64,10 @@ services:
     privileged: true
     volumes:
       - docker-data-medium2:/var/lib/docker
+      - ccache:/tmp/.ccache
     environment:
       - RUNNER_NAME=runner-medium-2
       - RUNNER_LABELS=medium
-      - GITHUB_RUNNER_TOKEN=${RUNNER_MEDIUM_2_TOKEN}
     deploy:
       resources:
         limits:
@@ -84,7 +84,6 @@ services:
     environment:
       - RUNNER_NAME=runner-small
       - RUNNER_LABELS=small
-      - GITHUB_RUNNER_TOKEN=${RUNNER_SMALL_TOKEN}
     deploy:
       resources:
         limits:
@@ -97,3 +96,4 @@ volumes:
   docker-data-medium1:
   docker-data-medium2:
   docker-data-large:
+  ccache:

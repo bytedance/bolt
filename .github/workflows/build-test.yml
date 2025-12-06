@@ -8,6 +8,7 @@ on:
 
 env:
   CONAN_HOME: '/root/.conan2'
+  CCACHE_DIR: '/tmp/.ccache
 
 jobs:
   build-test:
