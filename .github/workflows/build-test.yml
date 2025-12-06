@@ -13,7 +13,10 @@ env:
 jobs:
   build-test:
     runs-on: [ self-hosted, large ]
-    container: bolt-registry:5000/bolt-ci:latest
+    container: 
+      image: bolt-registry:5000/bolt-ci:latest
+      volumes:
+        - /tmp/.ccache:/tmp/.ccache
     strategy:
       matrix: 
         build_type: [ release, debug ]
