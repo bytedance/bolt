@@ -8,28 +8,16 @@ on:
 
 jobs:
   build-test:
+    matrix: 
+      build_type: [ release, debug ]
     runs-on: [ self-hosted, large ]
     container: bolt-registry:5000/bolt-ci:latest
     steps:
-    - name: Cache ccache
-      id: cache-ccache
-      uses: corca-ai/local-cache@v3
-      with:
-        path: ~/.ccache
-        key: ${{ runner.os }}-ccache-${{ hashFiles('**/conanfile.py') }}
-        base: /tmp/actions-cache
-
-    - name: Cache Conan2 packages
-      id: cache-conan
-      uses: corca-ai/local-cache@v3
-      with:
-        path: ~/.conan2/p
-        key: ${{ runner.os }}-conan-${{ hashFiles('**/conanfile.py') }}
-        base: /tmp/actions-cache
-
     - name: Checkout code
       uses: actions/checkout@v3
-
+    - name: Add CI conan remote
+      run: |
+        conan remote add ci https://bolt-registry:9300 --insert 0
     - name: Install Bolt dependencies
       run: |
         source ~/.profile
@@ -39,10 +27,10 @@ jobs:
       run: |
         source ~/.profile
         # Build with tests enabled
-        make release_with_test
+        make ${{ matrix.build_type }}_with_test
 
     - name: Run tests
       run: |
         source ~/.profile
         # Run tests with output on failure
-        make unittest_release
+        make unittest_${{ matrix.build_type }}
