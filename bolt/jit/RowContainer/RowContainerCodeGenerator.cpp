@@ -66,8 +66,9 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
 
 /// util functions
 std::string RowContainerCodeGenerator::GetCmpFuncName() {
-  std::string fn =
-      isEqualOp() ? "jit_rr_eq" : isCmp() ? "jit_rr_cmp" : "jit_rr_less";
+  std::string fn = isEqualOp() ? "jit_rr_eq"
+      : isCmp()                ? "jit_rr_cmp"
+                               : "jit_rr_less";
   fn.append(hasNullKeys ? "N" : "");
   for (auto i = 0; i < keysTypes.size(); ++i) {
     fn.append(keysTypes[i]->jitName());
@@ -318,9 +319,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genFloatPointCmpIR(
   // Ordered comparison of 1.0 and 1.0 gives true.
   // Ordered comparison of NaN and 1.0 gives false.
   // Ordered comparison of NaN and NaN gives false.
-  auto cmpOp = isEqualOp() ? llvm::FCmpInst::FCMP_OEQ
-                           : flags[idx].ascending ? llvm::FCmpInst::FCMP_OLT
-                                                  : llvm::FCmpInst::FCMP_OGT;
+  auto cmpOp = isEqualOp()   ? llvm::FCmpInst::FCMP_OEQ
+      : flags[idx].ascending ? llvm::FCmpInst::FCMP_OLT
+                             : llvm::FCmpInst::FCMP_OGT;
 
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
@@ -439,9 +440,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genIntegerCmpIR(
   auto left_val = builder.CreateLoad(data_ty, left_addr);
   auto right_val = builder.CreateLoad(data_ty, right_addr);
 
-  auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ
-                           : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
-                                                  : llvm::ICmpInst::ICMP_SGT;
+  auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
+      : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
+                             : llvm::ICmpInst::ICMP_SGT;
 
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
@@ -724,9 +725,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genStringViewCmpIR(
     builder.SetInsertPoint(curr_blk);
 
     // as unsigned integer
-    auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ
-                             : flags[idx].ascending ? llvm::ICmpInst::ICMP_ULT
-                                                    : llvm::ICmpInst::ICMP_UGT;
+    auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
+        : flags[idx].ascending ? llvm::ICmpInst::ICMP_ULT
+                               : llvm::ICmpInst::ICMP_UGT;
     auto cmp_res = builder.CreateICmp(cmpOp, left_inl, right_inl);
     if (isCmp()) {
       phi_inputs.emplace_back(
@@ -763,9 +764,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genStringViewCmpIR(
     curr_blk = buf_blk;
   }
 
-  auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ
-                           : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
-                                                  : llvm::ICmpInst::ICMP_SGT;
+  auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
+      : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
+                             : llvm::ICmpInst::ICMP_SGT;
   // Non-inline (buffer) part comparison
   builder.SetInsertPoint(curr_blk);
   std::vector<llvm::Value*> args;
@@ -848,9 +849,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genTimestampCmpIR(
       keyOffsets[idx], keyOffsets[idx] + (int32_t)sizeof(int64_t)};
 
   // Refer to bytedance::bolt::Timestamp
-  auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ
-                           : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
-                                                  : llvm::ICmpInst::ICMP_SGT;
+  auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
+      : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
+                             : llvm::ICmpInst::ICMP_SGT;
   for (auto i = 0; i < 2; ++i) {
     builder.SetInsertPoint(curr_blk);
 
@@ -962,9 +963,9 @@ llvm::BasicBlock* RowContainerCodeGenerator::genComplexCmpIR(
        builder.getInt8(isEqualOp() ? 0 : (int8_t)flags[idx].nullsFirst),
        builder.getInt8(isEqualOp() ? 0 : (int8_t)flags[idx].ascending)});
   auto const_0 = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
-  auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ
-                           : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
-                                                  : llvm::ICmpInst::ICMP_SGT;
+  auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
+      : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
+                             : llvm::ICmpInst::ICMP_SGT;
   // if it is the last key
   if (idx == keysTypes.size() - 1) {
     auto cmp_res = builder.CreateICmp(cmpOp, key_cmp_res, const_0);

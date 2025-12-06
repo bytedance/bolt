@@ -173,6 +173,12 @@ all: 			#: Build the release version
 clean:					#: Delete all build artifacts
 	rm -rf $(BUILD_BASE_DIR) && rm -rf CMakeUserPresets.json && rm -rf $(BENCHMARKS_BASIC_DIR)
 
+clang-format-check:
+	find bolt \( -name "*.cpp" -o -name "*.h" \) -type f > files.txt
+	cat files.txt | xargs -I{} -P $(CPU_CORES) clang-format -style=file --dry-run {}  > log.txt 2>&1
+	cat log.txt && echo -e "You can use clang-format -i -style=file path_to_file command to format file"
+	if grep -q 'warning' log.txt; then false; fi
+
 conan_build:
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \

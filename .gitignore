@@ -332,3 +332,8 @@ conan.options
 #ccls
 .ccls
 .ccls-cache/*
+
+
+# makefile clang-format files
+files.txt
+log.txt

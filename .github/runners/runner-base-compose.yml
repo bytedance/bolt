@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  base-runner:
+    build: .
+    env_file:
+      - variables.env
+    environment:
+      - RUNNER_HOSTNAME=${HOSTNAME:-${HOST:-unknown-host}}
+    volumes:
+      - actions-cache:/tmp/actions-cache:rw

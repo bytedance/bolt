@@ -1,0 +1,19 @@
+name: clang-format
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  format-check:
+    runs-on: [ self-hosted, small ]
+    container: bolt-registry:5000/bolt-ci:latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: clang-format check
+      run: |
+        make clang-format-check

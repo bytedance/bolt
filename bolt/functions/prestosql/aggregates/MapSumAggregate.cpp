@@ -363,7 +363,7 @@ exec::AggregateRegistrationResult registerMapSum(
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /* config */) -> std::unique_ptr<exec::Aggregate> {
         BOLT_USER_CHECK_EQ(argTypes.size(), 1);
         auto type = argTypes[0];

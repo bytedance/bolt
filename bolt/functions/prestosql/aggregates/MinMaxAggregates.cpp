@@ -1069,7 +1069,7 @@ exec::AggregateRegistrationResult registerMinMax(
           core::AggregationNode::Step step,
           std::vector<TypePtr> argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         const bool nAgg = !resultType->equivalent(*argTypes[0]);
         const bool throwOnNestedNulls = bolt::exec::isRawInput(step);

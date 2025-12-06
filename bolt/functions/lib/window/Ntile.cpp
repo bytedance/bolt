@@ -261,7 +261,7 @@ void registerNtile(const std::string& name, const std::string& type) {
           bool /*ignoreNulls*/,
           bolt::memory::MemoryPool* pool,
           HashStringAllocator* /*stringAllocator*/,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*queryConfig*/) -> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<NtileFunction<TResult>>(args, resultType, pool);
       });

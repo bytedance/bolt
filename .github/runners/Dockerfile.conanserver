@@ -1,0 +1,44 @@
+FROM debian:bookworm
+
+ARG DEB_REGION=""
+ARG HTTPS_PROXY=""
+
+RUN [ "$DEB_REGION" != "" ] && \
+    sed -i "s|http://deb.debian.org/debian|http://ftp.${DEB_REGION}.debian.org/debian|g" /etc/apt/sources.list.d/debian.sources \
+    || true
+
+# Update package lists and install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    gnupg \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up Python environment
+RUN python3 -m venv /opt/conan-env
+ENV PATH="/opt/conan-env/bin:$PATH"
+
+# Install Conan server
+RUN pip install --upgrade pip && \
+    pip install conan-server conan[all]
+
+ENV CONAN_SERVER_HOME="/var/conan"
+
+RUN mkdir -p /var/conan/
+
+# Copy Conan server configuration and start script
+COPY conanserver/server.conf /var/conan/server.conf.base
+COPY conanserver/start-conan-server.sh /usr/local/bin/start-conan-server.sh
+
+# Make start script executable
+RUN chmod +x /usr/local/bin/start-conan-server.sh
+
+# Expose Conan server port
+EXPOSE 9300
+
+# Start Conan server using the custom script
+CMD ["/usr/local/bin/start-conan-server.sh"]

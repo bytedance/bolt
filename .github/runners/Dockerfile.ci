@@ -1,0 +1,115 @@
+# Use gcc:10 as the base image
+FROM gcc:10
+
+ENV CMAKE_VERSION=3.31.8
+ENV CONAN_VERSION=2.22.2
+ENV MOLD_VERSION=v2.40.4
+
+ARG DEB_REGION=""
+ARG HTTPS_PROXY=""
+
+RUN [ "$DEB_REGION" != "" ] && \
+    sed -i "s|http://deb.debian.org/debian|http://ftp.${DEB_REGION}.debian.org/debian|g" /etc/apt/sources.list \
+    || true
+
+# Install cmake
+RUN apt-get update && \
+    apt-get install -y \
+    curl \
+    tar
+
+RUN arch=$(arch) && \
+    https_proxy=${HTTPS_PROXY} \
+    curl -L -# -o /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-${arch}.tar.gz  && \
+    tar -xzvf /tmp/cmake.tar.gz -C /opt && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/cmake /usr/local/bin/cmake && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/ctest /usr/local/bin/ctest && \
+    rm /tmp/cmake.tar.gz
+
+# Install vim, sudo, git, gdb, python3, pip, ssh, ninja, bison, maven
+RUN apt-get update && apt-get install -y \
+    bash \
+    vim-tiny \
+    vim \
+    sudo \
+    git \
+    gdb \
+    python3 \
+    python3-pip \
+    python3-virtualenv \
+    ssh-client \
+    ninja-build \
+    bison \
+    maven \
+    net-tools \
+    telnet \
+    ssh \
+    rsync \
+    openssh-server \
+    lld \
+    ccache \
+    binutils-dev \
+    make \
+    automake \
+    autoconf \
+    htop \
+    less \
+    clang-format \
+    nodejs \
+    npm \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /bin/bash /bin/sh
+
+# Build and install the most recent version of the mold linker
+RUN https_proxy=${HTTPS_PROXY} git clone https://github.com/rui314/mold.git /tmp/mold
+RUN cd /tmp/mold && \
+    git checkout $MOLD_VERSION && \
+    mkdir build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=c++ -B build && \
+    cmake --build build -j$(nproc) && \
+    sudo cmake --build build --target install
+
+# Create a default virtualenv that is activated on login
+RUN virtualenv -p python3 ~/venv \
+    && echo "source ~/venv/bin/activate" >> ~/.bashrc \
+    && echo "source ~/venv/bin/activate" >> ~/.bash_profile \
+    && echo "source ~/venv/bin/activate" >> ~/.profile
+
+RUN source ~/venv/bin/activate && \
+    pip install conan==$CONAN_VERSION pydot
+
+# Set up Conan default profile
+RUN source ~/venv/bin/activate && \
+    conan profile detect && \
+    sed -i 's/gnu14/gnu17/g' ~/.conan2/profiles/default
+
+# Configure default conan profile to use the mold linker
+RUN cat >> ~/.conan2/profiles/default <<EOF
+
+[conf]
+tools.build:exelinkflags=['-B/usr/libexec/mold', '-Wl,--allow-multiple-definition']
+tools.build:sharedlinkflags=['-B/usr/libexec/mold', '-Wl,--allow-multiple-definition']
+EOF
+
+RUN cat > ~/.conan2/profiles/clang-profile <<EOF
+[settings]
+arch=$( [ "$arch" = "aarch64" ] && echo "armv8" || echo "$arch" )
+build_type=Release
+compiler=clang
+compiler.cppstd=17
+compiler.libcxx=libstdc++11
+compiler.version=16
+os=Linux
+
+[conf]
+tools.build:compiler_executables={"c": "clang", "cpp": "clang++"}
+EOF
+
+ENV ENV=~/.profile
+
+# Set the working directory
+WORKDIR /workspace
+
+ENTRYPOINT ["bash"]

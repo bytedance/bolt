@@ -1198,8 +1198,8 @@ struct Crc32<uint64_t, A> {
 #if XSIMD_WITH_NEON
   static uint32_t apply(uint32_t checksum, uint64_t value, const xsimd::neon&) {
     __asm__("crc32cx %w[c], %w[c], %x[v]"
-            : [ c ] "+r"(checksum)
-            : [ v ] "r"(value));
+            : [c] "+r"(checksum)
+            : [v] "r"(value));
     return checksum;
   }
 #endif

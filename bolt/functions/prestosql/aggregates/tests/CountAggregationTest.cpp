@@ -112,7 +112,8 @@ TEST_F(CountAggregationTest, mask) {
              [](auto row) { return row % 3 == 0; }),
          makeFlatVector<bool>(kRowsInBatch, [&](auto row) {
            return counter % 3 == 0 ? false
-                                   : counter % 3 == 1 ? false : row % 2 == 0;
+               : counter % 3 == 1  ? false
+                                   : row % 2 == 0;
          })}));
   }
 

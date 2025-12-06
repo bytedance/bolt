@@ -1,0 +1,6 @@
+.venv
+.vscode
+variables.env
+.env
+conan-server-data
+registry

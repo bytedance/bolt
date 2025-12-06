@@ -1,0 +1,99 @@
+services:
+  ci-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    image: localhost:5000/bolt-ci:latest
+    command: ["/bin/bash", "-c", "Bolt CI Image"]
+  conan_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.conanserver
+    env_file:
+      - variables.env
+    ports:
+      - "9300:9300"
+    volumes:
+      - ./conan-server-data:/var/conan/data:rw
+    networks:
+      - default
+  bolt-registry:
+    image: registry:2
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./registry:/var/lib/registry:rw
+  runner-large:
+    extends:
+      service: base-runner
+      file: runner-base-compose.yml
+    environment:
+      - RUNNER_NAME=runner-large
+      - RUNNER_LABELS=large
+    privileged: true
+    volumes:
+      - docker-data-large:/var/lib/docker
+      - ccache:/tmp/.ccache
+    deploy:
+      resources:
+        limits:
+          cpus: '32.0'
+          memory: 128G
+
+  runner-medium-1:
+    extends:
+      service: base-runner
+      file: runner-base-compose.yml
+    privileged: true
+    volumes:
+      - docker-data-medium1:/var/lib/docker
+      - ccache:/tmp/.ccache
+    environment:
+      - RUNNER_NAME=runner-medium-1
+      - RUNNER_LABELS=medium
+    deploy:
+      resources:
+        limits:
+          cpus: '16.0'
+          memory: 48G
+
+  runner-medium-2:
+    extends:
+      service: base-runner
+      file: runner-base-compose.yml
+    privileged: true
+    volumes:
+      - docker-data-medium2:/var/lib/docker
+      - ccache:/tmp/.ccache
+    environment:
+      - RUNNER_NAME=runner-medium-2
+      - RUNNER_LABELS=medium
+    deploy:
+      resources:
+        limits:
+          cpus: '16.0'
+          memory: 48G
+
+  runner-small:
+    extends:
+      service: base-runner
+      file: runner-base-compose.yml
+    privileged: true
+    volumes:
+      - docker-data-small:/var/lib/docker
+    environment:
+      - RUNNER_NAME=runner-small
+      - RUNNER_LABELS=small
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+
+volumes:
+  actions-cache:
+  docker-data-small:
+  docker-data-medium1:
+  docker-data-medium2:
+  docker-data-large:
+  ccache:

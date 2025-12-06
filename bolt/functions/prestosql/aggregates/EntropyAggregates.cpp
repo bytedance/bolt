@@ -369,7 +369,7 @@ void registerEntropyAggregate(const std::string& prefix) {
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_LE(
             argTypes.size(), 1, "{} takes at most one argument", name);

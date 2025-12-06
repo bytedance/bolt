@@ -31,6 +31,7 @@
 
 #include "bolt/functions/prestosql/types/JsonType.h"
 
+#include <ryu/ryu.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/encode/Base64.h"
 #include "bolt/expression/EvalCtx.h"
@@ -39,7 +40,6 @@
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/prestosql/json/JsonUtil.h"
 #include "bolt/type/Type.h"
-#include <ryu/ryu.h>
 namespace bytedance::bolt {
 
 namespace {

@@ -572,7 +572,7 @@ void registerLag(const std::string& name) {
           bool ignoreNulls,
           bolt::memory::MemoryPool* pool,
           HashStringAllocator* /*stringAllocator*/,
-          const bolt::core::QueryConfig &
+          const bolt::core::QueryConfig&
           /*queryConfig*/) -> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<LeadLagFunction<true>>(
             args, resultType, ignoreNulls, pool);
@@ -589,7 +589,7 @@ void registerLead(const std::string& name) {
           bool ignoreNulls,
           bolt::memory::MemoryPool* pool,
           HashStringAllocator* /*stringAllocator*/,
-          const bolt::core::QueryConfig &
+          const bolt::core::QueryConfig&
           /*queryConfig*/) -> std::unique_ptr<exec::WindowFunction> {
         return std::make_unique<LeadLagFunction<false>>(
             args, resultType, ignoreNulls, pool);

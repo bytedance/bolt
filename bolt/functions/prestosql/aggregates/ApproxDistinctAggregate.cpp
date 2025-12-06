@@ -503,7 +503,7 @@ exec::AggregateRegistrationResult registerApproxDistinct(
           core::AggregationNode::Step /*step*/,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         TypePtr type = argTypes[0]->isVarbinary() ? BIGINT() : argTypes[0];
         return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(

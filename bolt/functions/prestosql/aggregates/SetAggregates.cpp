@@ -228,7 +228,7 @@ void registerSetAgg(const std::string& name) {
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(argTypes.size(), 1);
         const bool isRawInput = exec::isRawInput(step);
@@ -301,7 +301,7 @@ void registerSetUnion(const std::string& name) {
           core::AggregationNode::Step /*step*/,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
-          const core::QueryConfig &
+          const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(argTypes.size(), 1);
 
@@ -337,7 +337,7 @@ void registerCountDistinctAggregate(const std::string& prefix) {
       [](core::AggregationNode::Step step,
          const std::vector<TypePtr>& argTypes,
          const TypePtr& resultType,
-         const core::QueryConfig &
+         const core::QueryConfig&
          /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(argTypes.size(), 1);
 

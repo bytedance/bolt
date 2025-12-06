@@ -178,7 +178,7 @@ class [[nodiscard]] Status {
   inline Status& operator=(const Status& s);
 
   // Move the specified status.
-  inline Status(Status && s) noexcept;
+  inline Status(Status&& s) noexcept;
   inline Status& operator=(Status&& s) noexcept;
 
   inline bool operator==(const Status& other) const noexcept;
@@ -209,21 +209,21 @@ class [[nodiscard]] Status {
 
   /// Return an error status for out-of-memory conditions.
   template <typename... Args>
-  static Status UserError(Args && ... args) {
+  static Status UserError(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kUserError, std::forward<Args>(args)...);
   }
 
   /// Return an error status for type errors (such as mismatching data types)
   template <typename... Args>
-  static Status TypeError(Args && ... args) {
+  static Status TypeError(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kTypeError, std::forward<Args>(args)...);
   }
 
   /// Return an error status when an index is out of bounds
   template <typename... Args>
-  static Status IndexError(Args && ... args) {
+  static Status IndexError(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kIndexError, std::forward<Args>(args)...);
   }
@@ -231,32 +231,32 @@ class [[nodiscard]] Status {
   /// Return an error status for failed key lookups (e.g. column name in a
   /// table)
   template <typename... Args>
-  static Status KeyError(Args && ... args) {
+  static Status KeyError(Args&&... args) {
     return Status::fromArgs(StatusCode::kKeyError, std::forward<Args>(args)...);
   }
 
   template <typename... Args>
-  static Status AlreadyExists(Args && ... args) {
+  static Status AlreadyExists(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kAlreadyExists, std::forward<Args>(args)...);
   }
 
   /// Return an error status for out-of-memory conditions.
   template <typename... Args>
-  static Status OutOfMemory(Args && ... args) {
+  static Status OutOfMemory(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kOutOfMemory, std::forward<Args>(args)...);
   }
 
   /// Return an error status when some IO-related operation failed
   template <typename... Args>
-  static Status IOError(Args && ... args) {
+  static Status IOError(Args&&... args) {
     return Status::fromArgs(StatusCode::kIOError, std::forward<Args>(args)...);
   }
 
   /// Return an error status for cancelled operation
   template <typename... Args>
-  static Status Cancelled(Args && ... args) {
+  static Status Cancelled(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kCancelled, std::forward<Args>(args)...);
   }
@@ -264,13 +264,13 @@ class [[nodiscard]] Status {
   /// Return an error status for invalid data (for example a string that fails
   /// parsing)
   template <typename... Args>
-  static Status Invalid(Args && ... args) {
+  static Status Invalid(Args&&... args) {
     return Status::fromArgs(StatusCode::kInvalid, std::forward<Args>(args)...);
   }
 
   /// Return an error status for unknown errors
   template <typename... Args>
-  static Status UnknownError(Args && ... args) {
+  static Status UnknownError(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kUnknownError, std::forward<Args>(args)...);
   }
@@ -278,7 +278,7 @@ class [[nodiscard]] Status {
   /// Return an error status when an operation or a combination of operation and
   /// data types is unimplemented
   template <typename... Args>
-  static Status NotImplemented(Args && ... args) {
+  static Status NotImplemented(Args&&... args) {
     return Status::fromArgs(
         StatusCode::kNotImplemented, std::forward<Args>(args)...);
   }
@@ -367,7 +367,7 @@ class [[nodiscard]] Status {
   /// Return a new Status with changed message, copying the existing status
   /// code.
   template <typename... Args>
-  Status withMessage(Args && ... args) const {
+  Status withMessage(Args&&... args) const {
     return fromArgs(code(), std::forward<Args>(args)...);
   }
 
@@ -379,8 +379,8 @@ class [[nodiscard]] Status {
 
  private:
   template <typename... Args>
-  static Status fromArgs(
-      StatusCode code, fmt::string_view fmt, Args && ... args) {
+  static Status
+  fromArgs(StatusCode code, fmt::string_view fmt, Args&&... args) {
     return Status(code, fmt::vformat(fmt, fmt::make_format_args(args...)));
   }
 
@@ -394,7 +394,7 @@ class [[nodiscard]] Status {
   }
 
   void copyFrom(const Status& s);
-  inline void moveFrom(Status & s);
+  inline void moveFrom(Status& s);
 
   struct State {
     StatusCode code;
