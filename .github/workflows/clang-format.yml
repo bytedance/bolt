@@ -12,7 +12,7 @@ jobs:
     container: bolt-registry:5000/bolt-ci:latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v6
 
     - name: clang-format check
       run: |

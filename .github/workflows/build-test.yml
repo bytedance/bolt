@@ -8,16 +8,17 @@ on:
 
 jobs:
   build-test:
-    matrix: 
-      build_type: [ release, debug ]
     runs-on: [ self-hosted, large ]
     container: bolt-registry:5000/bolt-ci:latest
+    matrix: 
+      build_type: [ release, debug ]
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v6
     - name: Add CI conan remote
       run: |
         conan remote add ci https://bolt-registry:9300 --insert 0
+      
     - name: Install Bolt dependencies
       run: |
         source ~/.profile
@@ -26,11 +27,9 @@ jobs:
     - name: Bolt Build
       run: |
         source ~/.profile
-        # Build with tests enabled
         make ${{ matrix.build_type }}_with_test
 
     - name: Run tests
       run: |
         source ~/.profile
-        # Run tests with output on failure
         make unittest_${{ matrix.build_type }}
