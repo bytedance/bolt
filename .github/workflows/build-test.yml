@@ -22,7 +22,7 @@ jobs:
     - name: Add CI conan remote
       run: |
         source /root/venv/bin/activate
-        conan remote add --index=0 ci https://bolt-registry:9300
+        conan remote add --index=0 ci http://bolt-registry:9300
       
     - name: Install Bolt dependencies
       run: |
