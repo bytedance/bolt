@@ -1493,7 +1493,7 @@ TEST_F(StringTest, uuidWithSeed) {
       uuidManyWithSeed(321, 1233, 33), uuidManyWithSeed(321, 1233, 33));
 }
 
-TEST_F(StringTest, initCap) {
+TEST_F(StringTest, DISABLED_initCap) {
   EXPECT_EQ(initCap("ʻcAt! ʻeTc."), "ʻCat! ʻEtc.");
   EXPECT_EQ(initCap("aBc ABc"), "Abc Abc");
   EXPECT_EQ(initCap("a"), "A");

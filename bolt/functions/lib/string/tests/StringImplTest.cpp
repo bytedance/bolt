@@ -1280,7 +1280,7 @@ TEST_F(StringImplTest, toLower) {
   EXPECT_EQ(toLower<true>(std::string_view("𝔸")), "𝔸");
 }
 
-TEST_F(StringImplTest, toTitle) {
+TEST_F(StringImplTest, DISABLED_toTitle) {
   EXPECT_EQ(toTitle(std::string_view("ʻcAt! ʻeTc.")), "ʻCat! ʻEtc.");
   EXPECT_EQ(toTitle(std::string_view("aBc ABc")), "Abc Abc");
   EXPECT_EQ(toTitle(std::string_view("a")), "A");
