@@ -1,0 +1,26 @@
+{
+    "name": "Bolt Development Container",
+    "build": {
+        "dockerfile": "../.github/runners/Dockerfile.ci",
+        "context": "../.github/runners",
+        "args": {
+            "DEB_REGION": "",
+            "HTTPS_PROXY": ""
+        }
+    },
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    "forwardPorts": [],
+    // Use 'portsAttributes' to set default properties for specific forwarded ports.
+    "portsAttributes": {},
+    // Use 'remoteEnv' to set environment variables that are only available inside the container.
+    "remoteEnv": {
+    },
+    // Use 'mounts' to make files or directories from your local machine available inside the container.
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.conan2,target=/home/${localEnv:USER}/.conan2,type=bind,consistency=cached",
+        "source=bolt-ccache,target=/home/${localEnv:USER}/.ccache,type=volume"
+    ],
+    // Configure tool-specific properties.
+    "features": {}
+}
