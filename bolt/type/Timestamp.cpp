@@ -119,52 +119,10 @@ void Timestamp::toGMT(int16_t tzID, bool* hasError) {
   }
 }
 
-namespace {
-void validateTimePoint(const std::chrono::time_point<
-                       std::chrono::system_clock,
-                       std::chrono::milliseconds>& timePoint) {
-  // Due to the limit of std::chrono we can only represent time in
-  // [-32767-01-01, 32767-12-31] date range
-  const auto minTimePoint = ::date::sys_days{::date::year_month_day(
-      ::date::year::min(), ::date::month(1), ::date::day(1))};
-  const auto maxTimePoint = ::date::sys_days{::date::year_month_day(
-      ::date::year::max(), ::date::month(12), ::date::day(31))};
-  if (timePoint < minTimePoint || timePoint > maxTimePoint) {
-    BOLT_USER_FAIL(
-        "Timestamp is outside of supported range of [{}-{}-{}, {}-{}-{}]",
-        (int)::date::year::min(),
-        "01",
-        "01",
-        (int)::date::year::max(),
-        "12",
-        "31");
-  }
-}
-} // namespace
-
-std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>
-Timestamp::toTimePoint(bool allowOverflow) const {
-  using namespace std::chrono;
-  auto tp = time_point<system_clock, milliseconds>(
-      milliseconds(allowOverflow ? toMillisAllowOverflow() : toMillis()));
-  validateTimePoint(tp);
-  return tp;
-}
-
-std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>
-Timestamp::toTimePointMs(bool allowOverflow) const {
-  using namespace std::chrono;
-  auto tp = time_point<system_clock, milliseconds>(
-      milliseconds(allowOverflow ? toMillisAllowOverflow() : toMillis()));
-  util::validateRange(tp);
-  return tp;
-}
-
 void Timestamp::toTimezone(const ::date::time_zone& zone) {
-  auto tp = toTimePoint();
-  auto epoch = zone.to_local(tp).time_since_epoch();
-  // NOTE: Round down to get the seconds of the current time point.
-  seconds_ = std::chrono::floor<std::chrono::seconds>(epoch).count();
+  using namespace std::chrono;
+  const auto info = zone.get_info(::date::sys_seconds{seconds{seconds_}});
+  seconds_ += info.offset.count();
 }
 
 void Timestamp::toTimezone(int16_t tzID) {

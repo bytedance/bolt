@@ -329,6 +329,9 @@ This product includes software from the xsimd project (BSD).
 This product includes software from the xxHash project (BSD).
 * https://github.com/Cyan4973/xxHash
 
+This project includes portions of code from the "date" library by Howard Hinnant (MIT).
+* https://github.com/HowardHinnant/date
+
 ================================================================================
 Optional/Conditional Dependencies (only enabled with specific build options):
 ================================================================================
