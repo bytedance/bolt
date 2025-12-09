@@ -1479,7 +1479,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtime) {
 #ifdef NDEBUG
   // Integer overflow in the internal conversion from seconds to milliseconds.
   EXPECT_EQ(
-      fromUnixTime(std::numeric_limits<int64_t>::max(), "yyyy-MM-dd HH:mm:ss").value(),
+      fromUnixTime(std::numeric_limits<int64_t>::max(), "yyyy-MM-dd HH:mm:ss")
+          .value(),
       "1969-12-31 23:59:59");
 #endif
 

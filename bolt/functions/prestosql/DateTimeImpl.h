@@ -253,7 +253,8 @@ FOLLY_ALWAYS_INLINE int64_t diffTimestamp(
   const int32_t fromMonth = fromCalDate.date.month;
   const int32_t toDay = toCalDate.date.day;
   const int32_t toMonth = toCalDate.date.month;
-  const int32_t toLastYearMonthDay = util::getMaxDayOfMonth(toCalDate.date.year, toCalDate.date.month);
+  const int32_t toLastYearMonthDay =
+      util::getMaxDayOfMonth(toCalDate.date.year, toCalDate.date.month);
 
   if (unit == DateTimeUnit::kMonth || unit == DateTimeUnit::kQuarter) {
     int64_t diff =
