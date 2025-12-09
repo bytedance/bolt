@@ -319,14 +319,8 @@ class ByteOutputStream {
       return;
     }
 
-    auto* target = reinterpret_cast<T*>(current_->buffer + current_->position);
-    const auto* end = target + values.size();
-    auto* valuePtr = &values[0];
-    while (target != end) {
-      *target = *valuePtr;
-      ++target;
-      ++valuePtr;
-    }
+    auto* target = current_->buffer + current_->position;
+    memcpy(target, values.data(), values.size() * sizeof(T));
     current_->position += sizeof(T) * values.size();
   }
 
