@@ -1550,6 +1550,19 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeIllegal) {
   EXPECT_NO_THROW(fromUnixTime("-20231228101858000", "yyyy-MM-dd"));
 }
 
+#ifdef SPARK_COMPATIBLE
+TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {
+  using util::fromTimestampString;
+
+  auto result = evaluateOnce<Timestamp>(
+      "cast(c0 as timestamp)", std::optional<std::string>("32768"));
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(
+      result.value(),
+      fromTimestampString(StringView("32768-01-01 00:00:00"), nullptr));
+}
+#endif
+
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
 #ifdef SPARK_COMPATIBLE
   const std::string prefix = "+";

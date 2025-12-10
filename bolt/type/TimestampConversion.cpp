@@ -56,6 +56,7 @@
  */
 
 #include "bolt/type/TimestampConversion.h"
+#include <iostream>
 #include <limits>
 #include <set>
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -1175,4 +1176,33 @@ CivilDateTime toCivilDateTime(
       weekdayFromDaysSinceEpoch(daysSinceEpoch),
       dayOfYear};
 }
+
+int32_t CivilDateTime::isoWeek() const {
+  auto weeksInIsoYear = [](int32_t year) -> int32_t {
+    const auto wdayJan1 =
+        util::extractISODayOfTheWeek(util::daysSinceEpochFromDate(
+            year,
+            /*month*/ 1,
+            /*day*/ 1));
+    return (wdayJan1 == 4 || (wdayJan1 == 3 && util::isLeapYear(year))) ? 53
+                                                                        : 52;
+  };
+
+  const auto isoWeekday = util::extractISODayOfTheWeek(daysSinceEpoch);
+  int32_t isoWeek = static_cast<int32_t>((10 + dayOfYear - isoWeekday) / 7);
+  int32_t isoYear = date.year;
+
+  if (isoWeek < 1) {
+    isoYear -= 1;
+    isoWeek = weeksInIsoYear(isoYear);
+  } else {
+    const auto weeksThisYear = weeksInIsoYear(isoYear);
+    if (isoWeek > weeksThisYear) {
+      isoYear += 1;
+      isoWeek = 1;
+    }
+  }
+  return isoWeek;
+}
+
 } // namespace bytedance::bolt::util

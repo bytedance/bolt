@@ -207,12 +207,14 @@ inline auto fromTimestampWithTimezoneString(const StringView& str) {
 
 Timestamp fromDatetime(int64_t daysSinceEpoch, int64_t microsSinceMidnight);
 
+/// @brief Civil Date
 struct CivilDate {
   int32_t year;
   int32_t month;
   int32_t day;
 };
 
+/// @brief Civil Time
 struct CivilTime {
   int32_t hour;
   int32_t minute;
@@ -220,40 +222,18 @@ struct CivilTime {
   int32_t nanosecond;
 };
 
+/// @brief Civil DateTime type, combining CivilDate and CivilTime, compatible
+/// with std::chrono
 struct CivilDateTime {
   CivilDate date;
   CivilTime time;
+
   int64_t daysSinceEpoch;
   int32_t weekday; // 0 = Sunday.
   int32_t dayOfYear;
 
-  inline int32_t isoWeek() const {
-    auto weeksInIsoYear = [](int32_t year) -> int32_t {
-      const auto wdayJan1 =
-          util::extractISODayOfTheWeek(util::daysSinceEpochFromDate(
-              year,
-              /*month*/ 1,
-              /*day*/ 1));
-      return (wdayJan1 == 4 || (wdayJan1 == 3 && util::isLeapYear(year))) ? 53
-                                                                          : 52;
-    };
-
-    const auto isoWeekday = util::extractISODayOfTheWeek(daysSinceEpoch);
-    int32_t isoWeek = static_cast<int32_t>((10 + dayOfYear - isoWeekday) / 7);
-    int32_t isoYear = date.year;
-
-    if (isoWeek < 1) {
-      isoYear -= 1;
-      isoWeek = weeksInIsoYear(isoYear);
-    } else {
-      const auto weeksThisYear = weeksInIsoYear(isoYear);
-      if (isoWeek > weeksThisYear) {
-        isoYear += 1;
-        isoWeek = 1;
-      }
-    }
-    return isoWeek;
-  }
+  /// Returns the ISO week number (1-53).
+  int32_t isoWeek() const;
 };
 
 CivilDateTime toCivilDateTime(

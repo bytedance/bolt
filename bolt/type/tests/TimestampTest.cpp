@@ -319,7 +319,7 @@ TEST(TimestampTest, CivilDateTimeMatchesChrono) {
       Timestamp(-1, Timestamp::kMaxNanos),
       Timestamp(kSecondsPerYear * 10, 123456789),
       Timestamp(-kSecondsPerYear * 5, 987654321),
-      Timestamp(1704067200, 999999999), // 2024-12-31 00:00:00.999...
+      Timestamp(1704067200, 999999999), // 2024-01-01 00:00:00.999...
   };
 
   std::default_random_engine gen(42);

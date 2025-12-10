@@ -233,6 +233,14 @@ struct TimestampWithTimezoneSupport {
       const arg_type<TimestampWithTimezone>& timestampWithTimezone,
       bool asGMT = false) {
     const auto milliseconds = *timestampWithTimezone.template at<0>();
+    // presto timestamp with timezone use 52 bits to store milliseconds.
+    constexpr int64_t kMaxTimestampWithZoneMillis = (1LL << 51) - 1;
+    constexpr int64_t kMinTimestampWithZoneMillis = -(1LL << 51);
+    if (milliseconds > kMaxTimestampWithZoneMillis ||
+        milliseconds < kMinTimestampWithZoneMillis) {
+      BOLT_USER_FAIL("Timestamp with timezone overflow: {} ms]", milliseconds);
+    }
+
     auto tz = *timestampWithTimezone.template at<1>();
     Timestamp timestamp = Timestamp::fromMillis(milliseconds);
     if (!asGMT) {
