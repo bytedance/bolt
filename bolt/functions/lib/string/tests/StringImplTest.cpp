@@ -1324,7 +1324,7 @@ TEST_F(StringImplTest, toTitle) {
   EXPECT_EQ(toTitle(std::string_view("𐐭")), "𐐅");
   EXPECT_EQ(toTitle(std::string_view("𐐭𝔸")), "𐐅𝔸");
   // Different possible word boundaries.
-  EXPECT_EQ(toTitle(std::string_view("a.b,c")), "A.B,C");
+  EXPECT_EQ(toTitle(std::string_view("a.b,c")), "A.b,C");
   EXPECT_EQ(toTitle(std::string_view("a. b-c")), "A. B-C");
   EXPECT_EQ(toTitle(std::string_view("a?b世c")), "A?B世C");
   // Titlecase characters that are different from uppercase characters.

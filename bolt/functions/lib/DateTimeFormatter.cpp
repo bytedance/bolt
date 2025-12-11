@@ -1125,10 +1125,12 @@ int32_t DateTimeFormatter::format(
   const auto weekdayNum = civilDateTime.weekday;
   const auto dayOfYear = civilDateTime.dayOfYear;
   const auto daysSinceEpoch = civilDateTime.daysSinceEpoch;
-  [[maybe_unused]] auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
+#ifdef SPARK_COMPATIBLE
+  auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
     auto weekday = static_cast<int32_t>((daysSinceEpochInput + 4) % 7);
     return weekday < 0 ? weekday + 7 : weekday;
   };
+#endif
 
   const char* resultStart = result;
   char* maxResultEnd = result + maxResultSize;
@@ -1163,6 +1165,7 @@ int32_t DateTimeFormatter::format(
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
 #ifdef SPARK_COMPATIBLE
+            // spark compatibility: year should contain sign if > 9999
             if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
               *result++ = '+';
             }
@@ -1241,6 +1244,7 @@ int32_t DateTimeFormatter::format(
                 result);
           } else {
 #ifdef SPARK_COMPATIBLE
+            // spark compatibility: year should contain sign if > 9999
             if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
               *result++ = '+';
             }

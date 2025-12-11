@@ -1258,15 +1258,13 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
     try {
       auto unixtimeD = unixtime + this->sessionTzOffsetInSeconds_;
       const Timestamp timestamp{unixtimeD, 0};
-      // Spark wraps overflowing inputs instead of failing.
-      const bool allowOverflow = true;
       result.reserve(maxResultSize_);
       const auto resultSize = jodaDateTime_->format(
           timestamp,
           sessionTimeZone_,
           maxResultSize_,
           result.data(),
-          allowOverflow,
+          true,
           timePolicy_,
           false);
       result.resize(resultSize);
