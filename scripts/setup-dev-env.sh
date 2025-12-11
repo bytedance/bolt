@@ -28,6 +28,8 @@
 
 CUR_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
+set -eu
+
 function check_compiler() {
     if command -v gcc &> /dev/null; then
         gcc_version=$(gcc --version | grep -oP '(?<=^gcc \(GCC\) )\d+' | head -n 1)
@@ -39,29 +41,31 @@ function check_compiler() {
     else
         echo "❌ gcc is not installed"
     fi
-
-
-    if ! command -v clang &> /dev/null; then
-        echo "❌ clang is not installed"
-        return 1
-    fi
-
-    clang_version=$(clang --version | grep -oP '(?<=^clang version )\d+' | head -n 1)
-
-    if [ "$clang_version" -eq 16 ]; then
-        echo "✅ clang 16 is founded"
-        return 0
-    fi
     
     echo "Bolt requires gcc-10/gcc-11/gcc-12/clang-16. Please install the correct compiler version."
+    echo "Install complier by running(with root user): bash ${CUR_DIR}/install-gcc.sh"
     return 1
 }
 
-function install_and_config_conan() {
-    pip install pydot
-    pip install conan
+function check_conan() {
+    if command -v conan &> /dev/null; then
+        echo "✅ conan is installed"   
+    else
+        if [ ! -d ~/miniconda3 ]; then
+            echo "Installing conda"  
+            MINICONDA_VERSION=py310_23.1.0-1
+            MINICONDA_URL=https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VERSION}-Linux-$(arch).sh 
+            wget --progress=dot:mega  ${MINICONDA_URL} -O /tmp/miniconda.sh 
+            chmod +x /tmp/miniconda.sh && /tmp/miniconda.sh -b -u -p ~/miniconda3 && rm -f /tmp/miniconda.sh
+            echo "export PATH=~/miniconda3/bin:\$PATH" >> ~/.bashrc 
+            source ~/.bashrc && pip install --upgrade pip || true 
+        fi
+        source ~/.bashrc
+        pip install pydot && pip install requests 
+        pip install conan 
+    fi
 
-    if [ -z "$CONAN_HOME" ]; then
+    if [ -z "${CONAN_HOME:-}" ]; then
         export CONAN_HOME=~/.conan2
     fi
 
@@ -73,7 +77,7 @@ function install_and_config_conan() {
 }
 
 check_compiler
-install_and_config_conan
+check_conan
 
 install_bolt_deps_script="${CUR_DIR}/install-bolt-deps.sh"
 bash "${install_bolt_deps_script}" "$@"

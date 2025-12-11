@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 #
@@ -16,40 +15,35 @@
 #
 
 CUR_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
-
 cd ${CUR_DIR}/
 
-# Some dependencies are not available on conan-center,
-# we need to export the recipes to local cache first.
-function export_conan_recipes_to_local_cache() {
-    cd ${CUR_DIR}/conan
+if ! conan remote list | grep -q 'bolt-local'; then
+    conan remote add -t local-recipes-index bolt-local ${CUR_DIR}/conan
+fi 
 
-    declare -A bolt_deps
-    bolt_deps["folly"]="2022.10.31.00"
-    bolt_deps["arrow"]="15.0.1-oss"
-    bolt_deps["sonic-cpp"]="1.0.2"
-    bolt_deps["ryu"]="2.0.1"
-    bolt_deps["roaring"]="4.3.1"
-    bolt_deps["utf8proc"]="2.11.0"
-    bolt_deps["date"]="3.0.4-bolt"
-    bolt_deps["llvm-core"]="13.0.0"
+# Clone conan-center-index and apply Bolt's patch
+cci_home=${CONAN_HOME-~/.conan2}/conan-center-index
+conan_center_commit_id="bad5c95"
+\rm -rf ${cci_home} && git clone https://github.com/conan-io/conan-center-index.git ${cci_home}
+cd  ${cci_home} && git checkout ${conan_center_commit_id}
+for patch_file in "${CUR_DIR}/conan/patches"/*.patch; do
+    if [ ! -f "$patch_file" ]; then
+        continue
+    fi
+    patch_name=$(basename "$patch_file")
+    if patch -p1 -t -d "$cci_home" -i "$patch_file" >/dev/null 2>&1; then
+        echo "✅ $patch_name has been applied to conan-center-index@${conan_center_commit_id} successfully"
+    else
+        echo "❌ Failed to apply $patch_name" >&2
+    fi
+done
 
-    for dep in "${!bolt_deps[@]}"; do
-        ver=${bolt_deps[$dep]}
-        conan export recipes/${dep}/all/conanfile.py --name ${dep} --version ${ver}
-    done
+if ! conan remote list | grep -q 'bolt-cci-local'; then
+    conan remote add -t local-recipes-index bolt-cci-local ${cci_home}
+fi 
 
-    for dep in "${!bolt_deps[@]}"; do
-        ver=${bolt_deps[$dep]}
-        conan cache path ${dep}/${ver}@
-        if [ $? -eq 0 ]; then
-            echo "✅ The conan recipe of ${dep}/${ver} has been exported to local cache."
-        else
-            echo "❌ Failed to export ${dep}/${ver} to local cache."
-            exit 1
-        fi
-    done
-    cd -
-}
-
-export_conan_recipes_to_local_cache
+# Move conancenter to the end of the list
+if conan remote list | grep -q 'conancenter'; then
+    conan remote remove conancenter
+    conan remote add conancenter https://center2.conan.io
+fi

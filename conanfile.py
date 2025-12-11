@@ -280,7 +280,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_jit"):
             self.requires("llvm-core/13.0.0")
 
-        self.requires("simdjson/3.9.2", transitive_headers=True)
+        self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires("sonic-cpp/1.0.2", transitive_headers=True, transitive_libs=True)
         self.requires(
             f"protobuf/{protobuf_version}",
@@ -293,7 +293,7 @@ class BoltConan(ConanFile):
         self.requires(
             "icu/74.2", headers=True, transitive_headers=True, transitive_libs=True
         )
-        self.requires("xsimd/9.0.1", transitive_headers=True, transitive_libs=True)
+        self.requires("xsimd/9.0.1", transitive_headers=True, transitive_libs=True, force=True)
         self.requires(
             "cityhash/cci.20130801", transitive_headers=True, transitive_libs=True
         )
@@ -318,7 +318,7 @@ class BoltConan(ConanFile):
         self.requires(
             "glog/0.7.1", headers=True, transitive_headers=True, transitive_libs=True
         )
-        self.requires("thrift/0.17.0", headers=True)
+        self.requires("thrift/0.17.0", headers=True, force=True)
         self.requires("roaring/4.3.1", headers=True)
         self.requires("boost/1.85.0", transitive_headers=True, transitive_libs=True)
         self.requires("libxml2/2.13.4", override=True)

@@ -1,0 +1,386 @@
+diff --git a/recipes/folly/all/conandata.yml b/recipes/folly/all/conandata.yml
+index a21030554..05545cd00 100644
+--- a/recipes/folly/all/conandata.yml
++++ b/recipes/folly/all/conandata.yml
+@@ -2,3 +2,27 @@ sources:
+   "2024.08.12.00":
+     url: "https://github.com/facebook/folly/releases/download/v2024.08.12.00/folly-v2024.08.12.00.tar.gz"
+     sha256: "18d7be721721db547cb9c5dd5cc50df05cd88b0a8e683e3126ec6f9ce2c41c4d"
++  "2022.10.31.00":
++    url: "https://github.com/facebook/folly/releases/download/v2022.10.31.00/folly-v2022.10.31.00.tar.gz"
++    sha256: "d7749f78eee2a327c1fa6b4a290e4bcd7115cdd7f7ef59f9e043ed59e597ab30"
++patches:
++  "2022.10.31.00":
++    - patch_file: "patches/0017-compiler-flags.patch"
++      patch_description: "fix the hard-coded flag"
++      patch_type: "conan"
++    - patch_file: "patches/0019-exclude-example.patch"
++      patch_description: "exclude example"
++      patch_type: "conan"
++    - patch_file: "patches/0026-fix-windows-minmax.patch"
++      patch_description: "fix cmake script on window"
++      patch_type: "conan"
++    - patch_file: "patches/0029-json-escape.patch"
++      patch_description: "fix json escape diff"
++      patch_type: "conan"
++    - patch_file: "patches/0030-fix-build-gcc13.patch"
++      patch_description: "Fix build with GCC 13 (add missing includes)"
++      patch_type: "conan"
++    - patch_file: "patches/0031-fix-unistd-include.patch"
++      patch_description: "symbolizer: Fix missing unistd.h include. (#2245)"
++      patch_type: "conan"
++
+diff --git a/recipes/folly/all/conanfile.py b/recipes/folly/all/conanfile.py
+index 8e3f12f1c..727526a7c 100755
+--- a/recipes/folly/all/conanfile.py
++++ b/recipes/folly/all/conanfile.py
+@@ -1,16 +1,16 @@
+ from conan import ConanFile
+-from conan.errors import ConanInvalidConfiguration, ConanException
++from conan.errors import ConanInvalidConfiguration
+ from conan.tools.apple import is_apple_os
+ from conan.tools.build import check_min_cppstd, cross_building
+ from conan.tools.env import VirtualBuildEnv
+ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+-from conan.tools.files import get, copy, rmdir, replace_in_file, save, rm
++from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, copy, rmdir, replace_in_file, save, rm
+ from conan.tools.microsoft import is_msvc, is_msvc_static_runtime
+-from conan.tools.scm import Version
++from conan.tools.scm import Version, Git
+ import os
+ 
+ 
+-required_conan_version = ">=2.1"
++required_conan_version = ">=1.54.0"
+ 
+ 
+ class FollyConan(ConanFile):
+@@ -26,10 +26,14 @@ class FollyConan(ConanFile):
+     options = {
+         "shared": [True, False],
+         "fPIC": [True, False],
++
++        "no_exception_tracer": [True, False],
+     }
+     default_options = {
+         "shared": False,
+         "fPIC": True,
++
++        "no_exception_tracer": False
+     }
+ 
+     @property
+@@ -48,7 +52,9 @@ class FollyConan(ConanFile):
+         }
+ 
+     def export_sources(self):
++        export_conandata_patches(self)
+         copy(self, "conan_deps.cmake", self.recipe_folder, os.path.join(self.export_sources_folder, "src"))
++        
+ 
+     def config_options(self):
+         if self.settings.os == "Windows":
+@@ -73,21 +79,26 @@ class FollyConan(ConanFile):
+         self.requires("glog/0.7.1", transitive_headers=True, transitive_libs=True)
+         self.requires("libevent/2.1.12", transitive_headers=True, transitive_libs=True)
+         self.requires("openssl/[>=1.1 <4]")
+-        self.requires("lz4/1.10.0", transitive_libs=True)
+-        self.requires("snappy/1.2.1")
++        self.requires("lz4/1.9.4", transitive_headers=True, transitive_libs=True)
++        self.requires("snappy/1.2.1", transitive_headers=True, transitive_libs=True)
+         self.requires("zlib/[>=1.2.11 <2]")
+-        self.requires("zstd/1.5.5", transitive_libs=True)
++        self.requires("zstd/[>=1.5 <1.6]", transitive_libs=True)
+         if not is_msvc(self):
+-            self.requires("libdwarf/0.9.1")
+-        self.requires("libsodium/1.0.20")
+-        self.requires("xz_utils/[>=5.4.5 <6]")
++            self.requires("libdwarf/0.11.1", transitive_headers=True, transitive_libs=True)
++        self.requires("libsodium/1.0.19", transitive_headers=True, transitive_libs=True)
++        self.requires("xz_utils/5.4.5")
+         if self.settings.os in ["Linux", "FreeBSD"]:
+             self.requires("libiberty/9.1.0")
+-            self.requires("libunwind/1.8.0")
++            self.requires("libunwind/1.8.0", transitive_headers=True, transitive_libs=True)
+         if self.settings.os == "Linux":
+-            self.requires("liburing/2.6")
+-        # INFO: Folly does not support fmt 11 on MSVC: https://github.com/facebook/folly/issues/2250
+-        self.requires("fmt/10.2.1", transitive_headers=True, transitive_libs=True)
++            self.requires("liburing/2.6", transitive_headers=True, transitive_libs=True)
++
++        self.requires("fmt/8.0.1", transitive_headers=True, transitive_libs=True)
++        # if Version(self.version) == "2022.01.31.00":
++        #     self.requires("fmt/8.0.1", transitive_headers=True, transitive_libs=True)
++        # else:
++        #     # INFO: Folly does not support fmt 11 on MSVC: https://github.com/facebook/folly/issues/2250
++        #     self.requires("fmt/10.2.1", transitive_headers=True, transitive_libs=True)
+ 
+     def build_requirements(self):
+         # INFO: Required due ZIP_LISTS CMake feature in conan_deps.cmake
+@@ -131,6 +142,14 @@ class FollyConan(ConanFile):
+     def source(self):
+         get(self, **self.conan_data["sources"][self.version], strip_root=False)
+ 
++    def _cppstd_flag_value(self, cppstd):
++        if is_msvc(self):
++            prefix = "c"
++            year = str(cppstd)
++            if year > "17":
++                year = "latest"
++        return f"{prefix}++{year}"
++
+     def generate(self):
+         env = VirtualBuildEnv(self)
+         env.generate()
+@@ -154,14 +173,42 @@ class FollyConan(ConanFile):
+         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0077"] = "NEW"
+         # Honor Boost_ROOT set by boost recipe
+         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0074"] = "NEW"
+-        tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5" # CMake 4 support
+-        if Version(self.version) > "2024.08.12.00": # pylint: disable=conan-unreachable-upper-version
+-            raise ConanException("CMAKE_POLICY_VERSION_MINIMUM hardcoded to 3.5, check if new version supports CMake 4")
+ 
++        # https://gcc.gnu.org/onlinedocs/gcc-10.3.0/gcc/AArch64-Options.html
++        if str(self.settings.arch) in ['armv8'] and not is_msvc(self):
++            # Includes by default: ‘armv8-a’, ‘+crc’, ‘+lse’, ‘+rdma’
++            # This will enable Folly's F14IntrinsicsMode::SimdAndCrc
++            tc.variables["CMAKE_C_FLAGS"] = "-march=armv8.3-a"  
++            tc.variables["CMAKE_CXX_FLAGS"] = "-march=armv8.3-a"
++        elif str(self.settings.arch) in ['armv9'] and not is_msvc(self):
++            # gcc 12+ https://www.phoronix.com/news/GCC-12-ARMv9-march-armv9-a
++            tc.variables["CMAKE_C_FLAGS"] = "-march=armv9-a"
++            tc.variables["CMAKE_CXX_FLAGS"] = "-march=armv9-a"
++
++        # To enable Folly's FOLLY_F14_CRC_INTRINSIC_AVAILABLE
++        if str(self.settings.arch) in ['x86', 'x86_64']:
++            tc.preprocessor_definitions["FOLLY_SSE"] = "4"
++            tc.preprocessor_definitions["FOLLY_SSE_MINOR"] = "2"
++            if not is_msvc(self):
++                tc.variables["CMAKE_C_FLAGS"] = "-mfma -mavx2"
++                tc.variables["CMAKE_CXX_FLAGS"] = "-mfma -mavx2"
++            else:
++                tc.variables["CMAKE_C_FLAGS"] = "/arch:FMA /arch:AVX2"
++                tc.variables["CMAKE_CXX_FLAGS"] = "/arch:FMA /arch:AVX2"
++
++        tc.cache_variables["FOLLY_HAVE_INT128_T"] = True
++        tc.cache_variables["FOLLY_NO_EXCEPTION_TRACER"] = self.options.no_exception_tracer
++
++        tc.preprocessor_definitions["FOLLY_HAVE_INT128_T"] = "1"
++        if not self.options.no_exception_tracer and self.settings.os in ["Linux", "FreeBSD"]:
++            tc.cache_variables["FOLLY_HAVE_ELF"] = "ON"
++            tc.cache_variables["FOLLY_HAVE_DWARF"] = "ON"
++            tc.preprocessor_definitions["FOLLY_HAVE_ELF"] = "1"
++            tc.preprocessor_definitions["FOLLY_HAVE_DWARF"] = "1"
+ 
+         # 2019.10.21.00 -> either MSVC_ flags or CXX_STD
+         if is_msvc(self):
+-            cxx_std_value = "c++latest" if str(self.settings.compiler.cppstd) > "17" else f"c++{str(self.settings.compiler.cppstd)}"
++            cxx_std_value = self._cppstd_flag_value(self.settings.get_safe("compiler.cppstd", self._min_cppstd))
+             tc.cache_variables["MSVC_LANGUAGE_VERSION"] = cxx_std_value
+             tc.cache_variables["MSVC_ENABLE_ALL_WARNINGS"] = False
+             tc.cache_variables["MSVC_USE_STATIC_RUNTIME"] = is_msvc_static_runtime(self)
+@@ -171,6 +218,11 @@ class FollyConan(ConanFile):
+             tc.cache_variables["BOOST_LINK_STATIC"] = not self.dependencies["boost"].options.shared
+ 
+         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0074"] = "NEW"  # Honor Boost_ROOT set by boost recipe
++
++        # By default, FOLLY_USE_JEMALLOC is '1", and folly will force the consumers to include jemalloc.h
++        # Set FOLLY_USE_JEMALLOC as false, and consumers can decide to include/exclude jemalloc.h
++        tc.cache_variables["FOLLY_USE_JEMALLOC"] = "0"
++
+         tc.generate()
+ 
+         deps = CMakeDeps(self)
+@@ -195,6 +247,7 @@ class FollyConan(ConanFile):
+         deps.generate()
+ 
+     def _patch_sources(self):
++        apply_conandata_patches(self)
+         # Make sure will consume Conan dependencies
+         folly_deps = os.path.join(self.source_folder, "CMake", "folly-deps.cmake")
+         replace_in_file(self, folly_deps, " MODULE", " REQUIRED CONFIG")
+@@ -272,7 +325,7 @@ class FollyConan(ConanFile):
+         self.cpp_info.components["folly_test_util"].libs = ["folly_test_util"]
+         self.cpp_info.components["folly_test_util"].requires = ["libfolly"]
+ 
+-        if self.settings.os in ["Linux", "FreeBSD"]:
++        if self.settings.os in ["Linux", "FreeBSD"] and not self.options.get_safe("no_exception_tracer", False):
+             self.cpp_info.components["folly_exception_tracer_base"].set_property("cmake_target_name", "Folly::folly_exception_tracer_base")
+             self.cpp_info.components["folly_exception_tracer_base"].set_property("pkg_config_name", "libfolly_exception_tracer_base")
+             self.cpp_info.components["folly_exception_tracer_base"].libs = ["folly_exception_tracer_base"]
+@@ -287,3 +340,17 @@ class FollyConan(ConanFile):
+             self.cpp_info.components["folly_exception_counter"].set_property("pkg_config_name", "libfolly_exception_counter")
+             self.cpp_info.components["folly_exception_counter"].libs = ["folly_exception_counter"]
+             self.cpp_info.components["folly_exception_counter"].requires = ["folly_exception_tracer"]
++
++        # TODO: to remove in conan v2 once cmake_find_package_* & pkg_config generators removed
++        self.cpp_info.filenames["cmake_find_package"] = "folly"
++        self.cpp_info.filenames["cmake_find_package_multi"] = "folly"
++        self.cpp_info.names["cmake_find_package"] = "Folly"
++        self.cpp_info.names["cmake_find_package_multi"] = "Folly"
++        self.cpp_info.components["libfolly"].names["cmake_find_package"] = "folly"
++        self.cpp_info.components["libfolly"].names["cmake_find_package_multi"] = "folly"
++
++        # TODO: to remove in conan v2 once cmake_find_package_* & pkg_config generators removed
++        self.cpp_info.components["follybenchmark"].names["cmake_find_package"] = "follybenchmark"
++        self.cpp_info.components["follybenchmark"].names["cmake_find_package_multi"] = "follybenchmark"
++        self.cpp_info.components["folly_test_util"].names["cmake_find_package"] = "folly_test_util"
++        self.cpp_info.components["folly_test_util"].names["cmake_find_package_multi"] = "folly_test_util"
+diff --git a/recipes/folly/all/patches/0017-compiler-flags.patch b/recipes/folly/all/patches/0017-compiler-flags.patch
+new file mode 100644
+index 000000000..1290e801b
+--- /dev/null
++++ b/recipes/folly/all/patches/0017-compiler-flags.patch
+@@ -0,0 +1,24 @@
++diff --git a/CMake/FollyCompilerUnix.cmake b/CMake/FollyCompilerUnix.cmake
++index 8dcaf14..200fe8d 100644
++--- a/CMake/FollyCompilerUnix.cmake
+++++ b/CMake/FollyCompilerUnix.cmake
++@@ -28,9 +28,9 @@ set(
++ )
++ mark_as_advanced(CXX_STD)
++ 
++-set(CMAKE_CXX_FLAGS_COMMON "-g -Wall -Wextra")
+++set(CMAKE_CXX_FLAGS_COMMON "-Wall -Wextra")
++ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CMAKE_CXX_FLAGS_COMMON}")
++-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${CMAKE_CXX_FLAGS_COMMON} -O3")
+++set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${CMAKE_CXX_FLAGS_COMMON}")
++ 
++ # Note that CMAKE_REQUIRED_FLAGS must be a string, not a list
++ set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=${CXX_STD}")
++@@ -43,7 +43,6 @@ function(apply_folly_compile_options_to_target THETARGET)
++   )
++   target_compile_options(${THETARGET}
++     PRIVATE
++-      -g
++       -std=${CXX_STD}
++       -finput-charset=UTF-8
++       -fsigned-char
+diff --git a/recipes/folly/all/patches/0019-exclude-example.patch b/recipes/folly/all/patches/0019-exclude-example.patch
+new file mode 100644
+index 000000000..d2afb310f
+--- /dev/null
++++ b/recipes/folly/all/patches/0019-exclude-example.patch
+@@ -0,0 +1,12 @@
++diff --git a/folly/CMakeLists.txt b/folly/CMakeLists.txt
++index 883f27c..2d2086f 100644
++--- a/folly/CMakeLists.txt
+++++ b/folly/CMakeLists.txt
++@@ -28,7 +28,6 @@ install(
++ )
++ 
++ add_subdirectory(experimental/exception_tracer)
++-add_subdirectory(logging/example)
++ 
++ if (PYTHON_EXTENSIONS)
++   # Create tree of symbolic links in structure required for successful
+diff --git a/recipes/folly/all/patches/0026-fix-windows-minmax.patch b/recipes/folly/all/patches/0026-fix-windows-minmax.patch
+new file mode 100644
+index 000000000..24e4b9eac
+--- /dev/null
++++ b/recipes/folly/all/patches/0026-fix-windows-minmax.patch
+@@ -0,0 +1,12 @@
++diff --git a/CMake/FollyCompilerMSVC.cmake b/CMake/FollyCompilerMSVC.cmake
++index ad03039aa..1c76e0f00 100644
++--- a/CMake/FollyCompilerMSVC.cmake
+++++ b/CMake/FollyCompilerMSVC.cmake
++@@ -289,6 +289,7 @@ function(apply_folly_compile_options_to_target THETARGET)
++   # And the extra defines:
++   target_compile_definitions(${THETARGET}
++     PUBLIC
+++      NOMINMAX
++       _CRT_NONSTDC_NO_WARNINGS # Don't deprecate posix names of functions.
++       _CRT_SECURE_NO_WARNINGS # Don't deprecate the non _s versions of various standard library functions, because safety is for chumps.
++       _SCL_SECURE_NO_WARNINGS # Don't deprecate the non _s versions of various standard library functions, because safety is for chumps.
+diff --git a/recipes/folly/all/patches/0029-json-escape.patch b/recipes/folly/all/patches/0029-json-escape.patch
+new file mode 100644
+index 000000000..8d271ca49
+--- /dev/null
++++ b/recipes/folly/all/patches/0029-json-escape.patch
+@@ -0,0 +1,13 @@
++diff --git a/folly/json.cpp b/folly/json.cpp
++index a9b95c2..cc31bd8 100644
++--- a/folly/json.cpp
+++++ b/folly/json.cpp
++@@ -823,7 +823,7 @@ template <bool EnableExtraAsciiEscapes>
++ void escapeStringImpl(
++     StringPiece input, std::string& out, const serialization_opts& opts) {
++   auto hexDigit = [](uint8_t c) -> char {
++-    return c < 10 ? c + '0' : c - 10 + 'a';
+++    return c < 10 ? c + '0' : c - 10 + 'A';
++   };
++ 
++   out.push_back('\"');
+diff --git a/recipes/folly/all/patches/0030-fix-build-gcc13.patch b/recipes/folly/all/patches/0030-fix-build-gcc13.patch
+new file mode 100644
+index 000000000..faeada9de
+--- /dev/null
++++ b/recipes/folly/all/patches/0030-fix-build-gcc13.patch
+@@ -0,0 +1,39 @@
++diff --git a/folly/system/AtFork.cpp b/folly/system/AtFork.cpp
++index e888e52..27f37e7 100644
++--- a/folly/system/AtFork.cpp
+++++ b/folly/system/AtFork.cpp
++@@ -16,6 +16,9 @@
++
++ #include <folly/system/AtFork.h>
++
+++#include <stdexcept>
+++#include <system_error>
+++
++ #include <folly/ScopeGuard.h>
++ #include <folly/lang/Exception.h>
++ #include <folly/portability/PThread.h>
++diff --git a/CMakeLists.txt b/CMakeLists.txt
++index ddfdc76..f180197 100644
++--- a/CMakeLists.txt
+++++ b/CMakeLists.txt
++@@ -174,6 +174,7 @@ REMOVE_MATCHES_FROM_LISTS(files hfiles
++
++ # Exclude exception tracer, which is necessary to statically link libstdc++
++ if (${FOLLY_NO_EXCEPTION_TRACER})
+++    message(WARNING "Exclude exception tracer, which is necessary to statically link libstdc++")
++   REMOVE_MATCHES_FROM_LISTS(files hfiles
++     MATCHES
++       "^${FOLLY_DIR}/experimental/exception_tracer/"
++diff --git a/folly/experimental/exception_tracer/CMakeLists.txt b/folly/experimental/exception_tracer/CMakeLists.txt
++index 6156f53..19929e3 100644
++--- a/folly/experimental/exception_tracer/CMakeLists.txt
+++++ b/folly/experimental/exception_tracer/CMakeLists.txt
++@@ -12,7 +12,7 @@
++ # See the License for the specific language governing permissions and
++ # limitations under the License.
++
++-if (FOLLY_HAVE_ELF AND FOLLY_HAVE_DWARF)
+++if (NOT FOLLY_NO_EXCEPTION_TRACER AND FOLLY_HAVE_ELF AND FOLLY_HAVE_DWARF)
++   add_library(
++     folly_exception_tracer_base
++     ExceptionTracer.cpp
+diff --git a/recipes/folly/all/patches/0031-fix-unistd-include.patch b/recipes/folly/all/patches/0031-fix-unistd-include.patch
+new file mode 100644
+index 000000000..769c3b174
+--- /dev/null
++++ b/recipes/folly/all/patches/0031-fix-unistd-include.patch
+@@ -0,0 +1,12 @@
++diff --git a/folly/experimental/symbolizer/Elf.cpp b/folly/experimental/symbolizer/Elf.cpp
++index 903712e5e..b2c10f17d 100644
++--- a/folly/experimental/symbolizer/Elf.cpp
+++++ b/folly/experimental/symbolizer/Elf.cpp
++@@ -30,6 +30,7 @@
++ #include <folly/lang/CString.h>
++ #include <folly/portability/Config.h>
++ #include <folly/portability/SysMman.h>
+++#include <folly/portability/Unistd.h>
++ 
++ #if FOLLY_HAVE_ELF
++ 
+diff --git a/recipes/folly/config.yml b/recipes/folly/config.yml
+index e799fbeee..407214371 100644
+--- a/recipes/folly/config.yml
++++ b/recipes/folly/config.yml
+@@ -1,3 +1,5 @@
+ versions:
+   "2024.08.12.00":
+     folder: all
++  "2022.10.31.00":
++    folder: all
