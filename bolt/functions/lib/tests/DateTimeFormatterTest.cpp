@@ -1608,14 +1608,14 @@ TEST_F(MysqlDateTimeTest, formatYear) {
       formatMysqlDateTime(
           "%Y", util::fromTimestampString("-1-01-01", nullptr), timezone),
       "-0001");
-  EXPECT_THROW(
+  EXPECT_EQ(
       formatMysqlDateTime(
           "%Y", util::fromTimestampString("-99999-01-01", nullptr), timezone),
-      BoltUserError);
-  EXPECT_THROW(
+      "-99999");
+  EXPECT_EQ(
       formatMysqlDateTime(
           "%Y", util::fromTimestampString("99999-01-01", nullptr), timezone),
-      BoltUserError);
+      "99999");
 }
 
 TEST_F(MysqlDateTimeTest, formatMonthDay) {

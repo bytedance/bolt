@@ -3288,6 +3288,13 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, timeZoneHour) {
       "Unable to parse timestamp value: \"invalid_date\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
   BOLT_ASSERT_THROW(
       timezone_hour("123456", "Canada/Atlantic"),
+#ifndef SPARK_COMPATIBLE
+      "Unable to parse timestamp value: \"123456\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
+#else
+      "Timestamp with timezone overflow: 3833727840000000 ms");
+#endif
+  BOLT_ASSERT_THROW(
+      timezone_hour("123456-01-01 00:00:00", "Canada/Atlantic"),
       "Timestamp with timezone overflow: 3833727840000000 ms");
 }
 
