@@ -47,24 +47,21 @@ function check_compiler() {
     return 1
 }
 
-function check_conan() {
-    if command -v conan &> /dev/null; then
-        echo "✅ conan is installed"   
-    else
-        if [ ! -d ~/miniconda3 ]; then
-            echo "Installing conda"  
-            MINICONDA_VERSION=py310_23.1.0-1
-            MINICONDA_URL=https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VERSION}-Linux-$(arch).sh 
-            wget --progress=dot:mega  ${MINICONDA_URL} -O /tmp/miniconda.sh 
-            chmod +x /tmp/miniconda.sh && /tmp/miniconda.sh -b -u -p ~/miniconda3 && rm -f /tmp/miniconda.sh
-            echo "export PATH=~/miniconda3/bin:\$PATH" >> ~/.bashrc 
-            source ~/.bashrc && pip install --upgrade pip || true 
-        fi
-        source ~/.bashrc
-        pip install pydot && pip install requests 
-        pip install conan 
+function install_python_dep() {
+    if [ ! -d ~/miniconda3 ]; then
+        echo "Installing conda"  
+        MINICONDA_VERSION=py310_23.1.0-1
+        MINICONDA_URL=https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VERSION}-Linux-$(arch).sh 
+        wget --progress=dot:mega  ${MINICONDA_URL} -O /tmp/miniconda.sh 
+        chmod +x /tmp/miniconda.sh && /tmp/miniconda.sh -b -u -p ~/miniconda3 && rm -f /tmp/miniconda.sh
+        echo "export PATH=~/miniconda3/bin:\$PATH" >> ~/.bashrc 
+        source ~/.bashrc && pip install --upgrade pip || true 
     fi
+    source ~/.bashrc
+    pip install -r "${CUR_DIR}/../requirements.txt"
+}
 
+function check_conan() {
     if [ -z "${CONAN_HOME:-}" ]; then
         export CONAN_HOME=~/.conan2
     fi
@@ -77,6 +74,7 @@ function check_conan() {
 }
 
 check_compiler
+install_python_dep
 check_conan
 
 install_bolt_deps_script="${CUR_DIR}/install-bolt-deps.sh"

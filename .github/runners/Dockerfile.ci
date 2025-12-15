@@ -1,7 +1,6 @@
 FROM gcc:12
 
 ENV CMAKE_VERSION=3.31.8
-ENV CONAN_VERSION=2.22.2
 ENV MOLD_VERSION=2.40.4
 
 ARG DEB_REGION=""
@@ -54,7 +53,6 @@ RUN apt-get update && apt-get install -y \
     autoconf \
     htop \
     less \
-    clang-format \
     nodejs \
     npm \
     && apt-get clean \
@@ -86,8 +84,10 @@ RUN virtualenv -p python3 ~/venv \
     && echo "source ~/venv/bin/activate" >> ~/.bash_profile \
     && echo "source ~/venv/bin/activate" >> ~/.profile
 
-RUN source ~/venv/bin/activate && \
-    pip install conan==$CONAN_VERSION pydot
+COPY requirements.txt .
+
+RUN source ~/venv/bin/activate && pip install --no-cache-dir -r requirements.txt \
+    && rm -f requirements.txt
 
 RUN source ~/venv/bin/activate && \
     conan profile detect && \
