@@ -2332,6 +2332,24 @@ TEST_F(SparkSqlDateTimeFunctionsTest, timestampToMillis) {
   // EXPECT_EQ(timestampToMillis("-292275055-05-16T16:47:04.192"), kMinBigint);
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, civilDateTimeMicroRange) {
+  const auto maxSparkRange =
+      util::toCivilDateTime(
+          Timestamp::fromMicros(kMaxBigint),
+          /*allowOverflow*/ false,
+          /*isPrecision*/ false);
+  EXPECT_EQ(294247, maxSparkRange.date.year);
+  EXPECT_EQ(1, maxSparkRange.date.month);
+  EXPECT_EQ(10, maxSparkRange.date.day);
+
+  const Timestamp overflowTs(
+      Timestamp::kMaxSeconds, Timestamp::kMaxNanos);
+  BOLT_ASSERT_THROW(
+      util::toCivilDateTime(
+          overflowTs, /*allowOverflow*/ true, /*isPrecision*/ false),
+      "Could not convert Timestamp(9223372036854775, 999999999) to microseconds");
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, secondsToTimestamp) {
   // Tests using integer seconds as input.
   EXPECT_EQ(

@@ -313,6 +313,19 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
       BoltUserError);
 }
 
+TEST_F(PrestoSqlDateTimeFunctionsTest, civilDateTimeMillisecondRange) {
+  const auto civil = util::toCivilDateTime(
+      Timestamp::maxMillis(), /*allowOverflow*/ true, /*isPrecision*/ true);
+  EXPECT_EQ(292278994, civil.date.year);
+  EXPECT_EQ(8, civil.date.month);
+  EXPECT_EQ(17, civil.date.day);
+
+  BOLT_ASSERT_THROW(
+      util::toCivilDateTime(
+          Timestamp::max(), /*allowOverflow*/ true, /*isPrecision*/ true),
+      "Could not convert Timestamp(9223372036854775, 999999999) to milliseconds");
+}
+
 TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesPrestoParity) {
 #ifdef SPARK_COMPATIBLE
   const std::string prefix = "+";

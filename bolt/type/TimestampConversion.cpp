@@ -1127,12 +1127,25 @@ CivilTime nanosToCivilTime(uint64_t nanosInDay) {
   return {hour, minute, second, nanosecond};
 }
 
+void validateCivilDateTimeRange(const Timestamp& timestamp, bool isPrecision) {
+  // Spark stores timestamps as int64 microseconds, while Presto stores them as
+  // int64 milliseconds. Make sure the incoming timestamp can be represented in
+  // the corresponding integer range before breaking it into calendar fields.
+  if (isPrecision) {
+    (void)timestamp.toMillis();
+  } else {
+    (void)timestamp.toMicros();
+  }
+}
+
 } // namespace
 
 CivilDateTime toCivilDateTime(
     const Timestamp& timestamp,
     bool allowOverflow,
     bool isPrecision) {
+  validateCivilDateTimeRange(timestamp, isPrecision);
+
   int64_t daysSinceEpoch = 0;
   uint64_t nanosInDay = 0;
   if (isPrecision) {
