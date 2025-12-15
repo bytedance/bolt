@@ -1,0 +1,4 @@
+sources:
+  "2022.10.31.00":
+    url: "https://github.com/facebook/wangle/archive/refs/tags/v2022.10.31.00.tar.gz"
+    sha256: "5eabbb1ba7d4b309e0e041927605022212ec0c719888b7e548741d0d944e71c0"

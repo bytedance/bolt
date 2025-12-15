@@ -1,0 +1,4 @@
+sources:
+  "2022.10.31.00":
+    url: "https://github.com/facebookincubator/fizz/archive/refs/tags/v2022.10.31.00.tar.gz"
+    sha256: "13f18a617dbca4b849b4c4b5c9ece55eff438bfe0ed0323e1cd7c1d593655585"

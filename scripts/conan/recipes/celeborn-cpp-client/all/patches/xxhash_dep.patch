@@ -1,0 +1,24 @@
+diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
+index f24a8abff..5eda7263c 100644
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -130,9 +130,18 @@ find_library(FIZZ fizz REQUIRED)
+ find_library(WANGLE wangle REQUIRED)
+ 
+ find_package(LZ4 REQUIRED)
++find_package(xxHash CONFIG QUIET)
++
++if(NOT TARGET xxHash::xxhash)
++        # using system installed xxhash
++        set(XXHASH_LIBRARY xxhash)
++else()
++        set(XXHASH_LIBRARY xxHash::xxhash)
++endif()
++
+ set(LZ4_WITH_DEPENDENCIES
+         ${LZ4_LIBRARY}
+-        xxhash
++        ${XXHASH_LIBRARY}
+ )
+ 
+ find_library(RE2 re2)

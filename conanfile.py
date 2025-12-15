@@ -356,6 +356,7 @@ class BoltConan(ConanFile):
         self.requires("utf8proc/2.11.0", transitive_headers=True, transitive_libs=True)
         self.requires("date/3.0.4-bolt", transitive_headers=True, transitive_libs=True)
         self.requires("libbacktrace/cci.20210118")
+        self.requires("celeborn-cpp-client/main-20251212")
 
     def build_requirements(self):
         self.tool_requires("m4/1.4.19")

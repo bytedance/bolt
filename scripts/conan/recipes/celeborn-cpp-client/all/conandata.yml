@@ -1,0 +1,5 @@
+patches:
+  "main-20251212":
+      - patch_file: "patches/xxhash_dep.patch"
+        patch_description: "xxhash use conan dep"
+        patch_type: "conan"
