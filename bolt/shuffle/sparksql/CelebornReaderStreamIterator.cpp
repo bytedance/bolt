@@ -120,8 +120,8 @@ CelebornReaderStreamIterator::~CelebornReaderStreamIterator() {
   close();
 }
 
-std::shared_ptr<arrow::io::InputStream> CelebornReaderStreamIterator::nextStream(
-    arrow::MemoryPool* pool) {
+std::shared_ptr<arrow::io::InputStream>
+CelebornReaderStreamIterator::nextStream(arrow::MemoryPool* pool) {
   if (closed_ || nextPartitionIndex_ >= partitionIds_.size()) {
     return nullptr;
   }
@@ -155,7 +155,8 @@ void CelebornReaderStreamIterator::updateMetrics(
     int64_t deserializeTime,
     int64_t totalReadTime) {
   // TODO(celeborn): metric updater should be independent from reader iterator
-  BOLT_UNSUPPORTED("CelebornReaderStreamIterator does not support updateMetrics");
+  BOLT_UNSUPPORTED(
+      "CelebornReaderStreamIterator does not support updateMetrics");
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

@@ -1,0 +1,51 @@
+diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
+index f24a8abff..652b13ef4 100644
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -51,18 +51,14 @@ message(STATUS "Using CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
+ # Currently, we use the "-lgtest" to link the gtest library, and gtest library
+ # is in the "thirdparty/installed/lib64" directory in the linux environment, so
+ # the lib search path needs to be specified here.
+-if (EXISTS ${CMAKE_PREFIX_PATH}/lib64)
+-    link_directories(${CMAKE_PREFIX_PATH}/lib64)
+-    # thrift.a is installed in the directory thirdparty/installed/lib by
+-    # default in the Linux environment.
+-    link_directories(${CMAKE_PREFIX_PATH}/lib)
+-elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
+-    message(
+-            WARNING
+-            "You did not use the recommended way "
+-            "(using 'thirdparty/build-thirdparty.sh') to build & install "
+-            "thirdparty libraries.")
+-endif ()
++foreach(p IN LISTS CMAKE_PREFIX_PATH)
++    if(EXISTS "${p}/lib64")
++         link_directories(${CMAKE_PREFIX_PATH}/lib64)
++         # thrift.a is installed in the directory thirdparty/installed/lib by
++         # default in the Linux environment.
++         link_directories(${CMAKE_PREFIX_PATH}/lib)
++    endif()
++endforeach()
+ 
+ #if (NOT APPLE)
+ #    set(Boost_USE_STATIC_RUNTIME ON)
+@@ -130,9 +126,18 @@ find_library(FIZZ fizz REQUIRED)
+ find_library(WANGLE wangle REQUIRED)
+ 
+ find_package(LZ4 REQUIRED)
++find_package(xxHash CONFIG QUIET)
++
++if(NOT TARGET xxHash::xxhash)
++        # using system installed xxhash
++        set(XXHASH_LIBRARY xxhash)
++else()
++        set(XXHASH_LIBRARY xxHash::xxhash)
++endif()
++
+ set(LZ4_WITH_DEPENDENCIES
+         ${LZ4_LIBRARY}
+-        xxhash
++        ${XXHASH_LIBRARY}
+ )
+ 
+ find_library(RE2 re2)

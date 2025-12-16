@@ -38,6 +38,7 @@ class CelebornCppClientConan(ConanFile):
 
     def requirements(self):
         self.tool_requires('cmake/3.31.3')
+        self.tool_requires('protobuf/3.21.4')
         self.requires("folly/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("fizz/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("wangle/2022.10.31.00", transitive_headers=True, transitive_libs=True)
