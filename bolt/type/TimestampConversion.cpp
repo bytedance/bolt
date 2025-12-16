@@ -1144,7 +1144,9 @@ CivilDateTime toCivilDateTime(
     const Timestamp& timestamp,
     bool allowOverflow,
     bool isPrecision) {
-  validateCivilDateTimeRange(timestamp, isPrecision);
+  if (!allowOverflow) {
+    validateCivilDateTimeRange(timestamp, isPrecision);
+  }
 
   int64_t daysSinceEpoch = 0;
   uint64_t nanosInDay = 0;
@@ -1170,13 +1172,6 @@ CivilDateTime toCivilDateTime(
         static_cast<uint64_t>(secondsInDay) * Timestamp::kNanosInSecond +
         static_cast<uint64_t>(millisRemainder) *
             Timestamp::kNanosecondsInMillisecond;
-  }
-
-  if (!allowOverflow &&
-      (daysSinceEpoch < std::numeric_limits<int>::min() ||
-       daysSinceEpoch > std::numeric_limits<int>::max())) {
-    BOLT_USER_FAIL(
-        "Could not convert days {} to ::date::days.", daysSinceEpoch);
   }
 
   auto civilDate = civilFromDaysSinceEpoch(daysSinceEpoch);

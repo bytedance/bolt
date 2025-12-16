@@ -2346,7 +2346,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, civilDateTimeMicroRange) {
       Timestamp::kMaxSeconds, Timestamp::kMaxNanos);
   BOLT_ASSERT_THROW(
       util::toCivilDateTime(
-          overflowTs, /*allowOverflow*/ true, /*isPrecision*/ false),
+          overflowTs, /*allowOverflow*/ false, /*isPrecision*/ false),
       "Could not convert Timestamp(9223372036854775, 999999999) to microseconds");
 }
 
