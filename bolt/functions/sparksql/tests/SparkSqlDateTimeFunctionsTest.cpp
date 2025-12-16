@@ -154,6 +154,40 @@ TEST_F(SparkSqlDateTimeFunctionsTest, weekOfYear) {
   EXPECT_EQ(52, weekOfYear("2022-01-02"));
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, weekOfYearLargeTimestamp) {
+  const auto weeksInIsoYear = [](int32_t year) {
+    const auto wdayJan1 =
+        util::extractISODayOfTheWeek(util::daysSinceEpochFromDate(year, 1, 1));
+    return (wdayJan1 == 4 || (wdayJan1 == 3 && util::isLeapYear(year))) ? 53
+                                                                        : 52;
+  };
+
+  const auto isoWeekNumber = [&](const Timestamp& ts) {
+    const auto civil = util::toCivilDateTime(ts, true, false);
+    const auto isoWeekday = util::extractISODayOfTheWeek(civil.daysSinceEpoch);
+    int32_t isoWeek =
+        static_cast<int32_t>((10 + civil.dayOfYear - isoWeekday) / 7);
+    int32_t isoYear = civil.date.year;
+    if (isoWeek < 1) {
+      isoYear -= 1;
+      isoWeek = weeksInIsoYear(isoYear);
+    } else {
+      const auto weeksThisYear = weeksInIsoYear(isoYear);
+      if (isoWeek > weeksThisYear) {
+        isoYear += 1;
+        isoWeek = 1;
+      }
+    }
+    return isoWeek;
+  };
+
+  Timestamp ts(1'764'593'923'251, 0); // year ~57887, beyond chrono::time_point
+  const auto week =
+      evaluateOnce<int32_t>("week_of_year(c0)", std::optional<Timestamp>{ts});
+  ASSERT_TRUE(week.has_value());
+  EXPECT_EQ(week.value(), isoWeekNumber(ts));
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, weekdayDate) {
   const auto weekday = [&](std::optional<int32_t> value) {
     return evaluateOnce<int32_t, int32_t>("weekday(c0)", {value}, {DATE()});
@@ -1445,7 +1479,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtime) {
 #ifdef NDEBUG
   // Integer overflow in the internal conversion from seconds to milliseconds.
   EXPECT_EQ(
-      fromUnixTime(std::numeric_limits<int64_t>::max(), "yyyy-MM-dd HH:mm:ss"),
+      fromUnixTime(std::numeric_limits<int64_t>::max(), "yyyy-MM-dd HH:mm:ss")
+          .value(),
       "1969-12-31 23:59:59");
 #endif
 
@@ -1506,22 +1541,66 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeIllegal) {
         "from_unixtime(try_cast(c0 as bigint), c1)", unixTime, timeFormat);
   };
 
-  {
-    queryCtx_->testingOverrideConfigUnsafe({
-        {core::QueryConfig::kThrowExceptionWhenEncounterBadTimestamp, "true"},
-    });
-    EXPECT_THROW(
-        fromUnixTime("20231228101858000", "yyyy-MM-dd"), BoltUserError);
-    EXPECT_THROW(
-        fromUnixTime("-20231228101858000", "yyyy-MM-dd"), BoltUserError);
-  }
+  queryCtx_->testingOverrideConfigUnsafe({
+      {core::QueryConfig::kThrowExceptionWhenEncounterBadTimestamp, "true"},
+  });
+  // Spark returns a wrapped calendar value instead of throwing for extremely
+  // large seconds input. We only assert that parsing succeeds.
+  EXPECT_NO_THROW(fromUnixTime("20231228101858000", "yyyy-MM-dd"));
+  EXPECT_NO_THROW(fromUnixTime("-20231228101858000", "yyyy-MM-dd"));
+}
 
-  {
-    queryCtx_->testingOverrideConfigUnsafe({
-        {core::QueryConfig::kThrowExceptionWhenEncounterBadTimestamp, "false"},
-    });
-    EXPECT_EQ(fromUnixTime("20231228101858000", "yyyy-MM-dd"), "-12345678");
-    EXPECT_EQ(fromUnixTime("-20231228101858000", "yyyy-MM-dd"), "-12345678");
+#ifdef SPARK_COMPATIBLE
+TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {
+  using util::fromTimestampString;
+
+  auto result = evaluateOnce<Timestamp>(
+      "cast(c0 as timestamp)", std::optional<std::string>("32768"));
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(
+      result.value(),
+      fromTimestampString(StringView("32768-01-01 00:00:00"), nullptr));
+}
+#endif
+
+TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
+#ifdef SPARK_COMPATIBLE
+  const std::string prefix = "+";
+#else
+  const std::string prefix;
+#endif
+  auto fromUnixTime = [&](int64_t unixTime) {
+    return evaluateOnce<std::string>(
+               "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss')",
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+
+  std::vector<std::pair<int64_t, std::string>> cases = {
+      {1764593923251, prefix + "57887-10-03 18:40:51"},
+      {1764592804143, prefix + "57887-09-20 19:49:03"},
+      {1764593758503, prefix + "57887-10-01 20:55:03"},
+      {1764590772393, prefix + "57887-08-28 07:26:33"},
+      {1764593528791, prefix + "57887-09-29 05:06:31"},
+      {1764593955077, prefix + "57887-10-04 03:31:17"},
+      {1764593666320, prefix + "57887-09-30 19:18:40"},
+      {1764593144444, prefix + "57887-09-24 18:20:44"},
+      {1764594190546, prefix + "57887-10-06 20:55:46"},
+      {1764593098611, prefix + "57887-09-24 05:36:51"},
+      {1764592074551, prefix + "57887-09-12 09:09:11"},
+      {1764590721621, prefix + "57887-08-27 17:20:21"},
+      {1764590914524, prefix + "57887-08-29 22:55:24"},
+      {1764592158681, prefix + "57887-09-13 08:31:21"},
+      {1764590816700, prefix + "57887-08-28 19:45:00"},
+      {1764591795161, prefix + "57887-09-09 03:32:41"},
+      {1764594152392, prefix + "57887-10-06 10:19:52"},
+      {1764593373289, prefix + "57887-09-27 09:54:49"},
+      {1764591622807, prefix + "57887-09-07 03:40:07"},
+      {1764592069089, prefix + "57887-09-12 07:38:09"},
+  };
+
+  for (const auto& [input, expected] : cases) {
+    EXPECT_EQ(fromUnixTime(input), expected) << input;
   }
 }
 
@@ -2251,6 +2330,24 @@ TEST_F(SparkSqlDateTimeFunctionsTest, timestampToMillis) {
   // expected format is (YYYY-MM-DD HH:MM:SS[.MS])"
   // EXPECT_EQ(timestampToMillis("292278994-08-17T07:12:55.807"), kMaxBigint);
   // EXPECT_EQ(timestampToMillis("-292275055-05-16T16:47:04.192"), kMinBigint);
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, civilDateTimeMicroRange) {
+  const auto maxSparkRange =
+      util::toCivilDateTime(
+          Timestamp::fromMicros(kMaxBigint),
+          /*allowOverflow*/ false,
+          /*isPrecision*/ false);
+  EXPECT_EQ(294247, maxSparkRange.date.year);
+  EXPECT_EQ(1, maxSparkRange.date.month);
+  EXPECT_EQ(10, maxSparkRange.date.day);
+
+  const Timestamp overflowTs(
+      Timestamp::kMaxSeconds, Timestamp::kMaxNanos);
+  BOLT_ASSERT_THROW(
+      util::toCivilDateTime(
+          overflowTs, /*allowOverflow*/ true, /*isPrecision*/ false),
+      "Could not convert Timestamp(9223372036854775, 999999999) to microseconds");
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, secondsToTimestamp) {

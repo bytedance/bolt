@@ -312,6 +312,62 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
       fromUnixTimeWithTimezone("1609167953", "YYYY-MM-dd", "Asia/Shanghai"),
       BoltUserError);
 }
+
+TEST_F(PrestoSqlDateTimeFunctionsTest, civilDateTimeMillisecondRange) {
+  const auto civil = util::toCivilDateTime(
+      Timestamp::maxMillis(), /*allowOverflow*/ true, /*isPrecision*/ true);
+  EXPECT_EQ(292278994, civil.date.year);
+  EXPECT_EQ(8, civil.date.month);
+  EXPECT_EQ(17, civil.date.day);
+
+  BOLT_ASSERT_THROW(
+      util::toCivilDateTime(
+          Timestamp::max(), /*allowOverflow*/ true, /*isPrecision*/ true),
+      "Could not convert Timestamp(9223372036854775, 999999999) to milliseconds");
+}
+
+TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesPrestoParity) {
+#ifdef SPARK_COMPATIBLE
+  const std::string prefix = "+";
+#else
+  const std::string prefix;
+#endif
+  auto fromUnixTime = [&](int64_t unixTime) {
+    return evaluateOnce<std::string>(
+               "format_datetime("
+               "from_unixtime(CAST(c0 AS double)), 'yyyy-MM-dd HH:mm:ss')",
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+
+  std::vector<std::pair<int64_t, std::string>> cases = {
+      {1764593923251, prefix + "57887-10-03 18:40:51"},
+      {1764592804143, prefix + "57887-09-20 19:49:03"},
+      {1764593758503, prefix + "57887-10-01 20:55:03"},
+      {1764590772393, prefix + "57887-08-28 07:26:33"},
+      {1764593528791, prefix + "57887-09-29 05:06:31"},
+      {1764593955077, prefix + "57887-10-04 03:31:17"},
+      {1764593666320, prefix + "57887-09-30 19:18:40"},
+      {1764593144444, prefix + "57887-09-24 18:20:44"},
+      {1764594190546, prefix + "57887-10-06 20:55:46"},
+      {1764593098611, prefix + "57887-09-24 05:36:51"},
+      {1764592074551, prefix + "57887-09-12 09:09:11"},
+      {1764590721621, prefix + "57887-08-27 17:20:21"},
+      {1764590914524, prefix + "57887-08-29 22:55:24"},
+      {1764592158681, prefix + "57887-09-13 08:31:21"},
+      {1764590816700, prefix + "57887-08-28 19:45:00"},
+      {1764591795161, prefix + "57887-09-09 03:32:41"},
+      {1764594152392, prefix + "57887-10-06 10:19:52"},
+      {1764593373289, prefix + "57887-09-27 09:54:49"},
+      {1764591622807, prefix + "57887-09-07 03:40:07"},
+      {1764592069089, prefix + "57887-09-12 07:38:09"},
+  };
+
+  for (const auto& [input, expected] : cases) {
+    EXPECT_EQ(fromUnixTime(input), expected) << input;
+  }
+}
+
 TEST_F(PrestoSqlDateTimeFunctionsTest, DateFormatYYYYThrowError) {
   using util::fromTimestampString;
 
@@ -3246,11 +3302,13 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, timeZoneHour) {
   BOLT_ASSERT_THROW(
       timezone_hour("123456", "Canada/Atlantic"),
 #ifndef SPARK_COMPATIBLE
-      "Unable to parse timestamp value: \"123456\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])"
+      "Unable to parse timestamp value: \"123456\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
 #else
-      "is outside of supported range of [-32767-01-01, 32767-12-31]"
+      "Timestamp with timezone overflow: 3833727840000000 ms");
 #endif
-  );
+  BOLT_ASSERT_THROW(
+      timezone_hour("123456-01-01 00:00:00", "Canada/Atlantic"),
+      "Timestamp with timezone overflow: 3833727840000000 ms");
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, timeZoneMinute) {

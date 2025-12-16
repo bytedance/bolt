@@ -32,7 +32,6 @@
 #include "bolt/functions/lib/DateTimeFormatter.h"
 
 #include <bolt/common/base/Exceptions.h>
-#include <date/date.h>
 #include <date/tz.h>
 #include <folly/String.h>
 #include <charconv>
@@ -1119,29 +1118,19 @@ int32_t DateTimeFormatter::format(
   if (timezone != nullptr) {
     t.toTimezone(*timezone);
   }
-  ::date::sys_days daysTimePoint;
-  ::date::hh_mm_ss<std::chrono::nanoseconds> durationInTheDay;
-  if (isPrecision) {
-    const auto days = t.getDays();
-    if (!allowOverflow &&
-        (days < std::numeric_limits<int>::min() ||
-         days > std::numeric_limits<int>::max())) {
-      BOLT_USER_FAIL("Could not convert days {} to ::date::days.", days);
-    }
-    daysTimePoint = ::date::sys_days(::date::days(days));
-    durationInTheDay =
-        ::date::make_time(std::chrono::nanoseconds(t.getNanosInDay()));
-  } else {
-    // Compatible with spark:
-    // from_unixtime(9223372036854775807) => 1969-12-31 23:59:59
-    const auto timePoint = t.toTimePoint(allowOverflow);
-    daysTimePoint = ::date::floor<::date::days>(timePoint);
-    durationInTheDay =
-        ::date::make_time(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            timePoint - daysTimePoint));
-  }
-  const ::date::year_month_day calDate(daysTimePoint);
-  const ::date::weekday weekday(daysTimePoint);
+  const auto civilDateTime =
+      util::toCivilDateTime(t, allowOverflow, isPrecision);
+  const auto& calDate = civilDateTime.date;
+  const auto& durationInTheDay = civilDateTime.time;
+  const auto weekdayNum = civilDateTime.weekday;
+  const auto dayOfYear = civilDateTime.dayOfYear;
+  const auto daysSinceEpoch = civilDateTime.daysSinceEpoch;
+#ifdef SPARK_COMPATIBLE
+  auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
+    auto weekday = static_cast<int32_t>((daysSinceEpochInput + 4) % 7);
+    return weekday < 0 ? weekday + 7 : weekday;
+  };
+#endif
 
   const char* resultStart = result;
   char* maxResultEnd = result + maxResultSize;
@@ -1152,13 +1141,12 @@ int32_t DateTimeFormatter::format(
     } else {
       switch (token.pattern.specifier) {
         case DateTimeFormatSpecifier::ERA: {
-          const std::string_view piece =
-              static_cast<signed>(calDate.year()) > 0 ? "AD" : "BC";
+          const std::string_view piece = calDate.year > 0 ? "AD" : "BC";
           std::memcpy(result, piece.data(), piece.length());
           result += piece.length();
         } break;
         case DateTimeFormatSpecifier::CENTURY_OF_ERA: {
-          auto year = static_cast<signed>(calDate.year());
+          auto year = calDate.year;
           year = (year < 0 ? -year : year);
           auto century = year / 100;
           result += padContent(
@@ -1170,12 +1158,18 @@ int32_t DateTimeFormatter::format(
         } break;
 
         case DateTimeFormatSpecifier::YEAR_OF_ERA: {
-          auto year = static_cast<signed>(calDate.year());
+          auto year = calDate.year;
           if (token.pattern.minRepresentDigits == 2) {
             result +=
                 padContent(std::abs(year) % 100, '0', 2, maxResultEnd, result);
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
+#ifdef SPARK_COMPATIBLE
+            // spark compatibility: year should contain sign if > 9999
+            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+              *result++ = '+';
+            }
+#endif
             result += padContent(
                 year,
                 '0',
@@ -1187,14 +1181,14 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::DAY_OF_WEEK_0_BASED:
         case DateTimeFormatSpecifier::DAY_OF_WEEK_1_BASED: {
-          auto weekdayNum = weekday.c_encoding();
-          if (weekdayNum == 0 &&
+          auto weekdayValue = weekdayNum;
+          if (weekdayValue == 0 &&
               token.pattern.specifier ==
                   DateTimeFormatSpecifier::DAY_OF_WEEK_1_BASED) {
-            weekdayNum = 7;
+            weekdayValue = 7;
           }
           result += padContent(
-              weekdayNum,
+              weekdayValue,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1202,7 +1196,6 @@ int32_t DateTimeFormatter::format(
         } break;
 
         case DateTimeFormatSpecifier::DAY_OF_WEEK_TEXT: {
-          auto weekdayNum = weekday.c_encoding();
           std::string_view piece;
           if (token.pattern.minRepresentDigits <= 3) {
             piece = weekdaysShort[weekdayNum];
@@ -1217,7 +1210,7 @@ int32_t DateTimeFormatter::format(
         case DateTimeFormatSpecifier::WEEK_YEAR:
 #endif
         case DateTimeFormatSpecifier::YEAR: {
-          auto year = static_cast<signed>(calDate.year());
+          auto year = calDate.year;
 #ifdef SPARK_COMPATIBLE
           if (token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR) {
             BOLT_USER_CHECK_EQ(
@@ -1225,11 +1218,10 @@ int32_t DateTimeFormatter::format(
                 TimePolicy::LEGACY,
                 "WEEK_YEAR is only supported in Spark LEGACY policy");
             auto weekYear = year;
-            if (calDate.month() == ::date::month(12)) {
-              auto weekdayNum = weekday.c_encoding();
+            if (calDate.month == 12) {
               // If the date is in the last week of the year, and this week
               // contains next year's first day, the week year is next year.
-              if (static_cast<unsigned>(calDate.day()) - weekdayNum + 6 > 31) {
+              if (calDate.day - weekdayNum + 6 > 31) {
                 weekYear += 1;
               }
             }
@@ -1251,6 +1243,12 @@ int32_t DateTimeFormatter::format(
                 maxResultEnd,
                 result);
           } else {
+#ifdef SPARK_COMPATIBLE
+            // spark compatibility: year should contain sign if > 9999
+            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+              *result++ = '+';
+            }
+#endif
             result += padContent(
                 year,
                 '0',
@@ -1265,25 +1263,20 @@ int32_t DateTimeFormatter::format(
           // Calculate week of week year based on Java SimpleDateFormat
 
           int weekOfYear = 0;
-          if (calDate.month() == ::date::month(12) &&
-              static_cast<unsigned>(calDate.day()) - weekday.c_encoding() + 6 >
-                  31) {
+          if (calDate.month == 12 && calDate.day - weekdayNum + 6 > 31) {
             // If the date is in the last week of the year, and this week
             // contains next year's first day, the week is next year's first
             // week.
             weekOfYear = 1;
           } else {
-            auto year = static_cast<signed>(calDate.year());
-            auto firstDayOfYear = ::date::year_month_day(
-                calDate.year(), ::date::month(1), ::date::day(1));
+            auto year = calDate.year;
+            auto firstDayOfYear = util::daysSinceEpochFromDate(year, 1, 1);
 
-            auto daysSinceFirstDay =
-                (daysTimePoint - ::date::sys_days{firstDayOfYear}).count();
+            auto daysSinceFirstDay = daysSinceEpoch - firstDayOfYear;
 
             // Get the weekday of the first day of the year (0=Sunday,
             // 6=Saturday)
-            auto firstDayWeekday =
-                ::date::weekday{::date::sys_days{firstDayOfYear}}.c_encoding();
+            auto firstDayWeekday = weekdayFromDays(firstDayOfYear);
 
             // Calculate week number where week starts from Sunday
             // The formula is: (day_of_year + first_day_weekday) / 7 + 1
@@ -1302,16 +1295,14 @@ int32_t DateTimeFormatter::format(
           // Calculate week of month based on Java SimpleDateFormat
 
           // like WEEK_OF_WEEK_YEAR, but calculate from the first day of month
-          auto firstDayOfMonth = ::date::year_month_day(
-              calDate.year(), calDate.month(), ::date::day(1));
+          auto firstDayOfMonth =
+              util::daysSinceEpochFromDate(calDate.year, calDate.month, 1);
 
-          auto daysSinceFirstDayOfMonth =
-              (daysTimePoint - ::date::sys_days{firstDayOfMonth}).count();
+          auto daysSinceFirstDayOfMonth = daysSinceEpoch - firstDayOfMonth;
 
           // Get the weekday of the first day of the month (0=Sunday,
           // 6=Saturday)
-          auto firstDayOfMonthWeekday =
-              ::date::weekday{::date::sys_days{firstDayOfMonth}}.c_encoding();
+          auto firstDayOfMonthWeekday = weekdayFromDays(firstDayOfMonth);
 
           // Calculate week number where week starts from Sunday
           auto weekOfMonth =
@@ -1330,13 +1321,12 @@ int32_t DateTimeFormatter::format(
 
           // like WEEK_OF_MONTH, but calculates which occurrence of this weekday
           // in the month
-          auto currentDayOfWeek = weekday.c_encoding(); // 0=Sunday, 6=Saturday
-          auto dayOfMonth = static_cast<unsigned>(calDate.day());
+          auto currentDayOfWeek = weekdayNum; // 0=Sunday, 6=Saturday
+          auto dayOfMonth = calDate.day;
 
-          auto firstDayOfMonth = ::date::year_month_day(
-              calDate.year(), calDate.month(), ::date::day(1));
-          auto firstDayOfMonthWeekday =
-              ::date::weekday{::date::sys_days{firstDayOfMonth}}.c_encoding();
+          auto firstDayOfMonth =
+              util::daysSinceEpochFromDate(calDate.year, calDate.month, 1);
+          auto firstDayOfMonthWeekday = weekdayFromDays(firstDayOfMonth);
 
           // Calculate the first occurrence of the current day of week in the
           // month
@@ -1356,14 +1346,8 @@ int32_t DateTimeFormatter::format(
 #endif
 
         case DateTimeFormatSpecifier::DAY_OF_YEAR: {
-          auto firstDayOfTheYear = ::date::year_month_day(
-              calDate.year(), ::date::month(1), ::date::day(1));
-          auto delta =
-              (::date::sys_days{calDate} - ::date::sys_days{firstDayOfTheYear})
-                  .count();
-          delta += 1;
           result += padContent(
-              delta,
+              dayOfYear,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1372,7 +1356,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::MONTH_OF_YEAR:
           result += padContent(
-              static_cast<unsigned>(calDate.month()),
+              calDate.month,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1382,9 +1366,9 @@ int32_t DateTimeFormatter::format(
         case DateTimeFormatSpecifier::MONTH_OF_YEAR_TEXT: {
           std::string_view piece;
           if (token.pattern.minRepresentDigits <= 3) {
-            piece = monthsShort[static_cast<unsigned>(calDate.month()) - 1];
+            piece = monthsShort[calDate.month - 1];
           } else {
-            piece = monthsFull[static_cast<unsigned>(calDate.month()) - 1];
+            piece = monthsFull[calDate.month - 1];
           }
           std::memcpy(result, piece.data(), piece.length());
           result += piece.length();
@@ -1392,7 +1376,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::DAY_OF_MONTH:
           result += padContent(
-              static_cast<unsigned>(calDate.day()),
+              calDate.day,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1401,7 +1385,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::HALFDAY_OF_DAY: {
           const std::string_view piece =
-              durationInTheDay.hours().count() < 12 ? "AM" : "PM";
+              durationInTheDay.hour < 12 ? "AM" : "PM";
           std::memcpy(result, piece.data(), piece.length());
           result += piece.length();
         } break;
@@ -1410,7 +1394,7 @@ int32_t DateTimeFormatter::format(
         case DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY:
         case DateTimeFormatSpecifier::HOUR_OF_DAY:
         case DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY: {
-          auto hourNum = durationInTheDay.hours().count();
+          auto hourNum = durationInTheDay.hour;
           if (token.pattern.specifier ==
               DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY) {
             hourNum = (hourNum + 11) % 12 + 1;
@@ -1433,7 +1417,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::MINUTE_OF_HOUR:
           result += padContent(
-              durationInTheDay.minutes().count() % 60,
+              durationInTheDay.minute % 60,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1442,7 +1426,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::SECOND_OF_MINUTE:
           result += padContent(
-              durationInTheDay.seconds().count() % 60,
+              durationInTheDay.second % 60,
               '0',
               token.pattern.minRepresentDigits,
               maxResultEnd,
@@ -1451,8 +1435,7 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::FRACTION_OF_SECOND: {
           const auto& piece = formatFractionOfSecond(
-              durationInTheDay.subseconds().count(),
-              token.pattern.minRepresentDigits);
+              durationInTheDay.nanosecond, token.pattern.minRepresentDigits);
           std::memcpy(result, piece.data(), piece.length());
           result += piece.length();
         } break;

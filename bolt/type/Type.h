@@ -1175,6 +1175,7 @@ constexpr long kMillisInSecond = 1000;
 constexpr long kMillisInMinute = 60 * kMillisInSecond;
 constexpr long kMillisInHour = 60 * kMillisInMinute;
 constexpr long kMillisInDay = 24 * kMillisInHour;
+constexpr long kMillisInWeek = 7 * kMillisInDay;
 
 /// Time interval in milliseconds.
 class IntervalDayTimeType : public BigintType {

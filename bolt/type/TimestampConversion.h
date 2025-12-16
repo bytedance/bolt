@@ -207,4 +207,38 @@ inline auto fromTimestampWithTimezoneString(const StringView& str) {
 
 Timestamp fromDatetime(int64_t daysSinceEpoch, int64_t microsSinceMidnight);
 
+/// @brief Civil Date
+struct CivilDate {
+  int32_t year;
+  int32_t month;
+  int32_t day;
+};
+
+/// @brief Civil Time
+struct CivilTime {
+  int32_t hour;
+  int32_t minute;
+  int32_t second;
+  int32_t nanosecond;
+};
+
+/// @brief Civil DateTime type, combining CivilDate and CivilTime, compatible
+/// with std::chrono
+struct CivilDateTime {
+  CivilDate date;
+  CivilTime time;
+
+  int64_t daysSinceEpoch;
+  int32_t weekday; // 0 = Sunday.
+  int32_t dayOfYear;
+
+  /// Returns the ISO week number (1-53).
+  int32_t isoWeek() const;
+};
+
+CivilDateTime toCivilDateTime(
+    const Timestamp& timestamp,
+    bool allowOverflow = false,
+    bool isPrecision = true);
+
 } // namespace bytedance::bolt::util

@@ -70,17 +70,12 @@ struct WeekFunction : public InitSessionTimezone<T> {
       const Timestamp& timestamp,
       const ::date::time_zone* timezone,
       bool allowOverflow) {
-    // The computation of ISO week from date follows the algorithm here:
-    // https://en.wikipedia.org/wiki/ISO_week_date
     Timestamp t = timestamp;
     if (timezone) {
       t.toTimezone(*timezone);
     }
-    const auto timePoint = t.toTimePointMs(allowOverflow);
-    const auto daysTimePoint = ::date::floor<::date::days>(timePoint);
-    const ::date::year_month_day calDate(daysTimePoint);
-    auto weekNum = ::iso_week::year_weeknum_weekday{calDate}.weeknum();
-    return (uint32_t)weekNum;
+    const auto civil = util::toCivilDateTime(t, allowOverflow, false);
+    return static_cast<uint32_t>(civil.isoWeek());
   }
 
   FOLLY_ALWAYS_INLINE void call(

@@ -196,58 +196,37 @@ FOLLY_ALWAYS_INLINE int64_t diffTimestamp(
     const DateTimeUnit unit,
     const Timestamp& fromTimestamp,
     const Timestamp& toTimestamp) {
-  // TODO(gaoge): Handle overflow and underflow with 64-bit representation
   if (fromTimestamp == toTimestamp) {
     return 0;
   }
 
   const int8_t sign = fromTimestamp < toTimestamp ? 1 : -1;
 
-  // fromTimepoint is less than or equal to toTimepoint
-  const std::chrono::
-      time_point<std::chrono::system_clock, std::chrono::milliseconds>
-          fromTimepoint(std::chrono::milliseconds(
-              std::min(fromTimestamp, toTimestamp).toMillis()));
-  const std::chrono::
-      time_point<std::chrono::system_clock, std::chrono::milliseconds>
-          toTimepoint(std::chrono::milliseconds(
-              std::max(fromTimestamp, toTimestamp).toMillis()));
+  const auto& low = sign == 1 ? fromTimestamp : toTimestamp;
+  const auto& high = sign == 1 ? toTimestamp : fromTimestamp;
+  const int64_t fromMillis = low.toMillis();
+  const int64_t toMillis = high.toMillis();
+  const int64_t deltaMillis = toMillis - fromMillis;
 
   // Millisecond, second, minute, hour and day have fixed conversion ratio
   switch (unit) {
     case DateTimeUnit::kMillisecond: {
-      return sign *
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              toTimepoint - fromTimepoint)
-              .count();
+      return sign * deltaMillis;
     }
     case DateTimeUnit::kSecond: {
-      return sign *
-          std::chrono::duration_cast<std::chrono::seconds>(
-              toTimepoint - fromTimepoint)
-              .count();
+      return sign * (deltaMillis / kMillisInSecond);
     }
     case DateTimeUnit::kMinute: {
-      return sign *
-          std::chrono::duration_cast<std::chrono::minutes>(
-              toTimepoint - fromTimepoint)
-              .count();
+      return sign * (deltaMillis / kMillisInMinute);
     }
     case DateTimeUnit::kHour: {
-      return sign *
-          std::chrono::duration_cast<std::chrono::hours>(
-              toTimepoint - fromTimepoint)
-              .count();
+      return sign * (deltaMillis / kMillisInHour);
     }
     case DateTimeUnit::kDay: {
-      return sign *
-          std::chrono::duration_cast<::date::days>(toTimepoint - fromTimepoint)
-              .count();
+      return sign * (deltaMillis / kMillisInDay);
     }
     case DateTimeUnit::kWeek: {
-      return sign *
-          std::chrono::duration_cast<::date::weeks>(toTimepoint - fromTimepoint)
-              .count();
+      return sign * (deltaMillis / kMillisInWeek);
     }
     default:
       break;
@@ -255,35 +234,35 @@ FOLLY_ALWAYS_INLINE int64_t diffTimestamp(
 
   // Month, quarter and year do not have fixed conversion ratio. Ex. a month can
   // have 28, 29, 30 or 31 days. A year can have 365 or 366 days.
-  const std::chrono::time_point<std::chrono::system_clock, ::date::days>
-      fromDaysTimepoint = std::chrono::floor<::date::days>(fromTimepoint);
-  const std::chrono::time_point<std::chrono::system_clock, ::date::days>
-      toDaysTimepoint = std::chrono::floor<::date::days>(toTimepoint);
-  const ::date::year_month_day fromCalDate(fromDaysTimepoint);
-  const ::date::year_month_day toCalDate(toDaysTimepoint);
-  const uint64_t fromTimeInstantOfDay =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          fromTimepoint - fromDaysTimepoint)
-          .count();
-  const uint64_t toTimeInstantOfDay =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          toTimepoint - toDaysTimepoint)
-          .count();
-  const uint8_t fromDay = static_cast<unsigned>(fromCalDate.day()),
-                fromMonth = static_cast<unsigned>(fromCalDate.month());
-  const uint8_t toDay = static_cast<unsigned>(toCalDate.day()),
-                toMonth = static_cast<unsigned>(toCalDate.month());
-  const ::date::year_month_day toCalLastYearMonthDay(
-      toCalDate.year() / toCalDate.month() / ::date::last);
-  const uint8_t toLastYearMonthDay =
-      static_cast<unsigned>(toCalLastYearMonthDay.day());
+  const auto fromCalDate =
+      util::toCivilDateTime(low, /*allowOverflow*/ false, /*isPrecision*/ true);
+  const auto toCalDate = util::toCivilDateTime(
+      high, /*allowOverflow*/ false, /*isPrecision*/ true);
+
+  auto dayMillis = [](const util::CivilDateTime& civil) -> int64_t {
+    return static_cast<int64_t>(civil.time.nanosecond / 1'000'000) +
+        int64_t(
+            civil.time.second + civil.time.minute * 60 +
+            civil.time.hour * 3'600) *
+        1'000;
+  };
+  const int64_t fromDayMillis = dayMillis(fromCalDate);
+  const int64_t toDayMillis = dayMillis(toCalDate);
+
+  const int32_t fromDay = fromCalDate.date.day;
+  const int32_t fromMonth = fromCalDate.date.month;
+  const int32_t toDay = toCalDate.date.day;
+  const int32_t toMonth = toCalDate.date.month;
+  const int32_t toLastYearMonthDay =
+      util::getMaxDayOfMonth(toCalDate.date.year, toCalDate.date.month);
 
   if (unit == DateTimeUnit::kMonth || unit == DateTimeUnit::kQuarter) {
-    int64_t diff = (int(toCalDate.year()) - int(fromCalDate.year())) * 12 +
-        int(toMonth) - int(fromMonth);
+    int64_t diff =
+        (int64_t(toCalDate.date.year) - int64_t(fromCalDate.date.year)) * 12 +
+        int64_t(toMonth) - int64_t(fromMonth);
 
     if ((toDay != toLastYearMonthDay && fromDay > toDay) ||
-        (fromDay == toDay && fromTimeInstantOfDay > toTimeInstantOfDay)) {
+        (fromDay == toDay && fromDayMillis > toDayMillis)) {
       diff--;
     }
 
@@ -292,13 +271,14 @@ FOLLY_ALWAYS_INLINE int64_t diffTimestamp(
   }
 
   if (unit == DateTimeUnit::kYear) {
-    int64_t diff = (toCalDate.year() - fromCalDate.year()).count();
+    int64_t diff =
+        int64_t(toCalDate.date.year) - int64_t(fromCalDate.date.year);
 
     if (fromMonth > toMonth ||
         (fromMonth == toMonth && fromDay > toDay &&
          toDay != toLastYearMonthDay) ||
         (fromMonth == toMonth && fromDay == toDay &&
-         fromTimeInstantOfDay > toTimeInstantOfDay)) {
+         fromDayMillis > toDayMillis)) {
       diff--;
     }
     return sign * diff;

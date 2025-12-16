@@ -56,6 +56,8 @@
  */
 
 #include "bolt/type/TimestampConversion.h"
+#include <iostream>
+#include <limits>
 #include <set>
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
@@ -1077,4 +1079,143 @@ std::optional<std::pair<Timestamp, int64_t>> fromTimestampWithTimezoneString(
   }
   return std::make_pair(resultTimestamp, timezoneID);
 }
+
+namespace {
+
+CivilDate civilFromDaysSinceEpoch(int64_t daysSinceEpoch) {
+  // Algorithm derived from Howard Hinnant's civil calendar conversions.
+  // https://howardhinnant.github.io/date_algorithms.html
+  // Copyright (c) 2015, 2016 Howard Hinnant
+  //
+  // This code is licensed under the MIT license.
+  // https://github.com/HowardHinnant/date
+  int64_t z = daysSinceEpoch + 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const uint32_t doe = static_cast<uint32_t>(z - era * 146097);
+  const uint32_t yoe =
+      (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+  int64_t y = static_cast<int64_t>(yoe) + era * 400;
+  const uint32_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+  const uint32_t mp = (5 * doy + 2) / 153; // [0, 11]
+  const uint32_t day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+  const uint32_t month = mp + (mp < 10 ? 3 : -9); // [1, 12]
+  y += (month <= 2);
+  return {
+      static_cast<int32_t>(y),
+      static_cast<int32_t>(month),
+      static_cast<int32_t>(day)};
+}
+
+int32_t weekdayFromDaysSinceEpoch(int64_t daysSinceEpoch) {
+  // 1970-01-01 is Thursday which maps to 4 with Sunday = 0 encoding.
+  auto weekday = static_cast<int32_t>((daysSinceEpoch + 4) % 7);
+  return weekday < 0 ? weekday + 7 : weekday;
+}
+
+CivilTime nanosToCivilTime(uint64_t nanosInDay) {
+  constexpr uint64_t kNanosPerHour = Timestamp::kNanosInSecond * kSecsPerHour;
+  constexpr uint64_t kNanosPerMinute =
+      Timestamp::kNanosInSecond * kSecsPerMinute;
+  const auto hour = static_cast<int32_t>(nanosInDay / kNanosPerHour);
+  nanosInDay %= kNanosPerHour;
+  const auto minute = static_cast<int32_t>(nanosInDay / kNanosPerMinute);
+  nanosInDay %= kNanosPerMinute;
+  const auto second =
+      static_cast<int32_t>(nanosInDay / Timestamp::kNanosInSecond);
+  const auto nanosecond =
+      static_cast<int32_t>(nanosInDay % Timestamp::kNanosInSecond);
+  return {hour, minute, second, nanosecond};
+}
+
+void validateCivilDateTimeRange(const Timestamp& timestamp, bool isPrecision) {
+  // Spark stores timestamps as int64 microseconds, while Presto stores them as
+  // int64 milliseconds. Make sure the incoming timestamp can be represented in
+  // the corresponding integer range before breaking it into calendar fields.
+  if (isPrecision) {
+    (void)timestamp.toMillis();
+  } else {
+    (void)timestamp.toMicros();
+  }
+}
+
+} // namespace
+
+CivilDateTime toCivilDateTime(
+    const Timestamp& timestamp,
+    bool allowOverflow,
+    bool isPrecision) {
+  validateCivilDateTimeRange(timestamp, isPrecision);
+
+  int64_t daysSinceEpoch = 0;
+  uint64_t nanosInDay = 0;
+  if (isPrecision) {
+    daysSinceEpoch = timestamp.getDays();
+    nanosInDay = timestamp.getNanosInDay();
+  } else {
+    const auto millis = allowOverflow ? timestamp.toMillisAllowOverflow()
+                                      : timestamp.toMillis();
+    int64_t seconds = millis / 1000;
+    int64_t millisRemainder = millis % 1000;
+    if (millisRemainder < 0) {
+      millisRemainder += 1000;
+      seconds -= 1;
+    }
+    daysSinceEpoch = seconds / Timestamp::kSecondsInDay;
+    auto secondsInDay = seconds % Timestamp::kSecondsInDay;
+    if (secondsInDay < 0) {
+      secondsInDay += Timestamp::kSecondsInDay;
+      daysSinceEpoch -= 1;
+    }
+    nanosInDay =
+        static_cast<uint64_t>(secondsInDay) * Timestamp::kNanosInSecond +
+        static_cast<uint64_t>(millisRemainder) *
+            Timestamp::kNanosecondsInMillisecond;
+  }
+
+  if (!allowOverflow &&
+      (daysSinceEpoch < std::numeric_limits<int>::min() ||
+       daysSinceEpoch > std::numeric_limits<int>::max())) {
+    BOLT_USER_FAIL(
+        "Could not convert days {} to ::date::days.", daysSinceEpoch);
+  }
+
+  auto civilDate = civilFromDaysSinceEpoch(daysSinceEpoch);
+  auto dayOfYear = static_cast<int32_t>(
+      daysBeforeMonthFirstDay(civilDate.year, civilDate.month) + civilDate.day);
+  return {
+      civilDate,
+      nanosToCivilTime(nanosInDay),
+      daysSinceEpoch,
+      weekdayFromDaysSinceEpoch(daysSinceEpoch),
+      dayOfYear};
+}
+
+int32_t CivilDateTime::isoWeek() const {
+  auto weeksInIsoYear = [](int32_t year) -> int32_t {
+    const auto wdayJan1 =
+        util::extractISODayOfTheWeek(util::daysSinceEpochFromDate(
+            year,
+            /*month*/ 1,
+            /*day*/ 1));
+    return (wdayJan1 == 4 || (wdayJan1 == 3 && util::isLeapYear(year))) ? 53
+                                                                        : 52;
+  };
+
+  const auto isoWeekday = util::extractISODayOfTheWeek(daysSinceEpoch);
+  int32_t isoWeek = static_cast<int32_t>((10 + dayOfYear - isoWeekday) / 7);
+  int32_t isoYear = date.year;
+
+  if (isoWeek < 1) {
+    isoYear -= 1;
+    isoWeek = weeksInIsoYear(isoYear);
+  } else {
+    const auto weeksThisYear = weeksInIsoYear(isoYear);
+    if (isoWeek > weeksThisYear) {
+      isoYear += 1;
+      isoWeek = 1;
+    }
+  }
+  return isoWeek;
+}
+
 } // namespace bytedance::bolt::util

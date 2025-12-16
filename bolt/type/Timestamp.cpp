@@ -60,49 +60,31 @@ Timestamp Timestamp::now() {
 }
 
 void Timestamp::toGMT(const ::date::time_zone& zone, bool* hasError) {
-  // Magic number -2^39 + 24*3600. This number and any number lower than that
-  // will cause time_zone::to_sys() to SIGABRT. We don't want that to happen.
-  if (seconds_ < -1096193779200l + 86400l) {
-    if (hasError) {
-      *hasError = true;
-    } else {
+  const ::date::local_seconds local{std::chrono::seconds(seconds_)};
+  const auto info = zone.get_info(local);
+
+  auto failNonexistent = [&](const std::string& reason) {};
+
+  switch (info.result) {
+    case ::date::local_info::unique:
+      seconds_ -= info.first.offset.count();
+      break;
+    case ::date::local_info::ambiguous:
+      // Pick earliest to align with Presto behavior.
+      seconds_ -= info.first.offset.count();
+      break;
+    case ::date::local_info::nonexistent:
+      if (hasError) {
+        *hasError = true;
+        return;
+      }
       BOLT_USER_FAIL(
-          "Timestamp seconds out of range for time zone adjustment: {}",
-          seconds_);
-    }
-  } else if (seconds_ > kMaxSeconds) {
-    if (hasError) {
-      *hasError = true;
-    } else {
-      BOLT_USER_FAIL(
-          "Timestamp seconds out of range for time zone adjustment: {}",
-          seconds_);
-    }
+          "Timestamp {} does not exist in time zone {}",
+          std::to_string(seconds_),
+          zone.name());
+      return;
   }
 
-  ::date::local_time<std::chrono::seconds> localTime{
-      std::chrono::seconds(seconds_)};
-  std::chrono::time_point<std::chrono::system_clock, std::chrono::seconds>
-      sysTime;
-  try {
-    sysTime = zone.to_sys(localTime);
-  } catch (const ::date::ambiguous_local_time&) {
-    // If the time is ambiguous, pick the earlier possibility to be consistent
-    // with Presto.
-    sysTime = zone.to_sys(localTime, ::date::choose::earliest);
-  } catch (const ::date::nonexistent_local_time& error) {
-    // If the time does not exist, fail the conversion.
-    if (hasError) {
-      *hasError = true;
-    } else {
-      BOLT_USER_FAIL(
-          "Timestamp {} does not exist in time zone {}: {}",
-          std::to_string(seconds_),
-          zone.name(),
-          error.what());
-    }
-  }
-  seconds_ = sysTime.time_since_epoch().count();
   if (hasError) {
     *hasError = false;
   }
@@ -119,52 +101,10 @@ void Timestamp::toGMT(int16_t tzID, bool* hasError) {
   }
 }
 
-namespace {
-void validateTimePoint(const std::chrono::time_point<
-                       std::chrono::system_clock,
-                       std::chrono::milliseconds>& timePoint) {
-  // Due to the limit of std::chrono we can only represent time in
-  // [-32767-01-01, 32767-12-31] date range
-  const auto minTimePoint = ::date::sys_days{::date::year_month_day(
-      ::date::year::min(), ::date::month(1), ::date::day(1))};
-  const auto maxTimePoint = ::date::sys_days{::date::year_month_day(
-      ::date::year::max(), ::date::month(12), ::date::day(31))};
-  if (timePoint < minTimePoint || timePoint > maxTimePoint) {
-    BOLT_USER_FAIL(
-        "Timestamp is outside of supported range of [{}-{}-{}, {}-{}-{}]",
-        (int)::date::year::min(),
-        "01",
-        "01",
-        (int)::date::year::max(),
-        "12",
-        "31");
-  }
-}
-} // namespace
-
-std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>
-Timestamp::toTimePoint(bool allowOverflow) const {
-  using namespace std::chrono;
-  auto tp = time_point<system_clock, milliseconds>(
-      milliseconds(allowOverflow ? toMillisAllowOverflow() : toMillis()));
-  validateTimePoint(tp);
-  return tp;
-}
-
-std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>
-Timestamp::toTimePointMs(bool allowOverflow) const {
-  using namespace std::chrono;
-  auto tp = time_point<system_clock, milliseconds>(
-      milliseconds(allowOverflow ? toMillisAllowOverflow() : toMillis()));
-  util::validateRange(tp);
-  return tp;
-}
-
 void Timestamp::toTimezone(const ::date::time_zone& zone) {
-  auto tp = toTimePoint();
-  auto epoch = zone.to_local(tp).time_since_epoch();
-  // NOTE: Round down to get the seconds of the current time point.
-  seconds_ = std::chrono::floor<std::chrono::seconds>(epoch).count();
+  using namespace std::chrono;
+  const auto info = zone.get_info(::date::sys_seconds{seconds{seconds_}});
+  seconds_ += info.offset.count();
 }
 
 void Timestamp::toTimezone(int16_t tzID) {

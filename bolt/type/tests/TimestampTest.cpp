@@ -31,10 +31,13 @@
 
 #include <date/tz.h>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <random>
+#include <vector>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/Timestamp.h"
+#include "bolt/type/TimestampConversion.h"
 namespace bytedance::bolt {
 namespace {
 
@@ -307,6 +310,57 @@ TEST(TimestampTest, compareWithToStringAlt) {
   }
 }
 
+TEST(TimestampTest, CivilDateTimeMatchesChrono) {
+  // Keep samples within a safe std::chrono range to avoid overflow in tests.
+  const int64_t kSecondsPerYear = 365 * Timestamp::kSecondsInDay;
+  std::vector<Timestamp> samples = {
+      Timestamp(0, 0),
+      Timestamp(1, 0),
+      Timestamp(-1, Timestamp::kMaxNanos),
+      Timestamp(kSecondsPerYear * 10, 123456789),
+      Timestamp(-kSecondsPerYear * 5, 987654321),
+      Timestamp(1704067200, 999999999), // 2024-01-01 00:00:00.999...
+  };
+
+  std::default_random_engine gen(42);
+  std::uniform_int_distribution<int64_t> distSec(
+      -50 * kSecondsPerYear, 50 * kSecondsPerYear);
+  std::uniform_int_distribution<uint64_t> distNano(0, Timestamp::kMaxNanos);
+  for (int i = 0; i < 200; ++i) {
+    samples.emplace_back(distSec(gen), distNano(gen));
+  }
+
+  for (const auto& ts : samples) {
+    const auto civil = util::toCivilDateTime(ts, true, true);
+
+    auto chronoTimePoint = std::chrono::system_clock::time_point(
+        std::chrono::seconds(ts.getSeconds()) +
+        std::chrono::nanoseconds(ts.getNanos()));
+    auto days = ::date::floor<::date::days>(chronoTimePoint);
+    auto timeOfDay =
+        ::date::make_time(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            chronoTimePoint - days));
+    const ::date::year_month_day ymd(days);
+    const ::date::weekday weekday(days);
+    auto firstDayOfYear = ::date::sys_days(
+        ::date::year_month_day(ymd.year(), ::date::month(1), ::date::day(1)));
+    auto dayOfYear = static_cast<int32_t>((days - firstDayOfYear).count() + 1);
+
+    EXPECT_EQ(static_cast<int>(ymd.year()), civil.date.year);
+    EXPECT_EQ(static_cast<unsigned>(ymd.month()), civil.date.month);
+    EXPECT_EQ(static_cast<unsigned>(ymd.day()), civil.date.day);
+    EXPECT_EQ(weekday.c_encoding(), civil.weekday);
+    EXPECT_EQ(dayOfYear, civil.dayOfYear);
+
+    EXPECT_EQ(timeOfDay.hours().count(), civil.time.hour);
+    EXPECT_EQ(timeOfDay.minutes().count(), civil.time.minute);
+    EXPECT_EQ(timeOfDay.seconds().count(), civil.time.second);
+    EXPECT_EQ(
+        timeOfDay.subseconds().count(),
+        static_cast<uint64_t>(civil.time.nanosecond));
+  }
+}
+
 TEST(TimestampTest, increaseOperator) {
   auto ts = Timestamp(0, 999999998);
   EXPECT_EQ("1970-01-01 00:00:00.999999998", ts.toString());
@@ -343,9 +397,16 @@ TEST(TimestampTest, outOfRange) {
   auto* timezone = ::date::locate_zone("GMT");
   Timestamp t(-3217830796800, 0);
 
-  BOLT_ASSERT_THROW(t.toTimePoint(), "Timestamp is outside of supported range");
-  BOLT_ASSERT_THROW(
-      t.toTimezone(*timezone), "Timestamp is outside of supported range");
+  auto copy = t;
+  ASSERT_NO_THROW(copy.toTimezone(*timezone));
+  EXPECT_EQ(copy.getSeconds(), t.getSeconds());
+
+  copy = t;
+  auto* shanghai = ::date::locate_zone("Asia/Shanghai");
+  const auto info = shanghai->get_info(
+      ::date::sys_seconds{std::chrono::seconds{t.getSeconds()}});
+  ASSERT_NO_THROW(copy.toTimezone(*shanghai));
+  EXPECT_EQ(copy.getSeconds(), t.getSeconds() + info.offset.count());
 }
 
 // In debug mode, Timestamp constructor will throw exception if range check
@@ -354,12 +415,12 @@ TEST(TimestampTest, outOfRange) {
 TEST(TimestampTest, overflow) {
   Timestamp t(std::numeric_limits<int64_t>::max(), 0);
   BOLT_ASSERT_THROW(
-      t.toTimePoint(false),
+      t.toMillis(),
       fmt::format(
           "Could not convert Timestamp({}, {}) to milliseconds",
           std::numeric_limits<int64_t>::max(),
           0));
-  ASSERT_NO_THROW(t.toTimePoint(true));
+  ASSERT_NO_THROW(t.toMillisAllowOverflow());
 }
 #endif
 
@@ -494,6 +555,20 @@ TEST(TimestampTest, leadingPositiveSign) {
   ASSERT_EQ(
       timestampToString(Timestamp(253405036800, 0), options),
       "+10000-02-01 16:00:00.000000000");
+}
+
+TEST(TimestampTest, toTimezoneLargeYear) {
+  // 1'764'593'923'251 seconds is about year 57887; std::chrono time_point
+  // rejects it, so verify timezone adjustment works without time_point.
+  Timestamp ts(1'764'593'923'251, 0);
+
+  auto copy = ts;
+  copy.toTimezone(*::date::locate_zone("UTC"));
+  EXPECT_EQ(copy, ts);
+
+  copy = ts;
+  copy.toTimezone(*::date::locate_zone("Asia/Shanghai"));
+  EXPECT_EQ(copy.getSeconds(), ts.getSeconds() + 8 * 3600);
 }
 
 TEST(TimestampTest, skipTrailingZeros) {
