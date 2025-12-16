@@ -1,9 +1,32 @@
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 name: Build and Test
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CONAN_HOME: /root/.conan2
@@ -15,22 +38,24 @@ jobs:
   changes:
     runs-on:  [ self-hosted, small ]
     outputs:
-      source_code: ${{ steps.filter.outputs.source_code }}
+      source_changed: ${{ steps.filter.outputs.source_changed }}
     steps:
-      - uses: dorny/paths-filter@v3
-        id: filter
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: filter
+        uses: ./.github/actions/changes-check
         with:
           filters: |
-            source_code:
-              - 'bolt/**'
-              - '!bolt/**/*.md'
-              - 'Makefile'
-              - 'conanfile.py'
-              - 'CMakeLists.txt'
-              - 'scripts/**'
+            bolt/**
+            !bolt/**/*.md
+            Makefile
+            conanfile.py
+            CMakeLists.txt
+            scripts/**
   build-test:
     needs: changes
-    if: ${{ needs.changes.outputs.source_code == 'true' }}
+    if: ${{ needs.changes.outputs.source_changed == 'true' }}
     runs-on: [ self-hosted, medium ]
     container: 
       image: bolt-registry:5000/bolt-ci:latest
@@ -47,22 +72,22 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+
+    - name: Activate Python venv
+      run: echo "/root/venv/bin" >> $GITHUB_PATH
+
     - name: Add CI conan remote
       run: |
-        source /root/venv/bin/activate
         conan remote add --index=0 ci http://conanserver:9300
       
     - name: Install Bolt dependencies
       run: |
-        source /root/venv/bin/activate
         ./scripts/install-bolt-deps.sh
 
     - name: Bolt Build
       run: |
-        source /root/venv/bin/activate
         make ${{ matrix.build_type }}_with_test
 
     - name: Run tests
       run: |
-        source /root/venv/bin/activate
         make unittest_${{ matrix.build_type }}

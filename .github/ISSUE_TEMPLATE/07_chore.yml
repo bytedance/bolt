@@ -1,0 +1,85 @@
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Chore / Maintenance
+description: Dependency updates, build system changes, CI configuration, or code cleanup.
+title: "[Chore] "
+labels: ["chore"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > Thanks for helping keep the project clean, secure, and up-to-date!
+        > These changes usually don't affect the end-user functionality but are vital for development health.
+
+  - type: dropdown
+    attributes:
+      label: Chore Type
+      options:
+        - Dependency Update (Conan/Third-party)
+        - Build System (CMake/Makefile)
+        - CI/CD Configuration (GitHub Actions)
+        - Code Refactoring / Cleanup
+        - Linter / Formatter (Clang-format etc.)
+        - Test Infrastructure
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Task Description
+      description: What needs to be done?
+      placeholder: |
+        e.g. Upgrade `fmt` library to version 10.0
+        e.g. Add caching to the GitHub Actions workflow
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Motivation / Benefit
+      description: Why is this change necessary? (e.g., Security fix, Performance improvement, Deprecation warning)
+      placeholder: |
+        The current version has a security vulnerability (CVE-XXX).
+        Refactoring this module will make unit testing easier.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Related Files (Optional)
+      description: Which files or directories are primarily affected?
+      placeholder: e.g. .github/workflows/, conanfile.py, CMakeLists.txt
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Implementation Plan (Optional)
+      description: If you have a specific approach in mind, outline it here.
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Additional Context
+      description: Add any other context, links to upstream changelogs, or logs here.
+    validations:
+      required: false

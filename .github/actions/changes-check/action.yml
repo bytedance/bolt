@@ -1,0 +1,96 @@
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: 'Check Path Changes'
+description: 'Checks if specific paths have changed using git native pathspecs'
+
+inputs:
+  filters:
+    description: 'List of file paths or globs to check'
+    required: true
+
+outputs:
+  source_changed:
+    description: "Returns 'true' if changes detected"
+    value: ${{ steps.check.outputs.source_changed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check file changes
+      id: check
+      shell: bash
+      run: |
+        echo "Analyzing path filters..."
+
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          BASE_REF="origin/${{ github.base_ref }}"
+          HEAD_REF="HEAD"
+          echo "Mode: Pull Request ($BASE_REF ... $HEAD_REF)"
+        else
+          BEFORE_SHA="${{ github.event.before }}"
+          CURRENT_SHA="${{ github.sha }}"
+          
+          # empty SHA (0000...) represents new branch or repo initialization
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          
+          if [ "$BEFORE_SHA" == "$ZERO_SHA" ]; then
+            # scenario A: new branch / initial commit
+            # strategy: compare against Git's empty tree magic hash (think all files are new)
+            BASE_REF="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            HEAD_REF="$CURRENT_SHA"
+            echo "Mode: New Branch / Initial Commit (Compare against Empty Tree)"
+          else
+            # scenario B: standard push (may contain multiple commits)
+            # strategy: compare against previous commit (check if it exists locally)
+            if git cat-file -e $BEFORE_SHA^{commit} 2>/dev/null; then
+              BASE_REF="$BEFORE_SHA"
+              HEAD_REF="$CURRENT_SHA"
+              echo "Mode: Standard Push ($BASE_REF ... $HEAD_REF)"
+            else
+              # scenario C: force push or history loss
+              # strategy: cannot determine changes, default to safe assumption
+              echo "Warning: Previous commit $BEFORE_SHA not found (likely Force Push)."
+              echo "Fallback: Assuming changes exist to be safe."
+              echo "source_changed=true" >> $GITHUB_OUTPUT
+              exit 0 
+            fi
+          fi
+        fi
+
+        path_args=()
+        while IFS= read -r line || [ -n "$line" ]; do
+          [[ -z "$line" || "$line" =~ ^# ]] && continue
+          line=$(echo "$line" | xargs)
+          if [[ "$line" == !* ]]; then
+            path_args+=(":!${line:1}")
+          else
+            path_args+=("$line")
+          fi
+        done <<< "${{ inputs.filters }}"
+
+        echo "Checking paths between $BASE_REF and $HEAD_REF"
+
+        if git diff --quiet "$BASE_REF" "$HEAD_REF" -- "${path_args[@]}"; then
+          echo "No relevant changes found."
+          echo "source_changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "Changes detected."
+          echo "source_changed=true" >> $GITHUB_OUTPUT
+        fi
