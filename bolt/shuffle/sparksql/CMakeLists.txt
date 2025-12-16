@@ -35,6 +35,7 @@ add_library(
     BoltRowBasedSortShuffleWriter.cpp
     ShuffleWriterNode.cpp
     ShuffleReaderNode.cpp
+    CelebornReaderStreamIterator.cpp
     BoltArrowMemoryPool.cpp
     partitioner/FallbackRangePartitioner.cpp
     partitioner/HashPartitioner.cpp
@@ -46,13 +47,19 @@ add_library(
     partition_writer/LocalPartitionWriter.cpp
     partition_writer/rss/RemotePartitionWriter.cpp
     partition_writer/rss/CelebornPartitionWriter.cpp
+    partition_writer/rss/NativeCelebornClient.cpp
     compression/Compression.cpp
     Payload.cpp
     ShuffleMemoryPool.cpp
     Spill.cpp
     Utils.cpp)
 
-target_link_libraries(bolt_shuffle_spark_impl PUBLIC arrow::arrow ryu::ryu bolt_vector bolt_core bolt_exec)
+find_package(celeborn-cpp-client CONFIG REQUIRED)
+
+target_link_libraries(
+  bolt_shuffle_spark_impl
+  PUBLIC arrow::arrow ryu::ryu bolt_vector bolt_core bolt_exec
+         celeborn-cpp-client::celeborn-cpp-client)
 
 if(ENABLE_QAT)
   include(BuildQATzip)

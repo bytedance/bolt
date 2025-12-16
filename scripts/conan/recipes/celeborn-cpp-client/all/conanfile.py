@@ -42,7 +42,7 @@ class CelebornCppClientConan(ConanFile):
         self.requires("fizz/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("wangle/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("re2/20230301", transitive_headers=True, transitive_libs=True)
-        self.requires("xxhash/0.8.3", transitive_headers=True, transitive_libs=True)
+        self.requires("xxhash/0.8.1", transitive_headers=True, transitive_libs=True)
 
     def source(self):
         git = Git(self, folder="..")
@@ -112,9 +112,9 @@ class CelebornCppClientConan(ConanFile):
 
         # proto
         copy(self, pattern="*.pb.h",
-             src=os.path.join(self.build_folder, "proto"),
-             dst=os.path.join(inc_dst, "celeborn", "proto"),
-             keep_path=False)
+             src=self.build_folder,
+             dst=inc_dst,
+             keep_path=True)
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "celeborn-cpp-client")

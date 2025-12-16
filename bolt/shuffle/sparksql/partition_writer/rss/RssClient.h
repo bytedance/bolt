@@ -29,6 +29,7 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
+#include <cstdint>
 
 #pragma once
 namespace bytedance::bolt::shuffle::sparksql {

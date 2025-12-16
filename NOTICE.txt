@@ -351,6 +351,15 @@ This product includes software from the LLVM project (Apache 2.0 with LLVM Excep
 This product includes software from the pybind11 project (BSD 3‑Clause).
 * https://github.com/pybind/pybind11
 
+This product includes software from the fizz project (BSD License).
+* https://github.com/facebookincubator/fizz
+
+This product includes software from the wangle project (Apache-2.0).
+* https://github.com/facebook/wangle
+
+This product includes software from the celeborn project (Apache-2.0).
+* https://github.com/apache/celeborn
+
 ================================================================================
 For the complete terms and conditions of each license, please see the COPYING 
 or LICENSE file in each package's source distribution.
