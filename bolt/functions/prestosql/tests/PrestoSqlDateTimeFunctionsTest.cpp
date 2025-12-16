@@ -315,14 +315,14 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, civilDateTimeMillisecondRange) {
   const auto civil = util::toCivilDateTime(
-      Timestamp::maxMillis(), /*allowOverflow*/ true, /*isPrecision*/ true);
+      Timestamp::maxMillis(), /*allowOverflow*/ false, /*isPrecision*/ true);
   EXPECT_EQ(292278994, civil.date.year);
   EXPECT_EQ(8, civil.date.month);
   EXPECT_EQ(17, civil.date.day);
 
   BOLT_ASSERT_THROW(
       util::toCivilDateTime(
-          Timestamp::max(), /*allowOverflow*/ true, /*isPrecision*/ true),
+          Timestamp::max(), /*allowOverflow*/ false, /*isPrecision*/ true),
       "Could not convert Timestamp(9223372036854775, 999999999) to milliseconds");
 }
 
