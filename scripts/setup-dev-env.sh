@@ -32,7 +32,7 @@ set -eu
 
 function check_compiler() {
     if command -v gcc &> /dev/null; then
-        gcc_version=$(gcc --version | grep -oP '(?<=^gcc \(GCC\) )\d+' | head -n 1)
+        gcc_version=$(gcc -dumpversion)
 
         if [[ "$gcc_version" -eq 10 || "$gcc_version" -eq 11 || "$gcc_version" -eq 12 ]]; then
             echo "✅ gcc version：$gcc_version"
