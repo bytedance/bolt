@@ -73,8 +73,6 @@ class FizzConan(ConanFile):
 
     def build(self):
         cmakelists = os.path.join(self.source_folder, "fizz", "CMakeLists.txt")
-        replace_in_file(self, cmakelists, "add_executable(FizzTool", "add_executable(FizzTool EXCLUDE_FROM_ALL", strict=False)
-        replace_in_file(self, cmakelists, "add_executable(BogoShim", "add_executable(BogoShim EXCLUDE_FROM_ALL", strict=False)
         cmake = CMake(self)
         cmake.configure(build_script_folder=os.path.join(self.source_folder, "fizz"))
         cmake.build()

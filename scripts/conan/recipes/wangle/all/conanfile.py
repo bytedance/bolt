@@ -70,8 +70,6 @@ class WangleConan(ConanFile):
 
     def build(self):
         cmakelists = os.path.join(self.source_folder, "wangle", "CMakeLists.txt")
-        replace_in_file(self, cmakelists, "    ${FIZZ_INCLUDE_DIR}\n    ${FOLLY_INCLUDE_DIR}", "    ${FOLLY_INCLUDE_DIR}", strict=False)
-        replace_in_file(self, cmakelists, "    ${FIZZ_INCLUDE_DIR}", "", strict=False)
         cmake = CMake(self)
         cmake.configure(build_script_folder=os.path.join(self.source_folder, "wangle"))
         cmake.build()
