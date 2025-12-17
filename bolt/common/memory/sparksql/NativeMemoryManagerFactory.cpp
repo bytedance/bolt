@@ -72,8 +72,6 @@ std::string ListenableArbitrator::toString() const {
 bool ListenableArbitrator::growPoolLocked(
     bolt::memory::MemoryPool* pool,
     uint64_t bytes) {
-  // Since
-  // https://github.com/facebookincubator/bolt/pull/9557/files#diff-436e44b7374032f8f5d7eb45869602add6f955162daa2798d01cc82f8725724dL812-L820,
   // We should pass bytes as parameter "reservationBytes" when calling ::grow.
   const uint64_t freeBytes = pool->freeBytes();
   if (freeBytes >= bytes) {
@@ -358,8 +356,6 @@ bool BoltMemoryManager::tryDestructSafe() {
     }
     if (boltMemoryManager_->numPools() == 3) {
       // Assert the pool is spill pool
-      // See
-      // https://github.com/facebookincubator/bolt/commit/e6f84e8ac9ef6721f527a2d552a13f7e79bdf72e
       int32_t spillPoolCount = 0;
       int32_t cachePoolCount = 0;
       int32_t tracePoolCount = 0;

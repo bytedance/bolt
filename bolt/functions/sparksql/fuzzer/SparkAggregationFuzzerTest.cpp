@@ -123,12 +123,10 @@ int main(int argc, char** argv) {
   auto duckQueryRunner =
       std::make_unique<bytedance::bolt::exec::test::DuckQueryRunner>();
   duckQueryRunner->disableAggregateFunctions({
-      // https://github.com/facebookincubator/bolt/issues/7677
       "max_by",
       "min_by",
       // The skewness functions of Bolt and DuckDB use different
       // algorithms.
-      // https://github.com/facebookincubator/bolt/issues/4845
       "skewness",
       // Spark's kurtosis uses Pearson's formula for calculating the kurtosis
       // coefficient. Meanwhile, DuckDB employs the sample kurtosis calculation

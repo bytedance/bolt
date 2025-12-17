@@ -673,7 +673,6 @@ TEST_F(HiveDataSinkTest, memoryReclaim) {
     {dwio::common::FileFormat::DWRF, false, true, 1, true, true},
     {dwio::common::FileFormat::DWRF, false, false, 1 << 30, false, false},
     {dwio::common::FileFormat::DWRF, false, false, 1, false, false},
-  // Add Parquet with https://github.com/facebookincubator/bolt/issues/5560
 #if 0
       {dwio::common::FileFormat::PARQUET, true, true, 1 << 30, false, false},
       {dwio::common::FileFormat::PARQUET, true, true, 1, false, false},
@@ -810,10 +809,7 @@ TEST_F(HiveDataSinkTest, memoryReclaimAfterClose) {
       {dwio::common::FileFormat::DWRF, false, true, true, true},
       {dwio::common::FileFormat::DWRF, false, false, true, false},
       {dwio::common::FileFormat::DWRF, false, true, false, true},
-      {dwio::common::FileFormat::DWRF, false, false, false, false}
-      // Add parquet file format after fix
-      // https://github.com/facebookincubator/bolt/issues/5560
-  };
+      {dwio::common::FileFormat::DWRF, false, false, false, false}};
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 

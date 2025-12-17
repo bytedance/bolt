@@ -53,8 +53,7 @@ class HdfsFileSystem::Impl {
     hdfsBuilder* builder = driver_->NewBuilder();
     if (endpoint.isViewfs) {
       // The default NameNode configuration will be used (from the XML
-      // configuration files). See:
-      // https://github.com/facebookincubator/bolt/blob/main/bolt/external/hdfs/hdfs.h#L289
+      // configuration files).
       driver_->BuilderSetNameNode(builder, "default");
     } else {
       driver_->BuilderSetNameNode(builder, endpoint.host.c_str());

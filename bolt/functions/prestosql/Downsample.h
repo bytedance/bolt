@@ -80,8 +80,6 @@ struct DownsampleFunction {
       const arg_type<Varchar>& fillPolicy) {
     // out_type<Map<int64_t, double>> only supports limited function,
     // so we have to use an intermediate Map to hold the result first.
-    // See
-    // https://facebookincubator.github.io/bolt/develop/scalar-functions.html#outputs-writer-types
     std::unordered_map<int64_t, double> intermediateResult;
     int64_t intermediateResultStartTime = std::numeric_limits<int64_t>::max();
     int64_t intermediateResultEndTime = -1;

@@ -314,8 +314,7 @@ bolt::variant readSingleValue(
 /// their results. This condition may be relaxed if there is only one
 /// floating-point column in each set. Verifying arbitrary result sets with
 /// epsilon comparison would require more advanced algorithms such as maximum
-/// bipartite matching. Hence we leave them as future work. Check out
-/// https://github.com/facebookincubator/bolt/issues/3493 for more dicsussion.
+/// bipartite matching. Hence we leave them as future work.
 bool assertEqualResults(
     const std::vector<RowVectorPtr>& expected,
     const std::vector<RowVectorPtr>& actual);

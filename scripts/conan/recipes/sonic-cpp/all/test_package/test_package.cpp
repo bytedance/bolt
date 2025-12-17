@@ -1,10 +1,9 @@
 #include "sonic/sonic.h"
 
-#include <string>
 #include <iostream>
+#include <string>
 
-int main()
-{
+int main() {
   std::string json = R"(
     {
       "a": 1,

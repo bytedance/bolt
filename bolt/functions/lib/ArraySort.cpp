@@ -589,8 +589,7 @@ core::TypedExprPtr rewriteArraySortCall(
 }
 
 // An internal function to canonicalize an array to allow for comparisons. Used
-// in AggregationFuzzerTest. Details in
-// https://github.com/facebookincubator/bolt/issues/6999.
+// in AggregationFuzzerTest.
 BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
     udf_$internal$canonicalize,
     internalCanonicalizeSignatures(),

@@ -123,8 +123,6 @@ const ::date::time_zone& Timestamp::defaultTimezone() {
     // TODO: We are hard-coding PST/PDT here to be aligned with the current
     // behavior in DWRF reader/writer.  Once they are fixed, we can use
     // ::date::current_zone() here.
-    //
-    // See https://github.com/facebookincubator/bolt/issues/8127
     auto* tz = ::date::locate_zone("America/Los_Angeles");
     BOLT_CHECK_NOT_NULL(tz);
     tz;

@@ -244,7 +244,6 @@ class DictionaryVector : public SimpleVector<T> {
     }
 
     // TODO Fix the case when base vector is empty.
-    // https://github.com/facebookincubator/bolt/issues/7828
 
     BaseVector::resize(size, setNotNull);
   }

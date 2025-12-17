@@ -576,8 +576,7 @@ template <typename T>
 void FlatVector<T>::resizeValues(
     vector_size_t newSize,
     const std::optional<T>& initialValue) {
-  // TODO: change this to isMutable(). See
-  // https://github.com/facebookincubator/bolt/issues/6562.
+  // TODO: change this to isMutable().
   if (values_ && !values_->isView()) {
     const uint64_t newByteSize = BaseVector::byteSize<T>(newSize);
     if (values_->capacity() < newByteSize) {
@@ -615,8 +614,7 @@ template <>
 inline void FlatVector<bool>::resizeValues(
     vector_size_t newSize,
     const std::optional<bool>& initialValue) {
-  // TODO: change this to isMutable(). See
-  // https://github.com/facebookincubator/bolt/issues/6562.
+  // TODO: change this to isMutable().
   if (values_ && !values_->isView()) {
     const uint64_t newByteSize = BaseVector::byteSize<bool>(newSize);
     if (values_->size() < newByteSize) {

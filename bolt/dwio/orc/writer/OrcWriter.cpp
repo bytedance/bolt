@@ -483,7 +483,6 @@ void ArrowOrcWriter::setMemoryReclaimers() {
     return;
   }
 
-  // TODO https://github.com/facebookincubator/bolt/issues/8190
   pool_->setReclaimer(exec::MemoryReclaimer::create());
   generalPool_->setReclaimer(exec::MemoryReclaimer::create());
 }

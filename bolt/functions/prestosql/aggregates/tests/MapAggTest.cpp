@@ -328,8 +328,6 @@ TEST_F(MapAggTest, globalDuplicateKeys) {
       /*testWithTableScan*/ false);
 }
 
-/// Reproduces the bug reported in
-/// https://github.com/facebookincubator/bolt/issues/3143
 TEST_F(MapAggTest, selectiveMaskWithDuplicates) {
   auto data = makeRowVector({
       // Grouping key with mostly unique values.

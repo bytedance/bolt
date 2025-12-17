@@ -2217,7 +2217,6 @@ TEST_F(TableScanTest, statsBasedSkippingNulls) {
   EXPECT_EQ(31'234, stats.rawInputRows);
   EXPECT_EQ(31'234, stats.inputRows);
   EXPECT_EQ(31'234, stats.outputRows);
-  // details see https://github.com/facebookincubator/bolt/pull/10233
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedSplits").sum, 0);
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedStrides").sum, 0);
 
@@ -2235,7 +2234,6 @@ TEST_F(TableScanTest, statsBasedSkippingNulls) {
   EXPECT_EQ(size - 10'000, stats.rawInputRows);
   EXPECT_EQ(size - 11'111, stats.inputRows);
   EXPECT_EQ(size - 11'111, stats.outputRows);
-  // details see https://github.com/facebookincubator/bolt/pull/10233
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedSplits").sum, 0);
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedStrides").sum, 1);
 
@@ -2246,7 +2244,6 @@ TEST_F(TableScanTest, statsBasedSkippingNulls) {
   EXPECT_EQ(20'000, stats.rawInputRows);
   EXPECT_EQ(11'111, stats.inputRows);
   EXPECT_EQ(11'111, stats.outputRows);
-  // details see https://github.com/facebookincubator/bolt/pull/10233
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedSplits").sum, 0);
   ASSERT_EQ(getTableScanRuntimeStats(task).at("skippedStrides").sum, 2);
 }

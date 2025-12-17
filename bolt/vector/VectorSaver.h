@@ -33,9 +33,6 @@
 #include "bolt/vector/BaseVector.h"
 namespace bytedance::bolt {
 
-// Serialization format used by the following function is documented at
-// https://facebookincubator.github.io/bolt/develop/debugging/vector-saver.html
-
 /// Serializes the type into binary format and writes it to the provided
 /// output stream. Used for testing.
 void saveType(const TypePtr& type, std::ostream& out);

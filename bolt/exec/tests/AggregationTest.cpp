@@ -3891,8 +3891,7 @@ TEST_P(AggregationTest, noAggregationsNoGroupingKeys) {
   ASSERT_EQ(result->type()->size(), 0);
 }
 
-// Reproduces hang in partial distinct aggregation described in
-// https://github.com/facebookincubator/bolt/issues/7967 .
+// Reproduces hang in partial distinct aggregation.
 TEST_P(AggregationTest, distinctHang) {
   static const int64_t kMin = std::numeric_limits<int32_t>::min();
   static const int64_t kMax = std::numeric_limits<int32_t>::max();

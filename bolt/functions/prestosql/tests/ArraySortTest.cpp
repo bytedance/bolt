@@ -516,8 +516,6 @@ TEST_F(ArraySortTest, wellFormedVectors) {
 
   // Ensure that array vector is addressable right.
   // That is all offset + size should be < element.size().
-  // In https://github.com/facebookincubator/bolt/issues/4754 we found a bug
-  // that caused us to create element vectors with size < offsets + size.
   auto arrayVec = result->asUnchecked<ArrayVector>();
   EXPECT_TRUE(arrayVec);
   EXPECT_GT(arrayVec->offsetAt(2), 0);

@@ -41,7 +41,7 @@ class CprHttpClientTest : public testing::Test {};
 // illustration of how to use cpr, so disable it by default.
 TEST_F(CprHttpClientTest, DISABLED_basic) {
   auto response = cpr::Get(
-      cpr::Url{"https://facebookincubator.github.io/bolt/"},
+      cpr::Url{"https://github.com/bytedance/bolt/"},
       cpr::Timeout{std::chrono::seconds{3}});
   ASSERT_EQ(response.status_code, 200);
   ASSERT_FALSE(response.text.empty());
@@ -51,7 +51,7 @@ TEST_F(CprHttpClientTest, DISABLED_basic) {
   ASSERT_TRUE(response.text.empty());
 
   response = cpr::Post(
-      cpr::Url{"https://facebookincubator.github.io/bolt/"},
+      cpr::Url{"https://github.com/bytedance/bolt/"},
       cpr::Body{"select * from nation limit 1"},
       cpr::Header({{"Content-Type", "text/plain"}}));
   ASSERT_EQ(response.status_code, 405);
