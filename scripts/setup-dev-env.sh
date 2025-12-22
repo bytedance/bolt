@@ -28,7 +28,7 @@
 
 CUR_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
-set -eu
+set -e
 
 function check_basic_tools() {
     local tools=("wget" "make" "cmake" "ninja")
@@ -54,10 +54,10 @@ function check_basic_tools() {
 
 function check_compiler() {
     if command -v gcc &> /dev/null; then
-        gcc_version=$(gcc -dumpversion)
+        gcc_version=$(gcc -dumpversion | cut -f1 -d.)
 
-        if [[ "$gcc_version" -eq 10 || "$gcc_version" -eq 11 || "$gcc_version" -eq 12 ]]; then
-            echo "✅ gcc version：$gcc_version"
+        if [ "$gcc_version" -eq 10 ] || [ "$gcc_version" -eq 11 ] || [ "$gcc_version" -eq 12 ]; then
+            echo "✅ gcc version: $gcc_version"
             return 0
         fi
     else
@@ -65,7 +65,7 @@ function check_compiler() {
     fi
     
     echo "Bolt requires gcc-10/gcc-11/gcc-12/clang-16. Please install the correct compiler version."
-    echo "Install complier by running(with root user): bash ${CUR_DIR}/install-gcc.sh"
+    echo "Install compiler by running(with root user): bash ${CUR_DIR}/install-gcc.sh"
     return 1
 }
 
