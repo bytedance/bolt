@@ -25,7 +25,6 @@ from conan.tools.env import Environment, VirtualBuildEnv, VirtualRunEnv
 import csv
 
 # Now, set options of third parties
-# Note that: in conan 2.0, postfix = "/*""
 postfix = "/*"
 folly = f"folly{postfix}"
 glog = f"glog{postfix}"
@@ -153,7 +152,15 @@ class DepLoader:
 
 
 class BoltConan(ConanFile):
-    description = """ Bolt native engine."""
+    description = """
+        Bolt is a C++ acceleration library providing composable, extensible and performant data processing toolkit.
+    """
+
+    url = "https://github.com/bytedance/bolt"
+    topics = ("vectorized engine", "bytedance")
+    homepage = ""
+    license = ("Apache-2.0",)
+    package_type = "library"
 
     name = "bolt"
     settings = "os", "arch", "compiler", "build_type"
@@ -233,10 +240,12 @@ class BoltConan(ConanFile):
     def source(self):
         git = scm.Git(self)
 
-        # by default, use master branch
+        # by default, use main branch
         git.clone(self.scm_url, target=".")
 
         # if use 'stable" channel, we should use a git relase tag.
+        # TODO: Remove it since Conan 2.0 is no longer recommending to use
+        # variable users and channels
         if self.channel and self.channel == "stable":
             if not self.version:
                 raise "Do specify a tag for a stable release."
@@ -244,12 +253,12 @@ class BoltConan(ConanFile):
             git.checkout(cmd)
         else:
             scm_branch = self.version
-            if scm_branch != "master":
+            if scm_branch != "main":
                 cmd = f"-b {scm_branch} origin/{scm_branch}"
                 git.checkout(cmd)
 
     def io_uring_supported(self):
-        if self.options.io_uring_supported != True:
+        if not self.options.io_uring_supported:
             return False
         if self.settings.os == "Linux":
             # Try to determine kernel version during package configuration
@@ -274,9 +283,7 @@ class BoltConan(ConanFile):
         self.requires(
             f"folly/{self.FB_VERSION}", transitive_headers=True, transitive_libs=True
         )
-        self.requires(
-            "arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True
-        )
+        self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
         if self.options.get_safe("enable_jit"):
             self.requires("llvm-core/13.0.0")
 
@@ -293,7 +300,9 @@ class BoltConan(ConanFile):
         self.requires(
             "icu/74.2", headers=True, transitive_headers=True, transitive_libs=True
         )
-        self.requires("xsimd/9.0.1", transitive_headers=True, transitive_libs=True, force=True)
+        self.requires(
+            "xsimd/9.0.1", transitive_headers=True, transitive_libs=True, force=True
+        )
         self.requires(
             "cityhash/cci.20130801", transitive_headers=True, transitive_libs=True
         )
@@ -488,12 +497,12 @@ class BoltConan(ConanFile):
             tc.cache_variables["BOLT_ENABLE_TORCH"] = "OFF"
 
         if self.options.enable_asan:
-            tc.cache_variables["CMAKE_CXX_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
-            tc.cache_variables["CMAKE_C_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
+            tc.cache_variables[
+                "CMAKE_CXX_FLAGS"
+            ] += " -fsanitize=address -fno-omit-frame-pointer "
+            tc.cache_variables[
+                "CMAKE_C_FLAGS"
+            ] += " -fsanitize=address -fno-omit-frame-pointer "
 
         tc.cache_variables["TREAT_WARNINGS_AS_ERRORS"] = "OFF"
         tc.cache_variables["ENABLE_ALL_WARNINGS"] = "ON"
@@ -696,7 +705,7 @@ class BoltConan(ConanFile):
 
         for comp, deps in components_graph_.items():
             # Special handling for interface libraries
-            if comp == "bolt_type" or comp == "bolt_type_headers":  
+            if comp == "bolt_type" or comp == "bolt_type_headers":
                 self.cpp_info.components[comp].libs = []
             else:
                 self.cpp_info.components[comp].libs = [comp]
