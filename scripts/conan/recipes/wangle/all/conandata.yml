@@ -1,3 +1,8 @@
+patches:
+  "2022.10.31.00":
+      - patch_file: "patches/libevent.patch"
+        patch_description: "changes in CMakeLists.txt"
+        patch_type: "conan"
 sources:
   "2022.10.31.00":
     url: "https://github.com/facebook/wangle/archive/refs/tags/v2022.10.31.00.tar.gz"

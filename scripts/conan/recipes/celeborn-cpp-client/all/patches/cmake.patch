@@ -1,5 +1,5 @@
 diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
-index f24a8abff..652b13ef4 100644
+index f24a8abff..069c8fed3 100644
 --- a/cpp/CMakeLists.txt
 +++ b/cpp/CMakeLists.txt
 @@ -51,18 +51,14 @@ message(STATUS "Using CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
@@ -29,7 +29,16 @@ index f24a8abff..652b13ef4 100644
  
  #if (NOT APPLE)
  #    set(Boost_USE_STATIC_RUNTIME ON)
-@@ -130,9 +126,18 @@ find_library(FIZZ fizz REQUIRED)
+@@ -120,7 +116,7 @@ find_path(OPT_OPENSSL_DIR NAMES opt/openssl@1.1)
+ set(OPENSSL_ROOT_DIR "${OPT_OPENSSL_DIR}/opt/openssl@1.1")
+ find_package(OpenSSL REQUIRED)
+ 
+-find_package(Protobuf REQUIRED)
++find_package(protobuf REQUIRED)
+ 
+ set(CMAKE_MODULE_PATH
+         "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
+@@ -130,12 +126,22 @@ find_library(FIZZ fizz REQUIRED)
  find_library(WANGLE wangle REQUIRED)
  
  find_package(LZ4 REQUIRED)
@@ -48,4 +57,21 @@ index f24a8abff..652b13ef4 100644
 +        ${XXHASH_LIBRARY}
  )
  
- find_library(RE2 re2)
+-find_library(RE2 re2)
++find_package(re2 CONFIG REQUIRED)
++set(RE2 re2::re2)
+ 
+ find_package(fizz CONFIG REQUIRED)
+ find_package(wangle CONFIG REQUIRED)
+diff --git a/cpp/celeborn/utils/CMakeLists.txt b/cpp/celeborn/utils/CMakeLists.txt
+index fa440a730..006fe1d2b 100644
+--- a/cpp/celeborn/utils/CMakeLists.txt
++++ b/cpp/celeborn/utils/CMakeLists.txt
+@@ -28,6 +28,7 @@ target_link_libraries(
+         ${FOLLY_WITH_DEPENDENCIES}
+         ${GLOG}
+         ${GFLAGS_LIBRARIES}
++        ${PROTOBUF_LIBRARY}
+ )
+ 
+ if(CELEBORN_BUILD_TESTS)

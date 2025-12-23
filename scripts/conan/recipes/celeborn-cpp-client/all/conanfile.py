@@ -37,13 +37,16 @@ class CelebornCppClientConan(ConanFile):
     }
 
     def requirements(self):
-        self.tool_requires('cmake/3.31.3')
-        self.tool_requires('protobuf/3.21.4')
         self.requires("folly/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("fizz/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("wangle/2022.10.31.00", transitive_headers=True, transitive_libs=True)
         self.requires("re2/20230301", transitive_headers=True, transitive_libs=True)
         self.requires("xxhash/0.8.1", transitive_headers=True, transitive_libs=True)
+        self.requires("protobuf/3.21.4", transitive_headers=True, transitive_libs=True)
+
+    def build_requirements(self):
+        self.tool_requires("cmake/3.31.3")
+        self.tool_requires("protobuf/3.21.4")
 
     def source(self):
         git = Git(self, folder="..")
@@ -59,14 +62,6 @@ class CelebornCppClientConan(ConanFile):
         cmake_layout(self, src_folder="src")
 
     def build(self):
-        root_cmakelists = os.path.join(self.source_folder, "cpp", "CMakeLists.txt")
-        replace_in_file(
-            self,
-            root_cmakelists,
-            "find_library(RE2 re2)",
-            "find_package(re2 CONFIG REQUIRED)\nset(RE2 re2::re2)",
-            strict=False,
-        )
         cmake = CMake(self)
         cmake.configure(build_script_folder=os.path.join(self.source_folder, "cpp"))
         cmake.build()
@@ -88,6 +83,7 @@ class CelebornCppClientConan(ConanFile):
         tc.cache_variables["RE2"] = "re2::re2"
         tc.cache_variables["FIZZ"] = "fizz::fizz"
         tc.cache_variables["WANGLE"] = "wangle::wangle"
+        tc.cache_variables["PROTOBUF_LIBRARY"] = "protobuf::libprotobuf"
 
         tc.generate()
 
@@ -139,4 +135,5 @@ class CelebornCppClientConan(ConanFile):
             "wangle::wangle",
             "re2::re2",
             "xxhash::xxhash",
+            "protobuf::libprotobuf",
         ]
