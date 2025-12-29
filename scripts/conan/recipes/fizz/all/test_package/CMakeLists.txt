@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-versions:
-  "2022.10.31.00":
-    folder: all
+cmake_minimum_required(VERSION 3.15)
+project(test_package CXX)
+
+find_package(fizz REQUIRED CONFIG)
+add_executable(${PROJECT_NAME} test_package.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE fizz::fizz)
+
+set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)

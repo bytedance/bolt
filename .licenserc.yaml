@@ -112,8 +112,6 @@ header:
     - 'LICENSE'
     - 'MANIFEST.in'
     - 'scripts/conan/patches/**'
-    - 'scripts/conan/recipes/**/*.patch'
-    - 'scripts/conan/recipes/**/*.yml'
 
 
   comment: on-failure

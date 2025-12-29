@@ -84,7 +84,6 @@ class CelebornArrowInputStream final : public arrow::io::InputStream {
         auto buffer, arrow::AllocateResizableBuffer(nbytes, pool_));
     ARROW_ASSIGN_OR_RAISE(auto bytesRead, Read(nbytes, buffer->mutable_data()));
     RETURN_NOT_OK(buffer->Resize(bytesRead, /*shrink_to_fit=*/true));
-    position_ += bytesRead;
     return std::shared_ptr<arrow::Buffer>(std::move(buffer));
   }
 

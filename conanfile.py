@@ -191,6 +191,7 @@ class BoltConan(ConanFile):
         "enable_crc": [True, False],
         "enable_colocate": [True, False],
         "io_uring_supported": [True, False],
+        "enable_celeborn_cpp_client": [True, False],
         "enable_torch": TorchOption.all(),
         "enable_perf": [True, False],
         "targets": ["ANY", None],
@@ -224,6 +225,7 @@ class BoltConan(ConanFile):
         "enable_crc": False,
         "enable_colocate": False,
         "io_uring_supported": True,
+        "enable_celeborn_cpp_client": True,
         "enable_torch": TorchOption().value,
         "enable_perf": False,
     }
@@ -356,7 +358,8 @@ class BoltConan(ConanFile):
         self.requires("utf8proc/2.11.0", transitive_headers=True, transitive_libs=True)
         self.requires("date/3.0.4-bolt", transitive_headers=True, transitive_libs=True)
         self.requires("libbacktrace/cci.20210118")
-        self.requires("celeborn-cpp-client/main-20251212")
+        if self.options.get_safe("spark_compatible") and self.options.get_safe("enable_celeborn_cpp_client"):
+            self.requires("celeborn-cpp-client/main-20251212")
 
     def build_requirements(self):
         self.tool_requires("m4/1.4.19")
@@ -572,6 +575,10 @@ class BoltConan(ConanFile):
 
         if self.options.spark_compatible:
             tc.cache_variables["BOLT_ENABLE_SPARK_COMPATIBLE"] = "ON"
+
+        tc.cache_variables["BOLT_ENABLE_CELEBORN_CPP_CLIENT"] = (
+            "ON" if self.options.get_safe("enable_celeborn_cpp_client") else "OFF"
+        )
 
         if self.options.get_safe("enable_testutil"):
             tc.cache_variables["BOLT_ENABLE_DUCKDB"] = "ON"

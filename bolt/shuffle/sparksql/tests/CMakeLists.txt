@@ -12,6 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-versions:
-  "2022.10.31.00":
-    folder: all
+if(BOLT_ENABLE_CELEBORN_CPP_CLIENT)
+  add_executable(
+    bolt_shuffle_spark_celeborn_test
+    CelebornClientTest.cpp)
+
+  add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
+
+  target_link_libraries(
+    bolt_shuffle_spark_celeborn_test
+    PRIVATE bolt_shuffle_spark_impl
+            bolt_exception
+            gflags::gflags
+            glog::glog
+            GTest::gtest
+            GTest::gtest_main)
+endif()
