@@ -108,6 +108,8 @@ std::string VectorSerde::kindName(Kind kind) {
       return "CompactRow";
     case Kind::kUnsafeRow:
       return "UnsafeRow";
+    case Kind::kArrow:
+      return "Arrow";
   }
   BOLT_UNREACHABLE(
       fmt::format("Unknown vector serde kind: {}", static_cast<int32_t>(kind)));
@@ -117,7 +119,9 @@ VectorSerde::Kind VectorSerde::kindByName(const std::string& kindName) {
   static const std::unordered_map<std::string, Kind> kNameToKind = {
       {"Presto", Kind::kPresto},
       {"CompactRow", Kind::kCompactRow},
-      {"UnsafeRow", Kind::kUnsafeRow}};
+      {"UnsafeRow", Kind::kUnsafeRow},
+      {"Arrow", Kind::kArrow},
+  };
   const auto it = kNameToKind.find(kindName);
   BOLT_CHECK(
       it != kNameToKind.end(), "Unknown vector serde kind: {}", kindName);
@@ -243,17 +247,20 @@ void VectorStreamGroup::read(
 folly::IOBuf rowVectorToIOBuf(
     const RowVectorPtr& rowVector,
     memory::MemoryPool& pool,
-    VectorSerde* serde) {
-  return rowVectorToIOBuf(rowVector, rowVector->size(), pool, serde);
+    VectorSerde* serde,
+    const VectorSerde::Options* options) {
+  return rowVectorToIOBuf(rowVector, rowVector->size(), pool, serde, options);
 }
 
 folly::IOBuf rowVectorToIOBuf(
     const RowVectorPtr& rowVector,
     vector_size_t rangeEnd,
     memory::MemoryPool& pool,
-    VectorSerde* serde) {
+    VectorSerde* serde,
+    const VectorSerde::Options* options) {
   auto streamGroup = std::make_unique<VectorStreamGroup>(&pool, serde);
-  streamGroup->createStreamTree(asRowType(rowVector->type()), rangeEnd);
+  streamGroup->createStreamTree(
+      asRowType(rowVector->type()), rangeEnd, options);
 
   IndexRange range{0, rangeEnd};
   Scratch scratch;
@@ -268,7 +275,8 @@ RowVectorPtr IOBufToRowVector(
     const folly::IOBuf& ioBuf,
     const RowTypePtr& outputType,
     memory::MemoryPool& pool,
-    VectorSerde* serde) {
+    VectorSerde* serde,
+    const VectorSerde::Options* options) {
   std::vector<ByteRange> ranges;
   ranges.reserve(4);
 
@@ -285,7 +293,7 @@ RowVectorPtr IOBufToRowVector(
     serde = getVectorSerde();
   }
   serde->deserialize(
-      byteStream.get(), &pool, outputType, &outputVector, nullptr);
+      byteStream.get(), &pool, outputType, &outputVector, options);
   return outputVector;
 }
 

@@ -52,6 +52,7 @@
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/TypeResolver.h"
+#include "bolt/serializers/ArrowSerializer.h"
 #include "bolt/serializers/CompactRowSerializer.h"
 #include "bolt/serializers/UnsafeRowSerializer.h"
 #include "bolt/tool/trace/AggregationReplayer.h"
@@ -303,6 +304,9 @@ void TraceReplayRunner::init() {
   }
   if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kUnsafeRow)) {
     serializer::spark::UnsafeRowVectorSerde::registerNamedVectorSerde();
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kArrow)) {
+    serializer::arrowserde::ArrowVectorSerde::registerNamedVectorSerde();
   }
   connector::hive::HiveTableHandle::registerSerDe();
   connector::hive::LocationHandle::registerSerDe();

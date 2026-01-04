@@ -98,6 +98,7 @@ void StreamArena::clear() {
   currentOffset_ = 0;
   largeAllocations_.clear();
   size_ = 0;
+  logicalSize_ = 0;
   tinyRanges_.clear();
 }
 

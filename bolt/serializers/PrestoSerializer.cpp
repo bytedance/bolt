@@ -177,7 +177,8 @@ PrestoVectorSerde::PrestoOptions toPrestoOptions(
   if (options == nullptr) {
     return PrestoVectorSerde::PrestoOptions();
   }
-  return *(static_cast<const PrestoVectorSerde::PrestoOptions*>(options));
+  return PrestoVectorSerde::PrestoOptions(
+      options->useLosslessTimestamp, options->compressionKind);
 }
 
 FOLLY_ALWAYS_INLINE bool needCompression(const folly::io::Codec& codec) {

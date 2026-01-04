@@ -32,6 +32,7 @@
 
 #include <folly/Range.h>
 #include "bolt/buffer/Buffer.h"
+#include "bolt/common/compression/Compression.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryAllocator.h"
@@ -141,6 +142,7 @@ class VectorSerde {
     kPresto,
     kCompactRow,
     kUnsafeRow,
+    kArrow,
   };
 
   static std::string kindName(Kind type);
@@ -152,6 +154,20 @@ class VectorSerde {
   // Lets the caller pass options to the Serde. This can be extended to add
   // custom options by each of its extended classes.
   struct Options {
+    Options() = default;
+    Options(
+        bool _useLosslessTimestamp,
+        bytedance::bolt::common::CompressionKind _compressionKind)
+        : useLosslessTimestamp(_useLosslessTimestamp),
+          compressionKind(_compressionKind) {}
+
+    // Currently presto only supports microsecond precision and the serializer
+    // converts bolt native timestamp to that resulting in loss of precision.
+    // This option allows it to serialize with nanosecond precision and is
+    // currently used for spilling. Is false by default.
+    bool useLosslessTimestamp{false};
+    bytedance::bolt::common::CompressionKind compressionKind{
+        bytedance::bolt::common::CompressionKind::CompressionKind_NONE};
     virtual ~Options() {}
   };
 
@@ -351,14 +367,16 @@ class VectorStreamGroup : public StreamArena {
 folly::IOBuf rowVectorToIOBuf(
     const RowVectorPtr& rowVector,
     memory::MemoryPool& pool,
-    VectorSerde* serde = nullptr);
+    VectorSerde* serde = nullptr,
+    const VectorSerde::Options* options = nullptr);
 
 /// Same as above but serializes up until row `rangeEnd`.
 folly::IOBuf rowVectorToIOBuf(
     const RowVectorPtr& rowVector,
     vector_size_t rangeEnd,
     memory::MemoryPool& pool,
-    VectorSerde* serde = nullptr);
+    VectorSerde* serde = nullptr,
+    const VectorSerde::Options* options = nullptr);
 
 /// Convenience function to deserialize an IOBuf into a rowVector. If `serde` is
 /// nullptr, use the default installed serializer.
@@ -366,7 +384,8 @@ RowVectorPtr IOBufToRowVector(
     const folly::IOBuf& ioBuf,
     const RowTypePtr& outputType,
     memory::MemoryPool& pool,
-    VectorSerde* serde = nullptr);
+    VectorSerde* serde = nullptr,
+    const VectorSerde::Options* options = nullptr);
 
 } // namespace bytedance::bolt
 

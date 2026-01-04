@@ -57,6 +57,7 @@ struct ArrowOptions {
   // values first and then convert it to arrow format, and FlatVector will not
   // be modified.
   bool stringViewCopyValues{false};
+  bool exportToArrowIPC{false};
 };
 namespace bytedance::bolt {
 /// Export a generic Bolt Vector to an ArrowArray, as defined by Arrow's C data

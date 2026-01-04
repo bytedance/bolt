@@ -308,7 +308,7 @@ uint64_t SpillWriter::write(
   {
     MicrosecondTimer timer(&timeUs);
     if (batch_ == nullptr) {
-      serializer::presto::PrestoVectorSerde::PrestoOptions options = {
+      bytedance::bolt::VectorSerde::Options options = {
           kDefaultUseLosslessTimestamp, compressionKind_};
       batch_ = std::make_unique<VectorStreamGroup>(pool_);
       batch_->createStreamTree(
@@ -367,7 +367,7 @@ uint64_t SpillWriter::writeAndFlush(
   {
     MicrosecondTimer timer(&timeUs);
     if (batch_ == nullptr) {
-      serializer::presto::PrestoVectorSerde::PrestoOptions options = {
+      bytedance::bolt::VectorSerde::Options options = {
           kDefaultUseLosslessTimestamp, compressionKind_};
       batch_ = std::make_unique<VectorStreamGroup>(pool_);
       batch_->createStreamTree(

@@ -69,7 +69,15 @@ class StreamArena {
 
   /// Returns the Total size in bytes held by all Allocations.
   virtual size_t size() const {
-    return size_;
+    return size_ + logicalSize_;
+  }
+
+  // ArrowSerializer: count size without allocate memory to trigger flush
+  void accountLogical(size_t delta) {
+    logicalSize_ += delta;
+  }
+  void resetLogical() {
+    logicalSize_ = 0;
   }
 
   memory::MemoryPool* pool() const {
@@ -102,6 +110,9 @@ class StreamArena {
 
   // Tracks all the contiguous and non-contiguous allocations in bytes.
   size_t size_ = 0;
+
+  // Tracks logical size to trigger flush when use ArrowSerializer
+  size_t logicalSize_ = 0;
 
   std::vector<std::string> tinyRanges_;
 };
