@@ -87,8 +87,25 @@ class ShuffleColumnarToRowConverter {
     init(rowType);
   }
 
+  class RowVectorWithStats {
+    friend class ShuffleColumnarToRowConverter;
+
+   public:
+    int64_t getTotalMemorySize() {
+      return totalMemorySize;
+    }
+
+   private:
+    std::shared_ptr<bytedance::bolt::row::CompactRow> compactRow;
+    int64_t numRows;
+    int64_t totalMemorySize;
+  };
+
+  RowVectorWithStats getWithStats(
+      const bytedance::bolt::RowVectorPtr& rowVector);
+
   void convert(
-      const bytedance::bolt::RowVectorPtr& rowVector,
+      const RowVectorWithStats& rowVector,
       const std::vector<uint32_t>& indexes,
       std::vector<std::vector<uint8_t*>>& sortedRows,
       std::vector<int64_t>& partitionBytes);
@@ -108,14 +125,12 @@ class ShuffleColumnarToRowConverter {
 
  private:
   void init(const bytedance::bolt::RowTypePtr& rowType);
-  void refreshStates(const bytedance::bolt::RowVectorPtr& rowVector);
 
   int32_t fixedRowSize_ = 0;
   uint8_t* bufferAddress_;
   int64_t totalBufferSize_{0};
   size_t averageRowSize_{0};
   bytedance::bolt::memory::MemoryPool* boltPool_;
-  std::shared_ptr<bytedance::bolt::row::CompactRow> compactRow_;
   std::vector<RowInternalBufferPtr> boltBuffers_;
 };
 

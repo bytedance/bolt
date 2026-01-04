@@ -45,40 +45,42 @@ void ShuffleColumnarToRowConverter::init(
   }
 }
 
-void ShuffleColumnarToRowConverter::refreshStates(
+ShuffleColumnarToRowConverter::RowVectorWithStats
+ShuffleColumnarToRowConverter::getWithStats(
     const bytedance::bolt::RowVectorPtr& rowVector) {
-  compactRow_ = std::make_unique<bolt::row::CompactRow>(rowVector);
-
-  size_t totalMemorySize = 0;
+  RowVectorWithStats stats;
+  stats.compactRow = std::make_shared<bolt::row::CompactRow>(rowVector);
+  stats.numRows = rowVector->size();
+  stats.totalMemorySize = 0;
   auto numRows = rowVector->size();
   if (fixedRowSize_) {
-    totalMemorySize = fixedRowSize_ * numRows;
+    stats.totalMemorySize = fixedRowSize_ * numRows;
   } else {
     for (auto i = 0; i < numRows; ++i) {
-      totalMemorySize += compactRow_->rowSize(i);
+      stats.totalMemorySize += stats.compactRow->rowSize(i);
     }
   }
   // layout : rowSize | unsafeRow
-  totalMemorySize += numRows * kSizeOfRowHeader;
-  totalBufferSize_ += totalMemorySize;
-
-  boltBuffers_.emplace_back(
-      RowInternalBuffer::allocate(totalMemorySize, boltPool_));
-  bufferAddress_ = boltBuffers_.back()->mutable_data();
-  memset(bufferAddress_, 0, sizeof(int8_t) * totalMemorySize);
-  averageRowSize_ = numRows ? (totalMemorySize / numRows) : 0;
+  stats.totalMemorySize += numRows * kSizeOfRowHeader;
+  return stats;
 }
 
 void ShuffleColumnarToRowConverter::convert(
-    const bytedance::bolt::RowVectorPtr& rowVector,
+    const RowVectorWithStats& rowVector,
     const std::vector<uint32_t>& indexes,
     std::vector<std::vector<uint8_t*>>& sortedRows,
     std::vector<int64_t>& partitionBytes) {
-  refreshStates(rowVector);
-
+  auto numRows = rowVector.numRows;
+  totalBufferSize_ += rowVector.totalMemorySize;
+  boltBuffers_.emplace_back(
+      RowInternalBuffer::allocate(rowVector.totalMemorySize, boltPool_));
+  bufferAddress_ = boltBuffers_.back()->mutable_data();
+  memset(bufferAddress_, 0, sizeof(int8_t) * rowVector.totalMemorySize);
+  averageRowSize_ = numRows ? (rowVector.totalMemorySize / numRows) : 0;
   size_t offset = kSizeOfRowHeader;
-  for (auto i = 0; i < rowVector->size(); ++i) {
-    auto rowSize = compactRow_->serialize(i, (char*)(bufferAddress_ + offset));
+  for (auto i = 0; i < numRows; ++i) {
+    auto rowSize =
+        rowVector.compactRow->serialize(i, (char*)(bufferAddress_ + offset));
     // set rowSize
     *(int32_t*)(bufferAddress_ + offset - kSizeOfRowHeader) = rowSize;
     sortedRows[indexes[i]].push_back(
