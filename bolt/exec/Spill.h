@@ -859,6 +859,10 @@ class SpillState {
   /// Returns the spilled partition number set.
   const SpillPartitionNumSet& spilledPartitionSet() const;
 
+  std::optional<VectorSerde::Kind> testingSpillSerdeKind() const {
+    return ioConfig_.spillSerdeKind;
+  }
+
   /// Returns the spilled file paths from all the partitions.
   std::vector<std::string> testingSpilledFilePaths() const;
 

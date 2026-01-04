@@ -44,6 +44,7 @@
 #include "bolt/core/QueryConfig.h"
 #include "bolt/cudf/tests/CudfResource.h"
 #include "bolt/exec/PlanNodeStats.h"
+#include "bolt/exec/Spill.h"
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -52,6 +53,7 @@
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/WithGPUParamInterface.h"
+#include "bolt/serializers/ArrowSerializer.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "folly/experimental/EventCount.h"
 using namespace bytedance::bolt;
@@ -1079,6 +1081,69 @@ TEST_P(OrderByTest, spill) {
   ASSERT_EQ(
       planStats.customStats[Operator::kSpillWrites].count,
       planStats.customStats["spillWriteTime"].count);
+  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}
+
+TEST_P(OrderByTest, spillWithArrowSerde) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not support spilling\n";
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kArrow)) {
+    serializer::arrowserde::ArrowVectorSerde::registerNamedVectorSerde();
+  }
+
+  const vector_size_t batchSize = 2'048;
+  std::vector<RowVectorPtr> input;
+  for (int i = 0; i < 2; ++i) {
+    auto c0 = makeFlatVector<int64_t>(
+        batchSize, [&](vector_size_t row) { return row; }, nullEvery(11));
+    auto c1 = makeFlatVector<int64_t>(
+        batchSize, [&](vector_size_t row) { return row % 7; }, nullEvery(17));
+    input.push_back(makeRowVector({c0, c1}));
+  }
+  createDuckDbTable(input);
+
+  core::PlanNodeId orderById;
+  auto plan = PlanBuilder()
+                  .values(input)
+                  .orderBy({"c0 ASC NULLS LAST"}, false)
+                  .capturePlanNodeId(orderById)
+                  .planNode();
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto queryCtx = core::QueryCtx::create(executor_.get());
+  TestScopedSpillInjection scopedSpillInjection(100);
+  bool sawArrowSerde = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SpillState::appendToPartition",
+      std::function<void(exec::SpillState*)>([&](exec::SpillState* state) {
+        const auto kind = state->testingSpillSerdeKind();
+        if (kind.has_value()) {
+          EXPECT_EQ(VectorSerde::Kind::kArrow, kind.value());
+          sawArrowSerde = true;
+        }
+      }));
+  queryCtx->testingOverrideConfigUnsafe({
+      {core::QueryConfig::kSpillEnabled, "true"},
+      {core::QueryConfig::kOrderBySpillEnabled, "true"},
+      {core::QueryConfig::kSinglePartitionSpillSerdeKind, "Arrow"},
+      {core::QueryConfig::kSpillNumPartitionBits, "0"},
+      {core::QueryConfig::kJitLevel, "-1"},
+  });
+  CursorParameters params;
+  params.planNode = plan;
+  params.queryCtx = queryCtx;
+  params.spillDirectory = spillDirectory->path;
+  auto task = assertQueryOrdered(
+      params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
+  auto& planStats = toPlanStats(task->taskStats()).at(orderById);
+  ASSERT_GT(planStats.spilledBytes, 0);
+  ASSERT_GT(planStats.spilledInputBytes, 0);
+  ASSERT_GT(planStats.spilledRows, 0);
+  ASSERT_EQ(planStats.spilledPartitions, 1);
+#ifndef NDEBUG
+  ASSERT_TRUE(sawArrowSerde);
+#endif
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 

@@ -16,7 +16,8 @@ class ArrowVectorSerde : public VectorSerde {
     ArrowSerdeOptions(
         bool _useLosslessTimestamp,
         common::CompressionKind _compressionKind)
-        : useLosslessTimestamp(_useLosslessTimestamp),
+        : Options(_useLosslessTimestamp, _compressionKind),
+          useLosslessTimestamp(_useLosslessTimestamp),
           compressionKind(_compressionKind),
           arrowOptions(defaultArrowOptions(_useLosslessTimestamp)) {}
 

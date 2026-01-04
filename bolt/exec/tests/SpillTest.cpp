@@ -31,6 +31,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
+#include <optional>
 
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -169,17 +170,22 @@ class SpillTest : public ::testing::TestWithParam<common::CompressionKind>,
     // the batch number of the vector in the partition. When read back, both
     // partitions produce an ascending sequence of integers without gaps.
     stats_.wlock()->reset();
-    state_ = std::make_unique<SpillState>(
+    common::SpillConfig::SpillIOConfig ioConfig{
         [&]() -> const std::string& { return tempDir_->path; },
         updateSpilledBytesCb_,
         fileNamePrefix_,
+        0,
+        false,
+        writeBufferSize,
+        compressionKind_,
+        "",
+        std::optional<VectorSerde::Kind>{}};
+    state_ = std::make_unique<SpillState>(
+        ioConfig,
         numPartitions,
         1,
         compareFlags,
         targetFileSize,
-        false,
-        writeBufferSize,
-        compressionKind_,
         pool(),
         &stats_);
     ASSERT_EQ(targetFileSize, state_->targetFileSize());
@@ -481,19 +487,17 @@ TEST_P(SpillTest, spillTimestamp) {
       Timestamp{Timestamp::kMaxSeconds, Timestamp::kMaxNanos},
       Timestamp{Timestamp::kMinSeconds, 0}};
 
-  SpillState state(
+  common::SpillConfig::SpillIOConfig ioConfig{
       [&]() -> const std::string& { return tempDirectory->path; },
       updateSpilledBytesCb_,
       "test",
-      1,
-      1,
-      emptyCompareFlags,
-      1024,
+      0,
       false,
       0,
       compressionKind_,
-      pool(),
-      &stats_);
+      "",
+      std::optional<VectorSerde::Kind>{}};
+  SpillState state(ioConfig, 1, 1, emptyCompareFlags, 1024, pool(), &stats_);
   int partitionIndex = 0;
   state.setPartitionSpilled(partitionIndex);
   ASSERT_TRUE(state.isPartitionSpilled(partitionIndex));

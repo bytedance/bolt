@@ -40,6 +40,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/GroupingSet.h"
 #include "bolt/exec/PlanNodeStats.h"
+#include "bolt/exec/Spill.h"
 #include "bolt/exec/Values.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -47,6 +48,7 @@
 #include "bolt/exec/tests/utils/SumNonPODAggregate.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/WithGPUParamInterface.h"
+#include "bolt/serializers/ArrowSerializer.h"
 #include "folly/experimental/EventCount.h"
 namespace bytedance::bolt::exec::test {
 
@@ -1788,6 +1790,51 @@ TEST_P(AggregationTest, spillAll) {
   ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 1);
   // Verifies all the rows have been spilled.
   ASSERT_EQ(stats[0].operatorStats[1].spilledRows, numDistincts);
+  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}
+
+TEST_P(AggregationTest, spillWithArrowSerde) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling\n";
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kArrow)) {
+    serializer::arrowserde::ArrowVectorSerde::registerNamedVectorSerde();
+  }
+
+  auto inputs = makeVectors(rowType_, 100, 10);
+  auto plan = PlanBuilder()
+                  .values(inputs)
+                  .singleAggregation({"c0"}, {"sum(c1)"})
+                  .planNode();
+  auto results = AssertQueryBuilder(plan).copyResults(pool_.get());
+
+  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  bool sawArrowSerde = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SpillState::appendToPartition",
+      std::function<void(exec::SpillState*)>([&](exec::SpillState* state) {
+        const auto kind = state->testingSpillSerdeKind();
+        if (kind.has_value()) {
+          EXPECT_EQ(VectorSerde::Kind::kArrow, kind.value());
+          sawArrowSerde = true;
+        }
+      }));
+  auto task = AssertQueryBuilder(plan)
+                  .spillDirectory(tempDirectory->path)
+                  .config(QueryConfig::kSpillEnabled, "true")
+                  .config(QueryConfig::kAggregationSpillEnabled, "true")
+                  .config(QueryConfig::kAggregationSpillMemoryThreshold, "1024")
+                  .config(QueryConfig::kSinglePartitionSpillSerdeKind, "Arrow")
+                  .config(QueryConfig::kSpillNumPartitionBits, "0")
+                  .assertResults(results);
+
+  auto stats = task->taskStats().pipelineStats;
+  ASSERT_LT(0, stats[0].operatorStats[1].spilledInputBytes);
+  ASSERT_LT(0, stats[0].operatorStats[1].spilledBytes);
+  ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 1);
+#ifndef NDEBUG
+  ASSERT_TRUE(sawArrowSerde);
+#endif
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 

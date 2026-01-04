@@ -210,58 +210,6 @@ ArrowVectorSerde::ArrowSerdeOptions toArrowSerdeOptions(
       options->useLosslessTimestamp, options->compressionKind);
 }
 
-class ArrowVectorSerializer;
-
-class ArrowBatchVectorSerializer : public BatchVectorSerializer {
- public:
-  ArrowBatchVectorSerializer(
-      memory::MemoryPool* pool,
-      bool useLosslessTimestamp,
-      common::CompressionKind compressionKind,
-      const ArrowOptions* arrowBridgeOptions = nullptr)
-      : pool_(pool),
-        useLosslessTimestamp_(useLosslessTimestamp),
-        compressionKind_(compressionKind) {
-    if (arrowBridgeOptions) {
-      arrowBridgeOptions_ = *arrowBridgeOptions;
-    } else {
-      arrowBridgeOptions_ = toArrowSerdeOptions(nullptr).arrowOptions;
-    }
-    arrowBridgeOptions_.timestampUnit =
-        useLosslessTimestamp ? TimestampUnit::kNano : TimestampUnit::kMicro;
-    arrowBridgeOptions_.flattenDictionary = false;
-    arrowBridgeOptions_.flattenConstant = false;
-  }
-
-  void serialize(
-      const RowVectorPtr& vector,
-      const folly::Range<const IndexRange*>& ranges,
-      Scratch& scratch,
-      OutputStream* stream) override {
-    size_t numRows = 0;
-    for (const auto& range : ranges) {
-      numRows += range.size;
-    }
-    StreamArena arena(pool_);
-    auto serializer = std::make_unique<ArrowVectorSerializer>(
-        asRowType(vector->type()),
-        std::vector<VectorEncoding::Simple>{},
-        static_cast<int32_t>(numRows),
-        &arena,
-        useLosslessTimestamp_,
-        compressionKind_,
-        &arrowBridgeOptions_);
-    serializer->append(vector, ranges, scratch);
-    serializer->flush(stream);
-  }
-
- private:
-  memory::MemoryPool* pool_;
-  const bool useLosslessTimestamp_;
-  const common::CompressionKind compressionKind_;
-  ArrowOptions arrowBridgeOptions_;
-};
-
 class ArrowVectorSerializer : public VectorSerializer {
  public:
   ArrowVectorSerializer(
@@ -757,6 +705,56 @@ class ArrowVectorSerializer : public VectorSerializer {
   int32_t totalRows_{0};
   std::vector<RowVectorPtr> heldVectors_;
 }; // class ArrowVectorSerializer : public VectorSerializer
+
+class ArrowBatchVectorSerializer : public BatchVectorSerializer {
+ public:
+  ArrowBatchVectorSerializer(
+      memory::MemoryPool* pool,
+      bool useLosslessTimestamp,
+      common::CompressionKind compressionKind,
+      const ArrowOptions* arrowBridgeOptions = nullptr)
+      : pool_(pool),
+        useLosslessTimestamp_(useLosslessTimestamp),
+        compressionKind_(compressionKind) {
+    if (arrowBridgeOptions) {
+      arrowBridgeOptions_ = *arrowBridgeOptions;
+    } else {
+      arrowBridgeOptions_ = toArrowSerdeOptions(nullptr).arrowOptions;
+    }
+    arrowBridgeOptions_.timestampUnit =
+        useLosslessTimestamp ? TimestampUnit::kNano : TimestampUnit::kMicro;
+    arrowBridgeOptions_.flattenDictionary = false;
+    arrowBridgeOptions_.flattenConstant = false;
+  }
+
+  void serialize(
+      const RowVectorPtr& vector,
+      const folly::Range<const IndexRange*>& ranges,
+      Scratch& scratch,
+      OutputStream* stream) override {
+    size_t numRows = 0;
+    for (const auto& range : ranges) {
+      numRows += range.size;
+    }
+    StreamArena arena(pool_);
+    auto serializer = std::make_unique<ArrowVectorSerializer>(
+        asRowType(vector->type()),
+        std::vector<VectorEncoding::Simple>{},
+        static_cast<int32_t>(numRows),
+        &arena,
+        useLosslessTimestamp_,
+        compressionKind_,
+        &arrowBridgeOptions_);
+    serializer->append(vector, ranges, scratch);
+    serializer->flush(stream);
+  }
+
+ private:
+  memory::MemoryPool* pool_;
+  const bool useLosslessTimestamp_;
+  const common::CompressionKind compressionKind_;
+  ArrowOptions arrowBridgeOptions_;
+};
 } // namespace
 
 namespace { // for deserialize helper
