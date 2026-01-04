@@ -198,7 +198,8 @@ std::optional<common::SpillConfig> DriverCtx::makeSpillConfig(
              queryConfig.testingSpillPct(),
              queryConfig.spillCompressionKind(),
              queryConfig.spillFileCreateConfig(),
-             rowBasedSpillMode)
+             rowBasedSpillMode,
+             queryConfig.singlePartitionSpillSerdeKind())
       .setJITenableForSpill(queryConfig.enableJitRowCmpRow());
 }
 

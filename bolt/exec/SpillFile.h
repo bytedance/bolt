@@ -32,6 +32,7 @@
 
 #include <folly/container/F14Set.h>
 #include <cstdint>
+#include <optional>
 
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/base/SpillStats.h"
@@ -115,6 +116,7 @@ struct SpillFileInfo {
   uint32_t numSortKeys;
   std::vector<CompareFlags> sortFlags;
   common::CompressionKind compressionKind;
+  std::optional<VectorSerde::Kind> serdeKind;
   std::optional<RowFormatInfo> rowInfo;
 };
 
@@ -140,13 +142,9 @@ class SpillWriter {
       const RowTypePtr& type,
       const uint32_t numSortKeys,
       const std::vector<CompareFlags>& sortCompareFlags,
-      common::CompressionKind compressionKind,
       const std::string& pathPrefix,
       uint64_t targetFileSize,
-      bool spillUringEnabled,
-      uint64_t writeBufferSize,
-      const std::string& fileCreateConfig,
-      common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
+      const common::SpillConfig::SpillIOConfig& ioConfig,
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats,
       uint32_t maxBatchRows = 0,
@@ -246,6 +244,8 @@ class SpillWriter {
   uint64_t unflushedSizeInRowVector_{0};
 
   std::optional<RowFormatInfo> rowInfo_;
+  const std::optional<VectorSerde::Kind> spillSerdeKind_;
+  VectorSerde* serde_{nullptr};
   uint64_t rowsInCurrentFile_{0};
 };
 
@@ -370,7 +370,9 @@ class SpillReadFileBase {
   const uint32_t numSortKeys_;
   const std::vector<CompareFlags> sortCompareFlags_;
   const common::CompressionKind compressionKind_;
-  const serializer::presto::PrestoVectorSerde::PrestoOptions readOptions_;
+  const VectorSerde::Options readOptions_;
+  const std::optional<VectorSerde::Kind> serdeKind_;
+  VectorSerde* const serde_{nullptr};
   bool spillUringEnabled_;
   memory::MemoryPool* const pool_;
 

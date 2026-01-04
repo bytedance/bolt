@@ -32,6 +32,7 @@
 
 #include <folly/container/F14Set.h>
 #include <cstdint>
+#include <optional>
 #include <vector>
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/SpillConfig.h"
@@ -783,19 +784,13 @@ class SpillState {
   /// target size of a single file.  'pool' owns the memory for state and
   /// results.
   SpillState(
-      const common::GetSpillDirectoryPathCB& getSpillDirectoryPath,
-      const common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
-      const std::string& fileNamePrefix,
+      const common::SpillConfig::SpillIOConfig& ioConfig,
       int32_t maxPartitions,
       int32_t numSortKeys,
       const std::vector<CompareFlags>& sortCompareFlags,
       uint64_t targetFileSize,
-      bool spillUringEnabled,
-      uint64_t writeBufferSize,
-      common::CompressionKind compressionKind,
       memory::MemoryPool* pool,
-      folly::Synchronized<common::SpillStats>* stats,
-      const std::string& fileCreateConfig = {});
+      folly::Synchronized<common::SpillStats>* stats);
 
   /// Indicates if a given 'partition' has been spilled or not.
   bool isPartitionSpilled(uint32_t partition) const {
@@ -816,7 +811,7 @@ class SpillState {
   }
 
   common::CompressionKind compressionKind() const {
-    return compressionKind_;
+    return ioConfig_.compressionKind;
   }
 
   const std::vector<CompareFlags>& sortCompareFlags() const {
@@ -907,7 +902,7 @@ class SpillState {
   }
 
   bool isUringEnabled() {
-    return spillUringEnabled_;
+    return ioConfig_.spillUringEnabled;
   }
 
  private:
@@ -917,24 +912,12 @@ class SpillState {
 
   const RowTypePtr type_;
 
-  // A callback function that returns the spill directory path. Implementations
-  // can use it to ensure the path exists before returning.
-  common::GetSpillDirectoryPathCB getSpillDirPathCb_;
+  const common::SpillConfig::SpillIOConfig ioConfig_;
 
-  // Updates the aggregated spill bytes of this query, and throws if exceeds
-  // the max spill bytes limit.
-  common::UpdateAndCheckSpillLimitCB updateAndCheckSpillLimitCb_;
-
-  /// Prefix for spill files.
-  const std::string fileNamePrefix_;
   const int32_t maxPartitions_;
   const int32_t numSortKeys_;
   const std::vector<CompareFlags> sortCompareFlags_;
   const uint64_t targetFileSize_;
-  bool spillUringEnabled_;
-  const uint64_t writeBufferSize_;
-  const common::CompressionKind compressionKind_;
-  const std::string fileCreateConfig_;
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;
 

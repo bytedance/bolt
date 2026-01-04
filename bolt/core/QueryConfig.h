@@ -352,6 +352,10 @@ class QueryConfig {
   static constexpr const char* kSpillFileCreateConfig =
       "spill_file_create_config";
 
+  /// Vector serde used for row-vector spill when single partition is used.
+  static constexpr const char* kSinglePartitionSpillSerdeKind =
+      "spill_single_partition_serde_kind";
+
   static constexpr const char* kSpillStartPartitionBit =
       "spiller_start_partition_bit";
 
@@ -1094,6 +1098,10 @@ class QueryConfig {
   // otherwise disable row based spill
   std::string rowBasedSpillMode() const {
     return get<std::string>(kRowBasedSpillMode, kDefaultRowBasedSpillMode);
+  }
+
+  std::string singlePartitionSpillSerdeKind() const {
+    return get<std::string>(kSinglePartitionSpillSerdeKind, "");
   }
 
   /// Returns the timestamp unit used in Bolt-Arrow conversion.

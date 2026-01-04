@@ -200,13 +200,9 @@ SpillWriter::SpillWriter(
     const RowTypePtr& type,
     const uint32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
-    common::CompressionKind compressionKind,
     const std::string& pathPrefix,
     uint64_t targetFileSize,
-    bool spillUringEnabled,
-    uint64_t writeBufferSize,
-    const std::string& fileCreateConfig,
-    common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
+    const common::SpillConfig::SpillIOConfig& ioConfig,
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats,
     uint32_t maxBatchRows,
@@ -214,17 +210,21 @@ SpillWriter::SpillWriter(
     : type_(type),
       numSortKeys_(numSortKeys),
       sortCompareFlags_(sortCompareFlags),
-      compressionKind_(compressionKind),
+      compressionKind_(ioConfig.compressionKind),
       pathPrefix_(pathPrefix),
       targetFileSize_(targetFileSize),
-      spillUringEnabled_(spillUringEnabled),
-      writeBufferSize_(writeBufferSize),
-      fileCreateConfig_(fileCreateConfig),
-      updateAndCheckSpillLimitCb_(updateAndCheckSpillLimitCb),
+      spillUringEnabled_(ioConfig.spillUringEnabled),
+      writeBufferSize_(ioConfig.writeBufferSize),
+      fileCreateConfig_(ioConfig.fileCreateConfig),
+      updateAndCheckSpillLimitCb_(ioConfig.updateAndCheckSpillLimitCb),
       pool_(pool),
       stats_(stats),
       maxBatchRows_(maxBatchRows),
-      rowInfo_(rowInfo) {
+      rowInfo_(rowInfo),
+      spillSerdeKind_(ioConfig.spillSerdeKind) {
+  if (ioConfig.spillSerdeKind) {
+    serde_ = getNamedVectorSerde(*ioConfig.spillSerdeKind);
+  }
   // NOTE: if the associated spilling operator has specified the sort
   // comparison flags, then it must match the number of sorting keys.
   BOLT_CHECK(
@@ -260,6 +260,7 @@ void SpillWriter::closeFile() {
       .numSortKeys = numSortKeys_,
       .sortFlags = sortCompareFlags_,
       .compressionKind = compressionKind_,
+      .serdeKind = spillSerdeKind_,
       .rowInfo = rowInfo_});
   rowsInCurrentFile_ = 0;
   currentFile_.reset();
@@ -310,7 +311,7 @@ uint64_t SpillWriter::write(
     if (batch_ == nullptr) {
       bytedance::bolt::VectorSerde::Options options = {
           kDefaultUseLosslessTimestamp, compressionKind_};
-      batch_ = std::make_unique<VectorStreamGroup>(pool_);
+      batch_ = std::make_unique<VectorStreamGroup>(pool_, serde_);
       batch_->createStreamTree(
           std::static_pointer_cast<const RowType>(rows->type()),
           1'000,
@@ -369,7 +370,7 @@ uint64_t SpillWriter::writeAndFlush(
     if (batch_ == nullptr) {
       bytedance::bolt::VectorSerde::Options options = {
           kDefaultUseLosslessTimestamp, compressionKind_};
-      batch_ = std::make_unique<VectorStreamGroup>(pool_);
+      batch_ = std::make_unique<VectorStreamGroup>(pool_, serde_);
       batch_->createStreamTree(
           std::static_pointer_cast<const RowType>(rows->type()),
           rows->size(),
@@ -605,6 +606,9 @@ SpillReadFileBase::SpillReadFileBase(
       sortCompareFlags_(fileInfo.sortFlags),
       compressionKind_(fileInfo.compressionKind),
       readOptions_{kDefaultUseLosslessTimestamp, compressionKind_},
+      serdeKind_(fileInfo.serdeKind),
+      serde_(
+          serdeKind_.has_value() ? getNamedVectorSerde(*serdeKind_) : nullptr),
       spillUringEnabled_(spillUringEnabled),
       pool_(pool) {
   constexpr uint64_t kMaxReadBufferSize =
@@ -637,8 +641,12 @@ bool SpillReadFile::nextBatch(RowVectorPtr& rowVector) {
     spillReadIOTimeUs_ = input_->getSpillReadIOTime();
     return false;
   }
-  VectorStreamGroup::read(
-      input_.get(), pool_, type_, &rowVector, &readOptions_);
+  if (serde_ != nullptr) {
+    serde_->deserialize(input_.get(), pool_, type_, &rowVector, &readOptions_);
+  } else {
+    VectorStreamGroup::read(
+        input_.get(), pool_, type_, &rowVector, &readOptions_);
+  }
   return true;
 }
 

@@ -279,16 +279,10 @@ class Spiller {
       HashBitRange bits,
       int32_t numSortingKeys,
       const std::vector<CompareFlags>& sortCompareFlags,
-      const common::GetSpillDirectoryPathCB& getSpillDirPathCb,
-      const common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
-      const std::string& fileNamePrefix,
+      const common::SpillConfig::SpillIOConfig& ioConfig,
       uint64_t targetFileSize,
-      bool spillUringEnabled,
-      uint64_t writeBufferSize,
-      common::CompressionKind compressionKind,
       folly::Executor* executor,
       uint64_t maxSpillRunRows,
-      const std::string& fileCreateConfig,
       common::RowBasedSpillMode rowBasedSpillMode);
 
   // Invoked to spill. If 'startRowIter' is not null, then we only spill rows

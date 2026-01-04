@@ -66,6 +66,7 @@ SpillConfig::SpillConfig(
     const std::string& _compressionKind,
     const std::string& _fileCreateConfig,
     const std::string& _rowBasedSpillMode,
+    const std::string& _singlePartitionSerdeKind,
     bool jitEnabled)
     : getSpillDirPathCb(std::move(_getSpillDirPathCb)),
       updateAndCheckSpillLimitCb(std::move(_updateAndCheckSpillLimitCb)),
@@ -88,6 +89,7 @@ SpillConfig::SpillConfig(
       compressionKind(common::stringToCompressionKind(_compressionKind)),
       fileCreateConfig(_fileCreateConfig),
       rowBasedSpillMode(strToRowBasedSpillMode(_rowBasedSpillMode)),
+      singlePartitionSerdeKind(_singlePartitionSerdeKind),
       jitEnabled(jitEnabled) {
   BOLT_USER_CHECK_GE(
       spillableReservationGrowthPct,
@@ -203,6 +205,7 @@ std::string SpillConfig::toString() const {
       "compressionKind:{},\n\t"
       "fileCreateConfig:{}\n"
       "rowBasedSpillMode:{}\n"
+      "singlePartitionSerdeKind:{}\n"
       "jitEnabled:{}\n",
       fileNamePrefix,
       succinctBytes(maxFileSize),
@@ -218,6 +221,7 @@ std::string SpillConfig::toString() const {
       compressionKind,
       fileCreateConfig,
       rowBasedSpillMode,
+      singlePartitionSerdeKind,
       jitEnabled);
 }
 

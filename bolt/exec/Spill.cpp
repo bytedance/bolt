@@ -80,30 +80,18 @@ int32_t SpillMergeStream::compare(const MergeStream& other) const {
 }
 
 SpillState::SpillState(
-    const common::GetSpillDirectoryPathCB& getSpillDirPathCb,
-    const common::UpdateAndCheckSpillLimitCB& updateAndCheckSpillLimitCb,
-    const std::string& fileNamePrefix,
+    const common::SpillConfig::SpillIOConfig& ioConfig,
     int32_t maxPartitions,
     int32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
     uint64_t targetFileSize,
-    bool spillUringEnabled,
-    uint64_t writeBufferSize,
-    common::CompressionKind compressionKind,
     memory::MemoryPool* pool,
-    folly::Synchronized<common::SpillStats>* stats,
-    const std::string& fileCreateConfig)
-    : getSpillDirPathCb_(getSpillDirPathCb),
-      updateAndCheckSpillLimitCb_(updateAndCheckSpillLimitCb),
-      fileNamePrefix_(fileNamePrefix),
+    folly::Synchronized<common::SpillStats>* stats)
+    : ioConfig_(ioConfig),
       maxPartitions_(maxPartitions),
       numSortKeys_(numSortKeys),
       sortCompareFlags_(sortCompareFlags),
       targetFileSize_(targetFileSize),
-      spillUringEnabled_(spillUringEnabled),
-      writeBufferSize_(writeBufferSize),
-      compressionKind_(compressionKind),
-      fileCreateConfig_(fileCreateConfig),
       pool_(pool),
       stats_(stats),
       partitionWriters_(maxPartitions_) {
@@ -135,8 +123,8 @@ uint64_t SpillState::appendToPartition(
       "bytedance::bolt::exec::SpillState::appendToPartition", this);
 
   BOLT_CHECK_NOT_NULL(
-      getSpillDirPathCb_, "Spill directory callback not specified.");
-  const std::string& spillDir = getSpillDirPathCb_();
+      ioConfig_.getSpillDirPathCb, "Spill directory callback not specified.");
+  const std::string& spillDir = ioConfig_.getSpillDirPathCb();
   BOLT_CHECK(!spillDir.empty(), "Spill directory does not exist");
   // Ensure that partition exist before writing.
   if (partitionWriters_.at(partition) == nullptr) {
@@ -144,21 +132,18 @@ uint64_t SpillState::appendToPartition(
         std::static_pointer_cast<const RowType>(rows->type()),
         numSortKeys_,
         sortCompareFlags_,
-        compressionKind_,
         fmt::format(
             "{}/{}-spill-{}{}",
             spillDir,
-            fileNamePrefix_,
+            ioConfig_.fileNamePrefix,
             partition,
             (immediateFlush_ ? "-flags" : "")),
         targetFileSize_,
-        spillUringEnabled_,
-        writeBufferSize_,
-        fileCreateConfig_,
-        updateAndCheckSpillLimitCb_,
+        ioConfig_,
         pool_,
         stats_,
-        maxBatchRows_);
+        maxBatchRows_,
+        std::nullopt);
   }
 
   updateSpilledInputBytes(rows->estimateFlatSize());
@@ -186,8 +171,8 @@ uint64_t SpillState::appendToPartition(
       "bytedance::bolt::exec::SpillState::appendToPartition", this);
 
   BOLT_CHECK_NOT_NULL(
-      getSpillDirPathCb_, "Spill directory callback not specified.");
-  const std::string& spillDir = getSpillDirPathCb_();
+      ioConfig_.getSpillDirPathCb, "Spill directory callback not specified.");
+  const std::string& spillDir = ioConfig_.getSpillDirPathCb();
   BOLT_CHECK(!spillDir.empty(), "Spill directory does not exist");
   // Ensure that partition exist before writing.
   if (partitionWriters_.at(partition) == nullptr) {
@@ -195,13 +180,10 @@ uint64_t SpillState::appendToPartition(
         type,
         numSortKeys_,
         sortCompareFlags_,
-        compressionKind_,
-        fmt::format("{}/{}-spill-{}", spillDir, fileNamePrefix_, partition),
+        fmt::format(
+            "{}/{}-spill-{}", spillDir, ioConfig_.fileNamePrefix, partition),
         targetFileSize_,
-        spillUringEnabled_,
-        writeBufferSize_,
-        fileCreateConfig_,
-        updateAndCheckSpillLimitCb_,
+        ioConfig_,
         pool_,
         stats_,
         maxBatchRows_,
