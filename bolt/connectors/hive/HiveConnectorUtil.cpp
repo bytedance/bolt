@@ -34,12 +34,14 @@
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/core/Expressions.h"
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/CachedBufferedInput.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/Reader.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/type/Filter.h"
 
 namespace bytedance::bolt::connector::hive {
 
@@ -617,29 +619,29 @@ bool testFilters(
   const auto& fileTypeWithId = reader->typeWithId();
   const auto& rowType = reader->rowType();
   for (const auto& child : scanSpec->children()) {
-    if (child->filter()) {
+    if (child->rowGroupFilter()) {
       const auto& name = child->fieldName();
       if (!rowType->containsChild(name)) {
         // If missing column is partition key.
         auto iter = partitionKeys.find(name);
         if (iter != partitionKeys.end() && iter->second.has_value()) {
           if (isHiveNull(iter->second.value())) {
-            if (!child->filter()->testNull()) {
+            if (!child->rowGroupFilter()->testNull()) {
               return false;
             }
           } else {
             if (!applyPartitionFilter(
                     (*partitionKeysHandle)[name]->dataType()->kind(),
                     iter->second.value(),
-                    child->filter())) {
+                    child->rowGroupFilter())) {
               return false;
             }
           }
           continue;
         }
         // Column is missing. Most likely due to schema evolution.
-        if (child->filter()->isDeterministic() &&
-            !child->filter()->testNull()) {
+        if (child->rowGroupFilter()->isDeterministic() &&
+            !child->rowGroupFilter()->testNull()) {
           return false;
         }
       } else {
@@ -647,7 +649,7 @@ bool testFilters(
         const auto columnStats = reader->columnStatistics(typeWithId->id());
         if (columnStats != nullptr &&
             !testFilter(
-                child->filter(),
+                child->rowGroupFilter(),
                 columnStats.get(),
                 totalRows.value(),
                 typeWithId->type())) {
@@ -807,6 +809,857 @@ core::TypedExprPtr extractFiltersFromRemainingFilter(
     common::SubfieldFilters& filters) {
   return extractFiltersFromRemainingFilter(
       expr, evaluator, /*negated=*/false, filters);
+}
+
+} // namespace bytedance::bolt::connector::hive
+
+namespace bytedance::bolt::connector::hive {
+
+namespace {
+
+using bytedance::bolt::BIGINT;
+using bytedance::bolt::BOOLEAN;
+using bytedance::bolt::VARCHAR;
+using bytedance::bolt::variant;
+using bytedance::bolt::common::BigintMultiRange;
+using bytedance::bolt::common::BigintRange;
+using bytedance::bolt::common::BigintValuesUsingBitmask;
+using bytedance::bolt::common::BigintValuesUsingHashTable;
+using bytedance::bolt::common::BoolValue;
+using bytedance::bolt::common::BytesRange;
+using bytedance::bolt::common::BytesValues;
+using bytedance::bolt::common::DoubleRange;
+using bytedance::bolt::common::Filter;
+using bytedance::bolt::common::FilterKind;
+using bytedance::bolt::common::FloatRange;
+using bytedance::bolt::common::MultiRange;
+using bytedance::bolt::common::NegatedBigintRange;
+using bytedance::bolt::common::NegatedBigintValuesUsingBitmask;
+using bytedance::bolt::common::NegatedBigintValuesUsingHashTable;
+using bytedance::bolt::common::NegatedBytesRange;
+using bytedance::bolt::common::NegatedBytesValues;
+using bytedance::bolt::common::NegatedTimestampRange;
+using bytedance::bolt::common::Subfield;
+using bytedance::bolt::common::TimestampRange;
+using bytedance::bolt::core::CallTypedExpr;
+using bytedance::bolt::core::ConstantTypedExpr;
+using bytedance::bolt::core::DereferenceTypedExpr;
+using bytedance::bolt::core::FieldAccessTypedExpr;
+using bytedance::bolt::core::TypedExprPtr;
+
+TypedExprPtr createFieldExpr(
+    const Subfield& subfield,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<connector::ColumnHandle>>& columnHandles,
+    const RowTypePtr& dataColumns) {
+  const auto& path = subfield.path();
+  if (path.empty()) {
+    return nullptr;
+  }
+
+  TypedExprPtr currentExpr = nullptr;
+  TypePtr currentType = nullptr;
+
+  using bytedance::bolt::INTEGER;
+  using bytedance::bolt::common::kLongSubscript;
+  using bytedance::bolt::common::kNestedField;
+  using bytedance::bolt::common::kStringSubscript;
+
+  for (size_t i = 0; i < path.size(); ++i) {
+    const auto& element = path[i];
+    if (currentExpr == nullptr) {
+      // Expect the first element to be the Root NestedField (Column)
+      if (element->kind() != kNestedField) {
+        return nullptr;
+      }
+      auto* nestedField =
+          static_cast<const Subfield::NestedField*>(element.get());
+      const std::string& fieldName = nestedField->name();
+      auto it = columnHandles.find(fieldName);
+      if (it == columnHandles.end()) {
+        for (auto iter = columnHandles.begin(); iter != columnHandles.end();
+             ++iter) {
+          auto hiveHandle =
+              std::dynamic_pointer_cast<HiveColumnHandle>(iter->second);
+          if (hiveHandle) {
+            if (hiveHandle->name() == fieldName) {
+              it = iter;
+              break;
+            }
+          }
+          if (it != columnHandles.end()) {
+            break;
+          }
+        }
+      }
+
+      if (it == columnHandles.end()) {
+        // Try looking up in dataColumns if provided
+        if (dataColumns) {
+          if (auto type = dataColumns->findChild(fieldName)) {
+            currentExpr =
+                std::make_shared<FieldAccessTypedExpr>(type, fieldName);
+            currentType = type;
+            continue;
+          }
+        }
+        return nullptr;
+      }
+      auto hiveHandle = std::dynamic_pointer_cast<HiveColumnHandle>(it->second);
+      if (!hiveHandle) {
+        return nullptr;
+      }
+      currentExpr = std::make_shared<FieldAccessTypedExpr>(
+          hiveHandle->dataType(), hiveHandle->name());
+      currentType = hiveHandle->dataType();
+      continue;
+    }
+
+    if (element->kind() == kNestedField) {
+      if (!currentType->isRow())
+        return nullptr;
+      auto rowType = std::static_pointer_cast<const RowType>(currentType);
+      auto* fieldElem =
+          static_cast<const Subfield::NestedField*>(element.get());
+      std::string name = fieldElem->name();
+
+      auto& names = rowType->names();
+      auto itName = std::find(names.begin(), names.end(), name);
+      if (itName == names.end())
+        return nullptr;
+      int idx = std::distance(names.begin(), itName);
+      auto childType = rowType->childAt(idx);
+
+      currentExpr =
+          std::make_shared<DereferenceTypedExpr>(childType, currentExpr, idx);
+      currentType = childType;
+
+    } else if (element->kind() == kLongSubscript) {
+      auto* subscript =
+          static_cast<const Subfield::LongSubscript*>(element.get());
+      auto indexVal = subscript->index();
+      auto indexExpr = std::make_shared<ConstantTypedExpr>(
+          BIGINT(), variant(static_cast<int64_t>(indexVal)));
+
+      TypePtr returnType;
+      if (currentType->isArray()) {
+        returnType = currentType->asArray().elementType();
+      } else if (currentType->isMap()) {
+        returnType = currentType->asMap().valueType();
+      } else {
+        return nullptr;
+      }
+
+      currentExpr = std::make_shared<CallTypedExpr>(
+          returnType,
+          "subscript",
+          std::vector<TypedExprPtr>{currentExpr, indexExpr});
+      currentType = returnType;
+    } else if (element->kind() == kStringSubscript) {
+      if (!currentType->isMap())
+        return nullptr;
+
+      auto* stringSubscript =
+          static_cast<const Subfield::StringSubscript*>(element.get());
+      auto indexVal = stringSubscript->index();
+      auto indexExpr =
+          std::make_shared<ConstantTypedExpr>(VARCHAR(), variant(indexVal));
+
+      auto returnType = currentType->asMap().valueType();
+
+      currentExpr = std::make_shared<CallTypedExpr>(
+          returnType,
+          "subscript",
+          std::vector<TypedExprPtr>{currentExpr, indexExpr});
+      currentType = returnType;
+    } else {
+      return nullptr;
+    }
+  }
+
+  return currentExpr;
+}
+
+TypedExprPtr filterToExpr(
+    const Subfield& subfield,
+    const Filter* filter,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<connector::ColumnHandle>>& columnHandles,
+    const RowTypePtr& dataColumns) {
+  if (!filter) {
+    return nullptr;
+  }
+
+  auto fieldExpr = createFieldExpr(subfield, columnHandles, dataColumns);
+  if (!fieldExpr) {
+    return nullptr;
+  }
+
+  TypedExprPtr expr = nullptr;
+
+  switch (filter->kind()) {
+    case FilterKind::kBigintRange: {
+      auto* range = static_cast<const BigintRange*>(filter);
+      int64_t lower = range->lower();
+      int64_t upper = range->upper();
+      bool hasLower = lower > std::numeric_limits<int64_t>::min();
+      bool hasUpper = upper < std::numeric_limits<int64_t>::max();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      auto type = fieldExpr->type();
+
+      if (hasLower) {
+        variant val;
+        if (type->isDate()) {
+          val = variant(static_cast<int32_t>(lower));
+        } else if (type->isInteger()) {
+          val = variant(static_cast<int32_t>(lower));
+        } else if (type->isSmallint()) {
+          val = variant(static_cast<int16_t>(lower));
+        } else if (type->isTinyint()) {
+          val = variant(static_cast<int8_t>(lower));
+        } else {
+          val = variant(lower);
+        }
+        auto valExpr = std::make_shared<ConstantTypedExpr>(type, val);
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "gte", std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        variant val;
+        if (type->isDate()) {
+          val = variant(static_cast<int32_t>(upper));
+        } else if (type->isInteger()) {
+          val = variant(static_cast<int32_t>(upper));
+        } else if (type->isSmallint()) {
+          val = variant(static_cast<int16_t>(upper));
+        } else if (type->isTinyint()) {
+          val = variant(static_cast<int8_t>(upper));
+        } else {
+          val = variant(upper);
+        }
+        auto valExpr = std::make_shared<ConstantTypedExpr>(type, val);
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "lte", std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (lowerExpr && upperExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        expr = lowerExpr;
+      } else if (upperExpr) {
+        expr = upperExpr;
+      }
+      break;
+    }
+    case FilterKind::kNegatedBytesRange: {
+      auto* range = static_cast<const NegatedBytesRange*>(filter);
+      const std::string& lower = range->lower();
+      const std::string& upper = range->upper();
+      bool hasLower = !range->isLowerUnbounded();
+      bool hasUpper = !range->isUpperUnbounded();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      if (hasLower) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(lower));
+        std::string op = range->isLowerExclusive() ? "gt" : "gte";
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(upper));
+        std::string op = range->isUpperExclusive() ? "lt" : "lte";
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      TypedExprPtr rangeExpr = nullptr;
+      if (lowerExpr && upperExpr) {
+        rangeExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        rangeExpr = lowerExpr;
+      } else if (upperExpr) {
+        rangeExpr = upperExpr;
+      }
+
+      if (rangeExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "not", std::vector<TypedExprPtr>{rangeExpr});
+      }
+      break;
+    }
+    case FilterKind::kNegatedBigintRange: {
+      auto* range = static_cast<const NegatedBigintRange*>(filter);
+      int64_t lower = range->lower();
+      int64_t upper = range->upper();
+      bool hasLower = lower > std::numeric_limits<int64_t>::min();
+      bool hasUpper = upper < std::numeric_limits<int64_t>::max();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      auto type = fieldExpr->type();
+
+      if (hasLower) {
+        variant val;
+        if (type->isDate()) {
+          val = variant(static_cast<int32_t>(lower));
+        } else if (type->isInteger()) {
+          val = variant(static_cast<int32_t>(lower));
+        } else if (type->isSmallint()) {
+          val = variant(static_cast<int16_t>(lower));
+        } else if (type->isTinyint()) {
+          val = variant(static_cast<int8_t>(lower));
+        } else {
+          val = variant(lower);
+        }
+        auto valExpr = std::make_shared<ConstantTypedExpr>(type, val);
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "gte", std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        variant val;
+        if (type->isDate()) {
+          val = variant(static_cast<int32_t>(upper));
+        } else if (type->isInteger()) {
+          val = variant(static_cast<int32_t>(upper));
+        } else if (type->isSmallint()) {
+          val = variant(static_cast<int16_t>(upper));
+        } else if (type->isTinyint()) {
+          val = variant(static_cast<int8_t>(upper));
+        } else {
+          val = variant(upper);
+        }
+        auto valExpr = std::make_shared<ConstantTypedExpr>(type, val);
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "lte", std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      TypedExprPtr rangeExpr = nullptr;
+      if (lowerExpr && upperExpr) {
+        rangeExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        rangeExpr = lowerExpr;
+      } else if (upperExpr) {
+        rangeExpr = upperExpr;
+      }
+
+      if (rangeExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "not", std::vector<TypedExprPtr>{rangeExpr});
+      }
+      break;
+    }
+    case FilterKind::kBigintMultiRange: {
+      auto* multiRange = static_cast<const BigintMultiRange*>(filter);
+      const auto& ranges = multiRange->ranges();
+      if (ranges.empty()) {
+        return nullptr;
+      }
+
+      std::vector<TypedExprPtr> rangeExprs;
+      for (const auto& innerRange : ranges) {
+        if (auto innerExpr = filterToExpr(
+                subfield, innerRange.get(), columnHandles, dataColumns)) {
+          rangeExprs.push_back(innerExpr);
+        }
+      }
+
+      if (rangeExprs.empty()) {
+        return nullptr;
+      }
+
+      if (rangeExprs.size() == 1) {
+        expr = rangeExprs[0];
+      } else {
+        auto combined = rangeExprs[0];
+        for (size_t i = 1; i < rangeExprs.size(); ++i) {
+          combined = std::make_shared<CallTypedExpr>(
+              BOOLEAN(),
+              "or",
+              std::vector<TypedExprPtr>{combined, rangeExprs[i]});
+        }
+        expr = std::move(combined);
+      }
+      break;
+    }
+    case FilterKind::kBigintValuesUsingBitmask: {
+      auto* bitmaskFilter =
+          static_cast<const BigintValuesUsingBitmask*>(filter);
+      const auto& values = bitmaskFilter->values();
+
+      if (values.empty()) {
+        return nullptr;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      auto type = fieldExpr->type();
+      for (const auto& val : values) {
+        variant variantVal;
+        if (type->isDate()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isInteger()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isSmallint()) {
+          variantVal = variant(static_cast<int16_t>(val));
+        } else if (type->isTinyint()) {
+          variantVal = variant(static_cast<int8_t>(val));
+        } else {
+          variantVal = variant(val);
+        }
+        args.push_back(std::make_shared<ConstantTypedExpr>(type, variantVal));
+      }
+
+      expr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      break;
+    }
+    case FilterKind::kNegatedBytesValues: {
+      auto* bytesValues = static_cast<const NegatedBytesValues*>(filter);
+      const auto& values = bytesValues->values();
+
+      if (values.empty()) {
+        expr = std::make_shared<ConstantTypedExpr>(BOOLEAN(), variant(true));
+        break;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      for (const auto& val : values) {
+        args.push_back(std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(std::string(val))));
+      }
+
+      auto inExpr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "not", std::vector<TypedExprPtr>{inExpr});
+      break;
+    }
+    case FilterKind::kNegatedBigintValuesUsingBitmask: {
+      auto* bitmaskFilter =
+          static_cast<const NegatedBigintValuesUsingBitmask*>(filter);
+      const auto& values = bitmaskFilter->values();
+
+      if (values.empty()) {
+        // If values is empty, NOT IN () is always true?
+        // Or technically empty set. x NOT IN {} is true.
+        expr = std::make_shared<ConstantTypedExpr>(BOOLEAN(), variant(true));
+        break;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      auto type = fieldExpr->type();
+      for (const auto& val : values) {
+        variant variantVal;
+        if (type->isDate()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isInteger()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isSmallint()) {
+          variantVal = variant(static_cast<int16_t>(val));
+        } else if (type->isTinyint()) {
+          variantVal = variant(static_cast<int8_t>(val));
+        } else {
+          variantVal = variant(val);
+        }
+        args.push_back(std::make_shared<ConstantTypedExpr>(type, variantVal));
+      }
+
+      auto inExpr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "not", std::vector<TypedExprPtr>{inExpr});
+      break;
+    }
+    case FilterKind::kNegatedBigintValuesUsingHashTable: {
+      auto* hashTableFilter =
+          static_cast<const NegatedBigintValuesUsingHashTable*>(filter);
+      const auto& values = hashTableFilter->values();
+
+      if (values.empty()) {
+        expr = std::make_shared<ConstantTypedExpr>(BOOLEAN(), variant(true));
+        break;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      auto type = fieldExpr->type();
+      for (const auto& val : values) {
+        variant variantVal;
+        if (type->isDate()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isInteger()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isSmallint()) {
+          variantVal = variant(static_cast<int16_t>(val));
+        } else if (type->isTinyint()) {
+          variantVal = variant(static_cast<int8_t>(val));
+        } else {
+          variantVal = variant(val);
+        }
+        args.push_back(std::make_shared<ConstantTypedExpr>(type, variantVal));
+      }
+
+      auto inExpr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "not", std::vector<TypedExprPtr>{inExpr});
+      break;
+    }
+    case FilterKind::kBigintValuesUsingHashTable: {
+      auto* hashTableFilter =
+          static_cast<const BigintValuesUsingHashTable*>(filter);
+      const auto& values = hashTableFilter->values();
+
+      if (values.empty()) {
+        return nullptr;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      auto type = fieldExpr->type();
+      for (const auto& val : values) {
+        variant variantVal;
+        if (type->isDate()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isInteger()) {
+          variantVal = variant(static_cast<int32_t>(val));
+        } else if (type->isSmallint()) {
+          variantVal = variant(static_cast<int16_t>(val));
+        } else if (type->isTinyint()) {
+          variantVal = variant(static_cast<int8_t>(val));
+        } else {
+          variantVal = variant(val);
+        }
+        args.push_back(std::make_shared<ConstantTypedExpr>(type, variantVal));
+      }
+
+      expr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      break;
+    }
+    case FilterKind::kBytesValues: {
+      auto* bytesValues = static_cast<const BytesValues*>(filter);
+      const auto& values = bytesValues->values();
+
+      if (values.empty()) {
+        // Should effectively be false, but keep as is for now or return false
+        // constant
+        return nullptr;
+      }
+
+      std::vector<TypedExprPtr> args;
+      args.reserve(values.size() + 1);
+      args.push_back(fieldExpr);
+
+      for (const auto& val : values) {
+        args.push_back(std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(std::string(val))));
+      }
+
+      expr = std::make_shared<CallTypedExpr>(BOOLEAN(), "in", args);
+      break;
+    }
+    case FilterKind::kBytesRange: {
+      auto* range = static_cast<const BytesRange*>(filter);
+      const std::string& lower = range->lower();
+      const std::string& upper = range->upper();
+      bool hasLower = !range->lowerUnbounded();
+      bool hasUpper = !range->upperUnbounded();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      if (hasLower) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(lower));
+        std::string op = range->lowerExclusive() ? "gt" : "gte";
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(upper));
+        std::string op = range->upperExclusive() ? "lt" : "lte";
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (lowerExpr && upperExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        expr = lowerExpr;
+      } else if (upperExpr) {
+        expr = upperExpr;
+      }
+      break;
+    }
+    case FilterKind::kIsNull: {
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "is_null", std::vector<TypedExprPtr>{fieldExpr});
+      break;
+    }
+    case FilterKind::kIsNotNull: {
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "is_not_null", std::vector<TypedExprPtr>{fieldExpr});
+      break;
+    }
+    case FilterKind::kBoolValue: {
+      auto* boolFilter = static_cast<const BoolValue*>(filter);
+      bool val = boolFilter->testBool(true);
+      auto valExpr =
+          std::make_shared<ConstantTypedExpr>(BOOLEAN(), variant(val));
+      expr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "eq", std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      break;
+    }
+    case FilterKind::kDoubleRange: {
+      auto* range = static_cast<const DoubleRange*>(filter);
+      double lower = range->lower();
+      double upper = range->upper();
+      bool hasLower = !range->lowerUnbounded();
+      bool hasUpper = !range->upperUnbounded();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      // Handle special floating point values if necessary (infinity, NaN)
+      // For now, assume standard range logic matches SQL semantics
+
+      if (hasLower) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(lower));
+        // lowerExclusive: value > lower
+        // otherwise: value >= lower
+        std::string op = range->lowerExclusive() ? "gt" : "gte";
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(upper));
+        // upperExclusive: value < upper
+        // otherwise: value <= upper
+        std::string op = range->upperExclusive() ? "lt" : "lte";
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (lowerExpr && upperExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        expr = lowerExpr;
+      } else if (upperExpr) {
+        expr = upperExpr;
+      }
+      break;
+    }
+    case FilterKind::kFloatRange: {
+      auto* range = static_cast<const FloatRange*>(filter);
+      float lower = range->lower();
+      float upper = range->upper();
+      bool hasLower = !range->lowerUnbounded();
+      bool hasUpper = !range->upperUnbounded();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      if (hasLower) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(lower));
+        std::string op = range->lowerExclusive() ? "gt" : "gte";
+        lowerExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (hasUpper) {
+        auto valExpr = std::make_shared<ConstantTypedExpr>(
+            fieldExpr->type(), variant(upper));
+        std::string op = range->upperExclusive() ? "lt" : "lte";
+        upperExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), op, std::vector<TypedExprPtr>{fieldExpr, valExpr});
+      }
+
+      if (lowerExpr && upperExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      } else if (lowerExpr) {
+        expr = lowerExpr;
+      } else if (upperExpr) {
+        expr = upperExpr;
+      }
+      break;
+    }
+    case FilterKind::kMultiRange: {
+      auto* multiRange = static_cast<const MultiRange*>(filter);
+      const auto& filters = multiRange->filters();
+      if (filters.empty()) {
+        return nullptr;
+      }
+
+      std::vector<TypedExprPtr> rangeExprs;
+      for (const auto& innerFilter : filters) {
+        if (auto innerExpr = filterToExpr(
+                subfield, innerFilter.get(), columnHandles, dataColumns)) {
+          rangeExprs.push_back(innerExpr);
+        }
+      }
+
+      if (rangeExprs.empty()) {
+        return nullptr;
+      }
+
+      if (rangeExprs.size() == 1) {
+        expr = rangeExprs[0];
+      } else {
+        expr = std::make_shared<CallTypedExpr>(BOOLEAN(), "or", rangeExprs);
+      }
+      break;
+    }
+    case FilterKind::kTimestampRange: {
+      auto* range = static_cast<const TimestampRange*>(filter);
+      auto lower = range->lower();
+      auto upper = range->upper();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      // Timestamp range logic is similar to BigintRange but for Timestamps
+      // Usually, Timestamps are represented as int64 (microseconds or
+      // milliseconds) We assume they can be converted to the field type or
+      // handled as constants.
+
+      auto valExprLower = std::make_shared<ConstantTypedExpr>(
+          fieldExpr->type(), variant(lower));
+      lowerExpr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "gte", std::vector<TypedExprPtr>{fieldExpr, valExprLower});
+
+      auto valExprUpper = std::make_shared<ConstantTypedExpr>(
+          fieldExpr->type(), variant(upper));
+      upperExpr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "lte", std::vector<TypedExprPtr>{fieldExpr, valExprUpper});
+
+      if (lowerExpr && upperExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      }
+      break;
+    }
+    case FilterKind::kNegatedTimestampRange: {
+      auto* range = static_cast<const NegatedTimestampRange*>(filter);
+      auto lower = range->lower();
+      auto upper = range->upper();
+
+      TypedExprPtr lowerExpr = nullptr;
+      TypedExprPtr upperExpr = nullptr;
+
+      auto valExprLower = std::make_shared<ConstantTypedExpr>(
+          fieldExpr->type(), variant(lower));
+      lowerExpr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "gte", std::vector<TypedExprPtr>{fieldExpr, valExprLower});
+
+      auto valExprUpper = std::make_shared<ConstantTypedExpr>(
+          fieldExpr->type(), variant(upper));
+      upperExpr = std::make_shared<CallTypedExpr>(
+          BOOLEAN(), "lte", std::vector<TypedExprPtr>{fieldExpr, valExprUpper});
+
+      TypedExprPtr rangeExpr = nullptr;
+      if (lowerExpr && upperExpr) {
+        rangeExpr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "and", std::vector<TypedExprPtr>{lowerExpr, upperExpr});
+      }
+
+      if (rangeExpr) {
+        expr = std::make_shared<CallTypedExpr>(
+            BOOLEAN(), "not", std::vector<TypedExprPtr>{rangeExpr});
+      }
+      break;
+    }
+    default:
+      // Other filters not supported yet
+      return nullptr;
+  }
+
+  if (expr && filter->testNull() && filter->kind() != FilterKind::kIsNull) {
+    auto isNullExpr = std::make_shared<CallTypedExpr>(
+        BOOLEAN(), "is_null", std::vector<TypedExprPtr>{fieldExpr});
+    expr = std::make_shared<CallTypedExpr>(
+        BOOLEAN(), "or", std::vector<TypedExprPtr>{expr, isNullExpr});
+  }
+
+  if (expr) {
+    LOG(INFO) << "Converted filter kind=" << (int)filter->kind()
+              << " testNull=" << filter->testNull()
+              << " to expr=" << expr->toString();
+  } else {
+    LOG(INFO) << "Failed to convert filter kind=" << (int)filter->kind();
+  }
+
+  return expr;
+}
+
+} // namespace
+
+core::TypedExprPtr convertFiltersToExpr(
+    const common::SubfieldFilters& filters,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<connector::ColumnHandle>>& columnHandles,
+    const RowTypePtr& dataColumns,
+    const core::TypedExprPtr& baseExpr) {
+  std::vector<core::TypedExprPtr> exprs;
+  for (const auto& [subfield, filter] : filters) {
+    if (auto expr =
+            filterToExpr(subfield, filter.get(), columnHandles, dataColumns)) {
+      exprs.push_back(expr);
+    }
+  }
+
+  core::TypedExprPtr filtersExpr = nullptr;
+  if (!exprs.empty()) {
+    filtersExpr = exprs[0];
+    for (size_t i = 1; i < exprs.size(); ++i) {
+      filtersExpr = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(),
+          "and",
+          std::vector<core::TypedExprPtr>{filtersExpr, exprs[i]});
+    }
+  }
+
+  if (!baseExpr) {
+    return filtersExpr;
+  }
+  if (!filtersExpr) {
+    return baseExpr;
+  }
+  return std::make_shared<core::CallTypedExpr>(
+      BOOLEAN(), "and", std::vector<core::TypedExprPtr>{baseExpr, filtersExpr});
 }
 
 } // namespace bytedance::bolt::connector::hive

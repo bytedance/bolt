@@ -44,11 +44,249 @@
 #include "bolt/connectors/hive/SplitReader.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/common/exception/Exception.h"
+#include "bolt/expression/EvalCtx.h"
 #include "bolt/expression/FieldReference.h"
+#include "bolt/type/Filter.h"
 namespace bytedance::bolt::connector::hive {
 
 class HiveTableHandle;
 class HiveColumnHandle;
+
+namespace {
+bool tryMakeMapKeyPruningExpr(
+    const RowTypePtr& readerOutputType,
+    const std::string& columnName,
+    const common::Filter* keyFilter,
+    column_index_t& channel,
+    core::TypedExprPtr& out) {
+  if (keyFilter == nullptr) {
+    return false;
+  }
+
+  auto childIndex = readerOutputType->getChildIdxIfExists(columnName);
+  if (!childIndex.has_value()) {
+    return false;
+  }
+
+  auto mapType = readerOutputType->childAt(childIndex.value());
+  if (!mapType->isMap()) {
+    return false;
+  }
+
+  auto keyType = mapType->childAt(0);
+  auto valueType = mapType->childAt(1);
+
+  // Helper lambda to build constant expressions from a vector of values
+  auto buildInArgs = [&](const auto& values) {
+    std::vector<core::TypedExprPtr> inArgs;
+    inArgs.reserve(values.size() + 1);
+    auto kExpr = std::make_shared<core::FieldAccessTypedExpr>(keyType, "k");
+    inArgs.push_back(kExpr);
+    for (const auto& key : values) {
+      inArgs.push_back(
+          std::make_shared<core::ConstantTypedExpr>(keyType, variant(key)));
+    }
+    return inArgs;
+  };
+
+  // Helper to build map_filter expression
+  auto buildMapFilter = [&](core::TypedExprPtr body) {
+    auto mapExpr =
+        std::make_shared<core::FieldAccessTypedExpr>(mapType, columnName);
+    auto lambda = std::make_shared<core::LambdaTypedExpr>(
+        ROW({"k", "v"}, {keyType, valueType}), std::move(body));
+    return std::make_shared<core::CallTypedExpr>(
+        mapType,
+        "map_filter",
+        std::vector<core::TypedExprPtr>{mapExpr, lambda});
+  };
+
+  // Handle numeric keys (bigint)
+  if (keyType->isBigint()) {
+    std::vector<int64_t> allowedKeys;
+    bool hasKeys = false;
+
+    if (auto* range = dynamic_cast<const common::BigintRange*>(keyFilter)) {
+      const int64_t lower = range->lower();
+      const int64_t upper = range->upper();
+      // Increased range limit from 1024 to 4096 for better pruning
+      const int64_t MAX_RANGE_SIZE = 4096;
+      if (lower <= upper && upper - lower <= MAX_RANGE_SIZE) {
+        allowedKeys.reserve(upper - lower + 1);
+        for (int64_t v = lower; v <= upper; ++v) {
+          allowedKeys.push_back(v);
+        }
+        hasKeys = true;
+      }
+    } else if (
+        auto* valuesFilter =
+            dynamic_cast<const common::IFilterWithValues<int64_t>*>(
+                keyFilter)) {
+      allowedKeys = valuesFilter->values();
+      hasKeys = !allowedKeys.empty();
+    }
+
+    if (hasKeys) {
+      auto inArgs = buildInArgs(allowedKeys);
+      auto inCall = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(), "in", std::move(inArgs));
+      out = buildMapFilter(std::move(inCall));
+      channel = childIndex.value();
+      return true;
+    }
+  }
+  // Handle string keys (varchar)
+  else if (keyType->isVarchar()) {
+    std::vector<std::string> allowedKeys;
+    bool hasKeys = false;
+
+    if (auto* valuesFilter =
+            dynamic_cast<const common::IFilterWithValues<std::string>*>(
+                keyFilter)) {
+      allowedKeys = valuesFilter->values();
+      hasKeys = !allowedKeys.empty();
+    }
+
+    if (hasKeys) {
+      auto inArgs = buildInArgs(allowedKeys);
+      auto inCall = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(), "in", std::move(inArgs));
+      out = buildMapFilter(std::move(inCall));
+      channel = childIndex.value();
+      return true;
+    }
+    // For string ranges, we can use the between operator
+    else if (auto* range = dynamic_cast<const common::BytesRange*>(keyFilter)) {
+      auto kExpr = std::make_shared<core::FieldAccessTypedExpr>(keyType, "k");
+      auto lowerExpr = std::make_shared<core::ConstantTypedExpr>(
+          keyType, variant(range->lower()));
+      auto upperExpr = std::make_shared<core::ConstantTypedExpr>(
+          keyType, variant(range->upper()));
+
+      std::vector<core::TypedExprPtr> betweenArgs;
+      betweenArgs.push_back(kExpr);
+      betweenArgs.push_back(lowerExpr);
+      betweenArgs.push_back(upperExpr);
+
+      auto betweenCall = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(), "between", std::move(betweenArgs));
+      out = buildMapFilter(std::move(betweenCall));
+      channel = childIndex.value();
+      return true;
+    }
+  }
+
+  return false;
+}
+
+int64_t extractAttemptNumber(const std::string& taskId) {
+  const std::string prefix = "ATTEMPT_";
+  size_t prefixPos = taskId.find(prefix);
+
+  if (prefixPos == std::string::npos) {
+    return -1;
+  }
+
+  size_t numStart = prefixPos + prefix.length();
+  size_t numEnd = numStart;
+
+  while (numEnd < taskId.length() && std::isdigit(taskId[numEnd])) {
+    numEnd++;
+  }
+
+  if (numEnd == numStart) {
+    return -1;
+  }
+
+  try {
+    return std::stoi(taskId.substr(numStart, numEnd - numStart));
+  } catch (...) {
+    return -1;
+  }
+  return -1;
+}
+
+void collectScanSpecRowGroupFilters(
+    const common::ScanSpec& spec,
+    std::vector<std::string>& path,
+    common::SubfieldFilters& out,
+    std::vector<std::pair<std::string, std::unique_ptr<common::Filter>>>&
+        mapKeysRowGroupFilters) {
+  const bool pushed = spec.fieldName() != "root" &&
+      spec.fieldName() != common::ScanSpec::kMapKeysFieldName &&
+      spec.fieldName() != common::ScanSpec::kMapValuesFieldName &&
+      spec.fieldName() != common::ScanSpec::kArrayElementsFieldName;
+  if (pushed) {
+    path.push_back(spec.fieldName());
+  }
+
+  if (auto* filter = spec.rowGroupFilter()) {
+    const bool isMapKeysPruningFilter =
+        spec.fieldName() == common::ScanSpec::kMapKeysFieldName &&
+        spec.channel() == common::ScanSpec::kNoChannel;
+    if (isMapKeysPruningFilter && !path.empty()) {
+      mapKeysRowGroupFilters.emplace_back(path.front(), filter->clone());
+    } else if (!path.empty()) {
+      std::string subfieldPath = path.front();
+      for (size_t i = 1; i < path.size(); ++i) {
+        subfieldPath.append(".").append(path[i]);
+      }
+      out[common::Subfield(subfieldPath)] = filter->clone();
+    }
+  }
+
+  for (const auto& child : spec.children()) {
+    collectScanSpecRowGroupFilters(*child, path, out, mapKeysRowGroupFilters);
+  }
+
+  if (pushed) {
+    path.pop_back();
+  }
+}
+
+void buildMapKeyPruningExprs(
+    const std::shared_ptr<common::ScanSpec>& scanSpec,
+    const RowTypePtr& readerOutputType,
+    std::vector<std::pair<column_index_t, core::TypedExprPtr>>& out) {
+  out.clear();
+
+  common::SubfieldFilters scanSpecRowGroupFilters;
+  std::vector<std::string> scanSpecPath;
+  std::vector<std::pair<std::string, std::unique_ptr<common::Filter>>>
+      mapKeysRowGroupFilters;
+  collectScanSpecRowGroupFilters(
+      *scanSpec, scanSpecPath, scanSpecRowGroupFilters, mapKeysRowGroupFilters);
+
+  for (auto& [columnName, keyFilter] : mapKeysRowGroupFilters) {
+    column_index_t channel;
+    core::TypedExprPtr expr;
+    if (tryMakeMapKeyPruningExpr(
+            readerOutputType, columnName, keyFilter.get(), channel, expr)) {
+      out.emplace_back(channel, std::move(expr));
+    }
+  }
+}
+
+#ifdef BOLT_ENABLE_HDFS
+void enrichExceptionSetFromConf(
+    std::string exceptionStr,
+    std::vector<std::string>& exceptionKeyWords) {
+  // only init exceptionSet exactly once
+  if (exceptionStr.empty() || !exceptionKeyWords.empty()) {
+    return;
+  }
+
+  const char delimeter = exceptionStr.back();
+  exceptionStr.pop_back();
+  folly::split(delimeter, exceptionStr, exceptionKeyWords);
+
+  LOG(INFO) << "Split exception str by " << static_cast<char>(delimeter)
+            << ", and split result is: "
+            << fmt::format("{}", fmt::join(exceptionKeyWords, ", "));
+}
+#endif
+
+} // namespace
 
 HiveDataSource::HiveDataSource(
     const RowTypePtr& outputType,
@@ -68,7 +306,8 @@ HiveDataSource::HiveDataSource(
       hiveConfig_(hiveConfig),
       outputType_(outputType),
       expressionEvaluator_(connectorQueryCtx->expressionEvaluator()),
-      runtimeStats_(std::make_unique<dwio::common::RuntimeStatistics>()) {
+      runtimeStats_(std::make_unique<dwio::common::RuntimeStatistics>()),
+      columnHandles_(columnHandles) {
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -140,15 +379,32 @@ HiveDataSource::HiveDataSource(
     filters.emplace(k.clone(), v->clone());
   }
   auto remainingFilter = hiveTableHandle_->remainingFilter();
+  auto remainingFilterRet = hiveTableHandle_->remainingFilter();
+
   if (hiveTableHandle_->isFilterPushdownEnabled()) {
-    remainingFilter = hive::extractFiltersFromRemainingFilter(
-        hiveTableHandle_->remainingFilter(), expressionEvaluator_, filters);
+    remainingFilterRet = hive::extractFiltersFromRemainingFilter(
+        remainingFilter, expressionEvaluator_, filters);
   }
+
+  // User requested to evaluate all filters in the remaining filter.
+  // So we just use the original filter as remaining filter, incorporating both
+  // subfield filters (that were extracted) and the residual remaining filters.
+  // We also explicitly reconstruct expressions from subfield filters to ensure
+  // everything is covered.
+
+  remainingFilter = convertFiltersToExpr(
+      filters,
+      columnHandles,
+      hiveTableHandle_->dataColumns(),
+      remainingFilterRet);
+
+  currentRemainingFilter_ = remainingFilter;
 
   std::vector<common::Subfield> remainingFilterSubfields;
   if (remainingFilter) {
-    remainingFilterExprSet_ = expressionEvaluator_->compile(remainingFilter);
-    auto& remainingFilterExpr = remainingFilterExprSet_->expr(0);
+    auto remainingFilterExprSet =
+        expressionEvaluator_->compile(remainingFilter);
+    auto& remainingFilterExpr = remainingFilterExprSet->expr(0);
     folly::F14FastSet<std::string> columnNames(
         readerRowNames.begin(), readerRowNames.end());
     for (auto& input : remainingFilterExpr->distinctFields()) {
@@ -167,15 +423,17 @@ HiveDataSource::HiveDataSource(
           "Extracted subfields from remaining filter: [{}]",
           fmt::join(remainingFilterSubfields, ", "));
     }
-    for (auto& subfield : remainingFilterSubfields) {
-      auto& name = getColumnName(subfield);
-      auto it = subfields.find(name);
-      if (it != subfields.end()) {
-        // Only subfields of the column are projected out.
-        it->second.push_back(&subfield);
-      } else if (columnNames.count(name) == 0) {
-        // Column appears only in remaining filter.
-        subfields[name].push_back(&subfield);
+    if (remainingFilterRet) {
+      for (auto& subfield : remainingFilterSubfields) {
+        auto& name = getColumnName(subfield);
+        auto it = subfields.find(name);
+        if (it != subfields.end()) {
+          // Only subfields of the column are projected out.
+          it->second.push_back(&subfield);
+        } else if (columnNames.count(name) == 0) {
+          // Column appears only in remaining filter.
+          subfields[name].push_back(&subfield);
+        }
       }
     }
   }
@@ -209,18 +467,59 @@ HiveDataSource::HiveDataSource(
       expressionEvaluator_,
       runtimeStats_.get(),
       rowIndexColumns);
-  if (remainingFilter) {
+
+  buildMapKeyPruningExprs(scanSpec_, readerOutputType_, mapKeyPruningExprs_);
+  if (remainingFilterRet) {
     bool enableMapSubscriptFilter =
         queryConfig.mapSubscriptFilterPushdownEnabled();
     metadataFilter_ = std::make_shared<common::MetadataFilter>(
         *scanSpec_,
-        *remainingFilter,
+        *remainingFilterRet,
         expressionEvaluator_,
         enableMapSubscriptFilter);
   }
 
+  rebuildPostScanExprSet();
   recalculateRepDefConf(readerOutputType_, queryConfig);
   ioStats_ = std::make_shared<io::IoStatistics>();
+}
+
+void HiveDataSource::rebuildPostScanExprSet() {
+  postScanExprSet_.reset();
+  postScanPruningChannels_.clear();
+  postScanFilterExprIndex_ = -1;
+
+  std::vector<core::TypedExprPtr> exprs;
+  exprs.reserve(mapKeyPruningExprs_.size() + (currentRemainingFilter_ ? 1 : 0));
+  postScanPruningChannels_.reserve(mapKeyPruningExprs_.size());
+
+  for (auto& [channel, expr] : mapKeyPruningExprs_) {
+    postScanPruningChannels_.push_back(channel);
+    exprs.push_back(expr);
+  }
+
+  if (currentRemainingFilter_) {
+    postScanFilterExprIndex_ = exprs.size();
+    exprs.push_back(currentRemainingFilter_);
+  }
+
+  if (exprs.empty()) {
+    return;
+  }
+
+  if (exprs.size() == 1) {
+    postScanExprSet_ = expressionEvaluator_->compile(exprs[0]);
+    return;
+  }
+
+  auto seed = expressionEvaluator_->compile(exprs[0]);
+  auto* execCtx = seed->execCtx();
+  if (dynamic_cast<exec::ExprSetSimplified*>(seed.get()) != nullptr) {
+    postScanExprSet_ =
+        std::make_unique<exec::ExprSetSimplified>(exprs, execCtx);
+    return;
+  }
+  postScanExprSet_ = std::make_unique<exec::ExprSet>(exprs, execCtx);
 }
 
 bool judgeTableAndPartitionInRange(
@@ -656,30 +955,76 @@ std::optional<RowVectorPtr> HiveDataSource::next(
     }
 
     auto rowVector = std::dynamic_pointer_cast<RowVector>(output_);
-
     // In case there is a remaining filter that excludes some but not all
     // rows, collect the indices of the passing rows. If there is no filter,
     // or it passes on all rows, leave this as null and let exec::wrap skip
     // wrapping the results.
     BufferPtr remainingIndices;
-    if (remainingFilterExprSet_) {
-      rowsRemaining = evaluateRemainingFilter(rowVector);
-      BOLT_CHECK_LE(rowsRemaining, rowsScanned);
-      if (rowsRemaining == 0) {
-        // No rows passed the remaining filter.
-        output_->prepareForReuse();
-        return getEmptyOutput();
+    if (postScanExprSet_) {
+      std::vector<VectorPtr> results(postScanExprSet_->size());
+      bool initialized = false;
+
+      const int32_t pruningCount =
+          static_cast<int32_t>(postScanPruningChannels_.size());
+      if (pruningCount > 0) {
+        SelectivityVector rows(rowVector->size());
+        rows.setAll();
+        exec::EvalCtx ctx(
+            postScanExprSet_->execCtx(),
+            postScanExprSet_.get(),
+            rowVector.get(),
+            currentSplitStr_);
+        postScanExprSet_->eval(0, pruningCount, true, rows, ctx, results);
+        initialized = true;
+        for (int32_t i = 0; i < pruningCount; ++i) {
+          rowVector->childAt(postScanPruningChannels_[i]) = results[i];
+        }
       }
 
-      if (rowsRemaining < rowVector->size()) {
-        // Some, but not all rows passed the remaining filter.
-        remainingIndices = filterEvalCtx_.selectedIndices;
+      if (postScanFilterExprIndex_ != -1) {
+        const auto filterStartMicros = getCurrentTimeMicro();
+        filterRows_.resize(rowVector->size());
+        filterRows_.setAll();
+        exec::EvalCtx ctx(
+            postScanExprSet_->execCtx(),
+            postScanExprSet_.get(),
+            rowVector.get(),
+            currentSplitStr_);
+        postScanExprSet_->eval(
+            postScanFilterExprIndex_,
+            postScanFilterExprIndex_ + 1,
+            !initialized,
+            filterRows_,
+            ctx,
+            results);
+        filterResult_ = results[postScanFilterExprIndex_];
+        rowsRemaining = exec::processFilterResults(
+            filterResult_, filterRows_, filterEvalCtx_, pool_);
+        totalRemainingFilterTime_.fetch_add(
+            (getCurrentTimeMicro() - filterStartMicros) * 1000,
+            std::memory_order_relaxed);
+
+        BOLT_CHECK_LE(rowsRemaining, rowsScanned);
+        if (rowsRemaining == 0) {
+          // No rows passed the remaining filter.
+          output_->prepareForReuse();
+          return getEmptyOutput();
+        }
+
+        if (rowsRemaining < rowVector->size()) {
+          // Some, but not all rows passed the remaining filter.
+          remainingIndices = filterEvalCtx_.selectedIndices;
+        }
       }
     }
 
     if (outputType_->size() == 0) {
-      return exec::wrapAndCombineDict(
-          rowsRemaining, remainingIndices, rowVector);
+      return std::make_shared<RowVector>(
+          pool_,
+          outputType_,
+          BufferPtr(nullptr),
+          rowsRemaining,
+          std::vector<VectorPtr>{});
     }
 
     std::vector<VectorPtr> outputColumns;
@@ -711,6 +1056,40 @@ void HiveDataSource::addDynamicFilter(
   scanSpec_->resetCachedValues(true);
   if (splitReader_) {
     splitReader_->resetFilterCaches();
+  }
+
+  // Convert dynamic filter to expression and stack it
+  auto columnName = outputType_->nameOf(outputChannel);
+  common::Subfield subfield(columnName);
+  common::SubfieldFilters filters;
+  filters.emplace(std::move(subfield), filter->clone());
+
+  RowTypePtr schema = hiveTableHandle_->dataColumns();
+  if (!schema || schema->size() == 0) {
+    LOG(WARNING)
+        << "HiveTableHandle dataColumns is empty. Falling back to outputType for dynamic filter generation.";
+    schema = outputType_;
+  }
+
+  auto dynamicExpr = convertFiltersToExpr(filters, columnHandles_, schema);
+
+  if (!dynamicExpr) {
+    LOG(WARNING) << "Failed to generate dynamic expression for column: "
+                 << columnName;
+  }
+
+  if (dynamicExpr) {
+    if (currentRemainingFilter_) {
+      currentRemainingFilter_ = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(),
+          "and",
+          std::vector<core::TypedExprPtr>{
+              currentRemainingFilter_, dynamicExpr});
+    } else {
+      currentRemainingFilter_ = dynamicExpr;
+    }
+
+    rebuildPostScanExprSet();
   }
 }
 
@@ -833,24 +1212,6 @@ int64_t HiveDataSource::estimatedRowSize() {
     return kUnknownRowSize;
   }
   return splitReader_->estimatedRowSize();
-}
-
-vector_size_t HiveDataSource::evaluateRemainingFilter(RowVectorPtr& rowVector) {
-  auto filterStartMicros = getCurrentTimeMicro();
-  filterRows_.resize(output_->size());
-
-  expressionEvaluator_->evaluate(
-      remainingFilterExprSet_.get(),
-      filterRows_,
-      *rowVector,
-      filterResult_,
-      currentSplitStr_);
-  auto res = exec::processFilterResults(
-      filterResult_, filterRows_, filterEvalCtx_, pool_);
-  totalRemainingFilterTime_.fetch_add(
-      (getCurrentTimeMicro() - filterStartMicros) * 1000,
-      std::memory_order_relaxed);
-  return res;
 }
 
 void HiveDataSource::resetSplit() {

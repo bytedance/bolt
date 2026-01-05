@@ -74,9 +74,10 @@ void ParquetData::filterRowGroups(
         << "Skipping row group filter for VARCHAR column without logical type";
     return;
   }
-  if (scanSpec.filter() || scanSpec.numMetadataFilters() > 0) {
+  if (scanSpec.rowGroupFilter() || scanSpec.numMetadataFilters() > 0) {
     for (auto i = 0; i < rowGroups_.size(); ++i) {
-      if (scanSpec.filter() && !rowGroupMatches(i, scanSpec.filter(), input)) {
+      if (scanSpec.rowGroupFilter() &&
+          !rowGroupMatches(i, scanSpec.rowGroupFilter(), input)) {
         bits::setBit(result.filterResult.data(), i);
         continue;
       }

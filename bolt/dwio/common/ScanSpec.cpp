@@ -43,6 +43,7 @@ ScanSpec& ScanSpec::operator=(const ScanSpec& other) {
     extractValues_ = other.extractValues_;
     makeFlat_ = other.makeFlat_;
     filter_ = other.filter_;
+    rowGroupFilter_ = other.rowGroupFilter_;
     metadataFilters_ = other.metadataFilters_;
     selectivity_ = other.selectivity_;
     enableFilterReorder_ = other.enableFilterReorder_;
@@ -188,6 +189,7 @@ void ScanSpec::moveAdaptationFrom(ScanSpec& other) {
           // 'child' is constant there is no adaptation that can be
           // received.
           child->filter_ = std::move(otherChild->filter_);
+          child->rowGroupFilter_ = otherChild->rowGroupFilter_;
           child->selectivity_ = otherChild->selectivity_;
           child->isRowIndex_ = otherChild->isRowIndex_;
           child->rowIndexBase_ = otherChild->rowIndexBase_;
@@ -524,6 +526,8 @@ std::shared_ptr<ScanSpec> ScanSpec::removeChild(const ScanSpec* child) {
 
 void ScanSpec::addFilter(const Filter& filter) {
   filter_ = filter_ ? filter_->mergeWith(&filter) : filter.clone();
+  rowGroupFilter_ =
+      rowGroupFilter_ ? rowGroupFilter_->mergeWith(&filter) : filter.clone();
 }
 
 ScanSpec* ScanSpec::addField(const std::string& name, column_index_t channel) {
