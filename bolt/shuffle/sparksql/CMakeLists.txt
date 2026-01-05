@@ -59,6 +59,9 @@ if(BOLT_ENABLE_CELEBORN_CPP_CLIENT)
     CelebornReaderStreamIterator.cpp
     partition_writer/rss/NativeCelebornClient.cpp)
   find_package(celeborn-cpp-client CONFIG REQUIRED)
+  target_link_libraries(
+    bolt_shuffle_spark_impl
+    PUBLIC celeborn-cpp-client::celeborn-cpp-client)
 endif()
 
 add_library(bolt_shuffle_spark_impl ${bolt_shuffle_spark_impl_sources})
@@ -66,12 +69,6 @@ add_library(bolt_shuffle_spark_impl ${bolt_shuffle_spark_impl_sources})
 target_link_libraries(
   bolt_shuffle_spark_impl
   PUBLIC arrow::arrow ryu::ryu bolt_vector bolt_core bolt_exec)
-
-if(BOLT_ENABLE_CELEBORN_CPP_CLIENT)
-  target_link_libraries(
-    bolt_shuffle_spark_impl
-    PUBLIC celeborn-cpp-client::celeborn-cpp-client)
-endif()
 
 target_compile_definitions(
   bolt_shuffle_spark_impl
