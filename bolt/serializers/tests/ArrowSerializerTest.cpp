@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,17 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "../ArrowSerializer.h"
+#include "bolt/serializers/ArrowSerializer.h"
 #include <folly/Random.h>
 #include <gtest/gtest.h>
 #include <vector>
-#include "bolt/serializers/ArrowSerializer.h"
 
-#include "../../functions/prestosql/benchmarks/JsonBenchmarkUtil.h"
-// #include "../PrestoSerializer.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/time/Timer.h"
+#include "bolt/functions/prestosql/benchmarks/JsonBenchmarkUtil.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
