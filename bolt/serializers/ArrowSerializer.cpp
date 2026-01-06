@@ -143,8 +143,11 @@ class BoltArrowOutputStream : public ::arrow::io::OutputStream {
 
 class BoltArrowInputStream : public ::arrow::io::InputStream {
  public:
-  BoltArrowInputStream(bytedance::bolt::ByteInputStream* src, int64_t limit)
-      : src_(src), remaining_(limit) {}
+  BoltArrowInputStream(
+      bytedance::bolt::ByteInputStream* src,
+      int64_t limit,
+      memory::MemoryPool* pool)
+      : src_(src), remaining_(limit), pool_(pool) {}
 
   ::arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     if (closed_)
@@ -190,12 +193,16 @@ class BoltArrowInputStream : public ::arrow::io::InputStream {
       return ::arrow::AllocateBuffer(0);
     }
     int64_t want = std::min<int64_t>(nbytes, remaining_);
-    ARROW_ASSIGN_OR_RAISE(auto buf, ::arrow::AllocateResizableBuffer(want));
-    ARROW_ASSIGN_OR_RAISE(auto got, Read(buf->size(), buf->mutable_data()));
-    if (got < buf->size()) {
-      ARROW_RETURN_NOT_OK(buf->Resize(got, true));
-    }
-    return buf;
+    auto buffer = AlignedBuffer::allocate<char>(want, pool_);
+    ARROW_ASSIGN_OR_RAISE(auto got, Read(want, buffer->asMutable<char>()));
+    auto rawBuffer = buffer->as<uint8_t>();
+    auto arrowBuffer = std::shared_ptr<::arrow::Buffer>(
+        new ::arrow::Buffer(rawBuffer, static_cast<int64_t>(got)),
+        [buf = std::move(buffer)](::arrow::Buffer* p) {
+          delete p;
+          // buf will be released when go out of scope
+        });
+    return arrowBuffer;
   }
 
   ::arrow::Result<int64_t> Tell() const override {
@@ -214,6 +221,7 @@ class BoltArrowInputStream : public ::arrow::io::InputStream {
   int64_t remaining_;
   int64_t pos_{0};
   bool closed_{false};
+  memory::MemoryPool* pool_;
 };
 
 ArrowVectorSerde::ArrowSerdeOptions toArrowSerdeOptions(
@@ -1212,7 +1220,7 @@ void ArrowVectorSerde::deserialize(
           << " compressedSize=" << sizeInBytes;
   std::shared_ptr<::arrow::ipc::RecordBatchReader> reader;
   if (!isCompressed) {
-    auto in = std::make_shared<BoltArrowInputStream>(source, bodyLen);
+    auto in = std::make_shared<BoltArrowInputStream>(source, bodyLen, pool);
     auto openRes = ::arrow::ipc::RecordBatchStreamReader::Open(in);
     BOLT_USER_CHECK(
         openRes.ok(),

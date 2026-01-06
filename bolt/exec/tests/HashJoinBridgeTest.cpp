@@ -138,6 +138,7 @@ class HashJoinBridgeTest : public testing::Test,
            1,
            std::vector<CompareFlags>({}),
            common::CompressionKind_NONE,
+           std::nullopt,
            std::nullopt});
     }
     return files;
