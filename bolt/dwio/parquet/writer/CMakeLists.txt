@@ -25,9 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-
-add_subdirectory(arrow)
-
 add_library(bolt_dwio_arrow_parquet_writer Writer.cpp ArrowDataBufferSink.cpp)
 
 find_package(Snappy CONFIG REQUIRED)

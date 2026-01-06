@@ -33,7 +33,7 @@
 
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/SelectiveStructColumnReader.h"
-#include "bolt/dwio/parquet/writer/arrow/LevelConversion.h"
+#include "bolt/dwio/parquet/arrow/LevelConversion.h"
 namespace bytedance::bolt::dwio::common {
 class BufferedInput;
 }

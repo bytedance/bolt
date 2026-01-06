@@ -18,7 +18,7 @@
 #include <arrow/buffer.h>
 #include <arrow/c/bridge.h>
 #include <arrow/csv/api.h>
-#include "bolt/dwio/parquet/writer/arrow/Exception.h"
+#include "bolt/dwio/parquet/arrow/Exception.h"
 #include "bolt/exec/MemoryReclaimer.h"
 
 namespace bytedance::bolt::txt::writer {

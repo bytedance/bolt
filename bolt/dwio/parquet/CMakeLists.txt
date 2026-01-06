@@ -29,6 +29,7 @@
 if(BOLT_ENABLE_PARQUET)
   add_subdirectory(thrift)
   add_subdirectory(reader)
+  add_subdirectory(arrow)
   add_subdirectory(writer)
   if(${BOLT_BUILD_TESTING})
     add_subdirectory(fuzzer)

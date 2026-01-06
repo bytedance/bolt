@@ -32,8 +32,8 @@
 #pragma once
 
 #include "bolt/dwio/common/TypeWithId.h"
+#include "bolt/dwio/parquet/arrow/LevelConversion.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
-#include "bolt/dwio/parquet/writer/arrow/LevelConversion.h"
 namespace bytedance::bolt::parquet {
 
 /// Describes what to extract from leaf repetition / definition

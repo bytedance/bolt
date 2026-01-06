@@ -16,7 +16,7 @@
 
 #ifdef ENABLE_BOLT_JIT
 
-#include <dwio/parquet/writer/arrow/util/safe-math.h>
+#include <dwio/parquet/arrow/util/safe-math.h>
 #include <type/Type.h>
 
 #include <gtest/gtest.h>

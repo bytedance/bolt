@@ -19,9 +19,9 @@
 #include "bolt/dwio/common/Statistics.h"
 #include "bolt/dwio/common/tests/utils/DataSetBuilder.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
+#include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/dwio/parquet/writer/arrow/Properties.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/Benchmark.h>

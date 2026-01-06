@@ -40,9 +40,9 @@
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/Writer.h"
 #include "bolt/dwio/common/WriterFactory.h"
-#include "bolt/dwio/parquet/writer/arrow/Properties.h"
-#include "bolt/dwio/parquet/writer/arrow/Types.h"
-#include "bolt/dwio/parquet/writer/arrow/util/Compression.h"
+#include "bolt/dwio/parquet/arrow/Properties.h"
+#include "bolt/dwio/parquet/arrow/Types.h"
+#include "bolt/dwio/parquet/arrow/util/Compression.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/arrow/Bridge.h"
 namespace bytedance::bolt::parquet {
