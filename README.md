@@ -1,6 +1,6 @@
 <img src="static/logo.png" alt="Bolt logo" width="100%" align="center" />
 
-Bolt is a C++ acceleration library providing composable, extensible and performant data processing toolkit. It is designed to provide generic and unified interfaces which can be pluggable into "any framework" running on "any harware" to consume "any data source".
+Bolt is a C++ acceleration library providing composable, extensible and performant data processing toolkit. It is designed to provide generic and unified interfaces which can be pluggable into "any framework" running on "any hardware" to consume "any data source".
 
 Initially derived from [Velox](https://github.com/facebookincubator/velox) project, Bolt is created by ByteDance to embrace and unify the contributions from the community. It has been validated on Spark/Flink/Presto/ElasticSearch framework running on x64&ARM CPU/DPU/GPU accessing Parquet/ORC/Text/CSV/Lance file format managed under Hive/Paimon table to provide enterprise-grade cost optimization, results consistency and feature parity
 
