@@ -33,6 +33,7 @@
 
 #include <date/tz.h>
 #include <gmock/gmock.h>
+#include <cstdint>
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -282,49 +283,49 @@ TEST(DateTimeUtilTest, fromTimestampWithTimezoneString) {
   // -1 means no timezone information.
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:00:00"),
-      std::make_pair(Timestamp(0, 0), -1L));
+      std::make_pair(Timestamp(0, 0), (int16_t)-1));
 
   // Test timezone offsets.
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:00:00 -02:00"),
-      std::make_pair(Timestamp(0, 0), util::getTimeZoneID("-02:00")));
+      std::make_pair(Timestamp(0, 0), tz::getTimeZoneID("-02:00")));
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:00:00+13:36"),
-      std::make_pair(Timestamp(0, 0), util::getTimeZoneID("+13:36")));
+      std::make_pair(Timestamp(0, 0), tz::getTimeZoneID("+13:36")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:00:00Z"),
-      std::make_pair(Timestamp(0, 0), util::getTimeZoneID("UTC")));
+      std::make_pair(Timestamp(0, 0), tz::getTimeZoneID("UTC")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01T00:00:00Z"),
-      std::make_pair(Timestamp(0, 0), util::getTimeZoneID("UTC")));
+      std::make_pair(Timestamp(0, 0), tz::getTimeZoneID("UTC")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:01:00 UTC"),
-      std::make_pair(Timestamp(60, 0), util::getTimeZoneID("UTC")));
+      std::make_pair(Timestamp(60, 0), tz::getTimeZoneID("UTC")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:01:00 UTC-02:00"),
-      std::make_pair(Timestamp(60, 0), util::getTimeZoneID("-02:00")));
+      std::make_pair(Timestamp(60, 0), tz::getTimeZoneID("-02:00")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:01:00 UT-02:00"),
-      std::make_pair(Timestamp(60, 0), util::getTimeZoneID("-02:00")));
+      std::make_pair(Timestamp(60, 0), tz::getTimeZoneID("-02:00")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString("1970-01-01 00:01:00 GMT+13:36"),
-      std::make_pair(Timestamp(60, 0), util::getTimeZoneID("+13:36")));
+      std::make_pair(Timestamp(60, 0), tz::getTimeZoneID("+13:36")));
 
   EXPECT_EQ(
       fromTimestampWithTimezoneString(
           "1970-01-01 00:00:01 America/Los_Angeles"),
       std::make_pair(
-          Timestamp(1, 0), util::getTimeZoneID("America/Los_Angeles")));
+          Timestamp(1, 0), tz::getTimeZoneID("America/Los_Angeles")));
 }
 
 TEST(DateTimeUtilTest, toGMT) {
-  auto* laZone = ::date::locate_zone("America/Los_Angeles");
+  auto* laZone = tz::locateZone("America/Los_Angeles");
 
   // The GMT time when LA gets to "1970-01-01 00:00:00" (8h ahead).
   auto ts = fromTimestampString("1970-01-01 00:00:00", nullptr);
@@ -341,12 +342,12 @@ TEST(DateTimeUtilTest, toGMT) {
 
   // To Sao Paulo:
   tsCopy = ts;
-  tsCopy.toGMT(*::date::locate_zone("America/Sao_Paulo"));
+  tsCopy.toGMT(*tz::locateZone("America/Sao_Paulo"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 07:23:37", nullptr));
 
   // Moscow:
   tsCopy = ts;
-  tsCopy.toGMT(*::date::locate_zone("Europe/Moscow"));
+  tsCopy.toGMT(*tz::locateZone("Europe/Moscow"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 01:23:37", nullptr));
 
   // Probe LA's daylight savings boundary (starts at 2021-13-14 02:00am).
@@ -375,7 +376,7 @@ TEST(DateTimeUtilTest, toGMT) {
 }
 
 TEST(DateTimeUtilTest, toTimezone) {
-  auto* laZone = ::date::locate_zone("America/Los_Angeles");
+  auto* laZone = tz::locateZone("America/Los_Angeles");
 
   // The LA time when GMT gets to "1970-01-01 00:00:00" (8h behind).
   auto ts = fromTimestampString("1970-01-01 00:00:00", nullptr);
@@ -392,12 +393,12 @@ TEST(DateTimeUtilTest, toTimezone) {
 
   // To Sao Paulo:
   tsCopy = ts;
-  tsCopy.toTimezone(*::date::locate_zone("America/Sao_Paulo"));
+  tsCopy.toTimezone(*tz::locateZone("America/Sao_Paulo"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 01:23:37", nullptr));
 
   // Moscow:
   tsCopy = ts;
-  tsCopy.toTimezone(*::date::locate_zone("Europe/Moscow"));
+  tsCopy.toTimezone(*tz::locateZone("Europe/Moscow"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 07:23:37", nullptr));
 
   // Probe LA's daylight savings boundary (starts at 2021-13-14 02:00am).
@@ -415,7 +416,7 @@ TEST(DateTimeUtilTest, toTimezone) {
 TEST(DateTimeUtilTest, toGMTFromID) {
   // The GMT time when LA gets to "1970-01-01 00:00:00" (8h ahead).
   auto ts = fromTimestampString("1970-01-01 00:00:00", nullptr);
-  ts.toGMT(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toGMT(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("1970-01-01 08:00:00", nullptr));
 
   // Set on a random date/time and try some variations.
@@ -423,26 +424,26 @@ TEST(DateTimeUtilTest, toGMTFromID) {
 
   // To LA:
   auto tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("America/Los_Angeles"));
+  tsCopy.toGMT(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 11:23:37", nullptr));
 
   // To Sao Paulo:
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("America/Sao_Paulo"));
+  tsCopy.toGMT(tz::getTimeZoneID("America/Sao_Paulo"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 07:23:37", nullptr));
 
   // Moscow:
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("Europe/Moscow"));
+  tsCopy.toGMT(tz::getTimeZoneID("Europe/Moscow"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 01:23:37", nullptr));
 
   // Numerical time zones: +HH:MM and -HH:MM
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("+14:00"));
+  tsCopy.toGMT(tz::getTimeZoneID("+14:00"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-22 14:23:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("-14:00"));
+  tsCopy.toGMT(tz::getTimeZoneID("-14:00"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 18:23:37", nullptr));
 
   tsCopy = ts;
@@ -450,29 +451,29 @@ TEST(DateTimeUtilTest, toGMTFromID) {
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:23:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("-00:01"));
+  tsCopy.toGMT(tz::getTimeZoneID("-00:01"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:24:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toGMT(util::getTimeZoneID("+00:01"));
+  tsCopy.toGMT(tz::getTimeZoneID("+00:01"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:22:37", nullptr));
 
   // Probe LA's daylight savings boundary (starts at 2021-13-14 02:00am).
   // Before it starts, 8h offset:
   ts = fromTimestampString("2021-03-14 00:00:00", nullptr);
-  ts.toGMT(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toGMT(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("2021-03-14 08:00:00", nullptr));
 
   // After it starts, 7h offset:
   ts = fromTimestampString("2021-03-15 00:00:00", nullptr);
-  ts.toGMT(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toGMT(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("2021-03-15 07:00:00", nullptr));
 }
 
 TEST(DateTimeUtilTest, toTimezoneFromID) {
   // The LA time when GMT gets to "1970-01-01 00:00:00" (8h behind).
   auto ts = fromTimestampString("1970-01-01 00:00:00", nullptr);
-  ts.toTimezone(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toTimezone(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("1969-12-31 16:00:00", nullptr));
 
   // Set on a random date/time and try some variations.
@@ -480,26 +481,26 @@ TEST(DateTimeUtilTest, toTimezoneFromID) {
 
   // To LA:
   auto tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("America/Los_Angeles"));
+  tsCopy.toTimezone(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-22 21:23:37", nullptr));
 
   // To Sao Paulo:
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("America/Sao_Paulo"));
+  tsCopy.toTimezone(tz::getTimeZoneID("America/Sao_Paulo"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 01:23:37", nullptr));
 
   // Moscow:
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("Europe/Moscow"));
+  tsCopy.toTimezone(tz::getTimeZoneID("Europe/Moscow"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 07:23:37", nullptr));
 
   // Numerical time zones: +HH:MM and -HH:MM
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("+14:00"));
+  tsCopy.toTimezone(tz::getTimeZoneID("+14:00"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 18:23:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("-14:00"));
+  tsCopy.toTimezone(tz::getTimeZoneID("-14:00"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-22 14:23:37", nullptr));
 
   tsCopy = ts;
@@ -507,22 +508,22 @@ TEST(DateTimeUtilTest, toTimezoneFromID) {
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:23:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("-00:01"));
+  tsCopy.toTimezone(tz::getTimeZoneID("-00:01"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:22:37", nullptr));
 
   tsCopy = ts;
-  tsCopy.toTimezone(util::getTimeZoneID("+00:01"));
+  tsCopy.toTimezone(tz::getTimeZoneID("+00:01"));
   EXPECT_EQ(tsCopy, fromTimestampString("2020-04-23 04:24:37", nullptr));
 
   // Probe LA's daylight savings boundary (starts at 2021-13-14 02:00am).
   // Before it starts, 8h offset:
   ts = fromTimestampString("2021-03-14 00:00:00", nullptr);
-  ts.toTimezone(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toTimezone(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("2021-03-13 16:00:00", nullptr));
 
   // After it starts, 7h offset:
   ts = fromTimestampString("2021-03-15 00:00:00", nullptr);
-  ts.toTimezone(util::getTimeZoneID("America/Los_Angeles"));
+  ts.toTimezone(tz::getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(ts, fromTimestampString("2021-03-14 17:00:00", nullptr));
 }
 

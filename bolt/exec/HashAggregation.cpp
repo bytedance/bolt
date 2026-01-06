@@ -163,15 +163,11 @@ void HashAggregation::initialize() {
         operatorCtx_->operatorId(), rowbasedSpillMode);
   }
 
-  if (isDistinct_) {
-    addRuntimeStat("isDistinctAggregation", RuntimeCounter(1));
-    for (auto i = 0; i < hashers.size(); ++i) {
-      identityProjections_.emplace_back(hashers[i]->channel(), i);
-    }
-  } else {
-    addRuntimeStat("isDistinctAggregation", RuntimeCounter(0));
-  }
+  addRuntimeStat("isDistinctAggregation", RuntimeCounter(isDistinct_));
 
+  for (auto i = 0; i < hashers.size(); ++i) {
+    identityProjections_.emplace_back(hashers[i]->channel(), i);
+  }
   std::optional<column_index_t> groupIdChannel;
   if (aggregationNode_->groupId().has_value()) {
     groupIdChannel = outputType_->getChildIdxIfExists(

@@ -1066,7 +1066,8 @@ bool Window::isSpillableWindowBuild() {
     } else if (
         supportedNonAggFunc.find(sanitizedName) != supportedNonAggFunc.end()) {
       // lead/lag, but offset not 1
-      if (!supportedNonAggWindowFuncOffsetBySpill(windowNodeFunction)) {
+      if (!supportedNonAggWindowFuncOffsetBySpill(windowNodeFunction) ||
+          (windowNodeFunction.ignoreNulls)) {
         // for offset >= 2 in lead/lag, spillableWindow does not support
         // supportedNonAggWindowFuncOffsetBySpill() returns
         // - false if offset >=2

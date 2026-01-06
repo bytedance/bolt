@@ -451,7 +451,7 @@ class PrintfFunction : public exec::VectorFunction {
 
  private:
   void setTimezone(const core::QueryConfig& config) {
-    const ::date::time_zone* sessionTimeZone = getTimeZoneFromConfig(config);
+    const tz::TimeZone* sessionTimeZone = getTimeZoneFromConfig(config);
     if (sessionTimeZone) {
       time_zone_ = sessionTimeZone;
     }
@@ -780,7 +780,7 @@ class PrintfFunction : public exec::VectorFunction {
     return false;
   }
 
-  const ::date::time_zone* time_zone_;
+  const tz::TimeZone* time_zone_;
   int64_t sessionTzOffsetInSeconds_{0};
   constexpr static TimestampToStringOptions timestampToStringOptions_ =
       TimestampToStringOptions{

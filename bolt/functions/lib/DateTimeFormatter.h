@@ -342,11 +342,11 @@ class DateTimeFormatter {
 
   /// Returns max size of the formatted string. Can be used to preallocate
   /// memory before calling format() to avoid extra copy.
-  uint32_t maxResultSize(const ::date::time_zone* timezone) const;
+  uint32_t maxResultSize(const tz::TimeZone* timezone) const;
 
   int32_t format(
       const Timestamp& timestamp,
-      const ::date::time_zone* timezone,
+      const tz::TimeZone* timezone,
       const uint32_t maxResultSize,
       char* result,
       bool allowOverflow = false,

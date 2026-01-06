@@ -165,7 +165,7 @@ void adjustDateTime(std::tm& dateTime, const DateTimeUnit& unit) {
 Timestamp truncateTimestamp(
     Timestamp timestamp,
     DateTimeUnit unit,
-    const ::date::time_zone* timeZone) {
+    const tz::TimeZone* timeZone) {
   Timestamp result;
   switch (unit) {
     // For seconds ,millisecond, microsecond we just truncate the nanoseconds

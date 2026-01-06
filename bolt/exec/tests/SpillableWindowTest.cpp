@@ -142,6 +142,93 @@ class SpillableWindowTest : public OperatorTestBase {
       }
     }
   }
+
+  void runSortWindowLeadLagTest(
+      RowVectorPtr data,
+      std::string windowFunction,
+      bool spillEnabled,
+      int spillInjectionProbability,
+      bool hasSpill,
+      const char* batchSize) {
+    SCOPED_TRACE(windowFunction);
+
+    std::string frame;
+    frame = ("over (partition by c2 order by c1)");
+
+    core::PlanNodeId windowId;
+    auto spillDirectory = TempDirectoryPath::create();
+    TestScopedSpillInjection scopedSpillInjection(spillInjectionProbability);
+    bytedance::bolt::exec::TestWindowInjection windowInjection(
+        WindowBuildType::kSpillableWindowBuild);
+
+    {
+      auto plan = PlanBuilder()
+                      .values(split(data, 10))
+                      .orderBy({"c2", "c1"}, false)
+                      .streamingWindow({windowFunction + frame})
+                      .capturePlanNodeId(windowId)
+                      .planNode();
+
+      auto task =
+          AssertQueryBuilder(plan, duckDbQueryRunner_)
+              .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+              .config(core::QueryConfig::kPreferredOutputBatchRows, "1024")
+              .config(core::QueryConfig::kMaxOutputBatchRows, batchSize)
+              .config(
+                  core::QueryConfig::kSpillEnabled,
+                  spillEnabled ? "true" : "false")
+              .config(
+                  core::QueryConfig::kWindowSpillEnabled,
+                  spillEnabled ? "true" : "false")
+              .config(core::QueryConfig::kRowBasedSpillMode, "disable")
+              .config(core::QueryConfig::kJitLevel, "-1")
+              .config(core::QueryConfig::kTestingSpillPct, "100")
+              .spillDirectory(spillDirectory->path)
+              .assertResults(fmt::format(
+                  "SELECT *, {} {} FROM tmp", windowFunction, frame));
+    }
+
+    auto plan = PlanBuilder()
+                    .values(split(data, 10))
+                    .window({windowFunction + frame})
+                    .capturePlanNodeId(windowId)
+                    .planNode();
+
+    auto task =
+        AssertQueryBuilder(plan, duckDbQueryRunner_)
+            .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+            .config(core::QueryConfig::kPreferredOutputBatchRows, "1024")
+            .config(core::QueryConfig::kMaxOutputBatchRows, batchSize)
+            .config(
+                core::QueryConfig::kSpillEnabled,
+                spillEnabled ? "true" : "false")
+            .config(
+                core::QueryConfig::kWindowSpillEnabled,
+                spillEnabled ? "true" : "false")
+            .config(core::QueryConfig::kRowBasedSpillMode, "compression")
+            .config(core::QueryConfig::kJitLevel, "-1")
+            .config(core::QueryConfig::kTestingSpillPct, "100")
+            .spillDirectory(spillDirectory->path)
+            .assertResults(
+                fmt::format("SELECT *, {} {} FROM tmp", windowFunction, frame));
+
+    auto taskStats = exec::toPlanStats(task->taskStats());
+
+    const auto& stats = taskStats.at(windowId);
+
+    if (hasSpill) {
+      ASSERT_GT(stats.spilledBytes, 0);
+      ASSERT_GT(stats.spilledRows, 0);
+      ASSERT_GT(stats.spilledFiles, 0);
+      ASSERT_GT(stats.spilledPartitions, 0);
+    } else {
+      ASSERT_EQ(stats.spilledBytes, 0);
+      ASSERT_EQ(stats.spilledRows, 0);
+      ASSERT_EQ(stats.spilledFiles, 0);
+      ASSERT_EQ(stats.spilledPartitions, 0);
+    }
+    // }
+  }
 };
 
 TEST_F(SpillableWindowTest, spillAgg) {
@@ -217,216 +304,41 @@ TEST_F(SpillableWindowTest, spillAgg) {
   ASSERT_GT(stats.spilledPartitions, 0);
 }
 
-TEST_F(SpillableWindowTest, spillLag) {
+TEST_F(SpillableWindowTest, spillLeadLagWindow) {
   const vector_size_t size = 4096;
   auto data = makeRowVector(
       {"c1", "c2"},
       {
           // aggregate column.
-          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(
+              size, [](auto row) { return row; }, nullEvery(7)),
           // partition key.
-          makeFlatVector<int32_t>(
+          makeFlatVector<int64_t>(
               size, [](auto row) { return row < 2048 ? 1 : 2; }),
       });
 
   createDuckDbTable({data});
 
   for (auto batchSize : {"1", "10", "100", "1000"}) {
-    core::PlanNodeId windowId;
-    auto plan = PlanBuilder()
-                    .values(split(data, 10))
-                    .streamingWindow(
-                        {"lag(c1, 1, c1) over (partition by c2 order by c1)"})
-                    .capturePlanNodeId(windowId)
-                    .planNode();
-
-    auto spillDirectory = TempDirectoryPath::create();
-    auto task =
-        AssertQueryBuilder(plan, duckDbQueryRunner_)
-            .config(core::QueryConfig::kPreferredOutputBatchBytes, "10")
-            .config(core::QueryConfig::kSpillEnabled, "true")
-            .config(core::QueryConfig::kWindowSpillEnabled, "true")
-            .config(core::QueryConfig::kTestingSpillPct, "20")
-            .config(core::QueryConfig::kMaxOutputBatchRows, batchSize)
-            .spillDirectory(spillDirectory->path)
-            .assertResults(
-                "SELECT *, lag(c1, 1, c1) over (partition by c2 order by c1) FROM tmp");
+    std::vector<std::string> windowFunctions = {
+        "lag(c1, 1, c1)",
+        "lag(c1, 1, c2)",
+        "lag(c1, 1, 9)",
+        "lag(17, 1)",
+        "lag(3, 1, c1)",
+        "lag(3, 1, 6)",
+        "lead(c1, 1, c1)",
+        "lead(c1, 1, c2)",
+        "lead(c1, 1, 9)",
+        "lead(17, 1)",
+        "lead(3, 1, c1)",
+        "lead(3, 1, 6)"};
+    for (const auto& windowFunction : windowFunctions) {
+      runSortWindowLeadLagTest(
+          data, windowFunction, true, 100, true, batchSize);
+    }
   }
-  core::PlanNodeId windowId;
-  auto plan = PlanBuilder()
-                  .values(split(data, 10))
-                  .window({"lag(c1, 1, c1) over (partition by c2 order by c1)"})
-                  .capturePlanNodeId(windowId)
-                  .planNode();
-
-  auto spillDirectory = TempDirectoryPath::create();
-  auto task =
-      AssertQueryBuilder(plan, duckDbQueryRunner_)
-          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
-          .config(core::QueryConfig::kMaxOutputBatchRows, "1024")
-          .config(core::QueryConfig::kSpillEnabled, "true")
-          .config(core::QueryConfig::kWindowSpillEnabled, "true")
-          .config(core::QueryConfig::kTestingSpillPct, "100")
-          .spillDirectory(spillDirectory->path)
-          .assertResults(
-              "SELECT *, lag(c1, 1, c1) over (partition by c2 order by c1) FROM tmp");
-
-  TestScopedSpillInjection scopedSpillInjection(100);
-  bytedance::bolt::exec::TestWindowInjection windowInjection(
-      WindowBuildType::kSpillableWindowBuild);
-
-  plan = PlanBuilder()
-             .values(split(data, 10))
-             .window({"lag(c1, 1, c1) over (partition by c2 order by c1)"})
-             .capturePlanNodeId(windowId)
-             .planNode();
-  task =
-      AssertQueryBuilder(plan, duckDbQueryRunner_)
-          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
-          .config(core::QueryConfig::kMaxOutputBatchRows, "1024")
-          .config(core::QueryConfig::kSpillEnabled, "true")
-          .config(core::QueryConfig::kWindowSpillEnabled, "true")
-          .config(core::QueryConfig::kRowBasedSpillMode, "compression")
-          .config(core::QueryConfig::kJitLevel, "-1")
-          .config(core::QueryConfig::kTestingSpillPct, "100")
-          .spillDirectory(spillDirectory->path)
-          .assertResults(
-              "SELECT *, lag(c1, 1, c1) over (partition by c2 order by c1) FROM tmp");
-
-  auto taskStats = exec::toPlanStats(task->taskStats());
-  const auto& stats = taskStats.at(windowId);
-
-  ASSERT_GT(stats.spilledBytes, 0);
-  ASSERT_GT(stats.spilledRows, 0);
-  ASSERT_GT(stats.spilledFiles, 0);
-  ASSERT_GT(stats.spilledPartitions, 0);
 }
-
-TEST_F(SpillableWindowTest, spillLead) {
-  const vector_size_t size = 4096;
-  auto data = makeRowVector(
-      {"c1", "c2"},
-      {
-          // aggregate column.
-          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
-          // partition key.
-          makeFlatVector<int32_t>(
-              size, [](auto row) { return row < 2048 ? 1 : 2; }),
-      });
-
-  createDuckDbTable({data});
-
-  for (auto batchSize : {"1", "10", "100", "1000"}) {
-    core::PlanNodeId windowId;
-    auto plan =
-        PlanBuilder()
-            .values(split(data, 10))
-            .streamingWindow({"lead(c1, 1) over (partition by c2 order by c1)"})
-            .capturePlanNodeId(windowId)
-            .planNode();
-
-    auto spillDirectory = TempDirectoryPath::create();
-    auto task =
-        AssertQueryBuilder(plan, duckDbQueryRunner_)
-            .config(core::QueryConfig::kPreferredOutputBatchBytes, "10")
-            .config(core::QueryConfig::kSpillEnabled, "true")
-            .config(core::QueryConfig::kWindowSpillEnabled, "true")
-            .config(core::QueryConfig::kTestingSpillPct, "20")
-            .config(core::QueryConfig::kMaxOutputBatchRows, batchSize)
-            .spillDirectory(spillDirectory->path)
-            .assertResults(
-                "SELECT *, lead(c1, 1) over (partition by c2 order by c1) FROM tmp");
-  }
-
-  core::PlanNodeId windowId;
-  auto plan =
-      PlanBuilder()
-          .values(split(data, 10))
-          .streamingWindow({"lead(c1, 1) over (partition by c2 order by c1)"})
-          .capturePlanNodeId(windowId)
-          .planNode();
-
-  auto spillDirectory = TempDirectoryPath::create();
-  auto task =
-      AssertQueryBuilder(plan, duckDbQueryRunner_)
-          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
-          .config(core::QueryConfig::kMaxOutputBatchRows, "1024")
-          .config(core::QueryConfig::kSpillEnabled, "true")
-          .config(core::QueryConfig::kWindowSpillEnabled, "true")
-          .config(core::QueryConfig::kTestingSpillPct, "100")
-          .spillDirectory(spillDirectory->path)
-          .assertResults(
-              "SELECT *, lead(c1, 1) over (partition by c2 order by c1) FROM tmp");
-
-  TestScopedSpillInjection scopedSpillInjection(100);
-  bytedance::bolt::exec::TestWindowInjection windowInjection(
-      WindowBuildType::kSpillableWindowBuild);
-
-  plan = PlanBuilder()
-             .values(split(data, 10))
-             .window({"lead(c1, 1) over (partition by c2 order by c1)"})
-             .capturePlanNodeId(windowId)
-             .planNode();
-
-  task =
-      AssertQueryBuilder(plan, duckDbQueryRunner_)
-          .config(core::QueryConfig::kPreferredOutputBatchBytes, "10")
-          .config(core::QueryConfig::kMaxOutputBatchRows, "1")
-          .config(core::QueryConfig::kSpillEnabled, "true")
-          .config(core::QueryConfig::kWindowSpillEnabled, "true")
-          .config(core::QueryConfig::kRowBasedSpillMode, "compression")
-          .config(core::QueryConfig::kJitLevel, "-1")
-          .config(core::QueryConfig::kTestingSpillPct, "100")
-          .spillDirectory(spillDirectory->path)
-          .assertResults(
-              "SELECT *, lead(c1, 1) over (partition by c2 order by c1) FROM tmp");
-
-  auto taskStats = exec::toPlanStats(task->taskStats());
-  const auto& stats = taskStats.at(windowId);
-
-  ASSERT_GT(stats.spilledBytes, 0);
-  ASSERT_GT(stats.spilledRows, 0);
-  ASSERT_GT(stats.spilledFiles, 0);
-  ASSERT_GT(stats.spilledPartitions, 0);
-}
-
-TEST_F(SpillableWindowTest, spillLeadLag) {
-  const vector_size_t size = 4096;
-  auto data = makeRowVector(
-      {"c1", "c2"},
-      {
-          // aggregate column.
-          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
-          // partition key.
-          makeFlatVector<int32_t>(
-              size, [](auto row) { return row < 2048 ? 1 : 2; }),
-      });
-
-  createDuckDbTable({data});
-
-  for (auto batchSize : {"1", "10", "100", "1000"}) {
-    core::PlanNodeId windowId;
-    auto plan = PlanBuilder()
-                    .values(split(data, 10))
-                    .streamingWindow(
-                        {"lead(c1, 1) over (partition by c2 order by c1)",
-                         "lag(c1, 1) over (partition by c2 order by c1)"})
-                    .capturePlanNodeId(windowId)
-                    .planNode();
-
-    auto spillDirectory = TempDirectoryPath::create();
-    auto task =
-        AssertQueryBuilder(plan, duckDbQueryRunner_)
-            .config(core::QueryConfig::kPreferredOutputBatchBytes, "10")
-            .config(core::QueryConfig::kSpillEnabled, "true")
-            .config(core::QueryConfig::kWindowSpillEnabled, "true")
-            .config(core::QueryConfig::kTestingSpillPct, "20")
-            .config(core::QueryConfig::kMaxOutputBatchRows, batchSize)
-            .spillDirectory(spillDirectory->path)
-            .assertResults(
-                "SELECT *, lead(c1, 1) over (partition by c2 order by c1), lag(c1, 1) over (partition by c2 order by c1) FROM tmp");
-  }
-} // namespace
 
 TEST_F(SpillableWindowTest, noneSpillable) {
   const vector_size_t size = 4096;

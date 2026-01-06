@@ -334,14 +334,14 @@ int64_t parseTimezone(
       static std::unordered_map<std::string_view, int64_t> defaultTzNames{
           {"UTC", 0},
           {"GMT", 0},
-          {"EST", util::getTimeZoneID("America/New_York")},
-          {"EDT", util::getTimeZoneID("America/New_York")},
-          {"CST", util::getTimeZoneID("America/Chicago")},
-          {"CDT", util::getTimeZoneID("America/Chicago")},
-          {"MST", util::getTimeZoneID("America/Denver")},
-          {"MDT", util::getTimeZoneID("America/Denver")},
-          {"PST", util::getTimeZoneID("America/Los_Angeles")},
-          {"PDT", util::getTimeZoneID("America/Los_Angeles")},
+          {"EST", tz::getTimeZoneID("America/New_York")},
+          {"EDT", tz::getTimeZoneID("America/New_York")},
+          {"CST", tz::getTimeZoneID("America/Chicago")},
+          {"CDT", tz::getTimeZoneID("America/Chicago")},
+          {"MST", tz::getTimeZoneID("America/Denver")},
+          {"MDT", tz::getTimeZoneID("America/Denver")},
+          {"PST", tz::getTimeZoneID("America/Los_Angeles")},
+          {"PDT", tz::getTimeZoneID("America/Los_Angeles")},
       };
       std::string_view zone(cur, 3);
 #ifdef SPARK_COMPATIBLE
@@ -371,11 +371,11 @@ int64_t parseTimezone(
       if (legacySpark && (end - cur) >= 5) {
         // spark LEGACY accept (+/-)HHMM as time zone
         std::string tz = std::string(cur, 3) + ":" + std::string(cur + 3, 2);
-        timezoneId = util::getTimeZoneID(tz, false);
+        timezoneId = tz::getTimeZoneID(tz, false);
         length = 5;
       } else if (!legacySpark && (end - cur) >= 6 && *(cur + 3) == ':') {
         // spark CORRECTED accept (+/-)HH:MM as time zone
-        timezoneId = util::getTimeZoneID(std::string_view(cur, 6), false);
+        timezoneId = tz::getTimeZoneID(std::string_view(cur, 6), false);
         length = 6;
       }
       if (timezoneId != -1) {
@@ -405,8 +405,7 @@ int64_t parseTimezoneOffset(const char* cur, const char* end, Date& date) {
         if (std::strncmp(cur + 1, "00:00", 5) == 0) {
           date.timezoneId = 0;
         } else {
-          date.timezoneId =
-              util::getTimeZoneID(std::string_view(cur, 6), false);
+          date.timezoneId = tz::getTimeZoneID(std::string_view(cur, 6), false);
           if (date.timezoneId == -1) {
             return -1;
           }
@@ -424,7 +423,7 @@ int64_t parseTimezoneOffset(const char* cur, const char* end, Date& date) {
           // thread_local buffer to prevent extra allocations.
           std::memcpy(&timezoneBuffer[0], cur, 3);
           std::memcpy(&timezoneBuffer[4], cur + 3, 2);
-          date.timezoneId = util::getTimeZoneID(timezoneBuffer, false);
+          date.timezoneId = tz::getTimeZoneID(timezoneBuffer, false);
           if (date.timezoneId == -1) {
             return -1;
           }
@@ -442,7 +441,7 @@ int64_t parseTimezoneOffset(const char* cur, const char* end, Date& date) {
           // buffer to prevent extra allocations.
           std::memcpy(&timezoneBuffer[0], cur, 3);
           std::memcpy(&timezoneBuffer[4], defaultTrailingOffset, 2);
-          date.timezoneId = util::getTimeZoneID(timezoneBuffer, false);
+          date.timezoneId = tz::getTimeZoneID(timezoneBuffer, false);
           if (date.timezoneId == -1) {
             return -1;
           }
@@ -1029,8 +1028,7 @@ ErrorCode parseFromPattern(
 
 } // namespace
 
-uint32_t DateTimeFormatter::maxResultSize(
-    const ::date::time_zone* timezone) const {
+uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
   uint32_t size = 0;
   for (const auto& token : tokens_) {
     if (token.type == DateTimeToken::Type::kLiteral) {
@@ -1089,14 +1087,30 @@ uint32_t DateTimeFormatter::maxResultSize(
         size += std::max((int)token.pattern.minRepresentDigits, 9);
         break;
       case DateTimeFormatSpecifier::TIMEZONE:
-        if (timezone == nullptr) {
-          BOLT_USER_FAIL("Timezone unknown")
+        if (token.pattern.minRepresentDigits <= 3) {
+          // The longest timezone abbreviation is 9 in the case of timezones
+          // that do not have an abbreviation and use GMT offset (e.g.,
+          // GMT+01:00, GMT-08:00)
+          size += 9;
+        } else {
+          // The longest time zone long name is 40, Australian Central Western
+          // Standard Time.
+          // https://www.timeanddate.com/time/zones/
+          size += 50;
         }
-        size += std::max(
-            token.pattern.minRepresentDigits, timezone->name().length());
         break;
-      // Not supported.
       case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID:
+        if (token.pattern.minRepresentDigits == 1) {
+          // 'Z' means output the time zone offset without a colon.
+          size += 8;
+        } else if (token.pattern.minRepresentDigits == 2) {
+          // 'ZZ' means output the time zone offset with a colon.
+          size += 9;
+        } else {
+          // The longest time zone ID is 32, America/Argentina/ComodRivadavia.
+          size += 32;
+        }
+        break;
       default:
         BOLT_UNSUPPORTED(
             "format is not supported for specifier {}",
@@ -1108,7 +1122,7 @@ uint32_t DateTimeFormatter::maxResultSize(
 
 int32_t DateTimeFormatter::format(
     const Timestamp& timestamp,
-    const ::date::time_zone* timezone,
+    const tz::TimeZone* timezone,
     const uint32_t maxResultSize,
     char* result,
     bool allowOverflow,

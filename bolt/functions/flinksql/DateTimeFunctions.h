@@ -31,7 +31,7 @@ struct CurrentTimestampFunction {
 
   static constexpr bool is_deterministic = false;
 
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
   bool isConstTimeZone_ = false;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -47,7 +47,7 @@ struct CurrentTimestampFunction {
     if (timeZoneString == nullptr || timeZoneString->empty()) {
       timeZone_ = getTimeZoneFromConfig(config);
     } else {
-      timeZone_ = ::date::locate_zone(
+      timeZone_ = tz::locateZone(
           std::string_view(timeZoneString->data(), timeZoneString->size()));
       isConstTimeZone_ = true;
     }
@@ -57,7 +57,7 @@ struct CurrentTimestampFunction {
       out_type<Timestamp>& result,
       const arg_type<Varchar>& timeZoneString) {
     if (!timeZone_ || !isConstTimeZone_) {
-      timeZone_ = ::date::locate_zone(
+      timeZone_ = tz::locateZone(
           std::string_view(timeZoneString.data(), timeZoneString.size()));
     }
     result = Timestamp::now();

@@ -38,6 +38,8 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/type/TimestampConversion.h"
+#include "bolt/type/tz/TimeZoneMap.h"
+
 namespace bytedance::bolt {
 namespace {
 
@@ -394,16 +396,19 @@ TEST(TimestampTest, decreaseOperator) {
 }
 
 TEST(TimestampTest, outOfRange) {
-  auto* timezone = ::date::locate_zone("GMT");
+  auto* timezone = tz::locateZone("GMT");
   Timestamp t(-3217830796800, 0);
 
   auto copy = t;
   ASSERT_NO_THROW(copy.toTimezone(*timezone));
   EXPECT_EQ(copy.getSeconds(), t.getSeconds());
+  copy = t;
+  ASSERT_NO_THROW(copy.toGMT(*timezone));
+  EXPECT_EQ(copy.getSeconds(), t.getSeconds());
 
   copy = t;
-  auto* shanghai = ::date::locate_zone("Asia/Shanghai");
-  const auto info = shanghai->get_info(
+  auto* shanghai = tz::locateZone("Asia/Shanghai");
+  const auto info = shanghai->tz()->get_info(
       ::date::sys_seconds{std::chrono::seconds{t.getSeconds()}});
   ASSERT_NO_THROW(copy.toTimezone(*shanghai));
   EXPECT_EQ(copy.getSeconds(), t.getSeconds() + info.offset.count());
@@ -563,11 +568,11 @@ TEST(TimestampTest, toTimezoneLargeYear) {
   Timestamp ts(1'764'593'923'251, 0);
 
   auto copy = ts;
-  copy.toTimezone(*::date::locate_zone("UTC"));
+  copy.toTimezone(*tz::locateZone("UTC"));
   EXPECT_EQ(copy, ts);
 
   copy = ts;
-  copy.toTimezone(*::date::locate_zone("Asia/Shanghai"));
+  copy.toTimezone(*tz::locateZone("Asia/Shanghai"));
   EXPECT_EQ(copy.getSeconds(), ts.getSeconds() + 8 * 3600);
 }
 

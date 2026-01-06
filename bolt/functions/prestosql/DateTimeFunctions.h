@@ -31,6 +31,7 @@
 #pragma once
 
 #include <boost/date_time.hpp>
+#include <common/base/Exceptions.h>
 #include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
@@ -64,7 +65,7 @@ template <typename T>
 struct FromUnixtimeFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
   uint32_t maxResultSize_;
@@ -151,7 +152,7 @@ template <typename T>
 struct FromHiveUnixtimeFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> hiveDateTime_;
   bool isConstFormat_ = false;
   uint32_t maxResultSize_;
@@ -310,7 +311,7 @@ template <typename T>
 struct DateFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
 
@@ -429,7 +430,7 @@ template <typename T>
 struct ToTimestampFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   bool adjustTimezone_;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1059,7 +1060,7 @@ template <typename T>
 struct DateTruncFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
   std::optional<DateTimeUnit> unit_;
   bool optimizedTimeConversion_ = true;
 
@@ -1244,7 +1245,7 @@ template <typename T>
 struct DateAddFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::optional<DateTimeUnit> unit_ = std::nullopt;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1406,7 +1407,7 @@ template <typename T>
 struct DateDiffFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::optional<DateTimeUnit> unit_ = std::nullopt;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1586,7 +1587,7 @@ struct DateFormatFunction : public TimestampWithTimezoneSupport<T> {
     maxResultSize_ = mysqlDateTime_->maxResultSize(sessionTimeZone_);
   }
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> mysqlDateTime_;
   uint32_t maxResultSize_;
   bool isConstFormat_ = false;
@@ -1596,7 +1597,7 @@ template <typename T>
 struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
   uint32_t maxResultSize_{0};
@@ -1703,7 +1704,7 @@ struct DateParseFunction {
 
     auto sessionTzName = config.sessionTimezone();
     if (!sessionTzName.empty()) {
-      sessionTzID_ = util::getTimeZoneID(sessionTzName);
+      sessionTzID_ = tz::getTimeZoneID(sessionTzName);
     }
   }
 
@@ -1776,8 +1777,7 @@ struct FormatDateTimeFunction {
     const auto milliseconds = *timestampWithTimezone.template at<0>();
     Timestamp timestamp = Timestamp::fromMillis(milliseconds);
     int16_t timeZoneId = *timestampWithTimezone.template at<1>();
-    auto* timezonePtr = ::date::locate_zone(util::getTimeZoneName(timeZoneId));
-
+    auto* timezonePtr = tz::locateZone(timeZoneId);
     auto maxResultSize = jodaDateTime_->maxResultSize(timezonePtr);
     result.reserve(maxResultSize);
     auto resultSize = jodaDateTime_->format(
@@ -1792,7 +1792,7 @@ struct FormatDateTimeFunction {
     maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
   }
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   uint32_t maxResultSize_;
   bool isConstFormat_ = false;
@@ -1819,7 +1819,7 @@ struct ParseDateTimeFunction {
 
     auto sessionTzName = config.sessionTimezone();
     if (!sessionTzName.empty()) {
-      sessionTzID_ = util::getTimeZoneID(sessionTzName);
+      sessionTzID_ = tz::getTimeZoneID(sessionTzName);
     }
   }
 
@@ -1852,7 +1852,7 @@ template <typename T>
 struct CurrentDateFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
 
   FOLLY_ALWAYS_INLINE void initialize(
       const std::vector<TypePtr>& /*inputTypes*/,
@@ -1925,7 +1925,7 @@ struct MonthsBetweenFunction {
   // time part of the timestamp should not be skipped
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   int16_t tzID_ = -1;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1953,13 +1953,13 @@ struct MonthsBetweenFunction {
   void setTimeZone(const arg_type<Varchar>& timeZone) {
     // time zone like 'Asia/Shanghai'
     try {
-      sessionTimeZone_ = ::date::locate_zone(std::string_view(timeZone));
+      sessionTimeZone_ = tz::locateZone(std::string_view(timeZone));
     } catch (const std::exception&) {
       sessionTimeZone_ = nullptr;
     }
     // time zone like '+00:00'
     if (sessionTimeZone_ == nullptr) {
-      tzID_ = util::getTimeZoneID(std::string_view(timeZone));
+      tzID_ = tz::getTimeZoneID(std::string_view(timeZone));
     }
   }
 
@@ -1967,7 +1967,7 @@ struct MonthsBetweenFunction {
       const Timestamp& toTimestamp,
       const Timestamp& fromTimestamp,
       const bool roundOff,
-      const ::date::time_zone* timeZone,
+      const tz::TimeZone* timeZone,
       const int16_t tzID,
       double& result) {
     if (fromTimestamp == toTimestamp) {

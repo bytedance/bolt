@@ -36,6 +36,9 @@ SparkShuffleWriter::SparkShuffleWriter(
           shuffleWriterNode->id(),
           std::string(shuffleWriterNode->name())),
       shuffleWriterOptions_(shuffleWriterNode->getShuffleWriterOptions()),
+      // shuffle writer memory limit should at least hold one max shuffle batch
+      minMemLimit_(
+          shuffleWriterOptions_.partitionWriterOptions.shuffleBufferSize),
       reportShuffleStatusCallback_(
           shuffleWriterNode->getReportShuffleStatusCallback()) {}
 
@@ -65,6 +68,7 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
   auto memLimit = freeMem.value() + pool()->freeBytes();
+  memLimit = std::max(memLimit, minMemLimit_);
   auto status = shuffleWriter_->split(input, memLimit);
   BOLT_CHECK(status.ok(), "Native split: shuffle writer split failed");
 }

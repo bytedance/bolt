@@ -44,7 +44,7 @@ class LeadLagFunction : public exec::WindowFunction {
       bool ignoreNulls,
       bolt::memory::MemoryPool* pool)
       : WindowFunction(resultType, pool, nullptr), ignoreNulls_(ignoreNulls) {
-    valueIndex_ = args[0].index.value();
+    initializeTargetValue(args);
     resultType_ = resultType;
     numArgs_ = args.size();
     initializeOffset(args);
@@ -62,7 +62,15 @@ class LeadLagFunction : public exec::WindowFunction {
       auto partitionSize = partition_->numRows();
       AlignedBuffer::reallocate<bool>(&nulls_, partitionSize);
 
-      partition_->extractNulls(valueIndex_, 0, partitionSize, nulls_);
+      if (constantTargetValue_) {
+        BOLT_DCHECK(nulls_->size() >= bits::nbytes(partitionSize));
+        auto* rawNulls = nulls_->asMutable<uint64_t>();
+        bool isNull = constantTargetValue_->isNullAt(0);
+        bits::fillBits(rawNulls, 0, partitionSize, isNull);
+      } else {
+        BOLT_CHECK_GE(valueIndex_, 0);
+        partition_->extractNulls(valueIndex_, 0, partitionSize, nulls_);
+      }
       // There are null bits so the special ignoreNulls processing is required
       // for this partition.
       ignoreNullsForPartition_ =
@@ -121,12 +129,32 @@ class LeadLagFunction : public exec::WindowFunction {
         }
       }
       auto rowNumbersRange = folly::Range(rowNumbers_.data(), numRows);
-      partition_->extractColumn(valueIndex_, rowNumbersRange, 0, result);
-      setDefaultValue(result, 0);
+      if (!constantTargetValue_) {
+        BOLT_CHECK_GE(valueIndex_, 0);
+        partition_->extractColumn(valueIndex_, rowNumbersRange, 0, result);
+        setDefaultValue(result, 0);
+      } else {
+        setConstantTargetValue(result, 0);
+      }
       results_.emplace_back(std::move(result));
       partitionOffset_ += numRows;
       remainingRowCount -= numRows;
     } while (remainingRowCount);
+
+    if constexpr (!isLag) {
+      if (defaultValueIndex_.has_value()) {
+        lastRowDefaultValues_ = BaseVector::create(resultType_, 1, pool());
+        partition_->extractColumn(
+            defaultValueIndex_.value(),
+            partition_->numRows() - 1,
+            1,
+            0,
+            lastRowDefaultValues_);
+        return;
+      }
+    }
+    lastRowDefaultValues_ = nullptr;
+
   } // namespace
 
   std::deque<VectorPtr> getAggregateResultVector() override {
@@ -148,9 +176,17 @@ class LeadLagFunction : public exec::WindowFunction {
               correctLastBatchResult->size() - 1,
               0,
               1);
+        } else if (defaultValueIndex_.has_value()) {
+          BOLT_CHECK_NOT_NULL(lastRowDefaultValues_);
+          correctLastBatchResult->copy(
+              lastRowDefaultValues_.get(),
+              correctLastBatchResult->size() - 1,
+              0,
+              1);
         } else {
-          // lead(c1, 1, c1) or lead(c1)
+          // lead(c1)
           // Copy last value of 'lastBatchResult' into 'correctLastBatchResult'
+          BOLT_CHECK_EQ(numArgs_, 1);
           correctLastBatchResult->copy(
               lastBatchResult.get(),
               correctLastBatchResult->size() - 1,
@@ -198,10 +234,14 @@ class LeadLagFunction : public exec::WindowFunction {
     }
     bool exactSize = (partition_->numRows() == 1) ? true : false;
     auto rowNumbersRange = folly::Range(rowNumbers_.data(), numRows);
-    partition_->extractColumn(
-        valueIndex_, rowNumbersRange, resultOffset, result, exactSize);
-
-    setDefaultValue(result, resultOffset);
+    if (!constantTargetValue_) {
+      BOLT_CHECK_GE(valueIndex_, 0);
+      partition_->extractColumn(
+          valueIndex_, rowNumbersRange, resultOffset, result, exactSize);
+      setDefaultValue(result, resultOffset);
+    } else {
+      setConstantTargetValue(result, resultOffset);
+    }
 
     partitionOffset_ += numRows;
   }
@@ -215,6 +255,19 @@ class LeadLagFunction : public exec::WindowFunction {
   // WindowPartition::extractColumn calls skip this row. It is set to -2 to
   // distinguish it from kNullRow which is -1.
   static constexpr vector_size_t kDefaultValueRow = -2;
+
+  void initializeTargetValue(const std::vector<exec::WindowFunctionArg>& args) {
+    if (args.size() < 1) {
+      return;
+    }
+    const auto& valueArg = args[0];
+    auto constantTargetValue = valueArg.constantValue;
+    if (!constantTargetValue) {
+      valueIndex_ = args[0].index.value();
+    } else {
+      constantTargetValue_ = constantTargetValue;
+    }
+  }
 
   void initializeOffset(const std::vector<exec::WindowFunctionArg>& args) {
     if (args.size() == 1) {
@@ -363,14 +416,76 @@ class LeadLagFunction : public exec::WindowFunction {
     return kDefaultValueRow;
   }
 
+  void setConstantTargetValue(const VectorPtr& result, int32_t resultOffset) {
+    BOLT_CHECK_NOT_NULL(constantTargetValue_);
+    auto numRows = rowNumbers_.size();
+    auto maxRows = numRows + resultOffset;
+    if (constantDefaultValue_ ||
+        ((!constantDefaultValue_ && !defaultValueIndex_))) {
+      auto flatVector = BaseVector::create(resultType_, 2, pool());
+      flatVector->copy(constantTargetValue_.get(), 0, 0, 1);
+      if (constantDefaultValue_) {
+        flatVector->copy(constantDefaultValue_.get(), 1, 0, 1);
+      } else {
+        flatVector->setNull(1, true);
+      }
+
+      BufferPtr nulls = allocateNulls(numRows, pool());
+      auto rawNulls = nulls->asMutable<uint64_t>();
+      bits::clearAllNull(rawNulls, numRows);
+
+      BufferPtr indices =
+          AlignedBuffer::allocate<vector_size_t>(numRows, pool());
+      auto rawIndices = indices->asMutable<vector_size_t>();
+      for (auto i = 0; i < numRows; i++) {
+        rawIndices[i] = rowNumbers_[i] >= 0 ? 0 : 1;
+      }
+      auto dictVector =
+          BaseVector::wrapInDictionary(nulls, indices, numRows, flatVector);
+      result->copy(dictVector.get(), resultOffset, 0, numRows);
+    } else {
+      BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+      auto nulls = nullBuffer->asMutable<uint64_t>();
+      bits::fillBits(nulls, resultOffset, resultOffset + numRows, true);
+      std::vector<vector_size_t> defaultValueRowNumbers;
+      defaultValueRowNumbers.reserve(rowNumbers_.size());
+      for (auto i = 0; i < numRows; ++i) {
+        if (rowNumbers_[i] >= 0) {
+          result->copy(constantTargetValue_.get(), resultOffset + i, 0, 1);
+        } else {
+          BOLT_CHECK_EQ(rowNumbers_[i], kDefaultValueRow);
+          defaultValueRowNumbers.push_back(partitionOffset_ + i);
+        }
+      }
+      if (defaultValueRowNumbers.empty()) {
+        return;
+      }
+      bool exactSize = (partition_->numRows() == 1) ? true : false;
+      partition_->extractColumn(
+          defaultValueIndex_.value(),
+          folly::Range(
+              defaultValueRowNumbers.data(), defaultValueRowNumbers.size()),
+          0,
+          defaultValues_,
+          exactSize);
+      for (auto i = 0; i < defaultValueRowNumbers.size(); ++i) {
+        result->copy(
+            defaultValues_.get(),
+            resultOffset + defaultValueRowNumbers[i] - partitionOffset_,
+            i,
+            1);
+      }
+    }
+  }
+
   void setDefaultValue(const VectorPtr& result, int32_t resultOffset) {
     // Default value is not specified, just return.
     if (!constantDefaultValue_ && !defaultValueIndex_) {
       return;
     }
 
-    // Copy default values into 'result' for rows with invalid offsets or empty
-    // frames.
+    // Copy default values into 'result' for rows with invalid offsets or
+    // empty frames.
     if (constantDefaultValue_) {
       for (auto i = 0; i < rowNumbers_.size(); ++i) {
         if (rowNumbers_[i] == kDefaultValueRow) {
@@ -410,12 +525,12 @@ class LeadLagFunction : public exec::WindowFunction {
 
   const bool ignoreNulls_;
 
-  // Certain partitions may not have null values. So ignore nulls processing can
-  // be skipped for them. Used for tracking this at the partition level.
+  // Certain partitions may not have null values. So ignore nulls processing
+  // can be skipped for them. Used for tracking this at the partition level.
   bool ignoreNullsForPartition_;
 
   // Index of the 'value' argument.
-  column_index_t valueIndex_;
+  column_index_t valueIndex_ = -1;
 
   // Index of the 'offset' argument if offset is not constant.
   column_index_t offsetIndex_;
@@ -426,9 +541,9 @@ class LeadLagFunction : public exec::WindowFunction {
   std::deque<VectorPtr> results_;
 
   // 1. when using spillable window, a large partition will be further
-  // cut into several smaller sub-partitions. This variable indicates if this is
-  // the first iteration, aka. first sub-partiton, that needs to compare the
-  // 'offset' defined in LAG function and partitionOffsets_ when executing
+  // cut into several smaller sub-partitions. This variable indicates if this
+  // is the first iteration, aka. first sub-partiton, that needs to compare
+  // the 'offset' defined in LAG function and partitionOffsets_ when executing
   // setRowNumbersForConstantOffset()
   // 2. when NOT using spillable window, this variable is always true
   bool compareOffsetAndPartitionOffset = true;
@@ -438,12 +553,14 @@ class LeadLagFunction : public exec::WindowFunction {
   bool isConstantOffsetNull_ = false;
   bool isConstantOffsetZero_ = false;
 
-  // Index of the 'default_value' argument if default value is specified and not
-  // constant.
+  // Index of the 'default_value' argument if default value is specified and
+  // not constant.
   std::optional<column_index_t> defaultValueIndex_;
 
   // Constant 'default_value' or null if default value is not constant.
   VectorPtr constantDefaultValue_;
+
+  VectorPtr constantTargetValue_;
 
   const exec::WindowPartition* partition_;
 
@@ -452,6 +569,8 @@ class LeadLagFunction : public exec::WindowFunction {
 
   // Reusable vector of default values if these are not constant.
   VectorPtr defaultValues_;
+
+  VectorPtr lastRowDefaultValues_ = nullptr;
 
   // Null positions buffer to use for ignoreNulls.
   BufferPtr nulls_;

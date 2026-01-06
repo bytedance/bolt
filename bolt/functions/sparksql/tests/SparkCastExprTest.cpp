@@ -225,6 +225,8 @@ TEST_F(SparkCastExprTest, stringToTimestamp) {
       "1970-01-01",
       "2000-01-01",
       "1970-01-01 00:00:00",
+      "1970-01-01 00:00:00+00:00",
+      "1970-01-01 00:00:00-0000",
       "2000-01-01 12:21:56",
       "1970-01-01 00:00:00-02:00",
       "1970-01-01 00:00:00-02",
@@ -244,6 +246,8 @@ TEST_F(SparkCastExprTest, stringToTimestamp) {
   std::vector<std::optional<Timestamp>> expected{
       Timestamp(0, 0),
       Timestamp(946684800, 0),
+      Timestamp(0, 0),
+      Timestamp(0, 0),
       Timestamp(0, 0),
       Timestamp(946729316, 0),
       Timestamp(7200, 0),

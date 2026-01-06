@@ -197,7 +197,7 @@ inline Timestamp fromTimestampString(const StringView& str, bool* nullOutput) {
 ///
 /// -1 means no timezone information was found. return nullopt in case of
 /// parsing errors.
-std::optional<std::pair<Timestamp, int64_t>> fromTimestampWithTimezoneString(
+std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
     const char* buf,
     size_t len);
 

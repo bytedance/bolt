@@ -59,32 +59,34 @@ Timestamp Timestamp::now() {
   return fromMillis(epochMs);
 }
 
-void Timestamp::toGMT(const ::date::time_zone& zone, bool* hasError) {
-  const ::date::local_seconds local{std::chrono::seconds(seconds_)};
-  const auto info = zone.get_info(local);
+void Timestamp::toGMT(const tz::TimeZone& zone, bool* hasError) {
+  std::chrono::seconds sysSeconds;
 
-  auto failNonexistent = [&](const std::string& reason) {};
-
-  switch (info.result) {
-    case ::date::local_info::unique:
-      seconds_ -= info.first.offset.count();
-      break;
-    case ::date::local_info::ambiguous:
-      // Pick earliest to align with Presto behavior.
-      seconds_ -= info.first.offset.count();
-      break;
-    case ::date::local_info::nonexistent:
-      if (hasError) {
-        *hasError = true;
-        return;
-      }
-      BOLT_USER_FAIL(
-          "Timestamp {} does not exist in time zone {}",
-          std::to_string(seconds_),
-          zone.name());
+  try {
+    sysSeconds = zone.to_sys(std::chrono::seconds(seconds_));
+  } catch (const ::date::ambiguous_local_time&) {
+    // If the time is ambiguous, pick the earlier possibility to be consistent
+    // with Presto.
+    sysSeconds = zone.to_sys(
+        std::chrono::seconds(seconds_), tz::TimeZone::TChoose::kEarliest);
+  } catch (const ::date::nonexistent_local_time& error) {
+    if (hasError) {
+      *hasError = true;
       return;
+    }
+    // If the time does not exist, fail the conversion.
+    BOLT_USER_FAIL(error.what());
+  } catch (const std::invalid_argument& e) {
+    if (hasError) {
+      *hasError = true;
+      return;
+    }
+    // Invalid argument means we hit a conversion not supported by
+    // external/date. Need to throw a RuntimeError so that try() statements do
+    // not suppress it.
+    BOLT_FAIL_UNSUPPORTED_INPUT_UNCATCHABLE(e.what());
   }
-
+  seconds_ = sysSeconds.count();
   if (hasError) {
     *hasError = false;
   }
@@ -97,14 +99,19 @@ void Timestamp::toGMT(int16_t tzID, bool* hasError) {
     seconds_ -= getPrestoTZOffsetInSeconds(tzID);
   } else {
     // Other ids go this path.
-    toGMT(*::date::locate_zone(util::getTimeZoneName(tzID)), hasError);
+    toGMT(*tz::locateZone(tz::getTimeZoneName(tzID)), hasError);
   }
 }
 
-void Timestamp::toTimezone(const ::date::time_zone& zone) {
-  using namespace std::chrono;
-  const auto info = zone.get_info(::date::sys_seconds{seconds{seconds_}});
-  seconds_ += info.offset.count();
+void Timestamp::toTimezone(const tz::TimeZone& zone) {
+  try {
+    seconds_ = zone.to_local(std::chrono::seconds(seconds_)).count();
+  } catch (const std::invalid_argument& e) {
+    // Invalid argument means we hit a conversion not supported by
+    // external/date. This is a special case where we intentionally throw
+    // VeloxRuntimeError to avoid it being suppressed by TRY().
+    BOLT_FAIL_UNSUPPORTED_INPUT_UNCATCHABLE(e.what());
+  }
 }
 
 void Timestamp::toTimezone(int16_t tzID) {
@@ -114,18 +121,18 @@ void Timestamp::toTimezone(int16_t tzID) {
     seconds_ += getPrestoTZOffsetInSeconds(tzID);
   } else {
     // Other ids go this path.
-    toTimezone(*::date::locate_zone(util::getTimeZoneName(tzID)));
+    toTimezone(*tz::locateZone(tz::getTimeZoneName(tzID)));
   }
 }
 
-const ::date::time_zone& Timestamp::defaultTimezone() {
-  static const ::date::time_zone* kDefault = ({
+const tz::TimeZone& Timestamp::defaultTimezone() {
+  static const tz::TimeZone* kDefault = ({
     // TODO: We are hard-coding PST/PDT here to be aligned with the current
     // behavior in DWRF reader/writer.  Once they are fixed, we can use
     // ::date::current_zone() here.
     //
     // See https://github.com/facebookincubator/velox/issues/8127
-    auto* tz = ::date::locate_zone("America/Los_Angeles");
+    auto* tz = tz::locateZone("America/Los_Angeles");
     BOLT_CHECK_NOT_NULL(tz);
     tz;
   });

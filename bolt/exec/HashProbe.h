@@ -135,7 +135,7 @@ class HashProbe : public Operator {
   // number mappings or input vectors. In this way input vectors do
   // not have to be copied and will be singly referenced by their
   // producer.
-  void clearIdentityProjectedOutput();
+  void clearProjectedOutput();
 
   // Populate output columns with matching build-side rows
   // for the right semi join and non-matching build-side rows
@@ -178,6 +178,8 @@ class HashProbe : public Operator {
       std::function<int32_t(char**, int32_t)> iterator);
 
   void ensureLoadedIfNotAtEnd(column_index_t channel);
+
+  void ensureLoaded(column_index_t channel, bool forceLoaded = false);
 
   // Indicates if the operator has more probe inputs from either the upstream
   // operator or the spill input reader.
@@ -355,6 +357,9 @@ class HashProbe : public Operator {
 
   // Type of the RowVector for filter inputs.
   RowTypePtr filterInputType_;
+
+  // The input channels that are projected to the output.
+  std::vector<IdentityProjection> projectedInputColumns_;
 
   // Maps input channels to channels in 'filterInputType_'.
   std::vector<IdentityProjection> filterInputProjections_;
@@ -600,7 +605,7 @@ class HashProbe : public Operator {
   SelectivityVector activeRows_;
 
   // True if passingInputRows is up to date.
-  bool passingInputRowsInitialized_;
+  bool passingInputRowsInitialized_{false};
 
   // Set of input rows for which there is at least one join hit. All
   // set if right side optional. Used when loading lazy vectors for

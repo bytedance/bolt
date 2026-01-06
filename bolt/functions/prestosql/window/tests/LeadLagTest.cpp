@@ -261,6 +261,95 @@ TEST_P(LeadLagTest, defaultValue) {
   assertResults(fn("c0, 22, c2"));
 }
 
+TEST_P(LeadLagTest, constantTargetValue) {
+  auto data = makeRowVector({
+      // Values.
+      makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+      // Default values.
+      makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+      // Default values with nulls.
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30, std::nullopt, 50}),
+  });
+
+  createDuckDbTable({data});
+
+  auto assertResults = [&](const std::string& functionSql) {
+    auto queryInfo = buildWindowQuery({data}, functionSql, "order by c0", "");
+
+    SCOPED_TRACE(queryInfo.functionSql);
+    assertQuery(queryInfo.planNode, queryInfo.querySql);
+  };
+
+  assertResults(fn("4, 1, 100"));
+  assertResults(fn("4, 1, 100 IGNORE NULLS"));
+
+  // Constant non-null default value.
+  assertResults(fn("5, 2, 100"));
+  assertResults(fn("55, 22, 100 IGNORE NULLS"));
+
+  // Constant null default value.
+  assertResults(fn("5, 2, null::bigint"));
+  assertResults(fn("5, 2, null::bigint IGNORE NULLS"));
+
+  // Variable default values.
+  assertResults(fn("5, 2, c1"));
+  assertResults(fn("55, 22, c1"));
+  assertResults(fn("55, 22, c1 IGNORE NULLS"));
+
+  // Variable default values with nulls.
+  assertResults(fn("5, 2, c2"));
+  assertResults(fn("55, 22, c2"));
+  assertResults(fn("55, 22, c2 IGNORE NULLS"));
+}
+
+TEST_P(LeadLagTest, constantTargetVector) {
+  const vector_size_t size = 5;
+  auto flatVector = makeFlatVector<int64_t>(
+      size, [](auto row) { return row; }, nullEvery(7));
+
+  auto constVector = std::dynamic_pointer_cast<ConstantVector<int64_t>>(
+      BaseVector::wrapInConstant(size, 2, flatVector));
+
+  auto data = makeRowVector({
+      // Values.
+      constVector,
+      // Default values.
+      makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+      // Default values with nulls.
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30, std::nullopt, 50}),
+  });
+
+  createDuckDbTable({data});
+
+  auto assertResults = [&](const std::string& functionSql) {
+    auto queryInfo = buildWindowQuery({data}, functionSql, "order by c0", "");
+
+    SCOPED_TRACE(queryInfo.functionSql);
+    assertQuery(queryInfo.planNode, queryInfo.querySql);
+  };
+
+  assertResults(fn("c0, 1, 100"));
+  assertResults(fn("c0, 1, 100 IGNORE NULLS"));
+
+  // Constant non-null default value.
+  assertResults(fn("c0, 2, 100"));
+  assertResults(fn("c0, 22, 100"));
+
+  // Constant null default value.
+  assertResults(fn("c0, 2, null::bigint"));
+  assertResults(fn("c0, 2, null::bigint IGNORE NULLS"));
+
+  // Variable default values.
+  assertResults(fn("c0, 2, c1"));
+  assertResults(fn("c0, 22, c1"));
+  assertResults(fn("c0, 22, c1 IGNORE NULLS"));
+
+  // Variable default values with nulls.
+  assertResults(fn("c0, 2, c2"));
+  assertResults(fn("c0, 22, c2"));
+  assertResults(fn("c0, 22, c2 IGNORE NULLS"));
+}
+
 // Make sure resultOffset passed to LagFunction::apply is handled correctly.
 TEST_P(LeadLagTest, smallPartitions) {
   auto data = makeRowVector({

@@ -119,7 +119,7 @@ OperatorStats TableScan::stats(bool clear) {
       auto connectorStats = dataSource_->runtimeStats();
       auto lockedStats = stats_.wlock();
       for (const auto& [name, counter] : connectorStats) {
-        if (name == "ioWaitNanos") {
+        if (name == "ioWaitWallNanos") {
           ioWaitNanos_ += counter.value - lastIoWaitNanos_;
           lastIoWaitNanos_ = counter.value;
         }
@@ -241,7 +241,7 @@ RowVectorPtr TableScan::getOutput() {
                 << "]";
           }
           for (const auto& [name, counter] : connectorStats) {
-            if (name == "ioWaitNanos") {
+            if (name == "ioWaitWallNanos") {
               ioWaitNanos_ += counter.value - lastIoWaitNanos_;
               lastIoWaitNanos_ = counter.value;
             }

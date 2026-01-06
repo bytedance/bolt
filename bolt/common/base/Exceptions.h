@@ -344,6 +344,17 @@ DECLARE_CHECK_FAIL_TEMPLATES(::bytedance::bolt::BoltRuntimeError);
       /* isRetriable */ false,                                      \
       ##__VA_ARGS__)
 
+/// Throws BoltRuntimeError when functions receive input values out of the
+/// supported range. This should only be used when we want to force TRY() to not
+/// suppress the error.
+#define BOLT_FAIL_UNSUPPORTED_INPUT_UNCATCHABLE(...)                       \
+  _BOLT_THROW(                                                             \
+      ::bytedance::bolt::BoltRuntimeError,                                 \
+      ::bytedance::bolt::error_source::kErrorSourceRuntime.c_str(),        \
+      ::bytedance::bolt::error_code::kUnsupportedInputUncatchable.c_str(), \
+      /* isRetriable */ false,                                             \
+      ##__VA_ARGS__)
+
 DECLARE_CHECK_FAIL_TEMPLATES(::bytedance::bolt::BoltUserError);
 
 // For all below macros, an additional message can be passed using a

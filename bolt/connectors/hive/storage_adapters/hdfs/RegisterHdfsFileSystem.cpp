@@ -40,48 +40,33 @@
 namespace bytedance::bolt::filesystems {
 
 #ifdef BOLT_ENABLE_HDFS3
-std::mutex mtx;
 
+namespace {
 std::function<std::shared_ptr<
     FileSystem>(std::shared_ptr<const config::ConfigBase>, std::string_view)>
 hdfsFileSystemGenerator() {
-  static auto filesystemGenerator = [](std::shared_ptr<const config::ConfigBase>
-                                           properties,
-                                       std::string_view filePath) {
-    static folly::ConcurrentHashMap<std::string, std::shared_ptr<FileSystem>>
-        filesystems;
-    static folly::
-        ConcurrentHashMap<std::string, std::shared_ptr<folly::once_flag>>
-            hdfsInitiationFlags;
-    HdfsServiceEndpoint endpoint =
-        HdfsFileSystem::getServiceEndpoint(filePath, properties.get());
-    std::string hdfsIdentity = endpoint.identity();
-    if (filesystems.find(hdfsIdentity) != filesystems.end()) {
-      return filesystems[hdfsIdentity];
-    }
-    std::unique_lock<std::mutex> lk(mtx, std::defer_lock);
-    /// If the init flag for a given hdfs identity is not found,
-    /// create one for init use. It's a singleton.
-    if (hdfsInitiationFlags.find(hdfsIdentity) == hdfsInitiationFlags.end()) {
-      lk.lock();
-      if (hdfsInitiationFlags.find(hdfsIdentity) == hdfsInitiationFlags.end()) {
-        std::shared_ptr<folly::once_flag> initiationFlagPtr =
-            std::make_shared<folly::once_flag>();
-        hdfsInitiationFlags.insert(hdfsIdentity, initiationFlagPtr);
-      }
-      lk.unlock();
-    }
-    folly::call_once(
-        *hdfsInitiationFlags[hdfsIdentity].get(),
-        [&properties, endpoint, hdfsIdentity]() {
-          auto filesystem =
-              std::make_shared<HdfsFileSystem>(properties, endpoint);
-          filesystems.insert(hdfsIdentity, filesystem);
-        });
-    return filesystems[hdfsIdentity];
-  };
+  static auto filesystemGenerator =
+      [](const std::shared_ptr<const config::ConfigBase>& properties,
+         std::string_view filePath) {
+        HdfsServiceEndpoint endpoint =
+            HdfsFileSystem::getServiceEndpoint(filePath, properties.get());
+        std::string hdfsIdentity = endpoint.identity();
+
+        static std::unordered_map<std::string, std::shared_ptr<FileSystem>>
+            filesystems;
+        static std::mutex mtx;
+        {
+          std::unique_lock<std::mutex> lk(mtx);
+          if (filesystems.find(hdfsIdentity) == filesystems.end()) {
+            filesystems[hdfsIdentity] =
+                std::make_shared<HdfsFileSystem>(properties, endpoint);
+          }
+          return filesystems[hdfsIdentity];
+        }
+      };
   return filesystemGenerator;
 }
+} // namespace
 
 std::function<std::unique_ptr<bolt::dwio::common::FileSink>(
     const std::string&,

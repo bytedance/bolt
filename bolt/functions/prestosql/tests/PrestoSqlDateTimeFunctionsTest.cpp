@@ -225,7 +225,7 @@ class PrestoSqlDateTimeFunctionsTest
   RowVectorPtr makeTimestampWithTimeZoneVector(
       int64_t timestamp,
       const char* tz) {
-    const int64_t tzid = util::getTimeZoneID(tz);
+    const int64_t tzid = tz::getTimeZoneID(tz, true);
 
     return std::make_shared<RowVector>(
         pool(),
@@ -2083,23 +2083,23 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetime) {
   // 118860000 is the number of milliseconds since epoch at 1970-01-02
   // 09:01:00.000 UTC.
   EXPECT_EQ(
-      TimestampWithTimezone(118860000, util::getTimeZoneID("+00:00")),
+      TimestampWithTimezone(118860000, tz::getTimeZoneID("+00:00")),
       parseDatetime("1970-01-02+09:01+00:00", "YYYY-MM-dd+HH:mmZZ"));
   EXPECT_EQ(
-      TimestampWithTimezone(118860000, util::getTimeZoneID("-09:00")),
+      TimestampWithTimezone(118860000, tz::getTimeZoneID("-09:00")),
       parseDatetime("1970-01-02+00:01-09:00", "YYYY-MM-dd+HH:mmZZ"));
   EXPECT_EQ(
-      TimestampWithTimezone(118860000, util::getTimeZoneID("-02:00")),
+      TimestampWithTimezone(118860000, tz::getTimeZoneID("-02:00")),
       parseDatetime("1970-01-02+07:01-02:00", "YYYY-MM-dd+HH:mmZZ"));
   EXPECT_EQ(
-      TimestampWithTimezone(118860000, util::getTimeZoneID("+14:00")),
+      TimestampWithTimezone(118860000, tz::getTimeZoneID("+14:00")),
       parseDatetime("1970-01-02+23:01+14:00", "YYYY-MM-dd+HH:mmZZ"));
   EXPECT_EQ(
       TimestampWithTimezone(
-          198060000, util::getTimeZoneID("America/Los_Angeles")),
+          198060000, tz::getTimeZoneID("America/Los_Angeles")),
       parseDatetime("1970-01-02+23:01 PST", "YYYY-MM-dd+HH:mm z"));
   EXPECT_EQ(
-      TimestampWithTimezone(169260000, util::getTimeZoneID("+00:00")),
+      TimestampWithTimezone(169260000, tz::getTimeZoneID("+00:00")),
       parseDatetime("1970-01-02+23:01 GMT", "YYYY-MM-dd+HH:mm z"));
 
   setQueryTimeZone("Asia/Kolkata");
@@ -2107,19 +2107,19 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetime) {
   // 66600000 is the number of millisecond since epoch at 1970-01-01
   // 18:30:00.000 UTC.
   EXPECT_EQ(
-      TimestampWithTimezone(66600000, util::getTimeZoneID("Asia/Kolkata")),
+      TimestampWithTimezone(66600000, tz::getTimeZoneID("Asia/Kolkata")),
       parseDatetime("1970-01-02+00:00", "YYYY-MM-dd+HH:mm"));
   EXPECT_EQ(
-      TimestampWithTimezone(66600000, util::getTimeZoneID("-03:00")),
+      TimestampWithTimezone(66600000, tz::getTimeZoneID("-03:00")),
       parseDatetime("1970-01-01+15:30-03:00", "YYYY-MM-dd+HH:mmZZ"));
 
   // -66600000 is the number of millisecond since epoch at 1969-12-31
   // 05:30:00.000 UTC.
   EXPECT_EQ(
-      TimestampWithTimezone(-66600000, util::getTimeZoneID("Asia/Kolkata")),
+      TimestampWithTimezone(-66600000, tz::getTimeZoneID("Asia/Kolkata")),
       parseDatetime("1969-12-31+11:00", "YYYY-MM-dd+HH:mm"));
   EXPECT_EQ(
-      TimestampWithTimezone(-66600000, util::getTimeZoneID("+02:00")),
+      TimestampWithTimezone(-66600000, tz::getTimeZoneID("+02:00")),
       parseDatetime("1969-12-31+07:30+02:00", "YYYY-MM-dd+HH:mmZZ"));
 }
 
@@ -2551,6 +2551,18 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTimeTimezone) {
       "1969-12-31 16:00:00",
       formatDatetimeWithTimezone(
           zeroTs, "America/Los_Angeles", "YYYY-MM-dd HH:mm:ss"));
+
+  EXPECT_EQ(
+      "1969-12-31 16:00:00",
+      formatDatetimeWithTimezone(zeroTs, "-08:00", "YYYY-MM-dd HH:mm:ss"));
+
+  EXPECT_EQ(
+      "1969-12-31 23:45:00",
+      formatDatetimeWithTimezone(zeroTs, "-00:15", "YYYY-MM-dd HH:mm:ss"));
+
+  EXPECT_EQ(
+      "1970-01-01 00:07:00",
+      formatDatetimeWithTimezone(zeroTs, "+00:07", "YYYY-MM-dd HH:mm:ss"));
 }
 
 #ifndef SPARK_COMPATIBLE

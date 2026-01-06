@@ -88,7 +88,7 @@ class WindowBuild {
   /// Returns the spiller stats including total bytes and rows spilled so far.
   std::optional<common::SpillStats> spilledStats() const {
     return sortSpiller_ ? std::make_optional(sortSpiller_->stats())
-                        : std::nullopt;
+                        : windowSpilledStats();
   }
 
   /// Returns the spiller stats including total bytes and rows spilled so far.

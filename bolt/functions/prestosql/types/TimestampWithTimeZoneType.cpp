@@ -42,7 +42,7 @@ void castFromTimestamp(
   const auto& sessionTzName = config.sessionTimezone();
   int64_t sessionTzID = 0;
   if (!sessionTzName.empty()) {
-    sessionTzID = util::getTimeZoneID(sessionTzName);
+    sessionTzID = tz::getTimeZoneID(sessionTzName);
   }
   const auto adjustTimestampToTimezone = config.adjustTimestampToTimezone();
 

@@ -118,7 +118,7 @@ TEST(TimeUtilsTest, adjustEpoch) {
 }
 
 TEST(TimeUtilsTest, truncateTimestamp) {
-  auto* timezone = ::date::locate_zone("GMT");
+  auto* timezone = tz::locateZone("GMT");
 
   EXPECT_EQ(
       Timestamp(0, 0),
@@ -181,7 +181,7 @@ TEST(TimeUtilsTest, truncateTimestamp) {
       truncateTimestamp(
           Timestamp(998'474'645, 321'001'234), DateTimeUnit::kYear, timezone));
 
-  auto* timezone1 = ::date::locate_zone("America/Los_Angeles");
+  auto* timezone1 = tz::locateZone("America/Los_Angeles");
   EXPECT_EQ(
       Timestamp(0, 0),
       truncateTimestamp(Timestamp(0, 0), DateTimeUnit::kSecond, timezone1));

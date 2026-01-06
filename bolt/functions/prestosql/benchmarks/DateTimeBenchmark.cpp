@@ -35,7 +35,9 @@
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/lib/benchmarks/FunctionBenchmarkBase.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
+#include "bolt/type/tz/TimeZoneMap.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 
@@ -43,13 +45,13 @@ namespace {
 
 class HourFunction : public exec::VectorFunction {
  public:
-  const ::date::time_zone* FOLLY_NULLABLE
+  const tz::TimeZone* FOLLY_NULLABLE
   getTimeZoneIfNeeded(const core::QueryConfig& config) const {
-    const ::date::time_zone* timeZone = nullptr;
+    const tz::TimeZone* timeZone = nullptr;
     if (config.adjustTimestampToTimezone()) {
       auto sessionTzName = config.sessionTimezone();
       if (!sessionTzName.empty()) {
-        timeZone = ::date::locate_zone(sessionTzName);
+        timeZone = tz::locateZone(sessionTzName);
       }
     }
     return timeZone;

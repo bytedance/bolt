@@ -41,6 +41,7 @@
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/type/StringView.h"
+#include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt {
 
 namespace date {
@@ -419,7 +420,7 @@ struct Timestamp {
   // ts.Timezone("America/Los_Angeles");
   // ts.toString() returns January 1, 1970 08:00:00
   // If error is not nullptr, it is set to true if the conversion fails.
-  void toGMT(const ::date::time_zone& zone, bool* error = nullptr);
+  void toGMT(const tz::TimeZone& zone, bool* error = nullptr);
 
   // Same as above, but accepts PrestoDB time zone ID.
   // If error is not nullptr, it is set to true if the conversion fails.
@@ -430,13 +431,13 @@ struct Timestamp {
   // Example: Timestamp ts{0, 0};
   // ts.Timezone("America/Los_Angeles");
   // ts.toString() returns December 31, 1969 16:00:00
-  void toTimezone(const ::date::time_zone& zone);
+  void toTimezone(const tz::TimeZone& zone);
 
   // Same as above, but accepts PrestoDB time zone ID.
   void toTimezone(int16_t tzID);
 
   /// A default time zone that is same across the process.
-  static const ::date::time_zone& defaultTimezone();
+  static const tz::TimeZone& defaultTimezone();
 
   bool operator==(const Timestamp& b) const {
     return seconds_ == b.seconds_ && nanos_ == b.nanos_;
@@ -509,7 +510,7 @@ struct Timestamp {
   FOLLY_ALWAYS_INLINE
   std::string toString(
       const TimestampToStringOptions::Precision& precision,
-      const ::date::time_zone* tz) const {
+      const tz::TimeZone* tz) const {
     using namespace std::chrono;
     const auto localSec = tz == nullptr ? seconds_ : toLocal(tz);
     const auto days =
@@ -591,10 +592,9 @@ struct Timestamp {
 
  private:
   FOLLY_ALWAYS_INLINE
-  int64_t toLocal(const ::date::time_zone* tz) const {
+  int64_t toLocal(const tz::TimeZone* tz) const {
     using namespace std::chrono;
-    const auto tp = time_point<system_clock>(seconds(seconds_));
-    return duration_cast<seconds>(tz->to_local(tp).time_since_epoch()).count();
+    return tz->to_local(seconds(seconds_)).count();
   }
 
   int64_t seconds_;

@@ -40,6 +40,7 @@
 #include "bolt/type/DecimalUtil.h"
 #include "bolt/type/FloatingDecimal.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/tz/TimeZoneMap.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/SelectivityVector.h"
 namespace bytedance::bolt::exec {
@@ -96,7 +97,7 @@ void CastExpr::castTimestampToDate(
     const BaseVector& input,
     exec::EvalCtx& context,
     VectorPtr& result,
-    const ::date::time_zone* timeZone) {
+    const tz::TimeZone* timeZone) {
   auto* resultFlatVector = result->as<FlatVector<int32_t>>();
   static const int32_t kSecsPerDay{86'400};
   auto inputVector = input.as<SimpleVector<Timestamp>>();
@@ -598,7 +599,7 @@ template <TypeKind KIND>
 struct CastWithTz {
   template <typename T>
   static typename TypeTraits<KIND>::NativeType
-  cast(T val, bool& nullOutput, const ::date::time_zone* tz) {
+  cast(T val, bool& nullOutput, const tz::TimeZone* tz) {
     BOLT_UNSUPPORTED(
         "Conversion of {} to {} is not supported",
         CppToType<T>::name,
@@ -609,12 +610,12 @@ struct CastWithTz {
 template <>
 struct CastWithTz<TypeKind::VARCHAR> {
   template <typename T>
-  static std::string cast(const T&, bool&, const ::date::time_zone*) {
+  static std::string cast(const T&, bool&, const tz::TimeZone*) {
     BOLT_NYI();
   }
 
   static std::string
-  cast(const Timestamp& val, bool& nullOutput, const ::date::time_zone* tz) {
+  cast(const Timestamp& val, bool& nullOutput, const tz::TimeZone* tz) {
     return val.toString(TimestampToStringOptions::Precision::kMilliseconds, tz);
   }
 };
@@ -625,7 +626,7 @@ void applyCastWithTzKernel(
     const SimpleVector<From>* input,
     FlatVector<To>* result,
     bool& nullOutput,
-    const ::date::time_zone* tz) {
+    const tz::TimeZone* tz) {
   if constexpr (CppToType<To>::typeKind == TypeKind::VARCHAR) {
     std::string out = CastWithTz<CppToType<To>::typeKind>::cast(
         input->valueAt(row), nullOutput, tz);
@@ -686,7 +687,7 @@ void CastExpr::applyCastPrimitives(
         bool nullOutput = false;
         auto sessionTzName = queryConfig.sessionTimezone();
         if (!sessionTzName.empty()) {
-          auto* timeZone = ::date::locate_zone(sessionTzName);
+          auto* timeZone = tz::locateZone(sessionTzName);
           applyCastWithTzKernel<To, From>(
               row, inputSimpleVector, resultFlatVector, nullOutput, timeZone);
         } else {
@@ -748,7 +749,7 @@ void CastExpr::applyCastPrimitives(
           context.deselectErrors(*remainingRows);
           // locate_zone throws runtime_error if the timezone couldn't be found
           // (so we're safe to dereference the pointer).
-          auto* timeZone = ::date::locate_zone(sessionTzName);
+          auto* timeZone = tz::locateZone(sessionTzName);
           auto rawTimestamps = resultFlatVector->mutableRawValues();
           applyToSelectedNoThrowLocal(
               context, *remainingRows, result, [&](int row) {

@@ -65,7 +65,7 @@ class FromUnixtimeFunction : public exec::VectorFunction {
     if (timezoneNames->isConstantMapping()) {
       auto timezoneName = timezoneNames->valueAt<StringView>(rows.begin());
 
-      int16_t timezoneId = util::getTimeZoneID(
+      int16_t timezoneId = tz::getTimeZoneID(
           std::string_view(timezoneName.data(), timezoneName.size()));
       timezones = std::make_shared<ConstantVector<int16_t>>(
           pool, size, false /*isNull*/, SMALLINT(), std::move(timezoneId));
@@ -82,7 +82,7 @@ class FromUnixtimeFunction : public exec::VectorFunction {
         rawTimestamps[row] = toMillis(unixtimes->valueAt<double>(row));
 
         auto timezoneName = timezoneNames->valueAt<StringView>(row);
-        rawTimezones[row] = util::getTimeZoneID(
+        rawTimezones[row] = tz::getTimeZoneID(
             std::string_view(timezoneName.data(), timezoneName.size()));
       });
     }

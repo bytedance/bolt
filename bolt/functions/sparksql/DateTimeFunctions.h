@@ -67,7 +67,7 @@ struct WeekFunction : public InitSessionTimezone<T> {
 
   FOLLY_ALWAYS_INLINE uint32_t getWeek(
       const Timestamp& timestamp,
-      const ::date::time_zone* timezone,
+      const tz::TimeZone* timezone,
       bool allowOverflow) {
     Timestamp t = timestamp;
     if (timezone) {
@@ -109,7 +109,7 @@ struct UnixTimestampFunctionBase {
 
   bool setSpecTimezone(
       const int64_t tzID,
-      const ::date::time_zone* sessionTimeZone) {
+      const tz::TimeZone* sessionTimeZone) {
     if (tzID == 0) {
       return true;
     } else if (tzID <= 1680) {
@@ -259,11 +259,11 @@ struct UnixTimestampFunctionBase {
 
     if (timeZone != nullptr) {
       // time zone like '+00:00'.
-      int64_t tzID = util::getTimeZoneID(std::string_view(*timeZone));
+      int64_t tzID = tz::getTimeZoneID(std::string_view(*timeZone));
       // time zone like 'Asia/Shanghai'
-      const ::date::time_zone* sessionTimeZone = nullptr;
+      const tz::TimeZone* sessionTimeZone = nullptr;
       try {
-        sessionTimeZone = ::date::locate_zone(std::string(*timeZone));
+        sessionTimeZone = tz::locateZone(std::string(*timeZone));
       } catch (const std::exception&) {
         sessionTimeZone = nullptr;
       }
@@ -272,7 +272,7 @@ struct UnixTimestampFunctionBase {
       }
     } else {
       const int64_t tzID = getTimeZoneIdFromConfig(config);
-      const ::date::time_zone* sessionTimeZone = nullptr;
+      const tz::TimeZone* sessionTimeZone = nullptr;
       try {
         sessionTimeZone = getTimeZoneFromConfig(config);
       } catch (const std::exception&) {
@@ -296,7 +296,7 @@ struct UnixTimestampFunctionBase {
   std::shared_ptr<DateTimeFormatter> format_;
   int64_t sessionTzOffsetInSeconds_{0};
 
-  const ::date::time_zone* sessionTimeZone_{nullptr};
+  const tz::TimeZone* sessionTimeZone_{nullptr};
   std::optional<int64_t> sessionTzID_;
   bool isShanghai{false};
   bool isConstFormat_{false};
@@ -596,7 +596,7 @@ struct ToUtcTimestampFunction {
       const arg_type<Varchar>* /*input*/,
       const arg_type<Varchar>* timezone) {
     if (timezone) {
-      timezone_ = ::date::locate_zone(
+      timezone_ = tz::locateZone(
           std::string_view((*timezone).data(), (*timezone).size()));
     }
   }
@@ -606,14 +606,14 @@ struct ToUtcTimestampFunction {
       const arg_type<Timestamp>& timestamp,
       const arg_type<Varchar>& timezone) {
     result = timestamp;
-    auto fromTimezone = timezone_ ? timezone_
-                                  : ::date::locate_zone(std::string_view(
-                                        timezone.data(), timezone.size()));
+    auto fromTimezone = timezone_
+        ? timezone_
+        : tz::locateZone(std::string_view(timezone.data(), timezone.size()));
     result.toGMT(*fromTimezone);
   }
 
  private:
-  const ::date::time_zone* timezone_{nullptr};
+  const tz::TimeZone* timezone_{nullptr};
 };
 
 template <typename T>
@@ -626,7 +626,7 @@ struct FromUtcTimestampFunction {
       const arg_type<Varchar>* /*input*/,
       const arg_type<Varchar>* timezone) {
     if (timezone) {
-      timezone_ = ::date::locate_zone(
+      timezone_ = tz::locateZone(
           std::string_view((*timezone).data(), (*timezone).size()));
     }
   }
@@ -636,14 +636,14 @@ struct FromUtcTimestampFunction {
       const arg_type<Timestamp>& timestamp,
       const arg_type<Varchar>& timezone) {
     result = timestamp;
-    auto toTimezone = timezone_ ? timezone_
-                                : ::date::locate_zone(std::string_view(
-                                      timezone.data(), timezone.size()));
+    auto toTimezone = timezone_
+        ? timezone_
+        : tz::locateZone(std::string_view(timezone.data(), timezone.size()));
     result.toTimezone(*toTimezone);
   }
 
  private:
-  const ::date::time_zone* timezone_{nullptr};
+  const tz::TimeZone* timezone_{nullptr};
 };
 
 /// Converts date string to Timestmap type.
@@ -657,7 +657,7 @@ struct GetTimestampFunction {
       const arg_type<Varchar>* format) {
     auto sessionTimezoneName = config.sessionTimezone();
     if (!sessionTimezoneName.empty()) {
-      sessionTimezoneId_ = util::getTimeZoneID(sessionTimezoneName);
+      sessionTimezoneId_ = tz::getTimeZoneID(sessionTimezoneName);
     }
     if (format != nullptr) {
       if (this->timeParserPolicy == TimePolicy::LEGACY) {
@@ -742,7 +742,7 @@ template <typename T>
 struct LongToTimestampFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
   bool isConstTimeZone_ = false;
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -760,7 +760,7 @@ struct LongToTimestampFunction {
     if (timeZoneString == nullptr || timeZoneString->empty()) {
       timeZone_ = getTimeZoneFromConfig(config);
     } else {
-      timeZone_ = ::date::locate_zone(
+      timeZone_ = tz::locateZone(
           std::string_view(timeZoneString->data(), timeZoneString->size()));
       isConstTimeZone_ = true;
     }
@@ -780,7 +780,7 @@ struct LongToTimestampFunction {
       const arg_type<int64_t>& millis,
       const arg_type<Varchar>& timeZoneString) {
     if (!timeZone_ || !isConstTimeZone_) {
-      timeZone_ = ::date::locate_zone(
+      timeZone_ = tz::locateZone(
           std::string_view(timeZoneString.data(), timeZoneString.size()));
     }
     result = Timestamp::fromMillis(millis);
@@ -868,7 +868,7 @@ struct DateTruncFunction {
   }
 
  private:
-  const ::date::time_zone* timeZone_ = nullptr;
+  const tz::TimeZone* timeZone_ = nullptr;
 };
 
 template <typename T>
@@ -1152,7 +1152,7 @@ struct MillisecondFunction : public InitSessionTimezone<T> {
 template <typename T>
 struct FromUnixtimeFunction : public InitSessionTimezone<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
-  const ::date::time_zone* sessionTimeZone_ = nullptr;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
   int64_t sessionTzOffsetInSeconds_{0};
@@ -1173,7 +1173,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
 
     throwExceptionWhenEncounterBadTimestamp_ =
         config.throwExceptionWhenEncounterBadTimestamp();
-    int16_t tzID = util::getTimeZoneID(std::string_view(*timeZoneString));
+    int16_t tzID = tz::getTimeZoneID(std::string_view(*timeZoneString));
     // time zone like '+00:00'.
     if (tzID == 0) {
       return;
@@ -1181,7 +1181,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       this->sessionTzOffsetInSeconds_ = getPrestoTZOffsetInSeconds(tzID);
       return;
     } else { // time zone like 'Asia/Shanghai'
-      sessionTimeZone_ = ::date::locate_zone(
+      sessionTimeZone_ = tz::locateZone(
           std::string_view(timeZoneString->data(), timeZoneString->size()));
       BOLT_CHECK(sessionTimeZone_);
     }

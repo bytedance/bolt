@@ -34,7 +34,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/tz/TimeZoneMap.h"
-namespace bytedance::bolt::util {
+namespace bytedance::bolt::tz {
 namespace {
 
 TEST(TimeZoneMapTest, getTimeZoneName) {
@@ -94,4 +94,4 @@ TEST(TimeZoneMapTest, invalid) {
 }
 
 } // namespace
-} // namespace bytedance::bolt::util
+} // namespace bytedance::bolt::tz
