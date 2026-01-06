@@ -17,6 +17,28 @@ add_executable(bolt_shuffle_spark_celeborn_test CelebornClientTest.cpp)
 add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
 
 target_link_libraries(
-  bolt_shuffle_spark_celeborn_test PRIVATE bolt_shuffle_spark_impl bolt_exception gflags::gflags
-                                           glog::glog GTest::gtest GTest::gtest_main
+  bolt_shuffle_spark_celeborn_test
+  PRIVATE bolt_shuffle_spark_impl
+          bolt_exception
+          gflags::gflags
+          glog::glog
+          GTest::gtest
+          GTest::gtest_main)
+
+add_executable(bolt_shuffle_spark_tests
+  ShuffleTest.cpp
 )
+
+target_link_libraries(bolt_shuffle_spark_tests
+  PRIVATE
+  bolt_shuffle_spark_impl
+  bolt_exec_test_lib
+  bolt_vector_test_lib
+  bolt_vector_fuzzer
+  bolt_temp_path
+  GTest::gtest_main
+  GTest::gmock
+)
+
+# Add test
+add_test(NAME bolt_shuffle_spark_tests COMMAND bolt_shuffle_spark_tests)
