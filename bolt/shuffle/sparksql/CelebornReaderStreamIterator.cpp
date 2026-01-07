@@ -112,7 +112,8 @@ CelebornReaderStreamIterator::CelebornReaderStreamIterator(
       startMapIndex_(startMapIndex),
       endMapIndex_(endMapIndex),
       needCompression_(needCompression) {
-  BOLT_CHECK(shuffleClient_, "ShuffleClient is null for Celeborn reader");
+  BOLT_CHECK_NOT_NULL(
+      shuffleClient_, "ShuffleClient is null for Celeborn reader");
 }
 
 CelebornReaderStreamIterator::~CelebornReaderStreamIterator() {
@@ -132,7 +133,7 @@ CelebornReaderStreamIterator::nextStream(arrow::MemoryPool* pool) {
       startMapIndex_,
       endMapIndex_,
       needCompression_);
-  BOLT_CHECK(
+  BOLT_CHECK_NOT_NULL(
       celebornStream,
       "Failed to create CelebornInputStream for partition " +
           std::to_string(partitionId));

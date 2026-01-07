@@ -37,7 +37,8 @@ NativeCelebornClient::NativeCelebornClient(
       attemptId_(attemptId),
       numMappers_(numMappers),
       numPartitions_(numPartitions) {
-  BOLT_CHECK(shuffleClient_, "ShuffleClient is null for NativeCelebornClient");
+  BOLT_CHECK_NOT_NULL(
+      shuffleClient_, "ShuffleClient is null for NativeCelebornClient");
 }
 
 int32_t NativeCelebornClient::pushPartitionData(
@@ -57,9 +58,7 @@ int32_t NativeCelebornClient::pushPartitionData(
 }
 
 void NativeCelebornClient::stop() {
-  if (!shuffleClient_) {
-    return;
-  }
+  shuffleClient_->mapperEnd(shuffleId_, mapId_, attemptId_, numMappers_);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

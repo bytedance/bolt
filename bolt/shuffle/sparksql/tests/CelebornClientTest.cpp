@@ -40,7 +40,7 @@
 #include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
-std::shared_ptr<const celeborn::protocol::PartitionLocation> MakeLocation(
+std::shared_ptr<const celeborn::protocol::PartitionLocation> makeLocation(
     int partitionId) {
   auto location = std::make_shared<celeborn::protocol::PartitionLocation>();
   location->id = partitionId;
@@ -57,7 +57,7 @@ std::shared_ptr<const celeborn::protocol::PartitionLocation> MakeLocation(
   return location;
 }
 
-std::unique_ptr<celeborn::memory::ReadOnlyByteBuffer> BuildChunkPayload(
+std::unique_ptr<celeborn::memory::ReadOnlyByteBuffer> buildChunkPayload(
     const std::vector<uint8_t>& payload) {
   auto buffer = celeborn::memory::ByteBuffer::createWriteOnly(
       sizeof(int32_t) * 4 + payload.size(), false);
@@ -93,7 +93,7 @@ struct MapKey {
   }
 };
 
-void ReadStreamAndExpect(
+void readStreamAndExpect(
     const std::shared_ptr<arrow::io::InputStream>& stream,
     const std::string& payload) {
   auto readResult = stream->Read(payload.size());
@@ -137,7 +137,7 @@ class FakeTransportClient final : public celeborn::network::TransportClient {
       const celeborn::network::RpcRequest&,
       celeborn::network::FetchChunkSuccessCallback onSuccess,
       celeborn::network::FetchChunkFailureCallback) override {
-    onSuccess(streamChunkSlice, BuildChunkPayload(payload_));
+    onSuccess(streamChunkSlice, buildChunkPayload(payload_));
   }
 
  private:
@@ -282,7 +282,7 @@ class FakeShuffleClient final : public celeborn::client::ShuffleClient {
     std::vector<std::shared_ptr<const celeborn::protocol::PartitionLocation>>
         locations;
     std::vector<int> attempts{0};
-    locations.emplace_back(MakeLocation(partitionId));
+    locations.emplace_back(makeLocation(partitionId));
     return std::make_unique<celeborn::client::CelebornInputStream>(
         "shuffle_key",
         std::static_pointer_cast<const celeborn::conf::CelebornConf>(conf_),
@@ -311,7 +311,7 @@ TEST(CelebornReaderStreamIteratorTest, ReturnsNullWhenEmptyOrClosed) {
 }
 
 // Reads two partitions and confirms data matches per-map concatenation order.
-TEST(CelebornReaderStreamIteratorTest, IteratesPartitionsAndReads) {
+TEST(CelebornReaderStreamIteratorTest, iteratesPartitionsAndReads) {
   auto client = std::make_shared<FakeShuffleClient>();
   constexpr int kShuffleId = 42;
   constexpr int kMapId0 = 0;
@@ -353,7 +353,7 @@ TEST(CelebornReaderStreamIteratorTest, IteratesPartitionsAndReads) {
       false);
   auto stream = iterator.nextStream(arrow::default_memory_pool());
   ASSERT_NE(stream, nullptr);
-  ReadStreamAndExpect(stream, expectedA);
+  readStreamAndExpect(stream, expectedA);
 
   auto tellResult = stream->Tell();
   ASSERT_TRUE(tellResult.ok());
@@ -361,12 +361,12 @@ TEST(CelebornReaderStreamIteratorTest, IteratesPartitionsAndReads) {
 
   auto stream2 = iterator.nextStream(arrow::default_memory_pool());
   ASSERT_NE(stream2, nullptr);
-  ReadStreamAndExpect(stream2, expectedB);
+  readStreamAndExpect(stream2, expectedB);
   EXPECT_EQ(iterator.nextStream(arrow::default_memory_pool()), nullptr);
 }
 
 // Ensures multiple pushes for the same map are read in push order.
-TEST(CelebornReaderStreamIteratorTest, AppendsMultiplePushesPerMap) {
+TEST(CelebornReaderStreamIteratorTest, appendsMultiplePushesPerMap) {
   auto client = std::make_shared<FakeShuffleClient>();
   constexpr int kShuffleId = 9;
   constexpr int kMapId = 0;
@@ -396,11 +396,11 @@ TEST(CelebornReaderStreamIteratorTest, AppendsMultiplePushesPerMap) {
       false);
   auto stream = iterator.nextStream(arrow::default_memory_pool());
   ASSERT_NE(stream, nullptr);
-  ReadStreamAndExpect(stream, expected);
+  readStreamAndExpect(stream, expected);
 }
 
 // Confirms updateMetrics remains unsupported for the iterator.
-TEST(CelebornReaderStreamIteratorTest, UpdateMetricsUnsupported) {
+TEST(CelebornReaderStreamIteratorTest, updateMetricsUnsupported) {
   auto client = std::make_shared<FakeShuffleClient>();
   CelebornReaderStreamIterator iterator(client, 1, {1}, 0, 0, 0, false);
   EXPECT_THROW(
@@ -408,7 +408,7 @@ TEST(CelebornReaderStreamIteratorTest, UpdateMetricsUnsupported) {
 }
 
 // Verifies read fails before any push and succeeds after push.
-TEST(CelebornReaderStreamIteratorTest, RequiresPushBeforeRead) {
+TEST(CelebornReaderStreamIteratorTest, requiresPushBeforeRead) {
   auto client = std::make_shared<FakeShuffleClient>();
   constexpr int kShuffleId = 7;
   constexpr int32_t kPartitionId = 0;
@@ -454,7 +454,7 @@ TEST(CelebornReaderStreamIteratorTest, RequiresPushBeforeRead) {
       false);
   auto stream = iterator2.nextStream(arrow::default_memory_pool());
   ASSERT_NE(stream, nullptr);
-  ReadStreamAndExpect(stream, expected);
+  readStreamAndExpect(stream, expected);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
