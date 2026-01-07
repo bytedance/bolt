@@ -31,8 +31,8 @@ find_package(Snappy CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_dwio_arrow_parquet_writer
-  bolt_dwio_arrow_parquet_writer_lib
-  bolt_dwio_arrow_parquet_writer_util_lib
+  bolt_dwio_parquet_arrow_lib
+  bolt_dwio_parquet_arrow_util_lib
   bolt_dwio_common
   bolt_arrow_bridge
   arrow::arrow

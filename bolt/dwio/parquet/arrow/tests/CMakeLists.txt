@@ -27,7 +27,7 @@
 
 
 add_executable(
-  bolt_dwio_arrow_parquet_writer_test
+  bolt_dwio_parquet_arrow_test
   BloomFilterTest.cpp
   ColumnReaderTest.cpp
   ColumnWriterTest.cpp
@@ -43,12 +43,12 @@ add_executable(
   TypesTest.cpp
   LZ4HadoopCodecTest.cpp)
 
-add_test(bolt_dwio_arrow_parquet_writer_test
-         bolt_dwio_arrow_parquet_writer_test)
+add_test(bolt_dwio_parquet_arrow_test
+         bolt_dwio_parquet_arrow_test)
 target_link_libraries(
-  bolt_dwio_arrow_parquet_writer_test
-  bolt_dwio_arrow_parquet_writer_lib
-  bolt_dwio_arrow_parquet_writer_test_lib
+  bolt_dwio_parquet_arrow_test
+  bolt_dwio_parquet_arrow_lib
+  bolt_dwio_parquet_arrow_test_lib
   GTest::gmock
   arrow::arrow
   arrow::libarrow_testing
@@ -58,7 +58,7 @@ target_link_libraries(
   GTest::gtest_main)
 
 add_library(
-  bolt_dwio_arrow_parquet_writer_test_lib
+  bolt_dwio_parquet_arrow_test_lib
   BloomFilter.cpp
   BloomFilterReader.cpp
   ColumnReader.cpp
@@ -67,5 +67,5 @@ add_library(
   TestUtil.cpp
   XxHasher.cpp)
 
-target_link_libraries(bolt_dwio_arrow_parquet_writer_test_lib
-                      bolt_dwio_arrow_parquet_writer_lib arrow::arrow GTest::gtest GTest::gtest_main)
+target_link_libraries(bolt_dwio_parquet_arrow_test_lib
+                      bolt_dwio_parquet_arrow_lib arrow::arrow GTest::gtest GTest::gtest_main)

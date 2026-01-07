@@ -27,7 +27,7 @@
 
 
 add_library(
-  bolt_dwio_arrow_parquet_writer_util_lib
+  bolt_dwio_parquet_arrow_util_lib
   Compression.cpp
   CompressionSnappy.cpp
   CompressionZstd.cpp
@@ -39,7 +39,7 @@ add_library(
 find_package(xxHash CONFIG REQUIRED)
 
 target_link_libraries(
-  bolt_dwio_arrow_parquet_writer_util_lib
+  bolt_dwio_parquet_arrow_util_lib
   arrow::arrow
   Snappy::snappy
   zstd::libzstd_static

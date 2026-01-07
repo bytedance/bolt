@@ -26,7 +26,7 @@
 # --------------------------------------------------------------------------
 
 
-add_library(bolt_dwio_arrow_parquet_writer_thrift_lib parquet_types.cpp)
+add_library(bolt_dwio_parquet_arrow_thrift_lib parquet_types.cpp)
 
-target_link_libraries(bolt_dwio_arrow_parquet_writer_thrift_lib arrow::arrow
+target_link_libraries(bolt_dwio_parquet_arrow_thrift_lib arrow::arrow
                       Boost::headers)

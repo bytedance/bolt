@@ -34,7 +34,7 @@ if(${BOLT_BUILD_TESTING})
 endif()
 
 add_library(
-  bolt_dwio_arrow_parquet_writer_lib
+  bolt_dwio_parquet_arrow_lib
   ArrowSchema.cpp
   ArrowSchemaInternal.cpp
   ColumnWriter.cpp
@@ -59,9 +59,9 @@ add_library(
   Writer.cpp)
 
 target_link_libraries(
-  bolt_dwio_arrow_parquet_writer_lib
-  bolt_dwio_arrow_parquet_writer_util_lib
-  bolt_dwio_arrow_parquet_writer_thrift_lib
+  bolt_dwio_parquet_arrow_lib
+  bolt_dwio_parquet_arrow_util_lib
+  bolt_dwio_parquet_arrow_thrift_lib
   bolt_dwio_common
   bolt_arrow_bridge
   bolt_process
