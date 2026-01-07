@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -36,70 +37,52 @@ using testing::NiceMock;
 namespace {
 
 enum class DataTypeGroup {
-  kPrimitive,
-  kComplex,
+  kInteger,
+  kFloat,
+  kString,
   kLargeString,
+  kDecimal,
+  kDateTime,
+  kComplex,
+  kMix,
   kHighNulls,
   kEmpty
 };
 
-enum class MemoryPressure { kNormal, kLow };
+std::vector<DataTypeGroup> dataGroups = {
+    DataTypeGroup::kInteger,
+    DataTypeGroup::kFloat,
+    DataTypeGroup::kString,
+    DataTypeGroup::kLargeString,
+    DataTypeGroup::kDecimal,
+    DataTypeGroup::kDateTime,
+    DataTypeGroup::kComplex,
+    DataTypeGroup::kMix,
+    DataTypeGroup::kHighNulls,
+    DataTypeGroup::kEmpty};
 
 std::string dataTypeGroupToString(DataTypeGroup group) {
   switch (group) {
-    case DataTypeGroup::kPrimitive:
-      return "Primitive";
-    case DataTypeGroup::kComplex:
-      return "Complex";
+    case DataTypeGroup::kInteger:
+      return "Integer";
+    case DataTypeGroup::kFloat:
+      return "Float";
+    case DataTypeGroup::kString:
+      return "String";
     case DataTypeGroup::kLargeString:
       return "LargeString";
+    case DataTypeGroup::kDecimal:
+      return "Decimal";
+    case DataTypeGroup::kDateTime:
+      return "DateTime";
+    case DataTypeGroup::kComplex:
+      return "Complex";
+    case DataTypeGroup::kMix:
+      return "Mix";
     case DataTypeGroup::kHighNulls:
       return "HighNulls";
     case DataTypeGroup::kEmpty:
       return "Empty";
-    default:
-      return "Unknown";
-  }
-}
-
-std::string memoryPressureToString(MemoryPressure pressure) {
-  switch (pressure) {
-    case MemoryPressure::kNormal:
-      return "NormalMem";
-    case MemoryPressure::kLow:
-      return "LowMem";
-    default:
-      return "UnknownMem";
-  }
-}
-
-std::string partitioningToString(Partitioning p) {
-  switch (p) {
-    case Partitioning::kSingle:
-      return "Single";
-    case Partitioning::kRoundRobin:
-      return "RoundRobin";
-    case Partitioning::kHash:
-      return "Hash";
-    case Partitioning::kRange:
-      return "Range";
-    default:
-      return "Unknown";
-  }
-}
-
-std::string partitionShortName(Partitioning p) {
-  switch (p) {
-    case Partitioning::kSingle:
-      return "single";
-    case Partitioning::kRoundRobin:
-      return "rr";
-    case Partitioning::kHash:
-      return "hash";
-    case Partitioning::kRange:
-      return "range";
-    default:
-      return "";
   }
 }
 
@@ -129,50 +112,42 @@ std::string shuffleModeToString(int mode) {
   }
 }
 
-std::string keyChannelsToString(
-    const std::vector<column_index_t>& keyChannels) {
-  if (keyChannels.empty()) {
-    return "KeysNone";
-  }
-  std::ostringstream out;
-  out << "Keys";
-  for (size_t i = 0; i < keyChannels.size(); ++i) {
-    out << keyChannels[i];
-    if (i + 1 != keyChannels.size()) {
-      out << "_";
-    }
-  }
-  return out.str();
+constexpr int32_t kBatchSize = 100;
+constexpr int32_t kNumBatches = 10;
+constexpr uint32_t kPidSeed = 42;
+
+bool needsPidColumn(Partitioning partitioning) {
+  return partitioning == Partitioning::kHash ||
+      partitioning == Partitioning::kRange;
 }
 
 struct ShuffleTestParam {
-  Partitioning partitioning;
+  std::string partitioning;
   int32_t shuffleMode; // 0: Adaptive, 1: V1, 2: V2, 3: RowBased
   PartitionWriterType writerType;
   DataTypeGroup dataTypeGroup;
-  MemoryPressure memoryPressure;
   int32_t numPartitions;
-  int32_t numRows;
-  int32_t numBatches;
-  bool prependPid;
-  std::vector<column_index_t> keyChannels;
 
-  friend std::ostream& operator<<(std::ostream& os, const ShuffleTestParam& p) {
-    return os << partitioningToString(p.partitioning) << "_"
-              << shuffleModeToString(p.shuffleMode) << "_"
-              << writerTypeToString(p.writerType) << "_"
-              << dataTypeGroupToString(p.dataTypeGroup) << "_"
-              << memoryPressureToString(p.memoryPressure) << "_P"
-              << p.numPartitions << "_R" << p.numRows << "_B" << p.numBatches
-              << "_" << (p.prependPid ? "Pid" : "NoPid") << "_"
-              << keyChannelsToString(p.keyChannels);
+  std::string toString() const {
+    return fmt::format(
+        "{}_{}_{}_{}_P{}",
+        partitioning,
+        shuffleModeToString(shuffleMode),
+        writerTypeToString(writerType),
+        dataTypeGroupToString(dataTypeGroup),
+        numPartitions);
+  }
+
+  bool isSupported() const {
+    if (partitioning == Partitioning::kSingle) {
+      return numPartitions == 1 && shuffleMode <= 1;
+    }
+    return true;
   }
 };
 
 struct ShuffleInputData {
   std::vector<RowVectorPtr> baseBatches;
-  int32_t bufferSize{4096};
-  int32_t shuffleBatchByteSize{4 * 1024 * 1024};
 };
 
 struct ShuffleRunResult {
@@ -183,240 +158,33 @@ struct ShuffleRunResult {
 
 std::vector<ShuffleTestParam> buildShuffleParams() {
   std::vector<ShuffleTestParam> params;
-  auto add = [&](Partitioning partitioning,
-                 int32_t shuffleMode,
-                 PartitionWriterType writerType,
-                 DataTypeGroup dataTypeGroup,
-                 MemoryPressure memoryPressure,
-                 int32_t numPartitions,
-                 int32_t numRows,
-                 int32_t numBatches,
-                 bool prependPid,
-                 std::vector<column_index_t> keyChannels) {
-    ShuffleTestParam p{
-        partitioning,
-        shuffleMode,
-        writerType,
-        dataTypeGroup,
-        memoryPressure,
-        numPartitions,
-        numRows,
-        numBatches,
-        prependPid,
-        std::move(keyChannels)};
-    params.push_back(std::move(p));
-  };
+  const std::vector<std::string> partitionings = {
+      "single", "rr", "hash", "range"};
+  const std::vector<int32_t> shuffleModes = {0, 1, 2, 3};
+  const std::vector<int32_t> partitionNumbers = {1, 4, 16, 128};
 
-  add(Partitioning::kSingle,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      1,
-      1000,
-      1,
-      false,
-      {});
-  add(Partitioning::kRoundRobin,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      3,
-      false,
-      {});
-  add(Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRange,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRoundRobin,
-      2,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      2,
-      false,
-      {});
-  add(Partitioning::kHash,
-      2,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      8,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kHash,
-      3,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRange,
-      3,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRoundRobin,
-      3,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {});
-  add(Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kComplex,
-      MemoryPressure::kNormal,
-      4,
-      200,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRoundRobin,
-      2,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kComplex,
-      MemoryPressure::kNormal,
-      4,
-      200,
-      1,
-      false,
-      {});
-  add(Partitioning::kRoundRobin,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kHighNulls,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      false,
-      {});
-  add(Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kLargeString,
-      MemoryPressure::kLow,
-      4,
-      200,
-      1,
-      true,
-      {0});
-  add(Partitioning::kHash,
-      2,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kLargeString,
-      MemoryPressure::kLow,
-      4,
-      200,
-      1,
-      true,
-      {0});
-  add(Partitioning::kHash,
-      3,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kLargeString,
-      MemoryPressure::kLow,
-      4,
-      200,
-      1,
-      true,
-      {0});
-  add(Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kEmpty,
-      MemoryPressure::kNormal,
-      4,
-      0,
-      1,
-      true,
-      {0});
-  add(Partitioning::kSingle,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kEmpty,
-      MemoryPressure::kNormal,
-      1,
-      0,
-      1,
-      false,
-      {});
-  add(Partitioning::kHash,
-      1,
-      PartitionWriterType::kCeleborn,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRoundRobin,
-      2,
-      PartitionWriterType::kCeleborn,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      false,
-      {});
-  add(Partitioning::kHash,
-      3,
-      PartitionWriterType::kCeleborn,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      1,
-      true,
-      {0});
-  add(Partitioning::kRoundRobin,
-      0,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      2,
-      false,
-      {});
+  const std::vector<PartitionWriterType> writerTypes = {
+      PartitionWriterType::kLocal, PartitionWriterType::kCeleborn};
+
+  for (auto partitioning : partitionings) {
+    for (auto shuffleMode : shuffleModes) {
+      for (auto writerType : writerTypes) {
+        for (auto dataTypeGroup : dataGroups) {
+          for (auto numPartitions : partitionNumbers) {
+            auto param = ShuffleTestParam{
+                partitioning,
+                shuffleMode,
+                writerType,
+                dataTypeGroup,
+                numPartitions};
+            if (param.isSupported()) {
+              params.push_back(param);
+            }
+          }
+        }
+      }
+    }
+  }
 
   return params;
 }
@@ -465,71 +233,122 @@ class ShuffleTest : public OperatorTestBase {
 
   ShuffleInputData makeInputData(const ShuffleTestParam& param) {
     ShuffleInputData data;
-    data.bufferSize =
-        (param.memoryPressure == MemoryPressure::kLow) ? 256 : 4096;
-    data.shuffleBatchByteSize = (param.memoryPressure == MemoryPressure::kLow)
-        ? 256 * 1024
-        : 4 * 1024 * 1024;
 
     VectorFuzzer::Options opts;
     opts.nullRatio = 0.1;
     opts.stringVariableLength = true;
-    opts.stringLength = 20;
+    opts.vectorSize = kBatchSize;
+
+    auto numBatches = kNumBatches;
+
+    auto generateRandomData = [&](const RowTypePtr& rowType,
+                                  const VectorFuzzer::Options& opts,
+                                  int32_t numBatches) {
+      ShuffleInputData data;
+
+      if (numBatches == 0) {
+        data.baseBatches.push_back(std::dynamic_pointer_cast<RowVector>(
+            BaseVector::create(rowType, 0, pool())));
+        return data;
+      }
+
+      data.baseBatches.reserve(numBatches);
+      for (int32_t i = 0; i < numBatches; ++i) {
+        VectorFuzzer fuzzer(opts, pool());
+        data.baseBatches.push_back(fuzzer.fuzzInputRow(rowType));
+      }
+      return data;
+    };
 
     RowTypePtr rowType;
     switch (param.dataTypeGroup) {
-      case DataTypeGroup::kPrimitive:
+      case DataTypeGroup::kInteger: {
         rowType =
             ROW({"c0", "c1", "c2", "c3", "c4"},
-                {INTEGER(), BIGINT(), VARCHAR(), BOOLEAN(), DOUBLE()});
+                {BOOLEAN(), TINYINT(), SMALLINT(), INTEGER(), BIGINT()});
         break;
-      case DataTypeGroup::kComplex:
-        rowType =
-            ROW({"c0", "c1", "c2"},
-                {INTEGER(), ARRAY(VARCHAR()), MAP(INTEGER(), VARCHAR())});
+      }
+      case DataTypeGroup::kFloat: {
+        rowType = ROW({"c0", "c1", "c2"}, {REAL(), DOUBLE()});
         break;
-      case DataTypeGroup::kLargeString:
-        rowType = ROW({"c0"}, {VARCHAR()});
+      }
+      case DataTypeGroup::kString: {
+        opts.stringLength = 8;
+        rowType = ROW({"c0", "c1", "c2"}, {VARCHAR(), VARBINARY()});
+        break;
+      }
+      case DataTypeGroup::kLargeString: {
         opts.stringLength = 1024;
-        if (param.memoryPressure == MemoryPressure::kNormal) {
-          data.bufferSize = 1024;
-        }
+        rowType = ROW({"c0", "c1"}, {VARCHAR(), VARBINARY()});
         break;
-      case DataTypeGroup::kHighNulls:
-        rowType = ROW({"c0", "c1"}, {INTEGER(), VARCHAR()});
-        opts.nullRatio = 1.0;
+      }
+      case DataTypeGroup::kDecimal: {
+        rowType = ROW({"c0", "c1"}, {DECIMAL(10, 2), DECIMAL(38, 18)});
         break;
-      case DataTypeGroup::kEmpty:
-        rowType = ROW({"c0"}, {INTEGER()});
+      }
+      case DataTypeGroup::kDateTime: {
+        rowType = ROW({"c0", "c1"}, {TIMESTAMP(), DATE()});
         break;
+      }
+      case DataTypeGroup::kComplex: {
+        rowType =
+            ROW({"c0", "c1"}, {ARRAY(INTEGER()), MAP(VARCHAR(), BIGINT())});
+        break;
+      }
+      case DataTypeGroup::kMix: {
+        rowType =
+            ROW({"c0",
+                 "c1",
+                 "c2",
+                 "c3",
+                 "c4",
+                 "c5",
+                 "c6",
+                 "c7",
+                 "c8",
+                 "c9",
+                 "c10",
+                 "c11",
+                 "c12",
+                 "c13",
+                 "c14",
+                 "c15"},
+                {BOOLEAN(),
+                 TINYINT(),
+                 SMALLINT(),
+                 INTEGER(),
+                 BIGINT(),
+                 DECIMAL(10, 2),
+                 DECIMAL(38, 18),
+                 REAL(),
+                 DOUBLE(),
+                 VARCHAR(),
+                 VARBINARY(),
+                 DATE(),
+                 TIMESTAMP(),
+                 ARRAY(INTEGER()),
+                 MAP(VARCHAR(), BIGINT()),
+                 ROW({"f0", "f1"}, {INTEGER(), VARCHAR()})});
+        break;
+      }
+      case DataTypeGroup::kHighNulls: {
+        opts.nullRatio = 1;
+        rowType = ROW({"c0", "c1", "c2"}, {INTEGER(), DOUBLE(), VARCHAR()});
+        break;
+      }
+      case DataTypeGroup::kEmpty: {
+        rowType = ROW({"c0", "c1"}, {BIGINT(), VARCHAR()});
+        numBatches = 0;
+        break;
+      }
     }
-
-    const int32_t numRows =
-        (param.dataTypeGroup == DataTypeGroup::kEmpty) ? 0 : param.numRows;
-    const int32_t numBatches =
-        (numRows == 0) ? 1 : std::max(1, param.numBatches);
-
-    if (numRows == 0) {
-      data.baseBatches.push_back(std::dynamic_pointer_cast<RowVector>(
-          BaseVector::create(rowType, 0, pool())));
-      return data;
-    }
-
-    const int32_t baseSize = numRows / numBatches;
-    const int32_t remainder = numRows % numBatches;
-    data.baseBatches.reserve(numBatches);
-    for (int32_t i = 0; i < numBatches; ++i) {
-      opts.vectorSize = baseSize + ((i < remainder) ? 1 : 0);
-      VectorFuzzer fuzzer(opts, pool());
-      data.baseBatches.push_back(fuzzer.fuzzInputRow(rowType));
-    }
-    return data;
+    return generateRandomData(rowType, opts, numBatches);
   }
 
   RowVectorPtr prependPidColumn(
       const RowVectorPtr& input,
-      const std::vector<column_index_t>& keyChannels,
-      int32_t numPartitions) {
+      int32_t numPartitions,
+      std::mt19937& rng) {
     const auto numRows = input->size();
     const auto rowType = input->type()->asRow();
     std::vector<std::string> names;
@@ -543,23 +362,17 @@ class ShuffleTest : public OperatorTestBase {
       types.push_back(rowType.childAt(i));
     }
 
-    auto rows = materialize(input);
-    auto pidVector = makeFlatVector<int32_t>(numRows, [&](auto row) {
-      uint64_t hash = 0;
-      if (keyChannels.empty()) {
-        hash = static_cast<uint64_t>(row);
-      } else {
-        for (auto idx : keyChannels) {
-          BOLT_CHECK(
-              idx < rows[row].size(), "Key column index out of range: {}", idx);
-          hash = hash * 31 + rows[row][idx].hash();
-        }
+    std::vector<int32_t> pids(numRows);
+    if (numPartitions <= 0) {
+      std::fill(pids.begin(), pids.end(), 0);
+    } else {
+      std::uniform_int_distribution<int32_t> dist(0, numPartitions - 1);
+      for (int32_t row = 0; row < numRows; ++row) {
+        pids[row] = dist(rng);
       }
-      if (numPartitions == 0) {
-        return 0;
-      }
-      return static_cast<int32_t>(hash % numPartitions);
-    });
+    }
+    auto pidVector =
+        makeFlatVector<int32_t>(numRows, [&](auto row) { return pids[row]; });
 
     std::vector<VectorPtr> children;
     children.reserve(input->childrenSize() + 1);
@@ -577,12 +390,12 @@ class ShuffleTest : public OperatorTestBase {
 
   std::vector<RowVectorPtr> prependPidBatches(
       const std::vector<RowVectorPtr>& batches,
-      const std::vector<column_index_t>& keyChannels,
       int32_t numPartitions) {
+    std::mt19937 rng(kPidSeed);
     std::vector<RowVectorPtr> withPid;
     withPid.reserve(batches.size());
     for (const auto& batch : batches) {
-      withPid.push_back(prependPidColumn(batch, keyChannels, numPartitions));
+      withPid.push_back(prependPidColumn(batch, numPartitions, rng));
     }
     return withPid;
   }
@@ -600,14 +413,11 @@ class ShuffleTest : public OperatorTestBase {
     std::filesystem::create_directories(localDir);
 
     ShuffleWriterOptions writerOptions;
-    writerOptions.bufferSize = inputData.bufferSize;
-    writerOptions.partitioning = param.partitioning;
-    writerOptions.sort_before_repartition = param.prependPid;
+    writerOptions.partitioning = toPartitioning(param.partitioning);
+    writerOptions.sort_before_repartition = false;
     writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
     writerOptions.forceShuffleWriterType = param.shuffleMode;
     writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;
-    writerOptions.partitionWriterOptions.shuffleBufferSize =
-        inputData.shuffleBatchByteSize;
     writerOptions.taskAttemptId = taskAttemptIdCounter++;
 
     std::shared_ptr<NiceMock<MockRssClient>> mockRssClient;
@@ -669,10 +479,9 @@ class ShuffleTest : public OperatorTestBase {
       }
 
       ShuffleReaderOptions readerOptions;
-      readerOptions.shuffleBatchByteSize = inputData.shuffleBatchByteSize;
       readerOptions.numPartitions = param.numPartitions;
       readerOptions.forceShuffleWriterType = param.shuffleMode;
-      readerOptions.partitionShortName = partitionShortName(param.partitioning);
+      readerOptions.partitionShortName = param.partitioning;
 
       core::PlanNodeId readerId("reader_" + std::to_string(i));
       auto readerNode = std::make_shared<SparkShuffleReaderNode>(
@@ -694,28 +503,15 @@ class ShuffleTest : public OperatorTestBase {
     return result;
   }
 
-  void executeTestWithInput(
-      const ShuffleTestParam& param,
-      const ShuffleInputData& inputData) {
-    if (param.partitioning == Partitioning::kSingle) {
-      if (param.shuffleMode == 2 || param.shuffleMode == 3) {
-        GTEST_SKIP() << "Single partitioning not supported for V2/RowBased";
-      }
-    }
-    if ((param.partitioning == Partitioning::kHash ||
-         param.partitioning == Partitioning::kRange) &&
-        !param.prependPid) {
-      GTEST_SKIP() << "Hash/Range partitioning requires PID column";
-    }
-    if (param.shuffleMode == 3 && !param.prependPid) {
-      GTEST_SKIP() << "RowBased shuffle requires PID column";
-    }
-
+  void executeTest(const ShuffleTestParam& param) {
+    auto inputData = makeInputData(param);
+    const bool needsPid = param.partitioning == Partitioning::kHash ||
+        param.partitioning == Partitioning::kRange;
     const auto& baseBatches = inputData.baseBatches;
     BOLT_CHECK(!baseBatches.empty(), "Input batches should not be empty");
 
-    auto writerInput = param.prependPid
-        ? prependPidBatches(baseBatches, param.keyChannels, param.numPartitions)
+    auto writerInput = needsPid
+        ? prependPidBatches(baseBatches, param.numPartitions)
         : baseBatches;
     auto outputType =
         std::dynamic_pointer_cast<const RowType>(baseBatches[0]->type());
@@ -737,11 +533,6 @@ class ShuffleTest : public OperatorTestBase {
     result.outputBatches.clear();
     result.readerCursors.clear();
   }
-
-  void executeTest(const ShuffleTestParam& param) {
-    auto inputData = makeInputData(param);
-    executeTestWithInput(param, inputData);
-  }
 };
 
 std::atomic<int64_t> ShuffleTest::taskAttemptIdCounter{0};
@@ -760,43 +551,5 @@ INSTANTIATE_TEST_SUITE_P(
     ShuffleTestP,
     testing::ValuesIn(buildShuffleParams()),
     [](const testing::TestParamInfo<ShuffleTestParam>& info) {
-      std::stringstream ss;
-      ss << info.param;
-      return ss.str();
+      return info.param.toString();
     });
-
-TEST_F(ShuffleTest, HashPartitionMultiKey) {
-  ShuffleTestParam param{
-      Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      500,
-      2,
-      true,
-      {0, 2}};
-  executeTest(param);
-}
-
-TEST_F(ShuffleTest, SharedDatasetAcrossModes) {
-  ShuffleTestParam base{
-      Partitioning::kHash,
-      1,
-      PartitionWriterType::kLocal,
-      DataTypeGroup::kPrimitive,
-      MemoryPressure::kNormal,
-      4,
-      1000,
-      2,
-      true,
-      {0}};
-
-  auto inputData = makeInputData(base);
-  for (int mode : {1, 2, 3}) {
-    auto param = base;
-    param.shuffleMode = mode;
-    executeTestWithInput(param, inputData);
-  }
-}
