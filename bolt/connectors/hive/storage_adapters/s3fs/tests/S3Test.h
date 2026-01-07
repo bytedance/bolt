@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -28,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/File.h"
 #include "bolt/connectors/hive/FileHandle.h"
@@ -36,22 +34,20 @@
 #include "bolt/connectors/hive/storage_adapters/s3fs/S3Util.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/tests/MinioServer.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
-#include "bolt/exec/tests/utils/PortUtil.h"
 #include "bolt/exec/tests/utils/TempFilePath.h"
 
 #include "gtest/gtest.h"
+
 using namespace bytedance::bolt;
 
 constexpr int kOneMB = 1 << 20;
 
 static constexpr std::string_view kDummyPath = "s3://dummy/foo.txt";
 
-class S3Test : public testing::Test, public ::test::VectorTestBase {
+class S3Test : public testing::Test {
  protected:
   void SetUp() override {
-    auto port = bytedance::bolt::exec::test::getFreePort();
-    minioServer_ =
-        std::make_unique<MinioServer>(fmt::format("127.0.0.1:{}", port));
+    minioServer_ = std::make_unique<MinioServer>();
     minioServer_->start();
     ioExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(3);
   }

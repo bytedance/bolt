@@ -287,6 +287,9 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_jit"):
             self.requires("llvm-core/13.0.0")
 
+        if self.options.get_safe("enable_s3"):
+            self.requires("aws-sdk-cpp/1.11.692", transitive_headers=True, transitive_libs=True)
+            self.requires("aws-c-common/0.12.5", force=True)
         self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires("sonic-cpp/1.0.2", transitive_headers=True, transitive_libs=True)
         self.requires(
@@ -391,6 +394,10 @@ class BoltConan(ConanFile):
 
         if not self.options.get_safe("enable_test"):
             self.options.enable_coverage = False
+
+        if self.options.get_safe("enable_s3"):
+            s3_opt = self.options["aws-sdk-cpp/*"]
+            setattr(s3_opt, 'text-to-speech', False)
 
         arrow_simd_level = "default"
         if str(self.settings.arch) in ["x86", "x86_64"]:
@@ -751,6 +758,7 @@ class BoltConan(ConanFile):
                 "liburing::liburing",
                 "zlib::zlib",
                 "libbacktrace::libbacktrace",
+                "aws-c-common::aws-c-common",
             ]
         )
 

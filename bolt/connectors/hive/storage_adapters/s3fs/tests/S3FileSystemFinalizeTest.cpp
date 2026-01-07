@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -28,28 +27,28 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/S3FileSystem.h"
 
 #include "gtest/gtest.h"
+
 namespace bytedance::bolt {
 namespace {
 
 TEST(S3FileSystemFinalizeTest, finalize) {
   auto s3Config = std::make_shared<config::ConfigBase>(
       std::unordered_map<std::string, std::string>());
-  ASSERT_TRUE(filesystems::initializeS3(s3Config.get()));
-  ASSERT_FALSE(filesystems::initializeS3(s3Config.get()));
+  ASSERT_TRUE(filesystems::initializeS3());
+  ASSERT_FALSE(filesystems::initializeS3());
   {
-    filesystems::S3FileSystem s3fs(s3Config);
+    filesystems::S3FileSystem s3fs("", s3Config);
     BOLT_ASSERT_THROW(
         filesystems::finalizeS3(), "Cannot finalize S3 while in use");
   }
   filesystems::finalizeS3();
   BOLT_ASSERT_THROW(
-      filesystems::initializeS3(s3Config.get()),
+      filesystems::initializeS3(),
       "Attempt to initialize S3 after it has been finalized.");
 }
 

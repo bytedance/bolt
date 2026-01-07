@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -29,36 +28,51 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/s3fs/benchmark/S3ReadBenchmark.h"
-#include "bolt/core/Config.h"
+#pragma once
 
-#include <fstream>
+#include "bolt/common/file/File.h"
 
-DEFINE_string(s3_config, "", "Path of S3 config file");
-namespace bytedance::bolt {
-
-// From presto-cpp
-std::shared_ptr<Config> readConfig(const std::string& filePath) {
-  std::ifstream configFile(filePath);
-  if (!configFile.is_open()) {
-    throw std::runtime_error(
-        fmt::format("Couldn't open config file {} for reading.", filePath));
-  }
-
-  std::unordered_map<std::string, std::string> properties;
-  std::string line;
-  while (getline(configFile, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(), isspace), line.end());
-    if (line[0] == '#' || line.empty()) {
-      continue;
-    }
-    auto delimiterPos = line.find('=');
-    auto name = line.substr(0, delimiterPos);
-    auto value = line.substr(delimiterPos + 1);
-    properties.emplace(name, value);
-  }
-
-  return std::make_shared<bytedance::bolt::core::MemConfig>(properties);
+namespace Aws::S3 {
+class S3Client;
 }
 
-} // namespace bytedance::bolt
+namespace bytedance::bolt::filesystems {
+
+/// Implementation of s3 read file.
+class S3ReadFile : public ReadFile {
+ public:
+  S3ReadFile(std::string_view path, Aws::S3::S3Client* client);
+
+  ~S3ReadFile() override;
+
+  std::string_view pread(uint64_t offset, uint64_t length, void* buf)
+      const final;
+
+  std::string pread(uint64_t offset, uint64_t length) const final;
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const final;
+
+  uint64_t size() const final;
+
+  uint64_t memoryUsage() const final;
+
+  bool shouldCoalesce() const final;
+
+  std::string getName() const final;
+
+  uint64_t getNaturalReadSize() const final {
+    return 72 << 20;
+  }
+
+  void initialize();
+
+ private:
+  void preadInternal(uint64_t offset, uint64_t length, char* position) const;
+
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+} // namespace bytedance::bolt::filesystems

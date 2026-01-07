@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -37,6 +36,7 @@
 namespace Aws::S3 {
 class S3Client;
 }
+
 namespace bytedance::bolt::filesystems {
 
 /// S3WriteFile uses the Apache Arrow implementation as a reference.
@@ -62,7 +62,7 @@ namespace bytedance::bolt::filesystems {
 class S3WriteFile : public WriteFile {
  public:
   S3WriteFile(
-      const std::string& path,
+      std::string_view path,
       Aws::S3::S3Client* client,
       memory::MemoryPool* pool);
 

@@ -32,59 +32,74 @@
 #pragma once
 
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/hive/HiveConfig.h"
-namespace bytedance::bolt::filesystems {
-using namespace bytedance::bolt::connector::hive;
 
-bool initializeS3(const config::ConfigBase* config);
+namespace Aws::Auth {
+// Forward-declare the AWSCredentialsProvider class from the AWS SDK.
+class AWSCredentialsProvider;
+} // namespace Aws::Auth
+
+namespace bytedance::bolt::filesystems {
+
+bool initializeS3(
+    std::string_view logLevel = "FATAL",
+    std::optional<std::string_view> logLocation = std::nullopt);
 
 void finalizeS3();
+
+class S3Config;
+
+using AWSCredentialsProviderFactory =
+    std::function<std::shared_ptr<Aws::Auth::AWSCredentialsProvider>(
+        const S3Config& config)>;
+
+void registerCredentialsProvider(
+    const std::string& providerName,
+    const AWSCredentialsProviderFactory& factory);
 
 /// Implementation of S3 filesystem and file interface.
 /// We provide a registration method for read and write files so the appropriate
 /// type of file can be constructed based on a filename.
 class S3FileSystem : public FileSystem {
  public:
-  explicit S3FileSystem(std::shared_ptr<const config::ConfigBase> config);
+  S3FileSystem(
+      std::string_view bucketName,
+      const std::shared_ptr<const config::ConfigBase> config);
 
   std::string name() const override;
 
   std::unique_ptr<ReadFile> openFileForRead(
-      std::string_view path,
+      std::string_view s3Path,
       const FileOptions& options = {}) override;
 
   std::unique_ptr<WriteFile> openFileForWrite(
-      std::string_view path,
+      std::string_view s3Path,
       const FileOptions& options) override;
 
   void remove(std::string_view path) override {
     BOLT_UNSUPPORTED("remove for S3 not implemented");
   }
 
+  // Renames the path.
   void rename(
       std::string_view path,
       std::string_view newPath,
-      bool overWrite = false) override {
-    BOLT_UNSUPPORTED("rename for S3 not implemented");
-  }
+      bool overWrite = false) override;
 
-  bool exists(std::string_view path) override {
-    BOLT_UNSUPPORTED("exists for S3 not implemented");
-  }
+  /// Checks that the path exists.
+  bool exists(std::string_view path) override;
 
-  std::vector<std::string> list(std::string_view path) override {
-    BOLT_UNSUPPORTED("list for S3 not implemented");
-  }
+  /// List the objects associated to a path.
+  std::vector<std::string> list(std::string_view path) override;
 
-  void mkdir(std::string_view path) override {
-    BOLT_UNSUPPORTED("mkdir for S3 not implemented");
-  }
+  void mkdir(std::string_view path) override;
 
   void rmdir(std::string_view path) override {
     BOLT_UNSUPPORTED("rmdir for S3 not implemented");
   }
 
   std::string getLogLevelName() const;
+
+  std::string getLogPrefix() const;
 
  protected:
   class Impl;

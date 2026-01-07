@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -29,12 +28,17 @@
  * --------------------------------------------------------------------------
  */
 
+#include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/auth/AWSCredentialsProvider.h>
+
 #include "bolt/common/memory/Memory.h"
+#include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/S3WriteFile.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/tests/S3Test.h"
 
 #include <gtest/gtest.h>
-namespace bytedance::bolt {
+
+namespace bytedance::bolt::filesystems {
 namespace {
 
 class S3FileSystemTest : public S3Test {
@@ -45,28 +49,43 @@ class S3FileSystemTest : public S3Test {
 
   void SetUp() override {
     S3Test::SetUp();
-    auto hiveConfig = minioServer_->hiveConfig({{"hive.s3.log-level", "Info"}});
-    filesystems::initializeS3(hiveConfig.get());
+    auto hiveConfig = minioServer_->hiveConfig({});
+    filesystems::initializeS3("Info", kLogLocation_);
   }
 
   static void TearDownTestSuite() {
     filesystems::finalizeS3();
   }
+
+  std::string_view kLogLocation_ = "/tmp/foobar/";
 };
+
+class MyCredentialsProvider : public Aws::Auth::AWSCredentialsProvider {
+ public:
+  MyCredentialsProvider() = default;
+
+  Aws::Auth::AWSCredentials GetAWSCredentials() override {
+    return Aws::Auth::AWSCredentials();
+  }
+};
+
 } // namespace
 
 TEST_F(S3FileSystemTest, writeAndRead) {
+  /// The hive config used for Minio defaults to turning
+  /// off using proxy settings if the environment provides them.
+  setenv("HTTP_PROXY", "http://test:test@127.0.0.1:8888", 1);
   const char* bucketName = "data";
   const char* file = "test.txt";
-  const std::string filename = localPath(bucketName) + "/" + file;
-  const std::string s3File = s3URI(bucketName, file);
+  const auto filename = localPath(bucketName) + "/" + file;
+  const auto s3File = s3URI(bucketName, file);
   addBucket(bucketName);
   {
     LocalWriteFile writeFile(filename);
     writeData(&writeFile);
   }
   auto hiveConfig = minioServer_->hiveConfig();
-  filesystems::S3FileSystem s3fs(hiveConfig);
+  filesystems::S3FileSystem s3fs(bucketName, hiveConfig);
   auto readFile = s3fs.openFileForRead(s3File);
   readData(readFile.get());
 }
@@ -81,7 +100,7 @@ TEST_F(S3FileSystemTest, invalidCredentialsConfig) {
 
     // Both instance credentials and iam-role cannot be specified
     BOLT_ASSERT_THROW(
-        filesystems::S3FileSystem(hiveConfig),
+        filesystems::S3FileSystem("", hiveConfig),
         "Invalid configuration: specify only one among 'access/secret keys', 'use instance credentials', 'IAM role'");
   }
   {
@@ -93,7 +112,7 @@ TEST_F(S3FileSystemTest, invalidCredentialsConfig) {
         std::make_shared<const config::ConfigBase>(std::move(config));
     // Both access/secret keys and iam-role cannot be specified
     BOLT_ASSERT_THROW(
-        filesystems::S3FileSystem(hiveConfig),
+        filesystems::S3FileSystem("", hiveConfig),
         "Invalid configuration: specify only one among 'access/secret keys', 'use instance credentials', 'IAM role'");
   }
   {
@@ -105,7 +124,7 @@ TEST_F(S3FileSystemTest, invalidCredentialsConfig) {
         std::make_shared<const config::ConfigBase>(std::move(config));
     // Both access/secret keys and instance credentials cannot be specified
     BOLT_ASSERT_THROW(
-        filesystems::S3FileSystem(hiveConfig),
+        filesystems::S3FileSystem("", hiveConfig),
         "Invalid configuration: specify only one among 'access/secret keys', 'use instance credentials', 'IAM role'");
   }
   {
@@ -115,7 +134,7 @@ TEST_F(S3FileSystemTest, invalidCredentialsConfig) {
         std::make_shared<const config::ConfigBase>(std::move(config));
     // Both access key and secret key must be specified
     BOLT_ASSERT_THROW(
-        filesystems::S3FileSystem(hiveConfig),
+        filesystems::S3FileSystem("", hiveConfig),
         "Invalid configuration: both access key and secret key must be specified");
   }
 }
@@ -126,24 +145,22 @@ TEST_F(S3FileSystemTest, missingFile) {
   const std::string s3File = s3URI(bucketName, file);
   addBucket(bucketName);
   auto hiveConfig = minioServer_->hiveConfig();
-  filesystems::S3FileSystem s3fs(hiveConfig);
-  BOLT_ASSERT_THROW(
-      s3fs.openFileForRead(s3File),
-      "Failed to get metadata for S3 object due to: 'Resource not found'. Path:'s3://data1/i-do-not-exist.txt', SDK Error Type:16, HTTP Status Code:404, S3 Service:'MinIO', Message:'No response body.'");
+  filesystems::S3FileSystem s3fs(bucketName, hiveConfig);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      s3fs.openFileForRead(s3File), error_code::kFileNotFound);
 }
 
 TEST_F(S3FileSystemTest, missingBucket) {
   auto hiveConfig = minioServer_->hiveConfig();
-  filesystems::S3FileSystem s3fs(hiveConfig);
-  BOLT_ASSERT_THROW(
-      s3fs.openFileForRead(kDummyPath),
-      "Failed to get metadata for S3 object due to: 'Resource not found'. Path:'s3://dummy/foo.txt', SDK Error Type:16, HTTP Status Code:404, S3 Service:'MinIO', Message:'No response body.'");
+  filesystems::S3FileSystem s3fs("", hiveConfig);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      s3fs.openFileForRead(kDummyPath), error_code::kFileNotFound);
 }
 
 TEST_F(S3FileSystemTest, invalidAccessKey) {
   auto hiveConfig =
       minioServer_->hiveConfig({{"hive.s3.aws-access-key", "dummy-key"}});
-  filesystems::S3FileSystem s3fs(hiveConfig);
+  filesystems::S3FileSystem s3fs("", hiveConfig);
   // Minio credentials are wrong and this should throw
   BOLT_ASSERT_THROW(
       s3fs.openFileForRead(kDummyPath),
@@ -153,7 +170,7 @@ TEST_F(S3FileSystemTest, invalidAccessKey) {
 TEST_F(S3FileSystemTest, invalidSecretKey) {
   auto hiveConfig =
       minioServer_->hiveConfig({{"hive.s3.aws-secret-key", "dummy-key"}});
-  filesystems::S3FileSystem s3fs(hiveConfig);
+  filesystems::S3FileSystem s3fs("", hiveConfig);
   // Minio credentials are wrong and this should throw.
   BOLT_ASSERT_THROW(
       s3fs.openFileForRead("s3://dummy/foo.txt"),
@@ -163,12 +180,12 @@ TEST_F(S3FileSystemTest, invalidSecretKey) {
 TEST_F(S3FileSystemTest, noBackendServer) {
   auto hiveConfig =
       minioServer_->hiveConfig({{"hive.s3.aws-secret-key", "dummy-key"}});
-  filesystems::S3FileSystem s3fs(hiveConfig);
+  filesystems::S3FileSystem s3fs("", hiveConfig);
   // Stop Minio and check error.
   minioServer_->stop();
   BOLT_ASSERT_THROW(
       s3fs.openFileForRead(kDummyPath),
-      "Failed to get metadata for S3 object due to: 'Network connection'. Path:'s3://dummy/foo.txt', SDK Error Type:99, HTTP Status Code:-1, S3 Service:'Unknown', Message:'curlCode: 7, Couldn't connect to server'");
+      "Failed to get metadata for S3 object due to: 'Network connection'. Path:'s3://dummy/foo.txt', SDK Error Type:99, HTTP Status Code:-1, S3 Service:'Unknown', Message:'curlCode: 7, Couldn't connect to server");
   // Start Minio again.
   minioServer_->start();
 }
@@ -178,7 +195,7 @@ TEST_F(S3FileSystemTest, logLevel) {
   auto checkLogLevelName = [&config](std::string_view expected) {
     auto s3Config =
         std::make_shared<const config::ConfigBase>(std::move(config));
-    filesystems::S3FileSystem s3fs(s3Config);
+    filesystems::S3FileSystem s3fs("", s3Config);
     EXPECT_EQ(s3fs.getLogLevelName(), expected);
   };
 
@@ -191,6 +208,48 @@ TEST_F(S3FileSystemTest, logLevel) {
   checkLogLevelName("INFO");
 }
 
+TEST_F(S3FileSystemTest, logLocation) {
+  // From aws-cpp-sdk-core/include/aws/core/Aws.h .
+  std::string_view kDefaultPrefix = "aws_sdk_";
+  std::unordered_map<std::string, std::string> config;
+  auto checkLogPrefix = [&config](std::string_view expected) {
+    auto s3Config =
+        std::make_shared<const config::ConfigBase>(std::move(config));
+    filesystems::S3FileSystem s3fs("", s3Config);
+    EXPECT_EQ(s3fs.getLogPrefix(), expected);
+  };
+
+  const auto expected = fmt::format("{}{}", kLogLocation_, kDefaultPrefix);
+  // Test is configured with the default.
+  checkLogPrefix(expected);
+
+  // S3 log location is set once during initialization.
+  // It does not change with a new config.
+  config["hive.s3.log-location"] = "/home/foobar";
+  checkLogPrefix(expected);
+}
+
+TEST_F(S3FileSystemTest, mkdirAndRename) {
+  const auto bucketName = "mkdir";
+  const auto file = "mkdir-test.txt";
+  const auto s3File = s3URI(bucketName, file);
+  addBucket(bucketName);
+
+  auto hiveConfig = minioServer_->hiveConfig();
+  filesystems::S3FileSystem s3fs(bucketName, hiveConfig);
+
+  ASSERT_FALSE(s3fs.exists(s3File));
+  s3fs.mkdir(s3File);
+  ASSERT_TRUE(s3fs.exists(s3File));
+
+  // Rename test
+  const auto renameFile = "rename-test.txt";
+  const auto s3RenameFile = s3URI(bucketName, renameFile);
+  s3fs.rename(s3File, s3RenameFile);
+  ASSERT_TRUE(s3fs.exists(s3RenameFile));
+  ASSERT_FALSE(s3fs.exists(s3File));
+}
+
 TEST_F(S3FileSystemTest, writeFileAndRead) {
   const auto bucketName = "writedata";
   const auto file = "test.txt";
@@ -198,9 +257,10 @@ TEST_F(S3FileSystemTest, writeFileAndRead) {
   const auto s3File = s3URI(bucketName, file);
 
   auto hiveConfig = minioServer_->hiveConfig();
-  filesystems::S3FileSystem s3fs(hiveConfig);
+  filesystems::S3FileSystem s3fs(bucketName, hiveConfig);
   auto pool = memory::memoryManager()->addLeafPool("S3FileSystemTest");
-  auto writeFile = s3fs.openFileForWrite(s3File, {{}, pool.get()});
+  auto writeFile = s3fs.openFileForWrite(
+      s3File, filesystems::FileOptions{.pool = pool.get()});
   auto s3WriteFile = dynamic_cast<filesystems::S3WriteFile*>(writeFile.get());
   std::string dataContent =
       "Dance me to your beauty with a burning violin"
@@ -261,5 +321,63 @@ TEST_F(S3FileSystemTest, writeFileAndRead) {
   }
   // Verify the last chunk.
   ASSERT_EQ(readFile->pread(contentSize * 250'000, contentSize), dataContent);
+
+  // Verify the S3 list function.
+  auto result = s3fs.list(s3File);
+
+  ASSERT_EQ(result.size(), 1);
+  ASSERT_TRUE(result[0] == file);
+
+  ASSERT_TRUE(s3fs.exists(s3File));
 }
-} // namespace bytedance::bolt
+
+TEST_F(S3FileSystemTest, invalidConnectionSettings) {
+  auto hiveConfig =
+      minioServer_->hiveConfig({{"hive.s3.connect-timeout", "400"}});
+  BOLT_ASSERT_THROW(
+      filesystems::S3FileSystem("", hiveConfig), "Invalid duration");
+
+  hiveConfig = minioServer_->hiveConfig({{"hive.s3.socket-timeout", "abc"}});
+  BOLT_ASSERT_THROW(
+      filesystems::S3FileSystem("", hiveConfig), "Invalid duration");
+}
+
+TEST_F(S3FileSystemTest, registerCredentialProviderFactories) {
+  const std::string credentialsProvider = "my-credentials-provider";
+  const std::string invalidCredentialsProvider = "invalid-credentials-provider";
+  registerAWSCredentialsProvider(
+      credentialsProvider, [](const S3Config& config) {
+        return std::make_shared<MyCredentialsProvider>();
+      });
+
+  auto hiveConfig = minioServer_->hiveConfig(
+      {{"hive.s3.aws-credentials-provider", credentialsProvider}});
+  ASSERT_NO_THROW(filesystems::S3FileSystem("", hiveConfig));
+
+  // Configure with unregistered credential provider.
+  hiveConfig = minioServer_->hiveConfig(
+      {{"hive.s3.aws-credentials-provider", invalidCredentialsProvider}});
+  BOLT_ASSERT_THROW(
+      filesystems::S3FileSystem({"", hiveConfig}),
+      "CredentialsProviderFactory for 'invalid-credentials-provider' not registered");
+
+  // Register invalid credentials provider name.
+  BOLT_ASSERT_THROW(
+      registerAWSCredentialsProvider(
+          "",
+          [](const S3Config& config) {
+            return std::make_shared<MyCredentialsProvider>();
+          }),
+      "CredentialsProviderFactory name cannot be empty");
+
+  // Register the same credential provider name again.
+  BOLT_ASSERT_THROW(
+      registerAWSCredentialsProvider(
+          credentialsProvider,
+          [](const S3Config& config) {
+            return std::make_shared<MyCredentialsProvider>();
+          }),
+      "CredentialsProviderFactory 'my-credentials-provider' already registered");
+}
+
+} // namespace bytedance::bolt::filesystems

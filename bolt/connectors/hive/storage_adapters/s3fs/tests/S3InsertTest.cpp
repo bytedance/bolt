@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -32,17 +31,14 @@
 #include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
-#include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/tests/S3Test.h"
-#include "bolt/exec/TableWriter.h"
-#include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/PlanBuilder.h"
-using namespace bytedance::bolt::exec::test;
-namespace bytedance::bolt {
+#include "bolt/connectors/hive/storage_adapters/test_common/InsertTest.h"
+
+namespace bytedance::bolt::filesystems {
 namespace {
 
-class S3InsertTest : public S3Test {
+class S3InsertTest : public S3Test, public test::InsertTest {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
@@ -51,19 +47,12 @@ class S3InsertTest : public S3Test {
   void SetUp() override {
     S3Test::SetUp();
     filesystems::registerS3FileSystem();
-    auto hiveConnector =
-        connector::getConnectorFactory(
-            connector::hive::HiveConnectorFactory::kHiveConnectorName)
-            ->newConnector(
-                ::exec::test::kHiveConnectorId,
-                minioServer_->hiveConfig(),
-                ioExecutor_.get());
-    connector::registerConnector(hiveConnector);
+    InsertTest::SetUp(minioServer_->hiveConfig(), ioExecutor_.get());
   }
 
   void TearDown() override {
-    connector::unregisterConnector(::exec::test::kHiveConnectorId);
     S3Test::TearDown();
+    InsertTest::TearDown();
     filesystems::finalizeS3FileSystem();
   }
 };
@@ -72,67 +61,14 @@ class S3InsertTest : public S3Test {
 TEST_F(S3InsertTest, s3InsertTest) {
   const int64_t kExpectedRows = 1'000;
   const std::string_view kOutputDirectory{"s3://writedata/"};
-
-  auto rowType = ROW(
-      {"c0", "c1", "c2", "c3"}, {BIGINT(), INTEGER(), SMALLINT(), DOUBLE()});
-
-  auto input = makeRowVector(
-      {makeFlatVector<int64_t>(kExpectedRows, [](auto row) { return row; }),
-       makeFlatVector<int32_t>(kExpectedRows, [](auto row) { return row; }),
-       makeFlatVector<int16_t>(kExpectedRows, [](auto row) { return row; }),
-       makeFlatVector<double>(kExpectedRows, [](auto row) { return row; })});
-
   minioServer_->addBucket("writedata");
 
-  // Insert into s3 with one writer.
-  auto plan =
-      PlanBuilder()
-          .values({input})
-          .tableWrite(
-              kOutputDirectory.data(), dwio::common::FileFormat::PARQUET)
-          .planNode();
-
-  // Execute the write plan.
-  auto results = AssertQueryBuilder(plan).copyResults(pool());
-
-  // First column has number of rows written in the first row and nulls in other
-  // rows.
-  auto rowCount = results->childAt(exec::TableWriteTraits::kRowCountChannel)
-                      ->as<FlatVector<int64_t>>();
-  ASSERT_FALSE(rowCount->isNullAt(0));
-  ASSERT_EQ(kExpectedRows, rowCount->valueAt(0));
-  ASSERT_TRUE(rowCount->isNullAt(1));
-
-  // Second column contains details about written files.
-  auto details = results->childAt(exec::TableWriteTraits::kFragmentChannel)
-                     ->as<FlatVector<StringView>>();
-  ASSERT_TRUE(details->isNullAt(0));
-  ASSERT_FALSE(details->isNullAt(1));
-  folly::dynamic obj = folly::parseJson(details->valueAt(1));
-
-  ASSERT_EQ(kExpectedRows, obj["rowCount"].asInt());
-  auto fileWriteInfos = obj["fileWriteInfos"];
-  ASSERT_EQ(1, fileWriteInfos.size());
-
-  auto writeFileName = fileWriteInfos[0]["writeFileName"].asString();
-
-  // Read from 'writeFileName' and verify the data matches the original.
-  plan = PlanBuilder().tableScan(rowType).planNode();
-
-  auto filePath = fmt::format("{}{}", kOutputDirectory, writeFileName);
-  const int64_t fileSize = fileWriteInfos[0]["fileSize"].asInt();
-  auto split = HiveConnectorSplitBuilder(filePath)
-                   .fileFormat(dwio::common::FileFormat::PARQUET)
-                   .length(fileSize)
-                   .build();
-  auto copy = AssertQueryBuilder(plan).split(split).copyResults(pool());
-  assertEqualResults({input}, {copy});
+  runInsertTest(kOutputDirectory, kExpectedRows, pool());
 }
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::filesystems
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
+  folly::Init init{&argc, &argv, false};
   return RUN_ALL_TESTS();
 }

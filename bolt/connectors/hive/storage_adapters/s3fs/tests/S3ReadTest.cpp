@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -28,21 +27,24 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
 #include "bolt/common/memory/Memory.h"
+#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/tests/S3Test.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
+#include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+
 using namespace bytedance::bolt::exec::test;
-namespace bytedance::bolt {
+
+namespace bytedance::bolt::filesystems {
 namespace {
 
-class S3ReadTest : public S3Test {
+class S3ReadTest : public S3Test, public ::test::VectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
@@ -51,14 +53,15 @@ class S3ReadTest : public S3Test {
   void SetUp() override {
     S3Test::SetUp();
     filesystems::registerS3FileSystem();
+    connector::hive::HiveConnectorFactory factory;
     auto hiveConnector =
-        connector::getConnectorFactory(
-            connector::hive::HiveConnectorFactory::kHiveConnectorName)
-            ->newConnector(kHiveConnectorId, minioServer_->hiveConfig());
+        factory.newConnector(kHiveConnectorId, minioServer_->hiveConfig());
     connector::registerConnector(hiveConnector);
+    parquet::registerParquetReaderFactory();
   }
 
   void TearDown() override {
+    parquet::unregisterParquetReaderFactory();
     filesystems::finalizeS3FileSystem();
     connector::unregisterConnector(kHiveConnectorId);
     S3Test::TearDown();
@@ -68,6 +71,7 @@ class S3ReadTest : public S3Test {
 
 TEST_F(S3ReadTest, s3ReadTest) {
   const auto sourceFile = test::getDataFilePath(
+      "bolt/connectors/hive/storage_adapters/s3fs/tests",
       "../../../../../dwio/parquet/tests/examples/int.parquet");
   const char* bucketName = "data";
   const auto destinationFile = S3Test::localPath(bucketName) + "/int.parquet";
@@ -80,11 +84,9 @@ TEST_F(S3ReadTest, s3ReadTest) {
   dest.close();
 
   // Read the parquet file via the S3 bucket.
-  const auto readDirectory{s3URI(bucketName)};
   auto rowType = ROW({"int", "bigint"}, {INTEGER(), BIGINT()});
   auto plan = PlanBuilder().tableScan(rowType).planNode();
-  auto split = HiveConnectorSplitBuilder(
-                   fmt::format("{}/{}", readDirectory, "int.parquet"))
+  auto split = HiveConnectorSplitBuilder(s3URI(bucketName, "int.parquet"))
                    .fileFormat(dwio::common::FileFormat::PARQUET)
                    .build();
   auto copy = AssertQueryBuilder(plan).split(split).copyResults(pool());
@@ -98,11 +100,10 @@ TEST_F(S3ReadTest, s3ReadTest) {
            kExpectedRows, [](auto row) { return row + 1000; })});
   assertEqualResults({expectedResults}, {copy});
 }
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::filesystems
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
+  folly::Init init{&argc, &argv, false};
   return RUN_ALL_TESTS();
 }

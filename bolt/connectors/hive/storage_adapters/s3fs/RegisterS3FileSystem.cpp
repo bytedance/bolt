@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /* --------------------------------------------------------------------------
  * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -29,14 +28,17 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h" // @manual
+
 #ifdef BOLT_ENABLE_S3
-#include "bolt/connectors/hive/HiveConfig.h"
-#include "bolt/connectors/hive/storage_adapters/s3fs/S3FileSystem.h"
-#include "bolt/connectors/hive/storage_adapters/s3fs/S3Util.h"
+#include "bolt/common/base/StatsReporter.h"
+#include "bolt/connectors/hive/storage_adapters/s3fs/S3Config.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/s3fs/S3Counters.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/s3fs/S3FileSystem.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/s3fs/S3Util.h" // @manual
 #include "bolt/dwio/common/FileSink.h"
 #endif
 
-#include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 namespace bytedance::bolt::filesystems {
 
 #ifdef BOLT_ENABLE_S3
@@ -45,44 +47,62 @@ using FileSystemMap = folly::Synchronized<
 
 /// Multiple S3 filesystems are supported.
 /// Key is the endpoint value specified in the config using hive.s3.endpoint.
-/// If the endpoint is empty, it will default to AWS S3.
+/// If the endpoint is empty, it will default to AWS S3 Library.
+/// Different S3 buckets can be accessed with different client configurations.
+/// This allows for different endpoints, data read and write strategies.
+/// The bucket specific option is set by replacing the hive.s3. prefix on an
+/// option with hive.s3.bucket.BUCKETNAME., where BUCKETNAME is the name of the
+/// bucket. When connecting to a bucket, all options explicitly set will
+/// override the base hive.s3. values.
+
 FileSystemMap& fileSystems() {
   static FileSystemMap instances;
   return instances;
 }
 
-std::string getS3Identity(const std::shared_ptr<config::ConfigBase>& config) {
-  HiveConfig hiveConfig = HiveConfig(config);
-  auto endpoint = hiveConfig.s3Endpoint();
-  if (!endpoint.empty()) {
-    // The identity is the endpoint.
-    return endpoint;
-  }
-  // Default key value.
-  return "aws-s3-key";
-}
+CacheKeyFn cacheKeyFunc;
 
 std::shared_ptr<FileSystem> fileSystemGenerator(
     std::shared_ptr<const config::ConfigBase> properties,
-    std::string_view /*filePath*/) {
-  std::shared_ptr<config::ConfigBase> config =
-      std::make_shared<config::ConfigBase>(
-          std::unordered_map<std::string, std::string>());
-  if (properties) {
-    config = std::make_shared<config::ConfigBase>(properties->rawConfigsCopy());
+    std::string_view s3Path) {
+  std::string cacheKey, bucketName, key;
+  getBucketAndKeyFromPath(getPath(s3Path), bucketName, key);
+  if (!cacheKeyFunc) {
+    cacheKey = S3Config::cacheKey(bucketName, properties);
+  } else {
+    cacheKey = cacheKeyFunc(properties, s3Path);
   }
-  const auto s3Identity = getS3Identity(config);
+
+  // Check if an instance exists with a read lock (shared).
+  auto fs = fileSystems().withRLock(
+      [&](auto& instanceMap) -> std::shared_ptr<FileSystem> {
+        auto iterator = instanceMap.find(cacheKey);
+        if (iterator != instanceMap.end()) {
+          return iterator->second;
+        }
+        return nullptr;
+      });
+  if (fs != nullptr) {
+    return fs;
+  }
 
   return fileSystems().withWLock(
       [&](auto& instanceMap) -> std::shared_ptr<FileSystem> {
-        initializeS3(config.get());
-        auto iterator = instanceMap.find(s3Identity);
-        if (iterator == instanceMap.end()) {
-          auto fs = std::make_shared<S3FileSystem>(properties);
-          instanceMap.insert({s3Identity, fs});
-          return fs;
+        // Repeat the checks with a write lock.
+        auto iterator = instanceMap.find(cacheKey);
+        if (iterator != instanceMap.end()) {
+          return iterator->second;
         }
-        return iterator->second;
+
+        auto logLevel =
+            properties->get(S3Config::kS3LogLevel, std::string("FATAL"));
+        std::optional<std::string> logLocation =
+            static_cast<std::optional<std::string>>(
+                properties->get<std::string>(S3Config::kS3LogLocation));
+        initializeS3(logLevel, logLocation);
+        auto fs = std::make_shared<S3FileSystem>(bucketName, properties);
+        instanceMap.insert({cacheKey, fs});
+        return fs;
       });
 }
 
@@ -93,7 +113,8 @@ std::unique_ptr<bolt::dwio::common::FileSink> s3WriteFileSinkGenerator(
     auto fileSystem =
         filesystems::getFileSystem(fileURI, options.connectorProperties);
     return std::make_unique<dwio::common::WriteFileSink>(
-        fileSystem->openFileForWrite(fileURI, {{}, options.pool}),
+        fileSystem->openFileForWrite(
+            fileURI, filesystems::FileOptions{.pool = options.pool}),
         fileURI,
         options.metricLogger,
         options.stats);
@@ -102,10 +123,11 @@ std::unique_ptr<bolt::dwio::common::FileSink> s3WriteFileSinkGenerator(
 }
 #endif
 
-void registerS3FileSystem() {
+void registerS3FileSystem(CacheKeyFn identityFunction) {
 #ifdef BOLT_ENABLE_S3
   fileSystems().withWLock([&](auto& instanceMap) {
     if (instanceMap.empty()) {
+      cacheKeyFunc = identityFunction;
       registerFileSystem(isS3File, std::function(fileSystemGenerator));
       dwio::common::FileSink::registerFactory(
           std::function(s3WriteFileSinkGenerator));
@@ -126,6 +148,29 @@ void finalizeS3FileSystem() {
   });
 
   finalizeS3();
+#endif
+}
+
+void registerS3Metrics() {
+#ifdef BOLT_ENABLE_S3
+  DEFINE_METRIC(kMetricS3ActiveConnections, bolt::StatType::SUM);
+  DEFINE_METRIC(kMetricS3StartedUploads, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3FailedUploads, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3SuccessfulUploads, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3MetadataCalls, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3GetObjectCalls, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3GetObjectErrors, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3GetMetadataErrors, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3GetObjectRetries, bolt::StatType::COUNT);
+  DEFINE_METRIC(kMetricS3GetMetadataRetries, bolt::StatType::COUNT);
+#endif
+}
+
+void registerAWSCredentialsProvider(
+    const std::string& providerName,
+    const AWSCredentialsProviderFactory& provider) {
+#ifdef BOLT_ENABLE_S3
+  registerCredentialsProvider(providerName, provider);
 #endif
 }
 
