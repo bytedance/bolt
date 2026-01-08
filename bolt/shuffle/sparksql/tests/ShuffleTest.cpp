@@ -215,6 +215,8 @@ class ShuffleTest : public OperatorTestBase {
   static std::atomic<int32_t> suiteCounter_;
   static std::once_flag setupOnce_;
 
+  ShuffleTest() : OperatorTestBase(10 * 1024 * 1024) {}
+
   static void SetUpTestCase() {
     suiteCounter_.fetch_add(1);
     std::call_once(setupOnce_, [] { OperatorTestBase::SetUpTestCase(); });
@@ -527,7 +529,12 @@ class ShuffleTest : public OperatorTestBase {
       CursorParameters params;
       params.planNode = writerNode;
       params.serialExecution = true;
-      params.queryCtx = core::QueryCtx::create();
+      params.queryCtx = core::QueryCtx::create(
+          nullptr,
+          core::QueryConfig{{}},
+          {},
+          cache::AsyncDataCache::getInstance(),
+          rootPool_->shared_from_this());
 
       auto cursor = TaskCursor::create(params);
       while (cursor->moveNext()) {
@@ -597,7 +604,12 @@ class ShuffleTest : public OperatorTestBase {
       CursorParameters readerParams;
       readerParams.planNode = readerNode;
       readerParams.serialExecution = true;
-      readerParams.queryCtx = core::QueryCtx::create();
+      readerParams.queryCtx = core::QueryCtx::create(
+          nullptr,
+          core::QueryConfig{{}},
+          {},
+          cache::AsyncDataCache::getInstance(),
+          rootPool_->shared_from_this());
 
       auto readerCursor = TaskCursor::create(readerParams);
       while (readerCursor->moveNext()) {
