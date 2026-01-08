@@ -123,16 +123,30 @@ struct ShuffleTestParam {
   DataTypeGroup dataTypeGroup;
   int32_t numPartitions;
   int32_t numMappers;
+  int64_t memoryLimit = 1024 * 1024 * 1024; // 1GB
 
   std::string toString() const {
+    static constexpr const char* units[] = {
+        "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"};
+    const int maxUnit = (int)(sizeof(units) / sizeof(units[0])) - 1;
+
+    int64_t v = memoryLimit;
+    int u = 0;
+    while (v >= 1024 && u < maxUnit) {
+      v /= 1024;
+      ++u;
+    }
+    auto memStr = fmt::format("{}{}", v, units[u]);
+
     return fmt::format(
-        "{}_{}_{}_{}_P{}_M{}",
+        "{}_{}_{}_{}_M{}_P{}_{}",
         partitioning,
         shuffleModeToString(shuffleMode),
         writerTypeToString(writerType),
         dataTypeGroupToString(dataTypeGroup),
+        numMappers,
         numPartitions,
-        numMappers);
+        memStr);
   }
 
   bool isSupported() const {
@@ -221,11 +235,6 @@ class ShuffleTest : public OperatorTestBase {
         std::make_unique<SparkShuffleWriterTranslator>());
     bytedance::bolt::exec::Operator::registerOperator(
         std::make_unique<SparkShuffleReaderTranslator>());
-
-    // Initialize ExecutionMemoryPool
-    if (!ExecutionMemoryPool::inited()) {
-      ExecutionMemoryPool::init(true, 1L * 1024 * 1024 * 1024, 1, {}, 1000);
-    }
   }
 
   void TearDown() override {
@@ -601,8 +610,9 @@ class ShuffleTest : public OperatorTestBase {
     return result;
   }
 
-  void executeTest(const ShuffleTestParam& param) {
-    auto inputData = makeInputData(param);
+  void executeTestWithCustomInput(
+      const ShuffleTestParam& param,
+      ShuffleInputData& inputData) {
     const bool needsPid =
         (param.partitioning == "hash" || param.partitioning == "range");
 
@@ -670,6 +680,13 @@ class ShuffleTest : public OperatorTestBase {
     result.readerCursors.clear();
   }
 
+  void executeTest(const ShuffleTestParam& param) {
+    ExecutionMemoryPool::testingInitUnsafe(
+        true, param.memoryLimit, 1, {}, 10000);
+    auto inputData = makeInputData(param);
+    executeTestWithCustomInput(param, inputData);
+  }
+
  private:
   size_t countRows(const std::vector<RowVectorPtr>& batches) {
     size_t count = 0;
@@ -698,3 +715,64 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<ShuffleTestParam>& info) {
       return info.param.toString();
     });
+
+class MockRowVector : public RowVector {
+ public:
+  MockRowVector(
+      memory::MemoryPool* pool,
+      std::shared_ptr<const Type> type,
+      size_t length,
+      std::vector<VectorPtr> children,
+      uint64_t flatSize)
+      : RowVector(pool, type, nullptr, length, children), flatSize_(flatSize) {}
+
+  uint64_t estimateFlatSize() const override {
+    return flatSize_;
+  }
+
+ private:
+  uint64_t flatSize_;
+};
+
+TEST_F(ShuffleTest, testRowBasedShuffleEstimateLowerThanActual) {
+  std::string str(100 * 1024, 'x');
+  auto baseVectorPtr = BaseVector::create(VARCHAR(), 10, pool());
+  auto flatVector = baseVectorPtr->asFlatVector<StringView>();
+  for (int i = 0; i < 10; ++i) {
+    flatVector->setNoCopy(i, StringView(str));
+  }
+
+  auto rowType = ROW({"c0"}, {VARCHAR()});
+  auto rowVector = std::make_shared<MockRowVector>(
+      pool(),
+      rowType,
+      10,
+      std::vector<VectorPtr>{baseVectorPtr},
+      100 /* fake small size */);
+
+  std::string large(9 * 1024 * 1024, 'x');
+  baseVectorPtr = BaseVector::create(VARCHAR(), 1, pool());
+  flatVector = baseVectorPtr->asFlatVector<StringView>();
+  flatVector->setNoCopy(0, StringView(large));
+  auto largeRowVector = std::make_shared<MockRowVector>(
+      pool(),
+      rowType,
+      1,
+      std::vector<VectorPtr>{baseVectorPtr},
+      100 /* fake small size */);
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 3; // RowBased
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 1;
+  param.numMappers = 1;
+
+  // first 9 batches with 1MB memory, then 9MB batch, should trigger spilling
+  // and not OOM
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.emplace_back(9, rowVector);
+  inputData.inputsPerMapper[0].push_back(largeRowVector);
+
+  executeTestWithCustomInput(param, inputData);
+}

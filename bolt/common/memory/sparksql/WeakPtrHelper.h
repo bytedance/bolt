@@ -34,7 +34,7 @@ FOLLY_ALWAYS_INLINE std::shared_ptr<T> lock_or_throw(std::weak_ptr<T> weak) {
   if (auto shared = weak.lock()) {
     return shared;
   }
-  BOLT_FAIL("weak ptr is invalid");
+  BOLT_FAIL("weak ptr is invalid for type: " + std::string(typeid(T).name()));
 }
 
 template <typename T, typename Func>

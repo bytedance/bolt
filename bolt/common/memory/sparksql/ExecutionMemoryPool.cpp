@@ -296,7 +296,10 @@ std::ostream& operator<<(std::ostream& os, const ExecutionMemoryPool& pool) {
     os << "[taskAttemptId=" << pair.first << ", memoryUsed=" << pair.second
        << "]";
   }
-  os << ", DynamicMemoryQuotaManagerStatistics=" << pool.statistics_.toString();
+  if (pool.statistics_.extendCount > 0) {
+    os << ", DynamicMemoryQuotaManagerStatistics="
+       << pool.statistics_.toString();
+  }
   os << ", DynamicMemoryQuotaManagerOption=" << pool.option_.toString();
   return os << "}";
 }
