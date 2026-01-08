@@ -30,6 +30,7 @@
  */
 
 #include "bolt/shuffle/sparksql/partitioner/Partitioner.h"
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/partitioner/FallbackRangePartitioner.h"
 #include "bolt/shuffle/sparksql/partitioner/HashPartitioner.h"
 #include "bolt/shuffle/sparksql/partitioner/RoundRobinPartitioner.h"
@@ -55,6 +56,23 @@ arrow::Result<std::shared_ptr<Partitioner>> Partitioner::make(
       return arrow::Status::Invalid(
           "Unsupported partitioning type: " + std::to_string(partitioning));
   }
+}
+
+arrow::Status Partitioner::precompute(
+    int32_t* pidArr,
+    const int64_t numRows,
+    std::vector<uint32_t>& partition2RowCount,
+    bool doInitialize) {
+  BOLT_NYI("precompute is not supported for this partitioner type");
+}
+
+arrow::Status Partitioner::fill(
+    const int32_t* pidArr,
+    const int64_t numRows,
+    std::vector<uint32_t>& row2partition,
+    std::vector<uint32_t>& partition2RowCount) {
+  BOLT_NYI("fill is not supported for this partitioner type");
+  return arrow::Status::OK();
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

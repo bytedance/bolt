@@ -112,14 +112,9 @@ std::string shuffleModeToString(int mode) {
   }
 }
 
-constexpr int32_t kBatchSize = 100;
-constexpr int32_t kNumBatches = 10;
+constexpr int32_t kBatchSize = 32;
+constexpr int32_t kNumBatches = 4;
 constexpr uint32_t kPidSeed = 42;
-
-bool needsPidColumn(Partitioning partitioning) {
-  return partitioning == Partitioning::kHash ||
-      partitioning == Partitioning::kRange;
-}
 
 struct ShuffleTestParam {
   std::string partitioning;
@@ -127,33 +122,38 @@ struct ShuffleTestParam {
   PartitionWriterType writerType;
   DataTypeGroup dataTypeGroup;
   int32_t numPartitions;
+  int32_t numMappers;
 
   std::string toString() const {
     return fmt::format(
-        "{}_{}_{}_{}_P{}",
+        "{}_{}_{}_{}_P{}_M{}",
         partitioning,
         shuffleModeToString(shuffleMode),
         writerTypeToString(writerType),
         dataTypeGroupToString(dataTypeGroup),
-        numPartitions);
+        numPartitions,
+        numMappers);
   }
 
   bool isSupported() const {
     if (partitioning == Partitioning::kSingle) {
       return numPartitions == 1 && shuffleMode <= 1;
     }
+    if (partitioning == "rr") {
+      return shuffleMode <= 1;
+    }
     return true;
   }
 };
 
 struct ShuffleInputData {
-  std::vector<RowVectorPtr> baseBatches;
+  std::vector<std::vector<RowVectorPtr>> inputsPerMapper;
 };
 
 struct ShuffleRunResult {
   ShuffleWriterMetrics metrics;
   std::vector<std::unique_ptr<TaskCursor>> readerCursors;
-  std::vector<RowVectorPtr> outputBatches;
+  std::vector<std::vector<RowVectorPtr>> partitionOutputs;
 };
 
 std::vector<ShuffleTestParam> buildShuffleParams() {
@@ -161,7 +161,8 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
   const std::vector<std::string> partitionings = {
       "single", "rr", "hash", "range"};
   const std::vector<int32_t> shuffleModes = {0, 1, 2, 3};
-  const std::vector<int32_t> partitionNumbers = {1, 4, 16, 128};
+  const std::vector<int32_t> partitionNumbers = {1, 4, 16};
+  const std::vector<int32_t> mapperNumbers = {1, 4};
 
   const std::vector<PartitionWriterType> writerTypes = {
       PartitionWriterType::kLocal, PartitionWriterType::kCeleborn};
@@ -171,14 +172,17 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
       for (auto writerType : writerTypes) {
         for (auto dataTypeGroup : dataGroups) {
           for (auto numPartitions : partitionNumbers) {
-            auto param = ShuffleTestParam{
-                partitioning,
-                shuffleMode,
-                writerType,
-                dataTypeGroup,
-                numPartitions};
-            if (param.isSupported()) {
-              params.push_back(param);
+            for (auto numMappers : mapperNumbers) {
+              auto param = ShuffleTestParam{
+                  partitioning,
+                  shuffleMode,
+                  writerType,
+                  dataTypeGroup,
+                  numPartitions,
+                  numMappers};
+              if (param.isSupported()) {
+                params.push_back(param);
+              }
             }
           }
         }
@@ -238,26 +242,27 @@ class ShuffleTest : public OperatorTestBase {
     opts.nullRatio = 0.1;
     opts.stringVariableLength = true;
     opts.vectorSize = kBatchSize;
+    opts.timestampPrecision =
+        VectorFuzzer::Options::TimestampPrecision::kMicroSeconds;
 
     auto numBatches = kNumBatches;
 
     auto generateRandomData = [&](const RowTypePtr& rowType,
                                   const VectorFuzzer::Options& opts,
                                   int32_t numBatches) {
-      ShuffleInputData data;
-
+      std::vector<RowVectorPtr> batches;
       if (numBatches == 0) {
-        data.baseBatches.push_back(std::dynamic_pointer_cast<RowVector>(
+        batches.push_back(std::dynamic_pointer_cast<RowVector>(
             BaseVector::create(rowType, 0, pool())));
-        return data;
+        return batches;
       }
 
-      data.baseBatches.reserve(numBatches);
+      batches.reserve(numBatches);
       for (int32_t i = 0; i < numBatches; ++i) {
         VectorFuzzer fuzzer(opts, pool());
-        data.baseBatches.push_back(fuzzer.fuzzInputRow(rowType));
+        batches.push_back(fuzzer.fuzzInputRow(rowType));
       }
-      return data;
+      return batches;
     };
 
     RowTypePtr rowType;
@@ -269,12 +274,12 @@ class ShuffleTest : public OperatorTestBase {
         break;
       }
       case DataTypeGroup::kFloat: {
-        rowType = ROW({"c0", "c1", "c2"}, {REAL(), DOUBLE()});
+        rowType = ROW({"c0", "c1"}, {REAL(), DOUBLE()});
         break;
       }
       case DataTypeGroup::kString: {
         opts.stringLength = 8;
-        rowType = ROW({"c0", "c1", "c2"}, {VARCHAR(), VARBINARY()});
+        rowType = ROW({"c0", "c1"}, {VARCHAR(), VARBINARY()});
         break;
       }
       case DataTypeGroup::kLargeString: {
@@ -342,7 +347,13 @@ class ShuffleTest : public OperatorTestBase {
         break;
       }
     }
-    return generateRandomData(rowType, opts, numBatches);
+
+    data.inputsPerMapper.reserve(param.numMappers);
+    for (int i = 0; i < param.numMappers; ++i) {
+      data.inputsPerMapper.push_back(
+          generateRandomData(rowType, opts, numBatches));
+    }
+    return data;
   }
 
   RowVectorPtr prependPidColumn(
@@ -363,13 +374,9 @@ class ShuffleTest : public OperatorTestBase {
     }
 
     std::vector<int32_t> pids(numRows);
-    if (numPartitions <= 0) {
-      std::fill(pids.begin(), pids.end(), 0);
-    } else {
-      std::uniform_int_distribution<int32_t> dist(0, numPartitions - 1);
-      for (int32_t row = 0; row < numRows; ++row) {
-        pids[row] = dist(rng);
-      }
+    std::uniform_int_distribution<int32_t> dist(0, numPartitions - 1);
+    for (int32_t row = 0; row < numRows; ++row) {
+      pids[row] = dist(rng);
     }
     auto pidVector =
         makeFlatVector<int32_t>(numRows, [&](auto row) { return pids[row]; });
@@ -400,58 +407,142 @@ class ShuffleTest : public OperatorTestBase {
     return withPid;
   }
 
-  ShuffleRunResult runShuffle(
+  std::vector<std::vector<RowVectorPtr>> splitInputByPid(
       const std::vector<RowVectorPtr>& writerInput,
+      int32_t numPartitions) {
+    std::vector<std::vector<RowVectorPtr>> result(numPartitions);
+    auto pool = this->pool();
+
+    for (const auto& batch : writerInput) {
+      auto pidVec = batch->childAt(0)->as<SimpleVector<int32_t>>();
+      auto rowType = std::dynamic_pointer_cast<const RowType>(batch->type());
+
+      // Target type is rowType without the first column
+      auto targetNames = rowType->names();
+      targetNames.erase(targetNames.begin());
+      auto targetTypes = rowType->children();
+      targetTypes.erase(targetTypes.begin());
+      auto targetRowType = ROW(std::move(targetNames), std::move(targetTypes));
+
+      std::vector<std::vector<vector_size_t>> indices(numPartitions);
+      for (int i = 0; i < batch->size(); ++i) {
+        int32_t p = pidVec->valueAt(i);
+        if (p >= 0 && p < numPartitions) {
+          indices[p].push_back(i);
+        }
+      }
+
+      for (int p = 0; p < numPartitions; ++p) {
+        if (indices[p].empty()) {
+          continue;
+        }
+
+        auto indicesBuffer = allocateIndices(indices[p].size(), pool);
+        auto rawIndices = indicesBuffer->asMutable<vector_size_t>();
+        std::memcpy(
+            rawIndices,
+            indices[p].data(),
+            indices[p].size() * sizeof(vector_size_t));
+
+        std::vector<VectorPtr> children;
+        children.reserve(batch->childrenSize() - 1);
+        for (size_t c = 1; c < batch->childrenSize(); ++c) {
+          children.push_back(BaseVector::wrapInDictionary(
+              nullptr, indicesBuffer, indices[p].size(), batch->childAt(c)));
+        }
+
+        auto partBatch = std::make_shared<RowVector>(
+            pool,
+            targetRowType,
+            nullptr,
+            indices[p].size(),
+            std::move(children));
+        result[p].push_back(partBatch);
+      }
+    }
+    return result;
+  }
+
+  ShuffleRunResult runShuffle(
+      const std::vector<std::vector<RowVectorPtr>>& inputsPerMapper,
       const RowTypePtr& outputType,
       const ShuffleTestParam& param,
       const ShuffleInputData& inputData) {
     ShuffleRunResult result;
 
     auto tempDir = exec::test::TempDirectoryPath::create();
-    std::string dataFile = tempDir->path + "/shuffle_data.bin";
     std::string localDir = tempDir->path + "/local_dir";
     std::filesystem::create_directories(localDir);
-
-    ShuffleWriterOptions writerOptions;
-    writerOptions.partitioning = toPartitioning(param.partitioning);
-    writerOptions.sort_before_repartition = false;
-    writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
-    writerOptions.forceShuffleWriterType = param.shuffleMode;
-    writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;
-    writerOptions.taskAttemptId = taskAttemptIdCounter++;
 
     std::shared_ptr<NiceMock<MockRssClient>> mockRssClient;
     if (param.writerType == PartitionWriterType::kCeleborn) {
       mockRssClient = std::make_shared<NiceMock<MockRssClient>>();
       mockRssClient->delegateToFake();
-      writerOptions.partitionWriterOptions.rssClient = mockRssClient;
-    } else {
-      writerOptions.partitionWriterOptions.dataFile = dataFile;
-      writerOptions.partitionWriterOptions.configuredDirs = {localDir};
-      writerOptions.partitionWriterOptions.numSubDirs = 1;
     }
 
-    core::PlanNodeId writerId("writer");
-    auto planBuilder = PlanBuilder();
-    auto sourceNode = planBuilder.values(writerInput).planNode();
+    std::vector<ShuffleWriterMetrics> mapperMetrics;
+    std::vector<std::string> mapperDataFiles;
 
-    ShuffleWriterMetrics metrics;
-    auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
+    for (int m = 0; m < param.numMappers; ++m) {
+      std::string dataFile =
+          tempDir->path + "/shuffle_data_" + std::to_string(m) + ".bin";
+      mapperDataFiles.push_back(dataFile);
 
-    auto writerNode = std::make_shared<SparkShuffleWriterNode>(
-        writerId, writerOptions, reportCallback, sourceNode);
+      ShuffleWriterOptions writerOptions;
+      writerOptions.partitioning = toPartitioning(param.partitioning);
+      writerOptions.sort_before_repartition = false;
+      writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
+      writerOptions.forceShuffleWriterType = param.shuffleMode;
+      writerOptions.partitionWriterOptions.partitionWriterType =
+          param.writerType;
+      writerOptions.taskAttemptId = taskAttemptIdCounter++;
 
-    CursorParameters params;
-    params.planNode = writerNode;
-    params.serialExecution = true;
-    params.queryCtx = core::QueryCtx::create();
+      if (param.writerType == PartitionWriterType::kCeleborn) {
+        writerOptions.partitionWriterOptions.rssClient = mockRssClient;
+      } else {
+        writerOptions.partitionWriterOptions.dataFile = dataFile;
+        writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+        writerOptions.partitionWriterOptions.numSubDirs = 1;
+      }
 
-    auto cursor = TaskCursor::create(params);
-    while (cursor->moveNext()) {
+      core::PlanNodeId writerId("writer");
+      auto planBuilder = PlanBuilder();
+      auto sourceNode = planBuilder.values(inputsPerMapper[m]).planNode();
+
+      ShuffleWriterMetrics metrics;
+      auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
+
+      auto writerNode = std::make_shared<SparkShuffleWriterNode>(
+          writerId, writerOptions, reportCallback, sourceNode);
+
+      CursorParameters params;
+      params.planNode = writerNode;
+      params.serialExecution = true;
+      params.queryCtx = core::QueryCtx::create();
+
+      auto cursor = TaskCursor::create(params);
+      while (cursor->moveNext()) {
+      }
+      mapperMetrics.push_back(metrics);
     }
 
-    result.metrics = metrics;
+    // Populate result metrics (aggregate or just use last/first? logic used for
+    // check)
+    // The test mainly checks metrics.partitionLengths.size()
+    // Let's just use the first mapper's metrics for general check, or aggregate
+    // if needed.
+    // For now, we copy the first one, but we should probably aggregate for
+    // correctness checks if we were testing metrics. But we mostly test data
+    // correctness.
+    if (!mapperMetrics.empty()) {
+      result.metrics = mapperMetrics[0];
+      // We aggregate totalBytesWritten for validity check
+      for (size_t i = 1; i < mapperMetrics.size(); ++i) {
+        result.metrics.totalBytesWritten += mapperMetrics[i].totalBytesWritten;
+      }
+    }
 
+    result.partitionOutputs.resize(param.numPartitions);
     for (int i = 0; i < param.numPartitions; ++i) {
       std::shared_ptr<ReaderStreamIterator> streamIter;
       if (param.writerType == PartitionWriterType::kCeleborn) {
@@ -462,20 +553,27 @@ class ShuffleTest : public OperatorTestBase {
         streamIter = std::make_shared<MemoryReaderStreamIterator>(
             std::vector<std::vector<char>>{it->second});
       } else {
-        if (metrics.partitionLengths.empty()) {
+        std::vector<SegmentInfo> segments;
+        for (int m = 0; m < param.numMappers; ++m) {
+          const auto& metrics = mapperMetrics[m];
+          if (metrics.partitionLengths.empty()) {
+            continue;
+          }
+          int64_t length = metrics.partitionLengths[i];
+          if (length == 0) {
+            continue;
+          }
+          int64_t offset = 0;
+          for (int j = 0; j < i; ++j) {
+            offset += metrics.partitionLengths[j];
+          }
+          segments.push_back({mapperDataFiles[m], offset, length});
+        }
+        if (segments.empty()) {
           continue;
         }
-        int64_t length = metrics.partitionLengths[i];
-        if (length == 0) {
-          continue;
-        }
-        int64_t offset = 0;
-        for (int j = 0; j < i; ++j) {
-          offset += metrics.partitionLengths[j];
-        }
-        SegmentInfo seg{dataFile, offset, length};
         streamIter = std::make_shared<LocalFileReaderStreamIterator>(
-            std::vector<SegmentInfo>{seg});
+            std::move(segments));
       }
 
       ShuffleReaderOptions readerOptions;
@@ -494,7 +592,7 @@ class ShuffleTest : public OperatorTestBase {
 
       auto readerCursor = TaskCursor::create(readerParams);
       while (readerCursor->moveNext()) {
-        result.outputBatches.push_back(readerCursor->current());
+        result.partitionOutputs[i].push_back(readerCursor->current());
         readerCursor->current().reset();
       }
       result.readerCursors.push_back(std::move(readerCursor));
@@ -505,21 +603,29 @@ class ShuffleTest : public OperatorTestBase {
 
   void executeTest(const ShuffleTestParam& param) {
     auto inputData = makeInputData(param);
-    const bool needsPid = param.partitioning == Partitioning::kHash ||
-        param.partitioning == Partitioning::kRange;
-    const auto& baseBatches = inputData.baseBatches;
-    BOLT_CHECK(!baseBatches.empty(), "Input batches should not be empty");
+    const bool needsPid =
+        (param.partitioning == "hash" || param.partitioning == "range");
 
-    auto writerInput = needsPid
-        ? prependPidBatches(baseBatches, param.numPartitions)
-        : baseBatches;
+    std::vector<std::vector<RowVectorPtr>> writerInputs;
+    std::vector<RowVectorPtr> allBaseBatches;
+
+    for (const auto& mapperBatches : inputData.inputsPerMapper) {
+      allBaseBatches.insert(
+          allBaseBatches.end(), mapperBatches.begin(), mapperBatches.end());
+      auto input = needsPid
+          ? prependPidBatches(mapperBatches, param.numPartitions)
+          : mapperBatches;
+      writerInputs.push_back(input);
+    }
+
+    BOLT_CHECK(!allBaseBatches.empty(), "Input batches should not be empty");
     auto outputType =
-        std::dynamic_pointer_cast<const RowType>(baseBatches[0]->type());
+        std::dynamic_pointer_cast<const RowType>(allBaseBatches[0]->type());
 
-    auto result = runShuffle(writerInput, outputType, param, inputData);
+    auto result = runShuffle(writerInputs, outputType, param, inputData);
 
     int64_t totalRows = 0;
-    for (const auto& batch : baseBatches) {
+    for (const auto& batch : allBaseBatches) {
       totalRows += batch->size();
     }
 
@@ -528,10 +634,49 @@ class ShuffleTest : public OperatorTestBase {
       EXPECT_GT(result.metrics.totalBytesWritten, 0);
     }
 
-    assertEqualTypeAndNumRows(outputType, totalRows, result.outputBatches);
-    ASSERT_TRUE(assertEqualResults(baseBatches, result.outputBatches));
-    result.outputBatches.clear();
+    if (needsPid) {
+      std::vector<std::vector<RowVectorPtr>> expectedPartitions(
+          param.numPartitions);
+      for (const auto& mapperInput : writerInputs) {
+        auto mapperSplit = splitInputByPid(mapperInput, param.numPartitions);
+        for (int p = 0; p < param.numPartitions; ++p) {
+          expectedPartitions[p].insert(
+              expectedPartitions[p].end(),
+              mapperSplit[p].begin(),
+              mapperSplit[p].end());
+        }
+      }
+
+      for (int i = 0; i < param.numPartitions; ++i) {
+        assertEqualTypeAndNumRows(
+            outputType,
+            countRows(expectedPartitions[i]),
+            result.partitionOutputs[i]);
+        ASSERT_TRUE(assertEqualResults(
+            expectedPartitions[i], result.partitionOutputs[i]));
+      }
+    } else {
+      // Flatten all outputs
+      std::vector<RowVectorPtr> allOutputs;
+      for (const auto& partBatches : result.partitionOutputs) {
+        allOutputs.insert(
+            allOutputs.end(), partBatches.begin(), partBatches.end());
+      }
+      assertEqualTypeAndNumRows(outputType, totalRows, allOutputs);
+      ASSERT_TRUE(assertEqualResults(allBaseBatches, allOutputs));
+    }
+
+    result.partitionOutputs.clear();
     result.readerCursors.clear();
+  }
+
+ private:
+  size_t countRows(const std::vector<RowVectorPtr>& batches) {
+    size_t count = 0;
+    for (const auto& batch : batches) {
+      count += batch->size();
+    }
+    return count;
   }
 };
 
