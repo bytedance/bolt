@@ -12,19 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if(BOLT_ENABLE_CELEBORN_CPP_CLIENT)
-  add_executable(
-    bolt_shuffle_spark_celeborn_test
-    CelebornClientTest.cpp)
+add_executable(
+  bolt_shuffle_spark_celeborn_test
+  CelebornClientTest.cpp)
 
-  add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
+add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
 
-  target_link_libraries(
-    bolt_shuffle_spark_celeborn_test
-    PRIVATE bolt_shuffle_spark_impl
-            bolt_exception
-            gflags::gflags
-            glog::glog
-            GTest::gtest
-            GTest::gtest_main)
-endif()
+target_link_libraries(
+  bolt_shuffle_spark_celeborn_test
+  PRIVATE bolt_shuffle_spark_impl
+          bolt_exception
+          gflags::gflags
+          glog::glog
+          GTest::gtest
+          GTest::gtest_main)

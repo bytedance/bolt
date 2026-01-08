@@ -49,5 +49,6 @@ class NativeCelebornClient : public RssClient {
   int32_t attemptId_;
   int32_t numMappers_;
   int32_t numPartitions_;
+  bool stopped_{false};
 };
 } // namespace bytedance::bolt::shuffle::sparksql

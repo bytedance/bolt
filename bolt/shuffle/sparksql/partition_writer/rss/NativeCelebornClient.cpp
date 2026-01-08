@@ -45,6 +45,9 @@ int32_t NativeCelebornClient::pushPartitionData(
     int32_t partitionId,
     char* bytes,
     int64_t size) {
+  BOLT_CHECK(
+      !stopped_,
+      "Cannot push data after NativeCelebornClient has been stopped");
   return shuffleClient_->pushData(
       shuffleId_,
       mapId_,
@@ -58,7 +61,11 @@ int32_t NativeCelebornClient::pushPartitionData(
 }
 
 void NativeCelebornClient::stop() {
+  BOLT_CHECK(
+      !stopped_,
+      "NativeCelebornClient stop() called multiple times for the same map attempt");
   shuffleClient_->mapperEnd(shuffleId_, mapId_, attemptId_, numMappers_);
+  stopped_ = true;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

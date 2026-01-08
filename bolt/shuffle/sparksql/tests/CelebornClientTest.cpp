@@ -457,4 +457,29 @@ TEST(CelebornReaderStreamIteratorTest, requiresPushBeforeRead) {
   readStreamAndExpect(stream, expected);
 }
 
+TEST(NativeCelebornClientTest, testStopTriggeredTwice) {
+  auto client = std::make_shared<FakeShuffleClient>();
+  constexpr int kShuffleId = 15;
+  constexpr int32_t kPartitionId = 0;
+  constexpr int kMapId = 0;
+  constexpr int kAttemptId = 5;
+  constexpr int kNumMappers = 1;
+  constexpr int kNumPartitions = 1;
+
+  NativeCelebornClient nativeClient(
+      client, kShuffleId, kMapId, kAttemptId, kNumMappers, kNumPartitions);
+  nativeClient.pushPartitionData(kPartitionId, nullptr, 0);
+
+  nativeClient.stop();
+
+  // Calling stop again for the same map attempt should trigger an
+  // BoltRuntimeError.
+  EXPECT_THROW(nativeClient.stop(), bytedance::bolt::BoltRuntimeError);
+
+  // Further pushPartitionData calls after stop should also fail.
+  EXPECT_THROW(
+      nativeClient.pushPartitionData(kPartitionId, nullptr, 0),
+      bytedance::bolt::BoltRuntimeError);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test
