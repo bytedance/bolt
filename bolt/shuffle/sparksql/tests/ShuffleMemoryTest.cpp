@@ -70,7 +70,7 @@ TEST_F(ShuffleMemoryTest, testRowBasedShuffleEstimateLowerThanActual) {
   param.numMappers = 1;
   param.memoryLimit = 100 * 1024 * 1024; // 100MB
 
-  // first 6 batches with 10MB memory, then 50MB batch with under estimated flat
+  // first 5 batches with 10MB memory, then 50MB batch with under estimated flat
   // size, should trigger spilling and not OOM
   ShuffleInputData inputData;
   inputData.inputsPerMapper.emplace_back(5, rowVector);
