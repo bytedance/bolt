@@ -246,6 +246,41 @@ class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf,
         std::iostream(this) {}
 };
 
+class EnvVarGuard {
+ public:
+  EnvVarGuard(const char* name, const char* value) : name_(name) {
+    const char* old = std::getenv(name);
+    if (old) {
+      existed_ = true;
+      oldValue_ = std::string(old);
+    }
+
+    if (value) {
+      ::setenv(name, value, 1);
+    } else {
+      ::unsetenv(name);
+    }
+  }
+
+  ~EnvVarGuard() {
+    if (existed_) {
+      ::setenv(name_.c_str(), oldValue_->c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+  EnvVarGuard(const EnvVarGuard&) = delete;
+  EnvVarGuard& operator=(const EnvVarGuard&) = delete;
+  EnvVarGuard(EnvVarGuard&&) noexcept = default;
+  EnvVarGuard& operator=(EnvVarGuard&&) noexcept = default;
+
+ private:
+  std::string name_;
+  bool existed_{false};
+  std::optional<std::string> oldValue_;
+};
+
 } // namespace bytedance::bolt::filesystems
 
 template <>

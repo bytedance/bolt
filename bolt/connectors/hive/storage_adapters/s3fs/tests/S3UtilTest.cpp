@@ -183,7 +183,17 @@ TEST(S3UtilTest, isIpExcludedFromProxy) {
   }
 }
 
-class S3UtilProxyTest : public ::testing::TestWithParam<bool> {};
+class S3UtilProxyTest : public ::testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    guards_.emplace_back("http_proxy", nullptr);
+    guards_.emplace_back("https_proxy", nullptr);
+    guards_.emplace_back("HTTP_PROXY", nullptr);
+    guards_.emplace_back("HTTPS_PROXY", nullptr);
+  }
+
+  std::vector<EnvVarGuard> guards_;
+};
 
 TEST_P(S3UtilProxyTest, proxyBuilderBadEndpoint) {
   auto s3Endpoint = "http://127.0.0.1:8888";
