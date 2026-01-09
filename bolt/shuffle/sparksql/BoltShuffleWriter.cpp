@@ -650,7 +650,6 @@ arrow::Status BoltShuffleWriter::split(
 }
 
 arrow::Status BoltShuffleWriter::stop() {
-  LOG(INFO) << "BoltShuffleWriter::stop() start";
   bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   if (vectorLayout_ != RowVectorLayout::kComposite) {
     partitionWriter_->setRowFormat(false);
@@ -681,14 +680,12 @@ arrow::Status BoltShuffleWriter::stop() {
     }
     if (options_.partitioning != Partitioning::kSingle) {
       for (auto pid = 0; pid < numPartitions_; ++pid) {
-        LOG(INFO) << "Evicting partition buffer for pid: " << pid;
         RETURN_NOT_OK(evictPartitionBuffers(pid, false));
       }
     }
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
       setSplitState(SplitState::kStop);
-      LOG(INFO) << "Stopping partition writer";
       RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
       metrics_.avgPreallocSize =
           (preallocCount_ == 0) ? 0 : totalPreallocSize_ / preallocCount_;
@@ -708,7 +705,6 @@ arrow::Status BoltShuffleWriter::stop() {
   finalizeMetrics();
 
   boltPool_->release();
-  LOG(INFO) << "BoltShuffleWriter::stop() end";
   return arrow::Status::OK();
 }
 
@@ -1453,7 +1449,6 @@ arrow::Status BoltShuffleWriter::evictPartitionBuffers(
 arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>>
 BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
   SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingCreateRbFromBuffer]);
-  LOG(INFO) << "assembleBuffers for partitionId: " << partitionId;
 
   if (partitionBufferBase_[partitionId] == 0) {
     return std::vector<std::shared_ptr<arrow::Buffer>>{};
@@ -1594,7 +1589,6 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
     }
   }
   if (hasComplexType_ && complexTypeData_[partitionId] != nullptr) {
-    LOG(INFO) << "Flushing complex type for partition " << partitionId;
     auto serializedSize = complexTypeData_[partitionId]->maxSerializedSize();
     ARROW_ASSIGN_OR_RAISE(
         auto flushBuffer,
@@ -1605,7 +1599,6 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
     bytedance::bolt::serializer::presto::PrestoOutputStreamListener listener;
     ArrowFixedSizeBufferOutputStream out(output, &listener);
     complexTypeData_[partitionId]->flush(&out);
-    LOG(INFO) << "Flushed complex type, size: " << serializedSize;
     allBuffers.emplace_back(valueBuffer);
     complexTypeData_[partitionId] = nullptr;
     arenas_[partitionId] = nullptr;

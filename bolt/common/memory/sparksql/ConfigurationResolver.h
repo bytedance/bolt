@@ -111,5 +111,10 @@ class ConfigurationResolver final {
       "spark.gluten.boltMemoryManager.dynamicMemoryQuotaManager.ratios";
   static constexpr const char* kDynamicMemoryQuotaManagerRatiosDefaultValue =
       "0.5|0.9|1.0|1.0|6.0|1.0|0.05|0.0|0.05|";
+
+  // arbitrator extra config keys
+  static constexpr const char* kMemoryReclaimMaxWaitMs =
+      "memory-reclaim-max-wait-time";
+  static constexpr const char* kDefaultMemoryReclaimMaxWaitMs = "3600000ms";
 };
 } // namespace bytedance::bolt::memory::sparksql

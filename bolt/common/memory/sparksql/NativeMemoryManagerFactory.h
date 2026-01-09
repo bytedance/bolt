@@ -71,22 +71,13 @@ class ListenableArbitrator final : public bolt::memory::MemoryArbitrator {
 
   bool growCapacity(BoltMemoryPool* pool, uint64_t targetBytes) override;
 
+  // shrinkCapacity with targetBytes, will reclaim from candidate pool
   uint64_t shrinkCapacity(
       uint64_t targetBytes,
       bool allowSpill = true,
-      bool allowAbort = false) override {
-    bolt::memory::MemoryPool* pool = nullptr;
-    {
-      std::unique_lock guard{mutex_};
-      BOLT_CHECK_EQ(
-          candidates_.size(),
-          1,
-          "ListenableArbitrator should only be used within a single root pool");
-      pool = candidates_.begin()->first;
-    }
-    return shrinkCapacity(pool, targetBytes);
-  }
+      bool allowAbort = false) override;
 
+  // shrinkCapacity for specific pool, only shrink from this pool
   uint64_t shrinkCapacity(BoltMemoryPool* pool, uint64_t targetBytes) override;
 
   MemoryArbitrator::Stats stats() const override;
@@ -106,6 +97,8 @@ class ListenableArbitrator final : public bolt::memory::MemoryArbitrator {
       bolt::memory::MemoryPool*,
       std::weak_ptr<bolt::memory::MemoryPool>>
       candidates_;
+
+  const uint64_t memoryReclaimMaxWaitMs_;
 };
 
 class ArbitratorFactoryRegister final {

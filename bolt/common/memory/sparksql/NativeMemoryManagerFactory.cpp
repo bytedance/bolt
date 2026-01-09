@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/config/Config.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -31,12 +32,22 @@
 #include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/memory/sparksql/Spiller.h"
 #include "bolt/common/memory/sparksql/WeakPtrHelper.h"
+#include "bolt/exec/MemoryReclaimer.h"
 namespace bytedance::bolt::memory::sparksql {
 
 ListenableArbitrator::ListenableArbitrator(
     const Config& config,
     AllocationListenerPtr& listener)
-    : MemoryArbitrator(config), listener_(listener) {}
+    : MemoryArbitrator(config),
+      listener_(listener),
+      memoryReclaimMaxWaitMs_(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              bolt::config::toDuration(
+                  ConfigurationResolver::getStringParamFromConf(
+                      config.extraConfigs,
+                      ConfigurationResolver::kMemoryReclaimMaxWaitMs,
+                      ConfigurationResolver::kDefaultMemoryReclaimMaxWaitMs)))
+              .count()) {}
 
 std::string ListenableArbitrator::kind() const {
   return kind_;
@@ -47,6 +58,26 @@ bool ListenableArbitrator::growCapacity(
     uint64_t targetBytes) {
   std::lock_guard<std::recursive_mutex> l(mutex_);
   return growPoolLocked(pool, targetBytes);
+}
+
+uint64_t ListenableArbitrator::shrinkCapacity(
+    uint64_t targetBytes,
+    bool allowSpill,
+    bool allowAbort) {
+  bolt::memory::ScopedMemoryArbitrationContext ctx{};
+  bolt::exec::MemoryReclaimer::Stats status;
+  bolt::memory::MemoryPool* pool = nullptr;
+  {
+    std::unique_lock guard{mutex_};
+    BOLT_CHECK_EQ(
+        candidates_.size(),
+        1,
+        "ListenableArbitrator should only be used within a single root pool");
+    pool = candidates_.begin()->first;
+  }
+  pool->reclaim(
+      targetBytes, memoryReclaimMaxWaitMs_, status); // ignore the output
+  return shrinkCapacity(pool, targetBytes);
 }
 
 uint64_t ListenableArbitrator::shrinkCapacity(
@@ -101,7 +132,7 @@ bool ListenableArbitrator::growPoolLocked(
 uint64_t ListenableArbitrator::releaseMemoryLocked(
     bolt::memory::MemoryPool* pool,
     uint64_t bytes) {
-  uint64_t freeBytes = pool->shrink(0);
+  uint64_t freeBytes = shrinkPool(pool, bytes);
   listener_->allocationChanged(-freeBytes);
   return freeBytes;
 }

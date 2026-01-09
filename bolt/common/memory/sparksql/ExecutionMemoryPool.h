@@ -108,17 +108,6 @@ class ExecutionMemoryPool final
     return inited() ? instance()->poolExtendSize_.has_value() : false;
   }
 
-  // Test-only method to re-initialize the ExecutionMemoryPool.
-  static void testingInitUnsafe(
-      bool enable,
-      int64_t poolSize,
-      int32_t maxTaskNumber,
-      const DynamicMemoryQuotaManagerOption& option,
-      int64_t maxWaitTimeMs) {
-    instance_ = nullptr;
-    init(enable, poolSize, maxTaskNumber, option, maxWaitTimeMs);
-  }
-
  private:
   int64_t internalMemoryUsed() const;
 

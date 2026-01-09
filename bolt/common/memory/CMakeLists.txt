@@ -73,6 +73,7 @@ find_package(Arrow CONFIG REQUIRED)
 target_link_libraries(
   bolt_memory
   PUBLIC bolt_common_base
+         bolt_common_config
          bolt_exception
          bolt_flag_definitions
          bolt_time

@@ -43,10 +43,6 @@
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-#ifdef SPARK_COMPATIBLE
-#include "bolt/common/memory/sparksql/TaskMemoryManager.h"
-#endif
-
 DECLARE_bool(bolt_testing_enable_arbitration);
 namespace bytedance::bolt::exec::test {
 class OperatorTestBase : public testing::Test,
@@ -75,7 +71,7 @@ class OperatorTestBase : public testing::Test,
   static void resetMemory();
 
  protected:
-  OperatorTestBase(int64_t memoryLimit = memory::kMaxMemory);
+  OperatorTestBase();
   ~OperatorTestBase() override;
 
   void SetUp() override;
@@ -199,10 +195,5 @@ class OperatorTestBase : public testing::Test,
 
   // Used for IO prefetch and spilling.
   std::unique_ptr<folly::IOThreadPoolExecutor> ioExecutor_;
-
- private:
-#ifdef SPARK_COMPATIBLE
-  bytedance::bolt::memory::sparksql::TaskMemoryManagerPtr tmm_;
-#endif
 };
 } // namespace bytedance::bolt::exec::test

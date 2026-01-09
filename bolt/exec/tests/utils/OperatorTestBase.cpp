@@ -49,10 +49,6 @@
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/serializers/UnsafeRowSerializer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
-#ifdef SPARK_COMPATIBLE
-#include "bolt/common/memory/sparksql/ConfigurationResolver.h"
-#include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
-#endif
 
 DECLARE_bool(bolt_memory_leak_check_enabled);
 DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
@@ -66,53 +62,11 @@ namespace bytedance::bolt::exec::test {
 
 size_t OperatorTestBase::memoryLimit_ = 8L << 30;
 
-#ifdef SPARK_COMPATIBLE
-class OperatorTestSpiller final : public sparksql::Spiller {
- public:
-  OperatorTestSpiller(sparksql::BoltMemoryManagerPtr memoryManager)
-      : memoryManager_(memoryManager) {}
-
-  int64_t spill(sparksql::MemoryTargetWeakPtr self, int64_t size) override {
-    memoryManager_->shrink(size);
-  }
-
-  const std::set<sparksql::SpillerPhase>& applicablePhases() override {
-    return sparksql::SpillerHelper::phaseSetAll();
-  }
-
- private:
-  sparksql::BoltMemoryManagerPtr memoryManager_;
-};
-#endif
-
-OperatorTestBase::OperatorTestBase(int64_t memoryLimit) {
-#ifdef SPARK_COMPATIBLE
-  // create TaskMemoryMenager to ensure memory limit is applied correctly
-  sparksql::ExecutionMemoryPool::testingInitUnsafe(
-      true, memoryLimit, 1, {}, 10000);
-  tmm_ = std::make_shared<sparksql::TaskMemoryManager>(
-      sparksql::ExecutionMemoryPool::instance(), 0);
-  std::unordered_map<std::string, std::string> conf = {
-      {sparksql::ConfigurationResolver::kDynamicMemoryQuotaManager, "false"}};
-  sparksql::NativeMemoryManagerFactoryParam param{
-      .name = "OperatorTest",
-      .memoryIsolation = false,
-      .conservativeTaskOffHeapMemorySize = 0,
-      .overAcquiredRatio = 0.3,
-      .taskMemoryManager = tmm_,
-      .sessionConf = conf};
-  auto instance = sparksql::NativeMemoryManagerFactory::contextInstance(param);
-  std::shared_ptr<OperatorTestSpiller> spiller =
-      std::make_shared<OperatorTestSpiller>(instance->getManager());
-  auto genericSpiller = std::static_pointer_cast<sparksql::Spiller>(spiller);
-  instance->appendSpiller(genericSpiller);
-  rootPool_ = instance->getManager()->getAggregateMemoryPool();
-#else
+OperatorTestBase::OperatorTestBase() {
   // Overloads the memory pools used by VectorTestBase to work with memory
   // arbitrator.
   rootPool_ = memory::memoryManager()->addRootPool(
       "", memory::kMaxMemory, exec::MemoryReclaimer::create());
-#endif
   pool_ = rootPool_->addLeafChild("", true, exec::MemoryReclaimer::create());
   vectorMaker_ = bolt::test::VectorMaker(pool_.get());
 

@@ -104,11 +104,6 @@ int64_t ExecutionMemoryPool::getMemoryUsageForTask(int64_t taskAttemptId) {
 int64_t ExecutionMemoryPool::acquireMemory(
     int64_t numBytes,
     int64_t taskAttemptId) {
-  std::cout << "ExecutionMemoryPool::acquireMemory called for TID "
-            << taskAttemptId << " requesting " << succinctBytes(numBytes)
-            << " (" << numBytes << ")" << std::endl;
-  std::cout << "current memory: " << succinctBytes(internalMemoryUsed()) << " ("
-            << internalMemoryUsed() << ")" << std::endl;
   BOLT_CHECK(numBytes > 0, "invalid number of bytes requested:{}", numBytes);
 
   MemoryMutexGuard guard(lock_);
