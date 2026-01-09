@@ -1100,6 +1100,13 @@ class QueryConfig {
     return get<std::string>(kRowBasedSpillMode, kDefaultRowBasedSpillMode);
   }
 
+  /// Returns the vector serde kind used for single partition spill.
+  /// Options are:
+  ///   "Presto"      : use PrestoVectorSerde
+  ///   "UnsafeRow"   : use UnsafeRowVectorSerde
+  ///   "CompactRow"  : use CompactRowVectorSerde
+  ///   "Arrow"       : use ArrowVectorSerde
+  ///   "" (default)  : use system default serde (PrestoVectorSerde as of now)
   std::string singlePartitionSpillSerdeKind() const {
     return get<std::string>(kSinglePartitionSpillSerdeKind, "");
   }
