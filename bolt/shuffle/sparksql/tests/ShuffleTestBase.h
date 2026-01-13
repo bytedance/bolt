@@ -62,6 +62,8 @@ struct ShuffleTestParam {
   int32_t numPartitions;
   int32_t numMappers;
   int64_t memoryLimit = 1024 * 1024 * 1024; // 1GB
+  int32_t batchSize = 32;
+  int32_t numBatches = 4;
 
   std::string toString() const;
 

@@ -110,8 +110,6 @@ std::string shuffleModeToString(int mode) {
   }
 }
 
-constexpr int32_t kBatchSize = 32;
-constexpr int32_t kNumBatches = 4;
 constexpr uint32_t kPidSeed = 42;
 
 const std::vector<DataTypeGroup> dataGroups = {
@@ -201,11 +199,11 @@ ShuffleInputData ShuffleTestBase::makeInputData(const ShuffleTestParam& param) {
   VectorFuzzer::Options opts;
   opts.nullRatio = 0.1;
   opts.stringVariableLength = true;
-  opts.vectorSize = kBatchSize;
+  opts.vectorSize = param.batchSize;
   opts.timestampPrecision =
       VectorFuzzer::Options::TimestampPrecision::kMicroSeconds;
 
-  auto numBatches = kNumBatches;
+  auto numBatches = param.numBatches;
 
   auto generateRandomData = [&](const RowTypePtr& rowType,
                                 const VectorFuzzer::Options& opts,
