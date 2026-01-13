@@ -1535,17 +1535,28 @@ void HybridContainer::clear() {
 
 
 std::optional<int64_t> HybridContainer::estimateRowSize() const {
-  const auto keyRowSize = keys_->estimateRowSize();
-  if (!keyRowSize.has_value() || keyRowSize.value() == 0)
+  if (totalRows_ == 0) {
     return std::nullopt;
+  }
 
-  auto totalRowSize = keyRowSize.value();
-  // estimate payload
+  const auto keyRowSize = keys_->estimateRowSize();
+  if (!keyRowSize.has_value()) {
+    return std::nullopt;
+  }
+
+  int64_t estimatedSize = keyRowSize.value();
+
+  // Estimate payload size per row
   int64_t totalPayloadBytes = 0;
-  for (auto& columnSize : payloadFlatBytesSum_)
-    totalPayloadBytes += columnSize;
-  totalRowSize += totalPayloadBytes / totalRows_;
-  return totalRowSize;
+  for (const auto& payloadColumnBytes : payloadFlatBytesSum_) {
+    totalPayloadBytes += payloadColumnBytes;
+  }
+
+  if (totalPayloadBytes > 0) {
+    estimatedSize += totalPayloadBytes / totalRows_;
+  }
+
+  return estimatedSize;
 }
 
 int32_t HybridContainer::estimateVariableSizeAt(const char* row, column_index_t column) const {
