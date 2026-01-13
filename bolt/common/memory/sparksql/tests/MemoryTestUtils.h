@@ -57,7 +57,9 @@ class TestMemoryManagerHolder {
   static std::shared_ptr<TestMemoryManagerHolder> create(
       int64_t memoryLimit = memory::kMaxMemory) {
     if (!ExecutionMemoryPool::inited()) {
-      ExecutionMemoryPool::init(true, memory::kMaxMemory, 1, {}, 10000);
+      ExecutionMemoryPool::init(true, memoryLimit, 1, {}, 10000);
+    } else {
+      ExecutionMemoryPool::testingResetPoolSize(memoryLimit);
     }
     // create TaskMemoryMenager to ensure memory limit is applied correctly
     auto tmm = std::make_shared<TaskMemoryManager>(
@@ -104,8 +106,8 @@ class TestMemoryManagerHolder {
   BoltMemoryManagerHolder* memoryManagerHolder_ = nullptr;
   TaskMemoryManagerPtr tmm_ = nullptr;
   int64_t memoryLimit_ = memory::kMaxMemory;
-  // Use isolated memory abitration to set hard memory limit for test
-  static inline constexpr bool kIsolateMemory = true;
+  // disable memory isolation to align with gluten default behavior
+  static inline constexpr bool kIsolateMemory = false;
 
   static inline std::atomic<int64_t> globalTaskId_{0};
 };

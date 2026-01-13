@@ -108,6 +108,9 @@ class ExecutionMemoryPool final
     return inited() ? instance()->poolExtendSize_.has_value() : false;
   }
 
+  // For testing only, reset pool size to test new cases with new pool size
+  static void testingResetPoolSize(int64_t newSize);
+
  private:
   int64_t internalMemoryUsed() const;
 

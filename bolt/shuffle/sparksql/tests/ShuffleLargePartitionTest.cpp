@@ -42,7 +42,7 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
                   dataTypeGroup,
                   numPartitions,
                   numMappers,
-                  4ULL * 1024 * 1024 * 1024,
+                  1ULL * 1024 * 1024 * 1024,
                   1024 /* batchSize */
               };
               if (param.isSupported()) {
