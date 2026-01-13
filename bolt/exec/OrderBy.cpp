@@ -79,6 +79,9 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
+  auto hybridSortEnabled =
+      driverCtx->queryConfig().hybridSortEnabled();
+  hybridSortEnabled = true;
   sortBuffer_ = std::make_unique<SortBuffer>(
       outputType_,
       sortColumnIndices,

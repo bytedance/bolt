@@ -48,14 +48,16 @@ SortBuffer::SortBuffer(
     tsan_atomic<bool>* nonReclaimableSection,
     const common::SpillConfig* spillConfig,
     uint64_t spillMemoryThreshold,
-    OperatorCtx* operatorCtx)
+    OperatorCtx* operatorCtx,
+    bool hybridSortEnabled)
     : input_(input),
       sortCompareFlags_(sortCompareFlags),
       pool_(pool),
       nonReclaimableSection_(nonReclaimableSection),
       spillConfig_(spillConfig),
       spillMemoryThreshold_(spillMemoryThreshold),
-      operatorCtx_(operatorCtx) {
+      operatorCtx_(operatorCtx),
+      hybridSortEnabled_(hybridSortEnabled) {
   BOLT_CHECK_GE(input_->size(), sortCompareFlags_.size());
   BOLT_CHECK_GT(sortCompareFlags_.size(), 0);
   BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags_.size());
@@ -63,15 +65,19 @@ SortBuffer::SortBuffer(
 
   std::vector<TypePtr> sortedColumnTypes;
   std::vector<TypePtr> nonSortedColumnTypes;
+  std::vector<std::string> nonSortedColumnNames;
   std::vector<std::string> sortedSpillColumnNames;
   std::vector<TypePtr> sortedSpillColumnTypes;
   sortedColumnTypes.reserve(sortColumnIndices.size());
   nonSortedColumnTypes.reserve(input->size() - sortColumnIndices.size());
+  nonSortedColumnNames.reserve(input->size() - sortColumnIndices.size());
+  payloadChannels_.reserve(input->size() - sortColumnIndices.size());
   sortedSpillColumnNames.reserve(input->size());
   sortedSpillColumnTypes.reserve(input->size());
   std::unordered_set<column_index_t> sortedChannelSet;
   // Sorted key columns.
   for (column_index_t i = 0; i < sortColumnIndices.size(); ++i) {
+    keyColumnMap_.emplace_back(IdentityProjection(i, sortColumnIndices.at(i)));
     columnMap_.emplace_back(IdentityProjection(i, sortColumnIndices.at(i)));
     sortedColumnTypes.emplace_back(input_->childAt(sortColumnIndices.at(i)));
     sortedSpillColumnTypes.emplace_back(
@@ -86,16 +92,41 @@ SortBuffer::SortBuffer(
     if (sortedChannelSet.count(i) != 0) {
       continue;
     }
-    columnMap_.emplace_back(nonSortedIndex++, i);
+    payloadColumnMap_.emplace_back(nonSortedIndex,i);
+    columnMap_.emplace_back(nonSortedIndex, i);
+    nonSortedIndex++;
     nonSortedColumnTypes.emplace_back(input_->childAt(i));
+    nonSortedColumnNames.emplace_back(input->nameOf(i));
+    payloadChannels_.push_back(i);
     sortedSpillColumnTypes.emplace_back(input_->childAt(i));
     sortedSpillColumnNames.emplace_back(input->nameOf(i));
   }
+  hybridSortEnabled_ = hybridSortEnabled_ && !nonSortedColumnTypes.empty();
+  if (hybridSortEnabled_) {
+    std::vector<TypePtr> rowIdType = {BIGINT()};
+    data_ = std::make_unique<RowContainer>(
+      sortedColumnTypes, rowIdType, true /*useListRowIndex*/, pool_
+    );
+    hybridData_ = std::make_unique<HybridContainer>(
+      sortedColumnTypes,
+      nonSortedColumnTypes, 
+      data_.get()
+    );
+    // Set allContainer
+    std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
+    hybridDataChannel[0] = hybridData_.get();
+    hybridData_->setAllContainers(hybridDataChannel);
 
-  data_ = std::make_unique<RowContainer>(
-      sortedColumnTypes, nonSortedColumnTypes, true /*useListRowIndex*/, pool_);
+    payloadTypes_ = ROW(
+      std::move(nonSortedColumnNames), std::move(nonSortedColumnTypes));
+  }
+  else {
+    data_ = std::make_unique<RowContainer>(
+        sortedColumnTypes, nonSortedColumnTypes, true /*useListRowIndex*/, pool_);
+  }
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
+  LOG(ERROR) << "Hybrid Sort " << (hybridSortEnabled_ ? "Enabled" : "Disabled");
 }
 
 SortBuffer::~SortBuffer() {
@@ -113,18 +144,54 @@ void SortBuffer::addInput(const VectorPtr& input) {
   }
   auto* inputRow = input->as<RowVector>();
   MicrosecondTimer timer(&sortColToRowTimeUs_);
-  for (const auto& columnProjection : columnMap_) {
-    DecodedVector decoded(
+  if (hybridSortEnabled_) {
+    auto currentRows = hybridData_->getNumRows();
+    for (int row = 0; row < input->size(); ++row) {
+      // Store RowId
+      uint64_t encodedId =
+          (static_cast<uint64_t>(0) << 56) | // top 8 bits: driverId, always 0 for Sort
+          (static_cast<uint64_t>(row + currentRows) & ((1ULL << 56) - 1));
+      data_->storeSingleRowId(encodedId, rows[row]);
+    }
+    // Store key columns
+    for (const auto& columnProjection : keyColumnMap_) {
+      DecodedVector decoded(
         *inputRow->childAt(columnProjection.outputChannel), allRows);
-    auto kind =
+      auto kind =
         inputRow->childAt(columnProjection.outputChannel)->type()->kind();
-    BOLT_DYNAMIC_TYPE_DISPATCH(
-        data_->storeColumn,
-        kind,
-        decoded,
-        input->size(),
-        rows,
-        columnProjection.inputChannel);
+      BOLT_DYNAMIC_TYPE_DISPATCH(
+          data_->storeColumn,
+          kind,
+          decoded,
+          input->size(),
+          rows,
+          columnProjection.inputChannel);
+    }
+    // Gather payload columns
+    std::vector<std::unique_ptr<DecodedVector>> decoders;
+    decoders.reserve(payloadColumnMap_.size());
+    for (const auto& columnProjection : payloadColumnMap_) {
+      decoders.emplace_back(std::make_unique<DecodedVector>(
+        *inputRow->childAt(columnProjection.outputChannel), allRows));
+    }
+    auto payloadInput = wrapColumns(
+        input->as<RowVector>(), payloadChannels_, payloadTypes_, pool());
+    hybridData_->addPayload(std::move(payloadInput));
+  }
+  else {
+    for (const auto& columnProjection : columnMap_) {
+      DecodedVector decoded(
+          *inputRow->childAt(columnProjection.outputChannel), allRows);
+      auto kind =
+          inputRow->childAt(columnProjection.outputChannel)->type()->kind();
+      BOLT_DYNAMIC_TYPE_DISPATCH(
+          data_->storeColumn,
+          kind,
+          decoded,
+          input->size(),
+          rows,
+          columnProjection.inputChannel);
+    }
   }
 
   numInputRows_ += allRows.size();
@@ -139,6 +206,9 @@ void SortBuffer::noMoreInput() {
   // No data.
   if (numInputRows_ == 0) {
     return;
+  }
+  if (hybridSortEnabled_ && hybridData_ != nullptr) {
+    hybridData_->coalesceBatches();
   }
 
   if (spiller_ == nullptr) {
@@ -363,7 +433,9 @@ void SortBuffer::ensureOutputFits(vector_size_t batchSize) {
 }
 
 void SortBuffer::updateEstimatedOutputRowSize() {
-  const auto optionalRowSize = data_->estimateRowSize();
+  const auto optionalRowSize = hybridSortEnabled_
+      ? hybridData_->estimateRowSize()
+      : data_->estimateRowSize();
   if (!optionalRowSize.has_value() || optionalRowSize.value() == 0) {
     return;
   }
@@ -458,12 +530,27 @@ void SortBuffer::prepareOutput(uint32_t batchSize) {
 
 void SortBuffer::getOutputWithoutSpill() {
   BOLT_DCHECK_EQ(numInputRows_, sortedRows_.size());
-  for (const auto& columnProjection : columnMap_) {
-    data_->extractColumn(
-        sortedRows_.data() + numOutputRows_,
-        output_->size(),
-        columnProjection.inputChannel,
-        output_->childAt(columnProjection.outputChannel));
+  if (hybridSortEnabled_) {
+    std::vector<HybridRowId> outputRowIds;
+    outputRowIds.resize(output_->size());
+    hybridData_->getRowIds(sortedRows_.data() + numOutputRows_, output_->size(), outputRowIds);
+    for (const auto& columnProjection : columnMap_) {
+      hybridData_->extractColumn(
+          sortedRows_.data() + numOutputRows_,
+          output_->size(),
+          columnProjection.inputChannel,
+          output_->childAt(columnProjection.outputChannel),
+          outputRowIds);
+    }
+  }
+  else {
+    for (const auto& columnProjection : columnMap_) {
+      data_->extractColumn(
+          sortedRows_.data() + numOutputRows_,
+          output_->size(),
+          columnProjection.inputChannel,
+          output_->childAt(columnProjection.outputChannel));
+    }
   }
   numOutputRows_ += output_->size();
 }

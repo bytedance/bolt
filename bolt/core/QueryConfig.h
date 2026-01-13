@@ -589,6 +589,10 @@ class QueryConfig {
 
   static constexpr const char* kParquetRepDefMemoryLimit =
       "parquet_repdef_memory_limit";
+  
+  static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
+
+  static constexpr const char* kHybridSortEnabled = "hybrid_sort_enabled";
 
   /**
    * LLVM JIT enabled
@@ -1003,6 +1007,15 @@ class QueryConfig {
 #else
     return config::OFF;
 #endif
+  }
+
+
+  bool hybridJoinEnabled() const {
+    return get<bool>(kHybridJoinEnabled, true);
+  }
+
+  bool hybridSortEnabled() const {
+    return get<bool>(kHybridSortEnabled, true);
   }
 
   /// Returns 'is aggregation spilling enabled' flag. Must also check the
