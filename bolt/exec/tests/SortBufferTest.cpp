@@ -129,7 +129,8 @@ TEST_F(SortBufferTest, singleKey) {
       {{{true,
          true,
          false,
-         CompareFlags::NullHandlingMode::kNullAsValue}}, // Ascending with hybrid
+         CompareFlags::NullHandlingMode::kNullAsValue}}, // Ascending with
+                                                         // hybrid
        {1, 2, 3, 4, 5},
        true},
       {{{true,
@@ -141,7 +142,8 @@ TEST_F(SortBufferTest, singleKey) {
       {{{true,
          false,
          false,
-         CompareFlags::NullHandlingMode::kNullAsValue}}, // Descending with hybrid
+         CompareFlags::NullHandlingMode::kNullAsValue}}, // Descending with
+                                                         // hybrid
        {5, 4, 3, 2, 1},
        true}};
 
@@ -189,9 +191,7 @@ TEST_F(SortBufferTest, multipleKeys) {
     std::string debugString() const {
       return fmt::format("hybridSortEnabled:{}", hybridSortEnabled);
     }
-  } testSettings[] = {
-      {false},
-      {true}};
+  } testSettings[] = {{false}, {true}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -479,14 +479,23 @@ TEST_F(SortBufferTest, spill) {
        0,
        false,
        false}, // memory reservation failure won't trigger spilling.
+      {true, true, 0, false, true}, // memory reservation failure won't trigger
+                                    // spilling, hybrid enabled.
       {true,
-       true,
-       0,
        false,
-       true}, // memory reservation failure won't trigger spilling, hybrid enabled.
-      {true, false, 1000, true, false}, // threshold is small, spilling is triggered.
-      {true, false, 1000, true, true}, // threshold is small, spilling is triggered, hybrid enabled.
-      {true, false, 1000000, false, false} // threshold is too large, not triggered
+       1000,
+       true,
+       false}, // threshold is small, spilling is triggered.
+      {true,
+       false,
+       1000,
+       true,
+       true}, // threshold is small, spilling is triggered, hybrid enabled.
+      {true,
+       false,
+       1000000,
+       false,
+       false} // threshold is too large, not triggered
   };
 
   for (const auto& testData : testSettings) {
@@ -644,10 +653,7 @@ TEST_F(SortBufferTest, emptySpill) {
           hybridSortEnabled);
     }
   } testSettings[] = {
-      {false, false},
-      {false, true},
-      {true, false},
-      {true, true}};
+      {false, false}, {false, true}, {true, false}, {true, true}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -746,15 +752,16 @@ TEST_F(SortBufferTest, rowBasedSpillMemory) {
 }
 
 TEST_F(SortBufferTest, spillWithHybridModeValidateOutput) {
-  // Test hybrid sort mode with spilling enabled and validate output correctness.
+  // Test hybrid sort mode with spilling enabled and validate output
+  // correctness.
   struct {
     bool hybridSortEnabled;
     std::string debugString() const {
       return fmt::format("hybridSortEnabled:{}", hybridSortEnabled);
     }
   } testSettings[] = {
-      {false},  // Spill without hybrid mode
-      {true}    // Spill with hybrid mode
+      {false}, // Spill without hybrid mode
+      {true} // Spill with hybrid mode
   };
 
   for (const auto& testData : testSettings) {
@@ -769,13 +776,13 @@ TEST_F(SortBufferTest, spillWithHybridModeValidateOutput) {
         0,
         executor_.get(),
         5,
-        100,  // spillableReservationGrowthPct to trigger spilling
+        100, // spillableReservationGrowthPct to trigger spilling
         0,
         0,
         0,
         0,
         0,
-        100,  // testSpillPct
+        100, // testSpillPct
         "none");
 
     auto sortBuffer = std::make_unique<SortBuffer>(
@@ -795,10 +802,10 @@ TEST_F(SortBufferTest, spillWithHybridModeValidateOutput) {
     for (int batch = 0; batch < 2; ++batch) {
       RowVectorPtr data = makeRowVector(
           {makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
-           makeFlatVector<int32_t>({5, 4, 3, 2, 1}),  // sorted-2 column
+           makeFlatVector<int32_t>({5, 4, 3, 2, 1}), // sorted-2 column
            makeFlatVector<int16_t>({1, 2, 3, 4, 5}),
            makeFlatVector<float>({1.1, 2.2, 3.3, 4.4, 5.5}),
-           makeFlatVector<double>({1.1, 2.2, 2.2, 5.5, 5.5}),  // sorted-1 column
+           makeFlatVector<double>({1.1, 2.2, 2.2, 5.5, 5.5}), // sorted-1 column
            makeFlatVector<std::string>(
                {"hello", "world", "today", "is", "great"})});
       sortBuffer->addInput(data);
@@ -812,28 +819,36 @@ TEST_F(SortBufferTest, spillWithHybridModeValidateOutput) {
     ASSERT_GT(spillStats->spilledRows, 0);
     ASSERT_GT(spillStats->spilledBytes, 0);
     ASSERT_EQ(spillStats->spilledPartitions, 1);
-    
+
     // // Log spill statistics for verification
     // std::cout << "\n=== Spill Statistics ===" << std::endl;
-    // std::cout << "Hybrid Mode Enabled: " << testData.hybridSortEnabled << std::endl;
-    // std::cout << "Spilled Rows: " << spillStats->spilledRows << std::endl;
-    // std::cout << "Spilled Bytes: " << spillStats->spilledBytes << std::endl;
-    // std::cout << "Spilled Files: " << spillStats->spilledFiles << std::endl;
-    // std::cout << "========================\n" << std::endl;
+    // std::cout << "Hybrid Mode Enabled: " << testData.hybridSortEnabled <<
+    // std::endl; std::cout << "Spilled Rows: " << spillStats->spilledRows <<
+    // std::endl; std::cout << "Spilled Bytes: " << spillStats->spilledBytes <<
+    // std::endl; std::cout << "Spilled Files: " << spillStats->spilledFiles <<
+    // std::endl; std::cout << "========================\n" << std::endl;
 
     // Validate output correctness: check that all columns are correctly sorted
-    std::vector<int64_t> expectedC0 = 
-        {1, 1, 3, 3, 2, 2, 5, 5, 4, 4}; // sorted by c4, then c1
-    std::vector<int32_t> expectedC1 = 
-        {5, 5, 3, 3, 4, 4, 1, 1, 2, 2}; // sorted by c4, then c1
-    std::vector<int16_t> expectedC2 = 
-        {1, 1, 3, 3, 2, 2, 5, 5, 4, 4};
-    std::vector<float> expectedC3 = 
-        {1.1, 1.1, 3.3, 3.3, 2.2, 2.2, 5.5, 5.5, 4.4, 4.4};
-    std::vector<double> expectedC4 = 
-        {1.1, 1.1, 2.2, 2.2, 2.2, 2.2, 5.5, 5.5, 5.5, 5.5};
-    std::vector<std::string> expectedC5 = 
-        {"hello", "hello", "today", "today", "world", "world", "great", "great", "is", "is"};
+    std::vector<int64_t> expectedC0 = {
+        1, 1, 3, 3, 2, 2, 5, 5, 4, 4}; // sorted by c4, then c1
+    std::vector<int32_t> expectedC1 = {
+        5, 5, 3, 3, 4, 4, 1, 1, 2, 2}; // sorted by c4, then c1
+    std::vector<int16_t> expectedC2 = {1, 1, 3, 3, 2, 2, 5, 5, 4, 4};
+    std::vector<float> expectedC3 = {
+        1.1, 1.1, 3.3, 3.3, 2.2, 2.2, 5.5, 5.5, 4.4, 4.4};
+    std::vector<double> expectedC4 = {
+        1.1, 1.1, 2.2, 2.2, 2.2, 2.2, 5.5, 5.5, 5.5, 5.5};
+    std::vector<std::string> expectedC5 = {
+        "hello",
+        "hello",
+        "today",
+        "today",
+        "world",
+        "world",
+        "great",
+        "great",
+        "is",
+        "is"};
 
     RowVectorPtr output;
     int totalRowsVerified = 0;

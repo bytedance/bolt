@@ -62,7 +62,7 @@ SortBuffer::SortBuffer(
   BOLT_CHECK_GT(sortCompareFlags_.size(), 0);
   BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags_.size());
   BOLT_CHECK_NOT_NULL(nonReclaimableSection_);
-  
+
   // Validate that hybrid sort is not used with row-based spilling
   if (hybridSortEnabled_ && spillConfig_ != nullptr) {
     BOLT_CHECK(
@@ -99,7 +99,7 @@ SortBuffer::SortBuffer(
     if (sortedChannelSet.count(i) != 0) {
       continue;
     }
-    payloadColumnMap_.emplace_back(nonSortedIndex,i);
+    payloadColumnMap_.emplace_back(nonSortedIndex, i);
     columnMap_.emplace_back(nonSortedIndex, i);
     nonSortedIndex++;
     nonSortedColumnTypes.emplace_back(input_->childAt(i));
@@ -112,22 +112,17 @@ SortBuffer::SortBuffer(
   if (hybridSortEnabled_) {
     std::vector<TypePtr> rowIdType = {BIGINT()};
     data_ = std::make_unique<RowContainer>(
-      sortedColumnTypes, rowIdType, true /*useListRowIndex*/, pool_
-    );
+        sortedColumnTypes, rowIdType, true /*useListRowIndex*/, pool_);
     hybridData_ = std::make_unique<HybridContainer>(
-      sortedColumnTypes,
-      nonSortedColumnTypes, 
-      data_.get()
-    );
+        sortedColumnTypes, nonSortedColumnTypes, data_.get());
     // Set allContainer
     std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
     hybridDataChannel[0] = hybridData_.get();
     hybridData_->setAllContainers(hybridDataChannel);
 
-    payloadTypes_ = ROW(
-      std::move(nonSortedColumnNames), std::move(nonSortedColumnTypes));
-  }
-  else {
+    payloadTypes_ =
+        ROW(std::move(nonSortedColumnNames), std::move(nonSortedColumnTypes));
+  } else {
     data_ = std::make_unique<RowContainer>(
         sortedColumnTypes, nonSortedColumnTypes, true /*useListRowIndex*/, pool_);
   }
@@ -154,17 +149,17 @@ void SortBuffer::addInput(const VectorPtr& input) {
     auto currentRows = hybridData_->getNumRows();
     for (int row = 0; row < input->size(); ++row) {
       // Store RowId
-      uint64_t encodedId =
-          (static_cast<uint64_t>(0) << 56) | // top 8 bits: driverId, always 0 for Sort
+      uint64_t encodedId = (static_cast<uint64_t>(0)
+                            << 56) | // top 8 bits: driverId, always 0 for Sort
           (static_cast<uint64_t>(row + currentRows) & ((1ULL << 56) - 1));
       data_->storeSingleRowId(encodedId, rows[row]);
     }
     // Store key columns
     for (const auto& columnProjection : keyColumnMap_) {
       DecodedVector decoded(
-        *inputRow->childAt(columnProjection.outputChannel), allRows);
+          *inputRow->childAt(columnProjection.outputChannel), allRows);
       auto kind =
-        inputRow->childAt(columnProjection.outputChannel)->type()->kind();
+          inputRow->childAt(columnProjection.outputChannel)->type()->kind();
       BOLT_DYNAMIC_TYPE_DISPATCH(
           data_->storeColumn,
           kind,
@@ -178,13 +173,12 @@ void SortBuffer::addInput(const VectorPtr& input) {
     decoders.reserve(payloadColumnMap_.size());
     for (const auto& columnProjection : payloadColumnMap_) {
       decoders.emplace_back(std::make_unique<DecodedVector>(
-        *inputRow->childAt(columnProjection.outputChannel), allRows));
+          *inputRow->childAt(columnProjection.outputChannel), allRows));
     }
     auto payloadInput = wrapColumns(
         input->as<RowVector>(), payloadChannels_, payloadTypes_, pool());
     hybridData_->addPayload(std::move(payloadInput));
-  }
-  else {
+  } else {
     for (const auto& columnProjection : columnMap_) {
       DecodedVector decoded(
           *inputRow->childAt(columnProjection.outputChannel), allRows);
@@ -474,8 +468,9 @@ void SortBuffer::spillInput() {
     }
   }
   // Coalesce batches BEFORE every spill, not just the first one.
-  // After each spill, hybridData_->clear() is called which clears owningInputs_.
-  // New data added via addInput() needs to be coalesced before the next spill.
+  // After each spill, hybridData_->clear() is called which clears
+  // owningInputs_. New data added via addInput() needs to be coalesced before
+  // the next spill.
   if (hybridSortEnabled_ && hybridData_ != nullptr) {
     hybridData_->coalesceBatches();
   }
@@ -559,7 +554,8 @@ void SortBuffer::getOutputWithoutSpill() {
   if (hybridSortEnabled_) {
     std::vector<HybridRowId> outputRowIds;
     outputRowIds.resize(output_->size());
-    hybridData_->getRowIds(sortedRows_.data() + numOutputRows_, output_->size(), outputRowIds);
+    hybridData_->getRowIds(
+        sortedRows_.data() + numOutputRows_, output_->size(), outputRowIds);
     for (const auto& columnProjection : columnMap_) {
       hybridData_->extractColumn(
           sortedRows_.data() + numOutputRows_,
@@ -568,8 +564,7 @@ void SortBuffer::getOutputWithoutSpill() {
           output_->childAt(columnProjection.outputChannel),
           outputRowIds);
     }
-  }
-  else {
+  } else {
     for (const auto& columnProjection : columnMap_) {
       data_->extractColumn(
           sortedRows_.data() + numOutputRows_,

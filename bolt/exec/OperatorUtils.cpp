@@ -593,7 +593,7 @@ void adjustSpillCompressionKind(
 }
 
 RowVectorPtr wrapColumns(
-    const RowVector *input,
+    const RowVector* input,
     const std::vector<column_index_t> channels,
     const RowTypePtr types,
     memory::MemoryPool* pool) {
@@ -601,19 +601,15 @@ RowVectorPtr wrapColumns(
 
   std::vector<VectorPtr> children;
   children.reserve(channels.size());
-  for (auto & channel : channels)
-      children.push_back(input->childAt(channel));
+  for (auto& channel : channels)
+    children.push_back(input->childAt(channel));
 
-  // Preserve row-level nulls if present on the input RowVector; otherwise nullptr.
+  // Preserve row-level nulls if present on the input RowVector; otherwise
+  // nullptr.
   BufferPtr rowNulls = input->nulls();
 
   return std::make_shared<RowVector>(
-    pool,
-    types,
-    rowNulls,
-    input->size(),
-    children
-  );
+      pool, types, rowNulls, input->size(), children);
 }
 
 } // namespace bytedance::bolt::exec

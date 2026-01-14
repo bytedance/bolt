@@ -1851,7 +1851,7 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
   if (hybridData_) {
     std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
     hybridDataChannel[hybridData_->getId()] = hybridData_.get();
-    for (auto &table : otherTables_)
+    for (auto& table : otherTables_)
       hybridDataChannel[table->hybridData()->getId()] = table->hybridData();
     hybridData_->setAllContainers(hybridDataChannel);
   }

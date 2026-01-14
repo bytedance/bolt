@@ -322,11 +322,13 @@ void Spiller::extractSpill(folly::Range<char**> rows, RowVectorPtr& resultPtr) {
   }
 }
 
-void Spiller::extractSpillHybrid(folly::Range<char**> rows, RowVectorPtr& resultPtr) {
+void Spiller::extractSpillHybrid(
+    folly::Range<char**> rows,
+    RowVectorPtr& resultPtr) {
   BOLT_CHECK(
       type_ != Type::kAggregateInput && type_ != Type::kAggregateOutput,
       "Hybrid mode does not support aggregation");
-  
+
   if (!resultPtr) {
     resultPtr = BaseVector::create<RowVector>(
         rowType_, rows.size(), memory::spillMemoryPool());
@@ -335,11 +337,11 @@ void Spiller::extractSpillHybrid(folly::Range<char**> rows, RowVectorPtr& result
     resultPtr->resize(rows.size());
   }
   auto result = resultPtr.get();
-  
+
   std::vector<HybridRowId> outputRowIds;
   outputRowIds.resize(rows.size());
   hybridContainer_->getRowIds(rows.data(), rows.size(), outputRowIds);
-  
+
   auto& types = rowType_->children();
   for (auto i = 0; i < types.size(); ++i) {
     hybridContainer_->extractColumn(
@@ -420,7 +422,8 @@ int64_t Spiller::extractSpillVectorHybrid(
         break;
       }
     }
-    extractSpillHybrid(folly::Range(&rows[nextBatchIndex], numRows), spillVector);
+    extractSpillHybrid(
+        folly::Range(&rows[nextBatchIndex], numRows), spillVector);
     nextBatchIndex += numRows;
   }
   updateSpillConvertTime(convertTimeUs);

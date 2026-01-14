@@ -1501,10 +1501,10 @@ HybridContainer::HybridContainer(
   rowIdColumnOffset_ = keys_->columnAt(keyTypes.size()).offset();
   isNullable_.resize(payloadTypes_.size(), false);
   types_.reserve(keyTypes_.size() + payloadTypes_.size());
-  for (const auto &type : keyTypes_)
-        types_.push_back(type);
-  for (const auto &type : payloadTypes_)
-        types_.push_back(type);
+  for (const auto& type : keyTypes_)
+    types_.push_back(type);
+  for (const auto& type : payloadTypes_)
+    types_.push_back(type);
   payloadFlatBytesSum_.resize(payloadTypes_.size(), 0);
 }
 HybridContainer::~HybridContainer() {
@@ -1533,7 +1533,6 @@ void HybridContainer::clear() {
   keys_->clear();
 }
 
-
 std::optional<int64_t> HybridContainer::estimateRowSize() const {
   if (totalRows_ == 0) {
     return std::nullopt;
@@ -1559,16 +1558,19 @@ std::optional<int64_t> HybridContainer::estimateRowSize() const {
   return estimatedSize;
 }
 
-int32_t HybridContainer::estimateVariableSizeAt(const char* row, column_index_t column) const {
+int32_t HybridContainer::estimateVariableSizeAt(
+    const char* row,
+    column_index_t column) const {
   if (column < numKeys_)
     return keys_->variableSizeAt(row, column);
-  int32_t estimateSize = payloadFlatBytesSum_[column - numKeys_] / totalRows_ + 1;
+  int32_t estimateSize =
+      payloadFlatBytesSum_[column - numKeys_] / totalRows_ + 1;
   return estimateSize;
 }
 
 std::vector<TypePtr> HybridContainer::columnTypes() const {
-    return types_;
-  }
+  return types_;
+}
 
 int32_t HybridContainer::fixedSizeAt(column_index_t column) const {
   return typeKindSize(types_[column]->kind());

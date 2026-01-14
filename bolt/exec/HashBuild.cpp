@@ -147,7 +147,7 @@ HashBuild::HashBuild(
   const int32_t numDependents = inputType->size() - numKeys;
   std::vector<std::string> dependentNames;
   std::vector<TypePtr> dependentTypes;
-  
+
   hybridJoin_ = operatorCtx_->driverCtx()->queryConfig().hybridJoinEnabled() &&
       numDependents > 0 && !joinNode_->isLeftSemiFilterJoin() &&
       !joinNode_->isLeftSemiProjectJoin() && !joinNode_->isAntiJoin();
@@ -182,8 +182,11 @@ HashBuild::HashBuild(
   dependentTypes_ = ROW(std::move(dependentNames), std::move(dependentTypes));
   driverId_ = driverCtx->driverId;
   if (hybridJoin_) {
-    BOLT_CHECK_LE(driverId_, 255,
-        "driverId {} exceeds maximum 255 for hybrid join mode", driverId_);
+    BOLT_CHECK_LE(
+        driverId_,
+        255,
+        "driverId {} exceeds maximum 255 for hybrid join mode",
+        driverId_);
   }
   setupTable();
   setupSpiller();
@@ -274,11 +277,13 @@ void HashBuild::setupTable() {
 
   if (hybridJoin_) {
     table_->hybridData()->setId(static_cast<uint8_t>(driverId_));
-    // Initialize allContainers_ with itself so spilling can work before table merge.
+    // Initialize allContainers_ with itself so spilling can work before table
+    // merge.
     std::unordered_map<uint8_t, HybridContainer*> selfContainer;
     selfContainer[static_cast<uint8_t>(driverId_)] = table_->hybridData();
     table_->hybridData()->setAllContainers(selfContainer);
-    // Set reorder flag from query config - can be disabled for deterministic testing.
+    // Set reorder flag from query config - can be disabled for deterministic
+    // testing.
     table_->hybridData()->setReorderEnabled(
         queryConfig.hybridJoinReorderEnabled());
   }
@@ -626,9 +631,9 @@ void HashBuild::addInput(RowVectorPtr input) {
       }
       // Store RowId
       auto baseRow = table_->hybridData()->getNumRows();
-      uint64_t encodedId =
-      (static_cast<uint64_t>(driverId_) << 56) |       // top 8 bits: driverId [0, 255]
-      (static_cast<uint64_t>(rowIndex + baseRow) & ((1ULL << 56) - 1));
+      uint64_t encodedId = (static_cast<uint64_t>(driverId_)
+                            << 56) | // top 8 bits: driverId [0, 255]
+          (static_cast<uint64_t>(rowIndex + baseRow) & ((1ULL << 56) - 1));
       rows->storeSingleRowId(encodedId, newRow);
     });
     auto payloadInput = wrapColumns(
@@ -961,7 +966,8 @@ void HashBuild::runSpill(const std::vector<Operator*>& spillOperators) {
   // run in parallel.
   for (auto& spillOp : spillOperators) {
     HashBuild* build = dynamic_cast<HashBuild*>(spillOp);
-    // Coalesce batches before spilling to ensure hybrid data is properly laid out.
+    // Coalesce batches before spilling to ensure hybrid data is properly laid
+    // out.
     if (build->hybridJoin_ && build->table_->hybridData()) {
       build->table_->hybridData()->coalesceBatches();
     }
@@ -990,9 +996,9 @@ void HashBuild::noMoreInput() {
 }
 
 void HashBuild::noMoreInputInternal() {
-  // Coalesce batches in this driver's HybridContainer before merging with peers.
-  // This handles both the normal path (from noMoreInput) and spill restore path
-  // (from processSpillInput). Each driver does this independently.
+  // Coalesce batches in this driver's HybridContainer before merging with
+  // peers. This handles both the normal path (from noMoreInput) and spill
+  // restore path (from processSpillInput). Each driver does this independently.
   if (hybridJoin_ && table_->hybridData()) {
     table_->hybridData()->coalesceBatches();
   }
@@ -1591,7 +1597,8 @@ void HashBuild::reclaim(
     spillTasks.push_back(
         std::make_shared<AsyncSource<SpillResult>>([buildOp]() {
           try {
-            // Coalesce batches before spilling to ensure hybrid data is properly laid out.
+            // Coalesce batches before spilling to ensure hybrid data is
+            // properly laid out.
             if (buildOp->hybridJoin_ && buildOp->table_->hybridData()) {
               buildOp->table_->hybridData()->coalesceBatches();
             }

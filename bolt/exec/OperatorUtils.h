@@ -206,7 +206,7 @@ void projectChildren(
     const BufferPtr& mapping);
 
 RowVectorPtr wrapColumns(
-    const RowVector *input,
+    const RowVector* input,
     const std::vector<column_index_t> channels,
     const RowTypePtr types,
     memory::MemoryPool* pool);
