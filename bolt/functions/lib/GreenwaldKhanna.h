@@ -72,8 +72,12 @@ class GKQuantileSummaries {
       return g != other.g || delta != other.delta || value != other.value;
     }
     [[nodiscard]] std::string toString() const {
-      return fmt::format(
-          "{{g: {}, delta: {}, value: {:.8f}}}", g, delta, value);
+      if constexpr (std::is_floating_point_v<T>) {
+        return fmt::format(
+            "{{g: {}, delta: {}, value: {:.8f}}}", g, delta, value);
+      } else {
+        return fmt::format("{{g: {}, delta: {}, value: {}}}", g, delta, value);
+      }
     }
   };
   static_assert(

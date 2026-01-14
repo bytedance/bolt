@@ -490,7 +490,7 @@ class Driver : public std::enable_shared_from_this<Driver> {
   CpuWallTiming processLazyTiming(Operator& op, const CpuWallTiming& timing);
 
  private:
-  Driver() = default;
+  Driver();
 
   // Invoked to record the driver cpu yield count.
   static void recordYieldCount();

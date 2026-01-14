@@ -29,8 +29,12 @@
  */
 
 #include "bolt/common/base/SpillConfig.h"
+
+#include <fmt/format.h>
+
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SuccinctPrinter.h"
+
 namespace bytedance::bolt::common {
 
 RowBasedSpillMode strToRowBasedSpillMode(const std::string& str) {
@@ -126,14 +130,14 @@ int32_t SpillConfig::joinSpillLevel(
     return 0;
   }
   auto mapToString = [&]() -> std::string {
-    std::string mapstr = "{";
-    for (auto it = offsetToJoinBits.begin(); it != offsetToJoinBits.end();
-         ++it) {
-      mapstr += "[" + std::to_string(it->first) + ":" +
-          std::to_string(it->second) + "],";
+    std::vector<std::string> pairs;
+    pairs.reserve(offsetToJoinBits.size());
+
+    for (const auto& [offset, bits] : offsetToJoinBits) {
+      pairs.emplace_back(fmt::format("[{}:{}]", offset, bits));
     }
-    mapstr += "}";
-    return mapstr;
+
+    return fmt::format("{{{}}}", fmt::join(pairs, ","));
   };
   // should start from startPartitionBit
   auto firstIt = offsetToJoinBits.begin();
@@ -225,9 +229,4 @@ SpillConfig& SpillConfig::setJITenableForSpill(bool enabled) noexcept {
 bool SpillConfig::getJITenabledForSpill() const noexcept {
   return jitEnabled;
 }
-
-auto format_as(RowBasedSpillMode m) {
-  return fmt::underlying(m);
-}
-
 } // namespace bytedance::bolt::common

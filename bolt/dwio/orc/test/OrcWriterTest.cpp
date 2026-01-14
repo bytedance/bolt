@@ -140,7 +140,7 @@ TEST_F(OrcWriterTest, compression) {
   VectorPtr data = bytedance::bolt::test::BatchMaker::createBatch(
       schema, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
 
-  for (const auto [inputCompression, actualCompression] : compressionKindMap) {
+  for (const auto& [inputCompression, actualCompression] : compressionKindMap) {
     std::string orcTestPath = tempPath_->path + "/" +
         common::compressionKindToString(actualCompression) + "_comparison.orc";
     BoltOrcWriteOption writerOptions;

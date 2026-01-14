@@ -694,8 +694,9 @@ void fuzzFlatPrimitiveImpl(
         auto str =
             std::to_string(randTimestamp(rng, opts).toNanos()).substr(0, 10);
         for (int j = 0; j < rand<uint>(rng) % 24; ++j) {
-          str += "," +
-              std::to_string(randTimestamp(rng, opts).toNanos()).substr(0, 10);
+          str += fmt::format(
+              ",{}",
+              std::to_string(randTimestamp(rng, opts).toNanos()).substr(0, 10));
         }
         flatVector->set(i, StringView(str));
       } else {

@@ -285,7 +285,7 @@ std::string stopReasonString(StopReason reason) {
 std::ostream& operator<<(std::ostream& out, const StopReason& reason) {
   return out << stopReasonString(reason);
 }
-
+Driver::Driver() = default;
 // static
 void Driver::enqueue(std::shared_ptr<Driver> driver) {
   process::ScopedThreadDebugInfo scopedInfo(

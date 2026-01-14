@@ -177,3 +177,20 @@ struct ShuffleWriterMetrics {
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
 };
 } // namespace bytedance::bolt::shuffle::sparksql
+
+template <>
+struct fmt::formatter<bytedance::bolt::shuffle::sparksql::PartitionWriterType>
+    : fmt::formatter<std::string_view> {
+  auto format(
+      bytedance::bolt::shuffle::sparksql::PartitionWriterType c,
+      format_context& ctx) const {
+    switch (c) {
+      case bytedance::bolt::shuffle::sparksql::kLocal:
+        return fmt::formatter<std::string_view>::format("kLocal", ctx);
+      case bytedance::bolt::shuffle::sparksql::kCeleborn:
+        return fmt::formatter<std::string_view>::format("kCeleborn", ctx);
+      default:
+        return fmt::format_to(ctx.out(), "unknown[{}]", static_cast<int>(c));
+    }
+  }
+};

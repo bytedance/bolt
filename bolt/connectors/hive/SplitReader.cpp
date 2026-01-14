@@ -643,20 +643,18 @@ void SplitReader::setPartitionValue(
 }
 
 std::string SplitReader::toString() const {
-  std::string partitionKeys;
-  std::for_each(
-      partitionKeys_->begin(),
-      partitionKeys_->end(),
-      [&](std::pair<
-          const std::string,
-          std::shared_ptr<bytedance::bolt::connector::hive::HiveColumnHandle>>
-              column) { partitionKeys += " " + column.second->toString(); });
+  std::vector<std::string> keys;
+  keys.reserve(partitionKeys_->size());
+  for (const auto& [_, column] : *partitionKeys_) {
+    keys.emplace_back(column->toString());
+  }
+
   return fmt::format(
-      "SplitReader: hiveSplit_{} scanSpec_{} readerOutputType_{} partitionKeys_{} reader{} rowReader{}",
+      "SplitReader: hiveSplit_{} scanSpec_{} readerOutputType_{} partitionKeys_ {} reader{} rowReader{}",
       hiveSplit_->toString(),
       scanSpec_->toString(),
       readerOutputType_->toString(),
-      partitionKeys,
+      fmt::join(keys, " "),
       static_cast<const void*>(baseReader_.get()),
       static_cast<const void*>(baseRowReader_.get()));
 }

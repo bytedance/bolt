@@ -380,7 +380,9 @@ TEST_F(DecimalArithmeticTest, multiply) {
   // out_precision == 38, large values, trimming of scale.
   testDecimalExpr<TypeKind::HUGEINT>(
       makeConstant<int128_t>(
-          HugeInt::parse("201" + std::string(31, '0')), 1, DECIMAL(38, 6)),
+          HugeInt::parse(fmt::format("201{}", std::string(31, '0'))),
+          1,
+          DECIMAL(38, 6)),
       "c0 * c1",
       {makeConstant<int128_t>(201, 1, DECIMAL(20, 5)),
        makeConstant<int128_t>(
@@ -468,7 +470,7 @@ TEST_F(DecimalArithmeticTest, decimalDivTest) {
   // Divide long and short, returning long.
   testDecimalExpr<TypeKind::HUGEINT>(
       makeNullableLongDecimalVector(
-          {"20" + std::string(20, '0'), "5" + std::string(20, '0')},
+          {fmt::format("20{:0>20}", ""), fmt::format("5{:0>20}", "")},
           DECIMAL(38, 22)),
       "divide(c0, c1)",
       {shortFlat, longFlat});
@@ -476,7 +478,7 @@ TEST_F(DecimalArithmeticTest, decimalDivTest) {
   // Divide long and long, returning long.
   testDecimalExpr<TypeKind::HUGEINT>(
       makeNullableLongDecimalVector(
-          {"5" + std::string(18, '0'), "3" + std::string(18, '0')},
+          {fmt::format("5{:0>18}", ""), fmt::format("3{:0>18}", "")},
           DECIMAL(38, 18)),
       "divide(c0, c1)",
       {makeFlatVector<int128_t>({2500, 12000}, DECIMAL(20, 2)), longFlat});
@@ -513,7 +515,7 @@ TEST_F(DecimalArithmeticTest, decimalDivTest) {
 
   testDecimalExpr<TypeKind::HUGEINT>(
       makeNullableLongDecimalVector(
-          {"1000" + std::string(17, '0'), "500" + std::string(17, '0')},
+          {fmt::format("1000{:0>17}", ""), fmt::format("500{:0>17}", "")},
           DECIMAL(24, 20)),
       "1.00 / c0",
       {shortFlat});
@@ -521,7 +523,7 @@ TEST_F(DecimalArithmeticTest, decimalDivTest) {
   // Flat and Constant arguments.
   testDecimalExpr<TypeKind::HUGEINT>(
       makeNullableLongDecimalVector(
-          {"500" + std::string(4, '0'), "1000" + std::string(4, '0')},
+          {fmt::format("500{:0>4}", ""), fmt::format("1000{:0>4}", "")},
           DECIMAL(23, 7)),
       "c0 / 2.00",
       {shortFlat});
@@ -603,14 +605,14 @@ TEST_F(DecimalArithmeticTest, denyPrecisionLoss) {
       {makeConstant<int128_t>(500, 3, DECIMAL(20, 2)),
        makeConstant<int64_t>(1000, 3, DECIMAL(17, 3))},
       makeConstant<int128_t>(
-          HugeInt::parse("5" + std::string(18, '0')), 3, DECIMAL(38, 18)));
+          HugeInt::parse(fmt::format("5{:0>18}", "")), 3, DECIMAL(38, 18)));
   // diff < 0
   testArithmeticFunction(
       "divide" + denyPrecisionLoss,
       {makeConstant<int128_t>(500, 3, DECIMAL(20, 2)),
        makeConstant<int64_t>(1000, 3, DECIMAL(7, 3))},
       makeConstant<int128_t>(
-          HugeInt::parse("5" + std::string(10, '0')), 3, DECIMAL(31, 10)));
+          HugeInt::parse(fmt::format("5{:0>10}", "")), 3, DECIMAL(31, 10)));
 }
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

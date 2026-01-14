@@ -69,7 +69,8 @@ struct DynamicMemoryQuotaManagerOption {
 };
 
 inline std::string succinctBytesPrinter(int64_t size) {
-  return size >= 0 ? (succinctBytes(size)) : ("-" + succinctBytes(-size));
+  return size >= 0 ? (succinctBytes(size))
+                   : fmt::format("-{}", succinctBytes(-size));
 };
 
 struct DynamicMemoryQuotaManagerStatistics {

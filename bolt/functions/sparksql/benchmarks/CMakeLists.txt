@@ -46,10 +46,9 @@ target_link_libraries(
 
 add_executable(bolt_sparksql_benchmarks_regex RegexBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_regex Folly::folly ${FOLLY_BENCHMARK} bolt_process re2::re2
+  bolt_sparksql_benchmarks_regex Folly::folly ${FOLLY_BENCHMARK} $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process> re2::re2
   ${ICU_LIBRARIES}
 )
-
 add_executable(bolt_sparksql_benchmarks_split Split.cpp)
 target_link_libraries(
   bolt_sparksql_benchmarks_split bolt_functions_spark bolt_benchmark_builder bolt_vector_test_lib

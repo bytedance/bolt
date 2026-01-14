@@ -29,7 +29,17 @@
  */
 
 #include <folly/Random.h>
+
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+#endif
+
 #include <gtest/gtest.h>
+
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic pop
+#endif
 
 #include "bolt/common/base/Nulls.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"

@@ -343,7 +343,7 @@ class SelectiveColumnReader {
   inline void addValue(const T value) {
     // @lint-ignore-every HOWTOEVEN ConstantArgumentPassByValue
     static_assert(
-        std::is_pod_v<T>,
+        std::is_standard_layout_v<T> && std::is_trivial_v<T>,
         "General case of addValue is only for primitive types");
     BOLT_DCHECK_LE(
         rawValues_ && (numValues_ + 1) * sizeof(T), values_->capacity());

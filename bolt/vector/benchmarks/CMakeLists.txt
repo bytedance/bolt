@@ -35,9 +35,8 @@ target_link_libraries(bolt_vector_hash_all_benchmark GTest::gtest)
 
 add_executable(bolt_vector_selectivity_vector_benchmark SelectivityVectorBenchmark.cpp)
 
-target_link_libraries(
-  bolt_vector_selectivity_vector_benchmark bolt_vector Folly::folly ${FOLLY_BENCHMARK} bolt_process
-)
+target_link_libraries(bolt_vector_selectivity_vector_benchmark bolt_vector
+                      Folly::folly ${FOLLY_BENCHMARK} $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process>)
 
 add_executable(copy_benchmark CopyBenchmark.cpp)
 

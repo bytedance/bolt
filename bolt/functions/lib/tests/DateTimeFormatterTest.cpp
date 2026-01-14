@@ -128,7 +128,6 @@ class DateTimeFormatterTest : public testing::Test {
 
 TEST_F(DateTimeFormatterTest, fixedLengthTokenBuilder) {
   DateTimeFormatterBuilder builder(100);
-  std::string expectedLiterals;
   std::vector<DateTimeToken> expectedTokens;
 
   // Test fixed length tokens
@@ -137,10 +136,9 @@ TEST_F(DateTimeFormatterTest, fixedLengthTokenBuilder) {
   auto formatter =
       builder.appendHalfDayOfDay().setType(DateTimeFormatterType::JODA).build();
 
-  expectedLiterals = "-";
   std::string_view actualLiterals(
       formatter->literalBuf().get(), formatter->bufSize());
-  EXPECT_EQ(actualLiterals, expectedLiterals);
+  EXPECT_EQ(actualLiterals, "-");
   expectedTokens = {
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::ERA, 2}),
       DateTimeToken("-"),
@@ -151,7 +149,6 @@ TEST_F(DateTimeFormatterTest, fixedLengthTokenBuilder) {
 TEST_F(DateTimeFormatterTest, variableLengthTokenBuilder) {
   // Test variable length tokens
   DateTimeFormatterBuilder builder(100);
-  std::string expectedLiterals;
   std::vector<DateTimeToken> expectedTokens;
 
   auto formatter = builder.appendCenturyOfEra(3)
@@ -184,11 +181,9 @@ TEST_F(DateTimeFormatterTest, variableLengthTokenBuilder) {
                        .appendTimeZoneOffsetId(3)
                        .setType(DateTimeFormatterType::JODA)
                        .build();
-
-  expectedLiterals = "-///-00------///";
   auto actualLiterals =
       std::string_view(formatter->literalBuf().get(), formatter->bufSize());
-  EXPECT_EQ(actualLiterals, expectedLiterals);
+  EXPECT_EQ(actualLiterals, "-///-00------///");
   expectedTokens = {
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::CENTURY_OF_ERA, 3}),
       DateTimeToken("-"),

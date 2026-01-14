@@ -703,13 +703,17 @@ class AsyncDataCache : public memory::Cache {
  public:
   AsyncDataCache(
       memory::MemoryAllocator* allocator,
-      std::unique_ptr<SsdCache> ssdCache = nullptr);
+      std::unique_ptr<SsdCache> ssdCache);
+  AsyncDataCache(memory::MemoryAllocator* allocator);
 
   ~AsyncDataCache() override;
 
   static std::shared_ptr<AsyncDataCache> create(
       memory::MemoryAllocator* allocator,
-      std::unique_ptr<SsdCache> ssdCache = nullptr);
+      std::unique_ptr<SsdCache> ssdCache);
+
+  static std::shared_ptr<AsyncDataCache> create(
+      memory::MemoryAllocator* allocator);
 
   static AsyncDataCache* getInstance();
 

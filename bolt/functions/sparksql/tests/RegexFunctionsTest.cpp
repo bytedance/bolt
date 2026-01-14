@@ -549,11 +549,10 @@ TEST_F(RegexFunctionsTest, regexpReplaceCacheLimitTest) {
   std::vector<std::string> expectedOutputs;
 
   for (int i = 0; i <= kMaxCompiledRegexes; ++i) {
-    patterns.push_back("\\d" + std::to_string(i) + "-\\d" + std::to_string(i));
-    strings.push_back("1" + std::to_string(i) + "-2" + std::to_string(i));
-    replaces.push_back("X" + std::to_string(i) + "-Y" + std::to_string(i));
-    expectedOutputs.push_back(
-        "X" + std::to_string(i) + "-Y" + std::to_string(i));
+    patterns.push_back(fmt::format("\\d{}-\\d{}", i, i));
+    strings.push_back(fmt::format("1{}-2{}", i, i));
+    replaces.push_back(fmt::format("X{}-Y{}", i, i));
+    expectedOutputs.push_back(fmt::format("X{}-Y{}", i, i));
   }
 
   EXPECT_THROW(
@@ -568,11 +567,10 @@ TEST_F(RegexFunctionsTest, regexpReplaceCacheMissLimit) {
   std::vector<int32_t> positions;
 
   for (int i = 0; i <= kMaxCompiledRegexes - 1; ++i) {
-    patterns.push_back("\\d" + std::to_string(i) + "-\\d" + std::to_string(i));
-    strings.push_back("1" + std::to_string(i) + "-2" + std::to_string(i));
-    replaces.push_back("X" + std::to_string(i) + "-Y" + std::to_string(i));
-    expectedOutputs.push_back(
-        "X" + std::to_string(i) + "-Y" + std::to_string(i));
+    patterns.push_back(fmt::format("\\d{}-\\d{}", i, i));
+    strings.push_back(fmt::format("1{}-2{}", i, i));
+    replaces.push_back(fmt::format("X{}-Y{}", i, i));
+    expectedOutputs.push_back(fmt::format("X{}-Y{}", i, i));
     positions.push_back(1);
   }
 

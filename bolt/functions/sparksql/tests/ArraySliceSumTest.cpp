@@ -44,7 +44,7 @@ class ArraySliceSumTest : public SparkFunctionBaseTest {
       vecs.emplace_back(start);
       sql += "c1, ";
     } else {
-      sql += "'" + std::to_string(start) + "'::INTEGER, ";
+      sql += fmt::format("'{}'::INTEGER, ", start);
     }
 
     if constexpr (!std::is_same_v<LengthType, int32_t>) {
@@ -55,7 +55,7 @@ class ArraySliceSumTest : public SparkFunctionBaseTest {
         sql += "c1)";
       }
     } else {
-      sql += "'" + std::to_string(length) + "'::INTEGER)";
+      sql += fmt::format("'{}'::INTEGER)", length);
     }
     auto inputRows = makeRowVector(vecs);
     if (expectThrow) {

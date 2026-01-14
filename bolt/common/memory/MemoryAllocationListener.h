@@ -143,3 +143,29 @@ class MemoryAllocationListener {
 };
 
 } // namespace bytedance::bolt::memory
+
+template <>
+struct fmt::formatter<
+    bytedance::bolt::memory::MemoryAllocationListener::ListenMode>
+    : fmt::formatter<std::string_view> {
+  auto format(
+      bytedance::bolt::memory::MemoryAllocationListener::ListenMode c,
+      format_context& ctx) const {
+    switch (c) {
+      case bytedance::bolt::memory::MemoryAllocationListener::ListenMode::
+          kDisable:
+        return fmt::formatter<std::string_view>::format("kDisable", ctx);
+      case bytedance::bolt::memory::MemoryAllocationListener::ListenMode::
+          kOnlySingle:
+        return fmt::formatter<std::string_view>::format("kOnlySingle", ctx);
+      case bytedance::bolt::memory::MemoryAllocationListener::ListenMode::
+          kOnlyAccumulative:
+        return fmt::formatter<std::string_view>::format(
+            "kOnlyAccumulative", ctx);
+      case bytedance::bolt::memory::MemoryAllocationListener::ListenMode::kBoth:
+        return fmt::formatter<std::string_view>::format("kBoth", ctx);
+      default:
+        return fmt::format_to(ctx.out(), "unknown[{}]", static_cast<int>(c));
+    }
+  }
+};

@@ -86,11 +86,10 @@ uint64_t toCapacity(const std::string& from, CapacityUnit to) {
   if (!RE2::FullMatch(from, kPattern, &value, &unit)) {
     BOLT_USER_FAIL("Invalid capacity string '{}'", from);
   }
-  if (unit.empty()) {
-    unit = "b";
-  }
+  std::string actualUnit = unit.empty() ? "b" : unit;
+
   return value *
-      (toBytesPerCapacityUnit(valueOfCapacityUnit(unit)) /
+      (toBytesPerCapacityUnit(valueOfCapacityUnit(actualUnit)) /
        toBytesPerCapacityUnit(to));
 }
 

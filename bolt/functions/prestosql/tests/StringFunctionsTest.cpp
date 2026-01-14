@@ -212,15 +212,12 @@ class StringFunctionsTest : public FunctionBaseTest {
     }
 
     auto buildConcatQuery = [&]() {
-      std::string output = "concat(";
+      std::vector<std::string> args;
+      args.reserve(argsCount);
       for (int i = 0; i < argsCount; i++) {
-        if (i != 0) {
-          output += ",";
-        }
-        output += "c" + std::to_string(i);
+        args.emplace_back(fmt::format("c{}", i));
       }
-      output += ")";
-      return output;
+      return fmt::format("concat({})", fmt::join(args, ","));
     };
 
     // Evaluate 'concat' expression and verify no excessive memory allocation.

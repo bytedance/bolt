@@ -189,7 +189,7 @@ class Subfield {
     }
 
     std::string toString() const override {
-      return "[" + std::to_string(index_) + "]";
+      return fmt::format("[{}]", index_);
     }
 
     bool isSubscript() const override {

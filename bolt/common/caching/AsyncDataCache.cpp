@@ -645,6 +645,9 @@ AsyncDataCache::AsyncDataCache(
   }
 }
 
+AsyncDataCache::AsyncDataCache(memory::MemoryAllocator* allocator)
+    : AsyncDataCache(allocator, nullptr) {}
+
 AsyncDataCache::~AsyncDataCache() {}
 
 // static
@@ -654,6 +657,11 @@ std::shared_ptr<AsyncDataCache> AsyncDataCache::create(
   auto cache = std::make_shared<AsyncDataCache>(allocator, std::move(ssdCache));
   allocator->registerCache(cache);
   return cache;
+}
+
+std::shared_ptr<AsyncDataCache> AsyncDataCache::create(
+    memory::MemoryAllocator* allocator) {
+  return AsyncDataCache::create(allocator, nullptr);
 }
 
 // static

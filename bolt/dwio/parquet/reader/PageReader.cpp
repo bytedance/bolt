@@ -845,7 +845,50 @@ void PageReader::decodeRepDefsFromBuffer() {
     if (unConsumedNullWords > 0) {
       uint64_t* rawData = leafNulls_.data();
       size_t copyBytes = unConsumedNullWords * sizeof(uint64_t);
+
+      /*
+       * Intel FSRM Bug Detection Macro
+       *
+       * Background:
+       * Intel CPUs with FSRM (Fast Short REP MOVSB) feature have a hardware bug
+       * that causes memory corruption when source and destination pointers in
+       * memcpy/memmove have specific offset ranges: (0,63] or (4GB, 4GB+63].
+       *
+       * Affected: Ice Lake 8336C, Sapphire Rapids (SPR), and all FSRM-enabled
+       * CPUs Fixed in: glibc 2.33+
+       * see
+       * https://lore.kernel.org/all/20211101044955.2295495-1-goldstein.w.n@gmail.com/
+       */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GLIBC__) && \
+    (__GLIBC__ * 100 + __GLIBC_MINOR__ < 233)
+
+      // Suppress false positive -Wrestrict warnings from GCC 12+
+      // The memcpy calls below are intentionally designed to avoid overlap
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wrestrict"
+#endif
+      if (unConsumedNullWords < consumedWords) {
+        memcpy(rawData, rawData + consumedWords, copyBytes);
+      } else {
+        raw_vector<uint64_t> tmpBuffer;
+        tmpBuffer.resize(unConsumedNullWords);
+        uint64_t* tmpDest = tmpBuffer.data();
+        memcpy(tmpDest, rawData + consumedWords, copyBytes);
+        memcpy(rawData, tmpDest, copyBytes);
+      }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#else
       memmove(rawData, rawData + consumedWords, copyBytes);
+#endif
       leafNulls_.resize(unConsumedNullWords);
       leafNullsSize_ -= consumedWords * WordBits;
       erasedLeafNullWords_ += consumedWords;

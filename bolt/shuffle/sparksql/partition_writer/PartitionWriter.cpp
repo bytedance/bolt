@@ -17,7 +17,6 @@
 #include "bolt/shuffle/sparksql/partition_writer/PartitionWriter.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/base/FmtBoltFormatters.h"
 #include "bolt/shuffle/sparksql/partition_writer/LocalPartitionWriter.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/CelebornPartitionWriter.h"
 

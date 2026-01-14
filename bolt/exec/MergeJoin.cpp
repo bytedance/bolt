@@ -166,7 +166,7 @@ void MergeJoin::initializeFilter(
     names.emplace_back(inputType->nameOf(channel));
     types.emplace_back(inputType->childAt(channel));
 
-    for (const auto [inputChannel, outputChannel] : outputs) {
+    for (const auto& [inputChannel, outputChannel] : outputs) {
       if (inputChannel == channel) {
         filterInputToOutputChannel_.emplace(filterChannel++, outputChannel);
         return;

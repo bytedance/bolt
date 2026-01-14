@@ -1245,10 +1245,12 @@ std::string MemoryPoolImpl::toString(bool detail) const {
     result = toStringLocked();
   }
   if (detail) {
-    result += "\n" + treeMemoryUsage();
+    result += "\n";
+    result += treeMemoryUsage();
   }
   if (FOLLY_UNLIKELY(debugEnabled())) {
-    result += "\n" + dumpRecordsDbg();
+    result += "\n";
+    result += dumpRecordsDbg();
   }
   return result;
 }

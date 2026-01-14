@@ -33,6 +33,7 @@
 #include <fmt/format.h>
 #include <folly/compression/Compression.h>
 #include <string>
+
 namespace bytedance::bolt::common {
 
 enum CompressionKind {
@@ -66,7 +67,7 @@ struct fmt::formatter<bytedance::bolt::common::CompressionKind>
     : fmt::formatter<std::string> {
   auto format(
       const bytedance::bolt::common::CompressionKind& s,
-      format_context& ctx) {
+      format_context& ctx) const {
     return formatter<std::string>::format(
         bytedance::bolt::common::compressionKindToString(s), ctx);
   }

@@ -42,6 +42,21 @@ using namespace bytedance::bolt::functions::stringImpl;
 using namespace bytedance::bolt::functions::stringCore;
 using namespace bytedance::bolt::functions::javaStyle;
 
+namespace {
+template <typename T, std::size_t N>
+inline std::string u8str(const T (&str)[N]) {
+  static_assert(sizeof(T) == 1, "Type must be 1 byte (char or char8_t)");
+  return std::string(reinterpret_cast<const char*>(str), N - 1);
+}
+
+template <typename T, std::size_t N>
+inline std::string_view u8sv(const T (&str)[N]) {
+  static_assert(sizeof(T) == 1, "Type must be 1 byte (char or char8_t)");
+  return std::string_view(reinterpret_cast<const char*>(str), N - 1);
+}
+
+} // namespace
+
 class StringImplTest : public testing::Test {
  public:
   std::vector<std::tuple<std::string, std::string>> getUpperAsciiTestData() {
@@ -868,43 +883,43 @@ TEST_F(StringImplTest, findNthInstanceCharIndexFromStart) {
 
   // Test searching for a Unicode substring starting in the middle of a
   // multibyte character
-  std::string_view strUnicodeMidChar = u8"Test 字符串 with 中文";
-  std::string_view subStrUnicodeMidChar = u8"中文";
+  std::string_view strUnicodeMidChar = u8sv(u8"Test 字符串 with 中文");
+  std::string_view subStrUnicodeMidChar = u8sv(u8"中文");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(
           strUnicodeMidChar, subStrUnicodeMidChar, 1),
       14);
 
-  std::string_view subStrUnicodeMidChar1 = u8"字符串";
+  std::string_view subStrUnicodeMidChar1 = u8sv(u8"字符串");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(
           strUnicodeMidChar, subStrUnicodeMidChar1, 1),
       5);
 
   // Test with a longer Unicode substring
-  std::string_view longSubStrUnicode = u8"字符串 with 中文";
+  std::string_view longSubStrUnicode = u8sv(u8"字符串 with 中文");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(
           strUnicodeMidChar, longSubStrUnicode, 1),
       5);
 
   std::string_view longSubStrUnicode1 =
-      u8"Test 字符串 with 中文 中文 中文 中文";
+      u8sv(u8"Test 字符串 with 中文 中文 中文 中文");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(
           strUnicodeMidChar, longSubStrUnicode1, 1),
       -1);
 
   // Test with a Unicode substring that is not found
-  std::string_view nonExistingSubStrUnicode = u8"不存在";
+  std::string_view nonExistingSubStrUnicode = u8sv(u8"不存在");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(
           strUnicodeMidChar, nonExistingSubStrUnicode, 1),
       -1);
 
   // Test with Unicode string containing same character with different case
-  std::string_view caseStrUnicode = u8"Test 测试 TEST 测试";
-  std::string_view caseSubStrUnicode = u8"测试";
+  std::string_view caseStrUnicode = u8sv(u8"Test 测试 TEST 测试");
+  std::string_view caseSubStrUnicode = u8sv(u8"测试");
   EXPECT_EQ(
       findNthInstanceCharIndexFromStart(caseStrUnicode, caseSubStrUnicode, 2),
       13);
@@ -922,37 +937,37 @@ TEST_F(StringImplTest, AsciiOnlyInput) {
 
 TEST_F(StringImplTest, BMPCharactersOnly) {
   std::string input =
-      u8"Hello, 世界!"; // Assuming the file is encoded in UTF-8.
+      u8str(u8"Hello, 世界!"); // Assuming the file is encoded in UTF-8.
   EXPECT_EQ(replaceNonBMPWithUnicodeSequence(input), "Hello, 世界!");
 }
 
 TEST_F(StringImplTest, SingleNonBMPCharacter) {
-  std::string input = u8"😊"; // U+1F60A
+  std::string input = u8str(u8"😊"); // U+1F60A
   EXPECT_EQ(replaceNonBMPWithUnicodeSequence(input), "\\uD83D\\uDE0A");
 }
 
 TEST_F(StringImplTest, MultipleNonBMPCharacters) {
-  std::string input = u8"🌍🚀🌕"; // U+1F30D U+1F680 U+1F315
+  std::string input = u8str(u8"🌍🚀🌕"); // U+1F30D U+1F680 U+1F315
   EXPECT_EQ(
       replaceNonBMPWithUnicodeSequence(input),
       "\\uD83C\\uDF0D\\uD83D\\uDE80\\uD83C\\uDF15");
 }
 
 TEST_F(StringImplTest, NonBMPCharacterAtStart) {
-  std::string input = u8"🎉Party!";
+  std::string input = u8str(u8"🎉Party!");
   EXPECT_EQ(replaceNonBMPWithUnicodeSequence(input), "\\uD83C\\uDF89Party!");
 }
 
 TEST_F(StringImplTest, NonBMPCharacterInMiddle) {
-  std::string input = u8"Party🎉Time!";
+  std::string input = u8str(u8"Party🎉Time!");
   EXPECT_EQ(
       replaceNonBMPWithUnicodeSequence(input), "Party\\uD83C\\uDF89Time!");
 }
 
 TEST_F(StringImplTest, NonBMPCharacterAtEnd) {
-  std::string input = u8"Party🎉";
+  std::string input = u8str(u8"Party🎉");
   EXPECT_EQ(replaceNonBMPWithUnicodeSequence(input), "Party\\uD83C\\uDF89");
-  std::string input2 = u8"玫瑰🌹用雪做的一支玫瑰花 𠕇";
+  std::string input2 = u8str(u8"玫瑰🌹用雪做的一支玫瑰花 𠕇");
   EXPECT_EQ(
       replaceNonBMPWithUnicodeSequence(input2),
       "玫瑰\\uD83C\\uDF39用雪做的一支玫瑰花 \\uD841\\uDD47");
@@ -960,7 +975,7 @@ TEST_F(StringImplTest, NonBMPCharacterAtEnd) {
 
 TEST_F(StringImplTest, LargeInput) {
   std::string largeInput(10000, 'a'); // 10000个 'a' 字符
-  largeInput += u8"😊"; // 在末尾追加一个非BMP字符
+  largeInput += u8str(u8"😊"); // 在末尾追加一个非BMP字符
   std::string expectedOutput = largeInput.substr(0, 10000) + "\\uD83D\\uDE0A";
   EXPECT_EQ(replaceNonBMPWithUnicodeSequence(largeInput), expectedOutput);
 }
@@ -1081,8 +1096,9 @@ TEST_F(StringImplTest, StringWithRegExMetacharacters) {
 // Mixed Chinese, English, and emoji characters
 TEST_F(StringImplTest, StringWithMixedCharacters) {
   EXPECT_EQ(
-      javaStyleSplit(u8"hello,你好,😊", ",", -1),
-      std::vector<std::string_view>({u8"hello", u8"你好", u8"😊"}));
+      javaStyleSplit(u8sv(u8"hello,你好,😊"), ",", -1),
+      std::vector<std::string_view>(
+          {u8sv(u8"hello"), u8sv(u8"你好"), u8sv(u8"😊")}));
 }
 
 // Delimiter is a complex regex pattern
@@ -1105,8 +1121,8 @@ TEST_F(StringImplTest, StringWithEscapeSequences) {
 // UTF-8 encoded multibyte characters
 TEST_F(StringImplTest, StringWithUTF8MultibyteCharacters) {
   EXPECT_EQ(
-      javaStyleSplit(u8"α,β,γ", ",", -1),
-      std::vector<std::string_view>({u8"α", u8"β", u8"γ"}));
+      javaStyleSplit(u8sv(u8"α,β,γ"), ",", -1),
+      std::vector<std::string_view>({u8sv(u8"α"), u8sv(u8"β"), u8sv(u8"γ")}));
 }
 
 // Newline character as delimiter
@@ -1126,8 +1142,8 @@ TEST_F(StringImplTest, StringWithWhitespacesOnly) {
 // String and delimiter are non-ASCII characters
 TEST_F(StringImplTest, StringAndDelimiterNonASCII) {
   EXPECT_EQ(
-      javaStyleSplit(u8"你好✓世界✓", u8"✓", -1),
-      std::vector<std::string_view>({u8"你好", u8"世界", ""}));
+      javaStyleSplit(u8sv(u8"你好✓世界✓"), u8sv(u8"✓"), -1),
+      std::vector<std::string_view>({u8sv(u8"你好"), u8sv(u8"世界"), ""}));
 }
 
 // Delimiter is a string, not a single character

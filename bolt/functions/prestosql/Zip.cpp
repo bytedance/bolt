@@ -265,8 +265,8 @@ class ZipFunction : public exec::VectorFunction {
         builder.typeVariable(elementTypeNames[j]);
         builder.argumentType(fmt::format("array({})", elementTypeNames[j]));
       }
-      auto returnType = boost::algorithm::join(allTypeVars, ",");
-      builder.returnType(fmt::format("array(row({}))", returnType));
+      builder.returnType(
+          fmt::format("array(row({}))", fmt::join(allTypeVars, ",")));
       signatures.emplace_back(builder.build());
     }
 

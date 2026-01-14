@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
   Semaphore sem(0);
   std::vector<CopyCallable> ops;
   ops.resize(FLAGS_threads);
-  volatile uint64_t totalSum = 0;
+  uint64_t totalSum = 0;
   uint64_t totalUsec = 0;
   for (auto repeat = 0; repeat < FLAGS_repeats; ++repeat) {
     // Read once through 'other' to clear cache effects.
@@ -112,6 +112,9 @@ int main(int argc, char** argv) {
     }
     totalUsec += usec;
   }
+  // Prevent compiler from optimizing away the cache-warming sum() calls
+  folly::doNotOptimizeAway(totalSum);
+
   std::cout << fmt::format(
                    "{} repeats {} bytes {} threads: {} usec {} GB/s",
                    FLAGS_repeats,

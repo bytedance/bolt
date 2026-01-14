@@ -35,6 +35,7 @@
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include "bolt/common/compression/Compression.h"
+
 namespace bytedance::bolt::common {
 
 #define BOLT_SPILL_LIMIT_EXCEEDED(errorMessage)                     \
@@ -67,8 +68,6 @@ enum class RowBasedSpillMode {
   RAW, // row based spill with raw data
   COMPRESSION // row based spill with compression
 };
-
-auto format_as(RowBasedSpillMode m);
 
 RowBasedSpillMode strToRowBasedSpillMode(const std::string& str);
 
@@ -202,3 +201,21 @@ struct SpillConfig {
   size_t aggBypassHTEqualNum{0};
 };
 } // namespace bytedance::bolt::common
+
+template <>
+struct fmt::formatter<bytedance::bolt::common::RowBasedSpillMode>
+    : fmt::formatter<std::string_view> {
+  auto format(bytedance::bolt::common::RowBasedSpillMode c, format_context& ctx)
+      const {
+    switch (c) {
+      case bytedance::bolt::common::RowBasedSpillMode::DISABLE:
+        return fmt::formatter<std::string_view>::format("DISABLE", ctx);
+      case bytedance::bolt::common::RowBasedSpillMode::RAW:
+        return fmt::formatter<std::string_view>::format("RAW", ctx);
+      case bytedance::bolt::common::RowBasedSpillMode::COMPRESSION:
+        return fmt::formatter<std::string_view>::format("COMPRESSION", ctx);
+      default:
+        return fmt::format_to(ctx.out(), "unknown[{}]", static_cast<int>(c));
+    }
+  }
+};

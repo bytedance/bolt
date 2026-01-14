@@ -46,6 +46,10 @@ class InputTypedExpr : public ITypedExpr {
     return casted != nullptr;
   }
 
+  bool operator==(const InputTypedExpr& /*other*/) const {
+    return true;
+  }
+
   std::string toString() const override {
     return "ROW";
   }
@@ -593,10 +597,14 @@ class LambdaTypedExpr : public ITypedExpr {
     if (!casted) {
       return false;
     }
-    if (*casted->type() != *this->type()) {
+    return *this == *casted;
+  }
+
+  bool operator==(const LambdaTypedExpr& other) const {
+    if (*other.type() != *this->type()) {
       return false;
     }
-    return *signature_ == *casted->signature_ && *body_ == *casted->body_;
+    return *signature_ == *other.signature_ && *body_ == *other.body_;
   }
 
   folly::dynamic serialize() const override;
@@ -657,18 +665,29 @@ class CastTypedExpr : public ITypedExpr {
     return bits::hashMix(kBaseHash, std::hash<bool>()(nullOnFailure_));
   }
 
-  bool operator==(const ITypedExpr& other) const override {
-    const auto* otherCast = dynamic_cast<const CastTypedExpr*>(&other);
-    if (!otherCast) {
+  bool operator==(const CastTypedExpr& other) const {
+    if (nullOnFailure_ != other.nullOnFailure()) {
       return false;
     }
-    if (inputs().empty()) {
-      return type() == otherCast->type() && otherCast->inputs().empty() &&
-          nullOnFailure_ == otherCast->nullOnFailure();
+    if (inputs().size() != other.inputs().size()) {
+      return false;
     }
-    return *type() == *otherCast->type() &&
-        *inputs()[0] == *otherCast->inputs()[0] &&
-        nullOnFailure_ == otherCast->nullOnFailure();
+    if (*type() != *other.type()) {
+      return false;
+    }
+    if (!inputs().empty()) {
+      return *inputs()[0] == *other.inputs()[0];
+    }
+    return true;
+  }
+
+  bool operator==(const ITypedExpr& other) const override {
+    const auto* casted = dynamic_cast<const CastTypedExpr*>(&other);
+    if (!casted) {
+      return false;
+    }
+
+    return *this == *casted;
   }
 
   bool nullOnFailure() const {
