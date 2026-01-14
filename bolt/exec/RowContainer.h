@@ -12,9 +12,9 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
- * --------------------------------------------------------------------------
- * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ */
+/* --------------------------------------------------------------------------
+ * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
  *
  * This file has been modified by ByteDance Ltd. and/or its affiliates on
@@ -2010,6 +2010,28 @@ class HybridContainer {
     return allContainers_.size();
   }
 
+  // Fast path check for single container - avoids sorting overhead.
+  // In single container case, all rows come from the same container.
+  bool isSingleContainer() const {
+    return allContainers_.size() == 1;
+  }
+
+  // Controls whether to reorder rows by containerId during extraction.
+  // Can be disabled for testing to get deterministic output order.
+  void setReorderEnabled(bool enabled) {
+    reorderEnabled_ = enabled;
+  }
+
+  bool isReorderEnabled() const {
+    return reorderEnabled_;
+  }
+
+  // Returns whether sorting should be used for extraction.
+  // Sorting is used when: reorder is enabled AND there are multiple containers.
+  bool shouldUseSorting() const {
+    return reorderEnabled_ && !isSingleContainer();
+  }
+
   // Reorder rows and rowIds by containerId to improve locality for extraction.
   // Returns reordered rows, rowIds, and optionally rowNumbers when provided.
   struct SortedRows {
@@ -2060,7 +2082,10 @@ class HybridContainer {
 
   // Coalesce all payload batches into a single batch to improve locality.
   void coalesceBatches() {
-    if (totalBatches_ <= 1 || payloadTypes_.empty()) {
+    // Only skip if no payload columns or no batches to coalesce.
+    // Always flatten even for single batch, as input may be dictionary-encoded
+    // or other non-flat encodings. Extraction expects FlatVectors.
+    if (payloadTypes_.empty() || owningInputs_.empty()) {
       return;
     }
 
@@ -2101,6 +2126,18 @@ class HybridContainer {
   }  
 
  private:
+  // Get the single container's coalesced data (only valid when isSingleContainer()).
+  // Validates that the single container is actually this container.
+  RowVector* getSingleContainerData() const {
+    BOLT_DCHECK_EQ(allContainers_.size(), 1);
+    BOLT_DCHECK_EQ(owningInputs_.size(), 1);
+    BOLT_DCHECK_NOT_NULL(owningInputs_[0]);
+    auto it = allContainers_.begin();
+    // Validate that the single container is self
+    BOLT_DCHECK_EQ(it->first, id_, "Single container ID mismatch with self ID");
+    BOLT_DCHECK(it->second == this, "Single container is not self");
+    return owningInputs_[0].get();
+  }
 
   template <TypeKind Kind>
   void extractPayloadTyped(
@@ -2157,7 +2194,31 @@ class HybridContainer {
     using T = typename KindToFlatVector<Kind>::HashRowType;
     auto flatResult = result->as<FlatVector<T>>();
 
-    // null-aware extract
+    // Fast path for single container (spilling, sort) - avoids map lookups
+    if (isSingleContainer()) {
+      if (isNullable_[columnIndex]) {
+        extractPayloadWithNullsSingleContainer<T, useRowNumbers>(
+            rows,
+            rowNumbers,
+            numRows,
+            columnIndex,
+            resultOffset,
+            flatResult,
+            outputRowIds);
+      } else {
+        extractPayloadNoNullsSingleContainer<T, useRowNumbers>(
+            rows,
+            rowNumbers,
+            numRows,
+            columnIndex,
+            resultOffset,
+            flatResult,
+            outputRowIds);
+      }
+      return;
+    }
+
+    // Multi-container path (hash join after table merge)
     if (isNullable_[columnIndex]) {
       extractPayloadWithNulls<T, useRowNumbers>(
           rows,
@@ -2213,6 +2274,209 @@ class HybridContainer {
       result->copy(source, resultIndex, rec.rowId_, 1);
     }
   }
+
+  // ========== Single-container fast path implementations ==========
+  // These avoid map lookups and container ID checks in hot loops.
+  // Uses 4-way unrolled prefetch for best performance.
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadWithNullsSingleContainer(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Single container - direct access without map lookup
+    auto* flatChild = getSingleContainerData()
+                          ->childAt(columnIndex)
+                          ->template as<FlatVector<T>>();
+    BOLT_CHECK_NOT_NULL(flatChild);
+    const T* rawValues = flatChild->rawValues();
+    const uint64_t* rawNulls = flatChild->rawNulls();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    int32_t i = 0;
+
+    // ---- Main loop: process 4 rows per iteration ----
+    for (; i + 3 < numRows; i += 4) {
+      // ---- Prefetch next 4 records at distance ----
+      const int32_t p = i + kPrefetchDist;
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        __builtin_prefetch(rawValues + rowIdPtr[p].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 1].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 2].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 3].rowId_, 0, 1);
+      }
+
+      // ---- Process 4 rows ----
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        const auto rid = rowIdPtr[idx].rowId_;
+        if (rawNulls != nullptr && bits::isBitNull(rawNulls, rid)) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        bits::setNull(nulls, resultIndex, false);
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, rawValues[rid]);
+        } else {
+          values[resultIndex] = rawValues[rid];
+        }
+      }
+    }
+
+    // ---- Tail loop ----
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto rid = rowIdPtr[i].rowId_;
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, rid)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, rawValues[rid]);
+      } else {
+        values[resultIndex] = rawValues[rid];
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadNoNullsSingleContainer(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Single container - direct access without map lookup
+    auto* flatChild = getSingleContainerData()
+                          ->childAt(columnIndex)
+                          ->template as<FlatVector<T>>();
+    BOLT_CHECK_NOT_NULL(flatChild);
+    const T* rawValues = flatChild->rawValues();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    int32_t i = 0;
+
+    // ---- Main loop: process 4 rows per iteration ----
+    for (; i + 3 < numRows; i += 4) {
+      // ---- Prefetch next 4 records at distance ----
+      const int32_t p = i + kPrefetchDist;
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        __builtin_prefetch(rawValues + rowIdPtr[p].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 1].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 2].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 3].rowId_, 0, 1);
+      }
+
+      // ---- Process 4 rows ----
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          result->setNull(resultIndex, true);
+          continue;
+        }
+
+        result->setNull(resultIndex, false);
+        const auto rid = rowIdPtr[idx].rowId_;
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, rawValues[rid]);
+        } else {
+          values[resultIndex] = rawValues[rid];
+        }
+      }
+    }
+
+    // ---- Tail loop ----
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto rid = rowIdPtr[i].rowId_;
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, rawValues[rid]);
+      } else {
+        values[resultIndex] = rawValues[rid];
+      }
+    }
+  }
+
+  // ========== End single-container fast path implementations ==========
 
   template <typename T, bool useRowNumbers>
   void extractPayloadWithNulls(
@@ -2595,6 +2859,10 @@ class HybridContainer {
   uint8_t id_{0};
   std::unordered_map<uint8_t, HybridContainer*> allContainers_;
   uint8_t maxContainerId_{0};
+
+  // Controls whether to reorder rows by containerId during extraction.
+  // Default true for better cache locality. Can be disabled for testing.
+  bool reorderEnabled_{true};
 };
 
 template <>

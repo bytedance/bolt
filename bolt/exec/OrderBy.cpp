@@ -81,7 +81,6 @@ OrderBy::OrderBy(
   }
   auto hybridSortEnabled =
       driverCtx->queryConfig().hybridSortEnabled();
-  hybridSortEnabled = true;
   sortBuffer_ = std::make_unique<SortBuffer>(
       outputType_,
       sortColumnIndices,

@@ -65,9 +65,8 @@ SortBuffer::SortBuffer(
   
   // Validate that hybrid sort is not used with row-based spilling
   if (hybridSortEnabled_ && spillConfig_ != nullptr) {
-    BOLT_CHECK_EQ(
-        spillConfig_->rowBasedSpillMode,
-        common::RowBasedSpillMode::DISABLE,
+    BOLT_CHECK(
+        spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE,
         "Hybrid sort is not compatible with row-based spilling");
   }
 
@@ -134,7 +133,6 @@ SortBuffer::SortBuffer(
   }
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
-  LOG(ERROR) << "Hybrid Sort " << (hybridSortEnabled_ ? "Enabled" : "Disabled");
 }
 
 SortBuffer::~SortBuffer() {
@@ -460,10 +458,6 @@ void SortBuffer::spillInput() {
   if (spiller_ == nullptr) {
     BOLT_CHECK(!noMoreInput_);
     const auto sortingKeys = SpillState::makeSortingKeys(sortCompareFlags_);
-    // Coalesce batches in hybrid mode to simplify extraction during spill
-    if (hybridSortEnabled_ && hybridData_ != nullptr) {
-      hybridData_->coalesceBatches();
-    }
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kOrderByInput,
         data_.get(),
@@ -478,6 +472,12 @@ void SortBuffer::spillInput() {
     if (sorter_.getSortAlgo() != SortAlgo::kAuto) {
       spiller_->setSortAlgo(sorter_.getSortAlgo());
     }
+  }
+  // Coalesce batches BEFORE every spill, not just the first one.
+  // After each spill, hybridData_->clear() is called which clears owningInputs_.
+  // New data added via addInput() needs to be coalesced before the next spill.
+  if (hybridSortEnabled_ && hybridData_ != nullptr) {
+    hybridData_->coalesceBatches();
   }
   spiller_->spill();
   LOG(INFO) << (operatorCtx_ ? operatorCtx_->toString() : "SortBuffer")

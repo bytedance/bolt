@@ -87,20 +87,64 @@ void extractColumns(
     const std::vector<TypePtr>& resultTypes,
     std::vector<VectorPtr>& resultVectors) {
   BOLT_CHECK_EQ(resultTypes.size(), resultVectors.size())
-  for (auto projection : projections) {
-    const auto resultChannel = projection.outputChannel;
-    BOLT_CHECK_LT(resultChannel, resultVectors.size())
-
-    auto& child = resultVectors[resultChannel];
-    // TODO: Consider reuse of complex types.
-    if (!child || !BaseVector::isVectorWritable(child) ||
-        !child->isFlatEncoding()) {
-      child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+  auto hybridData = table->hybridData();
+  if (hybridData != nullptr) {
+    std::vector<HybridRowId> outputRowIds;
+    outputRowIds.resize(rows.size());
+    hybridData->getRowIds(rows.data(), rows.size(), outputRowIds);
+    
+    // For single container, extract directly without sorting overhead.
+    // For multiple containers, sort by containerId for better cache locality.
+    // Note: sorting is safe here because the output order of hash join results
+    // does not need to match any specific order (SQL doesn't guarantee order).
+    // Sorting can be disabled via query config for deterministic testing.
+    const bool useSorting = hybridData->shouldUseSorting();
+    
+    const char* const* extractRows = rows.data();
+    std::vector<HybridRowId>* extractRowIds = &outputRowIds;
+    HybridContainer::SortedRows sorted;
+    
+    if (useSorting) {
+      sorted = hybridData->sortByContainerId(
+          rows.data(), folly::Range<const vector_size_t*>{}, outputRowIds);
+      extractRows = sorted.rows.data();
+      extractRowIds = &sorted.rowIds;
     }
-    child->resize(rows.size());
-    table->rows()->extractColumn(
-        rows.data(), rows.size(), projection.inputChannel, child);
-  }
+    
+    for (auto projection : projections) {
+      const auto resultChannel = projection.outputChannel;
+      BOLT_CHECK_LT(resultChannel, resultVectors.size())
+      auto& child = resultVectors[resultChannel];
+      // TODO: Consider reuse of complex types.
+      if (!child || !BaseVector::isVectorWritable(child) ||
+          !child->isFlatEncoding()) {
+        child =
+            BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+      }
+      child->resize(rows.size());
+      hybridData->extractColumn(
+          extractRows,
+          extractRowIds->size(),
+          projection.inputChannel,
+          child,
+          *extractRowIds);
+    }
+  } else {
+      for (auto projection : projections) {
+        const auto resultChannel = projection.outputChannel;
+        BOLT_CHECK_LT(resultChannel, resultVectors.size())
+
+        auto& child = resultVectors[resultChannel];
+        // TODO: Consider reuse of complex types.
+        if (!child || !BaseVector::isVectorWritable(child) ||
+            !child->isFlatEncoding()) {
+          child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+        }
+        child->resize(rows.size());
+        table->rows()->extractColumn(
+            rows.data(), rows.size(), projection.inputChannel, child);
+      }
+    }
 }
 
 BlockingReason fromStateToBlockingReason(ProbeOperatorState state) {
@@ -1335,17 +1379,47 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
     return;
   }
   auto* tableRows = table_->rows();
+  auto* hybridData = table_->hybridData();
+  std::vector<HybridRowId> outputRowIds;
   BOLT_CHECK(tableRows, "Should not move rows in hash joins");
   char* data[kBatchSize];
   while (auto numRows = iterator(data, kBatchSize)) {
     filterTableInput_->resize(numRows);
     filterTableInputRows_.resizeFill(numRows, true);
-    for (auto& projection : filterTableProjections_) {
-      tableRows->extractColumn(
-          data,
-          numRows,
-          projection.inputChannel,
-          filterTableInput_->childAt(projection.outputChannel));
+    if (hybridData != nullptr) {
+      outputRowIds.resize(numRows);
+      hybridData->getRowIds(data, numRows, outputRowIds);
+      
+      // For single container, extract directly without sorting.
+      // For multiple containers, sort by containerId for better cache locality.
+      const bool useSorting = hybridData->shouldUseSorting();
+      const char* const* extractRows = data;
+      std::vector<HybridRowId>* extractRowIds = &outputRowIds;
+      HybridContainer::SortedRows sorted;
+      
+      if (useSorting) {
+        sorted = hybridData->sortByContainerId(
+            data, folly::Range<const vector_size_t*>{}, outputRowIds);
+        extractRows = sorted.rows.data();
+        extractRowIds = &sorted.rowIds;
+      }
+      
+      for (auto& projection : filterTableProjections_) {
+        hybridData->extractColumn(
+            extractRows,
+            extractRowIds->size(),
+            projection.inputChannel,
+            filterTableInput_->childAt(projection.outputChannel),
+            *extractRowIds);
+      }
+    } else {
+      for (auto& projection : filterTableProjections_) {
+        tableRows->extractColumn(
+            data,
+            numRows,
+            projection.inputChannel,
+            filterTableInput_->childAt(projection.outputChannel));
+      }
     }
     rows.applyToSelected([&](vector_size_t row) {
       for (auto& projection : filterInputProjections_) {

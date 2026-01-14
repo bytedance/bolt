@@ -592,6 +592,12 @@ class QueryConfig {
   
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
 
+  /// If true, reorder rows by containerId during hybrid join extraction for
+  /// better cache locality. Can be disabled for testing to get deterministic
+  /// output order.
+  static constexpr const char* kHybridJoinReorderEnabled =
+      "hybrid_join_reorder_enabled";
+
   static constexpr const char* kHybridSortEnabled = "hybrid_sort_enabled";
 
   /**
@@ -1011,11 +1017,18 @@ class QueryConfig {
 
 
   bool hybridJoinEnabled() const {
-    return get<bool>(kHybridJoinEnabled, true);
+    return get<bool>(kHybridJoinEnabled, false);
+  }
+
+  /// Returns whether to reorder rows by containerId during hybrid join
+  /// extraction. Default true for better cache locality. Can be disabled
+  /// for deterministic output order in tests.
+  bool hybridJoinReorderEnabled() const {
+    return get<bool>(kHybridJoinReorderEnabled, true);
   }
 
   bool hybridSortEnabled() const {
-    return get<bool>(kHybridSortEnabled, true);
+    return get<bool>(kHybridSortEnabled, false);
   }
 
   /// Returns 'is aggregation spilling enabled' flag. Must also check the
