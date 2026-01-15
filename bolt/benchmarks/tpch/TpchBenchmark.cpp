@@ -103,10 +103,14 @@ class TpchBenchmark : public QueryBenchmarkBase {
         }
       }
       runStats.rawInputBytes = rawInputBytes;
+      // Use endTimeMs (when all drivers finish) instead of executionEndTimeMs
+      // (when all splits finish) to include time spent in downstream operators
+      // like OrderBy's finish phase.
+      const auto endTime =
+          stats.endTimeMs > 0 ? stats.endTimeMs : stats.executionEndTimeMs;
       out << fmt::format(
                  "Execution time: {}",
-                 succinctMillis(
-                     stats.executionEndTimeMs - stats.executionStartTimeMs))
+                 succinctMillis(endTime - stats.executionStartTimeMs))
           << std::endl;
       out << fmt::format(
                  "Splits total: {}, finished: {}",

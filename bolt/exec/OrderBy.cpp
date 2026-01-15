@@ -88,7 +88,8 @@ OrderBy::OrderBy(
       &nonReclaimableSection_,
       spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr,
       operatorCtx_->driverCtx()->queryConfig().orderBySpillMemoryThreshold(),
-      operatorCtx_.get());
+      operatorCtx_.get(),
+      hybridSortEnabled);
 
   this->setRuntimeMetric(
       OperatorMetricKey::kCanUsedToEstimateHashBuildPartitionNum, "true");

@@ -2255,6 +2255,10 @@ class HybridContainer {
     // owningInputs_[0] for each container.
     std::vector<BaseVector*> sources(maxContainerId_ + 1, nullptr);
     for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
       auto* child = entry.second->owningInputs_[0]->childAt(columnIndex).get();
       BOLT_CHECK_NOT_NULL(child);
       sources[entry.first] = child;
@@ -2503,6 +2507,10 @@ class HybridContainer {
     std::vector<const uint64_t*> rawNullsByContainer(
         maxContainerId_ + 1, nullptr);
     for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
       auto* flatChild = entry.second->owningInputs_[0]
                             ->childAt(columnIndex)
                             ->template as<FlatVector<T>>();
@@ -2669,6 +2677,10 @@ class HybridContainer {
 
     std::vector<const T*> rawValuesByContainer(maxContainerId_ + 1, nullptr);
     for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
       auto* flatChild = entry.second->owningInputs_[0]
                             ->childAt(columnIndex)
                             ->template as<FlatVector<T>>();
@@ -2919,6 +2931,10 @@ inline void HybridContainer::extractNulls(
     std::vector<const uint64_t*> rawNullsByContainer(
         maxContainerId_ + 1, nullptr);
     for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
       auto* child =
           entry.second->owningInputs_[0]->childAt(payloadColumnIndex).get();
       rawNullsByContainer[entry.first] = child->rawNulls();
