@@ -96,14 +96,6 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
       isInitialized_ = true;
     }
 
-    // calc rv memory size and try reserve, reserve failed
-    auto incrementSize = std::max<size_t>(
-        rv->estimateFlatSize(), rv->size() * rowConverter_->averageRowSize());
-    if (!boltPool_->maybeReserve(incrementSize)) {
-      RETURN_NOT_OK(tryEvict());
-      requestSpill_ = false;
-    }
-
     // estimate batchSize based on UnsafeRowSize
     slicedBatchSize = rowConverter_->averageRowSize()
         ? (options_.recommendedColumn2RowSize / rowConverter_->averageRowSize())
@@ -139,13 +131,18 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
       RETURN_NOT_OK(partitioner_->compute(
           pidArr, rv->size(), row2Partition_, partition2RowCount_));
       strippedRv = getStrippedRowVectorWrapper(*rv);
-      setSplitState(SplitState::kSplit);
+    }
+    auto rowVectorWithStats = rowConverter_->getWithStats(strippedRv);
+    if (!boltPool_->maybeReserve(rowVectorWithStats.getTotalMemorySize())) {
+      RETURN_NOT_OK(tryEvict());
+      requestSpill_ = false;
     }
     // RowVector->UnsafeRow
     {
+      setSplitState(SplitState::kSplit);
       bytedance::bolt::NanosecondTimer timer(&convertTime_);
       rowConverter_->convert(
-          strippedRv, row2Partition_, sortedRows_, partitionBytes_);
+          rowVectorWithStats, row2Partition_, sortedRows_, partitionBytes_);
     }
   }
 

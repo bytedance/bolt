@@ -60,17 +60,13 @@ class Partitioner {
       int32_t* pidArr,
       const int64_t numRows,
       std::vector<uint32_t>& partition2RowCount,
-      bool doInitialize) {
-    return arrow::Status::OK();
-  }
+      bool doInitialize);
 
   virtual arrow::Status fill(
       const int32_t* pidArr,
       const int64_t numRows,
       std::vector<uint32_t>& row2partition,
-      std::vector<uint32_t>& partition2RowCount) {
-    return arrow::Status::OK();
-  }
+      std::vector<uint32_t>& partition2RowCount);
 
  protected:
   Partitioner(int32_t numPartitions, bool hasPid)

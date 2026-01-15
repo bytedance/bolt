@@ -55,4 +55,34 @@ arrow::Status FallbackRangePartitioner::compute(
   return arrow::Status::OK();
 }
 
+arrow::Status FallbackRangePartitioner::precompute(
+    int32_t* pidArr,
+    const int64_t numRows,
+    std::vector<uint32_t>& partition2RowCount,
+    bool doInitialize) {
+  if (doInitialize) {
+    std::fill(std::begin(partition2RowCount), std::end(partition2RowCount), 0);
+  }
+  for (auto i = 0; i < numRows; ++i) {
+    auto pid = pidArr[i];
+    if (pid >= numPartitions_) {
+      return arrow::Status::Invalid(
+          "Partition id ",
+          std::to_string(pid),
+          " is equal or greater than ",
+          std::to_string(numPartitions_));
+    }
+    partition2RowCount[pid]++;
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status FallbackRangePartitioner::fill(
+    const int32_t* pidArr,
+    const int64_t numRows,
+    std::vector<uint32_t>& row2Partition,
+    std::vector<uint32_t>& partition2RowCount) {
+  return compute(pidArr, numRows, row2Partition, partition2RowCount);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql
