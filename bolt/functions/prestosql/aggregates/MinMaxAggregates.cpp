@@ -1104,6 +1104,7 @@ exec::AggregateRegistrationResult registerMinMax(
                   "Unknown input type for {} aggregation {}",
                   name,
                   inputType->kindName());
+              return nullptr;
           }
         } else {
           auto inputType = argTypes[0];
@@ -1147,6 +1148,7 @@ exec::AggregateRegistrationResult registerMinMax(
                   "Unknown input type for {} aggregation {}",
                   name,
                   inputType->kindName());
+              return nullptr;
           }
         }
       },

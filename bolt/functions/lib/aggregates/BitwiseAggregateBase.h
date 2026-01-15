@@ -122,6 +122,7 @@ exec::AggregateRegistrationResult registerBitwise(
                 "Unknown input type for {} aggregation {}",
                 name,
                 inputType->kindName());
+            return nullptr;
         }
       },
       withCompanionFunctions,

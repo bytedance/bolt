@@ -120,6 +120,7 @@ exec::AggregateRegistrationResult registerSum(const std::string& name) {
                 "Unknown input type for {} aggregation {}",
                 name,
                 inputType->kindName());
+            return nullptr;
         }
       });
 }
