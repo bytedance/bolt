@@ -245,7 +245,7 @@ void ArbitrationParticipant::startArbitration(ArbitrationOperation* op) {
     }
   }
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::ArbitrationParticipant::startArbitration",
       this);
 
@@ -301,7 +301,7 @@ uint64_t ArbitrationParticipant::reclaim(
   uint64_t reclaimedCapacity{0};
   try {
     ArbitrationTimedLock l(reclaimMutex_, maxWaitTimeNs);
-    TestValue::adjust(
+    BOLT_TEST_ADJUST(
         "bytedance::bolt::memory::ArbitrationParticipant::reclaim", this);
     ++numReclaims_;
     BOLT_MEM_LOG(INFO) << "Reclaiming from memory pool " << pool_->name()
@@ -361,7 +361,7 @@ uint64_t ArbitrationParticipant::abort(
 
 uint64_t ArbitrationParticipant::abortLocked(
     const std::exception_ptr& error) noexcept {
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::ArbitrationParticipant::abortLocked", this);
   {
     std::lock_guard<std::mutex> l(stateLock_);

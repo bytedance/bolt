@@ -252,7 +252,7 @@ Spiller::Spiller(
         container_,
         rowBasedSpillMode == common::RowBasedSpillMode::COMPRESSION);
   }
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Spiller", const_cast<HashBitRange*>(&bits_));
 
   BOLT_CHECK_EQ(

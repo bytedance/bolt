@@ -25,8 +25,8 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_hdfs RegisterHdfsFileSystem.cpp)
-target_link_libraries(bolt_hdfs ${FOLLY_WITH_DEPENDENCIES} bolt_dwio_common xsimd::xsimd date::date)
+bolt_add_library(bolt_hdfs RegisterHdfsFileSystem.cpp)
+target_link_libraries(bolt_hdfs Folly::folly bolt_dwio_common xsimd::xsimd date::date)
 
 if(BOLT_USE_ARROW_HDFS)
   target_sources(

@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_row_fast CompactRow.cpp UnsafeRowFast.cpp)
+bolt_add_library(bolt_row_fast CompactRow.cpp UnsafeRowFast.cpp)
 
 target_link_libraries(bolt_row_fast PUBLIC bolt_vector)
 
@@ -33,6 +33,6 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmark)
 endif()

@@ -596,7 +596,7 @@ StopReason Driver::runInternal(
     // Invoked to initialize the operators once before driver starts execution.
     initializeOperators();
 
-    TestValue::adjust("bytedance::bolt::exec::Driver::runInternal", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::exec::Driver::runInternal", this);
 
     const int32_t numOperators = operators_.size();
     ContinueFuture future;
@@ -683,7 +683,7 @@ StopReason Driver::runInternal(
             uint64_t resultBytes = 0;
             RowVectorPtr intermediateResult;
             withDeltaCpuWallTimer(op, &OperatorStats::getOutputTiming, [&]() {
-              TestValue::adjust(
+              BOLT_TEST_ADJUST(
                   "bytedance::bolt::exec::Driver::runInternal::getOutput", op);
               CALL_OPERATOR(
                   intermediateResult = op->getOutput(),
@@ -721,7 +721,7 @@ StopReason Driver::runInternal(
                     resultBytes, intermediateResult->size());
               }
               nextOp->traceInput(intermediateResult);
-              TestValue::adjust(
+              BOLT_TEST_ADJUST(
                   "bytedance::bolt::exec::Driver::runInternal::addInput",
                   nextOp);
 
@@ -777,7 +777,7 @@ StopReason Driver::runInternal(
                       processLazyTiming(*nextOp, timing);
                       nextOp->stats().wlock()->finishTiming.add(timing);
                     });
-                TestValue::adjust(
+                BOLT_TEST_ADJUST(
                     "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
                     nextOp);
                 CALL_OPERATOR(

@@ -117,12 +117,12 @@ class LocalExchangeSource : public exec::ExchangeSource {
       totalBytes_ += totalBytes;
       if (data.empty()) {
         LOG(INFO) << "adjust timeout";
-        common::testutil::TestValue::adjust(
+        BOLT_TEST_ADJUST(
             "bytedance::bolt::exec::test::LocalExchangeSource::timeout", this);
       }
 
       try {
-        common::testutil::TestValue::adjust(
+        BOLT_TEST_ADJUST(
             "bytedance::bolt::exec::test::LocalExchangeSource", &numPages_);
       } catch (const std::exception& e) {
         queue_->setError(e.what());

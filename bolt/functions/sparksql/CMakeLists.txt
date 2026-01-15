@@ -26,7 +26,7 @@
 # --------------------------------------------------------------------------
 
 add_subdirectory(specialforms)
-add_library(
+bolt_add_library(
   bolt_functions_spark_impl
   ArrayGetFunction.cpp
   ArraySliceSum.cpp
@@ -82,7 +82,7 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()
 

@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_functions_spark_specialforms
   AtLeastNNonNulls.cpp
   DecimalRound.cpp

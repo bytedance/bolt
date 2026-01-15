@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_dwio_dwrf_reader
   BinaryStreamReader.cpp
   ColumnReader.cpp
@@ -55,8 +55,7 @@ target_link_libraries(
   bolt_dwio_dwrf_common
   bolt_caching
   bolt_dwio_dwrf_utils
-  bolt_test_util
-  ${FMT}
+  fmt::fmt
 )
 
 install(

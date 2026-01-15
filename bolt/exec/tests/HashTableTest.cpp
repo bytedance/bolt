@@ -121,7 +121,7 @@ class HashTableTest : public testing::TestWithParam<HashTableTestParam>,
   }
 
   void SetUp() override {
-    common::testutil::TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
     if (GetParam().enableRunParallel) {
       executor_ = std::make_unique<folly::CPUThreadPoolExecutor>(16);
     }

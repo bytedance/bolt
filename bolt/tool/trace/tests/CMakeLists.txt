@@ -46,12 +46,9 @@ set_tests_properties(bolt_tool_trace_test PROPERTIES TIMEOUT 3000)
 
 target_link_libraries(
   bolt_tool_trace_test
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_memory
   bolt_query_trace_replayer_base
   bolt_trace_file_tool_base
-  bolt_vector_fuzzer
+  bolt_testutils
   GTest::gtest_main
   GTest::gmock
   Folly::folly

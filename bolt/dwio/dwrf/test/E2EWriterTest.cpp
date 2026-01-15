@@ -67,7 +67,7 @@ namespace {
 class E2EWriterTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 

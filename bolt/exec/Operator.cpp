@@ -1197,7 +1197,7 @@ uint64_t Operator::MemoryReclaimer::reclaim(
       pool->name());
   BOLT_CHECK(driver->task()->pauseRequested());
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Operator::MemoryReclaimer::reclaim", pool);
 
   // NOTE: we can't reclaim memory from an operator which is under

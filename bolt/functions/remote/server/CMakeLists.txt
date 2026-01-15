@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_functions_remote_server RemoteFunctionService.cpp)
+bolt_add_library(bolt_functions_remote_server RemoteFunctionService.cpp)
 
 target_link_libraries(
   bolt_functions_remote_server PUBLIC bolt_remote_function_thrift bolt_functions_remote_get_serde

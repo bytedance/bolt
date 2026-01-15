@@ -34,12 +34,7 @@ add_test(
 
 target_link_libraries(
   bolt_dwio_orc_test
-  bolt_dwrf_test_utils
-  bolt_dwio_orc_writer
-  bolt_dwio_orc_reader
-  bolt_dwio_common_test_utils
-  bolt_temp_path
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
@@ -55,13 +50,6 @@ add_test(
 )
 target_link_libraries(
   bolt_dwio_orc_tpch_test
-  bolt_dwio_orc_reader
-  bolt_dwio_orc_writer
-  bolt_exec_test_lib
-  bolt_exec
-  bolt_hive_connector
-  bolt_tpch_connector
-  bolt_aggregates
-  bolt_tpch_gen
+  bolt_testutils
   ${TEST_LINK_LIBS}
 )

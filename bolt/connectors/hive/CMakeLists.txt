@@ -25,11 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_hive_config OBJECT HiveConfig.cpp)
+bolt_add_library(bolt_hive_config OBJECT HiveConfig.cpp)
 
 target_link_libraries(bolt_hive_config bolt_exception)
 
-add_library(
+bolt_add_library(
   bolt_hive_connector
   FileHandle.cpp
   HiveConfig.cpp
@@ -100,7 +100,7 @@ target_link_libraries(
          arrow::arrow
 )
 
-add_library(bolt_hive_partition_function HivePartitionFunction.cpp)
+bolt_add_library(bolt_hive_partition_function HivePartitionFunction.cpp)
 
 target_link_libraries(bolt_hive_partition_function bolt_core bolt_exec)
 
@@ -110,6 +110,6 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()

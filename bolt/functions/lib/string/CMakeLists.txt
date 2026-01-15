@@ -25,11 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_functions_string INTERFACE)
+bolt_add_library(bolt_functions_string INTERFACE)
 
 target_link_libraries(
   bolt_functions_string INTERFACE bolt_exception xxHash::xxhash utf8proc::utf8proc
-                                  ${FOLLY_WITH_DEPENDENCIES} ${ICU_LIBRARIES} re2::re2
+                                  Folly::folly ${ICU_LIBRARIES} re2::re2
 )
 
 if(${BOLT_BUILD_TESTING})

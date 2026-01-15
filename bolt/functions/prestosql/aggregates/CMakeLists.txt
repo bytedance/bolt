@@ -43,7 +43,7 @@ set(MIN_MAX_BY_TYPES
 specialize_template(MAX_BY_NARG_GENERATED_FILES MaxByAggregatesNArg.cpp.in ${MIN_MAX_BY_TYPES})
 specialize_template(MIN_BY_NARG_GENERATED_FILES MinByAggregatesNArg.cpp.in ${MIN_MAX_BY_TYPES})
 
-add_library(
+bolt_add_library(
   bolt_aggregates
   ${APAGG_GENERATED_FILES}
   ${MAX_BY_NARG_GENERATED_FILES}
@@ -106,6 +106,6 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()

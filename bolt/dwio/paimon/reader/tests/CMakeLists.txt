@@ -24,14 +24,8 @@ add_test(bolt_dwio_paimon_test bolt_dwio_paimon_test)
 
 target_link_libraries(
   bolt_dwio_paimon_test
-  bolt_exec_test_lib
-  bolt_memory
-  bolt_buffer
-  bolt_test_util
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock_main
-  glog::glog
-  gflags::gflags
-  pthread
 )

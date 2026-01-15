@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_exec
   $<$<BOOL:${ENABLE_META_SORT}>:meta/MetaRowSorter.cpp>
   AddressableNonNullValueList.cpp
@@ -138,7 +138,6 @@ target_link_libraries(
   bolt_connector
   bolt_time
   bolt_common_base
-  bolt_test_util
   bolt_arrow_bridge
   bolt_common_compression
   bolt_functions_json
@@ -175,7 +174,7 @@ elseif(${BOLT_BUILD_TEST_UTILS})
   add_subdirectory(tests/utils)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()
 

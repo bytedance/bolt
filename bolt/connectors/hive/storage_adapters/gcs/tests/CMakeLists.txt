@@ -29,12 +29,7 @@ add_executable(bolt_gcsfile_test GCSFileSystemTest.cpp GCSUtilTest.cpp)
 add_test(bolt_gcsfile_test bolt_gcsfile_test)
 target_link_libraries(
   bolt_gcsfile_test
-  bolt_file
-  bolt_gcs
-  bolt_core
-  bolt_hive_connector
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gmock
   GTest::gtest
   GTest::gtest_main

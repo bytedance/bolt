@@ -25,29 +25,13 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_tpch_benchmark_lib TpchBenchmark.cpp)
+add_library(bolt_tpch_benchmark_lib  OBJECT TpchBenchmark.cpp)
 
 target_link_libraries(
   bolt_tpch_benchmark_lib
   bolt_query_benchmark
-  bolt_aggregates
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_dwio_common
-  bolt_dwio_common_exception
-  bolt_dwio_parquet_reader
-  bolt_dwio_common_test_utils
-  bolt_hive_connector
-  bolt_exception
-  bolt_memory
-  bolt_process
-  bolt_serialization
-  bolt_encode
-  bolt_type
-  bolt_type_fbhive
-  bolt_caching
-  bolt_vector_test_lib
-  bolt_test_util_gperf
+  bolt_testutils
+  $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
   Folly::folly
   ${FOLLY_BENCHMARK}
   fmt::fmt
@@ -55,4 +39,10 @@ target_link_libraries(
 
 add_executable(bolt_tpch_benchmark TpchBenchmarkMain.cpp)
 
-target_link_libraries(bolt_tpch_benchmark bolt_tpch_benchmark_lib)
+target_link_libraries(bolt_tpch_benchmark PRIVATE
+  bolt_tpch_benchmark_lib
+  bolt_query_benchmark
+  bolt_testutils
+  $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
+  ${FOLLY_BENCHMARK}
+)

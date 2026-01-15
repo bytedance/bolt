@@ -31,11 +31,7 @@ add_test(bolt_functions_string_test bolt_functions_string_test)
 
 target_link_libraries(
   bolt_functions_string_test
-  bolt_functions_string
-  bolt_type
-  ${FOLLY_WITH_DEPENDENCIES}
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )

@@ -36,7 +36,9 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MmapAllocator.h"
+#ifndef NDEBUG
 #include "bolt/common/testutil/ScopedTestTime.h"
+#endif
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
@@ -82,7 +84,7 @@ class AsyncDataCacheTest : public testing::Test {
   static constexpr int32_t kNumFiles = 100;
 
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   void SetUp() override {

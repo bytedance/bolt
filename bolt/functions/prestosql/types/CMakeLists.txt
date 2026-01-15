@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_presto_types HyperLogLogType.cpp JsonType.cpp TimestampWithTimeZoneType.cpp)
+bolt_add_library(bolt_presto_types HyperLogLogType.cpp JsonType.cpp TimestampWithTimeZoneType.cpp)
 
 # JsonType.cpp needs to rely on the concept attribute in C++20
 target_compile_features(bolt_presto_types PRIVATE cxx_std_20)

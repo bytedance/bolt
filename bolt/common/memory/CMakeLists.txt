@@ -30,7 +30,7 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(sparksql/tests)
 endif()
 
-add_library(
+bolt_add_library(
   bolt_memory
   Allocation.cpp
   AllocationPool.cpp
@@ -78,10 +78,10 @@ target_link_libraries(
          bolt_flag_definitions
          bolt_time
          bolt_type_base
-         ${FOLLY_WITH_DEPENDENCIES}
+         Folly::folly
          ${FMT}
          gflags::gflags
          glog::glog
          arrow::arrow
-  PRIVATE bolt_test_util re2::re2
+  PRIVATE re2::re2
 )

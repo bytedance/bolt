@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_caching
   AsyncDataCache.cpp
   CacheTTLController.cpp

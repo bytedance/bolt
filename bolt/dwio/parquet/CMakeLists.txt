@@ -37,8 +37,8 @@ if(BOLT_ENABLE_PARQUET)
   endif()
 endif()
 
-add_library(bolt_dwio_parquet_reader RegisterParquetReader.cpp)
-add_library(bolt_dwio_parquet_writer RegisterParquetWriter.cpp)
+bolt_add_library(bolt_dwio_parquet_reader RegisterParquetReader.cpp)
+bolt_add_library(bolt_dwio_parquet_writer RegisterParquetWriter.cpp)
 
 if(BOLT_ENABLE_PARQUET)
   target_link_libraries(bolt_dwio_parquet_reader bolt_dwio_native_parquet_reader xsimd::xsimd)

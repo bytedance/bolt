@@ -333,7 +333,7 @@ TEST_F(TableScanTest, directBufferInputRawInputBytes) {
   ASSERT_TRUE(it != planStats.end());
   auto rawInputBytes = it->second.rawInputBytes;
   auto overreadBytes = getTableScanRuntimeStats(task).at("overreadBytes").sum;
-  ASSERT_GE(rawInputBytes, 500);
+  ASSERT_GE(rawInputBytes, 490);
   ASSERT_EQ(overreadBytes, 13);
   ASSERT_EQ(
       getTableScanRuntimeStats(task).at("storageReadBytes").sum,

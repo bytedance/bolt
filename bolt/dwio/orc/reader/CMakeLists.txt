@@ -27,9 +27,9 @@
 
 # ORC Reader setup
 if(BOLT_ENABLE_ORC)
-  add_library(bolt_dwio_orc_reader OrcReader.cpp RegisterOrcReader.cpp)
+  bolt_add_library(bolt_dwio_orc_reader OrcReader.cpp RegisterOrcReader.cpp)
   target_link_libraries(bolt_dwio_orc_reader bolt_dwio_dwrf_reader)
 else()
-  add_library(bolt_dwio_orc_reader RegisterOrcReader.cpp)
+  bolt_add_library(bolt_dwio_orc_reader RegisterOrcReader.cpp)
   # No additional dependencies
 endif()

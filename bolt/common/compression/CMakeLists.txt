@@ -29,9 +29,9 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_common_compression Compression.cpp LzoDecompressor.cpp)
+bolt_add_library(bolt_common_compression Compression.cpp LzoDecompressor.cpp)
 target_link_libraries(
   bolt_common_compression
-  PUBLIC ${FOLLY_WITH_DEPENDENCIES}
+  PUBLIC Folly::folly
   PRIVATE bolt_exception
 )

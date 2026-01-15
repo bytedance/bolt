@@ -19,9 +19,7 @@ add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
 target_link_libraries(
     bolt_shuffle_spark_celeborn_test
     PRIVATE
-        bolt_shuffle_spark_impl
-        bolt_exception
-        gflags::gflags
+        bolt_testutils
         glog::glog
         GTest::gtest
         GTest::gtest_main
@@ -37,10 +35,8 @@ target_link_libraries(
     bolt_shuffle_spark_matrix_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
+        bolt_testutils
         bolt_vector_fuzzer
-        bolt_temp_path
         GTest::gtest_main
         GTest::gmock
 )
@@ -61,10 +57,8 @@ target_link_libraries(
     bolt_shuffle_spark_large_partition_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
         bolt_vector_fuzzer
-        bolt_temp_path
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )
@@ -85,9 +79,8 @@ target_link_libraries(
     bolt_shuffle_spark_memory_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
         bolt_vector_fuzzer
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )

@@ -24,16 +24,18 @@
 #
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_library(bolt_debug_util OBJECT ScopedTestTime.cpp TestValue.cpp)
+  target_link_libraries(bolt_debug_util PUBLIC bolt_exception)
 
-add_library(bolt_test_util ScopedTestTime.cpp TestValue.cpp)
-target_link_libraries(bolt_test_util PUBLIC bolt_exception)
-
-if(${BOLT_BUILD_TESTING})
-  add_subdirectory(tests)
+  if(${BOLT_BUILD_TESTING})
+    add_subdirectory(tests)
+  endif()
 endif()
 
-add_library(bolt_test_util_gperf GPerf.cpp)
 if(${BOLT_ENABLE_PERF})
+  bolt_add_library(bolt_test_util_gperf OBJECT GPerf.cpp)
+
   target_compile_definitions(bolt_test_util_gperf PRIVATE -DBOLT_ENABLE_PERF)
   find_package(gperftools REQUIRED CONFIG)
   target_link_libraries(bolt_test_util_gperf PRIVATE gperftools::profiler)

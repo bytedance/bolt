@@ -581,7 +581,7 @@ void SharedArbitrator::sortCandidatesByReclaimableFreeCapacity(
       [&](const ArbitrationCandidate& lhs, const ArbitrationCandidate& rhs) {
         return lhs.reclaimableFreeCapacity > rhs.reclaimableFreeCapacity;
       });
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::sortCandidatesByReclaimableFreeCapacity",
       &candidates);
 }
@@ -639,7 +639,7 @@ SharedArbitrator::sortAndGroupSpillCandidates(
         });
   }
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::sortAndGroupSpillCandidates",
       &candidateGroups);
   return candidateGroups;
@@ -894,7 +894,7 @@ bool SharedArbitrator::growCapacity(MemoryPool* pool, uint64_t requestBytes) {
 }
 
 void SharedArbitrator::growCapacity(ArbitrationOperation& op) {
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::growCapacity", this);
   checkIfAborted(op);
   checkIfTimeout(op);
@@ -991,7 +991,7 @@ void SharedArbitrator::startAndWaitGlobalArbitration(ArbitrationOperation& op) {
     }
   }
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::startAndWaitGlobalArbitration",
       this);
 
@@ -1084,7 +1084,7 @@ void SharedArbitrator::runGlobalArbitration() {
   std::unordered_set<uint64_t> failedParticipants;
   bool allParticipantsReclaimed{false};
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::runGlobalArbitration", this);
 
   size_t round{0};
@@ -1263,7 +1263,7 @@ uint64_t SharedArbitrator::reclaimUsedMemoryBySpill(
     std::unordered_set<uint64_t>& reclaimedParticipants,
     std::unordered_set<uint64_t>& failedParticipants,
     bool& allParticipantsReclaimed) {
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::reclaimUsedMemoryBySpill",
       this);
 
@@ -1350,7 +1350,7 @@ uint64_t SharedArbitrator::reclaimUsedMemoryBySpill(
 }
 
 uint64_t SharedArbitrator::reclaimUsedMemoryByAbort(bool force) {
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::memory::SharedArbitrator::reclaimUsedMemoryByAbort",
       this);
   const auto victimOpt = findAbortCandidate(force);

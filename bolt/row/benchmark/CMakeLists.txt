@@ -17,15 +17,8 @@ add_executable(unsafe_row_serialize_benchmark UnsafeRowSerializeBenchmark.cpp)
 
 target_link_libraries(
   unsafe_row_serialize_benchmark
-  bolt_row_fast
-  bolt_exec
-  bolt_vector
-  bolt_hive_connector
-  bolt_exec_test_lib
-  bolt_dwio_common_exception
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  gflags::gflags
+  GTest::gtest
 )

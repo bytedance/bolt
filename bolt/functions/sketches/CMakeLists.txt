@@ -22,7 +22,7 @@ endif()
 
 # hll.hpp causes deprecated warning and turning the warning off for now
 add_compile_options(-Wno-deprecated-declarations)
-add_library(
+bolt_add_library(
   bolt_sketch_aggregates
   RegistrationAggregateFunctions.cpp
   RegistrationFunctions.cpp
@@ -45,7 +45,7 @@ target_include_directories(
   bolt_sketch_aggregates PRIVATE ${FOLLY_INCLUDE_DIRS} ${DataSketches_INCLUDE_DIRS}
 )
 target_link_libraries(
-  bolt_sketch_aggregates bolt_exec DataSketches::DataSketches ${FOLLY_WITH_DEPENDENCIES}
+  bolt_sketch_aggregates bolt_exec DataSketches::DataSketches Folly::folly
 )
 
 set_property(TARGET bolt_sketch_aggregates PROPERTY JOB_POOL_COMPILE high_memory_pool)

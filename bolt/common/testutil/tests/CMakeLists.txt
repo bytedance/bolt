@@ -25,11 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-include(GoogleTest)
 add_executable(bolt_test_util_test TestScopedTestTime.cpp TestValueTest.cpp)
 gtest_add_tests(bolt_test_util_test "" AUTO)
 
 target_link_libraries(
-  bolt_test_util_test PRIVATE bolt_test_util bolt_exception bolt_exec GTest::gtest
+  bolt_test_util_test PRIVATE bolt_testutils
+                              GTest::gtest
                               GTest::gtest_main
 )

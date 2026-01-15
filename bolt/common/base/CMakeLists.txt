@@ -25,13 +25,13 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_exception BoltException.cpp Exceptions.cpp Exceptions.h)
+bolt_add_library(bolt_exception BoltException.cpp Exceptions.cpp Exceptions.h)
 target_link_libraries(
   bolt_exception PUBLIC bolt_flag_definitions bolt_process Folly::folly fmt::fmt gflags::gflags
                         glog::glog
 )
 
-add_library(
+bolt_add_library(
   bolt_common_base
   BitUtil.cpp
   BloomFilter.cpp
@@ -64,18 +64,20 @@ target_link_libraries(
          ryu::ryu
          date::date
          openssl::openssl
-  PRIVATE bolt_common_compression bolt_process bolt_test_util glog::glog
+  PRIVATE bolt_common_compression
+          bolt_process
+          glog::glog
 )
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()
 
-add_library(bolt_id_map BigintIdMap.cpp)
+bolt_add_library(bolt_id_map BigintIdMap.cpp)
 target_link_libraries(
   bolt_id_map
   bolt_memory
@@ -87,7 +89,7 @@ target_link_libraries(
   gflags::gflags
 )
 
-add_library(bolt_status Status.cpp)
+bolt_add_library(bolt_status Status.cpp)
 target_link_libraries(
   bolt_status
   PUBLIC fmt::fmt Folly::folly

@@ -32,7 +32,7 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(
+bolt_add_library(
   bolt_dwio_parquet_arrow_lib
   ArrowSchema.cpp
   ArrowSchemaInternal.cpp

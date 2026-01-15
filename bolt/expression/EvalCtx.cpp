@@ -178,7 +178,7 @@ void EvalCtx::addErrors(
 }
 
 void EvalCtx::restore(ContextSaver& saver) {
-  TestValue::adjust("bytedance::bolt::exec::EvalCtx::restore", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::EvalCtx::restore", this);
 
   peeledFields_ = std::move(saver.peeled);
   nullsPruned_ = saver.nullsPruned;

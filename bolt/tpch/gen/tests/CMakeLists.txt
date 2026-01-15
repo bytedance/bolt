@@ -30,5 +30,8 @@ add_executable(bolt_tpch_gen_test TpchGenTest.cpp)
 add_test(bolt_tpch_gen_test bolt_tpch_gen_test)
 
 target_link_libraries(
-  bolt_tpch_gen_test bolt_tpch_gen bolt_type bolt_vector GTest::gtest GTest::gtest_main
+  bolt_tpch_gen_test PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )

@@ -33,12 +33,8 @@ find_package(Arrow CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_arrow_bridge_test
-  bolt_core
-  bolt_arrow_bridge
-  bolt_vector_test_lib
-  arrow::arrow
+  # bolt_arrow_bridge
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  glog::glog
-  dl
 )

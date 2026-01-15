@@ -30,5 +30,5 @@ add_executable(bolt_common_base_benchmarks BitUtilBenchmark.cpp)
 target_link_libraries(
   bolt_common_base_benchmarks
   PUBLIC ${FOLLY_BENCHMARK}
-  PRIVATE bolt_common_base Folly::folly bolt_process
+  PRIVATE bolt_testutils Folly::folly bolt_process
 )

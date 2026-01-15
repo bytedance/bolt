@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_arrow_connector ArrowMemoryConnector.cpp)
+bolt_add_library(bolt_arrow_connector ArrowMemoryConnector.cpp)
 
 target_link_libraries(bolt_arrow_connector bolt_connector)
 

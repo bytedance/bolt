@@ -31,11 +31,7 @@ add_test(bolt_row_test bolt_row_test)
 
 target_link_libraries(
   bolt_row_test
-  PRIVATE bolt_exception
-          bolt_row_fast
-          bolt_vector
-          bolt_vector_fuzzer
-          bolt_vector_test_lib
+  PRIVATE bolt_testutils
           Folly::folly
           GTest::gtest
           GTest::gtest_main

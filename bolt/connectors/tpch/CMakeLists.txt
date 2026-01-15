@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_tpch_connector TpchConnector.cpp)
+bolt_add_library(bolt_tpch_connector TpchConnector.cpp)
 
 target_link_libraries(bolt_tpch_connector bolt_connector bolt_tpch_gen fmt::fmt)
 

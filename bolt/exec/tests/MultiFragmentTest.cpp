@@ -56,7 +56,7 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     HiveConnectorTestBase::SetUp();
     exec::ExchangeSource::factories().clear();
     exec::ExchangeSource::registerFactory(createLocalExchangeSource);
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   void TearDown() override {
@@ -2134,7 +2134,7 @@ TEST_F(MultiFragmentTest, maxBytes) {
 /// Verify that ExchangeClient stats are populated even if task fails.
 DEBUG_ONLY_TEST_F(MultiFragmentTest, exchangeStatsOnFailure) {
   // Trigger a failure after fetching first 10 pages.
-  TestValue::enable();
+  BOLT_TEST_VALUE_ENABLE();
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::test::LocalExchangeSource",
       std::function<void(void* data)>([&](void* data) {

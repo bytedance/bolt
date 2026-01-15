@@ -29,11 +29,7 @@ add_executable(bolt_re2_functions_benchmarks Re2FunctionsBenchmarks.cpp)
 
 target_link_libraries(
   bolt_re2_functions_benchmarks
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_expression
-  bolt_vector_test_lib
   bolt_vector_fuzzer
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
 )

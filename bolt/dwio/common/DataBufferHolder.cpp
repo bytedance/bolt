@@ -44,7 +44,7 @@ void DataBufferHolder::take(const std::vector<folly::StringPiece>& buffers) {
     return;
   }
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::dwio::common::DataBufferHolder::take", pool_);
 
   dwio::common::DataBuffer<char> buf(*pool_, totalSize);

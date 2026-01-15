@@ -30,5 +30,8 @@ add_executable(bolt_parse_test QueryPlannerTest.cpp)
 add_test(bolt_parse_test bolt_parse_test)
 
 target_link_libraries(
-  bolt_parse_test bolt_parse_parser GTest::gtest GTest::gtest_main gflags::gflags
+  bolt_parse_test PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )

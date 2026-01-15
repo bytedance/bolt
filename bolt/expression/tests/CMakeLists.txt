@@ -70,39 +70,21 @@ add_test(
 )
 
 target_link_libraries(
-  bolt_expression_test
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_dwio_common
-  bolt_dwio_common_exception
-  bolt_exec_test_lib
-  bolt_expression
-  bolt_expression_test_utility
-  bolt_functions_lib
-  bolt_functions_prestosql
-  bolt_functions_test_lib
-  bolt_parse_parser
-  bolt_parse_expression
-  bolt_presto_serializer
-  bolt_vector_test_lib
-  bolt_vector_fuzzer
-  GTest::gtest
-  GTest::gtest_main
-  GTest::gmock
-  ${FOLLY_WITH_DEPENDENCIES}
-  gflags::gflags
-  glog::glog
-  fmt::fmt
+  bolt_expression_test PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
+    GTest::gmock
 )
 
-add_library(bolt_expression_verifier ExpressionVerifier.cpp)
+bolt_add_library(bolt_expression_verifier ExpressionVerifier.cpp)
 
 target_link_libraries(
   bolt_expression_verifier bolt_vector_test_lib bolt_vector_fuzzer bolt_type
   bolt_expression_test_utility
 )
 
-add_library(bolt_expression_runner ExpressionRunner.cpp)
+bolt_add_library(bolt_expression_runner ExpressionRunner.cpp)
 target_link_libraries(
   bolt_expression_runner bolt_expression_verifier bolt_functions_prestosql bolt_parse_parser
   GTest::gtest
@@ -110,13 +92,19 @@ target_link_libraries(
 
 add_executable(bolt_expression_runner_test ExpressionRunnerTest.cpp)
 target_link_libraries(
-  bolt_expression_runner_test bolt_expression_runner bolt_exec_test_lib bolt_function_registry
-  GTest::gtest GTest::gtest_main
+  bolt_expression_runner_test  PRIVATE
+  bolt_expression_runner
+  bolt_exec_test_lib
+  bolt_function_registry
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
 add_executable(spark_expression_runner_test SparkExpressionRunnerTest.cpp)
 target_link_libraries(
   spark_expression_runner_test bolt_expression_runner bolt_exec_test_lib bolt_function_registry
+  bolt_testutils
   GTest::gtest GTest::gtest_main
 )
 
@@ -124,12 +112,7 @@ add_executable(bolt_expression_verifier_unit_test ExpressionVerifierUnitTest.cpp
 target_link_libraries(
   bolt_expression_verifier_unit_test
   bolt_expression_verifier
-  bolt_file
-  bolt_temp_path
-  bolt_parse_expression
-  bolt_parse_parser
-  bolt_type
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -137,15 +120,7 @@ target_link_libraries(
 add_executable(bolt_expression_runner_unit_test ExpressionRunnerUnitTest.cpp)
 target_link_libraries(
   bolt_expression_runner_unit_test
-  bolt_dwio_common_test_utils
-  bolt_expression
-  bolt_expression_runner
-  bolt_expression_fuzzer
-  bolt_expression_verifier
-  bolt_function_registry
-  bolt_temp_path
-  bolt_exec_test_lib
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

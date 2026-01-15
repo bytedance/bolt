@@ -33,10 +33,7 @@ add_test(NAME bolt_functions_aggregates_test COMMAND bolt_functions_aggregates_t
 
 target_link_libraries(
   bolt_functions_aggregates_test
-  bolt_functions_aggregates
-  bolt_functions_test_lib
-  Folly::folly
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  glog::glog
 )

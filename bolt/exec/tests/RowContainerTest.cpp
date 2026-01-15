@@ -44,7 +44,7 @@ class RowContainerTest : public exec::test::RowContainerTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    common::testutil::TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   void testExtractColumn(

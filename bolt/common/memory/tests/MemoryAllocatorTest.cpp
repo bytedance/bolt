@@ -64,7 +64,7 @@ static constexpr MachinePageCount kCapacityPages =
 class MemoryAllocatorTest : public testing::TestWithParam<int> {
  protected:
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
     FLAGS_bolt_memory_leak_check_enabled = true;
   }
 

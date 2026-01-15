@@ -47,7 +47,7 @@ using namespace ::bytedance::bolt::common::testutil;
 class MemoryUsageTrackerTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 };
 

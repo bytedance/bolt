@@ -444,7 +444,7 @@ class MockSharedArbitrationTest : public testing::Test {
   static void SetUpTestCase() {
     SharedArbitrator::registerFactory();
     FLAGS_bolt_memory_leak_check_enabled = true;
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   /*  static void TearDownTestCase() {

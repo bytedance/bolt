@@ -34,9 +34,9 @@
 #include <arrow/testing/gtest_util.h>
 #include <gtest/gtest.h>
 
-#include "Type.h"
 #include "bolt/common/base/Nulls.h"
 #include "bolt/core/QueryCtx.h"
+#include "bolt/type/Type.h"
 #include "bolt/vector/arrow/Bridge.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"

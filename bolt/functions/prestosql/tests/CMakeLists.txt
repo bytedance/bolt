@@ -118,20 +118,12 @@ add_executable(
 add_test(bolt_functions_test bolt_functions_test)
 
 target_link_libraries(
-  bolt_functions_test
+  bolt_functions_test PRIVATE
   bolt_functions_test_lib
-  bolt_exec
-  bolt_expression
-  bolt_functions_prestosql
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_dwio_common_test_utils
-  bolt_vector_fuzzer
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
   GTest::gmock
-  GTest::gmock_main
 )
 
 add_executable(bolt_functions_simple_test SimpleComparisonMatcherTest.cpp)
@@ -139,5 +131,8 @@ add_executable(bolt_functions_simple_test SimpleComparisonMatcherTest.cpp)
 add_test(bolt_functions_simple_test bolt_functions_simple_test)
 
 target_link_libraries(
-  bolt_functions_simple_test bolt_functions_test_lib GTest::gtest GTest::gtest_main
+  bolt_functions_simple_test  PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )

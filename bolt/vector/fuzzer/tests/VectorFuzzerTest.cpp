@@ -31,8 +31,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "Type.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/type/Type.h"
 #include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 

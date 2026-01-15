@@ -124,8 +124,32 @@ inline void TestValue::adjust(
     void* testData) {}
 #endif
 
+#ifndef NDEBUG
 #define SCOPED_TESTVALUE_SET(point, ...)                             \
   ::bytedance::bolt::common::testutil::ScopedTestValue BOLT_VARNAME( \
       _scopedTestValue)(point, ##__VA_ARGS__)
+#else
+#define SCOPED_TESTVALUE_SET(point, ...) \
+  do {                                   \
+  } while (false)
+#endif
 
 } // namespace bytedance::bolt::common::testutil
+
+#ifndef NDEBUG
+
+#define BOLT_TEST_ADJUST(injectionPoint, testData)        \
+  ::bytedance::bolt::common::testutil::TestValue::adjust( \
+      injectionPoint, testData)
+
+#define BOLT_TEST_VALUE_ENABLE() \
+  ::bytedance::bolt::common::testutil::TestValue::enable()
+
+#define BOLT_TEST_VALUE_ENABLED() \
+  ::bytedance::bolt::common::testutil::TestValue::enabled()
+#else
+
+#define BOLT_TEST_ADJUST(injectionPoint, testData)
+#define BOLT_TEST_VALUE_ENABLE()
+#define BOLT_TEST_VALUE_ENABLED() false
+#endif

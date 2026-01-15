@@ -143,7 +143,7 @@ class ScopedOOMInjector {
     }
 
     // Make sure TestValues are enabled.
-    common::testutil::TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
 
     common::testutil::TestValue::set(
         kInjectionPoint,
@@ -160,7 +160,9 @@ class ScopedOOMInjector {
   }
 
   ~ScopedOOMInjector() {
+#ifndef NDEBUG
     common::testutil::TestValue::clear(kInjectionPoint);
+#endif
     enabled_ = false;
   }
 

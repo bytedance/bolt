@@ -729,7 +729,7 @@ void MemoryPoolImpl::allocateNonContiguous(
     INC_MEM_OP_STATS(Frees);
   }
   BOLT_CHECK_GT(numPages, 0);
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::common::memory::MemoryPoolImpl::allocateNonContiguous",
       this);
   RECORD_FREE(out);
@@ -915,7 +915,7 @@ std::shared_ptr<MemoryPool> MemoryPoolImpl::genChild(
 
 bool MemoryPoolImpl::maybeReserve(uint64_t increment) {
   CHECK_AND_INC_MEM_OP_STATS(this, Reserves);
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve", this);
   // TODO: make this a configurable memory pool option.
   constexpr int32_t kGrowthQuantum = 8 << 20;
@@ -998,7 +998,7 @@ void MemoryPoolImpl::reserveThreadSafe(uint64_t size, bool reserveOnly) {
         break;
       }
     }
-    TestValue::adjust(
+    BOLT_TEST_ADJUST(
         "bytedance::bolt::memory::MemoryPoolImpl::reserveThreadSafe", this);
     try {
       incrementReservationThreadSafe(this, increment);
@@ -1041,7 +1041,7 @@ void MemoryPoolImpl::incrementReservationThreadSafe(
   BOLT_CHECK_NULL(parent_);
 
   if (growCapacity(requestor, size)) {
-    TestValue::adjust(
+    BOLT_TEST_ADJUST(
         "bytedance::bolt::memory::MemoryPoolImpl::incrementReservationThreadSafe::AfterGrowCallback",
         this);
     return;

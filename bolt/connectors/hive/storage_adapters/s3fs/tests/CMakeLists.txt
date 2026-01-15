@@ -28,19 +28,14 @@
 add_executable(bolt_s3config_test S3ConfigTest.cpp)
 add_test(bolt_s3config_test bolt_s3config_test)
 target_link_libraries(
-  bolt_s3config_test bolt_common_config bolt_s3fs GTest::gtest GTest::gtest_main
+  bolt_s3config_test bolt_testutils GTest::gtest GTest::gtest_main
 )
 
 add_executable(bolt_s3file_test S3FileSystemTest.cpp S3UtilTest.cpp)
 add_test(bolt_s3file_test bolt_s3file_test)
 target_link_libraries(
   bolt_s3file_test
-  bolt_file
-  bolt_s3fs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -49,13 +44,7 @@ add_executable(bolt_s3registration_test S3FileSystemRegistrationTest.cpp)
 add_test(bolt_s3registration_test bolt_s3registration_test)
 target_link_libraries(
   bolt_s3registration_test
-  bolt_file
-  bolt_s3fs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_dwio_parquet_reader
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -63,21 +52,14 @@ target_link_libraries(
 add_executable(bolt_s3finalize_test S3FileSystemFinalizeTest.cpp)
 add_test(bolt_s3finalize_test bolt_s3finalize_test)
 target_link_libraries(
-  bolt_s3finalize_test bolt_s3fs bolt_file bolt_core GTest::gtest GTest::gtest_main
+  bolt_s3finalize_test bolt_testutils GTest::gtest GTest::gtest_main
 )
 
 add_executable(bolt_s3insert_test S3InsertTest.cpp)
 add_test(bolt_s3insert_test bolt_s3insert_test)
 target_link_libraries(
   bolt_s3insert_test
-  bolt_file
-  bolt_s3fs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_dwio_parquet_writer
-  bolt_dwio_parquet_reader
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -90,13 +72,7 @@ add_test(
 )
 target_link_libraries(
   bolt_s3read_test
-  bolt_file
-  bolt_s3fs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_dwio_parquet_reader
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -104,21 +80,14 @@ target_link_libraries(
 add_executable(bolt_s3metrics_test S3FileSystemMetricsTest.cpp)
 add_test(bolt_s3metrics_test bolt_s3metrics_test)
 target_link_libraries(
-  bolt_s3metrics_test bolt_s3fs bolt_exec_test_lib GTest::gtest GTest::gtest_main
+  bolt_s3metrics_test bolt_testutils GTest::gtest GTest::gtest_main
 )
 
 add_executable(bolt_s3multiendpoints_test S3MultipleEndpointsTest.cpp)
 add_test(bolt_s3multiendpoints_test bolt_s3multiendpoints_test)
 target_link_libraries(
   bolt_s3multiendpoints_test
-  bolt_file
-  bolt_s3fs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_dwio_parquet_reader
-  bolt_dwio_parquet_writer
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

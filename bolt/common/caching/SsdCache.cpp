@@ -99,7 +99,7 @@ bool SsdCache::startWrite() {
 void SsdCache::write(std::vector<CachePin> pins) {
   BOLT_CHECK_LE(numShards_, writesInProgress_);
 
-  TestValue::adjust("bytedance::bolt::cache::SsdCache::write", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::cache::SsdCache::write", this);
 
   const auto startTimeUs = getCurrentTimeMicro();
 

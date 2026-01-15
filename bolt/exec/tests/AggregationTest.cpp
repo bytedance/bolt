@@ -164,7 +164,7 @@ class AggregationTest : public OperatorTestBase,
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
     OperatorTestBase::SetUpTestCase();
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   static void TearDownTestCase() {

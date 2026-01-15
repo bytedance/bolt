@@ -176,13 +176,13 @@ RowVectorPtr TableScan::getOutput() {
         blockingReason_ = BlockingReason::kYield;
         blockingFuture_ = ContinueFuture{folly::Unit{}};
         // A point for test code injection.
-        TestValue::adjust(
+        BOLT_TEST_ADJUST(
             "bytedance::bolt::exec::TableScan::getOutput::bail", this);
         return nullptr;
       }
 
       // A point for test code injection.
-      TestValue::adjust("bytedance::bolt::exec::TableScan::getOutput", this);
+      BOLT_TEST_ADJUST("bytedance::bolt::exec::TableScan::getOutput", this);
 
       exec::Split split;
       curStatus_ = "getOutput: task->getSplitOrFuture";

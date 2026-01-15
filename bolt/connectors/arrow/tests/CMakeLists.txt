@@ -19,10 +19,6 @@ add_test(bolt_arrow_connector_test bolt_arrow_connector_test)
 
 target_link_libraries(
   bolt_arrow_connector_test
-  bolt_arrow_connector
-  bolt_arrow_bridge
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  bolt_aggregates
+  bolt_testutils
   GTest::gtest
 )

@@ -36,7 +36,7 @@ elseif(${BOLT_BUILD_TEST_UTILS})
   add_subdirectory(tests/utils)
 endif()
 
-add_library(
+bolt_add_library(
   bolt_dwio_common
   BitConcatenation.cpp
   BitPackDecoder.cpp

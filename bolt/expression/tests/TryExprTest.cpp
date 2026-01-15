@@ -46,7 +46,7 @@ class TryExprTest : public functions::test::FunctionBaseTest {
  protected:
   static void SetUpTestCase() {
     FunctionBaseTest::SetUpTestCase();
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 };
 

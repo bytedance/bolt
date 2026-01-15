@@ -54,7 +54,7 @@ class ParquetWriterTest : public ParquetTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    testutil::TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
     bytedance::bolt::connector::hive::CheckHiveConnectorFactoryInit<
         bytedance::bolt::connector::hive::HiveConnectorFactory>();
     auto hiveConnector =

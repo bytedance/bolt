@@ -23,13 +23,9 @@ add_test(
 )
 target_link_libraries(
   bolt_dwio_txt_writer_test
-  bolt_dwio_txt_writer
-  bolt_link_libs
-  bolt_arrow_bridge
-  arrow::arrow
-  ${FMT}
-  ${TXT_TEST_LINK_LIBS}
+PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
+  GTest::gmock
 )
-if(BOLT_ENABLE_PARQUET)
-  target_link_libraries(bolt_dwio_txt_writer_test bolt_dwio_arrow_parquet_writer)
-endif()

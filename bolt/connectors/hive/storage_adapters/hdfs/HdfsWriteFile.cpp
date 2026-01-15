@@ -68,7 +68,7 @@ HdfsWriteFile::~HdfsWriteFile() {
 
 void HdfsWriteFile::close() {
   int success = driver_->CloseFile(hdfsClient_, hdfsFile_);
-  common::testutil::TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::connectors::hive::HdfsWriteFile::close", &success);
   hdfsFile_ = nullptr;
   BOLT_CHECK_EQ(

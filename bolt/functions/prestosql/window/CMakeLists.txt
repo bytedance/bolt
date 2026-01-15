@@ -29,8 +29,8 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_window CumeDist.cpp FirstLastValue.cpp LeadLag.cpp WindowFunctionsRegistration.cpp)
+bolt_add_library(bolt_window CumeDist.cpp FirstLastValue.cpp LeadLag.cpp WindowFunctionsRegistration.cpp)
 
 target_link_libraries(
-  bolt_window bolt_buffer bolt_exec bolt_functions_window ${FOLLY_WITH_DEPENDENCIES}
+  bolt_window bolt_buffer bolt_exec bolt_functions_window Folly::folly
 )

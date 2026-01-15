@@ -28,6 +28,6 @@
 add_executable(file_utils_test FileUtilsTests.cpp)
 add_test(file_utils_test file_utils_test)
 target_link_libraries(
-  file_utils_test bolt_dwio_catalog_fbhive bolt_dwio_common_exception GTest::gtest
+  file_utils_test bolt_testutils GTest::gtest
   GTest::gtest_main GTest::gmock
 )

@@ -48,96 +48,68 @@ add_test(bolt_type_test bolt_type_test)
 
 target_link_libraries(
   bolt_type_test
-  bolt_type
-  bolt_common_base
-  ${FOLLY_WITH_DEPENDENCIES}
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_filter_benchmark FilterBenchmark.cpp)
 
 target_link_libraries(
   bolt_filter_benchmark
-  bolt_type
-  bolt_serialization
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_negated_values_filter_benchmark NegatedValuesFilterBenchmark.cpp)
 
 target_link_libraries(
   bolt_negated_values_filter_benchmark
-  bolt_type
-  bolt_serialization
-  Folly::folly
+   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_negated_bytes_values_benchmark NegatedBytesValuesBenchmark.cpp)
 
 target_link_libraries(
   bolt_negated_bytes_values_benchmark
-  bolt_type
-  bolt_serialization
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_negated_bigint_range_benchmark NegatedBigintRangeBenchmark.cpp)
 
 target_link_libraries(
   bolt_negated_bigint_range_benchmark
-  bolt_type
-  bolt_serialization
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_negated_bytes_range_benchmark NegatedBytesRangeBenchmark.cpp)
 
 target_link_libraries(
   bolt_negated_bytes_range_benchmark
-  bolt_type
-  bolt_serialization
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )
 
 add_executable(bolt_string_view_benchmark StringViewBenchmark.cpp)
 
 target_link_libraries(
   bolt_string_view_benchmark
-  bolt_type
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  bolt_process
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )

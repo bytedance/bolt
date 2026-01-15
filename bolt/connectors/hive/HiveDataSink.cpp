@@ -627,7 +627,7 @@ void HiveDataSink::abort() {
 void HiveDataSink::closeInternal() {
   BOLT_CHECK_NE(state_, State::kRunning);
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::connector::hive::HiveDataSink::closeInternal", this);
 
   if (state_ == State::kClosed) {

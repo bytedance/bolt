@@ -31,31 +31,6 @@
 
 using int128_t = __int128;
 
-extern "C" {
-
-// Just for JIT test
-int StringViewCompareWrapper(char* l, char* r) {
-  auto l_len = *(int32_t*)l;
-  auto r_len = *(int32_t*)r;
-
-  std::string_view left_sv;
-  std::string_view right_sv;
-  if (l_len <= 12) {
-    left_sv = std::string_view((char*)(l + 4), l_len);
-  } else {
-    left_sv = std::string_view(*(char**)(l + 8), l_len);
-  }
-  if (r_len <= 12) {
-    right_sv = std::string_view((char*)(r + 4), r_len);
-  } else {
-    right_sv = std::string_view(*(char**)(r + 8), r_len);
-  }
-
-  auto res = left_sv.compare(right_sv);
-  return res;
-}
-}
-
 namespace bytedance::bolt::jit::test {
 
 template <typename T>

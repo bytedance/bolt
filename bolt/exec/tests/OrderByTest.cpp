@@ -93,7 +93,7 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
     OperatorTestBase::SetUpTestCase();
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   void SetUp() override {

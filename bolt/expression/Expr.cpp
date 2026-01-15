@@ -1051,7 +1051,7 @@ Expr::PeelEncodingsResult Expr::peelEncodings(
         !peeledVectors[0]->memoDisabled();
   }
 
-  common::testutil::TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Expr::peelEncodings::mayCache", &mayCache);
   return {newRows, finalRowsHolder.get(), mayCache};
 }

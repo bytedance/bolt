@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_dwio_paimon_deletion_vector_reader DeletionFileReader.cpp DeletionVector.cpp)
+bolt_add_library(bolt_dwio_paimon_deletion_vector_reader DeletionFileReader.cpp DeletionVector.cpp)
 
 find_package(roaring REQUIRED)
 

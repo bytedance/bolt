@@ -27,7 +27,7 @@
 
 # for generated headers
 
-add_library(bolt_abfs RegisterAbfsFileSystem.cpp)
+bolt_add_library(bolt_abfs RegisterAbfsFileSystem.cpp)
 
 if(BOLT_ENABLE_ABFS)
   target_sources(bolt_abfs PRIVATE AbfsFileSystem.cpp AbfsUtils.cpp)

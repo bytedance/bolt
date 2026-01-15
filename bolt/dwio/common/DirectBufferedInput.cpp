@@ -400,7 +400,7 @@ std::vector<cache::CachePin> DirectCoalescedLoad::loadData(bool isPrefetch) {
   if (isPrefetch) {
     ioStats_->prefetch().increment(size + overread);
   }
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::cache::DirectCoalescedLoad::loadData", this);
   return {};
 }

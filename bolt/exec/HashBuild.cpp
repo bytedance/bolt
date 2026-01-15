@@ -453,7 +453,7 @@ void HashBuild::addInput(RowVectorPtr input) {
     return;
   }
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::addInput", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::addInput", this);
 
   activeRows_.resize(input->size());
   activeRows_.setAll();
@@ -955,7 +955,7 @@ bool HashBuild::finishHashBuild() {
     return false;
   }
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::finishHashBuild", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::finishHashBuild", this);
 
   auto promisesGuard = folly::makeGuard([&]() {
     // Realize the promises so that the other Drivers (which were not
@@ -1174,8 +1174,7 @@ void HashBuild::ensureTableFits(uint64_t numRows) {
   const uint64_t bytesToReserve = table_->estimateHashTableSize(numRows) * 1.1;
   {
     Operator::ReclaimableSectionGuard guard(this);
-    TestValue::adjust(
-        "bytedance::bolt::exec::HashBuild::ensureTableFits", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::ensureTableFits", this);
     if (pool()->maybeReserve(bytesToReserve)) {
       return;
     }
@@ -1443,7 +1442,7 @@ void HashBuild::reclaim(
   BOLT_CHECK_NOT_NULL(driver);
   BOLT_CHECK(!nonReclaimableSection_);
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::reclaim", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::reclaim", this);
 
   // can another thread  call close() while hashbuild is in arbitration and
   // reclaim is called on it?

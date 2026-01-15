@@ -30,6 +30,7 @@ add_executable(bolt_process_test ExceptionTraceTest.cpp TraceContextTest.cpp)
 add_test(bolt_process_test bolt_process_test)
 
 target_link_libraries(
-  bolt_process_test PRIVATE bolt_process fmt::fmt GTest::gtest GTest::gtest_main glog::glog
-                            gflags::gflags
+  bolt_process_test PRIVATE
+                    bolt_testutils
+                    GTest::gtest GTest::gtest_main
 )

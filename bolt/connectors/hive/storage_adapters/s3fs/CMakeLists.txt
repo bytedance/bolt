@@ -27,7 +27,7 @@
 
 # for generated headers
 
-add_library(bolt_s3fs RegisterS3FileSystem.cpp)
+bolt_add_library(bolt_s3fs RegisterS3FileSystem.cpp)
 if(BOLT_ENABLE_S3)
   target_sources(
     bolt_s3fs PRIVATE S3FileSystem.cpp S3Util.cpp S3Config.cpp S3WriteFile.cpp S3ReadFile.cpp

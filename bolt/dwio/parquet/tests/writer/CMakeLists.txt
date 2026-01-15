@@ -25,7 +25,10 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_parquet_writer_sink_test SinkTests.cpp)
+add_executable(bolt_parquet_writer_sink_test
+  SinkTests.cpp
+  ParquetWriterTest.cpp
+)
 
 add_test(
   NAME bolt_parquet_writer_sink_test
@@ -35,43 +38,14 @@ add_test(
 
 target_link_libraries(
   bolt_parquet_writer_sink_test
-  bolt_dwio_parquet_writer
-  bolt_dwio_common_test_utils
-  bolt_vector_fuzzer
-  bolt_link_libs
-  Folly::folly
-  ${TEST_LINK_LIBS}
+  bolt_testutils
   GTest::gtest
-  fmt::fmt
-)
-
-add_executable(bolt_parquet_writer_test ParquetWriterTest.cpp)
-
-add_test(
-  NAME bolt_parquet_writer_test
-  COMMAND bolt_parquet_writer_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(
-  bolt_parquet_writer_test
-  bolt_dwio_parquet_writer
-  bolt_dwio_common_test_utils
-  bolt_link_libs
-  bolt_process
-  Folly::folly
-  ${TEST_LINK_LIBS}
-  GTest::gtest
-  fmt::fmt
+  GTest::gtest_main
 )
 
 add_executable(bolt_dwio_parquet_writer_benchmark ParquetWriterBenchmark.cpp)
 target_link_libraries(
   bolt_dwio_parquet_writer_benchmark
-  bolt_dwio_parquet_writer
-  bolt_exec_test_lib
-  bolt_exec
-  bolt_hive_connector
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
 )

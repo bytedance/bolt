@@ -29,50 +29,23 @@ add_subdirectory(basic)
 add_subdirectory(unstable)
 
 set(BOLT_BENCHMARK_DEPS
-    bolt_type
-    bolt_vector
-    bolt_vector_fuzzer
-    bolt_expression
-    bolt_parse_parser
-    bolt_parse_expression
-    bolt_serialization
-    Folly::folly
+    bolt_testutils
     ${FOLLY_BENCHMARK}
-    ${DOUBLE_CONVERSION}
-    gflags::gflags
-    glog::glog
+    GTest::gtest
 )
 
-add_library(bolt_benchmark_builder ExpressionBenchmarkBuilder.cpp)
+add_library(bolt_benchmark_builder OBJECT ExpressionBenchmarkBuilder.cpp)
 target_link_libraries(bolt_benchmark_builder ${BOLT_BENCHMARK_DEPS})
-# This is a workaround for the use of VectorTestBase.h which includes gtest.h
-target_link_libraries(bolt_benchmark_builder GTest::gtest)
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(tpch)
 endif()
 
-add_library(bolt_query_benchmark QueryBenchmarkBase.cpp)
+add_library(bolt_query_benchmark OBJECT QueryBenchmarkBase.cpp)
 target_link_libraries(
-  bolt_query_benchmark
-  bolt_aggregates
-  bolt_connector
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_dwio_common
-  bolt_dwio_common_exception
-  bolt_dwio_parquet_reader
-  bolt_dwio_common_test_utils
-  bolt_exception
-  bolt_memory
-  bolt_process
-  bolt_serialization
-  bolt_encode
-  bolt_type
-  bolt_type_fbhive
-  bolt_caching
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_query_benchmark PRIVATE
+  bolt_benchmark_builder
+  bolt_testutils
   Folly::follybenchmark
   fmt::fmt
 )

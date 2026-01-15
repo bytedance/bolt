@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_parse_expression Expressions.cpp TypeResolver.cpp)
+bolt_add_library(bolt_parse_expression Expressions.cpp TypeResolver.cpp)
 target_link_libraries(
   bolt_parse_expression
   bolt_buffer
@@ -36,7 +36,7 @@ target_link_libraries(
   bolt_function_registry
 )
 
-add_library(bolt_parse_parser ExpressionsParser.cpp QueryPlanner.cpp)
+bolt_add_library(bolt_parse_parser ExpressionsParser.cpp QueryPlanner.cpp)
 target_link_libraries(bolt_parse_parser bolt_parse_expression bolt_type bolt_duckdb_parser)
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)

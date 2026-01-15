@@ -201,7 +201,7 @@ bool SelectiveStringDirectColumnReader::try8ConsecutiveSmall(
     int startRow) {
 #ifndef NDEBUG
   bool testCoverage[] = {kScatter, kGreaterThan4};
-  common::testutil::TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::dwrf::SelectiveStringDirectColumnReader::try8ConsecutiveSmall",
       testCoverage);
 #endif

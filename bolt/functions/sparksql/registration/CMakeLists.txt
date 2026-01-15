@@ -27,7 +27,7 @@
 
 find_package(simdjson CONFIG REQUIRED)
 
-add_library(
+bolt_add_library(
   bolt_functions_spark
   Register.cpp
   RegisterArray.cpp

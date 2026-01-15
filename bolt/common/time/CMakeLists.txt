@@ -29,5 +29,9 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_time CpuWallTimer.cpp Timer.cpp)
-target_link_libraries(bolt_time PUBLIC bolt_test_util ${FOLLY_WITH_DEPENDENCIES} ${FMT})
+bolt_add_library(bolt_time CpuWallTimer.cpp Timer.cpp)
+target_link_libraries(bolt_time
+      PRIVATE
+        Folly::folly
+        fmt::fmt
+        $<$<CONFIG:Debug>:bolt_debug_util>)

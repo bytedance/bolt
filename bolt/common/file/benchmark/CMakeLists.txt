@@ -33,4 +33,4 @@ target_link_libraries(
 
 add_executable(bolt_read_benchmark ReadBenchmarkMain.cpp)
 
-target_link_libraries(bolt_read_benchmark PRIVATE bolt_read_benchmark_lib)
+target_link_libraries(bolt_read_benchmark PRIVATE bolt_read_benchmark_lib bolt_testutils)

@@ -29,85 +29,43 @@ add_executable(bolt_aggregates_simple_aggregates_bm SimpleAggregates.cpp)
 
 target_link_libraries(
   bolt_aggregates_simple_aggregates_bm
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_functions_prestosql
-  bolt_dwio_common_exception
+  bolt_testutils
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
   ${FOLLY_BENCHMARK}
-  gflags::gflags
 )
 
 add_executable(bolt_aggregates_string_keys_bm TwoStringKeys.cpp)
 
 target_link_libraries(
   bolt_aggregates_string_keys_bm
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_functions_prestosql
-  bolt_dwio_common_exception
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  gflags::gflags
 )
 
 add_executable(bolt_aggregates_reduce_agg_bm ReduceAgg.cpp)
 
 target_link_libraries(
   bolt_aggregates_reduce_agg_bm
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_functions_prestosql
-  bolt_dwio_common_exception
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  gflags::gflags
 )
 
 add_executable(bolt_various_aggregates_bm VariousAggregates.cpp)
 
 target_link_libraries(
   bolt_various_aggregates_bm
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_functions_prestosql
-  bolt_functions_spark_aggregates
-  bolt_dwio_common_exception
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  gflags::gflags
 )
 
 add_executable(bolt_join_bm JoinBenchmarks.cpp)
 
 target_link_libraries(
   bolt_join_bm
-  bolt_aggregates
-  bolt_hive_connector
-  bolt_functions_lib
-  bolt_exec_test_lib
-  bolt_functions_prestosql
-  bolt_functions_spark_aggregates
-  bolt_dwio_common_exception
   bolt_vector_fuzzer
-  bolt_vector_test_lib
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  gflags::gflags
 )

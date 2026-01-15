@@ -42,24 +42,7 @@ int64_t extern_test_sum(int64_t a, int64_t b) {
   return a + b;
 }
 
-// extern int64_t extern_test_sum(int64_t a, int64_t b);
-
-int StringViewWrapper(const char* l, const char* r) noexcept {
-  bytedance::bolt::jit::test::StringView* left =
-      (bytedance::bolt::jit::test::StringView*)l;
-  bytedance::bolt::jit::test::StringView* right =
-      (bytedance::bolt::jit::test::StringView*)r;
-
-  // only for inline sv
-  auto res = std::memcmp(left->inline_chars, right->inline_chars, left->len);
-  if (res < 0) {
-    return -1;
-  }
-  if (res > 0) {
-    return 1;
-  }
-  return 0;
-}
+extern int StringViewCompareWrapper(char* l, char* r);
 
 } // ~ extern
 
@@ -82,6 +65,13 @@ class JitEngineTest : public ::testing::Test {
 using namespace bolt::jit;
 
 TEST_F(JitEngineTest, basic) {
+  // Force the linker import symbol 'StringViewCompareWrapper'
+  int32_t sz1{0};
+  int32_t sz2{0};
+  auto res = ::StringViewCompareWrapper(
+      reinterpret_cast<char*>(&sz1), reinterpret_cast<char*>(&sz2));
+  ASSERT_TRUE(res == 0);
+
   std::string fn = "sum_test2";
   auto tsm = jit->CreateTSModule(fn);
 
@@ -183,7 +173,7 @@ TEST_F(JitEngineTest, cacheLimit) {
   jit->GetCache().clear();
   jit->SetMemoryLimit(LIMIT);
 
-  for (auto i = 0; i < 16; ++i) {
+  for (auto i = 0; i < 128; ++i) {
     std::string fn = "test_func_" + std::to_string(i);
     std::regex p("function_name");
     std::string ir = std::regex_replace(irTmpl, p, fn);
@@ -267,7 +257,7 @@ TEST_F(JitEngineTest, concurreny) {
   };
 
   std::vector<std::jthread> threads;
-  for (auto i = 0; i < 20; ++i) {
+  for (auto i = 0; i < 256; ++i) {
     threads.emplace_back(codegenWorker);
   }
   for (auto&& t : threads) {

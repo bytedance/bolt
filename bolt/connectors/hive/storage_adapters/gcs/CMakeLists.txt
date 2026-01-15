@@ -27,7 +27,7 @@
 
 # for generated headers
 
-add_library(bolt_gcs RegisterGCSFileSystem.cpp)
+bolt_add_library(bolt_gcs RegisterGCSFileSystem.cpp)
 
 if(BOLT_ENABLE_GCS)
   target_sources(bolt_gcs PRIVATE GCSFileSystem.cpp GCSUtil.cpp)
@@ -37,7 +37,7 @@ if(BOLT_ENABLE_GCS)
     add_subdirectory(tests)
   endif()
 
-  if(${BOLT_ENABLE_BENCHMARKS})
+  if(${BOLT_BUILD_BENCHMARKS})
     add_subdirectory(benchmark)
   endif()
 

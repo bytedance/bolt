@@ -21,9 +21,7 @@ add_executable(
 
 target_link_libraries(
   bolt_memory_sparksql_test
-  bolt_memory
-  bolt_common_base
-  glog::glog
+  bolt_testutils
   GTest::gmock
   GTest::gtest
   GTest::gtest_main

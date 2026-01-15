@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(
+bolt_add_library(
   bolt_dwio_parquet_encryption
         EncryptionInternal.cpp
         InternalFileDecryptor.cpp)
@@ -26,4 +26,5 @@ target_link_libraries(
   bolt_type
   bolt_memory
   arrow::arrow
-  ${CURL_LIBRARIES})
+  CURL::libcurl
+)

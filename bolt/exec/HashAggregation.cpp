@@ -542,9 +542,9 @@ void triggerSegfault() {
 }
 
 RowVectorPtr HashAggregation::getOutput() {
-  if (bytedance::bolt::common::testutil::TestValue::enabled()) {
+  if (BOLT_TEST_VALUE_ENABLED()) {
     bool injectSegfault = false;
-    bytedance::bolt::common::testutil::TestValue::adjust(
+    BOLT_TEST_ADJUST(
         "bytedance::bolt::exec::HashAggregation::getOutput", &injectSegfault);
     if (injectSegfault) {
       triggerSegfault();

@@ -39,7 +39,9 @@ add_test(
 )
 
 target_link_libraries(
-  aggregate_companion_functions_test bolt_exec bolt_function_registry bolt_process GTest::gtest
+  aggregate_companion_functions_test PRIVATE
+  bolt_testutils
+  GTest::gtest
   GTest::gtest_main
 )
 
@@ -204,43 +206,10 @@ add_test(
 )
 
 set(BOLT_EXEC_TEST_DEPENDENCIES
-    bolt_dwio_common
-    bolt_dwio_common_exception
-    bolt_dwio_common_test_utils
-    bolt_dwio_parquet_reader
-    bolt_dwio_parquet_writer
-    bolt_dwio_orc_reader
-    bolt_dwio_orc_writer
-    bolt_exec
-    bolt_exec_test_lib
-    bolt_functions_json
-    bolt_functions_lib
-    bolt_functions_prestosql
-    bolt_functions_test_lib
-    bolt_hive_connector
-    bolt_memory
-    bolt_serialization
-    bolt_test_util
-    bolt_type
-    bolt_vector
-    bolt_vector_fuzzer
-    bolt_window
-    Boost::atomic
-    Boost::context
-    Boost::date_time
-    Boost::filesystem
-    Boost::program_options
-    Boost::thread
-    Boost::system
+    bolt_testutils
     GTest::gtest
     GTest::gtest_main
     GTest::gmock
-    ${FOLLY_WITH_DEPENDENCIES}
-    bolt_process
-    gflags::gflags
-    glog::glog
-    fmt::fmt
-    ${FILESYSTEM}
 )
 
 target_link_libraries(bolt_exec_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
@@ -271,18 +240,14 @@ add_executable(bolt_in_10_min_demo BoltIn10MinDemo.cpp)
 
 target_link_libraries(
   bolt_in_10_min_demo
-  bolt_aggregates
-  bolt_type
-  bolt_vector
-  bolt_vector_test_lib
-  bolt_exec
-  bolt_exec_test_lib
   bolt_tpch_connector
-  bolt_memory
+  bolt_testutils
 )
 
 # Join Fuzzer.
-add_library(bolt_join_fuzzer JoinFuzzer.cpp)
+# exclude bolt_join_fuzzer from bolt_testutils
+# to avoid multiple definition error
+add_library(bolt_join_fuzzer OBJECT JoinFuzzer.cpp)
 
 target_link_libraries(
   bolt_join_fuzzer bolt_type bolt_vector_fuzzer bolt_exec_test_lib bolt_expression_test_utility
@@ -290,19 +255,18 @@ target_link_libraries(
 
 add_executable(bolt_join_fuzzer_test JoinFuzzerTest.cpp)
 
-target_link_libraries(bolt_join_fuzzer_test bolt_join_fuzzer GTest::gtest GTest::gtest_main)
+target_link_libraries(bolt_join_fuzzer_test PRIVATE
+  bolt_join_fuzzer
+  bolt_testutils
+  GTest::gtest
+)
 
 add_executable(bolt_exchange_fuzzer_test ExchangeFuzzer.cpp)
 
 target_link_libraries(
   bolt_exchange_fuzzer_test
-  bolt_exec_test_lib
-  bolt_aggregates
-  bolt_vector_test_lib
-  bolt_vector_fuzzer
-  bolt_process
+  bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_aggregation_runner_test AggregationRunnerTest.cpp)
@@ -310,11 +274,8 @@ add_executable(bolt_aggregation_runner_test AggregationRunnerTest.cpp)
 target_link_libraries(
   bolt_aggregation_runner_test
   bolt_aggregation_fuzzer
-  bolt_fuzzer_util
-  bolt_aggregates
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(spark_aggregation_runner_test SparkAggregationRunnerTest.cpp)
@@ -325,9 +286,8 @@ target_link_libraries(
   bolt_fuzzer_util
   bolt_aggregates
   bolt_functions_spark_aggregates
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(spark_window_runner_test SparkWindowRunnerTest.cpp)
@@ -339,22 +299,22 @@ target_link_libraries(
   bolt_aggregates
   bolt_functions_spark_aggregates
   bolt_functions_spark_window
-  bolt_expression_test_utility
+  bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_library(bolt_simple_aggregate SimpleArrayAggAggregate.cpp SimpleAverageAggregate.cpp)
 
 target_link_libraries(
-  bolt_simple_aggregate bolt_exec bolt_expression bolt_expression_functions bolt_aggregates
+  bolt_simple_aggregate PUBLIC bolt_testutils
 )
 
 add_executable(bolt_simple_aggregate_test Main.cpp SimpleAggregateAdapterTest.cpp)
 
 target_link_libraries(
   bolt_simple_aggregate_test bolt_simple_aggregate bolt_exec bolt_functions_aggregates_test_lib
-  GTest::gtest GTest::gtest_main
+  bolt_testutils
+  GTest::gtest
 )
 
 add_library(
@@ -362,19 +322,15 @@ add_library(
 )
 target_link_libraries(
   bolt_spiller_join_benchmark_base
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_memory
-  bolt_vector_fuzzer
-  glog::glog
-  gflags::gflags
-  Folly::folly
+  bolt_testutils
   pthread
 )
 
 add_executable(bolt_spiller_join_benchmark SpillerJoinInputBenchmarkTest.cpp)
 target_link_libraries(
-  bolt_spiller_join_benchmark bolt_exec bolt_exec_test_lib bolt_spiller_join_benchmark_base
+  bolt_spiller_join_benchmark PUBLIC
+  bolt_spiller_join_benchmark_base
+  bolt_testutils
 )
 
 add_library(
@@ -382,13 +338,7 @@ add_library(
 )
 target_link_libraries(
   bolt_spiller_aggregate_benchmark_base
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_memory
-  bolt_vector_fuzzer
-  glog::glog
-  gflags::gflags
-  Folly::folly
+  bolt_testutils
   pthread
 )
 
@@ -405,8 +355,10 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  cpr_http_client_test bolt_process cpr::cpr GTest::gtest
-  GTest::gtest_main stdc++
+  cpr_http_client_test PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

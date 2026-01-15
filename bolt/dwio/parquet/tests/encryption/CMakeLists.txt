@@ -25,8 +25,8 @@ add_test(
 
 target_link_libraries(
   bolt_dwio_parquet_encryption_test
-  bolt_dwio_parquet_encryption
-  bolt_dwio_parquet_arrow_lib
-  bolt_memory
+  #bolt_dwio_parquet_encryption
+  #bolt_dwio_parquet_arrow_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main)

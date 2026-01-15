@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_token_extractor ITokenExtractor.cpp)
+bolt_add_library(bolt_token_extractor ITokenExtractor.cpp)
 target_compile_features(bolt_token_extractor PRIVATE cxx_std_20)
 
-target_link_libraries(bolt_token_extractor xxHash::xxhash ${FOLLY_WITH_DEPENDENCIES})
+target_link_libraries(bolt_token_extractor xxHash::xxhash Folly::folly)

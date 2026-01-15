@@ -87,7 +87,7 @@ void Merge::initializeTreeOfLosers() {
 }
 
 BlockingReason Merge::isBlocked(ContinueFuture* future) {
-  TestValue::adjust("bytedance::bolt::exec::Merge::isBlocked", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Merge::isBlocked", this);
 
   auto reason = addMergeSources(future);
   if (reason != BlockingReason::kNotBlocked) {

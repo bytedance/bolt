@@ -100,7 +100,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # Add all options below
 option(BOLT_BUILD_TESTING
-       "Enable Bolt tests. This will enable all other build options automatically." ON
+       "Enable Bolt tests. This will enable all other build options automatically." OFF
 )
 option(BOLT_BUILD_MINIMAL
        "Build a minimal set of components only. This will override other build options." OFF
@@ -136,8 +136,6 @@ option(BOLT_ENABLE_EXAMPLES
        "Build examples. This will enable BOLT_ENABLE_EXPRESSION automatically." OFF
 )
 option(BOLT_ENABLE_SUBSTRAIT "Build Substrait-to-Bolt converter." OFF)
-option(BOLT_ENABLE_BENCHMARKS "Enable Bolt top level benchmarks." OFF)
-option(BOLT_ENABLE_BENCHMARKS_BASIC "Enable Bolt basic benchmarks." OFF)
 option(BOLT_ENABLE_S3 "Build S3 Connector" OFF)
 option(BOLT_ENABLE_GCS "Build GCS Connector" OFF)
 option(BOLT_ENABLE_ABFS "Build Abfs Connector" OFF)
@@ -153,7 +151,6 @@ option(BOLT_ENABLE_CCACHE "Use ccache if installed." ON)
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
 option(BOLT_BUILD_PYTHON_PACKAGE "Builds Bolt Python bindings" OFF)
-option(BOLT_BUILD_BENCHMARKS "Builds Bolt benchmarks" OFF)
 
 # make buildPartitionBounds_ a vector int64 instead of int32 to avoid integer overflow when the
 # hashtable has billions of records
@@ -167,6 +164,10 @@ option(BOLT_ON_TCE "Build Bolt on Bytedance TCE Environment" OFF)
 option(BOLT_ENABLE_TBB "Enable oneTBB support" OFF)
 option(BOLT_ENABLE_TORCH "Enable torch script support" OFF)
 option(BOLT_ENABLE_CUDF "Enable cuDF support" OFF)
+
+# for CI / benchmarkpurpose
+option(BOLT_BUILD_BENCHMARKS "Builds Bolt benchmarks" OFF)
+option(BOLT_BUILD_BENCHMARKS_BASIC "Enable Bolt basic benchmarks." OFF)
 
 if(BOLT_ENABLE_SPARK_COMPATIBLE)
   set(SPARK_VERSION
@@ -257,8 +258,8 @@ if(${BOLT_ENABLE_EXAMPLES})
 endif()
 
 if(${BOLT_BUILD_BENCHMARKS})
-  set(BOLT_ENABLE_BENCHMARKS ON)
-  set(BOLT_ENABLE_BENCHMARKS_BASIC ON)
+  set(BOLT_BUILD_BENCHMARKS ON)
+  set(BOLT_BUILD_BENCHMARKS_BASIC ON)
   set(BOLT_ENABLE_DUCKDB ON)
   set(BOLT_ENABLE_PARSE ON)
   set(BOLT_ENABLE_PARQUET ON)
@@ -286,11 +287,11 @@ if(BOLT_BUILD_TESTING_WITH_COVERAGE)
   endif()
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
-  set(BOLT_ENABLE_BENCHMARKS_BASIC ON)
+if(${BOLT_BUILD_BENCHMARKS})
+  set(BOLT_BUILD_BENCHMARKS_BASIC ON)
 endif()
 
-if(BOLT_ENABLE_BENCHMARKS_BASIC)
+if(BOLT_BUILD_BENCHMARKS_BASIC)
   set(BOLT_BUILD_TEST_UTILS ON)
 endif()
 
@@ -317,8 +318,8 @@ if(${BOLT_BUILD_PYTHON_PACKAGE})
   set(BOLT_ENABLE_ABFS OFF)
   set(BOLT_ENABLE_SUBSTRAIT ON)
   set(BOLT_CODEGEN_SUPPORT OFF)
-  set(BOLT_ENABLE_BENCHMARKS_BASIC OFF)
-  set(BOLT_ENABLE_BENCHMARKS OFF)
+  set(BOLT_BUILD_BENCHMARKS_BASIC OFF)
+  set(BOLT_BUILD_BENCHMARKS OFF)
   set(BOLT_ENABLE_PARQUET ON)
   set(BOLT_ENABLE_HDFS ON)
 endif()
@@ -432,12 +433,6 @@ else()
   message(FATAL_ERROR "Unknown system type")
 endif()
 
-if(ENABLE_EXCEPTION_TRACE)
-  add_link_options("-Wl,--wrap=__cxa_throw"
-    "-Wl,--undefined=__wrap___cxa_throw" )
-
-endif()
-
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm64" AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   set(ON_APPLE_M1 True)
 endif()
@@ -537,28 +532,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Boost CONFIG REQUIRED)
 
-# Range-v3 will be enable when the codegen code actually lands keeping it here for reference.
-# find_package(range-v3)
-
 find_package(gflags CONFIG REQUIRED)
-# set_source(gflags) resolve_dependency(gflags COMPONENTS shared)
-if(NOT TARGET gflags::gflags)
-  # This is a bit convoluted, but we want to be able to use gflags::gflags as a target even when
-  # bolt is built as a subproject which uses `find_package(gflags)` which does not create a globally
-  # imported target that we can ALIAS.
-  add_library(gflags_gflags INTERFACE)
-  target_link_libraries(gflags_gflags INTERFACE gflags)
-  add_library(gflags::gflags ALIAS gflags_gflags)
-endif()
-
-# if(${gflags_SOURCE} STREQUAL "BUNDLED") # we force glog from source to avoid issues with a system
-# version built # against another gflags version (which is likely) set(glog_SOURCE BUNDLED) else()
-# set(glog_SOURCE SYSTEM) endif() resolve_dependency(glog)
-
-# if(${BOLT_ENABLE_DUCKDB}) set_source(DuckDB) resolve_dependency(DuckDB) endif()
-
-# set_source(fmt) resolve_dependency(fmt)
-
 find_library(EVENT event)
 
 if(${BOLT_ENABLE_TBB})
@@ -566,7 +540,7 @@ if(${BOLT_ENABLE_TBB})
   find_package(TBB REQUIRED)
 endif()
 
-find_library(DOUBLE_CONVERSION double-conversion)
+find_package(double-conversion CONFIG REQUIRED)
 
 # Required for boost.
 find_package(ZLIB)
@@ -577,14 +551,6 @@ if(NOT ${BOLT_BUILD_MINIMAL})
   find_package(zstd CONFIG REQUIRED)
   find_package(Snappy CONFIG REQUIRED)
   find_package(zstd CONFIG REQUIRED)
-  if(NOT TARGET zstd::zstd)
-    if(TARGET zstd::libzstd_static)
-      set(ZSTD_TYPE static)
-    else()
-      set(ZSTD_TYPE shared)
-    endif()
-    add_library(zstd::zstd ALIAS zstd::libzstd_${ZSTD_TYPE})
-  endif()
 endif()
 
 find_package(re2 CONFIG REQUIRED)
@@ -594,11 +560,6 @@ find_package(sonic-cpp CONFIG REQUIRED)
 find_package(simdjson CONFIG REQUIRED)
 find_package(sonic-cpp CONFIG REQUIRED)
 find_package(folly CONFIG REQUIRED)
-
-# We should just use Folly::folly, all the dependencies should be managed by target Folly::folly
-# But, there is an issue in folly recipe: transitive_headers=True doesn't work in conan 1.x bug?
-# Note: it is not elegant solution, just a workaround. It should be ok in conan 2.x
-set(FOLLY_WITH_DEPENDENCIES Folly::folly fmt::fmt)
 
 if(BOLT_ENABLE_REMOTE_FUNCTIONS)
   # TODO: Move this to use resolve_dependency(). For some reason, FBThrift requires clients to
@@ -624,9 +585,6 @@ else()
   set(FOLLY_BENCHMARK Folly::follybenchmark GTest::gtest GTest::gtest_main)
 endif()
 
-# if(NOT ${BOLT_BUILD_MINIMAL}) # Locate or build protobuf. set_source(Protobuf)
-# resolve_dependency(Protobuf 3.21 EXACT) include_directories(${Protobuf_INCLUDE_DIRS}) endif()
-
 find_package(Protobuf CONFIG REQUIRED)
 
 # GCC needs to link a library to enable std::filesystem.
@@ -634,8 +592,8 @@ if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
   set(FILESYSTEM "stdc++fs")
 
   # Ensure we have gcc at least 9+.
-  if(CMAKE_CXX_COMPILER_VERSION LESS 9.0)
-    message(FATAL_ERROR "BOLT requires gcc > 9. Found ${CMAKE_CXX_COMPILER_VERSION}")
+  if(CMAKE_CXX_COMPILER_VERSION LESS 10.0)
+    message(FATAL_ERROR "BOLT requires gcc > 10. Found ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
 
   # Find Threads library
@@ -666,46 +624,18 @@ if(BOLT_ENABLE_COLOCATE_FUNCTIONS)
   set(BOLT_ENABLE_ARROW ON)
 endif()
 
-# On macOS, search Homebrew for keg-only versions of Bison and Flex. Xcode does not provide new
-# enough versions for us to use.
-if(CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-  execute_process(
-    COMMAND brew --prefix bison
-    RESULT_VARIABLE BREW_BISON
-    OUTPUT_VARIABLE BREW_BISON_PREFIX
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  if(BREW_BISON EQUAL 0 AND EXISTS "${BREW_BISON_PREFIX}")
-    message(STATUS "Found Bison keg installed by Homebrew at ${BREW_BISON_PREFIX}")
-    set(BISON_EXECUTABLE "${BREW_BISON_PREFIX}/bin/bison")
-  endif()
-
-  execute_process(
-    COMMAND brew --prefix flex
-    RESULT_VARIABLE BREW_FLEX
-    OUTPUT_VARIABLE BREW_FLEX_PREFIX
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  if(BREW_FLEX EQUAL 0 AND EXISTS "${BREW_FLEX_PREFIX}")
-    message(STATUS "Found Flex keg installed by Homebrew at ${BREW_FLEX_PREFIX}")
-    set(FLEX_EXECUTABLE "${BREW_FLEX_PREFIX}/bin/flex")
-    set(FLEX_INCLUDE_DIR "${BREW_FLEX_PREFIX}/include")
-  endif()
-endif()
-
 find_package(BISON REQUIRED)
 find_package(FLEX REQUIRED)
 find_package(Arrow CONFIG REQUIRED)
 find_package(xxHash CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(roaring REQUIRED)
 
 
-include_directories(SYSTEM bolt)
+include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_SOURCE_DIR}/bolt)
 
-# these were previously vendored in third-party/
 if(NOT BOLT_DISABLE_GOOGLETEST)
-  # set(gtest_SOURCE AUTO) resolve_dependency(gtest) set(BOLT_GTEST_INCUDE_DIR
-  # "${gtest_SOURCE_DIR}/googletest/include" PARENT_SCOPE)
   find_package(GTest CONFIG REQUIRED)
 endif()
 
@@ -714,20 +644,11 @@ add_library(xsimd::xsimd ALIAS xsimd)
 
 find_package(gfx-timsort CONFIG REQUIRED)
 
-if(TARGET gfx::timsort)
-  get_target_property(_dirs gfx::timsort INTERFACE_LINK_DIRECTORIES)
-  set_target_properties(gfx::timsort PROPERTIES INTERFACE_LINK_DIRECTORIES "")
-endif()
-
 find_package(utf8proc REQUIRED)
 
 find_package(date REQUIRED)
 
 include(CTest) # include after project() but before add_subdirectory()
-# if(BOLT_BUILD_TESTING) set(BUILD_TESTING ON) include(CTest) # include after project() but before
-# add_subdirectory() endif()
-
-include_directories(.)
 
 # Adding this down here prevents warnings in dependencies from stopping the build
 if("${TREAT_WARNINGS_AS_ERRORS}")
@@ -753,8 +674,6 @@ install(
   PATTERN
   "*.hpp" # select header files
 )
-
-install(FILES "${CMAKE_BINARY_DIR}/deps/dep.json" DESTINATION deps)
 
 if(${BOLT_ENABLE_SUBSTRAIT})
   install(
@@ -809,6 +728,10 @@ endif()
 if(BOLT_ENABLE_CUDF)
   set(BOLT_ENABLE_ARROW ON)
   find_package(cudf CONFIG REQUIRED)
+endif()
+
+if(${BOLT_ENABLE_SPARK_COMPATIBLE})
+  find_package(celeborn-cpp-client REQUIRED CONFIG)
 endif()
 
 # print all configs

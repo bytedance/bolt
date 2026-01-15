@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_functions_json JsonExtractor.cpp JsonPathTokenizer.cpp SIMDJsonExtractor.cpp
                       SIMDJsonUtil.cpp
 )
@@ -42,7 +42,7 @@ target_link_libraries(
   xxHash::xxhash
   ryu::ryu
   sonic-cpp::sonic-cpp
-  ${FOLLY_WITH_DEPENDENCIES}
+  Folly::folly
 )
 target_compile_features(bolt_functions_json PRIVATE cxx_std_20)
 
