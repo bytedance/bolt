@@ -84,12 +84,27 @@ static utf8proc_bool utf8proc_char_first_byte(const char* u_input);
 static utf8proc_int32_t utf8proc_codepoint_length(utf8proc_int32_t uc);
 
 FOLLY_ALWAYS_INLINE bool isAscii(const char* str, size_t length) {
-  for (auto i = 0; i < length; i++) {
-    if (str[i] & 0x80) {
-      return false;
+  #if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
+    size_t i = 0;
+    const size_t sve_vector_size = svcntb();
+    while (i < length) {
+      svbool_t pgTail = svwhilelt_b8(i, length);
+      svuint8_t v = svld1_u8(pgTail,
+ 	                    reinterpret_cast<const uint8_t*>(str) + i);
+      if (svptest_any(pgTail, svcmpge(pgTail, v, v80))) {
+ 	      return false;
+      }
+ 	    i += sve_vector_size;
     }
-  }
-  return true;
+    return true;
+  #else
+    for (auto i = 0; i < length; i++) {
+      if (str[i] & 0x80) {
+        return false;
+      }
+    }
+    return true;
+  #endif
 }
 
 /// Perform reverse for ascii string input
