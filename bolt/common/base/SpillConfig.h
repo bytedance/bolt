@@ -36,6 +36,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <optional>
 #include "bolt/common/compression/Compression.h"
+#include "bolt/vector/VectorStream.h"
 namespace bytedance::bolt::common {
 
 #define BOLT_SPILL_LIMIT_EXCEEDED(errorMessage)                     \
