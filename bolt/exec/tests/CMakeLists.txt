@@ -405,7 +405,7 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  cpr_http_client_test $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process> cpr::cpr GTest::gtest
+  cpr_http_client_test bolt_process cpr::cpr GTest::gtest
   GTest::gtest_main stdc++
 )
 

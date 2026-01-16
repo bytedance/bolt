@@ -110,6 +110,8 @@ ExceptionTraceContext::ExceptionTraceContext() {
 }
 
 #if ENABLE_EXCEPTION_TRACE
+
+__attribute__((constructor)) static void ensureExceptionWrapperLinked() {}
 // wrap libc's _cxa_throw that must not throw exceptions again, otherwise
 // causing crash.
 #ifdef __clang__

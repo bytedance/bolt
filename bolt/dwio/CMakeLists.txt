@@ -35,7 +35,7 @@ target_link_libraries(
             bolt_encode
             bolt_exception
             bolt_memory
-            $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process>
+            bolt_process
             bolt_serialization
             bolt_type
             bolt_type_fbhive

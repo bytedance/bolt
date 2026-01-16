@@ -109,5 +109,5 @@ target_link_libraries(
 add_executable(bolt_memcpy_meter Memcpy.cpp)
 target_link_libraries(
   bolt_memcpy_meter PRIVATE bolt_common_base bolt_exception bolt_time
-                            $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process> Folly::folly gflags::gflags
+                            bolt_process Folly::folly gflags::gflags
 )

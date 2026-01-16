@@ -135,7 +135,7 @@ target_link_libraries(
   bolt_type
   Folly::folly
   ${FOLLY_BENCHMARK}
-  $<LINK_LIBRARY:WHOLE_ARCHIVE,bolt_process>
+  bolt_process
   GTest::gtest
   GTest::gtest_main
   gflags::gflags

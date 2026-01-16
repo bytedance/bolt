@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.25)
 
 # The policy allows us to change options without caching.
 cmake_policy(SET CMP0077 NEW)
@@ -433,7 +433,9 @@ else()
 endif()
 
 if(ENABLE_EXCEPTION_TRACE)
-  add_link_options("-Wl,-wrap=__cxa_throw")
+  add_link_options("-Wl,--wrap=__cxa_throw"
+    "-Wl,--undefined=__wrap___cxa_throw" )
+
 endif()
 
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm64" AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")

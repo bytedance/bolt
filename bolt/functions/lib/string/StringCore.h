@@ -707,7 +707,11 @@ static std::string codepointToUtf16SurrogatePairs(uint32_t codepoint) {
 
   // Format the surrogate pairs into the buffer using snprintf
   snprintf(
-      buffer, sizeof(buffer), "\\u%04X\\u%04X", highSurrogate, lowSurrogate);
+      buffer,
+      sizeof(buffer),
+      "\\u%04X\\u%04X",
+      static_cast<uint16_t>(highSurrogate),
+      static_cast<uint16_t>(lowSurrogate));
 
   // Create a string from the buffer
   return std::string(buffer);

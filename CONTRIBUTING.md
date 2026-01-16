@@ -48,7 +48,7 @@ Bolt uses Conan for dependency management and a Makefile to drive its build and 
 
 - **Compiler**: GCC 10+ or Clang 12+ (C++17 support required).
 
-- **Build Tools**: CMake 3.20+, Ninja.
+- **Build Tools**: CMake 3.25+, Ninja.
 
 - **Dependency Manager**: Conan 2.
 
