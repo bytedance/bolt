@@ -92,3 +92,15 @@ index fa440a730..006fe1d2b 100644
  )
  
  if(CELEBORN_BUILD_TESTS)
+diff --git a/cpp/celeborn/utils/ProcessBase.h b/cpp/celeborn/utils/ProcessBase.h
+index 749541faa..052c687c1 100644
+--- a/cpp/celeborn/utils/ProcessBase.h
++++ b/cpp/celeborn/utils/ProcessBase.h
+@@ -22,6 +22,7 @@
+ #include <sys/types.h>
+ #include <string>
+ #include <vector>
++#include <cstdint>
+ 
+ namespace celeborn {
+ namespace utils {
