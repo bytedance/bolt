@@ -69,6 +69,10 @@ class PrestoSerializerTest
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 
+  static void TearDownTestCase() {
+    deregisterVectorSerde();
+  }
+
   void SetUp() override {
     serde_ = std::make_unique<serializer::presto::PrestoVectorSerde>();
   }

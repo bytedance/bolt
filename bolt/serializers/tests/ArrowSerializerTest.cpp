@@ -48,6 +48,10 @@ class ArrowSerializerTest
     memory::MemoryManager::testingSetInstance({});
   }
 
+  static void TearDownTestCase() {
+    deregisterVectorSerde();
+  }
+
   void SetUp() override {
     serde_ = std::make_unique<serializer::arrowserde::ArrowVectorSerde>();
   }
