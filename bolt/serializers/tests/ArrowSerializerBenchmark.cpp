@@ -299,6 +299,23 @@ class Bench : public VectorTestBase {
             n,
             [&](auto row) { return static_cast<double>(row) * 0.1; },
             nullAt);
+      case TypeKind::VARCHAR: {
+        static const char charset[] =
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789";
+        static constexpr size_t M = sizeof(charset) - 1;
+        return vm.flatVector<std::string>(
+            n,
+            [&](vector_size_t row) {
+              std::string s(12, '\0');
+              for (size_t i = 0; i < 12; ++i) {
+                s[i] = charset[(static_cast<size_t>(row) + i * 31) % M];
+              }
+              return s;
+            },
+            nullAt);
+      }
       default:
         BOLT_FAIL("Unsupported scalar type: {}", t->toString());
     }
@@ -622,6 +639,159 @@ class Bench : public VectorTestBase {
       auto row = makeDictVarchar(N_LONG, nullPct, dictCard * 100, 8 * 1024);
       printOne(runCaseVector(
           "dict<str_long>[len=8KiB,card=100*100]", row, iters, nullPct));
+    }
+
+    // =========================================================================
+    // Option 1.5: Dictionary-Wrapped RowVector (HashJoin Partition Simulation)
+    // =========================================================================
+    std::cout << "\n";
+    std::cout
+        << "=============================================================\n";
+    std::cout
+        << "=== Dictionary-Wrapped RowVector (HashJoin Sim)           ===\n";
+    std::cout
+        << "=============================================================\n";
+
+    auto runDictWrappedCase = [&](const std::string& name,
+                                  const RowVectorPtr& base,
+                                  std::vector<vector_size_t> sizes) {
+      std::cout << "\n--- " << name << " (wrapped) ---\n";
+      std::cout
+          << "rows\tArrow_ser\tArrow_de\tus/row\t\tPresto_ser\tPresto_de\tratio\n";
+
+      for (auto bs : sizes) {
+        // Create indices for wrapping
+        BufferPtr indices =
+            AlignedBuffer::allocate<vector_size_t>(bs, pool_.get());
+        auto rawIdx = indices->asMutable<vector_size_t>();
+        for (vector_size_t i = 0; i < bs; ++i) {
+          rawIdx[i] = i % base->size();
+        }
+
+        std::vector<VectorPtr> wrappedChildren;
+        for (size_t i = 0; i < base->childrenSize(); ++i) {
+          wrappedChildren.push_back(BaseVector::wrapInDictionary(
+              nullptr, indices, bs, base->childAt(i)));
+        }
+        auto wrappedRow = std::make_shared<RowVector>(
+            pool_.get(), base->type(), nullptr, bs, wrappedChildren);
+
+        auto r = runCaseVector(name, wrappedRow, iters, nullPct);
+
+        double usPerRow =
+            bs > 0 ? (double)(r.arrow.serUs + r.arrow.deUs) / (double)bs : 0.0;
+        double ratio = r.presto.serUs > 0
+            ? (double)r.arrow.serUs / (double)r.presto.serUs
+            : 0.0;
+        std::cout << bs << "\t" << r.arrow.serUs << "\t\t" << r.arrow.deUs
+                  << "\t\t" << std::fixed << std::setprecision(3) << usPerRow
+                  << "\t\t" << r.presto.serUs << "\t\t" << r.presto.deUs
+                  << "\t\t" << std::setprecision(2) << ratio << "x\n";
+      }
+    };
+
+    std::vector<vector_size_t> testSizes = {
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768};
+
+    // Case 1: Wrapped i64
+    {
+      auto base = makeRowVectorForCase(BIGINT(), 32768, nullPct);
+      runDictWrappedCase("i64", base, testSizes);
+    }
+
+    // Case 2: Wrapped Varchar
+    {
+      auto base = makeRowVectorFixedLenVarchar(32768, nullPct, 12);
+      runDictWrappedCase("varchar[12]", base, testSizes);
+    }
+
+    // =========================================================================
+    // Option 1.6: Fixed Overhead Analysis (Small Batch)
+    // Use accumulated timing for small batches to get accurate measurements
+    // =========================================================================
+    std::cout << "\n";
+    std::cout
+        << "=============================================================\n";
+    std::cout
+        << "=== Fixed Overhead Analysis (Small Batch)                 ===\n";
+    std::cout
+        << "=============================================================\n";
+    std::cout << "rows\tArrow_ser(us)\tPresto_ser(us)\tratio\n";
+
+    std::vector<vector_size_t> smallSizes = {
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768};
+
+    for (auto bs : smallSizes) {
+      // Adjust iterations based on batch size to keep test time reasonable
+      int accumulateRuns = bs <= 256 ? 1000 : (bs <= 4096 ? 200 : 50);
+
+      auto row = makeRowVectorForCase(BIGINT(), bs, nullPct);
+      auto rowType = asRowType(row->type());
+
+      // Measure Arrow accumulated time
+      uint64_t arrowTotalUs = 0;
+      {
+        auto t0 = nowUs();
+        for (int run = 0; run < accumulateRuns; ++run) {
+          ArrowSerde arrowSerde;
+          ArrowSerde::ArrowSerdeOptions options(false, kind_);
+          auto iobuf = rowVectorToIOBuf(row, *pool_, &arrowSerde, &options);
+          (void)iobuf.computeChainDataLength();
+        }
+        arrowTotalUs = nowUs() - t0;
+      }
+
+      // Measure Presto accumulated time
+      uint64_t prestoTotalUs = 0;
+      {
+        auto t0 = nowUs();
+        for (int run = 0; run < accumulateRuns; ++run) {
+          serializer::presto::PrestoVectorSerde prestoSerde;
+          serializer::presto::PrestoVectorSerde::PrestoOptions options(
+              false, kind_);
+          auto iobuf = rowVectorToIOBuf(row, *pool_, &prestoSerde, &options);
+          (void)iobuf.computeChainDataLength();
+        }
+        prestoTotalUs = nowUs() - t0;
+      }
+
+      double arrowAvgUs = (double)arrowTotalUs / accumulateRuns;
+      double prestoAvgUs = (double)prestoTotalUs / accumulateRuns;
+      double ratio = prestoAvgUs > 0.001 ? arrowAvgUs / prestoAvgUs : 0.0;
+
+      std::cout << bs << "\t" << std::fixed << std::setprecision(1)
+                << arrowAvgUs << "\t\t" << prestoAvgUs << "\t\t"
+                << std::setprecision(2) << ratio << "x\n";
     }
   }
 };

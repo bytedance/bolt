@@ -23,6 +23,26 @@
 
 namespace bytedance::bolt::serializer::arrowserde {
 
+// TODO: ArrowSerializer has significant per-batch overhead for small batches.
+//
+// ArrowSerializer requires flattenDictionary=true and flattenConstant=true
+// for Arrow IPC compatibility. This causes higher fixed overhead per batch,
+// making it slower for small batches but faster for large batches.
+//
+// ArrowSerializer is enabled via spill_single_partition_serde_kind="Arrow".
+// Currently it is only used for single-partition spill where batch sizes are
+// typically large. Multi-partition spill (e.g., HashJoin) still uses
+// PrestoSerializer due to this small-batch overhead concern.
+//
+// General pattern:
+//   - Flat data: Arrow slower below ~2K rows, faster above
+//   - Dictionary-wrapped data: Arrow slower below ~8K rows, faster above
+//
+// Run benchmark for actual numbers on your machine:
+//   bolt/serializers/tests/ArrowSerializerBenchmark.cpp
+//   - "Fixed Overhead Analysis" test (flat data)
+//   - "Dictionary-Wrapped RowVector" test (HashJoin simulation)
+
 class ArrowVectorSerde : public VectorSerde {
  public:
   struct ArrowSerdeOptions : VectorSerde::Options {
