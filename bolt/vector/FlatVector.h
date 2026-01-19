@@ -260,10 +260,10 @@ class FlatVector final : public SimpleVector<T> {
   }
 
   void nullSet(vector_size_t idx) {
-      if (BaseVector::nulls_) {
-        BaseVector::setNull(idx, false);
-      }
+    if (BaseVector::nulls_) {
+      BaseVector::setNull(idx, false);
     }
+  }
 
   void setNoCopy(const vector_size_t /* unused */, const T& /* unused */) {
     BOLT_UNREACHABLE();

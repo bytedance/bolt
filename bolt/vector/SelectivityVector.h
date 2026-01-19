@@ -114,8 +114,8 @@ class SelectivityVector {
   }
 
   const uint64_t* getBitData() const {
-      return bits_.data();
-    }
+    return bits_.data();
+  }
 
   /**
    * If range is not empty, set a range of values to valid from [start, end).
