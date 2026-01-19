@@ -993,6 +993,47 @@ TEST_F(ArrowBridgeArrayExportTest, dictionaryNested) {
   EXPECT_EQ(values.Value(2), 3);
 }
 
+TEST_F(ArrowBridgeArrayExportTest, dictionaryMapVector) {
+  using MapKV = std::pair<int32_t, std::optional<int64_t>>;
+  using MapVector = std::vector<std::optional<std::vector<MapKV>>>;
+  std::vector<MapKV> map1{MapKV{10, 100}, MapKV{12, 120}};
+  std::vector<MapKV> map2{MapKV{15, 150}, MapKV{19, std::nullopt}};
+  std::vector<MapKV> map3{MapKV{5, std::nullopt}, MapKV{10, 100}};
+  auto mapVec = vectorMaker_.mapVector<int32_t, int64_t>(
+      MapVector{map1, map1, map2, map2, map3});
+  vector_size_t kDictSize = 3;
+  BufferPtr dictNulls =
+      AlignedBuffer::allocate<bool>(kDictSize, pool_.get(), bits::kNotNull);
+  auto rawNulls = dictNulls->asMutable<uint64_t>();
+  bits::setNull(rawNulls, 1, true);
+  BufferPtr indices =
+      AlignedBuffer::allocate<vector_size_t>(kDictSize, pool_.get(), 0);
+  auto rawIndices = indices->asMutable<vector_size_t>();
+  rawIndices[0] = 3;
+  rawIndices[1] = 1;
+  rawIndices[2] = 0;
+  auto vec =
+      BaseVector::wrapInDictionary(dictNulls, indices, kDictSize, mapVec);
+  auto array =
+      toArrow(vec, ArrowOptions{.flattenDictionary = true}, pool_.get());
+  ASSERT_OK(array->ValidateFull());
+  EXPECT_EQ(array->null_count(), 1);
+  ASSERT_EQ(*array->type(), *arrow::map(arrow::int32(), arrow::int64()));
+  auto& mapArray = static_cast<const arrow::MapArray&>(*array);
+  validateOffsets(mapArray, {0, 2, 2, 4});
+  auto& keys = static_cast<const arrow::Int32Array&>(*mapArray.keys());
+  ASSERT_EQ(keys.length(), 4);
+  EXPECT_EQ(keys.Value(0), 15);
+  EXPECT_EQ(keys.Value(1), 19);
+  EXPECT_EQ(keys.Value(2), 10);
+  EXPECT_EQ(keys.Value(3), 12);
+  auto& items = static_cast<const arrow::Int64Array&>(*mapArray.items());
+  ASSERT_EQ(items.length(), 4);
+  EXPECT_EQ(items.Value(0), 150);
+  EXPECT_EQ(items.Value(2), 100);
+  EXPECT_EQ(items.Value(3), 120);
+}
+
 TEST_F(ArrowBridgeArrayExportTest, nullType) {
   // NullType.
   VectorPtr vector =

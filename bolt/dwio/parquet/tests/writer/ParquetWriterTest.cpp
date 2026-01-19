@@ -42,6 +42,7 @@
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/arrow/Bridge.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
@@ -124,7 +125,7 @@ class ParquetWriterTest : public ParquetTestBase {
       const std::string& parquetPath,
       size_t rows,
       const RowTypePtr& schema,
-      VectorPtr expected) {
+      const VectorPtr& expected) {
     auto reader = createLocalParquetReader(parquetPath);
     ASSERT_EQ(reader->numberOfRows(), rows);
     ASSERT_EQ(*reader->rowType(), *schema);
@@ -135,6 +136,18 @@ class ParquetWriterTest : public ParquetTestBase {
         *rowReader,
         std::static_pointer_cast<RowVector>(expected),
         *leafPool_);
+  }
+
+  void assertWrite(
+      const std::string& parquetPath,
+      size_t rows,
+      const RowTypePtr& schema,
+      const VectorPtr& data,
+      vp::WriterOptions writerOptions = {}) {
+    auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+    writer->write(data);
+    writer->close();
+    assertRead(parquetPath, rows, schema, data);
   }
 
   std::shared_ptr<const Type> getType() {
@@ -283,11 +296,7 @@ TEST_F(ParquetWriterTest, lz4Hadoop) {
   std::string parquetPath = tempPath_->path + "/lz4Hadoop.parquet";
   vp::WriterOptions writerOptions{};
   writerOptions.compression = CompressionKind::CompressionKind_LZ4;
-  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
-  writer->write(data);
-  writer->close();
-
-  assertRead(parquetPath, kRows, schema, data);
+  assertWrite(parquetPath, kRows, schema, data, writerOptions);
 
   dwio::common::ReaderOptions readerOptions{leafPool_.get()};
   auto reader = createLocalParquetReader(parquetPath);
@@ -306,11 +315,56 @@ TEST_F(ParquetWriterTest, comparison) {
 
   std::string parquetPath = tempPath_->path + "/comparison.parquet";
   vp::WriterOptions writerOptions{};
-  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
-  writer->write(data);
-  writer->close();
+  assertWrite(parquetPath, kRows, schema, data, writerOptions);
+};
 
-  assertRead(parquetPath, kRows, schema, data);
+TEST_F(ParquetWriterTest, dictToArrow) {
+  const size_t kRows = 1100;
+  auto type = getType();
+  auto schema = std::static_pointer_cast<const RowType>(type);
+  VectorPtr data = bytedance::bolt::test::BatchMaker::createBatch(
+      type, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
+  auto& children = std::dynamic_pointer_cast<RowVector>(data)->children();
+  for (int i = 0; i < children.size(); ++i) {
+    auto reversedIndices = makeIndicesInReverse(kRows);
+    auto nulls = makeNulls(kRows, [](auto row) { return row % 19 == 0; });
+    children[i] = BaseVector::wrapInDictionary(
+        nulls, reversedIndices, kRows, children[i]);
+  }
+  std::string parquetPath = tempPath_->path + "/dictToArrow.parquet";
+  assertWrite(parquetPath, kRows, schema, data);
+};
+
+TEST_F(ParquetWriterTest, constantComplexToArrow) {
+  const size_t kRows = 1100;
+  auto type = getType();
+  auto schema = std::static_pointer_cast<const RowType>(type);
+  VectorPtr data = bytedance::bolt::test::BatchMaker::createBatch(
+      type, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
+  auto& children = std::dynamic_pointer_cast<RowVector>(data)->children();
+  for (int i = 0; i < children.size(); ++i) {
+    children[i] = BaseVector::wrapInConstant(kRows, 99, children[i]);
+  }
+  std::string parquetPath = tempPath_->path + "/constantComplexToArrow.parquet";
+  assertWrite(parquetPath, kRows, schema, data);
+};
+
+TEST_F(ParquetWriterTest, constantToArrow) {
+  auto schema =
+      ROW({"c0", "c1", "c2", "c3"}, {INTEGER(), VARCHAR(), BIGINT(), DOUBLE()});
+  const int64_t kRows = 10'000;
+  const auto data = makeRowVector(
+      {BaseVector::createConstant(INTEGER(), 100, kRows, leafPool_.get()),
+       BaseVector::createConstant(
+           VARCHAR(),
+           "ParquetWriterTestconstantToArrowTest",
+           kRows,
+           leafPool_.get()),
+       BaseVector::createConstant(
+           BIGINT(), 10000000000L, kRows, leafPool_.get()),
+       BaseVector::createConstant(DOUBLE(), 1000.0, kRows, leafPool_.get())});
+  std::string parquetPath = tempPath_->path + "/constantToArrow.parquet";
+  assertWrite(parquetPath, kRows, schema, data);
 };
 
 TEST_F(ParquetWriterTest, splitWrite) {
@@ -325,11 +379,7 @@ TEST_F(ParquetWriterTest, splitWrite) {
   vp::WriterOptions writerOptions{};
   // Set a smaller value to trigger split write and verify it.
   writerOptions.writeBatchBytes = 1024;
-  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
-  writer->write(data);
-  writer->close();
-
-  assertRead(parquetPath, kRows, schema, data);
+  assertWrite(parquetPath, kRows, schema, data, writerOptions);
 };
 
 TEST_F(ParquetWriterTest, columnNullable) {
@@ -409,11 +459,7 @@ TEST_F(ParquetWriterTest, allNullsFlatVector) {
        makeAllNullFlatVectorWithNullValues<Timestamp>(kRows)});
 
   vp::WriterOptions writerOptions{};
-  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
-  writer->write(data);
-  writer->close();
-
-  assertRead(parquetPath, kRows, schema, data);
+  assertWrite(parquetPath, kRows, schema, data, writerOptions);
 };
 
 TEST_F(ParquetWriterTest, columnCompressionLevel) {
