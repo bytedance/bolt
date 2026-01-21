@@ -79,3 +79,17 @@ repos:
           args: ["-c", ".licenserc.yaml"]
           exclude: '^\.github/'
           stages: [manual]
+      - id: clang-tidy
+        name: clang-tidy
+        description: >-
+          Run clang-tidy on C/C++ files, requires 'compile_commands.json'
+          to be available in the repo root (e.g. symlinked) or BUILD_PATH
+          set to it's path e.g. _build/Release.
+        stages:
+          - pre-commit
+        entry: ./scripts/run-clang-tidy.py
+        args: [--commit, HEAD]
+        language: python
+        types_or: [c++, c]
+        additional_dependencies: [clang-tidy==18.1.8]
+        require_serial: true

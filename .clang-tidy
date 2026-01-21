@@ -119,7 +119,7 @@ Checks: >
 # Turn all the warnings from the checks above into errors.
 WarningsAsErrors: "*"
 
-HeaderFilterRegex: "(google/cloud/|generator/).*\\.h$"
+HeaderFilterRegex: "bolt/.*"
 
 CheckOptions:
   - { key: readability-identifier-naming.NamespaceCase,          value: lower_case }
@@ -145,3 +145,5 @@ CheckOptions:
   - { key: readability-implicit-bool-conversion.AllowIntegerConditions,  value: 1   }
   - { key: readability-implicit-bool-conversion.AllowPointerConditions,  value: 1   }
   - { key: readability-function-cognitive-complexity.IgnoreMacros,  value: 1   }
+
+FormatStyle: file
