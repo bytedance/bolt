@@ -40,73 +40,66 @@ If you're a first-time contributor, we recommend starting with issues labeled "g
 
 ## Development Environment Setup
 
-Bolt uses Conan for dependency management and a Makefile to drive its build and test processes. Follow these steps to set up your environment.
+Bolt uses **Conan 2** for dependency management and a Makefile to drive its build and test processes. You can set up the environment automatically using our helper script, or configure it manually if you prefer granular control over your toolchain.
 
 ### Prerequisites
 
-- **OS**: Linux (Ubuntu 20.04+, CentOS 7+). macOS is currently experimental.
+- **OS**: Linux (Ubuntu 20.04+, CentOS 7+) or macOS (Experimental).
 
-- **Compiler**: GCC 10+ or Clang 12+ (C++17 support required).
-
+- **Compiler**: GCC 10+ or Clang 16+ (Must support C++17).
 - **Build Tools**: CMake 3.25+, Ninja.
+- **Dependency Manager**: Conan 2.0+.
 
-- **Dependency Manager**: Conan 2.
+### Setup Options
 
+#### Option 1: Automatic Setup (Recommended)
 
-### Setup Development Environment On Linux
-
-Run the following script to check your compiler, install Conan, configure its profile, and import dependency recipes into your local cache:
+Run the helper script to bootstrap your development environment:
 
 ```Bash
 scripts/setup-dev-env.sh
 ```
+**⚠️ Important: What this script does** This script is "opinionated" and performs the following actions. Please review them to ensure they fit your workflow:
 
-This script will:
+1. **Python Environment (Miniconda)**:
+   - Checks for `~/miniconda3`.
+   - **If missing**: Automatically downloads and installs Miniconda locally.
+   - **Shell Modification**: Appends the Miniconda path to your shell configuration file (`~/.bashrc` or `~/.zshrc`).
+   - Installs Python dependencies (including `conan`) into this environment.
+2. **Conan Configuration**:
+   - Sets the C++ standard to `gnu17` in the default Conan profile.
+   - **Clones & Patches Recipes**: Calls `install-bolt-deps.sh` to download a specific version of `conan-center-index` to `~/.conan2/conan-center-index` and applies Bolt-specific patches (required for `folly`, `arrow`, etc.).
+   - Configures local Conan remotes to prioritize these patched recipes.
+3. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
 
-- Check for a compatible compiler version (GCC 10/11/12 or Clang 16).
+#### Option 2: Manual Setup (For Advanced Users)
 
-- Install Conan and `pydot`, then create/adjust the default profile (setting the C++ standard to `gnu17` from `gnu14`).
+If you prefer to manage your own Python environment (e.g., via system packages, pyenv, or poetry) or use a specific compiler, you can skip the setup script. However, you **must** still configure the Conan dependencies manually.
 
-- Call `scripts/install-bolt-deps.sh` to export recipes for dependencies like folly, arrow, sonic-cpp, ryu, roaring, utf8proc, date, and llvm-core to your local Conan cache.
+1. **Install Python Dependencies**:
 
+   ```Bash
+   pip install -r requirements.txt
+   pre-commit install
+   ```
 
-**Note**: The first-time build will compile dependencies from source and cache them, which can be time-consuming. You can set up your own Conan remote to speed up builds.
+2. **Configure Conan Dependencies (Crucial)**: Bolt relies on patched versions of several libraries. You must run the dependency installation script to set up the local recipe index and apply necessary patches:
 
+   ```Bash
+   # This sets up the local conan-center-index with required patches
+   # and configures the 'bolt-local' and 'bolt-cci-local' remotes.
+   scripts/install-bolt-deps.sh
+   ```
 
-### Setup Development Environment on MacOS
+### Platform Specific Notes
 
-This guide outlines the steps to compile and build Bolt directly on macOS.
-You can follow the following steps
-1. Install Xcode Command Line Tools
+- **First-Time Build**: The first build will compile dependencies from source (e.g., Folly, Arrow), which can take a significant amount of time. Please be patient.
 
-```Bash
-xcode-select --install
-```
-2. Install Conan and Pydot
+- **macOS Users**: Ensure Xcode Command Line Tools are installed:
 
-```Bash
-pip install conan
-pip install pydot
-```
-
-3. Run the provided script to install Bolt's specific dependencies.
-
-```Bash
-scripts/install-bolt-deps.sh
-```
-
-4. Install CMake
-   We recommend using CMake version 3.25 or higher. Not using CMake 4.0 or higher may cause some third-party dependencies build failure.
-   Download the macOS installer (.dmg) directly from the official website and install it.
-* Download Link: https://cmake.org/download/
-  Note: After installation, ensure the cmake command is available in your terminal path. You may need to follow the instructions in the installer to add it to your system PATH.
-
-5. Configure Conan Profile
-   Detect and generate the default Conan profile for your machine.
-
-```bash
-conan profile detect
-```
+  ```bash
+  xcode-select --install
+  ```
 
 ## Fork and PR Workflow
 
