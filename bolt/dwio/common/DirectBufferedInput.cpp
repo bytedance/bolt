@@ -246,16 +246,7 @@ void DirectBufferedInput::readRegions(
           if (asyncLoad.load->state() != DirectCoalescedLoad::State::kPlanned) {
             return;
           }
-          // the load is valid, so asyncThreadCtx is not freed yet.
-          auto guard = folly::makeGuard([&]() {
-            try {
-              asyncLoad.asyncThreadCtx->out();
-            } catch (std::exception& e) {
-              LOG(ERROR) << "Exception from asyncThreadCtx->out(): "
-                         << e.what();
-            }
-          });
-          asyncLoad.asyncThreadCtx->in(); // trace in-flight loading
+
           // first check available memory allows to preload data, even if not,
           // the non-preload load will be sync loaded on the main thread.
           if (asyncLoad.canPreload()) {

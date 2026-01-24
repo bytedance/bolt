@@ -304,6 +304,18 @@ class DirectBufferedInput : public BufferedInput {
           asyncThreadCtx(asyncThreadCtx) {
       BOLT_CHECK(asyncThreadCtx);
       preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
+      asyncThreadCtx->in();
+    }
+
+    AsyncLoadHolder(const AsyncLoadHolder&) = delete;
+    AsyncLoadHolder& operator=(const AsyncLoadHolder&) = delete;
+
+    AsyncLoadHolder(AsyncLoadHolder&& other) noexcept
+        : load(std::move(other.load)),
+          prefetchMemoryPercent_(other.prefetchMemoryPercent_),
+          asyncThreadCtx(other.asyncThreadCtx),
+          preloadBytesLimit_(other.preloadBytesLimit_) {
+      other.asyncThreadCtx = nullptr;
     }
 
     bool canPreload() const {
@@ -362,6 +374,9 @@ class DirectBufferedInput : public BufferedInput {
     uint64_t preloadBytesLimit_{0};
 
     ~AsyncLoadHolder() {
+      if (asyncThreadCtx) {
+        asyncThreadCtx->out();
+      }
       // Release the load reference before the memory pool reference.
       // This is to make sure the memory pool is not destroyed before we free
       // up the allocated buffers. This is to handle the case that the

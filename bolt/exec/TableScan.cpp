@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <folly/ScopeGuard.h>
 #include <glog/logging.h>
 #include <cstdint>
 #include <memory>
@@ -514,7 +515,9 @@ void TableScan::checkPreload() {
           [executor, this](std::shared_ptr<connector::ConnectorSplit> split) {
             preload(split);
 
-            executor->add([connectorSplit = split]() mutable {
+            asyncThreadCtx_.in();
+            executor->add([connectorSplit = split, &ctx = asyncThreadCtx_]() mutable {
+              auto guard = folly::makeGuard([&]() { ctx.out(); });
               connectorSplit->dataSource->prepare();
               connectorSplit.reset();
             });
