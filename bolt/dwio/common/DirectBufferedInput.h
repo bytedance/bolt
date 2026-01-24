@@ -200,8 +200,7 @@ class DirectBufferedInput : public BufferedInput {
 
   void updatePreloadingBytes(int64_t bytes) {
     if (asyncThreadCtx_) {
-      std::lock_guard<std::mutex> lock(asyncThreadCtx_->getMutex());
-      asyncThreadCtx_->inPreloadingBytes() += bytes;
+      asyncThreadCtx_->addPreloadingBytes(bytes);
     }
   }
 
@@ -334,13 +333,12 @@ class DirectBufferedInput : public BufferedInput {
         // there are in preloading with high memory usage, sleep to avoid OOM
         {
           std::lock_guard<std::mutex> lock(asyncThreadCtx->getMutex());
-          auto& inPreloadingBytes = asyncThreadCtx->inPreloadingBytes();
           // must preserve memory for other part of scan, i.e decompressed data
-          if ((inPreloadingBytes + load->preloadBytes() <
+          if ((asyncThreadCtx->inPreloadingBytesUntracked() + load->preloadBytes() <
                    preloadBytesLimit_ * prefetchMemoryPercent_ / 100.0 &&
-               inPreloadingBytes + load->preloadBytes() + memoryBytes <
+               asyncThreadCtx->inPreloadingBytesUntracked() + load->preloadBytes() + memoryBytes <
                    preloadBytesLimit_ / 2)) {
-            inPreloadingBytes += load->preloadBytes();
+            asyncThreadCtx->addPreloadingBytesUntracked(load->preloadBytes());
             return true;
           }
         }
@@ -356,7 +354,7 @@ class DirectBufferedInput : public BufferedInput {
                        << " s, pool_.currentBytes(): " << memoryBytes
                        << " preloadBytesLimit: " << preloadBytesLimit_
                        << " inPreloadingBytes: "
-                       << asyncThreadCtx->inPreloadingBytes()
+                       << asyncThreadCtx->inPreloadingBytesUntracked()
                        << " preloadBytes: " << load->preloadBytes()
                        << " prefetchMemoryPercent: " << prefetchMemoryPercent_
                        << ", pls reduce preload IO threads or add memory";

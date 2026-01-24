@@ -401,12 +401,26 @@ class AsyncThreadCtx {
     return mutex_;
   }
 
-  int64_t& inPreloadingBytes() {
+  int64_t preloadBytesLimit() const {
+    return preloadBytesLimit_;
+  }
+
+  void addPreloadingBytes(int64_t bytes) {
+    std::unique_lock lock(mutex_);
+    addPreloadingBytesUntracked(bytes);
+  }
+
+  int64_t inPreloadingBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inPreloadingBytesUntracked();
+  }
+
+  int64_t inPreloadingBytesUntracked() const {
     return inPreloadingBytes_;
   }
 
-  int64_t preloadBytesLimit() const {
-    return preloadBytesLimit_;
+  void addPreloadingBytesUntracked(int64_t bytes) {
+    inPreloadingBytes_ += bytes;
   }
 
   void disallowPreload() {
@@ -417,11 +431,15 @@ class AsyncThreadCtx {
   }
 
   bool allowPreload() {
+    if (adaptive_ && allowPreload_.load()) {
+      std::unique_lock lock(mutex_);
+      return inPreloadingBytes_ < preloadBytesLimit_;
+    }
     return allowPreload_.load();
   }
 
  private:
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   int numIn_{0};
   int64_t inPreloadingBytes_{0};
   int64_t preloadBytesLimit_{0};

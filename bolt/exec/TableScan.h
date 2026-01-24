@@ -175,6 +175,6 @@ class TableScan : public SourceOperator {
 
   uint64_t outputRows_{0};
 
-  connector::AsyncThreadCtx asyncThreadCtx_;
+  std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx_;
 };
 } // namespace bytedance::bolt::exec
