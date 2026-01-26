@@ -378,12 +378,12 @@ class AsyncThreadCtx {
   }
 
   void in() {
-    std::unique_lock lock(mutex_);
+    std::scoped_lock lock(mutex_);
     numIn_++;
     cv_.notify_one();
   }
   void out() {
-    std::unique_lock lock(mutex_);
+    std::scoped_lock lock(mutex_);
     numIn_--;
     cv_.notify_one();
   }
@@ -406,12 +406,12 @@ class AsyncThreadCtx {
   }
 
   void addPreloadingBytes(int64_t bytes) {
-    std::unique_lock lock(mutex_);
+    std::scoped_lock lock(mutex_);
     addPreloadingBytesUntracked(bytes);
   }
 
   int64_t inPreloadingBytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::scoped_lock lock(mutex_);
     return inPreloadingBytesUntracked();
   }
 
@@ -432,7 +432,7 @@ class AsyncThreadCtx {
 
   bool allowPreload() {
     if (adaptive_ && allowPreload_.load()) {
-      std::unique_lock lock(mutex_);
+      std::scoped_lock lock(mutex_);
       return inPreloadingBytes_ < preloadBytesLimit_;
     }
     return allowPreload_.load();
