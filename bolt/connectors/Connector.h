@@ -438,6 +438,47 @@ class AsyncThreadCtx {
     return allowPreload_.load();
   }
 
+  class Guard {
+   public:
+    Guard(AsyncThreadCtx* ctx, int64_t bytes = 0) : ctx_(ctx), bytes_(bytes) {
+      if (ctx_) {
+        ctx_->in();
+        ctx_->addPreloadingBytes(bytes_);
+      }
+    }
+
+    ~Guard() {
+      if (ctx_) {
+        ctx_->out();
+        ctx_->addPreloadingBytes(-bytes_);
+      }
+    }
+
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+    Guard(Guard&& other) noexcept : ctx_(other.ctx_), bytes_(other.bytes_) {
+      other.ctx_ = nullptr;
+    }
+
+    Guard& operator=(Guard&& other) noexcept {
+      if (this != &other) {
+        if (ctx_) {
+          ctx_->out();
+          ctx_->addPreloadingBytes(-bytes_);
+        }
+        ctx_ = other.ctx_;
+        bytes_ = other.bytes_;
+        other.ctx_ = nullptr;
+      }
+      return *this;
+    }
+
+   private:
+    AsyncThreadCtx* ctx_;
+    int64_t bytes_;
+  };
+
  private:
   mutable std::mutex mutex_;
   int numIn_{0};

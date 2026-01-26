@@ -334,9 +334,11 @@ class DirectBufferedInput : public BufferedInput {
         {
           std::lock_guard<std::mutex> lock(asyncThreadCtx->getMutex());
           // must preserve memory for other part of scan, i.e decompressed data
-          if ((asyncThreadCtx->inPreloadingBytesUntracked() + load->preloadBytes() <
+          if ((asyncThreadCtx->inPreloadingBytesUntracked() +
+                       load->preloadBytes() <
                    preloadBytesLimit_ * prefetchMemoryPercent_ / 100.0 &&
-               asyncThreadCtx->inPreloadingBytesUntracked() + load->preloadBytes() + memoryBytes <
+               asyncThreadCtx->inPreloadingBytesUntracked() +
+                       load->preloadBytes() + memoryBytes <
                    preloadBytesLimit_ / 2)) {
             asyncThreadCtx->addPreloadingBytesUntracked(load->preloadBytes());
             return true;

@@ -459,8 +459,8 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
            planNodeId(),
            connectorPool_,
            nullptr,
-            asyncThreadCtx_.get()),
-        asyncThreadCtx = asyncThreadCtx_,
+           asyncThreadCtx_.get()),
+       asyncThreadCtx = asyncThreadCtx_,
        task = operatorCtx_->task(),
        pendingDynamicFilters = pendingDynamicFilters_,
        split]() -> std::unique_ptr<connector::DataSource> {
@@ -516,17 +516,14 @@ void TableScan::checkPreload() {
           [executor, this](std::shared_ptr<connector::ConnectorSplit> split) {
             preload(split);
 
-            auto hiveSplit = std::dynamic_pointer_cast<const connector::hive::HiveConnectorSplit>(split);
+            auto hiveSplit = std::dynamic_pointer_cast<
+                const connector::hive::HiveConnectorSplit>(split);
             int64_t preloadBytes = hiveSplit ? hiveSplit->length : 0;
-            asyncThreadCtx_->in();
-            asyncThreadCtx_->addPreloadingBytes(preloadBytes);
+            connector::AsyncThreadCtx::Guard guard(
+                asyncThreadCtx_.get(), preloadBytes);
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
-                           preloadBytes]() mutable {
-              auto guard = folly::makeGuard([&]() {
-                ctx->out();
-                ctx->addPreloadingBytes(-preloadBytes);
-              });
+                           inGuard = std::move(guard)]() mutable {
               connectorSplit->dataSource->prepare();
               connectorSplit.reset();
             });
