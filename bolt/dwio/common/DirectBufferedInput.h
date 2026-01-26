@@ -300,10 +300,10 @@ class DirectBufferedInput : public BufferedInput {
         connector::AsyncThreadCtx* asyncThreadCtx)
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
-          asyncThreadCtx(asyncThreadCtx) {
+          asyncThreadCtx(asyncThreadCtx),
+          inGuard(asyncThreadCtx) {
       BOLT_CHECK(asyncThreadCtx);
       preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
-      asyncThreadCtx->in();
     }
 
     AsyncLoadHolder(const AsyncLoadHolder&) = delete;
@@ -313,7 +313,8 @@ class DirectBufferedInput : public BufferedInput {
         : load(std::move(other.load)),
           prefetchMemoryPercent_(other.prefetchMemoryPercent_),
           asyncThreadCtx(other.asyncThreadCtx),
-          preloadBytesLimit_(other.preloadBytesLimit_) {
+          preloadBytesLimit_(other.preloadBytesLimit_),
+          inGuard(std::move(other.inGuard)) {
       other.asyncThreadCtx = nullptr;
     }
 
@@ -372,11 +373,9 @@ class DirectBufferedInput : public BufferedInput {
     int32_t prefetchMemoryPercent_{30};
     connector::AsyncThreadCtx* asyncThreadCtx;
     uint64_t preloadBytesLimit_{0};
+    connector::AsyncThreadCtx::Guard inGuard;
 
     ~AsyncLoadHolder() {
-      if (asyncThreadCtx) {
-        asyncThreadCtx->out();
-      }
       // Release the load reference before the memory pool reference.
       // This is to make sure the memory pool is not destroyed before we free
       // up the allocated buffers. This is to handle the case that the
