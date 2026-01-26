@@ -281,12 +281,15 @@ typename VectorValueType<kind>::type getValueFromFlatVector(
 
 template <TypeKind kind>
 constexpr bool isIntegerType =
-    (kind == TypeKind::BOOLEAN) || (kind == TypeKind::TINYINT) ||
-    (kind == TypeKind::SMALLINT) || (kind == TypeKind::INTEGER);
+    (kind == TypeKind::BOOLEAN) ||
+    (kind == TypeKind::TINYINT) ||
+    (kind == TypeKind::SMALLINT) ||
+    (kind == TypeKind::INTEGER);
 
 template <TypeKind kind>
 constexpr bool isStringType =
-    (kind == TypeKind::VARCHAR) || (kind == TypeKind::VARBINARY);
+    (kind == TypeKind::VARCHAR) ||
+    (kind == TypeKind::VARBINARY);
 
 class MurMur3HashBase {
  public:
