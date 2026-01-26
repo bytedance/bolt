@@ -28,13 +28,13 @@ target_link_libraries(
 )
 
 add_executable(
-    bolt_shuffle_spark_matrix_tests
+    bolt_shuffle_spark_matrix_test
     ShuffleTestBase.cpp
     ShuffleMatrixTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_matrix_tests
+    bolt_shuffle_spark_matrix_test
     PRIVATE
         bolt_shuffle_spark_impl
         bolt_exec_test_lib
@@ -47,18 +47,18 @@ target_link_libraries(
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_matrix_tests
-    COMMAND bolt_shuffle_spark_matrix_tests
+    NAME bolt_shuffle_spark_matrix_test
+    COMMAND bolt_shuffle_spark_matrix_test
 )
 
 add_executable(
-    bolt_shuffle_spark_large_partition_tests
+    bolt_shuffle_spark_large_partition_test
     ShuffleTestBase.cpp
     ShuffleLargePartitionTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_large_partition_tests
+    bolt_shuffle_spark_large_partition_test
     PRIVATE
         bolt_shuffle_spark_impl
         bolt_exec_test_lib
@@ -71,18 +71,18 @@ target_link_libraries(
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_large_partition_tests
-    COMMAND bolt_shuffle_spark_large_partition_tests
+    NAME bolt_shuffle_spark_large_partition_test
+    COMMAND bolt_shuffle_spark_large_partition_test
 )
 
 add_executable(
-    bolt_shuffle_spark_memory_tests
+    bolt_shuffle_spark_memory_test
     ShuffleTestBase.cpp
     ShuffleMemoryTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_memory_tests
+    bolt_shuffle_spark_memory_test
     PRIVATE
         bolt_shuffle_spark_impl
         bolt_exec_test_lib
@@ -94,6 +94,6 @@ target_link_libraries(
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_memory_tests
-    COMMAND bolt_shuffle_spark_memory_tests
+    NAME bolt_shuffle_spark_memory_test
+    COMMAND bolt_shuffle_spark_memory_test
 )
