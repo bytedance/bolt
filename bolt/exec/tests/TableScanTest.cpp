@@ -1703,7 +1703,23 @@ TEST_F(TableScanTest, preloadingSplitClose) {
     });
   }
   ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
-  auto task = assertQuery(tableScanNode(), filePaths, "SELECT * FROM tmp", 2);
+  std::shared_ptr<Task> task;
+  {
+    // Unblock the IO thread pool after a short delay to allow the task to finish.
+    // This is necessary because TableScan::close() waits for pending preloads,
+    // and if the IO threads are blocked, the preloads will never complete.
+    std::thread unblocker([&batons]() {
+      /* sleep override */
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      for (auto& baton : batons) {
+        baton.post();
+      }
+    });
+
+    task = assertQuery(tableScanNode(), filePaths, "SELECT * FROM tmp", 2);
+    unblocker.join();
+  }
+
   auto stats = getTableScanRuntimeStats(task);
 
   // Verify that split preloading is enabled.
@@ -1713,10 +1729,6 @@ TEST_F(TableScanTest, preloadingSplitClose) {
   // Once all task references are cleared, the count of deleted tasks should
   // promptly match the count of created tasks.
   ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
-  // Clean blocking items in the IO thread pool.
-  for (auto& baton : batons) {
-    baton.post();
-  }
   latch.wait();
 }
 

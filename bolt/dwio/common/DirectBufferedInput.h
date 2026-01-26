@@ -301,7 +301,7 @@ class DirectBufferedInput : public BufferedInput {
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
           asyncThreadCtx(asyncThreadCtx),
-          inGuard(asyncThreadCtx) {
+          inGuard_(asyncThreadCtx) {
       BOLT_CHECK(asyncThreadCtx);
       preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
     }
@@ -314,8 +314,10 @@ class DirectBufferedInput : public BufferedInput {
           prefetchMemoryPercent_(other.prefetchMemoryPercent_),
           asyncThreadCtx(other.asyncThreadCtx),
           preloadBytesLimit_(other.preloadBytesLimit_),
-          inGuard(std::move(other.inGuard)) {
+          inGuard_(std::move(other.inGuard_)),
+          addedBytes_(other.addedBytes_) {
       other.asyncThreadCtx = nullptr;
+      other.addedBytes_ = 0;
     }
 
     bool canPreload() const {
@@ -342,6 +344,7 @@ class DirectBufferedInput : public BufferedInput {
                        load->preloadBytes() + memoryBytes <
                    preloadBytesLimit_ / 2)) {
             asyncThreadCtx->addPreloadingBytesUntracked(load->preloadBytes());
+            addedBytes_ = load->preloadBytes();
             return true;
           }
         }
@@ -373,9 +376,14 @@ class DirectBufferedInput : public BufferedInput {
     int32_t prefetchMemoryPercent_{30};
     connector::AsyncThreadCtx* asyncThreadCtx;
     uint64_t preloadBytesLimit_{0};
-    connector::AsyncThreadCtx::Guard inGuard;
+    connector::AsyncThreadCtx::Guard inGuard_;
+
+    mutable int64_t addedBytes_{0};
 
     ~AsyncLoadHolder() {
+      if (asyncThreadCtx && addedBytes_ > 0) {
+        asyncThreadCtx->addPreloadingBytes(-addedBytes_);
+      }
       // Release the load reference before the memory pool reference.
       // This is to make sure the memory pool is not destroyed before we free
       // up the allocated buffers. This is to handle the case that the
