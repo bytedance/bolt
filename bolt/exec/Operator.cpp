@@ -331,7 +331,8 @@ void OperatorCtx::traverseOpToGetRowCount(
         BOLT_CHECK_NE(
             hasBeenProcessedRowCountStr,
             "",
-            "hasBeenProcessedRowCountStr can't be empty");
+            "hasBeenProcessedRowCountStr can't be empty, operator {}",
+            operators[i]->toString());
 
         totalRowCount = folly::to<uint64_t>(totalRowCountStr);
         processedRowCount = folly::to<uint64_t>(hasBeenProcessedRowCountStr);

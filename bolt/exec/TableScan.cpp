@@ -94,15 +94,11 @@ TableScan::TableScan(
   this->setRuntimeMetric(kCanUsedToEstimateHashBuildPartitionNum, "true");
   this->setRuntimeMetric(
       OperatorMetricKey::kHasBeenProcessedRowCount, folly::to<std::string>(0));
-  if (tableScanNode->existRowCount()) {
-    VLOG(1) << "TableScan RowCount=" << tableScanNode->getRowCount();
-    this->setRuntimeMetric(
-        OperatorMetricKey::kTotalRowCount,
-        std::to_string(tableScanNode->getRowCount()));
-  } else {
-    this->setRuntimeMetric(
-        OperatorMetricKey::kTotalRowCount, folly::to<std::string>(0));
-  }
+
+  VLOG(1) << "TableScan RowCount=" << tableScanNode->getRowCount();
+  this->setRuntimeMetric(
+      OperatorMetricKey::kTotalRowCount,
+      std::to_string(tableScanNode->getRowCount()));
 }
 
 folly::dynamic TableScan::toJson() const {
