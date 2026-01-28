@@ -95,7 +95,7 @@ arrow::Result<std::shared_ptr<arrow::Array>> makeBinaryArray(
 arrow::Status getLengthBufferAndValueBufferOneByOne(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
+    Codec* codec,
     std::shared_ptr<arrow::ResizableBuffer>& lengthBuffer,
     std::shared_ptr<arrow::ResizableBuffer>& valueBuffer) {
   ARROW_ASSIGN_OR_RAISE(
@@ -116,14 +116,12 @@ arrow::Status getLengthBufferAndValueBufferOneByOne(
   for (auto& buffer : buffers) {
     if (buffer != nullptr && buffer->size() != 0) {
       int64_t actualLength;
-      int64_t maxLength = codec->MaxCompressedLen(buffer->size(), nullptr);
-      ARROW_ASSIGN_OR_RAISE(
-          actualLength,
-          codec->Compress(
-              buffer->size(),
-              buffer->data(),
-              maxLength,
-              valueBuffer->mutable_data() + compressValueOffset));
+      int64_t maxLength = codec->maxCompressedLen(buffer->size());
+      actualLength = codec->compress(
+          buffer->data(),
+          buffer->size(),
+          valueBuffer->mutable_data() + compressValueOffset,
+          maxLength);
       compressValueOffset += actualLength;
       *lengthBufferPtr++ = buffer->size();
       *lengthBufferPtr++ = actualLength;
@@ -141,7 +139,7 @@ arrow::Status getLengthBufferAndValueBufferOneByOne(
 arrow::Status getLengthBufferAndValueBufferStream(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
+    Codec* codec,
     std::shared_ptr<arrow::ResizableBuffer>& lengthBuffer,
     std::shared_ptr<arrow::ResizableBuffer>& compressedBuffer) {
   ARROW_ASSIGN_OR_RAISE(
@@ -185,16 +183,14 @@ arrow::Status getLengthBufferAndValueBufferStream(
   }
 
   // Compress the big buffer.
-  int64_t maxLength = codec->MaxCompressedLen(uncompressedSize, nullptr);
+  int64_t maxLength = codec->maxCompressedLen(uncompressedSize);
   ARROW_ASSIGN_OR_RAISE(
       compressedBuffer, arrow::AllocateResizableBuffer(maxLength, pool));
-  ARROW_ASSIGN_OR_RAISE(
-      int64_t actualLength,
-      codec->Compress(
-          uncompressedSize,
-          uncompressedBuffer->data(),
-          maxLength,
-          compressedBuffer->mutable_data()));
+  int64_t actualLength = codec->compress(
+      uncompressedBuffer->data(),
+      uncompressedSize,
+      compressedBuffer->mutable_data(),
+      maxLength);
   RETURN_NOT_OK(compressedBuffer->Resize(actualLength, /*shrink*/ true));
 
   // Update compressed size.
@@ -314,11 +310,11 @@ int64_t getBufferSize(const std::shared_ptr<arrow::Array>& array) {
 
 int64_t getMaxCompressedBufferSize(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
-    arrow::util::Codec* codec) {
+    Codec* codec) {
   int64_t totalSize = 0;
   for (auto& buffer : buffers) {
     if (buffer != nullptr && buffer->size() != 0) {
-      totalSize += codec->MaxCompressedLen(buffer->size(), nullptr);
+      totalSize += codec->maxCompressedLen(buffer->size());
     }
   }
   return totalSize;

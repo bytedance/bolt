@@ -60,7 +60,7 @@ class Spill final {
       const std::vector<bool>* isValidityBuffer,
       uint64_t rawSize,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec);
+      Codec* codec);
 
   const std::string& spillFile() const;
 

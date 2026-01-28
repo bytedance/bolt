@@ -76,6 +76,6 @@ class CelebornPartitionWriter final : public RemotePartitionWriter {
   std::vector<int64_t> rawPartitionLengths_;
 
   // for BoltRowBasedSortShuffleWriter
-  std::shared_ptr<ZstdStreamCodec> zstdCodec_;
+  std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_;
 };
 } // namespace bytedance::bolt::shuffle::sparksql
