@@ -27,7 +27,7 @@
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
-  # add_subdirectory(sparksql/tests)
+  add_subdirectory(sparksql/tests)
 endif()
 
 add_library(

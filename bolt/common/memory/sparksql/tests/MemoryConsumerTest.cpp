@@ -151,6 +151,10 @@ class SpillMemoryConsumer
 
   ~SpillMemoryConsumer() override = default;
 
+  bool hasSpilled() {
+    return hasSpilled_;
+  }
+
   int64_t spill(int64_t size) override {
     if (hasSpilled_) {
       return 0;
@@ -171,7 +175,7 @@ class SpillMemoryConsumer
   }
 
   void freeMemory(int64_t size) override {
-    BOLT_CHECK(size <= used_);
+    BOLT_CHECK(size <= used_, "size is {}, used_ is {}", size, used_);
     auto tmm = lock_or_throw(taskMemoryManager_);
     int64_t released = tmm->releaseExecutionMemory(size, weak_from_this());
     used_ -= released;
@@ -190,31 +194,33 @@ TEST_F(MemoryConsumerTest, expectSpill) {
 
   auto taskMemoryManager =
       std::make_shared<TaskMemoryManager>(memoryPool, taskAttemptId);
-  std::shared_ptr<MemoryConsumer> consumer1 =
-      std::make_shared<SpillMemoryConsumer>(taskMemoryManager);
-  std::shared_ptr<MemoryConsumer> consumer2 =
+  std::shared_ptr<MemoryConsumer> consumer =
       std::make_shared<SpillMemoryConsumer>(taskMemoryManager);
   // consumer1 requests half mem, consumer2 requests (half + can Spilled=100 +
   // can't Spilled=1)
   const int64_t firstReq = capacity / 2;
   const int64_t secondReq = capacity / 2 + 100 + 1;
   // got mem success
-  const int64_t firstAcq = consumer1->acquireMemory(firstReq);
+  const int64_t firstAcq = consumer->acquireMemory(firstReq);
   BOLT_CHECK(
       firstAcq == firstReq,
       "expect firstAcq == firstReq, but firstAcq={}, firstReq={}",
       firstAcq,
       firstReq);
+  EXPECT_TRUE(consumer->getUsed() == firstAcq);
   // can't get enough mem for extra 1 byte
-  const int64_t secondAcq = consumer2->acquireMemory(secondReq);
+  const int64_t secondAcq = consumer->acquireMemory(secondReq);
   BOLT_CHECK(
       secondAcq == secondReq - 1,
       "expect secondAcq == secondReq - 1, but secondAcq={}, secondReq={}",
       secondAcq,
       secondReq);
+  EXPECT_TRUE(consumer->getUsed() == capacity);
   // repay mem
-  consumer1->freeMemory(firstReq - 100);
-  consumer2->freeMemory(secondReq - 1);
+  consumer->freeMemory(capacity);
+  EXPECT_TRUE(consumer->getUsed() == 0);
+  auto testConsumer = std::dynamic_pointer_cast<SpillMemoryConsumer>(consumer);
+  EXPECT_TRUE(testConsumer->hasSpilled() == true);
 }
 
 TEST_F(MemoryConsumerTest, expectWait) {

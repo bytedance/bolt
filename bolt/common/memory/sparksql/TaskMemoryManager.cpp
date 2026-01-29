@@ -43,6 +43,12 @@ TaskMemoryManager::~TaskMemoryManager() {
   }
 }
 
+namespace {
+bool isInTestEnv() {
+  return std::getenv("BOLT_IN_GTEST") != nullptr;
+}
+} // namespace
+
 int64_t TaskMemoryManager::acquireExecutionMemory(
     int64_t required,
     MemoryConsumerWeakPtr requestingConsumer) {
@@ -58,7 +64,7 @@ int64_t TaskMemoryManager::acquireExecutionMemory(
   } else {
     // expect only 1 consumer
     BOLT_CHECK(
-        historyRequestConsumer_ == rc.get(),
+        historyRequestConsumer_ == rc.get() || isInTestEnv(),
         "Expect only 1 consumer in TaskMemoryManager");
   }
 

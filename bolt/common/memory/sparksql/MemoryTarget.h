@@ -343,7 +343,7 @@ class SpillTrigger final {
       SpillerPhase::kShrink,
       SpillerPhase::kSpill};
 
-  inline static const std::string kNamePrefix = "SpillTriggerLayer.";
+  inline static const std::string kNamePrefix = "SpillTriggerLayer";
 
   static TreeMemoryTargetPtr newChild(
       TreeMemoryTargetWeakPtr parent,

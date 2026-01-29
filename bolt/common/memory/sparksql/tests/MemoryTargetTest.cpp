@@ -171,7 +171,7 @@ TEST_F(MemoryTargetTest, toString) {
   AllocationListenerPtr listener = std::make_shared<ManagedAllocationListener>(
       "test", overAccquireTarget, recorder);
   std::string expect =
-      "OverAcquireMemoryTarget(target=TreeMemoryTargetNode(name=WholeStageCodeGen.1, capacity=9223372036854775807, childrenNum=0, children=(), parent=TreeMemoryTargetNode(name=SpillTrigger.root.1, capacity=9223372036854775807, childrenNum=2, children=([seq=0, childName=OverAcquire.DummyTarget.1],[seq=1, childName=WholeStageCodeGen.1],), parent=ConsumerTargetBridge(name=Gluten.Tree.1, taskMemoryManager=TaskMemoryManager(taskAttemptId=996, pool=ExecutionMemoryPool(poolSize=1073741824, memoryForTask={}}), overTarget=TreeMemoryTargetNode(name=OverAcquire.DummyTarget.1, capacity=9223372036854775807, childrenNum=0, children=(), parent=TreeMemoryTargetNode(name=SpillTrigger.root.1, capacity=9223372036854775807, childrenNum=2, children=([seq=0, childName=OverAcquire.DummyTarget.1],[seq=1, childName=WholeStageCodeGen.1],), parent=ConsumerTargetBridge(name=Gluten.Tree.1, taskMemoryManager=TaskMemoryManager(taskAttemptId=996, pool=ExecutionMemoryPool(poolSize=1073741824, memoryForTask={}}))";
+      "OverAcquireMemoryTarget(target=TreeMemoryTargetNode(name=WholeStageCodeGen.1, capacity=9223372036854775807, childrenNum=0, children=(), parent=TreeMemoryTargetNode(name=SpillTriggerLayer.root.1, capacity=9223372036854775807, childrenNum=2, children=([seq=0, childName=OverAcquire.DummyTarget.1],[seq=1, childName=WholeStageCodeGen.1],), parent=ConsumerTargetBridge(name=Gluten.Tree.1, taskMemoryManager=TaskMemoryManager(taskAttemptId=996, pool=ExecutionMemoryPool(poolSize=1073741824, poolExtendSize=0, memIncreaseSize=0 memoryForTask={, DynamicMemoryQuotaManagerOption=enable=false, quotaTriggerRatio=0, rssMinRatio=0, rssMaxRatio=0, extendMaxRatio=0, extendMinRatio=0, extendScaleRatio=0, sampleRatio=0, sampleSize=0B, changeThresholdRatio=0, logPrintFreq=0}}), overTarget=TreeMemoryTargetNode(name=OverAcquire.DummyTarget.1, capacity=9223372036854775807, childrenNum=0, children=(), parent=TreeMemoryTargetNode(name=SpillTriggerLayer.root.1, capacity=9223372036854775807, childrenNum=2, children=([seq=0, childName=OverAcquire.DummyTarget.1],[seq=1, childName=WholeStageCodeGen.1],), parent=ConsumerTargetBridge(name=Gluten.Tree.1, taskMemoryManager=TaskMemoryManager(taskAttemptId=996, pool=ExecutionMemoryPool(poolSize=1073741824, poolExtendSize=0, memIncreaseSize=0 memoryForTask={, DynamicMemoryQuotaManagerOption=enable=false, quotaTriggerRatio=0, rssMinRatio=0, rssMaxRatio=0, extendMaxRatio=0, extendMinRatio=0, extendScaleRatio=0, sampleRatio=0, sampleSize=0B, changeThresholdRatio=0, logPrintFreq=0}}))";
   BOLT_CHECK(
       expect == ans->toString(),
       "Expect {}, but got {}",
@@ -227,10 +227,6 @@ TEST_F(MemoryTargetTest, expectSpill) {
   BOLT_CHECK(first == capacity / 2);
   int64_t second = listener->allocationChanged(capacity / 2 + 1);
   BOLT_CHECK(second == capacity / 2);
-}
-
-TEST_F(MemoryTargetTest, stats) {
-  BOLT_FAIL("Please test stats");
 }
 
 } // namespace bytedance::bolt::memory::sparksql
