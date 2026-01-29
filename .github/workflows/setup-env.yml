@@ -1,0 +1,67 @@
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Setup Env
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      scripts: ${{ steps.filter.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            scripts:
+              - 'scripts/**/*.sh'
+
+  test-scripts:
+    needs: changes
+    if: ${{ needs.changes.outputs.scripts == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install System and Python Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc g++ cmake make ninja-build wget
+          ./scripts/setup-dev-env.sh
+
+      - name: Setup path
+        run: |
+          echo "$HOME/miniconda3/bin" >> "$GITHUB_PATH"
+          cat "$GITHUB_PATH"
+
+      - name: Build Project
+        run: |
+          which -a pip
+          make release
