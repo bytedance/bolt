@@ -338,6 +338,8 @@ class ScanSpec {
   // projected out.
   void addAllChildFields(const Type&);
 
+  void removeAllChildFields();
+
   void setExpressionEvaluator(core::ExpressionEvaluator* eptr) {
     expressionEvaluator_ = eptr;
   }

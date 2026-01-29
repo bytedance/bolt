@@ -997,6 +997,62 @@ TEST_F(ParquetTableScanTest, testColumnNotExists) {
       "SELECT a, b, NULL, NULL, NULL FROM tmp");
 }
 
+TEST_F(ParquetTableScanTest, dcMapContainsDifferentDynamicColumns) {
+  // Scan three files that have different dynamic columns to mimic
+  // the scenario that different splits under the same table contains
+  // different dynamic columns.
+  auto inputType = ROW({"event_tag"}, {MAP(VARCHAR(), VARCHAR())});
+
+  auto plan =
+      PlanBuilder(pool_.get())
+          .tableScan(inputType)
+          .project(
+              {"CAST(event_tag['is_product_show'] AS BIGINT) AS is_product_show"})
+          .planNode();
+
+  CursorParameters params;
+  params.planNode = plan;
+
+  const int numSplitsPerFile = 1;
+  const std::vector<std::string> files = {
+      getExampleFilePath("dcmapDifferentDynamicColumns1.parquet"),
+      getExampleFilePath("dcmapDifferentDynamicColumns2.parquet"),
+      getExampleFilePath("dcmapDifferentDynamicColumns3.parquet"),
+  };
+
+  bool noMoreSplits = false;
+  auto addSplits = [&](exec::Task* task) {
+    if (!noMoreSplits) {
+      for (const auto& file : files) {
+        auto const splits = HiveConnectorTestBase::makeHiveConnectorSplits(
+            file, numSplitsPerFile, dwio::common::FileFormat::PARQUET);
+        for (const auto& split : splits) {
+          task->addSplit("0", exec::Split(split));
+        }
+      }
+      task->noMoreSplits("0");
+      noMoreSplits = true;
+    }
+  };
+
+  auto result = readCursor(params, addSplits);
+  ASSERT_TRUE(waitForTaskCompletion(result.first->task().get()));
+
+  std::vector<int64_t> actual;
+  for (const auto& batch : result.second) {
+    auto values = batch->childAt(0)->asFlatVector<int64_t>();
+    auto size = batch->size();
+    for (auto i = 0; i < size; ++i) {
+      actual.push_back(values->valueAt(i));
+    }
+  }
+
+  ASSERT_EQ(3, actual.size());
+  EXPECT_EQ(1, actual[0]);
+  EXPECT_EQ(0, actual[1]);
+  EXPECT_EQ(1, actual[2]);
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   // todo: use folly::Init init after upgrade folly lib

@@ -45,6 +45,9 @@
 
 namespace bytedance::bolt::parquet {
 
+constexpr std::string_view kDcmapColPrefix =
+    "parquet.meta.dynamic.column.map.keys.of.";
+
 /// Metadata and options for reading Parquet.
 class ReaderBase {
  public:
@@ -485,6 +488,45 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
               isRepeated);
         }
 
+        case thrift::ConvertedType::DCMAP: {
+          std::unordered_map<std::string, std::vector<std::string>> dcKeys;
+          for (const auto& kv : fileMetaData_->key_value_metadata) {
+            if (kv.key.find(kDcmapColPrefix, 0) != std::string::npos) {
+              auto k = kv.key.substr(kv.key.rfind('.') + 1);
+              auto v = kv.value;
+              auto start = 0U;
+              auto end = v.find(',');
+              while (end != std::string::npos) {
+                dcKeys[k].emplace_back(v.substr(start, end - start));
+                start = end + 1;
+                end = v.find(',', start);
+              }
+              dcKeys[k].push_back(v.substr(start));
+            }
+          }
+
+          auto childrenCopy = children;
+          return std::make_shared<const ParquetTypeWithId>(
+              createRowType(children, isFileColumnNamesReadAsLowerCase()),
+              std::move(childrenCopy),
+              curSchemaIdx,
+              maxSchemaElementIdx,
+              ParquetTypeWithId::kNonLeaf, // columnIdx,
+              std::move(name),
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              maxRepeat,
+              maxDefine,
+              isOptional,
+              isRepeated,
+              0,
+              0,
+              0,
+              true,
+              dcKeys);
+        }
+
         default:
           BOLT_UNREACHABLE(
               "Invalid SchemaElement converted_type: {}, name: {}",
@@ -538,6 +580,26 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
               std::nullopt,
               maxRepeat,
               maxDefine,
+              isOptional,
+              isRepeated);
+        } else if (
+            schema[parentSchemaIdx].converted_type ==
+            thrift::ConvertedType::DCMAP) {
+          BOLT_CHECK_EQ(children.size(), 2);
+          auto type = TypeFactory<TypeKind::MAP>::create(
+              children[0]->type(), children[1]->type());
+          return std::make_unique<ParquetTypeWithId>(
+              std::move(type),
+              std::move(children),
+              curSchemaIdx,
+              maxSchemaElementIdx,
+              ParquetTypeWithId::kNonLeaf, // columnIdx,
+              std::move(name),
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              maxRepeat,
+              maxDefine - 1,
               isOptional,
               isRepeated);
         }

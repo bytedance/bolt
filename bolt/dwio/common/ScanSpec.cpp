@@ -599,4 +599,10 @@ void ScanSpec::addAllChildFields(const Type& type) {
   }
 }
 
+void ScanSpec::removeAllChildFields() {
+  children_.clear();
+  stableChildren_.clear();
+  childByFieldName_.clear();
+}
+
 } // namespace bytedance::bolt::common

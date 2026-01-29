@@ -1499,3 +1499,109 @@ TEST_F(ParquetReaderTest, readDisputedNoLogicalType) {
   }
   EXPECT_GT(total, 0);
 }
+
+TEST_F(ParquetReaderTest, dcMapSimple) {
+  // dcmapSimple.parquet stores all the values inside dynamic columns.
+  const std::string sample(getExampleFilePath("dcmapSimple.parquet"));
+  // scanSpec we get from HMS will be map(varchar, varchar)
+  // so DCMap reader should be able to handle mismatched types.
+  auto rowType =
+      ROW({"name", "age", "accounts"},
+          {VARCHAR(), BIGINT(), MAP(VARCHAR(), VARCHAR())});
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(sample, readerOpts);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  auto expected = makeRowVector({
+      makeFlatVector<StringView>({"xeonliu", "wukong"}),
+      makeFlatVector<int64_t>({18, 500}),
+      makeMapVector<StringView, StringView>({
+          {{"baidu", "2020-01-01"},
+           {"douyin", "2012-04-05"},
+           {"tencent", "2011-02-03"}},
+          {{"baidu", "2015-01-01"}, {"toutiao", "2013-02-04"}},
+      }),
+  });
+
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}
+
+TEST_F(ParquetReaderTest, dcMapNested) {
+  const std::string sample(getExampleFilePath("dcmapNested.parquet"));
+  auto rowType =
+      ROW({"name", "age", "contact"},
+          {VARCHAR(),
+           BIGINT(),
+           ROW({"city", "phone"},
+               {VARCHAR(),
+                ROW({"key_value", "dynamic_column"},
+                    {MAP(VARCHAR(), VARCHAR()),
+                     ROW({"value_0",
+                          "value_1",
+                          "value_2",
+                          "value_3",
+                          "value_4",
+                          "value_5"},
+                         {VARCHAR(),
+                          VARCHAR(),
+                          VARCHAR(),
+                          VARCHAR(),
+                          VARCHAR(),
+                          VARCHAR()})})})});
+
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(sample, readerOpts);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  auto expected = makeRowVector({
+      makeFlatVector<StringView>({"xeonliu", "wukong"}),
+      makeFlatVector<int64_t>({18, 500}),
+      makeRowVector(
+          {makeFlatVector<StringView>({"Shanghai", "Beijing"}),
+           makeMapVector<StringView, StringView>(
+               {{{"tangchenyipin", "021-88880001"},
+                 {"zhongliangyihao", "021-88880002"},
+                 {"hepingfandian", "021-88880003"}},
+                {{"erhuan", "010-66660001"},
+                 {"sanhuan", "010-66660002"},
+                 {"sihuan", "010-66660003"}}})}),
+  });
+
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}
+
+TEST_F(ParquetReaderTest, dcMapContainsMap) {
+  // dcmapContainsMap.parquet stores values of "tencent" and "toutiao"
+  // in dynamic columns and other kv pairs in MAP part of DCMAP.
+  const std::string sample(getExampleFilePath("dcmapContainsMap.parquet"));
+  // scanSpec we get from HMS will be map(varchar, varchar)
+  // so DCMap reader should be able to handle mismatched types.
+  auto rowType =
+      ROW({"name", "age", "accounts"},
+          {VARCHAR(), BIGINT(), MAP(VARCHAR(), VARCHAR())});
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(sample, readerOpts);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  auto expected = makeRowVector({
+      makeFlatVector<StringView>({"xeon_liu", "wukong"}),
+      makeFlatVector<int64_t>({18, 500}),
+      makeMapVector<StringView, StringView>({
+          {{"douyin", "2012-04-05"},
+           {"baidu", "2010-01-01"},
+           {"tencent", "2011-02-03"}},
+          {{"toutiao", "2013-02-04"}, {"baidu", "2015-01-01"}},
+      }),
+  });
+
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}

@@ -51,9 +51,17 @@ StructColumnReader::StructColumnReader(
           fileType,
           params,
           scanSpec) {
-  auto& childSpecs = scanSpec_->stableChildren();
+  if (fileType->isDCMap()) {
+    // scanSpec for DCMap is a map, but we read it as a Struct.
+    // manually add Struct type to scanSpec.
+    // remove children from previous fileType or original Map type
+    // which may not be appliable to current fileType
+    scanSpec_->removeAllChildFields();
+    scanSpec_->addAllChildFields(*(fileType->type()));
+  }
   const bool useColumnNames =
       columnReaderOptions.useColumnNamesForColumnMapping_;
+  const auto& childSpecs = scanSpec_->stableChildren();
   std::vector<column_index_t> missingFields;
   for (int i = childSpecs.size() - 1; i >= 0; --i) {
     auto childSpec = childSpecs[i];
@@ -79,7 +87,9 @@ StructColumnReader::StructColumnReader(
       continue;
     }
     auto childFileType = fileType_->childByName(fieldName);
-    auto childRequestedType = requestedType_->childByName(fieldName);
+    auto childRequestedType = childFileType->isDCMap()
+        ? fileType_->childByName(fieldName)
+        : requestedType_->childByName(fieldName);
     addChild(ParquetColumnReader::build(
         columnReaderOptions,
         childRequestedType,
