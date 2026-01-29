@@ -33,14 +33,14 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SuccinctPrinter.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/memory/MemoryPoolForGluten.h"
 #include "bolt/common/memory/sparksql/AllocationListener.h"
 #include "bolt/common/memory/sparksql/MemoryConsumer.h"
 #include "bolt/common/memory/sparksql/MemoryTarget.h"
+#include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/memory/sparksql/Spiller.h"
 #include "bolt/common/memory/sparksql/SpillerPhase.h"
 #include "bolt/common/memory/sparksql/TaskMemoryManager.h"
-
-#include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 
 using namespace ::testing;
 using namespace bytedance::bolt::memory::sparksql;
@@ -98,6 +98,31 @@ TEST_F(NativeMemoryManagerTest, basic) {
 
   boltMemoryManager->shrink(memoryPool->memoryUsed());
   LOG(INFO) << "memoryUsed=" << memoryPool->memoryUsed();
+}
+
+TEST_F(NativeMemoryManagerTest, mustUseMemoryPoolForGluten) {
+  bolt::memory::MemoryManager::Options mmOptions;
+  mmOptions.alignment = bolt::memory::MemoryAllocator::kMaxAlignment;
+  mmOptions.trackDefaultUsage = true; // memory usage tracking
+  mmOptions.checkUsageLeak = true; // leak check
+  mmOptions.coreOnAllocationFailureEnabled = false;
+  mmOptions.allocatorCapacity = bolt::memory::kMaxMemory;
+  mmOptions.arbitratorKind = "TEST_ONLY";
+  mmOptions.useMemoryPoolForGluten = true; /* This code only for gluten */
+  auto boltMemoryManager =
+      std::make_unique<bolt::memory::MemoryManager>(mmOptions);
+  auto boltAggregatePool = boltMemoryManager->addRootPool(
+      "mustUseMemoryPoolForGluten_root",
+      bolt::memory::kMaxMemory, // the 3rd capacity
+      bytedance::bolt::memory::MemoryReclaimer::create());
+  auto boltLeafPool = boltAggregatePool->addLeafChild(
+      "mustUseMemoryPoolForGluten_default_leaf");
+
+  EXPECT_TRUE(
+      std::dynamic_pointer_cast<MemoryPoolForGluten>(boltAggregatePool) !=
+      nullptr);
+  EXPECT_TRUE(
+      std::dynamic_pointer_cast<MemoryPoolForGluten>(boltLeafPool) != nullptr);
 }
 
 } // namespace bytedance::bolt::memory::sparksql
