@@ -68,7 +68,17 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
   auto memLimit = freeMem.value() + pool()->freeBytes();
-  memLimit = std::max(memLimit, minMemLimit_);
+  if (pool()->reservedBytes() < minMemLimit_) {
+    // minMemLimit_ ensures that ShuffleWriter retains a minimum amount of
+    // memory. If ShuffleWriter has already consumed some memory, that usage is
+    // deducted from minMemLimit_ to determine the final effective threshold.
+    memLimit = std::max(memLimit, minMemLimit_ - pool()->reservedBytes());
+  }
+  VLOG(1) << "ShuffleWriterNode::addInput: memLimit = " << memLimit
+          << ", pool used: " << pool()->usedBytes()
+          << ", pool free: " << pool()->freeBytes()
+          << ", pool reserved: " << pool()->reservedBytes()
+          << ", total free: " << freeMem.value();
   auto status = shuffleWriter_->split(input, memLimit);
   BOLT_CHECK(status.ok(), "Native split: shuffle writer split failed");
 }

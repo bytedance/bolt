@@ -469,8 +469,9 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
     writerOptions.forceShuffleWriterType = param.shuffleMode;
     writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;
-    writerOptions.taskAttemptId = 0;
-    writerOptions.partitionWriterOptions.shuffleBufferSize = 1024 * 1024; // 1MB
+    writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+    writerOptions.partitionWriterOptions.shuffleBufferSize =
+        param.shuffleBufferSize;
 
     if (param.writerType == PartitionWriterType::kCeleborn) {
       writerOptions.partitionWriterOptions.rssClient = mockRssClient;

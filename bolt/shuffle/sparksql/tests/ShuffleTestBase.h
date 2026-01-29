@@ -64,6 +64,7 @@ struct ShuffleTestParam {
   int64_t memoryLimit = 1024 * 1024 * 1024; // 1GB
   int32_t batchSize = 32;
   int32_t numBatches = 4;
+  int32_t shuffleBufferSize = kDefaultShuffleWriterBufferSize;
 
   std::string toString() const;
 

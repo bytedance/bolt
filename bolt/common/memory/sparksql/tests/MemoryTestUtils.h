@@ -89,6 +89,10 @@ class TestMemoryManagerHolder {
     return ptr->shared_from_this();
   }
 
+  int64_t taskAttemptId() {
+    return tmm_->getTaskAttemptId();
+  }
+
   ~TestMemoryManagerHolder() {
     delete memoryManagerHolder_;
     MemoryTargetBuilder::invalidate(tmm_, kIsolateMemory, memoryLimit_);

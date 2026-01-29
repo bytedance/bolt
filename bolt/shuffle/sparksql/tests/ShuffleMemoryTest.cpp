@@ -79,4 +79,37 @@ TEST_F(ShuffleMemoryTest, testRowBasedShuffleEstimateLowerThanActual) {
   executeTestWithCustomInput(param, inputData);
 }
 
+TEST_F(ShuffleMemoryTest, testMinMemLimit) {
+  std::string str(10 * 1024, 'x');
+  auto rowCount = 1024;
+  auto baseVectorPtr = BaseVector::create(VARCHAR(), rowCount, pool());
+  auto flatVector = baseVectorPtr->asFlatVector<StringView>();
+  for (int i = 0; i < rowCount; ++i) {
+    flatVector->set(i, StringView(str));
+  }
+
+  auto rowType = ROW({"c0"}, {VARCHAR()});
+  auto rowVector = std::make_shared<RowVector>(
+      pool(),
+      rowType,
+      nullptr,
+      rowCount,
+      std::vector<VectorPtr>{baseVectorPtr});
+
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 2;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 10;
+  param.numMappers = 1;
+  param.memoryLimit = 100 * 1024 * 1024; // 100MB
+  param.shuffleBufferSize = 40 * 1024 * 1024; // 40MB
+
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.emplace_back(20, rowVector);
+
+  executeTestWithCustomInput(param, inputData);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test
