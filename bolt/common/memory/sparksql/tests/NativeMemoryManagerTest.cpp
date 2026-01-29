@@ -101,22 +101,38 @@ TEST_F(NativeMemoryManagerTest, basic) {
 }
 
 TEST_F(NativeMemoryManagerTest, mustUseMemoryPoolForGluten) {
+  class NoopListener final : public AllocationListener {
+   public:
+    ~NoopListener() override {}
+
+    int64_t allocationChanged(int64_t size) override {
+      return size;
+    }
+
+    int64_t getUsedBytes() override {
+      return 0;
+    }
+  };
+
+  AllocationListenerPtr listener = std::make_shared<NoopListener>();
+  ArbitratorFactoryRegister afr(listener);
   bolt::memory::MemoryManager::Options mmOptions;
   mmOptions.alignment = bolt::memory::MemoryAllocator::kMaxAlignment;
   mmOptions.trackDefaultUsage = true; // memory usage tracking
   mmOptions.checkUsageLeak = true; // leak check
   mmOptions.coreOnAllocationFailureEnabled = false;
   mmOptions.allocatorCapacity = bolt::memory::kMaxMemory;
-  mmOptions.arbitratorKind = "TEST_ONLY";
+  mmOptions.arbitratorKind = afr.getKind();
   mmOptions.useMemoryPoolForGluten = true; /* This code only for gluten */
   auto boltMemoryManager =
       std::make_unique<bolt::memory::MemoryManager>(mmOptions);
+
   auto boltAggregatePool = boltMemoryManager->addRootPool(
-      "mustUseMemoryPoolForGluten_root",
+      "TEST_ONLY_root",
       bolt::memory::kMaxMemory, // the 3rd capacity
       bytedance::bolt::memory::MemoryReclaimer::create());
-  auto boltLeafPool = boltAggregatePool->addLeafChild(
-      "mustUseMemoryPoolForGluten_default_leaf");
+
+  auto boltLeafPool = boltAggregatePool->addLeafChild("TEST_ONLY_default_leaf");
 
   EXPECT_TRUE(
       std::dynamic_pointer_cast<MemoryPoolForGluten>(boltAggregatePool) !=
