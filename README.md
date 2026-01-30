@@ -115,7 +115,7 @@ contribute to the project.
 
 ## Community
 
-WIP
+* [Please join our Slack channel and ask in `#dev`](https://join.slack.com/t/bolt-lib/shared_invite/zt-3okvtb6fr-7jUlaI2AiGCOYdoxhNL6Pw).
 
 ## License
 
