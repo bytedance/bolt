@@ -41,19 +41,7 @@ ENABLE_ASAN ?= False
 LDB_BUILD ?= False
 ENABLE_COLOR ?= True
 ENABLE_CRC ?= False
-ENABLE_EXCEPTION_TRACE ?= False
 ENABLE_PERF ?= False
-
-ARCH := $(shell uname -m)
-ifneq (,$(filter $(ARCH), aarch64 arm64))
-    ENABLE_EXCEPTION_TRACE = False
-    $(info ENABLE_EXCEPTION_TRACE is disabled on ARM platform)
-endif
-
-ifeq ($(LDB_BUILD), True)
-ENABLE_EXCEPTION_TRACE = False
-$(info Turn off ENABLE_EXCEPTION_TRACE when LDB_BUILD is ON)
-endif
 
 BUILD_BASE_DIR=_build
 BUILD_TYPE=Release
@@ -202,7 +190,6 @@ conan_build:
 	-o bolt/*:enable_color=${ENABLE_COLOR} \
 	-o bolt/*:enable_meta_sort=${ENABLE_META_SORT} \
 	-o bolt/*:enable_colocate=${ENABLE_COLOCATE} \
-	-o bolt/*:enable_exception_trace=${ENABLE_EXCEPTION_TRACE} \
 	-o bolt/*:ldb_build=${LDB_BUILD} \
 	-o bolt/*:enable_crc=${ENABLE_CRC} \
 	-pr ${PROFILE} -pr ../../scripts/conan/bolt.profile \

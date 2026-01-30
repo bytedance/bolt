@@ -159,7 +159,7 @@ option(BOLT_ENABLE_INT64_BUILD_PARTITION_BOUND
 )
 
 option(BOLT_ENABLE_SPARK_COMPATIBLE "Enable spark compatible setting" OFF)
-option(ENABLE_EXCEPTION_TRACE "Enable exception trace" ON)
+option(ENABLE_EXCEPTION_TRACE "Enable exception trace" OFF)
 option(BOLT_ON_TCE "Build Bolt on Bytedance TCE Environment" OFF)
 option(BOLT_ENABLE_TBB "Enable oneTBB support" OFF)
 option(BOLT_ENABLE_TORCH "Enable torch script support" OFF)

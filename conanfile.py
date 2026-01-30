@@ -88,7 +88,6 @@ class BoltConan(ConanFile):
         "use_arrow_hdfs": [True, False],
         "enable_asan": [True, False],
         "enable_jit": [True, False],
-        "enable_exception_trace": [True, False],
         "es_build": [True, False],
         "ldb_build": [True, False],
         "enable_arrow_connector": [True, False],
@@ -116,7 +115,6 @@ class BoltConan(ConanFile):
         "enable_jit": True,
         "spark_compatible": False,
         "es_build": False,
-        "enable_exception_trace": False,
         "ldb_build": False,
         # bytedance presto do not support crc flag
         "enable_crc": False,
@@ -284,8 +282,7 @@ class BoltConan(ConanFile):
         cmake_layout(self, build_folder="_build")
 
     def config_options(self):
-        if self.options.get_safe("ldb_build"):
-            self.options.enable_exception_trace = False
+        pass
 
     # Set default options of third parties here
     def configure(self):
@@ -469,19 +466,6 @@ class BoltConan(ConanFile):
         else:
             if tc.preprocessor_definitions.get("ENABLE_META_SORT", None) is not None:
                 del tc.preprocessor_definitions["ENABLE_META_SORT"]
-
-        # enable_exception_trace
-        tc.cache_variables["ENABLE_EXCEPTION_TRACE"] = self.options.get_safe(
-            "enable_exception_trace"
-        )
-        if self.options.get_safe("enable_exception_trace"):
-            tc.preprocessor_definitions["ENABLE_EXCEPTION_TRACE"] = 1
-        else:
-            if (
-                tc.preprocessor_definitions.get("ENABLE_EXCEPTION_TRACE", None)
-                is not None
-            ):
-                del tc.preprocessor_definitions["ENABLE_EXCEPTION_TRACE"]
 
         if self.options.es_build:
             tc.cache_variables["BOLT_ENABLE_SIMDJSON"] = "ON"
