@@ -31,7 +31,6 @@
 #include "bolt/dwio/common/SelectiveStructColumnReader.h"
 
 #include "bolt/dwio/common/ColumnLoader.h"
-#include "bolt/vector/tests/utils/VectorMaker.h"
 namespace bytedance::bolt::dwio::common {
 
 void SelectiveStructColumnReaderBase::filterRowGroups(
@@ -444,59 +443,145 @@ void SelectiveStructColumnReaderBase::getValues(
     // a new combined map will be constructed
     // all mapKV will be copied to resultVector.
     auto dcKeys = fileType_->getDcKeys();
-
-    if (!dcKeys.empty() &&
-        dcKeys.find(scanSpec_->fieldName()) != dcKeys.end()) {
+    const auto it = dcKeys.find(scanSpec_->fieldName());
+    if (it != dcKeys.end()) {
       auto oldMap = resultRow->childAt(0)->as<MapVector>();
       auto oldRow = resultRow->childAt(1)->as<RowVector>();
-      auto keys = dcKeys[scanSpec_->fieldName()];
+      const auto& keys = it->second;
       BOLT_CHECK_EQ(oldRow->childrenSize(), keys.size());
 
-      std::vector<std::vector<std::pair<StringView, std::optional<StringView>>>>
-          combinedMap(resultRow->size());
+      const auto numRows = resultRow->size();
+      std::vector<vector_size_t> entryCounts(numRows, 0);
 
+      const SimpleVector<StringView>* oldMapKeys = nullptr;
+      const SimpleVector<StringView>* oldMapValues = nullptr;
       if (oldMap && oldMap->mapKeys() && oldMap->mapValues()) {
-        auto oldMapKeys = oldMap->mapKeys()->as<SimpleVector<StringView>>();
-        auto oldMapValues = oldMap->mapValues()->as<SimpleVector<StringView>>();
+        BOLT_CHECK_EQ(oldMap->size(), numRows);
+        oldMapKeys = oldMap->mapKeys()->as<SimpleVector<StringView>>();
+        oldMapValues = oldMap->mapValues()->as<SimpleVector<StringView>>();
         BOLT_CHECK_NOT_NULL(oldMapKeys);
         BOLT_CHECK_NOT_NULL(oldMapValues);
-        BOLT_CHECK_EQ(oldMapValues->size(), oldMapValues->size());
+        BOLT_CHECK_EQ(oldMapKeys->size(), oldMapValues->size());
 
-        for (int rowIdx = 0; rowIdx < oldMap->size(); rowIdx++) {
-          if (!oldMap->isNullAt(rowIdx)) {
-            auto offset = oldMap->offsetAt(rowIdx);
-            auto size = oldMap->sizeAt(rowIdx);
-
-            for (int i = 0; i < size; i++) {
-              if (!oldMapKeys->isNullAt(offset + i) &&
-                  !oldMapValues->isNullAt(offset + i)) {
-                combinedMap[rowIdx].push_back(
-                    {oldMapKeys->valueAt(offset + i),
-                     oldMapValues->valueAt(offset + i)});
-              }
+        for (vector_size_t rowIdx = 0; rowIdx < oldMap->size(); ++rowIdx) {
+          if (oldMap->isNullAt(rowIdx)) {
+            continue;
+          }
+          const auto offset = oldMap->offsetAt(rowIdx);
+          const auto size = oldMap->sizeAt(rowIdx);
+          for (vector_size_t i = 0; i < size; ++i) {
+            const auto elementIndex = offset + i;
+            if (!oldMapKeys->isNullAt(elementIndex) &&
+                !oldMapValues->isNullAt(elementIndex)) {
+              ++entryCounts[rowIdx];
             }
           }
         }
       }
 
-      for (int colIdx = 0; colIdx < oldRow->childrenSize(); colIdx++) {
+      std::vector<const SimpleVector<StringView>*> rowValueColumns;
+      rowValueColumns.reserve(oldRow->childrenSize());
+      for (vector_size_t colIdx = 0; colIdx < oldRow->childrenSize();
+           ++colIdx) {
         auto curCol =
             oldRow->childAt(colIdx).get()->as<SimpleVector<StringView>>();
         BOLT_CHECK_NOT_NULL(curCol);
-        for (int rowIdx = 0; rowIdx < curCol->size(); rowIdx++) {
+        BOLT_CHECK_EQ(curCol->size(), numRows);
+        rowValueColumns.push_back(curCol);
+        for (vector_size_t rowIdx = 0; rowIdx < curCol->size(); ++rowIdx) {
           if (!curCol->isNullAt(rowIdx)) {
-            combinedMap[rowIdx].push_back(
-                {StringView(keys[colIdx]), curCol->valueAt(rowIdx)});
+            ++entryCounts[rowIdx];
           }
         }
       }
 
-      bytedance::bolt::test::VectorMaker vectorMaker(&memoryPool_);
-      auto combinedKvPtr = vectorMaker.mapVector(
-          combinedMap,
-          MAP(CppToType<StringView>::create(),
-              CppToType<StringView>::create()));
-      *result = combinedKvPtr;
+      auto offsets =
+          AlignedBuffer::allocate<vector_size_t>(numRows, &memoryPool_);
+      auto sizes =
+          AlignedBuffer::allocate<vector_size_t>(numRows, &memoryPool_);
+      auto* rawOffsets = offsets->asMutable<vector_size_t>();
+      auto* rawSizes = sizes->asMutable<vector_size_t>();
+
+      vector_size_t totalEntries = 0;
+      for (vector_size_t rowIdx = 0; rowIdx < numRows; ++rowIdx) {
+        rawOffsets[rowIdx] = totalEntries;
+        rawSizes[rowIdx] = entryCounts[rowIdx];
+        totalEntries += entryCounts[rowIdx];
+      }
+
+      const auto keyType = CppToType<StringView>::create();
+      const auto valueType = CppToType<StringView>::create();
+      auto combinedKeys = BaseVector::create<FlatVector<StringView>>(
+          keyType, totalEntries, &memoryPool_);
+      auto combinedValues = BaseVector::create<FlatVector<StringView>>(
+          valueType, totalEntries, &memoryPool_);
+
+      if (oldMapKeys != nullptr) {
+        combinedKeys->acquireSharedStringBuffers(oldMapKeys);
+      }
+      if (oldMapValues != nullptr) {
+        combinedValues->acquireSharedStringBuffers(oldMapValues);
+      }
+      for (const auto* col : rowValueColumns) {
+        combinedValues->acquireSharedStringBuffers(col);
+      }
+
+      auto keyDictionary = BaseVector::create<FlatVector<StringView>>(
+          keyType, keys.size(), &memoryPool_);
+      for (vector_size_t colIdx = 0; colIdx < keys.size(); ++colIdx) {
+        keyDictionary->set(colIdx, StringView(keys[colIdx]));
+      }
+      combinedKeys->acquireSharedStringBuffers(keyDictionary.get());
+
+      std::vector<vector_size_t> cursor(numRows);
+      for (vector_size_t rowIdx = 0; rowIdx < numRows; ++rowIdx) {
+        cursor[rowIdx] = rawOffsets[rowIdx];
+      }
+
+      if (oldMapKeys != nullptr) {
+        for (vector_size_t rowIdx = 0; rowIdx < oldMap->size(); ++rowIdx) {
+          if (oldMap->isNullAt(rowIdx)) {
+            continue;
+          }
+          const auto offset = oldMap->offsetAt(rowIdx);
+          const auto size = oldMap->sizeAt(rowIdx);
+          for (vector_size_t i = 0; i < size; ++i) {
+            const auto elementIndex = offset + i;
+            if (!oldMapKeys->isNullAt(elementIndex) &&
+                !oldMapValues->isNullAt(elementIndex)) {
+              const auto outIndex = cursor[rowIdx]++;
+              combinedKeys->setNoCopy(
+                  outIndex, oldMapKeys->valueAt(elementIndex));
+              combinedValues->setNoCopy(
+                  outIndex, oldMapValues->valueAt(elementIndex));
+            }
+          }
+        }
+      }
+
+      for (vector_size_t colIdx = 0; colIdx < rowValueColumns.size();
+           ++colIdx) {
+        const auto keyView = keyDictionary->valueAt(colIdx);
+        const auto* curCol = rowValueColumns[colIdx];
+        for (vector_size_t rowIdx = 0; rowIdx < curCol->size(); ++rowIdx) {
+          if (!curCol->isNullAt(rowIdx)) {
+            const auto outIndex = cursor[rowIdx]++;
+            combinedKeys->setNoCopy(outIndex, keyView);
+            combinedValues->setNoCopy(outIndex, curCol->valueAt(rowIdx));
+          }
+        }
+      }
+
+      auto combinedMap = std::make_shared<MapVector>(
+          &memoryPool_,
+          MAP(keyType, valueType),
+          nullptr,
+          numRows,
+          offsets,
+          sizes,
+          combinedKeys,
+          combinedValues);
+      *result = std::move(combinedMap);
     } else {
       *result = resultRow->childAt(0);
     }
