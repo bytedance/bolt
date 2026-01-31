@@ -148,7 +148,7 @@ function install_python_dep() {
   elif [[ "$OS_TYPE" == "Darwin" ]]; then
     SHELL_CONFIG="$HOME/.bash_profile"
   fi
-  if [ -d ~/miniconda3 ]; then
+  if [ ! -d ~/miniconda3 ]; then
     echo "Installing conda"
     MINICONDA_URL_BASE="https://repo.anaconda.com/miniconda"
     MINICONDA_VERSION="py310_23.1.0-1"
