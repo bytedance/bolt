@@ -1705,9 +1705,10 @@ TEST_F(TableScanTest, preloadingSplitClose) {
   ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
   std::shared_ptr<Task> task;
   {
-    // Unblock the IO thread pool after a short delay to allow the task to finish.
-    // This is necessary because TableScan::close() waits for pending preloads,
-    // and if the IO threads are blocked, the preloads will never complete.
+    // Unblock the IO thread pool after a short delay to allow the task to
+    // finish. This is necessary because TableScan::close() waits for pending
+    // preloads, and if the IO threads are blocked, the preloads will never
+    // complete.
     std::thread unblocker([&batons]() {
       /* sleep override */
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
