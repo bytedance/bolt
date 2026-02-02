@@ -130,19 +130,6 @@ TEST_F(ShuffleMemoryTest, testCompositeRowEvictBeforeInit) {
     }
   }
 
-  std::string str2(5 * 1024, '0');
-  auto baseVectorPtr = BaseVector::create(VARCHAR(), rowCount, pool());
-  auto* flatVector = baseVectorPtr->asFlatVector<StringView>();
-  for (int i = 0; i < rowCount; ++i) {
-    flatVector->set(i, StringView(str2));
-  }
-  auto rowVector2 = std::make_shared<RowVector>(
-      pool(),
-      rowType,
-      nullptr,
-      rowCount,
-      std::vector<VectorPtr>{baseVectorPtr});
-
   ShuffleTestParam param;
   param.partitioning = "hash";
   param.shuffleMode = 1;
