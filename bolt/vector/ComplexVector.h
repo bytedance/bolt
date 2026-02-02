@@ -262,7 +262,7 @@ class RowVector : public BaseVector {
   /// Note : If the child is null, then it will stay null after the resize.
   virtual void resize(vector_size_t newSize, bool setNotNull = true) override;
 
-  static bool isComposite(std::shared_ptr<RowVector>& input);
+  static bool isComposite(const std::shared_ptr<RowVector>& input);
 
  private:
   vector_size_t childSize() const {

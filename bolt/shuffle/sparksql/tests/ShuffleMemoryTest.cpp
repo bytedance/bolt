@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <vector/ComplexVector.h>
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
@@ -110,6 +111,55 @@ TEST_F(ShuffleMemoryTest, testMinMemLimit) {
   inputData.inputsPerMapper.emplace_back(20, rowVector);
 
   executeTestWithCustomInput(param, inputData);
+}
+
+TEST_F(ShuffleMemoryTest, testCompositeRowEvictBeforeInit) {
+  std::string str(25 * 1024, '\0');
+  auto rowCount = 5 * 1024;
+
+  auto rowType = ROW({"c1"}, {VARCHAR()});
+  auto rowVector = createCompositeRowVectorWithPid(rowType, rowCount);
+
+  size_t totalRowSize = str.size() * rowCount;
+  rowVector->allocateRows(totalRowSize);
+  {
+    RowInfoTracker tracker(rowVector.get(), 0, rowCount);
+    for (auto i = 0; i < rowCount; i++) {
+      rowVector->store(i, rowVector->newRow());
+      rowVector->advance(str.size());
+    }
+  }
+
+  std::string str2(5 * 1024, '0');
+  auto baseVectorPtr = BaseVector::create(VARCHAR(), rowCount, pool());
+  auto* flatVector = baseVectorPtr->asFlatVector<StringView>();
+  for (int i = 0; i < rowCount; ++i) {
+    flatVector->set(i, StringView(str2));
+  }
+  auto rowVector2 = std::make_shared<RowVector>(
+      pool(),
+      rowType,
+      nullptr,
+      rowCount,
+      std::vector<VectorPtr>{baseVectorPtr});
+
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 1;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 1;
+  param.numMappers = 1;
+  param.memoryLimit = 100 * 1024 * 1024; // 100MB
+  param.shuffleBufferSize = 40 * 1024 * 1024; // 40MB
+  param.verifyOutput = false;
+
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.emplace_back(1, rowVector);
+
+  // expect OOM for composite row vector large than memory limit rather than
+  // coredump
+  EXPECT_THROW(executeTestWithCustomInput(param, inputData), BoltRuntimeError);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

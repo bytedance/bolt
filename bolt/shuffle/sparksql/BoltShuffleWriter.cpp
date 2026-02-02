@@ -2152,7 +2152,7 @@ arrow::Status BoltShuffleWriter::splitCompositeVector(
         rowVector);
     BOLT_CHECK(rv != nullptr && partitioner_->hasPid());
     // if memLimit is too small, tryEvict to free memory
-    if (rv->totalRowSize() > memLimit) {
+    if (rv->totalRowSize() > memLimit && isCompositeInitialized_) {
       RETURN_NOT_OK(tryEvict());
     }
     if (!isCompositeInitialized_) {

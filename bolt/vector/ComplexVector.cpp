@@ -695,7 +695,7 @@ void RowVector::resize(vector_size_t newSize, bool setNotNull) {
 }
 
 // static
-bool RowVector::isComposite(std::shared_ptr<RowVector>& input) {
+bool RowVector::isComposite(const std::shared_ptr<RowVector>& input) {
   return dynamic_cast<CompositeRowVector*>(input.get()) != nullptr;
 }
 

@@ -38,9 +38,11 @@
 
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <utility>
 
 #include <fmt/format.h>
+#include <vector/ComplexVector.h>
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
@@ -343,6 +345,17 @@ RowVectorPtr ShuffleTestBase::prependPidColumn(
   for (int32_t row = 0; row < numRows; ++row) {
     pids[row] = dist(rng);
   }
+
+  if (RowVector::isComposite(input)) {
+    // CompositeRowVector should contains a pid column already.
+    auto compositeVector = std::dynamic_pointer_cast<CompositeRowVector>(input);
+    auto* pidVector = compositeVector->childAt(0)->asFlatVector<int32_t>();
+    for (int i = 0; i < numRows; ++i) {
+      pidVector->set(i, pids[i]);
+    }
+    return input;
+  }
+
   auto pidVector =
       makeFlatVector<int32_t>(numRows, [&](auto row) { return pids[row]; });
 
@@ -441,8 +454,7 @@ std::vector<std::vector<RowVectorPtr>> ShuffleTestBase::splitInputByPid(
 ShuffleRunResult ShuffleTestBase::runShuffle(
     const std::vector<std::vector<RowVectorPtr>>& inputsPerMapper,
     const RowTypePtr& outputType,
-    const ShuffleTestParam& param,
-    const ShuffleInputData& inputData) {
+    const ShuffleTestParam& param) {
   auto memoryManagerHolder = TestMemoryManagerHolder::create(param.memoryLimit);
   ShuffleRunResult result;
 
@@ -573,11 +585,13 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     while (readerCursor->moveNext()) {
       auto curBatch = readerCursor->current();
       // deep copy to avoid hold shuffle reader memory
-      VectorPtr copy =
-          BaseVector::create(curBatch->type(), curBatch->size(), pool());
-      copy->copy(curBatch.get(), 0, 0, curBatch->size());
-      result.partitionOutputs[i].push_back(
-          std::dynamic_pointer_cast<RowVector>(copy));
+      if (param.verifyOutput) {
+        VectorPtr copy =
+            BaseVector::create(curBatch->type(), curBatch->size(), pool());
+        copy->copy(curBatch.get(), 0, 0, curBatch->size());
+        result.partitionOutputs[i].push_back(
+            std::dynamic_pointer_cast<RowVector>(copy));
+      }
       readerCursor->current().reset();
     }
   }
@@ -607,7 +621,7 @@ void ShuffleTestBase::executeTestWithCustomInput(
   auto outputType =
       std::dynamic_pointer_cast<const RowType>(allBaseBatches[0]->type());
 
-  auto result = runShuffle(writerInputs, outputType, param, inputData);
+  auto result = runShuffle(writerInputs, outputType, param);
 
   int64_t totalRows = 0;
   for (const auto& batch : allBaseBatches) {
@@ -617,6 +631,10 @@ void ShuffleTestBase::executeTestWithCustomInput(
   EXPECT_EQ(result.metrics.partitionLengths.size(), param.numPartitions);
   if (totalRows > 0) {
     EXPECT_GT(result.metrics.totalBytesWritten, 0);
+  }
+
+  if (!param.verifyOutput) {
+    return;
   }
 
   if (needsPid) {
@@ -657,6 +675,33 @@ void ShuffleTestBase::executeTestWithCustomInput(
 void ShuffleTestBase::executeTest(const ShuffleTestParam& param) {
   auto inputData = makeInputData(param);
   executeTestWithCustomInput(param, inputData);
+}
+
+std::shared_ptr<CompositeRowVector>
+ShuffleTestBase::createCompositeRowVectorWithPid(
+    const RowTypePtr& rowTypeWithoutPid,
+    vector_size_t rowCount) {
+  auto names = std::vector<std::string>{"c0"};
+  auto types = std::vector<TypePtr>{INTEGER()};
+  names.insert(
+      names.end(),
+      rowTypeWithoutPid->names().begin(),
+      rowTypeWithoutPid->names().end());
+  types.insert(
+      types.end(),
+      rowTypeWithoutPid->children().begin(),
+      rowTypeWithoutPid->children().end());
+  auto rowType = ROW(std::move(names), std::move(types));
+  auto validColumns =
+      std::make_unique<SelectivityVector>(rowType->size(), false);
+  validColumns->setValid(0, true);
+  auto pidVector = BaseVector::create(INTEGER(), rowCount, pool());
+  return std::make_shared<CompositeRowVector>(
+      rowType,
+      rowCount,
+      pool(),
+      std::move(validColumns),
+      std::vector<std::shared_ptr<BaseVector>>{pidVector});
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
