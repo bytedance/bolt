@@ -145,11 +145,7 @@ class HiveDataSource : public DataSource {
   std::shared_ptr<io::IoStatistics> ioStats_;
 
  private:
-  // Evaluates remainingFilter_ on the specified vector. Returns number of
-  // rows passed. Populates filterEvalCtx_.selectedIndices and selectedBits
-  // if only some rows passed the filter. If none or all rows passed
-  // filterEvalCtx_.selectedIndices and selectedBits are not updated.
-  vector_size_t evaluateRemainingFilter(RowVectorPtr& rowVector);
+  void rebuildPostScanExprSet();
 
   bolt::RowTypePtr getRowTypeForFile(
       std::shared_ptr<PaimonConnectorSplit> split);
@@ -199,8 +195,16 @@ class HiveDataSource : public DataSource {
   std::unordered_map<std::string, std::shared_ptr<HiveColumnHandle>>
       infoColumns_;
 
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles_;
+
   std::shared_ptr<common::MetadataFilter> metadataFilter_;
-  std::unique_ptr<exec::ExprSet> remainingFilterExprSet_;
+  core::TypedExprPtr currentRemainingFilter_;
+  std::unique_ptr<exec::ExprSet> postScanExprSet_;
+  std::vector<std::pair<column_index_t, core::TypedExprPtr>>
+      mapKeyPruningExprs_;
+  std::vector<column_index_t> postScanPruningChannels_;
+  int32_t postScanFilterExprIndex_{-1};
   RowVectorPtr emptyOutput_;
   bool emptySplit_;
   bool native_cache_enabled;

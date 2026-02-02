@@ -138,4 +138,12 @@ core::TypedExprPtr extractFiltersFromRemainingFilter(
     const core::TypedExprPtr& expr,
     core::ExpressionEvaluator* evaluator,
     common::SubfieldFilters& filters);
+
+core::TypedExprPtr convertFiltersToExpr(
+    const SubfieldFilters& filters,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<connector::ColumnHandle>>& columnHandles,
+    const RowTypePtr& dataColumns = nullptr,
+    const core::TypedExprPtr& baseExpr = nullptr);
 } // namespace bytedance::bolt::connector::hive

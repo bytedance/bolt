@@ -1798,6 +1798,14 @@ class NegatedBytesRange final : public Filter {
     return nonNegated_->isLowerUnbounded();
   }
 
+  bool isLowerExclusive() const {
+    return nonNegated_->isLowerExclusive();
+  }
+
+  bool isUpperExclusive() const {
+    return nonNegated_->isUpperExclusive();
+  }
+
   const std::string& lower() const {
     return nonNegated_->lower();
   }

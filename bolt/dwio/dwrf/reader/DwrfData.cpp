@@ -160,7 +160,7 @@ void DwrfData::filterRowGroups(
     return;
   }
   ensureRowGroupIndex();
-  auto filter = scanSpec.filter();
+  auto filter = scanSpec.rowGroupFilter();
   auto dwrfContext = reinterpret_cast<const StatsContext*>(&writerContext);
   result.totalCount = std::max(result.totalCount, index_->entry_size());
   auto nwords = bits::nwords(result.totalCount);

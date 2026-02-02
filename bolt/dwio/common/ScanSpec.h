@@ -73,10 +73,15 @@ class ScanSpec {
     return filter_.get();
   }
 
+  common::Filter* rowGroupFilter() const {
+    return rowGroupFilter_.get();
+  }
+
   // Sets 'filter_'. May be used at initialization or when adding a
   // pushed down filter, e.g. top k cutoff.
   void setFilter(std::unique_ptr<Filter> filter) {
     filter_ = std::move(filter);
+    rowGroupFilter_ = filter_;
   }
 
   void addFilter(const Filter&);
@@ -422,6 +427,7 @@ class ScanSpec {
   // returned as flat.
   bool makeFlat_ = false;
   std::shared_ptr<common::Filter> filter_;
+  std::shared_ptr<common::Filter> rowGroupFilter_;
 
   // Filters that will be only used for row group filtering based on metadata.
   // The conjunctions among these filters are tracked in MetadataFilter, with
