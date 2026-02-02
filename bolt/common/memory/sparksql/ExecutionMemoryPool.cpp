@@ -147,14 +147,23 @@ int64_t ExecutionMemoryPool::acquireMemory(
                 << ", internalMemoryUsed=" << internalMemoryUsed()
                 << ", internalMemoryFree=" << internalMemoryFree()
                 << ", ExecutionPool detail is: " << this;
+      // In Spark's implementation, there is no timeout, but in Gluten's
+      // practice, we found that some deadlock issues occurred, so we added a
+      // timeout here. deadlock scenario:
+      // 1. task A accquire RESOURCE_REGISTRIES.synchronized.
+      // 2. task A waiting for 1/2N to be satisfied.
+      // 3. task B wants to release memory, but RESOURCE_REGISTRIES is hold by
+      // task A.
       if (cv_.wait_for(guard, std::chrono::milliseconds(minMemoryMaxWaitMs_)) ==
           std::cv_status::timeout) {
         LOG(ERROR) << "TID " << taskAttemptId
-                   << " waiting for at least 1/2N to be free timeout after "
+                   << " waiting for minimum memory failed after "
                    << minMemoryMaxWaitMs_ << "ms";
-        memoryForTask_[taskAttemptId] += toGrant;
-        memIncreaseSize_ += toGrant;
-        return toGrant;
+        BOLT_CHECK(
+            minMemoryMaxWaitMs_ > 0,
+            "Expect minMemoryMaxWaitMs is greater than 0, but got {}",
+            minMemoryMaxWaitMs_);
+        return 0;
       }
     } else {
       bool enable = option_.enable && !thisRunHasBorrowed;
