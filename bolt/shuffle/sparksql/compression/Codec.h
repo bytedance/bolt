@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+ * Copyright (c) ByteDance Ltd. and/or its affiliates
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <vector>
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql {

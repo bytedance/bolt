@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+ * Copyright (c) ByteDance Ltd. and/or its affiliates
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,9 @@
 #include <lz4hc.h>
 
 namespace bytedance::bolt::shuffle::sparksql {
-Lz4Codec::Lz4Codec(const CodecOptions& options) : Codec(options) {}
+Lz4Codec::Lz4Codec(const CodecOptions& options) : Codec(options) {
+  BOLT_CHECK(!options.checksumEnabled, "Lz4 codec does not support checksum");
+}
 
 int64_t Lz4Codec::compress(
     const uint8_t* input,

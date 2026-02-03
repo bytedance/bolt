@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+ * Copyright (c) ByteDance Ltd. and/or its affiliates
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,10 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 
-SnappyCodec::SnappyCodec(const CodecOptions& options) : Codec(options) {}
+SnappyCodec::SnappyCodec(const CodecOptions& options) : Codec(options) {
+  BOLT_CHECK(
+      !options.checksumEnabled, "Snappy codec does not support checksum");
+}
 
 int64_t SnappyCodec::compress(
     const uint8_t* input,

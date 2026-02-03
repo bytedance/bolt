@@ -100,7 +100,7 @@ struct ShuffleReaderOptions {
   std::string partitionShortName = "";
   int32_t forceShuffleWriterType = -1;
 
-  // Enable CRC32C checksum for shuffle data corruption detection
+  // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
 };
 
@@ -136,7 +136,7 @@ struct PartitionWriterOptions {
   // for CelebornPartitionWriter
   std::shared_ptr<RssClient> rssClient;
 
-  // Enable CRC32C checksum for shuffle data corruption detection
+  // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
 };
 
