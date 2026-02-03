@@ -1230,4 +1230,73 @@ TEST(HashTableTest, tableInsertPartitionInfo) {
     ASSERT_EQ(overflows[i], info.overflows[i]);
   }
 }
+
+TEST_P(HashTableTest, reclusterDataByKey) {
+  std::vector<TypePtr> dependentTypes = {BIGINT()};
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.emplace_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+
+  HashTableReclusterConfig config;
+  // Reusing 'enableRunParallel' to test different recluster modes (kSort vs
+  // kHash).
+  config.reclusterMode = GetParam().enableRunParallel
+      ? HashTableReclusterConfig::ReclusterMode::kSort
+      : HashTableReclusterConfig::ReclusterMode::kHash;
+  config.enableArrayRecluster = true;
+  config.duplicateRatioThreshold = 0;
+  config.minDistinctRowNumber = 0;
+
+  auto hashTable = HashTable<true>::createForJoin(
+      std::move(hashers),
+      dependentTypes,
+      true /*allowDuplicates*/,
+      false /*hasProbedFlag*/,
+      BaseHashTable::HashMode::kArray,
+      1 /*minTableSizeForParallelJoinBuild*/,
+      pool(),
+      GetParam().jitRowEqVectors,
+      config);
+  const int32_t numRows = 4096;
+  const int32_t numDistinctKeys = 16;
+  auto keyVector = makeFlatVector<int64_t>(
+      numRows, [](auto row) { return (row % numDistinctKeys) + 1; });
+  auto payloadVector =
+      makeFlatVector<int64_t>(numRows, [](auto row) { return row * 10; });
+
+  auto batch = makeRowVector({keyVector, payloadVector});
+  copyVectorsToTable({batch}, 0, hashTable.get());
+  hashTable->prepareJoinTable({}, executor_.get());
+  auto& rows = *hashTable->rows();
+  EXPECT_EQ(rows.numRows(), numRows);
+
+  hashTable->reclusterDataByKey();
+
+  auto& newRows = *hashTable->rows();
+  EXPECT_EQ(newRows.numRows(), numRows);
+
+  int32_t keyOffset = newRows.columnAt(0).offset();
+  RowContainerIterator iter;
+  std::vector<int64_t> resultKeys;
+  char* rowPtrs[1];
+
+  while (newRows.listRows(&iter, 1, rowPtrs) > 0) {
+    char* row = rowPtrs[0];
+    resultKeys.push_back(newRows.valueAt<int64_t>(row, keyOffset));
+  }
+
+  ASSERT_EQ(resultKeys.size(), numRows);
+  std::unordered_set<int64_t> seenKeys(resultKeys.begin(), resultKeys.end());
+  EXPECT_EQ(seenKeys.size(), numDistinctKeys);
+  int changeCount = 0;
+  for (size_t i = 1; i < resultKeys.size(); ++i) {
+    if (resultKeys[i] != resultKeys[i - 1]) {
+      changeCount++;
+    }
+  }
+  EXPECT_EQ(changeCount, numDistinctKeys - 1)
+      << "Data should be clustered into " << numDistinctKeys
+      << " groups, so there should be exactly " << numDistinctKeys - 1
+      << " transitions.";
+}
+
 } // namespace bytedance::bolt::exec::test

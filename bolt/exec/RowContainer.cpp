@@ -338,6 +338,110 @@ RowContainer::~RowContainer() {
   clear();
 }
 
+std::unique_ptr<RowContainer> RowContainer::cloneByOrder(
+    const std::vector<char*>& sortedRows,
+    memory::MemoryPool* pool,
+    std::shared_ptr<HashStringAllocator> stringAllocator) {
+  std::vector<TypePtr> dependentTypes;
+  if (types_.size() > keyTypes_.size()) {
+    dependentTypes.reserve(types_.size() - keyTypes_.size());
+    for (size_t i = keyTypes_.size(); i < types_.size(); ++i) {
+      dependentTypes.push_back(types_[i]);
+    }
+  }
+
+  auto newContainer = std::make_unique<RowContainer>(
+      keyTypes_,
+      nullableKeys_,
+      accumulators_,
+      dependentTypes,
+      nextOffset_ != 0,
+      isJoinBuild_,
+      probedFlagOffset_ != 0,
+      hasNormalizedKeys_,
+      pool == nullptr ? rows_.pool() : pool,
+      stringAllocator == nullptr ? pool == nullptr
+              ? std::make_shared<HashStringAllocator>(rows_.pool())
+              : std::make_shared<HashStringAllocator>(pool)
+                                 : stringAllocator);
+  if (hasVariableAccumulator_) {
+    BOLT_CHECK(
+        !usesExternalMemory_,
+        "Direct copy with external memory accumulators is not fully supported in this optimized path.");
+  }
+  auto& targetStringAllocator = newContainer->stringAllocator();
+
+  for (char* sourceRow : sortedRows) {
+    BOLT_CHECK_NOT_NULL(sourceRow, "Source row cannot be null");
+    char* targetRow = newContainer->newRow();
+
+    ::memcpy(targetRow, sourceRow, fixedRowSize_);
+
+    if (normalizedKeySize_ > 0) {
+      RowContainer::normalizedKey(targetRow) =
+          RowContainer::normalizedKey(sourceRow);
+    }
+
+    bits::clearBit(targetRow, newContainer->freeFlagOffset_);
+
+    if (nextOffset_ != 0) {
+      *reinterpret_cast<char**>(targetRow + nextOffset_) = nullptr;
+    }
+
+    if (rowSizeOffset_ != 0) {
+      *reinterpret_cast<uint32_t*>(targetRow + rowSizeOffset_) = 0;
+    }
+
+    for (int i = 0; i < types_.size(); ++i) {
+      if (types_[i]->isFixedWidth()) {
+        continue;
+      }
+
+      auto col = rowColumns_[i];
+      if (isNullAt(sourceRow, col)) {
+        continue;
+      }
+
+      auto typeKind = types_[i]->kind();
+
+      if (typeKind == TypeKind::ROW || typeKind == TypeKind::ARRAY ||
+          typeKind == TypeKind::MAP) {
+        auto sourceView = valueAt<std::string_view>(sourceRow, col.offset());
+        if (!sourceView.empty()) {
+          RowSizeTracker tracker(
+              targetRow[rowSizeOffset_], targetStringAllocator);
+          targetStringAllocator.copyMultipart(
+              StringView(sourceView.data(), sourceView.size()),
+              targetRow,
+              col.offset());
+        }
+      } else if (
+          typeKind == TypeKind::VARCHAR || typeKind == TypeKind::VARBINARY) {
+        StringView sourceView = valueAt<StringView>(sourceRow, col.offset());
+        if (!sourceView.isInline()) {
+          RowSizeTracker tracker(
+              targetRow[rowSizeOffset_], targetStringAllocator);
+          targetStringAllocator.copyMultipart(
+              sourceView, targetRow, col.offset());
+        }
+      }
+    }
+
+    for (const auto& accumulator : accumulators_) {
+      if (accumulator.serializable()) {
+        uint32_t serializeSize = accumulator.getSerializeSize(sourceRow);
+        if (serializeSize > 0) {
+          std::vector<char> buffer(serializeSize);
+          accumulator.serializeAccumulator(sourceRow, buffer.data());
+          accumulator.deserializeAccumulator(targetRow, buffer.data());
+        }
+      }
+    }
+  }
+
+  return newContainer;
+}
+
 char* RowContainer::newRow() {
   BOLT_DCHECK(mutable_, "Can't add row into an immutable row container");
   ++numRows_;

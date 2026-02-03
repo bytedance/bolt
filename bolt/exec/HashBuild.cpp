@@ -183,6 +183,7 @@ void HashBuild::initialize() {
   if (isAntiJoin(joinType_) && joinNode_->filter()) {
     setupFilterForAntiJoins(keyChannelMap_);
   }
+  table_->setNumEstimatedProbeRows(joinBridge_->numEstimatedProbeRows());
 }
 
 void HashBuild::setupTable() {
@@ -203,6 +204,12 @@ void HashBuild::setupTable() {
     dependentTypes.emplace_back(tableType_->childAt(i));
   }
   auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
+  HashTableReclusterConfig hashTableReclusterConfig(
+      queryConfig.hashJoinArrayReclusterDuplicateRatioThreshold(),
+      queryConfig.hashJoinArrayReclusterMinProbeRowNumber(),
+      queryConfig.hashJoinArrayReclusterMinDistinctRowNumber(),
+      queryConfig.hashJoinArrayReclusterMode(),
+      queryConfig.hashJoinArrayReclusterEnabled());
   if (joinNode_->isRightJoin() || joinNode_->isFullJoin() ||
       joinNode_->isRightSemiProjectJoin()) {
     // Do not ignore null keys.
@@ -215,7 +222,8 @@ void HashBuild::setupTable() {
                      : BaseHashTable::HashMode::kArray,
         queryConfig.minTableRowsForParallelJoinBuild(),
         pool(),
-        queryConfig.enableJitRowEqVectors());
+        queryConfig.enableJitRowEqVectors(),
+        hashTableReclusterConfig);
   } else {
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
@@ -231,7 +239,8 @@ void HashBuild::setupTable() {
                        : BaseHashTable::HashMode::kArray,
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
-          queryConfig.enableJitRowEqVectors());
+          queryConfig.enableJitRowEqVectors(),
+          hashTableReclusterConfig);
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
@@ -243,7 +252,8 @@ void HashBuild::setupTable() {
                        : BaseHashTable::HashMode::kArray,
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
-          queryConfig.enableJitRowEqVectors());
+          queryConfig.enableJitRowEqVectors(),
+          hashTableReclusterConfig);
     }
   }
   lookup_ = std::make_unique<HashLookup>(

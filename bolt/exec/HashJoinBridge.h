@@ -134,6 +134,14 @@ class HashJoinBridge : public JoinBridge {
     }
   }
 
+  uint64_t numEstimatedProbeRows() const {
+    return numEstimatedProbeRows_;
+  }
+
+  void setNumEstimatedProbeRows(uint64_t numEstimatedProbeRows) {
+    numEstimatedProbeRows_ = numEstimatedProbeRows;
+  }
+
  private:
   uint32_t numBuilders_{0};
 
@@ -158,6 +166,8 @@ class HashJoinBridge : public JoinBridge {
   // This set can grow if HashBuild operator cannot load full partition in
   // memory and engages in recursive spilling.
   SpillPartitionSet spillPartitionSets_;
+
+  uint64_t numEstimatedProbeRows_{0};
 };
 
 // Indicates if 'joinNode' is null-aware anti or left semi project join type and

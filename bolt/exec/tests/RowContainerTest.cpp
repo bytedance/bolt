@@ -1747,6 +1747,68 @@ DEBUG_ONLY_TEST_F(RowContainerTest, eraseAfterOomStoringString) {
   rowContainer->eraseRows(folly::Range<char**>(rows.data(), numRows));
 }
 
+TEST_F(RowContainerTest, cloneByOrder) {
+  std::vector<TypePtr> keyTypes = {BIGINT()};
+  std::vector<TypePtr> dependentTypes = {VARCHAR()};
+
+  auto data = makeRowContainer(keyTypes, dependentTypes);
+  auto keyOffset = data->columnAt(0).offset();
+  auto storeString = [&](char* row, const std::string& s) {
+    auto vector = makeFlatVector<StringView>({StringView(s)});
+    DecodedVector decoded(*vector);
+    data->store(decoded, 0, row, 1);
+  };
+  // Insert 3 rows: (1, "a"), (2, "b"), (3, "c")
+  // Row 1
+  auto* row1 = data->newRow();
+  data->valueAt<int64_t>(row1, keyOffset) = 1;
+  std::string str1 = "value_a_long_string";
+  storeString(row1, str1);
+
+  // Row 2
+  auto* row2 = data->newRow();
+  data->valueAt<int64_t>(row2, keyOffset) = 2;
+  std::string str2 = "value_b";
+  storeString(row2, str2);
+
+  // Row 3
+  auto* row3 = data->newRow();
+  data->valueAt<int64_t>(row3, keyOffset) = 3;
+  std::string str3 = "value_c";
+  storeString(row3, str3);
+
+  EXPECT_EQ(data->numRows(), 3);
+
+  // Create a vector of rows in reverse order: 3, 2, 1
+  std::vector<char*> sortedRows = {row3, row2, row1};
+
+  auto newData = data->cloneByOrder(sortedRows);
+
+  EXPECT_EQ(newData->numRows(), 3);
+  EXPECT_NE(newData.get(), data.get());
+
+  int64_t expectedKeys[] = {3, 2, 1};
+  std::string expectedVals[] = {str3, str2, str1};
+
+  std::vector<char*> clonedRows;
+  clonedRows.resize(3);
+  RowContainerIterator iter;
+  auto numRows = newData->listRows(&iter, 3, clonedRows.data());
+  EXPECT_EQ(numRows, 3);
+  int counter = 0;
+  auto newKeyOffset = newData->columnAt(0).offset();
+  auto newStringOffset = newData->columnAt(1).offset();
+
+  for (auto row : clonedRows) {
+    int64_t key = newData->valueAt<int64_t>(row, newKeyOffset);
+    EXPECT_EQ(key, expectedKeys[counter]);
+
+    auto val = newData->valueAt<StringView>(row, newStringOffset);
+    EXPECT_EQ(std::string(val), expectedVals[counter]);
+    ++counter;
+  }
+}
+
 TEST_F(RowContainerTest, DISABLED_ConvertBenchmark) {
   VectorFuzzer fuzzer(
       {.vectorSize = 100000, .nullRatio = 0.1, .containerLength = 10}, pool());

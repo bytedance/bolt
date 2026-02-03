@@ -652,6 +652,21 @@ class QueryConfig {
   static constexpr const char* kSkewRowCountRatioThreshold =
       "hash_join_skewed_row_count_ratio";
 
+  static constexpr const char* kEnableHashJoinArrayRecluster =
+      "enable_hash_join_array_recluster";
+
+  static constexpr const char* kHashJoinArrayReclusterMode =
+      "hash_join_array_recluster_mode";
+
+  static constexpr const char* kHashJoinArrayReclusterDuplicateRatioThreshold =
+      "hash_join_array_recluster_duplicate_ratio_threshold";
+
+  static constexpr const char* kHashJoinArrayReclusterMinProbeRowNumber =
+      "hash_join_array_recluster_min_probe_row_number";
+
+  static constexpr const char* kHashJoinArrayReclusterMinDistinctRowNumber =
+      "hash_join_array_recluster_min_distinct_row_number";
+
   // -1 means print all exceptions, usualing for debug
   // 0 means disable all exceptions,
   // 1 means print exceptions whose prefix is in the white list(default)
@@ -1488,6 +1503,26 @@ class QueryConfig {
 
   bool isHashJoinSkewedPartitionEnabled() const {
     return get<bool>(kHashJoinSkewedPartitionEnabled, true);
+  }
+
+  bool hashJoinArrayReclusterEnabled() const {
+    return get<bool>(kEnableHashJoinArrayRecluster, true);
+  }
+
+  std::string hashJoinArrayReclusterMode() const {
+    return get<std::string>(kHashJoinArrayReclusterMode, "hash");
+  }
+
+  int64_t hashJoinArrayReclusterDuplicateRatioThreshold() const {
+    return get<int64_t>(kHashJoinArrayReclusterDuplicateRatioThreshold, 128);
+  }
+
+  int64_t hashJoinArrayReclusterMinProbeRowNumber() const {
+    return get<int64_t>(kHashJoinArrayReclusterMinProbeRowNumber, 500000);
+  }
+
+  int64_t hashJoinArrayReclusterMinDistinctRowNumber() const {
+    return get<int64_t>(kHashJoinArrayReclusterMinDistinctRowNumber, 32);
   }
 
   int32_t skewFileSizeRatioThreshold() const {

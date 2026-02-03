@@ -235,6 +235,11 @@ class RowContainer {
 
   ~RowContainer();
 
+  std::unique_ptr<RowContainer> cloneByOrder(
+      const std::vector<char*>& rows,
+      memory::MemoryPool* pool = nullptr,
+      std::shared_ptr<HashStringAllocator> stringAllocator = nullptr);
+
   static int32_t combineAlignments(int32_t a, int32_t b);
 
   /// 'keyTypes' gives the type of the key of each row. For a group by,

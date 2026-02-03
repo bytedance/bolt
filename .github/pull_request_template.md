@@ -27,15 +27,17 @@ Please verify that your change does not introduce performance regressions.
 -->
 - [ ] **No Impact**: This change does not affect the critical path (e.g., build system, doc, error handling).
 - [ ] **Positive Impact**: I have run benchmarks.
-    <details>
-    <summary>Click to view Benchmark Results</summary>
+<details>
+<summary>Click to view Benchmark Results</summary>
 
-    ```text
-    Paste your google-benchmark or TPC-H results here.
-    Before: 10.5s
-    After:   8.2s  (+20%)
-    ```
-    </details>
+```text
+Paste your google-benchmark or TPC-H results here.
+Before: 10.5s
+After:   8.2s  (+20%)
+```
+
+</details>
+
 - [ ] **Negative Impact**: Explained below (e.g., trade-off for correctness).
 
 ### Release Note
@@ -70,13 +72,12 @@ If yes, please describe how users should migrate.
 
 - [ ] No
 - [ ] Yes (Description: ...)
-    <details>
-    <summary>Click to view Breaking Changes</summary>
-
-    ```text
-    Breaking Changes:
-    - Description of the breaking change.
-    - Possible solutions or workarounds.
-    - Any other relevant information.
-    ```
-    </details>
+<details>
+<summary>Click to view Breaking Changes</summary>
+```text
+Breaking Changes:
+- Description of the breaking change.
+- Possible solutions or workarounds.
+- Any other relevant information.
+```
+</details>  

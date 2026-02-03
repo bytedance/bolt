@@ -431,6 +431,14 @@ class BaseHashTable {
     return offThreadBuildTiming_;
   }
 
+  uint64_t numEstimatedProbeRows() const {
+    return numEstimatedProbeRows_;
+  }
+
+  void setNumEstimatedProbeRows(uint64_t numEstimatedProbeRows) {
+    numEstimatedProbeRows_ = numEstimatedProbeRows;
+  }
+
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
     // Each slot is 8 bytes.
@@ -458,6 +466,8 @@ class BaseHashTable {
 
   // Time spent in build outside of the calling thread.
   CpuWallTiming offThreadBuildTiming_;
+
+  uint64_t numEstimatedProbeRows_ = 0;
 };
 
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(
@@ -519,6 +529,62 @@ class ProbeState {
   int64_t bucketOffset_;
   BaseHashTable::MaskType hits_;
   uint8_t indexInTags_ = kNotSet;
+};
+
+struct HashTableReclusterConfig {
+  enum class ReclusterMode { kHash = 0, kSort = 1 };
+
+  int64_t duplicateRatioThreshold = 128;
+  int64_t minProbeRowNumber = 500000;
+  int64_t minDistinctRowNumber = 32;
+  ReclusterMode reclusterMode = ReclusterMode::kHash;
+  bool enableArrayRecluster = false;
+
+  HashTableReclusterConfig() = default;
+  HashTableReclusterConfig(
+      int64_t duplicateRatioThreshold,
+      int64_t minProbeRowNumber,
+      int64_t minDistinctRowNumber,
+      ReclusterMode reclusterMode,
+      bool enableArrayRecluster)
+      : duplicateRatioThreshold(duplicateRatioThreshold),
+        minProbeRowNumber(minProbeRowNumber),
+        minDistinctRowNumber(minDistinctRowNumber),
+        reclusterMode(reclusterMode),
+        enableArrayRecluster(enableArrayRecluster) {}
+  HashTableReclusterConfig(
+      int64_t duplicateRatioThreshold,
+      int64_t minProbeRowNumber,
+      int64_t minDistinctRowNumber,
+      const std::string& reclusterMod,
+      bool enableArrayRecluster)
+      : duplicateRatioThreshold(duplicateRatioThreshold),
+        minProbeRowNumber(minProbeRowNumber),
+        minDistinctRowNumber(minDistinctRowNumber),
+        reclusterMode(parseReclusterMode(reclusterMod)),
+        enableArrayRecluster(enableArrayRecluster) {}
+
+  static ReclusterMode parseReclusterMode(const std::string& mode) {
+    if (mode == "hash") {
+      return ReclusterMode::kHash;
+    } else if (mode == "sort") {
+      return ReclusterMode::kSort;
+    } else {
+      BOLT_FAIL("Unknown hash join array recluster mode: {}", mode);
+    }
+  }
+  static std::string modeString(ReclusterMode mode) {
+    switch (mode) {
+      case ReclusterMode::kHash:
+        return "hash";
+      case ReclusterMode::kSort:
+        return "sort";
+      default:
+        BOLT_FAIL(
+            "Unknown hash join array recluster mode: {}",
+            static_cast<int32_t>(mode));
+    }
+  }
 };
 
 template <bool ignoreNullKeys>
@@ -586,8 +652,9 @@ class HashTable : public BaseHashTable {
       HashMode mode,
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
-      bool jitRowEqVectors) {
-    return std::make_unique<HashTable>(
+      bool jitRowEqVectors,
+      const HashTableReclusterConfig& reclusterConfig = {}) {
+    auto hashTable = std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
         dependentTypes,
@@ -599,6 +666,8 @@ class HashTable : public BaseHashTable {
         pool,
         nullptr,
         jitRowEqVectors);
+    hashTable->reclusterConfig_ = reclusterConfig;
+    return hashTable;
   }
 
   void groupProbe(HashLookup& lookup) override;
@@ -689,6 +758,10 @@ class HashTable : public BaseHashTable {
   HashMode hashMode() const override {
     return hashMode_;
   }
+
+  void reclusterDataByKey();
+
+  void tryRecluster();
 
   void decideHashMode(int32_t numNew, bool disableRangeArrayHash = false)
       override;
@@ -1157,8 +1230,9 @@ class HashTable : public BaseHashTable {
 #ifdef ENABLE_BOLT_JIT
   bolt::jit::CompiledModuleSP jitModule_;
   bolt::jit::CompiledModuleSP jitModuleRow_;
-
 #endif
+  bool sorted_ = false;
+  HashTableReclusterConfig reclusterConfig_{};
 };
 
 } // namespace exec

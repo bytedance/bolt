@@ -121,6 +121,8 @@ class OperatorCtx {
       uint64_t& totalRowCount,
       uint64_t& processedRowCount);
 
+  void traverseOpToGetRowCount(uint64_t& totalRowCount) const;
+
   /// adjust SpillCompressionKind if estimatedSpillSize too large
   void adjustSpillCompressionKind(common::SpillConfig*& spillConfig);
 

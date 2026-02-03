@@ -820,7 +820,12 @@ void HashTable<ignoreNullKeys>::allocateTables(uint64_t size) {
   BOLT_CHECK_GT(size, 0);
   capacity_ = size;
   const uint64_t byteSize = capacity_ * tableSlotSize();
-  BOLT_CHECK_EQ(byteSize % kBucketSize, 0);
+  BOLT_CHECK_EQ(
+      byteSize % kBucketSize,
+      0,
+      "byteSize: {}, kBucketSize: {}, ",
+      byteSize,
+      kBucketSize);
   numTombstones_ = 0;
   sizeMask_ = byteSize - 1;
   numBuckets_ = byteSize / kBucketSize;
@@ -1551,6 +1556,35 @@ void HashTable<ignoreNullKeys>::clearUseRange(std::vector<bool>& useRange) {
 }
 
 template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::tryRecluster() {
+  if (!reclusterConfig_.enableArrayRecluster) {
+    return;
+  }
+
+  // note that maxDistinctNumber is the maximum number of distinct values
+  // in all hashers. But numDistinct_ is not DISTINCT number of values in
+  // the row container.
+
+  if (numDistinct_ >= numEstimatedProbeRows_ ||
+      numEstimatedProbeRows_ < reclusterConfig_.minProbeRowNumber) {
+    return;
+  }
+  size_t maxDistinctNumber = 0;
+
+  for (auto& hasher : hashers_) {
+    maxDistinctNumber = std::max(maxDistinctNumber, hasher->numUniqueValues());
+  }
+  int64_t duplicateRatio =
+      maxDistinctNumber > 0 ? numDistinct_ / maxDistinctNumber : 0;
+  if (duplicateRatio < reclusterConfig_.duplicateRatioThreshold ||
+      maxDistinctNumber < reclusterConfig_.minDistinctRowNumber) {
+    return;
+  }
+
+  reclusterDataByKey();
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::decideHashMode(
     int32_t numNew,
     bool disableRangeArrayHash) {
@@ -1776,6 +1810,107 @@ bool mayUseValueIds(const BaseHashTable& table) {
 } // namespace
 
 template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::reclusterDataByKey() {
+  if (!isJoinBuild_) {
+    LOG(INFO) << "reclusterDataByKey: joinBuild_ is false";
+    return;
+  }
+  if (rows_->numRows() == 0) {
+    LOG(INFO) << "reclusterDataByKey: numRows is 0";
+    return;
+  }
+  if (rows_->keyTypes().empty()) {
+    LOG(INFO) << "reclusterDataByKey: keyTypes is empty";
+    return;
+  }
+  if (rows_->accumulators().size() > 0) {
+    LOG(INFO) << "reclusterDataByKey: accumulators is not empty";
+    return;
+  }
+  if (sorted_) {
+    LOG(INFO) << "reclusterDataByKey: sorted_ is true";
+    return;
+  }
+
+  if (hashMode_ != HashMode::kArray) {
+    LOG(INFO) << "reclusterDataByKey: hashMode_ is not kArray";
+    return;
+  }
+
+  auto numRows = rows_->numRows();
+  std::vector<char*> sortedRows(numRows);
+
+  RowContainerIterator iter;
+  rows_->listRows(&iter, numRows, sortedRows.data());
+
+  if (reclusterConfig_.reclusterMode ==
+      HashTableReclusterConfig::ReclusterMode::kSort) {
+    HybridSorter sorter{SortAlgo::kAuto};
+    sorter.template sort(
+        sortedRows.begin(),
+        sortedRows.end(),
+        [this](const char* leftRow, const char* rightRow) {
+          return rows_->compareRows(leftRow, rightRow) < 0;
+        });
+  } else if (
+      reclusterConfig_.reclusterMode ==
+      HashTableReclusterConfig::ReclusterMode::kHash) {
+    std::vector<uint64_t> rowHashes(numRows);
+    folly::Range<char**> rowRange(sortedRows.data(), numRows);
+
+    for (size_t i = 0; i < rows_->keyTypes().size(); ++i) {
+      bool mix = (i > 0);
+      rows_->hash(i, rowRange, mix, rowHashes.data());
+    }
+
+    folly::F14FastMap<uint64_t, size_t> counts;
+    counts.reserve(4096);
+    for (uint64_t h : rowHashes) {
+      counts[h]++;
+    }
+
+    folly::F14FastMap<uint64_t, size_t> offsets;
+    offsets.reserve(counts.size());
+
+    size_t currentOffset = 0;
+    for (auto& kv : counts) {
+      offsets[kv.first] = currentOffset;
+      currentOffset += kv.second;
+    }
+    std::vector<char*> result(numRows);
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      uint64_t h = rowHashes[i];
+
+      size_t pos = offsets[h]++;
+
+      result[pos] = sortedRows[i];
+    }
+    sortedRows = std::move(result);
+  } else {
+    LOG(ERROR) << "reclusterDataByKey: unknown reclusterMode: "
+               << static_cast<int>(reclusterConfig_.reclusterMode);
+    return;
+  }
+
+  rows_ = std::move(rows_->cloneByOrder(sortedRows));
+  if (table_ != nullptr) {
+    rows_->pool()->freeContiguous(tableAllocation_);
+    table_ = nullptr;
+  }
+  numTombstones_ = 0;
+
+  for (size_t i = 0; i < otherTables_.size(); ++i) {
+    otherTables_[i]->reclusterDataByKey();
+  }
+  capacity_ = bits::nextPowerOfTwo(
+      std::max(static_cast<uint64_t>(numRows), kBucketSize));
+  allocateTables(capacity_);
+  rehash(true);
+  sorted_ = true;
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::prepareJoinTable(
     std::vector<std::unique_ptr<BaseHashTable>> tables,
     folly::Executor* executor,
@@ -1852,6 +1987,9 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
     }
   } else {
     decideHashMode(0);
+    if (hashMode_ == HashMode::kArray) {
+      tryRecluster();
+    }
   }
   checkHashBitsOverlap(spillInputStartPartitionBit);
   LOG(INFO) << __FUNCTION__ << ": capacity_ = " << capacity_

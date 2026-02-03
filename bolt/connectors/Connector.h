@@ -412,7 +412,7 @@ class AsyncThreadCtx {
   void disallowPreload() {
     if (adaptive_ && allowPreload_.load()) {
       allowPreload_ = false;
-      LOG(WARNING) << "Disallow scan preload due to limited memory";
+      LOG(INFO) << "Disallow scan preload due to limited memory";
     }
   }
 

@@ -158,6 +158,9 @@ HashProbe::HashProbe(
 
 void HashProbe::initialize() {
   Operator::initialize();
+  uint64_t totalRowCnt{0};
+  operatorCtx_->traverseOpToGetRowCount(totalRowCnt);
+  joinBridge_->setNumEstimatedProbeRows(totalRowCnt);
   auto jitRowEqVectors =
       operatorCtx_->driverCtx()->queryConfig().enableJitRowEqVectors();
   BOLT_CHECK(hashers_.empty());

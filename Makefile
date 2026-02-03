@@ -371,6 +371,17 @@ unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tes
 	lcov --remove coverage.info '/usr/*' '*/.conan/data/*' '*/_build/*' '*/tests/*' '*/test/*' --output-file coverage_striped.info && \
 	genhtml --ignore-errors source coverage_striped.info --output-directory coverage
 
+unittest_single:
+ifndef TARGET
+	$(error TARGET is undefined. Usage: make unittest_single TARGET=TargetName [TEST=TestFilter])
+endif
+	cmake --build $(BUILD_BASE_DIR)/Release --target $(TARGET) -j $(NUM_THREADS)
+ifneq ($(TEST),)
+	export GTEST_FILTER="$(TEST)" && ctest --test-dir $(BUILD_BASE_DIR)/Release -R "$(TARGET)" --output-on-failure --timeout 7200
+else
+	ctest --test-dir $(BUILD_BASE_DIR)/Release -R "$(TARGET)" --output-on-failure --timeout 7200
+endif
+
 hdfstest: hdfs-debug-build #: Build with debugging, hdfs enabled and run hdfs tests
 	ctest --test-dir $(BUILD_BASE_DIR)/Debug -j ${NUM_THREADS} --output-on-failure -R bolt_hdfs_file_test
 

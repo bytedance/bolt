@@ -347,6 +347,41 @@ void OperatorCtx::traverseOpToGetRowCount(
   }
 }
 
+void OperatorCtx::traverseOpToGetRowCount(uint64_t& totalRowCount) const {
+  auto numDrivers = task()->numDrivers(driverCtx());
+
+  if (numDrivers == 1) {
+    const auto& operators = driver()->operators();
+
+    VLOG(5) << "operators.size()=" << operators.size()
+            << ", operatorId=" << operatorId();
+
+    for (auto i = operatorId() - 1; i >= 0; --i) {
+      auto metricValueStr = operators[i]->getRuntimeMetric(
+          OperatorMetricKey::kCanUsedToEstimateHashBuildPartitionNum, "false");
+      auto metricValue = folly::to<bool>(metricValueStr);
+
+      VLOG(5) << "OperatorIndex=" << i << ", operator is "
+              << operators[i]->toString()
+              << ", kCanUsedToEstimateHashBuildPartitionNum="
+              << (metricValue ? "true" : "false");
+
+      if (metricValue) {
+        auto totalRowCountStr =
+            operators[i]->getRuntimeMetric(OperatorMetricKey::kTotalRowCount);
+
+        BOLT_CHECK_NE(totalRowCountStr, "", "totalRowCountStr can't be empty")
+
+        totalRowCount = folly::to<uint64_t>(totalRowCountStr);
+
+        LOG(INFO) << toString() << " totalRowCountStr = " << totalRowCountStr
+                  << ", numDrivers = " << numDrivers;
+        break;
+      }
+    }
+  }
+}
+
 void OperatorCtx::adjustSpillCompressionKind(
     common::SpillConfig*& spillConfig) {
   if (!isFirstSpill_) {
