@@ -246,7 +246,8 @@ void DirectBufferedInput::readRegions(
           if (asyncLoad.asyncThreadCtx->isClosed()) {
             return;
           }
-          connector::AsyncThreadCtx::Guard guard(asyncLoad.asyncThreadCtx.get());
+          connector::AsyncThreadCtx::Guard guard(
+              asyncLoad.asyncThreadCtx.get());
           if (asyncLoad.load->state() != DirectCoalescedLoad::State::kPlanned) {
             return;
           }
