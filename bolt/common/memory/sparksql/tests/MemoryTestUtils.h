@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "bolt/common/memory/sparksql/ConfigurationResolver.h"
 #include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/memory/sparksql/Spiller.h"
 
@@ -66,7 +67,9 @@ class TestMemoryManagerHolder {
         ExecutionMemoryPool::instance(), globalTaskId_++);
     // disable dynamic memory quota manager for test stability
     std::unordered_map<std::string, std::string> conf = {
-        {ConfigurationResolver::kDynamicMemoryQuotaManager, "false"}};
+        {::bytedance::bolt::memory::sparksql::ConfigurationResolver::
+             kDynamicMemoryQuotaManager,
+         "false"}};
     NativeMemoryManagerFactoryParam param{
         .name = "ShuffleTest",
         .memoryIsolation = kIsolateMemory, // isolate memory to set memory limit

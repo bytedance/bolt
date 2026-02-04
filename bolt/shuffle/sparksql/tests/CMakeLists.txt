@@ -90,3 +90,15 @@ add_test(
     NAME bolt_shuffle_spark_memory_test
     COMMAND bolt_shuffle_spark_memory_test
 )
+
+add_executable(shuffle_file_to_vector_tool ShuffleFileToVector.cpp)
+
+target_link_libraries(
+    shuffle_file_to_vector_tool
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_vector_fuzzer
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
