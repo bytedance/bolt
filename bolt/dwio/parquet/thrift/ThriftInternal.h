@@ -38,9 +38,10 @@ class ThriftDeserializer {
       const uint8_t* buf,
       uint32_t* len,
       T* deserializedMsg,
-      const std::shared_ptr<Decryptor>& decryptor) {
-    uint32_t length = *len;
-    int64_t allocateSize = length - decryptor->CiphertextSizeDelta();
+      const std::shared_ptr<Decryptor>& decryptor,
+      bool print = false) {
+    uint32_t clen = *len;
+    int64_t allocateSize = clen - decryptor->CiphertextSizeDelta();
     uint8_t* decryptedBuffer =
         reinterpret_cast<uint8_t*>(decryptor->pool()->allocate(allocateSize));
     auto decryptBufferGuard = folly::makeGuard(

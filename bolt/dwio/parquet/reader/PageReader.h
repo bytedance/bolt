@@ -48,6 +48,8 @@
 namespace bytedance::bolt::parquet {
 
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
+constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+
 struct CryptoContext {
   CryptoContext(
       bool startWithDictionaryPage,
