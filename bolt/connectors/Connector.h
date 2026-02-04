@@ -377,6 +377,16 @@ class AsyncThreadCtx {
     BOLT_CHECK_GT(preloadBytesLimit_, 0);
   }
 
+  enum class State { kActive, kClosed };
+
+  void close() {
+    state_ = State::kClosed;
+  }
+
+  bool isClosed() const {
+    return state_ == State::kClosed;
+  }
+
   void in() {
     std::scoped_lock lock(mutex_);
     numIn_++;
@@ -487,6 +497,7 @@ class AsyncThreadCtx {
   std::condition_variable cv_;
   std::atomic_bool allowPreload_{true};
   bool adaptive_{true};
+  std::atomic<State> state_{State::kActive};
 };
 
 /// Collection of context data for use in a DataSource, IndexSource or DataSink.
@@ -500,7 +511,7 @@ class ConnectorQueryCtx {
       memory::MemoryPool* connectorPool,
       const config::ConfigBase* sessionProperties,
       const common::SpillConfig* spillConfig,
-      connector::AsyncThreadCtx* const asyncThreadCtx,
+      std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx,
       std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator,
       cache::AsyncDataCache* cache,
       const std::string& queryId,
@@ -511,7 +522,7 @@ class ConnectorQueryCtx {
         connectorPool_(connectorPool),
         sessionProperties_(sessionProperties),
         spillConfig_(spillConfig),
-        asyncThreadCtx_(asyncThreadCtx),
+        asyncThreadCtx_(std::move(asyncThreadCtx)),
         expressionEvaluator_(std::move(expressionEvaluator)),
         cache_(cache),
         scanId_(fmt::format("{}.{}", taskId, planNodeId)),
@@ -575,7 +586,7 @@ class ConnectorQueryCtx {
     return planNodeId_;
   }
 
-  AsyncThreadCtx* asyncThreadCtx() const {
+  std::shared_ptr<AsyncThreadCtx> asyncThreadCtx() const {
     return asyncThreadCtx_;
   }
 
@@ -584,7 +595,7 @@ class ConnectorQueryCtx {
   memory::MemoryPool* const connectorPool_;
   const config::ConfigBase* const sessionProperties_;
   const common::SpillConfig* const spillConfig_;
-  AsyncThreadCtx* const asyncThreadCtx_;
+  const std::shared_ptr<AsyncThreadCtx> asyncThreadCtx_;
   std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator_;
   cache::AsyncDataCache* cache_;
   const std::string scanId_;

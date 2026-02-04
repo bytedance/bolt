@@ -459,8 +459,7 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
            planNodeId(),
            connectorPool_,
            nullptr,
-           asyncThreadCtx_.get()),
-       asyncThreadCtx = asyncThreadCtx_,
+           asyncThreadCtx_),
        task = operatorCtx_->task(),
        pendingDynamicFilters = pendingDynamicFilters_,
        split]() -> std::unique_ptr<connector::DataSource> {
@@ -475,18 +474,8 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
              },
              &debugString});
 
-        // let TableScan::close() wait for this AsyncSource to finish
-        auto guard = folly::makeGuard([&] {
-          try {
-            if (ctx->asyncThreadCtx()) {
-              ctx->asyncThreadCtx()->out();
-            }
-          } catch (std::exception& e) {
-            LOG(ERROR) << "Exception in TableScan::preload guard: " << e.what();
-          }
-        });
-        if (ctx->asyncThreadCtx()) {
-          ctx->asyncThreadCtx()->in();
+        if (ctx->asyncThreadCtx() && ctx->asyncThreadCtx()->isClosed()) {
+          return nullptr;
         }
         auto ptr = connector->createDataSource(
             type, table, columns, ctx, task->queryCtx()->queryConfig());
@@ -519,11 +508,13 @@ void TableScan::checkPreload() {
             auto hiveSplit = std::dynamic_pointer_cast<
                 const connector::hive::HiveConnectorSplit>(split);
             int64_t preloadBytes = hiveSplit ? hiveSplit->length : 0;
-            connector::AsyncThreadCtx::Guard guard(
-                asyncThreadCtx_.get(), preloadBytes);
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
-                           inGuard = std::move(guard)]() mutable {
+                           preloadBytes]() mutable {
+              if (ctx->isClosed()) {
+                return;
+              }
+              connector::AsyncThreadCtx::Guard guard(ctx.get(), preloadBytes);
               connectorSplit->dataSource->prepare();
               connectorSplit.reset();
             });
@@ -591,6 +582,7 @@ void TableScan::close() {
   if (dataSource_) {
     dataSource_->close(); // release all bufferedInputs(loads)
   }
+  asyncThreadCtx_->close();
   // wait all async threads to be finished
   uint64_t waitMs;
   {
