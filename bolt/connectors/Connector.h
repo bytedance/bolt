@@ -379,10 +379,7 @@ class AsyncThreadCtx {
 
   enum class State { kActive, kClosed };
 
-  void close() {
-    std::scoped_lock lock(mutex_);
-    state_ = State::kClosed;
-  }
+
 
   bool isClosed() const {
     std::scoped_lock lock(mutex_);
@@ -407,6 +404,7 @@ class AsyncThreadCtx {
   void wait() {
     // check timeout and output warninglogs
     std::unique_lock lock(mutex_);
+    state_ = State::kClosed;
     cv_.wait_until(
         lock,
         std::chrono::steady_clock::now() + std::chrono::seconds(600),

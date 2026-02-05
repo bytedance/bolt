@@ -580,7 +580,7 @@ void TableScan::close() {
   if (dataSource_) {
     dataSource_->close(); // release all bufferedInputs(loads)
   }
-  asyncThreadCtx_->close();
+
   // wait all async threads to be finished
   uint64_t waitMs;
   {
