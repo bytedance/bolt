@@ -380,10 +380,12 @@ class AsyncThreadCtx {
   enum class State { kActive, kClosed };
 
   void close() {
+    std::scoped_lock lock(mutex_);
     state_ = State::kClosed;
   }
 
   bool isClosed() const {
+    std::scoped_lock lock(mutex_);
     return state_ == State::kClosed;
   }
 
@@ -497,7 +499,7 @@ class AsyncThreadCtx {
   std::condition_variable cv_;
   std::atomic_bool allowPreload_{true};
   bool adaptive_{true};
-  std::atomic<State> state_{State::kActive};
+  State state_{State::kActive};
 };
 
 /// Collection of context data for use in a DataSource, IndexSource or DataSink.

@@ -474,9 +474,7 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
              },
              &debugString});
 
-        if (ctx->asyncThreadCtx() && ctx->asyncThreadCtx()->isClosed()) {
-          return nullptr;
-        }
+
         auto ptr = connector->createDataSource(
             type, table, columns, ctx, task->queryCtx()->queryConfig());
         if (task->isCancelled()) {
