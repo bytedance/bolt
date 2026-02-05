@@ -100,6 +100,7 @@ target_link_libraries(
     bolt_shuffle_codec_test
     PRIVATE
         bolt_shuffle_spark_impl
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )
@@ -118,6 +119,7 @@ target_link_libraries(
     bolt_shuffle_adaptive_zstd_codec_test
     PRIVATE
         bolt_shuffle_spark_impl
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )
