@@ -379,8 +379,6 @@ class AsyncThreadCtx {
 
   enum class State { kActive, kClosed };
 
-
-
   bool isClosed() const {
     std::scoped_lock lock(mutex_);
     return state_ == State::kClosed;
