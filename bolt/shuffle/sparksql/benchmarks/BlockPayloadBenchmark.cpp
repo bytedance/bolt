@@ -160,7 +160,7 @@ void logMetrics(
           (1024.0 * 1024.0)
       : 0.0;
 
-  std::cout << name << " num_payloads=" << numPayloads
+  LOG(INFO) << name << " num_payloads=" << numPayloads
             << " num_rows=" << numRows
             << " uncompressed_size=" << totalUncompressedSize
             << " serialized_size=" << totalSerializedSize
@@ -181,7 +181,7 @@ void logCorruptionMetrics(
       ? 100.0 * (detectedErrors + dataUnchanged) / totalTests
       : 0;
 
-  std::cout << name << " total_tests=" << totalTests
+  LOG(INFO) << name << " total_tests=" << totalTests
             << " detected_errors=" << detectedErrors
             << " undetected_data_changed=" << undetectedDataChanged
             << " data_unchanged=" << dataUnchanged
@@ -613,83 +613,93 @@ void runCorruptionBenchmark(bool checksumEnabled, size_t iterations) {
         continue;
       }
 
-      totalTests++;
+      // Run multiple corruption tests per payload for better statistics
+      constexpr int kCorruptionTestsPerPayload = 12;
+      for (int testIdx = 0; testIdx < kCorruptionTestsPerPayload; ++testIdx) {
+        totalTests++;
 
-      // Create corrupted copy - flip a random bit in the compressed data.
-      auto corruptedResult = arrow::AllocateResizableBuffer(
-          serializedData->size(), arrow::default_memory_pool());
-      BOLT_CHECK(corruptedResult.ok(), "Failed to allocate corrupted buffer");
-      auto corruptedBuffer = std::move(corruptedResult).ValueOrDie();
-      memcpy(
-          corruptedBuffer->mutable_data(),
-          serializedData->data(),
-          serializedData->size());
+        // Create corrupted copy - flip a random bit in the compressed data.
+        auto corruptedResult = arrow::AllocateResizableBuffer(
+            serializedData->size(), arrow::default_memory_pool());
+        BOLT_CHECK(corruptedResult.ok(), "Failed to allocate corrupted buffer");
+        auto corruptedBuffer = std::move(corruptedResult).ValueOrDie();
+        memcpy(
+            corruptedBuffer->mutable_data(),
+            serializedData->data(),
+            serializedData->size());
 
-      // Corrupt a random bit in the payload data (after header = 6 bytes).
-      int64_t corruptOffset = 6;
-      int64_t corruptableSize = serializedData->size() - corruptOffset;
-      if (corruptableSize > 0) {
-        std::uniform_int_distribution<int64_t> byteDist(0, corruptableSize - 1);
-        std::uniform_int_distribution<int> bitDist(0, 7);
-        int64_t bytePos = corruptOffset + byteDist(gen);
-        int bitPos = bitDist(gen);
-        corruptedBuffer->mutable_data()[bytePos] ^= (1 << bitPos);
-      }
-
-      // Try to deserialize corrupted data.
-      auto inputStream =
-          std::make_shared<arrow::io::BufferReader>(std::move(corruptedBuffer));
-
-      uint8_t payloadTypeByte;
-      auto payloadReadStatus =
-          inputStream->Read(sizeof(uint8_t), &payloadTypeByte);
-      BOLT_CHECK(payloadReadStatus.ok(), "Failed to read payload type");
-      std::optional<uint8_t> payloadType = payloadTypeByte;
-
-      uint32_t deserializedNumRows = 0;
-      uint64_t decompressTimeLocal = 0;
-
-      auto result = BlockPayload::deserialize(
-          inputStream.get(),
-          data.schema,
-          codec,
-          arrow::default_memory_pool(),
-          deserializedNumRows,
-          decompressTimeLocal,
-          payloadType,
-          nullptr);
-
-      if (!result.ok()) {
-        // Error detected during decompression.
-        detectedErrors++;
-      } else {
-        // Decompression succeeded - check if data is unchanged.
-        auto deserializedBuffers = std::move(result).ValueOrDie();
-        bool dataChanged = false;
-
-        size_t minSize =
-            std::min(originalBuffersCopy.size(), deserializedBuffers.size());
-        for (size_t i = 0; i < minSize; ++i) {
-          auto& orig = originalBuffersCopy[i];
-          auto& deser = deserializedBuffers[i];
-
-          if ((orig == nullptr) != (deser == nullptr)) {
-            dataChanged = true;
-            break;
-          }
-          if (orig && deser) {
-            if (orig->size() != deser->size() ||
-                memcmp(orig->data(), deser->data(), orig->size()) != 0) {
-              dataChanged = true;
-              break;
-            }
-          }
+        // Corrupt a random bit in the payload data (after header = 6 bytes).
+        int64_t corruptOffset = 6;
+        int64_t corruptableSize = serializedData->size() - corruptOffset;
+        if (corruptableSize > 0) {
+          std::uniform_int_distribution<int64_t> byteDist(
+              0, corruptableSize - 1);
+          std::uniform_int_distribution<int> bitDist(0, 7);
+          int64_t bytePos = corruptOffset + byteDist(gen);
+          int bitPos = bitDist(gen);
+          corruptedBuffer->mutable_data()[bytePos] ^= (1 << bitPos);
         }
 
-        if (dataChanged) {
-          undetectedDataChanged++;
-        } else {
-          dataUnchanged++;
+        // Try to deserialize corrupted data.
+        auto inputStream = std::make_shared<arrow::io::BufferReader>(
+            std::move(corruptedBuffer));
+
+        uint8_t payloadTypeByte;
+        auto payloadReadStatus =
+            inputStream->Read(sizeof(uint8_t), &payloadTypeByte);
+        BOLT_CHECK(payloadReadStatus.ok(), "Failed to read payload type");
+        std::optional<uint8_t> payloadType = payloadTypeByte;
+
+        uint32_t deserializedNumRows = 0;
+        uint64_t decompressTimeLocal = 0;
+
+        try {
+          auto result = BlockPayload::deserialize(
+              inputStream.get(),
+              data.schema,
+              codec,
+              arrow::default_memory_pool(),
+              deserializedNumRows,
+              decompressTimeLocal,
+              payloadType,
+              nullptr);
+
+          if (!result.ok()) {
+            // Error detected during decompression.
+            detectedErrors++;
+          } else {
+            // Decompression succeeded - check if data is unchanged.
+            auto deserializedBuffers = std::move(result).ValueOrDie();
+            bool dataChanged = false;
+
+            size_t minSize = std::min(
+                originalBuffersCopy.size(), deserializedBuffers.size());
+            for (size_t i = 0; i < minSize; ++i) {
+              auto& orig = originalBuffersCopy[i];
+              auto& deser = deserializedBuffers[i];
+
+              if ((orig == nullptr) != (deser == nullptr)) {
+                dataChanged = true;
+                break;
+              }
+              if (orig && deser) {
+                if (orig->size() != deser->size() ||
+                    memcmp(orig->data(), deser->data(), orig->size()) != 0) {
+                  dataChanged = true;
+                  break;
+                }
+              }
+            }
+
+            if (dataChanged) {
+              undetectedDataChanged++;
+            } else {
+              dataUnchanged++;
+            }
+          }
+        } catch (const std::exception& e) {
+          // Exception thrown during decompression (corruption detected).
+          detectedErrors++;
         }
       }
 

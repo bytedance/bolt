@@ -23,27 +23,19 @@
 namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
-// Maximum window size for GZIP
-constexpr int kGZipMaxWindowBits = 15;
-// Output GZIP format (add 16 to window bits)
-constexpr int kGZipCodec = 16;
-// Autodetect format from header (add 32 to window bits)
-constexpr int kDetectCodec = 32;
-// Default compression level
-constexpr int32_t kGZipDefaultCompressionLevel = 9;
-// Default memory level for deflateInit2
-constexpr int kDefaultMemLevel = 8;
+// GZIP format flag: add to windowBits for deflateInit2/inflateInit2
+// See zlib manual: windowBits can be 8..15, +16 for GZIP, +32 for auto-detect
+constexpr int kGzipFormatFlag = 16;
+constexpr int kAutoDetectFlag = 32;
 // Default buffer size recommendation
 constexpr int64_t kDefaultBufferSize = 64 * 1024;
 } // namespace
-
-// ============== GzipStreamCompressor ==============
 
 GzipStreamCompressor::GzipStreamCompressor(const CodecOptions& options)
     : StreamCompressor(options),
       compressionLevel_(
           options.compression_level == kDefaultCompressionLevel
-              ? kGZipDefaultCompressionLevel
+              ? Z_BEST_COMPRESSION
               : options.compression_level) {
   init();
 }
@@ -57,14 +49,14 @@ GzipStreamCompressor::~GzipStreamCompressor() {
 void GzipStreamCompressor::init() {
   memset(&stream_, 0, sizeof(stream_));
 
-  // Initialize for GZIP format: windowBits + 16
-  int windowBits = kGZipMaxWindowBits + kGZipCodec;
+  // Initialize for GZIP format: MAX_WBITS + 16
+  int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &stream_,
       compressionLevel_,
       Z_DEFLATED,
       windowBits,
-      kDefaultMemLevel,
+      8, // memLevel: default value (1-9, 8 is default)
       Z_DEFAULT_STRATEGY);
 
   BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateInit2 failed.");
@@ -169,8 +161,6 @@ int64_t GzipStreamCompressor::recommendedOutputSize(int64_t inputSize) const {
   return inputSize + 12 + ((inputSize / 16384) + 1) * 6;
 }
 
-// ============== GzipStreamDecompressor ==============
-
 GzipStreamDecompressor::GzipStreamDecompressor(
     const CodecOptions& /*options*/) {
   init();
@@ -186,8 +176,8 @@ void GzipStreamDecompressor::init() {
   memset(&stream_, 0, sizeof(stream_));
   finished_ = false;
 
-  // Autodetect GZIP/ZLIB format: windowBits + 32
-  int windowBits = kGZipMaxWindowBits + kDetectCodec;
+  // Autodetect GZIP/ZLIB format: MAX_WBITS + 32
+  int windowBits = MAX_WBITS + kAutoDetectFlag;
   int ret = inflateInit2(&stream_, windowBits);
 
   BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateInit2 failed.");

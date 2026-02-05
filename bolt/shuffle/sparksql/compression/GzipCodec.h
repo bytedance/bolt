@@ -24,8 +24,8 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 
-// Default compression level for GZIP (maximum compression)
-constexpr int kGzipDefaultCompressionLevel = 9;
+// Default compression level for GZIP (Z_BEST_COMPRESSION = 9)
+constexpr int kGzipDefaultCompressionLevel = Z_BEST_COMPRESSION;
 
 class GzipCodec : public Codec {
  public:

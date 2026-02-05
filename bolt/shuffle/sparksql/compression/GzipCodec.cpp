@@ -24,12 +24,10 @@
 namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
-// Maximum window size for zlib
-constexpr int kGzipMaxWindowBits = 15;
-// Output GZIP format (add 16 to window bits)
-constexpr int kGzipCodecFlag = 16;
-// Auto-detect format from header during decompression
-constexpr int kDetectCodecFlag = 32;
+// GZIP format flag: add to windowBits for deflateInit2/inflateInit2
+// See zlib manual: windowBits can be 8..15, +16 for GZIP, +32 for auto-detect
+constexpr int kGzipFormatFlag = 16;
+constexpr int kAutoDetectFlag = 32;
 } // namespace
 
 GzipCodec::GzipCodec(const CodecOptions& options)
@@ -50,8 +48,8 @@ void GzipCodec::initCompressor() {
   endDecompressor();
   memset(&compressStream_, 0, sizeof(compressStream_));
 
-  // Initialize for GZIP format: window_bits + 16
-  int windowBits = kGzipMaxWindowBits + kGzipCodecFlag;
+  // Initialize for GZIP format: MAX_WBITS + 16
+  int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &compressStream_,
       compressionLevel_,
@@ -74,8 +72,8 @@ void GzipCodec::initDecompressor() {
   endCompressor();
   memset(&decompressStream_, 0, sizeof(decompressStream_));
 
-  // Initialize for auto-detection of GZIP/ZLIB format
-  int windowBits = kGzipMaxWindowBits | kDetectCodecFlag;
+  // Initialize for auto-detection of GZIP/ZLIB format: MAX_WBITS + 32
+  int windowBits = MAX_WBITS + kAutoDetectFlag;
   int ret = inflateInit2(&decompressStream_, windowBits);
   BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateInit2 failed.");
   decompressorInitialized_ = true;
@@ -152,13 +150,13 @@ int64_t GzipCodec::maxCompressedLen(int64_t inputLength) const {
   z_stream tmpStream;
   memset(&tmpStream, 0, sizeof(tmpStream));
 
-  int windowBits = kGzipMaxWindowBits + kGzipCodecFlag;
+  int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &tmpStream,
       compressionLevel_,
       Z_DEFLATED,
       windowBits,
-      8,
+      8, // memLevel: default value (1-9, 8 is default)
       Z_DEFAULT_STRATEGY);
   BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateBound init failed.");
 

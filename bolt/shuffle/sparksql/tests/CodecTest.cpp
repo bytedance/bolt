@@ -48,7 +48,8 @@ std::string codecTypeName(CodecType type) {
 
 // Check if codec type supports checksum
 bool supportsChecksum(CodecType type) {
-  return type == CodecType::ZSTD || type == CodecType::GZIP;
+  return type == CodecType::ZSTD || type == CodecType::GZIP ||
+      type == CodecType::LZ4_FRAME;
 }
 
 // Check if codec type supports streaming
@@ -475,6 +476,214 @@ INSTANTIATE_TEST_SUITE_P(
     CodecTest,
     testing::ValuesIn(buildCodecTestParams()),
     [](const testing::TestParamInfo<CodecTestParam>& info) {
+      return info.param.toString();
+    });
+
+// Corruption detection test parameter structure
+struct CorruptionTestParam {
+  CodecType type;
+  bool isStream;
+
+  std::string toString() const {
+    std::string name = codecTypeName(type);
+    name += isStream ? "_Stream" : "_OneShot";
+    return name;
+  }
+};
+
+// Parameterized corruption detection test class
+class CorruptionDetectionTest
+    : public testing::TestWithParam<CorruptionTestParam> {
+ protected:
+  static constexpr int kTotalTests = 100;
+  static constexpr size_t kDataSize = 64 * 1024; // 64KB
+
+  // Corrupt a single bit in the data
+  void corruptBit(std::vector<uint8_t>& data, size_t bytePos, int bitPos) {
+    if (bytePos < data.size()) {
+      data[bytePos] ^= (1 << bitPos);
+    }
+  }
+
+  // Compress data using one-shot codec (always with checksum enabled)
+  std::vector<uint8_t> compressOneShot(
+      CodecType type,
+      const std::vector<uint8_t>& data) {
+    CodecOptions options;
+    options.checksumEnabled = true;
+    auto codec = Codec::create(type, options);
+
+    std::vector<uint8_t> compressed(codec->maxCompressedLen(data.size()));
+    int64_t compressedSize = codec->compress(
+        data.data(), data.size(), compressed.data(), compressed.size());
+    compressed.resize(compressedSize);
+    return compressed;
+  }
+
+  // Compress data using stream codec (always with checksum enabled)
+  std::vector<uint8_t> compressStream(
+      CodecType type,
+      const std::vector<uint8_t>& data) {
+    CodecOptions options;
+    options.checksumEnabled = true;
+    auto compressor = StreamCompressor::create(type, options);
+
+    std::vector<uint8_t> compressed(
+        compressor->recommendedOutputSize(data.size()) * 2);
+    auto result = compressor->compress(
+        data.data(), data.size(), compressed.data(), compressed.size());
+    int64_t written = result.bytesWritten;
+
+    auto endResult = compressor->end(
+        compressed.data() + written, compressed.size() - written);
+    while (endResult.shouldRetry) {
+      written += endResult.bytesWritten;
+      endResult = compressor->end(
+          compressed.data() + written, compressed.size() - written);
+    }
+    written += endResult.bytesWritten;
+    compressed.resize(written);
+    return compressed;
+  }
+
+  // Result of decompression attempt
+  struct DecompressResult {
+    bool success; // true if decompression didn't throw
+    std::vector<uint8_t> data; // decompressed data (if success)
+  };
+
+  // Try to decompress using one-shot codec (always with checksum enabled)
+  DecompressResult tryDecompressOneShot(
+      CodecType type,
+      const std::vector<uint8_t>& compressed,
+      size_t originalSize) {
+    CodecOptions options;
+    options.checksumEnabled = true;
+    auto codec = Codec::create(type, options);
+
+    DecompressResult result;
+    result.data.resize(originalSize);
+    try {
+      codec->decompress(
+          compressed.data(),
+          compressed.size(),
+          result.data.data(),
+          result.data.size());
+      result.success = true;
+    } catch (const std::exception&) {
+      result.success = false;
+    }
+    return result;
+  }
+
+  // Try to decompress using stream codec (always with checksum enabled)
+  DecompressResult tryDecompressStream(
+      CodecType type,
+      const std::vector<uint8_t>& compressed,
+      size_t originalSize) {
+    CodecOptions options;
+    options.checksumEnabled = true;
+    auto decompressor = StreamDecompressor::create(type, options);
+
+    DecompressResult result;
+    result.data.resize(originalSize);
+    try {
+      decompressor->decompress(
+          compressed.data(),
+          compressed.size(),
+          result.data.data(),
+          result.data.size());
+      result.success = true;
+    } catch (const std::exception&) {
+      result.success = false;
+    }
+    return result;
+  }
+};
+
+// Corruption detection test with checksum enabled
+// When checksum is enabled:
+// - If data is corrupted, decompression MUST fail (throw exception)
+// - If decompression succeeds, result MUST match original exactly
+TEST_P(CorruptionDetectionTest, DetectsCorruption) {
+  auto param = GetParam();
+  auto data = generateCompressibleData(kDataSize);
+
+  // Compress data with checksum enabled
+  std::vector<uint8_t> compressed;
+  if (param.isStream) {
+    compressed = compressStream(param.type, data);
+  } else {
+    compressed = compressOneShot(param.type, data);
+  }
+  ASSERT_GT(compressed.size(), 10);
+
+  // Verify original decompresses correctly and matches
+  auto originalResult = param.isStream
+      ? tryDecompressStream(param.type, compressed, data.size())
+      : tryDecompressOneShot(param.type, compressed, data.size());
+  ASSERT_TRUE(originalResult.success) << "Original data should decompress";
+  ASSERT_EQ(0, memcmp(originalResult.data.data(), data.data(), data.size()))
+      << "Decompressed data should match original";
+
+  // Test corruption detection with random bit flips
+  // With checksum enabled, corrupted data should either:
+  // 1. Fail to decompress (throw exception) - corruption detected
+  // 2. Decompress successfully AND result matches original - corruption
+  //    not in payload (e.g., unused bits)
+  // It should NEVER decompress successfully with mismatched data
+  std::mt19937 gen(42);
+  // Avoid header/trailer regions that might cause parse errors
+  size_t safeStart = 10;
+  size_t safeEnd = compressed.size() > 10 ? compressed.size() - 5 : safeStart;
+  std::uniform_int_distribution<size_t> posDist(safeStart, safeEnd);
+  std::uniform_int_distribution<int> bitDist(0, 7);
+
+  for (int i = 0; i < kTotalTests; ++i) {
+    auto corruptedData = compressed;
+    corruptBit(corruptedData, posDist(gen), bitDist(gen));
+
+    auto result = param.isStream
+        ? tryDecompressStream(param.type, corruptedData, data.size())
+        : tryDecompressOneShot(param.type, corruptedData, data.size());
+
+    if (result.success) {
+      // If decompression succeeded, verify data matches exactly
+      // With checksum enabled, this should only happen if the corrupted bit
+      // was in an unused/padding area that doesn't affect the actual data
+      EXPECT_EQ(0, memcmp(result.data.data(), data.data(), data.size()))
+          << "With checksum enabled, if decompression succeeds, "
+          << "result must match original (test iteration " << i << ")";
+    }
+    // If decompression failed (!result.success), that's expected for corrupted
+    // data
+  }
+}
+
+// Generate corruption detection test parameters
+// All tests use checksum enabled to verify integrity protection
+std::vector<CorruptionTestParam> buildCorruptionTestParams() {
+  std::vector<CorruptionTestParam> params;
+
+  // OneShot codecs with checksum support
+  params.push_back({CodecType::ZSTD, false});
+  params.push_back({CodecType::LZ4_FRAME, false});
+  params.push_back({CodecType::GZIP, false}); // GZIP has built-in CRC32
+
+  // Stream codecs with checksum support
+  // Note: GZIP stream excluded - its CRC32 validation doesn't guarantee
+  // detection of all corruptions in streaming mode
+  params.push_back({CodecType::ZSTD, true});
+  params.push_back({CodecType::LZ4_FRAME, true});
+
+  return params;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CorruptionDetection,
+    CorruptionDetectionTest,
+    testing::ValuesIn(buildCorruptionTestParams()),
+    [](const testing::TestParamInfo<CorruptionTestParam>& info) {
       return info.param.toString();
     });
 

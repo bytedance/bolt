@@ -30,6 +30,13 @@ enum class CodecType { UNCOMPRESSED, GZIP, SNAPPY, LZ4, LZ4_FRAME, ZSTD };
 constexpr int32_t kDefaultCompressionLevel =
     std::numeric_limits<int32_t>::max();
 
+/// Options for codec creation.
+/// Note on checksumEnabled support:
+/// - ZSTD: Fully supported. Uses ZSTD_c_checksumFlag for native checksum.
+/// - LZ4_FRAME: Fully supported. Uses LZ4F contentChecksumFlag.
+/// - GZIP: Ignored. GZIP has built-in CRC32 checksum (always enabled per spec).
+/// - LZ4 (raw): Not supported. Throws error if enabled.
+/// - SNAPPY: Not supported. Throws error if enabled.
 struct CodecOptions {
   CodecBackend backend;
   int32_t compression_level = kDefaultCompressionLevel;

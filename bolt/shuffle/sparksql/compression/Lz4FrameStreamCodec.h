@@ -47,6 +47,7 @@ class Lz4FrameStreamCompressor : public StreamCompressor {
   LZ4F_cctx* cctx_{nullptr};
   LZ4F_preferences_t prefs_;
   int32_t compressionLevel_;
+  bool checksumEnabled_{false};
   bool firstTime_{true};
 };
 

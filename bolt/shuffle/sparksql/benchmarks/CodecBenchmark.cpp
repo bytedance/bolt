@@ -17,7 +17,10 @@
 #include <glog/logging.h>
 
 #include <chrono>
+#include <cstring>
 #include <iostream>
+#include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -28,16 +31,86 @@ using namespace bytedance::bolt::shuffle::sparksql;
 
 constexpr size_t kDataSize = 1 * 1024 * 1024;
 
-std::vector<uint8_t> generateCompressibleData(size_t size) {
+// Store final metrics for each benchmark
+struct BenchmarkMetrics {
+  int64_t compressedSize{0};
+  double compressMBps{0};
+  double decompressMBps{0};
+};
+
+std::map<std::string, BenchmarkMetrics>& getMetricsMap() {
+  static std::map<std::string, BenchmarkMetrics> metricsMap;
+  return metricsMap;
+}
+
+// Generate realistic data that simulates shuffle payload:
+// - Mix of sequential IDs (like row IDs)
+// - Random values (like hash keys, timestamps)
+// - Repeated values (like partition keys, status codes)
+// - Some null markers
+// Target compression ratio: 2-5x (typical for real data)
+std::vector<uint8_t> generateRealisticData(size_t size) {
   std::vector<uint8_t> data(size);
-  for (size_t i = 0; i < size; i++) {
-    data[i] = static_cast<uint8_t>((i % 64) ^ ((i / 64) % 256));
+  std::mt19937 rng(42); // Fixed seed for reproducibility
+
+  size_t offset = 0;
+  while (offset < size) {
+    // Simulate different column types in a row
+    size_t rowSize = std::min(size - offset, size_t(64));
+
+    // 8 bytes: Sequential ID (highly compressible)
+    if (rowSize >= 8) {
+      uint64_t id = offset / 64;
+      memcpy(&data[offset], &id, 8);
+      offset += 8;
+      rowSize -= 8;
+    }
+
+    // 8 bytes: Random timestamp-like value (low compressibility)
+    if (rowSize >= 8) {
+      uint64_t ts = rng();
+      memcpy(&data[offset], &ts, 8);
+      offset += 8;
+      rowSize -= 8;
+    }
+
+    // 4 bytes: Partition key (repeated, medium compressibility)
+    if (rowSize >= 4) {
+      uint32_t partKey = (offset / 1024) % 100;
+      memcpy(&data[offset], &partKey, 4);
+      offset += 4;
+      rowSize -= 4;
+    }
+
+    // 4 bytes: Random int (low compressibility)
+    if (rowSize >= 4) {
+      uint32_t val = rng();
+      memcpy(&data[offset], &val, 4);
+      offset += 4;
+      rowSize -= 4;
+    }
+
+    // 8 bytes: Amount/price with some patterns (medium compressibility)
+    if (rowSize >= 8) {
+      double amount = (rng() % 10000) / 100.0;
+      memcpy(&data[offset], &amount, 8);
+      offset += 8;
+      rowSize -= 8;
+    }
+
+    // Remaining: Status codes and flags (high compressibility)
+    while (rowSize > 0) {
+      data[offset] = static_cast<uint8_t>(rng() % 10); // Values 0-9
+      offset++;
+      rowSize--;
+    }
   }
+
   return data;
 }
 
 const std::vector<uint8_t>& testData() {
-  static const std::vector<uint8_t> data = generateCompressibleData(kDataSize);
+  static const std::vector<uint8_t> data = generateRealisticData(kDataSize);
   return data;
 }
 
@@ -58,7 +131,7 @@ std::string codecTypeName(CodecType type) {
   }
 }
 
-void logMetrics(
+void storeMetrics(
     const std::string& name,
     int64_t compressedSize,
     int64_t totalCompressTime,
@@ -69,8 +142,6 @@ void logMetrics(
   }
 
   const double dataSize = static_cast<double>(kDataSize);
-  const double compressed = static_cast<double>(compressedSize);
-  const double compressionRatio = compressed > 0 ? dataSize / compressed : 0.0;
 
   const double compressThroughput = totalCompressTime > 0
       ? dataSize * iterations / static_cast<double>(totalCompressTime) * 1e9 /
@@ -82,11 +153,37 @@ void logMetrics(
           (1024.0 * 1024.0)
       : 0.0;
 
-  LOG(INFO) << name << " data_size=" << kDataSize
-            << " compressed_size=" << compressedSize
-            << " compression_ratio=" << compressionRatio
-            << " compress_MBps=" << compressThroughput
-            << " decompress_MBps=" << decompressThroughput;
+  // Store/update metrics (keeps the latest values)
+  auto& metrics = getMetricsMap()[name];
+  metrics.compressedSize = compressedSize;
+  metrics.compressMBps = compressThroughput;
+  metrics.decompressMBps = decompressThroughput;
+}
+
+void printAllMetrics() {
+  std::cout << "\n=== Codec Benchmark Metrics ===" << std::endl;
+  std::cout << "Data size: " << kDataSize << " bytes (" << kDataSize / 1024
+            << " KB)" << std::endl;
+  std::cout << std::endl;
+
+  printf(
+      "%-35s %12s %15s %15s\n",
+      "Benchmark",
+      "Compressed",
+      "Compress",
+      "Decompress");
+  printf("%-35s %12s %15s %15s\n", "", "(bytes)", "(MB/s)", "(MB/s)");
+  printf("%s\n", std::string(80, '-').c_str());
+
+  for (const auto& [name, metrics] : getMetricsMap()) {
+    printf(
+        "%-35s %12ld %15.1f %15.1f\n",
+        name.c_str(),
+        metrics.compressedSize,
+        metrics.compressMBps,
+        metrics.decompressMBps);
+  }
+  std::cout << std::endl;
 }
 
 void runOneShotBenchmark(CodecType type, bool checksumEnabled, size_t n) {
@@ -132,14 +229,14 @@ void runOneShotBenchmark(CodecType type, bool checksumEnabled, size_t n) {
 
   std::string name = "OneShot_" + codecTypeName(type) +
       (checksumEnabled ? "_Checksum" : "_NoChecksum");
-  logMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
+  storeMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
 }
 
-void runStreamBenchmark(CodecType type, size_t n) {
+void runStreamBenchmark(CodecType type, bool checksumEnabled, size_t n) {
   folly::BenchmarkSuspender suspender;
 
   CodecOptions options;
-  options.checksumEnabled = false;
+  options.checksumEnabled = checksumEnabled;
 
   const auto& data = testData();
 
@@ -195,8 +292,9 @@ void runStreamBenchmark(CodecType type, size_t n) {
 
   suspender.rehire();
 
-  std::string name = "Stream_" + codecTypeName(type);
-  logMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
+  std::string name = "Stream_" + codecTypeName(type) +
+      (checksumEnabled ? "_Checksum" : "_NoChecksum");
+  storeMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
 }
 
 BENCHMARK(OneShot_ZSTD_NoChecksum, n) {
@@ -207,12 +305,10 @@ BENCHMARK(OneShot_ZSTD_Checksum, n) {
   runOneShotBenchmark(CodecType::ZSTD, true, n);
 }
 
-BENCHMARK(OneShot_GZIP_NoChecksum, n) {
+// GZIP has built-in CRC32 checksum (always enabled), so no separate checksum
+// benchmark
+BENCHMARK(OneShot_GZIP, n) {
   runOneShotBenchmark(CodecType::GZIP, false, n);
-}
-
-BENCHMARK(OneShot_GZIP_Checksum, n) {
-  runOneShotBenchmark(CodecType::GZIP, true, n);
 }
 
 BENCHMARK(OneShot_LZ4_NoChecksum, n) {
@@ -223,24 +319,39 @@ BENCHMARK(OneShot_LZ4_FRAME_NoChecksum, n) {
   runOneShotBenchmark(CodecType::LZ4_FRAME, false, n);
 }
 
+BENCHMARK(OneShot_LZ4_FRAME_Checksum, n) {
+  runOneShotBenchmark(CodecType::LZ4_FRAME, true, n);
+}
+
 BENCHMARK(OneShot_SNAPPY_NoChecksum, n) {
   runOneShotBenchmark(CodecType::SNAPPY, false, n);
 }
 
-BENCHMARK(Stream_ZSTD, n) {
-  runStreamBenchmark(CodecType::ZSTD, n);
+BENCHMARK(Stream_ZSTD_NoChecksum, n) {
+  runStreamBenchmark(CodecType::ZSTD, false, n);
 }
 
+BENCHMARK(Stream_ZSTD_Checksum, n) {
+  runStreamBenchmark(CodecType::ZSTD, true, n);
+}
+
+// GZIP has built-in CRC32 checksum (always enabled), so no separate checksum
+// benchmark
 BENCHMARK(Stream_GZIP, n) {
-  runStreamBenchmark(CodecType::GZIP, n);
+  runStreamBenchmark(CodecType::GZIP, false, n);
 }
 
-BENCHMARK(Stream_LZ4_FRAME, n) {
-  runStreamBenchmark(CodecType::LZ4_FRAME, n);
+BENCHMARK(Stream_LZ4_FRAME_NoChecksum, n) {
+  runStreamBenchmark(CodecType::LZ4_FRAME, false, n);
+}
+
+BENCHMARK(Stream_LZ4_FRAME_Checksum, n) {
+  runStreamBenchmark(CodecType::LZ4_FRAME, true, n);
 }
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
   folly::runBenchmarks();
+  printAllMetrics();
   return 0;
 }

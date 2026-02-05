@@ -23,8 +23,6 @@ namespace {
 constexpr int32_t kZstdDefaultStreamCompressionLevel = 1;
 } // namespace
 
-// ============== ZstdStreamCompressor ==============
-
 ZstdStreamCompressor::ZstdStreamCompressor(const CodecOptions& options)
     : StreamCompressor(options),
       compressionLevel_(
@@ -120,8 +118,6 @@ int64_t ZstdStreamCompressor::recommendedOutputSize(int64_t inputSize) const {
   return static_cast<int64_t>(
       ZSTD_compressBound(static_cast<size_t>(inputSize)));
 }
-
-// ============== ZstdStreamDecompressor ==============
 
 ZstdStreamDecompressor::ZstdStreamDecompressor(
     const CodecOptions& /*options*/) {

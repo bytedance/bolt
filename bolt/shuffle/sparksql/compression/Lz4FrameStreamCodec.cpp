@@ -37,14 +37,13 @@ LZ4F_preferences_t PreferencesWithCompressionLevel(int compressionLevel) {
 }
 } // namespace
 
-// ============== Lz4FrameStreamCompressor ==============
-
 Lz4FrameStreamCompressor::Lz4FrameStreamCompressor(const CodecOptions& options)
     : StreamCompressor(options),
       compressionLevel_(
           options.compression_level == kDefaultCompressionLevel
               ? kLz4DefaultCompressionLevel
-              : options.compression_level) {
+              : options.compression_level),
+      checksumEnabled_(options.checksumEnabled) {
   init();
 }
 
@@ -56,6 +55,10 @@ Lz4FrameStreamCompressor::~Lz4FrameStreamCompressor() {
 
 void Lz4FrameStreamCompressor::init() {
   prefs_ = PreferencesWithCompressionLevel(compressionLevel_);
+  // Enable content checksum if requested
+  if (checksumEnabled_) {
+    prefs_.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
+  }
   firstTime_ = true;
 
   LZ4F_errorCode_t ret = LZ4F_createCompressionContext(&cctx_, LZ4F_VERSION);
@@ -198,8 +201,6 @@ int64_t Lz4FrameStreamCompressor::recommendedOutputSize(
              LZ4F_compressBound(static_cast<size_t>(inputSize), &prefs_)) +
       LZ4F_HEADER_SIZE_MAX;
 }
-
-// ============== Lz4FrameStreamDecompressor ==============
 
 Lz4FrameStreamDecompressor::Lz4FrameStreamDecompressor(
     const CodecOptions& /*options*/) {
