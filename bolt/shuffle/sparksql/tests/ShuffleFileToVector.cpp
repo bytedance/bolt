@@ -1,8 +1,11 @@
+#include <boost/algorithm/string.hpp>
+#include <gflags/gflags.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <vector>
 
 #include "Type.h"
@@ -12,8 +15,31 @@
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/tests/LocalFileReaderStreamIterator.h"
+#include "bolt/type/parser/TypeParser.h"
 #include "bolt/vector/VectorPrinter.h"
 #include "vector/VectorPrinter.h"
+
+DEFINE_string(index_file_path, "", "Path to the index file");
+DEFINE_string(data_file_path, "", "Path to the data file");
+DEFINE_string(data_type, "", "The schema of shuffle file");
+DEFINE_int32(
+    shuffle_writer_type,
+    0,
+    "The shuffle file is written by which shuffle writer");
+DEFINE_string(
+    shuffle_type,
+    "hash",
+    "Please chose one from [hash, single, range, rr]");
+DEFINE_string(
+    compress_type,
+    "zstd",
+    "The compression type which shuffle adopted");
+DEFINE_int32(max_batch_size, 32 * 1024, "");
+DEFINE_int32(max_batch_byte_size, 40 * 1024 * 1024, "");
+DEFINE_string(
+    filter,
+    "",
+    "string to filter result, if toString(vector) contains filter, will output");
 
 namespace {
 using namespace bytedance::bolt;
@@ -54,27 +80,41 @@ std::vector<SegmentInfo> getSegmentInfo(
     prev = actualValue;
     partitionCount++;
   }
-  LOG(INFO) << "PartitionNum=" << partitionCount;
+  std::cout << "PartitionNum=" << partitionCount << std::endl;
 
   return segs;
+}
+
+arrow::Compression::type parseCompressionType(const std::string& type) {
+  auto inputType = type;
+  boost::to_lower(inputType);
+  if (inputType == "zstd") {
+    return arrow::Compression::ZSTD;
+  }
+  if (inputType == "lz4") {
+    return arrow::Compression::LZ4;
+  }
+  std::cout << "Can't parse your input type " << type << std::endl;
+  exit(1);
 }
 
 void printShuffleFile(
     const std::string& indexFilePath,
     const std::string& dataFilePath,
     const RowTypePtr& outputType,
-    const int32_t& shuffleWriterType = 0 /*adaptive shuffle write type*/,
-    const std::string& partitionShortName = "hash") {
+    const int32_t& shuffleWriterType,
+    const std::string& partitionShortName) {
   auto segments = getSegmentInfo(indexFilePath, dataFilePath);
   auto streamIter =
       std::make_shared<LocalFileReaderStreamIterator>(std::move(segments));
 
   ShuffleReaderOptions readerOptions;
+  readerOptions.compressionType = parseCompressionType(FLAGS_compress_type);
+  readerOptions.batchSize = FLAGS_max_batch_size;
+  readerOptions.shuffleBatchByteSize = FLAGS_max_batch_byte_size;
   readerOptions.numPartitions = segments.size();
-  readerOptions.forceShuffleWriterType = shuffleWriterType;
   readerOptions.partitionShortName = partitionShortName;
-  readerOptions.shuffleBatchByteSize = 1024 * 1024; // 1MB
-  readerOptions.compressionType = arrow::Compression::ZSTD;
+  readerOptions.forceShuffleWriterType = shuffleWriterType;
 
   bytedance::bolt::exec::Operator::registerOperator(
       std::make_unique<SparkShuffleReaderTranslator>());
@@ -98,59 +138,36 @@ void printShuffleFile(
   auto readerCursor = TaskCursor::create(readerParams);
   while (readerCursor->moveNext()) {
     auto curBatch = readerCursor->current();
-    // avoid using LOG(INFO), which will be truncated
-    std::cout << printVector(*curBatch) << std::endl;
+    auto str = printVector(*curBatch);
+    if (FLAGS_filter.empty() ||
+        (!FLAGS_filter.empty() &&
+         str.find(FLAGS_filter) != std::string::npos)) {
+      // avoid using LOG(INFO), which will be truncated
+      std::cout << printVector(*curBatch) << std::endl;
+    }
     readerCursor->current().reset();
   }
 }
+
 } // namespace
 
-int main() {
-  const std::string shuffleFileBasePath = "/home/xxx/shuffle_data";
-  const std::string shuffleId = "15";
-  const std::string taskId = "90";
-  RowTypePtr outputType = ROW(
-      {{"l_l_task_id#3900L", BIGINT()},
-       {"l_l_deadline_item_vv_td#3901L", BIGINT()},
-       {"l_l_deadline_item_interact_pv_td#3902L", BIGINT()},
-       {"l_l_deadline_item_product_show_pv_td#3903L", BIGINT()},
-       {"l_l_deadline_item_life_anchor_entrance_click_cnt_td#3904L", BIGINT()},
-       {"l_l_deadline_item_pay_amount_td#3905L", BIGINT()},
-       {"l_l_deadline_whole_verify_amount#3906L", BIGINT()},
-       {"l_l_guarantee_deadline#3907", VARCHAR()},
-       {"l_l_task_create_date#3908", VARCHAR()},
-       {"l_l_item_vv_td_create2deadline#3909", VARCHAR()},
-       {"l_l_item_interact_pv_td_create2deadline#3910", VARCHAR()},
-       {"l_l_item_product_show_pv_td_create2deadline#3911", VARCHAR()},
-       {"l_l_item_life_anchor_entrance_click_cnt_td_create2deadline#3912",
-        VARCHAR()},
-       {"l_l_whole_sale_amount_create2deadline#3913", VARCHAR()},
-       {"l_l_whole_verify_amount_create2deadline#3914", VARCHAR()},
-       {"l_l_life_account_pay_amount_create2deadline_nd#3915L", BIGINT()},
-       {"l_l_estimated_item_vv_td#3916L", BIGINT()},
-       {"l_l_estimated_item_interact_pv_td#3917L", BIGINT()},
-       {"l_l_estimated_item_product_show_pv_td#3918L", BIGINT()},
-       {"l_l_estimated_item_life_anchor_entrance_click_cnt_td#3919L", BIGINT()},
-       {"l_l_estimated_item_pay_amount_td#3920L", BIGINT()},
-       {"l_l_estimated_whole_verify_amount#3921L", BIGINT()},
-       {"l_l_deadline_dingxiang_item_pay_amount_td#3922L", BIGINT()},
-       {"l_r_compensate_amount#3924L", BIGINT()},
-       {"l_r_refund_amount#3925L", BIGINT()},
-       {"l_r_pay_amount#3926L", BIGINT()}});
-
-  const std::string indexFilePath = fmt::format(
-      "{}/{}/{}/-1/shuffle_{}_{}_0.index",
-      shuffleFileBasePath,
-      shuffleId,
-      taskId,
-      shuffleId,
-      taskId);
-  const std::string dataFilePath = fmt::format(
-      "{}/{}/{}/-1/shuffle_{}_{}_0.data",
-      shuffleFileBasePath,
-      shuffleId,
-      taskId,
-      shuffleId,
-      taskId);
-  printShuffleFile(indexFilePath, dataFilePath, outputType, 0, "hash");
+int main(int argc, char* argv[]) {
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  auto outputType = parseType(FLAGS_data_type);
+  auto rowType = std::dynamic_pointer_cast<const RowType>(outputType);
+  if (rowType == nullptr) {
+    std::cout << "Please ensure data_type is like row(...)" << std::endl;
+    exit(1);
+  }
+  std::cout << "schema is:" << rowType->toString() << std::endl;
+  if (FLAGS_index_file_path.empty() || FLAGS_data_file_path.empty()) {
+    std::cout << "Please set index_file_path or data_file_path" << std::endl;
+    exit(1);
+  }
+  printShuffleFile(
+      FLAGS_index_file_path,
+      FLAGS_data_file_path,
+      rowType,
+      FLAGS_shuffle_writer_type,
+      FLAGS_shuffle_type);
 }
