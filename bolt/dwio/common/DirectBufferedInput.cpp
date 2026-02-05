@@ -243,11 +243,11 @@ void DirectBufferedInput::readRegions(
         AsyncLoadHolder loadHolder(
             load, options_.prefetchMemoryPercent(), asyncThreadCtx_);
         executor_->add([asyncLoad = std::move(loadHolder)]() {
-          if (asyncLoad.asyncThreadCtx->isClosed()) {
+          if (!asyncLoad.asyncThreadCtx->in()) {
             return;
           }
-          connector::AsyncThreadCtx::Guard guard(
-              asyncLoad.asyncThreadCtx.get());
+          auto guard = folly::makeGuard(
+              [&] { asyncLoad.asyncThreadCtx->out(); });
           if (asyncLoad.load->state() != DirectCoalescedLoad::State::kPlanned) {
             return;
           }

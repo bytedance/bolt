@@ -509,10 +509,10 @@ void TableScan::checkPreload() {
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
                            preloadBytes]() mutable {
-              if (ctx->isClosed()) {
+              connector::AsyncThreadCtx::Guard guard(ctx.get(), preloadBytes);
+              if (!guard) {
                 return;
               }
-              connector::AsyncThreadCtx::Guard guard(ctx.get(), preloadBytes);
               connectorSplit->dataSource->prepare();
               connectorSplit.reset();
             });

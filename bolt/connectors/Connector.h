@@ -389,10 +389,14 @@ class AsyncThreadCtx {
     return state_ == State::kClosed;
   }
 
-  void in() {
+  bool in() {
     std::scoped_lock lock(mutex_);
+    if (state_ == State::kClosed) {
+      return false;
+    }
     numIn_++;
     cv_.notify_one();
+    return true;
   }
   void out() {
     std::scoped_lock lock(mutex_);
@@ -454,8 +458,11 @@ class AsyncThreadCtx {
    public:
     Guard(AsyncThreadCtx* ctx, int64_t bytes = 0) : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        ctx_->in();
-        ctx_->addPreloadingBytes(bytes_);
+        if (ctx_->in()) {
+          ctx_->addPreloadingBytes(bytes_);
+        } else {
+          ctx_ = nullptr;
+        }
       }
     }
 
@@ -484,6 +491,10 @@ class AsyncThreadCtx {
         other.ctx_ = nullptr;
       }
       return *this;
+    }
+
+    explicit operator bool() const {
+      return ctx_ != nullptr;
     }
 
    private:
