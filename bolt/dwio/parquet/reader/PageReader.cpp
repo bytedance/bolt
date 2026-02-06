@@ -28,7 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
- #include <lz4.h>
+#include <lz4.h>
 #include <thrift/protocol/TCompactProtocol.h> // @manual
 #include <zstd.h>
 #include <zstd_errors.h>
