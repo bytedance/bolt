@@ -26,6 +26,10 @@ concurrency:
 
 env:
   PRE_COMMIT_HOME: /data/pre-commit-cache
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAX_SIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
   GOMAXPROCS: 8
 
 jobs:
@@ -36,12 +40,31 @@ jobs:
       options: --user root
       volumes:
         - pre-commit-cache:/data/pre-commit-cache
+        - /data/ccache-data:/data/ccache-data
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: env-setup
+        uses: ./.github/actions/bolt-build-base
       - name: Install pre-commit
         run: |
           pip install -r requirements.txt
+      - name: Generate Compile Database
+        run: |
+          make compile_db_all
       - name: Run pre-commit hooks
         run: |
-          pre-commit run --all-files
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "Detected Pull Request: Checking modified files only."
+            pre-commit run --from-ref origin/${{ github.base_ref }} --to-ref HEAD
+          else
+            echo "Detected Push/Merge: Checking all files."
+            pre-commit run --all-files
+          fi
