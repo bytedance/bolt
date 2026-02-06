@@ -38,8 +38,7 @@ class ThriftDeserializer {
       const uint8_t* buf,
       uint32_t* len,
       T* deserializedMsg,
-      const std::shared_ptr<Decryptor>& decryptor,
-      bool print = false) {
+      const std::shared_ptr<Decryptor>& decryptor) {
     uint32_t clen = *len;
     int64_t allocateSize = clen - decryptor->CiphertextSizeDelta();
     uint8_t* decryptedBuffer =
