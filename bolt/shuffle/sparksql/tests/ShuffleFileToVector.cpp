@@ -21,7 +21,10 @@
 
 DEFINE_string(index_file_path, "", "Path to the index file");
 DEFINE_string(data_file_path, "", "Path to the data file");
-DEFINE_string(data_type, "", "The schema of shuffle file");
+DEFINE_string(
+    data_type,
+    "",
+    "The schema of shuffle file, for example row(bigint,varchar,map(bigint, varchar))");
 DEFINE_int32(
     shuffle_writer_type,
     0,
@@ -34,6 +37,7 @@ DEFINE_string(
     compress_type,
     "zstd",
     "The compression type which shuffle adopted");
+// same conf with bytedance online env
 DEFINE_int32(max_batch_size, 32 * 1024, "");
 DEFINE_int32(max_batch_byte_size, 40 * 1024 * 1024, "");
 DEFINE_string(
@@ -103,15 +107,19 @@ void printShuffleFile(
     const std::string& dataFilePath,
     const RowTypePtr& outputType,
     const int32_t& shuffleWriterType,
-    const std::string& partitionShortName) {
+    const std::string& partitionShortName,
+    const std::string& compressType,
+    const int32_t maxBatchSize,
+    const int32_t maxBatchByteSize,
+    const std::string& filter) {
   auto segments = getSegmentInfo(indexFilePath, dataFilePath);
   auto streamIter =
       std::make_shared<LocalFileReaderStreamIterator>(std::move(segments));
 
   ShuffleReaderOptions readerOptions;
-  readerOptions.compressionType = parseCompressionType(FLAGS_compress_type);
-  readerOptions.batchSize = FLAGS_max_batch_size;
-  readerOptions.shuffleBatchByteSize = FLAGS_max_batch_byte_size;
+  readerOptions.compressionType = parseCompressionType(compressType);
+  readerOptions.batchSize = maxBatchSize;
+  readerOptions.shuffleBatchByteSize = maxBatchByteSize;
   readerOptions.numPartitions = segments.size();
   readerOptions.partitionShortName = partitionShortName;
   readerOptions.forceShuffleWriterType = shuffleWriterType;
@@ -139,9 +147,8 @@ void printShuffleFile(
   while (readerCursor->moveNext()) {
     auto curBatch = readerCursor->current();
     auto str = printVector(*curBatch);
-    if (FLAGS_filter.empty() ||
-        (!FLAGS_filter.empty() &&
-         str.find(FLAGS_filter) != std::string::npos)) {
+    if (filter.empty() ||
+        (!filter.empty() && str.find(filter) != std::string::npos)) {
       // avoid using LOG(INFO), which will be truncated
       std::cout << printVector(*curBatch) << std::endl;
     }
@@ -169,5 +176,9 @@ int main(int argc, char* argv[]) {
       FLAGS_data_file_path,
       rowType,
       FLAGS_shuffle_writer_type,
-      FLAGS_shuffle_type);
+      FLAGS_shuffle_type,
+      FLAGS_compress_type,
+      FLAGS_max_batch_size,
+      FLAGS_max_batch_byte_size,
+      FLAGS_filter);
 }
