@@ -287,7 +287,7 @@ RowVectorPtr TableScan::getOutput() {
             planNodeId(),
             connectorPool_,
             nullptr,
-            asyncThreadCtx_.get());
+            asyncThreadCtx_);
         dataSource_ = connector_->createDataSource(
             outputType_,
             tableHandle_,
@@ -505,7 +505,11 @@ void TableScan::checkPreload() {
 
             auto hiveSplit = std::dynamic_pointer_cast<
                 const connector::hive::HiveConnectorSplit>(split);
-            int64_t preloadBytes = hiveSplit ? hiveSplit->length : 0;
+            // Handle the default max value for length by treating it as 0
+            int64_t preloadBytes = 0;
+            if (hiveSplit && hiveSplit->length != std::numeric_limits<uint64_t>::max()) {
+              preloadBytes = static_cast<int64_t>(hiveSplit->length);
+            }
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
                            preloadBytes]() mutable {
