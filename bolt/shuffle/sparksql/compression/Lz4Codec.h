@@ -23,9 +23,15 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 
+constexpr int kLz4DefaultCompressionLevel = 1;
+
 class Lz4Codec : public Codec {
  public:
   explicit Lz4Codec(const CodecOptions& options);
+
+  int32_t defaultCompressionLevel() const override {
+    return kLz4DefaultCompressionLevel;
+  }
 
   int64_t compress(
       const uint8_t* input,
@@ -45,6 +51,10 @@ class Lz4Codec : public Codec {
 class Lz4FrameCodec : public Codec {
  public:
   explicit Lz4FrameCodec(const CodecOptions& options);
+
+  int32_t defaultCompressionLevel() const override {
+    return kLz4DefaultCompressionLevel;
+  }
 
   int64_t compress(
       const uint8_t* input,

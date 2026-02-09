@@ -17,36 +17,33 @@
 #include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
 
 #include <common/base/Exceptions.h>
+#include <fmt/format.h>
 #include <zstd.h>
 
 namespace bytedance::bolt::shuffle::sparksql {
 
 ZstdCodec::ZstdCodec(const CodecOptions& options)
-    : Codec(options), cctx_(nullptr), dctx_(nullptr) {
-  compressionLevel_ = (options.compression_level == kDefaultCompressionLevel)
-      ? kZstdDefaultCompressionLevel
-      : options.compression_level;
-
+    : Codec(CodecType::ZSTD, options), cctx_(nullptr), dctx_(nullptr) {
   cctx_ = ZSTD_createCCtx();
-  BOLT_CHECK(cctx_ != nullptr, "Bolt shuffle codec: ZSTD_createCCtx failed.");
+  BOLT_CODEC_CHECK(cctx_ != nullptr, "ZSTD_createCCtx failed.");
 
   dctx_ = ZSTD_createDCtx();
-  BOLT_CHECK(dctx_ != nullptr, "Bolt shuffle codec: ZSTD_createDCtx failed.");
+  BOLT_CODEC_CHECK(dctx_ != nullptr, "ZSTD_createDCtx failed.");
 
   // Set compression level
-  size_t ret =
-      ZSTD_CCtx_setParameter(cctx_, ZSTD_c_compressionLevel, compressionLevel_);
-  BOLT_CHECK(
+  size_t ret = ZSTD_CCtx_setParameter(
+      cctx_, ZSTD_c_compressionLevel, compressionLevel());
+  BOLT_CODEC_CHECK(
       !ZSTD_isError(ret),
-      "Bolt shuffle codec: ZSTD set compression level failed: %s",
+      "ZSTD set compression level failed: {}",
       ZSTD_getErrorName(ret));
 
   // Enable checksum if requested
-  if (options.checksumEnabled) {
+  if (checksumEnabled()) {
     ret = ZSTD_CCtx_setParameter(cctx_, ZSTD_c_checksumFlag, 1);
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         !ZSTD_isError(ret),
-        "Bolt shuffle codec: ZSTD set checksum flag failed: %s",
+        "ZSTD set checksum flag failed: {}",
         ZSTD_getErrorName(ret));
   }
 }
@@ -55,13 +52,21 @@ ZstdCodec::ZstdCodec(const ZstdCodecOptions& options)
     : ZstdCodec(static_cast<CodecOptions>(options)) {
   // Set number of workers if requested
   if (options.nbWorkers > 0) {
+    nbWorkers_ = options.nbWorkers;
     auto ret =
         ZSTD_CCtx_setParameter(cctx_, ZSTD_c_nbWorkers, options.nbWorkers);
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         !ZSTD_isError(ret),
-        "Bolt shuffle codec: ZSTD set number of workers failed: %s",
+        "Bolt shuffle codec: ZSTD set number of workers failed: {}",
         ZSTD_getErrorName(ret));
   }
+}
+
+std::string ZstdCodec::toString() const {
+  if (nbWorkers_ > 0) {
+    return fmt::format("{}: {}, nbWorkers: {}", name(), nbWorkers_);
+  }
+  return Codec::toString();
 }
 
 ZstdCodec::~ZstdCodec() {
@@ -87,9 +92,9 @@ int64_t ZstdCodec::compress(
       input,
       static_cast<size_t>(inputLength));
 
-  BOLT_CHECK(
+  BOLT_CODEC_CHECK(
       !ZSTD_isError(ret),
-      "Bolt shuffle codec: ZSTD compression failed: %s",
+      "Bolt shuffle codec: ZSTD compression failed: {}",
       ZSTD_getErrorName(ret));
 
   return static_cast<int64_t>(ret);
@@ -107,9 +112,9 @@ int64_t ZstdCodec::decompress(
       input,
       static_cast<size_t>(inputLength));
 
-  BOLT_CHECK(
+  BOLT_CODEC_CHECK(
       !ZSTD_isError(ret),
-      "Bolt shuffle codec: ZSTD decompression failed: %s",
+      "Bolt shuffle codec: ZSTD decompression failed: {}",
       ZSTD_getErrorName(ret));
 
   return static_cast<int64_t>(ret);

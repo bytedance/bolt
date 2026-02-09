@@ -16,11 +16,11 @@
 
 #pragma once
 
+#include <arrow/status.h>
 #include <arrow/util/compression.h>
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <vector>
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -39,17 +39,48 @@ constexpr int32_t kDefaultCompressionLevel =
 /// - SNAPPY: Not supported. Throws error if enabled.
 struct CodecOptions {
   CodecBackend backend;
-  int32_t compression_level = kDefaultCompressionLevel;
+  int32_t compressionLevel = kDefaultCompressionLevel;
   bool checksumEnabled = false;
+
+  std::string toString() const;
 };
+
+#define BOLT_CODEC_CHECK(expr, msg, ...) \
+  BOLT_CHECK(                            \
+      expr,                              \
+      fmt::format(                       \
+          "Failed in {}: {}", toString(), detail::errorMessage(__VA_ARGS__)))
 
 class Codec {
  public:
-  explicit Codec(const CodecOptions& options);
+  explicit Codec(CodecType type, const CodecOptions& options);
   virtual ~Codec() = default;
   static std::unique_ptr<Codec> create(
       CodecType type,
       const CodecOptions& options);
+
+  /*
+   * Returns the name of the codec type. Use constexpr to maximize compile-time
+   * optimization.
+   */
+  static constexpr std::string_view codecTypeName(CodecType type) {
+    switch (type) {
+      case CodecType::UNCOMPRESSED:
+        return "UNCOMPRESSED";
+      case CodecType::ZSTD:
+        return "ZSTD";
+      case CodecType::LZ4_FRAME:
+        return "LZ4_FRAME";
+      case CodecType::GZIP:
+        return "GZIP";
+      case CodecType::LZ4:
+        return "LZ4";
+      case CodecType::SNAPPY:
+        return "SNAPPY";
+      default:
+        return "UNKNOWN";
+    }
+  }
 
   /*
    * Compresses the input data using the specified codec options.
@@ -59,6 +90,8 @@ class Codec {
    * @param output The buffer to store the compressed data.
    * @param outputLength The length of the output buffer.
    * @return The length of the compressed data.
+   *
+   * Note: when compressing failed, it would throw a BoltRuntimeError.
    */
   virtual int64_t compress(
       const uint8_t* input,
@@ -74,6 +107,8 @@ class Codec {
    * @param output The buffer to store the decompressed data.
    * @param outputLength The length of the output buffer.
    * @return The length of the decompressed data.
+   *
+   * Note: when decompressing failed, it would throw a BoltRuntimeError.
    */
   virtual int64_t decompress(
       const uint8_t* input,
@@ -90,7 +125,42 @@ class Codec {
    */
   virtual int64_t maxCompressedLen(int64_t inputLength) const = 0;
 
+  /*
+   * Returns the default compression level for the codec.
+   *
+   * @return The default compression level.
+   */
+  virtual int32_t defaultCompressionLevel() const = 0;
+
+  /*
+   * Returns the name of the codec.
+   *
+   * @return The name of the codec.
+   */
+  std::string name() const {
+    return std::string(codecTypeName(codecType_));
+  }
+
+  /*
+   * Returns a string representation of the codec, including the codec options.
+   *
+   * @return The string representation of the codec.
+   */
+  virtual std::string toString() const;
+
  protected:
+  int32_t compressionLevel() const {
+    return options_.compressionLevel == kDefaultCompressionLevel
+        ? defaultCompressionLevel()
+        : options_.compressionLevel;
+  }
+
+  bool checksumEnabled() const {
+    return options_.checksumEnabled;
+  }
+
+ private:
+  CodecType codecType_;
   CodecOptions options_;
 };
 

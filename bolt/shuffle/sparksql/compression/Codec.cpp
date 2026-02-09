@@ -20,11 +20,13 @@
 #include "bolt/shuffle/sparksql/compression/Lz4Codec.h"
 #include "bolt/shuffle/sparksql/compression/SnappyCodec.h"
 #include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
+#include "shuffle/sparksql/compression/Compression.h"
 
 #include <arrow/util/type_fwd.h>
 #include <common/base/Exceptions.h>
 #include <common/base/SimdUtil.h>
 
+#include <cmath>
 #include <cstring>
 namespace bytedance::bolt::shuffle::sparksql {
 CodecType fromArrowCodecType(arrow::Compression::type type) {
@@ -48,19 +50,38 @@ CodecType fromArrowCodecType(arrow::Compression::type type) {
   }
 }
 
+std::string CodecOptions::toString() const {
+  if (compressionLevel == kDefaultCompressionLevel) {
+    return fmt::format(
+        "CodecOptions{{backend={}, level=default, checksum={}}}",
+        getCodecBackendName(backend),
+        checksumEnabled);
+  }
+  return fmt::format(
+      "CodecOptions{{backend={}, level={}, checksum={}}}",
+      getCodecBackendName(backend),
+      compressionLevel,
+      checksumEnabled);
+}
+
 class UncompressionCodec : public Codec {
  public:
-  explicit UncompressionCodec(const CodecOptions& options) : Codec(options) {}
+  explicit UncompressionCodec(const CodecOptions& options)
+      : Codec(CodecType::UNCOMPRESSED, options) {}
+
+  int32_t defaultCompressionLevel() const override {
+    return kDefaultCompressionLevel;
+  }
 
   int64_t compress(
       const uint8_t* input,
       int64_t inputLength,
       uint8_t* output,
       int64_t outputLength) override {
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         outputLength >= inputLength,
-        "Bolt codec: Output length is smaller than input length");
-    memcpy(output, input, inputLength);
+        "Output length is smaller than input length");
+    simd::memcpy(output, input, inputLength);
     return inputLength;
   }
 
@@ -69,10 +90,10 @@ class UncompressionCodec : public Codec {
       int64_t inputLength,
       uint8_t* output,
       int64_t outputLength) override {
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         outputLength >= inputLength,
-        "Bolt codec: Output length is smaller than input length");
-    memcpy(output, input, inputLength);
+        "Output length is smaller than input length");
+    simd::memcpy(output, input, inputLength);
     return inputLength;
   }
 
@@ -82,7 +103,8 @@ class UncompressionCodec : public Codec {
   }
 };
 
-Codec::Codec(const CodecOptions& options) : options_(options) {}
+Codec::Codec(CodecType codecType, const CodecOptions& options)
+    : codecType_(codecType), options_(options) {}
 
 std::unique_ptr<Codec> Codec::create(
     CodecType type,
@@ -102,8 +124,12 @@ std::unique_ptr<Codec> Codec::create(
       return std::make_unique<ZstdCodec>(options);
     default:
       BOLT_CHECK(
-          false, "Bolt codec: Unknown codec type: %d", static_cast<int>(type));
+          false, "Bolt codec: Unknown codec type: {}", static_cast<int>(type));
   }
+}
+
+std::string Codec::toString() const {
+  return fmt::format("{}: {}", name(), options_.toString());
 }
 
 std::unique_ptr<Codec> createCodec(

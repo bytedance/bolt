@@ -26,6 +26,10 @@ class SnappyCodec : public Codec {
  public:
   explicit SnappyCodec(const CodecOptions& options);
 
+  int32_t defaultCompressionLevel() const override {
+    return kDefaultCompressionLevel;
+  }
+
   int64_t compress(
       const uint8_t* input,
       int64_t inputLength,

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <lz4frame.h>
+#include "bolt/shuffle/sparksql/compression/Lz4Codec.h"
 #include "bolt/shuffle/sparksql/compression/StreamCodec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
@@ -26,6 +27,10 @@ class Lz4FrameStreamCompressor : public StreamCompressor {
  public:
   explicit Lz4FrameStreamCompressor(const CodecOptions& options);
   ~Lz4FrameStreamCompressor() override;
+
+  int32_t defaultCompressionLevel() const override {
+    return kLz4DefaultCompressionLevel;
+  }
 
   StreamCompressResult compress(
       const uint8_t* input,
@@ -46,8 +51,6 @@ class Lz4FrameStreamCompressor : public StreamCompressor {
 
   LZ4F_cctx* cctx_{nullptr};
   LZ4F_preferences_t prefs_;
-  int32_t compressionLevel_;
-  bool checksumEnabled_{false};
   bool firstTime_{true};
 };
 

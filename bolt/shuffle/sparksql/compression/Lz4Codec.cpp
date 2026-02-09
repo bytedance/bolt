@@ -20,8 +20,10 @@
 #include <lz4hc.h>
 
 namespace bytedance::bolt::shuffle::sparksql {
-Lz4Codec::Lz4Codec(const CodecOptions& options) : Codec(options) {
-  BOLT_CHECK(!options.checksumEnabled, "Lz4 codec does not support checksum");
+Lz4Codec::Lz4Codec(const CodecOptions& options)
+    : Codec(CodecType::LZ4, options) {
+  BOLT_CODEC_CHECK(
+      !options.checksumEnabled, "Lz4 codec does not support checksum");
 }
 
 int64_t Lz4Codec::compress(
@@ -33,7 +35,7 @@ int64_t Lz4Codec::compress(
     return 0;
   }
   int64_t outputSize = 0;
-  if (options_.compression_level < LZ4HC_CLEVEL_MIN) {
+  if (compressionLevel() < LZ4HC_CLEVEL_MIN) {
     outputSize = LZ4_compress_default(
         reinterpret_cast<const char*>(input),
         reinterpret_cast<char*>(output),
@@ -45,9 +47,9 @@ int64_t Lz4Codec::compress(
         reinterpret_cast<char*>(output),
         static_cast<int>(inputLenth),
         static_cast<int>(outputLength),
-        options_.compression_level);
+        compressionLevel());
   }
-  BOLT_CHECK(outputSize > 0, "Bolt shuffle codec: Lz4 compression failure.");
+  BOLT_CODEC_CHECK(outputSize > 0, "Lz4 compression failure.");
   return outputSize;
 }
 
@@ -64,8 +66,7 @@ int64_t Lz4Codec::decompress(
       reinterpret_cast<char*>(output),
       static_cast<int>(inputLength),
       static_cast<int>(outputLength));
-  BOLT_CHECK(
-      decompressionSize >= 0, "Bolt shuffle codec: Lz4 decompression failure.");
+  BOLT_CODEC_CHECK(decompressionSize >= 0, "Lz4 decompression failure.");
   return decompressionSize;
 }
 
@@ -73,20 +74,21 @@ int64_t Lz4Codec::maxCompressedLen(int64_t inputLength) const {
   return LZ4_compressBound(static_cast<int>(inputLength));
 }
 
-LZ4F_preferences_t getLZ4FPreferences(const CodecOptions& options) {
+LZ4F_preferences_t getLZ4FPreferences(
+    int32_t compressionLevel,
+    bool checksumEnabled) {
   LZ4F_preferences_t prefs;
   memset(&prefs, 0, sizeof(prefs));
-  if (options.compression_level != kDefaultCompressionLevel) {
-    prefs.compressionLevel = options.compression_level;
-  }
-  if (options.checksumEnabled) {
+  prefs.compressionLevel = compressionLevel;
+  if (checksumEnabled) {
     prefs.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
   }
   return prefs;
 };
 
 Lz4FrameCodec::Lz4FrameCodec(const CodecOptions& options)
-    : Codec(options), prefs_(getLZ4FPreferences(options)) {}
+    : Codec(CodecType::LZ4_FRAME, options),
+      prefs_(getLZ4FPreferences(compressionLevel(), checksumEnabled())) {}
 
 int64_t Lz4FrameCodec::compress(
     const uint8_t* input,
@@ -103,9 +105,7 @@ int64_t Lz4FrameCodec::compress(
       static_cast<size_t>(inputLength),
       &prefs_);
 
-  BOLT_CHECK(
-      !LZ4F_isError(totalBytesWriten),
-      "Bolt shuffle codec: Lz4 compression failure.");
+  BOLT_CODEC_CHECK(!LZ4F_isError(totalBytesWriten), "Lz4 compression failure.");
   return static_cast<int64_t>(totalBytesWriten);
 }
 
@@ -134,24 +134,21 @@ int64_t Lz4FrameCodec::decompress(
         input,
         &restInputSize,
         nullptr /* options */);
-    BOLT_CHECK(
-        !LZ4F_isError(ret), "Bolt shuffle codec: LZ4 decompress failed.");
+    BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4 decompress failed.");
     finished = (ret == 0);
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         (restInputSize != 0 || restOutputSize != 0),
-        "Bolt shuffle codec: Lz4 decompression buffer too small.");
+        "Lz4 decompression buffer too small.");
     input += restInputSize;
     inputLength -= restInputSize;
     output += restOutputSize;
     outputLength -= restOutputSize;
     totalBytesWriten += restOutputSize;
   }
-  BOLT_CHECK(
-      finished,
-      "Bolt shuffle codec: Lz4 compressed input contains less than one frame");
-  BOLT_CHECK(
-      inputLength == 0,
-      "Bolt shuffle codec: Lz4 compressed input contains more than one frame");
+  BOLT_CODEC_CHECK(
+      finished, "Lz4 compressed input contains less than one frame");
+  BOLT_CODEC_CHECK(
+      inputLength == 0, "Lz4 compressed input contains more than one frame");
   LZ4F_freeDecompressionContext(ctx);
   return totalBytesWriten;
 }

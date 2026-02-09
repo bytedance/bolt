@@ -27,7 +27,6 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/file_reader.h>
 #include <sched.h>
-#include <shuffle/sparksql/compression/Codec.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -39,6 +38,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/Payload.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "shuffle/sparksql/compression/Codec.h"
 
 DEFINE_string(file, "", "Path to parquet file for benchmark");
 DEFINE_int32(codec, 0, "Codec type: 0=LZ4, 1=ZSTD");

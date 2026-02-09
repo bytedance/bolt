@@ -180,7 +180,7 @@ class AdaptiveParallelZstdCodec {
         RETURN_NOT_OK(
             outputStream->Write(compressBufferPtr_, endResult.bytesWritten));
       }
-    } while (endResult.shouldRetry);
+    } while (!endResult.noMoreOutput);
     compressTime_ += (compressTime - writeTime);
     writeTime_ += writeTime;
     compressor.reset();

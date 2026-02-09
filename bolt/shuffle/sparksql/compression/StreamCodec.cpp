@@ -15,12 +15,17 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/StreamCodec.h"
+#include <fmt/format.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/compression/GzipStreamCodec.h"
 #include "bolt/shuffle/sparksql/compression/Lz4FrameStreamCodec.h"
 #include "bolt/shuffle/sparksql/compression/ZstdStreamCodec.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
+
+std::string StreamCompressor::toString() const {
+  return fmt::format("{}: {}", name(), options_.toString());
+}
 
 std::unique_ptr<StreamCompressor> StreamCompressor::create(
     CodecType type,
@@ -56,7 +61,9 @@ std::unique_ptr<StreamDecompressor> StreamDecompressor::create(
   }
 }
 
-StreamCompressor::StreamCompressor(const CodecOptions& options)
-    : options_(options) {}
+StreamCompressor::StreamCompressor(
+    CodecType codecType,
+    const CodecOptions& options)
+    : codecType_(codecType), options_(options) {}
 
 } // namespace bytedance::bolt::shuffle::sparksql

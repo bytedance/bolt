@@ -32,6 +32,10 @@ class GzipCodec : public Codec {
   explicit GzipCodec(const CodecOptions& options);
   ~GzipCodec() override;
 
+  int32_t defaultCompressionLevel() const override {
+    return kGzipDefaultCompressionLevel;
+  }
+
   int64_t compress(
       const uint8_t* input,
       int64_t inputLength,
@@ -56,7 +60,6 @@ class GzipCodec : public Codec {
   z_stream decompressStream_;
   bool compressorInitialized_;
   bool decompressorInitialized_;
-  int compressionLevel_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql

@@ -37,6 +37,12 @@ class ZstdCodec : public Codec {
   explicit ZstdCodec(const ZstdCodecOptions& options);
   ~ZstdCodec() override;
 
+  int32_t defaultCompressionLevel() const override {
+    return kZstdDefaultCompressionLevel;
+  }
+
+  std::string toString() const override;
+
   int64_t compress(
       const uint8_t* input,
       int64_t inputLength,
@@ -52,7 +58,7 @@ class ZstdCodec : public Codec {
   int64_t maxCompressedLen(int64_t inputLength) const override;
 
  private:
-  int compressionLevel_;
+  int nbWorkers_ = 0;
   ZSTD_CCtx* cctx_;
   ZSTD_DCtx* dctx_;
 };

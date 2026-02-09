@@ -38,12 +38,7 @@ LZ4F_preferences_t PreferencesWithCompressionLevel(int compressionLevel) {
 } // namespace
 
 Lz4FrameStreamCompressor::Lz4FrameStreamCompressor(const CodecOptions& options)
-    : StreamCompressor(options),
-      compressionLevel_(
-          options.compression_level == kDefaultCompressionLevel
-              ? kLz4DefaultCompressionLevel
-              : options.compression_level),
-      checksumEnabled_(options.checksumEnabled) {
+    : StreamCompressor(CodecType::LZ4_FRAME, options) {
   init();
 }
 
@@ -54,9 +49,9 @@ Lz4FrameStreamCompressor::~Lz4FrameStreamCompressor() {
 }
 
 void Lz4FrameStreamCompressor::init() {
-  prefs_ = PreferencesWithCompressionLevel(compressionLevel_);
+  prefs_ = PreferencesWithCompressionLevel(compressionLevel());
   // Enable content checksum if requested
-  if (checksumEnabled_) {
+  if (checksumEnabled()) {
     prefs_.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
   }
   firstTime_ = true;
@@ -99,18 +94,16 @@ StreamCompressResult Lz4FrameStreamCompressor::compress(
 
   // Write header on first call
   int64_t headerBytes = writeHeader(dst, dstCapacity);
-  if (headerBytes < 0) {
-    // Output too small for header
-    return StreamCompressResult{0, 0};
-  }
+  BOLT_CHECK(
+      headerBytes >= 0,
+      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for header.");
   bytesWritten += headerBytes;
 
   // Check if output has enough space
   size_t bound = LZ4F_compressBound(static_cast<size_t>(inputLen), &prefs_);
-  if (dstCapacity < bound) {
-    // Output too small to compress into
-    return StreamCompressResult{0, bytesWritten};
-  }
+  BOLT_CHECK(
+      bound <= dstCapacity,
+      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
 
   size_t ret = LZ4F_compressUpdate(
       cctx_,
@@ -135,22 +128,22 @@ StreamFlushResult Lz4FrameStreamCompressor::flush(
 
   // Write header if not yet written
   int64_t headerBytes = writeHeader(dst, dstCapacity);
-  if (headerBytes < 0) {
-    return StreamFlushResult{0, true};
-  }
+  BOLT_CHECK(
+      headerBytes >= 0,
+      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for header.");
   bytesWritten += headerBytes;
 
   // Check if output has enough space
   size_t bound = LZ4F_compressBound(0, &prefs_);
-  if (dstCapacity < bound) {
-    return StreamFlushResult{bytesWritten, true};
-  }
+  BOLT_CHECK(
+      bound <= dstCapacity,
+      "Bolt shuffle codec: LZ4F_compressBegin failed, output too small for compression.");
 
   size_t ret = LZ4F_flush(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CHECK(!LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_flush failed.");
 
   bytesWritten += static_cast<int64_t>(ret);
-  return StreamFlushResult{bytesWritten, false};
+  return StreamFlushResult{bytesWritten, ret == 0};
 }
 
 StreamEndResult Lz4FrameStreamCompressor::end(
@@ -162,23 +155,22 @@ StreamEndResult Lz4FrameStreamCompressor::end(
 
   // Write header if not yet written
   int64_t headerBytes = writeHeader(dst, dstCapacity);
-  if (headerBytes < 0) {
-    return StreamEndResult{0, true};
-  }
+  BOLT_CODEC_CHECK(
+      headerBytes >= 0,
+      " LZ4F_compressBegin failed, output too small for header.");
   bytesWritten += headerBytes;
 
   // Check if output has enough space
   size_t bound = LZ4F_compressBound(0, &prefs_);
-  if (dstCapacity < bound) {
-    return StreamEndResult{bytesWritten, true};
-  }
+  BOLT_CODEC_CHECK(
+      bound <= dstCapacity,
+      "LZ4F_compressBegin failed, output too small for compression.");
 
   size_t ret = LZ4F_compressEnd(cctx_, dst, dstCapacity, nullptr /* options */);
-  BOLT_CHECK(
-      !LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_compressEnd failed.");
+  BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_compressEnd failed.");
 
   bytesWritten += static_cast<int64_t>(ret);
-  return StreamEndResult{bytesWritten, false};
+  return StreamEndResult{bytesWritten, ret == 0};
 }
 
 void Lz4FrameStreamCompressor::reset() {
@@ -203,7 +195,8 @@ int64_t Lz4FrameStreamCompressor::recommendedOutputSize(
 }
 
 Lz4FrameStreamDecompressor::Lz4FrameStreamDecompressor(
-    const CodecOptions& /*options*/) {
+    const CodecOptions& /*options*/)
+    : StreamDecompressor(CodecType::LZ4_FRAME) {
   init();
 }
 
@@ -217,9 +210,8 @@ void Lz4FrameStreamDecompressor::init() {
   finished_ = false;
 
   LZ4F_errorCode_t ret = LZ4F_createDecompressionContext(&dctx_, LZ4F_VERSION);
-  BOLT_CHECK(
-      !LZ4F_isError(ret),
-      "Bolt shuffle codec: LZ4F_createDecompressionContext failed.");
+  BOLT_CODEC_CHECK(
+      !LZ4F_isError(ret), "LZ4F_createDecompressionContext failed.");
 }
 
 StreamDecompressResult Lz4FrameStreamDecompressor::decompress(
@@ -233,7 +225,7 @@ StreamDecompressResult Lz4FrameStreamDecompressor::decompress(
   size_t ret = LZ4F_decompress(
       dctx_, output, &dstCapacity, input, &srcSize, nullptr /* options */);
 
-  BOLT_CHECK(!LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_decompress failed.");
+  BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_decompress failed.");
 
   finished_ = (ret == 0);
 

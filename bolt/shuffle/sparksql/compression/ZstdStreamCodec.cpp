@@ -24,12 +24,7 @@ constexpr int32_t kZstdDefaultStreamCompressionLevel = 1;
 } // namespace
 
 ZstdStreamCompressor::ZstdStreamCompressor(const CodecOptions& options)
-    : StreamCompressor(options),
-      compressionLevel_(
-          options.compression_level == kDefaultCompressionLevel
-              ? kZstdDefaultStreamCompressionLevel
-              : options.compression_level),
-      checksumEnabled_(options.checksumEnabled) {
+    : StreamCompressor(CodecType::ZSTD, options) {
   init();
 }
 
@@ -39,9 +34,9 @@ ZstdStreamCompressor::ZstdStreamCompressor(const ZstdCodecOptions& options)
   if (options.nbWorkers > 0) {
     auto ret =
         ZSTD_CCtx_setParameter(cstream_, ZSTD_c_nbWorkers, options.nbWorkers);
-    BOLT_CHECK(
+    BOLT_CODEC_CHECK(
         !ZSTD_isError(ret),
-        "Bolt shuffle codec: ZSTD set number of workers failed: %s",
+        "ZSTD set number of workers failed: %s",
         ZSTD_getErrorName(ret));
   }
 }
@@ -54,17 +49,14 @@ ZstdStreamCompressor::~ZstdStreamCompressor() {
 
 void ZstdStreamCompressor::init() {
   cstream_ = ZSTD_createCStream();
-  BOLT_CHECK(
-      cstream_ != nullptr, "Bolt shuffle codec: ZSTD_createCStream failed.");
+  BOLT_CODEC_CHECK(cstream_ != nullptr, "ZSTD_createCStream failed.");
 
-  size_t ret = ZSTD_initCStream(cstream_, compressionLevel_);
-  BOLT_CHECK(
-      !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_initCStream failed.");
+  size_t ret = ZSTD_initCStream(cstream_, compressionLevel());
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_initCStream failed.");
 
-  if (checksumEnabled_) {
+  if (checksumEnabled()) {
     ret = ZSTD_CCtx_setParameter(cstream_, ZSTD_c_checksumFlag, 1);
-    BOLT_CHECK(
-        !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD set checksum failed.");
+    BOLT_CHECK(!ZSTD_isError(ret), "ZSTD set checksum failed.");
   }
 }
 
@@ -77,8 +69,7 @@ StreamCompressResult ZstdStreamCompressor::compress(
   ZSTD_outBuffer outBuf{output, static_cast<size_t>(outputLen), 0};
 
   size_t ret = ZSTD_compressStream(cstream_, &outBuf, &inBuf);
-  BOLT_CHECK(
-      !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_compressStream failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_compressStream failed.");
 
   return StreamCompressResult{
       static_cast<int64_t>(inBuf.pos), static_cast<int64_t>(outBuf.pos)};
@@ -90,24 +81,25 @@ StreamFlushResult ZstdStreamCompressor::flush(
   ZSTD_outBuffer outBuf{output, static_cast<size_t>(outputLen), 0};
 
   size_t ret = ZSTD_flushStream(cstream_, &outBuf);
-  BOLT_CHECK(
-      !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_flushStream failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_flushStream failed.");
 
-  return StreamFlushResult{static_cast<int64_t>(outBuf.pos), ret > 0};
+  // ret = 0 means flush finish
+  return StreamFlushResult{static_cast<int64_t>(outBuf.pos), ret == 0};
 }
 
 StreamEndResult ZstdStreamCompressor::end(uint8_t* output, int64_t outputLen) {
   ZSTD_outBuffer outBuf{output, static_cast<size_t>(outputLen), 0};
 
   size_t ret = ZSTD_endStream(cstream_, &outBuf);
-  BOLT_CHECK(!ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_endStream failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_endStream failed.");
 
-  return StreamEndResult{static_cast<int64_t>(outBuf.pos), ret > 0};
+  // ret = 0 means end finish
+  return StreamEndResult{static_cast<int64_t>(outBuf.pos), ret == 0};
 }
 
 void ZstdStreamCompressor::reset() {
   size_t ret = ZSTD_CCtx_reset(cstream_, ZSTD_reset_session_only);
-  BOLT_CHECK(!ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_CCtx_reset failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_CCtx_reset failed.");
 }
 
 int64_t ZstdStreamCompressor::recommendedInputSize() const {
@@ -119,12 +111,13 @@ int64_t ZstdStreamCompressor::recommendedOutputSize(int64_t inputSize) const {
       ZSTD_compressBound(static_cast<size_t>(inputSize)));
 }
 
-ZstdStreamDecompressor::ZstdStreamDecompressor(
-    const CodecOptions& /*options*/) {
+ZstdStreamDecompressor::ZstdStreamDecompressor(const CodecOptions& /*options*/)
+    : StreamDecompressor(CodecType::ZSTD) {
   init();
 }
 
-ZstdStreamDecompressor::ZstdStreamDecompressor(const ZstdCodecOptions&) {
+ZstdStreamDecompressor::ZstdStreamDecompressor(const ZstdCodecOptions&)
+    : StreamDecompressor(CodecType::ZSTD) {
   init();
 }
 
@@ -136,12 +129,10 @@ ZstdStreamDecompressor::~ZstdStreamDecompressor() {
 
 void ZstdStreamDecompressor::init() {
   dstream_ = ZSTD_createDStream();
-  BOLT_CHECK(
-      dstream_ != nullptr, "Bolt shuffle codec: ZSTD_createDStream failed.");
+  BOLT_CODEC_CHECK(dstream_ != nullptr, "ZSTD_createDStream failed.");
 
   size_t ret = ZSTD_initDStream(dstream_);
-  BOLT_CHECK(
-      !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_initDStream failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_initDStream failed.");
 
   finished_ = false;
 }
@@ -155,8 +146,7 @@ StreamDecompressResult ZstdStreamDecompressor::decompress(
   ZSTD_outBuffer outBuf{output, static_cast<size_t>(outputLen), 0};
 
   size_t ret = ZSTD_decompressStream(dstream_, &outBuf, &inBuf);
-  BOLT_CHECK(
-      !ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_decompressStream failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_decompressStream failed.");
 
   finished_ = (ret == 0);
   bool needMoreOutput = ret > 0 && outBuf.pos == outBuf.size;
@@ -173,7 +163,7 @@ bool ZstdStreamDecompressor::isFinished() const {
 
 void ZstdStreamDecompressor::reset() {
   size_t ret = ZSTD_DCtx_reset(dstream_, ZSTD_reset_session_only);
-  BOLT_CHECK(!ZSTD_isError(ret), "Bolt shuffle codec: ZSTD_DCtx_reset failed.");
+  BOLT_CODEC_CHECK(!ZSTD_isError(ret), "ZSTD_DCtx_reset failed.");
   finished_ = false;
 }
 

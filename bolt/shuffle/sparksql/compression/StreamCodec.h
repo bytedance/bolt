@@ -31,28 +31,36 @@ struct StreamCompressResult {
 /// Result of a streaming flush operation.
 struct StreamFlushResult {
   int64_t bytesWritten; // Number of bytes written to output.
-  bool shouldRetry; // If true, call flush() again with larger buffer.
+  bool noMoreOutput; // If true, flush is complete.
 };
 
 /// Result of a streaming end operation.
 struct StreamEndResult {
   int64_t bytesWritten; // Number of bytes written to output.
-  bool shouldRetry; // If true, call end() again with larger buffer.
+  bool noMoreOutput; // If true, end is complete.
 };
 
 /// Result of a streaming decompress operation.
 struct StreamDecompressResult {
   int64_t bytesRead; // Number of bytes consumed from input.
   int64_t bytesWritten; // Number of bytes written to output.
-  bool needMoreOutput; // If true, provide larger output buffer.
+  bool needMoreOutput; // If true, decompression is complete.
 };
 
 /// Streaming compressor interface.
 /// Supports incremental compression with flush and end operations.
 class StreamCompressor {
  public:
-  StreamCompressor(const CodecOptions& options);
+  StreamCompressor(CodecType codecType, const CodecOptions& options);
   virtual ~StreamCompressor() = default;
+
+  std::string name() const {
+    return std::string(Codec::codecTypeName(codecType_)) + "_COMPRESSOR";
+  }
+
+  virtual std::string toString() const;
+
+  virtual int32_t defaultCompressionLevel() const = 0;
 
   /// Create a streaming compressor for the specified codec type.
   /// Only ZSTD, GZIP, and LZ4_FRAME are supported.
@@ -69,12 +77,12 @@ class StreamCompressor {
       uint8_t* output,
       int64_t outputLen) = 0;
 
-  /// Flush internal buffers to output.
-  /// If shouldRetry is true, call again with larger buffer.
+  /// Flush internal buffers to output until noMoreOutput is true.
+  /// When noMoreOutput is true, flush is finished.
   virtual StreamFlushResult flush(uint8_t* output, int64_t outputLen) = 0;
 
   /// End the compression stream, writing any trailing data.
-  /// If shouldRetry is true, call again with larger buffer.
+  /// If noMoreOutput is true, end is finished.
   /// After successful end(), compressor should not be used unless reset().
   virtual StreamEndResult end(uint8_t* output, int64_t outputLen) = 0;
 
@@ -88,6 +96,17 @@ class StreamCompressor {
   virtual int64_t recommendedOutputSize(int64_t inputSize) const = 0;
 
  protected:
+  int32_t compressionLevel() const {
+    return options_.compressionLevel == kDefaultCompressionLevel
+        ? defaultCompressionLevel()
+        : options_.compressionLevel;
+  }
+  bool checksumEnabled() const {
+    return options_.checksumEnabled;
+  }
+
+ private:
+  const CodecType codecType_;
   const CodecOptions options_;
 };
 
@@ -95,7 +114,17 @@ class StreamCompressor {
 /// Supports incremental decompression of compressed streams.
 class StreamDecompressor {
  public:
+  explicit StreamDecompressor(CodecType codecType) : codecType_(codecType) {}
+
   virtual ~StreamDecompressor() = default;
+
+  std::string name() const {
+    return std::string(Codec::codecTypeName(codecType_)) + "_DECOMPRESSOR";
+  }
+
+  virtual std::string toString() const {
+    return name();
+  }
 
   /// Create a streaming decompressor for the specified codec type.
   /// Only ZSTD, GZIP, and LZ4_FRAME are supported.
@@ -122,6 +151,9 @@ class StreamDecompressor {
 
   /// Recommended input buffer size for optimal performance.
   virtual int64_t recommendedInputSize() const = 0;
+
+ private:
+  const CodecType codecType_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql

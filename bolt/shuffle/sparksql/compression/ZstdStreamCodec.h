@@ -29,6 +29,10 @@ class ZstdStreamCompressor : public StreamCompressor {
   explicit ZstdStreamCompressor(const ZstdCodecOptions& options);
   ~ZstdStreamCompressor() override;
 
+  int32_t defaultCompressionLevel() const override {
+    return kZstdDefaultCompressionLevel;
+  }
+
   StreamCompressResult compress(
       const uint8_t* input,
       int64_t inputLen,
@@ -46,8 +50,6 @@ class ZstdStreamCompressor : public StreamCompressor {
   void init();
 
   ZSTD_CStream* cstream_{nullptr};
-  int32_t compressionLevel_;
-  bool checksumEnabled_;
 };
 
 /// ZSTD streaming decompressor implementation.

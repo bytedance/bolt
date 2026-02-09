@@ -114,23 +114,6 @@ const std::vector<uint8_t>& testData() {
   return data;
 }
 
-std::string codecTypeName(CodecType type) {
-  switch (type) {
-    case CodecType::ZSTD:
-      return "ZSTD";
-    case CodecType::GZIP:
-      return "GZIP";
-    case CodecType::LZ4:
-      return "LZ4";
-    case CodecType::LZ4_FRAME:
-      return "LZ4_FRAME";
-    case CodecType::SNAPPY:
-      return "SNAPPY";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 void storeMetrics(
     const std::string& name,
     int64_t compressedSize,
@@ -227,7 +210,7 @@ void runOneShotBenchmark(CodecType type, bool checksumEnabled, size_t n) {
 
   suspender.rehire();
 
-  std::string name = "OneShot_" + codecTypeName(type) +
+  std::string name = "OneShot_" + std::string(Codec::codecTypeName(type)) +
       (checksumEnabled ? "_Checksum" : "_NoChecksum");
   storeMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
 }
@@ -246,9 +229,9 @@ void runStreamBenchmark(CodecType type, bool checksumEnabled, size_t n) {
   int64_t totalDecompressTime = 0;
   int64_t compressedSize = 0;
 
+  auto compressor = StreamCompressor::create(type, options);
+  auto decompressor = StreamDecompressor::create(type, options);
   for (size_t i = 0; i < n; ++i) {
-    auto compressor = StreamCompressor::create(type, options);
-
     int64_t outputSize = compressor->recommendedOutputSize(data.size());
     std::vector<uint8_t> compressed(outputSize * 2);
 
@@ -260,7 +243,7 @@ void runStreamBenchmark(CodecType type, bool checksumEnabled, size_t n) {
 
     auto endResult = compressor->end(
         compressed.data() + totalWritten, compressed.size() - totalWritten);
-    while (endResult.shouldRetry) {
+    while (!endResult.noMoreOutput) {
       totalWritten += endResult.bytesWritten;
       endResult = compressor->end(
           compressed.data() + totalWritten, compressed.size() - totalWritten);
@@ -272,8 +255,8 @@ void runStreamBenchmark(CodecType type, bool checksumEnabled, size_t n) {
     totalCompressTime += std::chrono::duration_cast<std::chrono::nanoseconds>(
                              compressEnd - compressStart)
                              .count();
+    compressor->reset();
 
-    auto decompressor = StreamDecompressor::create(type, options);
     std::vector<uint8_t> decompressed(data.size());
 
     auto decompressStart = std::chrono::steady_clock::now();
@@ -288,11 +271,12 @@ void runStreamBenchmark(CodecType type, bool checksumEnabled, size_t n) {
                                .count();
 
     CHECK_EQ(decompressResult.bytesWritten, static_cast<int64_t>(data.size()));
+    decompressor->reset();
   }
 
   suspender.rehire();
 
-  std::string name = "Stream_" + codecTypeName(type) +
+  std::string name = "Stream_" + std::string(Codec::codecTypeName(type)) +
       (checksumEnabled ? "_Checksum" : "_NoChecksum");
   storeMetrics(name, compressedSize, totalCompressTime, totalDecompressTime, n);
 }

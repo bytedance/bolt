@@ -32,11 +32,7 @@ constexpr int64_t kDefaultBufferSize = 64 * 1024;
 } // namespace
 
 GzipStreamCompressor::GzipStreamCompressor(const CodecOptions& options)
-    : StreamCompressor(options),
-      compressionLevel_(
-          options.compression_level == kDefaultCompressionLevel
-              ? Z_BEST_COMPRESSION
-              : options.compression_level) {
+    : StreamCompressor(CodecType::GZIP, options) {
   init();
 }
 
@@ -53,7 +49,7 @@ void GzipStreamCompressor::init() {
   int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &stream_,
-      compressionLevel_,
+      compressionLevel(),
       Z_DEFLATED,
       windowBits,
       8, // memLevel: default value (1-9, 8 is default)
@@ -102,12 +98,10 @@ StreamFlushResult GzipStreamCompressor::flush(
   stream_.avail_out = static_cast<uInt>(std::min(outputLen, inputLimit));
 
   int ret = deflate(&stream_, Z_SYNC_FLUSH);
-  BOLT_CHECK(
-      ret == Z_OK || ret == Z_BUF_ERROR,
-      "Bolt shuffle codec: GZIP flush failed.");
+  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP flush failed.");
 
   int64_t bytesWritten = outputLen - stream_.avail_out;
-  return StreamFlushResult{bytesWritten, stream_.avail_out == 0};
+  return StreamFlushResult{bytesWritten, stream_.avail_out != 0};
 }
 
 StreamEndResult GzipStreamCompressor::end(uint8_t* output, int64_t outputLen) {
@@ -128,20 +122,18 @@ StreamEndResult GzipStreamCompressor::end(uint8_t* output, int64_t outputLen) {
     // Stream finished successfully
     initialized_ = false;
     ret = deflateEnd(&stream_);
-    BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateEnd failed.");
-    return StreamEndResult{bytesWritten, false};
-  } else {
-    BOLT_CHECK(
-        ret == Z_OK || ret == Z_BUF_ERROR,
-        "Bolt shuffle codec: GZIP end failed.");
+    BOLT_CHECK(ret == Z_OK, "GZIP deflateEnd failed.");
     return StreamEndResult{bytesWritten, true};
+  } else {
+    BOLT_CHECK(ret == Z_OK, "GZIP end failed.");
+    return StreamEndResult{bytesWritten, false};
   }
 }
 
 void GzipStreamCompressor::reset() {
   if (initialized_) {
     int ret = deflateReset(&stream_);
-    BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateReset failed.");
+    BOLT_CHECK(ret == Z_OK, "GZIP deflateReset failed.");
   } else {
     init();
   }
@@ -161,8 +153,8 @@ int64_t GzipStreamCompressor::recommendedOutputSize(int64_t inputSize) const {
   return inputSize + 12 + ((inputSize / 16384) + 1) * 6;
 }
 
-GzipStreamDecompressor::GzipStreamDecompressor(
-    const CodecOptions& /*options*/) {
+GzipStreamDecompressor::GzipStreamDecompressor(const CodecOptions& /*options*/)
+    : StreamDecompressor(CodecType::GZIP) {
   init();
 }
 
@@ -180,7 +172,7 @@ void GzipStreamDecompressor::init() {
   int windowBits = MAX_WBITS + kAutoDetectFlag;
   int ret = inflateInit2(&stream_, windowBits);
 
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateInit2 failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP inflateInit2 failed.");
   initialized_ = true;
 }
 
@@ -189,8 +181,7 @@ StreamDecompressResult GzipStreamDecompressor::decompress(
     int64_t inputLen,
     uint8_t* output,
     int64_t outputLen) {
-  BOLT_CHECK(
-      initialized_, "Bolt shuffle codec: GZIP decompressor not initialized.");
+  BOLT_CODEC_CHECK(initialized_, "GZIP decompressor not initialized.");
 
   static constexpr auto inputLimit =
       static_cast<int64_t>(std::numeric_limits<uInt>::max());
@@ -208,7 +199,7 @@ StreamDecompressResult GzipStreamDecompressor::decompress(
     // No progress was possible
     return StreamDecompressResult{0, 0, true};
   } else {
-    BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflate failed.");
+    BOLT_CODEC_CHECK(ret == Z_OK, "GZIP inflate failed.");
   }
 
   return StreamDecompressResult{
@@ -223,7 +214,7 @@ void GzipStreamDecompressor::reset() {
   if (initialized_) {
     finished_ = false;
     int ret = inflateReset(&stream_);
-    BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateReset failed.");
+    BOLT_CODEC_CHECK(ret == Z_OK, "GZIP inflateReset failed.");
   } else {
     init();
   }

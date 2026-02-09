@@ -21,8 +21,9 @@
 
 namespace bytedance::bolt::shuffle::sparksql {
 
-SnappyCodec::SnappyCodec(const CodecOptions& options) : Codec(options) {
-  BOLT_CHECK(
+SnappyCodec::SnappyCodec(const CodecOptions& options)
+    : Codec(CodecType::SNAPPY, options) {
+  BOLT_CODEC_CHECK(
       !options.checksumEnabled, "Snappy codec does not support checksum");
 }
 
@@ -38,9 +39,9 @@ int64_t SnappyCodec::compress(
       reinterpret_cast<char*>(output),
       &compressedSize);
 
-  BOLT_CHECK(
+  BOLT_CODEC_CHECK(
       static_cast<int64_t>(compressedSize) <= outputLength,
-      "Bolt shuffle codec: Snappy compression output buffer too small.");
+      "Snappy compression output buffer too small.");
 
   return static_cast<int64_t>(compressedSize);
 }
@@ -56,18 +57,18 @@ int64_t SnappyCodec::decompress(
       static_cast<size_t>(inputLength),
       &uncompressedLength);
 
-  BOLT_CHECK(success, "Bolt shuffle codec: Corrupt snappy compressed data.");
+  BOLT_CODEC_CHECK(success, "Corrupt snappy compressed data.");
 
-  BOLT_CHECK(
+  BOLT_CODEC_CHECK(
       static_cast<int64_t>(uncompressedLength) <= outputLength,
-      "Bolt shuffle codec: Snappy decompression output buffer too small.");
+      "Snappy decompression output buffer too small.");
 
   success = snappy::RawUncompress(
       reinterpret_cast<const char*>(input),
       static_cast<size_t>(inputLength),
       reinterpret_cast<char*>(output));
 
-  BOLT_CHECK(success, "Bolt shuffle codec: Snappy decompression failed.");
+  BOLT_CODEC_CHECK(success, "Snappy decompression failed.");
 
   return static_cast<int64_t>(uncompressedLength);
 }

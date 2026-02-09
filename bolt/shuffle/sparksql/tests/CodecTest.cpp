@@ -28,24 +28,6 @@ namespace bytedance::bolt::shuffle::sparksql::test {
 
 namespace {
 
-// Get codec type name for test naming
-std::string codecTypeName(CodecType type) {
-  switch (type) {
-    case CodecType::ZSTD:
-      return "ZSTD";
-    case CodecType::GZIP:
-      return "GZIP";
-    case CodecType::LZ4:
-      return "LZ4";
-    case CodecType::LZ4_FRAME:
-      return "LZ4_FRAME";
-    case CodecType::SNAPPY:
-      return "SNAPPY";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 // Check if codec type supports checksum
 bool supportsChecksum(CodecType type) {
   return type == CodecType::ZSTD || type == CodecType::GZIP ||
@@ -87,7 +69,7 @@ struct CodecTestParam {
   bool isStream;
 
   std::string toString() const {
-    std::string name = codecTypeName(type);
+    std::string name(Codec::codecTypeName(type));
     name += checksumEnabled ? "_Checksum" : "_NoChecksum";
     name += isStream ? "_Stream" : "_OneShot";
     return name;
@@ -153,7 +135,7 @@ class CodecTest : public testing::TestWithParam<CodecTestParam> {
     // End stream
     auto endResult = compressor->end(
         compressed.data() + totalWritten, compressed.size() - totalWritten);
-    while (endResult.shouldRetry) {
+    while (!endResult.noMoreOutput) {
       totalWritten += endResult.bytesWritten;
       compressed.resize(compressed.size() * 2);
       endResult = compressor->end(
@@ -223,7 +205,7 @@ TEST_P(CodecTest, EmptyInput) {
     auto endResult = compressor->end(
         compressed.data() + totalWritten, compressed.size() - totalWritten);
     int32_t retryCount = 0;
-    while (endResult.shouldRetry) {
+    while (!endResult.noMoreOutput) {
       totalWritten += endResult.bytesWritten;
       compressed.resize(compressed.size() * 2);
       endResult = compressor->end(
@@ -319,7 +301,7 @@ TEST_P(CodecTest, MultipleChunks) {
   // End stream
   auto endResult = compressor->end(
       compressed.data() + totalWritten, compressed.size() - totalWritten);
-  while (endResult.shouldRetry) {
+  while (!endResult.noMoreOutput) {
     totalWritten += endResult.bytesWritten;
     compressed.resize(compressed.size() * 2);
     endResult = compressor->end(
@@ -362,7 +344,7 @@ TEST_P(CodecTest, Reset) {
     int64_t written1 = result1.bytesWritten;
     auto end1 = compressor->end(
         compressed1.data() + written1, compressed1.size() - written1);
-    while (end1.shouldRetry) {
+    while (!end1.noMoreOutput) {
       written1 += end1.bytesWritten;
       compressed1.resize(compressed1.size() * 2);
       end1 = compressor->end(
@@ -381,7 +363,7 @@ TEST_P(CodecTest, Reset) {
     int64_t written2 = result2.bytesWritten;
     auto end2 = compressor->end(
         compressed2.data() + written2, compressed2.size() - written2);
-    while (end2.shouldRetry) {
+    while (!end2.noMoreOutput) {
       written2 += end2.bytesWritten;
       compressed2.resize(compressed2.size() * 2);
       end2 = compressor->end(
@@ -485,7 +467,7 @@ struct CorruptionTestParam {
   bool isStream;
 
   std::string toString() const {
-    std::string name = codecTypeName(type);
+    std::string name(Codec::codecTypeName(type));
     name += isStream ? "_Stream" : "_OneShot";
     return name;
   }
@@ -536,7 +518,7 @@ class CorruptionDetectionTest
 
     auto endResult = compressor->end(
         compressed.data() + written, compressed.size() - written);
-    while (endResult.shouldRetry) {
+    while (!endResult.noMoreOutput) {
       written += endResult.bytesWritten;
       endResult = compressor->end(
           compressed.data() + written, compressed.size() - written);

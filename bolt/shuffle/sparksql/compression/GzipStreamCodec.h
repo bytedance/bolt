@@ -27,6 +27,10 @@ class GzipStreamCompressor : public StreamCompressor {
   explicit GzipStreamCompressor(const CodecOptions& options);
   ~GzipStreamCompressor() override;
 
+  int32_t defaultCompressionLevel() const override {
+    return Z_DEFAULT_COMPRESSION;
+  }
+
   StreamCompressResult compress(
       const uint8_t* input,
       int64_t inputLen,

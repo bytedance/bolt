@@ -31,13 +31,9 @@ constexpr int kAutoDetectFlag = 32;
 } // namespace
 
 GzipCodec::GzipCodec(const CodecOptions& options)
-    : Codec(options),
+    : Codec(CodecType::GZIP, options),
       compressorInitialized_(false),
-      decompressorInitialized_(false) {
-  compressionLevel_ = (options.compression_level == kDefaultCompressionLevel)
-      ? kGzipDefaultCompressionLevel
-      : options.compression_level;
-}
+      decompressorInitialized_(false) {}
 
 GzipCodec::~GzipCodec() {
   endCompressor();
@@ -52,12 +48,12 @@ void GzipCodec::initCompressor() {
   int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &compressStream_,
-      compressionLevel_,
+      compressionLevel(),
       Z_DEFLATED,
       windowBits,
       8, // memLevel (default)
       Z_DEFAULT_STRATEGY);
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateInit2 failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP deflateInit2 failed.");
   compressorInitialized_ = true;
 }
 
@@ -75,7 +71,7 @@ void GzipCodec::initDecompressor() {
   // Initialize for auto-detection of GZIP/ZLIB format: MAX_WBITS + 32
   int windowBits = MAX_WBITS + kAutoDetectFlag;
   int ret = inflateInit2(&decompressStream_, windowBits);
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateInit2 failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP inflateInit2 failed.");
   decompressorInitialized_ = true;
 }
 
@@ -97,7 +93,7 @@ int64_t GzipCodec::compress(
 
   // Reset stream state for new compression
   int ret = deflateReset(&compressStream_);
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateReset failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP deflateReset failed.");
 
   compressStream_.next_in =
       const_cast<Bytef*>(reinterpret_cast<const Bytef*>(input));
@@ -106,9 +102,9 @@ int64_t GzipCodec::compress(
   compressStream_.avail_out = static_cast<uInt>(outputLength);
 
   ret = deflate(&compressStream_, Z_FINISH);
-  BOLT_CHECK(
+  BOLT_CODEC_CHECK(
       ret == Z_STREAM_END,
-      "Bolt shuffle codec: GZIP compression failed, output buffer may be too small.");
+      "GZIP compression failed, output buffer may be too small.");
 
   return outputLength - compressStream_.avail_out;
 }
@@ -129,7 +125,7 @@ int64_t GzipCodec::decompress(
 
   // Reset stream state for new decompression
   int ret = inflateReset(&decompressStream_);
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP inflateReset failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP inflateReset failed.");
 
   decompressStream_.next_in =
       const_cast<Bytef*>(reinterpret_cast<const Bytef*>(input));
@@ -138,8 +134,7 @@ int64_t GzipCodec::decompress(
   decompressStream_.avail_out = static_cast<uInt>(outputLength);
 
   ret = inflate(&decompressStream_, Z_FINISH);
-  BOLT_CHECK(
-      ret == Z_STREAM_END, "Bolt shuffle codec: GZIP decompression failed.");
+  BOLT_CODEC_CHECK(ret == Z_STREAM_END, "GZIP decompression failed.");
 
   return decompressStream_.total_out;
 }
@@ -153,12 +148,12 @@ int64_t GzipCodec::maxCompressedLen(int64_t inputLength) const {
   int windowBits = MAX_WBITS + kGzipFormatFlag;
   int ret = deflateInit2(
       &tmpStream,
-      compressionLevel_,
+      compressionLevel(),
       Z_DEFLATED,
       windowBits,
       8, // memLevel: default value (1-9, 8 is default)
       Z_DEFAULT_STRATEGY);
-  BOLT_CHECK(ret == Z_OK, "Bolt shuffle codec: GZIP deflateBound init failed.");
+  BOLT_CODEC_CHECK(ret == Z_OK, "GZIP deflateBound init failed.");
 
   int64_t maxLen = static_cast<int64_t>(
       deflateBound(&tmpStream, static_cast<uLong>(inputLength)));
