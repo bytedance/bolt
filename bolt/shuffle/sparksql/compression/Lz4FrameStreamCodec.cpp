@@ -170,7 +170,7 @@ StreamEndResult Lz4FrameStreamCompressor::end(
   BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_compressEnd failed.");
 
   bytesWritten += static_cast<int64_t>(ret);
-  return StreamEndResult{bytesWritten, ret == 0};
+  return StreamEndResult{bytesWritten, true};
 }
 
 void Lz4FrameStreamCompressor::reset() {
