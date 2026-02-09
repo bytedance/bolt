@@ -28,6 +28,7 @@
 #include <parquet/file_reader.h>
 #include <sched.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -41,16 +42,13 @@
 #include "shuffle/sparksql/compression/Codec.h"
 
 DEFINE_string(file, "", "Path to parquet file for benchmark");
-DEFINE_int32(codec, 0, "Codec type: 0=LZ4, 1=ZSTD");
+DEFINE_string(codec, "lz4", "Codec type: lz4 or zstd");
 DEFINE_int32(cpu_offset, 0, "CPU offset for affinity");
 DEFINE_bool(checksum, false, "Enable checksum");
 DEFINE_bool(test_corruption, false, "Run corruption detection test");
 
 using arrow::RecordBatchReader;
 using namespace bytedance::bolt::shuffle::sparksql;
-
-const int32_t kLZ4 = 0;
-const int32_t kZstd = 1;
 
 // Global configuration set from command line.
 struct BenchmarkConfig {
@@ -746,10 +744,22 @@ int main(int argc, char** argv) {
 
   auto& config = getConfig();
   config.datafile = FLAGS_file;
-  config.codec = FLAGS_codec == kLZ4 ? CodecType::LZ4_FRAME : CodecType::ZSTD;
   config.cpuOffset = FLAGS_cpu_offset;
   config.checksumEnabled = FLAGS_checksum;
   config.testCorruption = FLAGS_test_corruption;
+
+  // Parse codec type from string
+  std::string codecStr = FLAGS_codec;
+  std::transform(codecStr.begin(), codecStr.end(), codecStr.begin(), ::tolower);
+  if (codecStr == "zstd") {
+    config.codec = CodecType::ZSTD;
+  } else if (codecStr == "lz4") {
+    config.codec = CodecType::LZ4_FRAME;
+  } else {
+    std::cerr << "Unknown codec: " << FLAGS_codec << ". Use 'lz4' or 'zstd'."
+              << std::endl;
+    return EXIT_FAILURE;
+  }
 
   if (config.datafile.empty()) {
     std::cerr
@@ -759,8 +769,7 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "datafile = " << config.datafile << std::endl;
-  std::cout << "codec = " << (config.codec == CodecType::LZ4 ? "LZ4" : "ZSTD")
-            << std::endl;
+  std::cout << "codec = " << Codec::codecTypeName(config.codec) << std::endl;
   std::cout << "cpu_offset = " << config.cpuOffset << std::endl;
   std::cout << "checksum = " << config.checksumEnabled << std::endl;
   std::cout << "test_corruption = " << config.testCorruption << std::endl;
