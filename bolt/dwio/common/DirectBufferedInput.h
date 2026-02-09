@@ -181,7 +181,7 @@ class DirectBufferedInput : public BufferedInput {
         executor_(executor),
         fileSize_(input_->getLength()),
         options_(readerOptions),
-        asyncThreadCtx_(asyncThreadCtx) {}
+        asyncThreadCtx_(std::move(asyncThreadCtx)) {}
 
   ~DirectBufferedInput() override {
     streamToCoalescedLoad_.wlock()->clear();
@@ -271,7 +271,7 @@ class DirectBufferedInput : public BufferedInput {
         executor_(executor),
         fileSize_(input_->getLength()),
         options_(readerOptions),
-        asyncThreadCtx_(asyncThreadCtx) {}
+        asyncThreadCtx_(std::move(asyncThreadCtx)) {}
 
   std::vector<int32_t> groupRequests(
       const std::vector<LoadRequest*>& requests,
@@ -301,8 +301,9 @@ class DirectBufferedInput : public BufferedInput {
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
           asyncThreadCtx(std::move(asyncThreadCtx)) {
-      BOLT_CHECK(this->asyncThreadCtx);
-      preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
+      if (this->asyncThreadCtx) {
+        preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
+      }
     }
 
     AsyncLoadHolder(const AsyncLoadHolder&) = delete;
@@ -321,7 +322,8 @@ class DirectBufferedInput : public BufferedInput {
     bool canPreload() const {
       static int maxAttempt = 1000;
       static int sleepMs = 500;
-      if (load->state() != DirectCoalescedLoad::State::kPlanned ||
+      if (!asyncThreadCtx ||
+          load->state() != DirectCoalescedLoad::State::kPlanned ||
           prefetchMemoryPercent_ == 0 || !asyncThreadCtx->allowPreload()) {
         return false;
       }
