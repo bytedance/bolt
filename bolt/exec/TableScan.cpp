@@ -492,8 +492,7 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
 void TableScan::checkPreload() {
   auto executor = connector_->executor();
   if (maxSplitPreloadPerDriver_ == 0 || !executor ||
-      !connector_->supportsSplitPreload() || !asyncThreadCtx_ ||
-      !asyncThreadCtx_->allowPreload()) {
+      !connector_->supportsSplitPreload() || !asyncThreadCtx_->allowPreload()) {
     return;
   }
   if (dataSource_->allPrefetchIssued()) {

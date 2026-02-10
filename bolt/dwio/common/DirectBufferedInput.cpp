@@ -235,7 +235,7 @@ void DirectBufferedInput::readRegions(
     readRegion(group, prefetch);
     group.clear();
   }
-  if (prefetch && executor_ && asyncThreadCtx_) {
+  if (prefetch && executor_) {
     for (auto i = 0; i < coalescedLoads_.size(); ++i) {
       auto& load = coalescedLoads_[i];
       if (load->state() == CoalescedLoad::State::kPlanned) {
@@ -261,9 +261,7 @@ void DirectBufferedInput::readRegions(
             LOG_IF(INFO, !res)
                 << "Preload fails to load " << (uint64_t)asyncLoad.load.get()
                 << " by async thread " << folly::getCurrentThreadName().value();
-            if (asyncLoad.asyncThreadCtx) {
-              asyncLoad.asyncThreadCtx->disallowPreload();
-            }
+            asyncLoad.asyncThreadCtx->disallowPreload();
           }
         });
       }
