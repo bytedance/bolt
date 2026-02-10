@@ -21,13 +21,8 @@ name: Conan CI Dependency Upload
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: Build type to use for Conan install/export
-        required: true
-        type: choice
-        options: [Release, Debug]
-        default: Release
+  schedule:
+    - cron: '0 14 * * *'
 
 env:
   CCACHE_DIR: /data/ccache-data
@@ -69,7 +64,7 @@ jobs:
 
       - name: Conan install
         run: |
-          conan install ${{ matrix.build_options }} -s llvm-core/*:build_type=Release -s build_type=${{ inputs.build_type }} --build=missing
+          conan install ${{ matrix.build_options }} -s llvm-core/*:build_type=Release -s build_type=Release --build=missing
 
       - name: Upload packages to conan remote
         env:
