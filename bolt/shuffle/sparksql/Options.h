@@ -64,6 +64,9 @@ static constexpr int32_t kDefaultAccumulateBatchMaxColumns =
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
 
+static constexpr int32_t kMaxShuffleWriterBatchBytes =
+    200 * 1024 * 1024; // 200MB
+
 enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
 
 enum PartitionWriterType { kLocal, kCeleborn };

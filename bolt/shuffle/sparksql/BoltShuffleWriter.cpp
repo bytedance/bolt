@@ -628,22 +628,44 @@ arrow::Status BoltShuffleWriter::split(
       }
     }
 
-    if (partitioner_->hasPid()) {
-      auto pidArr = getFirstColumn(*rv);
-      START_TIMING(cpuWallTimingList_[CpuWallTimingCompute]);
-      RETURN_NOT_OK(partitioner_->compute(
-          pidArr, rv->size(), row2Partition_, partition2RowCount_));
-      END_TIMING();
-      auto strippedRv = getStrippedRowVector(*rv);
-      RETURN_NOT_OK(initFromRowVector(*strippedRv));
-      RETURN_NOT_OK(doSplit(*strippedRv, memLimit));
+    bool isExtremeLargeBatch = rv->estimateFlatSize() > maxBatchBytes_;
+
+    std::vector<RowVectorPtr> batchVectors;
+    if (isExtremeLargeBatch) {
+      size_t batchCount =
+          (rv->estimateFlatSize() + maxBatchBytes_ - 1) / maxBatchBytes_;
+      size_t rowCountPerBatch = std::max(rv->size() / batchCount, (size_t)1);
+      BOLT_TEST_ADJUST("BoltShuffleWriter::extremeLargeBatch", &batchCount);
+      LOG(INFO) << "Split extreme large batch, flatten size: "
+                << rv->estimateFlatSize() << ", split into " << batchCount
+                << " batches";
+      for (size_t i = 0; i < rv->size(); i += rowCountPerBatch) {
+        batchVectors.push_back(
+            std::dynamic_pointer_cast<bytedance::bolt::RowVector>(
+                rv->slice(i, std::min(rowCountPerBatch, rv->size() - i))));
+      }
     } else {
-      RETURN_NOT_OK(initFromRowVector(*rv));
-      START_TIMING(cpuWallTimingList_[CpuWallTimingCompute]);
-      RETURN_NOT_OK(partitioner_->compute(
-          nullptr, rv->size(), row2Partition_, partition2RowCount_));
-      END_TIMING();
-      RETURN_NOT_OK(doSplit(*rv, memLimit));
+      batchVectors.push_back(rv);
+    }
+
+    for (auto& batch : batchVectors) {
+      if (partitioner_->hasPid()) {
+        auto pidArr = getFirstColumn(*batch);
+        START_TIMING(cpuWallTimingList_[CpuWallTimingCompute]);
+        RETURN_NOT_OK(partitioner_->compute(
+            pidArr, batch->size(), row2Partition_, partition2RowCount_));
+        END_TIMING();
+        auto strippedRv = getStrippedRowVector(*batch);
+        RETURN_NOT_OK(initFromRowVector(*strippedRv));
+        RETURN_NOT_OK(doSplit(*strippedRv, memLimit));
+      } else {
+        RETURN_NOT_OK(initFromRowVector(*batch));
+        START_TIMING(cpuWallTimingList_[CpuWallTimingCompute]);
+        RETURN_NOT_OK(partitioner_->compute(
+            nullptr, batch->size(), row2Partition_, partition2RowCount_));
+        END_TIMING();
+        RETURN_NOT_OK(doSplit(*batch, memLimit));
+      }
     }
   }
   return arrow::Status::OK();

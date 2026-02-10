@@ -735,6 +735,7 @@ class BoltShuffleWriter : public ShuffleWriter {
       nullptr};
   std::vector<int64_t> partitionBytes_;
   uint64_t convertTime_{0};
+  uint64_t maxBatchBytes_{kMaxShuffleWriterBatchBytes};
 
 }; // class BoltShuffleWriter
 
