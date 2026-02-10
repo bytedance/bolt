@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <arrow/status.h>
 #include <arrow/util/compression.h>
 #include <cstdint>
 #include <limits>
