@@ -297,12 +297,13 @@ class DirectBufferedInput : public BufferedInput {
     explicit AsyncLoadHolder(
         std::shared_ptr<cache::CoalescedLoad> load,
         int32_t prefetchMemoryPercent,
-        std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx)
+        std::shared_ptr<connector::AsyncThreadCtx> asyncThrCtx)
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
-          asyncThreadCtx(std::move(asyncThreadCtx)) {
-      BOLT_CHECK(this->asyncThreadCtx);
-      preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
+          asyncThreadCtx(std::move(asyncThrCtx)) {
+      if (this->asyncThreadCtx) {
+        preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
+      }
     }
 
     AsyncLoadHolder(const AsyncLoadHolder&) = delete;
