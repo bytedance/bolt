@@ -1476,7 +1476,7 @@ bool RowComparator::operator()(
 extern "C" {
 
 // An wrapper, called by LLVM IR.
-__attribute__((__visibility__("default"))) int32_t StringViewCompareWrapper(
+__attribute__((__visibility__("default"))) int32_t jit_StringViewCompareWrapper(
     char* l,
     char* r) {
   bytedance::bolt::StringView left = *(bytedance::bolt::StringView*)l;
@@ -1501,16 +1501,15 @@ __attribute__((__visibility__("default"))) int32_t StringViewCompareWrapper(
   }
 }
 
-__attribute__((__visibility__("default"))) int32_t RowBasedStringViewCompare(
-    char* l,
-    char* r) {
+__attribute__((__visibility__("default"))) int32_t
+jit_RowBasedStringViewCompare(char* l, char* r) {
   bytedance::bolt::StringView left = *(bytedance::bolt::StringView*)l;
   bytedance::bolt::StringView right = *(bytedance::bolt::StringView*)r;
   auto ans = left.compare(right);
   return ans == 0 ? 0 : (ans > 0 ? 1 : -1);
 }
 
-__attribute__((__visibility__("default"))) int32_t ComplexTypeRowCmpRow(
+__attribute__((__visibility__("default"))) int32_t jit_ComplexTypeRowCmpRow(
     char* left,
     char* right,
     int64_t typePtr,
@@ -1528,7 +1527,8 @@ __attribute__((__visibility__("default"))) int32_t ComplexTypeRowCmpRow(
       {static_cast<bool>(nullFirst), static_cast<bool>(ascending), false});
 }
 
-__attribute__((__visibility__("default"))) int32_t RowBasedComplexTypeRowCmpRow(
+__attribute__((__visibility__("default"))) int32_t
+jit_RowBased_ComplexTypeRowCmpRow(
     char* left,
     char* right,
     int64_t typePtr,
@@ -1558,7 +1558,7 @@ __attribute__((__visibility__("default"))) int32_t RowBasedComplexTypeRowCmpRow(
       {static_cast<bool>(nullFirst), static_cast<bool>(ascending), false});
 }
 
-__attribute__((__visibility__("default"))) int8_t StringViewRowEqVectors(
+__attribute__((__visibility__("default"))) int8_t jit_StringViewRowEqVectors(
     char* l,
     char* r) {
   bytedance::bolt::StringView left = *(bytedance::bolt::StringView*)l;
@@ -1569,35 +1569,35 @@ __attribute__((__visibility__("default"))) int8_t StringViewRowEqVectors(
              .compare(right) == 0;
 }
 
-__attribute__((__visibility__("default"))) int8_t GetDecodedValueBool(
+__attribute__((__visibility__("default"))) int8_t jit_GetDecodedValueBool(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)->valueAt<bool>(
       index);
 }
 
-__attribute__((__visibility__("default"))) int8_t GetDecodedValueI8(
+__attribute__((__visibility__("default"))) int8_t jit_GetDecodedValueI8(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
       ->valueAt<int8_t>(index);
 }
 
-__attribute__((__visibility__("default"))) int16_t GetDecodedValueI16(
+__attribute__((__visibility__("default"))) int16_t jit_GetDecodedValueI16(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
       ->valueAt<int16_t>(index);
 }
 
-__attribute__((__visibility__("default"))) int32_t GetDecodedValueI32(
+__attribute__((__visibility__("default"))) int32_t jit_GetDecodedValueI32(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
       ->valueAt<int32_t>(index);
 }
 
-__attribute__((__visibility__("default"))) int64_t GetDecodedValueI64(
+__attribute__((__visibility__("default"))) int64_t jit_GetDecodedValueI64(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
@@ -1605,19 +1605,19 @@ __attribute__((__visibility__("default"))) int64_t GetDecodedValueI64(
 }
 
 __attribute__((__visibility__("default"))) bytedance::bolt::int128_t
-GetDecodedValueI128(char* vec, int32_t index) {
+jit_GetDecodedValueI128(char* vec, int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
       ->valueAt<bytedance::bolt::int128_t>(index);
 }
 
-__attribute__((__visibility__("default"))) float GetDecodedValueFloat(
+__attribute__((__visibility__("default"))) float jit_GetDecodedValueFloat(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)->valueAt<float>(
       index);
 }
 
-__attribute__((__visibility__("default"))) double GetDecodedValueDouble(
+__attribute__((__visibility__("default"))) double jit_GetDecodedValueDouble(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
@@ -1625,7 +1625,7 @@ __attribute__((__visibility__("default"))) double GetDecodedValueDouble(
 }
 // get decoded value string
 __attribute__((__visibility__("default"))) const char*
-GetDecodedValueStringView(char* vec, int32_t index) {
+jit_GetDecodedValueStringView(char* vec, int32_t index) {
   auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
   return reinterpret_cast<const char*>(
       decoded->data<bytedance::bolt::StringView>() + decoded->indices()[index]);
@@ -1633,7 +1633,7 @@ GetDecodedValueStringView(char* vec, int32_t index) {
 
 // TODO: consider little or big endianness?
 __attribute__((__visibility__("default"))) int8_t
-CmpRowVecTimestamp(char* vec, int32_t index, char* rowPtr) {
+jit_CmpRowVecTimestamp(char* vec, int32_t index, char* rowPtr) {
   auto ts = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
                 ->valueAt<bytedance::bolt::Timestamp>(index);
 
@@ -1643,15 +1643,15 @@ CmpRowVecTimestamp(char* vec, int32_t index, char* rowPtr) {
   return ts == rts;
 }
 
-// GetDecodedIsNull
-__attribute__((__visibility__("default"))) int8_t GetDecodedIsNull(
+// jit_GetDecodedIsNull
+__attribute__((__visibility__("default"))) int8_t jit_GetDecodedIsNull(
     char* vec,
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)->isNullAt(
       index);
 }
 
-__attribute__((__visibility__("default"))) int8_t ComplexTypeRowEqVectors(
+__attribute__((__visibility__("default"))) int8_t jit_ComplexTypeRowEqVectors(
     const char* row,
     int32_t offset,
     char* vec,
@@ -1663,7 +1663,7 @@ __attribute__((__visibility__("default"))) int8_t ComplexTypeRowEqVectors(
 }
 
 __attribute__((__visibility__("default"))) void
-DebugPrint(int64_t mask, int64_t left, int64_t right) {
+jit_DebugPrint(int64_t mask, int64_t left, int64_t right) {
   std::cout << "mask: " << mask << ", left: " << left << ", right: " << right
             << std::endl;
   return;
