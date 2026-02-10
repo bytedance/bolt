@@ -1720,7 +1720,13 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   auto rowReaderOpts = getReaderOpts(readSchema);
   rowReaderOpts.setScanSpec(scanSpec);
 
-  // Without the fix, crashes in StringColumnReader::makeCastExpr().
+  // In non-SPARK builds this is rejected by ParquetColumnReader::matchType.
+#ifndef SPARK_COMPATIBLE
+  EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+  return;
+#endif
+
+  // In SPARK-compatible builds, schema mismatch is allowed and cast is applied.
   auto rowReader = reader->createRowReader(rowReaderOpts);
 
   VectorPtr result = BaseVector::create(readSchema, 0, leafPool_.get());
