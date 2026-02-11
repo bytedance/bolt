@@ -510,11 +510,12 @@ void TableScan::checkPreload() {
                 hiveSplit->length != std::numeric_limits<uint64_t>::max()) {
               preloadBytes = static_cast<int64_t>(hiveSplit->length);
             }
+            connector::AsyncThreadCtx::Guard guard(
+                asyncThreadCtx_.get(), preloadBytes);
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
-                           preloadBytes]() mutable {
-              connector::AsyncThreadCtx::Guard guard(ctx.get(), preloadBytes);
-              if (!guard) {
+                           inGuard = std::move(guard)]() mutable {
+              if (!inGuard) {
                 return;
               }
               connectorSplit->dataSource->prepare();
