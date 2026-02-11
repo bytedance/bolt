@@ -68,6 +68,8 @@ ScanSpec* ScanSpec::getOrCreateChild(const std::string& name) {
   }
   this->children_.push_back(std::make_unique<ScanSpec>(name));
   auto* child = this->children_.back().get();
+  child->setExpressionEvaluator(this->expressionEvaluator_);
+  child->setRuntimeStatistics(this->statis_);
   this->childByFieldName_[child->fieldName()] = child;
   return child;
 }
