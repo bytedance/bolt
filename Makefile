@@ -25,7 +25,34 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-.PHONY: all cmake build clean debug release unit submodules
+# --- 1. Standard Lifecycle Targets ---
+# all: Default build; clean: Remove artifacts; help: Show usage; install: Install package
+.PHONY: all clean help system_info install
+
+# --- 2. Development Tools & Setup ---
+# Includes code formatting, Conan dependency installation/build, and compilation DB generation
+.PHONY: clang-format-check conan_install conan_build _compile_db compile_db_all
+
+# --- 3. Conan Package Export ---
+# Export the built package to the local Conan cache
+.PHONY: export_base export_debug export_release
+
+# --- 4. Build Configurations & Variants ---
+# Covers Debug/Release, Spark compatibility, ASAN checks, and builds with test utilities
+.PHONY: debug release RelWithDebInfo debug-with-asan
+.PHONY: debug_spark release_spark
+.PHONY: release_with_test release_with_debug_info_with_test
+.PHONY: debug_with_test debug_with_test_spark debug_with_test_cov
+.PHONY: debug_spark_with_test release_spark_with_test
+
+# --- 5. Benchmark Build Targets ---
+.PHONY: benchmarks-basic-build benchmarks-build
+.PHONY: benchmarks-build-spark benchmarks-build-debug
+
+# --- 6. Test Execution & Coverage ---
+# Targets for running CTest and generating code coverage reports
+.PHONY: unittest unittest_debug unittest_release
+.PHONY: unittest_release_spark unittest_debug_spark unittest_coverage
 
 # ---------- Conan variables definition starts ----------
 # If built on SCM use date as version
@@ -175,7 +202,7 @@ clang-format-check:
 	if grep -q 'warning' log.txt; then false; fi
 	@rm -f files.txt log.txt
 
-conan_build:
+conan_install:
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \
 	fi; \
@@ -211,6 +238,11 @@ conan_build:
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	$${ALL_CONAN_OPTIONS} --build=missing && \
+	cd -
+
+conan_build: conan_install
+	cd _build/${BUILD_TYPE} && \
+	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
 	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
@@ -221,6 +253,27 @@ conan_build:
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	   --build=missing $${ALL_CONAN_OPTIONS} && \
 	cd -
+
+_compile_db: conan_install
+	cd _build/${BUILD_TYPE} && \
+	read ALL_CONAN_OPTIONS < conan.options && \
+	NUM_THREADS=$(NUM_THREADS) \
+	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
+	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	BOLT_CONAN_CONFIGURE_ONLY=1 \
+	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	   -s llvm-core/*:build_type=Release \
+	   -s "&:build_type=${BUILD_TYPE}" \
+	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	   --build=missing $${ALL_CONAN_OPTIONS} && \
+	cd -
+
+compile_db_all:
+	$(MAKE) _compile_db \
+	BUILD_TYPE=Release \
+	BOLT_BUILD_TESTING="ON" \
+	BOLT_BUILD_BENCHMARKS="ON" \
+	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 export_base:
 	cd _build/${BUILD_TYPE} && \
@@ -263,6 +316,9 @@ release_with_debug_info_with_test:
 debug_with_test:
 	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
+debug_with_test_spark:
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+
 debug_with_test_cov:
 	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" BOLT_BUILD_TESTING_WITH_COVERAGE="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
@@ -291,14 +347,17 @@ benchmarks-build-debug:
 	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 unittest_debug: unittest
-unittest: debug_with_test			#: Build with debugging and run unit tests
+unittest: debug_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
-unittest_release: release_with_test			#: Build with debugging and run unit tests
+unittest_release: release_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
-unittest_release_spark: release_spark_with_test		#: Build with debugging and run unit tests
+unittest_release_spark: release_spark_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
+unittest_debug_spark: debug_spark_with_test
+	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
 unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/Debug && \

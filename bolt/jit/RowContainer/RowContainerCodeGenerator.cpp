@@ -1223,4 +1223,15 @@ const std::string RowContainerCodeGenerator::builtInDeclarationsIR = R"IR(
 
 } // namespace bytedance::bolt::jit
 
+extern "C" {
+extern int StringViewCompareWrapper(char* l, char* r);
+
+// This dummy function will never be called in fact.
+// It is just a trick to make sure that the linker will not skip the functions
+// in RowContainer.cpp, which will be called by JIT.
+__attribute__((used)) void dummyImportFuctionsJitCalled(void) {
+  StringViewCompareWrapper(nullptr, nullptr);
+}
+}
+
 #endif // ENABLE_BOLT_JIT

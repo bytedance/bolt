@@ -119,39 +119,58 @@ PageHeader PageReader::readPageHeader() {
     uint32_t encryptedBufferSize = bufferEnd_ - bufferStart_;
     uint8_t* encryptedBufferStart =
         const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(bufferStart_));
-    bool reallocate = false;
     uint32_t headerSize = encryptedBufferSize;
+    bool reallocate = false;
+    auto decryptBufferGuard = folly::makeGuard([&]() {
+      if (reallocate) {
+        pool_.free(encryptedBufferStart, encryptedBufferSize);
+      }
+    });
+
     while (true) {
       headerSize = encryptedBufferSize;
-      bool ret = deserializer.DeserializeMessage(
-          encryptedBufferStart,
-          &headerSize,
-          &pageHeader,
-          cryptoCtx_.metaDecryptor);
-      if (ret) {
-        break;
-      } else {
-        int32_t size;
-        if (!inputStream_->Next(
-                reinterpret_cast<const void**>(&bufferStart_), &size)) {
-          BOLT_FAIL("readPageHeader() reading past the end of the stream");
-        }
-        bufferEnd_ = bufferStart_ + size;
-        if (!reallocate) {
-          auto start = encryptedBufferStart;
-          encryptedBufferStart = reinterpret_cast<uint8_t*>(
-              pool_.allocate(encryptedBufferSize + size));
-          memcpy(encryptedBufferStart, start, encryptedBufferSize);
-        } else {
-          encryptedBufferStart = reinterpret_cast<uint8_t*>(pool_.reallocate(
+      if (headerSize > cryptoCtx_.metaDecryptor->CiphertextSizeDelta()) {
+        try {
+          bool ret = deserializer.DeserializeMessage(
               encryptedBufferStart,
-              encryptedBufferSize,
-              encryptedBufferSize + size));
+              &headerSize,
+              &pageHeader,
+              cryptoCtx_.metaDecryptor);
+          if (ret) {
+            break;
+          }
+        } catch (const BoltRuntimeError& e) {
+          BOLT_CHECK(
+              encryptedBufferSize <= kDefaultMaxPageHeaderSize,
+              "Failed to decrypt page header with page header more than 16MB, failed reason: {}",
+              e.message());
         }
-        memcpy(encryptedBufferStart + encryptedBufferSize, bufferStart_, size);
-        reallocate = true;
-        encryptedBufferSize += size;
       }
+
+      // inputStream_->Next may change the content in buffer, so do redudant
+      // allocate and copy from buffer when first decrypt failed before reading
+      // from inputstream
+      if (!reallocate) {
+        encryptedBufferStart =
+            reinterpret_cast<uint8_t*>(pool_.allocate(encryptedBufferSize));
+        memcpy(encryptedBufferStart, bufferStart_, encryptedBufferSize);
+      }
+
+      reallocate = true;
+      int32_t size;
+      if (!inputStream_->Next(
+              reinterpret_cast<const void**>(&bufferStart_), &size)) {
+        BOLT_FAIL("readPageHeader() reading past the end of the stream");
+      }
+      bufferEnd_ = bufferStart_ + size;
+
+      encryptedBufferStart = reinterpret_cast<uint8_t*>(pool_.reallocate(
+          encryptedBufferStart,
+          encryptedBufferSize,
+          encryptedBufferSize + size));
+
+      memcpy(encryptedBufferStart + encryptedBufferSize, bufferStart_, size);
+      encryptedBufferSize += size;
     }
     readBytes = headerSize;
     bufferStart_ = bufferEnd_ - (encryptedBufferSize - headerSize);
@@ -289,6 +308,7 @@ void PageReader::prepareDataPageV1(
   BOLT_CHECK(
       pageHeader.type == thrift::PageType::DATA_PAGE &&
       pageHeader.__isset.data_page_header);
+  ++pageOrdinal_;
   numRepDefsInPage_ = pageHeader.data_page_header.num_values;
   setPageRowInfo(row == kRepDefOnly);
   if (row != kRepDefOnly && numRowsInPage_ != kRowsUnknown &&
@@ -302,7 +322,6 @@ void PageReader::prepareDataPageV1(
     return;
   }
 
-  ++pageOrdinal_;
   int32_t compressedLen = pageHeader.compressed_page_size;
   pageData_ = readBytes(compressedLen, pageBuffer_);
   if (cryptoCtx_.dataDecryptor != nullptr) {
@@ -382,6 +401,7 @@ void PageReader::prepareDataPageV2(
     int64_t row,
     const bool keepRepDefRawData) {
   BOLT_CHECK(pageHeader.__isset.data_page_header_v2);
+  ++pageOrdinal_;
 
   numRepDefsInPage_ = pageHeader.data_page_header_v2.num_values;
   setPageRowInfo(row == kRepDefOnly);
@@ -394,8 +414,6 @@ void PageReader::prepareDataPageV2(
         bufferEnd_);
     return;
   }
-
-  ++pageOrdinal_;
 
   uint32_t defineLength = maxDefine_ > 0
       ? pageHeader.data_page_header_v2.definition_levels_byte_length

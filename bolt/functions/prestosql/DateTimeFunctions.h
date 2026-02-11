@@ -1941,6 +1941,15 @@ struct MonthsBetweenFunction {
       const core::QueryConfig& config,
       const arg_type<Timestamp>* /*toTimestamp*/,
       const arg_type<Timestamp>* /*fromTimestamp*/,
+      const arg_type<bool>* /*roundOff*/) {
+    sessionTimeZone_ = getTimeZoneFromConfig(config);
+  }
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>* /*toTimestamp*/,
+      const arg_type<Timestamp>* /*fromTimestamp*/,
       const arg_type<bool>* /*roundOff*/,
       const arg_type<Varchar>* timeZone) {
     if (timeZone == nullptr || timeZone->empty()) {
@@ -2021,6 +2030,15 @@ struct MonthsBetweenFunction {
       const arg_type<Timestamp>& fromTimestamp) {
     calcMonthsBetween(
         toTimestamp, fromTimestamp, false, sessionTimeZone_, tzID_, result);
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<double>& result,
+      const arg_type<Timestamp>& toTimestamp,
+      const arg_type<Timestamp>& fromTimestamp,
+      const arg_type<bool>& roundOff) {
+    calcMonthsBetween(
+        toTimestamp, fromTimestamp, roundOff, sessionTimeZone_, tzID_, result);
   }
 
   FOLLY_ALWAYS_INLINE void call(

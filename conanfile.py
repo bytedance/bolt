@@ -534,7 +534,12 @@ class BoltConan(ConanFile):
 
         cmake = CMake(self)
         cmake.configure()
-        cmake.build()
+        if os.getenv("BOLT_CONAN_CONFIGURE_ONLY") == "1":
+            self.output.info(
+                f"✓ compile_commands.json at {self.build_folder}/compile_commands.json"
+            )
+        else:
+            cmake.build()
 
     def package(self):
         files.copy(

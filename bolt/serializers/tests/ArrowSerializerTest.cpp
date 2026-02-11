@@ -282,8 +282,10 @@ class ArrowSerializerTest
     for (const auto& child : rowVector->children()) {
       paramOptions.encodings.push_back(child->encoding());
     }
-
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     serde_->deprecatedSerializeEncoded(rowVector, &arena, &paramOptions, &out);
+#pragma GCC diagnostic pop
   }
 
   void assertEqualEncoding(

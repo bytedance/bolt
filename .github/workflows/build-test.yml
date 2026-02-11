@@ -77,13 +77,9 @@ jobs:
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
-    - name: Bolt build
+    - name: Build and Run Tests
       run: |
-        make ${{ matrix.build_type }}_with_test
-
-    - name: Run tests
-      run: |
-        make unittest_${{ matrix.build_type }}
+         make unittest_${{ matrix.build_type }}
 
   build-only:
       needs: changes
@@ -101,7 +97,7 @@ jobs:
             - /data/conan-server-data:/var/conan/data
       strategy:
         matrix:
-          build_target: [ benchmarks-build, debug_with_test ]
+          build_target: [ benchmarks-build, debug_spark_with_test ]
       steps:
       - name: Checkout code
         uses: actions/checkout@v6
