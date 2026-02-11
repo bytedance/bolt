@@ -4674,5 +4674,3 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
       .taskId("ATTEMPT_9")
       .assertResults(expected);
 }
-
-

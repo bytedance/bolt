@@ -474,7 +474,6 @@ void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
              },
              &debugString});
 
-
         auto ptr = connector->createDataSource(
             type, table, columns, ctx, task->queryCtx()->queryConfig());
         if (task->isCancelled()) {
@@ -508,8 +507,7 @@ void TableScan::checkPreload() {
             // Handle the default max value for length by treating it as 0
             int64_t preloadBytes = 0;
             if (hiveSplit &&
-                hiveSplit->length !=
-                    std::numeric_limits<uint64_t>::max()) {
+                hiveSplit->length != std::numeric_limits<uint64_t>::max()) {
               preloadBytes = static_cast<int64_t>(hiveSplit->length);
             }
             executor->add([connectorSplit = split,
