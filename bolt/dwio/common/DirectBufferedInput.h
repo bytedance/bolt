@@ -301,9 +301,8 @@ class DirectBufferedInput : public BufferedInput {
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
           asyncThreadCtx(std::move(asyncThrCtx)) {
-      if (this->asyncThreadCtx) {
-        preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
-      }
+      BOLT_CHECK(asyncThreadCtx);
+      preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
     }
 
     AsyncLoadHolder(const AsyncLoadHolder&) = delete;
