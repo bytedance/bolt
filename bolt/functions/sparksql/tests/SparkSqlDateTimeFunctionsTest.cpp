@@ -47,6 +47,10 @@ class SparkSqlDateTimeFunctionsTest : public SparkFunctionBaseTest {
     });
   }
 
+  void resetQueryConfig() {
+    queryCtx_->testingOverrideConfigUnsafe({});
+  }
+
   void setTimeParserPolicy(const std::string& timeParserPolicy) {
     queryCtx_->testingOverrideConfigUnsafe(
         {{core::QueryConfig::kTimeParserPolicy, timeParserPolicy}});
@@ -2021,7 +2025,73 @@ TEST_F(SparkSqlDateTimeFunctionsTest, monthsBetween) {
         timeZone);
   };
 
+  // Spark signature: months_between(timestamp1, timestamp2, roundOff)
+  // (timezone comes from session config).
+  const auto monthsBetween3Args = [&](std::optional<Timestamp> timestamp1,
+                                      std::optional<Timestamp> timestamp2,
+                                      std::optional<bool> roundOff) {
+    return evaluateOnce<double>(
+        "months_between(c0, c1, c2)", timestamp1, timestamp2, roundOff);
+  };
+
   using util::fromTimestampString;
+
+  setQueryTimeZone("Asia/Shanghai");
+  EXPECT_FLOAT_EQ(
+      -13.0,
+      monthsBetween3Args(
+          fromTimestampString("2019-02-28 10:00:00.500", nullptr),
+          fromTimestampString("2020-03-28 10:00:00.500", nullptr),
+          std::optional<bool>(true))
+          .value());
+
+  EXPECT_NEAR(
+      14.064516129032258,
+      monthsBetween3Args(
+          fromTimestampString("2021-05-30 10:00:00.500", nullptr),
+          fromTimestampString("2020-03-28 10:00:00.500", nullptr),
+          std::optional<bool>(false))
+          .value(),
+      1e-12);
+
+  EXPECT_EQ(
+      std::nullopt,
+      monthsBetween3Args(
+          std::nullopt,
+          fromTimestampString("2020-03-28 10:00:00.500", nullptr),
+          std::optional<bool>(true)));
+  EXPECT_EQ(
+      std::nullopt,
+      monthsBetween3Args(
+          fromTimestampString("2021-05-30 10:00:00.500", nullptr),
+          std::nullopt,
+          std::optional<bool>(true)));
+  EXPECT_EQ(
+      std::nullopt,
+      monthsBetween3Args(
+          fromTimestampString("2021-05-30 10:00:00.500", nullptr),
+          fromTimestampString("2020-03-28 10:00:00.500", nullptr),
+          std::nullopt));
+
+  setQueryTimeZone("-08:00");
+  EXPECT_FLOAT_EQ(
+      26.967741,
+      monthsBetween3Args(
+          fromTimestampString("2022-04-30", nullptr),
+          fromTimestampString("2020-01-31", nullptr),
+          std::optional<bool>(true))
+          .value());
+
+  setQueryTimeZone("America/Los_Angeles");
+  EXPECT_FLOAT_EQ(
+      -1.0,
+      monthsBetween3Args(
+          fromTimestampString("2021-03-14 09:00:00.000", nullptr),
+          fromTimestampString("2021-04-14 09:00:00.000", nullptr),
+          std::optional<bool>(true))
+          .value());
+
+  resetQueryConfig();
 
   // Simple tests
   EXPECT_FLOAT_EQ(

@@ -151,6 +151,8 @@ void registerDatetimeFunctions(const std::string& prefix) {
       Timestamp,
       bool,
       Varchar>({prefix + "months_between"});
+  registerFunction<MonthsBetweenFunction, double, Timestamp, Timestamp, bool>(
+      {prefix + "months_between"});
 
   registerFunction<DayOfWeekFunction, int32_t, Timestamp>(
       {prefix + "dow", prefix + "dayofweek"});
