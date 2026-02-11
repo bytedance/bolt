@@ -507,7 +507,9 @@ void TableScan::checkPreload() {
                 const connector::hive::HiveConnectorSplit>(split);
             // Handle the default max value for length by treating it as 0
             int64_t preloadBytes = 0;
-            if (hiveSplit && hiveSplit->length != std::numeric_limits<uint64_t>::max()) {
+            if (hiveSplit &&
+                hiveSplit->length !=
+                    std::numeric_limits<uint64_t>::max()) {
               preloadBytes = static_cast<int64_t>(hiveSplit->length);
             }
             executor->add([connectorSplit = split,

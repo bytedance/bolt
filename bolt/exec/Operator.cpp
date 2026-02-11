@@ -79,7 +79,8 @@ OperatorCtx::createConnectorQueryCtx(
   return std::make_shared<connector::ConnectorQueryCtx>(
       pool_,
       connectorPool,
-      driverCtx_->task->queryCtx()->connectorSessionProperties(connectorId),
+      driverCtx_->task->queryCtx()->connectorSessionProperties(
+          connectorId),
       spillConfig,
       std::move(asyncThreadCtx),
       std::make_unique<SimpleExpressionEvaluator>(

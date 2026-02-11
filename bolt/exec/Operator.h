@@ -114,7 +114,8 @@ class OperatorCtx {
       const std::string& planNodeId,
       memory::MemoryPool* connectorPool,
       const common::SpillConfig* spillConfig = nullptr,
-      std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx = nullptr) const;
+      std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx =
+          nullptr) const;
 
   /// get totalRowCount and processedRowCount
   void traverseOpToGetRowCount(
