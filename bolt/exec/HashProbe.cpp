@@ -79,13 +79,17 @@ RowTypePtr makeTableType(
 
 // Copy values from 'rows' of 'table' according to 'projections' in
 // 'result'. Reuses 'result' children where possible.
+// 'allowSorting': If false, disables sorting even if the hybridData supports it.
+// This is needed when the caller also has probe-side columns that won't be
+// reordered - we must keep build-side and probe-side in the same order.
 void extractColumns(
     BaseHashTable* table,
     folly::Range<char**> rows,
     folly::Range<const IdentityProjection*> projections,
     memory::MemoryPool* pool,
     const std::vector<TypePtr>& resultTypes,
-    std::vector<VectorPtr>& resultVectors) {
+    std::vector<VectorPtr>& resultVectors,
+    bool allowSorting = true) {
   BOLT_CHECK_EQ(resultTypes.size(), resultVectors.size())
   auto hybridData = table->hybridData();
   if (hybridData != nullptr) {
@@ -97,8 +101,9 @@ void extractColumns(
     // For multiple containers, sort by containerId for better cache locality.
     // Note: sorting is safe here because the output order of hash join results
     // does not need to match any specific order (SQL doesn't guarantee order).
-    // Sorting can be disabled via query config for deterministic testing.
-    const bool useSorting = hybridData->shouldUseSorting();
+    // Sorting can be disabled via query config for deterministic testing,
+    // or disabled by caller when probe-side columns must stay in sync.
+    const bool useSorting = allowSorting && hybridData->shouldUseSorting();
 
     const char* const* extractRows = rows.data();
     std::vector<HybridRowId>* extractRowIds = &outputRowIds;
@@ -927,13 +932,16 @@ void HashProbe::fillOutput(vector_size_t size) {
       // get dictionary raw value
       RowVectorPtr dictOutput = std::static_pointer_cast<RowVector>(
           BaseVector::create(outputType_, numDistinct, pool()));
+      // Disable sorting when there are probe columns to keep build and probe in sync.
+      const bool hasProbeColumns = !projectedInputColumns_.empty();
       extractColumns(
           table_.get(),
           folly::Range<char**>(distinctRows.data(), numDistinct),
           tableOutputProjections_,
           pool(),
           outputType_->children(),
-          dictOutput->children());
+          dictOutput->children(),
+          /*allowSorting=*/!hasProbeColumns);
 
       // calculate dictionary index
       BufferPtr indexBuffer;
@@ -946,13 +954,16 @@ void HashProbe::fillOutput(vector_size_t size) {
             size, indexBuffer, dictOutput->childAt(projection.outputChannel));
       }
     } else {
+      // Disable sorting when there are probe columns to keep build and probe in sync.
+      const bool hasProbeColumns = !projectedInputColumns_.empty();
       extractColumns(
           table_.get(),
           folly::Range<char**>(outputTableRows_.data(), size),
           tableOutputProjections_,
           pool(),
           outputType_->children(),
-          output_->children());
+          output_->children(),
+          /*allowSorting=*/!hasProbeColumns);
     }
   }
 }
