@@ -300,8 +300,7 @@ class DirectBufferedInput : public BufferedInput {
         std::shared_ptr<connector::AsyncThreadCtx> asyncThrCtx)
         : load(std::move(load)),
           prefetchMemoryPercent_(prefetchMemoryPercent),
-          asyncThreadCtx(std::move(asyncThrCtx)),
-          inGuard_(asyncThreadCtx.get()) {
+          asyncThreadCtx(std::move(asyncThrCtx)) {
       BOLT_CHECK(asyncThreadCtx);
       preloadBytesLimit_ = asyncThreadCtx->preloadBytesLimit();
     }
@@ -314,7 +313,6 @@ class DirectBufferedInput : public BufferedInput {
           prefetchMemoryPercent_(other.prefetchMemoryPercent_),
           asyncThreadCtx(std::move(other.asyncThreadCtx)),
           preloadBytesLimit_(other.preloadBytesLimit_),
-          inGuard_(std::move(other.inGuard_)),
           addedBytes_(other.addedBytes_) {
       other.asyncThreadCtx = nullptr;
       other.addedBytes_ = 0;
@@ -376,7 +374,6 @@ class DirectBufferedInput : public BufferedInput {
     int32_t prefetchMemoryPercent_{30};
     std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx;
     uint64_t preloadBytesLimit_{0};
-    connector::AsyncThreadCtx::Guard inGuard_;
 
     mutable int64_t addedBytes_{0};
 
