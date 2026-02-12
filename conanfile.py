@@ -127,7 +127,7 @@ class BoltConan(ConanFile):
     FB_VERSION = "2022.10.31.00"
 
     # global compiler options
-    BOLT_GLOABL_FLAGS = "-Werror=return-type"
+    BOLT_GLOBAL_FLAGS = "-Werror=return-type"
 
     build_policy = "missing"
 
@@ -393,21 +393,15 @@ class BoltConan(ConanFile):
 
         if str(self.settings.arch) in ["x86", "x86_64"]:
             flags = (
-                f"{self.BOLT_GLOABL_FLAGS} -mavx2 -mfma -mavx -mf16c -mlzcnt -mbmi2 "
+                f"{self.BOLT_GLOBAL_FLAGS} -mavx2 -mfma -mavx -mf16c -mlzcnt -mbmi2 "
             )
             tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
             tc.cache_variables["CMAKE_C_FLAGS"] = flags
 
-        if str(self.settings.arch) in ["armv8", "arm"]:
-            # Support CRC & NEON on ARMv8
-            flags = f"{self.BOLT_GLOABL_FLAGS} -march=armv8.3-a"
+        if str(self.settings.arch) in ["armv8", "arm", "armv9"]:
+            flags = self._get_arm_cpu_flags()
             tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
             tc.cache_variables["CMAKE_C_FLAGS"] = flags
-        elif str(self.settings.arch) in ["armv9"]:
-            # gcc 12+ https://www.phoronix.com/news/GCC-12-ARMv9-march-armv9-a
-            flags = f"{self.BOLT_GLOABL_FLAGS} -march=armv9-a"
-            tc.variables["CMAKE_C_FLAGS"] = flags
-            tc.variables["CMAKE_CXX_FLAGS"] = flags
         if (
             self.options.enable_torch is not None
             and self.options.enable_torch.value is not None
@@ -630,3 +624,68 @@ class BoltConan(ConanFile):
                 "gtest::gtest",
                 "duckdb::duckdb",
             ]
+
+    def _get_arm_cpu_flags(self) -> str:
+        """
+        Detect specific ARM CPU and return optimal compiler flags.
+
+        Detection:
+        Apple Silicon on Darwin -> -mcpu=apple-m1+crc
+        Linux ARM64 via MIDR_EL1 -> specific -mcpu flags
+        Fallback to generic -march flags
+        """
+        base_flags = self.BOLT_GLOBAL_FLAGS
+
+        # Apple Silicon detection (macOS)
+        # Note: Conan uses "Macos" not "macOS", see https://docs.conan.io/2/reference/config_files/settings.html
+        if self.settings.os == "Macos" and platform.machine() == "arm64":
+            self.output.info("Detected Apple Silicon, using -mcpu=apple-m1+crc")
+            return f"{base_flags} -mcpu=apple-m1+crc"
+
+        # Linux ARM64 detection via MIDR_EL1
+        if self.settings.os == "Linux":
+            midr_path = "/sys/devices/system/cpu/cpu0/regs/identification/midr_el1"
+            try:
+                with open(midr_path, "r") as f:
+                    midr_value = int(f.read().strip(), 16)
+
+                # Extract PartNum (bits 15:4) and Implementer (bits 31:24)
+                part_num = (midr_value >> 4) & 0xFFF
+                implementer = (midr_value >> 24) & 0xFF
+
+                # CPU flag mapping based on PartNum
+                cpu_flags_map = {
+                    0xD0C: "neoverse-n1",  # AWS Graviton2, Ampere Altra
+                    0xD49: "neoverse-n2",  # AWS Graviton3
+                    0xD40: "neoverse-v1",  # Neoverse V1
+                    0xD4F: "neoverse-v2",  # AWS Graviton4, NVIDIA Grace
+                }
+
+                if part_num in cpu_flags_map:
+                    cpu_name = cpu_flags_map[part_num]
+                    mcpu_flag = f"-mcpu={cpu_name}"
+
+                    # NVIDIA Grace (Neoverse V2 with NVIDIA implementer)
+                    if part_num == 0xD4F and implementer == 0x4E:
+                        mcpu_flag += "+crypto+sha3+sm4+sve2-aes+sve2-sha3+sve2-sm4"
+                        self.output.info(
+                            f"Detected NVIDIA Grace CPU, using {mcpu_flag}"
+                        )
+                    else:
+                        self.output.info(f"Detected ARM {cpu_name}, using {mcpu_flag}")
+
+                    return f"{base_flags} {mcpu_flag}"
+                else:
+                    self.output.info(
+                        f"Unknown ARM CPU (PartNum: 0x{part_num:x}), using fallback"
+                    )
+            except (FileNotFoundError, PermissionError, ValueError) as e:
+                self.output.warning(f"Could not detect ARM CPU via MIDR_EL1: {e}")
+
+        # Fallback based on arch setting (preserves original behavior)
+        if str(self.settings.arch) == "armv9":
+            self.output.info("Using fallback -march=armv9-a")
+            return f"{base_flags} -march=armv9-a"
+        else:
+            self.output.info("Using fallback -march=armv8.3-a")
+            return f"{base_flags} -march=armv8.3-a"
