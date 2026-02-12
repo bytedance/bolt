@@ -4687,3 +4687,38 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
       .taskId("ATTEMPT_9")
       .assertResults(expected);
 }
+
+TEST_F(TableScanTest, filterMissingFields) {
+  constexpr int kSize = 10;
+  auto iota = makeFlatVector<int64_t>(kSize, folly::identity);
+  auto data = makeRowVector({makeRowVector({iota})});
+  auto file = TempFilePath::create();
+  writeToFile(file->getPath(), {data});
+  auto schema = makeRowType({
+      makeRowType({BIGINT(), BIGINT()}),
+      makeRowType({BIGINT()}),
+      BIGINT(),
+  });
+  auto test = [&](const std::vector<std::string>& subfieldFilters,
+                  int expectedSize) {
+    SCOPED_TRACE(fmt::format("{}", fmt::join(subfieldFilters, " AND ")));
+    auto plan = PlanBuilder()
+                    .tableScan(ROW({}, {}), subfieldFilters, "", schema)
+                    .planNode();
+    auto split = makeHiveConnectorSplit(file->getPath());
+    auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+    ASSERT_EQ(result->size(), expectedSize);
+  };
+  test({"c0.c1 = 0"}, 0);
+  test({"c0.c1 IS NULL"}, kSize);
+  test({"c1 IS NOT NULL"}, 0);
+  test({"c1 IS NULL"}, kSize);
+  test({"c1.c0 = 0"}, 0);
+  test({"c1.c0 IS NULL"}, kSize);
+  test({"c2 = 0"}, 0);
+  test({"c2 IS NULL"}, kSize);
+  test({"c2 = 0", "c0.c1 IS NULL"}, 0);
+  test({"c2 IS NULL", "c0.c1 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 IS NULL"}, 1);
+}
