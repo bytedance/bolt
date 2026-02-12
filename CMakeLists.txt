@@ -426,9 +426,9 @@ endif()
 # DeveloperTools/TwoLevelNamespaces.html Enables -flat_namespace so type_info can be deudplicated
 # across .so boundaries
 if(APPLE)
-  add_link_options("-Wl,-flat_namespace,-no_warn_duplicate_libraries" "LINKER:-export_dynamic")
+  add_link_options("-Wl,-flat_namespace,-no_warn_duplicate_libraries" "-Wl,--export-dynamic")
 elseif(UNIX)
-  add_link_options("-Wl,-export-dynamic")
+  add_link_options("-Wl,--export-dynamic")
 else()
   message(FATAL_ERROR "Unknown system type")
 endif()

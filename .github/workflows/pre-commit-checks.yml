@@ -19,6 +19,7 @@ on:
     branches: [ main ]
   push:
     branches: [ main ]
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -61,10 +62,4 @@ jobs:
           make compile_db_all
       - name: Run pre-commit hooks
         run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "Detected Pull Request: Checking modified files only."
-            pre-commit run --from-ref origin/${{ github.base_ref }} --to-ref HEAD
-          else
-            echo "Detected Push/Merge: Checking all files."
-            pre-commit run --all-files
-          fi
+          pre-commit run --all-files

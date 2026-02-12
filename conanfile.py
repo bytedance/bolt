@@ -608,6 +608,9 @@ class BoltConan(ConanFile):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "llvm-core::llvm-core"
             )
+            self.cpp_info.components["bolt_engine"].exelinkflags.append(
+                "-Wl,--export-dynamic-symbol=jit_*"
+            )
         if self.options.get_safe("enable_s3"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "aws-c-common::aws-c-common"

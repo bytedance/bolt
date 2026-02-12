@@ -266,7 +266,8 @@ _compile_db: conan_install
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	   --build=missing $${ALL_CONAN_OPTIONS} && \
-	cd -
+	cd - && \
+	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target generate_parquet_thrift
 
 compile_db_all:
 	$(MAKE) _compile_db \

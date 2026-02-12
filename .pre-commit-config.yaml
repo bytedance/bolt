@@ -80,15 +80,15 @@ repos:
       - id: clang-tidy
         name: Lint C++ files
         description: >-
-          Run clang-tidy on C/C++ files, requires 'compile_commands.json'
-          to be available in the repo root (e.g. symlinked) or BUILD_PATH
-          set to it's path e.g. _build/Release.
-        stages:
-          - pre-commit
+          Run clang-tidy on only changed lines so existing warnings don't block.
+          Locally it checks staged diffs; in GitHub Actions it diffs against the
+          PR base / merge queue base
+        stages: [pre-commit]
         entry: ./scripts/run-clang-tidy.py
-        args: [--commit, HEAD]
+        args: [--diff, auto]
         language: python
-        types_or: [c++, c]
+        types_or: [c, c++]
+        pass_filenames: false
         additional_dependencies: [clang-tidy==18.1.8]
         require_serial: true
   - repo: https://github.com/codespell-project/codespell

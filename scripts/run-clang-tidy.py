@@ -32,9 +32,9 @@ import json
 import re
 import sys
 import os
-import gzip
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, List
 
 
 class Multimap(dict):
@@ -45,71 +45,115 @@ class Multimap(dict):
             self[key].append(value)
 
 
-class attrdict(dict):
-    __getattr__ = dict.__getitem__
-    __setattr__ = dict.__setitem__
+def _truthy_env(name: str) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return False
+    return v.lower() not in ("", "0", "false", "no")
 
 
-class string(str):
-    def extract(self, rexp):
-        return re.match(rexp, self).group(1)
-
-    def json(self):
-        return json.loads(self, object_hook=attrdict)
+def get_git_root() -> Optional[str]:
+    return _git_stdout(["rev-parse", "--show-toplevel"])
 
 
-def run(command, compressed=False, **kwargs):
-    """
-    Helper for git commands.
-    Note: We do not use this for the main clang-tidy execution anymore
-    to allow for streaming output.
-    """
-    if "input" in kwargs:
-        input_data = kwargs["input"]
-
-        if type(input_data) is list:
-            input_data = "\n".join(input_data) + "\n"
-
-        kwargs["input"] = input_data.encode("utf-8")
-
-    reply = subprocess.run(
-        command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs
+def _run_git(args: List[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git"] + args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
     )
 
-    if compressed:
-        stdout = gzip.decompress(reply.stdout)
+
+def _git_stdout(args: List[str]) -> Optional[str]:
+    proc = _run_git(args)
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out if out else None
+
+
+def _git_has_ref(ref: str) -> bool:
+    proc = _run_git(["rev-parse", "--verify", "--quiet", ref])
+    return proc.returncode == 0
+
+
+def _git_upstream_ref() -> Optional[str]:
+    # Example output: origin/main
+    return _git_stdout(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
+    )
+
+
+def _git_merge_base(a: str, b: str) -> Optional[str]:
+    return _git_stdout(["merge-base", a, b])
+
+
+def _git_commits_ahead(base_ref: str, head_ref: str = "HEAD") -> Optional[int]:
+    out = _git_stdout(["rev-list", "--count", f"{base_ref}..{head_ref}"])
+    if out is None:
+        return None
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+def detect_local_base_ref(user_base_ref: Optional[str]) -> Optional[str]:
+    """Return a base SHA to diff against for local runs.
+
+    Prefers upstream/remote base, falls back to common branch names.
+    Returns the merge-base SHA.
+    """
+    candidates: List[str] = []
+    if user_base_ref:
+        candidates.append(user_base_ref)
     else:
-        stdout = reply.stdout
+        upstream = _git_upstream_ref()
+        if upstream:
+            candidates.append(upstream)
 
-    stdout = (
-        string(stdout.decode("utf-8", errors="ignore").strip())
-        if stdout is not None
-        else ""
-    )
-    stderr = (
-        string(reply.stderr.decode("utf-8").strip()) if reply.stderr is not None else ""
-    )
+        # Best-effort fallbacks for repos without upstream tracking.
+        for ref in ("origin/main", "main", "origin/master", "master"):
+            if _git_has_ref(ref):
+                candidates.append(ref)
 
-    if stderr != "":
-        print(stderr, file=sys.stderr)
-
-    return reply.returncode, stdout, stderr
-
-
-def get_filename(filename):
-    return os.path.basename(filename)
+    for ref in candidates:
+        mb = _git_merge_base("HEAD", ref)
+        if mb:
+            return mb
+    return None
 
 
-def get_fileextn(filename):
-    split = os.path.splitext(filename)
-    if len(split) <= 1:
-        return ""
+def merge_changed_lines(a: Multimap, b: Multimap) -> Multimap:
+    out = Multimap()
+    for k, ranges in a.items():
+        for r in ranges:
+            out[k] = r
+    for k, ranges in b.items():
+        for r in ranges:
+            out[k] = r
+    return out
 
-    return split[-1]
+
+def to_repo_rel(path: str, git_root: Optional[str]) -> str:
+    """Convert path to repo-relative path when possible."""
+    if not git_root:
+        return os.path.normpath(path)
+    abs_path = os.path.abspath(path) if not os.path.isabs(path) else path
+    try:
+        rel = os.path.relpath(abs_path, git_root)
+        return os.path.normpath(rel)
+    except ValueError:
+        return os.path.normpath(path)
 
 
-def script_path():
-    return os.path.dirname(os.path.realpath(sys.argv[0]))
+def to_repo_abs(repo_rel: str, git_root: Optional[str]) -> str:
+    if not git_root:
+        return os.path.abspath(repo_rel)
+    return os.path.normpath(os.path.join(git_root, repo_rel))
 
 
 def input_files(files):
@@ -128,32 +172,94 @@ def get_all_files(directory, extensions):
     return files
 
 
-def git_changed_lines(commit):
-    file = ""
+def git_diff_unified_zero(
+    *,
+    base_ref: Optional[str],
+    head_ref: str = "HEAD",
+    staged: bool = False,
+) -> str:
+    cmd = ["diff", "--text", "--no-color", "--unified=0"]
+    if staged:
+        cmd.append("--cached")
+        if base_ref:
+            cmd.append(base_ref)
+    else:
+        if base_ref:
+            cmd.append(f"{base_ref}...{head_ref}")
+        else:
+            cmd.append(head_ref)
+
+    proc = _run_git(cmd)
+    if proc.returncode not in (0, 1):
+        # git diff returns 1 for differences in some edge cases; treat non-(0,1) as fatal.
+        raise RuntimeError(
+            (proc.stderr or "").strip() or f"git diff failed: git {' '.join(cmd)}"
+        )
+    return proc.stdout or ""
+
+
+def parse_changed_lines_from_diff(diff_text: str) -> Multimap:
+    """Parse `git diff -U0` output and return {file -> [[start,end], ...]} for C/C++ files."""
+    cur_file = ""
     changed_lines = Multimap()
-    returncode, stdout, stderr = run(f"git diff --text --unified=0 {commit}")
 
-    for line in stdout.splitlines():
+    file_re = re.compile(r"^\+\+\+ b/(.*)$")
+    cpp_file_re = re.compile(r"^\+\+\+ b/(.*(\.cc|\.cpp|\.cxx|\.c|\.h|\.hpp|\.hxx))$")
+    hunk_re = re.compile(r"^@@ .*\+(\d+)(?:,(\d+))? @@")
+
+    for line in diff_text.splitlines():
         line = line.rstrip("\n")
-        fields = line.split()
 
-        match = re.match(r"^\+\+\+ b/.*", line)
-        if match:
-            file = ""
+        if file_re.match(line):
+            cur_file = ""
 
-        match = re.match(r"^\+\+\+ b/(.*(\.cc|\.cpp|\.cxx|\.h|\.hpp|\.hxx))$", line)
-        if match:
-            file = match.group(1)
+        m = cpp_file_re.match(line)
+        if m:
+            cur_file = m.group(1)
+            continue
 
-        match = re.match(r"^@@", line)
-        if match and file != "":
-            lspan = fields[2].replace("+", "").split(",")
-            start_line = int(lspan[0])
-            count = int(lspan[1]) if len(lspan) > 1 else 1
-            if count > 0:
-                changed_lines[file] = [start_line, start_line + count - 1]
+        if not cur_file:
+            continue
+
+        m = hunk_re.match(line)
+        if not m:
+            continue
+
+        start_line = int(m.group(1))
+        count = int(m.group(2)) if m.group(2) is not None else 1
+        if count > 0:
+            changed_lines[cur_file] = [start_line, start_line + count - 1]
 
     return changed_lines
+
+
+def git_changed_lines(*, base_ref: Optional[str], staged: bool) -> Multimap:
+    diff_text = git_diff_unified_zero(base_ref=base_ref, staged=staged)
+    return parse_changed_lines_from_diff(diff_text)
+
+
+def get_base_ref_from_github_event() -> Optional[str]:
+    """Best-effort base SHA detection for PR, merge queue, and push workflows."""
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    if not event_path or not os.path.isfile(event_path):
+        return None
+    try:
+        with open(event_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+
+    if event_name in ("pull_request", "pull_request_target", "pull_request_review"):
+        return payload.get("pull_request", {}).get("base", {}).get("sha")
+
+    if event_name == "merge_group":
+        return payload.get("merge_group", {}).get("base_sha")
+
+    if event_name == "push":
+        return payload.get("before")
+
+    return None
 
 
 def normalize_path(path):
@@ -212,7 +318,7 @@ def process_gha_output(stdout):
 
 
 def tidy(args):
-    extensions = (".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx")
+    extensions = (".cc", ".cpp", ".cxx", ".c", ".h", ".hpp", ".hxx")
     candidate_files = []
     # get file list to check
     if args.directory:
@@ -222,12 +328,13 @@ def tidy(args):
         candidate_files = input_files(args.files)
         candidate_files = [f for f in candidate_files if f.endswith(extensions)]
 
-    if not candidate_files:
-        print("No valid C/C++ files found to check.")
-        return 0
-    # get build path
-    candidate_files = [normalize_path(f) for f in candidate_files]
+    # Normalize candidate files (if provided) for later matching.
+    git_root = get_git_root()
+    candidate_files = [
+        to_repo_rel(normalize_path(f), git_root) for f in candidate_files
+    ]
 
+    exclude_re = None
     if args.exclude:
         try:
             exclude_re = re.compile(args.exclude)
@@ -241,7 +348,10 @@ def tidy(args):
                     f"Excluded {excluded_count} files based on pattern '{args.exclude}'"
                 )
 
-            if not candidate_files:
+            # Only early-exit if the caller provided an explicit file list.
+            # When running under pre-commit with pass_filenames=false, we expect to
+            # discover files via git diff later.
+            if before_count > 0 and not candidate_files:
                 print("All files were excluded by the filter pattern.")
                 return 0
 
@@ -259,27 +369,118 @@ def tidy(args):
             print("Error: 'compile_commands.json' not found. Set BUILD_PATH or use -p.")
             return 1
 
-    files_to_process = []
+    files_to_process = []  # type: List[str]
     line_filter_json = ""
 
-    if args.commit:
-        changed_lines = git_changed_lines(args.commit)
+    # Diff mode selection
+    diff_mode = args.diff
+    base_ref = args.base_ref
 
-        final_map = {}
-        for f in candidate_files:
-            if f in changed_lines:
-                final_map[f] = changed_lines[f]
-                files_to_process.append(f)
+    # Backwards-compat: --commit means "diff against base ref" (not working tree).
+    if args.commit:
+        diff_mode = "base"
+        base_ref = args.commit
+
+    if diff_mode == "auto":
+        if _truthy_env("GITHUB_ACTIONS") or _truthy_env("IN_CI"):
+            base_ref = (
+                base_ref
+                or os.environ.get("CI_BASE_SHA")
+                or get_base_ref_from_github_event()
+            )
+            diff_mode = "base" if base_ref else "staged"
+        else:
+            diff_mode = "local"
+
+    if diff_mode == "staged":
+        base_ref = base_ref or "HEAD"
+
+    def _compute_changed_lines() -> Optional[Multimap]:
+        try:
+            if diff_mode == "staged":
+                return git_changed_lines(base_ref=base_ref, staged=True)
+
+            if diff_mode == "base":
+                if not base_ref:
+                    print(
+                        "Error: --diff=base requires --base-ref (or CI_BASE_SHA in CI).",
+                        file=sys.stderr,
+                    )
+                    return None
+                base_map = git_changed_lines(base_ref=base_ref, staged=False)
+                staged_map = git_changed_lines(base_ref="HEAD", staged=True)
+                return merge_changed_lines(base_map, staged_map)
+
+            if diff_mode == "local":
+                # Local mode: lint all commits from merge-base(base, HEAD) plus any staged changes.
+                base_sha = detect_local_base_ref(base_ref)
+
+                # If there is no meaningful base (e.g. directly on main with no commits ahead),
+                # fall back to only the last commit.
+                commits_ahead = (
+                    _git_commits_ahead(base_sha, "HEAD") if base_sha else None
+                )
+                if base_sha and commits_ahead == 0:
+                    base_sha = None
+
+                if not base_sha:
+                    if _git_has_ref("HEAD^"):
+                        base_sha = "HEAD^"
+
+                base_map = (
+                    git_changed_lines(base_ref=base_sha, staged=False)
+                    if base_sha
+                    else Multimap()
+                )
+                staged_map = git_changed_lines(base_ref="HEAD", staged=True)
+                return merge_changed_lines(base_map, staged_map)
+
+            if diff_mode == "none":
+                return None
+
+            print(f"Error: unknown diff mode '{diff_mode}'", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error computing changed lines via git diff: {e}", file=sys.stderr)
+            return None
+
+    changed_lines = _compute_changed_lines()
+    if diff_mode in ("staged", "base", "local"):
+        if changed_lines is None:
+            return 1
+
+        # If candidate files were provided, intersect them with diff.
+        if candidate_files:
+            for f in candidate_files:
+                if f in changed_lines:
+                    files_to_process.append(f)
+        else:
+            files_to_process = list(changed_lines.keys())
+
+        if exclude_re is not None:
+            files_to_process = [f for f in files_to_process if not exclude_re.search(f)]
 
         if not files_to_process:
-            print("No changes detected in the provided files relative to commit.")
+            print("No changed C/C++ lines detected for clang-tidy.")
             return 0
 
+        # Use absolute paths in --line-filter for better compatibility with compile DBs.
+        final_map_abs = {}  # type: Dict[str, List[List[int]]]
+        for f in files_to_process:
+            abs_f = to_repo_abs(f, git_root)
+            final_map_abs[abs_f] = changed_lines[f]
         line_filter_json = json.dumps(
-            [{"name": key, "lines": value} for key, value in final_map.items()]
+            [{"name": key, "lines": value} for key, value in final_map_abs.items()]
         )
+
+        # Also invoke clang-tidy with absolute paths to match compile_commands.json.
+        files_to_process = [to_repo_abs(f, git_root) for f in files_to_process]
     else:
-        files_to_process = candidate_files
+        # No diff mode: run on the provided candidate files.
+        if not candidate_files:
+            print("No valid C/C++ files found to check.")
+            return 0
+        files_to_process = [to_repo_abs(f, git_root) for f in candidate_files]
         line_filter_json = ""
 
     clang_tidy_bin = args.clang_tidy_binary
@@ -358,10 +559,27 @@ def parse_args():
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--commit",
-        help="Git commit/ref to compare against (incremental check on changed lines)",
+        help="Base git ref/SHA to diff against (legacy; prefer --diff=base --base-ref)",
     )
     group.add_argument(
         "--directory", "-d", help="Run recursively on all C/C++ files in this directory"
+    )
+
+    parser.add_argument(
+        "--diff",
+        choices=["auto", "local", "staged", "base", "none"],
+        default="auto",
+        help=(
+            "Diff mode: auto (GitHub base in CI, local base + staged locally), "
+            "local (merge-base to base branch + staged), staged (git diff --cached), "
+            "base (git diff <base>...HEAD + staged), none (run on given files)."
+        ),
+    )
+    parser.add_argument(
+        "--base-ref",
+        help=(
+            "Base git ref/SHA to use with --diff=base. In GitHub Actions you can also set CI_BASE_SHA."
+        ),
     )
 
     parser.add_argument("--fix", action="store_true", help="Automatically apply fixes")
