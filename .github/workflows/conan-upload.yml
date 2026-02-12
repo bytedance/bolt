@@ -59,6 +59,7 @@ jobs:
         build_options:
           - ""
           - "-o '*:spark_compatible=True'"
+          - "-o '*:enable_s3=True'"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
