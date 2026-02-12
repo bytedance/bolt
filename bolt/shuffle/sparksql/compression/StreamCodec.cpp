@@ -15,11 +15,12 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/StreamCodec.h"
-#include <fmt/format.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/compression/GzipStreamCodec.h"
 #include "bolt/shuffle/sparksql/compression/Lz4FrameStreamCodec.h"
 #include "bolt/shuffle/sparksql/compression/ZstdStreamCodec.h"
+
+#include <fmt/format.h>
 
 namespace bytedance::bolt::shuffle::sparksql {
 

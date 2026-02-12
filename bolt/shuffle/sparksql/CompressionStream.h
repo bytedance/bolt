@@ -35,15 +35,14 @@
 #include <arrow/status.h>
 #include <fmt/format.h>
 #include <glog/logging.h>
-#include <shuffle/sparksql/compression/Codec.h>
-#include <shuffle/sparksql/compression/ZstdCodec.h>
-#include <shuffle/sparksql/compression/ZstdStreamCodec.h>
 #include <zstd.h>
 #include <string>
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/functions/InlineFlatten.h"
 #include "bolt/shuffle/sparksql/Options.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
 #include "bolt/shuffle/sparksql/compression/ZstdStreamCodec.h"
 namespace bytedance::bolt::shuffle::sparksql {
 

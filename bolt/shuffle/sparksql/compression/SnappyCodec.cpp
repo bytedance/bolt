@@ -15,8 +15,8 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/SnappyCodec.h"
+#include "bolt/common/base/Exceptions.h"
 
-#include <common/base/Exceptions.h>
 #include <snappy.h>
 
 namespace bytedance::bolt::shuffle::sparksql {

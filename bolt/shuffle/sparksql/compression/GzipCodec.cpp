@@ -15,8 +15,8 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/GzipCodec.h"
+#include "bolt/common/base/Exceptions.h"
 
-#include <common/base/Exceptions.h>
 #include <zlib.h>
 
 #include <cstring>

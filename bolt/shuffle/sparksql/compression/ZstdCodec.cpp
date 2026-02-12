@@ -15,8 +15,8 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
+#include "bolt/common/base/Exceptions.h"
 
-#include <common/base/Exceptions.h>
 #include <fmt/format.h>
 #include <zstd.h>
 

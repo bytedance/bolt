@@ -34,7 +34,6 @@
 #include <arrow/array/array_binary.h>
 #include <arrow/buffer.h>
 #include <arrow/io/buffered.h>
-#include <shuffle/sparksql/compression/Codec.h>
 
 #include "arrow/c/bridge.h"
 #include "arrow/c/helpers.h"
@@ -42,6 +41,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/Payload.h"
 #include "bolt/shuffle/sparksql/Utils.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"

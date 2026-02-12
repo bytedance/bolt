@@ -15,16 +15,15 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/Codec.h"
-
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SimdUtil.h"
+#include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/shuffle/sparksql/compression/GzipCodec.h"
 #include "bolt/shuffle/sparksql/compression/Lz4Codec.h"
 #include "bolt/shuffle/sparksql/compression/SnappyCodec.h"
 #include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
-#include "shuffle/sparksql/compression/Compression.h"
 
 #include <arrow/util/type_fwd.h>
-#include <common/base/Exceptions.h>
-#include <common/base/SimdUtil.h>
 
 #include <cmath>
 #include <cstring>

@@ -15,9 +15,9 @@
  */
 
 #include "bolt/shuffle/sparksql/compression/Lz4Codec.h"
-#include <common/base/Exceptions.h>
 #include <lz4.h>
 #include <lz4hc.h>
+#include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::shuffle::sparksql {
 Lz4Codec::Lz4Codec(const CodecOptions& options)
