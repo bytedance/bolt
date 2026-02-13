@@ -40,6 +40,7 @@
 #include <arrow/util/io_util.h>
 #include <chrono>
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
@@ -69,7 +70,7 @@ int64_t getBufferSize(
 
 int64_t getMaxCompressedBufferSize(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
-    arrow::util::Codec* codec);
+    Codec* codec);
 
 std::shared_ptr<arrow::Buffer> zeroLengthNullBuffer();
 

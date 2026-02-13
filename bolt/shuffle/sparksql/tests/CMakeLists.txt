@@ -90,3 +90,41 @@ add_test(
     NAME bolt_shuffle_spark_memory_test
     COMMAND bolt_shuffle_spark_memory_test
 )
+
+add_executable(
+    bolt_shuffle_codec_test
+    CodecTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_codec_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_codec_test
+    COMMAND bolt_shuffle_codec_test
+)
+
+add_executable(
+    bolt_shuffle_adaptive_zstd_codec_test
+    AdaptiveParallelZstdCodecTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_adaptive_zstd_codec_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_adaptive_zstd_codec_test
+    COMMAND bolt_shuffle_adaptive_zstd_codec_test
+)

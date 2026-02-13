@@ -381,6 +381,47 @@ TEST_F(ParquetWriterTest, splitWrite) {
   assertWrite(parquetPath, kRows, schema, data, writerOptions);
 };
 
+TEST_F(ParquetWriterTest, flush) {
+  const size_t kRows = 4 * 1024;
+
+  auto type = getType();
+  auto schema = std::static_pointer_cast<const RowType>(type);
+  auto data = bytedance::bolt::test::BatchMaker::createBatch(
+      type, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
+
+  {
+    std::string parquetPath = tempPath_->path + "/flush1.parquet";
+    vp::WriterOptions writerOptions{};
+
+    auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+    writer->write(data);
+    writer->flush();
+    writer->close();
+
+    assertRead(parquetPath, data->size(), schema, data);
+    auto reader = createLocalParquetReader(parquetPath);
+    EXPECT_EQ(1, reader->fileMetaData().numRowGroups());
+    EXPECT_EQ(data->size(), reader->fileMetaData().rowGroup(0).numRows());
+  }
+  {
+    std::string parquetPath = tempPath_->path + "/flush2.parquet";
+    vp::WriterOptions writerOptions{};
+    auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+    auto size = data->size() / 2;
+    writer->write(data->slice(0, size));
+    writer->flush();
+    writer->write(data->slice(size, data->size() - size));
+    writer->close();
+
+    assertRead(parquetPath, data->size(), schema, data);
+    auto reader = createLocalParquetReader(parquetPath);
+    const auto& fileMetaData = reader->fileMetaData();
+    ASSERT_EQ(2, fileMetaData.numRowGroups());
+    EXPECT_EQ(size, fileMetaData.rowGroup(0).numRows());
+    EXPECT_EQ(data->size() - size, fileMetaData.rowGroup(1).numRows());
+  }
+};
+
 TEST_F(ParquetWriterTest, columnNullable) {
   const size_t kRows = 1100;
   auto type = getType();

@@ -116,14 +116,14 @@ class BlockPayload : public Payload {
       std::vector<std::shared_ptr<arrow::Buffer>> buffers,
       const std::vector<bool>* isValidityBuffer,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
+      Codec* codec,
       Payload::Mode mode,
       bool hasComplexType);
 
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> deserialize(
       arrow::io::InputStream* inputStream,
       const std::shared_ptr<arrow::Schema>& schema,
-      const std::shared_ptr<arrow::util::Codec>& codec,
+      const std::shared_ptr<Codec>& codec,
       arrow::MemoryPool* pool,
       uint32_t& numRows,
       uint64_t& decompressTime,
@@ -133,7 +133,7 @@ class BlockPayload : public Payload {
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>>
   deserializeRowVectorModeBuffers(
       arrow::io::InputStream* inputStream,
-      const std::shared_ptr<arrow::util::Codec>& codec,
+      const std::shared_ptr<Codec>& codec,
       arrow::MemoryPool* pool,
       uint32_t& numRows,
       uint64_t& decompressTime,
@@ -147,7 +147,7 @@ class BlockPayload : public Payload {
   static void concatBuffer(
       std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
+      Codec* codec,
       Payload::Mode& mode,
       bool hasComplexType);
 
@@ -163,7 +163,7 @@ class BlockPayload : public Payload {
       std::vector<std::shared_ptr<arrow::Buffer>> buffers,
       const std::vector<bool>* isValidityBuffer,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
+      Codec* codec,
       Payload::Mode mode = Payload::Mode::kBuffer)
       : Payload(type, numRows, isValidityBuffer, mode),
         buffers_(std::move(buffers)),
@@ -174,7 +174,7 @@ class BlockPayload : public Payload {
 
   std::vector<std::shared_ptr<arrow::Buffer>> buffers_;
   arrow::MemoryPool* pool_;
-  arrow::util::Codec* codec_;
+  Codec* codec_;
 };
 
 class InMemoryPayload final : public Payload {
@@ -206,7 +206,7 @@ class InMemoryPayload final : public Payload {
   arrow::Result<std::unique_ptr<BlockPayload>> toBlockPayload(
       Payload::Type payloadType,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
+      Codec* codec,
       bool hasComplexType);
 
   int64_t getBufferSize() const;
@@ -226,7 +226,7 @@ class UncompressedDiskBlockPayload : public Payload {
       arrow::io::InputStream*& inputStream,
       uint64_t rawSize,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec);
+      Codec* codec);
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> readBufferAt(
       uint32_t index) override;
@@ -237,7 +237,7 @@ class UncompressedDiskBlockPayload : public Payload {
   arrow::io::InputStream*& inputStream_;
   uint64_t rawSize_;
   arrow::MemoryPool* pool_;
-  arrow::util::Codec* codec_;
+  Codec* codec_;
   uint32_t readPos_{0};
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> readUncompressedBuffer();
@@ -271,7 +271,7 @@ class RowBlockPayload : public Payload {
       uint8_t* dst,
       int32_t dstSize,
       int32_t& offset,
-      ZstdStreamCodec* codec,
+      AdaptiveParallelZstdCodec* codec,
       std::vector<std::string_view>& outputRows,
       int32_t& outputLen,
       bool& eof,
@@ -288,7 +288,7 @@ class RowBlockPayload : public Payload {
       folly::Range<uint8_t**> rows,
       const int64_t rawSize,
       arrow::MemoryPool* pool,
-      ZstdStreamCodec* codec,
+      AdaptiveParallelZstdCodec* codec,
       RowVectorLayout layout = RowVectorLayout::kColumnar)
       : Payload(kCompressed, rows.size(), nullptr, kUnsafeRow),
         rows_(rows),
@@ -300,7 +300,7 @@ class RowBlockPayload : public Payload {
  private:
   folly::Range<uint8_t**> rows_;
   arrow::MemoryPool* pool_;
-  ZstdStreamCodec* codec_;
+  AdaptiveParallelZstdCodec* codec_;
   // Caution: rawSize_ is not accuracy for rss
   const int64_t rawSize_{0};
   const RowVectorLayout layout_{RowVectorLayout::kColumnar};

@@ -267,8 +267,8 @@ target_link_libraries(bolt_engine PUBLIC
                                   Boost::url
                                   cpr::cpr
                                   $<$<BOOL:${BOLT_ENABLE_SPARK_COMPATIBLE}>:celeborn-cpp-client::celeborn-cpp-client>
+                                  $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
                                   CURL::libcurl
-
 )
 
 if(${BOLT_BUILD_TEST_UTILS})

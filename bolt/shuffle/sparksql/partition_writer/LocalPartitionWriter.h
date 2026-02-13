@@ -152,6 +152,6 @@ class LocalPartitionWriter : public PartitionWriter {
 
   // for BoltRowBasedSortShuffleWriter
   std::shared_ptr<PartitionRowWriter> partitionRowWriter_;
-  std::shared_ptr<ZstdStreamCodec> zstdCodec_;
+  std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_;
 };
 } // namespace bytedance::bolt::shuffle::sparksql

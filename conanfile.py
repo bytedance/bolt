@@ -190,7 +190,7 @@ class BoltConan(ConanFile):
             self.requires("aws-c-common/0.12.5", force=True)
         self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires(
-            "sonic-cpp/1.0.2-fix", transitive_headers=True, transitive_libs=True
+            "sonic-cpp/1.0.2-bolt", transitive_headers=True, transitive_libs=True
         )
         self.requires(
             f"protobuf/{protobuf_version}",

@@ -274,6 +274,7 @@ compile_db_all:
 	BUILD_TYPE=Release \
 	BOLT_BUILD_TESTING="ON" \
 	BOLT_BUILD_BENCHMARKS="ON" \
+	ENABLE_S3="True" \
 	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 export_base:

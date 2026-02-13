@@ -41,28 +41,48 @@
 #include "bolt/common/time/Timer.h"
 #include "bolt/functions/InlineFlatten.h"
 #include "bolt/shuffle/sparksql/Options.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/compression/ZstdCodec.h"
+#include "bolt/shuffle/sparksql/compression/ZstdStreamCodec.h"
 namespace bytedance::bolt::shuffle::sparksql {
-#define DEFAULT_STREAM_COMPRESSION_LEVEL 1
 
-class ZstdStreamCodec {
+class AdaptiveParallelZstdCodec {
  public:
   // todo: make configurable
   static constexpr int32_t kParallelCompressionThreshold = 2 * 1024 * 1024;
   static constexpr int32_t kWorkerNumber = 2;
 
-  ZstdStreamCodec(
+  AdaptiveParallelZstdCodec(
       int32_t compressionLevel,
       bool compress,
-      arrow::MemoryPool* pool)
-      : compressionLevel_(compressionLevel),
+      arrow::MemoryPool* pool,
+      bool checksumEnabled = true)
+      : zstdCompressor_(
+            compress ? std::make_unique<ZstdStreamCompressor>(CodecOptions{
+                           CodecBackend::NONE,
+                           compressionLevel,
+                           checksumEnabled})
+                     : nullptr),
+        parallelZstdCompressor_(
+            compress ? std::make_unique<ZstdStreamCompressor>(ZstdCodecOptions{
+                           CodecBackend::NONE,
+                           compressionLevel,
+                           checksumEnabled,
+                           kWorkerNumber})
+                     : nullptr),
+        zstdDecompressor_(
+            compress ? nullptr
+                     : std::make_unique<ZstdStreamDecompressor>(CodecOptions{
+                           CodecBackend::NONE,
+                           compressionLevel,
+                           checksumEnabled})),
         BUFFER_SIZE(compress ? ZSTD_CStreamInSize() : 0),
         MAX_COMPRESS_SIZE(
-            compress ? maxCompressedSize(BUFFER_SIZE) * 2
+            compress ? zstdCompressor_->recommendedOutputSize(BUFFER_SIZE) * 2
                      : ZSTD_DStreamInSize()),
-        pool_(pool) {
+        pool_(pool),
+        checksumEnabled_(checksumEnabled) {
     if (compress) {
-      auto status = initCCtx();
-      BOLT_CHECK(status.ok(), "initCCtx failed : " + status.message());
       uncompressedBuffer_ =
           arrow::AllocateResizableBuffer(BUFFER_SIZE, pool_).ValueOrDie();
       uncompressBufferPtr_ = uncompressedBuffer_->mutable_data();
@@ -72,44 +92,14 @@ class ZstdStreamCodec {
       LOG(INFO) << "ZstdStreamCodec isCompress = " << compress
                 << ", cin buffer = " << BUFFER_SIZE
                 << ", cout = " << MAX_COMPRESS_SIZE
-                << ", compressionLevel = " << compressionLevel;
+                << ", compressionLevel = " << compressionLevel
+                << ", checksumEnabled = " << checksumEnabled;
 
     } else {
-      zstdDCtx_ = ZSTD_createDCtx();
       compressedBuffer_ =
           arrow::AllocateResizableBuffer(MAX_COMPRESS_SIZE, pool_).ValueOrDie();
       compressBufferPtr_ = compressedBuffer_->mutable_data();
     }
-  }
-
-  ~ZstdStreamCodec() {
-    if (zstdCCtx_) {
-      ZSTD_freeCCtx(zstdCCtx_);
-      zstdCCtx_ = nullptr;
-    }
-
-    if (zstdCCtx2_) {
-      ZSTD_freeCCtx(zstdCCtx2_);
-      zstdCCtx2_ = nullptr;
-    }
-
-    if (zstdDCtx_) {
-      ZSTD_freeDCtx(zstdDCtx_);
-      zstdDCtx_ = nullptr;
-    }
-  }
-
-  arrow::Status resetDCtx() {
-    BOLT_DCHECK(zstdDCtx_, "zstdDCtx_ should not be nullptr");
-    auto ret = ZSTD_DCtx_reset(zstdDCtx_, ZSTD_reset_session_only);
-    if (ZSTD_isError(ret)) {
-      return arrow::Status::Invalid("ZSTD_DCtx_reset failed");
-    }
-    return arrow::Status::OK();
-  }
-
-  size_t maxCompressedSize(size_t size) {
-    return ZSTD_compressBound(size);
   }
 
   arrow::Status CompressAndFlush(
@@ -117,11 +107,9 @@ class ZstdStreamCodec {
       arrow::io::OutputStream* outputStream,
       const int64_t rawSize,
       const RowVectorLayout layout) {
-    if (rawSize >= kParallelCompressionThreshold) {
-      currentCCtx_ = zstdCCtx2_;
-    } else {
-      currentCCtx_ = zstdCCtx_;
-    }
+    auto& compressor = rawSize >= kParallelCompressionThreshold
+        ? *parallelZstdCompressor_
+        : *zstdCompressor_;
     RETURN_NOT_OK(outputStream->Write((uint8_t*)(&layout), 1));
     for (auto i = 0; i < rows.size(); ++i) {
       uint8_t* input = rows.data()[i];
@@ -130,19 +118,18 @@ class ZstdStreamCodec {
       if (inputSize >= BUFFER_SIZE || inputSize + len_ > BUFFER_SIZE) {
         // compress cached data first
         if (len_) {
-          ZSTD_outBuffer outBuf{compressBufferPtr_, MAX_COMPRESS_SIZE, 0};
-          ZSTD_inBuffer inBuf{uncompressBufferPtr_, len_, 0};
-          RETURN_NOT_OK(CompressInternal(inBuf, outBuf, outputStream));
-          if (outBuf.pos) {
-            bytedance::bolt::NanosecondTimer timer(&writeTime_);
-            RETURN_NOT_OK(outputStream->Write(compressBufferPtr_, outBuf.pos));
-          }
+          RETURN_NOT_OK(CompressInternal(
+              compressor,
+              uncompressBufferPtr_,
+              len_,
+              compressBufferPtr_,
+              MAX_COMPRESS_SIZE,
+              outputStream));
           len_ = 0;
         }
         // input row is extremely large
         if (inputSize >= BUFFER_SIZE) {
-          ZSTD_inBuffer inBuf{input, (size_t)inputSize, 0};
-          auto outputSize = maxCompressedSize(inputSize) * 2;
+          auto outputSize = compressor.recommendedOutputSize(inputSize) * 2;
           if (largeBuffer_) {
             RETURN_NOT_OK(largeBuffer_->Resize(outputSize));
           } else {
@@ -150,13 +137,13 @@ class ZstdStreamCodec {
                 largeBuffer_,
                 arrow::AllocateResizableBuffer(outputSize, pool_));
           }
-          ZSTD_outBuffer outBuf{largeBuffer_->mutable_data(), outputSize, 0};
-          RETURN_NOT_OK(CompressInternal(inBuf, outBuf, outputStream));
-          if (outBuf.pos) {
-            bytedance::bolt::NanosecondTimer timer(&writeTime_);
-            RETURN_NOT_OK(
-                outputStream->Write(largeBuffer_->data(), outBuf.pos));
-          }
+          RETURN_NOT_OK(CompressInternal(
+              compressor,
+              input,
+              (size_t)inputSize,
+              largeBuffer_->mutable_data(),
+              outputSize,
+              outputStream));
         } else {
           // inputSize + len_ > BUFFER_SIZE but inputSize < BUFFER_SIZE
           bytedance::bolt::simd::memcpy(
@@ -170,8 +157,33 @@ class ZstdStreamCodec {
         len_ += inputSize;
       }
     }
-    RETURN_NOT_OK(endCompressionStream(outputStream));
-    RETURN_NOT_OK(resetCCtx());
+    if (len_) {
+      RETURN_NOT_OK(CompressInternal(
+          compressor,
+          uncompressBufferPtr_,
+          len_,
+          compressBufferPtr_,
+          MAX_COMPRESS_SIZE,
+          outputStream));
+      len_ = 0;
+    }
+
+    uint64_t compressTime = 0;
+    uint64_t writeTime = 0;
+    StreamEndResult endResult;
+    do {
+      bytedance::bolt::NanosecondTimer timer(&compressTime);
+      endResult = compressor.end(compressBufferPtr_, MAX_COMPRESS_SIZE);
+      if (endResult.bytesWritten > 0) {
+        bytedance::bolt::NanosecondTimer timer1(&writeTime);
+        RETURN_NOT_OK(
+            outputStream->Write(compressBufferPtr_, endResult.bytesWritten));
+      }
+    } while (!endResult.noMoreOutput);
+    compressTime_ += (compressTime - writeTime);
+    writeTime_ += writeTime;
+    compressor.reset();
+    len_ = 0;
     return arrow::Status::OK();
   }
 
@@ -212,26 +224,19 @@ class ZstdStreamCodec {
         frameFinished_ = false;
       }
 
-      ZSTD_inBuffer inBuf{compressBufferPtr_, srcSize_, srcPos_};
-      ZSTD_outBuffer outBuf{dst, (size_t)dstSize, (size_t)dstPos};
-      size_t size = ZSTD_decompressStream(zstdDCtx_, &outBuf, &inBuf);
-      srcPos_ = inBuf.pos;
-      dstPos = outBuf.pos;
-
-      if (ZSTD_isError(size)) [[unlikely]] {
-        return arrow::Status::Invalid(
-            "ZSTD_decompressStream error : " +
-            std::string(ZSTD_getErrorName(size)) + ", outputSize = " +
-            std::to_string(dstSize) + ", offset = " + std::to_string(offset) +
-            ", dstPos = " + std::to_string(dstPos) +
-            ", inputSize = " + std::to_string(srcSize_) +
-            ", inputPos = " + std::to_string(srcPos_));
-      }
+      auto result = zstdDecompressor_->decompress(
+          compressBufferPtr_ + srcPos_,
+          srcSize_ - srcPos_,
+          dst + dstPos,
+          dstSize - dstPos);
+      srcPos_ += result.bytesRead;
+      dstPos += result.bytesWritten;
 
       // we have completed a frame
-      if (size == 0) {
+      if (zstdDecompressor_->isFinished()) {
         frameFinished_ = true;
-        // need to read from the inputStream only if source buffer are consumed
+        // need to read from the inputStream only if source buffer are
+        // consumed
         needRead_ = srcPos_ == srcSize_;
         if (!needRead_) {
           if (skipHeader(layout, dstPos, offset, outputLen, layoutEnd)) {
@@ -291,33 +296,39 @@ class ZstdStreamCodec {
 
  private:
   arrow::Status CompressInternal(
-      ZSTD_inBuffer& inBuf,
-      ZSTD_outBuffer& outBuf,
+      ZstdStreamCompressor& compressor,
+      const uint8_t* input,
+      int64_t inputLen,
+      uint8_t* output,
+      int64_t outputLen,
       arrow::io::OutputStream* outputStream) {
     uint64_t compressTime = 0, writeTime = 0;
     {
       bytedance::bolt::NanosecondTimer timer(&compressTime);
+      StreamCompressResult result;
+      auto outputPos = 0;
       do {
-        auto ret = ZSTD_compressStream2(
-            currentCCtx_, &outBuf, &inBuf, ZSTD_e_continue);
-        if (ZSTD_isError(ret)) [[unlikely]] {
-          return arrow::Status::Invalid(
-              "ZSTD_compressStream2 failed : " +
-              std::string(ZSTD_getErrorName(ret)));
-        }
-        if (ret > 0 && outBuf.pos == outBuf.size) {
+        result = compressor.compress(
+            input, inputLen, output + outputPos, outputLen - outputPos);
+        input += result.bytesRead;
+        inputLen -= result.bytesRead;
+        outputPos += result.bytesWritten;
+        if (outputPos == outputLen || inputLen == 0) {
+          // output buffer is full or input is empty, write to the output
+          // stream
           bytedance::bolt::NanosecondTimer timer1(&writeTime);
-          RETURN_NOT_OK(outputStream->Write(outBuf.dst, outBuf.pos));
-          outBuf.pos = 0;
+          RETURN_NOT_OK(outputStream->Write(output, outputPos));
         }
-      } while (inBuf.pos != inBuf.size);
+      } while (inputLen > 0);
     }
     compressTime_ += (compressTime - writeTime);
     writeTime_ += writeTime;
     return arrow::Status::OK();
   }
 
-  arrow::Status endCompressionStream(arrow::io::OutputStream* outputStream) {
+  arrow::Status endCompressionStream(
+      ZstdStreamCompressor& compressor,
+      arrow::io::OutputStream* outputStream) {
     ZSTD_outBuffer outBuf{compressBufferPtr_, MAX_COMPRESS_SIZE, 0};
     ZSTD_inBuffer inBuf{uncompressBufferPtr_, len_, 0};
     uint64_t compressTime = 0, writeTime = 0;
@@ -348,34 +359,6 @@ class ZstdStreamCodec {
     return arrow::Status::OK();
   }
 
-  arrow::Status initCCtx() {
-    zstdCCtx_ = ZSTD_createCCtx();
-    auto ret = ZSTD_CCtx_setParameter(
-        zstdCCtx_, ZSTD_c_compressionLevel, compressionLevel_);
-    if (ZSTD_isError(ret)) {
-      return arrow::Status::Invalid(
-          "ZSTD_CCtx_setParameter 1 compressionLevel = " +
-          std::to_string(compressionLevel_));
-    }
-    zstdCCtx2_ = ZSTD_createCCtx();
-    ret = ZSTD_CCtx_setParameter(
-        zstdCCtx2_, ZSTD_c_compressionLevel, compressionLevel_);
-    if (ZSTD_isError(ret)) [[unlikely]] {
-      return arrow::Status::Invalid(
-          "ZSTD_CCtx_setParameter 2 compressionLevel = " +
-          std::to_string(compressionLevel_));
-    }
-
-    ret = ZSTD_CCtx_setParameter(zstdCCtx2_, ZSTD_c_nbWorkers, kWorkerNumber);
-    if (ZSTD_isError(ret)) [[unlikely]] {
-      return arrow::Status::Invalid(
-          "ZSTD_CCtx_setParameter 2 ZSTD_c_nbWorkers = " +
-          std::to_string(kWorkerNumber));
-    }
-
-    return arrow::Status::OK();
-  }
-
   arrow::Status resetCCtx() {
     auto ret = ZSTD_CCtx_reset(currentCCtx_, ZSTD_reset_session_only);
     if (ZSTD_isError(ret)) {
@@ -386,11 +369,7 @@ class ZstdStreamCodec {
   }
 
   std::string toString() {
-    return fmt::format(
-        " len_ = {},  BUFFER_SIZE = {},  compressionLevel_ = {}",
-        len_,
-        BUFFER_SIZE,
-        compressionLevel_);
+    return fmt::format(" len_ = {},  BUFFER_SIZE = {}", len_, BUFFER_SIZE);
   }
 
   FLATTEN bool skipHeader(
@@ -415,12 +394,13 @@ class ZstdStreamCodec {
     return false;
   }
 
-  ZSTD_CCtx* zstdCCtx_{nullptr};
-  ZSTD_CCtx* zstdCCtx2_{nullptr};
+  std::unique_ptr<ZstdStreamCompressor> zstdCompressor_;
+  std::unique_ptr<ZstdStreamCompressor> parallelZstdCompressor_;
+
+  std::unique_ptr<ZstdStreamDecompressor> zstdDecompressor_;
+
   ZSTD_CCtx* currentCCtx_{nullptr};
 
-  ZSTD_DCtx* zstdDCtx_{nullptr};
-  int32_t compressionLevel_;
   std::unique_ptr<arrow::Buffer> uncompressedBuffer_{nullptr};
   uint8_t* uncompressBufferPtr_;
   std::unique_ptr<arrow::Buffer> compressedBuffer_{nullptr};
@@ -439,6 +419,9 @@ class ZstdStreamCodec {
   bool needRead_{true};
   bool frameFinished_{true};
   RowVectorLayout layout_{RowVectorLayout::kInvalid};
+
+  // for checksum
+  bool checksumEnabled_{true};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql

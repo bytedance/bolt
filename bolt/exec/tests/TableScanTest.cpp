@@ -1703,24 +1703,7 @@ TEST_F(TableScanTest, preloadingSplitClose) {
     });
   }
   ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
-  std::shared_ptr<Task> task;
-  {
-    // Unblock the IO thread pool after a short delay to allow the task to
-    // finish. This is necessary because TableScan::close() waits for pending
-    // preloads, and if the IO threads are blocked, the preloads will never
-    // complete.
-    std::thread unblocker([&batons]() {
-      /* sleep override */
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-      for (auto& baton : batons) {
-        baton.post();
-      }
-    });
-
-    task = assertQuery(tableScanNode(), filePaths, "SELECT * FROM tmp", 2);
-    unblocker.join();
-  }
-
+  auto task = assertQuery(tableScanNode(), filePaths, "SELECT * FROM tmp", 2);
   auto stats = getTableScanRuntimeStats(task);
 
   // Verify that split preloading is enabled.
@@ -1730,6 +1713,10 @@ TEST_F(TableScanTest, preloadingSplitClose) {
   // Once all task references are cleared, the count of deleted tasks should
   // promptly match the count of created tasks.
   ASSERT_EQ(Task::numCreatedTasks(), Task::numDeletedTasks());
+  // Clean blocking items in the IO thread pool.
+  for (auto& baton : batons) {
+    baton.post();
+  }
   latch.wait();
 }
 
@@ -4686,4 +4673,39 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
           errorMsg + "|")
       .taskId("ATTEMPT_9")
       .assertResults(expected);
+}
+
+TEST_F(TableScanTest, filterMissingFields) {
+  constexpr int kSize = 10;
+  auto iota = makeFlatVector<int64_t>(kSize, folly::identity);
+  auto data = makeRowVector({makeRowVector({iota})});
+  auto file = TempFilePath::create();
+  writeToFile(file->getPath(), {data});
+  auto schema = makeRowType({
+      makeRowType({BIGINT(), BIGINT()}),
+      makeRowType({BIGINT()}),
+      BIGINT(),
+  });
+  auto test = [&](const std::vector<std::string>& subfieldFilters,
+                  int expectedSize) {
+    SCOPED_TRACE(fmt::format("{}", fmt::join(subfieldFilters, " AND ")));
+    auto plan = PlanBuilder()
+                    .tableScan(ROW({}, {}), subfieldFilters, "", schema)
+                    .planNode();
+    auto split = makeHiveConnectorSplit(file->getPath());
+    auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+    ASSERT_EQ(result->size(), expectedSize);
+  };
+  test({"c0.c1 = 0"}, 0);
+  test({"c0.c1 IS NULL"}, kSize);
+  test({"c1 IS NOT NULL"}, 0);
+  test({"c1 IS NULL"}, kSize);
+  test({"c1.c0 = 0"}, 0);
+  test({"c1.c0 IS NULL"}, kSize);
+  test({"c2 = 0"}, 0);
+  test({"c2 IS NULL"}, kSize);
+  test({"c2 = 0", "c0.c1 IS NULL"}, 0);
+  test({"c2 IS NULL", "c0.c1 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 IS NULL"}, 1);
 }
