@@ -27,18 +27,29 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
+#include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
 #include "bolt/shuffle/sparksql/tests/LocalFileReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MockRssClient.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
+#include <celeborn/client/ShuffleClient.h>
+#include <celeborn/conf/CelebornConf.h>
+#include <folly/init/Init.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include <fmt/format.h>
@@ -113,6 +124,80 @@ std::string shuffleModeToString(int mode) {
 }
 
 constexpr uint32_t kPidSeed = 42;
+constexpr int kCelebornAttemptId = 0;
+constexpr const char* kRealCelebornEnv = "BOLT_SHUFFLE_TEST_REAL_CELEBORN";
+constexpr const char* kCelebornLmEndpointFileEnv =
+    "BOLT_CELEBORN_LM_ENDPOINT_FILE";
+constexpr const char* kCelebornLmAppIdEnv = "BOLT_CELEBORN_LM_APP_ID";
+
+bool readBoolEnv(const char* env, bool defaultValue = false) {
+  const char* value = std::getenv(env);
+  if (value == nullptr || std::strlen(value) == 0) {
+    return defaultValue;
+  }
+  auto flag = std::string(value);
+  return flag == "1" || flag == "true" || flag == "TRUE";
+}
+
+std::string getEnvOrDefault(const char* env, const std::string& defaultValue) {
+  const char* value = std::getenv(env);
+  if (value == nullptr || std::strlen(value) == 0) {
+    return defaultValue;
+  }
+  return value;
+}
+
+void ensureFollyInitializedForCeleborn() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    int argc = 1;
+    char arg0[] = "bolt-shuffle-test";
+    char* argv[] = {arg0, nullptr};
+    char** argvPtr = argv;
+    folly::init(&argc, &argvPtr, false);
+  });
+}
+
+std::vector<std::shared_ptr<celeborn::client::ShuffleClient>>&
+leakedRealCelebornClients() {
+  static auto* clients =
+      new std::vector<std::shared_ptr<celeborn::client::ShuffleClient>>();
+  return *clients;
+}
+
+std::pair<std::string, int> loadLifecycleManagerEndpointForTests() {
+  const auto endpointFile = getEnvOrDefault(
+      kCelebornLmEndpointFileEnv,
+      "bolt/shuffle/sparksql/tests/celeborn/runtime/state/lifecycle_manager.endpoint");
+  std::ifstream in(endpointFile);
+  BOLT_CHECK(
+      in.good(),
+      "Cannot open lifecycle manager endpoint file: " + endpointFile);
+  std::string endpoint;
+  std::getline(in, endpoint);
+  const auto pos = endpoint.rfind(':');
+  BOLT_CHECK(
+      pos != std::string::npos,
+      "Invalid lifecycle manager endpoint: " + endpoint);
+  return {endpoint.substr(0, pos), std::stoi(endpoint.substr(pos + 1))};
+}
+
+std::shared_ptr<celeborn::client::ShuffleClient>
+createRealCelebornClientForTests(const std::string& appId) {
+  auto [lmHost, lmPort] = loadLifecycleManagerEndpointForTests();
+  ensureFollyInitializedForCeleborn();
+  auto conf = std::make_shared<celeborn::conf::CelebornConf>();
+  auto endpoint = celeborn::client::ShuffleClientEndpoint(conf);
+  auto client =
+      celeborn::client::ShuffleClientImpl::create(appId, conf, endpoint);
+  client->setupLifecycleManagerRef(lmHost, lmPort);
+  return client;
+}
+
+int nextCelebornShuffleIdForTests() {
+  static std::atomic<int> nextShuffleId{10000};
+  return nextShuffleId.fetch_add(1, std::memory_order_relaxed);
+}
 
 const std::vector<DataTypeGroup> dataGroups = {
     DataTypeGroup::kInteger,
@@ -463,12 +548,36 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
   std::filesystem::create_directories(localDir);
 
   std::shared_ptr<MockRssClient> mockRssClient;
+  std::shared_ptr<celeborn::client::ShuffleClient> realCelebornClient;
+  const bool useRealCeleborn =
+      param.writerType == PartitionWriterType::kCeleborn &&
+      readBoolEnv(kRealCelebornEnv);
   if (param.writerType == PartitionWriterType::kCeleborn) {
-    mockRssClient = std::make_shared<MockRssClient>();
+    if (useRealCeleborn) {
+      auto appId =
+          getEnvOrDefault(kCelebornLmAppIdEnv, "bolt-shuffle-test-app");
+      realCelebornClient = createRealCelebornClientForTests(appId);
+    } else {
+      mockRssClient = std::make_shared<MockRssClient>();
+    }
   }
+
+  struct RealCelebornClientLeakGuard {
+    bool enabled;
+    std::shared_ptr<celeborn::client::ShuffleClient>* client;
+
+    ~RealCelebornClientLeakGuard() {
+      if (enabled && client != nullptr && *client != nullptr) {
+        leakedRealCelebornClients().push_back(std::move(*client));
+      }
+    }
+  };
+  [[maybe_unused]] RealCelebornClientLeakGuard realCelebornClientLeakGuard{
+      useRealCeleborn, &realCelebornClient};
 
   std::vector<ShuffleWriterMetrics> mapperMetrics;
   std::vector<std::string> mapperDataFiles;
+  const int celebornShuffleId = nextCelebornShuffleIdForTests();
 
   for (int m = 0; m < param.numMappers; ++m) {
     std::string dataFile =
@@ -486,7 +595,18 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
         param.shuffleBufferSize;
 
     if (param.writerType == PartitionWriterType::kCeleborn) {
-      writerOptions.partitionWriterOptions.rssClient = mockRssClient;
+      if (useRealCeleborn) {
+        writerOptions.partitionWriterOptions.rssClient =
+            std::make_shared<NativeCelebornClient>(
+                realCelebornClient,
+                celebornShuffleId,
+                m,
+                kCelebornAttemptId,
+                param.numMappers,
+                param.numPartitions);
+      } else {
+        writerOptions.partitionWriterOptions.rssClient = mockRssClient;
+      }
     } else {
       writerOptions.partitionWriterOptions.dataFile = dataFile;
       writerOptions.partitionWriterOptions.configuredDirs = {localDir};
@@ -528,15 +648,47 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
   }
 
   result.partitionOutputs.resize(param.numPartitions);
+  if (useRealCeleborn) {
+    realCelebornClient->updateReducerFileGroup(celebornShuffleId);
+  }
+
+  auto partitionHasOutput = [&](int partition) {
+    int64_t bytes = 0;
+    for (const auto& metric : mapperMetrics) {
+      if (metric.partitionLengths.empty()) {
+        continue;
+      }
+      const auto idx = static_cast<size_t>(partition);
+      if (idx < metric.partitionLengths.size()) {
+        bytes += metric.partitionLengths[idx];
+      }
+    }
+    return bytes > 0;
+  };
+
   for (int i = 0; i < param.numPartitions; ++i) {
     std::shared_ptr<ReaderStreamIterator> streamIter;
     if (param.writerType == PartitionWriterType::kCeleborn) {
-      auto it = mockRssClient->getData().find(i);
-      if (it == mockRssClient->getData().end() || it->second.empty()) {
+      if (!partitionHasOutput(i)) {
         continue;
       }
-      streamIter = std::make_shared<MemoryReaderStreamIterator>(
-          std::vector<std::vector<char>>{it->second});
+      if (useRealCeleborn) {
+        streamIter = std::make_shared<CelebornReaderStreamIterator>(
+            realCelebornClient,
+            celebornShuffleId,
+            std::vector<int32_t>{i},
+            kCelebornAttemptId,
+            0,
+            param.numMappers,
+            false);
+      } else {
+        auto it = mockRssClient->getData().find(i);
+        if (it == mockRssClient->getData().end() || it->second.empty()) {
+          continue;
+        }
+        streamIter = std::make_shared<MemoryReaderStreamIterator>(
+            std::vector<std::vector<char>>{it->second});
+      }
     } else {
       std::vector<SegmentInfo> segments;
       for (int m = 0; m < param.numMappers; ++m) {
@@ -594,6 +746,10 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       }
       readerCursor->current().reset();
     }
+  }
+
+  if (useRealCeleborn) {
+    realCelebornClient->cleanupShuffle(celebornShuffleId);
   }
 
   return result;

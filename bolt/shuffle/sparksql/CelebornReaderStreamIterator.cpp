@@ -154,9 +154,12 @@ void CelebornReaderStreamIterator::updateMetrics(
     int64_t decompressTime,
     int64_t deserializeTime,
     int64_t totalReadTime) {
-  // TODO(celeborn): metric updater should be independent from reader iterator
-  BOLT_UNSUPPORTED(
-      "CelebornReaderStreamIterator does not support updateMetrics");
+  // TODO: align Celeborn read metrics reporting with Gluten implementation.
+  (void)numRows;
+  (void)numBatches;
+  (void)decompressTime;
+  (void)deserializeTime;
+  (void)totalReadTime;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

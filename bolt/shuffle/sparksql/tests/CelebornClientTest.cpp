@@ -399,12 +399,11 @@ TEST(CelebornReaderStreamIteratorTest, appendsMultiplePushesPerMap) {
   readStreamAndExpect(stream, expected);
 }
 
-// Confirms updateMetrics remains unsupported for the iterator.
-TEST(CelebornReaderStreamIteratorTest, updateMetricsUnsupported) {
+// Confirms updateMetrics is a no-op for the iterator.
+TEST(CelebornReaderStreamIteratorTest, updateMetricsNoop) {
   auto client = std::make_shared<FakeShuffleClient>();
   CelebornReaderStreamIterator iterator(client, 1, {1}, 0, 0, 0, false);
-  EXPECT_THROW(
-      iterator.updateMetrics(0, 0, 0, 0, 0), bytedance::bolt::BoltUserError);
+  EXPECT_NO_THROW(iterator.updateMetrics(0, 0, 0, 0, 0));
 }
 
 // Verifies read fails before any push and succeeds after push.

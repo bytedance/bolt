@@ -25,6 +25,28 @@ target_link_libraries(
         GTest::gtest_main
 )
 
+add_executable(bolt_shuffle_spark_celeborn_e2e_test CelebornE2ESmokeTest.cpp)
+
+add_test(
+    NAME bolt_shuffle_spark_celeborn_e2e_test
+    COMMAND bolt_shuffle_spark_celeborn_e2e_test
+)
+set_tests_properties(
+    bolt_shuffle_spark_celeborn_e2e_test
+    PROPERTIES
+        LABELS "celeborn_e2e"
+)
+
+target_link_libraries(
+    bolt_shuffle_spark_celeborn_e2e_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        glog::glog
+        GTest::gtest
+        GTest::gtest_main
+)
+
 add_executable(
     bolt_shuffle_spark_matrix_test
     ShuffleTestBase.cpp
