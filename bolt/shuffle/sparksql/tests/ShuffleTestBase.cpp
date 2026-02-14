@@ -55,6 +55,12 @@
 #include <fmt/format.h>
 #include <vector/ComplexVector.h>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::exec;
@@ -195,7 +201,17 @@ createRealCelebornClientForTests(const std::string& appId) {
 }
 
 int nextCelebornShuffleIdForTests() {
-  static std::atomic<int> nextShuffleId{10000};
+  constexpr int kShuffleIdStride = 10000;
+  constexpr int kPidModulo = 50000;
+  constexpr int kShuffleIdBase = 10000;
+#if defined(_WIN32)
+  const int processId = _getpid();
+#else
+  const int processId = static_cast<int>(getpid());
+#endif
+  const int pidBucket = std::abs(processId) % kPidModulo;
+  static std::atomic<int> nextShuffleId{
+      kShuffleIdBase + pidBucket * kShuffleIdStride};
   return nextShuffleId.fetch_add(1, std::memory_order_relaxed);
 }
 
