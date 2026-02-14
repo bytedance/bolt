@@ -93,10 +93,19 @@ function(bolt_add_library target_name)
 
   set(SHUFFLE_COMP_LIST "shuffle")
 
-  set(EXTENSIONS_COMP_LIST "torch" "cudf" "python")
+  set(BOLT_EXTENSION_COMP_LIST "cudf" "torch" "python")
 
   if (BOLT_INTERFACE)
     add_library(${target_name} INTERFACE ${ARGN})
+    return()
+  endif()
+  if (BOLT_OBJECT)
+    add_library(${target_name} OBJECT ${ARGN})
+    return()
+  endif()
+
+  if(FIRST_LEVEL_DIR IN_LIST BOLT_EXTENSION_COMP_LIST)
+    add_library(${target_name} ${ARGN})
     return()
   endif()
 
@@ -145,12 +154,6 @@ function(bolt_add_library target_name)
   if(FIRST_LEVEL_DIR IN_LIST SHUFFLE_COMP_LIST)
     list(APPEND BOLT_SHUFFLE_OBJECT_TARGETS $<TARGET_OBJECTS:${target_name}>)
     set(BOLT_SHUFFLE_OBJECT_TARGETS ${BOLT_SHUFFLE_OBJECT_TARGETS} CACHE INTERNAL "")
-    return()
-  endif()
-
-  if(FIRST_LEVEL_DIR IN_LIST EXTENSIONS_COMP_LIST)
-    list(APPEND EXTENSIONS_OBJECT_TARGETS $<TARGET_OBJECTS:${target_name}>)
-    set(EXTENSIONS_OBJECT_TARGETS ${EXTENSIONS_OBJECT_TARGETS} CACHE INTERNAL "")
     return()
   endif()
 

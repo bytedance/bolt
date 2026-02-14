@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_cudf_exec HashAggregation.cpp InterOp.cpp OrderBy.cpp)
+bolt_add_library(bolt_cudf_exec HashAggregation.cpp InterOp.cpp OrderBy.cpp)
 
 target_include_directories(bolt_cudf_exec PRIVATE ${cudf_INCLUDE_DIRS})
 
