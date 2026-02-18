@@ -368,6 +368,12 @@ class ScanSpec {
   void setLogicalTypeName(const std::string& name) {
     logicalTypeName_ = name;
   }
+  const std::string& convertedTypeName() const {
+    return convertedTypeName_;
+  }
+  void setConvertedTypeName(const std::string& name) {
+    convertedTypeName_ = name;
+  }
 
   // Whether this spec represents a column for the row index in the file
   bool isRowIndex() const {
@@ -471,6 +477,7 @@ class ScanSpec {
   bool isArrayElementOrMapEntry_ = false;
 
   std::string logicalTypeName_;
+  std::string convertedTypeName_;
 
   // Only take the first maxArrayElementsCount_ elements from each array.
   vector_size_t maxArrayElementsCount_ =
