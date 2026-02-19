@@ -1350,14 +1350,14 @@ class ParquetRowReader::Impl {
         auto ctIt = ctMap.find(path);
         if (ctIt != ctMap.end()) {
           const auto name = thrift::to_string(ctIt->second);
-          if (!spec.convertedTypeName().empty() &&
-              spec.convertedTypeName() != name) {
-            BOLT_FAIL(fmt::format(
-                "ConvertedType mismatch for path {}: scanSpec={}, schema={}",
-                path,
-                spec.convertedTypeName(),
-                name));
-          }
+          BOLT_CHECK(
+              spec.convertedTypeName().empty() ||
+                  spec.convertedTypeName() == name,
+              fmt::format(
+                  "ConvertedType mismatch for path {}: scanSpec={}, schema={}",
+                  path,
+                  spec.convertedTypeName(),
+                  name));
           spec.setConvertedTypeName(name);
         }
         VLOG(2) << "Annotate path=" << path << " field=" << spec.fieldName()
