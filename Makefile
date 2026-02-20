@@ -337,7 +337,7 @@ debug_spark_with_test:
 	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 benchmarks-basic-build:
-	$(MAKE) conan_build BUILD_TYPE=Release  BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
@@ -345,8 +345,8 @@ benchmarks-build:
 benchmarks-build-spark:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
-benchmarks-build-debug:
-	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+benchmarks-build-relwithdebinfo:
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 unittest_debug: unittest
 unittest: debug_with_test
