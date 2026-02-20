@@ -211,14 +211,13 @@ TEST_F(FunctionResolutionTest, sameRank) {
 TEST_F(FunctionResolutionTest, checkReturnTypesForVectorFunctions) {
   functions::registerVectorFunctions();
 
-  BOLT_ASSERT_THROW(
+  ASSERT_TRUE(
       exec::getVectorFunction(
           "my_func_return_type",
           {BIGINT()},
           {},
           queryCtx_->queryConfig(),
-          BIGINT()),
-      "Found incompatible return types for vector function 'my_func_return_type' (BOOLEAN vs. BIGINT) with input types (BIGINT)");
+          BIGINT()) == nullptr);
 }
 
 TEST_F(FunctionResolutionTest, vectorOverSimpleFunction) {

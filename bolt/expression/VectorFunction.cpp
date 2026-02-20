@@ -57,6 +57,8 @@ std::shared_ptr<const Type> resolveVectorFunction(
     const std::vector<TypePtr>& argTypes) {
   if (auto vectorFunctionSignatures =
           exec::getVectorFunctionSignatures(functionName)) {
+    LOG(ERROR) << "Found # matching functions for function '" << functionName
+               << "': " << vectorFunctionSignatures.value().size();
     for (const auto& signature : vectorFunctionSignatures.value()) {
       exec::SignatureBinder binder(*signature, argTypes);
       if (binder.tryBind()) {
@@ -96,14 +98,18 @@ std::shared_ptr<VectorFunction> getVectorFunction(
       [&sanitizedName, &inputArgs, &config, &inputTypes, &resultType, &name](
           auto& functionMap) -> std::shared_ptr<VectorFunction> {
         if (auto destType = resolveVectorFunction(sanitizedName, inputTypes)) {
-          BOLT_USER_CHECK(
-              (resultType == nullptr ||
-               (destType != nullptr && destType->equivalent(*resultType))),
-              "Found incompatible return types for vector function '{}' ({} vs. {}) with input types ({}).",
-              name,
-              destType,
-              resultType,
-              folly::join(", ", inputTypes));
+          if (!(resultType == nullptr ||
+                (destType != nullptr && destType->equivalent(*resultType)))) {
+            auto errorMsg = fmt::format(
+                "Found incompatible return types for vector function '{}' ({} vs. {}) with input types ({}).",
+                name,
+                destType,
+                resultType,
+                folly::join(", ", inputTypes));
+            LOG(ERROR) << errorMsg;
+            return nullptr;
+          }
+
           auto functionIterator = functionMap.find(sanitizedName);
           return functionIterator->second.factory(
               sanitizedName, inputArgs, config);
