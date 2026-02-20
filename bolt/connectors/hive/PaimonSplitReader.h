@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/connectors/hive/HiveSplitReaderBase.h"
+#include "bolt/connectors/hive/LoserTree.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/PaimonEngine.h"
 #include "bolt/connectors/hive/PaimonMergeEngineType.h"
@@ -24,10 +25,12 @@
 #include "bolt/connectors/hive/SplitReader.h"
 #include "bolt/connectors/hive/paimon_merge_engines/AggregateFunctions/AggregateFunction.h"
 #include "bolt/connectors/hive/paimon_merge_engines/PartialUpdateEngine.h"
+
 namespace bytedance::bolt {
 class BaseVector;
 using VectorPtr = std::shared_ptr<BaseVector>;
 } // namespace bytedance::bolt
+
 namespace bytedance::bolt::connector::hive {
 
 class PaimonSplitReader : public HiveSplitReaderBase {
@@ -120,6 +123,9 @@ class PaimonSplitReader : public HiveSplitReaderBase {
       std::vector<PaimonRowIteratorPtr>,
       PaimonRowIteratorCompare>
       heap;
+
+  std::shared_ptr<LoserTree> loserTree_;
+
   const std::shared_ptr<io::IoStatistics> ioStats_;
 };
 

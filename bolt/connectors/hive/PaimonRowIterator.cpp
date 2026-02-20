@@ -31,9 +31,9 @@ PaimonRowIterator::PaimonRowIterator(
       valueKind(valueKind_),
       values(std::move(values_)),
       sequenceGroups(std::move(sequenceGroups_)),
+      reader(reader_),
       rowIndex(0),
-      length(values ? values->size() : 0),
-      reader(reader_) {
+      length(values ? values->size() : 0) {
   if (length > 0) {
     BOLT_CHECK_EQ(
         primaryKeys->size(),

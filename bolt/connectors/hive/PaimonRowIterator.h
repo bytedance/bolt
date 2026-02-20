@@ -32,10 +32,10 @@ struct PaimonRowIterator {
   VectorPtr valueKindVect;
   const int8_t* valueKind;
   RowVectorPtr values;
+  SplitReader* reader;
   std::vector<std::pair<RowVectorPtr, std::vector<int>>> sequenceGroups;
   vector_size_t rowIndex;
   vector_size_t length;
-  SplitReader* reader;
 
   PaimonRowIterator()
       : PaimonRowIterator(
