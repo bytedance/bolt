@@ -57,8 +57,6 @@ std::shared_ptr<const Type> resolveVectorFunction(
     const std::vector<TypePtr>& argTypes) {
   if (auto vectorFunctionSignatures =
           exec::getVectorFunctionSignatures(functionName)) {
-    LOG(ERROR) << "Found # matching functions for function '" << functionName
-               << "': " << vectorFunctionSignatures.value().size();
     for (const auto& signature : vectorFunctionSignatures.value()) {
       exec::SignatureBinder binder(*signature, argTypes);
       if (binder.tryBind()) {
