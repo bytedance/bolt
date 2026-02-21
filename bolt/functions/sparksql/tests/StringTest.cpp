@@ -751,9 +751,7 @@ TEST_F(StringTest, repeat) {
   EXPECT_EQ(stringRepeat("abab", -1), "");
   EXPECT_EQ(stringRepeat("", 2), "");
   EXPECT_EQ(stringRepeat("123\u6570", 2), "123\u6570123\u6570");
-  BOLT_ASSERT_USER_THROW(
-      stringRepeat("hh", 524289),
-      "Result size must be less than or equal to 1048576");
+  EXPECT_EQ(stringRepeat("hh", 524289), std::string(1048578, 'h'));
   BOLT_ASSERT_USER_THROW(
       stringRepeat(std::string(214749, 'l'), 10000),
       "integer overflow: 214749 * 10000");
