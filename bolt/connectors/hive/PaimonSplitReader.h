@@ -43,6 +43,7 @@ class PaimonSplitReader : public HiveSplitReaderBase {
       int valueKindIndex,
       const std::vector<int>& valueIndices,
       const std::unordered_map<std::string, std::string>& tableParameters,
+      const bool paimonUseLoserTree_,
       const std::shared_ptr<io::IoStatistics> ioStats);
 
   virtual uint64_t next(int64_t size, VectorPtr& output) override;
@@ -101,6 +102,10 @@ class PaimonSplitReader : public HiveSplitReaderBase {
 
   std::unordered_map<std::string, int> getNameIdxMap();
 
+  uint64_t next_withLoserTree(int64_t size, VectorPtr& output);
+
+  uint64_t next_withHeap(int64_t size, VectorPtr& output);
+
  protected:
   std::vector<std::unique_ptr<SplitReader>> splitReaders_;
   RowTypePtr readerOutputType_;
@@ -125,6 +130,7 @@ class PaimonSplitReader : public HiveSplitReaderBase {
       heap;
 
   std::shared_ptr<LoserTree> loserTree_;
+  const bool paimonUseLoserTree_;
 
   const std::shared_ptr<io::IoStatistics> ioStats_;
 };

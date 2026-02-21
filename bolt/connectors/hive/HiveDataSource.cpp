@@ -77,6 +77,7 @@ HiveDataSource::HiveDataSource(
   }
   fsSessionConfig_.bufferSize = static_cast<size_t>(hiveConfig_->loadQuantum());
   native_cache_enabled = queryConfig.isNativeCacheEnabled();
+  paimonUseLoserTree_ = queryConfig.isPaimonMergeEngineUseLoserTree();
   IgnoreCorruptFileHelper::globalInitialize(
       queryConfig.taskMaxFailures(),
       queryConfig.ignoreCorruptFiles(),
@@ -567,6 +568,7 @@ void HiveDataSource::addSplit(
       rowkindFieldIndex,
       std::move(valueIndices),
       tableParameters,
+      paimonUseLoserTree_,
       ioStats_);
 
   readerOutputType_ = oldReaderOutputType;
