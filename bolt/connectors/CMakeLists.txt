@@ -39,6 +39,10 @@ if(${BOLT_ENABLE_TPCH_CONNECTOR})
   add_subdirectory(tpch)
 endif()
 
+if(${BOLT_ENABLE_PAIMON})
+  add_subdirectory(paimon)
+endif()
+
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()

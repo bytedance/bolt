@@ -1,0 +1,6 @@
+---
+versions:
+  "0.1.0-bolt":
+    folder: paimon-cpp
+    url: "https://github.com/alibaba/paimon-cpp"
+    branch: "conan-patch"

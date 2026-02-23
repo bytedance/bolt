@@ -82,6 +82,7 @@ class BoltConan(ConanFile):
         "enable_parquet": [True, False],
         "enable_orc": [True, False],
         "enable_txt": [True, False],
+        "enable_paimon": [True, False],
         # file system options
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
@@ -109,6 +110,7 @@ class BoltConan(ConanFile):
         "enable_parquet": True,
         "enable_orc": True,
         "enable_txt": True,
+        "enable_paimon": True,
         # file system options
         "enable_hdfs": True,
         "enable_s3": False,
@@ -184,6 +186,7 @@ class BoltConan(ConanFile):
             f"folly/{self.FB_VERSION}", transitive_headers=True, transitive_libs=True
         )
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
+        self.requires("rapidjson/cci.20230929", override=True)
         if self.options.get_safe("enable_jit"):
             self.requires("llvm-core/19.1.7-bolt")
 
@@ -280,6 +283,8 @@ class BoltConan(ConanFile):
         self.requires("libbacktrace/cci.20210118")
         if self.options.get_safe("spark_compatible"):
             self.requires("celeborn-cpp-client/main-20251212")
+        if self.options.get_safe("enable_paimon"):
+            self.requires("paimon-cpp/0.1.0-bolt")
         if self.options.get_safe("enable_testutil"):
             self.requires("gtest/1.17.0", force=True)
             self.requires("duckdb/0.8.1")
@@ -315,6 +320,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_s3"):
             s3_opt = self.options["aws-sdk-cpp/*"]
             setattr(s3_opt, "text-to-speech", False)
+        self.options["paimon-cpp/0.1.0-bolt"].shared = False
 
         arrow_simd_level = "default"
         if str(self.settings.arch) in ["x86", "x86_64"]:
@@ -447,6 +453,9 @@ class BoltConan(ConanFile):
 
         tc.cache_variables["BOLT_ENABLE_TXT"] = (
             "ON" if self.options.enable_txt else "OFF"
+        )
+        tc.cache_variables["BOLT_ENABLE_PAIMON"] = (
+            "ON" if self.options.enable_paimon else "OFF"
         )
         if self.options.get_safe("enable_jit"):
             tc.cache_variables["ENABLE_BOLT_JIT"] = "ON"

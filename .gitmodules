@@ -1,0 +1,4 @@
+[submodule "scripts/conan/recipes/paimon-cpp/paimon-cpp"]
+	path = scripts/conan/recipes/paimon-cpp/paimon-cpp
+	url = git@github.com:ZacBlanco/paimon-cpp.git
+	branch = conan-patch
