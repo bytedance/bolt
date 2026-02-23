@@ -218,12 +218,12 @@ std::shared_ptr<exec::VectorFunction> makeLength(
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> sparkRepeatSignatures() {
-  // T, integer -> T
+  // VARCHAR, INTEGER -> VARCHAR
   return {exec::FunctionSignatureBuilder()
-              .typeVariable("T")
-              .returnType("T")
-              .argumentType("T")
-              .argumentType("integer")
+              .typeVariable("VARCHAR")
+              .returnType("VARCHAR")
+              .argumentType("VARCHAR")
+              .argumentType("INTEGER")
               .build()};
 }
 
