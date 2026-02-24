@@ -2016,8 +2016,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateTrunc) {
 TEST_F(SparkSqlDateTimeFunctionsTest, trunc) {
   const auto trunc = [&](std::optional<int32_t> date,
                          const std::string& format) {
-    return evaluateOnce<int32_t>(
-        fmt::format("trunc(c0, '{}')", format), DATE(), date);
+    return evaluateOnce<int32_t, int32_t>(
+        fmt::format("trunc(c0, '{}')", format), {date}, {DATE()});
   };
 
   // Date(0) is 1970-01-01.
