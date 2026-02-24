@@ -360,7 +360,10 @@ TEST_F(ParquetWriterTest, constantToArrow) {
            kRows,
            leafPool_.get()),
        BaseVector::createConstant(
-           BIGINT(), 10000000000L, kRows, leafPool_.get()),
+           BIGINT(),
+           static_cast<int64_t>(10000000000L),
+           kRows,
+           leafPool_.get()),
        BaseVector::createConstant(DOUBLE(), 1000.0, kRows, leafPool_.get())});
   std::string parquetPath = tempPath_->path + "/constantToArrow.parquet";
   assertWrite(parquetPath, kRows, schema, data);
