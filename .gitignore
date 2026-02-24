@@ -337,3 +337,8 @@ files.txt
 log.txt
 
 bolt/version/version.h
+
+# Local experiment/profile files
+doc/exps/
+*.prof
+exp/

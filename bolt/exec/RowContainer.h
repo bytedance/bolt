@@ -2081,16 +2081,36 @@ class HybridContainer {
 
   // Coalesce all payload batches into a single batch to improve locality.
   void coalesceBatches() {
-    // Only skip if no payload columns or no batches to coalesce.
-    // Always flatten even for single batch, as input may be dictionary-encoded
-    // or other non-flat encodings. Extraction expects FlatVectors.
-    if (payloadTypes_.empty() || owningInputs_.empty()) {
+    // Skip if no payload columns defined.
+    if (payloadTypes_.empty()) {
       return;
     }
 
     auto* pool = keys_->pool();
-    const auto totalRows = totalRows_;
     const auto numPayloadCols = payloadTypes_.size();
+    
+    // Handle empty container: create an empty batch to maintain single-batch invariant.
+    // This ensures getSingleContainerData() works even when no data was added.
+    if (owningInputs_.empty()) {
+      std::vector<VectorPtr> emptyChildren;
+      emptyChildren.reserve(numPayloadCols);
+      std::vector<std::string> payloadNames;
+      payloadNames.reserve(numPayloadCols);
+      for (int32_t col = 0; col < numPayloadCols; ++col) {
+        payloadNames.push_back(fmt::format("c{}", col));
+        emptyChildren.push_back(BaseVector::create(payloadTypes_[col], 0, pool));
+      }
+      owningInputs_.push_back(std::make_shared<RowVector>(
+          pool,
+          ROW(std::move(payloadNames), std::vector<TypePtr>(payloadTypes_)),
+          BufferPtr(nullptr),
+          0,
+          std::move(emptyChildren)));
+      totalBatches_ = 1;
+      return;
+    }
+
+    const auto totalRows = totalRows_;
 
     std::vector<VectorPtr> newChildren;
     newChildren.reserve(numPayloadCols);
