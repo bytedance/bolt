@@ -36,6 +36,7 @@
 #include <bolt/common/base/Exceptions.h>
 #include <fmt/format.h>
 #include <cstdint>
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
 namespace bytedance::bolt::shuffle::sparksql {
@@ -63,6 +64,9 @@ static constexpr int32_t kDefaultAccumulateBatchMaxColumns =
 
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
+
+static constexpr int32_t kMaxShuffleWriterBatchBytes =
+    200 * 1024 * 1024; // 200MB
 
 enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
 
@@ -95,6 +99,9 @@ struct ShuffleReaderOptions {
   int32_t numPartitions = -1;
   std::string partitionShortName = "";
   int32_t forceShuffleWriterType = -1;
+
+  // Enable checksum in codec for shuffle data corruption detection
+  bool checksumEnabled = true;
 };
 
 struct PartitionWriterOptions {
@@ -105,7 +112,7 @@ struct PartitionWriterOptions {
   int32_t compressionThreshold = kDefaultCompressionThreshold;
   arrow::Compression::type compressionType = arrow::Compression::LZ4_FRAME;
   std::string codecBackend = "none";
-  int32_t compressionLevel = arrow::util::kUseDefaultCompressionLevel;
+  int32_t compressionLevel = kDefaultCompressionLevel;
   std::string compressionMode = "buffer";
 
   bool bufferedWrite = kEnableBufferedWrite;
@@ -128,6 +135,9 @@ struct PartitionWriterOptions {
 
   // for CelebornPartitionWriter
   std::shared_ptr<RssClient> rssClient;
+
+  // Enable checksum in codec for shuffle data corruption detection
+  bool checksumEnabled = true;
 };
 
 struct ShuffleWriterOptions {

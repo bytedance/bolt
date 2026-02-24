@@ -41,6 +41,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/Payload.h"
 #include "bolt/shuffle/sparksql/Utils.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -373,7 +374,7 @@ RowVectorPtr makeColumnarBatch(
 BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
     std::shared_ptr<arrow::io::InputStream> in,
     const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<arrow::util::Codec>& codec,
+    const std::shared_ptr<Codec>& codec,
     const bytedance::bolt::RowTypePtr& rowType,
     int32_t batchSize,
     int32_t shuffleBatchByteSize,
@@ -384,7 +385,7 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
     uint64_t& deserializeTime,
     uint64_t& decompressTime,
     bool isRowFormat,
-    ZstdStreamCodec* zstdCodec,
+    AdaptiveParallelZstdCodec* zstdCodec,
     RowBufferPool* rowBufferPool,
     ShuffleRowToColumnarConverter* row2ColConverter)
     : schema_(schema),
@@ -701,19 +702,21 @@ bool BoltColumnarBatchDeserializer::isCompositeRowVectorLayout(int64_t& bytes) {
 
 BoltColumnarBatchDeserializerFactory::BoltColumnarBatchDeserializerFactory(
     const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<arrow::util::Codec>& codec,
+    const std::shared_ptr<Codec>& codec,
     const RowTypePtr& rowType,
     int32_t batchSize,
     int32_t shuffleBatchByteSize,
     arrow::MemoryPool* memoryPool,
-    bytedance::bolt::memory::MemoryPool* boltPool)
+    bytedance::bolt::memory::MemoryPool* boltPool,
+    bool checksumEnabled)
     : schema_(schema),
       codec_(codec),
       rowType_(rowType),
       batchSize_(batchSize),
       shuffleBatchByteSize_(shuffleBatchByteSize),
       memoryPool_(memoryPool),
-      boltPool_(boltPool) {
+      boltPool_(boltPool),
+      checksumEnabled_(checksumEnabled) {
   initFromSchema();
 }
 
@@ -729,8 +732,8 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
         schema_->num_fields() >= rowBaseColumnNumThreshold) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
   if (!zstdCodec_) {
-    zstdCodec_ =
-        std::make_shared<ZstdStreamCodec>(1 /*not used*/, false, memoryPool_);
+    zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
+        1 /*not used*/, false, memoryPool_, checksumEnabled_);
     rowBufferPool_ = std::make_shared<RowBufferPool>(memoryPool_);
     row2ColConverter_ =
         std::make_shared<ShuffleRowToColumnarConverter>(rowType_, boltPool_);
@@ -821,14 +824,18 @@ BoltShuffleReader::BoltShuffleReader(
     bytedance::bolt::memory::MemoryPool* boltPool)
     : factory_(std::make_unique<BoltColumnarBatchDeserializerFactory>(
           schema,
-          createArrowIpcCodec(
+          createCodec(
               options.compressionType,
-              getCodecBackend(options.codecBackend)),
+              CodecOptions{
+                  getCodecBackend(options.codecBackend),
+                  kDefaultCompressionLevel,
+                  options.checksumEnabled}),
           bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
           options.batchSize,
           options.shuffleBatchByteSize,
           pool,
-          boltPool)) {
+          boltPool,
+          options.checksumEnabled)) {
   factory_->setNumPartitions(options.numPartitions);
   factory_->setShuffleWriterType(options.forceShuffleWriterType);
   factory_->setpartitioningShortName(options.partitionShortName);

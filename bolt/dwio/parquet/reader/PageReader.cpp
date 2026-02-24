@@ -147,7 +147,7 @@ PageHeader PageReader::readPageHeader() {
         }
       }
 
-      // inputStream_->Next may change the content in buffer, so do redudant
+      // inputStream_->Next may change the content in buffer, so do redundant
       // allocate and copy from buffer when first decrypt failed before reading
       // from inputstream
       if (!reallocate) {

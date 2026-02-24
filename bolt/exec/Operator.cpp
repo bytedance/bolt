@@ -75,13 +75,13 @@ OperatorCtx::createConnectorQueryCtx(
     const std::string& planNodeId,
     memory::MemoryPool* connectorPool,
     const common::SpillConfig* spillConfig,
-    connector::AsyncThreadCtx* const asyncThreadCtx) const {
+    std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx) const {
   return std::make_shared<connector::ConnectorQueryCtx>(
       pool_,
       connectorPool,
       driverCtx_->task->queryCtx()->connectorSessionProperties(connectorId),
       spillConfig,
-      asyncThreadCtx,
+      std::move(asyncThreadCtx),
       std::make_unique<SimpleExpressionEvaluator>(
           execCtx()->queryCtx(), execCtx()->pool()),
       driverCtx_->task->queryCtx()->cache(),

@@ -33,6 +33,18 @@
 #include "bolt/dwio/common/ColumnLoader.h"
 namespace bytedance::bolt::dwio::common {
 
+namespace {
+bool testFilterOnConstant(const bolt::common::ScanSpec& spec) {
+  if (spec.isConstant() && !spec.constantValue()->isNullAt(0)) {
+    // Non-null constant is known value during split scheduling and filters on
+    // them should not be handled at execution level.
+    return true;
+  }
+  // Check filter on missing field.
+  return !spec.hasFilter() || spec.testNull();
+}
+} // namespace
+
 void SelectiveStructColumnReaderBase::filterRowGroups(
     uint64_t rowGroupSize,
     const dwio::common::StatsContext& context,
@@ -75,6 +87,13 @@ void SelectiveStructColumnReaderBase::next(
       numValues -= bits::countBits(mutation->deletedRows, 0, numValues);
     }
 
+    for (auto& childSpec : scanSpec_->children()) {
+      if (isChildConstant(*childSpec) && !testFilterOnConstant(*childSpec)) {
+        numValues = 0;
+        break;
+      }
+    }
+
     // no readers
     // This can be either count(*) query or a query that select only
     // constant columns (partition keys or columns missing from an old file
@@ -82,8 +101,7 @@ void SelectiveStructColumnReaderBase::next(
     auto resultRowVector = std::dynamic_pointer_cast<RowVector>(result);
     resultRowVector->unsafeResize(numValues);
 
-    const auto& childSpecs = scanSpec_->children();
-    for (const auto& childSpec : childSpecs) {
+    for (const auto& childSpec : scanSpec_->children()) {
       if (childSpec->isRowIndex()) {
         auto channel = childSpec->channel();
         auto& childResult = resultRowVector->childAt(channel);
@@ -161,6 +179,10 @@ void SelectiveStructColumnReaderBase::read(
   for (size_t i = 0; i < childSpecs.size(); ++i) {
     auto& childSpec = childSpecs[i];
     if (isChildConstant(*childSpec)) {
+      if (!testFilterOnConstant(*childSpec)) {
+        activeRows = {};
+        break;
+      }
       continue;
     }
     auto fieldIndex = childSpec->subscript();

@@ -42,7 +42,7 @@ int64_t extern_test_sum(int64_t a, int64_t b) {
   return a + b;
 }
 
-extern int StringViewCompareWrapper(char* l, char* r);
+extern int jit_StringViewCompareWrapper(char* l, char* r);
 
 } // ~ extern
 
@@ -65,10 +65,10 @@ class JitEngineTest : public ::testing::Test {
 using namespace bolt::jit;
 
 TEST_F(JitEngineTest, basic) {
-  // Force the linker import symbol 'StringViewCompareWrapper'
+  // Force the linker import symbol 'jit_StringViewCompareWrapper'
   int32_t sz1{0};
   int32_t sz2{0};
-  auto res = ::StringViewCompareWrapper(
+  auto res = ::jit_StringViewCompareWrapper(
       reinterpret_cast<char*>(&sz1), reinterpret_cast<char*>(&sz2));
   ASSERT_TRUE(res == 0);
 

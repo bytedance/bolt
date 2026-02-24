@@ -146,6 +146,8 @@ class PARQUET_EXPORT FileWriter {
   /// Returns an error if not all columns have been written.
   virtual ::arrow::Status NewBufferedRowGroup() = 0;
 
+  virtual ::arrow::Status Flush() = 0;
+
   /// \brief Write a RecordBatch into the buffered row group.
   ///
   /// Multiple RecordBatches can be written into the same row group

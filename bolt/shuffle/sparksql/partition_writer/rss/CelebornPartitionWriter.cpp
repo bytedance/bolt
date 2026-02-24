@@ -108,8 +108,9 @@ arrow::Status CelebornPartitionWriter::evict(
     const bool isCompositeVector) {
   // evict rows in all partitions
   if (!zstdCodec_) {
-    zstdCodec_ = std::make_shared<ZstdStreamCodec>(
-        options_.compressionLevel, true, payloadPool_.get());
+    // Disable checksum for Celeborn cause celeborn already has checksum inside
+    zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
+        options_.compressionLevel, true, payloadPool_.get(), false);
   }
   RowVectorLayout layout = isCompositeVector ? RowVectorLayout::kComposite
                                              : RowVectorLayout::kColumnar;

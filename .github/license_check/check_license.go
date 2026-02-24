@@ -49,10 +49,7 @@ func main() {
 	fmt.Printf("[INFO] Project Root: %s\n", projectRoot)
 	fmt.Printf("[INFO] Config Path:  %s\n", configFile)
 
-	// 1. print files to check
-	fmt.Printf("[INFO] Files to check: %v\n", files)
-
-	// 2. read and parse config file
+	// read and parse config file
 	logger.Log.SetLevel(logrus.InfoLevel)
 	config, err := config.NewConfigFromFile(configFile)
 	if err != nil {
@@ -86,7 +83,6 @@ func main() {
 		fmt.Printf("[INFO] All files are ignored.\n")
 		os.Exit(0)
 	}
-	fmt.Printf("[INFO] Valid files to check: %v\n", validFiles)
 
 	g := new(errgroup.Group)
 	g.SetLimit(runtime.GOMAXPROCS(0))

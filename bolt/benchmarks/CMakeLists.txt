@@ -39,6 +39,7 @@ target_link_libraries(bolt_benchmark_builder ${BOLT_BENCHMARK_DEPS})
 
 if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(tpch)
+  add_subdirectory(paimon)
 endif()
 
 add_library(bolt_query_benchmark OBJECT QueryBenchmarkBase.cpp)

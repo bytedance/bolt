@@ -91,25 +91,25 @@ class RowContainerCodeGenerator {
 
   // For compare non-contiguous stringview, which allocated by
   // HashStringAllocator,  in the RowContainer
-  const std::string rowStringViewCompareAsc = "StringViewCompareWrapper";
-  const std::string RowBasedStringViewCompare = "RowBasedStringViewCompare";
-  const std::string ComplexTypeRowCmpRow = "ComplexTypeRowCmpRow";
-  const std::string RowBasedComplexTypeRowCmpRow =
-      "RowBasedComplexTypeRowCmpRow";
-  const std::string StringViewRowEqVectors = "StringViewRowEqVectors";
-  const std::string GetDecodedValueBool = "GetDecodedValueBool";
-  const std::string GetDecodedValueI8 = "GetDecodedValueI8";
-  const std::string GetDecodedValueI16 = "GetDecodedValueI16";
-  const std::string GetDecodedValueI32 = "GetDecodedValueI32";
-  const std::string GetDecodedValueI64 = "GetDecodedValueI64";
-  const std::string GetDecodedValueI128 = "GetDecodedValueI128";
-  const std::string GetDecodedValueFloat = "GetDecodedValueFloat";
-  const std::string GetDecodedValueDouble = "GetDecodedValueDouble";
-  const std::string CmpRowVecTimestamp = "CmpRowVecTimestamp";
-  const std::string GetDecodedValueStringView = "GetDecodedValueStringView";
-  const std::string GetDecodedIsNull = "GetDecodedIsNull";
-  const std::string ComplexTypeRowEqVectors = "ComplexTypeRowEqVectors";
-  const std::string DebugPrint = "DebugPrint";
+  const std::string rowStringViewCompareAsc = "jit_StringViewCompareWrapper";
+  const std::string RowBasedStringViewCompare = "jit_RowBasedStringViewCompare";
+  const std::string ComplexTypeRowCmpRow = "jit_ComplexTypeRowCmpRow";
+  const std::string RowBased_ComplexTypeRowCmpRow =
+      "jit_RowBased_ComplexTypeRowCmpRow";
+  const std::string StringViewRowEqVectors = "jit_StringViewRowEqVectors";
+  const std::string GetDecodedValueBool = "jit_GetDecodedValueBool";
+  const std::string GetDecodedValueI8 = "jit_GetDecodedValueI8";
+  const std::string GetDecodedValueI16 = "jit_GetDecodedValueI16";
+  const std::string GetDecodedValueI32 = "jit_GetDecodedValueI32";
+  const std::string GetDecodedValueI64 = "jit_GetDecodedValueI64";
+  const std::string GetDecodedValueI128 = "jit_GetDecodedValueI128";
+  const std::string GetDecodedValueFloat = "jit_GetDecodedValueFloat";
+  const std::string GetDecodedValueDouble = "jit_GetDecodedValueDouble";
+  const std::string CmpRowVecTimestamp = "jit_CmpRowVecTimestamp";
+  const std::string GetDecodedValueStringView = "jit_GetDecodedValueStringView";
+  const std::string GetDecodedIsNull = "jit_GetDecodedIsNull";
+  const std::string ComplexTypeRowEqVectors = "jit_ComplexTypeRowEqVectors";
+  const std::string DebugPrint = "jit_DebugPrint";
 
   static const std::string builtInDeclarationsIR;
 

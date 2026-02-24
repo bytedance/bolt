@@ -355,7 +355,6 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
   std::vector<uint32_t> combinedPartitionUsed_;
   int64_t combinedVectorNumber_{0};
   int64_t combineVectorTimes_{0};
-  uint64_t maxBatchBytes_{200UL << 20};
 
   // The PrestoVectorSerializer has a limit of INT32_MAX for the size after
   // serialization. In the case of hasComplexType_, limit total size of combined

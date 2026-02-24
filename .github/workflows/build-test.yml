@@ -23,6 +23,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -59,7 +60,7 @@ jobs:
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root
+      options: --user root --init
       volumes:
         - /data/ccache-data:/data/ccache-data
     services:
@@ -77,9 +78,13 @@ jobs:
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
-    - name: Build and Run Tests
+    - name: Bolt build
       run: |
-         make unittest_${{ matrix.build_type }}
+        make ${{ matrix.build_type }}_with_test
+
+    - name: Run tests
+      run: |
+        make unittest_${{ matrix.build_type }}
 
   build-only:
       needs: changes
@@ -89,7 +94,7 @@ jobs:
         image: bolt-registry:5000/bolt-ci:20260114
         volumes:
           - /data/ccache-data:/data/ccache-data
-        options: --user root
+        options: --user root --init
       services:
         conanserver:
           image: bolt-registry:5000/conan-server:latest

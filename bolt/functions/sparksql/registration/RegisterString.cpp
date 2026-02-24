@@ -59,8 +59,8 @@ void registerStringFunctions(const std::string& prefix) {
       {prefix + "locate"});
   registerFunction<RepeatStringFunction, Varchar, Varchar, int32_t>(
       {prefix + "string_repeat"});
-  registerFunction<RepeatFunction, Varchar, Varchar, int32_t>(
-      {prefix + "repeat"});
+  exec::registerStatefulVectorFunction(
+      prefix + "repeat", sparkRepeatSignatures(), makeRepeat);
   registerFunction<UUIDWithoutSeedFunction, Varchar>({prefix + "uuid"});
   registerFunction<UUIDWithSeedFunction, Varchar, Constant<int64_t>>(
       {prefix + "uuid"});

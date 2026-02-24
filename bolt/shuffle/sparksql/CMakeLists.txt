@@ -34,6 +34,15 @@ bolt_add_library(
   BoltShuffleWriterV2.cpp
   CelebornReaderStreamIterator.cpp
   compression/Compression.cpp
+  compression/Codec.cpp
+  compression/GzipCodec.cpp
+  compression/Lz4Codec.cpp
+  compression/SnappyCodec.cpp
+  compression/ZstdCodec.cpp
+  compression/StreamCodec.cpp
+  compression/ZstdStreamCodec.cpp
+  compression/GzipStreamCodec.cpp
+  compression/Lz4FrameStreamCodec.cpp
   partition_writer/LocalPartitionWriter.cpp
   partition_writer/PartitionWriter.cpp
   partition_writer/rss/CelebornPartitionWriter.cpp
@@ -83,4 +92,8 @@ endif()
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
+endif()
+
+if(${BOLT_ENABLE_BENCHMARKS})
+  add_subdirectory(benchmarks)
 endif()
