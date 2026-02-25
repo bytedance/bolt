@@ -807,7 +807,8 @@ getAllConnectors();
 
 #define BOLT_REGISTER_CONNECTOR_FACTORY(theFactory)                       \
   namespace {                                                             \
-  static bool FB_ANONYMOUS_VARIABLE(g_ConnectorFactory) =                 \
+  __attribute__((used)) static bool FB_ANONYMOUS_VARIABLE(                \
+      g_ConnectorFactory) =                                               \
       bytedance::bolt::connector::registerConnectorFactory((theFactory)); \
   }
 } // namespace bytedance::bolt::connector
