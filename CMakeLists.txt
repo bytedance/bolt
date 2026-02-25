@@ -367,7 +367,7 @@ if(BOLT_ENABLE_GCS)
   if(GCSSDK_ROOT_DIR)
     list(APPEND CMAKE_PREFIX_PATH ${GCSSDK_ROOT_DIR})
   endif()
-  find_package(google_cloud_cpp_storage REQUIRED)
+  find_package(google-cloud-cpp CONFIG QUIET COMPONENTS storage)
   add_definitions(-DBOLT_ENABLE_GCS)
 endif()
 
