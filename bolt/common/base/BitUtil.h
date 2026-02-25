@@ -41,6 +41,9 @@
 #ifdef __BMI2__
 #include <x86intrin.h>
 #endif
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
+#include <arm_sve.h>
+#endif
 namespace bytedance {
 namespace bolt {
 namespace bits {
@@ -933,6 +936,29 @@ inline void copyBits(
     uint64_t targetOffset,
     uint64_t numBits) {
   uint64_t i = 0;
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__) && SVE_BITS == 256
+  if ((sourceOffset & 7) == (targetOffset & 7))  {
+    const uint8_t* constSrcBase = reinterpret_cast<const uint8_t*>(source) + (sourceOffset >> 3);
+    uint8_t* srcBase = const_cast<uint8_t*>(constSrcBase);
+    uint8_t* dstBase = reinterpret_cast<uint8_t*>(target) + (targetOffset >> 3);
+    uint64_t bitStartOffset = 0;
+    if ((sourceOffset & 7) != 0) [[unlikely]] {
+      bitStartOffset = std::min<uint64_t>(8 - (sourceOffset & 7), numBits);
+      auto headBits =
+          detail::loadBits<uint8_t>(source, sourceOffset, bitStartOffset);
+      detail::storeBits<uint8_t>(target, targetOffset, headBits, bitStartOffset);
+      i += bitStartOffset;
+      srcBase++;
+      dstBase++;
+    }
+    svbool_t pg = svptrue_b8();
+    while (i + SVE_BITS <= numBits) {
+      svuint8_t curBitsCopy = svld1_u8(pg, srcBase + ((i - bitStartOffset) >> 3));
+      svst1_u8(pg, dstBase + ((i - bitStartOffset) >> 3), curBitsCopy);
+      i += SVE_BITS;
+    }
+  }
+#endif
   for (; i + 64 <= numBits; i += 64) {
     uint64_t word = detail::loadBits<uint64_t>(source, i + sourceOffset, 64);
     detail::storeBits<uint64_t>(target, targetOffset + i, word, 64);
