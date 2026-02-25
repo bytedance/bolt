@@ -10,28 +10,28 @@
 
 namespace bytedance::bolt::connector::paimon {
 
-class BoltMemoryPool : public ::paimon::MemoryPool {
+class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
  public:
-  explicit BoltMemoryPool(memory::MemoryPool* pool) : pool_(pool) {}
+  explicit BoltPaimonMemoryPool(std::shared_ptr<memory::MemoryPool> pool) : pool_(std::move(pool)) {}
 
   memory::MemoryPool* getBoltPool() const {
-    return pool_;
+    return pool_.get();
   }
 
-  void* Malloc(uint64_t size, uint64_t alignment = 0) override {
+  void* Malloc(uint64_t size, uint64_t alignment) override {
     if (alignment == 0) {
       return pool_->allocate(static_cast<int64_t>(size));
-    } else {
-      return pool_->allocate(static_cast<int64_t>(size), static_cast<uint32_t>(alignment));
     }
+
+    return pool_->allocate(static_cast<int64_t>(size), static_cast<uint32_t>(alignment));
   }
 
-  void* Realloc(void* p, size_t old_size, size_t new_size, uint64_t alignment = 0) override {
+  void* Realloc(void* p, size_t old_size, size_t new_size, uint64_t alignment) override {
     if (alignment == 0) {
       return pool_->reallocate(p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size));
-    } else {
-      return pool_->reallocate(p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size), static_cast<uint8_t>(alignment));
     }
+
+    return pool_->reallocate(p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size), static_cast<uint8_t>(alignment));
   }
 
   void Free(void* p, uint64_t size) override {
@@ -51,7 +51,7 @@ class BoltMemoryPool : public ::paimon::MemoryPool {
   }
 
  private:
-  memory::MemoryPool* pool_;
+  std::shared_ptr<memory::MemoryPool> pool_;
 };
 
 } // namespace bytedance::bolt::connector::paimon

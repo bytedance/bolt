@@ -6,19 +6,21 @@
 
 #include <memory>
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
+#include "common/memory/Memory.h"
 #include "common/memory/MemoryPool.h"
+#include "connectors/paimon/BoltMemoryPool.h"
 #include "paimon/format/reader_builder.h"
 #include "paimon/reader/file_batch_reader.h"
+#include "paimon/fs/file_system.h" // for ::paimon::InputStream
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/common/file/File.h"
 #include "bolt/vector/arrow/Bridge.h"
 #include "bolt/vector/arrow/Abi.h"
+#include <folly/io/IOBuf.h>
 
 namespace bytedance::bolt::connector::paimon {
-
-using namespace bytedance::bolt;
 
 class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
  public:
@@ -29,6 +31,9 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       : reader_(std::move(reader)), batch_size_(batch_size), pool_(pool) {
       // Create initial row reader with default options (read all)
       dwio::common::RowReaderOptions opts;
+      // Ensure ScanSpec is set to avoid null deref in ParquetRowReader
+      // Use root scan spec with no filters and full projection
+      opts.setScanSpec(std::make_shared<bolt::common::ScanSpec>("<root>"));
       rowReader_ = reader_->createRowReader(opts);
   }
 
@@ -72,11 +77,12 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
   ::paimon::Result<ReadBatch> NextBatch() override {
       try {
-          VectorPtr result;
-          bool hasData = rowReader_->next(batch_size_, result);
+          // Preallocate an empty RowVector to be populated by RowReader
+          VectorPtr result = BaseVector::create(reader_->rowType(), 0, pool_);
+          bool hasData = rowReader_->next(batch_size_, result) != 0;
 
           if (!hasData) {
-              return ::paimon::Status::NotImplemented("End of file reached");
+              return ::paimon::Status::Invalid("End of file reached");
           }
 
           auto arrowArray = std::make_unique<::ArrowArray>();
@@ -117,38 +123,51 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
 class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
  public:
-  explicit PaimonParquetReaderBuilder(int32_t batch_size, memory::MemoryPool* pool)
-      : batch_size_(batch_size), pool_(nullptr) {
-      // Use trace memory pool by default if no pool is set
-      default_pool_ = std::make_unique<BoltMemoryPool>(pool);
+  explicit PaimonParquetReaderBuilder(int32_t batch_size, const std::shared_ptr<memory::MemoryPool>& pool)
+      : batch_size_(batch_size) {
+    paimonPool_ = std::make_shared<BoltPaimonMemoryPool>(pool);
   }
 
   ::paimon::ReaderBuilder* WithMemoryPool(const std::shared_ptr<::paimon::MemoryPool>& pool) override {
-      pool_ = pool.get();
+    auto boltPool = std::dynamic_pointer_cast<BoltPaimonMemoryPool>(pool);
+      if (boltPool != nullptr) {
+        paimonPool_ = boltPool;
+      }
       return this;
   }
 
   ::paimon::Result<std::unique_ptr<::paimon::FileBatchReader>> Build(
       const std::shared_ptr<::paimon::InputStream>& path) const override {
-      return ::paimon::Status::NotImplemented("InputStream build not supported yet");
+      try {
+      // Choose Bolt memory pool to back DWIO
+      memory::MemoryPool* boltPool = paimonPool_->getBoltPool();
+
+          auto rf = std::make_shared<PaimonReadFile>(path);
+          auto input = std::make_unique<dwio::common::BufferedInput>(
+              std::make_shared<dwio::common::ReadFileInputStream>(rf), *boltPool);
+
+          dwio::common::ReaderOptions readerOptions(boltPool);
+          auto reader = std::make_unique<parquet::ParquetReader>(std::move(input), readerOptions);
+
+          return std::make_unique<PaimonParquetFileBatchReader>(
+              std::move(reader), batch_size_, boltPool);
+      } catch (const std::exception& e) {
+          return ::paimon::Status::IOError(std::string("Failed to build reader from InputStream: ") + e.what());
+      }
   }
 
   ::paimon::Result<std::unique_ptr<::paimon::FileBatchReader>> Build(const std::string& path) const override {
       try {
           auto file = std::make_shared<LocalReadFile>(path);
-          // Get the Bolt memory pool from our custom BoltMemoryPool
-          auto& selected_pool = pool_ ? pool_ : default_pool_.get();
-          auto bolt_pool = dynamic_cast<BoltMemoryPool*>(selected_pool);
-          if (!bolt_pool) {
-              return ::paimon::Status::Invalid("Only BoltMemoryPool is supported");
-          }
+      // Choose Bolt memory pool to back DWIO
+      memory::MemoryPool* boltPool = paimonPool_->getBoltPool();
 
-          auto input = std::make_unique<dwio::common::BufferedInput>(file, *bolt_pool->getBoltPool());
+          auto input = std::make_unique<dwio::common::BufferedInput>(file, *boltPool);
 
-          dwio::common::ReaderOptions readerOptions(bolt_pool->getBoltPool());
+          dwio::common::ReaderOptions readerOptions(boltPool);
           auto reader = std::make_unique<parquet::ParquetReader>(std::move(input), readerOptions);
 
-          return std::make_unique<PaimonParquetFileBatchReader>(std::move(reader), batch_size_, bolt_pool->getBoltPool());
+          return std::make_unique<PaimonParquetFileBatchReader>(std::move(reader), batch_size_, boltPool);
       } catch (const std::exception& e) {
           return ::paimon::Status::IOError(std::string("Failed to open file: ") + e.what());
       }
@@ -156,8 +175,7 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
 
  private:
   int32_t batch_size_;
-  ::paimon::MemoryPool* pool_;
-  std::unique_ptr<BoltMemoryPool> default_pool_;
+  std::shared_ptr<BoltPaimonMemoryPool> paimonPool_;
 };
 
 const std::string& PaimonParquetReader::Identifier() const {
@@ -167,11 +185,12 @@ const std::string& PaimonParquetReader::Identifier() const {
 
 ::paimon::Result<std::unique_ptr<::paimon::ReaderBuilder>> PaimonParquetReader::CreateReaderBuilder(
     int32_t batch_size) const {
-  return std::make_unique<PaimonParquetReaderBuilder>(batch_size);
+  auto pool = memory::memoryManager()->addLeafPool("paimon-parquet-reader");
+  return std::make_unique<PaimonParquetReaderBuilder>(batch_size, std::move(pool));
 }
 
 ::paimon::Result<std::unique_ptr<::paimon::WriterBuilder>> PaimonParquetReader::CreateWriterBuilder(
-    ::ArrowSchema* schema, int32_t batch_size) const {
+    ::ArrowSchema* /* schema */, int32_t /* batch_size */) const {
   return ::paimon::Status::NotImplemented("Writer not supported yet");
 }
 

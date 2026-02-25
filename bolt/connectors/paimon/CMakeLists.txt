@@ -3,7 +3,7 @@
 
 find_package(Paimon CONFIG REQUIRED)
 
-add_library(
+bolt_add_library(
     bolt_connector_paimon
     PaimonConnector.cpp
     PaimonDataSource.cpp
@@ -12,9 +12,17 @@ add_library(
 )
 
 target_link_libraries(
-    bolt_connector_paimon
-    bolt_connector
-    Paimon::core
+  bolt_connector_paimon
+  PUBLIC bolt_common_io
+         bolt_connector
+         bolt_dwio_parquet_reader
+         bolt_dwio_parquet_writer
+         bolt_file
+         bolt_dwio_common
+         bolt_type
+         bolt_vector
+         arrow::arrow
+         Paimon::core
 )
 
 if(${BOLT_BUILD_TESTING})
