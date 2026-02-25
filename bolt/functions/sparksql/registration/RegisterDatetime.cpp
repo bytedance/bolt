@@ -195,6 +195,7 @@ void registerDatetimeFunctions(const std::string& prefix) {
       {prefix + "make_ym_interval"});
   registerFunction<DateTruncFunction, Timestamp, Varchar, Timestamp>(
       {prefix + "date_trunc"});
+  registerFunction<TruncFunction, Date, Date, Varchar>({prefix + "trunc"});
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_make_timestamp, prefix + "make_timestamp");
 
