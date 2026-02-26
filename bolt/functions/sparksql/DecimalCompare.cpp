@@ -30,6 +30,7 @@
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/functions/lib/SIMDComparisonUtil.h"
 #include "bolt/functions/sparksql/DecimalUtil.h"
 namespace bytedance::bolt::functions::sparksql {
 namespace {
@@ -128,6 +129,13 @@ class DecimalCompareFunction : public exec::VectorFunction {
       exec::EvalCtx& context,
       VectorPtr& result) const override {
     prepareResults(rows, resultType, context, result);
+    if ((args[0]->isFlatEncoding() || args[0]->isConstantEncoding()) &&
+        (args[1]->isFlatEncoding() || args[1]->isConstantEncoding()) &&
+        rows.end() - rows.begin() > 64) {
+      applyAutoSimdComparison<A, B, Operation, int8_t, bool>(
+          rows, args, result, deltaScale_, need256_);
+      return;
+    }
 
     // Fast path when the first argument is a flat vector.
     if (args[0]->isFlatEncoding()) {
