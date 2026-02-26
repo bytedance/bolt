@@ -264,7 +264,7 @@ bool HashAggregation::preferPartialSpill(
   if (preferPartialSpill_) {
     groupingSet_->setPreferPartialSpill(preferPartialSpill_);
     if (expandNode_) {
-      for (auto groupingSet : groupingSetsRollUp_) {
+      for (auto&& groupingSet : groupingSetsRollUp_) {
         groupingSet->setPreferPartialSpill(preferPartialSpill_);
       }
     }
@@ -794,7 +794,7 @@ void HashAggregation::close() {
   }
   output_ = nullptr;
   if (expandNode_) {
-    for (auto groupingSet : groupingSetsRollUp_) {
+    for (auto& groupingSet : groupingSetsRollUp_) {
       groupingSet.reset();
     }
   }

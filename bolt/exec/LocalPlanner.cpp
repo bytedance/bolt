@@ -811,7 +811,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         auto next = planNodes[i + 1];
         std::shared_ptr<const core::AggregationNode> aggregationNode =
             std::dynamic_pointer_cast<const core::AggregationNode>(next);
-        if (aggregationNode && isRollupEnabled(expandNode, aggregationNode)) {
+        if (aggregationNode && isRollupEnabled(expandNode.get(), aggregationNode.get())) {
           auto expandPtr = std::make_unique<Expand>(id, ctx.get(), expandNode);
           expandPtr->setRollupEnabled(true);
           operators.push_back(std::move(expandPtr));
@@ -831,7 +831,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         std::shared_ptr<const core::AggregationNode> aggregationNode =
             std::dynamic_pointer_cast<const core::AggregationNode>(third);
         if (projectNode && aggregationNode &&
-            isRollupEnabled(expandNode, aggregationNode)) {
+            isRollupEnabled(expandNode.get(), aggregationNode.get())) {
           auto expandPtr = std::make_unique<Expand>(id, ctx.get(), expandNode);
           expandPtr->setRollupEnabled(true);
           operators.push_back(std::move(expandPtr));
@@ -1078,8 +1078,8 @@ void DriverFactory::registerAdapter(DriverAdapter adapter) {
 std::vector<DriverAdapter> DriverFactory::adapters;
 
 bool DriverFactory::isRollupEnabled(
-    std::shared_ptr<const core::ExpandNode> expandNode,
-    std::shared_ptr<const core::AggregationNode> aggregationNode) {
+    const core::ExpandNode* expandNode,
+    const core::AggregationNode* aggregationNode) {
   if (!aggregationNode->preGroupedKeys().empty() &&
       aggregationNode->preGroupedKeys().size() ==
           aggregationNode->groupingKeys().size()) {
