@@ -64,12 +64,11 @@ class AdaptiveParallelZstdCodec {
                            checksumEnabled})
                      : nullptr),
         parallelZstdCompressor_(
-            compress ? std::make_unique<ZstdStreamCompressor>(ZstdCodecOptions{
-                           CodecBackend::NONE,
-                           compressionLevel,
-                           checksumEnabled,
-                           kWorkerNumber})
-                     : nullptr),
+            compress
+                ? std::make_unique<ZstdStreamCompressor>(ZstdCodecOptions{
+                      {CodecBackend::NONE, compressionLevel, checksumEnabled},
+                      kWorkerNumber})
+                : nullptr),
         zstdDecompressor_(
             compress ? nullptr
                      : std::make_unique<ZstdStreamDecompressor>(CodecOptions{
