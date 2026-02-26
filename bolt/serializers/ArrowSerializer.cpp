@@ -600,12 +600,12 @@ class ArrowVectorSerializer : public VectorSerializer {
 
     writeCodec(0, 0, 0, true); // placeholder
 
-    // 8 byte allign
+    // 8 byte align
     {
       const int64_t cur = static_cast<int64_t>(stream->tellp());
-      const int64_t mis = cur & 7LL;
-      if (mis != 0) {
-        const int64_t pad = 8LL - mis;
+      const int64_t miss = cur & 7LL;
+      if (miss != 0) {
+        const int64_t pad = 8LL - miss;
         static const char kZeros[8] = {0};
         stream->write(kZeros, static_cast<std::streamsize>(pad));
         VLOG(1) << "[Flush] wrote padding: " << pad << " bytes";
@@ -1207,9 +1207,9 @@ void ArrowVectorSerde::deserialize(
 
   { // 8-byte padding
     const int64_t cur = static_cast<int64_t>(source->tellp());
-    const int64_t mis = (cur & 7LL);
-    if (mis != 0) {
-      const int32_t pad = static_cast<int32_t>(8LL - mis);
+    const int64_t miss = (cur & 7LL);
+    if (miss != 0) {
+      const int32_t pad = static_cast<int32_t>(8LL - miss);
       source->skip(pad);
       VLOG(1) << "[deserialize] skipped padding: " << pad << " bytes";
     }

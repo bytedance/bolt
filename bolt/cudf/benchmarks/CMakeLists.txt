@@ -16,7 +16,7 @@
 add_executable(bolt_cudf_benchmark Main.cpp)
 
 target_link_libraries(
-  bolt_cudf_benchmark PRIVATE bolt_exec_test_lib bolt_tpch_gen bolt_process ${FOLLY_BENCHMARK}
+  bolt_cudf_benchmark PRIVATE bolt_tpch_gen bolt_testutils ${FOLLY_BENCHMARK}
 )
 
 # This linker option eliminates the following warning. /usr/bin/ld: warning: XXX.o: missing

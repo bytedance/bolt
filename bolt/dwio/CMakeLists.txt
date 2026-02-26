@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_link_libs INTERFACE)
+bolt_add_library(bolt_link_libs INTERFACE)
 target_link_libraries(
   bolt_link_libs
   INTERFACE bolt_caching

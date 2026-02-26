@@ -649,7 +649,7 @@ FOLLY_ALWAYS_INLINE void pad(
       padString.size() * fullPadCopies + padPrefixByteLength;
   // The final size of the output string in bytes.
   int64_t outputByteLength = string.size() + fullPaddingByteLength;
-  // What byte index in the ouptut to start writing the padding at.
+  // What byte index in the output to start writing the padding at.
   int64_t paddingOffset;
 
   output.resize(outputByteLength);

@@ -315,7 +315,7 @@ TEST_F(ExchangeClientTest, multiPageFetch) {
 
 TEST_F(ExchangeClientTest, sourceTimeout) {
   constexpr int32_t kNumSources = 3;
-  common::testutil::TestValue::enable();
+  BOLT_TEST_VALUE_ENABLE();
   auto client =
       std::make_shared<ExchangeClient>("test", 17, 1 << 20, pool(), executor());
 

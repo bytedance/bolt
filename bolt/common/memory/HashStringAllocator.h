@@ -354,7 +354,7 @@ class HashStringAllocator : public StreamArena {
 
   std::string toString() const;
 
-  /// A fast version for compare non-contigous strings in RowContainer
+  /// A fast version for compare non-contiguous strings in RowContainer
   /// No copy, no ByteStream, no Ranges...
   /// TODO: write new fast version for compare Row with Column
   static int FastRowStringViewCompareAsc(char* l, char* r) noexcept;

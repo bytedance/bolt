@@ -399,7 +399,7 @@ struct WidthBucketFunction {
       double bound2,
       int64_t numBuckets) {
     // NULL would be returned if the input arguments don't follow conditions
-    // list belows:
+    // list below:
     // - `numBuckets` must be greater than zero and be less than Long.MaxValue.
     // - `value`, `bound1`, and `bound2` cannot be NaN.
     // - `bound1` bound cannot equal `bound2`.

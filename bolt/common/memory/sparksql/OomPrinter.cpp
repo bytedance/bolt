@@ -71,7 +71,7 @@ std::string normalizeTreeString(std::string& tree) {
 
   result.reserve(tree.size() * 2);
   for (char c : tree) {
-    // becuase tree in level 2, so need add 1 indent at the begin of line
+    // because tree in level 2, so need add 1 indent at the begin of line
     result += (c == '\n') ? "\n" + indent : std::string(1, c);
   }
   // the first line of tree also need indent

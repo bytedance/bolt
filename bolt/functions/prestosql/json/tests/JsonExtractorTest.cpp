@@ -218,7 +218,7 @@ TEST(JsonExtractorTest, generalJsonTest) {
   EXPECT_TRUE(res.has_value());
   EXPECT_EQ(expectedJson, folly::parseJson(res.value()));
 
-  // TEST WiteSpaces in Path and Json
+  // TEST whitespaces in Path and Json
   res = json_format(jsonExtract(json2, "$[*][*].key"s));
   EXPECT_TRUE(res.has_value());
   EXPECT_EQ("[1,2,3,4,5]", res.value());
@@ -577,7 +577,7 @@ TEST(JsonExtractorTest, simdJsonTypesTest) {
       "str" : "你好",
       "boolean" : true,
       "int": 1,
-      "negtive" : -2,
+      "negative" : -2,
       "double" : 3.1415926,
       "null" : null,
       "big_integer" : 22675263000000000000,
@@ -588,7 +588,7 @@ TEST(JsonExtractorTest, simdJsonTypesTest) {
   EXPECT_SCALAR_VALUE_EQ(json, "$.str", "你好");
   EXPECT_SCALAR_VALUE_EQ(json, "$.boolean", "true");
   EXPECT_SCALAR_VALUE_EQ(json, "$.int", "1");
-  EXPECT_SCALAR_VALUE_EQ(json, "$.negtive", "-2");
+  EXPECT_SCALAR_VALUE_EQ(json, "$.negative", "-2");
   EXPECT_SCALAR_VALUE_EQ(json, "$.double", "3.1415926");
   EXPECT_SCALAR_VALUE_NULL(json, "$.null");
   EXPECT_SCALAR_VALUE_EQ(json, "$.nested.arr[1]", "2");

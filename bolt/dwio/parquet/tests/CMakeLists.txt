@@ -26,9 +26,7 @@
 # --------------------------------------------------------------------------
 
 set(TEST_LINK_LIBS
-    bolt_dwio_common_test_utils
-    bolt_vector_test_lib
-    bolt_exec_test_lib
+    bolt_testutils
     bolt_temp_path
     GTest::gtest
     GTest::gtest_main
@@ -41,6 +39,7 @@ set(TEST_LINK_LIBS
 add_subdirectory(reader)
 add_subdirectory(writer)
 add_subdirectory(thrift)
+add_subdirectory(encryption)
 
 add_executable(bolt_dwio_parquet_tpch_test ParquetTpchTest.cpp)
 add_test(

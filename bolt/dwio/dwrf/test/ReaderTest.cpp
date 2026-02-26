@@ -192,7 +192,7 @@ void verifyPrefetch(
 }
 
 // This relies on schema and data inside of our fm_small and fm_large orc files,
-// and is not composeable with other schema/datas
+// and is not composeable with other schema/data
 void verifyFlatMapReading(
     DwrfRowReader* rowReader,
     const int32_t seeks[],

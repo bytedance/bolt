@@ -45,7 +45,7 @@ using ::bytedance::bolt::exec::VectorFunction;
 using ::bytedance::bolt::exec::VectorFunctionArg;
 using ::re2::RE2;
 
-// set to 40 to more compitable with spark
+// set to 40 to more compatible with spark
 static const int kMaxCompiledRegexes = 40;
 
 std::string printTypesCsv(
@@ -303,7 +303,7 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
       EvalCtx& context,
       VectorPtr& resultRef) const final {
     BOLT_CHECK(args.size() == 2 || args.size() == 3);
-    // TODO: Potentially re-use the string vector, not just the buffer.
+    // TODO: Potentially reuse the string vector, not just the buffer.
     FlatVector<StringView>& result =
         ensureWritableStringView(rows, context, resultRef);
 

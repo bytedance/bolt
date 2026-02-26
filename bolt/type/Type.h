@@ -72,7 +72,7 @@ struct __attribute__((__packed__)) Int96Timestamp {
 /// These logical definitions each serve slightly different purposes.
 /// These type sets are:
 /// - TypeKind
-/// - Type (RowType, BigIntType, ect.)
+/// - Type (RowType, BigIntType, etc.)
 /// - Templated Types (Row<T...>, Map<K, V>, ...)
 ///     C++ templated classes. Never instantiated, used to pass limited type
 ///     information into template parameters.

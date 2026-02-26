@@ -79,7 +79,7 @@ void SelectiveColumnReader::prepareRead(
   seekTo(offset, scanSpec_->readsNullsOnly());
   const vector_size_t numRows = rows.back() + 1;
 
-  // Do not re-use unless singly-referenced.
+  // Do not reuse unless singly-referenced.
   if (nullsInReadRange_ && !nullsInReadRange_->unique()) {
     nullsInReadRange_.reset();
   }

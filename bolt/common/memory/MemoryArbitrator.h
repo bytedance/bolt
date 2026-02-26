@@ -138,7 +138,7 @@ class MemoryArbitrator {
   /// once. The function returns false if 'kind' is already registered.
   static bool registerFactory(const std::string& kind, Factory factory);
 
-  /// Unregisters the registered factory for a specifc kind.
+  /// Unregisters the registered factory for a specific kind.
   ///
   /// NOTE: the function throws if the specified arbitrator 'kind' is not
   /// registered.

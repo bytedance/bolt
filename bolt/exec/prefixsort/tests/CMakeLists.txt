@@ -27,10 +27,6 @@
 
 add_compile_definitions(DISABLE_DUCKDB_REMOTE_INSTALL)
 
-# add_library( duckdb duckdb-1.cpp duckdb-2.cpp duckdb-3.cpp duckdb-4.cpp duckdb-5.cpp duckdb-6.cpp
-# duckdb-7.cpp duckdb-8.cpp duckdb-fastpforlib.cpp duckdb-fmt.cpp duckdb-hyperloglog.cpp
-# duckdb-libpg_query.cpp duckdb-miniz.cpp duckdb-re2.cpp duckdb-utf8proc.cpp)
-
 add_subdirectory(utils)
 
 add_executable(bolt_exec_prefixsort_test PrefixSortAlgorithmTest.cpp)
@@ -44,5 +40,8 @@ add_test(
 set_tests_properties(bolt_exec_prefixsort_test PROPERTIES TIMEOUT 3000)
 
 target_link_libraries(
-  bolt_exec_prefixsort_test bolt_exec_prefixsort_test_lib bolt_vector_fuzzer bolt_vector_test_lib
+  bolt_exec_prefixsort_test
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )

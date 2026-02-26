@@ -45,7 +45,7 @@
 // using Try.
 // It divides two integers, using division by 0 to trigger an exception getting
 // thrown.
-// These benchmarks show that meerly adding a Try expression does not
+// These benchmarks show that merely adding a Try expression does not
 // significantly impact performance, and the performance cost of handling
 // exceptions scales linearly with the number of rows that saw exceptions.
 using namespace bytedance::bolt;

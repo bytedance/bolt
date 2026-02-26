@@ -113,7 +113,7 @@ TEST_F(IndexBuilderTest, Backfill) {
   ASSERT_THAT(getPositions(builder, 1), ElementsAreArray({0uL}));
 
   builder.add(42uL, 0);
-  // Welp, this is a paranoid test that the two versions of add can
+  // Well, this is a paranoid test that the two versions of add can
   // work together properly.
   builder.add(0uL);
   builder.add(7uL, 1);

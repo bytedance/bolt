@@ -26,20 +26,11 @@
 # --------------------------------------------------------------------------
 
 set(BOLT_BENCHMARK_DEPS
-    bolt_type
-    bolt_vector
     bolt_vector_fuzzer
-    bolt_expression
-    bolt_parse_parser
-    bolt_parse_expression
-    bolt_serialization
     bolt_benchmark_builder
-    bolt_vector_test_lib
-    Folly::folly
+    bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest
-    gflags::gflags
-    glog::glog
 )
 
 add_executable(bolt_benchmark_basic_simple_arithmetic SimpleArithmetic.cpp)

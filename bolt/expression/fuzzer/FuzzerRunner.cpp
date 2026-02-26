@@ -104,10 +104,10 @@ DEFINE_int32(
     1,
     "This sets an upper limit on the number of expression trees to generate "
     "per step. These trees would be executed in the same ExprSet and can "
-    "re-use already generated columns and subexpressions (if re-use is "
+    "reuse already generated columns and subexpressions (if reuse is "
     "enabled).");
 
-// The flags bellow are used to initialize ExpressionFuzzer::options.
+// The flags below are used to initialize ExpressionFuzzer::options.
 DEFINE_string(
     only,
     "",
@@ -164,7 +164,7 @@ DEFINE_bool(
 DEFINE_bool(
     bolt_fuzzer_enable_expression_reuse,
     false,
-    "Enable generation of expressions that re-uses already generated "
+    "Enable generation of expressions that reuses already generated "
     "subexpressions.");
 
 DEFINE_string(

@@ -969,7 +969,7 @@ TEST_F(VectorHasherTest, hashCollision) {
 TEST_F(VectorHasherTest, simdRange) {
   // Tests the SIMD path for integer value ranges. We make hashers based on a
   // sample, then introduce out of range values and check that unmappable rows
-  // are detected and correctt normalized keys are produced for the rows with
+  // are detected and correct normalized keys are produced for the rows with
   // in-range values.
   constexpr int32_t kNumRows = 1001;
   using exec::VectorHasher;

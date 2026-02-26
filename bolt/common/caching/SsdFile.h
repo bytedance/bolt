@@ -335,7 +335,7 @@ class SsdFile {
   void checkpointError(int32_t rc, const std::string& error);
 
   // Looks for a checkpointed state and sets the state of 'this' by
-  // the checkpointed state iif the state is complete and
+  // the checkpointed state if the state is complete and
   // readable. Does not modify 'this' if the state is corrupt,
   // e.g. there was a crash during writing the checkpoint. Initializes
   // the files for making new checkpoints.

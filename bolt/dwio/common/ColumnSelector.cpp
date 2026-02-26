@@ -273,7 +273,7 @@ void ColumnSelector::setRead(const common::FilterTypePtr& node, bool only) {
   }
 }
 
-// TODO (cao) - SelectedTypeBuilder is uncessary to exist, can be killed
+// TODO (cao) - SelectedTypeBuilder is unnecessary to exist, can be killed
 std::shared_ptr<const TypeWithId> ColumnSelector::buildSelected() const {
   auto selector = [this](size_t index) { return shouldReadNode(index); };
   return typeutils::buildSelectedType(TypeWithId::create(schema_), selector);

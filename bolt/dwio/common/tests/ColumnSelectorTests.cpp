@@ -263,7 +263,7 @@ TEST(ColumnSelectorTests, testSearchInColumnFilter) {
   EXPECT_EQ(filter[0].node, 2);
 
   EXPECT_TRUE(FilterNode(0).in(filter) == filter.cend());
-  // only values column is fitlered so only it matches the filter
+  // only values column is filtered so only it matches the filter
   EXPECT_TRUE(FilterNode(1).in(filter) != filter.cend());
   EXPECT_TRUE(FilterNode(2).in(filter) == filter.cend());
   EXPECT_TRUE(FilterNode(3).in(filter) == filter.cend());

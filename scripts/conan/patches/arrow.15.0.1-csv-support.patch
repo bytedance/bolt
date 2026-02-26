@@ -435,7 +435,7 @@ index 24a7af89b..27655cdf4 100644
 +        auto_options = ["parquet", "compute", "dataset_modules", "with_boost", "with_flight_rpc", "with_gflags", "with_glog",
 +                        "with_grpc", "with_jemalloc", "with_thrift", "with_llvm", "with_openssl", "with_protobuf", "with_re2", "with_utf8proc"]
 +        for option in auto_options:
-+            assert "auto" not in str(self.options.get_safe(option)), f"Option '{option}' contains 'auto' value, wich is not allowed. Generally the final value should be True/False"
++            assert "auto" not in str(self.options.get_safe(option)), f"Option '{option}' contains 'auto' value, which is not allowed. Generally the final value should be True/False"
 +
 +        if self.settings.compiler.get_safe("cppstd"):
 +            check_min_cppstd(self, self._min_cppstd)

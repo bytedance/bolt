@@ -36,7 +36,9 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MmapAllocator.h"
+#ifndef NDEBUG
 #include "bolt/common/testutil/ScopedTestTime.h"
+#endif
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
@@ -82,7 +84,7 @@ class AsyncDataCacheTest : public testing::Test {
   static constexpr int32_t kNumFiles = 100;
 
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   void SetUp() override {
@@ -176,7 +178,7 @@ class AsyncDataCacheTest : public testing::Test {
   // number of entries, then loads the ones that nobody else is
   // loading. Stops after loading 'loadBytes' worth of entries. If
   // 'errorEveryNBatches' is non-0, every nth load batch will have a
-  // bad read and wil be dropped. The entries of the failed batch read
+  // bad read and will be dropped. The entries of the failed batch read
   // will still be accessed one by one. If 'largeEveryNBatches' is
   // non-0, allocates and freees a single allocation of 'largeBytes'
   // every so many batches. This creates extra memory pressure, as

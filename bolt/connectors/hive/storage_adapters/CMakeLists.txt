@@ -25,15 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-if(BOLT_ENABLE_S3)
-  add_subdirectory(s3fs)
-endif()
-if(BOLT_ENABLE_GCS)
-  add_subdirectory(gcs)
-endif()
-if(BOLT_ENABLE_ABFS)
-  add_subdirectory(abfs)
-endif()
-if(BOLT_ENABLE_HDFS)
-  add_subdirectory(hdfs)
-endif()
+add_subdirectory(s3fs)
+add_subdirectory(gcs)
+add_subdirectory(abfs)
+add_subdirectory(hdfs)

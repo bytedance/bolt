@@ -51,13 +51,7 @@ add_test(
 
 target_link_libraries(
   bolt_functions_lib_test
-  bolt_functions_lib
-  bolt_functions_test_lib
-  bolt_is_null_functions
-  bolt_exec_test_lib
-  bolt_expression
-  bolt_memory
-  bolt_dwio_common_test_utils
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock

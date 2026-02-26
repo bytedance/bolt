@@ -56,7 +56,7 @@ Values::Values(
 }
 
 RowVectorPtr Values::getOutput() {
-  TestValue::adjust("bytedance::bolt::exec::Values::getOutput", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Values::getOutput", this);
   if (current_ >= values_.size()) {
     if (roundsLeft_ > 0) {
       --roundsLeft_;

@@ -38,13 +38,13 @@ find_package(xxHash CONFIG REQUIRED)
 find_package(ryu CONFIG REQUIRED)
 
 # Header-only interface library for type definitions
-add_library(bolt_type_headers INTERFACE)
+bolt_add_library(bolt_type_headers INTERFACE)
 target_include_directories(
   bolt_type_headers INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
 
 # Implementation library for core type functionality
-add_library(
+bolt_add_library(
   bolt_type_base
   BigDecimal.cpp
   Conversions.cpp
@@ -81,12 +81,11 @@ target_link_libraries(
           re2::re2
           xxHash::xxhash
           ryu::ryu
-          ${Boost_REGEX_LIBRARIES}
-          ${FOLLY_WITH_DEPENDENCIES}
+          Folly::folly
 )
 
 # Main interface library that combines everything
-add_library(bolt_type INTERFACE)
+bolt_add_library(bolt_type INTERFACE)
 
 target_link_libraries(
   bolt_type
@@ -106,6 +105,5 @@ target_link_libraries(
             re2::re2
             xxHash::xxhash
             ryu::ryu
-            ${Boost_REGEX_LIBRARIES}
-            ${FOLLY_WITH_DEPENDENCIES}
+            Folly::folly
 )

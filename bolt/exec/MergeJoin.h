@@ -366,7 +366,7 @@ class MergeJoin : public Operator {
 
     /// Clear the left-side vector and index of the last added output row. The
     /// left-side vector has been fully processed and is now available for
-    /// re-use, hence, need to make sure that new rows won't be confused with
+    /// reuse, hence, need to make sure that new rows won't be confused with
     /// the old ones.
     void resetLastVector() {
       lastVector_.reset();

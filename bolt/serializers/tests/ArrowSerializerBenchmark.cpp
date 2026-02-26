@@ -573,14 +573,16 @@ class Bench : public VectorTestBase {
     }
 
     std::cout << "  Presto (IOBuf): "
-              << "ser=" << r.presto.serUs << "  de=" << r.presto.deUs
-              << "  sum=" << pSum << "  bytes=" << r.presto.bytes << "\n";
+              << "serialize=" << r.presto.serUs
+              << "  deserialize=" << r.presto.deUs << "  sum=" << pSum
+              << "  bytes=" << r.presto.bytes << "\n";
 
     std::cout << "  Arrow  (IOBuf): "
-              << "ser=" << r.arrow.serUs << " "
-              << ratio(r.presto.serUs, r.arrow.serUs) << "  de=" << r.arrow.deUs
-              << " " << ratio(r.presto.deUs, r.arrow.deUs) << "  sum=" << aSum
-              << " " << ratio(pSum, aSum) << "  bytes=" << r.arrow.bytes << " "
+              << "serialize=" << r.arrow.serUs << " "
+              << ratio(r.presto.serUs, r.arrow.serUs)
+              << "  deserialize=" << r.arrow.deUs << " "
+              << ratio(r.presto.deUs, r.arrow.deUs) << "  sum=" << aSum << " "
+              << ratio(pSum, aSum) << "  bytes=" << r.arrow.bytes << " "
               << pct(r.presto.bytes, r.arrow.bytes) << "\n\n";
   }
 

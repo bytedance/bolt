@@ -315,6 +315,20 @@ std::shared_ptr<MemoryPoolImpl> MemoryManager::createRootPool(
     std::string poolName,
     std::unique_ptr<MemoryReclaimer>& reclaimer,
     MemoryPool::Options& options) {
+  if (useMemoryPoolForGluten_) {
+    auto pool = std::make_shared<MemoryPoolForGluten>(
+        this,
+        poolName,
+        MemoryPool::Kind::kAggregate,
+        nullptr,
+        std::move(reclaimer),
+        options);
+    BOLT_CHECK_EQ(pool->capacity(), 0);
+    arbitrator_->addPool(pool);
+    RECORD_HISTOGRAM_METRIC_VALUE(
+        kMetricMemoryPoolInitialCapacityBytes, pool->capacity());
+    return pool;
+  }
   auto pool = std::make_shared<MemoryPoolImpl>(
       this,
       poolName,

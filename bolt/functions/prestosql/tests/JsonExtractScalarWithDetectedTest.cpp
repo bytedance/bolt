@@ -192,7 +192,7 @@ TEST_F(JsonExtractScalarWithDetectedTest, DISABLED_overflow) {
 // makes sure we don't break their workloads before they clear the dependency.
 TEST_F(JsonExtractScalarWithDetectedTest, wildcardSelect) {
   GTEST_SKIP()
-      << "Skipping wildcard test since current behaviro is not correct and simdjson does not support it right now";
+      << "Skipping wildcard test since current behavior is not correct and simdjson does not support it right now";
 
   EXPECT_EQ(
       jsonExtractScalarWithDetected(

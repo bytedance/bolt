@@ -166,7 +166,7 @@ class ParquetReaderBenchmark {
     return rowReader;
   }
 
-  // This method is the place where we do the read opeartions.
+  // This method is the place where we do the read operations.
   // scanSpec contains the setting of filters. e.g.
   // filterRateX100 = 30 means it would filter out 70% of rows and 30% remain.
   // nullsRateX100 = 70 means it would filter out 70% of rows and 30% remain.

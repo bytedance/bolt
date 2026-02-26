@@ -38,7 +38,7 @@ namespace bytedance::bolt::exec {
 /// 1. To prevent template code explosion, use this class only when the
 /// number of keys is <= 3.
 /// 2. for Simplicity, only support native types. Map,Array,Struct are not
-/// supported. Luckily, these types are seldomly used for sorting
+/// supported. Luckily, these types are seldom used for sorting
 /// 3. In theory, CompareFlags can also be used as template parameters to
 /// boost the performance. but, it would be better if we encoding CompareFlags
 /// into RowContainer in future

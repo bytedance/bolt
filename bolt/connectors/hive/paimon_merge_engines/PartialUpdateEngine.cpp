@@ -46,6 +46,10 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
       }
     }
     result->resize(result->size() + 1);
+    const auto newRowIdx = result->size() - 1;
+    for (int i = 0; i < result->childrenSize(); i++) {
+      result->childAt(i)->setNull(newRowIdx, true);
+    }
     lastSequenceGroupKeyValues =
         std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
   }

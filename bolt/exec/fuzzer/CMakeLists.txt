@@ -25,13 +25,13 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_fuzzer_util DuckQueryRunner.cpp PrestoQueryRunner.cpp)
+bolt_add_library(bolt_fuzzer_util DuckQueryRunner.cpp PrestoQueryRunner.cpp)
 
 target_link_libraries(
   bolt_fuzzer_util bolt_core bolt_exec_test_lib cpr::cpr bolt_type_parser Folly::folly
 )
 
-add_library(bolt_aggregation_fuzzer_base AggregationFuzzerBase.cpp)
+bolt_add_library(bolt_aggregation_fuzzer_base AggregationFuzzerBase.cpp)
 
 target_link_libraries(
   bolt_aggregation_fuzzer_base
@@ -50,7 +50,7 @@ target_link_libraries(
   bolt_core
 )
 
-add_library(bolt_aggregation_fuzzer AggregationFuzzer.cpp)
+bolt_add_library(bolt_aggregation_fuzzer AggregationFuzzer.cpp)
 
 target_link_libraries(
   bolt_aggregation_fuzzer
@@ -62,7 +62,7 @@ target_link_libraries(
   bolt_fuzzer_util
 )
 
-add_library(bolt_window_fuzzer WindowFuzzer.cpp)
+bolt_add_library(bolt_window_fuzzer WindowFuzzer.cpp)
 
 target_link_libraries(
   bolt_window_fuzzer

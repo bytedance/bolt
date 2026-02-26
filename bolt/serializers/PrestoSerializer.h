@@ -105,7 +105,7 @@ class PrestoVectorSerde : public VectorSerde {
   /// in case dictionaries contain null they are serialized as flat buffers.
   ///
   /// In order to override the encodings of top-level columns in the RowVector,
-  /// you can specifiy the encodings using PrestoOptions.encodings
+  /// you can specify the encodings using PrestoOptions.encodings
   ///
   /// DEPRECATED: Use createBatchSerializer and the BatchVectorSerializer's
   /// serialize function instead.

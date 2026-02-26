@@ -41,29 +41,11 @@ enum CodecBackend { NONE, QAT, IAA };
 // big buffer and then compress the big buffer
 enum CompressionMode { BUFFER, ROWVECTOR };
 
-inline CodecBackend getCodecBackend(std::string codecBackend) {
-  if (codecBackend == "none") {
-    return CodecBackend::NONE;
-  } else if (codecBackend == "qat") {
-    return CodecBackend::QAT;
-  } else if (codecBackend == "iaa") {
-    return CodecBackend::IAA;
-  } else {
-    throw std::invalid_argument(
-        "Not support this codec backend " + codecBackend);
-  }
-}
+CodecBackend getCodecBackend(const std::string& codecBackend);
 
-inline CompressionMode getCompressionMode(std::string compressionMode) {
-  if (compressionMode == "buffer") {
-    return CompressionMode::BUFFER;
-  } else if (compressionMode == "rowvector") {
-    return CompressionMode::ROWVECTOR;
-  } else {
-    throw std::invalid_argument(
-        "Not support this compression mode " + compressionMode);
-  }
-}
+std::string getCodecBackendName(CodecBackend backend);
+
+CompressionMode getCompressionMode(const std::string& compressionMode);
 
 std::unique_ptr<arrow::util::Codec> createArrowIpcCodec(
     arrow::Compression::type compressedType,

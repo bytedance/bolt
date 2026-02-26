@@ -29,13 +29,7 @@ add_executable(bolt_abfs_test AbfsFileSystemTest.cpp AbfsUtilTest.cpp AzuriteSer
 add_test(bolt_abfs_test bolt_abfs_test)
 target_link_libraries(
   bolt_abfs_test
-  PRIVATE bolt_file
-          bolt_abfs
-          bolt_core
-          bolt_exec_test_lib
-          bolt_hive_connector
-          bolt_dwio_common_exception
-          bolt_exec
+  PRIVATE bolt_testutils
           GTest::gtest
           GTest::gtest_main
           Azure::azure-storage-blobs

@@ -207,6 +207,30 @@ enum ConvertedType {
    * particular timezone or date.
    */
   INTERVAL = 21,
+
+  /**
+   * Dynamic Column Map (DCMap)
+   *
+   * optional group example (DCMAP) {
+   *  repeated group key_value {
+   *    required binary key (UTF_8);
+   *    optional binary value (UTF_8);
+   *  }
+   *  optional group dynamic_column {
+   *    optional binary value_0 (UTF_8);
+   *    optional binary value_1 (UTF_8);
+   *    ...
+   *  }
+   * }
+   *
+   * DCMap is an optimized map format designed for storage efficiency.
+   * Keys are stored in the Parquet footer, while values are stored
+   * separately in arrays.
+   * Allowed physical types: UTF-8 only for keys and values.
+   * DCMap is a custom in-house format and requires a reader that
+   * supports this optimized layout.
+   */
+  DCMAP = 101,
 }
 
 /**
@@ -264,6 +288,7 @@ struct MapType {} // see LogicalTypes.md
 struct ListType {} // see LogicalTypes.md
 struct EnumType {} // allowed for BINARY, must be encoded with UTF-8
 struct DateType {} // allowed for INT32
+struct DCMapType {} // optimized map format designed for storage efficiency
 
 /**
  * Logical type to annotate a column that is always null.
@@ -372,6 +397,7 @@ union LogicalType {
   12: JsonType JSON; // use ConvertedType JSON
   13: BsonType BSON; // use ConvertedType BSON
   14: UUIDType UUID;
+  101: DCMapType DCMAP;
 }
 
 /**
@@ -1026,7 +1052,7 @@ struct ColumnIndex {
   3: required list<binary> max_values;
 
   /**
-   * Stores whether both min_values and max_values are orderd and if so, in
+   * Stores whether both min_values and max_values are ordered and if so, in
    * which direction. This allows readers to perform binary searches in both
    * lists. Readers cannot assume that max_values[i] <= min_values[i+1], even
    * if the lists are ordered.

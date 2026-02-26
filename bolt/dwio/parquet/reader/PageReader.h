@@ -41,8 +41,34 @@
 #include "bolt/dwio/parquet/reader/RleBpDataDecoder.h"
 #include "bolt/dwio/parquet/reader/StringDecoder.h"
 
+#include "bolt/dwio/parquet/encryption/EncryptionInternal.h"
+#include "bolt/dwio/parquet/encryption/InternalFileDecryptor.h"
+
 #include <arrow/util/rle_encoding.h>
 namespace bytedance::bolt::parquet {
+
+constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
+constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+
+struct CryptoContext {
+  CryptoContext(
+      bool startWithDictionaryPage,
+      int16_t rowGroupOrdinal,
+      int16_t columnOrdinal,
+      std::shared_ptr<Decryptor> meta,
+      std::shared_ptr<Decryptor> data)
+      : startDecryptWithDictionaryPage(startWithDictionaryPage),
+        rowGroupOrdinal(rowGroupOrdinal),
+        columnOrdinal(columnOrdinal),
+        metaDecryptor(std::move(meta)),
+        dataDecryptor(std::move(data)) {}
+  CryptoContext() {}
+  bool startDecryptWithDictionaryPage = false;
+  int16_t rowGroupOrdinal = -1;
+  int16_t columnOrdinal = -1;
+  std::shared_ptr<Decryptor> metaDecryptor;
+  std::shared_ptr<Decryptor> dataDecryptor;
+};
 
 /// Manages access to pages inside a ColumnChunk. Interprets page headers and
 /// encodings and presents the combination of pages and encoded values as a
@@ -69,6 +95,7 @@ class PageReader {
         nullConcatenation_(pool_),
         statis_(statis) {
     type_->makeLevelInfo(leafInfo_);
+    pageOrdinal_ = 0;
   }
 
   // This PageReader constructor is for unit test only.
@@ -86,7 +113,9 @@ class PageReader {
         chunkSize_(chunkSize),
         definitionLevels_(&pool_),
         repetitionLevels_(&pool_),
-        nullConcatenation_(pool_) {}
+        nullConcatenation_(pool_) {
+    pageOrdinal_ = 0;
+  }
 
   /// Advances 'numRows' top level rows.
   void skip(int64_t numRows);
@@ -155,6 +184,45 @@ class PageReader {
   // Parses the PageHeader at 'inputStream_', and move the bufferStart_ and
   // bufferEnd_ to the corresponding positions.
   thrift::PageHeader readPageHeader();
+
+  CryptoContext& getCryptoContext() {
+    return cryptoCtx_;
+  }
+  void initDecryption() {
+    if (cryptoCtx_.dataDecryptor != nullptr) {
+      dataPageAad_ = encryption::createModuleAad(
+          cryptoCtx_.dataDecryptor->fileAad(),
+          encryption::kDataPage,
+          cryptoCtx_.rowGroupOrdinal,
+          cryptoCtx_.columnOrdinal,
+          kNonPageOrdinal);
+    }
+    if (cryptoCtx_.metaDecryptor != nullptr) {
+      dataPageHeaderAad_ = encryption::createModuleAad(
+          cryptoCtx_.metaDecryptor->fileAad(),
+          encryption::kDataPageHeader,
+          cryptoCtx_.rowGroupOrdinal,
+          cryptoCtx_.columnOrdinal,
+          kNonPageOrdinal);
+    }
+  }
+  void updateDecryption(
+      const std::shared_ptr<Decryptor>& decryptor,
+      int8_t moduleType,
+      std::string* pageAad) {
+    if (cryptoCtx_.startDecryptWithDictionaryPage) {
+      std::string aad = encryption::createModuleAad(
+          decryptor->fileAad(),
+          moduleType,
+          cryptoCtx_.rowGroupOrdinal,
+          cryptoCtx_.columnOrdinal,
+          kNonPageOrdinal);
+      decryptor->UpdateAad(aad);
+    } else {
+      encryption::quickUpdatePageAad(pageOrdinal_, pageAad);
+      decryptor->UpdateAad(*pageAad);
+    }
+  }
 
   void prepareDictionary(const thrift::PageHeader& pageHeader);
 
@@ -517,7 +585,7 @@ class PageReader {
   int32_t rowNumberBias_{0};
 
   // Manages concatenating null flags read from multiple pages. If a
-  // readWithVisitor is contined in one page, the visitor places the
+  // readWithVisitor is continued in one page, the visitor places the
   // nulls in the reader. If many pages are covered, some with and
   // some without nulls, we must make a a concatenated null flags to
   // return to the caller.
@@ -537,6 +605,14 @@ class PageReader {
   std::unique_ptr<DeltaBpDecoder> deltaBpDecoder_;
   bool decoderSet_{false};
   // Add decoders for other encodings here.
+
+  // decryptor
+  void decryptPageData(int32_t& compressedLen);
+  CryptoContext cryptoCtx_;
+  std::string dataPageAad_;
+  std::string dataPageHeaderAad_;
+  BufferPtr decryptionBuffer_;
+  int32_t pageOrdinal_;
 
   // preload undecoded RepDefs
   std::list<raw_vector<char>> preloadedRepDefs_;

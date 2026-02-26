@@ -142,7 +142,7 @@ TEST_F(TorchOperatorTest, TestConcurrentScriptExecution) {
     // The operator is not finished as long as noMoreInput_ is not called.
     ASSERT_FALSE(bolt_operator->isFinished());
 
-    // The operator is finished after processig all inputs and
+    // The operator is finished after processing all inputs and
     // noMoreInput() is called.
     bolt_operator->noMoreInput();
     ASSERT_TRUE(bolt_operator->isFinished());

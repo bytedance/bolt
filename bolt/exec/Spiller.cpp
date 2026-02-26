@@ -252,7 +252,7 @@ Spiller::Spiller(
         container_,
         rowBasedSpillMode == common::RowBasedSpillMode::COMPRESSION);
   }
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Spiller", const_cast<HashBitRange*>(&bits_));
 
   BOLT_CHECK_EQ(
@@ -565,7 +565,7 @@ size_t Spiller::setNextEqualForAgg(SpillRun& run) {
 std::unique_ptr<Spiller::SpillStatus> Spiller::writeSpill(int32_t partition) {
   BOLT_CHECK_NE(type_, Type::kHashJoinProbe);
 
-  // 1. The flush thredhold is controlled by writeBufferSize_ from configuration
+  // 1. The flush threshold is controlled by writeBufferSize_ from configuration
   // 2. The materialized size is controlled by kMaxReadBufferSize
   constexpr int32_t kTargetBatchBytes = (1UL << 20) -
       AlignedBuffer::kPaddedSize; // 1M, Same as kMaxReadBufferSize

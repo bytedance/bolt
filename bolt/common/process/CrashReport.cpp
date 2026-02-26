@@ -323,7 +323,7 @@ void crashReportHandler(int32_t sig, siginfo_t* info, void* ucontext) {
 
   writeToStderr("--- END OF CRASH REPORT ---\n");
   if (sigInfo.name) {
-    // restor old action
+    // restore old action
     sigaction(sigInfo.signum, &sigInfo.oldAction, NULL);
     // chain call old handler, check if it's a function pointer
     if (sigInfo.oldAction.sa_handler != SIG_DFL &&

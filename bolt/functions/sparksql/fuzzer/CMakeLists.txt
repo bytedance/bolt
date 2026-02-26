@@ -33,8 +33,7 @@ target_link_libraries(
   bolt_aggregation_fuzzer_base
   bolt_functions_spark_aggregates
   bolt_fuzzer_util
-  bolt_window
-  bolt_vector_test_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
@@ -48,6 +47,7 @@ target_link_libraries(
   bolt_fuzzer_util
   bolt_functions_spark_window
   bolt_expression_test_utility
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

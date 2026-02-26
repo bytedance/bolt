@@ -26,7 +26,7 @@
 # --------------------------------------------------------------------------
 
 add_library(
-  bolt_query_trace_replayer_base
+  bolt_query_trace_replayer_base OBJECT
   AggregationReplayer.cpp
   FilterProjectReplayer.cpp
   HashJoinReplayer.cpp
@@ -87,11 +87,14 @@ target_link_libraries(
 add_executable(bolt_query_replayer TraceReplayerMain.cpp)
 
 target_link_libraries(
-  bolt_query_replayer bolt_query_trace_replayer_base bolt_exec bolt_exec_test_lib
+  bolt_query_replayer PRIVATE
+  bolt_query_trace_replayer_base
+  bolt_exec bolt_exec_test_lib
   bolt_tpch_connector
+  bolt_testutils
 )
 
-add_library(bolt_trace_file_tool_base TraceFileToolRunner.cpp)
+add_library(bolt_trace_file_tool_base OBJECT TraceFileToolRunner.cpp)
 
 target_link_libraries(
   bolt_trace_file_tool_base
@@ -107,6 +110,9 @@ target_link_libraries(
 
 add_executable(bolt_trace_file_tool TraceFileToolMain.cpp)
 
-target_link_libraries(bolt_trace_file_tool bolt_trace_file_tool_base)
+target_link_libraries(bolt_trace_file_tool  PRIVATE
+  bolt_trace_file_tool_base
+  bolt_testutils
+)
 
 add_subdirectory(tests)

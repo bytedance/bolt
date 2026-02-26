@@ -68,7 +68,7 @@ void Spill::insertPayload(
     const std::vector<bool>* isValidityBuffer,
     uint64_t rawSize,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec) {
+    Codec* codec) {
   // TODO: Add compression threshold.
   switch (payloadType) {
     case Payload::Type::kUncompressed:

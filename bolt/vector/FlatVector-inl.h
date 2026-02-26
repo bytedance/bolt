@@ -504,7 +504,7 @@ void FlatVector<T>::resize(vector_size_t newSize, bool setNotNull) {
       SimpleVector<StringView>::invalidateIsAscii();
     } else {
       // Properly init stringView objects. This is useful when vectors are
-      // re-used where the size changes but not the capacity.
+      // reused where the size changes but not the capacity.
       // TODO: remove this when resizeValues() checks against size() instead
       // of capacity() when deciding to init values.
       auto stringViews = reinterpret_cast<StringView*>(rawValues_);

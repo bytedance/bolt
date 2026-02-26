@@ -44,7 +44,7 @@ add_flex_bison_dependency(SignatureParserScanner SignatureParser)
 
 include_directories(${PROJECT_BINARY_DIR})
 include_directories(${FLEX_INCLUDE_DIRS})
-add_library(
+bolt_add_library(
   bolt_signature_parser ${BISON_SignatureParser_OUTPUTS} ${FLEX_SignatureParserScanner_OUTPUTS}
                         ParseUtil.cpp
 )

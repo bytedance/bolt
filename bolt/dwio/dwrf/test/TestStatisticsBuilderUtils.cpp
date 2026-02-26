@@ -39,7 +39,9 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwrf;
 
+namespace {
 StatisticsBuilderOptions options{16};
+}
 
 template <typename T>
 std::shared_ptr<FlatVector<T>> makeFlatVector(

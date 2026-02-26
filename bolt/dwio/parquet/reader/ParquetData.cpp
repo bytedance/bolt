@@ -44,6 +44,7 @@ std::unique_ptr<dwio::common::FormatData> ParquetParams::toFormatData(
       type,
       metaData_.row_groups,
       pool(),
+      fileDecryptor_,
       scanSpec.getRuntimeStatistics(),
       schemaHelper_,
       enableDictionaryFilter_,
@@ -69,7 +70,8 @@ void ParquetData::filterRowGroups(
   }
   auto isVarchar = type_->type()->isVarchar();
   auto lt = scanSpec.logicalTypeName();
-  if (isVarchar && (lt.empty() || lt != "STRING")) {
+  auto ct = scanSpec.convertedTypeName();
+  if (ct.empty() && isVarchar && (lt.empty() || lt != "STRING")) {
     VLOG(1)
         << "Skipping row group filter for VARCHAR column without logical type";
     return;
@@ -109,13 +111,13 @@ std::unique_ptr<BlockSplitBloomFilter> ParquetData::loadBlockBloomFilter(
       columnMetaData.bloom_filter_offset > 0) {
     auto offset = columnMetaData.bloom_filter_offset;
     readSize = std::min(guessHeaderLen, fileLength - offset);
-    auto filter_stream =
+    auto filterStream =
         input.read(offset, readSize, dwio::common::LogType::HEADER);
     copy.resize(readSize);
     bufferStart = nullptr;
     bufferEnd = nullptr;
     dwio::common::readBytes(
-        readSize, filter_stream.get(), copy.data(), bufferStart, bufferEnd);
+        readSize, filterStream.get(), copy.data(), bufferStart, bufferEnd);
     auto thriftTransport = std::make_shared<thrift::ThriftBufferedTransport>(
         copy.data(), readSize);
     auto thriftProtocol =
@@ -126,18 +128,18 @@ std::unique_ptr<BlockSplitBloomFilter> ParquetData::loadBlockBloomFilter(
     if (filterHeader.numBytes > 0) {
       auto numBytes = filterHeader.numBytes;
       BOLT_CHECK_LE(numBytes, fileLength - offset);
-      auto bloomfilter = std::make_unique<BlockSplitBloomFilter>(numBytes);
-      auto bitmap_stream =
+      auto bloomFilter = std::make_unique<BlockSplitBloomFilter>(numBytes);
+      auto bitmapStream =
           input.read(offset, numBytes, dwio::common::LogType::HEADER);
       bufferStart = nullptr;
       bufferEnd = nullptr;
       dwio::common::readBytes(
           numBytes,
-          bitmap_stream.get(),
-          bloomfilter->getFilter().data(),
+          bitmapStream.get(),
+          bloomFilter->getFilter().data(),
           bufferStart,
           bufferEnd);
-      return bloomfilter;
+      return bloomFilter;
     }
   }
 
@@ -158,7 +160,7 @@ ParquetData::loadNGramBloomFilter(
   std::vector<std::pair<
       std::unique_ptr<struct NgramTokenExtractor>,
       std::unique_ptr<NGramBloomFilter>>>
-      token_bloom_filters;
+      tokenBloomFilters;
   auto fileLength = input.getReadFile()->size();
 
   auto& columnMetaData = rowGroups_[rowGroupId].columns[columnId].meta_data;
@@ -170,13 +172,13 @@ ParquetData::loadNGramBloomFilter(
       auto offset = columnMetaData.token_bloom_filter_offset[i];
       auto readSize = columnMetaData.token_bloom_filter_length[i];
       BOLT_CHECK_LE(readSize, fileLength - offset);
-      auto filter_stream =
+      auto filterStream =
           input.read(offset, readSize, dwio::common::LogType::HEADER);
       copy.resize(readSize);
       bufferStart = nullptr;
       bufferEnd = nullptr;
       dwio::common::readBytes(
-          readSize, filter_stream.get(), copy.data(), bufferStart, bufferEnd);
+          readSize, filterStream.get(), copy.data(), bufferStart, bufferEnd);
       auto thriftTransport = std::make_shared<thrift::ThriftBufferedTransport>(
           copy.data(), readSize);
       auto thriftProtocol =
@@ -190,18 +192,18 @@ ParquetData::loadNGramBloomFilter(
         auto extractor = std::make_unique<struct NgramTokenExtractor>(
             filterHeader.algorithm.NGRAM.nGram);
         BOLT_CHECK_EQ(headerSize + numBytes, readSize);
-        auto bloomfilter = std::make_unique<NGramBloomFilter>(
+        auto bloomFilter = std::make_unique<NGramBloomFilter>(
             numBytes,
             filterHeader.algorithm.NGRAM.hashes,
             filterHeader.algorithm.NGRAM.seed,
             copy.data() + headerSize);
-        token_bloom_filters.push_back(
-            std::make_pair(std::move(extractor), std::move(bloomfilter)));
+        tokenBloomFilters.push_back(
+            std::make_pair(std::move(extractor), std::move(bloomFilter)));
       }
     }
   }
 
-  return token_bloom_filters;
+  return tokenBloomFilters;
 }
 
 bool ParquetData::rowGroupMatches(
@@ -360,6 +362,9 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
   BOLT_CHECK_LT(index, streams_.size());
   BOLT_CHECK(streams_[index], "Stream not enqueued for column");
   auto& metadata = rowGroups_[index].columns[type_->column()].meta_data;
+
+  auto& columnChunkMeta = rowGroups_[index].columns[type_->column()];
+
   reader_ = std::make_unique<PageReader>(
       std::move(streams_[index]),
       pool_,
@@ -369,6 +374,43 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
       statis_);
   reader_->setDecodeRepDefPageCount(decodeRepDefPageCount_);
   reader_->setParquetRepDefMemoryLimit(parquetRepDefMemoryLimit_);
+
+  if (columnChunkMeta.__isset.crypto_metadata) {
+    std::shared_ptr<Decryptor> metaDecryptor;
+    std::shared_ptr<Decryptor> dataDecryptor;
+    auto& cryptoMetadata = columnChunkMeta.crypto_metadata;
+    if (cryptoMetadata.__isset.ENCRYPTION_WITH_FOOTER_KEY) {
+      metaDecryptor = fileDecryptor_->GetFooterDecryptorForColumnMeta();
+      dataDecryptor = fileDecryptor_->GetFooterDecryptorForColumnData();
+    } else {
+      auto toDotString = [&](const std::vector<std::string>& path) {
+        std::stringstream ss;
+        for (auto it = path.cbegin(); it != path.cend(); ++it) {
+          if (it != path.cbegin()) {
+            ss << ".";
+          }
+          ss << *it;
+        }
+        return ss.str();
+      };
+      const std::string& columnKeyMetadata =
+          cryptoMetadata.ENCRYPTION_WITH_COLUMN_KEY.key_metadata;
+      const std::string columnPath =
+          toDotString(cryptoMetadata.ENCRYPTION_WITH_COLUMN_KEY.path_in_schema);
+      metaDecryptor =
+          fileDecryptor_->GetColumnMetaDecryptor(columnPath, columnKeyMetadata);
+      dataDecryptor =
+          fileDecryptor_->GetColumnDataDecryptor(columnPath, columnKeyMetadata);
+    }
+    auto& ctx = reader_->getCryptoContext();
+    ctx.startDecryptWithDictionaryPage =
+        metadata.__isset.dictionary_page_offset;
+    ctx.rowGroupOrdinal = index;
+    ctx.columnOrdinal = type_->column();
+    ctx.metaDecryptor = std::move(metaDecryptor);
+    ctx.dataDecryptor = std::move(dataDecryptor);
+    reader_->initDecryption();
+  }
 
   return dwio::common::PositionProvider(empty);
 }

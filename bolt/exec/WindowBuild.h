@@ -105,7 +105,7 @@ class WindowBuild {
   // building partitions.
   virtual void noMoreInput() = 0;
 
-  // After all partitions being outputed, clear the memory used.
+  // After all partitions being outputted, clear the memory used.
   virtual void finish() {
     return;
   }

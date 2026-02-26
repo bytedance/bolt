@@ -45,7 +45,7 @@ namespace bytedance::bolt::functions {
 enum class PatternKind {
   /// Pattern containing wildcard character '_' only, such as _, __, ____.
   kExactlyN,
-  /// Pattern containing wildcard characters ('_' or '%') only with atleast one
+  /// Pattern containing wildcard characters ('_' or '%') only with at least one
   /// '%', such as ___%, _%__.
   kAtLeastN,
   /// Pattern with no wildcard characters, such as 'presto', 'foo'.

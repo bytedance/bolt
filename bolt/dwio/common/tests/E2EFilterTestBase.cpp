@@ -606,7 +606,7 @@ void E2EFilterTestBase::testMetadataFilter() {
         untypedExpr, batches[0]->type(), leafPool_.get());
     auto metadataFilter =
         std::make_shared<MetadataFilter>(*spec, *typedExpr, &evaluator, true);
-    // Top level metadata filter is null, so leaf node shoud not be referenced
+    // Top level metadata filter is null, so leaf node should not be referenced
     // from ScanSpec.
     ASSERT_EQ(spec->childByName("a")->numMetadataFilters(), 0);
     ASSERT_EQ(spec->childByName("b")->numMetadataFilters(), 0);

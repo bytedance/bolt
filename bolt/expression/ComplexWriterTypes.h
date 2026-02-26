@@ -203,7 +203,7 @@ class ArrayWriter {
   }
 
   // Should be called by the user (VectorWriter) when null is committed to
-  // pretect against user miss-use (writing to the writer then committing null).
+  // protect against user miss-use (writing to the writer then committing null).
   void resetLength() {
     // No need to commit last written items and innerOffset_ stays the same for
     // the next item.
@@ -633,7 +633,7 @@ class MapWriter {
     return length_;
   }
 
-  // Any map type iteratable in tuple like manner.
+  // Any map type iterable in tuple like manner.
   template <typename MapType>
   void copy_from(const MapType& data) {
     resize(0);
@@ -747,7 +747,7 @@ class MapWriter {
   }
 
   // Should be called by the user (VectorWriter) when null is committed to
-  // pretect against user miss-use (writing to the writer then committing
+  // protect against user miss-use (writing to the writer then committing
   // null).
   void resetLength() {
     // No need to commit last written items and innerOffset_ stays the same

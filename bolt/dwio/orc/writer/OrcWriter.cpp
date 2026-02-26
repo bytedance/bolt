@@ -267,8 +267,8 @@ ArrowOrcWriter::ArrowOrcWriter(
       options.orcWriteTimestampUnit.value_or(TimestampUnit::kNano);
 
   // Don't change following line, unless we port the whole implementation
-  // of arrow/adapters/orc to our codebase. The commiter hard coded the timezone
-  // as UTC when invoking liborc.
+  // of arrow/adapters/orc to our codebase. The committer hard coded the
+  // timezone as UTC when invoking liborc.
   options_.timestampTimeZone = "UTC";
   arrowContext_->arrowWriteOptions = getArrowOrcWriteOptions(options);
   setMemoryReclaimers();

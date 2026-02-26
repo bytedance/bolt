@@ -50,8 +50,7 @@ class TpchConnectorTest : public exec::test::OperatorTestBase {
   void SetUp() override {
     OperatorTestBase::SetUp();
     auto tpchConnector =
-        connector::getConnectorFactory(
-            connector::tpch::TpchConnectorFactory::kTpchConnectorName)
+        connector::getConnectorFactory(connector::kTpchConnectorName)
             ->newConnector(
                 kTpchConnectorId,
                 std::make_shared<config::ConfigBase>(

@@ -5719,7 +5719,7 @@ TEST_F(HashJoinTest, memoryUsage) {
         auto outputBytes = planStats.at(joinNodeId).outputBytes;
         ASSERT_LT(outputBytes, ((40 + 50 + 30) / 3 + 8) * 1000 * 10 * 5);
         // Verify number of memory allocations. Should not be too high if
-        // hash join is able to re-use output vectors that contain
+        // hash join is able to reuse output vectors that contain
         // build-side data.
         ASSERT_GT(40, task->pool()->stats().numAllocs);
       })
@@ -6199,7 +6199,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringInputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -6476,7 +6476,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringAllocation) {
     folly::EventCount testWait;
     auto testWaitKey = testWait.prepareWait();
 
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -6609,7 +6609,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringOutputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<bool> injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -6734,7 +6734,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
   folly::EventCount testWait;
   auto testWaitKey = testWait.prepareWait();
 
-  Operator* op;
+  Operator* op = nullptr;
   std::atomic<bool> injectSpillOnce{true};
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::Driver::runInternal::addInput",
@@ -6885,7 +6885,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringOutputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<bool> injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -6990,7 +6990,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringInputgProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -7096,7 +7096,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashProbeAbortDuringInputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -8090,7 +8090,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, skewPartitionSpill) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -8260,7 +8260,7 @@ TEST_F(HashJoinTest, duplicateLazyNotLoadedProbeVector) {
       .run();
 }
 
-/// a lazy vector cann't be wrapped twice, such as when filtering and get output
+/// a lazy vector can't be wrapped twice, such as when filtering and get output
 TEST_F(HashJoinTest, wrapLazyVectorInFilterAndOutput) {
   // VectorMaker vectorMaker{pool_};
   auto lazyVectorA = vectorMaker_.lazyFlatVector<int32_t>(

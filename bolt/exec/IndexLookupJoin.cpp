@@ -122,7 +122,7 @@ void IndexLookupJoin::initLookupInput() {
         ROW(std::move(lookupInputNames), std::move(lookupInputTypes));
   };
 
-  // List probe key columns used in join-equi caluse first.
+  // List probe key columns used in join-equi clause first.
   folly::F14FastSet<std::string> probeKeyColumnNames;
   for (auto keyIdx = 0; keyIdx < numKeys_; ++keyIdx) {
     lookupInputNames.emplace_back(joinNode_->leftKeys()[keyIdx]->name());

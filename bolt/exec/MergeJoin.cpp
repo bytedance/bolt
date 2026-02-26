@@ -241,7 +241,7 @@ int32_t MergeJoin::compare(
         otherIndex,
         compareFlags);
 
-    // Comparing null with null will return std::nullopt, otherwise determinated
+    // Comparing null with null will return std::nullopt, otherwise determined
     // by nullfirst.
     if (!compare.has_value()) {
       // The SQL semantics of Presto and Spark will always return false if

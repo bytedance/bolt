@@ -36,7 +36,7 @@
 
 DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 DEFINE_int64(iterations, 1, "run count of each benchmark");
-DEFINE_string(keys, "", "keys to compare euqal");
+DEFINE_string(keys, "", "keys to compare equal");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::exec;

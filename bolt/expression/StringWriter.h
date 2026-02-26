@@ -194,7 +194,7 @@ class StringWriter<true /*reuseInput*/> : public UDFOutputString {
     setCapacity(stringToReuse_.size());
 
     if (inPlace) {
-      // The string should be intialized with the input value
+      // The string should be initialized with the input value
       setSize(stringToReuse_.size());
     }
   }

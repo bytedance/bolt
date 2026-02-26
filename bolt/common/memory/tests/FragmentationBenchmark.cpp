@@ -110,7 +110,7 @@ class FragmentationTest {
       if (size <= 8 << 20) {
         block->allocation = std::make_shared<Allocation>();
         if (!memory_->allocateNonContiguous(size / 4096, *block->allocation)) {
-          BOLT_FAIL("allocate() faild");
+          BOLT_FAIL("allocate() failed");
         }
         for (int i = 0; i < block->allocation->numRuns(); ++i) {
           auto run = block->allocation->runAt(i);

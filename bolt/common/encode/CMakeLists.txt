@@ -29,5 +29,5 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_encode Base64.cpp)
-target_link_libraries(bolt_encode PUBLIC ${FOLLY_WITH_DEPENDENCIES} bolt_exception)
+bolt_add_library(bolt_encode Base64.cpp)
+target_link_libraries(bolt_encode PUBLIC Folly::folly bolt_exception)

@@ -622,7 +622,7 @@ using LambdaTypedExprPtr = std::shared_ptr<const LambdaTypedExpr>;
 class CastTypedExpr : public ITypedExpr {
  public:
   /// @param type Type to convert to. This is the return type of the CAST
-  /// expresion.
+  /// expression.
   /// @param input Single input. The type of input is referred to as from-type
   /// and expected to be different from to-type.
   /// @param nullOnFailure Whether to suppress cast errors and return null.
@@ -705,7 +705,7 @@ class CastTypedExpr : public ITypedExpr {
 
 using CastTypedExprPtr = std::shared_ptr<const CastTypedExpr>;
 
-/// A collection of convenince methods for working with expressions.
+/// A collection of convenience methods for working with expressions.
 class TypedExprs {
  public:
   /// Returns true if 'expr' is a field access expression.

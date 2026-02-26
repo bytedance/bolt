@@ -566,7 +566,7 @@ class Task : public std::enable_shared_from_this<Task> {
   /// Driver is running. In this case, the Driver will free resources
   /// and the caller should not do anything. Returns kTerminate if the
   /// Driver was not on thread. When this happens, the Driver is on the
-  /// caller thread wit isTerminated set and the caller is responsible
+  /// caller thread with isTerminated set and the caller is responsible
   /// for freeing resources.
   StopReason enterForTerminateLocked(ThreadState& state);
 
@@ -1315,7 +1315,7 @@ class TaskListener {
 bool registerTaskListener(std::shared_ptr<TaskListener> listener);
 
 /// Unregister a listener registered earlier. Returns true if listener was
-/// unregistered successfuly, false if listener was not found.
+/// unregistered successfully, false if listener was not found.
 bool unregisterTaskListener(const std::shared_ptr<TaskListener>& listener);
 
 std::string executionModeString(Task::ExecutionMode mode);

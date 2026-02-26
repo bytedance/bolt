@@ -31,6 +31,6 @@ elseif(${BOLT_BUILD_TEST_UTILS})
   add_subdirectory(tests/utils)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()

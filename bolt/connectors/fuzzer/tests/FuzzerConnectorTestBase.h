@@ -31,6 +31,7 @@
 #include "bolt/connectors/fuzzer/FuzzerConnector.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
+
 namespace bytedance::bolt::connector::fuzzer::test {
 
 class FuzzerConnectorTestBase : public exec::test::OperatorTestBase {
@@ -40,9 +41,12 @@ class FuzzerConnectorTestBase : public exec::test::OperatorTestBase {
   void SetUp() override {
     OperatorTestBase::SetUp();
     std::shared_ptr<const config::ConfigBase> config;
+    if (!connector::hasConnectorFactory(connector::kFuzzerConnectorName)) {
+      connector::registerConnectorFactory(
+          std::make_shared<FuzzerConnectorFactory>());
+    }
     auto fuzzerConnector =
-        connector::getConnectorFactory(
-            connector::fuzzer::FuzzerConnectorFactory::kFuzzerConnectorName)
+        connector::getConnectorFactory(connector::kFuzzerConnectorName)
             ->newConnector(kFuzzerConnectorId, config);
     connector::registerConnector(fuzzerConnector);
   }

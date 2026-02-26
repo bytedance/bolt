@@ -132,7 +132,7 @@ class BoltToSubstraitPlanConvertor {
   /// Substrait expressions.
   BoltToSubstraitExprConvertorPtr exprConvertor_;
 
-  /// The Type converter used to conver bolt representation into Substrait
+  /// The Type converter used to convert bolt representation into Substrait
   /// type.
   std::shared_ptr<BoltToSubstraitTypeConvertor> typeConvertor_;
 

@@ -432,7 +432,7 @@ TEST_F(EnsureWritableVectorTest, constant) {
   }
 
   // If constant has smaller size, check that we follow the selectivity vector
-  // max seleced row size.
+  // max selected row size.
   {
     const vector_size_t selectivityVectorSize = 100;
     auto constant = BaseVector::createConstant(

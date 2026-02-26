@@ -246,10 +246,12 @@ void DirectBufferedInput::readRegions(
           if (asyncLoad.load->state() != DirectCoalescedLoad::State::kPlanned) {
             return;
           }
-          // the load is valid, so asyncThreadCtx is not freed yet.
-          auto guard =
-              folly::makeGuard([&]() { asyncLoad.asyncThreadCtx->out(); });
-          asyncLoad.asyncThreadCtx->in(); // trace in-flight loading
+          connector::AsyncThreadCtx::Guard guard(
+              asyncLoad.asyncThreadCtx.get(), 0);
+          if (!guard) {
+            return;
+          }
+
           // first check available memory allows to preload data, even if not,
           // the non-preload load will be sync loaded on the main thread.
           if (asyncLoad.canPreload()) {
@@ -400,7 +402,7 @@ std::vector<cache::CachePin> DirectCoalescedLoad::loadData(bool isPrefetch) {
   if (isPrefetch) {
     ioStats_->prefetch().increment(size + overread);
   }
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::cache::DirectCoalescedLoad::loadData", this);
   return {};
 }

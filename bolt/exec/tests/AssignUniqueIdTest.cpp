@@ -77,7 +77,7 @@ class AssignUniqueIdTest : public OperatorTestBase {
     // Verify number of memory allocations. There should be exactly one
     // allocation (per thread of execution) for the values buffer of the unique
     // ID vector. Memory should be allocated when producing first batch of
-    // output and re-used for subsequent batches.
+    // output and reused for subsequent batches.
     auto stats = toPlanStats(task->taskStats());
     ASSERT_EQ(numThreads, stats.at(uniqueNodeId_).numMemoryAllocations);
   }

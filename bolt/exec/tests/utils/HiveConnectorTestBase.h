@@ -157,7 +157,7 @@ class HiveConnectorTestBase : public OperatorTestBase {
   /// @param tableColumnTypes Column types of the target table. Corresponding
   /// name of tableColumnTypes[i] is tableColumnNames[i].
   /// @param partitionedBy A list of partition columns of the target table.
-  /// @param bucketProperty if not nulll, specifies the property for a bucket
+  /// @param bucketProperty if not null, specifies the property for a bucket
   /// table.
   /// @param locationHandle Location handle for the table write.
   /// @param compressionKind compression algorithm to use for table write.

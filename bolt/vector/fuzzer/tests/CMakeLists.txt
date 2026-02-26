@@ -30,6 +30,6 @@ add_executable(bolt_vector_fuzzer_test VectorFuzzerTest.cpp)
 add_test(bolt_vector_fuzzer_test bolt_vector_fuzzer_test)
 
 target_link_libraries(
-  bolt_vector_fuzzer_test bolt_vector_fuzzer bolt_memory GTest::gtest GTest::gtest_main
+  bolt_vector_fuzzer_test bolt_testutils GTest::gtest GTest::gtest_main
   GTest::gmock
 )

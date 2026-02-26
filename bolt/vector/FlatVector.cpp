@@ -204,7 +204,7 @@ void FlatVector<StringView>::acquireSharedStringBuffers(
       totalCapacity += buffer->capacity();
     }
     LOG(INFO) << "FlatVector string buffers count: " << stringBuffers_.size()
-              << ", before accquire: " << bufferCount
+              << ", before acquire: " << bufferCount
               << ", totalSize: " << totalSize
               << ", totalCapacity: " << totalCapacity
               << ", pool name: " << pool_->name();
@@ -363,7 +363,7 @@ void FlatVector<StringView>::copy(
     } else {
       // ASCII-ness for the 'rows' is not known.
       ensureIsAsciiCapacity();
-      // If we arent All ascii, then invalidate
+      // If we aren't All ascii, then invalidate
       // because the remaining selected rows might be ascii
       if (!asciiInfo.isAllAscii()) {
         invalidateIsAscii();

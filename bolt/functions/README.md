@@ -42,7 +42,7 @@ For functions dealing with string inputs and outputs, please use the mechanisms 
 Unicode cases. For example here's how upper function is implemented `functions/lib/string/StringImpl.h`
 
 By passing asciiness via the template variable we know the string is ascii and so run the extremely simpler version of the
-function compared to unicode (utf8) implementation using `utf8proc` library. Note that the template variabe `ascii` having
+function compared to unicode (utf8) implementation using `utf8proc` library. Note that the template variable `ascii` having
 value `true` indicates that the vector has no unicode character in it.
 
 ```c++
@@ -101,7 +101,7 @@ FOLLY_ALWAYS_INLINE size_t upperUnicode(
 Vector functions are usually used in cases in which performance optimizations are necessary per batch such as
 
 * when dealing with complex types such as strings, struct, maps and arrays (functions such as element_at, substr,
-  coalese)
+  coalesce)
 * when we can perform optimizations for a constant input (functions such as regex).
 
 The best way to implement a function as a vector function is usually to follow a specific template. A full description

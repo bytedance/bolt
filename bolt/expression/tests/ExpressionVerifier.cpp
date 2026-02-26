@@ -407,7 +407,7 @@ class MinimalSubExpressionFinder {
   }
 
   // Verifies children of 'plan'. If all succeed, sets minimalFound to
-  // true and reruns 'plan' wth and without lazy vectors. Set
+  // true and reruns 'plan' with and without lazy vectors. Set
   // breakpoint inside this to debug failures.
   bool findMinimalRecursive(
       core::TypedExprPtr plan,

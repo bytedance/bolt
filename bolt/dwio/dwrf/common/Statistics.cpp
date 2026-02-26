@@ -56,7 +56,7 @@ std::unique_ptr<ColumnStatistics> buildColumnStatisticsFromProto(
     } else if (s.has_doublestatistics()) {
       const auto& dStats = s.doublestatistics();
       // Comparing against NaN doesn't make sense, and to prevent downstream
-      // from incorrectly using it, need to make sure min/max/sum doens't have
+      // from incorrectly using it, need to make sure min/max/sum doesn't have
       // NaN.
       auto hasNan = (dStats.has_minimum() && std::isnan(dStats.minimum())) ||
           (dStats.has_maximum() && std::isnan(dStats.maximum())) ||

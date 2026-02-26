@@ -52,7 +52,7 @@ namespace {
 ///  [9, 10]
 /// ]
 ///
-/// The function achieves zero copy through re-using base vector and adjusting
+/// The function achieves zero copy through reusing base vector and adjusting
 /// the rawOffsets and rawSizes vectors.
 /// For the input ArrayVector:
 /// rawOffsets vector [0, 3, 7]

@@ -39,7 +39,7 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
     return mod;
   }
 
-  // Only one fuction (RowRowCompare) generated in this module,
+  // Only one function (RowRowCompare) generated in this module,
   // pass function name as module key
   auto tsm = jit->CreateTSModule(fn);
 
@@ -242,7 +242,7 @@ llvm::BasicBlock* RowContainerCodeGenerator::genFloatPointCmpIR(
   // https://stackoverflow.com/questions/8627331/what-does-ordered-unordered-comparison-mean
   // 2. RowContainer::comparePrimitiveAsc
   // ```cpp
-  //  if (leftIsNan != rightIsNan) {  // only one oprand is NaN
+  //  if (leftIsNan != rightIsNan) {  // only one operand is NaN
   //      return asc ?  rightIsNan : leftIsNan;
   //  }
   //  else if (leftIsNan)  // both is Nan
@@ -420,8 +420,8 @@ llvm::BasicBlock* RowContainerCodeGenerator::genIntegerCmpIR(
   // Generate value comparison IR for check nullity
   // && flags[idx].nullsFirst == flags[idx].ascending
   // if we ignore the nullity check, we have to compare Max and Null, a bit
-  // complicated, just ignore this tricky optimzation we can optimize this after
-  // we refactor RowConatiner
+  // complicated, just ignore this tricky optimization we can optimize this
+  // after we refactor RowConatiner
   if (hasNullKeys) {
     curr_blk = genNullBitCmpIR(
         values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
@@ -929,7 +929,7 @@ llvm::BasicBlock* RowContainerCodeGenerator::genComplexCmpIR(
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
   // ```cpp
-  //   auto res = ComplexTypeRowCmpRow(left_row(offset),
+  //   auto res = jit_ComplexTypeRowCmpRow(left_row(offset),
   //   right_row[offset], type*, flags);
   //   if constexpr (lastKey) {
   //     return res;
@@ -955,7 +955,7 @@ llvm::BasicBlock* RowContainerCodeGenerator::genComplexCmpIR(
 
   auto key_cmp_res = createCall(
       builder,
-      isCmpSpill() ? RowBasedComplexTypeRowCmpRow : ComplexTypeRowCmpRow,
+      isCmpSpill() ? RowBased_ComplexTypeRowCmpRow : ComplexTypeRowCmpRow,
       {values[0],
        values[1],
        builder.getInt64((int64_t)keysTypes[idx].get()),
@@ -1199,28 +1199,39 @@ const std::string RowContainerCodeGenerator::builtInDeclarationsIR = R"IR(
 
   declare i32 @FastRowStringViewCompareAsc(i8*  %0, i8*  %1) local_unnamed_addr
 
-  declare i32 @StringViewCompareWrapper(i8* %0, i8*  %1) local_unnamed_addr
-  declare i32 @RowBasedStringViewCompare(i8* %0, i8*  %1) local_unnamed_addr
-  declare i32 @ComplexTypeRowCmpRow(i8* %0, i8* %1, i64 %2, i32 %3, i8 %4, i8 %5) local_unnamed_addr
-  declare i32 @RowBasedComplexTypeRowCmpRow(i8* %0, i8* %1, i64 %2, i32 %3, i8 %4, i8 %5) local_unnamed_addr
+  declare i32 @jit_StringViewCompareWrapper(i8* %0, i8*  %1) local_unnamed_addr
+  declare i32 @jit_RowBasedStringViewCompare(i8* %0, i8*  %1) local_unnamed_addr
+  declare i32 @jit_ComplexTypeRowCmpRow(i8* %0, i8* %1, i64 %2, i32 %3, i8 %4, i8 %5) local_unnamed_addr
+  declare i32 @jit_RowBased_ComplexTypeRowCmpRow(i8* %0, i8* %1, i64 %2, i32 %3, i8 %4, i8 %5) local_unnamed_addr
 
-  declare i8 @StringViewRowEqVectors(i8*  %0, i8*  %1) local_unnamed_addr
-  declare i8 @GetDecodedValueBool(i8* %0, i32 %1) local_unnamed_addr
-  declare i8 @GetDecodedValueI8(i8* %0, i32 %1) local_unnamed_addr
-  declare i16 @GetDecodedValueI16(i8* %0, i32 %1) local_unnamed_addr
-  declare i32 @GetDecodedValueI32(i8* %0, i32 %1) local_unnamed_addr
-  declare i64 @GetDecodedValueI64(i8* %0, i32 %1) local_unnamed_addr
-  declare i128 @GetDecodedValueI128(i8* %0, i32 %1) local_unnamed_addr
-  declare float @GetDecodedValueFloat(i8* %0, i32 %1) local_unnamed_addr
-  declare double @GetDecodedValueDouble(i8* %0, i32 %1) local_unnamed_addr
-  declare i8 @CmpRowVecTimestamp(i8* %0, i32 %1, i8* %2) local_unnamed_addr
-  declare i8* @GetDecodedValueStringView(i8* %0, i32 %1) local_unnamed_addr
-  declare i8 @GetDecodedIsNull(i8* %0, i32 %1) local_unnamed_addr
-  declare i8 @ComplexTypeRowEqVectors(i8* %0, i32 %1, i8* %2, i32 %3) local_unnamed_addr
-  declare void @DebugPrint(i64 %0, i64 %1, i64 %2) local_unnamed_addr
+  declare i8 @jit_StringViewRowEqVectors(i8*  %0, i8*  %1) local_unnamed_addr
+  declare i8 @jit_GetDecodedValueBool(i8* %0, i32 %1) local_unnamed_addr
+  declare i8 @jit_GetDecodedValueI8(i8* %0, i32 %1) local_unnamed_addr
+  declare i16 @jit_GetDecodedValueI16(i8* %0, i32 %1) local_unnamed_addr
+  declare i32 @jit_GetDecodedValueI32(i8* %0, i32 %1) local_unnamed_addr
+  declare i64 @jit_GetDecodedValueI64(i8* %0, i32 %1) local_unnamed_addr
+  declare i128 @jit_GetDecodedValueI128(i8* %0, i32 %1) local_unnamed_addr
+  declare float @jit_GetDecodedValueFloat(i8* %0, i32 %1) local_unnamed_addr
+  declare double @jit_GetDecodedValueDouble(i8* %0, i32 %1) local_unnamed_addr
+  declare i8 @jit_CmpRowVecTimestamp(i8* %0, i32 %1, i8* %2) local_unnamed_addr
+  declare i8* @jit_GetDecodedValueStringView(i8* %0, i32 %1) local_unnamed_addr
+  declare i8 @jit_GetDecodedIsNull(i8* %0, i32 %1) local_unnamed_addr
+  declare i8 @jit_ComplexTypeRowEqVectors(i8* %0, i32 %1, i8* %2, i32 %3) local_unnamed_addr
+  declare void @jit_DebugPrint(i64 %0, i64 %1, i64 %2) local_unnamed_addr
 
   )IR";
 
 } // namespace bytedance::bolt::jit
+
+extern "C" {
+extern int jit_StringViewCompareWrapper(char* l, char* r);
+
+// This dummy function will never be called in fact.
+// It is just a trick to make sure that the linker will not skip the functions
+// in RowContainer.cpp, which will be called by JIT.
+__attribute__((used)) void dummyImportFuctionsJitCalled(void) {
+  jit_StringViewCompareWrapper(nullptr, nullptr);
+}
+}
 
 #endif // ENABLE_BOLT_JIT

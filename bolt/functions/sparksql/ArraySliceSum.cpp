@@ -200,7 +200,7 @@ class ArraySliceSumFunction : public exec::VectorFunction {
       VectorPtr& result) const override {
     // Input is either flat or constant.
 
-    BOLT_USER_CHECK(args.size() == 3, "Expecte 3 arguments");
+    BOLT_USER_CHECK(args.size() == 3, "Expected 3 arguments");
     BOLT_CHECK_EQ(args[1]->typeKind(), TypeKind::INTEGER);
     BOLT_CHECK_EQ(args[2]->typeKind(), TypeKind::INTEGER);
 

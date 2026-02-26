@@ -29,7 +29,9 @@
  */
 
 #pragma once
-
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
+#include <arm_sve.h>
+#endif
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -84,12 +86,27 @@ static utf8proc_bool utf8proc_char_first_byte(const char* u_input);
 static utf8proc_int32_t utf8proc_codepoint_length(utf8proc_int32_t uc);
 
 FOLLY_ALWAYS_INLINE bool isAscii(const char* str, size_t length) {
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
+  size_t i = 0;
+  const size_t sveVectorSize = svcntb();
+  const svuint8_t v80 = svdup_u8(0x80);
+  while (i < length) {
+    svbool_t pgTail = svwhilelt_b8(i, length);
+    svuint8_t v = svld1_u8(pgTail, reinterpret_cast<const uint8_t*>(str) + i);
+    if (svptest_any(pgTail, svcmpge(pgTail, v, v80))) {
+      return false;
+    }
+    i += sveVectorSize;
+  }
+  return true;
+#else
   for (auto i = 0; i < length; i++) {
     if (str[i] & 0x80) {
       return false;
     }
   }
   return true;
+#endif
 }
 
 /// Perform reverse for ascii string input
@@ -545,8 +562,8 @@ FOLLY_ALWAYS_INLINE static int64_t findNthInstanceCharIndexFromStart(
 
 /// Replace replaced with replacement in inputString and write results in
 /// outputString. If inPlace=true inputString and outputString are assumed to
-/// tbe the same. When replaced is empty and ignoreEmptyReplaced is false,
-/// replacement is added before and after each charecter. When replaced is
+/// the same. When replaced is empty and ignoreEmptyReplaced is false,
+/// replacement is added before and after each character. When replaced is
 /// empty and ignoreEmptyReplaced is true, the result is the inputString value.
 /// When inputString is empty results is empty.
 /// replace("", "", "x") = ""
@@ -661,7 +678,7 @@ inline static size_t replace(
 
 /// Given a utf8 string, a starting position and length returns the
 /// corresponding underlying byte range [startByteIndex, endByteIndex).
-/// Byte indicies starts from 0, UTF8 character positions starts from 1.
+/// Byte indices starts from 0, UTF8 character positions starts from 1.
 /// If a bad unicode byte is encountered, then we skip that bad byte and
 /// count that as one codepoint.
 template <bool isAscii>
@@ -1182,8 +1199,8 @@ utf8proc_codepoint(const char* u_input, const char* end, utf8proc_int32_t* sz) {
 
 /// Return the size in bytes for the char pointed to by u_input.
 /// This function is not part of the original utf8proc, it is a simplified
-/// verion of utf8proc_codepoint. It assumes a valid utf8 input otherwise output
-/// is undefined.
+/// version of utf8proc_codepoint. It assumes a valid utf8 input otherwise
+/// output is undefined.
 FOLLY_ALWAYS_INLINE utf8proc_int32_t utf8proc_char_length(const char* u_input) {
   const unsigned char* u = (const unsigned char*)u_input;
   unsigned char u0 = u[0];
@@ -1217,7 +1234,7 @@ utf8proc_char_first_byte(const char* u_input) {
 
 /// Return the size in bytes for the char represented by the input code point.
 /// The output is not undefined if uc is invalid. Its implemented to match
-/// the space writen by utf8proc_encode_char for invalid inputs case.
+/// the space written by utf8proc_encode_char for invalid inputs case.
 FOLLY_ALWAYS_INLINE utf8proc_int32_t
 utf8proc_codepoint_length(utf8proc_int32_t uc) {
   if (uc < 0x00) {

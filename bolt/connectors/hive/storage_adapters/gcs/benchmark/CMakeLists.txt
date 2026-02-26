@@ -31,10 +31,7 @@ target_link_libraries(
   bolt_gcsread_benchmark
   bolt_read_benchmark_lib
   bolt_gcs
-  bolt_exception
-  bolt_exec_test_lib
-  ${FMT}
-  ${FOLLY_WITH_DEPENDENCIES}
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

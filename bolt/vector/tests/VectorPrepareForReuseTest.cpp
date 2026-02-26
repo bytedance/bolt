@@ -127,7 +127,7 @@ TEST_F(VectorPrepareForReuseTest, strings) {
     ASSERT_TRUE(allocationChecker.assertAtLeastOne());
   }
 
-  // Verify that only one string buffer is kept for re-use.
+  // Verify that only one string buffer is kept for reuse.
   {
     std::vector<std::string> extraLargeStrings = {
         std::string(200, '.'),

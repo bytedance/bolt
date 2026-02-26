@@ -41,6 +41,9 @@
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
 #include "bolt/dwio/parquet/thrift/ThriftTransport.h"
 #include "bolt/vector/FlatVector.h"
+
+#include "bolt/dwio/parquet/thrift/ThriftInternal.h"
+
 namespace bytedance::bolt::parquet {
 
 using thrift::Encoding;
@@ -62,6 +65,11 @@ void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
     PageHeader pageHeader = readPageHeader();
     pageStart_ = pageDataStart_ + pageHeader.compressed_page_size;
 
+    if (cryptoCtx_.dataDecryptor != nullptr) {
+      updateDecryption(
+          cryptoCtx_.dataDecryptor, encryption::kDictionaryPage, &dataPageAad_);
+    }
+
     switch (pageHeader.type) {
       case thrift::PageType::DATA_PAGE:
         prepareDataPageV1(pageHeader, row, keepRepDefRawData);
@@ -76,6 +84,7 @@ void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
               inputStream_.get(),
               bufferStart_,
               bufferEnd_);
+          cryptoCtx_.startDecryptWithDictionaryPage = false;
           continue;
         }
         prepareDictionary(pageHeader);
@@ -101,12 +110,78 @@ PageHeader PageReader::readPageHeader() {
 
   PageHeader pageHeader;
   uint64_t readBytes;
-  std::shared_ptr<thrift::ThriftTransport> transport =
-      std::make_shared<thrift::ThriftStreamingTransport>(
-          inputStream_.get(), bufferStart_, bufferEnd_);
-  apache::thrift::protocol::TCompactProtocolT<thrift::ThriftTransport> protocol(
-      transport);
-  readBytes = pageHeader.read(&protocol);
+  if (cryptoCtx_.metaDecryptor != nullptr) {
+    thrift::ThriftDeserializer deserializer;
+    updateDecryption(
+        cryptoCtx_.metaDecryptor,
+        encryption::kDictionaryPageHeader,
+        &dataPageHeaderAad_);
+    uint32_t encryptedBufferSize = bufferEnd_ - bufferStart_;
+    uint8_t* encryptedBufferStart =
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(bufferStart_));
+    uint32_t headerSize = encryptedBufferSize;
+    bool reallocate = false;
+    auto decryptBufferGuard = folly::makeGuard([&]() {
+      if (reallocate) {
+        pool_.free(encryptedBufferStart, encryptedBufferSize);
+      }
+    });
+
+    while (true) {
+      headerSize = encryptedBufferSize;
+      if (headerSize > cryptoCtx_.metaDecryptor->CiphertextSizeDelta()) {
+        try {
+          bool ret = deserializer.DeserializeMessage(
+              encryptedBufferStart,
+              &headerSize,
+              &pageHeader,
+              cryptoCtx_.metaDecryptor);
+          if (ret) {
+            break;
+          }
+        } catch (const BoltRuntimeError& e) {
+          BOLT_CHECK(
+              encryptedBufferSize <= kDefaultMaxPageHeaderSize,
+              "Failed to decrypt page header with page header more than 16MB, failed reason: {}",
+              e.message());
+        }
+      }
+
+      // inputStream_->Next may change the content in buffer, so do redundant
+      // allocate and copy from buffer when first decrypt failed before reading
+      // from inputstream
+      if (!reallocate) {
+        encryptedBufferStart =
+            reinterpret_cast<uint8_t*>(pool_.allocate(encryptedBufferSize));
+        memcpy(encryptedBufferStart, bufferStart_, encryptedBufferSize);
+      }
+
+      reallocate = true;
+      int32_t size;
+      if (!inputStream_->Next(
+              reinterpret_cast<const void**>(&bufferStart_), &size)) {
+        BOLT_FAIL("readPageHeader() reading past the end of the stream");
+      }
+      bufferEnd_ = bufferStart_ + size;
+
+      encryptedBufferStart = reinterpret_cast<uint8_t*>(pool_.reallocate(
+          encryptedBufferStart,
+          encryptedBufferSize,
+          encryptedBufferSize + size));
+
+      memcpy(encryptedBufferStart + encryptedBufferSize, bufferStart_, size);
+      encryptedBufferSize += size;
+    }
+    readBytes = headerSize;
+    bufferStart_ = bufferEnd_ - (encryptedBufferSize - headerSize);
+  } else {
+    std::shared_ptr<thrift::ThriftTransport> transport =
+        std::make_shared<thrift::ThriftStreamingTransport>(
+            inputStream_.get(), bufferStart_, bufferEnd_);
+    apache::thrift::protocol::TCompactProtocolT<thrift::ThriftTransport>
+        protocol(transport);
+    readBytes = pageHeader.read(&protocol);
+  }
 
   pageDataStart_ = pageStart_ + readBytes;
   return pageHeader;
@@ -233,6 +308,7 @@ void PageReader::prepareDataPageV1(
   BOLT_CHECK(
       pageHeader.type == thrift::PageType::DATA_PAGE &&
       pageHeader.__isset.data_page_header);
+  ++pageOrdinal_;
   numRepDefsInPage_ = pageHeader.data_page_header.num_values;
   setPageRowInfo(row == kRepDefOnly);
   if (row != kRepDefOnly && numRowsInPage_ != kRowsUnknown &&
@@ -246,11 +322,13 @@ void PageReader::prepareDataPageV1(
     return;
   }
 
-  pageData_ = readBytes(pageHeader.compressed_page_size, pageBuffer_);
+  int32_t compressedLen = pageHeader.compressed_page_size;
+  pageData_ = readBytes(compressedLen, pageBuffer_);
+  if (cryptoCtx_.dataDecryptor != nullptr) {
+    decryptPageData(compressedLen);
+  }
   pageData_ = decompressData(
-      pageData_,
-      pageHeader.compressed_page_size,
-      pageHeader.uncompressed_page_size);
+      pageData_, compressedLen, pageHeader.uncompressed_page_size);
   auto pageEnd = pageData_ + pageHeader.uncompressed_page_size;
 
   // copy rep/def to preloadedRepDefs_, do not decode
@@ -323,6 +401,7 @@ void PageReader::prepareDataPageV2(
     int64_t row,
     const bool keepRepDefRawData) {
   BOLT_CHECK(pageHeader.__isset.data_page_header_v2);
+  ++pageOrdinal_;
 
   numRepDefsInPage_ = pageHeader.data_page_header_v2.num_values;
   setPageRowInfo(row == kRepDefOnly);
@@ -344,6 +423,10 @@ void PageReader::prepareDataPageV2(
       : 0;
   auto bytes = pageHeader.compressed_page_size;
   pageData_ = readBytes(bytes, pageBuffer_);
+
+  if (cryptoCtx_.dataDecryptor != nullptr) {
+    decryptPageData(bytes);
+  }
 
   if (row == kRepDefOnly && keepRepDefRawData) {
     BOLT_CHECK(defineLength > 0 && repeatLength > 0);
@@ -418,12 +501,21 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
       dictionaryEncoding_ == Encoding::PLAIN_DICTIONARY ||
       dictionaryEncoding_ == Encoding::PLAIN);
 
+  cryptoCtx_.startDecryptWithDictionaryPage = false;
+  int32_t compressedLen = pageHeader.compressed_page_size;
+  int32_t uncompressedLen = pageHeader.uncompressed_page_size;
   if (codec_ != thrift::CompressionCodec::UNCOMPRESSED) {
-    pageData_ = readBytes(pageHeader.compressed_page_size, pageBuffer_);
+    pageData_ = readBytes(compressedLen, pageBuffer_);
+    if (cryptoCtx_.dataDecryptor != nullptr) {
+      decryptPageData(compressedLen);
+    }
     pageData_ = decompressData(
-        pageData_,
-        pageHeader.compressed_page_size,
-        pageHeader.uncompressed_page_size);
+        pageData_, compressedLen, pageHeader.uncompressed_page_size);
+  } else {
+    if (cryptoCtx_.dataDecryptor != nullptr) {
+      pageData_ = readBytes(uncompressedLen, pageBuffer_);
+      decryptPageData(uncompressedLen);
+    }
   }
 
   auto parquetType = type_->parquetType_.value();
@@ -520,7 +612,7 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
     case thrift::Type::BYTE_ARRAY: {
       dictionary_.values =
           AlignedBuffer::allocate<StringView>(dictionary_.numValues, &pool_);
-      auto numBytes = pageHeader.uncompressed_page_size;
+      auto numBytes = uncompressedLen;
       auto values = dictionary_.values->asMutable<StringView>();
       dictionary_.strings = AlignedBuffer::allocate<char>(numBytes, &pool_);
       auto strings = dictionary_.strings->asMutable<char>();
@@ -682,6 +774,7 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
 
 void PageReader::preloadRepDefs() {
   hasChunkRepDefs_ = true;
+  bool startWithDictinoaryPage = cryptoCtx_.startDecryptWithDictionaryPage;
   if (maxRepeat_ > 0 && maxDefine_ > 0) {
     const int32_t samplePages = decodeRepDefPageCount_;
     int32_t pageCnt = 0;
@@ -738,6 +831,8 @@ void PageReader::preloadRepDefs() {
   numRowsInPage_ = 0;
   pageData_ = nullptr;
   totalRefDefBytes_ = 0;
+  pageOrdinal_ = 0;
+  cryptoCtx_.startDecryptWithDictionaryPage = startWithDictinoaryPage;
 }
 
 void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
@@ -767,7 +862,7 @@ void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
     repDefEnd_ = i + numTopLevelRows;
   }
   if (maxRepeat_ > 0 && maxDefine_ > 0) {
-    // definitionLevels_ has been comsumed, decode more if any
+    // definitionLevels_ has been consumed, decode more if any
     while (repDefEnd_ == numLevels && topFound < numTopLevelRows + 1 &&
            !preloadedRepDefs_.empty()) {
       loadMoreRepDefs();
@@ -1387,6 +1482,24 @@ const VectorPtr& PageReader::dictionaryValues(const TypePtr& type) {
     }
   }
   return dictionaryValues_;
+}
+
+void PageReader::decryptPageData(int32_t& compressedLen) {
+  if (decryptionBuffer_) {
+    AlignedBuffer::reallocate<uint8_t>(
+        &decryptionBuffer_,
+        compressedLen - cryptoCtx_.dataDecryptor->CiphertextSizeDelta());
+  } else {
+    decryptionBuffer_ = AlignedBuffer::allocate<uint8_t>(
+        compressedLen - cryptoCtx_.dataDecryptor->CiphertextSizeDelta(),
+        &pool_);
+  }
+  compressedLen = cryptoCtx_.dataDecryptor->Decrypt(
+      reinterpret_cast<const uint8_t*>(pageData_),
+      compressedLen,
+      const_cast<uint8_t*>(decryptionBuffer_->as<uint8_t>()),
+      decryptionBuffer_->size());
+  pageData_ = decryptionBuffer_->as<char>();
 }
 
 } // namespace bytedance::bolt::parquet

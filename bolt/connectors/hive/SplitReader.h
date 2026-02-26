@@ -115,7 +115,7 @@ class SplitReader : public HiveSplitReaderBase {
 
   /// This function is used by different table formats like Iceberg and Hudi to
   /// do additional preparations before reading the split, e.g. Open delete
-  /// files or log files, and add column adapatations for metadata columns
+  /// files or log files, and add column adaptations for metadata columns
   virtual void prepareSplit(
       std::shared_ptr<common::MetadataFilter> metadataFilter,
       dwio::common::RuntimeStatistics& runtimeStats,
@@ -145,7 +145,7 @@ class SplitReader : public HiveSplitReaderBase {
   }
 
  protected:
-  // Different table formats may have different meatadata columns. This function
+  // Different table formats may have different metadata columns. This function
   // will be used to update the scanSpec for these columns.
   virtual std::vector<TypePtr> adaptColumns(
       const RowTypePtr& fileType,

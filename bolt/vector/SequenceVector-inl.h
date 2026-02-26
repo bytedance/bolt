@@ -177,7 +177,7 @@ vector_size_t SequenceVector<T>::offsetOfIndex(vector_size_t index) const {
       lastIndexRangeStart_ -= lengths_[lastRangeIndex_];
     } while (index < lastIndexRangeStart_);
   } else if (index >= lastIndexRangeEnd_) {
-    // walk up the range indicies until we are in the range requested
+    // walk up the range indices until we are in the range requested
     do {
       ++lastRangeIndex_;
       lastIndexRangeStart_ = lastIndexRangeEnd_;
@@ -195,14 +195,14 @@ static inline vector_size_t offsetOfIndex(
     vector_size_t* lastRangeEnd,
     vector_size_t* lastIndex) {
   if (index < *lastRangeBegin) {
-    // walk down the range indicies until we are in the range requested
+    // walk down the range indices until we are in the range requested
     do {
       --*lastIndex;
       *lastRangeEnd = *lastRangeBegin;
       *lastRangeBegin -= lengths[*lastIndex];
     } while (index < *lastRangeBegin);
   } else if (index >= *lastRangeEnd) {
-    // walk up the range indicies until we are in the range requested
+    // walk up the range indices until we are in the range requested
     do {
       ++*lastIndex;
       *lastRangeBegin = *lastRangeEnd;

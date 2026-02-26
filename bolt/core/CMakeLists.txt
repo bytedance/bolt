@@ -29,10 +29,10 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_config Config.cpp Context.cpp)
+bolt_add_library(bolt_config Config.cpp Context.cpp)
 target_link_libraries(bolt_config bolt_exception Folly::folly)
 
-add_library(
+bolt_add_library(
   bolt_core Expressions.cpp PlanFragment.cpp PlanNode.cpp QueryConfig.cpp QueryCtx.cpp
             SimpleFunctionMetadata.cpp
 )

@@ -40,7 +40,7 @@ namespace bytedance::bolt::exec {
 /// advantage of the meta data locality in the complex vectors.
 /// 2) If the function needs to keep around state from each element to the
 /// next it's preferred to use meta data. For example if the data is bitmap
-/// (boolean) for operations like Coalese etc.
+/// (boolean) for operations like Coalesce etc.
 /// 3) When for some constant input values major optimization is possible such
 /// as the case for regular expressions.
 /// 4) When reusing one of the input vectors for creating the output can lead
@@ -139,8 +139,8 @@ class VectorArithmetic : public VectorFunction {
     // Step 1: Create the output vector
     //
     // Check if the output vector is not initialized, we either use one of
-    // re-usable input or create it.
-    // To check if an input is re-usable:
+    // reusable input or create it.
+    // To check if an input is reusable:
     // (1) Its unique() property must be true!
     // (2) the input type must match the output vector type
     // (3) usually we try to reuse inputs with flat encoding

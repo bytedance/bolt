@@ -53,7 +53,7 @@ std::vector<int32_t> SsdFileTracker::findEvictionCandidates(
     int32_t numCandidates,
     int32_t numRegions,
     const std::vector<int32_t>& regionPins) {
-  // Calculates average score of regions wiht no pins. Returns up to
+  // Calculates average score of regions with no pins. Returns up to
   // 'numCandidates' unpinned regions with score <= average, lowest
   // scoring region first.
   int64_t scoreSum = 0;

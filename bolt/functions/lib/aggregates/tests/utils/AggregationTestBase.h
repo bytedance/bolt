@@ -155,7 +155,7 @@ class AggregationTestBase : public exec::test::OperatorTestBase {
 
   // Given a list of aggregation expressions, test their equivalent plans using
   // companion functions. For example, suppose we have the following arguments
-  // where c0 and c1 are double colummns.
+  // where c0 and c1 are double columns.
   //   aggregates = {"avg(c0), avg(c1)"}
   //   groupingKeys = {"g0"},
   //   postAggregationProjections = {},

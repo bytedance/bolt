@@ -30,7 +30,7 @@ add_test(bolt_connector_test bolt_connector_test)
 
 target_link_libraries(
   bolt_connector_test
-  bolt_connector
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   glog::glog

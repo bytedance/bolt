@@ -18,10 +18,10 @@
 #include <folly/Range.h>
 #include <folly/String.h>
 #include <ryu/ryu.h>
-#include "Type.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/serialization/Serializable.h"
 #include "bolt/type/NumericTypeUtils.h"
+#include "bolt/type/Type.h"
 
 namespace {
 
@@ -416,7 +416,7 @@ bool Cast<SOURCE, TARGET>::testBytes(const char* bytes, int32_t len) const {
         }
 
       } catch (...) {
-        // string -> double conversion failed, treat as UNKNOW.
+        // string -> double conversion failed, treat as UNKNOWN.
         return false;
       }
     } else {

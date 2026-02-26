@@ -262,7 +262,7 @@ void HashStringAllocator::newSlab() {
   // We check we got exactly the requested amount. checkConsistency()
   // depends on slabs made here coinciding with ranges from
   // AllocationPool::rangeAt(). Sometimes the last range can be
-  // several huge pages for severl huge page sized arenas but
+  // several huge pages for several huge page sized arenas but
   // checkConsistency() can interpret that.
   BOLT_CHECK_EQ(0, pool_.freeBytes());
   auto available = needed - sizeof(Header) - kSimdPadding;
@@ -350,7 +350,7 @@ void HashStringAllocator::freeRestOfBlock(Header* header, int32_t keepBytes) {
   header->setSize(keepBytes);
   auto newHeader = new (header->end()) Header(freeSize);
   free(newHeader);
-  // Substract the size of the new free header
+  // Subtract the size of the new free header
   cumulativeBytes_ -= sizeof(Header);
 }
 
@@ -822,7 +822,7 @@ int HashStringAllocator::FastRowStringViewCompareAsc(
       leftContLen = std::min((uint32_t)(leftHead->usableSize()), leftLen);
       leftData = leftHead->begin();
     } else {
-      leftData += useLen; // still contigous
+      leftData += useLen; // still contiguous
     }
 
     if (rightContLen == 0 && rightHead->isContinued()) {
@@ -830,7 +830,7 @@ int HashStringAllocator::FastRowStringViewCompareAsc(
       rightContLen = std::min((uint32_t)(rightHead->usableSize()), rightLen);
       rightData = rightHead->begin();
     } else {
-      rightData += useLen; // still contigous
+      rightData += useLen; // still contiguous
     }
 
     if (useLen == 0) {

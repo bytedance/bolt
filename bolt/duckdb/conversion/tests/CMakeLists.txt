@@ -31,11 +31,7 @@ add_test(bolt_duckdb_conversion_test bolt_duckdb_conversion_test)
 
 target_link_libraries(
   bolt_duckdb_conversion_test
-  bolt_duckdb_parser
-  bolt_parse_expression
-  bolt_functions_prestosql
-  bolt_functions_lib
-  bolt_functions_test_lib
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   gflags::gflags

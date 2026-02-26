@@ -25,12 +25,12 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_functions_remote_thrift_client ThriftClient.cpp)
+bolt_add_library(bolt_functions_remote_thrift_client ThriftClient.cpp)
 target_link_libraries(
   bolt_functions_remote_thrift_client PUBLIC bolt_remote_function_thrift FBThrift::thriftcpp2
 )
 
-add_library(bolt_functions_remote Remote.cpp)
+bolt_add_library(bolt_functions_remote Remote.cpp)
 target_link_libraries(
   bolt_functions_remote PUBLIC bolt_expression bolt_functions_remote_thrift_client
                                bolt_functions_remote_get_serde bolt_type_fbhive Folly::folly

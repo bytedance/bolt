@@ -131,7 +131,7 @@ class InputStream {
 
   /**
    * Take advantage of vectorized read API provided by some file system.
-   * Allow file system to do optimzied reading plan to disk to minimize
+   * Allow file system to do optimized reading plan to disk to minimize
    * total bytes transferred through network. Stores the result in an IOBuf
    * range named at `iobufs`, which must have the same size as `regions`.
    */

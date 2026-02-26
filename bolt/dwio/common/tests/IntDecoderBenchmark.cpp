@@ -148,7 +148,7 @@ uint64_t readVuLong(const char* buffer, size_t& len) {
 
 const char* readVuLongOptimized(uint64_t n, const char* pos, uint64_t* output) {
   static bool has_bmi2 = folly::CpuId().bmi2();
-  DWIO_ENSURE(has_bmi2, "bmi2 is not eabled");
+  DWIO_ENSURE(has_bmi2, "bmi2 is not enabled");
   constexpr uint64_t mask = 0x0000808080808080;
   // Note that we could of course use a mask_len of up to 8. But I found
   // that with mask_len > 6 we start to spill out of the l1i cache in

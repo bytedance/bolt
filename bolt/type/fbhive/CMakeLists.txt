@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_type_fbhive HiveTypeParser.cpp HiveTypeSerializer.cpp)
+bolt_add_library(bolt_type_fbhive HiveTypeParser.cpp HiveTypeSerializer.cpp)
 
 target_link_libraries(bolt_type_fbhive bolt_type)
 

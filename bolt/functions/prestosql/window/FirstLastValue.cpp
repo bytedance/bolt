@@ -168,7 +168,7 @@ class FirstLastValueFunction : public exec::WindowFunction {
   // is set.
   BufferPtr nulls_;
 
-  // Member variable re-used for setting null for empty frames.
+  // Member variable reused for setting null for empty frames.
   SelectivityVector invalidRows_;
 };
 } // namespace

@@ -1064,7 +1064,7 @@ TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
       util::fromTimestampString("1970-01-01 00:00:00", nullptr),
       parseJoda("12 AM", "h a").timestamp);
 
-  // time gives precendent to most recent time specifier
+  // time gives precedent to most recent time specifier
   EXPECT_EQ(
       util::fromTimestampString("1970-01-01 01:00:00", nullptr),
       parseJoda("0 1 AM", "H h a").timestamp);
@@ -1124,7 +1124,7 @@ TEST_F(JodaDateTimeFormatterTest, parseSecond) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseTimezoneOffset) {
-  // Broken timezone offfsets; allowed formats are either "+00:00" or "+00".
+  // Broken timezone offsets; allowed formats are either "+00:00" or "+00".
   EXPECT_THROW(parseJoda("", "ZZ"), BoltUserError);
   EXPECT_THROW(parseJoda("0", "ZZ"), BoltUserError);
   EXPECT_THROW(parseJoda("00", "ZZ"), BoltUserError);
@@ -2544,7 +2544,7 @@ TEST_F(MysqlDateTimeTest, parseHalfOfDay) {
       util::fromTimestampString("1970-01-01 00:00:00", nullptr),
       parseMysql("12 AM", "%l %p"));
 
-  // time gives precendent to most recent time specifier
+  // time gives precedent to most recent time specifier
   EXPECT_EQ(
       util::fromTimestampString("1970-01-01 01:00:00", nullptr),
       parseMysql("0 1 AM", "%H %h %p"));

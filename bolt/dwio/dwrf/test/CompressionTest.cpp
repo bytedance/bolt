@@ -104,7 +104,7 @@ void decompressAndVerify(
       std::move(inputStream),
       blockSize,
       pool,
-      "Test Comrpession",
+      "Test Compression",
       decrypter);
 
   const char* decompressedBuffer;
@@ -266,7 +266,7 @@ void verifyProto(
       new SeekableArrayInputStream(memSink.data(), memSink.size()));
 
   std::unique_ptr<SeekableInputStream> decompressStream = createDecompressor(
-      kind, std::move(inputStream), block, pool, "Test Comrpession", decrypter);
+      kind, std::move(inputStream), block, pool, "Test Compression", decrypter);
 
   proto::PostScript ps;
   ps.ParseFromZeroCopyStream(decompressStream.get());

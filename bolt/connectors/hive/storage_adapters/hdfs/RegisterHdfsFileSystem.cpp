@@ -40,6 +40,9 @@ namespace bytedance::bolt::filesystems {
 
 #ifdef BOLT_ENABLE_HDFS
 
+folly::ConcurrentHashMap<std::string, std::shared_ptr<HdfsFileSystem>>
+    registeredFilesystems;
+
 namespace {
 std::function<std::shared_ptr<
     FileSystem>(std::shared_ptr<const config::ConfigBase>, std::string_view)>
@@ -51,16 +54,16 @@ hdfsFileSystemGenerator() {
             HdfsFileSystem::getServiceEndpoint(filePath, properties.get());
         std::string hdfsIdentity = endpoint.identity();
 
-        static std::unordered_map<std::string, std::shared_ptr<FileSystem>>
-            filesystems;
         static std::mutex mtx;
         {
           std::unique_lock<std::mutex> lk(mtx);
-          if (filesystems.find(hdfsIdentity) == filesystems.end()) {
-            filesystems[hdfsIdentity] =
+          if (registeredFilesystems.find(hdfsIdentity) ==
+              registeredFilesystems.end()) {
+            auto fileSystem =
                 std::make_shared<HdfsFileSystem>(properties, endpoint);
+            registeredFilesystems.insert(hdfsIdentity, fileSystem);
           }
-          return filesystems[hdfsIdentity];
+          return registeredFilesystems[hdfsIdentity];
         }
       };
   return filesystemGenerator;

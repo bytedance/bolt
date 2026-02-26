@@ -19,12 +19,12 @@
 #include <folly/init/Init.h>
 #include <string>
 
-#include "Type.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/Window.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
+#include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_string(temp_file_path, "", "file path of input file");

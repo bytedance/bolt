@@ -56,24 +56,10 @@ endif()
 
 target_link_libraries(
   bolt_memory_test
-  PRIVATE bolt_caching
-          bolt_common_base
-          bolt_exception
-          bolt_exec
-          bolt_exec_test_lib
-          bolt_memory
-          bolt_temp_path
-          bolt_test_util
-          bolt_vector_fuzzer
-          bolt_functions_aggregates
-          Folly::folly
-          fmt::fmt
-          gflags::gflags
-          glog::glog
+  PRIVATE bolt_testutils
           GTest::gmock
           GTest::gtest
           GTest::gtest_main
-          re2::re2
           $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
           pthread
           dl
@@ -85,10 +71,11 @@ add_executable(bolt_fragmentation_benchmark FragmentationBenchmark.cpp)
 
 target_link_libraries(
   bolt_fragmentation_benchmark
-  PRIVATE bolt_memory ${FOLLY_WITH_DEPENDENCIES} $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
+  PRIVATE bolt_testutils
+          $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
           gflags::gflags glog::glog dl
 )
 
 add_executable(bolt_concurrent_allocation_benchmark ConcurrentAllocationBenchmark.cpp)
 
-target_link_libraries(bolt_concurrent_allocation_benchmark PRIVATE bolt_memory bolt_time)
+target_link_libraries(bolt_concurrent_allocation_benchmark PRIVATE bolt_testutils)

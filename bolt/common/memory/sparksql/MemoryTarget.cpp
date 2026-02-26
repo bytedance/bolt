@@ -521,7 +521,7 @@ TreeMemoryTargetPtr ConsumerTargetBridgeFactory::getSharedAccount(
     ConsumerTargetBridgePtr bridge =
         std::make_shared<ConsumerTargetBridge>(tmm);
 
-    // we need addConsumer manualy to avoid bridge being destroyed
+    // we need addConsumer manually to avoid bridge being destroyed
     MemoryConsumerPtr bridgeConsumer =
         std::dynamic_pointer_cast<MemoryConsumer>(bridge);
     BOLT_CHECK(bridgeConsumer != nullptr);

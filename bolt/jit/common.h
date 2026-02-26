@@ -26,7 +26,7 @@
 
 namespace bytedance::bolt::jit {
 
-// Use abstract class to seperate LLVM dependencies to avoid fmt::fmt v8.0.1
+// Use abstract class to separate LLVM dependencies to avoid fmt::fmt v8.0.1
 // compiling error. Since Impl class has to hold llvm::orc::ResourceTrackerSP
 struct CompiledModule {
   virtual const char* getKey() const noexcept {

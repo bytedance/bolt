@@ -30,7 +30,7 @@ class SpillerPhaseUtil final {
       case kSpill:
         return "spill";
       default:
-        return "unkown";
+        return "unknown";
     }
   }
 };

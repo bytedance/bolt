@@ -47,68 +47,45 @@ add_executable(
   VectorTest.cpp
   VectorTestUtils.cpp
   VectorToStringTest.cpp
+  SimpleVectorTest.cpp
+  ToStringUtilityTest.cpp
+  BiasVectorTest.cpp
 )
 
 add_test(bolt_vector_test bolt_vector_test)
 
 target_link_libraries(
   bolt_vector_test
-  bolt_vector_test_lib
-  bolt_buffer
-  bolt_vector
-  bolt_serialization
-  bolt_memory
-  bolt_presto_serializer
-  bolt_presto_types
-  bolt_temp_path
-  bolt_vector_fuzzer
-  Boost::atomic
-  Boost::context
-  Boost::date_time
-  Boost::filesystem
-  Boost::program_options
-  Boost::thread
-  Boost::system
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  ${FOLLY_WITH_DEPENDENCIES}
-  utf8proc::utf8proc
-  gflags::gflags
-  glog::glog
-  fmt::fmt
-  dl
 )
 
-add_executable(simple_vector_test SimpleVectorTest.cpp ToStringUtilityTest.cpp)
+# add_executable(simple_vector_test SimpleVectorTest.cpp ToStringUtilityTest.cpp)
 
-add_test(simple_vector_test simple_vector_test)
+# add_test(simple_vector_test simple_vector_test)
 
-target_link_libraries(
-  simple_vector_test
-  bolt_vector
-  bolt_buffer
-  bolt_type
-  bolt_vector_test_lib
-  GTest::gtest
-  GTest::gtest_main
-  ${FOLLY_WITH_DEPENDENCIES}
-  gflags::gflags
-  glog::glog
-  fmt::fmt
-)
+# target_link_libraries(
+#   simple_vector_test
+#   bolt_vector
+#   bolt_buffer
+#   bolt_type
+#   bolt_vector_test_lib
+#   GTest::gtest
+#   GTest::gtest_main
+#   Folly::folly
+#   gflags::gflags
+#   glog::glog
+#   fmt::fmt
+# )
 
-add_executable(bias_vector_test BiasVectorTest.cpp)
+# add_executable(bias_vector_test BiasVectorTest.cpp)
 
-add_test(bias_vector_test bias_vector_test)
+# add_test(bias_vector_test bias_vector_test)
 
-target_link_libraries(
-  bias_vector_test
-  bolt_vector
-  Boost::filesystem
-  GTest::gtest
-  GTest::gtest_main
-  ${FOLLY_WITH_DEPENDENCIES}
-  gflags::gflags
-  glog::glog
-  fmt::fmt
-)
+# target_link_libraries(
+#   bias_vector_test
+#   bolt_testutils
+#   GTest::gtest
+#   GTest::gtest_main
+# )

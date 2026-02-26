@@ -124,7 +124,7 @@ struct StringWriter : public UDFOutputString {
   void reserve(size_t size) override {
     // Resizing the storage not StringWriter size.
     // This allow us to write directly write into storage_.data() and assuring
-    // what we wrote wont be overwritten on future resize calls.
+    // what we wrote won't be overwritten on future resize calls.
     storage_.resize(size);
     setData(storage_.data());
     setCapacity(size);

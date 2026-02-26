@@ -35,7 +35,7 @@
 #include "bolt/dwio/parquet/reader/ParquetData.h"
 namespace bytedance::bolt::parquet {
 
-/// Comtainer for the lengths of a repeated reader where the lengths are
+/// Container for the lengths of a repeated reader where the lengths are
 /// pre-filled from repdefs.
 class RepeatedLengths {
  public:

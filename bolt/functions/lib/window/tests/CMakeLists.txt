@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_functions_window_test_lib WindowTestBase.cpp)
+bolt_add_library(bolt_functions_window_test_lib WindowTestBase.cpp)
 
 target_link_libraries(
   bolt_functions_window_test_lib bolt_exec_test_lib bolt_vector_fuzzer bolt_vector_test_lib

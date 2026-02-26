@@ -29,6 +29,8 @@ add_executable(bolt_serialization_test SerializableTest.cpp TestRegistry.cpp)
 add_test(bolt_serialization_test bolt_serialization_test)
 
 target_link_libraries(
-  bolt_serialization_test PRIVATE bolt_exception bolt_serialization ${FOLLY_WITH_DEPENDENCIES}
-                                  glog::glog GTest::gtest GTest::gtest_main
+  bolt_serialization_test
+  PRIVATE bolt_testutils
+          GTest::gtest
+          GTest::gtest_main
 )

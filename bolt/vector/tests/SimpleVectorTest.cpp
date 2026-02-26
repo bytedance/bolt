@@ -361,7 +361,7 @@ TEST_F(SimpleVectorNonParameterizedTest, isAsciiSourceRows) {
     ASSERT_TRUE(ascii.has_value());
     ASSERT_TRUE(ascii.value());
 
-    // Ensure we return nullopt if we arent a subset.
+    // Ensure we return nullopt if we aren't a subset.
     SelectivityVector some(all.size(), false);
     some.setValid(0, true);
     some.updateBounds();

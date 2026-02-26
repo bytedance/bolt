@@ -63,7 +63,9 @@ class ParquetTypeWithId : public dwio::common::TypeWithId {
       bool isRepeated,
       int32_t precision = 0,
       int32_t scale = 0,
-      int32_t typeLength = 0)
+      int32_t typeLength = 0,
+      bool isDCMap = false,
+      std::unordered_map<std::string, std::vector<std::string>> dcKeys = {})
       : TypeWithId(type, std::move(children), id, maxId, column),
         name_(name),
         parquetType_(parquetType),
@@ -75,7 +77,9 @@ class ParquetTypeWithId : public dwio::common::TypeWithId {
         isRepeated_(isRepeated),
         precision_(precision),
         scale_(scale),
-        typeLength_(typeLength) {}
+        typeLength_(typeLength),
+        isDCMap_(isDCMap),
+        dcKeys_(std::move(dcKeys)) {}
 
   bool isLeaf() const {
     // Negative column ordinal means non-leaf column.
@@ -93,6 +97,15 @@ class ParquetTypeWithId : public dwio::common::TypeWithId {
   /// Fills 'info' and returns the mode for interpreting levels.
   LevelMode makeLevelInfo(arrow::LevelInfo& info) const;
 
+  bool isDCMap() const override {
+    return isDCMap_;
+  }
+
+  const std::unordered_map<std::string, std::vector<std::string>>& getDcKeys()
+      const override {
+    return dcKeys_;
+  }
+
   const std::string name_;
   const std::optional<thrift::Type::type> parquetType_;
   const std::optional<thrift::LogicalType> logicalType_;
@@ -104,6 +117,8 @@ class ParquetTypeWithId : public dwio::common::TypeWithId {
   const int32_t precision_;
   const int32_t scale_;
   const int32_t typeLength_;
+  const bool isDCMap_;
+  const std::unordered_map<std::string, std::vector<std::string>> dcKeys_;
 
   // True if this is or has a non-repeated leaf.
   bool hasNonRepeatedLeaf() const;

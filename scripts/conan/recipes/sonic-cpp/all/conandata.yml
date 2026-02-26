@@ -13,6 +13,9 @@
 # limitations under the License.
 
 sources:
+  "1.0.2-bolt":
+    url: "https://github.com/bytedance/sonic-cpp/archive/3a99917e34c675b8f28ef3d060e708ad6474a074.zip"
+    sha256: "3adf8a409916ee7b54d1766cca0e78e8746120c3c8624c55e8be0ef3f018f7f3"
   "1.0.2-fix":
     url: "https://github.com/bytedance/sonic-cpp/archive/eb4d90eadedccf1089c6200e0f5297c7fcb6fb8b.zip"
     sha256: "a3ae36879cd38b891d338c172ef0e8f57d400f3e8beb702f33404ff54baabe67"

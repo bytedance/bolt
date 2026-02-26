@@ -54,7 +54,7 @@ class FromUtf8Function : public exec::VectorFunction {
     exec::DecodedArgs decodedArgs(rows, args, context);
     auto& decodedInput = *decodedArgs.at(0);
 
-    // Read the constant replacement if it exisits and verify that it is valid.
+    // Read the constant replacement if it exists and verify that it is valid.
     bool constantReplacement =
         args.size() == 1 || decodedArgs.at(1)->isConstantMapping();
     std::string constantReplacementValue = kReplacementChar;

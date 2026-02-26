@@ -15,7 +15,7 @@
 
 # TXT Reader setup
 if(BOLT_ENABLE_TXT)
-  add_library(bolt_dwio_txt_reader RegisterTxtReader.cpp TxtReader.cpp)
+  bolt_add_library(bolt_dwio_txt_reader RegisterTxtReader.cpp TxtReader.cpp)
   target_link_libraries(
     bolt_dwio_txt_reader
     xsimd::xsimd
@@ -29,6 +29,6 @@ if(BOLT_ENABLE_TXT)
     Folly::folly
   )
 else()
-  add_library(bolt_dwio_txt_reader RegisterTxtReader.cpp)
+  bolt_add_library(bolt_dwio_txt_reader RegisterTxtReader.cpp)
   # No additional dependencies
 endif()

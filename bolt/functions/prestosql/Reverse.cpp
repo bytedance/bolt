@@ -84,7 +84,7 @@ class ReverseFunction : public exec::VectorFunction {
         return;
       }
       case TypeKind::VARBINARY:
-        // The only difference betwen VARCHAR and VARBINARY input is that
+        // The only difference between VARCHAR and VARBINARY input is that
         // VARBINARY is reversed byte-by-byte, while VARCHAR is reversed
         // character-by-character. Hence, VARINARY behavior is the same as
         // VARCHAR with ascii flag set to true.

@@ -25,41 +25,50 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+set(BOLT_BENCHMARK_DEPS
+    bolt_vector_fuzzer
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest
+)
 add_executable(bolt_sparksql_benchmarks_in In.cpp)
 
 target_link_libraries(
-  bolt_sparksql_benchmarks_in
-  bolt_functions_prestosql
-  bolt_functions_spark
-  bolt_expression
-  bolt_exec_test_lib
-  bolt_vector_test_lib
-  bolt_vector_fuzzer
-  Folly::folly
-  ${FOLLY_BENCHMARK}
+  bolt_sparksql_benchmarks_in PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_compare CompareBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_compare bolt_functions_spark bolt_benchmark_builder bolt_vector_test_lib
+  bolt_sparksql_benchmarks_compare PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_regex RegexBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_regex Folly::folly ${FOLLY_BENCHMARK} bolt_process re2::re2
-  ${ICU_LIBRARIES}
+  bolt_sparksql_benchmarks_regex PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )
 add_executable(bolt_sparksql_benchmarks_split Split.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_split bolt_functions_spark bolt_benchmark_builder bolt_vector_test_lib
+  bolt_sparksql_benchmarks_split PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_hash HiveHashBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_hash bolt_functions_spark bolt_benchmark_builder bolt_vector_test_lib
+  bolt_sparksql_benchmarks_hash PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_map MapBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_map bolt_functions_spark bolt_benchmark_builder bolt_vector_test_lib
+  bolt_sparksql_benchmarks_map PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
 )

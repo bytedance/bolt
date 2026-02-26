@@ -151,6 +151,8 @@ void registerDatetimeFunctions(const std::string& prefix) {
       Timestamp,
       bool,
       Varchar>({prefix + "months_between"});
+  registerFunction<MonthsBetweenFunction, double, Timestamp, Timestamp, bool>(
+      {prefix + "months_between"});
 
   registerFunction<DayOfWeekFunction, int32_t, Timestamp>(
       {prefix + "dow", prefix + "dayofweek"});
@@ -193,6 +195,7 @@ void registerDatetimeFunctions(const std::string& prefix) {
       {prefix + "make_ym_interval"});
   registerFunction<DateTruncFunction, Timestamp, Varchar, Timestamp>(
       {prefix + "date_trunc"});
+  registerFunction<TruncFunction, Date, Date, Varchar>({prefix + "trunc"});
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_make_timestamp, prefix + "make_timestamp");
 

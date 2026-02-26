@@ -109,7 +109,7 @@ class SequenceVector : public SimpleVector<T> {
    * Note this method is implemented on each vector type, but is intentionally
    * not virtual for performance reasons
    *
-   * @param byteOffset - the byte offset to laod from
+   * @param byteOffset - the byte offset to load from
    */
   xsimd::batch<T> loadSIMDValueBufferAt(size_t index) const;
 

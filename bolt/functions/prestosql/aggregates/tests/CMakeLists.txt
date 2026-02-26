@@ -105,6 +105,7 @@ set(BOLT_AGGREGATES_TEST_DEPENDENCIES
     bolt_simple_aggregate
     bolt_type
     bolt_vector_fuzzer
+    bolt_testutils
     gflags::gflags
     GTest::gtest
     GTest::gtest_main

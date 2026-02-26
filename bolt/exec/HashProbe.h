@@ -120,7 +120,7 @@ class HashProbe : public Operator {
       const RowTypePtr& probeType,
       const RowTypePtr& tableType);
 
-  // Check if output_ can be re-used and if not make a new one.
+  // Check if output_ can be reused and if not make a new one.
   void prepareOutput(vector_size_t size);
 
   // Populate output columns.

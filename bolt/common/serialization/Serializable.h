@@ -97,7 +97,7 @@ class ISerializable {
  public:
   virtual folly::dynamic serialize() const = 0;
 
-  // Serialization for clases derived from ISerializable.
+  // Serialization for classes derived from ISerializable.
   template <
       typename T,
       typename = std::enable_if_t<std::is_base_of_v<ISerializable, T>>>
@@ -134,7 +134,7 @@ class ISerializable {
   }
 
   // Serialization for standard containers.
-  // TODO separate defintions of composite types from declarations.
+  // TODO separate definitions of composite types from declarations.
   template <typename T>
   static folly::dynamic serialize(const std::vector<T>& vec) {
     folly::dynamic arr = folly::dynamic::array;

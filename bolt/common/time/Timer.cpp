@@ -30,11 +30,16 @@
 
 #include "bolt/common/time/Timer.h"
 
+#ifndef NDEBUG
 #include "bolt/common/testutil/ScopedTestTime.h"
+#endif
 namespace bytedance::bolt {
 
 using namespace std::chrono;
+
+#ifndef NDEBUG
 using common::testutil::ScopedTestTime;
+#endif
 
 #ifndef NDEBUG
 

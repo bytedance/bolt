@@ -100,7 +100,7 @@ class BoltColumnarBatchDeserializer {
   BoltColumnarBatchDeserializer(
       std::shared_ptr<arrow::io::InputStream> in,
       const std::shared_ptr<arrow::Schema>& schema,
-      const std::shared_ptr<arrow::util::Codec>& codec,
+      const std::shared_ptr<Codec>& codec,
       const bytedance::bolt::RowTypePtr& rowType,
       int32_t batchSize,
       int32_t shuffleBatchByteSize,
@@ -111,7 +111,7 @@ class BoltColumnarBatchDeserializer {
       uint64_t& deserializeTime,
       uint64_t& decompressTime,
       bool isRowFormat = false,
-      ZstdStreamCodec* zstdCodec = nullptr,
+      AdaptiveParallelZstdCodec* zstdCodec = nullptr,
       RowBufferPool* rowBufferPool = nullptr,
       ShuffleRowToColumnarConverter* row2ColConverter = nullptr);
 
@@ -123,7 +123,7 @@ class BoltColumnarBatchDeserializer {
 
   std::shared_ptr<arrow::io::BufferedInputStream> in_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<arrow::util::Codec> codec_;
+  std::shared_ptr<Codec> codec_;
   bytedance::bolt::RowTypePtr rowType_;
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
@@ -140,7 +140,7 @@ class BoltColumnarBatchDeserializer {
 
   // for row format shuffle read
   const bool isRowFormat_{false};
-  ZstdStreamCodec* zstdCodec_{nullptr};
+  AdaptiveParallelZstdCodec* zstdCodec_{nullptr};
   RowBufferPool* rowBufferPool_{nullptr};
   uint8_t* partialRow_{nullptr};
   int32_t partialRowSize_{0};
@@ -157,12 +157,13 @@ class BoltColumnarBatchDeserializerFactory {
  public:
   BoltColumnarBatchDeserializerFactory(
       const std::shared_ptr<arrow::Schema>& schema,
-      const std::shared_ptr<arrow::util::Codec>& codec,
+      const std::shared_ptr<Codec>& codec,
       const bytedance::bolt::RowTypePtr& rowType,
       int32_t batchSize,
       int32_t shuffleBatchByteSize,
       arrow::MemoryPool* memoryPool,
-      bytedance::bolt::memory::MemoryPool* boltPool);
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      bool checksumEnabled = true);
 
   std::unique_ptr<BoltColumnarBatchDeserializer> createDeserializer(
       std::shared_ptr<arrow::io::InputStream> in);
@@ -205,7 +206,7 @@ class BoltColumnarBatchDeserializerFactory {
 
  private:
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<arrow::util::Codec> codec_;
+  std::shared_ptr<Codec> codec_;
   bytedance::bolt::RowTypePtr rowType_;
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
@@ -223,9 +224,10 @@ class BoltColumnarBatchDeserializerFactory {
 
   void initFromSchema();
   // for rowbased shuffle
-  std::shared_ptr<ZstdStreamCodec> zstdCodec_{nullptr};
+  std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_{nullptr};
   std::shared_ptr<RowBufferPool> rowBufferPool_{nullptr};
   std::shared_ptr<ShuffleRowToColumnarConverter> row2ColConverter_{nullptr};
+  bool checksumEnabled_{true};
 };
 
 class BoltShuffleReader {

@@ -32,6 +32,7 @@
 
 #include "bolt/common/config/Config.h"
 #include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/tpch/TpchConnectorSplit.h"
 #include "bolt/tpch/gen/TpchGen.h"
 namespace bytedance::bolt::connector::tpch {

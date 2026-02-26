@@ -278,7 +278,7 @@ StringView Timestamp::tmToStringView(
                                char* const position) {
     const auto numDigits = countDigits(value);
     uint32_t offset = 0;
-    // Append leading zeros when there is the requirement for minumum width.
+    // Append leading zeros when there is the requirement for minimum width.
     if (minWidth.has_value() && numDigits < minWidth.value()) {
       const auto leadingZeros = minWidth.value() - numDigits;
       std::memset(position, '0', leadingZeros);

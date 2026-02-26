@@ -369,7 +369,7 @@ class IndexSource {
   virtual std::unordered_map<std::string, RuntimeCounter> runtimeStats() = 0;
 };
 
-// recored in-flight async threads and wait them done
+// recorded in-flight async threads and wait them done
 class AsyncThreadCtx {
  public:
   explicit AsyncThreadCtx(int64_t memLimit, bool adaptive)
@@ -377,13 +377,24 @@ class AsyncThreadCtx {
     BOLT_CHECK_GT(preloadBytesLimit_, 0);
   }
 
-  void in() {
-    std::unique_lock lock(mutex_);
+  enum class State { kActive, kClosed };
+
+  bool isClosed() const {
+    std::scoped_lock lock(mutex_);
+    return state_ == State::kClosed;
+  }
+
+  bool in() {
+    std::scoped_lock lock(mutex_);
+    if (state_ == State::kClosed) {
+      return false;
+    }
     numIn_++;
     cv_.notify_one();
+    return true;
   }
   void out() {
-    std::unique_lock lock(mutex_);
+    std::scoped_lock lock(mutex_);
     numIn_--;
     cv_.notify_one();
   }
@@ -391,6 +402,7 @@ class AsyncThreadCtx {
   void wait() {
     // check timeout and output warninglogs
     std::unique_lock lock(mutex_);
+    state_ = State::kClosed;
     cv_.wait_until(
         lock,
         std::chrono::steady_clock::now() + std::chrono::seconds(600),
@@ -401,12 +413,26 @@ class AsyncThreadCtx {
     return mutex_;
   }
 
-  int64_t& inPreloadingBytes() {
+  int64_t preloadBytesLimit() const {
+    return preloadBytesLimit_;
+  }
+
+  void addPreloadingBytes(int64_t bytes) {
+    std::scoped_lock lock(mutex_);
+    addPreloadingBytesUntracked(bytes);
+  }
+
+  int64_t inPreloadingBytes() const {
+    std::scoped_lock lock(mutex_);
+    return inPreloadingBytesUntracked();
+  }
+
+  int64_t inPreloadingBytesUntracked() const {
     return inPreloadingBytes_;
   }
 
-  int64_t preloadBytesLimit() const {
-    return preloadBytesLimit_;
+  void addPreloadingBytesUntracked(int64_t bytes) {
+    inPreloadingBytes_ += bytes;
   }
 
   void disallowPreload() {
@@ -417,17 +443,70 @@ class AsyncThreadCtx {
   }
 
   bool allowPreload() {
+    if (adaptive_ && allowPreload_.load()) {
+      std::scoped_lock lock(mutex_);
+      return inPreloadingBytes_ < preloadBytesLimit_;
+    }
     return allowPreload_.load();
   }
 
+  class Guard {
+   public:
+    Guard(AsyncThreadCtx* ctx, int64_t bytes = 0) : ctx_(ctx), bytes_(bytes) {
+      if (ctx_) {
+        if (ctx_->in()) {
+          ctx_->addPreloadingBytes(bytes_);
+        } else {
+          ctx_ = nullptr;
+        }
+      }
+    }
+
+    ~Guard() {
+      if (ctx_) {
+        ctx_->out();
+        ctx_->addPreloadingBytes(-bytes_);
+      }
+    }
+
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+    Guard(Guard&& other) noexcept : ctx_(other.ctx_), bytes_(other.bytes_) {
+      other.ctx_ = nullptr;
+    }
+
+    Guard& operator=(Guard&& other) noexcept {
+      if (this != &other) {
+        if (ctx_) {
+          ctx_->out();
+          ctx_->addPreloadingBytes(-bytes_);
+        }
+        ctx_ = other.ctx_;
+        bytes_ = other.bytes_;
+        other.ctx_ = nullptr;
+      }
+      return *this;
+    }
+
+    explicit operator bool() const {
+      return ctx_ != nullptr;
+    }
+
+   private:
+    AsyncThreadCtx* ctx_;
+    int64_t bytes_;
+  };
+
  private:
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   int numIn_{0};
   int64_t inPreloadingBytes_{0};
   int64_t preloadBytesLimit_{0};
   std::condition_variable cv_;
   std::atomic_bool allowPreload_{true};
   bool adaptive_{true};
+  State state_{State::kActive};
 };
 
 /// Collection of context data for use in a DataSource, IndexSource or DataSink.
@@ -441,7 +520,7 @@ class ConnectorQueryCtx {
       memory::MemoryPool* connectorPool,
       const config::ConfigBase* sessionProperties,
       const common::SpillConfig* spillConfig,
-      connector::AsyncThreadCtx* const asyncThreadCtx,
+      std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx,
       std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator,
       cache::AsyncDataCache* cache,
       const std::string& queryId,
@@ -452,7 +531,7 @@ class ConnectorQueryCtx {
         connectorPool_(connectorPool),
         sessionProperties_(sessionProperties),
         spillConfig_(spillConfig),
-        asyncThreadCtx_(asyncThreadCtx),
+        asyncThreadCtx_(std::move(asyncThreadCtx)),
         expressionEvaluator_(std::move(expressionEvaluator)),
         cache_(cache),
         scanId_(fmt::format("{}.{}", taskId, planNodeId)),
@@ -516,7 +595,7 @@ class ConnectorQueryCtx {
     return planNodeId_;
   }
 
-  AsyncThreadCtx* asyncThreadCtx() const {
+  std::shared_ptr<AsyncThreadCtx> asyncThreadCtx() const {
     return asyncThreadCtx_;
   }
 
@@ -525,7 +604,7 @@ class ConnectorQueryCtx {
   memory::MemoryPool* const connectorPool_;
   const config::ConfigBase* const sessionProperties_;
   const common::SpillConfig* const spillConfig_;
-  AsyncThreadCtx* const asyncThreadCtx_;
+  const std::shared_ptr<AsyncThreadCtx> asyncThreadCtx_;
   std::unique_ptr<core::ExpressionEvaluator> expressionEvaluator_;
   cache::AsyncDataCache* cache_;
   const std::string scanId_;
@@ -728,7 +807,8 @@ getAllConnectors();
 
 #define BOLT_REGISTER_CONNECTOR_FACTORY(theFactory)                       \
   namespace {                                                             \
-  static bool FB_ANONYMOUS_VARIABLE(g_ConnectorFactory) =                 \
+  __attribute__((used)) static bool FB_ANONYMOUS_VARIABLE(                \
+      g_ConnectorFactory) =                                               \
       bytedance::bolt::connector::registerConnectorFactory((theFactory)); \
   }
 } // namespace bytedance::bolt::connector

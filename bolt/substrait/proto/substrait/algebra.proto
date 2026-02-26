@@ -708,7 +708,7 @@ message WriteRel {
     OUTPUT_MODE_NO_OUTPUT = 1;
     // this mode makes the operator return all the record INSERTED/DELETED/UPDATED by the operator.
     // The operator returns the AFTER-image of any change. This can be further manipulated by operators upstreams
-    // (e.g., retunring the typical "count of modified records").
+    // (e.g., returning the typical "count of modified records").
     // For scenarios in which the BEFORE image is required, the user must implement a spool (via references to
     // subplans in the body of the Rel input) and return those with anounter PlanRel.relations.
     OUTPUT_MODE_MODIFIED_RECORDS = 2;
@@ -798,7 +798,7 @@ message HashJoinRel {
   Rel right = 3;
   // These fields are deprecated in favor of `keys`.  If they are set then
   // the two lists (left_keys and right_keys) must have the same length and
-  // the comparion function is considered to be SimpleEqualityType::EQ
+  // the comparison function is considered to be SimpleEqualityType::EQ
   repeated Expression.FieldReference left_keys = 4 [deprecated = true];
   repeated Expression.FieldReference right_keys = 5 [deprecated = true];
   // One or more keys to join on.  The relation is invalid if this is empty
@@ -812,7 +812,7 @@ message HashJoinRel {
   // "equals ignoring case" then the hash function must return the same hash
   // code for strings that differ only by case.  Note: the hash function is not
   // specified here.  It is the responsibility of the consumer to find an appropriate
-  // hash function for a given comparsion function or to reject the plan if it cannot
+  // hash function for a given comparison function or to reject the plan if it cannot
   // do so.
   repeated ComparisonJoinKey keys = 8;
   Expression post_join_filter = 6;
@@ -846,7 +846,7 @@ message MergeJoinRel {
   Rel right = 3;
   // These fields are deprecated in favor of `keys`.  If they are set then
   // the two lists (left_keys and right_keys) must have the same length and
-  // the comparion function is considered to be SimpleEqualityType::EQ
+  // the comparison function is considered to be SimpleEqualityType::EQ
   repeated Expression.FieldReference left_keys = 4 [deprecated = true];
   repeated Expression.FieldReference right_keys = 5 [deprecated = true];
   // One or more keys to join on.  The relation is invalid if this is empty
@@ -1338,7 +1338,7 @@ message Expression {
   message IfThen {
     // A list of one or more IfClauses
     repeated IfClause ifs = 1;
-    // The returned Expression if no IfClauses are satisified
+    // The returned Expression if no IfClauses are satisfied
     Expression else = 2;
 
     message IfClause {
@@ -1522,7 +1522,7 @@ message Expression {
     }
 
     // Whether this reference has an origin of a root struct or is based on the
-    // ouput of an expression. When this is a RootReference and direct_reference
+    // output of an expression. When this is a RootReference and direct_reference
     // above is used, the direct_reference must be of a type StructField.
     oneof root_type {
       Expression expression = 3;

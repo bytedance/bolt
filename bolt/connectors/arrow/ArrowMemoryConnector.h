@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/arrow/ArrowMemoryConnectorSplit.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
@@ -140,8 +141,6 @@ class ArrowMemoryConnector : public Connector {
 
 class ArrowMemoryConnectorFactory : public ConnectorFactory {
  public:
-  static constexpr const char* FOLLY_NONNULL kArrowMemoryConnectorName =
-      "arrow-memory";
   ArrowMemoryConnectorFactory() : ConnectorFactory(kArrowMemoryConnectorName) {}
 
   explicit ArrowMemoryConnectorFactory(const char* FOLLY_NONNULL connectorName)

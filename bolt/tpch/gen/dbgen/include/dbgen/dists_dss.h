@@ -164,7 +164,7 @@ const char* dists_dss =
     "###\n"
     "# nations\n"
     "# NOTE: this is a special case; the weights here are adjustments to\n"
-    "#       map correctly into the regions table, and are *NOT* cummulative\n"
+    "#       map correctly into the regions table, and are *NOT* cumulative\n"
     "#       values to mimic a distribution\n"
     "###\n"
     "begin nations\n"

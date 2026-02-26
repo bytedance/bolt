@@ -102,7 +102,7 @@ bool isHostExcludedFromProxy(
 /// Reading the various proxy related environment variables.
 /// There is a lacking standard. The environment variables can be
 /// defined lower case or upper case. The lower case values are checked
-/// first and, if set, returned, therefore taking precendence.
+/// first and, if set, returned, therefore taking precedence.
 /// Note, the envVar input is expected to be lower case.
 namespace {
 std::string readProxyEnvVar(std::string envVar) {

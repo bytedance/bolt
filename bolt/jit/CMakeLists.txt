@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(
+bolt_add_library(
   bolt_thrustjit ThrustJIT.cpp
                  RowContainer/RowContainerCodeGenerator.cpp
                  RowContainer/RowEqVectorsCodeGenerator.cpp
@@ -24,12 +24,6 @@ target_link_libraries(bolt_thrustjit PUBLIC llvm-core::llvm-core date::date fmt:
 target_compile_options(
   bolt_thrustjit PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-Werror=return-type>
 )
-
-# if (${ENABLE_BOLT_EXPR_JIT}) # TODO: refactor ... add_library(bolt_jit
-# expression/ExprJitCompiler.h expression/ExprJitCompiler.cpp ) find_package(ThrustVector REQUIRED)
-
-# target_link_libraries(bolt_jit bolt_core bolt_vector bolt_common_base bolt_exec ThrustVector::JIT
-# ) endif()
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)

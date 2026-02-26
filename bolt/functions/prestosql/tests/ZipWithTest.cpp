@@ -341,7 +341,7 @@ TEST_F(ZipWithTest, fuzzSameSizeNoNulls) {
   VectorFuzzer fuzzer(options, pool());
   for (auto i = 0; i < 10; ++i) {
     // We need non-lazy children in order to successfully flatten data for
-    // re-use.
+    // reuse.
     auto data = fuzzer.fuzzInputRow(rowType);
     auto flatData = flatten<RowVector>(data);
 
@@ -377,7 +377,7 @@ TEST_F(ZipWithTest, fuzzVariableLengthWithNulls) {
   VectorFuzzer fuzzer(options, pool());
   for (auto i = 0; i < 10; ++i) {
     // We need non-lazy children in order to successfully flatten data for
-    // re-use.
+    // reuse.
     auto data = fuzzer.fuzzInputRow(rowType);
     auto flatData = flatten<RowVector>(data);
 

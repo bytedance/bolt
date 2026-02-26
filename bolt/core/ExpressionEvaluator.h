@@ -55,7 +55,7 @@ class ExpressionEvaluator {
       const std::shared_ptr<const ITypedExpr>& expression) = 0;
 
   // Evaluates previously compiled expression on the specified rows.
-  // Re-uses result vector if it is not null.
+  // Reuses result vector if it is not null.
   virtual void evaluate(
       exec::ExprSet* exprSet,
       const SelectivityVector& rows,

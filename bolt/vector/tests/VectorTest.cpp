@@ -1769,7 +1769,7 @@ TEST_F(VectorTest, resizeAtConstruction) {
 }
 
 TEST_F(VectorTest, resizeStringAsciiness) {
-  std::vector<std::string> stringInput = {"hellow", "how", "are"};
+  std::vector<std::string> stringInput = {"hello", "how", "are"};
   auto flatVector = makeFlatVector(stringInput);
   auto stringVector = flatVector->as<SimpleVector<StringView>>();
   SelectivityVector rows(stringInput.size());
@@ -2093,7 +2093,7 @@ TEST_F(VectorTest, valueHook) {
   // accept nulls.  In this way, for the use case of aggregation, the
   // row number is directly usable as an index into an array of groups
   // to update. The caller will compose the RowSet based on what rows
-  // have been filtered out beteen creating the LazyVector and the
+  // have been filtered out between creating the LazyVector and the
   // point of loading. The hook itself is concerned with the loaded
   // subset of rows and the position of each row within this set.
   lazy->load(rows, &hook);

@@ -5,8 +5,8 @@ project(dbgen CXX C)
 
 add_definitions(-DDBNAME=dss -DMAC -DORACLE -DTPCH)
 
-add_library(
-  bolt_dbgen STATIC
+bolt_add_library(
+  bolt_dbgen
   bm_utils.cpp
   build.cpp
   dbgen.cpp

@@ -43,7 +43,7 @@ class time_zone;
 namespace bytedance::bolt::tz {
 
 /// This library provides time zone management primitives. It maintains an
-/// internal static database which is contructed lazily based on the first
+/// internal static database which is constructed lazily based on the first
 /// access, based on TimeZoneDatabase.cpp and the local tzdata installed in your
 /// system.
 ///

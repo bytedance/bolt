@@ -70,8 +70,7 @@ class PaimonReaderDeduplicateTest
     leafPool_ = rootPool_->addLeafChild("ParquetTests");
 
     auto hiveConnector =
-        connector::getConnectorFactory(
-            connector::hive::HiveConnectorFactory::kHiveConnectorName)
+        connector::getConnectorFactory(connector::kHiveConnectorName)
             ->newConnector(
                 kHiveConnectorId,
                 std::make_shared<config::ConfigBase>(

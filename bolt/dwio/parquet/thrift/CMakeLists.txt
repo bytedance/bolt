@@ -58,7 +58,7 @@ add_custom_target(
   COMMENT "Generating Parquet Thrift files"
 )
 
-add_library(bolt_dwio_parquet_thrift ${GENERATED_CPP_FILE})
+bolt_add_library(bolt_dwio_parquet_thrift ${GENERATED_CPP_FILE})
 add_dependencies(bolt_dwio_parquet_thrift generate_parquet_thrift)
 target_include_directories(bolt_dwio_parquet_thrift PUBLIC ${GENERATED_DIR})
 

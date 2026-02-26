@@ -26,8 +26,7 @@
 # --------------------------------------------------------------------------
 
 find_package(zstd CONFIG REQUIRED)
-# message(FATAL_ERROR "${zstd_FOUND} ${zstd_INCLUDE_DIRS}")
-add_library(
+bolt_add_library(
   bolt_dwio_dwrf_common
   ByteRLE.cpp
   Common.cpp

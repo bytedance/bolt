@@ -45,7 +45,7 @@ struct RemoteVectorFunctionMetadata : public exec::VectorFunctionMetadata {
   remote::PageFormat serdeFormat{remote::PageFormat::PRESTO_PAGE};
 };
 
-/// Registers a new remote function. It will use the meatadata defined in
+/// Registers a new remote function. It will use the metadata defined in
 /// `RemoteVectorFunctionMetadata` to control the serialization format and
 /// remote server address.
 //

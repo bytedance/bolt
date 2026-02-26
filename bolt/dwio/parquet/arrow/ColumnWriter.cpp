@@ -93,7 +93,7 @@ using util::CodecOptions;
 
 namespace {
 
-// Visitor that exracts the value buffer from a FlatArray at a given offset.
+// Visitor that extracts the value buffer from a FlatArray at a given offset.
 struct ValueBufferSlicer {
   template <typename T>
   ::arrow::enable_if_base_binary<typename T::TypeClass, Status> Visit(
@@ -2122,7 +2122,7 @@ Status TypedColumnWriterImpl<DType>::WriteArrowDictionary(
         ::arrow::Datum referenced_indices,
         ::arrow::compute::Unique(*chunk_indices, &exec_ctx));
 
-    // On first run, we might be able to re-use the existing dictionary
+    // On first run, we might be able to reuse the existing dictionary
     if (referenced_indices.length() == dictionary->length()) {
       referenced_dictionary = dictionary;
     } else {

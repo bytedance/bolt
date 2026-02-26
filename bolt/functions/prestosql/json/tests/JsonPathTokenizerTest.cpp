@@ -160,7 +160,7 @@ TEST(JsonPathTokenizerTest, tokenizeTest) {
           "skyeye_contact_risk_item_friendly_see"s,
           "item_friendly_see##operate_type"s}));
 
-  // 4. sigle quote in subscript
+  // 4. single quote in subscript
   EXPECT_TOKEN_EQ("$['clusters']['0.99']"s, (TokenList{"clusters"s, "0.99"s}));
   EXPECT_TOKEN_EQ("$['0.96']"s, TokenList{"0.96"s});
 

@@ -28,7 +28,7 @@ using PaimonRowIteratorPtr = std::shared_ptr<PaimonRowIterator>;
 struct PaimonRowIterator {
   RowVectorPtr primaryKeys;
   RowVectorPtr sequenceFields;
-  // To prevent relesing underlying *valueKind
+  // To prevent releasing underlying *valueKind
   VectorPtr valueKindVect;
   const int8_t* valueKind;
   RowVectorPtr values;

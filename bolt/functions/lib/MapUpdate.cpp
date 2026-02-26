@@ -43,7 +43,7 @@ class MapUpdateFunction : public exec::VectorFunction {
         "timestamp",
         "date",
     };
-    // map(K,V), arry(K) -> map(K,V)
+    // map(K,V), array(K) -> map(K,V)
     for (const auto& keyType : types) {
       for (const auto& valueType : types) {
         signatures.emplace_back(

@@ -36,7 +36,7 @@ namespace bytedance::bolt::parquet {
 class NestedStructureDecoder {
  public:
   /// This function constructs the offsets, lengths and nulls arrays for the
-  /// current level for complext types including ARRAY and MAP. The level is
+  /// current level for complex types including ARRAY and MAP. The level is
   /// identified by the max definition level and repetition level for that
   /// level. For example, ARRAY<ARRAY<INTEGER>> has the following max definition
   /// and repetition levels:

@@ -25,5 +25,5 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_flag_definitions flags.cpp)
+bolt_add_library(bolt_flag_definitions flags.cpp)
 target_link_libraries(bolt_flag_definitions PRIVATE gflags::gflags)

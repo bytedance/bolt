@@ -74,7 +74,7 @@ struct CompareFlags {
           - Comparing null with anything else is indeterminate, otherwise a
             value result is returned.
 
-          - Comapring top level nulls in complex types is indeterminate.
+          - Comparing top level nulls in complex types is indeterminate.
 
         2. Arrays:
           - If the compared array sizes are different then result is false,
@@ -87,7 +87,7 @@ struct CompareFlags {
              indeterminate, then result is indeterminate.
              ex: [null, 1] = [null, 1] is indeterminate.
 
-           - If if elements comapre results are true, then result is true.
+           - If if elements compare results are true, then result is true.
              ex: [1, 1] = [1, 1] is true.
 
         3. Rows: Follows the same logic as array, with fields being elements.
@@ -98,7 +98,7 @@ struct CompareFlags {
             indeterminate, then the result is indeterminate.
             ex: (null, 1) = (null, 1) is indeterminate.
 
-            - If all fields comapre results are true, then result is true.
+            - If all fields compare results are true, then result is true.
             ex: (1, 1) = (1, 1) is indeterminate.
 
         4. Maps:

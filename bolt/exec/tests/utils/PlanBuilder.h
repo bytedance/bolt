@@ -1122,7 +1122,7 @@ class PlanBuilder {
     return planNode_;
   }
 
-  /// Return tha latest plan node wrapped in core::PlanFragment struct.
+  /// Return the latest plan node wrapped in core::PlanFragment struct.
   core::PlanFragment planFragment() const {
     return core::PlanFragment{planNode_};
   }

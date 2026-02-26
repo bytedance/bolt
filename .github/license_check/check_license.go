@@ -18,18 +18,15 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"gopkg.in/yaml.v3"
+	"github.com/apache/skywalking-eyes/pkg/config"
+	"github.com/apache/skywalking-eyes/pkg/header"
+	"github.com/apache/skywalking-eyes/pkg/logger"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
-
-type Config struct {
-	Header struct {
-		PathsIgnore []string `yaml:"paths-ignore"`
-	} `yaml:"header"`
-}
 
 func main() {
 	files := os.Args[1:]
@@ -52,80 +49,55 @@ func main() {
 	fmt.Printf("[INFO] Project Root: %s\n", projectRoot)
 	fmt.Printf("[INFO] Config Path:  %s\n", configFile)
 
-	// 1. print files to check
-	fmt.Printf("[INFO] Files to check: %v\n", files)
-
-	// 2. read and parse config file
-	ignores, err := loadIgnorePatterns(configFile)
+	// read and parse config file
+	logger.Log.SetLevel(logrus.InfoLevel)
+	config, err := config.NewConfigFromFile(configFile)
 	if err != nil {
 		fmt.Printf("[WARNING] Failed to load config: %v\n", err)
 	}
+	if len(config.Headers()) > 1 {
+		fmt.Printf("[ERROR] Only one header configuration is supported.\n")
+		os.Exit(1)
+	}
+	// move up to project root
+	if err := os.Chdir("../../"); err != nil {
+		fmt.Printf("[ERROR] Failed to change dir to project root: %v\n", err)
+		os.Exit(1)
+	}
+
+	licenseHeaderConfig := config.Headers()[0]
 
 	// 3. filter files
-	validFiles := filterFiles(files, ignores)
+	// iterate over passed files and filter out ignored files
+	validFiles := []string{}
+	for _, file := range files {
+		if ignore, err := licenseHeaderConfig.ShouldIgnore(file); err == nil && !ignore {
+			validFiles = append(validFiles, file)
+		} else if err != nil {
+			fmt.Printf("[ERROR] Failed to check file %s: %v\n", file, err)
+			os.Exit(1)
+		}
+	}
+
 	if len(validFiles) == 0 {
 		fmt.Printf("[INFO] All files are ignored.\n")
 		os.Exit(0)
 	}
-	fmt.Printf("[INFO] Valid files to check: %v\n", validFiles)
-	// 4.1 print license-eye command
-	fmt.Printf("[INFO] license-eye command: license-eye header check %v -c %s\n", validFiles, configFile)
 
-	args := append([]string{"header", "check"}, validFiles...)
-	args = append(args, "-c", configFile)
+	g := new(errgroup.Group)
+	g.SetLimit(runtime.GOMAXPROCS(0))
+	result := header.Result{}
+	for _, file := range validFiles {
+		f := file
+		g.Go(func() error {
+			return header.CheckFile(f, licenseHeaderConfig, &result)
+		})
+	}
 
-	cmd := exec.Command("license-eye", args...)
-	cmd.Dir = projectRoot
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitError.ExitCode())
-		}
-		fmt.Printf("[ERROR] Failed to run license-eye: %v\n", err)
+	if err := g.Wait(); err != nil {
+		fmt.Printf("[ERROR] License check failed: %v\n", err)
 		os.Exit(1)
 	}
-}
 
-func loadIgnorePatterns(configFile string) ([]string, error) {
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return cfg.Header.PathsIgnore, nil
-}
-
-func filterFiles(files []string, patterns []string) []string {
-	if len(patterns) == 0 {
-		return files
-	}
-
-	var valid []string
-	for _, file := range files {
-		if _, err := os.Stat(file); os.IsNotExist(err) {
-			continue
-		}
-		ignored := false
-		for _, pattern := range patterns {
-			// use doublestar to support **/ pattern
-			matched, _ := doublestar.Match(pattern, file)
-			if matched {
-				ignored = true
-				break
-			}
-		}
-		if !ignored {
-			valid = append(valid, file)
-		}
-	}
-	return valid
+	fmt.Printf("[INFO] License check passed successfully\n")
 }

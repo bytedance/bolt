@@ -1358,7 +1358,7 @@ TEST_F(StringImplTest, md5_radix) {
   ret = md5_radix<std::string, std::string>(out, std::string("a"), 10);
   EXPECT_TRUE(ret);
   std::string out10 = "16955237001963240173058271559858";
-  // just for compitable with the previous code, we need to resize the output
+  // just for compatible with the previous code, we need to resize the output
   // string to 38 characters.
   out10.resize(38);
   EXPECT_EQ(out10, out10);

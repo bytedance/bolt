@@ -121,7 +121,7 @@ void TorchOperator::ProcessInput() {
   // 3. Convert the output tensor back to a bolt type.
   try {
     // Inner try block converts exceptions to BoltException;
-    // Outter try block queues the exception in the output queue and returns.
+    // Outer try block queues the exception in the output queue and returns.
     try {
       auto input_tensor =
           BoltRowVectorToTorchTensor(pool(), boltTensorType_)(*input_table);

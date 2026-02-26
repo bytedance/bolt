@@ -91,8 +91,7 @@ void AggregationTestBase::SetUp() {
   OperatorTestBase::SetUp();
   filesystems::registerLocalFileSystem();
   auto hiveConnector =
-      connector::getConnectorFactory(
-          connector::hive::HiveConnectorFactory::kHiveConnectorName)
+      connector::getConnectorFactory(connector::kHiveConnectorName)
           ->newConnector(
               kHiveConnectorId,
               std::make_shared<config::ConfigBase>(
@@ -252,7 +251,7 @@ std::tuple<std::string, std::string, std::string> getCompanionAggregates(
 
   // Construct the extract expression. Rename the result of the extract
   // expression to be the same as the original aggregation result, so that
-  // post-aggregation proejctions, if exist, can apply with no change.
+  // post-aggregation projections, if exist, can apply with no change.
   std::string extractExpression;
   if (companionFunctions.extract.size() == 1) {
     extractExpression = fmt::format(

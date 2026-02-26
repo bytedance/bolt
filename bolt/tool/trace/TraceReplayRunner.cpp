@@ -96,11 +96,11 @@ DEFINE_string(
 DEFINE_double(
     hive_connector_executor_hw_multiplier,
     2.0,
-    "Hardware multipler for hive connector.");
+    "Hardware multiplier for hive connector.");
 DEFINE_double(
     driver_cpu_executor_hw_multiplier,
     2.0,
-    "Hardware multipler for driver cpu executor.");
+    "Hardware multiplier for driver cpu executor.");
 DEFINE_int32(
     shuffle_serialization_format,
     0,

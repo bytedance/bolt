@@ -72,7 +72,7 @@ InternalFileEncryptor::InternalFileEncryptor(
     ::arrow::MemoryPool* pool)
     : properties_(properties), pool_(pool) {
   if (properties_->is_utilized()) {
-    throw ParquetException("Re-using encryption properties for another file");
+    throw ParquetException("Reusing encryption properties for another file");
   }
   properties_->set_utilized();
 }

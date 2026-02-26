@@ -22,5 +22,5 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  bolt_dwio_txt_reader_test bolt_dwio_txt_reader bolt_link_libs ${TXT_TEST_LINK_LIBS}
+  bolt_dwio_txt_reader_test bolt_dwio_txt_reader bolt_link_libs ${TXT_TEST_LINK_LIBS} bolt_testutils
 )

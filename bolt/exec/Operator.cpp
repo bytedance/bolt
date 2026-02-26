@@ -75,13 +75,13 @@ OperatorCtx::createConnectorQueryCtx(
     const std::string& planNodeId,
     memory::MemoryPool* connectorPool,
     const common::SpillConfig* spillConfig,
-    connector::AsyncThreadCtx* const asyncThreadCtx) const {
+    std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx) const {
   return std::make_shared<connector::ConnectorQueryCtx>(
       pool_,
       connectorPool,
       driverCtx_->task->queryCtx()->connectorSessionProperties(connectorId),
       spillConfig,
-      asyncThreadCtx,
+      std::move(asyncThreadCtx),
       std::make_unique<SimpleExpressionEvaluator>(
           execCtx()->queryCtx(), execCtx()->pool()),
       driverCtx_->task->queryCtx()->cache(),
@@ -331,7 +331,8 @@ void OperatorCtx::traverseOpToGetRowCount(
         BOLT_CHECK_NE(
             hasBeenProcessedRowCountStr,
             "",
-            "hasBeenProcessedRowCountStr can't be empty");
+            "hasBeenProcessedRowCountStr can't be empty, operator {}",
+            operators[i]->toString());
 
         totalRowCount = folly::to<uint64_t>(totalRowCountStr);
         processedRowCount = folly::to<uint64_t>(hasBeenProcessedRowCountStr);
@@ -1196,7 +1197,7 @@ uint64_t Operator::MemoryReclaimer::reclaim(
       pool->name());
   BOLT_CHECK(driver->task()->pauseRequested());
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Operator::MemoryReclaimer::reclaim", pool);
 
   // NOTE: we can't reclaim memory from an operator which is under

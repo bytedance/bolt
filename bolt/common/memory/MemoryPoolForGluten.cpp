@@ -104,13 +104,14 @@ bool MemoryPoolForGluten::maybeReserveThreadSafe(uint64_t size) {
       // But in some unit tests, exception will not be thrown
       ans = maybeReserveIncrementReservationThreadSafe(this, increment);
     } catch (const BoltException& e) {
-      LOG(ERROR) << "Unexpect bolt exception occured! message is: "
+      LOG(ERROR) << "Unexpected bolt exception occurred! message is: "
                  << e.message() << ", e.what()=" << e.what()
                  << ", stack trace is: " << e.stackTrace();
       releaseThreadSafe(0, false);
       std::rethrow_exception(std::current_exception());
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Unexpect std::exception occured! reason is: " << e.what();
+      LOG(ERROR) << "Unexpected std::exception occurred! reason is: "
+                 << e.what();
       releaseThreadSafe(0, false);
       std::rethrow_exception(std::current_exception());
     }

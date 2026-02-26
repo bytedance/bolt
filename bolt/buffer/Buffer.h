@@ -237,7 +237,7 @@ class Buffer {
   // here though but rather throw an error so that the the message and
   // stack propagate to the library user. This may also happen in a
   // ~AlignedBuffer, which will leak the memory but since the process
-  // is anyway already compromized this is not an issue.
+  // is anyway already compromised this is not an issue.
   virtual void checkEndGuardImpl() const {}
 
   void setCapacity(size_t capacity) {
@@ -343,7 +343,7 @@ class AlignedBuffer : public Buffer {
     // user. This is better for distributed debugging than killing the
     // process. In concept this indicates the possibility of memory
     // corruption and the process state should be considered
-    // compromized.
+    // compromised.
     checkEndGuard();
   }
 
@@ -626,7 +626,7 @@ class NonPODAlignedBuffer : public Buffer {
   void releaseResources() override {
     BOLT_CHECK_EQ(size_ % sizeof(T), 0);
     size_t numValues = size_ / sizeof(T);
-    // we can't use asMutable because it checks isMutable and we wan't to
+    // we can't use asMutable because it checks isMutable and we want to
     // destroy regardless
     T* ptr = reinterpret_cast<T*>(data_);
     for (int i = 0; i < numValues; ++i) {

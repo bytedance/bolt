@@ -70,7 +70,7 @@ class SelectiveStringDictionaryColumnReader
     if (version_ == bolt::dwrf::RleVersion_1) {
       return true;
     } else {
-      return false; // RLEv2 does't support FastPath yet
+      return false; // RLEv2 doesn't support FastPath yet
     }
   }
 

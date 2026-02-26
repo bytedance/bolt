@@ -430,7 +430,7 @@ struct UrlExtractParameterFunction {
       boost::cregex_iterator end;
 
       for (auto it = begin; it != end; ++it) {
-        if (it->length(2) != 0 && (*it)[2].matched) { // key shouldnt be empty.
+        if (it->length(2) != 0 && (*it)[2].matched) { // key shouldn't be empty.
           auto key = submatch((*it), 2);
           if (param.compare(key) == 0) {
             auto value = submatch((*it), 3);

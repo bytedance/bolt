@@ -591,7 +591,7 @@ class BaseVector {
   // all current values.
   //
   // If 'result' is a lazy vector, then caller needs to ensure it is unique in
-  // order to re-use the loaded vector. Otherwise, a copy would be created.
+  // order to reuse the loaded vector. Otherwise, a copy would be created.
   static void ensureWritable(
       const SelectivityVector& rows,
       const TypePtr& type,

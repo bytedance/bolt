@@ -49,7 +49,7 @@ using namespace bytedance::bolt::common::testutil;
 namespace bytedance::bolt::exec::test {
 namespace {
 // A test join node whose build is skewed in terms of process time. The driver
-// id 0 processes slower than other drivers if paralelism greater than 1
+// id 0 processes slower than other drivers if parallelism greater than 1
 class TestSkewedJoinNode : public core::PlanNode {
  public:
   TestSkewedJoinNode(

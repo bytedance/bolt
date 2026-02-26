@@ -51,7 +51,8 @@ void SpillInputStream::next(bool /*throwIfPastEnd*/) {
   if (spillUringEnabled_ && file_->uringEnabled()) {
     int curIdx = idx_ % bufferNum_;
     auto ret = file_->waitForComplete();
-    BOLT_CHECK(ret, "Error occured when waiting for io_uring read to complete");
+    BOLT_CHECK(
+        ret, "Error occurred when waiting for io_uring read to complete");
     size_t compeletedSize = bufferSizes_[curIdx];
     setRange(
         {readBuffers_[curIdx]->asMutable<uint8_t>(),
@@ -496,7 +497,7 @@ uint64_t SpillWriter::write(
                     << sizeWithHeader
                     << ", buffer capacity: " << buffer->capacity();
           buffer = AlignedBuffer::allocate<char>(sizeWithHeader, pool_, 0);
-          // increse writeBufferLimit to hold large row
+          // increase writeBufferLimit to hold large row
           writeBufferLimit = sizeWithHeader;
         }
         needWriteRowCount = 0;

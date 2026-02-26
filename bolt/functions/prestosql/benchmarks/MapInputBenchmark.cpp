@@ -168,7 +168,7 @@ class NestedMapSumValuesAndKeysVector : public exec::VectorFunction {
   }
 };
 
-// This is an intresting point of comparison, here we use the vector reader
+// This is an interesting point of comparison, here we use the vector reader
 // inside of the vector function. This allows to better isolate hidden factors
 // and to time different components.
 class NestedMapWithMapView : public exec::VectorFunction {

@@ -187,7 +187,7 @@ Timestamp truncateTimestamp(
 
     // Hour truncation has to handle the corner case of daylight savings time
     // boundaries. Since conversions from local timezone to UTC may be
-    // ambiguous, we need to be carefull about the roundtrip of converting to
+    // ambiguous, we need to be careful about the roundtrip of converting to
     // local time and back. So what we do is to calculate the truncation delta
     // in UTC, then applying it to the input timestamp.
     case DateTimeUnit::kHour: {

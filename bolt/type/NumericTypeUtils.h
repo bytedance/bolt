@@ -34,7 +34,7 @@ class NumericTypeUtils {
     return kind == TypeKind::REAL || kind == TypeKind::DOUBLE;
   }
 
-  /// Returns true if the kind is either integeral or float.
+  /// Returns true if the kind is either integral or float.
   static constexpr bool isNumericType(TypeKind kind) {
     return isFloatingPointType(kind) || isIntegralType(kind);
   }

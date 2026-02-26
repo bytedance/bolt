@@ -187,8 +187,7 @@ bool SpillOperatorGroup::waitSpillLocked(
 }
 
 void SpillOperatorGroup::runSpill(std::vector<ContinuePromise>& promises) {
-  TestValue::adjust(
-      "bytedance::bolt::exec::SpillOperatorGroup::runSpill", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::SpillOperatorGroup::runSpill", this);
 
   BOLT_CHECK(needSpill_);
   auto guard = folly::makeGuard([&]() {

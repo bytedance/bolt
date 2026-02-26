@@ -143,7 +143,7 @@ class SimpleLRUCache {
 };
 
 //
-//  End of public API. Imlementation follows.
+//  End of public API. Implementation follows.
 //
 
 template <typename Key, typename Value>

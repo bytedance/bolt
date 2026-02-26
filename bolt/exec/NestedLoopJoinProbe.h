@@ -75,8 +75,8 @@ namespace bytedance::bolt::exec {
 /// c) If build side has multiple vectors, take one probe row are at a time,
 /// wrapping it as a constant, and produce it along with build batches.
 ///
-/// If needed, buid-side copies are done lazily; it first accumulates the ranges
-/// to be copied, then performs the copies in batch, column-by-column. It
+/// If needed, build-side copies are done lazily; it first accumulates the
+/// ranges to be copied, then performs the copies in batch, column-by-column. It
 /// produces at most `outputBatchSize_` records, but it may produce fewer since
 /// the output needs to follow the probe vector boundaries.
 class NestedLoopJoinProbe : public Operator {
@@ -127,7 +127,7 @@ class NestedLoopJoinProbe : public Operator {
   // smaller in some cases - outputs follow the probe side buffer boundaries.
   RowVectorPtr generateOutput();
 
-  // For non cross-join mode, the `output_` can be reused across multible probe
+  // For non cross-join mode, the `output_` can be reused across multiple probe
   // rows. If the input_ has remaining rows and the output_ is not fully filled,
   // it returns false here.
   bool readyToProduceOutput();
@@ -138,8 +138,8 @@ class NestedLoopJoinProbe : public Operator {
   // true), or if the output is full (returns false). If it returns false, a
   // valid vector with more than zero records will be available at `output_`; if
   // it returns true, either nullptr or zero records may be placed at `output_`.
-  // Also if it returns true, it's the caller's responsiblity to deicide when to
-  // set `output_` size.
+  // Also if it returns true, it's the caller's responsibility to deicide when
+  // to set `output_` size.
   //
   // Also updates `buildMatched_` if the build records that received a match, so
   // that they can be used to implement right and full outer join semantic once

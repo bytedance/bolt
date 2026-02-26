@@ -272,7 +272,7 @@ void HashProbe::setupSpillRestorForRangePartition(
     matchFlagType_ = ROW({"col_matchflag"}, {BOOLEAN()});
   }
   // if this is the last range partition, set reuseSpillReader_ to false
-  // since next parition should be normal hash partition
+  // since next partition should be normal hash partition
   bool isLastOne = restoredPartitionId->isLastSubRangePartition();
   reuseSpillReader_ = !isLastOne;
   probeRangePartition_ = true;
@@ -773,7 +773,7 @@ void HashProbe::addInput(RowVectorPtr input) {
 }
 
 void HashProbe::prepareOutput(vector_size_t size) {
-  // Try to re-use memory for the output vectors that contain build-side data.
+  // Try to reuse memory for the output vectors that contain build-side data.
   // We expect output vectors containing probe-side data to be null (reset in
   // clearProjectedOutput(). BaseVector::prepareForReuse keeps null
   // children unmodified and makes non-null (build side) children reusable.
@@ -1821,7 +1821,7 @@ void HashProbe::mergeAndSpillProbeMatchFlags() {
 void HashProbe::resetHashTable() {
   // [morsel] Under morsel-driven mode, not all drivers for a pipeline are
   // created at init phase, and the actual number of drivers might change
-  // dynamicly. Therefore, we cannot reset hash table once one hashProbe
+  // dynamically. Therefore, we cannot reset hash table once one hashProbe
   // operator finishes. Otherwise, the task might hang.
   if (operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1 &&
       isFinished() &&

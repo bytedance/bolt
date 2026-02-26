@@ -46,7 +46,7 @@ class TryExprTest : public functions::test::FunctionBaseTest {
  protected:
   static void SetUpTestCase() {
     FunctionBaseTest::SetUpTestCase();
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 };
 
@@ -103,7 +103,7 @@ TEST_F(TryExprTest, nestedTryChildErrors) {
 
 TEST_F(TryExprTest, nestedTryParentErrors) {
   // This tests that with nested TRY expressions, the child TRY does not see
-  // errros the parent TRY is supposed to handle.
+  // errors the parent TRY is supposed to handle.
 
   vector_size_t size = 10;
   // Put "a" wherever we want an exception, as casting it to an integer will

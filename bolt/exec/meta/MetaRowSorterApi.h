@@ -16,7 +16,7 @@
 
 #pragma once
 
-/// Seperated from implementation details to reduce compiling time
+/// Separated from implementation details to reduce compiling time
 
 #include "bolt/exec/HybridSorter.h"
 #include "bolt/exec/RowContainer.h"

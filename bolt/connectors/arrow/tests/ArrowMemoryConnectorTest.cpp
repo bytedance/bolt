@@ -58,10 +58,9 @@ class ArrowConnectorTest : public exec::test::OperatorTestBase {
     bytedance::bolt::connector::arrow::CheckArrowMemoryConnectorFactoryInit<
         bytedance::bolt::connector::arrow::ArrowMemoryConnectorFactory>();
     std::shared_ptr<const config::ConfigBase> config;
-    auto arrowConnector = connector::getConnectorFactory(
-                              connector::arrow::ArrowMemoryConnectorFactory::
-                                  kArrowMemoryConnectorName)
-                              ->newConnector(kArrowConnectorId, config);
+    auto arrowConnector =
+        connector::getConnectorFactory(connector::kArrowMemoryConnectorName)
+            ->newConnector(kArrowConnectorId, config);
     connector::registerConnector(arrowConnector);
 
     sampleBigIntVector_ = createSampleVectorColumn<int64_t>(bigIntVec_);
@@ -152,7 +151,7 @@ class ArrowConnectorTest : public exec::test::OperatorTestBase {
         childrenVecs.push_back(
             createSampleVectorColumn<StringView>(stringViewVec_));
       } else {
-        BOLT_FAIL("{} is not supportted in this unit test.", type->toString());
+        BOLT_FAIL("{} is not supported in this unit test.", type->toString());
       }
     }
     auto rowVectorPtr = makeRowVector(childrenNames, childrenVecs);
@@ -191,7 +190,7 @@ TEST_F(ArrowConnectorTest, simple) {
   test::assertEqualVectors(expected, output);
 }
 
-// Simple Arrow Conector Test on the in-column arrow table
+// Simple Arrow Connector Test on the in-column arrow table
 TEST_F(ArrowConnectorTest, simpleInColumn) {
   // Create the in-column Arrow table
   int coloumnSize = 4;

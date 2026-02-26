@@ -248,7 +248,8 @@ void ExecutorTaskScheduler::decideConcurrencyLocked() {
           3 * defaultConcurrency_);
       size_t threadNum = 0;
       if (newConcurrency > defaultConcurrency_) {
-        // finished tasks from more than 1 stage, no need to caculate throughput
+        // finished tasks from more than 1 stage, no need to calculate
+        // throughput
         if (trackingStageIds_.size() == 1) {
           inputThroughput_ = statsCollector_.accumulatedExecutionTimeMs_
               ? (1.0 * statsCollector_.accumulatedNumSourceRows_ /
@@ -367,7 +368,7 @@ void ExecutorTaskScheduler::scheduleNewTasksIfAny(
       auto temp = savedTask.lock();
       BOLT_CHECK(
           temp,
-          "Task is destoryed, task id {}, tasks count {}",
+          "Task is destroyed, task id {}, tasks count {}",
           task->taskId(),
           tasks.size());
       collectTaskStatsUnlocked(temp->taskStatsImmutable(), stats);

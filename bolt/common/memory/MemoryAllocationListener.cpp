@@ -61,7 +61,7 @@ MemoryAllocationListener::MemoryAllocationListener(
       p = p->parent();
     }
     const std::regex regex(poolRegex);
-    // When debuging, regex portability is more important than performance
+    // When debugging, regex portability is more important than performance
     if (!poolRegex.empty() && !std::regex_match(bloodline, regex)) {
       listenMode_ = ListenMode::kDisable;
     }
@@ -295,7 +295,7 @@ void MemoryAllocationListener::recordAllocInternal(
       break;
     }
     default: {
-      BOLT_FAIL("Unkonw listen type {}", listenMode_);
+      BOLT_FAIL("Unknown listen type {}", listenMode_);
     }
   }
 }
@@ -385,7 +385,7 @@ void MemoryAllocationListener::recordFreeInternal(
       break;
     }
     default: {
-      BOLT_FAIL("Unkonw listen type {}", listenMode_);
+      BOLT_FAIL("Unknown listen type {}", listenMode_);
     }
   }
 }
@@ -501,7 +501,7 @@ void MemoryAllocationListener::recordGrowInternal(
       break;
     }
     default: {
-      BOLT_FAIL("Unkonw listen type {}", listenMode_);
+      BOLT_FAIL("Unknown listen type {}", listenMode_);
     }
   }
 }

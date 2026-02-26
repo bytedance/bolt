@@ -61,7 +61,7 @@ class ResultVerifier {
   /// results.
   ///
   /// Can be used by array_distinct verifier to compute count(distinct) once and
-  /// re-use its results for multiple 'verify' calls.
+  /// reuse its results for multiple 'verify' calls.
   virtual void initialize(
       const std::vector<RowVectorPtr>& input,
       const std::vector<std::string>& groupingKeys,

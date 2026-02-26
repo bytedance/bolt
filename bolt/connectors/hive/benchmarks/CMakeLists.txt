@@ -29,19 +29,6 @@ add_executable(bolt_hive_partition_function_benchmark HivePartitionFunctionBench
 
 target_link_libraries(
   bolt_hive_partition_function_benchmark
-  bolt_type
-  bolt_vector
-  bolt_vector_test_lib
-  bolt_vector_fuzzer
-  bolt_expression
-  bolt_parse_parser
-  bolt_parse_expression
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_hive_connector
-  bolt_hive_partition_function
-  bolt_memory
-  Folly::folly
+  bolt_testutils
   ${FOLLY_BENCHMARK}
-  fmt::fmt
 )

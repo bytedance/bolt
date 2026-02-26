@@ -116,7 +116,7 @@ VectorPtr LazyVector::slice(vector_size_t offset, vector_size_t length) const {
 }
 
 //   static
-// This gurantee that vectors are loaded but it does not gurantee that vector
+// This guarantee that vectors are loaded but it does not guarantee that vector
 // will be free of any nested lazy vector i.e, references to Loaded lazy vectors
 // are not replaced with their underlying loaded vector.
 void LazyVector::ensureLoadedRows(
@@ -233,7 +233,7 @@ void LazyVector::ensureLoadedRowsImpl(
 
   // The loaded vector can itself also be lazy, so we load recursively.
   if (isLazyNotLoaded(*baseLazyVector->vector_)) {
-    // We do not neeed to decode all rows.
+    // We do not need to decode all rows.
     selectBaseRowsToLoad(decoded, baseRows, rows);
     decoded.decode(*baseLazyVector->vector_, baseRows, false);
     SelectivityVector nestedRows;

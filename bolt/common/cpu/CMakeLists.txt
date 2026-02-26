@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_cpu_usage CpuUsageTracker.cpp)
+bolt_add_library(bolt_cpu_usage CpuUsageTracker.cpp)

@@ -314,7 +314,7 @@ class NthValueFunction : public exec::WindowFunction {
   // vector across getOutput calls.
   std::vector<vector_size_t> rowNumbers_;
 
-  // Member variable re-used for setting null for empty frames.
+  // Member variable reused for setting null for empty frames.
   SelectivityVector invalidRows_;
 };
 } // namespace

@@ -425,7 +425,7 @@ class SelectiveFlatMapReader : public SelectiveStructColumnReaderBase {
  private:
   // Sets the bits for present and selected positions in 'rowColumnBits_' for
   // 'columnIdx' for the 64 rows selected by the inMap and selected bitmaps.
-  // 'baseRow' is the number of selectd rows below the range covered by 'inMap'
+  // 'baseRow' is the number of selected rows below the range covered by 'inMap'
   // and 'selected'
   void setRowBits(
       uint64_t inMap,

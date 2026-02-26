@@ -1,4 +1,4 @@
-# Copyright (c) ByteDance Ltd. and/or its affiliates.
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -17,42 +17,47 @@
 # specific language governing permissions and limitations
 # under the License.
 
-name: clang-format
+name: Setup Env
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   changes:
-    runs-on:  [ self-hosted, small ]
+    runs-on: ubuntu-24.04
     outputs:
-      source_code: ${{ steps.filter.outputs.source_code }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
-            source_code:
-              - 'bolt/**'
-              - '!bolt/**/*.md'
-  format-check:
-    needs: changes
-    if: ${{ needs.changes.outputs.source_code == 'true' }}
-    runs-on: [ self-hosted, small ]
-    container:
-      image: bolt-registry:5000/bolt-ci:20251217
-      options: --user root
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
+            scripts:
+              - 'scripts/**/*.sh'
 
-    - name: clang-format check
-      run: |
-        make clang-format-check
+  test-scripts:
+    needs: changes
+    if: ${{ needs.changes.outputs.scripts == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install System and Python Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc g++ cmake make ninja-build wget
+          ./scripts/setup-dev-env.sh
+
+      - name: Setup path
+        run: |
+          echo "$HOME/miniconda3/bin" >> "$GITHUB_PATH"
+          cat "$GITHUB_PATH"
+
+      - name: Build Project
+        run: |
+          which -a pip
+          make release

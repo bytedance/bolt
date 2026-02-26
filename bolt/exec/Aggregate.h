@@ -257,7 +257,7 @@ class Aggregate {
     BOLT_NYI("toIntermediate not supported");
   }
 
-  /// does the acumulator type support serialize and deserialize
+  /// does the accumulator type support serialize and deserialize
   /// memory after serialize
   ///   ------<accumulator>---- // fix part
   ///           --------------- // extra variable memory

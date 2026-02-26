@@ -53,10 +53,12 @@ class PartitionWriter {
         options_(std::move(options)),
         pool_(pool) {
     payloadPool_ = std::make_unique<ShuffleMemoryPool>(pool);
-    codec_ = createArrowIpcCodec(
+    codec_ = createCodec(
         options_.compressionType,
-        getCodecBackend(options_.codecBackend),
-        options_.compressionLevel);
+        CodecOptions{
+            getCodecBackend(options_.codecBackend),
+            options_.compressionLevel,
+            options_.checksumEnabled});
   }
 
   static std::unique_ptr<PartitionWriter> create(
@@ -121,7 +123,7 @@ class PartitionWriter {
   // The actual allocation is delegated to options_.memoryPool.
   std::unique_ptr<ShuffleMemoryPool> payloadPool_;
 
-  std::unique_ptr<arrow::util::Codec> codec_;
+  std::unique_ptr<Codec> codec_;
 
   uint64_t compressTime_{0};
   uint64_t spillTime_{0};

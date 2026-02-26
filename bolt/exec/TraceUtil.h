@@ -40,7 +40,7 @@
 #include <folly/dynamic.h>
 namespace bytedance::bolt::exec::trace {
 
-/// Creates a directory to store the query trace metdata and data.
+/// Creates a directory to store the query trace metadata and data.
 void createTraceDirectory(const std::string& traceDir);
 
 /// Returns the trace directory for a given query.

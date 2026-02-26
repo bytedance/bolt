@@ -67,7 +67,7 @@ class ExpressionBenchmarkSet {
       const VectorFuzzer::Options& options) {
     BOLT_CHECK(
         !inputRowVector_,
-        "input row vector is already passed, fuzzer wont be used");
+        "input row vector is already passed, fuzzer won't be used");
     fuzzerOptions_ = options;
     return *this;
   }

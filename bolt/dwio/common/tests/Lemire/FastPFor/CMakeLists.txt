@@ -25,6 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_fastpforlib STATIC bitpacking.cpp)
+bolt_add_library(bolt_fastpforlib STATIC bitpacking.cpp)
 
 target_include_directories(bolt_fastpforlib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)

@@ -1108,9 +1108,9 @@ TEST_F(DecodedVectorTest, testWrapBehavior) {
     EXPECT_TRUE(isDictionary(wrappedVector->encoding()));
     // TODO: Switch this to ensure all nulls from base are propagated correctly
     // which should be the correct expected behavior.
-    auto exptected =
+    auto expected =
         BaseVector::wrapInDictionary(noNulls, indices, vectorSize, intVector);
-    assertEqualVectors(exptected, wrappedVector);
+    assertEqualVectors(expected, wrappedVector);
   }
 }
 
@@ -1419,7 +1419,7 @@ TEST_F(DecodedVectorTest, dictionaryWrapping) {
 }
 
 TEST_F(DecodedVectorTest, previousIndicesInReUsedDecodedVector) {
-  // Verify that when DecodedVector is re-used with different set of valid rows,
+  // Verify that when DecodedVector is reused with different set of valid rows,
   // then the unselected indices would still have valid values.
 
   // Create a Dict(Dict(flat)) where merged indices point to a large index.
@@ -1441,7 +1441,7 @@ TEST_F(DecodedVectorTest, previousIndicesInReUsedDecodedVector) {
   // Used the first time with all selected rows.
   DecodedVector d(*dict);
 
-  // 0, 1 row is not selected and DecodedVector is now re-used with this
+  // 0, 1 row is not selected and DecodedVector is now reused with this
   // selectivity.
   SelectivityVector rows(3, false);
   rows.setValid(2, true);

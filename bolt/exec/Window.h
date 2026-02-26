@@ -340,7 +340,7 @@ class Window : public Operator {
   bool isAggWindowFunc_ = false;
   std::vector<TypePtr> windowResultTypes_;
 
-  // When sort and window is merge, we need to sort the data in window oprator
+  // When sort and window is merge, we need to sort the data in window operator
   bool needSort_ = true;
 
   bool enableJit_ = false;

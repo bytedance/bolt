@@ -29,6 +29,5 @@ add_executable(bolt_config_test ConfigTest.cpp)
 add_test(bolt_config_test bolt_config_test)
 target_link_libraries(
   bolt_config_test
-  PUBLIC Folly::folly
-  PRIVATE bolt_common_config GTest::gtest GTest::gtest_main
+  PRIVATE bolt_testutils GTest::gtest GTest::gtest_main
 )

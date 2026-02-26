@@ -31,7 +31,9 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
+
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::dwio::common {
 
@@ -91,9 +93,11 @@ class TypeWithId : public bolt::Tree<std::shared_ptr<const TypeWithId>> {
     return false;
   }
 
-  virtual const std::unordered_map<std::string, std::vector<std::string>>
+  virtual const std::unordered_map<std::string, std::vector<std::string>>&
   getDcKeys() const {
-    return {};
+    static const std::unordered_map<std::string, std::vector<std::string>>
+        EMPTY_MAP;
+    return EMPTY_MAP;
   }
 
  private:

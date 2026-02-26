@@ -373,7 +373,7 @@ folly::IOBuf* WriteBuffers::add(
     // we use round-robin, so the taskId to wait is taskId - capacity_
     auto ret = file->waitForComplete(taskId - capacity_, buffers_);
     BOLT_CHECK(
-        ret, "Error occured when waiting for io_uring write to complete");
+        ret, "Error occurred when waiting for io_uring write to complete");
   }
   buffers_[idx] = std::move(buf);
   return buffers_[idx].get();
@@ -381,7 +381,7 @@ folly::IOBuf* WriteBuffers::add(
 
 void WriteBuffers::clear(std::unique_ptr<WriteFile>& file) {
   auto ret = file->waitForCompleteAll();
-  BOLT_CHECK(ret, "Error occured when waiting for io_uring write to complete");
+  BOLT_CHECK(ret, "Error occurred when waiting for io_uring write to complete");
   for (int i = 0; i < capacity_; i++) {
     std::lock_guard<std::mutex> lock(mutexes_[i]);
     if (buffers_[i] != nullptr)

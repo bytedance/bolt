@@ -77,7 +77,7 @@ class SelectiveIntegerDirectColumnReader
 
   bool hasBulkPath() const override {
     if (format == bolt::dwrf::DwrfFormat::kOrc) {
-      return false; // RLEv2 does't support FastPath yet
+      return false; // RLEv2 doesn't support FastPath yet
     } else {
       return true;
     }

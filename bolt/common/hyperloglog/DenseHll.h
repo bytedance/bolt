@@ -46,7 +46,7 @@ class DenseHll {
 
   DenseHll(const char* serialized, HashStringAllocator* allocator);
 
-  /// Creates an uninitialized instance that doesn't allcate any significant
+  /// Creates an uninitialized instance that doesn't allocate any significant
   /// memory. The caller must call initialize before using the HLL.
   explicit DenseHll(HashStringAllocator* allocator)
       : deltas_{StlAllocator<int8_t>(allocator)},

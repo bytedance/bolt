@@ -104,7 +104,7 @@ class AllocationPool {
     return pool_;
   }
 
-  /// Returns true if 'ptr' is inside the range alocations are made from.
+  /// Returns true if 'ptr' is inside the range allocations are made from.
   bool isInCurrentRange(void* ptr) const {
     return reinterpret_cast<char*>(ptr) >= startOfRun_ &&
         reinterpret_cast<char*>(ptr) < startOfRun_ + bytesInRun_;
@@ -145,7 +145,7 @@ class AllocationPool {
     return bytesInRun_ - currentOffset_;
   }
 
-  // Increses the reservation in 'pool_' when 'currentOffset_' goes past
+  // Increases the reservation in 'pool_' when 'currentOffset_' goes past
   // current end of last large allocation.
   void growLastAllocation();
 

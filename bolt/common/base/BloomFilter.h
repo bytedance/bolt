@@ -41,7 +41,7 @@
 #include <xxhash.h>
 namespace bytedance::bolt {
 // BloomFilter filter with groups of 64 bits, of which 4 are set. The hash
-// number has 4 6 bit fields that selct the bits in the word and the
+// number has 4 6 bit fields that select the bits in the word and the
 // remaining bits select the word in the filter. With 8 bits per
 // expected entry, we get ~2% false positives. 'hashInput' determines
 // if the value added or checked needs to be hashed. If this is false,

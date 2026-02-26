@@ -181,7 +181,7 @@ BENCHMARK(scanDecodedDict5Nested) {
 
 BENCHMARK_DRAW_LINE();
 
-// For those we alwast report total runtime.
+// For those we always report total runtime.
 BENCHMARK(decodeFlat) {
   run([&] { benchmark->decodeFlat(); });
 }

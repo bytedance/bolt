@@ -42,7 +42,7 @@ void ContainerRow2RowSerde::serialize(
               HashStringAllocator::headerOf(sv.data()));
           stream->readBytes(current, sv.size());
         }
-        // clear data ptr of StringView to increse compress ratio
+        // clear data ptr of StringView to increase compress ratio
         *(char**)(currentHead + rowColumn.offset() + sizeof(uint64_t)) =
             nullptr;
         current += sv.size();

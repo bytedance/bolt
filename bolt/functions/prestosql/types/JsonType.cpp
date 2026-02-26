@@ -1375,7 +1375,7 @@ void JsonCastOperator::castFrom(
   castFrom(input, context, rows, resultType, result, /*isFromJson*/ false);
 }
 
-/// If `isFromJson` is ture, using in `from_json` udf, converts an input vector
+/// If `isFromJson` is true, using in `from_json` udf, converts an input vector
 /// from Json type to the type of result vector.
 void JsonCastOperator::castFrom(
     const BaseVector& input,

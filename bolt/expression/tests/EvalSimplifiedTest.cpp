@@ -58,7 +58,7 @@ class EvalSimplifiedTest : public FunctionBaseTest {
     }
   }
 
-  // Generate random (but deterministic) input row vectors that can be re-used
+  // Generate random (but deterministic) input row vectors that can be reused
   // between expression evaluation runs (by making sure, none of the children
   // are lazy vectors)
   RowVectorPtr genRowVector(

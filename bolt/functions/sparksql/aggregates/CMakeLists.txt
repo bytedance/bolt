@@ -37,7 +37,7 @@ set(PAAGG_TYPES
 )
 specialize_template(PAAGG_GENERATED_FILES PercentileApproxAggregate.cpp.in ${PAAGG_TYPES})
 
-add_library(
+bolt_add_library(
   bolt_functions_spark_aggregates
   ${PAAGG_GENERATED_FILES}
   AverageAggregate.cpp

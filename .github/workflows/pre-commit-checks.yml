@@ -1,0 +1,65 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: pre-commit checks
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PRE_COMMIT_HOME: /data/pre-commit-cache
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAX_SIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
+  GOMAXPROCS: 8
+
+jobs:
+  lint:
+    runs-on: ['self-hosted', 'medium']
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      options: --user root --init
+      volumes:
+        - pre-commit-cache:/data/pre-commit-cache
+        - /data/ccache-data:/data/ccache-data
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: env-setup
+        uses: ./.github/actions/bolt-build-base
+      - name: Install pre-commit
+        run: |
+          pip install -r requirements.txt
+      - name: Generate Compile Database
+        run: |
+          make compile_db_all
+      - name: Run pre-commit hooks
+        run: |
+          pre-commit run --all-files

@@ -31,7 +31,7 @@
 
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 
-#include <bolt/common/base/Exceptions.h>
+#include "bolt/common/base/Exceptions.h"
 
 #ifdef GLUTEN_ENABLE_QAT
 #include "bolt/shuffle/sparksql/compression/qat/QatCodec.h"
@@ -41,6 +41,41 @@
 #include "bolt/shuffle/sparksql/compression/qpl/qpl_codec.h"
 #endif
 namespace bytedance::bolt::shuffle::sparksql {
+
+CodecBackend getCodecBackend(const std::string& codecBackend) {
+  if (codecBackend == "none") {
+    return CodecBackend::NONE;
+  } else if (codecBackend == "qat") {
+    return CodecBackend::QAT;
+  } else if (codecBackend == "iaa") {
+    return CodecBackend::IAA;
+  } else {
+    BOLT_FAIL("Not support this codec backend " + codecBackend);
+  }
+}
+
+std::string getCodecBackendName(CodecBackend backend) {
+  switch (backend) {
+    case CodecBackend::NONE:
+      return "none";
+    case CodecBackend::QAT:
+      return "qat";
+    case CodecBackend::IAA:
+      return "iaa";
+    default:
+      BOLT_FAIL("Not support this codec backend");
+  }
+}
+
+CompressionMode getCompressionMode(const std::string& compressionMode) {
+  if (compressionMode == "buffer") {
+    return CompressionMode::BUFFER;
+  } else if (compressionMode == "rowvector") {
+    return CompressionMode::ROWVECTOR;
+  } else {
+    BOLT_FAIL("Not support this compression mode " + compressionMode);
+  }
+}
 
 std::unique_ptr<arrow::util::Codec> createArrowIpcCodec(
     arrow::Compression::type compressedType,

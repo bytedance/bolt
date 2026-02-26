@@ -1720,7 +1720,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
 //   EXPECT_EQ(Date(19779), dateTrunc("week", Date(19783)));
 // }
 
-// Reference dateTruncDateForWeek for test cases explanaitons
+// Reference dateTruncDateForWeek for test cases explanations
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampForWeek) {
   const auto dateTrunc = [&](const std::string& unit,
                              std::optional<Timestamp> timestamp) {

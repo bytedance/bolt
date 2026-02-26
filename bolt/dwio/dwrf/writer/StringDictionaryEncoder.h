@@ -205,7 +205,7 @@ class StringDictionaryEncoder {
 
   // Set to lookup if the String is already assigned an id.
   // An Id can only be created after appending the string, so this set
-  // leverages the heterogenous lookup to check if the String already exists
+  // leverages the heterogeneous lookup to check if the String already exists
   // as Creating an id is expensive.
   folly::F14FastSet<
       detail::DictStringId,

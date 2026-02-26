@@ -155,7 +155,7 @@ getAggregateFunctionSignatures(const std::string& name) {
 namespace {
 
 // return a vector of one single CompanionSignatureEntry instance {name,
-// signatues}.
+// signatures}.
 std::vector<CompanionSignatureEntry> getCompanionSignatures(
     std::string&& name,
     std::vector<AggregateFunctionSignaturePtr>&& signatures) {

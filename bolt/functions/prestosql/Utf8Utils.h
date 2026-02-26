@@ -39,7 +39,7 @@ namespace bytedance::bolt::functions {
 /// the result is the length of the code point. A negative return value means
 /// the UTF-8 sequence at the position is invalid, and the length of the invalid
 /// sequence is the absolute value of the result. A byte sequence is recognized
-/// as an invalid UTF-8 code point of length N in either of the folllowing
+/// as an invalid UTF-8 code point of length N in either of the following
 /// situations:
 ///   1. The first byte is a continuation byte or indicates the length of the
 ///      code point is greater than 6. N is 1 in this situation.

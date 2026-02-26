@@ -39,8 +39,8 @@ class CastOperator;
 
 // Given a class T, create a custom type that can be used to refer to it, with
 // an underlying opaque vector type.
-// Note that name must be stored in a variable and passed and cant be inlined.
-// OpaqueCustomTypeRegister<T, "type"> wont compile.
+// Note that name must be stored in a variable and passed and can't be inlined.
+// OpaqueCustomTypeRegister<T, "type"> won't compile.
 // but static constexpr char* type = "type", OpaqueCustomTypeRegister<T, type>
 // works.
 template <typename T, const char* customTypeName>

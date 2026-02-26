@@ -114,7 +114,8 @@ class OperatorCtx {
       const std::string& planNodeId,
       memory::MemoryPool* connectorPool,
       const common::SpillConfig* spillConfig = nullptr,
-      connector::AsyncThreadCtx* const asyncThreadCtx = nullptr) const;
+      std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx =
+          nullptr) const;
 
   /// get totalRowCount and processedRowCount
   void traverseOpToGetRowCount(
@@ -360,7 +361,7 @@ class Operator : public BaseRuntimeStatWriter {
     return operatorCtx_->toString();
   }
 
-  /// Used in debug ednpoints.
+  /// Used in debug endpoints.
   virtual folly::dynamic toJson() const {
     folly::dynamic obj = folly::dynamic::object;
     obj["operator"] = toString();
@@ -614,7 +615,7 @@ class Operator : public BaseRuntimeStatWriter {
   // Return the number of rows for the output batch by considering the output
   // columns. This is an alternative to outputBatchRows() to reduce the output
   // batch size (reduce OOM possibility) by considering the potential large
-  // number of output columns or output columns have complext types e.g. map,
+  // number of output columns or output columns have complex types e.g. map,
   // array, row ...
   int32_t getMaxReadBatchSize(
       int32_t minMaxReadBatchSize,

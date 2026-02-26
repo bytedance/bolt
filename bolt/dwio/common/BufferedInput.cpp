@@ -124,9 +124,9 @@ std::unique_ptr<SeekableInputStream> BufferedInput::enqueue(
 bool BufferedInput::useVRead() const {
   // Use value explicitly set by the user if any, otherwise use the GFLAG
   // We want to update this on every use for now because during the onboarding
-  // to wsVRLoad=true we may change the value of this GFLAG programatically from
-  // a config update so we can rollback fast from config without the need of a
-  // deployment
+  // to wsVRLoad=true we may change the value of this GFLAG programmatically
+  // from a config update so we can rollback fast from config without the need
+  // of a deployment
   return wsVRLoad_.value_or(FLAGS_wsVRLoad);
 }
 
@@ -157,34 +157,34 @@ void BufferedInput::sortRegions() {
 }
 
 void BufferedInput::mergeRegions() {
-  auto& r = regions_;
-  auto& e = enqueuedToBufferOffset_;
-  size_t ia = 0;
+  auto& regions = regions_;
+  auto& sortedToOriginalMap = enqueuedToBufferOffset_;
+  size_t mergedIdx = 0;
   // We want to map here where each region ended in the final merged regions
   // vector.
   // For example, if this is the regions vector: {{6, 3}, {24, 3}, {3, 3}, {0,
   // 3}, {29, 3}} After sorting, "e" would look like this: [3,2,0,1,4]. Because
   // region in position number 3 ended up in position 0 and so on.
-  // For a maxMergeDistance of 1, "te" will look like: [0,1,0,0,2], because
-  // original regions 3, 2 and 0 were merged into a larger region, now in
-  // position 0. The original region 1, became region 1, and original region 4
-  // became region 2
-  std::vector<size_t> te(e.size());
+  // For a maxMergeDistance of 1, "remappedIndices" will look like: [0,1,0,0,2],
+  // because original regions 3, 2 and 0 were merged into a larger region, now
+  // in position 0. The original region 1, became region 1, and original region
+  // 4 became region 2
+  std::vector<size_t> originalToMergedIndex(sortedToOriginalMap.size());
 
-  DWIO_ENSURE(!r.empty(), "Assumes that there's at least one region");
-  DWIO_ENSURE_GT(r[ia].length, 0, "invalid region");
+  DWIO_ENSURE(!regions.empty(), "Assumes that there's at least one region");
+  DWIO_ENSURE_GT(regions[0].length, 0, "invalid region");
 
-  te[e[0]] = 0;
-  for (size_t ib = 1; ib < r.size(); ++ib) {
-    DWIO_ENSURE_GT(r[ib].length, 0, "invalid region");
-    if (!tryMerge(r[ia], r[ib])) {
-      r[++ia] = r[ib];
+  originalToMergedIndex[sortedToOriginalMap[0]] = 0;
+  for (size_t sortedIdx = 1; sortedIdx < regions.size(); ++sortedIdx) {
+    DWIO_ENSURE_GT(regions[sortedIdx].length, 0, "invalid region");
+    if (!tryMerge(regions[mergedIdx], regions[sortedIdx])) {
+      regions[++mergedIdx] = regions[sortedIdx];
     }
-    te[e[ib]] = ia;
+    originalToMergedIndex[sortedToOriginalMap[sortedIdx]] = mergedIdx;
   }
   // After merging, remove what's left.
-  r.resize(ia + 1);
-  std::swap(e, te);
+  regions.resize(mergedIdx + 1);
+  std::swap(enqueuedToBufferOffset_, originalToMergedIndex);
 }
 
 bool BufferedInput::tryMerge(Region& first, const Region& second) {

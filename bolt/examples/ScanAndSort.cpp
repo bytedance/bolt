@@ -101,8 +101,7 @@ int main(int argc, char** argv) {
   // Create a new connector instance from the connector factory and register
   // it:
   auto hiveConnector =
-      connector::getConnectorFactory(
-          connector::hive::HiveConnectorFactory::kHiveConnectorName)
+      connector::getConnectorFactory(connector::kHiveConnectorName)
           ->newConnector(
               kHiveConnectorId,
               std::make_shared<config::ConfigBase>(
@@ -122,7 +121,7 @@ int main(int argc, char** argv) {
 
   // Once we finalize setting up the Hive connector, let's define our query
   // plan. We use the helper `PlanBuilder` class to generate the query plan
-  // for this example, but this is usually done programatically based on the
+  // for this example, but this is usually done programmatically based on the
   // application's IR. Considering that the plan executed in a local host is
   // usually part of a larger and often distributed query, this local portion is
   // called a "query fragment" and described by a "plan fragment".

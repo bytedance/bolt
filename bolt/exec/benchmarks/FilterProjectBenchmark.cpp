@@ -41,7 +41,7 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 /// Benchmark for running expressions on differently wrapped
-/// columns. Runs a sequence of filters and projects wher where each
+/// columns. Runs a sequence of filters and projects where each
 /// filter adds a row number mapping. Expressions are evaluated on
 /// data filtered by one or more filters, of which each adds a
 /// dictionary mapping output rows to input rows.

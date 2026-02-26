@@ -61,7 +61,7 @@ inline std::chrono::minutes getTimeZoneOffset(int16_t tzID) {
 }
 
 const ::date::time_zone* locateZoneImpl(std::string_view tz_name) {
-  TestValue::adjust("bytedance::bolt::tz::locateZoneImpl", &tz_name);
+  BOLT_TEST_ADJUST("bytedance::bolt::tz::locateZoneImpl", &tz_name);
   const ::date::time_zone* zone = ::date::locate_zone(tz_name);
   return zone;
 }

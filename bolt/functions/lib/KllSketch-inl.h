@@ -40,7 +40,7 @@ namespace detail {
 
 constexpr uint8_t kMaxLevel = 60;
 
-// Current version number for the serialzation format.  Everytime the
+// Current version number for the serialization format.  Every time the
 // serialization format changes, this needs to be increased and a new
 // deserializer should be added.  An adapter to convert serialization of
 // previous version to serialization of current version should also be added.

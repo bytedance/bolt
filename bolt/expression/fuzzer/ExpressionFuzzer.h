@@ -65,7 +65,7 @@ class ExpressionFuzzer {
     // multiple subexpressions.
     bool enableColumnReuse = false;
 
-    // Enable generation of expressions that re-uses already generated
+    // Enable generation of expressions that reuses already generated
     // subexpressions.
     bool enableExpressionReuse = false;
 
@@ -141,7 +141,7 @@ class ExpressionFuzzer {
   // Fuzz a single expression and return it along with the input row type.
   FuzzedExpressionData fuzzExpression();
 
-  /// Used to enable re-use of sub-expressions by exposing an API that allows
+  /// Used to enable reuse of sub-expressions by exposing an API that allows
   /// for randomly picking an expression that has a specific return type and a
   /// nesting level less than or equal to a specified limit. It ensures that
   /// all expressions that are valid candidates have an equal probability of
@@ -207,7 +207,7 @@ class ExpressionFuzzer {
  private:
   // Either generates a new expression of the required return type or if
   // already generated expressions of the same return type exist then there is
-  // a 30% chance that it will re-use one of them.
+  // a 30% chance that it will reuse one of them.
   core::TypedExprPtr generateExpression(const TypePtr& type);
 
   enum ArgumentKind { kArgConstant = 0, kArgColumn = 1, kArgExpression = 2 };
@@ -426,7 +426,7 @@ class ExpressionFuzzer {
           remainingLevelOfNesting_(maxLevelOfNesting) {}
 
     /// Used to track all generated expressions within a single iteration and
-    /// support expression re-use.
+    /// support expression reuse.
     ExprBank expressionBank_;
 
     /// Contains the types and names of the input vector that the generated
@@ -439,7 +439,7 @@ class ExpressionFuzzer {
 
     /// Maps a 'Type' serialized as a string to the column names that have
     /// already been generated. Used to easily look up columns that can be
-    /// re-used when a specific type is required as input to a callable.
+    /// reused when a specific type is required as input to a callable.
     std::unordered_map<std::string, std::vector<std::string>>
         typeToColumnNames_;
 

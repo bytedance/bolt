@@ -166,7 +166,7 @@ void validate(
     validateBaseTypeAndCollectTypeParams(variables, arg, usedVariables, false);
   }
 
-  // All type variables should apear in the inputs arguments.
+  // All type variables should appear in the inputs arguments.
   for (auto& [name, variable] : variables) {
     if (variable.isTypeParameter()) {
       BOLT_USER_CHECK(

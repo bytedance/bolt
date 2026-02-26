@@ -345,7 +345,7 @@ Task::~Task() {
       }};
   bytedance::bolt::process::ScopedThreadDebugInfo scopedInfo(debugInfoForTask);
 
-  TestValue::adjust("bytedance::bolt::exec::Task::~Task", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::~Task", this);
 
   clearStage = "removeSpillDirectoryIfExists";
   removeSpillDirectoryIfExists();
@@ -1222,7 +1222,7 @@ std::function<void(const bool)> Task::makeFinishDriverCreatorCallback(
 
 std::vector<std::shared_ptr<Driver>> Task::createDriversLocked(
     uint32_t splitGroupId) {
-  TestValue::adjust("bytedance::bolt::exec::Task::createDriversLocked", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::createDriversLocked", this);
   const bool groupedExecutionDrivers = (splitGroupId != kUngroupedGroupId);
   auto& splitGroupState = splitGroupStates_[splitGroupId];
   const auto numPipelines = driverFactories_.size();
@@ -2156,7 +2156,7 @@ ContinueFuture Task::terminate(TaskState terminalState) {
     }
   }
 
-  TestValue::adjust("bytedance::bolt::exec::Task::terminate", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::terminate", this);
 
   for (auto& [planNodeId, splits] : remainingRemoteSplits) {
     auto client = getExchangeClient(planNodeId);
@@ -2717,7 +2717,7 @@ Task::getLocalExchangeQueues(
 }
 
 void Task::setError(const std::exception_ptr& exception) {
-  TestValue::adjust("bytedance::bolt::exec::Task::setError", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::setError", this);
   {
     std::lock_guard<std::timed_mutex> l(mutex_);
     if (not isRunningLocked()) {
@@ -2754,7 +2754,7 @@ std::string Task::errorMessage() const {
 }
 
 StopReason Task::enter(ThreadState& state, uint64_t nowMicros) {
-  TestValue::adjust("bytedance::bolt::exec::Task::enter", &state);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::enter", &state);
   std::lock_guard<std::timed_mutex> l(mutex_);
   BOLT_CHECK(state.isEnqueued);
   state.isEnqueued = false;
@@ -2964,7 +2964,7 @@ StopReason Task::shouldStopLocked() {
 
 ContinueFuture Task::requestPause() {
   std::lock_guard<std::timed_mutex> l(mutex_);
-  TestValue::adjust("bytedance::bolt::exec::Task::requestPauseLocked", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::Task::requestPauseLocked", this);
   pauseRequested_ = true;
   return makeFinishFutureLocked("Task::requestPause");
 }

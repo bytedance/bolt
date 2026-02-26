@@ -46,18 +46,12 @@ add_executable(
 add_test(bolt_dwio_parquet_arrow_test bolt_dwio_parquet_arrow_test)
 target_link_libraries(
   bolt_dwio_parquet_arrow_test
-  bolt_dwio_parquet_arrow_lib
-  bolt_dwio_parquet_arrow_test_lib
-  GTest::gmock
-  arrow::arrow
-  arrow::libarrow_testing
-  glog::glog
-  gflags::gflags
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )
 
-add_library(
+bolt_add_library(
   bolt_dwio_parquet_arrow_test_lib
   BloomFilter.cpp
   BloomFilterReader.cpp

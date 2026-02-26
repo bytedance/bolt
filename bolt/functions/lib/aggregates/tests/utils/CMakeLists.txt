@@ -25,6 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_functions_aggregates_test_lib AggregationTestBase.cpp)
+bolt_add_library(bolt_functions_aggregates_test_lib AggregationTestBase.cpp)
 
 target_link_libraries(bolt_functions_aggregates_test_lib bolt_exec_test_lib bolt_vector_test_lib)

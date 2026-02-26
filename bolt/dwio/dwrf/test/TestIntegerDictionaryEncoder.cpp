@@ -339,7 +339,7 @@ TEST_F(TestIntegerDictionaryEncoder, ShortIntegerDictionary) {
   // for 2^15+1 values and using direct encoding(values) for the rest.
 
   std::vector<int16_t> values;
-  // All postive numbers(2^15=1), and individual values -1 and 0
+  // All positive numbers(2^15=1), and individual values -1 and 0
   for (int32_t i = -1; i <= std::numeric_limits<int16_t>::max(); i++) {
     // Add them twice to force dictionary encoding.
     values.emplace_back(static_cast<int16_t>(i));

@@ -695,7 +695,7 @@ class HiveHash : public HiveHashBase {
       // <31^7, 31^6, ..., 31, 1> and get final temp result
       // for rest of char less than 8, do normal hash with final temp result as seed
       //
-      // note: multiple is diffcult for SIMD, so we transfor 8xi32*31^8 with simple add and shift.
+      // note: multiple is difficult for SIMD, so we transfor 8xi32*31^8 with simple add and shift.
       // 31^8 = 0b 1100 0110 1001 0100 0100 0100 0110 1111 0000 0001
       // we only care about the lower 32 bits, cause result is i32
       // so a * 31^8 = a * 0b 1001 0100 0100 0100 0110 1111 0000 0001

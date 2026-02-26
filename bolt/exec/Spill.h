@@ -292,7 +292,7 @@ class RowBasedSpillMergeStream : public MergeStream {
 
   /// Returns a DecodedVector set decoding the 'index'th child of 'rowVector_'
   DecodedVector& decoded(int32_t index) {
-    BOLT_NYI("RowBasedSpillMergeStream deconde isn't implemented");
+    BOLT_NYI("RowBasedSpillMergeStream decode isn't implemented");
   }
 
   int64_t getSpillReadTime() const {
@@ -847,7 +847,7 @@ class SpillState {
 
   /// Returns the current number of finished files from a given partition.
   ///
-  /// NOTE: the fucntion returns zero if the state has finished or the partition
+  /// NOTE: the function returns zero if the state has finished or the partition
   /// is not spilled yet.
   size_t numFinishedFiles(uint32_t partition) const;
 

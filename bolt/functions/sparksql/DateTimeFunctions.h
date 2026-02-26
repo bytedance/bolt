@@ -646,7 +646,7 @@ struct FromUtcTimestampFunction {
   const tz::TimeZone* timezone_{nullptr};
 };
 
-/// Converts date string to Timestmap type.
+/// Converts date string to Timestamp type.
 template <typename T>
 struct GetTimestampFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
@@ -872,6 +872,51 @@ struct DateTruncFunction {
 
  private:
   const tz::TimeZone* timeZone_ = nullptr;
+};
+
+/// Truncates a date to a specified time unit. Return NULL if the format is
+/// invalid. Format as abbreviated unit string is allowed.
+template <typename T>
+struct TruncFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& /*config*/,
+      const arg_type<Date>* /*date*/,
+      const arg_type<Varchar>* format) {
+    if (format != nullptr) {
+      unit_ = fromDateTimeUnitString(
+          *format,
+          /*throwIfInvalid=*/false,
+          /*allowMicro=*/false,
+          /*allowAbbreviated=*/true);
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Date>& result,
+      const arg_type<Date>& date,
+      const arg_type<Varchar>& format) {
+    const auto unitOption = unit_.has_value() ? unit_
+                                              : fromDateTimeUnitString(
+                                                    format,
+                                                    /*throwIfInvalid=*/false,
+                                                    /*allowMicro=*/false,
+                                                    /*allowAbbreviated=*/true);
+    // Return NULL if unit is illegal or unit is less than week.
+    if (!unitOption.has_value() || unitOption.value() < DateTimeUnit::kWeek) {
+      return false;
+    }
+    auto dateTime = getDateTime(date);
+    adjustDateTime(dateTime, unitOption.value());
+
+    result = Timestamp::calendarUtcToEpoch(dateTime) / kSecondsInDay;
+    return true;
+  }
+
+ private:
+  std::optional<DateTimeUnit> unit_;
 };
 
 template <typename T>
@@ -1365,7 +1410,7 @@ struct PDate2DateFunction {
   // PDate: yyyy-MM-dd, such as 2023-12-21, Date: yyyyMMdd, such as 20231221
 
   bool convert(const std::string& input, out_type<Varchar>& result) {
-    // input is formated by PDate: yyyy-MM-dd
+    // input is formatted by PDate: yyyy-MM-dd
     size_t size = input.size();
     if (size != PDATE_LENGTH) {
       return false;

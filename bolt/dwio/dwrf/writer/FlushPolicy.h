@@ -141,7 +141,7 @@ class LambdaFlushPolicy : public DWRFFlushPolicy {
 
   virtual ~LambdaFlushPolicy() override = default;
 
-  bool shouldFlush(const dwio::common::StripeProgress& /* ununsed */) override {
+  bool shouldFlush(const dwio::common::StripeProgress& /* unused */) override {
     return lambda_();
   }
 

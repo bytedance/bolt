@@ -268,7 +268,7 @@ class VectorFuzzer {
   // Returns a "fuzzed" row vector with randomized data and nulls.
   RowVectorPtr fuzzRow(const RowTypePtr& rowType);
 
-  // If allowTopLevelNulls is false, the top level row wont have nulls.
+  // If allowTopLevelNulls is false, the top level row won't have nulls.
   RowVectorPtr fuzzRow(
       const RowTypePtr& rowType,
       vector_size_t size,
@@ -333,7 +333,7 @@ class VectorFuzzer {
   // Randomly applies wrapInLazyVector() to the children of the given input row
   // vector. Must only be used for input row vectors where all children are
   // non-null and non-lazy. Is useful when the input rowVector needs to be
-  // re-used between multiple evaluations.
+  // reused between multiple evaluations.
   RowVectorPtr fuzzRowChildrenToLazy(RowVectorPtr rowVector);
 
   // Returns a copy of 'rowVector' but with the columns having indices listed in

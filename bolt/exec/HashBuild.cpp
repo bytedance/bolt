@@ -426,7 +426,7 @@ void HashBuild::addSpilledRowInput(std::vector<char*>& rows, uint32_t size) {
   if (rows.empty()) {
     return;
   }
-  // TODO: support directly respill rows readed from spiller
+  // TODO: support directly respill rows read from spiller
   // now direct copy spilled rows to table, increase the risic of OOM
 
   // even though ensureInputFits return false, we still need to spill rows
@@ -453,7 +453,7 @@ void HashBuild::addInput(RowVectorPtr input) {
     return;
   }
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::addInput", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::addInput", this);
 
   activeRows_.resize(input->size());
   activeRows_.setAll();
@@ -955,7 +955,7 @@ bool HashBuild::finishHashBuild() {
     return false;
   }
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::finishHashBuild", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::finishHashBuild", this);
 
   auto promisesGuard = folly::makeGuard([&]() {
     // Realize the promises so that the other Drivers (which were not
@@ -1024,7 +1024,7 @@ bool HashBuild::finishHashBuild() {
   if (spiller_ != nullptr) {
     if (spillThreshold_.has_value()) {
       // after read from spill file, memory used for HashTable entries
-      // shoule be taken into consideration especially when spillThreshold_
+      // should be taken into consideration especially when spillThreshold_
       // is extremely large
       BOLT_CHECK(memoryUsedForFirstSpill_.has_value());
       auto maxRestoreRowCount = spillThreshold_.value();
@@ -1034,7 +1034,8 @@ bool HashBuild::finishHashBuild() {
         maxRestoreRowCount =
             (double)(1 - bytesForHashTable * 1.0 / usedMemBytes) *
             maxRestoreRowCount;
-        LOG(INFO) << __FUNCTION__ << " recal : usedMemBytes = " << usedMemBytes
+        LOG(INFO) << __FUNCTION__
+                  << " recalculated : usedMemBytes = " << usedMemBytes
                   << ", bytesForHashTable = " << bytesForHashTable
                   << ", spillThreshold_.value() = " << spillThreshold_.value()
                   << ", maxRestoreRowCount = " << maxRestoreRowCount;
@@ -1174,8 +1175,7 @@ void HashBuild::ensureTableFits(uint64_t numRows) {
   const uint64_t bytesToReserve = table_->estimateHashTableSize(numRows) * 1.1;
   {
     Operator::ReclaimableSectionGuard guard(this);
-    TestValue::adjust(
-        "bytedance::bolt::exec::HashBuild::ensureTableFits", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::ensureTableFits", this);
     if (pool()->maybeReserve(bytesToReserve)) {
       return;
     }
@@ -1443,7 +1443,7 @@ void HashBuild::reclaim(
   BOLT_CHECK_NOT_NULL(driver);
   BOLT_CHECK(!nonReclaimableSection_);
 
-  TestValue::adjust("bytedance::bolt::exec::HashBuild::reclaim", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::reclaim", this);
 
   // can another thread  call close() while hashbuild is in arbitration and
   // reclaim is called on it?
@@ -1556,7 +1556,7 @@ void HashBuild::reclaim(
 bool HashBuild::nonReclaimableState() const {
   // Apart from being in the nonReclaimable section,
   // its also not reclaimable if:
-  // 1) the hash table has been built by the last build thread (inidicated
+  // 1) the hash table has been built by the last build thread (indicated
   //    by state_)
   // 2) the last build operator has transferred ownership of 'this' operator's
   //    intermediate state (table_ and spiller_) to itself

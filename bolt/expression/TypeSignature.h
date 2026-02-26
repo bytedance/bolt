@@ -63,7 +63,7 @@ class TypeSignature {
 
   /// Convert a signature to a type.
   ///
-  /// This similary to calling
+  /// This similarly to calling
   /// `SignatureBinder::tryResolveType(*this, {}, {}, {})`, i.e, when
   /// there is no context to infer possible aliases.
   TypePtr asType() const;

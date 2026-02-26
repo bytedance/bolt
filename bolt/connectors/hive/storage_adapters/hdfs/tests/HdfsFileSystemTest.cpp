@@ -78,6 +78,11 @@ class HdfsFileSystemTest : public testing::Test {
   }
 
   static void TearDownTestSuite() {
+    for (const auto& [_, filesystem] :
+         bytedance::bolt::filesystems::registeredFilesystems) {
+      filesystem->close();
+    }
+
     miniCluster->stop();
   }
   static std::atomic<bool> startThreads;

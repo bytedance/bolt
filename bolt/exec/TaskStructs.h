@@ -136,7 +136,7 @@ struct SplitGroupState {
   uint32_t numFinishedOutputDrivers{0};
 
   // True if the state contains structures used for connecting ungrouped
-  // execution pipeline with grouped excution pipeline. In that case we don't
+  // execution pipeline with grouped execution pipeline. In that case we don't
   // want to clean up some of these structures.
   bool mixedExecutionMode{false};
 

@@ -178,7 +178,7 @@ struct TypeAnalysisResults {
     }
 
     uint32_t computePriority() {
-      // This assumes we wont have signature longer than 1M argument.
+      // This assumes we won't have signature longer than 1M argument.
       return getRank() * 1000000 - concreteCount;
     }
   } stats;
@@ -189,12 +189,12 @@ struct TypeAnalysisResults {
     } else {
       BOLT_CHECK(
           variable == variablesInformation.at(variable.name()),
-          "Cant assign different properties to the same variable {}",
+          "Can't assign different properties to the same variable {}",
           variable.name());
     }
   }
 
-  // String representaion of the type in the FunctionSignatureBuilder.
+  // String representation of the type in the FunctionSignatureBuilder.
   std::ostringstream out;
 
   // Set of generic variables used in the type.

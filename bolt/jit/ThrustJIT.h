@@ -254,7 +254,7 @@ class ThrustJIT {
   llvm::orc::JITDylib& main_jit_dylib_;
 
   // TODO: refactor code:
-  // seperate DynamicLibrarySearchGenerator::GetForCurrentProcess to this:
+  // separate DynamicLibrarySearchGenerator::GetForCurrentProcess to this:
   llvm::orc::JITDylib* process_symbols_{nullptr};
 
   llvm::ThreadPool compile_threads_;

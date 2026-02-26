@@ -153,7 +153,7 @@ inline static TResult addLargeOpposite(
     bool& overflow) {
   BOLT_DCHECK(
       (a < 0 && b > 0) || (a > 0 && b < 0),
-      "One positve and one negative value are expected in addLargeOpposite.");
+      "One positive and one negative value are expected in addLargeOpposite.");
 
   // Separate whole and fraction parts.
   const auto [aWhole, aFraction] = getWholeAndFraction<A>(a, aScale);

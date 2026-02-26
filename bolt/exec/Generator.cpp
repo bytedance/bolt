@@ -231,7 +231,7 @@ RowVectorPtr GeneratorExplode::getOutput() {
       rawOrdinality += maxSize;
     }
 
-    // Ordinality column is always in the begining of generated columns
+    // Ordinality column is always in the beginning of generated columns
     outputs[outputsIndex++] = std::move(ordinalityVector);
   }
 
@@ -242,7 +242,7 @@ RowVectorPtr GeneratorExplode::getOutput() {
       outputs[outputsIndex++] = wrapChild(
           numElements, elementIndices, generateBaseArray->elements(), nulls);
     } else {
-      // Genrate two columns for Map keys and values vectors
+      // Generate two columns for Map keys and values vectors
       auto generateBaseMap = currentDecoded.base()->as<MapVector>();
       outputs[outputsIndex++] = wrapChild(
           numElements, elementIndices, generateBaseMap->mapKeys(), nulls);
@@ -261,7 +261,7 @@ RowVectorPtr GeneratorExplode::getOutput() {
                 generateBaseArray->elements(),
                 nulls);
     } else {
-      // Genrate two columns for Map keys and values vectors
+      // Generate two columns for Map keys and values vectors
       auto generateBaseMap = currentDecoded.base()->as<MapVector>();
       outputs[outputsIndex++] = isIdentityMapping
           ? generateBaseMap->mapKeys()

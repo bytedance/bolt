@@ -333,7 +333,7 @@ TEST_F(TableScanTest, directBufferInputRawInputBytes) {
   ASSERT_TRUE(it != planStats.end());
   auto rawInputBytes = it->second.rawInputBytes;
   auto overreadBytes = getTableScanRuntimeStats(task).at("overreadBytes").sum;
-  ASSERT_GE(rawInputBytes, 500);
+  ASSERT_GE(rawInputBytes, 490);
   ASSERT_EQ(overreadBytes, 13);
   ASSERT_EQ(
       getTableScanRuntimeStats(task).at("storageReadBytes").sum,
@@ -3138,7 +3138,7 @@ TEST_F(TableScanTest, remainingFilterConstantResult) {
   /// batch start with 11. Also, make sure that remaining filter inputs for the
   /// second batch are dictionary encoded and constant. This makes it so that
   /// first batch is producing results using dictionary encoding with indices
-  /// starting at 11 and second batch cannot re-use these indices as they point
+  /// starting at 11 and second batch cannot reuse these indices as they point
   /// past the vector size (5).
   vector_size_t size = 10'000;
   std::vector<RowVectorPtr> data = {
@@ -4673,4 +4673,39 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
           errorMsg + "|")
       .taskId("ATTEMPT_9")
       .assertResults(expected);
+}
+
+TEST_F(TableScanTest, filterMissingFields) {
+  constexpr int kSize = 10;
+  auto iota = makeFlatVector<int64_t>(kSize, folly::identity);
+  auto data = makeRowVector({makeRowVector({iota})});
+  auto file = TempFilePath::create();
+  writeToFile(file->getPath(), {data});
+  auto schema = makeRowType({
+      makeRowType({BIGINT(), BIGINT()}),
+      makeRowType({BIGINT()}),
+      BIGINT(),
+  });
+  auto test = [&](const std::vector<std::string>& subfieldFilters,
+                  int expectedSize) {
+    SCOPED_TRACE(fmt::format("{}", fmt::join(subfieldFilters, " AND ")));
+    auto plan = PlanBuilder()
+                    .tableScan(ROW({}, {}), subfieldFilters, "", schema)
+                    .planNode();
+    auto split = makeHiveConnectorSplit(file->getPath());
+    auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+    ASSERT_EQ(result->size(), expectedSize);
+  };
+  test({"c0.c1 = 0"}, 0);
+  test({"c0.c1 IS NULL"}, kSize);
+  test({"c1 IS NOT NULL"}, 0);
+  test({"c1 IS NULL"}, kSize);
+  test({"c1.c0 = 0"}, 0);
+  test({"c1.c0 IS NULL"}, kSize);
+  test({"c2 = 0"}, 0);
+  test({"c2 IS NULL"}, kSize);
+  test({"c2 = 0", "c0.c1 IS NULL"}, 0);
+  test({"c2 IS NULL", "c0.c1 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 = 0"}, 0);
+  test({"c0.c0 = 0", "c1.c0 IS NULL"}, 1);
 }

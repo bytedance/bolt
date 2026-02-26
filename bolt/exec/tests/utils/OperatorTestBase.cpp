@@ -89,7 +89,7 @@ void OperatorTestBase::SetUpTestCase() {
   resetMemory();
   functions::prestosql::registerAllScalarFunctions();
   aggregate::prestosql::registerAllAggregateFunctions();
-  TestValue::enable();
+  BOLT_TEST_VALUE_ENABLE();
 }
 
 void OperatorTestBase::TearDownTestCase() {

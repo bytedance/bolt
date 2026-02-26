@@ -69,7 +69,7 @@ class StreamingAggregation : public Operator {
   // Returns the rows to aggregate with masking applied if applicable.
   const SelectivityVector& getSelectivityVector(size_t aggregateIndex) const;
 
-  // Allocate new group or re-use previously allocated group that has been fully
+  // Allocate new group or reuse previously allocated group that has been fully
   // calculated and included in the output.
   char* startNewGroup(vector_size_t index);
 
@@ -127,7 +127,7 @@ class StreamingAggregation : public Operator {
   std::vector<char*> groups_;
 
   // Number of active entries at the beginning of the groups_ vector. The
-  // remaining entries are re-usable.
+  // remaining entries are reusable.
   size_t numGroups_{0};
 
   // Reusable memory.

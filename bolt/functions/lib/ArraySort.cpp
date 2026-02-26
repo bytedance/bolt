@@ -80,16 +80,16 @@ BufferPtr sortElements(
           if (a == b) {
             return false;
           }
-          bool aNull = decodedElements->isNullAt(a);
-          bool bNull = decodedElements->isNullAt(b);
+          bool nullAtA = decodedElements->isNullAt(a);
+          bool nullAtB = decodedElements->isNullAt(b);
 
-          if (aNull && bNull) {
+          if (nullAtA && nullAtB) {
             return false;
           }
-          if (aNull) {
+          if (nullAtA) {
             return nullsFirst;
           }
-          if (bNull) {
+          if (nullAtB) {
             return !nullsFirst;
           }
 

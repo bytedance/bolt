@@ -904,7 +904,7 @@ bool AggregationFuzzer::verifySortedAggregation(
         plans, customVerification, input, customVerifier, 1);
   } else {
     // If custom verification is not enabled or the custom verifier is used for
-    // compare and the aggregation is order sensitive (the result shoudl be
+    // compare and the aggregation is order sensitive (the result should be
     // deterministic if the input is sorted), then compare the results directly.
     return compareEquivalentPlanResults(plans, false, input, nullptr, 1);
   }

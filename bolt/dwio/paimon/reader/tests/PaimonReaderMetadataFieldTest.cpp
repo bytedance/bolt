@@ -72,8 +72,7 @@ class PaimonReaderMetadataFieldTest
     leafPool_ = rootPool_->addLeafChild("PaimonTests");
 
     auto hiveConnector =
-        connector::getConnectorFactory(
-            connector::hive::HiveConnectorFactory::kHiveConnectorName)
+        connector::getConnectorFactory(connector::kHiveConnectorName)
             ->newConnector(
                 kHiveConnectorId,
                 std::make_shared<config::ConfigBase>(

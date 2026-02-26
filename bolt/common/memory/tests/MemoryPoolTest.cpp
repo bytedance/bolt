@@ -91,7 +91,7 @@ class MemoryPoolTest : public testing::TestWithParam<TestParam> {
   static void SetUpTestCase() {
     SharedArbitrator::registerFactory();
     FLAGS_bolt_memory_leak_check_enabled = true;
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   MemoryPoolTest()
@@ -2843,7 +2843,7 @@ TEST_P(MemoryPoolTest, memoryReclaimerSetCheck) {
   {
     auto root =
         manager->addRootPool("", kMaxMemory, memory::MemoryReclaimer::create());
-    // Can't set more tha once.
+    // Can't set more than once.
     BOLT_ASSERT_THROW(
         root->setReclaimer(memory::MemoryReclaimer::create()), "");
     BOLT_ASSERT_THROW(root->setReclaimer(nullptr), "");

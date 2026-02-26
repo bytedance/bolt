@@ -29,7 +29,7 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-add_library(bolt_common_config Config.cpp)
+bolt_add_library(bolt_common_config Config.cpp)
 target_link_libraries(
   bolt_common_config
   PUBLIC bolt_common_base bolt_exception

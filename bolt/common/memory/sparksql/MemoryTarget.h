@@ -335,7 +335,7 @@ class ConsumerTargetBridgeFactory final {
 };
 
 /* SpillTrigger acts middle-layer between Spark's Consumer and Gluten's
- * MemoryTarget, recive spill signal from Spark's Consumer, then trigge
+ * MemoryTarget, receive spill signal from Spark's Consumer, then trigge
  * MemoryTarget's spill function */
 class SpillTrigger final {
  public:
@@ -343,7 +343,7 @@ class SpillTrigger final {
       SpillerPhase::kShrink,
       SpillerPhase::kSpill};
 
-  inline static const std::string kNamePrefix = "SpillTriggerLayer.";
+  inline static const std::string kNamePrefix = "SpillTriggerLayer";
 
   static TreeMemoryTargetPtr newChild(
       TreeMemoryTargetWeakPtr parent,

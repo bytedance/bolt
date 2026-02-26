@@ -15,7 +15,7 @@
 
 find_package(simdjson CONFIG REQUIRED)
 
-add_library(bolt_functions_flink Register.cpp)
+bolt_add_library(bolt_functions_flink Register.cpp)
 
 # GCC 12 has a bug where it does not respect "pragma ignore" directives and ends up failing
 # compilation in an openssl header included by a hash-related function.

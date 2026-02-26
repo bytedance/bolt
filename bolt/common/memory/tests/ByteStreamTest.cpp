@@ -271,7 +271,7 @@ TEST_F(ByteStreamTest, bits) {
 }
 
 TEST_F(ByteStreamTest, appendWindow) {
-  // A littel over 1MB. We must test appendss that involve multiple extend()
+  // A little over 1MB. We must test appendss that involve multiple extend()
   // calls for one window.
   constexpr int32_t kNumWords = 140000;
   Scratch scratch;

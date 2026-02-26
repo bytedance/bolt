@@ -40,7 +40,7 @@ namespace bytedance::bolt::test {
 
 /**
  * This class is a bit of a workaround to allow the different test cases of
- * SimpleVector's to be re-used for asserting different things. To use, one
+ * SimpleVector's to be reused for asserting different things. To use, one
  * should import this header into a file, and implement
  * SimpleVectorTest::runTest. Given that the SimpleVectorTest name will
  * conflict, the test file importing this file should be in its own build target

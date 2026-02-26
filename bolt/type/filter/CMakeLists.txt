@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(
+bolt_add_library(
   bolt_filter
   Cast.cpp
   Filter.cpp

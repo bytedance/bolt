@@ -62,7 +62,7 @@ T add(T value, K step, int32_t sequence);
 template <>
 int64_t add(int64_t value, int64_t step, int32_t sequence) {
   const auto delta = (int128_t)step * (int128_t)sequence;
-  // Since step is calcuated from start and stop,
+  // Since step is calculated from start and stop,
   // the sum of 'value' and 'add' is within int64_t.
   return value + delta;
 }

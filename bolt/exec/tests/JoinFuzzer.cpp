@@ -204,8 +204,7 @@ JoinFuzzer::JoinFuzzer(size_t initialSeed)
       enableDuckdbVerification_{FLAGS_enable_duckdb_verification} {
   filesystems::registerLocalFileSystem();
   auto hiveConnector =
-      connector::getConnectorFactory(
-          connector::hive::HiveConnectorFactory::kHiveConnectorName)
+      connector::getConnectorFactory(connector::kHiveConnectorName)
           ->newConnector(kHiveConnectorId, std::make_shared<core::MemConfig>());
   connector::registerConnector(hiveConnector);
 

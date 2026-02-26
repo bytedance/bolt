@@ -1731,7 +1731,7 @@ void StringDirectColumnReader::next(
   BufferPtr lengths = AlignedBuffer::allocate<int64_t>(numValues, &memoryPool_);
   length->next(lengths->asMutable<int64_t>(), numValues, nullsPtr);
 
-  // figure out the total length of data we need fom the blob stream
+  // figure out the total length of data we need from the blob stream
   const auto* lengthsPtr = lengths->as<int64_t>();
   const size_t totalLength = computeSize(lengthsPtr, nullsPtr, numValues);
 

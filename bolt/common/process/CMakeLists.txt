@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_process ExceptionTrace.cpp ProcessBase.cpp StackTrace.cpp ThreadDebugInfo.cpp
                TraceContext.cpp
 )
@@ -38,7 +38,7 @@ target_link_libraries(
 
 find_package(libbacktrace REQUIRED CONFIG)
 
-add_library(bolt_process_crash_report CrashReport.cpp)
+bolt_add_library(bolt_process_crash_report CrashReport.cpp)
 
 target_link_libraries(bolt_process_crash_report libbacktrace::libbacktrace)
 

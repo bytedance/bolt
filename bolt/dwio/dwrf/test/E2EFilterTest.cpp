@@ -258,7 +258,7 @@ TEST_F(E2EFilterTest, floatAndDouble) {
 }
 
 TEST_F(E2EFilterTest, stringDirect) {
-  testutil::TestValue::enable();
+  BOLT_TEST_VALUE_ENABLE();
   bool coverage[2][2]{};
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::dwrf::SelectiveStringDirectColumnReader::try8ConsecutiveSmall",

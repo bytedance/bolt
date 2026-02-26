@@ -13,47 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set(BOLT_BENCHMARK_DEPS
+    bolt_vector_fuzzer
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest
+)
 add_executable(export_bolt_arrow_bridge_benchmark ExportBoltToArrowBenchmark.cpp)
 target_link_libraries(
-  export_bolt_arrow_bridge_benchmark
+  export_bolt_arrow_bridge_benchmark PRIVATE
   bolt_arrow_bridge
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  arrow::arrow
-  ${FOLLY_BENCHMARK}
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(arrow_bolt_bridge_benchmark ArrowToBoltBenchmark.cpp)
 target_link_libraries(
-  arrow_bolt_bridge_benchmark
+  arrow_bolt_bridge_benchmark PRIVATE
   bolt_arrow_bridge
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  arrow::arrow
-  ${FOLLY_BENCHMARK}
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(arrow_bolt_array_bridge_benchmark ArrowToBoltArrayBenchmark.cpp)
 target_link_libraries(
-  arrow_bolt_array_bridge_benchmark
+  arrow_bolt_array_bridge_benchmark PRIVATE
   bolt_arrow_bridge
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  arrow::arrow
-  ${FOLLY_BENCHMARK}
+  ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(import_arrow_bolt_bridge_benchmark ImportArrowToBoltBenchmark.cpp)
 target_link_libraries(
-  import_arrow_bolt_bridge_benchmark
+  import_arrow_bolt_bridge_benchmark PRIVATE
   bolt_arrow_bridge
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  arrow::arrow
-  arrow::libarrow_testing
-  ${FOLLY_BENCHMARK}
+  ${BOLT_BENCHMARK_DEPS}
+  arrow::libarrow_testing # TODO: remove this dependency
 )

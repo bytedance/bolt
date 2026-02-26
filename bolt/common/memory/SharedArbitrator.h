@@ -61,7 +61,7 @@ class SharedArbitratorTestHelper;
 /// the actual memory reclaim is executed by a thread pool to parallelize the
 /// memory reclamation from multiple running queries at the same time. The
 /// global arbitration first tries to reclaim memory by disk spilling and if it
-/// can't quickly reclaim enough memory, it then switchs to abort the younger
+/// can't quickly reclaim enough memory, it then switches to abort the younger
 /// queries which also have more memory usage.
 class SharedArbitrator : public memory::MemoryArbitrator {
  public:
@@ -324,7 +324,7 @@ class SharedArbitrator : public memory::MemoryArbitrator {
   inline static const std::string kind_{"SHARED"};
 
   // Used to manage an arbitration operation execution. It starts 'op' execution
-  // in ctor and finishes its exection in dtor.
+  // in ctor and finishes its execution in dtor.
   class ScopedArbitration {
    public:
     explicit ScopedArbitration(

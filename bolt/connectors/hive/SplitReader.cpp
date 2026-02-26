@@ -68,7 +68,7 @@ VectorPtr newConstantFromString(
         pool, size, false, type, StringView(value.value()));
   } else {
     auto copy = bolt::util::Converter<kind>::cast(value.value(), nullptr);
-    // It is guranteed that the value string is in UTC timezone.
+    // It is guaranteed that the value string is in UTC timezone.
     // if constexpr (kind == TypeKind::TIMESTAMP) {
     //   copy.toGMT(Timestamp::defaultTimezone());
     // }

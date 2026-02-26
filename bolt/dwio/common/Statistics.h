@@ -587,7 +587,7 @@ struct RuntimeStatistics {
   // Number of strides (row groups) skipped based on statistics.
   int64_t skippedStrides{0};
 
-  // Number of strides (row groups) processed based on statitics.
+  // Number of strides (row groups) processed based on statistics.
   int64_t processedStrides{0};
 
   uint64_t decompressDataTimeNs{0};

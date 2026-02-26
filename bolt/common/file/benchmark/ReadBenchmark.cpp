@@ -36,7 +36,7 @@ DEFINE_int64(
     0,
     "Limits the test to the first --file_size_gb "
     "of --path. 0 means use the whole file");
-DEFINE_int32(num_threads, 16, "Test paralelism");
+DEFINE_int32(num_threads, 16, "Test parallelism");
 DEFINE_int32(seed, 0, "Random seed, 0 means no seed");
 DEFINE_bool(odirect, false, "Use O_DIRECT");
 

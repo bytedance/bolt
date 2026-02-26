@@ -651,8 +651,8 @@ struct ValueOf<Map<keyT, valueT>> {
   }
 };
 
-template <typename elemT>
-struct ValueOf<Array<elemT>> {
+template <typename ElementType>
+struct ValueOf<Array<ElementType>> {
   static std::string get(const VectorPtr& batch, const uint32_t offset) {
     auto arrayBatch = std::dynamic_pointer_cast<ArrayVector>(batch);
     return folly::to<std::string>(
@@ -4340,7 +4340,7 @@ struct DictColumnWriterTestCase {
    * @param size the size the generated data (before dictionary)
    * @param valueAt the lmbda generating values
    * @param isNullAt the lambda generating nulls
-   * @param complexRowType only set if the data wil be complex (Row, Array or
+   * @param complexRowType only set if the data will be complex (Row, Array or
    * Map)
    * @return
    */

@@ -28,70 +28,48 @@
 # find_package(lzo CONFIG REQUIRED)
 find_package(Arrow CONFIG REQUIRED)
 
-add_executable(bolt_dwio_parquet_reader_test ParquetReaderTest.cpp)
+add_executable(bolt_dwio_parquet_reader_test
+  ParquetReaderTest.cpp
+  ParquetPageReaderTest.cpp
+  NestedStructureDecoderTest.cpp
+)
+
 add_test(
   NAME bolt_dwio_parquet_reader_test
   COMMAND bolt_dwio_parquet_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  bolt_dwio_parquet_reader_test bolt_dwio_native_parquet_reader bolt_link_libs ${TEST_LINK_LIBS}
+  bolt_dwio_parquet_reader_test PRIVATE
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
-add_executable(bolt_dwio_parquet_page_reader_test ParquetPageReaderTest.cpp)
-add_test(
-  NAME bolt_dwio_parquet_page_reader_test
-  COMMAND bolt_dwio_parquet_page_reader_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_link_libraries(
-  bolt_dwio_parquet_page_reader_test bolt_dwio_native_parquet_reader bolt_link_libs
-  ${TEST_LINK_LIBS}
-)
-
-add_executable(
-  bolt_parquet_filter_test E2EFilterTest.cpp ParquetDictionaryFilterTest.cpp
-                           ParquetRowGroupFilterTest.cpp
+add_executable(bolt_parquet_filter_test
+  E2EFilterTest.cpp
+  ParquetDictionaryFilterTest.cpp
+  ParquetRowGroupFilterTest.cpp
 )
 
 add_test(bolt_parquet_filter_test bolt_parquet_filter_test)
 target_link_libraries(
   bolt_parquet_filter_test
   bolt_e2e_filter_test_base
-  bolt_dwio_parquet_writer
-  bolt_dwio_native_parquet_reader
-  lz4::lz4
-  zstd::libzstd_static
-  ZLIB::ZLIB
-  ${TEST_LINK_LIBS}
+  bolt_testutils
 )
 
 add_executable(bolt_dwio_parquet_reader_benchmark ParquetReaderBenchmark.cpp)
 target_link_libraries(
   bolt_dwio_parquet_reader_benchmark
-  bolt_dwio_parquet_reader
-  bolt_dwio_parquet_writer
-  bolt_exec_test_lib
-  bolt_exec
-  bolt_hive_connector
-  Folly::folly
+  PRIVATE bolt_testutils
   ${FOLLY_BENCHMARK}
-)
-
-add_executable(bolt_dwio_parquet_structure_decoder_test NestedStructureDecoderTest.cpp)
-add_test(
-  NAME bolt_dwio_parquet_structure_decoder_test
-  COMMAND bolt_dwio_parquet_structure_decoder_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_link_libraries(
-  bolt_dwio_parquet_structure_decoder_test bolt_dwio_native_parquet_reader bolt_link_libs
-  ${TEST_LINK_LIBS}
 )
 
 add_executable(bolt_dwio_parquet_structure_decoder_benchmark NestedStructureDecoderBenchmark.cpp)
 target_link_libraries(
-  bolt_dwio_parquet_structure_decoder_benchmark bolt_dwio_native_parquet_reader Folly::folly
+  bolt_dwio_parquet_structure_decoder_benchmark PRIVATE
+  bolt_testutils
   ${FOLLY_BENCHMARK}
 )
 
@@ -102,12 +80,8 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  bolt_dwio_parquet_table_scan_test
-  bolt_dwio_parquet_reader
-  bolt_exec_test_lib
-  bolt_exec
-  bolt_hive_connector
-  bolt_link_libs
+  bolt_dwio_parquet_table_scan_test PRIVATE
+  bolt_testutils
   ${TEST_LINK_LIBS}
 )
 
@@ -120,7 +94,9 @@ add_test(
 )
 
 target_link_libraries(
-  bolt_dwio_parquet_cli_test bolt_exec_test_lib bolt_dwio_native_parquet_reader_cli
+  bolt_dwio_parquet_cli_test PRIVATE
+  bolt_dwio_native_parquet_reader_cli
+  bolt_testutils
 )
 
 if(${BOLT_ENABLE_ARROW})
@@ -132,8 +108,9 @@ if(${BOLT_ENABLE_ARROW})
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
   target_link_libraries(
-    bolt_dwio_parquet_rlebp_decoder_test bolt_dwio_native_parquet_reader arrow::arrow
-    bolt_dwio_common ${TEST_LINK_LIBS}
+    bolt_dwio_parquet_rlebp_decoder_test PRIVATE
+    bolt_testutils
+    ${TEST_LINK_LIBS}
   )
 
 endif()

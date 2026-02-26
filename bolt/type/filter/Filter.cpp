@@ -1900,7 +1900,7 @@ std::unique_ptr<Filter> MultiRange::mergeWith(const Filter* other) const {
     // 2. MultiRange(nullAllowed=true) AND IS NOT NULL =>
     // MultiRange(nullAllowed=false)
     // 3. MultiRange(nullAllowed=false) AND IS NULL
-    // => ALWAYS FALS
+    // => ALWAYS FALSE
     // 4. MultiRange(nullAllowed=false) AND IS NOT NULL
     // =>MultiRange(nullAllowed=false)
     case FilterKind::kAlwaysTrue:

@@ -95,7 +95,7 @@ class DirectBufferedInputTest : public testing::Test {
         ioStats_,
         executor_.get(),
         *opts_,
-        asyncCtxPtr_.get());
+        asyncCtxPtr_);
   }
 
   // Reads and checks the result of reading ''regions' and checks that this

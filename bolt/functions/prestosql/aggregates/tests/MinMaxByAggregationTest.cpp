@@ -1782,7 +1782,7 @@ TEST_F(MinMaxByNTest, sortedGroupBy) {
       "SELECT c0, min_by(c1, c2 ORDER BY c3), min_by(c1, c2 ORDER BY c3 DESC) FROM tmp GROUP BY 1");
 }
 
-TEST_F(MinMaxByNTest, variableN) {
+TEST_F(MinMaxByNTest, variable) {
   auto data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
       makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),

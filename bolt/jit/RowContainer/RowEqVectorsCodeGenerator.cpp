@@ -309,7 +309,7 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
   // https://stackoverflow.com/questions/8627331/what-does-ordered-unordered-comparison-mean
   // 2. RowContainer::comparePrimitiveAsc
   // ```cpp
-  //  if (leftIsNan != rightIsNan) {  // only one oprand is NaN
+  //  if (leftIsNan != rightIsNan) {  // only one operand is NaN
   //      return false;
   //  }
   //  else if (leftIsNan)  // both is Nan
@@ -426,7 +426,7 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genStringViewCmpIR(
                     mask[len];
     return left_inline == right_inline
     }
-    auto res = StringViewRowEqVectors(left, right);
+    auto res = jit_StringViewRowEqVectors(left, right);
     if constexpr (lastKey) {
       return res;
     } else {
@@ -551,7 +551,7 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
   // ```cpp
-  //   auto res = ComplexTypeRowEqVectors(row(offset), decodedvec(index));
+  //   auto res = jit_ComplexTypeRowEqVectors(row(offset), decodedvec(index));
   //   if constexpr (lastKey) {
   //     return res;
   //   } else {

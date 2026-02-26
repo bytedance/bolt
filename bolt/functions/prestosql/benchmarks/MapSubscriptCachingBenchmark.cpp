@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < options.vectorSize; i++) {
       auto mapIndex = decoded.index(i);
-      // Select a random exisiting key except when map is empty.
+      // Select a random existing key except when map is empty.
       if (map->sizeAt(mapIndex) == 0) {
         mutableIndices[i] = 0;
       }

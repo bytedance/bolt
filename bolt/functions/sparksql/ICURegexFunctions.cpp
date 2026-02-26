@@ -472,8 +472,8 @@ void extractAll(
   size_t pos = 0;
   size_t size = str.size();
 
-  // to avoid the performance loss of redudant traversal, track the end index in
-  // both input StringView and input UnicodeString, which is at most one full
+  // to avoid the performance loss of redundant traversal, track the end index
+  // in both input StringView and input UnicodeString, which is at most one full
   // traversal overhead
   int32_t pre = 0;
   int32_t preIndex = 0;

@@ -25,6 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_exec_prefixsort_test_lib EncoderTestUtils.cpp)
+bolt_add_library(bolt_exec_prefixsort_test_lib EncoderTestUtils.cpp)
 
 target_link_libraries(bolt_exec_prefixsort_test_lib bolt_vector_test_lib)

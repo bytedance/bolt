@@ -30,6 +30,7 @@
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/functions/sparksql/Register.h"
 #include "bolt/parse/TypeResolver.h"
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
@@ -58,15 +59,13 @@ class OrcTpchTest : public testing::Test {
     bytedance::bolt::orc::registerOrcWriterFactory();
 
     auto hiveConnector =
-        connector::getConnectorFactory(
-            connector::hive::HiveConnectorFactory::kHiveConnectorName)
+        connector::getConnectorFactory(connector::kHiveConnectorName)
             ->newConnector(
                 kHiveConnectorId, std::make_shared<core::MemConfig>());
     connector::registerConnector(hiveConnector);
 
     auto tpchConnector =
-        connector::getConnectorFactory(
-            connector::tpch::TpchConnectorFactory::kTpchConnectorName)
+        connector::getConnectorFactory(connector::kTpchConnectorName)
             ->newConnector(
                 kBoltTpchConnectorId, std::make_shared<core::MemConfig>());
     connector::registerConnector(tpchConnector);

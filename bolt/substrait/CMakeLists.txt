@@ -96,7 +96,7 @@ set(SRCS
     VariantToVectorConverter.cpp
 )
 
-add_library(bolt_substrait_plan_converter ${SRCS})
+bolt_add_library(bolt_substrait_plan_converter ${SRCS})
 target_include_directories(bolt_substrait_plan_converter PUBLIC ${PROTO_OUTPUT_DIR}/)
 target_link_libraries(bolt_substrait_plan_converter bolt_connector bolt_dwio_dwrf_common)
 

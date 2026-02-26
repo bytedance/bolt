@@ -30,6 +30,7 @@
 
 #include <folly/Singleton.h>
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/tests/HdfsMiniCluster.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -56,6 +57,10 @@ class InsertIntoHdfsTest : public HiveConnectorTestBase {
   }
 
   void TearDown() override {
+    for (const auto& [_, filesystem] :
+         bytedance::bolt::filesystems::registeredFilesystems) {
+      filesystem->close();
+    }
     HiveConnectorTestBase::TearDown();
     miniCluster->stop();
   }

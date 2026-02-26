@@ -263,7 +263,7 @@ RowVectorPtr NestedLoopJoinProbe::getOutput() {
     }
 
     // Generate actual join output by processing probe and build matches, and
-    // probe mismaches (for left joins).
+    // probe mismatches (for left joins).
     output = generateOutput();
   }
   return output;
@@ -280,8 +280,8 @@ RowVectorPtr NestedLoopJoinProbe::generateOutput() {
   if (advanceProbe()) {
     finishProbeInput();
     if (numOutputRows_ == 0) {
-      // output_ can only be re-used across probe rows within the same input_.
-      // Here we have to abandon the emtpy non-null output_ before we advance to
+      // output_ can only be reused across probe rows within the same input_.
+      // Here we have to abandon the empty non-null output_ before we advance to
       // the next probe input.
       output_ = nullptr;
     }
@@ -406,7 +406,7 @@ bool NestedLoopJoinProbe::addToOutput() {
       // 2. If match is found, the match column is marked as `true`, and
       //    defaulted to false otherwise.
       // 3. Ensures that only one row is produced in the output, handles
-      // mis-matched
+      // miss-matched
       //    probe side rows after evaluating the filter.
       //
       // Returns a `RowVectorPtr` representing the output row. For left semi
@@ -702,7 +702,7 @@ void NestedLoopJoinProbe::finishProbeInput() {
   }
 
   // From now one we finished processing the probe side. Check now if this is a
-  // right or full outer join, and hence we may need to start emitting buid
+  // right or full outer join, and hence we may need to start emitting build
   // mismatch records.
   if (!needsBuildMismatch(joinType_) || isBuildSideEmpty()) {
     setState(ProbeOperatorState::kFinish);

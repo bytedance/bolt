@@ -249,7 +249,7 @@ VectorPtr CastExpr::applyArray(
   return result;
 }
 
-// Cast from unkown type to other types.
+// Cast from unknown type to other types.
 VectorPtr CastExpr::applyUnknown(
     const SelectivityVector& rows,
     const BaseVector& /*input*/,
@@ -281,7 +281,7 @@ VectorPtr CastExpr::applyRow(
   ErrorVectorPtr oldErrors;
   if (setNullInResultAtError()) {
     // We need to isolate errors that happen during the cast from previous
-    // errors since those translate to nulls, unlike exisiting errors.
+    // errors since those translate to nulls, unlike existing errors.
     context.swapErrors(oldErrors);
   }
 

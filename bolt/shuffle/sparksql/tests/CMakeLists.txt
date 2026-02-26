@@ -19,81 +19,112 @@ add_test(bolt_shuffle_spark_celeborn_test bolt_shuffle_spark_celeborn_test)
 target_link_libraries(
     bolt_shuffle_spark_celeborn_test
     PRIVATE
-        bolt_shuffle_spark_impl
-        bolt_exception
-        gflags::gflags
+        bolt_testutils
         glog::glog
         GTest::gtest
         GTest::gtest_main
 )
 
 add_executable(
-    bolt_shuffle_spark_matrix_tests
+    bolt_shuffle_spark_matrix_test
     ShuffleTestBase.cpp
     ShuffleMatrixTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_matrix_tests
+    bolt_shuffle_spark_matrix_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
+        bolt_testutils
         bolt_vector_fuzzer
-        bolt_temp_path
         GTest::gtest_main
         GTest::gmock
 )
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_matrix_tests
-    COMMAND bolt_shuffle_spark_matrix_tests
+    NAME bolt_shuffle_spark_matrix_test
+    COMMAND bolt_shuffle_spark_matrix_test
 )
 
 add_executable(
-    bolt_shuffle_spark_large_partition_tests
+    bolt_shuffle_spark_large_partition_test
     ShuffleTestBase.cpp
     ShuffleLargePartitionTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_large_partition_tests
+    bolt_shuffle_spark_large_partition_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
         bolt_vector_fuzzer
-        bolt_temp_path
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_large_partition_tests
-    COMMAND bolt_shuffle_spark_large_partition_tests
+    NAME bolt_shuffle_spark_large_partition_test
+    COMMAND bolt_shuffle_spark_large_partition_test
 )
 
 add_executable(
-    bolt_shuffle_spark_memory_tests
+    bolt_shuffle_spark_memory_test
     ShuffleTestBase.cpp
     ShuffleMemoryTest.cpp
 )
 
 target_link_libraries(
-    bolt_shuffle_spark_memory_tests
+    bolt_shuffle_spark_memory_test
     PRIVATE
         bolt_shuffle_spark_impl
-        bolt_exec_test_lib
-        bolt_vector_test_lib
         bolt_vector_fuzzer
+        bolt_testutils
         GTest::gtest_main
         GTest::gmock
 )
 
 # Add test
 add_test(
-    NAME bolt_shuffle_spark_memory_tests
-    COMMAND bolt_shuffle_spark_memory_tests
+    NAME bolt_shuffle_spark_memory_test
+    COMMAND bolt_shuffle_spark_memory_test
+)
+
+add_executable(
+    bolt_shuffle_codec_test
+    CodecTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_codec_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_codec_test
+    COMMAND bolt_shuffle_codec_test
+)
+
+add_executable(
+    bolt_shuffle_adaptive_zstd_codec_test
+    AdaptiveParallelZstdCodecTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_adaptive_zstd_codec_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_adaptive_zstd_codec_test
+    COMMAND bolt_shuffle_adaptive_zstd_codec_test
 )

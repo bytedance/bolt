@@ -25,11 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_hive_config OBJECT HiveConfig.cpp)
+bolt_add_library(bolt_hive_config OBJECT HiveConfig.cpp)
 
 target_link_libraries(bolt_hive_config bolt_exception)
 
-add_library(
+bolt_add_library(
   bolt_hive_connector
   FileHandle.cpp
   HiveConfig.cpp
@@ -69,18 +69,10 @@ endif()
 
 set(ENABLED_FILESYSTEMS "")
 
-if(BOLT_ENABLE_S3)
-  list(APPEND ENABLED_FILESYSTEMS "bolt_s3fs")
-endif()
-if(BOLT_ENABLE_GCS)
-  list(APPEND ENABLED_FILESYSTEMS "bolt_gcs")
-endif()
-if(BOLT_ENABLE_HDFS)
-  list(APPEND ENABLED_FILESYSTEMS "bolt_hdfs")
-endif()
-if(BOLT_ENABLE_ABFS)
-  list(APPEND ENABLED_FILESYSTEMS "bolt_abfs")
-endif()
+list(APPEND ENABLED_FILESYSTEMS "bolt_s3fs")
+list(APPEND ENABLED_FILESYSTEMS "bolt_gcs")
+list(APPEND ENABLED_FILESYSTEMS "bolt_hdfs")
+list(APPEND ENABLED_FILESYSTEMS "bolt_abfs")
 
 target_link_libraries(
   bolt_hive_connector
@@ -100,7 +92,7 @@ target_link_libraries(
          arrow::arrow
 )
 
-add_library(bolt_hive_partition_function HivePartitionFunction.cpp)
+bolt_add_library(bolt_hive_partition_function HivePartitionFunction.cpp)
 
 target_link_libraries(bolt_hive_partition_function bolt_core bolt_exec)
 
@@ -110,6 +102,6 @@ if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
-if(${BOLT_ENABLE_BENCHMARKS})
+if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)
 endif()

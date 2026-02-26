@@ -74,7 +74,7 @@ int main() {
     } else if (vec->encoding() == VectorEncoding::Simple::DICTIONARY) {
       ++numDict;
     } else {
-      std::cout << "Unxpected encoding!!!\n";
+      std::cout << "Unexpected encoding!!!\n";
       return 0;
     }
   }

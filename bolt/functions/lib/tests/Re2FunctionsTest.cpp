@@ -1086,7 +1086,7 @@ TEST_F(Re2FunctionsTest, tryException) {
   auto input = makeRowVector({stringVector, patternVector});
   auto oneGoodInput = makeRowVector({stringVector, oneGoodPatternVector});
 
-  // Assert we can handle trys safely for re2_extract.
+  // Assert we can handle tries safely for re2_extract.
   {
     auto result = evaluate("try(re2_extract(c0, c1))", input);
     assertEqualVectors(makeNullConstant(TypeKind::VARCHAR, 3), result);

@@ -33,13 +33,7 @@ add_executable(
 add_test(bolt_hdfs_file_test bolt_hdfs_file_test)
 target_link_libraries(
   bolt_hdfs_file_test
-  bolt_file
-  bolt_hdfs
-  bolt_core
-  bolt_exec_test_lib
-  bolt_hive_connector
-  bolt_dwio_common_exception
-  bolt_exec
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock

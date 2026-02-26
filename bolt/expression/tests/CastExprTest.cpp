@@ -443,7 +443,7 @@ TEST_F(CastExprTest, basics) {
        1.0,
        -2.0,
        0.0008547008547008547,
-       0.0009165902841429881}, // add 2 cases for scientifc notation
+       0.0009165902841429881}, // add 2 cases for scientific notation
       {"1.888",
        "2.5",
        "3.6",
@@ -1016,7 +1016,7 @@ TEST_F(CastExprTest, invalidDate) {
   testUnsupportedCast<double>(
       "date", {12.99}, "Cast from DOUBLE to DATE is not supported", DOUBLE());
 
-// Parsing ill-formated dates.
+// Parsing ill-formatted dates.
 #ifndef SPARK_COMPATIBLE
   testInvalidCast<std::string>(
       "date",
@@ -2432,7 +2432,7 @@ TEST_F(CastExprTest, castStructOnError) {
 #ifndef SPARK_COMPATIBLE
 TEST_F(CastExprTest, castInTry) {
   // Test try(cast(array(varchar) as array(bigint))) whose input vector is
-  // wrapped in dictinary encoding. The row of ["2a"] should trigger an error
+  // wrapped in dictionary encoding. The row of ["2a"] should trigger an error
   // during casting and the try expression should turn this error into a null
   // at this row.
   auto input = makeRowVector({makeNullableArrayVector<StringView>(
@@ -3368,7 +3368,7 @@ TEST_F(CastExprTest, dictionaryEncodedNestedInput) {
   // produces a result VARCHAR vector of length 3. If the casting of the ROW
   // vector produces a result ROW<VARCHAR> vector of the length of all rows,
   // i.e., 6, the subsequent call to Expr::addNull() would throw due to the
-  // attempt of accessing the element VARCHAR vector at indices corresonding
+  // attempt of accessing the element VARCHAR vector at indices corresponding
   // to the non-existent ROW at indices 3--5.
   exec::registerVectorFunction(
       "add_dict",

@@ -164,7 +164,7 @@ class ColumnSelector {
   /**
    * Get request type and data type into
    * TODO (cao) - eventually these two mappings can be replaced by expression
-   * for tranformation/projection
+   * for transformation/projection
    */
   const std::shared_ptr<const bolt::Type>& getRequestType(
       const uint64_t node) const {

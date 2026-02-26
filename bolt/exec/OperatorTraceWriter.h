@@ -66,7 +66,7 @@ class OperatorTraceInputWriter {
 
   Operator* const traceOp_;
   const std::string traceDir_;
-  // TODO: make 'useLosslessTimestamp' configuerable.
+  // TODO: make 'useLosslessTimestamp' configurable.
   const serializer::presto::PrestoVectorSerde::PrestoOptions options_ = {
       true,
       common::CompressionKind::CompressionKind_ZSTD};

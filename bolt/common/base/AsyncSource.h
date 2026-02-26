@@ -70,8 +70,7 @@ class AsyncSource {
   // Makes an item if it is not already made. To be called on a background
   // executor.
   void prepare() {
-    common::testutil::TestValue::adjust(
-        "bytedance::bolt::AsyncSource::prepare", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::AsyncSource::prepare", this);
     std::function<std::unique_ptr<Item>()> make = nullptr;
     {
       std::lock_guard<std::mutex> l(mutex_);
@@ -125,8 +124,7 @@ class AsyncSource {
   // the item is preparing on the executor, waits for the item and otherwise
   // makes it on the caller thread.
   std::unique_ptr<Item> move() {
-    common::testutil::TestValue::adjust(
-        "bytedance::bolt::AsyncSource::move", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::AsyncSource::move", this);
     std::function<std::unique_ptr<Item>()> make = nullptr;
     ContinueFuture wait;
     {

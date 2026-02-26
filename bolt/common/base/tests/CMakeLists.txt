@@ -25,89 +25,45 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-if(${BOLT_ENABLE_METRICS})
-  add_executable(
-    bolt_base_test
-    AsyncSourceTest.cpp
-    BitUtilTest.cpp
-    BloomFilterTest.cpp
-    CoalesceIoTest.cpp
-    ConcurrentCounterTest.cpp
-    ExceptionTest.cpp
-    FsTest.cpp
-    RangeTest.cpp
-    RuntimeMetricsTest.cpp
-    ScopedLockTest.cpp
-    SemaphoreTest.cpp
-    SimdUtilTest.cpp
-    SpillConfigTest.cpp
-    SpillStatsTest.cpp
-    StatsReporterTest.cpp
-    StatusTest.cpp
-    SuccinctPrinterTest.cpp
-  )
-else()
-  add_executable(
-    bolt_base_test
-    AsyncSourceTest.cpp
-    BitUtilTest.cpp
-    BloomFilterTest.cpp
-    CoalesceIoTest.cpp
-    ConcurrentCounterTest.cpp
-    ExceptionTest.cpp
-    FsTest.cpp
-    RangeTest.cpp
-    RuntimeMetricsTest.cpp
-    ScopedLockTest.cpp
-    SemaphoreTest.cpp
-    SimdUtilTest.cpp
-    SpillConfigTest.cpp
-    SpillStatsTest.cpp
-    StatsReporterTest.cpp
-    StatusTest.cpp
-    SuccinctPrinterTest.cpp
-  )
-endif()
+
+add_executable(
+  bolt_base_test
+  AsyncSourceTest.cpp
+  BitUtilTest.cpp
+  BloomFilterTest.cpp
+  CoalesceIoTest.cpp
+  ConcurrentCounterTest.cpp
+  ExceptionTest.cpp
+  FsTest.cpp
+  RangeTest.cpp
+  RuntimeMetricsTest.cpp
+  ScopedLockTest.cpp
+  SemaphoreTest.cpp
+  SimdUtilTest.cpp
+  SpillConfigTest.cpp
+  SpillStatsTest.cpp
+  StatsReporterTest.cpp
+  StatusTest.cpp
+  SuccinctPrinterTest.cpp
+  IdMapTest.cpp
+)
 
 add_test(bolt_base_test bolt_base_test)
 
 target_link_libraries(
   bolt_base_test
-  PRIVATE bolt_common_base
-          bolt_time
-          bolt_status
-          bolt_exception
-          bolt_temp_path
-          bolt_type
-          Boost::filesystem
-          Boost::headers
-          Folly::folly
-          fmt::fmt
-          gflags::gflags
+  PRIVATE bolt_testutils
+          bolt_common_base
           GTest::gtest
           GTest::gmock
           GTest::gtest_main
 )
 
-add_executable(bolt_id_map_test IdMapTest.cpp)
-
-add_test(bolt_id_map_test bolt_id_map_test)
-
+add_executable(bolt_memcpy_meter MemcpyTest.cpp)
 target_link_libraries(
-  bolt_id_map_test
-  bolt_id_map
-  bolt_common_base
-  bolt_memory
-  Boost::headers
-  gflags::gflags
-  glog::glog
+  bolt_memcpy_meter PRIVATE
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   pthread
-)
-
-add_executable(bolt_memcpy_meter Memcpy.cpp)
-target_link_libraries(
-  bolt_memcpy_meter PRIVATE bolt_common_base bolt_exception bolt_time
-                            bolt_process Folly::folly gflags::gflags
 )

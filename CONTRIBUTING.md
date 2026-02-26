@@ -191,21 +191,96 @@ find bolt -name "*.h" -o -name "*.cpp" | xargs clang-format -i -style=file
 
 ### Static Analysis (clang-tidy)
 
-The repository provides a `.clang-tidy` configuration and a helper script at `scripts/run-clang-tidy.py`. It's best to run this after a successful build, as it relies on the compilation database in `-p=build/release/`.
+The repository provides a `.clang-tidy` configuration and a helper script at `scripts/run-clang-tidy.py`.
+
+#### Prerequisites
+It is best to run this after a successful build, as it relies on the compilation database (`compile_commands.json`). By default, the script looks for this database in `_build/Release` or the current directory.
 
 ```Bash
-# First, create a release build to generate the compile database
+# First, create a release build to generate the compile database (compile_commands.json)
 make release
 
-# Run clang-tidy on specific files (reports issues without fixing)
-python3 scripts/run-clang-tidy.py bolt/path/to/*.cpp bolt/other/path/*.h
-
-# Check only the lines changed in the last commit (more focused)
-python3 scripts/run-clang-tidy.py --commit HEAD~1 bolt/path/to/*.cpp
-
-# Automatically apply fixes (use with caution and review changes)
-python3 scripts/run-clang-tidy.py --fix bolt/path/to/*.cpp
 ```
+
+#### Basic Usage
+You can run the script on specific files, directories, or based on git changes.
+
+```Bash
+# 1. Run on specific files
+python3 scripts/run-clang-tidy.py src/path/to/file.cpp src/other/file.h
+
+# 2. Run recursively on a directory (New feature)
+# This will scan all .cpp/.h/.cc etc. files in 'src/'
+python3 scripts/run-clang-tidy.py -d src/
+
+# 3. Parallel execution (Recommended for speed)
+# Use '-j' to specify number of threads (defaults to half of CPU cores)
+python3 scripts/run-clang-tidy.py -d src/ -j 12
+```
+
+#### Advanced Filtering & Configuration
+The script includes default filters to skip tests and benchmarks. You can customize this behavior.
+
+```Bash
+# Exclude specific files using Regex
+# (Default excludes: tests/, benchmarks/, *Test.cpp, etc.)
+python3 scripts/run-clang-tidy.py -d src/ --exclude "legacy/|.*_generated.cpp"
+
+# Specify a custom build path if not in _build/Release
+python3 scripts/run-clang-tidy.py -d src/ -p build/debug/
+
+# Use a specific clang-tidy binary or config file
+python3 scripts/run-clang-tidy.py -d src/ \
+    --clang-tidy-binary /usr/bin/clang-tidy-14 \
+    --config-file .clang-tidy-strict
+```
+
+#### Focused Checks (Git Awareness)
+To save time, you can check only the files or lines changed in a specific commit.
+
+```Bash
+# Check only the lines changed in the last commit (Incremental check)
+python3 scripts/run-clang-tidy.py --commit HEAD~1 src/
+
+# Check files changed relative to the main branch
+python3 scripts/run-clang-tidy.py --commit origin/main src/
+```
+
+#### Auto-Fixing
+
+```Bash
+# Automatically apply fixes (Use with caution and review changes)
+python3 scripts/run-clang-tidy.py --fix src/
+```
+
+#### CI/CD & Automation Features
+
+**GitHub Actions Auto-Annotations** The script contains built-in logic to detect GitHub Actions environments. When running in a CI pipeline, it translates clang-tidy errors into GitHub Annotations, allowing them to show up directly in Pull Request diff views.
+
+**Standard Input (Stdin)** You can pipe file paths directly into the script using the `-` argument:
+
+```Bash
+find src/ -name "Legacy*.cpp" | python3 scripts/run-clang-tidy.py -
+```
+
+**Environment Variables**
+
+- `BUILD_`BUILD_PATH`: Overrides the default search path for `compile_commands.json` (alternative to `-p`).
+- `GITHUB_ACTIONS`: Triggers the CI-friendly output format (automatically set by GitHub).
+
+#### Script Options Reference
+
+| Option                                    | Description                                                  |
+| :---------------------------------------- | :----------------------------------------------------------- |
+| `FILES` or `-`                            | List of specific files. Use `-` to read file list from stdin. |
+| `-d`, `--directory`--directory`           | Recursively scan a directory for `.cpp`, `.h`, `.cc`, `.cxx`, etc. |
+| `-j`, `--jobs`                            | Number of parallel threads (Batch size is fixed at 5 files per job). |
+| `--commit`                                | **Incremental Mode**: Analyze only modified lines relative to a git ref. |
+| `--fix`--fix`                             | Apply suggested fixes to the files automatically.            |
+| `--exclude`                               | Regex to ignore files. Default includes tests, benchmarks, and test files. |
+| `-p`                                      | Path to build dir. Falls back to `BUILD_PATH` env var, then `_build/Release`, then `.`. |
+| `--clang-tidy-binary`--clang-tidy-binary` | Custom path to executable (e.g. `/usr/bin/clang-tidy-15`).   |
+| `--config-file`                           | Path to custom config. If omitted, uses standard `.clang-tidy` lookup (`--`--format-style=file`). |
 
 The script uses different check sets for test and main code. Please ensure your changes introduce no new warnings before committing.
 
@@ -232,7 +307,7 @@ make unittest_release_spark # Tests in Spark
 
 # run a specific test
 cd bolt/_build/Release/bolt/functions/sparksql/tests
-./velox_functions_spark_test --gtest_filter=SparkCastExprTest.stringToTimestamp
+./bolt_functions_spark_test --gtest_filter=SparkCastExprTest.stringToTimestamp
 ```
 
 ### Sanitizers (Crucial for C++)

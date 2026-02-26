@@ -488,19 +488,21 @@ void HashAggregation::maybeIncreasePartialAggregationMemoryUsage(
   if (shouldAbandon && adaptiveAdjustment_) {
     uint64_t totalRowCnt{0}, processedRowCnt{0};
     operatorCtx_->traverseOpToGetRowCount(totalRowCnt, processedRowCnt);
-    // left unprocessed rows * (input->output expansion/filter ratio) * size
-    auto calculatedSkippedSize = avgRowSize_ * (totalRowCnt - processedRowCnt) *
-        totalInputRows_ / processedRowCnt;
-    if (processedRowCnt && calculatedSkippedSize >= skippedDataSizeThreshold_) {
-      *const_cast<int32_t*>(&abandonPartialAggregationMinPct_) =
-          std::max((int32_t)abandonPartialAggregationMinPct_, 95);
-      *const_cast<int32_t*>(&abandonPartialAggregationMinFinalPct_) =
-          std::max((int32_t)abandonPartialAggregationMinFinalPct_, 90);
-      *const_cast<int32_t*>(&partialAggregationSpillMaxPct_) =
-          std::max((int32_t)partialAggregationSpillMaxPct_, 85);
-      adaptiveAdjustment_ = false;
-      // recalculate abandon or not
-      shouldAbandon = calShouldAbandon();
+    if (totalRowCnt > 0 && processedRowCnt > 0) {
+      // left unprocessed rows * (input->output expansion/filter ratio) * size
+      auto calculatedSkippedSize = avgRowSize_ *
+          (totalRowCnt - processedRowCnt) * totalInputRows_ / processedRowCnt;
+      if (calculatedSkippedSize >= skippedDataSizeThreshold_) {
+        *const_cast<int32_t*>(&abandonPartialAggregationMinPct_) =
+            std::max((int32_t)abandonPartialAggregationMinPct_, 95);
+        *const_cast<int32_t*>(&abandonPartialAggregationMinFinalPct_) =
+            std::max((int32_t)abandonPartialAggregationMinFinalPct_, 90);
+        *const_cast<int32_t*>(&partialAggregationSpillMaxPct_) =
+            std::max((int32_t)partialAggregationSpillMaxPct_, 85);
+        adaptiveAdjustment_ = false;
+        // recalculate abandon or not
+        shouldAbandon = calShouldAbandon();
+      }
     }
   }
   if (shouldAbandon) {
@@ -550,9 +552,9 @@ void triggerSegfault() {
 }
 
 RowVectorPtr HashAggregation::getOutput() {
-  if (bytedance::bolt::common::testutil::TestValue::enabled()) {
+  if (BOLT_TEST_VALUE_ENABLED()) {
     bool injectSegfault = false;
-    bytedance::bolt::common::testutil::TestValue::adjust(
+    BOLT_TEST_ADJUST(
         "bytedance::bolt::exec::HashAggregation::getOutput", &injectSegfault);
     if (injectSegfault) {
       triggerSegfault();
@@ -588,29 +590,7 @@ RowVectorPtr HashAggregation::getOutput() {
   }
 
   if (isDistinct_) {
-    auto currentOutput = getDistinctOutput();
-    // Accumulate the generated output using append()
-    if (currentOutput) {
-      if (!accumulatedOutput_) {
-        if (currentOutput->size() >= minOutputRows_) {
-          return currentOutput;
-        }
-        accumulatedOutput_ =
-            RowVector::createEmpty(currentOutput->type(), operatorCtx_->pool());
-      }
-      accumulatedOutput_->append(currentOutput.get());
-    }
-
-    // Handle accumulated output when no more input or memory pressure
-    if (accumulatedOutput_ &&
-        (finished_ || partialFull_ ||
-         accumulatedOutput_->size() >= minOutputRows_)) {
-      auto result = std::move(accumulatedOutput_);
-      accumulatedOutput_ = nullptr;
-      resetPartialOutputIfNeed();
-      return result;
-    }
-    return nullptr;
+    return getDistinctOutput();
   }
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();

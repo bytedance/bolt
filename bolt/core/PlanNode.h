@@ -538,13 +538,8 @@ class TableScanNode : public PlanNode {
     rowCount_ = rowCount;
   }
 
-  // Make sure call existRowCount before call getRowCount
-  uint64_t getRowCount() const {
-    return rowCount_.value();
-  }
-
-  bool existRowCount() const {
-    return rowCount_.has_value();
+  int64_t getRowCount() const {
+    return rowCount_;
   }
 
   folly::dynamic serialize() const override;
@@ -559,7 +554,7 @@ class TableScanNode : public PlanNode {
   const std::
       unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
           assignments_;
-  std::optional<uint64_t> rowCount_;
+  int64_t rowCount_ = 0;
 };
 
 using TableScanNodePtr = std::shared_ptr<const TableScanNode>;

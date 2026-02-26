@@ -577,7 +577,7 @@ struct VectorWriter<Generic<T, comparable, orderable>>
     }
     // No need to call finalizeNull here since commitNull will call it in
     // castType_ is true.
-    // otherwse there is nothing to do.
+    // otherwise there is nothing to do.
   }
 
   // User can only add values after casting a generic writer to an actual type.

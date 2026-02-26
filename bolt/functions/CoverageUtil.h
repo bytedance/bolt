@@ -35,7 +35,7 @@
 namespace bytedance::bolt::functions {
 
 // Print a rst format string which contains all Presto/Spark scalar
-// functions and aggragate functions. This function will read
+// functions and aggregate functions. This function will read
 // all_scalar_functions.txt and all_aggregate_functions.txt from certain path.
 // for Presto, path is bolt/functions/prestosql/coverage/data/
 // for Spark, path is bolt/functions/sparksql/coverage/data/

@@ -109,7 +109,7 @@ void resizeVector(RowVector& vector, vector_size_t size) {
 class SpillerTest : public exec::test::RowContainerTestBase {
  public:
   static void SetUpTestCase() {
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
     memory::MemoryManager::testingSetInstance({});
   }
 

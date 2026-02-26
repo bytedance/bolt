@@ -2073,7 +2073,7 @@ TEST_F(StringFunctionsTest, printfTest) {
       std::optional<double>(),
       std::optional<double>());
   testPrintf(
-      "All Type Test: false, A, 15000, 1.234000e+01, +27183.2401, 2300.41, 32, corret, 0x1.002p8",
+      "All Type Test: false, A, 15000, 1.234000e+01, +27183.2401, 2300.41, 32, correct, 0x1.002p8",
       "printf('All Type Test: %b, %c, %d, %e, %+10.4f, %g, %h, %s, %a', c0, c1, c2, c3, c4, c5, c6, c7, c8)",
       false,
       65,
@@ -2082,10 +2082,10 @@ TEST_F(StringFunctionsTest, printfTest) {
       27183.240051,
       2300.41,
       50,
-      "corret",
+      "correct",
       256.125);
   testPrintf(
-      "全类型unicode测试： false， A， 15000， 1.234000e+01， +27183.2401， 2300.41， 32， corret， 0x1.002p8",
+      "全类型unicode测试： false， A， 15000， 1.234000e+01， +27183.2401， 2300.41， 32， correct， 0x1.002p8",
       "printf('全类型unicode测试： %b， %c， %d， %e， %+10.4f， %g， %h， %s， %a', c0, c1, c2, c3, c4, c5, c6, c7, c8)",
       false,
       65,
@@ -2094,7 +2094,7 @@ TEST_F(StringFunctionsTest, printfTest) {
       27183.240051,
       2300.41,
       50,
-      "corret",
+      "correct",
       256.125);
   testPrintfOptional(
       "Color red, String Null: null, number1 123456, number2 00089, Integer Null: null, hex 0xff, float  3.14 Double Null: null",

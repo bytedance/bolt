@@ -26,14 +26,7 @@
 # --------------------------------------------------------------------------
 
 set(CMAKE_WINDOW_TEST_LINK_LIBRARIES
-    bolt_core
-    bolt_exec
-    bolt_exec_test_lib
-    bolt_functions_spark_window
-    bolt_functions_window_test_lib
-    bolt_vector_fuzzer
-    bolt_vector_test_lib
-    gflags::gflags
+    bolt_testutils
     GTest::gtest
     GTest::gtest_main
 )
@@ -48,4 +41,4 @@ add_test(
   WORKING_DIRECTORY .
 )
 
-target_link_libraries(bolt_spark_windows_test ${CMAKE_WINDOW_TEST_LINK_LIBRARIES})
+target_link_libraries(bolt_spark_windows_test PRIVATE ${CMAKE_WINDOW_TEST_LINK_LIBRARIES})

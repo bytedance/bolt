@@ -400,7 +400,7 @@ const ::substrait::Expression& BoltToSubstraitExprConvertor::toSubstraitExpr(
     return *substraitExpr;
   }
 
-  BOLT_UNSUPPORTED("Unsupport Expr '{}' in Substrait", expr->toString());
+  BOLT_UNSUPPORTED("Unsupported Expr '{}' in Substrait", expr->toString());
 }
 
 const ::substrait::Expression_Cast&

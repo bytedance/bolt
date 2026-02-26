@@ -210,7 +210,7 @@ TEST_F(SimpleFunctionCallNullFreeTest, deeplyNestedInputType) {
       [&](vector_size_t /* row */) { return 1; },
       [&](vector_size_t idx) { return idx; },
       [&](vector_size_t idx) { return idx; },
-      // Eigth map is NULL.
+      // Eighth map is NULL.
       [&](vector_size_t row) { return row == 7; },
       // Ninth map has a NULL value.
       [&](vector_size_t idx) { return idx == 7; });

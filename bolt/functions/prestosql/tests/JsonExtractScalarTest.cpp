@@ -221,7 +221,7 @@ TEST_F(JsonExtractScalarTest, overflow) {
 // before they clear the dependency.
 TEST_F(JsonExtractScalarTest, wildcardSelect) {
   GTEST_SKIP()
-      << "Skipping wildcard test since current behaviro is not correct and simdjson does not support it right now";
+      << "Skipping wildcard test since current behavior is not correct and simdjson does not support it right now";
 
   EXPECT_EQ(
       jsonExtractScalar(R"({"tags":{"a":["b"],"c":["d"]}})", "$.tags.c[*]"),

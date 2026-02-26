@@ -174,7 +174,7 @@ class PARQUET_EXPORT ColumnEncryptionProperties {
 
   bool is_utilized() {
     if (key_.empty())
-      return false; // can re-use column properties without encryption keys
+      return false; // can reuse column properties without encryption keys
     return utilized_;
   }
 

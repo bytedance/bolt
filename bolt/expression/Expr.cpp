@@ -657,7 +657,7 @@ class ExprExceptionContext {
   const Expr* FOLLY_NONNULL expr_;
 
   /// The input vector, i.e. EvalCtx::row(). In some cases, input columns are
-  /// re-used for results. Hence, 'vector' may no longer contain input data at
+  /// reused for results. Hence, 'vector' may no longer contain input data at
   /// the time of exception.
   const RowVector* FOLLY_NONNULL vector_;
 
@@ -1051,7 +1051,7 @@ Expr::PeelEncodingsResult Expr::peelEncodings(
         !peeledVectors[0]->memoDisabled();
   }
 
-  common::testutil::TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::Expr::peelEncodings::mayCache", &mayCache);
   return {newRows, finalRowsHolder.get(), mayCache};
 }
@@ -1323,7 +1323,7 @@ void computeIsAsciiForInputs(
     indices.push_back(index);
   }
 
-  // Compute string encoding for input vectors at indicies.
+  // Compute string encoding for input vectors at indices.
   for (auto& index : indices) {
     // Some arguments are optional and hence may not exist. And some
     // functions operate on dynamic types, but we only scan them when the
@@ -1430,7 +1430,7 @@ void Expr::evalAllImpl(
 
   if (hasJITed()) {
     // TODO:
-    // 1. evalate non-compilable sub exprs.
+    // 1. evaluate non-compilable sub exprs.
     // 2. Only support isDefaultNullBehavior() right now
     applyFunction(rows, context, result);
     return;

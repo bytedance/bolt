@@ -36,11 +36,8 @@ find_package(sonic-cpp CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_functions_json_test
-  bolt_functions_json
-  ${FOLLY_WITH_DEPENDENCIES}
-  ${FOLLY_BENCHMARK}
+  bolt_testutils
+  Folly::follybenchmark
   GTest::gtest
   GTest::gtest_main
-  gflags::gflags
-  glog::glog
 )

@@ -139,7 +139,7 @@ class SimpleFunctionAdapter : public VectorFunction {
       if constexpr (isVariadicType<arg_at<Is>>::value) {
         return true;
       } else if constexpr (!isArgFlatConstantFastPathEligible<Is>) {
-        return true; // We only want to check the encodings of primtive
+        return true; // We only want to check the encodings of primitive
                      // arguments if any exists.
       } else {
         return args[Is]->isFlatEncoding() || args[Is]->isConstantEncoding();
@@ -198,7 +198,7 @@ class SimpleFunctionAdapter : public VectorFunction {
 
       if constexpr (return_type_traits::isPrimitiveType) {
         // Avoid checking mutability during initialization.
-        // EnsureWritable gurantees uniqueness and mutability hence if
+        // EnsureWritable guarantees uniqueness and mutability hence if
         // valuesAsVoid()!= nullptr, then values is writable.
         resultWriter.init(*result, result->valuesAsVoid());
       } else {
@@ -289,7 +289,7 @@ class SimpleFunctionAdapter : public VectorFunction {
           typename VectorExec::template resolver<arg_at<POSITION>>::in_type;
       if (args[POSITION]->isFlatEncoding() && args[POSITION].use_count() == 1 &&
           args[POSITION]->asUnchecked<FlatVector<type>>()->isWritable()) {
-        // Re-use arg for result. We rely on the fact that for each row
+        // Reuse arg for result. We rely on the fact that for each row
         // we read arguments before computing and writing out the
         // result.
         return &args[POSITION];
@@ -314,7 +314,7 @@ class SimpleFunctionAdapter : public VectorFunction {
       EvalCtx& context,
       VectorPtr& result) const override {
     auto* reusableResult = &result;
-    // If result is null, check if one of the arguments can be re-used for
+    // If result is null, check if one of the arguments can be reused for
     // storing the result. This is possible if all the following conditions are
     // met:
     // - result type is a fixed-width type,
@@ -361,7 +361,7 @@ class SimpleFunctionAdapter : public VectorFunction {
     // null buffer during iteration).
 
     if constexpr (fastPathIteration) {
-      // If result is resuing one of the inputs we do not clear nulls, instead
+      // If result is reusing one of the inputs we do not clear nulls, instead
       // we do that after the the input is read. It is safe because reuse only
       // happens when the function does not generate null.
       if (!isResultReused) {
@@ -384,7 +384,7 @@ class SimpleFunctionAdapter : public VectorFunction {
     }
 
     if constexpr (fastPathIteration) {
-      // If result is resued and function is is_default_null_behavior then we do
+      // If result is reused and function is is_default_null_behavior then we do
       // not need to clear nulls.
       if constexpr (!FUNC::is_default_null_behavior) {
         if (isResultReused) {

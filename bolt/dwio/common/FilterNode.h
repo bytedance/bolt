@@ -96,7 +96,7 @@ struct FilterNode {
   bool match(const FilterNode& other) const {
     // no match if any is invalid
     if (!valid()) {
-      // even current is invlaid
+      // even current is invalid
       return false;
     }
 
@@ -118,7 +118,7 @@ struct FilterNode {
   bool match(const std::string_view& name_to_match_2) const {
     // no match if any is invalid
     if (!valid()) {
-      // even current is invlaid
+      // even current is invalid
       return false;
     }
 
@@ -265,7 +265,7 @@ class FilterType {
   }
 
   inline bolt::TypeKind getKind() const {
-    // always use request type when asking fro type kind
+    // always use request type when asking for type kind
     return requestType_->kind();
   }
 

@@ -200,7 +200,7 @@ class TaskCursorBase : public TaskCursor {
         try {
           fileSystem->mkdir(taskSpillDirectory_);
         } catch (...) {
-          LOG(ERROR) << "Faield to create task spill directory "
+          LOG(ERROR) << "Failed to create task spill directory "
                      << taskSpillDirectory_ << " base director "
                      << params.spillDirectory << " exists["
                      << std::filesystem::exists(taskSpillDirectory_) << "]";

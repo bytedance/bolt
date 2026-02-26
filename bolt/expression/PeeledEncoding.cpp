@@ -112,7 +112,7 @@ void PeeledEncoding::setDictionaryWrapping(
   wrapEncoding_ = VectorEncoding::Simple::DICTIONARY;
   baseSize_ = decoded.base()->size();
   if (isDictionaryOverFlat(firstWrapper)) {
-    // Re-use indices and nulls buffers.
+    // Reuse indices and nulls buffers.
     wrap_ = firstWrapper.wrapInfo();
     wrapNulls_ = firstWrapper.nulls();
     return;

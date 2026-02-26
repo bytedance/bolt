@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_dwrf_test_utils E2EWriterTestUtil.cpp)
+bolt_add_library(bolt_dwrf_test_utils E2EWriterTestUtil.cpp)
 
 target_link_libraries(
   bolt_dwrf_test_utils

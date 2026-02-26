@@ -47,13 +47,7 @@ add_test(bolt_functions_spark_aggregates_test bolt_functions_spark_aggregates_te
 
 target_link_libraries(
   bolt_functions_spark_aggregates_test
-  bolt_exec_test_lib
-  bolt_vector_test_lib
-  bolt_functions_aggregates_test_lib
-  bolt_functions_spark
-  bolt_functions_spark_aggregates
-  bolt_hive_connector
-  gflags::gflags
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

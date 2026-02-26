@@ -44,7 +44,7 @@ add_flex_bison_dependency(TypeParserScanner TypeParser)
 
 include_directories(${PROJECT_BINARY_DIR})
 include_directories(${FLEX_INCLUDE_DIRS})
-add_library(
+bolt_add_library(
   bolt_type_parser ${BISON_TypeParser_OUTPUTS} ${FLEX_TypeParserScanner_OUTPUTS} ParserUtil.cpp
 )
 target_link_libraries(bolt_type_parser bolt_common_base)

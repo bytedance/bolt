@@ -100,7 +100,7 @@ BinaryStreamReader::BinaryStreamReader(
       stripeIndex_{0},
       numStripes{folly::to<uint32_t>(reader->getFooter().stripesSize())} {
   DWIO_ENSURE(!reader->getFooter().hasEncryption(), "encryption not supported");
-  DWIO_ENSURE(!columnIds.empty(), "Atleast one column expected to be read");
+  DWIO_ENSURE(!columnIds.empty(), "At least one column expected to be read");
 }
 
 std::unique_ptr<BinaryStripeStreams> BinaryStreamReader::next() {

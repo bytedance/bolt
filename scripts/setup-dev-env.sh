@@ -141,14 +141,22 @@ function check_compiler() {
   return 1
 }
 
-function install_python_dep() {
+function runtime_conf_path() {
   local SHELL_CONFIG="$HOME/.bashrc"
   if [[ "$OS_TYPE" == "Darwin" && "$SHELL" == */zsh ]]; then
     SHELL_CONFIG="$HOME/.zshrc"
   elif [[ "$OS_TYPE" == "Darwin" ]]; then
     SHELL_CONFIG="$HOME/.bash_profile"
   fi
-  if [ -d ~/miniconda3 ]; then
+  echo "$SHELL_CONFIG"
+}
+
+function install_python_dep() {
+  local SHELL_CONFIG=$(runtime_conf_path)
+  local CONDA_INSTALL_DIR="$HOME/miniconda3"
+  if [ -d $CONDA_INSTALL_DIR ]; then
+    echo "Conda has been installed"
+  else
     echo "Installing conda"
     MINICONDA_URL_BASE="https://repo.anaconda.com/miniconda"
     MINICONDA_VERSION="py310_23.1.0-1"
@@ -163,12 +171,13 @@ function install_python_dep() {
     fi
 
     download_file "${MINICONDA_URL}" /tmp/miniconda.sh
-    chmod +x /tmp/miniconda.sh && /tmp/miniconda.sh -b -u -p ~/miniconda3 && rm -f /tmp/miniconda.sh
-    echo "export PATH=~/miniconda3/bin:\$PATH" >> "$SHELL_CONFIG"
+    chmod +x /tmp/miniconda.sh && /tmp/miniconda.sh -b -u -p $CONDA_INSTALL_DIR && rm -f /tmp/miniconda.sh
+    echo "export PATH=$CONDA_INSTALL_DIR/bin:\$PATH" >> "$SHELL_CONFIG"
+    export PATH="$CONDA_INSTALL_DIR/bin:$PATH"
   fi
   # shellcheck source=/dev/null
-  ~/miniconda3/bin/pip install --upgrade pip || true
-  ~/miniconda3/bin/pip install -r "${CUR_DIR}/../requirements.txt"
+  $CONDA_INSTALL_DIR/bin/pip install --upgrade pip || true
+  $CONDA_INSTALL_DIR/bin/pip install -r "${CUR_DIR}/../requirements.txt"
 }
 
 function check_conan() {
@@ -225,3 +234,5 @@ if [ -f "${install_bolt_deps_script}" ]; then
 else
   echo "⚠️  Warning: ${install_bolt_deps_script} not found, skipping."
 fi
+
+echo "💡💡💡 Please execute 'source $(runtime_conf_path)' to activate your env! 💡💡💡"

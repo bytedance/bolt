@@ -153,7 +153,7 @@ class TypedDistinctAggregations : public DistinctAggregations {
           groups.data(), groups.size(), &result->childAt(aggregate.output));
 
       // Release memory back to HashStringAllocator to allow next
-      // aggregate to re-use it.
+      // aggregate to reuse it.
       aggregate.function->destroy(groups);
 
       // Overwrite empty groups over the destructed groups to keep the container

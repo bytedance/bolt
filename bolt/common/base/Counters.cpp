@@ -316,9 +316,9 @@ void registerBoltMetrics() {
       kMetricArbitratorAbortedCount, bytedance::bolt::StatType::COUNT);
 
   // The number of times a memory arbitration request failed. This may occur
-  // either because the requester was terminated during the processing of its
+  // either because the requestor was terminated during the processing of its
   // request, the arbitration request would surpass the maximum allowed capacity
-  // for the requester, or the arbitration process couldn't release the
+  // for the requestor, or the arbitration process couldn't release the
   // requested amount of memory.
   DEFINE_METRIC(
       kMetricArbitratorFailuresCount, bytedance::bolt::StatType::COUNT);
@@ -511,7 +511,7 @@ void registerBoltMetrics() {
       99,
       100);
 
-  // The distribution of a root memory pool cappacity growth attempts through
+  // The distribution of a root memory pool capacity growth attempts through
   // memory arbitration in range of [0, 256] with 32 buckets. It is configured
   // to report the count at P50, P90, P99, and P100 percentiles.
   DEFINE_HISTOGRAM_METRIC(

@@ -53,7 +53,7 @@ bool isColumnNameRequiringEscaping(const std::string& name) {
 } // namespace
 namespace bytedance::bolt {
 
-// Static variable intialization is not thread safe for non
+// Static variable initialization is not thread safe for non
 // constant-initialization, but scoped static initialization is thread safe.
 const std::unordered_map<std::string, TypeKind>& getTypeStringMap() {
   static const std::unordered_map<std::string, TypeKind> kTypeStringMap{

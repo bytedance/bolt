@@ -156,7 +156,7 @@ TEST_F(EvalCtxTest, setErrors) {
     auto ex = std::static_pointer_cast<std::exception_ptr>(errors->valueAt(i));
     BOLT_ASSERT_THROW(std::rethrow_exception(*ex), "This is a test.");
 
-    // Verify that a single exception is re-used for all rows vs. each row
+    // Verify that a single exception is reused for all rows vs. each row
     // storing a copy.
     if (i == 0) {
       firstEx = *ex;

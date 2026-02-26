@@ -288,7 +288,7 @@ void printCoverageMap(
 }
 
 // A function name is a companion function's if the name is an existing
-// aggregation functio name followed by a specific suffixes.
+// aggregation function name followed by a specific suffixes.
 bool isCompanionFunctionName(
     const std::string& name,
     const std::unordered_map<std::string, exec::AggregateFunctionEntry>&

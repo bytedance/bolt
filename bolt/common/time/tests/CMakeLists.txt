@@ -30,8 +30,8 @@ include(GoogleTest)
 add_executable(bolt_time_test CpuWallTimerTest.cpp)
 
 target_link_libraries(
-  bolt_time_test PRIVATE bolt_time glog::glog GTest::gtest GTest::gtest_main
-                        bolt_process
+  bolt_time_test PRIVATE bolt_testutils
+                         GTest::gtest GTest::gtest_main
 )
 
 gtest_add_tests(bolt_time_test "" AUTO)

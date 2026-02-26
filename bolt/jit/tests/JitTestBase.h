@@ -55,7 +55,7 @@ struct Timestamp {
 };
 
 extern "C" {
-extern int StringViewCompareWrapper(char* l, char* r);
+extern int jit_StringViewCompareWrapper(char* l, char* r);
 } // ~ extern
 
 } // namespace bytedance::bolt::jit::test

@@ -25,9 +25,36 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-.PHONY: all cmake build clean debug release unit submodules
+# --- 1. Standard Lifecycle Targets ---
+# all: Default build; clean: Remove artifacts; help: Show usage; install: Install package
+.PHONY: all clean help system_info install
 
-# ---------- Conan variables defination starts ----------
+# --- 2. Development Tools & Setup ---
+# Includes code formatting, Conan dependency installation/build, and compilation DB generation
+.PHONY: clang-format-check conan_install conan_build _compile_db compile_db_all
+
+# --- 3. Conan Package Export ---
+# Export the built package to the local Conan cache
+.PHONY: export_base export_debug export_release
+
+# --- 4. Build Configurations & Variants ---
+# Covers Debug/Release, Spark compatibility, ASAN checks, and builds with test utilities
+.PHONY: debug release RelWithDebInfo debug-with-asan
+.PHONY: debug_spark release_spark
+.PHONY: release_with_test release_with_debug_info_with_test
+.PHONY: debug_with_test debug_with_test_spark debug_with_test_cov
+.PHONY: debug_spark_with_test release_spark_with_test
+
+# --- 5. Benchmark Build Targets ---
+.PHONY: benchmarks-basic-build benchmarks-build
+.PHONY: benchmarks-build-spark benchmarks-build-debug
+
+# --- 6. Test Execution & Coverage ---
+# Targets for running CTest and generating code coverage reports
+.PHONY: unittest unittest_debug unittest_release
+.PHONY: unittest_release_spark unittest_debug_spark unittest_coverage
+
+# ---------- Conan variables definition starts ----------
 # If built on SCM use date as version
 # $(shell date '+%Y.%m.%d.00')
 BUILD_VERSION ?= main
@@ -41,24 +68,10 @@ ENABLE_ASAN ?= False
 LDB_BUILD ?= False
 ENABLE_COLOR ?= True
 ENABLE_CRC ?= False
-ENABLE_EXCEPTION_TRACE ?= True
 ENABLE_PERF ?= False
 
-ARCH := $(shell uname -m)
-ifneq (,$(filter $(ARCH), aarch64 arm64))
-    ENABLE_EXCEPTION_TRACE = False
-    $(info ENABLE_EXCEPTION_TRACE is disabled on ARM platform)
-endif
-
-ifeq ($(LDB_BUILD), True)
-ENABLE_EXCEPTION_TRACE = False
-$(info Turn off ENABLE_EXCEPTION_TRACE when LDB_BUILD is ON)
-endif
-
 BUILD_BASE_DIR=_build
-BUILD_DIR=release
 BUILD_TYPE=Release
-BENCHMARKS_BASIC_DIR=$(BUILD_BASE_DIR)/$(BUILD_DIR)/bolt/benchmarks/basic/
 BENCHMARKS_DUMP_DIR=dumps
 TREAT_WARNINGS_AS_ERRORS ?= 0
 ENABLE_WALL ?= 1
@@ -70,7 +83,7 @@ PROFILE=default
 GLUTEN_BOLT_OPTIONS:=" -o *:spark_compatible=True "
 GLUTEN_CONAN_OPTIONS:=$(GLUTEN_BOLT_OPTIONS)
 
-# ---------- Conan variables defination ends ----------
+# ---------- Conan variables definition ends ----------
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
@@ -113,46 +126,12 @@ BOLT_BUILD_MINIMAL ?= "OFF"
 
 # Control whether to build unit tests. By default set to "ON"; set to
 # "OFF" to disable.
-BOLT_BUILD_TESTING ?= "ON"
-
-CMAKE_FLAGS := -DTREAT_WARNINGS_AS_ERRORS=${TREAT_WARNINGS_AS_ERRORS}
-CMAKE_FLAGS += -DENABLE_ALL_WARNINGS=${ENABLE_WALL}
-
-CMAKE_FLAGS += -DBOLT_BUILD_MINIMAL=${BOLT_BUILD_MINIMAL}
-CMAKE_FLAGS += -DBOLT_BUILD_TESTING=${BOLT_BUILD_TESTING}
-
-CMAKE_FLAGS += -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
-
-ifdef AWSSDK_ROOT_DIR
-CMAKE_FLAGS += -DAWSSDK_ROOT_DIR=$(AWSSDK_ROOT_DIR)
-endif
-
-ifdef GCSSDK_ROOT_DIR
-CMAKE_FLAGS += -DGCSSDK_ROOT_DIR=$(GCSSDK_ROOT_DIR)
-endif
-
-ifdef AZURESDK_ROOT_DIR
-CMAKE_FLAGS += -DAZURESDK_ROOT_DIR=$(AZURESDK_ROOT_DIR)
-endif
-
-ifdef BUILD_FOR_GLUTEN
-CMAKE_FLAGS += -DBOLT_ENABLE_SPARK_COMPATIBLE=ON
-endif
+BOLT_BUILD_TESTING ?= "OFF"
+BOLT_BUILD_BENCHMARKS ?= "OFF"
+BOLT_BUILD_BENCHMARKS_BASIC ?= "OFF"
+BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
 
 export GTEST_COLOR=1
-
-# Use Ninja if available. If Ninja is used, pass through parallelism control flags.
-USE_NINJA ?= 1
-ifeq ($(USE_NINJA), 1)
-ifneq ($(shell which ninja), )
-GENERATOR := -GNinja
-GENERATOR += -DMAX_LINK_JOBS=$(MAX_LINK_JOBS)
-GENERATOR += -DMAX_HIGH_MEM_JOBS=$(MAX_HIGH_MEM_JOBS)
-
-# Ninja makes compilers disable colored output by default.
-GENERATOR += -DBOLT_FORCE_COLORED_OUTPUT=ON
-endif
-endif
 
 OS:=$(shell uname -s)
 
@@ -213,7 +192,7 @@ all: 			#: Build the release version
 	$(MAKE) release
 
 clean:					#: Delete all build artifacts
-	rm -rf $(BUILD_BASE_DIR) && rm -rf CMakeUserPresets.json && rm -rf $(BENCHMARKS_BASIC_DIR)
+	rm -rf $(BUILD_BASE_DIR)/Rel* && rm -rf $(BUILD_BASE_DIR)/Debug* && rm -rf CMakeUserPresets.json
 
 # only used in CI
 clang-format-check:
@@ -223,7 +202,7 @@ clang-format-check:
 	if grep -q 'warning' log.txt; then false; fi
 	@rm -f files.txt log.txt
 
-conan_build:
+conan_install:
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \
 	fi; \
@@ -238,7 +217,6 @@ conan_build:
 	-o bolt/*:enable_color=${ENABLE_COLOR} \
 	-o bolt/*:enable_meta_sort=${ENABLE_META_SORT} \
 	-o bolt/*:enable_colocate=${ENABLE_COLOCATE} \
-	-o bolt/*:enable_exception_trace=${ENABLE_EXCEPTION_TRACE} \
 	-o bolt/*:ldb_build=${LDB_BUILD} \
 	-o bolt/*:enable_crc=${ENABLE_CRC} \
 	-pr ${PROFILE} -pr ../../scripts/conan/bolt.profile \
@@ -260,13 +238,44 @@ conan_build:
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	$${ALL_CONAN_OPTIONS} --build=missing && \
+	cd -
+
+conan_build: conan_install
+	cd _build/${BUILD_TYPE} && \
+	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
+	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
+	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
 	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	   --build=missing $${ALL_CONAN_OPTIONS} && \
 	cd -
+
+_compile_db: conan_install
+	cd _build/${BUILD_TYPE} && \
+	read ALL_CONAN_OPTIONS < conan.options && \
+	NUM_THREADS=$(NUM_THREADS) \
+	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
+	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	BOLT_CONAN_CONFIGURE_ONLY=1 \
+	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	   -s llvm-core/*:build_type=Release \
+	   -s "&:build_type=${BUILD_TYPE}" \
+	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	   --build=missing $${ALL_CONAN_OPTIONS} && \
+	cd - && \
+	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target generate_parquet_thrift
+
+compile_db_all:
+	$(MAKE) _compile_db \
+	BUILD_TYPE=Release \
+	BOLT_BUILD_TESTING="ON" \
+	BOLT_BUILD_BENCHMARKS="ON" \
+	ENABLE_S3="True" \
+	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 export_base:
 	cd _build/${BUILD_TYPE} && \
@@ -292,75 +301,65 @@ debug:      	#: Build with debugging symbols
 	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:spark_compatible=False"
 
 debug-with-asan:  #: Build the debug version with address sanitizer enabled
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:enable_test=True -o enable_asan=True"
-
-hdfs-debug-build:			#: Build the debug version with HDFS enabled
-	# TODO: Remove after hdfs memory bug is fixed and uncomment the next line
-	$(MAKE) debug EXTRA_CMAKE_FLAGS="-DBOLT_ENABLE_HDFS=ON"
-	# $(MAKE) debug EXTRA_CMAKE_FLAGS="-DBOLT_ENABLE_ADDRESS_SANITIZER=ON -DBOLT_ENABLE_HDFS=ON"
-
-arrow-vector-debug-build:			#: Build the debug version with HDFS enabled
-	$(MAKE) debug EXTRA_CMAKE_FLAGS="-DBOLT_ENABLE_ARROW_VECTORS=ON"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o enable_asan=True "
 
 release:  	#: Build the release version
 	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=" -o bolt/*:spark_compatible=False"
-
-arrow-bridge-build:      #: Build release version for arrow bridge with arrow enabled
-	$(MAKE) release EXTRA_CMAKE_FLAGS="-DBOLT_ENABLE_ARROW=ON -DBOLT_BUILD_TESTING=ON -DTREAT_WARNINGS_AS_ERRORS=OFF"
 
 RelWithDebInfo:
 	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo
 
 release_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=" -o bolt/*:enable_test=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 release_with_debug_info_with_test:
-	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo CONAN_OPTIONS=" -o bolt/*:enable_test=True"
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 debug_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:enable_test=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+
+debug_with_test_spark:
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 debug_with_test_cov:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:enable_test=True -o bolt/*:enable_coverage=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" BOLT_BUILD_TESTING_WITH_COVERAGE="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 debug_spark:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=$(GLUTEN_CONAN_OPTIONS)
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
 
 release_spark:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=$(GLUTEN_CONAN_OPTIONS)
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
 
 release_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=$(GLUTEN_CONAN_OPTIONS)" -o bolt/*:enable_test=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 debug_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=$(GLUTEN_CONAN_OPTIONS)" -o bolt/*:enable_test=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 benchmarks-basic-build:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=" -o bolt/*:build_benchmark=basic"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=" -o bolt/*:build_benchmark=on"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build-spark:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=$(GLUTEN_CONAN_OPTIONS)" -o bolt/*:build_benchmark=on"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
-benchmarks-build-debug:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:build_benchmark=on"
+benchmarks-build-relwithdebinfo:
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
-benchmarks-duckdb-build:
-	$(MAKE) release EXTRA_CMAKE_FLAGS="-DBOLT_BUILD_DUCKDB_BENCHMARK=ON"
-
-# skip all hdfs test
-# skip TimestampWithTimezone register and test
 unittest_debug: unittest
-unittest: debug_with_test			#: Build with debugging and run unit tests
+unittest: debug_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
-unittest_release: release_with_test			#: Build with debugging and run unit tests
+unittest_release: release_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
-unittest_release_spark: release_spark_with_test		#: Build with debugging and run unit tests
+unittest_release_spark: release_spark_with_test
 	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
+unittest_debug_spark: debug_spark_with_test
+	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
 
 unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/Debug && \
@@ -370,9 +369,6 @@ unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tes
 	lcov --add-tracefile coverage_base.info --add-tracefile coverage_test.info --output-file coverage.info && \
 	lcov --remove coverage.info '/usr/*' '*/.conan/data/*' '*/_build/*' '*/tests/*' '*/test/*' --output-file coverage_striped.info && \
 	genhtml --ignore-errors source coverage_striped.info --output-directory coverage
-
-hdfstest: hdfs-debug-build #: Build with debugging, hdfs enabled and run hdfs tests
-	ctest --test-dir $(BUILD_BASE_DIR)/Debug -j ${NUM_THREADS} --output-on-failure -R bolt_hdfs_file_test
 
 system_info:
 	@echo "----------------------------------------------------------------"

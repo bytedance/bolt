@@ -62,7 +62,7 @@ class FlatVector final : public SimpleVector<T> {
   // strings.
   static constexpr size_t kInitialStringSize =
       (32 * 1024) - sizeof(AlignedBuffer);
-  /// Maximum size of a string buffer to re-use (see
+  /// Maximum size of a string buffer to reuse (see
   /// BaseVector::prepareForReuse): 1MB.
   static constexpr size_t kMaxStringSizeForReuse =
       (1 << 20) - sizeof(AlignedBuffer);

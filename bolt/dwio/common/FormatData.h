@@ -143,7 +143,7 @@ class FormatData {
   /// column statistics and random access, returns the number of rows
   /// in such a group. This is the row group size for ORC and nullopt
   /// for Parquet, where row groups are physically separate runs of
-  /// arbitrary nunber of rows.
+  /// arbitrary number of rows.
   virtual std::optional<int64_t> rowsPerRowGroup() const {
     return std::nullopt;
   }

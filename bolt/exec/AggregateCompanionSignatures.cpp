@@ -278,7 +278,7 @@ TypeSignature CompanionSignatures::normalizeTypeImpl(
   if (renamedVariables.count(baseName)) {
     return TypeSignature{renamedVariables[baseName], {}};
   }
-  // Variales to be renamed in consistent manner.
+  // Variables to be renamed in consistent manner.
   if (allVariables.count(baseName)) {
     auto normalizedName = fmt::format("T{}", renamedVariables.size());
     renamedVariables[baseName] = normalizedName;

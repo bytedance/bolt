@@ -119,7 +119,7 @@ uint64_t SpillState::appendToPartition(
   BOLT_CHECK(
       isPartitionSpilled(partition), "Partition {} is not spilled", partition);
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::SpillState::appendToPartition", this);
 
   BOLT_CHECK_NOT_NULL(
@@ -167,7 +167,7 @@ uint64_t SpillState::appendToPartition(
   BOLT_CHECK(
       isPartitionSpilled(partition), "Partition {} is not spilled", partition);
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::SpillState::appendToPartition", this);
 
   BOLT_CHECK_NOT_NULL(

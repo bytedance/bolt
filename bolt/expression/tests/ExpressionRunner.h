@@ -47,7 +47,7 @@ class ExpressionRunner {
   ///        to feed to the expression.
   /// @param sql Comma-separated SQL expressions.
   /// @param complexConstantsPath The path to on-disk vector that stores complex
-  ///        subexpressions that aren't expressable in SQL (if any), used with
+  ///        subexpressions that aren't expressible in SQL (if any), used with
   ///        sql to construct the complete plan
   /// @param resultPath The path to the on-disk vector
   ///        that will be used as the result buffer to which the expression

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ci
-    image: localhost:5000/bolt-ci:20251217
+    image: localhost:5000/bolt-ci:20260114
     command: ["/bin/bash", "-c", "Bolt CI Image"]
   conan_server:
     build:

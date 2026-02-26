@@ -140,7 +140,7 @@ void register2() {
 // signature takes input parameters as pointers instead of const refs.
 //
 // Also, both call() and callNullabe() can be implemented returning a boolean
-// controling the nullability of the output result (true means not null).
+// controlling the nullability of the output result (true means not null).
 template <typename T>
 struct MyNullablePlusFunction {
   FOLLY_ALWAYS_INLINE bool
@@ -284,7 +284,7 @@ struct MyAsciiAwareFunction {
 // the inputs in the output, making the function zero-copy. Some compelling
 // examples are trim (ltrim and rtrim), substr, and split. One can do that by
 // setting the flag below, which specifies the index of the argument whose
-// strings are being re-used in the output. Valid output types are VARCHAR and
+// strings are being reused in the output. Valid output types are VARCHAR and
 // ARRAY<VARCHAR>.
 //
 // This example implements a simple split function that tokenizes the input

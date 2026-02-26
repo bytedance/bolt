@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_functions_aggregates
   AverageAggregateBase.cpp
   BitDaysOrAggregate.cpp
@@ -37,7 +37,7 @@ add_library(
 )
 
 target_link_libraries(
-  bolt_functions_aggregates bolt_exec bolt_presto_serializer ${FOLLY_WITH_DEPENDENCIES}
+  bolt_functions_aggregates bolt_exec bolt_presto_serializer Folly::folly
 )
 
 if(${BOLT_BUILD_TESTING})

@@ -31,10 +31,7 @@ add_test(bolt_fuzzer_connector_test bolt_fuzzer_connector_test)
 
 target_link_libraries(
   bolt_fuzzer_connector_test
-  bolt_fuzzer_connector
-  bolt_vector_test_lib
-  bolt_exec_test_lib
-  bolt_aggregates
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

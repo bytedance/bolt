@@ -85,7 +85,7 @@ bool AssignUniqueId::isFinished() {
 }
 
 void AssignUniqueId::generateIdColumn(vector_size_t size) {
-  // Re-use memory for the ID vector if possible.
+  // Reuse memory for the ID vector if possible.
   VectorPtr& result = results_[0];
   if (result && result.use_count() == 1) {
     BaseVector::prepareForReuse(result, size);

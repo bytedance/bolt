@@ -133,7 +133,7 @@ arrow::Status BoltShuffleWriterV2::splitExtremelyLargeBatch(
             << flatSize << ", " << maxBatchBytes << ", " << memLimit << "], "
             << ", current stored batches_ = " << numBatches
             << ", numSplits = " << numSplits
-            << ", splited numRows per batch = " << splitedBatchSize;
+            << ", split numRows per batch = " << splitedBatchSize;
   int32_t offset = 0;
   do {
     auto length = std::min(splitedBatchSize, numRows);
@@ -311,7 +311,7 @@ arrow::Status BoltShuffleWriterV2::tryEvict(int64_t memLimit) {
       shrinkBufferPoolMemory();
       ARROW_ASSIGN_OR_RAISE(auto ret, sequentialEvictAllPartitions());
       if (!ret && partitionWriter_->canSpill()) {
-        // all rows cached, payload cache not emtpy
+        // all rows cached, payload cache not empty
         RETURN_NOT_OK(partitionWriter_->evictPayLoadCache());
       }
       releaseBufferPoolMemory();
@@ -1161,7 +1161,7 @@ BoltShuffleWriterV2::assembleBuffersRowVectorMode(uint32_t partitionId) {
   allBuffers.push_back(
       std::make_shared<arrow::Buffer>(uncompressedBufferPtr, uncompressedSize));
 
-  // complextype buffer is seperately stored
+  // complextype buffer is separately stored
   if (hasComplexType_ && complexTypeData_[partitionId] != nullptr) {
     auto serializedSize = complexTypeData_[partitionId]->maxSerializedSize();
     ARROW_ASSIGN_OR_RAISE(

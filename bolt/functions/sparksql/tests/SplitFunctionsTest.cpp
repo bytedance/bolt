@@ -190,12 +190,12 @@ TEST_F(SplitTest, EmptyDelimeter) {
 }
 
 TEST_F(SplitTest, EmptyInput) {
-  testSplit({""}, "delimeter", {{{""}}});
+  testSplit({""}, "delimiter", {{{""}}});
 }
 TEST_F(SplitTest, DelimeterNotExists) {
   testSplit(
       {"", "a", "abc", "甲", "a甲乙丙"},
-      "delimeter",
+      "delimiter",
       {{{""}}, {{"a"}}, {{"abc"}}, {{"甲"}}, {{"a甲乙丙"}}});
 }
 

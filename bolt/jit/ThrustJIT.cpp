@@ -336,7 +336,7 @@ llvm::Expected<std::unique_ptr<ThrustJIT>> ThrustJIT::Create(
   }
 
   // Dump target machine CPU's features
-  // llvm::outs() << "feature stirng:" << jtmb->getFeatures().getString() <<
+  // llvm::outs() << "feature string:" << jtmb->getFeatures().getString() <<
   // "\n";
   auto dl = jtmb->getDefaultDataLayoutForTarget();
   if (!dl) {
@@ -437,7 +437,7 @@ const intptr_t CompiledModuleImpl::getFuncPtr(const std::string& fn) const {
 CompiledModuleImpl::~CompiledModuleImpl() {
   // We have to manually call ResourceTracker's remove()
   // Since, by default ResourceTracker will handle resource over to the default
-  // resource tracker. Even ResourceTracker is destory, the resource
+  // resource tracker. Even ResourceTracker is destroy, the resource
   // hold by it will not be released.
   if (rt && !rt->isDefunct()) {
     auto err = rt->remove();

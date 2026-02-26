@@ -32,9 +32,11 @@
 
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/hive/FileHandle.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/core/PlanNode.h"
+
 namespace bytedance::bolt::dwio::common {
 class DataSink;
 class DataSource;
@@ -99,11 +101,6 @@ class HiveConnector : public Connector {
 
 class HiveConnectorFactory : public ConnectorFactory {
  public:
-  static constexpr const char* FOLLY_NONNULL kHiveConnectorName = "hive";
-  static constexpr const char* FOLLY_NONNULL kHiveHadoop2ConnectorName =
-      "hive-hadoop2";
-  static constexpr const char* FOLLY_NONNULL kTosConnectorName = "tos";
-
   HiveConnectorFactory() : ConnectorFactory(kHiveConnectorName) {}
 
   explicit HiveConnectorFactory(const char* FOLLY_NONNULL connectorName)

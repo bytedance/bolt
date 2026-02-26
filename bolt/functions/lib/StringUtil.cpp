@@ -51,7 +51,7 @@ struct NormalizedArg {
 
 /**
  * concat_ws(delimiter, string1/array<string>1...stringN/array<string>N) →
- * varchar Returns the concatenation of string/array<string> seperated by
+ * varchar Returns the concatenation of string/array<string> separated by
  * delimiter.
  * */
 class ConcatWsFunction : public exec::VectorFunction {
@@ -78,16 +78,16 @@ class ConcatWsFunction : public exec::VectorFunction {
     for (auto i = 1; i < numArgs; ++i) {
       const auto& arg = inputArgs[i];
 
-      // we can't concat array without delimeter
+      // we can't concat array without delimiter
       if (arg.constantValue &&
-          (delimeter().isConstant || !arg.type->isArray())) {
+          (delimiter().isConstant || !arg.type->isArray())) {
         if (inputArgs[i].constantValue->isNullAt(0)) {
           continue;
         }
         std::ostringstream value;
         auto appendDelim = false;
         constantToString(value, inputArgs[i].constantValue, appendDelim);
-        if (delimeter().isConstant && !delimeter().isNull) {
+        if (delimiter().isConstant && !delimiter().isNull) {
           for (++i; i < inputArgs.size(); ++i) {
             if (!inputArgs[i].constantValue) {
               break;
@@ -159,14 +159,14 @@ class ConcatWsFunction : public exec::VectorFunction {
 
     rows.applyToSelected([&](int row) {
       StringView delim;
-      if (delimeter().isConstant) {
-        delim = StringView(delimeter().constantValue);
+      if (delimiter().isConstant) {
+        delim = StringView(delimiter().constantValue);
       } else {
-        if (delimeter().decoded->isNullAt(row)) {
+        if (delimiter().decoded->isNullAt(row)) {
           flatResult->setNull(row, true);
           return;
         }
-        delim = delimeter().decoded->valueAt<StringView>(row);
+        delim = delimiter().decoded->valueAt<StringView>(row);
       }
 
       auto result = InPlaceString(flatResult);
@@ -223,7 +223,7 @@ class ConcatWsFunction : public exec::VectorFunction {
       bool& appendDelim) {
     if (arg->typeKind() == TypeKind::VARCHAR) {
       if (appendDelim) {
-        value << delimeter().constantValue;
+        value << delimiter().constantValue;
       }
       value << arg->as<ConstantVector<StringView>>()->valueAt(0).str();
       appendDelim = true;
@@ -251,7 +251,7 @@ class ConcatWsFunction : public exec::VectorFunction {
       for (auto i = offset; i < offset + size; ++i) {
         if (!decodedElements.isNullAt(i)) {
           if (appendDelim) {
-            result << delimeter().constantValue.data();
+            result << delimiter().constantValue.data();
           }
           result << decodedElements.valueAt<StringView>(i);
           appendDelim = true;
@@ -268,7 +268,7 @@ class ConcatWsFunction : public exec::VectorFunction {
   // std::string constantDelim_;
   // StringView delimStringView_;
   std::vector<NormalizedArg> normalizedArgs_;
-  inline const NormalizedArg& delimeter() const {
+  inline const NormalizedArg& delimiter() const {
     return normalizedArgs_.at(0);
   }
 };

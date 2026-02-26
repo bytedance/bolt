@@ -323,7 +323,7 @@ TEST_F(VectorCompareTest, compareNullAsIndeterminateNullMap) {
   // Top level nulls.
   test("null", "{}", kEquality, kIndeterminate);
 
-  // If keys are different, values are not looked at. Note that keys cant be
+  // If keys are different, values are not looked at. Note that keys can't be
   // null or contain nested nulls in presto.
   test("{1: null, 2: null}", "{1: null, 3: null}", kEquality, kNeq);
   test("{1: null, 2: null}", "{1: null}", kEquality, kNeq);

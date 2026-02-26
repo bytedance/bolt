@@ -204,7 +204,7 @@ TEST_F(SparkCastExprTest, invalidDate) {
   testUnsupportedCast<double>(
       "date", {12.99}, "Cast from DOUBLE to DATE is not supported", DOUBLE());
 
-  // Parsing ill-formated dates.
+  // Parsing ill-formatted dates.
   testTryCast<std::string, int32_t>(
       "date", {"2012-Oct-23"}, {std::nullopt}, VARCHAR(), DATE());
   testTryCast<std::string, int32_t>(

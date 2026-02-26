@@ -157,7 +157,7 @@ std::string commitStrategyToString(CommitStrategy commitStrategy) {
       return "TASK_COMMIT";
     default:
       BOLT_UNREACHABLE(
-          "UNKOWN COMMIT STRATEGY: {}", static_cast<int>(commitStrategy));
+          "UNKNOWN COMMIT STRATEGY: {}", static_cast<int>(commitStrategy));
   }
 }
 
@@ -167,7 +167,7 @@ CommitStrategy stringToCommitStrategy(const std::string& strategy) {
   } else if (strategy == "TASK_COMMIT") {
     return CommitStrategy::kTaskCommit;
   } else {
-    BOLT_UNREACHABLE("UNKOWN COMMIT STRATEGY: {}", strategy);
+    BOLT_UNREACHABLE("UNKNOWN COMMIT STRATEGY: {}", strategy);
   }
 }
 

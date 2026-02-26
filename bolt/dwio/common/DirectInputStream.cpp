@@ -193,7 +193,7 @@ void DirectInputStream::loadPosition() {
           bufferedInput_->updatePreloadingBytes(-load->preloadBytes());
         }
         if (load->state() == cache::CoalescedLoad::State::kPlanned) {
-          if (isAsyncPreloadThread()) { // possiblely from preloading metaData
+          if (isAsyncPreloadThread()) { // possibly from preloading metaData
             throw std::runtime_error(fmt::format(
                 "{} preload {} failed",
                 folly::getCurrentThreadName().value(),

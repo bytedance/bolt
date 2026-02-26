@@ -920,8 +920,8 @@ class DynamicRowView {
       OptionalAccessor<Any>,
       GenericView>::type;
 
-  template <typename IndexT>
-  elem_n_t at(IndexT index) {
+  template <typename IndexType>
+  elem_n_t at(IndexType index) {
     if constexpr (returnsOptionalValues) {
       return elem_n_t{childReaders_[index].get(), offset_};
     } else {
@@ -1167,7 +1167,7 @@ class GenericView {
   VectorReader<B>* ensureReader() const {
     static_assert(
         !isGenericType<B>::value && !isVariadicType<B>::value,
-        "That does not make any sense! You cant cast to Generic or Variadic");
+        "That does not make any sense! You can't cast to Generic or Variadic");
 
     // This is an optimization to avoid checking dynamically for every row that
     // the user is always casting to the same type.

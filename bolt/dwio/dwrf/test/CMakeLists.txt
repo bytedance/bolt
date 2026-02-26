@@ -30,11 +30,13 @@ add_subdirectory(utils)
 # find_package(lzo CONFIG REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 
+
 set(TEST_LINK_LIBS
     bolt_dwio_common_test_utils
     bolt_dwio_dwrf_proto
     bolt_dwio_dwrf_reader
     bolt_dwio_dwrf_writer
+    bolt_testutils
     gflags::gflags
     GTest::gtest
     GTest::gtest_main
@@ -42,6 +44,8 @@ set(TEST_LINK_LIBS
     glog::glog
     ${FILESYSTEM}
 )
+
+include_directories("${CMAKE_BINARY_DIR}")
 
 add_executable(bolt_dwio_dwrf_buffered_output_stream_test TestBufferedOutputStream.cpp)
 add_test(bolt_dwio_dwrf_buffered_output_stream_test bolt_dwio_dwrf_buffered_output_stream_test)
@@ -362,7 +366,6 @@ target_link_libraries(
   bolt_dwrf_e2e_filter_test
   bolt_e2e_filter_test_base
   bolt_link_libs
-  bolt_test_util
   Folly::folly
   fmt::fmt
   lz4::lz4
@@ -453,7 +456,7 @@ target_link_libraries(
   Folly::folly
   fmt::fmt
   lz4::lz4
-  zstd::zstd
+  zstd::libzstd_static
   ZLIB::ZLIB
   ${TEST_LINK_LIBS}
 )
@@ -504,19 +507,16 @@ target_link_libraries(
 
 add_executable(bolt_dwrf_int_encoder_benchmark IntEncoderBenchmark.cpp)
 target_link_libraries(
-  bolt_dwrf_int_encoder_benchmark bolt_dwio_dwrf_common bolt_memory bolt_dwio_common_exception
-  Folly::folly ${FOLLY_BENCHMARK}
+  bolt_dwrf_int_encoder_benchmark
+  bolt_engine
+  ${FOLLY_BENCHMARK}
 )
 
 add_executable(bolt_dwrf_float_column_writer_benchmark FloatColumnWriterBenchmark.cpp)
 target_link_libraries(
   bolt_dwrf_float_column_writer_benchmark
-  bolt_vector
-  bolt_dwio_common_exception
-  bolt_dwio_dwrf_writer
-  Folly::folly
+  ${TEST_LINK_LIBS}
   ${FOLLY_BENCHMARK}
-  fmt::fmt
 )
 
 add_executable(bolt_dwio_cache_test CacheInputTest.cpp DirectBufferedInputTest.cpp)
@@ -525,13 +525,6 @@ add_test(bolt_dwio_cache_test bolt_dwio_cache_test)
 
 target_link_libraries(
   bolt_dwio_cache_test
-  bolt_common_io
-  bolt_link_libs
-  bolt_temp_path
-  Folly::folly
-  fmt::fmt
-  lz4::lz4
-  zstd::libzstd_static
-  ZLIB::ZLIB
   ${TEST_LINK_LIBS}
+  ${FOLLY_BENCHMARK}
 )

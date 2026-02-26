@@ -64,7 +64,7 @@ class QplJobHWPool {
   /// \brief Release QPL job by the jobId.
   void ReleaseJob(uint32_t jobId);
 
-  /// \brief Return if the QPL job is allocated sucessfully.
+  /// \brief Return if the QPL job is allocated successfully.
   static const bool& IsJobPoolReady() {
     return jobPoolReady;
   }

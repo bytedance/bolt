@@ -74,7 +74,7 @@ namespace bytedance::bolt {
 /// and is not managed by any memory pool. This means that the indices and nulls
 /// buffers either point directly to the corresponding buffers of the input
 /// vector which is decoded, or, are directly malloced from the system
-/// allocator. This allows objects of DecodedVector to be cached and re-used
+/// allocator. This allows objects of DecodedVector to be cached and reused
 /// when such operations need to be performed frequently. This saves time wasted
 /// on memory allocations (see LocalDecodedVector class).
 ///

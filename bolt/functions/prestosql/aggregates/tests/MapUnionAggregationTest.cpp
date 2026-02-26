@@ -358,7 +358,7 @@ TEST_F(MapUnionTest, unknownKeysAndValues) {
       /*config*/ {},
       /*testWithTableScan*/ false);
 
-  // map_union over non-emtpy map(unknown, T) is not allowed.
+  // map_union over non-empty map(unknown, T) is not allowed.
   data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 1}),
       // 3 map rows: {null, 100}, {null, 200}, {null, 300}.

@@ -30,7 +30,7 @@
 if(${BOLT_USE_ARROW_HDFS})
   find_package(Arrow CONFIG REQUIRED)
 
-  add_library(bolt_external_hdfs ArrowHdfsInternal.cpp)
+  bolt_add_library(bolt_external_hdfs ArrowHdfsInternal.cpp)
 
   target_link_libraries(bolt_external_hdfs arrow::arrow)
 endif()

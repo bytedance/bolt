@@ -28,7 +28,7 @@
 find_package(simdjson CONFIG REQUIRED)
 find_package(sonic-cpp CONFIG REQUIRED)
 
-add_library(
+bolt_add_library(
   bolt_functions_prestosql
   ArithmeticBasicFunctionsRegistration.cpp
   ArithmeticDecimalFunctionsRegistration.cpp

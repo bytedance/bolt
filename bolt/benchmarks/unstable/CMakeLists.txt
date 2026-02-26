@@ -26,18 +26,9 @@
 # --------------------------------------------------------------------------
 
 set(BOLT_BENCHMARK_DEPS
-    bolt_type
-    bolt_vector
     bolt_vector_fuzzer
-    bolt_expression
-    bolt_parse_parser
-    bolt_parse_expression
-    bolt_serialization
-    Folly::folly
+    bolt_testutils
     ${FOLLY_BENCHMARK}
-    ${DOUBLE_CONVERSION}
-    gflags::gflags
-    glog::glog
 )
 
 add_executable(bolt_memory_alloc_benchmark MemoryAllocationBenchmark.cpp)

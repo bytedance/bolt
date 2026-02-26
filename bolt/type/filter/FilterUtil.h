@@ -77,7 +77,7 @@ static inline bool applyFilter(TFilter& filter, T value) {
   } else if constexpr (std::is_same_v<T, StringView>) {
     return filter.testBytes(value.data(), value.size());
   } else if constexpr (std::is_same_v<T, bytedance::bolt::UnknownValue>) {
-    BOLT_UNSUPPORTED("Bad agrument type to filter with 'UnknownValue'");
+    BOLT_UNSUPPORTED("Bad argument type to filter with 'UnknownValue'");
   } else {
     static_assert(always_false_v<T>, "Bad argument type to filter");
   }

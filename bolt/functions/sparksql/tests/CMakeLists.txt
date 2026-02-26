@@ -100,12 +100,8 @@ add_test(
 
 target_link_libraries(
   bolt_functions_spark_test
-  bolt_functions_spark
-  bolt_functions_test_lib
-  bolt_exec_test_lib
-  ${FMT}
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
-  gflags::gflags
 )

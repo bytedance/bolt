@@ -26,12 +26,8 @@ add_test(
 
 target_link_libraries(
   bolt_functions_flink_test
-  bolt_functions_flink
-  bolt_functions_test_lib
-  bolt_exec_test_lib
-  ${FMT}
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
-  gflags::gflags
 )

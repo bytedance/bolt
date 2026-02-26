@@ -539,7 +539,7 @@ RowVectorPtr wrapChildren(
       rowVector->pool(), rowVector->type(), nullptr, size, newInputs);
 }
 
-// Return the level of nestin of `type`. Return 0 if `type` is primitive.
+// Return the level of nesting of `type`. Return 0 if `type` is primitive.
 uint32_t levelOfNesting(const TypePtr& type) {
   if (type->isPrimitiveType()) {
     return 0;
@@ -838,7 +838,7 @@ core::TypedExprPtr ExpressionFuzzer::generateArgConstant(const TypePtr& arg) {
 
 // Either generates a new column of the required type or if already generated
 // columns of the same type exist then there is a 30% chance that it will
-// re-use one of them.
+// reuse one of them.
 core::TypedExprPtr ExpressionFuzzer::generateArgColumn(const TypePtr& arg) {
   auto& listOfCandidateCols = state.typeToColumnNames_[arg->toString()];
   bool reuseColumn = options_.enableColumnReuse &&
@@ -1070,7 +1070,7 @@ ExpressionFuzzer::FuzzedExpressionData ExpressionFuzzer::fuzzExpression() {
 
 // Either generates a new expression of the required return type or if already
 // generated expressions of the same return type exist then there is a 30%
-// chance that it will re-use one of them.
+// chance that it will reuse one of them.
 core::TypedExprPtr ExpressionFuzzer::generateExpression(
     const TypePtr& returnType) {
   BOLT_CHECK_GT(state.remainingLevelOfNesting_, 0);

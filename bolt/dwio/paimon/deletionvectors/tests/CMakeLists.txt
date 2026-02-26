@@ -28,11 +28,7 @@ add_test(
 
 target_link_libraries(
   bolt_paimon_deletion_vector_reader_test
-  bolt_dwio_paimon_deletion_vector_reader
-  bolt_dwio_common_test_utils
-  bolt_hive_connector
-  bolt_link_libs
-  bolt_temp_path
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
 )

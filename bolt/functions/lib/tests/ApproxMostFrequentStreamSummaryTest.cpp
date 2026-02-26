@@ -165,7 +165,7 @@ TEST(ApproxMostFrequentStreamSummaryTest, serializeStringView) {
     }
   }
   EXPECT_NE(summary.topK(10), topK);
-  // Serialzation should keep deep copy of original strings.
+  // Serialization should keep deep copy of original strings.
   EXPECT_EQ(summary2.topK(10), topK);
 }
 

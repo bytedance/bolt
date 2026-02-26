@@ -139,7 +139,7 @@ class HashAggregation : public Operator {
   const volatile int32_t abandonPartialAggregationMinPct_;
 
   // Min unique rows pct for partial aggregation when memory usage reaches
-  // maximun. If more than this many rows are unique, the partial aggregation is
+  // maximum. If more than this many rows are unique, the partial aggregation is
   // not worthwhile.
   const volatile int32_t abandonPartialAggregationMinFinalPct_;
 
@@ -184,8 +184,6 @@ class HashAggregation : public Operator {
   // Possibly reusable output vector.
   RowVectorPtr output_;
 
-  // Accumulated Distinct Aggregation output
-  RowVectorPtr accumulatedOutput_;
   uint32_t minOutputRows_;
 
   // contains only one aggregate function - vid_split udaf

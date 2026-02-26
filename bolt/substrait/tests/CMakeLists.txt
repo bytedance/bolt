@@ -47,35 +47,9 @@ add_test(
 
 target_link_libraries(
   bolt_plan_conversion_test
-  bolt_substrait_plan_converter
-  bolt_functions_test_lib
-  bolt_exec
-  bolt_dwio_common
-  bolt_aggregates
-  bolt_functions_aggregates_test_lib
-  bolt_functions_lib
-  bolt_functions_prestosql
-  bolt_hive_connector
-  bolt_type
-  bolt_serialization
-  bolt_exec_test_lib
-  bolt_functions_json
-  bolt_vector
-  bolt_memory
-  bolt_dwio_common_exception
-  Boost::atomic
-  Boost::context
-  Boost::date_time
-  Boost::filesystem
-  Boost::program_options
-  Boost::thread
-  Boost::system
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  ${FOLLY_WITH_DEPENDENCIES}
-  gflags::gflags
-  glog::glog
-  fmt::fmt
   ${FILESYSTEM}
 )
 

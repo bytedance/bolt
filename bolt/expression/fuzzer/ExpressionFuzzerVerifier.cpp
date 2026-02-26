@@ -330,7 +330,7 @@ void ExpressionFuzzerVerifier::go() {
               << " (seed: " << currentSeed_ << ")";
 
     // Generate multiple expression trees and input data vectors. They can
-    // re-use columns and share sub-expressions if the appropriate flag is set.
+    // reuse columns and share sub-expressions if the appropriate flag is set.
     int numExpressionTrees = boost::random::uniform_int_distribution<int>(
         1, options_.maxExpressionTreesPerStep)(rng_);
     auto [expressions, inputType, selectionStats] =

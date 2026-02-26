@@ -192,7 +192,7 @@ void Writer::write(const VectorPtr& input) {
         estimatedInputMemoryBytes * numRowsToWrite / inputRowCount,
         numRowsToWrite);
 
-    TestValue::adjust("bytedance::bolt::dwrf::Writer::write", this);
+    BOLT_TEST_ADJUST("bytedance::bolt::dwrf::Writer::write", this);
 
     bool doFlush = shouldFlush(context, numRowsToWrite);
     if (doFlush) {
@@ -420,7 +420,7 @@ void Writer::flushStripe(bool close) {
     return;
   }
 
-  TestValue::adjust("bytedance::bolt::dwrf::Writer::flushStripe", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::dwrf::Writer::flushStripe", this);
 
   const auto& handler = context.getEncryptionHandler();
   EncodingManager encodingManager{handler};
@@ -577,7 +577,7 @@ void Writer::flushStripe(bool close) {
 }
 
 void Writer::flushInternal(bool close) {
-  TestValue::adjust("bytedance::bolt::dwrf::Writer::flushInternal", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::dwrf::Writer::flushInternal", this);
   auto exitGuard = folly::makeGuard([this]() { releaseMemory(); });
 
   auto& context = writerBase_->getContext();

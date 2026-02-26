@@ -256,7 +256,7 @@ class PercentileApproxAggregate : public exec::Aggregate {
         summary.serialize(buffer);
         StringView serialized = StringView(buffer, serializedByteSize);
         serializedSummary->setNoCopy(i, serialized);
-        // summary cannot be reseted, because of groups will be used after
+        // summary cannot be reset, because of groups will be used after
         // extractAccumulators in GroupingSet
       }
     }

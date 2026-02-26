@@ -251,7 +251,7 @@ class RowVector : public BaseVector {
 
   void validate(const VectorValidateOptions& options) const override;
 
-  /// Only calls BaseVector::resize and doesnt resize the children.
+  /// Only calls BaseVector::resize and doesn't resize the children.
   /// This function is present for backwards compatibility,
   /// until the few places that require it are migrated over.
   void unsafeResize(vector_size_t newSize, bool setNotNull = true);
@@ -262,7 +262,7 @@ class RowVector : public BaseVector {
   /// Note : If the child is null, then it will stay null after the resize.
   virtual void resize(vector_size_t newSize, bool setNotNull = true) override;
 
-  static bool isComposite(std::shared_ptr<RowVector>& input);
+  static bool isComposite(const std::shared_ptr<RowVector>& input);
 
  private:
   vector_size_t childSize() const {
@@ -523,7 +523,7 @@ class CompositeRowVector : public RowVector {
   // columns stored in columnar format
   std::unique_ptr<SelectivityVector> validChildren_;
 
-  // buffer that store row datas
+  // buffer that store row data
   std::unique_ptr<memory::RowBuffer> rowBuffer_;
 
   // map<row start index : buffer index rowBuffer_>

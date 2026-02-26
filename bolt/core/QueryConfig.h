@@ -659,7 +659,7 @@ class QueryConfig {
   static constexpr const char* kExceptionTraceLevel = "exception_trace_level";
 
   // enable to print exceptions whose prefix is in the white list, default
-  // "std::,folly::arrow::", each is a namespace of exceptioins.
+  // "std::,folly::arrow::", each is a namespace of exceptions.
   static constexpr const char* kExceptionTraceWhitelist =
       "exception_trace_whitelist";
 
@@ -1522,7 +1522,7 @@ class QueryConfig {
     return config::toDuration(get<std::string>(kColocateRpcTimeout, "30s"));
   }
 
-  // metrics used for abtesting splitted by comma, e.g., "metric1,metric2"
+  // metrics used for abtesting split by comma, e.g., "metric1,metric2"
   std::unordered_set<std::string> getAbtestMetrics() const {
     return config::splitToStrSet(get<std::string>(kAbtestMetrics, ""));
   }

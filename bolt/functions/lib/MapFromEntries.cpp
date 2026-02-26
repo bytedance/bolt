@@ -199,7 +199,7 @@ class MapFromEntriesFunction : public exec::VectorFunction {
           decodedRowVector->indices(),
           BaseVector::byteSize<vector_size_t>(decodedRowVector->size()));
       // Any null in the top row(X, Y) should be marked as null since its
-      // not guranteed to be addressable at X or Y.
+      // not guaranteed to be addressable at X or Y.
       for (auto i = 0; i < decodedRowVector->size(); i++) {
         if (decodedRowVector->isNullAt(i)) {
           bits::setNull(mutableNulls, i);

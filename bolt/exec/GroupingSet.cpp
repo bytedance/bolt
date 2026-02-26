@@ -246,7 +246,7 @@ void GroupingSet::addInputForActiveRows(
   }
   ensureInputFits(input);
 
-  TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::exec::GroupingSet::addInputForActiveRows", this);
 
   if (!bypassProbeHT_) { // probing time
@@ -759,7 +759,7 @@ bool GroupingSet::getOutput(
     int32_t maxOutputBytes,
     RowContainerIterator& iterator,
     RowVectorPtr& result) {
-  TestValue::adjust("bytedance::bolt::exec::GroupingSet::getOutput", this);
+  BOLT_TEST_ADJUST("bytedance::bolt::exec::GroupingSet::getOutput", this);
   NanosecondTimer timer(&stats_.aggOutputTimeNs);
   if (isGlobal_) {
     return getGlobalAggregationOutput(iterator, result);

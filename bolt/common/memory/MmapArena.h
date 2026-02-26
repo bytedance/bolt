@@ -79,7 +79,7 @@ class MmapArena {
   }
 
   /// Checks internal consistency of this MmapArena. Returns true if OK. May
-  /// return false if there are concurrent alocations and frees during the
+  /// return false if there are concurrent allocations and frees during the
   /// consistency check. This is a false positive but not dangerous. This is for
   /// test only
   bool checkConsistency() const;

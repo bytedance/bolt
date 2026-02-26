@@ -189,10 +189,10 @@ void MemoryOperator::freeSmallAllocation(SmallAllocation& allocation) {
 }
 
 void MemoryOperator::freeNonContiguousAllocation(
-    NonContiguousAllocation& alllocation) {
+    NonContiguousAllocation& allocation) {
   {
     ClockTimer cpuTimer(clockCount_);
-    pool_->freeNonContiguous(*alllocation.allocation);
+    pool_->freeNonContiguous(*allocation.allocation);
   }
   allocatedBytes_ -= allocationBytes_;
 }

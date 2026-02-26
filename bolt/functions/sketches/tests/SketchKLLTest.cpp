@@ -30,18 +30,21 @@ TEST_F(SketchKLLTests, example) {
   {
     std::default_random_engine generator(
         std::chrono::system_clock::now().time_since_epoch().count());
-    std::normal_distribution<float> nd(0, 1); // mean=0, stddev=1
+    std::normal_distribution<float> normalDistribution(
+        0, 1); // mean=0, stddev=1
 
     datasketches::kll_sketch<float> sketch1; // default k=200
     for (int i = 0; i < 10000; i++) {
-      sketch1.update(nd(generator)); // mean=0, stddev=1
+      sketch1.update(normalDistribution(generator)); // mean=0, stddev=1
     }
     std::ofstream os1("kll_sketch_float1.bin");
     sketch1.serialize(os1);
 
     datasketches::kll_sketch<float> sketch2; // default k=200
     for (int i = 0; i < 10000; i++) {
-      sketch2.update(nd(generator) + 1); // shift the mean for the second sketch
+      sketch2.update(
+          normalDistribution(generator) +
+          1); // shift the mean for the second sketch
     }
     std::ofstream os2("kll_sketch_float2.bin");
     sketch2.serialize(os2);

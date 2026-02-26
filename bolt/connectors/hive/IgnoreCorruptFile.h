@@ -105,10 +105,10 @@ class IgnoreCorruptFileHelper {
       return;
     }
     exceptionKeyWords.clear();
-    const char delimeter = exceptionStr.back();
+    const char delimiter = exceptionStr.back();
     exceptionStr.pop_back();
-    folly::split(delimeter, exceptionStr, exceptionKeyWords);
-    LOG(INFO) << "Split exception str by " << (char)delimeter
+    folly::split(delimiter, exceptionStr, exceptionKeyWords);
+    LOG(INFO) << "Split exception str by " << (char)delimiter
               << ", and split result is: "
               << fmt::format("{}", fmt::join(exceptionKeyWords, ", "));
   }

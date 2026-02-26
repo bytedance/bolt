@@ -43,7 +43,7 @@ class FunctionCallToSpecialForm {
   /// arguments, e.g. Try.
   virtual TypePtr resolveType(const std::vector<TypePtr>& argTypes) = 0;
 
-  /// Given the output Type, the child expresssions, and whether or not to track
+  /// Given the output Type, the child expressions, and whether or not to track
   /// CPU usage, returns the SpecialForm.
   virtual ExprPtr constructSpecialForm(
       const TypePtr& type,

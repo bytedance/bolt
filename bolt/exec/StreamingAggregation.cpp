@@ -325,7 +325,7 @@ RowVectorPtr StreamingAggregation::getOutput() {
     output = createOutput(outputBatchSize_);
 
     // Rotate the entries in the groups_ vector to move the remaining groups to
-    // the beginning and place re-usable groups at the end.
+    // the beginning and place reusable groups at the end.
     std::vector<char*> copy(groups_.size());
     std::copy(groups_.begin() + outputBatchSize_, groups_.end(), copy.begin());
     std::copy(

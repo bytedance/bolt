@@ -82,7 +82,7 @@ void serializeMany(
       if (nullCount.has_value()) {
         if (nullCount.value() == 0) {
           // all values is not null, just copy the values.
-          // to avoid cordump caused by memory align for 16 bytes type such as
+          // to avoid coredump caused by memory align for 16 bytes type such as
           // hugeint and decimal, we use int8_t to copy the values.
           const T* values = flatVector->rawValues() + offset;
           if constexpr (std::is_same_v<T, __int128>) {

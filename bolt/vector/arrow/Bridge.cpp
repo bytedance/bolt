@@ -608,7 +608,7 @@ struct BufferViewReleaser {
 };
 
 // Wraps a naked pointer using a Bolt buffer view, without copying it. Adding
-// a dummy releaser as the buffer lifetime is fully controled by the client of
+// a dummy releaser as the buffer lifetime is fully controlled by the client of
 // the API.
 BufferPtr wrapInBufferViewAsViewer(const void* buffer, size_t length) {
   static const BufferViewReleaser kViewerReleaser;
@@ -2164,7 +2164,7 @@ void exportToArrow(
     auto valuesChild = newArrowSchema();
     const auto& valueVector = vec->valueVector();
 
-    // Contants of complex types are stored in the `values` vector.
+    // Constants of complex types are stored in the `values` vector.
     if (valueVector != nullptr) {
       exportToArrow(valueVector, *valuesChild, options, {}, pool);
     } else {

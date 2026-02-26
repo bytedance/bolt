@@ -93,7 +93,7 @@ class TorchOperator : public bytedance::bolt::exec::Operator {
   // A thread will take one from the queue and start processing.
   std::deque<::bytedance::bolt::RowVectorPtr> tensorInputs_;
 
-  // The number inputs that are beeing processed.
+  // The number inputs that are being processed.
   // The queue of output done processing.
   using ResultOutput =
       std::variant<std::exception_ptr, ::bytedance::bolt::RowVectorPtr>;

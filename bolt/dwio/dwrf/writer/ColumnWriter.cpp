@@ -610,7 +610,7 @@ void IntegerColumnWriter<T>::populateDictionaryEncodingStreams() {
     }
 
     // lookupTable represents the data as signed, but each value needs to be
-    // interpretted by combining the corresponding offset in the indctionary
+    // interpreted by combining the corresponding offset in the indctionary
     // data. if inDictionary is true, lookupTable contains offset into
     // dictionary(unsigned) if inDictionary is false, lookupTable contains the
     // actual value(signed).

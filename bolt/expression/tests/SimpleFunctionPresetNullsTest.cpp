@@ -44,7 +44,7 @@
 // This file contains tests that ensure that simple function adapter properly
 // sets the nullity of the output when the input vector nullity is already set
 // to null for some indices. It was added after we discovered that simple
-// function adapter assumes results vector nullity to be intitially all not
+// function adapter assumes results vector nullity to be initially all not
 // null.
 namespace bytedance::bolt {
 using namespace bytedance::bolt::test;

@@ -322,7 +322,7 @@ T randDecimal(
     bool isLongDecimal) {
   BOLT_CHECK(
       isShortDecimal != isLongDecimal,
-      "Can only geneate either a short decimal or a long decimal.");
+      "Can only generate either a short decimal or a long decimal.");
 
   bool generateSpecialValues = rand<bool>(rng);
 
@@ -1267,7 +1267,7 @@ VectorPtr VectorFuzzer::normalizeMapKeys(
       vector_size_t idx = rawOffsets[i] + j;
       uint64_t hash = keys->hashValueAt(idx);
 
-      // If we find the same hash (either same key value or hash colision), we
+      // If we find the same hash (either same key value or hash collision), we
       // cut it short by reducing this element's map size. This should not
       // happen frequently.
       auto it = set.find(hash);

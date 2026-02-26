@@ -201,7 +201,7 @@ void SortBuffer::noMoreInput() {
     finishSpill();
   }
 
-  // Releases the unused memory reservation after procesing input.
+  // Releases the unused memory reservation after processing input.
   pool_->release();
 }
 

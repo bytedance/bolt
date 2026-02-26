@@ -352,7 +352,7 @@ class AggregateWindowFunction : public exec::WindowFunction {
       // This is a very naive algorithm.
       // It evaluates the entire aggregation for each row by iterating over
       // input rows from frameStart to frameEnd in the SelectivityVector.
-      // TODO : Try to re-use previous computations by advancing and retracting
+      // TODO : Try to reuse previous computations by advancing and retracting
       // the aggregation based on the frame changes with each row. This would
       // require adding new APIs to the Aggregate framework.
       resetAggregateGroup();

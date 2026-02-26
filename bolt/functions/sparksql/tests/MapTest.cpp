@@ -74,10 +74,10 @@ class MapTest : public SparkFunctionBaseTest {
   }
 };
 
-static std::string POLICYS[3]{"EXCEPTION", "FIRST_WIN", "LAST_WIN"};
+static std::string POLICIES[3]{"EXCEPTION", "FIRST_WIN", "LAST_WIN"};
 
 TEST_F(MapTest, Basics) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -100,7 +100,7 @@ TEST_F(MapTest, Basics) {
 }
 
 TEST_F(MapTest, Nulls) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -125,7 +125,7 @@ TEST_F(MapTest, Nulls) {
 }
 
 TEST_F(MapTest, differentTypes) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -148,7 +148,7 @@ TEST_F(MapTest, differentTypes) {
 }
 
 TEST_F(MapTest, boolType) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -171,7 +171,7 @@ TEST_F(MapTest, boolType) {
 }
 
 TEST_F(MapTest, wide) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -206,7 +206,7 @@ TEST_F(MapTest, wide) {
 }
 
 TEST_F(MapTest, MultipleColumnInput) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     {
       // vector key
@@ -268,7 +268,7 @@ TEST_F(MapTest, MultipleColumnInput) {
 }
 
 TEST_F(MapTest, errorCases) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     auto inputVectorInt64 = makeNullableFlatVector<int64_t>({1, 2, 3});
     auto inputVectorDouble = makeNullableFlatVector<double>({4.0, 5.0, 6.0});
@@ -322,7 +322,7 @@ TEST_F(MapTest, errorCases) {
 }
 
 TEST_F(MapTest, String) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     auto inputVector1 = makeNullableFlatVector<StringView>({
         "looooooooooooooooooong_key1"_sv,
@@ -372,7 +372,7 @@ TEST_F(MapTest, String) {
 }
 
 TEST_F(MapTest, complexTypes) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     auto makeSingleMapVector = [&](const VectorPtr& keyVector,
                                    const VectorPtr& valueVector) {
@@ -449,7 +449,7 @@ TEST_F(MapTest, complexTypes) {
 }
 
 TEST_F(MapTest, resultSize) {
-  for (const auto& policy : POLICYS) {
+  for (const auto& policy : POLICIES) {
     setMapKeyDedupPolicy(policy);
     auto condition = makeFlatVector<int64_t>({1, 2, 3});
     auto keys = makeFlatVector<int64_t>({3, 2, 1});

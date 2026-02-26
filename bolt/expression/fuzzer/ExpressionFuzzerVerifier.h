@@ -107,7 +107,7 @@ class ExpressionFuzzerVerifier {
 
     // This sets an upper limit on the number of expression trees to generate
     // per step. These trees would be executed in the same ExprSet and can
-    // re-use already generated columns and subexpressions (if re-use is
+    // reuse already generated columns and subexpressions (if reuse is
     // enabled).
     int32_t maxExpressionTreesPerStep = 1;
 

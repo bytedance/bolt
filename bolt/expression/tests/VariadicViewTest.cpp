@@ -595,7 +595,7 @@ TEST_F(NullableVariadicViewTest, callNonAscii) {
       Varchar,
       Variadic<Varchar>>({"variadic_args_reader_with_ascii_func"});
 
-  // Some of the input arguments have non-ACII characters so call should be
+  // Some of the input arguments have non-ASCII characters so call should be
   // called.
   auto arg1 = makeFlatVector<StringView>({"à"_sv, "b"_sv, "c"_sv});
   auto arg2 = makeFlatVector<StringView>({"d"_sv, "ê"_sv, "f"_sv});

@@ -57,7 +57,7 @@ class ReaderFactory {
   virtual ~ReaderFactory() = default;
 
   /**
-   * Get the file format ths factory is designated to.
+   * Get the file format this factory is designated to.
    */
   FileFormat fileFormat() const {
     return format_;

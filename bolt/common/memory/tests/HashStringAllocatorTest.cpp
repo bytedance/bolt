@@ -39,12 +39,9 @@
 #include <stdexcept>
 namespace bytedance::bolt {
 namespace {
-
-using HSA = HashStringAllocator;
-
 struct Multipart {
-  HSA::Position start;
-  HSA::Position current;
+  HashStringAllocator::Position start;
+  HashStringAllocator::Position current;
   uint64_t size = 0;
   std::string reference;
 };
@@ -61,14 +58,14 @@ class HashStringAllocatorTest : public testing::Test {
     rng_.seed(1);
   }
 
-  HSA::Header* allocate(int32_t numBytes) {
+  HashStringAllocator::Header* allocate(int32_t numBytes) {
     auto result = allocator_->allocate(numBytes);
     EXPECT_GE(result->size(), numBytes);
     initializeContents(result);
     return result;
   }
 
-  void initializeContents(HSA::Header* header) {
+  void initializeContents(HashStringAllocator::Header* header) {
     auto sequence = ++sequence_;
     int32_t numWords = header->size() / sizeof(void*);
     void** ptr = reinterpret_cast<void**>(header->begin());
@@ -80,7 +77,7 @@ class HashStringAllocatorTest : public testing::Test {
 
   static void checkMultipart(const Multipart& data) {
     std::string storage;
-    auto contiguous = HSA::contiguousString(
+    auto contiguous = HashStringAllocator::contiguousString(
         StringView(data.start.position, data.reference.size()), storage);
     EXPECT_EQ(StringView(data.reference), contiguous);
   }
@@ -89,7 +86,7 @@ class HashStringAllocatorTest : public testing::Test {
     checkMultipart(data);
     data.reference.clear();
     allocator_->free(data.start.header);
-    data.start = HSA::Position::null();
+    data.start = HashStringAllocator::Position::null();
   }
 
   uint32_t rand32() {
@@ -151,7 +148,7 @@ TEST_F(HashStringAllocatorTest, headerToString) {
 
 TEST_F(HashStringAllocatorTest, allocate) {
   for (auto count = 0; count < 3; ++count) {
-    std::vector<HSA::Header*> headers;
+    std::vector<HashStringAllocator::Header*> headers;
     for (auto i = 0; i < 10'000; ++i) {
       headers.push_back(allocate((i % 10) * 10));
     }
@@ -191,7 +188,7 @@ TEST_F(HashStringAllocatorTest, finishWrite) {
   auto [firstStart, firstFinish] = allocator_->finishWrite(stream, 0);
 
   ASSERT_EQ(start.header, firstStart.header);
-  ASSERT_EQ(HSA::offset(firstStart.header, firstFinish), 3);
+  ASSERT_EQ(HashStringAllocator::offset(firstStart.header, firstFinish), 3);
 
   // Replace short string with a long string that uses two bytes short of
   // available space.
@@ -201,7 +198,9 @@ TEST_F(HashStringAllocatorTest, finishWrite) {
   auto [longStart, longFinish] = allocator_->finishWrite(stream, 0);
 
   ASSERT_EQ(start.header, longStart.header);
-  ASSERT_EQ(HSA::offset(longStart.header, longFinish), longString.size());
+  ASSERT_EQ(
+      HashStringAllocator::offset(longStart.header, longFinish),
+      longString.size());
 
   // Append another string after the long string.
   allocator_->extendWrite(longFinish, stream);
@@ -209,9 +208,12 @@ TEST_F(HashStringAllocatorTest, finishWrite) {
   auto [appendStart, appendFinish] = allocator_->finishWrite(stream, 0);
 
   ASSERT_NE(appendStart.header, longFinish.header);
-  ASSERT_EQ(HSA::offset(longStart.header, appendStart), longString.size());
   ASSERT_EQ(
-      HSA::offset(appendStart.header, appendFinish), appendStart.offset() + 3);
+      HashStringAllocator::offset(longStart.header, appendStart),
+      longString.size());
+  ASSERT_EQ(
+      HashStringAllocator::offset(appendStart.header, appendFinish),
+      appendStart.offset() + 3);
 
   // Replace last string.
   allocator_->extendWrite(appendStart, stream);
@@ -220,11 +222,11 @@ TEST_F(HashStringAllocatorTest, finishWrite) {
 
   ASSERT_EQ(appendStart.header, replaceStart.header);
   ASSERT_EQ(
-      HSA::offset(replaceStart.header, replaceFinish),
+      HashStringAllocator::offset(replaceStart.header, replaceFinish),
       replaceStart.offset() + 4);
 
   // Read back long and short strings.
-  auto inputStream = HSA::prepareRead(longStart.header);
+  auto inputStream = HashStringAllocator::prepareRead(longStart.header);
 
   std::string copy;
   copy.resize(longString.size());
@@ -246,7 +248,7 @@ TEST_F(HashStringAllocatorTest, finishWrite) {
     stream.appendStringView(largeString);
     allocator_->finishWrite(stream, 0);
 
-    auto inStream = HSA::prepareRead(start.header);
+    auto inStream = HashStringAllocator::prepareRead(start.header);
     std::string copy;
     copy.resize(largeString.size());
     inStream->readBytes(copy.data(), copy.size());
@@ -280,7 +282,8 @@ TEST_F(HashStringAllocatorTest, multipart) {
         data[i].start = allocator_->newWrite(stream, chars.size());
         data[i].current = data[i].start;
         EXPECT_EQ(
-            data[i].start.header, HSA::headerOf(stream.ranges()[0].buffer));
+            data[i].start.header,
+            HashStringAllocator::headerOf(stream.ranges()[0].buffer));
       }
       stream.appendStringView(chars);
       auto reserve = rand32() % 100;
@@ -339,37 +342,43 @@ TEST_F(HashStringAllocatorTest, rewrite) {
   ByteOutputStream stream(allocator_.get());
   auto header = allocator_->allocate(5);
   EXPECT_EQ(16, header->size()); // Rounds up to kMinAlloc.
-  HSA::Position current = HSA::Position::atOffset(header, 0);
+  HashStringAllocator::Position current =
+      HashStringAllocator::Position::atOffset(header, 0);
   for (auto i = 0; i < 10; ++i) {
     allocator_->extendWrite(current, stream);
     stream.appendOne(123456789012345LL);
     current = allocator_->finishWrite(stream, 0).second;
-    auto offset = HSA::offset(header, current);
+    auto offset = HashStringAllocator::offset(header, current);
     EXPECT_EQ((i + 1) * sizeof(int64_t), offset);
     // The allocated writable space from 'header' is at least the amount
     // written.
-    auto available = HSA::available(HSA::Position::atOffset(header, 0));
+    auto available = HashStringAllocator::available(
+        HashStringAllocator::Position::atOffset(header, 0));
     EXPECT_LE((i + 1) * sizeof(int64_t), available);
   }
-  EXPECT_EQ(-1, HSA::offset(header, HSA::Position::null()));
+  EXPECT_EQ(
+      -1,
+      HashStringAllocator::offset(
+          header, HashStringAllocator::Position::null()));
   for (auto repeat = 0; repeat < 2; ++repeat) {
-    auto position = HSA::seek(header, sizeof(int64_t));
+    auto position = HashStringAllocator::seek(header, sizeof(int64_t));
     // We write the words at index 1 and 2.
     allocator_->extendWrite(position, stream);
     stream.appendOne(12345LL);
     stream.appendOne(67890LL);
     position = allocator_->finishWrite(stream, 0).second;
-    EXPECT_EQ(3 * sizeof(int64_t), HSA::offset(header, position));
-    auto inStream = HSA::prepareRead(header);
+    EXPECT_EQ(
+        3 * sizeof(int64_t), HashStringAllocator::offset(header, position));
+    auto inStream = HashStringAllocator::prepareRead(header);
     EXPECT_EQ(123456789012345LL, inStream->read<int64_t>());
     EXPECT_EQ(12345LL, inStream->read<int64_t>());
     EXPECT_EQ(67890LL, inStream->read<int64_t>());
   }
   // The stream contains 3 int64_t's.
-  auto end = HSA::seek(header, 3 * sizeof(int64_t));
-  EXPECT_EQ(0, HSA::available(end));
+  auto end = HashStringAllocator::seek(header, 3 * sizeof(int64_t));
+  EXPECT_EQ(0, HashStringAllocator::available(end));
   allocator_->ensureAvailable(32, end);
-  EXPECT_EQ(32, HSA::available(end));
+  EXPECT_EQ(32, HashStringAllocator::available(end));
 }
 
 TEST_F(HashStringAllocatorTest, stlAllocator) {
@@ -501,8 +510,9 @@ TEST_F(HashStringAllocatorTest, stlAllocatorOverflow) {
 
 TEST_F(HashStringAllocatorTest, externalLeak) {
   constexpr int32_t kSize = HashStringAllocator ::kMaxAlloc * 10;
-  auto root = memory::memoryManager()->addRootPool("HSALeakTestRoot");
-  auto pool = root->addLeafChild("HSALeakLeaf");
+  auto root =
+      memory::memoryManager()->addRootPool("HashStringAllocatorLeakTestRoot");
+  auto pool = root->addLeafChild("HashStringAllocatorLeakLeaf");
   auto initialBytes = pool->currentBytes();
   auto allocator = std::make_unique<HashStringAllocator>(pool.get());
 

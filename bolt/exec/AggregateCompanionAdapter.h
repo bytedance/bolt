@@ -252,8 +252,8 @@ class CompanionFunctionsRegistrar {
 
  private:
   // Register a vector function {originalName}_extract_{suffixOfResultType}
-  // that takes input of the intermeidate type and returns the result type of
-  // the orignal agregate function.
+  // that takes input of the intermediate type and returns the result type of
+  // the original aggregate function.
   static bool registerExtractFunctionWithSuffix(
       const std::string& originalName,
       const std::vector<AggregateFunctionSignaturePtr>& signatures,

@@ -43,7 +43,8 @@ void MemoryConsumer::spill() {
 }
 
 std::ostream& operator<<(std::ostream& os, const MemoryConsumer& consumer) {
-  os << "MemoryConsumer(uuid=" << consumer.uuid_ << ')';
+  os << "MemoryConsumer(uuid=" << consumer.uuid_ << ", used=" << consumer.used_
+     << ')';
   return os;
 }
 

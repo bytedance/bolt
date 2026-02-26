@@ -33,12 +33,7 @@ add_test(bolt_dwio_dwrf_utils_test bolt_dwio_dwrf_utils_test)
 
 target_link_libraries(
   bolt_dwio_dwrf_utils_test
-  bolt_dwio_common
-  bolt_dwio_dwrf_utils
-  bolt_dwio_common_exception
-  bolt_type_fbhive
-  gflags::gflags
+  bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  glog::glog
 )

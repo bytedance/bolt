@@ -168,7 +168,7 @@ TEST_F(ProbabilityTest, betaCDF) {
   EXPECT_EQ(0.0, betaCDF(kDoubleMax, kDoubleMax, 0.3));
 
 #ifdef __APPLE__
-  // MacOS has a different andling of denormalized numbers and kDoubleMin edge
+  // MacOS has a different handling of denormalized numbers and kDoubleMin edge
   // cases
   EXPECT_EQ(0.0, betaCDF(kDoubleMin, kDoubleMin, 0.3));
 #else

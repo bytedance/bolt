@@ -66,7 +66,7 @@ class GcsTestbench : public testing::Environment {
       names = {env};
     }
     auto error = std::string(
-        "Coud not start GCS emulator."
+        "Could not start GCS emulator."
         " Used the following list of python interpreter names:");
     for (const auto& interpreter : names) {
       auto exe_path = bp::search_path(interpreter);

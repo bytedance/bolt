@@ -140,7 +140,7 @@ TEST_F(FunctionSignatureBuilderTest, typeParamTests) {
           .build(),
       "Failed to parse type signature [row(..., varchar)]: syntax error, unexpected COMMA");
 
-  // Type params cant have type params.
+  // Type params can't have type params.
   BOLT_ASSERT_THROW(
       FunctionSignatureBuilder()
           .typeVariable("T")

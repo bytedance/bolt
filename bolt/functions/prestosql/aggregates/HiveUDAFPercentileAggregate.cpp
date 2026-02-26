@@ -557,7 +557,7 @@ class HiveUDAFPercentileAggregate : public exec::Aggregate {
       return;
     }
     // checkIntermediateInputs always false?
-    // rowVec maybe null ptr when input is constant nulll
+    // rowVec maybe null ptr when input is constant null
     auto indices = decoded.indices();
     if constexpr (checkIntermediateInputs) {
       BOLT_USER_CHECK(rowVec);

@@ -31,8 +31,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "Type.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/type/Type.h"
 #include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
@@ -78,7 +78,7 @@ class VectorFuzzerTest : public testing::Test {
 
       // For each map element, check that keys are unique. Keep track of the
       // hashes found so far; in case duplicated hashes are found, call the
-      // equalAt() function to break hash colisions ties.
+      // equalAt() function to break hash collisions ties.
       for (size_t j = 0; j < mapVector->sizeAt(i); ++j) {
         vector_size_t idx = offset + j;
         uint64_t hash = mapKeys->hashValueAt(idx);
@@ -1032,7 +1032,7 @@ TEST_F(VectorFuzzerTest, complexTooLarge) {
   validateMaxSizes(vector, opts.complexElementsMaxSize);
 
   // If opts.containerVariableLength is false,  then throw if requested size
-  // cant be satisfied.
+  // can't be satisfied.
   opts.containerVariableLength = false;
   fuzzer.setOptions(opts);
 

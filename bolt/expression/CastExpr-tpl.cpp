@@ -256,7 +256,7 @@ tryIntegerToInteger(const From& from, To& to) {
   if (FOLLY_UNLIKELY(
           (from < std::numeric_limits<To>::min()) ||
           (from > std::numeric_limits<To>::max()))) {
-    // save wraped value and return overflow status, will handle it in caller
+    // save wrapped value and return overflow status, will handle it in caller
     // function
     to = static_cast<To>(from);
     return ConvertStatus::INTEGER_OVERFLOW;

@@ -286,7 +286,7 @@ TEST_F(FunctionResolutionTest, testGenericOutputTypeResolution) {
     EXPECT_TRUE(type->equivalent(*expected));
   };
 
-  // When input is flaot output is double.
+  // When input is float output is double.
   test(DOUBLE(), ARRAY(REAL()));
 
   // Output is array element type.
@@ -421,13 +421,13 @@ TEST_F(FunctionResolutionTest, constrainedGenerics) {
   BOLT_ASSERT_THROW(
       (registerFunction<TwoInputFunc, int64_t, Generic<T1>, Comparable<T1>>(
           {"generic"})),
-      "Cant assign different properties to the same variable __user_T1");
+      "Can't assign different properties to the same variable __user_T1");
   BOLT_ASSERT_THROW(
       (registerFunction<TwoInputFunc, int64_t, Orderable<T1>, Comparable<T1>>(
           {"generic"})),
-      "Cant assign different properties to the same variable __user_T1");
+      "Can't assign different properties to the same variable __user_T1");
 
-  // Expect two args to be the same and comprable.
+  // Expect two args to be the same and comparable.
   registerFunction<TwoInputFunc, int64_t, Comparable<T1>, Comparable<T1>>(
       {"same_comparable"});
 

@@ -164,7 +164,7 @@ void registerPercentileApproxAggregate(
             BOLT_USER_CHECK(
                 accuracyType == TypeKind::BIGINT ||
                     accuracyType == TypeKind::INTEGER,
-                "The type of the accuracy argument of {} must be BIGINT ot INTEGER",
+                "The type of the accuracy argument of {} must be BIGINT or INTEGER",
                 name);
           }
           BOLT_USER_CHECK(
@@ -229,7 +229,7 @@ void registerPercentileApproxAggregate(
                 hasAccuracy, resultType);
           default:
             BOLT_USER_FAIL(
-                "Unsupported input type for {} aggregation {}, isRawInput: {}, setp: {}, reslut type: {}",
+                "Unsupported input type for {} aggregation {}, isRawInput: {}, setp: {}, result type: {}",
                 name,
                 type->toString(),
                 isRawInput,

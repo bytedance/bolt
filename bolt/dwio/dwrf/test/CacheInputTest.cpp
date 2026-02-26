@@ -529,7 +529,7 @@ TEST_F(CacheTest, ssd) {
       4);
   // Expect some hits from SSD.
   EXPECT_LE(kSsdBytes / 8, ioStats_->ssdRead().sum());
-  // We expec some prefetch but the quantity is nondeterminstic
+  // We expect some prefetch but the quantity is nondeterminstic
   // because cases where the main thread reads the data ahead of
   // background reader does not count as prefetch even if prefetch was
   // issued. Also, the head of each file does not get prefetched
@@ -575,7 +575,7 @@ TEST_F(CacheTest, ssdThreads) {
   threads.reserve(kNumThreads);
 
   // We read 4 files on 8 threads. Threads 0 and 1 read file 0, 2 and 3 read
-  // file 1 etc. Each tread reads its file 4 times.
+  // file 1 etc. Each thread reads its file 4 times.
   for (int i = 0; i < kNumThreads; ++i) {
     stats.push_back(std::make_shared<io::IoStatistics>());
     threads.push_back(std::thread([i, this, threadStats = stats.back()]() {

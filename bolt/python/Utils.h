@@ -82,11 +82,11 @@ ReturnType pyTry(
   }
 }
 
-// Get object name/type  (`__name__') as string with gracefull error
+// Get object name/type  (`__name__') as string with graceful error
 // handling.
 std::string pyTypeStr(const pybind11::object& obj);
 
-// Get object type name (`__class__.__name__') as string with gracefull error
+// Get object type name (`__class__.__name__') as string with graceful error
 // handling.
 std::string pyInstanceTypeStr(const pybind11::object& obj);
 

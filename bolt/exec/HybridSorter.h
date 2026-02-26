@@ -113,7 +113,7 @@ class HybridSorter {
     // decay the threshold
     significantThreshold_ *= DECAY_FACTOR;
 
-    // if rounds later, the differece is still not so significant,
+    // if rounds later, the difference is still not so significant,
     // stop probing, just choose the better one
     if (significantThreshold_ <= 1.0) {
       algo_ = pdqEfficiency >= timEfficiency ? SortAlgo::kPdqSort

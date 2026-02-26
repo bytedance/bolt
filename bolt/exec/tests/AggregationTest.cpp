@@ -164,7 +164,7 @@ class AggregationTest : public OperatorTestBase,
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
     OperatorTestBase::SetUpTestCase();
-    TestValue::enable();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
   static void TearDownTestCase() {
@@ -398,7 +398,7 @@ class AggregationTest : public OperatorTestBase,
   }
 
   // Makes batches which reference rows in 'rows' via dictionary. The
-  // dictionary indices are given by 'order', wich has values with
+  // dictionary indices are given by 'order', which has values with
   // indices plus random bits so as to create randomly scattered,
   // sometimes repeated values.
   void makeBatches(
@@ -952,7 +952,7 @@ TEST_P(AggregationTest, partialDistinctWithAbandon) {
       // 1st batch will produce 100 distinct groups from 10 rows.
       makeRowVector(
           {makeFlatVector<int32_t>(100, [](auto row) { return row; })}),
-      // 2st batch will trigger abandon partial aggregation event with no new
+      // 2nd batch will trigger abandon partial aggregation event with no new
       // distinct values.
       makeRowVector({makeFlatVector<int32_t>(1, [](auto row) { return row; })}),
       // 3rd batch will not produce any new distinct values.
@@ -1000,7 +1000,7 @@ TEST_P(AggregationTest, toIntermediate) {
       // 1st batch will produce 100 distinct groups from 10 rows.
       makeRowVector(
           {makeFlatVector<int32_t>(100, [](auto row) { return row; })}),
-      // 2st batch will trigger abandon partial aggregation event with no new
+      // 2nd batch will trigger abandon partial aggregation event with no new
       // distinct values.
       makeRowVector({makeFlatVector<int32_t>(1, [](auto row) { return row; })}),
       // 3rd batch will not produce any new distinct values.
@@ -1064,7 +1064,7 @@ TEST_P(AggregationTest, toIntermediateWithFilter) {
   std::vector<VectorPtr> c0 = {
       // 1st batch will produce 100 distinct groups from 10 rows.
       makeFlatVector<int32_t>(100, [](auto row) { return row; }),
-      // 2st batch will trigger abandon partial aggregation event with no new
+      // 2nd batch will trigger abandon partial aggregation event with no new
       // distinct values.
       makeFlatVector<int32_t>(1, [](auto row) { return row; }),
       // 3rd batch will not produce any new distinct values.
@@ -1075,7 +1075,7 @@ TEST_P(AggregationTest, toIntermediateWithFilter) {
   std::vector<VectorPtr> c1 = {
       // 1st batch will produce 100 distinct groups from 10 rows.
       makeFlatVector<int32_t>(100, [](auto row) { return row; }),
-      // 2st batch will trigger abandon partial aggregation event with no new
+      // 2nd batch will trigger abandon partial aggregation event with no new
       // distinct values.
       makeFlatVector<int32_t>(1, [](auto row) { return row; }),
       // 3rd batch will not produce any new distinct values.
@@ -1086,7 +1086,7 @@ TEST_P(AggregationTest, toIntermediateWithFilter) {
   std::vector<VectorPtr> c2 = {
       // 1st batch will produce 100 distinct groups from 10 rows.
       makeFlatVector<bool>(100, [](auto row) { return true; }),
-      // 2st batch will trigger abandon partial aggregation event with no new
+      // 2nd batch will trigger abandon partial aggregation event with no new
       // distinct values.
       makeFlatVector<bool>(1, [](auto row) { return true; }),
       // 3rd batch will not produce any new distinct values.
@@ -2943,7 +2943,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringInputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic_int numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -3087,7 +3087,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
   folly::EventCount testWait;
   auto testWaitKey = testWait.prepareWait();
 
-  Operator* op;
+  Operator* op = nullptr;
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::Driver::runInternal::addInput",
       std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -3201,7 +3201,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringAllocation) {
     folly::EventCount testWait;
     auto testWaitKey = testWait.prepareWait();
 
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -3644,7 +3644,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimWithEmptyAggregationTable) {
             .planNode();
 
     std::atomic_bool injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal",
         std::function<void(Driver*)>(([&](Driver* driver) {
@@ -3774,7 +3774,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, abortDuringOutputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic_bool injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -3866,7 +3866,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, abortDuringInputgProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic_int numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {

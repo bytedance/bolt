@@ -31,13 +31,8 @@ add_test(bolt_buffer_test bolt_buffer_test)
 
 target_link_libraries(
   bolt_buffer_test
-  bolt_memory
-  bolt_buffer
-  bolt_test_util
-  GTest::gtest
-  GTest::gtest_main
-  GTest::gmock_main
-  glog::glog
-  gflags::gflags
-  pthread
+  PRIVATE bolt_testutils
+          GTest::gtest
+          GTest::gtest_main
+          GTest::gmock_main
 )

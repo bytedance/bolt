@@ -618,7 +618,7 @@ std::optional<RowVectorPtr> HiveDataSource::next(
   }
   BOLT_CHECK(split_ != nullptr, "No split to process. Call addSplit first.");
 
-  common::testutil::TestValue::adjust(
+  BOLT_TEST_ADJUST(
       "bytedance::bolt::connector::hive::HiveDataSource::next", this);
 
   if (splitReader_ && splitReader_->emptySplit()) {

@@ -111,7 +111,7 @@ struct ScanState {
   DictionaryValues dictionary;
 
   // If the format, like ORC/DWRF has a base dictionary completed by
-  // local delta dictionaries over the furst one, this represents the
+  // local delta dictionaries over the first one, this represents the
   // local values, e.g. row group dictionary in ORC. TBD: If there is
   // a pattern of dictionaries completed by more dictionaries in other
   // formats, this will be modeled as an vector of n DictionaryValues.
@@ -300,7 +300,7 @@ class SelectiveColumnReader {
   void setNulls(BufferPtr resultNulls);
 
   // Adds 'bias' to outputt rows between 'firstRow' and end. Used
-  // whenn combining data from multiple encoding runs, where the
+  // when combining data from multiple encoding runs, where the
   // output rows are first in terms of position in the encoding entry.
   void offsetOutputRows(int32_t firstRow, int32_t bias) {
     for (auto i = firstRow; i < outputRows_.size(); ++i) {

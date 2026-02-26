@@ -67,7 +67,7 @@ class BitConcatenation {
 
  private:
   // Allocates or reallocates '*buffer' to have space for 'numBits_ + newBits'
-  // bits. Retuns a pointer to the first word of 'buffer_'.
+  // bits. Returns a pointer to the first word of 'buffer_'.
   uint64_t* FOLLY_NONNULL ensureSpace(int32_t newBits);
 
   void setSize() {
