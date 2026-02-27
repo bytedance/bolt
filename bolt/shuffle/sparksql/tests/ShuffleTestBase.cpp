@@ -50,6 +50,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include <fmt/format.h>
@@ -556,7 +557,23 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     const std::vector<std::vector<RowVectorPtr>>& inputsPerMapper,
     const RowTypePtr& outputType,
     const ShuffleTestParam& param) {
-  auto memoryManagerHolder = TestMemoryManagerHolder::create(param.memoryLimit);
+  const bool useRealCeleborn =
+      param.writerType == PartitionWriterType::kCeleborn &&
+      readBoolEnv(kRealCelebornEnv);
+
+  // Scale memory limit by parallel read thread count so that concurrent
+  // readers do not exceed the pool capacity.
+  constexpr int kParallelReadThreshold = 32;
+  const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
+  const int maxThreads = hwThreads > 0 ? hwThreads : 16;
+  const int numReadThreads =
+      (param.numPartitions >= kParallelReadThreshold && useRealCeleborn)
+      ? std::min(maxThreads, param.numPartitions)
+      : 0;
+  const int64_t memoryScale = std::max(1, numReadThreads);
+  auto memoryManagerHolder =
+      TestMemoryManagerHolder::create(param.memoryLimit * memoryScale);
+
   ShuffleRunResult result;
 
   auto tempDir = exec::test::TempDirectoryPath::create();
@@ -565,9 +582,6 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
   std::shared_ptr<MockRssClient> mockRssClient;
   std::shared_ptr<celeborn::client::ShuffleClient> realCelebornClient;
-  const bool useRealCeleborn =
-      param.writerType == PartitionWriterType::kCeleborn &&
-      readBoolEnv(kRealCelebornEnv);
   if (param.writerType == PartitionWriterType::kCeleborn) {
     if (useRealCeleborn) {
       auto appId =
@@ -682,11 +696,11 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     return bytes > 0;
   };
 
-  for (int i = 0; i < param.numPartitions; ++i) {
+  auto readPartition = [&](int i) {
     std::shared_ptr<ReaderStreamIterator> streamIter;
     if (param.writerType == PartitionWriterType::kCeleborn) {
       if (!partitionHasOutput(i)) {
-        continue;
+        return;
       }
       if (useRealCeleborn) {
         streamIter = std::make_shared<CelebornReaderStreamIterator>(
@@ -700,7 +714,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       } else {
         auto it = mockRssClient->getData().find(i);
         if (it == mockRssClient->getData().end() || it->second.empty()) {
-          continue;
+          return;
         }
         streamIter = std::make_shared<MemoryReaderStreamIterator>(
             std::vector<std::vector<char>>{it->second});
@@ -723,7 +737,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
         segments.push_back({mapperDataFiles[m], offset, length});
       }
       if (segments.empty()) {
-        continue;
+        return;
       }
       streamIter =
           std::make_shared<LocalFileReaderStreamIterator>(std::move(segments));
@@ -762,8 +776,41 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       }
       readerCursor->current().reset();
     }
-  }
+  };
 
+  if (numReadThreads > 0) {
+    std::atomic<int> nextPartition{0};
+    std::vector<std::exception_ptr> errors(numReadThreads);
+    std::vector<std::thread> threads;
+    threads.reserve(numReadThreads);
+    for (int t = 0; t < numReadThreads; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          while (true) {
+            int i = nextPartition.fetch_add(1);
+            if (i >= param.numPartitions) {
+              break;
+            }
+            readPartition(i);
+          }
+        } catch (...) {
+          errors[t] = std::current_exception();
+        }
+      });
+    }
+    for (auto& th : threads) {
+      th.join();
+    }
+    for (auto& ep : errors) {
+      if (ep) {
+        std::rethrow_exception(ep);
+      }
+    }
+  } else {
+    for (int i = 0; i < param.numPartitions; ++i) {
+      readPartition(i);
+    }
+  }
   if (useRealCeleborn) {
     realCelebornClient->cleanupShuffle(celebornShuffleId);
   }

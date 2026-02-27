@@ -19,6 +19,10 @@ inside the development container.
 - `BOLT_CELEBORN_SOURCE_HOME` (default `$BOLT_CELEBORN_RUNTIME_DIR/celeborn-src`)
 - `BOLT_CELEBORN_GIT_REF` (default `81d89f3`, aligned with cpp-client recipe)
 - `BOLT_CELEBORN_HOME` (default `$BOLT_CELEBORN_RUNTIME_DIR/celeborn-bin`)
+- `BOLT_CELEBORN_PID_DIR` (default `$BOLT_CELEBORN_RUNTIME_DIR/state/pids`)
+- `BOLT_CELEBORN_NUM_WORKERS` (default `$(nproc)`, number of worker instances on localhost)
+- `BOLT_CELEBORN_TEST_PATTERNS` (optional comma-separated ctest patterns)
+- `BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS` (default `7200`)
 
 `run_e2e.sh` sets `BOLT_CELEBORN_E2E=1` and `BOLT_SHUFFLE_TEST_REAL_CELEBORN=1` automatically.
 Without `build_dir`, it defaults to `_build/<build-type>`.

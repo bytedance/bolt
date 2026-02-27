@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
+#
+# Start a local Celeborn cluster, run shuffle e2e tests, then clean up.
+#
+# Usage: run_e2e.sh [--build-type Debug|Release] [build_dir]
+#
+# Environment variables (all optional):
+#   BOLT_CELEBORN_RUNTIME_DIR          - root for all runtime state (default: /tmp/bolt-celeborn-runtime-$USER)
+#   BOLT_CELEBORN_HOME                 - extracted Celeborn binary dir
+#   BOLT_CELEBORN_SOURCE_HOME          - Celeborn git source dir
+#   BOLT_CELEBORN_GIT_REF              - git ref to build (default: 81d89f3)
+#   BOLT_CELEBORN_MASTER_HOST/PORT     - master bind address (default: 127.0.0.1:19097)
+#   BOLT_CELEBORN_NUM_WORKERS          - number of worker instances (default: $(nproc))
+#   BOLT_CELEBORN_LM_HELPER_JAR_PATH  - override path to Celeborn spark client jar
+#   BOLT_CELEBORN_TEST_PATTERNS        - comma-separated ctest -R patterns
+#   BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS - per-test timeout (default: 7200)
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CELEBORN_TEST_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
@@ -10,411 +29,355 @@ CELEBORN_HOME=${BOLT_CELEBORN_HOME:-"${RUNTIME_DIR}/celeborn-bin"}
 CELEBORN_SOURCE_HOME=${BOLT_CELEBORN_SOURCE_HOME:-"${RUNTIME_DIR}/celeborn-src"}
 CELEBORN_GIT_REPO=${BOLT_CELEBORN_GIT_REPO:-"https://github.com/apache/celeborn.git"}
 CELEBORN_GIT_REF=${BOLT_CELEBORN_GIT_REF:-"81d89f3"}
-CELEBORN_ARCHIVE_REF_FILE="${CELEBORN_SOURCE_HOME}/.bolt_celeborn_archive_ref"
-if command -v java > /dev/null 2>&1; then
-  JAVA_MAJOR_VERSION=$(java -version 2>&1)
-else
-  JAVA_MAJOR_VERSION=""
-fi
-if [[ "${JAVA_MAJOR_VERSION}" =~ version[[:space:]]\"([0-9]+) ]]; then
-  JAVA_MAJOR_VERSION="${BASH_REMATCH[1]}"
-else
-  JAVA_MAJOR_VERSION="21"
-fi
-CELEBORN_BUILD_ARGS="-DskipTests -Pspark-3.5 -Pjdk-${JAVA_MAJOR_VERSION}"
-LM_HELPER_JAR_PATH=""
 
 MASTER_HOST=${BOLT_CELEBORN_MASTER_HOST:-"127.0.0.1"}
 MASTER_PORT=${BOLT_CELEBORN_MASTER_PORT:-19097}
-WORKER_RPC_PORT=${BOLT_CELEBORN_WORKER_RPC_PORT:-19098}
-WORKER_PUSH_PORT=${BOLT_CELEBORN_WORKER_PUSH_PORT:-19099}
-WORKER_FETCH_PORT=${BOLT_CELEBORN_WORKER_FETCH_PORT:-19100}
-WORKER_REPLICATE_PORT=${BOLT_CELEBORN_WORKER_REPLICATE_PORT:-19101}
+MASTER_ENDPOINT="${MASTER_HOST}:${MASTER_PORT}"
+
+# Number of worker instances.  Each worker gets a unique set of ports
+# (base + worker_index * 4) and its own storage directory.
+NUM_WORKERS=${BOLT_CELEBORN_NUM_WORKERS:-$(nproc)}
+WORKER_BASE_PORT=${BOLT_CELEBORN_WORKER_BASE_PORT:-19098}
 
 CELEBORN_CONF_DIR="${CELEBORN_HOME}/conf"
 CELEBORN_DATA_DIR=${BOLT_CELEBORN_DATA_DIR:-"${RUNTIME_DIR}/worker-data"}
 CELEBORN_LOG_DIR=${BOLT_CELEBORN_LOG_DIR:-"${RUNTIME_DIR}/logs"}
 
 STATE_DIR="${RUNTIME_DIR}/state"
+CELEBORN_PID_DIR=${BOLT_CELEBORN_PID_DIR:-"${STATE_DIR}/pids"}
 LM_ENDPOINT_FILE=${BOLT_CELEBORN_LM_ENDPOINT_FILE:-"${STATE_DIR}/lifecycle_manager.endpoint"}
 LM_STOP_FILE=${BOLT_CELEBORN_LM_STOP_FILE:-"${STATE_DIR}/lifecycle_manager.stop"}
 LM_PID_FILE=${BOLT_CELEBORN_LM_PID_FILE:-"${STATE_DIR}/lifecycle_manager.pid"}
-LM_APP_ID=${BOLT_CELEBORN_LM_APP_ID:-"bolt-shuffle-test-${$}"}
+LM_APP_ID=${BOLT_CELEBORN_LM_APP_ID:-"bolt-shuffle-test-$$"}
 
-mkdir -p "${RUNTIME_DIR}" "${STATE_DIR}" "${CELEBORN_LOG_DIR}" "${CELEBORN_DATA_DIR}"
+CTEST_TIMEOUT=${BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS:-7200}
+TEST_LOG_DIR="${RUNTIME_DIR}/test-logs"
 
-clean_celeborn_runtime_state() {
-  rm -rf "${CELEBORN_DATA_DIR}"
-  mkdir -p "${CELEBORN_DATA_DIR}"
-}
+mkdir -p "${RUNTIME_DIR}" "${STATE_DIR}" "${CELEBORN_LOG_DIR}" \
+  "${CELEBORN_DATA_DIR}" "${CELEBORN_PID_DIR}" "${TEST_LOG_DIR}"
 
-if [[ -z "${JAVA_HOME:-}" ]] && command -v java > /dev/null 2>&1; then
-  JAVA_BIN=$(readlink -f "$(command -v java)")
-  export JAVA_HOME
-  JAVA_HOME=$(dirname "$(dirname "${JAVA_BIN}")")
-fi
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 
-usage() {
-  echo "Usage: $0 [--build-type Debug|Release] [build_dir]"
-}
-
-BUILD_TYPE="Debug"
+BUILD_TYPE="Release"
 BUILD_DIR=""
 while (($# > 0)); do
   case "$1" in
     --build-type)
       shift
-      if (($# == 0)); then
-        echo "--build-type requires a value" >&2
-        usage
-        exit 1
-      fi
       BUILD_TYPE="$1"
       ;;
-    --build-type=*)
-      BUILD_TYPE="${1#*=}"
-      ;;
+    --build-type=*) BUILD_TYPE="${1#*=}" ;;
     -h | --help)
-      usage
+      echo "Usage: $0 [--build-type Debug|Release] [build_dir]"
       exit 0
       ;;
-    *)
-      if [[ -z "${BUILD_DIR}" ]]; then
-        BUILD_DIR="$1"
-      else
-        echo "Unexpected argument: $1" >&2
-        usage
-        exit 1
-      fi
-      ;;
+    *) BUILD_DIR="$1" ;;
   esac
   shift
 done
+: "${BUILD_DIR:=_build/${BUILD_TYPE}}"
 
 if [[ "${BUILD_TYPE}" != "Debug" && "${BUILD_TYPE}" != "Release" ]]; then
-  echo "Invalid --build-type: ${BUILD_TYPE}. Expected Debug or Release." >&2
+  echo "Invalid --build-type: ${BUILD_TYPE}" >&2
+  exit 1
+fi
+if [[ ! -d "${BUILD_DIR}" ]]; then
+  echo "Build directory does not exist: ${BUILD_DIR}" >&2
   exit 1
 fi
 
-if [[ -z "${BUILD_DIR}" ]]; then
-  BUILD_DIR="_build/${BUILD_TYPE}"
+# ---------------------------------------------------------------------------
+# Java detection
+# ---------------------------------------------------------------------------
+
+if [[ -z "${JAVA_HOME:-}" ]] && command -v java > /dev/null 2>&1; then
+  export JAVA_HOME
+  JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
+fi
+if ! command -v java > /dev/null 2>&1 || [[ -z "${JAVA_HOME:-}" ]]; then
+  echo "Java not found. Install JDK 11+ and set JAVA_HOME." >&2
+  exit 1
 fi
 
-function require_java() {
-  if ! command -v java > /dev/null 2>&1; then
-    echo "java command not found; install JDK 11+ in the development container" >&2
-    return 1
-  fi
-  if [[ -z "${JAVA_HOME:-}" ]]; then
-    echo "JAVA_HOME is empty; set JAVA_HOME before starting Celeborn" >&2
-    return 1
-  fi
-}
+# Detect Java major version for Celeborn build profile.
+JAVA_MAJOR_VERSION="21"
+if [[ "$(java -version 2>&1)" =~ version[[:space:]]\"([0-9]+) ]]; then
+  JAVA_MAJOR_VERSION="${BASH_REMATCH[1]}"
+fi
 
-function ensure_celeborn_binary() {
-  ensure_celeborn_archive_from_github || return 1
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
 
-  local archive_path=""
-  for candidate in "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz; do
-    if [[ -f "${candidate}" ]]; then
-      archive_path="${candidate}"
-      break
-    fi
+wait_for_port() {
+  local host="$1" port="$2" timeout_sec="${3:-30}" waited=0
+  while ((waited < timeout_sec)); do
+    bash -c "</dev/tcp/${host}/${port}" 2> /dev/null && return 0
+    sleep 1
+    ((waited += 1))
   done
-
-  if [[ -z "${archive_path}" ]]; then
-    echo "Celeborn archive not found under ${CELEBORN_SOURCE_HOME}." >&2
-    return 1
-  fi
-
-  echo "Extracting ${archive_path}"
-  rm -rf "${CELEBORN_HOME}"
-  mkdir -p "${CELEBORN_HOME}"
-  tar -xzf "${archive_path}" -C "${CELEBORN_HOME}" --strip-components=1
-}
-
-function ensure_celeborn_archive_from_github() {
-  if [[ ! -d "${CELEBORN_SOURCE_HOME}/.git" ]]; then
-    echo "Cloning Celeborn source from ${CELEBORN_GIT_REPO}"
-    git clone "${CELEBORN_GIT_REPO}" "${CELEBORN_SOURCE_HOME}"
-  fi
-
-  echo "Checking out Celeborn ref ${CELEBORN_GIT_REF}"
-  git -C "${CELEBORN_SOURCE_HOME}" fetch --all --tags
-  git -C "${CELEBORN_SOURCE_HOME}" checkout "${CELEBORN_GIT_REF}"
-
-  local current_ref
-  current_ref=$(git -C "${CELEBORN_SOURCE_HOME}" rev-parse --short=7 HEAD)
-
-  if [[ -f "${CELEBORN_ARCHIVE_REF_FILE}" ]]; then
-    local built_ref
-    built_ref=$(< "${CELEBORN_ARCHIVE_REF_FILE}")
-    if [[ "${built_ref}" == "${current_ref}" ]]; then
-      for candidate in "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz; do
-        if [[ -f "${candidate}" ]]; then
-          return 0
-        fi
-      done
-    fi
-  fi
-
-  rm -f "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz
-
-  echo "Building Celeborn distribution at ${CELEBORN_SOURCE_HOME}"
-  # shellcheck disable=SC2086
-  (cd "${CELEBORN_SOURCE_HOME}" && ./build/make-distribution.sh ${CELEBORN_BUILD_ARGS})
-  echo "${current_ref}" > "${CELEBORN_ARCHIVE_REF_FILE}"
-}
-
-function ensure_lifecycle_manager_jar() {
-  local helper_override=${BOLT_CELEBORN_LM_HELPER_JAR_PATH:-""}
-  if [[ -n "${helper_override}" ]]; then
-    if [[ ! -f "${helper_override}" ]]; then
-      echo "Configured LM helper jar does not exist: ${helper_override}" >&2
-      return 1
-    fi
-    LM_HELPER_JAR_PATH="${helper_override}"
-    export LM_HELPER_JAR_PATH
-    return
-  fi
-
-  for bundled in "${CELEBORN_HOME}/spark/celeborn-client-spark-"*.jar; do
-    if [[ -f "${bundled}" ]]; then
-      LM_HELPER_JAR_PATH="${bundled}"
-      export LM_HELPER_JAR_PATH
-      return
-    fi
-  done
-
-  echo "LifecycleManager helper jar not found." >&2
-  echo "Please provide BOLT_CELEBORN_LM_HELPER_JAR_PATH or ensure spark shaded client jar exists under ${CELEBORN_HOME}/spark." >&2
   return 1
 }
 
-function write_celeborn_conf() {
-  mkdir -p "${CELEBORN_CONF_DIR}" "${CELEBORN_DATA_DIR}" "${CELEBORN_LOG_DIR}"
+# Kill Celeborn Master/Worker processes found via jps.
+kill_celeborn_java() {
+  command -v jps > /dev/null 2>&1 || return 0
+  local pids=()
+  while read -r pid cls _; do
+    case "${cls}" in
+      org.apache.celeborn.service.deploy.master.Master | \
+        org.apache.celeborn.service.deploy.worker.Worker) pids+=("${pid}") ;;
+    esac
+  done < <(jps -l)
+  ((${#pids[@]} == 0)) && return 0
 
+  echo "Killing Celeborn processes: ${pids[*]}"
+  kill "${pids[@]}" 2> /dev/null || true
+  # Wait up to 10s for graceful exit, then force-kill.
+  for _ in $(seq 1 10); do
+    local alive=0
+    for p in "${pids[@]}"; do kill -0 "$p" 2> /dev/null && alive=1 && break; done
+    ((alive == 0)) && return 0
+    sleep 1
+  done
+  for p in "${pids[@]}"; do kill -9 "$p" 2> /dev/null || true; done
+}
+
+# ---------------------------------------------------------------------------
+# Celeborn provisioning: clone, build (with cache), and extract
+# ---------------------------------------------------------------------------
+
+provision_celeborn() {
+  local ref_file="${CELEBORN_SOURCE_HOME}/.bolt_celeborn_archive_ref"
+
+  # Clone if needed.
+  if [[ ! -d "${CELEBORN_SOURCE_HOME}/.git" ]]; then
+    echo "Cloning Celeborn from ${CELEBORN_GIT_REPO}"
+    git clone "${CELEBORN_GIT_REPO}" "${CELEBORN_SOURCE_HOME}"
+  fi
+  git -C "${CELEBORN_SOURCE_HOME}" fetch --all --tags
+  git -C "${CELEBORN_SOURCE_HOME}" checkout "${CELEBORN_GIT_REF}"
+
+  local head_ref
+  head_ref=$(git -C "${CELEBORN_SOURCE_HOME}" rev-parse --short=7 HEAD)
+
+  # Rebuild only if ref changed or archive missing.
+  local need_build=true
+  if [[ -f "${ref_file}" && "$(< "${ref_file}")" == "${head_ref}" ]]; then
+    for f in "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz; do
+      [[ -f "$f" ]] && need_build=false && break
+    done
+  fi
+  if ${need_build}; then
+    rm -f "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz
+    echo "Building Celeborn distribution (ref=${head_ref})"
+    # shellcheck disable=SC2086
+    (cd "${CELEBORN_SOURCE_HOME}" && ./build/make-distribution.sh \
+      -DskipTests -Pspark-3.5 -Pjdk-${JAVA_MAJOR_VERSION})
+    echo "${head_ref}" > "${ref_file}"
+  fi
+
+  # Extract archive.
+  local archive=""
+  for f in "${CELEBORN_SOURCE_HOME}"/apache-celeborn-*-bin.tgz; do
+    [[ -f "$f" ]] && archive="$f" && break
+  done
+  if [[ -z "${archive}" ]]; then
+    echo "Celeborn archive not found under ${CELEBORN_SOURCE_HOME}" >&2
+    return 1
+  fi
+  echo "Extracting ${archive}"
+  rm -rf "${CELEBORN_HOME}"
+  mkdir -p "${CELEBORN_HOME}"
+  tar -xzf "${archive}" -C "${CELEBORN_HOME}" --strip-components=1
+}
+
+# ---------------------------------------------------------------------------
+# Celeborn service lifecycle
+# ---------------------------------------------------------------------------
+
+start_celeborn() {
+  provision_celeborn
+  kill_celeborn_java
+
+  # Reset worker data.
+  rm -rf "${CELEBORN_DATA_DIR}"
+  mkdir -p "${CELEBORN_DATA_DIR}" "${CELEBORN_CONF_DIR}"
+
+  # Write master env config.
   cat > "${CELEBORN_CONF_DIR}/celeborn-env.sh" << EOF
 #!/usr/bin/env bash
 export CELEBORN_LOG_DIR=${CELEBORN_LOG_DIR}
+export CELEBORN_PID_DIR=${CELEBORN_PID_DIR}
 EOF
+  chmod +x "${CELEBORN_CONF_DIR}/celeborn-env.sh"
 
+  # Write master config (also used by worker 0).
+  local w0_rpc=$((WORKER_BASE_PORT))
+  local w0_push=$((WORKER_BASE_PORT + 1))
+  local w0_fetch=$((WORKER_BASE_PORT + 2))
+  local w0_replicate=$((WORKER_BASE_PORT + 3))
   cat > "${CELEBORN_CONF_DIR}/celeborn-defaults.conf" << EOF
 celeborn.master.host ${MASTER_HOST}
 celeborn.master.port ${MASTER_PORT}
-celeborn.master.endpoints ${MASTER_HOST}:${MASTER_PORT}
-celeborn.worker.rpc.port ${WORKER_RPC_PORT}
-celeborn.worker.push.port ${WORKER_PUSH_PORT}
-celeborn.worker.fetch.port ${WORKER_FETCH_PORT}
-celeborn.worker.replicate.port ${WORKER_REPLICATE_PORT}
-celeborn.worker.storage.dirs ${CELEBORN_DATA_DIR}
+celeborn.master.endpoints ${MASTER_ENDPOINT}
+celeborn.worker.rpc.port ${w0_rpc}
+celeborn.worker.push.port ${w0_push}
+celeborn.worker.fetch.port ${w0_fetch}
+celeborn.worker.replicate.port ${w0_replicate}
+celeborn.worker.storage.dirs ${CELEBORN_DATA_DIR}/w0
 celeborn.client.push.buffer.max.size 256K
-celeborn.data.io.numConnectionsPerPeer 1
+celeborn.data.io.numConnectionsPerPeer 8
 EOF
 
-  chmod +x "${CELEBORN_CONF_DIR}/celeborn-env.sh"
-}
+  # Start master.
+  "${CELEBORN_HOME}/sbin/start-master.sh"
+  if ! wait_for_port "${MASTER_HOST}" "${MASTER_PORT}" 60; then
+    echo "Celeborn master failed to start" >&2
+    return 1
+  fi
+  echo "Master started (${MASTER_ENDPOINT})"
 
-function wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local timeout_sec="${3:-30}"
+  # Start workers.  Each worker uses its own CELEBORN_CONF_DIR with unique
+  # ports and storage directory so multiple instances can coexist on one host.
+  for ((w = 0; w < NUM_WORKERS; w++)); do
+    local rpc=$((WORKER_BASE_PORT + w * 4))
+    local push=$((rpc + 1))
+    local fetch=$((rpc + 2))
+    local replicate=$((rpc + 3))
+    local data_dir="${CELEBORN_DATA_DIR}/w${w}"
+    local worker_conf_dir="${RUNTIME_DIR}/worker-conf-${w}"
+    mkdir -p "${data_dir}" "${worker_conf_dir}"
+
+    # Per-worker env (shared log/pid dirs).
+    cat > "${worker_conf_dir}/celeborn-env.sh" << WEOF
+#!/usr/bin/env bash
+export CELEBORN_LOG_DIR=${CELEBORN_LOG_DIR}
+export CELEBORN_PID_DIR=${CELEBORN_PID_DIR}
+WEOF
+    chmod +x "${worker_conf_dir}/celeborn-env.sh"
+
+    # Per-worker config with unique ports (rpc/push/fetch/replicate/http)
+    # and dedicated storage directory.
+    local http_port=$((19200 + w))
+    cat > "${worker_conf_dir}/celeborn-defaults.conf" << WEOF
+celeborn.master.host ${MASTER_HOST}
+celeborn.master.port ${MASTER_PORT}
+celeborn.master.endpoints ${MASTER_ENDPOINT}
+celeborn.worker.rpc.port ${rpc}
+celeborn.worker.push.port ${push}
+celeborn.worker.fetch.port ${fetch}
+celeborn.worker.replicate.port ${replicate}
+celeborn.worker.http.port ${http_port}
+celeborn.worker.storage.dirs ${data_dir}
+celeborn.client.push.buffer.max.size 256K
+celeborn.data.io.numConnectionsPerPeer 8
+WEOF
+
+    CELEBORN_CONF_DIR="${worker_conf_dir}" \
+      WORKER_INSTANCE=$((w + 1)) \
+      "${CELEBORN_HOME}/sbin/start-worker.sh" "celeborn://${MASTER_ENDPOINT}"
+    echo "Started worker ${w} (rpc=${rpc}, push=${push}, fetch=${fetch}, data=${data_dir})"
+  done
+
+  # Wait for all workers to report "Worker started." in their logs.
+  local expected=${NUM_WORKERS}
   local waited=0
-  while ((waited < timeout_sec)); do
-    if bash -c "</dev/tcp/${host}/${port}" > /dev/null 2>&1; then
+  while ((waited < 90)); do
+    local started
+    started=$(grep -l "Worker started\." "${CELEBORN_LOG_DIR}"/celeborn-*Worker*.out 2> /dev/null | wc -l)
+    if ((started >= expected)); then
+      echo "Celeborn cluster ready: ${NUM_WORKERS} worker(s)"
       return 0
     fi
     sleep 1
     ((waited += 1))
   done
+  echo "Only $(grep -l "Worker started\." "${CELEBORN_LOG_DIR}"/celeborn-*Worker*.out 2> /dev/null | wc -l)/${expected} workers started within 90s" >&2
   return 1
-}
-
-stop_celeborn_java_processes() {
-  if ! command -v jps > /dev/null 2>&1; then
-    return
-  fi
-
-  local pids=()
-  while read -r pid class_name _; do
-    case "${class_name}" in
-      org.apache.celeborn.service.deploy.master.Master | org.apache.celeborn.service.deploy.worker.Worker)
-        pids+=("${pid}")
-        ;;
-    esac
-  done < <(jps -l)
-
-  if ((${#pids[@]} == 0)); then
-    return
-  fi
-
-  echo "Stopping Celeborn Java processes: ${pids[*]}"
-  kill "${pids[@]}" > /dev/null 2>&1 || true
-
-  for _ in $(seq 1 10); do
-    local running=0
-    for pid in "${pids[@]}"; do
-      if kill -0 "${pid}" > /dev/null 2>&1; then
-        running=1
-        break
-      fi
-    done
-    if ((running == 0)); then
-      return
-    fi
-    sleep 1
-  done
-
-  for pid in "${pids[@]}"; do
-    if kill -0 "${pid}" > /dev/null 2>&1; then
-      kill -9 "${pid}" > /dev/null 2>&1 || true
-    fi
-  done
-}
-
-function celeborn_master_endpoint() {
-  echo "${MASTER_HOST}:${MASTER_PORT}"
-}
-
-stop_lifecycle_manager() {
-  if [[ ! -f "${LM_PID_FILE}" ]]; then
-    return
-  fi
-
-  local pid
-  pid=$(cat "${LM_PID_FILE}")
-  if ! kill -0 "${pid}" > /dev/null 2>&1; then
-    rm -f "${LM_PID_FILE}" "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}"
-    return
-  fi
-
-  touch "${LM_STOP_FILE}"
-  for _ in $(seq 1 10); do
-    if ! kill -0 "${pid}" > /dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  if kill -0 "${pid}" > /dev/null 2>&1; then
-    kill "${pid}" || true
-  fi
-
-  rm -f "${LM_PID_FILE}" "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}"
-  echo "Stopped LifecycleManager helper"
 }
 
 stop_celeborn() {
-  if [[ -d "${CELEBORN_HOME}" ]]; then
-    if command -v java > /dev/null 2>&1 && [[ -n "${JAVA_HOME:-}" ]]; then
-      "${CELEBORN_HOME}/sbin/stop-worker.sh" || true
-      "${CELEBORN_HOME}/sbin/stop-master.sh" || true
-    fi
+  if [[ -d "${CELEBORN_HOME}" ]] && command -v java > /dev/null 2>&1; then
+    "${CELEBORN_HOME}/sbin/stop-worker.sh" 2> /dev/null || true
+    "${CELEBORN_HOME}/sbin/stop-master.sh" 2> /dev/null || true
   fi
-  stop_celeborn_java_processes || true
-  echo "Stopped Celeborn services"
+  kill_celeborn_java
 }
 
-start_celeborn() {
-  require_java
-  ensure_celeborn_binary
-  stop_celeborn_java_processes
-  clean_celeborn_runtime_state
-  write_celeborn_conf
+# ---------------------------------------------------------------------------
+# LifecycleManager helper
+# ---------------------------------------------------------------------------
 
-  echo "Starting Celeborn master"
-  "${CELEBORN_HOME}/sbin/start-master.sh"
+start_lifecycle_manager() {
+  # Skip if already running.
+  if [[ -f "${LM_PID_FILE}" ]] && kill -0 "$(< "${LM_PID_FILE}")" 2> /dev/null; then
+    echo "LifecycleManager already running (pid=$(< "${LM_PID_FILE}"))"
+    return
+  fi
+  rm -f "${LM_STOP_FILE}" "${LM_ENDPOINT_FILE}" "${LM_PID_FILE}"
 
-  if ! wait_for_port "${MASTER_HOST}" "${MASTER_PORT}" 60; then
-    echo "Celeborn master failed to start on ${MASTER_HOST}:${MASTER_PORT}" >&2
+  # Find the Celeborn spark client jar.
+  local jar_path="${BOLT_CELEBORN_LM_HELPER_JAR_PATH:-}"
+  if [[ -z "${jar_path}" ]]; then
+    for f in "${CELEBORN_HOME}/spark/celeborn-client-spark-"*.jar; do
+      [[ -f "$f" ]] && jar_path="$f" && break
+    done
+  fi
+  if [[ -z "${jar_path}" || ! -f "${jar_path}" ]]; then
+    echo "LifecycleManager jar not found. Set BOLT_CELEBORN_LM_HELPER_JAR_PATH." >&2
     return 1
   fi
 
-  echo "Starting Celeborn worker"
-  "${CELEBORN_HOME}/sbin/start-worker.sh" "celeborn://${MASTER_HOST}:${MASTER_PORT}"
-
-  sleep 3
-
-  echo "Celeborn started"
-  echo "master=$(celeborn_master_endpoint)"
-  echo "worker_rpc_port=${WORKER_RPC_PORT}"
-}
-
-start_lifecycle_manager() {
-  require_java
-  ensure_celeborn_binary
-  ensure_lifecycle_manager_jar
-
-  if [[ -f "${LM_PID_FILE}" ]] && kill -0 "$(cat "${LM_PID_FILE}")" > /dev/null 2>&1; then
-    echo "LifecycleManager helper already running with pid $(cat "${LM_PID_FILE}")"
-    return
-  fi
-
-  rm -f "${LM_STOP_FILE}" "${LM_ENDPOINT_FILE}" "${LM_PID_FILE}"
-
-  local helper_src="${CELEBORN_TEST_ROOT}/java/LifecycleManagerHelper.java"
-  local classpath="${LM_HELPER_JAR_PATH}"
-  for jar_dir in \
-    "${CELEBORN_HOME}/jars" \
-    "${CELEBORN_HOME}/master-jars" \
-    "${CELEBORN_HOME}/worker-jars" \
-    "${CELEBORN_HOME}/cli-jars"; do
-    if [[ ! -d "${jar_dir}" ]]; then
-      continue
-    fi
-    for jar in "${jar_dir}"/*.jar; do
-      if [[ ! -f "${jar}" || "${jar}" == "${LM_HELPER_JAR_PATH}" ]]; then
-        continue
-      fi
-      classpath="${classpath}:${jar}"
+  # Build classpath from all Celeborn jars.
+  local classpath="${jar_path}"
+  for dir in "${CELEBORN_HOME}"/{jars,master-jars,worker-jars,cli-jars}; do
+    [[ -d "${dir}" ]] || continue
+    for jar in "${dir}"/*.jar; do
+      [[ -f "${jar}" && "${jar}" != "${jar_path}" ]] && classpath="${classpath}:${jar}"
     done
   done
 
-  echo "Starting LifecycleManager helper"
-  java -cp "${classpath}" "${helper_src}" "$(celeborn_master_endpoint)" "${LM_APP_ID}" "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}" > "${CELEBORN_LOG_DIR}/lifecycle_manager.log" 2>&1 &
+  # Launch and wait for endpoint file.
+  local helper_src="${CELEBORN_TEST_ROOT}/java/LifecycleManagerHelper.java"
+  java -cp "${classpath}" "${helper_src}" "${MASTER_ENDPOINT}" "${LM_APP_ID}" \
+    "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}" > "${CELEBORN_LOG_DIR}/lifecycle_manager.log" 2>&1 &
   echo $! > "${LM_PID_FILE}"
 
-  for _ in $(seq 1 30); do
-    if [[ -s "${LM_ENDPOINT_FILE}" ]]; then
-      echo "LifecycleManager endpoint: $(cat "${LM_ENDPOINT_FILE}")"
-      return
-    fi
+  local waited=0
+  while ((waited < 30)); do
+    [[ -s "${LM_ENDPOINT_FILE}" ]] && echo "LifecycleManager endpoint: $(< "${LM_ENDPOINT_FILE}")" && return 0
     sleep 1
+    ((waited += 1))
   done
-
-  echo "LifecycleManager helper failed to publish endpoint" >&2
+  echo "LifecycleManager failed to publish endpoint" >&2
   return 1
 }
 
-healthcheck_celeborn() {
-  if ! wait_for_port "${MASTER_HOST}" "${MASTER_PORT}" 1; then
-    echo "master port not ready: ${MASTER_HOST}:${MASTER_PORT}" >&2
-    return 1
-  fi
+stop_lifecycle_manager() {
+  [[ -f "${LM_PID_FILE}" ]] || return 0
+  local pid
+  pid=$(< "${LM_PID_FILE}")
+  kill -0 "${pid}" 2> /dev/null || {
+    rm -f "${LM_PID_FILE}" "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}"
+    return 0
+  }
 
-  local waited=0
-  until ls "${CELEBORN_LOG_DIR}"/celeborn-*-org.apache.celeborn.service.deploy.worker.Worker-*.out > /dev/null 2>&1; do
-    if ((waited >= 30)); then
-      echo "worker log not found under ${CELEBORN_LOG_DIR}" >&2
-      return 1
-    fi
+  # Signal graceful shutdown via stop file, then force-kill if needed.
+  touch "${LM_STOP_FILE}"
+  for _ in $(seq 1 10); do
+    kill -0 "${pid}" 2> /dev/null || break
     sleep 1
-    ((waited += 1))
   done
-
-  waited=0
-  until grep -q "Worker started\." "${CELEBORN_LOG_DIR}"/celeborn-*-org.apache.celeborn.service.deploy.worker.Worker-*.out; do
-    if ((waited >= 60)); then
-      echo "worker not fully started yet" >&2
-      return 1
-    fi
-    sleep 1
-    ((waited += 1))
-  done
-
-  echo "Celeborn healthcheck passed"
-  echo "master=$(celeborn_master_endpoint)"
+  kill -0 "${pid}" 2> /dev/null && kill "${pid}" 2> /dev/null || true
+  rm -f "${LM_PID_FILE}" "${LM_ENDPOINT_FILE}" "${LM_STOP_FILE}"
 }
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 cleanup() {
   stop_lifecycle_manager || true
@@ -423,35 +386,55 @@ cleanup() {
 trap cleanup EXIT
 
 start_celeborn
-healthcheck_celeborn
 start_lifecycle_manager
 
-if [[ ! -d "${BUILD_DIR}" ]]; then
-  echo "Build directory does not exist: ${BUILD_DIR}" >&2
-  exit 1
-fi
-
-TEST_PATTERNS=(
+# Resolve test patterns.
+DEFAULT_TEST_PATTERNS=(
   "bolt_shuffle_spark_celeborn_e2e_test"
   "bolt_shuffle_spark_matrix_test"
   "bolt_shuffle_spark_large_partition_test"
   "bolt_shuffle_spark_memory_test"
 )
-CTEST_TIMEOUT_SECONDS=${BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS:-7200}
+if [[ -n "${BOLT_CELEBORN_TEST_PATTERNS:-}" ]]; then
+  IFS=',' read -r -a TEST_PATTERNS <<< "${BOLT_CELEBORN_TEST_PATTERNS}"
+else
+  TEST_PATTERNS=("${DEFAULT_TEST_PATTERNS[@]}")
+fi
 
-FAILED_PATTERNS=()
-for test_pattern in "${TEST_PATTERNS[@]}"; do
-  echo "Running ctest pattern: ${test_pattern}"
-  if ! BOLT_CELEBORN_E2E=1 \
+# Launch each test pattern in parallel.
+PIDS=()
+PATTERN_NAMES=()
+for pattern in "${TEST_PATTERNS[@]}"; do
+  [[ -z "${pattern}" ]] && continue
+  log_file="${TEST_LOG_DIR}/${pattern}.log"
+  echo "Starting: ${pattern} (timeout=${CTEST_TIMEOUT}s)"
+  BOLT_CELEBORN_E2E=1 \
     BOLT_SHUFFLE_TEST_REAL_CELEBORN=1 \
     BOLT_CELEBORN_LM_ENDPOINT_FILE="${LM_ENDPOINT_FILE}" \
     BOLT_CELEBORN_LM_APP_ID="${LM_APP_ID}" \
-    ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout "${CTEST_TIMEOUT_SECONDS}" -R "${test_pattern}"; then
-    FAILED_PATTERNS+=("${test_pattern}")
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout "${CTEST_TIMEOUT}" -R "${pattern}" \
+    > "${log_file}" 2>&1 &
+  PIDS+=($!)
+  PATTERN_NAMES+=("${pattern}")
+done
+
+# Collect results.
+FAILED=()
+for i in "${!PIDS[@]}"; do
+  if ! wait "${PIDS[$i]}"; then
+    FAILED+=("${PATTERN_NAMES[$i]}")
+    echo "FAILED: ${PATTERN_NAMES[$i]} (see ${TEST_LOG_DIR}/${PATTERN_NAMES[$i]}.log)"
+  else
+    echo "PASSED: ${PATTERN_NAMES[$i]}"
   fi
 done
 
-if ((${#FAILED_PATTERNS[@]} > 0)); then
-  echo "Failing test patterns: ${FAILED_PATTERNS[*]}" >&2
+if ((${#FAILED[@]} > 0)); then
+  echo "Failed test patterns: ${FAILED[*]}" >&2
+  for p in "${FAILED[@]}"; do
+    echo "--- ${p} ---"
+    tail -20 "${TEST_LOG_DIR}/${p}.log"
+    echo "---"
+  done
   exit 1
 fi
