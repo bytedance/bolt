@@ -88,14 +88,15 @@ static utf8proc_int32_t utf8proc_codepoint_length(utf8proc_int32_t uc);
 FOLLY_ALWAYS_INLINE bool isAscii(const char* str, size_t length) {
 #if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
   size_t i = 0;
-  const size_t sve_vector_size = svcntb();
+  const size_t sveVectorSize = svcntb();
+  const svuint8_t v80 = svdup_u8(0x80);
   while (i < length) {
     svbool_t pgTail = svwhilelt_b8(i, length);
     svuint8_t v = svld1_u8(pgTail, reinterpret_cast<const uint8_t*>(str) + i);
     if (svptest_any(pgTail, svcmpge(pgTail, v, v80))) {
       return false;
     }
-    i += sve_vector_size;
+    i += sveVectorSize;
   }
   return true;
 #else

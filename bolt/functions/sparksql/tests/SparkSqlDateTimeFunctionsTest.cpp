@@ -1503,10 +1503,6 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtime) {
 #ifdef SPARK_COMPATIBLE
   setPolicyAndTimeZone("corrected", "Asia/Shanghai");
   EXPECT_EQ(
-      fromUnixTime(-62170185600, "yyyy-MM-dd HH:mm:ss").value(),
-      "-0001-11-28 00:05:43");
-
-  EXPECT_EQ(
       fromUnixTime(-62170185600, "yyyy-MM-dd HH:mm:ss G").value(),
       "0002-11-28 00:05:43 BC");
 

@@ -928,10 +928,16 @@ TypePtr ReaderBase::convertType(
                 "{} converted type can only be set for thrift::Type::(FIXED_LEN_)BYTE_ARRAY.",
                 thrift::to_string(schemaElement.converted_type));
         }
+      case thrift::ConvertedType::ENUM: {
+        BOLT_CHECK_EQ(
+            schemaElement.type,
+            thrift::Type::BYTE_ARRAY,
+            "ENUM converted type can only be set for value of thrift::Type::BYTE_ARRAY");
+        return VARCHAR();
+      }
       case thrift::ConvertedType::MAP:
       case thrift::ConvertedType::MAP_KEY_VALUE:
       case thrift::ConvertedType::LIST:
-      case thrift::ConvertedType::ENUM:
       case thrift::ConvertedType::TIME_MILLIS:
       case thrift::ConvertedType::TIME_MICROS:
       case thrift::ConvertedType::BSON:
