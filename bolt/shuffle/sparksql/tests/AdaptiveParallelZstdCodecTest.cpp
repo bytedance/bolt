@@ -115,6 +115,31 @@ void runRoundTrip(
   EXPECT_EQ(0, std::memcmp(output.data(), expected.data(), expected.size()));
 }
 
+std::vector<uint8_t> buildIncompressibleData(size_t size) {
+  std::vector<uint8_t> data(size);
+  uint32_t state = 0x12345678u;
+  for (size_t i = 0; i < size; ++i) {
+    state = state * 1664525u + 1013904223u;
+    data[i] = static_cast<uint8_t>(state >> 24);
+  }
+  return data;
+}
+
+std::vector<uint8_t> buildIncompressibleRow(size_t payloadSize, uint32_t seed) {
+  std::vector<uint8_t> row(sizeof(int32_t) + payloadSize);
+  auto payloadSize32 = static_cast<int32_t>(payloadSize);
+  std::memcpy(row.data(), &payloadSize32, sizeof(int32_t));
+
+  auto payload = buildIncompressibleData(payloadSize);
+  uint32_t state = seed;
+  for (size_t i = 0; i < payloadSize; ++i) {
+    state = state * 1103515245u + 12345u;
+    payload[i] ^= static_cast<uint8_t>(state >> 24);
+  }
+  std::memcpy(row.data() + sizeof(int32_t), payload.data(), payload.size());
+  return row;
+}
+
 } // namespace
 
 TEST(AdaptiveParallelZstdCodecTest, RoundTripSmallPayloads) {
@@ -142,6 +167,29 @@ TEST(AdaptiveParallelZstdCodecTest, RoundTripLargePayload) {
   }
 
   runRoundTrip(rows, rawSize, RowVectorLayout::kComposite);
+}
+
+TEST(
+    AdaptiveParallelZstdCodecTest,
+    CompressAndFlushStressRoundTripWithoutCorruption) {
+  constexpr int32_t kRounds = 6;
+  constexpr int32_t kRowsPerRound = 256;
+  const auto payloadSize =
+      static_cast<size_t>(ZSTD_CStreamInSize() - sizeof(int32_t) - 1);
+
+  for (int32_t round = 0; round < kRounds; ++round) {
+    std::vector<std::vector<uint8_t>> rows;
+    rows.reserve(kRowsPerRound);
+
+    int64_t rawSize = 0;
+    for (int32_t i = 0; i < kRowsPerRound; ++i) {
+      rows.emplace_back(buildIncompressibleRow(
+          payloadSize, static_cast<uint32_t>(round * kRowsPerRound + i + 1)));
+      rawSize += static_cast<int64_t>(rows.back().size());
+    }
+
+    runRoundTrip(rows, rawSize, RowVectorLayout::kComposite);
+  }
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
