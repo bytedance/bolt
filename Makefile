@@ -277,6 +277,7 @@ compile_db_all:
 	BOLT_BUILD_TESTING="ON" \
 	BOLT_BUILD_BENCHMARKS="ON" \
 	ENABLE_S3="True" \
+	ENABLE_GCS="True" \
 	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 export_base:
