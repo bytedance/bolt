@@ -30,6 +30,7 @@
 
 #include <gtest/gtest.h>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/PlanNode.h"
 
 using namespace ::bytedance::bolt;
@@ -119,5 +120,19 @@ TEST_F(PlanNodeTest, sortOrder) {
       ASSERT_NE(testData.order1, testData.order2);
     }
   }
+}
+
+TEST_F(PlanNodeTest, duplicateSortKeys) {
+  auto sortingKeys = std::vector<FieldAccessTypedExprPtr>{
+      std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "c0"),
+      std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "c1"),
+      std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "c0"),
+  };
+  auto sortingOrders =
+      std::vector<SortOrder>{{true, true}, {false, false}, {true, true}};
+  BOLT_ASSERT_USER_THROW(
+      std::make_shared<OrderByNode>(
+          "orderBy", sortingKeys, sortingOrders, false, nullptr),
+      "Duplicate sorting keys are not allowed: c0");
 }
 } // namespace
