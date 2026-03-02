@@ -23,6 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CELEBORN_TEST_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)
 
 RUNTIME_DIR="/tmp/bolt-celeborn-runtime-${USER:-unknown}"
 CELEBORN_HOME="${RUNTIME_DIR}/celeborn-bin"
@@ -82,14 +83,17 @@ while (($# > 0)); do
       exit 0
       ;;
     *)
-      echo "Unexpected argument: $1" >&2
-      usage
-      exit 1
+      if [[ -z "${BUILD_DIR}" ]]; then
+        BUILD_DIR="$1"
+      else
+        echo "Unexpected argument: $1" >&2
+        exit 1
+      fi
       ;;
   esac
   shift
 done
-BUILD_DIR="_build/${BUILD_TYPE}"
+: "${BUILD_DIR:=${PROJECT_ROOT}/_build/${BUILD_TYPE}}"
 
 if [[ "${BUILD_TYPE}" != "Debug" && "${BUILD_TYPE}" != "Release" ]]; then
   echo "Invalid --build-type: ${BUILD_TYPE}" >&2
