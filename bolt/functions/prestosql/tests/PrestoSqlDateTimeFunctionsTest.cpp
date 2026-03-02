@@ -636,7 +636,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, week) {
   const auto weekTimestamp = [&](const char* time) {
     auto timestampInSeconds = util::fromTimeString(time, nullptr) / 1'000'000;
     auto timestamp =
-        std::make_optional(Timestamp(timestampInSeconds * 100'000'000, 0));
+        std::make_optional(Timestamp(timestampInSeconds * 100'000, 0));
     auto week = evaluateOnce<int64_t>("week(c0)", timestamp).value();
     auto weekOfYear =
         evaluateOnce<int64_t>("week_of_year(c0)", timestamp).value();
@@ -646,11 +646,11 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, week) {
   };
 
   EXPECT_EQ(1, weekTimestamp("00:00:00"));
-  EXPECT_EQ(10, weekTimestamp("11:59:59"));
-  EXPECT_EQ(51, weekTimestamp("06:01:01"));
-  EXPECT_EQ(24, weekTimestamp("06:59:59"));
-  EXPECT_EQ(27, weekTimestamp("12:00:01"));
-  EXPECT_EQ(7, weekTimestamp("12:59:59"));
+  EXPECT_EQ(47, weekTimestamp("11:59:59"));
+  EXPECT_EQ(33, weekTimestamp("06:01:01"));
+  EXPECT_EQ(44, weekTimestamp("06:59:59"));
+  EXPECT_EQ(47, weekTimestamp("12:00:01"));
+  EXPECT_EQ(16, weekTimestamp("12:59:59"));
 }
 #endif
 

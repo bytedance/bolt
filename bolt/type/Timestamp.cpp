@@ -51,6 +51,12 @@ Timestamp Timestamp::fromDaysAndNanos(int32_t days, int64_t nanos) {
 }
 
 // static
+Timestamp Timestamp::fromDate(int32_t date) {
+  int64_t seconds = static_cast<int64_t>(date) * kSecondsInDay;
+  return Timestamp(seconds, 0);
+}
+
+// static
 Timestamp Timestamp::now() {
   auto now = std::chrono::system_clock::now();
   auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(
