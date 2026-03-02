@@ -56,8 +56,9 @@ AddressableNonNullValueList::Entry AddressableNonNullValueList::append(
   const auto originalSize = stream.size();
 
   // Write value.
+  exec::ContainerRowSerdeOptions options{};
   exec::ContainerRowSerde::serialize(
-      *decoded.base(), decoded.index(index), stream);
+      *decoded.base(), decoded.index(index), stream, options);
 
   ++size_;
 

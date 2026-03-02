@@ -49,11 +49,14 @@ class ContainerRowSerdeTest : public testing::Test,
 
   // Writes all rows together and returns a position at the start of this
   // combined write.
-  HashStringAllocator::Position serialize(const VectorPtr& data) {
+  HashStringAllocator::Position serialize(
+      const VectorPtr& data,
+      bool isKey = true) {
     ByteOutputStream out(&allocator_);
     auto position = allocator_.newWrite(out);
+    const ContainerRowSerdeOptions options{.isKey = isKey};
     for (auto i = 0; i < data->size(); ++i) {
-      ContainerRowSerde::serialize(*data, i, out);
+      ContainerRowSerde::serialize(*data, i, out, options);
     }
     allocator_.finishWrite(out, 0);
     return position;
@@ -61,15 +64,17 @@ class ContainerRowSerdeTest : public testing::Test,
 
   // Writes each row individually and returns positions for individual rows.
   std::vector<HashStringAllocator::Position> serializeWithPositions(
-      const VectorPtr& data) {
+      const VectorPtr& data,
+      bool isKey = true) {
     std::vector<HashStringAllocator::Position> positions;
     auto size = data->size();
     positions.reserve(size);
 
+    const ContainerRowSerdeOptions options{.isKey = isKey};
     for (auto i = 0; i < size; ++i) {
       ByteOutputStream out(&allocator_);
       auto position = allocator_.newWrite(out);
-      ContainerRowSerde::serialize(*data, i, out);
+      ContainerRowSerde::serialize(*data, i, out, options);
       allocator_.finishWrite(out, 0);
       positions.emplace_back(position);
     }
@@ -101,6 +106,23 @@ class ContainerRowSerdeTest : public testing::Test,
     test::assertEqualVectors(data, copy);
 
     allocator_.clear();
+  }
+
+  void assertNotEqualVectors(const VectorPtr& left, const VectorPtr& right) {
+    ASSERT_NE(left->size(), 0);
+    for (auto i = 0; i < left->size(); ++i) {
+      bool equal = true;
+      if (left->isNullAt(i) || right->isNullAt(i)) {
+        equal = left->isNullAt(i) && right->isNullAt(i);
+      } else {
+        // For simplicity, compare as strings for test purposes
+        equal = left->toString(i) == right->toString(i);
+      }
+      if (!equal) {
+        return; // Found inequality
+      }
+    }
+    FAIL() << "Vectors are unexpectedly equal";
   }
 
   // If the mode is NullAsIndeterminate with equalsOnly is false, and expected
@@ -197,6 +219,29 @@ TEST_F(ContainerRowSerdeTest, bigint) {
   auto data = makeFlatVector<int64_t>({1, 2, 3, 4, 5});
 
   testRoundTrip(data);
+}
+
+TEST_F(ContainerRowSerdeTest, map) {
+  auto data = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {3, 30}, {1, 10}},
+      {{4, 40}},
+  });
+  testRoundTrip(data);
+
+  // isKey=false: preserve order
+  {
+    auto position = serialize(data, false);
+    auto deserialized = deserialize(position, data->type(), data->size());
+    test::assertEqualVectors(
+        data->mapKeys(), deserialized->as<MapVector>()->mapKeys());
+  }
+  // isKey=true: sorted order, thus different than input
+  {
+    auto position = serialize(data, true);
+    auto deserialized = deserialize(position, data->type(), data->size());
+    assertNotEqualVectors(
+        data->mapKeys(), deserialized->as<MapVector>()->mapKeys());
+  }
 }
 
 TEST_F(ContainerRowSerdeTest, string) {

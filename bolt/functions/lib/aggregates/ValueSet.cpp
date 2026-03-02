@@ -43,7 +43,8 @@ void ValueSet::write(
     allocator_->extendWrite(position, stream);
   }
 
-  exec::ContainerRowSerde::serialize(vector, index, stream);
+  exec::ContainerRowSerdeOptions options{};
+  exec::ContainerRowSerde::serialize(vector, index, stream, options);
   allocator_->finishWrite(stream, 0);
 }
 
