@@ -80,7 +80,7 @@ add_executable(
   SparkCastExprTest.cpp
   SparkPartitionIdTest.cpp
   SparkSqlDateTimeFunctionsTest.cpp
-  SplitFunctionsTest.cpp
+  SplitTest.cpp
   StringTest.cpp
   UdfMapArrayCombineTest.cpp
   UdfMapFilterKeysTest.cpp
