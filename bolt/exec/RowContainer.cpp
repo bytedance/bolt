@@ -1520,11 +1520,29 @@ void HybridContainer::addPayload(RowVectorPtr input) {
     isNullable_[i] |= input->childAt(i)->mayHaveNulls();
     payloadFlatBytesSum_[i] += input->childAt(i)->estimateFlatSize();
   }
+
+  // In scattered mode, decode payload columns upfront for efficient extraction.
+  // DecodedVector handles lazy loading and any encoding (dictionary, constant, etc.)
+  // and provides efficient valueAt<T>() access.
+  if (scatteredModeEnabled_) {
+    std::vector<std::unique_ptr<DecodedVector>> decodedCols;
+    decodedCols.reserve(payloadTypes_.size());
+    for (int32_t i = 0; i < payloadTypes_.size(); ++i) {
+      auto decoded = std::make_unique<DecodedVector>();
+      // decode() loads lazy vectors and handles dictionary/constant encodings
+      decoded->decode(*input->childAt(i));
+      decodedCols.push_back(std::move(decoded));
+    }
+    decodedPayloads_.push_back(std::move(decodedCols));
+  }
+
+  // Keep the input to maintain lifecycle of underlying data
   owningInputs_.emplace_back(std::move(input));
 }
 
 void HybridContainer::clear() {
   owningInputs_.clear();
+  decodedPayloads_.clear();
   isNullable_.resize(payloadTypes_.size(), false);
   totalRows_ = 0;
   totalBatches_ = 0;

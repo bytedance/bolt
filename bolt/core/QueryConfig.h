@@ -600,6 +600,14 @@ class QueryConfig {
 
   static constexpr const char* kHybridSortEnabled = "hybrid_sort_enabled";
 
+  /// If true, use scattered (non-coalesced) mode for hybrid join payload extraction.
+  /// In scattered mode, payload batches are kept separate instead of being
+  /// merged into one large batch. Row IDs encode (batchId, rowInBatch) instead
+  /// of global row index. This avoids the coalesceBatches() overhead but may
+  /// have worse cache locality during extraction.
+  static constexpr const char* kHybridJoinScatteredModeEnabled =
+      "hybrid_join_scattered_mode_enabled";
+
   /**
    * LLVM JIT enabled
    * -1 : enable all jit (by default)
@@ -1028,6 +1036,13 @@ class QueryConfig {
 
   bool hybridSortEnabled() const {
     return get<bool>(kHybridSortEnabled, false);
+  }
+
+  /// Returns whether scattered (non-coalesced) mode is enabled for hybrid join.
+  /// When enabled, payload batches are kept separate instead of being merged,
+  /// avoiding coalesceBatches() overhead. Default false (use coalesced mode).
+  bool hybridJoinScatteredModeEnabled() const {
+    return get<bool>(kHybridJoinScatteredModeEnabled, true);
   }
 
   /// Returns 'is aggregation spilling enabled' flag. Must also check the

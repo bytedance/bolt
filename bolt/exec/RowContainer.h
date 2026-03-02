@@ -1852,6 +1852,15 @@ struct RowFormatInfo {
 struct HybridRowId {
   uint8_t containerId_;
   uint64_t rowId_;
+
+  // For scattered mode: decode batchId and rowInBatch from rowId_
+  // Encoding: rowId_ = (batchId << 32) | rowInBatch
+  uint32_t batchId() const {
+    return static_cast<uint32_t>(rowId_ >> 32);
+  }
+  uint32_t rowInBatch() const {
+    return static_cast<uint32_t>(rowId_ & 0xFFFFFFFF);
+  }
 };
 
 class HybridContainer {
@@ -1994,6 +2003,15 @@ class HybridContainer {
 
   uint8_t getId() {
     return id_;
+  }
+
+  // Scattered mode: keep payload batches separate (no coalesce)
+  void setScatteredModeEnabled(bool enabled) {
+    scatteredModeEnabled_ = enabled;
+  }
+
+  bool isScatteredModeEnabled() const {
+    return scatteredModeEnabled_;
   }
 
   void setAllContainers(
@@ -2213,6 +2231,53 @@ class HybridContainer {
     BOLT_CHECK(Kind != TypeKind::ROW && Kind != TypeKind::MAP);
     using T = typename KindToFlatVector<Kind>::HashRowType;
     auto flatResult = result->as<FlatVector<T>>();
+
+    // Scattered mode path: use DecodedVector for extraction
+    if (scatteredModeEnabled_) {
+      if (isSingleContainer()) {
+        if (isNullable_[columnIndex]) {
+          extractPayloadScatteredWithNulls<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        } else {
+          extractPayloadScatteredNoNulls<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        }
+      } else {
+        // Multi-container scattered mode
+        if (isNullable_[columnIndex]) {
+          extractPayloadScatteredWithNullsMulti<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        } else {
+          extractPayloadScatteredNoNullsMulti<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        }
+      }
+      return;
+    }
 
     // Fast path for single container (spilling, sort) - avoids map lookups
     if (isSingleContainer()) {
@@ -2501,6 +2566,227 @@ class HybridContainer {
   }
 
   // ========== End single-container fast path implementations ==========
+
+  // ========== Scattered mode extraction implementations ==========
+  // These use DecodedVector for extraction from non-coalesced batches.
+  // rowId encodes (batchId, rowInBatch) instead of global row index.
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredNoNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto& rid = rowIdPtr[i];
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      T value = decodedPayloads_[batchIdx][columnIndex]->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredWithNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto& rid = rowIdPtr[i];
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      auto* decoded = decodedPayloads_[batchIdx][columnIndex].get();
+      if (decoded->isNullAt(rowInBatch)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      T value = decoded->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  // Multi-container scattered mode extraction
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredNoNullsMulti(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Cache current container's decodedPayloads pointer to avoid repeated map lookups
+    uint8_t currentContainerId = UINT8_MAX;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>* currentDecodedPayloads = nullptr;
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto& rid = rowIdPtr[i];
+
+      // Switch container if needed
+      if (rid.containerId_ != currentContainerId) {
+        currentContainerId = rid.containerId_;
+        currentDecodedPayloads = &(allContainers_[currentContainerId]->decodedPayloads_);
+      }
+
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      T value = (*currentDecodedPayloads)[batchIdx][columnIndex]->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredWithNullsMulti(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Cache current container's decodedPayloads pointer to avoid repeated map lookups
+    uint8_t currentContainerId = UINT8_MAX;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>* currentDecodedPayloads = nullptr;
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto& rid = rowIdPtr[i];
+
+      // Switch container if needed
+      if (rid.containerId_ != currentContainerId) {
+        currentContainerId = rid.containerId_;
+        currentDecodedPayloads = &(allContainers_[currentContainerId]->decodedPayloads_);
+      }
+
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      auto* decoded = (*currentDecodedPayloads)[batchIdx][columnIndex].get();
+      if (decoded->isNullAt(rowInBatch)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      T value = decoded->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  // ========== End scattered mode extraction implementations ==========
 
   template <typename T, bool useRowNumbers>
   void extractPayloadWithNulls(
@@ -2895,6 +3181,14 @@ class HybridContainer {
   // Controls whether to reorder rows by containerId during extraction.
   // Default true for better cache locality. Can be disabled for testing.
   bool reorderEnabled_{true};
+
+  // Scattered mode: keep payload batches separate (no coalesce).
+  // In scattered mode, rowId encodes (batchId, rowInBatch) instead of global row index.
+  bool scatteredModeEnabled_{false};
+
+  // Pre-decoded payload vectors for scattered mode extraction.
+  // Indexed by [batchIndex][columnIndex].
+  std::vector<std::vector<std::unique_ptr<DecodedVector>>> decodedPayloads_;
 };
 
 template <>

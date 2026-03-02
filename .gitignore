@@ -298,6 +298,7 @@ test/evidence/
 # Benchmarks
 .last_benchmarked_commit
 benchmark_results/
+bolt/benchmarks/
 duckdb_unittest_tempdir/
 grammar.y.tmp
 src/amalgamation/
