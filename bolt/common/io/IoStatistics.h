@@ -125,6 +125,8 @@ class IoStatistics {
   uint64_t totalMergeTime() const;
   uint64_t loadFileMetaDataTimeNs() const;
 
+  uint64_t writeIOTimeUs() const;
+
   ReadStats& readStats();
 
   std::vector<uint64_t> rawBytesReads() const;
@@ -144,6 +146,8 @@ class IoStatistics {
   int is_greater_than(int x, int threshold) {
     return !((x - threshold) >> 31);
   }
+
+  uint64_t incWriteIOTimeUs(int64_t);
 
   IoCounter& prefetch() {
     return prefetch_;
@@ -197,6 +201,8 @@ class IoStatistics {
   std::atomic<uint64_t> totalScanTime_{0};
   std::atomic<uint64_t> totalMergeTime_{0};
   std::atomic<uint64_t> loadFileMetaDataTimeNs_{0};
+
+  std::atomic<uint64_t> writeIOTimeUs_{0};
 
   ReadStats readStats_{};
 

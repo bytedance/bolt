@@ -67,6 +67,10 @@ uint64_t IoStatistics::loadFileMetaDataTimeNs() const {
   return loadFileMetaDataTimeNs_.load(std::memory_order_relaxed);
 }
 
+uint64_t IoStatistics::writeIOTimeUs() const {
+  return writeIOTimeUs_.load(std::memory_order_relaxed);
+}
+
 IoStatistics::ReadStats& IoStatistics::readStats() {
   return readStats_;
 }
@@ -140,6 +144,10 @@ uint64_t IoStatistics::incLoadFileMetaDataTimeNs(int64_t v) {
   return loadFileMetaDataTimeNs_.fetch_add(v, std::memory_order_relaxed);
 }
 
+uint64_t IoStatistics::incWriteIOTimeUs(int64_t v) {
+  return writeIOTimeUs_.fetch_add(v, std::memory_order_relaxed);
+}
+
 void IoStatistics::incOperationCounters(
     const std::string& operation,
     const uint64_t resourceThrottleCount,
@@ -169,6 +177,7 @@ void IoStatistics::merge(const IoStatistics& other) {
   rawBytesWritten_ += other.rawBytesWritten_;
   totalScanTime_ += other.totalScanTime_;
   totalMergeTime_ += other.totalMergeTime_;
+  writeIOTimeUs_ += other.writeIOTimeUs_;
   for (int i = 0; i < 4; ++i) {
     readStats_.rawBytesReads_[i] += other.readStats_.rawBytesReads_[i];
     readStats_.cntReads_[i] += other.readStats_.cntReads_[i];
