@@ -55,11 +55,18 @@
  */
 
 #include "bolt/type/TimestampConversion.h"
+
+#include <cmath>
+
+#include <folly/Expected.h>
 #include <iostream>
 #include <limits>
 #include <set>
+
+#include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/type/HugeInt.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::util {
 
@@ -176,6 +183,66 @@ bool isValidWeekDate(int32_t weekYear, int32_t weekOfYear, int32_t dayOfWeek) {
     return false;
   }
   return true;
+}
+
+bool isValidWeekOfMonthDate(
+    int32_t year,
+    int32_t month,
+    int32_t weekOfMonth,
+    int32_t dayOfWeek) {
+  if (year < 1 || year > kMaxYear) {
+    return false;
+  }
+  if (month < 1 || month > 12) {
+    return false;
+  }
+
+  bool isValid = true;
+  const int64_t daysSinceEpochOfFirstDayOfMonth =
+      daysSinceEpochFromDate(year, month, 1, &isValid);
+  if (!isValid) {
+    return false;
+  }
+
+  const int32_t firstDayOfWeek =
+      extractISODayOfTheWeek(daysSinceEpochOfFirstDayOfMonth);
+  const int32_t firstWeekLength = 7 - firstDayOfWeek + 1;
+  const int32_t monthLength =
+      isLeapYear(year) ? kLeapDays[month] : kNormalDays[month];
+  const int32_t actualWeeks = 1 +
+      static_cast<int32_t>(std::ceil((monthLength - firstWeekLength) / 7.0));
+  if (weekOfMonth < 1 || weekOfMonth > actualWeeks) {
+    return false;
+  }
+
+  if (weekOfMonth == 1 && dayOfWeek < firstDayOfWeek) {
+    return false;
+  }
+  const int32_t lastWeekLength = (monthLength - firstWeekLength) % 7;
+  if (weekOfMonth == actualWeeks && lastWeekLength != 0 &&
+      dayOfWeek > lastWeekLength) {
+    return false;
+  }
+
+  return true;
+}
+
+::bytedance::bolt::Status tryDaysSinceEpochFromDate(
+    int32_t year,
+    int32_t month,
+    int32_t day,
+    int64_t& out) {
+  bool isValid = true;
+  out = daysSinceEpochFromDate(year, month, day, &isValid);
+  if (isValid) {
+    return ::bytedance::bolt::Status::OK();
+  }
+
+  if (::bytedance::bolt::threadSkipErrorDetails()) {
+    return ::bytedance::bolt::Status::UserError();
+  }
+  return ::bytedance::bolt::Status::UserError(
+      "Date out of range: {}-{}-{}", year, month, day);
 }
 
 inline bool validDate(int64_t daysSinceEpoch) {
@@ -699,6 +766,53 @@ int64_t daysSinceEpochFromWeekDate(
       7 * (weekOfYear - 1) + dayOfWeek - 1;
 }
 
+folly::Expected<int64_t, ::bytedance::bolt::Status>
+daysSinceEpochFromWeekOfMonthDate(
+    int32_t year,
+    int32_t month,
+    int32_t weekOfMonth,
+    int32_t dayOfWeek,
+    bool lenient) {
+  if (!lenient &&
+      !isValidWeekOfMonthDate(year, month, weekOfMonth, dayOfWeek)) {
+    if (::bytedance::bolt::threadSkipErrorDetails()) {
+      return folly::makeUnexpected(::bytedance::bolt::Status::UserError());
+    }
+    return folly::makeUnexpected(::bytedance::bolt::Status::UserError(
+        "Date out of range: {}-{}-{}-{}", year, month, weekOfMonth, dayOfWeek));
+  }
+
+  int32_t additionYears = 0;
+  if (month < 1) {
+    additionYears = month / 12 - 1;
+    month = 12 - std::abs(month) % 12;
+  } else if (month > 12) {
+    additionYears = (month - 1) / 12;
+    month = (month - 1) % 12 + 1;
+  }
+  year += additionYears;
+
+  int64_t daysSinceEpochOfFirstDayOfMonth;
+  const ::bytedance::bolt::Status status = tryDaysSinceEpochFromDate(
+      year, month, 1, daysSinceEpochOfFirstDayOfMonth);
+  if (!status.ok()) {
+    return folly::makeUnexpected(status);
+  }
+  const int32_t firstDayOfWeek =
+      extractISODayOfTheWeek(daysSinceEpochOfFirstDayOfMonth);
+
+  int32_t days;
+  if (dayOfWeek < 1) {
+    days = 7 - std::abs(dayOfWeek - 1) % 7;
+  } else if (dayOfWeek > 7) {
+    days = (dayOfWeek - 1) % 7;
+  } else {
+    days = dayOfWeek % 7;
+  }
+  return daysSinceEpochOfFirstDayOfMonth - (firstDayOfWeek - 1) +
+      7 * (weekOfMonth - 1) + days - 1;
+}
+
 int64_t daysSinceEpochFromDayOfYear(int32_t year, int32_t dayOfYear) {
   if (!isValidDayOfYear(year, dayOfYear)) {
     BOLT_USER_FAIL("Day of year out of range: {}", dayOfYear);
@@ -811,7 +925,7 @@ castFromDateString(const char* str, size_t len, bool isIso8601) {
   return daysSinceEpoch;
 }
 
-int32_t extractISODayOfTheWeek(int32_t daysSinceEpoch) {
+int32_t extractISODayOfTheWeek(int64_t daysSinceEpoch) {
   // date of 0 is 1970-01-01, which was a Thursday (4)
   // -7 = 4
   // -6 = 5
@@ -830,10 +944,10 @@ int32_t extractISODayOfTheWeek(int32_t daysSinceEpoch) {
   // 7  = 4
   if (daysSinceEpoch < 0) {
     // negative date: start off at 4 and cycle downwards
-    return (7 - ((-int64_t(daysSinceEpoch) + 3) % 7));
+    return (7 - ((-::bytedance::bolt::int128_t(daysSinceEpoch) + 3) % 7));
   } else {
     // positive date: start off at 4 and cycle upwards
-    return ((int64_t(daysSinceEpoch) + 3) % 7) + 1;
+    return ((::bytedance::bolt::int128_t(daysSinceEpoch) + 3) % 7) + 1;
   }
 }
 
