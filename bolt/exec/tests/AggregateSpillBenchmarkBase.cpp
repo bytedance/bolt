@@ -52,6 +52,7 @@ std::unique_ptr<RowContainer> makeRowContainer(
       false, // isJoinBuild
       true, // hasProbedFlag
       false, // hasNormalizedKey
+      false, // useListRowIndex
       pool.get());
 }
 

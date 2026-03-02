@@ -435,6 +435,7 @@ class AggregationTest : public OperatorTestBase,
         false,
         true,
         true,
+        false,
         pool_.get());
   }
 
