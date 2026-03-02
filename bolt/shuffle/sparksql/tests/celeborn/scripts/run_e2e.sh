@@ -2,16 +2,16 @@
 #
 # Start a local Celeborn cluster, run shuffle e2e tests, then clean up.
 #
-# Usage: run_e2e.sh [--build-type Debug|Release] [build_dir]
+# Usage: run_e2e.sh [--build-type Debug|Release]
+# Build directory is resolved as _build/<build-type>.
 #
 # Environment variables (all optional):
-#   BOLT_CELEBORN_RUNTIME_DIR          - root for all runtime state (default: /tmp/bolt-celeborn-runtime-$USER)
-#   BOLT_CELEBORN_HOME                 - extracted Celeborn binary dir
-#   BOLT_CELEBORN_SOURCE_HOME          - Celeborn git source dir
+#   BOLT_CELEBORN_GIT_REPO             - Celeborn git repo URL (default: https://github.com/apache/celeborn.git)
 #   BOLT_CELEBORN_GIT_REF              - git ref to build (default: 81d89f3)
-#   BOLT_CELEBORN_MASTER_HOST/PORT     - master bind address (default: 127.0.0.1:19097)
+#   BOLT_CELEBORN_MASTER_HOST           - master bind host (default: 127.0.0.1)
+#   BOLT_CELEBORN_MASTER_PORT           - master bind port (default: 19097)
 #   BOLT_CELEBORN_NUM_WORKERS          - number of worker instances (default: $(nproc))
-#   BOLT_CELEBORN_LM_HELPER_JAR_PATH  - override path to Celeborn spark client jar
+#   BOLT_CELEBORN_WORKER_BASE_PORT      - first worker rpc port (default: 19098)
 #   BOLT_CELEBORN_TEST_PATTERNS        - comma-separated ctest -R patterns
 #   BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS - per-test timeout (default: 7200)
 
@@ -24,9 +24,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CELEBORN_TEST_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
-RUNTIME_DIR=${BOLT_CELEBORN_RUNTIME_DIR:-"/tmp/bolt-celeborn-runtime-${USER:-unknown}"}
-CELEBORN_HOME=${BOLT_CELEBORN_HOME:-"${RUNTIME_DIR}/celeborn-bin"}
-CELEBORN_SOURCE_HOME=${BOLT_CELEBORN_SOURCE_HOME:-"${RUNTIME_DIR}/celeborn-src"}
+RUNTIME_DIR="/tmp/bolt-celeborn-runtime-${USER:-unknown}"
+CELEBORN_HOME="${RUNTIME_DIR}/celeborn-bin"
+CELEBORN_SOURCE_HOME="${RUNTIME_DIR}/celeborn-src"
 CELEBORN_GIT_REPO=${BOLT_CELEBORN_GIT_REPO:-"https://github.com/apache/celeborn.git"}
 CELEBORN_GIT_REF=${BOLT_CELEBORN_GIT_REF:-"81d89f3"}
 
@@ -40,15 +40,15 @@ NUM_WORKERS=${BOLT_CELEBORN_NUM_WORKERS:-$(nproc)}
 WORKER_BASE_PORT=${BOLT_CELEBORN_WORKER_BASE_PORT:-19098}
 
 CELEBORN_CONF_DIR="${CELEBORN_HOME}/conf"
-CELEBORN_DATA_DIR=${BOLT_CELEBORN_DATA_DIR:-"${RUNTIME_DIR}/worker-data"}
-CELEBORN_LOG_DIR=${BOLT_CELEBORN_LOG_DIR:-"${RUNTIME_DIR}/logs"}
+CELEBORN_DATA_DIR="${RUNTIME_DIR}/worker-data"
+CELEBORN_LOG_DIR="${RUNTIME_DIR}/logs"
 
 STATE_DIR="${RUNTIME_DIR}/state"
-CELEBORN_PID_DIR=${BOLT_CELEBORN_PID_DIR:-"${STATE_DIR}/pids"}
-LM_ENDPOINT_FILE=${BOLT_CELEBORN_LM_ENDPOINT_FILE:-"${STATE_DIR}/lifecycle_manager.endpoint"}
-LM_STOP_FILE=${BOLT_CELEBORN_LM_STOP_FILE:-"${STATE_DIR}/lifecycle_manager.stop"}
-LM_PID_FILE=${BOLT_CELEBORN_LM_PID_FILE:-"${STATE_DIR}/lifecycle_manager.pid"}
-LM_APP_ID=${BOLT_CELEBORN_LM_APP_ID:-"bolt-shuffle-test-$$"}
+CELEBORN_PID_DIR="${STATE_DIR}/pids"
+LM_ENDPOINT_FILE="${STATE_DIR}/lifecycle_manager.endpoint"
+LM_STOP_FILE="${STATE_DIR}/lifecycle_manager.stop"
+LM_PID_FILE="${STATE_DIR}/lifecycle_manager.pid"
+LM_APP_ID="bolt-shuffle-test-$$"
 
 CTEST_TIMEOUT=${BOLT_CELEBORN_CTEST_TIMEOUT_SECONDS:-7200}
 TEST_LOG_DIR="${RUNTIME_DIR}/test-logs"
@@ -60,24 +60,36 @@ mkdir -p "${RUNTIME_DIR}" "${STATE_DIR}" "${CELEBORN_LOG_DIR}" \
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+usage() {
+  echo "Usage: $0 [--build-type Debug|Release]"
+}
+
 BUILD_TYPE="Release"
-BUILD_DIR=""
 while (($# > 0)); do
   case "$1" in
     --build-type)
       shift
+      if (($# == 0)); then
+        echo "--build-type requires a value" >&2
+        usage
+        exit 1
+      fi
       BUILD_TYPE="$1"
       ;;
     --build-type=*) BUILD_TYPE="${1#*=}" ;;
     -h | --help)
-      echo "Usage: $0 [--build-type Debug|Release] [build_dir]"
+      usage
       exit 0
       ;;
-    *) BUILD_DIR="$1" ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      usage
+      exit 1
+      ;;
   esac
   shift
 done
-: "${BUILD_DIR:=_build/${BUILD_TYPE}}"
+BUILD_DIR="_build/${BUILD_TYPE}"
 
 if [[ "${BUILD_TYPE}" != "Debug" && "${BUILD_TYPE}" != "Release" ]]; then
   echo "Invalid --build-type: ${BUILD_TYPE}" >&2
@@ -319,15 +331,13 @@ start_lifecycle_manager() {
   fi
   rm -f "${LM_STOP_FILE}" "${LM_ENDPOINT_FILE}" "${LM_PID_FILE}"
 
-  # Find the Celeborn spark client jar.
-  local jar_path="${BOLT_CELEBORN_LM_HELPER_JAR_PATH:-}"
-  if [[ -z "${jar_path}" ]]; then
-    for f in "${CELEBORN_HOME}/spark/celeborn-client-spark-"*.jar; do
-      [[ -f "$f" ]] && jar_path="$f" && break
-    done
-  fi
+  # Find the Celeborn spark client jar from extracted Celeborn package.
+  local jar_path=""
+  for f in "${CELEBORN_HOME}/spark/celeborn-client-spark-"*.jar; do
+    [[ -f "$f" ]] && jar_path="$f" && break
+  done
   if [[ -z "${jar_path}" || ! -f "${jar_path}" ]]; then
-    echo "LifecycleManager jar not found. Set BOLT_CELEBORN_LM_HELPER_JAR_PATH." >&2
+    echo "LifecycleManager jar not found under ${CELEBORN_HOME}/spark." >&2
     return 1
   fi
 

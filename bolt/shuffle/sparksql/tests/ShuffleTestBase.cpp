@@ -32,6 +32,7 @@
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
+#include "bolt/shuffle/sparksql/tests/CelebornTestUtils.h"
 #include "bolt/shuffle/sparksql/tests/LocalFileReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MockRssClient.h"
@@ -39,28 +40,18 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <celeborn/client/ShuffleClient.h>
-#include <celeborn/conf/CelebornConf.h>
-#include <folly/init/Init.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <utility>
 
 #include <fmt/format.h>
 #include <vector/ComplexVector.h>
-
-#if defined(_WIN32)
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
@@ -132,89 +123,6 @@ std::string shuffleModeToString(int mode) {
 
 constexpr uint32_t kPidSeed = 42;
 constexpr int kCelebornAttemptId = 0;
-constexpr const char* kRealCelebornEnv = "BOLT_SHUFFLE_TEST_REAL_CELEBORN";
-constexpr const char* kCelebornLmEndpointFileEnv =
-    "BOLT_CELEBORN_LM_ENDPOINT_FILE";
-constexpr const char* kCelebornLmAppIdEnv = "BOLT_CELEBORN_LM_APP_ID";
-
-bool readBoolEnv(const char* env, bool defaultValue = false) {
-  const char* value = std::getenv(env);
-  if (value == nullptr || std::strlen(value) == 0) {
-    return defaultValue;
-  }
-  auto flag = std::string(value);
-  return flag == "1" || flag == "true" || flag == "TRUE";
-}
-
-std::string getEnvOrDefault(const char* env, const std::string& defaultValue) {
-  const char* value = std::getenv(env);
-  if (value == nullptr || std::strlen(value) == 0) {
-    return defaultValue;
-  }
-  return value;
-}
-
-void ensureFollyInitializedForCeleborn() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    int argc = 1;
-    char arg0[] = "bolt-shuffle-test";
-    char* argv[] = {arg0, nullptr};
-    char** argvPtr = argv;
-    folly::init(&argc, &argvPtr, false);
-  });
-}
-
-std::vector<std::shared_ptr<celeborn::client::ShuffleClient>>&
-leakedRealCelebornClients() {
-  static auto* clients =
-      new std::vector<std::shared_ptr<celeborn::client::ShuffleClient>>();
-  return *clients;
-}
-
-std::pair<std::string, int> loadLifecycleManagerEndpointForTests() {
-  const auto endpointFile = getEnvOrDefault(
-      kCelebornLmEndpointFileEnv,
-      "bolt/shuffle/sparksql/tests/celeborn/runtime/state/lifecycle_manager.endpoint");
-  std::ifstream in(endpointFile);
-  BOLT_CHECK(
-      in.good(),
-      "Cannot open lifecycle manager endpoint file: " + endpointFile);
-  std::string endpoint;
-  std::getline(in, endpoint);
-  const auto pos = endpoint.rfind(':');
-  BOLT_CHECK(
-      pos != std::string::npos,
-      "Invalid lifecycle manager endpoint: " + endpoint);
-  return {endpoint.substr(0, pos), std::stoi(endpoint.substr(pos + 1))};
-}
-
-std::shared_ptr<celeborn::client::ShuffleClient>
-createRealCelebornClientForTests(const std::string& appId) {
-  auto [lmHost, lmPort] = loadLifecycleManagerEndpointForTests();
-  ensureFollyInitializedForCeleborn();
-  auto conf = std::make_shared<celeborn::conf::CelebornConf>();
-  auto endpoint = celeborn::client::ShuffleClientEndpoint(conf);
-  auto client =
-      celeborn::client::ShuffleClientImpl::create(appId, conf, endpoint);
-  client->setupLifecycleManagerRef(lmHost, lmPort);
-  return client;
-}
-
-int nextCelebornShuffleIdForTests() {
-  constexpr int kShuffleIdStride = 10000;
-  constexpr int kPidModulo = 50000;
-  constexpr int kShuffleIdBase = 10000;
-#if defined(_WIN32)
-  const int processId = _getpid();
-#else
-  const int processId = static_cast<int>(getpid());
-#endif
-  const int pidBucket = std::abs(processId) % kPidModulo;
-  static std::atomic<int> nextShuffleId{
-      kShuffleIdBase + pidBucket * kShuffleIdStride};
-  return nextShuffleId.fetch_add(1, std::memory_order_relaxed);
-}
 
 const std::vector<DataTypeGroup> dataGroups = {
     DataTypeGroup::kInteger,
@@ -582,6 +490,13 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
   std::shared_ptr<MockRssClient> mockRssClient;
   std::shared_ptr<celeborn::client::ShuffleClient> realCelebornClient;
+  // The guard owns lifecycle cleanup and lazily allocates a unique shuffle id
+  // for real Celeborn runs, so call sites don't need separate id bookkeeping.
+  RealCelebornClientCleanupGuard realCelebornClientCleanupGuard(
+      useRealCeleborn ? &realCelebornClient : nullptr);
+  const int celebornShuffleId =
+      useRealCeleborn ? realCelebornClientCleanupGuard.shuffleId() : 0;
+
   if (param.writerType == PartitionWriterType::kCeleborn) {
     if (useRealCeleborn) {
       auto appId =
@@ -592,22 +507,8 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     }
   }
 
-  struct RealCelebornClientLeakGuard {
-    bool enabled;
-    std::shared_ptr<celeborn::client::ShuffleClient>* client;
-
-    ~RealCelebornClientLeakGuard() {
-      if (enabled && client != nullptr && *client != nullptr) {
-        leakedRealCelebornClients().push_back(std::move(*client));
-      }
-    }
-  };
-  [[maybe_unused]] RealCelebornClientLeakGuard realCelebornClientLeakGuard{
-      useRealCeleborn, &realCelebornClient};
-
   std::vector<ShuffleWriterMetrics> mapperMetrics;
   std::vector<std::string> mapperDataFiles;
-  const int celebornShuffleId = nextCelebornShuffleIdForTests();
 
   for (int m = 0; m < param.numMappers; ++m) {
     std::string dataFile =
@@ -812,7 +713,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     }
   }
   if (useRealCeleborn) {
-    realCelebornClient->cleanupShuffle(celebornShuffleId);
+    realCelebornClientCleanupGuard.cleanupNow();
   }
 
   return result;
