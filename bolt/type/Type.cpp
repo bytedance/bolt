@@ -74,6 +74,7 @@ const std::unordered_map<std::string, TypeKind>& getTypeStringMap() {
       {"FUNCTION", TypeKind::FUNCTION},
       {"UNKNOWN", TypeKind::UNKNOWN},
       {"OPAQUE", TypeKind::OPAQUE},
+      {"VARIANT", TypeKind::VARIANT},
       {"INVALID", TypeKind::INVALID}};
   return kTypeStringMap;
 }
@@ -117,6 +118,7 @@ std::string mapTypeKindToName(const TypeKind& typeKind) {
       {TypeKind::FUNCTION, "FUNCTION"},
       {TypeKind::UNKNOWN, "UNKNOWN"},
       {TypeKind::OPAQUE, "OPAQUE"},
+      {TypeKind::VARIANT, "VARIANT"},
       {TypeKind::INVALID, "INVALID"}};
 
   auto found = typeEnumMap.find(typeKind);
@@ -209,6 +211,9 @@ TypePtr Type::create(const folly::dynamic& obj) {
         return withExtra;
       }
       return it->second;
+    }
+    case TypeKind::VARIANT: {
+      return VARIANT();
     }
     default: {
       return createType(typeKind, std::move(childTypes));
@@ -787,6 +792,48 @@ BOLT_DEFINE_SCALAR_ACCESSOR(VARBINARY);
 
 #undef BOLT_DEFINE_SCALAR_ACCESSOR
 
+std::shared_ptr<const VariantType> VARIANT() {
+  return VariantType::get();
+}
+
+VariantType::VariantType() : children_({VARBINARY(), VARBINARY()}) {}
+
+uint32_t VariantType::size() const {
+  return children_.size();
+}
+
+const std::shared_ptr<const Type>& VariantType::childAt(uint32_t idx) const {
+  BOLT_CHECK_LT(idx, children_.size(), "VariantType has only two children");
+  return children_[idx];
+}
+
+bool VariantType::containsChild(std::string_view name) const {
+  return name == "value" || name == "metadata";
+}
+
+uint32_t VariantType::getChildIdx(const std::string& name) const {
+  if (name == "value") {
+    return 0;
+  }
+  if (name == "metadata") {
+    return 1;
+  }
+  BOLT_USER_FAIL(
+      "Field not found: {}. Available fields are: value, metadata.", name);
+}
+
+const char* VariantType::nameOf(uint32_t idx) const {
+  if (idx == 0) {
+    return "value";
+  }
+  if (idx == 1) {
+    return "metadata";
+  }
+  BOLT_USER_FAIL(
+      "VariantType has only two children. Tried to get name of child '{}'",
+      idx);
+}
+
 TypePtr UNKNOWN() {
   return TypeFactory<TypeKind::UNKNOWN>::create();
 }
@@ -843,6 +890,12 @@ template <>
 TypePtr createType<TypeKind::OPAQUE>(std::vector<TypePtr>&& /*children*/) {
   std::string name{TypeTraits<TypeKind::OPAQUE>::name};
   BOLT_USER_FAIL("Not supported for kind: {}", name);
+}
+
+template <>
+TypePtr createType<TypeKind::VARIANT>(std::vector<TypePtr>&& children) {
+  BOLT_USER_CHECK_EQ(children.size(), 0, "VARIANT should have no children");
+  return VARIANT();
 }
 
 bool Type::containsUnknown() const {
@@ -946,6 +999,8 @@ TypePtr fromKindToScalerType(TypeKind kind) {
       return TIMESTAMP();
     case TypeKind::DOUBLE:
       return DOUBLE();
+    case TypeKind::VARIANT:
+      return VARIANT();
     case TypeKind::UNKNOWN:
       return UNKNOWN();
     default:
@@ -1073,6 +1128,7 @@ const SingletonTypeMap& singletonBuiltInTypes() {
       {"INTERVAL DAY TO SECOND", INTERVAL_DAY_TIME()},
       {"INTERVAL YEAR TO MONTH", INTERVAL_YEAR_MONTH()},
       {"DATE", DATE()},
+      {"VARIANT", VARIANT()},
       {"UNKNOWN", UNKNOWN()},
   };
   return kTypes;

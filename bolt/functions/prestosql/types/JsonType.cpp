@@ -38,10 +38,32 @@
 #include "bolt/expression/StringWriter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/prestosql/json/JsonUtil.h"
+#include "bolt/functions/sparksql/VariantEncoding.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt {
 
 namespace {
+
+/// Convert a VariantValue to its JSON string representation.
+/// Shared between the isMapKey and non-isMapKey branches of generateJsonTyped.
+inline void appendVariantAsJson(
+    const VariantValue& value,
+    std::string& result) {
+  if (!value.metadata.empty()) {
+    auto decoded = functions::sparksql::variant::SparkVariantReader::decode(
+        value.value, value.metadata);
+    if (decoded.has_value()) {
+      result.append(*decoded);
+    } else {
+      result.append("null");
+    }
+  } else if (simdjson::validate_utf8(value.value.data(), value.value.size())) {
+    result.append(value.value);
+  } else {
+    folly::json::serialization_opts opts;
+    folly::json::escapeString(value.value, result, opts);
+  }
+}
 
 template <typename T, bool isMapKey = false>
 void generateJsonTyped(
@@ -147,6 +169,8 @@ void generateJsonTyped(
               "Casting {} to JSON is not supported in to_json function.",
               type->toString()));
         }
+      } else if constexpr (std::is_same_v<T, VariantValue>) {
+        appendVariantAsJson(value, result);
       } else {
         // No other physical types are currently supported
         BOLT_FAIL(fmt::format(
@@ -158,12 +182,14 @@ void generateJsonTyped(
         result.append(value ? "true" : "false");
       } else if constexpr (std::is_same_v<T, Timestamp>) {
         result.append(std::to_string(value));
+      } else if constexpr (std::is_same_v<T, VariantValue>) {
+        appendVariantAsJson(value, result);
       } else if (type->isDate()) {
         result.append(DATE()->toString(value));
       } else if (type->isDecimal()) {
         result.append(DecimalUtil::toString(value, type));
       } else {
-        folly::toAppend<std::string, T>(value, &result);
+        folly::toAppend(value, &result);
       }
     }
 
@@ -785,6 +811,13 @@ simdjson::error_code appendMapKey<TypeKind::VARBINARY>(
 
 template <>
 simdjson::error_code appendMapKey<TypeKind::TIMESTAMP>(
+    const std::string_view& /*value*/,
+    exec::GenericWriter& /*writer*/) {
+  return simdjson::INCORRECT_TYPE;
+}
+
+template <>
+simdjson::error_code appendMapKey<TypeKind::VARIANT>(
     const std::string_view& /*value*/,
     exec::GenericWriter& /*writer*/) {
   return simdjson::INCORRECT_TYPE;

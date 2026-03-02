@@ -44,6 +44,7 @@
 #include "bolt/dwio/parquet/reader/StringColumnReader.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 #include "bolt/dwio/parquet/reader/TimestampColumnReader.h"
+#include "bolt/dwio/parquet/reader/VariantColumnReader.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
 namespace bytedance::bolt::parquet {
 
@@ -124,6 +125,10 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
 
     case TypeKind::ROW:
       return std::make_unique<StructColumnReader>(
+          columnReaderOptions, requestedType, fileType, params, scanSpec, pool);
+
+    case TypeKind::VARIANT:
+      return std::make_unique<VariantColumnReader>(
           columnReaderOptions, requestedType, fileType, params, scanSpec, pool);
 
     case TypeKind::VARBINARY:

@@ -38,6 +38,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
 DECLARE_int32(shuffle_zstd_compression_level);
@@ -165,6 +166,8 @@ std::string_view typeToEncodingName(const TypePtr& type) {
       return "MAP";
     case TypeKind::ROW:
       return isTimestampWithTimeZoneType(type) ? "LONG_ARRAY" : "ROW";
+    case TypeKind::VARIANT:
+      return "ROW";
     case TypeKind::UNKNOWN:
       return "BYTE_ARRAY";
     default:
@@ -707,6 +710,14 @@ void scatterStructNulls(
     RowVector& row,
     vector_size_t rowOffset);
 
+void scatterStructNulls(
+    vector_size_t size,
+    vector_size_t scatterSize,
+    const vector_size_t* scatter,
+    const uint64_t* incomingNulls,
+    VariantVector& row,
+    vector_size_t rowOffset);
+
 // Scatters existing nulls and adds 'incomingNulls' to the gaps. 'oldSize' is
 // the number of valid bits in the nulls of 'vector'. 'vector' must have been
 // resized to the new size before calling this.
@@ -841,6 +852,12 @@ void scatterVector(
       scatterStructNulls(row->size(), 0, nullptr, nullptr, *row, offset);
       break;
     }
+    case VectorEncoding::Simple::VARIANT: {
+      auto* variant = vector->asUnchecked<VariantVector>();
+      scatterStructNulls(
+          variant->size(), 0, nullptr, nullptr, *variant, offset);
+      break;
+    }
     case VectorEncoding::Simple::FLAT: {
       if (incomingNulls != nullptr) {
         BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
@@ -866,26 +883,39 @@ void scatterVector(
 // merge child struct nulls into the nulls from enclosing structs so
 // that the leaves only get scattered once, considering all nulls
 // from all enclosing structs.
-void scatterStructNulls(
+template <typename T>
+void scatterStructNullsImpl(
     vector_size_t size,
     vector_size_t scatterSize,
     const vector_size_t* scatter,
     const uint64_t* incomingNulls,
-    RowVector& row,
+    T& row,
     vector_size_t rowOffset) {
   const auto oldSize = row.size();
-  if (isTimestampWithTimeZoneType(row.type())) {
-    // The timestamp with tz case is special. The child vectors are aligned with
-    // the struct even if the struct has nulls.
-    if (incomingNulls != nullptr) {
-      scatterVector(
-          size, scatterSize, scatter, incomingNulls, row.childAt(0), rowOffset);
-      scatterVector(
-          size, scatterSize, scatter, incomingNulls, row.childAt(1), rowOffset);
-      row.unsafeResize(size);
-      scatterNulls(oldSize, incomingNulls, row);
+  if constexpr (std::is_same_v<T, RowVector>) {
+    if (isTimestampWithTimeZoneType(row.type())) {
+      // The timestamp with tz case is special. The child vectors are aligned
+      // with the struct even if the struct has nulls.
+      if (incomingNulls != nullptr) {
+        scatterVector(
+            size,
+            scatterSize,
+            scatter,
+            incomingNulls,
+            row.childAt(0),
+            rowOffset);
+        scatterVector(
+            size,
+            scatterSize,
+            scatter,
+            incomingNulls,
+            row.childAt(1),
+            rowOffset);
+        row.unsafeResize(size);
+        scatterNulls(oldSize, incomingNulls, row);
+      }
+      return;
     }
-    return;
   }
 
   const uint64_t* childIncomingNulls = incomingNulls;
@@ -936,7 +966,15 @@ void scatterStructNulls(
           childScatterSize,
           childScatter,
           childIncomingNulls,
-          *child->asUnchecked<RowVector>(),
+          *child->template asUnchecked<RowVector>(),
+          rowOffset);
+    } else if (child->encoding() == VectorEncoding::Simple::VARIANT) {
+      scatterStructNulls(
+          size,
+          childScatterSize,
+          childScatter,
+          childIncomingNulls,
+          *child->template asUnchecked<VariantVector>(),
           rowOffset);
     } else {
       scatterVector(
@@ -959,6 +997,28 @@ void scatterStructNulls(
   }
 }
 
+void scatterStructNulls(
+    vector_size_t size,
+    vector_size_t scatterSize,
+    const vector_size_t* scatter,
+    const uint64_t* incomingNulls,
+    RowVector& row,
+    vector_size_t rowOffset) {
+  scatterStructNullsImpl(
+      size, scatterSize, scatter, incomingNulls, row, rowOffset);
+}
+
+void scatterStructNulls(
+    vector_size_t size,
+    vector_size_t scatterSize,
+    const vector_size_t* scatter,
+    const uint64_t* incomingNulls,
+    VariantVector& row,
+    vector_size_t rowOffset) {
+  scatterStructNullsImpl(
+      size, scatterSize, scatter, incomingNulls, row, rowOffset);
+}
+
 void readRowVector(
     ByteInputStream* source,
     const TypePtr& type,
@@ -966,24 +1026,56 @@ void readRowVector(
     VectorPtr& result,
     vector_size_t resultOffset,
     bool useLosslessTimestamp) {
-  auto* row = result->as<RowVector>();
   if (isTimestampWithTimeZoneType(type)) {
+    auto* row = result->as<RowVector>();
     readTimestampWithTimeZone(source, pool, row, resultOffset);
     return;
   }
 
   const int32_t numChildren = source->read<int32_t>();
-  auto& children = row->children();
 
-  const auto& childTypes = type->asRow().children();
+  std::vector<VectorPtr>* children;
+  auto encoding = result->encoding();
+  BOLT_CHECK(
+      encoding == VectorEncoding::Simple::ROW ||
+          encoding == VectorEncoding::Simple::VARIANT,
+      "readRowVector: unexpected encoding {}, expected ROW or VARIANT",
+      encoding);
+  if (encoding == VectorEncoding::Simple::ROW) {
+    children = &result->asUnchecked<RowVector>()->children();
+  } else {
+    children = &result->asUnchecked<VariantVector>()->children();
+  }
+
+  // The on-wire encoding for both ROW and VARIANT is a ROW-like structure.
+  // Don't assume the logical type is a RowType (VARIANT is not).
+  BOLT_USER_CHECK_EQ(
+      numChildren,
+      static_cast<int32_t>(type->size()),
+      "Mismatched number of children in serialized struct. Expected {} for type {}, got {}",
+      type->size(),
+      type->toString(),
+      numChildren);
+
+  std::vector<TypePtr> childTypes;
+  childTypes.reserve(type->size());
+  for (uint32_t i = 0; i < type->size(); ++i) {
+    childTypes.push_back(type->childAt(i));
+  }
   readColumns(
-      source, pool, childTypes, children, resultOffset, useLosslessTimestamp);
+      source, pool, childTypes, *children, resultOffset, useLosslessTimestamp);
 
   auto size = source->read<int32_t>();
   // Set the size of the row but do not alter the size of the
   // children. The children get adjusted in a separate pass over the
   // data. The parent and child size MUST be separate until the second pass.
-  row->BaseVector::resize(resultOffset + size);
+  if (result->encoding() == VectorEncoding::Simple::ROW) {
+    result->asUnchecked<RowVector>()->BaseVector::resize(resultOffset + size);
+  } else {
+    result->asUnchecked<VariantVector>()->BaseVector::resize(
+        resultOffset + size);
+  }
+
   for (int32_t i = 0; i <= size; ++i) {
     source->read<int32_t>();
   }
@@ -1039,6 +1131,7 @@ void readColumns(
           {TypeKind::ARRAY, &readArrayVector},
           {TypeKind::MAP, &readMapVector},
           {TypeKind::ROW, &readRowVector},
+          {TypeKind::VARIANT, &readRowVector},
           {TypeKind::UNKNOWN, &read<UnknownValue>}};
 
   BOLT_CHECK_EQ(types.size(), results.size());
@@ -1193,6 +1286,7 @@ class VectorStream {
 
     switch (type_->kind()) {
       case TypeKind::ROW:
+      case TypeKind::VARIANT:
         if (isTimestampWithTimeZoneType(type_)) {
           values_.startWrite(initialNumRows * 4);
           break;
@@ -1251,6 +1345,9 @@ class VectorStream {
 
     if ((*vector)->encoding() == VectorEncoding::Simple::ROW) {
       return (*vector)->as<RowVector>()->childAt(idx);
+    }
+    if ((*vector)->encoding() == VectorEncoding::Simple::VARIANT) {
+      return (*vector)->as<VariantVector>()->childAt(idx);
     }
     return std::nullopt;
   }
@@ -1420,6 +1517,7 @@ class VectorStream {
 
     switch (type_->kind()) {
       case TypeKind::ROW:
+      case TypeKind::VARIANT:
         if (isTimestampWithTimeZoneType(type_)) {
           writeInt32(out, nullCount_ + nonNullCount_);
           flushNulls(out);
@@ -1725,11 +1823,22 @@ void serializeRowVector(
     const BaseVector* vector,
     const folly::Range<const IndexRange*>& ranges,
     VectorStream* stream) {
-  auto rowVector = dynamic_cast<const RowVector*>(vector);
-
   if (isTimestampWithTimeZoneType(vector->type())) {
+    auto rowVector = dynamic_cast<const RowVector*>(vector);
     serializeTimestampWithTimeZone(rowVector, ranges, stream);
     return;
+  }
+
+  const std::vector<VectorPtr>* children;
+  size_t childrenSize;
+  if (vector->encoding() == VectorEncoding::Simple::ROW) {
+    auto rowVector = vector->asUnchecked<RowVector>();
+    children = &rowVector->children();
+    childrenSize = rowVector->childrenSize();
+  } else {
+    auto variantVector = vector->asUnchecked<VariantVector>();
+    children = &variantVector->children();
+    childrenSize = variantVector->childrenSize();
   }
 
   std::vector<IndexRange> childRanges;
@@ -1737,7 +1846,7 @@ void serializeRowVector(
     auto begin = ranges[i].begin;
     auto end = begin + ranges[i].size;
     for (auto offset = begin; offset < end; ++offset) {
-      if (rowVector->isNullAt(offset)) {
+      if (vector->isNullAt(offset)) {
         stream->appendNull();
       } else {
         stream->appendNonNull();
@@ -1746,9 +1855,8 @@ void serializeRowVector(
       }
     }
   }
-  for (int32_t i = 0; i < rowVector->childrenSize(); ++i) {
-    serializeColumn(
-        rowVector->childAt(i).get(), childRanges, stream->childAt(i));
+  for (int32_t i = 0; i < childrenSize; ++i) {
+    serializeColumn((*children)[i].get(), childRanges, stream->childAt(i));
   }
 }
 
@@ -1962,6 +2070,7 @@ void serializeColumn(
       }
       break;
     case VectorEncoding::Simple::ROW:
+    case VectorEncoding::Simple::VARIANT:
       serializeRowVector(vector, ranges, stream);
       break;
     case VectorEncoding::Simple::ARRAY:

@@ -32,6 +32,7 @@
 
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance {
 namespace bolt {
 
@@ -69,6 +70,13 @@ struct KindToFlatVector<TypeKind::ROW> {
   using type = RowVector;
   using WrapperType = ComplexType;
   using HashRowType = StringView;
+};
+
+template <>
+struct KindToFlatVector<TypeKind::VARIANT> {
+  using type = VariantVector;
+  using WrapperType = VariantValue;
+  using HashRowType = VariantValue;
 };
 
 template <>

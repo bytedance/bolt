@@ -75,14 +75,25 @@ class TypeWithId : public bolt::Tree<std::shared_ptr<const TypeWithId>> {
   const std::shared_ptr<const TypeWithId>& childAt(uint32_t idx) const override;
 
   bool containsChild(const std::string& name) const {
-    BOLT_CHECK_EQ(type_->kind(), bolt::TypeKind::ROW);
-    return type_->as<bolt::TypeKind::ROW>().containsChild(name);
+    if (type_->kind() == bolt::TypeKind::ROW) {
+      return type_->as<bolt::TypeKind::ROW>().containsChild(name);
+    }
+    if (type_->kind() == bolt::TypeKind::VARIANT) {
+      return type_->as<bolt::TypeKind::VARIANT>().containsChild(name);
+    }
+    BOLT_FAIL(
+        "containsChild is not supported for type kind: {}", type_->kind());
   }
 
   const std::shared_ptr<const TypeWithId>& childByName(
       const std::string& name) const {
-    BOLT_CHECK_EQ(type_->kind(), bolt::TypeKind::ROW);
-    return childAt(type_->as<bolt::TypeKind::ROW>().getChildIdx(name));
+    if (type_->kind() == bolt::TypeKind::ROW) {
+      return childAt(type_->as<bolt::TypeKind::ROW>().getChildIdx(name));
+    }
+    if (type_->kind() == bolt::TypeKind::VARIANT) {
+      return childAt(type_->as<bolt::TypeKind::VARIANT>().getChildIdx(name));
+    }
+    BOLT_FAIL("childByName is not supported for type kind: {}", type_->kind());
   }
 
   const std::vector<std::shared_ptr<const TypeWithId>>& getChildren() const {

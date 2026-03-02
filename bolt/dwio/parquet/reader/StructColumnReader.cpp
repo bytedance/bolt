@@ -51,8 +51,9 @@ StructColumnReader::StructColumnReader(
           fileType,
           params,
           scanSpec) {
-  if (fileType->isDCMap()) {
+  if (fileType->isDCMap() || fileType->type()->isVariant()) {
     // scanSpec for DCMap is a map, but we read it as a Struct.
+    // scanSpec for Variant is a primitive, but we read it as a Struct.
     // manually add Struct type to scanSpec.
     // remove children from previous fileType or original Map type
     // which may not be applicable to current fileType
