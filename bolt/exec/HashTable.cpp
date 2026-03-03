@@ -2065,11 +2065,14 @@ template <>
 int32_t HashTable<false>::listNullKeyRows(
     NullKeyRowsIterator* iter,
     int32_t maxRows,
-    char** rows) {
+    char** rows,
+    const std::vector<std::unique_ptr<VectorHasher>>& hashers) {
   if (!iter->initialized) {
     BOLT_CHECK_GT(nextOffset_, 0);
+    // Null-aware joins allow only one join key.
     BOLT_CHECK_EQ(hashers_.size(), 1);
-    HashLookup lookup(hashers_, enableJit_);
+    BOLT_CHECK_EQ(hashers_.size(), hashers.size());
+    HashLookup lookup(hashers, enableJit_);
     if (hashMode_ == HashMode::kHash) {
       lookup.hashes.push_back(VectorHasher::kNullHash);
     } else {
@@ -2093,8 +2096,11 @@ int32_t HashTable<false>::listNullKeyRows(
 }
 
 template <>
-int32_t
-HashTable<true>::listNullKeyRows(NullKeyRowsIterator*, int32_t, char**) {
+int32_t HashTable<true>::listNullKeyRows(
+    NullKeyRowsIterator*,
+    int32_t,
+    char**,
+    const std::vector<std::unique_ptr<VectorHasher>>&) {
   BOLT_UNREACHABLE();
 }
 

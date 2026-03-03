@@ -293,8 +293,11 @@ class BaseHashTable {
 
   /// Returns all rows with null keys.  Used by null-aware joins (e.g. anti or
   /// left semi project).
-  virtual int32_t
-  listNullKeyRows(NullKeyRowsIterator* iter, int32_t maxRows, char** rows) = 0;
+  virtual int32_t listNullKeyRows(
+      NullKeyRowsIterator* iter,
+      int32_t maxRows,
+      char** rows,
+      const std::vector<std::unique_ptr<VectorHasher>>& hashers) = 0;
 
   virtual void prepareJoinTable(
       std::vector<std::unique_ptr<BaseHashTable>> tables,
@@ -641,7 +644,8 @@ class HashTable : public BaseHashTable {
   int32_t listNullKeyRows(
       NullKeyRowsIterator* iter,
       int32_t maxRows,
-      char** rows) override;
+      char** rows,
+      const std::vector<std::unique_ptr<VectorHasher>>& hashers) override;
 
   void clear() override;
 
