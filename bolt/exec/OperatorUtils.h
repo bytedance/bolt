@@ -119,6 +119,22 @@ RowVectorPtr wrapAndCombineDict(
     const std::vector<VectorPtr>& childVectors,
     memory::MemoryPool* FOLLY_NONNULL pool);
 
+/// Wraps all children of the specified row vector into a dictionary using
+/// specified mapping. Returns vector as-is if mapping is null.
+RowVectorPtr
+wrap(vector_size_t size, BufferPtr mapping, const RowVectorPtr& vector);
+
+/// Wraps 'childVectors' into a dictionary with 'rowType' using specified
+/// mapping. Returns an empty vector if mapping is null. This is different than
+/// 'wrap' which takes an input vector. The latter returns the input vector if
+/// mapping is null.
+RowVectorPtr wrap(
+    vector_size_t size,
+    BufferPtr mapping,
+    const RowTypePtr& rowType,
+    const std::vector<VectorPtr>& childVectors,
+    memory::MemoryPool* pool);
+
 // Ensures that all LazyVectors reachable from 'input' are loaded for all
 // rows.
 void loadColumns(const RowVectorPtr& input, core::ExecCtx& execCtx);
