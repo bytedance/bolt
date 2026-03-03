@@ -23,6 +23,9 @@ target_link_libraries(
          bolt_vector
          arrow::arrow
          Paimon::core
+    PRIVATE
+        $<LINK_LIBRARY:WHOLE_ARCHIVE,Paimon::format_avro>
+        Paimon::libavrocpp
 )
 
 if(${BOLT_BUILD_TESTING})

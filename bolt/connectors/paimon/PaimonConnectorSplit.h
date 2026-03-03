@@ -5,22 +5,24 @@
 
 #pragma once
 
+#include <folly/Range.h>
+#include <paimon/table/source/split.h>
 #include "bolt/connectors/Connector.h"
 
 namespace bytedance::bolt::connector::paimon {
 
 struct PaimonConnectorSplit : public connector::ConnectorSplit {
-  explicit PaimonConnectorSplit(const std::string& connectorId, std::string serializedSplit)
-      : ConnectorSplit(connectorId), serializedSplit(std::move(serializedSplit)) {}
+  explicit PaimonConnectorSplit(
+      const std::string& connectorId,
+      std::shared_ptr<::paimon::Split> split)
+      : ConnectorSplit(connectorId), split_(std::move(split)) {}
 
-  // The serialized paimon::Split (e.g. JSON or binary)
-  std::string serializedSplit;
+  std::shared_ptr<::paimon::Split> split_;
 
   folly::dynamic serialize() const override {
-      folly::dynamic obj = folly::dynamic::object;
-      obj["connectorId"] = connectorId;
-      obj["serializedSplit"] = serializedSplit;
-      return obj;
+    folly::dynamic obj = folly::dynamic::object;
+    obj["connectorId"] = connectorId;
+    return obj;
   }
 };
 

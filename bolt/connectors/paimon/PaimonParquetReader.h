@@ -8,12 +8,13 @@
 #include <memory>
 #include <string>
 
-#include "bolt/common/file/File.h" // for bolt::ReadFile
-#include "bolt/common/file/Region.h"
 #include <folly/Range.h>
 #include <folly/io/IOBuf.h>
-#include "paimon/fs/file_system.h" // for ::paimon::InputStream
 #include <paimon/format/file_format.h>
+#include <paimon/format/file_format_factory.h>
+#include <paimon/fs/file_system.h>
+#include "bolt/common/file/File.h"
+#include "bolt/common/file/Region.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -23,8 +24,10 @@ class PaimonReadFile : public bolt::ReadFile {
   explicit PaimonReadFile(std::shared_ptr<::paimon::InputStream> is)
       : input_(std::move(is)) {}
 
-  std::string_view pread(uint64_t offset, uint64_t length, void* buf) const override {
-    auto res = input_->Read(static_cast<char*>(buf), static_cast<uint32_t>(length), offset);
+  std::string_view pread(uint64_t offset, uint64_t length, void* buf)
+      const override {
+    auto res = input_->Read(
+        static_cast<char*>(buf), static_cast<uint32_t>(length), offset);
     if (!res.ok()) {
       throw std::runtime_error(res.status().ToString());
     }
@@ -43,7 +46,8 @@ class PaimonReadFile : public bolt::ReadFile {
     uint64_t off = offset;
     for (const auto& range : buffers) {
       if (range.data()) {
-        auto res = input_->Read(range.data(), static_cast<uint32_t>(range.size()), off);
+        auto res = input_->Read(
+            range.data(), static_cast<uint32_t>(range.size()), off);
         if (!res.ok()) {
           throw std::runtime_error(res.status().ToString());
         }
@@ -121,16 +125,35 @@ class PaimonReadFile : public bolt::ReadFile {
 
 class PaimonParquetReader : public ::paimon::FileFormat {
  public:
+  explicit PaimonParquetReader(
+      const std::map<std::string, std::string>& /* options */) {}
+
   const std::string& Identifier() const override;
 
-  ::paimon::Result<std::unique_ptr<::paimon::ReaderBuilder>> CreateReaderBuilder(
-      int32_t batch_size) const override;
+  ::paimon::Result<std::unique_ptr<::paimon::ReaderBuilder>>
+  CreateReaderBuilder(int32_t batch_size) const override;
 
-  ::paimon::Result<std::unique_ptr<::paimon::WriterBuilder>> CreateWriterBuilder(
-      ::ArrowSchema* schema, int32_t batch_size) const override;
+  ::paimon::Result<std::unique_ptr<::paimon::WriterBuilder>>
+  CreateWriterBuilder(::ArrowSchema* schema, int32_t batch_size) const override;
 
-  ::paimon::Result<std::unique_ptr<::paimon::FormatStatsExtractor>> CreateStatsExtractor(
-      ::ArrowSchema* schema) const override;
+  ::paimon::Result<std::unique_ptr<::paimon::FormatStatsExtractor>>
+  CreateStatsExtractor(::ArrowSchema* schema) const override;
 };
 
 } // namespace bytedance::bolt::connector::paimon
+
+namespace paimon {
+
+class ParquetFileFormatFactory : public ::paimon::FileFormatFactory {
+ public:
+  static constexpr char kIDENTIFIER[] = "parquet";
+
+  const char* Identifier() const override {
+    return kIDENTIFIER;
+  }
+
+  ::paimon::Result<std::unique_ptr<::paimon::FileFormat>> Create(
+      const std::map<std::string, std::string>& options) const override;
+};
+
+} // namespace paimon

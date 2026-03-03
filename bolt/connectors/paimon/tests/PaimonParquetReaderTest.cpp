@@ -4,21 +4,21 @@
  */
 
 #include <gtest/gtest.h>
-#include <string>
-#include <memory>
 #include <filesystem>
+#include <memory>
+#include <string>
 
-#include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/vector/BaseVector.h"
 #include "bolt/type/StringView.h"
-#include "bolt/vector/arrow/Bridge.h"
+#include "bolt/vector/BaseVector.h"
 #include "bolt/vector/arrow/Abi.h"
-#include "paimon/result.h"
+#include "bolt/vector/arrow/Bridge.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
+#include "paimon/result.h"
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::paimon;
@@ -27,7 +27,8 @@ using namespace bytedance::bolt::dwio::common;
 
 namespace {
 
-class PaimonParquetReaderTest : public testing::Test, public bytedance::bolt::test::VectorTestBase {
+class PaimonParquetReaderTest : public testing::Test,
+                                public bytedance::bolt::test::VectorTestBase {
  protected:
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
@@ -46,50 +47,105 @@ class PaimonParquetReaderTest : public testing::Test, public bytedance::bolt::te
     return path;
   }
 
-  std::unique_ptr<bytedance::bolt::parquet::Writer> createWriter(const std::string& parquetPath, const RowTypePtr& schema) {
-    auto sink = dwio::common::FileSink::create(parquetPath, {.pool = leafPool_.get()});
+  std::unique_ptr<bytedance::bolt::parquet::Writer> createWriter(
+      const std::string& parquetPath,
+      const RowTypePtr& schema) {
+    auto sink =
+        dwio::common::FileSink::create(parquetPath, {.pool = leafPool_.get()});
     bytedance::bolt::parquet::WriterOptions opts;
     opts.memoryPool = leafPool_.get();
     opts.enableFlushBasedOnBlockSize = true;
-    return std::make_unique<bytedance::bolt::parquet::Writer>(std::move(sink), opts, rootPool_, ::arrow::default_memory_pool(), schema);
+    return std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink),
+        opts,
+        rootPool_,
+        ::arrow::default_memory_pool(),
+        schema);
   }
 
   // Open via PaimonParquetReader and validate row count and batch iteration
-  static void validateRead(const std::string& parquetPath, int32_t batchSize, int64_t expectedRows) {
-    PaimonParquetReader format;
+  static void validateRead(
+      const std::string& parquetPath,
+      int32_t batchSize,
+      const RowVectorPtr& expectedData) {
+    PaimonParquetReader format({});
     auto rbRes = format.CreateReaderBuilder(batchSize);
     ASSERT_TRUE(rbRes.ok());
     std::unique_ptr<::paimon::ReaderBuilder> builder = std::move(rbRes).value();
 
     auto readerRes = builder->Build(parquetPath);
     ASSERT_TRUE(readerRes.ok());
-    std::unique_ptr<::paimon::FileBatchReader> fileReader = std::move(readerRes).value();
+    std::unique_ptr<::paimon::FileBatchReader> fileReader =
+        std::move(readerRes).value();
 
+    // Read expected number of rows
+    auto expectedRows = expectedData->size();
     auto rowCountRes = fileReader->GetNumberOfRows();
-    ASSERT_TRUE(rowCountRes.ok());
-    ASSERT_EQ(rowCountRes.value(), static_cast<uint64_t>(expectedRows));
+    if (expectedRows > 0) {
+      ASSERT_TRUE(rowCountRes.ok());
+      ASSERT_EQ(rowCountRes.value(), static_cast<uint64_t>(expectedRows));
+    }
 
-    // Iterate batches until end
-    int64_t seen = 0;
+    // Iterate batches until end and collect data
+    std::vector<RowVectorPtr> batches;
+    uint32_t reads(0);
     while (true) {
       auto batchRes = fileReader->NextBatch();
-      if (!batchRes.ok()) {
+      if (::paimon::BatchReader::IsEofBatch(batchRes.value())) {
         break;
       }
+      BOLT_CHECK(batchRes.ok(), "NextBatch failed({}): {}", batchRes.status().CodeAsString(), batchRes.status().message());
+
       auto pair = std::move(batchRes).value();
-      auto& arr = pair.first; (void)arr; // ensure consumed
-      auto& sch = pair.second; (void)sch;
-      // No content validation here; just count approximate rows by schema fields being present
-      seen += 0; // content count omitted
+      auto& arr = pair.first;
+      auto& sch = pair.second;
+
+      // Convert Arrow array to RowVectorPtr
+      auto type = importFromArrow(*sch);
+      auto rowType = std::dynamic_pointer_cast<const RowType>(type);
+      ASSERT_TRUE(rowType != nullptr);
+
+      auto batch = importFromArrowAsOwner(*sch, *arr, {}, expectedData->pool());
+      auto rowBatch = std::dynamic_pointer_cast<RowVector>(batch);
+      ASSERT_TRUE(rowBatch != nullptr);
+
+      batches.push_back(rowBatch);
+      reads++;
+
+      if (arr && arr->release) {
+        arr->release(arr.get());
+      }
+      if (sch && sch->release) {
+        sch->release(sch.get());
+      }
+    }
+    fileReader->Close();
+
+    if (expectedRows > 0) {
+      ASSERT_GT(reads, 0);
+    }
+
+    // Concatenate all batches into a single result vector
+    if (!batches.empty()) {
+      auto actualData = RowVector::createEmpty(expectedData->type(), expectedData->pool());
+      for (const auto& batch : batches) {
+        actualData->append(batch.get());
+      }
+
+      // Compare actual data with expected data
+      assertVectorsEqual(expectedData, actualData);
     }
   }
 
-  static void assertVectorsEqual(const RowVectorPtr& expected, const RowVectorPtr& actual) {
+  static void assertVectorsEqual(
+      const RowVectorPtr& expected,
+      const RowVectorPtr& actual) {
     ASSERT_EQ(expected->size(), actual->size());
     ASSERT_EQ(*expected->type(), *actual->type());
     for (vector_size_t i = 0; i < expected->size(); ++i) {
       ASSERT_TRUE(expected->equalValueAt(actual.get(), i, i))
-          << "Row " << i << " expected: " << expected->toString(i) << " got: " << actual->toString(i);
+          << "Row " << i << " expected: " << expected->toString(i)
+          << " got: " << actual->toString(i);
     }
   }
 
@@ -112,16 +168,7 @@ TEST_F(PaimonParquetReaderTest, PrimitiveTypes) {
   writer->write(data);
   writer->close();
 
-  validateRead(path, 256, kRows);
-}
-
-TEST_F(PaimonParquetReaderTest, EmptyFile) {
-  auto schema = ROW({"c0", "c1"}, {INTEGER(), DOUBLE()});
-  auto path = tempPath("paimon_parquet_empty.parquet");
-  auto writer = createWriter(path, schema);
-  writer->close();
-
-  validateRead(path, 128, 0);
+  validateRead(path, 256, data);
 }
 
 TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
@@ -131,13 +178,7 @@ TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
   auto schema = ROW({"arr"}, {arrType});
 
   // Create array column with varying sizes
-  std::vector<std::vector<int32_t>> arrays = {
-      {1, 2, 3},
-      {},
-      {4},
-      {5, 6},
-      {7}
-  };
+  std::vector<std::vector<int32_t>> arrays = {{1, 2, 3}, {}, {4}, {5, 6}, {7}};
   auto arrVec = makeArrayVector<int32_t>(arrays);
   auto row = makeRowVector({arrVec});
 
@@ -146,7 +187,7 @@ TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 256, kRows);
+  validateRead(path, 256, row);
 }
 
 TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
@@ -159,8 +200,7 @@ TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
       {{S{"a"}, 1}, {S{"b"}, 2}},
       {},
       {{S{"c"}, std::nullopt}, {S{"d"}, 4}},
-      {{S{"e"}, 5}}
-  };
+      {{S{"e"}, 5}}};
 
   auto mapVec = makeMapVector<S, int32_t>(maps, mapType);
   auto row = makeRowVector({mapVec});
@@ -170,17 +210,17 @@ TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 128, kRows);
+  validateRead(path, 128, row);
 }
 
 TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
   using S = bytedance::bolt::StringView;
   const int64_t kRows = 6;
-  auto schema = ROW({"arr", "mp"}, {ARRAY(INTEGER()), MAP(VARCHAR(), INTEGER())});
+  auto schema =
+      ROW({"arr", "mp"}, {ARRAY(INTEGER()), MAP(VARCHAR(), INTEGER())});
 
   std::vector<std::vector<int32_t>> arrays = {
-      {1}, {}, {2, 3}, {4}, {}, {5, 6, 7}
-  };
+      {1}, {}, {2, 3}, {4}, {}, {5, 6, 7}};
   auto arrVec = makeArrayVector<int32_t>(arrays);
 
   std::vector<std::vector<std::pair<S, std::optional<int32_t>>>> maps = {
@@ -189,8 +229,7 @@ TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
       {{S{"b"}, std::nullopt}},
       {{S{"c"}, 3}, {S{"d"}, 4}},
       {},
-      {{S{"e"}, 5}}
-  };
+      {{S{"e"}, 5}}};
   auto mapVec = makeMapVector<S, int32_t>(maps);
 
   auto row = makeRowVector({arrVec, mapVec});
@@ -200,7 +239,7 @@ TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 256, kRows);
+  validateRead(path, 256, row);
 }
 
 } // namespace

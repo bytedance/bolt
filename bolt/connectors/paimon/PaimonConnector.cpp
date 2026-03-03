@@ -6,6 +6,10 @@
 #include "bolt/connectors/paimon/PaimonConnector.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
 
+namespace paimon {
+  class AvroFileFormatFactory;
+}
+
 namespace bytedance::bolt::connector::paimon {
 
 std::unique_ptr<DataSource> PaimonConnector::createDataSource(

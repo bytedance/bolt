@@ -9,6 +9,7 @@ add_executable(bolt_paimon_connector_test
 add_test(bolt_paimon_connector_test bolt_paimon_connector_test)
 
 target_link_libraries(bolt_paimon_connector_test
+    PUBLIC
     bolt_connector_paimon
     bolt_testutils
     bolt_engine
@@ -26,4 +27,9 @@ target_link_libraries(bolt_paimon_connector_test
     glog::glog
     gflags::gflags
     Folly::folly
+    TBB::tbb
+    PRIVATE
+    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_avro_file_format>
+    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_local_file_system>
+    Paimon::libavrocpp
 )

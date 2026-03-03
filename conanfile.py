@@ -321,6 +321,7 @@ class BoltConan(ConanFile):
             s3_opt = self.options["aws-sdk-cpp/*"]
             setattr(s3_opt, "text-to-speech", False)
         self.options["paimon-cpp/0.1.0-bolt"].shared = False
+        self.options["paimon-cpp/0.1.0-bolt"].with_avro = True
 
         arrow_simd_level = "default"
         if str(self.settings.arch) in ["x86", "x86_64"]:

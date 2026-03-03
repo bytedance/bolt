@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include "bolt/connectors/Connector.h"
 #include "bolt/type/Type.h"
 
@@ -28,7 +29,7 @@ class PaimonColumnHandle : public ColumnHandle {
   }
 
   folly::dynamic serialize() const override {
-     return folly::dynamic::object("name", name_);
+    return folly::dynamic::object("name", name_);
   }
 
  private:
@@ -38,10 +39,15 @@ class PaimonColumnHandle : public ColumnHandle {
 
 class PaimonTableHandle : public ConnectorTableHandle {
  public:
-  explicit PaimonTableHandle(std::string connectorId, std::string tableName, std::string tablePath)
+  explicit PaimonTableHandle(
+      std::string connectorId,
+      std::string tableName,
+      std::string tablePath,
+      std::unordered_map<std::string, std::string> tableProperties)
       : ConnectorTableHandle(std::move(connectorId)),
         tableName_(std::move(tableName)),
-        tablePath_(std::move(tablePath)) {}
+        tablePath_(std::move(tablePath)),
+        tableProperties_(std::move(tableProperties)) {}
 
   const std::string& tableName() const {
     return tableName_;
@@ -51,21 +57,26 @@ class PaimonTableHandle : public ConnectorTableHandle {
     return tablePath_;
   }
 
+  const std::unordered_map<std::string, std::string>& tableProperties() {
+    return tableProperties_;
+  }
+
   std::string toString() const override {
     return tableName_;
   }
 
   folly::dynamic serialize() const override {
-      folly::dynamic obj = folly::dynamic::object;
-      obj["connectorId"] = connectorId();
-      obj["tableName"] = tableName_;
-      obj["tablePath"] = tablePath_;
-      return obj;
+    folly::dynamic obj = folly::dynamic::object;
+    obj["connectorId"] = connectorId();
+    obj["tableName"] = tableName_;
+    obj["tablePath"] = tablePath_;
+    return obj;
   }
 
  private:
   std::string tableName_;
   std::string tablePath_;
+  std::unordered_map<std::string, std::string> tableProperties_;
 };
 
 } // namespace bytedance::bolt::connector::paimon

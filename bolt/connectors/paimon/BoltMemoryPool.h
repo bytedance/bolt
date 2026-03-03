@@ -5,17 +5,22 @@
 
 #pragma once
 
-#include "paimon/memory/memory_pool.h"
+#include <paimon/memory/memory_pool.h>
 #include "bolt/common/memory/MemoryPool.h"
 
 namespace bytedance::bolt::connector::paimon {
 
 class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
  public:
-  explicit BoltPaimonMemoryPool(std::shared_ptr<memory::MemoryPool> pool) : pool_(std::move(pool)) {}
+  explicit BoltPaimonMemoryPool(std::shared_ptr<memory::MemoryPool> pool)
+      : pool_(std::move(pool)) {}
 
   memory::MemoryPool* getBoltPool() const {
     return pool_.get();
+  }
+
+  std::shared_ptr<memory::MemoryPool> getBoltPoolShared() const {
+    return pool_;
   }
 
   void* Malloc(uint64_t size, uint64_t alignment) override {
@@ -23,15 +28,22 @@ class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
       return pool_->allocate(static_cast<int64_t>(size));
     }
 
-    return pool_->allocate(static_cast<int64_t>(size), static_cast<uint32_t>(alignment));
+    return pool_->allocate(
+        static_cast<int64_t>(size), static_cast<uint32_t>(alignment));
   }
 
-  void* Realloc(void* p, size_t old_size, size_t new_size, uint64_t alignment) override {
+  void* Realloc(void* p, size_t old_size, size_t new_size, uint64_t alignment)
+      override {
     if (alignment == 0) {
-      return pool_->reallocate(p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size));
+      return pool_->reallocate(
+          p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size));
     }
 
-    return pool_->reallocate(p, static_cast<int64_t>(old_size), static_cast<int64_t>(new_size), static_cast<uint8_t>(alignment));
+    return pool_->reallocate(
+        p,
+        static_cast<int64_t>(old_size),
+        static_cast<int64_t>(new_size),
+        static_cast<uint8_t>(alignment));
   }
 
   void Free(void* p, uint64_t size) override {

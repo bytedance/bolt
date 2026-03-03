@@ -6,7 +6,6 @@
 #pragma once
 
 #include "bolt/connectors/Connector.h"
-#include "bolt/connectors/paimon/PaimonTableHandle.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -14,16 +13,15 @@ class PaimonConnector : public Connector {
  public:
   PaimonConnector(
       const std::string& id,
-      std::shared_ptr<const config::ConfigBase> config,
+      std::shared_ptr<const config::ConfigBase> /* config */,
       folly::Executor* executor)
       : Connector(id), executor_(executor) {}
 
   std::unique_ptr<DataSource> createDataSource(
       const std::shared_ptr<const RowType>& outputType,
       const std::shared_ptr<ConnectorTableHandle>& tableHandle,
-      const std::unordered_map<
-          std::string,
-          std::shared_ptr<ColumnHandle>>& columnHandles,
+      const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
+          columnHandles,
       std::shared_ptr<ConnectorQueryCtx> queryCtx,
       const core::QueryConfig& queryConfig) override;
 
@@ -33,7 +31,7 @@ class PaimonConnector : public Connector {
       ConnectorQueryCtx* queryCtx,
       CommitStrategy commitStrategy,
       const core::QueryConfig& queryConfig) override {
-     return nullptr;
+    return nullptr;
   }
 
  private:
@@ -49,9 +47,21 @@ class PaimonConnectorFactory : public ConnectorFactory {
   std::shared_ptr<Connector> newConnector(
       const std::string& id,
       std::shared_ptr<const config::ConfigBase> config,
-      folly::Executor* executor = nullptr) override {
+      folly::Executor* executor) override {
     return std::make_shared<PaimonConnector>(id, config, executor);
   }
+
+  std::shared_ptr<Connector> newConnector(
+      const std::string& id,
+      std::shared_ptr<const Config> /* config */,
+      folly::Executor* FOLLY_NULLABLE executor) override {
+    // Adapt legacy Config API to ConfigBase by creating a nullptr ConfigBase.
+    // The PaimonConnector does not currently depend on specific config fields.
+    std::shared_ptr<const config::ConfigBase> cfgBase;
+    return std::make_shared<PaimonConnector>(id, cfgBase, executor);
+  }
 };
+
+
 
 } // namespace bytedance::bolt::connector::paimon
