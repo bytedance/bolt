@@ -36,10 +36,44 @@
 #include <limits>
 #include <system_error>
 #include <type_traits>
+#include <vector>
 #include "bolt/common/base/Doubles.h"
+#include "bolt/core/QueryConfig.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/lib/ToHex.h"
 namespace bytedance::bolt::functions::sparksql {
+
+template <typename TExec>
+struct AbsFunction {
+  template <typename T>
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const T* /*a*/) {
+    ansiEnabled_ = config.sparkAnsiEnabled();
+  }
+
+  template <typename T>
+  FOLLY_ALWAYS_INLINE Status call(T& result, const T& a) {
+    if constexpr (std::is_integral_v<T>) {
+      if (UNLIKELY(a == std::numeric_limits<T>::min())) {
+        if (ansiEnabled_) {
+          if (threadSkipErrorDetails()) {
+            return Status::UserError();
+          }
+          return Status::UserError("Arithmetic overflow: abs({})", a);
+        }
+        result = a;
+        return Status::OK();
+      }
+    }
+    result = std::abs(a);
+    return Status::OK();
+  }
+
+ private:
+  bool ansiEnabled_ = false;
+};
 
 template <typename T>
 struct RemainderFunction {
