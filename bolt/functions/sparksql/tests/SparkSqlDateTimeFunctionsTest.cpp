@@ -794,6 +794,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, lastDay) {
   EXPECT_EQ(lastDay("2015-12-05"), parseDateStr("2015-12-31"));
   EXPECT_EQ(lastDay("2016-01-06"), parseDateStr("2016-01-31"));
   EXPECT_EQ(lastDay("2016-02-07"), parseDateStr("2016-02-29"));
+  BOLT_ASSERT_THROW(
+      lastDay("5881580-07-11"), "Integer overflow in last_day(5881580-07-11)")
   EXPECT_EQ(lastDayFunc(std::nullopt), std::nullopt);
 }
 
