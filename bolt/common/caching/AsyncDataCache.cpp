@@ -272,7 +272,7 @@ CoalescedLoad::~CoalescedLoad() {
 bool CoalescedLoad::loadOrFuture(folly::SemiFuture<bool>* wait) {
   {
     bytedance::bolt::common::testutil::TestValue::adjust(
-        "facebook::velox::cache::CoalescedLoad::loadOrFuture", this);
+        "bytedance::bolt::cache::CoalescedLoad::loadOrFuture", this);
     std::lock_guard<std::mutex> l(mutex_);
     if (state_ == State::kCancelled || state_ == State::kLoaded) {
       return true;
@@ -293,7 +293,7 @@ bool CoalescedLoad::loadOrFuture(folly::SemiFuture<bool>* wait) {
   }
   // Outside of 'mutex_'.
   bytedance::bolt::common::testutil::TestValue::adjust(
-      "facebook::velox::cache::CoalescedLoad::loadOrFuture::loading", this);
+      "bytedance::bolt::cache::CoalescedLoad::loadOrFuture::loading", this);
   try {
     const auto pins = loadData(!wait);
     for (const auto& pin : pins) {
