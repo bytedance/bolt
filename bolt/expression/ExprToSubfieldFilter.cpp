@@ -189,6 +189,9 @@ std::unique_ptr<common::Filter> ExprToSubfieldFilterParser::makeNotEqualFilter(
   if (!value) {
     return nullptr;
   }
+  if (value->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
+  }
 
   std::unique_ptr<common::Filter> lessThanFilter =
       makeLessThanFilter(valueExpr, evaluator);
@@ -238,6 +241,9 @@ std::unique_ptr<common::Filter> ExprToSubfieldFilterParser::makeEqualFilter(
   if (!value) {
     return nullptr;
   }
+  if (value->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
+  }
   switch (value->typeKind()) {
     case TypeKind::BOOLEAN:
       return boolEqual(singleValue<bool>(value));
@@ -268,6 +274,9 @@ ExprToSubfieldFilterParser::makeGreaterThanFilter(
   auto lower = toConstant(lowerExpr, evaluator);
   if (!lower) {
     return nullptr;
+  }
+  if (lower->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
   }
   switch (lower->typeKind()) {
     case TypeKind::TINYINT:
@@ -300,6 +309,9 @@ std::unique_ptr<common::Filter> ExprToSubfieldFilterParser::makeLessThanFilter(
   auto upper = toConstant(upperExpr, evaluator);
   if (!upper) {
     return nullptr;
+  }
+  if (upper->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
   }
   switch (upper->typeKind()) {
     case TypeKind::TINYINT:
@@ -334,6 +346,9 @@ ExprToSubfieldFilterParser::makeLessThanOrEqualFilter(
   if (!upper) {
     return nullptr;
   }
+  if (upper->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
+  }
   switch (upper->typeKind()) {
     case TypeKind::TINYINT:
       return lessThanOrEqual(singleValue<int8_t>(upper));
@@ -366,6 +381,9 @@ ExprToSubfieldFilterParser::makeGreaterThanOrEqualFilter(
   auto lower = toConstant(lowerExpr, evaluator);
   if (!lower) {
     return nullptr;
+  }
+  if (lower->isNullAt(0)) {
+    return std::make_unique<common::AlwaysFalse>();
   }
   switch (lower->typeKind()) {
     case TypeKind::TINYINT:
