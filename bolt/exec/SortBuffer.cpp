@@ -56,7 +56,7 @@ SortBuffer::SortBuffer(
       spillConfig_(spillConfig),
       spillMemoryThreshold_(spillMemoryThreshold),
       operatorCtx_(operatorCtx) {
-  BOLT_CHECK_GE(input_->size(), sortCompareFlags_.size());
+  BOLT_CHECK_GE(input_->children().size(), sortCompareFlags_.size());
   BOLT_CHECK_GT(sortCompareFlags_.size(), 0);
   BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags_.size());
   BOLT_CHECK_NOT_NULL(nonReclaimableSection_);
@@ -106,12 +106,12 @@ void SortBuffer::addInput(const VectorPtr& input) {
   BOLT_CHECK(!noMoreInput_);
   ensureInputFits(input);
 
-  SelectivityVector allRows(input->size());
+  const SelectivityVector allRows(input->size());
   std::vector<char*> rows(input->size());
   for (int row = 0; row < input->size(); ++row) {
     rows[row] = data_->newRow();
   }
-  auto* inputRow = input->as<RowVector>();
+  const auto* inputRow = input->as<RowVector>();
   MicrosecondTimer timer(&sortColToRowTimeUs_);
   for (const auto& columnProjection : columnMap_) {
     DecodedVector decoded(
