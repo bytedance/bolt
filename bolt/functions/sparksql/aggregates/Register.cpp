@@ -37,6 +37,7 @@
 #include "bolt/functions/sparksql/aggregates/BloomFilterAggAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CentralMomentsAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CollectListAggregate.h"
+#include "bolt/functions/sparksql/aggregates/CovarianceAggregate.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
 #include "bolt/functions/sparksql/aggregates/PercentileAggregate.h"
 #include "bolt/functions/sparksql/aggregates/RegrReplacementAggregate.h"
@@ -83,5 +84,6 @@ void registerAggregateFunctions(
   registerCollectSetAggregate(prefix, withCompanionFunctions, overwrite);
   registerCollectListAggregate(prefix, withCompanionFunctions, overwrite);
   registerRegrReplacementAggregate(prefix, withCompanionFunctions, overwrite);
+  registerCovarianceAggregates(prefix, withCompanionFunctions, overwrite);
 }
 } // namespace bytedance::bolt::functions::aggregate::sparksql
