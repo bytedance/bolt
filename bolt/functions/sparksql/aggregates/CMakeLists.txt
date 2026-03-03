@@ -48,6 +48,7 @@ bolt_add_library(
   CovarianceAggregate.cpp
   FirstLastAggregate.cpp
   MinMaxByAggregate.cpp
+  ModeAggregate.cpp
   PercentileApproxAggregate.cpp
   Register.cpp
   RegrReplacementAggregate.cpp

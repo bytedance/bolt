@@ -62,6 +62,10 @@ extern void registerPercentileApproxAggregate(
     const std::string& prefix,
     bool withCompanionFunctions,
     bool overwrite);
+extern void registerModeAggregate(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite);
 
 void registerAggregateFunctions(
     const std::string& prefix,
@@ -85,5 +89,6 @@ void registerAggregateFunctions(
   registerCollectListAggregate(prefix, withCompanionFunctions, overwrite);
   registerRegrReplacementAggregate(prefix, withCompanionFunctions, overwrite);
   registerCovarianceAggregates(prefix, withCompanionFunctions, overwrite);
+  registerModeAggregate(prefix, withCompanionFunctions, overwrite);
 }
 } // namespace bytedance::bolt::functions::aggregate::sparksql

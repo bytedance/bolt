@@ -38,6 +38,7 @@ add_executable(
   LastAggregateTest.cpp
   Main.cpp
   MinMaxByAggregationTest.cpp
+  ModeAggregateTest.cpp
   PercentileAggregateTest.cpp
   PercentileApproxTest.cpp
   RegrReplacementAggregationTest.cpp
