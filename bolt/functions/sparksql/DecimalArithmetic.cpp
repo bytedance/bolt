@@ -221,6 +221,159 @@ class DecimalBaseFunction : public exec::VectorFunction {
   const uint8_t rScale_;
 };
 
+// Decimal integral divide function implementation.
+struct DecimalIntegralDivideBase {
+  void initializeBase(const TypePtr& aType, const TypePtr& bType) {
+    auto [aPrecision, aScale] = getDecimalPrecisionScale(*aType);
+    auto bScale = getDecimalPrecisionScale(*bType).second;
+    rPrecision_ = computeResultPrecision(aPrecision, aScale, bScale);
+    aRescale_ = std::max<int8_t>(0, bScale - aScale);
+    bRescale_ = std::max<int8_t>(0, aScale - bScale);
+  }
+
+  // Computes the quotient of 'a' and 'b' and stores it in 'out'. Returns false
+  // if the result exceeds rPrecision_ or if overflow occurs during scaling.
+  // Following Spark's behavior, the result is truncated to int64_t if it
+  // exceeds int64_t range.
+  template <typename A, typename B>
+  bool computeQuotient(int64_t& out, const A& a, const B& b) const {
+    // Determine sign and convert to absolute values.
+    bool isNegative = (a < 0) != (b < 0);
+    int128_t absA = static_cast<int128_t>(a < 0 ? -a : a);
+    int128_t absB = static_cast<int128_t>(b < 0 ? -b : b);
+
+    // Scale values, checking for overflow.
+    int128_t scaledA;
+    int128_t scaledB;
+    if (__builtin_mul_overflow(
+            absA, bolt::DecimalUtil::getPowersOfTen(aRescale_), &scaledA) ||
+        __builtin_mul_overflow(
+            absB, bolt::DecimalUtil::getPowersOfTen(bRescale_), &scaledB)) {
+      return false;
+    }
+
+    if (scaledA < scaledB) {
+      out = 0;
+      return true;
+    }
+
+    int128_t quotient = scaledA / scaledB;
+    quotient = isNegative ? -quotient : quotient;
+
+    if (!bolt::DecimalUtil::valueInPrecisionRange(quotient, rPrecision_)) {
+      return false;
+    }
+    out = static_cast<int64_t>(quotient);
+    return true;
+  }
+
+ private:
+  static uint8_t
+  computeResultPrecision(uint8_t aPrecision, uint8_t aScale, uint8_t bScale) {
+    int32_t intPrecision =
+        static_cast<int32_t>(aPrecision) - aScale + bScale;
+    if (intPrecision == 0) {
+      intPrecision = 1;
+    }
+    return DecimalUtil::bounded(static_cast<uint8_t>(intPrecision), 0).first;
+  }
+
+ protected:
+  uint8_t aRescale_;
+  uint8_t bRescale_;
+  uint8_t rPrecision_;
+};
+
+// Decimal integral divide function that returns null on division by zero or
+// overflow.
+template <bool Checked>
+class DecimalIntegralDivideFunction final : public exec::VectorFunction,
+                                            private DecimalIntegralDivideBase {
+ public:
+  explicit DecimalIntegralDivideFunction(const TypePtr& aType, const TypePtr& bType) {
+    initializeBase(aType, bType);
+  }
+
+  void apply(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      const TypePtr& resultType,
+      exec::EvalCtx& context,
+      VectorPtr& result) const override {
+    auto rawResults = prepareResults<int64_t>(rows, resultType, context, result);
+
+    auto aType = args[0]->type();
+    auto bType = args[1]->type();
+    if (aType->isShortDecimal()) {
+      if (bType->isShortDecimal()) {
+        applyTyped<int64_t, int64_t>(rows, args, context, result, rawResults);
+      } else {
+        applyTyped<int64_t, int128_t>(rows, args, context, result, rawResults);
+      }
+    } else {
+      if (bType->isShortDecimal()) {
+        applyTyped<int128_t, int64_t>(rows, args, context, result, rawResults);
+      } else {
+        applyTyped<int128_t, int128_t>(rows, args, context, result, rawResults);
+      }
+    }
+  }
+
+ private:
+  template <typename R>
+  R* prepareResults(
+      const SelectivityVector& rows,
+      const TypePtr& resultType,
+      exec::EvalCtx& context,
+      VectorPtr& result) const {
+    context.ensureWritable(rows, resultType, result);
+    result->clearNulls(rows);
+    return result->asUnchecked<FlatVector<R>>()->mutableRawValues();
+  }
+
+  template <typename A, typename B>
+  void applyTyped(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      exec::EvalCtx& context,
+      VectorPtr& result,
+      int64_t* rawResults) const {
+    exec::DecodedArgs decodedArgs(rows, args, context);
+    auto a = decodedArgs.at(0);
+    auto b = decodedArgs.at(1);
+
+    if constexpr (Checked) {
+      rows.applyToSelected([&](int row) {
+        const auto av = a->valueAt<A>(row);
+        const auto bv = b->valueAt<B>(row);
+        if (bv == 0) {
+          BOLT_USER_FAIL("Division by zero");
+        }
+        int64_t out;
+        if (!computeQuotient(out, av, bv)) {
+          BOLT_USER_FAIL("Overflow in integral divide");
+        }
+        rawResults[row] = out;
+      });
+    } else {
+      context.applyToSelectedNoThrow(rows, [&](auto row) {
+        const auto av = a->valueAt<A>(row);
+        const auto bv = b->valueAt<B>(row);
+        if (bv == 0) {
+          result->setNull(row, true);
+          return;
+        }
+        int64_t out;
+        if (!computeQuotient(out, av, bv)) {
+          result->setNull(row, true);
+          return;
+        }
+        rawResults[row] = out;
+      });
+    }
+  }
+};
+
 template <bool AllowPrecisionLoss>
 std::vector<std::shared_ptr<exec::FunctionSignature>>
 decimalAddSubtractSignature() {
@@ -332,6 +485,19 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> decimalDivideSignature() {
               .build()};
 }
 
+std::vector<std::shared_ptr<exec::FunctionSignature>>
+decimalIntegralDivideSignature() {
+  return {exec::FunctionSignatureBuilder()
+              .integerVariable("a_precision")
+              .integerVariable("a_scale")
+              .integerVariable("b_precision")
+              .integerVariable("b_scale")
+              .returnType("BIGINT")
+              .argumentType("DECIMAL(a_precision, a_scale)")
+              .argumentType("DECIMAL(b_precision, b_scale)")
+              .build()};
+}
+
 template <typename Operation, bool AllowPrecisionLoss>
 std::shared_ptr<exec::VectorFunction> createDecimalFunction(
     const std::string& name,
@@ -431,6 +597,15 @@ std::shared_ptr<exec::VectorFunction> createDecimalFunction(
     }
   }
 }
+
+template <bool Checked>
+std::shared_ptr<exec::VectorFunction> createDecimalIntegralDivideFunction(
+    const std::string& /*name*/,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& /*config*/) {
+  return std::make_shared<DecimalIntegralDivideFunction<Checked>>(
+      inputArgs[0].type, inputArgs[1].type);
+}
 }; // namespace
 
 BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
@@ -473,4 +648,14 @@ BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
     udf_decimal_div_deny_precision_loss,
     decimalDivideSignature<false>(),
     (createDecimalFunction<Divide, false>));
+
+BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
+    udf_decimal_integral_div,
+    decimalIntegralDivideSignature(),
+    (createDecimalIntegralDivideFunction<false>));
+
+BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
+    udf_decimal_checked_integral_div,
+    decimalIntegralDivideSignature(),
+    (createDecimalIntegralDivideFunction<true>));
 }; // namespace bytedance::bolt::functions::sparksql
