@@ -38,6 +38,7 @@ add_executable(
   ExecutorBarrierTest.cpp
   LocalFileSinkTest.cpp
   LoggedExceptionTest.cpp
+  OptionsTests.cpp
   ParallelForTest.cpp
   RangeTests.cpp
   ReaderTest.cpp

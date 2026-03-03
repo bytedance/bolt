@@ -33,9 +33,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <folly/dynamic.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <optional>
 #include "bolt/common/compression/Compression.h"
+#include "bolt/common/serialization/Serializable.h"
 #include "bolt/vector/VectorStream.h"
 namespace bytedance::bolt::common {
 
@@ -73,7 +75,7 @@ enum class RowBasedSpillMode {
 RowBasedSpillMode strToRowBasedSpillMode(const std::string& str);
 
 /// Specifies the config for spilling.
-struct SpillConfig {
+struct SpillConfig : public bytedance::bolt::ISerializable {
   SpillConfig() = default;
   SpillConfig(
       GetSpillDirectoryPathCB _getSpillDirPathCb,
@@ -111,6 +113,16 @@ struct SpillConfig {
   bool exceedJoinSpillLevelLimit(uint8_t startBitOffset) const;
 
   std::string toString() const;
+
+  /// Serializes all value fields. Callbacks and executor are omitted and must
+  /// be re-injected by the host after deserialization.
+  folly::dynamic serialize() const override;
+
+  /// Reconstructs a SpillConfig from a serialized object. Callbacks and
+  /// executor are left at their default (null/empty) values.
+  static std::shared_ptr<SpillConfig> deserialize(const folly::dynamic& obj);
+
+  static void registerSerDe();
 
   /// A callback function that returns the spill directory path. Implementations
   /// can use it to ensure the path exists before returning.
