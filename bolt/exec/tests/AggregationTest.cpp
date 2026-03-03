@@ -656,6 +656,61 @@ TEST_P(AggregationTest, global) {
   EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
 }
 
+TEST_F(AggregationTest, manyGlobalAggregations) {
+  // Test a query with a large number of global aggregations.
+  // Global aggregations have a separate code path that does not use a
+  // HashTable, but rather a single row outside of a RowContainer.  Having many
+  // aggregations can expose issues with that single row that may not occur with
+  // only a few aggregations.
+  auto rowType =
+      bolt::test::VectorMaker::rowType(std::vector<TypePtr>(100, SMALLINT()));
+  auto vectors = makeVectors(rowType, 10, 100);
+  createDuckDbTable(vectors);
+
+  std::vector<std::string> aggregates;
+  for (int i = 0; i < rowType->size(); i++) {
+    aggregates.push_back(fmt::format("sum({})", rowType->nameOf(i)));
+  }
+
+  auto op = PlanBuilder()
+                .values(vectors)
+                .singleAggregation({}, aggregates)
+                .planNode();
+
+  assertQuery(op, "SELECT " + folly::join(", ", aggregates) + " FROM tmp");
+
+  aggregates.clear();
+  for (int i = 0; i < rowType->size(); i++) {
+    aggregates.push_back(fmt::format("sum(distinct {})", rowType->nameOf(i)));
+  }
+
+  op = PlanBuilder()
+           .values(vectors)
+           .singleAggregation({}, aggregates)
+           .planNode();
+
+  assertQuery(op, "SELECT " + folly::join(", ", aggregates) + " FROM tmp");
+
+  rowType =
+      bolt::test::VectorMaker::rowType(std::vector<TypePtr>(32, SMALLINT()));
+  vectors = makeVectors(rowType, 10, 32);
+  createDuckDbTable(vectors);
+  aggregates.clear();
+  for (int i = 0; i < rowType->size(); i++) {
+    aggregates.push_back(fmt::format(
+        "array_agg({} ORDER BY {})", rowType->nameOf(i), rowType->nameOf(i)));
+  }
+
+  op = PlanBuilder()
+           .values(vectors)
+           .singleAggregation({}, aggregates)
+           .planNode();
+
+  assertQuery(op, "SELECT " + folly::join(", ", aggregates) + " FROM tmp");
+
+  EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
+}
+
 TEST_P(AggregationTest, singleBigintKey) {
   auto vectors = makeVectors(rowType_, 10, 100);
   createDuckDbTable(vectors);
