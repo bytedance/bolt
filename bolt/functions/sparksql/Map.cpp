@@ -134,10 +134,13 @@ class MapFunction : public exec::VectorFunction {
       resultWriter.setOffset(row);
       auto& mapWriter = resultWriter.current();
 
-      // used in Policy == LAST_WIN
-      std::unordered_map<exec::GenericView, std::optional<exec::GenericView>>
-          keyValues;
       std::unordered_set<exec::GenericView> keys;
+
+      // Only used when Policy == LAST_WIN
+      std::unordered_map<exec::GenericView, vector_size_t> lastIndex;
+      if constexpr (Policy == LAST_WIN) {
+        lastIndex.reserve(mapSize);
+      }
 
       for (auto i = 0; i < mapSize; ++i) {
         const auto& keyReader = *keyReaders[i];
@@ -146,6 +149,12 @@ class MapFunction : public exec::VectorFunction {
         BOLT_USER_CHECK(keyReader.isSet(row), "Cannot use null as map key!");
 
         exec::GenericView key = keyReader[row];
+
+        if constexpr (Policy == LAST_WIN) {
+          lastIndex.insert_or_assign(key, i);
+          continue;
+        }
+
         std::optional<exec::GenericView> value;
 
         if (valueReader.isSet(row)) {
@@ -173,20 +182,25 @@ class MapFunction : public exec::VectorFunction {
               mapWriter.add_null().copy_from(key); // value is null
             }
           }
-        } else if constexpr (Policy == LAST_WIN) {
-          keyValues.erase(key);
-          keyValues.insert({key, value});
         } else {
           BOLT_UNREACHABLE();
         }
       }
 
       if constexpr (Policy == LAST_WIN) {
-        for (const auto& [key, value] : keyValues) {
-          if (value.has_value()) {
+        for (auto i = 0; i < mapSize; ++i) {
+          const auto& keyReader = *keyReaders[i];
+          const auto& valueReader = *valueReaders[i];
+
+          exec::GenericView key = keyReader[row];
+          if (lastIndex.at(key) != i) {
+            continue;
+          }
+
+          if (valueReader.isSet(row)) {
             auto [keyWriter, valueWriter] = mapWriter.add_item();
             keyWriter.copy_from(key);
-            valueWriter.copy_from(*value);
+            valueWriter.copy_from(valueReader[row]);
           } else {
             mapWriter.add_null().copy_from(key); // value is null
           }
@@ -303,27 +317,45 @@ class MapFunction : public exec::VectorFunction {
     auto& valuesResult = mapResult->mapValues();
     vector_size_t offset = keysResult->size();
 
-    folly::F14FastMap<NativeType, vector_size_t> keyToArgsIndex;
-    keyToArgsIndex.reserve(mapSize);
+    folly::F14FastMap<NativeType, vector_size_t> lastIndex;
+    lastIndex.reserve(mapSize);
+    folly::F14FastSet<NativeType> seen;
+    seen.reserve(mapSize);
+    std::vector<NativeType> argKeys;
+    argKeys.reserve(mapSize);
+    std::vector<vector_size_t> selectedArgs;
+    selectedArgs.reserve(mapSize);
+
     // 1. For constant keys, only one time-consuming duplication is required.
     for (vector_size_t i = 0; i < mapSize; i++) {
       auto key =
           decodedArgs.at(i * 2)->base()->as<ConstantVector<NativeType>>();
       BOLT_USER_CHECK(!key->isNullAt(0), "Cannot use null as map key!");
+      argKeys.emplace_back(key->valueAtFast(0));
       if constexpr (Policy == EXCEPTION) {
         BOLT_USER_CHECK(
-            keyToArgsIndex.insert({key->valueAtFast(0), i}).second,
-            DuplicateKeyExceptionInfo);
+            seen.insert(argKeys.back()).second, DuplicateKeyExceptionInfo);
+        selectedArgs.emplace_back(i);
       } else if constexpr (Policy == FIRST_WIN) {
-        keyToArgsIndex.insert({key->valueAtFast(0), i});
+        if (seen.insert(argKeys.back()).second) {
+          selectedArgs.emplace_back(i);
+        }
       } else if constexpr (Policy == LAST_WIN) {
-        keyToArgsIndex.insert_or_assign(key->valueAtFast(0), i);
+        lastIndex.insert_or_assign(argKeys.back(), i);
       } else {
         BOLT_UNREACHABLE();
       }
     }
 
-    auto mapSizeAfterDedup = keyToArgsIndex.size();
+    if constexpr (Policy == LAST_WIN) {
+      for (vector_size_t i = 0; i < mapSize; i++) {
+        if (lastIndex.at(argKeys[i]) == i) {
+          selectedArgs.emplace_back(i);
+        }
+      }
+    }
+
+    const auto mapSizeAfterDedup = selectedArgs.size();
     rows.applyToSelected([&](vector_size_t row) {
       rawSizes[row] = mapSizeAfterDedup;
       rawOffsets[row] = offset;
@@ -346,7 +378,7 @@ class MapFunction : public exec::VectorFunction {
     // For other types of keys, copy first line from the args to the result
     // map, and then directly operate the `rawKeysResult` to memcpy the value of
     // each line.
-    for (const auto& [key, argsIndex] : keyToArgsIndex) {
+    for (auto argsIndex : selectedArgs) {
       rows.applyToSelected([&](vector_size_t row) {
         const auto mapIndex = rawOffsets[row] + targetIdx;
         targetRows.setValid(mapIndex, true);
@@ -359,9 +391,9 @@ class MapFunction : public exec::VectorFunction {
             args[argsIndex * 2].get(), targetRows, toSourceRow.data(), false);
       } else if constexpr (
           Kind == TypeKind::VARBINARY || Kind == TypeKind::VARCHAR) {
-        flatKeysResult->set(resultKeyIndex, key);
+        flatKeysResult->set(resultKeyIndex, argKeys[argsIndex]);
       } else {
-        rawKeysResult[resultKeyIndex] = key;
+        rawKeysResult[resultKeyIndex] = argKeys[argsIndex];
       }
       valuesResult->copy(
           args[argsIndex * 2 + 1].get(), targetRows, toSourceRow.data(), false);
