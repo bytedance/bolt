@@ -39,15 +39,8 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-#include <celeborn/client/ShuffleClient.h>
-
-#include <atomic>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <memory>
-#include <thread>
 #include <utility>
 
 #include <fmt/format.h>
@@ -469,18 +462,18 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       param.writerType == PartitionWriterType::kCeleborn &&
       readBoolEnv(kRealCelebornEnv);
 
-  // Scale memory limit by parallel read thread count so that concurrent
-  // readers do not exceed the pool capacity.
+  // Parallel reads for real Celeborn with many partitions.
   constexpr int kParallelReadThreshold = 32;
-  const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
-  const int maxThreads = hwThreads > 0 ? hwThreads : 16;
   const int numReadThreads =
-      (param.numPartitions >= kParallelReadThreshold && useRealCeleborn)
-      ? std::min(maxThreads, param.numPartitions)
+      (useRealCeleborn && param.numPartitions >= kParallelReadThreshold)
+      ? std::clamp(
+            static_cast<int>(std::thread::hardware_concurrency()),
+            1,
+            param.numPartitions)
       : 0;
-  const int64_t memoryScale = std::max(1, numReadThreads);
-  auto memoryManagerHolder =
-      TestMemoryManagerHolder::create(param.memoryLimit * memoryScale);
+  // Scale memory pool so concurrent readers don't exceed capacity.
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(
+      param.memoryLimit * std::max(1, numReadThreads));
 
   ShuffleRunResult result;
 
@@ -679,6 +672,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     }
   };
 
+  // Read partitions in parallel to saturate multiple Celeborn workers.
   if (numReadThreads > 0) {
     std::atomic<int> nextPartition{0};
     std::vector<std::exception_ptr> errors(numReadThreads);

@@ -18,6 +18,7 @@
 
 #include <celeborn/client/ShuffleClient.h>
 #include <celeborn/conf/CelebornConf.h>
+#include <folly/Conv.h>
 #include <folly/init/Init.h>
 #include <atomic>
 
@@ -32,13 +33,9 @@
 #include <string_view>
 #include <utility>
 
-#include "bolt/common/base/Exceptions.h"
-
-#if defined(_WIN32) && __has_include(<process.h>)
-#include <process.h>
-#elif !defined(_WIN32)
 #include <unistd.h>
-#endif
+
+#include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 
@@ -56,8 +53,7 @@ inline bool readBoolEnv(const char* env, bool defaultValue = false) {
   if (value == nullptr || std::strlen(value) == 0) {
     return defaultValue;
   }
-  const auto flag = std::string(value);
-  return flag == "1" || flag == "true" || flag == "TRUE";
+  return folly::tryTo<bool>(value).value_or(defaultValue);
 }
 
 inline std::string getEnvOrDefault(
@@ -120,12 +116,7 @@ inline int nextCelebornShuffleIdForTests() {
   constexpr int kShuffleIdStride = 10000;
   constexpr int kPidModulo = 50000;
   constexpr int kShuffleIdBase = 10000;
-  int processId = 0;
-#if defined(_WIN32) && __has_include(<process.h>)
-  processId = _getpid();
-#elif !defined(_WIN32)
-  processId = static_cast<int>(getpid());
-#endif
+  const int processId = static_cast<int>(getpid());
   const int pidBucket = std::abs(processId) % kPidModulo;
   static std::atomic<int> nextShuffleId{
       kShuffleIdBase + pidBucket * kShuffleIdStride};
