@@ -37,12 +37,10 @@ PaimonDataSource::PaimonDataSource(
 
   ::paimon::ReadContextBuilder ctxBuilder(tableHandle_->tablePath());
   std::vector<std::string> columns;
-  columns.reserve(columnHandles.size());
-  std::transform(
-      columnHandles.begin(),
-      columnHandles.end(),
-      std::back_inserter(columns),
-      [](const auto& kv) { return kv.first; });
+  columns.reserve(outputType_->size());
+  for (size_t i = 0; i < outputType_->size(); ++i) {
+    columns.push_back(outputType_->nameOf(i));
+  }
   LOG(INFO) << "PaimonDataSource::PaimonDataSource(): Read schema: " << folly::join(", ", columns);
   ctxBuilder.SetReadSchema(columns);
   ctxBuilder.EnableMultiThreadRowToBatch(false);  // Disabled to simplify testing
@@ -50,6 +48,7 @@ PaimonDataSource::PaimonDataSource(
   ctxBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local");
   for (const auto& [key, value] : tableHandle_->tableProperties()) {
     ctxBuilder.AddOption(key, value);
+    LOG(INFO) << "Added table option <" << key << "=" << value << ">";
   }
   auto ctxBuildResult = ctxBuilder.Finish();
   BOLT_CHECK(ctxBuildResult.ok(), "ReadContextBuilder.Finish() failed: {}", ctxBuildResult.status().ToString());
@@ -82,13 +81,11 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   if (!reader_ && !inputSplits_.empty()) {
     LOG(INFO) << "PaimonDataSource::next(): Creating reader with " << inputSplits_.size() << " split(s)";
     auto&& readerCreateStatus = tableRead_->CreateReader(inputSplits_);
-    LOG(INFO) << "PaimonDataSource::next(): CreateReader returned: " << (readerCreateStatus.ok() ? "OK" : "FAILED");
     if (!readerCreateStatus.ok()) {
       LOG(INFO) << "PaimonDataSource::next(): CreateReader error: " << readerCreateStatus.status().ToString();
       return nullptr;
     }
     reader_ = std::move(readerCreateStatus).value();
-    LOG(INFO) << "PaimonDataSource::next(): Created reader at " << reader_.get();
   }
 
   if (!reader_) {
@@ -135,10 +132,7 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   }
 
   ArrowOptions opts;
-  LOG(INFO) << "Calling importFromArrowAsOwner() with schema " << sch.format << " and array";
   auto vec = bytedance::bolt::importFromArrowAsOwner(sch, arr, opts, pool_);
-
-  LOG(INFO) << "importFromArrowAsOwner() returned " << vec.get();
 
   const auto& row = std::dynamic_pointer_cast<RowVector>(vec);
   BOLT_CHECK(row != nullptr, "Imported vector is not a RowVector");
@@ -173,20 +167,8 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     newRowVec->setNulls(row->nulls());
 
     LOG(INFO) << "New RowVector size: " << newRowVec->size() << ", number of fields: " << newRowType->size();
-
-    // Debug: Print the actual values being returned
-    auto idColumn = newRowVec->childAt(0);
-    auto* idFlat = idColumn->asFlatVector<int64_t>();
-    for (int i = 0; i < newRowVec->size(); ++i) {
-      if (idColumn->isNullAt(i)) {
-        LOG(INFO) << "Row " << i << ": id = NULL";
-      } else {
-        LOG(INFO) << "Row " << i << ": id = " << idFlat->valueAt(i);
-      }
-    }
-
+    LOG(INFO) << newRowVec->toPrettyString();
     completedRows_ += newRowVec->size();
-    LOG(INFO) << "Returning row vector of size " << newRowVec->size();
 
     return newRowVec;
   }

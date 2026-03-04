@@ -42,7 +42,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       std::unique_ptr<parquet::ParquetReader> reader,
       int32_t batch_size,
       std::shared_ptr<memory::MemoryPool> pool)
-      : reader_(std::move(reader)), batch_size_(batch_size), pool_(std::move(pool)) {
+      : reader_(std::move(reader)), batch_size_(batch_size), pool_(std::move(pool)), readType_(reader_->rowType()) {
     LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() = " << reader_->rowType()->toString();
   }
 
@@ -84,10 +84,6 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
       std::vector<std::string> dataColumnNames;
       int startIndex = 0;
-      if (rowType->size() > 0 && rowType->nameOf(0) == "_VALUE_KIND") {
-        LOG(INFO) << "SetReadSchema: skipping _VALUE_KIND field";
-        startIndex = 1;
-      }
       for (int i = startIndex; i < rowType->size(); ++i) {
         dataColumnNames.push_back(rowType->nameOf(i));
       }
@@ -95,14 +91,12 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       dwio::common::RowReaderOptions opts;
     auto fileRowType = reader_->rowType();
     LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
-    for (int i = 0; i < fileRowType->size(); ++i) {
-      LOG(INFO) << "SetReadSchema file column[" << i << "]: " << fileRowType->nameOf(i) << " (" << fileRowType->childAt(i)->toString() << ")";
-    }
 
+    opts.setScanSpec(buildScanSpecFromRowType(rowType));
     auto selector = std::make_shared<dwio::common::ColumnSelector>(fileRowType, dataColumnNames);
     opts.select(selector);
-    opts.setScanSpec(buildScanSpecFromRowType(fileRowType));
     rowReader_ = reader_->createRowReader(opts);
+    readType_ = rowType;
 
       return ::paimon::Status::OK();
     } catch (const std::exception& e) {
@@ -117,8 +111,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         LOG(INFO) << "NextBatch: rowReader_ not initialized, initializing with full schema";
         initializeRowReaderWithFullSchema();
       }
-
-      VectorPtr result = BaseVector::create(reader_->rowType(), batch_size_, pool_.get());
+      VectorPtr result = BaseVector::create(readType_, batch_size_, pool_.get());
       bool hasData = rowReader_->next(batch_size_, result) != 0;
 
       if (!hasData) {
@@ -128,30 +121,6 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
       LOG(INFO) << "NextBatch: result has type " << result->type()->toString();
       LOG(INFO) << "NextBatch: number of rows in batch = " << result->size();
-
-      auto rowVec = std::dynamic_pointer_cast<RowVector>(result);
-      if (rowVec) {
-        LOG(INFO) << "NextBatch: RowVector has " << rowVec->type()->size() << " children";
-        const auto& rowType = rowVec->type()->asRow();
-        for (int c = 0; c < rowType.size(); ++c) {
-          LOG(INFO) << "NextBatch child[" << c << "]: name=" << rowType.nameOf(c)
-                    << ", type=" << rowType.childAt(c)->toString()
-                    << ", vector=" << rowVec->childAt(c)->toString();
-
-          auto flatVec = std::dynamic_pointer_cast<FlatVector<int64_t>>(rowVec->childAt(c));
-          if (flatVec) {
-            LOG(INFO) << "NextBatch child[" << c << "] (flat int64_t) values:";
-            int numToPrint = std::min(5, static_cast<int>(flatVec->size()));
-            for (int i = 0; i < numToPrint; ++i) {
-              if (flatVec->isNullAt(i)) {
-                LOG(INFO) << "  [" << i << "]: NULL";
-              } else {
-                LOG(INFO) << "  [" << i << "]: " << flatVec->valueAt(i);
-              }
-            }
-          }
-        }
-      }
 
       auto arrowArray = std::make_unique<::ArrowArray>();
       auto arrowSchema = std::make_unique<::ArrowSchema>();
@@ -205,6 +174,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   std::unique_ptr<dwio::common::RowReader> rowReader_;
   int32_t batch_size_;
   std::shared_ptr<memory::MemoryPool> pool_;
+  RowTypePtr readType_;
 };
 
 class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {

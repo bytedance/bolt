@@ -4,12 +4,12 @@ from pypaimon.catalog.catalog_exception import (
     TableNotExistException,
 )
 from typing import Any
-from pypaimon.table.row.generic_row import GenericRowSerializer
 import pyarrow as pa
 from pypaimon import Schema
 from pathlib import Path
 import pandas as pd
 from argparse import ArgumentParser
+import os
 
 def write_to_table(table: Any, data: pd.DataFrame):
     write_builder = table.new_batch_write_builder()
@@ -132,10 +132,209 @@ def pk_no_overwrite(catalog):
     write_to_table(table, dataframe_2)
 
 
+def data_evolution_table(catalog):
+    pa_schema = pa.schema([
+        ('id', pa.int64()),
+        ('value', pa.string()),
+        ('length', pa.int32()),
+    ])
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=[],
+        options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+        },
+        comment='data evolution test table')
+    data_1 = {
+        'id': [1, 2, 3],
+        'value': ['apple', 'banana', 'cherry'],
+        'length': [None, None, None],
+    }
+    dataframe_1 = pd.DataFrame(data_1)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database='test_db',
+        table_name='data_evolution',
+        schema=schema
+    )
+    if not table_created:
+        return
+
+    # write initial dataset
+    write_to_table(table, dataframe_1)
+
+    write_builder = table.new_batch_write_builder()
+    batch_write = write_builder.new_write()
+    table_update = write_builder.new_update().with_update_type(['length'])
+    table_commit = write_builder.new_commit()
+    data2 = pa.Table.from_pydict({
+    '_ROW_ID': [0, 1, 2],
+    'length': [5, 6, 6],
+    }, schema=pa.schema([
+    ('_ROW_ID', pa.int64()),
+    ('length', pa.int32()),
+    ]))
+    cmts = table_update.update_by_arrow_with_row_id(data2)
+    table_commit.commit(cmts)
+    table_commit.close()
+    batch_write.close()
+
+
+def partial_update_table(catalog):
+    pa_schema = pa.schema([
+        ('id', pa.int64()),
+        ('name', pa.string()),
+        ('age', pa.int32()),
+        ('salary', pa.float64()),
+    ])
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=['id'],
+        options={
+            'merge-engine': 'partial-update',
+            'bucket': '1'
+        },
+        comment='partial update merge engine test table')
+    data_1 = {
+        'id': [1, 2, 3],
+        'name': ['Alice', 'Bob', 'Charlie'],
+        'age': [30, 35, 40],
+        'salary': [50000.0, 60000.0, 70000.0],
+    }
+    dataframe_1 = pd.DataFrame(data_1)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database='test_db',
+        table_name='partial_update',
+        schema=schema
+    )
+    if not table_created:
+        return
+
+    write_to_table(table, dataframe_1)
+
+    data_2 = {
+        'id': [1, 3],
+        'name': [None, None],
+        'age': [None, None],
+        'salary': [55000.0, 75000.0],
+    }
+
+    write_to_table(table, pd.DataFrame(data_2))
+
+    # read table
+    read_builder = table.new_read_builder()
+    result = read_builder.new_read().to_arrow(read_builder.new_scan().plan().splits())
+    print(result)
+
+
+def aggregate_table(catalog):
+    pa_schema = pa.schema([
+        ('id', pa.int64()),
+        ('sales', pa.int64()),
+        ('price', pa.float64()),
+    ])
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=['id'],
+        options={
+            'merge-engine': 'aggregation',
+            'bucket': '1',
+            'fields.price.aggregate-function': 'max',
+            'fields.sales.aggregate-function': 'sum'
+        },
+        comment='aggregate merge engine test table')
+    data_1 = {
+        'id': [1, 2, 3],
+        'sales': [2, 3, 1],
+        'price': [10.0, 20.0, 15.0],
+    }
+    dataframe_1 = pd.DataFrame(data_1)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database='test_db',
+        table_name='aggregate',
+        schema=schema
+    )
+    if not table_created:
+        return
+
+    write_to_table(table, dataframe_1)
+
+    data_2 = {
+        'id': [1, 3],
+        'sales': [1, 2],
+        'price': [15.0, 25.0],
+    }
+    dataframe_2 = pd.DataFrame(data_2)
+    write_to_table(table, dataframe_2)
+
+
+
+def deduplicate_table(catalog):
+    pa_schema = pa.schema([
+        ('id', pa.int64()),
+        ('value', pa.string()),
+        ('timestamp', pa.int64()),
+    ])
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=['id'],
+        options={
+            'merge-engine': 'deduplicate',
+            'bucket': '2',
+        },
+        comment='deduplicate merge engine test table')
+    data_1 = {
+        'id': [1, 2, 3],
+        'value': ['v1', 'v2', 'v3'],
+        'timestamp': [1000, 2000, 3000],
+    }
+    dataframe_1 = pd.DataFrame(data_1)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database='test_db',
+        table_name='deduplicate',
+        schema=schema
+    )
+    if not table_created:
+        return
+
+    write_to_table(table, dataframe_1)
+
+    data_2 = {
+        'id': [1, 3],
+        'value': ['v1', 'v3_updated'],
+        'timestamp': [2500, 3500],
+    }
+    dataframe_2 = pd.DataFrame(data_2)
+    write_to_table(table, dataframe_2)
+
+    # data 3
+    data_3 = {
+        'id': [2, 4],
+        'value': ['v2_updated', 'v4_updated'],
+        'timestamp': [2500, 4500],
+    }
+    dataframe_3 = pd.DataFrame(data_3)
+    write_to_table(table, dataframe_3)
+
+
 def main():
     parser = ArgumentParser()
-    parser.add_argument('-b', '--base-path', default=str(Path(__file__).parent / 'test_warehouse'))
+    parser.add_argument('-b', '--base-path', default=None)
     args = parser.parse_args()
+    if not args.base_path:
+        args.base_path = str(Path(__file__).parent / 'test_warehouse')
+        # remove base path if already exists
+        os.system(f'rm -rf {args.base_path}')
+        print("deleted existing warehouse directory")
+
     base_path = args.base_path
     print(f'warehouse base path: {base_path}')
     catalog_options = {
@@ -152,6 +351,10 @@ def main():
         basic_table,
         append_only_multiple_append,
         pk_no_overwrite,
+        data_evolution_table,
+        partial_update_table,
+        aggregate_table,
+        deduplicate_table,
     ]
     for create_table in tables:
         create_table(catalog)
