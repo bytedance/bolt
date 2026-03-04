@@ -63,6 +63,7 @@ BUILD_CHANNEL ?=
 # Use commas to separate multiple file systems, such as `hdfs,tos`
 ENABLE_HDFS ?= True
 ENABLE_S3 ?= False
+ENABLE_GCS ?= False
 USE_ARROW_HDFS ?= True
 ENABLE_ASAN ?= False
 LDB_BUILD ?= False
@@ -212,6 +213,7 @@ conan_install:
 	echo " -o bolt/*:enable_hdfs=${ENABLE_HDFS} \
 	-o bolt/*:use_arrow_hdfs=${USE_ARROW_HDFS} \
 	-o bolt/*:enable_s3=${ENABLE_S3} \
+	-o bolt/*:enable_gcs=${ENABLE_GCS} \
 	-o bolt/*:enable_asan=${ENABLE_ASAN} \
 	-o bolt/*:enable_perf=${ENABLE_PERF} \
 	-o bolt/*:enable_color=${ENABLE_COLOR} \
@@ -275,6 +277,7 @@ compile_db_all:
 	BOLT_BUILD_TESTING="ON" \
 	BOLT_BUILD_BENCHMARKS="ON" \
 	ENABLE_S3="True" \
+	ENABLE_GCS="True" \
 	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 export_base:

@@ -85,6 +85,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
+        "enable_gcs": [True, False],
         "use_arrow_hdfs": [True, False],
         "enable_asan": [True, False],
         "enable_jit": [True, False],
@@ -110,6 +111,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": True,
         "enable_s3": False,
+        "enable_gcs": False,
         "use_arrow_hdfs": True,
         "enable_arrow_connector": False,
         "enable_jit": True,
@@ -188,6 +190,12 @@ class BoltConan(ConanFile):
                 "aws-sdk-cpp/1.11.692", transitive_headers=True, transitive_libs=True
             )
             self.requires("aws-c-common/0.12.5", force=True)
+        if self.options.get_safe("enable_gcs"):
+            self.requires(
+                "google-cloud-cpp/[>=2.10 <3]",
+                transitive_headers=True,
+                transitive_libs=True,
+            )
         self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires(
             "sonic-cpp/1.0.2-bolt", transitive_headers=True, transitive_libs=True
@@ -215,6 +223,7 @@ class BoltConan(ConanFile):
         self.requires("ryu/2.0.1", transitive_headers=True, transitive_libs=True)
         self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
+        self.requires("zstd/1.5.7", override=True)
         self.requires(
             "flex/2.6.4",
             visible=False,
@@ -490,6 +499,10 @@ class BoltConan(ConanFile):
         tc.cache_variables["BOLT_ENABLE_S3"] = "OFF"
         if self.options.get_safe("enable_s3"):
             tc.cache_variables["BOLT_ENABLE_S3"] = "ON"
+
+        tc.cache_variables["BOLT_ENABLE_GCS"] = "OFF"
+        if self.options.get_safe("enable_gcs"):
+            tc.cache_variables["BOLT_ENABLE_GCS"] = "ON"
 
         tc.cache_variables["BOLT_FORCE_COLORED_OUTPUT"] = "ON"
         if self.options.enable_crc:
