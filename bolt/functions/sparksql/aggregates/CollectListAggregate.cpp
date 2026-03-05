@@ -63,7 +63,9 @@ class CollectListAggregate {
   struct AccumulatorType {
     ValueList elements_;
 
-    explicit AccumulatorType(HashStringAllocator* /*allocator*/)
+    explicit AccumulatorType(
+        HashStringAllocator* /*allocator*/,
+        CollectListAggregate* /*fn*/)
         : elements_{} {}
 
     static constexpr bool is_fixed_size_ = false;
@@ -129,7 +131,7 @@ AggregateRegistrationResult registerCollectList(
       name,
       std::move(signatures),
       [name](
-          core::AggregationNode::Step /*step*/,
+          core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
           const core::QueryConfig&
@@ -137,7 +139,7 @@ AggregateRegistrationResult registerCollectList(
         BOLT_CHECK_EQ(
             argTypes.size(), 1, "{} takes at most one argument", name);
         return std::make_unique<SimpleAggregateAdapter<CollectListAggregate>>(
-            resultType);
+            step, argTypes, resultType);
       },
       withCompanionFunctions,
       overwrite);
