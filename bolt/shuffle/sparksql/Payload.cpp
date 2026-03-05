@@ -134,7 +134,7 @@ arrow::Result<int64_t> compressBuffer(
     const std::shared_ptr<arrow::Buffer>& buffer,
     uint8_t* output,
     int64_t outputLength,
-    arrow::util::Codec* codec) {
+    Codec* codec) {
   auto outputPtr = &output;
   if (!buffer) {
     write<int64_t>(outputPtr, kNullBuffer);
@@ -147,10 +147,8 @@ arrow::Result<int64_t> compressBuffer(
   static const int64_t kCompressedBufferHeaderLength = 2 * sizeof(int64_t);
   auto* compressedLengthPtr = advance<int64_t>(outputPtr);
   write(outputPtr, static_cast<int64_t>(buffer->size()));
-  ARROW_ASSIGN_OR_RAISE(
-      auto compressedLength,
-      codec->Compress(
-          buffer->size(), buffer->data(), outputLength, *outputPtr));
+  auto compressedLength =
+      codec->compress(buffer->data(), buffer->size(), *outputPtr, outputLength);
   if (compressedLength >= buffer->size()) {
     // Write uncompressed buffer.
     memcpy(*outputPtr, buffer->data(), buffer->size());
@@ -164,7 +162,7 @@ arrow::Result<int64_t> compressBuffer(
 arrow::Status compressAndFlush(
     const std::shared_ptr<arrow::Buffer>& buffer,
     arrow::io::OutputStream* outputStream,
-    arrow::util::Codec* codec,
+    Codec* codec,
     arrow::MemoryPool* pool,
     uint64_t& compressTime,
     uint64_t& writeTime) {
@@ -182,8 +180,7 @@ arrow::Status compressAndFlush(
   int64_t compressedSize = 0;
   {
     bytedance::bolt::NanosecondTimer timer(&compressTime);
-    auto maxCompressedLength =
-        codec->MaxCompressedLen(buffer->size(), buffer->data());
+    auto maxCompressedLength = codec->maxCompressedLen(buffer->size());
     ARROW_ASSIGN_OR_RAISE(
         compressed,
         arrow::AllocateResizableBuffer(
@@ -244,7 +241,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readUncompressedBuffer(
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
     arrow::io::InputStream* inputStream,
-    const std::shared_ptr<arrow::util::Codec>& codec,
+    const std::shared_ptr<Codec>& codec,
     arrow::MemoryPool* pool,
     uint64_t& decompressTime,
     ByteBuffer** readAheadBuffer,
@@ -309,11 +306,11 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
   if (paddedSize > 0) {
     RETURN_NOT_OK(output->Resize(uncompressedLength, false));
   }
-  RETURN_NOT_OK(codec->Decompress(
-      compressedLength,
+  codec->decompress(
       compressed->data(),
-      uncompressedLength,
-      const_cast<uint8_t*>(output->data())));
+      compressedLength,
+      const_cast<uint8_t*>(output->data()),
+      uncompressedLength);
   return output;
 }
 
@@ -346,7 +343,7 @@ std::string Payload::toString() const {
 void BlockPayload::concatBuffer(
     std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
+    Codec* codec,
     Payload::Mode& mode,
     bool hasComplexType) {
   auto sourceBuffers = std::move(buffers);
@@ -415,7 +412,7 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
     std::vector<std::shared_ptr<arrow::Buffer>> buffers,
     const std::vector<bool>* isValidityBuffer,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
+    Codec* codec,
     Payload::Mode mode,
     bool hasComplexType) {
   if (mode == Payload::Mode::kRowVector &&
@@ -441,8 +438,7 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
             if (!buffer) {
               return sum;
             }
-            return sum +
-                codec->MaxCompressedLen(buffer->size(), buffer->data());
+            return sum + codec->maxCompressedLen(buffer->size());
           });
       const auto maxCompressedLength = metadataLength + totalCompressedLength;
       ARROW_ASSIGN_OR_RAISE(
@@ -552,7 +548,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>>
 BlockPayload::deserialize(
     arrow::io::InputStream* inputStream,
     const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<arrow::util::Codec>& codec,
+    const std::shared_ptr<Codec>& codec,
     arrow::MemoryPool* pool,
     uint32_t& numRows,
     uint64_t& decompressTime,
@@ -640,7 +636,7 @@ BlockPayload::deserialize(
 arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>>
 BlockPayload::deserializeRowVectorModeBuffers(
     arrow::io::InputStream* inputStream,
-    const std::shared_ptr<arrow::util::Codec>& codec,
+    const std::shared_ptr<Codec>& codec,
     arrow::MemoryPool* pool,
     uint32_t& numRows,
     uint64_t& decompressTime,
@@ -842,7 +838,7 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
 arrow::Result<std::unique_ptr<BlockPayload>> InMemoryPayload::toBlockPayload(
     Payload::Type payloadType,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
+    Codec* codec,
     bool hasComplexType) {
   return BlockPayload::fromBuffers(
       payloadType,
@@ -893,7 +889,7 @@ UncompressedDiskBlockPayload::UncompressedDiskBlockPayload(
     arrow::io::InputStream*& inputStream,
     uint64_t rawSize,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec)
+    Codec* codec)
     : Payload(type, numRows, isValidityBuffer),
       inputStream_(inputStream),
       rawSize_(rawSize),
@@ -992,7 +988,7 @@ arrow::Status RowBlockPayload::deserialize(
     uint8_t* dst,
     int32_t dstSize,
     int32_t& offset,
-    ZstdStreamCodec* codec,
+    AdaptiveParallelZstdCodec* codec,
     std::vector<std::string_view>& outputRows,
     int32_t& remainingOutputLen,
     bool& eof,

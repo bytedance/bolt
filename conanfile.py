@@ -190,7 +190,7 @@ class BoltConan(ConanFile):
             self.requires("aws-c-common/0.12.5", force=True)
         self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires(
-            "sonic-cpp/1.0.2-fix", transitive_headers=True, transitive_libs=True
+            "sonic-cpp/1.0.2-bolt", transitive_headers=True, transitive_libs=True
         )
         self.requires(
             f"protobuf/{protobuf_version}",
@@ -602,9 +602,14 @@ class BoltConan(ConanFile):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "llvm-core::llvm-core"
             )
-            self.cpp_info.components["bolt_engine"].exelinkflags.append(
-                "-Wl,--export-dynamic-symbol=jit_*"
-            )
+            if self.settings.os == "Macos":
+                self.cpp_info.components["bolt_engine"].exelinkflags.append(
+                    "-Wl,-export_dynamic"
+                )
+            elif self.settings.os == "Linux":
+                self.cpp_info.components["bolt_engine"].exelinkflags.append(
+                    "-Wl,--export-dynamic-symbol=jit_*"
+                )
         if self.options.get_safe("enable_s3"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "aws-c-common::aws-c-common"

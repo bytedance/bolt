@@ -1591,6 +1591,34 @@ TEST_F(ParquetReaderTest, readDisputedNoLogicalType) {
   EXPECT_GT(total, 0);
 }
 
+// Verify that when LogicalType is absent but legacy ConvertedType (e.g., UTF8)
+// is present on a BYTE_ARRAY column, the reader annotates ScanSpec with the
+// converted type. This enables VARCHAR pruning to rely on ConvertedType as a
+// fallback.
+TEST_F(ParquetReaderTest, varcharConvertedTypePropagatedWhenLogicalMissing) {
+  // Use column-only fixture extracted from real data; verifies ConvertedType
+  // propagation used by VARCHAR pruning.
+  const std::string sample(
+      getExampleFilePath("varchar_converted_type_fallback_stat_type.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  // Request VARCHAR for the 'stat_type' column.
+  auto rowType = ROW({"stat_type"}, {VARCHAR()});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  auto scanSpec = makeScanSpec(rowType);
+  rowReaderOpts.setScanSpec(scanSpec);
+
+  auto reader = createReader(sample, readerOptions);
+  // Annotation happens during row reader creation.
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  (void)rowReader;
+
+  auto spec = scanSpec->childByName("stat_type");
+  ASSERT_NE(spec, nullptr);
+  // Converted type should be annotated from schema (UTF8 for textual byte
+  // data).
+  EXPECT_EQ(spec->convertedTypeName(), "UTF8");
+}
+
 TEST_F(ParquetReaderTest, dcMapSimple) {
   // dcmapSimple.parquet stores all the values inside dynamic columns.
   const std::string sample(getExampleFilePath("dcmapSimple.parquet"));

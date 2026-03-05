@@ -1136,7 +1136,8 @@ TEST_P(OrderByTest, spillWithArrowSerde) {
   params.spillDirectory = spillDirectory->path;
   auto task = assertQueryOrdered(
       params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
-  auto& planStats = toPlanStats(task->taskStats()).at(orderById);
+  auto statsMap = toPlanStats(task->taskStats());
+  auto& planStats = statsMap.at(orderById);
   ASSERT_GT(planStats.spilledBytes, 0);
   ASSERT_GT(planStats.spilledInputBytes, 0);
   ASSERT_GT(planStats.spilledRows, 0);
@@ -1264,7 +1265,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -1406,7 +1407,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringReserve) {
   folly::EventCount testWait;
   auto testWaitKey = testWait.prepareWait();
 
-  Operator* op;
+  Operator* op = nullptr;
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::Driver::runInternal::addInput",
       std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -1523,7 +1524,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
     folly::EventCount testWait;
     auto testWaitKey = testWait.prepareWait();
 
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -1658,7 +1659,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<bool> injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -1792,7 +1793,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, abortDuringOutputProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<bool> injectOnce{true};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {
@@ -1889,7 +1890,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, abortDuringInputgProcessing) {
     auto testWaitKey = testWait.prepareWait();
 
     std::atomic<int> numInputs{0};
-    Operator* op;
+    Operator* op = nullptr;
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::addInput",
         std::function<void(Operator*)>(([&](Operator* testOp) {

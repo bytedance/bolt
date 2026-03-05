@@ -13,6 +13,8 @@
 # limitations under the License.
 
 versions:
+  "1.0.2-bolt":
+    folder: all
   "1.0.2-fix":
     folder: all
   "1.0.2":

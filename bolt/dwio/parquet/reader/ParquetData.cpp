@@ -70,7 +70,8 @@ void ParquetData::filterRowGroups(
   }
   auto isVarchar = type_->type()->isVarchar();
   auto lt = scanSpec.logicalTypeName();
-  if (isVarchar && (lt.empty() || lt != "STRING")) {
+  auto ct = scanSpec.convertedTypeName();
+  if (ct.empty() && isVarchar && (lt.empty() || lt != "STRING")) {
     VLOG(1)
         << "Skipping row group filter for VARCHAR column without logical type";
     return;

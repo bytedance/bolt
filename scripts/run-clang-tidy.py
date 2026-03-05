@@ -505,7 +505,7 @@ def tidy(args):
     cmd_base.append("--extra-arg=-Wno-unknown-warning-option")
 
     jobs = args.jobs if args.jobs else max(1, multiprocessing.cpu_count() // 2)
-    chunk_size = 10
+    chunk_size = 1
     file_chunks = [
         files_to_process[i : i + chunk_size]
         for i in range(0, len(files_to_process), chunk_size)
@@ -601,7 +601,13 @@ def parse_args():
         help="Specific files to process (space separated)",
     )
 
-    parser.add_argument("-j", "--jobs", type=int, help="Parallel jobs")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=multiprocessing.cpu_count(),
+        help="Parallel jobs",
+    )
 
     parser.add_argument(
         "--clang-tidy-binary",

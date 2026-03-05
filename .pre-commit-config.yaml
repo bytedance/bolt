@@ -72,11 +72,11 @@ repos:
         args: ["-w", "-i", "2", "-bn", "-ci", "-sr"]
   - repo: local
     hooks:
-      -   id: license-header-check
-          name: Check for license headers
-          entry: go run -C .github/license_check check_license.go
-          language: golang
-          pass_filenames: true
+      - id: license-header-check
+        name: Check for license headers
+        entry: go run -C .github/license_check check_license.go
+        language: golang
+        pass_filenames: true
       - id: clang-tidy
         name: Lint C++ files
         description: >-
@@ -87,8 +87,8 @@ repos:
         entry: ./scripts/run-clang-tidy.py
         args: [--diff, auto]
         language: python
-        types_or: [c, c++]
         pass_filenames: false
+        always_run: true
         additional_dependencies: [clang-tidy==18.1.8]
         require_serial: true
   - repo: https://github.com/codespell-project/codespell

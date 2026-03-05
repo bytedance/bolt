@@ -164,6 +164,40 @@ class JsonExtractor {
       return folly::none;
     }
 
+    // Because Sonic always escape; sonic is not DOM based; sonic does not throw
+    // Actually use sonic iff below is true
+    const bool actuallyUseSonic = !throwExceptionWhenEncounterBadJson &&
+        !useDOMParserInGetJsonObject && getJsonObjectEscapeEmoji &&
+        useSonicJson;
+    if (actuallyUseSonic) {
+      std::tuple<std::string, sonic_json::SonicError> result{};
+      result = sonic_json::GetByJsonPathOnDemand(json.toString(), this->path_);
+      const auto sonic_status = std::get<1>(result);
+      // If no error and no match, return none.
+      if (sonic_json::kErrorNoneNoMatch == sonic_status) {
+        return folly::none;
+      }
+      // No error and has result
+      if (sonic_json::kErrorNone == sonic_status) {
+        auto answer = std::get<0>(result);
+        ans_.clear();
+        ans_.append(answer);
+        return std::string_view{ans_};
+      }
+      // There was an error (likely parse invalid json), there may or may
+      // not be partial result in buffer.
+      auto answer = std::get<0>(result);
+      // If no partial result in buffer, return none.
+      // Otherwise, return whatever is in buffer to match spark
+      // behavior
+      if (answer.empty()) {
+        return folly::none;
+      }
+      ans_.clear();
+      ans_.append(answer);
+      return std::string_view{ans_};
+    }
+
     simdJsonPaddingJson(buffer_, json);
 
     if (useDOMParserInGetJsonObject) {
@@ -638,11 +672,37 @@ folly::Optional<bool> jsonArrayContains(folly::StringPiece json, const T& t) {
   return folly::none;
 }
 
+std::vector<folly::Optional<std::string>> jsonExtractTupleSonic(
+    folly::StringPiece json,
+    std::vector<folly::Optional<folly::StringPiece>> paths,
+    bool legacy) {
+  std::vector<std::string_view> paths_string_view{};
+  std::vector<size_t> non_null_index{};
+  for (int i = 0; i < paths.size(); i++) {
+    if (paths[i].has_value()) {
+      non_null_index.push_back(i);
+      paths_string_view.push_back(paths[i].value());
+    }
+  }
+  auto result =
+      sonic_json::JsonTupleWithCodeGen(json, paths_string_view, legacy);
+  std::vector<folly::Optional<std::string>> ret(paths.size(), folly::none);
+  for (int i = 0; i < paths_string_view.size(); i++) {
+    if (result[i].has_value()) {
+      ret[non_null_index[i]] = std::move(result[i].value());
+    }
+  }
+  return ret;
+}
+
 std::vector<folly::Optional<std::string>> jsonExtractTuple(
     folly::StringPiece json,
     std::vector<folly::Optional<folly::StringPiece>> paths,
     bool legacy,
     const bool useSonicLibrary) {
+  if (LIKELY(useSonicLibrary)) {
+    return jsonExtractTupleSonic(std::move(json), std::move(paths), legacy);
+  }
   std::vector<folly::Optional<std::string>> ret{paths.size(), folly::none};
   std::string json_str;
   simdJsonPaddingJson(json_str, json);

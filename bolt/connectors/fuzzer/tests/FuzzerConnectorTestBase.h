@@ -41,6 +41,10 @@ class FuzzerConnectorTestBase : public exec::test::OperatorTestBase {
   void SetUp() override {
     OperatorTestBase::SetUp();
     std::shared_ptr<const config::ConfigBase> config;
+    if (!connector::hasConnectorFactory(connector::kFuzzerConnectorName)) {
+      connector::registerConnectorFactory(
+          std::make_shared<FuzzerConnectorFactory>());
+    }
     auto fuzzerConnector =
         connector::getConnectorFactory(connector::kFuzzerConnectorName)
             ->newConnector(kFuzzerConnectorId, config);

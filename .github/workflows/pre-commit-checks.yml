@@ -38,7 +38,7 @@ jobs:
     runs-on: ['self-hosted', 'medium']
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root
+      options: --user root --init
       volumes:
         - pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data

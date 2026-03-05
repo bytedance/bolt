@@ -50,7 +50,7 @@ class LocalPartitionWriter::LocalSpiller {
       const std::string& spillFile,
       uint32_t compressionThreshold,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec)
+      Codec* codec)
       : numPartitions_(numPartitions),
         spillFile_(spillFile),
         compressionThreshold_(compressionThreshold),
@@ -126,7 +126,7 @@ class LocalPartitionWriter::LocalSpiller {
   std::string spillFile_;
   uint32_t compressionThreshold_;
   arrow::MemoryPool* pool_;
-  arrow::util::Codec* codec_;
+  Codec* codec_;
 
   bool opened_{false};
   bool finished_{false};
@@ -140,7 +140,7 @@ class LocalPartitionWriter::PayloadMerger {
   PayloadMerger(
       const PartitionWriterOptions& options,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
+      Codec* codec,
       bool hasComplexType)
       : pool_(pool),
         codec_(codec),
@@ -279,7 +279,7 @@ class LocalPartitionWriter::PayloadMerger {
 
  private:
   arrow::MemoryPool* pool_;
-  arrow::util::Codec* codec_;
+  Codec* codec_;
   bool hasComplexType_;
   int32_t compressionThreshold_;
   int32_t mergeBufferSize_;
@@ -392,10 +392,8 @@ class LocalPartitionWriter::PayloadCache {
     return false;
   }
 
-  arrow::Result<std::shared_ptr<Spill>> spill(
-      const std::string& spillFile,
-      arrow::MemoryPool* pool,
-      arrow::util::Codec* codec) {
+  arrow::Result<std::shared_ptr<Spill>>
+  spill(const std::string& spillFile, arrow::MemoryPool* pool, Codec* codec) {
     std::shared_ptr<Spill> diskSpill = nullptr;
     ARROW_ASSIGN_OR_RAISE(
         auto os, arrow::io::FileOutputStream::Open(spillFile, true));
@@ -450,8 +448,7 @@ class LocalPartitionWriter::PayloadCache {
     return std::move(diskSpill_);
   }
 
-  arrow::Status
-  spill(uint32_t pid, arrow::MemoryPool* pool, arrow::util::Codec* codec) {
+  arrow::Status spill(uint32_t pid, arrow::MemoryPool* pool, Codec* codec) {
     ARROW_ASSIGN_OR_RAISE(auto start, os_->Tell());
     if (hasCachedPayloads(pid)) {
       auto& payloads = partitionCachedPayload_[pid];
@@ -529,7 +526,7 @@ class LocalPartitionWriter::PartitionRowWriter {
       uint32_t pid,
       std::vector<uint8_t*>& rows,
       const int64_t rawSize,
-      ZstdStreamCodec* codec,
+      AdaptiveParallelZstdCodec* codec,
       RowVectorLayout layout,
       arrow::MemoryPool* pool) {
     auto payload = std::make_unique<RowBlockPayload>(
@@ -917,8 +914,11 @@ arrow::Status LocalPartitionWriter::evict(
     const bool isCompositeVector) {
   // evict rows in all partitions
   if (!zstdCodec_) {
-    zstdCodec_ = std::make_shared<ZstdStreamCodec>(
-        options_.compressionLevel, true, payloadPool_.get());
+    zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
+        options_.compressionLevel,
+        true,
+        payloadPool_.get(),
+        options_.checksumEnabled);
     partitionRowWriter_ = std::make_shared<PartitionRowWriter>();
   }
   RowVectorLayout layout = isCompositeVector ? RowVectorLayout::kComposite

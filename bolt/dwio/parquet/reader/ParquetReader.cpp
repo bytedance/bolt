@@ -117,6 +117,11 @@ class ReaderBase {
     return logicalTypesByPath_;
   }
 
+  const std::unordered_map<std::string, thrift::ConvertedType::type>&
+  schemaConvertedTypes() const {
+    return convertedTypesByPath_;
+  }
+
   bool isFileColumnNamesReadAsLowerCase() const {
     return options_.isFileColumnNamesReadAsLowerCase();
   }
@@ -195,6 +200,9 @@ class ReaderBase {
   // Logical types keyed by dot-delimited field path from the root.
   std::unordered_map<std::string, thrift::LogicalType> logicalTypesByPath_;
 
+  std::unordered_map<std::string, thrift::ConvertedType::type>
+      convertedTypesByPath_;
+
   // Map from row group index to pre-created loading BufferedInput.
   std::unordered_map<uint32_t, std::shared_ptr<dwio::common::BufferedInput>>
       inputs_;
@@ -206,6 +214,10 @@ class ReaderBase {
   std::shared_ptr<InternalFileDecryptor> fileDecryptor_;
 
   void collectLogicalTypes(
+      const std::shared_ptr<const dwio::common::TypeWithId>& type,
+      const std::string& path);
+
+  void collectConvertedTypes(
       const std::shared_ptr<const dwio::common::TypeWithId>& type,
       const std::string& path);
 };
@@ -378,7 +390,9 @@ void ReaderBase::initializeSchema() {
       schemaWithId_->getChildren(), isFileColumnNamesReadAsLowerCase());
 
   logicalTypesByPath_.clear();
+  convertedTypesByPath_.clear();
   collectLogicalTypes(schemaWithId_, "");
+  collectConvertedTypes(schemaWithId_, "");
 }
 
 std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
@@ -772,28 +786,45 @@ void ReaderBase::collectLogicalTypes(
     const std::shared_ptr<const dwio::common::TypeWithId>& type,
     const std::string& path) {
   auto parquetType = std::static_pointer_cast<const ParquetTypeWithId>(type);
-  if (parquetType->isLeaf()) {
-    if (parquetType->logicalType_.has_value()) {
-      if (!path.empty()) {
-        logicalTypesByPath_[path] = parquetType->logicalType_.value();
-      }
-    } else if (type->type()->kind() == TypeKind::ROW) {
-      // no-op for leaves of struct; handled via parent path
+  if (parquetType->logicalType_.has_value()) {
+    if (!path.empty()) {
+      logicalTypesByPath_[path] = parquetType->logicalType_.value();
     }
+  }
+
+  if (parquetType->isLeaf()) {
     return;
   }
-  if (type->type()->kind() == TypeKind::ROW) {
-    auto row = type->type()->asRow();
-    for (size_t i = 0; i < type->getChildren().size(); ++i) {
-      auto child = type->getChildren()[i];
-      auto childName = row.nameOf(i);
-      auto childPath = path.empty() ? childName : (path + "." + childName);
-      collectLogicalTypes(child, childPath);
+
+  for (auto& child : type->getChildren()) {
+    auto parquetChild =
+        std::static_pointer_cast<const ParquetTypeWithId>(child);
+    auto childPath =
+        path.empty() ? parquetChild->name_ : (path + "." + parquetChild->name_);
+    collectLogicalTypes(child, childPath);
+  }
+}
+
+void ReaderBase::collectConvertedTypes(
+    const std::shared_ptr<const dwio::common::TypeWithId>& type,
+    const std::string& path) {
+  auto parquetType = std::static_pointer_cast<const ParquetTypeWithId>(type);
+  if (parquetType->convertedType_.has_value()) {
+    if (!path.empty()) {
+      convertedTypesByPath_[path] = parquetType->convertedType_.value();
     }
-  } else {
-    for (auto& child : type->getChildren()) {
-      collectLogicalTypes(child, path);
-    }
+  }
+
+  if (parquetType->isLeaf()) {
+    return;
+  }
+
+  for (auto& child : type->getChildren()) {
+    auto parquetChild =
+        std::static_pointer_cast<const ParquetTypeWithId>(child);
+    auto childPath =
+        path.empty() ? parquetChild->name_ : (path + "." + parquetChild->name_);
+    collectConvertedTypes(child, childPath);
   }
 }
 
@@ -1260,6 +1291,7 @@ class ParquetRowReader::Impl {
     // Annotate scan spec with logical type names before filtering row groups.
     if (auto scanSpecPtr = options_.getScanSpec()) {
       const auto& ltMap = readerBase_->schemaLogicalTypes();
+      const auto& ctMap = readerBase_->schemaConvertedTypes();
       auto& scanSpec = *scanSpecPtr;
       auto annotate = [&](common::ScanSpec& spec,
                           const std::string& basePath,
@@ -1314,6 +1346,19 @@ class ParquetRowReader::Impl {
                 name));
           }
           spec.setLogicalTypeName(name);
+        }
+        auto ctIt = ctMap.find(path);
+        if (ctIt != ctMap.end()) {
+          const auto name = thrift::to_string(ctIt->second);
+          BOLT_CHECK(
+              spec.convertedTypeName().empty() ||
+                  spec.convertedTypeName() == name,
+              fmt::format(
+                  "ConvertedType mismatch for path {}: scanSpec={}, schema={}",
+                  path,
+                  spec.convertedTypeName(),
+                  name));
+          spec.setConvertedTypeName(name);
         }
         VLOG(2) << "Annotate path=" << path << " field=" << spec.fieldName()
                 << " kind=" << static_cast<int>(twi.type()->kind())

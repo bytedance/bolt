@@ -457,6 +457,15 @@ class FileWriterImpl : public FileWriter {
     return Status::OK();
   }
 
+  Status Flush() override {
+    if (row_group_writer_ != nullptr) {
+      auto row_group_writer = row_group_writer_;
+      row_group_writer_ = nullptr;
+      PARQUET_CATCH_NOT_OK(row_group_writer->Close());
+    }
+    return Status::OK();
+  }
+
   Status WriteRecordBatch(const RecordBatch& batch) override {
     if (batch.num_rows() == 0) {
       return Status::OK();
@@ -472,6 +481,9 @@ class FileWriterImpl : public FileWriter {
     }
 
     auto WriteBatch = [&](int64_t offset, int64_t size) {
+      if (size <= 0) {
+        return Status::OK();
+      }
       std::vector<std::unique_ptr<ArrowColumnWriterV2>> writers;
       int column_index_start = 0;
 
@@ -516,8 +528,7 @@ class FileWriterImpl : public FileWriter {
       if (numRowsWritten <= 0) {
         return false;
       }
-      // Whether the number of rows will exceed the threshold
-      if (numRowsWritten + numRows > max_row_group_length) {
+      if (numRowsWritten >= max_row_group_length) {
         return true;
       }
       // Parquet_block_size is not set.

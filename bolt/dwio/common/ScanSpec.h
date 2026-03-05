@@ -277,6 +277,12 @@ class ScanSpec {
   // This may change as a result of runtime adaptation.
   bool hasFilter() const;
 
+  /// Assume this field is read as null constant vector (usually due to missing
+  /// field), check if any filter in the struct subtree would make the whole
+  /// vector to be filtered out.  Return false when the whole vector should be
+  /// filtered out.
+  bool testNull() const;
+
   // Resets cached values after this or children were updated, e.g. a new filter
   // was added or existing filter was modified.
   void resetCachedValues(bool doReorder) {
@@ -361,6 +367,12 @@ class ScanSpec {
   }
   void setLogicalTypeName(const std::string& name) {
     logicalTypeName_ = name;
+  }
+  const std::string& convertedTypeName() const {
+    return convertedTypeName_;
+  }
+  void setConvertedTypeName(const std::string& name) {
+    convertedTypeName_ = name;
   }
 
   // Whether this spec represents a column for the row index in the file
@@ -465,6 +477,7 @@ class ScanSpec {
   bool isArrayElementOrMapEntry_ = false;
 
   std::string logicalTypeName_;
+  std::string convertedTypeName_;
 
   // Only take the first maxArrayElementsCount_ elements from each array.
   vector_size_t maxArrayElementsCount_ =

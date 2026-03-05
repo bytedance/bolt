@@ -530,7 +530,7 @@ TEST_F(LocalPartitionTest, earlyCancelation) {
   params.bufferedBytes = 100;
 
   auto cursor = TaskCursor::create(params);
-  const auto& task = cursor->task();
+  auto task = cursor->task();
 
   // Fetch first batch of data.
   ASSERT_TRUE(cursor->moveNext());
@@ -551,6 +551,12 @@ TEST_F(LocalPartitionTest, earlyCancelation) {
 
   // Wait for task to transition to final state.
   waitForTaskCompletion(task, exec::kCanceled);
+
+  // Cursor TaskQueue's producerUnblockPromises_ may hold an unfulfilled
+  // promise, which would hold a reference to Task, and would not release after
+  // TaskQueue is dequeued. So reset cursor to release TaskQueue's
+  // producerUnblockPromises_
+  cursor.reset();
 
   // Make sure there is only one reference to Task left, i.e. no Driver is
   // blocked forever.

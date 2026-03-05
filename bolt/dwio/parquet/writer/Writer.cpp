@@ -506,6 +506,10 @@ void Writer::flush() {
 }
 
 void Writer::flush(int64_t rowsInCurrentRowGroup) {
+  if (enableFlushBasedOnBlockSize_ && arrowContext_->writer) {
+    PARQUET_THROW_NOT_OK(arrowContext_->writer->Flush());
+    return;
+  }
   if (arrowContext_->stagingRows > 0) {
     createFileWriterIfNotExist();
 

@@ -1201,5 +1201,139 @@ TEST_F(PaimonReaderPartialUpdateTest, sequenceGroupDefaultAggregateUpdate) {
   EXPECT_GT(getTableScanRuntimeStats(readTask)["totalMergeTime"].sum, 0);
 }
 
+TEST_F(PaimonReaderPartialUpdateTest, uninitializedMemoryTest) {
+  filesystems::registerLocalFileSystem();
+
+  std::shared_ptr<folly::Executor> executor(
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::thread::hardware_concurrency()));
+
+  auto tempDir = exec::test::TempDirectoryPath::create();
+
+  /*
+   * We want to test that if a column is NEVER updated for a PK, it should be
+   * NULL. If memory is uninitialized, it might show up as non-NULL with garbage
+   * value.
+   *
+   * Row Schema: k (PK), v1, v2, v3 (never updated)
+   *
+   * Input 1: k=1, v1=10, v2=NULL, v3=NULL
+   * Input 2: k=1, v1=NULL, v2=20, v3=NULL
+   *
+   * Expected: k=1, v1=10, v2=20, v3=NULL
+   */
+
+  auto rowType = ROW({
+      {"k", BIGINT()},
+      {"v1", BIGINT()},
+      {"v2", BIGINT()},
+      {"v3", BIGINT()}, // This column will never be updated
+      {"_SEQUENCE_NUMBER", BIGINT()},
+      {"_VALUE_KIND", TINYINT()},
+  });
+
+  bytedance::bolt::test::VectorMaker maker{leafPool_.get()};
+
+  // File 1: update v1
+  createPaimonFile(
+      tempDir->getPath(),
+      executor,
+      {"k"},
+      maker.rowVector(
+          rowType->names(),
+          {maker.flatVector<int64_t>({1}),
+           maker.flatVector<int64_t>({10}),
+           maker.flatVectorNullable<int64_t>({std::nullopt}),
+           maker.flatVectorNullable<int64_t>({std::nullopt}),
+           maker.flatVector<int64_t>({1}),
+           maker.flatVector<int8_t>(
+               {static_cast<int8_t>(PaimonRowKind::INSERT)})}));
+
+  // File 2: update v2
+  createPaimonFile(
+      tempDir->getPath(),
+      executor,
+      {"k"},
+      maker.rowVector(
+          rowType->names(),
+          {maker.flatVector<int64_t>({1}),
+           maker.flatVectorNullable<int64_t>({std::nullopt}),
+           maker.flatVector<int64_t>({20}),
+           maker.flatVectorNullable<int64_t>({std::nullopt}),
+           maker.flatVector<int64_t>({2}),
+           maker.flatVector<int8_t>(
+               {static_cast<int8_t>(PaimonRowKind::INSERT)})}));
+
+  core::PlanNodeId scanNodeId;
+
+  std::unordered_map<std::string, std::string> tableParameters{
+      {connector::paimon::kMergeEngine,
+       connector::paimon::kPartialUpdateMergeEngine},
+      {connector::paimon::kPrimaryKey, "k"}};
+
+  auto tableHandle = std::make_shared<connector::hive::HiveTableHandle>(
+      kHiveConnectorId,
+      "hive_table",
+      true,
+      SubfieldFilters{},
+      nullptr,
+      rowType,
+      tableParameters);
+
+  auto assignments = getIdentityAssignment(rowType);
+
+  auto readPlanFragment = exec::test::PlanBuilder()
+                              .tableScan(rowType, tableHandle, assignments)
+                              .capturePlanNodeId(scanNodeId)
+                              .planFragment();
+
+  // Create the reader task.
+  auto readTask = exec::Task::create(
+      "my_read_task",
+      readPlanFragment,
+      /*destination=*/0,
+      core::QueryCtx::create(executor.get()),
+      exec::Task::ExecutionMode::kSerial);
+
+  auto filePaths = getFilePaths(tempDir->getPath());
+
+  std::vector<std::shared_ptr<hive::HiveConnectorSplit>> hiveSplits;
+  for (auto filePath : filePaths) {
+    auto hiveSplit = std::make_shared<hive::HiveConnectorSplit>(
+        kHiveConnectorId, filePath, dwio::common::FileFormat::PARQUET);
+    hiveSplits.push_back(hiveSplit);
+  }
+
+  auto connectorSplit = std::make_shared<connector::hive::PaimonConnectorSplit>(
+      kHiveConnectorId, hiveSplits);
+
+  readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
+  readTask->noMoreSplits(scanNodeId);
+
+  // Expected: k=1, v1=10, v2=20, v3=NULL
+  // Since v3 is never updated, it must remain NULL.
+  auto expected = maker.rowVector(
+      rowType->names(),
+      {maker.flatVector<int64_t>({1}),
+       maker.flatVector<int64_t>({10}),
+       maker.flatVector<int64_t>({20}),
+       maker.flatVectorNullable<int64_t>({std::nullopt}), // v3 MUST be NULL
+       maker.flatVector<int64_t>({2}), // Last sequence number
+       maker.flatVector<int8_t>({static_cast<int8_t>(PaimonRowKind::INSERT)})});
+
+  int nBatch = 0;
+  while (auto result = readTask->next()) {
+    nBatch++;
+    // Check v3 explicitly to be sure
+    auto v3 = result->childAt(3);
+    EXPECT_TRUE(v3->isNullAt(0))
+        << "v3 should be NULL at index 0, but got: " << v3->toString(0);
+
+    bytedance::bolt::test::assertEqualVectors(expected, result);
+  }
+
+  BOLT_CHECK(nBatch > 0);
+}
+
 } // namespace
 } // namespace bytedance::bolt::dwio::paimon::test
