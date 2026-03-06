@@ -42,6 +42,7 @@
 #include "bolt/dwio/parquet/arrow/Exception.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
+#include "dwio/common/exception/Exceptions.h"
 
 namespace arrow {
 
@@ -186,6 +187,10 @@ class Encoder {
   virtual int64_t EstimatedDataEncodedSize() = 0;
   virtual std::shared_ptr<::arrow::Buffer> FlushValues() = 0;
   virtual Encoding::type encoding() const = 0;
+
+  virtual void testSinkResize0() {
+    BOLT_UNREACHABLE();
+  }
 
   virtual void Put(const ::arrow::Array& values) = 0;
 
