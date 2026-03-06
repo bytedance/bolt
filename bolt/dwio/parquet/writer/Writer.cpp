@@ -145,9 +145,11 @@ constexpr int64_t DEFAULT_PARQUET_BLOCK_SIZE = 128 * 1024 * 1024; // 128M
 
 std::shared_ptr<WriterProperties::Builder> getArrowParquetWriterOptionsBuilder(
     const parquet::WriterOptions& options,
-    const std::unique_ptr<DefaultFlushPolicy>& flushPolicy) {
+    const std::unique_ptr<DefaultFlushPolicy>& flushPolicy,
+    arrow::MemoryPool* arrowPool) {
   auto builder = std::make_shared<WriterProperties::Builder>();
   WriterProperties::Builder* properties = builder.get();
+  properties->memory_pool(arrowPool);
   if (!options.enableDictionary) {
     properties = properties->disable_dictionary();
   }
@@ -379,9 +381,10 @@ std::shared_ptr<::arrow::Field> updateFieldNameRecursive(
 } // namespace
 
 std::shared_ptr<WriterProperties::Builder>
-WriterOptions::getWriterPropertiesBuilder() const {
+WriterOptions::getWriterPropertiesBuilder(arrow::MemoryPool* arrowPool) const {
   auto defaultFlushPolicy = std::make_unique<DefaultFlushPolicy>();
-  return getArrowParquetWriterOptionsBuilder(*this, defaultFlushPolicy);
+  return getArrowParquetWriterOptionsBuilder(
+      *this, defaultFlushPolicy, arrowPool);
 }
 
 std::shared_ptr<ArrowWriterProperties::Builder>
@@ -468,7 +471,8 @@ Writer::Writer(
   options_.timestampTimeZone =
       options.parquetWriteTimestampTimeZone.value_or("UTC");
   arrowContext_->properties =
-      getArrowParquetWriterOptionsBuilder(options, flushPolicy_)->build();
+      getArrowParquetWriterOptionsBuilder(options, flushPolicy_, arrowPool_)
+          ->build();
   arrowContext_->arrowWriterProperties =
       options.getArrowWriterPropertiesBuilder()->build();
   setMemoryReclaimers();
