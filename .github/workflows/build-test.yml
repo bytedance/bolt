@@ -41,6 +41,8 @@ jobs:
     outputs:
       source_code: ${{ steps.filter.outputs.source_code }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
