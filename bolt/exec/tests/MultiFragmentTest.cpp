@@ -602,8 +602,7 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
     leafTask->start(1);
     auto op = PlanBuilder().exchange(leafPlan->outputType()).planNode();
 
-    auto task =
-        assertQuery(op, {leafTaskId}, "SELECT c0, c1, c2, c3, c4 FROM tmp");
+    assertQuery(op, {leafTaskId}, "SELECT c0, c1, c2, c3, c4 FROM tmp");
     ASSERT_TRUE(waitForTaskCompletion(leafTask.get()))
         << leafTask->taskId() << "state: " << leafTask->state();
     // Check the leaf task's PartitionedOutput operator ("1") for outputVectors.
@@ -647,8 +646,7 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
 
     auto op = PlanBuilder().exchange(intermediatePlan->outputType()).planNode();
 
-    auto task = assertQuery(
-        op, intermediateTaskIds, "SELECT c0, c1, c2, c3, c4 FROM tmp");
+    assertQuery(op, intermediateTaskIds, "SELECT c0, c1, c2, c3, c4 FROM tmp");
     ASSERT_TRUE(waitForTaskCompletion(leafTask.get()))
         << "state: " << leafTask->state();
     // Same as above: check the leaf's PartitionedOutput operator ("1").
