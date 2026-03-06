@@ -275,7 +275,7 @@ class BoltConan(ConanFile):
         self.tool_requires("ninja/1.11.1")
         self.tool_requires("protobuf/<host_version>")
         self.tool_requires("thrift/<host_version>")
-        if os.getenv("BOLT_BUILD_TESTING", "OFF") == "ON":
+        if not self.conf.get("tools.build:skip_test", default=True):
             self.test_requires("jemalloc/5.3.0")
 
     def layout(self):
@@ -505,16 +505,17 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_perf"):
             tc.cache_variables["BOLT_ENABLE_PERF"] = "ON"
 
-        # for CI / testing / benchmarks
-        if os.getenv("BOLT_BUILD_TESTING", "OFF") == "ON":
+        # benchmark and coverage should NOT be in conan options/configurations
+        if not self.conf.get("tools.build:skip_test", default=True):
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
-        if os.getenv("BOLT_BUILD_BENCHMARKS_BASIC", "OFF") == "ON":
-            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
+
+            if os.getenv("BOLT_BUILD_TESTING_WITH_COVERAGE", "OFF") == "ON":
+                tc.cache_variables["BOLT_BUILD_TESTING_WITH_COVERAGE"] = "ON"
+
         if os.getenv("BOLT_BUILD_BENCHMARKS", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_BENCHMARKS"] = "ON"
-        if os.getenv("BOLT_BUILD_TESTING_WITH_COVERAGE", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
-            tc.cache_variables["BOLT_BUILD_TESTING_WITH_COVERAGE"] = "ON"
+            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
 
         tc.generate()
 

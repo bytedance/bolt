@@ -29,20 +29,21 @@
  */
 
 #include <cstdio>
+#include <memory>
 
 #include "arrow/c/abi.h"
 #include "arrow/c/bridge.h"
-#include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/common/process/ProcessBase.h"
+#include "arrow/memory_pool.h"
+#include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/Connector.h"
-#include "bolt/connectors/hive/HiveConnector.h" // @manual
+#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
+#include "bolt/dwio/parquet/arrow/Encoding.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 #include "bolt/vector/BaseVector.h"
-#include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/arrow/Bridge.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
@@ -91,7 +92,8 @@ class ParquetWriterTest : public ParquetTestBase {
       const std::string& parquetPath,
       RowTypePtr schema,
       vp::WriterOptions& writerOptions,
-      std::shared_ptr<::arrow::Schema> arrowSchema = nullptr) {
+      std::shared_ptr<::arrow::Schema> arrowSchema = nullptr,
+      ::arrow::MemoryPool* arrowPool = ::arrow::default_memory_pool()) {
     writerOptions.enableFlushBasedOnBlockSize = true;
     writerOptions.parquetWriteTimestampUnit = TimestampUnit::kNano;
     writerOptions.writeInt96AsTimestamp = true;
@@ -104,7 +106,7 @@ class ParquetWriterTest : public ParquetTestBase {
         std::move(sink),
         writerOptions,
         rootPool_,
-        ::arrow::default_memory_pool(),
+        arrowPool,
         schema,
         arrowSchema);
   }
@@ -118,6 +120,16 @@ class ParquetWriterTest : public ParquetTestBase {
             std::make_shared<LocalReadFile>(parquetPath),
             readerOptions.getMemoryPool()),
         readerOptions);
+  }
+
+  ::arrow::MemoryPool* getArrowMemoryPool() {
+    if (arrowPool_) {
+      return arrowPool_.get();
+    }
+    static auto memAlloc = memory::sparksql::DefaultMemoryAllocatorGetter::
+        defaultMemoryAllocator();
+    arrowPool_ = std::make_shared<memory::sparksql::ArrowMemoryPool>(memAlloc);
+    return arrowPool_.get();
   }
 
   void assertRead(
@@ -201,6 +213,7 @@ class ParquetWriterTest : public ParquetTestBase {
   }
 
   inline static const std::string kHiveConnectorId = "test-hive";
+  std::shared_ptr<::arrow::MemoryPool> arrowPool_ = nullptr;
 };
 
 std::vector<CompressionKind> params = {
@@ -620,3 +633,54 @@ TEST_F(ParquetWriterTest, columnPageSize) {
   ASSERT_EQ(1, chunk2PageEncodingStats.size());
   ASSERT_EQ(4, chunk2PageEncodingStats[0].count); // data page num
 }
+
+TEST_F(ParquetWriterTest, arrowPool) {
+  const size_t kRows = 4 * 1024;
+  auto type = getType();
+  auto schema = std::static_pointer_cast<const RowType>(type);
+  VectorPtr data = bytedance::bolt::test::BatchMaker::createBatch(
+      type, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
+  std::string parquetPath = tempPath_->path + "/arrowPool.parquet";
+
+  auto* arrowPool = getArrowMemoryPool();
+  vp::WriterOptions writerOptions{};
+  auto writer =
+      createLocalWriter(parquetPath, schema, writerOptions, nullptr, arrowPool);
+  writer->write(data);
+  auto* defaultMemoryPool = ::arrow::default_memory_pool();
+  ASSERT_EQ(0, defaultMemoryPool->bytes_allocated());
+  ASSERT_LT(0, arrowPool->bytes_allocated());
+  writer->close();
+  ASSERT_EQ(0, arrowPool->bytes_allocated());
+  ASSERT_EQ(0, defaultMemoryPool->bytes_allocated());
+  auto reader = createLocalParquetReader(parquetPath);
+  ASSERT_EQ(reader->numberOfRows(), kRows);
+  ASSERT_EQ(*reader->rowType(), *schema);
+  auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
+  assertReadWithReaderAndExpected(
+      schema,
+      *rowReader,
+      std::static_pointer_cast<RowVector>(data),
+      *leafPool_);
+};
+
+#ifdef SPARK_COMPATIBLE
+TEST_F(ParquetWriterTest, encoderTestSinkResize0) {
+  int levels_per_page = 100;
+  int num_pages = 50;
+  auto max_def_level_ = 4;
+  auto max_rep_level_ = 0;
+  bytedance::bolt::parquet::arrow::schema::NodePtr type =
+      bytedance::bolt::parquet::arrow::schema::Int32(
+          "b", bytedance::bolt::parquet::arrow::Repetition::OPTIONAL);
+  const bytedance::bolt::parquet::arrow::ColumnDescriptor descr(
+      type, max_def_level_, max_rep_level_);
+  auto encoder = bytedance::bolt::parquet::arrow::MakeEncoder(
+      bytedance::bolt::parquet::arrow::Type::INT32,
+      bytedance::bolt::parquet::arrow::Encoding::PLAIN,
+      false,
+      &descr,
+      getArrowMemoryPool());
+  encoder->testSinkResize0();
+};
+#endif

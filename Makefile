@@ -54,36 +54,44 @@
 .PHONY: unittest unittest_debug unittest_release
 .PHONY: unittest_release_spark unittest_debug_spark unittest_coverage
 
-# ---------- Conan variables definition starts ----------
-# If built on SCM use date as version
-# $(shell date '+%Y.%m.%d.00')
+# -----------------------------------------------------------------
+# Interfaces to control CMake options via Makefile.
+# Usage:
+# To pass any options to Bolt via Makefile in shell script, you can
+# ```shell
+#  make conan_build BUILD_VERSION="main" BUILD_TYPE=Release \
+#        CONAN_OPTIONS="-o bolt/*:enable_hdfs=True" \
+#        CONAN_CONFIG="-c tools.build:skip_test=False"
+# ```
+
+# for passing conan options
+CONAN_OPTIONS ?=
+
+# for passing skip_test
+CONAN_CONFIG ?=
+
+# for passing high priority options.
+# options in CONAN_OVERRIDE will override the options in CONAN_OPTIONS
+CONAN_OVERRIDE ?=
+
 BUILD_VERSION ?= main
+PROFILE=default
+BUILD_TYPE=Release
+
+# Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
+# Control whether to build benchmarks
+BOLT_BUILD_BENCHMARKS ?= "OFF"
+# Control whether to build tests with coverage instrumentation
+BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
+# -----------------------------------------------------------------
+
+# TODO: remove `BUILD_USER` and `BUILD_CHANNEL`
 BUILD_USER ?=
 BUILD_CHANNEL ?=
-# Use commas to separate multiple file systems, such as `hdfs,tos`
-ENABLE_HDFS ?= True
-ENABLE_S3 ?= False
-USE_ARROW_HDFS ?= True
-ENABLE_ASAN ?= False
-LDB_BUILD ?= False
-ENABLE_COLOR ?= True
-ENABLE_CRC ?= False
-ENABLE_PERF ?= False
 
+# temporary variables for build scripts, not intended for users to set directly
 BUILD_BASE_DIR=_build
-BUILD_TYPE=Release
 BENCHMARKS_DUMP_DIR=dumps
-TREAT_WARNINGS_AS_ERRORS ?= 0
-ENABLE_WALL ?= 1
-ENABLE_JEMALLOC_PROF ?= False
-ENABLE_COLOCATE ?= False
-ENABLE_META_SORT ?= False
-PROFILE=default
-
-GLUTEN_BOLT_OPTIONS:=" -o *:spark_compatible=True "
-GLUTEN_CONAN_OPTIONS:=$(GLUTEN_BOLT_OPTIONS)
-
-# ---------- Conan variables definition ends ----------
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
@@ -119,18 +127,6 @@ endif
 CONAN_EXE := $(shell command -v conan 2> /dev/null)
 CMAKE_EXE := $(shell command -v cmake 2> /dev/null)
 
-# Option to make a minimal build. By default set to "OFF"; set to
-# "ON" to only build a minimal set of components. This may override
-# other build options
-BOLT_BUILD_MINIMAL ?= "OFF"
-
-# Control whether to build unit tests. By default set to "ON"; set to
-# "OFF" to disable.
-BOLT_BUILD_TESTING ?= "OFF"
-BOLT_BUILD_BENCHMARKS ?= "OFF"
-BOLT_BUILD_BENCHMARKS_BASIC ?= "OFF"
-BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
-
 export GTEST_COLOR=1
 
 OS:=$(shell uname -s)
@@ -157,36 +153,7 @@ endif
 
 CPU_TARGET ?= "avx"
 
-ifeq ($(UNAME_S),Darwin)
-    FUZZER_SEED ?= $(shell python3 -c 'import random; print(random.randint(1000000000, 5000000000))')
-else
-    FUZZER_SEED ?= $(shell shuf -i 1000000000-5000000000 -n 1)
-endif
-
-FUZZER_MAX_LEVEL_NEST ?= 5
-FUZZER_DURATION_SEC ?= 600
-FUZZER_EXPRESSION_REPRO_PERSIST_PATH ?= expression_fuzzer
-FUZZER_SPARK_EXPRESSION_REPRO_PERSIST_PATH ?= spark_expression_fuzzer
-FUZZER_SPARK_AGGREGATION_REPRO_PERSIST_PATH ?= spark_aggregation_fuzzer
-FUZZER_JOIN_REPRO_PERSIST_PATH ?= join_fuzzer
-FUZZER_SPARK_WINDOW_REPRO_PERSIST_PATH ?= spark_window_fuzzer
-FUZZER_SPARK_WINDOW_FUNCTIONS ?= "nth_value,row_number,rank,dense_rank,ntile"
-FUZZER_MAX_STRING_LENGTH ?= 100
-FUZZER_BATCH_SIZE ?= 100
-FUZZER_NUM_BATCH ?= 5
-FUZZER_ENABLE_COMPLEX_TYPES ?= true
-FUZZER_ENABLE_STRING_VARIABLE_LENGTH ?= true
-FUZZER_ENABLE_STRING_INCREMENTAL_GENERATION ?= true
-FUZZER_ENABLE_DUPLICATES ?= true
-FUZZER_ENABLE_USER_STACKTRACE ?= true
-FUZZER_ENABLE_SPILL ?= true
-FUZZER_ENABLE_LOG_SIGNATURE_STATS ?= true
-FUZZER_ENABLE_HUGEINT_FOR_JOIN ?= false
-FUZZER_ENABLE_DUCKDB_VERIFICATION ?= true
-
 PYTHON_EXECUTABLE ?= $(shell which python)
-
-CONAN_OPTIONS=
 
 all: 			#: Build the release version
 	$(MAKE) release
@@ -209,18 +176,9 @@ conan_install:
 	git rev-parse HEAD && \
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
-	echo " -o bolt/*:enable_hdfs=${ENABLE_HDFS} \
-	-o bolt/*:use_arrow_hdfs=${USE_ARROW_HDFS} \
-	-o bolt/*:enable_s3=${ENABLE_S3} \
-	-o bolt/*:enable_asan=${ENABLE_ASAN} \
-	-o bolt/*:enable_perf=${ENABLE_PERF} \
-	-o bolt/*:enable_color=${ENABLE_COLOR} \
-	-o bolt/*:enable_meta_sort=${ENABLE_META_SORT} \
-	-o bolt/*:enable_colocate=${ENABLE_COLOCATE} \
-	-o bolt/*:ldb_build=${LDB_BUILD} \
-	-o bolt/*:enable_crc=${ENABLE_CRC} \
+	echo " \
 	-pr ${PROFILE} -pr ../../scripts/conan/bolt.profile \
-	${CONAN_OPTIONS}" > new_conan.options && \
+	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
 	  echo "Conan options and build type unchanged; preserving CMakeCache.txt"; \
@@ -237,28 +195,26 @@ conan_install:
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
-	$${ALL_CONAN_OPTIONS} --build=missing && \
+	$${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing  &&\
 	cd -
 
 conan_build: conan_install
 	cd _build/${BUILD_TYPE} && \
 	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
-	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
 	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
-	   --build=missing $${ALL_CONAN_OPTIONS} && \
+	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
 	cd -
 
 _compile_db: conan_install
 	cd _build/${BUILD_TYPE} && \
 	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
-	BOLT_BUILD_TESTING=${BOLT_BUILD_TESTING} \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_CONAN_CONFIGURE_ONLY=1 \
 	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
@@ -272,10 +228,9 @@ _compile_db: conan_install
 compile_db_all:
 	$(MAKE) _compile_db \
 	BUILD_TYPE=Release \
-	BOLT_BUILD_TESTING="ON" \
 	BOLT_BUILD_BENCHMARKS="ON" \
-	ENABLE_S3="True" \
-	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_s3=True -o bolt/*:enable_gcs=True" \
+	CONAN_CONFIG=" -c tools.build:skip_test=False"
 
 export_base:
 	cd _build/${BUILD_TYPE} && \
@@ -284,7 +239,7 @@ export_base:
 	 $${ALL_CONAN_OPTIONS} \
 	 -s llvm-core/*:build_type=Release \
 	 -s "&:build_type=${BUILD_TYPE}" \
-	 -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	 -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} ${CONAN_CONFIG}\
 	 ../.. && \
 	cd -
 
@@ -310,19 +265,19 @@ RelWithDebInfo:
 	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo
 
 release_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 release_with_debug_info_with_test:
-	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 debug_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 debug_with_test_spark:
-	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 debug_with_test_cov:
-	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" BOLT_BUILD_TESTING_WITH_COVERAGE="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
 
 debug_spark:
 	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
@@ -331,22 +286,22 @@ release_spark:
 	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
 
 release_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 debug_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
 
 benchmarks-basic-build:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build-spark:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 benchmarks-build-relwithdebinfo:
-	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 unittest_debug: unittest
 unittest: debug_with_test
