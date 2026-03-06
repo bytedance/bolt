@@ -28,42 +28,41 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/file/benchmark/ReadBenchmark.h"
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSFileSystem.h"
+#pragma once
 
-DECLARE_string(gcs_config);
-namespace bytedance::bolt {
+#include <google/cloud/storage/client.h>
+#include "bolt/common/file/File.h"
 
-std::shared_ptr<Config> readConfig(const std::string& filePath);
+namespace bytedance::bolt::filesystems {
 
-class GCSReadBenchmark : public ReadBenchmark {
+/**
+ * Implementation of gcs write file.
+ */
+class GcsWriteFile : public WriteFile {
  public:
-  // Initialize a GCSReadFile instance for the specified 'path'.
-  void initialize() override {
-    executor_ =
-        std::make_unique<folly::IOThreadPoolExecutor>(FLAGS_num_threads);
+  GcsWriteFile(
+      const std::string& path,
+      std::shared_ptr<::google::cloud::storage::Client> client);
 
-    std::shared_ptr<Config> config;
-    if (!FLAGS_gcs_config.empty()) {
-      config = readConfig(FLAGS_gcs_config);
-    }
-    auto gcsfs = filesystems::getFileSystem(FLAGS_path, config);
-    readFile_ = gcsfs->openFileForRead(FLAGS_path);
+  ~GcsWriteFile() override;
 
-    fileSize_ = readFile_->size();
-    if (FLAGS_file_size_gb) {
-      fileSize_ = std::min<uint64_t>(FLAGS_file_size_gb << 30, fileSize_);
-    }
+  void initialize();
 
-    if (fileSize_ <= FLAGS_measurement_size) {
-      LOG(ERROR) << "File size " << fileSize_
-                 << " is <= then --measurement_size " << FLAGS_measurement_size;
-      exit(1);
-    }
-    if (FLAGS_seed) {
-      rng_.seed(FLAGS_seed);
-    }
-  }
+  /// Writes the data by append mode.
+  void append(std::string_view data) override;
+
+  /// Flushes the data.
+  void flush() override;
+
+  /// Closes the file.
+  void close() override;
+
+  /// Gets the file size.
+  uint64_t size() const override;
+
+ protected:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::filesystems

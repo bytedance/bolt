@@ -39,7 +39,7 @@
 #include "bolt/connectors/hive/HiveDataSink.h"
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
-#include "bolt/connectors/hive/storage_adapters/gcs/RegisterGCSFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 #include "bolt/core/PlanNode.h"
@@ -273,7 +273,7 @@ void TraceReplayRunner::init() {
   filesystems::registerHdfsFileSystem();
 #endif
 #ifdef BOLT_ENABLE_GCS
-  filesystems::registerGCSFileSystem();
+  filesystems::registerGcsFileSystem();
 #endif
 #ifdef BOLT_ENABLE_ABFS
   filesystems::abfs::registerAbfsFileSystem();

@@ -28,22 +28,50 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
+#pragma once
 
-#include "gtest/gtest.h"
-using namespace bytedance::bolt;
+#include <google/cloud/storage/client.h>
+#include "bolt/common/file/File.h"
 
-TEST(GCSUtilTest, isGCSFile) {
-  EXPECT_FALSE(isGCSFile("gs:"));
-  EXPECT_FALSE(isGCSFile("gs::/bucket"));
-  EXPECT_FALSE(isGCSFile("gs:/bucket"));
-  EXPECT_TRUE(isGCSFile("gs://bucket/file.txt"));
-}
+namespace bytedance::bolt::filesystems {
 
-TEST(GCSUtilTest, setBucketAndKeyFromGCSPath) {
-  std::string bucket, key;
-  auto path = "bucket/file.txt";
-  setBucketAndKeyFromGCSPath(path, bucket, key);
-  EXPECT_EQ(bucket, "bucket");
-  EXPECT_EQ(key, "file.txt");
-}
+/**
+ * Implementation of gcs read file.
+ */
+class GcsReadFile : public ReadFile {
+ public:
+  GcsReadFile(
+      const std::string& path,
+      std::shared_ptr<::google::cloud::storage::Client> client);
+
+  ~GcsReadFile() override;
+
+  void initialize();
+
+  std::string_view pread(uint64_t offset, uint64_t length, void* buffer)
+      const override;
+
+  std::string pread(uint64_t offset, uint64_t length) const override;
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const override;
+
+  uint64_t size() const override;
+
+  uint64_t memoryUsage() const override;
+
+  bool shouldCoalesce() const final {
+    return false;
+  }
+
+  std::string getName() const override;
+
+  uint64_t getNaturalReadSize() const override;
+
+ protected:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+} // namespace bytedance::bolt::filesystems

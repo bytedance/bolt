@@ -37,7 +37,7 @@
 #include "bolt/connectors/hive/HivePartitionFunction.h"
 // Meta's buck build system needs this check.
 #ifdef BOLT_ENABLE_GCS
-#include "bolt/connectors/hive/storage_adapters/gcs/RegisterGCSFileSystem.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h" // @manual
 #endif
 #ifdef BOLT_ENABLE_HDFS
 #include "bolt/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h" // @manual
@@ -180,7 +180,7 @@ void HiveConnectorFactory::initialize() {
     filesystems::registerHdfsFileSystem();
 #endif
 #ifdef BOLT_ENABLE_GCS
-    filesystems::registerGCSFileSystem();
+    filesystems::registerGcsFileSystem();
 #endif
 #ifdef BOLT_ENABLE_ABFS
     filesystems::abfs::registerAbfsFileSystem();

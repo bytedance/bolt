@@ -27,18 +27,14 @@
 
 # for generated headers
 
-bolt_add_library(bolt_gcs RegisterGCSFileSystem.cpp)
+bolt_add_library(bolt_gcs RegisterGcsFileSystem.cpp)
 
 if(BOLT_ENABLE_GCS)
-  target_sources(bolt_gcs PRIVATE GCSFileSystem.cpp GCSUtil.cpp)
-  target_link_libraries(bolt_gcs bolt_exception Folly::folly google-cloud-cpp::storage)
+  target_sources(bolt_gcs PRIVATE GcsFileSystem.cpp GcsUtil.cpp GcsWriteFile.cpp GcsReadFile.cpp)
+  target_link_libraries(bolt_gcs bolt_dwio_common bolt_exception Folly::folly google-cloud-cpp::storage)
 
   if(${BOLT_BUILD_TESTING})
     add_subdirectory(tests)
-  endif()
-
-  if(${BOLT_BUILD_BENCHMARKS})
-    add_subdirectory(benchmark)
   endif()
 
   if(${BOLT_ENABLE_EXAMPLES})
