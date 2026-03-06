@@ -35,14 +35,14 @@ namespace bytedance::bolt {
 
 namespace {
 constexpr const char* kSep{"/"};
-constexpr std::string_view kGCSScheme{"gs://"};
+constexpr std::string_view kGcsScheme{"gs://"};
 
 } // namespace
 
 std::string getErrorStringFromGCSError(const google::cloud::StatusCode& error);
 
 inline bool isGCSFile(const std::string_view filename) {
-  return (filename.substr(0, kGCSScheme.size()) == kGCSScheme);
+  return (filename.substr(0, kGcsScheme.size()) == kGcsScheme);
 }
 
 inline void setBucketAndKeyFromGCSPath(
@@ -54,7 +54,7 @@ inline void setBucketAndKeyFromGCSPath(
   key = path.substr(firstSep + 1);
 }
 inline std::string gcsURI(const std::string& bucket) {
-  return std::string(kGCSScheme) + bucket;
+  return std::string(kGcsScheme) + bucket;
 }
 
 inline std::string gcsURI(const std::string& bucket, const std::string& key) {
@@ -63,7 +63,7 @@ inline std::string gcsURI(const std::string& bucket, const std::string& key) {
 
 inline std::string gcsPath(const std::string_view& path) {
   // Remove the prefix gcs:// from the given path
-  return std::string(path.substr(kGCSScheme.length()));
+  return std::string(path.substr(kGcsScheme.length()));
 }
 
 } // namespace bytedance::bolt

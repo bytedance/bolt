@@ -35,7 +35,7 @@ target_link_libraries(
   bolt_type_fbhive
   bolt_caching
   bolt_vector_test_lib
-  bolt_test_util_gperf
+  $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
   Folly::folly
   ${FOLLY_BENCHMARK}
   fmt::fmt)

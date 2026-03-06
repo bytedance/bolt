@@ -85,6 +85,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
+        "enable_gcs": [True, False],
         "use_arrow_hdfs": [True, False],
         "enable_asan": [True, False],
         "enable_jit": [True, False],
@@ -110,6 +111,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": True,
         "enable_s3": False,
+        "enable_gcs": False,
         "use_arrow_hdfs": True,
         "enable_arrow_connector": False,
         "enable_jit": True,
@@ -188,6 +190,12 @@ class BoltConan(ConanFile):
                 "aws-sdk-cpp/1.11.692", transitive_headers=True, transitive_libs=True
             )
             self.requires("aws-c-common/0.12.5", force=True)
+        if self.options.get_safe("enable_gcs"):
+            self.requires(
+                "google-cloud-cpp/[>=2.10 <3]",
+                transitive_headers=True,
+                transitive_libs=True,
+            )
         self.requires("simdjson/3.12.3", transitive_headers=True)
         self.requires(
             "sonic-cpp/1.0.2-bolt", transitive_headers=True, transitive_libs=True
@@ -215,6 +223,7 @@ class BoltConan(ConanFile):
         self.requires("ryu/2.0.1", transitive_headers=True, transitive_libs=True)
         self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
+        self.requires("zstd/1.5.7", override=True)
         self.requires(
             "flex/2.6.4",
             visible=False,
@@ -275,7 +284,7 @@ class BoltConan(ConanFile):
         self.tool_requires("ninja/1.11.1")
         self.tool_requires("protobuf/<host_version>")
         self.tool_requires("thrift/<host_version>")
-        if os.getenv("BOLT_BUILD_TESTING", "OFF") == "ON":
+        if not self.conf.get("tools.build:skip_test", default=True):
             self.test_requires("jemalloc/5.3.0")
 
     def layout(self):
@@ -491,6 +500,10 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_s3"):
             tc.cache_variables["BOLT_ENABLE_S3"] = "ON"
 
+        tc.cache_variables["BOLT_ENABLE_GCS"] = "OFF"
+        if self.options.get_safe("enable_gcs"):
+            tc.cache_variables["BOLT_ENABLE_GCS"] = "ON"
+
         tc.cache_variables["BOLT_FORCE_COLORED_OUTPUT"] = "ON"
         if self.options.enable_crc:
             tc.cache_variables["BOLT_ENABLE_CRC"] = "ON"
@@ -505,16 +518,17 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_perf"):
             tc.cache_variables["BOLT_ENABLE_PERF"] = "ON"
 
-        # for CI / testing / benchmarks
-        if os.getenv("BOLT_BUILD_TESTING", "OFF") == "ON":
+        # benchmark and coverage should NOT be in conan options/configurations
+        if not self.conf.get("tools.build:skip_test", default=True):
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
-        if os.getenv("BOLT_BUILD_BENCHMARKS_BASIC", "OFF") == "ON":
-            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
+
+            if os.getenv("BOLT_BUILD_TESTING_WITH_COVERAGE", "OFF") == "ON":
+                tc.cache_variables["BOLT_BUILD_TESTING_WITH_COVERAGE"] = "ON"
+
         if os.getenv("BOLT_BUILD_BENCHMARKS", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_BENCHMARKS"] = "ON"
-        if os.getenv("BOLT_BUILD_TESTING_WITH_COVERAGE", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
-            tc.cache_variables["BOLT_BUILD_TESTING_WITH_COVERAGE"] = "ON"
+            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
 
         tc.generate()
 
