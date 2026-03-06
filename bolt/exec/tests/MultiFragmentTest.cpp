@@ -584,6 +584,7 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
   // Verify that partitionedOutput operator is able to split a single input
   // vector if it hits memory or row limits.
   // We create a large vector that hits the row limit (70% - 120% of 10,000).
+  // which would hit a task level memory limit of 1MB unless its split up.
   // This test exercises splitting up the input both from the edges and the
   // middle as it ends up splitting it into at least 3.
   setupSources(1, 30'000);
