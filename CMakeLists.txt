@@ -118,7 +118,6 @@ option(BOLT_BUILD_TESTING_WITH_COVERAGE "Enable Bolt tests with coverage statist
 option(BOLT_ENABLE_ADDRESS_SANITIZER "Enable Address Sanitizer to check for memory related errors"
        OFF
 )
-option(BOLT_ENABLE_DUCKDB "Build duckDB to enable differential testing." ON)
 option(BOLT_ENABLE_EXEC "Build exec." ON)
 option(BOLT_ENABLE_AGGREGATES "Build aggregates." ON)
 option(BOLT_ENABLE_HIVE_CONNECTOR "Build Hive connector." ON)
@@ -214,7 +213,6 @@ if(${BOLT_BUILD_MINIMAL})
   # Enable and disable components for bolt base build
   set(BOLT_BUILD_TESTING OFF)
   set(BOLT_ENABLE_PRESTO_FUNCTIONS ON)
-  set(BOLT_ENABLE_DUCKDB OFF)
   set(BOLT_ENABLE_EXPRESSION ON)
   set(BOLT_ENABLE_PARSE OFF)
   set(BOLT_ENABLE_EXEC OFF)
@@ -236,7 +234,6 @@ endif()
 if(${BOLT_BUILD_TESTING})
   # Enable all components to build testing binaries
   set(BOLT_ENABLE_PRESTO_FUNCTIONS ON)
-  set(BOLT_ENABLE_DUCKDB ON)
   set(BOLT_ENABLE_EXPRESSION ON)
   set(BOLT_ENABLE_PARSE ON)
   set(BOLT_ENABLE_EXEC ON)
@@ -260,7 +257,6 @@ endif()
 if(${BOLT_BUILD_BENCHMARKS})
   set(BOLT_BUILD_BENCHMARKS ON)
   set(BOLT_BUILD_BENCHMARKS_BASIC ON)
-  set(BOLT_ENABLE_DUCKDB ON)
   set(BOLT_ENABLE_PARSE ON)
   set(BOLT_ENABLE_PARQUET ON)
   set(BOLT_ENABLE_ORC ON)
@@ -297,13 +293,11 @@ endif()
 
 if(BOLT_BUILD_TESTING OR BOLT_BUILD_TEST_UTILS)
   find_package(cpr CONFIG REQUIRED)
-  set(BOLT_ENABLE_DUCKDB ON)
   set(BOLT_ENABLE_PARSE ON)
 endif()
 
 if(${BOLT_BUILD_PYTHON_PACKAGE})
   set(BOLT_ENABLE_PRESTO_FUNCTIONS ON)
-  set(BOLT_ENABLE_DUCKDB ON)
   set(BOLT_ENABLE_EXPRESSION ON)
   set(BOLT_ENABLE_PARSE ON)
   set(BOLT_ENABLE_EXEC ON)
@@ -602,13 +596,6 @@ else()
   set(FILESYSTEM "")
 endif()
 
-if(BOLT_BUILD_TESTING AND NOT BOLT_ENABLE_DUCKDB)
-  message(
-    FATAL_ERROR
-      "Unit tests require duckDB to be enabled (BOLT_ENABLE_DUCKDB=ON or BOLT_BUILD_TESTING=OFF)"
-  )
-endif()
-
 set(BOLT_DISABLE_GOOGLETEST OFF)
 if(NOT BOLT_BUILD_TEST_UTILS AND NOT BOLT_BUILD_TESTING)
   set(BOLT_DISABLE_GOOGLETEST ON)
@@ -713,7 +700,9 @@ if("${TREAT_WARNINGS_AS_ERRORS}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
 endif()
 
-find_package(duckdb REQUIRED CONFIG)
+if(BOLT_BUILD_TEST_UTILS)
+  find_package(duckdb REQUIRED CONFIG)
+endif()
 
 # if both JIT and TORCH are enabled, torch includes a llvm header as a transitive header included by
 # jit. Therefore, LLVM definitions need to be available to torch module and not just the jit module.
