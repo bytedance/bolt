@@ -471,6 +471,33 @@ class Converter {
       }
     } else if constexpr (fromBool) {
       return tryToWithFolly(from, to);
+    } else if constexpr (fromKind == PrimitiveKind::TIMESTAMP) {
+      // Timestamp -> integral seconds, rounding away from zero.
+      int64_t secs64 = 0;
+      try {
+        __int128_t micros = static_cast<__int128_t>(from.toMicros());
+        __int128_t secs128 =
+            micros / (__int128_t)1'000'000; // trunc toward zero
+        __int128_t rem = micros % (__int128_t)1'000'000;
+        if (rem != 0) {
+          if (micros > 0) {
+            secs128 += 1; // away from zero for positive fraction
+          } else {
+            secs128 -= 1; // away from zero for negative fraction
+          }
+        }
+        if (secs128 > (__int128_t)std::numeric_limits<int64_t>::max()) {
+          secs64 = std::numeric_limits<int64_t>::max();
+        } else if (secs128 < (__int128_t)std::numeric_limits<int64_t>::min()) {
+          secs64 = std::numeric_limits<int64_t>::min();
+        } else {
+          secs64 = static_cast<int64_t>(secs128);
+        }
+      } catch (...) {
+        return ConvertStatus::OTHER_FAILURE;
+      }
+
+      return tryIntegerToInteger<int64_t, ToType>(secs64, to);
     } else {
       // INTEGER
       return tryIntegerToInteger<FromType, ToType>(from, to);
@@ -993,6 +1020,8 @@ void registerConverter() {
   ConverterRegister<integerType, timestampType>::registerConverter();
   // integer to binary type conversion
   ConverterRegister<integerType, binaryType>::registerConverter();
+  // timestamp to integer type conversion
+  ConverterRegister<timestampType, integerType>::registerConverter();
 #endif
 }
 
