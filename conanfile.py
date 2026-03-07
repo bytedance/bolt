@@ -86,6 +86,7 @@ class BoltConan(ConanFile):
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
         "enable_gcs": [True, False],
+        "enable_abfs": [True, False],
         "use_arrow_hdfs": [True, False],
         "enable_asan": [True, False],
         "enable_jit": [True, False],
@@ -112,6 +113,7 @@ class BoltConan(ConanFile):
         "enable_hdfs": True,
         "enable_s3": False,
         "enable_gcs": False,
+        "enable_abfs": False,
         "use_arrow_hdfs": True,
         "enable_arrow_connector": False,
         "enable_jit": True,
@@ -193,6 +195,12 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_gcs"):
             self.requires(
                 "google-cloud-cpp/[>=2.10 <3]",
+                transitive_headers=True,
+                transitive_libs=True,
+            )
+        if self.options.get_safe("enable_abfs"):
+            self.requires(
+                "azure-sdk-for-cpp/1.16.1",
                 transitive_headers=True,
                 transitive_libs=True,
             )
@@ -503,6 +511,10 @@ class BoltConan(ConanFile):
         tc.cache_variables["BOLT_ENABLE_GCS"] = "OFF"
         if self.options.get_safe("enable_gcs"):
             tc.cache_variables["BOLT_ENABLE_GCS"] = "ON"
+
+        tc.cache_variables["BOLT_ENABLE_ABFS"] = "OFF"
+        if self.options.get_safe("enable_abfs"):
+            tc.cache_variables["BOLT_ENABLE_ABFS"] = "ON"
 
         tc.cache_variables["BOLT_FORCE_COLORED_OUTPUT"] = "ON"
         if self.options.enable_crc:

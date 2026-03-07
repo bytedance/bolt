@@ -583,10 +583,10 @@ TEST_F(MultiFragmentTest, partitionedOutput) {
 TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
   // Verify that partitionedOutput operator is able to split a single input
   // vector if it hits memory or row limits.
-  // We create a large vector that hits the row limit (70% - 120% of 10,000)
+  // We create a large vector that hits the row limit (70% - 120% of 10,000).
   // which would hit a task level memory limit of 1MB unless its split up.
   // This test exercises splitting up the input both from the edges and the
-  // middle as it ends up splitting it in ~ 3 splits.
+  // middle as it ends up splitting it into at least 3.
   setupSources(1, 30'000);
   const int64_t kRootMemoryLimit = 1 << 20; // 1MB
   // Single Partition
@@ -602,12 +602,15 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
     leafTask->start(1);
     auto op = PlanBuilder().exchange(leafPlan->outputType()).planNode();
 
-    auto task =
-        assertQuery(op, {leafTaskId}, "SELECT c0, c1, c2, c3, c4 FROM tmp");
-    auto taskStats = toPlanStats(task->taskStats());
-    ASSERT_GT(taskStats.at("0").inputVectors, 2);
+    assertQuery(op, {leafTaskId}, "SELECT c0, c1, c2, c3, c4 FROM tmp");
     ASSERT_TRUE(waitForTaskCompletion(leafTask.get()))
         << leafTask->taskId() << "state: " << leafTask->state();
+    // Check the leaf task's PartitionedOutput operator ("1") for outputVectors.
+    // Leaf plan: "0" = Values, "1" = PartitionedOutput.
+    // We avoid checking the consumer's Exchange inputVectors because the
+    // Exchange may merge small vectors, making the count non-deterministic.
+    auto taskStats = toPlanStats(leafTask->taskStats());
+    ASSERT_GT(taskStats.at("1").outputVectors, 2);
   }
 
   // Multiple partitions but round-robin.
@@ -643,14 +646,12 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
 
     auto op = PlanBuilder().exchange(intermediatePlan->outputType()).planNode();
 
-    auto task = assertQuery(
-        op, intermediateTaskIds, "SELECT c0, c1, c2, c3, c4 FROM tmp");
-    auto taskStats = toPlanStats(task->taskStats());
-    // Disable this test as it flakes
-    // ASSERT_GT(taskStats.at("0").inputVectors, 2);
-
+    assertQuery(op, intermediateTaskIds, "SELECT c0, c1, c2, c3, c4 FROM tmp");
     ASSERT_TRUE(waitForTaskCompletion(leafTask.get()))
         << "state: " << leafTask->state();
+    // Same as above: check the leaf's PartitionedOutput operator ("1").
+    auto taskStats = toPlanStats(leafTask->taskStats());
+    ASSERT_GT(taskStats.at("1").outputVectors, 2);
   }
 }
 
