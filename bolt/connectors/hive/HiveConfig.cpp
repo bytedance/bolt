@@ -158,15 +158,24 @@ std::string HiveConfig::s3IAMRoleSessionName() const {
 }
 
 std::string HiveConfig::gcsEndpoint() const {
-  return config_->get<std::string>(kGCSEndpoint, std::string(""));
+  return config_->get<std::string>(kGcsEndpoint, std::string(""));
 }
 
 std::string HiveConfig::gcsScheme() const {
-  return config_->get<std::string>(kGCSScheme, std::string("https"));
+  return config_->get<std::string>(kGcsScheme, std::string("https"));
 }
 
 std::string HiveConfig::gcsCredentials() const {
-  return config_->get<std::string>(kGCSCredentials, std::string(""));
+  return config_->get<std::string>(kGcsCredentials, std::string(""));
+}
+
+std::optional<int> HiveConfig::gcsMaxRetryCount() const {
+  return static_cast<std::optional<int>>(config_->get<int>(kGcsMaxRetryCount));
+}
+
+std::optional<std::string> HiveConfig::gcsMaxRetryTime() const {
+  return static_cast<std::optional<std::string>>(
+      config_->get<std::string>(kGcsMaxRetryTime));
 }
 
 bool HiveConfig::isOrcUseColumnNames(const config::ConfigBase* session) const {

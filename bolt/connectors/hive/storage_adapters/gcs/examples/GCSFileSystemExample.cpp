@@ -39,6 +39,8 @@
 #include <iostream>
 
 DEFINE_string(gcs_path, "", "Path of GCS bucket");
+DEFINE_string(gcs_max_retry_count, "", "Max retry count");
+DEFINE_string(gcs_max_retry_time, "", "Max retry time");
 
 auto newConfiguration() {
   using namespace bytedance::bolt;
@@ -62,7 +64,7 @@ int main(int argc, char** argv) {
   }
   filesystems::GCSFileSystem gcfs(newConfiguration());
   gcfs.initializeClient();
-  std::cout << "Opening file " << FLAGS_gcs_path << std::endl;
+  std::cout << "Opening file for read " << FLAGS_gcs_path << std::endl;
   std::unique_ptr<ReadFile> file_read = gcfs.openFileForRead(FLAGS_gcs_path);
   std::size_t file_size = file_read->size();
   std::cout << "File size = " << file_size << std::endl;
