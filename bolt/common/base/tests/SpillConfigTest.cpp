@@ -31,7 +31,9 @@
 #include "bolt/common/base/SpillConfig.h"
 #include <gtest/gtest.h>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/serialization/Serializable.h"
 #include "bolt/exec/HashBitRange.h"
+using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec;
 
@@ -158,6 +160,148 @@ TEST(SpillConfig, spillLevelLimit) {
         config.exceedJoinSpillLevelLimit(testData.bitOffset));
   }
 }
+
+// ---- Serialization helpers --------------------------------------------------
+
+namespace {
+
+// Returns a SpillConfig with every serializable field set to a non-default
+// value, making it easy to detect fields that were silently dropped.
+SpillConfig makeFullConfig() {
+  SpillConfig cfg;
+  cfg.fileNamePrefix = "test_spill";
+  cfg.maxFileSize = 512UL * 1024 * 1024;
+  cfg.spillUringEnabled = true;
+  cfg.writeBufferSize = 8UL * 1024 * 1024;
+  cfg.minSpillableReservationPct = 10;
+  cfg.spillableReservationGrowthPct = 25;
+  cfg.startPartitionBit = 29;
+  cfg.joinPartitionBits = 4;
+  cfg.joinRepartitionBits = 2;
+  cfg.maxSpillLevel = 3;
+  cfg.maxSpillRunRows = 100'000;
+  cfg.writerFlushThresholdSize = 64UL * 1024 * 1024;
+  cfg.testSpillPct = 5;
+  cfg.compressionKind = CompressionKind_ZSTD;
+  cfg.fileCreateConfig = R"({"option":"value"})";
+  cfg.rowBasedSpillMode = RowBasedSpillMode::RAW;
+  cfg.singlePartitionSerdeKind = "Arrow";
+  cfg.spillPartitionsAdaptiveThreshold = 64;
+  cfg.jitEnabled = false;
+  cfg.needSetNextEqual = true;
+  cfg.aggBypassHTEqualNum = 42;
+  return cfg;
+}
+
+void assertFieldsEqual(const SpillConfig& e, const SpillConfig& a) {
+  EXPECT_EQ(e.fileNamePrefix, a.fileNamePrefix);
+  EXPECT_EQ(e.maxFileSize, a.maxFileSize);
+  EXPECT_EQ(e.spillUringEnabled, a.spillUringEnabled);
+  EXPECT_EQ(e.writeBufferSize, a.writeBufferSize);
+  EXPECT_EQ(e.minSpillableReservationPct, a.minSpillableReservationPct);
+  EXPECT_EQ(e.spillableReservationGrowthPct, a.spillableReservationGrowthPct);
+  EXPECT_EQ(e.startPartitionBit, a.startPartitionBit);
+  EXPECT_EQ(e.joinPartitionBits, a.joinPartitionBits);
+  EXPECT_EQ(e.joinRepartitionBits, a.joinRepartitionBits);
+  EXPECT_EQ(e.maxSpillLevel, a.maxSpillLevel);
+  EXPECT_EQ(e.maxSpillRunRows, a.maxSpillRunRows);
+  EXPECT_EQ(e.writerFlushThresholdSize, a.writerFlushThresholdSize);
+  EXPECT_EQ(e.testSpillPct, a.testSpillPct);
+  EXPECT_EQ(e.compressionKind, a.compressionKind);
+  EXPECT_EQ(e.fileCreateConfig, a.fileCreateConfig);
+  EXPECT_EQ(e.rowBasedSpillMode, a.rowBasedSpillMode);
+  EXPECT_EQ(e.singlePartitionSerdeKind, a.singlePartitionSerdeKind);
+  EXPECT_EQ(
+      e.spillPartitionsAdaptiveThreshold, a.spillPartitionsAdaptiveThreshold);
+  EXPECT_EQ(e.jitEnabled, a.jitEnabled);
+  EXPECT_EQ(e.needSetNextEqual, a.needSetNextEqual);
+  EXPECT_EQ(e.aggBypassHTEqualNum, a.aggBypassHTEqualNum);
+}
+
+} // namespace
+
+// ---- Serialization tests ----------------------------------------------------
+
+TEST(SpillConfig, serializeContainsNameField) {
+  folly::dynamic dyn = makeFullConfig().serialize();
+  ASSERT_TRUE(dyn.isObject());
+  ASSERT_EQ("SpillConfig", dyn["name"].asString());
+}
+
+TEST(SpillConfig, roundTripAllFields) {
+  SpillConfig cfg = makeFullConfig();
+  auto rt = SpillConfig::deserialize(cfg.serialize());
+  ASSERT_NE(nullptr, rt);
+  assertFieldsEqual(cfg, *rt);
+}
+
+TEST(SpillConfig, callbacksAndExecutorNullAfterRoundTrip) {
+  SpillConfig cfg = makeFullConfig();
+  cfg.getSpillDirPathCb = []() -> const std::string& {
+    static const std::string path = "/tmp/spill";
+    return path;
+  };
+  cfg.updateAndCheckSpillLimitCb = [](uint64_t) {};
+
+  auto rt = SpillConfig::deserialize(cfg.serialize());
+  ASSERT_NE(nullptr, rt);
+  EXPECT_FALSE(static_cast<bool>(rt->getSpillDirPathCb));
+  EXPECT_FALSE(static_cast<bool>(rt->updateAndCheckSpillLimitCb));
+  EXPECT_EQ(nullptr, rt->executor);
+}
+
+TEST(SpillConfig, roundTripViaISerializableRegistry) {
+  SpillConfig cfg = makeFullConfig();
+  auto rt = ISerializable::deserialize<SpillConfig>(cfg.serialize());
+  ASSERT_NE(nullptr, rt);
+  assertFieldsEqual(cfg, *rt);
+}
+
+TEST(SpillConfig, roundTripDefaultConstructed) {
+  SpillConfig cfg;
+  auto rt = SpillConfig::deserialize(cfg.serialize());
+  ASSERT_NE(nullptr, rt);
+  assertFieldsEqual(cfg, *rt);
+}
+
+TEST(SpillConfig, roundTripRowBasedSpillModes) {
+  for (auto mode :
+       {RowBasedSpillMode::DISABLE,
+        RowBasedSpillMode::RAW,
+        RowBasedSpillMode::COMPRESSION}) {
+    SpillConfig cfg = makeFullConfig();
+    cfg.rowBasedSpillMode = mode;
+    auto rt = SpillConfig::deserialize(cfg.serialize());
+    ASSERT_NE(nullptr, rt);
+    EXPECT_EQ(mode, rt->rowBasedSpillMode);
+  }
+}
+
+TEST(SpillConfig, roundTripCompressionKinds) {
+  for (auto kind :
+       {CompressionKind_NONE,
+        CompressionKind_ZLIB,
+        CompressionKind_SNAPPY,
+        CompressionKind_ZSTD,
+        CompressionKind_LZ4,
+        CompressionKind_GZIP}) {
+    SpillConfig cfg = makeFullConfig();
+    cfg.compressionKind = kind;
+    auto rt = SpillConfig::deserialize(cfg.serialize());
+    ASSERT_NE(nullptr, rt);
+    EXPECT_EQ(kind, rt->compressionKind);
+  }
+}
+
+TEST(SpillConfig, maxSpillLevelUnlimited) {
+  SpillConfig cfg = makeFullConfig();
+  cfg.maxSpillLevel = -1; // -1 means no limit
+  auto rt = SpillConfig::deserialize(cfg.serialize());
+  ASSERT_NE(nullptr, rt);
+  EXPECT_EQ(-1, rt->maxSpillLevel);
+}
+
+// ---- spillableReservationPercentages ----------------------------------------
 
 TEST(SpillConfig, spillableReservationPercentages) {
   struct {

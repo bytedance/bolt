@@ -29,6 +29,8 @@ add_executable(bolt_gcsfile_test GCSFileSystemTest.cpp GCSUtilTest.cpp)
 add_test(bolt_gcsfile_test bolt_gcsfile_test)
 target_link_libraries(
   bolt_gcsfile_test
+  bolt_gcs
+  google-cloud-cpp::storage
   bolt_testutils
   GTest::gmock
   GTest::gtest

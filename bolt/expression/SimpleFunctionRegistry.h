@@ -104,6 +104,11 @@ class SimpleFunctionRegistry {
   std::vector<std::shared_ptr<const FunctionSignature>> getFunctionSignatures(
       const std::string& name) const;
 
+  std::unordered_map<
+      std::string,
+      std::vector<std::shared_ptr<const exec::FunctionSignature>>>
+  getFunctionSignatureMap() const;
+
   class ResolvedSimpleFunction {
    public:
     ResolvedSimpleFunction(
