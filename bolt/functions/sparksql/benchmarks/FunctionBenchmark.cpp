@@ -28,42 +28,39 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
-#include <google/cloud/storage/client.h>
-#include "bolt/common/base/Exceptions.h"
-namespace bytedance::bolt {
+#include <folly/Benchmark.h>
+#include <folly/init/Init.h>
+#include <functions/FunctionRegistry.h>
 
-namespace {
-constexpr const char* kSep{"/"};
-constexpr std::string_view kGcsScheme{"gs://"};
+#include "bolt/benchmarks/ExpressionBenchmarkBuilder.h"
+#include "bolt/functions/sparksql/registration/Register.h"
 
-} // namespace
+using namespace bytedance::bolt;
+class FunctionBenchmark : public functions::test::FunctionBenchmarkBase {
+ public:
+  FunctionBenchmark() : FunctionBenchmarkBase() {
+    functions::sparksql::registerFunctions("");
+  }
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& error);
+  void run() {
+    volatile int total = 0;
+    for (auto i = 0; i < 1000; i++) {
+      auto functions = getFunctionSignatures();
+      auto size = functions.size();
+      total += size;
+    }
+    std::cout << total << std::endl;
+  }
+};
 
-inline bool isGCSFile(const std::string_view filename) {
-  return (filename.substr(0, kGcsScheme.size()) == kGcsScheme);
+BENCHMARK(get_function_signatures_1000) {
+  FunctionBenchmark benchmark;
+  benchmark.run();
 }
 
-inline void setBucketAndKeyFromGCSPath(
-    const std::string& path,
-    std::string& bucket,
-    std::string& key) {
-  auto firstSep = path.find_first_of(kSep);
-  bucket = path.substr(0, firstSep);
-  key = path.substr(firstSep + 1);
+int main(int argc, char** argv) {
+  folly::Init init(&argc, &argv);
+  memory::MemoryManager::initialize(memory::MemoryManager::Options{});
+  folly::runBenchmarks();
+  return 0;
 }
-inline std::string gcsURI(const std::string& bucket) {
-  return std::string(kGcsScheme) + bucket;
-}
-
-inline std::string gcsURI(const std::string& bucket, const std::string& key) {
-  return gcsURI(bucket) + kSep + key;
-}
-
-inline std::string gcsPath(const std::string_view& path) {
-  // Remove the prefix gcs:// from the given path
-  return std::string(path.substr(kGcsScheme.length()));
-}
-
-} // namespace bytedance::bolt
