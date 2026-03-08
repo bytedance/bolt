@@ -31,7 +31,6 @@
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
 #include "bolt/common/file/File.h"
 #include "bolt/connectors/hive/HiveConfig.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
 #include "bolt/core/Config.h"
 
@@ -44,7 +43,6 @@
 #include "bolt/common/file/File.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
 namespace bytedance::bolt::filesystems::abfs {
 using namespace Azure::Storage::Blobs;
 class AbfsConfig {
