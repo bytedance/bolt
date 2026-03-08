@@ -56,7 +56,7 @@ namespace gc = ::google::cloud;
 // upload this buffer with zero copies if possible.
 auto constexpr kUploadBufferSize = 256 * 1024;
 
-inline void checkGCSStatus(
+inline void checkGcsStatus(
     const gc::Status outcome,
     const std::string_view& errorMsgPrefix,
     const std::string& bucket,
@@ -91,7 +91,7 @@ class GCSReadFile final : public ReadFile {
     // get metadata and initialize length
     auto metadata = client_->GetObjectMetadata(bucket_, key_);
     if (!metadata.ok()) {
-      checkGCSStatus(
+      checkGcsStatus(
           metadata.status(),
           "Failed to get metadata for GCS object",
           bucket_,
@@ -166,13 +166,13 @@ class GCSReadFile final : public ReadFile {
     gcs::ObjectReadStream stream = client_->ReadObject(
         bucket_, key_, gcs::ReadRange(offset, offset + length));
     if (!stream) {
-      checkGCSStatus(
+      checkGcsStatus(
           stream.status(), "Failed to get GCS object", bucket_, key_);
     }
 
     stream.read(position, length);
     if (!stream) {
-      checkGCSStatus(
+      checkGcsStatus(
           stream.status(), "Failed to get read object", bucket_, key_);
     }
     bytesRead_ += length;
@@ -208,7 +208,7 @@ class GCSWriteFile final : public WriteFile {
     BOLT_CHECK(!object_metadata.ok(), "File already exists");
 
     auto stream = client_->WriteObject(bucket_, key_);
-    checkGCSStatus(
+    checkGcsStatus(
         stream.last_status(),
         "Failed to open GCS object for writing",
         bucket_,
@@ -258,7 +258,7 @@ class GCSWriteFile final : public WriteFile {
 namespace filesystems {
 using namespace connector::hive;
 
-auto constexpr kGCSInvalidPath = "File {} is not a valid gcs file";
+auto constexpr kGcsInvalidPath = "File {} is not a valid gcs file";
 
 class GCSFileSystem::Impl {
  public:
@@ -348,7 +348,7 @@ std::unique_ptr<WriteFile> GCSFileSystem::openFileForWrite(
 
 void GCSFileSystem::remove(std::string_view path) {
   if (!isGCSFile(path)) {
-    BOLT_FAIL(kGCSInvalidPath, path);
+    BOLT_FAIL(kGcsInvalidPath, path);
   }
 
   // We assume 'path' is well-formed here.
@@ -360,7 +360,7 @@ void GCSFileSystem::remove(std::string_view path) {
   if (!object.empty()) {
     auto stat = impl_->getClient()->GetObjectMetadata(bucket, object);
     if (!stat.ok()) {
-      checkGCSStatus(
+      checkGcsStatus(
           stat.status(),
           "Failed to get metadata for GCS object",
           bucket,
@@ -369,7 +369,7 @@ void GCSFileSystem::remove(std::string_view path) {
   }
   auto ret = impl_->getClient()->DeleteObject(bucket, object);
   if (!ret.ok()) {
-    checkGCSStatus(
+    checkGcsStatus(
         ret, "Failed to get metadata for GCS object", bucket, object);
   }
 }
@@ -377,7 +377,7 @@ void GCSFileSystem::remove(std::string_view path) {
 bool GCSFileSystem::exists(std::string_view path) {
   std::vector<std::string> result;
   if (!isGCSFile(path))
-    BOLT_FAIL(kGCSInvalidPath, path);
+    BOLT_FAIL(kGcsInvalidPath, path);
 
   // We assume 'path' is well-formed here.
   const auto file = gcsPath(path);
@@ -394,7 +394,7 @@ bool GCSFileSystem::exists(std::string_view path) {
 std::vector<std::string> GCSFileSystem::list(std::string_view path) {
   std::vector<std::string> result;
   if (!isGCSFile(path))
-    BOLT_FAIL(kGCSInvalidPath, path);
+    BOLT_FAIL(kGcsInvalidPath, path);
 
   // We assume 'path' is well-formed here.
   const auto file = gcsPath(path);
@@ -403,7 +403,7 @@ std::vector<std::string> GCSFileSystem::list(std::string_view path) {
   setBucketAndKeyFromGCSPath(file, bucket, object);
   for (auto&& metadata : impl_->getClient()->ListObjects(bucket)) {
     if (!metadata.ok()) {
-      checkGCSStatus(
+      checkGcsStatus(
           metadata.status(),
           "Failed to get metadata for GCS object",
           bucket,

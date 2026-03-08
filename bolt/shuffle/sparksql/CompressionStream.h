@@ -317,6 +317,7 @@ class AdaptiveParallelZstdCodec {
           // stream
           bytedance::bolt::NanosecondTimer timer1(&writeTime);
           RETURN_NOT_OK(outputStream->Write(output, outputPos));
+          outputPos = 0;
         }
       } while (inputLen > 0);
     }

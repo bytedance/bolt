@@ -765,95 +765,30 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dayOfMonth) {
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, dayOfWeekDate) {
-  const auto dayOfWeek = [&](std::optional<int32_t> date,
-                             const std::string& func) {
-    return evaluateOnce<int32_t, int32_t>(
-        fmt::format("{}(c0)", func), {date}, {DATE()});
+  const auto dayOfWeek = [&](std::optional<int32_t> date) {
+    return evaluateOnce<int32_t, int32_t>("dayofweek(c0)", {date}, {DATE()});
   };
 
-  for (const auto& func : {"dayofweek", "dow"}) {
-    EXPECT_EQ(std::nullopt, dayOfWeek(std::nullopt, func));
-    EXPECT_EQ(5, dayOfWeek(0, func));
-    EXPECT_EQ(4, dayOfWeek(-1, func));
-    EXPECT_EQ(7, dayOfWeek(-40, func));
-    EXPECT_EQ(5, dayOfWeek(parseDate("2009-07-30"), func));
-    EXPECT_EQ(1, dayOfWeek(parseDate("2023-08-20"), func));
-    EXPECT_EQ(2, dayOfWeek(parseDate("2023-08-21"), func));
-    EXPECT_EQ(3, dayOfWeek(parseDate("2023-08-22"), func));
-    EXPECT_EQ(4, dayOfWeek(parseDate("2023-08-23"), func));
-    EXPECT_EQ(5, dayOfWeek(parseDate("2023-08-24"), func));
-    EXPECT_EQ(6, dayOfWeek(parseDate("2023-08-25"), func));
-    EXPECT_EQ(7, dayOfWeek(parseDate("2023-08-26"), func));
-    EXPECT_EQ(1, dayOfWeek(parseDate("2023-08-27"), func));
+  EXPECT_EQ(std::nullopt, dayOfWeek(std::nullopt));
+  EXPECT_EQ(5, dayOfWeek(0));
+  EXPECT_EQ(4, dayOfWeek(-1));
+  EXPECT_EQ(7, dayOfWeek(-40));
+  EXPECT_EQ(5, dayOfWeek(parseDate("2009-07-30")));
+  EXPECT_EQ(1, dayOfWeek(parseDate("2023-08-20")));
+  EXPECT_EQ(2, dayOfWeek(parseDate("2023-08-21")));
+  EXPECT_EQ(3, dayOfWeek(parseDate("2023-08-22")));
+  EXPECT_EQ(4, dayOfWeek(parseDate("2023-08-23")));
+  EXPECT_EQ(5, dayOfWeek(parseDate("2023-08-24")));
+  EXPECT_EQ(6, dayOfWeek(parseDate("2023-08-25")));
+  EXPECT_EQ(7, dayOfWeek(parseDate("2023-08-26")));
+  EXPECT_EQ(1, dayOfWeek(parseDate("2023-08-27")));
+  EXPECT_EQ(6, dayOfWeek(util::fromDateString("2011-05-06", nullptr)));
+  EXPECT_EQ(4, dayOfWeek(util::fromDateString("2015-04-08", nullptr)));
+  EXPECT_EQ(7, dayOfWeek(util::fromDateString("2017-05-27", nullptr)));
+  EXPECT_EQ(6, dayOfWeek(util::fromDateString("1582-10-15", nullptr)));
 
-    // test cases from spark's DateExpressionSuite.
-    EXPECT_EQ(6, dayOfWeek(util::fromDateString("2011-05-06", nullptr), func));
-  }
-}
-
-TEST_F(SparkSqlDateTimeFunctionsTest, dayofWeekTs) {
-  const auto dayOfWeek = [&](std::optional<Timestamp> date,
-                             const std::string& func) {
-    return evaluateOnce<int32_t>(fmt::format("{}(c0)", func), date);
-  };
-
-  for (const auto& func : {"dayofweek", "dow"}) {
-    EXPECT_EQ(5, dayOfWeek(Timestamp(0, 0), func));
-    EXPECT_EQ(4, dayOfWeek(Timestamp(-1, 0), func));
-    EXPECT_EQ(
-        1,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-20 20:23:00.001", nullptr),
-            func));
-    EXPECT_EQ(
-        2,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-21 21:23:00.030", nullptr),
-            func));
-    EXPECT_EQ(
-        3,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-22 11:23:00.100", nullptr),
-            func));
-    EXPECT_EQ(
-        4,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-23 22:23:00.030", nullptr),
-            func));
-    EXPECT_EQ(
-        5,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-24 15:23:00.000", nullptr),
-            func));
-    EXPECT_EQ(
-        6,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-25 03:23:04.000", nullptr),
-            func));
-    EXPECT_EQ(
-        7,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-26 01:03:00.300", nullptr),
-            func));
-    EXPECT_EQ(
-        1,
-        dayOfWeek(
-            util::fromTimestampString("2023-08-27 01:13:00.000", nullptr),
-            func));
-    // test cases from spark's DateExpressionSuite.
-    EXPECT_EQ(
-        4,
-        dayOfWeek(
-            util::fromTimestampString("2015-04-08 13:10:15", nullptr), func));
-    EXPECT_EQ(
-        7,
-        dayOfWeek(
-            util::fromTimestampString("2017-05-27 13:10:15", nullptr), func));
-    EXPECT_EQ(
-        6,
-        dayOfWeek(
-            util::fromTimestampString("1582-10-15 13:10:15", nullptr), func));
-  }
+  // test cases from spark's DateExpressionSuite.
+  EXPECT_EQ(6, dayOfWeek(util::fromDateString("2011-05-06", nullptr)));
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, dateDiffDate) {

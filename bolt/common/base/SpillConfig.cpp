@@ -31,9 +31,11 @@
 #include "bolt/common/base/SpillConfig.h"
 
 #include <fmt/format.h>
+#include <folly/dynamic.h>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SuccinctPrinter.h"
+#include "bolt/common/compression/Compression.h"
 
 namespace bytedance::bolt::common {
 
@@ -224,6 +226,92 @@ std::string SpillConfig::toString() const {
       singlePartitionSerdeKind,
       jitEnabled);
 }
+
+folly::dynamic SpillConfig::serialize() const {
+  folly::dynamic obj = folly::dynamic::object;
+  obj["name"] = "SpillConfig";
+  obj["fileNamePrefix"] = fileNamePrefix;
+  obj["maxFileSize"] = static_cast<int64_t>(maxFileSize);
+  obj["spillUringEnabled"] = spillUringEnabled;
+  obj["writeBufferSize"] = static_cast<int64_t>(writeBufferSize);
+  obj["minSpillableReservationPct"] = minSpillableReservationPct;
+  obj["spillableReservationGrowthPct"] = spillableReservationGrowthPct;
+  obj["startPartitionBit"] = static_cast<int64_t>(startPartitionBit);
+  obj["joinPartitionBits"] = static_cast<int64_t>(joinPartitionBits);
+  obj["joinRepartitionBits"] = static_cast<int64_t>(joinRepartitionBits);
+  obj["maxSpillLevel"] = maxSpillLevel;
+  obj["maxSpillRunRows"] = static_cast<int64_t>(maxSpillRunRows);
+  obj["writerFlushThresholdSize"] =
+      static_cast<int64_t>(writerFlushThresholdSize);
+  obj["testSpillPct"] = testSpillPct;
+  obj["compressionKind"] = static_cast<int>(compressionKind);
+  obj["fileCreateConfig"] = fileCreateConfig;
+  obj["rowBasedSpillMode"] = static_cast<int>(rowBasedSpillMode);
+  obj["singlePartitionSerdeKind"] = singlePartitionSerdeKind;
+  obj["spillPartitionsAdaptiveThreshold"] =
+      static_cast<int64_t>(spillPartitionsAdaptiveThreshold);
+  obj["jitEnabled"] = jitEnabled;
+  obj["needSetNextEqual"] = needSetNextEqual;
+  obj["aggBypassHTEqualNum"] = static_cast<int64_t>(aggBypassHTEqualNum);
+  // getSpillDirPathCb, updateAndCheckSpillLimitCb, and executor are omitted;
+  // they must be re-injected by the host after deserialization.
+  return obj;
+}
+
+std::shared_ptr<SpillConfig> SpillConfig::deserialize(
+    const folly::dynamic& obj) {
+  auto spillConfig = std::make_shared<SpillConfig>();
+  spillConfig->fileNamePrefix = obj["fileNamePrefix"].asString();
+  spillConfig->maxFileSize = static_cast<uint64_t>(obj["maxFileSize"].asInt());
+  spillConfig->spillUringEnabled = obj["spillUringEnabled"].asBool();
+  spillConfig->writeBufferSize =
+      static_cast<uint64_t>(obj["writeBufferSize"].asInt());
+  spillConfig->minSpillableReservationPct =
+      static_cast<int32_t>(obj["minSpillableReservationPct"].asInt());
+  spillConfig->spillableReservationGrowthPct =
+      static_cast<int32_t>(obj["spillableReservationGrowthPct"].asInt());
+  spillConfig->startPartitionBit =
+      static_cast<uint8_t>(obj["startPartitionBit"].asInt());
+  spillConfig->joinPartitionBits =
+      static_cast<uint8_t>(obj["joinPartitionBits"].asInt());
+  spillConfig->joinRepartitionBits =
+      static_cast<uint8_t>(obj["joinRepartitionBits"].asInt());
+  spillConfig->maxSpillLevel =
+      static_cast<int32_t>(obj["maxSpillLevel"].asInt());
+  spillConfig->maxSpillRunRows =
+      static_cast<uint64_t>(obj["maxSpillRunRows"].asInt());
+  spillConfig->writerFlushThresholdSize =
+      static_cast<uint64_t>(obj["writerFlushThresholdSize"].asInt());
+  spillConfig->testSpillPct = static_cast<int32_t>(obj["testSpillPct"].asInt());
+  spillConfig->compressionKind =
+      static_cast<common::CompressionKind>(obj["compressionKind"].asInt());
+  spillConfig->fileCreateConfig = obj["fileCreateConfig"].asString();
+  spillConfig->rowBasedSpillMode =
+      static_cast<RowBasedSpillMode>(obj["rowBasedSpillMode"].asInt());
+  spillConfig->singlePartitionSerdeKind =
+      obj["singlePartitionSerdeKind"].asString();
+  spillConfig->spillPartitionsAdaptiveThreshold =
+      static_cast<uint32_t>(obj["spillPartitionsAdaptiveThreshold"].asInt());
+  spillConfig->jitEnabled = obj["jitEnabled"].asBool();
+  spillConfig->needSetNextEqual = obj["needSetNextEqual"].asBool();
+  spillConfig->aggBypassHTEqualNum =
+      static_cast<size_t>(obj["aggBypassHTEqualNum"].asInt());
+  // getSpillDirPathCb, updateAndCheckSpillLimitCb, and executor remain
+  // default-initialized (null); callers must re-inject them as needed.
+  return spillConfig;
+}
+
+void SpillConfig::registerSerDe() {
+  auto& registry = bolt::DeserializationRegistryForSharedPtr();
+  registry.Register("SpillConfig", SpillConfig::deserialize);
+}
+
+namespace {
+const bool kSpillConfigSerdeRegistered = []() {
+  SpillConfig::registerSerDe();
+  return true;
+}();
+} // namespace
 
 SpillConfig& SpillConfig::setJITenableForSpill(bool enabled) noexcept {
   jitEnabled = enabled;

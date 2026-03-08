@@ -32,5 +32,6 @@
         "label=disable"
     ],
     // Configure tool-specific properties.
-    "features": {}
+    "features": {},
+    "postCreateCommand": "./.devcontainer/post_create_command.sh"
 }

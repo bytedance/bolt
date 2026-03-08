@@ -78,3 +78,10 @@ target_link_libraries(
   bolt_benchmark_builder
   ${BOLT_BENCHMARK_DEPS}
 )
+
+add_executable(bolt_sparksql_benchmarks_get_funcs FunctionBenchmark.cpp)
+target_link_libraries(
+  bolt_sparksql_benchmarks_get_funcs PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
+)

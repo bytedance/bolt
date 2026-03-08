@@ -154,10 +154,7 @@ void registerDatetimeFunctions(const std::string& prefix) {
   registerFunction<MonthsBetweenFunction, double, Timestamp, Timestamp, bool>(
       {prefix + "months_between"});
 
-  registerFunction<DayOfWeekFunction, int32_t, Timestamp>(
-      {prefix + "dow", prefix + "dayofweek"});
-  registerFunction<DayOfWeekFunction, int32_t, Date>(
-      {prefix + "dow", prefix + "dayofweek"});
+  registerFunction<DayOfWeekFunction, int32_t, Date>({prefix + "dayofweek"});
 
   registerTimestampWithTimeZoneType();
   registerFunction<QuarterFunction, int32_t, Date>({prefix + "quarter"});
