@@ -30,6 +30,7 @@
 
 #include "bolt/dwio/common/Options.h"
 #include <sstream>
+#include "bolt/type/Type.h"
 namespace bytedance::bolt::dwio::common {
 
 FileFormat toFileFormat(std::string s) {
@@ -96,6 +97,105 @@ ColumnReaderOptions makeColumnReaderOptions(const ReaderOptions& options) {
   columnReaderOptions.useColumnNamesForColumnMapping_ =
       options.isUseColumnNamesForColumnMapping();
   return columnReaderOptions;
+}
+
+// We do *not* serialize pool, nonReclaimableSection, or the callbacks /
+//  executor inside spillConfig—they must be re‐injected by the host.
+folly::dynamic WriterOptions::serialize() const {
+  folly::dynamic obj = folly::dynamic::object;
+
+  if (schema) {
+    obj["schema"] = schema->serialize();
+  }
+
+  if (compressionKind) {
+    obj["compressionKind"] = static_cast<int>(*compressionKind);
+  }
+
+  if (!serdeParameters.empty()) {
+    folly::dynamic mapObj = folly::dynamic::object;
+    for (const auto& [k, v] : serdeParameters) {
+      mapObj[k] = v;
+    }
+    obj["serdeParameters"] = std::move(mapObj);
+  }
+
+  if (maxStripeSize) {
+    obj["maxStripeSize"] = static_cast<int64_t>(*maxStripeSize);
+  }
+
+  if (arrowBridgeTimestampUnit) {
+    obj["arrowBridgeTimestampUnit"] =
+        static_cast<int64_t>(*arrowBridgeTimestampUnit);
+  }
+
+  if (zlibCompressionLevel) {
+    obj["zlibCompressionLevel"] = static_cast<int64_t>(*zlibCompressionLevel);
+  }
+
+  // spillConfig (value fields only; callbacks/executor re-injected by host)
+  if (spillConfig) {
+    obj["spillConfig"] = spillConfig->serialize();
+  }
+
+  return obj;
+}
+
+// pool, nonReclaimableSection, and spillConfig callbacks/executor remain at
+// default and must be re-injected by the host.
+std::shared_ptr<WriterOptions> WriterOptions::deserialize(
+    const folly::dynamic& obj) {
+  auto opts = std::make_shared<WriterOptions>();
+
+  // 1) schema
+  if (auto p = obj.get_ptr("schema")) {
+    opts->schema = ISerializable::deserialize<bolt::Type>(*p);
+  }
+
+  // 2) compressionKind
+  if (auto p = obj.get_ptr("compressionKind")) {
+    opts->compressionKind =
+        static_cast<bolt::common::CompressionKind>(p->asInt());
+  }
+
+  // 3) serdeParameters
+  if (auto p = obj.get_ptr("serdeParameters")) {
+    opts->serdeParameters.clear();
+    for (auto& kv : p->items()) {
+      opts->serdeParameters.emplace(kv.first.asString(), kv.second.asString());
+    }
+  }
+
+  // 4) maxStripeSize
+  if (auto p = obj.get_ptr("maxStripeSize")) {
+    opts->maxStripeSize = static_cast<uint64_t>(p->asInt());
+  }
+
+  // 5) arrowBridgeTimestampUnit
+  if (auto p = obj.get_ptr("arrowBridgeTimestampUnit")) {
+    opts->arrowBridgeTimestampUnit = static_cast<uint8_t>(p->asInt());
+  }
+
+  // 6) zlibCompressionLevel
+  if (auto p = obj.get_ptr("zlibCompressionLevel")) {
+    opts->zlibCompressionLevel = static_cast<uint8_t>(p->asInt());
+  }
+
+  // 7) spillConfig
+  if (auto p = obj.get_ptr("spillConfig")) {
+    opts->ownedSpillConfig =
+        ISerializable::deserialize<bolt::common::SpillConfig>(*p);
+    opts->spillConfig = opts->ownedSpillConfig.get();
+  }
+
+  return opts;
+}
+
+void WriterOptions::registerSerDe() {
+  bolt::Type::registerSerDe();
+  bolt::common::SpillConfig::registerSerDe();
+  auto& registry = DeserializationRegistryForSharedPtr();
+  registry.Register("WriterOptions", WriterOptions::deserialize);
 }
 
 } // namespace bytedance::bolt::dwio::common

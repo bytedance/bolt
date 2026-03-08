@@ -131,6 +131,19 @@ class EncoderImpl : virtual public Encoder {
     return pool_;
   }
 
+  template <typename SinkType>
+  std::shared_ptr<::arrow::Buffer> FinishSink(SinkType& sink) {
+    std::shared_ptr<Buffer> buffer;
+#ifdef SPARK_COMPATIBLE
+    // as customized ArrowMemoryPool can't resize 0, speciallly avoid shrinking
+    // to fit for length = 0, and the memory will be released soon
+    PARQUET_THROW_NOT_OK(sink.Finish(&buffer, sink.length() > 0));
+#else
+    PARQUET_THROW_NOT_OK(sink.Finish(&buffer));
+#endif
+    return buffer;
+  }
+
  protected:
   // For accessing type-specific metadata, like FIXED_LEN_BYTE_ARRAY
   const ColumnDescriptor* descr_;
@@ -156,10 +169,13 @@ class PlainEncoder : public EncoderImpl, virtual public TypedEncoder<DType> {
     return sink_.length();
   }
 
+  void testSinkResize0() override {
+    sink_.Resize(10);
+    FlushValues();
+  }
+
   std::shared_ptr<::arrow::Buffer> FlushValues() override {
-    std::shared_ptr<Buffer> buffer;
-    PARQUET_THROW_NOT_OK(sink_.Finish(&buffer));
-    return buffer;
+    return FinishSink<::arrow::BufferBuilder>(sink_);
   }
 
   using TypedEncoder<DType>::Put;
@@ -446,9 +462,7 @@ int64_t PlainEncoder<BooleanType>::EstimatedDataEncodedSize() {
 }
 
 std::shared_ptr<::arrow::Buffer> PlainEncoder<BooleanType>::FlushValues() {
-  std::shared_ptr<Buffer> buffer;
-  PARQUET_THROW_NOT_OK(sink_.Finish(&buffer));
-  return buffer;
+  return FinishSink<::arrow::TypedBufferBuilder<bool>>(sink_);
 }
 
 void PlainEncoder<BooleanType>::Put(const bool* src, int num_values) {
@@ -2669,7 +2683,7 @@ std::shared_ptr<::arrow::Buffer> DeltaBitPackEncoder<DType>::FlushValues() {
   if (values_current_block_ > 0) {
     FlushBlock();
   }
-  PARQUET_ASSIGN_OR_THROW(auto buffer, sink_.Finish(/*shrink_to_fit=*/true));
+  auto buffer = FinishSink<::arrow::BufferBuilder>(sink_);
 
   uint8_t header_buffer_[kMaxPageHeaderWriterSize] = {};
   bit_util::BitWriter header_writer(header_buffer_, sizeof(header_buffer_));
@@ -3144,8 +3158,7 @@ std::shared_ptr<::arrow::Buffer>
 DeltaLengthByteArrayEncoder<DType>::FlushValues() {
   std::shared_ptr<Buffer> encoded_lengths = length_encoder_.FlushValues();
 
-  std::shared_ptr<Buffer> data;
-  PARQUET_THROW_NOT_OK(sink_.Finish(&data));
+  std::shared_ptr<Buffer> data = FinishSink<::arrow::BufferBuilder>(sink_);
   sink_.Reset();
 
   PARQUET_THROW_NOT_OK(sink_.Resize(encoded_lengths->size() + data->size()));
@@ -3153,8 +3166,7 @@ DeltaLengthByteArrayEncoder<DType>::FlushValues() {
       sink_.Append(encoded_lengths->data(), encoded_lengths->size()));
   PARQUET_THROW_NOT_OK(sink_.Append(data->data(), data->size()));
 
-  std::shared_ptr<Buffer> buffer;
-  PARQUET_THROW_NOT_OK(sink_.Finish(&buffer, true));
+  std::shared_ptr<Buffer> buffer = FinishSink<::arrow::BufferBuilder>(sink_);
   encoded_size_ = 0;
   return buffer;
 }
@@ -3758,8 +3770,7 @@ std::shared_ptr<Buffer> DeltaByteArrayEncoder<DType>::FlushValues() {
   std::shared_ptr<Buffer> suffixes = suffix_encoder_.FlushValues();
   PARQUET_THROW_NOT_OK(sink_.Append(suffixes->data(), suffixes->size()));
 
-  std::shared_ptr<Buffer> buffer;
-  PARQUET_THROW_NOT_OK(sink_.Finish(&buffer, true));
+  std::shared_ptr<Buffer> buffer = FinishSink<::arrow::BufferBuilder>(sink_);
   last_value_.clear();
   return buffer;
 }

@@ -725,10 +725,12 @@ class ReaderOptions : public io::ReaderOptions {
   }
 };
 
-struct WriterOptions {
+struct WriterOptions : public ISerializable {
   TypePtr schema;
-  bolt::memory::MemoryPool* memoryPool;
+  bolt::memory::MemoryPool* memoryPool{nullptr};
   const bolt::common::SpillConfig* spillConfig{nullptr};
+  // Owns the SpillConfig when it was produced by deserialize().
+  std::shared_ptr<const bolt::common::SpillConfig> ownedSpillConfig;
   tsan_atomic<bool>* nonReclaimableSection{nullptr};
   std::optional<bolt::common::CompressionKind> compressionKind;
   std::optional<uint64_t> maxStripeSize{std::nullopt};
@@ -743,6 +745,10 @@ struct WriterOptions {
   virtual void processHiveConnectorConfigs(const config::ConfigBase&) {}
 
   virtual ~WriterOptions() = default;
+
+  folly::dynamic serialize() const override;
+  static std::shared_ptr<WriterOptions> deserialize(const folly::dynamic& obj);
+  static void registerSerDe();
 };
 
 struct ColumnReaderOptions {
