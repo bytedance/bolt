@@ -31,6 +31,7 @@
 #include "bolt/expression/SpecialFormRegistry.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/sparksql/In.h"
+#include "bolt/functions/sparksql/MonotonicallyIncreasingId.h"
 #include "bolt/functions/sparksql/RaiseError.h"
 #include "bolt/functions/sparksql/SparkPartitionId.h"
 #include "bolt/functions/sparksql/UnscaledValueFunction.h"
@@ -63,6 +64,9 @@ void registerMiscFunctions(const std::string& prefix) {
 
   registerFunction<SparkPartitionIdFunction, int32_t>(
       {prefix + "spark_partition_id"});
+
+  registerFunction<MonotonicallyIncreasingIdFunction, int64_t>(
+      {prefix + "monotonically_increasing_id"});
 }
 } // namespace sparksql
 } // namespace bytedance::bolt::functions
