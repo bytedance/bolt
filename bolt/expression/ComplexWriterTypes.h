@@ -288,7 +288,7 @@ class ArrayWriter {
     } else if constexpr (std::is_same_v<V, bool>) {
       addItemsBoolFastPath(arrayView);
     } else if constexpr (provide_std_interface<V>) {
-      addItemsOrimitiveFastPath<V>(arrayView);
+      addItemsPrimitiveFastPath<V>(arrayView);
     } else {
       addItemsGeneralSlowPath(arrayView);
     }
@@ -328,14 +328,14 @@ class ArrayWriter {
         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
       addItemsStringFastPath<kind>(data);
     } else if constexpr (TypeTraits<kind>::isPrimitiveType) {
-      addItemsOrimitiveFastPath<typename KindToSimpleType<kind>::type>(data);
+      addItemsPrimitiveFastPath<typename KindToSimpleType<kind>::type>(data);
     } else {
       BOLT_UNREACHABLE("non primitives handled in addItemsGeneric");
     }
   }
 
   template <typename ElementSimpleType, typename Input>
-  void addItemsOrimitiveFastPath(const Input& sourceArray) {
+  void addItemsPrimitiveFastPath(const Input& sourceArray) {
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::BOOLEAN);
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::VARBINARY);
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::VARCHAR);

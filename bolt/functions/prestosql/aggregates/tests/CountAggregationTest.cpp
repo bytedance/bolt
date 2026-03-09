@@ -174,6 +174,7 @@ TEST_F(CountAggregationTest, distinct) {
       makeNullableFlatVector<int64_t>(
           {std::nullopt, 1, std::nullopt, 2, std::nullopt, 1, std::nullopt, 1}),
       makeNullConstant(TypeKind::DOUBLE, 8),
+      makeFlatVector<int128_t>({1, 2, 1, 2, 1, 2, 1, 1}, DECIMAL(38, 8)),
   });
   createDuckDbTable({data});
 
@@ -192,6 +193,7 @@ TEST_F(CountAggregationTest, distinct) {
   testGlobal("c1");
   testGlobal("c2");
   testGlobal("c3");
+  testGlobal("c4");
 
   auto plan = PlanBuilder()
                   .values({data})
@@ -228,6 +230,7 @@ TEST_F(CountAggregationTest, distinct) {
   testGroupBy("c1");
   testGroupBy("c2");
   testGroupBy("c3");
+  testGlobal("c4");
 
   plan = PlanBuilder()
              .values({data})

@@ -71,7 +71,7 @@ add_executable(
   MapTest.cpp
   MaskTest.cpp
   MightContainTest.cpp
-  MightContainTest.cpp
+  MonotonicallyIncreasingIdTest.cpp
   RaiseErrorTest.cpp
   RandTest.cpp
   RegexFunctionsTest.cpp

@@ -27,43 +27,30 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #pragma once
-#include <google/cloud/storage/client.h>
-#include "bolt/common/base/Exceptions.h"
-namespace bytedance::bolt {
 
-namespace {
-constexpr const char* kSep{"/"};
-constexpr std::string_view kGcsScheme{"gs://"};
+#include "bolt/core/QueryConfig.h"
+#include "bolt/functions/Macros.h"
 
-} // namespace
+namespace bytedance::bolt::functions::sparksql {
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& error);
+template <typename T>
+struct MonotonicallyIncreasingIdFunction {
+  static constexpr bool is_deterministic =
+      false; // NOLINT(readability-identifier-naming)
 
-inline bool isGCSFile(const std::string_view filename) {
-  return (filename.substr(0, kGcsScheme.size()) == kGcsScheme);
-}
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config) {
+    count_ = static_cast<int64_t>(config.sparkPartitionId()) << 33;
+  }
 
-inline void setBucketAndKeyFromGCSPath(
-    const std::string& path,
-    std::string& bucket,
-    std::string& key) {
-  auto firstSep = path.find_first_of(kSep);
-  bucket = path.substr(0, firstSep);
-  key = path.substr(firstSep + 1);
-}
-inline std::string gcsURI(const std::string& bucket) {
-  return std::string(kGcsScheme) + bucket;
-}
+  FOLLY_ALWAYS_INLINE void call(int64_t& result) {
+    result = count_++;
+  }
 
-inline std::string gcsURI(const std::string& bucket, const std::string& key) {
-  return gcsURI(bucket) + kSep + key;
-}
+ private:
+  int64_t count_;
+};
 
-inline std::string gcsPath(const std::string_view& path) {
-  // Remove the prefix gcs:// from the given path
-  return std::string(path.substr(kGcsScheme.length()));
-}
-
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::functions::sparksql

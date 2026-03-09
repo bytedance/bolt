@@ -62,7 +62,9 @@ class GeometricMeanAggregate {
 
     AccumulatorType() = delete;
 
-    explicit AccumulatorType(HashStringAllocator* /*allocator*/) {}
+    explicit AccumulatorType(
+        HashStringAllocator* /*allocator*/,
+        GeometricMeanAggregate<TInput, TResult>* /*fn*/) {}
 
     void addInput(
         HashStringAllocator* /*allocator*/,
@@ -129,15 +131,16 @@ void registerGeometricMeanAggregate(const std::string& prefix) {
         switch (inputType->kind()) {
           case TypeKind::BIGINT:
             return std::make_unique<SimpleAggregateAdapter<
-                GeometricMeanAggregate<int64_t, double>>>(resultType);
+                GeometricMeanAggregate<int64_t, double>>>(
+                step, argTypes, resultType);
           case TypeKind::DOUBLE:
             return std::make_unique<
                 SimpleAggregateAdapter<GeometricMeanAggregate<double, double>>>(
-                resultType);
+                step, argTypes, resultType);
           case TypeKind::REAL:
             return std::make_unique<
                 SimpleAggregateAdapter<GeometricMeanAggregate<float, float>>>(
-                resultType);
+                step, argTypes, resultType);
           default:
             BOLT_USER_FAIL(
                 "Unknown input type for {} aggregation {}",
