@@ -36,11 +36,8 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 class RoundRobinPartitioner final : public Partitioner {
  public:
-  RoundRobinPartitioner(
-      int32_t numPartitions,
-      int32_t startPartitionId,
-      bool hasPid)
-      : Partitioner(numPartitions, hasPid),
+  RoundRobinPartitioner(int32_t numPartitions, int32_t startPartitionId)
+      : Partitioner(numPartitions, false),
         pidSelection_(startPartitionId % numPartitions) {}
 
   arrow::Status compute(

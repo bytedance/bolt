@@ -477,7 +477,6 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
     ShuffleWriterOptions writerOptions;
     writerOptions.partitioning = toPartitioning(param.partitioning);
-    writerOptions.sort_before_repartition = false;
     writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
     writerOptions.forceShuffleWriterType = param.shuffleMode;
     writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;

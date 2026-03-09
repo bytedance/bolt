@@ -146,7 +146,6 @@ struct ShuffleWriterOptions {
   Partitioning partitioning;
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
-  bool sort_before_repartition = true;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
@@ -186,6 +185,14 @@ struct ShuffleWriterMetrics {
   std::vector<int64_t> partitionLengths{};
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
 };
+
+// Only partitioning that has pid support adaptive shuffle writer, otherwise
+// force use V1
+inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
+  return partitioning == Partitioning::kRange ||
+      partitioning == Partitioning::kHash;
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql
 
 template <>

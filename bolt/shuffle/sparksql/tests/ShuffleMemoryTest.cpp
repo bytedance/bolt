@@ -193,4 +193,24 @@ TEST_F(ShuffleMemoryTest, testCompositeRowEvictBeforeInit) {
   EXPECT_THROW(executeTestWithCustomInput(param, inputData), BoltRuntimeError);
 }
 
+// RoundRobin with large partitions (>=8000) and many columns (>=5) should use
+// V1 consistently on both writer and reader side. Before the fix, the writer
+// used V1 (RoundRobin was not in hashOrRoundRobinWithPid when
+// sort_before_repartition=false), but the reader checked partitioning name
+// "rr" without considering sort_before_repartition and incorrectly chose
+// RowBased deserialization, causing a format mismatch.
+TEST_F(ShuffleMemoryTest, testRoundRobinLargePartitionConsistency) {
+  ShuffleTestParam param;
+  param.partitioning = "rr";
+  param.shuffleMode = 0; // Adaptive
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kMix;
+  param.numPartitions = 8000;
+  param.numMappers = 1;
+  param.batchSize = 32;
+  param.numBatches = 2;
+
+  executeTest(param);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test
