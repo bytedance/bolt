@@ -25,6 +25,7 @@
 #define bswap_64(x) __builtin_bswap64(x)
 #endif
 
+#include <algorithm>
 #include "bolt/functions/InlineFlatten.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
 #include "bolt/functions/lib/StringUtil.h"
@@ -475,24 +476,17 @@ class Converter {
       // Timestamp -> integral seconds, rounding away from zero.
       int64_t secs64 = 0;
       try {
-        __int128_t micros = static_cast<__int128_t>(from.toMicros());
-        __int128_t secs128 =
-            micros / (__int128_t)1'000'000; // trunc toward zero
-        __int128_t rem = micros % (__int128_t)1'000'000;
-        if (rem != 0) {
-          if (micros > 0) {
-            secs128 += 1; // away from zero for positive fraction
-          } else {
-            secs128 -= 1; // away from zero for negative fraction
-          }
-        }
-        if (secs128 > (__int128_t)std::numeric_limits<int64_t>::max()) {
-          secs64 = std::numeric_limits<int64_t>::max();
-        } else if (secs128 < (__int128_t)std::numeric_limits<int64_t>::min()) {
-          secs64 = std::numeric_limits<int64_t>::min();
-        } else {
-          secs64 = static_cast<int64_t>(secs128);
-        }
+        int128_t micros = static_cast<int128_t>(from.toMicros());
+        int128_t secs128 =
+            micros / static_cast<int128_t>(1'000'000); // trunc toward zero
+        int128_t rem = micros % static_cast<int128_t>(1'000'000);
+        // sec128 + 1 when rem != 0 and micros > 0, sec128 - 1 when rem != 0
+        // and micros < 0
+        secs128 += (rem != 0) * ((micros > 0) - (micros < 0));
+        secs64 = std::clamp(
+            secs128,
+            static_cast<int128_t>(std::numeric_limits<int64_t>::min()),
+            static_cast<int128_t>(std::numeric_limits<int64_t>::max()));
       } catch (...) {
         return ConvertStatus::OTHER_FAILURE;
       }
