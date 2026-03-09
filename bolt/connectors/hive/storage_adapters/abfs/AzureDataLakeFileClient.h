@@ -28,40 +28,36 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#pragma once
 
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
+#include <stdint.h>
+#include <cstddef>
+#include <string>
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+namespace Azure::Storage::Files::DataLake::Models {
+class PathProperties;
+}
 
 namespace bytedance::bolt::filesystems {
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
-}
+// Azurite Simulator does not yet support the DFS endpoint.
+// (For more information, see https://github.com/Azure/Azurite/issues/553 and
+// https://github.com/Azure/Azurite/issues/409).
+// You can find a comparison between DFS and Blob endpoints here:
+// https://github.com/Azure/Azurite/wiki/ADLS-Gen2-Implementation-Guidance
+// To facilitate unit testing of file write scenarios, we define the
+// AzureDatalakeFileClient which can be mocked during testing.
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
-}
+class AzureDataLakeFileClient {
+ public:
+  virtual ~AzureDataLakeFileClient() {}
 
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
-}
-
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
-}
+  virtual void create() = 0;
+  virtual Azure::Storage::Files::DataLake::Models::PathProperties
+  getProperties() = 0;
+  virtual void append(const uint8_t* buffer, size_t size, uint64_t offset) = 0;
+  virtual void flush(uint64_t position) = 0;
+  virtual void close() = 0;
+  virtual std::string getUrl() = 0;
+};
 } // namespace bytedance::bolt::filesystems

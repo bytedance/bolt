@@ -28,40 +28,29 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#pragma once
 
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
-
+#include "bolt/common/config/Config.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureBlobClient.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
 
 namespace bytedance::bolt::filesystems {
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
-}
+// Provider interface for creating Azure Blob and Data Lake clients.
+class AzureClientProvider {
+ public:
+  virtual ~AzureClientProvider() = default;
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
-}
+  // Creates AzureBlobClient for file read operations.
+  virtual std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
 
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
-}
+  // Creates AzureDataLakeFileClient for file write operations.
+  virtual std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
+};
 
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
-}
 } // namespace bytedance::bolt::filesystems

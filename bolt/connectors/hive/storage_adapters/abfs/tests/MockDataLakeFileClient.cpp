@@ -28,40 +28,47 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/tests/MockDataLakeFileClient.h"
 
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
+#include <filesystem>
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+#include <azure/storage/files/datalake.hpp>
 
 namespace bytedance::bolt::filesystems {
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
+void MockDataLakeFileClient::create() {
+  fileStream_ = std::ofstream(
+      filePath_,
+      std::ios_base::out | std::ios_base::binary | std::ios_base::app);
 }
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
+PathProperties MockDataLakeFileClient::getProperties() {
+  if (!std::filesystem::exists(filePath_)) {
+    Azure::Storage::StorageException exp(filePath_ + "doesn't exists");
+    exp.StatusCode = Azure::Core::Http::HttpStatusCode::NotFound;
+    throw exp;
+  }
+  std::ifstream file(filePath_, std::ios::binary | std::ios::ate);
+  uint64_t size = static_cast<uint64_t>(file.tellg());
+  PathProperties ret;
+  ret.FileSize = size;
+  return ret;
 }
 
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
+void MockDataLakeFileClient::append(
+    const uint8_t* buffer,
+    size_t size,
+    uint64_t offset) {
+  fileStream_.seekp(offset);
+  fileStream_.write(reinterpret_cast<const char*>(buffer), size);
 }
 
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
+void MockDataLakeFileClient::flush(uint64_t position) {
+  fileStream_.flush();
+}
+
+void MockDataLakeFileClient::close() {
+  fileStream_.flush();
+  fileStream_.close();
 }
 } // namespace bytedance::bolt::filesystems
