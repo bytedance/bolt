@@ -39,6 +39,7 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <utility>

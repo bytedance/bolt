@@ -97,17 +97,14 @@ while (($# > 0)); do
       exit 0
       ;;
     *)
-      if [[ -z "${BUILD_DIR}" ]]; then
-        BUILD_DIR="$1"
-      else
-        echo "Unexpected argument: $1" >&2
-        exit 1
-      fi
+      echo "Unexpected argument: $1" >&2
+      usage
+      exit 1
       ;;
   esac
   shift
 done
-: "${BUILD_DIR:=${PROJECT_ROOT}/_build/${BUILD_TYPE}}"
+BUILD_DIR="${PROJECT_ROOT}/_build/${BUILD_TYPE}"
 
 if [[ "${BUILD_TYPE}" != "Debug" && "${BUILD_TYPE}" != "Release" ]]; then
   echo "Invalid --build-type: ${BUILD_TYPE}" >&2
