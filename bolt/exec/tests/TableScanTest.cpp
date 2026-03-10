@@ -1688,6 +1688,20 @@ TEST_F(TableScanTest, multipleSplits) {
   }
 }
 
+TEST_F(TableScanTest, preloadSplits) {
+  auto filePaths = makeFilePaths(10);
+  auto vectors = makeVectors(10, 10);
+  for (int32_t i = 0; i < vectors.size(); i++) {
+    writeToFile(filePaths[i]->getPath(), vectors[i]);
+  }
+  createDuckDbTable(vectors);
+
+  auto task = assertQuery(
+      tableScanNode(), filePaths, "SELECT * FROM tmp", /*numPrefetchSplit=*/10);
+  auto stats = getTableScanRuntimeStats(task);
+  ASSERT_EQ(stats.at("preloadedSplits").sum, 10);
+}
+
 TEST_F(TableScanTest, preloadingSplitClose) {
   auto filePaths = makeFilePaths(100);
   auto vectors = makeVectors(100, 100);
@@ -1766,11 +1780,11 @@ TEST_F(TableScanTest, splitOffsetAndLength) {
 }
 
 TEST_F(TableScanTest, fileNotFound) {
+  auto assertMissingFile = [&](bool ignoreMissingFiles) {
   auto split = HiveConnectorSplitBuilder("/path/to/nowhere.orc")
                    .connectorId(kHiveConnectorId)
                    .fileFormat(dwio::common::FileFormat::DWRF)
                    .build();
-  auto assertMissingFile = [&](bool ignoreMissingFiles) {
     AssertQueryBuilder(tableScanNode())
         .connectorSessionProperty(
             kHiveConnectorId,
@@ -3703,13 +3717,19 @@ TEST_F(TableScanTest, reuseRowVector) {
                   .tableScan(rowType, {}, "c0 < 5")
                   .project({"c1.c0"})
                   .planNode();
-  auto split = HiveConnectorSplitBuilder(file->path)
+  auto firstSplit = HiveConnectorSplitBuilder(file->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .build();
+  auto secondSplit = HiveConnectorSplitBuilder(file->path)
                    .connectorId(kHiveConnectorId)
                    .fileFormat(dwio::common::FileFormat::DWRF)
                    .build();
   auto expected = makeRowVector(
       {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
-  AssertQueryBuilder(plan).splits({split, split}).assertResults(expected);
+  AssertQueryBuilder(plan)
+      .splits({firstSplit, secondSplit})
+      .assertResults(expected);
 }
 
 // Tests queries that read more row fields than exist in the data.
@@ -3964,6 +3984,7 @@ TEST_F(TableScanTest, readMissingFieldsInMap) {
 
   // Now run query with column mapping using names - we should not be able to
   // find any names.
+  split = makeHiveConnectorSplit(filePath->getPath());
   result = AssertQueryBuilder(op)
                .connectorSessionProperty(
                    kHiveConnectorId,
@@ -4021,6 +4042,7 @@ TEST_F(TableScanTest, readMissingFieldsInMap) {
            .project({"i1"})
            .planNode();
 
+  split = makeHiveConnectorSplit(filePath->getPath());
   EXPECT_THROW(
       AssertQueryBuilder(op).split(split).copyResults(pool()), BoltUserError);
 }
@@ -4189,6 +4211,7 @@ TEST_F(TableScanTest, readMissingFieldsWithMoreColumns) {
 
   // Now run query with column mapping using names - we should not be able to
   // find any names, except for the last string column.
+  split = makeHiveConnectorSplit(filePath->getPath());
   result = AssertQueryBuilder(op)
                .connectorSessionProperty(
                    kHiveConnectorId,

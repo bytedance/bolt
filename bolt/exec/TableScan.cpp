@@ -184,6 +184,9 @@ RowVectorPtr TableScan::getOutput() {
       // A point for test code injection.
       BOLT_TEST_ADJUST("bytedance::bolt::exec::TableScan::getOutput", this);
 
+      curStatus_ = "getOutput: checkPreload";
+      checkPreload();
+
       exec::Split split;
       curStatus_ = "getOutput: task->getSplitOrFuture";
       blockingReason_ = driverCtx_->task->getSplitOrFuture(
@@ -363,8 +366,6 @@ RowVectorPtr TableScan::getOutput() {
         maxReadBatchSize_, std::max<int32_t>(minReadBatchSize_, readBatchSize));
     curStatus_ = "getOutput: dataSource_->next";
     auto dataOptional = dataSource_->next(readBatchSize, blockingFuture_);
-    curStatus_ = "getOutput: checkPreload";
-    checkPreload();
 
     estimateBytesPerRow(dataOptional);
 
@@ -488,7 +489,6 @@ void TableScan::checkPreload() {
       !connector_->supportsSplitPreload() || !asyncThreadCtx_->allowPreload()) {
     return;
   }
-  if (dataSource_->allPrefetchIssued()) {
     maxPreloadedSplits_ = driverCtx_->task->numDrivers(driverCtx_->driver) *
         maxSplitPreloadPerDriver_;
     if (!splitPreloader_) {
@@ -509,7 +509,6 @@ void TableScan::checkPreload() {
             });
           };
     }
-  }
 }
 
 bool TableScan::isFinished() {
