@@ -28,23 +28,50 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
-namespace bytedance::bolt {
+#pragma once
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& code) {
-  using ::google::cloud::StatusCode;
+#include <google/cloud/storage/client.h>
+#include "bolt/common/file/File.h"
 
-  switch (code) {
-    case StatusCode::kNotFound:
-      return "Resource not found";
-    case StatusCode::kPermissionDenied:
-      return "Access denied";
-    case StatusCode::kUnavailable:
-      return "Service unavailable";
+namespace bytedance::bolt::filesystems {
 
-    default:
-      return "Unknown error";
+/**
+ * Implementation of gcs read file.
+ */
+class GcsReadFile : public ReadFile {
+ public:
+  GcsReadFile(
+      const std::string& path,
+      std::shared_ptr<::google::cloud::storage::Client> client);
+
+  ~GcsReadFile() override;
+
+  void initialize();
+
+  std::string_view pread(uint64_t offset, uint64_t length, void* buffer)
+      const override;
+
+  std::string pread(uint64_t offset, uint64_t length) const override;
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const override;
+
+  uint64_t size() const override;
+
+  uint64_t memoryUsage() const override;
+
+  bool shouldCoalesce() const final {
+    return false;
   }
-}
 
-} // namespace bytedance::bolt
+  std::string getName() const override;
+
+  uint64_t getNaturalReadSize() const override;
+
+ protected:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+} // namespace bytedance::bolt::filesystems

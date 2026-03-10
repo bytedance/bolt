@@ -205,8 +205,8 @@ struct WriterOptions {
   // If 0 or less, threading is disabled (`set_use_threads` is set to false).
   int32_t threadPoolSize = 0;
 
-  std::shared_ptr<arrow::WriterProperties::Builder> getWriterPropertiesBuilder()
-      const;
+  std::shared_ptr<arrow::WriterProperties::Builder> getWriterPropertiesBuilder(
+      arrow::MemoryPool* arrowPool) const;
   std::shared_ptr<arrow::ArrowWriterProperties::Builder>
   getArrowWriterPropertiesBuilder() const;
 };

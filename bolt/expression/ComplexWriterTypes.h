@@ -104,9 +104,8 @@ struct PrimitiveWriter {
 };
 
 template <typename V>
-bool constexpr provide_std_interface =
-    SimpleTypeTrait<V>::isPrimitiveType && !std::is_same_v<Varchar, V> &&
-    !std::is_same_v<Varbinary, V> && !std::is_same_v<Any, V>;
+bool constexpr provide_std_interface = SimpleTypeTrait<V>::isPrimitiveType &&
+    !std::is_same_v<Varchar, V> && !std::is_same_v<Varbinary, V>;
 
 // bool is an exception, it requires commit but also provides std::interface.
 template <typename V>
@@ -288,7 +287,7 @@ class ArrayWriter {
     } else if constexpr (std::is_same_v<V, bool>) {
       addItemsBoolFastPath(arrayView);
     } else if constexpr (provide_std_interface<V>) {
-      addItemsOrimitiveFastPath<V>(arrayView);
+      addItemsPrimitiveFastPath<V>(arrayView);
     } else {
       addItemsGeneralSlowPath(arrayView);
     }
@@ -328,14 +327,14 @@ class ArrayWriter {
         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
       addItemsStringFastPath<kind>(data);
     } else if constexpr (TypeTraits<kind>::isPrimitiveType) {
-      addItemsOrimitiveFastPath<typename KindToSimpleType<kind>::type>(data);
+      addItemsPrimitiveFastPath<typename KindToSimpleType<kind>::type>(data);
     } else {
       BOLT_UNREACHABLE("non primitives handled in addItemsGeneric");
     }
   }
 
   template <typename ElementSimpleType, typename Input>
-  void addItemsOrimitiveFastPath(const Input& sourceArray) {
+  void addItemsPrimitiveFastPath(const Input& sourceArray) {
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::BOOLEAN);
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::VARBINARY);
     BOLT_DCHECK_NE(sourceArray.elementKind(), TypeKind::VARCHAR);
@@ -994,9 +993,7 @@ class RowWriter {
     (
         [&]() {
           using current_t = std::tuple_element_t<Is, children_types>;
-          if constexpr (
-              !provide_std_interface<current_t> &&
-              !isOpaqueType<current_t>::value) {
+          if constexpr (!provide_std_interface<current_t>) {
             if (UNLIKELY(std::get<Is>(needCommit_))) {
               std::get<Is>(childrenWriters_).finalizeNull();
               std::get<Is>(needCommit_) = false;

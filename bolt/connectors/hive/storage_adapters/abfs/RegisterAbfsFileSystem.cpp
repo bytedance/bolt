@@ -28,14 +28,22 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h" // @manual
+
 #ifdef BOLT_ENABLE_ABFS
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h" // @manual
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h" // @manual
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderImpl.h" // @manual
+#include "bolt/dwio/common/FileSink.h"
 #endif
-namespace bytedance::bolt::filesystems::abfs {
+
+namespace bytedance::bolt::filesystems {
 
 #ifdef BOLT_ENABLE_ABFS
+
 folly::once_flag abfsInitiationFlag;
 
 std::shared_ptr<FileSystem> abfsFileSystemGenerator(
@@ -47,13 +55,66 @@ std::shared_ptr<FileSystem> abfsFileSystemGenerator(
   });
   return filesystem;
 }
+
+std::unique_ptr<bolt::dwio::common::FileSink> abfsWriteFileSinkGenerator(
+    const std::string& fileURI,
+    const bolt::dwio::common::FileSink::Options& options) {
+  if (isAbfsFile(fileURI)) {
+    auto fileSystem =
+        filesystems::getFileSystem(fileURI, options.connectorProperties);
+    return std::make_unique<dwio::common::WriteFileSink>(
+        fileSystem->openFileForWrite(fileURI),
+        fileURI,
+        options.metricLogger,
+        options.stats);
+  }
+  return nullptr;
+}
 #endif
 
 void registerAbfsFileSystem() {
 #ifdef BOLT_ENABLE_ABFS
-  LOG(INFO) << "Register ABFS";
   registerFileSystem(isAbfsFile, std::function(abfsFileSystemGenerator));
+  dwio::common::FileSink::registerFactory(
+      std::function(abfsWriteFileSinkGenerator));
 #endif
 }
 
-} // namespace bytedance::bolt::filesystems::abfs
+void registerAzureClientProvider(const config::ConfigBase& config) {
+#ifdef BOLT_ENABLE_ABFS
+
+  for (const auto& [accountName, authType] :
+       extractCacheKeyFromConfig(config)) {
+    if (authType == kAzureSharedKeyAuthType) {
+      AzureClientProviderFactories::registerFactory(
+          accountName, [](const std::string&) {
+            return std::make_unique<SharedKeyAzureClientProvider>();
+          });
+    } else if (authType == kAzureOAuthAuthType) {
+      AzureClientProviderFactories::registerFactory(
+          accountName, [](const std::string&) {
+            return std::make_unique<OAuthAzureClientProvider>();
+          });
+    } else if (authType == kAzureSASAuthType) {
+      AzureClientProviderFactories::registerFactory(
+          accountName, [](const std::string&) {
+            return std::make_unique<FixedSasAzureClientProvider>();
+          });
+    } else {
+      BOLT_USER_FAIL(
+          "Unsupported auth type {}, supported auth types are SharedKey, OAuth and SAS.",
+          authType);
+    }
+  }
+#endif
+}
+
+void registerAzureClientProviderFactory(
+    const std::string& account,
+    const AzureClientProviderFactory& factory) {
+#ifdef BOLT_ENABLE_ABFS
+  AzureClientProviderFactories::registerFactory(account, factory);
+#endif
+}
+
+} // namespace bytedance::bolt::filesystems

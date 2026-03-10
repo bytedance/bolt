@@ -30,7 +30,8 @@
 
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
 #include <folly/init/Init.h>
 
@@ -39,6 +40,8 @@
 #include <iostream>
 
 DEFINE_string(gcs_path, "", "Path of GCS bucket");
+DEFINE_string(gcs_max_retry_count, "", "Max retry count");
+DEFINE_string(gcs_max_retry_time, "", "Max retry time");
 
 auto newConfiguration() {
   using namespace bytedance::bolt;
@@ -60,9 +63,12 @@ int main(int argc, char** argv) {
     gflags::ShowUsageWithFlags(argv[0]);
     return 1;
   }
-  filesystems::GCSFileSystem gcfs(newConfiguration());
+  std::string bucket;
+  std::string object;
+  setBucketAndKeyFromGcsPath(FLAGS_gcs_path, bucket, object);
+  filesystems::GcsFileSystem gcfs(bucket, newConfiguration());
   gcfs.initializeClient();
-  std::cout << "Opening file " << FLAGS_gcs_path << std::endl;
+  std::cout << "Opening file for read " << FLAGS_gcs_path << std::endl;
   std::unique_ptr<ReadFile> file_read = gcfs.openFileForRead(FLAGS_gcs_path);
   std::size_t file_size = file_read->size();
   std::cout << "File size = " << file_size << std::endl;

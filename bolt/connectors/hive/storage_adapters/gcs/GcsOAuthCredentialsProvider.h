@@ -28,36 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-#include "bolt/core/Config.h"
+#pragma once
 
-#include <fstream>
+#include <google/cloud/storage/oauth2/credentials.h>
 
-DEFINE_string(gcs_config, "", "Path of GCS config file");
-namespace bytedance::bolt {
+namespace bytedance::bolt::filesystems {
 
-// From presto-cpp
-std::shared_ptr<Config> readConfig(const std::string& filePath) {
-  std::ifstream configFile(filePath);
-  if (!configFile.is_open()) {
-    throw std::runtime_error(
-        fmt::format("Couldn't open config file {} for reading.", filePath));
-  }
+namespace gcs = ::google::cloud::storage;
 
-  std::unordered_map<std::string, std::string> properties;
-  std::string line;
-  while (getline(configFile, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(), isspace), line.end());
-    if (line[0] == '#' || line.empty()) {
-      continue;
-    }
-    auto delimiterPos = line.find('=');
-    auto name = line.substr(0, delimiterPos);
-    auto value = line.substr(delimiterPos + 1);
-    properties.emplace(name, value);
-  }
+/// Interface for providing OAuth2 credentials for Google Cloud Storage (GCS).
+/// Implementations should return a GCS OAuth2 credential used for creating the
+/// GCS client for a specific bucket via `getCredentials`.
+class GcsOAuthCredentialsProvider {
+ public:
+  virtual ~GcsOAuthCredentialsProvider() = default;
 
-  return std::make_shared<bytedance::bolt::core::MemConfig>(properties);
-}
+  virtual std::shared_ptr<gcs::oauth2::Credentials> getCredentials(
+      const std::string& bucket) = 0;
+};
 
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::filesystems

@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/config/Config.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <azure/storage/blobs/blob_container_client.hpp>
@@ -37,19 +38,13 @@
 #include <unistd.h>
 #include <iostream>
 #include "boost/process.hpp"
-namespace bytedance::bolt::filesystems::test {
+
+namespace bytedance::bolt::filesystems {
+
 using namespace Azure::Storage::Blobs;
-static const std::string AzuriteServerExecutableName{"azurite-blob"};
-static const std::string AzuriteSearchPath{":/usr/bin/azurite"};
-static const std::string AzuriteAccountName{"test"};
-static const std::string AzuriteContainerName{"test"};
-// the default key of Azurite Server used for connection
-static const std::string AzuriteAccountKey{
-    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="};
-static const std::string AzuriteABFSEndpoint = fmt::format(
-    "abfs://{}@{}.dfs.core.windows.net/",
-    AzuriteAccountName,
-    AzuriteContainerName);
+using TempDirectoryPath = exec::test::TempDirectoryPath;
+static std::string_view kAzuriteServerExecutableName{"azurite-blob"};
+static std::string_view kAzuriteSearchPath{":/usr/bin/azurite"};
 
 class AzuriteServer {
  public:
@@ -59,19 +54,40 @@ class AzuriteServer {
 
   void start();
 
+  std::string URI() const;
+
+  std::string fileURI() const;
+
+  std::string container() const {
+    return container_;
+  }
+
+  std::string file() const {
+    return file_;
+  }
+
+  std::shared_ptr<const config::ConfigBase> hiveConfig(
+      const std::unordered_map<std::string, std::string> configOverride = {})
+      const;
+
   void stop();
 
   bool isRunning();
 
-  void addFile(std::string source, std::string destination);
+  void addFile(std::string source);
 
   virtual ~AzuriteServer();
 
  private:
   int64_t port_;
+  const std::string account_{"test"};
+  const std::string container_{"test"};
+  const std::string file_{"test_file.txt"};
+  const std::string key_{
+      "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="};
   std::vector<std::string> commandOptions_;
   std::unique_ptr<::boost::process::child> serverProcess_;
   boost::filesystem::path exePath_;
   boost::process::environment env_;
 };
-} // namespace bytedance::bolt::filesystems::test
+} // namespace bytedance::bolt::filesystems

@@ -29,7 +29,9 @@
  */
 #pragma once
 
+#include "bolt/expression/EvalCtx.h"
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/vector/DecodedVector.h"
 
 namespace bytedance::bolt::functions {
 
@@ -140,6 +142,10 @@ void applyAutoSimdComparisonInternal(
         });
   }
 }
+
+inline bool isDictEncoding(const VectorPtr& arg) {
+  return arg->encoding() == VectorEncoding::Simple::DICTIONARY;
+}
 } // namespace detail
 
 template <
@@ -238,6 +244,7 @@ template <typename A, typename B, typename Compare, typename... Args>
 void applyAutoSimdComparison(
     const SelectivityVector& rows,
     std::vector<VectorPtr>& args,
+    exec::EvalCtx& context,
     VectorPtr& result,
     Args... cmpArgs) {
   const Compare cmp;
@@ -255,6 +262,42 @@ void applyAutoSimdComparison(
             return Compare::apply(rawA[i], rawB[i], cmpArgs...);
           } else {
             return cmp(rawA[i], rawB[i]);
+          }
+        },
+        result);
+  } else if (args[0]->isFlatEncoding() && detail::isDictEncoding(args[1])) {
+    const A* __restrict rawA =
+        args[0]->asUnchecked<FlatVector<A>>()->template rawValues<A>();
+    DecodedVector decodedB(*args[1], rows);
+    const B* __restrict rawB = decodedB.data<B>();
+    const vector_size_t* __restrict indexB = decodedB.indices();
+    detail::applyAutoSimdComparisonInternal(
+        rows,
+        rawA,
+        rawB,
+        [&](const A* __restrict rawA, const B* __restrict rawB, int i) {
+          if constexpr (sizeof...(cmpArgs) > 0) {
+            return Compare::apply(rawA[i], rawB[indexB[i]], cmpArgs...);
+          } else {
+            return cmp(rawA[i], rawB[indexB[i]]);
+          }
+        },
+        result);
+  } else if (detail::isDictEncoding(args[0]) && args[1]->isFlatEncoding()) {
+    DecodedVector decodedA(*args[0], rows);
+    const A* __restrict rawA = decodedA.data<A>();
+    const vector_size_t* __restrict indexA = decodedA.indices();
+    const B* __restrict rawB =
+        args[1]->asUnchecked<FlatVector<B>>()->template rawValues<B>();
+    detail::applyAutoSimdComparisonInternal(
+        rows,
+        rawA,
+        rawB,
+        [&](const A* __restrict rawA, const B* __restrict rawB, int i) {
+          if constexpr (sizeof...(cmpArgs) > 0) {
+            return Compare::apply(rawA[indexA[i]], rawB[i], cmpArgs...);
+          } else {
+            return cmp(rawA[indexA[i]], rawB[i]);
           }
         },
         result);
@@ -312,5 +355,22 @@ void applyAutoSimdComparison(
   } else {
     BOLT_UNREACHABLE();
   }
+}
+
+template <typename A, typename B>
+bool shouldApplyAutoSimdComparison(
+    const SelectivityVector& rows,
+    std::vector<VectorPtr>& args) {
+  if (rows.end() - rows.begin() > 64) {
+    if ((args[0]->isFlatEncoding() || args[0]->isConstantEncoding()) &&
+        (args[1]->isFlatEncoding() || args[1]->isConstantEncoding())) {
+      return true;
+    } else if (args[0]->isFlatEncoding() && detail::isDictEncoding(args[1])) {
+      return true;
+    } else if (detail::isDictEncoding(args[0]) && args[1]->isFlatEncoding()) {
+      return true;
+    }
+  }
+  return false;
 }
 } // namespace bytedance::bolt::functions

@@ -28,18 +28,29 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-using namespace bytedance::bolt;
+#pragma once
 
-// This benchmark measures the throughput of an GCS compatible FileSystem for
-// various ReadFile APIs. The output helps us understand the maximum possible
-// gains for queries. Example: If a single thread requires reading 1GB of data
-// and the IO throughput is 100 MBps, then it takes 10 seconds to just read the
-// data.
-int main(int argc, char** argv) {
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  GCSReadBenchmark bm;
-  bm.initialize();
-  bm.run();
-}
+#include "bolt/common/config/Config.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureBlobClient.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
+
+namespace bytedance::bolt::filesystems {
+
+// Provider interface for creating Azure Blob and Data Lake clients.
+class AzureClientProvider {
+ public:
+  virtual ~AzureClientProvider() = default;
+
+  // Creates AzureBlobClient for file read operations.
+  virtual std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
+
+  // Creates AzureDataLakeFileClient for file write operations.
+  virtual std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
+};
+
+} // namespace bytedance::bolt::filesystems
