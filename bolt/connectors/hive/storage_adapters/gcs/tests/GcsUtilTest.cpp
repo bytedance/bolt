@@ -28,10 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
-namespace bytedance::bolt::filesystems {
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
-// Register the GCS filesystem.
-void registerGCSFileSystem();
+#include "gtest/gtest.h"
 
-} // namespace bytedance::bolt::filesystems
+using namespace bytedance::bolt;
+
+TEST(GcsUtilTest, isGcsFile) {
+  EXPECT_FALSE(isGcsFile("gs:"));
+  EXPECT_FALSE(isGcsFile("gs::/bucket"));
+  EXPECT_FALSE(isGcsFile("gs:/bucket"));
+  EXPECT_TRUE(isGcsFile("gs://bucket/file.txt"));
+}
+
+TEST(GcsUtilTest, setBucketAndKeyFromGcsPath) {
+  std::string bucket, key;
+  auto path = "bucket/file.txt";
+  setBucketAndKeyFromGcsPath(path, bucket, key);
+  EXPECT_EQ(bucket, "bucket");
+  EXPECT_EQ(key, "file.txt");
+}

@@ -28,36 +28,28 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-#include "bolt/core/Config.h"
+#pragma once
 
-#include <fstream>
+#include <functional>
+#include <memory>
+#include <string>
 
-DEFINE_string(gcs_config, "", "Path of GCS config file");
-namespace bytedance::bolt {
-
-// From presto-cpp
-std::shared_ptr<Config> readConfig(const std::string& filePath) {
-  std::ifstream configFile(filePath);
-  if (!configFile.is_open()) {
-    throw std::runtime_error(
-        fmt::format("Couldn't open config file {} for reading.", filePath));
-  }
-
-  std::unordered_map<std::string, std::string> properties;
-  std::string line;
-  while (getline(configFile, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(), isspace), line.end());
-    if (line[0] == '#' || line.empty()) {
-      continue;
-    }
-    auto delimiterPos = line.find('=');
-    auto name = line.substr(0, delimiterPos);
-    auto value = line.substr(delimiterPos + 1);
-    properties.emplace(name, value);
-  }
-
-  return std::make_shared<bytedance::bolt::core::MemConfig>(properties);
+namespace bytedance::bolt::connector::hive {
+class HiveConfig;
 }
 
-} // namespace bytedance::bolt
+namespace bytedance::bolt::filesystems {
+class GcsOAuthCredentialsProvider;
+
+// Register the GCS filesystem.
+void registerGcsFileSystem();
+
+using GcsOAuthCredentialsProviderFactory =
+    std::function<std::shared_ptr<GcsOAuthCredentialsProvider>(
+        const std::shared_ptr<connector::hive::HiveConfig>& hiveConfig)>;
+
+void registerGcsOAuthCredentialsProvider(
+    const std::string& providerName,
+    const GcsOAuthCredentialsProviderFactory& factory);
+
+} // namespace bytedance::bolt::filesystems

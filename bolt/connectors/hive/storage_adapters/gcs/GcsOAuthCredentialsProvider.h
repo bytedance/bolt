@@ -28,23 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
-namespace bytedance::bolt {
+#pragma once
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& code) {
-  using ::google::cloud::StatusCode;
+#include <google/cloud/storage/oauth2/credentials.h>
 
-  switch (code) {
-    case StatusCode::kNotFound:
-      return "Resource not found";
-    case StatusCode::kPermissionDenied:
-      return "Access denied";
-    case StatusCode::kUnavailable:
-      return "Service unavailable";
+namespace bytedance::bolt::filesystems {
 
-    default:
-      return "Unknown error";
-  }
-}
+namespace gcs = ::google::cloud::storage;
 
-} // namespace bytedance::bolt
+/// Interface for providing OAuth2 credentials for Google Cloud Storage (GCS).
+/// Implementations should return a GCS OAuth2 credential used for creating the
+/// GCS client for a specific bucket via `getCredentials`.
+class GcsOAuthCredentialsProvider {
+ public:
+  virtual ~GcsOAuthCredentialsProvider() = default;
+
+  virtual std::shared_ptr<gcs::oauth2::Credentials> getCredentials(
+      const std::string& bucket) = 0;
+};
+
+} // namespace bytedance::bolt::filesystems

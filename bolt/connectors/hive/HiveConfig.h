@@ -109,14 +109,18 @@ class HiveConfig {
   /// The GCS storage scheme, https for default credentials.
   static constexpr const char* kGcsScheme = "hive.gcs.scheme";
 
-  /// The GCS service account configuration as json string
-  static constexpr const char* kGcsCredentials = "hive.gcs.credentials";
+  /// The GCS service account configuration JSON key file.
+  static constexpr const char* kGcsCredentialsPath =
+      "hive.gcs.json-key-file-path";
 
   /// The GCS maximum retry counter of transient errors.
   static constexpr const char* kGcsMaxRetryCount = "hive.gcs.max-retry-count";
 
   /// The GCS maximum time allowed to retry transient errors.
   static constexpr const char* kGcsMaxRetryTime = "hive.gcs.max-retry-time";
+
+  static constexpr const char* kGcsAuthAccessTokenProvider =
+      "hive.gcs.auth.access-token-provider";
 
   /// Maps table field names to file field names using names, not indices.
   // TODO: remove hive_orc_use_column_names since it doesn't exist in presto,
@@ -263,11 +267,13 @@ class HiveConfig {
 
   std::string gcsScheme() const;
 
-  std::string gcsCredentials() const;
+  std::string gcsCredentialsPath() const;
 
   std::optional<int> gcsMaxRetryCount() const;
 
   std::optional<std::string> gcsMaxRetryTime() const;
+
+  std::optional<std::string> gcsAuthAccessTokenProvider() const;
 
   bool isOrcUseColumnNames(const config::ConfigBase* session) const;
   bool isParquetUseColumnNames(const config::ConfigBase* session) const;

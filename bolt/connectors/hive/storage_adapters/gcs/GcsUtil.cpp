@@ -27,19 +27,44 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-using namespace bytedance::bolt;
+namespace bytedance::bolt {
 
-// This benchmark measures the throughput of an GCS compatible FileSystem for
-// various ReadFile APIs. The output helps us understand the maximum possible
-// gains for queries. Example: If a single thread requires reading 1GB of data
-// and the IO throughput is 100 MBps, then it takes 10 seconds to just read the
-// data.
-int main(int argc, char** argv) {
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  GCSReadBenchmark bm;
-  bm.initialize();
-  bm.run();
+std::string getErrorStringFromGcsError(const google::cloud::StatusCode& code) {
+  using ::google::cloud::StatusCode;
+
+  switch (code) {
+    case StatusCode::kNotFound:
+      return "Resource not found";
+    case StatusCode::kPermissionDenied:
+      return "Access denied";
+    case StatusCode::kUnavailable:
+      return "Service unavailable";
+
+    default:
+      return "Unknown error";
+  }
 }
+
+void checkGcsStatus(
+    const google::cloud::Status outcome,
+    const std::string_view& errorMsgPrefix,
+    const std::string& bucket,
+    const std::string& key) {
+  if (!outcome.ok()) {
+    const auto errMsg = fmt::format(
+        "{} due to: Path:'{}', SDK Error Type:{}, GCS Status Code:{},  Message:'{}'",
+        errorMsgPrefix,
+        gcsURI(bucket, key),
+        outcome.error_info().domain(),
+        getErrorStringFromGcsError(outcome.code()),
+        outcome.message());
+    if (outcome.code() == google::cloud::StatusCode::kNotFound) {
+      BOLT_FILE_NOT_FOUND_ERROR(errMsg);
+    }
+    BOLT_FAIL(errMsg);
+  }
+}
+
+} // namespace bytedance::bolt
