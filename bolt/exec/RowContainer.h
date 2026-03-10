@@ -354,7 +354,7 @@ class RowContainer {
       auto mask = rowColumn.nullMask();
 
       for (auto r = 0; r < size; ++r) {
-        storeWithNulls<Kind>(decoded, r, rows[r], off, nullByte, mask);
+        storeWithNulls<Kind>(decoded, r, rows[r], off, nullByte, mask, column);
       }
     }
   }
@@ -397,10 +397,15 @@ class RowContainer {
   /// Copies the values at 'col' into 'result' (starting at 'resultOffset')
   /// for the 'numRows' rows pointed to by 'rows'. If a 'row' is null, sets
   /// corresponding row in 'result' to null.
+  /// @param hasNulls indicates whether the 'col' column contains null
+  /// values. If 'hasNulls' is false, a null-free optimization will be
+  /// applied. It is the caller's responsibility to ensure this flag is set
+  /// correctly.
   static void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       int32_t numRows,
       RowColumn col,
+      bool hasNulls,
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false);
@@ -408,13 +413,18 @@ class RowContainer {
   /// Copies the values at 'col' into 'result' for the 'numRows' rows pointed to
   /// by 'rows'. If an entry in 'rows' is null, sets corresponding row in
   /// 'result' to null.
+  /// @param hasNulls indicates whether the 'col' column contains null
+  /// values. If 'hasNulls' is false, a null-free optimization will be
+  /// applied. It is the caller's responsibility to ensure this flag is set
+  /// correctly.
   static void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       int32_t numRows,
       RowColumn col,
+      bool hasNulls,
       const VectorPtr& result,
       bool exactSize = false) {
-    extractColumn(rows, numRows, col, 0, result, exactSize);
+    extractColumn(rows, numRows, col, hasNulls, 0, result, exactSize);
   }
 
   /// Copies the values from the array pointed to by 'rows' at 'col' into
@@ -423,10 +433,15 @@ class RowContainer {
   /// 'result' to null. The positions in 'rowNumbers' array can repeat and also
   /// appear out of order. If rowNumbers has a negative value, then the
   /// corresponding row in 'result' is set to null.
+  /// @param hasNulls indicates whether the 'col' column contains null
+  /// values. If 'hasNulls' is false, a null-free optimization will be
+  /// applied. It is the caller's responsibility to ensure this flag is set
+  /// correctly.
   static void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       folly::Range<const vector_size_t*> rowNumbers,
       RowColumn col,
+      bool hasNulls,
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false);
@@ -448,7 +463,13 @@ class RowContainer {
       int32_t columnIndex,
       const VectorPtr& result,
       bool exactSize = false) {
-    extractColumn(rows, numRows, columnAt(columnIndex), result, exactSize);
+    extractColumn(
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        columnHasNulls(columnIndex),
+        result,
+        exactSize);
   }
 
   /// Copies the values at 'columnIndex' into 'result' (starting at
@@ -462,7 +483,13 @@ class RowContainer {
       const VectorPtr& result,
       bool exactSize = false) {
     extractColumn(
-        rows, numRows, columnAt(columnIndex), resultOffset, result, exactSize);
+        rows,
+        numRows,
+        columnAt(columnIndex),
+        columnHasNulls(columnIndex),
+        resultOffset,
+        result,
+        exactSize);
   }
 
   /// Copies the values at 'columnIndex' at positions in the 'rowNumbers' array
@@ -483,6 +510,7 @@ class RowContainer {
         rows,
         rowNumbers,
         columnAt(columnIndex),
+        columnHasNulls(columnIndex),
         resultOffset,
         result,
         exactSize);
@@ -792,6 +820,11 @@ class RowContainer {
     return keyIndices_;
   }
 
+  /// Returns true if specified column may have nulls, false otherwise.
+  inline bool columnHasNulls(int32_t columnIndex) const {
+    return columnHasNulls_[columnIndex];
+  }
+
   const std::vector<Accumulator>& accumulators() const {
     return accumulators_;
   }
@@ -907,6 +940,7 @@ class RowContainer {
       folly::Range<const vector_size_t*> rowNumbers,
       int32_t numRows,
       RowColumn column,
+      bool hasNulls,
       int32_t resultOffset,
       const VectorPtr& result,
       bool exactSize) {
@@ -916,12 +950,20 @@ class RowContainer {
           rowNumbers,
           rowNumbers.size(),
           column,
+          hasNulls,
           resultOffset,
           result,
           exactSize);
     } else {
       extractColumnTypedInternal<false, Kind>(
-          rows, rowNumbers, numRows, column, resultOffset, result, exactSize);
+          rows,
+          rowNumbers,
+          numRows,
+          column,
+          hasNulls,
+          resultOffset,
+          result,
+          exactSize);
     }
   }
 
@@ -931,6 +973,7 @@ class RowContainer {
       folly::Range<const vector_size_t*> rowNumbers,
       int32_t numRows,
       RowColumn column,
+      bool hasNulls,
       int32_t resultOffset,
       const VectorPtr& result,
       bool exactSize) {
@@ -948,7 +991,7 @@ class RowContainer {
     auto* flatResult = result->as<FlatVector<T>>();
     auto nullMask = column.nullMask();
     auto offset = column.offset();
-    if (!nullMask) {
+    if (!nullMask || !hasNulls) {
       extractValuesNoNulls<useRowNumbers, T>(
           rows,
           rowNumbers,
@@ -987,7 +1030,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte,
-      uint8_t nullMask) {
+      uint8_t nullMask,
+      int32_t column) {
     using T = typename TypeTraits<Kind>::NativeType;
     if (decoded.isNullAt(index)) {
       row[nullByte] |= nullMask;
@@ -1007,6 +1051,7 @@ class RowContainer {
         // null. This is an error with valgrind/asan.
         *reinterpret_cast<T*>(row + offset) = T();
       }
+      updateColumnHasNulls(column, true);
       return;
     }
     if constexpr (std::is_same_v<T, StringView>) {
@@ -1274,7 +1319,8 @@ class RowContainer {
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte = 0,
-      uint8_t nullMask = 0);
+      uint8_t nullMask = 0,
+      int32_t column = 0);
 
   template <bool useRowNumbers>
   static void extractComplexType(
@@ -1383,12 +1429,20 @@ class RowContainer {
   // Free any aggregates associated with the 'rows'.
   void freeAggregates(folly::Range<char**> rows);
 
+  // Updates the specific column's columnHasNulls_ flag if 'hasNulls' is true.
+  // 'columnHasNulls_' is false by default.
+  inline void updateColumnHasNulls(int32_t columnIndex, bool hasNulls) {
+    columnHasNulls_[columnIndex] = columnHasNulls_[columnIndex] || hasNulls;
+  }
+
   const bool checkFree_ = false;
 
   const std::vector<TypePtr> keyTypes_;
   std::vector<column_index_t> keyIndices_;
   const bool nullableKeys_;
   const bool isJoinBuild_;
+
+  std::vector<bool> columnHasNulls_;
 
   // Indicates if we can add new row to this row container. It is set to false
   // after user calls 'getRowPartitions()' to create 'rowPartitions' object for
@@ -1461,8 +1515,9 @@ inline void RowContainer::storeWithNulls<TypeKind::ROW>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(decoded, index, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1481,8 +1536,9 @@ inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(decoded, index, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1501,8 +1557,9 @@ inline void RowContainer::storeWithNulls<TypeKind::MAP>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+    uint8_t nullMask,
+    int32_t column) {
+  storeComplexType(decoded, index, row, offset, nullByte, nullMask, column);
 }
 
 template <>
@@ -1521,12 +1578,14 @@ inline void RowContainer::storeWithNulls<TypeKind::HUGEINT>(
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
+    uint8_t nullMask,
+    int32_t column) {
   if (decoded.isNullAt(index)) {
     row[nullByte] |= nullMask;
     // Do not leave an uninitialized value in the case of a
     // null. This is an error with valgrind/asan.
     memset(row + offset, 0, sizeof(int128_t));
+    updateColumnHasNulls(column, true);
     return;
   }
   HugeInt::serialize(decoded.valueAt<int128_t>(index), row + offset);
@@ -1547,6 +1606,7 @@ inline void RowContainer::extractColumnTyped<TypeKind::OPAQUE>(
     folly::Range<const vector_size_t*> /*rowNumbers*/,
     int32_t /*numRows*/,
     RowColumn /*column*/,
+    bool /*hasNulls*/,
     int32_t /*resultOffset*/,
     const VectorPtr& /*result*/,
     bool exactSize /*exactSize*/) {
@@ -1557,6 +1617,7 @@ inline void RowContainer::extractColumn(
     const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
     int32_t numRows,
     RowColumn column,
+    bool hasNulls,
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
@@ -1567,6 +1628,7 @@ inline void RowContainer::extractColumn(
       {},
       numRows,
       column,
+      hasNulls,
       resultOffset,
       result,
       exactSize);
@@ -1576,6 +1638,7 @@ inline void RowContainer::extractColumn(
     const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
     folly::Range<const vector_size_t*> rowNumbers,
     RowColumn column,
+    bool hasNulls,
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
@@ -1586,6 +1649,7 @@ inline void RowContainer::extractColumn(
       rowNumbers,
       rowNumbers.size(),
       column,
+      hasNulls,
       resultOffset,
       result,
       exactSize);

@@ -56,6 +56,7 @@ void WindowPartition::extractColumn(
       partition_.data(),
       rowNumbers,
       columns_[columnIndex],
+      data_->columnHasNulls(inputMapping_[columnIndex]),
       resultOffset,
       result,
       exactSize);
@@ -72,6 +73,7 @@ void WindowPartition::extractColumn(
       partition_.data() + partitionOffset - offsetInPartition(),
       numRows,
       columns_[columnIndex],
+      data_->columnHasNulls(inputMapping_[columnIndex]),
       resultOffset,
       result,
       exactSize);
@@ -371,6 +373,7 @@ void WindowPartitionImpl<T>::extractColumn(
         partition_.data(),
         rowNumbers,
         columns_[columnIndex],
+        data_->columnHasNulls(inputMapping_[columnIndex]),
         resultOffset,
         result,
         exactSize);
@@ -400,6 +403,7 @@ void WindowPartitionImpl<T>::extractColumn(
         partition_.data() + partitionOffset - offsetInPartition(),
         numRows,
         columns_[columnIndex],
+        data_->columnHasNulls(inputMapping_[columnIndex]),
         resultOffset,
         result,
         exactSize);

@@ -98,8 +98,7 @@ void extractColumns(
       child = BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
     }
     child->resize(rows.size());
-    table->rows()->extractColumn(
-        rows.data(), rows.size(), projection.inputChannel, child);
+    table->extractColumn(rows, projection.inputChannel, child);
   }
 }
 
@@ -1334,16 +1333,14 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
   if (!rows.hasSelections()) {
     return;
   }
-  auto* tableRows = table_->rows();
-  BOLT_CHECK(tableRows, "Should not move rows in hash joins");
+  BOLT_CHECK(table_->rows(), "Should not move rows in hash joins");
   char* data[kBatchSize];
   while (auto numRows = iterator(data, kBatchSize)) {
     filterTableInput_->resize(numRows);
     filterTableInputRows_.resizeFill(numRows, true);
     for (auto& projection : filterTableProjections_) {
-      tableRows->extractColumn(
-          data,
-          numRows,
+      table_->extractColumn(
+          folly::Range<char* const*>(data, numRows),
           projection.inputChannel,
           filterTableInput_->childAt(projection.outputChannel));
     }

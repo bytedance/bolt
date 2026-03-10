@@ -256,6 +256,7 @@ RowContainer::RowContainer(
       ++nullOffset;
     }
     keyIndices_.emplace_back(keyIdx++);
+    columnHasNulls_.push_back(false);
   }
   // Make offset at least sizeof pointer so that there is space for a
   // free list next pointer below the bit at 'freeFlagOffset_'.
@@ -275,6 +276,7 @@ RowContainer::RowContainer(
     nullOffsets_.push_back(nullOffset);
     ++nullOffset;
     isVariableWidth |= !type->isFixedWidth();
+    columnHasNulls_.push_back(false);
   }
   if (hasProbedFlag) {
     nullOffsets_.push_back(nullOffset);
@@ -550,7 +552,8 @@ void RowContainer::store(
         row,
         rowColumn.offset(),
         rowColumn.nullByte(),
-        rowColumn.nullMask());
+        rowColumn.nullMask(),
+        column);
   }
 }
 
@@ -833,11 +836,13 @@ void RowContainer::storeComplexType(
     char* row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
+    uint8_t nullMask,
+    int32_t column) {
   if (decoded.isNullAt(index)) {
     BOLT_DCHECK(nullMask);
     row[nullByte] |= nullMask;
     valueAt<std::string_view>(row, offset) = std::string_view();
+    updateColumnHasNulls(column, true);
     return;
   }
   // RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
