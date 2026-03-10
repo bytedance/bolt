@@ -27,13 +27,13 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #pragma once
 
 #include "bolt/common/file/FileSystems.h"
-namespace bytedance::bolt::filesystems::abfs {
 
-/// Implementation of the ABS (Azure Blob Storage) filesystem and file
+namespace bytedance::bolt::filesystems {
+
+/// Implementation of the ABFS (Azure Blob File Storage) filesystem and file
 /// interface. We provide a registration method for reading and writing files so
 /// that the appropriate type of file can be constructed based on a filename.
 /// The supported schema is `abfs(s)://` to align with the valid scheme
@@ -48,8 +48,7 @@ namespace bytedance::bolt::filesystems::abfs {
 /// https://learn.microsoft.com/en-us/azure/databricks/storage/azure-storage.
 class AbfsFileSystem : public FileSystem {
  public:
-  explicit AbfsFileSystem(
-      const std::shared_ptr<const config::ConfigBase>& config);
+  explicit AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config);
 
   std::string name() const override;
 
@@ -59,9 +58,7 @@ class AbfsFileSystem : public FileSystem {
 
   std::unique_ptr<WriteFile> openFileForWrite(
       std::string_view path,
-      const FileOptions& options = {}) override {
-    BOLT_UNSUPPORTED("write for abfs not implemented");
-  }
+      const FileOptions& options = {}) override;
 
   void rename(
       std::string_view path,
@@ -89,11 +86,6 @@ class AbfsFileSystem : public FileSystem {
   void rmdir(std::string_view path) override {
     BOLT_UNSUPPORTED("rmdir for abfs not implemented");
   }
-
- protected:
-  class Impl;
-  std::shared_ptr<Impl> impl_;
 };
 
-void registerAbfsFileSystem();
-} // namespace bytedance::bolt::filesystems::abfs
+} // namespace bytedance::bolt::filesystems

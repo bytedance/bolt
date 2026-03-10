@@ -28,36 +28,41 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-#include "bolt/core/Config.h"
+#pragma once
 
-#include <fstream>
+#include <google/cloud/storage/client.h>
+#include "bolt/common/file/File.h"
 
-DEFINE_string(gcs_config, "", "Path of GCS config file");
-namespace bytedance::bolt {
+namespace bytedance::bolt::filesystems {
 
-// From presto-cpp
-std::shared_ptr<Config> readConfig(const std::string& filePath) {
-  std::ifstream configFile(filePath);
-  if (!configFile.is_open()) {
-    throw std::runtime_error(
-        fmt::format("Couldn't open config file {} for reading.", filePath));
-  }
+/**
+ * Implementation of gcs write file.
+ */
+class GcsWriteFile : public WriteFile {
+ public:
+  GcsWriteFile(
+      const std::string& path,
+      std::shared_ptr<::google::cloud::storage::Client> client);
 
-  std::unordered_map<std::string, std::string> properties;
-  std::string line;
-  while (getline(configFile, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(), isspace), line.end());
-    if (line[0] == '#' || line.empty()) {
-      continue;
-    }
-    auto delimiterPos = line.find('=');
-    auto name = line.substr(0, delimiterPos);
-    auto value = line.substr(delimiterPos + 1);
-    properties.emplace(name, value);
-  }
+  ~GcsWriteFile() override;
 
-  return std::make_shared<bytedance::bolt::core::MemConfig>(properties);
-}
+  void initialize();
 
-} // namespace bytedance::bolt
+  /// Writes the data by append mode.
+  void append(std::string_view data) override;
+
+  /// Flushes the data.
+  void flush() override;
+
+  /// Closes the file.
+  void close() override;
+
+  /// Gets the file size.
+  uint64_t size() const override;
+
+ protected:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+} // namespace bytedance::bolt::filesystems

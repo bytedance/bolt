@@ -28,23 +28,29 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
-namespace bytedance::bolt {
+#pragma once
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& code) {
-  using ::google::cloud::StatusCode;
+#include "bolt/common/config/Config.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureBlobClient.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
 
-  switch (code) {
-    case StatusCode::kNotFound:
-      return "Resource not found";
-    case StatusCode::kPermissionDenied:
-      return "Access denied";
-    case StatusCode::kUnavailable:
-      return "Service unavailable";
+namespace bytedance::bolt::filesystems {
 
-    default:
-      return "Unknown error";
-  }
-}
+// Provider interface for creating Azure Blob and Data Lake clients.
+class AzureClientProvider {
+ public:
+  virtual ~AzureClientProvider() = default;
 
-} // namespace bytedance::bolt
+  // Creates AzureBlobClient for file read operations.
+  virtual std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
+
+  // Creates AzureDataLakeFileClient for file write operations.
+  virtual std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
+};
+
+} // namespace bytedance::bolt::filesystems

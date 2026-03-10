@@ -28,40 +28,28 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#pragma once
 
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
+#include <functional>
+#include <memory>
+#include <string>
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+namespace bytedance::bolt::connector::hive {
+class HiveConfig;
+}
 
 namespace bytedance::bolt::filesystems {
+class GcsOAuthCredentialsProvider;
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
-}
+// Register the GCS filesystem.
+void registerGcsFileSystem();
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
-}
+using GcsOAuthCredentialsProviderFactory =
+    std::function<std::shared_ptr<GcsOAuthCredentialsProvider>(
+        const std::shared_ptr<connector::hive::HiveConfig>& hiveConfig)>;
 
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
-}
+void registerGcsOAuthCredentialsProvider(
+    const std::string& providerName,
+    const GcsOAuthCredentialsProviderFactory& factory);
 
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
-}
 } // namespace bytedance::bolt::filesystems

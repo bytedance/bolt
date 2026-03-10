@@ -28,40 +28,30 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
-
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
-
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+#include "bolt/common/config/Config.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
 
 namespace bytedance::bolt::filesystems {
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
+std::vector<CacheKey> extractCacheKeyFromConfig(
+    const config::ConfigBase& config) {
+  std::vector<CacheKey> cacheKeys;
+  constexpr std::string_view authTypePrefix{kAzureAccountAuthType};
+  for (const auto& [key, value] : config.rawConfigs()) {
+    if (key.find(authTypePrefix) == 0) {
+      // Extract the accountName after "fs.azure.account.auth.type.".
+      auto remaining = std::string_view(key).substr(authTypePrefix.size() + 1);
+      auto dot = remaining.find(".");
+      BOLT_USER_CHECK_NE(
+          dot,
+          std::string_view::npos,
+          "Invalid Azure account auth type key: {}",
+          key);
+      cacheKeys.emplace_back(CacheKey{remaining.substr(0, dot), value});
+    }
+  }
+  return cacheKeys;
 }
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
-}
-
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
-}
-
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
-}
 } // namespace bytedance::bolt::filesystems

@@ -27,40 +27,44 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
-#pragma once
+namespace bytedance::bolt {
 
-#include <functional>
-#include <memory>
-#include <string>
+std::string getErrorStringFromGcsError(const google::cloud::StatusCode& code) {
+  using ::google::cloud::StatusCode;
 
-namespace bytedance::bolt::config {
+  switch (code) {
+    case StatusCode::kNotFound:
+      return "Resource not found";
+    case StatusCode::kPermissionDenied:
+      return "Access denied";
+    case StatusCode::kUnavailable:
+      return "Service unavailable";
 
-class ConfigBase;
+    default:
+      return "Unknown error";
+  }
+}
 
-} // namespace bytedance::bolt::config
+void checkGcsStatus(
+    const google::cloud::Status outcome,
+    const std::string_view& errorMsgPrefix,
+    const std::string& bucket,
+    const std::string& key) {
+  if (!outcome.ok()) {
+    const auto errMsg = fmt::format(
+        "{} due to: Path:'{}', SDK Error Type:{}, GCS Status Code:{},  Message:'{}'",
+        errorMsgPrefix,
+        gcsURI(bucket, key),
+        outcome.error_info().domain(),
+        getErrorStringFromGcsError(outcome.code()),
+        outcome.message());
+    if (outcome.code() == google::cloud::StatusCode::kNotFound) {
+      BOLT_FILE_NOT_FOUND_ERROR(errMsg);
+    }
+    BOLT_FAIL(errMsg);
+  }
+}
 
-namespace bytedance::bolt::filesystems {
-
-class AzureClientProvider;
-class AbfsPath;
-
-using AzureClientProviderFactory =
-    std::function<std::unique_ptr<AzureClientProvider>(
-        const std::string& account)>;
-
-// Register the ABFS filesystem.
-void registerAbfsFileSystem();
-
-/// Register the AzureClientProvider implementation in `AzureClientProviders`
-/// based on the configuration.
-void registerAzureClientProvider(const config::ConfigBase& config);
-
-/// Registers a factory for creating AzureClientProvider instances.
-/// Any existing factory registered for the specified account will be
-/// overwritten by recalling this method with the same account name.
-void registerAzureClientProviderFactory(
-    const std::string& account,
-    const AzureClientProviderFactory& factory);
-
-} // namespace bytedance::bolt::filesystems
+} // namespace bytedance::bolt

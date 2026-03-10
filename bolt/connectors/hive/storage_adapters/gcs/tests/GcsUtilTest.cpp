@@ -28,39 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
-#include <functional>
-#include <memory>
-#include <string>
+#include "gtest/gtest.h"
 
-namespace bytedance::bolt::config {
+using namespace bytedance::bolt;
 
-class ConfigBase;
+TEST(GcsUtilTest, isGcsFile) {
+  EXPECT_FALSE(isGcsFile("gs:"));
+  EXPECT_FALSE(isGcsFile("gs::/bucket"));
+  EXPECT_FALSE(isGcsFile("gs:/bucket"));
+  EXPECT_TRUE(isGcsFile("gs://bucket/file.txt"));
+}
 
-} // namespace bytedance::bolt::config
-
-namespace bytedance::bolt::filesystems {
-
-class AzureClientProvider;
-class AbfsPath;
-
-using AzureClientProviderFactory =
-    std::function<std::unique_ptr<AzureClientProvider>(
-        const std::string& account)>;
-
-// Register the ABFS filesystem.
-void registerAbfsFileSystem();
-
-/// Register the AzureClientProvider implementation in `AzureClientProviders`
-/// based on the configuration.
-void registerAzureClientProvider(const config::ConfigBase& config);
-
-/// Registers a factory for creating AzureClientProvider instances.
-/// Any existing factory registered for the specified account will be
-/// overwritten by recalling this method with the same account name.
-void registerAzureClientProviderFactory(
-    const std::string& account,
-    const AzureClientProviderFactory& factory);
-
-} // namespace bytedance::bolt::filesystems
+TEST(GcsUtilTest, setBucketAndKeyFromGcsPath) {
+  std::string bucket, key;
+  auto path = "bucket/file.txt";
+  setBucketAndKeyFromGcsPath(path, bucket, key);
+  EXPECT_EQ(bucket, "bucket");
+  EXPECT_EQ(key, "file.txt");
+}
