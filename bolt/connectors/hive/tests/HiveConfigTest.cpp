@@ -57,7 +57,7 @@ TEST(HiveConfigTest, defaultConfig) {
   ASSERT_EQ(hiveConfig.s3IAMRoleSessionName(), "bolt-session");
   ASSERT_EQ(hiveConfig.gcsEndpoint(), "");
   ASSERT_EQ(hiveConfig.gcsScheme(), "https");
-  ASSERT_EQ(hiveConfig.gcsCredentials(), "");
+  ASSERT_EQ(hiveConfig.gcsCredentialsPath(), "");
   ASSERT_EQ(hiveConfig.isOrcUseColumnNames(emptySession.get()), false);
   ASSERT_EQ(hiveConfig.isParquetUseColumnNames(emptySession.get()), false);
   ASSERT_EQ(
@@ -97,7 +97,7 @@ TEST(HiveConfigTest, overrideConfig) {
       {HiveConfig::kS3IamRoleSessionName, "bolt"},
       {HiveConfig::kGcsEndpoint, "hey"},
       {HiveConfig::kGcsScheme, "http"},
-      {HiveConfig::kGcsCredentials, "hey"},
+      {HiveConfig::kGcsCredentialsPath, "hey"},
       {HiveConfig::kOrcUseColumnNames, "true"},
       {HiveConfig::kFileColumnNamesReadAsLowerCase, "true"},
       {HiveConfig::kParquetUseColumnNames, "true"},
@@ -130,7 +130,7 @@ TEST(HiveConfigTest, overrideConfig) {
   ASSERT_EQ(hiveConfig.s3IAMRoleSessionName(), "bolt");
   ASSERT_EQ(hiveConfig.gcsEndpoint(), "hey");
   ASSERT_EQ(hiveConfig.gcsScheme(), "http");
-  ASSERT_EQ(hiveConfig.gcsCredentials(), "hey");
+  ASSERT_EQ(hiveConfig.gcsCredentialsPath(), "hey");
   ASSERT_EQ(hiveConfig.isOrcUseColumnNames(emptySession.get()), true);
   ASSERT_EQ(hiveConfig.isParquetUseColumnNames(emptySession.get()), true);
   ASSERT_EQ(
@@ -183,7 +183,7 @@ TEST(HiveConfigTest, overrideSession) {
   ASSERT_EQ(hiveConfig.s3IAMRoleSessionName(), "bolt-session");
   ASSERT_EQ(hiveConfig.gcsEndpoint(), "");
   ASSERT_EQ(hiveConfig.gcsScheme(), "https");
-  ASSERT_EQ(hiveConfig.gcsCredentials(), "");
+  ASSERT_EQ(hiveConfig.gcsCredentialsPath(), "");
   ASSERT_EQ(hiveConfig.isOrcUseColumnNames(session.get()), true);
   ASSERT_EQ(hiveConfig.isParquetUseColumnNames(session.get()), true);
   ASSERT_EQ(hiveConfig.isFileColumnNamesReadAsLowerCase(session.get()), true);

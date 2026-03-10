@@ -29,61 +29,46 @@
  */
 
 #pragma once
+
 #include <azure/storage/common/storage_exception.hpp>
+#include <fmt/format.h>
+#include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
 
-#include <fmt/format.h>
-#include <regex>
-namespace bytedance::bolt::filesystems::abfs {
+namespace bytedance::bolt::filesystems {
 namespace {
 constexpr std::string_view kAbfsScheme{"abfs://"};
 constexpr std::string_view kAbfssScheme{"abfss://"};
 } // namespace
 
+struct CacheKey {
+  const std::string accountName;
+  const std::string authType;
+
+  CacheKey(std::string_view accountName, std::string_view authType)
+      : accountName(accountName), authType(authType) {}
+};
+
 inline bool isAbfsFile(const std::string_view filename) {
   return filename.find(kAbfsScheme) == 0 || filename.find(kAbfssScheme) == 0;
 }
 
-class AbfsAccount {
- public:
-  explicit AbfsAccount(const std::string path);
-
-  const std::string accountNameWithSuffix() const;
-
-  const std::string scheme() const;
-
-  const std::string accountName() const;
-
-  const std::string endpointSuffix() const;
-
-  const std::string fileSystem() const;
-
-  const std::string filePath() const;
-
-  const std::string credKey() const;
-
-  const std::string connectionString(const std::string accountKey) const;
-
- private:
-  std::string scheme_;
-  std::string accountName_;
-  std::string endpointSuffix_;
-  std::string accountNameWithSuffix_;
-  std::string fileSystem_;
-  std::string filePath_;
-  std::string path_;
-  std::string credKey_;
-};
-
-inline const std::string throwStorageExceptionWithOperationDetails(
+inline std::string throwStorageExceptionWithOperationDetails(
     std::string operation,
     std::string path,
     Azure::Storage::StorageException& error) {
-  BOLT_FAIL(
+  const auto errMsg = fmt::format(
       "Operation '{}' to path '{}' encountered azure storage exception, Details: '{}'.",
       operation,
       path,
       error.what());
+  if (error.StatusCode == Azure::Core::Http::HttpStatusCode::NotFound) {
+    BOLT_FILE_NOT_FOUND_ERROR(errMsg);
+  }
+  BOLT_FAIL(errMsg);
 }
 
-} // namespace bytedance::bolt::filesystems::abfs
+std::vector<CacheKey> extractCacheKeyFromConfig(
+    const config::ConfigBase& config);
+
+} // namespace bytedance::bolt::filesystems

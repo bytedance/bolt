@@ -28,10 +28,47 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
+#include "bolt/connectors/hive/storage_adapters/abfs/tests/MockDataLakeFileClient.h"
+
+#include <filesystem>
+
+#include <azure/storage/files/datalake.hpp>
+
 namespace bytedance::bolt::filesystems {
 
-// Register the GCS filesystem.
-void registerGCSFileSystem();
+void MockDataLakeFileClient::create() {
+  fileStream_ = std::ofstream(
+      filePath_,
+      std::ios_base::out | std::ios_base::binary | std::ios_base::app);
+}
 
+PathProperties MockDataLakeFileClient::getProperties() {
+  if (!std::filesystem::exists(filePath_)) {
+    Azure::Storage::StorageException exp(filePath_ + "doesn't exists");
+    exp.StatusCode = Azure::Core::Http::HttpStatusCode::NotFound;
+    throw exp;
+  }
+  std::ifstream file(filePath_, std::ios::binary | std::ios::ate);
+  uint64_t size = static_cast<uint64_t>(file.tellg());
+  PathProperties ret;
+  ret.FileSize = size;
+  return ret;
+}
+
+void MockDataLakeFileClient::append(
+    const uint8_t* buffer,
+    size_t size,
+    uint64_t offset) {
+  fileStream_.seekp(offset);
+  fileStream_.write(reinterpret_cast<const char*>(buffer), size);
+}
+
+void MockDataLakeFileClient::flush(uint64_t position) {
+  fileStream_.flush();
+}
+
+void MockDataLakeFileClient::close() {
+  fileStream_.flush();
+  fileStream_.close();
+}
 } // namespace bytedance::bolt::filesystems

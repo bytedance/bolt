@@ -25,13 +25,62 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_gcsfile_test GCSFileSystemTest.cpp GCSUtilTest.cpp)
-add_test(bolt_gcsfile_test bolt_gcsfile_test)
+add_executable(bolt_gcs_file_test GcsFileSystemTest.cpp GcsUtilTest.cpp)
+add_test(bolt_gcs_file_test bolt_gcsfile_test)
 target_link_libraries(
-  bolt_gcsfile_test
-  bolt_gcs
-  google-cloud-cpp::storage
+  bolt_gcs_file_test
   bolt_testutils
+  bolt_engine
+  bolt_core
+  bolt_exec_test_lib
+  bolt_dwio_common_exception
+  bolt_exec
+  bolt_gcs
+  bolt_exception
+  bolt_temp_path
+  google-cloud-cpp::storage
+  GTest::gmock
+  GTest::gtest
+  GTest::gtest_main
+)
+
+add_executable(bolt_gcs_insert_test GcsInsertTest.cpp)
+add_test(bolt_gcs_insert_test bolt_gcs_insert_test)
+target_link_libraries(
+  bolt_gcs_insert_test
+  bolt_testutils
+  bolt_engine
+  bolt_file
+  bolt_gcs
+  bolt_exception
+  bolt_hive_config
+  bolt_core
+  bolt_dwio_parquet_reader
+  bolt_dwio_parquet_writer
+  bolt_exec_test_lib
+  bolt_dwio_common_exception
+  bolt_exec
+  GTest::gmock
+  GTest::gtest
+  GTest::gtest_main
+)
+
+add_executable(bolt_gcs_multiendpoints_test GcsMultipleEndpointsTest.cpp)
+add_test(bolt_gcs_multiendpoints_test bolt_gcs_multiendpoints_test)
+target_link_libraries(
+  bolt_gcs_multiendpoints_test
+  bolt_testutils
+  bolt_engine
+  bolt_file
+  bolt_gcs
+  bolt_exception
+  bolt_hive_config
+  bolt_core
+  bolt_exec_test_lib
+  bolt_dwio_parquet_reader
+  bolt_dwio_parquet_writer
+  bolt_dwio_common_exception
+  bolt_exec
   GTest::gmock
   GTest::gtest
   GTest::gtest_main

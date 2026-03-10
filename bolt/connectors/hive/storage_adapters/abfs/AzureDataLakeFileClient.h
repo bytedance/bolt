@@ -28,18 +28,36 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-using namespace bytedance::bolt;
+#pragma once
 
-// This benchmark measures the throughput of an GCS compatible FileSystem for
-// various ReadFile APIs. The output helps us understand the maximum possible
-// gains for queries. Example: If a single thread requires reading 1GB of data
-// and the IO throughput is 100 MBps, then it takes 10 seconds to just read the
-// data.
-int main(int argc, char** argv) {
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  GCSReadBenchmark bm;
-  bm.initialize();
-  bm.run();
+#include <stdint.h>
+#include <cstddef>
+#include <string>
+
+namespace Azure::Storage::Files::DataLake::Models {
+class PathProperties;
 }
+
+namespace bytedance::bolt::filesystems {
+
+// Azurite Simulator does not yet support the DFS endpoint.
+// (For more information, see https://github.com/Azure/Azurite/issues/553 and
+// https://github.com/Azure/Azurite/issues/409).
+// You can find a comparison between DFS and Blob endpoints here:
+// https://github.com/Azure/Azurite/wiki/ADLS-Gen2-Implementation-Guidance
+// To facilitate unit testing of file write scenarios, we define the
+// AzureDatalakeFileClient which can be mocked during testing.
+
+class AzureDataLakeFileClient {
+ public:
+  virtual ~AzureDataLakeFileClient() {}
+
+  virtual void create() = 0;
+  virtual Azure::Storage::Files::DataLake::Models::PathProperties
+  getProperties() = 0;
+  virtual void append(const uint8_t* buffer, size_t size, uint64_t offset) = 0;
+  virtual void flush(uint64_t position) = 0;
+  virtual void close() = 0;
+  virtual std::string getUrl() = 0;
+};
+} // namespace bytedance::bolt::filesystems

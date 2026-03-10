@@ -28,40 +28,24 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#pragma once
 
-#include <fmt/format.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
-#include <glog/logging.h>
-
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+#include <azure/storage/blobs/blob_client.hpp>
 
 namespace bytedance::bolt::filesystems {
 
-AbfsFileSystem::AbfsFileSystem(std::shared_ptr<const config::ConfigBase> config)
-    : FileSystem(config) {
-  BOLT_CHECK_NOT_NULL(config.get());
-}
+// Interface for Azure Blob Storage client operations.
+class AzureBlobClient {
+ public:
+  virtual ~AzureBlobClient() {}
 
-std::string AbfsFileSystem::name() const {
-  return "ABFS";
-}
+  virtual Azure::Response<Azure::Storage::Blobs::Models::BlobProperties>
+  getProperties() = 0;
 
-std::unique_ptr<ReadFile> AbfsFileSystem::openFileForRead(
-    std::string_view path,
-    const FileOptions& options) {
-  auto abfsfile = std::make_unique<AbfsReadFile>(path, *config_);
-  abfsfile->initialize();
-  return abfsfile;
-}
+  virtual Azure::Response<Azure::Storage::Blobs::Models::DownloadBlobResult>
+  download(const Azure::Storage::Blobs::DownloadBlobOptions& options) = 0;
 
-std::unique_ptr<WriteFile> AbfsFileSystem::openFileForWrite(
-    std::string_view path,
-    const FileOptions& /*unused*/) {
-  return std::make_unique<AbfsWriteFile>(path, *config_);
-}
+  virtual std::string getUrl() = 0;
+};
+
 } // namespace bytedance::bolt::filesystems

@@ -27,49 +27,56 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #pragma once
 
 #include "bolt/common/file/File.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
 
 namespace bytedance::bolt::config {
 class ConfigBase;
 }
 
 namespace bytedance::bolt::filesystems {
-class AbfsReadFile final : public ReadFile {
+
+/// We are using the DFS (Data Lake Storage) endpoint for Azure Blob File write
+/// operations because the DFS endpoint is designed to be compatible with file
+/// operation semantics, such as `Append` to a file and file `Flush` operations.
+/// The legacy Blob endpoint can only be used for blob level append and flush
+/// operations. When using the Blob endpoint, we would need to manually manage
+/// the creation, appending, and committing of file-related blocks.
+
+/// Implementation of abfs write file. Nothing written to the file should be
+/// read back until it is closed.
+class AbfsWriteFile : public WriteFile {
  public:
-  explicit AbfsReadFile(
+  constexpr static uint64_t kNaturalWriteSize = 8 << 20; // 8M
+
+  /// @param path The file path to write.
+  /// @param connectStr The connection string used to auth the storage account.
+  AbfsWriteFile(std::string_view path, const config::ConfigBase& config);
+
+  /// @param path The file path to write.
+  /// @param client The AdlsFileClient.
+  AbfsWriteFile(
       std::string_view path,
-      const config::ConfigBase& config);
+      std::unique_ptr<AzureDataLakeFileClient>& client);
 
-  void initialize();
+  ~AbfsWriteFile();
 
-  std::string_view pread(uint64_t offset, uint64_t length, void* buf)
-      const final;
+  /// Get the file size.
+  uint64_t size() const override;
 
-  std::string pread(uint64_t offset, uint64_t length) const final;
+  /// Flush the data.
+  void flush() override;
 
-  uint64_t preadv(
-      uint64_t offset,
-      const std::vector<folly::Range<char*>>& buffers) const final;
+  /// Write the data by append mode.
+  void append(std::string_view data) override;
 
-  void preadv(
-      folly::Range<const common::Region*> regions,
-      folly::Range<folly::IOBuf*> iobufs) const final;
-
-  uint64_t size() const final;
-
-  uint64_t memoryUsage() const final;
-
-  bool shouldCoalesce() const final;
-
-  std::string getName() const final;
-
-  uint64_t getNaturalReadSize() const final;
+  /// Close the file.
+  void close() override;
 
  protected:
   class Impl;
-  std::shared_ptr<Impl> impl_;
+  std::unique_ptr<Impl> impl_;
 };
 } // namespace bytedance::bolt::filesystems
