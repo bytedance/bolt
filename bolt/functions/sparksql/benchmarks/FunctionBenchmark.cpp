@@ -28,22 +28,39 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
+#include <folly/Benchmark.h>
+#include <folly/init/Init.h>
+#include <functions/FunctionRegistry.h>
 
-#include "gtest/gtest.h"
+#include "bolt/benchmarks/ExpressionBenchmarkBuilder.h"
+#include "bolt/functions/sparksql/registration/Register.h"
+
 using namespace bytedance::bolt;
+class FunctionBenchmark : public functions::test::FunctionBenchmarkBase {
+ public:
+  FunctionBenchmark() : FunctionBenchmarkBase() {
+    functions::sparksql::registerFunctions("");
+  }
 
-TEST(GCSUtilTest, isGCSFile) {
-  EXPECT_FALSE(isGCSFile("gs:"));
-  EXPECT_FALSE(isGCSFile("gs::/bucket"));
-  EXPECT_FALSE(isGCSFile("gs:/bucket"));
-  EXPECT_TRUE(isGCSFile("gs://bucket/file.txt"));
+  void run() {
+    volatile int total = 0;
+    for (auto i = 0; i < 1000; i++) {
+      auto functions = getFunctionSignatures();
+      auto size = functions.size();
+      total += size;
+    }
+    std::cout << total << std::endl;
+  }
+};
+
+BENCHMARK(get_function_signatures_1000) {
+  FunctionBenchmark benchmark;
+  benchmark.run();
 }
 
-TEST(GCSUtilTest, setBucketAndKeyFromGCSPath) {
-  std::string bucket, key;
-  auto path = "bucket/file.txt";
-  setBucketAndKeyFromGCSPath(path, bucket, key);
-  EXPECT_EQ(bucket, "bucket");
-  EXPECT_EQ(key, "file.txt");
+int main(int argc, char** argv) {
+  folly::Init init(&argc, &argv);
+  memory::MemoryManager::initialize(memory::MemoryManager::Options{});
+  folly::runBenchmarks();
+  return 0;
 }

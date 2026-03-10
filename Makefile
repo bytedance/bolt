@@ -223,13 +223,16 @@ _compile_db: conan_install
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
 	   --build=missing $${ALL_CONAN_OPTIONS} && \
 	cd - && \
-	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target generate_parquet_thrift
+	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target generate_parquet_thrift && \
+	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target bolt_dwio_dwrf_proto
+
 
 compile_db_all:
 	$(MAKE) _compile_db \
 	BUILD_TYPE=Release \
 	BOLT_BUILD_BENCHMARKS="ON" \
-	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_s3=True -o bolt/*:enable_gcs=True" \
+	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_s3=True \
+					-o bolt/*:enable_gcs=True -o bolt/*:enable_abfs=True" \
 	CONAN_CONFIG=" -c tools.build:skip_test=False"
 
 export_base:

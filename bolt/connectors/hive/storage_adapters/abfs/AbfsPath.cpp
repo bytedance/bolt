@@ -28,64 +28,47 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-namespace bytedance::bolt::filesystems::abfs {
-AbfsAccount::AbfsAccount(const std::string path) {
-  auto file = std::string("");
+
+namespace bytedance::bolt::filesystems {
+
+AbfsPath::AbfsPath(std::string_view path) {
+  std::string_view file;
+  isHttps_ = true;
   if (path.find(kAbfssScheme) == 0) {
-    file = std::string(path.substr(8));
-    scheme_ = kAbfssScheme.substr(0, 5);
+    file = path.substr(kAbfssScheme.size());
+  } else if (path.find(kAbfsScheme) == 0) {
+    file = path.substr(kAbfsScheme.size());
+    isHttps_ = false;
   } else {
-    file = std::string(path.substr(7));
-    scheme_ = kAbfsScheme.substr(0, 4);
+    BOLT_FAIL("Invalid ABFS Path {}", path);
   }
 
   auto firstAt = file.find_first_of("@");
-  fileSystem_ = std::string(file.substr(0, firstAt));
+  fileSystem_ = file.substr(0, firstAt);
   auto firstSep = file.find_first_of("/");
-  filePath_ = std::string(file.substr(firstSep + 1));
-
+  filePath_ = file.substr(firstSep + 1);
   accountNameWithSuffix_ = file.substr(firstAt + 1, firstSep - firstAt - 1);
   auto firstDot = accountNameWithSuffix_.find_first_of(".");
   accountName_ = accountNameWithSuffix_.substr(0, firstDot);
-  endpointSuffix_ = accountNameWithSuffix_.substr(firstDot + 5);
-  credKey_ = fmt::format("fs.azure.account.key.{}", accountNameWithSuffix_);
 }
 
-const std::string AbfsAccount::accountNameWithSuffix() const {
-  return accountNameWithSuffix_;
-}
-
-const std::string AbfsAccount::scheme() const {
-  return scheme_;
-}
-
-const std::string AbfsAccount::accountName() const {
-  return accountName_;
-}
-
-const std::string AbfsAccount::endpointSuffix() const {
-  return endpointSuffix_;
-}
-
-const std::string AbfsAccount::fileSystem() const {
-  return fileSystem_;
-}
-
-const std::string AbfsAccount::filePath() const {
-  return filePath_;
-}
-
-const std::string AbfsAccount::credKey() const {
-  return credKey_;
-}
-
-const std::string AbfsAccount::connectionString(
-    const std::string accountKey) const {
+std::string AbfsPath::getUrl(bool withblobSuffix) const {
+  std::string accountNameWithSuffixForUrl(accountNameWithSuffix_);
+  if (withblobSuffix) {
+    // We should use correct suffix for blob client.
+    size_t startPos = accountNameWithSuffixForUrl.find("dfs");
+    if (startPos != std::string::npos) {
+      accountNameWithSuffixForUrl.replace(startPos, 3, "blob");
+    }
+  }
   return fmt::format(
-      "DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix={}",
-      accountName(),
-      accountKey,
-      endpointSuffix());
+      "{}{}/{}/{}",
+      isHttps_ ? "https://" : "http://",
+      accountNameWithSuffixForUrl,
+      fileSystem_,
+      filePath_);
 }
-} // namespace bytedance::bolt::filesystems::abfs
+
+} // namespace bytedance::bolt::filesystems

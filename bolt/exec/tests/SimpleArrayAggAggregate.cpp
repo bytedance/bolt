@@ -67,7 +67,9 @@ class ArrayAggAggregate {
     AccumulatorType() = delete;
 
     // Constructor used in initializeNewGroups().
-    explicit AccumulatorType(HashStringAllocator* /*allocator*/)
+    explicit AccumulatorType(
+        HashStringAllocator* /*allocator*/,
+        ArrayAggAggregate* /*fn*/)
         : elements_{} {}
 
     static constexpr bool is_fixed_size_ = false;
@@ -139,7 +141,7 @@ exec::AggregateRegistrationResult registerSimpleArrayAggAggregate(
       name,
       std::move(signatures),
       [name](
-          core::AggregationNode::Step /*step*/,
+          core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& resultType,
           const core::QueryConfig&
@@ -147,7 +149,7 @@ exec::AggregateRegistrationResult registerSimpleArrayAggAggregate(
         BOLT_CHECK_EQ(
             argTypes.size(), 1, "{} takes at most one argument", name);
         return std::make_unique<SimpleAggregateAdapter<ArrayAggAggregate>>(
-            resultType);
+            step, argTypes, resultType);
       },
       /*registerCompanionFunctions*/ true);
 }

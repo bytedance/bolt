@@ -955,7 +955,7 @@ struct DateSubFunction {
 };
 
 template <typename T>
-struct DayOfWeekFunction : public InitSessionTimezone<T> {
+struct DayOfWeekFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
   // 1 = Sunday, 2 = Monday, ..., 7 = Saturday
@@ -963,23 +963,7 @@ struct DayOfWeekFunction : public InitSessionTimezone<T> {
     return time.tm_wday + 1;
   }
 
-  FOLLY_ALWAYS_INLINE void call(
-      int32_t& result,
-      const arg_type<Timestamp>& timestamp) {
-    result = getDayOfWeek(getDateTime(timestamp, this->timeZone_));
-  }
-
   FOLLY_ALWAYS_INLINE void call(int32_t& result, const arg_type<Date>& date) {
-    result = getDayOfWeek(getDateTime(date));
-  }
-
-  FOLLY_ALWAYS_INLINE void call(
-      int64_t& result,
-      const arg_type<Timestamp>& timestamp) {
-    result = getDayOfWeek(getDateTime(timestamp, this->timeZone_));
-  }
-
-  FOLLY_ALWAYS_INLINE void call(int64_t& result, const arg_type<Date>& date) {
     result = getDayOfWeek(getDateTime(date));
   }
 };

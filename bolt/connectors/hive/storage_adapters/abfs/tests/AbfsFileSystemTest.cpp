@@ -28,66 +28,106 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#include <gtest/gtest.h>
+#include <atomic>
+#include <filesystem>
+#include <random>
+
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/FileHandle.h"
-#include "bolt/connectors/hive/HiveConfig.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
+
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/tests/AzuriteServer.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/tests/MockDataLakeFileClient.h"
+#include "bolt/dwio/common/FileSink.h"
 #include "bolt/exec/tests/utils/PortUtil.h"
 #include "bolt/exec/tests/utils/TempFilePath.h"
-#include "gtest/gtest.h"
+#include "connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
+#include "connectors/hive/storage_adapters/abfs/AzureClientProviderImpl.h"
+#include "connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
 
-#include <atomic>
-#include <random>
 using namespace bytedance::bolt;
-
+using namespace bytedance::bolt::filesystems;
+using namespace bytedance::bolt::common::testutil;
 using ::bytedance::bolt::common::Region;
 
+namespace {
+
 constexpr int kOneMB = 1 << 20;
-static const std::string filePath = "test_file.txt";
-static const std::string fullFilePath =
-    bytedance::bolt::filesystems::test::AzuriteABFSEndpoint + filePath;
 
-class AbfsFileSystemTest : public testing::Test {
+class TestAzureClientProvider final : public AzureClientProvider {
  public:
-  static std::shared_ptr<const config::ConfigBase> hiveConfig(
-      const std::unordered_map<std::string, std::string> configOverride = {}) {
-    std::unordered_map<std::string, std::string> config({});
-
-    // Update the default config map with the supplied configOverride map
-    for (const auto& item : configOverride) {
-      config[item.first] = item.second;
-      std::cout << "config " + item.first + " value " + item.second
-                << std::endl;
-    }
-
-    return std::make_shared<const config::ConfigBase>(std::move(config));
+  explicit TestAzureClientProvider() {
+    delegated_ = std::make_unique<SharedKeyAzureClientProvider>();
   }
 
- public:
-  std::shared_ptr<bytedance::bolt::filesystems::test::AzuriteServer>
-      azuriteServer;
-
-  void SetUp() override {
-    auto port = bytedance::bolt::exec::test::getFreePort();
-    azuriteServer =
-        std::make_shared<bytedance::bolt::filesystems::test::AzuriteServer>(
-            port);
-    azuriteServer->start();
-    auto tempFile = createFile();
-    azuriteServer->addFile(tempFile->path, filePath);
+  std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) override {
+    return delegated_->getReadFileClient(path, config);
   }
 
-  void TearDown() override {
-    azuriteServer->stop();
+  std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) override {
+    return std::make_unique<MockDataLakeFileClient>();
   }
 
  private:
-  static std::shared_ptr<::exec::test::TempFilePath> createFile() {
-    auto tempFile = ::exec::test::TempFilePath::create();
+  std::unique_ptr<AzureClientProvider> delegated_;
+};
+
+} // namespace
+
+class AbfsFileSystemTest : public testing::Test {
+ public:
+  std::shared_ptr<AzuriteServer> azuriteServer_;
+  std::unique_ptr<AbfsFileSystem> abfs_;
+
+  static void SetUpTestCase() {
+    registerAbfsFileSystem();
+    registerAzureClientProviderFactory("test", [](const std::string&) {
+      return std::make_unique<TestAzureClientProvider>();
+    });
+  }
+
+  void SetUp() override {
+    auto port = bytedance::bolt::exec::test::getFreePort();
+    azuriteServer_ = std::make_shared<AzuriteServer>(port);
+    azuriteServer_->start();
+    auto tempFile = createFile();
+    azuriteServer_->addFile(tempFile->getPath());
+    abfs_ = std::make_unique<AbfsFileSystem>(azuriteServer_->hiveConfig());
+  }
+
+  void TearDown() override {
+    azuriteServer_->stop();
+  }
+
+  static std::string generateRandomData(int size) {
+    static const char charset[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    std::string data(size, ' ');
+
+    for (int i = 0; i < size; ++i) {
+      int index = rand() % (sizeof(charset) - 1);
+      data[i] = charset[index];
+    }
+
+    return data;
+  }
+
+ private:
+  static std::shared_ptr<TempFilePath> createFile() {
+    auto tempFile = TempFilePath::create();
     tempFile->append("aaaaa");
     tempFile->append("bbbbb");
     tempFile->append(std::string(kOneMB, 'c'));
@@ -102,9 +142,8 @@ void readData(ReadFile* readFile) {
   ASSERT_EQ(readFile->pread(10 + kOneMB, 5, &buffer1), "ddddd");
   char buffer2[10];
   ASSERT_EQ(readFile->pread(0, 10, &buffer2), "aaaaabbbbb");
-  auto buffer3 = new char[kOneMB];
+  char buffer3[kOneMB];
   ASSERT_EQ(readFile->pread(10, kOneMB, buffer3), std::string(kOneMB, 'c'));
-  delete[] buffer3;
   ASSERT_EQ(readFile->size(), 15 + kOneMB);
   char buffer4[10];
   const std::string_view arf = readFile->pread(5, 10, &buffer4);
@@ -129,8 +168,6 @@ void readData(ReadFile* readFile) {
 
   std::vector<folly::IOBuf> iobufs(2);
   std::vector<Region> regions = {{0, 10}, {10, 5}};
-  readFile->preadv(
-      {regions.data(), regions.size()}, {iobufs.data(), iobufs.size()});
   ASSERT_EQ(
       std::string_view(
           reinterpret_cast<const char*>(iobufs[0].writableData()),
@@ -144,21 +181,27 @@ void readData(ReadFile* readFile) {
 }
 
 TEST_F(AbfsFileSystemTest, readFile) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  auto readFile = abfs->openFileForRead(fullFilePath);
+  auto readFile = abfs_->openFileForRead(azuriteServer_->fileURI());
   readData(readFile.get());
+}
+
+TEST_F(AbfsFileSystemTest, openFileForReadWithOptions) {
+  FileOptions options;
+  options.fileSize = 15 + kOneMB;
+  auto readFile = abfs_->openFileForRead(azuriteServer_->fileURI(), options);
+  readData(readFile.get());
+}
+
+TEST_F(AbfsFileSystemTest, openFileForReadWithInvalidOptions) {
+  FileOptions options;
+  options.fileSize = -kOneMB;
+  BOLT_ASSERT_THROW(
+      abfs_->openFileForRead(azuriteServer_->fileURI(), options),
+      "File size must be non-negative");
 }
 
 TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
   std::atomic<bool> startThreads = false;
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-
   std::vector<std::thread> threads;
   std::mt19937 generator(std::random_device{}());
   std::vector<int> sleepTimesInMicroseconds = {0, 500, 5000};
@@ -172,7 +215,7 @@ TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
       }
       std::this_thread::sleep_for(
           std::chrono::microseconds(sleepTimesInMicroseconds[index]));
-      auto readFile = abfs->openFileForRead(fullFilePath);
+      auto readFile = abfs_->openFileForRead(azuriteServer_->fileURI());
       readData(readFile.get());
     });
     threads.emplace_back(std::move(thread));
@@ -184,85 +227,91 @@ TEST_F(AbfsFileSystemTest, multipleThreadsWithReadFile) {
 }
 
 TEST_F(AbfsFileSystemTest, missingFile) {
-  try {
-    auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-        {{"fs.azure.account.key.test.dfs.core.windows.net",
-          azuriteServer->connectionStr()}});
-    const std::string abfsFile =
-        bytedance::bolt::filesystems::test::AzuriteABFSEndpoint + "test.txt";
-    auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-    auto readFile = abfs->openFileForRead(abfsFile);
-    FAIL() << "Expected BoltException";
-  } catch (BoltException const& err) {
-    EXPECT_TRUE(err.message().find("404") != std::string::npos);
-  }
+  const std::string abfsFile = azuriteServer_->URI() + "test.txt";
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      abfs_->openFileForRead(abfsFile), error_code::kFileNotFound);
 }
 
-TEST_F(AbfsFileSystemTest, openFileForWriteNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
+TEST(AbfsWriteFileTest, openFileForWriteTest) {
+  std::string_view kAbfsFile =
+      "abfs://test@test.dfs.core.windows.net/test/writetest.txt";
+  std::unique_ptr<AzureDataLakeFileClient> mockClient =
+      std::make_unique<MockDataLakeFileClient>();
+  auto mockClientPath =
+      reinterpret_cast<MockDataLakeFileClient*>(mockClient.get())->path();
+  AbfsWriteFile abfsWriteFile(kAbfsFile, mockClient);
+  EXPECT_EQ(abfsWriteFile.size(), 0);
+  std::string dataContent = "";
+  uint64_t totalSize = 0;
+  std::string randomData =
+      AbfsFileSystemTest::generateRandomData(1 * 1024 * 1024);
+  for (int i = 0; i < 8; ++i) {
+    abfsWriteFile.append(randomData);
+    dataContent += randomData;
+  }
+  totalSize = randomData.size() * 8;
+  abfsWriteFile.flush();
+  EXPECT_EQ(abfsWriteFile.size(), totalSize);
+
+  randomData = AbfsFileSystemTest::generateRandomData(9 * 1024 * 1024);
+  dataContent += randomData;
+  abfsWriteFile.append(randomData);
+  totalSize += randomData.size();
+  randomData = AbfsFileSystemTest::generateRandomData(2 * 1024 * 1024);
+  dataContent += randomData;
+  totalSize += randomData.size();
+  abfsWriteFile.append(randomData);
+  abfsWriteFile.flush();
+  EXPECT_EQ(abfsWriteFile.size(), totalSize);
+  abfsWriteFile.flush();
+  abfsWriteFile.close();
+  BOLT_ASSERT_THROW(abfsWriteFile.append("abc"), "File is not open");
+
+  std::unique_ptr<AzureDataLakeFileClient> mockClientCopy =
+      std::make_unique<MockDataLakeFileClient>(mockClientPath);
   BOLT_ASSERT_THROW(
-      abfs->openFileForWrite(fullFilePath), "write for abfs not implemented");
+      AbfsWriteFile(kAbfsFile, mockClientCopy), "File already exists");
+  MockDataLakeFileClient readClient(mockClientPath);
+  auto fileContent = readClient.readContent();
+  ASSERT_EQ(fileContent.size(), dataContent.size());
+  ASSERT_EQ(fileContent, dataContent);
 }
 
 TEST_F(AbfsFileSystemTest, renameNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
   BOLT_ASSERT_THROW(
-      abfs->rename("text", "text2"), "rename for abfs not implemented");
+      abfs_->rename("text", "text2"), "rename for abfs not implemented");
 }
 
-TEST_F(AbfsFileSystemTest, removeNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  BOLT_ASSERT_THROW(abfs->remove("text"), "remove for abfs not implemented");
+TEST_F(AbfsFileSystemTest, notImplemented) {
+  BOLT_ASSERT_THROW(abfs_->remove("text"), "remove for abfs not implemented");
+  BOLT_ASSERT_THROW(abfs_->exists("text"), "exists for abfs not implemented");
+  BOLT_ASSERT_THROW(abfs_->list("dir"), "list for abfs not implemented");
+  BOLT_ASSERT_THROW(abfs_->mkdir("dir"), "mkdir for abfs not implemented");
+  BOLT_ASSERT_THROW(abfs_->rmdir("dir"), "rmdir for abfs not implemented");
 }
 
-TEST_F(AbfsFileSystemTest, existsNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  BOLT_ASSERT_THROW(abfs->exists("text"), "exists for abfs not implemented");
-}
-
-TEST_F(AbfsFileSystemTest, listNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  BOLT_ASSERT_THROW(abfs->list("dir"), "list for abfs not implemented");
-}
-
-TEST_F(AbfsFileSystemTest, mkdirNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  BOLT_ASSERT_THROW(abfs->mkdir("dir"), "mkdir for abfs not implemented");
-}
-
-TEST_F(AbfsFileSystemTest, rmdirNotImplemented) {
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig(
-      {{"fs.azure.account.key.test.dfs.core.windows.net",
-        azuriteServer->connectionStr()}});
-  auto abfs = std::make_shared<filesystems::abfs::AbfsFileSystem>(hiveConfig);
-  BOLT_ASSERT_THROW(abfs->rmdir("dir"), "rmdir for abfs not implemented");
-}
-
-TEST_F(AbfsFileSystemTest, credNotFOund) {
+TEST_F(AbfsFileSystemTest, clientProviderFactoryNotRegistered) {
   const std::string abfsFile =
       std::string("abfs://test@test1.dfs.core.windows.net/test");
-  auto hiveConfig = AbfsFileSystemTest::hiveConfig({});
-  auto abfs =
-      std::make_shared<bytedance::bolt::filesystems::abfs::AbfsFileSystem>(
-          hiveConfig);
   BOLT_ASSERT_THROW(
-      abfs->openFileForRead(abfsFile), "Failed to find storage credentials");
+      abfs_->openFileForRead(abfsFile),
+      "No AzureClientProviderFactory registered for account 'test1'.");
+}
+
+TEST_F(AbfsFileSystemTest, registerAbfsFileSink) {
+  static const std::vector<std::string> paths = {
+      "abfs://test@test.dfs.core.windows.net/test",
+      "abfss://test@test.dfs.core.windows.net/test"};
+  std::unordered_map<std::string, std::string> config(
+      {{"fs.azure.account.key.test.dfs.core.windows.net", "NDU2"}});
+  auto hiveConfig =
+      std::make_shared<const config::ConfigBase>(std::move(config));
+  for (const auto& path : paths) {
+    auto sink = dwio::common::FileSink::create(
+        path, {.connectorProperties = hiveConfig});
+    auto writeFileSink = dynamic_cast<dwio::common::WriteFileSink*>(sink.get());
+    auto writeFile = writeFileSink->toWriteFile();
+    auto abfsWriteFile = dynamic_cast<AbfsWriteFile*>(writeFile.get());
+    ASSERT_TRUE(abfsWriteFile != nullptr);
+  }
 }

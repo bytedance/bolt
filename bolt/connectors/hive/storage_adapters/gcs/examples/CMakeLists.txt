@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_gcsfile_example GCSFileSystemExample.cpp)
+add_executable(bolt_gcsfile_example GcsFileSystemExample.cpp)
 target_link_libraries(
   bolt_gcsfile_example
   bolt_testutils

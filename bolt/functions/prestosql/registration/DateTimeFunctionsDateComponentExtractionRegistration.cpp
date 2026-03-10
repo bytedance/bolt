@@ -33,14 +33,6 @@ void registerDateTimeDateComponentExtractionFunctionsInternal(
       {prefix + "week", prefix + "week_of_year"});
   registerFunction<WeekFunction, int64_t, Date>(
       {prefix + "week", prefix + "week_of_year"});
-  registerFunction<
-      bytedance::bolt::functions::sparksql::DayOfWeekFunction,
-      int64_t,
-      Date>({prefix + "dayofweek"});
-  registerFunction<
-      bytedance::bolt::functions::sparksql::DayOfWeekFunction,
-      int64_t,
-      Timestamp>({prefix + "dayofweek"});
   registerFunction<HourFunction, int64_t, Timestamp>({prefix + "hour"});
   registerFunction<MinuteFunction, int64_t, Timestamp>({prefix + "minute"});
   registerFunction<SecondFunction, int64_t, Timestamp>({prefix + "second"});

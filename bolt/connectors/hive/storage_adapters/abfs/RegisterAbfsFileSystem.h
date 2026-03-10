@@ -29,9 +29,38 @@
  */
 
 #pragma once
-namespace bytedance::bolt::filesystems::abfs {
+
+#include <functional>
+#include <memory>
+#include <string>
+
+namespace bytedance::bolt::config {
+
+class ConfigBase;
+
+} // namespace bytedance::bolt::config
+
+namespace bytedance::bolt::filesystems {
+
+class AzureClientProvider;
+class AbfsPath;
+
+using AzureClientProviderFactory =
+    std::function<std::unique_ptr<AzureClientProvider>(
+        const std::string& account)>;
 
 // Register the ABFS filesystem.
 void registerAbfsFileSystem();
 
-} // namespace bytedance::bolt::filesystems::abfs
+/// Register the AzureClientProvider implementation in `AzureClientProviders`
+/// based on the configuration.
+void registerAzureClientProvider(const config::ConfigBase& config);
+
+/// Registers a factory for creating AzureClientProvider instances.
+/// Any existing factory registered for the specified account will be
+/// overwritten by recalling this method with the same account name.
+void registerAzureClientProviderFactory(
+    const std::string& account,
+    const AzureClientProviderFactory& factory);
+
+} // namespace bytedance::bolt::filesystems

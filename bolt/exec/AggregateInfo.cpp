@@ -86,9 +86,6 @@ std::vector<AggregateInfo> toAggregateInfo(
         constants.push_back(constant->toConstantVector(operatorCtx.pool()));
       } else if (
           auto lambda = dynamic_cast<const core::LambdaTypedExpr*>(arg.get())) {
-        BOLT_USER_CHECK(
-            !isStreaming,
-            "StreamingAggregation doesn't support lambda functions yet.");
         for (const auto& name : lambda->signature()->names()) {
           if (auto captureIndex = inputType->getChildIdxIfExists(name)) {
             channels.push_back(captureIndex.value());
@@ -97,8 +94,7 @@ std::vector<AggregateInfo> toAggregateInfo(
         }
       } else {
         BOLT_FAIL(
-            "Expression must be field access, constant, or "
-            "lambda (HashAggregation): {}",
+            "Expression must be field access, constant, or lambda: {}",
             arg->toString());
       }
     }
@@ -139,15 +135,13 @@ std::vector<AggregateInfo> toAggregateInfo(
         aggResultType,
         operatorCtx.driverCtx()->queryConfig());
 
-    if (!isStreaming) {
-      auto lambdas = extractLambdaInputs(aggregate);
-      if (!lambdas.empty()) {
-        if (expressionEvaluator == nullptr) {
-          expressionEvaluator = std::make_shared<SimpleExpressionEvaluator>(
-              operatorCtx.execCtx()->queryCtx(), operatorCtx.execCtx()->pool());
-        }
-        info.function->setLambdaExpressions(lambdas, expressionEvaluator);
+    auto lambdas = extractLambdaInputs(aggregate);
+    if (!lambdas.empty()) {
+      if (expressionEvaluator == nullptr) {
+        expressionEvaluator = std::make_shared<SimpleExpressionEvaluator>(
+            operatorCtx.execCtx()->queryCtx(), operatorCtx.execCtx()->pool());
       }
+      info.function->setLambdaExpressions(lambdas, expressionEvaluator);
     }
 
     // Sorting keys and orders.
