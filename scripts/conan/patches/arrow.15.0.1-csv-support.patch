@@ -449,7 +449,7 @@ index 24a7af89b..27655cdf4 100644
  
          if self.options.get_safe("skyhook", False):
              raise ConanInvalidConfiguration("CCI has no librados recipe (yet)")
-@@ -248,16 +388,11 @@ class ArrowConan(ConanFile):
+@@ -248,16 +388,13 @@ class ArrowConan(ConanFile):
              if self.dependencies["jemalloc"].options.enable_cxx:
                  raise ConanInvalidConfiguration("jemmalloc.enable_cxx of a static jemalloc must be disabled")
  
@@ -467,6 +467,8 @@ index 24a7af89b..27655cdf4 100644
 -        else:
 +        if Version(self.version) >= "13.0.0":
              self.tool_requires("cmake/[>=3.16 <4]")
++        if self.options.with_protobuf:
++            self.tool_requires("protobuf/<host_version>")
  
      def source(self):
 @@ -292,7 +427,7 @@ class ArrowConan(ConanFile):

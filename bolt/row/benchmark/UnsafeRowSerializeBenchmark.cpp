@@ -203,8 +203,9 @@ class SerializeBenchmark {
       HashStringAllocator& allocator) {
     ByteOutputStream out(&allocator);
     auto position = allocator.newWrite(out);
+    const exec::ContainerRowSerdeOptions options{};
     for (auto i = 0; i < data->size(); ++i) {
-      exec::ContainerRowSerde::serialize(*data, i, out);
+      exec::ContainerRowSerde::serialize(*data, i, out, options);
     }
     allocator.finishWrite(out, 0);
     return position;

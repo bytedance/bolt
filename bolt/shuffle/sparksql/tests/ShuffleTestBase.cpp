@@ -27,9 +27,12 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
+#include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
+#include "bolt/shuffle/sparksql/tests/CelebornTestUtils.h"
 #include "bolt/shuffle/sparksql/tests/LocalFileReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MockRssClient.h"
@@ -113,6 +116,7 @@ std::string shuffleModeToString(int mode) {
 }
 
 constexpr uint32_t kPidSeed = 42;
+constexpr int kCelebornAttemptId = 0;
 
 const std::vector<DataTypeGroup> dataGroups = {
     DataTypeGroup::kInteger,
@@ -455,7 +459,23 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     const std::vector<std::vector<RowVectorPtr>>& inputsPerMapper,
     const RowTypePtr& outputType,
     const ShuffleTestParam& param) {
-  auto memoryManagerHolder = TestMemoryManagerHolder::create(param.memoryLimit);
+  const bool useRealCeleborn =
+      param.writerType == PartitionWriterType::kCeleborn &&
+      readBoolEnv(kRealCelebornEnv);
+
+  // Parallel reads for real Celeborn with many partitions.
+  constexpr int kParallelReadThreshold = 32;
+  const int numReadThreads =
+      (useRealCeleborn && param.numPartitions >= kParallelReadThreshold)
+      ? std::clamp(
+            static_cast<int>(std::thread::hardware_concurrency()),
+            1,
+            param.numPartitions)
+      : 0;
+  // Scale memory pool so concurrent readers don't exceed capacity.
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(
+      param.memoryLimit * std::max(1, numReadThreads));
+
   ShuffleRunResult result;
 
   auto tempDir = exec::test::TempDirectoryPath::create();
@@ -463,8 +483,22 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
   std::filesystem::create_directories(localDir);
 
   std::shared_ptr<MockRssClient> mockRssClient;
+  std::shared_ptr<celeborn::client::ShuffleClient> realCelebornClient;
+  // The guard owns lifecycle cleanup and lazily allocates a unique shuffle id
+  // for real Celeborn runs, so call sites don't need separate id bookkeeping.
+  RealCelebornClientCleanupGuard realCelebornClientCleanupGuard(
+      useRealCeleborn ? &realCelebornClient : nullptr);
+  const int celebornShuffleId =
+      useRealCeleborn ? realCelebornClientCleanupGuard.shuffleId() : 0;
+
   if (param.writerType == PartitionWriterType::kCeleborn) {
-    mockRssClient = std::make_shared<MockRssClient>();
+    if (useRealCeleborn) {
+      auto appId =
+          getEnvOrDefault(kCelebornLmAppIdEnv, "bolt-shuffle-test-app");
+      realCelebornClient = createRealCelebornClientForTests(appId);
+    } else {
+      mockRssClient = std::make_shared<MockRssClient>();
+    }
   }
 
   std::vector<ShuffleWriterMetrics> mapperMetrics;
@@ -486,7 +520,18 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
         param.shuffleBufferSize;
 
     if (param.writerType == PartitionWriterType::kCeleborn) {
-      writerOptions.partitionWriterOptions.rssClient = mockRssClient;
+      if (useRealCeleborn) {
+        writerOptions.partitionWriterOptions.rssClient =
+            std::make_shared<NativeCelebornClient>(
+                realCelebornClient,
+                celebornShuffleId,
+                m,
+                kCelebornAttemptId,
+                param.numMappers,
+                param.numPartitions);
+      } else {
+        writerOptions.partitionWriterOptions.rssClient = mockRssClient;
+      }
     } else {
       writerOptions.partitionWriterOptions.dataFile = dataFile;
       writerOptions.partitionWriterOptions.configuredDirs = {localDir};
@@ -528,15 +573,47 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
   }
 
   result.partitionOutputs.resize(param.numPartitions);
-  for (int i = 0; i < param.numPartitions; ++i) {
-    std::shared_ptr<ReaderStreamIterator> streamIter;
-    if (param.writerType == PartitionWriterType::kCeleborn) {
-      auto it = mockRssClient->getData().find(i);
-      if (it == mockRssClient->getData().end() || it->second.empty()) {
+  if (useRealCeleborn) {
+    realCelebornClient->updateReducerFileGroup(celebornShuffleId);
+  }
+
+  auto partitionHasOutput = [&](int partition) {
+    int64_t bytes = 0;
+    for (const auto& metric : mapperMetrics) {
+      if (metric.partitionLengths.empty()) {
         continue;
       }
-      streamIter = std::make_shared<MemoryReaderStreamIterator>(
-          std::vector<std::vector<char>>{it->second});
+      const auto idx = static_cast<size_t>(partition);
+      if (idx < metric.partitionLengths.size()) {
+        bytes += metric.partitionLengths[idx];
+      }
+    }
+    return bytes > 0;
+  };
+
+  auto readPartition = [&](int i) {
+    std::shared_ptr<ReaderStreamIterator> streamIter;
+    if (param.writerType == PartitionWriterType::kCeleborn) {
+      if (!partitionHasOutput(i)) {
+        return;
+      }
+      if (useRealCeleborn) {
+        streamIter = std::make_shared<CelebornReaderStreamIterator>(
+            realCelebornClient,
+            celebornShuffleId,
+            std::vector<int32_t>{i},
+            kCelebornAttemptId,
+            0,
+            param.numMappers,
+            false);
+      } else {
+        auto it = mockRssClient->getData().find(i);
+        if (it == mockRssClient->getData().end() || it->second.empty()) {
+          return;
+        }
+        streamIter = std::make_shared<MemoryReaderStreamIterator>(
+            std::vector<std::vector<char>>{it->second});
+      }
     } else {
       std::vector<SegmentInfo> segments;
       for (int m = 0; m < param.numMappers; ++m) {
@@ -555,7 +632,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
         segments.push_back({mapperDataFiles[m], offset, length});
       }
       if (segments.empty()) {
-        continue;
+        return;
       }
       streamIter =
           std::make_shared<LocalFileReaderStreamIterator>(std::move(segments));
@@ -594,6 +671,44 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       }
       readerCursor->current().reset();
     }
+  };
+
+  // Read partitions in parallel to saturate multiple Celeborn workers.
+  if (numReadThreads > 0) {
+    std::atomic<int> nextPartition{0};
+    std::vector<std::exception_ptr> errors(numReadThreads);
+    std::vector<std::thread> threads;
+    threads.reserve(numReadThreads);
+    for (int t = 0; t < numReadThreads; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          while (true) {
+            int i = nextPartition.fetch_add(1);
+            if (i >= param.numPartitions) {
+              break;
+            }
+            readPartition(i);
+          }
+        } catch (...) {
+          errors[t] = std::current_exception();
+        }
+      });
+    }
+    for (auto& th : threads) {
+      th.join();
+    }
+    for (auto& ep : errors) {
+      if (ep) {
+        std::rethrow_exception(ep);
+      }
+    }
+  } else {
+    for (int i = 0; i < param.numPartitions; ++i) {
+      readPartition(i);
+    }
+  }
+  if (useRealCeleborn) {
+    realCelebornClientCleanupGuard.cleanupNow();
   }
 
   return result;
