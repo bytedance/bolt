@@ -1699,7 +1699,7 @@ TEST_F(TableScanTest, preloadSplits) {
   auto task = assertQuery(
       tableScanNode(), filePaths, "SELECT * FROM tmp", /*numPrefetchSplit=*/10);
   auto stats = getTableScanRuntimeStats(task);
-  ASSERT_EQ(stats.at("preloadedSplits").sum, 10);
+  ASSERT_EQ(stats.at("preloadSplits").sum, 10);
 }
 
 TEST_F(TableScanTest, preloadingSplitClose) {
@@ -1828,6 +1828,18 @@ TEST_F(TableScanTest, emptyFile) {
   } catch (const BoltException& e) {
     EXPECT_EQ("ORC file is empty", e.message());
   }
+}
+
+TEST_F(TableScanTest, preloadEmptySplit) {
+  auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
+  auto emptyVector = makeVectors(1, 0, rowType);
+  auto vector = makeVectors(1, 1'000, rowType);
+  auto filePaths = makeFilePaths(2);
+  writeToFile(filePaths[0]->path, vector[0]);
+  writeToFile(filePaths[1]->path, emptyVector[0]);
+  createDuckDbTable(vector);
+  auto op = tableScanNode(rowType);
+  assertQuery(op, filePaths, "SELECT * FROM tmp", 1);
 }
 
 TEST_F(TableScanTest, partitionedTableVarcharKey) {
