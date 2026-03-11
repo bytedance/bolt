@@ -109,7 +109,7 @@ void applyWithType(
     }
   } else {
     auto func = [&](vector_size_t row) { result.set(row, hashSeed); };
-    bits::forEachSetBit(rows.getBitData(), begin, end, func);
+    bits::forEachSetBit(rows.allBits(), begin, end, func);
   }
 #else
   rows.applyToSelected([&](int row) { result.set(row, hashSeed); });
