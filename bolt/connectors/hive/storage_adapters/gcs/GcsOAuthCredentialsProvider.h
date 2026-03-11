@@ -28,18 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-using namespace bytedance::bolt;
+#pragma once
 
-// This benchmark measures the throughput of an GCS compatible FileSystem for
-// various ReadFile APIs. The output helps us understand the maximum possible
-// gains for queries. Example: If a single thread requires reading 1GB of data
-// and the IO throughput is 100 MBps, then it takes 10 seconds to just read the
-// data.
-int main(int argc, char** argv) {
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  GCSReadBenchmark bm;
-  bm.initialize();
-  bm.run();
-}
+#include <google/cloud/storage/oauth2/credentials.h>
+
+namespace bytedance::bolt::filesystems {
+
+namespace gcs = ::google::cloud::storage;
+
+/// Interface for providing OAuth2 credentials for Google Cloud Storage (GCS).
+/// Implementations should return a GCS OAuth2 credential used for creating the
+/// GCS client for a specific bucket via `getCredentials`.
+class GcsOAuthCredentialsProvider {
+ public:
+  virtual ~GcsOAuthCredentialsProvider() = default;
+
+  virtual std::shared_ptr<gcs::oauth2::Credentials> getCredentials(
+      const std::string& bucket) = 0;
+};
+
+} // namespace bytedance::bolt::filesystems

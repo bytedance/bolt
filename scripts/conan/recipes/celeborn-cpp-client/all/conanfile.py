@@ -62,7 +62,7 @@ class CelebornCppClientConan(ConanFile):
         git = Git(self, folder="..")
         git.clone("https://github.com/apache/celeborn", target="src")
         git = Git(self, folder=self.source_folder)
-        git.checkout("0f663d0")
+        git.checkout("81d89f3")
         apply_conandata_patches(self)
 
     def export_sources(self):

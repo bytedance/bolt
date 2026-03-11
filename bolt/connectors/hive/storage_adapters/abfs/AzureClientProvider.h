@@ -28,42 +28,29 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/file/benchmark/ReadBenchmark.h"
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSFileSystem.h"
+#pragma once
 
-DECLARE_string(gcs_config);
-namespace bytedance::bolt {
+#include "bolt/common/config/Config.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureBlobClient.h"
+#include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
 
-std::shared_ptr<Config> readConfig(const std::string& filePath);
+namespace bytedance::bolt::filesystems {
 
-class GCSReadBenchmark : public ReadBenchmark {
+// Provider interface for creating Azure Blob and Data Lake clients.
+class AzureClientProvider {
  public:
-  // Initialize a GCSReadFile instance for the specified 'path'.
-  void initialize() override {
-    executor_ =
-        std::make_unique<folly::IOThreadPoolExecutor>(FLAGS_num_threads);
+  virtual ~AzureClientProvider() = default;
 
-    std::shared_ptr<Config> config;
-    if (!FLAGS_gcs_config.empty()) {
-      config = readConfig(FLAGS_gcs_config);
-    }
-    auto gcsfs = filesystems::getFileSystem(FLAGS_path, config);
-    readFile_ = gcsfs->openFileForRead(FLAGS_path);
+  // Creates AzureBlobClient for file read operations.
+  virtual std::unique_ptr<AzureBlobClient> getReadFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
 
-    fileSize_ = readFile_->size();
-    if (FLAGS_file_size_gb) {
-      fileSize_ = std::min<uint64_t>(FLAGS_file_size_gb << 30, fileSize_);
-    }
-
-    if (fileSize_ <= FLAGS_measurement_size) {
-      LOG(ERROR) << "File size " << fileSize_
-                 << " is <= then --measurement_size " << FLAGS_measurement_size;
-      exit(1);
-    }
-    if (FLAGS_seed) {
-      rng_.seed(FLAGS_seed);
-    }
-  }
+  // Creates AzureDataLakeFileClient for file write operations.
+  virtual std::unique_ptr<AzureDataLakeFileClient> getWriteFileClient(
+      const std::shared_ptr<AbfsPath>& path,
+      const config::ConfigBase& config) = 0;
 };
 
-} // namespace bytedance::bolt
+} // namespace bytedance::bolt::filesystems

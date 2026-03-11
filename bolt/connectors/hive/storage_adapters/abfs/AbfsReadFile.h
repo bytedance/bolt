@@ -28,14 +28,20 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/executors/ThreadedExecutor.h>
-#include <folly/futures/Future.h>
+#pragma once
+
 #include "bolt/common/file/File.h"
-#include "bolt/connectors/hive/storage_adapters/abfs/AbfsUtil.h"
-namespace bytedance::bolt::filesystems::abfs {
+
+namespace bytedance::bolt::config {
+class ConfigBase;
+}
+
+namespace bytedance::bolt::filesystems {
 class AbfsReadFile final : public ReadFile {
  public:
-  explicit AbfsReadFile(const std::string& path, const std::string& connectStr);
+  explicit AbfsReadFile(
+      std::string_view path,
+      const config::ConfigBase& config);
 
   void initialize();
 
@@ -66,4 +72,4 @@ class AbfsReadFile final : public ReadFile {
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
-} // namespace bytedance::bolt::filesystems::abfs
+} // namespace bytedance::bolt::filesystems

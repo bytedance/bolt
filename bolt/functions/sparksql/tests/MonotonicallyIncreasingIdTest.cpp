@@ -28,23 +28,31 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSUtil.h"
-namespace bytedance::bolt {
+#include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 
-std::string getErrorStringFromGCSError(const google::cloud::StatusCode& code) {
-  using ::google::cloud::StatusCode;
-
-  switch (code) {
-    case StatusCode::kNotFound:
-      return "Resource not found";
-    case StatusCode::kPermissionDenied:
-      return "Access denied";
-    case StatusCode::kUnavailable:
-      return "Service unavailable";
-
-    default:
-      return "Unknown error";
+namespace bytedance::bolt::functions::sparksql::test {
+namespace {
+class MonotonicallyIncreasingIdTest : public SparkFunctionBaseTest {
+ protected:
+  void testMonotonicallyIncreasingId(
+      int32_t partitionId,
+      int32_t vectorSize,
+      const std::vector<int64_t>& expected) {
+    setSparkPartitionId(partitionId);
+    auto result = evaluate(
+        "monotonically_increasing_id()", makeRowVector(ROW({}), vectorSize));
+    ASSERT_FALSE(result->isConstantEncoding());
+    bolt::test::assertEqualVectors({makeFlatVector<int64_t>(expected)}, result);
   }
-}
+};
 
-} // namespace bytedance::bolt
+TEST_F(MonotonicallyIncreasingIdTest, basic) {
+  testMonotonicallyIncreasingId(0, 1, {0});
+  testMonotonicallyIncreasingId(2, 2, {17179869184, 17179869185});
+  testMonotonicallyIncreasingId(5, 3, {42949672960, 42949672961, 42949672962});
+  testMonotonicallyIncreasingId(
+      100, 4, {858993459200, 858993459201, 858993459202, 858993459203});
+}
+} // namespace
+} // namespace bytedance::bolt::functions::sparksql::test

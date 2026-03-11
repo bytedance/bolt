@@ -33,11 +33,13 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
+#include "bolt/shuffle/sparksql/tests/CelebornTestUtils.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 std::shared_ptr<const celeborn::protocol::PartitionLocation> makeLocation(
@@ -399,12 +401,64 @@ TEST(CelebornReaderStreamIteratorTest, appendsMultiplePushesPerMap) {
   readStreamAndExpect(stream, expected);
 }
 
-// Confirms updateMetrics remains unsupported for the iterator.
-TEST(CelebornReaderStreamIteratorTest, updateMetricsUnsupported) {
+// Confirms updateMetrics is a no-op for the iterator.
+TEST(CelebornReaderStreamIteratorTest, updateMetricsNoop) {
   auto client = std::make_shared<FakeShuffleClient>();
   CelebornReaderStreamIterator iterator(client, 1, {1}, 0, 0, 0, false);
-  EXPECT_THROW(
-      iterator.updateMetrics(0, 0, 0, 0, 0), bytedance::bolt::BoltUserError);
+  EXPECT_NO_THROW(iterator.updateMetrics(0, 0, 0, 0, 0));
+}
+
+TEST(CelebornE2ESmokeTest, nativeClientPushAndReadBack) {
+  if (!readBoolEnv(kRunE2EEnv)) {
+    GTEST_SKIP()
+        << "Set BOLT_CELEBORN_E2E=1 to run real Celeborn E2E smoke test";
+  }
+
+  auto appId = getEnvOrDefault(kCelebornLmAppIdEnv, "bolt-shuffle-test-app");
+  auto shuffleClient = createRealCelebornClientForTests(appId);
+  RealCelebornClientCleanupGuard realCelebornClientCleanupGuard(&shuffleClient);
+
+  // Let the cleanup guard allocate a process-scoped shuffle id and own
+  // cleanup/shutdown responsibilities on all exit paths.
+  const int kShuffleId = realCelebornClientCleanupGuard.shuffleId();
+  constexpr int kAttemptId = 0;
+  constexpr int kNumMappers = 2;
+  constexpr int kNumPartitions = 2;
+
+  NativeCelebornClient mapper0(
+      shuffleClient, kShuffleId, 0, kAttemptId, kNumMappers, kNumPartitions);
+  NativeCelebornClient mapper1(
+      shuffleClient, kShuffleId, 1, kAttemptId, kNumMappers, kNumPartitions);
+
+  const std::string p0m0 = "partition0-map0|";
+  const std::string p0m1 = "partition0-map1";
+  const std::string p1m0 = "partition1-map0|";
+  const std::string p1m1 = "partition1-map1";
+
+  mapper0.pushPartitionData(0, const_cast<char*>(p0m0.data()), p0m0.size());
+  mapper1.pushPartitionData(0, const_cast<char*>(p0m1.data()), p0m1.size());
+  mapper0.pushPartitionData(1, const_cast<char*>(p1m0.data()), p1m0.size());
+  mapper1.pushPartitionData(1, const_cast<char*>(p1m1.data()), p1m1.size());
+
+  mapper0.stop();
+  mapper1.stop();
+
+  shuffleClient->updateReducerFileGroup(kShuffleId);
+
+  std::vector<int32_t> partitions = {0, 1};
+  CelebornReaderStreamIterator iterator(
+      shuffleClient, kShuffleId, partitions, kAttemptId, 0, kNumMappers, false);
+
+  auto stream0 = iterator.nextStream(arrow::default_memory_pool());
+  ASSERT_NE(stream0, nullptr);
+  readStreamAndExpect(stream0, p0m0 + p0m1);
+
+  auto stream1 = iterator.nextStream(arrow::default_memory_pool());
+  ASSERT_NE(stream1, nullptr);
+  readStreamAndExpect(stream1, p1m0 + p1m1);
+
+  EXPECT_EQ(iterator.nextStream(arrow::default_memory_pool()), nullptr);
+  realCelebornClientCleanupGuard.cleanupNow();
 }
 
 // Verifies read fails before any push and succeeds after push.

@@ -265,6 +265,65 @@ TEST_F(JitEngineTest, concurreny) {
   }
 }
 
+TEST_F(JitEngineTest, cacheEvictionOnEmptyList) {
+  // When a cached module has an external reference (CompiledModuleSP
+  // held outside the cache), eviction removes the cache entry but the
+  // CompiledModuleImpl isn't destroyed (refcount > 0), so notifyFreeingObject
+  // is never called and memory usage doesn't decrease. The eviction loop in
+  // LRUCache::insert() keeps calling evict() until the cache is empty, then
+  // calls evict() on an empty list: --list_.end() is UB.
+  const std::string irTmpl = R"IR(
+        define i64 @function_name(i64 noundef %0, i64 noundef %1)  {
+        %3 = add nsw i64 %1, %0
+        ret i64 %3
+        }
+    )IR";
+
+  constexpr size_t LIMIT = 1024;
+  jit->GetCache().clear();
+  jit->SetMemoryLimit(LIMIT);
+
+  auto compileFunc = [&](const std::string& fn) -> CompiledModuleSP {
+    std::regex p("function_name");
+    std::string ir = std::regex_replace(irTmpl, p, fn);
+    auto tsm = jit->CreateTSModule(fn);
+    tsm.withModuleDo([&, this](llvm::Module& m) {
+      bool err = jit->AddIRIntoModule(ir.c_str(), &m);
+      EXPECT_TRUE(!err);
+    });
+    return jit->CompileModule(std::move(tsm));
+  };
+
+  // Step 1: Compile module A. Memory ~768, below limit 1024.
+  auto modA = compileFunc("evict_test_A");
+  ASSERT_TRUE(modA != nullptr);
+
+  // Step 2: Hold an external reference to A via cache lookup.
+  auto modA_ref = jit->LookupSymbolsInCache("evict_test_A");
+  ASSERT_TRUE(modA_ref != nullptr);
+  // modA has refcount 3: cache + modA + modA_ref
+
+  // Drop modA, but modA_ref still holds a reference.
+  modA.reset();
+  // refcount 2: cache + modA_ref
+
+  // Step 3: Compile module B. Memory goes to ~1536, above limit 1024.
+  // Eviction triggers: removes A from cache (refcount drops to 1: modA_ref).
+  // But since CompiledModuleImpl isn't destroyed, memory doesn't decrease.
+  // The eviction loop calls evict() again on an EMPTY cache → UB / crash.
+  auto modB = compileFunc("evict_test_B");
+  ASSERT_TRUE(modB != nullptr);
+
+  // If we reach here, the bug is fixed.
+  // Verify modA_ref still works (module not destroyed).
+  typedef int64_t (*FuncProto)(int64_t, int64_t);
+  auto jitFunc = (FuncProto)modA_ref->getFuncPtr("evict_test_A");
+  if (jitFunc) {
+    auto result = jitFunc(100, 200);
+    ASSERT_TRUE(result == 300);
+  }
+}
+
 } // namespace bytedance::bolt::jit::test
 
 #endif

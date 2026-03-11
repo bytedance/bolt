@@ -376,6 +376,19 @@ TEST_F(SparkCastExprTest, intToTimestamp) {
   testIntegralToTimestampCast<int32_t>();
 }
 
+TEST_F(SparkCastExprTest, timestampToBigint) {
+  // Cast bigint as timestamp.
+  testCast(
+      makeNullableFlatVector<Timestamp>(
+          {Timestamp(0, 0),
+           Timestamp(1727181032, 0),
+           Timestamp(-1727181032, 0),
+           Timestamp(9223372036854, 775'807'000),
+           Timestamp(-9223372036855, 224'192'000)}),
+      makeNullableFlatVector<int64_t>(
+          {0, 1727181032, -1727181032, 9223372036855, -9223372036855}));
+}
+
 TEST_F(SparkCastExprTest, primitiveInvalidCornerCases) {
   // To integer.
   { testInvalidCast<std::string>("tinyint", {""}, "Empty string"); }

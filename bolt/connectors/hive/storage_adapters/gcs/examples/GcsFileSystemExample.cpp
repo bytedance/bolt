@@ -30,7 +30,8 @@
 
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
-#include "bolt/connectors/hive/storage_adapters/gcs/GCSFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 
 #include <folly/init/Init.h>
 
@@ -62,7 +63,10 @@ int main(int argc, char** argv) {
     gflags::ShowUsageWithFlags(argv[0]);
     return 1;
   }
-  filesystems::GCSFileSystem gcfs(newConfiguration());
+  std::string bucket;
+  std::string object;
+  setBucketAndKeyFromGcsPath(FLAGS_gcs_path, bucket, object);
+  filesystems::GcsFileSystem gcfs(bucket, newConfiguration());
   gcfs.initializeClient();
   std::cout << "Opening file for read " << FLAGS_gcs_path << std::endl;
   std::unique_ptr<ReadFile> file_read = gcfs.openFileForRead(FLAGS_gcs_path);

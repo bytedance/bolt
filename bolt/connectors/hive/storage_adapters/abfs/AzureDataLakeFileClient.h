@@ -28,36 +28,36 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/storage_adapters/gcs/benchmark/GCSReadBenchmark.h"
-#include "bolt/core/Config.h"
+#pragma once
 
-#include <fstream>
+#include <stdint.h>
+#include <cstddef>
+#include <string>
 
-DEFINE_string(gcs_config, "", "Path of GCS config file");
-namespace bytedance::bolt {
-
-// From presto-cpp
-std::shared_ptr<Config> readConfig(const std::string& filePath) {
-  std::ifstream configFile(filePath);
-  if (!configFile.is_open()) {
-    throw std::runtime_error(
-        fmt::format("Couldn't open config file {} for reading.", filePath));
-  }
-
-  std::unordered_map<std::string, std::string> properties;
-  std::string line;
-  while (getline(configFile, line)) {
-    line.erase(std::remove_if(line.begin(), line.end(), isspace), line.end());
-    if (line[0] == '#' || line.empty()) {
-      continue;
-    }
-    auto delimiterPos = line.find('=');
-    auto name = line.substr(0, delimiterPos);
-    auto value = line.substr(delimiterPos + 1);
-    properties.emplace(name, value);
-  }
-
-  return std::make_shared<bytedance::bolt::core::MemConfig>(properties);
+namespace Azure::Storage::Files::DataLake::Models {
+class PathProperties;
 }
 
-} // namespace bytedance::bolt
+namespace bytedance::bolt::filesystems {
+
+// Azurite Simulator does not yet support the DFS endpoint.
+// (For more information, see https://github.com/Azure/Azurite/issues/553 and
+// https://github.com/Azure/Azurite/issues/409).
+// You can find a comparison between DFS and Blob endpoints here:
+// https://github.com/Azure/Azurite/wiki/ADLS-Gen2-Implementation-Guidance
+// To facilitate unit testing of file write scenarios, we define the
+// AzureDatalakeFileClient which can be mocked during testing.
+
+class AzureDataLakeFileClient {
+ public:
+  virtual ~AzureDataLakeFileClient() {}
+
+  virtual void create() = 0;
+  virtual Azure::Storage::Files::DataLake::Models::PathProperties
+  getProperties() = 0;
+  virtual void append(const uint8_t* buffer, size_t size, uint64_t offset) = 0;
+  virtual void flush(uint64_t position) = 0;
+  virtual void close() = 0;
+  virtual std::string getUrl() = 0;
+};
+} // namespace bytedance::bolt::filesystems

@@ -69,7 +69,7 @@ class LRUCache {
     if (i == map_.end()) {
       // insert item into the cache, but first check if it is full
 
-      while (evictPolicy_()) {
+      while (!empty() && evictPolicy_()) {
         // cache is full, evict the least recently used item
         evict();
       }

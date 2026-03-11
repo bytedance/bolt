@@ -68,7 +68,9 @@ class AverageAggregate {
     AccumulatorType() = delete;
 
     // Constructor used in initializeNewGroups().
-    explicit AccumulatorType(HashStringAllocator* /*allocator*/) {
+    explicit AccumulatorType(
+        HashStringAllocator* /*allocator*/,
+        AverageAggregate* /*fn*/) {
       sum_ = 0;
       count_ = 0;
     }
@@ -142,21 +144,23 @@ exec::AggregateRegistrationResult registerSimpleAverageAggregate(
             case TypeKind::SMALLINT:
               return std::make_unique<
                   SimpleAggregateAdapter<AverageAggregate<int16_t>>>(
-                  resultType);
+                  step, argTypes, resultType);
             case TypeKind::INTEGER:
               return std::make_unique<
                   SimpleAggregateAdapter<AverageAggregate<int32_t>>>(
-                  resultType);
+                  step, argTypes, resultType);
             case TypeKind::BIGINT:
               return std::make_unique<
                   SimpleAggregateAdapter<AverageAggregate<int64_t>>>(
-                  resultType);
+                  step, argTypes, resultType);
             case TypeKind::REAL:
               return std::make_unique<
-                  SimpleAggregateAdapter<AverageAggregate<float>>>(resultType);
+                  SimpleAggregateAdapter<AverageAggregate<float>>>(
+                  step, argTypes, resultType);
             case TypeKind::DOUBLE:
               return std::make_unique<
-                  SimpleAggregateAdapter<AverageAggregate<double>>>(resultType);
+                  SimpleAggregateAdapter<AverageAggregate<double>>>(
+                  step, argTypes, resultType);
             default:
               BOLT_FAIL(
                   "Unknown input type for {} aggregation {}",
@@ -167,11 +171,13 @@ exec::AggregateRegistrationResult registerSimpleAverageAggregate(
           switch (resultType->kind()) {
             case TypeKind::REAL:
               return std::make_unique<
-                  SimpleAggregateAdapter<AverageAggregate<float>>>(resultType);
+                  SimpleAggregateAdapter<AverageAggregate<float>>>(
+                  step, argTypes, resultType);
             case TypeKind::DOUBLE:
             case TypeKind::ROW:
               return std::make_unique<
-                  SimpleAggregateAdapter<AverageAggregate<double>>>(resultType);
+                  SimpleAggregateAdapter<AverageAggregate<double>>>(
+                  step, argTypes, resultType);
             default:
               BOLT_FAIL(
                   "Unsupported result type for final aggregation: {}",
