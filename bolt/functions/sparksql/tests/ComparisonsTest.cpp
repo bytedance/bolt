@@ -29,10 +29,12 @@
  */
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/functions/lib/SIMDComparisonUtil.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "bolt/vector/DecodedVector.h"
 
 #include <bolt/vector/SimpleVector.h>
+#include <array>
 namespace bytedance::bolt::functions::sparksql::test {
 namespace {
 
@@ -702,6 +704,34 @@ TEST_F(ComparisonsTest, testSIMDComparsion) {
   runSIMDCompareAndAssert<TypeKind::TIMESTAMP>(1024);
   runSIMDCompareAndAssert<TypeKind::VARCHAR>(686);
   runSIMDCompareAndAssert<TypeKind::VARBINARY>(777);
+}
+
+TEST_F(ComparisonsTest, to64BitsTreatsNonZeroAsTrue) {
+  std::array<int8_t, 64> resultData{};
+  resultData.fill(0);
+
+  resultData[0] = 1;
+  resultData[1] = -1;
+  resultData[7] = 2;
+  resultData[8] = -3;
+  resultData[15] = 4;
+  resultData[16] = -5;
+  resultData[23] = 6;
+  resultData[31] = -7;
+  resultData[32] = 8;
+  resultData[47] = -9;
+  resultData[63] = 10;
+
+  uint64_t expectedMask = 0;
+  for (size_t i = 0; i < resultData.size(); ++i) {
+    if (resultData[i] != 0) {
+      expectedMask |= (1ULL << i);
+    }
+  }
+
+  EXPECT_EQ(
+      bytedance::bolt::functions::detail::to64Bits(resultData.data()),
+      expectedMask);
 }
 
 TEST_F(ComparisonsTest, lessthan) {
