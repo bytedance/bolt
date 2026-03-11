@@ -807,6 +807,45 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
     } else if (
         auto expandNode =
             std::dynamic_pointer_cast<const core::ExpandNode>(planNode)) {
+      if (i < planNodes.size() - 1) {
+        auto next = planNodes[i + 1];
+        std::shared_ptr<const core::AggregationNode> aggregationNode =
+            std::dynamic_pointer_cast<const core::AggregationNode>(next);
+        if (aggregationNode && isRollupEnabled(expandNode.get(), aggregationNode.get())) {
+          auto expandPtr = std::make_unique<Expand>(id, ctx.get(), expandNode);
+          expandPtr->setRollupEnabled(true);
+          operators.push_back(std::move(expandPtr));
+          auto aggregationPtr = std::make_unique<HashAggregation>(
+              id + 1, ctx.get(), aggregationNode);
+          aggregationPtr->setExpandNode(expandNode);
+          operators.push_back(std::move(aggregationPtr));
+          i++;
+          continue;
+        }
+      }
+      if (i < planNodes.size() - 2) {
+        auto next = planNodes[i + 1];
+        auto third = planNodes[i + 2];
+        std::shared_ptr<const core::ProjectNode> projectNode =
+            std::dynamic_pointer_cast<const core::ProjectNode>(next);
+        std::shared_ptr<const core::AggregationNode> aggregationNode =
+            std::dynamic_pointer_cast<const core::AggregationNode>(third);
+        if (projectNode && aggregationNode &&
+            isRollupEnabled(expandNode.get(), aggregationNode.get())) {
+          auto expandPtr = std::make_unique<Expand>(id, ctx.get(), expandNode);
+          expandPtr->setRollupEnabled(true);
+          operators.push_back(std::move(expandPtr));
+          operators.push_back(std::make_unique<FilterProject>(
+              id + 1, ctx.get(), nullptr, projectNode));
+          auto aggregationPtr = std::make_unique<HashAggregation>(
+              id + 2, ctx.get(), aggregationNode);
+          aggregationPtr->setProjectNode(projectNode);
+          aggregationPtr->setExpandNode(expandNode);
+          operators.push_back(std::move(aggregationPtr));
+          i += 2;
+          continue;
+        }
+      }
       operators.push_back(std::make_unique<Expand>(id, ctx.get(), expandNode));
     } else if (
         auto groupIdNode =
@@ -1037,5 +1076,29 @@ void DriverFactory::registerAdapter(DriverAdapter adapter) {
 
 // static
 std::vector<DriverAdapter> DriverFactory::adapters;
+
+bool DriverFactory::isRollupEnabled(
+    const core::ExpandNode* expandNode,
+    const core::AggregationNode* aggregationNode) {
+  if (!aggregationNode->preGroupedKeys().empty() &&
+      aggregationNode->preGroupedKeys().size() ==
+          aggregationNode->groupingKeys().size()) {
+    return false;
+  }
+  auto projections = expandNode->projections();
+  auto numColumns = expandNode->names().size();
+  bool rollupEnabled = true;
+  for (auto step = 0; step < projections.size(); step++) {
+    if (auto constTypedExpr =
+            std::dynamic_pointer_cast<const core::ConstantTypedExpr>(
+                projections[step][numColumns - 1])) {
+      if (constTypedExpr->value().value<int64_t>() != ((1LL << step) - 1)) {
+        rollupEnabled = false;
+        break;
+      }
+    }
+  }
+  return rollupEnabled;
+}
 
 } // namespace bytedance::bolt::exec
