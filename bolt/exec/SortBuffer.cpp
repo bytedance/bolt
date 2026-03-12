@@ -218,8 +218,12 @@ RowVectorPtr SortBuffer::getOutput(uint32_t maxOutputRows) {
     return nullptr;
   }
 
-  ensureOutputFits();
-  prepareOutput(maxOutputRows);
+  BOLT_CHECK_GT(maxOutputRows, 0);
+  BOLT_CHECK_GT(numInputRows_, numOutputRows_);
+  const vector_size_t batchSize =
+      std::min<uint64_t>(numInputRows_ - numOutputRows_, maxOutputRows);
+  ensureOutputFits(batchSize);
+  prepareOutput(batchSize);
   // bool oldNonReclaimableSection = *nonReclaimableSection_;
   // auto guard = folly::makeGuard([this, oldNonReclaimableSection]() {
   // *nonReclaimableSection_ = oldNonReclaimableSection; });
@@ -327,7 +331,8 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
                << ", reservation: " << succinctBytes(pool()->reservedBytes());
 }
 
-void SortBuffer::ensureOutputFits() {
+void SortBuffer::ensureOutputFits(vector_size_t batchSize) {
+  BOLT_CHECK_GT(batchSize, 0);
   // Check if spilling is enabled or not.
   if (spillConfig_ == nullptr) {
     return;
@@ -339,9 +344,9 @@ void SortBuffer::ensureOutputFits() {
     return;
   }
 
-  if (estimatedOutputRowSize_.has_value()) {
+  if (estimatedOutputRowSize_.has_value() || spiller_ != nullptr) {
     const uint64_t outputBufferSizeToReserve =
-        estimatedOutputRowSize_.value() * 1.2;
+        estimatedOutputRowSize_.value() * batchSize * 1.2;
     {
       memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
       if (pool_->maybeReserve(outputBufferSizeToReserve)) {
@@ -427,13 +432,7 @@ void SortBuffer::spillOutput() {
   finishSpill();
 }
 
-void SortBuffer::prepareOutput(uint32_t maxOutputRows) {
-  BOLT_CHECK_GT(maxOutputRows, 0);
-  BOLT_CHECK_GT(numInputRows_, numOutputRows_);
-
-  const size_t batchSize =
-      std::min<size_t>(numInputRows_ - numOutputRows_, maxOutputRows);
-
+void SortBuffer::prepareOutput(uint32_t batchSize) {
   if (output_ != nullptr) {
     VectorPtr output = std::move(output_);
     BaseVector::prepareForReuse(output, batchSize);
@@ -448,12 +447,11 @@ void SortBuffer::prepareOutput(uint32_t maxOutputRows) {
   }
 
   if (spiller_ != nullptr) {
-    spillSources_.resize(maxOutputRows);
-    spillSourceRows_.resize(maxOutputRows);
+    spillSources_.resize(batchSize);
+    spillSourceRows_.resize(batchSize);
   }
 
   BOLT_CHECK_GT(output_->size(), 0);
-  BOLT_DCHECK_LE(output_->size(), maxOutputRows);
   BOLT_CHECK_LE(output_->size() + numOutputRows_, numInputRows_);
 }
 
