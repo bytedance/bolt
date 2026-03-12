@@ -182,8 +182,12 @@ class RowDeserializer {
 
     serializedRows.reserve(serializedBuffers.size());
     for (const auto& serializedBuffer : serializedBuffers) {
-      serializedRows.push_back(
-          std::string_view(serializedBuffer.data(), serializedBuffer.size()));
+      if constexpr (std::is_same_v<SerializeView, std::string_view>) {
+        serializedRows.push_back(std::string_view(
+            serializedBuffer.data(), serializedBuffer.size()));
+      } else {
+        serializedRows.push_back(serializedBuffer.data());
+      }
     }
   }
 
