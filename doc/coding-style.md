@@ -58,7 +58,7 @@ Many aspects of C++ style will be covered by clang-format, such as spacing,
 line width, indentation and ordering (for includes, using directives and etc). 
 
 * Always ensure your code is clang-format compatible.
-* If you’re working on a legacy file which is not clang-format compliant yet,
+* If you're working on a legacy file which is not clang-format compliant yet,
   refrain from formatting the entire file in the same PR as it pollutes your
   original PR and makes it harder to review.
   * Submit a separate diff/PR with the format-only changes.
@@ -92,11 +92,11 @@ Some good practices about code comments:
   * Bolt is growing and starting to be used by multiple compute engines and
     teams; as a result, more time will be spent reading code than writing it.
 * Overall goal: make the code more obvious and remove obscurity.
-* Comments should capture information that was on the writer’s mind, but
-  **couldn’t be represented as code.**
+* Comments should capture information that was on the writer's mind, but
+  **couldn't be represented as code.**
   * As such, refrain from adding obvious comments, e.g: simple getter/setter
     methods.
-  * However, “obviousness” is in the reader’s mind - if a reviewer says
+  * However, “obviousness” is in the reader's mind - if a reviewer says
     something is not obvious, then it is not obvious. 
     * Consider that the audience is an experienced Software Engineer with a
       moderate knowledge of the codebase.
@@ -154,7 +154,7 @@ About comment style:
 
   * Include enough context in the comment itself to make clear what will be
     done, without requiring any references from outside the code.
-  * Do not include the author’s username. If required, this can always be
+  * Do not include the author's username. If required, this can always be
     retrieved from git blame.
 
 ## Asserts and CHECKs
@@ -211,7 +211,7 @@ About comment style:
 * For member variables:
   * Group member variable and methods based on their visibility (public,
     protected and private)
-    * It’s ok to have multiple blocks for a given level. 
+    * It's ok to have multiple blocks for a given level. 
   * Most member variables should come with a short comment description and an
     empty line above that. 
   * Refrain from using public member variables whenever possible, in order to
@@ -234,7 +234,7 @@ About comment style:
 
 * Always use `nullptr` if you need a constant that represents a null pointer
   (`T*` for some `T`); use `0` otherwise for a zero value.
-* For large literal numbers, use ‘ to make it more readable, e.g:  `1’000’000`
+* For large literal numbers, use `'` to make it more readable, e.g:  `1'000'000`
   instead of `1000000`.
 * For floating point literals, never omit the initial 0 before the decimal
   point (always `0.5`, not `.5`).
@@ -279,7 +279,7 @@ macro names are always upper-snake-case. Also:
 * Included files and using declarations should all be at the top of the file,
   and ordered properly to make it easier to see what is included. 
   * Use clang-format to order your include and using directives.
-* Includes should always use the full path (relative to github’s root dir).
+* Includes should always use the full path (relative to github's root dir).
 * Whenever possible, try to forward-declare as much as possible in the .h and
   only `#include` things you need the full implementation for. 
   * For instance, if you just use a `Class*` or `Class&` in a header file,
@@ -305,7 +305,7 @@ macro names are always upper-snake-case. Also:
 
 * Const
   * All objects, whenever possible, should be passed to functions as const-refs
-    (`const T&`). This makes APIs much clearer as to whether it’s an input or
+    (`const T&`). This makes APIs much clearer as to whether it's an input or
     output arg, reduces the need for NULL-checks (and reduces crashing bugs),
     and helps enforce good encapsulation.
     * An obvious exception is objects that are trivially copy- or
@@ -320,7 +320,7 @@ macro names are always upper-snake-case. Also:
     `std::optional`; raw pointers are also appropriate.
   * For output, mutable, or in/out parameters:
     * Non-const ref is the recommendation if the argument is not nullable. 
-    * If it’s nullable, use a raw pointer.
+    * If it's nullable, use a raw pointer.
   * Always use `std::optional` instead of `folly::Optional` and
     `boost::optional`. 
 * Prefer `std::string_view` to `const std::string&`
@@ -338,9 +338,9 @@ macro names are always upper-snake-case. Also:
     InPredicate::InPredicate(folly::F14HashSet<T> rhs) : rhs_(std::move(rhs))
     {} ```
   * However, the first requires either a std::move() or an explicit copy at the
-    call point; the second doesn’t. The performance of the two should be almost
+    call point; the second doesn't. The performance of the two should be almost
     identical.
-* Add comments when it’s not clear which argument is intended in a function
+* Add comments when it's not clear which argument is intended in a function
   call.  This is particularly a problem for longer signatures with repeated
   types or constant arguments. For example, `phrobinicate(/*elements=*/{1, 2},
   /*startOffset=*/0, /*length=*/2)`
@@ -377,13 +377,13 @@ myFunc();
   chunks of related code and prevent identifier clashes.
   * Namespaces should make it easier to code, not harder. Refrain from creating
     hierarchies that are way too long.
-  * Namespace don’t necessarily need to reflect the on-disk layout. 
-    * This isn’t java.
+  * Namespace don't necessarily need to reflect the on-disk layout. 
+    * This isn't java.
 * Guidelines for importing namespaces:
   * Don't EVER put `using namespace anything;` OR `using anything::anything;`
     in a header file. This pollutes the global namespace and makes it extremely
     difficult to refactor code.
-  * It’s very useful to not have to fully-qualify types as it can make code
+  * It's very useful to not have to fully-qualify types as it can make code
     more readable. In header files, it's unavoidable. ALWAYS fully qualify
     names in a header (e.g. it's `std::string`, not just `string`).
   * In cpp files, best practice is to add a using declaration after your list
