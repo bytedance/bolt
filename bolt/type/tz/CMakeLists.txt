@@ -28,7 +28,7 @@
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
-bolt_add_library(bolt_type_tz TimeZoneDatabase.cpp TimeZoneMap.cpp TimeZoneMap.h TimeZoneNames.cpp)
+bolt_add_library(bolt_type_tz TimeZoneDatabase.cpp TimeZoneLinks.cpp TimeZoneMap.cpp TimeZoneMap.h TimeZoneNames.cpp)
 
 target_link_libraries(bolt_type_tz
           PUBLIC

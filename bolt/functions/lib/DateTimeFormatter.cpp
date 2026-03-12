@@ -41,6 +41,12 @@
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
+
+namespace bytedance::bolt::tz {
+// Defined in TimeZoneLinks.cpp
+extern const std::unordered_map<std::string, std::string>& getTimeZoneLinks();
+} // namespace bytedance::bolt::tz
+
 namespace bytedance::bolt::functions {
 
 static thread_local std::string timezoneBuffer = "+00:00";
@@ -536,6 +542,56 @@ std::string formatFractionOfSecond(
   // Adding KBase can align the prefix 0
   auto subsecondsStr = std::to_string(subseconds + KBase);
   return subsecondsStr.substr(1, minRepresentDigits);
+}
+
+int32_t appendTimezoneOffset(int64_t offset, char* result, bool includeColon) {
+  int pos = 0;
+  if (offset >= 0) {
+    result[pos++] = '+';
+  } else {
+    result[pos++] = '-';
+    offset = -offset;
+  }
+
+  const auto hours = offset / 60 / 60;
+  if (hours < 10) {
+    result[pos++] = '0';
+    result[pos++] = char(hours + '0');
+  } else {
+    result[pos++] = char(hours / 10 + '0');
+    result[pos++] = char(hours % 10 + '0');
+  }
+
+  if (includeColon) {
+    result[pos++] = ':';
+  }
+
+  const auto minutes = (offset / 60) % 60;
+  if LIKELY (minutes == 0) {
+    result[pos++] = '0';
+    result[pos++] = '0';
+  } else if (minutes < 10) {
+    result[pos++] = '0';
+    result[pos++] = char(minutes + '0');
+  } else {
+    result[pos++] = char(minutes / 10 + '0');
+    result[pos++] = char(minutes % 10 + '0');
+  }
+
+  const auto seconds = offset % 60;
+  if (seconds > 0) {
+    result[pos++] = ':';
+
+    if (seconds < 10) {
+      result[pos++] = '0';
+      result[pos++] = char(seconds + '0');
+    } else {
+      result[pos++] = char(seconds / 10 + '0');
+      result[pos++] = char(seconds % 10 + '0');
+    }
+  }
+
+  return pos;
 }
 
 // According to DateTimeFormatSpecifier enum class
@@ -1128,10 +1184,15 @@ int32_t DateTimeFormatter::format(
     char* result,
     bool allowOverflow,
     TimePolicy timePolicy,
-    bool isPrecision) const {
+    bool isPrecision,
+    const std::optional<std::string>& zeroOffsetText) const {
   Timestamp t = timestamp;
+  int64_t offset = 0;
   if (timezone != nullptr) {
+    const auto utcSeconds = timestamp.getSeconds();
     t.toTimezone(*timezone);
+
+    offset = t.getSeconds() - utcSeconds;
   }
   const auto civilDateTime =
       util::toCivilDateTime(t, allowOverflow, isPrecision);
@@ -1469,9 +1530,41 @@ int32_t DateTimeFormatter::format(
           result += piece.length();
         } break;
 
-        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID:
-          // TODO: implement timezone offset id formatting, need a map from full
-          // name to offset time
+        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID: {
+          // Zone: 'Z' outputs offset without a colon, 'ZZ' outputs the offset
+          // with a colon, 'ZZZ' or more outputs the zone id.
+          if (offset == 0 && zeroOffsetText.has_value()) {
+            std::memcpy(result, zeroOffsetText->data(), zeroOffsetText->size());
+            result += zeroOffsetText->size();
+            break;
+          }
+
+          if (timezone == nullptr) {
+            BOLT_USER_FAIL("Timezone unknown");
+          }
+
+          if (token.pattern.minRepresentDigits >= 3) {
+            // Append the time zone ID.
+            const auto& piece = timezone->name();
+
+            static const auto& timeZoneLinks = tz::getTimeZoneLinks();
+            auto timeZoneLinksIter = timeZoneLinks.find(piece);
+            if (timeZoneLinksIter != timeZoneLinks.end()) {
+              const auto& timeZoneLink = timeZoneLinksIter->second;
+              std::memcpy(result, timeZoneLink.data(), timeZoneLink.length());
+              result += timeZoneLink.length();
+              break;
+            }
+
+            std::memcpy(result, piece.data(), piece.length());
+            result += piece.length();
+            break;
+          }
+
+          result += appendTimezoneOffset(
+              offset, result, token.pattern.minRepresentDigits == 2);
+          break;
+        }
         default:
           BOLT_UNSUPPORTED(
               "format is not supported for specifier {}",

@@ -51,6 +51,7 @@ add_executable(
   FactorialTest.cpp
   FromJsonTest.cpp
   FromJsonTest.cpp
+  FromToJsonRoundTripTest.cpp
   GetArrayStructFieldsTest.cpp
   GetStructFieldTest.cpp
   HashTest.cpp
@@ -82,6 +83,7 @@ add_executable(
   SparkSqlDateTimeFunctionsTest.cpp
   SplitFunctionsTest.cpp
   StringTest.cpp
+  ToJsonTest.cpp
   UdfMapArrayCombineTest.cpp
   UdfMapFilterKeysTest.cpp
   UdfMapUpdateTest.cpp
