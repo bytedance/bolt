@@ -13,7 +13,7 @@ runs:
         tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
         tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
         EOF
-        echo "core.download:parallel=16" >> ~/.conan2/global.conf
+        echo "core.download:parallel=8" >> ~/.conan2/global.conf
 
     - name: Add CI conan remote
       shell: bash
