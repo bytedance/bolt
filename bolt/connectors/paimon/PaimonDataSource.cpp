@@ -167,7 +167,7 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     newRowVec->setNulls(row->nulls());
 
     LOG(INFO) << "New RowVector size: " << newRowVec->size() << ", number of fields: " << newRowType->size();
-    LOG(INFO) << newRowVec->toPrettyString();
+    // LOG(INFO) << newRowVec->toPrettyString();
     completedRows_ += newRowVec->size();
 
     return newRowVec;

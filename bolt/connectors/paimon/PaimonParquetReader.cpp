@@ -31,7 +31,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   }
 
   void initializeRowReaderWithFullSchema() {
-    LOG(INFO) << "Initializing rowReader_ with full file schema: " << reader_->rowType()->toString();
+    //LOG(INFO) << "Initializing rowReader_ with full file schema: " << reader_->rowType()->toString();
     dwio::common::RowReaderOptions opts;
     opts.setScanSpec(buildScanSpecFromRowType(reader_->rowType()));
     rowReader_ = reader_->createRowReader(opts);
@@ -43,7 +43,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       int32_t batch_size,
       std::shared_ptr<memory::MemoryPool> pool)
       : reader_(std::move(reader)), batch_size_(batch_size), pool_(std::move(pool)), readType_(reader_->rowType()) {
-    LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() = " << reader_->rowType()->toString();
+    //LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() = " << reader_->rowType()->toString();
   }
 
   ::paimon::Result<std::unique_ptr<::ArrowSchema>> GetFileSchema()
@@ -51,7 +51,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
     auto schema = std::make_unique<::ArrowSchema>();
 
     const auto& fileRowType = reader_->rowType();
-    LOG(INFO) << "GetFileSchema: file schema = " << fileRowType->toString();
+    // LOG(INFO) << "GetFileSchema: file schema = " << fileRowType->toString();
 
     auto dummyVector = BaseVector::create(fileRowType, 0, pool_.get());
 
@@ -77,10 +77,10 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       if (!rowType) {
         return ::paimon::Status::Invalid("Read schema must be a struct/row type");
       }
-      LOG(INFO) << "SetReadSchema: requested read schema = " << rowType->toString();
-      for (int i = 0; i < rowType->size(); ++i) {
-        LOG(INFO) << "SetReadSchema requested column[" << i << "]: " << rowType->nameOf(i) << " (" << rowType->childAt(i)->toString() << ")";
-      }
+      //LOG(INFO) << "SetReadSchema: requested read schema = " << rowType->toString();
+      // for (int i = 0; i < rowType->size(); ++i) {
+      //   LOG(INFO) << "SetReadSchema requested column[" << i << "]: " << rowType->nameOf(i) << " (" << rowType->childAt(i)->toString() << ")";
+      // }
 
       std::vector<std::string> dataColumnNames;
       int startIndex = 0;
@@ -90,7 +90,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
       dwio::common::RowReaderOptions opts;
     auto fileRowType = reader_->rowType();
-    LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
+    // LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
 
     opts.setScanSpec(buildScanSpecFromRowType(rowType));
     auto selector = std::make_shared<dwio::common::ColumnSelector>(fileRowType, dataColumnNames);
@@ -119,8 +119,8 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         return ::paimon::BatchReader::MakeEofBatch();
       }
 
-      LOG(INFO) << "NextBatch: result has type " << result->type()->toString();
-      LOG(INFO) << "NextBatch: number of rows in batch = " << result->size();
+      // LOG(INFO) << "NextBatch: result has type " << result->type()->toString();
+      // LOG(INFO) << "NextBatch: number of rows in batch = " << result->size();
 
       auto arrowArray = std::make_unique<::ArrowArray>();
       auto arrowSchema = std::make_unique<::ArrowSchema>();
@@ -130,11 +130,11 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       exportToArrow(result, *arrowSchema, opts);
 
       LOG(INFO) << "NextBatch: exported ArrowSchema has " << arrowSchema->n_children << " children";
-      for (int i = 0; i < arrowSchema->n_children; ++i) {
-        LOG(INFO) << "NextBatch exported child[" << i << "]: name=" << (arrowSchema->children[i]->name ? arrowSchema->children[i]->name : "")
-                  << ", format=" << (arrowSchema->children[i]->format ? arrowSchema->children[i]->format : "");
-      }
-      LOG(INFO) << "NextBatch: exported ArrowArray has length " << arrowArray->length;
+      // for (int i = 0; i < arrowSchema->n_children; ++i) {
+      //   LOG(INFO) << "NextBatch exported child[" << i << "]: name=" << (arrowSchema->children[i]->name ? arrowSchema->children[i]->name : "")
+      //             << ", format=" << (arrowSchema->children[i]->format ? arrowSchema->children[i]->format : "");
+      // }
+      // LOG(INFO) << "NextBatch: exported ArrowArray has length " << arrowArray->length;
 
       return std::make_pair(std::move(arrowArray), std::move(arrowSchema));
     } catch (const std::exception& e) {
