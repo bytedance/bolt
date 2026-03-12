@@ -98,6 +98,10 @@ SortBuffer::SortBuffer(
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
 }
 
+SortBuffer::~SortBuffer() {
+  pool_->release();
+}
+
 void SortBuffer::addInput(const VectorPtr& input) {
   BOLT_CHECK(!noMoreInput_);
   ensureInputFits(input);
@@ -127,6 +131,8 @@ void SortBuffer::addInput(const VectorPtr& input) {
 }
 
 void SortBuffer::noMoreInput() {
+  bolt::common::testutil::TestValue::adjust(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput", this);
   BOLT_CHECK(!noMoreInput_);
   noMoreInput_ = true;
 
@@ -212,6 +218,7 @@ RowVectorPtr SortBuffer::getOutput(uint32_t maxOutputRows) {
     return nullptr;
   }
 
+  ensureOutputFits();
   prepareOutput(maxOutputRows);
   // bool oldNonReclaimableSection = *nonReclaimableSection_;
   // auto guard = folly::makeGuard([this, oldNonReclaimableSection]() {
@@ -318,6 +325,35 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
                << " for memory pool " << pool()->name()
                << ", usage: " << succinctBytes(pool()->currentBytes())
                << ", reservation: " << succinctBytes(pool()->reservedBytes());
+}
+
+void SortBuffer::ensureOutputFits() {
+  // Check if spilling is enabled or not.
+  if (spillConfig_ == nullptr) {
+    return;
+  }
+
+  // Test-only spill path.
+  if (testingTriggerSpill()) {
+    spill();
+    return;
+  }
+
+  if (estimatedOutputRowSize_.has_value()) {
+    const uint64_t outputBufferSizeToReserve =
+        estimatedOutputRowSize_.value() * 1.2;
+    {
+      memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
+      if (pool_->maybeReserve(outputBufferSizeToReserve)) {
+        return;
+      }
+    }
+    LOG(WARNING) << "Failed to reserve "
+                 << succinctBytes(outputBufferSizeToReserve)
+                 << " for memory pool " << pool_->name()
+                 << ", usage: " << succinctBytes(pool_->usedBytes())
+                 << ", reservation: " << succinctBytes(pool_->reservedBytes());
+  }
 }
 
 void SortBuffer::updateEstimatedOutputRowSize() {

@@ -59,6 +59,8 @@ class SortBuffer {
       uint64_t spillMemoryThreshold = 0,
       OperatorCtx* operatorCtx = nullptr);
 
+  ~SortBuffer();
+
   void addInput(const VectorPtr& input);
 
   /// Indicates no more input and triggers either of:
@@ -147,6 +149,9 @@ class SortBuffer {
  private:
   // Ensures there is sufficient memory reserved to process 'input'.
   void ensureInputFits(const VectorPtr& input);
+  // Reserves memory for output processing. If reservation cannot be increased,
+  // spills enough to make output fit.
+  void ensureOutputFits();
   void updateEstimatedOutputRowSize();
   // Invoked to initialize or reset the reusable output buffer to get output.
   void prepareOutput(uint32_t maxOutputRows);
