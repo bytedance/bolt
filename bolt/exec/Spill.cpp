@@ -337,6 +337,47 @@ uint32_t FileSpillMergeStream::id() const {
   return spillFile_->id();
 }
 
+std::unique_ptr<SpillMergeStream> ConcatFilesSpillMergeStream::create(
+    uint32_t id,
+    std::vector<std::unique_ptr<SpillReadFile>> spillFiles) {
+  auto spillStream = std::unique_ptr<ConcatFilesSpillMergeStream>(
+      new ConcatFilesSpillMergeStream(id, std::move(spillFiles)));
+  spillStream->nextBatch();
+  return spillStream;
+}
+
+uint32_t ConcatFilesSpillMergeStream::id() const {
+  return id_;
+}
+
+void ConcatFilesSpillMergeStream::nextBatch() {
+  BOLT_CHECK(!closed_);
+  index_ = 0;
+  for (; fileIndex_ < spillFiles_.size(); ++fileIndex_) {
+    BOLT_CHECK_NOT_NULL(spillFiles_[fileIndex_]);
+    if (spillFiles_[fileIndex_]->nextBatch(rowVector_)) {
+      BOLT_CHECK_NOT_NULL(rowVector_);
+      size_ = rowVector_->size();
+      return;
+    }
+    spillFiles_[fileIndex_].reset();
+  }
+  size_ = 0;
+  close();
+}
+
+void ConcatFilesSpillMergeStream::close() {
+  BOLT_CHECK(!closed_);
+  SpillMergeStream::close();
+  spillFiles_.clear();
+}
+
+const std::vector<SpillSortKey>& ConcatFilesSpillMergeStream::sortingKeys()
+    const {
+  BOLT_CHECK(!closed_);
+  return spillFiles_[fileIndex_]->sortingKeys();
+}
+
 void FileSpillMergeStream::nextBatch() {
   BOLT_CHECK(!closed_);
   MicrosecondTimer timer(&spillReadTimeUs_);

@@ -534,6 +534,33 @@ class RowBasedFileSpillBatchStream : public BatchStream {
   std::unique_ptr<RowBasedSpillReadFile> spillFile_;
 };
 
+/// A SpillMergeStream that contains a sequence of sorted spill files, the
+/// sorted keys are ordered both within each file and across files.
+class ConcatFilesSpillMergeStream final : public SpillMergeStream {
+ public:
+  static std::unique_ptr<SpillMergeStream> create(
+      uint32_t id,
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles);
+
+ private:
+  ConcatFilesSpillMergeStream(
+      uint32_t id,
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles)
+      : id_(id), spillFiles_(std::move(spillFiles)) {}
+
+  uint32_t id() const override;
+
+  void nextBatch() override;
+
+  void close() override;
+
+  const std::vector<SpillSortKey>& sortingKeys() const override;
+
+  const uint32_t id_;
+  std::vector<std::unique_ptr<SpillReadFile>> spillFiles_;
+  size_t fileIndex_{0};
+};
+
 /// Identifies a spill partition generated from a given spilling operator. It
 /// consists of partition start bit offset and the actual partition number. The
 /// start bit offset is used to calculate the partition number of spill data. It
