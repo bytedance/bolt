@@ -266,6 +266,12 @@ RowVectorPtr NestedLoopJoinProbe::getOutput() {
     // probe mismatches (for left joins).
     output = generateOutput();
   }
+  // Refine outputBatchSize_ based on actual output row size for subsequent
+  // batches.
+  if (output && output->size() > 0) {
+    outputBatchSize_ =
+        outputBatchRows(output->estimateFlatSize() / output->size());
+  }
   return output;
 }
 
@@ -456,6 +462,23 @@ void NestedLoopJoinProbe::prepareOutput() {
     return;
   }
 
+  // Estimate average output row size to compute a byte-budget-aware
+  // outputBatchSize_ before allocating the output vectors. This prevents the
+  // first batch from being too large and OOMing during copyBuildValues(),
+  // and also keeps the output size within preferredOutputBatchBytes for
+  // downstream operators.
+  //
+  // Re-estimated each time since input_ may change between probe batches
+  // (different avgProbeRowSize). updateOutputBatchSize() also refines after
+  // each output based on actual estimateFlatSize().
+  if (input_ && input_->size() > 0 && buildVectors_.has_value() &&
+      !buildVectors_->empty() && buildVectors_->front()->size() > 0) {
+    const auto& firstBuild = buildVectors_->front();
+    outputBatchSize_ = outputBatchRows(
+        firstBuild->estimateFlatSize() / firstBuild->size() +
+        input_->estimateFlatSize() / input_->size());
+  }
+
   std::vector<VectorPtr> localColumns(outputType_->size());
 
   probeOutputIndices_ = allocateIndices(outputBatchSize_, pool());
@@ -570,7 +593,7 @@ RowVectorPtr NestedLoopJoinProbe::genCrossProductSingleBuildVector(
     probeRowCount_ = 1;
   } else {
     probeRowCount_ = std::min(
-        (vector_size_t)outputBatchSize_ / buildRowCount,
+        static_cast<vector_size_t>(outputBatchSize_ / buildRowCount),
         input_->size() - probeRow_);
   }
   const size_t numOutputRows = probeRowCount_ * buildRowCount;

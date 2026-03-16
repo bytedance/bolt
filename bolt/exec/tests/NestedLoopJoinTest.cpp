@@ -742,5 +742,68 @@ TEST_F(NestedLoopJoinTest, mergeBuildVectorsOverflow) {
   ASSERT_EQ(mergeResult.size(), 2);
 }
 
+// Reproduces an OOM scenario where NLJ with wide build-side rows
+// (ARRAY<VARCHAR>) causes copyBuildValues() to request huge memory during
+// buffer doubling. With the dynamic batch size adjustment in prepareOutput(),
+// the outputBatchSize_ is reduced based on avg row size, preventing OOM.
+TEST_F(NestedLoopJoinTest, dynamicBatchSizeWithWideBuildRows) {
+  // Build side: 4 rows with a large ARRAY<VARCHAR> column.
+  // Each array has 200 elements of ~500-byte strings ≈ 100KB per row.
+  constexpr int32_t kBuildRows = 4;
+  constexpr int32_t kArraySize = 200;
+  const std::string kLargeString(500, 'x');
+
+  auto buildArrays = vectorMaker_.arrayVector<StringView>(
+      kBuildRows,
+      /*sizeAt*/ [&](auto /*row*/) { return kArraySize; },
+      /*valueAt*/
+      [&](auto /*idx*/) { return StringView(kLargeString); });
+  auto buildKeys =
+      makeFlatVector<int64_t>(kBuildRows, [](auto row) { return row; });
+  auto buildVectors = makeRowVector({"u0", "u1"}, {buildKeys, buildArrays});
+
+  // Probe side: 1000 rows with a key column and a VARCHAR column.
+  constexpr int32_t kProbeRows = 1'000;
+  const std::string kProbeString(200, 'y');
+
+  auto probeKeys = makeFlatVector<int64_t>(
+      kProbeRows, [](auto row) { return row % kBuildRows; });
+  auto probeStrings = makeFlatVector<StringView>(
+      kProbeRows, [&](auto /*row*/) { return StringView(kProbeString); });
+  auto probeVectors = makeRowVector({"t0", "t1"}, {probeKeys, probeStrings});
+
+  // Use a memory pool with a cap small enough to trigger OOM without the fix
+  // (~10MB), but large enough to succeed with dynamic batch sizing.
+  constexpr int64_t kMemoryCap = 50LL << 20; // 50MB
+  auto rootPool =
+      memory::memoryManager()->addRootPool("dynamicBatchSizeTest", kMemoryCap);
+  auto queryCtx = core::QueryCtx::create(
+      executor_.get(),
+      core::QueryConfig{{}},
+      /*connectorConfigs*/ {},
+      /*cache*/ cache::AsyncDataCache::getInstance(),
+      std::move(rootPool));
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values({probeVectors})
+                  .nestedLoopJoin(
+                      PlanBuilder(planNodeIdGenerator)
+                          .values({buildVectors})
+                          .planNode(),
+                      /*joinCondition*/ "t0 = u0",
+                      /*outputLayout*/ {"t0", "t1", "u1"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  // With dynamic batch sizing, the batch size is reduced before the first
+  // batch, preventing the large reallocation.
+  auto result = AssertQueryBuilder(plan).queryCtx(queryCtx).copyResults(pool());
+
+  // Verify correctness: each probe row matches exactly 1 build row
+  // (t0 = u0 where t0 = row % 4), so output should have kProbeRows rows.
+  ASSERT_EQ(result->size(), kProbeRows);
+}
+
 } // namespace
 } // namespace bytedance::bolt::exec::test
