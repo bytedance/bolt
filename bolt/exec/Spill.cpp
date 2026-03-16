@@ -39,12 +39,14 @@
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
 void SpillMergeStream::pop() {
+  BOLT_CHECK(!closed_);
   if (++index_ >= size_) {
     setNextBatch();
   }
 }
 
 int32_t SpillMergeStream::compare(const MergeStream& other) const {
+  BOLT_CHECK(!closed_);
   auto& otherStream = static_cast<const SpillMergeStream&>(other);
   auto& children = rowVector_->children();
   auto& otherChildren = otherStream.current().children();
@@ -77,6 +79,16 @@ int32_t SpillMergeStream::compare(const MergeStream& other) const {
     } while (++key < numSortKeys());
   }
   return 0;
+}
+
+void SpillMergeStream::close() {
+  BOLT_CHECK(!closed_);
+  closed_ = true;
+  rowVector_.reset();
+  decoded_.clear();
+  rows_.resize(0);
+  index_ = 0;
+  size_ = 0;
 }
 
 SpillState::SpillState(
@@ -318,18 +330,27 @@ SpillPartition::createUnorderedReader(
 }
 
 uint32_t FileSpillMergeStream::id() const {
+  BOLT_CHECK(!closed_);
   return spillFile_->id();
 }
 
 void FileSpillMergeStream::nextBatch() {
+  BOLT_CHECK(!closed_);
   MicrosecondTimer timer(&spillReadTimeUs_);
   index_ = 0;
   if (!spillFile_->nextBatch(rowVector_)) {
     spillReadIOTimeUs_ += spillFile_->getSpillReadIOTime();
     size_ = 0;
+    close();
     return;
   }
   size_ = rowVector_->size();
+}
+
+void FileSpillMergeStream::close() {
+  BOLT_CHECK(!closed_);
+  SpillMergeStream::close();
+  spillFile_.reset();
 }
 
 std::unique_ptr<TreeOfLosers<SpillMergeStream>>

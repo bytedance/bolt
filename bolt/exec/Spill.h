@@ -73,6 +73,7 @@ class SpillMergeStream : public MergeStream {
   void pop();
 
   const RowVector& current() const {
+    BOLT_CHECK(!closed_);
     return *rowVector_;
   }
 
@@ -83,6 +84,7 @@ class SpillMergeStream : public MergeStream {
   /// batch, in which case the caller must call copy out current batch data if
   /// required before calling pop().
   vector_size_t currentIndex(bool* isLastRow = nullptr) const {
+    BOLT_CHECK(!closed_);
     if (isLastRow != nullptr) {
       *isLastRow = (index_ == (rowVector_->size() - 1));
     }
@@ -91,6 +93,7 @@ class SpillMergeStream : public MergeStream {
 
   /// Returns a DecodedVector set decoding the 'index'th child of 'rowVector_'
   DecodedVector& decoded(int32_t index) {
+    BOLT_CHECK(!closed_);
     ensureDecodedValid(index);
     return decoded_[index];
   }
@@ -113,6 +116,8 @@ class SpillMergeStream : public MergeStream {
   virtual const std::vector<CompareFlags>& sortCompareFlags() const = 0;
 
   virtual void nextBatch() = 0;
+
+  virtual void close();
 
   // loads the next 'rowVector' and sets 'decoded_' if this is initialized.
   void setNextBatch() {
@@ -142,6 +147,9 @@ class SpillMergeStream : public MergeStream {
       rows_.resize(size_);
     }
   }
+
+  // True if the stream is closed.
+  bool closed_{false};
 
   // Current batch of rows.
   RowVectorPtr rowVector_;
@@ -203,14 +211,18 @@ class FileSpillMergeStream : public SpillMergeStream {
   }
 
   int32_t numSortKeys() const override {
+    BOLT_CHECK(!closed_);
     return spillFile_->numSortKeys();
   }
 
   const std::vector<CompareFlags>& sortCompareFlags() const override {
+    BOLT_CHECK(!closed_);
     return spillFile_->sortCompareFlags();
   }
 
   void nextBatch() override;
+
+  void close() override;
 
   std::unique_ptr<SpillReadFile> spillFile_;
 };

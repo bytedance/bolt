@@ -376,7 +376,9 @@ class RowContainerSpillMergeStream : public SpillMergeStream {
     // since this is all processed row by row.
     static constexpr vector_size_t kMaxRows = 64;
     constexpr uint64_t kMaxBytes = 1 << 18;
+    BOLT_CHECK(!closed_);
     if (nextBatchIndex_ >= rows_.size()) {
+      close();
       index_ = 0;
       size_ = 0;
       return;
@@ -385,6 +387,12 @@ class RowContainerSpillMergeStream : public SpillMergeStream {
         rows_, kMaxRows, kMaxBytes, rowVector_, nextBatchIndex_);
     size_ = rowVector_->size();
     index_ = 0;
+  }
+
+  void close() override {
+    BOLT_CHECK(!closed_);
+    SpillMergeStream::close();
+    rows_.clear();
   }
 
   const int32_t numSortKeys_;
