@@ -508,8 +508,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           type_,
           rowContainer_.get(),
           rowType_,
-          rowContainer_->keyTypes().size(),
-          compareFlags_,
+          SpillState::makeSortingKeys(compareFlags_),
           &spillConfig_);
     } else if (
         type_ == Spiller::Type::kAggregateOutput ||

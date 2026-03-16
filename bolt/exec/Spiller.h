@@ -79,8 +79,7 @@ class Spiller {
       Type type,
       RowContainer* container,
       RowTypePtr rowType,
-      int32_t numSortingKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       const common::SpillConfig* spillConfig);
 
   /// type == Type::kAggregateOutput || type == Type::kOrderByOutput
@@ -277,8 +276,7 @@ class Spiller {
       RowContainer* container,
       RowTypePtr rowType,
       HashBitRange bits,
-      int32_t numSortingKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       const common::SpillConfig::SpillIOConfig& ioConfig,
       uint64_t targetFileSize,
       folly::Executor* executor,
@@ -407,6 +405,8 @@ class Spiller {
   const HashBitRange bits_;
   const RowTypePtr rowType_;
   const uint64_t maxSpillRunRows_;
+
+  const std::vector<CompareFlags> compareFlags_;
 
   // True if all rows of spilling partitions are in 'spillRuns_', so
   // that one can start reading these back. This means that the rows

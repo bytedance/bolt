@@ -47,36 +47,20 @@ void SpillMergeStream::pop() {
 
 int32_t SpillMergeStream::compare(const MergeStream& other) const {
   BOLT_CHECK(!closed_);
-  auto& otherStream = static_cast<const SpillMergeStream&>(other);
-  auto& children = rowVector_->children();
-  auto& otherChildren = otherStream.current().children();
-  int32_t key = 0;
-  if (sortCompareFlags().empty()) {
-    do {
-      auto result = children[key]
-                        ->compare(
-                            otherChildren[key].get(),
-                            index_,
-                            otherStream.index_,
-                            CompareFlags())
-                        .value();
-      if (result != 0) {
-        return result;
-      }
-    } while (++key < numSortKeys());
-  } else {
-    do {
-      auto result = children[key]
-                        ->compare(
-                            otherChildren[key].get(),
-                            index_,
-                            otherStream.index_,
-                            sortCompareFlags()[key])
-                        .value();
-      if (result != 0) {
-        return result;
-      }
-    } while (++key < numSortKeys());
+  const auto& otherStream = static_cast<const SpillMergeStream&>(other);
+  const auto& children = rowVector_->children();
+  const auto& otherChildren = otherStream.current().children();
+  for (const auto& [key, compareFlags] : sortingKeys()) {
+    const auto result = children[key]
+                            ->compare(
+                                otherChildren[key].get(),
+                                index_,
+                                otherStream.index_,
+                                compareFlags)
+                            .value();
+    if (result != 0) {
+      return result;
+    }
   }
   return 0;
 }
@@ -94,20 +78,41 @@ void SpillMergeStream::close() {
 SpillState::SpillState(
     const common::SpillConfig::SpillIOConfig& ioConfig,
     int32_t maxPartitions,
-    int32_t numSortKeys,
-    const std::vector<CompareFlags>& sortCompareFlags,
+    const std::vector<SpillSortKey>& sortingKeys,
     uint64_t targetFileSize,
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats)
     : ioConfig_(ioConfig),
       maxPartitions_(maxPartitions),
-      numSortKeys_(numSortKeys),
-      sortCompareFlags_(sortCompareFlags),
+      sortingKeys_(sortingKeys),
       targetFileSize_(targetFileSize),
       pool_(pool),
       stats_(stats),
       partitionWriters_(maxPartitions_) {
   spilledRowCount_.resize(maxPartitions_, 0);
+}
+
+std::vector<SpillSortKey> SpillState::makeSortingKeys(
+    const std::vector<CompareFlags>& compareFlags) {
+  std::vector<SpillSortKey> sortingKeys;
+  sortingKeys.reserve(compareFlags.size());
+  for (column_index_t i = 0; i < compareFlags.size(); ++i) {
+    sortingKeys.emplace_back(i, compareFlags[i]);
+  }
+  return sortingKeys;
+}
+
+std::vector<SpillSortKey> SpillState::makeSortingKeys(
+    const std::vector<column_index_t>& indices,
+    const std::vector<CompareFlags>& compareFlags) {
+  BOLT_CHECK(!indices.empty());
+  BOLT_CHECK_EQ(indices.size(), compareFlags.size());
+  std::vector<SpillSortKey> sortingKeys;
+  sortingKeys.reserve(indices.size());
+  for (auto i = 0; i < indices.size(); i++) {
+    sortingKeys.emplace_back(indices[i], compareFlags[i]);
+  }
+  return sortingKeys;
 }
 
 void SpillState::setPartitionSpilled(uint32_t partition) {
@@ -142,8 +147,7 @@ uint64_t SpillState::appendToPartition(
   if (partitionWriters_.at(partition) == nullptr) {
     partitionWriters_[partition] = std::make_unique<SpillWriter>(
         std::static_pointer_cast<const RowType>(rows->type()),
-        numSortKeys_,
-        sortCompareFlags_,
+        sortingKeys_,
         fmt::format(
             "{}/{}-spill-{}{}",
             spillDir,
@@ -190,8 +194,7 @@ uint64_t SpillState::appendToPartition(
   if (partitionWriters_.at(partition) == nullptr) {
     partitionWriters_[partition] = std::make_unique<SpillWriter>(
         type,
-        numSortKeys_,
-        sortCompareFlags_,
+        sortingKeys_,
         fmt::format(
             "{}/{}-spill-{}", spillDir, ioConfig_.fileNamePrefix, partition),
         targetFileSize_,
@@ -385,7 +388,12 @@ SpillPartition::createRowBasedOrderedReader(
     bool spillUringEnabled) {
 #ifdef ENABLE_BOLT_JIT
   if (rows != nullptr && canJit && RowContainer::JITable(rows->keyTypes())) {
-    auto cmpFlags = files_[0].sortFlags;
+    // Extract compare flags from sorting keys
+    std::vector<CompareFlags> cmpFlags;
+    for (const auto& sortKey : files_[0].sortingKeys) {
+      cmpFlags.push_back(sortKey.second);
+    }
+
     if (cmpFlags.empty()) {
       cmpFlags.resize(rows->keyTypes().size(), CompareFlags());
     }
@@ -425,7 +433,12 @@ SpillPartition::createRowBasedOrderedReaderWithLength(
     bool spillUringEnabled) {
 #ifdef ENABLE_BOLT_JIT
   if (rows != nullptr && canJit && RowContainer::JITable(rows->keyTypes())) {
-    auto cmpFlags = files_[0].sortFlags;
+    // Extract compare flags from sorting keys
+    std::vector<CompareFlags> cmpFlags;
+    for (const auto& sortKey : files_[0].sortingKeys) {
+      cmpFlags.push_back(sortKey.second);
+    }
+
     if (cmpFlags.empty()) {
       cmpFlags.resize(rows->keyTypes().size(), CompareFlags());
     }

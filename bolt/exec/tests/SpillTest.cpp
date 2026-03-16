@@ -183,8 +183,7 @@ class SpillTest : public ::testing::TestWithParam<common::CompressionKind>,
     state_ = std::make_unique<SpillState>(
         ioConfig,
         numPartitions,
-        1,
-        compareFlags,
+        SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
         targetFileSize,
         pool(),
         &stats_);
@@ -497,7 +496,13 @@ TEST_P(SpillTest, spillTimestamp) {
       compressionKind_,
       "",
       std::optional<VectorSerde::Kind>{}};
-  SpillState state(ioConfig, 1, 1, emptyCompareFlags, 1024, pool(), &stats_);
+  SpillState state(
+      ioConfig,
+      1,
+      SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+      1024,
+      pool(),
+      &stats_);
   int partitionIndex = 0;
   state.setPartitionSpilled(partitionIndex);
   ASSERT_TRUE(state.isPartitionSpilled(partitionIndex));

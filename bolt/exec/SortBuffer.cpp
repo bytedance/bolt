@@ -373,12 +373,12 @@ void SortBuffer::updateEstimatedOutputRowSize() {
 void SortBuffer::spillInput() {
   if (spiller_ == nullptr) {
     BOLT_CHECK(!noMoreInput_);
+    const auto sortingKeys = SpillState::makeSortingKeys(sortCompareFlags_);
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kOrderByInput,
         data_.get(),
         spillerStoreType_,
-        data_->keyTypes().size(),
-        sortCompareFlags_,
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
 
