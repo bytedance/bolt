@@ -350,7 +350,10 @@ void FileSpillMergeStream::nextBatch() {
 void FileSpillMergeStream::close() {
   BOLT_CHECK(!closed_);
   SpillMergeStream::close();
+  std::string filePath = spillFile_->testingFilePath();
   spillFile_.reset();
+  auto fs = filesystems::getFileSystem(filePath, nullptr);
+  fs->remove(filePath);
 }
 
 std::unique_ptr<TreeOfLosers<SpillMergeStream>>

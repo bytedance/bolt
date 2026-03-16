@@ -197,13 +197,6 @@ class FileSpillMergeStream : public SpillMergeStream {
 
   uint32_t id() const override;
 
-  ~FileSpillMergeStream() {
-    std::string filePath = spillFile_->testingFilePath();
-    spillFile_.reset();
-    auto fs = filesystems::getFileSystem(filePath, nullptr);
-    fs->remove(filePath);
-  }
-
  private:
   explicit FileSpillMergeStream(std::unique_ptr<SpillReadFile> spillFile)
       : spillFile_(std::move(spillFile)) {
