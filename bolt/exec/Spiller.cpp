@@ -420,12 +420,9 @@ void Spiller::ensureSorted(SpillRun& run) {
   {
     MicrosecondTimer timer(&sortTimeUs);
 
-    std::vector<CompareFlags> compareFlags;
-    bool noFlags = compareFlags_.empty();
-    if (noFlags) {
-      for (auto i = 0; i < container_->keyIndices().size(); ++i)
-        compareFlags.emplace_back(CompareFlags());
-    }
+    auto compareFlags = compareFlags_.empty()
+        ? std::vector<CompareFlags>(container_->keyTypes().size())
+        : compareFlags_;
 
 #ifdef ENABLE_BOLT_JIT
     if (cmp_ == nullptr && spillConfig_ &&
@@ -433,7 +430,7 @@ void Spiller::ensureSorted(SpillRun& run) {
       if (container_->JITable(container_->keyTypes())) {
         auto [jitMod, rowRowCmpfn] = container_->codegenCompare(
             container_->keyTypes(),
-            noFlags ? compareFlags : compareFlags_,
+            compareFlags,
             bytedance::bolt::jit::CmpType::SORT_LESS,
             true);
         jitModule_ = std::move(jitMod);
@@ -447,7 +444,7 @@ void Spiller::ensureSorted(SpillRun& run) {
           run.rows.end(),
           [&](const char* left, const char* right) {
             auto expected =
-                container_->compareRows(left, right, compareFlags_) < 0;
+                container_->compareRows(left, right, compareFlags) < 0;
             auto res = cmp_(left, right) > 0;
             bool jitEqual = (int)res > 0; // as cmp_ may return 255 for true
             if ((expected != jitEqual)) {
@@ -473,13 +470,13 @@ void Spiller::ensureSorted(SpillRun& run) {
           container_,
           sorter_,
           container_->keyIndices(),
-          compareFlags_);
+          compareFlags);
 #else
     sorter_.sort(
         run.rows.begin(),
         run.rows.end(),
         [&](const char* left, const char* right) {
-          return container_->compareRows(left, right, compareFlags_) < 0;
+          return container_->compareRows(left, right, compareFlags) < 0;
         });
 
 #endif

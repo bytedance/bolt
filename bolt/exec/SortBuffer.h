@@ -166,7 +166,6 @@ class SortBuffer {
   void finishSpill();
 
   const RowTypePtr input_;
-  const std::vector<column_index_t> sortColumnIndices_;
   const std::vector<CompareFlags> sortCompareFlags_;
   bolt::memory::MemoryPool* const pool_;
   // The flag is passed from the associated operator such as OrderBy or

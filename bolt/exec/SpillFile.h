@@ -38,7 +38,6 @@
 #include "bolt/common/base/SpillStats.h"
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/file/File.h"
-#include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/UnorderedStreamReader.h"
