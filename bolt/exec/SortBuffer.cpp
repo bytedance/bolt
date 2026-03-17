@@ -98,6 +98,10 @@ SortBuffer::SortBuffer(
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
 }
 
+SortBuffer::~SortBuffer() {
+  pool_->release();
+}
+
 void SortBuffer::addInput(const VectorPtr& input) {
   BOLT_CHECK(!noMoreInput_);
   ensureInputFits(input);
@@ -127,6 +131,8 @@ void SortBuffer::addInput(const VectorPtr& input) {
 }
 
 void SortBuffer::noMoreInput() {
+  bolt::common::testutil::TestValue::adjust(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput", this);
   BOLT_CHECK(!noMoreInput_);
   noMoreInput_ = true;
 
@@ -212,6 +218,7 @@ RowVectorPtr SortBuffer::getOutput(uint32_t maxOutputRows) {
     return nullptr;
   }
 
+  ensureOutputFits();
   prepareOutput(maxOutputRows);
   // bool oldNonReclaimableSection = *nonReclaimableSection_;
   // auto guard = folly::makeGuard([this, oldNonReclaimableSection]() {
@@ -320,6 +327,35 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
                << ", reservation: " << succinctBytes(pool()->reservedBytes());
 }
 
+void SortBuffer::ensureOutputFits() {
+  // Check if spilling is enabled or not.
+  if (spillConfig_ == nullptr) {
+    return;
+  }
+
+  // Test-only spill path.
+  if (testingTriggerSpill()) {
+    spill();
+    return;
+  }
+
+  if (estimatedOutputRowSize_.has_value()) {
+    const uint64_t outputBufferSizeToReserve =
+        estimatedOutputRowSize_.value() * 1.2;
+    {
+      memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
+      if (pool_->maybeReserve(outputBufferSizeToReserve)) {
+        return;
+      }
+    }
+    LOG(WARNING) << "Failed to reserve "
+                 << succinctBytes(outputBufferSizeToReserve)
+                 << " for memory pool " << pool_->name()
+                 << ", usage: " << succinctBytes(pool_->usedBytes())
+                 << ", reservation: " << succinctBytes(pool_->reservedBytes());
+  }
+}
+
 void SortBuffer::updateEstimatedOutputRowSize() {
   const auto optionalRowSize = data_->estimateRowSize();
   if (!optionalRowSize.has_value() || optionalRowSize.value() == 0) {
@@ -337,12 +373,12 @@ void SortBuffer::updateEstimatedOutputRowSize() {
 void SortBuffer::spillInput() {
   if (spiller_ == nullptr) {
     BOLT_CHECK(!noMoreInput_);
+    const auto sortingKeys = SpillState::makeSortingKeys(sortCompareFlags_);
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kOrderByInput,
         data_.get(),
         spillerStoreType_,
-        data_->keyTypes().size(),
-        sortCompareFlags_,
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
 

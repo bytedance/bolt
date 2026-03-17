@@ -48,6 +48,11 @@ struct IndexRange {
   vector_size_t size;
 };
 
+namespace row {
+class CompactRow;
+class UnsafeRowFast;
+} // namespace row
+
 /// Serializer that can iteratively build up a buffer of serialized rows from
 /// one or more RowVectors.
 ///
@@ -75,6 +80,20 @@ class VectorSerializer {
       const RowVectorPtr& vector,
       const folly::Range<const vector_size_t*>& rows,
       Scratch& scratch) {
+    BOLT_UNSUPPORTED("{}", __FUNCTION__);
+  }
+
+  virtual void append(
+      const row::CompactRow& compactRow,
+      const folly::Range<const vector_size_t*>& rows,
+      const std::vector<vector_size_t>& sizes) {
+    BOLT_UNSUPPORTED("{}", __FUNCTION__);
+  }
+
+  virtual void append(
+      const row::UnsafeRowFast& unsafeRow,
+      const folly::Range<const vector_size_t*>& rows,
+      const std::vector<vector_size_t>& sizes) {
     BOLT_UNSUPPORTED("{}", __FUNCTION__);
   }
 

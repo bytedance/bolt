@@ -73,6 +73,7 @@ class SpillMergeStream : public MergeStream {
   void pop();
 
   const RowVector& current() const {
+    BOLT_CHECK(!closed_);
     return *rowVector_;
   }
 
@@ -83,6 +84,7 @@ class SpillMergeStream : public MergeStream {
   /// batch, in which case the caller must call copy out current batch data if
   /// required before calling pop().
   vector_size_t currentIndex(bool* isLastRow = nullptr) const {
+    BOLT_CHECK(!closed_);
     if (isLastRow != nullptr) {
       *isLastRow = (index_ == (rowVector_->size() - 1));
     }
@@ -91,6 +93,7 @@ class SpillMergeStream : public MergeStream {
 
   /// Returns a DecodedVector set decoding the 'index'th child of 'rowVector_'
   DecodedVector& decoded(int32_t index) {
+    BOLT_CHECK(!closed_);
     ensureDecodedValid(index);
     return decoded_[index];
   }
@@ -108,11 +111,11 @@ class SpillMergeStream : public MergeStream {
   }
 
  protected:
-  virtual int32_t numSortKeys() const = 0;
-
-  virtual const std::vector<CompareFlags>& sortCompareFlags() const = 0;
+  virtual const std::vector<SpillSortKey>& sortingKeys() const = 0;
 
   virtual void nextBatch() = 0;
+
+  virtual void close();
 
   // loads the next 'rowVector' and sets 'decoded_' if this is initialized.
   void setNextBatch() {
@@ -142,6 +145,9 @@ class SpillMergeStream : public MergeStream {
       rows_.resize(size_);
     }
   }
+
+  // True if the stream is closed.
+  bool closed_{false};
 
   // Current batch of rows.
   RowVectorPtr rowVector_;
@@ -189,28 +195,20 @@ class FileSpillMergeStream : public SpillMergeStream {
 
   uint32_t id() const override;
 
-  ~FileSpillMergeStream() {
-    std::string filePath = spillFile_->testingFilePath();
-    spillFile_.reset();
-    auto fs = filesystems::getFileSystem(filePath, nullptr);
-    fs->remove(filePath);
-  }
-
  private:
   explicit FileSpillMergeStream(std::unique_ptr<SpillReadFile> spillFile)
       : spillFile_(std::move(spillFile)) {
     BOLT_CHECK_NOT_NULL(spillFile_);
   }
 
-  int32_t numSortKeys() const override {
-    return spillFile_->numSortKeys();
-  }
-
-  const std::vector<CompareFlags>& sortCompareFlags() const override {
-    return spillFile_->sortCompareFlags();
+  const std::vector<SpillSortKey>& sortingKeys() const override {
+    BOLT_CHECK(!closed_);
+    return spillFile_->sortingKeys();
   }
 
   void nextBatch() override;
+
+  void close() override;
 
   std::unique_ptr<SpillReadFile> spillFile_;
 };
@@ -304,9 +302,7 @@ class RowBasedSpillMergeStream : public MergeStream {
   }
 
  protected:
-  virtual int32_t numSortKeys() const = 0;
-
-  virtual const std::vector<CompareFlags>& sortCompareFlags() const = 0;
+  virtual const std::vector<SpillSortKey>& sortingKeys() const = 0;
 
   virtual void nextBatch() = 0;
 
@@ -368,42 +364,24 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
     const std::vector<RowColumn>& rightRowColumns =
         otherStream.spillFile_->rowColumns();
     RowTypePtr rowType = spillFile_->type();
-    int32_t key = 0;
     char* left = rowVector_[index_];
     char* right = otherStream.current()[otherStream.currentIndex()];
     if (cmp_) {
       return cmp_(left, right);
     } else {
-      if (sortCompareFlags().empty()) {
-        do {
-          auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-              compareByRow,
-              rowType->childAt(key)->kind(),
-              left,
-              right,
-              leftRowColumns[key],
-              rightRowColumns[key],
-              CompareFlags(),
-              rowType->childAt(key).get());
-          if (result != 0) {
-            return result;
-          }
-        } while (++key < numSortKeys());
-      } else {
-        do {
-          auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-              compareByRow,
-              rowType->childAt(key)->kind(),
-              left,
-              right,
-              leftRowColumns[key],
-              rightRowColumns[key],
-              sortCompareFlags()[key],
-              rowType->childAt(key).get());
-          if (result != 0) {
-            return result;
-          }
-        } while (++key < numSortKeys());
+      for (const auto& [key, compareFlags] : sortingKeys()) {
+        auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+            compareByRow,
+            rowType->childAt(key)->kind(),
+            left,
+            right,
+            leftRowColumns[key],
+            rightRowColumns[key],
+            compareFlags,
+            rowType->childAt(key).get());
+        if (result != 0) {
+          return result;
+        }
       }
     }
     return 0;
@@ -434,12 +412,8 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
     BOLT_CHECK_NOT_NULL(spillFile_);
   }
 
-  int32_t numSortKeys() const override {
-    return spillFile_->numSortKeys();
-  }
-
-  const std::vector<CompareFlags>& sortCompareFlags() const override {
-    return spillFile_->sortCompareFlags();
+  const std::vector<SpillSortKey>& sortingKeys() const override {
+    return spillFile_->sortingKeys();
   }
 
   void nextBatch() override {
@@ -558,6 +532,33 @@ class RowBasedFileSpillBatchStream : public BatchStream {
   }
 
   std::unique_ptr<RowBasedSpillReadFile> spillFile_;
+};
+
+/// A SpillMergeStream that contains a sequence of sorted spill files, the
+/// sorted keys are ordered both within each file and across files.
+class ConcatFilesSpillMergeStream final : public SpillMergeStream {
+ public:
+  static std::unique_ptr<SpillMergeStream> create(
+      uint32_t id,
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles);
+
+ private:
+  ConcatFilesSpillMergeStream(
+      uint32_t id,
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles)
+      : id_(id), spillFiles_(std::move(spillFiles)) {}
+
+  uint32_t id() const override;
+
+  void nextBatch() override;
+
+  void close() override;
+
+  const std::vector<SpillSortKey>& sortingKeys() const override;
+
+  const uint32_t id_;
+  std::vector<std::unique_ptr<SpillReadFile>> spillFiles_;
+  size_t fileIndex_{0};
 };
 
 /// Identifies a spill partition generated from a given spilling operator. It
@@ -779,18 +780,23 @@ class SpillState {
   /// Constructs a SpillState. 'type' is the content RowType. 'path' is the file
   /// system path prefix. 'bits' is the hash bit field for partitioning data
   /// between files. This also gives the maximum number of partitions.
-  /// 'numSortKeys' is the number of leading columns on which the data is
-  /// sorted, 0 if only hash partitioning is used. 'targetFileSize' is the
-  /// target size of a single file.  'pool' owns the memory for state and
-  /// results.
+  /// 'sortingKeys' is the list of sorting keys with their comparison flags.
+  /// 'targetFileSize' is the target size of a single file.  'pool' owns the
+  /// memory for state and results.
   SpillState(
       const common::SpillConfig::SpillIOConfig& ioConfig,
       int32_t maxPartitions,
-      int32_t numSortKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       uint64_t targetFileSize,
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats);
+
+  static std::vector<SpillSortKey> makeSortingKeys(
+      const std::vector<CompareFlags>& compareFlags = {});
+
+  static std::vector<SpillSortKey> makeSortingKeys(
+      const std::vector<column_index_t>& indices,
+      const std::vector<CompareFlags>& compareFlags);
 
   /// Indicates if a given 'partition' has been spilled or not.
   bool isPartitionSpilled(uint32_t partition) const {
@@ -814,8 +820,8 @@ class SpillState {
     return ioConfig_.compressionKind;
   }
 
-  const std::vector<CompareFlags>& sortCompareFlags() const {
-    return sortCompareFlags_;
+  const std::vector<SpillSortKey>& sortingKeys() const {
+    return sortingKeys_;
   }
 
   bool isAnyPartitionSpilled() const {
@@ -919,8 +925,7 @@ class SpillState {
   const common::SpillConfig::SpillIOConfig ioConfig_;
 
   const int32_t maxPartitions_;
-  const int32_t numSortKeys_;
-  const std::vector<CompareFlags> sortCompareFlags_;
+  const std::vector<SpillSortKey> sortingKeys_;
   const uint64_t targetFileSize_;
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;

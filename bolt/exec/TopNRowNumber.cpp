@@ -801,13 +801,13 @@ void TopNRowNumber::spill() {
 void TopNRowNumber::setupSpiller() {
   BOLT_CHECK_NULL(spiller_);
 
+  const auto sortingKeys = SpillState::makeSortingKeys(spillCompareFlags_);
   spiller_ = std::make_unique<Spiller>(
       // TODO Replace Spiller::Type::kOrderBy.
       Spiller::Type::kOrderByInput,
       data_.get(),
       inputType_,
-      spillCompareFlags_.size(),
-      spillCompareFlags_,
+      sortingKeys,
       &spillConfig_.value());
   spiller_->setSpillConfig(&spillConfig_.value());
 }

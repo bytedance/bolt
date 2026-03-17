@@ -1099,12 +1099,13 @@ void GroupingSet::spill() {
     BOLT_DCHECK(pool_.trackUsage());
     BOLT_CHECK_EQ(numDistinctSpilledFiles_, 0);
     BOLT_CHECK_GT(rows->probedFlagOffset(), 0);
+    const auto sortingKeys = SpillState::makeSortingKeys(
+        std::vector<CompareFlags>(rows->keyTypes().size()));
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kAggregateInput,
         rows,
         makeSpillType(),
-        rows->keyTypes().size(),
-        std::vector<CompareFlags>(),
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
     BOLT_CHECK_EQ(spiller_->state().maxPartitions(), 1);

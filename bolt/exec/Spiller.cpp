@@ -61,16 +61,14 @@ Spiller::Spiller(
     Type type,
     RowContainer* container,
     RowTypePtr rowType,
-    int32_t numSortingKeys,
-    const std::vector<CompareFlags>& sortCompareFlags,
+    const std::vector<SpillSortKey>& sortingKeys,
     const common::SpillConfig* spillConfig)
     : Spiller(
           type,
           container,
           std::move(rowType),
           HashBitRange{},
-          numSortingKeys,
-          sortCompareFlags,
+          sortingKeys,
           spillConfig->spillIOConfig(1),
           std::numeric_limits<uint64_t>::max(),
           spillConfig->executor,
@@ -95,8 +93,7 @@ Spiller::Spiller(
           container,
           std::move(rowType),
           HashBitRange{},
-          0,
-          {},
+          std::vector<SpillSortKey>{},
           spillConfig->spillIOConfig(1),
           std::numeric_limits<uint64_t>::max(),
           spillConfig->executor,
@@ -122,8 +119,7 @@ Spiller::Spiller(
           container,
           std::move(rowType),
           HashBitRange{},
-          0,
-          {},
+          std::vector<SpillSortKey>{},
           spillConfig->spillIOConfig(1),
           std::numeric_limits<uint64_t>::max(),
           spillConfig->executor,
@@ -150,8 +146,7 @@ Spiller::Spiller(
           nullptr,
           std::move(rowType),
           bits,
-          0,
-          {},
+          std::vector<SpillSortKey>{},
           spillConfig->spillIOConfig(bits.numPartitions()),
           targetFileSize,
           spillConfig->executor,
@@ -178,8 +173,7 @@ Spiller::Spiller(
           container,
           std::move(rowType),
           bits,
-          0,
-          {},
+          std::vector<SpillSortKey>{},
           spillConfig->spillIOConfig(bits.numPartitions()),
           targetFileSize,
           spillConfig->executor,
@@ -203,8 +197,7 @@ Spiller::Spiller(
           nullptr,
           std::move(rowType),
           HashBitRange{},
-          0,
-          {},
+          std::vector<SpillSortKey>{},
           spillConfig->spillIOConfig(1),
           0, /*targetFileSize*/
           spillConfig->executor,
@@ -223,8 +216,7 @@ Spiller::Spiller(
     RowContainer* container,
     RowTypePtr rowType,
     HashBitRange bits,
-    int32_t numSortingKeys,
-    const std::vector<CompareFlags>& sortCompareFlags,
+    const std::vector<SpillSortKey>& sortingKeys,
     const common::SpillConfig::SpillIOConfig& ioConfig,
     uint64_t targetFileSize,
     folly::Executor* executor,
@@ -236,11 +228,18 @@ Spiller::Spiller(
       bits_(bits),
       rowType_(std::move(rowType)),
       maxSpillRunRows_(maxSpillRunRows),
+      compareFlags_([&sortingKeys]() {
+        std::vector<CompareFlags> compareFlags;
+        compareFlags.reserve(sortingKeys.size());
+        for (const auto& [_, flags] : sortingKeys) {
+          compareFlags.push_back(flags);
+        }
+        return compareFlags;
+      }()),
       state_(
           ioConfig,
           bits.numPartitions(),
-          numSortingKeys,
-          sortCompareFlags,
+          sortingKeys,
           targetFileSize,
           memory::spillMemoryPool(),
           &stats_),
@@ -342,14 +341,10 @@ namespace {
 class RowContainerSpillMergeStream : public SpillMergeStream {
  public:
   RowContainerSpillMergeStream(
-      int32_t numSortKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       Spiller::SpillRows&& rows,
       Spiller& spiller)
-      : numSortKeys_(numSortKeys),
-        sortCompareFlags_(sortCompareFlags),
-        rows_(std::move(rows)),
-        spiller_(spiller) {
+      : sortingKeys_(sortingKeys), rows_(std::move(rows)), spiller_(spiller) {
     if (!rows_.empty()) {
       nextBatch();
     }
@@ -362,12 +357,8 @@ class RowContainerSpillMergeStream : public SpillMergeStream {
   }
 
  private:
-  int32_t numSortKeys() const override {
-    return numSortKeys_;
-  }
-
-  const std::vector<CompareFlags>& sortCompareFlags() const override {
-    return sortCompareFlags_;
+  const std::vector<SpillSortKey>& sortingKeys() const override {
+    return sortingKeys_;
   }
 
   void nextBatch() override {
@@ -376,7 +367,9 @@ class RowContainerSpillMergeStream : public SpillMergeStream {
     // since this is all processed row by row.
     static constexpr vector_size_t kMaxRows = 64;
     constexpr uint64_t kMaxBytes = 1 << 18;
+    BOLT_CHECK(!closed_);
     if (nextBatchIndex_ >= rows_.size()) {
+      close();
       index_ = 0;
       size_ = 0;
       return;
@@ -387,9 +380,13 @@ class RowContainerSpillMergeStream : public SpillMergeStream {
     index_ = 0;
   }
 
-  const int32_t numSortKeys_;
-  const std::vector<CompareFlags> sortCompareFlags_;
+  void close() override {
+    BOLT_CHECK(!closed_);
+    SpillMergeStream::close();
+    rows_.clear();
+  }
 
+  const std::vector<SpillSortKey>& sortingKeys_;
   Spiller::SpillRows rows_;
   Spiller& spiller_;
   size_t nextBatchIndex_ = 0;
@@ -410,10 +407,7 @@ std::unique_ptr<SpillMergeStream> Spiller::spillMergeStreamOverRows(
   }
   ensureSorted(spillRuns_[partition]);
   return std::make_unique<RowContainerSpillMergeStream>(
-      container_->keyTypes().size(),
-      state_.sortCompareFlags(),
-      std::move(spillRuns_[partition].rows),
-      *this);
+      state_.sortingKeys(), std::move(spillRuns_[partition].rows), *this);
 }
 
 void Spiller::ensureSorted(SpillRun& run) {
@@ -426,12 +420,9 @@ void Spiller::ensureSorted(SpillRun& run) {
   {
     MicrosecondTimer timer(&sortTimeUs);
 
-    std::vector<CompareFlags> compareFlags;
-    bool noFlags = state_.sortCompareFlags().size() == 0;
-    if (noFlags) {
-      for (auto i = 0; i < container_->keyIndices().size(); ++i)
-        compareFlags.emplace_back(CompareFlags());
-    }
+    auto compareFlags = compareFlags_.empty()
+        ? std::vector<CompareFlags>(container_->keyTypes().size())
+        : compareFlags_;
 
 #ifdef ENABLE_BOLT_JIT
     if (cmp_ == nullptr && spillConfig_ &&
@@ -439,7 +430,7 @@ void Spiller::ensureSorted(SpillRun& run) {
       if (container_->JITable(container_->keyTypes())) {
         auto [jitMod, rowRowCmpfn] = container_->codegenCompare(
             container_->keyTypes(),
-            noFlags ? compareFlags : state_.sortCompareFlags(),
+            compareFlags,
             bytedance::bolt::jit::CmpType::SORT_LESS,
             true);
         jitModule_ = std::move(jitMod);
@@ -452,8 +443,8 @@ void Spiller::ensureSorted(SpillRun& run) {
           run.rows.begin(),
           run.rows.end(),
           [&](const char* left, const char* right) {
-            auto expected = container_->compareRows(
-                                left, right, state_.sortCompareFlags()) < 0;
+            auto expected =
+                container_->compareRows(left, right, compareFlags) < 0;
             auto res = cmp_(left, right) > 0;
             bool jitEqual = (int)res > 0; // as cmp_ may return 255 for true
             if ((expected != jitEqual)) {
@@ -479,14 +470,13 @@ void Spiller::ensureSorted(SpillRun& run) {
           container_,
           sorter_,
           container_->keyIndices(),
-          noFlags ? compareFlags : state_.sortCompareFlags());
+          compareFlags);
 #else
     sorter_.sort(
         run.rows.begin(),
         run.rows.end(),
         [&](const char* left, const char* right) {
-          return container_->compareRows(
-                     left, right, state_.sortCompareFlags()) < 0;
+          return container_->compareRows(left, right, compareFlags) < 0;
         });
 
 #endif
@@ -519,9 +509,8 @@ size_t Spiller::setNextEqualForAgg(SpillRun& run) {
       equal = !cmp_(run.rows[i], run.rows[i + 1]);
 #if DEBUG_JIT
       bool jitEqual = (int)equal > 0; // as cmp_ may return 255 for true
-      auto expected =
-          container_->compareRows(
-              run.rows[i], run.rows[i + 1], state_.sortCompareFlags()) == 0;
+      auto expected = container_->compareRows(
+                          run.rows[i], run.rows[i + 1], compareFlags_) == 0;
       if ((expected != jitEqual)) {
         std::stringstream ss;
         ss << " bypass expected: " << (int)expected
@@ -535,7 +524,7 @@ size_t Spiller::setNextEqualForAgg(SpillRun& run) {
 #endif
     } else {
       equal = container_->compareRows(
-                  run.rows[i], run.rows[i + 1], state_.sortCompareFlags()) == 0;
+                  run.rows[i], run.rows[i + 1], compareFlags_) == 0;
     }
     if (equal) {
       bits::setBit(run.rows[i], container_->probedFlagOffset(), true);
