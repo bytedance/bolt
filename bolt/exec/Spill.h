@@ -51,6 +51,10 @@
 #include "bolt/vector/VectorStream.h"
 namespace bytedance::bolt::exec {
 
+// Forward declarations
+class SpillReadFile;
+class RowBasedSpillReadFile;
+
 // A source of sorted spilled RowVectors coming either from a file or memory.
 class SpillMergeStream : public MergeStream {
  public:

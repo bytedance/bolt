@@ -123,13 +123,17 @@ OperatorSupplier makeConsumerSupplier(
       auto mergeSource = ctx->task->addLocalMergeSource(
           ctx->splitGroupId, localMerge->id(), localMerge->outputType());
 
-      auto consumer = [mergeSource](
-                          RowVectorPtr input,
-                          ContinueFuture* future,
-                          uint32_t partitionId) {
+      auto consumerCb = [mergeSource](
+                            RowVectorPtr input,
+                            ContinueFuture* future,
+                            uint32_t partitionId) {
         return mergeSource->enqueue(input, future);
       };
-      return std::make_unique<CallbackSink>(operatorId, ctx, consumer);
+      auto startCb = [mergeSource](ContinueFuture* future) {
+        return mergeSource->started(future);
+      };
+      return std::make_unique<CallbackSink>(
+          operatorId, ctx, std::move(consumerCb), std::move(startCb));
     };
   }
 

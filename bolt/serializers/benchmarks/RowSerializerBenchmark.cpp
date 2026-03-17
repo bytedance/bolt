@@ -30,10 +30,10 @@
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
-#include "velox/serializers/CompactRowSerializer.h"
-#include "velox/vector/fuzzer/VectorFuzzer.h"
+#include "bolt/serializers/CompactRowSerializer.h"
+#include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-namespace facebook::velox::test {
+namespace bytedance::bolt::test {
 namespace {
 class RowSerializerBenchmark {
  public:
@@ -154,11 +154,11 @@ VECTOR_SERDE_BENCHMARKS(
     ROW({BIGINT(), ROW({BIGINT(), DOUBLE(), BOOLEAN(), TINYINT(), REAL()})}));
 
 } // namespace
-} // namespace facebook::velox::test
+} // namespace bytedance::bolt::test
 
 int main(int argc, char** argv) {
   folly::Init init{&argc, &argv};
-  facebook::velox::memory::MemoryManager::initialize({});
+  bytedance::bolt::memory::MemoryManager::initialize({});
   folly::runBenchmarks();
   return 0;
 }
