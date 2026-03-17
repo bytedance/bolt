@@ -53,6 +53,7 @@
 #include <arrow/type.h>
 
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
+#include "bolt/shuffle/sparksql/EffectiveSizeEstimator.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
 #include "bolt/shuffle/sparksql/Utils.h"
@@ -736,6 +737,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   std::vector<int64_t> partitionBytes_;
   uint64_t convertTime_{0};
   uint64_t maxBatchBytes_{kMaxShuffleWriterBatchBytes};
+
+  EffectiveSizeEstimator effectiveSizeEstimator_;
 
 }; // class BoltShuffleWriter
 

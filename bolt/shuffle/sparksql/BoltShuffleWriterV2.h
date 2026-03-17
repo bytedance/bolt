@@ -367,6 +367,8 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
   // set maxComplexTypePageSize_ less than maxCombinedBytesWithComplexType_
   // because maxCombinedBytesWithComplexType_ is usually estimated larger
   const int32_t maxComplexTypePageSize_{1UL << 30};
+
+  EffectiveSizeEstimator effectiveSizeEstimator_;
 }; // class BoltShuffleWriterV2
 
 } // namespace bytedance::bolt::shuffle::sparksql

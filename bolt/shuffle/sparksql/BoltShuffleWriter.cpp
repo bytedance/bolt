@@ -612,6 +612,8 @@ arrow::Status BoltShuffleWriter::split(
       bytedance::bolt::NanosecondTimer timer(&flattenTime_);
       ensureFlatten(rv);
     }
+    auto effectiveSize = effectiveSizeEstimator_.estimate(rv);
+
     bool enableAccumulateBatch = options_.enableVectorCombination &&
         !hasComplexType_ &&
         rv->childrenSize() < options_.accumulateBatchMaxColumns;
@@ -619,7 +621,7 @@ arrow::Status BoltShuffleWriter::split(
       int64_t occupiedMemory = (accumulateDataset_ == nullptr
                                     ? 0
                                     : accumulateDataset_->estimateFlatSize()) +
-          rv->estimateFlatSize();
+          effectiveSize;
       if (accumulateRows_ + rv->size() < options_.accumulateBatchMaxBatches &&
           occupiedMemory < 0.25 * memLimit) {
         bytedance::bolt::NanosecondTimer timer(&combineVectorCost_);
@@ -640,17 +642,15 @@ arrow::Status BoltShuffleWriter::split(
       }
     }
 
-    bool isExtremeLargeBatch = rv->estimateFlatSize() > maxBatchBytes_;
+    bool isExtremeLargeBatch = effectiveSize > maxBatchBytes_;
 
     std::vector<RowVectorPtr> batchVectors;
     if (isExtremeLargeBatch) {
-      size_t batchCount =
-          (rv->estimateFlatSize() + maxBatchBytes_ - 1) / maxBatchBytes_;
+      size_t batchCount = (effectiveSize + maxBatchBytes_ - 1) / maxBatchBytes_;
       size_t rowCountPerBatch = std::max(rv->size() / batchCount, (size_t)1);
       BOLT_TEST_ADJUST("BoltShuffleWriter::extremeLargeBatch", &batchCount);
-      LOG(INFO) << "Split extreme large batch, flatten size: "
-                << rv->estimateFlatSize() << ", split into " << batchCount
-                << " batches";
+      LOG(INFO) << "Split extreme large batch, effectiveSize: " << effectiveSize
+                << ", split into " << batchCount << " batches";
       for (size_t i = 0; i < rv->size(); i += rowCountPerBatch) {
         batchVectors.push_back(
             std::dynamic_pointer_cast<bytedance::bolt::RowVector>(

@@ -32,6 +32,7 @@ bolt_add_library(
   BoltShuffleReader.cpp
   BoltShuffleWriter.cpp
   BoltShuffleWriterV2.cpp
+  EffectiveSizeEstimator.cpp
   CelebornReaderStreamIterator.cpp
   compression/Compression.cpp
   compression/Codec.cpp

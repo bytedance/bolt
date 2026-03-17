@@ -68,10 +68,12 @@ arrow::Status BoltShuffleWriterV2::split(
   {
     bytedance::bolt::NanosecondTimer timer(&flattenTime_);
     ensureLoaded(rv);
-    auto flatSize = rv->estimateFlatSize();
     ensureFlatten(rv);
+
+    auto effectiveSize = effectiveSizeEstimator_.estimate(rv);
+
     // try evict before split if current batch size is larger than memLimit
-    if (flatSize > memLimit) {
+    if (effectiveSize > static_cast<uint64_t>(memLimit)) {
       requestSpill_ = true;
     }
     RETURN_NOT_OK(tryEvict(memLimit));
@@ -83,11 +85,12 @@ arrow::Status BoltShuffleWriterV2::split(
     maxBatchBytes = hasComplexType_
         ? std::min(maxBatchBytes, (uint64_t)maxCombinedBytesWithComplexType_)
         : maxBatchBytes;
-    if (flatSize > maxBatchBytes) {
-      return splitExtremelyLargeBatch(rv, memLimit, flatSize, maxBatchBytes);
+    if (effectiveSize > maxBatchBytes) {
+      return splitExtremelyLargeBatch(
+          rv, memLimit, effectiveSize, maxBatchBytes);
     }
     numRowsInBatches_ += rv->size();
-    numBytesInBatches_ += flatSize;
+    numBytesInBatches_ += effectiveSize;
     batches_.emplace_back(rv);
     // when BoltMemoryManager is enabled, memLimit is lower than what we got in
     // Java, so we make threshold lower to store more batches.
