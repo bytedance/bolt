@@ -33,6 +33,7 @@
 #include <cstring>
 #include <string>
 
+#include "bolt/common/encode/Base64.h"
 #include "bolt/expression/ComplexViewTypes.h"
 #include "bolt/expression/VectorReaders.h"
 #include "bolt/functions/Macros.h"
@@ -142,6 +143,13 @@ void toJson<TypeKind::DOUBLE>(
 
 template <>
 void toJson<TypeKind::VARCHAR>(
+    const exec::GenericView& input,
+    std::string& result,
+    const JsonOptions& /*options*/,
+    bool isMapKey);
+
+template <>
+void toJson<TypeKind::VARBINARY>(
     const exec::GenericView& input,
     std::string& result,
     const JsonOptions& /*options*/,
@@ -297,6 +305,30 @@ inline void toJson<TypeKind::VARCHAR>(
 }
 
 template <>
+inline void toJson<TypeKind::VARBINARY>(
+    const exec::GenericView& input,
+    std::string& result,
+    const JsonOptions& /*options*/,
+    bool isMapKey) {
+  // Encode binary as standard Base64 and emit as JSON string.
+  auto value = input.castTo<Varbinary>();
+  std::string encoded;
+  // Reserve to avoid reallocations.
+  encoded.reserve(encoding::Base64::calculateEncodedSize(value.size()));
+  encoding::Base64::encodeAppend(
+      folly::StringPiece(value.data(), value.size()), encoded);
+
+  if (!isMapKey) {
+    folly::json::escapeString(encoded, result, {});
+  } else {
+    // Keys are wrapped with quotes by the caller; strip quotes after escaping.
+    std::string quotedString;
+    folly::json::escapeString(encoded, quotedString, {});
+    result.append(quotedString.substr(1, quotedString.size() - 2));
+  }
+}
+
+template <>
 inline void toJson<TypeKind::TIMESTAMP>(
     const exec::GenericView& input,
     std::string& result,
@@ -381,6 +413,8 @@ inline void toJson<TypeKind::ARRAY>(
     bool isMapKey) {
   auto arrayView = input.castTo<Array<Any>>();
   result.append("[");
+  // Determine the array element kind once to guide null rendering.
+  const auto elementKind = input.type()->childAt(0)->kind();
   for (int i = 0; i < arrayView.size(); i++) {
     if (i > 0) {
       result.append(",");
@@ -390,7 +424,15 @@ inline void toJson<TypeKind::ARRAY>(
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           detail::toJson, element.kind(), element, result, options, isMapKey);
     } else {
-      result.append("null");
+      // Spark semantics: an array element of ROW type with all-null fields
+      // renders as an empty object `{}` rather than `null` when serializing
+      // to JSON (with ignoreNullFields=true). Tests expect `[{}]` for a
+      // single empty ROW element.
+      if (!isMapKey && elementKind == TypeKind::ROW) {
+        result.append("{}");
+      } else {
+        result.append("null");
+      }
     }
   }
   result.append("]");
