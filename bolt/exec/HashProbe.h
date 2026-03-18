@@ -99,6 +99,8 @@ class HashProbe : public Operator {
   void checkRunning() const;
   bool isRunning() const;
 
+  void initializeResultIter();
+
   // Invoked to wait for the hash table to be built by the hash build operators
   // asynchronously.
   void asyncWaitForHashTable();
@@ -593,7 +595,7 @@ class HashProbe : public Operator {
 
   // Keeps track of returned results between successive batches of
   // output for a batch of input.
-  BaseHashTable::JoinResultIterator results_;
+  std::unique_ptr<BaseHashTable::JoinResultIterator> resultIter_;
 
   RowVectorPtr output_;
 

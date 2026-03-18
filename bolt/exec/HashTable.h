@@ -169,6 +169,12 @@ class BaseHashTable {
   // from HashLookup, which is expected to stay constant while 'this'
   // is being used.
   struct JoinResultIterator {
+    JoinResultIterator(
+        std::vector<vector_size_t>&& _varSizeListColumns,
+        uint64_t _fixedSizeListColumnsSizeSum)
+        : varSizeListColumns(std::move(_varSizeListColumns)),
+          fixedSizeListColumnsSizeSum(_fixedSizeListColumnsSizeSum) {}
+
     void reset(const HashLookup& lookup) {
       rows = &lookup.rows;
       hits = &lookup.hits;
@@ -179,7 +185,11 @@ class BaseHashTable {
     bool atEnd() const {
       return !rows || lastRowIndex == rows->size();
     }
-
+    /// The indexes of the build side projected columns that are variable sized.
+    const std::vector<vector_size_t> varSizeListColumns;
+    /// The per row total bytes of the build side projected columns that are
+    /// fixed sized.
+    const uint64_t fixedSizeListColumnsSizeSum{0};
     const raw_vector<vector_size_t>* rows{nullptr};
     const raw_vector<char*>* hits{nullptr};
     vector_size_t lastRowIndex{0};
@@ -268,6 +278,7 @@ class BaseHashTable {
       bool includeMisses,
       folly::Range<vector_size_t*> inputRows,
       folly::Range<char**> hits,
+      uint64_t maxBytes,
       const BaseVector* matchFlags = nullptr) = 0;
 
   /// Returns rows with 'probed' flag unset. Used by the right/full join.
@@ -610,6 +621,7 @@ class HashTable : public BaseHashTable {
       bool includeMisses,
       folly::Range<vector_size_t*> inputRows,
       folly::Range<char**> hits,
+      uint64_t maxBytes,
       const BaseVector* matchFlags = nullptr) override;
 
   template <bool hasMatchFlags>
@@ -618,6 +630,7 @@ class HashTable : public BaseHashTable {
       bool includeMisses,
       folly::Range<vector_size_t*> inputRows,
       folly::Range<char**> hits,
+      uint64_t maxBytes,
       const BaseVector* matchFlags);
 
   int32_t listNotProbedRows(
@@ -851,7 +864,8 @@ class HashTable : public BaseHashTable {
       JoinResultIterator& iter,
       bool includeMisses,
       folly::Range<vector_size_t*> inputRows,
-      folly::Range<char**> hits);
+      folly::Range<char**> hits,
+      uint64_t maxBytes);
 
   // Tries to use as many range hashers as can in a normalized key situation.
   void enableRangeWhereCan(
@@ -977,6 +991,14 @@ class HashTable : public BaseHashTable {
 
   // Shortcut for probe with normalized keys.
   void joinNormalizedKeyProbe(HashLookup& lookup);
+
+  // Returns the total size of the variable size 'columns' in 'row'.
+  // NOTE: No checks are done in the method for performance considerations.
+  // Caller needs to make sure only variable size columns are inside of
+  // 'columns'.
+  inline uint64_t joinProjectedVarColumnsSize(
+      const std::vector<vector_size_t>& columns,
+      const char* row) const;
 
   // if a new entry was made and false if the row was added to an
   // existing set of rows with the same key.

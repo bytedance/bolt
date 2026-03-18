@@ -1859,18 +1859,32 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
 }
 
 template <bool ignoreNullKeys>
+inline uint64_t HashTable<ignoreNullKeys>::joinProjectedVarColumnsSize(
+    const std::vector<vector_size_t>& columns,
+    const char* row) const {
+  uint64_t totalBytes{0};
+  for (const auto& column : columns) {
+    if (!rows_->columnTypes()[column]->isFixedWidth()) {
+      totalBytes += rows_->variableSizeAt(row, column);
+    }
+  }
+  return totalBytes;
+}
+
+template <bool ignoreNullKeys>
 int32_t HashTable<ignoreNullKeys>::listJoinResults(
     JoinResultIterator& iter,
     bool includeMisses,
     folly::Range<vector_size_t*> inputRows,
     folly::Range<char**> hits,
+    uint64_t maxBytes,
     const BaseVector* matchFlags) {
   if (matchFlags) {
     return listJoinResultsInternal<true>(
-        iter, includeMisses, inputRows, hits, matchFlags);
+        iter, includeMisses, inputRows, hits, maxBytes, matchFlags);
   } else {
     return listJoinResultsInternal<false>(
-        iter, includeMisses, inputRows, hits, matchFlags);
+        iter, includeMisses, inputRows, hits, maxBytes, matchFlags);
   }
 }
 
@@ -1881,12 +1895,14 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsInternal(
     bool includeMisses,
     folly::Range<vector_size_t*> inputRows,
     folly::Range<char**> hits,
+    uint64_t maxBytes,
     const BaseVector* matchFlags) {
   BOLT_CHECK_LE(inputRows.size(), hits.size());
 
   if constexpr (!hasMatchFlags) {
-    if (!hasDuplicates_) {
-      return listJoinResultsNoDuplicates(iter, includeMisses, inputRows, hits);
+    if (iter.varSizeListColumns.empty() && !hasDuplicates_) {
+      return listJoinResultsNoDuplicates(
+          iter, includeMisses, inputRows, hits, maxBytes);
     }
   }
   const FlatVector<bool>* flags = nullptr;
@@ -1896,6 +1912,7 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsInternal(
 
   size_t numOut = 0;
   auto maxOut = inputRows.size();
+  uint64_t totalBytes{0};
   while (iter.lastRowIndex < iter.rows->size()) {
     if (!iter.nextHit) {
       auto row = (*iter.rows)[iter.lastRowIndex];
@@ -1932,11 +1949,14 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsInternal(
       inputRows[numOut] = (*iter.rows)[iter.lastRowIndex]; // NOLINT
       hits[numOut] = iter.nextHit;
       ++numOut;
+      totalBytes +=
+          (joinProjectedVarColumnsSize(iter.varSizeListColumns, iter.nextHit) +
+           iter.fixedSizeListColumnsSizeSum);
       iter.nextHit = next;
       if (!iter.nextHit) {
         ++iter.lastRowIndex;
       }
-      if (numOut >= maxOut) {
+      if (numOut >= maxOut || totalBytes >= maxBytes) {
         return numOut;
       }
     }
@@ -1949,11 +1969,16 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsNoDuplicates(
     JoinResultIterator& iter,
     bool includeMisses,
     folly::Range<vector_size_t*> inputRows,
-    folly::Range<char**> hits) {
+    folly::Range<char**> hits,
+    uint64_t maxBytes) {
   int32_t numOut = 0;
-  auto maxOut = inputRows.size();
+  const auto maxOut = std::min(
+      static_cast<uint64_t>(inputRows.size()),
+      (iter.fixedSizeListColumnsSizeSum != 0
+           ? maxBytes / iter.fixedSizeListColumnsSizeSum
+           : std::numeric_limits<uint64_t>::max()));
   int32_t i = iter.lastRowIndex;
-  auto numRows = iter.rows->size();
+  const auto numRows = iter.rows->size();
 
   constexpr int32_t kWidth = xsimd::batch<int64_t>::size;
   auto sourceHits = reinterpret_cast<int64_t*>(iter.hits->data());
@@ -1961,7 +1986,7 @@ int32_t HashTable<ignoreNullKeys>::listJoinResultsNoDuplicates(
   // We pass the pointers as int64_t's in 'hitWords'.
   auto resultHits = reinterpret_cast<int64_t*>(hits.data());
   auto resultRows = inputRows.data();
-  int32_t outLimit = maxOut - kWidth;
+  const auto outLimit = maxOut - kWidth;
   for (; i + kWidth <= numRows && numOut < outLimit; i += kWidth) {
     auto indices = simd::loadGatherIndices<int64_t, int32_t>(sourceRows + i);
     auto hitWords = simd::gather(sourceHits, indices);

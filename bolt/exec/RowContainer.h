@@ -879,14 +879,16 @@ class RowContainer {
       const char* row,
       int32_t offset);
 
+  /// Returns the size of a string or complex types value stored in the
+  /// specified row and column.
+  int32_t variableSizeAt(const char* row, column_index_t column);
+
+  int32_t fixedSizeAt(column_index_t column);
+
  private:
   static constexpr int32_t kNextFreeOffset = 0;
 
   static const std::vector<column_index_t> kEmptySortKeyIndexes;
-
-  /// Returns the size of a string or complex types value stored in the
-  /// specified row and column.
-  int32_t variableSizeAt(const char* row, column_index_t column);
 
   /// Copies a string or complex type value from the specified row and column
   /// @return The number of bytes written to 'destination' including the 4 bytes

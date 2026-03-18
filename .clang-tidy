@@ -1,4 +1,3 @@
----
 # Configure clang-tidy for this project.
 
 # Here is an explanation for why some of the checks are disabled:
