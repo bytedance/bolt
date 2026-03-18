@@ -84,12 +84,13 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
 
   SpillFiles generateSortedSpillFiles(
       const std::vector<RowVectorPtr>& sortedVectors) {
-    const auto spiller = std::make_unique<Spiller>(
-        Spiller::Type::kHashJoinProbe,
+    const auto spiller = std::make_unique<MergeSpiller>(
         inputType_,
+        std::nullopt,
         HashBitRange{},
+        sortingKeys_,
         &spillConfig_,
-        spillConfig_.maxFileSize);
+        &spillStats_);
     spiller->setPartitionsSpilled(SpillPartitionNumSet{0});
     for (const auto& vector : sortedVectors) {
       spiller->spill(0, vector);

@@ -248,6 +248,14 @@ class QueryConfig {
   /// Window spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kWindowSpillEnabled = "window_spill_enabled";
 
+  /// LocalMerge spilling flag, only applies if "spill_enabled" flag is set.
+  static constexpr const char* kLocalMergeSpillEnabled =
+      "local_merge_spill_enabled";
+
+  /// Maximum number of merge sources to merge in memory before spilling.
+  static constexpr const char* kLocalMergeMaxNumMergeSources =
+      "local_merge_max_num_merge_sources";
+
   /// If true, the memory arbitrator will reclaim memory from table writer by
   /// flushing its buffered data to disk.
   static constexpr const char* kWriterSpillEnabled = "writer_spill_enabled";
@@ -1037,6 +1045,20 @@ class QueryConfig {
   /// check the spillEnabled()!
   bool windowSpillEnabled() const {
     return get<bool>(kWindowSpillEnabled, true);
+  }
+
+  /// Returns true if spilling is enabled for LocalMerge operator.
+  bool localMergeSpillEnabled() const {
+    return get<bool>(kLocalMergeSpillEnabled, false);
+  }
+
+  /// Returns the maximum number of merge sources to merge in memory before
+  /// spilling.
+  uint32_t localMergeMaxNumMergeSources() const {
+    const auto maxNumMergeSources = get<uint32_t>(
+        kLocalMergeMaxNumMergeSources, std::numeric_limits<uint32_t>::max());
+    BOLT_CHECK_GT(maxNumMergeSources, 0);
+    return maxNumMergeSources;
   }
 
   /// Returns 'is writer spilling enabled' flag. Must also check the

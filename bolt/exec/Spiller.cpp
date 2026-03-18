@@ -162,6 +162,31 @@ Spiller::Spiller(
 
 Spiller::Spiller(
     Type type,
+    RowTypePtr rowType,
+    HashBitRange bits,
+    const std::vector<SpillSortKey>& sortingKeys,
+    const common::SpillConfig* spillConfig)
+    : Spiller(
+          type,
+          nullptr,
+          std::move(rowType),
+          bits,
+          sortingKeys,
+          spillConfig->spillIOConfig(bits.numPartitions()),
+          spillConfig->maxFileSize,
+          spillConfig->executor,
+          0,
+          spillConfig->rowBasedSpillMode) {
+  setSpillConfig(spillConfig);
+  BOLT_CHECK_EQ(
+      type_,
+      Type::kLocalMergeInput,
+      "Unexpected spiller type: {}",
+      typeName(type_));
+}
+
+Spiller::Spiller(
+    Type type,
     RowContainer* container,
     RowTypePtr rowType,
     HashBitRange bits,
@@ -257,7 +282,10 @@ Spiller::Spiller(
   BOLT_CHECK_EQ(
       container_ == nullptr,
       (type_ == Type::kHashJoinProbe ||
-       type_ == Type::kHashJoinProbeMatchFlag));
+       type_ == Type::kHashJoinProbeMatchFlag ||
+       type_ == Type::kLocalMergeInput),
+      "Unexpected spiller type: {}",
+      typeName(type_));
   spillRuns_.reserve(state_.maxPartitions());
   for (int i = 0; i < state_.maxPartitions(); ++i) {
     spillRuns_.emplace_back(*memory::spillMemoryPool());
@@ -300,7 +328,7 @@ int64_t Spiller::extractSpillVector(
     int64_t maxBytes,
     RowVectorPtr& spillVector,
     size_t& nextBatchIndex) {
-  BOLT_CHECK_NE(type_, Type::kHashJoinProbe);
+  BOLT_CHECK(type_ != Type::kHashJoinProbe && type_ != Type::kLocalMergeInput);
 
   auto limit = std::min<size_t>(rows.size() - nextBatchIndex, maxRows);
   BOLT_CHECK(!rows.empty());
@@ -552,7 +580,7 @@ size_t Spiller::setNextEqualForAgg(SpillRun& run) {
 }
 
 std::unique_ptr<Spiller::SpillStatus> Spiller::writeSpill(int32_t partition) {
-  BOLT_CHECK_NE(type_, Type::kHashJoinProbe);
+  BOLT_CHECK(type_ != Type::kHashJoinProbe && type_ != Type::kLocalMergeInput);
 
   // 1. The flush threshold is controlled by writeBufferSize_ from configuration
   // 2. The materialized size is controlled by kMaxReadBufferSize
@@ -688,7 +716,8 @@ void Spiller::updateSpillTotalTime(uint64_t timeUs) {
 
 bool Spiller::needSort() const {
   return type_ != Type::kHashJoinProbe && type_ != Type::kHashJoinBuild &&
-      type_ != Type::kAggregateOutput && type_ != Type::kOrderByOutput;
+      type_ != Type::kAggregateOutput && type_ != Type::kOrderByOutput &&
+      type_ != Type::kLocalMergeInput;
 }
 
 void Spiller::spill() {
@@ -702,8 +731,9 @@ void Spiller::spill(const RowContainerIterator& startRowIter) {
 
 void Spiller::spill(const RowContainerIterator* startRowIter) {
   CHECK_NOT_FINALIZED();
-  BOLT_CHECK_NE(type_, Type::kHashJoinProbe);
-  BOLT_CHECK_NE(type_, Type::kOrderByOutput);
+  BOLT_CHECK(
+      type_ != Type::kHashJoinProbe && type_ != Type::kOrderByOutput &&
+      type_ != Type::kLocalMergeInput);
   const bool doPotentialRangePartitionCheck =
       (supportSkewPartition_ && container_ &&
        container_->numRows() >
@@ -771,7 +801,8 @@ void Spiller::spill(uint32_t partition, const RowVectorPtr& spillVector) {
   CHECK_NOT_FINALIZED();
   BOLT_CHECK(
       type_ == Type::kHashJoinProbe || type_ == Type::kHashJoinBuild ||
-          type_ == Type::kHashJoinProbeMatchFlag,
+          type_ == Type::kHashJoinProbeMatchFlag ||
+          type_ == Type::kLocalMergeInput,
       "Unexpected spiller type: {}",
       typeName(type_));
   if (FOLLY_UNLIKELY(!state_.isPartitionSpilled(partition))) {
@@ -1055,6 +1086,8 @@ std::string Spiller::typeName(Type type) {
       return "AGGREGATE_INPUT";
     case Type::kAggregateOutput:
       return "AGGREGATE_OUTPUT";
+    case Type::kLocalMergeInput:
+      return "LOCAL_MERGE_INPUT";
     case Type::kHashJoinProbeMatchFlag:
       return "kHashJoinProbeMatchFlag";
     default:
