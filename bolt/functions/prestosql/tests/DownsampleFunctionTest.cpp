@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-//
-// Created by tanjunsheng@bytedance.com on 2023/5/29.
-//
 #include <cmath>
 #include <unordered_map>
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"

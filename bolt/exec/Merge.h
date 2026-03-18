@@ -32,6 +32,7 @@
 
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/MergeSource.h"
+#include "bolt/exec/Spill.h"
 #include "bolt/exec/TreeOfLosers.h"
 namespace bytedance::bolt::exec {
 
@@ -68,14 +69,17 @@ class Merge : public SourceOperator {
   virtual BlockingReason addMergeSources(ContinueFuture* future) = 0;
 
   std::vector<std::shared_ptr<MergeSource>> sources_;
+  size_t numStartedSources_{0};
 
  private:
+  void startSources();
+
   void initializeTreeOfLosers();
 
   /// Maximum number of rows in the output batch.
   const uint32_t outputBatchSize_;
 
-  std::vector<std::pair<column_index_t, CompareFlags>> sortingKeys_;
+  std::vector<SpillSortKey> sortingKeys_;
 
   /// A list of cursors over batches of ordered source data. One per source.
   /// Aligned with 'sources'.
@@ -100,7 +104,7 @@ class SourceStream final : public MergeStream {
  public:
   SourceStream(
       MergeSource* source,
-      const std::vector<std::pair<column_index_t, CompareFlags>>& sortingKeys,
+      const std::vector<SpillSortKey>& sortingKeys,
       uint32_t outputBatchSize)
       : source_{source},
         sortingKeys_{sortingKeys},

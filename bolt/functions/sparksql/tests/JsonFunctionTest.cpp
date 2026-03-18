@@ -249,15 +249,15 @@ TEST_F(JsonFucntionTest, nullBehavior) {
          {core::QueryConfig::kUseDOMParserInGetJsonObject, "true"},
          {core::QueryConfig::kGetJsonObjectEscapeEmoji, value}});
     {
-      auto json = R"( {"name": "金三胖", "height": null} )";
+      auto json = R"( {"name": "张三丰", "height": null} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height"), std::nullopt);
     }
     {
-      auto json = R"( {"name": "金三胖", "height": [null]} )";
+      auto json = R"( {"name": "张三丰", "height": [null]} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height[*]"), "null");
     }
     {
-      auto json = R"( {"name": "金三胖", "height": [null, null]} )";
+      auto json = R"( {"name": "张三丰", "height": [null, null]} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height[*]"), "[null,null]");
     }
   }
@@ -269,15 +269,15 @@ TEST_F(JsonFucntionTest, nullBehavior) {
          {core::QueryConfig::kUseDOMParserInGetJsonObject, "false"},
          {core::QueryConfig::kGetJsonObjectEscapeEmoji, value}});
     {
-      auto json = R"( {"name": "金三胖", "height": null} )";
+      auto json = R"( {"name": "张三丰", "height": null} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height"), std::nullopt);
     }
     {
-      auto json = R"( {"name": "金三胖", "height": [null]} )";
+      auto json = R"( {"name": "张三丰", "height": [null]} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height[*]"), "null");
     }
     {
-      auto json = R"( {"name": "金三胖", "height": [null, null]} )";
+      auto json = R"( {"name": "张三丰", "height": [null, null]} )";
       EXPECT_EQ(testGetJsonObjectOnce(json, "$.height[*]"), "[null,null]");
     }
   }

@@ -396,7 +396,7 @@ TEST_F(JitFilterProjectTest, testTypes) {
         )sql");
   }
 
-  // WTF: bolt doesn't support >= <= !!!
+  // NOTE: bolt doesn't support >= <= yet
 
   // 1. constant literal expression
   // 2.  + - * / for types integer, real, double

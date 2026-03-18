@@ -48,10 +48,7 @@ arrow::Status BoltRowBasedSortShuffleWriter::init() {
   ARROW_ASSIGN_OR_RAISE(
       partitioner_,
       Partitioner::make(
-          options_.partitioning,
-          numPartitions_,
-          options_.startPartitionId,
-          options_.sort_before_repartition));
+          options_.partitioning, numPartitions_, options_.startPartitionId));
   partition2RowCount_.resize(numPartitions_);
   partitionWriter_->setRowFormat(true);
   return arrow::Status::OK();

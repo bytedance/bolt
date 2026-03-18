@@ -40,14 +40,16 @@ class CallbackSink : public Operator {
       int32_t operatorId,
       DriverCtx* driverCtx,
       std::function<BlockingReason(RowVectorPtr, ContinueFuture*, uint32_t)>
-          callback)
+          consumeCb,
+      std::function<BlockingReason(ContinueFuture*)> startedCb = nullptr)
       : Operator(driverCtx, nullptr, operatorId, "N/A", "CallbackSink"),
-        callback_{callback} {}
+        startedCb_{std::move(startedCb)},
+        consumeCb_{std::move(consumeCb)} {}
 
   void addInput(RowVectorPtr input) override {
     loadColumns(input, *operatorCtx_->execCtx());
     blockingReason_ =
-        callback_(input, &future_, operatorCtx_->driverCtx()->partitionId);
+        consumeCb_(input, &future_, operatorCtx_->driverCtx()->partitionId);
   }
 
   RowVectorPtr getOutput() override {
@@ -55,7 +57,7 @@ class CallbackSink : public Operator {
   }
 
   bool needsInput() const override {
-    return callback_ != nullptr;
+    return consumeCb_ != nullptr;
   }
 
   void noMoreInput() override {
@@ -64,6 +66,10 @@ class CallbackSink : public Operator {
   }
 
   BlockingReason isBlocked(ContinueFuture* future) override {
+    if (startedCb_ != nullptr) {
+      blockingReason_ = startedCb_(&future_);
+      startedCb_ = nullptr;
+    }
     if (blockingReason_ != BlockingReason::kNotBlocked) {
       *future = std::move(future_);
       blockingReason_ = BlockingReason::kNotBlocked;
@@ -78,16 +84,17 @@ class CallbackSink : public Operator {
 
  private:
   void close() override {
-    if (callback_) {
-      callback_(nullptr, nullptr, 0);
-      callback_ = nullptr;
+    if (consumeCb_) {
+      consumeCb_(nullptr, nullptr, 0);
+      consumeCb_ = nullptr;
     }
   }
 
   ContinueFuture future_;
   BlockingReason blockingReason_{BlockingReason::kNotBlocked};
+  std::function<BlockingReason(ContinueFuture*)> startedCb_;
   std::function<BlockingReason(RowVectorPtr, ContinueFuture*, uint32_t)>
-      callback_;
+      consumeCb_;
 };
 
 } // namespace bytedance::bolt::exec

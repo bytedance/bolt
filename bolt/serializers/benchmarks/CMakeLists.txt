@@ -24,26 +24,12 @@
 #
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
-
-bolt_add_library(
-    bolt_presto_serializer
-    PrestoSerializer.cpp
-    UnsafeRowSerializer.cpp
-    CompactRowSerializer.cpp
-    ArrowSerializer.cpp
-)
+add_executable(bolt_row_serializer_benchmark RowSerializerBenchmark.cpp)
 
 target_link_libraries(
-    bolt_presto_serializer
-    bolt_vector
-    bolt_row_fast
-    utf8proc::utf8proc
-)
-
-if(${BOLT_BUILD_TESTING})
-    add_subdirectory(tests)
-endif()
-
-if(${BOLT_ENABLE_BENCHMARKS})
-  add_subdirectory(benchmarks)
-endif()
+  bolt_row_serializer_benchmark
+  bolt_presto_serializer
+  bolt_vector_fuzzer
+  bolt_memory
+  Folly::folly
+  ${FOLLY_BENCHMARK})

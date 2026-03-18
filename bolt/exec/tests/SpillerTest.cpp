@@ -513,13 +513,12 @@ class SpillerTest : public exec::test::RowContainerTestBase {
         type_ == Spiller::Type::kAggregateInput) {
       // We spill 'data' in one partition in type of kOrderBy, otherwise in 4
       // partitions.
+      const auto sortingKeys = SpillState::makeSortingKeys(
+          compareFlags_.empty()
+              ? std::vector<CompareFlags>(rowContainer_->keyTypes().size())
+              : compareFlags_);
       spiller_ = std::make_unique<Spiller>(
-          type_,
-          rowContainer_.get(),
-          rowType_,
-          rowContainer_->keyTypes().size(),
-          compareFlags_,
-          &spillConfig_);
+          type_, rowContainer_.get(), rowType_, sortingKeys, &spillConfig_);
     } else if (
         type_ == Spiller::Type::kAggregateOutput ||
         type_ == Spiller::Type::kOrderByOutput) {

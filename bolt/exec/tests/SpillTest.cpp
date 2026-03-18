@@ -180,14 +180,10 @@ class SpillTest : public ::testing::TestWithParam<common::CompressionKind>,
         compressionKind_,
         "",
         std::optional<VectorSerde::Kind>{}};
+    const auto sortingKeys = SpillState::makeSortingKeys(
+        compareFlags.empty() ? std::vector<CompareFlags>(1) : compareFlags);
     state_ = std::make_unique<SpillState>(
-        ioConfig,
-        numPartitions,
-        1,
-        compareFlags,
-        targetFileSize,
-        pool(),
-        &stats_);
+        ioConfig, numPartitions, sortingKeys, targetFileSize, pool(), &stats_);
     ASSERT_EQ(targetFileSize, state_->targetFileSize());
     ASSERT_EQ(numPartitions, state_->maxPartitions());
     ASSERT_EQ(stats_.rlock()->spilledPartitions, 0);
@@ -497,7 +493,13 @@ TEST_P(SpillTest, spillTimestamp) {
       compressionKind_,
       "",
       std::optional<VectorSerde::Kind>{}};
-  SpillState state(ioConfig, 1, 1, emptyCompareFlags, 1024, pool(), &stats_);
+  SpillState state(
+      ioConfig,
+      1,
+      SpillState::makeSortingKeys(std::vector<CompareFlags>(1)),
+      1024,
+      pool(),
+      &stats_);
   int partitionIndex = 0;
   state.setPartitionSpilled(partitionIndex);
   ASSERT_TRUE(state.isPartitionSpilled(partitionIndex));

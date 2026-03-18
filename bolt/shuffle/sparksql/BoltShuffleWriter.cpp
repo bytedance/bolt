@@ -264,14 +264,21 @@ ShuffleWriterType decideBoltShuffleWriterType(
     int64_t firstBatchFlatSize,
     int64_t memLimit,
     bytedance::bolt::memory::MemoryPool* boltPool) {
+  /*
+   * decide shuffle write type based on options.
+   *
+   * 1. For partitioning that does not has pid, only support V1, even with force
+   * write type
+   * 2. For partitioning that has pid,
+   *   - if column number and partitioner number exceed threshold, use RowBased
+   * shuffle.
+   *   - otherwise use preAllocSize to choose shuffle write type.
+   */
+
   int numPartitions = options.partitionWriterOptions.numPartitions;
-  bool hashOrRoundRobinWithPid =
-      (options.partitioning == Partitioning::kRange ||
-       options.partitioning == Partitioning::kHash ||
-       (options.partitioning == Partitioning::kRoundRobin &&
-        options.sort_before_repartition));
+  bool supportAdaptive = supportAdaptiveShuffleWriter(options.partitioning);
   // 0 is adaptive strategy, > 0 means shuffle type forced
-  if (options.forceShuffleWriterType && hashOrRoundRobinWithPid) {
+  if (options.forceShuffleWriterType && supportAdaptive) {
     return (ShuffleWriterType)options.forceShuffleWriterType;
   }
   constexpr int32_t v1PartitionThreholdL1 = 10000;
@@ -281,7 +288,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
 
   // calculate prealloc row size
   int32_t preAllocSize = kDefaultPreAllocSize;
-  if (options.forceShuffleWriterType == 0 && hashOrRoundRobinWithPid) {
+  if (options.forceShuffleWriterType == 0 && supportAdaptive) {
     preAllocSize = BoltShuffleWriter::calculatePreallocBufferSize(
         firstBatchRowNumber,
         firstBatchFlatSize,
@@ -291,7 +298,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
   }
   // V1 by default for single/range partitioning
   ShuffleWriterType type = ShuffleWriterType::V1;
-  if (hashOrRoundRobinWithPid) {
+  if (supportAdaptive) {
     // for large partition number with multiple columns
     if (numPartitions >= rowBasePartitionThreshold &&
         numColumnsExludePid >= rowBaseColumnNumThreshold) {
@@ -332,12 +339,20 @@ ShuffleWriterType decideBoltShuffleWriterType(
                 << ", partitioning = " << options.partitioning
                 << ", use BoltShuffleWriterV2";
     }
+  } else {
+    LOG(INFO) << __FUNCTION__
+              << ": forceShuffleWriterType = " << options.forceShuffleWriterType
+              << ", preAllocSize " << preAllocSize
+              << " <= " << options.useV2PreallocSizeThreshold
+              << ", partitions = " << numPartitions
+              << ", partitioning = " << options.partitioning
+              << ", use BoltShuffleWriterV";
   }
   return type;
 }
 
 std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
-    ShuffleWriterOptions options,
+    const ShuffleWriterOptions& options,
     int32_t numColumnsExludePid,
     int64_t firstBatchRowNumber,
     int64_t firstBatchFlatSize,
@@ -387,7 +402,7 @@ std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
 }
 
 std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::createDefault(
-    ShuffleWriterOptions options,
+    const ShuffleWriterOptions& options,
     bytedance::bolt::memory::MemoryPool* boltPool,
     arrow::MemoryPool* arrowPool) {
   auto writer = std::make_shared<BoltShuffleWriter>(
@@ -416,10 +431,7 @@ arrow::Status BoltShuffleWriter::init() {
   ARROW_ASSIGN_OR_RAISE(
       partitioner_,
       Partitioner::make(
-          options_.partitioning,
-          numPartitions_,
-          options_.startPartitionId,
-          options_.sort_before_repartition));
+          options_.partitioning, numPartitions_, options_.startPartitionId));
 
   // pre-allocated buffer size for each partition, unit is row count
   // when partitioner is SinglePart, partial variables don`t need init

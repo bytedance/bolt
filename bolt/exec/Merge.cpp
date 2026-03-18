@@ -89,7 +89,7 @@ void Merge::initializeTreeOfLosers() {
 BlockingReason Merge::isBlocked(ContinueFuture* future) {
   BOLT_TEST_ADJUST("bytedance::bolt::exec::Merge::isBlocked", this);
 
-  auto reason = addMergeSources(future);
+  const auto reason = addMergeSources(future);
   if (reason != BlockingReason::kNotBlocked) {
     return reason;
   }
@@ -100,6 +100,8 @@ BlockingReason Merge::isBlocked(ContinueFuture* future) {
     finished_ = true;
     return BlockingReason::kNotBlocked;
   }
+
+  startSources();
 
   // No merging is needed if there is only one source.
   if (streams_.empty() && sources_.size() > 1) {
@@ -112,13 +114,30 @@ BlockingReason Merge::isBlocked(ContinueFuture* future) {
     }
   }
 
-  if (!sourceBlockingFutures_.empty()) {
-    *future = std::move(sourceBlockingFutures_.back());
-    sourceBlockingFutures_.pop_back();
-    return BlockingReason::kWaitForProducer;
+  if (sourceBlockingFutures_.empty()) {
+    return BlockingReason::kNotBlocked;
   }
 
-  return BlockingReason::kNotBlocked;
+  *future = std::move(sourceBlockingFutures_.back());
+  sourceBlockingFutures_.pop_back();
+  return BlockingReason::kWaitForProducer;
+}
+
+void Merge::startSources() {
+  BOLT_CHECK_LE(numStartedSources_, sources_.size());
+  // Start the merge source once.
+  if (numStartedSources_ >= sources_.size()) {
+    return;
+  }
+  BOLT_CHECK_EQ(numStartedSources_, 0);
+  BOLT_CHECK(streams_.empty());
+  BOLT_CHECK(sourceBlockingFutures_.empty());
+  // TODO: support lazy start for local merge with a large number of sources
+  // to cap the memory usage.
+  for (auto& source : sources_) {
+    source->start();
+  }
+  numStartedSources_ = sources_.size();
 }
 
 bool Merge::isFinished() {
@@ -129,6 +148,8 @@ RowVectorPtr Merge::getOutput() {
   if (finished_) {
     return nullptr;
   }
+
+  BOLT_CHECK_EQ(numStartedSources_, sources_.size());
 
   // No merging is needed if there is only one source.
   if (sources_.size() == 1) {
@@ -331,48 +352,45 @@ BlockingReason MergeExchange::addMergeSources(ContinueFuture* future) {
     exec::Split split;
     auto reason = operatorCtx_->task()->getSplitOrFuture(
         operatorCtx_->driverCtx()->splitGroupId, planNodeId(), split, *future);
-    if (reason == BlockingReason::kNotBlocked) {
-      if (split.hasConnectorSplit()) {
-        auto remoteSplit = std::dynamic_pointer_cast<RemoteConnectorSplit>(
-            split.connectorSplit);
-        BOLT_CHECK(remoteSplit, "Wrong type of split");
-        remoteSourceTaskIds_.push_back(remoteSplit->taskId);
-      } else {
-        noMoreSplits_ = true;
-        if (!remoteSourceTaskIds_.empty()) {
-          const auto maxMergeExchangeBufferSize =
-              operatorCtx_->driverCtx()
-                  ->queryConfig()
-                  .maxMergeExchangeBufferSize();
-          const auto maxQueuedBytesPerSource = std::min<int64_t>(
-              std::max<int64_t>(
-                  maxMergeExchangeBufferSize / remoteSourceTaskIds_.size(),
-                  MergeSource::kMaxQueuedBytesLowerLimit),
-              MergeSource::kMaxQueuedBytesUpperLimit);
-          for (uint32_t remoteSourceIndex = 0;
-               remoteSourceIndex < remoteSourceTaskIds_.size();
-               ++remoteSourceIndex) {
-            auto* pool = operatorCtx_->task()->addMergeSourcePool(
-                operatorCtx_->planNodeId(),
-                operatorCtx_->driverCtx()->pipelineId,
-                remoteSourceIndex);
-            sources_.emplace_back(MergeSource::createMergeExchangeSource(
-                this,
-                remoteSourceTaskIds_[remoteSourceIndex],
-                operatorCtx_->task()->destination(),
-                maxQueuedBytesPerSource,
-                pool,
-                operatorCtx_->task()->queryCtx()->executor()));
-          }
-        }
-        // TODO Delay this call until all input data has been processed.
-        operatorCtx_->task()->multipleSplitsFinished(
-            remoteSourceTaskIds_.size());
-        return BlockingReason::kNotBlocked;
-      }
-    } else {
+    if (reason != BlockingReason::kNotBlocked) {
       return reason;
     }
+    if (split.hasConnectorSplit()) {
+      auto remoteSplit =
+          std::dynamic_pointer_cast<RemoteConnectorSplit>(split.connectorSplit);
+      BOLT_CHECK_NOT_NULL(remoteSplit, "Wrong type of split");
+      remoteSourceTaskIds_.push_back(remoteSplit->taskId);
+      continue;
+    }
+
+    noMoreSplits_ = true;
+    if (!remoteSourceTaskIds_.empty()) {
+      const auto maxMergeExchangeBufferSize =
+          operatorCtx_->driverCtx()->queryConfig().maxMergeExchangeBufferSize();
+      const auto maxQueuedBytesPerSource = std::min<int64_t>(
+          std::max<int64_t>(
+              maxMergeExchangeBufferSize / remoteSourceTaskIds_.size(),
+              MergeSource::kMaxQueuedBytesLowerLimit),
+          MergeSource::kMaxQueuedBytesUpperLimit);
+      for (uint32_t remoteSourceIndex = 0;
+           remoteSourceIndex < remoteSourceTaskIds_.size();
+           ++remoteSourceIndex) {
+        auto* pool = operatorCtx_->task()->addMergeSourcePool(
+            operatorCtx_->planNodeId(),
+            operatorCtx_->driverCtx()->pipelineId,
+            remoteSourceIndex);
+        sources_.emplace_back(MergeSource::createMergeExchangeSource(
+            this,
+            remoteSourceTaskIds_[remoteSourceIndex],
+            operatorCtx_->task()->destination(),
+            maxQueuedBytesPerSource,
+            pool,
+            operatorCtx_->task()->queryCtx()->executor()));
+      }
+    }
+    // TODO Delay this call until all input data has been processed.
+    operatorCtx_->task()->multipleSplitsFinished(remoteSourceTaskIds_.size());
+    return BlockingReason::kNotBlocked;
   }
 }
 

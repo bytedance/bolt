@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-//
-// Created by tanjunsheng@bytedance.com on 2023/5/29.
-//
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/functions/prestosql/aggregates/AggregateNames.h"
