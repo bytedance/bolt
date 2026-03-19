@@ -805,5 +805,152 @@ TEST_F(NestedLoopJoinTest, dynamicBatchSizeWithWideBuildRows) {
   ASSERT_EQ(result->size(), kProbeRows);
 }
 
+// Verifies filter path correctness when build side has a single row.
+// The optimization batches all probe rows into one filter evaluation.
+TEST_F(NestedLoopJoinTest, filterWithSingleBuildRow) {
+  auto probeVectors = {
+      makeRowVector({"t0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5})}),
+  };
+  auto buildVectors = {
+      makeRowVector({"u0"}, {makeFlatVector<int32_t>(std::vector<int32_t>{3})}),
+  };
+
+  createDuckDbTable("t", {probeVectors});
+  createDuckDbTable("u", {buildVectors});
+
+  for (auto joinType :
+       {core::JoinType::kInner,
+        core::JoinType::kLeft,
+        core::JoinType::kRight,
+        core::JoinType::kFull}) {
+    SCOPED_TRACE(core::joinTypeName(joinType));
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values({probeVectors})
+                    .nestedLoopJoin(
+                        PlanBuilder(planNodeIdGenerator)
+                            .values({buildVectors})
+                            .planNode(),
+                        "t0 >= u0",
+                        {"t0", "u0"},
+                        joinType)
+                    .planNode();
+    auto duckDbSql = fmt::format(
+        "SELECT t0, u0 FROM t {} JOIN u ON t0 >= u0",
+        core::joinTypeName(joinType));
+
+    assertQuery(plan, duckDbSql);
+
+    // Small batch size to exercise output-full path in batched mode.
+    CursorParameters params;
+    params.planNode = plan;
+    params.queryCtx = core::QueryCtx::create(executor_.get());
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows, "2"}});
+    assertQuery(params, duckDbSql);
+  }
+}
+
+// Verifies filter path correctness when build side has a single vector with
+// multiple rows. The optimization batches multiple probe rows per filter
+// evaluation.
+TEST_F(NestedLoopJoinTest, filterWithSingleBuildVector) {
+  auto probeVectors = {
+      makeRowVector({"t0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6})}),
+  };
+  auto buildVectors = {
+      makeRowVector({"u0"}, {makeFlatVector<int32_t>({2, 4, 6})}),
+  };
+
+  createDuckDbTable("t", {probeVectors});
+  createDuckDbTable("u", {buildVectors});
+
+  for (auto joinType :
+       {core::JoinType::kInner,
+        core::JoinType::kLeft,
+        core::JoinType::kRight,
+        core::JoinType::kFull}) {
+    SCOPED_TRACE(core::joinTypeName(joinType));
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values({probeVectors})
+                    .nestedLoopJoin(
+                        PlanBuilder(planNodeIdGenerator)
+                            .values({buildVectors})
+                            .planNode(),
+                        "t0 >= u0",
+                        {"t0", "u0"},
+                        joinType)
+                    .planNode();
+    auto duckDbSql = fmt::format(
+        "SELECT t0, u0 FROM t {} JOIN u ON t0 >= u0",
+        core::joinTypeName(joinType));
+
+    assertQuery(plan, duckDbSql);
+
+    // Small batch size to exercise output-full path; ensure
+    // outputBatchSize / buildRowCount > 1 so batching is active.
+    CursorParameters params;
+    params.planNode = plan;
+    params.queryCtx = core::QueryCtx::create(executor_.get());
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows, "9"}});
+    assertQuery(params, duckDbSql);
+  }
+}
+
+// Verifies LeftSemiProject join correctness with single build vector in the
+// batched filter path.
+TEST_F(NestedLoopJoinTest, leftSemiProjectWithSingleBuildVector) {
+  // Single build vector with multiple rows.
+  auto probeVector =
+      makeRowVector({"t0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5})});
+  auto buildVector = makeRowVector({"u0"}, {makeFlatVector<int32_t>({2, 4})});
+
+  auto verifyLeftSemiProject = [&](const RowVectorPtr& result,
+                                   const std::vector<bool>& expectedMatch) {
+    ASSERT_EQ(result->size(), expectedMatch.size());
+    for (int r = 0; r < result->size(); ++r) {
+      auto t0 = result->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(r);
+      bool match = result->childAt(1)->as<SimpleVector<bool>>()->valueAt(r);
+      EXPECT_EQ(t0, r + 1) << "row " << r;
+      EXPECT_EQ(match, expectedMatch[r]) << "row " << r << ": t0=" << t0;
+    }
+  };
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan =
+      PlanBuilder(planNodeIdGenerator)
+          .values({probeVector})
+          .nestedLoopJoin(
+              PlanBuilder(planNodeIdGenerator).values({buildVector}).planNode(),
+              "t0 >= u0",
+              {"t0", "match"},
+              core::JoinType::kLeftSemiProject)
+          .planNode();
+
+  // Default batch size — single build vector.
+  auto r1 = AssertQueryBuilder(plan).copyResults(pool());
+  verifyLeftSemiProject(r1, {false, true, true, true, true});
+
+  // Single build row.
+  buildVector =
+      makeRowVector({"u0"}, {makeFlatVector<int32_t>(std::vector<int32_t>{3})});
+
+  planNodeIdGenerator->reset();
+  plan =
+      PlanBuilder(planNodeIdGenerator)
+          .values({probeVector})
+          .nestedLoopJoin(
+              PlanBuilder(planNodeIdGenerator).values({buildVector}).planNode(),
+              "t0 >= u0",
+              {"t0", "match"},
+              core::JoinType::kLeftSemiProject)
+          .planNode();
+
+  auto r2 = AssertQueryBuilder(plan).copyResults(pool());
+  verifyLeftSemiProject(r2, {false, false, true, true, true});
+}
+
 } // namespace
 } // namespace bytedance::bolt::exec::test

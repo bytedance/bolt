@@ -222,7 +222,18 @@ class NestedLoopJoinProbe : public Operator {
 
   // Copies the ranges from buildVector specified by `buildCopyRanges_` to
   // `output_`, one projected column at a time. Clears buildCopyRanges_.
+  // Skipped when using dictionary encoding for build columns (single build
+  // vector).
   void copyBuildValues(const RowVectorPtr& buildVector);
+
+  // Whether to use dictionary encoding for build columns in the output.
+  // Enabled when there is a single build vector, avoiding deep copy of build
+  // data. Not applicable to LeftSemiProject joins (which skip build
+  // projections) or cross joins (which have their own optimized paths).
+  bool useBuildDictionary() const {
+    return isSingleBuildVector() && !isLeftSemiProjectJoin(joinType_) &&
+        !isCrossJoin();
+  }
 
   // Called when we are done processing the current probe batch, to signal we
   // are ready for the next one.
@@ -319,8 +330,13 @@ class NestedLoopJoinProbe : public Operator {
   BufferPtr probeOutputIndices_;
   vector_size_t* rawProbeOutputIndices_;
 
-  // Dictionary indices for build columns.
+  // Dictionary indices for build columns used to generate cross-product.
   BufferPtr buildIndices_;
+
+  // Dictionary indices for build columns in output vector. Used when there is
+  // a single build vector to avoid deep-copying build data.
+  BufferPtr buildOutputIndices_;
+  vector_size_t* rawBuildOutputIndices_{nullptr};
 
   // Join condition expression.
 
