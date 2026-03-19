@@ -28,8 +28,6 @@ add_executable(bolt_row_serializer_benchmark RowSerializerBenchmark.cpp)
 
 target_link_libraries(
   bolt_row_serializer_benchmark
-  bolt_presto_serializer
+  bolt_engine
   bolt_vector_fuzzer
-  bolt_memory
-  Folly::folly
   ${FOLLY_BENCHMARK})
