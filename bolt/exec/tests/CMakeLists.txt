@@ -52,6 +52,7 @@ add_executable(
   ArrowStreamTest.cpp
   AssignUniqueIdTest.cpp
   AsyncConnectorTest.cpp
+  ConcatFilesSpillMergeStreamTest.cpp
   ContainerRowSerdeTest.cpp
   CustomJoinTest.cpp
   EnforceSingleRowTest.cpp

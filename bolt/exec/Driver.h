@@ -369,6 +369,10 @@ class Driver : public std::enable_shared_from_this<Driver> {
  public:
   static void enqueue(std::shared_ptr<Driver> instance);
 
+  // Declare out-of-line destructor to ensure std::unique_ptr<Operator> is
+  // destroyed in a TU where Operator is a complete type.
+  ~Driver();
+
   /// Run the pipeline until it produces a batch of data or gets blocked.
   /// Return the data produced or nullptr if pipeline finished processing and
   /// will not produce more data. Return nullptr and set 'blockingState' if

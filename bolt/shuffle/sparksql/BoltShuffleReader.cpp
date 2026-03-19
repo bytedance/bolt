@@ -723,10 +723,9 @@ BoltColumnarBatchDeserializerFactory::BoltColumnarBatchDeserializerFactory(
 std::unique_ptr<BoltColumnarBatchDeserializer>
 BoltColumnarBatchDeserializerFactory::createDeserializer(
     std::shared_ptr<arrow::io::InputStream> in) {
-  // must be same as BoltRuntime::decideBoltShuffleWriterType
-  bool isRowBased = (!partitioningShortName_.compare("hash") ||
-                     !partitioningShortName_.compare("rr") ||
-                     !partitioningShortName_.compare("range")) &&
+  // must be same as BoltShuffleWriter::decideBoltShuffleWriterType
+  auto partitioning = toPartitioning(partitioningShortName_);
+  bool isRowBased = supportAdaptiveShuffleWriter(partitioning) &&
       ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
         numPartitions_ >= rowBasePartitionThreshold &&
         schema_->num_fields() >= rowBaseColumnNumThreshold) ||

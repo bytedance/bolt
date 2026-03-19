@@ -99,6 +99,8 @@ void registerCollectSetAggregate(
                 resultType);
           case TypeKind::ARRAY:
             [[fallthrough]];
+          case TypeKind::UNKNOWN:
+            [[fallthrough]];
           case TypeKind::ROW:
             // Nested nulls are allowed by setting 'throwOnNestedNulls' as
             // false.

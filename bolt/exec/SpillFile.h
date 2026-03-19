@@ -38,7 +38,6 @@
 #include "bolt/common/base/SpillStats.h"
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/file/File.h"
-#include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/UnorderedStreamReader.h"
@@ -47,6 +46,8 @@
 #include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/VectorStream.h"
 namespace bytedance::bolt::exec {
+
+using SpillSortKey = std::pair<column_index_t, CompareFlags>;
 
 /// Represents a spill file for writing the serialized spilled data into a disk
 /// file.
@@ -113,8 +114,7 @@ struct SpillFileInfo {
   /// The file size in bytes.
   uint64_t size;
   uint64_t rowCount;
-  uint32_t numSortKeys;
-  std::vector<CompareFlags> sortFlags;
+  std::vector<SpillSortKey> sortingKeys;
   common::CompressionKind compressionKind;
   std::optional<VectorSerde::Kind> serdeKind;
   std::optional<RowFormatInfo> rowInfo;
@@ -140,8 +140,7 @@ class SpillWriter {
   /// and sorting the data. write is called multiple times, followed by flush().
   SpillWriter(
       const RowTypePtr& type,
-      const uint32_t numSortKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       const std::string& pathPrefix,
       uint64_t targetFileSize,
       const common::SpillConfig::SpillIOConfig& ioConfig,
@@ -219,8 +218,7 @@ class SpillWriter {
       uint64_t writeTimeUs);
 
   const RowTypePtr type_;
-  const uint32_t numSortKeys_;
-  const std::vector<CompareFlags> sortCompareFlags_;
+  const std::vector<SpillSortKey> sortingKeys_;
   const common::CompressionKind compressionKind_;
   const std::string pathPrefix_;
   const uint64_t targetFileSize_;
@@ -323,12 +321,8 @@ class SpillReadFileBase {
     return id_;
   }
 
-  int32_t numSortKeys() const {
-    return numSortKeys_;
-  }
-
-  const std::vector<CompareFlags>& sortCompareFlags() const {
-    return sortCompareFlags_;
+  const std::vector<SpillSortKey>& sortingKeys() const {
+    return sortingKeys_;
   }
 
   /// Returns the file size in bytes.
@@ -367,8 +361,7 @@ class SpillReadFileBase {
   const uint64_t size_;
   // The data type of spilled data.
   const RowTypePtr type_;
-  const uint32_t numSortKeys_;
-  const std::vector<CompareFlags> sortCompareFlags_;
+  const std::vector<SpillSortKey> sortingKeys_;
   const common::CompressionKind compressionKind_;
   const VectorSerde::Options readOptions_;
   const std::optional<VectorSerde::Kind> serdeKind_;

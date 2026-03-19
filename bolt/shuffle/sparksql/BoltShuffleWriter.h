@@ -167,7 +167,7 @@ class BoltShuffleWriter : public ShuffleWriter {
   // options and input RowVector. May return
   // BoltShuffleWriter/BoltShuffleWriterV2 or RowBasedSortShuffleWriter.
   static std::shared_ptr<BoltShuffleWriter> create(
-      ShuffleWriterOptions options,
+      const ShuffleWriterOptions& options,
       int32_t numColumnsExludePid,
       int64_t firstBatchRowNumber,
       int64_t firstBatchFlatSize,
@@ -177,7 +177,7 @@ class BoltShuffleWriter : public ShuffleWriter {
 
   // create a BoltShuffleWriter instance
   static std::shared_ptr<BoltShuffleWriter> createDefault(
-      ShuffleWriterOptions options,
+      const ShuffleWriterOptions& options,
       bytedance::bolt::memory::MemoryPool* boltPool,
       arrow::MemoryPool* arrowPool);
 

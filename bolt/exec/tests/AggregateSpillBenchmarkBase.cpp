@@ -52,6 +52,7 @@ std::unique_ptr<RowContainer> makeRowContainer(
       false, // isJoinBuild
       true, // hasProbedFlag
       false, // hasNormalizedKey
+      false, // useListRowIndex
       pool.get());
 }
 
@@ -150,12 +151,13 @@ std::unique_ptr<Spiller> AggregateSpillBenchmarkBase::makeSpiller() {
   spillConfig_.fileCreateConfig = {};
 
   if (spillerType_ == Spiller::Type::kAggregateInput) {
+    const auto sortingKeys = SpillState::makeSortingKeys(
+        std::vector<CompareFlags>(rowContainer_->keyTypes().size()));
     auto spiller = std::make_unique<Spiller>(
         spillerType_,
         rowContainer_.get(),
         rowType_,
-        rowContainer_->keyTypes().size(),
-        std::vector<CompareFlags>{},
+        sortingKeys,
         &spillConfig_);
     spiller->setSpillConfig(&spillConfig_);
     return spiller;

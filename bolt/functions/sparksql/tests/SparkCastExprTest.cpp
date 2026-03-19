@@ -384,9 +384,23 @@ TEST_F(SparkCastExprTest, timestampToBigint) {
            Timestamp(1727181032, 0),
            Timestamp(-1727181032, 0),
            Timestamp(9223372036854, 775'807'000),
-           Timestamp(-9223372036855, 224'192'000)}),
+           Timestamp(-9223372036855, 224'192'000),
+           Timestamp(15, 3'000'000),
+           Timestamp(-16, 3'000'000),
+           Timestamp(15, 499'000'000),
+           Timestamp(15, 500'000'000),
+           Timestamp(15, 999'000'000)}),
       makeNullableFlatVector<int64_t>(
-          {0, 1727181032, -1727181032, 9223372036855, -9223372036855}));
+          {0,
+           1727181032,
+           -1727181032,
+           9223372036854,
+           -9223372036855,
+           15,
+           -16,
+           15,
+           15,
+           15}));
 }
 
 TEST_F(SparkCastExprTest, primitiveInvalidCornerCases) {

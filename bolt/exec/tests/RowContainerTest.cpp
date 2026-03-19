@@ -40,7 +40,8 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
 
-class RowContainerTest : public exec::test::RowContainerTestBase {
+class RowContainerTest : public exec::test::RowContainerTestBase,
+                         public testing::WithParamInterface<bool> {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
@@ -276,7 +277,9 @@ class RowContainerTest : public exec::test::RowContainerTestBase {
       sum += data.rowSize(row) - data.fixedRowSize();
     }
     auto usage = data.stringAllocator().cumulativeBytes();
-    EXPECT_EQ(usage, sum);
+    if (data.testingRowPointers().empty()) {
+      EXPECT_EQ(usage, sum);
+    }
   }
 
   /*
@@ -774,7 +777,7 @@ TEST_F(RowContainerTest, storeExtractArrayOfBoolean) {
   roundTrip(input);
 }
 
-TEST_F(RowContainerTest, types) {
+TEST_P(RowContainerTest, types) {
   constexpr int32_t kNumRows = 100;
   auto batch = makeDataset(
       ROW(
@@ -834,7 +837,7 @@ TEST_F(RowContainerTest, types) {
   std::vector<TypePtr> dependents;
   dependents.insert(
       dependents.begin(), types.begin() + types.size() / 2, types.end());
-  auto data = makeRowContainer(keys, dependents);
+  auto data = makeRowContainer(keys, dependents, true, GetParam());
 
   EXPECT_GT(data->nextOffset(), 0);
   EXPECT_GT(data->probedFlagOffset(), 0);
@@ -944,7 +947,7 @@ TEST_F(RowContainerTest, types) {
   EXPECT_LT(0, free.second);
 }
 
-TEST_F(RowContainerTest, extractNulls) {
+TEST_P(RowContainerTest, extractNulls) {
   constexpr int32_t kNumRows = 100;
   auto batch = makeRowVector({
       makeFlatVector<bool>(
@@ -995,7 +998,7 @@ TEST_F(RowContainerTest, extractNulls) {
       ARRAY(INTEGER()),
       MAP(INTEGER(), INTEGER()),
       ROW({INTEGER(), INTEGER()})};
-  auto data = makeRowContainer({}, rowType);
+  auto data = makeRowContainer({}, rowType, true, GetParam());
   for (int i = 0; i < kNumRows; i++) {
     data->newRow();
   }
@@ -1076,11 +1079,11 @@ TEST_F(RowContainerTest, erase) {
   data->checkConsistency();
 }
 
-TEST_F(RowContainerTest, initialNulls) {
+TEST_P(RowContainerTest, initialNulls) {
   std::vector<TypePtr> keys{INTEGER()};
   std::vector<TypePtr> dependent{INTEGER()};
   // Join build.
-  auto data = makeRowContainer(keys, dependent, true);
+  auto data = makeRowContainer(keys, dependent, true, GetParam());
   auto row = data->newRow();
   auto isNullAt = [](const RowContainer& data, const char* row, int32_t i) {
     auto column = data.columnAt(i);
@@ -1090,7 +1093,7 @@ TEST_F(RowContainerTest, initialNulls) {
   EXPECT_FALSE(isNullAt(*data, row, 0));
   EXPECT_FALSE(isNullAt(*data, row, 1));
   // Non-join build.
-  data = makeRowContainer(keys, dependent, false);
+  data = makeRowContainer(keys, dependent, false, GetParam());
   row = data->newRow();
   EXPECT_FALSE(isNullAt(*data, row, 0));
   EXPECT_FALSE(isNullAt(*data, row, 1));
@@ -1098,7 +1101,7 @@ TEST_F(RowContainerTest, initialNulls) {
 
 TEST_F(RowContainerTest, rowSize) {
   constexpr int32_t kNumRows = 100;
-  auto data = makeRowContainer({SMALLINT()}, {VARCHAR()});
+  auto data = makeRowContainer({SMALLINT()}, {VARCHAR()}, true);
 
   // The layout is expected to be smallint - 6 bytes of padding - 1 byte of bits
   // - StringView - rowSize - next pointer. The bits are a null flag for the
@@ -1134,8 +1137,8 @@ TEST_F(RowContainerTest, rowSize) {
   EXPECT_EQ(rows, rowsFromContainer);
 }
 
-TEST_F(RowContainerTest, rowSizeWithNormalizedKey) {
-  auto data = makeRowContainer({SMALLINT()}, {VARCHAR()});
+TEST_P(RowContainerTest, rowSizeWithNormalizedKey) {
+  auto data = makeRowContainer({SMALLINT()}, {VARCHAR()}, true, GetParam());
   data->newRow();
   data->disableNormalizedKeys();
   data->newRow();
@@ -1151,7 +1154,7 @@ TEST_F(RowContainerTest, estimateRowSize) {
 
   // Make a RowContainer with a fixed-length key column and a variable-length
   // dependent column.
-  auto rowContainer = makeRowContainer({BIGINT()}, {VARCHAR()});
+  auto rowContainer = makeRowContainer({BIGINT()}, {VARCHAR()}, true);
   EXPECT_FALSE(rowContainer->estimateRowSize().has_value());
 
   // Store rows to the container.
@@ -1196,6 +1199,7 @@ TEST_F(RowContainerTest, alignment) {
       false,
       true,
       true,
+      false,
       pool_.get());
   constexpr int kNumRows = 100;
   char* rows[kNumRows];
@@ -1363,6 +1367,7 @@ TEST_F(RowContainerTest, probedFlag) {
       true, // isJoinBuild
       true, // hasProbedFlag
       false, // hasNormalizedKey
+      false, // useListRowIndex
       pool_.get());
 
   auto input = makeRowVector({
@@ -1792,3 +1797,8 @@ TEST_F(RowContainerTest, DISABLED_ConvertBenchmark) {
     benchmark("string_array_10K", lambda, 1000, data);
   }
 }
+
+BOLT_INSTANTIATE_TEST_SUITE_P(
+    RowContainerTest,
+    RowContainerTest,
+    testing::ValuesIn({false, true}));

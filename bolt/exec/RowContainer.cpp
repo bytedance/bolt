@@ -205,6 +205,7 @@ RowContainer::RowContainer(
     bool isJoinBuild,
     bool hasProbedFlag,
     bool hasNormalizedKeys,
+    bool useListRowIndex,
     memory::MemoryPool* pool,
     std::shared_ptr<HashStringAllocator> stringAllocator)
     : keyTypes_(keyTypes),
@@ -215,7 +216,9 @@ RowContainer::RowContainer(
       rows_(pool),
       stringAllocator_(
           stringAllocator ? stringAllocator
-                          : std::make_shared<HashStringAllocator>(pool)) {
+                          : std::make_shared<HashStringAllocator>(pool)),
+      useListRowIndex_(useListRowIndex),
+      rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable
   // width data is referenced, this is done with StringView(for VARCHAR) and
@@ -352,6 +355,9 @@ char* RowContainer::newRow() {
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;
+    }
+    if (useListRowIndex_) {
+      rowPointers_.push_back(row);
     }
   }
   return initializeRow(row, false /* reuse */);
@@ -1052,6 +1058,8 @@ void RowContainer::clear() {
     }
   }
   rows_.clear();
+  rowPointers_.clear();
+  rowPointers_.shrink_to_fit();
   if (!sharedStringAllocator) {
     if (checkFree_) {
       stringAllocator_->checkEmpty();
@@ -1115,7 +1123,8 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   }
   int64_t freeBytes = rows_.freeBytes() + fixedRowSize_ * numFreeRows_;
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
-      stringAllocator_->retainedSize() - stringAllocator_->freeSpace();
+      stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
+      rowPointers_.capacity() * sizeof(char*);
   int64_t rowSize = usedSize / numRows_;
   BOLT_CHECK_GT(
       rowSize, 0, "Estimated row size of the RowContainer must be positive.");

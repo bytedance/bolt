@@ -126,6 +126,9 @@ struct RowContainerIterator {
   // First byte after the end of the range containing 'currentRow'.
   char* FOLLY_NULLABLE endOfRun{nullptr};
 
+  // Cursor used by fast row listing with cached row pointers.
+  int32_t listRowCursor{0};
+
   // Returns the current row, skipping a possible normalized key below the first
   // byte of row.
   inline char* currentRow() const {
@@ -224,6 +227,18 @@ class RowContainer {
       memory::MemoryPool* FOLLY_NONNULL pool)
       : RowContainer(
             keyTypes,
+            dependentTypes,
+            false, // useListRowIndex
+            pool) {}
+
+  // Convenience overload to enable fast row listing via cached pointers.
+  RowContainer(
+      const std::vector<TypePtr>& keyTypes,
+      const std::vector<TypePtr>& dependentTypes,
+      bool useListRowIndex,
+      memory::MemoryPool* FOLLY_NONNULL pool)
+      : RowContainer(
+            keyTypes,
             true, // nullableKeys
             std::vector<Accumulator>{},
             dependentTypes,
@@ -231,6 +246,7 @@ class RowContainer {
             false, // isJoinBuild
             false, // hasProbedFlag
             false, // hasNormalizedKey
+            useListRowIndex,
             pool) {}
 
   ~RowContainer();
@@ -265,6 +281,7 @@ class RowContainer {
       bool isJoinBuild,
       bool hasProbedFlag,
       bool hasNormalizedKey,
+      bool useListRowIndex,
       memory::MemoryPool* FOLLY_NONNULL pool,
       std::shared_ptr<HashStringAllocator> stringAllocator = nullptr);
 
@@ -523,6 +540,22 @@ class RowContainer {
   /// There is a barrier but tsan does not know this.
   enum class ProbeType { kAll, kProbed, kNotProbed };
 
+  /// Fast path for `listRows` that returns `rowPointers_` directly. Used by
+  /// `SortBuffer` and `SortInputSpiller`, so it skips checking the free and
+  /// probe flags.
+  int32_t listRowsFast(
+      RowContainerIterator* FOLLY_NONNULL iter,
+      int32_t maxRows,
+      char* FOLLY_NONNULL* FOLLY_NONNULL rows) const {
+    int32_t count = 0;
+    while (count < maxRows &&
+           iter->listRowCursor < static_cast<int32_t>(rowPointers_.size())) {
+      rows[count++] = rowPointers_[iter->listRowCursor];
+      ++iter->listRowCursor;
+    }
+    return count;
+  }
+
   template <ProbeType probeType>
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -610,6 +643,9 @@ class RowContainer {
       RowContainerIterator* FOLLY_NONNULL iter,
       int32_t maxRows,
       char* FOLLY_NONNULL* FOLLY_NONNULL rows) {
+    if (useListRowIndex_) {
+      return listRowsFast(iter, maxRows, rows);
+    }
     return listRows<ProbeType::kAll>(iter, maxRows, kUnlimited, rows);
   }
 
@@ -775,6 +811,10 @@ class RowContainer {
   codegenRowEqVectors(const std::vector<TypePtr>& keyTypes, bool haveNulls);
 
 #endif
+
+  const std::vector<char*, StlAllocator<char*>>& testingRowPointers() const {
+    return rowPointers_;
+  }
 
   memory::MemoryPool* FOLLY_NONNULL pool() const {
     return stringAllocator_->pool();
@@ -1428,6 +1468,8 @@ class RowContainer {
   int32_t fixedRowSize_;
   // True if normalized keys are enabled in initial state.
   const bool hasNormalizedKeys_;
+  // Whether to use cached row pointers for fast listing.
+  const bool useListRowIndex_;
   // The count of entries that have an extra normalized_key_t before the
   // start.
   int64_t numRowsWithNormalizedKey_ = 0;
@@ -1447,6 +1489,7 @@ class RowContainer {
 
   memory::AllocationPool rows_;
   std::shared_ptr<HashStringAllocator> stringAllocator_;
+  std::vector<char*, StlAllocator<char*>> rowPointers_;
 
   int alignment_ = 1;
 };

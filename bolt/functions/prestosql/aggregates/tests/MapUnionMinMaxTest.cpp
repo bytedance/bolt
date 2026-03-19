@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-//
-// Created by tanjunsheng@bytedance.com on 2023/5/29.
-//
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
