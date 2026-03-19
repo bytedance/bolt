@@ -266,12 +266,6 @@ RowVectorPtr NestedLoopJoinProbe::getOutput() {
     // probe mismatches (for left joins).
     output = generateOutput();
   }
-  // Refine outputBatchSize_ based on actual output row size for subsequent
-  // batches.
-  if (output && output->size() > 0) {
-    outputBatchSize_ =
-        outputBatchRows(output->estimateFlatSize() / output->size());
-  }
   return output;
 }
 
