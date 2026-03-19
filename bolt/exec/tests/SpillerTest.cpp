@@ -498,6 +498,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
     spillConfig_.executor = executor();
     spillConfig_.compressionKind = compressionKind_;
     spillConfig_.maxSpillRunRows = maxSpillRunRows;
+    spillConfig_.maxFileSize = targetFileSize;
     spillConfig_.fileCreateConfig = {};
     spillConfig_.spillUringEnabled = false;
     spillConfig_.rowBasedSpillMode = rowBasedSpill
@@ -508,6 +509,14 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       // kHashJoinProbe doesn't have associated row container.
       spiller_ = std::make_unique<Spiller>(
           type_, rowType_, hashBits_, &spillConfig_, targetFileSize);
+    } else if (type_ == Spiller::Type::kLocalMergeInput) {
+      // kLocalMergeInput doesn't have associated row container.
+      const auto sortingKeys = SpillState::makeSortingKeys(
+          compareFlags_.empty()
+              ? std::vector<CompareFlags>(rowContainer_->keyTypes().size())
+              : compareFlags_);
+      spiller_ = std::make_unique<Spiller>(
+          type_, rowType_, hashBits_, sortingKeys, &spillConfig_);
     } else if (
         type_ == Spiller::Type::kOrderByInput ||
         type_ == Spiller::Type::kAggregateInput) {
@@ -696,11 +705,13 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       int numAppendBatches,
       int targetFileSize,
       uint64_t maxSpillRunRows) {
-    ASSERT_TRUE(
-        type_ == Spiller::Type::kHashJoinBuild ||
-        type_ == Spiller::Type::kHashJoinProbe);
+    const bool isBuild = type_ == Spiller::Type::kHashJoinBuild;
+    const bool isNoRowContainerSpiller =
+        type_ == Spiller::Type::kHashJoinProbe ||
+        type_ == Spiller::Type::kLocalMergeInput;
+    ASSERT_TRUE(isBuild || isNoRowContainerSpiller);
 
-    const int numSpillPartitions = type_ == Spiller::Type::kHashJoinBuild
+    const int numSpillPartitions = isBuild
         ? numPartitions_
         : 1 + folly::Random().rand32() % numPartitions_;
     SpillPartitionNumSet spillPartitionNumSet;
@@ -726,18 +737,13 @@ class SpillerTest : public exec::test::RowContainerTestBase {
     for (int iter = 0; iter < numSpillers; ++iter) {
       const auto prevGStats = common::globalSpillStats();
       setupSpillData(
-          rowType_,
-          numKeys_,
-          type_ == Spiller::Type::kHashJoinBuild ? numBatchRows * 10 : 0,
-          1,
-          nullptr,
-          {});
+          rowType_, numKeys_, isBuild ? numBatchRows * 10 : 0, 1, nullptr, {});
       setupSpiller(targetFileSize, 0, false, maxSpillRunRows);
       // Can't append without marking a partition as spilling.
       BOLT_ASSERT_THROW(spiller_->spill(0, rowVector_), "");
 
       splitByPartition(rowVector_, spillHashFunction, inputsByPartition);
-      if (type_ == Spiller::Type::kHashJoinProbe) {
+      if (isNoRowContainerSpiller) {
         spiller_->setPartitionsSpilled(spillPartitionNumSet);
 #ifndef NDEBUG
         BOLT_ASSERT_THROW(
@@ -758,9 +764,9 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           spiller_->spill(partition, inputsByPartition[partition].back());
         }
       }
-      // Assert that hash probe type of spiller type doesn't support incremental
-      // spilling.
-      if (type_ == Spiller::Type::kHashJoinProbe) {
+      // No-row-container spiller types don't support spill();
+      // they only support append-only spill(partition, vector).
+      if (isNoRowContainerSpiller) {
         BOLT_ASSERT_THROW(spiller_->spill(), "");
       } else {
         spiller_->spill();
@@ -769,7 +775,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
       const auto stats = spiller_->stats();
       ASSERT_GE(stats.spilledFiles, 0);
-      if (type_ == Spiller::Type::kHashJoinProbe) {
+      if (isNoRowContainerSpiller) {
         if (numAppendBatches == 0) {
           ASSERT_EQ(stats.spilledRows, 0);
           ASSERT_EQ(stats.spilledBytes, 0);
@@ -845,9 +851,11 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       std::vector<std::unique_ptr<Spiller>> spillers,
       const SpillPartitionNumSet& spillPartitionNumSet,
       const std::vector<std::vector<RowVectorPtr>>& inputsByPartition) {
-    ASSERT_TRUE(
-        type_ == Spiller::Type::kHashJoinBuild ||
-        type_ == Spiller::Type::kHashJoinProbe);
+    const bool isBuild = type_ == Spiller::Type::kHashJoinBuild;
+    const bool isNoRowContainerSpiller =
+        type_ == Spiller::Type::kHashJoinProbe ||
+        type_ == Spiller::Type::kLocalMergeInput;
+    ASSERT_TRUE(isBuild || isNoRowContainerSpiller);
 
     SpillPartitionSet spillPartitionSet;
     for (auto& spiller : spillers) {
@@ -863,8 +871,8 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       ASSERT_EQ(
           hashBits_.begin(), spillPartitionEntry.first.partitionBitOffset());
       auto reader = spillPartitionEntry.second->createUnorderedReader(pool());
-      if (type_ == Spiller::Type::kHashJoinProbe) {
-        // For hash probe type, we append each input vector as one batch in
+      if (isNoRowContainerSpiller) {
+        // For no-row-container types, we append each input vector as a batch in
         // spill file so that we can do one-to-one comparison.
         for (int i = 0; i < inputsByPartition[partition].size(); ++i) {
           const auto& expectedVector = inputsByPartition[partition][i];
@@ -915,9 +923,11 @@ class SpillerTest : public exec::test::RowContainerTestBase {
   void verifyNonSortedSpillData(
       const SpillPartitionNumSet& spillPartitionNumSet,
       const std::vector<std::vector<RowVectorPtr>>& inputsByPartition) {
-    ASSERT_TRUE(
-        type_ == Spiller::Type::kHashJoinBuild ||
-        type_ == Spiller::Type::kHashJoinProbe);
+    const bool isBuild = type_ == Spiller::Type::kHashJoinBuild;
+    const bool isNoRowContainerSpiller =
+        type_ == Spiller::Type::kHashJoinProbe ||
+        type_ == Spiller::Type::kLocalMergeInput;
+    ASSERT_TRUE(isBuild || isNoRowContainerSpiller);
 
     if (numPartitions_ > 0) {
       BOLT_ASSERT_THROW(spiller_->finishSpill(), "");
@@ -935,8 +945,8 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       ASSERT_EQ(
           hashBits_.begin(), spillPartitionEntry.first.partitionBitOffset());
       auto reader = spillPartitionEntry.second->createUnorderedReader(pool());
-      if (type_ == Spiller::Type::kHashJoinProbe) {
-        // For hash probe type, we append each input vector as one batch in
+      if (isNoRowContainerSpiller) {
+        // For no-row-container types, we append each input vector as a batch in
         // spill file so that we can do one-to-one comparison.
         for (int i = 0; i < inputsByPartition[partition].size(); ++i) {
           const auto& expectedVector = inputsByPartition[partition][i];
@@ -1101,6 +1111,7 @@ class NoHashJoin : public SpillerTest,
         .typesToExclude =
             {Spiller::Type::kHashJoinProbe,
              Spiller::Type::kHashJoinBuild,
+             Spiller::Type::kLocalMergeInput,
              Spiller::Type::kOrderByOutput}}
         .getTestParams();
   }
@@ -1264,6 +1275,7 @@ class HashJoinBuildOnly : public SpillerTest,
             {Spiller::Type::kAggregateInput,
              Spiller::Type::kAggregateOutput,
              Spiller::Type::kHashJoinProbe,
+             Spiller::Type::kLocalMergeInput,
              Spiller::Type::kOrderByInput,
              Spiller::Type::kOrderByOutput}}
         .getTestParams();
@@ -1356,6 +1368,7 @@ class AggregationOutputOnly : public SpillerTest,
             {Spiller::Type::kAggregateInput,
              Spiller::Type::kHashJoinBuild,
              Spiller::Type::kHashJoinProbe,
+             Spiller::Type::kLocalMergeInput,
              Spiller::Type::kOrderByInput,
              Spiller::Type::kOrderByOutput}}
         .getTestParams();
@@ -1455,6 +1468,7 @@ class OrderByOutputOnly : public SpillerTest,
              Spiller::Type::kAggregateOutput,
              Spiller::Type::kHashJoinBuild,
              Spiller::Type::kHashJoinProbe,
+             Spiller::Type::kLocalMergeInput,
              Spiller::Type::kOrderByInput}}
         .getTestParams();
   }
@@ -1540,7 +1554,8 @@ class RowBasedSpillTest : public SpillerTest,
             {Spiller::Type::kAggregateInput,
              Spiller::Type::kAggregateOutput,
              Spiller::Type::kHashJoinBuild,
-             Spiller::Type::kHashJoinProbe}}
+             Spiller::Type::kHashJoinProbe,
+             Spiller::Type::kLocalMergeInput}}
         .getTestParams();
   }
 };
@@ -1654,7 +1669,9 @@ class MaxSpillRunTest : public SpillerTest,
   static std::vector<TestParam> getTestParams() {
     return TestParamsBuilder{
         .typesToExclude =
-            {Spiller::Type::kHashJoinProbe, Spiller::Type::kOrderByOutput}}
+            {Spiller::Type::kHashJoinProbe,
+             Spiller::Type::kLocalMergeInput,
+             Spiller::Type::kOrderByOutput}}
         .getTestParams();
   }
 };
