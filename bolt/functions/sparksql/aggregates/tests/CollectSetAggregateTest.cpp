@@ -83,6 +83,35 @@ TEST_F(CollectSetAggregateTest, global) {
       {data}, {}, {"collect_set(c0)"}, {"spark_array_sort(a0)"}, {expected});
 }
 
+TEST_F(CollectSetAggregateTest, unknownType) {
+  // All inputs are null.
+  auto data = makeRowVector({makeNullConstant(TypeKind::UNKNOWN, 1)});
+  auto expected = makeRowVector({
+      makeArrayVectorFromJson<int32_t>({"[]"}),
+  });
+  testAggregations({data}, {}, {"collect_set(c0)"}, {"a0"}, {expected});
+  // Null inputs.
+  data = makeRowVector({
+      makeFlatVector<int16_t>({1, 1, 2, 2, 2, 1, 2, 1, 2, 1}),
+      makeNullConstant(TypeKind::UNKNOWN, 10),
+  });
+  expected = makeRowVector({
+      makeFlatVector<int16_t>({1, 2}),
+      makeArrayVectorFromJson<int32_t>({
+          "[]",
+          "[]",
+      }),
+  });
+  testAggregations(
+      {data, data, data},
+      {"c0"},
+      {"collect_set(c1)"},
+      {"c0", "a0"},
+      {expected},
+      {},
+      false);
+}
+
 TEST_F(CollectSetAggregateTest, noInputRow) {
   // Empty input.
   auto data = makeRowVector({makeFlatVector<int32_t>({})});
