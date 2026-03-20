@@ -330,7 +330,7 @@ class NestedLoopJoinProbe : public Operator {
   BufferPtr probeOutputIndices_;
   vector_size_t* rawProbeOutputIndices_;
 
-  // Dictionary indices for build columns used to generate cross-product.
+  // Dictionary indices for build columns.
   BufferPtr buildIndices_;
 
   // Dictionary indices for build columns in output vector. Used when there is

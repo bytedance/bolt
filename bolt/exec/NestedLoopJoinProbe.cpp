@@ -392,10 +392,8 @@ bool NestedLoopJoinProbe::addToOutput() {
     const auto buildRowCount = currentBuild->size();
 
     // Iterate over the filter results. For each match, add an output record.
-    // When probeRowCount_ > 1 (single build row/vector optimization), the
-    // filter results cover multiple probe rows. Use probeOffset and buildIdx
-    // to decode each entry. When probeRowCount_ == 1, probeOffset is always 0
-    // and buildIdx equals i, preserving the original single-row behavior.
+    // Use probeOffset and buildIdx
+    // to decode each entry.
     for (size_t i = filterResultRow_; i < decodedFilterResult_.size(); ++i) {
       const auto probeOffset = i / buildRowCount;
       const auto buildIdx = static_cast<vector_size_t>(i % buildRowCount);
@@ -403,10 +401,10 @@ bool NestedLoopJoinProbe::addToOutput() {
       // At probe row boundaries (only for build with single vector, when has
       // multiple build vectors, buildRowCount equals
       // decodedFilterResult.size(), so buildIdx == 0 && i > filterResultRow_
-      // wounld never match), set probeRowHasMatch_ to false and check if the
+      // would never match), set probeRowHasMatch_ to false and check if the
       // previous probe row needs a mismatch row (for left/full outer and left
       // semi project joins).
-      if (probeRowCount_ > 1 && buildIdx == 0 && i > filterResultRow_) {
+      if (buildIdx == 0 && i > filterResultRow_) {
         if (needsProbeMismatch(joinType_) && !probeRowHasMatch_) {
           probeRow_ = startProbeRow + probeOffset - 1;
           addProbeMismatchRow();
@@ -540,8 +538,7 @@ void NestedLoopJoinProbe::prepareOutput() {
         BaseVector::create(BOOLEAN(), outputBatchSize_, pool());
   } else if (useBuildDictionary()) {
     // Single build vector: wrap build columns as DictionaryVector to avoid
-    // deep-copying build data. Each output row stores a 4-byte index instead
-    // of copying the full build row.
+    // deep-copying build data.
     buildOutputIndices_ = allocateIndices(outputBatchSize_, pool());
     rawBuildOutputIndices_ = buildOutputIndices_->asMutable<vector_size_t>();
     const auto& buildVector = buildVectors_->front();
