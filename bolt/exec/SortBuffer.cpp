@@ -49,7 +49,8 @@ SortBuffer::SortBuffer(
     const common::SpillConfig* spillConfig,
     uint64_t spillMemoryThreshold,
     OperatorCtx* operatorCtx,
-    bool hybridSortEnabled)
+    bool hybridSortEnabled,
+    bool scatteredModeEnabled)
     : input_(input),
       sortCompareFlags_(sortCompareFlags),
       pool_(pool),
@@ -57,7 +58,8 @@ SortBuffer::SortBuffer(
       spillConfig_(spillConfig),
       spillMemoryThreshold_(spillMemoryThreshold),
       operatorCtx_(operatorCtx),
-      hybridSortEnabled_(hybridSortEnabled) {
+      hybridSortEnabled_(hybridSortEnabled),
+      scatteredMode_(hybridSortEnabled && scatteredModeEnabled) {
   BOLT_CHECK_GE(input_->size(), sortCompareFlags_.size());
   BOLT_CHECK_GT(sortCompareFlags_.size(), 0);
   BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags_.size());
@@ -119,6 +121,8 @@ SortBuffer::SortBuffer(
     std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
     hybridDataChannel[0] = hybridData_.get();
     hybridData_->setAllContainers(hybridDataChannel);
+    // Set scattered mode
+    hybridData_->setScatteredModeEnabled(scatteredMode_);
 
     payloadTypes_ =
         ROW(std::move(nonSortedColumnNames), std::move(nonSortedColumnTypes));
@@ -146,12 +150,22 @@ void SortBuffer::addInput(const VectorPtr& input) {
   auto* inputRow = input->as<RowVector>();
   MicrosecondTimer timer(&sortColToRowTimeUs_);
   if (hybridSortEnabled_) {
-    auto currentRows = hybridData_->getNumRows();
+    // Get batch/row info before processing
+    auto batchId = hybridData_->getNumBatches();  // for scattered mode
+    auto baseRow = hybridData_->getNumRows();     // for coalesced mode
     for (int row = 0; row < input->size(); ++row) {
-      // Store RowId
-      uint64_t encodedId = (static_cast<uint64_t>(0)
-                            << 56) | // top 8 bits: driverId, always 0 for Sort
-          (static_cast<uint64_t>(row + currentRows) & ((1ULL << 56) - 1));
+      // Store RowId - encoding depends on mode
+      uint64_t encodedId;
+      if (scatteredMode_) {
+        // Scattered mode: rowId = (batchId << 32) | rowInBatch
+        // driverId stored in top 8 bits (always 0 for Sort)
+        encodedId = (static_cast<uint64_t>(0) << 56) |
+            ((static_cast<uint64_t>(batchId) << 32) | row);
+      } else {
+        // Coalesced mode: rowId = global row index
+        encodedId = (static_cast<uint64_t>(0) << 56) |
+            (static_cast<uint64_t>(row + baseRow) & ((1ULL << 56) - 1));
+      }
       data_->storeSingleRowId(encodedId, rows[row]);
     }
     // Store key columns
@@ -207,7 +221,7 @@ void SortBuffer::noMoreInput() {
   if (numInputRows_ == 0) {
     return;
   }
-  if (hybridSortEnabled_ && hybridData_ != nullptr) {
+  if (hybridSortEnabled_ && hybridData_ != nullptr && !scatteredMode_) {
     hybridData_->coalesceBatches();
   }
 
@@ -358,7 +372,13 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
   }
 
   // If current memory usage exceeds spilling threshold, trigger spilling.
-  const auto currentMemoryUsage = pool_->currentBytes();
+  // For hybrid sort in coalesced mode, include the payload memory that will be needed when
+  // coalescing batches. This ensures we trigger spill early enough to have
+  // headroom for the coalesce operation. Skip in scattered mode since we don't coalesce.
+  auto currentMemoryUsage = pool_->currentBytes();
+  if (hybridSortEnabled_ && hybridData_ != nullptr && !scatteredMode_) {
+    currentMemoryUsage += hybridData_->payloadMemoryBytes();
+  }
   if (spillMemoryThreshold_ != 0 &&
       currentMemoryUsage > spillMemoryThreshold_) {
     spill();
@@ -470,8 +490,8 @@ void SortBuffer::spillInput() {
   // Coalesce batches BEFORE every spill, not just the first one.
   // After each spill, hybridData_->clear() is called which clears
   // owningInputs_. New data added via addInput() needs to be coalesced before
-  // the next spill.
-  if (hybridSortEnabled_ && hybridData_ != nullptr) {
+  // the next spill. Skip in scattered mode since we keep batches separate.
+  if (hybridSortEnabled_ && hybridData_ != nullptr && !scatteredMode_) {
     hybridData_->coalesceBatches();
   }
   spiller_->spill();

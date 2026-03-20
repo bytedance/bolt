@@ -1997,6 +1997,18 @@ class HybridContainer {
     return totalBatches_;
   }
 
+  /// Returns the total payload memory bytes that would be needed to coalesce
+  /// all payload batches. This is the sum of estimateFlatSize() for all payload
+  /// columns across all batches. Used by SortBuffer to account for the memory
+  /// required for coalescing when making spill decisions.
+  uint64_t payloadMemoryBytes() const {
+    uint64_t total = 0;
+    for (const auto& bytes : payloadFlatBytesSum_) {
+      total += bytes;
+    }
+    return total;
+  }
+
   void setId(uint8_t id) {
     id_ = id;
   }

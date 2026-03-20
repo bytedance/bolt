@@ -742,7 +742,12 @@ bool HashBuild::reserveMemory(
 
     // We check usage from the parent pool to take peers' allocations into
     // account.
-    const auto nodeUsage = pool()->currentBytes();
+    auto nodeUsage = pool()->currentBytes();
+    // For hybrid join without scattered mode, include payload memory that
+    // is not tracked by the pool but will be needed during coalesceBatches().
+    if (hybridJoin_ && table_->hybridData() && !scatteredMode_) {
+      nodeUsage += table_->hybridData()->payloadMemoryBytes();
+    }
     if (spillMemoryThreshold_ != 0 && nodeUsage > spillMemoryThreshold_) {
       const int64_t bytesToSpill =
           nodeUsage * spillConfig()->spillableReservationGrowthPct / 100;
