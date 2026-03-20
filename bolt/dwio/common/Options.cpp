@@ -214,7 +214,7 @@ folly::dynamic WriterOptions::serialize() const {
 
 // pool, nonReclaimableSection, and spillConfig callbacks/executor remain at
 // default and must be re-injected by the host.
-std::shared_ptr<WriterOptions> WriterOptions::deserialize(
+std::shared_ptr<WriterOptions> WriterOptions::create(
     const folly::dynamic& obj) {
   auto opts = std::make_shared<WriterOptions>();
 
@@ -266,13 +266,13 @@ void WriterOptions::registerSerDe() {
   bolt::Type::registerSerDe();
   bolt::common::SpillConfig::registerSerDe();
   auto& registry = DeserializationRegistryForSharedPtr();
-  registry.Register("WriterOptions", WriterOptions::deserialize);
+  registry.Register("WriterOptions", WriterOptions::create);
 }
 
-ReaderOptions ReaderOptions::deserialize(
+ReaderOptions ReaderOptions::create(
     const folly::dynamic& obj,
     bolt::memory::MemoryPool* pool) {
-  auto baseOptions = io::ReaderOptions::deserialize(obj, pool);
+  auto baseOptions = io::ReaderOptions::create(obj, pool);
   ReaderOptions options(pool);
   static_cast<io::ReaderOptions&>(options) = baseOptions;
 
@@ -333,7 +333,7 @@ void ReaderOptions::registerSerDe() {
         // In practice, deserialize() should be called directly with a real
         // pool.
         bolt::memory::MemoryPool* dummyPool = nullptr;
-        auto options = ReaderOptions::deserialize(obj, dummyPool);
+        auto options = ReaderOptions::create(obj, dummyPool);
         return std::make_shared<ReaderOptions>(std::move(options));
       });
 }

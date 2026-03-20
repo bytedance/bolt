@@ -94,7 +94,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsSerializeDeserializeRoundTrip) {
   folly::dynamic dyn = opts.serialize();
 
   // ---- deserialize ----
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   // ---- verify ----
 
@@ -126,7 +126,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsDefaultsRoundTrip) {
   WriterOptions opts;
 
   folly::dynamic dyn = opts.serialize();
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   ASSERT_EQ(nullptr, roundTrip->schema);
   ASSERT_FALSE(roundTrip->compressionKind.has_value());
@@ -160,7 +160,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsWithSpillConfigRoundTrip) {
   WriterOptions opts;
   opts.spillConfig = &cfg;
 
-  auto rt = WriterOptions::deserialize(opts.serialize());
+  auto rt = WriterOptions::create(opts.serialize());
 
   ASSERT_NE(nullptr, rt->spillConfig);
   ASSERT_NE(nullptr, rt->ownedSpillConfig.get());
@@ -176,7 +176,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsNoSpillConfigRoundTrip) {
   WriterOptions opts;
   ASSERT_EQ(nullptr, opts.spillConfig);
 
-  auto rt = WriterOptions::deserialize(opts.serialize());
+  auto rt = WriterOptions::create(opts.serialize());
 
   ASSERT_EQ(nullptr, rt->spillConfig);
   ASSERT_EQ(nullptr, rt->ownedSpillConfig.get());
@@ -188,7 +188,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsNoSchemaRoundTrip) {
   opts.serdeParameters["key"] = "value";
 
   folly::dynamic dyn = opts.serialize();
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   ASSERT_EQ(nullptr, roundTrip->schema);
   ASSERT_TRUE(roundTrip->compressionKind.has_value());
@@ -239,8 +239,8 @@ TEST_F(ReaderOptionsSerDeTest, readerOptionsSerializeDeserializeRoundTrip) {
   folly::dynamic dyn = opts.serialize();
 
   // ---- deserialize ----
-  auto roundTrip = bytedance::bolt::dwio::common::ReaderOptions::deserialize(
-      dyn, pool.get());
+  auto roundTrip =
+      bytedance::bolt::dwio::common::ReaderOptions::create(dyn, pool.get());
 
   // ---- verify ----
   ASSERT_EQ(opts.getTailLocation(), roundTrip.getTailLocation());
@@ -286,8 +286,8 @@ TEST_F(ReaderOptionsSerDeTest, readerOptionsDefaultsRoundTrip) {
   bytedance::bolt::dwio::common::ReaderOptions opts(pool.get());
 
   folly::dynamic dyn = opts.serialize();
-  auto roundTrip = bytedance::bolt::dwio::common::ReaderOptions::deserialize(
-      dyn, pool.get());
+  auto roundTrip =
+      bytedance::bolt::dwio::common::ReaderOptions::create(dyn, pool.get());
 
   ASSERT_EQ(opts.getTailLocation(), roundTrip.getTailLocation());
   ASSERT_EQ(opts.getFileFormat(), roundTrip.getFileFormat());

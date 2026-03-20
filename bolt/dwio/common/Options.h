@@ -732,7 +732,7 @@ class ReaderOptions : public io::ReaderOptions {
   // Serialization support
   folly::dynamic serialize() const override;
 
-  static ReaderOptions deserialize(
+  static ReaderOptions create(
       const folly::dynamic& obj,
       bolt::memory::MemoryPool* pool);
   static void registerSerDe();
@@ -760,7 +760,7 @@ struct WriterOptions : public ISerializable {
   virtual ~WriterOptions() = default;
 
   folly::dynamic serialize() const override;
-  static std::shared_ptr<WriterOptions> deserialize(const folly::dynamic& obj);
+  static std::shared_ptr<WriterOptions> create(const folly::dynamic& obj);
   static void registerSerDe();
 };
 

@@ -223,7 +223,7 @@ class ReaderOptions : public bolt::ISerializable {
     return obj;
   }
 
-  static ReaderOptions deserialize(
+  static ReaderOptions create(
       const folly::dynamic& obj,
       bolt::memory::MemoryPool* pool) {
     ReaderOptions options(pool);
