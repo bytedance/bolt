@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/NestedLoopJoinProbe.h"
+#include <folly/ScopeGuard.h>
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/Task.h"
 #include "bolt/expression/FieldReference.h"
@@ -330,7 +331,7 @@ void NestedLoopJoinProbe::handleLeftSemiProjectNoCondition() {
       ->asFlatVector<bool>()
       ->set(numOutputRows_ - 1, true);
   buildIndex_ = buildVectors_.value().size();
-  buildRow_ = 0;
+  filterResultRow_ = 0;
 }
 
 // Main join loop.
@@ -348,6 +349,10 @@ bool NestedLoopJoinProbe::addToOutput() {
   }
 
   const auto startProbeRow = probeRow_;
+  // probeRow_ is temporarily modified during the loop (for addOutputRow /
+  // addProbeMismatchRow), but must be restored to startProbeRow on every exit
+  // so that advanceProbe() can correctly advance by probeRowCount_.
+  auto probeRowGuard = folly::makeGuard([&] { probeRow_ = startProbeRow; });
 
   while (!hasProbedAllBuildData()) {
     const auto& currentBuild = buildVectors_.value()[buildIndex_];
@@ -355,7 +360,7 @@ bool NestedLoopJoinProbe::addToOutput() {
     // Empty build vector; move to the next.
     if (currentBuild->size() == 0) {
       ++buildIndex_;
-      buildRow_ = 0;
+      filterResultRow_ = 0;
       continue;
     }
 
@@ -368,7 +373,7 @@ bool NestedLoopJoinProbe::addToOutput() {
       numOutputRows_ = output_->size();
       probeRowHasMatch_ = true;
       ++buildIndex_;
-      buildRow_ = 0;
+      filterResultRow_ = 0;
       return false;
     }
 
@@ -380,7 +385,7 @@ bool NestedLoopJoinProbe::addToOutput() {
     }
 
     // Only re-calculate the filter if we have a new build vector.
-    if (buildRow_ == 0) {
+    if (filterResultRow_ == 0) {
       evaluateJoinFilter(currentBuild);
     }
 
@@ -391,20 +396,23 @@ bool NestedLoopJoinProbe::addToOutput() {
     // filter results cover multiple probe rows. Use probeOffset and buildIdx
     // to decode each entry. When probeRowCount_ == 1, probeOffset is always 0
     // and buildIdx equals i, preserving the original single-row behavior.
-    for (size_t i = buildRow_; i < decodedFilterResult_.size(); ++i) {
+    for (size_t i = filterResultRow_; i < decodedFilterResult_.size(); ++i) {
       const auto probeOffset = i / buildRowCount;
       const auto buildIdx = static_cast<vector_size_t>(i % buildRowCount);
 
-      // At probe row boundaries, check if the previous probe row needs a
-      // mismatch row (for left/full outer and left semi project joins).
-      if (buildIdx == 0 && i > buildRow_) {
+      // At probe row boundaries (only for build with single vector, when has
+      // multiple build vectors, buildRowCount equals
+      // decodedFilterResult.size(), so buildIdx == 0 && i > filterResultRow_
+      // wounld never match), set probeRowHasMatch_ to false and check if the
+      // previous probe row needs a mismatch row (for left/full outer and left
+      // semi project joins).
+      if (probeRowCount_ > 1 && buildIdx == 0 && i > filterResultRow_) {
         if (needsProbeMismatch(joinType_) && !probeRowHasMatch_) {
           probeRow_ = startProbeRow + probeOffset - 1;
           addProbeMismatchRow();
           ++numOutputRows_;
-          if (numOutputRows_ >= outputBatchSize_) {
-            buildRow_ = i;
-            probeRow_ = startProbeRow;
+          if (numOutputRows_ == outputBatchSize_) {
+            filterResultRow_ = i;
             copyBuildValues(currentBuild);
             return false;
           }
@@ -453,21 +461,14 @@ bool NestedLoopJoinProbe::addToOutput() {
             static_cast<size_t>(probeOffset + 1) * buildRowCount;
         // All probe rows in the batch are done.
         if (nextProbeStart >= decodedFilterResult_.size()) {
-          probeRow_ = startProbeRow;
-          copyBuildValues(currentBuild);
-          if (probeRowCount_ == 1) {
-            buildIndex_ = buildVectors_.value().size();
-          } else {
-            ++buildIndex_;
-          }
-          buildRow_ = 0;
+          // skip all remaining build rows.
+          buildIndex_ = buildVectors_.value().size();
+          filterResultRow_ = 0;
           return true;
         }
         // Output buffer full; save position and produce output.
-        if (numOutputRows_ >= outputBatchSize_) {
-          buildRow_ = nextProbeStart;
-          probeRow_ = startProbeRow;
-          copyBuildValues(currentBuild);
+        if (numOutputRows_ == outputBatchSize_) {
+          filterResultRow_ = nextProbeStart;
           return false;
         }
         i = nextProbeStart - 1; // -1 because the for-loop increments.
@@ -482,9 +483,8 @@ bool NestedLoopJoinProbe::addToOutput() {
       }
 
       // If the buffer is full, save state and produce it as output.
-      if (numOutputRows_ >= outputBatchSize_) {
-        buildRow_ = i + 1;
-        probeRow_ = startProbeRow;
+      if (numOutputRows_ == outputBatchSize_) {
+        filterResultRow_ = i + 1;
         copyBuildValues(currentBuild);
         return false;
       }
@@ -492,15 +492,14 @@ bool NestedLoopJoinProbe::addToOutput() {
 
     // Before moving to the next build vector, copy the needed ranges.
     copyBuildValues(currentBuild);
-    probeRow_ = startProbeRow;
     ++buildIndex_;
-    buildRow_ = 0;
+    filterResultRow_ = 0;
   }
 
   // Handle mismatch for the last probe row in the batch.
   probeRow_ = startProbeRow + probeRowCount_ - 1;
   checkProbeMismatchRow();
-  probeRow_ = startProbeRow;
+  // probeRowGuard restores probeRow_ = startProbeRow on return.
 
   // Signals that all input has been generated for the probeRow and build
   // vectors; safe to move to the next probe record.
@@ -512,15 +511,8 @@ void NestedLoopJoinProbe::prepareOutput() {
     return;
   }
 
-  // Estimate average output row size to compute a byte-budget-aware
-  // outputBatchSize_ before allocating the output vectors. This prevents the
-  // first batch from being too large and OOMing during copyBuildValues(),
-  // and also keeps the output size within preferredOutputBatchBytes for
-  // downstream operators.
-  //
-  // Re-estimated each time since input_ may change between probe batches
-  // (different avgProbeRowSize). updateOutputBatchSize() also refines after
-  // each output based on actual estimateFlatSize().
+  // Dynamically adjust outputBatchSize_ based on estimated average row size
+  // to stay within preferredOutputBatchBytes and avoid OOM on wide rows.
   if (input_ && input_->size() > 0 && buildVectors_.has_value() &&
       !buildVectors_->empty() && buildVectors_->front()->size() > 0) {
     const auto& firstBuild = buildVectors_->front();
