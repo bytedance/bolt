@@ -814,10 +814,35 @@ ErrorCode parseFromPattern(
         }
       }
     } else {
-      while (cur < end && cur < startPos + maxDigitConsume &&
-             characterIsDigit(*cur)) {
-        number = number * 10 + (*cur - '0');
-        ++cur;
+      if (legacySpark && !specifierNext &&
+          (curPattern.specifier == DateTimeFormatSpecifier::DAY_OF_MONTH ||
+           curPattern.specifier == DateTimeFormatSpecifier::HOUR_OF_DAY ||
+           curPattern.specifier == DateTimeFormatSpecifier::MINUTE_OF_HOUR ||
+           curPattern.specifier == DateTimeFormatSpecifier::SECOND_OF_MINUTE)) {
+        // Spark LEGACY tolerance: for width-2 numeric fields followed by a
+        // literal, allow exactly one extra leading '0'. Consume 3 digits when
+        // present and use the last two digits as the value.
+        const char* p = cur;
+        int len = 0;
+        while (p < end && characterIsDigit(*p)) {
+          ++p;
+          ++len;
+        }
+        if (len == 2) {
+          number = (cur[0] - '0') * 10 + (cur[1] - '0');
+          cur += 2;
+        } else if (len == 3 && cur[0] == '0') {
+          number = (cur[1] - '0') * 10 + (cur[2] - '0');
+          cur += 3;
+        } else {
+          return ErrorCode::PARSE_DIGIT_ERROR;
+        }
+      } else {
+        while (cur < end && cur < startPos + maxDigitConsume &&
+               characterIsDigit(*cur)) {
+          number = number * 10 + (*cur - '0');
+          ++cur;
+        }
       }
     }
 
@@ -1581,13 +1606,31 @@ DateTimeResult DateTimeFormatter::parse(
     auto& tok = tokens_[i];
     switch (tok.type) {
       case DateTimeToken::Type::kLiteral:
-        if (tok.literal.size() > end - cur ||
-            std::memcmp(cur, tok.literal.data(), tok.literal.size()) != 0) {
-          return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+        if (tok.literal.size() == 1 && tok.literal[0] == ' ' && isLegacy) {
+          // Spark LEGACY: tolerate multiple spaces where a single space is
+          // specified. Require at least one space to be present.
+          if (cur >= end || *cur != ' ') {
+            return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+          }
+          while (cur < end && *cur == ' ') {
+            ++cur;
+          }
+        } else {
+          if (tok.literal.size() > end - cur ||
+              std::memcmp(cur, tok.literal.data(), tok.literal.size()) != 0) {
+            return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+          }
+          cur += tok.literal.size();
         }
-        cur += tok.literal.size();
         break;
       case DateTimeToken::Type::kPattern:
+        // Spark LEGACY: skip leading whitespace before numeric tokens
+        if (isLegacy) {
+          // Tolerate multiple spaces only; tabs are not accepted.
+          while (cur < end && (*cur == ' ')) {
+            ++cur;
+          }
+        }
         if (i + 1 < tokens_.size() &&
             tokens_[i + 1].type == DateTimeToken::Type::kPattern) {
           auto errorCode = parseFromPattern(
