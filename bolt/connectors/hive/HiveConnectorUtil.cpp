@@ -364,11 +364,12 @@ std::shared_ptr<common::ScanSpec> makeScanSpec(
   for (int i = 0; i < rowType->size(); ++i) {
     const auto& name = rowType->nameOf(i);
     const auto& type = rowType->childAt(i);
+    const bool isRowIndexColumn =
+        rowIdxIter != rowIndexColumns.end() && i == std::get<0>(*rowIdxIter);
     auto it = outputSubfields.find(name);
     if (it == outputSubfields.end()) {
       const auto& childSpec = spec->addFieldRecursively(name, *type, i);
-      if (rowIdxIter != rowIndexColumns.end() &&
-          i == std::get<0>(*rowIdxIter)) {
+      if (isRowIndexColumn) {
         childSpec->setIsRowIndex(true);
         childSpec->setRowIndexColumnName(std::get<1>(*rowIdxIter));
         ++rowIdxIter;
@@ -386,7 +387,13 @@ std::shared_ptr<common::ScanSpec> makeScanSpec(
       }
       filterSubfields.erase(it);
     }
-    addSubfields(*type, subfieldSpecs, 1, pool, *spec->addField(name, i));
+    auto* childSpec = spec->addField(name, i);
+    if (isRowIndexColumn) {
+      childSpec->setIsRowIndex(true);
+      childSpec->setRowIndexColumnName(std::get<1>(*rowIdxIter));
+      ++rowIdxIter;
+    }
+    addSubfields(*type, subfieldSpecs, 1, pool, *childSpec);
     subfieldSpecs.clear();
   }
 
