@@ -89,8 +89,9 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     auto configCopy = configSettings_;
     auto queryCtx = core::QueryCtx::create(
         executor_.get(), core::QueryConfig(std::move(configCopy)));
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -116,8 +117,9 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     auto queryCtx = core::QueryCtx::create(
         executor ? executor : executor_.get(),
         core::QueryConfig(std::move(configCopy)));
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -2052,12 +2054,21 @@ TEST_F(
       });
     }
 
+    auto addBadSplit = [&](int idx) {
+      try {
+        task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", idx)));
+      } catch (const std::exception& e) {
+        LOG(INFO) << "Ignoring expected exception while adding bad split: "
+                  << e.what();
+      }
+    };
+
     // Add one bad remote split and trigger Task::terminate.
-    task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 0)));
+    addBadSplit(0);
 
     // Add one more bad split, making sure `remainingRemoteSplits` is not empty
     // and processing it would cause an exception.
-    task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 1)));
+    addBadSplit(1);
 
     // Wait for the task to fail, and make sure the task has been deleted
     // instead of hanging as a zombie task.
