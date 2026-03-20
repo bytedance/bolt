@@ -1141,6 +1141,10 @@ class LocalMergeNode : public PlanNode {
     return "LocalMerge";
   }
 
+  bool canSpill(const QueryConfig& queryConfig) const override {
+    return !sortingKeys_.empty() && queryConfig.localMergeSpillEnabled();
+  }
+
   folly::dynamic serialize() const override;
 
   static PlanNodePtr create(const folly::dynamic& obj, void* context);

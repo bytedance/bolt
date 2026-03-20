@@ -85,7 +85,7 @@ class LocalMergeSource : public MergeSource {
       : queue_(LocalMergeSourceQueue(queueSize)) {}
 
   void start() override {
-    TestValue::adjust("facebook::velox::exec::LocalMergeSource::start", this);
+    TestValue::adjust("bytedance::bolt::exec::LocalMergeSource::start", this);
     ScopedPromiseNotification notification(1);
     queue_.withWLock([&](auto& queue) { queue.start(notification); });
   }
@@ -265,6 +265,7 @@ class MergeExchangeSource : public MergeSource {
 
       auto lockedStats = mergeExchange_->stats().wlock();
       lockedStats->addInputVector(data->estimateFlatSize(), data->size());
+      lockedStats->rawInputPositions += data->size();
     }
 
     // Since VectorStreamGroup::read() may cause inputStream to be at end,
