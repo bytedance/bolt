@@ -89,9 +89,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     auto configCopy = configSettings_;
     auto queryCtx = core::QueryCtx::create(
         executor_.get(), core::QueryConfig(std::move(configCopy)));
-    queryCtx->testingOverrideMemoryPool(
-        memory::memoryManager()->addRootPool(
-            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
+        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -117,9 +116,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     auto queryCtx = core::QueryCtx::create(
         executor ? executor : executor_.get(),
         core::QueryConfig(std::move(configCopy)));
-    queryCtx->testingOverrideMemoryPool(
-        memory::memoryManager()->addRootPool(
-            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
+        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -2064,11 +2062,12 @@ TEST_F(
     };
 
     // Add one bad remote split and trigger Task::terminate.
-    addBadSplit(0);
+    task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 0)));
 
     // Add one more bad split, making sure `remainingRemoteSplits` is not empty
     // and processing it would cause an exception.
     addBadSplit(1);
+    addBadSplit(2);
 
     // Wait for the task to fail, and make sure the task has been deleted
     // instead of hanging as a zombie task.
