@@ -42,6 +42,7 @@ PaimonSplitReader::PaimonSplitReader(
     int valueKindIndex,
     const std::vector<int>& valueIndices,
     const std::unordered_map<std::string, std::string>& tableParameters,
+    const bool paimonUseLoserTree,
     const std::shared_ptr<io::IoStatistics> ioStats)
     : splitReaders_(std::move(splitReaders)),
       readerOutputType_(readerOutputType),
@@ -56,13 +57,18 @@ PaimonSplitReader::PaimonSplitReader(
       aggregations_(getAggregations()),
       sequenceGroups_(getSequenceGroups()),
       mergeEngine_(getMergeEngine()),
+      paimonUseLoserTree_(paimonUseLoserTree),
       ioStats_(ioStats) {
+  std::vector<PaimonRowIteratorPtr> iterators;
+  iterators.reserve(splitReaders_.size());
   for (const auto& splitReader : splitReaders_) {
     auto iterator = getIterator(splitReader.get());
     if (iterator && iterator->primaryKeys->size() > 0) {
-      heap.push(iterator);
+      iterators.push_back(iterator);
     }
   }
+  iterators.shrink_to_fit();
+  loserTree_ = std::make_shared<LoserTree>(iterators);
 }
 
 RowTypePtr PaimonSplitReader::projectType(
@@ -367,27 +373,67 @@ PaimonSplitReader::getAggregateFunctions() {
 }
 
 uint64_t PaimonSplitReader::next(int64_t size, VectorPtr& output) {
+  return paimonUseLoserTree_ ? next_withHeap(size, output)
+                             : next_withLoserTree(size, output);
+}
+
+uint64_t PaimonSplitReader::next_withLoserTree(
+    int64_t size,
+    VectorPtr& output) {
   output = BaseVector::create(output->type(), 0, output->pool());
 
   mergeEngine_->setResult(std::dynamic_pointer_cast<RowVector>(output));
 
   auto mergetStartTime = getCurrentTimeMicro();
-  while (!heap.empty()) {
-    auto iterator = heap.top();
+  while (!loserTree_->done()) {
+    auto iterator = loserTree_->winner();
+    auto winnerIdx = loserTree_->winnerIdx();
+
     VLOG(2) << "Values:" << iterator->values->toString(iterator->rowIndex)
             << "   Seq:"
             << iterator->sequenceFields->toString(iterator->rowIndex);
-    heap.pop();
 
     int rowCnt = mergeEngine_->add(iterator);
 
-    if (iterator->next()) {
-      heap.push(iterator);
-    } else {
+    if (!iterator->next()) {
       auto nextBatchIterator = getIterator(iterator->reader);
-      if (nextBatchIterator)
-        heap.push(nextBatchIterator);
+      loserTree_->updateLeaf(winnerIdx, nextBatchIterator);
     }
+    loserTree_->adjust(winnerIdx);
+
+    if (rowCnt >= size) {
+      return rowCnt;
+    }
+  }
+
+  mergeEngine_->finish();
+  auto mergeTime = (getCurrentTimeMicro() - mergetStartTime) * 1000;
+  ioStats_->incTotalMergeTime(mergeTime);
+
+  return output->size();
+}
+
+uint64_t PaimonSplitReader::next_withHeap(int64_t size, VectorPtr& output) {
+  output = BaseVector::create(output->type(), 0, output->pool());
+
+  mergeEngine_->setResult(std::dynamic_pointer_cast<RowVector>(output));
+
+  auto mergetStartTime = getCurrentTimeMicro();
+  while (!loserTree_->done()) {
+    auto iterator = loserTree_->winner();
+    auto winnerIdx = loserTree_->winnerIdx();
+
+    VLOG(2) << "Values:" << iterator->values->toString(iterator->rowIndex)
+            << "   Seq:"
+            << iterator->sequenceFields->toString(iterator->rowIndex);
+
+    int rowCnt = mergeEngine_->add(iterator);
+
+    if (!iterator->next()) {
+      auto nextBatchIterator = getIterator(iterator->reader);
+      loserTree_->updateLeaf(winnerIdx, nextBatchIterator);
+    }
+    loserTree_->adjust(winnerIdx);
 
     if (rowCnt >= size) {
       return rowCnt;

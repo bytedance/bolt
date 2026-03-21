@@ -204,6 +204,7 @@ class HiveDataSource : public DataSource {
   RowVectorPtr emptyOutput_;
   bool emptySplit_;
   bool native_cache_enabled;
+  bool paimonUseLoserTree_ = false;
 
   bool enable_parquet_rownum_and_filename = false;
 

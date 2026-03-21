@@ -749,6 +749,9 @@ class QueryConfig {
   static constexpr const char* kSparkLegacyStatisticalAggregate =
       "spark_legacy_statistical_aggregate";
 
+  static constexpr const char* kPaimonMergeEngineUseLoserTree =
+      "paimon_merge_engine_use_loser_tree";
+
   bool operatorTrackExpressionStats() const {
     return get<bool>(kOperatorTrackExpressionStats, false);
   }
@@ -1654,6 +1657,10 @@ class QueryConfig {
 
   bool isDecryptionEnabled() const {
     return get<bool>(kDecryptionEnabled, false);
+  }
+
+  bool isPaimonMergeEngineUseLoserTree() const {
+    return get<bool>(kPaimonMergeEngineUseLoserTree, false);
   }
 
  private:

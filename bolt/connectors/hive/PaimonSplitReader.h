@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/connectors/hive/HiveSplitReaderBase.h"
+#include "bolt/connectors/hive/LoserTree.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/PaimonEngine.h"
 #include "bolt/connectors/hive/PaimonMergeEngineType.h"
@@ -24,10 +25,12 @@
 #include "bolt/connectors/hive/SplitReader.h"
 #include "bolt/connectors/hive/paimon_merge_engines/AggregateFunctions/AggregateFunction.h"
 #include "bolt/connectors/hive/paimon_merge_engines/PartialUpdateEngine.h"
+
 namespace bytedance::bolt {
 class BaseVector;
 using VectorPtr = std::shared_ptr<BaseVector>;
 } // namespace bytedance::bolt
+
 namespace bytedance::bolt::connector::hive {
 
 class PaimonSplitReader : public HiveSplitReaderBase {
@@ -40,6 +43,7 @@ class PaimonSplitReader : public HiveSplitReaderBase {
       int valueKindIndex,
       const std::vector<int>& valueIndices,
       const std::unordered_map<std::string, std::string>& tableParameters,
+      const bool paimonUseLoserTree_,
       const std::shared_ptr<io::IoStatistics> ioStats);
 
   virtual uint64_t next(int64_t size, VectorPtr& output) override;
@@ -98,6 +102,10 @@ class PaimonSplitReader : public HiveSplitReaderBase {
 
   std::unordered_map<std::string, int> getNameIdxMap();
 
+  uint64_t next_withLoserTree(int64_t size, VectorPtr& output);
+
+  uint64_t next_withHeap(int64_t size, VectorPtr& output);
+
  protected:
   std::vector<std::unique_ptr<SplitReader>> splitReaders_;
   RowTypePtr readerOutputType_;
@@ -120,6 +128,10 @@ class PaimonSplitReader : public HiveSplitReaderBase {
       std::vector<PaimonRowIteratorPtr>,
       PaimonRowIteratorCompare>
       heap;
+
+  std::shared_ptr<LoserTree> loserTree_;
+  const bool paimonUseLoserTree_;
+
   const std::shared_ptr<io::IoStatistics> ioStats_;
 };
 
