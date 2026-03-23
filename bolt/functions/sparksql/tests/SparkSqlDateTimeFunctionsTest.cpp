@@ -357,7 +357,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format2Str),
       "2021-06-10 15:49:32");
 
-  // Extra digit in minute breaks parsing
+  // Extra leading 0 in minute
   EXPECT_EQ(
       evaluateOnce<std::string>(
           "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
@@ -366,7 +366,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format2Str),
       "2021-06-10 15:49:32");
 
-  // Extra non-zero digit in day-of-month is not tolerated
+  // Extra leading 0 in day
   EXPECT_EQ(
       evaluateOnce<std::string>(
           "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
@@ -375,7 +375,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format2Str),
       "2021-06-11 15:49:32");
 
-  // Extra digit in hour breaks parsing
+  // Extra leading 0 in hour
   EXPECT_EQ(
       evaluateOnce<std::string>(
           "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
@@ -384,7 +384,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format2Str),
       "2021-06-10 15:49:32");
 
-  // Missing trailing 0s in hour, minute and second
+  // Missing leading 0s in hour, minute and second
   EXPECT_EQ(
       evaluateOnce<std::string>(
           "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
@@ -420,6 +420,14 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format1Str,
           format2Str),
       "2021-05-26 09:02:01");
+  // Missing leading 0s in day
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"2021051 09:32:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-01 09:32:00");
 
   EXPECT_EQ(
       evaluateOnce<int64_t>(
@@ -477,6 +485,20 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
       evaluateOnce<int64_t>(
           "UNIX_TIMESTAMP(c0, c1)",
           std::optional<StringView>{"020210601 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Missing leading zeros in before month is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202151 09:32:00"_sv},
+          format1Str),
+      std::nullopt);
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"2021501 09:32:00"_sv},
           format1Str),
       std::nullopt);
 }

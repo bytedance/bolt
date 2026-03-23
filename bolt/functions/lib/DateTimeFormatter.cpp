@@ -828,11 +828,7 @@ ErrorCode parseFromPattern(
           ++p;
           ++len;
         }
-        if (len == 1 &&
-            (curPattern.specifier == DateTimeFormatSpecifier::HOUR_OF_DAY ||
-             curPattern.specifier == DateTimeFormatSpecifier::MINUTE_OF_HOUR ||
-             curPattern.specifier ==
-                 DateTimeFormatSpecifier::SECOND_OF_MINUTE)) {
+        if (len == 1) {
           number = cur[0] - '0';
           cur += 1;
         } else if (len == 2) {
