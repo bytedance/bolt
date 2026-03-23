@@ -384,6 +384,43 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
           format2Str),
       "2021-06-10 15:49:32");
 
+  // Missing trailing 0s in hour, minute and second
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 9:17:34"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 09:17:34");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:32:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:32:00");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:32:1"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:32:01");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:2:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:02:00");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:2:1"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:02:01");
+
   EXPECT_EQ(
       evaluateOnce<int64_t>(
           "UNIX_TIMESTAMP(c0, c1)",

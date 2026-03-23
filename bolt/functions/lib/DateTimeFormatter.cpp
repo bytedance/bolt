@@ -828,7 +828,14 @@ ErrorCode parseFromPattern(
           ++p;
           ++len;
         }
-        if (len == 2) {
+        if (len == 1 &&
+            (curPattern.specifier == DateTimeFormatSpecifier::HOUR_OF_DAY ||
+             curPattern.specifier == DateTimeFormatSpecifier::MINUTE_OF_HOUR ||
+             curPattern.specifier ==
+                 DateTimeFormatSpecifier::SECOND_OF_MINUTE)) {
+          number = cur[0] - '0';
+          cur += 1;
+        } else if (len == 2) {
           number = (cur[0] - '0') * 10 + (cur[1] - '0');
           cur += 2;
         } else if (len == 3 && cur[0] == '0') {
