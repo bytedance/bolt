@@ -163,3 +163,22 @@ add_test(
     NAME bolt_shuffle_adaptive_zstd_codec_test
     COMMAND bolt_shuffle_adaptive_zstd_codec_test
 )
+
+add_executable(
+    bolt_shuffle_effective_size_estimator_test
+    EffectiveSizeEstimatorTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_effective_size_estimator_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_effective_size_estimator_test
+    COMMAND bolt_shuffle_effective_size_estimator_test
+)

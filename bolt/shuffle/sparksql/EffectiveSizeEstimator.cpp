@@ -58,15 +58,9 @@ uint64_t EffectiveSizeEstimator::estimate(
     return flatSize;
   }
 
-  // Fast path: if no batch has triggered full scan mode, use flatSize.
-  // Once any batch has ratio >= kFullScanRatioThreshold AND
-  // flatSize > kFullScanSizeThreshold, switch to full scan permanently.
-  if (!alwaysFullScan_) {
-    // First batch: do a probe scan to determine if full scan is needed.
-    if (flatSize <= kFullScanSizeThreshold) {
-      LOG(INFO) << "flatSize: " << flatSize;
-      return flatSize;
-    }
+  if (!alwaysFullScan_ && flatSize <= kFullScanSizeThreshold) {
+    // fast path for small RowVector, just return flatSize
+    return flatSize;
   }
 
   // Full scan mode: scan every batch.
@@ -76,16 +70,11 @@ uint64_t EffectiveSizeEstimator::estimate(
       ? flatSize - estimatedBinaryFlatSize + actualBinarySize
       : actualBinarySize;
 
-  if (estimatedBinaryFlatSize > 0) {
-    cachedRatio_ =
-        static_cast<double>(actualBinarySize) / estimatedBinaryFlatSize;
-    if (cachedRatio_ > kFullScanRatioThreshold &&
-        flatSize > kFullScanSizeThreshold) {
-      alwaysFullScan_ = true;
-    }
+  if (effectiveSize > flatSize * kFullScanRatioThreshold &&
+      flatSize > kFullScanSizeThreshold) {
+    alwaysFullScan_ = true;
   }
 
-  LOG(INFO) << "effectiveSize: " << effectiveSize << ", flatSize: " << flatSize;
   return effectiveSize;
 }
 
