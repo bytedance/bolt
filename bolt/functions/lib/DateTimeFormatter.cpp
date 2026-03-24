@@ -1229,6 +1229,12 @@ int32_t DateTimeFormatter::format(
   const auto weekdayNum = civilDateTime.weekday;
   const auto dayOfYear = civilDateTime.dayOfYear;
   const auto daysSinceEpoch = civilDateTime.daysSinceEpoch;
+  // Compute the UTC civil date/time of the same instant for timezone-aware
+  // formatting decisions (e.g., suppress '+' when local crosses year boundary
+  // but UTC year is still <= 9999).
+  const auto civilDateTimeUtc =
+      util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
+  const auto& calDateUtc = civilDateTimeUtc.date;
 #ifdef SPARK_COMPATIBLE
   auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
     auto weekday = static_cast<int32_t>((daysSinceEpochInput + 4) % 7);
@@ -1269,8 +1275,22 @@ int32_t DateTimeFormatter::format(
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
 #ifdef SPARK_COMPATIBLE
-            // spark compatibility: year should contain sign if > 9999
-            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+            // spark compatibility: year should contain sign if > 9999.
+            // However, if a timezone is applied and the same instant in UTC
+            // has year-of-era <= 9999 (e.g., Asia/Shanghai at
+            // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
+            // the leading '+'.
+            bool addPlus =
+                (year > 9999 && token.pattern.minRepresentDigits >= 4);
+            if (timezone != nullptr) {
+              int32_t utcYearEra = calDateUtc.year <= 0
+                  ? std::abs(calDateUtc.year - 1)
+                  : calDateUtc.year;
+              if (utcYearEra <= 9999) {
+                addPlus = false;
+              }
+            }
+            if (addPlus) {
               *result++ = '+';
             }
 #endif
@@ -1348,8 +1368,22 @@ int32_t DateTimeFormatter::format(
                 result);
           } else {
 #ifdef SPARK_COMPATIBLE
-            // spark compatibility: year should contain sign if > 9999
-            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+            // spark compatibility: year should contain sign if > 9999.
+            // If a timezone is applied and the same instant in UTC has
+            // (adjusted) year <= 9999, suppress the leading '+'.
+            bool addPlus =
+                (year > 9999 && token.pattern.minRepresentDigits >= 4);
+            if (timezone != nullptr) {
+              int32_t utcYearAdj = calDateUtc.year;
+              if (utcYearAdj < 0 &&
+                  (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
+                utcYearAdj = std::abs(utcYearAdj) + 1;
+              }
+              if (utcYearAdj <= 9999) {
+                addPlus = false;
+              }
+            }
+            if (addPlus) {
               *result++ = '+';
             }
 #endif

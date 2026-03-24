@@ -84,6 +84,7 @@ target_link_libraries(
   gfx::timsort
   utf8proc::utf8proc
   date::date
+  bolt_type_tz
 )
 
 add_subdirectory(aggregates)
