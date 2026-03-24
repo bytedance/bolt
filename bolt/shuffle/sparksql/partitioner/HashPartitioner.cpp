@@ -32,6 +32,18 @@
 #include "bolt/shuffle/sparksql/partitioner/HashPartitioner.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
+namespace {
+
+inline int32_t normalizePid(int32_t value, int32_t numPartitions) {
+  auto pid = value % numPartitions;
+  if (pid < 0) {
+    pid += numPartitions;
+  }
+  return pid;
+}
+
+} // namespace
+
 arrow::Status HashPartitioner::compute(
     const int32_t* pidArr,
     const int64_t numRows,
@@ -41,20 +53,7 @@ arrow::Status HashPartitioner::compute(
   std::fill(std::begin(partition2RowCount), std::end(partition2RowCount), 0);
 
   for (auto i = 0; i < numRows; ++i) {
-    auto pid = pidArr[i] % numPartitions_;
-#if defined(__x86_64__)
-    // force to generate ASM
-    __asm__(
-        "lea (%[num_partitions],%[pid],1),%[tmp]\n"
-        "test %[pid],%[pid]\n"
-        "cmovs %[tmp],%[pid]\n"
-        : [pid] "+r"(pid)
-        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
-#else
-    if (pid < 0) {
-      pid += numPartitions_;
-    }
-#endif
+    auto pid = normalizePid(pidArr[i], numPartitions_);
     row2partition[i] = pid;
   }
 
@@ -75,20 +74,7 @@ arrow::Status HashPartitioner::precompute(
   }
 
   for (auto i = 0; i < numRows; ++i) {
-    auto pid = pidArr[i] % numPartitions_;
-#if defined(__x86_64__)
-    // force to generate ASM
-    __asm__(
-        "lea (%[num_partitions],%[pid],1),%[tmp]\n"
-        "test %[pid],%[pid]\n"
-        "cmovs %[tmp],%[pid]\n"
-        : [pid] "+r"(pid)
-        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
-#else
-    if (pid < 0) {
-      pid += numPartitions_;
-    }
-#endif
+    auto pid = normalizePid(pidArr[i], numPartitions_);
     pidArr[i] = pid;
     partition2RowCount[pid]++;
   }

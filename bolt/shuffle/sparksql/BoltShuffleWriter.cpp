@@ -756,6 +756,12 @@ arrow::Status BoltShuffleWriter::buildPartition2Row(uint32_t rowNum) {
   rowOffset2RowId_.resize(rowNum);
   for (auto row = 0; row < rowNum; ++row) {
     auto pid = row2Partition_[row];
+    if (pid >= numPartitions_) {
+      return arrow::Status::Invalid(
+          "buildPartition2Row: invalid partition id " + std::to_string(pid) +
+          " for row " + std::to_string(row) +
+          ", numPartitions=" + std::to_string(numPartitions_));
+    }
     rowOffset2RowId_[partition2RowOffsetBase_[pid]++] = row;
   }
 
@@ -927,7 +933,7 @@ arrow::Status BoltShuffleWriter::splitBoolType(
   for (auto& pid : partitionUsed_) {
     uint8_t* dstaddr = dstAddrs[pid];
     if (dstaddr != nullptr) {
-      splitBoolTypeInternal(srcAddr, dstaddr, pid);
+      RETURN_NOT_OK(splitBoolTypeInternal(srcAddr, dstaddr, pid));
     }
   }
   return arrow::Status::OK();
@@ -939,15 +945,16 @@ arrow::Status BoltShuffleWriter::splitBoolType(
   for (auto& pid : partitionUsed_) {
     uint8_t* dstaddr = dstAddrs[pid][0];
     BOLT_DCHECK(dstaddr != nullptr);
-    splitBoolTypeInternal(srcAddr, dstaddr, pid);
+    RETURN_NOT_OK(splitBoolTypeInternal(srcAddr, dstaddr, pid));
   }
   return arrow::Status::OK();
 }
 
-void BoltShuffleWriter::splitBoolTypeInternal(
+arrow::Status BoltShuffleWriter::splitBoolTypeInternal(
     const uint8_t* srcAddr,
     uint8_t* dstaddr,
     uint32_t pid) {
+  RETURN_NOT_OK(validatePartitionRowRange(pid, "splitBoolTypeInternal"));
   auto r = partition2RowOffsetBase_[pid]; /*8k*/
   auto size = partition2RowOffsetBase_[pid + 1];
   auto dstOffset = partitionBufferBase_[pid];
@@ -957,6 +964,7 @@ void BoltShuffleWriter::splitBoolTypeInternal(
 
   for (; r < size && dstIdxByte > 0; r++, dstIdxByte--) {
     auto srcOffset = rowOffset2RowId_[r]; /*16k*/
+    RETURN_NOT_OK(validateSourceRowId(srcOffset, "splitBoolTypeInternal"));
     auto src = srcAddr[srcOffset >> 3];
     src = src >> (srcOffset & 7) |
         0xfe; // get the bit in bit 0, other bits set to 1
@@ -969,11 +977,15 @@ void BoltShuffleWriter::splitBoolTypeInternal(
   }
   dstaddr[dstOffset >> 3] = dst;
   if (r == size) {
-    return;
+    return arrow::Status::OK();
   }
   dstOffset += dstOffsetInByte;
   // now dst_offset is 8 aligned
   for (; r + 8 < size; r += 8) {
+    for (auto i = 0; i < 8; ++i) {
+      RETURN_NOT_OK(validateSourceRowId(
+          rowOffset2RowId_[r + i], "splitBoolTypeInternal"));
+    }
     dst = extractBitsToByteSimd(srcAddr, &rowOffset2RowId_[r]);
     dstaddr[dstOffset >> 3] = dst;
     dstOffset += 8;
@@ -984,6 +996,7 @@ void BoltShuffleWriter::splitBoolTypeInternal(
   dstIdxByte = 0;
   for (; r < size; r++, dstIdxByte++) {
     auto srcOffset = rowOffset2RowId_[r]; /*16k*/
+    RETURN_NOT_OK(validateSourceRowId(srcOffset, "splitBoolTypeInternal"));
     auto src = srcAddr[srcOffset >> 3];
     src = src >> (srcOffset & 7) |
         0xfe; // get the bit in bit 0, other bits set to 1
@@ -995,6 +1008,7 @@ void BoltShuffleWriter::splitBoolTypeInternal(
     dst = dst & src; // only take the useful bit.
   }
   dstaddr[dstOffset >> 3] = dst;
+  return arrow::Status::OK();
 }
 
 template <bool needAlloc>
@@ -1042,6 +1056,7 @@ arrow::Status BoltShuffleWriter::splitBinaryType(
   const auto* srcRawNulls = src.rawNulls();
 
   for (auto& pid : partitionUsed_) {
+    RETURN_NOT_OK(validatePartitionRowRange(pid, "splitBinaryType"));
     auto& binaryBuf = dst[pid];
 
     // use 32bit offset
@@ -1058,6 +1073,7 @@ arrow::Status BoltShuffleWriter::splitBinaryType(
 
     for (auto i = 0; i < numRows; i++) {
       auto rowId = rowOffset2RowId_[rowOffsetBase + i];
+      RETURN_NOT_OK(validateSourceRowId(rowId, "splitBinaryType"));
       auto& stringView = srcRawValues[rowId];
       size_t isNull =
           srcRawNulls && bytedance::bolt::bits::isBitNull(srcRawNulls, rowId);

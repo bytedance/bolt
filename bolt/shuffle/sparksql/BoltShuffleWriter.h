@@ -371,8 +371,37 @@ class BoltShuffleWriter : public ShuffleWriter {
       const uint8_t* srcAddr,
       const std::vector<std::vector<uint8_t*>>& dstAddrs);
 
-  void
+  arrow::Status
   splitBoolTypeInternal(const uint8_t* srcAddr, uint8_t* dstaddr, uint32_t pid);
+
+  arrow::Status validateSourceRowId(uint32_t rowId, const char* context) const {
+    if (rowId < rowOffset2RowId_.size()) {
+      return arrow::Status::OK();
+    }
+    return arrow::Status::Invalid(
+        std::string(context) + ": source rowId " + std::to_string(rowId) +
+        " is out of bounds for input row count " +
+        std::to_string(rowOffset2RowId_.size()));
+  }
+
+  arrow::Status validatePartitionRowRange(uint32_t pid, const char* context)
+      const {
+    if (pid + 1 >= partition2RowOffsetBase_.size()) {
+      return arrow::Status::Invalid(
+          std::string(context) + ": partition id " + std::to_string(pid) +
+          " is out of bounds for partition row offsets");
+    }
+    const auto begin = partition2RowOffsetBase_[pid];
+    const auto end = partition2RowOffsetBase_[pid + 1];
+    if (begin <= end && end <= rowOffset2RowId_.size()) {
+      return arrow::Status::OK();
+    }
+    return arrow::Status::Invalid(
+        std::string(context) + ": partition " + std::to_string(pid) +
+        " has invalid row range [" + std::to_string(begin) + ", " +
+        std::to_string(end) + ") for input row count " +
+        std::to_string(rowOffset2RowId_.size()));
+  }
 
   template <bool needAlloc>
   arrow::Status splitValidityBuffer(const bytedance::bolt::RowVector& rv);
@@ -395,12 +424,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       const uint8_t* srcAddr,
       const std::vector<uint8_t*>& dstAddrs) {
     for (auto& pid : partitionUsed_) {
+      RETURN_NOT_OK(validatePartitionRowRange(pid, "splitFixedType"));
       auto dstPidBase =
           (T*)(dstAddrs[pid] + partitionBufferBase_[pid] * sizeof(T));
       auto pos = partition2RowOffsetBase_[pid];
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
+        RETURN_NOT_OK(validateSourceRowId(rowId, "splitFixedType"));
         *dstPidBase++ = reinterpret_cast<const T*>(srcAddr)[rowId]; // copy
       }
     }
@@ -413,12 +444,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       const uint8_t* srcAddr,
       const std::vector<std::vector<uint8_t*>>& dstAddrs) {
     for (auto& pid : partitionUsed_) {
+      RETURN_NOT_OK(validatePartitionRowRange(pid, "splitFixedType"));
       auto dstPidBase =
           (T*)(dstAddrs[pid].back() + partitionBufferBaseInBatches_[pid] * sizeof(T));
       auto pos = partition2RowOffsetBase_[pid];
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
+        RETURN_NOT_OK(validateSourceRowId(rowId, "splitFixedType"));
         *dstPidBase++ = reinterpret_cast<const T*>(srcAddr)[rowId]; // copy
       }
     }
