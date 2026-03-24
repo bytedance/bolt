@@ -172,64 +172,64 @@ struct SpillConfig : public bytedance::bolt::ISerializable {
 
   /// The max spill file size. If it is zero, there is no limit on the spill
   /// file size.
-  uint64_t maxFileSize;
+  uint64_t maxFileSize{0};
 
   // io_uring control
-  bool spillUringEnabled;
+  bool spillUringEnabled{false};
 
   /// Specifies the size to buffer the serialized spill data before write to
   /// storage system for io efficiency.
-  uint64_t writeBufferSize;
+  uint64_t writeBufferSize{0};
 
   /// Executor for spilling. If nullptr spilling writes on the Driver's thread.
-  folly::Executor* executor; // Not owned.
+  folly::Executor* executor{nullptr}; // Not owned.
 
   /// The minimal spillable memory reservation in percentage of the current
   /// memory usage.
-  int32_t minSpillableReservationPct;
+  int32_t minSpillableReservationPct{0};
 
   /// The spillable memory reservation growth in percentage of the current
   /// memory usage.
-  int32_t spillableReservationGrowthPct;
+  int32_t spillableReservationGrowthPct{0};
 
   /// Used to calculate spill partition number.
-  uint8_t startPartitionBit;
+  uint8_t startPartitionBit{0};
 
   /// Used to calculate the spill hash partition number for hash join with
   /// 'startPartitionBit'.
-  uint8_t joinPartitionBits;
+  uint8_t joinPartitionBits{0};
 
   /// partition bits for spill level > 0
-  uint8_t joinRepartitionBits;
+  uint8_t joinRepartitionBits{0};
 
   /// The max allowed spilling level with zero being the initial spilling
   /// level. This only applies for hash build spilling which needs recursive
   /// spilling when the build table is too big. If it is set to -1, then there
   /// is no limit and then some extreme large query might run out of spilling
   /// partition bits at the end.
-  int32_t maxSpillLevel;
+  int32_t maxSpillLevel{0};
 
   /// The max row numbers to fill and spill for each spill run. This is used to
   /// cap the memory used for spilling. If it is zero, then there is no limit
   /// and spilling might run out of memory.
-  uint64_t maxSpillRunRows;
+  uint64_t maxSpillRunRows{0};
 
   /// Minimum memory footprint size required to reclaim memory from a file
   /// writer by flushing its buffered data to disk.
-  uint64_t writerFlushThresholdSize;
+  uint64_t writerFlushThresholdSize{0};
 
   /// Percentage of input batches to be spilled for testing. 0 means no
   /// spilling for test.
-  int32_t testSpillPct;
+  int32_t testSpillPct{0};
 
   /// CompressionKind when spilling, CompressionKind_NONE means no compression.
-  common::CompressionKind compressionKind;
+  common::CompressionKind compressionKind{CompressionKind_NONE};
 
   /// Custom options passed to bolt::FileSystem to create spill WriteFile.
   std::string fileCreateConfig;
 
   // spill direct with row format
-  RowBasedSpillMode rowBasedSpillMode;
+  RowBasedSpillMode rowBasedSpillMode{RowBasedSpillMode::DISABLE};
 
   // Optional serde kind for single-partition row-vector spill (e.g., "Arrow").
   std::string singlePartitionSerdeKind;

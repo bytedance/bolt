@@ -29,6 +29,7 @@
  */
 
 #include "bolt/row/UnsafeRowFast.h"
+#include <cstring>
 namespace bytedance::bolt::row {
 
 namespace {

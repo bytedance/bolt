@@ -71,7 +71,14 @@ class StdMemoryAllocator final : public MemoryAllocator {
   }
 
   bool allocateAligned(uint64_t alignment, int64_t size, void** out) override {
-    *out = aligned_alloc(alignment, size);
+    if (size == 0) {
+      *out = nullptr;
+      return true;
+    }
+    *out = nullptr;
+    if (posix_memalign(out, alignment, size) != 0) {
+      return false;
+    }
     bytes_ += size;
     return true;
   }
@@ -98,7 +105,10 @@ class StdMemoryAllocator final : public MemoryAllocator {
         return reallocate(p, size, aligned, out);
       }
     }
-    void* reallocatedP = std::aligned_alloc(alignment, newSize);
+    void* reallocatedP = nullptr;
+    if (posix_memalign(&reallocatedP, alignment, newSize) != 0) {
+      return false;
+    }
     if (!reallocatedP) {
       return false;
     }

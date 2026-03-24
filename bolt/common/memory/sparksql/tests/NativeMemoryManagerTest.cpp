@@ -141,4 +141,19 @@ TEST_F(NativeMemoryManagerTest, mustUseMemoryPoolForGluten) {
       std::dynamic_pointer_cast<MemoryPoolForGluten>(boltLeafPool) != nullptr);
 }
 
+TEST_F(
+    NativeMemoryManagerTest,
+    arrowPoolAlignedAllocationDoesNotRequireRoundedSize) {
+  auto allocator = DefaultMemoryAllocatorGetter::defaultMemoryAllocator();
+  ArrowMemoryPool pool(allocator);
+
+  uint8_t* out = nullptr;
+  ASSERT_TRUE(pool.Allocate(13, 64, &out).ok());
+  ASSERT_NE(nullptr, out);
+  EXPECT_EQ(13, pool.bytes_allocated());
+
+  pool.Free(out, 13, 64);
+  EXPECT_EQ(0, pool.bytes_allocated());
+}
+
 } // namespace bytedance::bolt::memory::sparksql
