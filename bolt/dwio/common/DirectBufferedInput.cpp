@@ -254,7 +254,7 @@ void DirectBufferedInput::readRegions(
 
           // first check available memory allows to preload data, even if not,
           // the non-preload load will be sync loaded on the main thread.
-          if (asyncLoad.canPreload()) {
+          if (asyncLoad.canPreload(guard)) {
             process::TraceContext trace("Read Ahead");
             BOLT_CHECK_NOT_NULL(asyncLoad.load);
             auto res = asyncLoad.load->loadOrFuture(nullptr);

@@ -384,18 +384,21 @@ class AsyncThreadCtx {
     return state_ == State::kClosed;
   }
 
-  bool in() {
+  bool in(int64_t bytes) {
     std::scoped_lock lock(mutex_);
     if (state_ == State::kClosed) {
       return false;
     }
     numIn_++;
+    BOLT_CHECK_GE(bytes, 0);
+    addPreloadingBytes(bytes);
     cv_.notify_one();
     return true;
   }
-  void out() {
+  void out(int64_t bytes) {
     std::scoped_lock lock(mutex_);
     numIn_--;
+    addPreloadingBytes(bytes > 0 ? -bytes : bytes);
     cv_.notify_one();
   }
 
@@ -418,21 +421,11 @@ class AsyncThreadCtx {
   }
 
   void addPreloadingBytes(int64_t bytes) {
-    std::scoped_lock lock(mutex_);
-    addPreloadingBytesUntracked(bytes);
+    inPreloadingBytes_ += bytes;
   }
 
   int64_t inPreloadingBytes() const {
-    std::scoped_lock lock(mutex_);
-    return inPreloadingBytesUntracked();
-  }
-
-  int64_t inPreloadingBytesUntracked() const {
     return inPreloadingBytes_;
-  }
-
-  void addPreloadingBytesUntracked(int64_t bytes) {
-    inPreloadingBytes_ += bytes;
   }
 
   void disallowPreload() {
@@ -452,11 +445,10 @@ class AsyncThreadCtx {
 
   class Guard {
    public:
-    Guard(AsyncThreadCtx* ctx, int64_t bytes = 0) : ctx_(ctx), bytes_(bytes) {
+    explicit Guard(AsyncThreadCtx* ctx, int64_t bytes = 0)
+        : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        if (ctx_->in()) {
-          ctx_->addPreloadingBytes(bytes_);
-        } else {
+        if (!ctx_->in(bytes_)) {
           ctx_ = nullptr;
         }
       }
@@ -464,8 +456,7 @@ class AsyncThreadCtx {
 
     ~Guard() {
       if (ctx_) {
-        ctx_->out();
-        ctx_->addPreloadingBytes(-bytes_);
+        ctx_->out(-bytes_);
       }
     }
 
@@ -476,17 +467,13 @@ class AsyncThreadCtx {
       other.ctx_ = nullptr;
     }
 
-    Guard& operator=(Guard&& other) noexcept {
-      if (this != &other) {
-        if (ctx_) {
-          ctx_->out();
-          ctx_->addPreloadingBytes(-bytes_);
-        }
-        ctx_ = other.ctx_;
-        bytes_ = other.bytes_;
-        other.ctx_ = nullptr;
+    Guard& operator=(Guard&& other) = delete;
+
+    void updateInPreloadingBytesUnlocked(int64_t bytes) {
+      if (ctx_) {
+        bytes_ += bytes;
+        ctx_->addPreloadingBytes(bytes);
       }
-      return *this;
     }
 
     explicit operator bool() const {
