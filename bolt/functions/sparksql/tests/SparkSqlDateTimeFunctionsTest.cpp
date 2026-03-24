@@ -1744,8 +1744,13 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
 
   EXPECT_EQ(
       fromUnixTime(253402300799, "Asia/Shanghai"), "10000-01-01 07:59:59");
+#ifdef SPARK_COMPATIBLE
   EXPECT_EQ(
       fromUnixTime(253402300801, "Asia/Shanghai"), "+10000-01-01 08:00:01");
+#else
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"), "10000-01-01 08:00:01");
+#endif
   EXPECT_EQ(
       fromUnixTime(253402300801, "America/Los_Angeles"), "9999-12-31 16:00:01");
 }
