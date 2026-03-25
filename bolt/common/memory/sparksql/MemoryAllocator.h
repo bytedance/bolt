@@ -71,11 +71,14 @@ class StdMemoryAllocator final : public MemoryAllocator {
   }
 
   bool allocateAligned(uint64_t alignment, int64_t size, void** out) override {
+    *out = nullptr;
     if (size == 0) {
-      *out = nullptr;
       return true;
     }
-    *out = nullptr;
+    if (alignment < sizeof(void*) || alignment % sizeof(void*) != 0 ||
+        (alignment & (alignment - 1)) != 0) {
+      return false;
+    }
     if (posix_memalign(out, alignment, size) != 0) {
       return false;
     }
