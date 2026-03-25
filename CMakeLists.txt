@@ -51,6 +51,11 @@ endif()
 # set the project name
 project(bolt CXX)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  add_compile_options(-rtlib=compiler-rt)
+  add_link_options(-rtlib=compiler-rt)
+endif()
+
 # If we are in an active conda env disable search in system paths and add env to prefix path
 # if(DEFINED ENV{CONDA_PREFIX}) if(NOT DEFINED ENV{BOLT_DEPENDENCY_SOURCE} OR
 # "$ENV{BOLT_DEPENDENCY_SOURCE}" STREQUAL "CONDA") message(STATUS "Using Conda environment:
