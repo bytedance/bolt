@@ -1733,6 +1733,28 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
   }
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
+  auto fromUnixTime = [&](int64_t unixTime, std::string timeZone) {
+    return evaluateOnce<std::string>(
+               fmt::format(
+                   "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss', '{}')", timeZone),
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+
+  EXPECT_EQ(
+      fromUnixTime(253402300799, "Asia/Shanghai"), "10000-01-01 07:59:59");
+#ifdef SPARK_COMPATIBLE
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"), "+10000-01-01 08:00:01");
+#else
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"), "10000-01-01 08:00:01");
+#endif
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "America/Los_Angeles"), "9999-12-31 16:00:01");
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
   const auto fromUnixTime = [&](const std::optional<std::string>& unixTime,
                                 const std::optional<std::string>& timeFormat) {

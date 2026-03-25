@@ -105,6 +105,11 @@ class SerDeOptions {
         escapeChar(escape),
         isEscaped(isEscapedFlag) {}
   ~SerDeOptions() = default;
+
+  // Serialization support
+  folly::dynamic serialize() const;
+  static SerDeOptions create(const folly::dynamic& obj);
+  static SerDeOptions deserialize(const folly::dynamic& obj);
 };
 
 struct TableParameter {
@@ -723,6 +728,14 @@ class ReaderOptions : public io::ReaderOptions {
   bool isUseColumnNamesForColumnMapping() const {
     return useColumnNamesForColumnMapping_;
   }
+
+  // Serialization support
+  folly::dynamic serialize() const override;
+
+  static ReaderOptions create(
+      const folly::dynamic& obj,
+      bolt::memory::MemoryPool* pool);
+  static void registerSerDe();
 };
 
 struct WriterOptions : public ISerializable {
@@ -747,7 +760,7 @@ struct WriterOptions : public ISerializable {
   virtual ~WriterOptions() = default;
 
   folly::dynamic serialize() const override;
-  static std::shared_ptr<WriterOptions> deserialize(const folly::dynamic& obj);
+  static std::shared_ptr<WriterOptions> create(const folly::dynamic& obj);
   static void registerSerDe();
 };
 
