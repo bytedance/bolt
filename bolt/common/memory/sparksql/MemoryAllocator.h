@@ -210,7 +210,11 @@ class ListenableMemoryAllocator final : public MemoryAllocator {
       listener_->allocationChanged(-diff);
     }
     if (succeed) {
-      boltListener_->recordGrow(p, *out, size, newSize);
+      if (newSize == 0 || *out == nullptr) {
+        boltListener_->recordFree(p, size);
+      } else {
+        boltListener_->recordGrow(p, *out, size, newSize);
+      }
       bytes_ += diff;
     }
     return succeed;
@@ -230,7 +234,11 @@ class ListenableMemoryAllocator final : public MemoryAllocator {
       listener_->allocationChanged(-diff);
     }
     if (succeed) {
-      boltListener_->recordGrow(p, *out, size, newSize);
+      if (newSize == 0 || *out == nullptr) {
+        boltListener_->recordFree(p, size);
+      } else {
+        boltListener_->recordGrow(p, *out, size, newSize);
+      }
       bytes_ += diff;
     }
     return succeed;
