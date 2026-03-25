@@ -157,4 +157,23 @@ TEST_F(
   EXPECT_EQ(initialBytes, pool.bytes_allocated());
 }
 
+TEST_F(
+    NativeMemoryManagerTest,
+    arrowPoolAlignedReallocateKeepsAlignmentWhenShrinking) {
+  auto allocator = DefaultMemoryAllocatorGetter::defaultMemoryAllocator();
+  ArrowMemoryPool pool(allocator);
+
+  uint8_t* out = nullptr;
+  ASSERT_TRUE(pool.Allocate(128, 64, &out).ok());
+  ASSERT_NE(nullptr, out);
+  ASSERT_EQ(0, reinterpret_cast<uintptr_t>(out) % 64);
+
+  uint8_t* reallocated = nullptr;
+  ASSERT_TRUE(pool.Reallocate(128, 13, 64, &out, &reallocated).ok());
+  ASSERT_NE(nullptr, reallocated);
+  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(reallocated) % 64);
+
+  pool.Free(reallocated, 13, 64);
+}
+
 } // namespace bytedance::bolt::memory::sparksql
