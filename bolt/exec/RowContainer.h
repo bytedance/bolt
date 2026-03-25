@@ -2118,9 +2118,10 @@ class HybridContainer {
 
     auto* pool = keys_->pool();
     const auto numPayloadCols = payloadTypes_.size();
-    
-    // Handle empty container: create an empty batch to maintain single-batch invariant.
-    // This ensures getSingleContainerData() works even when no data was added.
+
+    // Handle empty container: create an empty batch to maintain single-batch
+    // invariant. This ensures getSingleContainerData() works even when no data
+    // was added.
     if (owningInputs_.empty()) {
       std::vector<VectorPtr> emptyChildren;
       emptyChildren.reserve(numPayloadCols);
@@ -2128,7 +2129,8 @@ class HybridContainer {
       payloadNames.reserve(numPayloadCols);
       for (int32_t col = 0; col < numPayloadCols; ++col) {
         payloadNames.push_back(fmt::format("c{}", col));
-        emptyChildren.push_back(BaseVector::create(payloadTypes_[col], 0, pool));
+        emptyChildren.push_back(
+            BaseVector::create(payloadTypes_[col], 0, pool));
       }
       owningInputs_.push_back(std::make_shared<RowVector>(
           pool,
@@ -2234,13 +2236,13 @@ class HybridContainer {
       bool exactSize) {
     result->resize(numRows + resultOffset);
     BOLT_CHECK_EQ(numRows, outputRowIds.size());
-    BOLT_CHECK(Kind != TypeKind::ROW, "Currently do not support ROW");
-    if (Kind == TypeKind::ARRAY || Kind == TypeKind::MAP) {
+    if (Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+        Kind == TypeKind::ROW) {
       extractPayloadComplex(
           numRows, columnIndex, resultOffset, result, outputRowIds);
       return;
     }
-    BOLT_CHECK(Kind != TypeKind::ROW && Kind != TypeKind::MAP);
+    BOLT_CHECK(Kind != TypeKind::MAP);
     using T = typename KindToFlatVector<Kind>::HashRowType;
     auto flatResult = result->as<FlatVector<T>>();
 
@@ -2618,7 +2620,8 @@ class HybridContainer {
       const auto& rid = rowIdPtr[i];
       const auto batchIdx = rid.batchId();
       const auto rowInBatch = rid.rowInBatch();
-      T value = decodedPayloads_[batchIdx][columnIndex]->template valueAt<T>(rowInBatch);
+      T value = decodedPayloads_[batchIdx][columnIndex]->template valueAt<T>(
+          rowInBatch);
       if constexpr (std::is_same_v<T, StringView>) {
         result->set(resultIndex, value);
       } else {
@@ -2696,9 +2699,11 @@ class HybridContainer {
     auto values = valuesBuffer->asMutableRange<T>();
     auto* rowIdPtr = outputRowIds.data();
 
-    // Cache current container's decodedPayloads pointer to avoid repeated map lookups
+    // Cache current container's decodedPayloads pointer to avoid repeated map
+    // lookups
     uint8_t currentContainerId = UINT8_MAX;
-    std::vector<std::vector<std::unique_ptr<DecodedVector>>>* currentDecodedPayloads = nullptr;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>*
+        currentDecodedPayloads = nullptr;
 
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
@@ -2721,12 +2726,15 @@ class HybridContainer {
       // Switch container if needed
       if (rid.containerId_ != currentContainerId) {
         currentContainerId = rid.containerId_;
-        currentDecodedPayloads = &(allContainers_[currentContainerId]->decodedPayloads_);
+        currentDecodedPayloads =
+            &(allContainers_[currentContainerId]->decodedPayloads_);
       }
 
       const auto batchIdx = rid.batchId();
       const auto rowInBatch = rid.rowInBatch();
-      T value = (*currentDecodedPayloads)[batchIdx][columnIndex]->template valueAt<T>(rowInBatch);
+      T value =
+          (*currentDecodedPayloads)[batchIdx][columnIndex]->template valueAt<T>(
+              rowInBatch);
       if constexpr (std::is_same_v<T, StringView>) {
         result->set(resultIndex, value);
       } else {
@@ -2753,9 +2761,11 @@ class HybridContainer {
     auto values = valuesBuffer->asMutableRange<T>();
     auto* rowIdPtr = outputRowIds.data();
 
-    // Cache current container's decodedPayloads pointer to avoid repeated map lookups
+    // Cache current container's decodedPayloads pointer to avoid repeated map
+    // lookups
     uint8_t currentContainerId = UINT8_MAX;
-    std::vector<std::vector<std::unique_ptr<DecodedVector>>>* currentDecodedPayloads = nullptr;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>*
+        currentDecodedPayloads = nullptr;
 
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
@@ -2777,7 +2787,8 @@ class HybridContainer {
       // Switch container if needed
       if (rid.containerId_ != currentContainerId) {
         currentContainerId = rid.containerId_;
-        currentDecodedPayloads = &(allContainers_[currentContainerId]->decodedPayloads_);
+        currentDecodedPayloads =
+            &(allContainers_[currentContainerId]->decodedPayloads_);
       }
 
       const auto batchIdx = rid.batchId();
@@ -3195,7 +3206,8 @@ class HybridContainer {
   bool reorderEnabled_{true};
 
   // Scattered mode: keep payload batches separate (no coalesce).
-  // In scattered mode, rowId encodes (batchId, rowInBatch) instead of global row index.
+  // In scattered mode, rowId encodes (batchId, rowInBatch) instead of global
+  // row index.
   bool scatteredModeEnabled_{false};
 
   // Pre-decoded payload vectors for scattered mode extraction.
