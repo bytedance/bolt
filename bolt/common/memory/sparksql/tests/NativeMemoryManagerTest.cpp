@@ -146,14 +146,15 @@ TEST_F(
     arrowPoolAlignedAllocationDoesNotRequireRoundedSize) {
   auto allocator = DefaultMemoryAllocatorGetter::defaultMemoryAllocator();
   ArrowMemoryPool pool(allocator);
+  auto initialBytes = pool.bytes_allocated();
 
   uint8_t* out = nullptr;
   ASSERT_TRUE(pool.Allocate(13, 64, &out).ok());
   ASSERT_NE(nullptr, out);
-  EXPECT_EQ(13, pool.bytes_allocated());
+  EXPECT_EQ(initialBytes + 13, pool.bytes_allocated());
 
   pool.Free(out, 13, 64);
-  EXPECT_EQ(0, pool.bytes_allocated());
+  EXPECT_EQ(initialBytes, pool.bytes_allocated());
 }
 
 } // namespace bytedance::bolt::memory::sparksql
