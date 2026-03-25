@@ -375,7 +375,7 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
     } else {
       for (const auto& sortKey : sortingKeys()) {
         auto key = sortKey.first;
-        auto compareFlags = sortKey.second;
+        const auto& compareFlags = sortKey.second;
         auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
             compareByRow,
             rowType->childAt(key)->kind(),
