@@ -168,12 +168,11 @@ TEST_F(
   ASSERT_NE(nullptr, out);
   ASSERT_EQ(0, reinterpret_cast<uintptr_t>(out) % 64);
 
-  uint8_t* reallocated = nullptr;
-  ASSERT_TRUE(pool.Reallocate(128, 13, 64, &out, &reallocated).ok());
-  ASSERT_NE(nullptr, reallocated);
-  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(reallocated) % 64);
+  ASSERT_TRUE(pool.Reallocate(128, 13, 64, &out).ok());
+  ASSERT_NE(nullptr, out);
+  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(out) % 64);
 
-  pool.Free(reallocated, 13, 64);
+  pool.Free(out, 13, 64);
 }
 
 } // namespace bytedance::bolt::memory::sparksql
