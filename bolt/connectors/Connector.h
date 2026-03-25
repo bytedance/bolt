@@ -93,11 +93,18 @@ struct ConnectorSplit : public ISerializable {
   virtual std::string toString() const {
     return fmt::format("[split: {}]", connectorId);
   }
+
+  /// Returns the size of this split in bytes, or 0 if unknown.
+  virtual int64_t splitSizeBytes() const {
+    return 0;
+  }
 };
 
 class ColumnHandle : public ISerializable {
  public:
   virtual ~ColumnHandle() = default;
+
+  virtual const std::string& name() const = 0;
 
   folly::dynamic serialize() const override;
 
@@ -125,9 +132,7 @@ class ConnectorTableHandle : public ISerializable {
   /// Returns the connector-dependent table name. Used with
   /// ConnectorMetadata. Implementations need to supply a definition
   /// to work with metadata.
-  virtual const std::string& name() const {
-    BOLT_UNSUPPORTED();
-  }
+  virtual const std::string& name() const = 0;
 
   /// Returns true if the connector table handle supports index lookup.
   virtual bool supportsIndexLookup() const {
@@ -161,6 +166,33 @@ class ConnectorInsertTableHandle : public ISerializable {
   folly::dynamic serialize() const override {
     BOLT_NYI();
   }
+};
+
+class ConnectorLocationHandle : public ISerializable {
+ public:
+  enum class TableType { kNew, kExisting, kTemp };
+
+  ConnectorLocationHandle(std::string connectorId, TableType tableType)
+      : connectorId_{std::move(connectorId)}, tableType_{tableType} {}
+
+  ~ConnectorLocationHandle() override;
+
+  const std::string& connectorId() const {
+    return connectorId_;
+  }
+
+  /// New vs existing vs temp.
+  TableType tableType() const {
+    return tableType_;
+  }
+
+  virtual std::string toString() const = 0;
+
+  folly::dynamic serialize() const override = 0;
+
+ private:
+  const std::string connectorId_;
+  const TableType tableType_;
 };
 
 /// Represents the commit strategy for writing to connector.
@@ -732,6 +764,12 @@ class ConnectorFactory {
 
   // Initialize is called during the factory registration.
   virtual void initialize() {}
+
+  /// Create and register the ConnectorObjectFactory for this connector type.
+  /// The default implementation is a no-op; connectors that support an object
+  /// factory should override this.
+  virtual void registerObjectFactory(const std::string& /*connectorId*/) const {
+  }
 
   const std::string& connectorName() const {
     return name_;

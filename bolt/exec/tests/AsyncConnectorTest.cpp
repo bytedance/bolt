@@ -50,6 +50,10 @@ class TestTableHandle : public connector::ConnectorTableHandle {
   std::string toString() const override {
     BOLT_NYI();
   }
+
+  const std::string& name() const override {
+    BOLT_NYI();
+  }
 };
 
 class TestSplit : public connector::ConnectorSplit {
