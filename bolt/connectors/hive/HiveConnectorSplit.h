@@ -41,6 +41,7 @@ inline const std::string KPaimonDeletionFilePath = "paimon.deletion.file.path";
 inline const std::string KPaimonDeletionBinOffset =
     "paimon.deletion.bin.offset";
 inline const std::string KPaimonDeletionBinSize = "paimon.deletion.bin.size";
+constexpr std::string_view kDefaultHiveConnectorId = "hive-default";
 
 struct HiveConnectorSplitCacheLimit : public ISerializable {
   // record table is or not cache, and table partition range limit;
@@ -203,6 +204,124 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
   static std::shared_ptr<HiveConnectorSplit> create(const folly::dynamic& obj);
 
   static void registerSerDe();
+};
+
+/// Builder for HiveConnectorSplit. Allows constructing splits incrementally
+/// without specifying every constructor argument.
+class HiveConnectorSplitBuilder {
+ public:
+  explicit HiveConnectorSplitBuilder(std::string filePath)
+      : filePath_{std::move(filePath)} {}
+
+  HiveConnectorSplitBuilder& connectorId(const std::string& connectorId) {
+    connectorId_ = connectorId;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& start(uint64_t start) {
+    start_ = start;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& length(uint64_t length) {
+    length_ = length;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& fileFormat(dwio::common::FileFormat format) {
+    fileFormat_ = format;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& partitionKey(
+      std::string name,
+      std::optional<std::string> value) {
+    partitionKeys_.emplace(std::move(name), std::move(value));
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& tableBucketNumber(int32_t bucket) {
+    tableBucketNumber_ = bucket;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& cacheLimit(HiveConnectorSplitCacheLimit cl) {
+    cacheLimit_ = std::make_shared<HiveConnectorSplitCacheLimit>(std::move(cl));
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& customSplitInfo(
+      std::unordered_map<std::string, std::string> info) {
+    customSplitInfo_ = std::move(info);
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& extraFileInfo(
+      std::shared_ptr<std::string> extraFileInfo) {
+    extraFileInfo_ = std::move(extraFileInfo);
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& serdeParameters(
+      std::unordered_map<std::string, std::string> params) {
+    serdeParameters_ = std::move(params);
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& fileSize(uint64_t size) {
+    fileSize_ = size;
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& rowIdProperties(RowIdProperties props) {
+    rowIdProperties_ = std::move(props);
+    return *this;
+  }
+
+  HiveConnectorSplitBuilder& infoColumn(
+      const std::string& name,
+      const std::string& value) {
+    infoColumns_.emplace(name, value);
+    return *this;
+  }
+
+  std::shared_ptr<HiveConnectorSplit> build() const {
+    const auto effectivePath =
+        filePath_.find('/') == 0 ? "file:" + filePath_ : filePath_;
+    return std::make_shared<HiveConnectorSplit>(
+        connectorId_,
+        effectivePath,
+        fileFormat_,
+        start_,
+        length_,
+        partitionKeys_,
+        tableBucketNumber_,
+        cacheLimit_
+            ? std::make_unique<HiveConnectorSplitCacheLimit>(*cacheLimit_)
+            : nullptr,
+        customSplitInfo_,
+        extraFileInfo_,
+        serdeParameters_,
+        fileSize_,
+        rowIdProperties_,
+        infoColumns_);
+  }
+
+ private:
+  std::string filePath_;
+  std::string connectorId_{kDefaultHiveConnectorId};
+  dwio::common::FileFormat fileFormat_{dwio::common::FileFormat::PARQUET};
+  uint64_t start_{0};
+  uint64_t length_{std::numeric_limits<uint64_t>::max()};
+  std::unordered_map<std::string, std::optional<std::string>> partitionKeys_;
+  std::optional<int32_t> tableBucketNumber_;
+  std::shared_ptr<HiveConnectorSplitCacheLimit> cacheLimit_;
+  std::unordered_map<std::string, std::string> customSplitInfo_;
+  std::shared_ptr<std::string> extraFileInfo_;
+  std::unordered_map<std::string, std::string> serdeParameters_;
+  uint64_t fileSize_{0};
+  std::optional<RowIdProperties> rowIdProperties_;
+  std::unordered_map<std::string, std::string> infoColumns_;
 };
 
 } // namespace bytedance::bolt::connector::hive

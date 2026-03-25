@@ -196,6 +196,8 @@ class TableScanTest : public virtual HiveConnectorTestBase {
       const TypePtr& partitionType,
       const std::optional<std::string>& partitionValue) {
     auto split = HiveConnectorSplitBuilder(filePath)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
                      .partitionKey("pkey", partitionValue)
                      .build();
     auto outputType =
@@ -474,6 +476,8 @@ TEST_F(TableScanTest, partitionKeyAlias) {
       {"ds_alias", partitionKey("ds", VARCHAR())}};
 
   auto split = HiveConnectorSplitBuilder(filePath->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
                    .partitionKey("ds", "2021-12-02")
                    .build();
 
@@ -1762,7 +1766,10 @@ TEST_F(TableScanTest, splitOffsetAndLength) {
 }
 
 TEST_F(TableScanTest, fileNotFound) {
-  auto split = HiveConnectorSplitBuilder("/path/to/nowhere.orc").build();
+  auto split = HiveConnectorSplitBuilder("/path/to/nowhere.orc")
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .build();
   auto assertMissingFile = [&](bool ignoreMissingFiles) {
     AssertQueryBuilder(tableScanNode())
         .connectorSessionProperty(
@@ -1784,6 +1791,8 @@ TEST_F(TableScanTest, validFileNoData) {
   auto filePath =
       bytedance::bolt::test::getDataFilePath("data/emptyPresto.dwrf");
   auto split = HiveConnectorSplitBuilder(filePath)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
                    .start(0)
                    .length(fs::file_size(filePath) / 2)
                    .build();
@@ -1892,6 +1901,8 @@ TEST_F(TableScanTest, partitionedTableDateKey) {
   // Test partition filter on date column.
   {
     auto split = HiveConnectorSplitBuilder(filePath->getPath())
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
                      .partitionKey("pkey", partitionValue)
                      .build();
     auto outputType = ROW({"pkey", "c0", "c1"}, {DATE(), BIGINT(), DOUBLE()});
@@ -2795,6 +2806,8 @@ TEST_F(TableScanTest, bucket) {
     rowVectors.emplace_back(rowVector);
 
     splits.emplace_back(HiveConnectorSplitBuilder(filePaths[i]->path)
+                            .connectorId(kHiveConnectorId)
+                            .fileFormat(dwio::common::FileFormat::DWRF)
                             .tableBucketNumber(bucket)
                             .build());
   }
@@ -2821,6 +2834,8 @@ TEST_F(TableScanTest, bucket) {
   for (int i = 0; i < buckets.size(); ++i) {
     int bucketValue = buckets[i];
     auto hsplit = HiveConnectorSplitBuilder(filePaths[i]->path)
+                      .connectorId(kHiveConnectorId)
+                      .fileFormat(dwio::common::FileFormat::DWRF)
                       .tableBucketNumber(bucketValue)
                       .build();
 
@@ -2841,6 +2856,8 @@ TEST_F(TableScanTest, bucket) {
     // Filter on bucket column, but don't project it out
     auto rowTypes = ROW({"c0", "c1"}, {INTEGER(), BIGINT()});
     hsplit = HiveConnectorSplitBuilder(filePaths[i]->path)
+                 .connectorId(kHiveConnectorId)
+                 .fileFormat(dwio::common::FileFormat::DWRF)
                  .tableBucketNumber(bucketValue)
                  .build();
     op = PlanBuilder()
@@ -3686,7 +3703,10 @@ TEST_F(TableScanTest, reuseRowVector) {
                   .tableScan(rowType, {}, "c0 < 5")
                   .project({"c1.c0"})
                   .planNode();
-  auto split = HiveConnectorSplitBuilder(file->path).build();
+  auto split = HiveConnectorSplitBuilder(file->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .build();
   auto expected = makeRowVector(
       {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
   AssertQueryBuilder(plan).splits({split, split}).assertResults(expected);
@@ -4232,6 +4252,8 @@ TEST_F(TableScanTest, varbinaryPartitionKey) {
       {"ds_alias", partitionKey("ds", VARBINARY())}};
 
   auto split = HiveConnectorSplitBuilder(filePath->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
                    .partitionKey("ds", "2021-12-02")
                    .build();
 
@@ -4267,8 +4289,11 @@ TEST_F(TableScanTest, timestampPartitionKey) {
   ColumnHandleMap assignments = {{"t", partitionKey("t", TIMESTAMP())}};
   std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
   for (auto& t : inputs) {
-    splits.push_back(
-        HiveConnectorSplitBuilder(filePath->path).partitionKey("t", t).build());
+    splits.push_back(HiveConnectorSplitBuilder(filePath->path)
+                         .connectorId(kHiveConnectorId)
+                         .fileFormat(dwio::common::FileFormat::DWRF)
+                         .partitionKey("t", t)
+                         .build());
   }
   auto plan = PlanBuilder()
                   .startTableScan()
@@ -4291,13 +4316,19 @@ TEST_F(TableScanTest, paimonDeletionVector) {
                   .planNode();
   auto deletionFilePath =
       bytedance::bolt::test::getDataFilePath("data/deletionFile");
-  auto split1 = HiveConnectorSplitBuilder(file->path).build();
+  auto split1 = HiveConnectorSplitBuilder(file->path)
+                    .connectorId(kHiveConnectorId)
+                    .fileFormat(dwio::common::FileFormat::DWRF)
+                    .build();
   // delete 3, 5, 9 rows
   split1->customSplitInfo.insert(
       {{connector::hive::KPaimonDeletionFilePath, deletionFilePath},
        {connector::hive::KPaimonDeletionBinOffset, "61"},
        {connector::hive::KPaimonDeletionBinSize, "26"}});
-  auto split2 = HiveConnectorSplitBuilder(file->path).build();
+  auto split2 = HiveConnectorSplitBuilder(file->path)
+                    .connectorId(kHiveConnectorId)
+                    .fileFormat(dwio::common::FileFormat::DWRF)
+                    .build();
   // delete 1, 5, 6, 9, 13, 14 rows
   split2->customSplitInfo.insert(
       {{connector::hive::KPaimonDeletionFilePath, deletionFilePath},
@@ -4568,7 +4599,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareDisable) {
                     .tableScan(rowType, {}, "c0 < 5")
                     .project({"c1.c0"})
                     .planNode();
-    auto split = HiveConnectorSplitBuilder(file->path).build();
+    auto split = HiveConnectorSplitBuilder(file->path)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
+                     .build();
     auto expected = makeRowVector(
         {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
     AssertQueryBuilder(plan).splits({split, split}).assertResults(expected);
@@ -4597,7 +4631,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareAttempt3) {
                     .tableScan(rowType, {}, "c0 < 5")
                     .project({"c1.c0"})
                     .planNode();
-    auto split = HiveConnectorSplitBuilder(file->path).build();
+    auto split = HiveConnectorSplitBuilder(file->path)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
+                     .build();
     auto expected = makeRowVector(
         {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
     AssertQueryBuilder(plan)
@@ -4632,7 +4669,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareCanIgnore) {
                   .tableScan(rowType, {}, "c0 < 5")
                   .project({"c1.c0"})
                   .planNode();
-  auto split = HiveConnectorSplitBuilder(file->path).build();
+  auto split = HiveConnectorSplitBuilder(file->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .build();
   auto expected =
       makeRowVector({makeFlatVector<int32_t>(0, [](auto i) { return i % 5; })});
   AssertQueryBuilder(plan)
@@ -4663,7 +4703,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextDisable) {
                     .tableScan(rowType, {}, "c0 < 5")
                     .project({"c1.c0"})
                     .planNode();
-    auto split = HiveConnectorSplitBuilder(file->path).build();
+    auto split = HiveConnectorSplitBuilder(file->path)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
+                     .build();
     auto expected = makeRowVector(
         {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
     AssertQueryBuilder(plan)
@@ -4694,7 +4737,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextAttempt3) {
                     .tableScan(rowType, {}, "c0 < 5")
                     .project({"c1.c0"})
                     .planNode();
-    auto split = HiveConnectorSplitBuilder(file->path).build();
+    auto split = HiveConnectorSplitBuilder(file->path)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
+                     .build();
     auto expected = makeRowVector(
         {makeFlatVector<int32_t>(10, [](auto i) { return i % 5; })});
     AssertQueryBuilder(plan)
@@ -4728,7 +4774,10 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
                   .tableScan(rowType, {}, "c0 < 5")
                   .project({"c1.c0"})
                   .planNode();
-  auto split = HiveConnectorSplitBuilder(file->path).build();
+  auto split = HiveConnectorSplitBuilder(file->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .build();
   auto expected =
       makeRowVector({makeFlatVector<int32_t>(0, [](auto i) { return i % 5; })});
   AssertQueryBuilder(plan)

@@ -53,6 +53,7 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::common::testutil;
 
+using bytedance::bolt::connector::hive::HiveConnectorSplitBuilder;
 using bytedance::bolt::test::BatchMaker;
 
 namespace {
@@ -5366,6 +5367,8 @@ TEST_F(HashJoinTest, dynamicFiltersWithSkippedSplits) {
       // We add splits that have no rows.
       auto makeEmpty = [&]() {
         return exec::Split(HiveConnectorSplitBuilder(tempFiles.back()->path)
+                               .connectorId(kHiveConnectorId)
+                               .fileFormat(dwio::common::FileFormat::DWRF)
                                .start(10000000)
                                .length(1)
                                .build());
@@ -5570,6 +5573,8 @@ TEST_F(HashJoinTest, dynamicFiltersAppliedToPreloadedSplits) {
     tempFiles.push_back(TempFilePath::create());
     writeToFile(tempFiles.back()->path, rowVector);
     auto split = HiveConnectorSplitBuilder(tempFiles.back()->path)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::DWRF)
                      .partitionKey("p1", std::to_string(i))
                      .build();
     probeSplits.push_back(exec::Split(split));
@@ -6179,10 +6184,11 @@ TEST_F(HashJoinTest, dynamicFilterOnPartitionKey) {
   std::vector<RowVectorPtr> buildVectors{
       makeRowVector({"c0"}, {makeFlatVector<int64_t>({0, 1, 2})})};
   createDuckDbTable("t", buildVectors);
-  auto split =
-      bytedance::bolt::exec::test::HiveConnectorSplitBuilder(filePaths[0]->path)
-          .partitionKey("k", "0")
-          .build();
+  auto split = HiveConnectorSplitBuilder(filePaths[0]->path)
+                   .connectorId(kHiveConnectorId)
+                   .fileFormat(dwio::common::FileFormat::DWRF)
+                   .partitionKey("k", "0")
+                   .build();
   auto outputType = ROW({"n1_0", "n1_1"}, {BIGINT(), BIGINT()});
   ColumnHandleMap assignments = {
       {"n1_0", regularColumn("c0", BIGINT())},

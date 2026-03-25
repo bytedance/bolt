@@ -39,93 +39,80 @@ std::shared_ptr<ConnectorSplit> HiveObjectFactory::makeConnectorSplit(
   auto* dyn = dynamic_cast<const DynamicConnectorOptions*>(&optsBase);
   BOLT_CHECK(dyn != nullptr, "Expected DynamicConnectorOptions");
   const auto& options = dyn->options;
-  dwio::common::FileFormat fileFormat =
-      (!options.isNull() && options.count("fileFormat"))
-      ? static_cast<dwio::common::FileFormat>(options["fileFormat"].asInt())
-      : defaultFileFormat_;
+  HiveConnectorSplitBuilder builder(filePath);
+  builder.connectorId(connectorId()).start(start).length(length);
 
-  std::unordered_map<std::string, std::optional<std::string>> partitionKeys;
+  builder.fileFormat(
+      (!options.isNull() && options.count("fileFormat"))
+          ? static_cast<dwio::common::FileFormat>(options["fileFormat"].asInt())
+          : defaultFileFormat_);
+
   if (!options.isNull() && options.count("partitionKeys")) {
     for (auto& kv : options["partitionKeys"].items()) {
-      partitionKeys[kv.first.asString()] = kv.second.isNull()
-          ? std::nullopt
-          : std::optional<std::string>(kv.second.asString());
+      builder.partitionKey(
+          kv.first.asString(),
+          kv.second.isNull()
+              ? std::nullopt
+              : std::optional<std::string>(kv.second.asString()));
     }
   }
 
-  std::optional<int32_t> tableBucketNumber;
   if (!options.isNull() && options.count("tableBucketNumber")) {
-    tableBucketNumber = options["tableBucketNumber"].asInt();
+    builder.tableBucketNumber(options["tableBucketNumber"].asInt());
   }
 
-  std::unordered_map<std::string, std::string> customSplitInfo;
   if (!options.isNull() && options.count("customSplitInfo")) {
+    std::unordered_map<std::string, std::string> info;
     for (auto& kv : options["customSplitInfo"].items()) {
-      customSplitInfo[kv.first.asString()] = kv.second.asString();
+      info[kv.first.asString()] = kv.second.asString();
     }
+    builder.customSplitInfo(std::move(info));
   }
 
-  std::shared_ptr<std::string> extraFileInfo;
   if (!options.isNull() && options.count("extraFileInfo")) {
-    extraFileInfo = options["extraFileInfo"].isNull()
-        ? std::shared_ptr<std::string>()
-        : std::make_shared<std::string>(options["extraFileInfo"].asString());
-  }
-
-  std::unordered_map<std::string, std::string> serdeParameters;
-  if (!options.isNull() && options.count("serdeParameters")) {
-    for (auto& kv : options["serdeParameters"].items()) {
-      serdeParameters[kv.first.asString()] = kv.second.asString();
+    if (!options["extraFileInfo"].isNull()) {
+      builder.extraFileInfo(
+          std::make_shared<std::string>(options["extraFileInfo"].asString()));
     }
   }
 
-  std::unique_ptr<HiveConnectorSplitCacheLimit> hiveConnectorSplitCacheLimit;
-  if (!options.isNull() && options.count("hiveConnectorSplitCacheLimit")) {
-    hiveConnectorSplitCacheLimit = HiveConnectorSplitCacheLimit::create(
-        options["hiveConnectorSplitCacheLimit"]);
+  if (!options.isNull() && options.count("serdeParameters")) {
+    std::unordered_map<std::string, std::string> params;
+    for (auto& kv : options["serdeParameters"].items()) {
+      params[kv.first.asString()] = kv.second.asString();
+    }
+    builder.serdeParameters(std::move(params));
   }
 
-  uint64_t fileSize = 0;
+  if (!options.isNull() && options.count("hiveConnectorSplitCacheLimit")) {
+    builder.cacheLimit(*HiveConnectorSplitCacheLimit::create(
+        options["hiveConnectorSplitCacheLimit"]));
+  }
+
   if (!options.isNull() && options.count("fileProperties")) {
     const auto& propertiesOption = options["fileProperties"];
     if (propertiesOption.count("fileSize") &&
         !propertiesOption["fileSize"].isNull()) {
-      fileSize = propertiesOption["fileSize"].asInt();
+      builder.fileSize(propertiesOption["fileSize"].asInt());
     }
   }
 
-  std::optional<RowIdProperties> rowIdProperties;
   if (!options.isNull() && options.count("rowIdProperties")) {
     RowIdProperties props;
     const auto& rowIdPropertiesOption = options["rowIdProperties"];
     props.metadataVersion = rowIdPropertiesOption["metadataVersion"].asInt();
     props.partitionId = rowIdPropertiesOption["partitionId"].asInt();
     props.tableGuid = rowIdPropertiesOption["tableGuid"].asString();
-    rowIdProperties = props;
+    builder.rowIdProperties(std::move(props));
   }
 
-  std::unordered_map<std::string, std::string> infoColumns;
   if (!options.isNull() && options.count("infoColumns")) {
     for (auto& kv : options["infoColumns"].items()) {
-      infoColumns[kv.first.asString()] = kv.second.asString();
+      builder.infoColumn(kv.first.asString(), kv.second.asString());
     }
   }
 
-  return std::make_shared<HiveConnectorSplit>(
-      connectorId(),
-      filePath,
-      fileFormat,
-      start,
-      length,
-      partitionKeys,
-      tableBucketNumber,
-      std::move(hiveConnectorSplitCacheLimit),
-      customSplitInfo,
-      extraFileInfo,
-      serdeParameters,
-      fileSize,
-      rowIdProperties,
-      infoColumns);
+  return builder.build();
 }
 
 std::shared_ptr<connector::ColumnHandle> HiveObjectFactory::makeColumnHandle(
