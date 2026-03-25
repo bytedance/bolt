@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bolt AI Agent Features Summary</title>
+    <style>
+      @page {
+        size: Letter;
+        margin: 0.55in;
+      }
+
+      :root {
+        --ink: #16324f;
+        --text: #22313f;
+        --muted: #5f7285;
+        --line: #d8e0e8;
+        --panel: #f4f7fb;
+        --accent: #0f766e;
+        --accent-soft: #dff5f1;
+        --warn: #9a3412;
+        --warn-soft: #ffedd5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+        color: var(--text);
+        background: white;
+        line-height: 1.35;
+      }
+
+      .page {
+        min-height: 9.7in;
+        padding: 0.06in 0;
+        page-break-after: always;
+      }
+
+      .page:last-child {
+        page-break-after: auto;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 0.12in;
+        color: var(--ink);
+        line-height: 1.1;
+      }
+
+      h1 {
+        font-size: 28px;
+        letter-spacing: -0.02em;
+      }
+
+      h2 {
+        font-size: 20px;
+      }
+
+      h3 {
+        font-size: 13px;
+        margin-bottom: 0.08in;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      p {
+        margin: 0 0 0.12in;
+        font-size: 11.4px;
+      }
+
+      ul {
+        margin: 0.06in 0 0.12in 0.18in;
+        padding: 0;
+      }
+
+      li {
+        margin: 0 0 0.06in;
+        font-size: 11px;
+      }
+
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 0.14in;
+      }
+
+      .lead {
+        font-size: 14px;
+        color: #30465c;
+        max-width: 7.2in;
+      }
+
+      .hero {
+        padding: 0.28in;
+        border: 1px solid var(--line);
+        background:
+          linear-gradient(135deg, rgba(15, 118, 110, 0.08), rgba(22, 50, 79, 0.03)),
+          white;
+        border-radius: 16px;
+      }
+
+      .meta {
+        display: flex;
+        gap: 0.16in;
+        flex-wrap: wrap;
+        margin-top: 0.2in;
+      }
+
+      .pill {
+        padding: 0.08in 0.12in;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        color: var(--ink);
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1.08fr 0.92fr;
+        gap: 0.2in;
+        align-items: start;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.14in;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 0.14in;
+        background: white;
+      }
+
+      .soft {
+        background: var(--panel);
+      }
+
+      .accent {
+        background: var(--accent-soft);
+        border-color: #b8e6dd;
+      }
+
+      .warn {
+        background: var(--warn-soft);
+        border-color: #fdba74;
+      }
+
+      .stat {
+        font-size: 24px;
+        font-weight: 800;
+        color: var(--ink);
+        margin-bottom: 0.03in;
+      }
+
+      .caption {
+        font-size: 10px;
+        color: var(--muted);
+      }
+
+      .flow {
+        margin-top: 0.12in;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 0.16in;
+        background: linear-gradient(180deg, #fbfdff, #f5f9fd);
+      }
+
+      .flow-row {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0.08in;
+        align-items: center;
+      }
+
+      .flow-box {
+        min-height: 0.82in;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        padding: 0.1in;
+        background: white;
+        font-size: 10.5px;
+      }
+
+      .arrow {
+        text-align: center;
+        font-size: 18px;
+        color: var(--accent);
+        font-weight: 800;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 0.08in;
+        font-size: 10.2px;
+      }
+
+      th,
+      td {
+        border: 1px solid var(--line);
+        padding: 0.07in 0.08in;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #eef4fa;
+        color: var(--ink);
+      }
+
+      code,
+      pre {
+        font-family: Menlo, Monaco, "Courier New", monospace;
+      }
+
+      pre {
+        margin: 0.08in 0 0;
+        padding: 0.12in;
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 12px;
+        font-size: 9px;
+        line-height: 1.35;
+        overflow: hidden;
+        white-space: pre-wrap;
+      }
+
+      .small {
+        font-size: 10px;
+        color: var(--muted);
+      }
+
+      .section-gap {
+        margin-top: 0.18in;
+      }
+
+      .two-col-list {
+        columns: 2;
+        column-gap: 0.28in;
+      }
+
+      .footer {
+        margin-top: 0.16in;
+        padding-top: 0.08in;
+        border-top: 1px solid var(--line);
+        font-size: 9.5px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <section class="page">
+      <div class="hero">
+        <div class="eyebrow">Bolt Project Summary</div>
+        <h1>AI Agent Features in Bolt</h1>
+        <p class="lead">
+          Bolt is evolving from a human-operated execution backend into an
+          agent-facing runtime that can execute a plan, explain what happened in
+          machine-readable form, package the run for replay, and accept targeted
+          plan patches instead of full resubmission.
+        </p>
+        <div class="meta">
+          <div class="pill">Source: `doc/ai-ready-execution-engine.md`</div>
+          <div class="pill">Demo: `scripts/bolt_agent_demo.py`</div>
+          <div class="pill">Real adapter: `bolt/tool/AgentRuntimeExecutor.cpp`</div>
+          <div class="pill">API: `demo/agent_runtime_api/server.py`</div>
+        </div>
+      </div>
+
+      <div class="grid-2 section-gap">
+        <div class="card soft">
+          <h2>What the feature set is trying to solve</h2>
+          <p>
+            The core problem is that AI agents need a tighter runtime contract
+            than a human does. A person can read logs, infer root causes, and
+            retry by hand. An agent needs structured outputs that are stable,
+            explicit, and easy to act on programmatically.
+          </p>
+          <ul>
+            <li>Deterministic execution requests for upstream planning agents</li>
+            <li>Structured critique for downstream tuning and diagnosis agents</li>
+            <li>Replay capsules for reproducibility and auditability</li>
+            <li>Patch-oriented retries for fast, incremental refinement</li>
+          </ul>
+        </div>
+        <div class="card accent">
+          <h2>Why Bolt is a good base</h2>
+          <p>
+            The design leans on capabilities Bolt already has: portable plan
+            representation, rich operator support, trace capture, Python
+            extensibility, and multi-runtime experience.
+          </p>
+          <p>
+            The agent work is therefore mostly about adding a thin semantic
+            layer over execution rather than inventing a separate planner or
+            chatbot wrapper.
+          </p>
+        </div>
+      </div>
+
+      <div class="flow">
+        <h3>Agent Runtime Loop</h3>
+        <div class="flow-row">
+          <div class="flow-box">
+            <strong>Planner / Optimizer Agent</strong><br />
+            builds intent, goal, and plan payload
+          </div>
+          <div class="arrow">→</div>
+          <div class="flow-box">
+            <strong>Bolt Execution</strong><br />
+            runs plan through native engine or demo runtime
+          </div>
+          <div class="arrow">→</div>
+          <div class="flow-box">
+            <strong>Artifacts</strong><br />
+            result.json, critique.json, capsule.json
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-3 section-gap">
+        <div class="card">
+          <div class="stat">Run</div>
+          <p>Submit a plan plus execution goal such as latency or memory.</p>
+        </div>
+        <div class="card">
+          <div class="stat">Replay</div>
+          <p>Reproduce the same request from a captured execution capsule.</p>
+        </div>
+        <div class="card">
+          <div class="stat">Patch</div>
+          <p>Apply a small plan change and rerun without rebuilding context.</p>
+        </div>
+      </div>
+
+      <div class="footer">
+        Summary grounded in the repository as of March 24, 2026.
+      </div>
+    </section>
+
+    <section class="page">
+      <h2>1. Core Agent-Native Capabilities</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Execution Critique</h3>
+          <p>
+            After a run, Bolt emits structured operator findings instead of
+            forcing the caller to reverse-engineer logs. The critique is shaped
+            for machine action: dominant operators, evidence, symptoms, and
+            suggested next actions.
+          </p>
+          <ul>
+            <li>Identifies hot operators and failure symptoms</li>
+            <li>Separates local operator findings from global findings</li>
+            <li>Generates recommended next actions for an optimizer agent</li>
+            <li>Encodes evidence such as memory, rows, wall time, and shuffle</li>
+          </ul>
+          <pre>{
+  "symptom": "high_peak_memory",
+  "operator_type": "HashAggregation",
+  "suggested_actions": [
+    "increase_partition_count",
+    "rewrite_to_two_phase_aggregation",
+    "enable_spill"
+  ]
+}</pre>
+        </div>
+        <div class="card">
+          <h3>Replay Capsule</h3>
+          <p>
+            The capsule is the reproducibility primitive. It bundles the plan,
+            split metadata, query config, connector properties, critique, and
+            trace summary so another agent can replay or compare the same run.
+          </p>
+          <ul>
+            <li>Preserves the execution context in one object</li>
+            <li>Supports debugging, auditing, and regression triage</li>
+            <li>Can redact or mask sensitive connector values</li>
+            <li>Acts as the base object for future patches</li>
+          </ul>
+          <pre>{
+  "capsule_version": 1,
+  "query_id": "clickbench_q7_demo",
+  "query_config": { "task.max-drivers-per-task": "8" },
+  "trace_summary": [ ... ]
+}</pre>
+        </div>
+      </div>
+
+      <div class="section-gap card accent">
+        <h3>Patch-Oriented Execution</h3>
+        <p>
+          The design explicitly supports small plan edits. Instead of submitting
+          an entirely new query, an agent can supply a patch against a base
+          capsule. In the demo API, the narrow implemented patch is
+          <code>retune_aggregation</code>; in the design doc, the broader target
+          is subtree replacement and incremental plan refinement.
+        </p>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>What an agent gets back</th>
+            <th>Why it matters</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Structured critique</td>
+            <td>Symptoms, evidence, dominant operators, next actions</td>
+            <td>Lets an optimizer or debugger reason without reading logs</td>
+          </tr>
+          <tr>
+            <td>Replay capsule</td>
+            <td>Plan, config, splits, trace summary, result snapshot</td>
+            <td>Supports reproducible comparison and auditing</td>
+          </tr>
+          <tr>
+            <td>Patch loop</td>
+            <td>Before/after rerun anchored to one capsule lineage</td>
+            <td>Enables fast iterative optimization</td>
+          </tr>
+          <tr>
+            <td>Agent-native failure surface</td>
+            <td>Category, retriable flag, affected node, suggested actions</td>
+            <td>Improves autonomous recovery decisions</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="footer">
+        Design center: Bolt should be a runtime that agents can execute
+        against, inspect, replay, patch, and improve.
+      </div>
+    </section>
+
+    <section class="page">
+      <h2>2. What Is Already Implemented Today</h2>
+      <div class="grid-2">
+        <div class="card soft">
+          <h3>Lightweight CLI Demo</h3>
+          <p>
+            The script <code>scripts/bolt_agent_demo.py</code> is a no-build,
+            standard-library demo of the full run/replay/patch loop. It does
+            not execute real Bolt operators, but it does model the agent-facing
+            contract and generate realistic artifacts.
+          </p>
+          <ul>
+            <li>Command surface: <code>run</code>, <code>replay</code>, <code>patch</code></li>
+            <li>Simulated operator metrics for scan, filter, project, aggregation, join, Python node, and exchange</li>
+            <li>Automatic critique generation from those metrics</li>
+            <li>Capsule emission with redacted connector properties</li>
+          </ul>
+        </div>
+        <div class="card accent">
+          <h3>Operator-Aware Recommendations</h3>
+          <p>
+            The demo maps operator symptoms to actionable next steps. Examples
+            in code include high-memory hash aggregation, low-selectivity scans,
+            large join build sides, and Python nodes that block vectorization.
+          </p>
+          <p>
+            This is important because it turns raw telemetry into a control loop
+            an AI system can actually use.
+          </p>
+        </div>
+      </div>
+
+      <div class="section-gap">
+        <h3>Example: Demo Patch Improved the Run</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Original demo run</th>
+              <th>Patched demo run</th>
+              <th>Observed effect</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Total runtime</td>
+              <td>1256 ms</td>
+              <td>237 ms</td>
+              <td>About 81% faster</td>
+            </tr>
+            <tr>
+              <td>Peak memory</td>
+              <td>14.58 GB</td>
+              <td>0.60 GB</td>
+              <td>Memory pressure removed</td>
+            </tr>
+            <tr>
+              <td>Dominant operator</td>
+              <td>HashAggregation</td>
+              <td>TableScan</td>
+              <td>Bottleneck shifted away from aggregation</td>
+            </tr>
+            <tr>
+              <td>Global findings</td>
+              <td>Spill, latency, goal conflict</td>
+              <td>None</td>
+              <td>Cleaner post-patch state</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid-2 section-gap">
+        <div class="card">
+          <h3>Representative Findings From the Demo</h3>
+          <ul class="two-col-list">
+            <li><code>high_peak_memory</code></li>
+            <li><code>shuffle_heavy_aggregation</code></li>
+            <li><code>low_filter_selectivity</code></li>
+            <li><code>vectorization_blocked_by_python</code></li>
+            <li><code>join_build_side_large</code></li>
+            <li><code>spill_detected</code></li>
+            <li><code>latency_above_interactive_budget</code></li>
+            <li><code>goal_conflict_memory_vs_latency</code></li>
+          </ul>
+        </div>
+        <div class="card warn">
+          <h3>Current Limitation</h3>
+          <p>
+            The CLI demo is intentionally synthetic. It proves the interaction
+            model and artifact shapes, but it is not a full Bolt execution path.
+            That gap is partly addressed by the newer API demo backed by a real
+            C++ executor.
+          </p>
+        </div>
+      </div>
+
+      <div class="footer">
+        Implemented today: a runnable concept demo with concrete metrics,
+        artifacts, and patch effects.
+      </div>
+    </section>
+
+    <section class="page">
+      <h2>3. Real Execution Adapter and HTTP API</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>C++ Executor</h3>
+          <p>
+            <code>bolt/tool/AgentRuntimeExecutor.cpp</code> moves the agent
+            story beyond simulation. It accepts a JSON request, builds a real
+            Bolt plan with <code>PlanBuilder</code>, executes it, enables trace
+            capture, and returns result rows plus trace metadata.
+          </p>
+          <ul>
+            <li>Builds input vectors from inline schema and rows</li>
+            <li>Supports filter, project, aggregation, order by, and limit</li>
+            <li>Allows single or partial/final aggregation strategy</li>
+            <li>Captures per-node trace data through Bolt query tracing</li>
+          </ul>
+        </div>
+        <div class="card soft">
+          <h3>Standalone HTTP API</h3>
+          <p>
+            <code>demo/agent_runtime_api/server.py</code> wraps the C++
+            executor with a simple local HTTP service. It persists run
+            artifacts, indexes capsules, and exposes endpoints for execution,
+            replay, patching, and artifact retrieval.
+          </p>
+          <ul>
+            <li><code>POST /runs</code></li>
+            <li><code>POST /replays</code></li>
+            <li><code>POST /patches</code></li>
+            <li><code>GET /runs/{run_id}</code></li>
+            <li><code>GET /capsules/{capsule_id}</code></li>
+            <li><code>GET /artifacts/{run_id}/{artifact_name}</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="flow section-gap">
+        <h3>Real Adapter Request Path</h3>
+        <div class="flow-row" style="grid-template-columns: 1.2fr 0.25fr 1fr 0.25fr 1.3fr;">
+          <div class="flow-box">
+            JSON request with inline input, goal, repeat count, max drivers,
+            and plan fragment
+          </div>
+          <div class="arrow">→</div>
+          <div class="flow-box">
+            C++ executor builds Bolt plan and enables trace capture
+          </div>
+          <div class="arrow">→</div>
+          <div class="flow-box">
+            API packages result, critique, capsule, trace directory, and stored
+            run metadata
+          </div>
+        </div>
+      </div>
+
+      <table class="section-gap">
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Supported today</th>
+            <th>Not yet the end-state</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Inputs</td>
+            <td>Inline schema and rows</td>
+            <td>External connectors and richer data sources</td>
+          </tr>
+          <tr>
+            <td>Plan shapes</td>
+            <td>Values, filter, project, aggregation, order by, limit</td>
+            <td>Broader physical operator coverage</td>
+          </tr>
+          <tr>
+            <td>Patching</td>
+            <td><code>retune_aggregation</code>, request merge updates</td>
+            <td>General subtree replacement and wider retuning actions</td>
+          </tr>
+          <tr>
+            <td>Storage</td>
+            <td>Local filesystem run directories</td>
+            <td>Production auth, scheduler, queueing, remote persistence</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="footer">
+        The API is demo-oriented, but the execution path is already real Bolt,
+        not just a toy simulation.
+      </div>
+    </section>
+
+    <section class="page">
+      <h2>4. Bottom Line and Near-Term Roadmap</h2>
+      <div class="grid-2">
+        <div class="card accent">
+          <h3>Bottom Line</h3>
+          <p>
+            Bolt already has a credible AI agent feature set centered on
+            execution critique, replay capsules, and patch-based optimization.
+            The repository shows both the design vision and an incremental path
+            from simulated demo to real traced execution.
+          </p>
+          <p>
+            In practical terms, Bolt is becoming an execution substrate that
+            optimizer, debugging, regression triage, and evaluation agents can
+            reason about directly.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Best-Fit Agent Use Cases</h3>
+          <ul>
+            <li>Physical plan tuning agents</li>
+            <li>Replay-based debugging agents</li>
+            <li>Regression triage and benchmark agents</li>
+            <li>Autonomous data workflow controllers</li>
+            <li>Audit and postmortem assistants</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="section-gap card soft">
+        <h3>What still looks most important next</h3>
+        <ul>
+          <li>Broaden the real adapter beyond the current narrow request subset</li>
+          <li>Enrich failure objects with explicit retryability and root-cause hints</li>
+          <li>Expand patch operations from aggregation retuning to general plan edits</li>
+          <li>Carry more trace and sampled input context into capsules when safe</li>
+          <li>Harden the API with production concerns such as auth and scheduling</li>
+        </ul>
+      </div>
+
+      <div class="section-gap">
+        <h3>Key repo evidence behind this summary</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Repository artifact</th>
+              <th>What it demonstrates</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>doc/ai-ready-execution-engine.md</code></td>
+              <td>Overall architecture and target contract for agents</td>
+            </tr>
+            <tr>
+              <td><code>scripts/bolt_agent_demo.py</code></td>
+              <td>Runnable run/replay/patch loop and critique heuristics</td>
+            </tr>
+            <tr>
+              <td><code>demo/agent_runtime/outputs/*.json</code></td>
+              <td>Concrete sample critique, capsule, and patched outcomes</td>
+            </tr>
+            <tr>
+              <td><code>bolt/tool/AgentRuntimeExecutor.cpp</code></td>
+              <td>Real Bolt execution with trace capture from JSON requests</td>
+            </tr>
+            <tr>
+              <td><code>demo/agent_runtime_api/server.py</code></td>
+              <td>HTTP-accessible run, replay, patch, and artifact retrieval</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="small section-gap">
+        Overall assessment: the strongest current feature is not “chat with
+        Bolt.” It is the emerging agent-runtime contract that gives other
+        systems deterministic execution, structured feedback, and reproducible
+        state to iterate on.
+      </p>
+
+      <div class="footer">
+        Prepared as a shareable repo summary PDF based on checked-in docs,
+        demos, code, and sample artifacts.
+      </div>
+    </section>
+  </body>
+</html>

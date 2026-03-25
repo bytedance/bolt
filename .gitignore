@@ -337,3 +337,6 @@ files.txt
 log.txt
 
 bolt/version/version.h
+.conan2/
+demo/agent_runtime/outputs/
+demo/agent_runtime_api/data/

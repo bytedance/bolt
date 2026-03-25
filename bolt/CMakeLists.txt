@@ -211,6 +211,11 @@ if(${BOLT_ENABLE_EXEC})
   add_subdirectory(exec)
 endif()
 
+if(${BOLT_ENABLE_EXEC} AND ${BOLT_BUILD_TEST_UTILS})
+  add_executable(bolt_agent_runtime_executor tool/AgentRuntimeExecutor.cpp)
+  target_link_libraries(bolt_agent_runtime_executor bolt_testutils)
+endif()
+
 if(${BOLT_ENABLE_DUCKDB})
   add_subdirectory(duckdb)
 endif()
