@@ -108,7 +108,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
 USER $USERNAME
 
 # Configure default conan profile to use the mold linker
-RUN cat > ~/.conan2/profiles/default <<EOF
+RUN arch=$(uname -m) && mkdir -p ~/.conan2/profiles && cat > ~/.conan2/profiles/default <<EOF
 [settings]
 arch=$( [ "$arch" = "aarch64" ] && echo "armv8" || echo "$arch" )
 build_type=Release
