@@ -34,6 +34,7 @@
 #include <cmath>
 #include <type_traits>
 #include "bolt/type/BigDecimal.h"
+#include "bolt/type/DecimalUtil.h"
 #include "bolt/type/FloatingPointUtil.h"
 #include "folly/CPortability.h"
 namespace bytedance::bolt::functions {
@@ -47,17 +48,55 @@ round(const TNum& number, const TDecimals& decimals = 0) {
   static_assert(!std::is_same_v<TNum, bool> && "round not supported for bool");
 
   if constexpr (std::is_integral_v<TNum>) {
+#ifdef SPARK_COMPATIBLE
+    if (decimals >= 0) {
+      return number;
+    }
+    const int32_t absScale = -decimals;
+    if (absScale > LongDecimalType::kMaxPrecision) {
+      return 0;
+    }
+    const int128_t factor =
+        DecimalUtil::getPowersOfTen(static_cast<uint8_t>(absScale));
+    const int128_t absVal = number < 0 ? -static_cast<int128_t>(number)
+                                       : static_cast<int128_t>(number);
+    const int128_t base = absVal / factor;
+    const int128_t rem = absVal % factor;
+    int128_t rounded = base;
+    if (rem * 2 >= factor) {
+      rounded += 1;
+    }
+    rounded *= factor;
+    if (number < 0) {
+      rounded = -rounded;
+    }
+    return static_cast<TNum>(rounded);
+#else
     if constexpr (alwaysRoundNegDec) {
       if (decimals >= 0)
         return number;
     } else {
       return number;
     }
+#endif
   }
   if (!std::isfinite(number)) {
     return number;
   }
 
+#ifdef SPARK_COMPATIBLE
+  if constexpr (std::is_same_v<TNum, float>) {
+    BigDecimal decimal(static_cast<float>(number));
+    decimal.setScale(decimals);
+    auto res = decimal.floatValue();
+    return res;
+  } else {
+    BigDecimal decimal(static_cast<double>(number));
+    decimal.setScale(decimals);
+    auto res = decimal.doubleValue();
+    return res;
+  }
+#else
   double dNumber = static_cast<double>(number);
   BigDecimal decimal(dNumber);
   decimal.setScale(decimals);
@@ -68,6 +107,7 @@ round(const TNum& number, const TDecimals& decimals = 0) {
     auto res = decimal.floatValue();
     return res;
   }
+#endif
 }
 
 // This is used by Bolt for floating points plus.

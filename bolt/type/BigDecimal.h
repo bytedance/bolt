@@ -41,7 +41,12 @@ class BigDecimal {
     bool nullOutput = false;
     auto output =
         util::Converter<TypeKind::VARCHAR, void, util::DefaultCastPolicy>::cast<
-            double>(val, &nullOutput);
+#ifdef SPARK_COMPATIBLE
+            Tfloat
+#else
+            double
+#endif
+            >(val, &nullOutput);
     if (nullOutput) {
       BOLT_FAIL("Invalid data");
     }
