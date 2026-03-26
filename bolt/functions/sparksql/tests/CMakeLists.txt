@@ -80,6 +80,7 @@ add_executable(
   SparkArraySortTest.cpp
   SparkCastExprTest.cpp
   SparkPartitionIdTest.cpp
+  SparkRoundTest.cpp
   SparkSqlDateTimeFunctionsTest.cpp
   SplitFunctionsTest.cpp
   StringTest.cpp
