@@ -282,7 +282,7 @@ class BoltConan(ConanFile):
             self.requires("celeborn-cpp-client/main-20251212")
         if self.options.get_safe("enable_testutil"):
             self.requires("gtest/1.17.0", force=True)
-            self.requires("duckdb/0.8.1")
+            self.requires("duckdb/1.1.3")
 
     def build_requirements(self):
         self.tool_requires("m4/1.4.19")
@@ -352,6 +352,7 @@ class BoltConan(ConanFile):
             self.options[llvm_core].with_z3 = False
             self.options[llvm_core].with_zstd = False
             self.options[llvm_core].with_ffi = False
+            self.options[llvm_core].targets = 'AArch64;ARM;X86'
 
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"
