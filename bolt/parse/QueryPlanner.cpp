@@ -31,6 +31,7 @@
 #include "bolt/parse/QueryPlanner.h"
 #include "bolt/duckdb/conversion/DuckConversion.h"
 #include "bolt/parse/DuckLogicalOperator.h"
+#include "bolt/vector/VariantToVector.h"
 
 #include <duckdb.hpp> // @manual
 #include <duckdb/function/aggregate_function.hpp> // @manual
@@ -141,23 +142,60 @@ PlanNodePtr toBoltPlan(
     std::vector<PlanNodePtr> sources,
     QueryContext& queryContext) {
   if (logicalGet.function.name == "unnest") {
-    BOLT_CHECK_EQ(1, sources.size());
+    // DuckDB 1.1.3 represents UNNEST as a standalone LOGICAL_GET with
+    // parameters embedded in the LogicalGet.
+    BOLT_CHECK_EQ(0, sources.size());
+
+    BOLT_CHECK_EQ(
+        logicalGet.parameters.size(),
+        1,
+        "UNNEST expects a single parameter, got {}",
+        logicalGet.parameters.size());
+
+    const auto& param = logicalGet.parameters[0];
+    BOLT_CHECK(
+        param.type().id() == ::duckdb::LogicalTypeId::LIST,
+        "UNNEST parameter must be a LIST, got {}",
+        param.type().ToString());
+
+    const auto& listType = param.type();
+    auto elementType =
+        duckdb::toBoltType(::duckdb::ListType::GetChildType(listType));
+    auto arrayType = ARRAY(elementType);
+
+    std::vector<variant> elements;
+    const auto& listValues = ::duckdb::ListValue::GetChildren(param);
+    elements.reserve(listValues.size());
+    for (const auto& value : listValues) {
+      elements.emplace_back(duckdb::duckValueToVariant(value));
+    }
+
+    auto arrayVector = variantArrayToVector(arrayType, elements, pool);
+    auto rowType = ROW({queryContext.nextColumnName()}, {arrayType});
+    auto rowVector = std::make_shared<RowVector>(
+        pool, rowType, nullptr, 1, std::vector<VectorPtr>{arrayVector});
+
+    std::vector<RowVectorPtr> vectors = {rowVector};
+    auto valuesNode =
+        std::make_shared<ValuesNode>(queryContext.nextNodeId(), vectors);
+
     return std::make_shared<UnnestNode>(
         queryContext.nextNodeId(),
         std::vector<FieldAccessTypedExprPtr>{}, // replicateVariables
         std::vector<FieldAccessTypedExprPtr>{
             std::make_shared<FieldAccessTypedExpr>(
-                sources[0]->outputType()->childAt(0),
-                sources[0]->outputType()->asRow().nameOf(0))},
-        std::vector<std::string>{"a"},
+                valuesNode->outputType()->childAt(0),
+                valuesNode->outputType()->asRow().nameOf(0))},
+        std::vector<std::string>{
+            logicalGet.names.empty() ? "a" : logicalGet.names[0]},
         std::nullopt, // ordinalityName
-        std::move(sources[0]));
+        std::move(valuesNode));
   }
 
   BOLT_CHECK_EQ(logicalGet.function.name, "seq_scan");
   BOLT_CHECK_EQ(0, sources.size());
 
-  const auto& columnIds = logicalGet.column_ids;
+  const auto& columnIds = logicalGet.GetColumnIds();
   std::vector<std::string> names(columnIds.size());
   std::vector<TypePtr> types(columnIds.size());
 
@@ -465,6 +503,18 @@ PlanNodePtr toBoltPlan(
           pool,
           std::move(sources),
           queryContext);
+    case ::duckdb::LogicalOperatorType::LOGICAL_UNNEST:
+      BOLT_CHECK_EQ(1, sources.size());
+      return std::make_shared<UnnestNode>(
+          queryContext.nextNodeId(),
+          std::vector<FieldAccessTypedExprPtr>{}, // replicateVariables
+          std::vector<FieldAccessTypedExprPtr>{
+              std::make_shared<FieldAccessTypedExpr>(
+                  sources[0]->outputType()->childAt(0),
+                  sources[0]->outputType()->asRow().nameOf(0))},
+          std::vector<std::string>{"a"},
+          std::nullopt, // ordinalityName
+          std::move(sources[0]));
     default:
       BOLT_NYI(
           "Plan node is not supported yet: {}",

@@ -107,24 +107,33 @@ class LogicalGet : public LogicalOperator {
   vector<LogicalType> returned_types;
   //! The names of ALL columns that can be returned by the table function
   vector<string> names;
-  //! Bound column IDs
-  vector<column_t> column_ids;
+  //! Columns that are used outside the scan
+  vector<idx_t> projection_ids;
   //! Filters pushed down for table scan
   TableFilterSet table_filters;
-
+  //! The set of input parameters for the table function
+  vector<Value> parameters;
   string GetName() const override;
   InsertionOrderPreservingMap<string> ParamsToString() const override;
   //! Returns the underlying table that is being scanned, or nullptr if there is
   //! none
-  TableCatalogEntry* GetTable() const;
+  optional_ptr<TableCatalogEntry> GetTable() const;
 
  public:
+  const vector<column_t>& GetColumnIds() const;
   vector<ColumnBinding> GetColumnBindings() override;
 
   idx_t EstimateCardinality(ClientContext& context) override;
 
  protected:
   void ResolveTypes() override;
+
+ private:
+  LogicalGet();
+
+ private:
+  //! Bound column IDs
+  vector<column_t> column_ids;
 };
 
 //! LogicalFilter represents a filter operation (e.g. WHERE or HAVING clause)
