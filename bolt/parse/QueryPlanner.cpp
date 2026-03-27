@@ -33,8 +33,8 @@
 #include "bolt/parse/DuckLogicalOperator.h"
 
 #include <duckdb.hpp> // @manual
-#include <duckdb/main/connection.hpp> // @manual
 #include <duckdb/function/aggregate_function.hpp> // @manual
+#include <duckdb/main/connection.hpp> // @manual
 #include <duckdb/planner/expression/bound_aggregate_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_cast_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_comparison_expression.hpp> // @manual
@@ -479,11 +479,14 @@ static void customScalarFunction(
   BOLT_UNREACHABLE();
 }
 
-static ::duckdb::idx_t customAggregateState(const ::duckdb::AggregateFunction & /*function*/) {
+static ::duckdb::idx_t customAggregateState(
+    const ::duckdb::AggregateFunction& /*function*/) {
   BOLT_UNREACHABLE();
 }
 
-static void customAggregateInitialize(const ::duckdb::AggregateFunction & /*function*/, ::duckdb::data_ptr_t state) {
+static void customAggregateInitialize(
+    const ::duckdb::AggregateFunction& /*function*/,
+    ::duckdb::data_ptr_t state) {
   BOLT_UNREACHABLE();
 }
 

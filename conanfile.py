@@ -352,7 +352,7 @@ class BoltConan(ConanFile):
             self.options[llvm_core].with_z3 = False
             self.options[llvm_core].with_zstd = False
             self.options[llvm_core].with_ffi = False
-            self.options[llvm_core].targets = 'AArch64;ARM;X86'
+            self.options[llvm_core].targets = "AArch64;ARM;X86"
 
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"

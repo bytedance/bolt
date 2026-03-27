@@ -841,8 +841,7 @@ class VectorConverter : public ConverterBase {
         kind == PrimitiveKind::LONG_DECIMAL);
   }
 
-  static constexpr bool kLegacySensitive =
-      toKind == PrimitiveKind::STRING &&
+  static constexpr bool kLegacySensitive = toKind == PrimitiveKind::STRING &&
       (fromKind == PrimitiveKind::TIMESTAMP || isFloatKind(fromKind));
 
   static constexpr bool kTruncateSensitive =
