@@ -51,11 +51,6 @@ endif()
 # set the project name
 project(bolt CXX)
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  add_compile_options(-rtlib=compiler-rt)
-  add_link_options(-rtlib=compiler-rt)
-endif()
-
 # If we are in an active conda env disable search in system paths and add env to prefix path
 # if(DEFINED ENV{CONDA_PREFIX}) if(NOT DEFINED ENV{BOLT_DEPENDENCY_SOURCE} OR
 # "$ENV{BOLT_DEPENDENCY_SOURCE}" STREQUAL "CONDA") message(STATUS "Using Conda environment:
@@ -92,6 +87,12 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
 elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   set(OS_MACOSX 1)
   add_definitions(-D OS_MACOSX)
+endif()
+
+# Only use compiler-rt when building with Clang on Linux for ARM/AArch64
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND OS_LINUX AND (ARCH_AARCH64 OR ARCH_ARM))
+  add_compile_options(-rtlib=compiler-rt)
+  add_link_options(-rtlib=compiler-rt)
 endif()
 
 list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/CMake"
