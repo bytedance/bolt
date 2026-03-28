@@ -32,6 +32,10 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/Nulls.h"
+
+#include <folly/Varint.h>
+
 namespace bytedance::bolt::parquet {
 
 // DeltaBpDecoder is adapted from Apache Arrow:
