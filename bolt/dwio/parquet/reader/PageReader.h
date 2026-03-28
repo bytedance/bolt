@@ -666,7 +666,7 @@ void PageReader::readWithVisitor(Visitor& visitor) {
     }
     if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED &&
         deltaBpDecoder_->validValuesCount() == 0) {
-      VELOX_DCHECK(
+      BOLT_DCHECK(
           deltaBpDecoder_->bufferStart() == pageData_ + encodedDataSize_,
           "Once all data in the delta binary packed decoder has been read, "
           "its buffer ptr should be moved to the end of the page.");
