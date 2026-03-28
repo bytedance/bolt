@@ -3717,5 +3717,25 @@ TEST_F(VectorTest, sliceUnknownVector) {
   EXPECT_NE(v->slice(0, 512), nullptr);
 }
 
+TEST_F(VectorTest, rowPrepareForReuse) {
+  const int oldSize = 10;
+  for (const int newSize : {10, 20, 5, 0}) {
+    SCOPED_TRACE(fmt::format("oldSize {}, newSize {}", oldSize, newSize));
+    auto rowVector = makeRowVector(
+        {makeFlatVector<int32_t>(10), makeFlatVector<int64_t>(10)});
+    ASSERT_EQ(rowVector->size(), 10);
+    for (const auto& child : rowVector->children()) {
+      ASSERT_EQ(child->size(), rowVector->size());
+    }
+    bolt::VectorPtr baseVector = rowVector;
+    BaseVector::prepareForReuse(baseVector, newSize);
+    rowVector = std::static_pointer_cast<bolt::RowVector>(baseVector);
+    ASSERT_EQ(rowVector->size(), newSize);
+    for (const auto& child : rowVector->children()) {
+      ASSERT_EQ(child->size(), newSize);
+    }
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt
