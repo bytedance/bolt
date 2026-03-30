@@ -68,13 +68,12 @@ struct WeekFunction : public InitSessionTimezone<T> {
   FOLLY_ALWAYS_INLINE void call(
       int32_t& result,
       const arg_type<Timestamp>& timestamp) {
-    result = static_cast<int32_t>(
-        bytedance::bolt::functions::getWeek(timestamp, this->timeZone_, false));
+    result = static_cast<int32_t>(getWeek(timestamp, this->timeZone_, false));
   }
 
   FOLLY_ALWAYS_INLINE void call(int32_t& result, const arg_type<Date>& date) {
-    result = static_cast<int32_t>(bytedance::bolt::functions::getWeek(
-        Timestamp::fromDate(date), nullptr, false));
+    result = static_cast<int32_t>(
+        getWeek(Timestamp::fromDate(date), nullptr, false));
   }
 };
 
