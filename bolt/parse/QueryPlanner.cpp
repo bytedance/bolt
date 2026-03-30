@@ -183,8 +183,7 @@ PlanNodePtr toBoltPlan(
         std::make_shared<FieldAccessTypedExpr>(
             valuesNode->outputType()->childAt(0),
             valuesNode->outputType()->asRow().nameOf(0))};
-    std::vector<std::string> projectionNames{
-        queryContext.nextColumnName()};
+    std::vector<std::string> projectionNames{queryContext.nextColumnName()};
     auto projectNode = std::make_shared<ProjectNode>(
         queryContext.nextNodeId(),
         std::move(projectionNames),
