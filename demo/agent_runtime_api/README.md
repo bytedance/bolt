@@ -15,6 +15,81 @@ plus trace metadata. The Python API then packages that into:
 - `critique.json`
 - `capsule.json`
 
+## V1 Vs V2
+
+The project now exposes two API styles:
+
+### V1
+
+The original demo-oriented endpoints:
+
+- `POST /runs`
+- `POST /sql`
+- `POST /replays`
+- `POST /patches`
+- `GET /runs/{run_id}`
+- `GET /capsules/{capsule_id}`
+- `GET /artifacts/{run_id}/{artifact_name}`
+
+Characteristics:
+
+- simple and easy to demo
+- centered around ad hoc actions
+- patching is limited
+- no built-in run comparison endpoint
+
+### V2
+
+The newer agent-native API shape:
+
+- `POST /v2/sql/runs`
+- `POST /v2/plans/runs`
+- `POST /v2/runs/{run_id}/replay`
+- `POST /v2/runs/{run_id}/patch`
+- `POST /v2/runs/compare`
+- `GET /v2/runs/{run_id}`
+- `GET /v2/runs/{run_id}/request`
+- `GET /v2/runs/{run_id}/result`
+- `GET /v2/runs/{run_id}/critique`
+- `GET /v2/runs/{run_id}/capsule`
+
+Characteristics:
+
+- explicit SQL mode and plan mode
+- typed patch operations
+- richer critique output with `candidate_patches`
+- run-to-run comparison support
+- cleaner resource-oriented endpoint structure
+
+### Typed Patch Ops In V2
+
+`v2` supports these patch operations:
+
+- `add_filter`
+- `replace_filter`
+- `remove_filter`
+- `change_projection`
+- `change_limit`
+- `change_order_by`
+- `change_parallelism`
+- `retune_aggregation`
+- `merge_request`
+
+### When To Use Which
+
+Use `v1` when:
+
+- you want the shortest demo path
+- you are manually poking the service
+- backward compatibility with the original demo matters
+
+Use `v2` when:
+
+- another agent is the client
+- you want typed patches
+- you want comparison workflows
+- you want a cleaner long-term API contract
+
 ## What The Real Adapter Supports
 
 The adapter intentionally starts with a narrow but real subset:
@@ -38,7 +113,7 @@ This is enough to demonstrate a true agent loop on top of Bolt:
 Build the new example target:
 
 ```bash
-cmake --build _build/Release/_build/Release --target bolt_agent_runtime_executor -j 8
+cmake --build _build/Release --target bolt_agent_runtime_executor -j 8
 ```
 
 If your local build output path differs, pass it explicitly to the server using
@@ -50,7 +125,7 @@ If your local build output path differs, pass it explicitly to the server using
 python3 demo/agent_runtime_api/server.py \
   --host 127.0.0.1 \
   --port 8088 \
-  --adapter-bin _build/Release/_build/Release/bolt/bolt_agent_runtime_executor
+  --adapter-bin _build/Release/bolt/bolt_agent_runtime_executor
 ```
 
 ## Request Shape
