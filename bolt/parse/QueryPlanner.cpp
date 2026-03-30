@@ -179,17 +179,29 @@ PlanNodePtr toBoltPlan(
     auto valuesNode =
         std::make_shared<ValuesNode>(queryContext.nextNodeId(), vectors);
 
+    std::vector<TypedExprPtr> projections{
+        std::make_shared<FieldAccessTypedExpr>(
+            valuesNode->outputType()->childAt(0),
+            valuesNode->outputType()->asRow().nameOf(0))};
+    std::vector<std::string> projectionNames{
+        queryContext.nextColumnName()};
+    auto projectNode = std::make_shared<ProjectNode>(
+        queryContext.nextNodeId(),
+        std::move(projectionNames),
+        std::move(projections),
+        std::move(valuesNode));
+
     return std::make_shared<UnnestNode>(
         queryContext.nextNodeId(),
         std::vector<FieldAccessTypedExprPtr>{}, // replicateVariables
         std::vector<FieldAccessTypedExprPtr>{
             std::make_shared<FieldAccessTypedExpr>(
-                valuesNode->outputType()->childAt(0),
-                valuesNode->outputType()->asRow().nameOf(0))},
+                projectNode->outputType()->childAt(0),
+                projectNode->outputType()->asRow().nameOf(0))},
         std::vector<std::string>{
             logicalGet.names.empty() ? "a" : logicalGet.names[0]},
         std::nullopt, // ordinalityName
-        std::move(valuesNode));
+        std::move(projectNode));
   }
 
   BOLT_CHECK_EQ(logicalGet.function.name, "seq_scan");
