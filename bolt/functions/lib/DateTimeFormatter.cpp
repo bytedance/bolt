@@ -41,6 +41,12 @@
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
+
+namespace bytedance::bolt::tz {
+// Defined in TimeZoneLinks.cpp
+extern const std::unordered_map<std::string, std::string>& getTimeZoneLinks();
+} // namespace bytedance::bolt::tz
+
 namespace bytedance::bolt::functions {
 
 static thread_local std::string timezoneBuffer = "+00:00";
@@ -538,6 +544,56 @@ std::string formatFractionOfSecond(
   return subsecondsStr.substr(1, minRepresentDigits);
 }
 
+int32_t appendTimezoneOffset(int64_t offset, char* result, bool includeColon) {
+  int pos = 0;
+  if (offset >= 0) {
+    result[pos++] = '+';
+  } else {
+    result[pos++] = '-';
+    offset = -offset;
+  }
+
+  const auto hours = offset / 60 / 60;
+  if (hours < 10) {
+    result[pos++] = '0';
+    result[pos++] = char(hours + '0');
+  } else {
+    result[pos++] = char(hours / 10 + '0');
+    result[pos++] = char(hours % 10 + '0');
+  }
+
+  if (includeColon) {
+    result[pos++] = ':';
+  }
+
+  const auto minutes = (offset / 60) % 60;
+  if LIKELY (minutes == 0) {
+    result[pos++] = '0';
+    result[pos++] = '0';
+  } else if (minutes < 10) {
+    result[pos++] = '0';
+    result[pos++] = char(minutes + '0');
+  } else {
+    result[pos++] = char(minutes / 10 + '0');
+    result[pos++] = char(minutes % 10 + '0');
+  }
+
+  const auto seconds = offset % 60;
+  if (seconds > 0) {
+    result[pos++] = ':';
+
+    if (seconds < 10) {
+      result[pos++] = '0';
+      result[pos++] = char(seconds + '0');
+    } else {
+      result[pos++] = char(seconds / 10 + '0');
+      result[pos++] = char(seconds % 10 + '0');
+    }
+  }
+
+  return pos;
+}
+
 // According to DateTimeFormatSpecifier enum class
 std::string getSpecifierName(DateTimeFormatSpecifier s) {
   switch (s) {
@@ -814,10 +870,38 @@ ErrorCode parseFromPattern(
         }
       }
     } else {
-      while (cur < end && cur < startPos + maxDigitConsume &&
-             characterIsDigit(*cur)) {
-        number = number * 10 + (*cur - '0');
-        ++cur;
+      if (legacySpark && !specifierNext &&
+          (curPattern.specifier == DateTimeFormatSpecifier::DAY_OF_MONTH ||
+           curPattern.specifier == DateTimeFormatSpecifier::HOUR_OF_DAY ||
+           curPattern.specifier == DateTimeFormatSpecifier::MINUTE_OF_HOUR ||
+           curPattern.specifier == DateTimeFormatSpecifier::SECOND_OF_MINUTE)) {
+        // Spark LEGACY tolerance: for width-2 numeric fields followed by a
+        // literal, allow exactly one extra leading '0'. Consume 3 digits when
+        // present and use the last two digits as the value.
+        const char* p = cur;
+        int len = 0;
+        while (p < end && characterIsDigit(*p)) {
+          ++p;
+          ++len;
+        }
+        if (len == 1) {
+          number = cur[0] - '0';
+          cur += 1;
+        } else if (len == 2) {
+          number = (cur[0] - '0') * 10 + (cur[1] - '0');
+          cur += 2;
+        } else if (len == 3 && cur[0] == '0') {
+          number = (cur[1] - '0') * 10 + (cur[2] - '0');
+          cur += 3;
+        } else {
+          return ErrorCode::PARSE_DIGIT_ERROR;
+        }
+      } else {
+        while (cur < end && cur < startPos + maxDigitConsume &&
+               characterIsDigit(*cur)) {
+          number = number * 10 + (*cur - '0');
+          ++cur;
+        }
       }
     }
 
@@ -1128,10 +1212,15 @@ int32_t DateTimeFormatter::format(
     char* result,
     bool allowOverflow,
     TimePolicy timePolicy,
-    bool isPrecision) const {
+    bool isPrecision,
+    const std::optional<std::string>& zeroOffsetText) const {
   Timestamp t = timestamp;
+  int64_t offset = 0;
   if (timezone != nullptr) {
+    const auto utcSeconds = timestamp.getSeconds();
     t.toTimezone(*timezone);
+
+    offset = t.getSeconds() - utcSeconds;
   }
   const auto civilDateTime =
       util::toCivilDateTime(t, allowOverflow, isPrecision);
@@ -1140,6 +1229,12 @@ int32_t DateTimeFormatter::format(
   const auto weekdayNum = civilDateTime.weekday;
   const auto dayOfYear = civilDateTime.dayOfYear;
   const auto daysSinceEpoch = civilDateTime.daysSinceEpoch;
+  // Compute the UTC civil date/time of the same instant for timezone-aware
+  // formatting decisions (e.g., suppress '+' when local crosses year boundary
+  // but UTC year is still <= 9999).
+  const auto civilDateTimeUtc =
+      util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
+  const auto& calDateUtc = civilDateTimeUtc.date;
 #ifdef SPARK_COMPATIBLE
   auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
     auto weekday = static_cast<int32_t>((daysSinceEpochInput + 4) % 7);
@@ -1180,8 +1275,22 @@ int32_t DateTimeFormatter::format(
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
 #ifdef SPARK_COMPATIBLE
-            // spark compatibility: year should contain sign if > 9999
-            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+            // spark compatibility: year should contain sign if > 9999.
+            // However, if a timezone is applied and the same instant in UTC
+            // has year-of-era <= 9999 (e.g., Asia/Shanghai at
+            // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
+            // the leading '+'.
+            bool addPlus =
+                (year > 9999 && token.pattern.minRepresentDigits >= 4);
+            if (timezone != nullptr) {
+              int32_t utcYearEra = calDateUtc.year <= 0
+                  ? std::abs(calDateUtc.year - 1)
+                  : calDateUtc.year;
+              if (utcYearEra <= 9999) {
+                addPlus = false;
+              }
+            }
+            if (addPlus) {
               *result++ = '+';
             }
 #endif
@@ -1259,8 +1368,22 @@ int32_t DateTimeFormatter::format(
                 result);
           } else {
 #ifdef SPARK_COMPATIBLE
-            // spark compatibility: year should contain sign if > 9999
-            if (year > 9999 && token.pattern.minRepresentDigits >= 4) {
+            // spark compatibility: year should contain sign if > 9999.
+            // If a timezone is applied and the same instant in UTC has
+            // (adjusted) year <= 9999, suppress the leading '+'.
+            bool addPlus =
+                (year > 9999 && token.pattern.minRepresentDigits >= 4);
+            if (timezone != nullptr) {
+              int32_t utcYearAdj = calDateUtc.year;
+              if (utcYearAdj < 0 &&
+                  (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
+                utcYearAdj = std::abs(utcYearAdj) + 1;
+              }
+              if (utcYearAdj <= 9999) {
+                addPlus = false;
+              }
+            }
+            if (addPlus) {
               *result++ = '+';
             }
 #endif
@@ -1469,9 +1592,41 @@ int32_t DateTimeFormatter::format(
           result += piece.length();
         } break;
 
-        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID:
-          // TODO: implement timezone offset id formatting, need a map from full
-          // name to offset time
+        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID: {
+          // Zone: 'Z' outputs offset without a colon, 'ZZ' outputs the offset
+          // with a colon, 'ZZZ' or more outputs the zone id.
+          if (offset == 0 && zeroOffsetText.has_value()) {
+            std::memcpy(result, zeroOffsetText->data(), zeroOffsetText->size());
+            result += zeroOffsetText->size();
+            break;
+          }
+
+          if (timezone == nullptr) {
+            BOLT_USER_FAIL("Timezone unknown");
+          }
+
+          if (token.pattern.minRepresentDigits >= 3) {
+            // Append the time zone ID.
+            const auto& piece = timezone->name();
+
+            static const auto& timeZoneLinks = tz::getTimeZoneLinks();
+            auto timeZoneLinksIter = timeZoneLinks.find(piece);
+            if (timeZoneLinksIter != timeZoneLinks.end()) {
+              const auto& timeZoneLink = timeZoneLinksIter->second;
+              std::memcpy(result, timeZoneLink.data(), timeZoneLink.length());
+              result += timeZoneLink.length();
+              break;
+            }
+
+            std::memcpy(result, piece.data(), piece.length());
+            result += piece.length();
+            break;
+          }
+
+          result += appendTimezoneOffset(
+              offset, result, token.pattern.minRepresentDigits == 2);
+          break;
+        }
         default:
           BOLT_UNSUPPORTED(
               "format is not supported for specifier {}",
@@ -1581,13 +1736,31 @@ DateTimeResult DateTimeFormatter::parse(
     auto& tok = tokens_[i];
     switch (tok.type) {
       case DateTimeToken::Type::kLiteral:
-        if (tok.literal.size() > end - cur ||
-            std::memcmp(cur, tok.literal.data(), tok.literal.size()) != 0) {
-          return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+        if (tok.literal.size() == 1 && tok.literal[0] == ' ' && isLegacy) {
+          // Spark LEGACY: tolerate multiple spaces where a single space is
+          // specified. Require at least one space to be present.
+          if (cur >= end || *cur != ' ') {
+            return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+          }
+          while (cur < end && *cur == ' ') {
+            ++cur;
+          }
+        } else {
+          if (tok.literal.size() > end - cur ||
+              std::memcmp(cur, tok.literal.data(), tok.literal.size()) != 0) {
+            return DateTimeResult::ErrorCode::PARSE_LITERAL_ERROR;
+          }
+          cur += tok.literal.size();
         }
-        cur += tok.literal.size();
         break;
       case DateTimeToken::Type::kPattern:
+        // Spark LEGACY: skip leading whitespace before numeric tokens
+        if (isLegacy) {
+          // Tolerate multiple spaces only; tabs are not accepted.
+          while (cur < end && (*cur == ' ')) {
+            ++cur;
+          }
+        }
         if (i + 1 < tokens_.size() &&
             tokens_[i + 1].type == DateTimeToken::Type::kPattern) {
           auto errorCode = parseFromPattern(

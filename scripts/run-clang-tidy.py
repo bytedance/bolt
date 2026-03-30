@@ -503,8 +503,8 @@ def tidy(args):
         cmd_base.append(f"--line-filter={line_filter_json}")
 
     cmd_base.append("--extra-arg=-Wno-unknown-warning-option")
-
-    jobs = args.jobs if args.jobs else max(1, multiprocessing.cpu_count() // 2)
+    max_cpus = int(os.environ.get("CI_NUM_THREADS", multiprocessing.cpu_count() // 2))
+    jobs = args.jobs if args.jobs else max(1, max_cpus)
     chunk_size = 1
     file_chunks = [
         files_to_process[i : i + chunk_size]

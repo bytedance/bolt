@@ -311,6 +311,198 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestamp) {
   EXPECT_EQ(1563922800, unixTimestampWithFormat("2019-07-24", "yyyyMMdd"));
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTolerateIllegalDataLegacy) {
+  std::optional<StringView> format1Str = "yyyyMMdd HH:mm:ss"_sv;
+  std::optional<StringView> format2Str = "yyyy-MM-dd HH:mm:ss"_sv;
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 15:49:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010  15:49:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Extra digit in second breaks parsing
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 15:49:032"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Additional fuzzy cases for legacy tolerance
+  // Multiple spaces between date and time are tolerated
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010     15:49:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Trailing spaces after time are tolerated
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 15:49:32   "_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Extra leading 0 in minute
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 15:049:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Extra leading 0 in day
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106011 15:49:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-11 15:49:32");
+
+  // Extra leading 0 in hour
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 015:49:32"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 15:49:32");
+
+  // Missing leading 0s in hour, minute and second
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"202106010 9:17:34"_sv},
+          format1Str,
+          format2Str),
+      "2021-06-10 09:17:34");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:32:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:32:00");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:32:1"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:32:01");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:2:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:02:00");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"20210526 9:2:1"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-26 09:02:01");
+  // Missing leading 0s in day
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "FROM_UNIXTIME(UNIX_TIMESTAMP(c0, c1), c2)",
+          std::optional<StringView>{"2021051 09:32:00"_sv},
+          format1Str,
+          format2Str),
+      "2021-05-01 09:32:00");
+
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106010- 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"2021060100 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106110 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Tab instead of space is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106010\t15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Non-space delimiter is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106010.15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Day-of-month becomes 00 after tolerance -> invalid date
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106000 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Short time portion (missing seconds) is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202106010 15:49"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Leading zeros before year is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"020210601 15:49:32"_sv},
+          format1Str),
+      std::nullopt);
+
+  // Missing leading zeros in before month is not tolerated
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"202151 09:32:00"_sv},
+          format1Str),
+      std::nullopt);
+  EXPECT_EQ(
+      evaluateOnce<int64_t>(
+          "UNIX_TIMESTAMP(c0, c1)",
+          std::optional<StringView>{"2021501 09:32:00"_sv},
+          format1Str),
+      std::nullopt);
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDate) {
   const auto unixTimestamp = [&](std::optional<int32_t> date) {
     return evaluateOnce<int64_t, int32_t>(
@@ -1539,6 +1731,28 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
   for (const auto& [input, expected] : cases) {
     EXPECT_EQ(fromUnixTime(input), expected) << input;
   }
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
+  auto fromUnixTime = [&](int64_t unixTime, std::string timeZone) {
+    return evaluateOnce<std::string>(
+               fmt::format(
+                   "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss', '{}')", timeZone),
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+
+  EXPECT_EQ(
+      fromUnixTime(253402300799, "Asia/Shanghai"), "10000-01-01 07:59:59");
+#ifdef SPARK_COMPATIBLE
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"), "+10000-01-01 08:00:01");
+#else
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"), "10000-01-01 08:00:01");
+#endif
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "America/Los_Angeles"), "9999-12-31 16:00:01");
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {

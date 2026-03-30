@@ -16,7 +16,11 @@
 include(GoogleTest)
 
 add_executable(
-  bolt_memory_sparksql_test MemoryConsumerTest.cpp MemoryTargetTest.cpp NativeMemoryManagerTest.cpp
+  bolt_memory_sparksql_test
+  MemoryAllocatorTest.cpp
+  MemoryConsumerTest.cpp
+  MemoryTargetTest.cpp
+  NativeMemoryManagerTest.cpp
 )
 
 target_link_libraries(

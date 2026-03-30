@@ -71,7 +71,17 @@ class StdMemoryAllocator final : public MemoryAllocator {
   }
 
   bool allocateAligned(uint64_t alignment, int64_t size, void** out) override {
-    *out = aligned_alloc(alignment, size);
+    *out = nullptr;
+    if (size == 0) {
+      return true;
+    }
+    if (alignment < sizeof(void*) || alignment % sizeof(void*) != 0 ||
+        (alignment & (alignment - 1)) != 0) {
+      return false;
+    }
+    if (posix_memalign(out, alignment, size) != 0) {
+      return false;
+    }
     bytes_ += size;
     return true;
   }
@@ -84,26 +94,38 @@ class StdMemoryAllocator final : public MemoryAllocator {
 
   bool reallocateAligned(
       void* p,
+
       uint64_t alignment,
       int64_t size,
       int64_t newSize,
       void** out) override {
-    if (newSize <= 0) {
+    *out = nullptr;
+
+    if (alignment < sizeof(void*) || alignment % sizeof(void*) != 0 ||
+        (alignment & (alignment - 1)) != 0) {
       return false;
     }
-    if (newSize <= size) {
-      auto aligned = BOLT_ROUND_TO_LINE(newSize, alignment);
-      if (aligned <= size) {
-        // shrink-to-fit
-        return reallocate(p, size, aligned, out);
+
+    if (newSize == 0) {
+      if (p != nullptr) {
+        ::free(p);
       }
+      bytes_ -= size;
+      return true;
     }
-    void* reallocatedP = std::aligned_alloc(alignment, newSize);
-    if (!reallocatedP) {
+
+    auto roundedNewSize = BOLT_ROUND_TO_LINE(newSize, alignment);
+
+    void* reallocatedP = nullptr;
+    if (posix_memalign(&reallocatedP, alignment, roundedNewSize) != 0) {
       return false;
     }
-    memcpy(reallocatedP, p, std::min(size, newSize));
-    std::free(p);
+
+    if (p != nullptr) {
+      std::memcpy(reallocatedP, p, std::min<int64_t>(size, newSize));
+      ::free(p);
+    }
+
     *out = reallocatedP;
     bytes_ += (newSize - size);
     return true;
@@ -188,7 +210,11 @@ class ListenableMemoryAllocator final : public MemoryAllocator {
       listener_->allocationChanged(-diff);
     }
     if (succeed) {
-      boltListener_->recordGrow(p, *out, size, newSize);
+      if (newSize == 0 || *out == nullptr) {
+        boltListener_->recordFree(p, size);
+      } else {
+        boltListener_->recordGrow(p, *out, size, newSize);
+      }
       bytes_ += diff;
     }
     return succeed;
@@ -208,7 +234,11 @@ class ListenableMemoryAllocator final : public MemoryAllocator {
       listener_->allocationChanged(-diff);
     }
     if (succeed) {
-      boltListener_->recordGrow(p, *out, size, newSize);
+      if (newSize == 0 || *out == nullptr) {
+        boltListener_->recordFree(p, size);
+      } else {
+        boltListener_->recordGrow(p, *out, size, newSize);
+      }
       bytes_ += diff;
     }
     return succeed;

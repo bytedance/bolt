@@ -428,9 +428,16 @@ struct UnixTimestampParseWithFormatFunction
       }
     }
 
-    auto dateTimeResult =
-        this->format_->parse(std::string_view(input.data(), input.size()));
+    auto dateTimeResult = this->format_->parse(
+        std::string_view(input.data(), input.size()), this->timeParserPolicy);
     if (dateTimeResult.hasError()) {
+      if (this->timeParserPolicy == TimePolicy::EXCEPTION) {
+        std::string msg = fmt::format(
+            "parse timestamp failed, input: {}, format: {}",
+            std::string_view(input.data(), input.size()),
+            std::string_view(format.data(), format.size()));
+        dateTimeResult.throwExceptionIfErrorOccurs(msg);
+      }
       return false;
     }
     result = this->getResultInGMT(dateTimeResult.value());

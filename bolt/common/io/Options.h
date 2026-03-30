@@ -31,6 +31,8 @@
 #pragma once
 
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/serialization/Serializable.h"
+
 namespace bytedance::bolt::io {
 
 constexpr uint64_t DEFAULT_AUTO_PRELOAD_SIZE =
@@ -69,7 +71,7 @@ enum class PrefetchMode {
                 // actual reads.
 };
 
-class ReaderOptions {
+class ReaderOptions : public bolt::ISerializable {
  protected:
   bolt::memory::MemoryPool* memoryPool;
   uint64_t autoPreloadLength;
@@ -206,6 +208,61 @@ class ReaderOptions {
 
   int32_t prefetchMemoryPercent() const {
     return prefetchMemoryPercent_;
+  }
+
+  // Serialization support
+  folly::dynamic serialize() const override {
+    folly::dynamic obj = folly::dynamic::object;
+    obj["autoPreloadLength"] = static_cast<int64_t>(autoPreloadLength);
+    obj["prefetchMode"] = static_cast<int64_t>(prefetchMode);
+    obj["loadQuantum"] = static_cast<int64_t>(loadQuantum_);
+    obj["maxCoalesceDistance"] = static_cast<int64_t>(maxCoalesceDistance_);
+    obj["maxCoalesceBytes"] = static_cast<int64_t>(maxCoalesceBytes_);
+    obj["prefetchRowGroups"] = static_cast<int64_t>(prefetchRowGroups_);
+    obj["prefetchMemoryPercent"] = static_cast<int64_t>(prefetchMemoryPercent_);
+    return obj;
+  }
+
+  static ReaderOptions create(
+      const folly::dynamic& obj,
+      bolt::memory::MemoryPool* pool) {
+    ReaderOptions options(pool);
+    if (const auto* p = obj.get_ptr("autoPreloadLength")) {
+      if (p->isNumber()) {
+        options.autoPreloadLength = static_cast<uint64_t>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("prefetchMode")) {
+      if (p->isNumber()) {
+        options.prefetchMode = static_cast<PrefetchMode>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("loadQuantum")) {
+      if (p->isNumber()) {
+        options.loadQuantum_ = static_cast<size_t>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("maxCoalesceDistance")) {
+      if (p->isNumber()) {
+        options.maxCoalesceDistance_ = static_cast<size_t>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("maxCoalesceBytes")) {
+      if (p->isNumber()) {
+        options.maxCoalesceBytes_ = static_cast<size_t>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("prefetchRowGroups")) {
+      if (p->isNumber()) {
+        options.prefetchRowGroups_ = static_cast<int32_t>(p->asInt());
+      }
+    }
+    if (const auto* p = obj.get_ptr("prefetchMemoryPercent")) {
+      if (p->isNumber()) {
+        options.prefetchMemoryPercent_ = static_cast<int32_t>(p->asInt());
+      }
+    }
+    return options;
   }
 };
 } // namespace bytedance::bolt::io

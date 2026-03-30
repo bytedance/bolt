@@ -749,6 +749,11 @@ class QueryConfig {
   static constexpr const char* kSparkLegacyStatisticalAggregate =
       "spark_legacy_statistical_aggregate";
 
+  /// If true, ignore null fields when generating JSON string.
+  /// If false, null fields are included with a null value.
+  static constexpr const char* kSparkJsonIgnoreNullFields =
+      "spark.json_ignore_null_fields";
+
   bool operatorTrackExpressionStats() const {
     return get<bool>(kOperatorTrackExpressionStats, false);
   }
@@ -1654,6 +1659,10 @@ class QueryConfig {
 
   bool isDecryptionEnabled() const {
     return get<bool>(kDecryptionEnabled, false);
+  }
+
+  bool sparkJsonIgnoreNullFields() const {
+    return get<bool>(kSparkJsonIgnoreNullFields, true);
   }
 
  private:

@@ -2055,12 +2055,22 @@ TEST_F(
       });
     }
 
+    auto addBadSplit = [&](int idx) {
+      try {
+        task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", idx)));
+      } catch (const std::exception& e) {
+        LOG(INFO) << "Ignoring expected exception while adding bad split: "
+                  << e.what();
+      }
+    };
+
     // Add one bad remote split and trigger Task::terminate.
     task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 0)));
 
     // Add one more bad split, making sure `remainingRemoteSplits` is not empty
     // and processing it would cause an exception.
-    task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 1)));
+    addBadSplit(1);
+    addBadSplit(2);
 
     // Wait for the task to fail, and make sure the task has been deleted
     // instead of hanging as a zombie task.

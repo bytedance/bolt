@@ -213,11 +213,11 @@ RowContainer::RowContainer(
       isJoinBuild_(isJoinBuild),
       accumulators_(accumulators),
       hasNormalizedKeys_(hasNormalizedKeys),
+      useListRowIndex_(useListRowIndex),
       rows_(pool),
       stringAllocator_(
           stringAllocator ? stringAllocator
                           : std::make_shared<HashStringAllocator>(pool)),
-      useListRowIndex_(useListRowIndex),
       rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable

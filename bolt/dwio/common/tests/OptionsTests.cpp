@@ -94,7 +94,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsSerializeDeserializeRoundTrip) {
   folly::dynamic dyn = opts.serialize();
 
   // ---- deserialize ----
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   // ---- verify ----
 
@@ -126,7 +126,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsDefaultsRoundTrip) {
   WriterOptions opts;
 
   folly::dynamic dyn = opts.serialize();
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   ASSERT_EQ(nullptr, roundTrip->schema);
   ASSERT_FALSE(roundTrip->compressionKind.has_value());
@@ -160,7 +160,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsWithSpillConfigRoundTrip) {
   WriterOptions opts;
   opts.spillConfig = &cfg;
 
-  auto rt = WriterOptions::deserialize(opts.serialize());
+  auto rt = WriterOptions::create(opts.serialize());
 
   ASSERT_NE(nullptr, rt->spillConfig);
   ASSERT_NE(nullptr, rt->ownedSpillConfig.get());
@@ -176,7 +176,7 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsNoSpillConfigRoundTrip) {
   WriterOptions opts;
   ASSERT_EQ(nullptr, opts.spillConfig);
 
-  auto rt = WriterOptions::deserialize(opts.serialize());
+  auto rt = WriterOptions::create(opts.serialize());
 
   ASSERT_EQ(nullptr, rt->spillConfig);
   ASSERT_EQ(nullptr, rt->ownedSpillConfig.get());
@@ -188,11 +188,128 @@ TEST_F(WriterOptionsSerDeTest, writerOptionsNoSchemaRoundTrip) {
   opts.serdeParameters["key"] = "value";
 
   folly::dynamic dyn = opts.serialize();
-  auto roundTrip = WriterOptions::deserialize(dyn);
+  auto roundTrip = WriterOptions::create(dyn);
 
   ASSERT_EQ(nullptr, roundTrip->schema);
   ASSERT_TRUE(roundTrip->compressionKind.has_value());
   ASSERT_EQ(common::CompressionKind_ZLIB, roundTrip->compressionKind.value());
   ASSERT_EQ(1u, roundTrip->serdeParameters.size());
   ASSERT_EQ("value", roundTrip->serdeParameters.at("key"));
+}
+
+class ReaderOptionsSerDeTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    bytedance::bolt::memory::MemoryManager::testingSetInstance(
+        bytedance::bolt::memory::MemoryManager::Options{});
+    bytedance::bolt::dwio::common::ReaderOptions::registerSerDe();
+  }
+};
+
+TEST_F(ReaderOptionsSerDeTest, readerOptionsSerializeDeserializeRoundTrip) {
+  auto rootPool = bytedance::bolt::memory::memoryManager()->addRootPool();
+  auto pool = rootPool->addLeafChild("test_pool");
+  bytedance::bolt::dwio::common::ReaderOptions opts(pool.get());
+
+  // Set various options
+  opts.setTailLocation(12345);
+  opts.setFileFormat(FileFormat::PARQUET);
+  opts.setFileSchema(ROW({"c1", "c2"}, {INTEGER(), VARCHAR()}));
+
+  SerDeOptions serdeOpts('a', 'b', 'c', 'd', true);
+  serdeOpts.nullString = "NULL_VAL";
+  serdeOpts.lastColumnTakesRest = true;
+  opts.setSerDeOptions(serdeOpts);
+
+  opts.setFooterEstimatedSize(1024 * 1024);
+  opts.setFilePreloadThreshold(8 * 1024 * 1024);
+  opts.setFileColumnNamesReadAsLowerCase(true);
+  opts.setUseColumnNamesForColumnMapping(false);
+  opts.setUseNestedColumnNamesForColumnMapping(true);
+
+  opts.setAutoPreloadLength(1000);
+  opts.setPrefetchMode(bytedance::bolt::io::PrefetchMode::PREFETCH);
+  opts.setLoadQuantum(2000);
+  opts.setMaxCoalesceDistance(3000);
+  opts.setMaxCoalesceBytes(4000);
+  opts.setPrefetchRowGroups(5);
+  opts.setPrefetchMemoryPercent(50);
+
+  // ---- serialize ----
+  folly::dynamic dyn = opts.serialize();
+
+  // ---- deserialize ----
+  auto roundTrip =
+      bytedance::bolt::dwio::common::ReaderOptions::create(dyn, pool.get());
+
+  // ---- verify ----
+  ASSERT_EQ(opts.getTailLocation(), roundTrip.getTailLocation());
+  ASSERT_EQ(opts.getFileFormat(), roundTrip.getFileFormat());
+  ASSERT_EQ(
+      opts.getFileSchema()->toString(), roundTrip.getFileSchema()->toString());
+
+  auto& rtSerDe = roundTrip.getSerDeOptions();
+  ASSERT_EQ(serdeOpts.separators[0], rtSerDe.separators[0]);
+  ASSERT_EQ(serdeOpts.separators[1], rtSerDe.separators[1]);
+  ASSERT_EQ(serdeOpts.separators[2], rtSerDe.separators[2]);
+  ASSERT_EQ(serdeOpts.separators[3], rtSerDe.separators[3]);
+  ASSERT_EQ(serdeOpts.nullString, rtSerDe.nullString);
+  ASSERT_EQ(serdeOpts.lastColumnTakesRest, rtSerDe.lastColumnTakesRest);
+  ASSERT_EQ(serdeOpts.escapeChar, rtSerDe.escapeChar);
+  ASSERT_EQ(serdeOpts.isEscaped, rtSerDe.isEscaped);
+
+  ASSERT_EQ(opts.getFooterEstimatedSize(), roundTrip.getFooterEstimatedSize());
+  ASSERT_EQ(
+      opts.getFilePreloadThreshold(), roundTrip.getFilePreloadThreshold());
+  ASSERT_EQ(
+      opts.isFileColumnNamesReadAsLowerCase(),
+      roundTrip.isFileColumnNamesReadAsLowerCase());
+  ASSERT_EQ(
+      opts.isUseColumnNamesForColumnMapping(),
+      roundTrip.isUseColumnNamesForColumnMapping());
+  ASSERT_EQ(
+      opts.useNestedColumnNamesForColumnMapping(),
+      roundTrip.useNestedColumnNamesForColumnMapping());
+
+  ASSERT_EQ(opts.getAutoPreloadLength(), roundTrip.getAutoPreloadLength());
+  ASSERT_EQ(opts.getPrefetchMode(), roundTrip.getPrefetchMode());
+  ASSERT_EQ(opts.loadQuantum(), roundTrip.loadQuantum());
+  ASSERT_EQ(opts.maxCoalesceDistance(), roundTrip.maxCoalesceDistance());
+  ASSERT_EQ(opts.maxCoalesceBytes(), roundTrip.maxCoalesceBytes());
+  ASSERT_EQ(opts.prefetchRowGroups(), roundTrip.prefetchRowGroups());
+  ASSERT_EQ(opts.prefetchMemoryPercent(), roundTrip.prefetchMemoryPercent());
+}
+
+TEST_F(ReaderOptionsSerDeTest, readerOptionsDefaultsRoundTrip) {
+  auto rootPool = bytedance::bolt::memory::memoryManager()->addRootPool();
+  auto pool = rootPool->addLeafChild("test_pool");
+  bytedance::bolt::dwio::common::ReaderOptions opts(pool.get());
+
+  folly::dynamic dyn = opts.serialize();
+  auto roundTrip =
+      bytedance::bolt::dwio::common::ReaderOptions::create(dyn, pool.get());
+
+  ASSERT_EQ(opts.getTailLocation(), roundTrip.getTailLocation());
+  ASSERT_EQ(opts.getFileFormat(), roundTrip.getFileFormat());
+  ASSERT_EQ(nullptr, roundTrip.getFileSchema());
+
+  auto& rtSerDe = roundTrip.getSerDeOptions();
+  // Default values check
+  ASSERT_EQ('\1', rtSerDe.separators[0]);
+  ASSERT_EQ("\\N", rtSerDe.nullString);
+  ASSERT_FALSE(rtSerDe.lastColumnTakesRest);
+
+  ASSERT_EQ(
+      bytedance::bolt::dwio::common::ReaderOptions::kDefaultFooterEstimatedSize,
+      roundTrip.getFooterEstimatedSize());
+  ASSERT_EQ(
+      bytedance::bolt::dwio::common::ReaderOptions::
+          kDefaultFilePreloadThreshold,
+      roundTrip.getFilePreloadThreshold());
+  ASSERT_FALSE(roundTrip.isFileColumnNamesReadAsLowerCase());
+  ASSERT_FALSE(roundTrip.isUseColumnNamesForColumnMapping());
+  // Default for useNestedColumnNamesForColumnMapping_ is false
+  // But accessor useNestedColumnNamesForColumnMapping() has a check that might
+  // fail if useColumnNamesForColumnMapping is set to true. Since both are false
+  // by default, it should be safe.
 }
