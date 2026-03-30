@@ -377,16 +377,16 @@ std::shared_ptr<exec::VectorFunction> createDecimalUnaryFunction(
 };
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> decimalUnarySignature() {
-  return {exec::FunctionSignatureBuilder()
-              .integerVariable("a_precision")
-              .integerVariable("a_scale")
-              .integerVariable(
-                  "r_precision",
-                  "min(38, a_precision - a_scale + min(1, a_scale))")
-              .integerVariable("r_scale", "0")
-              .returnType("DECIMAL(r_precision, r_scale)")
-              .argumentType("DECIMAL(a_precision, a_scale)")
-              .build()};
+  return {
+      exec::FunctionSignatureBuilder()
+          .integerVariable("a_precision")
+          .integerVariable("a_scale")
+          .integerVariable(
+              "r_precision", "min(38, a_precision - a_scale + min(1, a_scale))")
+          .integerVariable("r_scale", "0")
+          .returnType("DECIMAL(r_precision, r_scale)")
+          .argumentType("DECIMAL(a_precision, a_scale)")
+          .build()};
 }
 } // namespace
 

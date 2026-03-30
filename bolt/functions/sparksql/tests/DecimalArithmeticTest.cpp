@@ -624,18 +624,7 @@ TEST_F(DecimalArithmeticTest, ceil) {
           {0, 1, -1, 49, -49, 50, -50, 99, -99}, DECIMAL(3, 2))});
   testDecimalExpr<TypeKind::BIGINT>(
       makeFlatVector<int64_t>(
-          {123,
-           -123,
-           124,
-           -123,
-           124,
-           -123,
-           124,
-           -123,
-           124,
-           -123,
-           124,
-           -123},
+          {123, -123, 124, -123, 124, -123, 124, -123, 124, -123, 124, -123},
           DECIMAL(4, 0)),
       "ceil(c0)",
       {makeFlatVector<int64_t>(
@@ -669,8 +658,7 @@ TEST_F(DecimalArithmeticTest, ceil) {
           {0, 1, -1, 49, -49, 50, -50, 99, -99}, DECIMAL(20, 2))});
   testDecimalExpr<TypeKind::HUGEINT>(
       makeFlatVector<int128_t>(
-          {DecimalUtil::kPowersOfTen[33],
-           -DecimalUtil::kPowersOfTen[33] + 1},
+          {DecimalUtil::kPowersOfTen[33], -DecimalUtil::kPowersOfTen[33] + 1},
           DECIMAL(34, 0)),
       "ceil(c0)",
       {makeFlatVector<int128_t>(
