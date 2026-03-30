@@ -30,10 +30,14 @@
 
 #include "bolt/functions/prestosql/aggregates/MinMaxByAggregates.h"
 namespace bytedance::bolt::aggregate::prestosql {
-void registerMaxByAggregate(const std::string& prefix);
-void registerMinByAggregate(const std::string& prefix);
 
-void registerMinMaxByAggregates(const std::string& prefix) {
+void registerMaxByAggregate( // NOLINT(misc-use-internal-linkage)
+    const std::string& prefix);
+void registerMinByAggregate( // NOLINT(misc-use-internal-linkage)
+    const std::string& prefix);
+
+void registerMinMaxByAggregates( // NOLINT(misc-use-internal-linkage)
+    const std::string& prefix) {
   registerMaxByAggregate(prefix);
   registerMinByAggregate(prefix);
 }

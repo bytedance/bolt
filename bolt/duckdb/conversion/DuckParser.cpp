@@ -256,16 +256,18 @@ std::shared_ptr<const core::ConstantExpr> tryParseInterval(
 std::shared_ptr<const core::ConstantExpr> tryParseIntervalWithUnit(
     const std::shared_ptr<const core::IExpr>& input,
     const std::shared_ptr<const core::IExpr>& unit,
-    std::optional<std::string> alias) {
+    const std::optional<std::string>& alias) {
   std::optional<int64_t> value;
-  if (auto constInput = dynamic_cast<const core::ConstantExpr*>(input.get())) {
+  if (const auto* constInput =
+          dynamic_cast<const core::ConstantExpr*>(input.get())) {
     if (constInput->type()->isBigint() && !constInput->value().isNull()) {
       value = constInput->value().value<int64_t>();
     }
   } else if (
-      auto castInput = dynamic_cast<const core::CastExpr*>(input.get())) {
+      const auto* castInput =
+          dynamic_cast<const core::CastExpr*>(input.get())) {
     if (castInput->type()->isBigint()) {
-      if (auto constInput = dynamic_cast<const core::ConstantExpr*>(
+      if (const auto* constInput = dynamic_cast<const core::ConstantExpr*>(
               castInput->getInput().get())) {
         if (constInput->type()->isBigint() && !constInput->value().isNull()) {
           value = constInput->value().value<int64_t>();
@@ -278,7 +280,7 @@ std::shared_ptr<const core::ConstantExpr> tryParseIntervalWithUnit(
     return nullptr;
   }
 
-  auto unitExpr = dynamic_cast<const core::ConstantExpr*>(unit.get());
+  const auto* unitExpr = dynamic_cast<const core::ConstantExpr*>(unit.get());
   if (!unitExpr || !unitExpr->type()->isVarchar() ||
       unitExpr->value().isNull()) {
     return nullptr;

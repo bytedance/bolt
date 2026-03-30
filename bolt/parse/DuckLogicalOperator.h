@@ -130,10 +130,6 @@ class LogicalGet : public LogicalOperator {
 
  private:
   LogicalGet();
-
- private:
-  //! Bound column IDs
-  vector<column_t> column_ids;
 };
 
 //! LogicalFilter represents a filter operation (e.g. WHERE or HAVING clause)
@@ -143,8 +139,6 @@ class LogicalFilter : public LogicalOperator {
   LogicalFilter();
 
   vector<idx_t> projection_map;
-
- public:
   vector<ColumnBinding> GetColumnBindings() override;
 
   bool SplitPredicates() {

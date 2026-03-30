@@ -17,7 +17,9 @@
 #include "bolt/functions/prestosql/aggregates/MinMaxByAggregateRegistration.h"
 
 namespace bytedance::bolt::aggregate::prestosql {
-void registerMaxByAggregate(const std::string& prefix) {
+
+void registerMaxByAggregate( // NOLINT(misc-use-internal-linkage)
+    const std::string& prefix) {
   detail::registerMinMaxBy<
       functions::aggregate::MinMaxByAggregateBase,
       true,

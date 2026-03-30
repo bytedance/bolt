@@ -41,7 +41,7 @@ template <
         template <bool B2, typename C1, typename C2>
         class C>
     class Aggregate,
-    bool isMaxFunc,
+    bool IsMaxFunc,
     template <typename U, typename V>
     class NAggregate>
 exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
@@ -100,7 +100,7 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
           return createNArg<NAggregate>(
               resultType, argTypes[0], argTypes[1], errorMessage);
         }
-        return functions::aggregate::create<Aggregate, Comparator, isMaxFunc>(
+        return functions::aggregate::create<Aggregate, Comparator, IsMaxFunc>(
             resultType, argTypes[0], argTypes[1], errorMessage, true);
       });
 }
