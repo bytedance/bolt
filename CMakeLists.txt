@@ -89,6 +89,12 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   add_definitions(-D OS_MACOSX)
 endif()
 
+# Only use compiler-rt when building with Clang on Linux for ARM/AArch64
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND OS_LINUX AND (ARCH_AARCH64 OR ARCH_ARM))
+  add_compile_options(-rtlib=compiler-rt)
+  add_link_options(-rtlib=compiler-rt)
+endif()
+
 list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/CMake"
      "${PROJECT_SOURCE_DIR}/CMake/third-party"
 )
