@@ -5,32 +5,33 @@
 
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include <folly/io/IOBuf.h>
-#include <memory>
+#include <algorithm>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <vector>
 #include "bolt/common/file/File.h"
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/type/Timestamp.h"
-#include "bolt/vector/arrow/Abi.h"
-#include "bolt/vector/arrow/Bridge.h"
-#include "common/base/Exceptions.h"
-#include "common/memory/Memory.h"
-#include "common/memory/MemoryPool.h"
-#include "connectors/paimon/BoltMemoryPool.h"
-#include "paimon/format/reader_builder.h"
-#include "paimon/fs/file_system.h"
-#include "paimon/reader/file_batch_reader.h"
-#include "paimon/data/timestamp.h"
-#include "paimon/predicate/compound_predicate.h"
-#include "paimon/predicate/leaf_predicate.h"
-#include "paimon/predicate/function.h"
-#include "paimon/predicate/predicate.h"
-#include "paimon/defs.h"
 #include "bolt/type/filter/FilterBase.h"
 #include "bolt/type/filter/FilterUtil.h"
 #include "bolt/type/filter/FloatingPointRange.h"
+#include "bolt/vector/arrow/Abi.h"
+#include "bolt/vector/arrow/Bridge.h"
+#include "common/memory/Memory.h"
+#include "common/memory/MemoryPool.h"
+#include "connectors/paimon/BoltMemoryPool.h"
+#include "paimon/data/timestamp.h"
+#include "paimon/defs.h"
+#include "paimon/format/reader_builder.h"
+#include "paimon/fs/file_system.h"
+#include "paimon/predicate/compound_predicate.h"
+#include "paimon/predicate/function.h"
+#include "paimon/predicate/leaf_predicate.h"
+#include "paimon/predicate/predicate.h"
+#include "paimon/reader/file_batch_reader.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -61,7 +62,9 @@ bool literalIsNull(const ::paimon::Literal& literal) {
   return literal.IsNull();
 }
 
-int64_t literalAsInt64(const ::paimon::Literal& literal, ::paimon::FieldType type) {
+int64_t literalAsInt64(
+    const ::paimon::Literal& literal,
+    ::paimon::FieldType type) {
   switch (type) {
     case ::paimon::FieldType::TINYINT:
       return static_cast<int64_t>(literal.GetValue<int8_t>());
@@ -86,8 +89,7 @@ bytedance::bolt::Timestamp literalAsBoltTimestamp(
   const int64_t millis = ts.GetMillisecond();
   const int32_t nanosOfMillisecond = ts.GetNanoOfMillisecond();
   auto base = bytedance::bolt::Timestamp::fromMillis(millis);
-  uint64_t nanos = base.getNanos() +
-      static_cast<uint64_t>(nanosOfMillisecond);
+  uint64_t nanos = base.getNanos() + static_cast<uint64_t>(nanosOfMillisecond);
   auto seconds = base.getSeconds();
   if (nanos >= 1'000'000'000) {
     nanos -= 1'000'000'000;
@@ -121,12 +123,7 @@ std::unique_ptr<Filter> buildFilterForLeaf(
   const auto& literals = leaf.Literals();
 
   auto hasNullLiteral = [&]() {
-    for (const auto& literal : literals) {
-      if (literalIsNull(literal)) {
-        return true;
-      }
-    }
-    return false;
+    return std::any_of(literals.begin(), literals.end(), literalIsNull);
   };
 
   switch (functionType) {
@@ -152,12 +149,14 @@ std::unique_ptr<Filter> buildFilterForLeaf(
         }
         case ::paimon::FieldType::FLOAT: {
           auto value = literals.front().GetValue<float>();
-          return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
+          return std::make_unique<
+              bytedance::bolt::common::FloatingPointRange<float>>(
               value, false, false, value, false, false, false);
         }
         case ::paimon::FieldType::DOUBLE: {
           auto value = literals.front().GetValue<double>();
-          return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+          return std::make_unique<
+              bytedance::bolt::common::FloatingPointRange<double>>(
               value, false, false, value, false, false, false);
         }
         case ::paimon::FieldType::STRING:
@@ -199,7 +198,8 @@ std::unique_ptr<Filter> buildFilterForLeaf(
         }
         case ::paimon::FieldType::TIMESTAMP: {
           auto value = literalAsBoltTimestamp(literals.front());
-          return std::make_unique<bytedance::bolt::common::NegatedTimestampRange>(
+          return std::make_unique<
+              bytedance::bolt::common::NegatedTimestampRange>(
               value, value, false);
         }
         default:
@@ -216,9 +216,11 @@ std::unique_ptr<Filter> buildFilterForLeaf(
       if (literalIsNull(literals.front())) {
         return nullptr;
       }
-      const bool isGreater = functionType == ::paimon::Function::Type::GREATER_THAN ||
+      const bool isGreater =
+          functionType == ::paimon::Function::Type::GREATER_THAN ||
           functionType == ::paimon::Function::Type::GREATER_OR_EQUAL;
-      const bool isExclusive = functionType == ::paimon::Function::Type::GREATER_THAN ||
+      const bool isExclusive =
+          functionType == ::paimon::Function::Type::GREATER_THAN ||
           functionType == ::paimon::Function::Type::LESS_THAN;
       switch (fieldType) {
         case ::paimon::FieldType::TINYINT:
@@ -253,19 +255,23 @@ std::unique_ptr<Filter> buildFilterForLeaf(
         case ::paimon::FieldType::FLOAT: {
           auto value = literals.front().GetValue<float>();
           if (isGreater) {
-            return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
-                value, false, isExclusive, 0.0f, true, false, false);
+            return std::make_unique<
+                bytedance::bolt::common::FloatingPointRange<float>>(
+                value, false, isExclusive, 0.0F, true, false, false);
           }
-          return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
-              0.0f, true, false, value, false, isExclusive, false);
+          return std::make_unique<
+              bytedance::bolt::common::FloatingPointRange<float>>(
+              0.0F, true, false, value, false, isExclusive, false);
         }
         case ::paimon::FieldType::DOUBLE: {
           auto value = literals.front().GetValue<double>();
           if (isGreater) {
-            return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+            return std::make_unique<
+                bytedance::bolt::common::FloatingPointRange<double>>(
                 value, false, isExclusive, 0.0, true, false, false);
           }
-          return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+          return std::make_unique<
+              bytedance::bolt::common::FloatingPointRange<double>>(
               0.0, true, false, value, false, isExclusive, false);
         }
         case ::paimon::FieldType::STRING:
@@ -324,7 +330,8 @@ std::unique_ptr<Filter> buildFilterForLeaf(
               values.push_back(literalAsInt64(literal, fieldType));
             }
           }
-          return bytedance::bolt::common::createBigintValues(values, nullAllowed);
+          return bytedance::bolt::common::createBigintValues(
+              values, nullAllowed);
         }
         case ::paimon::FieldType::STRING:
         case ::paimon::FieldType::BINARY: {
@@ -335,7 +342,8 @@ std::unique_ptr<Filter> buildFilterForLeaf(
               values.emplace_back(literalAsString(literal));
             }
           }
-          return bytedance::bolt::common::createBytesValues(values, nullAllowed);
+          return bytedance::bolt::common::createBytesValues(
+              values, nullAllowed);
         }
         default:
           return nullptr;
@@ -358,7 +366,8 @@ std::unique_ptr<Filter> buildFilterForLeaf(
               values.push_back(literalAsInt64(literal, fieldType));
             }
           }
-          return bytedance::bolt::common::createNegatedBigintValues(values, nullAllowed);
+          return bytedance::bolt::common::createNegatedBigintValues(
+              values, nullAllowed);
         }
         case ::paimon::FieldType::STRING:
         case ::paimon::FieldType::BINARY: {
@@ -419,9 +428,11 @@ bool collectSameColumnOrFilters(
         fieldType == ::paimon::FieldType::SMALLINT ||
         fieldType == ::paimon::FieldType::INT ||
         fieldType == ::paimon::FieldType::BIGINT) {
-      intValues.push_back(literalAsInt64(leaf->Literals().front(), fieldType.value()));
-    } else if (fieldType == ::paimon::FieldType::STRING ||
-               fieldType == ::paimon::FieldType::BINARY) {
+      intValues.push_back(
+          literalAsInt64(leaf->Literals().front(), fieldType.value()));
+    } else if (
+        fieldType == ::paimon::FieldType::STRING ||
+        fieldType == ::paimon::FieldType::BINARY) {
       stringValues.push_back(literalAsString(leaf->Literals().front()));
     } else {
       return false;
@@ -454,50 +465,60 @@ PredicateConversionResult convertPredicateToFilters(
     return result;
   }
 
-  if (auto leaf = std::dynamic_pointer_cast<::paimon::LeafPredicate>(predicate)) {
-    auto name = resolveFieldName(*leaf, rowType);
-    if (!name.has_value()) {
-      result.fullyConvertible = false;
-      return result;
-    }
-    auto filter = buildFilterForLeaf(*leaf);
-    if (!filter) {
-      result.fullyConvertible = false;
-      return result;
-    }
-    result.filters.emplace_back(name.value(), std::move(filter));
-    return result;
-  }
+  // Iterative traversal to satisfy clang-tidy misc-no-recursion.
+  std::vector<std::shared_ptr<::paimon::Predicate>> stack;
+  stack.push_back(predicate);
 
-  auto compound = std::dynamic_pointer_cast<::paimon::CompoundPredicate>(predicate);
-  if (!compound) {
-    result.fullyConvertible = false;
-    return result;
-  }
+  while (!stack.empty()) {
+    auto current = std::move(stack.back());
+    stack.pop_back();
+    if (!current) {
+      continue;
+    }
 
-  const auto functionType = compound->GetFunction().GetType();
-  const auto& children = compound->Children();
-  if (functionType == ::paimon::Function::Type::AND) {
-    for (const auto& child : children) {
-      auto childResult = convertPredicateToFilters(child, rowType);
-      if (!childResult.fullyConvertible) {
+    if (auto leaf =
+            std::dynamic_pointer_cast<::paimon::LeafPredicate>(current)) {
+      auto name = resolveFieldName(*leaf, rowType);
+      if (!name.has_value()) {
+        result.fullyConvertible = false;
+        continue;
+      }
+      auto filter = buildFilterForLeaf(*leaf);
+      if (!filter) {
+        result.fullyConvertible = false;
+        continue;
+      }
+      result.filters.emplace_back(name.value(), std::move(filter));
+      continue;
+    }
+
+    auto compound =
+        std::dynamic_pointer_cast<::paimon::CompoundPredicate>(current);
+    if (!compound) {
+      result.fullyConvertible = false;
+      continue;
+    }
+
+    const auto functionType = compound->GetFunction().GetType();
+    const auto& children = compound->Children();
+    if (functionType == ::paimon::Function::Type::AND) {
+      // Flatten AND by pushing children onto the stack.
+      for (const auto& child : children) {
+        stack.push_back(child);
+      }
+      continue;
+    }
+
+    if (functionType == ::paimon::Function::Type::OR) {
+      if (!collectSameColumnOrFilters(children, rowType, result)) {
         result.fullyConvertible = false;
       }
-      for (auto& entry : childResult.filters) {
-        result.filters.emplace_back(entry.first, std::move(entry.second));
-      }
+      continue;
     }
-    return result;
+
+    result.fullyConvertible = false;
   }
 
-  if (functionType == ::paimon::Function::Type::OR) {
-    if (!collectSameColumnOrFilters(children, rowType, result)) {
-      result.fullyConvertible = false;
-    }
-    return result;
-  }
-
-  result.fullyConvertible = false;
   return result;
 }
 
@@ -515,18 +536,18 @@ void applyFiltersToScanSpec(
   }
 }
 
-} // namespace
-
 class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
  private:
-  std::shared_ptr<bolt::common::ScanSpec> buildScanSpecFromRowType(const RowTypePtr& rowType) {
+  static std::shared_ptr<bolt::common::ScanSpec> buildScanSpecFromRowType(
+      const RowTypePtr& rowType) {
     auto scanSpec = std::make_shared<bolt::common::ScanSpec>("<root>");
     scanSpec->addAllChildFields(*rowType);
     return scanSpec;
   }
 
   void initializeRowReaderWithFullSchema() {
-    //LOG(INFO) << "Initializing rowReader_ with full file schema: " << reader_->rowType()->toString();
+    // LOG(INFO) << "Initializing rowReader_ with full file schema: " <<
+    // reader_->rowType()->toString();
     dwio::common::RowReaderOptions opts;
     opts.setScanSpec(buildScanSpecFromRowType(reader_->rowType()));
     rowReader_ = reader_->createRowReader(opts);
@@ -537,8 +558,12 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       std::unique_ptr<parquet::ParquetReader> reader,
       int32_t batch_size,
       std::shared_ptr<memory::MemoryPool> pool)
-      : reader_(std::move(reader)), batch_size_(batch_size), pool_(std::move(pool)), readType_(reader_->rowType()) {
-    //LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() = " << reader_->rowType()->toString();
+      : reader_(std::move(reader)),
+        batch_size_(batch_size),
+        pool_(std::move(pool)),
+        readType_(reader_->rowType()) {
+    // LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() =
+    // " << reader_->rowType()->toString();
   }
 
   ::paimon::Result<std::unique_ptr<::ArrowSchema>> GetFileSchema()
@@ -553,10 +578,14 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
     ArrowOptions opts;
     exportToArrow(dummyVector, *schema, opts);
 
-    LOG(INFO) << "GetFileSchema exported ArrowSchema has " << schema->n_children << " children";
+    LOG(INFO) << "GetFileSchema exported ArrowSchema has " << schema->n_children
+              << " children";
     for (int i = 0; i < schema->n_children; ++i) {
-      LOG(INFO) << "GetFileSchema child[" << i << "]: name=" << (schema->children[i]->name ? schema->children[i]->name : "")
-                << ", format=" << (schema->children[i]->format ? schema->children[i]->format : "");
+      LOG(INFO) << "GetFileSchema child[" << i << "]: name="
+                << (schema->children[i]->name ? schema->children[i]->name : "")
+                << ", format="
+                << (schema->children[i]->format ? schema->children[i]->format
+                                                : "");
     }
     return std::move(schema);
   }
@@ -564,18 +593,22 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   ::paimon::Status SetReadSchema(
       ::ArrowSchema* read_schema,
       const std::shared_ptr<::paimon::Predicate>& predicate,
-      const std::optional<::paimon::RoaringBitmap32>& selection_bitmap)
+      const std::optional<::paimon::RoaringBitmap32>& /*selection_bitmap*/)
       override {
     try {
       auto type = importFromArrow(*read_schema);
       auto rowType = std::dynamic_pointer_cast<const RowType>(type);
       if (!rowType) {
-        return ::paimon::Status::Invalid("Read schema must be a struct/row type");
+        return ::paimon::Status::Invalid(
+            "Read schema must be a struct/row type");
       }
-      //LOG(INFO) << "SetReadSchema: requested read schema = " << rowType->toString();
-      // for (int i = 0; i < rowType->size(); ++i) {
-      //   LOG(INFO) << "SetReadSchema requested column[" << i << "]: " << rowType->nameOf(i) << " (" << rowType->childAt(i)->toString() << ")";
-      // }
+      // LOG(INFO) << "SetReadSchema: requested read schema = " <<
+      // rowType->toString();
+      //  for (int i = 0; i < rowType->size(); ++i) {
+      //    LOG(INFO) << "SetReadSchema requested column[" << i << "]: " <<
+      //    rowType->nameOf(i) << " (" << rowType->childAt(i)->toString() <<
+      //    ")";
+      //  }
 
       std::vector<std::string> dataColumnNames;
       int startIndex = 0;
@@ -585,7 +618,8 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
 
       dwio::common::RowReaderOptions opts;
       auto fileRowType = reader_->rowType();
-      // LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
+      // LOG(INFO) << "SetReadSchema: file schema = " <<
+      // fileRowType->toString();
 
       auto scanSpec = buildScanSpecFromRowType(rowType);
       if (predicate) {
@@ -593,7 +627,8 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         applyFiltersToScanSpec(*scanSpec, conversion);
       }
       opts.setScanSpec(scanSpec);
-      auto selector = std::make_shared<dwio::common::ColumnSelector>(fileRowType, dataColumnNames);
+      auto selector = std::make_shared<dwio::common::ColumnSelector>(
+          fileRowType, dataColumnNames);
       opts.select(selector);
       rowReader_ = reader_->createRowReader(opts);
       readType_ = rowType;
@@ -601,17 +636,20 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       return ::paimon::Status::OK();
     } catch (const std::exception& e) {
       LOG(ERROR) << "SetReadSchema: exception " << e.what();
-      return ::paimon::Status::Invalid(std::string("Failed to set read schema: ") + e.what());
+      return ::paimon::Status::Invalid(
+          std::string("Failed to set read schema: ") + e.what());
     }
   }
 
   ::paimon::Result<ReadBatch> NextBatch() override {
     try {
       if (!rowReader_) {
-        LOG(INFO) << "NextBatch: rowReader_ not initialized, initializing with full schema";
+        LOG(INFO)
+            << "NextBatch: rowReader_ not initialized, initializing with full schema";
         initializeRowReaderWithFullSchema();
       }
-      VectorPtr result = BaseVector::create(readType_, batch_size_, pool_.get());
+      VectorPtr result =
+          BaseVector::create(readType_, batch_size_, pool_.get());
       bool hasData = rowReader_->next(batch_size_, result) != 0;
 
       if (!hasData) {
@@ -619,8 +657,9 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         return ::paimon::BatchReader::MakeEofBatch();
       }
 
-      // LOG(INFO) << "NextBatch: result has type " << result->type()->toString();
-      // LOG(INFO) << "NextBatch: number of rows in batch = " << result->size();
+      // LOG(INFO) << "NextBatch: result has type " <<
+      // result->type()->toString(); LOG(INFO) << "NextBatch: number of rows in
+      // batch = " << result->size();
 
       auto arrowArray = std::make_unique<::ArrowArray>();
       auto arrowSchema = std::make_unique<::ArrowSchema>();
@@ -629,17 +668,23 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       exportToArrow(result, *arrowArray, pool_.get(), opts);
       exportToArrow(result, *arrowSchema, opts);
 
-      LOG(INFO) << "NextBatch: exported ArrowSchema has " << arrowSchema->n_children << " children";
+      LOG(INFO) << "NextBatch: exported ArrowSchema has "
+                << arrowSchema->n_children << " children";
       // for (int i = 0; i < arrowSchema->n_children; ++i) {
-      //   LOG(INFO) << "NextBatch exported child[" << i << "]: name=" << (arrowSchema->children[i]->name ? arrowSchema->children[i]->name : "")
-      //             << ", format=" << (arrowSchema->children[i]->format ? arrowSchema->children[i]->format : "");
+      //   LOG(INFO) << "NextBatch exported child[" << i << "]: name=" <<
+      //   (arrowSchema->children[i]->name ? arrowSchema->children[i]->name :
+      //   "")
+      //             << ", format=" << (arrowSchema->children[i]->format ?
+      //             arrowSchema->children[i]->format : "");
       // }
-      // LOG(INFO) << "NextBatch: exported ArrowArray has length " << arrowArray->length;
+      // LOG(INFO) << "NextBatch: exported ArrowArray has length " <<
+      // arrowArray->length;
 
       return std::make_pair(std::move(arrowArray), std::move(arrowSchema));
     } catch (const std::exception& e) {
       LOG(ERROR) << "NextBatch: exception " << e.what();
-      return ::paimon::Status::IOError(std::string("Failed to read batch: ") + e.what());
+      return ::paimon::Status::IOError(
+          std::string("Failed to read batch: ") + e.what());
     }
   }
 
@@ -742,6 +787,8 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
   std::shared_ptr<BoltPaimonMemoryPool> paimonPool_;
 };
 
+} // namespace
+
 const std::string& PaimonParquetReader::Identifier() const {
   static const std::string kIdentifier = "parquet";
   return kIdentifier;
@@ -762,7 +809,7 @@ PaimonParquetReader::CreateWriterBuilder(
 }
 
 ::paimon::Result<std::unique_ptr<::paimon::FormatStatsExtractor>>
-PaimonParquetReader::CreateStatsExtractor(::ArrowSchema* schema) const {
+PaimonParquetReader::CreateStatsExtractor(::ArrowSchema* /*schema*/) const {
   return ::paimon::Status::NotImplemented("Stats extractor not supported yet");
 }
 

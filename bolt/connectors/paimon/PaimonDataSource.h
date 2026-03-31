@@ -6,12 +6,8 @@
 #pragma once
 
 #include "bolt/connectors/Connector.h"
-#include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
-#include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
-#include "bolt/vector/arrow/Abi.h"
-#include "bolt/vector/arrow/Bridge.h"
 
 // Forward declare paimon types
 namespace paimon {
@@ -31,7 +27,7 @@ class PaimonDataSource : public DataSource {
       const std::shared_ptr<ConnectorTableHandle>& tableHandle,
       const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
           columnHandles,
-      std::shared_ptr<ConnectorQueryCtx> queryCtx,
+      const std::shared_ptr<ConnectorQueryCtx>& queryCtx,
       const core::QueryConfig& queryConfig);
 
   // Declare destructor in header but define in cpp to avoid incomplete type

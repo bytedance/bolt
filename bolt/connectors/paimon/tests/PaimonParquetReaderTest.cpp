@@ -94,7 +94,11 @@ class PaimonParquetReaderTest : public testing::Test,
       if (::paimon::BatchReader::IsEofBatch(batchRes.value())) {
         break;
       }
-      BOLT_CHECK(batchRes.ok(), "NextBatch failed({}): {}", batchRes.status().CodeAsString(), batchRes.status().message());
+      BOLT_CHECK(
+          batchRes.ok(),
+          "NextBatch failed({}): {}",
+          batchRes.status().CodeAsString(),
+          batchRes.status().message());
 
       auto pair = std::move(batchRes).value();
       auto& arr = pair.first;
@@ -127,7 +131,8 @@ class PaimonParquetReaderTest : public testing::Test,
 
     // Concatenate all batches into a single result vector
     if (!batches.empty()) {
-      auto actualData = RowVector::createEmpty(expectedData->type(), expectedData->pool());
+      auto actualData =
+          RowVector::createEmpty(expectedData->type(), expectedData->pool());
       for (const auto& batch : batches) {
         actualData->append(batch.get());
       }

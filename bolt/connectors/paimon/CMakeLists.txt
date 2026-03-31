@@ -35,4 +35,3 @@ endif()
 if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(benchmark)
 endif()
-

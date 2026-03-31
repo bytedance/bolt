@@ -13,7 +13,7 @@ class PaimonConnector : public Connector {
  public:
   PaimonConnector(
       const std::string& id,
-      std::shared_ptr<const config::ConfigBase> /* config */,
+      const std::shared_ptr<const config::ConfigBase>& /* config */,
       folly::Executor* executor)
       : Connector(id), executor_(executor) {}
 
@@ -26,11 +26,11 @@ class PaimonConnector : public Connector {
       const core::QueryConfig& queryConfig) override;
 
   std::unique_ptr<DataSink> createDataSink(
-      std::shared_ptr<const RowType> inputType,
-      std::shared_ptr<ConnectorInsertTableHandle> insertHandle,
-      ConnectorQueryCtx* queryCtx,
-      CommitStrategy commitStrategy,
-      const core::QueryConfig& queryConfig) override {
+      std::shared_ptr<const RowType> /*inputType*/,
+      std::shared_ptr<ConnectorInsertTableHandle> /*insertHandle*/,
+      ConnectorQueryCtx* /*queryCtx*/,
+      CommitStrategy /*commitStrategy*/,
+      const core::QueryConfig& /*queryConfig*/) override {
     return nullptr;
   }
 
@@ -61,7 +61,5 @@ class PaimonConnectorFactory : public ConnectorFactory {
     return std::make_shared<PaimonConnector>(id, cfgBase, executor);
   }
 };
-
-
 
 } // namespace bytedance::bolt::connector::paimon

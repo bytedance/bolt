@@ -16,9 +16,11 @@ BUCKETS = 4
 # 10^9 / 100 = 10,000,000 rows.
 ROWS_PER_SCALE_UNIT = 10_000_000
 
+
 def get_catalog(warehouse_path: Path):
-    catalog_options = {'warehouse': f'file://{warehouse_path.absolute()}'}
+    catalog_options = {"warehouse": f"file://{warehouse_path.absolute()}"}
     return CatalogFactory.create(catalog_options)
+
 
 def create_database(catalog, database_name):
     try:
@@ -30,19 +32,21 @@ def create_database(catalog, database_name):
     except Exception as e:
         print(f"Failed to create database {database_name}: {e}")
 
+
 def create_table_if_not_exists(catalog, database, table_name, schema):
     try:
-        catalog.get_table(f'{database}.{table_name}')
+        catalog.get_table(f"{database}.{table_name}")
         print(f"Table {database}.{table_name} already exists.")
-        return False, catalog.get_table(f'{database}.{table_name}')
+        return False, catalog.get_table(f"{database}.{table_name}")
     except TableNotExistException:
         catalog.create_table(
-            identifier=f'{database}.{table_name}',
+            identifier=f"{database}.{table_name}",
             schema=schema,
             ignore_if_exists=False,
         )
         print(f"Created table {database}.{table_name}.")
-        return True, catalog.get_table(f'{database}.{table_name}')
+        return True, catalog.get_table(f"{database}.{table_name}")
+
 
 def write_data(table, df):
     print("Writing dataframe with shape:", df.shape)
@@ -59,6 +63,7 @@ def write_data(table, df):
     table_commit.commit(commit_messages)
     table_write.close()
     table_commit.close()
+
 
 def generate_data_chunks(scale_factor, partitions):
     total_rows = int(ROWS_PER_SCALE_UNIT * scale_factor)
@@ -77,142 +82,150 @@ def generate_data_chunks(scale_factor, partitions):
         keys = np.char.add("key_", ids.astype(str))
         # val_col: random-ish, padded to achieve ~100 bytes per row total
         # Prefix length 60 + suffix
-        vals = np.char.add("val_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_", (ids % 1000).astype(str))
+        vals = np.char.add(
+            "val_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_",
+            (ids % 1000).astype(str),
+        )
         nums = np.random.randint(0, 10000, size=rows_per_partition)
         # Use string for partition column as pypaimon/paimon often prefers string partitions
         pts = np.full(rows_per_partition, str(pt))
 
-        df = pd.DataFrame({
-            'pt': pts,
-            'id': ids,
-            'key_col': keys,
-            'val_col': vals,
-            'num_col': nums
-        })
+        df = pd.DataFrame(
+            {"pt": pts, "id": ids, "key_col": keys, "val_col": vals, "num_col": nums}
+        )
 
         yield df
 
+
 def create_append_only(catalog, db, scale_factor):
     name = "append_only"
-    pa_schema = pa.schema([
-        ('pt', pa.string()),
-        ('id', pa.int64()),
-        ('key_col', pa.string()),
-        ('val_col', pa.string()),
-        ('num_col', pa.int32()),
-    ])
+    pa_schema = pa.schema(
+        [
+            ("pt", pa.string()),
+            ("id", pa.int64()),
+            ("key_col", pa.string()),
+            ("val_col", pa.string()),
+            ("num_col", pa.int32()),
+        ]
+    )
 
     schema = Schema.from_pyarrow_schema(
         pa_schema=pa_schema,
-        partition_keys=['pt'],
-        primary_keys=[], # No PK for append-only
+        partition_keys=["pt"],
+        primary_keys=[],  # No PK for append-only
         options={
-            'bucket': str(BUCKETS),
-            'bucket-key': 'id', # Bucket by ID
-            'write-mode': 'append-only'
+            "bucket": str(BUCKETS),
+            "bucket-key": "id",  # Bucket by ID
+            "write-mode": "append-only",
         },
-        comment='Append-only benchmark table'
+        comment="Append-only benchmark table",
     )
 
     created, table = create_table_if_not_exists(catalog, db, name, schema)
     if created:
         for df in generate_data_chunks(scale_factor, PARTITIONS):
             write_data(table, df)
+
 
 def create_aggregate(catalog, db, scale_factor):
     name = "aggregate"
-    pa_schema = pa.schema([
-        ('pt', pa.string()),
-        ('id', pa.int64()),
-        ('key_col', pa.string()),
-        ('val_col', pa.string()),
-        ('num_col', pa.int32()),
-    ])
+    pa_schema = pa.schema(
+        [
+            ("pt", pa.string()),
+            ("id", pa.int64()),
+            ("key_col", pa.string()),
+            ("val_col", pa.string()),
+            ("num_col", pa.int32()),
+        ]
+    )
 
     schema = Schema.from_pyarrow_schema(
         pa_schema=pa_schema,
-        partition_keys=['pt'],
-        primary_keys=['pt', 'id'],
+        partition_keys=["pt"],
+        primary_keys=["pt", "id"],
         options={
-            'bucket': str(BUCKETS),
-            'merge-engine': 'aggregation',
-            'fields.num_col.aggregate-function': 'sum',
-            'fields.val_col.aggregate-function': 'last_non_null_value',
-            'fields.key_col.aggregate-function': 'last_non_null_value'
+            "bucket": str(BUCKETS),
+            "merge-engine": "aggregation",
+            "fields.num_col.aggregate-function": "sum",
+            "fields.val_col.aggregate-function": "last_non_null_value",
+            "fields.key_col.aggregate-function": "last_non_null_value",
         },
-        comment='Aggregate benchmark table'
+        comment="Aggregate benchmark table",
     )
 
     created, table = create_table_if_not_exists(catalog, db, name, schema)
     if created:
         for df in generate_data_chunks(scale_factor, PARTITIONS):
             write_data(table, df)
+
 
 def create_partial_update(catalog, db, scale_factor):
     name = "partial_update"
-    pa_schema = pa.schema([
-        ('pt', pa.string()),
-        ('id', pa.int64()),
-        ('key_col', pa.string()),
-        ('val_col', pa.string()),
-        ('num_col', pa.int32()),
-    ])
+    pa_schema = pa.schema(
+        [
+            ("pt", pa.string()),
+            ("id", pa.int64()),
+            ("key_col", pa.string()),
+            ("val_col", pa.string()),
+            ("num_col", pa.int32()),
+        ]
+    )
 
     schema = Schema.from_pyarrow_schema(
         pa_schema=pa_schema,
-        partition_keys=['pt'],
-        primary_keys=['pt', 'id'],
-        options={
-            'bucket': str(BUCKETS),
-            'merge-engine': 'partial-update'
-        },
-        comment='Partial-update benchmark table'
+        partition_keys=["pt"],
+        primary_keys=["pt", "id"],
+        options={"bucket": str(BUCKETS), "merge-engine": "partial-update"},
+        comment="Partial-update benchmark table",
     )
 
     created, table = create_table_if_not_exists(catalog, db, name, schema)
     if created:
         for df in generate_data_chunks(scale_factor, PARTITIONS):
             write_data(table, df)
+
 
 def create_deduplicate(catalog, db, scale_factor):
     name = "deduplicate"
-    pa_schema = pa.schema([
-        ('pt', pa.string()),
-        ('id', pa.int64()),
-        ('key_col', pa.string()),
-        ('val_col', pa.string()),
-        ('num_col', pa.int32()),
-    ])
+    pa_schema = pa.schema(
+        [
+            ("pt", pa.string()),
+            ("id", pa.int64()),
+            ("key_col", pa.string()),
+            ("val_col", pa.string()),
+            ("num_col", pa.int32()),
+        ]
+    )
 
     schema = Schema.from_pyarrow_schema(
         pa_schema=pa_schema,
-        partition_keys=['pt'],
-        primary_keys=['pt', 'id'],
-        options={
-            'bucket': str(BUCKETS),
-            'merge-engine': 'deduplicate'
-        },
-        comment='Deduplicate benchmark table'
+        partition_keys=["pt"],
+        primary_keys=["pt", "id"],
+        options={"bucket": str(BUCKETS), "merge-engine": "deduplicate"},
+        comment="Deduplicate benchmark table",
     )
 
     created, table = create_table_if_not_exists(catalog, db, name, schema)
     if created:
         for df in generate_data_chunks(scale_factor, PARTITIONS):
             write_data(table, df)
+
 
 def _sf_to_suffix(sf: float) -> str:
     # Produce compact, filesystem-friendly suffix for the scale factor.
     if float(int(sf)) == float(sf):
         return str(int(sf))
     # Replace dot with underscore for decimals, trim trailing zeros
-    s = ("%g" % sf).replace('.', '_')
+    s = ("%g" % sf).replace(".", "_")
     return s
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Create Paimon benchmark tables')
-    parser.add_argument('--scale-factor', type=float, default=1.0, help='Scale factor (1.0 ~= 1GB)')
-    parser.add_argument('--base-path', required=True, help='Warehouse base path')
+    parser = argparse.ArgumentParser(description="Create Paimon benchmark tables")
+    parser.add_argument(
+        "--scale-factor", type=float, default=1.0, help="Scale factor (1.0 ~= 1GB)"
+    )
+    parser.add_argument("--base-path", required=True, help="Warehouse base path")
     args = parser.parse_args()
 
     print(f"Warehouse path: {args.base_path}")
@@ -228,11 +241,12 @@ def main():
         create_append_only,
         create_aggregate,
         create_partial_update,
-        create_deduplicate
+        create_deduplicate,
     ]
 
     for creator in creators:
         creator(catalog, db_name, args.scale_factor)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
