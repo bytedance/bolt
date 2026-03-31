@@ -30,16 +30,12 @@ namespace bytedance::bolt::shuffle::sparksql {
 /// correction ratio is small.
 class EffectiveSizeEstimator {
  public:
-  static constexpr double kFullScanRatioThreshold = 2.0;
+  static constexpr double kFullScanRatioThreshold = 8.0;
   static constexpr uint64_t kFullScanSizeThreshold = 32 << 20; // 32MB
 
   EffectiveSizeEstimator() = default;
 
   uint64_t estimate(const bytedance::bolt::RowVectorPtr& rv);
-
-  double cachedRatio() const {
-    return cachedRatio_;
-  }
 
  private:
   static bool typeContainsStringView(const bytedance::bolt::TypePtr& type);
@@ -57,7 +53,6 @@ class EffectiveSizeEstimator {
       const bytedance::bolt::BaseVector* vec,
       uint64_t& estimatedFlatSize) const;
 
-  double cachedRatio_{1.0};
   std::vector<uint32_t> binaryColumnIndices_;
   bool initialized_{false};
   bool alwaysFullScan_{false};
