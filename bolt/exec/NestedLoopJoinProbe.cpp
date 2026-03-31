@@ -716,6 +716,8 @@ void NestedLoopJoinProbe::addOutputRow(vector_size_t buildRow) {
   if (useBuildDictionary()) {
     // Single build vector: just record the dictionary index. No data copy.
     rawBuildOutputIndices_[numOutputRows_] = buildRow;
+  } else if (isLeftSemiProjectJoin(joinType_)) {
+    // Left semi project join: no build data copy needed.
   } else {
     // Multiple build vectors: accumulate ranges for flat copy. Consecutive
     // rows are merged into a single range.
@@ -730,11 +732,13 @@ void NestedLoopJoinProbe::addOutputRow(vector_size_t buildRow) {
 }
 
 void NestedLoopJoinProbe::copyBuildValues(const RowVectorPtr& buildVector) {
-  if (buildCopyRanges_.empty() || isLeftSemiProjectJoin(joinType_) ||
-      useBuildDictionary()) {
+  if (buildCopyRanges_.empty()) {
     // Dictionary mode: indices already set in addOutputRow(), no copy needed.
     return;
   }
+  // buildCopyRanges_ should always be empty for left semi project join or build
+  // dictionary mode.
+  BOLT_CHECK(!isLeftSemiProjectJoin(joinType_) && !useBuildDictionary());
 
   for (const auto& projection : buildProjections_) {
     const auto& buildChild = buildVector->childAt(projection.inputChannel);
