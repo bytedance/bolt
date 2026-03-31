@@ -66,10 +66,11 @@ SortBuffer::SortBuffer(
   BOLT_CHECK_NOT_NULL(nonReclaimableSection_);
 
   // Validate that hybrid sort is not used with row-based spilling
-  if (hybridSortEnabled_ && spillConfig_ != nullptr) {
-    BOLT_CHECK(
-        spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE,
-        "Hybrid sort is not compatible with row-based spilling");
+  if (hybridSortEnabled_ && spillConfig_ != nullptr &&
+      spillConfig_->rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
+    LOG(ERROR) << "Hybrid sort is not compatible with row-based spilling, "
+               << "disabling hybrid sort";
+    hybridSortEnabled_ = false;
   }
 
   std::vector<TypePtr> sortedColumnTypes;
@@ -159,6 +160,7 @@ void SortBuffer::addInput(const VectorPtr& input) {
       if (scatteredMode_) {
         // Scattered mode: rowId = (batchId << 32) | rowInBatch
         // driverId stored in top 8 bits (always 0 for Sort)
+        BOLT_CHECK_LT(batchId, (1u << 24));
         encodedId = (static_cast<uint64_t>(0) << 56) |
             ((static_cast<uint64_t>(batchId) << 32) | row);
       } else {
@@ -181,13 +183,6 @@ void SortBuffer::addInput(const VectorPtr& input) {
           input->size(),
           rows,
           columnProjection.inputChannel);
-    }
-    // Gather payload columns
-    std::vector<std::unique_ptr<DecodedVector>> decoders;
-    decoders.reserve(payloadColumnMap_.size());
-    for (const auto& columnProjection : payloadColumnMap_) {
-      decoders.emplace_back(std::make_unique<DecodedVector>(
-          *inputRow->childAt(columnProjection.outputChannel), allRows));
     }
     auto payloadInput = wrapColumns(
         input->as<RowVector>(), payloadChannels_, payloadTypes_, pool());

@@ -3263,7 +3263,7 @@ inline void HybridContainer::extractNulls(
     BOLT_DCHECK(result->size() >= bits::nbytes(numRows));
     auto* rawResult = result->asMutable<uint64_t>();
     bits::fillBits(rawResult, 0, numRows, false);
-    if (!isNullable_[columnIndex]) {
+    if (!isNullable_[payloadColumnIndex]) {
       return;
     }
     std::vector<const uint64_t*> rawNullsByContainer(

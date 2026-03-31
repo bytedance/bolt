@@ -207,8 +207,8 @@ void projectChildren(
 
 RowVectorPtr wrapColumns(
     const RowVector* input,
-    const std::vector<column_index_t> channels,
-    const RowTypePtr types,
+    const std::vector<column_index_t>& channels,
+    const RowTypePtr& types,
     memory::MemoryPool* pool);
 
 } // namespace bytedance::bolt::exec

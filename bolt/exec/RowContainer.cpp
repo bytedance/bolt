@@ -1543,7 +1543,7 @@ void HybridContainer::addPayload(RowVectorPtr input) {
 void HybridContainer::clear() {
   owningInputs_.clear();
   decodedPayloads_.clear();
-  isNullable_.resize(payloadTypes_.size(), false);
+  std::fill(isNullable_.begin(), isNullable_.end(), false);
   totalRows_ = 0;
   totalBatches_ = 0;
   std::fill(payloadFlatBytesSum_.begin(), payloadFlatBytesSum_.end(), 0);

@@ -194,7 +194,7 @@ HashBuild::HashBuild(
   setupSpiller();
   intermediateStateCleared_ = false;
 
-  LOG(ERROR) << name() << " HashBuild created for " << operatorCtx_->toString()
+  LOG(INFO) << name() << " HashBuild created for " << operatorCtx_->toString()
             << ", spill enabled: " << spillEnabled()
             << ", maxHashTableSize = " << maxHashTableBucketCount_
             << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disbaled")
@@ -644,6 +644,7 @@ void HashBuild::addInput(RowVectorPtr input) {
       if (scatteredMode_) {
         // Scattered mode: rowId = (batchId << 32) | rowInBatch
         // driverId stored in top 8 bits, remaining 56 bits for batchId+rowInBatch
+        BOLT_CHECK_LT(batchId, (1u << 24));
         encodedId = (static_cast<uint64_t>(driverId_) << 56) |
             ((static_cast<uint64_t>(batchId) << 32) | rowIndex);
       } else {

@@ -594,8 +594,8 @@ void adjustSpillCompressionKind(
 
 RowVectorPtr wrapColumns(
     const RowVector* input,
-    const std::vector<column_index_t> channels,
-    const RowTypePtr types,
+    const std::vector<column_index_t>& channels,
+    const RowTypePtr& types,
     memory::MemoryPool* pool) {
   BOLT_CHECK_NOT_NULL(input);
 

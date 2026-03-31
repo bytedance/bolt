@@ -1053,7 +1053,7 @@ class QueryConfig {
 
   /// Returns whether scattered (non-coalesced) mode is enabled for hybrid join.
   /// When enabled, payload batches are kept separate instead of being merged,
-  /// avoiding coalesceBatches() overhead. Default false (use coalesced mode).
+  /// avoiding coalesceBatches() overhead. Default true (use scattered mode).
   bool hybridJoinScatteredModeEnabled() const {
     return get<bool>(kHybridJoinScatteredModeEnabled, true);
   }
