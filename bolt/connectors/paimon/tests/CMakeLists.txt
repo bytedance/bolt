@@ -4,6 +4,7 @@
 add_executable(bolt_paimon_connector_test
     PaimonConnectorTest.cpp
     PaimonParquetReaderTest.cpp
+    PaimonFilterPushdownTest.cpp
 )
 
 add_test(bolt_paimon_connector_test bolt_paimon_connector_test)

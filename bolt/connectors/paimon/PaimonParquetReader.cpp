@@ -6,10 +6,13 @@
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include <folly/io/IOBuf.h>
 #include <memory>
+#include <limits>
+#include <optional>
 #include "bolt/common/file/File.h"
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/type/Timestamp.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
 #include "common/base/Exceptions.h"
@@ -19,8 +22,500 @@
 #include "paimon/format/reader_builder.h"
 #include "paimon/fs/file_system.h"
 #include "paimon/reader/file_batch_reader.h"
+#include "paimon/data/timestamp.h"
+#include "paimon/predicate/compound_predicate.h"
+#include "paimon/predicate/leaf_predicate.h"
+#include "paimon/predicate/function.h"
+#include "paimon/predicate/predicate.h"
+#include "paimon/defs.h"
+#include "bolt/type/filter/FilterBase.h"
+#include "bolt/type/filter/FilterUtil.h"
+#include "bolt/type/filter/FloatingPointRange.h"
 
 namespace bytedance::bolt::connector::paimon {
+
+namespace {
+
+using bytedance::bolt::common::Filter;
+using bytedance::bolt::common::FilterPtr;
+
+struct PredicateConversionResult {
+  std::vector<std::pair<std::string, std::unique_ptr<Filter>>> filters;
+  bool fullyConvertible{true};
+};
+
+std::optional<std::string> resolveFieldName(
+    const ::paimon::LeafPredicate& leaf,
+    const RowTypePtr& rowType) {
+  if (!leaf.FieldName().empty()) {
+    return leaf.FieldName();
+  }
+  const auto index = leaf.FieldIndex();
+  if (index >= 0 && rowType && index < rowType->size()) {
+    return rowType->nameOf(index);
+  }
+  return std::nullopt;
+}
+
+bool literalIsNull(const ::paimon::Literal& literal) {
+  return literal.IsNull();
+}
+
+int64_t literalAsInt64(const ::paimon::Literal& literal, ::paimon::FieldType type) {
+  switch (type) {
+    case ::paimon::FieldType::TINYINT:
+      return static_cast<int64_t>(literal.GetValue<int8_t>());
+    case ::paimon::FieldType::SMALLINT:
+      return static_cast<int64_t>(literal.GetValue<int16_t>());
+    case ::paimon::FieldType::INT:
+      return static_cast<int64_t>(literal.GetValue<int32_t>());
+    case ::paimon::FieldType::BIGINT:
+      return static_cast<int64_t>(literal.GetValue<int64_t>());
+    default:
+      return 0;
+  }
+}
+
+std::string literalAsString(const ::paimon::Literal& literal) {
+  return literal.GetValue<std::string>();
+}
+
+bytedance::bolt::Timestamp literalAsBoltTimestamp(
+    const ::paimon::Literal& literal) {
+  auto ts = literal.GetValue<::paimon::Timestamp>();
+  const int64_t millis = ts.GetMillisecond();
+  const int32_t nanosOfMillisecond = ts.GetNanoOfMillisecond();
+  auto base = bytedance::bolt::Timestamp::fromMillis(millis);
+  uint64_t nanos = base.getNanos() +
+      static_cast<uint64_t>(nanosOfMillisecond);
+  auto seconds = base.getSeconds();
+  if (nanos >= 1'000'000'000) {
+    nanos -= 1'000'000'000;
+    ++seconds;
+  }
+  return bytedance::bolt::Timestamp(seconds, nanos);
+}
+
+std::optional<bytedance::bolt::Timestamp> shiftTimestampNanos(
+    const bytedance::bolt::Timestamp& value,
+    int64_t delta) {
+  const auto min = bytedance::bolt::Timestamp::min();
+  const auto max = bytedance::bolt::Timestamp::max();
+  const auto nanos = value.toNanos();
+  const auto minNanos = min.toNanos();
+  const auto maxNanos = max.toNanos();
+  if (delta > 0 && nanos > maxNanos - delta) {
+    return std::nullopt;
+  }
+  if (delta < 0 && nanos < minNanos - delta) {
+    return std::nullopt;
+  }
+  return bytedance::bolt::Timestamp::fromNanos(nanos + delta);
+}
+
+std::unique_ptr<Filter> buildFilterForLeaf(
+    const ::paimon::LeafPredicate& leaf) {
+  const auto& function = leaf.GetFunction();
+  const auto functionType = function.GetType();
+  const auto fieldType = leaf.GetFieldType();
+  const auto& literals = leaf.Literals();
+
+  auto hasNullLiteral = [&]() {
+    for (const auto& literal : literals) {
+      if (literalIsNull(literal)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  switch (functionType) {
+    case ::paimon::Function::Type::IS_NULL:
+      return bytedance::bolt::common::nullOrFalse(true);
+    case ::paimon::Function::Type::IS_NOT_NULL:
+      return bytedance::bolt::common::notNullOrTrue(false);
+    case ::paimon::Function::Type::EQUAL: {
+      if (literals.empty()) {
+        return nullptr;
+      }
+      if (literalIsNull(literals.front())) {
+        return bytedance::bolt::common::nullOrFalse(true);
+      }
+      switch (fieldType) {
+        case ::paimon::FieldType::TINYINT:
+        case ::paimon::FieldType::SMALLINT:
+        case ::paimon::FieldType::INT:
+        case ::paimon::FieldType::BIGINT: {
+          auto value = literalAsInt64(literals.front(), fieldType);
+          return bytedance::bolt::common::createBigintRange(
+              value, value, false, true);
+        }
+        case ::paimon::FieldType::FLOAT: {
+          auto value = literals.front().GetValue<float>();
+          return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
+              value, false, false, value, false, false, false);
+        }
+        case ::paimon::FieldType::DOUBLE: {
+          auto value = literals.front().GetValue<double>();
+          return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+              value, false, false, value, false, false, false);
+        }
+        case ::paimon::FieldType::STRING:
+        case ::paimon::FieldType::BINARY: {
+          auto value = literalAsString(literals.front());
+          return bytedance::bolt::common::createBytesRange(
+              value, true, value, true, false);
+        }
+        case ::paimon::FieldType::TIMESTAMP: {
+          auto value = literalAsBoltTimestamp(literals.front());
+          return std::make_unique<bytedance::bolt::common::TimestampRange>(
+              value, value, false);
+        }
+        default:
+          return nullptr;
+      }
+    }
+    case ::paimon::Function::Type::NOT_EQUAL: {
+      if (literals.empty()) {
+        return nullptr;
+      }
+      if (literalIsNull(literals.front())) {
+        return bytedance::bolt::common::notNullOrTrue(false);
+      }
+      switch (fieldType) {
+        case ::paimon::FieldType::TINYINT:
+        case ::paimon::FieldType::SMALLINT:
+        case ::paimon::FieldType::INT:
+        case ::paimon::FieldType::BIGINT: {
+          auto value = literalAsInt64(literals.front(), fieldType);
+          return std::make_unique<bytedance::bolt::common::NegatedBigintRange>(
+              value, value, false);
+        }
+        case ::paimon::FieldType::STRING:
+        case ::paimon::FieldType::BINARY: {
+          auto value = literalAsString(literals.front());
+          return std::make_unique<bytedance::bolt::common::NegatedBytesValues>(
+              std::vector<std::string>{value}, false);
+        }
+        case ::paimon::FieldType::TIMESTAMP: {
+          auto value = literalAsBoltTimestamp(literals.front());
+          return std::make_unique<bytedance::bolt::common::NegatedTimestampRange>(
+              value, value, false);
+        }
+        default:
+          return nullptr;
+      }
+    }
+    case ::paimon::Function::Type::GREATER_THAN:
+    case ::paimon::Function::Type::GREATER_OR_EQUAL:
+    case ::paimon::Function::Type::LESS_THAN:
+    case ::paimon::Function::Type::LESS_OR_EQUAL: {
+      if (literals.empty()) {
+        return nullptr;
+      }
+      if (literalIsNull(literals.front())) {
+        return nullptr;
+      }
+      const bool isGreater = functionType == ::paimon::Function::Type::GREATER_THAN ||
+          functionType == ::paimon::Function::Type::GREATER_OR_EQUAL;
+      const bool isExclusive = functionType == ::paimon::Function::Type::GREATER_THAN ||
+          functionType == ::paimon::Function::Type::LESS_THAN;
+      switch (fieldType) {
+        case ::paimon::FieldType::TINYINT:
+        case ::paimon::FieldType::SMALLINT:
+        case ::paimon::FieldType::INT:
+        case ::paimon::FieldType::BIGINT: {
+          auto value = literalAsInt64(literals.front(), fieldType);
+          auto lower = std::numeric_limits<int64_t>::min();
+          auto upper = std::numeric_limits<int64_t>::max();
+          if (isGreater) {
+            if (isExclusive) {
+              if (value == std::numeric_limits<int64_t>::max()) {
+                return bytedance::bolt::common::nullOrFalse(false);
+              }
+              lower = value + 1;
+            } else {
+              lower = value;
+            }
+          } else {
+            if (isExclusive) {
+              if (value == std::numeric_limits<int64_t>::min()) {
+                return bytedance::bolt::common::nullOrFalse(false);
+              }
+              upper = value - 1;
+            } else {
+              upper = value;
+            }
+          }
+          return bytedance::bolt::common::createBigintRange(
+              lower, upper, false, true);
+        }
+        case ::paimon::FieldType::FLOAT: {
+          auto value = literals.front().GetValue<float>();
+          if (isGreater) {
+            return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
+                value, false, isExclusive, 0.0f, true, false, false);
+          }
+          return std::make_unique<bytedance::bolt::common::FloatingPointRange<float>>(
+              0.0f, true, false, value, false, isExclusive, false);
+        }
+        case ::paimon::FieldType::DOUBLE: {
+          auto value = literals.front().GetValue<double>();
+          if (isGreater) {
+            return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+                value, false, isExclusive, 0.0, true, false, false);
+          }
+          return std::make_unique<bytedance::bolt::common::FloatingPointRange<double>>(
+              0.0, true, false, value, false, isExclusive, false);
+        }
+        case ::paimon::FieldType::STRING:
+        case ::paimon::FieldType::BINARY: {
+          auto value = literalAsString(literals.front());
+          if (isGreater) {
+            return bytedance::bolt::common::createBytesRange(
+                value, !isExclusive, std::nullopt, false, false);
+          }
+          return bytedance::bolt::common::createBytesRange(
+              std::nullopt, false, value, !isExclusive, false);
+        }
+        case ::paimon::FieldType::TIMESTAMP: {
+          auto value = literalAsBoltTimestamp(literals.front());
+          if (isGreater) {
+            if (!isExclusive) {
+              return std::make_unique<bytedance::bolt::common::TimestampRange>(
+                  value, bytedance::bolt::Timestamp::max(), false);
+            }
+            auto lower = shiftTimestampNanos(value, 1);
+            if (!lower.has_value()) {
+              return bytedance::bolt::common::nullOrFalse(false);
+            }
+            return std::make_unique<bytedance::bolt::common::TimestampRange>(
+                lower.value(), bytedance::bolt::Timestamp::max(), false);
+          }
+          if (!isExclusive) {
+            return std::make_unique<bytedance::bolt::common::TimestampRange>(
+                bytedance::bolt::Timestamp::min(), value, false);
+          }
+          auto upper = shiftTimestampNanos(value, -1);
+          if (!upper.has_value()) {
+            return bytedance::bolt::common::nullOrFalse(false);
+          }
+          return std::make_unique<bytedance::bolt::common::TimestampRange>(
+              bytedance::bolt::Timestamp::min(), upper.value(), false);
+        }
+        default:
+          return nullptr;
+      }
+    }
+    case ::paimon::Function::Type::IN: {
+      if (literals.empty()) {
+        return nullptr;
+      }
+      const bool nullAllowed = hasNullLiteral();
+      switch (fieldType) {
+        case ::paimon::FieldType::TINYINT:
+        case ::paimon::FieldType::SMALLINT:
+        case ::paimon::FieldType::INT:
+        case ::paimon::FieldType::BIGINT: {
+          std::vector<int64_t> values;
+          values.reserve(literals.size());
+          for (const auto& literal : literals) {
+            if (!literalIsNull(literal)) {
+              values.push_back(literalAsInt64(literal, fieldType));
+            }
+          }
+          return bytedance::bolt::common::createBigintValues(values, nullAllowed);
+        }
+        case ::paimon::FieldType::STRING:
+        case ::paimon::FieldType::BINARY: {
+          std::vector<std::string> values;
+          values.reserve(literals.size());
+          for (const auto& literal : literals) {
+            if (!literalIsNull(literal)) {
+              values.emplace_back(literalAsString(literal));
+            }
+          }
+          return bytedance::bolt::common::createBytesValues(values, nullAllowed);
+        }
+        default:
+          return nullptr;
+      }
+    }
+    case ::paimon::Function::Type::NOT_IN: {
+      if (literals.empty()) {
+        return nullptr;
+      }
+      const bool nullAllowed = hasNullLiteral();
+      switch (fieldType) {
+        case ::paimon::FieldType::TINYINT:
+        case ::paimon::FieldType::SMALLINT:
+        case ::paimon::FieldType::INT:
+        case ::paimon::FieldType::BIGINT: {
+          std::vector<int64_t> values;
+          values.reserve(literals.size());
+          for (const auto& literal : literals) {
+            if (!literalIsNull(literal)) {
+              values.push_back(literalAsInt64(literal, fieldType));
+            }
+          }
+          return bytedance::bolt::common::createNegatedBigintValues(values, nullAllowed);
+        }
+        case ::paimon::FieldType::STRING:
+        case ::paimon::FieldType::BINARY: {
+          std::vector<std::string> values;
+          values.reserve(literals.size());
+          for (const auto& literal : literals) {
+            if (!literalIsNull(literal)) {
+              values.emplace_back(literalAsString(literal));
+            }
+          }
+          return std::make_unique<bytedance::bolt::common::NegatedBytesValues>(
+              values, nullAllowed);
+        }
+        default:
+          return nullptr;
+      }
+    }
+    default:
+      return nullptr;
+  }
+}
+
+bool collectSameColumnOrFilters(
+    const std::vector<std::shared_ptr<::paimon::Predicate>>& children,
+    const RowTypePtr& rowType,
+    PredicateConversionResult& result) {
+  std::optional<std::string> columnName;
+  std::optional<::paimon::FieldType> fieldType;
+  std::vector<int64_t> intValues;
+  std::vector<std::string> stringValues;
+  bool allEqual = true;
+
+  for (const auto& child : children) {
+    auto leaf = std::dynamic_pointer_cast<::paimon::LeafPredicate>(child);
+    if (!leaf) {
+      return false;
+    }
+    if (leaf->GetFunction().GetType() != ::paimon::Function::Type::EQUAL) {
+      allEqual = false;
+      break;
+    }
+    auto name = resolveFieldName(*leaf, rowType);
+    if (!name.has_value()) {
+      return false;
+    }
+    if (!columnName.has_value()) {
+      columnName = name;
+      fieldType = leaf->GetFieldType();
+    } else if (columnName.value() != name.value()) {
+      return false;
+    }
+
+    if (leaf->Literals().empty() || literalIsNull(leaf->Literals().front())) {
+      return false;
+    }
+
+    if (fieldType == ::paimon::FieldType::TINYINT ||
+        fieldType == ::paimon::FieldType::SMALLINT ||
+        fieldType == ::paimon::FieldType::INT ||
+        fieldType == ::paimon::FieldType::BIGINT) {
+      intValues.push_back(literalAsInt64(leaf->Literals().front(), fieldType.value()));
+    } else if (fieldType == ::paimon::FieldType::STRING ||
+               fieldType == ::paimon::FieldType::BINARY) {
+      stringValues.push_back(literalAsString(leaf->Literals().front()));
+    } else {
+      return false;
+    }
+  }
+
+  if (!allEqual || !columnName.has_value() || !fieldType.has_value()) {
+    return false;
+  }
+
+  std::unique_ptr<Filter> filter;
+  if (fieldType == ::paimon::FieldType::TINYINT ||
+      fieldType == ::paimon::FieldType::SMALLINT ||
+      fieldType == ::paimon::FieldType::INT ||
+      fieldType == ::paimon::FieldType::BIGINT) {
+    filter = bytedance::bolt::common::createBigintValues(intValues, false);
+  } else {
+    filter = bytedance::bolt::common::createBytesValues(stringValues, false);
+  }
+
+  result.filters.emplace_back(columnName.value(), std::move(filter));
+  return true;
+}
+
+PredicateConversionResult convertPredicateToFilters(
+    const std::shared_ptr<::paimon::Predicate>& predicate,
+    const RowTypePtr& rowType) {
+  PredicateConversionResult result;
+  if (!predicate) {
+    return result;
+  }
+
+  if (auto leaf = std::dynamic_pointer_cast<::paimon::LeafPredicate>(predicate)) {
+    auto name = resolveFieldName(*leaf, rowType);
+    if (!name.has_value()) {
+      result.fullyConvertible = false;
+      return result;
+    }
+    auto filter = buildFilterForLeaf(*leaf);
+    if (!filter) {
+      result.fullyConvertible = false;
+      return result;
+    }
+    result.filters.emplace_back(name.value(), std::move(filter));
+    return result;
+  }
+
+  auto compound = std::dynamic_pointer_cast<::paimon::CompoundPredicate>(predicate);
+  if (!compound) {
+    result.fullyConvertible = false;
+    return result;
+  }
+
+  const auto functionType = compound->GetFunction().GetType();
+  const auto& children = compound->Children();
+  if (functionType == ::paimon::Function::Type::AND) {
+    for (const auto& child : children) {
+      auto childResult = convertPredicateToFilters(child, rowType);
+      if (!childResult.fullyConvertible) {
+        result.fullyConvertible = false;
+      }
+      for (auto& entry : childResult.filters) {
+        result.filters.emplace_back(entry.first, std::move(entry.second));
+      }
+    }
+    return result;
+  }
+
+  if (functionType == ::paimon::Function::Type::OR) {
+    if (!collectSameColumnOrFilters(children, rowType, result)) {
+      result.fullyConvertible = false;
+    }
+    return result;
+  }
+
+  result.fullyConvertible = false;
+  return result;
+}
+
+void applyFiltersToScanSpec(
+    bolt::common::ScanSpec& scanSpec,
+    PredicateConversionResult& result) {
+  for (auto& entry : result.filters) {
+    auto* child = scanSpec.getOrCreateChild(entry.first);
+    if (!child) {
+      continue;
+    }
+    if (entry.second) {
+      child->addFilter(*entry.second);
+    }
+  }
+}
+
+} // namespace
 
 class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
  private:
@@ -89,14 +584,19 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       }
 
       dwio::common::RowReaderOptions opts;
-    auto fileRowType = reader_->rowType();
-    // LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
+      auto fileRowType = reader_->rowType();
+      // LOG(INFO) << "SetReadSchema: file schema = " << fileRowType->toString();
 
-    opts.setScanSpec(buildScanSpecFromRowType(rowType));
-    auto selector = std::make_shared<dwio::common::ColumnSelector>(fileRowType, dataColumnNames);
-    opts.select(selector);
-    rowReader_ = reader_->createRowReader(opts);
-    readType_ = rowType;
+      auto scanSpec = buildScanSpecFromRowType(rowType);
+      if (predicate) {
+        auto conversion = convertPredicateToFilters(predicate, rowType);
+        applyFiltersToScanSpec(*scanSpec, conversion);
+      }
+      opts.setScanSpec(scanSpec);
+      auto selector = std::make_shared<dwio::common::ColumnSelector>(fileRowType, dataColumnNames);
+      opts.select(selector);
+      rowReader_ = reader_->createRowReader(opts);
+      readType_ = rowType;
 
       return ::paimon::Status::OK();
     } catch (const std::exception& e) {
