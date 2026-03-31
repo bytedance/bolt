@@ -952,5 +952,80 @@ TEST_F(NestedLoopJoinTest, leftSemiProjectWithSingleBuildVector) {
   verifyLeftSemiProject(r2, {false, false, true, true, true});
 }
 
+// Verifies that left/left-semi-project joins produce correct mismatch rows
+// when the output batch fills exactly at a probe row boundary.  In this
+// scenario probeRowHasMatch_ must be reset before processing the next probe
+// row; otherwise it inherits the previous row's "matched" state and silently
+// drops the NULL-extended / match=false output for unmatched probe rows.
+TEST_F(NestedLoopJoinTest, batchBoundaryProbeMismatch) {
+  // Probe: {10, 10, 5, 5}.  Build: {10}.  Filter: t0 = u0.
+  // With maxOutputBatchRows=2 the output fills right after the two matches
+  // (probes 0-1), so the batch boundary lands exactly at the start of probe 2
+  // (the first non-matching row).  Probes 2 and 3 must still produce mismatch
+  // output.
+  auto probeVectors = {
+      makeRowVector({"t0"}, {makeFlatVector<int32_t>({10, 10, 5, 5})}),
+  };
+  auto buildVectors = {
+      makeRowVector(
+          {"u0"}, {makeFlatVector<int32_t>(std::vector<int32_t>{10})}),
+  };
+
+  createDuckDbTable("t", {probeVectors});
+  createDuckDbTable("u", {buildVectors});
+
+  // Use kMaxOutputBatchRows as the hard cap — the dynamic batch size
+  // adjustment in prepareOutput() can override kPreferredOutputBatchRows but
+  // not the max.
+  const std::string kBatchSize = "2";
+
+  // Left join: non-matching probes must produce (t0, NULL).
+  {
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values({probeVectors})
+                    .nestedLoopJoin(
+                        PlanBuilder(planNodeIdGenerator)
+                            .values({buildVectors})
+                            .planNode(),
+                        "t0 = u0",
+                        {"t0", "u0"},
+                        core::JoinType::kLeft)
+                    .planNode();
+    CursorParameters params;
+    params.planNode = plan;
+    params.queryCtx = core::QueryCtx::create(executor_.get());
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kMaxOutputBatchRows, kBatchSize}});
+    assertQuery(params, "SELECT t0, u0 FROM t LEFT JOIN u ON t0 = u0");
+  }
+
+  // Left semi project: non-matching probes must produce match=false.
+  {
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values({probeVectors})
+                    .nestedLoopJoin(
+                        PlanBuilder(planNodeIdGenerator)
+                            .values({buildVectors})
+                            .planNode(),
+                        "t0 = u0",
+                        {"t0", "match"},
+                        core::JoinType::kLeftSemiProject)
+                    .planNode();
+    auto result =
+        AssertQueryBuilder(plan)
+            .config(core::QueryConfig::kMaxOutputBatchRows, kBatchSize)
+            .copyResults(pool());
+    ASSERT_EQ(result->size(), 4);
+    for (int r = 0; r < 4; ++r) {
+      auto t0 = result->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(r);
+      bool match = result->childAt(1)->as<SimpleVector<bool>>()->valueAt(r);
+      bool expectedMatch = (t0 == 10);
+      EXPECT_EQ(match, expectedMatch) << "row " << r << ": t0=" << t0;
+    }
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt::exec::test

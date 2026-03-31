@@ -465,8 +465,11 @@ bool NestedLoopJoinProbe::addToOutput() {
           return true;
         }
         // Output buffer full; save position and produce output.
+        // nextProbeStart is always a probe row boundary, so reset match state
+        // for the next probe row.
         if (numOutputRows_ == outputBatchSize_) {
           filterResultRow_ = nextProbeStart;
+          probeRowHasMatch_ = false;
           return false;
         }
         i = nextProbeStart - 1; // -1 because the for-loop increments.
@@ -483,6 +486,11 @@ bool NestedLoopJoinProbe::addToOutput() {
       // If the buffer is full, save state and produce it as output.
       if (numOutputRows_ == outputBatchSize_) {
         filterResultRow_ = i + 1;
+        // If resuming at a new probe row boundary, reset match state so the
+        // next probe row does not inherit a stale "matched" flag.
+        if (filterResultRow_ % buildRowCount == 0) {
+          probeRowHasMatch_ = false;
+        }
         copyBuildValues(currentBuild);
         return false;
       }
