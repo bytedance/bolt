@@ -129,7 +129,10 @@ SortBuffer::SortBuffer(
         ROW(std::move(nonSortedColumnNames), std::move(nonSortedColumnTypes));
   } else {
     data_ = std::make_unique<RowContainer>(
-        sortedColumnTypes, nonSortedColumnTypes, true /*useListRowIndex*/, pool_);
+        sortedColumnTypes,
+        nonSortedColumnTypes,
+        true /*useListRowIndex*/,
+        pool_);
   }
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
@@ -152,8 +155,8 @@ void SortBuffer::addInput(const VectorPtr& input) {
   MicrosecondTimer timer(&sortColToRowTimeUs_);
   if (hybridSortEnabled_) {
     // Get batch/row info before processing
-    auto batchId = hybridData_->getNumBatches();  // for scattered mode
-    auto baseRow = hybridData_->getNumRows();     // for coalesced mode
+    auto batchId = hybridData_->getNumBatches(); // for scattered mode
+    auto baseRow = hybridData_->getNumRows(); // for coalesced mode
     for (int row = 0; row < input->size(); ++row) {
       // Store RowId - encoding depends on mode
       uint64_t encodedId;
@@ -367,9 +370,10 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
   }
 
   // If current memory usage exceeds spilling threshold, trigger spilling.
-  // For hybrid sort in coalesced mode, include the payload memory that will be needed when
-  // coalescing batches. This ensures we trigger spill early enough to have
-  // headroom for the coalesce operation. Skip in scattered mode since we don't coalesce.
+  // For hybrid sort in coalesced mode, include the payload memory that will be
+  // needed when coalescing batches. This ensures we trigger spill early enough
+  // to have headroom for the coalesce operation. Skip in scattered mode since
+  // we don't coalesce.
   auto currentMemoryUsage = pool_->currentBytes();
   if (hybridSortEnabled_ && hybridData_ != nullptr && !scatteredMode_) {
     currentMemoryUsage += hybridData_->payloadMemoryBytes();

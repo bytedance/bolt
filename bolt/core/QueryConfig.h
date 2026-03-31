@@ -600,17 +600,18 @@ class QueryConfig {
 
   static constexpr const char* kHybridSortEnabled = "hybrid_sort_enabled";
 
-  /// If true, use scattered (non-coalesced) mode for hybrid sort payload extraction.
-  /// In scattered mode, payload batches are kept separate instead of being
-  /// merged into one large batch. This avoids the coalesceBatches() overhead.
+  /// If true, use scattered (non-coalesced) mode for hybrid sort payload
+  /// extraction. In scattered mode, payload batches are kept separate instead
+  /// of being merged into one large batch. This avoids the coalesceBatches()
+  /// overhead.
   static constexpr const char* kHybridSortScatteredModeEnabled =
       "hybrid_sort_scattered_mode_enabled";
 
-  /// If true, use scattered (non-coalesced) mode for hybrid join payload extraction.
-  /// In scattered mode, payload batches are kept separate instead of being
-  /// merged into one large batch. Row IDs encode (batchId, rowInBatch) instead
-  /// of global row index. This avoids the coalesceBatches() overhead but may
-  /// have worse cache locality during extraction.
+  /// If true, use scattered (non-coalesced) mode for hybrid join payload
+  /// extraction. In scattered mode, payload batches are kept separate instead
+  /// of being merged into one large batch. Row IDs encode (batchId, rowInBatch)
+  /// instead of global row index. This avoids the coalesceBatches() overhead
+  /// but may have worse cache locality during extraction.
   static constexpr const char* kHybridJoinScatteredModeEnabled =
       "hybrid_join_scattered_mode_enabled";
 

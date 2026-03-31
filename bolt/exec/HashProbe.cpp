@@ -79,8 +79,8 @@ RowTypePtr makeTableType(
 
 // Copy values from 'rows' of 'table' according to 'projections' in
 // 'result'. Reuses 'result' children where possible.
-// 'allowSorting': If false, disables sorting even if the hybridData supports it.
-// This is needed when the caller also has probe-side columns that won't be
+// 'allowSorting': If false, disables sorting even if the hybridData supports
+// it. This is needed when the caller also has probe-side columns that won't be
 // reordered - we must keep build-side and probe-side in the same order.
 void extractColumns(
     BaseHashTable* table,
@@ -932,7 +932,8 @@ void HashProbe::fillOutput(vector_size_t size) {
       // get dictionary raw value
       RowVectorPtr dictOutput = std::static_pointer_cast<RowVector>(
           BaseVector::create(outputType_, numDistinct, pool()));
-      // Disable sorting when there are probe columns to keep build and probe in sync.
+      // Disable sorting when there are probe columns to keep build and probe in
+      // sync.
       const bool hasProbeColumns = !projectedInputColumns_.empty();
       extractColumns(
           table_.get(),
@@ -954,7 +955,8 @@ void HashProbe::fillOutput(vector_size_t size) {
             size, indexBuffer, dictOutput->childAt(projection.outputChannel));
       }
     } else {
-      // Disable sorting when there are probe columns to keep build and probe in sync.
+      // Disable sorting when there are probe columns to keep build and probe in
+      // sync.
       const bool hasProbeColumns = !projectedInputColumns_.empty();
       extractColumns(
           table_.get(),

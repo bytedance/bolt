@@ -1522,8 +1522,8 @@ void HybridContainer::addPayload(RowVectorPtr input) {
   }
 
   // In scattered mode, decode payload columns upfront for efficient extraction.
-  // DecodedVector handles lazy loading and any encoding (dictionary, constant, etc.)
-  // and provides efficient valueAt<T>() access.
+  // DecodedVector handles lazy loading and any encoding (dictionary, constant,
+  // etc.) and provides efficient valueAt<T>() access.
   if (scatteredModeEnabled_) {
     std::vector<std::unique_ptr<DecodedVector>> decodedCols;
     decodedCols.reserve(payloadTypes_.size());

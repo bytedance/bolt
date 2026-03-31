@@ -625,8 +625,8 @@ void HashBuild::addInput(RowVectorPtr input) {
 
   if (hybridJoin_) {
     // Get batch/row info before processing
-    auto batchId = table_->hybridData()->getNumBatches();  // for scattered mode
-    auto baseRow = table_->hybridData()->getNumRows();     // for coalesced mode
+    auto batchId = table_->hybridData()->getNumBatches(); // for scattered mode
+    auto baseRow = table_->hybridData()->getNumRows(); // for coalesced mode
 
     activeRows_.applyToSelected([&](auto rowIndex) {
       char* newRow = rows->newRow();
@@ -643,14 +643,15 @@ void HashBuild::addInput(RowVectorPtr input) {
       uint64_t encodedId;
       if (scatteredMode_) {
         // Scattered mode: rowId = (batchId << 32) | rowInBatch
-        // driverId stored in top 8 bits, remaining 56 bits for batchId+rowInBatch
+        // driverId stored in top 8 bits, remaining 56 bits for
+        // batchId+rowInBatch
         BOLT_CHECK_LT(batchId, (1u << 24));
         encodedId = (static_cast<uint64_t>(driverId_) << 56) |
             ((static_cast<uint64_t>(batchId) << 32) | rowIndex);
       } else {
         // Coalesced mode: rowId = global row index
         encodedId = (static_cast<uint64_t>(driverId_)
-                              << 56) | // top 8 bits: driverId [0, 255]
+                     << 56) | // top 8 bits: driverId [0, 255]
             (static_cast<uint64_t>(rowIndex + baseRow) & ((1ULL << 56) - 1));
       }
       rows->storeSingleRowId(encodedId, newRow);
@@ -992,7 +993,8 @@ void HashBuild::runSpill(const std::vector<Operator*>& spillOperators) {
     HashBuild* build = dynamic_cast<HashBuild*>(spillOp);
     // Coalesce batches before spilling to ensure hybrid data is properly laid
     // out. Skip in scattered mode - batches are kept separate.
-    if (build->hybridJoin_ && build->table_->hybridData() && !build->scatteredMode_) {
+    if (build->hybridJoin_ && build->table_->hybridData() &&
+        !build->scatteredMode_) {
       build->table_->hybridData()->coalesceBatches();
     }
     build->spiller_->spill();
@@ -1623,8 +1625,10 @@ void HashBuild::reclaim(
         std::make_shared<AsyncSource<SpillResult>>([buildOp]() {
           try {
             // Coalesce batches before spilling to ensure hybrid data is
-            // properly laid out. Skip in scattered mode - batches are kept separate.
-            if (buildOp->hybridJoin_ && buildOp->table_->hybridData() && !buildOp->scatteredMode_) {
+            // properly laid out. Skip in scattered mode - batches are kept
+            // separate.
+            if (buildOp->hybridJoin_ && buildOp->table_->hybridData() &&
+                !buildOp->scatteredMode_) {
               buildOp->table_->hybridData()->coalesceBatches();
             }
             buildOp->spiller_->spill();

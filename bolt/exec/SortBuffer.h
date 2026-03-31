@@ -229,7 +229,8 @@ class SortBuffer {
 
   // For hybrid design
   bool hybridSortEnabled_{false};
-  bool scatteredMode_{false};  // Use scattered (non-coalesced) mode for hybrid sort
+  bool scatteredMode_{
+      false}; // Use scattered (non-coalesced) mode for hybrid sort
   std::unique_ptr<HybridContainer> hybridData_{nullptr};
   std::vector<IdentityProjection> keyColumnMap_;
   std::vector<IdentityProjection> payloadColumnMap_;

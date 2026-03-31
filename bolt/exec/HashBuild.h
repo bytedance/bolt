@@ -451,7 +451,7 @@ class HashBuild final : public Operator {
 
   // For hybrid join
   bool hybridJoin_{false};
-  bool scatteredMode_{false};  // Use scattered (non-coalesced) mode
+  bool scatteredMode_{false}; // Use scattered (non-coalesced) mode
   int driverId_;
   std::unique_ptr<HybridContainer> hybridData_;
 };
