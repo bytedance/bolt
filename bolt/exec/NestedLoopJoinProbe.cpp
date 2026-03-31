@@ -733,7 +733,8 @@ void NestedLoopJoinProbe::addOutputRow(vector_size_t buildRow) {
 
 void NestedLoopJoinProbe::copyBuildValues(const RowVectorPtr& buildVector) {
   if (buildCopyRanges_.empty()) {
-    // Dictionary mode: indices already set in addOutputRow(), no copy needed.
+    // Left simi join or dictionary mode: indices already set in addOutputRow(),
+    // no copy needed.
     return;
   }
   // buildCopyRanges_ should always be empty for left semi project join or build
