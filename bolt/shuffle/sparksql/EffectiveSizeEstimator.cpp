@@ -114,8 +114,8 @@ uint64_t EffectiveSizeEstimator::scanVector(
   if (kind == bytedance::bolt::TypeKind::ARRAY) {
     auto* array = vec->asUnchecked<bytedance::bolt::ArrayVector>();
     // Account for array's own overhead: nulls, offsets, sizes.
-    auto overhead = vec->retainedSize() + array->offsets()->capacity() +
-        array->sizes()->capacity();
+    auto overhead = vec->BaseVector::retainedSize() +
+        array->offsets()->capacity() + array->sizes()->capacity();
     estimatedFlatSize += overhead;
     return overhead + scanVector(array->elements().get(), estimatedFlatSize);
   }
@@ -123,8 +123,8 @@ uint64_t EffectiveSizeEstimator::scanVector(
   if (kind == bytedance::bolt::TypeKind::MAP) {
     auto* map = vec->asUnchecked<bytedance::bolt::MapVector>();
     // Account for map's own overhead: nulls, offsets, sizes.
-    auto overhead = vec->retainedSize() + map->offsets()->capacity() +
-        map->sizes()->capacity();
+    auto overhead = vec->BaseVector::retainedSize() +
+        map->offsets()->capacity() + map->sizes()->capacity();
     estimatedFlatSize += overhead;
     uint64_t size = overhead;
     size += scanVector(map->mapKeys().get(), estimatedFlatSize);
@@ -135,7 +135,7 @@ uint64_t EffectiveSizeEstimator::scanVector(
   if (kind == bytedance::bolt::TypeKind::ROW) {
     auto* row = vec->asUnchecked<bytedance::bolt::RowVector>();
     // Account for row's own overhead: nulls.
-    auto overhead = vec->retainedSize();
+    auto overhead = vec->BaseVector::retainedSize();
     estimatedFlatSize += overhead;
     uint64_t size = overhead;
     for (auto i = 0; i < row->childrenSize(); ++i) {
