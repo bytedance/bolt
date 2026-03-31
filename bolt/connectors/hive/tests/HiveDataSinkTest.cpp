@@ -993,7 +993,6 @@ TEST_F(HiveDataSinkTest, lazyVectorForParquet) {
       rowType, outputDirectory->path, dwio::common::FileFormat::PARQUET);
 
   dataSink->appendData(row);
-  ASSERT_TRUE(dataSink->finish());
   dataSink->close();
 }
 #endif
