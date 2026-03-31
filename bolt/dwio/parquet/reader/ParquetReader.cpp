@@ -452,11 +452,38 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
       }
 
       TypePtr childRequestedType = nullptr;
-      if (requestedType && requestedType->isRow()) {
-        auto fileTypeIdx =
-            requestedType->asRow().getChildIdxIfExists(childName);
-        if (fileTypeIdx.has_value()) {
-          childRequestedType = requestedType->asRow().childAt(*fileTypeIdx);
+      bool followChild = true;
+
+      {
+        RowTypePtr requestedRowType = nullptr;
+        if (requestedType) {
+          if (requestedType->isRow()) {
+            requestedRowType =
+                std::dynamic_pointer_cast<const RowType>(requestedType);
+          } else if (
+              requestedType->isArray() && isRepeated &&
+              requestedType->asArray().elementType()->isRow()) {
+            // Handle the case of unannotated array of structs (repeated group
+            // without LIST annotation).
+            requestedRowType = std::dynamic_pointer_cast<const RowType>(
+                requestedType->asArray().elementType());
+          }
+        }
+
+        if (requestedRowType) {
+          if (options_.isUseColumnNamesForColumnMapping()) {
+            auto fileTypeIdx = requestedRowType->getChildIdxIfExists(childName);
+            if (fileTypeIdx.has_value()) {
+              childRequestedType = requestedRowType->childAt(*fileTypeIdx);
+            }
+          } else {
+            // Handle schema evolution.
+            if (i < requestedRowType->size()) {
+              childRequestedType = requestedRowType->childAt(i);
+            } else {
+              followChild = false;
+            }
+          }
         }
       }
 
@@ -747,7 +774,7 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
               isOptional,
               isRepeated);
         } else {
-          // Row type
+          // Row type in a repeated field without LIST/MAP annotation.
           // To support list backward compatibility, need create a new row type
           // instance and set all the fields as its children.
           auto childrenRowType =

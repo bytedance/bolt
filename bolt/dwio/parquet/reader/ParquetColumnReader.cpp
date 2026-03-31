@@ -152,9 +152,12 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
       return std::make_unique<StringColumnReader>(
           requestedType, fileType, params, scanSpec);
 
-    case TypeKind::ARRAY:
+    case TypeKind::ARRAY: {
+      BOLT_CHECK(
+          requestedType->type()->isArray(), "Requested type must be array");
       return std::make_unique<ListColumnReader>(
           columnReaderOptions, requestedType, fileType, params, scanSpec, pool);
+    }
 
     case TypeKind::MAP:
       return std::make_unique<MapColumnReader>(
