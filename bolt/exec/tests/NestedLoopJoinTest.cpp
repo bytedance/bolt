@@ -1027,5 +1027,46 @@ TEST_F(NestedLoopJoinTest, batchBoundaryProbeMismatch) {
   }
 }
 
+// Verifies that no spurious mismatch row is produced when the output batch
+// fills exactly at the last build row of the last probe row in a batch.  In
+// this scenario filterResultRow_ lands at decodedFilterResult_.size() (no more
+// filter results to process), so probeRowHasMatch_ must NOT be reset —
+// otherwise checkProbeMismatchRow() incorrectly adds a NULL-extended row for a
+// probe that already matched.
+TEST_F(NestedLoopJoinTest, batchBoundaryLastProbeRow) {
+  // 3 probe rows that ALL match the single build row.  maxOutputBatchRows=3
+  // makes the output fill exactly when the 3rd match (last probe, last build
+  // row) is added.
+  auto probeVectors = {
+      makeRowVector({"t0"}, {makeFlatVector<int32_t>({1, 2, 3})}),
+  };
+  auto buildVectors = {
+      makeRowVector({"u0"}, {makeFlatVector<int32_t>(std::vector<int32_t>{1})}),
+  };
+
+  createDuckDbTable("t", {probeVectors});
+  createDuckDbTable("u", {buildVectors});
+
+  // Left join: all 3 probes match, so the result must be exactly 3 rows with
+  // no NULL-extended mismatch rows.
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values({probeVectors})
+                  .nestedLoopJoin(
+                      PlanBuilder(planNodeIdGenerator)
+                          .values({buildVectors})
+                          .planNode(),
+                      "t0 >= u0",
+                      {"t0", "u0"},
+                      core::JoinType::kLeft)
+                  .planNode();
+  CursorParameters params;
+  params.planNode = plan;
+  params.queryCtx = core::QueryCtx::create(executor_.get());
+  params.queryCtx->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kMaxOutputBatchRows, "3"}});
+  assertQuery(params, "SELECT t0, u0 FROM t LEFT JOIN u ON t0 >= u0");
+}
+
 } // namespace
 } // namespace bytedance::bolt::exec::test

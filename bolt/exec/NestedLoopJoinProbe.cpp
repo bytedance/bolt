@@ -398,14 +398,17 @@ bool NestedLoopJoinProbe::addToOutput() {
       const auto probeOffset = i / buildRowCount;
       const auto buildIdx = static_cast<vector_size_t>(i % buildRowCount);
 
-      // At probe row boundaries (only for build with single vector, when has
-      // multiple build vectors, buildRowCount equals
-      // decodedFilterResult.size(), so buildIdx == 0 && i > filterResultRow_
-      // would never match), set probeRowHasMatch_ to false and check if the
-      // previous probe row needs a mismatch row (for left/full outer and left
-      // semi project joins).
-      if (buildIdx == 0 && i > filterResultRow_) {
-        if (needsProbeMismatch(joinType_) && !probeRowHasMatch_) {
+      // At probe row boundaries, two things happen:
+      //  1. Check if the previous probe row needs a mismatch row (only when
+      //     we actually crossed a boundary, i.e. i > filterResultRow_).
+      //  2. Reset probeRowHasMatch_ for the new probe row.  This fires even
+      //     when resuming from an output-full return (i == filterResultRow_),
+      //     so no separate reset is needed in the output-full paths.
+      // For multiple build vectors probeRowCount_ == 1, so the guard
+      // prevents this block from ever running (buildIdx always equals i).
+      if (probeRowCount_ > 1 && buildIdx == 0) {
+        if (i > filterResultRow_ && needsProbeMismatch(joinType_) &&
+            !probeRowHasMatch_) {
           probeRow_ = startProbeRow + probeOffset - 1;
           addProbeMismatchRow();
           ++numOutputRows_;
@@ -465,11 +468,8 @@ bool NestedLoopJoinProbe::addToOutput() {
           return true;
         }
         // Output buffer full; save position and produce output.
-        // nextProbeStart is always a probe row boundary, so reset match state
-        // for the next probe row.
         if (numOutputRows_ == outputBatchSize_) {
           filterResultRow_ = nextProbeStart;
-          probeRowHasMatch_ = false;
           return false;
         }
         i = nextProbeStart - 1; // -1 because the for-loop increments.
@@ -486,11 +486,6 @@ bool NestedLoopJoinProbe::addToOutput() {
       // If the buffer is full, save state and produce it as output.
       if (numOutputRows_ == outputBatchSize_) {
         filterResultRow_ = i + 1;
-        // If resuming at a new probe row boundary, reset match state so the
-        // next probe row does not inherit a stale "matched" flag.
-        if (filterResultRow_ % buildRowCount == 0) {
-          probeRowHasMatch_ = false;
-        }
         copyBuildValues(currentBuild);
         return false;
       }
