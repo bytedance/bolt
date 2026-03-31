@@ -1251,6 +1251,19 @@ TEST_F(ParquetTableScanTest, dcMapContainsDifferentDynamicColumns) {
   EXPECT_EQ(1, actual[2]);
 }
 
+TEST_F(ParquetTableScanTest, deltaByteArray) {
+  auto a = makeFlatVector<StringView>({"axis", "axle", "babble", "babyhood"});
+  auto expected = makeRowVector({"a"}, {a});
+  createDuckDbTable("expected", {expected});
+
+  auto vector = makeFlatVector<StringView>({{}});
+  loadData(
+      getExampleFilePath("delta_byte_array.parquet"),
+      ROW({"a"}, {VARCHAR()}),
+      makeRowVector({"a"}, {vector}));
+  assertSelect({"a"}, "SELECT a from expected");
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   // todo: use folly::Init init after upgrade folly lib
