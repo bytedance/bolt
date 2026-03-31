@@ -197,8 +197,8 @@ HashBuild::HashBuild(
   LOG(INFO) << name() << " HashBuild created for " << operatorCtx_->toString()
             << ", spill enabled: " << spillEnabled()
             << ", maxHashTableSize = " << maxHashTableBucketCount_
-            << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disbaled")
-            << ", scattered mode " << (scatteredMode_ ? "enabled" : "disbaled");
+            << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disabled")
+            << ", scattered mode " << (scatteredMode_ ? "enabled" : "disabled");
 }
 
 void HashBuild::initialize() {
