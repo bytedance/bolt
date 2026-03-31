@@ -40,10 +40,10 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genNullBitCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* next_blk,
-    llvm::BasicBlock* phi_blk,
-    PhiNodeInputs& phi_inputs) {
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* nextBlk,
+    llvm::BasicBlock* phiBlk,
+    PhiNodeInputs& phiInputs) {
   /*
  ```cpp
      auto leftNull = * (char *) (leftRow + nullByteOffsets[col_idx]);
@@ -62,51 +62,51 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genNullBitCmpIR(
   */
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
-  builder.SetInsertPoint(curr_blk);
+  builder.SetInsertPoint(currBlk);
 
   // row->isNullAt(idx)
-  auto i8_ty = builder.getInt8Ty();
-  auto const_mask = llvm::ConstantInt::get(i8_ty, nullByteMasks[idx]);
-  auto left_val_unmask =
-      getValueByPtr(builder, values[0], i8_ty, nullByteOffsets[idx]);
+  auto i8Ty = builder.getInt8Ty();
+  auto constMask = llvm::ConstantInt::get(i8Ty, nullByteMasks[idx]);
+  auto leftValUnmask =
+      getValueByPtr(builder, values[0], i8Ty, nullByteOffsets[idx]);
 
-  auto left_val = castToI8(
+  auto leftVal = castToI8(
       builder,
       builder.CreateICmpNE(
-          builder.CreateAnd(left_val_unmask, const_mask), builder.getInt8(0)));
+          builder.CreateAnd(leftValUnmask, constMask), builder.getInt8(0)));
 
   // get right value from call
-  auto right_val =
+  auto rightVal =
       createCall(builder, GetDecodedIsNull, {values[2 + idx], values[1]});
 
-  auto nil_ne = builder.CreateICmpNE(left_val, right_val);
-  auto nil_ne_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_nil_ne_blk", func, next_blk);
-  auto nil_eq_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_nil_eq_blk", func, next_blk);
-  auto no_nil_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_no_nil_blk", func, next_blk);
-  auto un_likely = llvm::MDBuilder(builder.getContext())
-                       .createBranchWeights(1, 1000); //(1U << 20) - 1, 1
+  auto nilNe = builder.CreateICmpNE(leftVal, rightVal);
+  auto nilNeBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_nil_ne_blk", func, nextBlk);
+  auto nilEqBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_nil_eq_blk", func, nextBlk);
+  auto noNilBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_no_nil_blk", func, nextBlk);
+  auto unLikely = llvm::MDBuilder(builder.getContext())
+                      .createBranchWeights(1, 1000); //(1U << 20) - 1, 1
 
-  builder.CreateCondBr(nil_ne, nil_ne_blk, nil_eq_blk, un_likely);
+  builder.CreateCondBr(nilNe, nilNeBlk, nilEqBlk, unLikely);
 
   // return 0 if not equal
-  curr_blk = nil_ne_blk;
-  builder.SetInsertPoint(curr_blk);
-  builder.CreateBr(phi_blk);
-  phi_inputs.emplace_back(builder.getInt8(0), curr_blk);
+  currBlk = nilNeBlk;
+  builder.SetInsertPoint(currBlk);
+  builder.CreateBr(phiBlk);
+  phiInputs.emplace_back(builder.getInt8(0), currBlk);
 
   // goto next key compare if null, else goto value compare
-  curr_blk = nil_eq_blk;
-  builder.SetInsertPoint(curr_blk);
+  currBlk = nilEqBlk;
+  builder.SetInsertPoint(currBlk);
   builder.CreateCondBr(
-      builder.CreateICmpNE(left_val, builder.getInt8(0)),
-      next_blk,
-      no_nil_blk,
-      un_likely);
+      builder.CreateICmpNE(leftVal, builder.getInt8(0)),
+      nextBlk,
+      noNilBlk,
+      unLikely);
 
-  return no_nil_blk;
+  return noNilBlk;
 }
 
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
@@ -114,9 +114,9 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    PhiNodeInputs& phi_inputs,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* phi_blk) {
+    PhiNodeInputs& phiInputs,
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* phiBlk) {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
   /*
@@ -124,21 +124,21 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
   leftRow = values[0];
   index = values[1];
   decodedVector = values[2 + idx];
-  auto left_val = *(Integer*) (leftRow + keyOffsets[idx]);
-  auto right_val = *(Integer*) getDecodedValue(decodedVector, index);
+  auto leftVal = *(Integer*) (leftRow + keyOffsets[idx]);
+  auto rightVal = *(Integer*) getDecodedValue(decodedVector, index);
   { // check null
-    auto left_null = (leftRow + nullByteOffsets[idx]) & nullByteMasks[idx];
-    auto right_null = getDecodedNull(decodedVector, index);
-    if (left_null && right_null) {
+    auto leftNull = (leftRow + nullByteOffsets[idx]) & nullByteMasks[idx];
+    auto rightNull = getDecodedNull(decodedVector, index);
+    if (leftNull && rightNull) {
       return true;
-    } else if (left_null || right_null) {
+    } else if (leftNull || rightNull) {
       return false;
     }
   }
   if constexpr (is_last_key) {
-     return left_val == right_val;
+     return leftVal == rightVal;
   } else {
-     if (left_val == right_val) {
+     if (leftVal == rightVal) {
        goto next_key_compare;
      }
      return false;
@@ -146,68 +146,70 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
 ```
 */
 
-  auto row_ty = builder.getInt8Ty();
-  llvm::Type* data_ty = nullptr;
-  std::string right_val_call = GetDecodedValueI32;
+  auto rowTy = builder.getInt8Ty();
+  llvm::Type* dataTy = nullptr;
+  std::string rightValCall = GetDecodedValueI32;
   if (kind == bytedance::bolt::TypeKind::BOOLEAN) {
     // Just follow Clang. Clang chose i8 over i1 for a boolean field
-    data_ty = builder.getInt8Ty();
-    right_val_call = GetDecodedValueBool;
+    dataTy = builder.getInt8Ty();
+    rightValCall = GetDecodedValueBool;
   } else if (kind == bytedance::bolt::TypeKind::TINYINT) {
-    data_ty = builder.getInt8Ty();
-    right_val_call = GetDecodedValueI8;
+    dataTy = builder.getInt8Ty();
+    rightValCall = GetDecodedValueI8;
   } else if (kind == bytedance::bolt::TypeKind::SMALLINT) {
-    data_ty = builder.getInt16Ty();
-    right_val_call = GetDecodedValueI16;
+    dataTy = builder.getInt16Ty();
+    rightValCall = GetDecodedValueI16;
   } else if (kind == bytedance::bolt::TypeKind::INTEGER) {
-    data_ty = builder.getInt32Ty();
-    right_val_call = GetDecodedValueI32;
+    dataTy = builder.getInt32Ty();
+    rightValCall = GetDecodedValueI32;
   } else if (kind == bytedance::bolt::TypeKind::BIGINT) {
-    data_ty = builder.getInt64Ty();
-    right_val_call = GetDecodedValueI64;
+    dataTy = builder.getInt64Ty();
+    rightValCall = GetDecodedValueI64;
   } else if (kind == bytedance::bolt::TypeKind::HUGEINT) {
-    data_ty = builder.getInt128Ty();
-    right_val_call = GetDecodedValueI128;
+    dataTy = builder.getInt128Ty();
+    rightValCall = GetDecodedValueI128;
   } else {
     BOLT_UNREACHABLE();
   }
 
   // Block for next key.
-  auto next_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phi_blk);
-  llvm::PointerType* data_ptr_ty = data_ty->getPointerTo();
-
+  auto nextBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
   if (hasNullKeys) {
-    curr_blk = genNullBitCmpIR(
-        values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
+    currBlk =
+        genNullBitCmpIR(values, idx, func, currBlk, nextBlk, phiBlk, phiInputs);
   }
 
   // Generate value comparison IR
-  builder.SetInsertPoint(curr_blk);
+  builder.SetInsertPoint(currBlk);
   // left value
-  auto left_val = getValueByPtr(builder, values[0], data_ty, keyOffsets[idx]);
+  llvm::Value* leftVal = nullptr;
+  if (kind == bytedance::bolt::TypeKind::HUGEINT) {
+    leftVal = getHugeIntValueByPtr(builder, values[0], keyOffsets[idx]);
+  } else {
+    leftVal = getValueByPtr(builder, values[0], dataTy, keyOffsets[idx]);
+  }
   // right value from createCall
-  auto right_val =
-      createCall(builder, right_val_call, {values[2 + idx], values[1]});
+  auto rightVal =
+      createCall(builder, rightValCall, {values[2 + idx], values[1]});
 
-  auto key_eq = builder.CreateICmpEQ(left_val, right_val);
+  auto keyEq = builder.CreateICmpEQ(leftVal, rightVal);
 
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
-    phi_inputs.emplace_back(
-        std::make_pair(castToI8(builder, key_eq), curr_blk));
-    builder.CreateBr(phi_blk);
+    phiInputs.emplace_back(std::make_pair(castToI8(builder, keyEq), currBlk));
+    builder.CreateBr(phiBlk);
   } else {
     // return false if not equal, otherwise goto next key
-    auto key_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne", func, next_blk);
-    builder.CreateCondBr(key_eq, next_blk, key_ne_blk);
-    builder.SetInsertPoint(key_ne_blk);
-    builder.CreateBr(phi_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), key_ne_blk));
+    auto keyNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne", func, nextBlk);
+    builder.CreateCondBr(keyEq, nextBlk, keyNeBlk);
+    builder.SetInsertPoint(keyNeBlk);
+    builder.CreateBr(phiBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), keyNeBlk));
   }
 
-  return next_blk;
+  return nextBlk;
 }
 
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genTimestampCmpIR(
@@ -215,27 +217,27 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genTimestampCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    PhiNodeInputs& phi_inputs,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* phi_blk) {
+    PhiNodeInputs& phiInputs,
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* phiBlk) {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
 
-  auto row_ty = builder.getInt8Ty();
+  auto rowTy = builder.getInt8Ty();
 
   // Block for next key.
-  auto next_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phi_blk);
+  auto nextBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
 
   if (hasNullKeys) {
-    curr_blk = genNullBitCmpIR(
-        values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
+    currBlk =
+        genNullBitCmpIR(values, idx, func, currBlk, nextBlk, phiBlk, phiInputs);
   }
 
   // Generate value comparison IR
-  builder.SetInsertPoint(curr_blk);
+  builder.SetInsertPoint(currBlk);
 
-  auto key_eq = createCall(
+  auto keyEq = createCall(
       builder,
       CmpRowVecTimestamp,
       {values[2 + idx],
@@ -245,22 +247,22 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genTimestampCmpIR(
 
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
-    phi_inputs.emplace_back(std::make_pair(key_eq, curr_blk));
-    builder.CreateBr(phi_blk);
+    phiInputs.emplace_back(std::make_pair(keyEq, currBlk));
+    builder.CreateBr(phiBlk);
   } else {
     // return false if not equal, otherwise goto next key
-    auto key_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne", func, next_blk);
+    auto keyNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne", func, nextBlk);
     builder.CreateCondBr(
-        builder.CreateIntCast(key_eq, builder.getInt1Ty(), false),
-        next_blk,
-        key_ne_blk);
-    builder.SetInsertPoint(key_ne_blk);
-    builder.CreateBr(phi_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), key_ne_blk));
+        builder.CreateIntCast(keyEq, builder.getInt1Ty(), false),
+        nextBlk,
+        keyNeBlk);
+    builder.SetInsertPoint(keyNeBlk);
+    builder.CreateBr(phiBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), keyNeBlk));
   }
 
-  return next_blk;
+  return nextBlk;
 }
 
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
@@ -268,40 +270,39 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    PhiNodeInputs& phi_inputs,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* phi_blk) {
+    PhiNodeInputs& phiInputs,
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* phiBlk) {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
 
   bool isDouble = kind == bytedance::bolt::TypeKind::DOUBLE;
 
-  auto data_ty = isDouble ? builder.getDoubleTy() : builder.getFloatTy();
-  std::string right_val_call =
+  auto dataTy = isDouble ? builder.getDoubleTy() : builder.getFloatTy();
+  std::string rightValCall =
       isDouble ? GetDecodedValueDouble : GetDecodedValueFloat;
-  llvm::PointerType* data_ptr_ty = data_ty->getPointerTo();
+  llvm::PointerType* dataPtrTy = dataTy->getPointerTo();
 
   // Block for next key.
-  auto next_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phi_blk);
+  auto nextBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
   if (hasNullKeys) {
-    curr_blk = genNullBitCmpIR(
-        values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
+    currBlk =
+        genNullBitCmpIR(values, idx, func, currBlk, nextBlk, phiBlk, phiInputs);
   }
   // Generate value comparison IR
-  builder.SetInsertPoint(curr_blk);
+  builder.SetInsertPoint(currBlk);
 
-  auto left_val_raw =
-      getValueByPtr(builder, values[0], data_ty, keyOffsets[idx]);
+  auto leftValRaw = getValueByPtr(builder, values[0], dataTy, keyOffsets[idx]);
   // right value from createCall
-  auto right_val_raw =
-      createCall(builder, right_val_call, {values[2 + idx], values[1]});
+  auto rightValRaw =
+      createCall(builder, rightValCall, {values[2 + idx], values[1]});
 
-  auto const_float_0 = isDouble ? llvm::ConstantFP::get(data_ty, (double)0.0)
-                                : llvm::ConstantFP::get(data_ty, (float)0.0);
-  auto const_float_max = isDouble
-      ? llvm::ConstantFP::get(data_ty, std::numeric_limits<double>::max())
-      : llvm::ConstantFP::get(data_ty, std::numeric_limits<float>::max());
+  auto constFloat0 = isDouble ? llvm::ConstantFP::get(dataTy, (double)0.0)
+                              : llvm::ConstantFP::get(dataTy, (float)0.0);
+  auto constFloatMax = isDouble
+      ? llvm::ConstantFP::get(dataTy, std::numeric_limits<double>::max())
+      : llvm::ConstantFP::get(dataTy, std::numeric_limits<float>::max());
   // ====== NaN check starts ==========
   // "FCMP_UNO" : Create a quiet
   // floating-point comparison (NaN) to check if it is a NaN. References:
@@ -318,55 +319,54 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
   //      goto normal values compare
   // }
   // ```
-  auto is_left_nan =
-      builder.CreateFCmp(llvm::FCmpInst::FCMP_UNO, left_val_raw, const_float_0);
-  auto is_right_nan = builder.CreateFCmp(
-      llvm::FCmpInst::FCMP_UNO, right_val_raw, const_float_0);
-  auto ne_nan =
-      builder.CreateICmp(llvm::ICmpInst::ICMP_NE, is_left_nan, is_right_nan);
-  auto ne_nan_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_ne_nan_blk", func, next_blk);
-  auto eq_nan_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_eq_nan_blk", func, next_blk);
-  auto no_nan_blk = llvm::BasicBlock::Create(
-      llvm_context, getLabel(idx) + "_no_nan_blk", func, next_blk);
+  auto isLeftNan =
+      builder.CreateFCmp(llvm::FCmpInst::FCMP_UNO, leftValRaw, constFloat0);
+  auto isRightNan =
+      builder.CreateFCmp(llvm::FCmpInst::FCMP_UNO, rightValRaw, constFloat0);
+  auto neNan =
+      builder.CreateICmp(llvm::ICmpInst::ICMP_NE, isLeftNan, isRightNan);
+  auto neNanBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_ne_nan_blk", func, nextBlk);
+  auto eqNanBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_eq_nan_blk", func, nextBlk);
+  auto noNanBlk = llvm::BasicBlock::Create(
+      llvm_context, getLabel(idx) + "_no_nan_blk", func, nextBlk);
   // unlikely weight
-  auto un_likely = llvm::MDBuilder(builder.getContext())
-                       .createBranchWeights(1, 1000); //(1U << 20) - 1, 1
-  builder.CreateCondBr(ne_nan, ne_nan_blk, eq_nan_blk, un_likely);
+  auto unLikely = llvm::MDBuilder(builder.getContext())
+                      .createBranchWeights(1, 1000); //(1U << 20) - 1, 1
+  builder.CreateCondBr(neNan, neNanBlk, eqNanBlk, unLikely);
 
-  curr_blk = ne_nan_blk;
-  builder.SetInsertPoint(curr_blk);
-  builder.CreateBr(phi_blk);
-  phi_inputs.emplace_back(builder.getInt8(0), curr_blk); // return false
+  currBlk = neNanBlk;
+  builder.SetInsertPoint(currBlk);
+  builder.CreateBr(phiBlk);
+  phiInputs.emplace_back(builder.getInt8(0), currBlk); // return false
 
-  curr_blk = eq_nan_blk;
-  builder.SetInsertPoint(curr_blk);
-  builder.CreateCondBr(
-      is_left_nan, next_blk, no_nan_blk, un_likely); // if Both NaN
+  currBlk = eqNanBlk;
+  builder.SetInsertPoint(currBlk);
+  builder.CreateCondBr(isLeftNan, nextBlk, noNanBlk, unLikely); // if Both NaN
 
-  curr_blk = no_nan_blk;
-  builder.SetInsertPoint(curr_blk);
+  currBlk = noNanBlk;
+  builder.SetInsertPoint(currBlk);
 
-  auto left_val = left_val_raw;
-  auto right_val = right_val_raw;
+  auto leftVal = leftValRaw;
+  auto rightVal = rightValRaw;
   /*
 ```cpp
  leftRow = values[0];
  index = values[1];
  decodedVector = values[2 + idx];
- auto left_val = *(Integer*) (leftRow + keyOffsets[idx]);
- auto right_val = *(Integer*) getDecodedValue(decodedVector, index);
+ auto leftVal = *(Integer*) (leftRow + keyOffsets[idx]);
+ auto rightVal = *(Integer*) getDecodedValue(decodedVector, index);
  { // check null
-   auto left_null = (leftRow + nullByteOffsets[idx]) & nullByteMasks[idx];
-   auto right_null = getDecodedNull(decodedVector, index);
-   if (left_null && right_null) {
+   auto leftNull = (leftRow + nullByteOffsets[idx]) & nullByteMasks[idx];
+   auto rightNull = getDecodedNull(decodedVector, index);
+   if (leftNull && rightNull) {
      return true;
-   } else if (left_null || right_null) {
+   } else if (leftNull || rightNull) {
      return false;
    }
  }
- cmp = left_val == right_val;
+ cmp = leftVal == rightVal;
  if constexpr (is_last_key) {
     return cmp;
  } else {
@@ -377,22 +377,21 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
  }
 ```
 */
-  auto key_eq = builder.CreateFCmpOEQ(left_val, right_val);
+  auto keyEq = builder.CreateFCmpOEQ(leftVal, rightVal);
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
-    phi_inputs.emplace_back(
-        std::make_pair(castToI8(builder, key_eq), curr_blk));
-    builder.CreateBr(phi_blk);
+    phiInputs.emplace_back(std::make_pair(castToI8(builder, keyEq), currBlk));
+    builder.CreateBr(phiBlk);
   } else {
     // return false if not equal, otherwise goto next key
-    auto key_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne", func, next_blk);
-    builder.CreateCondBr(key_eq, next_blk, key_ne_blk);
-    builder.SetInsertPoint(key_ne_blk);
-    builder.CreateBr(phi_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), key_ne_blk));
+    auto keyNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne", func, nextBlk);
+    builder.CreateCondBr(keyEq, nextBlk, keyNeBlk);
+    builder.SetInsertPoint(keyNeBlk);
+    builder.CreateBr(phiBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), keyNeBlk));
   }
-  return next_blk;
+  return nextBlk;
 }
 
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genStringViewCmpIR(
@@ -400,31 +399,31 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genStringViewCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    PhiNodeInputs& phi_inputs,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* phi_blk) {
+    PhiNodeInputs& phiInputs,
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* phiBlk) {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
 
   /*
     ```cpp
     // prefix and length
-    auto left_prefix = *(int64_t*) (leftRow + keyOffsets[idx]);
-    auto right_prefix = *(int64_t*) (rightAddr);
-    if (left_prefix != right_prefix) {
+    auto leftPrefix = *(int64_t*) (leftRow + keyOffsets[idx]);
+    auto rightPrefix = *(int64_t*) (rightAddr);
+    if (leftPrefix != rightPrefix) {
         return false;
     }
-    auto left_len = *(int32_t*) (leftRow + keyOffsets[idx] );
-    auto right_len = *(int32_t*) (rightAddr);
-    if (left_len <= 12 && right_len <= 12) {
+    auto leftLen = *(int32_t*) (leftRow + keyOffsets[idx] );
+    auto rightLen = *(int32_t*) (rightAddr);
+    if (leftLen <= 12 && rightLen <= 12) {
     // if len <=4, only compare first 8 bytes
     // else compare the whole inline part, 16 bytes
     // optimize this comparison with mask, mask[len <=4] = 0, else mask[len] = 0
-      auto left_inline = *(int64_t*) (leftRow + keyOffsets[idx] +
+      auto leftInline = *(int64_t*) (leftRow + keyOffsets[idx] +
                     sizeof(int64_t)) & mask[len];
-      auto right_inline = *(int64_t*) (rightAddr + sizeof(int64_t))) &
+      auto rightInline = *(int64_t*) (rightAddr + sizeof(int64_t))) &
                     mask[len];
-    return left_inline == right_inline
+    return leftInline == rightInline
     }
     auto res = jit_StringViewRowEqVectors(left, right);
     if constexpr (lastKey) {
@@ -440,104 +439,104 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genStringViewCmpIR(
     */
 
   // Block for next key.
-  auto next_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phi_blk);
+  auto nextBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
   if (hasNullKeys) {
-    curr_blk = genNullBitCmpIR(
-        values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
+    currBlk =
+        genNullBitCmpIR(values, idx, func, currBlk, nextBlk, phiBlk, phiInputs);
   }
 
   // Generate value comparison IR
-  builder.SetInsertPoint(curr_blk);
-  auto left_addr = builder.CreateConstInBoundsGEP1_64(
+  builder.SetInsertPoint(currBlk);
+  auto leftAddr = builder.CreateConstInBoundsGEP1_64(
       builder.getInt8Ty(), values[0], keyOffsets[idx]);
 
   // get right value from createCall
-  auto right_addr = createCall(
+  auto rightAddr = createCall(
       builder, GetDecodedValueStringView, {values[2 + idx], values[1]});
   // Check Prefix + length (8 chars)
   {
-    auto int64_ty = builder.getInt64Ty();
-    auto left_val = getValueByPtr(builder, left_addr, int64_ty, 0);
-    auto right_val = getValueByPtr(builder, right_addr, int64_ty, 0);
+    auto int64Ty = builder.getInt64Ty();
+    auto leftVal = getValueByPtr(builder, leftAddr, int64Ty, 0);
+    auto rightVal = getValueByPtr(builder, rightAddr, int64Ty, 0);
 
-    auto pre_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_pre_ne", func, next_blk);
-    auto pre_eq_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_pre_eq", func, next_blk);
+    auto preNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_pre_ne", func, nextBlk);
+    auto preEqBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_pre_eq", func, nextBlk);
 
-    auto prefix_eq = builder.CreateICmpEQ(left_val, right_val);
-    builder.CreateCondBr(prefix_eq, pre_eq_blk, pre_ne_blk);
+    auto prefixEq = builder.CreateICmpEQ(leftVal, rightVal);
+    builder.CreateCondBr(prefixEq, preEqBlk, preNeBlk);
 
     // If prefix is NOT equal, return false
-    builder.SetInsertPoint(pre_ne_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), pre_ne_blk));
-    builder.CreateBr(phi_blk);
+    builder.SetInsertPoint(preNeBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), preNeBlk));
+    builder.CreateBr(phiBlk);
 
-    curr_blk = pre_eq_blk;
+    currBlk = preEqBlk;
   }
   // return inline part comparison
   {
-    builder.SetInsertPoint(curr_blk);
-    auto len_ty = builder.getInt32Ty();
-    auto left_len = getValueByPtr(builder, left_addr, len_ty, 0);
+    builder.SetInsertPoint(currBlk);
+    auto lenTy = builder.getInt32Ty();
+    auto leftLen = getValueByPtr(builder, leftAddr, lenTy, 0);
     constexpr int32_t SV_INLINE_LIMIT = 12;
-    auto inline_limit = llvm::ConstantInt::get(len_ty, SV_INLINE_LIMIT);
-    auto is_inline = builder.CreateICmpULE(left_len, inline_limit);
+    auto inlineLimit = llvm::ConstantInt::get(lenTy, SV_INLINE_LIMIT);
+    auto isInline = builder.CreateICmpULE(leftLen, inlineLimit);
 
-    auto inline_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_both_inline", func, next_blk);
-    auto buf_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_buf", func, next_blk);
-    builder.CreateCondBr(is_inline, inline_blk, buf_blk);
+    auto inlineBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_both_inline", func, nextBlk);
+    auto bufBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_buf", func, nextBlk);
+    builder.CreateCondBr(isInline, inlineBlk, bufBlk);
 
     // if both inline, return false if not equal, otherwise goto next key
-    curr_blk = inline_blk;
-    builder.SetInsertPoint(curr_blk);
-    auto inline_ty = builder.getInt64Ty();
+    currBlk = inlineBlk;
+    builder.SetInsertPoint(currBlk);
+    auto inlineTy = builder.getInt64Ty();
     llvm::ArrayType* arrayTy = llvm::ArrayType::get(builder.getInt64Ty(), 13);
-    auto suffix_mask_ptr = builder.CreateGEP(
-        arrayTy, values[2 + keysTypes.size()], {builder.getInt32(0), left_len});
-    auto suffix_mask = builder.CreateLoad(inline_ty, suffix_mask_ptr);
+    auto suffixMaskPtr = builder.CreateGEP(
+        arrayTy, values[2 + keysTypes.size()], {builder.getInt32(0), leftLen});
+    auto suffixMask = builder.CreateLoad(inlineTy, suffixMaskPtr);
 
-    auto left_inl = builder.CreateAnd(
-        suffix_mask,
-        getValueByPtr(builder, left_addr, inline_ty, sizeof(int64_t)));
-    auto right_inl = builder.CreateAnd(
-        suffix_mask,
-        getValueByPtr(builder, right_addr, inline_ty, sizeof(int64_t)));
-    auto ne_inline_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne_inline", func, next_blk);
-    auto ne_inline = builder.CreateICmpNE(left_inl, right_inl);
-    builder.CreateCondBr(ne_inline, ne_inline_blk, next_blk);
-    curr_blk = ne_inline_blk;
-    builder.SetInsertPoint(curr_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), curr_blk));
-    builder.CreateBr(phi_blk);
+    auto leftInl = builder.CreateAnd(
+        suffixMask,
+        getValueByPtr(builder, leftAddr, inlineTy, sizeof(int64_t)));
+    auto rightInl = builder.CreateAnd(
+        suffixMask,
+        getValueByPtr(builder, rightAddr, inlineTy, sizeof(int64_t)));
+    auto neInlineBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne_inline", func, nextBlk);
+    auto neInline = builder.CreateICmpNE(leftInl, rightInl);
+    builder.CreateCondBr(neInline, neInlineBlk, nextBlk);
+    currBlk = neInlineBlk;
+    builder.SetInsertPoint(currBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), currBlk));
+    builder.CreateBr(phiBlk);
 
-    curr_blk = buf_blk;
+    currBlk = bufBlk;
   }
   // Non-inline (buffer) part comparison
-  builder.SetInsertPoint(curr_blk);
-  auto key_eq =
-      createCall(builder, StringViewRowEqVectors, {left_addr, right_addr});
+  builder.SetInsertPoint(currBlk);
+  auto keyEq =
+      createCall(builder, StringViewRowEqVectors, {leftAddr, rightAddr});
 
   if (idx == keysTypes.size() - 1) {
-    phi_inputs.emplace_back(std::make_pair(key_eq, curr_blk));
-    builder.CreateBr(phi_blk);
+    phiInputs.emplace_back(std::make_pair(keyEq, currBlk));
+    builder.CreateBr(phiBlk);
   } else {
     // return false if not equal, otherwise goto next key
-    auto key_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne", func, next_blk);
+    auto keyNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne", func, nextBlk);
     builder.CreateCondBr(
-        builder.CreateICmpNE(key_eq, builder.getInt8(0)), next_blk, key_ne_blk);
+        builder.CreateICmpNE(keyEq, builder.getInt8(0)), nextBlk, keyNeBlk);
 
-    builder.SetInsertPoint(key_ne_blk);
-    builder.CreateBr(phi_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), key_ne_blk));
+    builder.SetInsertPoint(keyNeBlk);
+    builder.CreateBr(phiBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), keyNeBlk));
   }
 
-  return next_blk;
+  return nextBlk;
 }
 
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
@@ -545,9 +544,9 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
     llvm::Function* func,
-    PhiNodeInputs& phi_inputs,
-    llvm::BasicBlock* curr_blk,
-    llvm::BasicBlock* phi_blk) {
+    PhiNodeInputs& phiInputs,
+    llvm::BasicBlock* currBlk,
+    llvm::BasicBlock* phiBlk) {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
   // ```cpp
@@ -563,17 +562,17 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
   //   }
   // ```
 
-  auto next_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phi_blk);
+  auto nextBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
   if (hasNullKeys) {
-    curr_blk = genNullBitCmpIR(
-        values, idx, func, curr_blk, next_blk, phi_blk, phi_inputs);
+    currBlk =
+        genNullBitCmpIR(values, idx, func, currBlk, nextBlk, phiBlk, phiInputs);
   }
 
   // Generate value comparison IR
-  builder.SetInsertPoint(curr_blk);
+  builder.SetInsertPoint(currBlk);
   // return i1 (true/false) for row(offset) = decodedvec(index)?
-  auto key_eq = createCall(
+  auto keyEq = createCall(
       builder,
       ComplexTypeRowEqVectors,
       {values[0],
@@ -582,57 +581,56 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
        values[1]});
 
   if (idx == keysTypes.size() - 1) {
-    phi_inputs.emplace_back(std::make_pair(key_eq, curr_blk));
-    builder.CreateBr(phi_blk);
+    phiInputs.emplace_back(std::make_pair(keyEq, currBlk));
+    builder.CreateBr(phiBlk);
   } else {
     // If it not the last key, return false if not equal otherwise goto next_key
-    auto key_ne_blk = llvm::BasicBlock::Create(
-        llvm_context, getLabel(idx) + "_ne", func, next_blk);
+    auto keyNeBlk = llvm::BasicBlock::Create(
+        llvm_context, getLabel(idx) + "_ne", func, nextBlk);
     builder.CreateCondBr(
-        builder.CreateICmpNE(key_eq, builder.getInt8(0)), next_blk, key_ne_blk);
+        builder.CreateICmpNE(keyEq, builder.getInt8(0)), nextBlk, keyNeBlk);
 
-    builder.SetInsertPoint(key_ne_blk);
-    builder.CreateBr(phi_blk);
-    phi_inputs.emplace_back(std::make_pair(builder.getInt8(0), key_ne_blk));
+    builder.SetInsertPoint(keyNeBlk);
+    builder.CreateBr(phiBlk);
+    phiInputs.emplace_back(std::make_pair(builder.getInt8(0), keyNeBlk));
   }
 
-  return next_blk;
+  return nextBlk;
 }
 
 bool RowEqVectorsCodeGenerator::GenCmpIR() {
   auto& llvm_context = llvm_module->getContext();
   llvm::IRBuilder<> builder(llvm_context);
+  auto* bytePtrTy = llvm::PointerType::get(llvm_context, 0);
+  auto* bytePtrPtrTy = llvm::PointerType::get(llvm_context, 0);
   // Declaration:
   // bool row=vec(char* row, int32_t index, char*[] decodedVectors)
   // row == vec(decodedVectors[0][index], decodedVectors[1][index],...)?
-  auto fun_name = GetCmpFuncName();
-  llvm::FunctionType* func_type = llvm::FunctionType::get(
+  auto funName = GetCmpFuncName();
+  llvm::FunctionType* funcType = llvm::FunctionType::get(
       builder.getInt8Ty(),
-      {builder.getInt8PtrTy(),
-       builder.getInt32Ty(),
-       builder.getInt8PtrTy()->getPointerTo()},
+      {bytePtrTy, builder.getInt32Ty(), bytePtrPtrTy},
       /*isVarArg=*/false);
   llvm::Function* func = llvm::Function::Create(
-      func_type, llvm::Function::ExternalLinkage, fun_name, llvm_module);
+      funcType, llvm::Function::ExternalLinkage, funName, llvm_module);
 
   // Add a basic block to the function.
-  llvm::BasicBlock* entry_blk =
+  llvm::BasicBlock* entryBlk =
       llvm::BasicBlock::Create(llvm_context, "entry", func);
-  builder.SetInsertPoint(entry_blk);
+  builder.SetInsertPoint(entryBlk);
 
   // get all arguments.
-  llvm::SmallVector<llvm::Value*> args_values(keysTypes.size() + 3, nullptr);
-  auto* func_args = func->args().begin();
-  llvm::Value* arg_row = func_args++;
-  llvm::Value* arg_index = func_args++;
-  llvm::Value* arg_vectors = func_args++;
-  args_values[0] = arg_row;
-  args_values[1] = arg_index; // need cast?
+  llvm::SmallVector<llvm::Value*> argsValues(keysTypes.size() + 3, nullptr);
+  auto* funcArgs = func->args().begin();
+  llvm::Value* argRow = funcArgs++;
+  llvm::Value* argIndex = funcArgs++;
+  llvm::Value* argVectors = funcArgs++;
+  argsValues[0] = argRow;
+  argsValues[1] = argIndex; // need cast?
   for (auto i = 0; i < keysTypes.size(); ++i) {
-    args_values[i + 2] = builder.CreateLoad(
-        llvm::Type::getInt8PtrTy(llvm_context),
-        builder.CreateConstInBoundsGEP1_64(
-            llvm::Type::getInt8PtrTy(llvm_context), arg_vectors, i));
+    argsValues[i + 2] = builder.CreateLoad(
+        bytePtrTy,
+        builder.CreateConstInBoundsGEP1_64(bytePtrTy, argVectors, i));
   }
   llvm::ArrayType* ArrayTy = llvm::ArrayType::get(builder.getInt64Ty(), 13);
 
@@ -659,17 +657,17 @@ bool RowEqVectorsCodeGenerator::GenCmpIR() {
       array,
       "mask");
 
-  args_values[keysTypes.size() + 2] = arrayVar;
+  argsValues[keysTypes.size() + 2] = arrayVar;
 
   // The phi block for keys comparison
-  auto phi_blk = llvm::BasicBlock::Create(llvm_context, "phi", func);
+  auto phiBlk = llvm::BasicBlock::Create(llvm_context, "phi", func);
 
-  auto curr_blk =
-      llvm::BasicBlock::Create(llvm_context, getLabel(0), func, phi_blk);
-  builder.CreateBr(curr_blk);
+  auto currBlk =
+      llvm::BasicBlock::Create(llvm_context, getLabel(0), func, phiBlk);
+  builder.CreateBr(currBlk);
 
   using PhiNodeInputs = std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>>;
-  PhiNodeInputs phi_inputs;
+  PhiNodeInputs phiInputs;
 
   // Step 2: Generate IR for the comparison of all the keys
   for (size_t i = 0; i < keysTypes.size(); ++i) {
@@ -677,13 +675,13 @@ bool RowEqVectorsCodeGenerator::GenCmpIR() {
 
     if (kind == bytedance::bolt::TypeKind::DOUBLE ||
         kind == bytedance::bolt::TypeKind::REAL) {
-      curr_blk = genFloatPointCmpIR(
-          kind, args_values, i, func, phi_inputs, curr_blk, phi_blk);
+      currBlk = genFloatPointCmpIR(
+          kind, argsValues, i, func, phiInputs, currBlk, phiBlk);
     } else if (
         kind == bytedance::bolt::TypeKind::VARCHAR ||
         kind == bytedance::bolt::TypeKind::VARBINARY) {
-      curr_blk = genStringViewCmpIR(
-          kind, args_values, i, func, phi_inputs, curr_blk, phi_blk);
+      currBlk = genStringViewCmpIR(
+          kind, argsValues, i, func, phiInputs, currBlk, phiBlk);
     } else if (
         kind == bytedance::bolt::TypeKind::BOOLEAN ||
         kind == bytedance::bolt::TypeKind::TINYINT ||
@@ -691,17 +689,17 @@ bool RowEqVectorsCodeGenerator::GenCmpIR() {
         kind == bytedance::bolt::TypeKind::INTEGER ||
         kind == bytedance::bolt::TypeKind::BIGINT ||
         kind == bytedance::bolt::TypeKind::HUGEINT) {
-      curr_blk = genIntegerCmpIR(
-          kind, args_values, i, func, phi_inputs, curr_blk, phi_blk);
+      currBlk = genIntegerCmpIR(
+          kind, argsValues, i, func, phiInputs, currBlk, phiBlk);
     } else if (kind == bytedance::bolt::TypeKind::TIMESTAMP) {
-      curr_blk = genTimestampCmpIR(
-          kind, args_values, i, func, phi_inputs, curr_blk, phi_blk);
+      currBlk = genTimestampCmpIR(
+          kind, argsValues, i, func, phiInputs, currBlk, phiBlk);
     } else if (
         kind == bytedance::bolt::TypeKind::ARRAY ||
         kind == bytedance::bolt::TypeKind::MAP ||
         kind == bytedance::bolt::TypeKind::ROW) {
-      curr_blk = genComplexCmpIR(
-          kind, args_values, i, func, phi_inputs, curr_blk, phi_blk);
+      currBlk = genComplexCmpIR(
+          kind, argsValues, i, func, phiInputs, currBlk, phiBlk);
     } else {
       // should not be here.
       throw std::logic_error(
@@ -710,19 +708,19 @@ bool RowEqVectorsCodeGenerator::GenCmpIR() {
   }
 
   // If all key compared
-  builder.SetInsertPoint(curr_blk);
-  builder.CreateBr(phi_blk);
+  builder.SetInsertPoint(currBlk);
+  builder.CreateBr(phiBlk);
   // if all keys equals,  return true
-  phi_inputs.emplace_back(builder.getInt8(1), curr_blk);
+  phiInputs.emplace_back(builder.getInt8(1), currBlk);
 
   // Step 3: Phi node, return the comparison result
   {
-    builder.SetInsertPoint(phi_blk);
-    auto cmp_phi = builder.CreatePHI(builder.getInt8Ty(), phi_inputs.size());
-    for (auto input : phi_inputs) {
-      cmp_phi->addIncoming(input.first, input.second);
+    builder.SetInsertPoint(phiBlk);
+    auto cmpPhi = builder.CreatePHI(builder.getInt8Ty(), phiInputs.size());
+    for (auto input : phiInputs) {
+      cmpPhi->addIncoming(input.first, input.second);
     }
-    builder.CreateRet(cmp_phi);
+    builder.CreateRet(cmpPhi);
   }
   auto err = llvm::verifyFunction(*func);
   return err;

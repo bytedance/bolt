@@ -17,7 +17,7 @@ if(${ENABLE_BOLT_JIT})
 
   add_executable(bolt_thrustjit_test
     RowContainerIRTest.cpp
-    ThrustJitEngineTest.cpp
+    ThrustJITv2Test.cpp
   )
   target_compile_features(bolt_thrustjit_test PUBLIC cxx_std_20)
   target_link_libraries(

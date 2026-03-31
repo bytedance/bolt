@@ -41,8 +41,8 @@
 #include "bolt/vector/VectorTypeUtils.h"
 
 #ifdef ENABLE_BOLT_JIT
+#include "bolt/jit/CompiledModule.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
-#include "bolt/jit/common.h"
 
 #endif
 namespace bytedance::bolt::exec {

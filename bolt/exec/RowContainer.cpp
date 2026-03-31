@@ -48,7 +48,7 @@
 #ifdef ENABLE_BOLT_JIT
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 #include "bolt/jit/RowContainer/RowEqVectorsCodeGenerator.h"
-#include "bolt/jit/ThrustJIT.h"
+#include "bolt/jit/ThrustJITv2.h"
 #endif
 
 #include <bit>

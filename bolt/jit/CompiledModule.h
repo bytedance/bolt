@@ -18,30 +18,41 @@
 
 #ifdef ENABLE_BOLT_JIT
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
-
-#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::jit {
 
-// Use abstract class to separate LLVM dependencies to avoid fmt::fmt v8.0.1
-// compiling error. Since Impl class has to hold llvm::orc::ResourceTrackerSP
 struct CompiledModule {
-  virtual const char* getKey() const noexcept {
-    return nullptr;
-  }
-  virtual const intptr_t getFuncPtr(const std::string& fn) const {
-    return (intptr_t)0;
-  }
+  const char* getKey() const noexcept;
+  intptr_t getFuncPtr(const std::string& fn) const;
+  size_t getCodeSize() const noexcept;
 
-  virtual void setKey(const std::string& key) {}
-  virtual void setFuncPtr(const std::string& fn, intptr_t funcPtr) {}
+  void setKey(const std::string& key);
+  void setFuncPtr(const std::string& fn, intptr_t funcPtr);
+  void setCodeSize(size_t codeSize);
+  void appendCleanCallback(std::function<void()> cleanCallback);
 
-  virtual void setCachedTypes(std::vector<bytedance::bolt::TypePtr>&) {}
+  // type-erasured user data, CompiledModule does not own the data and won't
+  // manage its lifetime. The caller should make sure the data is valid during
+  // the module's lifetime.
+  void setUserData(void* data) noexcept;
+  void* getUserData() const noexcept;
 
-  virtual ~CompiledModule(){};
+  ~CompiledModule();
+
+ private:
+  std::string key_;
+  std::unordered_map<std::string, intptr_t> functions_;
+  size_t codeSize_{0};
+  std::vector<std::function<void()>> cleanCallbacks_;
+
+  void* userData_{nullptr};
 };
 
 using CompiledModuleSP = std::shared_ptr<CompiledModule>;
