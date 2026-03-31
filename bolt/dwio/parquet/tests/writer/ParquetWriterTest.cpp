@@ -511,7 +511,6 @@ TEST_F(ParquetWriterTest, allNulls) {
 
   dwio::common::ReaderOptions readerOptions{leafPool_.get()};
   auto reader = createReaderInMemory(*sinkPtr, readerOptions);
-
   ASSERT_EQ(reader->numberOfRows(), kRows);
   ASSERT_EQ(*reader->rowType(), *schema);
 
