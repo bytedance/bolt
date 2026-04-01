@@ -270,8 +270,7 @@ struct DecimalIntegralDivideBase {
  private:
   static uint8_t
   computeResultPrecision(uint8_t aPrecision, uint8_t aScale, uint8_t bScale) {
-    int32_t intPrecision =
-        static_cast<int32_t>(aPrecision) - aScale + bScale;
+    int32_t intPrecision = static_cast<int32_t>(aPrecision) - aScale + bScale;
     if (intPrecision == 0) {
       intPrecision = 1;
     }
@@ -290,7 +289,9 @@ template <bool Checked>
 class DecimalIntegralDivideFunction final : public exec::VectorFunction,
                                             private DecimalIntegralDivideBase {
  public:
-  explicit DecimalIntegralDivideFunction(const TypePtr& aType, const TypePtr& bType) {
+  explicit DecimalIntegralDivideFunction(
+      const TypePtr& aType,
+      const TypePtr& bType) {
     initializeBase(aType, bType);
   }
 
@@ -300,7 +301,8 @@ class DecimalIntegralDivideFunction final : public exec::VectorFunction,
       const TypePtr& resultType,
       exec::EvalCtx& context,
       VectorPtr& result) const override {
-    auto rawResults = prepareResults<int64_t>(rows, resultType, context, result);
+    auto rawResults =
+        prepareResults<int64_t>(rows, resultType, context, result);
 
     auto aType = args[0]->type();
     auto bType = args[1]->type();
