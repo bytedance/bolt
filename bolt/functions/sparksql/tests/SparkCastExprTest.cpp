@@ -429,6 +429,13 @@ TEST_F(SparkCastExprTest, floatToTimestamp) {
           std::nullopt,
           std::nullopt,
           std::nullopt,
+
+TEST_F(SparkCastExprTest, boolToTimestamp) {
+  testCast(
+      makeFlatVector<bool>({true, false}),
+      makeFlatVector<Timestamp>({
+          Timestamp(0, 1000),
+          Timestamp(0, 0),
       }));
 }
 
