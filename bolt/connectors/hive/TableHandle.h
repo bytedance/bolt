@@ -48,7 +48,8 @@ class HiveColumnHandle : public ColumnHandle {
     kSynthesized,
     kKey,
     kSequenceNumber,
-    kValueKind
+    kValueKind,
+    kRowIndex
   };
 
   /// NOTE: 'dataType' is the column type in target write table. 'hiveType' is

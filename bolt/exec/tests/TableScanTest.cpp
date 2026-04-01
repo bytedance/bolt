@@ -1880,6 +1880,45 @@ TEST_F(TableScanTest, partitionedTableDoubleKey) {
   testPartitionedTable(filePath->path, DOUBLE(), "3.5");
 }
 
+TEST_F(TableScanTest, partitionedTableDateKey) {
+  auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
+  auto vectors = makeVectors(10, 1'000, rowType);
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->getPath(), vectors);
+  createDuckDbTable(vectors);
+  const std::string partitionValue = "2023-10-27";
+  testPartitionedTable(filePath->getPath(), DATE(), partitionValue);
+
+  // Test partition filter on date column.
+  {
+    auto split = HiveConnectorSplitBuilder(filePath->getPath())
+                     .partitionKey("pkey", partitionValue)
+                     .build();
+    auto outputType = ROW({"pkey", "c0", "c1"}, {DATE(), BIGINT(), DOUBLE()});
+    ColumnHandleMap assignments = {
+        {"pkey", partitionKey("pkey", DATE())},
+        {"c0", regularColumn("c0", BIGINT())},
+        {"c1", regularColumn("c1", DOUBLE())}};
+
+    SubfieldFilters filters;
+    // pkey > 2020-09-01.
+    filters[common::Subfield("pkey")] = std::make_unique<common::BigintRange>(
+        18506, std::numeric_limits<int64_t>::max(), false);
+
+    auto tableHandle = std::make_shared<HiveTableHandle>(
+        "test-hive", "hive_table", true, std::move(filters), nullptr, nullptr);
+    auto op = std::make_shared<TableScanNode>(
+        "0",
+        std::move(outputType),
+        std::move(tableHandle),
+        std::move(assignments));
+
+    std::string partitionValueStr = "'" + partitionValue + "'";
+    assertQuery(
+        op, split, fmt::format("SELECT {}, * FROM tmp", partitionValueStr));
+  }
+}
+
 std::vector<StringView> toStringViews(const std::vector<std::string>& values) {
   std::vector<StringView> views;
   views.reserve(values.size());
@@ -4735,4 +4774,94 @@ TEST_F(TableScanTest, filterMissingFields) {
   test({"c2 IS NULL", "c0.c1 = 0"}, 0);
   test({"c0.c0 = 0", "c1.c0 = 0"}, 0);
   test({"c0.c0 = 0", "c1.c0 IS NULL"}, 1);
+}
+
+TEST_F(TableScanTest, dynamicFilterWithRowIndexColumn) {
+  auto aVector =
+      makeRowVector({"a"}, {makeFlatVector<int64_t>(10, folly::identity)});
+  auto bVector = makeRowVector({"b"}, {makeFlatVector<int64_t>(10, [](auto i) {
+                                 if (i < 5) {
+                                   return i;
+                                 }
+                                 return 10 + i;
+                               })});
+  auto resVector = makeRowVector(
+      {"row_index", "a"},
+      {makeFlatVector<int64_t>(5, folly::identity),
+       makeFlatVector<int64_t>(5, folly::identity)});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignments;
+  assignments["a"] = std::make_shared<connector::hive::HiveColumnHandle>(
+      "a",
+      connector::hive::HiveColumnHandle::ColumnType::kRegular,
+      BIGINT(),
+      BIGINT());
+  assignments["row_index"] =
+      std::make_shared<connector::hive::HiveColumnHandle>(
+          "row_index",
+          connector::hive::HiveColumnHandle::ColumnType::kRowIndex,
+          BIGINT(),
+          BIGINT());
+  std::shared_ptr<TempFilePath> files[2];
+  files[0] = TempFilePath::create();
+  writeToFile(files[0]->getPath(), {aVector});
+  files[1] = TempFilePath::create();
+  writeToFile(files[1]->getPath(), {bVector});
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId aScanId;
+  core::PlanNodeId bScanId;
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .tableScan(
+                      ROW({"row_index", "a"}, {BIGINT(), BIGINT()}),
+                      makeTableHandle({}, nullptr, "hive_table", nullptr),
+                      assignments)
+                  .capturePlanNodeId(aScanId)
+                  .hashJoin(
+                      {"a"},
+                      {"b"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .tableScan(ROW({"b"}, {BIGINT()}))
+                          .capturePlanNodeId(bScanId)
+                          .planNode(),
+                      "", /*filter*/
+                      {"row_index", "a"})
+                  .planNode();
+  AssertQueryBuilder(plan)
+      .split(aScanId, makeHiveConnectorSplit(files[0]->getPath()))
+      .split(bScanId, makeHiveConnectorSplit(files[1]->getPath()))
+      .assertResults(resVector);
+}
+
+TEST_F(TableScanTest, rowNumberInRemainingFilter) {
+  constexpr int kSize = 100;
+  auto vector = makeRowVector({
+      makeFlatVector<int64_t>(kSize, folly::identity),
+  });
+  auto file = TempFilePath::create();
+  writeToFile(file->getPath(), {vector});
+  auto outputType = ROW({"c0"}, {BIGINT()});
+  auto remainingFilter = parseExpr("r1 % 2 == 0", ROW({"r1"}, {BIGINT()}));
+  auto tableHandle = makeTableHandle(SubfieldFilters{}, remainingFilter);
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .outputType(outputType)
+                  .tableHandle(tableHandle)
+                  .assignments({
+                      {"c0", makeColumnHandle("c0", BIGINT(), {})},
+                      {"r1",
+                       std::make_shared<HiveColumnHandle>(
+                           "r1",
+                           HiveColumnHandle::ColumnType::kRowIndex,
+                           BIGINT(),
+                           BIGINT())},
+                  })
+                  .endTableScan()
+                  .planNode();
+  auto expected = makeRowVector(
+      {"c0"}, {makeFlatVector<int64_t>(kSize / 2, [](vector_size_t row) {
+        return row * 2;
+      })});
+  AssertQueryBuilder(plan)
+      .split(makeHiveConnectorSplit(file->getPath()))
+      .assertResults(expected);
 }
