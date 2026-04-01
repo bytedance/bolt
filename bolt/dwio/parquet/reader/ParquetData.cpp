@@ -33,6 +33,7 @@
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/ScanSpec.h"
 #include "bolt/dwio/parquet/reader/DictionaryFilter.h"
+#include "bolt/dwio/parquet/reader/ParquetStatsContext.h"
 #include "bolt/dwio/parquet/reader/Statistics.h"
 #include "bolt/type/filter/MapSubscriptFilter.h"
 namespace bytedance::bolt::parquet {
@@ -55,9 +56,16 @@ std::unique_ptr<dwio::common::FormatData> ParquetParams::toFormatData(
 void ParquetData::filterRowGroups(
     const common::ScanSpec& scanSpec,
     uint64_t /*rowsPerRowGroup*/,
-    const dwio::common::StatsContext& /*writerContext*/,
+    const dwio::common::StatsContext& writerContext,
     FilterRowGroupsResult& result,
     dwio::common::BufferedInput& input) {
+  auto parquetStatsContext =
+      reinterpret_cast<const ParquetStatsContext*>(&writerContext);
+  if (type_->parquetType_.has_value() &&
+      parquetStatsContext->shouldIgnoreStatistics(
+          type_->parquetType_.value())) {
+    return;
+  }
   result.totalCount = std::max<int>(result.totalCount, rowGroups_.size());
   auto nwords = bits::nwords(result.totalCount);
   if (result.filterResult.size() < nwords) {

@@ -47,6 +47,7 @@ bolt_add_library(
   StringColumnReader.cpp
   StructColumnReader.cpp
   VariantColumnReader.cpp
+  SemanticVersion.cpp
 )
 
 find_package(Arrow CONFIG REQUIRED)

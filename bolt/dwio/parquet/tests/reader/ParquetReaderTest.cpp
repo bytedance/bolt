@@ -1631,6 +1631,17 @@ TEST_F(ParquetReaderTest, struct_of_array_of_array) {
   }
 }
 
+TEST_F(ParquetReaderTest, parquet251) {
+  FilterMap filters;
+  filters.insert({"str", exec::equal("2")});
+  auto expected = makeRowVector({
+      makeFlatVector<std::string>({"2"}),
+  });
+  auto rowType = ROW({"str"}, {VARCHAR()});
+  assertReadWithFilters(
+      "parquet-251.parquet", rowType, std::move(filters), expected);
+}
+
 TEST_F(ParquetReaderTest, readDisputedNoLogicalType) {
   const std::string sample(getExampleFilePath("no_logical_type.parquet"));
   bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};

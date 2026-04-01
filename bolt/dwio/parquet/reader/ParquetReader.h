@@ -37,6 +37,7 @@
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/common/SelectiveColumnReader.h"
 #include "bolt/dwio/parquet/reader/Metadata.h"
+#include "bolt/dwio/parquet/reader/ParquetStatsContext.h"
 #include "bolt/dwio/parquet/reader/ParquetTypeWithId.h"
 #include "bolt/dwio/parquet/reader/Statistics.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"

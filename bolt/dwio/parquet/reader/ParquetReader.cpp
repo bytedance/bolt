@@ -39,6 +39,7 @@
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
 #include "bolt/dwio/parquet/reader/ParquetFooterCache.h"
 #include "bolt/dwio/parquet/reader/SchemaHelper.h"
+#include "bolt/dwio/parquet/reader/SemanticVersion.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
 #include "bolt/dwio/parquet/thrift/ThriftInternal.h"
@@ -130,6 +131,10 @@ class ReaderBase {
     return options_;
   }
 
+  std::optional<SemanticVersion> version() const {
+    return version_;
+  }
+
   /// Ensures that streams are enqueued and loading for the row group at
   /// 'currentGroup'. May start loading one or more subsequent groups.
   void scheduleRowGroups(
@@ -157,6 +162,8 @@ class ReaderBase {
   void loadFileMetaData();
 
   void initializeSchema();
+
+  void initializeVersion();
 
   std::shared_ptr<const ParquetTypeWithId> getParquetColumnInfo(
       uint32_t maxSchemaElementIdx,
@@ -196,6 +203,8 @@ class ReaderBase {
   std::shared_ptr<thrift::FileMetaData> fileMetaData_;
   RowTypePtr schema_;
   std::shared_ptr<const dwio::common::TypeWithId> schemaWithId_;
+
+  std::optional<SemanticVersion> version_;
 
   // Logical types keyed by dot-delimited field path from the root.
   std::unordered_map<std::string, thrift::LogicalType> logicalTypesByPath_;
@@ -245,6 +254,7 @@ ReaderBase::ReaderBase(
     ioStats->incLoadFileMetaDataTimeNs(loadFileMetaDataTimeNs);
   }
   initializeSchema();
+  initializeVersion();
 }
 
 void ReaderBase::loadFileMetaData() {
@@ -393,6 +403,10 @@ void ReaderBase::initializeSchema() {
   convertedTypesByPath_.clear();
   collectLogicalTypes(schemaWithId_, "");
   collectConvertedTypes(schemaWithId_, "");
+}
+
+void ReaderBase::initializeVersion() {
+  version_ = SemanticVersion::parse(fileMetaData_->created_by);
 }
 
 std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
@@ -1278,10 +1292,6 @@ void ReaderBase::parsePlainFooter() {
   }
 }
 
-namespace {
-struct ParquetStatsContext : dwio::common::StatsContext {};
-} // namespace
-
 class ParquetRowReader::Impl {
  public:
   Impl(
@@ -1312,6 +1322,7 @@ class ParquetRowReader::Impl {
     if (rowGroups_.empty()) {
       return; // TODO
     }
+    parquetStatsContext_ = ParquetStatsContext(readerBase_->version());
     ParquetParams params(
         pool_,
         columnReaderStats_,
@@ -1453,7 +1464,7 @@ class ParquetRowReader::Impl {
 
     ParquetData::FilterRowGroupsResult res;
     columnReader_->filterRowGroups(
-        0, ParquetStatsContext(), res, readerBase_->bufferedInput());
+        0, parquetStatsContext_, res, readerBase_->bufferedInput());
     if (auto& metadataFilter = options_.getMetadataFilter()) {
       metadataFilter->eval(res.metadataFilterResults, res.filterResult);
     }
@@ -1691,6 +1702,8 @@ class ParquetRowReader::Impl {
 
   RowTypePtr requestedType_;
   dwio::common::ColumnReaderOptions columnReaderOptions_;
+
+  ParquetStatsContext parquetStatsContext_;
 
   dwio::common::ColumnReaderStatistics columnReaderStats_;
   SchemaHelper schemaHelper_;
