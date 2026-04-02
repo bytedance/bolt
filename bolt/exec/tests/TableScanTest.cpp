@@ -1880,6 +1880,45 @@ TEST_F(TableScanTest, partitionedTableDoubleKey) {
   testPartitionedTable(filePath->path, DOUBLE(), "3.5");
 }
 
+TEST_F(TableScanTest, partitionedTableDateKey) {
+  auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
+  auto vectors = makeVectors(10, 1'000, rowType);
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->getPath(), vectors);
+  createDuckDbTable(vectors);
+  const std::string partitionValue = "2023-10-27";
+  testPartitionedTable(filePath->getPath(), DATE(), partitionValue);
+
+  // Test partition filter on date column.
+  {
+    auto split = HiveConnectorSplitBuilder(filePath->getPath())
+                     .partitionKey("pkey", partitionValue)
+                     .build();
+    auto outputType = ROW({"pkey", "c0", "c1"}, {DATE(), BIGINT(), DOUBLE()});
+    ColumnHandleMap assignments = {
+        {"pkey", partitionKey("pkey", DATE())},
+        {"c0", regularColumn("c0", BIGINT())},
+        {"c1", regularColumn("c1", DOUBLE())}};
+
+    SubfieldFilters filters;
+    // pkey > 2020-09-01.
+    filters[common::Subfield("pkey")] = std::make_unique<common::BigintRange>(
+        18506, std::numeric_limits<int64_t>::max(), false);
+
+    auto tableHandle = std::make_shared<HiveTableHandle>(
+        "test-hive", "hive_table", true, std::move(filters), nullptr, nullptr);
+    auto op = std::make_shared<TableScanNode>(
+        "0",
+        std::move(outputType),
+        std::move(tableHandle),
+        std::move(assignments));
+
+    std::string partitionValueStr = "'" + partitionValue + "'";
+    assertQuery(
+        op, split, fmt::format("SELECT {}, * FROM tmp", partitionValueStr));
+  }
+}
+
 std::vector<StringView> toStringViews(const std::vector<std::string>& values) {
   std::vector<StringView> views;
   views.reserve(values.size());
