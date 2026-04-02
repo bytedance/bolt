@@ -33,6 +33,7 @@
 #include "bolt/dwio/common/Writer.h"
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/SortBuffer.h"
+#include "bolt/vector/TypeAliases.h"
 namespace bytedance::bolt::dwio::common {
 
 /// Sorting Writer object is used to write sorted data into a single file.
@@ -41,7 +42,7 @@ class SortingWriter : public Writer {
   SortingWriter(
       std::unique_ptr<Writer> writer,
       std::unique_ptr<exec::SortBuffer> sortBuffer,
-      uint32_t maxOutputRowsConfig,
+      vector_size_t maxOutputRowsConfig,
       uint64_t maxOutputBytesConfig,
       bolt::common::SpillStats* spillStats);
 
@@ -87,10 +88,10 @@ class SortingWriter : public Writer {
 
   uint64_t reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats);
 
-  uint32_t outputBatchRows();
+  vector_size_t outputBatchRows();
 
   const std::unique_ptr<Writer> outputWriter_;
-  const uint32_t maxOutputRowsConfig_;
+  const vector_size_t maxOutputRowsConfig_;
   const uint64_t maxOutputBytesConfig_;
   memory::MemoryPool* const sortPool_;
   const bool canReclaim_;

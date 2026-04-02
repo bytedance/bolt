@@ -144,8 +144,8 @@ class TableScan : public SourceOperator {
 
   uint64_t prepareSplitTimeNs_{0};
 
-  int32_t readBatchSize_;
-  int32_t maxReadBatchSize_;
+  vector_size_t readBatchSize_;
+  vector_size_t maxReadBatchSize_;
   int32_t minReadBatchSize_;
 
   // Exits getOutput() method after this many milliseconds.

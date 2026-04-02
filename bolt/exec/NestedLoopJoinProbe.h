@@ -315,7 +315,7 @@ class NestedLoopJoinProbe : public Operator {
 
   // Maximum number of rows in the output batch. Dynamically adjusted based on
   // observed output row size to stay within preferredOutputBatchBytes.
-  uint32_t outputBatchSize_;
+  vector_size_t outputBatchSize_;
 
   // The current output batch being populated.
   RowVectorPtr output_;

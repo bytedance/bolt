@@ -29,12 +29,13 @@
  */
 
 #include "bolt/dwio/common/SortingWriter.h"
+#include <limits>
 namespace bytedance::bolt::dwio::common {
 
 SortingWriter::SortingWriter(
     std::unique_ptr<Writer> writer,
     std::unique_ptr<exec::SortBuffer> sortBuffer,
-    uint32_t maxOutputRowsConfig,
+    vector_size_t maxOutputRowsConfig,
     uint64_t maxOutputBytesConfig,
     bolt::common::SpillStats* spillStats)
     : outputWriter_(std::move(writer)),
@@ -133,12 +134,19 @@ uint64_t SortingWriter::reclaim(
   return reclaimBytes;
 }
 
-uint32_t SortingWriter::outputBatchRows() {
-  uint32_t estimatedMaxOutputRows = UINT_MAX;
+vector_size_t SortingWriter::outputBatchRows() {
+  vector_size_t estimatedMaxOutputRows =
+      std::numeric_limits<vector_size_t>::max();
   if (sortBuffer_->estimateOutputRowSize().has_value() &&
       sortBuffer_->estimateOutputRowSize().value() != 0) {
-    estimatedMaxOutputRows =
+    const uint64_t maxOutputRows =
         maxOutputBytesConfig_ / sortBuffer_->estimateOutputRowSize().value();
+
+    if (UNLIKELY(maxOutputRows > std::numeric_limits<vector_size_t>::max())) {
+      return maxOutputRowsConfig_;
+    }
+
+    estimatedMaxOutputRows = maxOutputRows;
   }
   return std::min(estimatedMaxOutputRows, maxOutputRowsConfig_);
 }

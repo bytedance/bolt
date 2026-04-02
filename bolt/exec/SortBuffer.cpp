@@ -212,7 +212,7 @@ void SortBuffer::noMoreInput() {
   pool_->release();
 }
 
-RowVectorPtr SortBuffer::getOutput(uint32_t maxOutputRows) {
+RowVectorPtr SortBuffer::getOutput(vector_size_t maxOutputRows) {
   BOLT_CHECK(noMoreInput_);
 
   if (numOutputRows_ == numInputRows_) {
@@ -433,7 +433,7 @@ void SortBuffer::spillOutput() {
   finishSpill();
 }
 
-void SortBuffer::prepareOutput(uint32_t batchSize) {
+void SortBuffer::prepareOutput(vector_size_t batchSize) {
   if (output_ != nullptr) {
     VectorPtr output = std::move(output_);
     BaseVector::prepareForReuse(output, batchSize);
