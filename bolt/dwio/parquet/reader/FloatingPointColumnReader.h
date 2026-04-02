@@ -49,6 +49,13 @@ class FloatingPointColumnReader
       ParquetParams& params,
       common::ScanSpec& scanSpec);
 
+  // Parquet floating point reader always supports a bulk path
+  static constexpr bool kHasBulkPath = true;
+
+  bool hasBulkPath() const override {
+    return kHasBulkPath;
+  }
+
   void seekToRowGroup(int64_t index) override {
     base::seekToRowGroup(index);
     this->scanState().clear();
@@ -79,7 +86,16 @@ FloatingPointColumnReader<TData, TRequested>::FloatingPointColumnReader(
           requestedType,
           std::move(fileType),
           params,
-          scanSpec) {}
+          scanSpec) {
+  BOLT_DCHECK(
+      (this->requestedType_->kind() == TypeKind::REAL &&
+       std::is_same_v<TRequested, float>) ||
+          (this->requestedType_->kind() == TypeKind::DOUBLE &&
+           std::is_same_v<TRequested, double>),
+      "TRequested type mismatch: template parameter is {}, but requestedType is {}",
+      folly::demangle(typeid(TRequested)),
+      this->requestedType_->toString());
+}
 
 template <typename TData, typename TRequested>
 uint64_t FloatingPointColumnReader<TData, TRequested>::skip(
