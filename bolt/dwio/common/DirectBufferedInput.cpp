@@ -258,10 +258,12 @@ void DirectBufferedInput::readRegions(
             process::TraceContext trace("Read Ahead");
             BOLT_CHECK_NOT_NULL(asyncLoad.load);
             auto res = asyncLoad.load->loadOrFuture(nullptr);
-            LOG_IF(INFO, !res)
-                << "Preload fails to load " << (uint64_t)asyncLoad.load.get()
-                << " by async thread " << folly::getCurrentThreadName().value();
-            asyncLoad.asyncThreadCtx->disallowPreload();
+            if (!res) {
+              LOG(INFO) << "Preload fails to load "
+                        << (uint64_t)asyncLoad.load.get() << " by async thread "
+                        << folly::getCurrentThreadName().value();
+              asyncLoad.asyncThreadCtx->disallowPreload();
+            }
           }
         });
       }
