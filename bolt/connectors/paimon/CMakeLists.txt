@@ -11,10 +11,15 @@ bolt_add_library(
     BoltMemoryPool.h
 )
 
+if(${BOLT_ENABLE_HDFS})
+  target_sources(bolt_connector_paimon PRIVATE PaimonBoltHdfsFileSystem.cpp)
+endif()
+
 target_link_libraries(
   bolt_connector_paimon
   PUBLIC bolt_common_io
          bolt_connector
+         $<$<BOOL:${BOLT_ENABLE_HDFS}>:bolt_hdfs>
          bolt_dwio_parquet_reader
          bolt_dwio_parquet_writer
          bolt_file

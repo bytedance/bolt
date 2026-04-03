@@ -1,11 +1,18 @@
 # Copyright (c) ByteDance Ltd. and/or its affiliates.
 # SPDX-License-Identifier: Apache-2.0
 
-add_executable(bolt_paimon_connector_test
+set(PAIMON_CONNECTOR_TEST_SOURCES
     PaimonConnectorTest.cpp
     PaimonParquetReaderTest.cpp
-    PaimonFilterPushdownTest.cpp
-)
+    PaimonFilterPushdownTest.cpp)
+
+if(BOLT_ENABLE_HDFS)
+  list(APPEND PAIMON_CONNECTOR_TEST_SOURCES
+      PaimonHdfsFileSystemTest.cpp
+      HdfsContainerMiniCluster.cpp)
+endif()
+
+add_executable(bolt_paimon_connector_test ${PAIMON_CONNECTOR_TEST_SOURCES})
 
 add_test(bolt_paimon_connector_test bolt_paimon_connector_test)
 

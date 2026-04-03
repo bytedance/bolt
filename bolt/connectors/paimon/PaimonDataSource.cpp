@@ -11,7 +11,9 @@
 #include <paimon/table/source/split.h>
 #include <paimon/table/source/table_read.h>
 #include <paimon/type_fwd.h>
+#include <map>
 #include <memory>
+#include "bolt/connectors/paimon/PaimonBoltHdfsFileSystem.h"
 #include "bolt/type/Type.h"
 #include "connectors/paimon/BoltMemoryPool.h"
 #include "vector/FlatVector.h"
@@ -50,6 +52,13 @@ PaimonDataSource::PaimonDataSource(
   ctxBuilder.EnableMultiThreadRowToBatch(false); // Disabled to simplify testing
   ctxBuilder.WithMemoryPool(paimonPool_);
   ctxBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local");
+
+#ifdef BOLT_ENABLE_HDFS
+  // Enable hdfs:// scheme resolution to Bolt-backed paimon filesystem.
+  EnsurePaimonBoltHdfsFileSystemRegistered();
+  ctxBuilder.WithFileSystemSchemeToIdentifierMap(
+      std::map<std::string, std::string>{{"hdfs", "bolt_hdfs"}});
+#endif
   for (const auto& [key, value] : tableHandle_->tableProperties()) {
     ctxBuilder.AddOption(key, value);
     LOG(INFO) << "Added table option <" << key << "=" << value << ">";
