@@ -372,11 +372,6 @@ uint32_t maxDrivers(
     else if (node->name() == "ValueStream") {
       return 1;
     }
-    // multi-threaded spark: SparkShuffleReader is designed to be
-    // single-threaded for now. This assumption might not hold in the future.
-    else if (node->name() == "SparkShuffleReader") {
-      return 1;
-    }
     // multi-threaded spark: SparkShuffleWriter is designed to be
     // single-threaded for now. This assumption might not hold in the future.
     else if (node->name() == "SparkShuffleWriter") {

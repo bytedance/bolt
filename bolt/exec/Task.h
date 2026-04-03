@@ -42,6 +42,13 @@
 #include "bolt/exec/TaskStructs.h"
 #include "bolt/exec/TraceConfig.h"
 #include "bolt/vector/ComplexVector.h"
+
+#ifdef SPARK_COMPATIBLE
+namespace bytedance::bolt::shuffle::sparksql {
+class BoltShuffleReaderClient;
+} // namespace bytedance::bolt::shuffle::sparksql
+#endif
+
 namespace bytedance::bolt::exec {
 
 class OutputBufferManager;
@@ -734,6 +741,39 @@ class Task : public std::enable_shared_from_this<Task> {
     return numThreads_;
   }
 
+#ifdef SPARK_COMPATIBLE
+  std::shared_ptr<shuffle::sparksql::BoltShuffleReaderClient>
+  getOrCreateShuffleReaderClient(
+      int32_t pipelineId,
+      const core::PlanNodeId& planNodeId,
+      std::function<
+          std::shared_ptr<shuffle::sparksql::BoltShuffleReaderClient>()>
+          initClient) {
+    BOLT_CHECK_GE(pipelineId, 0);
+    const auto pipelineIndex = static_cast<size_t>(pipelineId);
+    BOLT_CHECK_LT(pipelineIndex, shuffleReaderClients_.size());
+    std::lock_guard<std::mutex> l(
+        shuffleReaderClientsInitFlags_[pipelineIndex]);
+    if (!shuffleReaderClients_[pipelineIndex]) {
+      shuffleReaderClients_[pipelineIndex] = initClient();
+      shuffleReaderClientByPlanNode_.emplace(
+          planNodeId, shuffleReaderClients_[pipelineIndex]);
+    }
+    return shuffleReaderClients_[pipelineIndex];
+  }
+
+  bolt::memory::MemoryPool* addShuffleReaderClientPool(
+      const core::PlanNodeId& planNodeId,
+      uint32_t pipelineId) {
+    auto* nodePool = getOrAddNodePool(planNodeId);
+    childPools_.push_back(nodePool->addLeafChild(
+        fmt::format("shuffleReaderClient.{}.{}", planNodeId, pipelineId),
+        true,
+        createExchangeClientReclaimer()));
+    return childPools_.back().get();
+  }
+#endif
+
  private:
   Task(
       const std::string& taskId,
@@ -1156,6 +1196,16 @@ class Task : public std::enable_shared_from_this<Task> {
   // process remaining remote splits after the task has completed early.
   std::unordered_map<core::PlanNodeId, std::shared_ptr<ExchangeClient>>
       exchangeClientByPlanNode_;
+
+#ifdef SPARK_COMPATIBLE
+  std::vector<std::shared_ptr<shuffle::sparksql::BoltShuffleReaderClient>>
+      shuffleReaderClients_;
+  std::unordered_map<
+      core::PlanNodeId,
+      std::shared_ptr<shuffle::sparksql::BoltShuffleReaderClient>>
+      shuffleReaderClientByPlanNode_;
+  std::vector<std::mutex> shuffleReaderClientsInitFlags_;
+#endif
 
   ConsumerSupplier consumerSupplier_;
 
