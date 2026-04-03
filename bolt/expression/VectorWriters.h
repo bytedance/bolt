@@ -435,6 +435,14 @@ struct VectorWriter<Variant> : public VectorWriterBase {
 
   void init(vector_t& vector, const void* /*values*/ = nullptr) {
     variantVector_ = &vector;
+    BOLT_CHECK(
+        vector.valueChildVector()->isFlatEncoding(),
+        "Variant value child must use flat encoding, got {}",
+        vector.valueChildVector()->encoding());
+    BOLT_CHECK(
+        vector.metadataChildVector()->isFlatEncoding(),
+        "Variant metadata child must use flat encoding, got {}",
+        vector.metadataChildVector()->encoding());
     valueWriter_.init(
         static_cast<FlatVector<StringView>&>(*vector.valueChildVector()));
     metadataWriter_.init(
@@ -462,8 +470,8 @@ struct VectorWriter<Variant> : public VectorWriterBase {
 
   void ensureSize(size_t size) override {
     if (size > variantVector_->size()) {
-      valueWriter_.ensureSize(size);
-      metadataWriter_.ensureSize(size);
+      // VariantVector::resize() already resizes both children, so do this once
+      // via the parent to avoid redundant child resize calls.
       variantVector_->resize(size, /*setNotNull*/ false);
     }
   }

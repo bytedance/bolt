@@ -75,10 +75,10 @@ class VariantVector : public BaseVector {
   }
 
   void resize(vector_size_t size, bool setNotNull = true) override {
-    // Resize parent first so that if a child resize throws (e.g. OOM),
-    // the parent length is already consistent with the intent. Children
-    // that haven't been resized yet will still have valid data for the
-    // old size, which is a safe (if stale) state.
+    // Resize the parent first to record the requested logical length before
+    // touching the child buffers. If a child resize throws (for example on
+    // OOM), the parent size reflects the requested length while any children
+    // that were not resized still retain their previously valid contents.
     BaseVector::resize(size, setNotNull);
     for (auto& child : children_) {
       child->resize(size, setNotNull);
@@ -93,8 +93,9 @@ class VariantVector : public BaseVector {
   /// The same logical value (e.g., integer 42) can have different binary
   /// representations (INT1 vs INT4 vs INT8), which will compare as unequal.
   /// This means GROUP BY, JOIN, DISTINCT, and ORDER BY on VARIANT columns
-  /// may produce incorrect results. Use only for internal row container
-  /// operations where byte-level comparison is acceptable.
+  /// may produce incorrect results. Use only for internal row-container
+  /// serialization paths, such as ContainerRowSerde equality/order checks,
+  /// where both sides use Bolt's exact serialized representation.
   std::optional<int32_t> compare(
       const BaseVector* other,
       vector_size_t index,

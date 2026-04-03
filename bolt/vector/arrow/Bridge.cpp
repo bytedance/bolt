@@ -32,6 +32,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <string_view>
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -52,9 +53,15 @@ namespace {
 // The supported conversions use one buffer for nulls (0), one for values (1),
 // and one for offsets (2).
 static constexpr size_t kMaxBuffers{3};
+constexpr const char kArrowExtensionNameKey[] = "ARROW:extension:name";
+constexpr const char kSparkVariantExtensionName[] = "spark.variant";
 
 void clearNullableFlag(int64_t& flags) {
   flags = flags & (~ARROW_FLAG_NULLABLE);
+}
+
+void appendArrowMetadataInt32(std::string& metadata, int32_t value) {
+  metadata.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
 // Structure that will hold the buffers needed by ArrowArray. This is opaquely
@@ -173,6 +180,9 @@ struct BoltToArrowSchemaBridgeHolder {
   // format.
   std::string formatBuffer;
 
+  // Buffer for ArrowSchema.metadata when exporting extension types.
+  std::string metadataBuffer;
+
   void setChildAtIndex(
       size_t index,
       std::unique_ptr<ArrowSchema>&& child,
@@ -189,6 +199,22 @@ struct BoltToArrowSchemaBridgeHolder {
     schema.children[index] = childrenOwned[index].get();
   }
 };
+
+void setArrowMetadataEntry(
+    ArrowSchema& arrowSchema,
+    BoltToArrowSchemaBridgeHolder& bridgeHolder,
+    std::string_view key,
+    std::string_view value) {
+  bridgeHolder.metadataBuffer.clear();
+  appendArrowMetadataInt32(bridgeHolder.metadataBuffer, 1);
+  appendArrowMetadataInt32(
+      bridgeHolder.metadataBuffer, static_cast<int32_t>(key.size()));
+  bridgeHolder.metadataBuffer.append(key.data(), key.size());
+  appendArrowMetadataInt32(
+      bridgeHolder.metadataBuffer, static_cast<int32_t>(value.size()));
+  bridgeHolder.metadataBuffer.append(value.data(), value.size());
+  arrowSchema.metadata = bridgeHolder.metadataBuffer.data();
+}
 
 // Release function for ArrowArray. Arrow standard requires it to recurse down
 // to children and dictionary arrays, and set release and private_data to null
@@ -1979,7 +2005,8 @@ TypePtr importFromArrowImpl(
               meta += 4;
               std::string_view val(meta, valLen);
               meta += valLen;
-              if (key == "ARROW:extension:name" && val == "spark.variant") {
+              if (key == kArrowExtensionNameKey &&
+                  val == kSparkVariantExtensionName) {
                 isVariant = true;
                 break;
               }
@@ -2063,7 +2090,6 @@ void exportVariantToArrowSchema(
     const ArrowOptions& options,
     BoltToArrowSchemaBridgeHolder* bridgeHolder,
     memory::MemoryPool* pool) {
-  auto& type = variant.type();
   auto numChildren = variant.childrenSize();
   bridgeHolder->childrenRaw.resize(numChildren);
   bridgeHolder->childrenOwned.resize(numChildren);
@@ -2073,6 +2099,11 @@ void exportVariantToArrowSchema(
     child->name = (i == 0) ? "value" : "metadata";
     bridgeHolder->setChildAtIndex(i, std::move(child), arrowSchema);
   }
+  setArrowMetadataEntry(
+      arrowSchema,
+      *bridgeHolder,
+      kArrowExtensionNameKey,
+      kSparkVariantExtensionName);
 }
 
 void exportRowToArrowSchema(

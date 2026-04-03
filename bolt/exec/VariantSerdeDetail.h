@@ -11,6 +11,11 @@
 
 namespace bytedance::bolt::exec::variant_serde {
 
+using DeserializeStringFunction =
+    void (*)(ByteInputStream&, vector_size_t, BaseVector&, bool);
+
+using ReadStringViewFunction = StringView (*)(ByteInputStream&, std::string&);
+
 /// Serialize a VARIANT value (value + metadata) to a stream.
 /// Works with any stream type that supports appendOne<T> and appendStringView.
 template <typename StreamT>
@@ -42,11 +47,7 @@ inline void deserializeVariant(
     bool exactSize,
     // Pointer to the deserializeString function (different signatures in each
     // serde implementation, but same behavior for our purposes).
-    void (*deserializeString)(
-        ByteInputStream&,
-        vector_size_t,
-        BaseVector&,
-        bool)) {
+    DeserializeStringFunction deserializeString) {
   if (result.encoding() == VectorEncoding::Simple::VARIANT) {
     auto variantVector = result.asUnchecked<VariantVector>();
     deserializeString(in, index, *variantVector->valueChildVector(), exactSize);
@@ -97,7 +98,7 @@ inline std::optional<int32_t> compareVariantStreamVsVector(
     const BaseVector& right,
     vector_size_t index,
     CompareFlags flags,
-    StringView (*readSV)(ByteInputStream&, std::string&)) {
+    ReadStringViewFunction readSV) {
   const auto* wrapped = right.wrappedVector();
   BOLT_CHECK_EQ(
       wrapped->encoding(),
@@ -124,7 +125,7 @@ inline std::optional<int32_t> compareVariantStreamVsStream(
     ByteInputStream& left,
     ByteInputStream& right,
     CompareFlags flags,
-    StringView (*readSV)(ByteInputStream&, std::string&)) {
+    ReadStringViewFunction readSV) {
   std::string leftStorage;
   std::string rightStorage;
   StringView leftValue = readSV(left, leftStorage);
@@ -141,10 +142,11 @@ inline std::optional<int32_t> compareVariantStreamVsStream(
 /// Hash a serialized VARIANT value from a stream.
 inline uint64_t hashVariant(
     ByteInputStream& stream,
-    StringView (*readSV)(ByteInputStream&, std::string&)) {
-  std::string storage;
-  auto value = readSV(stream, storage);
-  auto metadata = readSV(stream, storage);
+    ReadStringViewFunction readSV) {
+  std::string valueStorage;
+  std::string metadataStorage;
+  auto value = readSV(stream, valueStorage);
+  auto metadata = readSV(stream, metadataStorage);
   return folly::hasher<VariantValue>()({value, metadata});
 }
 
