@@ -35,7 +35,7 @@
 #include "bolt/parse/Expressions.h"
 #include "bolt/type/Variant.h"
 
-#include <sstream>
+#include <cmath>
 
 #include <duckdb.hpp> // @manual
 #include <duckdb/parser/expression/between_expression.hpp> // @manual
@@ -253,116 +253,6 @@ std::shared_ptr<const core::ConstantExpr> tryParseInterval(
       INTERVAL_DAY_TIME(), variant(value.value() * multiplier), alias);
 }
 
-std::shared_ptr<const core::ConstantExpr> tryParseIntervalWithUnit(
-    const std::shared_ptr<const core::IExpr>& input,
-    const std::shared_ptr<const core::IExpr>& unit,
-    const std::optional<std::string>& alias) {
-  std::optional<int64_t> value;
-  if (const auto* constInput =
-          dynamic_cast<const core::ConstantExpr*>(input.get())) {
-    if (constInput->type()->isBigint() && !constInput->value().isNull()) {
-      value = constInput->value().value<int64_t>();
-    }
-  } else if (
-      const auto* castInput =
-          dynamic_cast<const core::CastExpr*>(input.get())) {
-    if (castInput->type()->isBigint()) {
-      if (const auto* constInput = dynamic_cast<const core::ConstantExpr*>(
-              castInput->getInput().get())) {
-        if (constInput->type()->isBigint() && !constInput->value().isNull()) {
-          value = constInput->value().value<int64_t>();
-        }
-      }
-    }
-  }
-
-  if (!value.has_value()) {
-    return nullptr;
-  }
-
-  const auto* unitExpr = dynamic_cast<const core::ConstantExpr*>(unit.get());
-  if (!unitExpr || !unitExpr->type()->isVarchar() ||
-      unitExpr->value().isNull()) {
-    return nullptr;
-  }
-
-  const auto unitName =
-      StringUtil::Lower(unitExpr->value().value<std::string>());
-  int64_t multiplier;
-  if (unitName == "hour" || unitName == "hours") {
-    multiplier = 60 * 60 * 1'000;
-  } else if (unitName == "minute" || unitName == "minutes") {
-    multiplier = 60 * 1'000;
-  } else if (unitName == "second" || unitName == "seconds") {
-    multiplier = 1'000;
-  } else if (unitName == "millisecond" || unitName == "milliseconds") {
-    multiplier = 1;
-  } else {
-    return nullptr;
-  }
-
-  return std::make_shared<core::ConstantExpr>(
-      INTERVAL_DAY_TIME(), variant(value.value() * multiplier), alias);
-}
-
-std::shared_ptr<const core::ConstantExpr> tryParseIntervalLiteral(
-    const std::string& exprString) {
-  std::string trimmed = exprString;
-  StringUtil::Trim(trimmed);
-  auto lower = StringUtil::Lower(trimmed);
-  if (!StringUtil::StartsWith(lower, "interval ")) {
-    return nullptr;
-  }
-
-  std::istringstream iss(trimmed);
-  std::string keyword;
-  iss >> keyword;
-  if (StringUtil::Lower(keyword) != "interval") {
-    return nullptr;
-  }
-
-  std::string valueToken;
-  std::string unitToken;
-  if (!(iss >> valueToken >> unitToken)) {
-    return nullptr;
-  }
-
-  int64_t value;
-  try {
-    value = std::stoll(valueToken);
-  } catch (const std::exception&) {
-    return nullptr;
-  }
-
-  std::optional<std::string> alias;
-  std::string maybeAs;
-  if (iss >> maybeAs) {
-    if (StringUtil::Lower(maybeAs) == "as") {
-      std::string aliasToken;
-      if (iss >> aliasToken) {
-        alias = aliasToken;
-      }
-    }
-  }
-
-  const auto unitName = StringUtil::Lower(unitToken);
-  int64_t multiplier;
-  if (unitName == "hour" || unitName == "hours") {
-    multiplier = 60 * 60 * 1'000;
-  } else if (unitName == "minute" || unitName == "minutes") {
-    multiplier = 60 * 1'000;
-  } else if (unitName == "second" || unitName == "seconds") {
-    multiplier = 1'000;
-  } else if (unitName == "millisecond" || unitName == "milliseconds") {
-    multiplier = 1;
-  } else {
-    return nullptr;
-  }
-
-  return std::make_shared<core::ConstantExpr>(
-      INTERVAL_DAY_TIME(), variant(value * multiplier), alias);
-}
-
 // Parse a function call (avg(a), func(1, b), etc).
 // Arithmetic operators also follow this path (a + b, a * b, etc).
 std::shared_ptr<const core::IExpr> parseFunctionExpr(
@@ -379,13 +269,6 @@ std::shared_ptr<const core::IExpr> parseFunctionExpr(
 
   if (params.size() == 1) {
     if (auto interval = tryParseInterval(func, params[0], getAlias(expr))) {
-      return interval;
-    }
-  }
-
-  if (func == "interval" && params.size() == 2) {
-    if (auto interval =
-            tryParseIntervalWithUnit(params[0], params[1], getAlias(expr))) {
       return interval;
     }
   }
@@ -799,9 +682,6 @@ std::unique_ptr<::duckdb::ParsedExpression> parseSingleExpression(
 std::shared_ptr<const core::IExpr> parseExpr(
     const std::string& exprString,
     const ParseOptions& options) {
-  if (auto interval = tryParseIntervalLiteral(exprString)) {
-    return interval;
-  }
   auto parsed = parseSingleExpression(exprString);
   return parseExpr(*parsed, options);
 }
