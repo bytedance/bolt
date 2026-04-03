@@ -49,7 +49,7 @@ class MicrosecondTimer {
   }
 
   ~MicrosecondTimer() {
-    if (FOLLY_LIKELY(timer_)) {
+    if (FOLLY_LIKELY(timer_ != nullptr)) {
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - start_);
 
@@ -72,7 +72,7 @@ class NanosecondTimer {
   }
 
   ~NanosecondTimer() {
-    if (FOLLY_LIKELY(timer_)) {
+    if (FOLLY_LIKELY(timer_ != nullptr)) {
       auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - start_);
 

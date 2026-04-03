@@ -132,6 +132,9 @@ struct PartitionWriterOptions {
   // for LocalPartitionWriter
   std::string dataFile;
   std::vector<std::string> configuredDirs;
+  // For parallel SparkShuffleWriter + LocalPartitionWriter execution, partial
+  // files use a per-driver suffix when part >= 0.
+  int32_t part = -1;
 
   // for CelebornPartitionWriter
   std::shared_ptr<RssClient> rssClient;
@@ -168,6 +171,8 @@ struct ShuffleWriterMetrics {
   int64_t totalEvictTime{0};
   int64_t totalCompressTime{0};
   int64_t maxPartitionBufferSize{0};
+  int64_t totalPreallocSize{0};
+  int64_t totalPreallocCount{0};
   int64_t avgPreallocSize{0};
   int64_t useV2{0};
   int64_t rowVectorModeCompress{0};
@@ -184,6 +189,57 @@ struct ShuffleWriterMetrics {
   int64_t dataSize{0};
   std::vector<int64_t> partitionLengths{};
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
+  std::string dataFile{};
+
+  ShuffleWriterMetrics& operator+=(const ShuffleWriterMetrics& rhs) {
+    totalInputRowNumber += rhs.totalInputRowNumber;
+    totalInputBatches += rhs.totalInputBatches;
+    totalBytesWritten += rhs.totalBytesWritten;
+    totalBytesEvicted += rhs.totalBytesEvicted;
+    totalWriteTime += rhs.totalWriteTime;
+    totalEvictTime += rhs.totalEvictTime;
+    totalCompressTime += rhs.totalCompressTime;
+    maxPartitionBufferSize =
+        std::max(maxPartitionBufferSize, rhs.maxPartitionBufferSize);
+    totalPreallocSize += rhs.totalPreallocSize;
+    totalPreallocCount += rhs.totalPreallocCount;
+    avgPreallocSize =
+        totalPreallocCount == 0 ? 0 : totalPreallocSize / totalPreallocCount;
+    useV2 = rhs.useV2;
+    rowVectorModeCompress += rhs.rowVectorModeCompress;
+    combinedVectorNumber += rhs.combinedVectorNumber;
+    combineVectorTimes += rhs.combineVectorTimes;
+    combineVectorCost += rhs.combineVectorCost;
+    useRowBased += rhs.useRowBased;
+    splitTime += rhs.splitTime;
+    convertTime += rhs.convertTime;
+    flattenTime += rhs.flattenTime;
+    computePidTime += rhs.computePidTime;
+    shuffleWriteTime += rhs.shuffleWriteTime;
+    dataSize += rhs.dataSize;
+
+    if (!rhs.partitionLengths.empty()) {
+      if (partitionLengths.empty()) {
+        partitionLengths.resize(rhs.partitionLengths.size(), 0);
+      }
+      BOLT_CHECK_EQ(partitionLengths.size(), rhs.partitionLengths.size());
+      for (size_t i = 0; i < partitionLengths.size(); ++i) {
+        partitionLengths[i] += rhs.partitionLengths[i];
+      }
+    }
+
+    if (!rhs.rawPartitionLengths.empty()) {
+      if (rawPartitionLengths.empty()) {
+        rawPartitionLengths.resize(rhs.rawPartitionLengths.size(), 0);
+      }
+      BOLT_CHECK_EQ(rawPartitionLengths.size(), rhs.rawPartitionLengths.size());
+      for (size_t i = 0; i < rawPartitionLengths.size(); ++i) {
+        rawPartitionLengths[i] += rhs.rawPartitionLengths[i];
+      }
+    }
+
+    return *this;
+  }
 };
 
 // Only partitioning that has pid support adaptive shuffle writer, otherwise

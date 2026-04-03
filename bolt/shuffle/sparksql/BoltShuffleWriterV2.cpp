@@ -262,6 +262,14 @@ arrow::Status BoltShuffleWriterV2::initPartitions() {
 }
 
 arrow::Status BoltShuffleWriterV2::stop() {
+  return stopInternal(true);
+}
+
+arrow::Status BoltShuffleWriterV2::localStop() {
+  return stopInternal(false);
+}
+
+arrow::Status BoltShuffleWriterV2::stopInternal(bool stopPartitionWriter) {
   bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     partitionWriter_->setRowFormat(false);
@@ -275,7 +283,11 @@ arrow::Status BoltShuffleWriterV2::stop() {
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
       setSplitState(SplitState::kStop);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      if (stopPartitionWriter) {
+        RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      } else {
+        RETURN_NOT_OK(partitionWriter_->populateMetrics(&metrics_));
+      }
       metrics_.rowVectorModeCompress = rowVectorModeCompress_;
       releaseBufferPoolMemory();
     }
@@ -286,7 +298,11 @@ arrow::Status BoltShuffleWriterV2::stop() {
     RETURN_NOT_OK(tryEvict());
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      if (stopPartitionWriter) {
+        RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      } else {
+        RETURN_NOT_OK(partitionWriter_->populateMetrics(&metrics_));
+      }
     }
   }
   metrics_.useV2 = 1;

@@ -107,12 +107,16 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   bytedance::bolt::RowVectorPtr getOutput() override;
 
   bytedance::bolt::exec::BlockingReason isBlocked(
-      bytedance::bolt::ContinueFuture* /* unused */) override {
-    return bytedance::bolt::exec::BlockingReason::kNotBlocked;
+      bytedance::bolt::ContinueFuture* future) override {
+    if (!future_.valid()) {
+      return bytedance::bolt::exec::BlockingReason::kNotBlocked;
+    }
+    *future = std::move(future_);
+    return bytedance::bolt::exec::BlockingReason::kWaitForShuffle;
   }
 
   bool isFinished() override {
-    return finished_;
+    return !future_.valid() && finished_;
   }
 
   void noMoreInput() override;
@@ -135,6 +139,8 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   std::shared_ptr<BoltShuffleWriter> shuffleWriter_;
   bool finished_ = false;
   ReportShuffleStatusCallback reportShuffleStatusCallback_;
+  bytedance::bolt::ContinueFuture future_{
+      bytedance::bolt::ContinueFuture::makeEmpty()};
 };
 
 class SparkShuffleWriterTranslator

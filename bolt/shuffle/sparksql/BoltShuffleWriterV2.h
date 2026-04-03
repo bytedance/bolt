@@ -206,6 +206,8 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
 
   arrow::Status stop() override;
 
+  arrow::Status localStop() override;
+
   arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
 
   BoltShuffleWriterV2(
@@ -219,6 +221,8 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
   }
 
  private:
+  arrow::Status stopInternal(bool stopPartitionWriter);
+
   void checkLengthBuffer(uint32_t col, uint32_t pid);
 
   void checkNullValue(int32_t col, uint32_t pid, uint32_t numRows);

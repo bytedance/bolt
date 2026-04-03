@@ -189,6 +189,9 @@ class BoltShuffleWriter : public ShuffleWriter {
 
   arrow::Status stop() override;
 
+  // stop partition writer in local thread
+  arrow::Status localStop() override;
+
   arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
 
   const uint64_t cachedPayloadSize() const override;
@@ -512,6 +515,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   // for CompositeRowVector
   virtual arrow::Status tryEvict(
       int64_t memLimit = std::numeric_limits<int64_t>::max());
+
+  arrow::Status stopInternal(bool stopPartitionWriter);
   arrow::Status initFromRowVectorForComposite(
       const bytedance::bolt::RowVector& rv);
   virtual arrow::Status splitCompositeVector(

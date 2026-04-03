@@ -43,10 +43,15 @@ void CelebornPartitionWriter::init() {
 }
 
 arrow::Status CelebornPartitionWriter::stop(ShuffleWriterMetrics* metrics) {
+  celebornClient_->stop();
+  return populateMetrics(metrics);
+}
+
+arrow::Status CelebornPartitionWriter::populateMetrics(
+    ShuffleWriterMetrics* metrics) {
   // Push data and collect metrics.
   auto totalBytesEvicted =
       std::accumulate(bytesEvicted_.begin(), bytesEvicted_.end(), 0LL);
-  celebornClient_->stop();
   // Populate metrics.
   metrics->totalCompressTime += compressTime_;
   metrics->totalEvictTime += spillTime_;

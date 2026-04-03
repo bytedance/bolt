@@ -71,6 +71,8 @@ class PartitionWriter {
 
   virtual arrow::Status stop(ShuffleWriterMetrics* metrics) = 0;
 
+  virtual arrow::Status populateMetrics(ShuffleWriterMetrics* metrics) = 0;
+
   /// Evict buffers for `partitionId` partition.
   virtual arrow::Status evict(
       uint32_t partitionId,
