@@ -35,8 +35,6 @@
 #include "bolt/parse/Expressions.h"
 #include "bolt/type/Variant.h"
 
-#include <cmath>
-
 #include <duckdb.hpp> // @manual
 #include <duckdb/parser/expression/between_expression.hpp> // @manual
 #include <duckdb/parser/expression/case_expression.hpp> // @manual

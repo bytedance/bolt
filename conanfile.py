@@ -325,10 +325,10 @@ class BoltConan(ConanFile):
         llvm_targets = None
         if str(self.settings.arch) in ["x86", "x86_64"]:
             arrow_simd_level = "avx2"
-            llvm_targets = 'X86'
+            llvm_targets = "X86"
         elif str(self.settings.arch) in ["armv8", "arm", "armv9"]:
             arrow_simd_level = "neon"
-            llvm_targets = 'AArch64'
+            llvm_targets = "AArch64"
         self.options[arrow].parquet = True
         self.options[arrow].filesystem_layer = True
         self.options[arrow].simd_level = arrow_simd_level

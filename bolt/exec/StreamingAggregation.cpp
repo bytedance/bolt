@@ -45,7 +45,7 @@ StreamingAggregation::StreamingAggregation(
               : "StreamingAggregation"),
       outputBatchSize_{outputBatchRows()},
       outputBytes_(outputBatchByteSize()),
-      groupNumberThreshold_{static_cast<uint32_t>(2 * outputBatchSize_)},
+      groupNumberThreshold_{static_cast<vector_size_t>(2 * outputBatchSize_)},
       aggregationNode_{aggregationNode},
       step_{aggregationNode->step()} {
   if (aggregationNode_->ignoreNullKeys()) {

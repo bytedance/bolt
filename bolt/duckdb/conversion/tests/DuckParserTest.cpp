@@ -301,16 +301,29 @@ TEST(DuckParserTest, interval) {
     return parsed->toString();
   };
 
-  EXPECT_EQ("to_hours(cast(trunc(cast(5, DOUBLE)), BIGINT))", parseInterval("INTERVAL 5 HOURS"));
-  EXPECT_EQ("to_minutes(cast(trunc(cast(36, DOUBLE)), BIGINT))", parseInterval("INTERVAL 36 MINUTES"));
+  EXPECT_EQ(
+      "to_hours(cast(trunc(cast(5, DOUBLE)), BIGINT))",
+      parseInterval("INTERVAL 5 HOURS"));
+  EXPECT_EQ(
+      "to_minutes(cast(trunc(cast(36, DOUBLE)), BIGINT))",
+      parseInterval("INTERVAL 36 MINUTES"));
   EXPECT_EQ("to_seconds(cast(7, DOUBLE))", parseInterval("INTERVAL 7 SECONDS"));
-  EXPECT_EQ("to_milliseconds(cast(123, DOUBLE))", parseInterval("INTERVAL 123 MILLISECONDS"));
-  EXPECT_EQ("to_milliseconds(cast(12345, DOUBLE))", parseInterval("INTERVAL 12345 MILLISECONDS"));
-  EXPECT_EQ("to_milliseconds(cast(12345678, DOUBLE))", parseInterval("INTERVAL 12345678 MILLISECONDS"));
-  EXPECT_EQ("to_milliseconds(cast(100100100, DOUBLE))", parseInterval("INTERVAL 100100100 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(123, DOUBLE))",
+      parseInterval("INTERVAL 123 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(12345, DOUBLE))",
+      parseInterval("INTERVAL 12345 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(12345678, DOUBLE))",
+      parseInterval("INTERVAL 12345678 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(100100100, DOUBLE))",
+      parseInterval("INTERVAL 100100100 MILLISECONDS"));
 
   EXPECT_EQ(
-      "to_milliseconds(cast(11, DOUBLE)) AS x", parseInterval("INTERVAL 11 MILLISECONDS AS x"));
+      "to_milliseconds(cast(11, DOUBLE)) AS x",
+      parseInterval("INTERVAL 11 MILLISECONDS AS x"));
 }
 
 TEST(DuckParserTest, cast) {
