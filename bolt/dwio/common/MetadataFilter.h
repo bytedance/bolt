@@ -49,7 +49,8 @@ class MetadataFilter {
       ScanSpec&,
       const core::ITypedExpr&,
       core::ExpressionEvaluator*,
-      bool enableMapSubscriptFilter);
+      bool enableMapSubscriptFilter = true,
+      bool enableCastFilter = true);
 
   /// Evaluate the filter results based on logical conjunctions tracked in this
   /// object.  `leafNodeResults` could be reused for intermediate results.  The
