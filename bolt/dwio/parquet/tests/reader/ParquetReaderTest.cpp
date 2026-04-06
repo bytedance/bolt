@@ -1851,7 +1851,10 @@ TEST_F(ParquetReaderTest, readVariantParquet) {
   auto col0 = type->childAt(0);
   auto col1 = type->childAt(1);
   EXPECT_EQ(col0->type()->kind(), TypeKind::INTEGER);
-  EXPECT_EQ(col1->type()->kind(), TypeKind::VARIANT);
+  EXPECT_EQ(col1->type()->kind(), TypeKind::ROW);
+  EXPECT_EQ(col1->type()->size(), 2);
+  EXPECT_EQ(col1->type()->childAt(0)->kind(), TypeKind::VARBINARY);
+  EXPECT_EQ(col1->type()->childAt(1)->kind(), TypeKind::VARBINARY);
 
   auto rowType = ROW({"id", "v"}, {INTEGER(), VARIANT()});
   auto rowReaderOpts = getReaderOpts(rowType);

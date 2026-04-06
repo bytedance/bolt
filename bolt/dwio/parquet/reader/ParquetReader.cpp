@@ -489,11 +489,9 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
     BOLT_CHECK(!children.empty());
 
     // Detect Spark 4.0 Variant structure: STRUCT<value BINARY, metadata BINARY>
-    // Only promote to VARIANT if the requested type explicitly asks for it,
-    // OR the struct has exactly children named "value" and "metadata" with
-    // binary types. This heuristic can match non-variant structs that happen
-    // to have these field names — callers should set requestedType to VARIANT
-    // explicitly when they know the column is a Spark VARIANT.
+    // Promote only when the requested logical type explicitly asks for
+    // VARIANT. The raw Parquet schema alone is not specific enough because
+    // ordinary structs can also contain {value, metadata} binary children.
     if (children.size() == 2 && children[0]->type()->isVarbinary() &&
         children[1]->type()->isVarbinary()) {
       auto child0Name =
@@ -502,13 +500,23 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
           std::static_pointer_cast<const ParquetTypeWithId>(children[1])->name_;
       folly::toLowerAscii(child0Name);
       folly::toLowerAscii(child1Name);
-      // Check if the caller requested VARIANT type, or if the schema matches
-      // the Spark VARIANT convention.
       bool isRequestedVariant = requestedType && requestedType->isVariant();
+      if (!isRequestedVariant && parentRequestedType) {
+        if (parentRequestedType->isVariant()) {
+          isRequestedVariant = true;
+        } else if (parentRequestedType->isRow()) {
+          auto childIdx =
+              parentRequestedType->asRow().getChildIdxIfExists(name);
+          if (childIdx.has_value()) {
+            isRequestedVariant =
+                parentRequestedType->asRow().childAt(*childIdx)->isVariant();
+          }
+        }
+      }
       bool matchesVariantSchema =
           (child0Name == "value" && child1Name == "metadata") ||
           (child0Name == "metadata" && child1Name == "value");
-      if (matchesVariantSchema && (isRequestedVariant || !requestedType)) {
+      if (matchesVariantSchema && isRequestedVariant) {
         if (child0Name == "metadata") {
           std::swap(children[0], children[1]);
         }

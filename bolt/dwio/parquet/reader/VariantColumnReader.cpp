@@ -23,7 +23,7 @@ VariantColumnReader::VariantColumnReader(
           params,
           scanSpec,
           pool) {
-  BOLT_CHECK(fileType->type()->isVariant());
+  BOLT_CHECK(fileType->type()->isVariant() || fileType->type()->isRow());
 }
 
 void VariantColumnReader::getValues(const RowSet& rows, VectorPtr* result) {

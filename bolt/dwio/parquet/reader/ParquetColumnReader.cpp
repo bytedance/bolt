@@ -93,10 +93,17 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
     common::ScanSpec& scanSpec,
     memory::MemoryPool& pool) {
   auto colName = scanSpec.fieldName();
+  const bool canReadVariantStructAsVariant =
+      requestedType->type()->isVariant() && fileType->type()->isRow() &&
+      fileType->size() == 2 && fileType->containsChild("value") &&
+      fileType->containsChild("metadata") &&
+      fileType->childByName("value")->type()->isVarbinary() &&
+      fileType->childByName("metadata")->type()->isVarbinary();
 
 #ifndef SPARK_COMPATIBLE
   BOLT_CHECK(
-      matchType(fileType->type()->kind(), requestedType->type()->kind()),
+      canReadVariantStructAsVariant ||
+          matchType(fileType->type()->kind(), requestedType->type()->kind()),
       "file schema type {} can not convert to ddl type {}",
       mapTypeKindToName(fileType->type()->kind()),
       mapTypeKindToName(requestedType->type()->kind()));
@@ -124,6 +131,15 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
           requestedType->type(), fileType, params, scanSpec);
 
     case TypeKind::ROW:
+      if (canReadVariantStructAsVariant) {
+        return std::make_unique<VariantColumnReader>(
+            columnReaderOptions,
+            requestedType,
+            fileType,
+            params,
+            scanSpec,
+            pool);
+      }
       return std::make_unique<StructColumnReader>(
           columnReaderOptions, requestedType, fileType, params, scanSpec, pool);
 
