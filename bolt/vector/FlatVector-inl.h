@@ -178,6 +178,11 @@ void FlatVector<T>::copyValuesAndNulls(
     mutableRawValues();
   }
 
+  // used to track string stats for string views when source is not flat
+  // encoding
+  uint64_t stringStatsTotal = 0, stringStatsMax = 0;
+  const bool allSelected = rows.countSelected() == BaseVector::length_;
+
   if (source->isFlatEncoding()) {
     auto* flatSource = source->asUnchecked<FlatVector<T>>();
     if (flatSource->values() == nullptr) {
@@ -271,6 +276,12 @@ void FlatVector<T>::copyValuesAndNulls(
     } else {
       rows.applyToSelected([&](int32_t row) { rawValues_[row] = value; });
     }
+    if constexpr (std::is_same_v<T, StringView>) {
+      if (allSelected) {
+        stringStatsTotal = rows.countSelected() * value.size();
+        stringStatsMax = value.size();
+      }
+    }
 
     rows.clearNulls(rawNulls);
   } else {
@@ -294,7 +305,15 @@ void FlatVector<T>::copyValuesAndNulls(
               auto* rawValues = reinterpret_cast<uint64_t*>(rawValues_);
               bits::setBit(rawValues, row, decoded.valueAt<bool>(row));
             } else {
-              rawValues_[row] = decoded.valueAt<T>(row);
+              auto val = decoded.valueAt<T>(row);
+              rawValues_[row] = val;
+              if constexpr (std::is_same_v<T, StringView>) {
+                if (allSelected) {
+                  stringStatsTotal += val.size();
+                  stringStatsMax = std::max(
+                      stringStatsMax, static_cast<uint64_t>(val.size()));
+                }
+              }
             }
           },
           nulls);
@@ -315,6 +334,14 @@ void FlatVector<T>::copyValuesAndNulls(
             bits::setBit(rawValues, row, sourceVector->valueAt(sourceRow));
           } else {
             rawValues_[row] = sourceVector->valueAt(sourceRow);
+            if constexpr (std::is_same_v<T, StringView>) {
+              if (allSelected) {
+                stringStatsTotal += rawValues_[row].size();
+                stringStatsMax = std::max(
+                    stringStatsMax,
+                    static_cast<uint64_t>(rawValues_[row].size()));
+              }
+            }
           }
 
           if (rawNulls) {
@@ -324,6 +351,15 @@ void FlatVector<T>::copyValuesAndNulls(
           bits::setNull(rawNulls, row);
         }
       });
+    }
+  }
+
+  if constexpr (std::is_same_v<T, StringView>) {
+    // Only set stats when copying all rows, otherwise stats would be
+    // partial and misleading.
+    if (allSelected) {
+      this->setStringViewStats(
+          StringViewStats{stringStatsTotal, stringStatsMax});
     }
   }
 }

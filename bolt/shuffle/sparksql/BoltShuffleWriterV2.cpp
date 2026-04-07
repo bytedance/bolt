@@ -68,8 +68,10 @@ arrow::Status BoltShuffleWriterV2::split(
   {
     bytedance::bolt::NanosecondTimer timer(&flattenTime_);
     ensureLoaded(rv);
-    auto flatSize = rv->estimateFlatSize();
     ensureFlatten(rv);
+    // Use post-flatten estimateFlatSize which leverages StringStats
+    // computed during flatten for accurate string size estimation.
+    auto flatSize = rv->estimateFlatSize();
     // try evict before split if current batch size is larger than memLimit
     if (flatSize > memLimit) {
       requestSpill_ = true;
