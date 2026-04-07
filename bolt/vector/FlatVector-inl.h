@@ -178,10 +178,10 @@ void FlatVector<T>::copyValuesAndNulls(
     mutableRawValues();
   }
 
-  // used to track string stats for string views when source is not flat
-  // encoding
-  uint64_t stringStatsTotal = 0, stringStatsMax = 0;
-  const bool allSelected = rows.countSelected() == BaseVector::length_;
+  // Used to track string stats for StringView when source is not flat encoding.
+  uint64_t stringStatsTotal = 0;
+  uint64_t stringStatsMax = 0;
+  const bool kAllSelected = rows.countSelected() == BaseVector::length_;
 
   if (source->isFlatEncoding()) {
     auto* flatSource = source->asUnchecked<FlatVector<T>>();
@@ -277,7 +277,7 @@ void FlatVector<T>::copyValuesAndNulls(
       rows.applyToSelected([&](int32_t row) { rawValues_[row] = value; });
     }
     if constexpr (std::is_same_v<T, StringView>) {
-      if (allSelected) {
+      if (kAllSelected) {
         stringStatsTotal = rows.countSelected() * value.size();
         stringStatsMax = value.size();
       }
@@ -308,7 +308,7 @@ void FlatVector<T>::copyValuesAndNulls(
               auto val = decoded.valueAt<T>(row);
               rawValues_[row] = val;
               if constexpr (std::is_same_v<T, StringView>) {
-                if (allSelected) {
+                if (kAllSelected) {
                   stringStatsTotal += val.size();
                   stringStatsMax = std::max(
                       stringStatsMax, static_cast<uint64_t>(val.size()));
@@ -335,7 +335,7 @@ void FlatVector<T>::copyValuesAndNulls(
           } else {
             rawValues_[row] = sourceVector->valueAt(sourceRow);
             if constexpr (std::is_same_v<T, StringView>) {
-              if (allSelected) {
+              if (kAllSelected) {
                 stringStatsTotal += rawValues_[row].size();
                 stringStatsMax = std::max(
                     stringStatsMax,
@@ -357,7 +357,7 @@ void FlatVector<T>::copyValuesAndNulls(
   if constexpr (std::is_same_v<T, StringView>) {
     // Only set stats when copying all rows, otherwise stats would be
     // partial and misleading.
-    if (allSelected) {
+    if (kAllSelected) {
       this->setStringViewStats(
           StringViewStats{stringStatsTotal, stringStatsMax});
     }
