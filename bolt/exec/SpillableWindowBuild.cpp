@@ -141,7 +141,9 @@ void SpillableWindowBuild<needSort>::spill() {
     }
     doInitialize_ = false;
 
-    spillers_[currentSpilledPartition_]->spill(inputRows_, lastRun_);
+    Spiller::SpillRows spillRows(
+        inputRows_.begin(), inputRows_.end(), memory::StlAllocator<char*>(*pool_));
+    spillers_[currentSpilledPartition_]->spill(spillRows, lastRun_);
 
     spilledNumRows_ += inputRows_.size();
 
@@ -204,7 +206,9 @@ void SpillableWindowBuild<needSort>::spill() {
     doInitialize_ = false;
 
     spillers_[currentSpilledPartition_]->setRowFormatInfo(true);
-    spillers_[currentSpilledPartition_]->spill(inputRows_, lastRun_);
+    Spiller::SpillRows spillRows2(
+        inputRows_.begin(), inputRows_.end(), memory::StlAllocator<char*>(*pool_));
+    spillers_[currentSpilledPartition_]->spill(spillRows2, lastRun_);
 
     spilledNumRows_ += inputRows_.size();
 

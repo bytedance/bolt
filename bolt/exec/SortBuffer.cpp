@@ -55,7 +55,9 @@ SortBuffer::SortBuffer(
       nonReclaimableSection_(nonReclaimableSection),
       spillConfig_(spillConfig),
       spillMemoryThreshold_(spillMemoryThreshold),
-      operatorCtx_(operatorCtx) {
+      operatorCtx_(operatorCtx),
+      // Track std::vector<char*> allocations in memory pool.
+      sortedRows_(0, memory::StlAllocator<char*>(*pool)) {
   BOLT_CHECK_GE(input_->size(), sortCompareFlags_.size());
   BOLT_CHECK_GT(sortCompareFlags_.size(), 0);
   BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags_.size());
@@ -172,7 +174,7 @@ void SortBuffer::noMoreInput() {
 #endif
 
 #ifdef ENABLE_META_SORT
-      MetaRowsSorterWraper<BufferRows>::MetaCodegenSort(
+      MetaRowsSorterWraper<SpillRows>::MetaCodegenSort(
           sortedRows_,
           data_.get(),
           sorter_,
@@ -418,8 +420,10 @@ void SortBuffer::spillOutput() {
       spillConfig_);
   spiller_->setSpillConfig(spillConfig_);
 
-  auto spillRows = std::vector<char*>(
-      sortedRows_.begin() + numOutputRows_, sortedRows_.end());
+  Spiller::SpillRows spillRows(
+      sortedRows_.begin() + numOutputRows_,
+      sortedRows_.end(),
+      sortedRows_.get_allocator());
   spiller_->spill(spillRows);
   LOG(INFO) << (operatorCtx_ ? operatorCtx_->toString() : "SortBuffer")
             << " spill output, data size: "

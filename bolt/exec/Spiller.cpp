@@ -762,7 +762,7 @@ void Spiller::spill(const RowContainerIterator* startRowIter) {
   updateSpillTotalTime(totalTimeUs);
 }
 
-void Spiller::spill(std::vector<char*>& rows, bool lastRun) {
+void Spiller::spill(SpillRows& rows, bool lastRun) {
   CHECK_NOT_FINALIZED();
   BOLT_CHECK(!rows.empty());
   uint64_t totalTimeUs{0};
@@ -918,14 +918,14 @@ bool Spiller::fillSpillRuns(RowContainerIterator* iterator) {
   return lastRun;
 }
 
-void Spiller::fillSpillRun(std::vector<char*>& rows) {
+void Spiller::fillSpillRun(SpillRows& rows) {
   BOLT_CHECK_EQ(bits_.numPartitions(), 1);
   checkEmptySpillRuns();
   uint64_t execTimeUs{0};
   {
     MicrosecondTimer timer(&execTimeUs);
-    spillRuns_[0].rows =
-        SpillRows(rows.begin(), rows.end(), spillRuns_[0].rows.get_allocator());
+    spillRuns_[0].rows = SpillRows(
+        rows.begin(), rows.end(), spillRuns_[0].rows.get_allocator());
     for (const auto* row : rows) {
       spillRuns_[0].numBytes += container_->rowSize(row);
     }

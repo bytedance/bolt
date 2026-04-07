@@ -1079,7 +1079,9 @@ TEST_P(AllTypes, nonSortedSpillFunctionsWithUring) {
         int numListedRows{0};
         numListedRows = rowContainer_->listRows(&rowIter, 5000, rows.data());
         ASSERT_EQ(numListedRows, 5000);
-        spiller_->spill(rows);
+        Spiller::SpillRows spillRows(
+            rows.begin(), rows.end(), memory::StlAllocator<char*>(*memory::spillMemoryPool()));
+        spiller_->spill(spillRows);
       } else {
         spiller_->spill();
       }
@@ -1604,7 +1606,9 @@ TEST_P(MaxSpillRunTest, basicWithUring) {
       int numListedRows{0};
       numListedRows = rowContainer_->listRows(&rowIter, numRows, rows.data());
       ASSERT_EQ(numListedRows, numRows);
-      spiller_->spill(rows);
+      Spiller::SpillRows spillRows(
+          rows.begin(), rows.end(), memory::StlAllocator<char*>(*memory::spillMemoryPool()));
+      spiller_->spill(spillRows);
     } else {
       spiller_->spill();
     }

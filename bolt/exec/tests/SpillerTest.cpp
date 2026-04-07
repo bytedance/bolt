@@ -1081,7 +1081,9 @@ TEST_P(AllTypes, nonSortedSpillFunctions) {
         int numListedRows{0};
         numListedRows = rowContainer_->listRows(&rowIter, 5000, rows.data());
         ASSERT_EQ(numListedRows, 5000);
-        spiller_->spill(rows);
+        Spiller::SpillRows spillRows(
+            rows.begin(), rows.end(), memory::StlAllocator<char*>(*memory::spillMemoryPool()));
+        spiller_->spill(spillRows);
       } else {
         spiller_->spill();
       }
@@ -1507,8 +1509,9 @@ TEST_P(OrderByOutputOnly, basic) {
       std::vector<char*> emptyRows;
       BOLT_ASSERT_THROW(spiller_->spill(emptyRows), "");
     }
-    auto spillRows =
-        std::vector<char*>(rows.begin(), rows.begin() + numListedRows);
+    Spiller::SpillRows spillRows(
+        rows.begin(), rows.begin() + numListedRows,
+        memory::StlAllocator<char*>(*memory::spillMemoryPool()));
     spiller_->spill(spillRows);
     ASSERT_EQ(rowContainer_->numRows(), numRows);
     rowContainer_->clear();
@@ -1572,9 +1575,10 @@ TEST_P(RowBasedSpillTest, row_based_spill) {
   int numListedRows{0};
   numListedRows = rowContainer_->listRows(&rowIter, numRows, rows.data());
   ASSERT_EQ(numListedRows, numRows);
-  auto spillRows =
-      std::vector<char*>(rows.begin(), rows.begin() + numListedRows);
-  spiller_->spill(spillRows);
+    Spiller::SpillRows spillRows(
+        rows.begin(), rows.begin() + numListedRows,
+        memory::StlAllocator<char*>(*memory::spillMemoryPool()));
+    spiller_->spill(spillRows);
   ASSERT_EQ(rowContainer_->numRows(), numRows);
 
   auto spillPartition = spiller_->finishSpill();
@@ -1704,7 +1708,9 @@ TEST_P(MaxSpillRunTest, basic) {
       int numListedRows{0};
       numListedRows = rowContainer_->listRows(&rowIter, numRows, rows.data());
       ASSERT_EQ(numListedRows, numRows);
-      spiller_->spill(rows);
+      Spiller::SpillRows spillRows(
+          rows.begin(), rows.end(), memory::StlAllocator<char*>(*memory::spillMemoryPool()));
+      spiller_->spill(spillRows);
     } else {
       spiller_->spill();
     }
