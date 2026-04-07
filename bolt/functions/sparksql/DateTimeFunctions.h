@@ -428,9 +428,16 @@ struct UnixTimestampParseWithFormatFunction
       }
     }
 
-    auto dateTimeResult =
-        this->format_->parse(std::string_view(input.data(), input.size()));
+    auto dateTimeResult = this->format_->parse(
+        std::string_view(input.data(), input.size()), this->timeParserPolicy);
     if (dateTimeResult.hasError()) {
+      if (this->timeParserPolicy == TimePolicy::EXCEPTION) {
+        std::string msg = fmt::format(
+            "parse timestamp failed, input: {}, format: {}",
+            std::string_view(input.data(), input.size()),
+            std::string_view(format.data(), format.size()));
+        dateTimeResult.throwExceptionIfErrorOccurs(msg);
+      }
       return false;
     }
     result = this->getResultInGMT(dateTimeResult.value());
@@ -814,16 +821,13 @@ struct LastDayFunction {
     auto dateTime = getDateTime(date);
     int32_t year = getYear(dateTime);
     int32_t month = getMonth(dateTime);
-    int32_t day = getMonth(dateTime);
     auto lastDay = util::getMaxDayOfMonth(year, month);
     auto daysSinceEpoch = util::daysSinceEpochFromDate(year, month, lastDay);
     BOLT_USER_CHECK_EQ(
         daysSinceEpoch,
         (int32_t)daysSinceEpoch,
-        "Integer overflow in last_day({}-{}-{})",
-        year,
-        month,
-        day);
+        "Integer overflow in last_day({})",
+        DATE()->toString(date));
     result = daysSinceEpoch;
   }
 
@@ -833,7 +837,6 @@ struct LastDayFunction {
     auto dateTime = getDateTime(date);
     int32_t year = getYear(dateTime);
     int32_t month = getMonth(dateTime);
-    int32_t day = getMonth(dateTime);
     auto lastDay = util::getMaxDayOfMonth(year, month);
     result = fmt::format("{:04d}-{:02d}-{:02d}", year, month, lastDay);
   }

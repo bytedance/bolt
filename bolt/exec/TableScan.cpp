@@ -36,7 +36,6 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/common/time/Timer.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/OperatorMetric.h"
 #include "bolt/exec/TableScan.h"
@@ -268,12 +267,7 @@ RowVectorPtr TableScan::getOutput() {
       NanosecondTimer splitTimer(&prepareSplitTimeNs_);
 
       // update currentSplitStr_ only when new split is added
-      if (auto s = std::dynamic_pointer_cast<
-              const connector::hive::HiveConnectorSplit>(connectorSplit)) {
-        currentSplitStr_ = s->filePath;
-      } else {
-        currentSplitStr_ = "empty_split_str__cast_to_HiveConnectorSplit_failed";
-      }
+      currentSplitStr_ = connectorSplit->toString();
 
       BOLT_CHECK_EQ(
           connector_->connectorId(),
@@ -502,14 +496,7 @@ void TableScan::checkPreload() {
           [executor, this](std::shared_ptr<connector::ConnectorSplit> split) {
             preload(split);
 
-            auto hiveSplit = std::dynamic_pointer_cast<
-                const connector::hive::HiveConnectorSplit>(split);
-            // Handle the default max value for length by treating it as 0
-            int64_t preloadBytes = 0;
-            if (hiveSplit &&
-                hiveSplit->length != std::numeric_limits<uint64_t>::max()) {
-              preloadBytes = static_cast<int64_t>(hiveSplit->length);
-            }
+            int64_t preloadBytes = split->splitSizeBytes();
             executor->add([connectorSplit = split,
                            ctx = asyncThreadCtx_,
                            preloadBytes]() mutable {

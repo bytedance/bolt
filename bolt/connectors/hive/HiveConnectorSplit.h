@@ -124,6 +124,13 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
         rowIdProperties(_rowIdProperties),
         infoColumns(_infoColumns) {}
 
+  int64_t splitSizeBytes() const override {
+    if (length != std::numeric_limits<uint64_t>::max()) {
+      return static_cast<int64_t>(length);
+    }
+    return fileSize > start ? static_cast<int64_t>(fileSize - start) : 0;
+  }
+
   std::string toString() const override {
     if (tableBucketNumber.has_value()) {
       return fmt::format(

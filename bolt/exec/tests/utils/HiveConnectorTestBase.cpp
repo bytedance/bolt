@@ -133,7 +133,12 @@ std::vector<std::shared_ptr<connector::hive::HiveConnectorSplit>>
 HiveConnectorTestBase::makeHiveConnectorSplits(
     const std::string& filePath,
     uint32_t splitCount,
-    dwio::common::FileFormat format) {
+    dwio::common::FileFormat format,
+    const std::optional<
+        std::unordered_map<std::string, std::optional<std::string>>>&
+        partitionKeys,
+    const std::optional<std::unordered_map<std::string, std::string>>&
+        infoColumns) {
   auto file =
       filesystems::getFileSystem(filePath, nullptr)->openFileForRead(filePath);
   const int64_t fileSize = file->size();
@@ -142,11 +147,21 @@ HiveConnectorTestBase::makeHiveConnectorSplits(
   std::vector<std::shared_ptr<connector::hive::HiveConnectorSplit>> splits;
   // Add all the splits.
   for (int i = 0; i < splitCount; i++) {
-    auto split = HiveConnectorSplitBuilder(filePath)
-                     .fileFormat(format)
-                     .start(i * splitSize)
-                     .length(splitSize)
-                     .build();
+    auto splitBuilder = HiveConnectorSplitBuilder(filePath)
+                            .fileFormat(format)
+                            .start(i * splitSize)
+                            .length(splitSize);
+    if (infoColumns.has_value()) {
+      for (const auto& infoColumn : infoColumns.value()) {
+        splitBuilder.infoColumn(infoColumn.first, infoColumn.second);
+      }
+    }
+    if (partitionKeys.has_value()) {
+      for (const auto& partitionKey : partitionKeys.value()) {
+        splitBuilder.partitionKey(partitionKey.first, partitionKey.second);
+      }
+    }
+    auto split = splitBuilder.build();
     splits.push_back(std::move(split));
   }
   return splits;

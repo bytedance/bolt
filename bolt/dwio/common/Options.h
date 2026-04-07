@@ -31,6 +31,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include <unordered_set>
 
 #include <folly/Executor.h>
@@ -105,10 +106,20 @@ class SerDeOptions {
         escapeChar(escape),
         isEscaped(isEscapedFlag) {}
   ~SerDeOptions() = default;
+
+  // Serialization support
+  folly::dynamic serialize() const;
+  static SerDeOptions create(const folly::dynamic& obj);
+  static SerDeOptions deserialize(const folly::dynamic& obj);
 };
 
 struct TableParameter {
   static constexpr const char* kSkipHeaderLineCount = "skip.header.line.count";
+};
+
+struct RowNumberColumnInfo {
+  column_index_t insertPosition;
+  std::string name;
 };
 
 /**
@@ -135,6 +146,7 @@ class RowReaderOptions {
   size_t decodingParallelismFactor_{0};
   bool appendRowNumberColumn_ = false;
   bool appendParquetRowNumberAndFileName_ = false;
+  std::optional<RowNumberColumnInfo> rowNumberColumnInfo_ = std::nullopt;
   // Function to populate metrics related to feature projection stats
   // in Koski. This gets fired in FlatMapColumnReader.
   // This is a bit of a hack as there is (by design) no good way
@@ -354,6 +366,11 @@ class RowReaderOptions {
     appendRowNumberColumn_ = value;
   }
 
+  void setRowNumberColumnInfo(
+      std::optional<RowNumberColumnInfo> rowNumberColumnInfo) {
+    rowNumberColumnInfo_ = std::move(rowNumberColumnInfo);
+  }
+
   void setAppendParquetRowNumberAndFileName(bool append) {
     appendParquetRowNumberAndFileName_ = append;
   }
@@ -368,6 +385,10 @@ class RowReaderOptions {
 
   bool getAppendRowNumberColumn() const {
     return appendRowNumberColumn_;
+  }
+
+  std::optional<RowNumberColumnInfo> getRowNumberColumnInfo() const {
+    return rowNumberColumnInfo_;
   }
 
   bool getAppendParquetRowNumberAndFileName() const {
@@ -502,6 +523,8 @@ class RowReaderOptions {
     ss << "decodingExecutor_=" << (decodingExecutor_ ? "set" : "null") << ", ";
     ss << "decodingParallelismFactor_=" << decodingParallelismFactor_ << ", ";
     ss << "appendRowNumberColumn_=" << appendRowNumberColumn_ << ", ";
+    ss << "rowNumberColumnInfo_="
+       << (rowNumberColumnInfo_.has_value() ? "set" : "null") << ", ";
     ss << "appendParquetRowNumberAndFileName_="
        << appendParquetRowNumberAndFileName_ << ", ";
     ss << "keySelectionCallback_=" << (keySelectionCallback_ ? "set" : "null")
@@ -723,6 +746,14 @@ class ReaderOptions : public io::ReaderOptions {
   bool isUseColumnNamesForColumnMapping() const {
     return useColumnNamesForColumnMapping_;
   }
+
+  // Serialization support
+  folly::dynamic serialize() const override;
+
+  static ReaderOptions create(
+      const folly::dynamic& obj,
+      bolt::memory::MemoryPool* pool);
+  static void registerSerDe();
 };
 
 struct WriterOptions : public ISerializable {
@@ -747,7 +778,7 @@ struct WriterOptions : public ISerializable {
   virtual ~WriterOptions() = default;
 
   folly::dynamic serialize() const override;
-  static std::shared_ptr<WriterOptions> deserialize(const folly::dynamic& obj);
+  static std::shared_ptr<WriterOptions> create(const folly::dynamic& obj);
   static void registerSerDe();
 };
 

@@ -93,11 +93,18 @@ struct ConnectorSplit : public ISerializable {
   virtual std::string toString() const {
     return fmt::format("[split: {}]", connectorId);
   }
+
+  /// Returns the size of this split in bytes, or 0 if unknown.
+  virtual int64_t splitSizeBytes() const {
+    return 0;
+  }
 };
 
 class ColumnHandle : public ISerializable {
  public:
   virtual ~ColumnHandle() = default;
+
+  virtual const std::string& name() const = 0;
 
   folly::dynamic serialize() const override;
 
@@ -125,9 +132,7 @@ class ConnectorTableHandle : public ISerializable {
   /// Returns the connector-dependent table name. Used with
   /// ConnectorMetadata. Implementations need to supply a definition
   /// to work with metadata.
-  virtual const std::string& name() const {
-    BOLT_UNSUPPORTED();
-  }
+  virtual const std::string& name() const = 0;
 
   /// Returns true if the connector table handle supports index lookup.
   virtual bool supportsIndexLookup() const {
@@ -161,6 +166,33 @@ class ConnectorInsertTableHandle : public ISerializable {
   folly::dynamic serialize() const override {
     BOLT_NYI();
   }
+};
+
+class ConnectorLocationHandle : public ISerializable {
+ public:
+  enum class TableType { kNew, kExisting, kTemp };
+
+  ConnectorLocationHandle(std::string connectorId, TableType tableType)
+      : connectorId_{std::move(connectorId)}, tableType_{tableType} {}
+
+  ~ConnectorLocationHandle() override;
+
+  const std::string& connectorId() const {
+    return connectorId_;
+  }
+
+  /// New vs existing vs temp.
+  TableType tableType() const {
+    return tableType_;
+  }
+
+  virtual std::string toString() const = 0;
+
+  folly::dynamic serialize() const override = 0;
+
+ private:
+  const std::string connectorId_;
+  const TableType tableType_;
 };
 
 /// Represents the commit strategy for writing to connector.
@@ -384,18 +416,21 @@ class AsyncThreadCtx {
     return state_ == State::kClosed;
   }
 
-  bool in() {
+  bool in(int64_t bytes) {
     std::scoped_lock lock(mutex_);
     if (state_ == State::kClosed) {
       return false;
     }
     numIn_++;
+    BOLT_CHECK_GE(bytes, 0);
+    addPreloadingBytes(bytes);
     cv_.notify_one();
     return true;
   }
-  void out() {
+  void out(int64_t bytes) {
     std::scoped_lock lock(mutex_);
     numIn_--;
+    addPreloadingBytes(bytes > 0 ? -bytes : bytes);
     cv_.notify_one();
   }
 
@@ -418,21 +453,11 @@ class AsyncThreadCtx {
   }
 
   void addPreloadingBytes(int64_t bytes) {
-    std::scoped_lock lock(mutex_);
-    addPreloadingBytesUntracked(bytes);
+    inPreloadingBytes_ += bytes;
   }
 
   int64_t inPreloadingBytes() const {
-    std::scoped_lock lock(mutex_);
-    return inPreloadingBytesUntracked();
-  }
-
-  int64_t inPreloadingBytesUntracked() const {
     return inPreloadingBytes_;
-  }
-
-  void addPreloadingBytesUntracked(int64_t bytes) {
-    inPreloadingBytes_ += bytes;
   }
 
   void disallowPreload() {
@@ -452,11 +477,10 @@ class AsyncThreadCtx {
 
   class Guard {
    public:
-    Guard(AsyncThreadCtx* ctx, int64_t bytes = 0) : ctx_(ctx), bytes_(bytes) {
+    explicit Guard(AsyncThreadCtx* ctx, int64_t bytes = 0)
+        : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        if (ctx_->in()) {
-          ctx_->addPreloadingBytes(bytes_);
-        } else {
+        if (!ctx_->in(bytes_)) {
           ctx_ = nullptr;
         }
       }
@@ -464,8 +488,7 @@ class AsyncThreadCtx {
 
     ~Guard() {
       if (ctx_) {
-        ctx_->out();
-        ctx_->addPreloadingBytes(-bytes_);
+        ctx_->out(-bytes_);
       }
     }
 
@@ -476,17 +499,13 @@ class AsyncThreadCtx {
       other.ctx_ = nullptr;
     }
 
-    Guard& operator=(Guard&& other) noexcept {
-      if (this != &other) {
-        if (ctx_) {
-          ctx_->out();
-          ctx_->addPreloadingBytes(-bytes_);
-        }
-        ctx_ = other.ctx_;
-        bytes_ = other.bytes_;
-        other.ctx_ = nullptr;
+    Guard& operator=(Guard&& other) = delete;
+
+    void updateInPreloadingBytesUnlocked(int64_t bytes) {
+      if (ctx_) {
+        bytes_ += bytes;
+        ctx_->addPreloadingBytes(bytes);
       }
-      return *this;
     }
 
     explicit operator bool() const {
@@ -745,6 +764,12 @@ class ConnectorFactory {
 
   // Initialize is called during the factory registration.
   virtual void initialize() {}
+
+  /// Create and register the ConnectorObjectFactory for this connector type.
+  /// The default implementation is a no-op; connectors that support an object
+  /// factory should override this.
+  virtual void registerObjectFactory(const std::string& /*connectorId*/) const {
+  }
 
   const std::string& connectorName() const {
     return name_;

@@ -220,6 +220,11 @@ TEST(TypeTest, intervalYearMonth) {
   month = kMonthInYear * -2 + -1;
   EXPECT_EQ("-2-1", INTERVAL_YEAR_MONTH()->valueToString(month));
 
+  EXPECT_EQ(
+      "-178956970-8",
+      INTERVAL_YEAR_MONTH()->valueToString(
+          std::numeric_limits<int32_t>::min()));
+
   testTypeSerde(interval);
 }
 
@@ -234,6 +239,9 @@ TEST(TypeTest, shortDecimal) {
   EXPECT_EQ(*DECIMAL(10, 5), *shortDecimal);
   EXPECT_NE(*DECIMAL(9, 5), *shortDecimal);
   EXPECT_NE(*DECIMAL(10, 4), *shortDecimal);
+
+  BOLT_ASSERT_THROW(
+      DECIMAL(0, 0), "Precision of decimal type must be at least 1");
 
   EXPECT_STREQ(shortDecimal->name(), "DECIMAL");
   EXPECT_EQ(shortDecimal->parameters().size(), 2);

@@ -473,25 +473,7 @@ class Converter {
     } else if constexpr (fromBool) {
       return tryToWithFolly(from, to);
     } else if constexpr (fromKind == PrimitiveKind::TIMESTAMP) {
-      // Timestamp -> integral seconds, rounding away from zero.
-      int64_t secs64 = 0;
-      try {
-        int128_t micros = static_cast<int128_t>(from.toMicros());
-        int128_t secs128 =
-            micros / static_cast<int128_t>(1'000'000); // trunc toward zero
-        int128_t rem = micros % static_cast<int128_t>(1'000'000);
-        // sec128 + 1 when rem != 0 and micros > 0, sec128 - 1 when rem != 0
-        // and micros < 0
-        secs128 += (rem != 0) * ((micros > 0) - (micros < 0));
-        secs64 = std::clamp(
-            secs128,
-            static_cast<int128_t>(std::numeric_limits<int64_t>::min()),
-            static_cast<int128_t>(std::numeric_limits<int64_t>::max()));
-      } catch (...) {
-        return ConvertStatus::OTHER_FAILURE;
-      }
-
-      return tryIntegerToInteger<int64_t, ToType>(secs64, to);
+      return tryIntegerToInteger<int64_t, ToType>(from.getSeconds(), to);
     } else {
       // INTEGER
       return tryIntegerToInteger<FromType, ToType>(from, to);

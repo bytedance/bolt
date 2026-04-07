@@ -1475,15 +1475,104 @@ class ParquetRowReader::Impl {
       uint64_t size,
       bolt::VectorPtr& result,
       const dwio::common::Mutation* mutation) {
-    BOLT_DCHECK(!options_.getAppendRowNumberColumn());
     auto rowsToRead = nextReadSize(size);
     if (rowsToRead == kAtEnd) {
       return 0;
     }
     BOLT_DCHECK_GT(rowsToRead, 0);
-    columnReader_->next(rowsToRead, result, mutation);
+    if (!options_.getAppendRowNumberColumn() &&
+        !options_.getRowNumberColumnInfo().has_value()) {
+      columnReader_->next(rowsToRead, result, mutation);
+    } else {
+      readWithRowNumber(rowsToRead, result, mutation);
+    }
     currentRowInGroup_ += rowsToRead;
     return rowsToRead;
+  }
+
+  void readWithRowNumber(
+      uint64_t rowsToRead,
+      VectorPtr& result,
+      const dwio::common::Mutation* mutation) {
+    auto* rowVector = result->asUnchecked<RowVector>();
+    column_index_t numChildren = 0;
+    for (auto& column : options_.getScanSpec()->children()) {
+      if (column->projectOut()) {
+        ++numChildren;
+      }
+    }
+    dwio::common::RowNumberColumnInfo rowNumberColumnInfo;
+    if (options_.getRowNumberColumnInfo().has_value()) {
+      rowNumberColumnInfo = options_.getRowNumberColumnInfo().value();
+    } else {
+      rowNumberColumnInfo.insertPosition = numChildren;
+      rowNumberColumnInfo.name = "";
+    }
+    auto rowNumberColumnIndex = rowNumberColumnInfo.insertPosition;
+    auto rowNumberColumnName = rowNumberColumnInfo.name;
+    BOLT_CHECK_LE(rowNumberColumnIndex, numChildren);
+
+    VectorPtr rowNumVector;
+    if (rowVector->childrenSize() != numChildren) {
+      BOLT_CHECK_EQ(rowVector->childrenSize(), numChildren + 1);
+
+      rowNumVector = rowVector->childAt(rowNumberColumnIndex);
+      auto& rowType = rowVector->type()->asRow();
+      auto names = rowType.names();
+      auto types = rowType.children();
+      auto children = rowVector->children();
+      BOLT_DCHECK(!names.empty() && !types.empty() && !children.empty());
+      names.erase(names.begin() + rowNumberColumnIndex);
+      types.erase(types.begin() + rowNumberColumnIndex);
+      children.erase(children.begin() + rowNumberColumnIndex);
+      result = std::make_shared<RowVector>(
+          rowVector->pool(),
+          ROW(std::move(names), std::move(types)),
+          rowVector->nulls(),
+          rowVector->size(),
+          std::move(children));
+    }
+
+    const auto previousRow = nextRowNumber();
+    columnReader_->next(rowsToRead, result, mutation);
+    FlatVector<int64_t>* flatRowNum = nullptr;
+    if (rowNumVector && BaseVector::isVectorWritable(rowNumVector)) {
+      flatRowNum = rowNumVector->asFlatVector<int64_t>();
+    }
+    if (flatRowNum) {
+      flatRowNum->clearAllNulls();
+      flatRowNum->resize(result->size());
+    } else {
+      rowNumVector = std::make_shared<FlatVector<int64_t>>(
+          result->pool(),
+          BIGINT(),
+          nullptr,
+          result->size(),
+          AlignedBuffer::allocate<int64_t>(result->size(), result->pool()),
+          std::vector<BufferPtr>());
+      flatRowNum = rowNumVector->asUnchecked<FlatVector<int64_t>>();
+    }
+
+    auto rowOffsets = columnReader_->outputRows();
+    BOLT_DCHECK_EQ(rowOffsets.size(), result->size());
+    auto* rawRowNum = flatRowNum->mutableRawValues();
+    for (int i = 0; i < rowOffsets.size(); ++i) {
+      rawRowNum[i] = previousRow + rowOffsets[i];
+    }
+    rowVector = result->asUnchecked<RowVector>();
+    auto& rowType = rowVector->type()->asRow();
+    auto names = rowType.names();
+    auto types = rowType.children();
+    auto children = rowVector->children();
+    names.insert(names.begin() + rowNumberColumnIndex, rowNumberColumnName);
+    types.insert(types.begin() + rowNumberColumnIndex, BIGINT());
+    children.insert(children.begin() + rowNumberColumnIndex, rowNumVector);
+    result = std::make_shared<RowVector>(
+        rowVector->pool(),
+        ROW(std::move(names), std::move(types)),
+        rowVector->nulls(),
+        rowVector->size(),
+        std::move(children));
   }
 
   std::optional<size_t> estimatedRowSize() const {

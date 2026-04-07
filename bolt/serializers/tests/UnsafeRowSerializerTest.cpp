@@ -279,20 +279,17 @@ TEST_F(UnsafeRowSerializerTest, incompleteRow) {
   // Cut in the middle of the row.
   buffers = {{rawData, 10}};
   BOLT_ASSERT_RUNTIME_THROW(
-      testDeserialize(buffers, expected),
-      "Unable to read full serialized UnsafeRow");
+      testDeserialize(buffers, expected), "Unable to read full serialized row");
 
   // Still incomplete row.
   buffers = {{rawData, 10}, {rawData, 5}};
   BOLT_ASSERT_RUNTIME_THROW(
-      testDeserialize(buffers, expected),
-      "Unable to read full serialized UnsafeRow");
+      testDeserialize(buffers, expected), "Unable to read full serialized row");
 
   // Cut right after the row size.
   buffers = {{rawData, 4}};
   BOLT_ASSERT_RUNTIME_THROW(
-      testDeserialize(buffers, expected),
-      "Unable to read full serialized UnsafeRow");
+      testDeserialize(buffers, expected), "Unable to read full serialized row");
 
   // Cut in the middle of the `size` integer.
   buffers = {{rawData, 2}};

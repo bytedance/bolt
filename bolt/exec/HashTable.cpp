@@ -100,6 +100,7 @@ HashTable<ignoreNullKeys>::HashTable(
       isJoinBuild,
       hasProbedFlag,
       hashMode_ != HashMode::kHash,
+      false /*useListRowIndex*/,
       pool,
       stringArena);
   nextOffset_ = rows_->nextOffset();

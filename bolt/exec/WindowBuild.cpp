@@ -341,12 +341,13 @@ void WindowBuild::ensureInputFits(const RowVectorPtr& input) {
 void WindowBuild::setupSortSpiller() {
   BOLT_CHECK_NULL(sortSpiller_);
 
+  const auto sortingKeys = SpillState::makeSortingKeys(
+      std::vector<CompareFlags>(sortSpillCompareFlags_));
   sortSpiller_ = std::make_unique<Spiller>(
       Spiller::Type::kOrderByInput,
       data_.get(),
       inputType_,
-      sortSpillCompareFlags_.size(),
-      sortSpillCompareFlags_,
+      sortingKeys,
       spillConfig_);
   sortSpiller_->setSpillConfig(spillConfig_);
 }

@@ -21,15 +21,12 @@
 #include "bolt/functions/sparksql/JsonObjectKeys.h"
 #include "bolt/functions/sparksql/JsonTuple.h"
 #include "bolt/functions/sparksql/SIMDJsonFunctions.h"
+#include "bolt/functions/sparksql/ToJson.h"
 #include "bolt/functions/sparksql/specialforms/FromJson.h"
 #include "bolt/functions/sparksql/specialforms/JsonSplit.h"
 namespace bytedance::bolt::functions {
-static void registerSparkJsonFunctions(const std::string& prefix) {
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_to_json, prefix + "to_json");
-}
 namespace sparksql {
 void registerJsonFunctions(const std::string& prefix) {
-  registerSparkJsonFunctions(prefix);
   registerFunctionCallToSpecialForm(
       "json_split", std::make_unique<JsonSplitToSpecialForm>());
   //   registerFunctionCallToSpecialForm(
@@ -52,6 +49,9 @@ void registerJsonFunctions(const std::string& prefix) {
 
   registerFunction<JsonObjectKeysFunction, Array<Varchar>, Varchar>(
       {prefix + "json_object_keys"});
+  registerFunction<ToJsonFunction, Varchar, Generic<T1>>({prefix + "to_json"});
+  registerFunction<ToJsonFunction, Varchar, Generic<T1>, Varchar>(
+      {prefix + "to_json"});
 }
 } // namespace sparksql
 } // namespace bytedance::bolt::functions

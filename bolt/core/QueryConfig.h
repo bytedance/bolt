@@ -30,8 +30,10 @@
 
 #pragma once
 
+#include <limits>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
+#include "bolt/vector/TypeAliases.h"
 namespace bytedance::bolt::core {
 /// A simple wrapper around bolt::Config. Defines constants for query
 /// config properties and accessor methods.
@@ -247,6 +249,14 @@ class QueryConfig {
 
   /// Window spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kWindowSpillEnabled = "window_spill_enabled";
+
+  /// LocalMerge spilling flag, only applies if "spill_enabled" flag is set.
+  static constexpr const char* kLocalMergeSpillEnabled =
+      "local_merge_spill_enabled";
+
+  /// Maximum number of merge sources to merge in memory before spilling.
+  static constexpr const char* kLocalMergeMaxNumMergeSources =
+      "local_merge_max_num_merge_sources";
 
   /// If true, the memory arbitrator will reclaim memory from table writer by
   /// flushing its buffered data to disk.
@@ -741,6 +751,11 @@ class QueryConfig {
   static constexpr const char* kSparkLegacyStatisticalAggregate =
       "spark_legacy_statistical_aggregate";
 
+  /// If true, ignore null fields when generating JSON string.
+  /// If false, null fields are included with a null value.
+  static constexpr const char* kSparkJsonIgnoreNullFields =
+      "spark.json_ignore_null_fields";
+
   bool operatorTrackExpressionStats() const {
     return get<bool>(kOperatorTrackExpressionStats, false);
   }
@@ -889,12 +904,16 @@ class QueryConfig {
     return get<uint64_t>(kPreferredOutputBatchBytes, kDefault);
   }
 
-  uint32_t preferredOutputBatchRows() const {
-    return get<uint32_t>(kPreferredOutputBatchRows, 1024);
+  vector_size_t preferredOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kPreferredOutputBatchRows, 1024);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
-  uint32_t maxOutputBatchRows() const {
-    return get<uint32_t>(kMaxOutputBatchRows, 10'000);
+  vector_size_t maxOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kMaxOutputBatchRows, 10'000);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
   uint32_t minOutputBatchRows() const {
@@ -1037,6 +1056,20 @@ class QueryConfig {
   /// check the spillEnabled()!
   bool windowSpillEnabled() const {
     return get<bool>(kWindowSpillEnabled, true);
+  }
+
+  /// Returns true if spilling is enabled for LocalMerge operator.
+  bool localMergeSpillEnabled() const {
+    return get<bool>(kLocalMergeSpillEnabled, false);
+  }
+
+  /// Returns the maximum number of merge sources to merge in memory before
+  /// spilling.
+  uint32_t localMergeMaxNumMergeSources() const {
+    const auto maxNumMergeSources = get<uint32_t>(
+        kLocalMergeMaxNumMergeSources, std::numeric_limits<uint32_t>::max());
+    BOLT_CHECK_GT(maxNumMergeSources, 0);
+    return maxNumMergeSources;
   }
 
   /// Returns 'is writer spilling enabled' flag. Must also check the
@@ -1634,7 +1667,12 @@ class QueryConfig {
     return get<bool>(kDecryptionEnabled, false);
   }
 
+  bool sparkJsonIgnoreNullFields() const {
+    return get<bool>(kSparkJsonIgnoreNullFields, true);
+  }
+
  private:
   std::unique_ptr<bolt::config::ConfigBase> config_;
 };
+
 } // namespace bytedance::bolt::core

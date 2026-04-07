@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-//
-// Created by tanjunsheng@bytedance.com on 2023/5/26.
-//
 #include <functional>
 #include <utility>
 #include "bolt/exec/Aggregate.h"

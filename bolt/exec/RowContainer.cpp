@@ -205,6 +205,7 @@ RowContainer::RowContainer(
     bool isJoinBuild,
     bool hasProbedFlag,
     bool hasNormalizedKeys,
+    bool useListRowIndex,
     memory::MemoryPool* pool,
     std::shared_ptr<HashStringAllocator> stringAllocator)
     : keyTypes_(keyTypes),
@@ -212,10 +213,12 @@ RowContainer::RowContainer(
       isJoinBuild_(isJoinBuild),
       accumulators_(accumulators),
       hasNormalizedKeys_(hasNormalizedKeys),
+      useListRowIndex_(useListRowIndex),
       rows_(pool),
       stringAllocator_(
           stringAllocator ? stringAllocator
-                          : std::make_shared<HashStringAllocator>(pool)) {
+                          : std::make_shared<HashStringAllocator>(pool)),
+      rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable
   // width data is referenced, this is done with StringView(for VARCHAR) and
@@ -352,6 +355,9 @@ char* RowContainer::newRow() {
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;
+    }
+    if (useListRowIndex_) {
+      rowPointers_.push_back(row);
     }
   }
   return initializeRow(row, false /* reuse */);
@@ -531,22 +537,25 @@ void RowContainer::store(
     char* row,
     int32_t column) {
   auto numKeys = keyTypes_.size();
-  if (column < numKeys && !nullableKeys_) {
+  bool isKey = column < numKeys;
+  if (isKey && !nullableKeys_) {
     BOLT_DYNAMIC_TYPE_DISPATCH(
         storeNoNulls,
         typeKinds_[column],
         decoded,
         index,
+        isKey,
         row,
         offsets_[column]);
   } else {
-    BOLT_DCHECK(column < keyTypes_.size() || accumulators_.empty());
+    BOLT_DCHECK(isKey || accumulators_.empty());
     auto rowColumn = rowColumns_[column];
     BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
         storeWithNulls,
         typeKinds_[column],
         decoded,
         index,
+        isKey,
         row,
         rowColumn.offset(),
         rowColumn.nullByte(),
@@ -830,6 +839,7 @@ void RowContainer::extractString(
 void RowContainer::storeComplexType(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* row,
     int32_t offset,
     int32_t nullByte,
@@ -843,7 +853,9 @@ void RowContainer::storeComplexType(
   // RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
   ByteOutputStream stream(stringAllocator_.get(), false, false);
   auto position = stringAllocator_->newWrite(stream);
-  ContainerRowSerde::serialize(*decoded.base(), decoded.index(index), stream);
+  ContainerRowSerdeOptions options{.isKey = isKey};
+  ContainerRowSerde::serialize(
+      *decoded.base(), decoded.index(index), stream, options);
   stringAllocator_->finishWrite(stream, 0);
 
   valueAt<std::string_view>(row, offset) = std::string_view(
@@ -1046,6 +1058,8 @@ void RowContainer::clear() {
     }
   }
   rows_.clear();
+  rowPointers_.clear();
+  rowPointers_.shrink_to_fit();
   if (!sharedStringAllocator) {
     if (checkFree_) {
       stringAllocator_->checkEmpty();
@@ -1109,7 +1123,8 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   }
   int64_t freeBytes = rows_.freeBytes() + fixedRowSize_ * numFreeRows_;
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
-      stringAllocator_->retainedSize() - stringAllocator_->freeSpace();
+      stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
+      rowPointers_.capacity() * sizeof(char*);
   int64_t rowSize = usedSize / numRows_;
   BOLT_CHECK_GT(
       rowSize, 0, "Estimated row size of the RowContainer must be positive.");

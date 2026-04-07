@@ -126,6 +126,9 @@ struct RowContainerIterator {
   // First byte after the end of the range containing 'currentRow'.
   char* FOLLY_NULLABLE endOfRun{nullptr};
 
+  // Cursor used by fast row listing with cached row pointers.
+  int32_t listRowCursor{0};
+
   // Returns the current row, skipping a possible normalized key below the first
   // byte of row.
   inline char* currentRow() const {
@@ -224,6 +227,18 @@ class RowContainer {
       memory::MemoryPool* FOLLY_NONNULL pool)
       : RowContainer(
             keyTypes,
+            dependentTypes,
+            false, // useListRowIndex
+            pool) {}
+
+  // Convenience overload to enable fast row listing via cached pointers.
+  RowContainer(
+      const std::vector<TypePtr>& keyTypes,
+      const std::vector<TypePtr>& dependentTypes,
+      bool useListRowIndex,
+      memory::MemoryPool* FOLLY_NONNULL pool)
+      : RowContainer(
+            keyTypes,
             true, // nullableKeys
             std::vector<Accumulator>{},
             dependentTypes,
@@ -231,6 +246,7 @@ class RowContainer {
             false, // isJoinBuild
             false, // hasProbedFlag
             false, // hasNormalizedKey
+            useListRowIndex,
             pool) {}
 
   ~RowContainer();
@@ -265,6 +281,7 @@ class RowContainer {
       bool isJoinBuild,
       bool hasProbedFlag,
       bool hasNormalizedKey,
+      bool useListRowIndex,
       memory::MemoryPool* FOLLY_NONNULL pool,
       std::shared_ptr<HashStringAllocator> stringAllocator = nullptr);
 
@@ -340,11 +357,12 @@ class RowContainer {
       const std::vector<char*>& rows, // span
       size_t column) {
     auto numKeys = keyTypes_.size();
-    if (column < numKeys && !nullableKeys_) {
+    bool isKey = column < numKeys;
+    if (isKey && !nullableKeys_) {
       auto off = offsets_[column];
 
       for (auto r = 0; r < size; ++r) {
-        storeNoNulls<Kind>(decoded, r, rows[r], off);
+        storeNoNulls<Kind>(decoded, r, isKey, rows[r], off);
       }
     } else {
       BOLT_DCHECK(column < keyTypes_.size() || accumulators_.empty());
@@ -354,7 +372,7 @@ class RowContainer {
       auto mask = rowColumn.nullMask();
 
       for (auto r = 0; r < size; ++r) {
-        storeWithNulls<Kind>(decoded, r, rows[r], off, nullByte, mask);
+        storeWithNulls<Kind>(decoded, r, isKey, rows[r], off, nullByte, mask);
       }
     }
   }
@@ -522,6 +540,22 @@ class RowContainer {
   /// There is a barrier but tsan does not know this.
   enum class ProbeType { kAll, kProbed, kNotProbed };
 
+  /// Fast path for `listRows` that returns `rowPointers_` directly. Used by
+  /// `SortBuffer` and `SortInputSpiller`, so it skips checking the free and
+  /// probe flags.
+  int32_t listRowsFast(
+      RowContainerIterator* FOLLY_NONNULL iter,
+      int32_t maxRows,
+      char* FOLLY_NONNULL* FOLLY_NONNULL rows) const {
+    int32_t count = 0;
+    while (count < maxRows &&
+           iter->listRowCursor < static_cast<int32_t>(rowPointers_.size())) {
+      rows[count++] = rowPointers_[iter->listRowCursor];
+      ++iter->listRowCursor;
+    }
+    return count;
+  }
+
   template <ProbeType probeType>
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -609,6 +643,9 @@ class RowContainer {
       RowContainerIterator* FOLLY_NONNULL iter,
       int32_t maxRows,
       char* FOLLY_NONNULL* FOLLY_NONNULL rows) {
+    if (useListRowIndex_) {
+      return listRowsFast(iter, maxRows, rows);
+    }
     return listRows<ProbeType::kAll>(iter, maxRows, kUnlimited, rows);
   }
 
@@ -774,6 +811,10 @@ class RowContainer {
   codegenRowEqVectors(const std::vector<TypePtr>& keyTypes, bool haveNulls);
 
 #endif
+
+  const std::vector<char*, StlAllocator<char*>>& testingRowPointers() const {
+    return rowPointers_;
+  }
 
   memory::MemoryPool* FOLLY_NONNULL pool() const {
     return stringAllocator_->pool();
@@ -984,6 +1025,7 @@ class RowContainer {
   inline void storeWithNulls(
       const DecodedVector& decoded,
       vector_size_t index,
+      bool isKey,
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte,
@@ -1021,6 +1063,7 @@ class RowContainer {
   inline void storeNoNulls(
       const DecodedVector& decoded,
       vector_size_t index,
+      bool isKey,
       char* FOLLY_NONNULL group,
       int32_t offset) {
     using T = typename TypeTraits<Kind>::NativeType;
@@ -1049,7 +1092,7 @@ class RowContainer {
     BufferPtr& nullBuffer = result->mutableNulls(maxRows);
     auto nulls = nullBuffer->asMutable<uint64_t>();
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
-    auto values = valuesBuffer->asMutableRange<T>();
+    [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
       if constexpr (useRowNumbers) {
@@ -1085,7 +1128,7 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
-    auto values = valuesBuffer->asMutableRange<T>();
+    [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
       if constexpr (useRowNumbers) {
@@ -1271,6 +1314,7 @@ class RowContainer {
   void storeComplexType(
       const DecodedVector& decoded,
       vector_size_t index,
+      bool isKey,
       char* FOLLY_NONNULL row,
       int32_t offset,
       int32_t nullByte = 0,
@@ -1424,6 +1468,8 @@ class RowContainer {
   int32_t fixedRowSize_;
   // True if normalized keys are enabled in initial state.
   const bool hasNormalizedKeys_;
+  // Whether to use cached row pointers for fast listing.
+  const bool useListRowIndex_;
   // The count of entries that have an extra normalized_key_t before the
   // start.
   int64_t numRowsWithNormalizedKey_ = 0;
@@ -1443,6 +1489,7 @@ class RowContainer {
 
   memory::AllocationPool rows_;
   std::shared_ptr<HashStringAllocator> stringAllocator_;
+  std::vector<char*, StlAllocator<char*>> rowPointers_;
 
   int alignment_ = 1;
 };
@@ -1458,66 +1505,73 @@ template <>
 inline void RowContainer::storeWithNulls<TypeKind::ROW>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
 }
 
 template <>
 inline void RowContainer::storeNoNulls<TypeKind::ROW>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset) {
-  storeComplexType(decoded, index, row, offset);
+  storeComplexType(decoded, index, isKey, row, offset);
 }
 
 template <>
 inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
 }
 
 template <>
 inline void RowContainer::storeNoNulls<TypeKind::ARRAY>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset) {
-  storeComplexType(decoded, index, row, offset);
+  storeComplexType(decoded, index, isKey, row, offset);
 }
 
 template <>
 inline void RowContainer::storeWithNulls<TypeKind::MAP>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask) {
-  storeComplexType(decoded, index, row, offset, nullByte, nullMask);
+  storeComplexType(decoded, index, isKey, row, offset, nullByte, nullMask);
 }
 
 template <>
 inline void RowContainer::storeNoNulls<TypeKind::MAP>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool isKey,
     char* FOLLY_NONNULL row,
     int32_t offset) {
-  storeComplexType(decoded, index, row, offset);
+  storeComplexType(decoded, index, isKey, row, offset);
 }
 
 template <>
 inline void RowContainer::storeWithNulls<TypeKind::HUGEINT>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool /*isKey*/,
     char* FOLLY_NONNULL row,
     int32_t offset,
     int32_t nullByte,
@@ -1536,6 +1590,7 @@ template <>
 inline void RowContainer::storeNoNulls<TypeKind::HUGEINT>(
     const DecodedVector& decoded,
     vector_size_t index,
+    bool /*isKey*/,
     char* FOLLY_NONNULL row,
     int32_t offset) {
   HugeInt::serialize(decoded.valueAt<int128_t>(index), row + offset);

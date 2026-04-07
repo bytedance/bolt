@@ -40,24 +40,28 @@ namespace {
 void serializeSwitch(
     const BaseVector& source,
     vector_size_t index,
-    ByteOutputStream& out);
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options);
 
 void serializeManySwitch(
     const BaseVector& vector,
     vector_size_t offset,
     vector_size_t size,
-    ByteOutputStream& stream);
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options);
 
 void serializeManySwitch(
     const BaseVector& vector,
     folly::Range<const vector_size_t*> indices,
-    ByteOutputStream& stream);
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options);
 
 template <TypeKind Kind>
 void serializeOne(
     const BaseVector& vector,
     vector_size_t index,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& /*options*/) {
   using T = typename TypeTraits<Kind>::NativeType;
   stream.appendOne<T>(vector.asUnchecked<SimpleVector<T>>()->valueAt(index));
 }
@@ -67,7 +71,8 @@ void serializeMany(
     const BaseVector& vector,
     vector_size_t offset,
     vector_size_t size,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options) {
   if constexpr (
       Kind == TypeKind::TINYINT || Kind == TypeKind::SMALLINT ||
       Kind == TypeKind::INTEGER || Kind == TypeKind::BIGINT ||
@@ -159,7 +164,7 @@ void serializeMany(
     for (auto i = 0; i < size; ++i) {
       auto index = offset + i;
       if (!vector.isNullAt(index)) {
-        serializeOne<Kind>(vector, index, stream);
+        serializeOne<Kind>(vector, index, stream, options);
       }
     }
   }
@@ -169,7 +174,8 @@ template <TypeKind Kind>
 void serializeMany(
     const BaseVector& vector,
     folly::Range<const vector_size_t*> indices,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options) {
   if constexpr (
       Kind == TypeKind::TINYINT || Kind == TypeKind::SMALLINT ||
       Kind == TypeKind::INTEGER || Kind == TypeKind::BIGINT ||
@@ -185,7 +191,7 @@ void serializeMany(
   } else {
     for (auto index : indices) {
       if (!vector.isNullAt(index)) {
-        serializeOne<Kind>(vector, index, stream);
+        serializeOne<Kind>(vector, index, stream, options);
       }
     }
   }
@@ -195,7 +201,8 @@ template <>
 void serializeOne<TypeKind::VARCHAR>(
     const BaseVector& vector,
     vector_size_t index,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& /*options*/) {
   auto string = vector.asUnchecked<SimpleVector<StringView>>()->valueAt(index);
   stream.appendOne<int32_t>(string.size());
   stream.appendStringView(string);
@@ -205,7 +212,8 @@ template <>
 void serializeOne<TypeKind::VARBINARY>(
     const BaseVector& vector,
     vector_size_t index,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& /*options*/) {
   auto string = vector.asUnchecked<SimpleVector<StringView>>()->valueAt(index);
   stream.appendOne<int32_t>(string.size());
   stream.appendStringView(string);
@@ -215,7 +223,8 @@ template <>
 void serializeOne<TypeKind::ROW>(
     const BaseVector& vector,
     vector_size_t index,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   auto row = vector.wrappedVector()->asUnchecked<RowVector>();
   auto wrappedIndex = vector.wrappedIndex(index);
   const auto& type = row->type()->as<TypeKind::ROW>();
@@ -234,7 +243,7 @@ void serializeOne<TypeKind::ROW>(
   out.append<uint64_t>(nulls);
   for (auto i = 0; i < children.size(); ++i) {
     if (!bits ::isBitSet(nulls.data(), i)) {
-      serializeSwitch(*children[i], wrappedIndex, out);
+      serializeSwitch(*children[i], wrappedIndex, out, options);
     }
   }
 }
@@ -277,76 +286,89 @@ void serializeArray(
     const BaseVector& elements,
     vector_size_t offset,
     vector_size_t size,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   BOLT_CHECK_GE(size, 0);
   out.appendOne<int32_t>(size);
   writeNulls(elements, offset, size, out);
   if (size > 0) {
-    serializeManySwitch(elements, offset, size, out);
+    serializeManySwitch(elements, offset, size, out, options);
   }
 }
 
 void serializeArray(
     const BaseVector& elements,
     folly::Range<const vector_size_t*> indices,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   BOLT_CHECK_GE(indices.size(), 0);
   out.appendOne<int32_t>(indices.size());
   writeNulls(elements, indices, out);
-  serializeManySwitch(elements, indices, out);
+  serializeManySwitch(elements, indices, out, options);
 }
 
 template <>
 void serializeOne<TypeKind::ARRAY>(
     const BaseVector& source,
     vector_size_t index,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   auto array = source.wrappedVector()->asUnchecked<ArrayVector>();
   auto wrappedIndex = source.wrappedIndex(index);
   serializeArray(
       *array->elements(),
       array->offsetAt(wrappedIndex),
       array->sizeAt(wrappedIndex),
-      out);
+      out,
+      options);
 }
 
 template <>
 void serializeOne<TypeKind::MAP>(
     const BaseVector& vector,
     vector_size_t index,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   auto map = vector.wrappedVector()->asUnchecked<MapVector>();
   auto wrappedIndex = vector.wrappedIndex(index);
-  auto size = map->sizeAt(wrappedIndex);
-  auto offset = map->offsetAt(wrappedIndex);
-  auto indices = map->sortedKeyIndices(wrappedIndex);
-  serializeArray(*map->mapKeys(), indices, out);
-  serializeArray(*map->mapValues(), indices, out);
+  if (options.isKey) {
+    auto indices = map->sortedKeyIndices(wrappedIndex);
+    serializeArray(*map->mapKeys(), indices, out, options);
+    serializeArray(*map->mapValues(), indices, out, options);
+  } else {
+    auto size = map->sizeAt(wrappedIndex);
+    auto offset = map->offsetAt(wrappedIndex);
+    serializeArray(*map->mapKeys(), offset, size, out, options);
+    serializeArray(*map->mapValues(), offset, size, out, options);
+  }
 }
 
 void serializeSwitch(
     const BaseVector& source,
     vector_size_t index,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options) {
   BOLT_DYNAMIC_TYPE_DISPATCH(
-      serializeOne, source.typeKind(), source, index, stream);
+      serializeOne, source.typeKind(), source, index, stream, options);
 }
 
 void serializeManySwitch(
     const BaseVector& vector,
     vector_size_t offset,
     vector_size_t size,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options) {
   BOLT_DYNAMIC_TYPE_DISPATCH(
-      serializeMany, vector.typeKind(), vector, offset, size, stream);
+      serializeMany, vector.typeKind(), vector, offset, size, stream, options);
 }
 
 void serializeManySwitch(
     const BaseVector& vector,
     folly::Range<const vector_size_t*> indices,
-    ByteOutputStream& stream) {
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& options) {
   BOLT_DYNAMIC_TYPE_DISPATCH(
-      serializeMany, vector.typeKind(), vector, indices, stream);
+      serializeMany, vector.typeKind(), vector, indices, stream, options);
 }
 
 // Copy from serialization to vector.
@@ -1091,10 +1113,11 @@ uint64_t hashSwitch(ByteInputStream& in, const Type* type) {
 void ContainerRowSerde::serialize(
     const BaseVector& source,
     vector_size_t index,
-    ByteOutputStream& out) {
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
   BOLT_DCHECK(
       !source.isNullAt(index), "Null top-level values are not supported");
-  serializeSwitch(source, index, out);
+  serializeSwitch(source, index, out, options);
 }
 
 // static

@@ -93,9 +93,13 @@ SortBuffer::SortBuffer(
   }
 
   data_ = std::make_unique<RowContainer>(
-      sortedColumnTypes, nonSortedColumnTypes, pool_);
+      sortedColumnTypes, nonSortedColumnTypes, true /*useListRowIndex*/, pool_);
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
+}
+
+SortBuffer::~SortBuffer() {
+  pool_->release();
 }
 
 void SortBuffer::addInput(const VectorPtr& input) {
@@ -127,6 +131,8 @@ void SortBuffer::addInput(const VectorPtr& input) {
 }
 
 void SortBuffer::noMoreInput() {
+  bolt::common::testutil::TestValue::adjust(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput", this);
   BOLT_CHECK(!noMoreInput_);
   noMoreInput_ = true;
 
@@ -140,6 +146,7 @@ void SortBuffer::noMoreInput() {
     updateEstimatedOutputRowSize();
     // Sort the pointers to the rows in RowContainer (data_) instead of sorting
     // the rows.
+    // TODO: Reuse 'RowContainer::rowPointers_'.
     sortedRows_.resize(numInputRows_);
     RowContainerIterator iter;
     data_->listRows(&iter, numInputRows_, sortedRows_.data());
@@ -205,14 +212,19 @@ void SortBuffer::noMoreInput() {
   pool_->release();
 }
 
-RowVectorPtr SortBuffer::getOutput(uint32_t maxOutputRows) {
+RowVectorPtr SortBuffer::getOutput(vector_size_t maxOutputRows) {
   BOLT_CHECK(noMoreInput_);
 
   if (numOutputRows_ == numInputRows_) {
     return nullptr;
   }
 
-  prepareOutput(maxOutputRows);
+  BOLT_CHECK_GT(maxOutputRows, 0);
+  BOLT_CHECK_GT(numInputRows_, numOutputRows_);
+  const vector_size_t batchSize =
+      std::min<uint64_t>(numInputRows_ - numOutputRows_, maxOutputRows);
+  ensureOutputFits(batchSize);
+  prepareOutput(batchSize);
   // bool oldNonReclaimableSection = *nonReclaimableSection_;
   // auto guard = folly::makeGuard([this, oldNonReclaimableSection]() {
   // *nonReclaimableSection_ = oldNonReclaimableSection; });
@@ -320,6 +332,36 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
                << ", reservation: " << succinctBytes(pool()->reservedBytes());
 }
 
+void SortBuffer::ensureOutputFits(vector_size_t batchSize) {
+  BOLT_CHECK_GT(batchSize, 0);
+  // Check if spilling is enabled or not.
+  if (spillConfig_ == nullptr) {
+    return;
+  }
+
+  // Test-only spill path.
+  if (testingTriggerSpill()) {
+    spill();
+    return;
+  }
+
+  if (estimatedOutputRowSize_.has_value() || spiller_ != nullptr) {
+    const uint64_t outputBufferSizeToReserve =
+        estimatedOutputRowSize_.value() * batchSize * 1.2;
+    {
+      memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
+      if (pool_->maybeReserve(outputBufferSizeToReserve)) {
+        return;
+      }
+    }
+    LOG(WARNING) << "Failed to reserve "
+                 << succinctBytes(outputBufferSizeToReserve)
+                 << " for memory pool " << pool_->name()
+                 << ", usage: " << succinctBytes(pool_->usedBytes())
+                 << ", reservation: " << succinctBytes(pool_->reservedBytes());
+  }
+}
+
 void SortBuffer::updateEstimatedOutputRowSize() {
   const auto optionalRowSize = data_->estimateRowSize();
   if (!optionalRowSize.has_value() || optionalRowSize.value() == 0) {
@@ -337,12 +379,12 @@ void SortBuffer::updateEstimatedOutputRowSize() {
 void SortBuffer::spillInput() {
   if (spiller_ == nullptr) {
     BOLT_CHECK(!noMoreInput_);
+    const auto sortingKeys = SpillState::makeSortingKeys(sortCompareFlags_);
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kOrderByInput,
         data_.get(),
         spillerStoreType_,
-        data_->keyTypes().size(),
-        sortCompareFlags_,
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
 
@@ -391,13 +433,7 @@ void SortBuffer::spillOutput() {
   finishSpill();
 }
 
-void SortBuffer::prepareOutput(uint32_t maxOutputRows) {
-  BOLT_CHECK_GT(maxOutputRows, 0);
-  BOLT_CHECK_GT(numInputRows_, numOutputRows_);
-
-  const size_t batchSize =
-      std::min<size_t>(numInputRows_ - numOutputRows_, maxOutputRows);
-
+void SortBuffer::prepareOutput(vector_size_t batchSize) {
   if (output_ != nullptr) {
     VectorPtr output = std::move(output_);
     BaseVector::prepareForReuse(output, batchSize);
@@ -412,12 +448,11 @@ void SortBuffer::prepareOutput(uint32_t maxOutputRows) {
   }
 
   if (spiller_ != nullptr) {
-    spillSources_.resize(maxOutputRows);
-    spillSourceRows_.resize(maxOutputRows);
+    spillSources_.resize(batchSize);
+    spillSourceRows_.resize(batchSize);
   }
 
   BOLT_CHECK_GT(output_->size(), 0);
-  BOLT_DCHECK_LE(output_->size(), maxOutputRows);
   BOLT_CHECK_LE(output_->size() + numOutputRows_, numInputRows_);
 }
 

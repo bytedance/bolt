@@ -471,7 +471,19 @@ void GroupingSet::initializeGlobalAggregation() {
   // Here we always make space for a row size since we only have one row and no
   // RowContainer.  The whole row is allocated to guarantee that alignment
   // requirements of all aggregate functions are satisfied.
-  int32_t rowSizeOffset = bits::nbytes(aggregates_.size());
+
+  // Allocate space for the null and initialized flags.
+  size_t numAggregates = aggregates_.size();
+  if (sortedAggregations_) {
+    numAggregates++;
+  }
+  for (const auto& aggregation : distinctAggregations_) {
+    if (aggregation != nullptr) {
+      numAggregates++;
+    }
+  }
+
+  int32_t rowSizeOffset = bits::nbytes(numAggregates);
   int32_t offset = rowSizeOffset + sizeof(int32_t);
   int32_t nullOffset = 0;
   int32_t alignment = 1;
@@ -504,6 +516,7 @@ void GroupingSet::initializeGlobalAggregation() {
     offset = bits::roundUp(offset, accumulator.alignment());
 
     sortedAggregations_->setAllocator(&stringAllocator_);
+    BOLT_DCHECK_LT(RowContainer::nullByte(nullOffset), rowSizeOffset);
     sortedAggregations_->setOffsets(
         offset,
         RowContainer::nullByte(nullOffset),
@@ -1086,12 +1099,13 @@ void GroupingSet::spill() {
     BOLT_DCHECK(pool_.trackUsage());
     BOLT_CHECK_EQ(numDistinctSpilledFiles_, 0);
     BOLT_CHECK_GT(rows->probedFlagOffset(), 0);
+    const auto sortingKeys = SpillState::makeSortingKeys(
+        std::vector<CompareFlags>(rows->keyTypes().size()));
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kAggregateInput,
         rows,
         makeSpillType(),
-        rows->keyTypes().size(),
-        std::vector<CompareFlags>(),
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
     BOLT_CHECK_EQ(spiller_->state().maxPartitions(), 1);
@@ -1186,6 +1200,7 @@ bool GroupingSet::getOutputWithSpill(
           false,
           true,
           false,
+          false /*useListRowIndex*/,
           &pool_,
           table_->rows()->stringAllocatorShared());
 
@@ -2022,6 +2037,7 @@ void GroupingSet::abandonPartialAggregation() {
       false,
       true,
       false,
+      false /*useListRowIndex*/,
       &pool_,
       table_->rows()->stringAllocatorShared());
   initializeAggregates(aggregates_, *intermediateRows_, true);

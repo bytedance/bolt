@@ -52,6 +52,7 @@ add_executable(
   ArrowStreamTest.cpp
   AssignUniqueIdTest.cpp
   AsyncConnectorTest.cpp
+  ConcatFilesSpillMergeStreamTest.cpp
   ContainerRowSerdeTest.cpp
   CustomJoinTest.cpp
   EnforceSingleRowTest.cpp
@@ -66,11 +67,11 @@ add_executable(
   MarkDistinctTest.cpp
   MemoryReclaimerTest.cpp
   MergeTest.cpp
+  MergerTest.cpp
   MorselDrivenTest.cpp
   MultiFragmentTest.cpp
   OneWayStatusFlagTest.cpp
   OperatorTraceTest.cpp
-  OperatorUtilsTest.cpp
   OrderByTest.cpp
   OutputBufferManagerTest.cpp
   PlanNodeSerdeTest.cpp
