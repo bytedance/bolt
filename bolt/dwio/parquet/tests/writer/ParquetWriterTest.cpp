@@ -490,6 +490,47 @@ TEST_F(ParquetWriterTest, emptyParquet) {
       *leafPool_);
 };
 
+TEST_F(ParquetWriterTest, allNulls) {
+  auto schema = ROW({"c0"}, {INTEGER()});
+  const int64_t kRows = 4096;
+  // Create a column with all elements being null.
+  auto nulls = makeNulls(kRows, [](auto /*row*/) { return true; });
+  auto flatVector = std::make_shared<FlatVector<int32_t>>(
+      pool_.get(),
+      schema->childAt(0),
+      nulls,
+      kRows,
+      /*values=*/nullptr,
+      std::vector<BufferPtr>());
+  auto data = std::make_shared<RowVector>(
+      pool_.get(), schema, nullptr, kRows, std::vector<VectorPtr>{flatVector});
+
+  // Create an in-memory writer.
+  auto sink = std::make_unique<MemorySink>(
+      200 * 1024 * 1024,
+      dwio::common::FileSink::Options{.pool = leafPool_.get()});
+  auto sinkPtr = sink.get();
+  vp::WriterOptions writerOptions;
+  writerOptions.memoryPool = leafPool_.get();
+
+  auto writer = std::make_unique<vp::Writer>(
+      std::move(sink),
+      writerOptions,
+      rootPool_,
+      ::arrow::default_memory_pool(),
+      schema);
+  writer->write(data);
+  writer->close();
+
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReaderInMemory(*sinkPtr, readerOptions);
+  ASSERT_EQ(reader->numberOfRows(), kRows);
+  ASSERT_EQ(*reader->rowType(), *schema);
+
+  auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
+  assertReadWithReaderAndExpected(schema, *rowReader, data, *leafPool_);
+};
+
 TEST_F(ParquetWriterTest, allNullsFlatVector) {
   auto schema =
       ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"},

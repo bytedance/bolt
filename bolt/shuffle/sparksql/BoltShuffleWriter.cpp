@@ -2184,7 +2184,12 @@ arrow::Status BoltShuffleWriter::splitCompositeVector(
     ensurePartialFlatten(rowVector, {0});
     rv = std::dynamic_pointer_cast<bytedance::bolt::CompositeRowVector>(
         rowVector);
-    BOLT_CHECK(rv != nullptr && partitioner_->hasPid());
+    BOLT_CHECK(
+        rv != nullptr && partitioner_->hasPid(),
+        "Failed to cast rowVector to CompositeRowVector or partitioner missing PID. "
+        "rv is null: {}, partitioner has PID: {}",
+        rv == nullptr,
+        partitioner_->hasPid());
     // if memLimit is too small, tryEvict to free memory
     if (rv->totalRowSize() > memLimit && isCompositeInitialized_) {
       RETURN_NOT_OK(tryEvict());

@@ -46,6 +46,10 @@ struct TpchConnectorSplit : public connector::ConnectorSplit {
     BOLT_CHECK_GT(totalParts, partNumber, "totalParts must be > partNumber");
   }
 
+  int64_t splitSizeBytes() const override {
+    return 0;
+  }
+
   // In how many parts the generated TPC-H table will be segmented, roughly
   // `rowCount / totalParts`
   size_t totalParts{1};

@@ -47,6 +47,7 @@
 #include <string>
 #include <string_view>
 
+#include <folly/Executor.h>
 #include <folly/Range.h>
 #include <folly/futures/Future.h>
 
@@ -289,9 +290,11 @@ class InMemoryWriteFile final : public WriteFile {
 
 class LocalReadFile final : public ReadFile {
  public:
-  explicit LocalReadFile(std::string_view path);
+  explicit LocalReadFile(
+      std::string_view path,
+      folly::Executor* executor = nullptr);
 
-  explicit LocalReadFile(int32_t fd);
+  explicit LocalReadFile(int32_t fd, folly::Executor* executor = nullptr);
 
   ~LocalReadFile();
 
@@ -303,6 +306,14 @@ class LocalReadFile final : public ReadFile {
   uint64_t preadv(
       uint64_t offset,
       const std::vector<folly::Range<char*>>& buffers) const final;
+
+  folly::SemiFuture<uint64_t> preadvAsync(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const override;
+
+  bool hasPreadvAsync() const override {
+    return executor_ != nullptr;
+  }
 
   uint64_t memoryUsage() const final;
 
@@ -325,6 +336,7 @@ class LocalReadFile final : public ReadFile {
   void preadInternal(uint64_t offset, uint64_t length, char* FOLLY_NONNULL pos)
       const;
 
+  folly::Executor* const executor_;
   std::string path_;
   int32_t fd_{0};
   long size_{0};

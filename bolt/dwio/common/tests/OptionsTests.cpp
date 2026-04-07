@@ -46,26 +46,37 @@ class WriterOptionsSerDeTest : public ::testing::Test {
   }
 };
 
-TEST(OptionsTests, defaultAppendRowNumberColumnTest) {
-  // appendRowNumberColumn flag should be false by default
+TEST(OptionsTests, defaultRowNumberColumnInfoTest) {
   RowReaderOptions rowReaderOptions;
-  ASSERT_EQ(false, rowReaderOptions.getAppendRowNumberColumn());
+  ASSERT_EQ(std::nullopt, rowReaderOptions.getRowNumberColumnInfo());
 }
 
-TEST(OptionsTests, setAppendRowNumberColumnToTrueTest) {
+TEST(OptionsTests, setRowNumberColumnInfoTest) {
   RowReaderOptions rowReaderOptions;
-  rowReaderOptions.setAppendRowNumberColumn(true);
-  ASSERT_EQ(true, rowReaderOptions.getAppendRowNumberColumn());
+  RowNumberColumnInfo rowNumberColumnInfo;
+  rowNumberColumnInfo.insertPosition = 0;
+  rowNumberColumnInfo.name = "test";
+  rowReaderOptions.setRowNumberColumnInfo(rowNumberColumnInfo);
+  auto readBack = rowReaderOptions.getRowNumberColumnInfo();
+  ASSERT_TRUE(readBack.has_value());
+  ASSERT_EQ(rowNumberColumnInfo.insertPosition, readBack->insertPosition);
+  ASSERT_EQ(rowNumberColumnInfo.name, readBack->name);
 }
 
-TEST(OptionsTests, testAppendRowNumberColumnInCopy) {
+TEST(OptionsTests, testRowNumberColumnInfoInCopy) {
   RowReaderOptions rowReaderOptions;
   RowReaderOptions rowReaderOptionsCopy{rowReaderOptions};
-  ASSERT_EQ(false, rowReaderOptionsCopy.getAppendRowNumberColumn());
+  ASSERT_EQ(std::nullopt, rowReaderOptionsCopy.getRowNumberColumnInfo());
 
-  rowReaderOptions.setAppendRowNumberColumn(true);
+  RowNumberColumnInfo rowNumberColumnInfo;
+  rowNumberColumnInfo.insertPosition = 0;
+  rowNumberColumnInfo.name = "test";
+  rowReaderOptions.setRowNumberColumnInfo(rowNumberColumnInfo);
   RowReaderOptions rowReaderOptionsSecondCopy{rowReaderOptions};
-  ASSERT_EQ(true, rowReaderOptionsSecondCopy.getAppendRowNumberColumn());
+  auto readBack = rowReaderOptionsSecondCopy.getRowNumberColumnInfo();
+  ASSERT_TRUE(readBack.has_value());
+  ASSERT_EQ(rowNumberColumnInfo.insertPosition, readBack->insertPosition);
+  ASSERT_EQ(rowNumberColumnInfo.name, readBack->name);
 }
 
 TEST_F(WriterOptionsSerDeTest, writerOptionsSerializeDeserializeRoundTrip) {

@@ -859,6 +859,9 @@ void exportValues(
     return;
   }
   if (!rows.changed() && isFlatScalarZeroCopy(type)) {
+    // Arrow does not allow a nullptr for the values buffer.
+    // The all-null (no values buffer) case is handled above.
+    BOLT_DCHECK(vec.values());
     holder.setBuffer(1, vec.values());
     return;
   }

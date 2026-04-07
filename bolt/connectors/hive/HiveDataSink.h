@@ -33,6 +33,7 @@
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/PartitionIdGenerator.h"
 #include "bolt/dwio/common/Options.h"
@@ -49,24 +50,18 @@ class LocationHandle;
 using LocationHandlePtr = std::shared_ptr<const LocationHandle>;
 
 /// Location related properties of the Hive table to be written.
-class LocationHandle : public ISerializable {
+class LocationHandle : public ConnectorLocationHandle {
  public:
-  enum class TableType {
-    /// Write to a new table to be created.
-    kNew,
-    /// Write to an existing table.
-    kExisting,
-  };
-
   LocationHandle(
       std::string targetPath,
       std::string writePath,
       TableType tableType,
-      std::string targetFileName = "")
-      : targetPath_(std::move(targetPath)),
+      std::string targetFileName = "",
+      const std::string& connectorId = kHiveConnectorName)
+      : ConnectorLocationHandle(connectorId, tableType),
+        targetPath_(std::move(targetPath)),
         targetFileName_(std::move(targetFileName)),
-        writePath_(std::move(writePath)),
-        tableType_(tableType) {}
+        writePath_(std::move(writePath)) {}
 
   const std::string& targetPath() const {
     return targetPath_;
@@ -80,11 +75,7 @@ class LocationHandle : public ISerializable {
     return writePath_;
   }
 
-  TableType tableType() const {
-    return tableType_;
-  }
-
-  std::string toString() const;
+  std::string toString() const override;
 
   static void registerSerDe();
 
@@ -103,8 +94,6 @@ class LocationHandle : public ISerializable {
   const std::string targetFileName_;
   // Staging directory path.
   const std::string writePath_;
-  // Whether the table to be written is new, already existing or temporary.
-  const TableType tableType_;
 };
 
 class HiveSortingColumn : public ISerializable {

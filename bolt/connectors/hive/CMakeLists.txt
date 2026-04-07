@@ -38,6 +38,7 @@ bolt_add_library(
   HiveConnectorUtil.cpp
   HiveDataSink.cpp
   HiveDataSource.cpp
+  HiveObjectFactory.cpp
   HivePartitionUtil.cpp
   HiveSplitReaderBase.cpp
   PaimonMetadataColumn.cpp

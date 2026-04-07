@@ -34,7 +34,7 @@
 #include "bolt/python/Utils.h"
 #include "bolt/vector/FlatVector.h"
 
-using namespace facebook::bolt;
+using namespace bytedance::bolt;
 
 namespace {
 // pybind11::object is the intermediateType of aggregations.

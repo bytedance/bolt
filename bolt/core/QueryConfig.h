@@ -30,8 +30,10 @@
 
 #pragma once
 
+#include <limits>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
+#include "bolt/vector/TypeAliases.h"
 namespace bytedance::bolt::core {
 /// A simple wrapper around bolt::Config. Defines constants for query
 /// config properties and accessor methods.
@@ -902,12 +904,16 @@ class QueryConfig {
     return get<uint64_t>(kPreferredOutputBatchBytes, kDefault);
   }
 
-  uint32_t preferredOutputBatchRows() const {
-    return get<uint32_t>(kPreferredOutputBatchRows, 1024);
+  vector_size_t preferredOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kPreferredOutputBatchRows, 1024);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
-  uint32_t maxOutputBatchRows() const {
-    return get<uint32_t>(kMaxOutputBatchRows, 10'000);
+  vector_size_t maxOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kMaxOutputBatchRows, 10'000);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
   uint32_t minOutputBatchRows() const {
@@ -1668,4 +1674,5 @@ class QueryConfig {
  private:
   std::unique_ptr<bolt::config::ConfigBase> config_;
 };
+
 } // namespace bytedance::bolt::core
