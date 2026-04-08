@@ -37,19 +37,35 @@ PartialUpdateEngine::PartialUpdateEngine(
       std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
 }
 
+void PartialUpdateEngine::initPendingResultRow() {
+  if (!pendingResultRow_) {
+    pendingResultRow_ = std::static_pointer_cast<RowVector>(
+        BaseVector::create(result->type(), 1, result->pool()));
+  }
+
+  pendingResultRow_->resize(1);
+  for (int i = 0; i < pendingResultRow_->childrenSize(); i++) {
+    pendingResultRow_->childAt(i)->setNull(0, true);
+  }
+}
+
+void PartialUpdateEngine::flushPendingRow() {
+  if (!lastPk_.primaryKeys || !pendingResultRow_) {
+    return;
+  }
+
+  for (const auto& [idx, aggr] : aggregations_) {
+    aggr->appendResult(pendingResultRow_->childAt(idx));
+  }
+
+  result->resize(result->size() + 1);
+  result->copy(pendingResultRow_.get(), result->size() - 1, 0, 1);
+}
+
 vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   if (!lastPk_.primaryKeys || !lastPk_.pkEqual(iterator)) {
-    if (result->size() > 0) {
-      for (const auto& [idx, aggr] : aggregations_) {
-        auto dest = result->childAt(idx);
-        aggr->appendResult(dest);
-      }
-    }
-    result->resize(result->size() + 1);
-    const auto newRowIdx = result->size() - 1;
-    for (int i = 0; i < result->childrenSize(); i++) {
-      result->childAt(i)->setNull(newRowIdx, true);
-    }
+    flushPendingRow();
+    initPendingResultRow();
     lastSequenceGroupKeyValues =
         std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
   }
@@ -65,12 +81,12 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
             << std::endl;
   }
 
-  int destIdx = result->size() - 1;
+  int destIdx = 0;
   for (int i = 0; i < iterator->values->childrenSize(); i++) {
     if (sequenceGroupFields_.find(i) == sequenceGroupFields_.end()) {
       auto src = iterator->values->childAt(i);
       if (!src->isNullAt(iterator->rowIndex)) {
-        auto dest = result->childAt(i);
+        auto dest = pendingResultRow_->childAt(i);
         dest->copy(src.get(), destIdx, iterator->rowIndex, 1);
       }
     }
@@ -84,7 +100,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
             key.get(), 0, iterator->rowIndex, CompareFlags()) < 0) {
       for (const auto& idx : iterator->sequenceGroups[i].second) {
         if (aggregations_.find(idx) == aggregations_.end()) {
-          auto dest = result->childAt(idx);
+          auto dest = pendingResultRow_->childAt(idx);
           auto src = iterator->values->childAt(idx);
           dest->copy(src.get(), destIdx, iterator->rowIndex, 1);
         } else {
@@ -107,7 +123,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   lastPk_ = *iterator;
 
   VLOG(2) << "Result:"
-          << "-->" << result->toString(result->size() - 1);
+          << "-->" << pendingResultRow_->toString(0);
   VLOG(2) << "  Sequence group key:";
   for (int i = 0; i < lastSequenceGroupKeyValues.size(); i++) {
     VLOG(2) << "\t\t\t\t"
@@ -121,12 +137,8 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
 }
 
 vector_size_t PartialUpdateEngine::finish() {
-  if (result->size() > 0) {
-    for (const auto& [idx, aggr] : aggregations_) {
-      auto dest = result->childAt(idx);
-      aggr->appendResult(dest);
-    }
-  }
+  flushPendingRow();
+  lastPk_.primaryKeys = nullptr;
 
   return result->size();
 }

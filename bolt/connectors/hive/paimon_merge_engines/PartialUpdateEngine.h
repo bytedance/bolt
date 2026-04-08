@@ -38,6 +38,9 @@ class PartialUpdateEngine : public PaimonEngine {
   vector_size_t finish() override;
 
  protected:
+  void initPendingResultRow();
+  void flushPendingRow();
+
   const bool ignoreDelete_;
   const std::
       unordered_map<int, std::shared_ptr<connector::paimon::AggregateFunction>>
@@ -45,6 +48,7 @@ class PartialUpdateEngine : public PaimonEngine {
   const std::vector<std::pair<std::vector<int>, std::vector<int>>>
       sequenceGroups_;
   std::unordered_set<int> sequenceGroupFields_;
+  RowVectorPtr pendingResultRow_;
   PaimonRowIterator lastPk_;
   std::vector<RowVectorPtr> lastSequenceGroupKeyValues;
 };
