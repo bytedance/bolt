@@ -160,15 +160,53 @@ bool SignatureBinderBase::checkOrSetIntegerParameter(
     return false;
   }
 
+  const auto& constraint = variables().at(parameterName).constraint();
+  auto checkConstraint = [&](int v) -> bool {
+    if (constraint.empty()) {
+      return true;
+    }
+
+    // Support simple comparison constraints used by decimal types.
+    // These constraints are validated at bind time.
+    // Existing calculation-style constraints are ignored here.
+    auto parseInt = [](std::string_view s) -> std::optional<int> {
+      try {
+        return folly::to<int>(s);
+      } catch (const std::exception&) {
+        return std::nullopt;
+      }
+    };
+
+    auto sv = std::string_view(constraint);
+    if (sv.rfind("<=", 0) == 0) {
+      auto rhs = parseInt(sv.substr(2));
+      return rhs.has_value() ? v <= rhs.value() : true;
+    }
+    if (sv.rfind(">=", 0) == 0) {
+      auto rhs = parseInt(sv.substr(2));
+      return rhs.has_value() ? v >= rhs.value() : true;
+    }
+    if (sv.rfind("<", 0) == 0) {
+      auto rhs = parseInt(sv.substr(1));
+      return rhs.has_value() ? v < rhs.value() : true;
+    }
+    if (sv.rfind(">", 0) == 0) {
+      auto rhs = parseInt(sv.substr(1));
+      return rhs.has_value() ? v > rhs.value() : true;
+    }
+    return true;
+  };
+
   if (integerVariablesBindings_.count(parameterName)) {
     // Return false if the parameter is found with a different value.
     if (integerVariablesBindings_[parameterName] != value) {
       return false;
     }
+    return checkConstraint(value);
   }
   // Bind the variable.
   integerVariablesBindings_[parameterName] = value;
-  return true;
+  return checkConstraint(value);
 }
 
 bool SignatureBinderBase::tryBind(

@@ -679,4 +679,111 @@ FOLLY_ALWAYS_INLINE void pad(
       padPrefixByteLength);
 }
 
+namespace detail {
+
+FOLLY_ALWAYS_INLINE int32_t incrementCodePoint(int32_t codePoint) {
+  static constexpr int32_t kMaxCodePoint = 0x10FFFF;
+  static constexpr int32_t kMinSurrogate = 0xD800;
+  static constexpr int32_t kMaxSurrogate = 0xDFFF;
+  if (codePoint == (kMinSurrogate - 1)) {
+    return kMaxSurrogate + 1;
+  } else if (codePoint == kMaxCodePoint) {
+    return 0;
+  }
+  return codePoint + 1;
+}
+
+FOLLY_ALWAYS_INLINE std::optional<std::string> roundUpAscii(
+    std::string_view input,
+    int32_t numCodePoints) {
+  const size_t truncatedLength =
+      std::min(input.size(), static_cast<size_t>(numCodePoints));
+
+  if (truncatedLength == input.size()) {
+    return std::string(input);
+  }
+
+  if (truncatedLength == 0) {
+    return std::nullopt;
+  }
+
+  for (int32_t i = truncatedLength - 1; i >= 0; --i) {
+    const auto byte = static_cast<unsigned char>(input[i]);
+    if (byte < 0x7F) {
+      std::string result(input.data(), i);
+      result.push_back(static_cast<char>(byte + 1));
+      return result;
+    }
+  }
+
+  return std::nullopt;
+}
+
+FOLLY_ALWAYS_INLINE std::optional<std::string> roundUpUnicode(
+    std::string_view input,
+    int32_t numCodePoints) {
+  const auto truncatedLength = cappedByteLength<false>(input, numCodePoints);
+
+  if (truncatedLength == input.size()) {
+    return std::string(input);
+  }
+
+  if (truncatedLength == 0) {
+    return std::nullopt;
+  }
+
+  const char* data = input.data();
+  const char* truncatedEnd = data + truncatedLength;
+
+  std::vector<size_t> codePointOffsets;
+  codePointOffsets.reserve(numCodePoints);
+  const char* current = data;
+  while (current < truncatedEnd) {
+    codePointOffsets.push_back(current - data);
+    int charSize;
+    stringCore::utf8proc_codepoint(current, truncatedEnd, &charSize);
+    current += charSize;
+  }
+
+  for (int32_t i = codePointOffsets.size() - 1; i >= 0; --i) {
+    const char* pos = data + codePointOffsets[i];
+    int charLength;
+    const auto codePoint =
+        stringCore::utf8proc_codepoint(pos, truncatedEnd, &charLength);
+    const auto nextCodePoint = incrementCodePoint(codePoint);
+    if (nextCodePoint != 0) {
+      std::string result(data, codePointOffsets[i]);
+      char buffer[4];
+      const auto bytesWritten = utf8proc_encode_char(
+          nextCodePoint, reinterpret_cast<unsigned char*>(buffer));
+      result.append(buffer, bytesWritten);
+      return result;
+    }
+  }
+
+  return std::nullopt;
+}
+
+} // namespace detail
+
+FOLLY_ALWAYS_INLINE std::string_view truncateUtf8(
+    std::string_view input,
+    int32_t numCodePoints) {
+  if (isAscii(input.data(), input.size())) {
+    return std::string_view(
+        input.data(), std::min(input.size(), (size_t)numCodePoints));
+  }
+  const auto truncatedLength = cappedByteLength<false>(input, numCodePoints);
+  return std::string_view(input.data(), truncatedLength);
+}
+
+FOLLY_ALWAYS_INLINE std::optional<std::string> roundUpUtf8(
+    std::string_view input,
+    int32_t numCodePoints) {
+  if (isAscii(input.data(), input.size())) {
+    return detail::roundUpAscii(input, numCodePoints);
+  }
+  return detail::roundUpUnicode(input, numCodePoints);
+}
+
 } // namespace bytedance::bolt::functions::stringImpl

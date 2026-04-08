@@ -1,0 +1,60 @@
+/*
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <string>
+
+#include "bolt/type/Type.h"
+
+namespace bytedance::bolt::connector::hive::iceberg {
+
+struct IcebergMetadataColumn {
+  int id;
+  std::string name;
+  std::shared_ptr<const Type> type;
+  std::string doc;
+
+  // Position delete file's metadata column ID, see
+  // https://iceberg.apache.org/spec/#position-delete-files.
+  static constexpr int32_t kPosId = 2'147'483'545;
+  static constexpr int32_t kFilePathId = 2'147'483'546;
+
+  IcebergMetadataColumn(
+      int _id,
+      const std::string& _name,
+      std::shared_ptr<const Type> _type,
+      const std::string& _doc)
+      : id(_id), name(_name), type(_type), doc(_doc) {}
+
+  static std::shared_ptr<IcebergMetadataColumn> icebergDeleteFilePathColumn() {
+    return std::make_shared<IcebergMetadataColumn>(
+        kFilePathId,
+        "file_path",
+        VARCHAR(),
+        "Path of a file in which a deleted row is stored");
+  }
+
+  static std::shared_ptr<IcebergMetadataColumn> icebergDeletePosColumn() {
+    return std::make_shared<IcebergMetadataColumn>(
+        kPosId,
+        "pos",
+        BIGINT(),
+        "Ordinal position of a deleted row in the data file");
+  }
+};
+
+} // namespace bytedance::bolt::connector::hive::iceberg

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "bolt/type/SimpleFunctionApi.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::exec {
 
@@ -112,6 +113,20 @@ struct resolver<Array<V>> {
   using in_type = NullableArrayView<V>;
   using null_free_in_type = NullFreeArrayView<V>;
   using out_type = ArrayWriter<V>;
+};
+
+template <typename P, typename S>
+struct resolver<ShortDecimal<P, S>> {
+  using in_type = int64_t;
+  using null_free_in_type = in_type;
+  using out_type = int64_t;
+};
+
+template <typename P, typename S>
+struct resolver<LongDecimal<P, S>> {
+  using in_type = int128_t;
+  using null_free_in_type = in_type;
+  using out_type = int128_t;
 };
 
 template <>

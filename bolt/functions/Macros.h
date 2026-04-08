@@ -31,6 +31,7 @@
 #pragma once
 
 #include "bolt/core/Metaprogramming.h"
+#include "bolt/type/SimpleFunctionApi.h"
 #include "bolt/type/Type.h"
 
 #define BOLT_DEFINE_FUNCTION_TYPES(__Bolt_ExecParams)                  \

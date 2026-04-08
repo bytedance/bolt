@@ -77,6 +77,8 @@ class SplitReader : public HiveSplitReaderBase {
       const std::shared_ptr<HiveTableHandle>& hiveTableHandle,
       const std::shared_ptr<common::ScanSpec>& scanSpec,
       const RowTypePtr& readerOutputType,
+      const std::unordered_map<int32_t, std::shared_ptr<HiveColumnHandle>>&
+          topLevelFieldIdToHandle,
       std::unordered_map<std::string, std::shared_ptr<HiveColumnHandle>>*
           partitionKeys,
       FileHandleFactory* fileHandleFactory,
@@ -103,7 +105,7 @@ class SplitReader : public HiveSplitReaderBase {
 
   virtual ~SplitReader();
 
-  void configureReaderOptions();
+  virtual void configureReaderOptions();
 
   dwio::common::ReaderOptions& readerOptions() {
     return baseReaderOpts_;

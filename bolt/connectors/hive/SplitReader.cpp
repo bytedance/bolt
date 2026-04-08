@@ -38,6 +38,8 @@
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/PaimonMetadataColumn.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/connectors/hive/iceberg/IcebergSplit.h"
+#include "bolt/connectors/hive/iceberg/IcebergSplitReader.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
 #include "bolt/type/Conversions.h"
@@ -114,6 +116,8 @@ std::unique_ptr<SplitReader> SplitReader::create(
     const std::shared_ptr<HiveTableHandle>& hiveTableHandle,
     const std::shared_ptr<common::ScanSpec>& scanSpec,
     const RowTypePtr& readerOutputType,
+    const std::unordered_map<int32_t, std::shared_ptr<HiveColumnHandle>>&
+        topLevelFieldIdToHandle,
     std::unordered_map<std::string, std::shared_ptr<HiveColumnHandle>>*
         partitionKeys,
     FileHandleFactory* fileHandleFactory,
@@ -122,6 +126,22 @@ std::unique_ptr<SplitReader> SplitReader::create(
     const std::shared_ptr<HiveConfig>& hiveConfig,
     const std::shared_ptr<io::IoStatistics>& ioStats,
     const bool isPartOfPaimonSplit) {
+  if (std::dynamic_pointer_cast<const iceberg::HiveIcebergSplit>(hiveSplit) !=
+      nullptr) {
+    return std::make_unique<iceberg::IcebergSplitReader>(
+        hiveSplit,
+        hiveTableHandle,
+        topLevelFieldIdToHandle,
+        partitionKeys,
+        connectorQueryCtx,
+        hiveConfig,
+        readerOutputType,
+        ioStats,
+        fileHandleFactory,
+        executor,
+        scanSpec);
+  }
+
   return std::make_unique<SplitReader>(
       hiveSplit,
       hiveTableHandle,

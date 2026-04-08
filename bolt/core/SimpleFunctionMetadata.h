@@ -41,6 +41,7 @@
 #include "bolt/core/QueryConfig.h"
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/expression/SignatureBinder.h"
+#include "bolt/type/SimpleFunctionApi.h"
 #include "bolt/type/Type.h"
 #include "bolt/type/Variant.h"
 namespace bytedance::bolt::core {
@@ -254,6 +255,38 @@ struct TypeAnalysis<Generic<T, comparable, orderable>> {
           comparable));
     }
     results.stats.hasGeneric = true;
+  }
+};
+
+template <typename P, typename S>
+struct TypeAnalysis<ShortDecimal<P, S>> {
+  void run(TypeAnalysisResults& results) {
+    auto precision = fmt::format("__user_{}", P::name());
+    auto scale = fmt::format("__user_{}", S::name());
+    results.addVariable(exec::SignatureVariable(
+        precision,
+        std::make_optional<std::string>("<=18"),
+        exec::ParameterType::kIntegerParameter));
+    results.addVariable(exec::SignatureVariable(
+        scale, std::nullopt, exec::ParameterType::kIntegerParameter));
+    results.stats.concreteCount++;
+    results.out << fmt::format("decimal({},{})", precision, scale);
+  }
+};
+
+template <typename P, typename S>
+struct TypeAnalysis<LongDecimal<P, S>> {
+  void run(TypeAnalysisResults& results) {
+    auto precision = fmt::format("__user_{}", P::name());
+    auto scale = fmt::format("__user_{}", S::name());
+    results.addVariable(exec::SignatureVariable(
+        precision,
+        std::make_optional<std::string>(">18"),
+        exec::ParameterType::kIntegerParameter));
+    results.addVariable(exec::SignatureVariable(
+        scale, std::nullopt, exec::ParameterType::kIntegerParameter));
+    results.stats.concreteCount++;
+    results.out << fmt::format("decimal({},{})", precision, scale);
   }
 };
 

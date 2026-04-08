@@ -43,6 +43,10 @@ if(${BOLT_ENABLE_FLINK_FUNCTIONS})
   add_subdirectory(flinksql)
 endif()
 
+if(${BOLT_ENABLE_ICEBERG_FUNCTIONS})
+  add_subdirectory(iceberg)
+endif()
+
 if(${BOLT_ENABLE_REMOTE_FUNCTIONS})
   add_subdirectory(remote)
 endif()

@@ -33,8 +33,13 @@ add_executable(
   HiveConnectorTest.cpp
   HiveRowIndexTest.cpp
   HiveDataSinkTest.cpp
+  IcebergConnectorTest.cpp
+  IcebergReadTest.cpp
+  IcebergWriteTest.cpp
+  IcebergPartitionNameTest.cpp
   HivePartitionFunctionTest.cpp
   HivePartitionUtilTest.cpp
+  PartitionSpecTest.cpp
   PartitionIdGeneratorTest.cpp
   TableHandleTest.cpp
 )

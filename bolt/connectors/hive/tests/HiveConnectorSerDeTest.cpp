@@ -31,6 +31,9 @@
 #include <gtest/gtest.h>
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/HiveConnector.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/iceberg/IcebergMetadataColumns.h"
+#include "bolt/connectors/hive/iceberg/IcebergSplit.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 using namespace bytedance::bolt;
@@ -47,6 +50,8 @@ class HiveConnectorSerDeTest : public exec::test::HiveConnectorTestBase {
     HiveColumnHandle::registerSerDe();
     LocationHandle::registerSerDe();
     HiveInsertTableHandle::registerSerDe();
+    HiveConnectorSplit::registerSerDe();
+    iceberg::HiveIcebergSplit::registerSerDe();
   }
 
   template <typename T>
@@ -93,8 +98,12 @@ TEST_F(HiveConnectorSerDeTest, hiveTableHandle) {
           .build(),
       parseExpr("c1 > c4 and c3 = true", rowType),
       "hive_table",
-      ROW({"c0", "c1"}, {BIGINT(), VARCHAR()}));
+      ROW({"c0", "c1"}, {BIGINT(), VARCHAR()}),
+      true,
+      {{1, "c0"}, {2, "c1"}});
   testSerde(*tableHandle);
+  ASSERT_EQ(tableHandle->fieldIdToColumnPath().at(1), "c0");
+  ASSERT_EQ(tableHandle->fieldIdToColumnPath().at(2), "c1");
 }
 
 TEST_F(HiveConnectorSerDeTest, hiveColumnHandle) {
@@ -104,7 +113,7 @@ TEST_F(HiveConnectorSerDeTest, hiveColumnHandle) {
         ARRAY(MAP(
             VARCHAR(), ROW({{"c0c1c0", BIGINT()}, {"c0c1c1", BIGINT()}})))}});
   auto columnHandle = exec::test::HiveConnectorTestBase::makeColumnHandle(
-      "columnHandle", columnType, {"c0.c0c1[3][\"foo\"].c0c1c0"});
+      "columnHandle", columnType, {"c0.c0c1[3][\"foo\"].c0c1c0"}, 11);
 
   testSerde(*columnHandle);
 }
@@ -140,4 +149,71 @@ TEST_F(HiveConnectorSerDeTest, hiveInsertTableHandle) {
       exec::test::HiveConnectorTestBase::makeHiveInsertTableHandle(
           tableColumnNames, tableColumnTypes, {"loc"}, locationHandle);
   testSerde(*hiveInsertTableHandle);
+}
+
+TEST_F(HiveConnectorSerDeTest, hiveConnectorSplitInfoColumns) {
+  auto split = exec::test::HiveConnectorSplitBuilder("/tmp/test-file")
+                   .fileFormat(dwio::common::FileFormat::PARQUET)
+                   .infoColumn("meta_file_size", "123")
+                   .build();
+
+  auto obj = split->serialize();
+  auto clone = ISerializable::deserialize<connector::ConnectorSplit>(obj);
+  auto hiveClone = std::dynamic_pointer_cast<const HiveConnectorSplit>(clone);
+  ASSERT_NE(hiveClone, nullptr);
+  ASSERT_EQ(hiveClone->infoColumns.at("meta_file_size"), "123");
+}
+
+TEST_F(HiveConnectorSerDeTest, hiveIcebergSplitDeleteFiles) {
+  std::vector<iceberg::IcebergDeleteFile> deleteFiles{
+      iceberg::IcebergDeleteFile(
+          iceberg::FileContent::kPositionalDeletes,
+          "/tmp/delete-file.parquet",
+          dwio::common::FileFormat::PARQUET,
+          3,
+          128,
+          {},
+          {{iceberg::IcebergMetadataColumn::kPosId, "AAE="}},
+          {{iceberg::IcebergMetadataColumn::kPosId, "AAI="}})};
+  std::unordered_map<std::string, std::optional<std::string>> partitionKeys{
+      {"ds", std::make_optional<std::string>("2024-01-01")}};
+  std::unordered_map<std::string, std::string> infoColumns{
+      {"meta_file_size", "456"}};
+
+  auto split = std::make_shared<iceberg::HiveIcebergSplit>(
+      exec::test::kHiveConnectorId,
+      "/tmp/data-file.parquet",
+      dwio::common::FileFormat::PARQUET,
+      0,
+      std::numeric_limits<uint64_t>::max(),
+      partitionKeys,
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      true,
+      deleteFiles,
+      infoColumns);
+
+  auto obj = split->serialize();
+  auto clone = ISerializable::deserialize<connector::ConnectorSplit>(obj);
+  auto icebergClone =
+      std::dynamic_pointer_cast<const iceberg::HiveIcebergSplit>(clone);
+  ASSERT_NE(icebergClone, nullptr);
+  ASSERT_EQ(icebergClone->partitionKeys.at("ds").value(), "2024-01-01");
+  ASSERT_EQ(icebergClone->infoColumns.at("meta_file_size"), "456");
+  ASSERT_EQ(icebergClone->deleteFiles.size(), 1);
+  EXPECT_EQ(
+      icebergClone->deleteFiles[0].content,
+      iceberg::FileContent::kPositionalDeletes);
+  EXPECT_EQ(icebergClone->deleteFiles[0].filePath, "/tmp/delete-file.parquet");
+  EXPECT_EQ(icebergClone->deleteFiles[0].recordCount, 3);
+  EXPECT_EQ(icebergClone->deleteFiles[0].fileSizeInBytes, 128);
+  EXPECT_EQ(
+      icebergClone->deleteFiles[0].lowerBounds.at(
+          iceberg::IcebergMetadataColumn::kPosId),
+      "AAE=");
+  EXPECT_EQ(
+      icebergClone->deleteFiles[0].upperBounds.at(
+          iceberg::IcebergMetadataColumn::kPosId),
+      "AAI=");
 }

@@ -29,6 +29,8 @@ bolt_add_library(bolt_hive_config OBJECT HiveConfig.cpp)
 
 target_link_libraries(bolt_hive_config bolt_exception)
 
+add_subdirectory(iceberg)
+
 bolt_add_library(
   bolt_hive_connector
   FileHandle.cpp
@@ -42,6 +44,17 @@ bolt_add_library(
   HivePartitionName.cpp
   HivePartitionUtil.cpp
   HiveSplitReaderBase.cpp
+  iceberg/IcebergConfig.cpp
+  iceberg/IcebergColumnHandle.cpp
+  iceberg/IcebergConnector.cpp
+  iceberg/IcebergDataFileStatistics.cpp
+  iceberg/IcebergDataSink.cpp
+  iceberg/IcebergDataSource.cpp
+  iceberg/IcebergPartitionName.cpp
+  iceberg/IcebergParquetStatsCollector.cpp
+  iceberg/PartitionSpec.cpp
+  iceberg/TransformEvaluator.cpp
+  iceberg/TransformExprBuilder.cpp
   PaimonMetadataColumn.cpp
   PaimonSplitReader.cpp
   paimon_merge_engines/AggregateEngine.cpp
@@ -86,6 +99,7 @@ target_link_libraries(
          bolt_dwio_orc_reader
          bolt_dwio_parquet_reader
          bolt_dwio_parquet_writer
+         bolt_hive_iceberg_splitreader
          ${ENABLED_FILESYSTEMS}
          ${ENABLED_DWIO_FORMATS}
          bolt_dwio_paimon_deletion_vector_reader
