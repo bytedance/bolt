@@ -278,7 +278,10 @@ void FlatVector<T>::copyValuesAndNulls(
     }
     if constexpr (std::is_same_v<T, StringView>) {
       if (kAllSelected) {
-        stringStatsTotal = rows.countSelected() * value.size();
+        if (!value.isInline()) {
+          // Only count non-inline strings.
+          stringStatsTotal = rows.countSelected() * value.size();
+        }
         stringStatsMax = value.size();
       }
     }
@@ -309,7 +312,10 @@ void FlatVector<T>::copyValuesAndNulls(
               rawValues_[row] = val;
               if constexpr (std::is_same_v<T, StringView>) {
                 if (kAllSelected) {
-                  stringStatsTotal += val.size();
+                  if (!val.isInline()) {
+                    // Only count non-inline strings.
+                    stringStatsTotal += val.size();
+                  }
                   stringStatsMax = std::max(
                       stringStatsMax, static_cast<uint64_t>(val.size()));
                 }
@@ -336,7 +342,10 @@ void FlatVector<T>::copyValuesAndNulls(
             rawValues_[row] = sourceVector->valueAt(sourceRow);
             if constexpr (std::is_same_v<T, StringView>) {
               if (kAllSelected) {
-                stringStatsTotal += rawValues_[row].size();
+                if (!rawValues_[row].isInline()) {
+                  // Only count non-inline strings.
+                  stringStatsTotal += rawValues_[row].size();
+                }
                 stringStatsMax = std::max(
                     stringStatsMax,
                     static_cast<uint64_t>(rawValues_[row].size()));

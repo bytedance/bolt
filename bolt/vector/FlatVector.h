@@ -44,13 +44,18 @@
 namespace bytedance::bolt {
 
 /// Accurate string size statistics for FlatVector<StringView>.
-/// When present, provides the actual sum of string bytes which may differ
-/// significantly from retainedSize (e.g., after flattening a DictionaryVector
-/// where shared string buffers cause retainedSize to underestimate the actual
-/// materialized size due to repeated references to large dictionary entries).
+/// When present, provides the actual sum of non-inline string bytes which may
+/// differ significantly from retainedSize (e.g., after flattening a
+/// DictionaryVector where shared string buffers cause retainedSize to
+/// underestimate the actual materialized size due to repeated references to
+/// large dictionary entries).
 struct StringViewStats {
-  uint64_t totalBytes{0}; // sum of all StringView.size()
-  uint64_t maxLength{0}; // max single StringView.size()
+  /// Sum of non-inline StringView.size(). Inline strings are stored within the
+  /// StringView struct itself, already covered by the values buffer size in
+  /// estimateFlatSize.
+  uint64_t totalBytes{0};
+  /// Max single StringView.size() (including inline strings).
+  uint64_t maxLength{0};
 };
 
 // FlatVector is marked final to allow for inlining on virtual methods called

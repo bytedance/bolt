@@ -107,8 +107,9 @@ void FlatVector<StringView>::setStringViewStats(StringViewStats stats) {
 template <>
 uint64_t FlatVector<StringView>::estimateFlatSize() const {
   if (stringStats_.has_value()) {
-    // stringStats_->totalBytes is the actual sum of StringView.size().
-    // Add StringView array size + nulls overhead for a complete estimate.
+    // stringStats_->totalBytes is the sum of non-inline StringView sizes.
+    // Inline strings are stored in the StringView struct itself,
+    // already covered by values_->size(). Add values + nulls overhead.
     return stringStats_->totalBytes + (values_ ? values_->size() : 0) +
         BaseVector::retainedSize();
   }
@@ -357,7 +358,6 @@ void FlatVector<StringView>::copy(
     }
 
     size_t totalBytes = 0;
-    uint64_t statsTotalBytes = 0;
     uint64_t maxLen = 0;
     rows.applyToSelected([&](vector_size_t row) {
       const auto sourceRow = toSourceRow ? toSourceRow[row] : row;
@@ -368,7 +368,6 @@ void FlatVector<StringView>::copy(
           bits::clearNull(rawNulls, row);
         }
         auto v = decoded.valueAt<StringView>(sourceRow);
-        statsTotalBytes += v.size();
         maxLen = std::max(maxLen, static_cast<uint64_t>(v.size()));
         if (v.isInline()) {
           rawValues_[row] = v;
@@ -379,7 +378,7 @@ void FlatVector<StringView>::copy(
     });
     // Only set stats when copying all rows.
     if (rows.countSelected() == BaseVector::length_) {
-      setStringViewStats(StringViewStats{statsTotalBytes, maxLen});
+      setStringViewStats(StringViewStats{totalBytes, maxLen});
     }
 
     if (totalBytes > 0) {

@@ -548,5 +548,5 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
        makeDict(row->childAt(2))});
   EXPECT_EQ(29632, row->retainedSize());
   EXPECT_EQ(2837, row->estimateFlatSize());
-  EXPECT_EQ(3042, flatten(row)->estimateFlatSize());
+  EXPECT_EQ(2943, flatten(row)->estimateFlatSize());
 }

@@ -94,9 +94,13 @@ TEST_F(ShuffleMiscTest, SkewedDictionaryStringEstimateFlatSize) {
   // Verify DictionaryVector estimateFlatSize underestimates
   auto dictEstimate = dictVector->estimateFlatSize();
   uint64_t actualBytes = 0;
+  uint64_t actualNonInlineBytes = 0;
   for (int i = 0; i < kNumRows; ++i) {
-    actualBytes +=
-        dictVector->as<SimpleVector<StringView>>()->valueAt(i).size();
+    auto sv = dictVector->as<SimpleVector<StringView>>()->valueAt(i);
+    actualBytes += sv.size();
+    if (!sv.isInline()) {
+      actualNonInlineBytes += sv.size();
+    }
   }
   // DictionaryVector default estimate uses dict avg, should be much smaller
   EXPECT_LT(dictEstimate, actualBytes / 2)
@@ -106,12 +110,14 @@ TEST_F(ShuffleMiscTest, SkewedDictionaryStringEstimateFlatSize) {
   VectorPtr flattened = dictVector;
   BaseVector::flattenVector(flattened);
 
-  // After flatten, FlatVector should have StringViewStats set
+  // After flatten, FlatVector should have StringViewStats set.
+  // totalBytes only includes non-inline strings (>12B); inline strings are
+  // stored in the StringView struct, covered by values.size().
   auto* flatVec = flattened->asFlatVector<StringView>();
   ASSERT_NE(flatVec, nullptr);
   ASSERT_TRUE(flatVec->stringStats().has_value())
       << "StringViewStats should be set after flattenVector";
-  EXPECT_EQ(flatVec->stringStats()->totalBytes, actualBytes);
+  EXPECT_EQ(flatVec->stringStats()->totalBytes, actualNonInlineBytes);
   EXPECT_EQ(flatVec->stringStats()->maxLength, kLongStringLen);
 
   // estimateFlatSize should now be accurate
