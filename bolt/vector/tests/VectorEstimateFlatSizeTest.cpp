@@ -536,7 +536,10 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
 
   EXPECT_EQ(28800, makeDict(row)->retainedSize());
   EXPECT_EQ(2838, makeDict(row)->estimateFlatSize());
-  EXPECT_EQ(3295, flatten(makeDict(row))->estimateFlatSize());
+  // After flatten, StringViewStats provides a more accurate (smaller) estimate
+  // than retainedSize because it uses actual string bytes instead of buffer
+  // capacity.
+  EXPECT_EQ(2943, flatten(makeDict(row))->estimateFlatSize());
 
   // Flat struct with dictionary encoded fields.
   row = makeRowVector(
@@ -545,5 +548,5 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
        makeDict(row->childAt(2))});
   EXPECT_EQ(29632, row->retainedSize());
   EXPECT_EQ(2837, row->estimateFlatSize());
-  EXPECT_EQ(3295, flatten(row)->estimateFlatSize());
+  EXPECT_EQ(3042, flatten(row)->estimateFlatSize());
 }
