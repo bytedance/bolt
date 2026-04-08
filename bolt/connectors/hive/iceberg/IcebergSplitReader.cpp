@@ -32,7 +32,7 @@ namespace bytedance::bolt::connector::hive::iceberg {
 namespace {
 
 // Bolt uses the generic Hive string conversion helpers for metadata info
-// columns, while velox routes these through newConstantFromString().
+// columns, while Bolt routes these through newConstantFromString().
 template <TypeKind kind>
 bolt::variant infoColumnValue(const std::string& value) {
   return hive::convertFromString<kind>(std::make_optional(value));

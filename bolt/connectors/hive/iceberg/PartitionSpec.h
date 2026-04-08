@@ -58,7 +58,6 @@ enum class TransformType {
   kTruncate,
 };
 
-/// String names for transform types. Matches Velox's TransformTypeName.
 struct TransformTypeName {
   static std::string_view toName(TransformType type);
 };
@@ -77,6 +76,7 @@ enum class TransformCategory {
   kBucket,
   kTruncate,
 };
+
 struct TransformCategoryName {
   static std::string_view toName(TransformCategory category);
 };
@@ -108,11 +108,14 @@ struct IcebergPartitionSpec {
     /// Column name as defined in table schema. This column's value is used to
     /// compute partition key by applying 'transformType' transformation.
     const std::string name;
+
     /// Column type.
     const TypePtr type;
+
     /// Transform to apply. Callers must ensure the transform is compatible with
     /// the column type.
     const TransformType transformType;
+
     /// Optional parameter for transforms that require configuration.
     const std::optional<int32_t> parameter;
 

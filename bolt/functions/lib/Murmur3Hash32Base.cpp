@@ -12,6 +12,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * --------------------------------------------------------------------------
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2025-11-11.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This modified file is released under the same license.
+ * --------------------------------------------------------------------------
  */
 
 #include "bolt/functions/lib/Murmur3Hash32Base.h"
@@ -55,5 +69,4 @@ uint32_t Murmur3Hash32Base::fmix(uint32_t h1, uint32_t length) {
   h1 ^= h1 >> 16;
   return h1;
 }
-
 } // namespace bytedance::bolt::functions

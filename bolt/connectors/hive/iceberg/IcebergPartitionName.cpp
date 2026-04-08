@@ -27,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #include "bolt/connectors/hive/iceberg/IcebergPartitionName.h"
 
 #include "bolt/common/encode/Base64.h"

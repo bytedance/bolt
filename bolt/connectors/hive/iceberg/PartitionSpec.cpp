@@ -36,6 +36,7 @@
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
+
 namespace {
 
 TransformCategory getTransformCategory(TransformType transformType) {
@@ -53,6 +54,36 @@ TransformCategory getTransformCategory(TransformType transformType) {
       return TransformCategory::kTruncate;
   }
   BOLT_UNREACHABLE("Unknown transform type");
+}
+
+bool isValidPartitionType(const TypePtr& type) {
+  return !(
+      type->isRow() || type->isArray() || type->isMap() || type->isDouble() ||
+      type->isReal() || isTimestampWithTimeZoneType(type));
+}
+
+bool canTransform(TransformType transformType, const TypePtr& type) {
+  switch (transformType) {
+    case TransformType::kIdentity:
+      return type->isTinyint() || type->isSmallint() || type->isInteger() ||
+          type->isBigint() || type->isBoolean() || type->isDecimal() ||
+          type->isDate() || type->isTimestamp() || type->isVarchar() ||
+          type->isVarbinary();
+    case TransformType::kYear:
+    case TransformType::kMonth:
+    case TransformType::kDay:
+      return type->isDate() || type->isTimestamp();
+    case TransformType::kHour:
+      return type->isTimestamp();
+    case TransformType::kBucket:
+      return type->isInteger() || type->isBigint() || type->isDecimal() ||
+          type->isVarchar() || type->isVarbinary() || type->isDate() ||
+          type->isTimestamp();
+    case TransformType::kTruncate:
+      return type->isInteger() || type->isBigint() || type->isDecimal() ||
+          type->isVarchar() || type->isVarbinary();
+  }
+  BOLT_UNREACHABLE("Unsupported partition transform type");
 }
 
 const auto& transformTypeNames() {
@@ -89,40 +120,6 @@ std::string_view TransformTypeName::toName(TransformType type) {
 std::string_view TransformCategoryName::toName(TransformCategory category) {
   return transformCategoryNames().at(category);
 }
-
-namespace {
-
-bool isValidPartitionType(const TypePtr& type) {
-  return !(
-      type->isRow() || type->isArray() || type->isMap() || type->isDouble() ||
-      type->isReal() || isTimestampWithTimeZoneType(type));
-}
-
-bool canTransform(TransformType transformType, const TypePtr& type) {
-  switch (transformType) {
-    case TransformType::kIdentity:
-      return type->isTinyint() || type->isSmallint() || type->isInteger() ||
-          type->isBigint() || type->isBoolean() || type->isDecimal() ||
-          type->isDate() || type->isTimestamp() || type->isVarchar() ||
-          type->isVarbinary();
-    case TransformType::kYear:
-    case TransformType::kMonth:
-    case TransformType::kDay:
-      return type->isDate() || type->isTimestamp();
-    case TransformType::kHour:
-      return type->isTimestamp();
-    case TransformType::kBucket:
-      return type->isInteger() || type->isBigint() || type->isDecimal() ||
-          type->isVarchar() || type->isVarbinary() || type->isDate() ||
-          type->isTimestamp();
-    case TransformType::kTruncate:
-      return type->isInteger() || type->isBigint() || type->isDecimal() ||
-          type->isVarchar() || type->isVarbinary();
-  }
-  BOLT_UNREACHABLE("Unsupported partition transform type");
-}
-
-} // namespace
 
 TypePtr IcebergPartitionSpec::Field::resultType() const {
   switch (transformType) {
@@ -163,7 +160,7 @@ void IcebergPartitionSpec::checkCompatibility() const {
   std::vector<std::string> errors;
   for (const auto& [columnName, transforms] : columnTransforms) {
     folly::F14FastSet<TransformCategory> seenCategories;
-    for (const auto& transform : transforms) {
+    for (const auto transform : transforms) {
       const auto category = getTransformCategory(transform);
       if (!seenCategories.insert(category).second) {
         std::vector<std::string> names;

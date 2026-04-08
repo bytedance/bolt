@@ -27,10 +27,10 @@ add_test(
 
 target_link_libraries(
   bolt_functions_iceberg_test
-  PRIVATE
   bolt_functions_iceberg
   bolt_functions_test_lib
-  bolt_testutils
+  bolt_expression
+  bolt_memory
   GTest::gtest
   GTest::gtest_main
 )

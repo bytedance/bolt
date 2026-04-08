@@ -31,10 +31,7 @@
 #pragma once
 
 #include "bolt/connectors/hive/iceberg/PartitionSpec.h"
-#include "bolt/core/ITypedExpr.h"
-
-// For column_index_t.
-#include "bolt/vector/ComplexVector.h"
+#include "bolt/expression/Expr.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
 

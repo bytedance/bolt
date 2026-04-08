@@ -27,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #pragma once
 
 #include <string>
@@ -35,6 +34,8 @@
 
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/parquet/ParquetFieldId.h"
+#include "bolt/type/Subfield.h"
+#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
 

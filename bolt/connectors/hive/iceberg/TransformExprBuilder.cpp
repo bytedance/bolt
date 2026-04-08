@@ -27,12 +27,11 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #include "bolt/connectors/hive/iceberg/TransformExprBuilder.h"
-
 #include "bolt/core/Expressions.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
+
 namespace {
 
 /// Converts a single partition field to a typed expression.
@@ -86,7 +85,7 @@ core::TypedExprPtr toExpression(
   std::vector<core::TypedExprPtr> exprArgs;
   if (field.parameter.has_value()) {
     exprArgs.emplace_back(std::make_shared<core::ConstantTypedExpr>(
-        INTEGER(), variant(field.parameter.value())));
+        INTEGER(), bolt::variant(field.parameter.value())));
   }
   exprArgs.emplace_back(
       std::make_shared<core::FieldAccessTypedExpr>(field.type, inputFieldName));

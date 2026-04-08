@@ -14,9 +14,18 @@
 
 set(
   ICEBERG_SOURCES
+  IcebergConfig.cpp
+  IcebergColumnHandle.cpp
+  IcebergConnector.cpp
+  IcebergDataSink.cpp
+  IcebergDataSource.cpp
+  IcebergPartitionName.cpp
   IcebergSplit.cpp
   IcebergSplitReader.cpp
+  PartitionSpec.cpp
   PositionalDeleteFileReader.cpp
+  TransformEvaluator.cpp
+  TransformExprBuilder.cpp
 )
 
 bolt_add_library(
@@ -31,3 +40,15 @@ target_link_libraries(
     bolt_functions_iceberg
     Folly::folly
 )
+
+# Iceberg split reader transitively includes exec/jit headers when ENABLE_BOLT_JIT is on.
+# Ensure LLVM headers are available for this target.
+if(ENABLE_BOLT_JIT)
+  find_package(LLVM CONFIG REQUIRED)
+  target_include_directories(
+    bolt_hive_iceberg_splitreader
+    SYSTEM
+    PRIVATE
+      ${LLVM_INCLUDE_DIRS}
+  )
+endif()

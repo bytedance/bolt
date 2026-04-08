@@ -12,6 +12,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * --------------------------------------------------------------------------
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2025-11-11.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This modified file is released under the same license.
+ * --------------------------------------------------------------------------
  */
 #include "bolt/functions/iceberg/Truncate.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -35,11 +49,7 @@ class TruncateTest : public bytedance::bolt::functions::iceberg::test::
       const TypePtr& type,
       std::optional<int32_t> width,
       std::optional<T> value) {
-    auto rowVector = makeRowVector({
-        makeNullableFlatVector(std::vector<std::optional<int32_t>>{width}),
-        makeNullableFlatVector(std::vector<std::optional<T>>{value}, type),
-    });
-    return evaluateOnce<T>("truncate(c0, c1)", rowVector);
+    return evaluateOnce<T>("truncate(c0, c1)", {INTEGER(), type}, width, value);
   }
 };
 
@@ -111,8 +121,12 @@ TEST_F(TruncateTest, bigint) {
 
   EXPECT_EQ(truncate<int64_t>(2, -1), -2);
   EXPECT_EQ(truncate<int64_t>(10, std::nullopt), std::nullopt);
-  BOLT_ASSERT_THROW(truncate<int64_t>(0, 34), "Invalid truncate width");
-  BOLT_ASSERT_THROW(truncate<int64_t>(-3, 34), "Invalid truncate width");
+  BOLT_ASSERT_THROW(
+      truncate<int64_t>(0, 34),
+      "Reason: (0 vs. 0) Invalid truncate width\nExpression: width <= 0");
+  BOLT_ASSERT_THROW(
+      truncate<int64_t>(-3, 34),
+      "Reason: (-3 vs. 0) Invalid truncate width\nExpression: width <= 0");
 }
 
 TEST_F(TruncateTest, string) {
@@ -134,11 +148,18 @@ TEST_F(TruncateTest, string) {
   // Explicit varchar/char types (treated same as string).
   EXPECT_EQ(truncate<std::string>(4, "测试raul试测"), "测试ra");
 
-  BOLT_ASSERT_THROW(truncate<std::string>(0, "abc"), "Invalid truncate width");
-  BOLT_ASSERT_THROW(truncate<std::string>(-3, "abc"), "Invalid truncate width");
-  BOLT_ASSERT_THROW(truncate<std::string>(0, "测试"), "Invalid truncate width");
   BOLT_ASSERT_THROW(
-      truncate<std::string>(-3, "测试"), "Invalid truncate width");
+      truncate<std::string>(0, "abc"),
+      "Reason: (0 vs. 0) Invalid truncate width\nExpression: width <= 0");
+  BOLT_ASSERT_THROW(
+      truncate<std::string>(-3, "abc"),
+      "Reason: (-3 vs. 0) Invalid truncate width\nExpression: width <= 0");
+  BOLT_ASSERT_THROW(
+      truncate<std::string>(0, "测试"),
+      "Reason: (0 vs. 0) Invalid truncate width\nExpression: width <= 0");
+  BOLT_ASSERT_THROW(
+      truncate<std::string>(-3, "测试"),
+      "Reason: (-3 vs. 0) Invalid truncate width\nExpression: width <= 0");
 }
 
 TEST_F(TruncateTest, unicodeBoundaries) {

@@ -30,10 +30,8 @@
 
 #pragma once
 
-#include <folly/Conv.h>
-
+#include "bolt/connectors/hive/HivePartitionName.h"
 #include "bolt/connectors/hive/iceberg/PartitionSpec.h"
-#include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
 
@@ -55,12 +53,27 @@ class IcebergPartitionName {
   /// Constructs a partition path in the format "key1=value1/key2=value2/..."
   /// where:
   /// - Keys are partition column names for identity transforms, or
-  ///   "columnName_transformName" for non-identity transforms.
-  /// - Values are human-readable string representations of transformed
-  ///   partition keys, formatted according to their transform types.
-  /// - Both keys and values are URL-encoded per java.net.URLEncoder.encode().
+  ///   "columnName_transformName" for non-identity transforms (e.g.,
+  ///   "date_year")
+  /// - Values are human-readable string representations of the transformed
+  ///   partition keys, formatted according to their transform types
+  /// - Both keys and values are URL-encoded per java.net.URLEncoder.encode()
   ///
   /// Example: "store_id=123/date_year=2025/address_bucket=1"
+  ///
+  /// Typically called once per partition ID when creating a new writer for that
+  /// partition.
+  ///
+  /// @param partitionId Sequential partition ID (0-based) used as the row index
+  /// into partitionValues. Must be less than partitionValues->size().
+  /// @param partitionValues RowVector containing transformed partition keys
+  /// for all partitions. Each row represents one unique partition, with
+  /// columns corresponding to partition fields in partitionSpec. Row at
+  /// partitionId contains the keys for this specific partition.
+  /// @param partitionKeyAsLowerCase Whether to convert partition keys to
+  /// lowercase in the generated partition path. When true, partition keys like
+  /// "Year" become "year" in the path "year=2025/...".
+  /// @return URL-encoded partition path string suitable for use in file paths.
   std::string partitionName(
       uint32_t partitionId,
       const RowVectorPtr& partitionValues,
@@ -70,34 +83,39 @@ class IcebergPartitionName {
   /// conversion. Specialized for types that need special handling.
   template <typename T>
   FOLLY_ALWAYS_INLINE static std::string
-  toName(T value, const TypePtr& /*type*/, TransformType /*transformType*/) {
-    return folly::to<std::string>(value);
+  toName(T value, const TypePtr& type, TransformType transformType) {
+    return HivePartitionName::toName(value, type);
   }
 
-  /// Converts a boolean partition key to its Iceberg string representation.
   static std::string
   toName(bool value, const TypePtr& type, TransformType transformType);
 
   /// Converts an int32_t partition key to its string representation based on
   /// the transform type:
-  /// - kIdentity: For DATE type return "YYYY-MM-DD" format.
-  /// - kDay: Returns date in "YYYY-MM-DD" format.
-  /// - kYear: Returns 4-digit year "YYYY".
-  /// - kMonth: Returns "YYYY-MM" format.
-  /// - kHour: Returns "YYYY-MM-DD-HH" format.
+  /// - kIdentity: For DATE type return "YYYY-MM-DD" format (e.g.,
+  ///              "2025-11-07").
+  ///              For other types return the value as-is (e.g., "-123").
+  /// - kDay: Returns date in "YYYY-MM-DD" format (e.g., "2025-11-07").
+  /// - kYear: Returns 4-digit year "YYYY" (e.g., "2025").
+  /// - kMonth: Returns "YYYY-MM" format (e.g., "2025-01").
+  /// - kHour: Returns "YYYY-MM-DD-HH" format (e.g., "2025-11-07-21").
   static std::string
   toName(int32_t value, const TypePtr& type, TransformType transformType);
 
-  /// Converts an int64_t partition key to its Iceberg string representation.
   static std::string
   toName(int64_t value, const TypePtr& type, TransformType transformType);
 
-  /// Converts a decimal partition key using Iceberg's unscaled decimal text
-  /// form expected in partition paths.
   static std::string
   toName(int128_t value, const TypePtr& type, TransformType transformType);
 
-  /// Returns timestamp formatted with Iceberg-compatible millisecond precision.
+  /// Returns timestamp formatted with milliseconds precision, zero-padded
+  /// year, trailing zeros skipped, and leading positive sign for years >=
+  /// 10000. Examples:
+  /// - Timestamp(0, 0) -> "1970-01-01T00:00:00".
+  /// - Timestamp(1609459200, 999000000) -> "2021-01-01T00:00:00.999".
+  /// - Timestamp(1640995200, 500000000) -> "2022-01-01T00:00:00.5".
+  /// - Timestamp(-1, 999000000) -> "1969-12-31T23:59:59.999".
+  /// - Timestamp(253402300800, 100000000) -> "+10000-01-01T00:00:00.1".
   static std::string
   toName(Timestamp value, const TypePtr& type, TransformType transformType);
 
@@ -108,6 +126,9 @@ class IcebergPartitionName {
   toName(StringView value, const TypePtr& type, TransformType transformType);
 
  private:
+  // Cached transform types, one per partition column. Created once in
+  // constructor and reused for all formatting operations. Index corresponds to
+  // column index in partitionSpec_->fields.
   std::vector<TransformType> transformTypes_;
 };
 

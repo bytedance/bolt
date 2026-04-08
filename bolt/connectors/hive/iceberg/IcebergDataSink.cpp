@@ -52,7 +52,7 @@ namespace {
 namespace fs = std::filesystem;
 
 // Parquet (Arrow) writer reads field id from Arrow field metadata.
-// See Velox: velox/dwio/parquet/writer/arrow/Writer.h.
+// Bolt's Parquet writer reads field ids from Arrow field metadata.
 static constexpr char FIELD_ID_KEY[] = "PARQUET:field_id";
 
 std::vector<std::shared_ptr<const HiveColumnHandle>> toHiveInputColumns(
@@ -198,7 +198,7 @@ folly::dynamic extractPartitionValue<TypeKind::UNKNOWN>(
 //
 // NOTE: This is a Bolt-specific adaptation for wiring Iceberg field ids into
 // the existing HiveDataSink write pipeline via WriterOptions::arrowSchema.
-// Semantics match Velox Parquet(Arrow) writer which consumes PARQUET:field_id
+// Semantics match Bolt's Parquet(Arrow) writer which consumes PARQUET:field_id
 // metadata when producing the Parquet schema.
 std::shared_ptr<::arrow::Schema> makeArrowSchemaWithFieldIds(
     const RowTypePtr& rowType,

@@ -116,7 +116,7 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
           deleteSplit_->partitionKeys,
           nullptr)) {
     // We only count the number of base splits skipped as skippedSplits runtime
-    // statistics in Velox.  Skipped delta split is only counted as skipped
+    // statistics in Bolt. Skipped delta split is only counted as skipped
     // bytes.
     runtimeStats.skippedSplitBytes += deleteSplit_->length;
     deleteSplit_.reset();

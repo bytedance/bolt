@@ -15,13 +15,12 @@
 bolt_add_library(
   bolt_functions_iceberg_hash
   Murmur3Hash32.cpp
-  ../lib/Murmur3Hash32Base.cpp
 )
 
 target_link_libraries(
   bolt_functions_iceberg_hash
-  PUBLIC bolt_common_base
-         bolt_functions_util
+  bolt_common_base
+  bolt_functions_util
 )
 
 bolt_add_library(
@@ -34,13 +33,16 @@ bolt_add_library(
 
 target_link_libraries(
   bolt_functions_iceberg
-  PUBLIC bolt_functions_iceberg_hash
-         bolt_functions_lib
-         Folly::folly
+  bolt_functions_iceberg_hash
+  bolt_functions_lib
+  Folly::folly
 )
 
 if(NOT BOLT_MONO_LIBRARY)
-  set_property(TARGET bolt_functions_iceberg PROPERTY JOB_POOL_COMPILE high_memory_pool)
+  set_property(
+    TARGET bolt_functions_iceberg
+    PROPERTY JOB_POOL_COMPILE high_memory_pool
+  )
 endif()
 
 if(${BOLT_BUILD_TESTING})

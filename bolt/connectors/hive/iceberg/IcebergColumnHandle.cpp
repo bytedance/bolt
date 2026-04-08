@@ -28,11 +28,11 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/iceberg/IcebergColumnHandle.h"
-
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "bolt/connectors/hive/iceberg/IcebergColumnHandle.h"
 
 namespace bytedance::bolt::connector::hive::iceberg {
 

@@ -12,6 +12,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * --------------------------------------------------------------------------
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2025-11-11.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This modified file is released under the same license.
+ * --------------------------------------------------------------------------
  */
 #include "bolt/functions/iceberg/BucketFunction.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -40,11 +54,8 @@ class BucketFunctionTest
       const TypePtr& type,
       std::optional<int32_t> numBuckets,
       std::optional<T> value) {
-    auto rowVector = makeRowVector({
-        makeNullableFlatVector(std::vector<std::optional<int32_t>>{numBuckets}),
-        makeNullableFlatVector(std::vector<std::optional<T>>{value}, type),
-    });
-    return evaluateOnce<int32_t>("bucket(c0, c1)", rowVector);
+    return evaluateOnce<int32_t>(
+        "bucket(c0, c1)", {INTEGER(), type}, numBuckets, value);
   }
 };
 
@@ -58,8 +69,12 @@ TEST_F(BucketFunctionTest, integerTypes) {
   EXPECT_EQ(bucket<int64_t>(10, 42), 6);
   EXPECT_EQ(bucket<int64_t>(100, -34), 97);
   EXPECT_EQ(bucket<int64_t>(2, -1), 0);
-  BOLT_ASSERT_THROW(bucket<int64_t>(0, 34), "Invalid number of buckets.");
-  BOLT_ASSERT_THROW(bucket<int64_t>(-3, 34), "Invalid number of buckets.");
+  BOLT_ASSERT_THROW(
+      bucket<int64_t>(0, 34),
+      "Reason: (0 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
+  BOLT_ASSERT_THROW(
+      bucket<int64_t>(-3, 34),
+      "Reason: (-3 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
 }
 
 TEST_F(BucketFunctionTest, string) {
@@ -73,9 +88,11 @@ TEST_F(BucketFunctionTest, string) {
   EXPECT_EQ(bucket<std::string>(16, "Товары"), 10);
   EXPECT_EQ(bucket<std::string>(120, "😀"), 58);
   BOLT_ASSERT_THROW(
-      bucket<std::string>(0, "abc"), "Invalid number of buckets.");
+      bucket<std::string>(0, "abc"),
+      "Reason: (0 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
   BOLT_ASSERT_THROW(
-      bucket<std::string>(-3, "abc"), "Invalid number of buckets.");
+      bucket<std::string>(-3, "abc"),
+      "Reason: (-3 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
 }
 
 TEST_F(BucketFunctionTest, binary) {
@@ -89,10 +106,10 @@ TEST_F(BucketFunctionTest, timestamp) {
   EXPECT_EQ(bucket<Timestamp>(20, Timestamp(-62167219200, 0)), 5);
   BOLT_ASSERT_THROW(
       bucket<Timestamp>(0, Timestamp(-62167219200, 0)),
-      "Invalid number of buckets.");
+      "Reason: (0 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
   BOLT_ASSERT_THROW(
       bucket<Timestamp>(-3, Timestamp(-62167219200, 0)),
-      "Invalid number of buckets.");
+      "Reason: (-3 vs. 0) Invalid number of buckets.\nExpression: numBuckets <= 0\n");
 }
 
 TEST_F(BucketFunctionTest, date) {

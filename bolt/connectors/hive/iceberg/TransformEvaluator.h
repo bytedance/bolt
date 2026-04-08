@@ -27,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-
 #pragma once
 
 #include "bolt/connectors/Connector.h"
@@ -35,9 +34,6 @@
 
 namespace bytedance::bolt::connector::hive::iceberg {
 
-/// Evaluates multiple expressions efficiently using batch evaluation.
-/// Expressions are compiled once in the constructor and reused across multiple
-/// input batches.
 class TransformEvaluator {
  public:
   /// Creates an evaluator with the given expressions and connector query
@@ -46,7 +42,7 @@ class TransformEvaluator {
   ///
   /// @param expressions Vector of typed expressions to evaluate. These are
   /// typically built using TransformExprBuilder::toExpressions() for Iceberg
-  /// partition transforms, but can be any valid expressions. The
+  /// partition transforms, but can be any valid Bolt expressions. The
   /// expressions are compiled once during construction.
   /// @param connectorQueryCtx Connector query context providing access to the
   /// expression evaluator (for compilation and evaluation) and memory pool.
@@ -55,8 +51,6 @@ class TransformEvaluator {
       const std::vector<core::TypedExprPtr>& expressions,
       const ConnectorQueryCtx* connectorQueryCtx);
 
-  /// Evaluates all expressions on the input data.
-  ///
   /// The input RowType must match the RowType used when building the
   /// expressions (passed to TransformExprBuilder::toExpressions). The column
   /// positions, names and types must align. Create a new TransformEvaluator

@@ -12,6 +12,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * --------------------------------------------------------------------------
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2026-03-30.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This modified file is released under the same license.
+ * --------------------------------------------------------------------------
  */
 #pragma once
 
@@ -56,15 +70,6 @@ struct HiveIcebergSplit : public connector::hive::HiveConnectorSplit {
       std::vector<IcebergDeleteFile> deletes = {},
       const std::unordered_map<std::string, std::string>& infoColumns = {},
       std::optional<FileProperties> fileProperties = std::nullopt);
-
-  // Bolt extension for split ser/de. Velox carries delete files only in
-  // in-memory test construction today, while Bolt also persists them through
-  // connector split serialization.
-  folly::dynamic serialize() const override;
-
-  static std::shared_ptr<HiveIcebergSplit> create(const folly::dynamic& obj);
-
-  static void registerSerDe();
 };
 
 } // namespace bytedance::bolt::connector::hive::iceberg

@@ -12,6 +12,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * --------------------------------------------------------------------------
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2025-11-11.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This modified file is released under the same license.
+ * --------------------------------------------------------------------------
  */
 
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -33,9 +47,8 @@ TEST_F(DateTimeFunctionsTest, years) {
   EXPECT_EQ(-1, years("1969-12-31 23:59:58.999999"));
 
   const auto yearsDate = [&](const std::string& date) {
-    auto rowVector = makeRowVector({makeNullableFlatVector(
-        std::vector<std::optional<int32_t>>{{parseDate(date)}}, DATE())});
-    return evaluateOnce<int32_t>("years(c0)", rowVector);
+    return evaluateOnce<int32_t>(
+        "years(c0)", DATE(), std::make_optional<int32_t>(parseDate(date)));
   };
   EXPECT_EQ(47, yearsDate("2017-12-01"));
   EXPECT_EQ(0, yearsDate("1970-01-01"));
@@ -52,9 +65,8 @@ TEST_F(DateTimeFunctionsTest, months) {
   EXPECT_EQ(-1, months("1969-12-31 23:59:58.999999"));
 
   const auto monthsDate = [&](const std::string& date) {
-    auto rowVector = makeRowVector({makeNullableFlatVector(
-        std::vector<std::optional<int32_t>>{{parseDate(date)}}, DATE())});
-    return evaluateOnce<int32_t>("months(c0)", rowVector);
+    return evaluateOnce<int32_t>(
+        "months(c0)", DATE(), std::make_optional<int32_t>(parseDate(date)));
   };
   EXPECT_EQ(575, monthsDate("2017-12-01"));
   EXPECT_EQ(0, monthsDate("1970-01-01"));
@@ -68,9 +80,8 @@ TEST_F(DateTimeFunctionsTest, days) {
   };
 
   const auto daysDate = [&](const std::string& date) {
-    auto rowVector = makeRowVector({makeNullableFlatVector(
-        std::vector<std::optional<int32_t>>{{parseDate(date)}}, DATE())});
-    return evaluateOnce<int32_t>("days(c0)", rowVector);
+    return evaluateOnce<int32_t>(
+        "days(c0)", DATE(), std::make_optional<int32_t>(parseDate(date)));
   };
   EXPECT_EQ(days("2017-12-01 10:12:55.038194"), daysDate("2017-12-01"));
   EXPECT_EQ(days("1970-01-01 00:00:01.000001"), daysDate("1970-01-01"));

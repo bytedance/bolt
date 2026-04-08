@@ -40,8 +40,6 @@ TransformEvaluator::TransformEvaluator(
     : connectorQueryCtx_(connectorQueryCtx) {
   BOLT_CHECK_NOT_NULL(connectorQueryCtx_);
   BOLT_CHECK_NOT_NULL(connectorQueryCtx_->expressionEvaluator());
-  // Bolt currently compiles one ExprSet per expression. Keep the constructor
-  // flow close to velox even though the compiled representation differs.
   exprSets_.reserve(expressions.size());
   for (const auto& expression : expressions) {
     exprSets_.push_back(
@@ -54,12 +52,11 @@ std::vector<VectorPtr> TransformEvaluator::evaluate(
   std::vector<VectorPtr> results(exprSets_.size());
   SelectivityVector rows(input->size());
 
-  // Evaluate all expressions using the pre-compiled ExprSets from the
-  // constructor.
   for (auto i = 0; i < exprSets_.size(); ++i) {
     connectorQueryCtx_->expressionEvaluator()->evaluate(
         exprSets_[i].get(), rows, *input, results[i]);
   }
+
   return results;
 }
 
