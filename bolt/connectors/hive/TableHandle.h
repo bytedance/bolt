@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "bolt/connectors/Connector.h"
 #include "bolt/core/ITypedExpr.h"
 #include "bolt/type/Filter.h"
@@ -39,6 +41,7 @@ namespace bytedance::bolt::connector::hive {
 
 using SubfieldFilters =
     std::unordered_map<common::Subfield, std::unique_ptr<common::Filter>>;
+using FieldIdToColumnPathMap = std::unordered_map<int32_t, std::string>;
 
 class HiveColumnHandle : public ColumnHandle {
  public:
@@ -62,12 +65,14 @@ class HiveColumnHandle : public ColumnHandle {
       ColumnType columnType,
       TypePtr dataType,
       TypePtr hiveType,
-      std::vector<common::Subfield> requiredSubfields = {})
+      std::vector<common::Subfield> requiredSubfields = {},
+      std::optional<int32_t> fieldId = std::nullopt)
       : name_(name),
         columnType_(columnType),
         dataType_(std::move(dataType)),
         hiveType_(std::move(hiveType)),
-        requiredSubfields_(std::move(requiredSubfields)) {
+        requiredSubfields_(std::move(requiredSubfields)),
+        fieldId_(fieldId) {
     BOLT_USER_CHECK(
         dataType_->equivalent(*hiveType_),
         "data type {} and hive type {} do not match",
@@ -109,6 +114,10 @@ class HiveColumnHandle : public ColumnHandle {
     return requiredSubfields_;
   }
 
+  const std::optional<int32_t>& fieldId() const {
+    return fieldId_;
+  }
+
   bool isPartitionKey() const {
     return columnType_ == ColumnType::kPartitionKey;
   }
@@ -144,6 +153,7 @@ class HiveColumnHandle : public ColumnHandle {
   const TypePtr dataType_;
   const TypePtr hiveType_;
   const std::vector<common::Subfield> requiredSubfields_;
+  const std::optional<int32_t> fieldId_;
 };
 
 class HiveTableHandle : public ConnectorTableHandle {
@@ -156,6 +166,16 @@ class HiveTableHandle : public ConnectorTableHandle {
       const core::TypedExprPtr& remainingFilter,
       const RowTypePtr& dataColumns = nullptr,
       const std::unordered_map<std::string, std::string>& tableParameters = {});
+
+  HiveTableHandle(
+      std::string connectorId,
+      const std::string& tableName,
+      bool filterPushdownEnabled,
+      SubfieldFilters subfieldFilters,
+      const core::TypedExprPtr& remainingFilter,
+      const RowTypePtr& dataColumns,
+      const std::unordered_map<std::string, std::string>& tableParameters,
+      FieldIdToColumnPathMap fieldIdToColumnPath);
 
   const std::string& tableName() const {
     return tableName_;
@@ -182,6 +202,10 @@ class HiveTableHandle : public ConnectorTableHandle {
     return dataColumns_;
   }
 
+  const FieldIdToColumnPathMap& fieldIdToColumnPath() const {
+    return fieldIdToColumnPath_;
+  }
+
   const std::unordered_map<std::string, std::string>& tableParameters() const {
     return tableParameters_;
   }
@@ -202,6 +226,7 @@ class HiveTableHandle : public ConnectorTableHandle {
   const SubfieldFilters subfieldFilters_;
   const core::TypedExprPtr remainingFilter_;
   const RowTypePtr dataColumns_;
+  const FieldIdToColumnPathMap fieldIdToColumnPath_;
   const std::unordered_map<std::string, std::string> tableParameters_;
 };
 

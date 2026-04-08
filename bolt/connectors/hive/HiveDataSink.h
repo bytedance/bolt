@@ -197,6 +197,39 @@ FOLLY_ALWAYS_INLINE std::ostream& operator<<(
 class HiveInsertTableHandle;
 using HiveInsertTableHandlePtr = std::shared_ptr<HiveInsertTableHandle>;
 
+class FileNameGenerator : public ISerializable {
+ public:
+  virtual ~FileNameGenerator() = default;
+
+  virtual std::pair<std::string, std::string> gen(
+      std::optional<uint32_t> bucketId,
+      const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle,
+      const ConnectorQueryCtx& connectorQueryCtx,
+      bool commitRequired) const = 0;
+
+  virtual std::string toString() const = 0;
+};
+
+class HiveInsertFileNameGenerator : public FileNameGenerator {
+ public:
+  HiveInsertFileNameGenerator() {}
+
+  std::pair<std::string, std::string> gen(
+      std::optional<uint32_t> bucketId,
+      const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle,
+      const ConnectorQueryCtx& connectorQueryCtx,
+      bool commitRequired) const override;
+
+  static void registerSerDe();
+
+  folly::dynamic serialize() const override;
+
+  static std::shared_ptr<HiveInsertFileNameGenerator> deserialize(
+      const folly::dynamic& obj);
+
+  std::string toString() const override;
+};
+
 /**
  * Represents a request for Hive write.
  */
@@ -207,24 +240,27 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
       std::shared_ptr<const LocationHandle> locationHandle,
       dwio::common::FileFormat tableStorageFormat =
           dwio::common::FileFormat::DWRF,
-      std::shared_ptr<HiveBucketProperty> bucketProperty = nullptr,
+      std::shared_ptr<const HiveBucketProperty> bucketProperty = nullptr,
       std::optional<common::CompressionKind> compressionKind = {},
       const std::unordered_map<std::string, std::string>& serdeParameters = {},
       const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
-          nullptr)
-      : inputColumns_(std::move(inputColumns)),
-        locationHandle_(std::move(locationHandle)),
-        tableStorageFormat_(tableStorageFormat),
-        bucketProperty_(std::move(bucketProperty)),
-        compressionKind_(compressionKind),
-        serdeParameters_(serdeParameters),
-        writerOptions_(writerOptions) {
-    if (compressionKind.has_value()) {
-      BOLT_CHECK(
-          compressionKind.value() != common::CompressionKind_MAX,
-          "Unsupported compression type: CompressionKind_MAX")
-    }
-  }
+          nullptr,
+      bool ensureFiles = false,
+      std::shared_ptr<const FileNameGenerator> fileNameGenerator =
+          std::make_shared<const HiveInsertFileNameGenerator>());
+
+  HiveInsertTableHandle(
+      std::vector<std::shared_ptr<const HiveColumnHandle>> inputColumns,
+      std::shared_ptr<const LocationHandle> locationHandle,
+      dwio::common::FileFormat tableStorageFormat,
+      std::shared_ptr<HiveBucketProperty> bucketProperty,
+      std::optional<common::CompressionKind> compressionKind,
+      const std::unordered_map<std::string, std::string>& serdeParameters = {},
+      const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
+          nullptr,
+      bool ensureFiles = false,
+      std::shared_ptr<const FileNameGenerator> fileNameGenerator =
+          std::make_shared<const HiveInsertFileNameGenerator>());
 
   virtual ~HiveInsertTableHandle() = default;
 
@@ -253,6 +289,14 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
     return writerOptions_;
   }
 
+  bool ensureFiles() const {
+    return ensureFiles_;
+  }
+
+  const std::shared_ptr<const FileNameGenerator>& fileNameGenerator() const {
+    return fileNameGenerator_;
+  }
+
   bool supportsMultiThreading() const override {
     return true;
   }
@@ -264,6 +308,14 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
   const HiveBucketProperty* bucketProperty() const;
 
   bool isExistingTable() const;
+
+  const std::vector<column_index_t>& partitionChannels() const {
+    return partitionChannels_;
+  }
+
+  const std::vector<column_index_t>& nonPartitionChannels() const {
+    return nonPartitionChannels_;
+  }
 
   folly::dynamic serialize() const override;
 
@@ -277,10 +329,14 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
   const std::vector<std::shared_ptr<const HiveColumnHandle>> inputColumns_;
   const std::shared_ptr<const LocationHandle> locationHandle_;
   const dwio::common::FileFormat tableStorageFormat_;
-  const std::shared_ptr<HiveBucketProperty> bucketProperty_;
+  const std::shared_ptr<const HiveBucketProperty> bucketProperty_;
   const std::optional<common::CompressionKind> compressionKind_;
   const std::unordered_map<std::string, std::string> serdeParameters_;
   const std::shared_ptr<dwio::common::WriterOptions> writerOptions_;
+  const bool ensureFiles_;
+  const std::shared_ptr<const FileNameGenerator> fileNameGenerator_;
+  const std::vector<column_index_t> partitionChannels_;
+  const std::vector<column_index_t> nonPartitionChannels_;
 };
 
 /// Parameters for Hive writers.
@@ -388,6 +444,19 @@ struct HiveWriterInfo {
   const std::shared_ptr<memory::MemoryPool> sinkPool;
   const std::shared_ptr<memory::MemoryPool> sortPool;
   int64_t numWrittenRows = 0;
+  int64_t currentFileWrittenRows{0};
+  uint64_t inputSizeInBytes{0};
+  uint32_t fileSequenceNumber{0};
+  struct HiveFileInfo {
+    std::string writeFileName;
+    std::string targetFileName;
+    uint64_t fileSize{0};
+    uint64_t numRows{0};
+  };
+  std::vector<HiveFileInfo> writtenFiles;
+  uint64_t cumulativeWrittenBytes{0};
+  std::string currentWriteFileName;
+  std::string currentTargetFileName;
 };
 
 /// Identifies a hive writer.
@@ -453,7 +522,20 @@ class HiveDataSink : public DataSink {
 
   bool canReclaim() const;
 
- private:
+ protected:
+  HiveDataSink(
+      RowTypePtr inputType,
+      std::shared_ptr<const HiveInsertTableHandle> insertTableHandle,
+      const ConnectorQueryCtx* connectorQueryCtx,
+      CommitStrategy commitStrategy,
+      const std::shared_ptr<const HiveConfig>& hiveConfig,
+      const core::QueryConfig& queryConfig,
+      uint32_t bucketCount,
+      std::unique_ptr<core::PartitionFunction> bucketFunction,
+      std::vector<column_index_t> partitionChannels,
+      std::vector<column_index_t> dataChannels,
+      std::unique_ptr<PartitionIdGenerator> partitionIdGenerator);
+
   enum class State { kRunning = 0, kAborted = 1, kClosed = 2 };
   friend struct fmt::formatter<
       bytedance::bolt::connector::hive::HiveDataSink::State>;
@@ -517,7 +599,7 @@ class HiveDataSink : public DataSink {
   void setMemoryReclaimers(HiveWriterInfo* writerInfo);
 
   // Compute the partition id and bucket id for each row in 'input'.
-  void computePartitionAndBucketIds(const RowVectorPtr& input);
+  virtual void computePartitionAndBucketIds(const RowVectorPtr& input);
 
   // Get the HiveWriter corresponding to the row
   // from partitionIds and bucketIds.
@@ -531,7 +613,11 @@ class HiveDataSink : public DataSink {
 
   // Makes sure to create one writer for the given writer id. The function
   // returns the corresponding index in 'writers_'.
-  uint32_t ensureWriter(const HiveWriterId& id);
+  virtual uint32_t ensureWriter(const HiveWriterId& id);
+
+  uint64_t getCurrentFileBytes(size_t writerIndex) const;
+
+  void finalizeWriterFile(size_t index);
 
   // Appends a new writer for the given 'id'. The function returns the index of
   // the newly created writer in 'writers_'.
@@ -539,7 +625,11 @@ class HiveDataSink : public DataSink {
 
   std::unique_ptr<bytedance::bolt::dwio::common::Writer>
   maybeCreateBucketSortWriter(
+      size_t writerIndex,
       std::unique_ptr<bytedance::bolt::dwio::common::Writer> writer);
+
+  std::unique_ptr<dwio::common::Writer> createWriterForIndex(
+      size_t writerIndex);
 
   HiveWriterParameters getWriterParameters(
       const std::optional<std::string>& partition,
@@ -564,8 +654,16 @@ class HiveDataSink : public DataSink {
   // Invoked to write 'input' to the specified file writer.
   void write(size_t index, RowVectorPtr input);
 
-  void closeInternal();
+  virtual std::vector<std::string> commitMessage() const;
 
+  virtual std::shared_ptr<dwio::common::WriterOptions> createWriterOptions(
+      size_t writerIndex) const;
+
+  virtual std::string getPartitionName(uint32_t partitionId) const;
+
+  virtual void closeInternal();
+
+ protected:
   const RowTypePtr inputType_;
   const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle_;
   const ConnectorQueryCtx* const connectorQueryCtx_;
@@ -610,6 +708,8 @@ class HiveDataSink : public DataSink {
 
   // Reusable buffers for bucket id calculations.
   std::vector<uint32_t> bucketIds_;
+
+ private:
 };
 
 } // namespace bytedance::bolt::connector::hive

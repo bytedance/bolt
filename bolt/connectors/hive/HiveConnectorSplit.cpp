@@ -126,6 +126,14 @@ std::shared_ptr<HiveConnectorSplit> HiveConnectorSplit::create(
     serdeParameters[key.asString()] = value.asString();
   }
 
+  std::unordered_map<std::string, std::string> infoColumns;
+  const auto& infoColumnsObj = obj.getDefault("infoColumns", nullptr);
+  if (infoColumnsObj != nullptr) {
+    for (const auto& [key, value] : infoColumnsObj.items()) {
+      infoColumns[key.asString()] = value.asString();
+    }
+  }
+
   uint64_t fileSize = static_cast<uint64_t>(obj["fileSize"].asInt());
 
   std::unique_ptr<HiveConnectorSplitCacheLimit> hiveConnectorSplitCacheLimit =
@@ -159,7 +167,8 @@ std::shared_ptr<HiveConnectorSplit> HiveConnectorSplit::create(
       extraFileInfo,
       serdeParameters,
       fileSize,
-      rowIdProperties);
+      rowIdProperties,
+      infoColumns);
 }
 
 // static

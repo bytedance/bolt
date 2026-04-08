@@ -59,6 +59,43 @@ int64_t ColumnChunkMetaDataPtr::totalCompressedSize() const {
   return thriftColumnChunkPtr(ptr_)->meta_data.total_compressed_size;
 }
 
+std::optional<int64_t> ColumnChunkMetaDataPtr::nullCount() const {
+  const auto& columnMetaData = thriftColumnChunkPtr(ptr_)->meta_data;
+  if (!columnMetaData.__isset.statistics ||
+      !columnMetaData.statistics.__isset.null_count) {
+    return std::nullopt;
+  }
+  return columnMetaData.statistics.null_count;
+}
+
+std::optional<std::string> ColumnChunkMetaDataPtr::minValue() const {
+  const auto& columnMetaData = thriftColumnChunkPtr(ptr_)->meta_data;
+  if (!columnMetaData.__isset.statistics) {
+    return std::nullopt;
+  }
+  if (columnMetaData.statistics.__isset.min_value) {
+    return columnMetaData.statistics.min_value;
+  }
+  if (columnMetaData.statistics.__isset.min) {
+    return columnMetaData.statistics.min;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> ColumnChunkMetaDataPtr::maxValue() const {
+  const auto& columnMetaData = thriftColumnChunkPtr(ptr_)->meta_data;
+  if (!columnMetaData.__isset.statistics) {
+    return std::nullopt;
+  }
+  if (columnMetaData.statistics.__isset.max_value) {
+    return columnMetaData.statistics.max_value;
+  }
+  if (columnMetaData.statistics.__isset.max) {
+    return columnMetaData.statistics.max;
+  }
+  return std::nullopt;
+}
+
 const std::vector<thrift::PageEncodingStats>&
 ColumnChunkMetaDataPtr::pageEncodingStats() const {
   return thriftColumnChunkPtr(ptr_)->meta_data.encoding_stats;

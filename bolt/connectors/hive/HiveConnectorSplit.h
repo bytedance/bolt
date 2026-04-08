@@ -183,6 +183,12 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
     }
     obj["serdeParameters"] = serdeParametersObj;
 
+    folly::dynamic infoColumnsObj = folly::dynamic::object;
+    for (const auto& [key, value] : infoColumns) {
+      infoColumnsObj[key] = value;
+    }
+    obj["infoColumns"] = infoColumnsObj;
+
     if (hiveConnectorSplitCacheLimit)
       obj["hiveConnectorSplitCacheLimit"] =
           hiveConnectorSplitCacheLimit->serialize();

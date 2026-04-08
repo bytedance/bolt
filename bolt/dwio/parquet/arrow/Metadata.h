@@ -37,6 +37,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -183,6 +184,7 @@ class PARQUET_EXPORT ColumnChunkMetaData {
   std::shared_ptr<schema::ColumnPath> path_in_schema() const;
   bool is_stats_set() const;
   std::shared_ptr<Statistics> statistics() const;
+  int32_t field_id() const;
 
   Compression::type compression() const;
   // Indicate if the ColumnChunk compression is supported by the current
@@ -397,6 +399,8 @@ class PARQUET_EXPORT FileMetaData {
   const SchemaDescriptor* schema() const;
 
   const std::shared_ptr<const KeyValueMetadata>& key_value_metadata() const;
+  std::pair<int64_t, bool> getNaNCount(int32_t fieldId) const;
+  std::pair<int64_t, bool> getNaNCountByColumnIndex(int columnIndex) const;
 
   /// \brief Set a path to all ColumnChunk for all RowGroups.
   ///
@@ -515,6 +519,8 @@ class PARQUET_EXPORT ColumnChunkMetaDataBuilder {
 
   // For writing metadata at end of column chunk
   void WriteTo(::arrow::io::OutputStream* sink);
+  int64_t nan_count() const;
+  bool has_nan_count() const;
 
  private:
   explicit ColumnChunkMetaDataBuilder(
@@ -548,6 +554,8 @@ class PARQUET_EXPORT RowGroupMetaDataBuilder {
 
   // commit the metadata
   void Finish(int64_t total_bytes_written, int16_t row_group_ordinal = -1);
+  std::unordered_map<int32_t, std::pair<int64_t, bool>> nan_counts() const;
+  std::vector<std::pair<int64_t, bool>> nan_counts_by_column_order() const;
 
  private:
   explicit RowGroupMetaDataBuilder(

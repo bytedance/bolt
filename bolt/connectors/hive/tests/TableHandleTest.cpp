@@ -44,13 +44,18 @@ TEST(FileHandleTest, hiveColumnHandle) {
         ARRAY(MAP(
             VARCHAR(), ROW({{"c0c1c0", BIGINT()}, {"c0c1c1", BIGINT()}})))}});
   auto columnHandle = exec::test::HiveConnectorTestBase::makeColumnHandle(
-      "columnHandle", columnType, columnType, {"c0.c0c1[3][\"foo\"].c0c1c0"});
+      "columnHandle",
+      columnType,
+      columnType,
+      {"c0.c0c1[3][\"foo\"].c0c1c0"},
+      17);
   ASSERT_EQ(columnHandle->name(), "columnHandle");
   ASSERT_EQ(
       columnHandle->columnType(),
       connector::hive::HiveColumnHandle::ColumnType::kRegular);
   ASSERT_EQ(columnHandle->dataType(), columnType);
   ASSERT_EQ(columnHandle->hiveType(), columnType);
+  ASSERT_EQ(columnHandle->fieldId(), 17);
   ASSERT_FALSE(columnHandle->isPartitionKey());
 
   auto str = columnHandle->toString();
@@ -67,4 +72,26 @@ TEST(FileHandleTest, hiveColumnHandle) {
           incompatibleHiveType,
           {"c0.c0c1[3][\"foo\"].c0c1c0"}),
       "data type ROW<c0c0:BIGINT,c0c1:ARRAY<MAP<VARCHAR,ROW<c0c1c0:BIGINT,c0c1c1:BIGINT>>>> and hive type ROW<c0c0:BIGINT,c0c1:BIGINT> do not match");
+}
+
+TEST(FileHandleTest, hiveTableHandleFieldIdToColumnPath) {
+  Type::registerSerDe();
+  connector::hive::HiveTableHandle::registerSerDe();
+
+  auto tableHandle = exec::test::HiveConnectorTestBase::makeTableHandle(
+      {},
+      nullptr,
+      "iceberg_table",
+      ROW({"payload", "s"},
+          {VARCHAR(), ROW({"x", "y"}, {BIGINT(), VARCHAR()})}),
+      true,
+      {{1, "s"}, {2, "s.x"}, {3, "s.y"}, {4, "payload"}});
+
+  auto obj = tableHandle->serialize();
+  auto clone =
+      ISerializable::deserialize<connector::hive::HiveTableHandle>(obj);
+  ASSERT_EQ(clone->fieldIdToColumnPath().size(), 4);
+  EXPECT_EQ(clone->fieldIdToColumnPath().at(1), "s");
+  EXPECT_EQ(clone->fieldIdToColumnPath().at(2), "s.x");
+  EXPECT_EQ(clone->fieldIdToColumnPath().at(4), "payload");
 }

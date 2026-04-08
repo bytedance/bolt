@@ -137,6 +137,8 @@ class HiveDataSource : public DataSource {
   // column name.
   std::unordered_map<std::string, std::shared_ptr<HiveColumnHandle>>
       partitionKeys_;
+  std::unordered_map<int32_t, std::shared_ptr<HiveColumnHandle>>
+      topLevelFieldIdToHandle_;
 
   FileHandleFactory* const fileHandleFactory_;
   folly::Executor* const executor_;

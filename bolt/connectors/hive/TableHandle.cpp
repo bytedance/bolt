@@ -71,6 +71,9 @@ folly::dynamic HiveColumnHandle::serialize() const {
   obj["columnType"] = columnTypeName(columnType_);
   obj["dataType"] = dataType_->serialize();
   obj["hiveType"] = hiveType_->serialize();
+  if (fieldId_.has_value()) {
+    obj["fieldId"] = *fieldId_;
+  }
   folly::dynamic requiredSubfields = folly::dynamic::array;
   for (const auto& subfield : requiredSubfields_) {
     requiredSubfields.push_back(subfield.toString());
@@ -86,6 +89,9 @@ std::string HiveColumnHandle::toString() const {
       name_,
       columnTypeName(columnType_),
       dataType_->toString());
+  if (fieldId_.has_value()) {
+    out << " fieldId: " << *fieldId_;
+  }
   out << " requiredSubfields: [";
   for (const auto& subfield : requiredSubfields_) {
     out << " " << subfield.toString();
@@ -99,6 +105,10 @@ ColumnHandlePtr HiveColumnHandle::create(const folly::dynamic& obj) {
   auto columnType = columnTypeFromName(obj["columnType"].asString());
   auto dataType = ISerializable::deserialize<Type>(obj["dataType"]);
   auto hiveType = ISerializable::deserialize<Type>(obj["hiveType"]);
+  std::optional<int32_t> fieldId;
+  if (auto it = obj.find("fieldId"); it != obj.items().end()) {
+    fieldId = it->second.asInt();
+  }
 
   const auto& arr = obj["requiredSubfields"];
   std::vector<common::Subfield> requiredSubfields;
@@ -108,7 +118,12 @@ ColumnHandlePtr HiveColumnHandle::create(const folly::dynamic& obj) {
   }
 
   return std::make_shared<HiveColumnHandle>(
-      name, columnType, dataType, hiveType, std::move(requiredSubfields));
+      name,
+      columnType,
+      dataType,
+      hiveType,
+      std::move(requiredSubfields),
+      fieldId);
 }
 
 void HiveColumnHandle::registerSerDe() {
@@ -124,12 +139,32 @@ HiveTableHandle::HiveTableHandle(
     const core::TypedExprPtr& remainingFilter,
     const RowTypePtr& dataColumns,
     const std::unordered_map<std::string, std::string>& tableParameters)
+    : HiveTableHandle(
+          std::move(connectorId),
+          tableName,
+          filterPushdownEnabled,
+          std::move(subfieldFilters),
+          remainingFilter,
+          dataColumns,
+          tableParameters,
+          {}) {}
+
+HiveTableHandle::HiveTableHandle(
+    std::string connectorId,
+    const std::string& tableName,
+    bool filterPushdownEnabled,
+    SubfieldFilters subfieldFilters,
+    const core::TypedExprPtr& remainingFilter,
+    const RowTypePtr& dataColumns,
+    const std::unordered_map<std::string, std::string>& tableParameters,
+    FieldIdToColumnPathMap fieldIdToColumnPath)
     : ConnectorTableHandle(std::move(connectorId)),
       tableName_(tableName),
       filterPushdownEnabled_(filterPushdownEnabled),
       subfieldFilters_(std::move(subfieldFilters)),
       remainingFilter_(remainingFilter),
       dataColumns_(dataColumns),
+      fieldIdToColumnPath_(std::move(fieldIdToColumnPath)),
       tableParameters_(tableParameters) {}
 
 std::string HiveTableHandle::toString() const {
@@ -158,6 +193,20 @@ std::string HiveTableHandle::toString() const {
   if (dataColumns_) {
     out << ", data columns: " << dataColumns_->toString();
   }
+  if (!fieldIdToColumnPath_.empty()) {
+    std::map<int32_t, std::string> orderedFieldIds(
+        fieldIdToColumnPath_.begin(), fieldIdToColumnPath_.end());
+    out << ", field ids: [";
+    bool notFirstFieldId = false;
+    for (const auto& [fieldId, path] : orderedFieldIds) {
+      if (notFirstFieldId) {
+        out << ", ";
+      }
+      out << "(" << fieldId << ", " << path << ")";
+      notFirstFieldId = true;
+    }
+    out << "]";
+  }
   return out.str();
 }
 
@@ -181,6 +230,14 @@ folly::dynamic HiveTableHandle::serialize() const {
   if (dataColumns_) {
     obj["dataColumns"] = dataColumns_->serialize();
   }
+  folly::dynamic fieldIdToColumnPath = folly::dynamic::array;
+  for (const auto& [fieldId, path] : fieldIdToColumnPath_) {
+    folly::dynamic pair = folly::dynamic::object;
+    pair["fieldId"] = fieldId;
+    pair["columnPath"] = path;
+    fieldIdToColumnPath.push_back(pair);
+  }
+  obj["fieldIdToColumnPath"] = fieldIdToColumnPath;
 
   return obj;
 }
@@ -213,13 +270,24 @@ ConnectorTableHandlePtr HiveTableHandle::create(
     dataColumns = ISerializable::deserialize<RowType>(it->second, context);
   }
 
+  FieldIdToColumnPathMap fieldIdToColumnPath;
+  if (auto it = obj.find("fieldIdToColumnPath"); it != obj.items().end()) {
+    for (const auto& fieldIdEntry : it->second) {
+      fieldIdToColumnPath.emplace(
+          fieldIdEntry["fieldId"].asInt(),
+          fieldIdEntry["columnPath"].asString());
+    }
+  }
+
   return std::make_shared<const HiveTableHandle>(
       connectorId,
       tableName,
       filterPushdownEnabled,
       std::move(subfieldFilters),
       remainingFilter,
-      dataColumns);
+      dataColumns,
+      std::unordered_map<std::string, std::string>{},
+      std::move(fieldIdToColumnPath));
 }
 
 void HiveTableHandle::registerSerDe() {

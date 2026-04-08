@@ -35,6 +35,7 @@
 #include <unordered_set>
 
 #include <folly/Executor.h>
+#include <memory>
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/config/Config.h"
@@ -47,6 +48,11 @@
 #include "bolt/dwio/common/InputStream.h"
 #include "bolt/dwio/common/ScanSpec.h"
 #include "bolt/dwio/common/encryption/Encryption.h"
+
+namespace arrow {
+class Schema;
+}
+
 namespace bytedance::bolt::dwio::common {
 
 enum class FileFormat {
@@ -758,6 +764,7 @@ class ReaderOptions : public io::ReaderOptions {
 
 struct WriterOptions : public ISerializable {
   TypePtr schema;
+  std::shared_ptr<::arrow::Schema> arrowSchema;
   bolt::memory::MemoryPool* memoryPool{nullptr};
   const bolt::common::SpillConfig* spillConfig{nullptr};
   // Owns the SpillConfig when it was produced by deserialize().

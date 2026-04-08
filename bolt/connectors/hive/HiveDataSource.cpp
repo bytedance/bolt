@@ -99,6 +99,11 @@ HiveDataSource::HiveDataSource(
       partitionKeys_.emplace(handle->name(), handle);
     }
 
+    if (handle->columnType() == HiveColumnHandle::ColumnType::kRegular &&
+        handle->fieldId().has_value()) {
+      topLevelFieldIdToHandle_.emplace(*handle->fieldId(), handle);
+    }
+
     if (handle->columnType() == HiveColumnHandle::ColumnType::kSynthesized) {
       infoColumns_.emplace(handle->name(), handle);
     }
@@ -319,6 +324,7 @@ std::unique_ptr<SplitReader> HiveDataSource::createSplitReader(
       hiveTableHandle_,
       scanSpec_,
       readerOutputType_,
+      topLevelFieldIdToHandle_,
       &partitionKeys_,
       fileHandleFactory_,
       executor_,

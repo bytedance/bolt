@@ -29,6 +29,7 @@
  */
 
 #include "bolt/connectors/hive/HivePartitionUtil.h"
+#include "bolt/type/DecimalUtil.h"
 namespace bytedance::bolt::connector::hive {
 
 #define PARTITION_TYPE_DISPATCH(TEMPLATE_FUNC, typeKind, ...)               \
@@ -39,6 +40,8 @@ namespace bytedance::bolt::connector::hive {
       case TypeKind::SMALLINT:                                              \
       case TypeKind::INTEGER:                                               \
       case TypeKind::BIGINT:                                                \
+      case TypeKind::HUGEINT:                                               \
+      case TypeKind::TIMESTAMP:                                             \
       case TypeKind::VARCHAR:                                               \
       case TypeKind::VARBINARY:                                             \
         return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(                           \
@@ -60,11 +63,27 @@ inline std::string makePartitionValueString(bool value) {
   return value ? "true" : "false";
 }
 
+template <>
+inline std::string makePartitionValueString(Timestamp value) {
+  return value.toString();
+}
+
+template <>
+inline std::string makePartitionValueString(int64_t value) {
+  return folly::to<std::string>(value);
+}
+
+template <>
+inline std::string makePartitionValueString(int128_t value) {
+  return std::to_string(value);
+}
+
 template <TypeKind Kind>
 std::pair<std::string, std::string> makePartitionKeyValueString(
     const BaseVector* partitionVector,
     vector_size_t row,
     const std::string& name,
+    const TypePtr& type,
     bool isDate) {
   using T = typename TypeTraits<Kind>::NativeType;
   if (partitionVector->as<SimpleVector<T>>()->isNullAt(row)) {
@@ -75,6 +94,14 @@ std::pair<std::string, std::string> makePartitionKeyValueString(
         name,
         DATE()->toString(
             partitionVector->as<SimpleVector<int32_t>>()->valueAt(row)));
+  }
+  if constexpr (Kind == TypeKind::BIGINT || Kind == TypeKind::HUGEINT) {
+    if (type->isDecimal()) {
+      return std::make_pair(
+          name,
+          DecimalUtil::toString(
+              partitionVector->as<SimpleVector<T>>()->valueAt(row), type));
+    }
   }
   return std::make_pair(
       name,
@@ -95,6 +122,7 @@ std::vector<std::pair<std::string, std::string>> extractPartitionKeyValues(
         partitionsVector->childAt(i)->loadedVector(),
         row,
         asRowType(partitionsVector->type())->nameOf(i),
+        partitionsVector->childAt(i)->type(),
         partitionsVector->childAt(i)->type()->isDate()));
   }
   return partitionKeyValues;

@@ -86,17 +86,22 @@ RowVectorPtr makeDataInput(
 
 // Returns a subset of column indices corresponding to partition keys.
 std::vector<column_index_t> getPartitionChannels(
-    const std::shared_ptr<const HiveInsertTableHandle>& insertTableHandle) {
+    const std::vector<std::shared_ptr<const HiveColumnHandle>>& inputColumns) {
   std::vector<column_index_t> channels;
 
-  for (column_index_t i = 0; i < insertTableHandle->inputColumns().size();
-       i++) {
-    if (insertTableHandle->inputColumns()[i]->isPartitionKey()) {
+  for (column_index_t i = 0; i < inputColumns.size(); i++) {
+    if (inputColumns[i]->isPartitionKey()) {
       channels.push_back(i);
     }
   }
 
   return channels;
+}
+
+// Returns a subset of column indices corresponding to partition keys.
+std::vector<column_index_t> getPartitionChannels(
+    const std::shared_ptr<const HiveInsertTableHandle>& insertTableHandle) {
+  return getPartitionChannels(insertTableHandle->inputColumns());
 }
 
 // Returns the column indices of non-partition data columns.
@@ -281,6 +286,57 @@ HiveBucketProperty::HiveBucketProperty(
   validate();
 }
 
+HiveInsertTableHandle::HiveInsertTableHandle(
+    std::vector<std::shared_ptr<const HiveColumnHandle>> inputColumns,
+    std::shared_ptr<const LocationHandle> locationHandle,
+    dwio::common::FileFormat tableStorageFormat,
+    std::shared_ptr<const HiveBucketProperty> bucketProperty,
+    std::optional<common::CompressionKind> compressionKind,
+    const std::unordered_map<std::string, std::string>& serdeParameters,
+    const std::shared_ptr<dwio::common::WriterOptions>& writerOptions,
+    bool ensureFiles,
+    std::shared_ptr<const FileNameGenerator> fileNameGenerator)
+    : inputColumns_(std::move(inputColumns)),
+      locationHandle_(std::move(locationHandle)),
+      tableStorageFormat_(tableStorageFormat),
+      bucketProperty_(std::move(bucketProperty)),
+      compressionKind_(compressionKind),
+      serdeParameters_(serdeParameters),
+      writerOptions_(writerOptions),
+      ensureFiles_(ensureFiles),
+      fileNameGenerator_(std::move(fileNameGenerator)),
+      partitionChannels_(getPartitionChannels(inputColumns_)),
+      nonPartitionChannels_(
+          getNonPartitionChannels(partitionChannels_, inputColumns_.size())) {
+  if (compressionKind.has_value()) {
+    BOLT_CHECK(
+        compressionKind.value() != common::CompressionKind_MAX,
+        "Unsupported compression type: CompressionKind_MAX");
+  }
+  BOLT_CHECK_NOT_NULL(fileNameGenerator_);
+}
+
+HiveInsertTableHandle::HiveInsertTableHandle(
+    std::vector<std::shared_ptr<const HiveColumnHandle>> inputColumns,
+    std::shared_ptr<const LocationHandle> locationHandle,
+    dwio::common::FileFormat tableStorageFormat,
+    std::shared_ptr<HiveBucketProperty> bucketProperty,
+    std::optional<common::CompressionKind> compressionKind,
+    const std::unordered_map<std::string, std::string>& serdeParameters,
+    const std::shared_ptr<dwio::common::WriterOptions>& writerOptions,
+    bool ensureFiles,
+    std::shared_ptr<const FileNameGenerator> fileNameGenerator)
+    : HiveInsertTableHandle(
+          std::move(inputColumns),
+          std::move(locationHandle),
+          tableStorageFormat,
+          std::shared_ptr<const HiveBucketProperty>(std::move(bucketProperty)),
+          compressionKind,
+          serdeParameters,
+          writerOptions,
+          ensureFiles,
+          std::move(fileNameGenerator)) {}
+
 void HiveBucketProperty::validate() const {
   BOLT_USER_CHECK_GT(bucketCount_, 0, "Hive bucket count can't be zero");
   BOLT_USER_CHECK(!bucketedBy_.empty(), "Hive bucket columns must be set");
@@ -300,6 +356,59 @@ std::string HiveBucketProperty::kindString(Kind kind) {
     default:
       return fmt::format("UNKNOWN {}", static_cast<int>(kind));
   }
+}
+
+std::pair<std::string, std::string> HiveInsertFileNameGenerator::gen(
+    std::optional<uint32_t> bucketId,
+    const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle,
+    const ConnectorQueryCtx& connectorQueryCtx,
+    bool commitRequired) const {
+  auto targetFileName = insertTableHandle->locationHandle()->targetFileName();
+  const bool generateFileName = targetFileName.empty();
+  if (bucketId.has_value()) {
+    BOLT_CHECK(generateFileName);
+    targetFileName =
+        computeBucketedFileName(connectorQueryCtx.queryId(), bucketId.value());
+  } else if (generateFileName) {
+    targetFileName = fmt::format(
+        "{}_{}_{}_{}",
+        connectorQueryCtx.taskId(),
+        connectorQueryCtx.driverId(),
+        connectorQueryCtx.planNodeId(),
+        makeUuid());
+  }
+  BOLT_CHECK(!targetFileName.empty());
+  const std::string writeFileName = commitRequired
+      ? fmt::format(".tmp.bolt.{}_{}", targetFileName, makeUuid())
+      : targetFileName;
+  if (generateFileName &&
+      insertTableHandle->storageFormat() == dwio::common::FileFormat::PARQUET) {
+    return {
+        fmt::format("{}{}", targetFileName, ".parquet"),
+        fmt::format("{}{}", writeFileName, ".parquet")};
+  }
+  return {targetFileName, writeFileName};
+}
+
+folly::dynamic HiveInsertFileNameGenerator::serialize() const {
+  folly::dynamic obj = folly::dynamic::object;
+  obj["name"] = "HiveInsertFileNameGenerator";
+  return obj;
+}
+
+std::shared_ptr<HiveInsertFileNameGenerator>
+HiveInsertFileNameGenerator::deserialize(const folly::dynamic& obj) {
+  return std::make_shared<HiveInsertFileNameGenerator>();
+}
+
+std::string HiveInsertFileNameGenerator::toString() const {
+  return "HiveInsertFileNameGenerator";
+}
+
+void HiveInsertFileNameGenerator::registerSerDe() {
+  auto& registry = DeserializationRegistryForSharedPtr();
+  registry.Register(
+      "HiveInsertFileNameGenerator", HiveInsertFileNameGenerator::deserialize);
 }
 
 folly::dynamic HiveBucketProperty::serialize() const {
@@ -362,6 +471,46 @@ HiveDataSink::HiveDataSink(
     CommitStrategy commitStrategy,
     const std::shared_ptr<const HiveConfig>& hiveConfig,
     const core::QueryConfig& queryConfig)
+    : HiveDataSink(
+          inputType,
+          insertTableHandle,
+          connectorQueryCtx,
+          commitStrategy,
+          hiveConfig,
+          queryConfig,
+          insertTableHandle->bucketProperty() == nullptr
+              ? 0
+              : insertTableHandle->bucketProperty()->bucketCount(),
+          insertTableHandle->bucketProperty() == nullptr
+              ? nullptr
+              : createBucketFunction(
+                    *insertTableHandle->bucketProperty(),
+                    inputType),
+          insertTableHandle->partitionChannels(),
+          insertTableHandle->nonPartitionChannels(),
+          !insertTableHandle->partitionChannels().empty()
+              ? std::make_unique<PartitionIdGenerator>(
+                    inputType,
+                    insertTableHandle->partitionChannels(),
+                    hiveConfig->maxPartitionsPerWriters(
+                        connectorQueryCtx->sessionProperties()),
+                    connectorQueryCtx->memoryPool(),
+                    hiveConfig->isPartitionPathAsLowerCase(
+                        connectorQueryCtx->sessionProperties()))
+              : nullptr) {}
+
+HiveDataSink::HiveDataSink(
+    RowTypePtr inputType,
+    std::shared_ptr<const HiveInsertTableHandle> insertTableHandle,
+    const ConnectorQueryCtx* connectorQueryCtx,
+    CommitStrategy commitStrategy,
+    const std::shared_ptr<const HiveConfig>& hiveConfig,
+    const core::QueryConfig& queryConfig,
+    uint32_t bucketCount,
+    std::unique_ptr<core::PartitionFunction> bucketFunction,
+    std::vector<column_index_t> partitionChannels,
+    std::vector<column_index_t> dataChannels,
+    std::unique_ptr<PartitionIdGenerator> partitionIdGenerator)
     : inputType_(std::move(inputType)),
       insertTableHandle_(std::move(insertTableHandle)),
       connectorQueryCtx_(connectorQueryCtx),
@@ -369,28 +518,11 @@ HiveDataSink::HiveDataSink(
       hiveConfig_(hiveConfig),
       maxOpenWriters_(hiveConfig_->maxPartitionsPerWriters(
           connectorQueryCtx->sessionProperties())),
-      partitionChannels_(getPartitionChannels(insertTableHandle_)),
-      partitionIdGenerator_(
-          !partitionChannels_.empty()
-              ? std::make_unique<PartitionIdGenerator>(
-                    inputType_,
-                    partitionChannels_,
-                    maxOpenWriters_,
-                    connectorQueryCtx_->memoryPool(),
-                    hiveConfig_->isPartitionPathAsLowerCase(
-                        connectorQueryCtx->sessionProperties()))
-              : nullptr),
-      dataChannels_(
-          getNonPartitionChannels(partitionChannels_, inputType_->size())),
-      bucketCount_(
-          insertTableHandle_->bucketProperty() == nullptr
-              ? 0
-              : insertTableHandle_->bucketProperty()->bucketCount()),
-      bucketFunction_(
-          isBucketed() ? createBucketFunction(
-                             *insertTableHandle_->bucketProperty(),
-                             inputType_)
-                       : nullptr),
+      partitionChannels_(std::move(partitionChannels)),
+      partitionIdGenerator_(std::move(partitionIdGenerator)),
+      dataChannels_(std::move(dataChannels)),
+      bucketCount_(bucketCount),
+      bucketFunction_(std::move(bucketFunction)),
       writerFactory_(
           dwio::common::getWriterFactory(insertTableHandle_->storageFormat())),
       spillConfig_(connectorQueryCtx->spillConfig()) {
@@ -487,6 +619,7 @@ void HiveDataSink::write(size_t index, RowVectorPtr input) {
 
   writers_[index]->write(dataInput);
   writerInfo_[index]->numWrittenRows += dataInput->size();
+  writerInfo_[index]->currentFileWrittenRows += dataInput->size();
 }
 
 std::string HiveDataSink::stateString(State state) {
@@ -529,10 +662,11 @@ DataSink::Stats HiveDataSink::stats() const {
     return stats;
   }
 
-  stats.numWrittenFiles = writers_.size();
+  stats.numWrittenFiles = 0;
   for (int i = 0; i < writerInfo_.size(); ++i) {
     const auto& info = writerInfo_.at(i);
     BOLT_CHECK_NOT_NULL(info);
+    stats.numWrittenFiles += info->writtenFiles.size();
     if (!info->spillStats->empty()) {
       stats.spillStats += *info->spillStats;
     }
@@ -557,6 +691,30 @@ void HiveDataSink::setMemoryReclaimers(HiveWriterInfo* writerInfo) {
   writerInfo->sinkPool->setReclaimer(exec::MemoryReclaimer::create());
   // NOTE: we set the memory reclaimer for sort pool when we construct the sort
   // writer.
+}
+
+uint64_t HiveDataSink::getCurrentFileBytes(size_t writerIndex) const {
+  return ioStats_.at(writerIndex)->rawBytesWritten() -
+      writerInfo_.at(writerIndex)->cumulativeWrittenBytes;
+}
+
+void HiveDataSink::finalizeWriterFile(size_t index) {
+  auto& info = writerInfo_.at(index);
+  BOLT_CHECK_NOT_NULL(info);
+  if (info->currentWriteFileName.empty()) {
+    return;
+  }
+
+  const auto currentFileBytes = getCurrentFileBytes(index);
+  info->writtenFiles.push_back(HiveWriterInfo::HiveFileInfo{
+      .writeFileName = info->currentWriteFileName,
+      .targetFileName = info->currentTargetFileName,
+      .fileSize = currentFileBytes,
+      .numRows = static_cast<uint64_t>(info->currentFileWrittenRows)});
+  info->cumulativeWrittenBytes += currentFileBytes;
+  info->currentFileWrittenRows = 0;
+  info->currentWriteFileName.clear();
+  info->currentTargetFileName.clear();
 }
 
 void HiveDataSink::setState(State newState) {
@@ -586,36 +744,7 @@ std::vector<std::string> HiveDataSink::close() {
   checkRunning();
   state_ = State::kClosed;
   closeInternal();
-
-  std::vector<std::string> partitionUpdates;
-  partitionUpdates.reserve(writerInfo_.size());
-  for (int i = 0; i < writerInfo_.size(); ++i) {
-    const auto& info = writerInfo_.at(i);
-    BOLT_CHECK_NOT_NULL(info);
-    // clang-format off
-      auto partitionUpdateJson = folly::toJson(
-       folly::dynamic::object
-          ("name", info->writerParameters.partitionName().value_or(""))
-          ("updateMode",
-            HiveWriterParameters::updateModeToString(
-              info->writerParameters.updateMode()))
-          ("writePath", info->writerParameters.writeDirectory())
-          ("targetPath", info->writerParameters.targetDirectory())
-          ("fileWriteInfos", folly::dynamic::array(
-            folly::dynamic::object
-              ("writeFileName", info->writerParameters.writeFileName())
-              ("targetFileName", info->writerParameters.targetFileName())
-              ("fileSize", ioStats_.at(i)->rawBytesWritten())))
-          ("rowCount", info->numWrittenRows)
-         // TODO(gaoge): track and send the fields when inMemoryDataSizeInBytes
-         // and containsNumberedFileNames are needed at coordinator when file_renaming_enabled are turned on.
-          ("inMemoryDataSizeInBytes", 0)
-          ("onDiskDataSizeInBytes", ioStats_.at(i)->rawBytesWritten())
-          ("containsNumberedFileNames", true));
-    // clang-format on
-    partitionUpdates.push_back(partitionUpdateJson);
-  }
-  return partitionUpdates;
+  return commitMessage();
 }
 
 void HiveDataSink::abort() {
@@ -632,11 +761,18 @@ void HiveDataSink::closeInternal() {
 
   if (state_ == State::kClosed) {
     for (int i = 0; i < writers_.size(); ++i) {
+      if (writers_[i] == nullptr) {
+        continue;
+      }
       WRITER_NON_RECLAIMABLE_SECTION_GUARD(i);
       writers_[i]->close();
+      finalizeWriterFile(i);
     }
   } else {
     for (int i = 0; i < writers_.size(); ++i) {
+      if (writers_[i] == nullptr) {
+        continue;
+      }
       WRITER_NON_RECLAIMABLE_SECTION_GUARD(i);
       writers_[i]->abort();
     }
@@ -651,6 +787,70 @@ uint32_t HiveDataSink::ensureWriter(const HiveWriterId& id) {
   return appendWriter(id);
 }
 
+std::vector<std::string> HiveDataSink::commitMessage() const {
+  std::vector<std::string> partitionUpdates;
+  partitionUpdates.reserve(writerInfo_.size());
+  for (int i = 0; i < writerInfo_.size(); ++i) {
+    const auto& info = writerInfo_.at(i);
+    BOLT_CHECK_NOT_NULL(info);
+    folly::dynamic fileWriteInfos = folly::dynamic::array;
+    uint64_t onDiskDataSizeInBytes{0};
+    for (const auto& file : info->writtenFiles) {
+      fileWriteInfos.push_back(folly::dynamic::object(
+          "writeFileName", file.writeFileName)(
+          "targetFileName", file.targetFileName)("fileSize", file.fileSize));
+      onDiskDataSizeInBytes += file.fileSize;
+    }
+    // clang-format off
+    auto partitionUpdateJson = folly::toJson(
+      folly::dynamic::object
+        ("name", info->writerParameters.partitionName().value_or(""))
+        ("updateMode",
+          HiveWriterParameters::updateModeToString(
+            info->writerParameters.updateMode()))
+        ("writePath", info->writerParameters.writeDirectory())
+        ("targetPath", info->writerParameters.targetDirectory())
+        ("fileWriteInfos", std::move(fileWriteInfos))
+        ("rowCount", info->numWrittenRows)
+        ("inMemoryDataSizeInBytes", info->inputSizeInBytes)
+        ("onDiskDataSizeInBytes", onDiskDataSizeInBytes)
+        ("containsNumberedFileNames", true));
+    // clang-format on
+    partitionUpdates.push_back(partitionUpdateJson);
+  }
+  return partitionUpdates;
+}
+
+std::shared_ptr<dwio::common::WriterOptions> HiveDataSink::createWriterOptions(
+    size_t writerIndex) const {
+  auto options = std::make_shared<dwio::common::WriterOptions>();
+  if (insertTableHandle_->writerOptions()) {
+    *options = *insertTableHandle_->writerOptions();
+  }
+  const auto* connectorSessionProperties =
+      connectorQueryCtx_->sessionProperties();
+  options->schema = getNonPartitionTypes(dataChannels_, inputType_);
+  options->memoryPool = writerInfo_.at(writerIndex)->writerPool.get();
+  options->compressionKind = insertTableHandle_->compressionKind();
+  if (canReclaim()) {
+    options->spillConfig = spillConfig_;
+  }
+  options->nonReclaimableSection =
+      writerInfo_.at(writerIndex)->nonReclaimableSectionHolder.get();
+  options->maxStripeSize = std::optional(
+      hiveConfig_->orcWriterMaxStripeSize(connectorSessionProperties));
+  options->maxDictionaryMemory = std::optional(
+      hiveConfig_->orcWriterMaxDictionaryMemory(connectorSessionProperties));
+  options->arrowBridgeTimestampUnit =
+      hiveConfig_->arrowBridgeTimestampUnit(connectorSessionProperties);
+  return options;
+}
+
+std::string HiveDataSink::getPartitionName(uint32_t partitionId) const {
+  BOLT_CHECK_NOT_NULL(partitionIdGenerator_);
+  return partitionIdGenerator_->partitionName(partitionId);
+}
+
 uint32_t HiveDataSink::appendWriter(const HiveWriterId& id) {
   // Check max open writers.
   BOLT_USER_CHECK_LE(
@@ -660,8 +860,7 @@ uint32_t HiveDataSink::appendWriter(const HiveWriterId& id) {
 
   std::optional<std::string> partitionName;
   if (isPartitioned()) {
-    partitionName =
-        partitionIdGenerator_->partitionName(id.partitionId.value());
+    partitionName = getPartitionName(id.partitionId.value());
   }
 
   // Without explicitly setting flush policy, the default memory based flush
@@ -682,41 +881,11 @@ uint32_t HiveDataSink::appendWriter(const HiveWriterId& id) {
       std::move(sortPool)));
   setMemoryReclaimers(writerInfo_.back().get());
 
-  dwio::common::WriterOptions options;
-  const auto* connectorSessionProperties =
-      connectorQueryCtx_->sessionProperties();
-  options.schema = getNonPartitionTypes(dataChannels_, inputType_);
-
-  options.memoryPool = writerInfo_.back()->writerPool.get();
-  options.compressionKind = insertTableHandle_->compressionKind();
-  if (canReclaim()) {
-    options.spillConfig = spillConfig_;
-  }
-  options.nonReclaimableSection =
-      writerInfo_.back()->nonReclaimableSectionHolder.get();
-  options.maxStripeSize = std::optional(
-      hiveConfig_->orcWriterMaxStripeSize(connectorSessionProperties));
-  options.maxDictionaryMemory = std::optional(
-      hiveConfig_->orcWriterMaxDictionaryMemory(connectorSessionProperties));
-  options.arrowBridgeTimestampUnit =
-      hiveConfig_->arrowBridgeTimestampUnit(connectorSessionProperties);
   ioStats_.emplace_back(std::make_shared<io::IoStatistics>());
 
   // Prevents the memory allocation during the writer creation.
   WRITER_NON_RECLAIMABLE_SECTION_GUARD(writerInfo_.size() - 1);
-  auto writer = writerFactory_->createWriter(
-      dwio::common::FileSink::create(
-          writePath,
-          {.bufferWrite = false,
-           .connectorProperties = hiveConfig_->config(),
-           .fileCreateConfig = hiveConfig_->writeFileCreateConfig(),
-           .pool = writerInfo_.back()->sinkPool.get(),
-           .metricLogger = dwio::common::MetricsLog::voidLog(),
-           .stats = ioStats_.back().get(),
-           .fileOptions = &fileOptions_}),
-      options);
-  writer = maybeCreateBucketSortWriter(std::move(writer));
-  writers_.emplace_back(std::move(writer));
+  writers_.emplace_back(createWriterForIndex(writerInfo_.size() - 1));
   // Extends the buffer used for partition rows calculations.
   partitionSizes_.emplace_back(0);
   partitionRows_.emplace_back(nullptr);
@@ -726,20 +895,47 @@ uint32_t HiveDataSink::appendWriter(const HiveWriterId& id) {
   return writerIndexMap_[id];
 }
 
+std::unique_ptr<dwio::common::Writer> HiveDataSink::createWriterForIndex(
+    size_t writerIndex) {
+  auto& info = writerInfo_.at(writerIndex);
+  BOLT_CHECK_NOT_NULL(info);
+  info->currentWriteFileName = info->writerParameters.writeFileName();
+  info->currentTargetFileName = info->writerParameters.targetFileName();
+
+  const auto writePath = fs::path(info->writerParameters.writeDirectory()) /
+      info->currentWriteFileName;
+  auto options = createWriterOptions(writerIndex);
+  auto writer = writerFactory_->createWriter(
+      dwio::common::FileSink::create(
+          writePath,
+          {.bufferWrite = false,
+           .connectorProperties = hiveConfig_->config(),
+           .fileCreateConfig = hiveConfig_->writeFileCreateConfig(),
+           .pool = info->sinkPool.get(),
+           .metricLogger = dwio::common::MetricsLog::voidLog(),
+           .stats = ioStats_.at(writerIndex).get(),
+           .fileOptions = &fileOptions_}),
+      *options);
+  return maybeCreateBucketSortWriter(writerIndex, std::move(writer));
+}
+
 std::unique_ptr<bytedance::bolt::dwio::common::Writer>
 HiveDataSink::maybeCreateBucketSortWriter(
+    size_t writerIndex,
     std::unique_ptr<bytedance::bolt::dwio::common::Writer> writer) {
   if (!sortWrite()) {
     return writer;
   }
-  auto* sortPool = writerInfo_.back()->sortPool.get();
+  auto& info = writerInfo_.at(writerIndex);
+  BOLT_CHECK_NOT_NULL(info);
+  auto* sortPool = info->sortPool.get();
   BOLT_CHECK_NOT_NULL(sortPool);
   auto sortBuffer = std::make_unique<exec::SortBuffer>(
       getNonPartitionTypes(dataChannels_, inputType_),
       sortColumnIndices_,
       sortCompareFlags_,
       sortPool,
-      writerInfo_.back()->nonReclaimableSectionHolder.get(),
+      info->nonReclaimableSectionHolder.get(),
       spillConfig_);
   return std::make_unique<dwio::common::SortingWriter>(
       std::move(writer),
@@ -748,7 +944,7 @@ HiveDataSink::maybeCreateBucketSortWriter(
           connectorQueryCtx_->sessionProperties()),
       hiveConfig_->sortWriterMaxOutputBytes(
           connectorQueryCtx_->sessionProperties()),
-      writerInfo_.back()->spillStats.get());
+      info->spillStats.get());
 }
 
 HiveWriterId HiveDataSink::getWriterId(size_t row) const {
@@ -821,36 +1017,8 @@ HiveWriterParameters HiveDataSink::getWriterParameters(
 
 std::pair<std::string, std::string> HiveDataSink::getWriterFileNames(
     std::optional<uint32_t> bucketId) const {
-  auto targetFileName = insertTableHandle_->locationHandle()->targetFileName();
-  const bool generateFileName = targetFileName.empty();
-  if (bucketId.has_value()) {
-    BOLT_CHECK(generateFileName);
-    // TODO: add hive.file_renaming_enabled support.
-    targetFileName = computeBucketedFileName(
-        connectorQueryCtx_->queryId(), bucketId.value());
-  } else if (generateFileName) {
-    // targetFileName includes planNodeId and Uuid. As a result, different
-    // table writers run by the same task driver or the same table writer
-    // run in different task tries would have different targetFileNames.
-    targetFileName = fmt::format(
-        "{}_{}_{}_{}",
-        connectorQueryCtx_->taskId(),
-        connectorQueryCtx_->driverId(),
-        connectorQueryCtx_->planNodeId(),
-        makeUuid());
-  }
-  BOLT_CHECK(!targetFileName.empty());
-  const std::string writeFileName = isCommitRequired()
-      ? fmt::format(".tmp.bolt.{}_{}", targetFileName, makeUuid())
-      : targetFileName;
-  if (generateFileName &&
-      insertTableHandle_->storageFormat() ==
-          dwio::common::FileFormat::PARQUET) {
-    return {
-        fmt::format("{}{}", targetFileName, ".parquet"),
-        fmt::format("{}{}", writeFileName, ".parquet")};
-  }
-  return {targetFileName, writeFileName};
+  return insertTableHandle_->fileNameGenerator()->gen(
+      bucketId, insertTableHandle_, *connectorQueryCtx_, isCommitRequired());
 }
 
 HiveWriterParameters::UpdateMode HiveDataSink::getUpdateMode() const {
@@ -881,10 +1049,7 @@ HiveWriterParameters::UpdateMode HiveDataSink::getUpdateMode() const {
 }
 
 bool HiveInsertTableHandle::isPartitioned() const {
-  return std::any_of(
-      inputColumns_.begin(), inputColumns_.end(), [](auto column) {
-        return column->isPartitionKey();
-      });
+  return !partitionChannels_.empty();
 }
 
 const HiveBucketProperty* HiveInsertTableHandle::bucketProperty() const {
@@ -909,6 +1074,20 @@ folly::dynamic HiveInsertTableHandle::serialize() const {
 
   obj["inputColumns"] = arr;
   obj["locationHandle"] = locationHandle_->serialize();
+  obj["storageFormat"] = static_cast<int64_t>(tableStorageFormat_);
+  if (bucketProperty_ != nullptr) {
+    obj["bucketProperty"] = bucketProperty_->serialize();
+  }
+  if (compressionKind_.has_value()) {
+    obj["compressionKind"] = static_cast<int64_t>(compressionKind_.value());
+  }
+  folly::dynamic serdeParameters = folly::dynamic::object;
+  for (const auto& [key, value] : serdeParameters_) {
+    serdeParameters[key] = value;
+  }
+  obj["serdeParameters"] = std::move(serdeParameters);
+  obj["ensureFiles"] = ensureFiles_;
+  obj["fileNameGenerator"] = fileNameGenerator_->serialize();
   return obj;
 }
 
@@ -918,12 +1097,49 @@ HiveInsertTableHandlePtr HiveInsertTableHandle::create(
       obj["inputColumns"]);
   auto locationHandle =
       ISerializable::deserialize<LocationHandle>(obj["locationHandle"]);
-  return std::make_shared<HiveInsertTableHandle>(inputColumns, locationHandle);
+  const auto storageFormat = obj.count("storageFormat")
+      ? static_cast<dwio::common::FileFormat>(obj["storageFormat"].asInt())
+      : dwio::common::FileFormat::DWRF;
+  std::shared_ptr<const HiveBucketProperty> bucketProperty;
+  if (obj.count("bucketProperty")) {
+    bucketProperty =
+        ISerializable::deserialize<HiveBucketProperty>(obj["bucketProperty"]);
+  }
+  std::optional<common::CompressionKind> compressionKind = std::nullopt;
+  if (obj.count("compressionKind")) {
+    compressionKind =
+        static_cast<common::CompressionKind>(obj["compressionKind"].asInt());
+  }
+  std::unordered_map<std::string, std::string> serdeParameters;
+  if (obj.count("serdeParameters")) {
+    for (const auto& [key, value] : obj["serdeParameters"].items()) {
+      serdeParameters[key.asString()] = value.asString();
+    }
+  }
+  const bool ensureFiles =
+      obj.count("ensureFiles") ? obj["ensureFiles"].asBool() : false;
+  std::shared_ptr<const FileNameGenerator> fileNameGenerator =
+      std::make_shared<const HiveInsertFileNameGenerator>();
+  if (obj.count("fileNameGenerator")) {
+    fileNameGenerator =
+        ISerializable::deserialize<FileNameGenerator>(obj["fileNameGenerator"]);
+  }
+  return std::make_shared<HiveInsertTableHandle>(
+      inputColumns,
+      locationHandle,
+      storageFormat,
+      std::move(bucketProperty),
+      compressionKind,
+      serdeParameters,
+      nullptr,
+      ensureFiles,
+      std::move(fileNameGenerator));
 }
 
 void HiveInsertTableHandle::registerSerDe() {
   auto& registry = DeserializationRegistryForSharedPtr();
   registry.Register("HiveInsertTableHandle", HiveInsertTableHandle::create);
+  HiveInsertFileNameGenerator::registerSerDe();
 }
 
 std::string HiveInsertTableHandle::toString() const {

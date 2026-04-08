@@ -31,6 +31,7 @@
 #include "FileUtils.h"
 #include <fmt/core.h>
 #include <bitset>
+#include <sstream>
 #include "bolt/dwio/common/exception/Exception.h"
 #include "folly/container/Array.h"
 namespace bytedance {
@@ -173,45 +174,38 @@ std::string FileUtils::unescapePathName(const std::string& data) {
 std::string FileUtils::makePartName(
     const std::vector<std::pair<std::string, std::string>>& entries,
     bool partitionPathAsLowerCase) {
-  size_t size = 0;
-  size_t escapeCount = 0;
-  std::for_each(entries.begin(), entries.end(), [&](auto& pair) {
-    auto keySize = pair.first.size();
-    DWIO_ENSURE_GT(keySize, 0);
-    size += keySize;
-    escapeCount += countEscape(pair.first);
+  return makePartName(
+      entries,
+      partitionPathAsLowerCase,
+      /*useDefaultPartitionValue=*/true,
+      FileUtils::escapePathName);
+}
 
-    auto valSize = pair.second.size();
-    if (valSize == 0) {
-      size += DEFAULT_PARTITION_VALUE.size();
+std::string FileUtils::makePartName(
+    const std::vector<std::pair<std::string, std::string>>& entries,
+    bool partitionPathAsLowerCase,
+    bool useDefaultPartitionValue,
+    const FileUtils::EncodeFunction& encodeFunc) {
+  DWIO_ENSURE(!entries.empty());
+  std::ostringstream out;
+
+  for (const auto& [key, value] : entries) {
+    DWIO_ENSURE_GT(key.size(), 0);
+    if (out.tellp() > 0) {
+      out << '/';
+    }
+
+    std::string keyToEncode = partitionPathAsLowerCase ? toLower(key) : key;
+    out << encodeFunc(keyToEncode) << '=';
+
+    if (value.empty() && useDefaultPartitionValue) {
+      out << DEFAULT_PARTITION_VALUE;
     } else {
-      size += valSize;
-      escapeCount += countEscape(pair.second);
+      out << encodeFunc(value);
     }
-  });
+  }
 
-  std::string ret;
-  ret.reserve(size + escapeCount * HEX_WIDTH + entries.size() - 1);
-
-  std::for_each(entries.begin(), entries.end(), [&](auto& pair) {
-    if (ret.size() > 0) {
-      ret += "/";
-    }
-    if (partitionPathAsLowerCase) {
-      ret += escapePathName(toLower(pair.first));
-    } else {
-      ret += escapePathName(pair.first);
-    }
-
-    ret += "=";
-    if (pair.second.size() == 0) {
-      ret += DEFAULT_PARTITION_VALUE;
-    } else {
-      ret += escapePathName(pair.second);
-    }
-  });
-
-  return ret;
+  return out.str();
 }
 
 std::vector<std::pair<std::string, std::string>> FileUtils::parsePartKeyValues(

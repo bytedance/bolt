@@ -39,6 +39,7 @@
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/Writer.h"
 #include "bolt/dwio/common/WriterFactory.h"
+#include "bolt/dwio/parquet/arrow/Metadata.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
@@ -230,7 +231,8 @@ class Writer : public dwio::common::Writer {
   Writer(
       std::unique_ptr<dwio::common::FileSink> sink,
       const WriterOptions& options,
-      RowTypePtr schema);
+      RowTypePtr schema,
+      std::shared_ptr<::arrow::Schema> arrowSchema = nullptr);
 
   ~Writer() override = default;
 
@@ -251,6 +253,8 @@ class Writer : public dwio::common::Writer {
   // Parquet file is flushed into 'sink' provided at construction. 'sink' stays
   // live until destruction of 'this'.
   void close() override;
+
+  std::shared_ptr<arrow::FileMetaData> metadata() const;
 
   void abort() override;
 

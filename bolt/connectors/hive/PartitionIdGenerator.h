@@ -68,6 +68,10 @@ class PartitionIdGenerator {
   /// schema.
   std::string partitionName(uint64_t partitionId) const;
 
+  const RowVectorPtr& partitionValues() const {
+    return partitionValues_;
+  }
+
  private:
   static constexpr const int32_t kHasherReservePct = 20;
 

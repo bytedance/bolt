@@ -370,6 +370,54 @@ CleanStatistic(std::pair<T, T> min_max) {
   return min_max;
 }
 
+template <typename T>
+::arrow::enable_if_t<std::is_floating_point<T>::value, int64_t> CountNaNs(
+    const T* values,
+    int64_t length) {
+  int64_t count = 0;
+  for (int64_t i = 0; i < length; ++i) {
+    if (std::isnan(SafeLoad(values + i))) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+template <typename T>
+::arrow::enable_if_t<!std::is_floating_point<T>::value, int64_t> CountNaNs(
+    const T* /*values*/,
+    int64_t /*length*/) {
+  return 0;
+}
+
+template <typename T>
+::arrow::enable_if_t<std::is_floating_point<T>::value, int64_t> CountNaNsSpaced(
+    const T* values,
+    int64_t length,
+    const uint8_t* valid_bits,
+    int64_t valid_bits_offset) {
+  int64_t count = 0;
+  ::arrow::internal::VisitSetBitRunsVoid(
+      valid_bits, valid_bits_offset, length, [&](int64_t position, int64_t n) {
+        for (int64_t i = 0; i < n; ++i) {
+          if (std::isnan(SafeLoad(values + position + i))) {
+            ++count;
+          }
+        }
+      });
+  return count;
+}
+
+template <typename T>
+::arrow::enable_if_t<!std::is_floating_point<T>::value, int64_t>
+CountNaNsSpaced(
+    const T* /*values*/,
+    int64_t /*length*/,
+    const uint8_t* /*valid_bits*/,
+    int64_t /*valid_bits_offset*/) {
+  return 0;
+}
+
 // In case of floating point types, the following rules are applied (as per
 // upstream parquet-mr):
 // - If any of min/max is NaN, return nothing.
@@ -605,6 +653,8 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
       bool has_min_max,
       bool has_null_count,
       bool has_distinct_count,
+      bool has_nan_count,
+      int64_t nan_count,
       MemoryPool* pool)
       : TypedStatisticsImpl(descr, pool) {
     TypedStatisticsImpl::IncrementNumValues(num_values);
@@ -617,6 +667,11 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
       SetDistinctCount(distinct_count);
     } else {
       has_distinct_count_ = false;
+    }
+    if (has_nan_count) {
+      IncrementNaNValues(nan_count);
+    } else {
+      has_nan_count_ = false;
     }
 
     if (!encoded_min.empty()) {
@@ -637,6 +692,9 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   bool HasNullCount() const override {
     return has_null_count_;
   };
+  bool HasNaNCount() const override {
+    return has_nan_count_;
+  }
 
   void IncrementNullCount(int64_t n) override {
     statistics_.null_count += n;
@@ -645,6 +703,13 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
 
   void IncrementNumValues(int64_t n) override {
     num_values_ += n;
+  }
+
+  void IncrementNaNValues(int64_t n) override {
+    if (n > 0) {
+      statistics_.nan_count += n;
+      has_nan_count_ = true;
+    }
   }
 
   bool Equals(const Statistics& raw_other) const override {
@@ -662,7 +727,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
 
     return null_count() == other.null_count() &&
         distinct_count() == other.distinct_count() &&
-        num_values() == other.num_values();
+        nan_count() == other.nan_count() && num_values() == other.num_values();
   }
 
   bool MinMaxEqual(const TypedStatisticsImpl& other) const;
@@ -693,6 +758,10 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
     } else {
       // Otherwise clear has_distinct_count_ as distinct count cannot be merged.
       this->has_distinct_count_ = false;
+    }
+    if (other.HasNaNCount()) {
+      this->statistics_.nan_count += other.nan_count();
+      this->has_nan_count_ = true;
     }
     // Do not clear min/max here if the other side does not provide
     // min/max which may happen when other is an empty stats or all
@@ -768,6 +837,9 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
     if (HasDistinctCount()) {
       s.set_distinct_count(this->distinct_count());
     }
+    if (HasNaNCount()) {
+      s.set_nan_count(this->nan_count());
+    }
     return s;
   }
 
@@ -776,6 +848,9 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   }
   int64_t distinct_count() const override {
     return statistics_.distinct_count;
+  }
+  int64_t nan_count() const override {
+    return statistics_.nan_count;
   }
   int64_t num_values() const override {
     return num_values_;
@@ -786,6 +861,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   bool has_min_max_ = false;
   bool has_null_count_ = false;
   bool has_distinct_count_ = false;
+  bool has_nan_count_ = false;
   T min_;
   T max_;
   ::arrow::MemoryPool* pool_;
@@ -815,6 +891,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   void ResetCounts() {
     this->statistics_.null_count = 0;
     this->statistics_.distinct_count = 0;
+    this->statistics_.nan_count = 0;
     this->num_values_ = 0;
   }
 
@@ -827,6 +904,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
     this->has_distinct_count_ = false;
     // Null count calculation is cheap and enabled by default.
     this->has_null_count_ = true;
+    this->has_nan_count_ = false;
   }
 
   void SetMinMaxPair(std::pair<T, T> min_max) {
@@ -904,6 +982,7 @@ void TypedStatisticsImpl<DType>::Update(
 
   IncrementNullCount(null_count);
   IncrementNumValues(num_values);
+  IncrementNaNValues(CountNaNs(values, num_values));
 
   if (num_values == 0)
     return;
@@ -923,6 +1002,8 @@ void TypedStatisticsImpl<DType>::UpdateSpaced(
 
   IncrementNullCount(null_count);
   IncrementNumValues(num_values);
+  IncrementNaNValues(CountNaNsSpaced(
+      values, num_spaced_values, valid_bits, valid_bits_offset));
 
   if (num_values == 0)
     return;
@@ -1095,6 +1176,8 @@ std::shared_ptr<Statistics> Statistics::Make(
       encoded_stats->has_min && encoded_stats->has_max,
       encoded_stats->has_null_count,
       encoded_stats->has_distinct_count,
+      encoded_stats->has_nan_count,
+      encoded_stats->nan_count,
       pool);
 }
 
@@ -1108,6 +1191,8 @@ std::shared_ptr<Statistics> Statistics::Make(
     bool has_min_max,
     bool has_null_count,
     bool has_distinct_count,
+    bool has_nan_count,
+    int64_t nan_count,
     ::arrow::MemoryPool* pool) {
 #define MAKE_STATS(CAP_TYPE, KLASS)                      \
   case Type::CAP_TYPE:                                   \
@@ -1121,6 +1206,8 @@ std::shared_ptr<Statistics> Statistics::Make(
         has_min_max,                                     \
         has_null_count,                                  \
         has_distinct_count,                              \
+        has_nan_count,                                   \
+        nan_count,                                       \
         pool)
 
   switch (descr->physical_type()) {

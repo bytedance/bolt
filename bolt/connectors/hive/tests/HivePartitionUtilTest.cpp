@@ -80,6 +80,8 @@ TEST_F(HivePartitionUtilTest, partitionName) {
          "flat_smallint_col",
          "flat_int_col",
          "flat_bigint_col",
+         "flat_short_decimal_col",
+         "flat_long_decimal_col",
          "dict_string_col",
          "const_date_col"},
         {makeFlatVector<bool>(std::vector<bool>{false}),
@@ -87,6 +89,9 @@ TEST_F(HivePartitionUtilTest, partitionName) {
          makeFlatVector<int16_t>(std::vector<int16_t>{100}),
          makeFlatVector<int32_t>(std::vector<int32_t>{1000}),
          makeFlatVector<int64_t>(std::vector<int64_t>{10000}),
+         makeFlatVector<int64_t>(std::vector<int64_t>{12345}, DECIMAL(6, 2)),
+         makeFlatVector<int128_t>(
+             std::vector<int128_t>{1234567890123}, DECIMAL(20, 3)),
          makeDictionary<StringView>(std::vector<StringView>{"str1000"}),
          makeConstant<int32_t>(10000, 1, DATE())});
 
@@ -96,6 +101,8 @@ TEST_F(HivePartitionUtilTest, partitionName) {
         "flat_smallint_col=100",
         "flat_int_col=1000",
         "flat_bigint_col=10000",
+        "flat_short_decimal_col=123.45",
+        "flat_long_decimal_col=1234567890.123",
         "dict_string_col=str1000",
         "const_date_col=1997-05-19"};
 

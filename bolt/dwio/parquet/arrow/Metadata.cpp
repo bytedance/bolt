@@ -116,7 +116,9 @@ static std::shared_ptr<Statistics> MakeTypedColumnStats(
         metadata.statistics.__isset.max_value ||
             metadata.statistics.__isset.min_value,
         metadata.statistics.__isset.null_count,
-        metadata.statistics.__isset.distinct_count);
+        metadata.statistics.__isset.distinct_count,
+        false,
+        0);
   }
   // Default behavior
   return MakeStatistics<DType>(
@@ -128,7 +130,9 @@ static std::shared_ptr<Statistics> MakeTypedColumnStats(
       metadata.statistics.distinct_count,
       metadata.statistics.__isset.max || metadata.statistics.__isset.min,
       metadata.statistics.__isset.null_count,
-      metadata.statistics.__isset.distinct_count);
+      metadata.statistics.__isset.distinct_count,
+      false,
+      0);
 }
 
 std::shared_ptr<Statistics> MakeColumnStats(
@@ -320,6 +324,10 @@ class ColumnChunkMetaData::ColumnChunkMetaDataImpl {
 
   inline std::shared_ptr<Statistics> statistics() const {
     return is_stats_set() ? possible_stats_ : nullptr;
+  }
+
+  inline int32_t field_id() const {
+    return descr_->schema_node()->field_id();
   }
 
   inline Compression::type compression() const {
@@ -539,6 +547,10 @@ int64_t ColumnChunkMetaData::total_uncompressed_size() const {
 
 int64_t ColumnChunkMetaData::total_compressed_size() const {
   return impl_->total_compressed_size();
+}
+
+int32_t ColumnChunkMetaData::field_id() const {
+  return impl_->field_id();
 }
 
 std::unique_ptr<ColumnCryptoMetaData> ColumnChunkMetaData::crypto_metadata()
@@ -999,6 +1011,8 @@ class FileMetaData::FileMetaDataImpl {
     out->impl_->writer_version_ = writer_version_;
     out->impl_->key_value_metadata_ = key_value_metadata_;
     out->impl_->file_decryptor_ = file_decryptor_;
+    out->impl_->field_nan_counts_ = field_nan_counts_;
+    out->impl_->column_nan_counts_ = column_nan_counts_;
 
     return out;
   }
@@ -1006,6 +1020,32 @@ class FileMetaData::FileMetaDataImpl {
   void set_file_decryptor(
       std::shared_ptr<InternalFileDecryptor> file_decryptor) {
     file_decryptor_ = file_decryptor;
+  }
+
+  void set_nan_counts(
+      std::unordered_map<int32_t, std::pair<int64_t, bool>> nan_counts) {
+    field_nan_counts_ = std::move(nan_counts);
+  }
+
+  void set_nan_counts_by_column_order(
+      std::vector<std::pair<int64_t, bool>> nan_counts) {
+    column_nan_counts_ = std::move(nan_counts);
+  }
+
+  std::pair<int64_t, bool> getNaNCount(int32_t field_id) const {
+    auto it = field_nan_counts_.find(field_id);
+    if (it == field_nan_counts_.end()) {
+      return {0, false};
+    }
+    return it->second;
+  }
+
+  std::pair<int64_t, bool> getNaNCountByColumnIndex(int column_index) const {
+    if (column_index < 0 ||
+        column_index >= static_cast<int>(column_nan_counts_.size())) {
+      return {0, false};
+    }
+    return column_nan_counts_[column_index];
   }
 
  private:
@@ -1017,6 +1057,8 @@ class FileMetaData::FileMetaDataImpl {
   std::shared_ptr<const KeyValueMetadata> key_value_metadata_;
   const ReaderProperties properties_;
   std::shared_ptr<InternalFileDecryptor> file_decryptor_;
+  std::unordered_map<int32_t, std::pair<int64_t, bool>> field_nan_counts_;
+  std::vector<std::pair<int64_t, bool>> column_nan_counts_;
 
   void InitSchema() {
     if (metadata_->schema.empty()) {
@@ -1116,6 +1158,15 @@ int64_t FileMetaData::num_rows() const {
 
 int FileMetaData::num_row_groups() const {
   return impl_->num_row_groups();
+}
+
+std::pair<int64_t, bool> FileMetaData::getNaNCount(int32_t fieldId) const {
+  return impl_->getNaNCount(fieldId);
+}
+
+std::pair<int64_t, bool> FileMetaData::getNaNCountByColumnIndex(
+    int columnIndex) const {
+  return impl_->getNaNCountByColumnIndex(columnIndex);
 }
 
 bool FileMetaData::can_decompress() const {
@@ -1706,6 +1757,7 @@ class ColumnChunkMetaDataBuilder::ColumnChunkMetaDataBuilderImpl {
 
   // column metadata
   void SetStatistics(const EncodedStatistics& val) {
+    statistics_ = val;
     column_chunk_->meta_data.__set_statistics(ToThrift(val));
   }
 
@@ -1850,6 +1902,12 @@ class ColumnChunkMetaDataBuilder::ColumnChunkMetaDataBuilderImpl {
   int64_t total_compressed_size() const {
     return column_chunk_->meta_data.total_compressed_size;
   }
+  int64_t nan_count() const {
+    return statistics_.nan_count;
+  }
+  bool has_nan_count() const {
+    return statistics_.has_nan_count;
+  }
 
  private:
   void Init(format::ColumnChunk* column_chunk) {
@@ -1866,6 +1924,7 @@ class ColumnChunkMetaDataBuilder::ColumnChunkMetaDataBuilderImpl {
   std::unique_ptr<format::ColumnChunk> owned_column_chunk_;
   const std::shared_ptr<WriterProperties> properties_;
   const ColumnDescriptor* column_;
+  EncodedStatistics statistics_;
 };
 
 std::unique_ptr<ColumnChunkMetaDataBuilder> ColumnChunkMetaDataBuilder::Make(
@@ -1952,6 +2011,14 @@ int64_t ColumnChunkMetaDataBuilder::total_compressed_size() const {
   return impl_->total_compressed_size();
 }
 
+int64_t ColumnChunkMetaDataBuilder::nan_count() const {
+  return impl_->nan_count();
+}
+
+bool ColumnChunkMetaDataBuilder::has_nan_count() const {
+  return impl_->has_nan_count();
+}
+
 class RowGroupMetaDataBuilder::RowGroupMetaDataBuilderImpl {
  public:
   explicit RowGroupMetaDataBuilderImpl(
@@ -2035,6 +2102,24 @@ class RowGroupMetaDataBuilder::RowGroupMetaDataBuilderImpl {
     row_group_->num_rows = num_rows;
   }
 
+  std::unordered_map<int32_t, std::pair<int64_t, bool>> nan_counts() const {
+    std::unordered_map<int32_t, std::pair<int64_t, bool>> result;
+    for (const auto& builder : column_builders_) {
+      auto field_id = builder->descr()->schema_node()->field_id();
+      result[field_id] = {builder->nan_count(), builder->has_nan_count()};
+    }
+    return result;
+  }
+
+  std::vector<std::pair<int64_t, bool>> nan_counts_by_column_order() const {
+    std::vector<std::pair<int64_t, bool>> result;
+    result.reserve(column_builders_.size());
+    for (const auto& builder : column_builders_) {
+      result.push_back({builder->nan_count(), builder->has_nan_count()});
+    }
+    return result;
+  }
+
   int num_columns() {
     return static_cast<int>(row_group_->columns.size());
   }
@@ -2100,6 +2185,16 @@ void RowGroupMetaDataBuilder::Finish(
   impl_->Finish(total_bytes_written, row_group_ordinal);
 }
 
+std::unordered_map<int32_t, std::pair<int64_t, bool>>
+RowGroupMetaDataBuilder::nan_counts() const {
+  return impl_->nan_counts();
+}
+
+std::vector<std::pair<int64_t, bool>>
+RowGroupMetaDataBuilder::nan_counts_by_column_order() const {
+  return impl_->nan_counts_by_column_order();
+}
+
 // file metadata
 class FileMetaDataBuilder::FileMetaDataBuilderImpl {
  public:
@@ -2118,6 +2213,11 @@ class FileMetaDataBuilder::FileMetaDataBuilderImpl {
   }
 
   RowGroupMetaDataBuilder* AppendRowGroup() {
+    if (current_row_group_builder_) {
+      merge_nan_counts(current_row_group_builder_->nan_counts());
+      merge_nan_counts_by_column_order(
+          current_row_group_builder_->nan_counts_by_column_order());
+    }
     row_groups_.emplace_back();
     current_row_group_builder_ = RowGroupMetaDataBuilder::Make(
         properties_, schema_, &row_groups_.back());
@@ -2162,6 +2262,11 @@ class FileMetaDataBuilder::FileMetaDataBuilderImpl {
 
   std::unique_ptr<FileMetaData> Finish(
       const std::shared_ptr<const KeyValueMetadata>& key_value_metadata) {
+    if (current_row_group_builder_) {
+      merge_nan_counts(current_row_group_builder_->nan_counts());
+      merge_nan_counts_by_column_order(
+          current_row_group_builder_->nan_counts_by_column_order());
+    }
     int64_t total_rows = 0;
     for (auto row_group : row_groups_) {
       total_rows += row_group.num_rows;
@@ -2239,6 +2344,8 @@ class FileMetaDataBuilder::FileMetaDataBuilderImpl {
     file_meta_data->impl_->metadata_ = std::move(metadata_);
     file_meta_data->impl_->InitSchema();
     file_meta_data->impl_->InitKeyValueMetadata();
+    file_meta_data->impl_->set_nan_counts(field_nan_counts_);
+    file_meta_data->impl_->set_nan_counts_by_column_order(column_nan_counts_);
     return file_meta_data;
   }
 
@@ -2269,12 +2376,35 @@ class FileMetaDataBuilder::FileMetaDataBuilderImpl {
   std::unique_ptr<format::FileCryptoMetaData> crypto_metadata_;
 
  private:
+  void merge_nan_counts(
+      const std::unordered_map<int32_t, std::pair<int64_t, bool>>& nan_counts) {
+    for (const auto& [field_id, count_and_flag] : nan_counts) {
+      auto& entry = field_nan_counts_[field_id];
+      entry.first += count_and_flag.first;
+      entry.second = entry.second || count_and_flag.second;
+    }
+  }
+
+  void merge_nan_counts_by_column_order(
+      const std::vector<std::pair<int64_t, bool>>& nan_counts) {
+    if (column_nan_counts_.size() < nan_counts.size()) {
+      column_nan_counts_.resize(nan_counts.size(), {0, false});
+    }
+    for (size_t i = 0; i < nan_counts.size(); ++i) {
+      column_nan_counts_[i].first += nan_counts[i].first;
+      column_nan_counts_[i].second =
+          column_nan_counts_[i].second || nan_counts[i].second;
+    }
+  }
+
   const std::shared_ptr<WriterProperties> properties_;
   std::vector<format::RowGroup> row_groups_;
 
   std::unique_ptr<RowGroupMetaDataBuilder> current_row_group_builder_;
   const SchemaDescriptor* schema_;
   std::shared_ptr<const KeyValueMetadata> key_value_metadata_;
+  std::unordered_map<int32_t, std::pair<int64_t, bool>> field_nan_counts_;
+  std::vector<std::pair<int64_t, bool>> column_nan_counts_;
 };
 
 std::unique_ptr<FileMetaDataBuilder> FileMetaDataBuilder::Make(

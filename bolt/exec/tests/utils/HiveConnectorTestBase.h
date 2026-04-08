@@ -114,14 +114,17 @@ class HiveConnectorTestBase : public OperatorTestBase {
       const core::TypedExprPtr& remainingFilter = nullptr,
       const std::string& tableName = "hive_table",
       const RowTypePtr& dataColumns = nullptr,
-      bool filterPushdownEnabled = true) {
+      bool filterPushdownEnabled = true,
+      connector::hive::FieldIdToColumnPathMap fieldIdToColumnPath = {}) {
     return std::make_shared<connector::hive::HiveTableHandle>(
         kHiveConnectorId,
         tableName,
         filterPushdownEnabled,
         std::move(subfieldFilters),
         remainingFilter,
-        dataColumns);
+        dataColumns,
+        std::unordered_map<std::string, std::string>{},
+        std::move(fieldIdToColumnPath));
   }
 
   /// @param name Column name.
@@ -130,7 +133,8 @@ class HiveConnectorTestBase : public OperatorTestBase {
   static std::shared_ptr<connector::hive::HiveColumnHandle> makeColumnHandle(
       const std::string& name,
       const TypePtr& type,
-      const std::vector<std::string>& requiredSubfields);
+      const std::vector<std::string>& requiredSubfields,
+      std::optional<int32_t> fieldId = std::nullopt);
 
   /// @param name Column name.
   /// @param type Column type.
@@ -140,7 +144,8 @@ class HiveConnectorTestBase : public OperatorTestBase {
       const std::string& name,
       const TypePtr& dataType,
       const TypePtr& hiveType,
-      const std::vector<std::string>& requiredSubfields);
+      const std::vector<std::string>& requiredSubfields,
+      std::optional<int32_t> fieldId = std::nullopt);
 
   /// @param targetDirectory Final directory of the target table after commit.
   /// @param writeDirectory Write directory of the target table before commit.
@@ -189,7 +194,8 @@ class HiveConnectorTestBase : public OperatorTestBase {
 
   static std::shared_ptr<connector::hive::HiveColumnHandle> regularColumn(
       const std::string& name,
-      const TypePtr& type);
+      const TypePtr& type,
+      std::optional<int32_t> fieldId = std::nullopt);
 
   static std::shared_ptr<connector::hive::HiveColumnHandle> partitionKey(
       const std::string& name,

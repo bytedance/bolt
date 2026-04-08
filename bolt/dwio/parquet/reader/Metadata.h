@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "bolt/dwio/common/compression/Compression.h"
 namespace bytedance::bolt::parquet {
 namespace thrift {
@@ -50,6 +52,12 @@ class ColumnChunkMetaDataPtr {
   common::CompressionKind compression() const;
 
   int64_t totalCompressedSize() const;
+
+  std::optional<int64_t> nullCount() const;
+
+  std::optional<std::string> minValue() const;
+
+  std::optional<std::string> maxValue() const;
 
   const std::vector<thrift::PageEncodingStats>& pageEncodingStats() const;
 

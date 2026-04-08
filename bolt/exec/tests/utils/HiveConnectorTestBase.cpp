@@ -171,8 +171,9 @@ std::shared_ptr<connector::hive::HiveColumnHandle>
 HiveConnectorTestBase::makeColumnHandle(
     const std::string& name,
     const TypePtr& type,
-    const std::vector<std::string>& requiredSubfields) {
-  return makeColumnHandle(name, type, type, requiredSubfields);
+    const std::vector<std::string>& requiredSubfields,
+    std::optional<int32_t> fieldId) {
+  return makeColumnHandle(name, type, type, requiredSubfields, fieldId);
 }
 
 std::shared_ptr<connector::hive::HiveColumnHandle>
@@ -180,7 +181,8 @@ HiveConnectorTestBase::makeColumnHandle(
     const std::string& name,
     const TypePtr& dataType,
     const TypePtr& hiveType,
-    const std::vector<std::string>& requiredSubfields) {
+    const std::vector<std::string>& requiredSubfields,
+    std::optional<int32_t> fieldId) {
   std::vector<common::Subfield> subfields;
   subfields.reserve(requiredSubfields.size());
   for (auto& path : requiredSubfields) {
@@ -192,7 +194,8 @@ HiveConnectorTestBase::makeColumnHandle(
       connector::hive::HiveColumnHandle::ColumnType::kRegular,
       dataType,
       hiveType,
-      std::move(subfields));
+      std::move(subfields),
+      fieldId);
 }
 
 std::vector<std::shared_ptr<connector::ConnectorSplit>>
@@ -324,12 +327,15 @@ HiveConnectorTestBase::makeHiveInsertTableHandle(
 std::shared_ptr<connector::hive::HiveColumnHandle>
 HiveConnectorTestBase::regularColumn(
     const std::string& name,
-    const TypePtr& type) {
+    const TypePtr& type,
+    std::optional<int32_t> fieldId) {
   return std::make_shared<connector::hive::HiveColumnHandle>(
       name,
       connector::hive::HiveColumnHandle::ColumnType::kRegular,
       type,
-      type);
+      type,
+      std::vector<common::Subfield>{},
+      fieldId);
 }
 
 std::shared_ptr<connector::hive::HiveColumnHandle>

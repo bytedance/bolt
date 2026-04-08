@@ -77,7 +77,7 @@ class HiveConnector : public Connector {
       std::shared_ptr<ConnectorInsertTableHandle> connectorInsertTableHandle,
       ConnectorQueryCtx* connectorQueryCtx,
       CommitStrategy commitStrategy,
-      const core::QueryConfig& queryConfig) override final;
+      const core::QueryConfig& queryConfig) override;
 
   folly::Executor* FOLLY_NULLABLE executor() const override {
     return executor_;

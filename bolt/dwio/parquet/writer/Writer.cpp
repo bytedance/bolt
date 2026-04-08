@@ -60,6 +60,7 @@ using bytedance::bolt::parquet::arrow::arrow::FileWriter;
 struct ArrowContext {
   std::unique_ptr<FileWriter> writer;
   std::shared_ptr<::arrow::Schema> schema;
+  std::shared_ptr<bytedance::bolt::parquet::arrow::FileMetaData> metadata;
   std::shared_ptr<WriterProperties> properties;
   std::shared_ptr<ArrowWriterProperties> arrowWriterProperties;
   uint64_t stagingRows = 0;
@@ -484,7 +485,8 @@ Writer::Writer(
 Writer::Writer(
     std::unique_ptr<dwio::common::FileSink> sink,
     const WriterOptions& options,
-    RowTypePtr schema)
+    RowTypePtr schema,
+    std::shared_ptr<::arrow::Schema> arrowSchema)
     : Writer{
           std::move(sink),
           options,
@@ -492,7 +494,8 @@ Writer::Writer(
               "writer_node_{}",
               folly::to<std::string>(folly::Random::rand64()))),
           ::arrow::default_memory_pool(),
-          std::move(schema)} {}
+          std::move(schema),
+          std::move(arrowSchema)} {}
 
 void Writer::flush() {
   if (enableRowGroupAlignedWrite_) {
@@ -726,10 +729,15 @@ void Writer::close() {
   }
 
   PARQUET_THROW_NOT_OK(arrowContext_->writer->Close());
+  arrowContext_->metadata = arrowContext_->writer->metadata();
   arrowContext_->writer.reset();
   PARQUET_THROW_NOT_OK(stream_->Close());
   arrowContext_->stagingChunks.clear();
   closed_ = true;
+}
+
+std::shared_ptr<arrow::FileMetaData> Writer::metadata() const {
+  return arrowContext_ ? arrowContext_->metadata : nullptr;
 }
 
 void Writer::createEmptyFile() {
@@ -789,7 +797,10 @@ std::unique_ptr<dwio::common::Writer> ParquetWriterFactory::createWriter(
     const dwio::common::WriterOptions& options) {
   auto parquetOptions = getParquetOptions(options);
   return std::make_unique<Writer>(
-      std::move(sink), parquetOptions, asRowType(options.schema));
+      std::move(sink),
+      parquetOptions,
+      asRowType(options.schema),
+      options.arrowSchema);
 }
 
 void Writer::rowGroupAlignedFlush(
