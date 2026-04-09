@@ -1327,9 +1327,7 @@ TEST_F(PaimonReaderPartialUpdateTest, uninitializedMemoryTest) {
   BOLT_CHECK(nBatch > 0);
 }
 
-TEST_F(
-    PaimonReaderPartialUpdateTest,
-    samePrimaryKeyAcrossOutputBatchesCanCrash) {
+TEST_F(PaimonReaderPartialUpdateTest, samePrimaryKeyAcrossOutputBatches) {
   filesystems::registerLocalFileSystem();
 
   std::shared_ptr<folly::Executor> executor(

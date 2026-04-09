@@ -37,35 +37,36 @@ PartialUpdateEngine::PartialUpdateEngine(
       std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
 }
 
-void PartialUpdateEngine::initPendingResultRow() {
-  if (!pendingResultRow_) {
-    pendingResultRow_ = std::static_pointer_cast<RowVector>(
-        BaseVector::create(result->type(), 1, result->pool()));
-  }
+void PartialUpdateEngine::setResult(RowVectorPtr result_) {
+  PaimonEngine::setResult(result_);
+}
 
-  pendingResultRow_->resize(1);
-  for (int i = 0; i < pendingResultRow_->childrenSize(); i++) {
-    pendingResultRow_->childAt(i)->setNull(0, true);
+void PartialUpdateEngine::startActiveRow() {
+  result->resize(result->size() + 1);
+  activeRowIndex_ = result->size() - 1;
+  hasActiveRow_ = true;
+  for (int i = 0; i < result->childrenSize(); i++) {
+    result->childAt(i)->setNull(activeRowIndex_, true);
   }
 }
 
-void PartialUpdateEngine::flushPendingRow() {
-  if (!lastPk_.primaryKeys || !pendingResultRow_) {
+void PartialUpdateEngine::finalizeActiveRow() {
+  if (!lastPk_.primaryKeys || !hasActiveRow_) {
     return;
   }
 
   for (const auto& [idx, aggr] : aggregations_) {
-    aggr->appendResult(pendingResultRow_->childAt(idx));
+    aggr->appendResult(result->childAt(idx));
   }
-
-  result->resize(result->size() + 1);
-  result->copy(pendingResultRow_.get(), result->size() - 1, 0, 1);
 }
 
 vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
-  if (!lastPk_.primaryKeys || !lastPk_.pkEqual(iterator)) {
-    flushPendingRow();
-    initPendingResultRow();
+  if (lastPk_.primaryKeys && !lastPk_.pkEqual(iterator)) {
+    finalizeCompletedGroups(iterator);
+  }
+
+  if (!lastPk_.primaryKeys) {
+    startActiveRow();
     lastSequenceGroupKeyValues =
         std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
   }
@@ -81,12 +82,12 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
             << std::endl;
   }
 
-  int destIdx = 0;
+  int destIdx = activeRowIndex_;
   for (int i = 0; i < iterator->values->childrenSize(); i++) {
     if (sequenceGroupFields_.find(i) == sequenceGroupFields_.end()) {
       auto src = iterator->values->childAt(i);
       if (!src->isNullAt(iterator->rowIndex)) {
-        auto dest = pendingResultRow_->childAt(i);
+        auto dest = result->childAt(i);
         dest->copy(src.get(), destIdx, iterator->rowIndex, 1);
       }
     }
@@ -100,7 +101,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
             key.get(), 0, iterator->rowIndex, CompareFlags()) < 0) {
       for (const auto& idx : iterator->sequenceGroups[i].second) {
         if (aggregations_.find(idx) == aggregations_.end()) {
-          auto dest = pendingResultRow_->childAt(idx);
+          auto dest = result->childAt(idx);
           auto src = iterator->values->childAt(idx);
           dest->copy(src.get(), destIdx, iterator->rowIndex, 1);
         } else {
@@ -123,7 +124,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   lastPk_ = *iterator;
 
   VLOG(2) << "Result:"
-          << "-->" << pendingResultRow_->toString(0);
+          << "-->" << result->toString(activeRowIndex_);
   VLOG(2) << "  Sequence group key:";
   for (int i = 0; i < lastSequenceGroupKeyValues.size(); i++) {
     VLOG(2) << "\t\t\t\t"
@@ -136,11 +137,22 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   return result->size();
 }
 
-vector_size_t PartialUpdateEngine::finish() {
-  flushPendingRow();
-  lastPk_.primaryKeys = nullptr;
+vector_size_t PartialUpdateEngine::finalizeCompletedGroups(
+    const PaimonRowIteratorPtr& nextInput) {
+  if (lastPk_.primaryKeys && (!nextInput || !lastPk_.pkEqual(nextInput))) {
+    finalizeActiveRow();
+    lastPk_.primaryKeys = nullptr;
+    hasActiveRow_ = false;
+    activeRowIndex_ = 0;
+    lastSequenceGroupKeyValues =
+        std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
+  }
 
-  return result->size();
+  return result->size() - (hasActiveRow_ ? 1 : 0);
+}
+
+vector_size_t PartialUpdateEngine::finish() {
+  return finalizeCompletedGroups(nullptr);
 }
 
 } // namespace bytedance::bolt::connector::hive
