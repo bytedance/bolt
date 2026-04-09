@@ -10,10 +10,9 @@ tests, or benchmarks
 
 ## Workflow
 
-- Configure the repository using instructions from the "Configure" section ONLY if necessary
-- Compile the project using instructions from "Compile" section
+- **Configure** the repository using instructions from the "Configure" section ONLY if necessary
+- **Compile** the project using instructions from "Compile" section
   - Wait for all units to finish. If compilation exits early, check the error
-  - If syntax error, consider the users' previous instructions and fix it
   - If killed (e.g. due to OOM), restart the build, but lower the number of jobs
   by adding the `--parallel` flag and specify a lower number than the machine's available cores.
   If the build is repeatedly killed to due OOMs, decrease it after each failure.
@@ -84,17 +83,14 @@ Use this to decide whether you can reuse the existing preset or need to reconfig
 
 - Prefer the narrowest target that validates the change.
 - Reuse the current configured preset whenever possible.
-- If a compile fails, fix the smallest coherent issue and re-run the same narrow build first.
-- In status updates and final summaries, state whether you reused an existing configured preset or had to reconfigure.
 
 ## Finding the narrowest target
 
 To identify the smallest target that contains an edited compilation unit:
 
 1. Locate the edited `*.cpp` file's directory.
-2. Find the `CMakeLists.txt` in that directory (or the nearest parent directory).
-3. Search for the target that lists the edited `*.cpp` file in its source list.
-4. Build that target.
+2. Find `CMakeLists.txt` in that directory (or the nearest parent directory).
+3. Find the target with the edited `*.cpp` file in its source list.
 
 Example:
 - Edited file: `bolt/core/execution/ExecutionPlan.cpp`
