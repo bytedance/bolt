@@ -19,7 +19,6 @@
 #ifdef ENABLE_BOLT_JIT
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/JITSymbol.h"
 #include "llvm/ExecutionEngine/Orc/CompileOnDemandLayer.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
@@ -55,6 +54,8 @@
 #include <deque>
 #include <memory>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace bytedance::bolt::jit {
 
@@ -67,8 +68,6 @@ struct ThrustJitOptions {
 
   size_t jit_memory_usage_limit{1L << 27}; // 128 M by default
 };
-
-class ThrustJitMemoryUsageListener;
 
 class ThrustJIT;
 
@@ -85,6 +84,12 @@ class CompiledModuleImpl final : public CompiledModule {
   void setFuncPtr(const std::string& fn, intptr_t funcPtr) override;
 
   void setResourceTracker(llvm::orc::ResourceTrackerSP&& srcTrk);
+  void setObjectSize(size_t sz) {
+    objectSize_ = sz;
+  }
+  void setMemoryUsageCounter(std::shared_ptr<std::atomic<size_t>> counter) {
+    memoryUsageCounter_ = std::move(counter);
+  }
 
   void setCachedTypes(std::vector<bytedance::bolt::TypePtr>& types) override {
     for (auto& t : types) {
@@ -106,11 +111,10 @@ class CompiledModuleImpl final : public CompiledModule {
   std::map<std::string, llvm::JITTargetAddress> functions{};
   std::string key;
   llvm::orc::ResourceTrackerSP rt{nullptr};
+  size_t objectSize_{0};
+  std::shared_ptr<std::atomic<size_t>> memoryUsageCounter_{};
   std::vector<bytedance::bolt::TypePtr> cachedTypes{};
 };
-
-using MemoryUsageObjectSizeMap =
-    llvm::DenseMap<llvm::JITEventListener::ObjectKey, size_t>;
 
 class ThrustJIT {
  public:
@@ -191,19 +195,17 @@ class ThrustJIT {
   }
 
   size_t GetMemoryUsage() {
-    return jit_memory_usage_.load(std::memory_order_acquire);
+    return jit_memory_usage_->load(std::memory_order_acquire);
   }
 
   void IncreaseMemoryUsage(int64_t sz) {
-    size_t orig_sz{0};
-    size_t new_sz{0};
-    do {
-      orig_sz = GetMemoryUsage();
-      new_sz = orig_sz + sz;
-
-      // compare_exchange_weak is OK for this case
-    } while (!jit_memory_usage_.compare_exchange_weak(
-        orig_sz, new_sz, std::memory_order_release));
+    if (sz >= 0) {
+      jit_memory_usage_->fetch_add(
+          static_cast<size_t>(sz), std::memory_order_acq_rel);
+      return;
+    }
+    jit_memory_usage_->fetch_sub(
+        static_cast<size_t>(0 - sz), std::memory_order_acq_rel);
   }
 
   void DecreaseMemoryUsage(int64_t sz) {
@@ -232,6 +234,8 @@ class ThrustJIT {
       ThrustJitOptions options = {});
 
   static void handleLazyCallThroughError();
+  bool tryAcquireCompileSlot();
+  void releaseCompileSlot();
 
  private:
   std::unique_ptr<llvm::orc::ExecutionSession> execution_session_;
@@ -257,52 +261,38 @@ class ThrustJIT {
   // separate DynamicLibrarySearchGenerator::GetForCurrentProcess to this:
   llvm::orc::JITDylib* process_symbols_{nullptr};
 
-  llvm::ThreadPool compile_threads_;
-
   // module id
   std::atomic<size_t> id_{0};
 
-  std::atomic<size_t> jit_memory_usage_{0};
+  std::shared_ptr<std::atomic<size_t>> jit_memory_usage_{
+      std::make_shared<std::atomic<size_t>>(0)};
 
   std::atomic<size_t> jit_memory_usage_limit_{1L << 27};
 
-  std::unique_ptr<ThrustJitMemoryUsageListener> mem_usage_listener_;
+  bool shutting_down_{false};
+  size_t active_compiles_{0};
+  std::mutex shutdown_mu_;
+  std::condition_variable shutdown_cv_;
+
+  // Per-module emit fence: tracks onObjEmit tasks that have called
+  // NotifyEmitted (unblocking lookup) but haven't finished withResourceKeyDo
+  // (storing the MemMgr in the layer).  waitForEmit() blocks only until the
+  // specific module's onObjEmit task returns — not the entire pool.
+  std::mutex emit_mu_;
+  std::condition_variable emit_cv_;
+  std::unordered_set<uintptr_t> pending_emits_;
+  std::unordered_map<uintptr_t, size_t> emit_sizes_;
+
+  // compile_threads_ must be declared AFTER all state it references
+  // (emit_mu_, jit_memory_usage_, etc.) so that ~ThreadPool joins pool
+  // threads before those members are destroyed.
+  llvm::ThreadPool compile_threads_;
 
   std::mutex cache_mutex_;
   std::condition_variable cv_;
   std::set<std::string> compilingFns_;
 
   LRUCache<std::string, CompiledModuleSP, CacheEvictPred> lruCache_;
-};
-
-// BasicObjectLayerMaterializationUnit::Create(*this, std::move(O));
-// class VectorData;
-class ThrustJitMemoryUsageListener : public llvm::JITEventListener {
- public:
-  explicit ThrustJitMemoryUsageListener(ThrustJIT* jit);
-
-  /// Creates an entry in the JIT registry for the buffer @p Object,
-  /// which must contain an object file in executable memory with any
-  /// debug information for the debugger.
-  void notifyObjectLoaded(
-      llvm::JITEventListener::ObjectKey K,
-      const llvm::object::ObjectFile& Obj,
-      const llvm::RuntimeDyld::LoadedObjectInfo& L) override;
-
-  /// Removes the internal registration of @p Object, and
-  /// frees associated resources.
-  /// Returns true if @p Object was found in ObjectBufferMap.
-  void notifyFreeingObject(llvm::JITEventListener::ObjectKey K) override;
-
- private:
-  // std::atomic<size_t>& consumed_mem_size_;
-
-  MemoryUsageObjectSizeMap objectSizeMap_;
-
-  // For objectSizeMap_
-  std::mutex mutex_;
-
-  ThrustJIT* jit_{nullptr};
 };
 
 } // namespace bytedance::bolt::jit

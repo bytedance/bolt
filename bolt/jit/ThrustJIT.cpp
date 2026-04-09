@@ -17,6 +17,7 @@
 #ifdef ENABLE_BOLT_JIT
 #include "bolt/jit/ThrustJIT.h"
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/ExecutionEngine/Orc/Core.h>
 #include <llvm/Support/SourceMgr.h>
@@ -75,17 +76,59 @@ ThrustJIT::ThrustJIT(
       cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
           data_layout_.getGlobalPrefix())));
 
-  // Register the event listener.
-  mem_usage_listener_ = std::make_unique<ThrustJitMemoryUsageListener>(this);
-  object_layer_.registerJITEventListener(
-      *static_cast<llvm::JITEventListener*>(mem_usage_listener_.get()));
+  // Per-module emit fence with self-managed memory tracking.
+  //
+  // In LLVM 13's onObjEmit the execution order is:
+  //   1. R.notifyEmitted()        – dispatches a *separate* task that unblocks
+  //                                 lookup() on the caller thread
+  //   2. notifyObjectLoaded()     – EventListener callback (unused)
+  //   3. NotifyEmitted callback   – we hook here to capture object size
+  //   4. R.withResourceKeyDo()    – stores MemMgr in MemMgrs map
+  //   5. onObjEmit returns        – task->run() returns
+  //
+  // lookup() can observe completion after step 1, before step 4. We fence each
+  // module by waiting for step 5. Memory tracking is self-managed: we capture
+  // the object buffer size in step 3 and apply it in CompileModule after the
+  // fence, eliminating the race by construction.
+  static thread_local uintptr_t tlsEmitKey = 0;
+  static thread_local size_t tlsEmitSize = 0;
+  static thread_local bool tlsEmitActive = false;
 
-  // Set compile concurrency
+  object_layer_.setNotifyEmitted(
+      [this](
+          llvm::orc::MaterializationResponsibility& R,
+          std::unique_ptr<llvm::MemoryBuffer> objBuffer) {
+        size_t bufSize = objBuffer ? objBuffer->getBufferSize() : 0;
+        llvm::handleAllErrors(
+            R.withResourceKeyDo([bufSize](llvm::orc::ResourceKey K) {
+              tlsEmitKey = K;
+              tlsEmitSize = bufSize;
+              tlsEmitActive = true;
+            }),
+            [](llvm::ErrorInfoBase&) {
+              // Tracker already defunct – nothing to fence on.
+            });
+      });
+
+  // Set compile concurrency and wire the per-module fence completion.
   this->execution_session_->setDispatchTask(
       [this](std::unique_ptr<llvm::orc::Task> T) {
-        compile_threads_.async([UnownedT = T.release()]() {
-          std::unique_ptr<llvm::orc::Task> T(UnownedT);
-          T->run();
+        compile_threads_.async([this, unownedT = T.release()]() {
+          std::unique_ptr<llvm::orc::Task> task(unownedT);
+          task->run();
+
+          if (tlsEmitActive) {
+            {
+              std::lock_guard lock(emit_mu_);
+              // Only publish if the waiter hasn't timed out and cleaned up.
+              if (pending_emits_.count(tlsEmitKey) != 0U) {
+                emit_sizes_[tlsEmitKey] = tlsEmitSize;
+                pending_emits_.erase(tlsEmitKey);
+              }
+            }
+            emit_cv_.notify_all();
+            tlsEmitActive = false;
+          }
         });
       });
 }
@@ -160,7 +203,19 @@ CompiledModuleSP ThrustJIT::CompileModule(
     llvm::orc::ThreadSafeModule tsm,
     bool isGobal) { // isBobal = false
 
+  if (!tryAcquireCompileSlot()) {
+    return nullptr;
+  }
+  [[maybe_unused]] auto compileSlot =
+      llvm::make_scope_exit([this]() { releaseCompileSlot(); });
+
   llvm::orc::ResourceTrackerSP resource_tracker = createResourceTracker();
+  auto key = resource_tracker->getKeyUnsafe();
+
+  {
+    std::lock_guard lock(emit_mu_);
+    pending_emits_.insert(key);
+  }
 
   std::string modId;
   std::vector<std::string> funcNames;
@@ -174,15 +229,21 @@ CompiledModuleSP ThrustJIT::CompileModule(
     }
   });
 
-  auto err = optimize_layer_.add(resource_tracker, std::move(tsm));
-  llvm::handleAllErrors(std::move(err), [&](llvm::ErrorInfoBase& eib) {
-    llvm::errs() << "[JIT] CompileModule Error: " << eib.message() << '\n';
+  if (auto err = optimize_layer_.add(resource_tracker, std::move(tsm))) {
+    llvm::handleAllErrors(std::move(err), [&](llvm::ErrorInfoBase& eib) {
+      llvm::errs() << "[JIT] CompileModule Error: " << eib.message() << '\n';
+    });
+    {
+      std::lock_guard lock(emit_mu_);
+      pending_emits_.erase(key);
+    }
     {
       std::unique_lock lock(cache_mutex_);
       compilingFns_.erase(modId);
     }
     cv_.notify_all();
-  });
+    return nullptr;
+  }
 
   auto compiledModuleSP = std::make_shared<CompiledModuleImpl>();
   compiledModuleSP->setKey(modId);
@@ -198,6 +259,11 @@ CompiledModuleSP ThrustJIT::CompileModule(
     } else {
       llvm::errs() << llvm::toString(func.takeError()) << "\n";
       {
+        std::lock_guard lock(emit_mu_);
+        pending_emits_.erase(key);
+        emit_sizes_.erase(key);
+      }
+      {
         std::unique_lock lock(cache_mutex_);
         compilingFns_.erase(modId);
       }
@@ -206,6 +272,27 @@ CompiledModuleSP ThrustJIT::CompileModule(
     }
   }
 
+  // Wait until this module's onObjEmit task has completed withResourceKeyDo
+  // bookkeeping, then read the object size captured by NotifyEmitted.
+  size_t objSize = 0;
+  {
+    std::unique_lock lock(emit_mu_);
+    emit_cv_.wait(lock, [&] { return pending_emits_.count(key) == 0U; });
+
+    auto it = emit_sizes_.find(key);
+    if (it != emit_sizes_.end()) {
+      objSize = it->second;
+      emit_sizes_.erase(it);
+    }
+  }
+
+  // Memory tracking is self-managed: increase here (after the fence ensures
+  // the MemMgr is stored), decrease in ~CompiledModuleImpl.  This avoids the
+  // race where notifyObjectLoaded's IncreaseMemoryUsage triggers eviction
+  // before withResourceKeyDo stores the MemMgr.
+  IncreaseMemoryUsage(objSize);
+  compiledModuleSP->setObjectSize(objSize);
+  compiledModuleSP->setMemoryUsageCounter(jit_memory_usage_);
   compiledModuleSP->setResourceTracker(std::move(resource_tracker));
 
   // Add into cache
@@ -360,6 +447,22 @@ llvm::Expected<llvm::JITEvaluatedSymbol> ThrustJIT::lookup(
   return execution_session_->lookup({&main_jit_dylib_}, mangle_(name));
 }
 
+bool ThrustJIT::tryAcquireCompileSlot() {
+  std::lock_guard lock(shutdown_mu_);
+  if (shutting_down_) {
+    return false;
+  }
+  ++active_compiles_;
+  return true;
+}
+
+void ThrustJIT::releaseCompileSlot() {
+  std::lock_guard lock(shutdown_mu_);
+  if (--active_compiles_ == 0) {
+    shutdown_cv_.notify_all();
+  }
+}
+
 void ThrustJIT::handleLazyCallThroughError() {
   auto errMsg = "LazyCallThrough error: Could not find function body";
   llvm::errs() << errMsg;
@@ -367,8 +470,37 @@ void ThrustJIT::handleLazyCallThroughError() {
 }
 
 ThrustJIT::~ThrustJIT() {
-  // Clear cached modules before ending session
-  lruCache_.clear();
+  // Reject any new compilations racing with destruction.
+  {
+    std::unique_lock lock(shutdown_mu_);
+    shutting_down_ = true;
+    shutdown_cv_.wait(lock, [this] { return active_compiles_ == 0; });
+  }
+
+  // Unblock any threads waiting in LookupSymbolsInCache on compilingFns_.
+  {
+    std::unique_lock lock(cache_mutex_);
+    compilingFns_.clear();
+  }
+  cv_.notify_all();
+
+  // Wait for all pending thread pool tasks to complete FIRST.
+  // onObjEmit stores MemMgrs via withResourceKeyDo AFTER notifyEmitted
+  // dispatches a separate completion task. If we clear the cache or end
+  // the session before these tasks finish, handleRemoveResources won't
+  // find the MemMgr entries, leaving them orphaned in the layer and
+  // triggering the MemMgrs.empty() assertion in ~RTDyldObjectLinkingLayer.
+  compile_threads_.wait();
+
+  // Now safe to clear: all MemMgrs are properly stored in the layer.
+  {
+    std::unique_lock lock(cache_mutex_);
+    lruCache_.clear();
+  }
+
+  // Clear triggers ResourceTracker::remove() which can enqueue additional
+  // tasks. Drain them before ending the session.
+  compile_threads_.wait();
 
   if (auto err = execution_session_->endSession()) {
     execution_session_->reportError(std::move(err));
@@ -376,34 +508,6 @@ ThrustJIT::~ThrustJIT() {
   if (auto err = EPCIU->cleanup()) {
     execution_session_->reportError(std::move(err));
   }
-
-  compile_threads_.wait();
-}
-
-ThrustJitMemoryUsageListener::ThrustJitMemoryUsageListener(ThrustJIT* jit)
-    : jit_(jit) {}
-
-void ThrustJitMemoryUsageListener::notifyObjectLoaded(
-    llvm::JITEventListener::ObjectKey key,
-    const llvm::object::ObjectFile& obj,
-    const llvm::RuntimeDyld::LoadedObjectInfo& loi) {
-  // auto res = llvm::object::computeSymbolSizes(Obj);
-  size_t sz = obj.getMemoryBufferRef().getBufferSize();
-  {
-    std::unique_lock lock(mutex_);
-    objectSizeMap_[key] = sz;
-
-    jit_->IncreaseMemoryUsage(sz);
-  }
-}
-
-void ThrustJitMemoryUsageListener::notifyFreeingObject(
-    llvm::JITEventListener::ObjectKey key) {
-  std::unique_lock lock(mutex_);
-  size_t sz = objectSizeMap_[key];
-  objectSizeMap_.erase(key);
-
-  jit_->DecreaseMemoryUsage(sz);
 }
 
 bool CacheEvictPred::operator()() {
@@ -435,10 +539,20 @@ const intptr_t CompiledModuleImpl::getFuncPtr(const std::string& fn) const {
 }
 
 CompiledModuleImpl::~CompiledModuleImpl() {
+  // Decrease memory usage before removing the resource tracker so the
+  // eviction predicate sees accurate accounting immediately.
+  if (objectSize_ > 0 && memoryUsageCounter_) {
+    memoryUsageCounter_->fetch_sub(objectSize_, std::memory_order_acq_rel);
+  }
+
   // We have to manually call ResourceTracker's remove()
   // Since, by default ResourceTracker will handle resource over to the default
   // resource tracker. Even ResourceTracker is destroy, the resource
   // hold by it will not be released.
+  //
+  // Guard: if the ThrustJIT singleton was already destroyed (static
+  // destruction order), the ExecutionSession backing this tracker is gone.
+  // The tracker is defunct in that case, so the check below is sufficient.
   if (rt && !rt->isDefunct()) {
     auto err = rt->remove();
     llvm::handleAllErrors(std::move(err), [&](llvm::ErrorInfoBase& eib) {
