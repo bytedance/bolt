@@ -75,6 +75,7 @@ std::vector<TypeSignature> MakeParameters(const Type& type) {
     case TypeKind::VARBINARY:
     case TypeKind::TIMESTAMP:
     case TypeKind::UNKNOWN:
+    case TypeKind::VARIANT:
       break;
       // Possibly a decimal type with scale and precision arguments,
     case TypeKind::BIGINT: {

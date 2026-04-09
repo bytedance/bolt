@@ -696,7 +696,7 @@ void RowVector::resize(vector_size_t newSize, bool setNotNull) {
 
 // static
 bool RowVector::isComposite(const std::shared_ptr<RowVector>& input) {
-  return dynamic_cast<CompositeRowVector*>(input.get()) != nullptr;
+  return std::dynamic_pointer_cast<CompositeRowVector>(input) != nullptr;
 }
 
 void ArrayVectorBase::checkRanges() const {

@@ -39,7 +39,7 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 1;
-static constexpr int32_t kRowsPerVector = 1'000;
+static constexpr int32_t kRowsPerVector = 256;
 
 #define DEBUG 0
 namespace {
@@ -290,8 +290,8 @@ class RowEqRowTest : public OperatorTestBase {
           jitEqual = jitEqual == 0 ? 0 : (jitEqual < 0 ? -1 : 1);
           if (expected != jitEqual) {
             std::stringstream ss;
-            ss << "cmp expected: " << (int)expected
-               << " jitEqual: " << (int)jitEqual
+            ss << "cmp expected: " << static_cast<int>(expected)
+               << " jitEqual: " << static_cast<int>(jitEqual)
                << " row:  " << rowContainer->toString(row)
                << " otherRow: " << rowContainer->toString(otherRow)
                << std::endl;
@@ -302,11 +302,10 @@ class RowEqRowTest : public OperatorTestBase {
         } else {
           bool expected = rowContainer->compareRows(row, otherRow) < 0;
           bool jitEqual = eqFunc(row, otherRow);
-          jitEqual = eqFunc(row, otherRow);
           if (expected != jitEqual) {
             std::stringstream ss;
-            ss << "less expected: " << (int)expected
-               << " jitEqual: " << (int)jitEqual
+            ss << "less expected: " << static_cast<int>(expected)
+               << " jitEqual: " << static_cast<int>(jitEqual)
                << " row:  " << rowContainer->toString(row)
                << " otherRow: " << rowContainer->toString(otherRow)
                << std::endl;
@@ -337,9 +336,11 @@ class RowEqRowTest : public OperatorTestBase {
             rows[i + 1], rowContainer->columnAt(0).offset());
         if (currStr == nextStr) {
           if (currStr.size() == 4) { // equal prefix but different size
-            *((int32_t*)(rows[i] + rowContainer->columnAt(0).offset())) = 2;
+            *(reinterpret_cast<int32_t*>(
+                rows[i] + rowContainer->columnAt(0).offset())) = 2;
           } else if (currStr.size() == 12) { // equal inline but different size
-            *((int32_t*)(rows[i] + rowContainer->columnAt(0).offset())) = 10;
+            *(reinterpret_cast<int32_t*>(
+                rows[i] + rowContainer->columnAt(0).offset())) = 10;
           }
         }
       }

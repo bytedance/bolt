@@ -145,6 +145,15 @@ HashBuild::HashBuild(
 
   // Identify the non-key build side columns and make a decoder for each.
   const int32_t numDependents = inputType->size() - numKeys;
+  std::vector<std::string> dependentNames;
+  std::vector<TypePtr> dependentTypes;
+
+  hybridJoin_ = operatorCtx_->driverCtx()->queryConfig().hybridJoinEnabled() &&
+      numDependents > 0 && !joinNode_->isLeftSemiFilterJoin() &&
+      !joinNode_->isLeftSemiProjectJoin() && !joinNode_->isAntiJoin();
+  scatteredMode_ = hybridJoin_ &&
+      operatorCtx_->driverCtx()->queryConfig().hybridJoinScatteredModeEnabled();
+
   if (!dropDuplicates_ && numDependents > 0) {
     // Number of join keys (numKeys) may be less then number of input columns
     // (inputType->size()). In this case numDependents is negative and cannot be
@@ -153,6 +162,8 @@ HashBuild::HashBuild(
     // u.k AND t.k2 = u.k.
     dependentChannels_.reserve(numDependents);
     decoders_.reserve(numDependents);
+    dependentNames.reserve(numDependents);
+    dependentTypes.reserve(numDependents);
   }
   if (!dropDuplicates_) {
     // For left semi and anti join with no extra filter, hash table does not
@@ -163,18 +174,31 @@ HashBuild::HashBuild(
         decoders_.emplace_back(std::make_unique<DecodedVector>());
         names.emplace_back(inputType->nameOf(i));
         types.emplace_back(inputType->childAt(i));
+        dependentNames.emplace_back(inputType->nameOf(i));
+        dependentTypes.emplace_back(inputType->childAt(i));
       }
     }
   }
 
   tableType_ = ROW(std::move(names), std::move(types));
+  dependentTypes_ = ROW(std::move(dependentNames), std::move(dependentTypes));
+  driverId_ = driverCtx->driverId;
+  if (hybridJoin_) {
+    BOLT_CHECK_LE(
+        driverId_,
+        255,
+        "driverId {} exceeds maximum 255 for hybrid join mode",
+        driverId_);
+  }
   setupTable();
   setupSpiller();
   intermediateStateCleared_ = false;
 
   LOG(INFO) << name() << " HashBuild created for " << operatorCtx_->toString()
             << ", spill enabled: " << spillEnabled()
-            << ", maxHashTableSize = " << maxHashTableBucketCount_;
+            << ", maxHashTableSize = " << maxHashTableBucketCount_
+            << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disabled")
+            << ", scattered mode " << (scatteredMode_ ? "enabled" : "disabled");
 }
 
 void HashBuild::initialize() {
@@ -215,7 +239,8 @@ void HashBuild::setupTable() {
                      : BaseHashTable::HashMode::kArray,
         queryConfig.minTableRowsForParallelJoinBuild(),
         pool(),
-        queryConfig.enableJitRowEqVectors());
+        queryConfig.enableJitRowEqVectors(),
+        hybridJoin_);
   } else {
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
@@ -231,7 +256,8 @@ void HashBuild::setupTable() {
                        : BaseHashTable::HashMode::kArray,
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
-          queryConfig.enableJitRowEqVectors());
+          queryConfig.enableJitRowEqVectors(),
+          hybridJoin_);
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
@@ -243,13 +269,30 @@ void HashBuild::setupTable() {
                        : BaseHashTable::HashMode::kArray,
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
-          queryConfig.enableJitRowEqVectors());
+          queryConfig.enableJitRowEqVectors(),
+          hybridJoin_);
     }
   }
   lookup_ = std::make_unique<HashLookup>(
       table_->hashers(), queryConfig.enableJitRowEqVectors());
   lookup_->reset(1);
   analyzeKeys_ = table_->hashMode() != BaseHashTable::HashMode::kHash;
+
+  if (hybridJoin_) {
+    table_->hybridData()->setId(static_cast<uint8_t>(driverId_));
+    // Initialize allContainers_ with itself so spilling can work before table
+    // merge.
+    std::unordered_map<uint8_t, HybridContainer*> selfContainer;
+    selfContainer[static_cast<uint8_t>(driverId_)] = table_->hybridData();
+    table_->hybridData()->setAllContainers(selfContainer);
+    // Set reorder flag from query config - can be disabled for deterministic
+    // testing.
+    table_->hybridData()->setReorderEnabled(
+        queryConfig.hybridJoinReorderEnabled());
+    // Set scattered mode - in scattered mode, payload batches are kept separate
+    // and rowId encodes (batchId, rowInBatch) instead of global row index.
+    table_->hybridData()->setScatteredModeEnabled(scatteredMode_);
+  }
 }
 
 void HashBuild::setupSpiller(
@@ -264,7 +307,8 @@ void HashBuild::setupSpiller(
 
   const auto& spillConfig = spillConfig_.value();
   bool canUseRowBasedSpill = joinBridge_->numBuilders() == 1 &&
-      operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1; // TODO
+      operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1 &&
+      !hybridJoin_; // Disable row-based spill for hybrid join mode
   if (canUseRowBasedSpill) {
     *const_cast<common::RowBasedSpillMode*>(&spillConfig.rowBasedSpillMode) =
         common::strToRowBasedSpillMode(
@@ -348,6 +392,12 @@ void HashBuild::setupSpiller(
   spiller_->setSpillConfig(&spillConfig);
   spiller_->setSkewThreshold(
       skewFileSizeRatioThreshold_, skewRowCountRatioThreshold_);
+
+  // Enable hybrid mode for spiller if hybrid join is enabled.
+  // Works for both initial spill and repartition spill during restoration.
+  if (hybridJoin_ && table_->hybridData()) {
+    spiller_->setHybridMode(true, table_->hybridData());
+  }
 
   const int32_t numPartitions = spiller_->hashBits().numPartitions();
   spillLevel_ = spillConfig.joinSpillLevel(offsetTojoinBits_);
@@ -572,21 +622,60 @@ void HashBuild::addInput(RowVectorPtr input) {
   }
   auto rows = table_->rows();
   auto nextOffset = rows->nextOffset();
-  activeRows_.applyToSelected([&](auto rowIndex) {
-    char* newRow = rows->newRow();
-    if (nextOffset) {
-      *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
-    }
-    // Store the columns for each row in sequence. At probe time
-    // strings of the row will probably be in consecutive places, so
-    // reading one will prime the cache for the next.
-    for (auto i = 0; i < hashers.size(); ++i) {
-      rows->store(hashers[i]->decodedVector(), rowIndex, newRow, i);
-    }
-    for (auto i = 0; i < dependentChannels_.size(); ++i) {
-      rows->store(*decoders_[i], rowIndex, newRow, i + hashers.size());
-    }
-  });
+
+  if (hybridJoin_) {
+    // Get batch/row info before processing
+    auto batchId = table_->hybridData()->getNumBatches(); // for scattered mode
+    auto baseRow = table_->hybridData()->getNumRows(); // for coalesced mode
+
+    activeRows_.applyToSelected([&](auto rowIndex) {
+      char* newRow = rows->newRow();
+      if (nextOffset) {
+        *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
+      }
+      // Store the columns for each row in sequence. At probe time
+      // strings of the row will probably be in consecutive places, so
+      // reading one will prime the cache for the next.
+      for (auto i = 0; i < hashers.size(); ++i) {
+        rows->store(hashers[i]->decodedVector(), rowIndex, newRow, i);
+      }
+      // Store RowId - encoding depends on mode
+      uint64_t encodedId;
+      if (scatteredMode_) {
+        // Scattered mode: rowId = (batchId << 32) | rowInBatch
+        // driverId stored in top 8 bits, remaining 56 bits for
+        // batchId+rowInBatch
+        BOLT_CHECK_LT(batchId, (1u << 24));
+        encodedId = (static_cast<uint64_t>(driverId_) << 56) |
+            ((static_cast<uint64_t>(batchId) << 32) | rowIndex);
+      } else {
+        // Coalesced mode: rowId = global row index
+        encodedId = (static_cast<uint64_t>(driverId_)
+                     << 56) | // top 8 bits: driverId [0, 255]
+            (static_cast<uint64_t>(rowIndex + baseRow) & ((1ULL << 56) - 1));
+      }
+      rows->storeSingleRowId(encodedId, newRow);
+    });
+    auto payloadInput = wrapColumns(
+        input->as<RowVector>(), dependentChannels_, dependentTypes_, pool());
+    table_->hybridData()->addPayload(std::move(payloadInput));
+  } else {
+    activeRows_.applyToSelected([&](auto rowIndex) {
+      char* newRow = rows->newRow();
+      if (nextOffset) {
+        *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
+      }
+      // Store the columns for each row in sequence. At probe time
+      // strings of the row will probably be in consecutive places, so
+      // reading one will prime the cache for the next.
+      for (auto i = 0; i < hashers.size(); ++i) {
+        rows->store(hashers[i]->decodedVector(), rowIndex, newRow, i);
+      }
+      for (auto i = 0; i < dependentChannels_.size(); ++i) {
+        rows->store(*decoders_[i], rowIndex, newRow, i + hashers.size());
+      }
+    });
+  }
   spillRowBasedInput();
 }
 
@@ -655,7 +744,12 @@ bool HashBuild::reserveMemory(
 
     // We check usage from the parent pool to take peers' allocations into
     // account.
-    const auto nodeUsage = pool()->currentBytes();
+    auto nodeUsage = pool()->currentBytes();
+    // For hybrid join without scattered mode, include payload memory that
+    // is not tracked by the pool but will be needed during coalesceBatches().
+    if (hybridJoin_ && table_->hybridData() && !scatteredMode_) {
+      nodeUsage += table_->hybridData()->payloadMemoryBytes();
+    }
     if (spillMemoryThreshold_ != 0 && nodeUsage > spillMemoryThreshold_) {
       const int64_t bytesToSpill =
           nodeUsage * spillConfig()->spillableReservationGrowthPct / 100;
@@ -897,6 +991,12 @@ void HashBuild::runSpill(const std::vector<Operator*>& spillOperators) {
   // run in parallel.
   for (auto& spillOp : spillOperators) {
     HashBuild* build = dynamic_cast<HashBuild*>(spillOp);
+    // Coalesce batches before spilling to ensure hybrid data is properly laid
+    // out. Skip in scattered mode - batches are kept separate.
+    if (build->hybridJoin_ && build->table_->hybridData() &&
+        !build->scatteredMode_) {
+      build->table_->hybridData()->coalesceBatches();
+    }
     build->spiller_->spill();
     build->table_->clear();
     build->pool()->release();
@@ -922,6 +1022,14 @@ void HashBuild::noMoreInput() {
 }
 
 void HashBuild::noMoreInputInternal() {
+  // Coalesce batches in this driver's HybridContainer before merging with
+  // peers. This handles both the normal path (from noMoreInput) and spill
+  // restore path (from processSpillInput). Each driver does this independently.
+  // Skip in scattered mode - we keep batches separate.
+  if (hybridJoin_ && table_->hybridData() && !scatteredMode_) {
+    table_->hybridData()->coalesceBatches();
+  }
+
   if (spillEnabled()) {
     spillGroup_->operatorStopped(*this);
   }
@@ -1516,6 +1624,13 @@ void HashBuild::reclaim(
     spillTasks.push_back(
         std::make_shared<AsyncSource<SpillResult>>([buildOp]() {
           try {
+            // Coalesce batches before spilling to ensure hybrid data is
+            // properly laid out. Skip in scattered mode - batches are kept
+            // separate.
+            if (buildOp->hybridJoin_ && buildOp->table_->hybridData() &&
+                !buildOp->scatteredMode_) {
+              buildOp->table_->hybridData()->coalesceBatches();
+            }
             buildOp->spiller_->spill();
             buildOp->table_->clear();
             // Release the minimum reserved memory.

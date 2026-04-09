@@ -122,6 +122,18 @@ safeXor(const int64_t& hash, const int64_t& a, const int64_t& b) {
 
 } // namespace
 
+template <>
+FOLLY_ALWAYS_INLINE void PrestoHasher::hash<TypeKind::VARIANT>(
+    const SelectivityVector& rows,
+    BufferPtr& hashes) {
+  applyHashFunction(rows, *vector_.get(), hashes, [&](auto row) {
+    auto v = vector_->valueAt<VariantValue>(row);
+    auto h1 = XXH64(v.value.data(), v.value.size(), 0);
+    auto h2 = XXH64(v.metadata.data(), v.metadata.size(), 0);
+    return safeHash(h1, h2);
+  });
+}
+
 template <TypeKind kind>
 FOLLY_ALWAYS_INLINE void PrestoHasher::hash(
     const SelectivityVector& rows,

@@ -217,6 +217,28 @@ class FileSpillMergeStream : public SpillMergeStream {
   std::unique_ptr<SpillReadFile> spillFile_;
 };
 
+/// A source of spilled RowVectors coming from a sequence of files.
+///
+/// NOTE: this object is not thread-safe.
+class ConcatFilesSpillBatchStream final : public BatchStream {
+ public:
+  static std::unique_ptr<BatchStream> create(
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles);
+
+  bool nextBatch(RowVectorPtr& batch) override;
+
+ private:
+  explicit ConcatFilesSpillBatchStream(
+      std::vector<std::unique_ptr<SpillReadFile>> spillFiles)
+      : spillFiles_(std::move(spillFiles)) {
+    BOLT_CHECK(!spillFiles_.empty());
+  }
+
+  std::vector<std::unique_ptr<SpillReadFile>> spillFiles_;
+  size_t fileIndex_{0};
+  bool atEnd_{false};
+};
+
 // A source of sorted spilled rows coming either from a file or memory.
 class RowBasedSpillMergeStream : public MergeStream {
  public:
@@ -373,7 +395,9 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
     if (cmp_) {
       return cmp_(left, right);
     } else {
-      for (const auto& [key, compareFlags] : sortingKeys()) {
+      for (const auto& sortKey : sortingKeys()) {
+        auto key = sortKey.first;
+        const auto& compareFlags = sortKey.second;
         auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
             compareByRow,
             rowType->childAt(key)->kind(),

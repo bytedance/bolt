@@ -30,8 +30,10 @@
 
 #pragma once
 
+#include <limits>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
+#include "bolt/vector/TypeAliases.h"
 namespace bytedance::bolt::core {
 /// A simple wrapper around bolt::Config. Defines constants for query
 /// config properties and accessor methods.
@@ -590,6 +592,31 @@ class QueryConfig {
   static constexpr const char* kParquetRepDefMemoryLimit =
       "parquet_repdef_memory_limit";
 
+  static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
+
+  /// If true, reorder rows by containerId during hybrid join extraction for
+  /// better cache locality. Can be disabled for testing to get deterministic
+  /// output order.
+  static constexpr const char* kHybridJoinReorderEnabled =
+      "hybrid_join_reorder_enabled";
+
+  static constexpr const char* kHybridSortEnabled = "hybrid_sort_enabled";
+
+  /// If true, use scattered (non-coalesced) mode for hybrid sort payload
+  /// extraction. In scattered mode, payload batches are kept separate instead
+  /// of being merged into one large batch. This avoids the coalesceBatches()
+  /// overhead.
+  static constexpr const char* kHybridSortScatteredModeEnabled =
+      "hybrid_sort_scattered_mode_enabled";
+
+  /// If true, use scattered (non-coalesced) mode for hybrid join payload
+  /// extraction. In scattered mode, payload batches are kept separate instead
+  /// of being merged into one large batch. Row IDs encode (batchId, rowInBatch)
+  /// instead of global row index. This avoids the coalesceBatches() overhead
+  /// but may have worse cache locality during extraction.
+  static constexpr const char* kHybridJoinScatteredModeEnabled =
+      "hybrid_join_scattered_mode_enabled";
+
   /**
    * LLVM JIT enabled
    * -1 : enable all jit (by default)
@@ -749,6 +776,11 @@ class QueryConfig {
   static constexpr const char* kSparkLegacyStatisticalAggregate =
       "spark_legacy_statistical_aggregate";
 
+  /// If true, ignore null fields when generating JSON string.
+  /// If false, null fields are included with a null value.
+  static constexpr const char* kSparkJsonIgnoreNullFields =
+      "spark.json_ignore_null_fields";
+
   bool operatorTrackExpressionStats() const {
     return get<bool>(kOperatorTrackExpressionStats, false);
   }
@@ -897,12 +929,16 @@ class QueryConfig {
     return get<uint64_t>(kPreferredOutputBatchBytes, kDefault);
   }
 
-  uint32_t preferredOutputBatchRows() const {
-    return get<uint32_t>(kPreferredOutputBatchRows, 1024);
+  vector_size_t preferredOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kPreferredOutputBatchRows, 1024);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
-  uint32_t maxOutputBatchRows() const {
-    return get<uint32_t>(kMaxOutputBatchRows, 10'000);
+  vector_size_t maxOutputBatchRows() const {
+    const uint32_t batchRows = get<uint32_t>(kMaxOutputBatchRows, 10'000);
+    BOLT_USER_CHECK_LE(batchRows, std::numeric_limits<vector_size_t>::max());
+    return batchRows;
   }
 
   uint32_t minOutputBatchRows() const {
@@ -998,6 +1034,35 @@ class QueryConfig {
 #else
     return config::OFF;
 #endif
+  }
+
+  bool hybridJoinEnabled() const {
+    return get<bool>(kHybridJoinEnabled, false);
+  }
+
+  /// Returns whether to reorder rows by containerId during hybrid join
+  /// extraction. Default true for better cache locality. Can be disabled
+  /// for deterministic output order in tests.
+  bool hybridJoinReorderEnabled() const {
+    return get<bool>(kHybridJoinReorderEnabled, true);
+  }
+
+  bool hybridSortEnabled() const {
+    return get<bool>(kHybridSortEnabled, false);
+  }
+
+  /// Returns whether scattered (non-coalesced) mode is enabled for hybrid sort.
+  /// When enabled, payload batches are kept separate instead of being merged,
+  /// avoiding coalesceBatches() overhead. Default true.
+  bool hybridSortScatteredModeEnabled() const {
+    return get<bool>(kHybridSortScatteredModeEnabled, true);
+  }
+
+  /// Returns whether scattered (non-coalesced) mode is enabled for hybrid join.
+  /// When enabled, payload batches are kept separate instead of being merged,
+  /// avoiding coalesceBatches() overhead. Default true (use scattered mode).
+  bool hybridJoinScatteredModeEnabled() const {
+    return get<bool>(kHybridJoinScatteredModeEnabled, true);
   }
 
   /// Returns 'is aggregation spilling enabled' flag. Must also check the
@@ -1656,7 +1721,12 @@ class QueryConfig {
     return get<bool>(kDecryptionEnabled, false);
   }
 
+  bool sparkJsonIgnoreNullFields() const {
+    return get<bool>(kSparkJsonIgnoreNullFields, true);
+  }
+
  private:
   std::unique_ptr<bolt::config::ConfigBase> config_;
 };
+
 } // namespace bytedance::bolt::core

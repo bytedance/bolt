@@ -31,6 +31,7 @@
 #include "bolt/functions/lib/Re2Functions.h"
 #include "bolt/functions/prestosql/StringFunctions.h"
 #include "bolt/functions/sparksql/Base64Function.h"
+#include "bolt/functions/sparksql/LuhnCheckFunction.h"
 #include "bolt/functions/sparksql/MaskFunction.h"
 #include "bolt/functions/sparksql/String.h"
 #include "bolt/functions/sparksql/UnBase64Function.h"
@@ -171,6 +172,8 @@ void registerStringFunctions(const std::string& prefix) {
       {prefix + "bit_length"});
   registerFunction<Empty2NullFunction, Varchar, Varchar>(
       {prefix + "empty2null"});
+
+  registerFunction<LuhnCheckFunction, bool, Varchar>({prefix + "luhn_check"});
 }
 } // namespace sparksql
 } // namespace bytedance::bolt::functions

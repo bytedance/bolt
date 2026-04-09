@@ -48,7 +48,8 @@ class HiveColumnHandle : public ColumnHandle {
     kSynthesized,
     kKey,
     kSequenceNumber,
-    kValueKind
+    kValueKind,
+    kRowIndex
   };
 
   /// NOTE: 'dataType' is the column type in target write table. 'hiveType' is
@@ -74,7 +75,7 @@ class HiveColumnHandle : public ColumnHandle {
         hiveType_->toString());
   }
 
-  const std::string& name() const {
+  const std::string& name() const override {
     return name_;
   }
 
@@ -157,6 +158,10 @@ class HiveTableHandle : public ConnectorTableHandle {
       const std::unordered_map<std::string, std::string>& tableParameters = {});
 
   const std::string& tableName() const {
+    return tableName_;
+  }
+
+  const std::string& name() const override {
     return tableName_;
   }
 

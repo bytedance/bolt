@@ -34,11 +34,16 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 namespace bytedance::bolt::exec {
 
 namespace {
+
+void appendSerializedInt32(std::string& bytes, int32_t value) {
+  bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
 
 class ContainerRowSerdeTest : public testing::Test,
                               public bolt::test::VectorTestBase {
@@ -214,6 +219,55 @@ class ContainerRowSerdeTest : public testing::Test,
 
   HashStringAllocator allocator_{pool()};
 };
+
+TEST_F(ContainerRowSerdeTest, variantCompare) {
+  auto data = VariantVector::create(pool(), VARIANT(), 2);
+  auto* values =
+      data->valueChildVector()->asUnchecked<FlatVector<StringView>>();
+  auto* metadata =
+      data->metadataChildVector()->asUnchecked<FlatVector<StringView>>();
+  const std::string longValue(48, 'v');
+  const std::string longMetadata(36, 'm');
+
+  values->set(0, StringView("short"));
+  metadata->set(0, StringView("meta"));
+  values->set(1, StringView(longValue));
+  metadata->set(1, StringView(longMetadata));
+
+  testCompare(data);
+  allocator_.clear();
+}
+
+TEST_F(ContainerRowSerdeTest, variantHashWithSegmentedInput) {
+  const std::string value(64, 'v');
+  const std::string metadata(40, 'm');
+
+  std::string serialized;
+  appendSerializedInt32(serialized, value.size());
+  serialized.append(value);
+  appendSerializedInt32(serialized, metadata.size());
+  serialized.append(metadata);
+
+  const auto split = sizeof(int32_t) + 10;
+  ASSERT_LT(split, serialized.size());
+
+  ByteInputStream stream({
+      ByteRange{
+          reinterpret_cast<uint8_t*>(serialized.data()),
+          static_cast<int32_t>(split),
+          0,
+      },
+      ByteRange{
+          reinterpret_cast<uint8_t*>(serialized.data() + split),
+          static_cast<int32_t>(serialized.size() - split),
+          0,
+      },
+  });
+
+  EXPECT_EQ(
+      std::hash<VariantValue>{}({StringView(value), StringView(metadata)}),
+      ContainerRowSerde::hash(stream, VARIANT().get()));
+}
 
 TEST_F(ContainerRowSerdeTest, bigint) {
   auto data = makeFlatVector<int64_t>({1, 2, 3, 4, 5});

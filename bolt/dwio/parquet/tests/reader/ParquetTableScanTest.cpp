@@ -29,6 +29,7 @@
  */
 
 #include <folly/init/Init.h>
+#include <simdjson.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -38,6 +39,8 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/functions/sparksql/VariantEncoding.h"
+#include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -47,12 +50,75 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::parquet;
 
+namespace {
+
+std::pair<std::string, std::string> encodeVariantJson(std::string_view json) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element doc;
+  auto error = parser.parse(json.data(), json.size()).get(doc);
+  BOLT_CHECK(!error, "Failed to parse JSON for VARIANT test data: {}", json);
+
+  functions::sparksql::variant::StringDictionary dict;
+  functions::sparksql::variant::SparkVariantEncoder::collectKeys(doc, dict);
+  dict.finalize();
+
+  std::string value;
+  functions::sparksql::variant::SparkVariantEncoder::encode(doc, dict, value);
+  return {std::move(value), dict.serialize()};
+}
+
+RowVectorPtr makeVariantParquetBatch(
+    memory::MemoryPool* pool,
+    const std::vector<int64_t>& groups,
+    const std::vector<std::string>& jsons) {
+  BOLT_CHECK_EQ(groups.size(), jsons.size());
+
+  auto groupVector = BaseVector::create(BIGINT(), groups.size(), pool);
+  auto valueVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto metadataVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto* flatGroupVector = groupVector->asUnchecked<FlatVector<int64_t>>();
+  auto* flatValueVector = valueVector->asUnchecked<FlatVector<StringView>>();
+  auto* flatMetadataVector =
+      metadataVector->asUnchecked<FlatVector<StringView>>();
+
+  std::vector<std::pair<std::string, std::string>> encoded;
+  encoded.reserve(jsons.size());
+  for (const auto& json : jsons) {
+    encoded.push_back(encodeVariantJson(json));
+  }
+
+  for (auto i = 0; i < groups.size(); ++i) {
+    flatGroupVector->set(i, groups[i]);
+    flatValueVector->set(i, StringView(encoded[i].first));
+    flatMetadataVector->set(i, StringView(encoded[i].second));
+  }
+
+  auto variantStorageType =
+      ROW({"value", "metadata"}, {VARBINARY(), VARBINARY()});
+  auto variantStorageVector = std::make_shared<RowVector>(
+      pool,
+      variantStorageType,
+      nullptr,
+      jsons.size(),
+      std::vector<VectorPtr>{valueVector, metadataVector});
+
+  return std::make_shared<RowVector>(
+      pool,
+      ROW({"g", "v"}, {BIGINT(), variantStorageType}),
+      nullptr,
+      groups.size(),
+      std::vector<VectorPtr>{groupVector, variantStorageVector});
+}
+
+} // namespace
+
 class ParquetTableScanTest : public HiveConnectorTestBase {
  protected:
   using OperatorTestBase::assertQuery;
 
   void SetUp() {
     registerParquetReaderFactory();
+    functions::sparksql::registerFunctions("");
 
     auto hiveConnector =
         connector::getConnectorFactory(connector::kHiveConnectorName)
@@ -128,6 +194,19 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     assertQuery(plan, splits_, sql);
   }
 
+  void assertSelectWithAssignments(
+      std::vector<std::string>&& outputColumnNames,
+      const std::unordered_map<
+          std::string,
+          std::shared_ptr<connector::ColumnHandle>>& assignments,
+      const std::string& sql) {
+    auto rowType = getRowType(std::move(outputColumnNames));
+    auto tableHandle = makeTableHandle({}, nullptr, "hive_table", rowType);
+    auto plan =
+        PlanBuilder().tableScan(rowType, tableHandle, assignments).planNode();
+    assertQuery(plan, splits_, sql);
+  }
+
   void assertSelectWithAgg(
       std::vector<std::string>&& outputColumnNames,
       const std::vector<std::string>& aggregates,
@@ -159,9 +238,16 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     assertQuery(plan, splits_, sql);
   }
 
-  void
-  loadData(const std::string& filePath, RowTypePtr rowType, RowVectorPtr data) {
-    splits_ = {makeSplit(filePath)};
+  void loadData(
+      const std::string& filePath,
+      RowTypePtr rowType,
+      RowVectorPtr data,
+      const std::optional<
+          std::unordered_map<std::string, std::optional<std::string>>>&
+          partitionKeys = std::nullopt,
+      const std::optional<std::unordered_map<std::string, std::string>>&
+          infoColumns = std::nullopt) {
+    splits_ = {makeSplit(filePath, partitionKeys, infoColumns)};
     rowType_ = rowType;
     createDuckDbTable({data});
   }
@@ -184,9 +270,18 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
   }
 
   std::shared_ptr<connector::hive::HiveConnectorSplit> makeSplit(
-      const std::string& filePath) {
+      const std::string& filePath,
+      const std::optional<
+          std::unordered_map<std::string, std::optional<std::string>>>&
+          partitionKeys = std::nullopt,
+      const std::optional<std::unordered_map<std::string, std::string>>&
+          infoColumns = std::nullopt) {
     return makeHiveConnectorSplits(
-        filePath, 1, dwio::common::FileFormat::PARQUET)[0];
+        filePath,
+        1,
+        dwio::common::FileFormat::PARQUET,
+        partitionKeys,
+        infoColumns)[0];
   }
 
   const std::vector<std::shared_ptr<connector::ConnectorSplit>>& splits()
@@ -448,6 +543,35 @@ TEST_F(ParquetTableScanTest, map) {
   assertSelectWithFilter({"map"}, {}, "", "SELECT map FROM tmp");
 }
 
+TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
+  auto file = TempFilePath::create();
+  WriterOptions writerOptions;
+  auto data = makeVariantParquetBatch(
+      pool(),
+      {1, 1, 2},
+      {R"({"a":1,"name":"x"})",
+       R"({"a":2,"name":"y"})",
+       R"({"a":3,"name":"z"})"});
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  auto logicalRowType = ROW({"g", "v"}, {BIGINT(), VARIANT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(logicalRowType)
+                  .project({"g", "cast(variant_get(v, '$.a') as bigint) AS a"})
+                  .singleAggregation({"g"}, {"sum(a) AS sum_a"})
+                  .orderBy({"g"}, false)
+                  .planNode();
+
+  auto results = AssertQueryBuilder(plan)
+                     .split(makeSplit(file->getPath()))
+                     .copyResults(pool());
+
+  auto expected = makeRowVector(
+      {"g", "sum_a"},
+      {makeFlatVector<int64_t>({1, 2}), makeFlatVector<int64_t>({3, 3})});
+  ASSERT_TRUE(assertEqualResults({expected}, {results}));
+}
+
 TEST_F(ParquetTableScanTest, nullMap) {
   auto path = getExampleFilePath("null_map.parquet");
   loadData(
@@ -628,6 +752,81 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
   ASSERT_TRUE(waitForTaskCompletion(result.first->task().get()));
   assertEqualResults(
       result.second, {makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 1})})});
+}
+
+TEST_F(ParquetTableScanTest, rowIndex) {
+  static const char* kPath = "file_path";
+  // case 1: file not have `_tmp_metadata_row_index`, scan generate it for user.
+  auto filePath = getExampleFilePath("sample.parquet");
+  loadData(
+      filePath,
+      ROW({"a", "b", "_tmp_metadata_row_index", kPath},
+          {BIGINT(), DOUBLE(), BIGINT(), VARCHAR()}),
+      makeRowVector(
+          {"a", "b", "_tmp_metadata_row_index", kPath},
+          {
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<double>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(20, [](auto row) { return row; }),
+              makeFlatVector<std::string>(
+                  20, [filePath](auto /*row*/) { return filePath; }),
+          }),
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{{kPath, filePath}});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignments;
+  assignments["a"] = std::make_shared<connector::hive::HiveColumnHandle>(
+      "a",
+      connector::hive::HiveColumnHandle::ColumnType::kRegular,
+      BIGINT(),
+      BIGINT());
+  assignments["b"] = std::make_shared<connector::hive::HiveColumnHandle>(
+      "b",
+      connector::hive::HiveColumnHandle::ColumnType::kRegular,
+      DOUBLE(),
+      DOUBLE());
+  assignments[kPath] = synthesizedColumn(kPath, VARCHAR());
+  assignments["_tmp_metadata_row_index"] =
+      std::make_shared<connector::hive::HiveColumnHandle>(
+          "_tmp_metadata_row_index",
+          connector::hive::HiveColumnHandle::ColumnType::kRowIndex,
+          BIGINT(),
+          BIGINT());
+
+  assertSelectWithAssignments({"a"}, assignments, "SELECT a FROM tmp");
+  assertSelectWithAssignments(
+      {"a", "_tmp_metadata_row_index"},
+      assignments,
+      "SELECT a, _tmp_metadata_row_index FROM tmp");
+  assertSelectWithAssignments(
+      {"_tmp_metadata_row_index", "a"},
+      assignments,
+      "SELECT _tmp_metadata_row_index, a FROM tmp");
+  assertSelectWithAssignments(
+      {kPath, "_tmp_metadata_row_index"},
+      assignments,
+      fmt::format("SELECT {}, _tmp_metadata_row_index FROM tmp", kPath));
+
+  // case 2: file has `_tmp_metadata_row_index` column, then use user data
+  // insteads of generating it.
+  loadData(
+      getExampleFilePath("sample_with_rowindex.parquet"),
+      ROW({"a", "b", "_tmp_metadata_row_index"},
+          {BIGINT(), DOUBLE(), BIGINT()}),
+      makeRowVector(
+          {"a", "b", "_tmp_metadata_row_index"},
+          {
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<double>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+          }));
+
+  assignments.erase(kPath);
+  assertSelectWithAssignments({"a"}, assignments, "SELECT a FROM tmp");
+  assertSelectWithAssignments(
+      {"a", "_tmp_metadata_row_index"},
+      assignments,
+      "SELECT a, _tmp_metadata_row_index FROM tmp");
 }
 
 TEST_F(ParquetTableScanTest, DISABLED_structSelection) {

@@ -160,6 +160,8 @@ class RowDeserializer {
       ByteInputStream* source,
       std::vector<SerializeView>& serializedRows,
       std::vector<std::string>& serializedBuffers) {
+    serializedRows.clear();
+    serializedBuffers.clear();
     while (!source->atEnd()) {
       // First read row size in big endian order.
       const auto rowSize = folly::Endian::big(source->read<TRowSize>());
@@ -176,8 +178,12 @@ class RowDeserializer {
 
       BOLT_CHECK_EQ(serializedBuffer.size(), rowSize);
       serializedBuffers.emplace_back(std::move(serializedBuffer));
-      serializedRows.push_back(std::string_view(
-          serializedBuffers.back().data(), serializedBuffers.back().size()));
+    }
+
+    serializedRows.reserve(serializedBuffers.size());
+    for (const auto& serializedBuffer : serializedBuffers) {
+      serializedRows.push_back(
+          std::string_view(serializedBuffer.data(), serializedBuffer.size()));
     }
   }
 

@@ -45,7 +45,10 @@ Simple mapNameToSimple(const std::string& name) {
       {"SEQUENCE", Simple::SEQUENCE},
       {"ROW", Simple::ROW},
       {"MAP", Simple::MAP},
-      {"ARRAY", Simple::ARRAY}};
+      {"ARRAY", Simple::ARRAY},
+      {"LAZY", Simple::LAZY},
+      {"FUNCTION", Simple::FUNCTION},
+      {"VARIANT", Simple::VARIANT}};
 
   if (vecNameMap.find(name) == vecNameMap.end()) {
     throw std::invalid_argument(

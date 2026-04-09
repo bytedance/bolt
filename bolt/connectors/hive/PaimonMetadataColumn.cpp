@@ -55,7 +55,9 @@ MetadataColumnPartition::MetadataColumnPartition(
   std::vector<VectorPtr> childVectors;
   const auto& partitionRowType = partitionType_->asRow();
 
-  for (const auto& [key, value] : partitionKeys) {
+  for (const auto& kv : partitionKeys) {
+    const auto& key = kv.first;
+    const auto& value = kv.second;
     auto fieldType = partitionRowType.findChild(key);
     fieldNames.push_back(key);
     fieldTypes.push_back(fieldType);

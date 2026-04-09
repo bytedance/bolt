@@ -159,6 +159,8 @@ class HashAggregation : public Operator {
   // Possibly reusable output vector.
   RowVectorPtr output_;
 
+  // Accumulated Distinct Aggregation output
+  RowVectorPtr accumulatedOutput_;
   uint32_t minOutputRows_;
 
   // contains only one aggregate function - vid_split udaf

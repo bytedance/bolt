@@ -580,7 +580,29 @@ RowVectorPtr HashAggregation::getOutput() {
   }
 
   if (isDistinct_) {
-    return getDistinctOutput();
+    auto currentOutput = getDistinctOutput();
+    // Accumulate the generated output using append()
+    if (currentOutput) {
+      if (!accumulatedOutput_) {
+        if (currentOutput->size() >= minOutputRows_) {
+          return currentOutput;
+        }
+        accumulatedOutput_ =
+            RowVector::createEmpty(currentOutput->type(), operatorCtx_->pool());
+      }
+      accumulatedOutput_->append(currentOutput.get());
+    }
+
+    // Handle accumulated output when no more input or memory pressure
+    if (accumulatedOutput_ &&
+        (finished_ || partialFull_ ||
+         accumulatedOutput_->size() >= minOutputRows_ ||
+         abandonedPartialAggregation_)) {
+      auto result = std::move(accumulatedOutput_);
+      resetPartialOutputIfNeed();
+      return result;
+    }
+    return nullptr;
   }
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
@@ -708,6 +730,9 @@ void HashAggregation::noMoreInput() {
 }
 
 bool HashAggregation::isFinished() {
+  if (finished_) {
+    BOLT_CHECK_NULL(accumulatedOutput_);
+  }
   return finished_;
 }
 

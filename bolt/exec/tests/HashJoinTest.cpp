@@ -58,8 +58,10 @@ using bytedance::bolt::test::BatchMaker;
 namespace {
 struct TestParam {
   int numDrivers;
+  bool hybridJoin;
 
-  explicit TestParam(int _numDrivers) : numDrivers(_numDrivers) {}
+  TestParam(int _numDrivers, bool _hybridJoin = false)
+      : numDrivers(_numDrivers), hybridJoin(_hybridJoin) {}
 };
 
 using SplitInput =
@@ -396,6 +398,11 @@ class HashJoinBuilder {
     return *this;
   }
 
+  HashJoinBuilder& hybridJoin(bool hybridJoin) {
+    hybridJoin_ = hybridJoin;
+    return *this;
+  }
+
   HashJoinBuilder& maxSpillLevel(int32_t maxSpillLevel) {
     maxSpillLevel_ = maxSpillLevel;
     return *this;
@@ -650,6 +657,11 @@ class HashJoinBuilder {
           std::to_string(maxDriverYieldTimeMs));
     }
     config(core::QueryConfig::kJitLevel, "-1");
+    config(
+        core::QueryConfig::kHybridJoinEnabled, hybridJoin_ ? "true" : "false");
+    // Disable reordering for hybrid join to get deterministic output order in
+    // tests.
+    config(core::QueryConfig::kHybridJoinReorderEnabled, "false");
 
     if (!configs_.empty()) {
       auto configCopy = configs_;
@@ -744,6 +756,7 @@ class HashJoinBuilder {
 
   uint64_t spillMemoryThreshold_{0};
   bool injectSpill_{true};
+  bool hybridJoin_{false};
   // If not set, then the test will run the test with different settings:
   // 0, 2.
   std::optional<int32_t> maxSpillLevel_;
@@ -771,7 +784,7 @@ class HashJoinTest : public HiveConnectorTestBase {
   HashJoinTest() : HashJoinTest(TestParam(1)) {}
 
   explicit HashJoinTest(const TestParam& param)
-      : numDrivers_(param.numDrivers) {}
+      : numDrivers_(param.numDrivers), hybridJoin_(param.hybridJoin) {}
 
   void SetUp() override {
     HiveConnectorTestBase::SetUp();
@@ -972,6 +985,7 @@ class HashJoinTest : public HiveConnectorTestBase {
   }
 
   const int32_t numDrivers_;
+  const bool hybridJoin_{false};
 
   // The default left and right table types used for test.
   RowTypePtr probeType_;
@@ -989,13 +1003,18 @@ class MultiThreadedHashJoinTest
   MultiThreadedHashJoinTest() : HashJoinTest(GetParam()) {}
 
   static std::vector<TestParam> getTestParams() {
-    return std::vector<TestParam>({TestParam{1}, TestParam{3}});
+    return std::vector<TestParam>(
+        {TestParam{1, false},
+         TestParam{1, true},
+         TestParam{3, false},
+         TestParam{3, true}});
   }
 };
 
 TEST_P(MultiThreadedHashJoinTest, bigintArray) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -1007,12 +1026,13 @@ TEST_P(MultiThreadedHashJoinTest, bigintArray) {
 TEST_P(MultiThreadedHashJoinTest, outOfJoinKeyColumnOrder) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeType(probeType_)
       .probeKeys({"t_k2"})
       .probeVectors(5, 10)
       .buildType(buildType_)
       .buildKeys({"u_k2"})
-      .buildVectors(5, 15)
+      .buildVectors(64, 15)
       .joinOutputLayout({"t_k1", "t_k2", "u_k1", "u_k2", "u_v1"})
       .referenceQuery(
           "SELECT t_k1, t_k2, u_k1, u_k2, u_v1 FROM t, u WHERE t_k2 = u_k2")
@@ -1027,6 +1047,7 @@ TEST_P(MultiThreadedHashJoinTest, emptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .keyTypes({BIGINT()})
         .probeVectors(1600, 5)
         .buildVectors(0, 5)
@@ -1058,6 +1079,7 @@ TEST_P(MultiThreadedHashJoinTest, emptyBuild) {
 TEST_P(MultiThreadedHashJoinTest, emptyProbe) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT()})
       .probeVectors(0, 5)
       .buildVectors(1500, 5)
@@ -1094,6 +1116,7 @@ TEST_P(MultiThreadedHashJoinTest, emptyProbe) {
 TEST_P(MultiThreadedHashJoinTest, emptyProbeWithSpillMemoryThreshold) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT()})
       .probeVectors(0, 5)
       .buildVectors(1500, 5)
@@ -1183,6 +1206,7 @@ DEBUG_ONLY_TEST_P(
           .spillMemoryThreshold(1)
           .maxSpillLevel(0)
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .referenceQuery(
               "SELECT t.t_k1, t.t_k2 from t, u WHERE t.t_k1 = u.u_k1")
           .run(),
@@ -1192,6 +1216,7 @@ DEBUG_ONLY_TEST_P(
 TEST_P(MultiThreadedHashJoinTest, normalizedKey) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT(), VARCHAR()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -1217,6 +1242,7 @@ DEBUG_ONLY_TEST_P(MultiThreadedHashJoinTest, parallelJoinBuildCheck) {
       std::function<void(void*)>([&](void*) { isParallelBuild = true; }));
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT(), VARCHAR()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -1258,6 +1284,7 @@ DEBUG_ONLY_TEST_P(
   BOLT_ASSERT_THROW(
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .keyTypes({BIGINT(), VARCHAR()})
           .probeVectors(1600, 5)
           .buildVectors(1500, 5)
@@ -1288,6 +1315,7 @@ TEST_P(MultiThreadedHashJoinTest, allTypes) {
 TEST_P(MultiThreadedHashJoinTest, filter) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -1324,6 +1352,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithNull) {
 
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeType(probeType_)
         .probeKeys({"t_k2"})
         .probeVectors(std::move(probeVectors))
@@ -1363,6 +1392,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithLargeOutput) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u0"})
@@ -1414,6 +1444,7 @@ TEST_P(MultiThreadedHashJoinTest, arrayBasedLookup) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"c0"})
@@ -1480,6 +1511,7 @@ TEST_P(MultiThreadedHashJoinTest, joinSidesDifferentSchema) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t_c0"})
       .probeVectors(std::move(probeVectors))
       .probeProjections({"c0 AS t_c0", "c1 AS t_c1", "c2 AS t_c2"})
@@ -1519,6 +1551,7 @@ TEST_P(MultiThreadedHashJoinTest, innerJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"c0"})
@@ -1553,6 +1586,7 @@ TEST_P(MultiThreadedHashJoinTest, innerJoinWithEmptyBuild) {
 TEST_P(MultiThreadedHashJoinTest, leftSemiJoinFilter) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeType(probeType_)
       .probeVectors(174, 5)
       .probeKeys({"t_k1"})
@@ -1589,6 +1623,7 @@ TEST_P(MultiThreadedHashJoinTest, leftSemiJoinFilterWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"c0"})
@@ -1630,6 +1665,7 @@ TEST_P(MultiThreadedHashJoinTest, leftSemiJoinFilterWithExtraFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -1646,6 +1682,7 @@ TEST_P(MultiThreadedHashJoinTest, leftSemiJoinFilterWithExtraFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -1662,6 +1699,7 @@ TEST_P(MultiThreadedHashJoinTest, leftSemiJoinFilterWithExtraFilter) {
 TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilter) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeType(probeType_)
       .probeVectors(133, 3)
       .probeKeys({"t_k1"})
@@ -1703,6 +1741,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u0"})
@@ -1760,6 +1799,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithAllMatches) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u0"})
@@ -1795,6 +1835,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithExtraFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -1817,6 +1858,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithExtraFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -1838,6 +1880,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithExtraFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -1979,6 +2022,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoin) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"c0"})
@@ -1999,6 +2043,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoin) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"c0"})
@@ -2019,6 +2064,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoin) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"c0"})
@@ -2056,6 +2102,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithFilter) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u0"})
@@ -2110,6 +2157,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithFilterAndEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::vector<RowVectorPtr>(probeVectors))
         .buildKeys({"u0"})
@@ -2169,6 +2217,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithFilterAndNullKey) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -2229,6 +2278,7 @@ TEST_P(
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u0"})
@@ -2267,6 +2317,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithFilterOnNullableColumn) {
     });
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u0"})
@@ -2317,6 +2368,7 @@ TEST_P(MultiThreadedHashJoinTest, nullAwareAntiJoinWithFilterOnNullableColumn) {
     });
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u0"})
@@ -2365,6 +2417,7 @@ TEST_P(MultiThreadedHashJoinTest, antiJoin) {
   });
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
       .probeVectors(std::vector<RowVectorPtr>(probeVectors))
       .buildKeys({"u0"})
@@ -2393,6 +2446,7 @@ TEST_P(MultiThreadedHashJoinTest, antiJoin) {
   for (const std::string& filter : filters) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::vector<RowVectorPtr>(probeVectors))
         .buildKeys({"u0"})
@@ -2432,6 +2486,7 @@ TEST_P(MultiThreadedHashJoinTest, antiJoinWithFilterAndEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
         .probeVectors(std::vector<RowVectorPtr>(probeVectors))
         .buildKeys({"u0"})
@@ -2506,6 +2561,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2561,6 +2617,7 @@ TEST_P(MultiThreadedHashJoinTest, nullStatsWithEmptyBuild) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2644,6 +2701,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u_c0"})
@@ -2705,6 +2763,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithNoJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2763,6 +2822,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithAllMatch) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .probeFilter("c0 < 5")
@@ -2826,6 +2886,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2845,6 +2906,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2891,6 +2953,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithNullableFilter) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2942,6 +3005,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2997,6 +3061,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u_c0"})
@@ -3049,6 +3114,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithAllMatch) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -3104,6 +3170,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -3123,6 +3190,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -3176,6 +3244,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -3231,6 +3300,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u_c0"})
@@ -3284,6 +3354,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithNoMatch) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -3437,6 +3508,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -3456,6 +3528,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -3473,6 +3546,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
 TEST_P(MultiThreadedHashJoinTest, noSpillLevelLimit) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .keyTypes({INTEGER()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -5781,6 +5855,7 @@ TEST_F(HashJoinTest, spillFileSize) {
     SCOPED_TRACE(fmt::format("spillFileSize: {}", spillFileSize));
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .keyTypes({BIGINT()})
         .probeVectors(100, 3)
         .buildVectors(100, 3)
@@ -6010,6 +6085,7 @@ TEST_F(HashJoinTest, antiJoinAbandomBuildNoDupHashEarly) {
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinRows, "1")
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinPct, "10")
       .numDrivers(numDrivers_)
+      .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
       .probeVectors(std::vector<RowVectorPtr>(probeVectors))
       .buildKeys({"u0"})
@@ -6025,6 +6101,7 @@ TEST_F(HashJoinTest, spillPartitionBitsOverlap) {
   auto builder =
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .keyTypes({BIGINT(), BIGINT()})
           .probeVectors(2'000, 3)
           .buildVectors(2'000, 3)
@@ -6235,6 +6312,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringInputProcessing) {
     std::thread taskThread([&]() {
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .planNode(plan)
           .queryPool(std::move(queryPool))
           .injectSpill(false)
@@ -6388,6 +6466,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringReserve) {
   std::thread taskThread([&]() {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .planNode(plan)
         .queryPool(std::move(queryPool))
         .injectSpill(false)
@@ -6518,6 +6597,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringAllocation) {
     std::thread taskThread([&]() {
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .planNode(plan)
           .queryPool(std::move(queryPool))
           .injectSpill(false)
@@ -6637,6 +6717,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringOutputProcessing) {
     std::thread taskThread([&]() {
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
+          .hybridJoin(hybridJoin_)
           .planNode(plan)
           .queryPool(std::move(queryPool))
           .injectSpill(false)
@@ -6783,6 +6864,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
   std::thread taskThread([&]() {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .planNode(plan)
         .queryPool(std::move(queryPool))
         .injectSpill(false)
@@ -6912,6 +6994,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringOutputProcessing) {
       BOLT_ASSERT_THROW(
           HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
               .numDrivers(numDrivers_)
+              .hybridJoin(hybridJoin_)
               .planNode(plan)
               .queryPool(std::move(queryPool))
               .injectSpill(false)
@@ -7018,6 +7101,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringInputgProcessing) {
       BOLT_ASSERT_THROW(
           HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
               .numDrivers(numDrivers_)
+              .hybridJoin(hybridJoin_)
               .planNode(plan)
               .queryPool(std::move(queryPool))
               .injectSpill(false)
@@ -7124,6 +7208,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashProbeAbortDuringInputProcessing) {
       BOLT_ASSERT_THROW(
           HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
               .numDrivers(numDrivers_)
+              .hybridJoin(hybridJoin_)
               .planNode(plan)
               .queryPool(std::move(queryPool))
               .injectSpill(false)
@@ -7300,6 +7385,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, minSpillableMemoryReservation) {
     auto tempDirectory = exec::test::TempDirectoryPath::create();
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .hybridJoin(hybridJoin_)
         .planNode(plan)
         .injectSpill(false)
         .spillDirectory(tempDirectory->path)

@@ -32,6 +32,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <string_view>
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -40,6 +41,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 #include "bolt/vector/arrow/Abi.h"
 
@@ -51,9 +53,15 @@ namespace {
 // The supported conversions use one buffer for nulls (0), one for values (1),
 // and one for offsets (2).
 static constexpr size_t kMaxBuffers{3};
+constexpr const char kArrowExtensionNameKey[] = "ARROW:extension:name";
+constexpr const char kSparkVariantExtensionName[] = "spark.variant";
 
 void clearNullableFlag(int64_t& flags) {
   flags = flags & (~ARROW_FLAG_NULLABLE);
+}
+
+void appendArrowMetadataInt32(std::string& metadata, int32_t value) {
+  metadata.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
 // Structure that will hold the buffers needed by ArrowArray. This is opaquely
@@ -172,6 +180,9 @@ struct BoltToArrowSchemaBridgeHolder {
   // format.
   std::string formatBuffer;
 
+  // Buffer for ArrowSchema.metadata when exporting extension types.
+  std::string metadataBuffer;
+
   void setChildAtIndex(
       size_t index,
       std::unique_ptr<ArrowSchema>&& child,
@@ -188,6 +199,22 @@ struct BoltToArrowSchemaBridgeHolder {
     schema.children[index] = childrenOwned[index].get();
   }
 };
+
+void setArrowMetadataEntry(
+    ArrowSchema& arrowSchema,
+    BoltToArrowSchemaBridgeHolder& bridgeHolder,
+    std::string_view key,
+    std::string_view value) {
+  bridgeHolder.metadataBuffer.clear();
+  appendArrowMetadataInt32(bridgeHolder.metadataBuffer, 1);
+  appendArrowMetadataInt32(
+      bridgeHolder.metadataBuffer, static_cast<int32_t>(key.size()));
+  bridgeHolder.metadataBuffer.append(key.data(), key.size());
+  appendArrowMetadataInt32(
+      bridgeHolder.metadataBuffer, static_cast<int32_t>(value.size()));
+  bridgeHolder.metadataBuffer.append(value.data(), value.size());
+  arrowSchema.metadata = bridgeHolder.metadataBuffer.data();
+}
 
 // Release function for ArrowArray. Arrow standard requires it to recurse down
 // to children and dictionary arrays, and set release and private_data to null
@@ -342,6 +369,8 @@ const char* exportArrowFormatStr(
       return "+m"; // map
     case TypeKind::ROW:
       return "+s"; // struct
+    case TypeKind::VARIANT:
+      return "+s"; // variant is a struct
 
     default:
       BOLT_NYI("Unable to map type '{}' to ArrowSchema.", type->kind());
@@ -859,6 +888,9 @@ void exportValues(
     return;
   }
   if (!rows.changed() && isFlatScalarZeroCopy(type)) {
+    // Arrow does not allow a nullptr for the values buffer.
+    // The all-null (no values buffer) case is handled above.
+    BOLT_DCHECK(vec.values());
     holder.setBuffer(1, vec.values());
     return;
   }
@@ -1139,8 +1171,9 @@ void exportToArrowImpl(
     ArrowArray&,
     memory::MemoryPool*);
 
-void exportRows(
-    const RowVector& vec,
+template <typename T>
+void exportRowsImpl(
+    const T& vec,
     const Selection& rows,
     const ArrowOptions& options,
     ArrowArray& out,
@@ -1167,6 +1200,26 @@ void exportRows(
       throw;
     }
   }
+}
+
+void exportRows(
+    const RowVector& vec,
+    const Selection& rows,
+    const ArrowOptions& options,
+    ArrowArray& out,
+    memory::MemoryPool* pool,
+    BoltToArrowBridgeHolder& holder) {
+  exportRowsImpl(vec, rows, options, out, pool, holder);
+}
+
+void exportRows(
+    const VariantVector& vec,
+    const Selection& rows,
+    const ArrowOptions& options,
+    ArrowArray& out,
+    memory::MemoryPool* pool,
+    BoltToArrowBridgeHolder& holder) {
+  exportRowsImpl(vec, rows, options, out, pool, holder);
 }
 
 template <typename Vector>
@@ -1733,6 +1786,10 @@ void exportToArrowImpl(
       exportRows(
           *vec.asUnchecked<RowVector>(), rows, options, out, pool, *holder);
       break;
+    case VectorEncoding::Simple::VARIANT:
+      exportRows(
+          *vec.asUnchecked<VariantVector>(), rows, options, out, pool, *holder);
+      break;
     case VectorEncoding::Simple::ARRAY:
       exportArrays(
           *vec.asUnchecked<ArrayVector>(), rows, options, out, pool, *holder);
@@ -1921,6 +1978,45 @@ TypePtr importFromArrowImpl(
             return TIMESTAMP_WITH_TIME_ZONE();
           }
 
+          // Check for explicit Arrow extension type annotation for VARIANT.
+          // We do NOT use a heuristic based on field names because
+          // STRUCT<value VARBINARY, metadata VARBINARY> is too common and
+          // would cause false positives on legitimate structs.
+          // Callers that import Spark VARIANT data via Arrow should either:
+          // 1. Set the "ARROW:extension:name" metadata to "spark.variant", or
+          // 2. Post-process the imported ROW type into VARIANT.
+          bool isVariant = false;
+          if (arrowSchema.metadata) {
+            // Arrow C metadata is encoded as:
+            //   int32 num_pairs
+            //   (int32 key_len, key, int32 val_len, val) * num_pairs
+            const char* meta = arrowSchema.metadata;
+            int32_t numPairs;
+            memcpy(&numPairs, meta, 4);
+            meta += 4;
+            for (int32_t p = 0; p < numPairs; ++p) {
+              int32_t keyLen;
+              memcpy(&keyLen, meta, 4);
+              meta += 4;
+              std::string_view key(meta, keyLen);
+              meta += keyLen;
+              int32_t valLen;
+              memcpy(&valLen, meta, 4);
+              meta += 4;
+              std::string_view val(meta, valLen);
+              meta += valLen;
+              if (key == kArrowExtensionNameKey &&
+                  val == kSparkVariantExtensionName) {
+                isVariant = true;
+                break;
+              }
+            }
+          }
+
+          if (isVariant) {
+            return VARIANT();
+          }
+
           return ROW(std::move(childNames), std::move(childTypes));
         }
 
@@ -1986,6 +2082,28 @@ void exportArrayToArrowSchema(
   // Name is required, and "item" is the default name used in arrow itself.
   child->name = "item";
   bridgeHolder->setChildAtIndex(0, std::move(child), arrowSchema);
+}
+
+void exportVariantToArrowSchema(
+    const VariantVector& variant,
+    ArrowSchema& arrowSchema,
+    const ArrowOptions& options,
+    BoltToArrowSchemaBridgeHolder* bridgeHolder,
+    memory::MemoryPool* pool) {
+  auto numChildren = variant.childrenSize();
+  bridgeHolder->childrenRaw.resize(numChildren);
+  bridgeHolder->childrenOwned.resize(numChildren);
+  for (column_index_t i = 0; i < numChildren; ++i) {
+    auto child = std::make_unique<ArrowSchema>();
+    exportToArrow(variant.childAt(i), *child, options, {}, pool);
+    child->name = (i == 0) ? "value" : "metadata";
+    bridgeHolder->setChildAtIndex(i, std::move(child), arrowSchema);
+  }
+  setArrowMetadataEntry(
+      arrowSchema,
+      *bridgeHolder,
+      kArrowExtensionNameKey,
+      kSparkVariantExtensionName);
 }
 
 void exportRowToArrowSchema(
@@ -2118,6 +2236,15 @@ void exportToArrow(
             bridgeHolder.get(),
             fieldNames,
             pool);
+      } else if (
+          vec->valueVector() != nullptr &&
+          vec->wrappedVector()->encoding() == VectorEncoding::Simple::VARIANT) {
+        exportVariantToArrowSchema(
+            *vec->wrappedVector()->asUnchecked<VariantVector>(),
+            arrowSchema,
+            options,
+            bridgeHolder.get(),
+            pool);
       } else {
         arrowSchema.n_children = 0;
         arrowSchema.children = nullptr;
@@ -2220,6 +2347,13 @@ void exportToArrow(
           options,
           bridgeHolder.get(),
           fieldNames,
+          pool);
+    } else if (type->kind() == TypeKind::VARIANT) {
+      exportVariantToArrowSchema(
+          *vec->asUnchecked<VariantVector>(),
+          arrowSchema,
+          options,
+          bridgeHolder.get(),
           pool);
     } else {
       BOLT_DCHECK_EQ(type->size(), 0);

@@ -36,6 +36,7 @@ using ondemandElementResult = simdjson::simdjson_result<ondemandElement>;
 using domArray = simdjson::dom::array;
 using ondemandArray = simdjson::ondemand::array;
 
+#if __cplusplus >= 202002L
 template <typename T>
 concept JsonElementConcept = std::is_same_v<T, ondemandElement> ||
     std::is_same_v<T, ondemandElementResult> || std::is_same_v<T, domElement> ||
@@ -47,6 +48,15 @@ concept JsonObjectKeyValuePairConcept =
     std::is_same_v<T, simdjson::simdjson_result<simdjson::ondemand::field>> ||
     std::is_same_v<T, simdjson::dom::key_value_pair> ||
     std::is_same_v<T, simdjson::simdjson_result<simdjson::dom::key_value_pair>>;
+#else
+// Pre-C++20 fallback: these macros expand to 'typename' so that
+// template <JsonElementConcept T> compiles as template <typename T>.
+// They are #undef'd at the end of this header to avoid polluting the
+// global macro namespace.
+#define JsonElementConcept typename
+#define JsonObjectKeyValuePairConcept typename
+#define BOLT_JSON_UTIL_UNDEF_CONCEPT_MACROS
+#endif
 
 enum BoltJsonElementType {
   ARRAY = 1,
@@ -627,3 +637,9 @@ inline bool traversingByTokens(
 
 } // namespace JsonUtil
 } // namespace bytedance::bolt::functions
+
+#ifdef BOLT_JSON_UTIL_UNDEF_CONCEPT_MACROS
+#undef JsonElementConcept
+#undef JsonObjectKeyValuePairConcept
+#undef BOLT_JSON_UTIL_UNDEF_CONCEPT_MACROS
+#endif

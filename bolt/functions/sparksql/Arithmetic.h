@@ -39,6 +39,7 @@
 #include "bolt/common/base/Doubles.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/lib/ToHex.h"
+#include "bolt/functions/prestosql/ArithmeticImpl.h"
 namespace bytedance::bolt::functions::sparksql {
 
 template <typename T>
@@ -201,6 +202,15 @@ struct FloorFunction {
       result = safeDoubleToInt64(std::floor(value));
     }
     return true;
+  }
+};
+
+template <typename T>
+struct RoundFunction {
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE void
+  call(TInput& result, const TInput& a, const int32_t b = 0) {
+    result = bytedance::bolt::functions::round<TInput, int32_t, true>(a, b);
   }
 };
 

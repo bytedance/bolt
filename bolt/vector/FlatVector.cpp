@@ -32,6 +32,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/TypeAliases.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance {
 namespace bolt {
 
@@ -249,6 +250,14 @@ void FlatVector<StringView>::acquireSharedStringBuffersRecursive(
 
     case VectorEncoding::Simple::ROW: {
       for (auto& child : source->asUnchecked<RowVector>()->children()) {
+        acquireSharedStringBuffersRecursive(child.get());
+      }
+      return;
+    }
+
+    case VectorEncoding::Simple::VARIANT: {
+      auto* variant = source->asUnchecked<VariantVector>();
+      for (auto& child : variant->children()) {
         acquireSharedStringBuffersRecursive(child.get());
       }
       return;

@@ -305,7 +305,8 @@ void DwrfRowReader::readNext(
     }
     return;
   }
-  if (!options_.getAppendRowNumberColumn()) {
+  if (!options_.getAppendRowNumberColumn() &&
+      !options_.getRowNumberColumnInfo().has_value()) {
     selectiveColumnReader_->next(rowsToRead, result, mutation);
     return;
   }
@@ -323,18 +324,28 @@ void DwrfRowReader::readWithRowNumber(
       ++numChildren;
     }
   }
+  bytedance::bolt::dwio::common::RowNumberColumnInfo rowNumberColumnInfo;
+  if (options_.getRowNumberColumnInfo().has_value()) {
+    rowNumberColumnInfo = options_.getRowNumberColumnInfo().value();
+  } else {
+    rowNumberColumnInfo.insertPosition = numChildren;
+    rowNumberColumnInfo.name = "";
+  }
+  auto rowNumberColumnIndex = rowNumberColumnInfo.insertPosition;
+  auto rowNumberColumnName = rowNumberColumnInfo.name;
+  BOLT_CHECK_LE(rowNumberColumnIndex, numChildren);
   VectorPtr rowNumVector;
   if (rowVector->childrenSize() != numChildren) {
     BOLT_CHECK_EQ(rowVector->childrenSize(), numChildren + 1);
-    rowNumVector = rowVector->childAt(numChildren);
+    rowNumVector = rowVector->childAt(rowNumberColumnIndex);
     auto& rowType = rowVector->type()->asRow();
     auto names = rowType.names();
     auto types = rowType.children();
     auto children = rowVector->children();
     BOLT_DCHECK(!names.empty() && !types.empty() && !children.empty());
-    names.pop_back();
-    types.pop_back();
-    children.pop_back();
+    names.erase(names.begin() + rowNumberColumnIndex);
+    types.erase(types.begin() + rowNumberColumnIndex);
+    children.erase(children.begin() + rowNumberColumnIndex);
     result = std::make_shared<RowVector>(
         rowVector->pool(),
         ROW(std::move(names), std::move(types)),
@@ -371,9 +382,9 @@ void DwrfRowReader::readWithRowNumber(
   auto names = rowType.names();
   auto types = rowType.children();
   auto children = rowVector->children();
-  names.emplace_back();
-  types.push_back(BIGINT());
-  children.push_back(rowNumVector);
+  names.insert(names.begin() + rowNumberColumnIndex, rowNumberColumnName);
+  types.insert(types.begin() + rowNumberColumnIndex, BIGINT());
+  children.insert(children.begin() + rowNumberColumnIndex, rowNumVector);
   result = std::make_shared<RowVector>(
       rowVector->pool(),
       ROW(std::move(names), std::move(types)),

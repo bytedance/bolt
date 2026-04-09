@@ -156,6 +156,10 @@ TEST_F(DecimalVectorFunctionsTest, floor) {
       "floor(c0)",
       {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 2))});
   testDecimalExpr<TypeKind::BIGINT>(
+      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 0))},
+      "floor(c0)",
+      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 0))});
+  testDecimalExpr<TypeKind::BIGINT>(
       {makeFlatVector<int64_t>({0, 0, -1, 0}, DECIMAL(1, 0))},
       "floor(c0)",
       {makeFlatVector<int128_t>(

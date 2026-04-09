@@ -38,6 +38,7 @@ columnTypeNames() {
       {HiveColumnHandle::ColumnType::kPartitionKey, "PartitionKey"},
       {HiveColumnHandle::ColumnType::kRegular, "Regular"},
       {HiveColumnHandle::ColumnType::kSynthesized, "Synthesized"},
+      {HiveColumnHandle::ColumnType::kRowIndex, "RowIndex"},
   };
 }
 
