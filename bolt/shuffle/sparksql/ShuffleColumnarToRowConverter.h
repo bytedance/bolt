@@ -34,8 +34,14 @@
 #include <arrow/memory_pool.h>
 #include <arrow/type.h>
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 #include "bolt/buffer/Buffer.h"
 #include "bolt/row/CompactRow.h"
+#include "bolt/row/RowFormat.h"
+#include "bolt/row/dense/DenseRow.h"
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::shuffle::sparksql {
 static const uint32_t kSizeOfRowHeader = sizeof(int32_t);
@@ -81,11 +87,11 @@ class RowInternalBuffer final {
 class ShuffleColumnarToRowConverter {
  public:
   explicit ShuffleColumnarToRowConverter(
-      const bytedance::bolt::RowTypePtr& rowType,
-      bytedance::bolt::memory::MemoryPool* boltPool)
-      : boltPool_(boltPool) {
-    init(rowType);
-  }
+      const bytedance::bolt::RowTypePtr& /*rowType*/,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      bytedance::bolt::row::RowFormat rowFormat =
+          bytedance::bolt::row::RowFormat::Dense)
+      : boltPool_(boltPool), rowFormat_(rowFormat) {}
 
   class RowVectorWithStats {
     friend class ShuffleColumnarToRowConverter;
@@ -96,9 +102,26 @@ class ShuffleColumnarToRowConverter {
     }
 
    private:
-    std::shared_ptr<bytedance::bolt::row::CompactRow> compactRow;
-    int64_t numRows;
-    int64_t totalMemorySize;
+    // getWithStats() builds the serializer (size pass, once) and stashes it
+    // here; convert() then writes into the boltPool_-owned partition buffer at
+    // offsets computed from the per-row sizes. Exactly one of denseRow /
+    // compactRow is populated, per ShuffleColumnarToRowConverter::rowFormat_.
+    //
+    // Dense (default): DenseRow holds a shared_ptr to the source RowVector, so
+    //   the input stays alive across the two calls and the plan/sizes computed
+    //   in getWithStats() are reused for the write pass (no second size pass).
+    // Compact: plain CompactRow used exactly as elsewhere (no behavior change).
+    //   CompactRow's DecodedVector is non-owning, so compactInput keeps the
+    //   source alive across the two calls, and compactSizes caches the per-row
+    //   sizes computed in getWithStats() for the layout in convert().
+    std::optional<bytedance::bolt::row::DenseRow> denseRow;
+    // unique_ptr (not optional): CompactRow has a const member so it is not
+    // move-assignable, which RowVectorWithStats's move-assign needs.
+    std::unique_ptr<bytedance::bolt::row::CompactRow> compactRow;
+    bytedance::bolt::RowVectorPtr compactInput;
+    std::vector<size_t> compactSizes;
+    int64_t numRows{0};
+    int64_t totalMemorySize{0};
   };
 
   RowVectorWithStats getWithStats(
@@ -124,13 +147,11 @@ class ShuffleColumnarToRowConverter {
   }
 
  private:
-  void init(const bytedance::bolt::RowTypePtr& rowType);
-
-  int32_t fixedRowSize_ = 0;
   uint8_t* bufferAddress_;
   int64_t totalBufferSize_{0};
   size_t averageRowSize_{0};
   bytedance::bolt::memory::MemoryPool* boltPool_;
+  bytedance::bolt::row::RowFormat rowFormat_;
   std::vector<RowInternalBufferPtr> boltBuffers_;
 };
 

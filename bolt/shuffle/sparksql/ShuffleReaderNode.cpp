@@ -48,7 +48,8 @@ SparkShuffleReader::SparkShuffleReader(
       rowBufferPool_(std::make_shared<RowBufferPool>(arrowPool_.get())),
       row2ColConverter_(std::make_shared<ShuffleRowToColumnarConverter>(
           outputType_,
-          pool())) {
+          pool(),
+          shuffleReaderOptions_.rowFormat)) {
   isValidityBuffer_.reserve(outputType_->size());
   for (size_t i = 0; i < outputType_->size(); ++i) {
     switch (outputType_->childAt(i)->kind()) {

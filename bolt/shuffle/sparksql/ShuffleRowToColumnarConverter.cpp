@@ -31,18 +31,26 @@
 
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/row/CompactRow.h"
+#include "bolt/row/dense/DenseRow.h"
 #include "bolt/vector/arrow/Bridge.h"
 using namespace bytedance::bolt;
 namespace bytedance::bolt::shuffle::sparksql {
 ShuffleRowToColumnarConverter::ShuffleRowToColumnarConverter(
     const bytedance::bolt::RowTypePtr& rowType,
-    memory::MemoryPool* memoryPool)
-    : rowType_(rowType), pool_(memoryPool) {}
+    memory::MemoryPool* memoryPool,
+    bytedance::bolt::row::RowFormat rowFormat)
+    : rowType_(rowType), pool_(memoryPool), rowFormat_(rowFormat) {}
 
 RowVectorPtr ShuffleRowToColumnarConverter::convert(
     std::vector<std::string_view>& rows) {
-  auto vp = row::CompactRow::deserialize(rows, rowType_, pool_);
-  return std::dynamic_pointer_cast<RowVector>(vp);
+  // Shuffle's row framing is `[int32 rowSize | rowBytes]` and the
+  // partitioner guarantees no top-level row is null, so the wire here omits
+  // the per-row marker byte — paired with the write side's serialize(). The
+  // format must match what the writer used (rowFormat_).
+  if (rowFormat_ == row::RowFormat::Compact) {
+    return row::CompactRow::deserialize(rows, rowType_, pool_);
+  }
+  return row::DenseRow::deserialize(rows, rowType_, pool_);
 }
 
 RowVectorPtr ShuffleRowToColumnarConverter::convertToComposite(

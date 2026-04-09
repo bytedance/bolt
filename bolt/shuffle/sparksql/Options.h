@@ -36,6 +36,7 @@
 #include <bolt/common/base/Exceptions.h>
 #include <fmt/format.h>
 #include <cstdint>
+#include "bolt/row/RowFormat.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
@@ -109,6 +110,10 @@ struct ShuffleReaderOptions {
   std::string partitionShortName = "";
   int32_t forceShuffleWriterType = -1;
 
+  // On-wire row format for the row-based shuffle. Must match the writer side.
+  bytedance::bolt::row::RowFormat rowFormat =
+      bytedance::bolt::row::RowFormat::Dense;
+
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
 
@@ -171,6 +176,8 @@ struct ShuffleWriterOptions {
   int32_t recommendedColumn2RowSize = 0;
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
+  bytedance::bolt::row::RowFormat rowFormat =
+      bytedance::bolt::row::RowFormat::Dense;
   PartitionWriterOptions partitionWriterOptions{};
 };
 

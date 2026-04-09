@@ -129,7 +129,16 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
           pidArr, rv->size(), row2Partition_, partition2RowCount_));
       strippedRv = getStrippedRowVectorWrapper(*rv);
     }
-    auto rowVectorWithStats = rowConverter_->getWithStats(strippedRv);
+    // Building the serializer runs the size pass — that is conversion work, so
+    // it must count toward convertTime_ (it previously sat in an untimed gap
+    // and was attributed to nothing). The memory-reserve/spill below stays out
+    // of the timer. NanosecondTimer accumulates, so this scope and convert()
+    // below both add into convertTime_.
+    ShuffleColumnarToRowConverter::RowVectorWithStats rowVectorWithStats;
+    {
+      bytedance::bolt::NanosecondTimer timer(&convertTime_);
+      rowVectorWithStats = rowConverter_->getWithStats(strippedRv);
+    }
     if (!boltPool_->maybeReserve(rowVectorWithStats.getTotalMemorySize())) {
       if (boltPool_->reservedBytes() >= kMinMemLimit) {
         RETURN_NOT_OK(tryEvict());
@@ -160,8 +169,8 @@ arrow::Status BoltRowBasedSortShuffleWriter::initFromRowVector(
     const bytedance::bolt::RowVector& rv) {
   // rv is not stripped
   auto&& rowType = getStrippedRowVectorType(rv);
-  rowConverter_ =
-      std::make_unique<ShuffleColumnarToRowConverter>(rowType, boltPool_);
+  rowConverter_ = std::make_unique<ShuffleColumnarToRowConverter>(
+      rowType, boltPool_, options_.rowFormat);
   sortedRows_.resize(numPartitions_);
   partitionBytes_.resize(numPartitions_, 0);
   return arrow::Status::OK();
