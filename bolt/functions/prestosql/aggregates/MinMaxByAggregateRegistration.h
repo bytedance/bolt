@@ -54,7 +54,7 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
                            .argumentType("V")
                            .argumentType("C")
                            .build());
-  const std::vector<std::string> supportedCompareTypes = {
+  static constexpr std::array<const char*, 10> kSupportedCompareTypes = {
       "boolean",
       "tinyint",
       "smallint",
@@ -66,7 +66,7 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
       "date",
       "timestamp"};
 
-  for (const auto& compareType : supportedCompareTypes) {
+  for (const auto& compareType : kSupportedCompareTypes) {
     signatures.push_back(exec::AggregateFunctionSignatureBuilder()
                              .typeVariable("V")
                              .returnType("array(V)")
