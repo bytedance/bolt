@@ -376,9 +376,11 @@ void FlatVector<StringView>::copy(
         }
       }
     });
-    // Only set stats when copying all rows.
     if (rows.countSelected() == BaseVector::length_) {
       setStringViewStats(StringViewStats{totalBytes, maxLen});
+    } else {
+      // Partial copy invalidates any previously cached stats.
+      stringStats_.reset();
     }
 
     if (totalBytes > 0) {

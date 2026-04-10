@@ -366,13 +366,13 @@ void FlatVector<T>::copyValuesAndNulls(
   }
 
   if constexpr (std::is_same_v<T, StringView>) {
-    // Only set stats when copying all rows and stats were actually computed.
-    // The flat source path skips computation, leaving both at 0; use
-    // stringStatsMax > 0 to distinguish from actually-computed zero-totalBytes
-    // (all inline strings).
     if (kAllSelected && stringStatsMax > 0) {
+      // Stats were computed by the non-flat source path. Set them.
       this->setStringViewStats(
           StringViewStats{stringStatsTotal, stringStatsMax});
+    } else if (!kAllSelected) {
+      // Partial copy invalidates any previously cached stats.
+      this->stringStats_.reset();
     }
   }
 }
