@@ -366,7 +366,7 @@ void FlatVector<T>::copyValuesAndNulls(
   if constexpr (std::is_same_v<T, StringView>) {
     // Only set stats when copying all rows, otherwise stats would be
     // partial and misleading.
-    if (kAllSelected) {
+    if (kAllSelected && stringStatsTotal > 0) {
       this->setStringViewStats(
           StringViewStats{stringStatsTotal, stringStatsMax});
     }
