@@ -178,7 +178,8 @@ void FlatVector<T>::copyValuesAndNulls(
     mutableRawValues();
   }
 
-  // Used to track string stats for StringView when source is not flat encoding.
+  // Used to track string stats for StringView in non-flat source paths.
+  // Flat source path skips stats computation (best-effort: nullopt is fine).
   uint64_t stringStatsTotal = 0;
   uint64_t stringStatsMax = 0;
   const bool kAllSelected = rows.countSelected() == BaseVector::length_;
@@ -257,6 +258,7 @@ void FlatVector<T>::copyValuesAndNulls(
         }
       }
     }
+
   } else if (source->isConstantEncoding()) {
     if (source->isNullAt(0)) {
       BaseVector::addNulls(rows);
@@ -364,9 +366,11 @@ void FlatVector<T>::copyValuesAndNulls(
   }
 
   if constexpr (std::is_same_v<T, StringView>) {
-    // Only set stats when copying all rows, otherwise stats would be
-    // partial and misleading.
-    if (kAllSelected && stringStatsTotal > 0) {
+    // Only set stats when copying all rows and stats were actually computed.
+    // The flat source path skips computation, leaving both at 0; use
+    // stringStatsMax > 0 to distinguish from actually-computed zero-totalBytes
+    // (all inline strings).
+    if (kAllSelected && stringStatsMax > 0) {
       this->setStringViewStats(
           StringViewStats{stringStatsTotal, stringStatsMax});
     }
