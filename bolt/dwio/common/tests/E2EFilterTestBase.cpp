@@ -456,7 +456,7 @@ void E2EFilterTestBase::testMetadataFilterImpl(
   auto typedExpr = core::Expressions::inferTypes(
       untypedExpr, batches[0]->type(), leafPool_.get());
   auto metadataFilter =
-      std::make_shared<MetadataFilter>(*spec, *typedExpr, evaluator, true);
+      std::make_shared<MetadataFilter>(*spec, *typedExpr, evaluator);
   auto specA = spec->getOrCreateChild("a");
   auto specB = spec->getOrCreateChild("b");
   auto specC = spec->getOrCreateChild(common::Subfield("b.c"));
@@ -605,7 +605,7 @@ void E2EFilterTestBase::testMetadataFilter() {
     auto typedExpr = core::Expressions::inferTypes(
         untypedExpr, batches[0]->type(), leafPool_.get());
     auto metadataFilter =
-        std::make_shared<MetadataFilter>(*spec, *typedExpr, &evaluator, true);
+        std::make_shared<MetadataFilter>(*spec, *typedExpr, &evaluator);
     // Top level metadata filter is null, so leaf node should not be referenced
     // from ScanSpec.
     ASSERT_EQ(spec->childByName("a")->numMetadataFilters(), 0);

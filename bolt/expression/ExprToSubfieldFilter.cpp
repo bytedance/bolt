@@ -38,6 +38,11 @@ using namespace bytedance::bolt;
 namespace bytedance::bolt::exec {
 namespace {
 
+inline bool isMapSubscriptFunctionName(std::string_view name) {
+  return name == "subscript" || name == "presto.default.subscript" ||
+      name == "element_at" || name == "presto.default.element_at";
+}
+
 const core::CallTypedExpr* asCall(const core::ITypedExpr* expr) {
   return dynamic_cast<const core::CallTypedExpr*>(expr);
 }
@@ -101,10 +106,7 @@ std::optional<FunctionInfo> FunctionInfo::tryExtractFromExpr(
   }
 
   if (auto callExpr = asCall(expr.get())) {
-    if ((callExpr->name() == "subscript" ||
-         callExpr->name() == "presto.default.subscript" ||
-         callExpr->name() == "element_at" ||
-         callExpr->name() == "presto.default.element_at") &&
+    if (isMapSubscriptFunctionName(callExpr->name()) &&
         filterKeys.find(callExpr->name()) != filterKeys.end()) {
       return FunctionInfo{
           fieldExprOpt->type(), callExpr->type(), callExpr->name(), fieldDepth};
@@ -332,10 +334,7 @@ bool ExprToSubfieldFilterParser::toSubfield(
       // Skip over cast to extract the underlying field
     } else if (
         auto* callExpr = dynamic_cast<const core::CallTypedExpr*>(current)) {
-      if (callExpr->name() == "subscript" ||
-          callExpr->name() == "presto.default.subscript" ||
-          callExpr->name() == "element_at" ||
-          callExpr->name() == "presto.default.element_at") {
+      if (isMapSubscriptFunctionName(callExpr->name())) {
         // Skip over subscript to extract the underlying field
       } else {
         return false;
@@ -719,10 +718,7 @@ bool isSupportedMapSubscriptPushdownKey(const core::TypedExprPtr& fieldSide) {
     return true;
   }
 
-  if (callExpr->name() != "subscript" &&
-      callExpr->name() != "presto.default.subscript" &&
-      callExpr->name() != "element_at" &&
-      callExpr->name() != "presto.default.element_at") {
+  if (!isMapSubscriptFunctionName(callExpr->name())) {
     return true;
   }
 
@@ -768,10 +764,7 @@ combine(
           functionInfo->targetType,
           std::move(filter));
     } else if (
-        (functionInfo->functionName == "subscript" ||
-         functionInfo->functionName == "presto.default.subscript" ||
-         functionInfo->functionName == "element_at" ||
-         functionInfo->functionName == "presto.default.element_at") &&
+        isMapSubscriptFunctionName(functionInfo->functionName) &&
         functionInfo->fieldDepth == 1) {
       // For map subscript expressions, create appropriate filters
       // based on the map value type

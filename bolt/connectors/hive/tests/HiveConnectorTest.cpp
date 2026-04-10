@@ -37,6 +37,7 @@
 #include "bolt/connectors/hive/HiveDataSource.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/expression/tests/TestExprUtils.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
 using namespace bytedance::bolt::common;
@@ -56,18 +57,6 @@ std::vector<Subfield> makeSubfields(const std::vector<std::string>& paths) {
     subfields.emplace_back(path);
   }
   return subfields;
-}
-
-core::TypedExprPtr renameRootCall(
-    const core::TypedExprPtr& expr,
-    const std::string& name) {
-  auto call = std::dynamic_pointer_cast<const core::CallTypedExpr>(expr);
-  BOLT_CHECK_NOT_NULL(call);
-  return std::make_shared<core::CallTypedExpr>(
-      call->type(),
-      std::vector<core::TypedExprPtr>(
-          call->inputs().begin(), call->inputs().end()),
-      name);
 }
 
 class TestNameNormalizingParser : public exec::ExprToSubfieldFilterParser {
@@ -508,7 +497,8 @@ TEST_F(HiveConnectorTest, extractFiltersFromRemainingFilter) {
   ASSERT_EQ(filters.size(), 0);
 
   ensureTestNameNormalizingParserRegistered();
-  expr = renameRootCall(parseExpr("m['a'] > 0", rowType), "greaterthan");
+  expr =
+      exec::test::renameCall(parseExpr("m['a'] > 0", rowType), "greaterthan");
   filters.clear();
   remaining = extractFiltersFromRemainingFilter(expr, &evaluator, filters);
   ASSERT_TRUE(remaining);

@@ -217,15 +217,13 @@ HiveDataSource::HiveDataSource(
       runtimeStats_.get(),
       rowIndexColumns);
   if (remainingFilter) {
-    bool enableMapSubscriptFilter =
-        queryConfig.mapSubscriptFilterPushdownEnabled();
-    bool enableCastFilter = queryConfig.castFilterPushdownEnabled();
     metadataFilter_ = std::make_shared<common::MetadataFilter>(
         *scanSpec_,
         *remainingFilter,
         expressionEvaluator_,
-        enableMapSubscriptFilter,
-        enableCastFilter);
+        common::MetadataFilter::Options{
+            queryConfig.mapSubscriptFilterPushdownEnabled(),
+            queryConfig.castFilterPushdownEnabled()});
   }
 
   recalculateRepDefConf(readerOutputType_, queryConfig);

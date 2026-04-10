@@ -31,6 +31,7 @@
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include <gtest/gtest.h>
 #include "bolt/expression/Expr.h"
+#include "bolt/expression/tests/TestExprUtils.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/Expressions.h"
 #include "bolt/parse/ExpressionsParser.h"
@@ -49,16 +50,6 @@ void validateSubfield(
     ASSERT_TRUE(subfield.path()[i]);
     ASSERT_EQ(*subfield.path()[i], Subfield::NestedField(expectedPath[i]));
   }
-}
-
-core::CallTypedExprPtr renameCall(
-    const core::CallTypedExprPtr& call,
-    const std::string& name) {
-  return std::make_shared<core::CallTypedExpr>(
-      call->type(),
-      std::vector<core::TypedExprPtr>(
-          call->inputs().begin(), call->inputs().end()),
-      name);
 }
 
 class TestNameNormalizingParser : public ExprToSubfieldFilterParser {
@@ -322,7 +313,7 @@ TEST_F(ExprToSubfieldFilterTest, castIsNullFilter) {
 }
 
 TEST_F(ExprToSubfieldFilterTest, sparkGreaterThanWithMapSubscriptFilter) {
-  auto call = renameCall(
+  auto call = test::renameCall(
       parseCallExpr(
           "element_at(a, 'key') > 42", ROW({{"a", MAP(VARCHAR(), BIGINT())}})),
       "greaterthan");
@@ -334,7 +325,7 @@ TEST_F(ExprToSubfieldFilterTest, sparkGreaterThanWithMapSubscriptFilter) {
 }
 
 TEST_F(ExprToSubfieldFilterTest, sparkLessThanOrEqualWithCastFilter) {
-  auto call = renameCall(
+  auto call = test::renameCall(
       parseCallExpr("cast(a as bigint) <= 42", ROW({{"a", VARCHAR()}})),
       "lessthanorequal");
   auto [subfield, filter] = leafCallToSubfieldFilter(call);
