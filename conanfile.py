@@ -664,6 +664,14 @@ class BoltConan(ConanFile):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "celeborn-cpp-client::celeborn-cpp-client"
             )
+        if self.options.get_safe("enable_paimon"):
+            self.cpp_info.components["bolt_engine"].requires.extend(
+                [
+                    "paimon-cpp::core",
+                    "paimon-cpp::format_avro",
+                    "paimon-cpp::avro",
+                ]
+            )
 
         if self.options.get_safe("enable_testutil"):
             self.cpp_info.components["bolt_testutils"].libs = ["bolt_testutils"]
