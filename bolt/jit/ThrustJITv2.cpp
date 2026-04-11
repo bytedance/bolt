@@ -21,12 +21,22 @@
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Utils.h"
+
+#include <glog/logging.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <sstream>
 #include <vector>
 
 namespace bytedance::bolt::jit {
@@ -81,6 +91,46 @@ llvm::Expected<std::unique_ptr<ThrustJITv2>> ThrustJITv2::Create() {
   }
 
   result->jit_ = std::move(*jit);
+
+  // Add IR optimization pass: inline alwaysinline functions (pre-built kernels)
+  // and run basic optimizations on the inlined code.
+  result->jit_->getIRTransformLayer().setTransform(
+      [](llvm::orc::ThreadSafeModule TSM,
+         const llvm::orc::MaterializationResponsibility&)
+          -> llvm::Expected<llvm::orc::ThreadSafeModule> {
+        TSM.withModuleDo([](llvm::Module& M) {
+          // Module-level: inline alwaysinline functions
+          {
+            llvm::legacy::PassManager mpm;
+            mpm.add(llvm::createAlwaysInlinerLegacyPass());
+            mpm.run(M);
+          }
+
+          // Per-function: clean up inlined code
+          auto fpm = std::make_unique<llvm::legacy::FunctionPassManager>(&M);
+          fpm->add(llvm::createPromoteMemoryToRegisterPass());
+          fpm->add(llvm::createInstructionCombiningPass());
+          fpm->add(llvm::createGVNPass());
+          fpm->add(llvm::createCFGSimplificationPass());
+          fpm->doInitialization();
+          for (auto& func : M) {
+            if (!func.isDeclaration()) {
+              fpm->run(func);
+            }
+          }
+          // Dump final IR for debugging (enable with --v=1)
+          if (VLOG_IS_ON(1)) {
+            std::string irStr;
+            llvm::raw_string_ostream os(irStr);
+            M.print(os, nullptr);
+            VLOG(1) << "[JIT] Final IR for module '" << M.getModuleIdentifier()
+                    << "':\n"
+                    << irStr;
+          }
+        });
+        return std::move(TSM);
+      });
+
   return result;
 }
 
@@ -117,6 +167,7 @@ CompiledModuleSP ThrustJITv2::CompileModule(
     compilingCv_.notify_all();
   };
 
+  auto compileStart = std::chrono::steady_clock::now();
   auto llvmContext = std::make_unique<llvm::LLVMContext>();
   auto llvmModule = std::make_unique<llvm::Module>(funcName, *llvmContext);
   llvmModule->setDataLayout(jit_->getDataLayout());
@@ -127,7 +178,7 @@ CompiledModuleSP ThrustJITv2::CompileModule(
 
   std::vector<std::string> funcNames;
   for (auto& function : *llvmModule) {
-    if (!function.isDeclaration()) {
+    if (!function.isDeclaration() && !function.hasInternalLinkage()) {
       funcNames.emplace_back(function.getName().str());
     }
   }
@@ -206,6 +257,12 @@ CompiledModuleSP ThrustJITv2::CompileModule(
     compilingFunctions_.erase(funcName);
   }
   compilingCv_.notify_all();
+
+  auto compileMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - compileStart)
+                       .count();
+  LOG(INFO) << "[JIT] Compiled '" << funcName << "' in " << compileMs
+            << " ms, code size: " << codeSize << " bytes";
 
   return compiledModule;
 }

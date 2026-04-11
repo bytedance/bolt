@@ -58,6 +58,11 @@ jobs:
       - name: Generate Compile Database
         run: |
           make compile_db_all
+      - name: Generate JIT kernel bitcode header
+        # Only builds kernels.bc + kernels_bc.h, not the full project (~2s).
+        # Needed so clang-tidy can resolve #include "kernels_bc.h" in PrebuiltIR.cpp.
+        run: |
+          cmake --build _build/Release --target jit_kernels_bc
       - name: Run pre-commit hooks
         run: |
           pre-commit run --all-files
