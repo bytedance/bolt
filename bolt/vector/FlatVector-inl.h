@@ -217,7 +217,18 @@ void FlatVector<T>::copyValuesAndNulls(
         rows.applyToSelected([&](auto row) {
           auto sourceRow = toSourceRow[row];
           BOLT_DCHECK_GT(source->size(), sourceRow);
-          rawValues_[row] = sourceValues[sourceRow];
+          auto& value = sourceValues[sourceRow];
+          rawValues_[row] = value;
+          if constexpr (std::is_same_v<T, StringView>) {
+            if (kAllSelected) {
+              if (!value.isInline()) {
+                // Only count non-inline strings.
+                stringStatsTotal += value.size();
+              }
+              stringStatsMax =
+                  std::max(stringStatsMax, static_cast<uint64_t>(value.size()));
+            }
+          }
         });
       } else {
         if constexpr (copyAll) {
@@ -366,13 +377,23 @@ void FlatVector<T>::copyValuesAndNulls(
   }
 
   if constexpr (std::is_same_v<T, StringView>) {
+    // Always reset first: the target may be reused across multiple copy()
+    // calls, and stale stats from a previous source must not survive.
+    this->stringStats_.reset();
     if (kAllSelected && stringStatsMax > 0) {
-      // Stats were computed by the non-flat source path. Set them.
+      // Per-element stats were computed above. Apply them.
       this->setStringViewStats(
           StringViewStats{stringStatsTotal, stringStatsMax});
-    } else if (!kAllSelected) {
-      // Partial copy invalidates any previously cached stats.
-      this->stringStats_.reset();
+    } else if (kAllSelected && !toSourceRow && source->isFlatEncoding()) {
+      // Flat-to-flat identity copy (memcpy path) does not iterate elements,
+      // so stringStatsMax is 0. Reuse the source's stats when available.
+      // Only safe for identity copies; remapped copies (toSourceRow != null)
+      // select a subset, so source stats would over-count.
+      const auto& srcStats =
+          source->asUnchecked<FlatVector<StringView>>()->stringStats();
+      if (srcStats.has_value()) {
+        this->setStringViewStats(srcStats.value());
+      }
     }
   }
 }

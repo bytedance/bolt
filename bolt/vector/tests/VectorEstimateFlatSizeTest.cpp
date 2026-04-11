@@ -536,10 +536,9 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
 
   EXPECT_EQ(28800, makeDict(row)->retainedSize());
   EXPECT_EQ(2838, makeDict(row)->estimateFlatSize());
-  // Flattening a dict(RowVector) copies each child from the base flat vector,
-  // so StringViewStats is not computed (best-effort). Falls back to
-  // retainedSize-based estimate.
-  EXPECT_EQ(3295, flatten(makeDict(row))->estimateFlatSize());
+  // Flattening a dict(RowVector) copies each child from the base flat vector
+  // via toSourceRow. StringViewStats is computed per-element in this path.
+  EXPECT_EQ(2943, flatten(makeDict(row))->estimateFlatSize());
 
   // Flat struct with dictionary encoded fields. The string child is
   // dict-encoded, so StringViewStats is computed during copy, giving a more
@@ -551,4 +550,79 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
   EXPECT_EQ(29632, row->retainedSize());
   EXPECT_EQ(2837, row->estimateFlatSize());
   EXPECT_EQ(2943, flatten(row)->estimateFlatSize());
+}
+
+// FlatVector<StringView>::stringStats_ caches string size statistics used by
+// estimateFlatSize(). When a target vector is reused across multiple copy()
+// calls, stringStats_ must reflect the latest copy — not a previous one.
+//
+// This test copies from a dictionary (long strings), then overwrites with a
+// flat source (short inline strings, no toSourceRow). After the second copy,
+// stringStats_ must be cleared because the flat-to-flat identity path does
+// not compute per-element stats.
+TEST_F(VectorEstimateFlatSizeTest, copyFromFlatResetsStaleStringStats) {
+  const vector_size_t kSize = 100;
+
+  auto target =
+      BaseVector::create<FlatVector<StringView>>(VARCHAR(), kSize, pool());
+
+  // First copy: dictionary source with non-inline strings.
+  auto longStringAt = [&](auto row) {
+    return StringView(longStrings_[row % 3]);
+  };
+  auto base = makeFlatVector<StringView>(1'000, longStringAt);
+  auto indices = makeIndices(kSize, [](auto row) { return row * 2; });
+  auto dictSource = wrapInDictionary(indices, kSize, base);
+
+  SelectivityVector allRows(kSize);
+  target->copy(dictSource.get(), allRows, nullptr, true);
+
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_GT(target->stringStats()->totalBytes, 0);
+
+  // Second copy: flat source with inline strings, no toSourceRow.
+  auto flatSource = makeFlatVector<StringView>(kSize, shortStringAt);
+  target->copy(flatSource.get(), allRows, nullptr, true);
+
+  // stringStats_ must not retain values from the first (dictionary) copy.
+  EXPECT_FALSE(target->stringStats().has_value())
+      << "stringStats_ should be reset after flat-to-flat copy";
+}
+
+// Same scenario as above, but the second copy uses toSourceRow (remapped
+// copy from a flat source). The remapped path computes per-element stats,
+// so stringStats_ should be set to accurate values for the copied rows.
+TEST_F(VectorEstimateFlatSizeTest, remappedCopyFromFlatClearsStaleStats) {
+  const vector_size_t kSize = 100;
+
+  auto target =
+      BaseVector::create<FlatVector<StringView>>(VARCHAR(), kSize, pool());
+
+  // First copy: dictionary source with non-inline strings.
+  auto longStringAt = [&](auto row) {
+    return StringView(longStrings_[row % 3]);
+  };
+  auto base = makeFlatVector<StringView>(1'000, longStringAt);
+  auto indices = makeIndices(kSize, [](auto row) { return row * 2; });
+  auto dictSource = wrapInDictionary(indices, kSize, base);
+
+  SelectivityVector allRows(kSize);
+  target->copy(dictSource.get(), allRows, nullptr, true);
+
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_GT(target->stringStats()->totalBytes, 0);
+  auto prevEstimate = target->estimateFlatSize();
+
+  // Second copy: flat source with inline strings, via toSourceRow.
+  auto flatSource = makeFlatVector<StringView>(kSize, shortStringAt);
+  std::vector<vector_size_t> toSourceRow(kSize);
+  std::iota(toSourceRow.begin(), toSourceRow.end(), 0);
+
+  target->copy(flatSource.get(), allRows, toSourceRow.data(), true);
+
+  // All copied strings are inline, so totalBytes must be 0.
+  ASSERT_TRUE(target->stringStats().has_value());
+  EXPECT_EQ(target->stringStats()->totalBytes, 0)
+      << "All copied strings are inline; totalBytes should be 0";
+  EXPECT_LT(target->estimateFlatSize(), prevEstimate);
 }
