@@ -156,6 +156,7 @@ struct ShuffleWriterOptions {
   int32_t accumulateBatchMaxColumns = kDefaultAccumulateBatchMaxColumns;
   int32_t accumulateBatchMaxBatches = kDefaultAccumulateBatchMaxBatches;
   int32_t recommendedColumn2RowSize = 0;
+  double shuffleCheckRatio = 0;
   PartitionWriterOptions partitionWriterOptions{};
 };
 
