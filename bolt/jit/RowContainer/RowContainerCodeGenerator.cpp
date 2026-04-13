@@ -137,12 +137,11 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
           break;
       }
     }
-    if (cacheTypes->size() > 0) {
+    if (cacheTypes->size() > 0 && module->getUserData() == nullptr) {
       module->setUserData(static_cast<void*>(cacheTypes.release()));
       module->appendCleanCallback([mod = module.get()] {
         auto* cacheTypes = static_cast<std::vector<bytedance::bolt::TypePtr>*>(
             mod->getUserData());
-        cacheTypes->clear();
         delete cacheTypes;
         mod->setUserData(nullptr);
       });
