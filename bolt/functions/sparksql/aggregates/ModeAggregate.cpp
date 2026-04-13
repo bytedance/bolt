@@ -70,6 +70,11 @@ class ModeAggregate {
         : values{AlignedStlAllocator<std::pair<const T, int64_t>, 16>(
               allocator)} {}
 
+    explicit AccumulatorType(
+        HashStringAllocator* allocator,
+        ModeAggregate* /*fn*/)
+        : AccumulatorType(allocator) {}
+
     static constexpr bool is_fixed_size_ = false;
 
     void addInput(HashStringAllocator* /*allocator*/, arg_type<T> data) {
@@ -138,6 +143,11 @@ class StringModeAggregate {
     explicit AccumulatorType(HashStringAllocator* allocator)
         : values{AlignedStlAllocator<std::pair<const StringView, int64_t>, 16>(
               allocator)} {}
+
+    explicit AccumulatorType(
+        HashStringAllocator* allocator,
+        StringModeAggregate* /*fn*/)
+        : AccumulatorType(allocator) {}
 
     static constexpr bool is_fixed_size_ = false;
 
@@ -534,48 +544,56 @@ void registerModeAggregate(
         switch (inputType->kind()) {
           case TypeKind::BOOLEAN:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<bool>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<bool>>>(
+                step, argTypes, resultType);
           case TypeKind::TINYINT:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<int8_t>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<int8_t>>>(
+                step, argTypes, resultType);
           case TypeKind::SMALLINT:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<int16_t>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<int16_t>>>(
+                step, argTypes, resultType);
           case TypeKind::INTEGER:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<int32_t>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<int32_t>>>(
+                step, argTypes, resultType);
           case TypeKind::BIGINT:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<int64_t>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<int64_t>>>(
+                step, argTypes, resultType);
           case TypeKind::HUGEINT:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<int128_t>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<int128_t>>>(
+                step, argTypes, resultType);
           case TypeKind::REAL:
             return std::make_unique<SimpleAggregateAdapter<ModeAggregate<
                 float,
                 bytedance::bolt::util::floating_point::NaNAwareHash<float>,
                 bytedance::bolt::util::floating_point::NaNAwareEquals<float>>>>(
-                resultType);
+                step, argTypes, resultType);
           case TypeKind::DOUBLE:
             return std::make_unique<SimpleAggregateAdapter<ModeAggregate<
                 double,
                 bytedance::bolt::util::floating_point::NaNAwareHash<double>,
                 bytedance::bolt::util::floating_point::NaNAwareEquals<
-                    double>>>>(resultType);
+                    double>>>>(step, argTypes, resultType);
           case TypeKind::TIMESTAMP:
             return std::make_unique<
-                SimpleAggregateAdapter<ModeAggregate<Timestamp>>>(resultType);
+                SimpleAggregateAdapter<ModeAggregate<Timestamp>>>(
+                step, argTypes, resultType);
           case TypeKind::UNKNOWN:
             // Regitsers Mode function with unknown type, this needs hasher for
             // UnknownValue, we use folly::hasher for it.
             return std::make_unique<SimpleAggregateAdapter<ModeAggregate<
                 UnknownValue,
                 folly::hasher<UnknownValue>,
-                std::equal_to<UnknownValue>>>>(resultType);
+                std::equal_to<UnknownValue>>>>(step, argTypes, resultType);
           case TypeKind::VARCHAR:
           case TypeKind::VARBINARY:
             return std::make_unique<
-                SimpleAggregateAdapter<StringModeAggregate>>(resultType);
+                SimpleAggregateAdapter<StringModeAggregate>>(
+                step, argTypes, resultType);
           case TypeKind::ARRAY:
           case TypeKind::MAP:
           case TypeKind::ROW:
