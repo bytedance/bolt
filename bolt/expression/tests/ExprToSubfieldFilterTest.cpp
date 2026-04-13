@@ -31,10 +31,12 @@
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include <gtest/gtest.h>
 #include "bolt/expression/Expr.h"
+#include "bolt/expression/tests/TestExprUtils.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/Expressions.h"
 #include "bolt/parse/ExpressionsParser.h"
 #include "bolt/parse/TypeResolver.h"
+#include "bolt/type/filter/FilterBase.h"
 
 using bytedance::bolt::common::Subfield;
 
@@ -50,12 +52,48 @@ void validateSubfield(
   }
 }
 
+class TestNameNormalizingParser : public ExprToSubfieldFilterParser {
+ public:
+  std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>
+  leafCallToSubfieldFilter(
+      const core::CallTypedExpr& call,
+      core::ExpressionEvaluator* /*evaluator*/,
+      bool /*negated*/) override {
+    if (call.name() == "greaterthan" || call.name() == "lessthanorequal") {
+      return std::make_pair(
+          common::Subfield("fallback"), std::make_unique<common::IsNull>());
+    }
+    return std::nullopt;
+  }
+
+  core::CallTypedExprPtr normalizeCall(
+      const core::CallTypedExpr& call) override {
+    const auto& name = call.name();
+    std::string canonical;
+    if (name == "greaterthan") {
+      canonical = "gt";
+    } else if (name == "lessthanorequal") {
+      canonical = "lte";
+    } else {
+      return nullptr;
+    }
+
+    return std::make_shared<core::CallTypedExpr>(
+        call.type(),
+        std::vector<core::TypedExprPtr>(
+            call.inputs().begin(), call.inputs().end()),
+        canonical);
+  }
+};
+
 class ExprToSubfieldFilterTest : public testing::Test {
  public:
   static void SetUpTestSuite() {
     functions::prestosql::registerAllScalarFunctions();
     parse::registerTypeResolver();
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+    ExprToSubfieldFilterParser::registerParser(
+        std::make_shared<TestNameNormalizingParser>());
   }
 
   core::TypedExprPtr parseExpr(
@@ -240,6 +278,67 @@ TEST_F(ExprToSubfieldFilterTest, nonConstant) {
 
 TEST_F(ExprToSubfieldFilterTest, userError) {
   auto call = parseCallExpr("a = 1 / 0", ROW({{"a", BIGINT()}}));
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_FALSE(filter);
+}
+
+TEST_F(ExprToSubfieldFilterTest, castFilter) {
+  auto call = parseCallExpr("cast(a as bigint) = 42", ROW({{"a", VARCHAR()}}));
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_EQ(filter->kind(), common::FilterKind::kCast);
+}
+
+TEST_F(ExprToSubfieldFilterTest, mapSubscriptFilter) {
+  auto call = parseCallExpr(
+      "element_at(a, 'key') = 42", ROW({{"a", MAP(VARCHAR(), BIGINT())}}));
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_EQ(filter->kind(), common::FilterKind::kMapSubscript);
+}
+
+TEST_F(ExprToSubfieldFilterTest, castIsNullFilter) {
+  auto call =
+      parseCallExpr("cast(a as bigint) is null", ROW({{"a", VARCHAR()}}));
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_EQ(filter->kind(), common::FilterKind::kCast);
+}
+
+TEST_F(ExprToSubfieldFilterTest, sparkGreaterThanWithMapSubscriptFilter) {
+  auto call = test::renameCall(
+      parseCallExpr(
+          "element_at(a, 'key') > 42", ROW({{"a", MAP(VARCHAR(), BIGINT())}})),
+      "greaterthan");
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_EQ(filter->kind(), common::FilterKind::kMapSubscript);
+}
+
+TEST_F(ExprToSubfieldFilterTest, sparkLessThanOrEqualWithCastFilter) {
+  auto call = test::renameCall(
+      parseCallExpr("cast(a as bigint) <= 42", ROW({{"a", VARCHAR()}})),
+      "lessthanorequal");
+  auto [subfield, filter] = leafCallToSubfieldFilter(call);
+
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_EQ(filter->kind(), common::FilterKind::kCast);
+}
+
+TEST_F(ExprToSubfieldFilterTest, mapSubscriptFilterRequiresConstantKey) {
+  auto call = parseCallExpr(
+      "element_at(a, b) = 42",
+      ROW({{"a", MAP(VARCHAR(), BIGINT())}, {"b", VARCHAR()}}));
   auto [subfield, filter] = leafCallToSubfieldFilter(call);
 
   ASSERT_FALSE(filter);

@@ -43,13 +43,23 @@ class MetadataFilter {
  public:
   class LeafNode;
 
+  struct Options {
+    bool enableMapSubscriptFilter{true};
+    bool enableCastFilter{true};
+  };
+
   /// Construct from a ScanSpec and an expression.  The leaf filter nodes
   /// generated will be added to the corresponding position in ScanSpec.
   MetadataFilter(
       ScanSpec&,
       const core::ITypedExpr&,
+      core::ExpressionEvaluator*);
+
+  MetadataFilter(
+      ScanSpec&,
+      const core::ITypedExpr&,
       core::ExpressionEvaluator*,
-      bool enableMapSubscriptFilter);
+      Options options);
 
   /// Evaluate the filter results based on logical conjunctions tracked in this
   /// object.  `leafNodeResults` could be reused for intermediate results.  The

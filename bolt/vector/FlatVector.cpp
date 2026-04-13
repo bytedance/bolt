@@ -95,6 +95,29 @@ char* FlatVector<StringView>::getRawStringBufferWithSpace(
 }
 
 template <>
+const std::optional<StringViewStats>& FlatVector<StringView>::stringStats()
+    const {
+  return stringStats_;
+}
+
+template <>
+void FlatVector<StringView>::setStringViewStats(StringViewStats stats) {
+  stringStats_ = std::move(stats);
+}
+
+template <>
+uint64_t FlatVector<StringView>::estimateFlatSize() const {
+  if (stringStats_.has_value()) {
+    // stringStats_->totalBytes is the sum of non-inline StringView sizes.
+    // Inline strings are stored in the StringView struct itself,
+    // already covered by values_->size(). Add values + nulls overhead.
+    return stringStats_->totalBytes + (values_ ? values_->size() : 0) +
+        BaseVector::retainedSize();
+  }
+  return BaseVector::estimateFlatSize();
+}
+
+template <>
 void FlatVector<StringView>::prepareForReuse() {
   BaseVector::prepareForReuse();
 
@@ -113,10 +136,17 @@ void FlatVector<StringView>::prepareForReuse() {
       rawValues_[i] = StringView();
     }
   }
+
+  // Reset string stats since the vector is being reused with new data.
+  stringStats_.reset();
 }
 
 template <>
 void FlatVector<StringView>::set(vector_size_t idx, StringView value) {
+  BOLT_DCHECK(
+      !stringStats_.has_value(),
+      "Mutating FlatVector with StringStats set. "
+      "StringStats may become stale.");
   setStringViewValue(idx, value, false);
 }
 
@@ -150,6 +180,10 @@ template <>
 void FlatVector<StringView>::setNoCopy(
     const vector_size_t idx,
     const StringView& value) {
+  BOLT_DCHECK(
+      !stringStats_.has_value(),
+      "Mutating FlatVector with StringViewStats set. "
+      "StringViewStats may become stale.");
   BOLT_DCHECK_LT(idx, BaseVector::length_);
   ensureValues();
   BOLT_DCHECK(!values_->isView())
@@ -333,6 +367,7 @@ void FlatVector<StringView>::copy(
     }
 
     size_t totalBytes = 0;
+    uint64_t maxLen = 0;
     rows.applyToSelected([&](vector_size_t row) {
       const auto sourceRow = toSourceRow ? toSourceRow[row] : row;
       if (decoded.isNullAt(sourceRow)) {
@@ -342,6 +377,7 @@ void FlatVector<StringView>::copy(
           bits::clearNull(rawNulls, row);
         }
         auto v = decoded.valueAt<StringView>(sourceRow);
+        maxLen = std::max(maxLen, static_cast<uint64_t>(v.size()));
         if (v.isInline()) {
           rawValues_[row] = v;
         } else {
@@ -349,6 +385,12 @@ void FlatVector<StringView>::copy(
         }
       }
     });
+    if (rows.countSelected() == BaseVector::length_) {
+      setStringViewStats(StringViewStats{totalBytes, maxLen});
+    } else {
+      // Partial copy invalidates any previously cached stats.
+      stringStats_.reset();
+    }
 
     if (totalBytes > 0) {
       auto* buffer = getRawStringBufferWithSpace(totalBytes);
