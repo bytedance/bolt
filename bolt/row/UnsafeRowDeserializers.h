@@ -67,6 +67,9 @@ struct UnsafeRowDeserializer {
     std::vector<char*> dataPtrs;
     dataPtrs.reserve(data.size());
     for (const auto& row : data) {
+      if (!row.has_value()) {
+        BOLT_FAIL("UnsafeRowDeserializer::deserialize received nullopt");
+      }
       const char* ptr = row.value().data();
       dataPtrs.emplace_back(const_cast<char*>(ptr));
     }
