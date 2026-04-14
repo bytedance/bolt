@@ -710,7 +710,7 @@ class DecimalColumnWriter : public BaseColumnWriter {
       std::function<void(IndexBuilder&)> onRecordPosition)
       : BaseColumnWriter{context, type, sequence, std::move(onRecordPosition)},
         type_{type.type()},
-        scale_{getDecimalPrecisionScale(*type_).second},
+        scale_{static_cast<uint8_t>(getDecimalPrecisionScale(*type_).second)},
         isShortDecimal_{type_->isShortDecimal()},
         unscaledValues_{createDirectEncoder</*isSigned=*/true>(
             newStream(StreamKind::StreamKind_DATA),
