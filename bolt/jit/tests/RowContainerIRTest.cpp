@@ -21,7 +21,7 @@
 
 #include <gtest/gtest.h>
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
-#include "bolt/jit/ThrustJIT.h"
+#include "bolt/jit/ThrustJITv2.h"
 #include "bolt/jit/tests/JitTestBase.h"
 
 #include <cmath>
@@ -162,11 +162,11 @@ struct RowDataBuilder {
 class RowContainerJitTest : public ::testing::Test {
  public:
   RowContainerJitTest() {
-    jit = bytedance::bolt::jit::ThrustJIT::getInstance();
+    jit = bytedance::bolt::jit::ThrustJITv2::getInstance();
   };
 
  protected:
-  bytedance::bolt::jit::ThrustJIT* jit{nullptr};
+  bytedance::bolt::jit::ThrustJITv2* jit{nullptr};
 };
 
 using namespace bytedance::bolt::jit;

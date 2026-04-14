@@ -18,6 +18,7 @@
 
 #ifdef ENABLE_BOLT_JIT
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 
 #include <llvm/IR/BasicBlock.h>
@@ -25,10 +26,11 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/Alignment.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 
-#include "bolt/jit/common.h"
+#include "bolt/jit/CompiledModule.h"
 #include "bolt/type/Type.h"
 
 #include <cstdint>
@@ -111,8 +113,6 @@ class RowContainerCodeGenerator {
   const std::string ComplexTypeRowEqVectors = "jit_ComplexTypeRowEqVectors";
   const std::string DebugPrint = "jit_DebugPrint";
 
-  static const std::string builtInDeclarationsIR;
-
  protected:
   /// util functions
   std::string getLabel(size_t i);
@@ -132,70 +132,89 @@ class RowContainerCodeGenerator {
       size_t offset) {
     auto addr =
         builder.CreateConstInBoundsGEP1_64(builder.getInt8Ty(), row, offset);
-    auto cast_addr = builder.CreatePointerCast(addr, dataType->getPointerTo());
-    return builder.CreateLoad(dataType, cast_addr);
+    auto castAddr = builder.CreatePointerCast(addr, dataType->getPointerTo());
+    auto* load = builder.CreateLoad(dataType, castAddr);
+    load->setAlignment(llvm::Align(1));
+    return load;
+  };
+
+  inline llvm::Value* getHugeIntValueByPtr(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* row,
+      size_t offset) {
+    auto* i64Ty = builder.getInt64Ty();
+    auto* i128Ty = builder.getInt128Ty();
+
+    auto* lower64 = getValueByPtr(builder, row, i64Ty, offset);
+    auto* upper64 =
+        getValueByPtr(builder, row, i64Ty, offset + sizeof(int64_t));
+
+    auto* lower128 = builder.CreateZExt(lower64, i128Ty);
+    auto* upper128 = builder.CreateZExt(upper64, i128Ty);
+    auto* shiftedUpper = builder.CreateShl(upper128, 64);
+    return builder.CreateOr(shiftedUpper, lower128);
   };
 
   /// \param values:  pointers for left row and right row
   /// \param idx:  key index
   /// \param func:  compare function body
-  /// \param curr_blk: block for current key
-  /// \param next_blk: block for next key, passed in for branch jump
-  /// \param phi_inputs: for phi node (the return result of this function)
+  /// \param currBlk: block for current key
+  /// \param nextBlk: block for next key, passed in for branch jump
+  /// \param phiInputs: for phi node (the return result of this function)
   /// \return: block for value comparison
   virtual llvm::BasicBlock* genNullBitCmpIR(
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* next_blk,
-      llvm::BasicBlock* phi_blk,
-      PhiNodeInputs& phi_inputs);
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* nextBlk,
+      llvm::BasicBlock* phiBlk,
+      PhiNodeInputs& phiInputs);
 
   virtual llvm::BasicBlock* genFloatPointCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk);
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk);
 
   virtual llvm::BasicBlock* genIntegerCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk);
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk);
 
   virtual llvm::BasicBlock* genStringViewCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk);
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk);
 
   virtual llvm::BasicBlock* genTimestampCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk);
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk);
 
   virtual llvm::BasicBlock* genComplexCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values, // left row, right row
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk);
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk);
 
  protected:
   llvm::Module* llvm_module;

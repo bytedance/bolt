@@ -50,6 +50,7 @@ add_executable(
   SimpleVectorTest.cpp
   ToStringUtilityTest.cpp
   BiasVectorTest.cpp
+  VariantVectorTest.cpp
 )
 
 add_test(bolt_vector_test bolt_vector_test)

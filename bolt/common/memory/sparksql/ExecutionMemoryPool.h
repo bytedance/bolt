@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "bolt/common/memory/sparksql/DynamicMemoryQuotaManager.h"
 namespace bytedance::bolt::memory::sparksql {
@@ -49,6 +50,10 @@ class ExecutionMemoryPool final
 
   int64_t poolSize();
 
+  // The configured pool size (ExecutionMemoryPool::poolSize_) excluding dynamic
+  // extension from RSS.
+  int64_t configuredPoolSize() const;
+
   int64_t memoryFree();
 
   int64_t getMemoryUsageForTask(int64_t taskAttemptId);
@@ -60,6 +65,13 @@ class ExecutionMemoryPool final
   int64_t releaseAllMemoryForTask(int64_t taskAttemptId);
 
   int64_t numActiveTasks() const;
+
+  struct TaskExecutionMemoryUsage {
+    int64_t taskAttemptId{0};
+    int64_t usedBytes{0};
+  };
+
+  std::vector<TaskExecutionMemoryUsage> snapshotTaskMemoryUsage() const;
 
   int64_t maxTaskNumber() const {
     return maxTaskNumber_;
@@ -120,7 +132,7 @@ class ExecutionMemoryPool final
 
   bool triggerDynamicMemoryQuotaManager(bool notEnough, bool reachThreshold);
 
-  MemoryMutex lock_;
+  mutable MemoryMutex lock_;
   std::condition_variable cv_;
   std::unordered_map<int64_t, int64_t> memoryForTask_;
   std::optional<int64_t> poolSize_{};

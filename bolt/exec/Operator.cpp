@@ -468,7 +468,7 @@ OperatorStats Operator::stats(bool clear) {
   return stats;
 }
 
-uint32_t Operator::outputBatchRows(
+vector_size_t Operator::outputBatchRows(
     std::optional<uint64_t> averageRowSize) const {
   const auto& queryConfig = operatorCtx_->task()->queryCtx()->queryConfig();
 
@@ -484,12 +484,16 @@ uint32_t Operator::outputBatchRows(
       operatorType(),
       operatorId());
 
-  if (rowSize * queryConfig.maxOutputBatchRows() <
-      queryConfig.preferredOutputBatchBytes()) {
+  if (rowSize == 0) {
     return queryConfig.maxOutputBatchRows();
   }
-  return std::max<uint32_t>(
-      queryConfig.preferredOutputBatchBytes() / rowSize, 1);
+  const uint64_t batchSize =
+
+      queryConfig.preferredOutputBatchBytes() / rowSize;
+  if (batchSize > queryConfig.maxOutputBatchRows()) {
+    return queryConfig.maxOutputBatchRows();
+  }
+  return std::max<vector_size_t>(batchSize, 1);
 }
 
 int32_t Operator::getMaxReadBatchSize(

@@ -42,6 +42,7 @@ add_executable(
   TimestampTest.cpp
   TypeTest.cpp
   VariantTest.cpp
+  VariantTypeTest.cpp
 )
 
 add_test(bolt_type_test bolt_type_test)

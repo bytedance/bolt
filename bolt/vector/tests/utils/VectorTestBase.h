@@ -1055,6 +1055,9 @@ class VectorTestBase {
   std::shared_ptr<folly::Executor> executor_{
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency())};
+  std::shared_ptr<folly::Executor> spillExecutor_{
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::thread::hardware_concurrency())};
 };
 
 struct EmptyArray {

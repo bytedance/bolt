@@ -1034,6 +1034,7 @@ void Task::resume(std::shared_ptr<Task> self) {
 
   // Get the stats and free the resources of Drivers that were not on thread.
   for (auto& driver : offThreadDrivers) {
+    self->driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
   }
 }
@@ -1354,8 +1355,8 @@ void Task::removeDriver(std::shared_ptr<Task> self, Driver* driver) {
     if (self->numFinishedDrivers_ == self->numTotalDrivers_) {
       LOG(INFO) << "All drivers (" << self->numFinishedDrivers_
                 << ") finished for task " << self->taskId()
-                << " after running for " << self->timeSinceStartMsLocked()
-                << " ms.";
+                << " after running for "
+                << succinctMillis(self->timeSinceStartMsLocked());
     }
   }
   stateChangeNotifier.notify();
@@ -2063,7 +2064,7 @@ ContinueFuture Task::terminate(TaskState terminalState) {
 
     LOG(INFO) << "Terminating task " << taskId() << " with state "
               << taskStateString(state_) << " after running for "
-              << timeSinceStartMsLocked() << " ms.";
+              << succinctMillis(timeSinceStartMsLocked());
 
     taskCompletionNotifier.activate(
         std::move(taskCompletionPromises_), [&]() { onTaskCompletion(); });
@@ -2097,6 +2098,7 @@ ContinueFuture Task::terminate(TaskState terminalState) {
   // Get the stats and free the resources of Drivers that were not on
   // thread.
   for (auto& driver : offThreadDrivers) {
+    driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
   }
 
@@ -2502,10 +2504,29 @@ std::string Task::toString() const {
   }
 
   if (numRemainingDrivers > 0) {
-    out << "drivers:\n";
+    bool addedCaption{false};
     for (auto& driver : drivers_) {
       if (driver) {
+        if (!addedCaption) {
+          out << "drivers:\n";
+          addedCaption = true;
+        }
         out << driver->toString() << std::endl;
+      }
+    }
+  }
+
+  if (!driversClosedByTask_.empty()) {
+    bool addedCaption{false};
+    for (auto& driver : driversClosedByTask_) {
+      auto zombieDriver = driver.lock();
+      if (zombieDriver) {
+        if (!addedCaption) {
+          out << "zombie drivers:\n";
+          addedCaption = true;
+        }
+        out << zombieDriver->toString()
+            << ", refcount: " << zombieDriver.use_count() - 1 << std::endl;
       }
     }
   }

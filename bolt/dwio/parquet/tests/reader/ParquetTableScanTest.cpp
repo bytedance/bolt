@@ -29,6 +29,7 @@
  */
 
 #include <folly/init/Init.h>
+#include <simdjson.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -38,6 +39,8 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/functions/sparksql/VariantEncoding.h"
+#include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -47,12 +50,75 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::parquet;
 
+namespace {
+
+std::pair<std::string, std::string> encodeVariantJson(std::string_view json) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element doc;
+  auto error = parser.parse(json.data(), json.size()).get(doc);
+  BOLT_CHECK(!error, "Failed to parse JSON for VARIANT test data: {}", json);
+
+  functions::sparksql::variant::StringDictionary dict;
+  functions::sparksql::variant::SparkVariantEncoder::collectKeys(doc, dict);
+  dict.finalize();
+
+  std::string value;
+  functions::sparksql::variant::SparkVariantEncoder::encode(doc, dict, value);
+  return {std::move(value), dict.serialize()};
+}
+
+RowVectorPtr makeVariantParquetBatch(
+    memory::MemoryPool* pool,
+    const std::vector<int64_t>& groups,
+    const std::vector<std::string>& jsons) {
+  BOLT_CHECK_EQ(groups.size(), jsons.size());
+
+  auto groupVector = BaseVector::create(BIGINT(), groups.size(), pool);
+  auto valueVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto metadataVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto* flatGroupVector = groupVector->asUnchecked<FlatVector<int64_t>>();
+  auto* flatValueVector = valueVector->asUnchecked<FlatVector<StringView>>();
+  auto* flatMetadataVector =
+      metadataVector->asUnchecked<FlatVector<StringView>>();
+
+  std::vector<std::pair<std::string, std::string>> encoded;
+  encoded.reserve(jsons.size());
+  for (const auto& json : jsons) {
+    encoded.push_back(encodeVariantJson(json));
+  }
+
+  for (auto i = 0; i < groups.size(); ++i) {
+    flatGroupVector->set(i, groups[i]);
+    flatValueVector->set(i, StringView(encoded[i].first));
+    flatMetadataVector->set(i, StringView(encoded[i].second));
+  }
+
+  auto variantStorageType =
+      ROW({"value", "metadata"}, {VARBINARY(), VARBINARY()});
+  auto variantStorageVector = std::make_shared<RowVector>(
+      pool,
+      variantStorageType,
+      nullptr,
+      jsons.size(),
+      std::vector<VectorPtr>{valueVector, metadataVector});
+
+  return std::make_shared<RowVector>(
+      pool,
+      ROW({"g", "v"}, {BIGINT(), variantStorageType}),
+      nullptr,
+      groups.size(),
+      std::vector<VectorPtr>{groupVector, variantStorageVector});
+}
+
+} // namespace
+
 class ParquetTableScanTest : public HiveConnectorTestBase {
  protected:
   using OperatorTestBase::assertQuery;
 
   void SetUp() {
     registerParquetReaderFactory();
+    functions::sparksql::registerFunctions("");
 
     auto hiveConnector =
         connector::getConnectorFactory(connector::kHiveConnectorName)
@@ -475,6 +541,35 @@ TEST_F(ParquetTableScanTest, map) {
           }));
 
   assertSelectWithFilter({"map"}, {}, "", "SELECT map FROM tmp");
+}
+
+TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
+  auto file = TempFilePath::create();
+  WriterOptions writerOptions;
+  auto data = makeVariantParquetBatch(
+      pool(),
+      {1, 1, 2},
+      {R"({"a":1,"name":"x"})",
+       R"({"a":2,"name":"y"})",
+       R"({"a":3,"name":"z"})"});
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  auto logicalRowType = ROW({"g", "v"}, {BIGINT(), VARIANT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(logicalRowType)
+                  .project({"g", "cast(variant_get(v, '$.a') as bigint) AS a"})
+                  .singleAggregation({"g"}, {"sum(a) AS sum_a"})
+                  .orderBy({"g"}, false)
+                  .planNode();
+
+  auto results = AssertQueryBuilder(plan)
+                     .split(makeSplit(file->getPath()))
+                     .copyResults(pool());
+
+  auto expected = makeRowVector(
+      {"g", "sum_a"},
+      {makeFlatVector<int64_t>({1, 2}), makeFlatVector<int64_t>({3, 3})});
+  ASSERT_TRUE(assertEqualResults({expected}, {results}));
 }
 
 TEST_F(ParquetTableScanTest, nullMap) {

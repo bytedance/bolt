@@ -46,6 +46,7 @@ bolt_add_library(
   Statistics.cpp
   StringColumnReader.cpp
   StructColumnReader.cpp
+  VariantColumnReader.cpp
 )
 
 find_package(Arrow CONFIG REQUIRED)

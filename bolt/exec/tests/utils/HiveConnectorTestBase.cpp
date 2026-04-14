@@ -37,6 +37,8 @@
 #include "bolt/dwio/dwrf/writer/Writer.h"
 namespace bytedance::bolt::exec::test {
 
+using connector::hive::HiveConnectorSplitBuilder;
+
 HiveConnectorTestBase::HiveConnectorTestBase() {
   filesystems::registerLocalFileSystem();
 }
@@ -148,6 +150,7 @@ HiveConnectorTestBase::makeHiveConnectorSplits(
   // Add all the splits.
   for (int i = 0; i < splitCount; i++) {
     auto splitBuilder = HiveConnectorSplitBuilder(filePath)
+                            .connectorId(kHiveConnectorId)
                             .fileFormat(format)
                             .start(i * splitSize)
                             .length(splitSize);
@@ -216,6 +219,8 @@ HiveConnectorTestBase::makeHiveConnectorSplit(
     uint64_t start,
     uint64_t length) {
   return HiveConnectorSplitBuilder(filePath)
+      .connectorId(kHiveConnectorId)
+      .fileFormat(dwio::common::FileFormat::DWRF)
       .start(start)
       .length(length)
       .build();
@@ -229,6 +234,8 @@ HiveConnectorTestBase::makeHiveConnectorSplit(
     uint64_t start,
     uint64_t length) {
   return HiveConnectorSplitBuilder(filePath)
+      .connectorId(kHiveConnectorId)
+      .fileFormat(dwio::common::FileFormat::DWRF)
       .infoColumn("$file_size", fmt::format("{}", fileSize))
       .infoColumn("$file_modified_time", fmt::format("{}", fileModifiedTime))
       .start(start)

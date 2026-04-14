@@ -609,7 +609,7 @@ class Operator : public BaseRuntimeStatWriter {
   /// must not be negative. If the averageRowSize is 0 which is not advised,
   /// returns maxOutputBatchRows. If the averageRowSize is not given, returns
   /// preferredOutputBatchRows.
-  uint32_t outputBatchRows(
+  vector_size_t outputBatchRows(
       std::optional<uint64_t> averageRowSize = std::nullopt) const;
 
   // Return the number of rows for the output batch by considering the output

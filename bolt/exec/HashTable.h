@@ -388,9 +388,15 @@ class BaseHashTable {
     return rows_.get();
   }
 
+  HybridContainer* hybridData() const {
+    return hybridData_.get();
+  }
+
   /// Returns all the row containers of a composed hash table such as for hash
   /// join use.
   virtual std::vector<RowContainer*> allRows() const = 0;
+
+  virtual std::vector<HybridContainer*> allHybridContainers() const = 0;
 
   /// Static functions for processing internals. Public because used in
   /// structs that define probe and insert algorithms.
@@ -455,6 +461,8 @@ class BaseHashTable {
 
   std::vector<std::unique_ptr<VectorHasher>> hashers_;
   std::unique_ptr<RowContainer> rows_;
+
+  std::unique_ptr<HybridContainer> hybridData_{nullptr};
 
   // Time spent in build outside of the calling thread.
   CpuWallTiming offThreadBuildTiming_;
@@ -542,7 +550,8 @@ class HashTable : public BaseHashTable {
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-      bool enableJitRowEqVectors);
+      bool enableJitRowEqVectors,
+      bool hybridMode = false);
 
   HashTable(
       std::vector<std::unique_ptr<VectorHasher>>&& hashers,
@@ -555,7 +564,8 @@ class HashTable : public BaseHashTable {
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-      bool enableJitRowEqVectors);
+      bool enableJitRowEqVectors,
+      bool hybridMode = false);
 
   ~HashTable() override = default;
 
@@ -586,7 +596,8 @@ class HashTable : public BaseHashTable {
       HashMode mode,
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
-      bool jitRowEqVectors) {
+      bool jitRowEqVectors,
+      bool hybridMode = false) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
@@ -598,7 +609,8 @@ class HashTable : public BaseHashTable {
         minTableSizeForParallelJoinBuild,
         pool,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        hybridMode);
   }
 
   void groupProbe(HashLookup& lookup) override;
@@ -738,6 +750,8 @@ class HashTable : public BaseHashTable {
   }
 
   std::vector<RowContainer*> allRows() const override;
+
+  std::vector<HybridContainer*> allHybridContainers() const override;
 
   std::string toString() override;
 

@@ -227,10 +227,12 @@ std::string strToLowerCopy(const std::string& str);
 template <typename T>
 struct TypeAnalysis {
   void run(TypeAnalysisResults& results) {
-    // This should only handle primitives and OPAQUE.
+    // This should only handle primitives, OPAQUE, and VARIANT.
+    // VARIANT is a composite type physically but a leaf type in signatures.
     static_assert(
         SimpleTypeTrait<T>::isPrimitiveType ||
-        SimpleTypeTrait<T>::typeKind == TypeKind::OPAQUE);
+        SimpleTypeTrait<T>::typeKind == TypeKind::OPAQUE ||
+        SimpleTypeTrait<T>::typeKind == TypeKind::VARIANT);
     results.stats.concreteCount++;
     results.out << detail::strToLowerCopy(
         std::string(SimpleTypeTrait<T>::name));

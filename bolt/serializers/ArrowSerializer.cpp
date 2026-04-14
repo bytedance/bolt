@@ -811,6 +811,8 @@ std::string_view typeToEncodingName(const TypePtr& type) {
       return "MAP";
     case TypeKind::ROW:
       return isTimestampWithTimeZoneType(type) ? "LONG_ARRAY" : "ROW";
+    case TypeKind::VARIANT:
+      return "VARIANT";
     case TypeKind::UNKNOWN:
       return "BYTE_ARRAY";
     default:
@@ -897,6 +899,14 @@ static void ensureOffsetsSizesWritableDeep(
       auto row = std::static_pointer_cast<RowVector>(v);
       for (size_t i = 0; i < row->childrenSize(); ++i) {
         ensureOffsetsSizesWritableDeep(row->childAt(i), parentLen, nullptr);
+      }
+      break;
+    }
+
+    case bolt::VectorEncoding::Simple::VARIANT: {
+      auto variant = std::static_pointer_cast<VariantVector>(v);
+      for (size_t i = 0; i < variant->childrenSize(); ++i) {
+        ensureOffsetsSizesWritableDeep(variant->childAt(i), parentLen, nullptr);
       }
       break;
     }
@@ -1048,6 +1058,14 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
       for (size_t c = 0; c < rowv->childrenSize(); ++c) {
         bytes += estimateCellBytes(rowv->childAt(c), baseIndex);
       }
+      return bytes;
+    }
+
+    case TypeKind::VARIANT: {
+      auto variantv = static_cast<const VariantVector*>(base);
+      size_t bytes = 1; // variant validity
+      bytes += estimateCellBytes(variantv->valueChildVector(), baseIndex);
+      bytes += estimateCellBytes(variantv->metadataChildVector(), baseIndex);
       return bytes;
     }
 

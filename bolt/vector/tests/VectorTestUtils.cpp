@@ -29,6 +29,7 @@
  */
 
 #include "bolt/vector/tests/VectorTestUtils.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance::bolt::test {
 namespace {
 
@@ -120,6 +121,19 @@ void checkVectorFlagsClearedTyped<TypeKind::ROW>(
   }
 }
 
+template <>
+void checkVectorFlagsClearedTyped<TypeKind::VARIANT>(
+    const BaseVector& vector,
+    const SelectivityVector& asciiClearedRows,
+    const SelectivityVector& asciiRemainRows) {
+  checkBaseVectorFlagsCleared(vector);
+
+  auto* variantVector = vector.as<VariantVector>();
+  for (const auto& child : variantVector->children()) {
+    checkVectorFlagsCleared(*child, asciiClearedRows, asciiRemainRows);
+  }
+}
+
 // Check that data-dependent flags have been reset. If the asciiness flag
 // applies, check that the asciiness information is cleared at asciiClearedRows
 // and remains at asciiRemainRows.
@@ -184,6 +198,18 @@ void checkVectorFlagsSetTyped<TypeKind::ROW>(
 
   auto* rowVector = vector.as<RowVector>();
   for (const auto& child : rowVector->children()) {
+    checkVectorFlagsSet(*child, asciiSetRows);
+  }
+}
+
+template <>
+void checkVectorFlagsSetTyped<TypeKind::VARIANT>(
+    const BaseVector& vector,
+    const SelectivityVector& asciiSetRows) {
+  EXPECT_TRUE(vector.getNullCount().has_value());
+
+  auto* variantVector = vector.as<VariantVector>();
+  for (const auto& child : variantVector->children()) {
     checkVectorFlagsSet(*child, asciiSetRows);
   }
 }

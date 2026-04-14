@@ -90,7 +90,9 @@ void skipUnreadLengthsAndNulls(dwio::common::SelectiveColumnReader& reader) {
   }
   if (reader.fileType().type()->kind() == TypeKind::ARRAY) {
     reinterpret_cast<ListColumnReader*>(&reader)->skipUnreadLengths();
-  } else if (reader.fileType().type()->kind() == TypeKind::ROW) {
+  } else if (
+      reader.fileType().type()->kind() == TypeKind::ROW ||
+      reader.fileType().type()->kind() == TypeKind::VARIANT) {
     reinterpret_cast<StructColumnReader*>(&reader)->seekToEndOfPresetNulls();
   } else if (reader.fileType().type()->kind() == TypeKind::MAP) {
     reinterpret_cast<MapColumnReader*>(&reader)->skipUnreadLengths();

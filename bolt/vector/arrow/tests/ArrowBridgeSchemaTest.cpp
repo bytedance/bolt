@@ -32,6 +32,7 @@
 #include <arrow/c/bridge.h>
 #include <arrow/testing/gtest_util.h>
 #include <gtest/gtest.h>
+#include <string_view>
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -39,6 +40,23 @@
 #include "bolt/vector/arrow/Bridge.h"
 namespace bytedance::bolt::test {
 namespace {
+
+constexpr std::string_view kArrowExtensionNameKey = "ARROW:extension:name";
+constexpr std::string_view kSparkVariantExtensionName = "spark.variant";
+
+void appendMetadataInt32(std::string& metadata, int32_t value) {
+  metadata.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+std::string makeArrowMetadata(std::string_view key, std::string_view value) {
+  std::string metadata;
+  appendMetadataInt32(metadata, 1);
+  appendMetadataInt32(metadata, static_cast<int32_t>(key.size()));
+  metadata.append(key.data(), key.size());
+  appendMetadataInt32(metadata, static_cast<int32_t>(value.size()));
+  metadata.append(value.data(), value.size());
+  return metadata;
+}
 
 static void mockRelease(ArrowSchema*) {}
 
@@ -265,6 +283,28 @@ TEST_F(ArrowBridgeSchemaExportTest, nested) {
           }));
 }
 
+TEST_F(ArrowBridgeSchemaExportTest, variant) {
+  ArrowSchema arrowSchema;
+  exportToArrow(VARIANT(), arrowSchema);
+
+  EXPECT_STREQ("+s", arrowSchema.format);
+  ASSERT_NE(nullptr, arrowSchema.metadata);
+  ASSERT_EQ(2, arrowSchema.n_children);
+  ASSERT_NE(nullptr, arrowSchema.children);
+
+  EXPECT_STREQ("z", arrowSchema.children[0]->format);
+  EXPECT_STREQ("value", arrowSchema.children[0]->name);
+  EXPECT_STREQ("z", arrowSchema.children[1]->format);
+  EXPECT_STREQ("metadata", arrowSchema.children[1]->name);
+
+  auto roundTripped = importFromArrow(arrowSchema);
+  EXPECT_EQ(*VARIANT(), *roundTripped);
+
+  arrowSchema.release(&arrowSchema);
+  EXPECT_EQ(nullptr, arrowSchema.release);
+  EXPECT_EQ(nullptr, arrowSchema.private_data);
+}
+
 TEST_F(ArrowBridgeSchemaExportTest, constant) {
   testConstant(TINYINT(), "c");
   testConstant(INTEGER(), "i");
@@ -453,6 +493,39 @@ TEST_F(ArrowBridgeSchemaImportTest, complexTypes) {
       *testSchemaImportComplex("+s", {"s", "f"}, {"col1", "col2"}));
 }
 
+TEST_F(ArrowBridgeSchemaImportTest, variantExtensionMetadata) {
+  std::vector<ArrowSchema> schemas;
+  std::vector<ArrowSchema> mapSchemas;
+  std::vector<ArrowSchema*> schemaPtrs;
+  std::vector<ArrowSchema*> mapSchemaPtrs;
+
+  auto rowSchema = makeComplexArrowSchema(
+      schemas,
+      schemaPtrs,
+      mapSchemas,
+      mapSchemaPtrs,
+      "+s",
+      {"z", "z"},
+      {"value", "metadata"});
+  auto metadata =
+      makeArrowMetadata(kArrowExtensionNameKey, kSparkVariantExtensionName);
+  rowSchema.metadata = metadata.data();
+  EXPECT_EQ(*VARIANT(), *importFromArrow(rowSchema));
+
+  auto plainStruct = makeComplexArrowSchema(
+      schemas,
+      schemaPtrs,
+      mapSchemas,
+      mapSchemaPtrs,
+      "+s",
+      {"z", "z"},
+      {"value", "metadata"});
+  plainStruct.metadata = nullptr;
+  EXPECT_EQ(
+      *ROW({"value", "metadata"}, {VARBINARY(), VARBINARY()}),
+      *importFromArrow(plainStruct));
+}
+
 TEST_F(ArrowBridgeSchemaImportTest, unsupported) {
   EXPECT_THROW(testSchemaImport("C"), BoltUserError);
   EXPECT_THROW(testSchemaImport("S"), BoltUserError);
@@ -503,6 +576,7 @@ TEST_F(ArrowBridgeSchemaTest, roundtrip) {
   roundtripTest(BOOLEAN());
   roundtripTest(VARCHAR());
   roundtripTest(REAL());
+  roundtripTest(VARIANT());
   roundtripTest(ARRAY(DOUBLE()));
   roundtripTest(ARRAY(ARRAY(ARRAY(ARRAY(VARBINARY())))));
   roundtripTest(MAP(VARCHAR(), REAL()));

@@ -35,7 +35,7 @@
 #include "bolt/vector/ConstantVector.h"
 #include "expression/EvalCtx.h"
 
-using namespace ::facebook::bolt;
+using namespace ::bytedance::bolt;
 
 namespace {
 

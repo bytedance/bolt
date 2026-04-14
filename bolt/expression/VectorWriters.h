@@ -42,8 +42,28 @@
 #include "bolt/expression/StringWriter.h"
 #include "bolt/expression/UdfTypeResolver.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/Variant.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance::bolt::exec {
+
+class VariantWriter {
+ public:
+  VariantWriter(StringWriter<false>& value, StringWriter<false>& metadata)
+      : value(value), metadata(metadata) {}
+
+  StringWriter<false>& value;
+  StringWriter<false>& metadata;
+
+  void copy_from(const VariantValue& other) {
+    value.copy_from(other.value);
+    metadata.copy_from(other.metadata);
+  }
+
+  void operator=(const VariantValue& other) {
+    copy_from(other);
+  }
+};
 
 // This default is for scalar types.
 template <typename T, typename = void>
@@ -100,6 +120,54 @@ struct VectorWriter : public VectorWriterBase {
 
   vector_t* vector_;
   exec_out_t* data_;
+};
+
+template <typename T>
+struct VectorWriter<
+    T,
+    std::enable_if_t<std::is_same_v<T, Varchar> | std::is_same_v<T, Varbinary>>>
+    : public VectorWriterBase {
+  using vector_t = typename TypeToFlatVector<T>::type;
+  using exec_out_t = StringWriter<>;
+
+  void init(vector_t& vector, bool uniqueAndMutable = false) {
+    proxy_.vector_ = &vector;
+  }
+
+  void ensureSize(size_t size) override {
+    if (size > proxy_.vector_->size()) {
+      proxy_.vector_->resize(size, /*setNotNull*/ false);
+    }
+  }
+
+  VectorWriter() {}
+
+  exec_out_t& current() {
+    return proxy_;
+  }
+
+  void commitNull() {
+    proxy_.vector_->setNull(proxy_.offset_, true);
+  }
+
+  void commit(bool isSet) override {
+    // this code path is called when the slice is top-level
+    if (isSet) {
+      proxy_.finalize();
+    } else {
+      commitNull();
+    }
+    proxy_.prepareForReuse(isSet);
+  }
+
+  void setOffset(vector_size_t offset) override {
+    proxy_.offset_ = offset;
+  }
+
+  vector_t& vector() {
+    return *proxy_.vector_;
+  }
+  exec_out_t proxy_;
 };
 
 template <typename V>
@@ -360,53 +428,96 @@ struct VectorWriter<Row<T...>> : public VectorWriterBase {
   vector_t* rowVector_ = nullptr;
 };
 
-template <typename T>
-struct VectorWriter<
-    T,
-    std::enable_if_t<std::is_same_v<T, Varchar> | std::is_same_v<T, Varbinary>>>
-    : public VectorWriterBase {
-  using vector_t = typename TypeToFlatVector<T>::type;
-  using exec_out_t = StringWriter<>;
+template <>
+struct VectorWriter<Variant> : public VectorWriterBase {
+  using vector_t = VariantVector;
+  using exec_out_t = VariantWriter;
 
-  void init(vector_t& vector, bool uniqueAndMutable = false) {
-    proxy_.vector_ = &vector;
+  void init(vector_t& vector, const void* /*values*/ = nullptr) {
+    variantVector_ = &vector;
+    BOLT_CHECK(
+        vector.valueChildVector()->isFlatEncoding(),
+        "Variant value child must use flat encoding, got {}",
+        vector.valueChildVector()->encoding());
+    BOLT_CHECK(
+        vector.metadataChildVector()->isFlatEncoding(),
+        "Variant metadata child must use flat encoding, got {}",
+        vector.metadataChildVector()->encoding());
+    valueWriter_.init(
+        static_cast<FlatVector<StringView>&>(*vector.valueChildVector()));
+    metadataWriter_.init(
+        static_cast<FlatVector<StringView>&>(*vector.metadataChildVector()));
   }
 
-  void ensureSize(size_t size) override {
-    if (size > proxy_.vector_->size()) {
-      proxy_.vector_->resize(size, /*setNotNull*/ false);
-    }
+  void finish() override {
+    variantVector_ = nullptr;
+    valueWriter_.finish();
+    metadataWriter_.finish();
   }
 
-  VectorWriter() {}
+  VectorWriter() : proxy_(valueWriter_.proxy_, metadataWriter_.proxy_) {}
+
+  // proxy_ holds references to valueWriter_/metadataWriter_ members.
+  // Moving or copying would dangle those references.
+  VectorWriter(const VectorWriter&) = delete;
+  VectorWriter& operator=(const VectorWriter&) = delete;
+  VectorWriter(VectorWriter&&) = delete;
+  VectorWriter& operator=(VectorWriter&&) = delete;
 
   exec_out_t& current() {
     return proxy_;
   }
 
+  void ensureSize(size_t size) override {
+    if (size > variantVector_->size()) {
+      // VariantVector::resize() already resizes both children, so do this once
+      // via the parent to avoid redundant child resize calls.
+      variantVector_->resize(size, /*setNotNull*/ false);
+    }
+  }
+
+  void commit() {
+    valueWriter_.setOffset(offset_);
+    metadataWriter_.setOffset(offset_);
+    valueWriter_.commit(true);
+    metadataWriter_.commit(true);
+    variantVector_->setNull(offset_, false);
+  }
+
   void commitNull() {
-    proxy_.vector_->setNull(proxy_.offset_, true);
+    valueWriter_.setOffset(offset_);
+    metadataWriter_.setOffset(offset_);
+    valueWriter_.commit(false);
+    metadataWriter_.commit(false);
+    variantVector_->setNull(offset_, true);
   }
 
   void commit(bool isSet) override {
-    // this code path is called when the slice is top-level
-    if (isSet) {
-      proxy_.finalize();
+    if (LIKELY(isSet)) {
+      commit();
     } else {
       commitNull();
     }
-    proxy_.prepareForReuse(isSet);
   }
 
   void setOffset(vector_size_t offset) override {
-    proxy_.offset_ = offset;
+    offset_ = offset;
+    valueWriter_.setOffset(offset);
+    metadataWriter_.setOffset(offset);
   }
 
   vector_t& vector() {
-    return *proxy_.vector_;
+    return *variantVector_;
   }
+
+  vector_t* variantVector_ = nullptr;
+  VectorWriter<Varchar> valueWriter_;
+  VectorWriter<Varchar> metadataWriter_;
   exec_out_t proxy_;
 };
+
+template <>
+struct VectorWriter<VariantValue> : public VectorWriter<Variant> {};
 
 template <typename T>
 struct VectorWriter<T, std::enable_if_t<std::is_same_v<T, bool>>>

@@ -823,6 +823,38 @@ template <PrimitiveKind fromKind, PrimitiveKind toKind>
 class VectorConverter : public ConverterBase {
  public:
   virtual ~VectorConverter() = default;
+
+ private:
+  static constexpr bool isIntegerKind(PrimitiveKind kind) {
+    return (
+        kind == PrimitiveKind::TINYINT || kind == PrimitiveKind::SMALLINT ||
+        kind == PrimitiveKind::INTEGER || kind == PrimitiveKind::BIGINT);
+  }
+
+  static constexpr bool isFloatKind(PrimitiveKind kind) {
+    return kind == PrimitiveKind::REAL || kind == PrimitiveKind::DOUBLE;
+  }
+
+  static constexpr bool isDecimalKind(PrimitiveKind kind) {
+    return (
+        kind == PrimitiveKind::SHORT_DECIMAL ||
+        kind == PrimitiveKind::LONG_DECIMAL);
+  }
+
+  static constexpr bool kLegacySensitive = toKind == PrimitiveKind::STRING &&
+      (fromKind == PrimitiveKind::TIMESTAMP || isFloatKind(fromKind));
+
+  static constexpr bool kTruncateSensitive =
+      // integer -> boolean
+      (toKind == PrimitiveKind::BOOLEAN && isIntegerKind(fromKind)) ||
+      // string/float/decimal -> integer
+      (isIntegerKind(toKind) &&
+       (fromKind == PrimitiveKind::STRING || isFloatKind(fromKind) ||
+        isDecimalKind(fromKind))) ||
+      // float -> float
+      (isFloatKind(toKind) && isFloatKind(fromKind));
+
+ public:
   template <bool legacy, bool truncate>
   FLATTEN void convertWithPolicy(
       const SelectivityVector& rows,
@@ -880,20 +912,44 @@ class VectorConverter : public ConverterBase {
       convertWithPolicy<legacy, truncate>(
           rows, input, context, result, errorPolicy);
     } else {
-      bool legacy = context.execCtx()->queryCtx()->queryConfig().isLegacyCast();
-      bool truncate =
-          context.execCtx()->queryCtx()->queryConfig().isCastToIntByTruncate();
-      if (legacy && truncate) {
-        convertWithPolicy<true, true>(
-            rows, input, context, result, errorPolicy);
-      } else if (legacy && !truncate) {
-        convertWithPolicy<true, false>(
-            rows, input, context, result, errorPolicy);
-      } else if (!legacy && truncate) {
-        convertWithPolicy<false, true>(
-            rows, input, context, result, errorPolicy);
+      const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+
+      if constexpr (kLegacySensitive && kTruncateSensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (legacy && truncate) {
+          convertWithPolicy<true, true>(
+              rows, input, context, result, errorPolicy);
+        } else if (legacy && !truncate) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else if (!legacy && truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          // !legacy && !truncate
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kLegacySensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        if (legacy) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kTruncateSensitive) {
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
       } else {
-        // !legacy && !truncate
         convertWithPolicy<false, false>(
             rows, input, context, result, errorPolicy);
       }
