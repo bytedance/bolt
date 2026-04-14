@@ -199,6 +199,7 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
   }
 
   void assertSelectWithAssignments(
+      std::vector<std::shared_ptr<connector::ConnectorSplit>> splits,
       std::vector<std::string>&& outputColumnNames,
       const std::unordered_map<
           std::string,
@@ -208,7 +209,7 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     auto tableHandle = makeTableHandle({}, nullptr, "hive_table", rowType);
     auto plan =
         PlanBuilder().tableScan(rowType, tableHandle, assignments).planNode();
-    assertQuery(plan, splits_, sql);
+    assertQuery(plan, splits, sql);
   }
 
   void assertSelectWithAgg(
@@ -858,7 +859,7 @@ TEST_F(ParquetTableScanTest, rowIndex) {
               makeFlatVector<int64_t>(20, [](auto row) { return row; }),
               makeFlatVector<std::string>(
                   20, [filePath](auto /*row*/) { return filePath; }),
-	   }));
+          }));
   std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
       assignments;
   assignments["a"] = std::make_shared<connector::hive::HiveColumnHandle>(
@@ -879,12 +880,16 @@ TEST_F(ParquetTableScanTest, rowIndex) {
           BIGINT(),
           BIGINT());
 
-  assertSelectWithAssignments({makeSplit(
+  assertSelectWithAssignments(
+      {makeSplit(
           filePath,
           std::nullopt,
-          std::unordered_map<std::string, std::string>{{kPath, filePath}})}, {"a"}, assignments, "SELECT a FROM tmp");
+          std::unordered_map<std::string, std::string>{{kPath, filePath}})},
+      {"a"},
+      assignments,
+      "SELECT a FROM tmp");
   assertSelectWithAssignments(
-		  {makeSplit(
+      {makeSplit(
           filePath,
           std::nullopt,
           std::unordered_map<std::string, std::string>{{kPath, filePath}})},
@@ -892,7 +897,7 @@ TEST_F(ParquetTableScanTest, rowIndex) {
       assignments,
       "SELECT a, _tmp_metadata_row_index FROM tmp");
   assertSelectWithAssignments(
-{makeSplit(
+      {makeSplit(
           filePath,
           std::nullopt,
           std::unordered_map<std::string, std::string>{{kPath, filePath}})},
@@ -900,7 +905,7 @@ TEST_F(ParquetTableScanTest, rowIndex) {
       assignments,
       "SELECT _tmp_metadata_row_index, a FROM tmp");
   assertSelectWithAssignments(
-		  {makeSplit(
+      {makeSplit(
           filePath,
           std::nullopt,
           std::unordered_map<std::string, std::string>{{kPath, filePath}})},
@@ -925,7 +930,7 @@ TEST_F(ParquetTableScanTest, rowIndex) {
   filePath = getExampleFilePath("sample_with_rowindex.parquet");
   assertSelect({makeSplit(filePath)}, {"a"}, "SELECT a FROM tmp");
   assertSelectWithAssignments(
-		   {makeSplit(filePath)},
+      {makeSplit(filePath)},
       {"a", "_tmp_metadata_row_index"},
       assignments,
       "SELECT a, _tmp_metadata_row_index FROM tmp");
