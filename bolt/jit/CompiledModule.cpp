@@ -46,10 +46,10 @@ void CompiledModule::setCodeSize(size_t codeSize) {
 }
 
 void CompiledModule::setUserData(void* data) noexcept {
-  userData_ = data;
+  userData_.store(data, std::memory_order_release);
 }
 void* CompiledModule::getUserData() const noexcept {
-  return userData_;
+  return userData_.load(std::memory_order_acquire);
 }
 
 void CompiledModule::appendCleanCallback(std::function<void()> cleanCallback) {

@@ -18,6 +18,7 @@
 
 #ifdef ENABLE_BOLT_JIT
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -52,7 +53,7 @@ struct CompiledModule {
   size_t codeSize_{0};
   std::vector<std::function<void()>> cleanCallbacks_;
 
-  void* userData_{nullptr};
+  std::atomic<void*> userData_{nullptr};
 };
 
 using CompiledModuleSP = std::shared_ptr<CompiledModule>;
