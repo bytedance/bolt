@@ -137,7 +137,7 @@ class JsonToMapFunction : public exec::VectorFunction {
           return;
         }
         if (!doc.IsObject()) {
-          // Spark returns empty map for valid non-object JSON
+          // hiveudf returns empty map for valid non-object JSON
           // (null, number, boolean, string, array), not SQL NULL.
           resultWriter.commit();
           return;
