@@ -20,6 +20,7 @@
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/Rand.h"
 #include "bolt/functions/flinksql/String.h"
+
 namespace bytedance::bolt::functions {
 // If the function registration order is Presto, Spark, Flink,
 // then these Presto functions may be overwritten by Spark
@@ -81,11 +82,18 @@ static void registerJsonFunctions(const std::string& prefix) {
       json_str_to_array, prefix + "json_str_to_array");
 }
 
+extern void registerFlinkElementAtFunction(const std::string& name);
+
+static void registerArrayFunctions(const std::string& prefix) {
+  registerFlinkElementAtFunction(prefix + "element_at");
+}
+
 void registerFunctions(const std::string& prefix) {
   registerStringFunctions(prefix);
   registerDatetimeFunctions(prefix);
   registerMathFunctions(prefix);
   registerJsonFunctions(prefix);
+  registerArrayFunctions(prefix);
 }
 } // namespace flinksql
 } // namespace bytedance::bolt::functions

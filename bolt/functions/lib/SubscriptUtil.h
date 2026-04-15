@@ -187,12 +187,16 @@ class MapSubscript {
 /// - allowOutOfBound: if allowed, returns NULL for out of bound accesses; if
 ///   false, throws an exception.
 /// - indexStartsAtOne: whether indices start at zero or one.
+/// - nullOnNonConstantInvalidIndex: when true, any index < 1 (in 1-based mode)
+///   is treated as invalid. For constant indices this triggers an exception;
+///   for non-constant indices it returns NULL silently instead of throwing.
 template <
     bool allowNegativeIndices,
     bool nullOnNegativeIndices,
     bool allowOutOfBound,
     bool indexStartsAtOne,
-    bool isElementAt>
+    bool isElementAt,
+    bool nullOnNonConstantInvalidIndex = false>
 class SubscriptImpl : public exec::Subscript {
  public:
   explicit SubscriptImpl(bool allowCaching)
@@ -330,7 +334,13 @@ class SubscriptImpl : public exec::Subscript {
         const auto adjustedIndex = adjustIndex(
             originalIndex, isZeroSubscriptError, zeroBasedArrayIndex);
         if (isZeroSubscriptError) {
-          context.setBoltExceptionError(row, zeroSubscriptError());
+          if constexpr (nullOnNonConstantInvalidIndex) {
+            // Flink: non-constant invalid index returns NULL silently.
+            nullsBuilder.setNull(row);
+            rawIndices[row] = 0;
+          } else {
+            context.setBoltExceptionError(row, zeroSubscriptError());
+          }
           return;
         }
         const auto elementIndex = getIndex(
@@ -373,9 +383,19 @@ class SubscriptImpl : public exec::Subscript {
 
     // If array indices start at 1.
     if constexpr (indexStartsAtOne) {
-      if (UNLIKELY(index == 0)) {
-        isZeroSubscriptError = true;
-        return 0;
+      if constexpr (nullOnNonConstantInvalidIndex) {
+        // Flink: any index < 1 (including 0 and negative) is invalid.
+        // For constant indices this triggers an exception; for non-constant
+        // indices applyArrayTyped will return NULL instead.
+        if (UNLIKELY(index <= 0)) {
+          isZeroSubscriptError = true;
+          return 0;
+        }
+      } else {
+        if (UNLIKELY(index == 0)) {
+          isZeroSubscriptError = true;
+          return 0;
+        }
       }
 
       // If larger than zero, adjust it.
