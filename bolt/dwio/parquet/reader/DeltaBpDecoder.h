@@ -32,6 +32,10 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/Nulls.h"
+
+#include <folly/Varint.h>
+
 namespace bytedance::bolt::parquet {
 
 // DeltaBpDecoder is adapted from Apache Arrow:
@@ -89,6 +93,14 @@ class DeltaBpDecoder {
         return;
       }
     }
+  }
+
+  const char* bufferStart() {
+    return bufferStart_;
+  }
+
+  int64_t validValuesCount() {
+    return static_cast<int64_t>(totalValuesRemaining_);
   }
 
  private:
@@ -186,6 +198,7 @@ class DeltaBpDecoder {
         if (totalValueCount_ != 1) {
           initBlock();
         }
+        totalValuesRemaining_--;
         return value;
       } else {
         ++miniBlockIdx_;
@@ -214,7 +227,7 @@ class DeltaBpDecoder {
     valuesRemainingCurrentMiniBlock_--;
     totalValuesRemaining_--;
 
-    if (valuesRemainingCurrentMiniBlock_ == 0) {
+    if (valuesRemainingCurrentMiniBlock_ == 0 || totalValuesRemaining_ == 0) {
       bufferStart_ += bits::nbytes(deltaBitWidth_ * valuesPerMiniBlock_);
     }
     return value;
