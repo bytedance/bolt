@@ -65,6 +65,10 @@ class PaimonTableHandle : public ConnectorTableHandle {
     return tableName_;
   }
 
+  const std::string& name() const override {
+    return tableName_;
+  }
+
   folly::dynamic serialize() const override {
     folly::dynamic obj = folly::dynamic::object;
     obj["connectorId"] = connectorId();
@@ -74,8 +78,8 @@ class PaimonTableHandle : public ConnectorTableHandle {
   }
 
  private:
-  std::string tableName_;
-  std::string tablePath_;
+  const std::string tableName_;
+  const std::string tablePath_;
   std::unordered_map<std::string, std::string> tableProperties_;
 };
 

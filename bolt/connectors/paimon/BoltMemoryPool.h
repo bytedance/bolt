@@ -12,14 +12,10 @@ namespace bytedance::bolt::connector::paimon {
 
 class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
  public:
-  explicit BoltPaimonMemoryPool(std::shared_ptr<memory::MemoryPool> pool)
+  explicit BoltPaimonMemoryPool(memory::MemoryPool* const pool)
       : pool_(std::move(pool)) {}
 
   memory::MemoryPool* getBoltPool() const {
-    return pool_.get();
-  }
-
-  std::shared_ptr<memory::MemoryPool> getBoltPoolShared() const {
     return pool_;
   }
 
@@ -63,7 +59,7 @@ class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
   }
 
  private:
-  std::shared_ptr<memory::MemoryPool> pool_;
+  memory::MemoryPool* const pool_;
 };
 
 } // namespace bytedance::bolt::connector::paimon

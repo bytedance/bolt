@@ -140,6 +140,10 @@ class PaimonParquetReader : public ::paimon::FileFormat {
   CreateStatsExtractor(::ArrowSchema* schema) const override;
 };
 
+// Ensures that paimon's FileFormatFactory for "parquet" (backed by
+// bolt's native parquet reader) is registered
+void EnsurePaimonParquetFormatRegistered();
+
 } // namespace bytedance::bolt::connector::paimon
 
 namespace paimon {
@@ -155,5 +159,7 @@ class ParquetFileFormatFactory : public ::paimon::FileFormatFactory {
   ::paimon::Result<std::unique_ptr<::paimon::FileFormat>> Create(
       const std::map<std::string, std::string>& options) const override;
 };
+
+void ensureParquetFormatFactoryRegistered();
 
 } // namespace paimon

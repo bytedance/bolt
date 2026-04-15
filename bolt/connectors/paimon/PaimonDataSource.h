@@ -13,9 +13,8 @@
 namespace paimon {
 class BatchReader;
 class TableRead;
-class ReadContext;
-class ReadContextBuilder;
 class Split;
+class MemoryPool;
 } // namespace paimon
 
 namespace bytedance::bolt::connector::paimon {

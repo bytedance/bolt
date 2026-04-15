@@ -28,8 +28,9 @@ target_link_libraries(
          bolt_vector
          arrow::arrow
          Paimon::core
-    PRIVATE
         $<LINK_LIBRARY:WHOLE_ARCHIVE,Paimon::format_avro>
+        $<LINK_LIBRARY:WHOLE_ARCHIVE,Paimon::fs_local>
+    PRIVATE
         Paimon::libavrocpp
 )
 

@@ -12,6 +12,7 @@
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -78,10 +79,10 @@ class PaimonFilterPushdownTest : public testing::Test,
 
     for (int32_t row = 0; row < kRows; ++row) {
       tinyValues_[row] = static_cast<int8_t>(row);
-      smallValues_[row] = static_cast<int16_t>(100 + row * 2);
+      smallValues_[row] = static_cast<int16_t>(100 + (row * 2));
       intValues_[row] = row * 10;
-      bigintValues_[row] = 1000 + row * 100;
-      floatValues_[row] = static_cast<float>(row) * 0.5f;
+      bigintValues_[row] = 1000 + (row * 100);
+      floatValues_[row] = static_cast<float>(row) * 0.5F;
       doubleValues_[row] = static_cast<double>(row) * 1.25;
 
       if (row % 5 == 0) {
@@ -97,7 +98,7 @@ class PaimonFilterPushdownTest : public testing::Test,
       }
 
       timestampValues_[row] = Timestamp::fromMillis(
-          1'700'000'000'000 + static_cast<int64_t>(row) * 1000);
+          1'700'000'000'000 + (static_cast<int64_t>(row) * 1000));
     }
 
     auto tinyVec = makeFlatVector<int8_t>(
@@ -158,7 +159,7 @@ class PaimonFilterPushdownTest : public testing::Test,
   }
 
   void writeParquet() {
-    auto testInfo = testing::UnitTest::GetInstance()->current_test_info();
+    const auto* testInfo = testing::UnitTest::GetInstance()->current_test_info();
     auto filename =
         std::string("paimon_filter_pushdown_") + testInfo->name() + ".parquet";
     parquetPath_ = (tempDir_ / filename).string();
@@ -186,6 +187,9 @@ class PaimonFilterPushdownTest : public testing::Test,
       return RowVector::createEmpty(rowType_, leafPool_.get());
     }
     auto builder = std::move(rbRes).value();
+
+    auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+    builder->WithMemoryPool(paimonPool);
 
     auto readerRes = builder->Build(parquetPath_);
     EXPECT_TRUE(readerRes.ok());
@@ -245,7 +249,7 @@ class PaimonFilterPushdownTest : public testing::Test,
   }
 
   RowVectorPtr expectedByPredicate(
-      std::function<bool(vector_size_t)> predicate) {
+      const std::function<bool(vector_size_t)>& predicate) {
     std::vector<vector_size_t> indices;
     for (vector_size_t row = 0; row < data_->size(); ++row) {
       if (predicate(row)) {
@@ -375,9 +379,9 @@ TEST_F(PaimonFilterPushdownTest, IntNotInList) {
 
 TEST_F(PaimonFilterPushdownTest, FloatRange) {
   auto predicate = ::paimon::PredicateBuilder::GreaterThan(
-      4, "f", ::paimon::FieldType::FLOAT, ::paimon::Literal(5.0f));
+      4, "f", ::paimon::FieldType::FLOAT, ::paimon::Literal(5.0F));
   auto expected =
-      expectedByPredicate([&](auto row) { return floatValues_[row] > 5.0f; });
+      expectedByPredicate([&](auto row) { return floatValues_[row] > 5.0F; });
   auto actual = readWithPredicate(predicate);
   assertRowVectorsEqual(expected, actual);
 }
@@ -463,9 +467,9 @@ TEST_F(PaimonFilterPushdownTest, StringNotInList) {
 
 TEST_F(PaimonFilterPushdownTest, TimestampRange) {
   auto tsLower =
-      ::paimon::Timestamp::FromEpochMillis(1'700'000'000'000 + 5 * 1000);
+      ::paimon::Timestamp::FromEpochMillis(1'700'000'000'000 + (5 * 1000));
   auto tsUpper =
-      ::paimon::Timestamp::FromEpochMillis(1'700'000'000'000 + 8 * 1000);
+      ::paimon::Timestamp::FromEpochMillis(1'700'000'000'000 + (8 * 1000));
   auto predicate = ::paimon::PredicateBuilder::Between(
       8,
       "ts",
@@ -473,7 +477,7 @@ TEST_F(PaimonFilterPushdownTest, TimestampRange) {
       ::paimon::Literal(tsLower),
       ::paimon::Literal(tsUpper));
   auto expected = expectedByPredicate([&](auto row) {
-    auto millis = 1'700'000'000'000 + static_cast<int64_t>(row) * 1000;
+    auto millis = 1'700'000'000'000 + (static_cast<int64_t>(row) * 1000);
     return millis >= tsLower.GetMillisecond() &&
         millis <= tsUpper.GetMillisecond();
   });
@@ -506,7 +510,7 @@ TEST_F(PaimonFilterPushdownTest, OrSameColumn) {
       2, "i", ::paimon::FieldType::INT, ::paimon::Literal(20));
   auto orRes = ::paimon::PredicateBuilder::Or({left, right});
   ASSERT_TRUE(orRes.ok()) << orRes.status().message();
-  auto predicate = orRes.value();
+  const auto& predicate = orRes.value();
   auto expected = expectedByPredicate(
       [&](auto row) { return intValues_[row] == 10 || intValues_[row] == 20; });
   auto actual = readWithPredicate(predicate);
@@ -525,7 +529,7 @@ TEST_F(PaimonFilterPushdownTest, OrAcrossColumnsMetadataOnly) {
           ::paimon::FieldType::STRING, value.data(), value.size()));
   auto orRes = ::paimon::PredicateBuilder::Or({left, right});
   ASSERT_TRUE(orRes.ok()) << orRes.status().message();
-  auto predicate = orRes.value();
+  const auto& predicate = orRes.value();
 
   // Hive-parity: OR across columns is not pushed into ScanSpec filters.
   // Reader-level row filtering is not expected here; only metadata pruning may
@@ -547,7 +551,7 @@ TEST_F(PaimonFilterPushdownTest, AndAcrossColumns) {
           ::paimon::FieldType::STRING, value.data(), value.size()));
   auto andRes = ::paimon::PredicateBuilder::And({left, right});
   ASSERT_TRUE(andRes.ok()) << andRes.status().message();
-  auto predicate = andRes.value();
+  const auto& predicate = andRes.value();
   auto expected = expectedByPredicate([&](auto row) {
     return intValues_[row] == 70 && stringValues_[row].has_value() &&
         stringValues_[row].value() == "str_7";

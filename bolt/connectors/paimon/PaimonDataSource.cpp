@@ -11,14 +11,12 @@
 #include <paimon/table/source/split.h>
 #include <paimon/table/source/table_read.h>
 #include <paimon/type_fwd.h>
-#include <map>
-#include <memory>
-#include "bolt/connectors/paimon/PaimonBoltHdfsFileSystem.h"
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/type/Type.h"
-#include "connectors/paimon/BoltMemoryPool.h"
-#include "vector/FlatVector.h"
-#include "vector/arrow/Abi.h"
-#include "vector/arrow/Bridge.h"
+#include "bolt/vector/FlatVector.h"
+#include "bolt/vector/arrow/Abi.h"
+#include "bolt/vector/arrow/Bridge.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -26,25 +24,25 @@ PaimonDataSource::PaimonDataSource(
     const std::shared_ptr<const RowType>& outputType,
     const std::shared_ptr<ConnectorTableHandle>& tableHandle,
     const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
-    /*columnHandles*/,
+        columnHandles,
     const std::shared_ptr<ConnectorQueryCtx>& queryCtx,
     const core::QueryConfig& /*queryConfig*/)
     : outputType_(outputType),
       tableHandle_(std::dynamic_pointer_cast<PaimonTableHandle>(tableHandle)),
-      pool_(
-          queryCtx ? queryCtx->memoryPool()
-                   : bytedance::bolt::memory::memoryManager()
-                         ->addLeafPool("paimon-datasource")
-                         .get()) {
-  auto boltShared = bytedance::bolt::memory::memoryManager()->addLeafPool(
-      "paimon-datasource-inner");
-  paimonPool_ = std::make_shared<BoltPaimonMemoryPool>(boltShared);
+      pool_(queryCtx->memoryPool()) {
+  // Wrap the query-context pool for Paimon's native memory management.
+  paimonPool_ = std::make_shared<BoltPaimonMemoryPool>(pool_);
 
   ::paimon::ReadContextBuilder ctxBuilder(tableHandle_->tablePath());
   std::vector<std::string> columns;
   columns.reserve(outputType_->size());
-  for (size_t i = 0; i < outputType_->size(); ++i) {
-    columns.push_back(outputType_->nameOf(i));
+  for (const auto& outName : outputType_->names()) {
+    auto it = columnHandles.find(outName);
+    BOLT_CHECK(
+        it != columnHandles.end(),
+        "Could not find column handle with name: {}",
+        outName);
+    columns.push_back(it->second->name());
   }
   LOG(INFO) << "PaimonDataSource::PaimonDataSource(): Read schema: "
             << folly::join(", ", columns);
@@ -55,7 +53,6 @@ PaimonDataSource::PaimonDataSource(
 
 #ifdef BOLT_ENABLE_HDFS
   // Enable hdfs:// scheme resolution to Bolt-backed paimon filesystem.
-  EnsurePaimonBoltHdfsFileSystemRegistered();
   ctxBuilder.WithFileSystemSchemeToIdentifierMap(
       std::map<std::string, std::string>{{"hdfs", "bolt_hdfs"}});
 #endif
@@ -84,7 +81,17 @@ void PaimonDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
       std::dynamic_pointer_cast<PaimonConnectorSplit>(split);
   BOLT_CHECK_NOT_NULL(
       paimonConnectorSplit, "Split was not paimon connector split");
-  inputSplits_.push_back(paimonConnectorSplit->split_);
+
+  // Deserialize the split bytes into a ::paimon::Split
+  auto paimonSplit = ::paimon::Split::Deserialize(
+      paimonConnectorSplit->splitBytes_.data(),
+      paimonConnectorSplit->splitBytes_.length(),
+      paimonPool_);
+  BOLT_CHECK(
+      paimonSplit.ok(),
+      "Failed to deserialize Paimon split: {}",
+      paimonSplit.status().ToString());
+  inputSplits_.push_back(std::move(paimonSplit).value());
 }
 
 std::optional<RowVectorPtr> PaimonDataSource::next(
@@ -202,7 +209,19 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     // LOG(INFO) << newRowVec->toPrettyString();
     completedRows_ += newRowVec->size();
 
-    return newRowVec;
+    // Re-wrap with outputType_ to ensure internal alias names match upstream
+    // operators' expectations (same as the non-_VALUE_KIND path below).
+    std::vector<VectorPtr> outputColumns;
+    outputColumns.reserve(outputType_->size());
+    for (size_t i = 0; i < outputType_->size(); ++i) {
+      outputColumns.push_back(newRowVec->childAt(i));
+    }
+    return std::make_shared<RowVector>(
+        pool_,
+        outputType_,
+        nullptr,
+        newRowVec->size(),
+        std::move(outputColumns));
   }
 
   // Debug: Print the actual values being returned if no _VALUE_KIND field
@@ -219,7 +238,18 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   completedRows_ += row->size();
   LOG(INFO) << "Returning row vector of size " << row->size();
 
-  return row;
+  // Wrap the imported vector in a new RowVector that uses outputType_ as its
+  // type. The raw Arrow import carries real column names (e.g. "id", "name")
+  // from the Paimon schema, but upstream operators (FilterProject, ProjectNode)
+  // expect internal alias names (e.g. "n0_0", "n0_1") from outputType_. Re-wrap
+  // by index position to preserve the correct naming contract.
+  std::vector<VectorPtr> outputColumns;
+  outputColumns.reserve(outputType_->size());
+  for (size_t i = 0; i < outputType_->size(); ++i) {
+    outputColumns.push_back(row->childAt(i));
+  }
+  return std::make_shared<RowVector>(
+      pool_, outputType_, nullptr, row->size(), std::move(outputColumns));
 }
 
 } // namespace bytedance::bolt::connector::paimon

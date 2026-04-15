@@ -42,7 +42,7 @@ class PaimonConnectorFactory : public ConnectorFactory {
  public:
   static constexpr const char* kPaimonConnectorName{"paimon"};
 
-  PaimonConnectorFactory() : ConnectorFactory(kPaimonConnectorName) {}
+  PaimonConnectorFactory();
 
   std::shared_ptr<Connector> newConnector(
       const std::string& id,

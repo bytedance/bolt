@@ -10,6 +10,7 @@
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -67,11 +68,15 @@ class PaimonParquetReaderTest : public testing::Test,
   static void validateRead(
       const std::string& parquetPath,
       int32_t batchSize,
-      const RowVectorPtr& expectedData) {
+      const RowVectorPtr& expectedData,
+      memory::MemoryPool* pool) {
     PaimonParquetReader format({});
     auto rbRes = format.CreateReaderBuilder(batchSize);
     ASSERT_TRUE(rbRes.ok());
     std::unique_ptr<::paimon::ReaderBuilder> builder = std::move(rbRes).value();
+
+    auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(pool);
+    builder->WithMemoryPool(paimonPool);
 
     auto readerRes = builder->Build(parquetPath);
     ASSERT_TRUE(readerRes.ok());
@@ -173,7 +178,7 @@ TEST_F(PaimonParquetReaderTest, PrimitiveTypes) {
   writer->write(data);
   writer->close();
 
-  validateRead(path, 256, data);
+  validateRead(path, 256, data, leafPool_.get());
 }
 
 TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
@@ -192,7 +197,7 @@ TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 256, row);
+  validateRead(path, 256, row, leafPool_.get());
 }
 
 TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
@@ -215,7 +220,7 @@ TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 128, row);
+  validateRead(path, 128, row, leafPool_.get());
 }
 
 TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
@@ -244,7 +249,7 @@ TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
   writer->write(row);
   writer->close();
 
-  validateRead(path, 256, row);
+  validateRead(path, 256, row, leafPool_.get());
 }
 
 } // namespace

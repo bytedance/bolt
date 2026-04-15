@@ -14,6 +14,7 @@
 #include <paimon/table/source/plan.h>
 #include <paimon/table/source/table_scan.h>
 #include "bolt/common/memory/Memory.h"
+#include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -79,6 +80,7 @@ TEST_F(PaimonConnectorTest, TestTableScanBasic) {
   // Create Parquet data with unique id
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
   auto schema = ROW({"id"}, {BIGINT()});
 
   const int64_t kRows = 3;
@@ -129,8 +131,10 @@ TEST_F(PaimonConnectorTest, TestTableScanBasic) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -146,6 +150,7 @@ TEST_F(PaimonConnectorTest, TestTableScanAppendOnlyMultipleAppend) {
   // Create Parquet data with unique id
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
   auto schema = ROW({"id"}, {BIGINT()});
 
   const int64_t kRows = 6;
@@ -197,8 +202,10 @@ TEST_F(PaimonConnectorTest, TestTableScanAppendOnlyMultipleAppend) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -214,6 +221,7 @@ TEST_F(PaimonConnectorTest, TestTableScanPkNoOverwrite) {
   // Create Parquet data with unique id
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
   auto schema = ROW({"id"}, {BIGINT()});
 
   const int64_t kRows = 6;
@@ -265,8 +273,10 @@ TEST_F(PaimonConnectorTest, TestTableScanPkNoOverwrite) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -282,6 +292,7 @@ TEST_F(PaimonConnectorTest, TestTableScanDataEvolution) {
   // Create Parquet data with unique id and value
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
   auto schema =
       ROW({"id", "value", "length"}, {BIGINT(), VARCHAR(), INTEGER()});
 
@@ -347,8 +358,10 @@ TEST_F(PaimonConnectorTest, TestTableScanDataEvolution) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -364,6 +377,7 @@ TEST_F(PaimonConnectorTest, TestTableScanPartialUpdate) {
   // Create expected data
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
 
   auto rowType =
       ROW({"id", "name", "age", "salary"},
@@ -428,8 +442,10 @@ TEST_F(PaimonConnectorTest, TestTableScanPartialUpdate) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -445,6 +461,7 @@ TEST_F(PaimonConnectorTest, TestTableScanAggregate) {
   // Create expected data
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
 
   auto rowType = ROW({"id", "sales", "price"}, {BIGINT(), BIGINT(), DOUBLE()});
 
@@ -512,8 +529,10 @@ TEST_F(PaimonConnectorTest, TestTableScanAggregate) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
@@ -529,6 +548,7 @@ TEST_F(PaimonConnectorTest, TestTableScanDeduplicate) {
   // Create expected data
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
   auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
 
   auto rowType =
       ROW({"id", "value", "timestamp"}, {BIGINT(), VARCHAR(), BIGINT()});
@@ -598,8 +618,10 @@ TEST_F(PaimonConnectorTest, TestTableScanDeduplicate) {
   std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
   paimonConnectorSplits.reserve(paimonSplits.size());
   for (auto& paimonSplit : paimonSplits) {
-    paimonConnectorSplits.push_back(
-        std::make_shared<PaimonConnectorSplit>("paimon_test", paimonSplit));
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
   }
 
   // Assert query correctness and ordering
