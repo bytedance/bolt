@@ -418,7 +418,7 @@ class PageReader {
         nullsFromFastPath = dwio::common::useFastPath<Visitor, true>(visitor);
         auto dictVisitor = visitor.toStringDictionaryColumnVisitor();
         dictionaryIdDecoder_->readWithVisitor<true>(nulls, dictVisitor);
-      } else if (encoding_ == thrift::Encoding::DELTA_BYTE_ARRAY) {
+      } else if (isDeltaByteArray()) {
         nullsFromFastPath = false;
         deltaByteArrDecoder_->readWithVisitor<true>(nulls, visitor);
       } else {
@@ -429,7 +429,7 @@ class PageReader {
       if (isDictionary()) {
         auto dictVisitor = visitor.toStringDictionaryColumnVisitor();
         dictionaryIdDecoder_->readWithVisitor<false>(nullptr, dictVisitor);
-      } else if (encoding_ == thrift::Encoding::DELTA_BYTE_ARRAY) {
+      } else if (isDeltaByteArray()) {
         deltaByteArrDecoder_->readWithVisitor<false>(nulls, visitor);
       } else {
         stringDecoder_->readWithVisitor<false>(nulls, visitor);
