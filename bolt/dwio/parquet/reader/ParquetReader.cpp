@@ -502,16 +502,18 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
         }
       }
 
-      auto child = getParquetColumnInfo(
-          maxSchemaElementIdx,
-          maxRepeat,
-          maxDefine,
-          curSchemaIdx,
-          schemaIdx,
-          columnIdx,
-          childRequestedType,
-          requestedType);
-      children.push_back(std::move(child));
+      if (followChild) {
+        auto child = getParquetColumnInfo(
+            maxSchemaElementIdx,
+            maxRepeat,
+            maxDefine,
+            curSchemaIdx,
+            schemaIdx,
+            columnIdx,
+            childRequestedType,
+            requestedType);
+        children.push_back(std::move(child));
+      }
     }
     BOLT_CHECK(!children.empty());
 
