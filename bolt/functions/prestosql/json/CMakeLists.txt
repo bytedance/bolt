@@ -44,7 +44,6 @@ target_link_libraries(
   sonic-cpp::sonic-cpp
   Folly::folly
 )
-target_compile_features(bolt_functions_json PRIVATE cxx_std_20)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)

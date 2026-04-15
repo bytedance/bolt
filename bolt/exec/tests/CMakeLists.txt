@@ -125,8 +125,6 @@ add_executable(bolt_exec_unested_test Main.cpp UnnestTest.cpp)
 
 add_executable(bolt_exec_table_writer_test Main.cpp TableWriteTest.cpp)
 
-target_compile_features(bolt_exec_test PRIVATE cxx_std_20)
-
 add_executable(
   bolt_exec_infra_test
   AssertQueryBuilderTest.cpp

@@ -48,8 +48,6 @@ add_executable(
   StreamArenaTest.cpp
 )
 
-target_compile_features(bolt_memory_test PRIVATE cxx_std_20)
-
 if(NOT APPLE)
   find_package(jemalloc CONFIG REQUIRED)
 endif()

@@ -14,6 +14,5 @@
 # limitations under the License.
 
 bolt_add_library(bolt_token_extractor ITokenExtractor.cpp)
-target_compile_features(bolt_token_extractor PRIVATE cxx_std_20)
 
 target_link_libraries(bolt_token_extractor xxHash::xxhash Folly::folly)

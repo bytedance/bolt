@@ -122,8 +122,6 @@ bolt_add_library(
   WindowPartition.cpp
 )
 
-target_compile_features(bolt_exec PRIVATE cxx_std_20)
-
 set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)
 
 if(${ENABLE_BOLT_JIT})
