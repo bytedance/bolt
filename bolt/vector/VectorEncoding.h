@@ -52,7 +52,8 @@ enum class Simple {
   MAP,
   ARRAY,
   LAZY,
-  FUNCTION
+  FUNCTION,
+  VARIANT
 };
 
 inline std::ostream& operator<<(
@@ -79,6 +80,8 @@ inline std::ostream& operator<<(
       return out << "LAZY";
     case VectorEncoding::Simple::FUNCTION:
       return out << "FUNCTION";
+    case VectorEncoding::Simple::VARIANT:
+      return out << "VARIANT";
   }
   return out;
 }

@@ -29,6 +29,7 @@
  */
 
 #include <optional>
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/expression/VectorReaders.h"
 #include "bolt/expression/VectorWriters.h"
 #include "bolt/functions/Udf.h"
@@ -156,6 +157,49 @@ TEST_F(GenericWriterTest, ensureSizeDoesNotResize) {
   writer.init(*result);
   writer.ensureSize(1);
   EXPECT_EQ(result->size(), 6);
+}
+
+TEST_F(GenericWriterTest, variantRequiresFlatChildren) {
+  auto valueChild = BaseVector::create(VARBINARY(), 1, pool());
+  auto metadataChild = BaseVector::create(VARBINARY(), 1, pool());
+  auto wrappedValueChild = BaseVector::wrapInConstant(1, 0, valueChild);
+
+  auto variantVector = std::make_shared<VariantVector>(
+      pool(),
+      VARIANT(),
+      nullptr,
+      1,
+      std::vector<VectorPtr>{wrappedValueChild, metadataChild});
+
+  VectorWriter<Variant> writer;
+  BOLT_ASSERT_THROW(
+      writer.init(*variantVector),
+      "Variant value child must use flat encoding");
+}
+
+TEST_F(GenericWriterTest, variantWriterEnsureSize) {
+  auto result = VariantVector::create(pool(), VARIANT(), 0);
+
+  VectorWriter<Variant> writer;
+  writer.init(*result);
+  writer.ensureSize(2);
+
+  writer.setOffset(0);
+  writer.current().value.copy_from(StringView("value-0"));
+  writer.current().metadata.copy_from(StringView("meta-0"));
+  writer.commit(true);
+
+  writer.setOffset(1);
+  writer.current().value.copy_from(StringView("value-1"));
+  writer.current().metadata.copy_from(StringView("meta-1"));
+  writer.commit(true);
+  writer.finish();
+
+  EXPECT_EQ(2, result->size());
+  EXPECT_EQ(StringView("value-0"), result->valueAt(0).value);
+  EXPECT_EQ(StringView("meta-0"), result->valueAt(0).metadata);
+  EXPECT_EQ(StringView("value-1"), result->valueAt(1).value);
+  EXPECT_EQ(StringView("meta-1"), result->valueAt(1).metadata);
 }
 
 TEST_F(GenericWriterTest, varchar) {

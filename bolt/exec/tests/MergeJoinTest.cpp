@@ -34,12 +34,50 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/vector/BaseVector.h"
 
 #include "folly/experimental/EventCount.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+
+namespace {
+
+struct DictionaryJoinLeftRow {
+  std::string lUid;
+  std::string hoodieRecordKey;
+  int64_t c0;
+};
+
+struct DictionaryJoinRightRow {
+  std::string hoodieRecordKey;
+  std::string c1;
+  int64_t rOnly;
+};
+
+std::pair<
+    std::vector<DictionaryJoinLeftRow>,
+    std::vector<DictionaryJoinRightRow>>
+makeDictionaryJoinRegressionData() {
+  return {
+      {
+          {"0001", "0001:0000:0000", 101},
+          {"0001", "0001:0000:0000", 102},
+          {"0001", "0001:0000:0001", 103},
+          {"0002", "0002:0000:0000", 201},
+          {"0002", "0002:0000:0000", 202},
+          {"0002", "0002:0000:0001", 203},
+          {"0003", "0003:0000:0000", 301},
+      },
+      {
+          {"0001", "right_0001", 9001},
+          {"0002", "right_0002", 9002},
+          {"0003", "right_0003", 9003},
+      }};
+}
+
+} // namespace
 
 class MergeJoinTest : public HiveConnectorTestBase {
  protected:
@@ -71,6 +109,45 @@ class MergeJoinTest : public HiveConnectorTestBase {
       startRow += key->size();
     }
     return data;
+  }
+
+  RowVectorPtr makeDictionaryJoinLeftBatch(
+      const std::vector<DictionaryJoinLeftRow>& rows) {
+    return makeRowVector(
+        {"l_uid", "_hoodie_record_key", "c0"},
+        {
+            makeFlatVector<std::string>(
+                rows.size(), [&](auto row) { return rows[row].lUid; }),
+            makeFlatVector<std::string>(
+                rows.size(),
+                [&](auto row) { return rows[row].hoodieRecordKey; }),
+            makeFlatVector<int64_t>(
+                rows.size(), [&](auto row) { return rows[row].c0; }),
+        });
+  }
+
+  RowVectorPtr makeDictionaryJoinRightBatch(
+      const std::vector<DictionaryJoinRightRow>& rows,
+      bool dictionaryEncodeC1) {
+    auto key = makeFlatVector<std::string>(
+        rows.size(), [&](auto row) { return rows[row].hoodieRecordKey; });
+    auto c1Base = makeFlatVector<std::string>(
+        rows.size(), [&](auto row) { return rows[row].c1; });
+    auto rOnly = makeFlatVector<int64_t>(
+        rows.size(), [&](auto row) { return rows[row].rOnly; });
+
+    VectorPtr c1 = c1Base;
+    if (dictionaryEncodeC1) {
+      auto indices = allocateIndices(rows.size(), pool());
+      auto* rawIndices = indices->asMutable<vector_size_t>();
+      for (vector_size_t i = 0; i < rows.size(); ++i) {
+        rawIndices[i] = i;
+      }
+      c1 = BaseVector::wrapInDictionary(nullptr, indices, rows.size(), c1Base);
+    }
+
+    return makeRowVector(
+        {"_hoodie_record_key", "c1", "r_only"}, {key, c1, rOnly});
   }
 
   // Lazy vector loader class to ensure they get loaded in the correct order,
@@ -491,6 +568,43 @@ TEST_F(MergeJoinTest, keySkew) {
   testJoin<int32_t>(
       [](auto row) { return row; },
       [](auto row) { return row < 10 ? row : row + 10240; });
+}
+
+TEST_F(MergeJoinTest, dictionaryEncodedRightProjectionRegression) {
+  const auto [leftRows, rightRows] = makeDictionaryJoinRegressionData();
+
+  auto leftBatch = makeDictionaryJoinLeftBatch(leftRows);
+  auto rightBatch = makeDictionaryJoinRightBatch(rightRows, true);
+  auto rightFlatBatch = makeDictionaryJoinRightBatch(rightRows, false);
+
+  createDuckDbTable("t", {leftBatch});
+  createDuckDbTable("u", {rightFlatBatch});
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto rightPlan =
+      PlanBuilder(planNodeIdGenerator).values({rightBatch}).planNode();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values({leftBatch})
+                  .mergeJoin(
+                      {"l_uid"},
+                      {"_hoodie_record_key"},
+                      rightPlan,
+                      "",
+                      {"c0", "c1", "r_only"},
+                      core::JoinType::kLeft)
+                  .planNode();
+
+  // Regressions here used to pin all rows to the first dictionary value from
+  // the right-side c1 column when that projection was already dictionary
+  // encoded before entering MergeJoin.
+  assertQuery(
+      makeCursorParameters(plan, 4),
+      "SELECT t.c0, u.c1, u.r_only FROM t LEFT JOIN u ON t.l_uid = "
+      "u._hoodie_record_key");
+  assertQuery(
+      makeCursorParameters(plan, 1024),
+      "SELECT t.c0, u.c1, u.r_only FROM t LEFT JOIN u ON t.l_uid = "
+      "u._hoodie_record_key");
 }
 
 TEST_F(MergeJoinTest, aggregationOverJoin) {

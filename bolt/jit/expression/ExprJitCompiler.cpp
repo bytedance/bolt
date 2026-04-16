@@ -103,14 +103,14 @@ using BoltTypes = std::vector<std::shared_ptr<const Type>>;
 using JitIFunctionUPtr = std::unique_ptr<thrust::jit::IFunction>;
 
 struct FunctionResourceWrapper {
-  std::shared_ptr<thrust::jit::JitFunctionHolder> jit_holder;
+  std::shared_ptr<thrust::jit::JitFunctionHolder> jitHolder;
 };
 
 void bolt_call_function_wrapper(
     FunctionResourceWrapper wrapper,
     const std::vector<VectorPtr>& args,
     VectorPtr* result) {
-  if (wrapper.jit_holder == nullptr) {
+  if (wrapper.jitHolder == nullptr) {
     return;
     // TODO
   }
@@ -132,16 +132,16 @@ class ExprConverter {
       return convertConstVariant(constValue);
     } else if (
         auto fieldRef = dynamic_cast<const exec::FieldReference*>(expr)) {
-      auto field_idx = arg_idx_;
-      if (fields_arg_idx_.contains(fieldRef->name())) {
-        field_idx = fields_arg_idx_[fieldRef->name()];
+      auto fieldIdx = argIdx_;
+      if (fieldsArgIdx_.contains(fieldRef->name())) {
+        fieldIdx = fieldsArgIdx_[fieldRef->name()];
       } else {
-        field_idx = arg_idx_++;
-        fields_arg_idx_[fieldRef->name()] = field_idx;
+        fieldIdx = argIdx_++;
+        fieldsArgIdx_[fieldRef->name()] = fieldIdx;
       }
 
       auto r = std::make_shared<thrust::jit::FieldRefExpr>(
-          convertType(fieldRef->type()), field_idx, fieldRef->name());
+          convertType(fieldRef->type()), fieldIdx, fieldRef->name());
       return std::move(r);
     } else if (auto switchExpr = dynamic_cast<const exec::SwitchExpr*>(expr)) {
       BOLT_UNSUPPORTED("Unsupported");
@@ -154,11 +154,11 @@ class ExprConverter {
 
       thrust::jit::ExprPtr left = children[0];
       for (size_t i = 1; i < children.size(); i++) {
-        auto jit_typed_func =
+        auto jitTypedFunc =
             convertFunction(expr->name(), {BOOLEAN(), BOOLEAN()}, BOOLEAN());
-        std::vector<thrust::jit::ExprPtr> new_children{left, children[i]};
+        std::vector<thrust::jit::ExprPtr> newChildren{left, children[i]};
         left = std::make_shared<thrust::jit::FuncExpr>(
-            std::move(jit_typed_func), new_children);
+            std::move(jitTypedFunc), newChildren);
       }
 
       return left;
@@ -172,11 +172,11 @@ class ExprConverter {
 
       // TODO: some names may need to be mapped.
       auto&& name = expr->name();
-      auto jit_typed_func =
+      auto jitTypedFunc =
           convertFunction(name, getInputsTypes(expr), call->type());
 
       return std::make_shared<thrust::jit::FuncExpr>(
-          std::move(jit_typed_func), children);
+          std::move(jitTypedFunc), children);
     }
     // TODO cast
 
@@ -231,18 +231,18 @@ class ExprConverter {
   // type automatically.
   JitIFunctionUPtr convertFunction(
       const std::string& name,
-      const BoltTypes& args_type,
+      const BoltTypes& argsType,
       const TypePtr& resultType = nullptr) {
-    JitTypes args_jit_types;
-    for (auto&& t : args_type) {
-      args_jit_types.emplace_back(convertType(t));
+    JitTypes argsJitTypes;
+    for (auto&& t : argsType) {
+      argsJitTypes.emplace_back(convertType(t));
     }
 
     JitTypePtr resultJitType =
         (resultType == nullptr ? nullptr : convertType(resultType));
 
     return thrust::jit::MakeFunction(
-        name, std::move(args_jit_types), std::move(resultJitType));
+        name, std::move(argsJitTypes), std::move(resultJitType));
   }
 
   thrust::jit::ExprPtr convertTypedExprToJitExpr(
@@ -256,11 +256,11 @@ class ExprConverter {
         auto call = dynamic_cast<const core::CallTypedExpr*>(expr.get())) {
       // TODO: some names need to be mapped.
       auto name = call->name();
-      std::vector<TypePtr> inputs_types;
+      std::vector<TypePtr> inputTypes;
       for (auto&& input : expr->inputs()) {
-        inputs_types.emplace_back(input->type());
+        inputTypes.emplace_back(input->type());
       }
-      auto jit_typed_func = convertFunction(name, inputs_types, expr->type());
+      auto jitTypedFunc = convertFunction(name, inputTypes, expr->type());
 
       std::vector<thrust::jit::ExprPtr> children;
       for (auto&& child : expr->inputs()) {
@@ -268,7 +268,7 @@ class ExprConverter {
       }
       // type comes from func
       return std::make_shared<thrust::jit::FuncExpr>(
-          std::move(jit_typed_func), children);
+          std::move(jitTypedFunc), children);
     } else if (
         auto access =
             dynamic_cast<const core::FieldAccessTypedExpr*>(expr.get())) {
@@ -300,11 +300,11 @@ class ExprConverter {
   }
 
   std::vector<TypePtr> getInputsTypes(const exec::Expr* expr) {
-    std::vector<TypePtr> inputs_types;
+    std::vector<TypePtr> inputTypes;
     for (auto&& input : expr->inputs()) {
-      inputs_types.emplace_back(input->type());
+      inputTypes.emplace_back(input->type());
     }
-    return inputs_types;
+    return inputTypes;
   }
 
   thrust::jit::ExprPtr convertConstVariant(const exec::ConstantExpr* expr) {
@@ -394,8 +394,8 @@ class ExprConverter {
   }
 
  private:
-  std::map<std::string, int32_t> fields_arg_idx_;
-  int32_t arg_idx_{0};
+  std::map<std::string, int32_t> fieldsArgIdx_;
+  int32_t argIdx_{0};
 };
 
 JitBoltVectorFunction compileExprToJitVectorFunc(const exec::Expr* expr) {
@@ -425,16 +425,16 @@ JitBoltVectorFunction compileExprToJitVectorFunc(const exec::Expr* expr) {
       jitMetas.emplace_back(std::move(jitMeta));
     }
 
-    auto jit_resource_holder =
+    auto jitResourceHolder =
         thrust::jit::compileExprForVector(jitExpr.get(), jitMetas);
 
     result.jitFunc = (JitBoltVectorFunction::JitedFuncAddress)
-                         jit_resource_holder->getFunction();
+                         jitResourceHolder->getFunction();
 
     // std::function<void(const std::vector<VectorPtr>& args, VectorPtr*
     // result)> func;
     FunctionResourceWrapper wrapper;
-    wrapper.jit_holder = jit_resource_holder;
+    wrapper.jitHolder = jitResourceHolder;
     result.func = std::bind(
         bolt_call_function_wrapper,
         wrapper,

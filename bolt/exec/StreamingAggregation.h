@@ -98,7 +98,7 @@ class StreamingAggregation : public Operator {
   void initializeAggregates(uint32_t numKeys);
 
   /// Maximum number of rows in the output batch.
-  const uint32_t outputBatchSize_;
+  const vector_size_t outputBatchSize_;
 
   // Will hold on accept new input if groups_ size large than
   // groupNumberThreshold_

@@ -34,6 +34,7 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::exec::test {
+using connector::hive::HiveConnectorSplitBuilder;
 
 class AssertQueryBuilderTest : public HiveConnectorTestBase {};
 
@@ -121,6 +122,8 @@ TEST_F(AssertQueryBuilderTest, hiveSplits) {
           .planNode(),
       duckDbQueryRunner_)
       .split(HiveConnectorSplitBuilder(file->path)
+                 .connectorId(kHiveConnectorId)
+                 .fileFormat(dwio::common::FileFormat::DWRF)
                  .partitionKey("ds", "2022-05-10")
                  .build())
       .assertResults(

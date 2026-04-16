@@ -28,116 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
-using namespace bytedance::bolt;
-using namespace bytedance::bolt::test;
-using namespace bytedance::bolt::functions::test;
+#include "bolt/functions/lib/tests/SliceTestBase.h"
+#include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 
+namespace bytedance::bolt::functions::prestosql {
 namespace {
 
-class SliceTest : public FunctionBaseTest {
+class SliceTest : public test::SliceTestBase {
  protected:
   static const vector_size_t kVectorSize{1000};
-
-  void testSlice(
-      const std::string& expression,
-      const std::vector<VectorPtr>& parameters,
-      const ArrayVectorPtr& expectedArrayVector) {
-    auto result = evaluate<ArrayVector>(expression, makeRowVector(parameters));
-    assertEqualVectors(expectedArrayVector, result);
-    EXPECT_NO_THROW(expectedArrayVector->checkRanges());
+  static void SetUpTestCase() {
+    SliceTestBase::SetUpTestCase();
+    registerAllScalarFunctions();
   }
 };
 
-TEST_F(SliceTest, prestoTestCases) {
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4, 5}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    testSlice("slice(C0, 1, 4)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{1, 2}});
-    testSlice("slice(C0, 1, 4)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4, 5}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{3, 4}});
-    testSlice("slice(C0, 3, 2)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{3, 4}});
-    testSlice("slice(C0, 3, 3)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{2, 3, 4}});
-    testSlice("slice(C0, -3, 3)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{2, 3, 4}});
-    testSlice("slice(C0, -3, 5)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, 1, 0)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, -2, 0)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, -2, 0)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, -5, 5)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, -6, 5)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    testSlice("slice(C0, -6, 5)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    // The implementation is zero-copy, so floating point number comparison
-    // won't have issue here since numerical representation remains the same.
-    auto arrayVector = makeArrayVector<double>({{2.3, 2.3, 2.2}});
-    auto expectedArrayVector = makeArrayVector<double>({{2.3, 2.2}});
-    testSlice("slice(C0, 2, 3)", {arrayVector}, expectedArrayVector);
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    BOLT_ASSERT_THROW(
-        testSlice(
-            "slice(C0, 1, -1)",
-            {arrayVector, arrayVector, expectedArrayVector},
-            expectedArrayVector),
-        "The value of length argument of slice() function should not be negative");
-  }
-  {
-    auto arrayVector = makeArrayVector<int64_t>({{1, 2, 3, 4}});
-    auto expectedArrayVector = makeArrayVector<int64_t>({{}});
-    BOLT_ASSERT_THROW(
-        testSlice(
-            "slice(C0, 0, 1)",
-            {arrayVector, arrayVector, expectedArrayVector},
-            expectedArrayVector),
-        "SQL array indices start at 1");
-  }
+TEST_F(SliceTest, basic) {
+  basicTestCases();
 }
 
 TEST_F(SliceTest, constantInputArray) {
@@ -239,78 +146,6 @@ TEST_F(SliceTest, variableInputArray) {
     auto startsVector = makeFlatVector<int64_t>(
         kVectorSize, [](vector_size_t row) { return 1 + row % 7; });
     auto lengthsVector = makeFlatVector<int64_t>(
-        kVectorSize, [](vector_size_t /*row*/) { return 7; });
-    auto sizeAt = [](vector_size_t /*row*/) { return 7; };
-    auto valueAt = [](vector_size_t /*row*/, vector_size_t idx) {
-      return 1 + idx;
-    };
-    auto arrayVector = makeArrayVector<int64_t>(kVectorSize, sizeAt, valueAt);
-
-    auto expectedSizeAt = [](vector_size_t row) { return 7 - row % 7; };
-    auto expectedValueAt = [](vector_size_t row, vector_size_t idx) {
-      return 1 + row % 7 + idx;
-    };
-    auto expectedArrayVector =
-        makeArrayVector<int64_t>(kVectorSize, expectedSizeAt, expectedValueAt);
-    testSlice(
-        "slice(C0, C1, C2)",
-        {arrayVector, startsVector, lengthsVector},
-        expectedArrayVector);
-  }
-}
-
-TEST_F(SliceTest, variableInputIntegerArray) {
-  {
-    auto startsVector = makeFlatVector<int32_t>(
-        kVectorSize, [](vector_size_t row) { return 1 + row % 7; });
-    auto lengthsVector = makeFlatVector<int32_t>(
-        kVectorSize, [](vector_size_t /*row*/) { return 1; });
-    auto sizeAt = [](vector_size_t /*row*/) { return 7; };
-    auto valueAt = [](vector_size_t /*row*/, vector_size_t idx) {
-      return 1 + idx;
-    };
-    auto arrayVector = makeArrayVector<int64_t>(kVectorSize, sizeAt, valueAt);
-
-    auto expectedSizeAt = [](vector_size_t /*row*/) { return 1; };
-    auto expectedValueAt = [](vector_size_t row, vector_size_t /*idx*/) {
-      return 1 + row % 7;
-    };
-    auto expectedArrayVector =
-        makeArrayVector<int64_t>(kVectorSize, expectedSizeAt, expectedValueAt);
-    testSlice(
-        "slice(C0, C1, C2)",
-        {arrayVector, startsVector, lengthsVector},
-        expectedArrayVector);
-  }
-  {
-    auto startsVector = makeFlatVector<int32_t>(
-        kVectorSize, [](vector_size_t row) { return 1 + row % 7; });
-    auto lengthsVector = makeFlatVector<int32_t>(
-        kVectorSize, [](vector_size_t /*row*/) { return 2; });
-    auto sizeAt = [](vector_size_t /*row*/) { return 7; };
-    auto valueAt = [](vector_size_t /*row*/, vector_size_t idx) {
-      return 1 + idx;
-    };
-    auto arrayVector = makeArrayVector<int64_t>(kVectorSize, sizeAt, valueAt);
-
-    auto expectedSizeAt = [](vector_size_t row) {
-      return (row + 1) % 7 == 0 ? 1 : 2;
-    };
-    auto expectedValueAt = [](vector_size_t row, vector_size_t idx) {
-      return 1 + row % 7 + idx;
-    };
-    auto expectedArrayVector =
-        makeArrayVector<int64_t>(kVectorSize, expectedSizeAt, expectedValueAt);
-    testSlice(
-        "slice(C0, C1, C2)",
-        {arrayVector, startsVector, lengthsVector},
-        expectedArrayVector);
-  }
-
-  {
-    auto startsVector = makeFlatVector<int32_t>(
-        kVectorSize, [](vector_size_t row) { return 1 + row % 7; });
-    auto lengthsVector = makeFlatVector<int32_t>(
         kVectorSize, [](vector_size_t /*row*/) { return 7; });
     auto sizeAt = [](vector_size_t /*row*/) { return 7; };
     auto valueAt = [](vector_size_t /*row*/, vector_size_t idx) {
@@ -484,3 +319,4 @@ TEST_F(SliceTest, constantArrayNonConstantLength) {
 }
 
 } // namespace
+} // namespace bytedance::bolt::functions::prestosql

@@ -380,7 +380,8 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> decimalUnarySignature() {
   return {exec::FunctionSignatureBuilder()
               .integerVariable("a_precision")
               .integerVariable("a_scale")
-              .integerVariable("r_precision", "min(38,a_precision-a_scale+1)")
+              .integerVariable(
+                  "r_precision", "min(38,a_precision-a_scale+min(1,a_scale))")
               .integerVariable("r_scale", "0")
               .returnType("DECIMAL(r_precision, r_scale)")
               .argumentType("DECIMAL(a_precision, a_scale)")

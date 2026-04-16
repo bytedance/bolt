@@ -32,6 +32,7 @@
 #include <folly/Random.h>
 #include <gtest/gtest.h>
 
+#include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/Exceptions.h"
 using namespace bytedance::bolt;
 
@@ -1027,5 +1028,41 @@ TEST(ExceptionTest, exceptionMacroInlining) {
     BOLT_USER_FAIL(errorStr, "definitely");
   } catch (const std::exception& e) {
     ASSERT_TRUE(folly::StringPiece{e.what()}.startsWith("argument not found"));
+  }
+}
+
+// Tests errorMessage(const char*) path: BOLT_FAIL(nullPtr) as sole argument.
+TEST(ExceptionTest, boltFailWithNullWhatException) {
+  struct NullWhatException : public std::exception {
+    const char* what() const noexcept override {
+      return nullptr;
+    }
+  };
+
+  try {
+    try {
+      throw NullWhatException();
+    } catch (const std::exception& e) {
+      BOLT_FAIL(e.what());
+    }
+    FAIL() << "Expected an exception to be thrown";
+  } catch (const BoltRuntimeError& e) {
+    EXPECT_NE(std::string(e.what()).find("(nullptr)"), std::string::npos)
+        << "Expected '(nullptr)' in message, got: " << e.what();
+  }
+}
+
+// Tests errorMessage(fmt, args...) path: null const char* as a format argument.
+TEST(ExceptionTest, boltFailWithNullPtr) {
+  const char* nullPtr = nullptr;
+
+  try {
+    BOLT_FAIL("error message: {}", nullPtr);
+    FAIL() << "Expected an exception to be thrown";
+  } catch (const BoltRuntimeError& e) {
+    EXPECT_NE(
+        std::string(e.what()).find("error message: (nullptr)"),
+        std::string::npos)
+        << "Expected 'error message: (nullptr)' in message, got: " << e.what();
   }
 }

@@ -48,6 +48,7 @@ bolt_add_library(
   RegisterSpecialForm.cpp
   RegisterString.cpp
   RegisterUrl.cpp
+  RegisterVariant.cpp
 )
 
 # GCC 12 has a bug where it does not respect "pragma ignore" directives and ends up failing

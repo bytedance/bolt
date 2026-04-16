@@ -32,6 +32,7 @@
 #include "bolt/functions/lib/ArrayShuffle.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/lib/Repeat.h"
+#include "bolt/functions/lib/Slice.h"
 #include "bolt/functions/prestosql/ArrayFunctions.h"
 #include "bolt/functions/sparksql/ArrayAppend.h"
 #include "bolt/functions/sparksql/ArrayFlattenFunction.h"
@@ -82,9 +83,11 @@ inline void registerArrayMinMaxFunctions(const std::string& prefix) {
   registerArrayMinMaxFunctions<float>(prefix);
   registerArrayMinMaxFunctions<double>(prefix);
   registerArrayMinMaxFunctions<bool>(prefix);
+  registerArrayMinMaxFunctions<Varbinary>(prefix);
   registerArrayMinMaxFunctions<Varchar>(prefix);
   registerArrayMinMaxFunctions<Timestamp>(prefix);
   registerArrayMinMaxFunctions<Date>(prefix);
+  registerArrayMinMaxFunctions<Orderable<T1>>(prefix);
 }
 
 template <typename T>
@@ -204,6 +207,8 @@ void registerArrayFunctions(const std::string& prefix) {
       prefix + "array_repeat",
       repeatSignatures(),
       makeRepeatAllowNegativeCount);
+
+  registerIntegerSliceFunction(prefix);
 
   // for now, register ArrayRemoveFunctionString that takes String input and
   // output is enough for our use cases. In future, if need to support more

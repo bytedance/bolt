@@ -177,6 +177,15 @@ class Spiller {
       RowVectorPtr& spillVector,
       size_t& nextBatchIndex);
 
+  /// Hybrid mode extraction: extracts from both RowContainer (keys) and
+  /// HybridContainer (payloads)
+  int64_t extractSpillVectorHybrid(
+      SpillRows& rows,
+      int32_t maxRows,
+      int64_t maxBytes,
+      RowVectorPtr& spillVector,
+      size_t& nextBatchIndex);
+
   /// Finishes spilling and accumulate the spilled partition metadata in
   /// 'partitionSet' indexed by spill partition id.
   void finishSpill(SpillPartitionSet& partitionSet);
@@ -256,6 +265,11 @@ class Spiller {
     sorter_ = HybridSorter{algo};
   }
 
+  void setHybridMode(bool enabled, HybridContainer* hybridContainer) {
+    hybridSortEnabled_ = enabled;
+    hybridContainer_ = hybridContainer;
+  }
+
   const RowContainer* container() const {
     return container_;
   }
@@ -302,6 +316,10 @@ class Spiller {
   // Creates '*results' in spillPool() if nullptr. Used from Spiller and
   // RowContainerSpillMergeStream.
   void extractSpill(folly::Range<char**> rows, RowVectorPtr& result);
+
+  // Hybrid mode extraction: extracts keys from RowContainer and payloads from
+  // HybridContainer for 'rows' into '*result'.
+  void extractSpillHybrid(folly::Range<char**> rows, RowVectorPtr& result);
 
   // Returns a mergeable stream that goes over unspilled in-memory
   // rows for the spill partition  'partition'. finishSpill()
@@ -435,6 +453,11 @@ class Spiller {
   std::vector<SpillRun> spillRuns_;
 
   common::SpillConfig* spillConfig_{nullptr};
+
+  // Hybrid mode support: when true, extraction uses both RowContainer (keys)
+  // and HybridContainer (payloads)
+  bool hybridSortEnabled_{false};
+  HybridContainer* hybridContainer_{nullptr};
 
   HybridSorter sorter_;
 

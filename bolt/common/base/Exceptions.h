@@ -155,16 +155,27 @@ inline CompileTimeEmptyString errorMessage() {
 }
 
 inline const char* errorMessage(const char* s) {
-  return s;
+  return s ? s : "(nullptr)";
 }
 
 inline std::string errorMessage(const std::string& str) {
   return str;
 }
 
+template <typename T>
+decltype(auto) sanitizeArg(const T& arg) {
+  return (arg);
+}
+
+// Replaces null const char* with "(nullptr)" so fmt::vformat won't throw
+// "string pointer is null" when argument is nullptr.
+inline const char* sanitizeArg(const char* arg) {
+  return arg ? arg : "(nullptr)";
+}
+
 template <typename... Args>
 std::string errorMessage(fmt::string_view fmt, const Args&... args) {
-  return fmt::vformat(fmt, fmt::make_format_args(args...));
+  return fmt::vformat(fmt, fmt::make_format_args(sanitizeArg(args)...));
 }
 
 } // namespace detail

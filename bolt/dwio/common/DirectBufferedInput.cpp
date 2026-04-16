@@ -254,14 +254,16 @@ void DirectBufferedInput::readRegions(
 
           // first check available memory allows to preload data, even if not,
           // the non-preload load will be sync loaded on the main thread.
-          if (asyncLoad.canPreload()) {
+          if (asyncLoad.canPreload(guard)) {
             process::TraceContext trace("Read Ahead");
             BOLT_CHECK_NOT_NULL(asyncLoad.load);
             auto res = asyncLoad.load->loadOrFuture(nullptr);
-            LOG_IF(INFO, !res)
-                << "Preload fails to load " << (uint64_t)asyncLoad.load.get()
-                << " by async thread " << folly::getCurrentThreadName().value();
-            asyncLoad.asyncThreadCtx->disallowPreload();
+            if (!res) {
+              LOG(INFO) << "Preload fails to load "
+                        << (uint64_t)asyncLoad.load.get() << " by async thread "
+                        << folly::getCurrentThreadName().value();
+              asyncLoad.asyncThreadCtx->disallowPreload();
+            }
           }
         });
       }

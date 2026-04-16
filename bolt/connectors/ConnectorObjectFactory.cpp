@@ -1,0 +1,62 @@
+/*
+ * Copyright (c) International Business Machines Corporation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bolt/connectors/ConnectorObjectFactory.h"
+
+namespace bytedance::bolt::connector {
+
+ConnectorObjectFactory::~ConnectorObjectFactory() = default;
+
+std::unordered_map<std::string, std::shared_ptr<ConnectorObjectFactory>>&
+connectorObjectFactories() {
+  static std::
+      unordered_map<std::string, std::shared_ptr<ConnectorObjectFactory>>
+          factories;
+  return factories;
+}
+
+bool registerConnectorObjectFactory(
+    const std::shared_ptr<ConnectorObjectFactory>& factory) {
+  bool ok = connectorObjectFactories()
+                .insert({factory->connectorName(), factory})
+                .second;
+  BOLT_CHECK(
+      ok,
+      "ConnectorObjectFactory with name '{}' is already registered",
+      factory->connectorName());
+  return true;
+}
+
+bool hasConnectorObjectFactory(const std::string& connectorName) {
+  return connectorObjectFactories().count(connectorName) == 1;
+}
+
+bool unregisterConnectorObjectFactory(const std::string& connectorName) {
+  auto count = connectorObjectFactories().erase(connectorName);
+  return count == 1;
+}
+
+std::shared_ptr<ConnectorObjectFactory> getConnectorObjectFactory(
+    const std::string& connectorName) {
+  auto it = connectorObjectFactories().find(connectorName);
+  BOLT_CHECK(
+      it != connectorObjectFactories().end(),
+      "ConnectorObjectFactory with name '{}' not registered",
+      connectorName);
+  return it->second;
+}
+
+} // namespace bytedance::bolt::connector

@@ -51,6 +51,7 @@ bolt_add_library(
   SplitFunctions.cpp
   String.cpp
   UnscaledValueFunction.cpp
+  VariantEncoding.cpp
 )
 
 target_link_libraries(

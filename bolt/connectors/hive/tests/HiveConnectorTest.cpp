@@ -35,17 +35,13 @@
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/HiveDataSource.h"
+#include "bolt/core/Expressions.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/expression/tests/TestExprUtils.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec::test;
-
-class HiveConnectorTest : public exec::test::HiveConnectorTestBase {
- protected:
-  std::shared_ptr<memory::MemoryPool> pool_ =
-      memory::memoryManager()->addLeafPool();
-};
 
 void validateNullConstant(const ScanSpec& spec, const Type& type) {
   ASSERT_TRUE(spec.isConstant());
@@ -62,6 +58,37 @@ std::vector<Subfield> makeSubfields(const std::vector<std::string>& paths) {
   }
   return subfields;
 }
+
+class TestNameNormalizingParser : public exec::ExprToSubfieldFilterParser {
+ public:
+  core::CallTypedExprPtr normalizeCall(
+      const core::CallTypedExpr& call) override {
+    if (call.name() != "greaterthan") {
+      return nullptr;
+    }
+
+    return std::make_shared<core::CallTypedExpr>(
+        call.type(),
+        std::vector<core::TypedExprPtr>(
+            call.inputs().begin(), call.inputs().end()),
+        "gt");
+  }
+};
+
+void ensureTestNameNormalizingParserRegistered() {
+  static const bool registered = []() {
+    exec::ExprToSubfieldFilterParser::registerParser(
+        std::make_shared<TestNameNormalizingParser>());
+    return true;
+  }();
+  static_cast<void>(registered);
+}
+
+class HiveConnectorTest : public exec::test::HiveConnectorTestBase {
+ protected:
+  std::shared_ptr<memory::MemoryPool> pool_ =
+      memory::memoryManager()->addLeafPool();
+};
 
 folly::F14FastMap<std::string, std::vector<const common::Subfield*>>
 groupSubfields(const std::vector<Subfield>& subfields) {
@@ -423,7 +450,9 @@ TEST_F(HiveConnectorTest, makeScanSpec_filterPartitionKey) {
 TEST_F(HiveConnectorTest, extractFiltersFromRemainingFilter) {
   auto queryCtx = core::QueryCtx::create();
   exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), pool_.get());
-  auto rowType = ROW({"c0", "c1", "c2"}, {BIGINT(), BIGINT(), DECIMAL(20, 0)});
+  auto rowType =
+      ROW({"c0", "c1", "c2", "m"},
+          {BIGINT(), BIGINT(), DECIMAL(20, 0), MAP(VARCHAR(), BIGINT())});
 
   auto expr = parseExpr("not (c0 > 0 or c1 > 0)", rowType);
   SubfieldFilters filters;
@@ -450,6 +479,30 @@ TEST_F(HiveConnectorTest, extractFiltersFromRemainingFilter) {
   ASSERT_TRUE(remaining);
   ASSERT_EQ(
       remaining->toString(), "not(lt(ROW[\"c2\"],cast 0 as DECIMAL(20, 0)))");
+
+  // Test Cast filter pushdown is skipped from subfield filters and kept in
+  // remaining
+  expr = parseExpr("cast(c0 as INTEGER) > 0", rowType);
+  filters.clear();
+  remaining = extractFiltersFromRemainingFilter(expr, &evaluator, filters);
+  ASSERT_TRUE(remaining);
+  ASSERT_EQ(filters.size(), 0);
+
+  // Test MapSubscript filter pushdown is skipped from subfield filters and kept
+  // in remaining
+  expr = parseExpr("m['a'] > 0", rowType);
+  filters.clear();
+  remaining = extractFiltersFromRemainingFilter(expr, &evaluator, filters);
+  ASSERT_TRUE(remaining);
+  ASSERT_EQ(filters.size(), 0);
+
+  ensureTestNameNormalizingParserRegistered();
+  expr =
+      exec::test::renameCall(parseExpr("m['a'] > 0", rowType), "greaterthan");
+  filters.clear();
+  remaining = extractFiltersFromRemainingFilter(expr, &evaluator, filters);
+  ASSERT_TRUE(remaining);
+  ASSERT_EQ(filters.size(), 0);
 }
 
 } // namespace
