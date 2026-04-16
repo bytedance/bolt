@@ -702,12 +702,6 @@ class Converter {
         to.toGMT(*timeZone_, &hasError);
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
-    } else if constexpr (fromInteger || fromFloat) {
-      if constexpr (fromFloat) {
-        if (FOLLY_UNLIKELY(std::isnan(from) || std::isinf(from))) {
-          return ConvertStatus::OTHER_FAILURE;
-        }
-      }
     } else if constexpr (fromKind == PrimitiveKind::BOOLEAN) {
       if constexpr (isInSpark) {
         // Spark treats boolean as microseconds since epoch when casting to
@@ -716,7 +710,12 @@ class Converter {
         return ConvertStatus::SUCCESS;
       }
       return ConvertStatus::OTHER_FAILURE;
-    }
+    } else if constexpr (fromInteger || fromFloat) {
+      if constexpr (fromFloat) {
+        if (FOLLY_UNLIKELY(std::isnan(from) || std::isinf(from))) {
+          return ConvertStatus::OTHER_FAILURE;
+        }
+      }
       // Spark internally use microsecond precision for timestamp.
       // To avoid overflow, we need to check the range of seconds.
       static constexpr int64_t maxSeconds =

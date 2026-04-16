@@ -429,6 +429,8 @@ TEST_F(SparkCastExprTest, floatToTimestamp) {
           std::nullopt,
           std::nullopt,
           std::nullopt,
+      }));
+}
 
 TEST_F(SparkCastExprTest, boolToTimestamp) {
   testCast(

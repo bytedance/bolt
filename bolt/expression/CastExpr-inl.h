@@ -672,7 +672,8 @@ void CastExpr::applyCastPrimitives(
 #ifndef SPARK_COMPATIABLE
   if constexpr (
       (FromKind == TypeKind::INTEGER || FromKind == TypeKind::BIGINT ||
-       FromKind == TypeKind::REAL || FromKind == TypeKind::DOUBLE ||  FromKind == TypeKind::BOOLEAN) &&
+       FromKind == TypeKind::REAL || FromKind == TypeKind::DOUBLE ||
+       FromKind == TypeKind::BOOLEAN) &&
       ToKind == TypeKind::TIMESTAMP) {
     if (queryConfig.throwExceptionWhenCastIntToTimestamp()) {
       BOLT_FAIL("Cannot cast {} to timestamp", mapTypeKindToName(FromKind));
