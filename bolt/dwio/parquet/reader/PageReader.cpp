@@ -1132,6 +1132,12 @@ void PageReader::makeDecoder() {
               "DELTA_BINARY_PACKED decoder only supports INT32 and INT64");
       }
       break;
+    case Encoding::DELTA_BYTE_ARRAY:
+      if (parquetType == thrift::Type::BYTE_ARRAY) {
+        deltaByteArrDecoder_ =
+            std::make_unique<DeltaByteArrayDecoder>(pageData_);
+        break;
+      }
     default:
       BOLT_UNSUPPORTED("Encoding not supported yet: {}", encoding_);
       break;
@@ -1173,6 +1179,8 @@ void PageReader::skip(int64_t numRows) {
     booleanDecoder_->skip(toSkip);
   } else if (deltaBpDecoder_) {
     deltaBpDecoder_->skip(toSkip);
+  } else if (deltaByteArrDecoder_) {
+    deltaByteArrDecoder_->skip(toSkip);
   } else if (!decoderSet_ && chunkSize_ <= pageStart_) {
     // There is a chance that we seek to the end of column chunk
     // without read any PageData , no skip for decoder

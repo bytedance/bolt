@@ -72,7 +72,6 @@ add_executable(
   MultiFragmentTest.cpp
   OneWayStatusFlagTest.cpp
   OperatorTraceTest.cpp
-  OperatorUtilsTest.cpp
   OrderByTest.cpp
   OutputBufferManagerTest.cpp
   PlanNodeSerdeTest.cpp

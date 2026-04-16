@@ -385,6 +385,10 @@ class AlwaysFalse final : public Filter {
     return false;
   }
 
+  bool testNull() const final {
+    return false;
+  }
+
   bool testInt64(int64_t /* unused */) const final {
     return false;
   }

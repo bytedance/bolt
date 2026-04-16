@@ -57,7 +57,9 @@ class SortBuffer {
       tsan_atomic<bool>* nonReclaimableSection,
       const common::SpillConfig* spillConfig = nullptr,
       uint64_t spillMemoryThreshold = 0,
-      OperatorCtx* operatorCtx = nullptr);
+      OperatorCtx* operatorCtx = nullptr,
+      bool hybridSortEnabled = false,
+      bool scatteredModeEnabled = false);
 
   ~SortBuffer();
 
@@ -224,6 +226,16 @@ class SortBuffer {
   uint64_t sortOutputTimeUs_{0};
   uint64_t sortColToRowTimeUs_{0};
   uint64_t sortInSortTimeUs_{0};
+
+  // For hybrid design
+  bool hybridSortEnabled_{false};
+  bool scatteredMode_{
+      false}; // Use scattered (non-coalesced) mode for hybrid sort
+  std::unique_ptr<HybridContainer> hybridData_{nullptr};
+  std::vector<IdentityProjection> keyColumnMap_;
+  std::vector<IdentityProjection> payloadColumnMap_;
+  std::vector<column_index_t> payloadChannels_;
+  RowTypePtr payloadTypes_;
 };
 
 } // namespace bytedance::bolt::exec

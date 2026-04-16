@@ -35,12 +35,28 @@
 #include <folly/container/F14Set.h>
 #include <folly/dynamic.h>
 #include <gflags/gflags_declare.h>
+#include <optional>
 
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/SimpleVector.h"
 #include "bolt/vector/TypeAliases.h"
 namespace bytedance::bolt {
+
+/// Accurate string size statistics for FlatVector<StringView>.
+/// When present, provides the actual sum of non-inline string bytes which may
+/// differ significantly from retainedSize (e.g., after flattening a
+/// DictionaryVector where shared string buffers cause retainedSize to
+/// underestimate the actual materialized size due to repeated references to
+/// large dictionary entries).
+struct StringViewStats {
+  /// Sum of non-inline StringView.size(). Inline strings are stored within the
+  /// StringView struct itself, already covered by the values buffer size in
+  /// estimateFlatSize.
+  uint64_t totalBytes{0};
+  /// Max single StringView.size() (including inline strings).
+  uint64_t maxLength{0};
+};
 
 // FlatVector is marked final to allow for inlining on virtual methods called
 // on a pointer that has the static type FlatVector<T>; this can be a
@@ -415,6 +431,19 @@ class FlatVector final : public SimpleVector<T> {
     return this->typeKind() != TypeKind::UNKNOWN;
   }
 
+  /// String statistics for accurate size estimation.
+  /// Only meaningful for FlatVector<StringView>. Specialized in .cpp.
+  const std::optional<StringViewStats>& stringStats() const {
+    static const std::optional<StringViewStats> kEmpty;
+    return kEmpty;
+  }
+
+  void setStringViewStats(StringViewStats /*stats*/) {}
+
+  uint64_t estimateFlatSize() const override {
+    return BaseVector::estimateFlatSize();
+  }
+
   uint64_t retainedSize() const override {
     auto size =
         BaseVector::retainedSize() + (values_ ? values_->capacity() : 0);
@@ -611,6 +640,10 @@ class FlatVector final : public SimpleVector<T> {
   // NOTE: we need to ensure 'stringBuffers_' and 'stringBufferSet_' are
   // always consistent.
   folly::F14FastSet<const Buffer*> stringBufferSet_;
+
+  // Accurate string size statistics, set during vector construction paths.
+  // nullopt = not computed, use default retainedSize-based estimate.
+  std::optional<StringViewStats> stringStats_;
 };
 
 template <>
@@ -624,6 +657,16 @@ Range<bool> FlatVector<bool>::asRange() const;
 
 template <>
 void FlatVector<StringView>::set(vector_size_t idx, StringView value);
+
+template <>
+const std::optional<StringViewStats>& FlatVector<StringView>::stringStats()
+    const;
+
+template <>
+void FlatVector<StringView>::setStringViewStats(StringViewStats stats);
+
+template <>
+uint64_t FlatVector<StringView>::estimateFlatSize() const;
 
 template <>
 void FlatVector<StringView>::setStringViewValue(

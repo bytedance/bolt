@@ -76,6 +76,7 @@ void DecodedVector::decode(
     case VectorEncoding::Simple::FLAT:
     case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::ROW:
+    case VectorEncoding::Simple::VARIANT:
     case VectorEncoding::Simple::ARRAY:
     case VectorEncoding::Simple::MAP:
     case VectorEncoding::Simple::LAZY:
@@ -185,6 +186,7 @@ void DecodedVector::combineWrappers(
       case VectorEncoding::Simple::FLAT:
       case VectorEncoding::Simple::BIASED:
       case VectorEncoding::Simple::ROW:
+      case VectorEncoding::Simple::VARIANT:
       case VectorEncoding::Simple::ARRAY:
       case VectorEncoding::Simple::MAP:
         setBaseData(*values, rows);
@@ -313,7 +315,8 @@ void DecodedVector::setBaseData(
     }
     case VectorEncoding::Simple::ROW:
     case VectorEncoding::Simple::ARRAY:
-    case VectorEncoding::Simple::MAP: {
+    case VectorEncoding::Simple::MAP:
+    case VectorEncoding::Simple::VARIANT: {
       setFlatNulls(vector, rows);
       break;
     }

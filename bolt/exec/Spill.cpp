@@ -378,6 +378,28 @@ const std::vector<SpillSortKey>& ConcatFilesSpillMergeStream::sortingKeys()
   return spillFiles_[fileIndex_]->sortingKeys();
 }
 
+std::unique_ptr<BatchStream> ConcatFilesSpillBatchStream::create(
+    std::vector<std::unique_ptr<SpillReadFile>> spillFiles) {
+  auto* spillStream = new ConcatFilesSpillBatchStream(std::move(spillFiles));
+  return std::unique_ptr<BatchStream>(spillStream);
+}
+
+bool ConcatFilesSpillBatchStream::nextBatch(RowVectorPtr& batch) {
+  BOLT_CHECK_NULL(batch);
+  BOLT_CHECK(!atEnd_);
+  for (; fileIndex_ < spillFiles_.size(); ++fileIndex_) {
+    BOLT_CHECK_NOT_NULL(spillFiles_[fileIndex_]);
+    if (spillFiles_[fileIndex_]->nextBatch(batch)) {
+      BOLT_CHECK_NOT_NULL(batch);
+      return true;
+    }
+    spillFiles_[fileIndex_].reset();
+  }
+  spillFiles_.clear();
+  atEnd_ = true;
+  return false;
+}
+
 void FileSpillMergeStream::nextBatch() {
   BOLT_CHECK(!closed_);
   MicrosecondTimer timer(&spillReadTimeUs_);

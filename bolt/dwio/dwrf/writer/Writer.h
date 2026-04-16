@@ -60,6 +60,7 @@ struct WriterOptions {
   std::shared_ptr<encryption::EncryptionSpecification> encryptionSpec;
   std::shared_ptr<dwio::common::encryption::EncrypterFactory> encrypterFactory;
   int64_t memoryBudget = std::numeric_limits<int64_t>::max();
+  DwrfFormat format{DwrfFormat::kDwrf};
   std::function<std::unique_ptr<ColumnWriter>(
       WriterContext& context,
       const bolt::dwio::common::TypeWithId& type)>

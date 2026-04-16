@@ -185,7 +185,7 @@ class BoltConan(ConanFile):
         )
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
         if self.options.get_safe("enable_jit"):
-            self.requires("llvm-core/13.0.0")
+            self.requires("llvm-core/19.1.7")
 
         if self.options.get_safe("enable_s3"):
             self.requires(

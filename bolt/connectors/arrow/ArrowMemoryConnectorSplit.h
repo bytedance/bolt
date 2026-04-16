@@ -84,6 +84,10 @@ class ArrowMemoryConnectorSplit : public ConnectorSplit {
     return finished_;
   }
 
+  int64_t splitSizeBytes() const override {
+    return 0;
+  }
+
   ~ArrowMemoryConnectorSplit() {
     if (!finished_ && arrowTable_.has_value()) {
       int columnSize = arrowTable_.value().arrowSchemas_.size();

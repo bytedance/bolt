@@ -54,6 +54,7 @@
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/type/Tree.h"
+#include "bolt/type/VariantValue.h"
 #include "folly/CPortability.h"
 namespace bytedance::bolt {
 
@@ -99,6 +100,7 @@ enum class TypeKind : int8_t {
   UNKNOWN = 33,
   FUNCTION = 34,
   OPAQUE = 35,
+  VARIANT = 37,
   INVALID = 36
 };
 
@@ -122,6 +124,7 @@ class MapType;
 class RowType;
 class FunctionType;
 class OpaqueType;
+class VariantType;
 class UnknownType;
 
 struct UnknownValue {
@@ -350,6 +353,25 @@ struct TypeTraits<TypeKind::ROW> {
 };
 
 template <>
+struct TypeTraits<TypeKind::VARIANT> {
+  using ImplType = VariantType;
+  using NativeType = VariantValue;
+  using DeepCopiedType = OwnedVariantValue;
+  // VARIANT has 2 physical children (value, metadata) and its own vector class,
+  // but is treated as a leaf type in the type system (no user-visible
+  // children).
+  static constexpr uint32_t minSubTypes = 0;
+  static constexpr uint32_t maxSubTypes = 0;
+  static constexpr TypeKind typeKind = TypeKind::VARIANT;
+  // NOT a primitive: it has composite storage (VariantVector with 2 children).
+  // This ensures SimpleFunctionAdapter doesn't try to treat it as a flat
+  // scalar.
+  static constexpr bool isPrimitiveType = false;
+  static constexpr bool isFixedWidth = false;
+  static constexpr const char* name = "VARIANT";
+};
+
+template <>
 struct TypeTraits<TypeKind::UNKNOWN> {
   using ImplType = UnknownType;
   using NativeType = UnknownValue;
@@ -567,6 +589,7 @@ class Type : public Tree<const TypePtr>, public bolt::ISerializable {
   BOLT_FLUENT_CAST(Map, MAP)
   BOLT_FLUENT_CAST(Row, ROW)
   BOLT_FLUENT_CAST(Opaque, OPAQUE)
+  BOLT_FLUENT_CAST(Variant, VARIANT)
   BOLT_FLUENT_CAST(UnKnown, UNKNOWN)
   BOLT_FLUENT_CAST(Function, FUNCTION)
 
@@ -801,6 +824,62 @@ FOLLY_ALWAYS_INLINE bool isDecimalName(const std::string& name) {
 }
 
 std::pair<int, int> getDecimalPrecisionScale(const Type& type);
+
+class VariantType : public TypeBase<TypeKind::VARIANT> {
+ public:
+  VariantType();
+
+  uint32_t size() const override;
+
+  const std::shared_ptr<const Type>& childAt(uint32_t idx) const override;
+
+  std::string toString() const override {
+    return TypeTraits<TypeKind::VARIANT>::name;
+  }
+
+  size_t cppSizeInBytes() const override {
+    return sizeof(VariantValue);
+  }
+
+  /// VARIANT comparison is byte-level and NOT semantically correct.
+  /// The same logical value (e.g., integer 42) can have different binary
+  /// representations (INT1 vs INT4 vs INT8), which compare as unequal.
+  /// Mark as non-orderable/non-comparable to prevent the query planner
+  /// from generating GROUP BY, JOIN, DISTINCT, or ORDER BY plans on
+  /// VARIANT columns that would produce silently wrong results.
+  bool isOrderable() const override {
+    return false;
+  }
+
+  bool isComparable() const override {
+    return false;
+  }
+
+  bool equivalent(const Type& other) const override {
+    return Type::hasSameTypeId(other);
+  }
+
+  folly::dynamic serialize() const override {
+    folly::dynamic obj = folly::dynamic::object;
+    obj["name"] = "Type";
+    obj["type"] = TypeTraits<TypeKind::VARIANT>::name;
+    return obj;
+  }
+
+  bool containsChild(std::string_view name) const;
+
+  uint32_t getChildIdx(const std::string& name) const;
+
+  const char* nameOf(uint32_t idx) const;
+
+  static const std::shared_ptr<const VariantType>& get() {
+    static const std::shared_ptr<const VariantType> kType{new VariantType()};
+    return kType;
+  }
+
+ private:
+  std::vector<TypePtr> children_;
+};
 
 class UnknownType : public TypeBase<TypeKind::UNKNOWN> {
  public:
@@ -1360,6 +1439,13 @@ struct TypeFactory {
 };
 
 template <>
+struct TypeFactory<TypeKind::VARIANT> {
+  static std::shared_ptr<const VariantType> create() {
+    return VariantType::get();
+  }
+};
+
+template <>
 struct TypeFactory<TypeKind::UNKNOWN> {
   static std::shared_ptr<const UnknownType> create() {
     return std::make_shared<UnknownType>();
@@ -1407,6 +1493,8 @@ std::shared_ptr<const MapType> MAP(TypePtr keyType, TypePtr valType);
 std::shared_ptr<const FunctionType> FUNCTION(
     std::vector<TypePtr>&& argumentTypes,
     TypePtr returnType);
+
+std::shared_ptr<const VariantType> VARIANT();
 
 template <typename Class>
 std::shared_ptr<const OpaqueType> OPAQUE() {
@@ -1588,6 +1676,10 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
       case ::bytedance::bolt::TypeKind::ROW: {                                 \
         return PREFIX<::bytedance::bolt::TypeKind::ROW> SUFFIX(__VA_ARGS__);   \
       }                                                                        \
+      case ::bytedance::bolt::TypeKind::VARIANT: {                             \
+        return PREFIX<::bytedance::bolt::TypeKind::VARIANT> SUFFIX(            \
+            __VA_ARGS__);                                                      \
+      }                                                                        \
       default:                                                                 \
         BOLT_FAIL("not a known type kind: {}", mapTypeKindToName(typeKind));   \
     }                                                                          \
@@ -1681,6 +1773,10 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
         return TEMPLATE_FUNC<::bytedance::bolt::TypeKind::ROW, T, legacy>(     \
             __VA_ARGS__);                                                      \
       }                                                                        \
+      case ::bytedance::bolt::TypeKind::VARIANT: {                             \
+        return TEMPLATE_FUNC<::bytedance::bolt::TypeKind::VARIANT, T, legacy>( \
+            __VA_ARGS__);                                                      \
+      }                                                                        \
       default:                                                                 \
         BOLT_FAIL("not a scalar type! kind: {}", mapTypeKindToName(typeKind)); \
     }                                                                          \
@@ -1751,6 +1847,9 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
       case ::bytedance::bolt::TypeKind::ROW: {                               \
         return CLASS<::bytedance::bolt::TypeKind::ROW>::FIELD;               \
       }                                                                      \
+      case ::bytedance::bolt::TypeKind::VARIANT: {                           \
+        return CLASS<::bytedance::bolt::TypeKind::VARIANT>::FIELD;           \
+      }                                                                      \
       default:                                                               \
         BOLT_FAIL("not a known type kind: {}", mapTypeKindToName(typeKind)); \
     }                                                                        \
@@ -1782,6 +1881,7 @@ BOLT_SCALAR_ACCESSOR(DOUBLE);
 BOLT_SCALAR_ACCESSOR(TIMESTAMP);
 BOLT_SCALAR_ACCESSOR(VARCHAR);
 BOLT_SCALAR_ACCESSOR(VARBINARY);
+std::shared_ptr<const VariantType> VARIANT();
 
 TypePtr UNKNOWN();
 
@@ -1840,6 +1940,10 @@ std::shared_ptr<const Type> createType<TypeKind::MAP>(
 
 template <>
 std::shared_ptr<const Type> createType<TypeKind::OPAQUE>(
+    std::vector<std::shared_ptr<const Type>>&& children);
+
+template <>
+std::shared_ptr<const Type> createType<TypeKind::VARIANT>(
     std::vector<std::shared_ptr<const Type>>&& children);
 
 #undef BOLT_SCALAR_ACCESSOR
@@ -1999,6 +2103,11 @@ struct Varchar {
   Varchar() {}
 };
 
+struct Variant {
+ private:
+  Variant() {}
+};
+
 template <typename T>
 struct Constant {};
 
@@ -2043,6 +2152,11 @@ struct KindToSimpleType<TypeKind::VARBINARY> {
   using type = Varbinary;
 };
 
+template <>
+struct KindToSimpleType<TypeKind::VARIANT> {
+  using type = Variant;
+};
+
 template <typename T>
 struct SimpleTypeTrait {};
 
@@ -2075,6 +2189,16 @@ struct SimpleTypeTrait<Varchar> : public TypeTraits<TypeKind::VARCHAR> {};
 
 template <>
 struct SimpleTypeTrait<Varbinary> : public TypeTraits<TypeKind::VARBINARY> {};
+
+template <>
+struct SimpleTypeTrait<Variant> : public TypeTraits<TypeKind::VARIANT> {};
+
+template <>
+struct SimpleTypeTrait<VariantValue> : public TypeTraits<TypeKind::VARIANT> {};
+
+template <>
+struct SimpleTypeTrait<OwnedVariantValue>
+    : public TypeTraits<TypeKind::VARIANT> {};
 
 template <>
 struct SimpleTypeTrait<Timestamp> : public TypeTraits<TypeKind::TIMESTAMP> {};
@@ -2198,6 +2322,16 @@ struct CppToType<const char*> : public CppToTypeBase<TypeKind::VARCHAR> {};
 
 template <>
 struct CppToType<Varbinary> : public CppToTypeBase<TypeKind::VARBINARY> {};
+
+template <>
+struct CppToType<Variant> : public CppToTypeBase<TypeKind::VARIANT> {};
+
+template <>
+struct CppToType<VariantValue> : public CppToTypeBase<TypeKind::VARIANT> {};
+
+template <>
+struct CppToType<OwnedVariantValue> : public CppToTypeBase<TypeKind::VARIANT> {
+};
 
 template <>
 struct CppToType<folly::ByteRange> : public CppToTypeBase<TypeKind::VARBINARY> {
@@ -2447,6 +2581,20 @@ template <>
 struct MaterializeType<Varbinary> {
   using nullable_t = std::string;
   using null_free_t = std::string;
+  static constexpr bool requiresMaterialization = false;
+};
+
+template <>
+struct MaterializeType<Variant> {
+  using nullable_t = OwnedVariantValue;
+  using null_free_t = OwnedVariantValue;
+  static constexpr bool requiresMaterialization = false;
+};
+
+template <>
+struct MaterializeType<VariantValue> {
+  using nullable_t = OwnedVariantValue;
+  using null_free_t = OwnedVariantValue;
   static constexpr bool requiresMaterialization = false;
 };
 

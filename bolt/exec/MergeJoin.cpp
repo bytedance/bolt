@@ -305,6 +305,27 @@ void copyRow(
     targetChild->copy(sourceChild.get(), targetIndex, sourceIndex, 1);
   }
 }
+
+// MergeJoin fills 'indices' incrementally as output rows are appended.
+// Therefore we must keep a dictionary directly over the input child and must
+// not use wrapIndirectChildren(), which may eagerly combine existing
+// dictionary layers by reading the current contents of 'indices'. That would
+// be incorrect for already dictionary-encoded projections because the mapping
+// is not finalized at prepareOutput() time.
+void wrapProjectedInputChildren(
+    const std::vector<IdentityProjection>& projections,
+    const RowVectorPtr& input,
+    vector_size_t outputBatchSize,
+    const BufferPtr& indices,
+    std::vector<VectorPtr>& outputChildren) {
+  for (const auto& projection : projections) {
+    outputChildren[projection.outputChannel] = BaseVector::wrapInDictionary(
+        BufferPtr(nullptr),
+        indices,
+        outputBatchSize,
+        input->childAt(projection.inputChannel));
+  }
+}
 } // namespace
 
 void MergeJoin::addOutputRowForLeftJoin(
@@ -469,9 +490,9 @@ bool MergeJoin::prepareOutput(
           operatorCtx_->pool());
     }
   } else {
-    wrapIndirectChildren(
+    wrapProjectedInputChildren(
         leftProjections_,
-        newLeft->children(),
+        newLeft,
         outputBatchSize_,
         leftIndices_,
         localColumns);
@@ -488,9 +509,9 @@ bool MergeJoin::prepareOutput(
     }
     isRightFlattened_ = true;
   } else {
-    wrapIndirectChildren(
+    wrapProjectedInputChildren(
         rightProjections_,
-        right->children(),
+        right,
         outputBatchSize_,
         rightIndices_,
         localColumns);

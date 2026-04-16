@@ -488,6 +488,55 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
     }
     BOLT_CHECK(!children.empty());
 
+    // Detect Spark 4.0 Variant structure: STRUCT<value BINARY, metadata BINARY>
+    // Promote only when the requested logical type explicitly asks for
+    // VARIANT. The raw Parquet schema alone is not specific enough because
+    // ordinary structs can also contain {value, metadata} binary children.
+    if (children.size() == 2 && children[0]->type()->isVarbinary() &&
+        children[1]->type()->isVarbinary()) {
+      auto child0Name =
+          std::static_pointer_cast<const ParquetTypeWithId>(children[0])->name_;
+      auto child1Name =
+          std::static_pointer_cast<const ParquetTypeWithId>(children[1])->name_;
+      folly::toLowerAscii(child0Name);
+      folly::toLowerAscii(child1Name);
+      bool isRequestedVariant = requestedType && requestedType->isVariant();
+      if (!isRequestedVariant && parentRequestedType) {
+        if (parentRequestedType->isVariant()) {
+          isRequestedVariant = true;
+        } else if (parentRequestedType->isRow()) {
+          auto childIdx =
+              parentRequestedType->asRow().getChildIdxIfExists(name);
+          if (childIdx.has_value()) {
+            isRequestedVariant =
+                parentRequestedType->asRow().childAt(*childIdx)->isVariant();
+          }
+        }
+      }
+      bool matchesVariantSchema =
+          (child0Name == "value" && child1Name == "metadata") ||
+          (child0Name == "metadata" && child1Name == "value");
+      if (matchesVariantSchema && isRequestedVariant) {
+        if (child0Name == "metadata") {
+          std::swap(children[0], children[1]);
+        }
+        return std::make_shared<const ParquetTypeWithId>(
+            VARIANT(),
+            std::move(children),
+            curSchemaIdx,
+            maxSchemaElementIdx,
+            ParquetTypeWithId::kNonLeaf,
+            std::move(name),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            maxRepeat,
+            maxDefine,
+            isOptional,
+            isRepeated);
+      }
+    }
+
     if (schemaElement.__isset.converted_type) {
       switch (schemaElement.converted_type) {
         case thrift::ConvertedType::LIST: {
@@ -1479,6 +1528,12 @@ class ParquetRowReader::Impl {
       VLOG(1) << "Filtered row groups: " << rowGroupIds_.size();
       VLOG(1) << "Total row groups: " << rowGroups_.size();
       VLOG(1) << "Total rows: " << rowNumber;
+    }
+
+    if (rowGroupIds_.size() < rowGroups_.size()) {
+      VLOG(1) << "Bolt Parquet Scan: Retained " << rowGroupIds_.size()
+              << " out of " << rowGroups_.size() << " total row groups. "
+              << "Total rows: " << rowNumber;
     }
   }
 

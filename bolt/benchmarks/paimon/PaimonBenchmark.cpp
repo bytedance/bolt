@@ -27,16 +27,11 @@
 #include <gtest/gtest.h>
 
 #include <bolt/dwio/common/BufferedInput.h>
-#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/dwio/common/Options.h"
-#include "bolt/type/Timestamp.h"
-#include "bolt/vector/tests/utils/VectorTestBase.h"
 #include "folly/Range.h"
 
-#include "bolt/common/base/Fs.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -45,11 +40,8 @@
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/TableHandle.h"
-#include "bolt/connectors/hive/paimon_merge_engines/PaimonRowKind.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
-#include <algorithm>
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -65,6 +57,18 @@ DEFINE_string(
 namespace {
 static bool notEmpty(const char* /*flagName*/, const std::string& value) {
   return !value.empty();
+}
+
+std::string benchmarkDataPath(const std::string& subdir) {
+  if (FLAGS_data_path.empty()) {
+    return subdir;
+  }
+
+  if (FLAGS_data_path.back() == '/') {
+    return FLAGS_data_path + subdir;
+  }
+
+  return FLAGS_data_path + "/" + subdir;
 }
 } // namespace
 
@@ -178,10 +182,100 @@ class PaimonBenchmark : public QueryBenchmarkBase {
         core::QueryCtx::create(executor.get()),
         exec::Task::ExecutionMode::kSerial);
 
-    auto filePaths = getFilePaths(FLAGS_data_path);
+    auto filePaths = getFilePaths(benchmarkDataPath("reader"));
 
     std::vector<std::shared_ptr<HiveConnectorSplit>> hiveSplits;
     for (auto filePath : filePaths) {
+      auto hiveSplit = std::make_shared<HiveConnectorSplit>(
+          kHiveConnectorId, filePath, dwio::common::FileFormat::PARQUET);
+      hiveSplits.push_back(hiveSplit);
+    }
+
+    auto connectorSplit =
+        std::make_shared<connector::hive::PaimonConnectorSplit>(
+            kHiveConnectorId, hiveSplits);
+
+    readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
+
+    readTask->noMoreSplits(scanNodeId);
+
+    const auto stats = readTask->taskStats();
+    while (auto result = readTask->next()) {
+    }
+
+    connector::unregisterConnector(kHiveConnectorId);
+    BoltProfilerStop();
+  }
+
+  void runPartialUpdate(std::ostream& out, RunStats& runStats) {
+    BoltProfilerStart("paimon_partial_update.prof");
+
+    auto hiveConnector =
+        connector::getConnectorFactory(connector::kHiveConnectorName)
+            ->newConnector(
+                kHiveConnectorId,
+                std::make_shared<config::ConfigBase>(
+                    std::unordered_map<std::string, std::string>()));
+    connector::registerConnector(hiveConnector);
+
+    filesystems::registerLocalFileSystem();
+
+    std::shared_ptr<folly::Executor> executor(
+        std::make_shared<folly::CPUThreadPoolExecutor>(
+            std::thread::hardware_concurrency()));
+
+    // Schema for partial update: pk_a (primary key), a (double), b (bigint), c
+    // (varchar)
+    auto fileRowType = ROW(
+        {{"pk_a", INTEGER()},
+         {"a", DOUBLE()},
+         {"b", BIGINT()},
+         {"c", VARCHAR()},
+         {"_SEQUENCE_NUMBER", BIGINT()},
+         {"_VALUE_KIND", TINYINT()}});
+    // Project only the data columns (exclude metadata columns)
+    auto rowType = ROW(
+        {{"pk_a", INTEGER()},
+         {"a", DOUBLE()},
+         {"b", BIGINT()},
+         {"c", VARCHAR()}});
+
+    core::PlanNodeId scanNodeId;
+
+    // Use partial-update merge engine with pk_a as primary key
+    std::unordered_map<std::string, std::string> tableParameters{
+        {connector::paimon::kMergeEngine,
+         connector::paimon::kPartialUpdateMergeEngine},
+        {connector::paimon::kPrimaryKey, "a"}};
+
+    auto tableHandle = std::make_shared<connector::hive::HiveTableHandle>(
+        kHiveConnectorId,
+        "hive_table",
+        true,
+        SubfieldFilters{},
+        nullptr,
+        fileRowType,
+        tableParameters);
+
+    auto assignments = getIdentityAssignment(fileRowType);
+
+    auto readPlanFragment = exec::test::PlanBuilder()
+                                .tableScan(rowType, tableHandle, assignments)
+                                .capturePlanNodeId(scanNodeId)
+                                .planFragment();
+
+    // Create the reader task.
+    auto readTask = exec::Task::create(
+        "my_read_task",
+        readPlanFragment,
+        /*destination=*/0,
+        core::QueryCtx::create(executor.get()),
+        exec::Task::ExecutionMode::kSerial);
+
+    auto filePaths = getFilePaths(benchmarkDataPath("partial-update"));
+
+    std::vector<std::shared_ptr<HiveConnectorSplit>> hiveSplits;
+    for (const auto& filePath : filePaths) {
       auto hiveSplit = std::make_shared<HiveConnectorSplit>(
           kHiveConnectorId, filePath, dwio::common::FileFormat::PARQUET);
       hiveSplits.push_back(hiveSplit);
@@ -210,6 +304,12 @@ BENCHMARK(reader) {
   PaimonBenchmark benchmark;
   RunStats runStats;
   benchmark.runMain(std::cout, runStats);
+}
+
+BENCHMARK(partial_update_reader) {
+  PaimonBenchmark benchmark;
+  RunStats runStats;
+  benchmark.runPartialUpdate(std::cout, runStats);
 }
 
 int paimonBenchmarkMain() {

@@ -37,6 +37,7 @@ bolt_add_library(
   SequenceVector.cpp
   SimpleVector.cpp
   VariantToVector.cpp
+  VariantVector.cpp
   VectorEncoding.cpp
   VectorPool.cpp
   VectorPrinter.cpp

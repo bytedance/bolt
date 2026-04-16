@@ -353,6 +353,7 @@ class HashBuild final : public Operator {
 
   // Non-key channels in 'input_'.
   std::vector<column_index_t> dependentChannels_;
+  RowTypePtr dependentTypes_;
 
   // Corresponds 1:1 to 'dependentChannels_'.
   std::vector<std::unique_ptr<DecodedVector>> decoders_;
@@ -447,6 +448,12 @@ class HashBuild final : public Operator {
   bool isDREnabled_{false};
   int32_t maxHashTableBucketCount_{std::numeric_limits<int32_t>::max()};
   std::shared_ptr<RowFormatInfo> rowFormatInfo_{nullptr};
+
+  // For hybrid join
+  bool hybridJoin_{false};
+  bool scatteredMode_{false}; // Use scattered (non-coalesced) mode
+  int driverId_;
+  std::unique_ptr<HybridContainer> hybridData_;
 };
 
 inline std::ostream& operator<<(std::ostream& os, HashBuild::State state) {

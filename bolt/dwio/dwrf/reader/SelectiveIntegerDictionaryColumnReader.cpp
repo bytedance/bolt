@@ -128,7 +128,7 @@ void SelectiveIntegerDictionaryColumnReader::ensureInitialized() {
     return;
   }
 
-  Timer timer;
+  ClockTimer timer{initTimeClocks_};
   scanState_.dictionary.values = dictInit_();
   if (scanSpec_->hasFilter()) {
     // Make sure there is a cache even for an empty dictionary because of asan
@@ -140,9 +140,8 @@ void SelectiveIntegerDictionaryColumnReader::ensureInitialized() {
         FilterResult::kUnknown,
         scanState_.filterCache.size());
   }
-  initialized_ = true;
-  initTimeClocks_ = timer.elapsedClocks();
   scanState_.updateRawState();
+  initialized_ = true;
 }
 
 } // namespace bytedance::bolt::dwrf

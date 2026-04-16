@@ -757,6 +757,26 @@ bool isNotExpr(
       exec::FunctionCanonicalName::kNot;
 }
 
+bool containsMapSubscriptExpr(const core::TypedExprPtr& expr) {
+  auto* call = dynamic_cast<const core::CallTypedExpr*>(expr.get());
+  if (call == nullptr) {
+    return false;
+  }
+
+  if ((call->name() == "subscript" || call->name() == "element_at") &&
+      !call->inputs().empty() && call->inputs()[0]->type()->isMap()) {
+    return true;
+  }
+
+  for (const auto& input : call->inputs()) {
+    if (containsMapSubscriptExpr(input)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 core::TypedExprPtr extractFiltersFromRemainingFilter(
     const core::TypedExprPtr& expr,
     core::ExpressionEvaluator* evaluator,
@@ -772,6 +792,11 @@ core::TypedExprPtr extractFiltersFromRemainingFilter(
             exec::ExprToSubfieldFilterParser::getInstance()
                 ->leafCallToSubfieldFilter(*call, evaluator, negated)) {
       auto& [subfield, filter] = subfieldAndFilter.value();
+      if (containsMapSubscriptExpr(expr) ||
+          filter->kind() == common::FilterKind::kCast ||
+          filter->kind() == common::FilterKind::kMapSubscript) {
+        return expr;
+      }
       if (auto it = filters.find(subfield); it != filters.end()) {
         oldFilter = it->second.get();
         filter = filter->mergeWith(oldFilter);

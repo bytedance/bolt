@@ -37,19 +37,36 @@ PartialUpdateEngine::PartialUpdateEngine(
       std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
 }
 
+void PartialUpdateEngine::setResult(RowVectorPtr result_) {
+  PaimonEngine::setResult(result_);
+}
+
+void PartialUpdateEngine::startActiveRow() {
+  result->resize(result->size() + 1);
+  activeRowIndex_ = result->size() - 1;
+  hasActiveRow_ = true;
+  for (int i = 0; i < result->childrenSize(); i++) {
+    result->childAt(i)->setNull(activeRowIndex_, true);
+  }
+}
+
+void PartialUpdateEngine::finalizeActiveRow() {
+  if (!lastPk_.primaryKeys || !hasActiveRow_) {
+    return;
+  }
+
+  for (const auto& [idx, aggr] : aggregations_) {
+    aggr->appendResult(result->childAt(idx));
+  }
+}
+
 vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
-  if (!lastPk_.primaryKeys || !lastPk_.pkEqual(iterator)) {
-    if (result->size() > 0) {
-      for (const auto& [idx, aggr] : aggregations_) {
-        auto dest = result->childAt(idx);
-        aggr->appendResult(dest);
-      }
-    }
-    result->resize(result->size() + 1);
-    const auto newRowIdx = result->size() - 1;
-    for (int i = 0; i < result->childrenSize(); i++) {
-      result->childAt(i)->setNull(newRowIdx, true);
-    }
+  if (lastPk_.primaryKeys && !lastPk_.pkEqual(iterator)) {
+    finalizeCompletedGroups(iterator);
+  }
+
+  if (!lastPk_.primaryKeys) {
+    startActiveRow();
     lastSequenceGroupKeyValues =
         std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
   }
@@ -65,7 +82,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
             << std::endl;
   }
 
-  int destIdx = result->size() - 1;
+  int destIdx = activeRowIndex_;
   for (int i = 0; i < iterator->values->childrenSize(); i++) {
     if (sequenceGroupFields_.find(i) == sequenceGroupFields_.end()) {
       auto src = iterator->values->childAt(i);
@@ -107,7 +124,7 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   lastPk_ = *iterator;
 
   VLOG(2) << "Result:"
-          << "-->" << result->toString(result->size() - 1);
+          << "-->" << result->toString(activeRowIndex_);
   VLOG(2) << "  Sequence group key:";
   for (int i = 0; i < lastSequenceGroupKeyValues.size(); i++) {
     VLOG(2) << "\t\t\t\t"
@@ -120,15 +137,22 @@ vector_size_t PartialUpdateEngine::add(PaimonRowIteratorPtr iterator) {
   return result->size();
 }
 
-vector_size_t PartialUpdateEngine::finish() {
-  if (result->size() > 0) {
-    for (const auto& [idx, aggr] : aggregations_) {
-      auto dest = result->childAt(idx);
-      aggr->appendResult(dest);
-    }
+vector_size_t PartialUpdateEngine::finalizeCompletedGroups(
+    const PaimonRowIteratorPtr& nextInput) {
+  if (lastPk_.primaryKeys && (!nextInput || !lastPk_.pkEqual(nextInput))) {
+    finalizeActiveRow();
+    lastPk_.primaryKeys = nullptr;
+    hasActiveRow_ = false;
+    activeRowIndex_ = 0;
+    lastSequenceGroupKeyValues =
+        std::vector<RowVectorPtr>(sequenceGroups_.size(), nullptr);
   }
 
-  return result->size();
+  return result->size() - (hasActiveRow_ ? 1 : 0);
+}
+
+vector_size_t PartialUpdateEngine::finish() {
+  return finalizeCompletedGroups(nullptr);
 }
 
 } // namespace bytedance::bolt::connector::hive

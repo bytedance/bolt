@@ -31,10 +31,13 @@
 #include "bolt/exec/ContainerRowSerde.h"
 
 #include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/VariantVector.h"
 namespace bytedance::bolt::exec {
 namespace {
+StringView readStringView(ByteInputStream& stream, std::string& storage);
 
 // Copy from vector to stream.
 void serializeSwitch(
@@ -217,6 +220,15 @@ void serializeOne<TypeKind::VARBINARY>(
   auto string = vector.asUnchecked<SimpleVector<StringView>>()->valueAt(index);
   stream.appendOne<int32_t>(string.size());
   stream.appendStringView(string);
+}
+
+template <>
+void serializeOne<TypeKind::VARIANT>(
+    const BaseVector& vector,
+    vector_size_t index,
+    ByteOutputStream& stream,
+    const ContainerRowSerdeOptions& /*options*/) {
+  variant_serde::serializeVariant(vector, index, stream);
 }
 
 template <>
@@ -495,6 +507,16 @@ void deserializeOne<TypeKind::VARBINARY>(
   deserializeString(in, index, result, exactSize);
 }
 
+template <>
+void deserializeOne<TypeKind::VARIANT>(
+    ByteInputStream& in,
+    vector_size_t index,
+    BaseVector& result,
+    bool exactSize) {
+  variant_serde::deserializeVariant(
+      in, index, result, exactSize, deserializeString);
+}
+
 std::vector<uint64_t> readNulls(ByteInputStream& in, int32_t size) {
   auto n = bits::nwords(size);
   std::vector<uint64_t> nulls(n);
@@ -665,6 +687,16 @@ std::optional<int32_t> compare<TypeKind::VARBINARY>(
     CompareFlags flags) {
   auto result = compareStringAsc(left, right, index, flags.equalsOnly);
   return flags.ascending ? result : result * -1;
+}
+
+template <>
+std::optional<int32_t> compare<TypeKind::VARIANT>(
+    ByteInputStream& left,
+    const BaseVector& right,
+    vector_size_t index,
+    CompareFlags flags) {
+  return variant_serde::compareVariantStreamVsVector(
+      left, right, index, flags, readStringView);
 }
 
 template <>
@@ -923,6 +955,16 @@ std::optional<int32_t> compare<TypeKind::VARBINARY>(
                          : rightValue.compare(leftValue);
 }
 
+template <>
+std::optional<int32_t> compare<TypeKind::VARIANT>(
+    ByteInputStream& left,
+    ByteInputStream& right,
+    const Type* /*type*/,
+    CompareFlags flags) {
+  return variant_serde::compareVariantStreamVsStream(
+      left, right, flags, readStringView);
+}
+
 template <TypeKind Kind>
 std::optional<int32_t> compareArraysInternal(
     ByteInputStream& left,
@@ -1055,6 +1097,13 @@ uint64_t hashOne<TypeKind::VARBINARY>(
     const Type* /*type*/) {
   std::string storage;
   return folly::hasher<StringView>()(readStringView(stream, storage));
+}
+
+template <>
+uint64_t hashOne<TypeKind::VARIANT>(
+    ByteInputStream& stream,
+    const Type* /*type*/) {
+  return variant_serde::hashVariant(stream, readStringView);
 }
 
 uint64_t

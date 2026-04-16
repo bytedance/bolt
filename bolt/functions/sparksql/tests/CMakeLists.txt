@@ -76,6 +76,7 @@ add_executable(
   RaiseErrorTest.cpp
   RandTest.cpp
   RegexFunctionsTest.cpp
+  SliceTest.cpp
   SizeTest.cpp
   SortArrayTest.cpp
   SparkArraySortTest.cpp
@@ -93,6 +94,7 @@ add_executable(
   UnBase64Test.cpp
   UnscaledValueFunctionTest.cpp
   URLFunctionsTest.cpp
+  VariantFunctionTest.cpp
   XxHash64Test.cpp
 )
 

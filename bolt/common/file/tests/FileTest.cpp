@@ -29,6 +29,7 @@
  */
 
 #include <fcntl.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/File.h"
@@ -59,7 +60,10 @@ void writeData(WriteFile* writeFile, bool useIOBuf = false) {
   }
 }
 
-void readData(ReadFile* readFile, bool checkFileSize = true) {
+void readData(
+    ReadFile* readFile,
+    bool checkFileSize = true,
+    bool testReadAsync = false) {
   if (checkFileSize) {
     ASSERT_EQ(readFile->size(), 15 + kOneMB);
   }
@@ -97,6 +101,30 @@ void readData(ReadFile* readFile, bool checkFileSize = true) {
   ASSERT_EQ(std::string_view(head, sizeof(head)), "aaaaabbbbbcc");
   ASSERT_EQ(std::string_view(middle, sizeof(middle)), "cccc");
   ASSERT_EQ(std::string_view(tail, sizeof(tail)), "ccddddd");
+
+  if (testReadAsync) {
+    std::vector<folly::Range<char*>> buffers1 = {
+        folly::Range<char*>(head, sizeof(head)),
+        folly::Range<char*>(nullptr, (char*)(uint64_t)500000)};
+    auto future1 = readFile->preadvAsync(0, buffers1);
+    const auto offset1 = sizeof(head) + 500000;
+    std::vector<folly::Range<char*>> buffers2 = {
+        folly::Range<char*>(middle, sizeof(middle)),
+        folly::Range<char*>(
+            nullptr,
+            (char*)(uint64_t)(15 + kOneMB - offset1 - sizeof(middle) - sizeof(tail)))};
+    auto future2 = readFile->preadvAsync(offset1, buffers2);
+    std::vector<folly::Range<char*>> buffers3 = {
+        folly::Range<char*>(tail, sizeof(tail))};
+    const auto offset2 = 15 + kOneMB - sizeof(tail);
+    auto future3 = readFile->preadvAsync(offset2, buffers3);
+    ASSERT_EQ(offset1, future1.wait().value());
+    ASSERT_EQ(offset2 - offset1, future2.wait().value());
+    ASSERT_EQ(sizeof(tail), future3.wait().value());
+    ASSERT_EQ(std::string_view(head, sizeof(head)), "aaaaabbbbbcc");
+    ASSERT_EQ(std::string_view(middle, sizeof(middle)), "cccc");
+    ASSERT_EQ(std::string_view(tail, sizeof(tail)), "ccddddd");
+  }
 }
 
 // We could templated this test, but that's kinda overkill for how simple it is.
@@ -148,8 +176,24 @@ TEST(LocalFile, writeAndRead) {
       LocalWriteFile writeFile(filename);
       writeData(&writeFile, useIOBuf);
     }
-    LocalReadFile readFile(filename);
-    readData(&readFile);
+    // read async
+    {
+      const std::unique_ptr<folly::CPUThreadPoolExecutor> executor =
+          std::make_unique<folly::CPUThreadPoolExecutor>(
+              std::max(
+                  1,
+                  static_cast<int32_t>(
+                      std::thread::hardware_concurrency() / 2)),
+              std::make_shared<folly::NamedThreadFactory>(
+                  "LocalFileReadAheadTest"));
+      LocalReadFile readFile(filename, executor.get());
+      readData(&readFile, true, true);
+    }
+    // read sync
+    {
+      LocalReadFile readFile(filename);
+      readData(&readFile);
+    }
   }
 }
 

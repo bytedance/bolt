@@ -38,6 +38,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/Type.h"
+#include "bolt/type/VariantValue.h"
 #include "folly/dynamic.h"
 namespace bytedance::bolt {
 
@@ -66,6 +67,9 @@ struct VariantEquality<TypeKind::ROW>;
 
 template <>
 struct VariantEquality<TypeKind::MAP>;
+
+template <>
+struct VariantEquality<TypeKind::VARIANT>;
 
 bool dispatchDynamicVariantEquality(
     const variant& a,
@@ -134,6 +138,12 @@ struct OpaqueCapsule {
 template <>
 struct VariantTypeTraits<TypeKind::OPAQUE> {
   using stored_type = OpaqueCapsule;
+};
+
+template <>
+struct VariantTypeTraits<TypeKind::VARIANT> {
+  using native_type = VariantValue;
+  using stored_type = OwnedVariantValue;
 };
 } // namespace detail
 

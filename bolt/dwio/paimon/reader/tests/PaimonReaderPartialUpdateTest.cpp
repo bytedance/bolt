@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include <limits>
-#include <map>
 #include <optional>
 #include <string>
 
@@ -24,16 +22,11 @@
 #include <gtest/gtest.h>
 
 #include <bolt/dwio/common/BufferedInput.h>
-#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/dwio/common/Options.h"
-#include "bolt/type/Timestamp.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
-#include "folly/Range.h"
 
-#include "bolt/common/base/Fs.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -45,7 +38,6 @@
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
-#include <algorithm>
 using namespace bytedance::bolt;
 // using exec::test::HiveConnectorTestBase;
 using namespace bytedance::bolt;
@@ -1333,6 +1325,150 @@ TEST_F(PaimonReaderPartialUpdateTest, uninitializedMemoryTest) {
   }
 
   BOLT_CHECK(nBatch > 0);
+}
+
+TEST_F(PaimonReaderPartialUpdateTest, samePrimaryKeyAcrossOutputBatches) {
+  filesystems::registerLocalFileSystem();
+
+  std::shared_ptr<folly::Executor> executor(
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::thread::hardware_concurrency()));
+
+  auto tempDir = exec::test::TempDirectoryPath::create();
+
+  /*
+   * Reproducer:
+   * - A large number of updates for a single PK (crosses reader internal
+   *   1024-row batches).
+   * - Sequence-group updates with nullable VARCHAR values to exercise
+   *   copyRanges/copyNulls paths.
+   * - Force tiny output batches so one PK spans many next() calls.
+   */
+  auto rowType = ROW({
+      {"k", BIGINT()},
+      {"sg", BIGINT()},
+      {"v1", VARCHAR()},
+      {"v2", VARCHAR()},
+      {"_SEQUENCE_NUMBER", BIGINT()},
+      {"_VALUE_KIND", TINYINT()},
+  });
+
+  bytedance::bolt::test::VectorMaker maker{leafPool_.get()};
+
+  constexpr int kNumRows = 1200;
+  std::vector<int64_t> kValues(kNumRows, 1);
+  std::vector<int64_t> sgValues;
+  std::vector<int64_t> seqValues;
+  std::vector<std::optional<StringView>> v1Values;
+  std::vector<std::optional<StringView>> v2Values;
+  std::vector<int8_t> rowKinds;
+  sgValues.reserve(kNumRows);
+  seqValues.reserve(kNumRows);
+  v1Values.reserve(kNumRows);
+  v2Values.reserve(kNumRows);
+  rowKinds.reserve(kNumRows);
+
+  for (int i = 0; i < kNumRows; ++i) {
+    sgValues.push_back(i + 1);
+    seqValues.push_back(i + 1);
+    rowKinds.push_back(static_cast<int8_t>(PaimonRowKind::INSERT));
+
+    if (i == kNumRows - 1 || i % 57 == 0) {
+      v1Values.emplace_back("2023-01-04 11:27:58");
+    } else {
+      v1Values.emplace_back(std::nullopt);
+    }
+
+    if (i == kNumRows - 1 || i % 97 == 0) {
+      v2Values.emplace_back("🚀😅🆎😇🌁👾🚯");
+    } else {
+      v2Values.emplace_back(std::nullopt);
+    }
+  }
+
+  createPaimonFile(
+      tempDir->getPath(),
+      executor,
+      {"k"},
+      maker.rowVector(
+          rowType->names(),
+          {maker.flatVector<int64_t>(kValues),
+           maker.flatVector<int64_t>(sgValues),
+           maker.flatVectorNullable<StringView>(v1Values),
+           maker.flatVectorNullable<StringView>(v2Values),
+           maker.flatVector<int64_t>(seqValues),
+           maker.flatVector<int8_t>(rowKinds)}));
+
+  core::PlanNodeId scanNodeId;
+
+  std::unordered_map<std::string, std::string> tableParameters{
+      {connector::paimon::kMergeEngine,
+       connector::paimon::kPartialUpdateMergeEngine},
+      {connector::paimon::kPrimaryKey, "k"},
+      {connector::paimon::kPartialUpdateKeyPrefix + std::string("sg") +
+           connector::paimon::kPartialUpdateSequenceGroup,
+       "v1,v2"}};
+
+  auto tableHandle = std::make_shared<connector::hive::HiveTableHandle>(
+      kHiveConnectorId,
+      "hive_table",
+      true,
+      SubfieldFilters{},
+      nullptr,
+      rowType,
+      tableParameters);
+
+  auto assignments = getIdentityAssignment(rowType);
+
+  auto readPlanFragment = exec::test::PlanBuilder()
+                              .tableScan(rowType, tableHandle, assignments)
+                              .capturePlanNodeId(scanNodeId)
+                              .planFragment();
+
+  auto queryCtx = core::QueryCtx::create(executor.get());
+  queryCtx->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kMaxOutputBatchRows, "1"},
+       {core::QueryConfig::kPreferredOutputBatchRows, "1"}});
+
+  auto readTask = exec::Task::create(
+      "my_read_task",
+      readPlanFragment,
+      /*destination=*/0,
+      queryCtx,
+      exec::Task::ExecutionMode::kSerial);
+
+  auto filePaths = getFilePaths(tempDir->getPath());
+
+  std::vector<std::shared_ptr<hive::HiveConnectorSplit>> hiveSplits;
+  hiveSplits.reserve(filePaths.size());
+  for (const auto& filePath : filePaths) {
+    hiveSplits.push_back(std::make_shared<hive::HiveConnectorSplit>(
+        kHiveConnectorId, filePath, dwio::common::FileFormat::PARQUET));
+  }
+
+  auto connectorSplit = std::make_shared<connector::hive::PaimonConnectorSplit>(
+      kHiveConnectorId, hiveSplits);
+  readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
+  readTask->noMoreSplits(scanNodeId);
+
+  int nBatch = 0;
+  int totalRows = 0;
+  RowVectorPtr lastResult;
+  while (auto result = readTask->next()) {
+    ++nBatch;
+    totalRows += result->size();
+    lastResult = result;
+  }
+
+  BOLT_CHECK(nBatch > 0);
+  EXPECT_EQ(totalRows, 1);
+  ASSERT_TRUE(lastResult != nullptr);
+  EXPECT_EQ(
+      lastResult->childAt(2)->as<SimpleVector<StringView>>()->valueAt(0),
+      "2023-01-04 11:27:58");
+  EXPECT_EQ(
+      lastResult->childAt(3)->as<SimpleVector<StringView>>()->valueAt(0),
+      "🚀😅🆎😇🌁👾🚯");
 }
 
 } // namespace

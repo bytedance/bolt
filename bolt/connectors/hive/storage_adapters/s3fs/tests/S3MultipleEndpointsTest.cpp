@@ -46,7 +46,7 @@ static const std::string_view kBucketName = "writedata";
 
 using namespace bytedance::bolt::exec::test;
 
-namespace facebook::bolt {
+namespace bytedance::bolt {
 namespace {
 
 class S3MultipleEndpoints : public S3Test, public ::test::VectorTestBase {
@@ -234,7 +234,7 @@ TEST_F(S3MultipleEndpoints, bucketEndpoints) {
   connector::unregisterConnector(std::string(kConnectorId2));
 }
 
-} // namespace facebook::bolt
+} // namespace bytedance::bolt
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);

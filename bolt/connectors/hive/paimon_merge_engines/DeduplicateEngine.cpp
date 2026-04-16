@@ -32,6 +32,10 @@ vector_size_t DeduplicateEngine::add(PaimonRowIteratorPtr iterator) {
   if (ignoreDelete && iterator->isRetract())
     return result->size();
 
+  if (last.primaryKeys && !last.pkEqual(iterator)) {
+    finalizeCompletedGroups(iterator);
+  }
+
   if (last.primaryKeys) {
     VLOG(2) << "Adding Last:"
             << "-->" << last.values->toString(last.rowIndex)
@@ -42,11 +46,6 @@ vector_size_t DeduplicateEngine::add(PaimonRowIteratorPtr iterator) {
           << "  Seq:" << iterator->sequenceFields->toString(iterator->rowIndex);
 
   if (!last.primaryKeys) {
-    last = *iterator;
-  } else if (!last.pkEqual(iterator)) {
-    if (last.isAdd()) {
-      append(result, last);
-    }
     last = *iterator;
   } else if (last.sequenceFields
                  ->compare(
@@ -61,13 +60,20 @@ vector_size_t DeduplicateEngine::add(PaimonRowIteratorPtr iterator) {
   return result->size();
 }
 
-vector_size_t DeduplicateEngine::finish() {
-  if (last.primaryKeys && last.isAdd()) {
-    append(result, last);
+vector_size_t DeduplicateEngine::finalizeCompletedGroups(
+    const PaimonRowIteratorPtr& nextInput) {
+  if (last.primaryKeys && (!nextInput || !last.pkEqual(nextInput))) {
+    if (last.isAdd()) {
+      append(result, last);
+    }
     last.primaryKeys = nullptr;
   }
 
   return result->size();
+}
+
+vector_size_t DeduplicateEngine::finish() {
+  return finalizeCompletedGroups(nullptr);
 }
 
 } // namespace bytedance::bolt::connector::hive

@@ -70,6 +70,16 @@ class RowGroupMetaDataPtr {
   /// parent's column ordering.
   int numColumns() const;
 
+  /// The sorting column, column index in this row group
+  int32_t sortingColumnIdx(int i) const;
+
+  /// If true, indicates this column is sorted in descending order.
+  bool sortingColumnDescending(int i) const;
+
+  /// If true, nulls will come before non-null values, otherwise, nulls go at
+  /// the end
+  bool sortingColumnNullsFirst(int i) const;
+
   /// Return the ColumnChunkMetaData pointer of the corresponding column index.
   ColumnChunkMetaDataPtr columnChunk(int index) const;
 
@@ -107,6 +117,15 @@ class FileMetaDataPtr {
 
   /// Return the RowGroupMetaData pointer of the corresponding row group index.
   RowGroupMetaDataPtr rowGroup(int index) const;
+
+  /// The key/value metadata size.
+  int64_t keyValueMetadataSize() const;
+
+  /// Returns True if the key/value metadata contains the key input.
+  bool keyValueMetadataContains(const std::string_view key) const;
+
+  /// Returns the value inside the key/value metadata if the key is present.
+  std::string keyValueMetadataValue(const std::string_view key) const;
 
  private:
   const void* ptr_;

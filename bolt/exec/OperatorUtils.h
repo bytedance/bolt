@@ -93,14 +93,42 @@ std::vector<VectorPtr> wrapChildren(
     const std::vector<VectorPtr>& children,
     BufferPtr nulls = nullptr);
 
-/// Wraps all children of the specified row vector into a dictionary using
-/// specified mapping, combine dictionaries if needed. Returns vector as-is if
-/// mapping is null.
+/// Wraps all children of the specified row vector into a dictionary using the
+/// specified mapping and combines dictionary layers when possible. Returns the
+/// input vector as-is if 'mapping' is null.
+///
+/// IMPORTANT: this helper may eagerly read and transpose 'mapping' while
+/// constructing the output vectors. This is required to collapse
+/// dictionary-over-dictionary inputs into a single dictionary layer and is the
+/// intended fast path for callers whose row mapping is already fully
+/// materialized.
+///
+/// As a result, callers must only use this API when every entry in 'mapping'
+/// has been finalized before the call. It is not safe to pass a buffer that is
+/// going to be filled incrementally after the wrapped vectors are created. In
+/// such cases, any child that is already dictionary-encoded may capture a
+/// partially initialized mapping and produce incorrect results.
+///
+/// If an operator creates output vectors first and populates row indices later,
+/// it must keep a dictionary directly over the input child instead of using
+/// this helper. MergeJoin::prepareOutput is one example of such a lifecycle.
 RowVectorPtr wrapAndCombineDict(
     vector_size_t size,
     BufferPtr mapping,
     const RowVectorPtr& vector);
 
+/// Projects 'inputs' according to 'identityProjection' and wraps the projected
+/// children with 'mapping'.
+///
+/// This helper shares the same contract as wrapAndCombineDict(): the mapping
+/// must already contain the final row numbers for every output position when
+/// the function is called. The implementation may combine existing dictionary
+/// layers immediately, which requires reading 'mapping' eagerly.
+///
+/// Do not use this API with a mapping buffer that will be populated after the
+/// wrapped vectors are constructed. If the projected input already contains a
+/// dictionary layer, delayed writes to 'mapping' will not be reflected in the
+/// combined result.
 void wrapIndirectChildren(
     std::vector<IdentityProjection> identityProjection,
     const std::vector<VectorPtr>& inputs,
@@ -204,5 +232,11 @@ void projectChildren(
     const std::vector<IdentityProjection>& projections,
     int32_t size,
     const BufferPtr& mapping);
+
+RowVectorPtr wrapColumns(
+    const RowVector* input,
+    const std::vector<column_index_t>& channels,
+    const RowTypePtr& types,
+    memory::MemoryPool* pool);
 
 } // namespace bytedance::bolt::exec

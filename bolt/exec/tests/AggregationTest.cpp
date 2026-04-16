@@ -1051,6 +1051,45 @@ TEST_P(AggregationTest, partialDistinctWithAbandon) {
              .assertResults("SELECT distinct c0, sum(c0) FROM tmp group by c0");
 }
 
+TEST_P(AggregationTest, partialDistinctFlushesAccumulatedOutputOnAbandon) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP()
+        << "GPU Aggregation does not support partial aggregation stats\n";
+  }
+  auto vectors = {
+      // 1st batch produces 100 distinct rows which stay buffered in
+      // accumulatedOutput_ because min_output_batch_rows is larger.
+      makeRowVector(
+          {makeFlatVector<int32_t>(100, [](auto row) { return row; })}),
+      // 2nd batch adds one new distinct row and triggers abandon partial
+      // aggregation in the same getOutput() call. Without flushing
+      // accumulatedOutput_, these 101 distinct rows are lost before reaching
+      // the final aggregation.
+      makeRowVector(
+          {makeFlatVector<int32_t>(1, [](auto /*row*/) { return 100; })}),
+  };
+  createDuckDbTable(vectors);
+  CursorParameters params;
+  params.maxDrivers = 1;
+  params.queryCtx = core::QueryCtx::create(executor_.get());
+  params.queryCtx->testingOverrideConfigUnsafe({
+      {QueryConfig::kMinOutputBatchRows, "128"},
+      {QueryConfig::kAbandonPartialAggregationMinRows, "100"},
+      {QueryConfig::kAbandonPartialAggregationMinPct, "50"},
+  });
+  params.planNode = PlanBuilder()
+                        .values(vectors)
+                        .partialAggregation({"c0"}, {}, {}, GetParam().useGPU)
+                        .finalAggregation(GetParam().useGPU)
+                        .planNode();
+  auto result = readCursor(params, [](Task*) {});
+  int64_t numRows = 0;
+  for (const auto& vector : result.second) {
+    numRows += vector->size();
+  }
+  ASSERT_EQ(101, numRows);
+}
+
 TEST_P(AggregationTest, toIntermediate) {
   auto vectors = {
       // 1st batch will produce 100 distinct groups from 10 rows.

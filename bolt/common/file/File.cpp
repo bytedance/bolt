@@ -122,7 +122,8 @@ uint64_t InMemoryWriteFile::size() const {
   return file_->size();
 }
 
-LocalReadFile::LocalReadFile(std::string_view path) : path_(path) {
+LocalReadFile::LocalReadFile(std::string_view path, folly::Executor* executor)
+    : executor_(executor), path_(path) {
   fd_ = open(path_.c_str(), O_RDONLY);
   if (fd_ < 0) {
     if (errno == ENOENT) {
@@ -146,7 +147,8 @@ LocalReadFile::LocalReadFile(std::string_view path) : path_(path) {
   size_ = rc;
 }
 
-LocalReadFile::LocalReadFile(int32_t fd) : fd_(fd) {}
+LocalReadFile::LocalReadFile(int32_t fd, folly::Executor* executor)
+    : executor_(executor), fd_(fd) {}
 
 LocalReadFile::~LocalReadFile() {
   const int ret = close(fd_);
@@ -228,6 +230,23 @@ uint64_t LocalReadFile::preadv(
   }
 
   return totalBytesRead;
+}
+
+folly::SemiFuture<uint64_t> LocalReadFile::preadvAsync(
+    uint64_t offset,
+    const std::vector<folly::Range<char*>>& buffers) const {
+  if (!executor_) {
+    return ReadFile::preadvAsync(offset, buffers);
+  }
+  auto [promise, future] = folly::makePromiseContract<uint64_t>();
+  executor_->add([this,
+                  _promise = std::move(promise),
+                  _offset = offset,
+                  _buffers = buffers]() mutable {
+    auto delegateFuture = ReadFile::preadvAsync(_offset, _buffers);
+    _promise.setTry(std::move(delegateFuture).getTry());
+  });
+  return std::move(future);
 }
 
 uint64_t LocalReadFile::size() const {

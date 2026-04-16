@@ -322,6 +322,33 @@ void Spiller::extractSpill(folly::Range<char**> rows, RowVectorPtr& resultPtr) {
   }
 }
 
+void Spiller::extractSpillHybrid(
+    folly::Range<char**> rows,
+    RowVectorPtr& resultPtr) {
+  BOLT_CHECK(
+      type_ != Type::kAggregateInput && type_ != Type::kAggregateOutput,
+      "Hybrid mode does not support aggregation");
+
+  if (!resultPtr) {
+    resultPtr = BaseVector::create<RowVector>(
+        rowType_, rows.size(), memory::spillMemoryPool());
+  } else {
+    resultPtr->prepareForReuse();
+    resultPtr->resize(rows.size());
+  }
+  auto result = resultPtr.get();
+
+  std::vector<HybridRowId> outputRowIds;
+  outputRowIds.resize(rows.size());
+  hybridContainer_->getRowIds(rows.data(), rows.size(), outputRowIds);
+
+  auto& types = rowType_->children();
+  for (auto i = 0; i < types.size(); ++i) {
+    hybridContainer_->extractColumn(
+        rows.data(), rows.size(), i, result->childAt(i), outputRowIds);
+  }
+}
+
 int64_t Spiller::extractSpillVector(
     SpillRows& rows,
     int32_t maxRows,
@@ -354,6 +381,49 @@ int64_t Spiller::extractSpillVector(
       }
     }
     extractSpill(folly::Range(&rows[nextBatchIndex], numRows), spillVector);
+    nextBatchIndex += numRows;
+  }
+  updateSpillConvertTime(convertTimeUs);
+  return bytes;
+}
+
+int64_t Spiller::extractSpillVectorHybrid(
+    SpillRows& rows,
+    int32_t maxRows,
+    int64_t maxBytes,
+    RowVectorPtr& spillVector,
+    size_t& nextBatchIndex) {
+  BOLT_CHECK(
+      type_ != Type::kAggregateInput && type_ != Type::kAggregateOutput,
+      "Hybrid mode does not support aggregation");
+  BOLT_CHECK_NE(type_, Type::kHashJoinProbe);
+
+  auto limit = std::min<size_t>(rows.size() - nextBatchIndex, maxRows);
+  BOLT_CHECK(!rows.empty());
+  int32_t numRows = 0;
+  int64_t bytes = 0;
+  uint64_t convertTimeUs{0};
+
+  // Estimate average row byte from hybrid container
+  uint32_t avgRowByte = 0;
+  auto estimatedRowSize = hybridContainer_->estimateRowSize();
+  if (estimatedRowSize.has_value()) {
+    avgRowByte = estimatedRowSize.value();
+  }
+
+  {
+    MicrosecondTimer timer(&convertTimeUs);
+    for (; numRows < limit; ++numRows) {
+      bytes += avgRowByte;
+      if (bytes > maxBytes) {
+        // Increment because the row that went over the limit is part
+        // of the result. We must spill at least one row.
+        ++numRows;
+        break;
+      }
+    }
+    extractSpillHybrid(
+        folly::Range(&rows[nextBatchIndex], numRows), spillVector);
     nextBatchIndex += numRows;
   }
   updateSpillConvertTime(convertTimeUs);
@@ -596,12 +666,21 @@ std::unique_ptr<Spiller::SpillStatus> Spiller::writeSpill(int32_t partition) {
     size_t written = 0;
     if (spillMode_ == Mode::kRowVector) {
       while (written < run.rows.size()) {
-        extractSpillVector(
-            run.rows,
-            kTargetBatchRows,
-            kTargetBatchBytes,
-            spillVector,
-            written);
+        if (hybridSortEnabled_) {
+          extractSpillVectorHybrid(
+              run.rows,
+              kTargetBatchRows,
+              kTargetBatchBytes,
+              spillVector,
+              written);
+        } else {
+          extractSpillVector(
+              run.rows,
+              kTargetBatchRows,
+              kTargetBatchBytes,
+              spillVector,
+              written);
+        }
         totalBytes += state_.appendToPartition(partition, spillVector);
         spillVector->prepareForReuse();
         if (totalBytes > state_.targetFileSize()) {

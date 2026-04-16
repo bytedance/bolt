@@ -372,14 +372,22 @@ uint64_t PaimonSplitReader::next(int64_t size, VectorPtr& output) {
   mergeEngine_->setResult(std::dynamic_pointer_cast<RowVector>(output));
 
   auto mergetStartTime = getCurrentTimeMicro();
-  while (!heap.empty()) {
-    auto iterator = heap.top();
+  while (true) {
+    auto iterator = heap.empty() ? nullptr : heap.top();
+    auto rowCnt = mergeEngine_->finalizeCompletedGroups(iterator);
+
+    if (rowCnt >= size || !iterator) {
+      auto mergeTime = (getCurrentTimeMicro() - mergetStartTime) * 1000;
+      ioStats_->incTotalMergeTime(mergeTime);
+      return rowCnt;
+    }
+
     VLOG(2) << "Values:" << iterator->values->toString(iterator->rowIndex)
             << "   Seq:"
             << iterator->sequenceFields->toString(iterator->rowIndex);
     heap.pop();
 
-    int rowCnt = mergeEngine_->add(iterator);
+    mergeEngine_->add(iterator);
 
     if (iterator->next()) {
       heap.push(iterator);
@@ -388,17 +396,7 @@ uint64_t PaimonSplitReader::next(int64_t size, VectorPtr& output) {
       if (nextBatchIterator)
         heap.push(nextBatchIterator);
     }
-
-    if (rowCnt >= size) {
-      return rowCnt;
-    }
   }
-
-  mergeEngine_->finish();
-  auto mergeTime = (getCurrentTimeMicro() - mergetStartTime) * 1000;
-  ioStats_->incTotalMergeTime(mergeTime);
-
-  return output->size();
 }
 
 bool PaimonSplitReader::allPrefetchIssued() const {
