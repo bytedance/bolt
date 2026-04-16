@@ -86,6 +86,13 @@ struct DirectoryOptions : FileOptions {
       "make-directory-config"};
 };
 
+struct FileSystemOptions {
+  /// As for now, only local file system respects this option. It implements
+  /// async read by using a background cpu executor. Some filesystem might has
+  /// native async read-ahead support.
+  bool readAheadEnabled{false};
+};
+
 /// An abstract FileSystem
 class FileSystem {
  public:
@@ -183,5 +190,6 @@ void registerFileSystem(
         std::string_view)> fileSystemGenerator);
 
 /// Register the local filesystem.
-void registerLocalFileSystem();
+void registerLocalFileSystem(
+    const FileSystemOptions& options = FileSystemOptions());
 } // namespace bytedance::bolt::filesystems

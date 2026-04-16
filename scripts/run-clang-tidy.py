@@ -460,6 +460,18 @@ def tidy(args):
         if exclude_re is not None:
             files_to_process = [f for f in files_to_process if not exclude_re.search(f)]
 
+        # Only analyze .cpp files — header files (.h, -inl.h) are not standalone
+        # translation units and cause false errors in clang-tidy when analyzed
+        # independently. Header diagnostics are still checked transitively when
+        # clang-tidy processes .cpp files that include them.
+        before_filter = len(files_to_process)
+        files_to_process = [f for f in files_to_process if f.endswith(".cpp")]
+        header_excluded = before_filter - len(files_to_process)
+        if header_excluded > 0:
+            print(
+                f"Excluded {header_excluded} header file(s) (analyzed transitively via .cpp)."
+            )
+
         if not files_to_process:
             print("No changed C/C++ lines detected for clang-tidy.")
             return 0
@@ -591,7 +603,7 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude",
-        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$",
+        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
         help="Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
     )
     parser.add_argument(

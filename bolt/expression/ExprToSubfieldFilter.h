@@ -429,6 +429,16 @@ class ExprToSubfieldFilterParser {
  public:
   virtual ~ExprToSubfieldFilterParser() = default;
 
+  static void registerAlias(
+      const std::string& alias,
+      const std::string& canonical);
+  static std::string getCanonicalName(const std::string& name);
+
+  // Creates an equal subfield filter against the given constant.
+  static std::unique_ptr<common::Filter> makeEqualFilter(
+      const core::TypedExprPtr& valueExpr,
+      core::ExpressionEvaluator* evaluator);
+
   /// Returns a parser provided to an earlier 'registerParser' call. Not thread
   /// safe.
   static const std::shared_ptr<ExprToSubfieldFilterParser>& getInstance() {
@@ -436,12 +446,23 @@ class ExprToSubfieldFilterParser {
     return parser_;
   }
 
-  /// Registers a parser. Silently overwrites previously registered parser if
-  /// any. Not thread safe.
+  /// Registers an additional fallback parser.
+  ///
+  /// The built-in Bolt parser remains the primary parser. This method is for
+  /// platform/vendor specific extensions, and will be consulted only when the
+  /// built-in parser returns std::nullopt.
+  ///
+  /// Not thread safe.
   static void registerParser(
-      std::shared_ptr<ExprToSubfieldFilterParser> parser) {
-    BOLT_CHECK_NOT_NULL(parser);
-    parser_ = std::move(parser);
+      std::shared_ptr<ExprToSubfieldFilterParser> parser);
+
+  /// Gives a fallback parser a chance to rewrite only the outer call into a
+  /// canonical Bolt/Presto form while preserving the original inputs. This is
+  /// useful for dialect-specific operator names, e.g. Spark comparison names,
+  /// where nested expressions should still be interpreted by Bolt's parser.
+  virtual core::CallTypedExprPtr normalizeCall(
+      const core::CallTypedExpr& call) {
+    return nullptr;
   }
 
   /// Analyzes 'call' expression to determine if it can be expressed as a
@@ -454,7 +475,9 @@ class ExprToSubfieldFilterParser {
   leafCallToSubfieldFilter(
       const core::CallTypedExpr& call,
       core::ExpressionEvaluator* evaluator,
-      bool negated = false) = 0;
+      bool negated = false) {
+    return std::nullopt;
+  }
 
   static std::unique_ptr<common::Filter> makeOrFilter(
       std::unique_ptr<common::Filter> a,
@@ -469,11 +492,6 @@ class ExprToSubfieldFilterParser {
 
   // Creates a non-equal subfield filter against the given constant.
   static std::unique_ptr<common::Filter> makeNotEqualFilter(
-      const core::TypedExprPtr& valueExpr,
-      core::ExpressionEvaluator* evaluator);
-
-  // Creates an equal subfield filter against the given constant.
-  static std::unique_ptr<common::Filter> makeEqualFilter(
       const core::TypedExprPtr& valueExpr,
       core::ExpressionEvaluator* evaluator);
 
@@ -512,11 +530,22 @@ class ExprToSubfieldFilterParser {
       bool negated);
 
  private:
-  // Singleton parser instance.
+  static void rebuildParserChain();
+
+  // Built-in parser (Bolt-owned).
+  static std::shared_ptr<ExprToSubfieldFilterParser> boltParser_;
+
+  // Registered fallback parsers (platform/vendor owned).
+  static std::vector<std::shared_ptr<ExprToSubfieldFilterParser>>
+      fallbackParsers_;
+
+  // Singleton parser instance (a chain of boltParser_ + fallbackParsers_).
   static std::shared_ptr<ExprToSubfieldFilterParser> parser_;
+
+  // Alias mapping.
+  static std::unordered_map<std::string, std::string> aliases_;
 };
 
-// Parser for Presto expressions.
 class PrestoExprToSubfieldFilterParser : public ExprToSubfieldFilterParser {
  public:
   std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>

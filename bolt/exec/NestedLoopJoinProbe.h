@@ -222,7 +222,18 @@ class NestedLoopJoinProbe : public Operator {
 
   // Copies the ranges from buildVector specified by `buildCopyRanges_` to
   // `output_`, one projected column at a time. Clears buildCopyRanges_.
+  // Skipped when using dictionary encoding for build columns (single build
+  // vector).
   void copyBuildValues(const RowVectorPtr& buildVector);
+
+  // Whether to use dictionary encoding for build columns in the output.
+  // Enabled when there is a single build vector, avoiding deep copy of build
+  // data. Not applicable to LeftSemiProject joins (which skip build
+  // projections) or cross joins (which have their own optimized paths).
+  bool useBuildDictionary() const {
+    return isSingleBuildVector() && !isLeftSemiProjectJoin(joinType_) &&
+        !isCrossJoin();
+  }
 
   // Called when we are done processing the current probe batch, to signal we
   // are ready for the next one.
@@ -302,8 +313,9 @@ class NestedLoopJoinProbe : public Operator {
 
   // Output buffer members.
 
-  // Maximum number of rows in the output batch.
-  const vector_size_t outputBatchSize_;
+  // Maximum number of rows in the output batch. Dynamically adjusted based on
+  // observed output row size to stay within preferredOutputBatchBytes.
+  vector_size_t outputBatchSize_;
 
   // The current output batch being populated.
   RowVectorPtr output_;
@@ -320,6 +332,11 @@ class NestedLoopJoinProbe : public Operator {
 
   // Dictionary indices for build columns.
   BufferPtr buildIndices_;
+
+  // Dictionary indices for build columns in output vector. Used when there is
+  // a single build vector to avoid deep-copying build data.
+  BufferPtr buildOutputIndices_;
+  vector_size_t* rawBuildOutputIndices_{nullptr};
 
   // Join condition expression.
 
@@ -372,8 +389,8 @@ class NestedLoopJoinProbe : public Operator {
   // Index into `buildVectors_` for the build vector being currently processed.
   size_t buildIndex_{0};
 
-  // Row being currently processed from `buildVectors_[buildIndex_]`.
-  vector_size_t buildRow_{0};
+  // Row being currently processed from `decodedFilterResult_`.
+  vector_size_t filterResultRow_{0};
 
   // Keep track of the build rows that had matches (only used for right or full
   // outer joins).

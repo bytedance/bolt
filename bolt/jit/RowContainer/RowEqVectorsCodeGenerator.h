@@ -35,55 +35,55 @@ class RowEqVectorsCodeGenerator : public RowContainerCodeGenerator {
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* next_blk,
-      llvm::BasicBlock* phi_blk,
-      PhiNodeInputs& phi_inputs) override;
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* nextBlk,
+      llvm::BasicBlock* phiBlk,
+      PhiNodeInputs& phiInputs) override;
 
   llvm::BasicBlock* genIntegerCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk) override;
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk) override;
 
   llvm::BasicBlock* genTimestampCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk) override;
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk) override;
 
   llvm::BasicBlock* genFloatPointCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk) override;
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk) override;
 
   llvm::BasicBlock* genStringViewCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk) override;
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk) override;
 
   llvm::BasicBlock* genComplexCmpIR(
       bytedance::bolt::TypeKind kind,
       const llvm::SmallVector<llvm::Value*>& values,
       const size_t idx,
       llvm::Function* func,
-      PhiNodeInputs& phi_inputs,
-      llvm::BasicBlock* curr_blk,
-      llvm::BasicBlock* phi_blk) override;
+      PhiNodeInputs& phiInputs,
+      llvm::BasicBlock* currBlk,
+      llvm::BasicBlock* phiBlk) override;
 };
 
 } // namespace bytedance::bolt::jit

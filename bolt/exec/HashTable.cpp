@@ -76,7 +76,8 @@ HashTable<ignoreNullKeys>::HashTable(
     uint32_t minTableSizeForParallelJoinBuild,
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-    bool enableJit)
+    bool enableJit,
+    bool hybridMode)
     : BaseHashTable(std::move(hashers)),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
       isJoinBuild_(isJoinBuild),
@@ -90,19 +91,35 @@ HashTable<ignoreNullKeys>::HashTable(
       hashMode_ = HashMode::kHash;
     }
   }
-
-  rows_ = std::make_unique<RowContainer>(
-      keys,
-      !ignoreNullKeys,
-      accumulators,
-      dependentTypes,
-      allowDuplicates,
-      isJoinBuild,
-      hasProbedFlag,
-      hashMode_ != HashMode::kHash,
-      false /*useListRowIndex*/,
-      pool,
-      stringArena);
+  if (hybridMode) {
+    std::vector<TypePtr> rowIdType = {BIGINT()};
+    rows_ = std::make_unique<RowContainer>(
+        keys,
+        !ignoreNullKeys,
+        accumulators,
+        rowIdType,
+        allowDuplicates,
+        isJoinBuild,
+        hasProbedFlag,
+        hashMode_ != HashMode::kHash,
+        false /*useListRowIndex*/,
+        pool);
+    hybridData_ =
+        std::make_unique<HybridContainer>(keys, dependentTypes, rows_.get());
+  } else {
+    rows_ = std::make_unique<RowContainer>(
+        keys,
+        !ignoreNullKeys,
+        accumulators,
+        dependentTypes,
+        allowDuplicates,
+        isJoinBuild,
+        hasProbedFlag,
+        hashMode_ != HashMode::kHash,
+        false /*useListRowIndex*/,
+        pool,
+        stringArena);
+  }
   nextOffset_ = rows_->nextOffset();
 #ifdef ENABLE_BOLT_JIT // generate JIT lazily?
   if (enableJit_) {
@@ -130,7 +147,8 @@ HashTable<ignoreNullKeys>::HashTable(
     uint32_t minTableSizeForParallelJoinBuild,
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-    bool enableJitRowEqVectors)
+    bool enableJitRowEqVectors,
+    bool hybridMode)
     : HashTable<ignoreNullKeys>(
           std::move(hashers),
           accumulators,
@@ -142,7 +160,8 @@ HashTable<ignoreNullKeys>::HashTable(
           minTableSizeForParallelJoinBuild,
           pool,
           stringArena,
-          enableJitRowEqVectors) {}
+          enableJitRowEqVectors,
+          hybridMode) {}
 
 int32_t ProbeState::row() const {
   return row_;
@@ -839,8 +858,14 @@ void HashTable<ignoreNullKeys>::allocateTables(uint64_t size) {
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::clear() {
-  for (auto* rowContainer : allRows()) {
-    rowContainer->clear();
+  if (hybridData_) {
+    for (auto* hybridContainer : allHybridContainers()) {
+      hybridContainer->clear();
+    }
+  } else {
+    for (auto* rowContainer : allRows()) {
+      rowContainer->clear();
+    }
   }
   if (table_) {
     // All modes have 8 bytes per slot.
@@ -1653,6 +1678,19 @@ std::vector<RowContainer*> HashTable<ignoreNullKeys>::allRows() const {
 }
 
 template <bool ignoreNullKeys>
+std::vector<HybridContainer*> HashTable<ignoreNullKeys>::allHybridContainers()
+    const {
+  BOLT_CHECK_NOT_NULL(hybridData_);
+  std::vector<HybridContainer*> hybridContainers;
+  hybridContainers.reserve(otherTables_.size() + 1);
+  hybridContainers.push_back(hybridData_.get());
+  for (auto& other : otherTables_) {
+    hybridContainers.push_back(other->hybridData_.get());
+  }
+  return hybridContainers;
+}
+
+template <bool ignoreNullKeys>
 std::string HashTable<ignoreNullKeys>::toString() {
   std::stringstream out;
   out << "[HashTable keys: " << hashers_.size()
@@ -1808,6 +1846,16 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
     otherTables_.emplace_back(std::unique_ptr<HashTable<ignoreNullKeys>>(
         dynamic_cast<HashTable<ignoreNullKeys>*>(table.release())));
   }
+
+  // For hybrid mode
+  if (hybridData_) {
+    std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
+    hybridDataChannel[hybridData_->getId()] = hybridData_.get();
+    for (auto& table : otherTables_)
+      hybridDataChannel[table->hybridData()->getId()] = table->hybridData();
+    hybridData_->setAllContainers(hybridDataChannel);
+  }
+
   bool useValueIds = mayUseValueIds(*this);
   if (useValueIds) {
     for (auto& other : otherTables_) {

@@ -110,10 +110,7 @@ void registerMapUnionAggregate(const std::string& prefix) {
           const core::QueryConfig&
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(
-            argTypes.size(),
-            1,
-            "{} ({}): unexpected number of arguments",
-            name);
+            argTypes.size(), 1, "{}: unexpected number of arguments", name);
 
         return createMapAggregate<MapUnionAggregate>(resultType);
       });

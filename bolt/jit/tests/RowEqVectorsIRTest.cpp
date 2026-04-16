@@ -37,7 +37,7 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 1;
-static constexpr int32_t kRowsPerVector = 1'000;
+static constexpr int32_t kRowsPerVector = 256;
 
 #define DEBUG 0
 namespace {

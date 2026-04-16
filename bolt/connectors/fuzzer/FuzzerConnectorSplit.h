@@ -37,6 +37,10 @@ struct FuzzerConnectorSplit : public connector::ConnectorSplit {
   explicit FuzzerConnectorSplit(const std::string& connectorId, size_t numRows)
       : ConnectorSplit(connectorId), numRows(numRows) {}
 
+  int64_t splitSizeBytes() const override {
+    return 0;
+  }
+
   // Row many rows to generate.
   size_t numRows;
 };

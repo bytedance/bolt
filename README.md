@@ -22,6 +22,7 @@ Bolt focuses on the physical execution layer of DBMS while providing first-class
 
 Frameworks:
 * [Apache Gluten](https://github.com/apache/incubator-gluten/discussions/10929#discussioncomment-15037342) for Spark
+* RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)  
 * [OpenSearch](https://github.com/opensearch-project/sql/issues/4812?open_in_browser=true) for ElasticSearch
 * Flink (Coming Soon)
 * ...

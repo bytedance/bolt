@@ -38,6 +38,7 @@
 #include "bolt/vector/LazyVector.h"
 #include "bolt/vector/SequenceVector.h"
 #include "bolt/vector/TypeAliases.h"
+#include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorPool.h"
 #include "bolt/vector/VectorPrinter.h"
 #include "bolt/vector/VectorTypeUtils.h"
@@ -350,6 +351,9 @@ VectorPtr BaseVector::createInternal(
           std::move(sizes),
           std::move(keys),
           std::move(values));
+    }
+    case TypeKind::VARIANT: {
+      return VariantVector::create(pool, type, size);
     }
     case TypeKind::UNKNOWN: {
       BufferPtr nulls = allocateNulls(size, pool, bits::kNull);

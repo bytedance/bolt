@@ -42,6 +42,16 @@ class DeltaBpDecoder {
     initHeader();
   }
 
+  /// Returns the current buffer position after consuming header/values.
+  const char* bufferStart() const {
+    return bufferStart_;
+  }
+
+  /// Returns the number of values encoded in this delta-bp stream.
+  int64_t validValuesCount() const {
+    return static_cast<int64_t>(totalValueCount_);
+  }
+
   void skip(uint64_t numValues) {
     skip<false>(numValues, 0, nullptr);
   }
@@ -88,6 +98,14 @@ class DeltaBpDecoder {
       if (atEnd) {
         return;
       }
+    }
+  }
+
+  template <typename T>
+  void readValues(T* values, int32_t numValues) {
+    BOLT_DCHECK_LE(numValues, totalValuesRemaining_);
+    for (auto i = 0; i < numValues; i++) {
+      values[i] = T(readLong());
     }
   }
 
@@ -186,6 +204,7 @@ class DeltaBpDecoder {
         if (totalValueCount_ != 1) {
           initBlock();
         }
+        totalValuesRemaining_--;
         return value;
       } else {
         ++miniBlockIdx_;
@@ -214,7 +233,7 @@ class DeltaBpDecoder {
     valuesRemainingCurrentMiniBlock_--;
     totalValuesRemaining_--;
 
-    if (valuesRemainingCurrentMiniBlock_ == 0) {
+    if (valuesRemainingCurrentMiniBlock_ == 0 || totalValuesRemaining_ == 0) {
       bufferStart_ += bits::nbytes(deltaBitWidth_ * valuesPerMiniBlock_);
     }
     return value;

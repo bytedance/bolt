@@ -79,7 +79,9 @@ bolt_add_library(
   MapUnionSumAggregate.cpp
   MaxSizeForStatsAggregate.cpp
   MinMaxAggregates.cpp
+  MaxByAggregateRegistration.cpp
   MinMaxByAggregates.cpp
+  MinByAggregateRegistration.cpp
   MultiMapAggAggregate.cpp
   PrestoHasher.cpp
   ReduceAgg.cpp

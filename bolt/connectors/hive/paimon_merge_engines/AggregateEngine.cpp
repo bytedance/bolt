@@ -24,11 +24,7 @@ AggregateEngine::AggregateEngine(
 
 vector_size_t AggregateEngine::add(PaimonRowIteratorPtr iterator) {
   if (lastPk_.primaryKeys && !lastPk_.pkEqual(iterator)) {
-    result->resize(result->size() + 1);
-    for (auto i = 0; i < aggregateFunctions_.size(); i++) {
-      auto dest = result->childAt(i);
-      aggregateFunctions_[i]->appendResult(dest);
-    }
+    finalizeCompletedGroups(iterator);
   }
 
   lastPk_ = *iterator;
@@ -41,8 +37,9 @@ vector_size_t AggregateEngine::add(PaimonRowIteratorPtr iterator) {
   return result->size();
 }
 
-vector_size_t AggregateEngine::finish() {
-  if (lastPk_.primaryKeys) {
+vector_size_t AggregateEngine::finalizeCompletedGroups(
+    const PaimonRowIteratorPtr& nextInput) {
+  if (lastPk_.primaryKeys && (!nextInput || !lastPk_.pkEqual(nextInput))) {
     result->resize(result->size() + 1);
     for (auto i = 0; i < aggregateFunctions_.size(); i++) {
       auto dest = result->childAt(i);
@@ -50,7 +47,12 @@ vector_size_t AggregateEngine::finish() {
     }
     lastPk_.primaryKeys = nullptr;
   }
+
   return result->size();
+}
+
+vector_size_t AggregateEngine::finish() {
+  return finalizeCompletedGroups(nullptr);
 }
 
 } // namespace bytedance::bolt::connector::hive

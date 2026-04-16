@@ -30,6 +30,9 @@ class AggregateEngine : public PaimonEngine {
 
   vector_size_t add(PaimonRowIteratorPtr iterator) override;
 
+  vector_size_t finalizeCompletedGroups(
+      const PaimonRowIteratorPtr& nextInput) override;
+
   vector_size_t finish() override;
 
  protected:

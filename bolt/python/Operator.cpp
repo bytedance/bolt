@@ -33,7 +33,7 @@
 #include "bolt/python/Operator.h"
 #include "bolt/python/Utils.h"
 
-using namespace facebook::bolt;
+using namespace bytedance::bolt;
 
 namespace bolt::python {
 PythonOperator::PythonOperator(

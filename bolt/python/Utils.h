@@ -37,10 +37,10 @@
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/vector/ComplexVector.h"
 
-namespace facebook::bolt {
+namespace bytedance::bolt {
 class BaseVector;
 using VectorPtr = std::shared_ptr<BaseVector>;
-} // namespace facebook::bolt
+} // namespace bytedance::bolt
 
 namespace bolt::python {
 std::vector<std::shared_ptr<bytedance::bolt::exec::FunctionSignature>>

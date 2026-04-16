@@ -29,6 +29,14 @@ struct PaimonConnectorSplit : public connector::ConnectorSplit {
     BOLT_CHECK_GE(hiveSplits.size(), 1, "No splits");
   }
 
+  int64_t splitSizeBytes() const override {
+    int64_t total = 0;
+    for (const auto& split : hiveSplits) {
+      total += split->splitSizeBytes();
+    }
+    return total;
+  }
+
   std::string toString() const override {
     std::string result;
     for (const auto& split : hiveSplits) {

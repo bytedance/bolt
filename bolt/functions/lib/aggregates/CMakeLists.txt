@@ -31,6 +31,7 @@ bolt_add_library(
   BitDaysOrAggregate.cpp
   CentralMomentsAggregatesBase.cpp
   CollectSetAggregate.cpp
+  CovarianceAggregatesBase.cpp
   SingleValueAccumulator.cpp
   ValueList.cpp
   ValueSet.cpp

@@ -702,19 +702,32 @@ class Converter {
         to.toGMT(*timeZone_, &hasError);
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
-    } else if constexpr (fromInteger) {
+    } else if constexpr (fromInteger || fromFloat) {
+      if constexpr (fromFloat) {
+        if (FOLLY_UNLIKELY(std::isnan(from) || std::isinf(from))) {
+          return ConvertStatus::OTHER_FAILURE;
+        }
+      }
       // Spark internally use microsecond precision for timestamp.
       // To avoid overflow, we need to check the range of seconds.
       static constexpr int64_t maxSeconds =
           std::numeric_limits<int64_t>::max() /
-          (Timestamp::kMicrosecondsInMillisecond *
-           Timestamp::kMillisecondsInSecond);
+          Timestamp::kMicrosecondsInSecond;
       if (from > maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::max());
       } else if (from < -maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::min());
       } else {
-        to = Timestamp(from, 0);
+        if constexpr (fromFloat) {
+          // NOTE: `from` can be `float`. Make sure we do the multiplication in
+          // at least double precision, otherwise we lose too much precision at
+          // ~1e15 scale and produce unexpected microseconds.
+          const auto micros = static_cast<long double>(from) *
+              static_cast<long double>(Timestamp::kMicrosecondsInSecond);
+          to = Timestamp::fromMicrosNoError(static_cast<int64_t>(micros));
+        } else {
+          to = Timestamp(from, 0);
+        }
       }
     }
     return ConvertStatus::SUCCESS;
@@ -823,6 +836,38 @@ template <PrimitiveKind fromKind, PrimitiveKind toKind>
 class VectorConverter : public ConverterBase {
  public:
   virtual ~VectorConverter() = default;
+
+ private:
+  static constexpr bool isIntegerKind(PrimitiveKind kind) {
+    return (
+        kind == PrimitiveKind::TINYINT || kind == PrimitiveKind::SMALLINT ||
+        kind == PrimitiveKind::INTEGER || kind == PrimitiveKind::BIGINT);
+  }
+
+  static constexpr bool isFloatKind(PrimitiveKind kind) {
+    return kind == PrimitiveKind::REAL || kind == PrimitiveKind::DOUBLE;
+  }
+
+  static constexpr bool isDecimalKind(PrimitiveKind kind) {
+    return (
+        kind == PrimitiveKind::SHORT_DECIMAL ||
+        kind == PrimitiveKind::LONG_DECIMAL);
+  }
+
+  static constexpr bool kLegacySensitive = toKind == PrimitiveKind::STRING &&
+      (fromKind == PrimitiveKind::TIMESTAMP || isFloatKind(fromKind));
+
+  static constexpr bool kTruncateSensitive =
+      // integer -> boolean
+      (toKind == PrimitiveKind::BOOLEAN && isIntegerKind(fromKind)) ||
+      // string/float/decimal -> integer
+      (isIntegerKind(toKind) &&
+       (fromKind == PrimitiveKind::STRING || isFloatKind(fromKind) ||
+        isDecimalKind(fromKind))) ||
+      // float -> float
+      (isFloatKind(toKind) && isFloatKind(fromKind));
+
+ public:
   template <bool legacy, bool truncate>
   FLATTEN void convertWithPolicy(
       const SelectivityVector& rows,
@@ -880,20 +925,44 @@ class VectorConverter : public ConverterBase {
       convertWithPolicy<legacy, truncate>(
           rows, input, context, result, errorPolicy);
     } else {
-      bool legacy = context.execCtx()->queryCtx()->queryConfig().isLegacyCast();
-      bool truncate =
-          context.execCtx()->queryCtx()->queryConfig().isCastToIntByTruncate();
-      if (legacy && truncate) {
-        convertWithPolicy<true, true>(
-            rows, input, context, result, errorPolicy);
-      } else if (legacy && !truncate) {
-        convertWithPolicy<true, false>(
-            rows, input, context, result, errorPolicy);
-      } else if (!legacy && truncate) {
-        convertWithPolicy<false, true>(
-            rows, input, context, result, errorPolicy);
+      const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+
+      if constexpr (kLegacySensitive && kTruncateSensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (legacy && truncate) {
+          convertWithPolicy<true, true>(
+              rows, input, context, result, errorPolicy);
+        } else if (legacy && !truncate) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else if (!legacy && truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          // !legacy && !truncate
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kLegacySensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        if (legacy) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kTruncateSensitive) {
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
       } else {
-        // !legacy && !truncate
         convertWithPolicy<false, false>(
             rows, input, context, result, errorPolicy);
       }
@@ -990,10 +1059,14 @@ void registerConverter() {
       PrimitiveKind::SMALLINT,
       PrimitiveKind::INTEGER,
       PrimitiveKind::BIGINT};
+  static constexpr std::array floatType = {
+      PrimitiveKind::REAL, PrimitiveKind::DOUBLE};
   static constexpr std::array timestampType = {PrimitiveKind::TIMESTAMP};
   static constexpr std::array binaryType = {PrimitiveKind::BINARY};
   // integer to timestamp type conversion
   ConverterRegister<integerType, timestampType>::registerConverter();
+  // float/double to timestamp type conversion
+  ConverterRegister<floatType, timestampType>::registerConverter();
   // integer to binary type conversion
   ConverterRegister<integerType, binaryType>::registerConverter();
   // timestamp to integer type conversion

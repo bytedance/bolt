@@ -190,7 +190,6 @@ void DirectInputStream::loadPosition() {
         if (!load->loadOrFuture(&waitFuture)) {
           auto& exec = folly::QueuedImmediateExecutor::instance();
           std::move(waitFuture).via(&exec).wait();
-          bufferedInput_->updatePreloadingBytes(-load->preloadBytes());
         }
         if (load->state() == cache::CoalescedLoad::State::kPlanned) {
           if (isAsyncPreloadThread()) { // possibly from preloading metaData

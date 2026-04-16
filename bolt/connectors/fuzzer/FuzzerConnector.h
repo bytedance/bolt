@@ -61,6 +61,11 @@ class FuzzerTableHandle : public ConnectorTableHandle {
 
   ~FuzzerTableHandle() override {}
 
+  const std::string& name() const override {
+    static const std::string kName = "fuzzer-mock-table";
+    return kName;
+  }
+
   std::string toString() const override {
     return "fuzzer-mock-table";
   }

@@ -79,6 +79,12 @@ class JsonToMapFunction : public exec::VectorFunction {
         try {
           simdjson::ondemand::document doc = parser.iterate(padded_data);
           simdjson::ondemand::value val = doc;
+          if (val.type() != simdjson::ondemand::json_type::object) {
+            // hiveudf returns empty map for valid non-object JSON
+            // (null, number, boolean, string, array), not SQL NULL.
+            resultWriter.commit();
+            return;
+          }
           for (auto field : val.get_object()) {
             std::string_view key = field.unescaped_key(true);
             simdjson::ondemand::value value = field.value();
@@ -126,8 +132,14 @@ class JsonToMapFunction : public exec::VectorFunction {
         const std::string_view current = std::string_view(sv.data(), sv.size());
         sonic_json::Document doc;
         doc.Parse(current);
-        if (doc.HasParseError() || !doc.IsObject()) {
+        if (doc.HasParseError()) {
           resultWriter.commitNull();
+          return;
+        }
+        if (!doc.IsObject()) {
+          // hiveudf returns empty map for valid non-object JSON
+          // (null, number, boolean, string, array), not SQL NULL.
+          resultWriter.commit();
           return;
         }
 

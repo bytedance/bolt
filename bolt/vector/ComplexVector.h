@@ -59,11 +59,12 @@ class RowVector : public BaseVector {
       BufferPtr nulls,
       size_t length,
       std::vector<VectorPtr> children,
-      std::optional<vector_size_t> nullCount = std::nullopt)
+      std::optional<vector_size_t> nullCount = std::nullopt,
+      VectorEncoding::Simple encoding = VectorEncoding::Simple::ROW)
       : BaseVector(
             pool,
             type,
-            VectorEncoding::Simple::ROW,
+            encoding,
             nulls,
             length,
             std::nullopt,
