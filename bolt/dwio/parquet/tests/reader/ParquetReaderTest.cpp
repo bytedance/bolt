@@ -79,8 +79,7 @@ std::string getVariantFixturePath(const std::string& fileName) {
     }
   }
 
-  BOLT_CHECK(
-      false,
+  BOLT_FAIL(
       "VARIANT fixture not found: {}, cwd: {}, source: {}",
       fileName,
       cwd.string(),
