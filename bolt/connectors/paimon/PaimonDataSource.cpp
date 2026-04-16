@@ -13,6 +13,7 @@
 #include <paimon/type_fwd.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/arrow/Abi.h"
@@ -59,6 +60,50 @@ PaimonDataSource::PaimonDataSource(
   for (const auto& [key, value] : tableHandle_->tableProperties()) {
     ctxBuilder.AddOption(key, value);
     LOG(INFO) << "Added table option <" << key << "=" << value << ">";
+  }
+  ctxBuilder.EnablePredicateFilter(true);
+
+  // Translate the filter expression from PaimonTableHandle into a
+  // paimon-native Predicate for pushdown into the parquet reader.
+  //
+  // The filter expression references columns by their *real* paimon schema
+  // names (e.g., "id", "name") as set by the SparkSQL/gluten planner, but
+  // outputType_ carries internal alias names (e.g., "n0_0", "n0_1").
+  // We must build a RowType whose names match the filter's field references
+  // so that extractFieldInfo can resolve field indices correctly.
+  if (tableHandle_->filter()) {
+    std::vector<std::string> realNames;
+    std::vector<TypePtr> realTypes;
+    realNames.reserve(outputType_->size());
+    realTypes.reserve(outputType_->size());
+    for (size_t i = 0; i < outputType_->size(); ++i) {
+      const auto& outName = outputType_->nameOf(i);
+      auto it = columnHandles.find(outName);
+      BOLT_CHECK(
+          it != columnHandles.end(),
+          "Could not find column handle with name: {}",
+          outName);
+      realNames.push_back(it->second->name()); // real paimon name
+      realTypes.push_back(outputType_->childAt(i)); // preserve type
+    }
+    auto filterRowType = ROW(std::move(realNames), std::move(realTypes));
+
+    auto result = PaimonFilterTranslator::translate(
+        tableHandle_->filter(), filterRowType);
+    if (result.ok()) {
+      LOG(INFO) << "PaimonDataSource: Translated filter to paimon Predicate: "
+                << result.value->ToString();
+      ctxBuilder.SetPredicate(result.value);
+    } else {
+      LOG(WARNING)
+          << "PaimonDataSource: Could not fully translate filter expression "
+          << tableHandle_->filter()->toString()
+          << " to paimon Predicate: " << result.reason
+          << "; filter pushdown will not be applied";
+      ctxBuilder.SetPredicate(nullptr);
+    }
+  } else {
+    ctxBuilder.SetPredicate(nullptr);
   }
   auto ctxBuildResult = ctxBuilder.Finish();
   BOLT_CHECK(

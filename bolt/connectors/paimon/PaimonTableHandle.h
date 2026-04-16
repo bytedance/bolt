@@ -7,6 +7,7 @@
 
 #include <unordered_map>
 #include "bolt/connectors/Connector.h"
+#include "bolt/core/ITypedExpr.h"
 #include "bolt/type/Type.h"
 
 namespace bytedance::bolt::connector::paimon {
@@ -43,11 +44,13 @@ class PaimonTableHandle : public ConnectorTableHandle {
       std::string connectorId,
       std::string tableName,
       std::string tablePath,
-      std::unordered_map<std::string, std::string> tableProperties)
+      std::unordered_map<std::string, std::string> tableProperties,
+      core::TypedExprPtr filter = nullptr)
       : ConnectorTableHandle(std::move(connectorId)),
         tableName_(std::move(tableName)),
         tablePath_(std::move(tablePath)),
-        tableProperties_(std::move(tableProperties)) {}
+        tableProperties_(std::move(tableProperties)),
+        filter_(std::move(filter)) {}
 
   const std::string& tableName() const {
     return tableName_;
@@ -59,6 +62,10 @@ class PaimonTableHandle : public ConnectorTableHandle {
 
   const std::unordered_map<std::string, std::string>& tableProperties() {
     return tableProperties_;
+  }
+
+  const core::TypedExprPtr& filter() const {
+    return filter_;
   }
 
   std::string toString() const override {
@@ -81,6 +88,7 @@ class PaimonTableHandle : public ConnectorTableHandle {
   const std::string tableName_;
   const std::string tablePath_;
   std::unordered_map<std::string, std::string> tableProperties_;
+  core::TypedExprPtr filter_;
 };
 
 } // namespace bytedance::bolt::connector::paimon

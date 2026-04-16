@@ -7,6 +7,7 @@ bolt_add_library(
     bolt_connector_paimon
     PaimonConnector.cpp
     PaimonDataSource.cpp
+    PaimonFilterTranslator.cpp
     PaimonParquetReader.cpp
     BoltMemoryPool.h
 )

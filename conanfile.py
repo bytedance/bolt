@@ -670,6 +670,7 @@ class BoltConan(ConanFile):
                     "paimon-cpp::core",
                     "paimon-cpp::format_avro",
                     "paimon-cpp::avro",
+                    "paimon-cpp::fs_local",
                 ]
             )
 

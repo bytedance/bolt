@@ -159,7 +159,8 @@ class PaimonFilterPushdownTest : public testing::Test,
   }
 
   void writeParquet() {
-    const auto* testInfo = testing::UnitTest::GetInstance()->current_test_info();
+    const auto* testInfo =
+        testing::UnitTest::GetInstance()->current_test_info();
     auto filename =
         std::string("paimon_filter_pushdown_") + testInfo->name() + ".parquet";
     parquetPath_ = (tempDir_ / filename).string();

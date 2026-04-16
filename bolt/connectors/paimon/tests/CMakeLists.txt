@@ -3,8 +3,9 @@
 
 set(PAIMON_CONNECTOR_TEST_SOURCES
     PaimonConnectorTest.cpp
-    PaimonParquetReaderTest.cpp
-    PaimonFilterPushdownTest.cpp)
+    PaimonFilterPushdownTest.cpp
+    PaimonFilterTranslatorTest.cpp
+    PaimonParquetReaderTest.cpp)
 
 if(BOLT_ENABLE_HDFS)
   list(APPEND PAIMON_CONNECTOR_TEST_SOURCES
