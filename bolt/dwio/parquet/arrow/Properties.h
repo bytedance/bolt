@@ -48,7 +48,41 @@
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
 
+// ----------------------------------------------------------------------
+// Common macro helpers
+
+#ifndef BOLT_STRINGIZE_IMPL
+#define BOLT_STRINGIZE_IMPL(x) #x
+#endif
+
+#ifndef BOLT_STRINGIZE
+#define BOLT_STRINGIZE(x) BOLT_STRINGIZE_IMPL(x)
+#endif
+
 // Define the parquet created by version.
+
+// Export Parquet C++ library version from the Arrow/Parquet dependency.
+// This is determined by the Conan-provided Arrow package (e.g.
+// arrow/15.0.1-oss).
+#if defined(__has_include)
+#if __has_include(<parquet/parquet_version.h>)
+#include <parquet/parquet_version.h>
+#endif
+#else
+#include <parquet/parquet_version.h>
+#endif
+
+#ifndef BOLT_PARQUET_VERSION
+#if defined(PARQUET_VERSION_MAJOR) && defined(PARQUET_VERSION_MINOR) && \
+    defined(PARQUET_VERSION_PATCH)
+#define BOLT_PARQUET_VERSION                                    \
+  BOLT_STRINGIZE(PARQUET_VERSION_MAJOR)                         \
+  "." BOLT_STRINGIZE(PARQUET_VERSION_MINOR) "." BOLT_STRINGIZE( \
+      PARQUET_VERSION_PATCH)
+#else
+#define BOLT_PARQUET_VERSION "unknown"
+#endif
+#endif
 
 #ifdef CREATED_BY_VERSION
 #undef CREATED_BY_VERSION
@@ -370,8 +404,8 @@ class PARQUET_EXPORT WriterProperties {
           version_(ParquetVersion::PARQUET_2_6),
           data_page_version_(ParquetDataPageVersion::V1),
           created_by_(
-              std::string("parquet-mr version 2.6.0 (build ") +
-              DEFAULT_CREATED_BY + ")"),
+              DEFAULT_CREATED_BY + std::string(" version ") +
+              BOLT_PARQUET_VERSION),
           store_decimal_as_integer_(false),
           page_checksum_enabled_(false) {}
     virtual ~Builder() {}
