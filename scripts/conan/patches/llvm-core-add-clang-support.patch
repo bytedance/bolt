@@ -13,7 +13,7 @@ index dd26cdba..bc4c16a9 100644
      url: https://github.com/llvm/llvm-project/releases/download/llvmorg-13.0.0/llvm-13.0.0.src.tar.xz
      sha256: 408d11708643ea826f519ff79761fcdfc12d641a2510229eec459e72f8163020
 diff --git a/recipes/llvm-core/all/conanfile.py b/recipes/llvm-core/all/conanfile.py
-index e8290099..c6d1e93d 100644
+index e8290099..fb18c9dd 100644
 --- a/recipes/llvm-core/all/conanfile.py
 +++ b/recipes/llvm-core/all/conanfile.py
 @@ -171,6 +171,7 @@ class LLVMCoreConan(ConanFile):
@@ -62,11 +62,3 @@ index e8290099..c6d1e93d 100644
          ]
          graphviz_options = textwrap.dedent(f"""
              set(GRAPHVIZ_EXECUTABLES OFF)
-@@ -547,3 +556,7 @@ class LLVMCoreConan(ConanFile):
-         else:
-             self.cpp_info.set_property("cmake_target_name", "LLVM")
-             self.cpp_info.libs = collect_libs(self)
-+
-+        if self.options.with_clang:
-+            bindir = os.path.join(self.package_folder, "bin")
-+            self.buildenv_info.prepend_path("PATH", bindir)
