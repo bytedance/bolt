@@ -452,6 +452,15 @@ class BoltConan(ConanFile):
             tc.cache_variables["ENABLE_BOLT_JIT"] = "ON"
             tc.preprocessor_definitions["ENABLE_BOLT_JIT"] = 1
 
+            # Verify clang exists in llvm-core package.
+            llvm_dep = self.dependencies["llvm-core"]
+            clang_path = os.path.join(str(llvm_dep.package_folder), "bin", "clang")
+            if not os.path.exists(clang_path):
+                raise Exception(
+                    f"clang not found at {clang_path}. "
+                    "Ensure llvm-core is built with -o llvm-core/*:with_clang=True"
+                )
+
             # TODO: Refactor the IR codegen of expression evaluation
             # Disable it right now
             tc.cache_variables["ENABLE_BOLT_EXPR_JIT"] = "OFF"
