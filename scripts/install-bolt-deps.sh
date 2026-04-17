@@ -75,9 +75,7 @@ update_conan_remote() {
   conan remote remove "${remote_name}" > /dev/null 2>&1 || true
 
   if [ -n "$remote_type" ]; then
-    # Local recipe remotes should have highest priority so patches
-    # take precedence over pre-built packages on CI remotes.
-    conan remote add --index=0 -t "$remote_type" "${remote_name}" "${remote_url}" > /dev/null
+    conan remote add -t "$remote_type" "${remote_name}" "${remote_url}" > /dev/null
   else
     conan remote add "${remote_name}" "${remote_url}" > /dev/null
   fi
