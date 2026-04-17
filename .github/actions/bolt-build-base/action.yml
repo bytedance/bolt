@@ -24,8 +24,3 @@ runs:
       shell: bash
       run: |
         ./scripts/install-bolt-deps.sh
-
-    - name: Override PR-modified Conan recipes
-      shell: bash
-      run: |
-        ./.github/actions/bolt-build-base/override-changed-recipes.sh "${GITHUB_BASE_REF:-main}"
