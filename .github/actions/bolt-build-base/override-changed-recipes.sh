@@ -27,8 +27,8 @@
 set -euo pipefail
 
 BASE_REF="${1:-main}"
-CCI_HOME="${CONAN_HOME:-~/.conan2}/conan-center-index"
-OVERRIDE_DIR="${CONAN_HOME:-~/.conan2}/patched-recipes"
+CCI_HOME="${CONAN_HOME:-$HOME/.conan2}/conan-center-index"
+OVERRIDE_DIR="${CONAN_HOME:-$HOME/.conan2}/patched-recipes"
 
 changed_files=$(git diff --name-only "origin/${BASE_REF}" -- scripts/conan/ 2> /dev/null || true)
 if [ -z "$changed_files" ]; then
