@@ -1529,12 +1529,6 @@ class ParquetRowReader::Impl {
       VLOG(1) << "Total row groups: " << rowGroups_.size();
       VLOG(1) << "Total rows: " << rowNumber;
     }
-
-    if (rowGroupIds_.size() < rowGroups_.size()) {
-      VLOG(1) << "Bolt Parquet Scan: Retained " << rowGroupIds_.size()
-              << " out of " << rowGroups_.size() << " total row groups. "
-              << "Total rows: " << rowNumber;
-    }
   }
 
   int64_t nextRowNumber() {
