@@ -6,6 +6,7 @@
 #pragma once
 
 #include "bolt/connectors/Connector.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 
@@ -27,7 +28,8 @@ class PaimonDataSource : public DataSource {
       const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
           columnHandles,
       const std::shared_ptr<ConnectorQueryCtx>& queryCtx,
-      const core::QueryConfig& queryConfig);
+      const core::QueryConfig& queryConfig,
+      const std::shared_ptr<PaimonConfig>& paimonConfig);
 
   // Declare destructor in header but define in cpp to avoid incomplete type
   // issue

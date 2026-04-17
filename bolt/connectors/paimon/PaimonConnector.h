@@ -13,9 +13,9 @@ class PaimonConnector : public Connector {
  public:
   PaimonConnector(
       const std::string& id,
-      const std::shared_ptr<const config::ConfigBase>& /* config */,
+      const std::shared_ptr<const config::ConfigBase>& config,
       folly::Executor* executor)
-      : Connector(id), executor_(executor) {}
+      : Connector(id), config_(config), executor_(executor) {}
 
   std::unique_ptr<DataSource> createDataSource(
       const std::shared_ptr<const RowType>& outputType,
@@ -35,6 +35,7 @@ class PaimonConnector : public Connector {
   }
 
  private:
+  std::shared_ptr<const config::ConfigBase> config_;
   folly::Executor* executor_;
 };
 

@@ -3,6 +3,7 @@
 
 set(PAIMON_CONNECTOR_TEST_SOURCES
     PaimonConnectorTest.cpp
+    PaimonConfigTest.cpp
     PaimonFilterPushdownTest.cpp
     PaimonFilterTranslatorTest.cpp
     PaimonParquetReaderTest.cpp)

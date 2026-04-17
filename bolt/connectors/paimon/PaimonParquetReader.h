@@ -15,14 +15,17 @@
 #include <paimon/fs/file_system.h>
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/Region.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 
 namespace bytedance::bolt::connector::paimon {
 
 // Adapter to wrap a paimon::InputStream in Bolt's ReadFile interface
 class PaimonReadFile : public bolt::ReadFile {
  public:
-  explicit PaimonReadFile(std::shared_ptr<::paimon::InputStream> is)
-      : input_(std::move(is)) {}
+  explicit PaimonReadFile(
+      std::shared_ptr<::paimon::InputStream> is,
+      const PaimonIoOptions& ioOptions)
+      : input_(std::move(is)), ioOptions_(ioOptions) {}
 
   std::string_view pread(uint64_t offset, uint64_t length, void* buf)
       const override {
@@ -92,7 +95,7 @@ class PaimonReadFile : public bolt::ReadFile {
   }
 
   bool shouldCoalesce() const override {
-    return true; // prefer coalescing for remote/object storage
+    return ioOptions_.coalesceReads;
   }
 
   uint64_t size() const override {
@@ -116,17 +119,18 @@ class PaimonReadFile : public bolt::ReadFile {
   }
 
   uint64_t getNaturalReadSize() const override {
-    return 10 << 20; // 10MB default
+    return ioOptions_.naturalReadSize;
   }
 
  private:
   std::shared_ptr<::paimon::InputStream> input_;
+  PaimonIoOptions ioOptions_;
 };
 
 class PaimonParquetReader : public ::paimon::FileFormat {
  public:
   explicit PaimonParquetReader(
-      const std::map<std::string, std::string>& /* options */) {}
+      const std::map<std::string, std::string>& options);
 
   const std::string& Identifier() const override;
 
@@ -138,6 +142,9 @@ class PaimonParquetReader : public ::paimon::FileFormat {
 
   ::paimon::Result<std::unique_ptr<::paimon::FormatStatsExtractor>>
   CreateStatsExtractor(::ArrowSchema* schema) const override;
+
+ private:
+  PaimonIoOptions ioOptions_;
 };
 
 // Ensures that paimon's FileFormatFactory for "parquet" (backed by

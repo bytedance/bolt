@@ -6,6 +6,7 @@ find_package(Paimon CONFIG REQUIRED)
 bolt_add_library(
     bolt_connector_paimon
     PaimonConnector.cpp
+    PaimonConfig.cpp
     PaimonDataSource.cpp
     PaimonFilterTranslator.cpp
     PaimonParquetReader.cpp

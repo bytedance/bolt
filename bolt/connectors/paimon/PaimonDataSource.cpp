@@ -13,6 +13,7 @@
 #include <paimon/type_fwd.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/FlatVector.h"
@@ -27,7 +28,8 @@ PaimonDataSource::PaimonDataSource(
     const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
         columnHandles,
     const std::shared_ptr<ConnectorQueryCtx>& queryCtx,
-    const core::QueryConfig& /*queryConfig*/)
+    const core::QueryConfig& queryConfig,
+    const std::shared_ptr<PaimonConfig>& paimonConfig)
     : outputType_(outputType),
       tableHandle_(std::dynamic_pointer_cast<PaimonTableHandle>(tableHandle)),
       pool_(queryCtx->memoryPool()) {
@@ -48,7 +50,11 @@ PaimonDataSource::PaimonDataSource(
   LOG(INFO) << "PaimonDataSource::PaimonDataSource(): Read schema: "
             << folly::join(", ", columns);
   ctxBuilder.SetReadSchema(columns);
-  ctxBuilder.EnableMultiThreadRowToBatch(false); // Disabled to simplify testing
+  ctxBuilder.EnableMultiThreadRowToBatch(paimonConfig->multiThreadRowToBatch());
+  if (paimonConfig->multiThreadRowToBatch()) {
+    ctxBuilder.SetRowToBatchThreadNumber(
+        paimonConfig->rowToBatchThreadNumber());
+  }
   ctxBuilder.WithMemoryPool(paimonPool_);
   ctxBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local");
 
@@ -61,7 +67,37 @@ PaimonDataSource::PaimonDataSource(
     ctxBuilder.AddOption(key, value);
     LOG(INFO) << "Added table option <" << key << "=" << value << ">";
   }
-  ctxBuilder.EnablePredicateFilter(true);
+
+  // Pass read.batch-size through the options map so the paimon library uses
+  // it when creating FileBatchReaders.
+  ctxBuilder.AddOption(
+      ::paimon::Options::READ_BATCH_SIZE,
+      std::to_string(paimonConfig->readBatchSize()));
+
+  // Propagate I/O tuning options through paimon's options map so they reach
+  // PaimonReadFile (constructed deep inside paimon's internal reader pipeline).
+  // Query config overrides connector config; connector config provides
+  // defaults.
+  ctxBuilder.AddOption(
+      PaimonConfig::kNaturalReadSize,
+      std::to_string(queryConfig.get<uint64_t>(
+          PaimonConfig::kNaturalReadSize, paimonConfig->naturalReadSize())));
+  ctxBuilder.AddOption(
+      PaimonConfig::kCoalesceReads,
+      queryConfig.get<bool>(
+          PaimonConfig::kCoalesceReads, paimonConfig->coalesceReads())
+          ? "true"
+          : "false");
+
+  ctxBuilder.EnablePredicateFilter(paimonConfig->predicateFilterEnabled());
+
+  // Prefetch tuning — disabled by default; when enabled, overlaps I/O with
+  // computation for high-latency storage backends (S3, HDFS, OSS).
+  ctxBuilder.EnablePrefetch(paimonConfig->prefetchEnabled());
+  if (paimonConfig->prefetchEnabled()) {
+    ctxBuilder.SetPrefetchBatchCount(paimonConfig->prefetchBatchCount());
+    ctxBuilder.SetPrefetchMaxParallelNum(paimonConfig->prefetchMaxParallel());
+  }
 
   // Translate the filter expression from PaimonTableHandle into a
   // paimon-native Predicate for pushdown into the parquet reader.

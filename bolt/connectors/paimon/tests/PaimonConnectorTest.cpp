@@ -15,6 +15,7 @@
 #include <paimon/table/source/table_scan.h>
 #include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -1014,7 +1015,208 @@ TEST_F(PaimonConnectorTest, FilterPushdownAggregateTable) {
       plan,
       connectorSplits,
       "SELECT c0, c1, c2 FROM tmp WHERE c2 > 15.0 ORDER BY c0",
-      {0});
+      std::vector<uint32_t>{0});
+}
+
+// ===========================================================================
+// End-to-end config tests: prefetch & multi-thread row-to-batch
+// ===========================================================================
+
+TEST_F(PaimonConnectorTest, PrefetchEnabledReturnsCorrectResults) {
+  // Scan the "basic" table (id = [1, 2, 3]) with prefetch enabled via
+  // query config overrides.
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>{});
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .orderBy({"id"}, /*isPartial*/ false)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  createDuckDbTable("tmp", {mk.rowVector({mk.flatVector<int64_t>({1, 2, 3})})});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  exec::test::CursorParameters params;
+  params.planNode = plan;
+  params.queryConfigs = {
+      {PaimonConfig::kPrefetchEnabled, "true"},
+      {PaimonConfig::kPrefetchBatchCount, "100"},
+      {PaimonConfig::kPrefetchMaxParallel, "2"},
+  };
+  exec::test::assertQuery(
+      params,
+      [&](exec::Task* task) {
+        for (auto& split : connectorSplits) {
+          task->addSplit("0", exec::Split(std::move(split)));
+        }
+        task->noMoreSplits("0");
+      },
+      "SELECT c0 FROM tmp ORDER BY c0",
+      duckDbQueryRunner_,
+      std::vector<uint32_t>{0});
+}
+
+TEST_F(PaimonConnectorTest, MultiThreadRowToBatchReturnsCorrectResults) {
+  // Scan with multi-thread row-to-batch enabled via query config overrides.
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath =
+      "file:" + tempDir_->path + "/test_db.db/append_only_multiple_append";
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>{});
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .orderBy({"id"}, /*isPartial*/ false)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  std::vector<int64_t> ids(6);
+  std::iota(ids.begin(), ids.end(), 4);
+  createDuckDbTable("tmp", {mk.rowVector({mk.flatVector<int64_t>(ids)})});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  exec::test::CursorParameters params;
+  params.planNode = plan;
+  params.queryConfigs = {
+      {PaimonConfig::kMultiThreadRowToBatch, "true"},
+      {PaimonConfig::kRowToBatchThreadNum, "2"},
+  };
+  exec::test::assertQuery(
+      params,
+      [&](exec::Task* task) {
+        for (auto& split : connectorSplits) {
+          task->addSplit("0", exec::Split(std::move(split)));
+        }
+        task->noMoreSplits("0");
+      },
+      "SELECT c0 FROM tmp ORDER BY c0",
+      duckDbQueryRunner_,
+      std::vector<uint32_t>{0});
+}
+
+TEST_F(PaimonConnectorTest, PrefetchAndMultiThreadCombined) {
+  // Enable both prefetch and multi-thread row-to-batch via query config
+  // overrides.
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath =
+      "file:" + tempDir_->path + "/test_db.db/pk_no_overwrite";
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>{});
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .orderBy({"id"}, /*isPartial*/ false)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  std::vector<int64_t> ids(6);
+  std::iota(ids.begin(), ids.end(), 10);
+  createDuckDbTable("tmp", {mk.rowVector({mk.flatVector<int64_t>(ids)})});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  exec::test::CursorParameters params;
+  params.planNode = plan;
+  params.queryConfigs = {
+      {PaimonConfig::kPrefetchEnabled, "true"},
+      {PaimonConfig::kPrefetchBatchCount, "100"},
+      {PaimonConfig::kPrefetchMaxParallel, "2"},
+      {PaimonConfig::kMultiThreadRowToBatch, "true"},
+      {PaimonConfig::kRowToBatchThreadNum, "2"},
+  };
+  exec::test::assertQuery(
+      params,
+      [&](exec::Task* task) {
+        for (auto& split : connectorSplits) {
+          task->addSplit("0", exec::Split(std::move(split)));
+        }
+        task->noMoreSplits("0");
+      },
+      "SELECT c0 FROM tmp ORDER BY c0",
+      duckDbQueryRunner_,
+      std::vector<uint32_t>{0});
+}
+
+TEST_F(PaimonConnectorTest, CustomNaturalReadSizeReturnsCorrectResults) {
+  // Set a non-default natural read size via query config and verify it flows
+  // through to PaimonReadFile (which uses PaimonIoOptions::naturalReadSize).
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>{});
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .orderBy({"id"}, /*isPartial*/ false)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  createDuckDbTable("tmp", {mk.rowVector({mk.flatVector<int64_t>({1, 2, 3})})});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  exec::test::CursorParameters params;
+  params.planNode = plan;
+  params.queryConfigs = {
+      {PaimonConfig::kNaturalReadSize, "20971520"}, // 20 MB
+      {PaimonConfig::kCoalesceReads, "false"},
+  };
+  exec::test::assertQuery(
+      params,
+      [&](exec::Task* task) {
+        for (auto& split : connectorSplits) {
+          task->addSplit("0", exec::Split(std::move(split)));
+        }
+        task->noMoreSplits("0");
+      },
+      "SELECT c0 FROM tmp ORDER BY c0",
+      duckDbQueryRunner_,
+      std::vector<uint32_t>{0});
 }
 
 } // namespace bytedance::bolt::connector::paimon

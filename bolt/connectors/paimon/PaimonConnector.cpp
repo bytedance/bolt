@@ -10,6 +10,7 @@
 #include <paimon/fs/file_system_factory.h>
 #include <algorithm>
 #include "bolt/connectors/paimon/PaimonBoltHdfsFileSystem.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 
@@ -84,8 +85,14 @@ std::unique_ptr<DataSource> PaimonConnector::createDataSource(
         columnHandles,
     std::shared_ptr<ConnectorQueryCtx> queryCtx,
     const core::QueryConfig& queryConfig) {
+  auto paimonConfig = std::make_shared<PaimonConfig>(config_);
   return std::make_unique<PaimonDataSource>(
-      outputType, tableHandle, columnHandles, queryCtx, queryConfig);
+      outputType,
+      tableHandle,
+      columnHandles,
+      queryCtx,
+      queryConfig,
+      paimonConfig);
 }
 
 PaimonConnectorFactory::PaimonConnectorFactory()
