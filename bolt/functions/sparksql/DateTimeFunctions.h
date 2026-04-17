@@ -139,16 +139,28 @@ struct UnixTimestampFunctionBase {
 
   // calculate china/shanghai unix-timestamp
   Timestamp calculateCnUnixTimestamp(Timestamp& timestamp) {
-    // between 1986 and 1991, china/shanghai use dst time
-    if (timestamp.getSeconds() > 504892800 &&
-        timestamp.getSeconds() < 694195200) {
-      if (sessionTzID_.has_value()) {
+    // Route through tzdata for every Shanghai regime (LMT, CST, and DST in
+    // 1919/1940-1949/1986-1991). Forward-shift gap local times to match
+    // Spark/JVM's ZonedDateTime.ofLocal semantics.
+    if (sessionTimeZone_ != nullptr) {
+      const auto adjusted = sessionTimeZone_->correct_nonexistent_time(
+          std::chrono::seconds(timestamp.getSeconds()));
+      timestamp = Timestamp(adjusted.count(), timestamp.getNanos());
+      timestamp.toGMT(*sessionTimeZone_);
+      return timestamp;
+    }
+    if (sessionTzID_.has_value()) {
+      const auto* zone = tz::locateZone(
+          static_cast<int16_t>(sessionTzID_.value()), /*failOnError=*/false);
+      if (zone != nullptr) {
+        const auto adjusted = zone->correct_nonexistent_time(
+            std::chrono::seconds(timestamp.getSeconds()));
+        timestamp = Timestamp(adjusted.count(), timestamp.getNanos());
+        timestamp.toGMT(*zone);
+      } else {
         timestamp.toGMT(sessionTzID_.value());
-        return timestamp;
-      } else if (sessionTimeZone_ != nullptr) {
-        timestamp.toGMT(*sessionTimeZone_);
-        return timestamp;
       }
+      return timestamp;
     }
 
     if (timestamp.getSeconds() - sessionTzOffsetInSeconds_ < kShseparator) {
@@ -170,12 +182,11 @@ struct UnixTimestampFunctionBase {
       // Use parsed timezone
       dtr.timestamp.toGMT(dtr.timezoneId);
       result = dtr.timestamp.getSeconds();
+    } else if (this->isShanghai) {
+      return calculateCnUnixTimestamp(dtr.timestamp).getSeconds();
     } else if (sessionTimeZone_ != nullptr) {
       dtr.timestamp.toGMT(*sessionTimeZone_);
       result = dtr.timestamp.getSeconds();
-    } else if (this->isShanghai) {
-      return calculateCnUnixTimestamp(dtr.timestamp).getSeconds();
-
     } else {
       result = dtr.timestamp.getSeconds() - sessionTzOffsetInSeconds_;
     }
@@ -190,10 +201,10 @@ struct UnixTimestampFunctionBase {
     if (dtr.timezoneId != -1) {
       // Use parsed timezone
       dtr.timestamp.toGMT(dtr.timezoneId);
-    } else if (sessionTimeZone_ != nullptr) {
-      dtr.timestamp.toGMT(*sessionTimeZone_);
     } else if (this->isShanghai) {
       return calculateCnUnixTimestamp(dtr.timestamp);
+    } else if (sessionTimeZone_ != nullptr) {
+      dtr.timestamp.toGMT(*sessionTimeZone_);
     } else {
       return Timestamp(
           dtr.timestamp.getSeconds() - sessionTzOffsetInSeconds_,

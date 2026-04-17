@@ -17,6 +17,8 @@
 #include <common/base/BoltException.h>
 #include <fmt/core.h>
 #include <type/Type.h>
+#include <cstdlib>
+#include <fstream>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "bolt/type/tz/TimeZoneMap.h"
@@ -719,6 +721,161 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormatTimeZone) {
       5 * 3600,
       unixTimestamp(
           "1970-01-01 00:00:00", "yyyy-MM-dd HH:mm:ss", "America/Toronto"));
+}
+
+// Regression: parsing Asia/Shanghai dates across every historical DST
+// regime must match Spark (ZonedDateTime.ofLocal semantics):
+//   - DST-start midnight local is in a gap -> shift forward, offset = +09h.
+//   - Interior DST moment -> offset = +09h (CDT).
+//   - Outside DST / post-1991 -> offset = +08h (CST).
+// Prior behavior: date::to_sys rejected gap local times (VeloxUserError),
+// and the Shanghai fast-path used STDOFF arithmetic that silently diverged
+// by 1h for every moment *inside* a DST period. toGMT now calls
+// correct_nonexistent_time to gap-shift, and calculateCnUnixTimestamp
+// always routes through toGMT so full tzdata history is respected.
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampShanghaiDstGap) {
+  setQueryTimeZone("Asia/Shanghai");
+  const auto unixTimestamp = [&](std::optional<StringView> dateStr) {
+    return evaluateOnce<int64_t>("unix_timestamp(c0, 'yyyyMMdd')", dateStr);
+  };
+
+  // The failing case from production (DST-start gap, pre-1986 Shang rule).
+  EXPECT_EQ(-652348800, unixTimestamp("19490501"));
+  // Adjacent non-gap day (still inside DST, offset +09h).
+  EXPECT_EQ(-652266000, unixTimestamp("19490502"));
+
+  // All pre-1986 Shanghai DST transition dates at 00:00 local. Per current
+  // IANA tzdata, 19410316 and 19420201 are already-DST (not gaps), so their
+  // offset is +09h; the others are true DST-start gaps resolved via
+  // forward-shift, giving offset +09h on the post-gap side as well.
+  EXPECT_EQ(-933667200, unixTimestamp("19400601"));
+  EXPECT_EQ(-908787600, unixTimestamp("19410316"));
+  EXPECT_EQ(-880966800, unixTimestamp("19420201"));
+  EXPECT_EQ(-745833600, unixTimestamp("19460515"));
+  EXPECT_EQ(-716889600, unixTimestamp("19470415"));
+  EXPECT_EQ(-683884800, unixTimestamp("19480501"));
+
+  // Modern PRC DST-start gap dates (1986-1991, 00:00 local).
+  EXPECT_EQ(515520000, unixTimestamp("19860504"));
+  EXPECT_EQ(545155200, unixTimestamp("19870412"));
+  EXPECT_EQ(577209600, unixTimestamp("19880417"));
+  EXPECT_EQ(608659200, unixTimestamp("19890416"));
+  EXPECT_EQ(640108800, unixTimestamp("19900415"));
+  EXPECT_EQ(671558400, unixTimestamp("19910414"));
+
+  // Interior DST moments: offset is +09h, not +08h. Previously the fast
+  // path returned naive-8h, diverging from Spark by exactly 3600s.
+  EXPECT_EQ(-837853200, unixTimestamp("19430615")); // wartime DST
+  EXPECT_EQ(516466800, unixTimestamp("19860515")); // 1986 DST interior
+
+  // Outside any DST period: straight +08h offset (sanity baseline).
+  EXPECT_EQ(-28800, unixTimestamp("19700101")); // 1970-01-01 +08h
+  EXPECT_EQ(-1577952000, unixTimestamp("19200101")); // pre-DST CST
+}
+
+// Exhaustive cross-check of unix_timestamp(..., yyyyMMddHHmmss) for every
+// hour from 1900-01-01 00:00 to 2026-01-01 23:00 in Asia/Shanghai against
+// ground-truth values produced by Apache Spark.
+//
+// Disabled by default (GoogleTest DISABLED_ prefix). To run:
+//
+//   1. Generate the expected TSV from Spark (any Spark 3.x+ works). For
+//      example, inside a Spark docker:
+//
+//        docker exec <spark-container> /opt/spark/bin/spark-sql -S \
+//          --conf spark.sql.session.timeZone=Asia/Shanghai -e "
+//            WITH days AS (
+//              SELECT date_add(DATE '1900-01-01', CAST(i AS INT)) AS d
+//              FROM (SELECT explode(sequence(0, 46021)) AS i)
+//            ), hours AS (SELECT explode(sequence(0, 23)) AS h)
+//            SELECT
+//              CONCAT(date_format(d,'yyyyMMdd'),
+//                     LPAD(CAST(h AS STRING),2,'0'),'0000') AS dt,
+//              unix_timestamp(
+//                CONCAT(date_format(d,'yyyyMMdd'),
+//                       LPAD(CAST(h AS STRING),2,'0'),'0000'),
+//                'yyyyMMddHHmmss') AS epoch
+//            FROM days CROSS JOIN hours;" \
+//          > /tmp/spark_expected.tsv
+//
+//   2. Run the test pointing at the TSV:
+//
+//        SHANGHAI_SPARK_CSV=/tmp/spark_expected.tsv \
+//          bolt_functions_spark_test \
+//          --gtest_also_run_disabled_tests \
+//          --gtest_filter='*ShanghaiAgainstSpark*'
+//
+// Notes on stability: the TSV is a snapshot of Spark's tzdata + JDK; if
+// bolt's `date` library is later bumped to a newer IANA release, a handful
+// of pre-1970 hours may start diverging (IANA periodically revises
+// historical rules). Regenerate the TSV against the matching Spark version
+// when that happens.
+TEST_F(
+    SparkSqlDateTimeFunctionsTest,
+    DISABLED_unixTimestampShanghaiAgainstSpark) {
+  const char* csvPath = std::getenv("SHANGHAI_SPARK_CSV");
+  ASSERT_NE(csvPath, nullptr)
+      << "SHANGHAI_SPARK_CSV env var not set — see test comment for how to "
+         "generate the TSV from Spark.";
+  std::ifstream in(csvPath);
+  ASSERT_TRUE(in.is_open()) << "cannot open " << csvPath;
+
+  setQueryTimeZone("Asia/Shanghai");
+
+  std::string header;
+  std::getline(in, header); // discard header line
+
+  const size_t kBatch = 65536;
+  std::vector<std::string> dts;
+  std::vector<int64_t> expected;
+  dts.reserve(kBatch);
+  expected.reserve(kBatch);
+
+  size_t totalChecked = 0;
+  size_t mismatches = 0;
+  std::string sampleMismatch;
+
+  auto flush = [&]() {
+    if (dts.empty()) {
+      return;
+    }
+    auto input = makeRowVector({makeFlatVector<std::string>(dts)});
+    auto result = evaluate("unix_timestamp(c0, 'yyyyMMddHHmmss')", input);
+    auto* flat = result->asFlatVector<int64_t>();
+    ASSERT_NE(flat, nullptr);
+    for (size_t i = 0; i < dts.size(); ++i) {
+      const int64_t got = flat->valueAt(i);
+      if (got != expected[i]) {
+        ++mismatches;
+        if (mismatches <= 10) {
+          sampleMismatch += fmt::format(
+              "\n  {} expected={} got={}", dts[i], expected[i], got);
+        }
+      }
+    }
+    totalChecked += dts.size();
+    dts.clear();
+    expected.clear();
+  };
+
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto tab = line.find('\t');
+    if (tab == std::string::npos) {
+      continue;
+    }
+    dts.emplace_back(line.substr(0, tab));
+    expected.emplace_back(std::stoll(line.substr(tab + 1)));
+    if (dts.size() >= kBatch) {
+      flush();
+    }
+  }
+  flush();
+
+  EXPECT_EQ(0U, mismatches)
+      << "out of " << totalChecked << " rows checked" << sampleMismatch;
+  std::cerr << "[INFO] checked " << totalChecked
+            << " rows, mismatches=" << mismatches << std::endl;
 }
 
 // unix_timestamp and to_unix_timestamp are aliases.
