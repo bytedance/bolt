@@ -1,0 +1,90 @@
+diff --git a/recipes/llvm-core/config.yml b/recipes/llvm-core/config.yml
+index ba4acd33..b1f0b2a1 100644
+--- a/recipes/llvm-core/config.yml
++++ b/recipes/llvm-core/config.yml
+@@ -1,5 +1,5 @@
+ versions:
+-  "19.1.7":
++  "19.1.7-bolt":
+     folder: all
+   "13.0.0":
+     folder: all
+diff --git a/recipes/llvm-core/all/conandata.yml b/recipes/llvm-core/all/conandata.yml
+index dd26cdba..bc4c16a9 100644
+--- a/recipes/llvm-core/all/conandata.yml
++++ b/recipes/llvm-core/all/conandata.yml
+@@ -1,11 +1,14 @@
+ sources:
+-  "19.1.7":
++  "19.1.7-bolt":
+     "llvm":
+       url: https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/llvm-19.1.7.src.tar.xz
+       sha256: 96f833c6ad99a3e8e1d9aca5f439b8fd2c7efdcf83b664e0af1c0712c5315910
+     "cmake":
+       url: https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/cmake-19.1.7.src.tar.xz
+       sha256: 11c5a28f90053b0c43d0dec3d0ad579347fc277199c005206b963c19aae514e3
++    "clang":
++      url: https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/clang-19.1.7.src.tar.xz
++      sha256: 11e5e4ecab5338b9914de3b83a4622cb200de466b7c56ba675afb72fa7d64675
+   "13.0.0":
+     url: https://github.com/llvm/llvm-project/releases/download/llvmorg-13.0.0/llvm-13.0.0.src.tar.xz
+     sha256: 408d11708643ea826f519ff79761fcdfc12d641a2510229eec459e72f8163020
+@@ -17,7 +20,7 @@ sources:
+     sha256: ce8508e318a01a63d4e8b3090ab2ded3c598a50258cc49e2625b9120d4c03ea5
+
+ patches:
+-  "19.1.7":
++  "19.1.7-bolt":
+     - patch_file: patches/19x/0000-cmake-dependencies.patch
+       patch_description: fix references to third party libs to match conan variables and targets
+       patch_type: conan
+diff --git a/recipes/llvm-core/all/conanfile.py b/recipes/llvm-core/all/conanfile.py
+index e8290099..fb18c9dd 100644
+--- a/recipes/llvm-core/all/conanfile.py
++++ b/recipes/llvm-core/all/conanfile.py
+@@ -171,6 +171,7 @@ class LLVMCoreConan(ConanFile):
+         "with_xml2": [True, False],
+         "with_z3": [True, False],
+         "with_zstd": [True, False],
++        "with_clang": [True, False],
+     }
+     default_options = {
+         "shared": False,
+@@ -193,6 +194,7 @@ class LLVMCoreConan(ConanFile):
+         "with_z3": True,
+         "with_zlib": True,
+         "with_zstd": True,
++        "with_clang": False,
+     }
+
+     @property
+@@ -301,6 +303,8 @@ class LLVMCoreConan(ConanFile):
+             # LLVM >=15 split up several components in its release, including cmake
+             get(self, **sources["llvm"], destination='llvm-main', strip_root=True)
+             get(self, **sources["cmake"], destination='cmake', strip_root=True)
++            if "clang" in sources:
++                get(self, **sources["clang"], destination='clang', strip_root=True)
+
+     def _apply_resource_limits(self, cmake_definitions):
+         if os.getenv("CONAN_CENTER_BUILD_SERVICE"):
+@@ -373,6 +377,9 @@ class LLVMCoreConan(ConanFile):
+         if self.options.targets != "all":
+             cmake_variables["LLVM_TARGETS_TO_BUILD"] = self.options.targets
+
++        if self.options.with_clang:
++            cmake_variables["LLVM_ENABLE_PROJECTS"] = "clang"
++
+         self._apply_resource_limits(cmake_variables)
+
+         if is_msvc(self):
+@@ -415,7 +422,9 @@ class LLVMCoreConan(ConanFile):
+             "LLVMTableGenGlobalISel.*",
+             "CONAN_LIB.*",
+             "LLVMExegesis.*",
+-            "LLVMCFIVerify.*"
++            "LLVMCFIVerify.*",
++            "clang.*",
++            "libclang.*",
+         ]
+         graphviz_options = textwrap.dedent(f"""
+             set(GRAPHVIZ_EXECUTABLES OFF)
