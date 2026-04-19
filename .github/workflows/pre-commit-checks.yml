@@ -54,13 +54,7 @@ jobs:
         with:
           go-version-file: .github/license_check/go.mod
           cache: true
-      - name: Setup Golang caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-        key: ${{ runner.os }}-golang-${{ hashFiles('.github/license_check/go.sum') }}
+          cache-dependency-path: .github/license_check/go.sum
       - id: env-setup
         uses: ./.github/actions/bolt-build-base
       - name: Install pre-commit
