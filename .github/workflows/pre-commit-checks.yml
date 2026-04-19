@@ -36,7 +36,7 @@ jobs:
     runs-on: ['self-hosted', 'medium']
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root --init
+      options: --user root --init -e GOMODCACHE=/data/pre-commit-cache/gomodcache -e GOCACHE=/data/pre-commit-cache/gocache
       volumes:
         - pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
@@ -50,11 +50,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: .github/license_check/go.mod
-          cache: true
-          cache-dependency-path: .github/license_check/go.sum
       - id: env-setup
         uses: ./.github/actions/bolt-build-base
       - name: Install pre-commit
