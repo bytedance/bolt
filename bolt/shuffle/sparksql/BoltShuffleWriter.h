@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -52,6 +53,7 @@
 #include <arrow/result.h>
 #include <arrow/type.h>
 
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
@@ -273,7 +275,9 @@ class BoltShuffleWriter : public ShuffleWriter {
             options,
             pool),
         boltPool_(std::move(boltPool)),
-        spillArrowPool_(getSpillArrowPool(pool)) {
+        spillArrowPool_(getSpillArrowPool(pool)),
+        shuffleCheckDistribution_(
+            std::clamp(options.shuffleCheckRatio, 0.0, 1.0)) {
     arenas_.resize(options.partitionWriterOptions.numPartitions);
     variableMemoryUsage_.resize(
         options.partitionWriterOptions.numPartitions, 0);
@@ -323,6 +327,16 @@ class BoltShuffleWriter : public ShuffleWriter {
   }
 
  protected:
+  using FixedColumnCheckFunction = void (BoltShuffleWriter::*)(
+      const uint8_t* srcAddrs,
+      const uint8_t* srcNulls,
+      const std::vector<uint8_t*>& dstAddrs,
+      const std::vector<uint8_t*>& dstNulls,
+      int colId,
+      const std::string& name,
+      const std::string& funcLine,
+      bool valueAddrsPointToWritePosition);
+
   virtual arrow::Status init();
 
   virtual arrow::Status initPartitions();
@@ -363,6 +377,58 @@ class BoltShuffleWriter : public ShuffleWriter {
       const bytedance::bolt::RowVector& rv,
       T& valueAddrs);
 
+  template <typename T>
+  arrow::Status checkFixedColumnCopyValue(
+      const bytedance::bolt::RowVector& rv,
+      T& fixedWidthValueAddrs,
+      const std::string& funcLine,
+      bool valueAddrsPointToWritePosition = false);
+
+  template <typename Fn>
+  arrow::Status withShuffleCheck(
+      const bytedance::bolt::RowVector& rv,
+      std::string funcLine,
+      Fn&& fn) {
+    const auto shuffleCheckRatio =
+        std::clamp(options_.shuffleCheckRatio, 0.0, 1.0);
+    if (shuffleCheckRatio <= 0.0) {
+      return arrow::Status::OK();
+    }
+    if (shuffleCheckRatio < 1.0) {
+      if (!shuffleCheckDistribution_(shuffleCheckRandomEngine_)) {
+        return arrow::Status::OK();
+      }
+    }
+    ++shuffleCheckCount_;
+    bytedance::bolt::NanosecondTimer timer(&shuffleCheckTimeNanos_);
+    return fn(rv, std::move(funcLine));
+  }
+
+  template <typename T>
+  void checkCopyValue(
+      const uint8_t* srcAddrs,
+      const uint8_t* srcNulls,
+      const std::vector<uint8_t*>& dstAddrs,
+      const std::vector<uint8_t*>& dstNulls,
+      int colId,
+      const std::string& name,
+      const std::string& funcLine,
+      bool valueAddrsPointToWritePosition);
+
+  template <typename T>
+  void checkCopyValueTyped(
+      const uint8_t* srcAddrs,
+      const uint8_t* srcNulls,
+      const std::vector<uint8_t*>& dstAddrs,
+      const std::vector<uint8_t*>& dstNulls,
+      int colId,
+      const std::string& name,
+      const std::string& funcLine,
+      bool valueAddrsPointToWritePosition);
+
+  arrow::Result<FixedColumnCheckFunction> createFixedColumnCheckFunction(
+      arrow::Type::type typeId) const;
+
   arrow::Status splitBoolType(
       const uint8_t* srcAddr,
       const std::vector<uint8_t*>& dstAddrs);
@@ -396,12 +462,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::vector<uint8_t*>& dstAddrs) {
     for (auto& pid : partitionUsed_) {
       auto dstPidBase =
-          (T*)(dstAddrs[pid] + partitionBufferBase_[pid] * sizeof(T));
+          reinterpret_cast<T*>(dstAddrs[pid]) + partitionBufferBase_[pid];
       auto pos = partition2RowOffsetBase_[pid];
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
-        *dstPidBase++ = reinterpret_cast<const T*>(srcAddr)[rowId]; // copy
+        memcpy(
+            dstPidBase, &reinterpret_cast<const T*>(srcAddr)[rowId], sizeof(T));
+        dstPidBase++;
       }
     }
     return arrow::Status::OK();
@@ -419,7 +487,9 @@ class BoltShuffleWriter : public ShuffleWriter {
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
-        *dstPidBase++ = reinterpret_cast<const T*>(srcAddr)[rowId]; // copy
+        memcpy(
+            dstPidBase, &reinterpret_cast<const T*>(srcAddr)[rowId], sizeof(T));
+        dstPidBase++;
       }
     }
     return arrow::Status::OK();
@@ -508,6 +578,8 @@ class BoltShuffleWriter : public ShuffleWriter {
         metrics_.rawPartitionLengths.end(),
         0LL);
   }
+
+  void logShuffleCheckStats(const char* writerType) const;
 
   // for CompositeRowVector
   virtual arrow::Status tryEvict(
@@ -622,6 +694,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   std::vector<std::vector<uint8_t*>> partitionValidityAddrs_;
   // Used by fixed-width types. Stores raw pointers of partition buffers.
   std::vector<std::vector<uint8_t*>> partitionFixedWidthValueAddrs_;
+  std::vector<FixedColumnCheckFunction> fixedWidthCheckFunctions_;
+  std::vector<std::string> fixedWidthTypeNames_;
   // Used by binary types. Stores raw pointers and metadata of partition
   // buffers.
   std::vector<std::vector<BinaryBuf>> partitionBinaryAddrs_;
@@ -725,6 +799,10 @@ class BoltShuffleWriter : public ShuffleWriter {
   uint64_t computePidTime_{0};
   uint64_t totalSplitTime_{0};
   uint64_t stopTime_{0};
+  uint64_t shuffleCheckTimeNanos_{0};
+  uint64_t shuffleCheckCount_{0};
+  std::mt19937 shuffleCheckRandomEngine_{std::random_device{}()};
+  std::bernoulli_distribution shuffleCheckDistribution_;
 
   // for CompositeRowVector
   RowVectorLayout vectorLayout_{RowVectorLayout::kInvalid};
