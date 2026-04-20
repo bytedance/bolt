@@ -90,6 +90,11 @@ int64_t ExecutionMemoryPool::poolSize() {
   return internalPoolSize();
 }
 
+int64_t ExecutionMemoryPool::configuredPoolSize() const {
+  MemoryMutexGuard guard(lock_);
+  return poolSize_.value_or(0);
+}
+
 int64_t ExecutionMemoryPool::memoryFree() {
   MemoryMutexGuard guard(lock_);
   return internalMemoryFree();
@@ -227,7 +232,22 @@ int64_t ExecutionMemoryPool::releaseAllMemoryForTask(int64_t taskAttemptId) {
 }
 
 int64_t ExecutionMemoryPool::numActiveTasks() const {
+  MemoryMutexGuard guard(lock_);
   return memoryForTask_.size();
+}
+
+std::vector<ExecutionMemoryPool::TaskExecutionMemoryUsage>
+ExecutionMemoryPool::snapshotTaskMemoryUsage() const {
+  MemoryMutexGuard guard(lock_);
+  std::vector<TaskExecutionMemoryUsage> result;
+  result.reserve(memoryForTask_.size());
+  for (const auto& pair : memoryForTask_) {
+    TaskExecutionMemoryUsage usage;
+    usage.taskAttemptId = pair.first;
+    usage.usedBytes = pair.second;
+    result.push_back(std::move(usage));
+  }
+  return result;
 }
 
 int64_t ExecutionMemoryPool::getOveragedMemoryForTask(int64_t taskAttemptId) {

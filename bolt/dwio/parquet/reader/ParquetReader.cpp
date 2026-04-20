@@ -746,6 +746,45 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
               maxDefine - 1,
               isOptional,
               isRepeated);
+        } else {
+          // Row type
+          // To support list backward compatibility, need create a new row type
+          // instance and set all the fields as its children.
+          auto childrenRowType =
+              createRowType(children, isFileColumnNamesReadAsLowerCase());
+          std::vector<std::shared_ptr<const ParquetTypeWithId::TypeWithId>>
+              rowChildren;
+          // In this legacy case, there is no middle layer between "array"
+          // node and the children nodes. Below creates this dummy middle
+          // layer to mimic the non-legacy case and fill the gap.
+          rowChildren.emplace_back(std::make_shared<const ParquetTypeWithId>(
+              childrenRowType,
+              std::move(children),
+              curSchemaIdx,
+              maxSchemaElementIdx,
+              ParquetTypeWithId::kNonLeaf,
+              "dummy",
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              maxRepeat,
+              maxDefine,
+              isOptional,
+              isRepeated));
+          return std::make_unique<ParquetTypeWithId>(
+              TypeFactory<TypeKind::ARRAY>::create(childrenRowType),
+              std::move(rowChildren),
+              curSchemaIdx,
+              maxSchemaElementIdx,
+              ParquetTypeWithId::kNonLeaf, // columnIdx,
+              std::move(name),
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              maxRepeat,
+              maxDefine,
+              isOptional,
+              isRepeated);
         }
       } else {
         // Row type
@@ -1489,12 +1528,6 @@ class ParquetRowReader::Impl {
       VLOG(1) << "Filtered row groups: " << rowGroupIds_.size();
       VLOG(1) << "Total row groups: " << rowGroups_.size();
       VLOG(1) << "Total rows: " << rowNumber;
-    }
-
-    if (rowGroupIds_.size() < rowGroups_.size()) {
-      VLOG(1) << "Bolt Parquet Scan: Retained " << rowGroupIds_.size()
-              << " out of " << rowGroups_.size() << " total row groups. "
-              << "Total rows: " << rowNumber;
     }
   }
 

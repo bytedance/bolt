@@ -505,6 +505,23 @@ TEST_F(E2EFilterTest, stringDictionary) {
       20);
 }
 
+TEST_F(E2EFilterTest, stringDeltaByteArray) {
+  options_.enableDictionary = false;
+  options_.encoding =
+      bytedance::bolt::parquet::arrow::Encoding::DELTA_BYTE_ARRAY;
+
+  testWithTypes(
+      "string_val:string,"
+      "string_val_2:string",
+      [&]() {
+        makeStringUnique("string_val");
+        makeStringUnique("string_val_2");
+      },
+      true,
+      {"string_val", "string_val_2"},
+      20);
+}
+
 TEST_F(E2EFilterTest, dedictionarize) {
   rowsInRowGroup_ = 10'000;
   options_.dictionaryPageSizeLimit = 20'000;

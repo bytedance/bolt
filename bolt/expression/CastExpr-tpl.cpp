@@ -702,19 +702,40 @@ class Converter {
         to.toGMT(*timeZone_, &hasError);
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
-    } else if constexpr (fromInteger) {
+    } else if constexpr (fromKind == PrimitiveKind::BOOLEAN) {
+      if constexpr (isInSpark) {
+        // Spark treats boolean as microseconds since epoch when casting to
+        // timestamp: false -> 0us, true -> 1us.
+        to = Timestamp::fromMicrosNoError(from ? 1 : 0);
+        return ConvertStatus::SUCCESS;
+      }
+      return ConvertStatus::OTHER_FAILURE;
+    } else if constexpr (fromInteger || fromFloat) {
+      if constexpr (fromFloat) {
+        if (FOLLY_UNLIKELY(std::isnan(from) || std::isinf(from))) {
+          return ConvertStatus::OTHER_FAILURE;
+        }
+      }
       // Spark internally use microsecond precision for timestamp.
       // To avoid overflow, we need to check the range of seconds.
       static constexpr int64_t maxSeconds =
           std::numeric_limits<int64_t>::max() /
-          (Timestamp::kMicrosecondsInMillisecond *
-           Timestamp::kMillisecondsInSecond);
+          Timestamp::kMicrosecondsInSecond;
       if (from > maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::max());
       } else if (from < -maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::min());
       } else {
-        to = Timestamp(from, 0);
+        if constexpr (fromFloat) {
+          // NOTE: `from` can be `float`. Make sure we do the multiplication in
+          // at least double precision, otherwise we lose too much precision at
+          // ~1e15 scale and produce unexpected microseconds.
+          const auto micros = static_cast<long double>(from) *
+              static_cast<long double>(Timestamp::kMicrosecondsInSecond);
+          to = Timestamp::fromMicrosNoError(static_cast<int64_t>(micros));
+        } else {
+          to = Timestamp(from, 0);
+        }
       }
     }
     return ConvertStatus::SUCCESS;
@@ -1046,10 +1067,17 @@ void registerConverter() {
       PrimitiveKind::SMALLINT,
       PrimitiveKind::INTEGER,
       PrimitiveKind::BIGINT};
+  static constexpr std::array floatType = {
+      PrimitiveKind::REAL, PrimitiveKind::DOUBLE};
+  static constexpr std::array booleanType = {PrimitiveKind::BOOLEAN};
   static constexpr std::array timestampType = {PrimitiveKind::TIMESTAMP};
   static constexpr std::array binaryType = {PrimitiveKind::BINARY};
   // integer to timestamp type conversion
   ConverterRegister<integerType, timestampType>::registerConverter();
+  // float/double to timestamp type conversion
+  ConverterRegister<floatType, timestampType>::registerConverter();
+  // boolean to timestamp type conversion
+  ConverterRegister<booleanType, timestampType>::registerConverter();
   // integer to binary type conversion
   ConverterRegister<integerType, binaryType>::registerConverter();
   // timestamp to integer type conversion

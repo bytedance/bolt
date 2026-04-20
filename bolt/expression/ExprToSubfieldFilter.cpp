@@ -30,97 +30,10 @@
 
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/expression/Expr.h"
-#include "bolt/expression/SingleSubfieldExtractor.h"
-#include "bolt/type/filter/Cast.h"
-#include "bolt/type/filter/MapSubscriptFilter.h"
 
 using namespace bytedance::bolt;
 namespace bytedance::bolt::exec {
 namespace {
-
-inline bool isMapSubscriptFunctionName(std::string_view name) {
-  return name == "subscript" || name == "presto.default.subscript" ||
-      name == "element_at" || name == "presto.default.element_at";
-}
-
-const core::CallTypedExpr* asCall(const core::ITypedExpr* expr) {
-  return dynamic_cast<const core::CallTypedExpr*>(expr);
-}
-
-const core::CastTypedExpr* asCast(const core::ITypedExpr* expr) {
-  return dynamic_cast<const core::CastTypedExpr*>(expr);
-}
-
-struct FunctionInfo {
-  TypePtr sourceType;
-  TypePtr targetType;
-  std::string functionName;
-  size_t fieldDepth;
-
-  static std::optional<FunctionInfo> tryExtractFromExpr(
-      const core::TypedExprPtr& expr);
-
-  static inline const std::unordered_set<std::string> filterKeys = {
-      "eq",
-      "neq",
-      "lt",
-      "gt",
-      "lte",
-      "gte",
-      "between",
-      "presto.default.eq",
-      "presto.default.neq",
-      "presto.default.lt",
-      "presto.default.gt",
-      "presto.default.lte",
-      "presto.default.gte",
-      "presto.default.between",
-      "in",
-      "is_null",
-      "cast",
-      "subscript",
-      "presto.default.subscript",
-      "element_at",
-      "presto.default.element_at"};
-};
-
-std::optional<FunctionInfo> FunctionInfo::tryExtractFromExpr(
-    const core::TypedExprPtr& expr) {
-  SingleSubfieldExtractor extractor;
-  auto extractResult = extractor.extract(expr.get());
-  if (!extractResult.has_value()) {
-    return std::nullopt;
-  }
-
-  auto [chainOpt, depth] = extractResult.value();
-  if (chainOpt.empty()) {
-    return std::nullopt;
-  }
-
-  // Notice that SingleSubfieldExtractor in newer codebase might return
-  // std::vector<std::string> as chainOpt. We need to get the actual source
-  // type. We can use fieldTypedExpr for it.
-  auto [fieldExprOpt, fieldDepth] = extractor.fieldTypedExpr(expr.get());
-  if (fieldExprOpt == nullptr) {
-    return std::nullopt;
-  }
-
-  if (auto callExpr = asCall(expr.get())) {
-    if (isMapSubscriptFunctionName(callExpr->name()) &&
-        filterKeys.find(callExpr->name()) != filterKeys.end()) {
-      return FunctionInfo{
-          fieldExprOpt->type(), callExpr->type(), callExpr->name(), fieldDepth};
-    } else if (filterKeys.find(callExpr->name()) == filterKeys.end()) {
-      return FunctionInfo{
-          fieldExprOpt->type(), callExpr->type(), callExpr->name(), fieldDepth};
-    }
-  } else if (auto castExpr = asCast(expr.get())) {
-    return FunctionInfo{
-        fieldExprOpt->type(), castExpr->type(), "cast", fieldDepth};
-  }
-  return std::nullopt;
-};
-
 VectorPtr toConstant(
     const core::TypedExprPtr& expr,
     core::ExpressionEvaluator* evaluator) {
@@ -174,55 +87,6 @@ toInt64List(const VectorPtr& vector, vector_size_t start, vector_size_t size) {
 
 } // namespace
 
-namespace {
-
-class ChainedExprToSubfieldFilterParser final
-    : public ExprToSubfieldFilterParser {
- public:
-  explicit ChainedExprToSubfieldFilterParser(
-      std::vector<std::shared_ptr<ExprToSubfieldFilterParser>> parsers)
-      : parsers_(std::move(parsers)) {
-    // Always keep at least the built-in parser.
-    BOLT_CHECK(!parsers_.empty(), "Parser chain must not be empty");
-  }
-
-  std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>
-  leafCallToSubfieldFilter(
-      const core::CallTypedExpr& call,
-      core::ExpressionEvaluator* evaluator,
-      bool negated = false) override {
-    if (auto result = parsers_.front()->leafCallToSubfieldFilter(
-            call, evaluator, negated)) {
-      return result;
-    }
-
-    for (auto i = 1; i < parsers_.size(); ++i) {
-      const auto& parser = parsers_[i];
-      if (!parser) {
-        continue;
-      }
-
-      if (auto normalizedCall = parser->normalizeCall(call)) {
-        if (auto result = parsers_.front()->leafCallToSubfieldFilter(
-                *normalizedCall, evaluator, negated)) {
-          return result;
-        }
-      }
-
-      if (auto result =
-              parser->leafCallToSubfieldFilter(call, evaluator, negated)) {
-        return result;
-      }
-    }
-    return std::nullopt;
-  }
-
- private:
-  const std::vector<std::shared_ptr<ExprToSubfieldFilterParser>> parsers_;
-};
-
-} // namespace
-
 // Analyzes 'expr' to determine if it can be expressed as a subfield filter.
 // Returns a pair of subfield and filter if so. Otherwise, throws.
 //
@@ -272,42 +136,8 @@ std::pair<common::Subfield, std::unique_ptr<common::Filter>> toSubfieldFilter(
 }
 
 std::shared_ptr<ExprToSubfieldFilterParser>
-    ExprToSubfieldFilterParser::boltParser_ =
+    ExprToSubfieldFilterParser::parser_ =
         std::make_shared<PrestoExprToSubfieldFilterParser>();
-
-std::vector<std::shared_ptr<ExprToSubfieldFilterParser>>
-    ExprToSubfieldFilterParser::fallbackParsers_ = {};
-
-std::shared_ptr<ExprToSubfieldFilterParser>
-    ExprToSubfieldFilterParser::parser_ = []() {
-      ExprToSubfieldFilterParser::rebuildParserChain();
-      return ExprToSubfieldFilterParser::parser_;
-    }();
-
-// static
-void ExprToSubfieldFilterParser::rebuildParserChain() {
-  std::vector<std::shared_ptr<ExprToSubfieldFilterParser>> chain;
-  // Avoid static initialization order issues across translation units.
-  if (!boltParser_) {
-    boltParser_ = std::make_shared<PrestoExprToSubfieldFilterParser>();
-  }
-  chain.emplace_back(boltParser_);
-  chain.insert(chain.end(), fallbackParsers_.begin(), fallbackParsers_.end());
-  parser_ =
-      std::make_shared<ChainedExprToSubfieldFilterParser>(std::move(chain));
-}
-
-// static
-void ExprToSubfieldFilterParser::registerParser(
-    std::shared_ptr<ExprToSubfieldFilterParser> parser) {
-  BOLT_CHECK_NOT_NULL(parser);
-  // Add as fallback. Bolt built-in parser stays first.
-  fallbackParsers_.emplace_back(std::move(parser));
-  rebuildParserChain();
-}
-
-std::unordered_map<std::string, std::string>
-    ExprToSubfieldFilterParser::aliases_;
 
 // static
 bool ExprToSubfieldFilterParser::toSubfield(
@@ -329,16 +159,6 @@ bool ExprToSubfieldFilterParser::toSubfield(
         return false;
       }
       path.push_back(std::make_unique<common::Subfield::NestedField>(name));
-    } else if (
-        auto* castExpr = dynamic_cast<const core::CastTypedExpr*>(current)) {
-      // Skip over cast to extract the underlying field
-    } else if (
-        auto* callExpr = dynamic_cast<const core::CallTypedExpr*>(current)) {
-      if (isMapSubscriptFunctionName(callExpr->name())) {
-        // Skip over subscript to extract the underlying field
-      } else {
-        return false;
-      }
     } else if (dynamic_cast<const core::InputTypedExpr*>(current) == nullptr) {
       return false;
     } else {
@@ -348,9 +168,9 @@ bool ExprToSubfieldFilterParser::toSubfield(
     if (current->inputs().empty()) {
       break;
     }
-    // We only traverse the first input (the child field) for
-    // subscript/element_at calls because the second input is the key, and we
-    // only want the map/array field path.
+    if (current->inputs().size() != 1) {
+      return false;
+    }
     current = current->inputs()[0].get();
     if (current == nullptr) {
       return false;
@@ -712,140 +532,15 @@ std::unique_ptr<common::Filter> ExprToSubfieldFilterParser::makeOrFilter(
 }
 
 namespace {
-bool isSupportedMapSubscriptPushdownKey(const core::TypedExprPtr& fieldSide) {
-  auto* callExpr = dynamic_cast<const core::CallTypedExpr*>(fieldSide.get());
-  if (callExpr == nullptr || callExpr->inputs().size() != 2) {
-    return true;
-  }
-
-  if (!isMapSubscriptFunctionName(callExpr->name())) {
-    return true;
-  }
-
-  if (!callExpr->inputs()[0]->type()->isMap()) {
-    return true;
-  }
-
-  auto* constantExpr =
-      dynamic_cast<const core::ConstantTypedExpr*>(callExpr->inputs()[1].get());
-  if (constantExpr == nullptr) {
-    return false;
-  }
-
-  auto keyVariant = constantExpr->value();
-  if (!keyVariant.hasValue()) {
-    return false;
-  }
-
-  return keyVariant.kind() == TypeKind::VARCHAR ||
-      keyVariant.kind() == TypeKind::BIGINT ||
-      keyVariant.kind() == TypeKind::INTEGER;
-}
-
 std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>
-combine(
-    const core::TypedExprPtr& fieldSide,
-    common::Subfield& subfield,
-    std::unique_ptr<common::Filter>& filter,
-    core::ExpressionEvaluator* evaluator) {
-  if (!filter) {
-    return std::nullopt;
+combine(common::Subfield& subfield, std::unique_ptr<common::Filter>& filter) {
+  if (filter != nullptr) {
+    return std::make_pair(std::move(subfield), std::move(filter));
   }
 
-  if (!isSupportedMapSubscriptPushdownKey(fieldSide)) {
-    return std::nullopt;
-  }
-
-  if (auto functionInfo = FunctionInfo::tryExtractFromExpr(fieldSide)) {
-    // Cast operator is much faster than ExprSetFilter.
-    if (functionInfo->functionName == "cast" && functionInfo->fieldDepth == 1) {
-      filter = common::createCastFilter(
-          functionInfo->sourceType,
-          functionInfo->targetType,
-          std::move(filter));
-    } else if (
-        isMapSubscriptFunctionName(functionInfo->functionName) &&
-        functionInfo->fieldDepth == 1) {
-      // For map subscript expressions, create appropriate filters
-      // based on the map value type
-      if (functionInfo->sourceType->isMap()) {
-        // Extract the key from the subscript expression
-        if (auto* callExpr =
-                dynamic_cast<const core::CallTypedExpr*>(fieldSide.get())) {
-          BOLT_CHECK_EQ(callExpr->inputs().size(), 2);
-          auto keyExpr = callExpr->inputs()[1].get();
-          // Only constant string/integer keys can be converted into metadata
-          // filters. Otherwise, keep the original expression unmodified.
-          auto* constantExpr =
-              dynamic_cast<const core::ConstantTypedExpr*>(keyExpr);
-          if (constantExpr == nullptr) {
-            return std::nullopt;
-          }
-
-          auto keyVariant = constantExpr->value();
-          if (!keyVariant.hasValue()) {
-            return std::nullopt;
-          }
-
-          std::unique_ptr<common::Filter> keyFilter =
-              ExprToSubfieldFilterParser::makeEqualFilter(
-                  callExpr->inputs()[1], evaluator);
-          if (!keyFilter) {
-            return std::nullopt;
-          }
-
-          if (keyVariant.kind() == TypeKind::VARCHAR) {
-            // Use MapSubscriptFilter for map key and value filtering with
-            // string key.
-            filter = common::createMapSubscriptFilter(
-                keyVariant.value<TypeKind::VARCHAR>(),
-                std::move(filter),
-                std::move(keyFilter));
-          } else if (keyVariant.kind() == TypeKind::BIGINT) {
-            // Use MapSubscriptFilter for map key and value filtering with
-            // integer key.
-            filter = common::createMapSubscriptFilter(
-                keyVariant.value<TypeKind::BIGINT>(),
-                std::move(filter),
-                std::move(keyFilter));
-          } else if (keyVariant.kind() == TypeKind::INTEGER) {
-            // Use MapSubscriptFilter for map key and value filtering with
-            // integer key.
-            filter = common::createMapSubscriptFilter(
-                keyVariant.value<TypeKind::INTEGER>(),
-                std::move(filter),
-                std::move(keyFilter));
-          } else {
-            return std::nullopt;
-          }
-        } else {
-          return std::nullopt;
-        }
-
-      } else {
-        // Fallback or unsupported type for subscript
-        return std::nullopt;
-      }
-    } else {
-      return std::nullopt;
-    }
-  }
-
-  return std::make_pair(std::move(subfield), std::move(filter));
+  return std::nullopt;
 }
 } // namespace
-
-void ExprToSubfieldFilterParser::registerAlias(
-    const std::string& alias,
-    const std::string& canonical) {
-  aliases_[alias] = canonical;
-}
-
-std::string ExprToSubfieldFilterParser::getCanonicalName(
-    const std::string& name) {
-  auto it = aliases_.find(name);
-  return it != aliases_.end() ? it->second : name;
-}
 
 std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>
 PrestoExprToSubfieldFilterParser::leafCallToSubfieldFilter(
@@ -859,79 +554,64 @@ PrestoExprToSubfieldFilterParser::leafCallToSubfieldFilter(
   const auto* leftSide = call.inputs()[0].get();
 
   common::Subfield subfield;
-  std::string funcName = getCanonicalName(call.name());
-
-  if (funcName == "eq" || funcName == "presto.default.eq") {
+  if (call.name() == "eq") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated ? makeNotEqualFilter(call.inputs()[1], evaluator)
                             : makeEqualFilter(call.inputs()[1], evaluator);
 
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "neq" || funcName == "presto.default.neq") {
+  } else if (call.name() == "neq") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated ? makeEqualFilter(call.inputs()[1], evaluator)
                             : makeNotEqualFilter(call.inputs()[1], evaluator);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "lte" || funcName == "presto.default.lte") {
+  } else if (call.name() == "lte") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated
           ? makeGreaterThanFilter(call.inputs()[1], evaluator)
           : makeLessThanOrEqualFilter(call.inputs()[1], evaluator);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "lt" || funcName == "presto.default.lt") {
+  } else if (call.name() == "lt") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated
           ? makeGreaterThanOrEqualFilter(call.inputs()[1], evaluator)
           : makeLessThanFilter(call.inputs()[1], evaluator);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "gte" || funcName == "presto.default.gte") {
+  } else if (call.name() == "gte") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated
           ? makeLessThanFilter(call.inputs()[1], evaluator)
           : makeGreaterThanOrEqualFilter(call.inputs()[1], evaluator);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "gt" || funcName == "presto.default.gt") {
+  } else if (call.name() == "gt") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = negated
           ? makeLessThanOrEqualFilter(call.inputs()[1], evaluator)
           : makeGreaterThanFilter(call.inputs()[1], evaluator);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "between" || funcName == "presto.default.between") {
+  } else if (call.name() == "between") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = makeBetweenFilter(
           call.inputs()[1], call.inputs()[2], evaluator, negated);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "in") {
+  } else if (call.name() == "in") {
     if (toSubfield(leftSide, subfield)) {
       auto filter = makeInFilter(call.inputs()[1], evaluator, negated);
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return combine(subfield, filter);
     }
-  } else if (funcName == "is_null") {
+  } else if (call.name() == "is_null") {
     if (toSubfield(leftSide, subfield)) {
-      std::unique_ptr<common::Filter> filter;
       if (negated) {
-        filter = isNotNull();
-      } else {
-        filter = isNull();
+        return std::make_pair(std::move(subfield), isNotNull());
       }
-      return combine(call.inputs()[0], subfield, filter, evaluator);
-    }
-  } else if (funcName == "is_not_null") {
-    if (toSubfield(leftSide, subfield)) {
-      std::unique_ptr<common::Filter> filter;
-      if (negated) {
-        filter = isNull();
-      } else {
-        filter = isNotNull();
-      }
-      return combine(call.inputs()[0], subfield, filter, evaluator);
+      return std::make_pair(std::move(subfield), isNull());
     }
   }
   return std::nullopt;
