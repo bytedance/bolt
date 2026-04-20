@@ -33,6 +33,7 @@
 namespace bytedance::bolt::row {
 namespace {
 constexpr size_t kSizeBytes = sizeof(int32_t);
+using TRowSize = uint32_t;
 
 void writeInt32(char* buffer, int32_t n) {
   ::memcpy(buffer, &n, kSizeBytes);

@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_row_test CompactRowTest.cpp UnsafeRowFuzzTest.cpp)
+add_executable(bolt_row_test CompactRowTest.cpp UnsafeRowTest.cpp)
 
 add_test(bolt_row_test bolt_row_test)
 

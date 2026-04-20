@@ -38,6 +38,13 @@ class UnsafeRowFast {
  public:
   explicit UnsafeRowFast(const RowVectorPtr& vector);
 
+  /// Returns the serialized sizes of the rows at specified row indexes.
+  ///
+  /// TODO: optimizes using columnar serialization size calculation.
+  void serializedRowSizes(
+      const folly::Range<const vector_size_t*>& rows,
+      vector_size_t** sizes) const;
+
   /// Returns row size if all fields are fixed width. Return std::nullopt if
   /// there are variable-width fields.
   static std::optional<int32_t> fixedRowSize(const RowTypePtr& rowType);
@@ -49,6 +56,14 @@ class UnsafeRowFast {
   /// Serializes row at specified index into 'buffer'.
   /// 'buffer' must have sufficient capacity and set to all zeros.
   int32_t serialize(vector_size_t index, char* buffer) const;
+
+  /// Deserializes multiple rows into a RowVector of specified type. The type
+  /// must match the contents of the serialized rows.
+  /// @param data The start memory address of each row.
+  static RowVectorPtr deserialize(
+      const std::vector<char*>& data,
+      const RowTypePtr& rowType,
+      memory::MemoryPool* pool);
 
  protected:
   explicit UnsafeRowFast(const VectorPtr& vector);

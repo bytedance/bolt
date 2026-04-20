@@ -45,7 +45,7 @@ struct MetadataFilter::Node {
       const core::ITypedExpr&,
       core::ExpressionEvaluator*,
       bool negated,
-      MetadataFilter::Options options);
+      bool enableMapSubscriptFilter);
   virtual ~Node() = default;
   virtual void addToScanSpec(ScanSpec&) const = 0;
   virtual uint64_t* eval(LeafResults&, int size) const = 0;
@@ -173,25 +173,30 @@ std::unique_ptr<MetadataFilter::Node> MetadataFilter::Node::fromExpression(
     const core::ITypedExpr& expr,
     core::ExpressionEvaluator* evaluator,
     bool negated,
-    MetadataFilter::Options options) {
+    bool enableMapSubscriptFilter) {
   auto* call = asCall(&expr);
   if (!call) {
     return nullptr;
   }
   if (call->name() == "and") {
-    auto lhs = fromExpression(*call->inputs()[0], evaluator, negated, options);
-    auto rhs = fromExpression(*call->inputs()[1], evaluator, negated, options);
+    auto lhs = fromExpression(
+        *call->inputs()[0], evaluator, negated, enableMapSubscriptFilter);
+    auto rhs = fromExpression(
+        *call->inputs()[1], evaluator, negated, enableMapSubscriptFilter);
     return negated ? OrNode::create(std::move(lhs), std::move(rhs))
                    : AndNode::create(std::move(lhs), std::move(rhs));
   }
   if (call->name() == "or") {
-    auto lhs = fromExpression(*call->inputs()[0], evaluator, negated, options);
-    auto rhs = fromExpression(*call->inputs()[1], evaluator, negated, options);
+    auto lhs = fromExpression(
+        *call->inputs()[0], evaluator, negated, enableMapSubscriptFilter);
+    auto rhs = fromExpression(
+        *call->inputs()[1], evaluator, negated, enableMapSubscriptFilter);
     return negated ? AndNode::create(std::move(lhs), std::move(rhs))
                    : OrNode::create(std::move(lhs), std::move(rhs));
   }
   if (call->name() == "not") {
-    return fromExpression(*call->inputs()[0], evaluator, !negated, options);
+    return fromExpression(
+        *call->inputs()[0], evaluator, !negated, enableMapSubscriptFilter);
   }
   try {
     auto subfieldAndFilter =
@@ -203,10 +208,7 @@ std::unique_ptr<MetadataFilter::Node> MetadataFilter::Node::fromExpression(
 
     auto& [subfield, filter] = subfieldAndFilter.value();
     if (filter->kind() == FilterKind::kMapSubscript &&
-        !options.enableMapSubscriptFilter) {
-      return nullptr;
-    }
-    if (filter->kind() == FilterKind::kCast && !options.enableCastFilter) {
+        !enableMapSubscriptFilter) {
       return nullptr;
     }
     BOLT_CHECK(
@@ -224,15 +226,13 @@ std::unique_ptr<MetadataFilter::Node> MetadataFilter::Node::fromExpression(
 MetadataFilter::MetadataFilter(
     ScanSpec& scanSpec,
     const core::ITypedExpr& expr,
-    core::ExpressionEvaluator* evaluator)
-    : MetadataFilter(scanSpec, expr, evaluator, Options{}) {}
-
-MetadataFilter::MetadataFilter(
-    ScanSpec& scanSpec,
-    const core::ITypedExpr& expr,
     core::ExpressionEvaluator* evaluator,
-    Options options)
-    : root_(Node::fromExpression(expr, evaluator, false, options)) {
+    bool enableMapSubscriptFilter)
+    : root_(Node::fromExpression(
+          expr,
+          evaluator,
+          false,
+          enableMapSubscriptFilter)) {
   if (root_) {
     root_->addToScanSpec(scanSpec);
   }

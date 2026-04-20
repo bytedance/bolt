@@ -750,9 +750,6 @@ class QueryConfig {
   static constexpr const char* kMapSubscriptFilterPushdown =
       "map_subscript_filter_pushdown";
 
-  /// Enable filter pushdown for filters with cast operation
-  static constexpr const char* kCastFilterPushdown = "cast_filter_pushdown";
-
   static constexpr const char* kDynamicConcurrencyAdjustmentEnabled =
       "dynamic_concurrency_adjustment_enabled";
 
@@ -1697,13 +1694,7 @@ class QueryConfig {
   /// Returns 'map subscript pushdown enable' flag.
   /// Map subscript filter pushdown is enabled by default.
   bool mapSubscriptFilterPushdownEnabled() const {
-    return get<bool>(kMapSubscriptFilterPushdown, true);
-  }
-
-  /// Returns 'cast filter pushdown enable' flag.
-  /// Cast filter pushdown is enabled by default.
-  bool castFilterPushdownEnabled() const {
-    return get<bool>(kCastFilterPushdown, true);
+    return get<bool>(kMapSubscriptFilterPushdown, false);
   }
 
   int32_t queryMemoryReclaimerPriority() const {

@@ -30,6 +30,7 @@
 
 #include <gtest/gtest.h>
 
+#include "bolt/common/base/Doubles.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/DecimalUtil.h"
 namespace bytedance::bolt {
@@ -83,6 +84,10 @@ void testToByteArray(int128_t value, int8_t* expected, int32_t size) {
   EXPECT_EQ(length, size);
   EXPECT_EQ(DecimalUtil::getByteArrayLength(value), size);
   EXPECT_EQ(std::memcmp(expected, out.data(), length), 0);
+}
+
+std::string zeros(uint32_t numZeros) {
+  return std::string(numZeros, '0');
 }
 
 TEST(DecimalTest, toString) {
@@ -370,6 +375,8 @@ TEST(DecimalTest, rescaleDouble) {
   assertRescaleFloatingPoint<double, int128_t>(
       0.034567890, DECIMAL(38, 18), 34'567'890'000'000'000);
   assertRescaleFloatingPoint<double, int128_t>(
+      0.03456789, DECIMAL(38, 33), HugeInt::parse("3456789" + zeros(25)));
+  assertRescaleFloatingPoint<double, int128_t>(
       0.999999999999999, DECIMAL(38, 18), 999'999'999'999'999'000);
   assertRescaleFloatingPoint<double, int128_t>(
       0.123456789123123, DECIMAL(38, 18), 123'456'789'123'123'000);
@@ -379,6 +386,16 @@ TEST(DecimalTest, rescaleDouble) {
       std::numeric_limits<double>::max(), DECIMAL(38, 38), "Result overflows.");
   assertRescaleFloatingPoint<double, int128_t>(
       std::numeric_limits<double>::min(), DECIMAL(38, 2), 0);
+
+  assertRescaleFloatingPoint<double, int128_t>(
+      0.9999999999999999, DECIMAL(17, 2), 100);
+
+  assertRescaleFloatingPoint<double, int128_t>(
+      -0.9999999999999999, DECIMAL(17, 2), -100);
+
+  assertRescaleFloatingPoint<double, int128_t>(
+      kMaxDoubleBelowInt64Max, DECIMAL(19, 0), 9'223'372'036'854'774'784);
+
   assertRescaleFloatingPointFail<double, int128_t>(
       std::numeric_limits<double>::lowest(),
       DECIMAL(38, 2),
