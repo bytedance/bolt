@@ -191,5 +191,32 @@ TEST_F(UnsafeRowFuzzTests, fast) {
   });
 }
 
+TEST_F(UnsafeRowFuzzTests, constantVector) {
+  clearBuffers();
+
+  auto emptyStructType = ROW({});
+  auto rowType = ROW({emptyStructType});
+  auto data = std::make_shared<RowVector>(
+      pool_.get(),
+      rowType,
+      BufferPtr(nullptr),
+      1,
+      std::vector<VectorPtr>{
+          BaseVector::createNullConstant(emptyStructType, 1, pool_.get())});
+
+  UnsafeRowFast fast(data);
+  auto rowSize = fast.serialize(0, buffers_[0]);
+  BOLT_CHECK_LE(rowSize, kBufferSize);
+
+  std::vector<std::optional<std::string_view>> serialized;
+  serialized.reserve(1);
+  serialized.push_back(std::string_view(buffers_[0], rowSize));
+
+  VectorPtr outputVector =
+      UnsafeRowDeserializer::deserialize(serialized, rowType, pool_.get());
+
+  assertEqualVectors(data, outputVector);
+}
+
 } // namespace
 } // namespace bytedance::bolt::row
