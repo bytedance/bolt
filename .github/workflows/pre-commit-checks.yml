@@ -30,13 +30,15 @@ env:
   CI_NUM_THREADS: "16"
   IN_CI: '1'
   GOMAXPROCS: 8
+  GOMODCACHE: /data/pre-commit-cache/gomodcache
+  GOCACHE: /data/pre-commit-cache/gocache
 
 jobs:
   lint:
     runs-on: ['self-hosted', 'medium']
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root --init -e GOMODCACHE=/data/pre-commit-cache/gomodcache -e GOCACHE=/data/pre-commit-cache/gocache
+      options: --user root --init
       volumes:
         - pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
