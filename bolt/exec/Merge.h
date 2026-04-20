@@ -306,6 +306,7 @@ class SpillMerger : public std::enable_shared_from_this<SpillMerger> {
           spillReadFilesGroup,
       vector_size_t maxOutputBatchRows,
       uint64_t maxOutputBatchBytes,
+      int mergeSourceQueueSize,
       const common::SpillConfig* spillConfig,
       const std::shared_ptr<folly::Synchronized<common::SpillStats>>&
           spillStats,
@@ -321,7 +322,8 @@ class SpillMerger : public std::enable_shared_from_this<SpillMerger> {
 
  private:
   static std::vector<std::shared_ptr<MergeSource>> createMergeSources(
-      size_t numSpillSources);
+      size_t numSpillSources,
+      int queueSize);
 
   static std::vector<std::unique_ptr<BatchStream>> createBatchStreams(
       std::vector<std::vector<std::unique_ptr<SpillReadFile>>>
