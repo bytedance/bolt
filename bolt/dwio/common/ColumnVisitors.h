@@ -154,7 +154,12 @@ template <typename TFilter, typename ExtractValues, bool isDense>
 class StringDictionaryColumnVisitor;
 
 // Template parameter for controlling filtering and action on a set of rows.
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath = true>
 class ColumnVisitor {
  public:
   using FilterType = TFilter;
@@ -162,7 +167,7 @@ class ColumnVisitor {
   using HookType = typename Extract::HookType;
   using DataType = T;
   static constexpr bool dense = isDense;
-  static constexpr bool kHasBulkPath = true;
+  static constexpr bool kHasBulkPath = hasBulkPath;
   ColumnVisitor(
       TFilter& filter,
       SelectiveColumnReader* reader,
@@ -496,9 +501,14 @@ class ColumnVisitor {
   ExtractValues values_;
 };
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
 FOLLY_ALWAYS_INLINE void
-ColumnVisitor<T, TFilter, ExtractValues, isDense>::filterFailed() {
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::filterFailed() {
   const auto preceding = filter_.getPrecedingPositionsToFail();
   const auto succeeding = filter_.getSucceedingPositionsToFail();
   if (preceding) {
@@ -509,19 +519,37 @@ ColumnVisitor<T, TFilter, ExtractValues, isDense>::filterFailed() {
   }
 }
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
-inline void ColumnVisitor<T, TFilter, ExtractValues, isDense>::addResult(
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
+inline void
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::addResult(
     T value) {
   values_.addValue(rowIndex_, value);
 }
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
-inline void ColumnVisitor<T, TFilter, ExtractValues, isDense>::addNull() {
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
+inline void
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::addNull() {
   values_.template addNull<T>(rowIndex_);
 }
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
-inline void ColumnVisitor<T, TFilter, ExtractValues, isDense>::addOutputRow(
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
+inline void
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::addOutputRow(
     vector_size_t row) {
   reader_->addOutputRow(row);
 }
@@ -1102,19 +1130,40 @@ class DictionaryColumnVisitor
   const uint8_t width_;
 };
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
 DictionaryColumnVisitor<T, TFilter, ExtractValues, isDense>
-ColumnVisitor<T, TFilter, ExtractValues, isDense>::toDictionaryColumnVisitor() {
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::
+    toDictionaryColumnVisitor() {
+  if constexpr (!kHasBulkPath) {
+    // Only DWRF integer dictionary is using this, which should not disable bulk
+    // path at decoder level.
+    BOLT_UNREACHABLE();
+  }
   auto result = DictionaryColumnVisitor<T, TFilter, ExtractValues, isDense>(
       filter_, reader_, RowSet(rows_ + rowIndex_, numRows_), values_);
-  result.numValuesBias_ = numValuesBias_;
+  result.setNumValuesBias(numValuesBias_);
   return result;
 }
 
-template <typename T, typename TFilter, typename ExtractValues, bool isDense>
+template <
+    typename T,
+    typename TFilter,
+    typename ExtractValues,
+    bool isDense,
+    bool hasBulkPath>
 StringDictionaryColumnVisitor<TFilter, ExtractValues, isDense>
-ColumnVisitor<T, TFilter, ExtractValues, isDense>::
+ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::
     toStringDictionaryColumnVisitor() {
+  if constexpr (!kHasBulkPath) {
+    // Only DWRF string dictionary is using this, which should not disable bulk
+    // path at decoder level.
+    BOLT_UNREACHABLE();
+  }
   auto result = StringDictionaryColumnVisitor<TFilter, ExtractValues, isDense>(
       filter_, reader_, RowSet(rows_ + rowIndex_, numRows_), values_);
   result.setNumValuesBias(numValuesBias_);

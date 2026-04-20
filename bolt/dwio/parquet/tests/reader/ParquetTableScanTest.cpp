@@ -469,6 +469,43 @@ TEST_F(ParquetTableScanTest, basic) {
       "SELECT max(b), a FROM tmp WHERE a < 3 GROUP BY a");
 }
 
+TEST_F(ParquetTableScanTest, aggregatePushdownToSmallPages) {
+  const std::vector<std::string> columnNames = {"a", "b", "c"};
+  const auto expectedRowVector = makeRowVector(
+      {makeFlatVector<int16_t>({1, 2, 4}),
+       makeFlatVector<int64_t>({7, 9, 13})});
+  const auto outputType =
+      ROW(std::vector<std::string>(columnNames),
+          {SMALLINT(), SMALLINT(), VARCHAR()});
+  std::vector<RowVectorPtr> data;
+  for (auto row = 0; row < 10; ++row) {
+    data.emplace_back(makeRowVector(
+        columnNames,
+        {
+            makeFlatVector<int16_t>(
+                std::vector<int16_t>{static_cast<int16_t>(row % 5)}),
+            makeFlatVector<int16_t>(
+                std::vector<int16_t>{static_cast<int16_t>(row)}),
+            makeFlatVector<std::string>({std::to_string(row)}),
+        }));
+  }
+  const auto filePath = TempFilePath::create();
+  WriterOptions options;
+  options.dataPageSize = 1;
+  writeToParquetFile(filePath->getPath(), data, options);
+  const auto plan =
+      PlanBuilder(pool())
+          .tableScan(
+              outputType,
+              {},
+              "c <> '' AND a in (1::smallint, 2::smallint, 4::smallint)")
+          .singleAggregation({"a"}, {"sum(b) as s"})
+          .planNode();
+  AssertQueryBuilder(plan)
+      .split(makeSplit(filePath->getPath()))
+      .assertResults(expectedRowVector);
+}
+
 TEST_F(ParquetTableScanTest, countStar) {
   // sample.parquet holds two columns (a: BIGINT, b: DOUBLE) and
   // 20 rows.
@@ -1249,6 +1286,19 @@ TEST_F(ParquetTableScanTest, dcMapContainsDifferentDynamicColumns) {
   EXPECT_EQ(1, actual[0]);
   EXPECT_EQ(0, actual[1]);
   EXPECT_EQ(1, actual[2]);
+}
+
+TEST_F(ParquetTableScanTest, deltaByteArray) {
+  auto a = makeFlatVector<StringView>({"axis", "axle", "babble", "babyhood"});
+  auto expected = makeRowVector({"a"}, {a});
+  createDuckDbTable("expected", {expected});
+
+  auto vector = makeFlatVector<StringView>({{}});
+  loadData(
+      getExampleFilePath("delta_byte_array.parquet"),
+      ROW({"a"}, {VARCHAR()}),
+      makeRowVector({"a"}, {vector}));
+  assertSelect({"a"}, "SELECT a from expected");
 }
 
 int main(int argc, char** argv) {

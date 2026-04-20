@@ -185,7 +185,7 @@ class BoltConan(ConanFile):
         )
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
         if self.options.get_safe("enable_jit"):
-            self.requires("llvm-core/19.1.7")
+            self.requires("llvm-core/19.1.7-bolt")
 
         if self.options.get_safe("enable_s3"):
             self.requires(
@@ -352,6 +352,7 @@ class BoltConan(ConanFile):
             self.options[llvm_core].with_z3 = False
             self.options[llvm_core].with_zstd = False
             self.options[llvm_core].with_ffi = False
+            self.options[llvm_core].with_clang = True
 
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"
@@ -450,6 +451,15 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_jit"):
             tc.cache_variables["ENABLE_BOLT_JIT"] = "ON"
             tc.preprocessor_definitions["ENABLE_BOLT_JIT"] = 1
+
+            # Verify clang exists in llvm-core package.
+            llvm_dep = self.dependencies["llvm-core"]
+            clang_path = os.path.join(str(llvm_dep.package_folder), "bin", "clang")
+            if not os.path.exists(clang_path):
+                raise Exception(
+                    f"clang not found at {clang_path}. "
+                    "Ensure llvm-core is built with -o llvm-core/*:with_clang=True"
+                )
 
             # TODO: Refactor the IR codegen of expression evaluation
             # Disable it right now

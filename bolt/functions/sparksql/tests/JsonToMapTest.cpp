@@ -108,6 +108,21 @@ TEST_F(JsonToMapTest, basic) {
   }
 
   {
+    // Valid non-object JSON should return empty map, same as hiveudf.
+    // JSON null
+    testJsonToMap({"null"}, {});
+    // JSON number
+    testJsonToMap({"123"}, {});
+    // JSON boolean
+    testJsonToMap({"true"}, {});
+    testJsonToMap({"false"}, {});
+    // JSON string
+    testJsonToMap({R"("hello")"}, {});
+    // JSON array
+    testJsonToMap({R"([1,2,3])"}, {});
+  }
+
+  {
     // json parse failed, return null
     auto result = evaluateJsonToMap({R"({"a": [1, 223,      23], "a" 1})"});
     auto expectVector =

@@ -37,6 +37,7 @@
 #include "bolt/dwio/common/compression/Compression.h"
 #include "bolt/dwio/parquet/reader/BooleanDecoder.h"
 #include "bolt/dwio/parquet/reader/DeltaBpDecoder.h"
+#include "bolt/dwio/parquet/reader/DeltaByteArrayDecoder.h"
 #include "bolt/dwio/parquet/reader/ParquetTypeWithId.h"
 #include "bolt/dwio/parquet/reader/RleBpDataDecoder.h"
 #include "bolt/dwio/parquet/reader/StringDecoder.h"
@@ -173,6 +174,10 @@ class PageReader {
 
   bool isDeltaBinaryPacked() const {
     return encoding_ == thrift::Encoding::DELTA_BINARY_PACKED;
+  }
+
+  bool isDeltaByteArray() const {
+    return encoding_ == thrift::Encoding::DELTA_BYTE_ARRAY;
   }
 
   /// Returns the range of repdefs for the top level rows covered by the last
@@ -413,6 +418,9 @@ class PageReader {
         nullsFromFastPath = dwio::common::useFastPath<Visitor, true>(visitor);
         auto dictVisitor = visitor.toStringDictionaryColumnVisitor();
         dictionaryIdDecoder_->readWithVisitor<true>(nulls, dictVisitor);
+      } else if (isDeltaByteArray()) {
+        nullsFromFastPath = false;
+        deltaByteArrDecoder_->readWithVisitor<true>(nulls, visitor);
       } else {
         nullsFromFastPath = false;
         stringDecoder_->readWithVisitor<true>(nulls, visitor);
@@ -421,6 +429,8 @@ class PageReader {
       if (isDictionary()) {
         auto dictVisitor = visitor.toStringDictionaryColumnVisitor();
         dictionaryIdDecoder_->readWithVisitor<false>(nullptr, dictVisitor);
+      } else if (isDeltaByteArray()) {
+        deltaByteArrDecoder_->readWithVisitor<false>(nulls, visitor);
       } else {
         stringDecoder_->readWithVisitor<false>(nulls, visitor);
       }
@@ -603,6 +613,7 @@ class PageReader {
   std::unique_ptr<StringDecoder> stringDecoder_;
   std::unique_ptr<BooleanDecoder> booleanDecoder_;
   std::unique_ptr<DeltaBpDecoder> deltaBpDecoder_;
+  std::unique_ptr<DeltaByteArrayDecoder> deltaByteArrDecoder_;
   bool decoderSet_{false};
   // Add decoders for other encodings here.
 
@@ -663,6 +674,13 @@ void PageReader::readWithVisitor(Visitor& visitor) {
       NanosecondTimer timer(
           FOLLY_LIKELY(statis_ != nullptr) ? &statis_->decodeTimeNs : nullptr);
       callDecoder(nulls, nullsFromFastPath, visitor);
+    }
+    if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED &&
+        deltaBpDecoder_->validValuesCount() == 0) {
+      BOLT_DCHECK(
+          deltaBpDecoder_->bufferStart() == pageData_ + encodedDataSize_,
+          "Once all data in the delta binary packed decoder has been read, "
+          "its buffer ptr should be moved to the end of the page.");
     }
     if (currentVisitorRow_ < numVisitorRows_ || isMultiPage) {
       if (mayProduceNulls) {
