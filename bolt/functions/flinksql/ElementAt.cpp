@@ -47,8 +47,8 @@ class FlinkElementAtFunction : public SubscriptImpl<
                                    /* isElementAt */ true,
                                    /* nullOnNonConstantInvalidIndex */ true> {
  public:
-  explicit FlinkElementAtFunction(bool allowCaching)
-      : SubscriptImpl(allowCaching) {}
+  FlinkElementAtFunction(bool allowCaching, bool constantIndexInvalidThrows)
+      : SubscriptImpl(allowCaching, constantIndexInvalidThrows) {}
 };
 
 } // namespace
@@ -60,13 +60,15 @@ void registerFlinkElementAtFunction(const std::string& name) {
       [](const std::string&,
          const std::vector<exec::VectorFunctionArg>& inputArgs,
          const bolt::core::QueryConfig& config) {
-        static const auto kSubscriptStateLess =
-            std::make_shared<FlinkElementAtFunction>(false);
+        const bool constantIndexInvalidThrows =
+            inputArgs.size() > 1 && inputArgs[1].constantValue != nullptr;
         if (inputArgs[0].type->isArray()) {
-          return kSubscriptStateLess;
+          return std::make_shared<FlinkElementAtFunction>(
+              false, constantIndexInvalidThrows);
         } else {
           return std::make_shared<FlinkElementAtFunction>(
-              config.isExpressionEvaluationCacheEnabled());
+              config.isExpressionEvaluationCacheEnabled(),
+              constantIndexInvalidThrows);
         }
       });
 }

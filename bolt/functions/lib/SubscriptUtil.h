@@ -199,8 +199,11 @@ template <
     bool nullOnNonConstantInvalidIndex = false>
 class SubscriptImpl : public exec::Subscript {
  public:
-  explicit SubscriptImpl(bool allowCaching)
-      : mapSubscript_(MapSubscript(allowCaching)) {}
+  explicit SubscriptImpl(
+      bool allowCaching,
+      bool constantIndexInvalidThrows = false)
+      : mapSubscript_(MapSubscript(allowCaching)),
+        constantIndexInvalidThrows_(constantIndexInvalidThrows) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -313,19 +316,32 @@ class SubscriptImpl : public exec::Subscript {
           isZeroSubscriptError,
           zeroBasedArrayIndex);
       if (isZeroSubscriptError) {
-        context.setErrors(rows, zeroSubscriptError());
-        allFailed = true;
+        if constexpr (nullOnNonConstantInvalidIndex) {
+          if (constantIndexInvalidThrows_) {
+            std::rethrow_exception(zeroSubscriptError());
+          }
+          return BaseVector::createNullConstant(
+              baseArray->elements()->type(), rows.end(), context.pool());
+        } else {
+          context.setErrors(rows, zeroSubscriptError());
+          allFailed = true;
+        }
       }
 
       if (!allFailed) {
         rows.applyToSelected([&](auto row) {
           const auto elementIndex = getIndex(
               adjustedIndex, row, rawSizes, rawOffsets, arrayIndices, context);
-          rawIndices[row] = elementIndex;
           if (elementIndex == -1) {
             nullsBuilder.setNull(row);
+            rawIndices[row] = 0;
+          } else {
+            rawIndices[row] = elementIndex;
           }
         });
+      } else {
+        return BaseVector::createNullConstant(
+            baseArray->elements()->type(), rows.end(), context.pool());
       }
     } else {
       rows.applyToSelected([&](auto row) {
@@ -345,9 +361,11 @@ class SubscriptImpl : public exec::Subscript {
         }
         const auto elementIndex = getIndex(
             adjustedIndex, row, rawSizes, rawOffsets, arrayIndices, context);
-        rawIndices[row] = elementIndex;
         if (elementIndex == -1) {
           nullsBuilder.setNull(row);
+          rawIndices[row] = 0;
+        } else {
+          rawIndices[row] = elementIndex;
         }
       });
     }
@@ -429,6 +447,9 @@ class SubscriptImpl : public exec::Subscript {
           index += arraySize;
         }
       } else {
+        if constexpr (nullOnNonConstantInvalidIndex) {
+          return -1;
+        }
         context.setBoltExceptionError(row, negativeSubscriptError());
         return -1;
       }
@@ -452,6 +473,7 @@ class SubscriptImpl : public exec::Subscript {
 
  private:
   MapSubscript mapSubscript_;
+  const bool constantIndexInvalidThrows_;
 };
 
 } // namespace bytedance::bolt::functions
