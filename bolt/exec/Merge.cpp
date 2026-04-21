@@ -29,8 +29,9 @@
  */
 
 #include "bolt/exec/Merge.h"
+#include <folly/Traits.h>
+#include <exception>
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/Task.h"
 
 using bytedance::bolt::common::testutil::TestValue;
@@ -565,14 +566,22 @@ void SpillMerger::start() {
 
 RowVectorPtr SpillMerger::getOutput(
     std::vector<ContinueFuture>& sourceBlockingFutures,
-    bool& atEnd) const {
+    bool& atEnd) {
   TestValue::adjust(
       "bytedance::bolt::exec::SpillMerger::getOutput", &sourceBlockingFutures);
   sourceMerger_->isBlocked(sourceBlockingFutures);
   if (!sourceBlockingFutures.empty()) {
     return nullptr;
   }
-  return sourceMerger_->getOutput(sourceBlockingFutures, atEnd);
+  // SpillMerger::getOutput waits for all readers to finish, reaches EOF,
+  // and rethrows any captured error. Centralizing error propagation here
+  // helps prevent potential resource leaks.
+  auto output = sourceMerger_->getOutput(sourceBlockingFutures, atEnd);
+
+  if (atEnd) {
+    checkError();
+  }
+  return output;
 }
 
 std::vector<std::shared_ptr<MergeSource>> SpillMerger::createMergeSources(
@@ -619,61 +628,97 @@ std::unique_ptr<SourceMerger> SpillMerger::createSourceMerger(
       type, std::move(streams), maxOutputBatchRows, maxOutputBatchBytes, pool);
 }
 
-// static.
-void SpillMerger::asyncReadFromSpillFileStream(
+void SpillMerger::finishSource(size_t streamIdx) const {
+  ContinueFuture future{ContinueFuture::makeEmpty()};
+  sources_[streamIdx]->enqueue(nullptr, &future);
+  BOLT_CHECK(!future.valid());
+}
+
+void SpillMerger::readFromSpillFileStream(
     const std::weak_ptr<SpillMerger>& mergeHolder,
     size_t streamIdx) {
   TestValue::adjust(
-      "bytedance::bolt::exec::SpillMerger::asyncReadFromSpillFileStream",
+      "bytedance::bolt::exec::SpillMerger::readFromSpillFileStream",
       static_cast<void*>(0));
   const auto merger = mergeHolder.lock();
   if (merger == nullptr) {
     LOG(ERROR) << "SpillMerger is destroyed, abandon reading from batch stream";
     return;
   }
-  merger->readFromSpillFileStream(streamIdx);
-}
+  try {
+    if (hasError()) {
+      finishSource(streamIdx);
+      return;
+    }
 
-void SpillMerger::readFromSpillFileStream(size_t streamIdx) {
-  RowVectorPtr vector;
-  ContinueFuture future{ContinueFuture::makeEmpty()};
-  if (!batchStreams_[streamIdx]->nextBatch(vector)) {
-    BOLT_CHECK_NULL(vector);
-    sources_[streamIdx]->enqueue(nullptr, &future);
-    BOLT_CHECK(!future.valid());
-    return;
-  }
-  const auto blockingReason =
-      sources_[streamIdx]->enqueue(std::move(vector), &future);
-  // TODO: add async error handling.
-  if (blockingReason == BlockingReason::kNotBlocked) {
-    BOLT_CHECK(!future.valid());
-    executor_->add(
-        [mergeHolder = std::weak_ptr(shared_from_this()), streamIdx]() {
-          asyncReadFromSpillFileStream(mergeHolder, streamIdx);
-        });
-  } else {
-    BOLT_CHECK(future.valid());
-    std::move(future)
-        .via(executor_)
-        .thenValue([mergeHolder = std::weak_ptr(shared_from_this()),
-                    streamIdx](folly::Unit) {
-          asyncReadFromSpillFileStream(mergeHolder, streamIdx);
-        })
-        .thenError(
-            folly::tag_t<std::exception>{},
-            [streamIdx](const std::exception& e) {
-              LOG(ERROR) << "Stop the " << streamIdx
-                         << "th batch stream producer on error: " << e.what();
-            });
+    RowVectorPtr vector;
+    if (!batchStreams_[streamIdx]->nextBatch(vector)) {
+      BOLT_CHECK_NULL(vector);
+      finishSource(streamIdx);
+      return;
+    }
+
+    ContinueFuture future{ContinueFuture::makeEmpty()};
+    const auto blockingReason =
+        sources_[streamIdx]->enqueue(std::move(vector), &future);
+    if (blockingReason == BlockingReason::kNotBlocked) {
+      BOLT_CHECK(!future.valid());
+      readFromSpillFileStream(mergeHolder, streamIdx);
+    } else {
+      BOLT_CHECK(future.valid());
+      std::move(future)
+          .via(executor_)
+          .thenValue([this, mergeHolder, streamIdx](auto&&) {
+            readFromSpillFileStream(mergeHolder, streamIdx);
+          })
+          .thenError(
+              folly::tag_t<std::exception>{},
+              [this, mergeHolder, streamIdx](const std::exception& e) {
+                const auto merger = mergeHolder.lock();
+                if (merger != nullptr) {
+                  LOG(ERROR) << "Stop the " << streamIdx
+                             << " th source on error: " << e.what();
+                  setError(std::make_exception_ptr(e));
+                  finishSource(streamIdx);
+                }
+              });
+    }
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "The " << streamIdx
+               << " spill stream failed with error: " << e.what();
+    setError(std::current_exception());
+    finishSource(streamIdx);
   }
 }
 
 void SpillMerger::scheduleAsyncSpillFileStreamReads() {
   BOLT_CHECK_EQ(batchStreams_.size(), sources_.size());
   for (auto i = 0; i < batchStreams_.size(); ++i) {
-    executor_->add(
-        [&, streamIdx = i]() { readFromSpillFileStream(streamIdx); });
+    executor_->add([&, streamIdx = i]() {
+      readFromSpillFileStream(std::weak_ptr(shared_from_this()), streamIdx);
+    });
+  }
+}
+
+void SpillMerger::setError(const std::exception_ptr& exception) {
+  std::lock_guard l(mutex_);
+  if (exception_ != nullptr) {
+    return;
+  }
+  exception_ = exception;
+}
+
+bool SpillMerger::hasError() const {
+  std::lock_guard l(mutex_);
+  return exception_ != nullptr;
+}
+
+void SpillMerger::checkError() {
+  if (hasError()) {
+    sourceMerger_.reset();
+    batchStreams_.clear();
+    sources_.clear();
+    std::rethrow_exception(exception_);
   }
 }
 
