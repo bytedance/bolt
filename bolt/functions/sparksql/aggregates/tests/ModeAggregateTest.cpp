@@ -76,6 +76,31 @@ class ModeAggregateTest : public AggregationTestBase {
         {vectors}, {}, {"spark_mode(c1)"}, "SELECT mode(c1) FROM tmp");
   }
 
+  void testGlobalModeWithDuckSkipTableScan(const VectorPtr& vector) {
+    auto num = vector->size();
+    auto reverseIndices = makeIndicesInReverse(num);
+
+    auto vectors =
+        makeRowVector({vector, wrapInDictionary(reverseIndices, num, vector)});
+
+    createDuckDbTable({vectors});
+    testAggregations(
+        {vectors},
+        {},
+        {"spark_mode(c0)"},
+        "SELECT mode(c0) FROM tmp",
+        /*config=*/{},
+        /*testWithTableScan=*/false);
+
+    testAggregations(
+        {vectors},
+        {},
+        {"spark_mode(c1)"},
+        "SELECT mode(c1) FROM tmp",
+        /*config=*/{},
+        /*testWithTableScan=*/false);
+  }
+
   void testMode(
       const std::string& expression,
       const std::vector<std::string>& groupKeys,
@@ -84,6 +109,22 @@ class ModeAggregateTest : public AggregationTestBase {
       const RowVectorPtr& expected) {
     auto vectors = makeRowVector({vectorKey, vectorInput});
     testAggregations({vectors}, groupKeys, {expression}, {expected});
+  }
+
+  void testModeSkipTableScan(
+      const std::string& expression,
+      const std::vector<std::string>& groupKeys,
+      const VectorPtr& vectorKey,
+      const VectorPtr& vectorInput,
+      const RowVectorPtr& expected) {
+    auto vectors = makeRowVector({vectorKey, vectorInput});
+    testAggregations(
+        {vectors},
+        groupKeys,
+        {expression},
+        {expected},
+        /*config=*/{},
+        /*testWithTableScan=*/false);
   }
 };
 
@@ -218,7 +259,9 @@ TEST_F(ModeAggregateTest, globalDecimal) {
       nullEvery(7),
       longDecimalType);
 
-  testGlobalModeWithDuck(vectorLongDecimal);
+  // Decimal types cannot be written as DWRF in our TableScan test path.
+  // Keep DuckDB verification, but skip the TableScan (write-to-file) variant.
+  testGlobalModeWithDuckSkipTableScan(vectorLongDecimal);
 
   auto shortDecimalType = DECIMAL(6, 2);
   auto vectorShortDecimal = makeFlatVector<int64_t>(
@@ -227,7 +270,7 @@ TEST_F(ModeAggregateTest, globalDecimal) {
       nullEvery(7),
       shortDecimalType);
 
-  testGlobalModeWithDuck(vectorShortDecimal);
+  testGlobalModeWithDuckSkipTableScan(vectorShortDecimal);
 }
 
 TEST_F(ModeAggregateTest, globalUnknown) {
@@ -237,7 +280,8 @@ TEST_F(ModeAggregateTest, globalUnknown) {
       BaseVector::createNullConstant(UNKNOWN(), 1, pool()),
   });
 
-  testMode("spark_mode(c1)", {}, vector, vector, expected);
+  // UNKNOWN type cannot be written in our TableScan (write-to-file) test path.
+  testModeSkipTableScan("spark_mode(c1)", {}, vector, vector, expected);
 }
 
 TEST_F(ModeAggregateTest, globalDouble) {
