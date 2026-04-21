@@ -139,6 +139,33 @@ struct UnixTimestampFunctionBase {
 
   // calculate china/shanghai unix-timestamp
   Timestamp calculateCnUnixTimestamp(Timestamp& timestamp) {
+    constexpr int64_t kLastDstEndUtc = 694195200; // 1992-01-01 local
+    constexpr int64_t kMidCenturyStartUtc = -631180800; // 1950-01-01 local
+    constexpr int64_t kMidCenturyEndUtc = 504892800; // 1986-01-01 local
+    // between 1986 and 1991, china/shanghai use dst time
+    if (timestamp.getSeconds() > kMidCenturyEndUtc &&
+        timestamp.getSeconds() < kLastDstEndUtc) {
+      if (sessionTzID_.has_value()) {
+        timestamp.toGMT(sessionTzID_.value());
+        return timestamp;
+      } else if (sessionTimeZone_ != nullptr) {
+        timestamp.toGMT(*sessionTimeZone_);
+        return timestamp;
+      }
+    }
+    // STDOFF fast paths for pure-CST windows (no DST, no LMT):
+    //   post-1991   (>= 1992-01-01 local)
+    //   mid-century (1950-01-01 .. 1985-12-31 local)
+    // Other eras fall through to tzdata + correct_nonexistent_time.
+    const int64_t utcSeconds =
+        timestamp.getSeconds() - sessionTzOffsetInSeconds_;
+    if (utcSeconds >= kLastDstEndUtc) {
+      return Timestamp(utcSeconds, timestamp.getNanos());
+    }
+    if (utcSeconds >= kMidCenturyStartUtc && utcSeconds < kMidCenturyEndUtc) {
+      return Timestamp(utcSeconds, timestamp.getNanos());
+    }
+
     // Route through tzdata for every Shanghai regime (LMT, CST, and DST in
     // 1919/1940-1949/1986-1991). Forward-shift gap local times to match
     // Spark/JVM's ZonedDateTime.ofLocal semantics.

@@ -85,3 +85,10 @@ target_link_libraries(
   bolt_benchmark_builder
   ${BOLT_BENCHMARK_DEPS}
 )
+
+add_executable(bolt_sparksql_benchmarks_unix_timestamp UnixTimestampBenchmark.cpp)
+target_link_libraries(
+  bolt_sparksql_benchmarks_unix_timestamp PRIVATE
+  bolt_benchmark_builder
+  ${BOLT_BENCHMARK_DEPS}
+)
