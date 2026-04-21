@@ -336,6 +336,48 @@ def deduplicate_table(catalog):
     write_to_table(table, dataframe_3)
 
 
+def timestamp_precision_table(catalog):
+    """Table with high-precision timestamps for testing kReadTimestampUnit."""
+    pa_schema = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("ts", pa.timestamp("ns")),
+            ("value", pa.int64()),
+        ]
+    )
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=[],
+        options={"bucket": "1"},
+        comment="timestamp precision test table",
+    )
+    # Write timestamps with nanosecond precision so we can observe
+    # truncation at milli/micro/nano levels.
+    data = {
+        "id": [1, 2, 3, 4, 5],
+        "ts": [
+            # Nanosecond-precision timestamps
+            pd.Timestamp("2015-06-01 19:34:56.123456789"),
+            pd.Timestamp("2023-04-21 09:09:34.567890123"),
+            pd.Timestamp("2007-12-12 04:27:56.999999111"),
+            pd.Timestamp("2000-01-01 00:00:00.000001000"),
+            pd.Timestamp("1999-12-31 23:59:59.999999000"),
+        ],
+        "value": [10, 20, 30, 40, 50],
+    }
+    dataframe = pd.DataFrame(data)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database="test_db",
+        table_name="timestamp_precision",
+        schema=schema,
+    )
+    if not table_created:
+        return
+    write_to_table(table, dataframe)
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument("-b", "--base-path", default=None)
@@ -364,6 +406,7 @@ def main():
         partial_update_table,
         aggregate_table,
         deduplicate_table,
+        timestamp_precision_table,
     ]
     for create_table in tables:
         create_table(catalog)

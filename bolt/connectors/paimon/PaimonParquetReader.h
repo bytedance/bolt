@@ -145,6 +145,7 @@ class PaimonParquetReader : public ::paimon::FileFormat {
 
  private:
   PaimonIoOptions ioOptions_;
+  uint8_t timestampPrecision_ = 3; // default: milliseconds (matches hive)
 };
 
 // Ensures that paimon's FileFormatFactory for "parquet" (backed by

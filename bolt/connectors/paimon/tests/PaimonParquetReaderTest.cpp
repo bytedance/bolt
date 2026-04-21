@@ -11,10 +11,11 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/type/StringView.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
@@ -28,49 +29,50 @@ using namespace bytedance::bolt::dwio::common;
 
 namespace {
 
-class PaimonParquetReaderTest : public testing::Test,
+class PaimonParquetReaderTest : public ::testing::Test,
                                 public bytedance::bolt::test::VectorTestBase {
  protected:
-  static void SetUpTestSuite() {
-    memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    // Register local filesystem sink for writing to local paths
-    bytedance::bolt::dwio::common::LocalFileSink::registerFactory();
+  static void SetUpTestCase() {
+    memory::MemoryManager::Options options;
+    options.allocatorCapacity = 8L << 30;
+    memory::MemoryManager::testingSetInstance(options);
   }
 
   void SetUp() override {
-    rootPool_ = memory::memoryManager()->addRootPool("PaimonParquetReaderTest");
-    leafPool_ = rootPool_->addLeafChild("Leaf");
+    dwio::common::LocalFileSink::registerFactory();
+    pool_ = memory::memoryManager()->addRootPool("PaimonParquetReaderTest");
+    leafPool_ = pool_->addLeafChild("leaf");
     tempDir_ = std::filesystem::temp_directory_path();
   }
 
   std::string tempPath(const std::string& filename) const {
-    auto path = (tempDir_ / filename).string();
-    return path;
+    return (tempDir_ / filename).string();
   }
 
-  std::unique_ptr<bytedance::bolt::parquet::Writer> createWriter(
+  std::unique_ptr<parquet::Writer> createWriter(
       const std::string& parquetPath,
       const RowTypePtr& schema) {
     auto sink =
-        dwio::common::FileSink::create(parquetPath, {.pool = leafPool_.get()});
-    bytedance::bolt::parquet::WriterOptions opts;
-    opts.memoryPool = leafPool_.get();
+        dwio::common::FileSink::create(parquetPath, {.pool = pool_.get()});
+    auto writerPool = pool_->addLeafChild("writer");
+    parquet::WriterOptions opts;
+    opts.memoryPool = writerPool.get();
     opts.enableFlushBasedOnBlockSize = true;
-    return std::make_unique<bytedance::bolt::parquet::Writer>(
-        std::move(sink),
-        opts,
-        rootPool_,
-        ::arrow::default_memory_pool(),
-        schema);
+    return std::make_unique<parquet::Writer>(
+        std::move(sink), opts, pool_, ::arrow::default_memory_pool(), schema);
   }
 
-  // Open via PaimonParquetReader and validate row count and batch iteration
+  /// Open via PaimonParquetReader, read all rows, and compare against expected.
+  /// When \p extraOptions is provided, its entries are passed through to
+  /// PaimonParquetReader (e.g. kReadTimestampUnit for timestamp truncation).
   static void validateRead(
       const std::string& parquetPath,
       int32_t batchSize,
       const RowVectorPtr& expectedData,
-      memory::MemoryPool* pool) {
-    PaimonParquetReader format({});
+      memory::MemoryPool* pool,
+      const std::map<std::string, std::string>& extraOptions = {}) {
+    auto options = extraOptions;
+    PaimonParquetReader format(options);
     auto rbRes = format.CreateReaderBuilder(batchSize);
     ASSERT_TRUE(rbRes.ok());
     std::unique_ptr<::paimon::ReaderBuilder> builder = std::move(rbRes).value();
@@ -83,15 +85,15 @@ class PaimonParquetReaderTest : public testing::Test,
     std::unique_ptr<::paimon::FileBatchReader> fileReader =
         std::move(readerRes).value();
 
-    // Read expected number of rows
+    // Validate row count when we have expected data.
     auto expectedRows = expectedData->size();
-    auto rowCountRes = fileReader->GetNumberOfRows();
     if (expectedRows > 0) {
+      auto rowCountRes = fileReader->GetNumberOfRows();
       ASSERT_TRUE(rowCountRes.ok());
       ASSERT_EQ(rowCountRes.value(), static_cast<uint64_t>(expectedRows));
     }
 
-    // Iterate batches until end and collect data
+    // Collect all batches.
     std::vector<RowVectorPtr> batches;
     uint32_t reads(0);
     while (true) {
@@ -106,27 +108,20 @@ class PaimonParquetReaderTest : public testing::Test,
           batchRes.status().message());
 
       auto pair = std::move(batchRes).value();
-      auto& arr = pair.first;
-      auto& sch = pair.second;
 
-      // Convert Arrow array to RowVectorPtr
-      auto type = importFromArrow(*sch);
-      auto rowType = std::dynamic_pointer_cast<const RowType>(type);
-      ASSERT_TRUE(rowType != nullptr);
-
-      auto batch = importFromArrowAsOwner(*sch, *arr, {}, expectedData->pool());
+      auto batch = importFromArrowAsOwner(
+          *pair.second, *pair.first, {}, expectedData->pool());
       auto rowBatch = std::dynamic_pointer_cast<RowVector>(batch);
       ASSERT_TRUE(rowBatch != nullptr);
-
       batches.push_back(rowBatch);
-      reads++;
 
-      if (arr && arr->release) {
-        arr->release(arr.get());
+      if (pair.first && pair.first->release) {
+        pair.first->release(pair.first.get());
       }
-      if (sch && sch->release) {
-        sch->release(sch.get());
+      if (pair.second && pair.second->release) {
+        pair.second->release(pair.second.get());
       }
+      reads++;
     }
     fileReader->Close();
 
@@ -134,15 +129,12 @@ class PaimonParquetReaderTest : public testing::Test,
       ASSERT_GT(reads, 0);
     }
 
-    // Concatenate all batches into a single result vector
     if (!batches.empty()) {
       auto actualData =
           RowVector::createEmpty(expectedData->type(), expectedData->pool());
       for (const auto& batch : batches) {
         actualData->append(batch.get());
       }
-
-      // Compare actual data with expected data
       assertVectorsEqual(expectedData, actualData);
     }
   }
@@ -159,10 +151,13 @@ class PaimonParquetReaderTest : public testing::Test,
     }
   }
 
-  std::shared_ptr<memory::MemoryPool> rootPool_;
+  std::shared_ptr<memory::MemoryPool> pool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
   std::filesystem::path tempDir_;
 };
+
+// ---- Existing tests
+// ----------------------------------------------------------
 
 TEST_F(PaimonParquetReaderTest, PrimitiveTypes) {
   auto schema = ROW({"c0", "c1", "c2"}, {INTEGER(), DOUBLE(), BIGINT()});
@@ -182,12 +177,10 @@ TEST_F(PaimonParquetReaderTest, PrimitiveTypes) {
 }
 
 TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
-  using namespace bytedance::bolt::test;
   const int64_t kRows = 5;
   auto arrType = ARRAY(INTEGER());
   auto schema = ROW({"arr"}, {arrType});
 
-  // Create array column with varying sizes
   std::vector<std::vector<int32_t>> arrays = {{1, 2, 3}, {}, {4}, {5, 6}, {7}};
   auto arrVec = makeArrayVector<int32_t>(arrays);
   auto row = makeRowVector({arrVec});
@@ -201,7 +194,7 @@ TEST_F(PaimonParquetReaderTest, ArraysOfInts) {
 }
 
 TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
-  using S = bytedance::bolt::StringView;
+  using S = StringView;
   const int64_t kRows = 4;
   auto mapType = MAP(VARCHAR(), INTEGER());
   auto schema = ROW({"mp"}, {mapType});
@@ -224,7 +217,7 @@ TEST_F(PaimonParquetReaderTest, MapsStringToInt) {
 }
 
 TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
-  using S = bytedance::bolt::StringView;
+  using S = StringView;
   const int64_t kRows = 6;
   auto schema =
       ROW({"arr", "mp"}, {ARRAY(INTEGER()), MAP(VARCHAR(), INTEGER())});
@@ -250,6 +243,126 @@ TEST_F(PaimonParquetReaderTest, MixedArrayAndMap) {
   writer->close();
 
   validateRead(path, 256, row, leafPool_.get());
+}
+
+// ---- Timestamp precision test
+// ------------------------------------------------
+
+TEST_F(PaimonParquetReaderTest, TimestampPrecision) {
+  // Verify kReadTimestampUnit config threads through PaimonDataSource →
+  // PaimonParquetReader → RowReaderOptions.setTimestampPrecision().
+  // Uses INT64-encoded timestamps (microsecond precision on disk).
+
+  auto schema = ROW({"ts", "value"}, {TIMESTAMP(), BIGINT()});
+
+  const auto parseTs = [](std::string_view s) {
+    return util::fromTimestampString(s.data(), s.size(), nullptr);
+  };
+
+  // Timestamps with sub-millisecond precision to observe truncation.
+  auto writtenData = makeRowVector(std::vector<VectorPtr>{
+      makeNullableFlatVector<Timestamp>({
+          parseTs("2015-06-01 19:34:56.123456"),
+          parseTs("2023-04-21 09:09:34.567890"),
+          std::nullopt,
+      }),
+      makeFlatVector<int64_t>({10, 20, 30}),
+  });
+
+  // Expected at millisecond precision: sub-ms digits zeroed.
+  auto expectedMilli = makeRowVector(std::vector<VectorPtr>{
+      makeNullableFlatVector<Timestamp>({
+          parseTs("2015-06-01 19:34:56.123000"),
+          parseTs("2023-04-21 09:09:34.567000"),
+          std::nullopt,
+      }),
+      makeFlatVector<int64_t>({10, 20, 30}),
+  });
+
+  // Expected at microsecond precision: full INT64 native precision preserved.
+  auto expectedMicro = makeRowVector(std::vector<VectorPtr>{
+      makeNullableFlatVector<Timestamp>({
+          parseTs("2015-06-01 19:34:56.123456"),
+          parseTs("2023-04-21 09:09:34.567890"),
+          std::nullopt,
+      }),
+      makeFlatVector<int64_t>({10, 20, 30}),
+  });
+
+  // Write with default INT64 encoding (microsecond precision on disk).
+  auto path = tempPath("ts_precision.parquet");
+  {
+    auto sink = dwio::common::FileSink::create(path, {.pool = pool_.get()});
+    parquet::WriterOptions opts;
+    opts.memoryPool = pool_->addLeafChild("writer").get();
+    opts.enableFlushBasedOnBlockSize = true;
+    auto writer = std::make_unique<parquet::Writer>(
+        std::move(sink), opts, pool_, ::arrow::default_memory_pool(), schema);
+    writer->write(writtenData);
+    writer->close();
+  }
+
+  // Millisecond precision (default): sub-ms truncated.
+  validateRead(path, 256, expectedMilli, leafPool_.get());
+
+  // Explicit milli option should give same result.
+  validateRead(
+      path,
+      256,
+      expectedMilli,
+      leafPool_.get(),
+      {{PaimonConfig::kReadTimestampUnit, "3"}});
+
+  // Microsecond precision: preserves INT64's native micro precision.
+  validateRead(
+      path,
+      256,
+      expectedMicro,
+      leafPool_.get(),
+      {{PaimonConfig::kReadTimestampUnit, "6"}});
+
+  // ---- INT96-encoded timestamps ----
+  // INT96 stores nanosecond precision on disk (days + nanos).
+  // Verify precision config truncates correctly for this encoding too.
+  {
+    auto int96Path = tempPath("ts_precision_int96.parquet");
+    {
+      auto sink =
+          dwio::common::FileSink::create(int96Path, {.pool = pool_.get()});
+      parquet::WriterOptions opts;
+      opts.memoryPool = pool_->addLeafChild("int96_writer").get();
+      opts.enableFlushBasedOnBlockSize = true;
+      opts.writeInt96AsTimestamp = true;
+      auto writer = std::make_unique<parquet::Writer>(
+          std::move(sink), opts, pool_, ::arrow::default_memory_pool(), schema);
+      writer->write(writtenData);
+      writer->close();
+    }
+
+    // Millisecond precision: sub-ms digits zeroed.
+    validateRead(
+        int96Path,
+        256,
+        expectedMilli,
+        leafPool_.get(),
+        {{PaimonConfig::kReadTimestampUnit, "3"}});
+
+    // Microsecond precision: sub-us digits zeroed.
+    validateRead(
+        int96Path,
+        256,
+        expectedMicro,
+        leafPool_.get(),
+        {{PaimonConfig::kReadTimestampUnit, "6"}});
+
+    // Nanosecond precision: full INT96 native precision preserved.
+    validateRead(
+        int96Path,
+        256,
+        writtenData,
+        leafPool_.get(),
+        {{PaimonConfig::kReadTimestampUnit, "9"}});
+  }
 }
 
 } // namespace

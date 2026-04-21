@@ -7,11 +7,11 @@
 
 namespace bytedance::bolt::connector::paimon {
 
-PaimonConfig::PaimonConfig(
-    std::shared_ptr<const config::ConfigBase> config)
-    : config_(config ? std::move(config)
-                     : std::make_shared<const config::ConfigBase>(
-                           std::unordered_map<std::string, std::string>{})) {}
+PaimonConfig::PaimonConfig(std::shared_ptr<const config::ConfigBase> config)
+    : config_(
+          config ? std::move(config)
+                 : std::make_shared<const config::ConfigBase>(
+                       std::unordered_map<std::string, std::string>{})) {}
 
 // ---------------------------------------------------------------------------
 // Batch / Row Reading
@@ -63,6 +63,14 @@ uint64_t PaimonConfig::naturalReadSize() const {
 
 bool PaimonConfig::coalesceReads() const {
   return config_->get<bool>(kCoalesceReads, true);
+}
+
+// ---------------------------------------------------------------------------
+// Read Semantics
+// ---------------------------------------------------------------------------
+
+uint8_t PaimonConfig::readTimestampUnit() const {
+  return config_->get<uint8_t>(kReadTimestampUnit, 3 /*milli*/);
 }
 
 } // namespace bytedance::bolt::connector::paimon

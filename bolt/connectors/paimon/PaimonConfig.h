@@ -33,7 +33,8 @@ class PaimonConfig {
 
   // ---- Prefetch & I/O -------------------------------------------------------
 
-  static constexpr const char* kPrefetchEnabled = "paimon.read.prefetch-enabled";
+  static constexpr const char* kPrefetchEnabled =
+      "paimon.read.prefetch-enabled";
   static constexpr const char* kPrefetchBatchCount =
       "paimon.read.prefetch-batch-count";
   static constexpr const char* kPrefetchMaxParallel =
@@ -44,10 +45,17 @@ class PaimonConfig {
   static constexpr const char* kPredicateFilterEnabled =
       "paimon.read.predicate-filter-enabled";
 
-  // ---- I/O Tuning (consumed by PaimonReadFile / bolt::ReadFile) -----------------
+  // ---- I/O Tuning (consumed by PaimonReadFile / bolt::ReadFile)
+  // -----------------
 
   static constexpr const char* kNaturalReadSize = "paimon.io.natural-read-size";
   static constexpr const char* kCoalesceReads = "paimon.io.coalesce-reads";
+
+  // ---- Read Semantics (consumed by ParquetReader)
+  // ------------------------------
+
+  static constexpr const char* kReadTimestampUnit =
+      "spark.gluten.paimon.read.timestamp-unit";
 
   explicit PaimonConfig(std::shared_ptr<const config::ConfigBase> config);
 
@@ -68,6 +76,9 @@ class PaimonConfig {
   uint64_t naturalReadSize() const;
   bool coalesceReads() const;
 
+  // Read Semantics
+  uint8_t readTimestampUnit() const;
+
   const std::shared_ptr<const config::ConfigBase>& config() const {
     return config_;
   }
@@ -81,8 +92,8 @@ class PaimonConfig {
 /// → PaimonReadFile (the bolt::ReadFile adapter used inside paimon's internal
 /// reader pipeline).
 ///
-/// These map onto bolt::ReadFile interface methods that bolt's generic I/O layer
-/// calls:
+/// These map onto bolt::ReadFile interface methods that bolt's generic I/O
+/// layer calls:
 ///   - naturalReadSize   → BufferedInput buffer sizing
 ///   - coalesceReads     → I/O coalescing in dwio/common/file/Utils.h
 struct PaimonIoOptions {

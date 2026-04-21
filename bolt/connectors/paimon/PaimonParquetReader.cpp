@@ -33,22 +33,32 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
     return scanSpec;
   }
 
+  dwio::common::RowReaderOptions makeRowReaderOpts(
+      const RowTypePtr& rowType) const {
+    dwio::common::RowReaderOptions opts;
+    opts.setScanSpec(buildScanSpecFromRowType(rowType));
+    opts.setTimestampPrecision(
+        static_cast<TimestampPrecision>(timestampPrecision_));
+    return opts;
+  }
+
   void initializeRowReaderWithFullSchema() {
     // LOG(INFO) << "Initializing rowReader_ with full file schema: " <<
     // reader_->rowType()->toString();
-    dwio::common::RowReaderOptions opts;
-    opts.setScanSpec(buildScanSpecFromRowType(reader_->rowType()));
-    rowReader_ = reader_->createRowReader(opts);
+    rowReader_ =
+        reader_->createRowReader(makeRowReaderOpts(reader_->rowType()));
   }
 
  public:
   PaimonParquetFileBatchReader(
       std::unique_ptr<parquet::ParquetReader> reader,
       int32_t batch_size,
-      memory::MemoryPool* const pool)
+      memory::MemoryPool* const pool,
+      uint8_t timestampPrecision)
       : reader_(std::move(reader)),
         batch_size_(batch_size),
         pool_(std::move(pool)),
+        timestampPrecision_(timestampPrecision),
         readType_(reader_->rowType()) {
     // LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() =
     // " << reader_->rowType()->toString();
@@ -98,7 +108,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
         dataColumnNames.push_back(rowType->nameOf(i));
       }
 
-      dwio::common::RowReaderOptions opts;
+      dwio::common::RowReaderOptions opts = makeRowReaderOpts(rowType);
       auto fileRowType = reader_->rowType();
 
       auto scanSpec = buildScanSpecFromRowType(rowType);
@@ -154,6 +164,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       auto arrowSchema = std::make_unique<::ArrowSchema>();
 
       ArrowOptions opts;
+      opts.timestampUnit = static_cast<TimestampUnit>(timestampPrecision_);
       exportToArrow(result, *arrowArray, pool_, opts);
       exportToArrow(result, *arrowSchema, opts);
 
@@ -208,6 +219,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   std::unique_ptr<dwio::common::RowReader> rowReader_;
   int32_t batch_size_;
   memory::MemoryPool* const pool_;
+  uint8_t timestampPrecision_;
   RowTypePtr readType_;
 };
 
@@ -215,8 +227,11 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
  public:
   explicit PaimonParquetReaderBuilder(
       int32_t batch_size,
-      const PaimonIoOptions& ioOptions)
-      : batch_size_(batch_size), ioOptions_(ioOptions) {}
+      const PaimonIoOptions& ioOptions,
+      uint8_t timestampPrecision)
+      : batch_size_(batch_size),
+        ioOptions_(ioOptions),
+        timestampPrecision_(timestampPrecision) {}
 
   ::paimon::ReaderBuilder* WithMemoryPool(
       const std::shared_ptr<::paimon::MemoryPool>& pool) override {
@@ -243,7 +258,10 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
           std::move(input), readerOptions);
 
       return std::make_unique<PaimonParquetFileBatchReader>(
-          std::move(reader), batch_size_, paimonPool_->getBoltPool());
+          std::move(reader),
+          batch_size_,
+          paimonPool_->getBoltPool(),
+          timestampPrecision_);
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
           std::string("Failed to build reader from InputStream: ") + e.what());
@@ -267,7 +285,10 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
           std::move(input), readerOptions);
 
       return std::make_unique<PaimonParquetFileBatchReader>(
-          std::move(reader), batch_size_, paimonPool_->getBoltPool());
+          std::move(reader),
+          batch_size_,
+          paimonPool_->getBoltPool(),
+          timestampPrecision_);
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
           std::string("Failed to open file: ") + e.what());
@@ -277,6 +298,7 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
  private:
   int32_t batch_size_;
   PaimonIoOptions ioOptions_;
+  uint8_t timestampPrecision_;
   std::shared_ptr<BoltPaimonMemoryPool> paimonPool_;
 };
 
@@ -292,6 +314,10 @@ PaimonParquetReader::PaimonParquetReader(
   if (it != options.end()) {
     ioOptions_.coalesceReads = it->second == "true";
   }
+  it = options.find(PaimonConfig::kReadTimestampUnit);
+  if (it != options.end()) {
+    timestampPrecision_ = static_cast<uint8_t>(std::stoi(it->second));
+  }
 }
 
 const std::string& PaimonParquetReader::Identifier() const {
@@ -301,7 +327,8 @@ const std::string& PaimonParquetReader::Identifier() const {
 
 ::paimon::Result<std::unique_ptr<::paimon::ReaderBuilder>>
 PaimonParquetReader::CreateReaderBuilder(int32_t batch_size) const {
-  return std::make_unique<PaimonParquetReaderBuilder>(batch_size, ioOptions_);
+  return std::make_unique<PaimonParquetReaderBuilder>(
+      batch_size, ioOptions_, timestampPrecision_);
 }
 
 ::paimon::Result<std::unique_ptr<::paimon::WriterBuilder>>

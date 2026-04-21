@@ -21,6 +21,7 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -1217,6 +1218,104 @@ TEST_F(PaimonConnectorTest, CustomNaturalReadSizeReturnsCorrectResults) {
       "SELECT c0 FROM tmp ORDER BY c0",
       duckDbQueryRunner_,
       std::vector<uint32_t>{0});
+}
+
+// ---- End-to-end timestamp precision through PlanBuilder
+// ----------------------
+
+TEST_F(PaimonConnectorTest, TimestampPrecisionEndToEnd) {
+  // Verify kReadTimestampUnit config flows through the full pipeline:
+  //   queryConfig → PaimonConfig → PaimonParquetReader → RowReaderOptions
+  //
+  // Uses the timestamp_precision table (created by create_test_tables.py)
+  // which contains nanosecond-precision timestamps. Reading at different
+  // kReadTimestampUnit values should produce correctly truncated results.
+
+  auto rootPool = memory::memoryManager()->addRootPool("TsPrecisionE2E");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+
+  std::string tablePath =
+      "file:" + tempDir_->path + "/test_db.db/timestamp_precision";
+
+  auto rowType = ROW({"id", "ts", "value"}, {BIGINT(), TIMESTAMP(), BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+  columnHandles["ts"] = std::make_shared<PaimonColumnHandle>("ts", TIMESTAMP());
+  columnHandles["value"] =
+      std::make_shared<PaimonColumnHandle>("value", BIGINT());
+
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "timestamp_precision",
+      tablePath,
+      std::unordered_map<std::string, std::string>{});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+
+  const auto parseTs = [](std::string_view s) {
+    return util::fromTimestampString(s.data(), s.size(), nullptr);
+  };
+
+  // Expected at millisecond precision: sub-ms digits zeroed.
+  auto expectedMilli = mk.rowVector({
+      mk.flatVector<int64_t>({1, 2, 3, 4, 5}),
+      mk.flatVectorNullable<Timestamp>({
+          parseTs("2015-06-01 19:34:56.123000000"),
+          parseTs("2023-04-21 09:09:34.567000000"),
+          parseTs("2007-12-12 04:27:56.999000000"),
+          parseTs("2000-01-01 00:00:00.000000000"),
+          parseTs("1999-12-31 23:59:59.999000000"),
+      }),
+      mk.flatVector<int64_t>({10, 20, 30, 40, 50}),
+  });
+
+  // Expected at microsecond precision: sub-us digits preserved.
+  auto expectedMicro = mk.rowVector({
+      mk.flatVector<int64_t>({1, 2, 3, 4, 5}),
+      mk.flatVectorNullable<Timestamp>({
+          parseTs("2015-06-01 19:34:56.123456000"),
+          parseTs("2023-04-21 09:09:34.567890000"),
+          parseTs("2007-12-12 04:27:56.999999000"),
+          parseTs("2000-01-01 00:00:00.000001000"),
+          parseTs("1999-12-31 23:59:59.999999000"),
+      }),
+      mk.flatVector<int64_t>({10, 20, 30, 40, 50}),
+  });
+
+  // Helper: run a table scan with given kReadTimestampUnit and assert results.
+  const auto assertPrecision = [&](const std::string& tsUnit,
+                                   const RowVectorPtr& expected) {
+    auto plan = exec::test::PlanBuilder()
+                    .tableScan(rowType, tableHandle, columnHandles)
+                    .planNode();
+
+    createDuckDbTable("tmp", {expected});
+
+    exec::test::CursorParameters params;
+    params.planNode = plan;
+    params.queryConfigs = {{PaimonConfig::kReadTimestampUnit, tsUnit}};
+
+    exec::test::assertQuery(
+        params,
+        [&](exec::Task* task) {
+          for (auto& split : connectorSplits) {
+            task->addSplit("0", exec::Split(std::move(split)));
+          }
+          task->noMoreSplits("0");
+        },
+        "SELECT c0, c1, c2 FROM tmp ORDER BY c0",
+        duckDbQueryRunner_,
+        std::vector<uint32_t>{0, 1, 2});
+  };
+
+  // Millisecond precision (default): sub-ms truncated.
+  assertPrecision("3", expectedMilli);
+
+  // Microsecond precision: sub-us truncated.
+  assertPrecision("6", expectedMicro);
 }
 
 } // namespace bytedance::bolt::connector::paimon

@@ -11,12 +11,17 @@
 #include <paimon/table/source/split.h>
 #include <paimon/table/source/table_read.h>
 #include <paimon/type_fwd.h>
+#include <algorithm>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
+#include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
+#include "bolt/vector/BaseVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/SelectivityVector.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
 
@@ -88,6 +93,16 @@ PaimonDataSource::PaimonDataSource(
           PaimonConfig::kCoalesceReads, paimonConfig->coalesceReads())
           ? "true"
           : "false");
+
+  // Propagate timestamp read precision so PaimonParquetReader can set it on
+  // bolt's ParquetReader (ReaderOptions::setTimestampPrecision). This ensures
+  // the paimon connector truncates timestamps to the same precision as the hive
+  // connector for a given session property value.
+  ctxBuilder.AddOption(
+      PaimonConfig::kReadTimestampUnit,
+      std::to_string(queryConfig.get<uint8_t>(
+          PaimonConfig::kReadTimestampUnit,
+          paimonConfig->readTimestampUnit())));
 
   ctxBuilder.EnablePredicateFilter(paimonConfig->predicateFilterEnabled());
 

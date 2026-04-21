@@ -5,9 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include "bolt/common/config/Config.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
-#include "bolt/common/config/Config.h"
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -185,7 +185,8 @@ TEST_F(PaimonConfigTest, TestIoTuningConfig) {
     };
     PaimonParquetReader reader(opts);
     auto result = reader.CreateReaderBuilder(4096);
-    ASSERT_TRUE(result.ok()) << "CreateReaderBuilder should succeed with valid options";
+    ASSERT_TRUE(result.ok())
+        << "CreateReaderBuilder should succeed with valid options";
   }
 
   // Missing options keep defaults.
@@ -193,7 +194,8 @@ TEST_F(PaimonConfigTest, TestIoTuningConfig) {
     auto opts = std::map<std::string, std::string>{};
     PaimonParquetReader reader(opts);
     auto result = reader.CreateReaderBuilder(4096);
-    ASSERT_TRUE(result.ok()) << "CreateReaderBuilder should succeed with empty options";
+    ASSERT_TRUE(result.ok())
+        << "CreateReaderBuilder should succeed with empty options";
   }
 }
 
