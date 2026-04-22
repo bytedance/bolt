@@ -56,7 +56,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       uint8_t timestampPrecision)
       : reader_(std::move(reader)),
         batch_size_(batch_size),
-        pool_(std::move(pool)),
+        pool_(pool),
         timestampPrecision_(timestampPrecision),
         readType_(reader_->rowType()) {
     // LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() =

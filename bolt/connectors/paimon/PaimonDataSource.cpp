@@ -4,6 +4,7 @@
  */
 
 #include "bolt/connectors/paimon/PaimonDataSource.h"
+#include <folly/detail/ThreadLocalDetail.h>
 #include <folly/json.h>
 #include <paimon/defs.h>
 #include <paimon/read_context.h>
@@ -52,7 +53,7 @@ PaimonDataSource::PaimonDataSource(
         outName);
     columns.push_back(it->second->name());
   }
-  LOG(INFO) << "PaimonDataSource::PaimonDataSource(): Read schema: "
+  VLOG(1) << "PaimonDataSource::PaimonDataSource(): Read schema: "
             << folly::join(", ", columns);
   ctxBuilder.SetReadSchema(columns);
   ctxBuilder.EnableMultiThreadRowToBatch(paimonConfig->multiThreadRowToBatch());
@@ -70,7 +71,7 @@ PaimonDataSource::PaimonDataSource(
 #endif
   for (const auto& [key, value] : tableHandle_->tableProperties()) {
     ctxBuilder.AddOption(key, value);
-    LOG(INFO) << "Added table option <" << key << "=" << value << ">";
+    VLOG(1) << "Added table option <" << key << "=" << value << ">";
   }
 
   // Pass read.batch-size through the options map so the paimon library uses
@@ -142,7 +143,7 @@ PaimonDataSource::PaimonDataSource(
     auto result = PaimonFilterTranslator::translate(
         tableHandle_->filter(), filterRowType);
     if (result.ok()) {
-      LOG(INFO) << "PaimonDataSource: Translated filter to paimon Predicate: "
+      VLOG(1) << "PaimonDataSource: Translated filter to paimon Predicate: "
                 << result.value->ToString();
       ctxBuilder.SetPredicate(result.value);
     } else {
@@ -201,11 +202,11 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
 
   // Lazily create the BatchReader using accumulated splits.
   if (!reader_ && !inputSplits_.empty()) {
-    LOG(INFO) << "PaimonDataSource::next(): Creating reader with "
+    VLOG(1) << "PaimonDataSource::next(): Creating reader with "
               << inputSplits_.size() << " split(s)";
     auto&& readerCreateStatus = tableRead_->CreateReader(inputSplits_);
     if (!readerCreateStatus.ok()) {
-      LOG(INFO) << "PaimonDataSource::next(): CreateReader error: "
+      VLOG(1) << "PaimonDataSource::next(): CreateReader error: "
                 << readerCreateStatus.status().ToString();
       return nullptr;
     }
@@ -213,16 +214,16 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   }
 
   if (!reader_) {
-    LOG(INFO)
+    VLOG(1)
         << "PaimonDataSource::next(): No reader available, returning nullopt";
     return nullptr;
   }
 
-  LOG(INFO) << "PaimonDataSource::next(): Calling reader->NextBatch() at "
+  VLOG(1) << "PaimonDataSource::next(): Calling reader->NextBatch() at "
             << reader_.get();
   auto batchRes = reader_->NextBatch();
   if (!batchRes.ok()) {
-    LOG(INFO) << "PaimonDataSource::next(): NextBatch NOT ok: "
+    VLOG(1) << "PaimonDataSource::next(): NextBatch NOT ok: "
               << batchRes.status().ToString();
     reader_->Close();
     reader_.reset();
@@ -230,11 +231,11 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     return nullptr;
   }
 
-  LOG(INFO) << "PaimonDataSource::next(): NextBatch successful, getting value";
+  VLOG(1) << "PaimonDataSource::next(): NextBatch successful, getting value";
   auto pair = std::move(batchRes).value();
 
   if (::paimon::BatchReader::IsEofBatch(pair)) {
-    LOG(INFO) << "PaimonDataSource::next(): IsEofBatch: true";
+    VLOG(1) << "PaimonDataSource::next(): IsEofBatch: true";
     if (pair.first && pair.first->release) {
       pair.first->release(pair.first.get());
     }
@@ -246,15 +247,15 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     inputSplits_.clear();
     return nullptr;
   }
-  LOG(INFO) << "PaimonDataSource::next(): Not an EOF batch, attempting import";
+  VLOG(1) << "PaimonDataSource::next(): Not an EOF batch, attempting import";
   ArrowArray& arr = *pair.first;
   ArrowSchema& sch = *pair.second;
 
-  LOG(INFO) << "PaimonDataSource::next(): Schema has " << sch.n_children
+  VLOG(1) << "PaimonDataSource::next(): Schema has " << sch.n_children
             << " children";
   if (sch.n_children > 0) {
     for (int i = 0; i < sch.n_children; ++i) {
-      LOG(INFO) << "PaimonDataSource::next(): child " << i << ": name="
+      VLOG(1) << "PaimonDataSource::next(): child " << i << ": name="
                 << (sch.children[i] ? sch.children[i]->name : "null")
                 << ", type="
                 << (sch.children[i] ? sch.children[i]->format : "null");
@@ -268,17 +269,17 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   BOLT_CHECK(row != nullptr, "Imported vector is not a RowVector");
   const auto& rowType = row->type()->asRow();
 
-  LOG(INFO) << "Imported RowVector size: " << row->size()
+  VLOG(1) << "Imported RowVector size: " << row->size()
             << ", number of fields: " << rowType.size();
 
   // If we have _VALUE_KIND as the first field, drop it - but only if the
   // original Parquet reader actually exported it. Check if the data actually
   // exists in the child vector before proceeding.
   auto firstChild = row->childAt(0);
-  LOG(INFO) << "First child vector type: " << firstChild->type()->toString()
+  VLOG(1) << "First child vector type: " << firstChild->type()->toString()
             << ", elements: " << firstChild->size();
   if (rowType.nameOf(0) == "_VALUE_KIND" && rowType.size() > 1) {
-    LOG(INFO) << "Dropping _VALUE_KIND field";
+    VLOG(1) << "Dropping _VALUE_KIND field";
 
     // Create a new row vector without the _VALUE_KIND field
     std::vector<VectorPtr> newChildren;
@@ -300,9 +301,9 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     // Copy null information
     newRowVec->setNulls(row->nulls());
 
-    LOG(INFO) << "New RowVector size: " << newRowVec->size()
+    VLOG(1) << "New RowVector size: " << newRowVec->size()
               << ", number of fields: " << newRowType->size();
-    // LOG(INFO) << newRowVec->toPrettyString();
+    // VLOG(1) << newRowVec->toPrettyString();
     completedRows_ += newRowVec->size();
 
     // Re-wrap with outputType_ to ensure internal alias names match upstream
@@ -320,19 +321,20 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
         std::move(outputColumns));
   }
 
-  // Debug: Print the actual values being returned if no _VALUE_KIND field
-  auto idColumn = row->childAt(0);
-  auto* idFlat = idColumn->asFlatVector<int64_t>();
-  for (int i = 0; i < row->size(); ++i) {
-    if (idColumn->isNullAt(i)) {
-      LOG(INFO) << "Row " << i << ": id = NULL";
-    } else {
-      LOG(INFO) << "Row " << i << ": id = " << idFlat->valueAt(i);
+  if (VLOG_IS_ON(1)) {
+    auto idColumn = row->childAt(0);
+    auto* idFlat = idColumn->asFlatVector<int64_t>();
+    for (int i = 0; i < row->size(); ++i) {
+      if (idColumn->isNullAt(i)) {
+        VLOG(1) << "Row " << i << ": id = NULL";
+      } else {
+        VLOG(1) << "Row " << i << ": id = " << idFlat->valueAt(i);
+      }
     }
   }
 
   completedRows_ += row->size();
-  LOG(INFO) << "Returning row vector of size " << row->size();
+  VLOG(1) << "Returning row vector of size " << row->size();
 
   // Wrap the imported vector in a new RowVector that uses outputType_ as its
   // type. The raw Arrow import carries real column names (e.g. "id", "name")

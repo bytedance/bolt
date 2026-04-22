@@ -31,7 +31,7 @@ struct TranslationResult {
   std::string reason; // Non-empty when translation failed.
 
   bool ok() const {
-    return !reason.empty() == false;
+    return reason.empty();
   }
   explicit operator bool() const {
     return ok();
