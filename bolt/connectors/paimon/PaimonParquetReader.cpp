@@ -16,7 +16,6 @@
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
-#include "bolt/type/Subfield.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
 
@@ -195,9 +194,6 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   void Close() override {
     rowReader_.reset();
     reader_.reset();
-    if (pool_) {
-      pool_->release();
-    }
   }
 
   uint64_t GetPreviousBatchFirstRowNumber() const override {

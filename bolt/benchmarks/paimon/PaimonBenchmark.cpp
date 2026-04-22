@@ -17,9 +17,6 @@
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
 #include "bolt/common/testutil/GPerf.h"
 
-#include <limits>
-#include <map>
-#include <optional>
 #include <string>
 
 #include <glog/logging.h>

@@ -4,7 +4,6 @@
  */
 
 #include <folly/Benchmark.h>
-#include <folly/concurrency/UnboundedQueue.h>
 #include <folly/init/Init.h>
 #include <paimon/scan_context.h>
 #include <paimon/table/source/plan.h>
@@ -13,13 +12,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <regex>
+#include <sstream>
 #include "Type.h"
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
-#include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/TableHandle.h"
-#include "bolt/connectors/paimon/PaimonConnector.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/Cursor.h"
@@ -195,28 +192,21 @@ class PaimonBenchmark : public QueryBenchmarkBase {
         tablePath,
         std::unordered_map<std::string, std::string>());
 
-    // std::cout << "Setting up Paimon for " << tableName << " at " << tablePath
-    // << std::endl; Generate splits using Paimon SDK via TableScan
+    // Generate splits using Paimon SDK via TableScan.
     ::paimon::ScanContextBuilder contextBuilder(tablePath);
     auto scanContext =
         contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
             .Finish()
             .value();
-    LOG(INFO) << "created scanContext";
     auto tableScan =
         ::paimon::TableScan::Create(std::move(scanContext)).value();
-    LOG(INFO) << "created tableScan: " << &tableScan;
     auto scanResult = tableScan->CreatePlan();
-    LOG(INFO) << "created plan: " << scanResult.ok();
     const auto& plan = scanResult.value();
-    LOG(INFO) << "created paimon plan";
     if (!plan) {
       LOG(FATAL) << "Paimon plan is null";
     }
 
     auto paimonSplits = plan->Splits();
-    // std::cout << "Got " << paimonSplits.size() << " splits from Paimon" <<
-    // std::endl;
     for (auto& split : paimonSplits) {
       splits.push_back(std::make_shared<PaimonConnectorSplit>("paimon", split));
     }

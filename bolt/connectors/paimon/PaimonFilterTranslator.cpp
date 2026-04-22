@@ -83,6 +83,58 @@ core::TypedExprPtr makeArrayConstant(
       elements = std::move(flat);
       break;
     }
+    case TypeKind::REAL: {
+      auto flat = BaseVector::create<FlatVector<float>>(
+          elementType, numElements, pool);
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i].isNull()) {
+          flat->setNull(i, true);
+        } else {
+          flat->set(i, values[i].value<float>());
+        }
+      }
+      elements = std::move(flat);
+      break;
+    }
+    case TypeKind::DOUBLE: {
+      auto flat = BaseVector::create<FlatVector<double>>(
+          elementType, numElements, pool);
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i].isNull()) {
+          flat->setNull(i, true);
+        } else {
+          flat->set(i, values[i].value<double>());
+        }
+      }
+      elements = std::move(flat);
+      break;
+    }
+    case TypeKind::BOOLEAN: {
+      auto flat = BaseVector::create<FlatVector<bool>>(
+          elementType, numElements, pool);
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i].isNull()) {
+          flat->setNull(i, true);
+        } else {
+          flat->set(i, values[i].value<bool>());
+        }
+      }
+      elements = std::move(flat);
+      break;
+    }
+    case TypeKind::TIMESTAMP: {
+      auto flat = BaseVector::create<FlatVector<bytedance::bolt::Timestamp>>(
+          elementType, numElements, pool);
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i].isNull()) {
+          flat->setNull(i, true);
+        } else {
+          flat->set(i, values[i].value<bytedance::bolt::Timestamp>());
+        }
+      }
+      elements = std::move(flat);
+      break;
+    }
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY: {
       auto flat = BaseVector::create<FlatVector<StringView>>(
@@ -478,9 +530,75 @@ PaimonFilterTranslator::extractInListLiterals(
       }
       break;
     }
+    case ::paimon::FieldType::FLOAT: {
+      const auto* floatVec =
+          dynamic_cast<const SimpleVector<float>*>(elements.get());
+      if (!floatVec) {
+        return std::nullopt;
+      }
+      for (vector_size_t i = 0; i < size; ++i) {
+        if (floatVec->isNullAt(offset + i)) {
+          literals.emplace_back(fieldType);
+        } else {
+          literals.emplace_back(floatVec->valueAt(offset + i));
+        }
+      }
+      break;
+    }
+    case ::paimon::FieldType::DOUBLE: {
+      const auto* doubleVec =
+          dynamic_cast<const SimpleVector<double>*>(elements.get());
+      if (!doubleVec) {
+        return std::nullopt;
+      }
+      for (vector_size_t i = 0; i < size; ++i) {
+        if (doubleVec->isNullAt(offset + i)) {
+          literals.emplace_back(fieldType);
+        } else {
+          literals.emplace_back(doubleVec->valueAt(offset + i));
+        }
+      }
+      break;
+    }
+    case ::paimon::FieldType::TIMESTAMP: {
+      const auto* tsVec =
+          dynamic_cast<const SimpleVector<bytedance::bolt::Timestamp>*>(
+              elements.get());
+      if (!tsVec) {
+        return std::nullopt;
+      }
+      for (vector_size_t i = 0; i < size; ++i) {
+        if (tsVec->isNullAt(offset + i)) {
+          literals.emplace_back(fieldType);
+        } else {
+          auto boltTs = tsVec->valueAt(offset + i);
+          int64_t totalNanos =
+              boltTs.getSeconds() * 1'000'000'000LL + boltTs.getNanos();
+          int64_t millis = totalNanos / 1'000'000;
+          int32_t nanoOfMillis =
+              static_cast<int32_t>(totalNanos % 1'000'000);
+          literals.emplace_back(::paimon::Timestamp(millis, nanoOfMillis));
+        }
+      }
+      break;
+    }
+    case ::paimon::FieldType::BOOLEAN: {
+      const auto* boolVec =
+          dynamic_cast<const SimpleVector<bool>*>(elements.get());
+      if (!boolVec) {
+        return std::nullopt;
+      }
+      for (vector_size_t i = 0; i < size; ++i) {
+        if (boolVec->isNullAt(offset + i)) {
+          literals.emplace_back(fieldType);
+        } else {
+          literals.emplace_back(boolVec->valueAt(offset + i));
+        }
+      }
+      break;
+    }
     default:
-      // FLOAT, DOUBLE, TIMESTAMP, DECIMAL, BOOLEAN not yet supported
-      // for IN lists.
+      // DECIMAL, DATE, etc. not yet supported for IN lists.
       return std::nullopt;
   }
   return literals;
@@ -625,11 +743,15 @@ std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
           ::paimon::FieldType::STRING, sv.data(), sv.size());
     }
     case ::paimon::FieldType::TIMESTAMP: {
-      // Timestamp in bolt is stored as int64 nanos or a Timestamp struct.
-      // The variant may store it as Timestamp or as int64.
+      // Bolt stores Timestamp as (seconds, nanoseconds).
+      // Paimon stores as (millis_since_epoch, nano_of_millis).
+      // Preserve full nanosecond precision via total nanoseconds.
       auto ts = value.value<bytedance::bolt::Timestamp>();
-      auto millis = ts.toMillis();
-      auto paimonTs = ::paimon::Timestamp::FromEpochMillis(millis);
+      int64_t totalNanos =
+          ts.getSeconds() * 1'000'000'000LL + ts.getNanos();
+      int64_t millis = totalNanos / 1'000'000;
+      int32_t nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
+      auto paimonTs = ::paimon::Timestamp(millis, nanoOfMillis);
       return ::paimon::Literal(paimonTs);
     }
     case ::paimon::FieldType::DECIMAL:

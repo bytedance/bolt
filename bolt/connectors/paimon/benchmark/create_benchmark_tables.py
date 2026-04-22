@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import numpy as np
 import pandas as pd
@@ -35,9 +38,9 @@ def create_database(catalog, database_name):
 
 def create_table_if_not_exists(catalog, database, table_name, schema):
     try:
-        catalog.get_table(f"{database}.{table_name}")
+        table = catalog.get_table(f"{database}.{table_name}")
         print(f"Table {database}.{table_name} already exists.")
-        return False, catalog.get_table(f"{database}.{table_name}")
+        return False, table
     except TableNotExistException:
         catalog.create_table(
             identifier=f"{database}.{table_name}",

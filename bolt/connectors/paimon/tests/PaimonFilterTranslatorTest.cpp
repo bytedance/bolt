@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include <paimon/data/timestamp.h>
+#include <paimon/predicate/function.h>
+#include <paimon/predicate/leaf_predicate.h>
 #include <paimon/predicate/literal.h>
 #include <paimon/predicate/predicate_builder.h>
 #include "bolt/common/memory/Memory.h"
@@ -63,6 +66,8 @@ class PaimonFilterTranslatorTest
       {"y", BIGINT()},
       {"z", VARCHAR()},
       {"i", BIGINT()},
+      {"ts_col", TIMESTAMP()},
+      {"active", BOOLEAN()},
   })};
 
   // Helpers to build expression trees.
@@ -91,6 +96,10 @@ class PaimonFilterTranslatorTest
     return std::make_shared<ConstantTypedExpr>(DOUBLE(), value);
   }
 
+  static TypedExprPtr tsConst(const Timestamp& ts) {
+    return std::make_shared<ConstantTypedExpr>(TIMESTAMP(), variant(ts));
+  }
+
   /// Wrap an expression in a CastTypedExpr (simulates query planner behavior).
   static TypedExprPtr cast(
       const TypePtr& targetType,
@@ -113,6 +122,34 @@ class PaimonFilterTranslatorTest
       svs.emplace_back(v);
     }
     auto arrVec = makeArrayVector<StringView>({svs});
+    return std::make_shared<ConstantTypedExpr>(
+        BaseVector::wrapInConstant(1, 0, arrVec));
+  }
+
+  /// Build an IN-list array constant for doubles.
+  TypedExprPtr doubleArrayConst(const std::vector<double>& values) {
+    auto arrVec = makeArrayVector<double>({values});
+    return std::make_shared<ConstantTypedExpr>(
+        BaseVector::wrapInConstant(1, 0, arrVec));
+  }
+
+  /// Build an IN-list array constant for floats.
+  TypedExprPtr floatArrayConst(const std::vector<float>& values) {
+    auto arrVec = makeArrayVector<float>({values});
+    return std::make_shared<ConstantTypedExpr>(
+        BaseVector::wrapInConstant(1, 0, arrVec));
+  }
+
+  /// Build an IN-list array constant for booleans.
+  TypedExprPtr boolArrayConst(const std::vector<bool>& values) {
+    auto arrVec = makeArrayVector<bool>({values});
+    return std::make_shared<ConstantTypedExpr>(
+        BaseVector::wrapInConstant(1, 0, arrVec));
+  }
+
+  /// Build an IN-list array constant for timestamps.
+  TypedExprPtr tsArrayConst(const std::vector<Timestamp>& values) {
+    auto arrVec = makeArrayVector<Timestamp>({values});
     return std::make_shared<ConstantTypedExpr>(
         BaseVector::wrapInConstant(1, 0, arrVec));
   }
@@ -435,216 +472,288 @@ TEST_F(PaimonFilterTranslatorTest, UnsupportedFunctionReturnsNull) {
 // Round-trip tests: TypedExpr → Predicate → TypedExpr
 // ===========================================================================
 
-/// Helper: verify a CallTypedExpr's name matches expected.
-static void assertOpName(
+/// Common boilerplate: translate expr → predicate → TypedExpr.
+/// Returns the round-tripped expression. Fails with EXPECT if any step fails.
+static core::TypedExprPtr roundTripExpr(
     const core::TypedExprPtr& expr,
-    const std::string& expected) {
-  const auto* call = dynamic_cast<const core::CallTypedExpr*>(expr.get());
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto pred = PaimonFilterTranslator::translate(expr, rowType);
+  EXPECT_TRUE(pred.ok()) << pred.reason;
+  if (!pred.ok()) return nullptr;
+  auto result = PaimonFilterTranslator::toTypedExpr(pred.value, pool);
+  EXPECT_TRUE(result.ok()) << result.reason;
+  return result.value;
+}
+
+/// Verify a CallTypedExpr has the expected operator name and input count.
+static void assertOp(
+    const core::TypedExprPtr& rt,
+    std::string_view expectedOp,
+    size_t expectedInputs) {
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(rt.get());
+  ASSERT_NE(call, nullptr) << "Expected CallTypedExpr";
+  EXPECT_EQ(call->name(), expectedOp)
+      << "Expected op '" << expectedOp << "'";
+  EXPECT_EQ(call->inputs().size(), expectedInputs)
+      << "Expected " << expectedInputs << " inputs";
+}
+
+/// Extract and verify the field name from input[0] of a CallTypedExpr.
+static void assertField(
+    const core::TypedExprPtr& rt,
+    std::string_view expectedField,
+    size_t fieldIndex = 0) {
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(rt.get());
   ASSERT_NE(call, nullptr);
-  EXPECT_EQ(call->name(), expected);
+  const auto* fa =
+      dynamic_cast<const core::FieldAccessTypedExpr*>(
+          call->inputs()[fieldIndex].get());
+  ASSERT_NE(fa, nullptr) << "Input[" << fieldIndex << "] is not FieldAccessTypedExpr";
+  EXPECT_EQ(fa->name(), expectedField)
+      << "Expected field '" << expectedField << "'";
+}
+
+/// Verify input[1] is a ConstantTypedExpr.
+static void assertConstantInput(
+    const core::TypedExprPtr& rt, size_t constIndex = 1) {
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(rt.get());
+  ASSERT_NE(call, nullptr);
+  const auto* c =
+      dynamic_cast<const core::ConstantTypedExpr*>(
+          call->inputs()[constIndex].get());
+  ASSERT_NE(c, nullptr) << "Input[" << constIndex << "] is not ConstantTypedExpr";
+}
+
+/// Full binary comparison round-trip: op + field + constant + toString match.
+static void assertRoundTripBinary(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    std::string_view expectedField,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 2);
+  assertField(rt, expectedField);
+  assertConstantInput(rt);
+  EXPECT_EQ(rt->toString(), expr->toString())
+      << "Round-trip differs.\n"
+      << "  original:   " << expr->toString() << "\n"
+      << "  round-trip: " << rt->toString();
+}
+
+/// Unary op round-trip (is_null / is_not_null): op + field + toString match.
+static void assertRoundTripUnary(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    std::string_view expectedField,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 1);
+  assertField(rt, expectedField);
+  EXPECT_EQ(rt->toString(), expr->toString())
+      << "Round-trip differs.\n"
+      << "  original:   " << expr->toString() << "\n"
+      << "  round-trip: " << rt->toString();
+}
+
+/// Normalized unary op round-trip where the operator name changes
+/// (e.g. NOT(is_null)→is_not_null). Verifies structure but skips toString.
+static void assertRoundTripNormalizedUnary(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    std::string_view expectedField,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 1);
+  assertField(rt, expectedField);
+}
+
+/// Compound op round-trip (and / or): op + input count + toString match.
+static void assertRoundTripCompound(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 2);
+  EXPECT_EQ(rt->toString(), expr->toString())
+      << "Round-trip differs.\n"
+      << "  original:   " << expr->toString() << "\n"
+      << "  round-trip: " << rt->toString();
+}
+
+/// Binary op round-trip where the operator is intentionally different from the
+/// original (e.g. NOT(eq)→neq). Verifies structure but skips toString check.
+static void assertRoundTripNormalizedBinary(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    std::string_view expectedField,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 2);
+  assertField(rt, expectedField);
+  assertConstantInput(rt);
+}
+
+/// IN-list round-trip: op + field + array constant + toString match.
+static void assertRoundTripInList(
+    const core::TypedExprPtr& expr,
+    std::string_view expectedOp,
+    std::string_view expectedField,
+    const RowTypePtr& rowType,
+    memory::MemoryPool* pool) {
+  auto rt = roundTripExpr(expr, rowType, pool);
+  assertOp(rt, expectedOp, 2);
+  assertField(rt, expectedField);
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(rt.get());
+  const auto* c =
+      dynamic_cast<const core::ConstantTypedExpr*>(
+          call->inputs()[1].get());
+  ASSERT_NE(c, nullptr) << "Second input is not ConstantTypedExpr";
+  EXPECT_TRUE(c->type()->isArray())
+      << "Expected array-typed constant for IN-list";
+  EXPECT_EQ(rt->toString(), expr->toString())
+      << "Round-trip differs.\n"
+      << "  original:   " << expr->toString() << "\n"
+      << "  round-trip: " << rt->toString();
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIntEq) {
-  // eq(field("i", BIGINT), intConst(42)) → predicate → expr
-  auto expr = eq(field(BIGINT(), "i"), intConst(42));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "eq");
+  assertRoundTripBinary(
+      eq(field(BIGINT(), "i"), intConst(42)), "eq", "i", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIntNeq) {
-  auto expr = neq(field(BIGINT(), "i"), intConst(99));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "neq");
+  assertRoundTripBinary(
+      neq(field(BIGINT(), "i"), intConst(99)), "neq", "i", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripLessThan) {
-  auto expr = lt(field(BIGINT(), "x"), intConst(100));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "lt");
+  assertRoundTripBinary(
+      lt(field(BIGINT(), "x"), intConst(100)), "lt", "x", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripLessThanOrEqual) {
-  auto expr = lte(field(BIGINT(), "age"), intConst(30));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "lte");
+  assertRoundTripBinary(
+      lte(field(BIGINT(), "age"), intConst(30)), "lte", "age", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripGreaterThan) {
-  auto expr = gt(field(DOUBLE(), "score"), doubleConst(85.5));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "gt");
+  assertRoundTripBinary(
+      gt(field(DOUBLE(), "score"), doubleConst(85.5)), "gt", "score",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripGreaterThanOrEqual) {
-  auto expr = gte(field(REAL(), "ratio"), floatConst(0.5F));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "gte");
+  assertRoundTripBinary(
+      gte(field(REAL(), "ratio"), floatConst(0.5F)), "gte", "ratio",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripStringEq) {
-  auto expr = eq(field(VARCHAR(), "name"), strConst("alice"));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "eq");
+  assertRoundTripBinary(
+      eq(field(VARCHAR(), "name"), strConst("alice")), "eq", "name",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripBetween) {
   auto expr = between(field(BIGINT(), "val"), intConst(10), intConst(50));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  // paimon::Between is internally represented as AND(gte, lte),
-  // so the round-trip produces "and" rather than "between".
-  assertOpName(roundTripped.value, "and");
+  auto rt = roundTripExpr(expr, rowType_, pool_.get());
+  // paimon::Between is internally represented as AND(gte, lte).
+  assertOp(rt, "and", 2);
+  // Verify both children are binary comparisons on the same field.
+  for (int i = 0; i < 2; ++i) {
+    SCOPED_TRACE(fmt::format("child {}", i));
+    const auto* child =
+        dynamic_cast<const core::CallTypedExpr*>(rt->inputs()[i].get());
+    ASSERT_NE(child, nullptr);
+    ASSERT_EQ(child->inputs().size(), 2);
+    const auto* fa =
+        dynamic_cast<const core::FieldAccessTypedExpr*>(
+            child->inputs()[0].get());
+    ASSERT_NE(fa, nullptr);
+    EXPECT_EQ(fa->name(), "val");
+  }
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIsNull) {
-  auto expr = isNull(field(VARCHAR(), "email"));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "is_null");
+  assertRoundTripUnary(
+      isNull(field(VARCHAR(), "email")), "is_null", "email", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIsNotNull) {
-  auto expr = isNotNull(field(VARCHAR(), "email"));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "is_not_null");
+  assertRoundTripUnary(
+      isNotNull(field(VARCHAR(), "email")), "is_not_null", "email", rowType_,
+      pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripAndTwoPredicates) {
-  auto left = eq(field(BIGINT(), "id"), intConst(1));
-  auto right = eq(field(VARCHAR(), "name"), strConst("alice"));
-  auto expr = andExpr(left, right);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "and");
-
-  // Verify the AND has two children.
-  const auto* call =
-      dynamic_cast<const core::CallTypedExpr*>(roundTripped.value.get());
-  ASSERT_NE(call, nullptr);
-  EXPECT_EQ(call->inputs().size(), 2);
+  assertRoundTripCompound(
+      andExpr(eq(field(BIGINT(), "id"), intConst(1)),
+            eq(field(VARCHAR(), "name"), strConst("alice"))),
+      "and", rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripOrTwoPredicatesSameColumn) {
-  auto left = eq(field(BIGINT(), "id"), intConst(1));
-  auto right = eq(field(BIGINT(), "id"), intConst(2));
-  auto expr = orExpr(left, right);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "or");
+  assertRoundTripCompound(
+      orExpr(eq(field(BIGINT(), "id"), intConst(1)),
+           eq(field(BIGINT(), "id"), intConst(2))),
+      "or", rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripAndThreePredicates) {
-  auto a = eq(field(BIGINT(), "x"), intConst(1));
-  auto b = gt(field(BIGINT(), "y"), intConst(0));
-  auto c = isNull(field(VARCHAR(), "z"));
-  auto expr = andExpr(andExpr(a, b), c);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "and");
+  assertRoundTripCompound(
+      andExpr(andExpr(eq(field(BIGINT(), "x"), intConst(1)),
+                       gt(field(BIGINT(), "y"), intConst(0))),
+             isNull(field(VARCHAR(), "z"))),
+      "and", rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripNotEqBecomesNeq) {
-  auto inner = eq(field(BIGINT(), "id"), intConst(5));
-  auto expr = notExpr(inner);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  // NOT(eq) was translated to neq by translate(), so round-trip should give
-  // neq.
-  assertOpName(roundTripped.value, "neq");
+  // NOT(eq) is translated to neq. Structure matches but op differs.
+  assertRoundTripNormalizedBinary(
+      notExpr(eq(field(BIGINT(), "id"), intConst(5))), "neq", "id",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripNotLtBecomesGte) {
-  auto inner = lt(field(BIGINT(), "x"), intConst(10));
-  auto expr = notExpr(inner);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "gte");
+  // NOT(lt) is translated to gte.
+  assertRoundTripNormalizedBinary(
+      notExpr(lt(field(BIGINT(), "x"), intConst(10))), "gte", "x",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripNotIsNullBecomesIsNotNull) {
-  auto inner = isNull(field(VARCHAR(), "email"));
-  auto expr = notExpr(inner);
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
-  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "is_not_null");
+  // NOT(is_null) → is_not_null. Operator name changes — use normalized
+  // variant that checks structure but skips toString comparison.
+  assertRoundTripNormalizedUnary(
+      notExpr(isNull(field(VARCHAR(), "email"))), "is_not_null", "email",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIntInList) {
-  auto expr = inExpr(field(BIGINT(), "id"), intArrayConst({1, 3, 5}));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  // Instance method provides pool for array constant allocation.
-  auto result = toTypedExpr(pred.value);
-  ASSERT_TRUE(result.ok()) << result.reason;
-  assertOpName(result.value, "in");
+  assertRoundTripInList(
+      inExpr(field(BIGINT(), "id"), intArrayConst({1, 3, 5})), "in", "id",
+      rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, RoundTripIntNotInList) {
-  auto expr = notInExpr(field(BIGINT(), "id"), intArrayConst({2, 4}));
-  auto pred = translate(expr);
-  ASSERT_TRUE(pred.ok()) << pred.reason;
-
-  // Instance method provides pool for array constant allocation.
-  auto result = toTypedExpr(pred.value);
-  ASSERT_TRUE(result.ok()) << result.reason;
-  assertOpName(result.value, "not_in");
+  assertRoundTripInList(
+      notInExpr(field(BIGINT(), "id"), intArrayConst({2, 4})), "not_in",
+      "id", rowType_, pool_.get());
 }
 
 TEST_F(PaimonFilterTranslatorTest, ToTypedExprNullPredicateReturnsNull) {
@@ -780,13 +889,19 @@ TEST_F(
 
 TEST_F(PaimonFilterTranslatorTest, CastWrappedInt32ConstRoundTrip) {
   // Full round-trip: TypedExpr(int32-cast) → Predicate → TypedExpr.
+  // The cast wrapper is stripped during translation (paimon stores int64_t),
+  // so the round-trip produces a plain eq without cast.
   auto expr = eq(field(BIGINT(), "id"), cast(BIGINT(), int32Const(99)));
   auto pred = translate(expr);
   ASSERT_TRUE(pred.ok()) << pred.reason;
 
   auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
   ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
-  assertOpName(roundTripped.value, "eq");
+  // The cast wrapper is stripped during translation, so verify the round-trip
+  // produces a plain eq("id", 99) without the cast.
+  assertOp(roundTripped.value, "eq", 2);
+  assertField(roundTripped.value, "id");
+  assertConstantInput(roundTripped.value);
 }
 
 TEST_F(PaimonFilterTranslatorTest, IntFieldInt32LiteralMatch) {
@@ -810,6 +925,201 @@ TEST_F(PaimonFilterTranslatorTest, IntFieldBigintLiteralWidens) {
   auto expr = eq(field(INTEGER(), "id"), cast(INTEGER(), bigIntConst));
   auto result = PaimonFilterTranslator::translate(expr, intRowType);
   ASSERT_TRUE(result.ok()) << result.reason;
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp predicate tests
+// ---------------------------------------------------------------------------
+
+TEST_F(PaimonFilterTranslatorTest, TimestampEqualityPreservesSubMs) {
+  // A timestamp with sub-millisecond nanoseconds. The predicate literal
+  // must preserve microsecond precision (not truncate to milliseconds),
+  // otherwise filter pushdown may produce incorrect results.
+  // Timestamp(seconds, nanos): epoch + 1 second + 123'456'789 nanos.
+  auto ts = Timestamp(1, 123'456'789);
+  auto expr = eq(field(TIMESTAMP(), "ts_col"), tsConst(ts));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  // Round-trip and verify the nanoseconds are preserved (not truncated to ms).
+  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
+  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
+
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(roundTripped.value.get());
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(call->inputs().size(), 2);
+  const auto* constExpr =
+      dynamic_cast<const core::ConstantTypedExpr*>(call->inputs()[1].get());
+  ASSERT_NE(constExpr, nullptr);
+  const auto& val = constExpr->value();
+  auto roundTrippedTs = val.value<Timestamp>();
+  // The original ts had nanos=123'456'789. Paimon stores (millis,
+  // nanos_of_millis). After round-trip we should preserve sub-ms precision:
+  // millis = 1000 + 123 = 1123, nanos_of_millis = 456'789.
+  // The bolt Timestamp should have the same total nanoseconds within ms.
+  EXPECT_EQ(roundTrippedTs.getNanos() % 1'000'000, ts.getNanos() % 1'000'000)
+      << "Sub-millisecond nanoseconds were truncated";
+}
+
+TEST_F(PaimonFilterTranslatorTest, TimestampGtWithSubMsPrecision) {
+  // gt(ts, '2023-01-01 00:00:00.000500') should not truncate to
+  // '2023-01-01 00:00:00.000', which would incorrectly match rows at
+  // t+0.000100.
+  auto ts = Timestamp(1672531200, 500'000); // 2023-01-01 00:00:00.000500
+  auto expr = gt(field(TIMESTAMP(), "ts_col"), tsConst(ts));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  auto roundTripped = PaimonFilterTranslator::toTypedExpr(pred.value);
+  ASSERT_TRUE(roundTripped.ok()) << roundTripped.reason;
+
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(roundTripped.value.get());
+  ASSERT_NE(call, nullptr);
+  const auto* constExpr =
+      dynamic_cast<const core::ConstantTypedExpr*>(call->inputs()[1].get());
+  ASSERT_NE(constExpr, nullptr);
+  const auto& val = constExpr->value();
+  auto roundTrippedTs = val.value<Timestamp>();
+  EXPECT_EQ(roundTrippedTs.getNanos() % 1'000'000, ts.getNanos() % 1'000'000);
+}
+
+TEST_F(PaimonFilterTranslatorTest, DoubleInList) {
+  auto expr = inExpr(field(DOUBLE(), "score"), doubleArrayConst({1.5, 2.5, 3.5}));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  // Verify predicate structure: IN function on DOUBLE field "score" with
+  // correct literal values.
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::IN);
+  EXPECT_EQ(leaf->FieldName(), "score");
+  EXPECT_EQ(leaf->GetFieldType(), ::paimon::FieldType::DOUBLE);
+
+  const auto& lits = leaf->Literals();
+  ASSERT_EQ(lits.size(), 3);
+  double v0 = lits[0].GetValue<double>();
+  double v1 = lits[1].GetValue<double>();
+  double v2 = lits[2].GetValue<double>();
+  EXPECT_NEAR(v0, 1.5, 1e-9);
+  EXPECT_NEAR(v1, 2.5, 1e-9);
+  EXPECT_NEAR(v2, 3.5, 1e-9);
+}
+
+TEST_F(PaimonFilterTranslatorTest, DoubleNotInList) {
+  auto expr =
+      notInExpr(field(DOUBLE(), "score"), doubleArrayConst({0.0, 100.0}));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::NOT_IN);
+  EXPECT_EQ(leaf->FieldName(), "score");
+  EXPECT_EQ(leaf->GetFieldType(), ::paimon::FieldType::DOUBLE);
+
+  const auto& lits = leaf->Literals();
+  ASSERT_EQ(lits.size(), 2);
+  double v0 = lits[0].GetValue<double>();
+  double v1 = lits[1].GetValue<double>();
+  EXPECT_NEAR(v0, 0.0, 1e-9);
+  EXPECT_NEAR(v1, 100.0, 1e-9);
+}
+
+TEST_F(PaimonFilterTranslatorTest, FloatInList) {
+  auto expr =
+      inExpr(field(REAL(), "ratio"), floatArrayConst({0.1F, 0.5F, 0.9F}));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::IN);
+  EXPECT_EQ(leaf->FieldName(), "ratio");
+  EXPECT_EQ(leaf->GetFieldType(), ::paimon::FieldType::FLOAT);
+
+  const auto& lits = leaf->Literals();
+  ASSERT_EQ(lits.size(), 3);
+  auto f0 = lits[0].GetValue<float>();
+  auto f1 = lits[1].GetValue<float>();
+  auto f2 = lits[2].GetValue<float>();
+  EXPECT_FLOAT_EQ(f0, 0.1F);
+  EXPECT_FLOAT_EQ(f1, 0.5F);
+  EXPECT_FLOAT_EQ(f2, 0.9F);
+}
+
+TEST_F(PaimonFilterTranslatorTest, BooleanInList) {
+  auto expr = inExpr(field(BOOLEAN(), "active"), boolArrayConst({true, false}));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::IN);
+  EXPECT_EQ(leaf->FieldName(), "active");
+  EXPECT_EQ(leaf->GetFieldType(), ::paimon::FieldType::BOOLEAN);
+
+  const auto& lits = leaf->Literals();
+  ASSERT_EQ(lits.size(), 2);
+  bool b0 = lits[0].GetValue<bool>();
+  bool b1 = lits[1].GetValue<bool>();
+  EXPECT_EQ(b0, true);
+  EXPECT_EQ(b1, false);
+}
+
+TEST_F(PaimonFilterTranslatorTest, TimestampInList) {
+  auto ts1 = Timestamp(1000, 123'456'000);
+  auto ts2 = Timestamp(2000, 789'000'000);
+  auto expr = inExpr(field(TIMESTAMP(), "ts_col"), tsArrayConst({ts1, ts2}));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::IN);
+  EXPECT_EQ(leaf->FieldName(), "ts_col");
+  EXPECT_EQ(leaf->GetFieldType(), ::paimon::FieldType::TIMESTAMP);
+
+  const auto& lits = leaf->Literals();
+  ASSERT_EQ(lits.size(), 2);
+  // Verify timestamps preserve full nanosecond precision through conversion.
+  auto rtTs1 = lits[0].GetValue<::paimon::Timestamp>();
+  auto rtTs2 = lits[1].GetValue<::paimon::Timestamp>();
+  int64_t expectedNanos1 = (1000 * 1'000'000'000LL) + 123'456'000;
+  int64_t expectedNanos2 = (2000 * 1'000'000'000LL) + 789'000'000;
+  int64_t actualNanos1 =
+      (rtTs1.GetMillisecond() * 1'000'000) + rtTs1.GetNanoOfMillisecond();
+  int64_t actualNanos2 =
+      (rtTs2.GetMillisecond() * 1'000'000) + rtTs2.GetNanoOfMillisecond();
+  EXPECT_EQ(actualNanos1, expectedNanos1);
+  EXPECT_EQ(actualNanos2, expectedNanos2);
+}
+
+TEST_F(PaimonFilterTranslatorTest, RoundTripDoubleInList) {
+  assertRoundTripInList(
+      inExpr(field(DOUBLE(), "score"), doubleArrayConst({1.5, 2.5})), "in",
+      "score", rowType_, pool_.get());
+}
+
+TEST_F(PaimonFilterTranslatorTest, RoundTripBooleanInList) {
+  assertRoundTripInList(
+      inExpr(field(BOOLEAN(), "active"), boolArrayConst({true})), "in",
+      "active", rowType_, pool_.get());
+}
+
+TEST_F(PaimonFilterTranslatorTest, RoundTripTimestampInList) {
+  auto ts1 = Timestamp(1000, 500'000);
+  auto ts2 = Timestamp(2000, 0);
+  assertRoundTripInList(
+      inExpr(field(TIMESTAMP(), "ts_col"), tsArrayConst({ts1, ts2})), "in",
+      "ts_col", rowType_, pool_.get());
 }
 
 } // namespace

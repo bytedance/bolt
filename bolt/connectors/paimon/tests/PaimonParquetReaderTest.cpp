@@ -71,7 +71,7 @@ class PaimonParquetReaderTest : public ::testing::Test,
       const RowVectorPtr& expectedData,
       memory::MemoryPool* pool,
       const std::map<std::string, std::string>& extraOptions = {}) {
-    auto options = extraOptions;
+    const auto& options = extraOptions;
     PaimonParquetReader format(options);
     auto rbRes = format.CreateReaderBuilder(batchSize);
     ASSERT_TRUE(rbRes.ok());
@@ -363,6 +363,89 @@ TEST_F(PaimonParquetReaderTest, TimestampPrecision) {
         leafPool_.get(),
         {{PaimonConfig::kReadTimestampUnit, "9"}});
   }
+}
+
+// ---- Full-schema fallback test (initializeRowReaderWithFullSchema)
+// ----
+
+TEST_F(PaimonParquetReaderTest, NextBatchWithoutSetReadSchema) {
+  auto schema = ROW({"c0", "c1", "c2"}, {INTEGER(), DOUBLE(), VARCHAR()});
+  const int64_t kRows = 100;
+  std::vector<std::string> stringData(kRows);
+  for (int64_t i = 0; i < kRows; ++i) {
+    stringData[i] = "row_" + std::to_string(i);
+  }
+  auto data = makeRowVector(std::vector<VectorPtr>{
+      makeFlatVector<int32_t>(kRows, [](auto r) { return r + 1; }),
+      makeFlatVector<double>(kRows, [](auto r) { return r * 2.5; }),
+      makeFlatVector<StringView>(
+          kRows, [&](auto r) { return StringView(stringData[r]); }),
+  });
+
+  auto path = tempPath("paimon_parquet_full_schema_fallback.parquet");
+  auto writer = createWriter(path, schema);
+  writer->write(data);
+  writer->close();
+
+  // Open the file and call NextBatch directly WITHOUT SetReadSchema.
+  PaimonParquetReader format({});
+  auto rbRes = format.CreateReaderBuilder(256);
+  ASSERT_TRUE(rbRes.ok());
+  std::unique_ptr<::paimon::ReaderBuilder> builder = std::move(rbRes).value();
+
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
+  builder->WithMemoryPool(paimonPool);
+
+  auto readerRes = builder->Build(path);
+  ASSERT_TRUE(readerRes.ok());
+  std::unique_ptr<::paimon::FileBatchReader> fileReader =
+      std::move(readerRes).value();
+
+  // Call NextBatch directly — this should trigger the full-schema fallback.
+  auto batchRes = fileReader->NextBatch();
+  ASSERT_TRUE(batchRes.ok())
+      << "NextBatch failed: " << batchRes.status().message();
+
+  auto pair = std::move(batchRes).value();
+  ASSERT_NE(pair.first, nullptr);
+  ASSERT_NE(pair.second, nullptr);
+
+  // Verify the returned schema matches the file schema (all 3 columns).
+  auto batch =
+      importFromArrowAsOwner(*pair.second, *pair.first, {}, leafPool_.get());
+  auto rowBatch = std::dynamic_pointer_cast<RowVector>(batch);
+  ASSERT_NE(rowBatch, nullptr);
+  auto rowType = std::dynamic_pointer_cast<const RowType>(rowBatch->type());
+  ASSERT_NE(rowType, nullptr);
+  ASSERT_EQ(rowType->size(), 3)
+      << "Full-schema fallback should return all columns";
+  ASSERT_EQ(rowType->nameOf(0), "c0");
+  ASSERT_EQ(rowType->nameOf(1), "c1");
+  ASSERT_EQ(rowType->nameOf(2), "c2");
+
+  // Verify the row count matches.
+  int64_t totalRows = rowBatch->size();
+  while (true) {
+    auto nextRes = fileReader->NextBatch();
+    if (::paimon::BatchReader::IsEofBatch(nextRes.value())) {
+      break;
+    }
+    auto nextPair = std::move(nextRes).value();
+    auto nextBatch = importFromArrowAsOwner(
+        *nextPair.second, *nextPair.first, {}, leafPool_.get());
+    auto nextRow = std::dynamic_pointer_cast<RowVector>(nextBatch);
+    ASSERT_NE(nextRow, nullptr);
+    totalRows += nextRow->size();
+    if (nextPair.first && nextPair.first->release) {
+      nextPair.first->release(nextPair.first.get());
+    }
+    if (nextPair.second && nextPair.second->release) {
+      nextPair.second->release(nextPair.second.get());
+    }
+  }
+  ASSERT_EQ(totalRows, kRows);
+
+  fileReader->Close();
 }
 
 } // namespace
