@@ -35,6 +35,7 @@ const char* const kApproxDistinct = "approx_distinct";
 const char* const kApproxMostFrequent = "approx_most_frequent";
 const char* const kApproxPercentile = "approx_percentile";
 const char* const kPercentileApprox = "percentile_approx";
+const char* const kPbsVidSplitAggMetrics = "pbs_vid_split_agg_metrics";
 const char* const kVidSplitAggMetrics = "vid_split_agg_metrics";
 const char* const kVidSplitAggHashkeyMetrics = "vid_split_hash_key_metrics";
 const char* const kVidSplitUdaf = "vid_split_udaf";
