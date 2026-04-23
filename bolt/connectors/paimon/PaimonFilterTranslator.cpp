@@ -84,8 +84,8 @@ core::TypedExprPtr makeArrayConstant(
       break;
     }
     case TypeKind::REAL: {
-      auto flat = BaseVector::create<FlatVector<float>>(
-          elementType, numElements, pool);
+      auto flat =
+          BaseVector::create<FlatVector<float>>(elementType, numElements, pool);
       for (size_t i = 0; i < values.size(); ++i) {
         if (values[i].isNull()) {
           flat->setNull(i, true);
@@ -110,8 +110,8 @@ core::TypedExprPtr makeArrayConstant(
       break;
     }
     case TypeKind::BOOLEAN: {
-      auto flat = BaseVector::create<FlatVector<bool>>(
-          elementType, numElements, pool);
+      auto flat =
+          BaseVector::create<FlatVector<bool>>(elementType, numElements, pool);
       for (size_t i = 0; i < values.size(); ++i) {
         if (values[i].isNull()) {
           flat->setNull(i, true);
@@ -575,8 +575,7 @@ PaimonFilterTranslator::extractInListLiterals(
           int64_t totalNanos =
               boltTs.getSeconds() * 1'000'000'000LL + boltTs.getNanos();
           int64_t millis = totalNanos / 1'000'000;
-          int32_t nanoOfMillis =
-              static_cast<int32_t>(totalNanos % 1'000'000);
+          int32_t nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
           literals.emplace_back(::paimon::Timestamp(millis, nanoOfMillis));
         }
       }
@@ -747,8 +746,7 @@ std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
       // Paimon stores as (millis_since_epoch, nano_of_millis).
       // Preserve full nanosecond precision via total nanoseconds.
       auto ts = value.value<bytedance::bolt::Timestamp>();
-      int64_t totalNanos =
-          ts.getSeconds() * 1'000'000'000LL + ts.getNanos();
+      int64_t totalNanos = ts.getSeconds() * 1'000'000'000LL + ts.getNanos();
       int64_t millis = totalNanos / 1'000'000;
       int32_t nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
       auto paimonTs = ::paimon::Timestamp(millis, nanoOfMillis);

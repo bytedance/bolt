@@ -290,6 +290,87 @@ TEST_F(PaimonConnectorTest, TestTableScanPkNoOverwrite) {
   assertQueryOrdered(plan, inputSplits, duckSql, std::vector<uint32_t>{0});
 }
 
+TEST_F(PaimonConnectorTest, TestTableScanPkWithOverwrite) {
+  // PK table with overlapping keys across two writes.
+  auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  const int64_t kRows = 15;
+  std::vector<int64_t> ids(kRows);
+  std::vector<int64_t> values(kRows);
+  std::iota(ids.begin(), ids.end(), 0);
+  for (int i = 0; i < kRows; i++) {
+    if (i < 5) {
+      values[i] = 2 * i;
+    } else {
+      values[i] = 3 * i;
+    }
+  }
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  auto idVec = mk.flatVector<int64_t>(ids);
+  auto valueVec = mk.flatVector<int64_t>(values);
+  std::vector<VectorPtr> children{idVec, valueVec};
+  auto rowVec = mk.rowVector(children);
+
+  // Build table path using the temporary directory
+  std::string tablePath =
+      "file:" + tempDir_->path + "/test_db.db/pk_with_overwrite";
+
+  ::paimon::ScanContextBuilder contextBuilder(tablePath);
+
+  std::unique_ptr<::paimon::ScanContext> scanContext =
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+          .Finish()
+          .value();
+  std::unique_ptr<::paimon::TableScan> tableScan =
+      ::paimon::TableScan::Create(std::move(scanContext)).value();
+  std::shared_ptr<::paimon::Plan> paimonPlan = tableScan->CreatePlan().value();
+
+  // Define schema and handles
+  auto rowType = ROW({"id", "value"}, {BIGINT(), BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+  columnHandles["value"] =
+      std::make_shared<PaimonColumnHandle>("value", BIGINT());
+
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>());
+
+  // Build plan with ORDER BY id
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .orderBy({"id"}, /*isPartial*/ false)
+                  .planNode();
+
+  // Prepare DuckDB expected results
+  std::vector<RowVectorPtr> rows{rowVec};
+  createDuckDbTable("tmp", rows);
+  std::string duckSql = "SELECT c0, c1 FROM tmp ORDER BY c0";
+  std::vector<std::shared_ptr<::paimon::Split>> paimonSplits =
+      paimonPlan->Splits();
+  std::vector<std::shared_ptr<PaimonConnectorSplit>> paimonConnectorSplits;
+  paimonConnectorSplits.reserve(paimonSplits.size());
+  for (auto& paimonSplit : paimonSplits) {
+    const auto serialized =
+        ::paimon::Split::Serialize(paimonSplit, paimonPool).value();
+    paimonConnectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
+  }
+
+  // Assert query correctness and ordering
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> inputSplits;
+  inputSplits.insert(
+      inputSplits.end(),
+      paimonConnectorSplits.begin(),
+      paimonConnectorSplits.end());
+  assertQueryOrdered(plan, inputSplits, duckSql, std::vector<uint32_t>{0});
+}
+
 TEST_F(PaimonConnectorTest, TestTableScanDataEvolution) {
   // Create Parquet data with unique id and value
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
@@ -555,7 +636,6 @@ TEST_F(PaimonConnectorTest, TestTableScanDeduplicate) {
   auto rowType =
       ROW({"id", "value", "timestamp"}, {BIGINT(), VARCHAR(), BIGINT()});
 
-  const int64_t kRows = 3;
   std::vector<int64_t> ids = {1, 2, 3, 4};
   std::vector<std::string> values = {
       "v1", "v2_updated", "v3_updated", "v4_updated"};

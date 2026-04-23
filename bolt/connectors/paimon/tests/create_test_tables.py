@@ -142,6 +142,49 @@ def pk_no_overwrite(catalog):
     write_to_table(table, dataframe_2)
 
 
+def pk_with_overwrite(catalog):
+    pa_schema = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("value", pa.int64()),
+        ]
+    )
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=["id"],
+        options={"bucket": "2"},
+        comment="my test table",
+    )
+    data_1 = {
+        "id": [x for x in range(10)],
+        "value": [2 * x for x in range(10)],
+    }
+    data_2 = {
+        "id": [x for x in range(5, 15)],  # overlaps on [5, 9]
+        "value": [3 * x for x in range(5, 15)],  # [15-42]
+    }
+    # resulting table should be
+    # id:    0 1 2 3 4 5  6  7  8  9  10 11 12 13 14
+    # value: 0 2 4 6 8 15 18 21 24 27 30 33 36 39 42
+    dataframe_1 = pd.DataFrame(data_1)
+    dataframe_2 = pd.DataFrame(data_2)
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database="test_db",
+        table_name="pk_with_overwrite",
+        schema=schema,
+    )
+    if not table_created:
+        return
+
+    # write dataset 1
+    write_to_table(table, dataframe_1)
+
+    # write dataset 2
+    write_to_table(table, dataframe_2)
+
+
 def data_evolution_table(catalog):
     pa_schema = pa.schema(
         [
@@ -402,6 +445,7 @@ def main():
         basic_table,
         append_only_multiple_append,
         pk_no_overwrite,
+        pk_with_overwrite,
         data_evolution_table,
         partial_update_table,
         aggregate_table,

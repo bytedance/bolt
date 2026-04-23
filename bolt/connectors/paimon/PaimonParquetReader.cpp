@@ -8,6 +8,7 @@
 #include <paimon/format/reader_builder.h>
 #include <paimon/fs/file_system.h>
 #include <paimon/reader/file_batch_reader.h>
+#include <paimon/result.h>
 #include <memory>
 #include "bolt/common/file/File.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -196,9 +197,10 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
     reader_.reset();
   }
 
-  uint64_t GetPreviousBatchFirstRowNumber() const override {
+  ::paimon::Result<uint64_t> GetPreviousBatchFirstRowNumber() const override {
     return 0;
   }
+
   ::paimon::Result<uint64_t> GetNumberOfRows() const override {
     auto numRows = reader_->numberOfRows();
     if (numRows) {
