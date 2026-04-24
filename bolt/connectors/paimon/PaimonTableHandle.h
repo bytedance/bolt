@@ -81,6 +81,14 @@ class PaimonTableHandle : public ConnectorTableHandle {
     obj["connectorId"] = connectorId();
     obj["tableName"] = tableName_;
     obj["tablePath"] = tablePath_;
+    folly::dynamic tablePropsObj = folly::dynamic::object;
+    for (const auto& [key, value] : tableProperties_) {
+      tablePropsObj[key] = value;
+    }
+    obj["tableProperties"] = tablePropsObj;
+    if (filter_) {
+      obj["filter"] = filter_->serialize();
+    }
     return obj;
   }
 

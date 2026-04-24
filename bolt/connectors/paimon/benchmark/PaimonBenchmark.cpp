@@ -7,6 +7,7 @@
 #include <folly/init/Init.h>
 #include <paimon/scan_context.h>
 #include <paimon/table/source/plan.h>
+#include <paimon/table/source/split.h>
 #include <paimon/table/source/table_scan.h>
 #include <algorithm>
 #include <cstdio>
@@ -15,14 +16,17 @@
 #include <sstream>
 #include "Type.h"
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
+#include "bolt/common/config/Config.h"
+#include "bolt/common/memory/Memory.h"
+#include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonConnector.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "common/config/Config.h"
-#include "connectors/Connector.h"
 
 using bytedance::bolt::BIGINT;
 using bytedance::bolt::INTEGER;
@@ -207,8 +211,16 @@ class PaimonBenchmark : public QueryBenchmarkBase {
     }
 
     auto paimonSplits = plan->Splits();
+    auto paimonPool = std::make_shared<
+        bytedance::bolt::connector::paimon::BoltPaimonMemoryPool>(
+        bytedance::bolt::memory::memoryManager()
+            ->addRootPool("PaimonBenchmark")
+            .get());
     for (auto& split : paimonSplits) {
-      splits.push_back(std::make_shared<PaimonConnectorSplit>("paimon", split));
+      const auto serialized =
+          ::paimon::Split::Serialize(split, paimonPool).value();
+      splits.push_back(std::make_shared<PaimonConnectorSplit>(
+          "paimon", serialized.data(), serialized.length()));
     }
   }
 

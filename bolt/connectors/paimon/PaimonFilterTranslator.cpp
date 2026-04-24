@@ -139,11 +139,15 @@ core::TypedExprPtr makeArrayConstant(
     case TypeKind::VARBINARY: {
       auto flat = BaseVector::create<FlatVector<StringView>>(
           elementType, numElements, pool);
+      // Keep temporary strings alive so StringViews don't dangle.
+      std::vector<std::string> ownedStrings;
+      ownedStrings.reserve(values.size());
       for (size_t i = 0; i < values.size(); ++i) {
         if (values[i].isNull()) {
           flat->setNull(i, true);
         } else {
-          flat->set(i, StringView(values[i].value<std::string>()));
+          ownedStrings.push_back(values[i].value<std::string>());
+          flat->set(i, StringView(ownedStrings.back()));
         }
       }
       elements = std::move(flat);
@@ -280,7 +284,7 @@ PaimonFilterTranslator::translateCall(
   }
 
   // Handle NOT: translate inner with negation applied per-operator.
-  if (opName == "not" || endsWith(opName, "not")) {
+  if (opName == "not") {
     if (inputs.empty()) {
       return fail("NOT has no inputs");
     }
@@ -910,7 +914,7 @@ core::TypedExprPtr PaimonFilterTranslator::literalToConstantExpr(
     case ::paimon::FieldType::BINARY: {
       auto str = literal.GetValue<std::string>();
       return std::make_shared<core::ConstantTypedExpr>(
-          type, variant(StringView(str)));
+          type, variant(std::move(str)));
     }
     case ::paimon::FieldType::TIMESTAMP: {
       auto ts = literal.GetValue<::paimon::Timestamp>();
@@ -1535,7 +1539,7 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
       continue;
     }
 
-    // OR: only push down when ALL recursive children are EQUAL predicates
+    // OR: only push down when ALL direct children are EQUAL predicates
     // on the same column (produces a Values filter). Cross-column or mixed
     // ORs cannot be pushed into ScanSpec.
     if (op == "or") {
@@ -1544,8 +1548,6 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
       std::vector<std::string> stringValues;
       bool allEqual = true;
 
-      // Flatten nested ORs by iterating with a local stack.
-      // Push direct children (not self) so each entry is checked as "eq".
       std::vector<const core::CallTypedExpr*> orStack;
       for (const auto& child : call->inputs()) {
         const auto* childCall =
@@ -1589,14 +1591,6 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
         } else {
           allEqual = false;
           break;
-        }
-        // Push nested OR children for flattening.
-        for (const auto& child : current->inputs()) {
-          const auto* childCall =
-              dynamic_cast<const core::CallTypedExpr*>(child.get());
-          if (childCall && childCall->name() == "or") {
-            orStack.push_back(childCall);
-          }
         }
       }
 

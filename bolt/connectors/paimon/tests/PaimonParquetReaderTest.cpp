@@ -448,4 +448,144 @@ TEST_F(PaimonParquetReaderTest, NextBatchWithoutSetReadSchema) {
   fileReader->Close();
 }
 
+/// Helper: open a parquet file via PaimonParquetReader and return the
+/// FileBatchReader. Does NOT call SetReadSchema — use for testing
+/// GetPreviousBatchFirstRowNumber with full-schema fallback.
+std::unique_ptr<::paimon::FileBatchReader> openReader(
+    const std::string& parquetPath,
+    int32_t batchSize,
+    memory::MemoryPool* pool,
+    const std::map<std::string, std::string>& extraOptions = {}) {
+  PaimonParquetReader format(extraOptions);
+  auto rbRes = format.CreateReaderBuilder(batchSize);
+  EXPECT_TRUE(rbRes.ok()) << rbRes.status().ToString();
+  std::unique_ptr<::paimon::ReaderBuilder> builder = std::move(rbRes).value();
+
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(pool);
+  builder->WithMemoryPool(paimonPool);
+
+  auto readerRes = builder->Build(parquetPath);
+  EXPECT_TRUE(readerRes.ok()) << readerRes.status().message();
+  return std::move(readerRes).value();
+}
+
+// ---- GetPreviousBatchFirstRowNumber tests
+// ----------------------------------------------------------
+
+TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberSingleBatch) {
+  // Single batch: all rows fit in one read, so first batch starts at row 0.
+  const int64_t kRows = 100;
+  auto schema = ROW({"id"}, {BIGINT()});
+  auto data =
+      makeRowVector({makeFlatVector<int64_t>(kRows, [](auto r) { return r; })});
+
+  auto path = tempPath("row_number_single.parquet");
+  auto writer = createWriter(path, schema);
+  writer->write(data);
+  writer->close();
+
+  auto reader = openReader(path, kRows, leafPool_.get());
+
+  // First batch should start at row 0.
+  auto rowRes = reader->GetPreviousBatchFirstRowNumber();
+  ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
+  EXPECT_EQ(rowRes.value(), 0U);
+
+  // Read the only batch.
+  auto batchRes = reader->NextBatch();
+  ASSERT_TRUE(batchRes.ok());
+  EXPECT_FALSE(::paimon::BatchReader::IsEofBatch(batchRes.value()));
+
+  // Release Arrow data to free underlying memory.
+  {
+    auto pair = std::move(batchRes).value();
+    if (pair.first && pair.first->release) {
+      pair.first->release(pair.first.get());
+    }
+    if (pair.second && pair.second->release) {
+      pair.second->release(pair.second.get());
+    }
+  }
+
+  // After reading, next call still returns the same batch's start (or EOF).
+  reader->Close();
+}
+
+TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberMultipleBatches) {
+  // Small batch size forces multiple reads from a larger file.
+  const int64_t kRows = 100;
+  const int32_t kBatchSize = 17; // doesn't divide evenly
+  auto schema = ROW({"id"}, {BIGINT()});
+  auto data = makeRowVector(
+      {makeFlatVector<int64_t>(kRows, [](auto r) { return r * 10; })});
+
+  auto path = tempPath("row_number_multi.parquet");
+  auto writer = createWriter(path, schema);
+  writer->write(data);
+  writer->close();
+
+  auto reader = openReader(path, kBatchSize, leafPool_.get());
+
+  uint64_t totalRows = 0;
+  uint64_t expectedStart = 0;
+  while (true) {
+    auto batchRes = reader->NextBatch();
+    if (::paimon::BatchReader::IsEofBatch(batchRes.value())) {
+      break;
+    }
+    ASSERT_TRUE(batchRes.ok()) << batchRes.status().message();
+
+    // After NextBatch(), GetPreviousBatchFirstRowNumber() returns the start
+    // row of the batch just read.
+    auto rowRes = reader->GetPreviousBatchFirstRowNumber();
+    ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
+    EXPECT_EQ(rowRes.value(), expectedStart)
+        << "Batch starting at wrong absolute row position";
+
+    auto pair = std::move(batchRes).value();
+    auto batch =
+        importFromArrowAsOwner(*pair.second, *pair.first, {}, leafPool_.get());
+    auto rowBatch = std::dynamic_pointer_cast<RowVector>(batch);
+    ASSERT_NE(rowBatch, nullptr);
+    uint64_t batchRows = rowBatch->size();
+    totalRows += batchRows;
+
+    // Release Arrow data to free underlying memory.
+    if (pair.first && pair.first->release) {
+      pair.first->release(pair.first.get());
+    }
+    if (pair.second && pair.second->release) {
+      pair.second->release(pair.second.get());
+    }
+
+    expectedStart += batchRows;
+  }
+
+  EXPECT_EQ(totalRows, static_cast<uint64_t>(kRows));
+  reader->Close();
+}
+
+TEST_F(
+    PaimonParquetReaderTest,
+    PreviousBatchRowNumberReturnsZeroBeforeAnyRead) {
+  // Before any NextBatch() call, the method should return 0.
+  const int64_t kRows = 50;
+  auto schema = ROW({"id"}, {BIGINT()});
+  auto data =
+      makeRowVector({makeFlatVector<int64_t>(kRows, [](auto r) { return r; })});
+
+  auto path = tempPath("row_number_before_read.parquet");
+  auto writer = createWriter(path, schema);
+  writer->write(data);
+  writer->close();
+
+  auto reader = openReader(path, 20, leafPool_.get());
+
+  auto rowRes = reader->GetPreviousBatchFirstRowNumber();
+  ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
+  EXPECT_EQ(rowRes.value(), 0U);
+
+  reader->Close();
+}
+
 } // namespace

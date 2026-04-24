@@ -148,10 +148,22 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
             << "NextBatch: rowReader_ not initialized, initializing with full schema";
         initializeRowReaderWithFullSchema();
       }
-      VectorPtr result = BaseVector::create(readType_, batch_size_, pool_);
-      bool hasData = rowReader_->next(batch_size_, result) != 0;
 
-      if (!hasData) {
+      // Record the absolute file row number where this batch starts.
+      // nextRowNumber() returns the position relative to file start,
+      // including rows that may be filtered/deleted — this is what
+      // paimon-cpp needs for deletion vector offset computation.
+      int64_t nextRow = rowReader_->nextRowNumber();
+      if (nextRow == dwio::common::RowReader::kAtEnd) {
+        LOG(INFO) << "NextBatch: End of file reached";
+        return ::paimon::BatchReader::MakeEofBatch();
+      }
+      previousBatchFirstRowNumber_ = static_cast<uint64_t>(nextRow);
+
+      VectorPtr result = BaseVector::create(readType_, batch_size_, pool_);
+      uint64_t numRows = rowReader_->next(batch_size_, result);
+
+      if (numRows == 0) {
         LOG(INFO) << "NextBatch: End of file reached";
         return ::paimon::BatchReader::MakeEofBatch();
       }
@@ -180,6 +192,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       // LOG(INFO) << "NextBatch: exported ArrowArray has length " <<
       // arrowArray->length;
 
+      hasReadAnyBatch_ = true;
       return std::make_pair(std::move(arrowArray), std::move(arrowSchema));
     } catch (const std::exception& e) {
       LOG(ERROR) << "NextBatch: exception " << e.what();
@@ -198,7 +211,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   }
 
   ::paimon::Result<uint64_t> GetPreviousBatchFirstRowNumber() const override {
-    return 0;
+    return previousBatchFirstRowNumber_;
   }
 
   ::paimon::Result<uint64_t> GetNumberOfRows() const override {
@@ -219,6 +232,8 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   memory::MemoryPool* const pool_;
   uint8_t timestampPrecision_;
   RowTypePtr readType_;
+  uint64_t previousBatchFirstRowNumber_{0};
+  bool hasReadAnyBatch_{false};
 };
 
 class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {

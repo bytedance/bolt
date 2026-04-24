@@ -208,7 +208,8 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     if (!readerCreateStatus.ok()) {
       VLOG(1) << "PaimonDataSource::next(): CreateReader error: "
               << readerCreateStatus.status().ToString();
-      return nullptr;
+      BOLT_FAIL(
+          "create reader error: {}", readerCreateStatus.status().ToString());
     }
     reader_ = std::move(readerCreateStatus).value();
   }
@@ -228,7 +229,7 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
     reader_->Close();
     reader_.reset();
     inputSplits_.clear();
-    return nullptr;
+    BOLT_FAIL("failed to get next batch: {}", batchRes.status().ToString());
   }
 
   VLOG(1) << "PaimonDataSource::next(): NextBatch successful, getting value";

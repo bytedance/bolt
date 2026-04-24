@@ -23,6 +23,7 @@ struct PaimonConnectorSplit : public connector::ConnectorSplit {
   folly::dynamic serialize() const override {
     folly::dynamic obj = folly::dynamic::object;
     obj["connectorId"] = connectorId;
+    obj["splitBytes"] = splitBytes_;
     return obj;
   }
 };

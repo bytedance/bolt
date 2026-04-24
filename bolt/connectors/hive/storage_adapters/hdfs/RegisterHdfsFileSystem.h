@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "common/file/FileSystems.h"
+#include "bolt/common/file/FileSystems.h"
 #include "folly/concurrency/ConcurrentHashMap.h"
 
 namespace bytedance::bolt::filesystems {

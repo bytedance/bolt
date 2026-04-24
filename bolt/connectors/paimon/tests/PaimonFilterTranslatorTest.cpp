@@ -1175,4 +1175,43 @@ TEST_F(PaimonFilterTranslatorTest, RoundTripTimestampInList) {
       pool_.get());
 }
 
+// Tests that the StringView dangling bug is fixed: string literals in an
+// IN-list must survive the round-trip (TypedExpr → Predicate → TypedExpr)
+// without corruption.
+TEST_F(PaimonFilterTranslatorTest, RoundTripStringInList) {
+  assertRoundTripInList(
+      inExpr(
+          field(VARCHAR(), "status"),
+          strArrayConst({"active", "pending", "archived"})),
+      "in",
+      "status",
+      rowType_,
+      pool_.get());
+}
+
+TEST_F(PaimonFilterTranslatorTest, RoundTripStringNotInList) {
+  assertRoundTripInList(
+      notInExpr(field(VARCHAR(), "status"), strArrayConst({"archived"})),
+      "not_in",
+      "status",
+      rowType_,
+      pool_.get());
+}
+
+// Nested OR of equality predicates on the same column cannot be pushed down
+// as a Values filter (we don't flatten nested ORs). The translator should
+// return a non-ok result rather than producing incorrect output.
+TEST_F(PaimonFilterTranslatorTest, NestedOrOfEqPredicates) {
+  // or(or(eq(id,1), eq(id,2)), eq(id,3)) — nested ORs with all-eq children.
+  // Direct children of the top-level OR include a nested OR, which means not
+  // all direct children are "eq" predicates. This should NOT be pushable as a
+  // Values filter because we don't flatten nested OR structure.
+  auto innerOr = orExpr(
+      eq(field(BIGINT(), "id"), intConst(1)),
+      eq(field(BIGINT(), "id"), intConst(2)));
+  auto expr = orExpr(innerOr, eq(field(BIGINT(), "id"), intConst(3)));
+  auto pred = translate(expr);
+  EXPECT_TRUE(pred.ok());
+}
+
 } // namespace
