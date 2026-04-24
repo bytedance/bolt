@@ -49,22 +49,18 @@ MetadataColumnPartition::MetadataColumnPartition(
         partitionKeys,
     memory::MemoryPool* pool)
     : partitionType_(std::move(partitionType)) {
-  std::vector<std::string> fieldNames;
-  std::vector<TypePtr> fieldTypes;
-  std::vector<variant> fieldValues;
   std::vector<VectorPtr> childVectors;
   const auto& partitionRowType = partitionType_->asRow();
+  childVectors.reserve(partitionRowType.size());
 
-  for (const auto& kv : partitionKeys) {
-    const auto& key = kv.first;
-    const auto& value = kv.second;
-    auto fieldType = partitionRowType.findChild(key);
-    fieldNames.push_back(key);
-    fieldTypes.push_back(fieldType);
+  for (uint32_t i = 0; i < partitionRowType.size(); ++i) {
+    const auto& key = partitionRowType.nameOf(i);
+    const auto& fieldType = partitionRowType.childAt(i);
+    const auto it = partitionKeys.find(key);
 
-    if (value.has_value()) {
+    if (it != partitionKeys.end() && it->second.has_value()) {
       auto convertedValue = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-          hive::convertFromString, fieldType->kind(), value);
+          hive::convertFromString, fieldType->kind(), it->second);
       childVectors.push_back(
           BaseVector::createConstant(fieldType, convertedValue, 1, pool));
     } else {
@@ -73,10 +69,9 @@ MetadataColumnPartition::MetadataColumnPartition(
     }
   }
 
-  auto structType = ROW(std::move(fieldNames), std::move(fieldTypes));
   partitionValue_ = std::make_shared<RowVector>(
       pool,
-      structType,
+      asRowType(partitionType_),
       BufferPtr(nullptr),
       1, // size
       std::move(childVectors));
