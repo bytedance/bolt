@@ -24,3 +24,7 @@ runs:
       shell: bash
       run: |
         ./scripts/install-bolt-deps.sh
+    - name: Install Python dependencies
+      shell: bash
+      run: |
+        pip install -r requirements.txt

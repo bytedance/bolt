@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -74,9 +75,16 @@ class PaimonHdfsFileSystemTest : public testing::Test {
 
   static void SetUpTestSuite() {
     // Validate environment prerequisites.
-    requireEnvironmentVariable("JAVA_HOME");
-    LOG(INFO) << "JAVA_HOME: " << ::getenv("JAVA_HOME");
-    requireEnvironmentVariable("HADOOP_HOME");
+    try {
+      requireEnvironmentVariable("JAVA_HOME");
+      LOG(INFO) << "JAVA_HOME: " << ::getenv("JAVA_HOME");
+      requireEnvironmentVariable("HADOOP_HOME");
+    } catch (std::runtime_error& e) {
+      GTEST_SKIP()
+          << "Skipped HDFS tests due to missing environment variables: "
+          << e.what();
+    }
+
     std::string hadoopHome = ::getenv("HADOOP_HOME");
     std::string cmd = fmt::format("{}/bin/hadoop classpath --glob", hadoopHome);
     std::string hadoopClasspath = runAndCapture(cmd);

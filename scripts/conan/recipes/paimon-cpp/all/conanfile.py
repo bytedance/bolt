@@ -1,35 +1,19 @@
 from conan import ConanFile
-from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import apply_conandata_patches
+from conan.tools.files import apply_conandata_patches, export_conandata_patches
 from conan.tools.scm import Git
-import importlib.util
 import os
-import subprocess
 
 from conan.tools.cmake import CMake, CMakeToolchain, CMakeDeps, cmake_layout
 from conan.tools.files import copy
 
 
 class PaimonCppConan(ConanFile):
-    """Thin wrapper that handles source acquisition; all other lifecycle methods
-    are delegated to the remote repo's conanfile.py after cloning.
-
-    Only these members are defined locally because they must resolve BEFORE
-    source() runs (Conan computes the dependency graph and settings early):
-
-    - Class-level metadata (name, version, options, settings)
-    - config_options()   - trivial platform handling
-    - requirements()      - declares deps so the graph can be built
-    - export_sources()    - exports patch files for source()
-    - source()           - clones the repo, verifies commit, then morphs self
-    """
-
-    # --- Metadata (must exist on the class before any method runs) ---
+    """Paimon C++ Conan recipe."""
 
     name = "paimon-cpp"
     package_type = "library"
     license = "Apache-2.0"
-    url = "https://github.com/ZacBlanco/paimon-cpp"
+    url = "https://github.com/alibaba/paimon-cpp"
     description = "Paimon C++ core library and optional plugins"
     topics = ("paimon", "lakehouse", "arrow", "parquet", "orc")
 
@@ -57,19 +41,12 @@ class PaimonCppConan(ConanFile):
         "with_lucene": False,
     }
 
-    # --- Methods that run before source() (cannot delegate yet) ---
-
     def config_options(self):
         if self.settings.os == "Windows":
             self.options.rm_safe("fPIC")
 
     def requirements(self):
-        """Declare dependencies for the Conan dependency graph.
-
-        Versions align with Bolt's tree.  The remote conanfile may declare
-        additional or overlapping requirements; those are resolved after
-        source() when the remote class takes over.
-        """
+        """Declare dependencies for the Conan dependency graph."""
         # Core dependencies
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
         self.requires("fmt/9.0.0")
@@ -85,93 +62,22 @@ class PaimonCppConan(ConanFile):
         if bool(self.options.with_orc):
             # protobuf is only required when ORC is enabled
             self.requires("protobuf/3.21.4")
-            # If ORC is available in the remote, use it; otherwise ORC will be built locally
-            # Uncomment below if your remote provides `orc/2.1.1`
-            # self.requires("orc/2.1.1")
         if bool(self.options.with_avro):
-            # Some environments package Avro C++ as `avro-cpp`. Keep this optional.
-            # Uncomment if provided in the remote:
-            # self.requires("avro-cpp/1.11.0")
             pass
 
-    # --- Source acquisition (the sole responsibility of this recipe) ---
-
-    def _import_remote_class(self):
-        """Import and return the ConanFile subclass from the cloned remote repo."""
-        remote_path = os.path.join(self.source_folder, "conanfile.py")
-        spec = importlib.util.spec_from_file_location("remote_paimon", remote_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-
-        for attr_name, attr_value in vars(mod).items():
-            if (
-                isinstance(attr_value, type)
-                and issubclass(attr_value, ConanFile)
-                and attr_value is not ConanFile
-            ):
-                return attr_value
-        raise RuntimeError(f"Could not find a ConanFile subclass in {remote_path}")
-
     def source(self):
-        """Clone paimon-cpp source from GitHub and verify branch tip matches expected commit."""
+        """Clone paimon-cpp source from GitHub and apply patches."""
         data = self.conan_data["sources"][self.version]
         git_url = data["url"]
         expected_commit = data["revision"]
-        expected_tag = data["tag"]
 
         git = Git(self)
-        git.clone(
-            url=git_url, target=".", args=["--branch", expected_tag, "--depth", "1"]
-        )
-
-        git = Git(self, folder=self.source_folder)
-        git.checkout(commit=expected_commit)
-
-        actual_tip = subprocess.check_output(
-            ["git", "-C", self.source_folder, "rev-parse", f"{expected_tag}"],
-            text=True,
-        ).strip()
-        if actual_tip != expected_commit:
-            raise ConanInvalidConfiguration(
-                f"Branch '{expected_tag}' tip ({actual_tip}) does not match "
-                f"expected commit {expected_commit}. The branch may have advanced "
-                f"since this recipe was generated."
-            )
+        git.fetch_commit(git_url, expected_commit)
 
         apply_conandata_patches(self)
 
-        # Morph self into a hybrid: local class stays first in MRO so our
-        # name/version/options remain authoritative, but every method we do NOT
-        # define locally is resolved from the remote conanfile.
-        RemoteCls = self._import_remote_class()
-        self.__class__ = type(
-            "PaimonCppDelegated",
-            (RemoteCls, PaimonCppConan),
-            {},
-        )
-
     def export_sources(self):
-        """Export local build files and sources for recipe-based builds.
-
-        This ensures consumers can build from the exported sources without
-        relying on ExternalProject downloads.
-        """
-        patterns = [
-            "CMakeLists.txt",
-            "PaimonConfig.cmake.in",
-            "cmake_modules/*",
-            "src/*",
-            "include/*",
-            "third_party/roaring_bitmap/*",
-            "third_party/xxhash/*",
-        ]
-        for pattern in patterns:
-            copy(
-                self,
-                pattern=pattern,
-                src=self.recipe_folder,
-                dst=self.export_sources_folder,
-            )
+        export_conandata_patches(self)
 
     def layout(self):
         cmake_layout(self)
@@ -211,11 +117,7 @@ class PaimonCppConan(ConanFile):
         CMakeDeps(self).generate()
 
     def configure(self):
-        """Adjust transitive dependency options required by recipes.
-
-        onetbb requires hwloc to be built as shared in your remote. Enforce it
-        here to avoid Invalid configuration errors during resolution.
-        """
+        """Adjust transitive dependency options required by recipes."""
         # Ensure hwloc is shared to satisfy onetbb's constraint
         try:
             self.options["hwloc/*"].shared = True

@@ -1,9 +1,8 @@
 sources:
-  "0.0.1-bolt":
-    url: "https://github.com/ZacBlanco/paimon-cpp.git"
-    revision: "51ffed68f9b01592c436b9eda7860ab654ae862e"
-    tag: "v0.0.1-bolt"
-  "0.0.2-bolt":
-    url: "https://github.com/ZacBlanco/paimon-cpp.git"
-    revision: "2b56923dd21690779102e6fa17d666df59982389"
-    tag: "v0.0.2-bolt"
+  "0.0.3-bolt":
+    url: "https://github.com/alibaba/paimon-cpp.git"
+    revision: "d474ebc24ac302239ca596a2d72f32210586b882"
+patches:
+  "0.0.3-bolt":
+    - patch_file: "patches/paimon-cpp-conan-deps.patch"
+      patch_description: "Add Conan dependencies support"

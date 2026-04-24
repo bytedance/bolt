@@ -1,6 +1,37 @@
 # Copyright (c) ByteDance Ltd. and/or its affiliates.
 # SPDX-License-Identifier: Apache-2.0
 
+# Ensure paimon Python package is available for tests that use it.
+# Only runs during cmake configuration; skips if already installed.
+
+find_package(
+        Python3
+        REQUIRED
+        COMPONENTS Interpreter
+)
+
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import pypaimon"
+  RESULT_VARIABLE _paimon_check_result
+  ERROR_QUIET
+  OUTPUT_QUIET
+)
+if(NOT _paimon_check_result EQUAL 0)
+  message(STATUS "Installing paimon Python package for integration tests...")
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -m pip install
+      "git+https://github.com/apache/paimon@release-1.4.1-rc2#subdirectory=paimon-python"
+    RESULT_VARIABLE _paimon_install_result
+    OUTPUT_VARIABLE _paimon_install_output
+    ERROR_VARIABLE _paimon_install_error
+  )
+  if(NOT _paimon_install_result EQUAL 0)
+    message(WARNING "Failed to install paimon Python package: ${_paimon_install_error}. Please install at least version 1.4.1")
+  else()
+    message(STATUS "paimon Python package installed successfully")
+  endif()
+endif()
+
 set(PAIMON_CONNECTOR_TEST_SOURCES
     PaimonConnectorTest.cpp
     PaimonConfigTest.cpp
