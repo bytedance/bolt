@@ -74,8 +74,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
-      with:
-          submodules: recursive
 
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
@@ -108,8 +106,6 @@ jobs:
       steps:
       - name: Checkout code
         uses: actions/checkout@v6
-        with:
-          submodules: recursive
 
       - id: env-setup
         uses: ./.github/actions/bolt-build-base

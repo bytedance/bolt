@@ -46,8 +46,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-        with:
-          submodules: recursive
 
       - name: Install System and Python Dependencies
         run: |
