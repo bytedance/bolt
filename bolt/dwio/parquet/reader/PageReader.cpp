@@ -33,6 +33,8 @@
 #include <zstd.h>
 #include <zstd_errors.h>
 
+#include <glog/logging.h>
+
 #include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/common/ColumnVisitors.h"
 #include "bolt/dwio/parquet/reader/Decompression.h"
@@ -290,13 +292,14 @@ void PageReader::readPageDefLevels() {
       nullptr,
       leafNulls_.data(),
       0);
-  numRowsInPage_ = leafNullsSize_;
+  numRowsInPage_ = checkedInt64ToInt32(leafNullsSize_, "leafNullsSize_");
   numLeafNullsConsumed_ = 0;
 }
 
 void PageReader::updateRowInfoAfterPageSkipped() {
   rowOfPage_ += numRowsInPage_;
   if (hasChunkRepDefs_) {
+    BOLT_CHECK_GE(rowOfPage_, 0);
     numLeafNullsConsumed_ = rowOfPage_;
   }
 }
@@ -767,7 +770,7 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
         leafNulls_.data(),
         leafNullsSize_);
     leafNullsSize_ += numLeaves;
-    numLeavesInPage_.push_back(numLeaves);
+    numLeavesInPage_.push_back(checkedInt64ToInt32(numLeaves, "numLeaves"));
   }
   return;
 }
@@ -1025,20 +1028,20 @@ void PageReader::decodeRepDefsFromBuffer() {
         leafNulls_.data(),
         leafNullsSize_);
     leafNullsSize_ += numLeaves;
-    numLeavesInPage_.push_back(numLeaves);
+    numLeavesInPage_.push_back(checkedInt64ToInt32(numLeaves, "numLeaves"));
   }
   preloadedRepDefs_.pop_front();
 }
 
-int32_t PageReader::getLengthsAndNulls(
+int64_t PageReader::getLengthsAndNulls(
     LevelMode mode,
     const arrow::LevelInfo& info,
-    int32_t begin,
-    int32_t end,
-    int32_t maxItems,
+    int64_t begin,
+    int64_t end,
+    int64_t maxItems,
     int32_t* lengths,
     uint64_t* nulls,
-    int32_t nullsStartIndex) const {
+    int64_t nullsStartIndex) const {
   arrow::ValidityBitmapInputOutput bits;
   bits.values_read_upper_bound = maxItems;
   bits.values_read = 0;
@@ -1060,7 +1063,7 @@ int32_t PageReader::getLengthsAndNulls(
           &bits,
           lengths);
       // Convert offsets to lengths.
-      for (auto i = 0; i < bits.values_read; ++i) {
+      for (int64_t i = 0; i < bits.values_read; ++i) {
         lengths[i] = lengths[i + 1] - lengths[i];
       }
       break;
@@ -1153,6 +1156,7 @@ void PageReader::skip(int64_t numRows) {
   if (firstUnvisited_ + numRows >= rowOfPage_ + numRowsInPage_) {
     seekToPage(firstUnvisited_ + numRows);
     if (hasChunkRepDefs_) {
+      BOLT_CHECK_GE(rowOfPage_, 0);
       numLeafNullsConsumed_ = rowOfPage_;
     }
     toSkip -= rowOfPage_ - firstUnvisited_;
@@ -1256,6 +1260,7 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
     buffer = nullptr;
     return nullptr;
   }
+  BOLT_CHECK_GE(numValues, 0);
   dwio::common::ensureCapacity<bool>(buffer, numValues, &pool_);
   if (isTopLevel_) {
     BOLT_CHECK_EQ(1, maxDefine_);
@@ -1264,12 +1269,29 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
         numValues, buffer->asMutable<uint64_t>(), &allOnes);
     return allOnes ? nullptr : buffer->as<uint64_t>();
   }
+
+  const int64_t erasedBits = erasedLeafNullWords_ * 64;
+  const int64_t relativeConsumed = numLeafNullsConsumed_ - erasedBits;
+  BOLT_CHECK(
+      !leafNulls_.empty() && leafNullsSize_ >= 0 &&
+          numLeafNullsConsumed_ >= erasedBits && relativeConsumed >= 0 &&
+          relativeConsumed <= leafNullsSize_ &&
+          relativeConsumed + numValues <= leafNullsSize_,
+      "invalid leafNulls range in readNulls(non-top): maxDefine_={} numValues={} numLeafNullsConsumed_={} erasedLeafNullWords_={} erasedBits={} relativeConsumed={} leafNullsSize_={} leafNullsWords={}",
+      maxDefine_,
+      numValues,
+      numLeafNullsConsumed_,
+      erasedLeafNullWords_,
+      erasedBits,
+      relativeConsumed,
+      leafNullsSize_,
+      leafNulls_.size());
   bits::copyBits(
       leafNulls_.data(),
-      numLeafNullsConsumed_ - erasedLeafNullWords_ * 64,
+      static_cast<uint64_t>(relativeConsumed),
       buffer->asMutable<uint64_t>(),
       0,
-      numValues);
+      static_cast<uint64_t>(numValues));
   numLeafNullsConsumed_ += numValues;
   return buffer->as<uint64_t>();
 }
@@ -1298,6 +1320,7 @@ bool PageReader::rowsForPage(
   if (rowZero >= rowOfPage_ + numRowsInPage_) {
     seekToPage(rowZero);
     if (hasChunkRepDefs_) {
+      BOLT_CHECK_GE(rowOfPage_, 0);
       numLeafNullsConsumed_ = rowOfPage_;
     }
   }

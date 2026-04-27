@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <type_traits>
 
 #ifdef __BMI2__
 #include <x86intrin.h>
@@ -125,8 +126,45 @@ constexpr inline uint64_t nbytes(int32_t bits) {
   return roundUp(bits, 8) / 8;
 }
 
+constexpr inline uint64_t nbytes(int64_t bits) {
+  return bits <= 0 ? 0 : roundUp<uint64_t>(static_cast<uint64_t>(bits), 8) / 8;
+}
+
+template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+constexpr inline uint64_t nbytes(T bits) {
+  if constexpr (std::is_signed_v<T>) {
+    if (bits <= 0) {
+      return 0;
+    }
+  } else {
+    if (bits == 0) {
+      return 0;
+    }
+  }
+  return roundUp<uint64_t>(static_cast<uint64_t>(bits), 8) / 8;
+}
+
 constexpr inline uint64_t nwords(int32_t bits) {
   return roundUp(bits, 64) / 64;
+}
+
+constexpr inline uint64_t nwords(int64_t bits) {
+  return bits <= 0 ? 0
+                   : roundUp<uint64_t>(static_cast<uint64_t>(bits), 64) / 64;
+}
+
+template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+constexpr inline uint64_t nwords(T bits) {
+  if constexpr (std::is_signed_v<T>) {
+    if (bits <= 0) {
+      return 0;
+    }
+  } else {
+    if (bits == 0) {
+      return 0;
+    }
+  }
+  return roundUp<uint64_t>(static_cast<uint64_t>(bits), 64) / 64;
 }
 
 inline int32_t getAndClearLastSetBit(uint16_t& bits) {
