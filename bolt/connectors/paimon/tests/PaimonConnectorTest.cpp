@@ -35,9 +35,16 @@ class PaimonConnectorTest
     tempDir_ = exec::test::TempDirectoryPath::create();
     LOG(INFO) << "Test using temporary directory: " << tempDir_->path;
 
-    // Run create_test_tables.py with the temporary directory
-    std::string scriptPath =
-        "./bolt/connectors/paimon/tests/create_test_tables.py";
+    // Run create_test_tables.py with the temporary directory.
+    // PAIMON_TEST_SCRIPT_DIR is set by ctest via the test's ENVIRONMENT
+    // property; fall back to relative path when running binary directly.
+    std::string scriptPath;
+    const char* envDir = std::getenv("PAIMON_TEST_SCRIPT_DIR");
+    if (envDir && envDir[0] != '\0') {
+      scriptPath = std::string(envDir) + "/create_test_tables.py";
+    } else {
+      scriptPath = "./bolt/connectors/paimon/tests/create_test_tables.py";
+    }
     std::string command = scriptPath + " --base-path " + tempDir_->path;
     int exitCode = system(command.c_str());
     CHECK_EQ(exitCode, 0) << "Failed to create test tables";
