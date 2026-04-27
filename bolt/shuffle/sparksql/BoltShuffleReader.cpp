@@ -421,7 +421,12 @@ RowVectorPtr BoltColumnarBatchDeserializer::next() {
     int64_t bytes = 0;
     auto result = BlockPayload::getVectorLayout(in_.get(), type, bytes);
     BOLT_CHECK(result.ok(), "Failed to get vector layout: " + result.message());
-    BOLT_CHECK(bytes != 0, "bytes should not be zero");
+    if (bytes == 0) {
+      // Empty stream: treat as EOS.
+      LOG(INFO) << "BoltColumnarBatchDeserializer: empty input stream, EOS";
+      reachEos_ = true;
+      return nullptr;
+    }
     if (type == static_cast<uint8_t>(RowVectorLayout::kComposite)) {
       vectorLayout_ = RowVectorLayout::kComposite;
       // first byte has been read by checkVectorLayout

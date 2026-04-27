@@ -14,11 +14,54 @@
  * limitations under the License.
  */
 
+#include <arrow/buffer.h>
+#include <arrow/io/memory.h>
+
+#include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
+#include "bolt/shuffle/sparksql/BoltShuffleReader.h"
+#include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 
 class ShuffleMiscTest : public ShuffleTestBase {};
+
+// next() should return nullptr on an empty input stream (e.g. an empty
+// Celeborn partition) instead of throwing, across all shuffle modes.
+TEST_F(ShuffleMiscTest, EmptyInputStreamReturnsNullInsteadOfFailing) {
+  // hash partitioning works for all three modes: V1/V2 stay on the columnar
+  // path (isRowBased = false), RowBased takes the row path.
+  const std::vector<std::pair<const char*, ShuffleWriterType>> cases = {
+      {"V1", ShuffleWriterType::V1},
+      {"V2", ShuffleWriterType::V2},
+      {"RowBased", ShuffleWriterType::RowBased},
+  };
+
+  auto rowType = ROW({"c0"}, {INTEGER()});
+  auto schema = boltTypeToArrowSchema(rowType, pool());
+
+  for (const auto& [label, writerType] : cases) {
+    SCOPED_TRACE(label);
+    auto emptyBuf = arrow::Buffer::FromString("");
+    std::shared_ptr<arrow::io::InputStream> emptyStream =
+        std::make_shared<arrow::io::BufferReader>(emptyBuf);
+
+    ShuffleReaderOptions options;
+    options.numPartitions = 1;
+    options.forceShuffleWriterType = static_cast<int32_t>(writerType);
+    options.partitionShortName = "hash";
+    options.shuffleBatchByteSize = 1024 * 1024;
+    options.batchSize = 32;
+
+    auto arrowPool = std::make_shared<BoltArrowMemoryPool>(pool());
+    BoltShuffleReader reader(schema, options, arrowPool.get(), pool());
+
+    auto deserializer = reader.readStream(emptyStream);
+    ASSERT_NE(deserializer, nullptr);
+    EXPECT_EQ(deserializer->next(), nullptr);
+    EXPECT_EQ(deserializer->next(), nullptr);
+  }
+}
 
 // End-to-end test: RoundRobin with Adaptive mode, >=8000 partitions and >=5
 // columns should use V1 consistently on both writer and reader side.
