@@ -27,5 +27,5 @@ runs:
     - name: Install Python dependencies
       shell: bash
       run: |
-        pip config --user set global.index-url https://mirrors.sustech.edu.cn/pypi/web/simple
+        pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
         pip install -r requirements.txt

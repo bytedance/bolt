@@ -187,7 +187,6 @@ class BoltConan(ConanFile):
             f"folly/{self.FB_VERSION}", transitive_headers=True, transitive_libs=True
         )
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
-        self.requires("rapidjson/cci.20230929", override=True)
         if self.options.get_safe("enable_jit"):
             self.requires("llvm-core/19.1.7-bolt")
 
