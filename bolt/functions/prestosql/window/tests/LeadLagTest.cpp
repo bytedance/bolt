@@ -31,6 +31,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/functions/lib/window/tests/WindowTestBase.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 using namespace bytedance::bolt::exec::test;
@@ -538,6 +539,182 @@ TEST_P(LeadLagTest, emptyFrames) {
 BOLT_INSTANTIATE_TEST_SUITE_P(LagTest, LeadLagTest, ::testing::Values("lag"));
 
 BOLT_INSTANTIATE_TEST_SUITE_P(LeadTest, LeadLagTest, ::testing::Values("lead"));
+
+// Regression test for an O(N^2) slowdown observed when LAG runs over a query
+// shape like:
+//
+//   lag(varchar_col, 1, default_varchar_col) over (partition by k order by ...)
+//
+// against many small (here single-row) partitions whose VARCHAR values are
+// stored out-of-line -- i.e. each value is longer than 12 bytes, so it does
+// not fit in StringView's inline storage and must point into an external
+// string buffer. Production hit this with timestamp-shaped strings such as
+// '2026-01-01 23:59:59' (19 bytes).
+//
+// Mechanism the fix is guarding against:
+//
+//   1. For each partition, LeadLagFunction::setDefaultValue extracts the
+//      partition's default-value rows into the reusable member vector
+//      `defaultValues_`. extractColumn allocates a string buffer inside
+//      `defaultValues_` to hold those bytes.
+//
+//   2. setDefaultValue then calls `result->copy(defaultValues_, ...)`. For
+//      same-pool VARCHAR copies this routes through
+//      FlatVector::acquireSharedStringBuffers, which makes `result` take a
+//      shared ref to every buffer currently in
+//      `defaultValues_->stringBuffers_`.
+//
+//   3. On the next partition, the buffer in `defaultValues_` is no longer
+//      unique (refcount==2: held by both `defaultValues_` and `result`), so
+//      getBufferWithSpace cannot reuse it. It allocates a new buffer and
+//      appends it to `defaultValues_->stringBuffers_` -- the old buffer is
+//      never removed because it is still referenced by `result`.
+//
+//   4. `defaultValues_->stringBuffers_` therefore grows by one entry per
+//      partition. Each subsequent `result->copy(defaultValues_, ...)` iterates
+//      that whole list inside acquireSharedStringBuffers, giving O(N^2) work
+//      across N partitions.
+//
+// The fix calls `defaultValues_->prepareForReuse()` before each extract, which
+// drops the now-non-unique buffer from `defaultValues_` (the bytes it owns are
+// kept alive via the ref still held by `result`). That keeps
+// `defaultValues_->stringBuffers_` bounded at one entry, returning the per-call
+// acquireSharedStringBuffers walk to O(1).
+//
+// What this test asserts:
+//
+//   The Window operator emits output in batches of `numRowsPerOutput_` rows
+//   (~1024 by default). Within one batch, `result->stringBuffers_` accumulates
+//   the union of all distinct buffers it has acquired from `defaultValues_`.
+//   Because acquireSharedStringBuffers copies *every* entry of
+//   `defaultValues_->stringBuffers_`, in the broken version that union grows
+//   monotonically across batches: batch i's `result` ends up with roughly
+//   i * (rows-per-batch) buffers. We empirically observed on the broken
+//   version: 11264, 21504, 31744, 41984, 50000.
+//
+//   With the fix, `defaultValues_->stringBuffers_` is bounded at 1, so the
+//   only buffers a batch's `result` acquires are the ones produced by the
+//   partitions in that very batch -- bounded by the batch row count
+//   (~1024 in our case).
+//
+//   So `maxBatchBuffers` distinguishes the two cleanly: it scales with kSize
+//   when broken and with rows-per-batch when fixed. The threshold below
+//   (kSize / 10 = 5000) sits comfortably above ~1024 (a few batches' worth of
+//   slack) and far below kSize (50000), so it tolerates batch-sizing changes
+//   while still firing on regressions.
+TEST_F(LeadLagTest, manySingleRowVarcharPartitions) {
+  // Each row is its own partition, so callApplyForPartitionRows runs kSize
+  // times against the LAG function -- amplifying the per-partition O(N) walk
+  // in the broken version into a clearly visible O(N^2) total.
+  constexpr vector_size_t kSize = 50'000;
+
+  // Materialize the value/default strings into long-lived std::strings so the
+  // StringViews we hand to makeFlatVector point at stable memory while
+  // FlatVector::set copies them into its own string buffer. (The
+  // StringView(std::string&&) constructor is deleted precisely to catch the
+  // dangling-temporary mistake, so we cannot use fmt::format directly inline.)
+  std::vector<std::string> valueStrings(kSize);
+  std::vector<std::string> defaultStrings(kSize);
+  for (vector_size_t row = 0; row < kSize; ++row) {
+    // 19 chars -- exceeds StringView's 12-byte inline limit, forcing each
+    // value to live in an external buffer. This is what makes the
+    // acquireSharedStringBuffers path relevant.
+    valueStrings[row] = fmt::format(
+        "2026-01-01 {:02d}:{:02d}:{:02d}",
+        (row / 3600) % 24,
+        (row / 60) % 60,
+        row % 60);
+    defaultStrings[row] = fmt::format(
+        "2026-12-31 {:02d}:{:02d}:{:02d}",
+        (row / 3600) % 24,
+        (row / 60) % 60,
+        row % 60);
+  }
+
+  // Schema: c0 = unique partition key, c1 = LAG value column,
+  // c2 = LAG per-row default (variable -- routes setDefaultValue through the
+  // `defaultValueIndex_` branch where the `defaultValues_` accumulation bug
+  // lives, not the constant-default branch).
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+      makeFlatVector<StringView>(
+          kSize, [&](auto row) { return StringView(valueStrings[row]); }),
+      makeFlatVector<StringView>(
+          kSize, [&](auto row) { return StringView(defaultStrings[row]); }),
+  });
+
+  auto queryInfo = buildWindowQuery(
+      {data}, "lag(c1, 1, c2)", "partition by c0 order by c1 desc", "");
+
+  // We must observe the *raw* per-batch FlatVector that the Window operator
+  // emits. AssertQueryBuilder::copyResults concatenates batches into a fresh
+  // RowVector created in the test's pool; that copy goes through
+  // FlatVector<StringView>::copyRanges' cross-pool path, which writes via
+  // setStringViewValue and re-chunks into the result's own 32 KB buffers --
+  // hiding the per-batch buffer count we want to assert on.
+  //
+  // Driving with TaskCursor + `copyResult=false` skips the queue-side copy
+  // and hands us the operator's own RowVector, so `lagColumn->stringBuffers()`
+  // reports exactly what the Window operator produced.
+  exec::test::CursorParameters params;
+  params.planNode = queryInfo.planNode;
+  params.copyResult = false;
+  auto cursor = exec::test::TaskCursor::create(params);
+
+  auto start = std::chrono::steady_clock::now();
+  size_t totalRows = 0;
+  size_t maxBatchBuffers = 0;
+  size_t numBatches = 0;
+  while (cursor->moveNext()) {
+    auto batch = cursor->current();
+    // Output schema is the input columns followed by one column per window
+    // function. We have a single LAG, so it's the last child.
+    auto* lagColumn = batch->childAt(batch->childrenSize() - 1)
+                          ->asUnchecked<FlatVector<StringView>>();
+    maxBatchBuffers =
+        std::max(maxBatchBuffers, lagColumn->stringBuffers().size());
+
+    // Spot-check correctness while we're here: every row sits in its own
+    // size-1 partition with offset=1, so LAG always falls back to the per-row
+    // default (c2 = defaultStrings[row]).
+    for (vector_size_t i = 0; i < batch->size(); ++i) {
+      ASSERT_FALSE(lagColumn->isNullAt(i));
+      ASSERT_EQ(
+          lagColumn->valueAt(i), StringView(defaultStrings[totalRows + i]));
+    }
+    totalRows += batch->size();
+    ++numBatches;
+  }
+  auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+
+  ASSERT_EQ(totalRows, kSize);
+  // Diagnostic line; not part of the assertion, but useful when triaging
+  // future regressions to know whether the slowdown shows up in elapsed
+  // time, in buffer count, or both.
+  std::cout << "[manySingleRowVarcharPartitions] rows=" << kSize
+            << " batches=" << numBatches
+            << " maxBatchBuffers=" << maxBatchBuffers
+            << " elapsed=" << elapsedMs << "ms" << std::endl;
+
+  // The actual regression check. See the long comment above for why this
+  // metric distinguishes the broken and fixed code:
+  //
+  //   broken: maxBatchBuffers grows toward kSize (we measured 50000)
+  //   fixed:  maxBatchBuffers stays at ~rows-per-batch (~1024)
+  //
+  // kSize/10 (== 5000) leaves a comfortable margin around the fixed value
+  // while staying well under the broken value, so the test won't go flaky if
+  // the default output batch size shifts modestly.
+  EXPECT_LT(maxBatchBuffers, static_cast<size_t>(kSize / 10))
+      << "lag-column stringBuffers grew across batches (cumulative): "
+      << maxBatchBuffers << " >= " << kSize / 10
+      << ". This indicates defaultValues_->stringBuffers_ is accumulating "
+      << "across partitions -- check that LeadLagFunction::setDefaultValue "
+      << "and setConstantTargetValue still call defaultValues_->prepareForReuse() "
+      << "before extractColumn.";
+}
 
 // DuckDB has errors in IGNORE NULLS logic for empty
 // frames (tested above). So using non-empty frames.

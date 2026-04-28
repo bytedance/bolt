@@ -459,6 +459,9 @@ class LeadLagFunction : public exec::WindowFunction {
       if (defaultValueRowNumbers.empty()) {
         return;
       }
+      // Drop the previous partition's buffer so `stringBuffers_` doesn't grow
+      // too much
+      defaultValues_->prepareForReuse();
       bool exactSize = (partition_->numRows() == 1) ? true : false;
       partition_->extractColumn(
           defaultValueIndex_.value(),
@@ -503,6 +506,7 @@ class LeadLagFunction : public exec::WindowFunction {
       if (defaultValueRowNumbers.empty()) {
         return;
       }
+      defaultValues_->prepareForReuse();
       bool exactSize = (partition_->numRows() == 1) ? true : false;
       partition_->extractColumn(
           defaultValueIndex_.value(),
