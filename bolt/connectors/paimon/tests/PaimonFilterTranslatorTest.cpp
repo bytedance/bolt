@@ -45,8 +45,7 @@ class PaimonFilterTranslatorTest
   /// Convenience override: calls translate with a rowType that covers all
   /// field names used by the tests (id, name, x, age, score, ratio, val,
   /// status, email, a, b, y, z, i, col).
-  TranslationResult<std::shared_ptr<::paimon::Predicate>> translate(
-      const core::TypedExprPtr& expr) {
+  ToPaimonPredicateResult translate(const core::TypedExprPtr& expr) {
     return PaimonFilterTranslator::translate(expr, rowType_);
   }
 

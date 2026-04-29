@@ -208,12 +208,10 @@ std::string PaimonFilterTranslator::normalizeOpName(const std::string& opName) {
   return opName;
 }
 
-TranslationResult<std::shared_ptr<::paimon::Predicate>>
-PaimonFilterTranslator::translate(
+ToPaimonPredicateResult PaimonFilterTranslator::translate(
     const core::TypedExprPtr& expr,
     const RowTypePtr& rowType) {
-  auto fail = [](std::string reason)
-      -> TranslationResult<std::shared_ptr<::paimon::Predicate>> {
+  auto fail = [](std::string reason) -> ToPaimonPredicateResult {
     LOG(WARNING) << "translate (with rowType): " << reason;
     return {nullptr, std::move(reason)};
   };
@@ -230,17 +228,15 @@ PaimonFilterTranslator::translate(
   return translateCall(*call, rowType);
 }
 
-TranslationResult<std::shared_ptr<::paimon::Predicate>>
-PaimonFilterTranslator::translateCall(
+ToPaimonPredicateResult PaimonFilterTranslator::translateCall(
     const core::CallTypedExpr& call,
     const RowTypePtr& rowType) {
-  auto fail = [](std::string reason)
-      -> TranslationResult<std::shared_ptr<::paimon::Predicate>> {
+  auto fail = [](std::string reason) -> ToPaimonPredicateResult {
     LOG(WARNING) << "translateCall (with rowType): " << reason;
     return {nullptr, std::move(reason)};
   };
-  auto ok = [](std::shared_ptr<::paimon::Predicate> pred)
-      -> TranslationResult<std::shared_ptr<::paimon::Predicate>> {
+  auto ok =
+      [](std::shared_ptr<::paimon::Predicate> pred) -> ToPaimonPredicateResult {
     return {std::move(pred), ""};
   };
 

@@ -23,11 +23,10 @@ enum class FieldType : int;
 
 namespace bytedance::bolt::connector::paimon {
 
-/// Templated result type for filter translation operations.
-/// Carries either a successful value or a diagnostic reason string on failure.
-template <typename T>
-struct TranslationResult {
-  T value{};
+/// Result type for TypedExpr -> paimon::Predicate translation.
+/// Carries either a successful predicate or a diagnostic reason string.
+struct ToPaimonPredicateResult {
+  std::shared_ptr<::paimon::Predicate> value;
   std::string reason; // Non-empty when translation failed.
 
   bool ok() const {
@@ -68,8 +67,8 @@ class PaimonFilterTranslator {
   /// @param expr    The filter expression tree (typically from TableHandle).
   /// @param rowType The output row type used to resolve column names to field
   ///                indices required by Paimon's predicate validation.
-  /// @return A TranslationResult with the predicate or failure reason.
-  static TranslationResult<std::shared_ptr<::paimon::Predicate>> translate(
+  /// @return A ToPaimonPredicateResult with the predicate or failure reason.
+  static ToPaimonPredicateResult translate(
       const core::TypedExprPtr& expr,
       const RowTypePtr& rowType);
 
@@ -78,7 +77,17 @@ class PaimonFilterTranslator {
   // -----------------------------------------------------------------------
 
   /// Result of converting a paimon Predicate to a bolt TypedExpr.
-  using ToTypedExprResult = TranslationResult<core::TypedExprPtr>;
+  struct ToTypedExprResult {
+    core::TypedExprPtr value;
+    std::string reason; // Non-empty when conversion failed.
+
+    bool ok() const {
+      return reason.empty();
+    }
+    explicit operator bool() const {
+      return ok();
+    }
+  };
 
   /// Convert a paimon Predicate back into a bolt TypedExpr expression tree.
   ///
@@ -125,7 +134,7 @@ class PaimonFilterTranslator {
   static std::string normalizeOpName(const std::string& opName);
 
   /// Translate a CallTypedExpr node with row type for field index resolution.
-  static TranslationResult<std::shared_ptr<::paimon::Predicate>> translateCall(
+  static ToPaimonPredicateResult translateCall(
       const core::CallTypedExpr& call,
       const RowTypePtr& rowType);
 
