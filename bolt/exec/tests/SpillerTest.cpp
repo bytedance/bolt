@@ -483,7 +483,8 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       uint64_t writeBufferSize,
       bool makeError,
       uint64_t maxSpillRunRows = 0,
-      bool rowBasedSpill = false) {
+      bool rowBasedSpill = false,
+      bool supportSkewPartition = false) {
     static const std::string kBadSpillDirPath = "/bad/path";
     common::GetSpillDirectoryPathCB badSpillDirCb =
         [&]() -> const std::string& { return kBadSpillDirPath; };
@@ -542,7 +543,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           hashBits_,
           &spillConfig_,
           targetFileSize,
-          false /*supportSkewPartition*/);
+          supportSkewPartition);
     }
     spiller_->setSpillConfig(&spillConfig_);
 
@@ -1355,6 +1356,104 @@ TEST_P(HashJoinBuildOnly, writeBufferSize) {
       ASSERT_EQ(stats.spillWrites, numDiskWrites + spillInputVectorCount);
     }
   }
+}
+
+TEST_P(HashJoinBuildOnly, rowBasedHashBuildSkewedVictimFinishFile) {
+  // Covers the fix scenario: row-based HashBuild spills via
+  // spill(RowContainerIterator*). After skewedVictim_ is identified, we still
+  // must call prepareForRangPartitionIfNeeded() to enforce maxRowsPerFile_ and
+  // finish the current spill file for the victim partition.
+
+  // Only need the row container and the spiller; no need to pre-populate the
+  // row container.
+  setupSpillData(rowType_, numKeys_, 0, 0);
+  setupSpiller(
+      std::numeric_limits<uint64_t>::max(),
+      0,
+      false,
+      0,
+      true /*rowBasedSpill*/,
+      true /*supportSkewPartition*/);
+
+  // Lower thresholds to make the test quickly identify skewedVictim_.
+  spiller_->setSkewThreshold(1 /*fileSizeThreshold*/, 2 /*rowCountThreshold*/);
+
+  // spill(partition, spillVector) requires the partition to be marked as
+  // spilled.
+  spiller_->spill();
+
+  HashPartitionFunction partitionFn(hashBits_, rowType_, keyChannels_);
+
+  auto makeSubsetForPartition = [&](uint32_t targetPartition,
+                                    int32_t needRows) -> RowVectorPtr {
+    BOLT_CHECK(needRows > 0, "needRows must be > 0");
+    for (int attempt = 0; attempt < 50; ++attempt) {
+      const auto input = makeDataset(rowType_, 2048, nullptr);
+      spillPartitions_.resize(input->size());
+      const auto singlePartition =
+          partitionFn.partition(*input, spillPartitions_);
+      std::vector<vector_size_t> indices;
+      indices.reserve(needRows);
+      for (vector_size_t i = 0; i < input->size() && indices.size() < needRows;
+           ++i) {
+        const auto p = singlePartition.has_value() ? singlePartition.value()
+                                                   : spillPartitions_[i];
+        if (p == targetPartition) {
+          indices.push_back(i);
+        }
+      }
+      if (static_cast<int32_t>(indices.size()) < needRows) {
+        continue;
+      }
+      auto indicesBuffer = allocateIndices(needRows, pool_.get());
+      auto* raw = indicesBuffer->asMutable<vector_size_t>();
+      for (int i = 0; i < needRows; ++i) {
+        raw[i] = indices[i];
+      }
+      return wrapAndCombineDict(needRows, indicesBuffer, input);
+    }
+    BOLT_CHECK(
+        false,
+        "Failed to generate enough rows for partition {} (needRows={})",
+        targetPartition,
+        needRows);
+    return nullptr;
+  };
+
+  const uint32_t victimPartition = 0;
+  const uint32_t otherPartition = 1;
+  const int32_t victimRows = 50;
+  const int32_t otherRows = 1;
+
+  // Create a strong row-count skew so prepareForRangPartitionIfNeeded()
+  // identifies the victim partition.
+  const auto victimVector = makeSubsetForPartition(victimPartition, victimRows);
+  const auto otherVector = makeSubsetForPartition(otherPartition, otherRows);
+  spiller_->spill(victimPartition, victimVector);
+  spiller_->spill(otherPartition, otherVector);
+
+  spiller_->prepareForRangPartitionIfNeeded();
+  ASSERT_EQ(spiller_->state().numFinishedFiles(victimPartition), 1);
+
+  // Spill again via spill(RowContainerIterator*) and fill up the victim
+  // partition's current file, which should trigger a second finishFile().
+  const auto victimVector2 =
+      makeSubsetForPartition(victimPartition, victimRows);
+  const SelectivityVector allRows(victimVector2->size());
+  std::vector<DecodedVector> decoded;
+  decoded.reserve(rowType_->size());
+  for (int i = 0; i < rowType_->size(); ++i) {
+    decoded.emplace_back(*victimVector2->childAt(i), allRows);
+  }
+  for (vector_size_t row = 0; row < victimVector2->size(); ++row) {
+    char* newRow = rowContainer_->newRow();
+    for (int col = 0; col < rowType_->size(); ++col) {
+      rowContainer_->store(decoded[col], row, newRow, col);
+    }
+  }
+
+  spiller_->spill();
+  ASSERT_EQ(spiller_->state().numFinishedFiles(victimPartition), 2);
 }
 
 class AggregationOutputOnly : public SpillerTest,

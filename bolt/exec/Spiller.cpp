@@ -831,7 +831,7 @@ void Spiller::spill(const RowContainerIterator* startRowIter) {
     do {
       lastRun = fillSpillRuns(&rowIter);
       runSpill(lastRun);
-      if (doPotentialRangePartitionCheck) {
+      if (doPotentialRangePartitionCheck || skewedVictim_ >= 0) {
         prepareForRangPartitionIfNeeded();
       }
     } while (!lastRun);
