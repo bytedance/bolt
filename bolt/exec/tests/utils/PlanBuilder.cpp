@@ -32,6 +32,7 @@
 #include "bolt/connectors/arrow/ArrowMemoryConnector.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/connectors/tpcds/TpcdsConnector.h"
 #include "bolt/connectors/tpch/TpchConnector.h"
 #include "bolt/duckdb/conversion/DuckParser.h"
 #include "bolt/exec/Aggregate.h"
@@ -171,6 +172,33 @@ PlanBuilder& PlanBuilder::tpchTableScan(
       .outputType(rowType)
       .tableHandle(std::make_shared<connector::tpch::TpchTableHandle>(
           connectorId, table, scaleFactor))
+      .assignments(assignmentsMap)
+      .endTableScan();
+}
+
+PlanBuilder& PlanBuilder::tpcdsTableScan(
+    tpcds::Table table,
+    std::vector<std::string> columnNames,
+    double scaleFactor,
+    std::string_view connectorId) {
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignmentsMap;
+  std::vector<TypePtr> outputTypes;
+
+  assignmentsMap.reserve(columnNames.size());
+  outputTypes.reserve(columnNames.size());
+
+  for (const auto& columnName : columnNames) {
+    assignmentsMap.emplace(
+        columnName,
+        std::make_shared<connector::tpcds::TpcdsColumnHandle>(columnName));
+    outputTypes.emplace_back(resolveTpcdsColumn(table, columnName));
+  }
+  auto rowType = ROW(std::move(columnNames), std::move(outputTypes));
+  return TableScanBuilder(*this)
+      .outputType(rowType)
+      .tableHandle(std::make_shared<connector::tpcds::TpcdsTableHandle>(
+          std::string(connectorId), table, scaleFactor))
       .assignments(assignmentsMap)
       .endTableScan();
 }
