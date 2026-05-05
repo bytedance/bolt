@@ -15,6 +15,7 @@
  */
 
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
+#include <paimon/data/decimal.h>
 #include <paimon/data/timestamp.h>
 #include <paimon/defs.h>
 #include <paimon/predicate/compound_predicate.h>
@@ -25,6 +26,7 @@
 #include <paimon/predicate/predicate_builder.h>
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include "bolt/core/Expressions.h"
 #include "bolt/type/Subfield.h"
 #include "bolt/type/Timestamp.h"
@@ -33,6 +35,7 @@
 #include "bolt/type/filter/FloatingPointRange.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/ComplexVector.h"
+#include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "common/base/Exceptions.h"
 
@@ -340,7 +343,7 @@ ToPaimonPredicateResult PaimonFilterTranslator::translateCall(
 
   const auto& fieldName = fieldInfo->name;
   const auto fieldIndex = fieldInfo->index;
-  const auto fieldType = fieldInfo->fieldType;
+  const auto& fieldType = fieldInfo->fieldType;
 
   // Equality: eq(field, constant)
   if (opName == "eq") {
@@ -584,7 +587,7 @@ PaimonFilterTranslator::extractInListLiterals(
         } else {
           auto boltTs = tsVec->valueAt(offset + i);
           int64_t totalNanos =
-              boltTs.getSeconds() * 1'000'000'000LL + boltTs.getNanos();
+              (boltTs.getSeconds() * 1'000'000'000LL) + boltTs.getNanos();
           int64_t millis = totalNanos / 1'000'000;
           int32_t nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
           literals.emplace_back(::paimon::Timestamp(millis, nanoOfMillis));
@@ -627,7 +630,11 @@ PaimonFilterTranslator::extractFieldInfo(const core::TypedExprPtr& expr) {
           dynamic_cast<const core::FieldAccessTypedExpr*>(unwrapped)) {
     FieldInfo info;
     info.name = fieldAccess->name();
-    info.fieldType = toPaimonFieldType(expr->type());
+    auto fieldType = toPaimonFieldType(expr->type());
+    if (!fieldType) {
+      return std::nullopt;
+    }
+    info.fieldType = fieldType.value();
     // Index will be filled in later by the caller if needed; use -1 as
     // sentinel.
     info.index = -1;
@@ -637,7 +644,11 @@ PaimonFilterTranslator::extractFieldInfo(const core::TypedExprPtr& expr) {
           dynamic_cast<const core::DereferenceTypedExpr*>(unwrapped)) {
     FieldInfo info;
     info.name = deref->name();
-    info.fieldType = toPaimonFieldType(expr->type());
+    auto fieldType = toPaimonFieldType(expr->type());
+    if (!fieldType) {
+      return std::nullopt;
+    }
+    info.fieldType = fieldType.value();
     info.index = -1;
     return info;
   }
@@ -659,7 +670,11 @@ PaimonFilterTranslator::extractFieldInfo(
     for (size_t i = 0; i < rowType->size(); ++i) {
       if (rowType->nameOf(i) == info->name) {
         info->index = static_cast<int32_t>(i);
-        info->fieldType = toPaimonFieldType(rowType->childAt(i));
+        auto ft = toPaimonFieldType(rowType->childAt(i));
+        if (!ft) {
+          return std::nullopt;
+        }
+        info->fieldType = std::move(ft.value());
         break;
       }
     }
@@ -757,21 +772,45 @@ std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
       // Paimon stores as (millis_since_epoch, nano_of_millis).
       // Preserve full nanosecond precision via total nanoseconds.
       auto ts = value.value<bytedance::bolt::Timestamp>();
-      int64_t totalNanos = ts.getSeconds() * 1'000'000'000LL + ts.getNanos();
+      int64_t totalNanos = (ts.getSeconds() * 1'000'000'000LL) + ts.getNanos();
       int64_t millis = totalNanos / 1'000'000;
       int32_t nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
       auto paimonTs = ::paimon::Timestamp(millis, nanoOfMillis);
       return ::paimon::Literal(paimonTs);
     }
-    case ::paimon::FieldType::DECIMAL:
-      // For decimal types, extract as double.
-      return ::paimon::Literal(value.value<double>());
+    case ::paimon::FieldType::DECIMAL: {
+      // Bolt stores short decimals as int64, long decimals as int128.
+      // paimon::Literal accepts paimon::Decimal which holds an int128.
+      const auto* shortDec =
+          dynamic_cast<const ShortDecimalType*>(unwrapped->type().get());
+      const auto* longDec =
+          dynamic_cast<const LongDecimalType*>(unwrapped->type().get());
+      if (!shortDec && !longDec) {
+        return std::nullopt;
+      }
+      int32_t precision =
+          shortDec ? shortDec->precision() : longDec->precision();
+      int32_t scale = shortDec ? shortDec->scale() : longDec->scale();
+      ::paimon::Decimal::int128_t unscaled = 0;
+      switch (value.kind()) {
+        case TypeKind::BIGINT:
+          unscaled = value.value<int64_t>();
+          break;
+        case TypeKind::HUGEINT:
+          unscaled = value.value<__int128_t>();
+          break;
+        default:
+          return std::nullopt;
+      }
+      auto paimonDec = ::paimon::Decimal(precision, scale, unscaled);
+      return ::paimon::Literal(paimonDec);
+    }
     default:
       return std::nullopt;
   }
 }
 
-::paimon::FieldType PaimonFilterTranslator::toPaimonFieldType(
+std::optional<::paimon::FieldType> PaimonFilterTranslator::toPaimonFieldType(
     const TypePtr& type) {
   switch (type->kind()) {
     case TypeKind::BOOLEAN:
@@ -783,20 +822,41 @@ std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
     case TypeKind::INTEGER:
       return ::paimon::FieldType::INT;
     case TypeKind::BIGINT:
+      // Short decimal (precision <= 18) is stored as int64.
+      if (type->isShortDecimal()) {
+        return ::paimon::FieldType::DECIMAL;
+      }
       return ::paimon::FieldType::BIGINT;
+    case TypeKind::HUGEINT:
+      // Long decimal (precision > 18) is stored as int128.
+      if (type->isLongDecimal()) {
+        return ::paimon::FieldType::DECIMAL;
+      }
+      return std::nullopt;
     case TypeKind::REAL:
       return ::paimon::FieldType::FLOAT;
     case TypeKind::DOUBLE:
       return ::paimon::FieldType::DOUBLE;
     case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
       return ::paimon::FieldType::STRING;
+    case TypeKind::VARBINARY:
+      return ::paimon::FieldType::BINARY;
     case TypeKind::TIMESTAMP:
       return ::paimon::FieldType::TIMESTAMP;
+    case TypeKind::ARRAY:
+      return ::paimon::FieldType::ARRAY;
+    case TypeKind::MAP:
+      return ::paimon::FieldType::MAP;
+    case TypeKind::ROW:
+      return ::paimon::FieldType::STRUCT;
+    case TypeKind::UNKNOWN:
+      return ::paimon::FieldType::UNKNOWN;
+    case TypeKind::FUNCTION:
+    case TypeKind::OPAQUE:
+    case TypeKind::VARIANT:
+    case TypeKind::INVALID:
     default:
-      // For unsupported types (including DATE, DECIMAL, ARRAY, etc.),
-      // default to STRING to avoid hard failure.
-      return ::paimon::FieldType::STRING;
+      return std::nullopt;
   }
 }
 
@@ -853,6 +913,10 @@ TypePtr PaimonFilterTranslator::fromPaimonFieldType(
       return VARCHAR();
     case ::paimon::FieldType::TIMESTAMP:
       return TIMESTAMP();
+    case ::paimon::FieldType::DECIMAL:
+      // Default: max precision/scale. The actual precision/scale comes from
+      // the file schema during filter application.
+      return DECIMAL(38, 18);
     default:
       return VARCHAR();
   }
@@ -937,6 +1001,20 @@ core::TypedExprPtr PaimonFilterTranslator::literalToConstantExpr(
       }
       return std::make_shared<core::ConstantTypedExpr>(
           type, variant(Timestamp(seconds, nanos)));
+    }
+    case ::paimon::FieldType::DECIMAL: {
+      auto dec = literal.GetValue<::paimon::Decimal>();
+      // Extract unscaled value; use int64 for short decimals,
+      // int128 for long decimals.
+      if (dec.IsCompact()) {
+        return std::make_shared<core::ConstantTypedExpr>(
+            bytedance::bolt::ShortDecimalType::create(),
+            variant(dec.ToUnscaledLong()));
+      }
+      // Long decimal: store as HUGEINT (__int128_t).
+      auto val = dec.Value();
+      return std::make_shared<core::ConstantTypedExpr>(
+          type, variant(*reinterpret_cast<__int128_t*>(&val)));
     }
     default:
       return nullptr;
@@ -1142,36 +1220,58 @@ std::optional<variant> extractConstant(const core::TypedExprPtr& expr) {
   return constant->value();
 }
 
+/// Macro to build an IN/NOT_IN BigintValues filter from narrow integer
+/// elements. Uses DecodedVector with native-width reads for correct physical
+/// type handling.
+#define BUILD_INT_IN_FILTER(kindEnum, nativeType)                         \
+  case TypeKind::kindEnum: {                                              \
+    DecodedVector decoded(*elements);                                     \
+    std::vector<int64_t> values;                                          \
+    values.reserve(size);                                                 \
+    for (vector_size_t i = 0; i < size; ++i)                              \
+      values.push_back(                                                   \
+          static_cast<int64_t>(decoded.valueAt<nativeType>(offset + i))); \
+    return {                                                              \
+        negated ? common::createNegatedBigintValues(values, false)        \
+                : common::createBigintValues(values, false),              \
+        ""};                                                              \
+  }
+
 /// Build a bolt Filter from a leaf CallTypedExpr (eq, neq, lt, lte, gt, gte,
 /// between, in, not_in, is_null, is_not_null) with ConstantTypedExpr literals.
-std::unique_ptr<common::Filter> buildFilterFromCall(
+PaimonFilterTranslator::FilterBuildResult buildFilterFromCall(
     const core::CallTypedExpr& call) {
+  auto fail =
+      [](std::string reason) -> PaimonFilterTranslator::FilterBuildResult {
+    return {nullptr, std::move(reason)};
+  };
+
   const auto& op = call.name();
   const auto& inputs = call.inputs();
   if (inputs.empty()) {
-    return nullptr;
+    return fail("call has no inputs");
   }
 
   auto fieldName = extractFieldName(inputs[0]);
   if (!fieldName) {
-    return nullptr;
+    return fail("could not extract field name from inputs[0]");
   }
 
   // Null checks — no literal needed.
   if (op == "is_null") {
-    return common::nullOrFalse(true);
+    return {common::nullOrFalse(true), ""};
   }
   if (op == "is_not_null") {
-    return common::notNullOrTrue(false);
+    return {common::notNullOrTrue(false), ""};
   }
 
   if (inputs.size() < 2) {
-    return nullptr;
+    return fail(fmt::format("operator '{}' requires at least 2 inputs", op));
   }
 
   auto value = extractConstant(inputs[1]);
   if (!value) {
-    return nullptr;
+    return fail("could not extract constant from inputs[1]");
   }
 
   const auto kind = inputs[1]->type()->kind();
@@ -1195,92 +1295,121 @@ std::unique_ptr<common::Filter> buildFilterFromCall(
           auto elements = arrVec->elements();
           if (elements) {
             const bool negated = (op == "not_in");
-            const auto kind = elements->type()->kind();
-            switch (kind) {
-              case TypeKind::TINYINT:
-              case TypeKind::SMALLINT:
-              case TypeKind::INTEGER:
-              case TypeKind::BIGINT: {
-                const auto* flat =
-                    dynamic_cast<const SimpleVector<int64_t>*>(elements.get());
-                if (!flat)
-                  return nullptr;
-                std::vector<int64_t> values;
+            const auto elemKind = elements->type()->kind();
+            switch (elemKind) {
+              BUILD_INT_IN_FILTER(TINYINT, int8_t)
+              BUILD_INT_IN_FILTER(SMALLINT, int16_t)
+              BUILD_INT_IN_FILTER(INTEGER, int32_t)
+              BUILD_INT_IN_FILTER(BIGINT, int64_t)
+              case TypeKind::HUGEINT: {
+                DecodedVector decoded(*elements);
+                std::vector<int128_t> values;
                 values.reserve(size);
                 for (vector_size_t i = 0; i < size; ++i) {
-                  values.push_back(flat->valueAt(offset + i));
+                  values.push_back(decoded.valueAt<int128_t>(offset + i));
                 }
-                return negated
-                    ? common::createNegatedBigintValues(values, false)
-                    : common::createBigintValues(values, false);
+                auto [minIt, maxIt] =
+                    std::minmax_element(values.begin(), values.end());
+                if (negated) {
+                  return fail("NOT_IN for HUGEINT/DECIMAL not supported");
+                }
+                return {
+                    std::make_unique<common::HugeintValuesUsingHashTable>(
+                        *minIt, *maxIt, values, false),
+                    ""};
               }
               case TypeKind::VARCHAR:
               case TypeKind::VARBINARY: {
-                const auto* flat =
-                    dynamic_cast<const SimpleVector<StringView>*>(
-                        elements.get());
-                if (!flat)
-                  return nullptr;
+                DecodedVector decoded(*elements);
                 std::vector<std::string> values;
                 values.reserve(size);
                 for (vector_size_t i = 0; i < size; ++i) {
-                  values.emplace_back(flat->valueAt(offset + i));
+                  values.emplace_back(decoded.valueAt<StringView>(offset + i));
                 }
-                return negated ? std::make_unique<common::NegatedBytesValues>(
-                                     std::move(values), false)
-                               : common::createBytesValues(values, false);
+                return {
+                    negated ? std::make_unique<common::NegatedBytesValues>(
+                                  std::move(values), false)
+                            : common::createBytesValues(values, false),
+                    ""};
               }
               default:
-                return nullptr;
+                return fail(fmt::format(
+                    "unsupported type kind {} for IN/NOT_IN",
+                    static_cast<int>(elemKind)));
             }
           }
         }
       }
     }
-  }
+  } // end IN / NOT_IN
 
-  // Equality / inequality.
+  // Equality.
   if (op == "eq") {
     switch (kind) {
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
       case TypeKind::INTEGER:
       case TypeKind::BIGINT:
-        return common::createBigintRange(
-            value->value<int64_t>(), value->value<int64_t>(), false, true);
+        return {
+            common::createBigintRange(
+                value->value<int64_t>(), value->value<int64_t>(), false, true),
+            ""};
+      case TypeKind::HUGEINT:
+        return {
+            std::make_unique<common::HugeintRange>(
+                value->value<int128_t>(), value->value<int128_t>(), false),
+            ""};
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
-        return common::createBytesRange(
-            value->value<std::string>(),
-            true,
-            value->value<std::string>(),
-            true,
-            false);
+        return {
+            common::createBytesRange(
+                value->value<std::string>(),
+                true,
+                value->value<std::string>(),
+                true,
+                false),
+            ""};
       case TypeKind::TIMESTAMP:
-        return std::make_unique<common::TimestampRange>(
-            value->value<Timestamp>(), value->value<Timestamp>(), false);
+        return {
+            std::make_unique<common::TimestampRange>(
+                value->value<Timestamp>(), value->value<Timestamp>(), false),
+            ""};
       default:
-        return nullptr;
+        return fail(fmt::format(
+            "unsupported type kind {} for eq", static_cast<int>(kind)));
     }
   }
 
+  // Inequality.
   if (op == "neq") {
     switch (kind) {
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
       case TypeKind::INTEGER:
       case TypeKind::BIGINT:
-        return std::make_unique<common::NegatedBigintRange>(
-            value->value<int64_t>(), value->value<int64_t>(), false);
+        return {
+            std::make_unique<common::NegatedBigintRange>(
+                value->value<int64_t>(), value->value<int64_t>(), false),
+            ""};
+      case TypeKind::HUGEINT:
+        return {
+            std::make_unique<common::NegatedHugeintRange>(
+                value->value<int128_t>(), value->value<int128_t>(), false),
+            ""};
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
-        return std::make_unique<common::NegatedBytesValues>(
-            std::vector<std::string>{value->value<std::string>()}, false);
+        return {
+            std::make_unique<common::NegatedBytesValues>(
+                std::vector<std::string>{value->value<std::string>()}, false),
+            ""};
       case TypeKind::TIMESTAMP:
-        return std::make_unique<common::NegatedTimestampRange>(
-            value->value<Timestamp>(), value->value<Timestamp>(), false);
+        return {
+            std::make_unique<common::NegatedTimestampRange>(
+                value->value<Timestamp>(), value->value<Timestamp>(), false),
+            ""};
       default:
-        return nullptr;
+        return fail(fmt::format(
+            "unsupported type kind {} for neq", static_cast<int>(kind)));
     }
   }
 
@@ -1302,59 +1431,94 @@ std::unique_ptr<common::Filter> buildFilterFromCall(
         } else {
           upper = isExclusive ? v - 1 : v;
         }
-        return common::createBigintRange(lower, upper, false, true);
+        return {common::createBigintRange(lower, upper, false, true), ""};
+      }
+      case TypeKind::HUGEINT: {
+        int128_t v = value->value<int128_t>();
+        int128_t lower = std::numeric_limits<int128_t>::min();
+        int128_t upper = std::numeric_limits<int128_t>::max();
+        if (isGreater) {
+          lower = isExclusive ? v + 1 : v;
+        } else {
+          upper = isExclusive ? v - 1 : v;
+        }
+        return {
+            std::make_unique<common::HugeintRange>(lower, upper, false), ""};
       }
       case TypeKind::DOUBLE: {
         double v = value->value<double>();
         if (isGreater) {
-          return std::make_unique<common::FloatingPointRange<double>>(
-              v, false, isExclusive, 0.0, true, false, false);
+          return {
+              std::make_unique<common::FloatingPointRange<double>>(
+                  v, false, isExclusive, 0.0, true, false, false),
+              ""};
         }
-        return std::make_unique<common::FloatingPointRange<double>>(
-            0.0, true, false, v, false, isExclusive, false);
+        return {
+            std::make_unique<common::FloatingPointRange<double>>(
+                0.0, true, false, v, false, isExclusive, false),
+            ""};
       }
       case TypeKind::REAL: {
         float v = value->value<float>();
         if (isGreater) {
-          return std::make_unique<common::FloatingPointRange<float>>(
-              v, false, isExclusive, 0.0F, true, false, false);
+          return {
+              std::make_unique<common::FloatingPointRange<float>>(
+                  v, false, isExclusive, 0.0F, true, false, false),
+              ""};
         }
-        return std::make_unique<common::FloatingPointRange<float>>(
-            0.0F, true, false, v, false, isExclusive, false);
+        return {
+            std::make_unique<common::FloatingPointRange<float>>(
+                0.0F, true, false, v, false, isExclusive, false),
+            ""};
       }
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
         auto s = value->value<std::string>();
         if (isGreater) {
-          return common::createBytesRange(
-              s, !isExclusive, std::nullopt, false, false);
+          return {
+              common::createBytesRange(
+                  s, !isExclusive, std::nullopt, false, false),
+              ""};
         }
-        return common::createBytesRange(
-            std::nullopt, false, s, !isExclusive, false);
+        return {
+            common::createBytesRange(
+                std::nullopt, false, s, !isExclusive, false),
+            ""};
       }
       case TypeKind::TIMESTAMP: {
         auto ts = value->value<Timestamp>();
         if (isGreater) {
           if (!isExclusive) {
-            return std::make_unique<common::TimestampRange>(
-                ts, Timestamp::max(), false);
+            return {
+                std::make_unique<common::TimestampRange>(
+                    ts, Timestamp::max(), false),
+                ""};
           }
           auto lower = ts;
-          ++lower; // nanosecond-precision increment
-          return std::make_unique<common::TimestampRange>(
-              lower, Timestamp::max(), false);
+          ++lower;
+          return {
+              std::make_unique<common::TimestampRange>(
+                  lower, Timestamp::max(), false),
+              ""};
         }
         if (!isExclusive) {
-          return std::make_unique<common::TimestampRange>(
-              Timestamp::min(), ts, false);
+          return {
+              std::make_unique<common::TimestampRange>(
+                  Timestamp::min(), ts, false),
+              ""};
         }
         auto upper = ts;
         --upper;
-        return std::make_unique<common::TimestampRange>(
-            Timestamp::min(), upper, false);
+        return {
+            std::make_unique<common::TimestampRange>(
+                Timestamp::min(), upper, false),
+            ""};
       }
       default:
-        return nullptr;
+        return fail(fmt::format(
+            "unsupported type kind {} for range comparison '{}'",
+            static_cast<int>(kind),
+            op));
     }
   }
 
@@ -1363,151 +1527,34 @@ std::unique_ptr<common::Filter> buildFilterFromCall(
     auto low = extractConstant(inputs[1]);
     auto high = extractConstant(inputs[2]);
     if (!low || !high) {
-      return nullptr;
+      return fail("between: could not extract low/high constants");
     }
     switch (kind) {
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
       case TypeKind::INTEGER:
       case TypeKind::BIGINT:
-        return common::createBigintRange(
-            low->value<int64_t>(), high->value<int64_t>(), false, true);
+        return {
+            common::createBigintRange(
+                low->value<int64_t>(), high->value<int64_t>(), false, true),
+            ""};
+      case TypeKind::HUGEINT:
+        return {
+            std::make_unique<common::HugeintRange>(
+                low->value<int128_t>(), high->value<int128_t>(), false),
+            ""};
       case TypeKind::TIMESTAMP:
-        return std::make_unique<common::TimestampRange>(
-            low->value<Timestamp>(), high->value<Timestamp>(), false);
+        return {
+            std::make_unique<common::TimestampRange>(
+                low->value<Timestamp>(), high->value<Timestamp>(), false),
+            ""};
       default:
-        return nullptr;
+        return fail(fmt::format(
+            "unsupported type kind {} for between", static_cast<int>(kind)));
     }
   }
 
-  // IN list.
-  if (op == "in") {
-    const auto* arrayConst =
-        dynamic_cast<const core::ConstantTypedExpr*>(inputs[1].get());
-    if (!arrayConst || !arrayConst->hasValueVector()) {
-      return nullptr;
-    }
-    const auto& vec = arrayConst->valueVector();
-    if (!vec->type()->isArray()) {
-      return nullptr;
-    }
-    const BaseVector* rawVec = vec.get();
-    if (vec->isConstantEncoding() && vec->wrappedVector()) {
-      rawVec = vec->wrappedVector();
-    }
-    const auto* arrVec = rawVec->as<ArrayVector>();
-    if (!arrVec) {
-      return nullptr;
-    }
-    constexpr vector_size_t kIndex = 0;
-    auto offset = arrVec->offsetAt(kIndex);
-    auto size = arrVec->sizeAt(kIndex);
-    auto elements = arrVec->elements();
-    if (!elements) {
-      return nullptr;
-    }
-
-    switch (kind) {
-      case TypeKind::TINYINT:
-      case TypeKind::SMALLINT:
-      case TypeKind::INTEGER:
-      case TypeKind::BIGINT: {
-        const auto* flat =
-            dynamic_cast<const SimpleVector<int64_t>*>(elements.get());
-        if (!flat) {
-          return nullptr;
-        }
-        std::vector<int64_t> values;
-        values.reserve(size);
-        for (vector_size_t i = 0; i < size; ++i) {
-          values.push_back(flat->valueAt(offset + i));
-        }
-        return common::createBigintValues(values, false);
-      }
-      case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY: {
-        const auto* flat =
-            dynamic_cast<const SimpleVector<StringView>*>(elements.get());
-        if (!flat) {
-          return nullptr;
-        }
-        std::vector<std::string> values;
-        values.reserve(size);
-        for (vector_size_t i = 0; i < size; ++i) {
-          values.emplace_back(flat->valueAt(offset + i));
-        }
-        return common::createBytesValues(values, false);
-      }
-      default:
-        return nullptr;
-    }
-  }
-
-  // NOT_IN.
-  if (op == "not_in") {
-    const auto* arrayConst =
-        dynamic_cast<const core::ConstantTypedExpr*>(inputs[1].get());
-    if (!arrayConst || !arrayConst->hasValueVector()) {
-      return nullptr;
-    }
-    const auto& vec = arrayConst->valueVector();
-    if (!vec->type()->isArray()) {
-      return nullptr;
-    }
-    const BaseVector* rawVec = vec.get();
-    if (vec->isConstantEncoding() && vec->wrappedVector()) {
-      rawVec = vec->wrappedVector();
-    }
-    const auto* arrVec = rawVec->as<ArrayVector>();
-    if (!arrVec) {
-      return nullptr;
-    }
-    constexpr vector_size_t kIndex = 0;
-    auto offset = arrVec->offsetAt(kIndex);
-    auto size = arrVec->sizeAt(kIndex);
-    auto elements = arrVec->elements();
-    if (!elements) {
-      return nullptr;
-    }
-
-    switch (kind) {
-      case TypeKind::TINYINT:
-      case TypeKind::SMALLINT:
-      case TypeKind::INTEGER:
-      case TypeKind::BIGINT: {
-        const auto* flat =
-            dynamic_cast<const SimpleVector<int64_t>*>(elements.get());
-        if (!flat) {
-          return nullptr;
-        }
-        std::vector<int64_t> values;
-        values.reserve(size);
-        for (vector_size_t i = 0; i < size; ++i) {
-          values.push_back(flat->valueAt(offset + i));
-        }
-        return common::createNegatedBigintValues(values, false);
-      }
-      case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY: {
-        const auto* flat =
-            dynamic_cast<const SimpleVector<StringView>*>(elements.get());
-        if (!flat) {
-          return nullptr;
-        }
-        std::vector<std::string> values;
-        values.reserve(size);
-        for (vector_size_t i = 0; i < size; ++i) {
-          values.emplace_back(flat->valueAt(offset + i));
-        }
-        return std::make_unique<common::NegatedBytesValues>(
-            std::move(values), false);
-      }
-      default:
-        return nullptr;
-    }
-  }
-
-  return nullptr;
+  return fail(fmt::format("unsupported operator '{}'", op));
 }
 
 } // namespace
@@ -1552,6 +1599,7 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
     if (op == "or") {
       std::optional<std::string> columnName;
       std::vector<int64_t> intValues;
+      std::vector<int128_t> hugeintValues;
       std::vector<std::string> stringValues;
       bool allEqual = true;
 
@@ -1592,7 +1640,11 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
         auto kind = current->inputs()[1]->type()->kind();
         if (kind == TypeKind::TINYINT || kind == TypeKind::SMALLINT ||
             kind == TypeKind::INTEGER || kind == TypeKind::BIGINT) {
+          // literalToConstantExpr promotes all integral types < BIGINT to
+          // int64_t in the variant, so always read as int64_t.
           intValues.push_back(val->value<int64_t>());
+        } else if (kind == TypeKind::HUGEINT) {
+          hugeintValues.push_back(val->value<int128_t>());
         } else if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
           stringValues.push_back(val->value<std::string>());
         } else {
@@ -1601,10 +1653,20 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
         }
       }
 
+      if (!allEqual) {
+        LOG(INFO)
+            << "[FilterPushdown] OR predicate cannot be pushed down: "
+               "not all children are equality predicates on the same column";
+      }
       if (allEqual && columnName.has_value()) {
         std::unique_ptr<common::Filter> filter;
         if (!intValues.empty()) {
           filter = common::createBigintValues(intValues, false);
+        } else if (!hugeintValues.empty()) {
+          auto [minIt, maxIt] =
+              std::minmax_element(hugeintValues.begin(), hugeintValues.end());
+          filter = std::make_unique<common::HugeintValuesUsingHashTable>(
+              *minIt, *maxIt, hugeintValues, false);
         } else if (!stringValues.empty()) {
           filter = common::createBytesValues(stringValues, false);
         }
@@ -1617,10 +1679,13 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
     }
 
     // Leaf predicate — try to build a filter directly.
-    auto filter = buildFilterFromCall(*call);
-    if (!filter) {
+    auto result = buildFilterFromCall(*call);
+    if (!result) {
+      LOG(INFO) << "[FilterPushdown] skipping leaf predicate '" << call->name()
+                << "': " << result.reason;
       continue;
     }
+    auto filter = std::move(result.value);
 
     auto fieldName = extractFieldName(call->inputs()[0]);
     if (!fieldName) {
@@ -1631,7 +1696,15 @@ common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
     auto [it, inserted] =
         filters.try_emplace(std::move(subfield), std::move(filter));
     if (!inserted && it->second && filter) {
-      it->second = it->second->mergeWith(filter.get());
+      try {
+        it->second = it->second->mergeWith(filter.get());
+      } catch (const BoltException& e) {
+        // Some filter types (e.g. HugeintRange) don't support mergeWith.
+        // Skip pushdown for this subfield rather than failing.
+        LOG(WARNING) << "toSubfieldFilters: cannot merge filters on '"
+                     << *fieldName << "': " << e.message();
+        filters.erase(it);
+      }
     }
   }
 

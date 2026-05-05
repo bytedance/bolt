@@ -132,6 +132,14 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
             "expression {} not supported for filter pushdown by paimon connector",
             predicate->ToString());
         auto filters = PaimonFilterTranslator::toSubfieldFilters(result.value);
+        if (filters.empty()) {
+          LOG(INFO) << "[FilterPushdown] predicate translated successfully but "
+                       "produced zero subfield filters — filter will not be "
+                       "evaluated in the scan";
+        } else {
+          LOG(INFO) << "[FilterPushdown] pushed down " << filters.size()
+                    << " subfield filter(s)";
+        }
         for (const auto& [subfield, filter] : filters) {
           auto* fieldSpec = scanSpec->getOrCreateChild(subfield);
           fieldSpec->addFilter(*filter);

@@ -42,7 +42,7 @@ class PaimonConnector : public Connector {
       ConnectorQueryCtx* /*queryCtx*/,
       CommitStrategy /*commitStrategy*/,
       const core::QueryConfig& /*queryConfig*/) override {
-    return nullptr;
+    BOLT_FAIL("paimon connector does not support writes");
   }
 
  private:

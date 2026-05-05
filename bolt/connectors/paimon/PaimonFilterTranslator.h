@@ -120,6 +120,19 @@ class PaimonFilterTranslator {
   // Direction 2b: TypedExpr → SubfieldFilters (constant-only, no evaluator)
   // -----------------------------------------------------------------------
 
+  /// Result of building a DWIO Filter from a CallTypedExpr.
+  struct FilterBuildResult {
+    std::unique_ptr<common::Filter> value;
+    std::string reason; // Non-empty when conversion failed.
+
+    bool ok() const {
+      return reason.empty();
+    }
+    explicit operator bool() const {
+      return ok();
+    }
+  };
+
   /// Convert a TypedExpr into SubfieldFilters for DWIO scan spec pushdown.
   ///
   /// Designed for TypedExpr trees produced by toTypedExpr(), where all
@@ -171,7 +184,9 @@ class PaimonFilterTranslator {
       ::paimon::FieldType fieldType);
 
   /// Map a bolt TypeKind to a paimon FieldType.
-  static ::paimon::FieldType toPaimonFieldType(const TypePtr& type);
+  /// Returns nullopt if the type is not supported for pushdown.
+  static std::optional<::paimon::FieldType> toPaimonFieldType(
+      const TypePtr& type);
 
   /// Map a function name with negation flag to its non-negated form.
   /// Returns nullopt if the operator doesn't support negation via name swap.
