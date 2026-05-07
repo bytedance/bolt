@@ -118,6 +118,10 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<Codec> codec_;
 
+  // When a lazy codec is active this is the wire-level RowType (complex
+  // positions replaced by VARBINARY); equals `outputType_` otherwise.
+  bytedance::bolt::RowTypePtr wireOutputType_;
+
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
   int32_t numPartitions_{0};

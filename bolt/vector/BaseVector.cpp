@@ -633,7 +633,13 @@ void BaseVector::ensureWritable(
       case VectorEncoding::Simple::ROW:
       case VectorEncoding::Simple::ARRAY:
       case VectorEncoding::Simple::MAP:
-      case VectorEncoding::Simple::FUNCTION: {
+      case VectorEncoding::Simple::FUNCTION:
+      // LazyComplexVector delegates resize to its inner FlatVector<StringView>
+      // and supports byte-level copy via LazyComplexVector::copyRanges; treat
+      // it as writable in place rather than replacing with a freshly allocated
+      // ARRAY/MAP target (which would fail the subsequent copy with an
+      // encoding mismatch).
+      case VectorEncoding::Simple::LAZY_COMPLEX: {
         result->ensureWritable(rows);
         return;
       }
@@ -847,7 +853,8 @@ bool isReusableEncoding(VectorEncoding::Simple encoding) {
   return encoding == VectorEncoding::Simple::FLAT ||
       encoding == VectorEncoding::Simple::ARRAY ||
       encoding == VectorEncoding::Simple::MAP ||
-      encoding == VectorEncoding::Simple::ROW;
+      encoding == VectorEncoding::Simple::ROW ||
+      encoding == VectorEncoding::Simple::LAZY_COMPLEX;
 }
 } // namespace
 

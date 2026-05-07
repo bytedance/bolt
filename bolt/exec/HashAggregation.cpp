@@ -106,6 +106,7 @@ void HashAggregation::initialize() {
   BOLT_CHECK(pool()->trackUsage());
 
   auto inputType = aggregationNode_->sources()[0]->outputType();
+  inputLazyModes_.assign(inputType->size(), InputLazyMode::kForceDecoded);
 
   auto hashers =
       createVectorHashers(inputType, aggregationNode_->groupingKeys());

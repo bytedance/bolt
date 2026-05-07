@@ -32,6 +32,7 @@
 #include "bolt/core/Expressions.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/FieldReference.h"
+#include "bolt/vector/LazyComplexCodec.h"
 #include "bolt/vector/VectorEncoding.h"
 namespace bytedance::bolt::exec {
 namespace {
@@ -145,21 +146,27 @@ void FilterProject::initialize() {
   numExprs_ = allExprs.size();
   exprs_ = makeExprSetFromFlag(std::move(allExprs), operatorCtx_->execCtx());
 
-  if (numExprs_ > 0 && !identityProjections_.empty()) {
-    const auto inputType = project_ ? project_->sources()[0]->outputType()
-                                    : filter_->sources()[0]->outputType();
-    std::unordered_set<uint32_t> distinctFieldIndices;
+  const auto inputType = project_ ? project_->sources()[0]->outputType()
+                                  : filter_->sources()[0]->outputType();
+  std::unordered_set<uint32_t> distinctFieldIndices;
+  if (numExprs_ > 0) {
     for (auto field : exprs_->distinctFields()) {
       auto fieldIndex = inputType->getChildIdx(field->name());
       distinctFieldIndices.insert(fieldIndex);
     }
-    for (auto identityField : identityProjections_) {
-      if (distinctFieldIndices.find(identityField.inputChannel) !=
-          distinctFieldIndices.end()) {
-        multiplyReferencedFieldIndices_.push_back(identityField.inputChannel);
+    if (!identityProjections_.empty()) {
+      for (auto identityField : identityProjections_) {
+        if (distinctFieldIndices.find(identityField.inputChannel) !=
+            distinctFieldIndices.end()) {
+          multiplyReferencedFieldIndices_.push_back(identityField.inputChannel);
+        }
       }
     }
   }
+  inputLazyModes_ = makeInputLazyModes(
+      inputType->size(),
+      {distinctFieldIndices.begin(), distinctFieldIndices.end()},
+      InputLazyMode::kForceDecoded);
   filter_.reset();
   project_.reset();
 }

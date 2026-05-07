@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include <folly/CPortability.h>
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/core/PlanNode.h"
@@ -38,6 +40,9 @@
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 #include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
+#include "bolt/vector/LazyComplexVector.h"
+#include "bolt/vector/VectorEncoding.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
 #ifdef ENABLE_BOLT_JIT
@@ -45,6 +50,11 @@
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 
 #endif
+
+namespace bytedance::bolt {
+class LazyComplexCodec;
+} // namespace bytedance::bolt
+
 namespace bytedance::bolt::exec {
 
 class Aggregate;
@@ -849,6 +859,47 @@ class RowContainer {
     return *stringAllocator_;
   }
 
+  // Returns true if column 'i' is stored as lazy-encoded VARBINARY bytes.
+  bool isLazyComplex(int32_t column) const {
+    return column < static_cast<int32_t>(lazyOriginalTypes_.size()) &&
+        lazyOriginalTypes_[column] != nullptr;
+  }
+
+  // Returns the original TypePtr for a lazy-complex column (nullptr if not
+  // lazy).
+  const TypePtr& lazyOriginalType(int32_t column) const {
+    return lazyOriginalTypes_[column];
+  }
+
+  /// Allocates a RowVector matching `rowType` (which mirrors this container's
+  /// columns 1:1) where lazy-complex positions get a pre-sized
+  /// LazyComplexVector slot and everything else gets a plain
+  /// `BaseVector::create`. Used by operators (TopN, Spiller, ...) that emit
+  /// RowVectors fed by `extractColumn`.
+  RowVectorPtr allocateOutputRowVector(
+      const RowTypePtr& rowType,
+      vector_size_t size,
+      memory::MemoryPool* pool) const {
+    std::vector<VectorPtr> children(rowType->size());
+    for (size_t i = 0; i < rowType->size(); ++i) {
+      children[i] = isLazyComplex(static_cast<int32_t>(i))
+          ? allocateLazyAwareChild(rowType->childAt(i), size, pool)
+          : BaseVector::create(rowType->childAt(i), size, pool);
+    }
+    return std::make_shared<RowVector>(
+        pool, rowType, /*nulls=*/nullptr, size, std::move(children));
+  }
+
+  /// Returns the per-input-column lazy-mode vector that an operator's
+  /// `Operator::inputLazyModes()` can return directly. For each column `rc`
+  /// that is lazy-configured (`isLazyComplex(rc)` is true), the returned
+  /// vector has `kForceLazy` at position `inputChannels[rc]`; all other
+  /// positions are `kAny`. The result is sized to max(inputChannels) + 1.
+  /// Returns an empty vector when no column is lazy-configured (the
+  /// operator then declares no preference and the Driver skips dispatch).
+  std::vector<InputLazyMode> inputLazyModes(
+      const std::vector<column_index_t>& inputChannels) const;
+
   /// Checks that row and free row counts match and that free list membership is
   /// consistent with free flag.
   void checkConsistency();
@@ -1449,6 +1500,14 @@ class RowContainer {
   // to 'typeKinds_' and 'rowColumns_'.
   std::vector<TypePtr> types_;
   std::vector<TypeKind> typeKinds_;
+
+  // Lazy-complex encoding metadata. Populated only when an active codec exists
+  // at construction time. lazyOriginalTypes_[i] is non-null when column i is a
+  // complex type encoded lazily (use lazyOriginalTypes_[i] != nullptr to test).
+  // typeKinds_[i] is overridden to VARBINARY for lazy-complex columns so that
+  // the store/extract dispatch goes through the StringView (VARBINARY) path.
+  std::vector<TypePtr> lazyOriginalTypes_;
+  const ::bytedance::bolt::LazyComplexCodec* lazyCodec_ = nullptr;
   int32_t nextOffset_ = 0;
   // Bit position of null bit  in the row. 0 if no null flag. Order is keys,
   // accumulators, dependent.
@@ -1620,15 +1679,24 @@ inline void RowContainer::extractColumn(
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
+  // If the caller pre-allocated a LazyComplexVector, write the stored
+  // bytes into its inner FlatVector<StringView> — the column is lazy-
+  // configured in the container (storage kind is VARBINARY) so the
+  // VARBINARY typed extract is the right dispatch.
+  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex ? result->asUnchecked<LazyComplexVector>()->encoded() : result;
+  // Dispatch on inner->typeKind(): for lazy-complex this is VARBINARY (the
+  // storage kind), matching how the column is stored in the row container.
+  // For non-lazy results inner == result so the kind is identical.
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
-      result->typeKind(),
+      inner->typeKind(),
       rows,
       {},
       numRows,
       column,
       resultOffset,
-      result,
+      inner,
       exactSize);
 }
 
@@ -1639,15 +1707,17 @@ inline void RowContainer::extractColumn(
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
+  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex ? result->asUnchecked<LazyComplexVector>()->encoded() : result;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
-      result->typeKind(),
+      inner->typeKind(),
       rows,
       rowNumbers,
       rowNumbers.size(),
       column,
       resultOffset,
-      result,
+      inner,
       exactSize);
 }
 
@@ -1798,8 +1868,11 @@ struct RowFormatInfo {
     for (int i = 0; i < container->columnTypes().size(); i++) {
       auto type = container->columnTypes()[i];
       if (!type->isFixedWidth()) {
+        // Lazy-complex columns are stored as VARBINARY (StringView) even though
+        // their type is the original complex type. isLazyComplex() detects
+        // this and treats them as string-type for serde purposes.
         bool isStringType = type->kind() == TypeKind::VARCHAR ||
-            type->kind() == TypeKind::VARBINARY;
+            type->kind() == TypeKind::VARBINARY || container->isLazyComplex(i);
         variableColumns.emplace_back(isStringType, rowColumns[i]);
       }
     }

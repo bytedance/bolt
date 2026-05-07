@@ -302,7 +302,7 @@ void Spiller::setRowFormatInfo(bool isSerialized) {
 
 void Spiller::extractSpill(folly::Range<char**> rows, RowVectorPtr& resultPtr) {
   if (!resultPtr) {
-    resultPtr = BaseVector::create<RowVector>(
+    resultPtr = container_->allocateOutputRowVector(
         rowType_, rows.size(), memory::spillMemoryPool());
   } else {
     resultPtr->prepareForReuse();
@@ -330,7 +330,7 @@ void Spiller::extractSpillHybrid(
       "Hybrid mode does not support aggregation");
 
   if (!resultPtr) {
-    resultPtr = BaseVector::create<RowVector>(
+    resultPtr = container_->allocateOutputRowVector(
         rowType_, rows.size(), memory::spillMemoryPool());
   } else {
     resultPtr->prepareForReuse();

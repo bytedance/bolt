@@ -30,6 +30,7 @@
 
 #include "bolt/exec/NestedLoopJoinBuild.h"
 #include "bolt/exec/Task.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 void NestedLoopJoinBridge::setData(std::vector<RowVectorPtr> buildVectors) {
@@ -103,8 +104,8 @@ std::vector<RowVectorPtr> NestedLoopJoinBuild::mergeDataVectors() const {
     if (j == i + 1) {
       merged.push_back(dataVectors_[i++]);
     } else {
-      auto batch = BaseVector::create<RowVector>(
-          dataVectors_[i]->type(), batchSize, pool());
+      auto batch = allocateLazyAwareRowVector(
+          asRowType(dataVectors_[i]->type()), batchSize, pool());
       batchSize = 0;
       while (i < j) {
         auto* source = dataVectors_[i++].get();

@@ -48,7 +48,8 @@ Simple mapNameToSimple(const std::string& name) {
       {"ARRAY", Simple::ARRAY},
       {"LAZY", Simple::LAZY},
       {"FUNCTION", Simple::FUNCTION},
-      {"VARIANT", Simple::VARIANT}};
+      {"VARIANT", Simple::VARIANT},
+      {"LAZY_COMPLEX", Simple::LAZY_COMPLEX}};
 
   if (vecNameMap.find(name) == vecNameMap.end()) {
     throw std::invalid_argument(

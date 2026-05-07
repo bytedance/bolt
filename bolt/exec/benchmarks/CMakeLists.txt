@@ -131,3 +131,12 @@ target_link_libraries(
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
 )
+
+add_executable(window_spill_complex_payload_benchmark WindowSpillComplexPayloadBenchmark.cpp)
+target_link_libraries(
+  window_spill_complex_payload_benchmark PRIVATE
+    bolt_testutils
+    bolt_row_fast
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)

@@ -79,6 +79,13 @@ class SortBuffer {
     return spillConfig_ != nullptr;
   }
 
+  /// Returns a per-input-column lazy-mode vector suitable for
+  /// Operator::inputLazyModes(). Forwards to
+  /// `data_->inputLazyModes(channels)` where `channels[rc]` is the
+  /// input RowVector column for RowContainer column `rc` (derived from
+  /// `columnMap_`). Empty when lazy is disabled or hybrid-sort is on.
+  std::vector<InputLazyMode> inputLazyModes() const;
+
   /// Invoked to spill all the rows from 'data_'.
   void spill();
 

@@ -38,6 +38,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/LazyComplexVector.h"
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
@@ -2082,6 +2083,14 @@ void serializeColumn(
     case VectorEncoding::Simple::LAZY:
       serializeColumn(vector->loadedVector(), ranges, stream);
       break;
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      // Boundaries that want lazy round-trip (Spiller) must translate the
+      // row type to VARBINARY at lazy positions before serialization;
+      // VectorStream's per-column type would otherwise emit VARBINARY bytes
+      // under an ARRAY/MAP/ROW header.
+      BOLT_FAIL(
+          "LAZY_COMPLEX must be translated to VARBINARY before reaching "
+          "PrestoSerializer");
     default:
       serializeWrapped(vector, ranges, stream);
   }
@@ -2687,6 +2696,14 @@ void serializeColumn(
     case VectorEncoding::Simple::LAZY:
       serializeColumn(vector->loadedVector(), rows, stream, scratch);
       break;
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      // Serialize the opaque VARBINARY bytes as a flat VARBINARY column.
+      serializeColumn(
+          vector->asUnchecked<LazyComplexVector>()->encoded().get(),
+          rows,
+          stream,
+          scratch);
+      break;
     default:
       serializeWrapped(vector, rows, stream, scratch);
   }
@@ -2947,6 +2964,13 @@ void estimateSerializedSizeInt(
     }
     case VectorEncoding::Simple::LAZY:
       estimateSerializedSizeInt(vector->loadedVector(), ranges, sizes, scratch);
+      break;
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      estimateSerializedSizeInt(
+          vector->asUnchecked<LazyComplexVector>()->encoded().get(),
+          ranges,
+          sizes,
+          scratch);
       break;
     default:
       BOLT_CHECK(false, "Unsupported vector encoding {}", vector->encoding());
@@ -3238,6 +3262,13 @@ void estimateSerializedSizeInt(
     }
     case VectorEncoding::Simple::LAZY:
       estimateSerializedSizeInt(vector->loadedVector(), rows, sizes, scratch);
+      break;
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      estimateSerializedSizeInt(
+          vector->asUnchecked<LazyComplexVector>()->encoded().get(),
+          rows,
+          sizes,
+          scratch);
       break;
     default:
       BOLT_CHECK(false, "Unsupported vector encoding {}", vector->encoding());

@@ -33,6 +33,7 @@
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/exec/TopN.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 TopN::TopN(
     int32_t operatorId,
@@ -67,6 +68,16 @@ TopN::TopN(
       if (!isSortingKey[i]) {
         nonKeyColumns_.emplace_back(i);
       }
+    }
+  }
+
+  // TopN's single-key-list RowContainer has no lazy config; force-decode
+  // any upstream lazy-complex child so the store path sees regular data.
+  inputLazyModes_.assign(numColumns, InputLazyMode::kAny);
+  for (column_index_t i = 0; i < numColumns; ++i) {
+    const auto& t = outputType_->childAt(i);
+    if (t->isRow() || t->isArray() || t->isMap()) {
+      inputLazyModes_[i] = InputLazyMode::kForceDecoded;
     }
   }
 }
@@ -129,8 +140,9 @@ RowVectorPtr TopN::getOutput() {
       outputBatchSize_, rows_.size() - numRowsReturned_);
   BOLT_CHECK_GT(numRowsToReturn, 0);
 
-  auto result = BaseVector::create<RowVector>(
-      outputType_, numRowsToReturn, operatorCtx_->pool());
+  auto* pool = operatorCtx_->pool();
+  auto result = data_->allocateOutputRowVector(
+      outputType_, numRowsToReturn, pool);
 
   for (auto i = 0; i < outputType_->size(); ++i) {
     data_->extractColumn(

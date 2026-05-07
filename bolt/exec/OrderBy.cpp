@@ -93,6 +93,7 @@ OrderBy::OrderBy(
       operatorCtx_.get(),
       hybridSortEnabled,
       scatteredModeEnabled);
+  inputLazyModes_ = sortBuffer_->inputLazyModes();
 
   this->setRuntimeMetric(
       OperatorMetricKey::kCanUsedToEstimateHashBuildPartitionNum, "true");

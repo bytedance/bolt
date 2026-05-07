@@ -35,6 +35,7 @@
 #include "bolt/exec/SpillableWindowBuild.h"
 #include "bolt/exec/StreamingWindowBuild.h"
 #include "bolt/exec/Task.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 tsan_atomic<WindowBuildType>& getWindowBuildType() {
@@ -100,6 +101,7 @@ Window::Window(
       ignore,
       maxBatchRows,
       preferredBatchBytes);
+  inputLazyModes_ = windowBuild_->inputLazyModes();
 }
 
 void Window::setRowsStreamingWindowBuild(
@@ -966,8 +968,12 @@ RowVectorPtr Window::getOutput() {
 
   auto numOutputRows = std::min(numRowsPerOutput_, numRowsLeft);
   auto usedBytes = operatorCtx_->pool()->currentBytes();
-  auto result = BaseVector::create<RowVector>(
-      outputType_, numOutputRows, operatorCtx_->pool());
+
+  auto result = allocateLazyAwareRowVectorPrefix(
+      outputType_,
+      numOutputRows,
+      /*numLazyAwareCols=*/numInputColumns_,
+      operatorCtx_->pool());
 
   // Compute the output values of window functions.
   auto numResultRows = callApplyLoop(numOutputRows, result);

@@ -32,6 +32,7 @@
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/LazyComplexVector.h"
 #include "bolt/vector/LazyVector.h"
 namespace bytedance::bolt {
 
@@ -98,6 +99,16 @@ void DecodedVector::decode(
     case VectorEncoding::Simple::SEQUENCE: {
       combineWrappers(&vector, rows);
       break;
+    }
+    case VectorEncoding::Simple::LAZY_COMPLEX: {
+      // LazyComplexVector carries CompactRow-encoded bytes in an inner
+      // FlatVector<StringView>. Decode transparently through to that
+      // inner vector so callers see a VARBINARY flat view — the
+      // serialised bytes are what every consumer of lazy-complex data
+      // (RowContainer store, shuffle writer) actually wants to read.
+      decode(
+          *vector.asUnchecked<LazyComplexVector>()->encoded(), rows, loadLazy);
+      return;
     }
     default:
       BOLT_FAIL(

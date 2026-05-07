@@ -169,18 +169,14 @@ void WindowBuild::addInputCommon(RowVectorPtr input) {
 
   ensureInputFits(input);
   const auto numInput = input->size();
-
-  vector_size_t rowCnt = 0;
-  // Add all the rows into the RowContainer.
   for (auto row = 0; row < numInput; ++row) {
     char* newRow = data_->newRow();
-
-    for (auto col = 0; col < input->childrenSize(); ++col) {
+    for (auto col = 0; col < static_cast<int32_t>(inputChannels_.size());
+         ++col) {
       data_->store(decodedInputVectors_[col], row, newRow, col);
     }
   }
-  rowCnt = numInput;
-  numRows_ += rowCnt;
+  numRows_ += numInput;
 }
 
 void WindowBuild::noMoreInputCommon() {

@@ -20,6 +20,8 @@
 #include "bolt/shuffle/sparksql/BoltRowBasedSortShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
+#include "bolt/shuffle/sparksql/LazyBundleEncoder.h"
+#include "bolt/vector/LazyComplexCodec.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -61,6 +63,13 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
 
 void SparkShuffleWriter::addInput(RowVectorPtr input) {
   Operator::ReclaimableSectionGuard guard(this);
+  // Fused encode + bundle pack in a single pass: CompactRow writes
+  // encoded bytes straight into the bundle arena; already-lazy children
+  // pass through as memcpy. The reader splits the bundle back into
+  // LazyComplexVector children on deserialise.
+  if (LazyComplexCodec::activeCodec() != nullptr) {
+    input = encodeAndBundleLazyWireRowVector(input, pool());
+  }
   std::call_once(initOnceFlag_, [this, &input]() { this->init(input); });
   auto freeMem = ExecutionMemoryPool::getMinimumFreeMemoryForTask(
       shuffleWriterOptions_.taskAttemptId);

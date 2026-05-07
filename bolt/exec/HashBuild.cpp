@@ -278,6 +278,12 @@ void HashBuild::setupTable() {
   lookup_->reset(1);
   analyzeKeys_ = table_->hashMode() != BaseHashTable::HashMode::kHash;
 
+  {
+    std::vector<column_index_t> channels = keyChannels_;
+    channels.insert(channels.end(), dependentChannels_.begin(), dependentChannels_.end());
+    inputLazyModes_ = table_->rows()->inputLazyModes(channels);
+  }
+
   if (hybridJoin_) {
     table_->hybridData()->setId(static_cast<uint8_t>(driverId_));
     // Initialize allContainers_ with itself so spilling can work before table

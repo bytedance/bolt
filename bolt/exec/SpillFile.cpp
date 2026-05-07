@@ -36,6 +36,7 @@
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/ContainerRow2RowSerde.h"
+#include "bolt/vector/LazyComplexVector.h"
 namespace bytedance::bolt::exec {
 namespace {
 // Spilling currently uses the default PrestoSerializer which by default
@@ -248,14 +249,15 @@ void SpillWriter::closeFile() {
   updateSpilledFileStats(currentFile_->size());
   finishedFiles_.push_back(SpillFileInfo{
       .id = currentFile_->id(),
-      .type = type_,
+      .type = wireType_ != nullptr ? wireType_ : type_,
       .path = currentFile_->path(),
       .size = currentFile_->size(),
       .rowCount = rowsInCurrentFile_,
       .sortingKeys = sortingKeys_,
       .compressionKind = compressionKind_,
       .serdeKind = spillSerdeKind_,
-      .rowInfo = rowInfo_});
+      .rowInfo = rowInfo_,
+      .lazyOriginalTypes = lazyOriginalTypes_});
   rowsInCurrentFile_ = 0;
   currentFile_.reset();
 }
@@ -293,11 +295,52 @@ uint64_t SpillWriter::flush() {
   return writtenBytes;
 }
 
+RowVectorPtr SpillWriter::prepareWireRows(const RowVectorPtr& rows) {
+  // First call inspects the rows' children, caching the wire row type and
+  // per-column originals if any LazyComplexVector wrappers are present.
+  // wireType_ being null is the "not inspected yet" sentinel.
+  if (wireType_ == nullptr) {
+    auto wireChildren = type_->children();
+    for (size_t i = 0; i < rows->children().size(); ++i) {
+      const auto& child = rows->children()[i];
+      if (child &&
+          child->encoding() == VectorEncoding::Simple::LAZY_COMPLEX) {
+        if (lazyOriginalTypes_.empty()) {
+          lazyOriginalTypes_.assign(rows->children().size(), nullptr);
+        }
+        lazyOriginalTypes_[i] = child->type();
+        wireChildren[i] = VARBINARY();
+      }
+    }
+    wireType_ = lazyOriginalTypes_.empty()
+        ? type_
+        : ROW(
+              std::vector<std::string>(type_->names()),
+              std::move(wireChildren));
+  }
+  if (lazyOriginalTypes_.empty()) {
+    return rows;
+  }
+  std::vector<VectorPtr> children = rows->children();
+  for (size_t i = 0; i < lazyOriginalTypes_.size(); ++i) {
+    if (lazyOriginalTypes_[i] != nullptr) {
+      children[i] = children[i]->asUnchecked<LazyComplexVector>()->encoded();
+    }
+  }
+  return std::make_shared<RowVector>(
+      rows->pool(),
+      wireType_,
+      rows->nulls(),
+      rows->size(),
+      std::move(children));
+}
+
 uint64_t SpillWriter::write(
-    const RowVectorPtr& rows,
+    const RowVectorPtr& rowsIn,
     const folly::Range<IndexRange*>& indices) {
   checkNotFinished();
 
+  auto rows = prepareWireRows(rowsIn);
   bool rowSizeExceed = false;
   uint64_t timeUs{0};
   {
@@ -354,10 +397,11 @@ char* alignUp(char* addr, int alignment) {
 }
 
 uint64_t SpillWriter::writeAndFlush(
-    const RowVectorPtr& rows,
+    const RowVectorPtr& rowsIn,
     const folly::Range<IndexRange*>& indices) {
   checkNotFinished();
 
+  auto rows = prepareWireRows(rowsIn);
   uint64_t timeUs{0};
   {
     MicrosecondTimer timer(&timeUs);
@@ -603,7 +647,8 @@ SpillReadFileBase::SpillReadFileBase(
       serde_(
           serdeKind_.has_value() ? getNamedVectorSerde(*serdeKind_) : nullptr),
       spillUringEnabled_(spillUringEnabled),
-      pool_(pool) {
+      pool_(pool),
+      lazyOriginalTypes_(fileInfo.lazyOriginalTypes) {
   constexpr uint64_t kMaxReadBufferSize =
       (1 << 20) - AlignedBuffer::kPaddedSize; // 1MB - padding.
   auto fs = filesystems::getFileSystem(path_, nullptr);
@@ -640,7 +685,39 @@ bool SpillReadFile::nextBatch(RowVectorPtr& rowVector) {
     VectorStreamGroup::read(
         input_.get(), pool_, type_, &rowVector, &readOptions_);
   }
+  if (!lazyOriginalTypes_.empty() && rowVector != nullptr) {
+    rewrapLazyChildren(rowVector);
+  }
   return true;
+}
+
+void SpillReadFile::rewrapLazyChildren(RowVectorPtr& rowVector) const {
+  auto& children = rowVector->children();
+  std::vector<TypePtr> logicalTypes = type_->children();
+  bool changed = false;
+  for (size_t i = 0; i < children.size() && i < lazyOriginalTypes_.size();
+       ++i) {
+    const auto& original = lazyOriginalTypes_[i];
+    if (original == nullptr) {
+      continue;
+    }
+    auto bytes = std::dynamic_pointer_cast<FlatVector<StringView>>(children[i]);
+    BOLT_CHECK_NOT_NULL(
+        bytes,
+        "SpillReadFile lazy column {} expected FlatVector<StringView>",
+        i);
+    children[i] = std::make_shared<LazyComplexVector>(pool_, original, bytes);
+    logicalTypes[i] = original;
+    changed = true;
+  }
+  if (changed) {
+    rowVector = std::make_shared<RowVector>(
+        rowVector->pool(),
+        ROW(std::vector<std::string>(type_->names()), std::move(logicalTypes)),
+        rowVector->nulls(),
+        rowVector->size(),
+        std::move(children));
+  }
 }
 
 void SpillReadFile::reuse() {

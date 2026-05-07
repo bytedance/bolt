@@ -118,6 +118,9 @@ struct SpillFileInfo {
   common::CompressionKind compressionKind;
   std::optional<VectorSerde::Kind> serdeKind;
   std::optional<RowFormatInfo> rowInfo;
+  /// Original complex type at each lazy-complex column (`type` carries
+  /// VARBINARY there). Empty when no lazy columns are present.
+  std::vector<TypePtr> lazyOriginalTypes;
 };
 
 using SpillFiles = std::vector<SpillFileInfo>;
@@ -191,6 +194,13 @@ class SpillWriter {
     BOLT_CHECK(!finished_, "SpillWriter has finished");
   }
 
+  // On first call, scans 'rows' for LazyComplexVector children and caches
+  // their original types in lazyOriginalTypes_ (and the wire row type in
+  // wireType_). Returns 'rows' translated to wire shape — LazyComplexVector
+  // children replaced by their inner FlatVector<StringView>, type updated
+  // to wireType_. Returns 'rows' unchanged when no lazy children exist.
+  RowVectorPtr prepareWireRows(const RowVectorPtr& rows);
+
   // Returns an open spill file for write. If there is no open spill file, then
   // the function creates a new one. If the current open spill file exceeds the
   // target file size limit, then it first closes the current one and then
@@ -245,6 +255,13 @@ class SpillWriter {
   const std::optional<VectorSerde::Kind> spillSerdeKind_;
   VectorSerde* serde_{nullptr};
   uint64_t rowsInCurrentFile_{0};
+  // Original complex type at each LAZY_COMPLEX child of the first written
+  // RowVector. Cached from the first write() and stamped into every
+  // emitted SpillFileInfo. Empty when no lazy children are present.
+  std::vector<TypePtr> lazyOriginalTypes_;
+  // Wire row type (VARBINARY at lazy positions). Same caching scope as
+  // lazyOriginalTypes_; equal to type_ when not lazy.
+  RowTypePtr wireType_;
 };
 
 /// Input stream backed by spill file.
@@ -368,6 +385,8 @@ class SpillReadFileBase {
   VectorSerde* const serde_{nullptr};
   bool spillUringEnabled_;
   memory::MemoryPool* const pool_;
+  // Original complex type at each lazy-complex position; empty otherwise.
+  const std::vector<TypePtr> lazyOriginalTypes_;
 
   std::unique_ptr<SpillInputStream> input_;
   uint64_t spillReadIOTimeUs_{0};
@@ -391,6 +410,11 @@ class SpillReadFile : public SpillReadFileBase {
 
   void reuse();
   bool nextBatch(RowVectorPtr& rowVector);
+
+ private:
+  // Replace VARBINARY children at lazy positions with LazyComplexVector,
+  // then rebuild the RowVector with the logical row type.
+  void rewrapLazyChildren(RowVectorPtr& rowVector) const;
 };
 
 class RowBasedSpillReadFile : public SpillReadFileBase {

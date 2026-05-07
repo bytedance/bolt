@@ -31,6 +31,7 @@
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/ConstantVector.h"
+#include "bolt/vector/LazyComplexVector.h"
 #include "bolt/vector/TypeAliases.h"
 #include "bolt/vector/VariantVector.h"
 namespace bytedance {
@@ -314,6 +315,15 @@ void FlatVector<StringView>::acquireSharedStringBuffersRecursive(
       if (buffer != nullptr) {
         addStringBuffer(buffer);
       }
+      return;
+    }
+
+    case VectorEncoding::Simple::LAZY_COMPLEX: {
+      // A LazyComplexVector stores its payload in an encoded()
+      // FlatVector<StringView>. Recurse into it so that any string buffers it
+      // holds are shared correctly.
+      const auto* lazy = source->asUnchecked<LazyComplexVector>();
+      acquireSharedStringBuffersRecursive(lazy->encoded().get());
       return;
     }
 

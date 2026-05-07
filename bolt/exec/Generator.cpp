@@ -22,6 +22,7 @@
 #include "bolt/functions/prestosql/json/JsonExtractor.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 Generator::Generator(
@@ -53,6 +54,9 @@ Generator::Generator(
     identityProjections_.emplace_back(
         inputType->getChildIdx(repCol->name()), outputChannel++);
   }
+
+  inputLazyModes_ = makeInputLazyModes(
+      inputType->size(), generateChannels_, InputLazyMode::kForceDecoded);
 }
 
 void Generator::initialize() {

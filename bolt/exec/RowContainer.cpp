@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -37,12 +38,15 @@
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/vector/DecodedVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
+#include "bolt/vector/LazyComplexVector.h"
 
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/exec/Operator.h"
+#include "bolt/exec/RowToColumnVector.h"
 #include "bolt/type/Type.h"
 
 #ifdef ENABLE_BOLT_JIT
@@ -337,6 +341,25 @@ RowContainer::RowContainer(
         offsets_[i],
         (nullableKeys_ || i >= keyTypes_.size()) ? nullOffsets_[i]
                                                  : RowColumn::kNotNullOffset);
+  }
+
+  // Lazy-complex metadata — populated only for NON-KEY complex columns.
+  // Keys (sort keys, hash keys, partition keys) always retain their original
+  // complex form so that compare/hash paths can read values. Lazy encoding
+  // is strictly a payload-side optimisation.
+  // TODO since ComplexType data is also store as string for key, we may also encoding on keys and support compare direct in row format
+  const auto numCols = types_.size();
+  lazyOriginalTypes_.assign(numCols, nullptr);
+  lazyCodec_ = LazyComplexCodec::activeCodec();
+  if (lazyCodec_ != nullptr) {
+    const auto numKeys = keyTypes.size();
+    for (size_t i = numKeys; i < numCols; ++i) {
+      const auto& t = types_[i];
+      if (t->isRow() || t->isArray() || t->isMap()) {
+        lazyOriginalTypes_[i] = t;
+        typeKinds_[i] = TypeKind::VARBINARY;
+      }
+    }
   }
 }
 
@@ -671,17 +694,39 @@ int32_t RowContainer::storeVariableSizeAt(
 void RowContainer::store(const RowVectorPtr& input) {
   BOLT_CHECK_EQ(input->childrenSize(), types_.size());
   for (auto i = 0; i < types_.size(); ++i) {
-    BOLT_CHECK_EQ(input->childAt(i)->type(), types_[i]);
+    // Compare structurally (via Type::operator==) rather than by pointer, so
+    // that lazily-encoded columns whose type is stored as the original complex
+    // type still pass when the input uses a freshly-constructed TypePtr.
+    BOLT_CHECK(
+        *input->childAt(i)->type() == *types_[i],
+        "Column {} type mismatch: input={} expected={}",
+        i,
+        input->childAt(i)->type()->toString(),
+        types_[i]->toString());
   }
   SelectivityVector allRows(input->size());
   std::vector<char*> rows(input->size());
   for (int row = 0; row < input->size(); ++row) {
     rows[row] = this->newRow();
   }
+
+  // Keep encoded lazy vectors alive for the duration of the store loop
+  // so their FlatVector<StringView>'s backing buffers don't drop.
+  std::vector<LazyComplexVectorPtr> lazyKeepalive(input->childrenSize());
+
   auto* inputRow = input->as<RowVector>();
   for (size_t colIdx = 0; colIdx < inputRow->childrenSize(); ++colIdx) {
-    DecodedVector decoded(*inputRow->childAt(colIdx), allRows);
-    auto kind = inputRow->childAt(colIdx)->type()->kind();
+    VectorPtr child = inputRow->childAt(colIdx);
+    if (lazyCodec_ != nullptr && colIdx < lazyOriginalTypes_.size() &&
+        lazyOriginalTypes_[colIdx] != nullptr) {
+      lazyKeepalive[colIdx] =
+          encodeToLazy(child, stringAllocator_->pool(), *lazyCodec_);
+      child = lazyKeepalive[colIdx]->encoded();
+    }
+    DecodedVector decoded(*child, allRows);
+    // Use typeKinds_[colIdx] for dispatch: lazy-complex columns have their
+    // kind overridden to VARBINARY in the constructor.
+    auto kind = typeKinds_[colIdx];
     BOLT_DYNAMIC_TYPE_DISPATCH(
         this->storeColumn, kind, decoded, input->size(), rows, colIdx);
   }
@@ -837,6 +882,21 @@ void RowContainer::extractString(
       HashStringAllocator::headerOf(value.data()));
   stream->readBytes(rawBuffer, value.size());
   values->setNoCopy(index, StringView(rawBuffer, value.size()));
+}
+
+std::vector<InputLazyMode> RowContainer::inputLazyModes(
+    const std::vector<column_index_t>& inputChannels) const {
+  if (lazyCodec_ == nullptr) {
+    return {};
+  }
+  column_index_t maxCol = *std::max_element(inputChannels.begin(), inputChannels.end());
+  std::vector<InputLazyMode> out(maxCol + 1, InputLazyMode::kAny);
+  for (size_t rc = 0; rc < lazyOriginalTypes_.size(); ++rc) {
+    if (lazyOriginalTypes_[rc] != nullptr && rc < inputChannels.size()) {
+      out[inputChannels[rc]] = InputLazyMode::kForceLazy;
+    }
+  }
+  return out;
 }
 
 void RowContainer::storeComplexType(

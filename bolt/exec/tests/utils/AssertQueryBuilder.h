@@ -176,6 +176,10 @@ class AssertQueryBuilder {
   /// Run the query and return the number of result rows.
   uint64_t runWithoutResults(std::shared_ptr<Task>& task);
 
+  /// Run the query and return all result batches without copying or decoding.
+  /// The caller is responsible for decoding lazy-complex children if needed.
+  std::vector<RowVectorPtr> readBatches(std::shared_ptr<Task>& task);
+
  private:
   std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>>
   readCursor();

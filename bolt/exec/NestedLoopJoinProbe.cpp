@@ -33,6 +33,7 @@
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/Task.h"
 #include "bolt/expression/FieldReference.h"
+#include "bolt/vector/LazyComplexCodec.h"
 
 namespace bytedance::bolt::exec {
 namespace {
@@ -553,9 +554,11 @@ void NestedLoopJoinProbe::prepareOutput() {
           buildVector->childAt(projection.inputChannel));
     }
   } else {
-    // Multiple build vectors: use FlatVector with flat copy.
+    // Multiple build vectors: use FlatVector with flat copy. When the lazy
+    // codec is active, use a LazyComplexVector for complex columns so
+    // copyRanges from lazy build inputs stays a byte copy
     for (const auto& projection : buildProjections_) {
-      localColumns[projection.outputChannel] = BaseVector::create(
+      localColumns[projection.outputChannel] = allocateLazyAwareChild(
           outputType_->childAt(projection.outputChannel),
           outputBatchSize_,
           operatorCtx_->pool());

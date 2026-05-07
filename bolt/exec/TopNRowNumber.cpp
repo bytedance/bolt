@@ -30,6 +30,7 @@
 
 #include "bolt/exec/TopNRowNumber.h"
 #include "bolt/exec/OperatorUtils.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 namespace {
@@ -191,6 +192,8 @@ TopNRowNumber::TopNRowNumber(
   if (generateRowNumber_) {
     results_.resize(1);
   }
+
+  inputLazyModes_ = data_->inputLazyModes(inputChannels_);
 }
 
 void TopNRowNumber::addInput(RowVectorPtr input) {
@@ -459,8 +462,28 @@ RowVectorPtr TopNRowNumber::getOutputFromMemory() {
   BOLT_CHECK_GT(outputBatchSize_, 0);
 
   // Loop over partitions and emit sorted rows along with row numbers.
-  auto output =
-      BaseVector::create<RowVector>(outputType_, outputBatchSize_, pool());
+  // Lazy-aware output: complex payload columns are marked lazy in the
+  // RowContainer, so their output slot needs a pre-allocated
+  // LazyComplexVector for extractColumn to write bytes into.
+  std::vector<bool> isLazyOutCol(outputType_->size(), false);
+  for (int i = 0; i < inputChannels_.size(); ++i) {
+    if (data_->isLazyComplex(i)) {
+      isLazyOutCol[inputChannels_[i]] = true;
+    }
+  }
+  std::vector<VectorPtr> children(outputType_->size());
+  for (size_t out = 0; out < outputType_->size(); ++out) {
+    const auto& type = outputType_->childAt(out);
+    children[out] = isLazyOutCol[out]
+        ? allocateLazyAwareChild(type, outputBatchSize_, pool())
+        : BaseVector::create(type, outputBatchSize_, pool());
+  }
+  auto output = std::make_shared<RowVector>(
+      pool(),
+      outputType_,
+      /*nulls=*/nullptr,
+      outputBatchSize_,
+      std::move(children));
 #ifdef SPARK_COMPATIBLE
   FlatVector<int32_t>* rowNumbers = nullptr;
   if (generateRowNumber_) {
@@ -524,8 +547,13 @@ RowVectorPtr TopNRowNumber::getOutputFromMemory() {
   output->resize(offset);
 
   for (int i = 0; i < inputChannels_.size(); ++i) {
+    // 5-arg extractColumn routes lazy-configured columns into the inner
+    // FlatVector<StringView> of the pre-allocated LazyComplexVector.
     data_->extractColumn(
-        outputRows_.data(), offset, i, output->childAt(inputChannels_[i]));
+        outputRows_.data(),
+        offset,
+        i,
+        output->childAt(inputChannels_[i]));
   }
 
   return output;

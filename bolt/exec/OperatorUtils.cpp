@@ -256,6 +256,10 @@ vector_size_t processFilterResults(
       return processConstantFilterResults(filterResult, rows);
     case VectorEncoding::Simple::FLAT:
       return processFlatFilterResults(filterResult, rows, filterEvalCtx, pool);
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      BOLT_FAIL(
+          "OperatorUtils::processFilterResults is not supported for "
+          "LAZY_COMPLEX; call decode() first");
     default:
       return processEncodedFilterResults(
           filterResult, rows, filterEvalCtx, pool);

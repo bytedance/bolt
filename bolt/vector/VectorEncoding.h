@@ -53,7 +53,8 @@ enum class Simple {
   ARRAY,
   LAZY,
   FUNCTION,
-  VARIANT
+  VARIANT,
+  LAZY_COMPLEX,
 };
 
 inline std::ostream& operator<<(
@@ -82,6 +83,8 @@ inline std::ostream& operator<<(
       return out << "FUNCTION";
     case VectorEncoding::Simple::VARIANT:
       return out << "VARIANT";
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      return out << "LAZY_COMPLEX";
   }
   return out;
 }
@@ -102,6 +105,10 @@ inline bool isConstant(VectorEncoding::Simple encoding) {
 
 inline bool isLazy(VectorEncoding::Simple encoding) {
   return encoding == VectorEncoding::Simple::LAZY;
+}
+
+inline bool isLazyComplex(VectorEncoding::Simple encoding) {
+  return encoding == VectorEncoding::Simple::LAZY_COMPLEX;
 }
 
 inline bool isDictionary(VectorEncoding::Simple encoding) {

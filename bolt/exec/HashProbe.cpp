@@ -40,6 +40,7 @@
 #include "bolt/exec/Task.h"
 #include "bolt/expression/FieldReference.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 namespace {
@@ -140,11 +141,18 @@ void extractColumns(
       BOLT_CHECK_LT(resultChannel, resultVectors.size())
 
       auto& child = resultVectors[resultChannel];
-      // TODO: Consider reuse of complex types.
-      if (!child || !BaseVector::isVectorWritable(child) ||
-          !child->isFlatEncoding()) {
-        child =
-            BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+      // `allocateLazyAwareChild` returns a pre-sized LazyComplexVector when a
+      // codec is active and the type is complex; otherwise delegates to
+      // BaseVector::create. This matches the lazy configuration of
+      // table->rows(), so extractColumn's lazy check passes. A cached lazy
+      // child (LAZY_COMPLEX encoding) is also reusable since extractColumn
+      // overwrites the inner FlatVector<StringView> in place.
+      const bool reusable = child && BaseVector::isVectorWritable(child) &&
+          (child->isFlatEncoding() ||
+           child->encoding() == VectorEncoding::Simple::LAZY_COMPLEX);
+      if (!reusable) {
+        child = allocateLazyAwareChild(
+            resultTypes[resultChannel], rows.size(), pool);
       }
       child->resize(rows.size());
       table->rows()->extractColumn(

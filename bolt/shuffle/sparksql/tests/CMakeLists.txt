@@ -61,6 +61,27 @@ add_test(
 )
 
 add_executable(
+    bolt_shuffle_spark_lazy_complex_test
+    ShuffleTestBase.cpp
+    ShuffleLazyComplexTest.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_spark_lazy_complex_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        bolt_vector_fuzzer
+        GTest::gtest_main
+        GTest::gmock
+)
+
+add_test(
+    NAME bolt_shuffle_spark_lazy_complex_test
+    COMMAND bolt_shuffle_spark_lazy_complex_test
+)
+
+add_executable(
     bolt_shuffle_spark_large_partition_test
     ShuffleTestBase.cpp
     ShuffleLargePartitionTest.cpp

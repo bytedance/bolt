@@ -35,8 +35,8 @@
 #include "bolt/exec/Task.h"
 #include "bolt/expression/FieldReference.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/LazyComplexCodec.h"
 
-#include <iostream>
 #include <utility>
 namespace bytedance::bolt::exec {
 
@@ -484,7 +484,7 @@ bool MergeJoin::prepareOutput(
   std::vector<VectorPtr> localColumns(outputType_->size());
   if (newLeft == nullptr) {
     for (const auto& projection : leftProjections_) {
-      localColumns[projection.outputChannel] = BaseVector::create(
+      localColumns[projection.outputChannel] = allocateLazyAwareChild(
           outputType_->childAt(projection.outputChannel),
           outputBatchSize_,
           operatorCtx_->pool());
@@ -502,7 +502,7 @@ bool MergeJoin::prepareOutput(
   // Create right side projection outputs.
   if (right == nullptr) {
     for (const auto& projection : rightProjections_) {
-      localColumns[projection.outputChannel] = BaseVector::create(
+      localColumns[projection.outputChannel] = allocateLazyAwareChild(
           outputType_->childAt(projection.outputChannel),
           outputBatchSize_,
           operatorCtx_->pool());

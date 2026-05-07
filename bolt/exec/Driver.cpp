@@ -727,6 +727,16 @@ StopReason Driver::runInternal(
                   "bytedance::bolt::exec::Driver::runInternal::addInput",
                   nextOp);
 
+              // Lazy-complex input dispatch — see Operator::inputLazyModes().
+              // Runs inside the timer above so the cost lands in
+              // nextOp's addInputTiming.
+              if (LazyComplexCodec::activeCodec() != nullptr) {
+                intermediateResult = applyLazyInputModes(
+                    intermediateResult,
+                    nextOp->inputLazyModes(),
+                    nextOp->pool());
+              }
+
               CALL_OPERATOR(
                   nextOp->addInput(intermediateResult),
                   nextOp,

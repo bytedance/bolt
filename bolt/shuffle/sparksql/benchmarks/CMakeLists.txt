@@ -35,3 +35,19 @@ target_link_libraries(
         ${FOLLY_BENCHMARK}
         glog::glog
 )
+
+add_executable(
+    bolt_shuffle_writer_lazy_benchmark
+    ShuffleWriterLazyBenchmark.cpp
+)
+
+target_link_libraries(
+    bolt_shuffle_writer_lazy_benchmark
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        bolt_vector_fuzzer
+        Folly::folly
+        ${FOLLY_BENCHMARK}
+        glog::glog
+)

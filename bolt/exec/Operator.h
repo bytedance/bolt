@@ -43,6 +43,7 @@
 #include "bolt/exec/OperatorStats.h"
 #include "bolt/exec/OperatorTraceWriter.h"
 #include "bolt/type/Filter.h"
+#include "bolt/vector/LazyComplexCodec.h"
 namespace bytedance::bolt::exec {
 
 // Represents a column that is copied from input to output, possibly
@@ -231,6 +232,29 @@ class Operator : public BaseRuntimeStatWriter {
   /// operator in the pipeline.
   /// @param input Non-empty input vector.
   virtual void addInput(RowVectorPtr input) = 0;
+
+  /// Per-input-column lazy-encoding preference. Consulted by the Driver at
+  /// the addInput seam when a `LazyComplexCodec` is active:
+  ///   - kAny           : column passes through unchanged.
+  ///   - kForceDecoded  : if the arriving child is `LazyComplexVector`,
+  ///                      decode it to its original complex vector first.
+  ///   - kForceLazy     : if the arriving complex child is not yet lazy,
+  ///                      encode it to `LazyComplexVector` first.
+  ///
+  /// Return an empty vector (the default) if the operator has no
+  /// preference — the Driver skips all dispatch in that case. Otherwise
+  /// the size must equal the number of children in the input RowVector.
+  /// When a `LazyComplexCodec` is NOT active the Driver skips dispatch
+  /// regardless of the declared modes (kForceLazy is a no-op then).
+  ///
+  /// Operators populate `inputLazyModes_` in their constructor or
+  /// `initialize()` and leave the accessor alone — the default
+  /// implementation returns the member. Operators with no lazy policy
+  /// simply leave `inputLazyModes_` empty.
+  using InputLazyMode = bytedance::bolt::InputLazyMode;
+  virtual const std::vector<InputLazyMode>& inputLazyModes() const {
+    return inputLazyModes_;
+  }
 
   /// Informs 'this' that addInput will no longer be called. This means
   /// that any partial state kept by 'this' should be returned by
@@ -529,6 +553,12 @@ class Operator : public BaseRuntimeStatWriter {
  protected:
   static std::vector<std::unique_ptr<PlanNodeTranslator>>& translators();
   friend class NonReclaimableSection;
+
+  // Per-input-column lazy-encoding preference returned by the default
+  // `inputLazyModes()` accessor. Populated by each operator in its
+  // constructor or `initialize()` when a policy is needed; empty
+  // otherwise (then the Driver skips dispatch).
+  std::vector<InputLazyMode> inputLazyModes_;
 
   class MemoryReclaimer : public memory::MemoryReclaimer {
    public:

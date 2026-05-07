@@ -276,6 +276,17 @@ uint64_t AssertQueryBuilder::runWithoutResults(std::shared_ptr<Task>& task) {
   return count;
 }
 
+std::vector<RowVectorPtr> AssertQueryBuilder::readBatches(
+    std::shared_ptr<Task>& task) {
+  // Disable the consumer-side copy so that LAZY_COMPLEX vectors are not
+  // copied (which would crash in ArrayVectorBase::copyRangesImpl).  The
+  // caller is responsible for decoding any lazy-complex children it needs.
+  params_.copyResult = false;
+  auto [cursor, results] = readCursor();
+  task = cursor->task();
+  return results;
+}
+
 std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>>
 AssertQueryBuilder::readCursor() {
   BOLT_CHECK_NOT_NULL(params_.planNode);

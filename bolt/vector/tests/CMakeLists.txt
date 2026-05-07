@@ -32,6 +32,7 @@ add_executable(
   DecodedVectorTest.cpp
   EnsureWritableVectorTest.cpp
   IsWritableVectorTest.cpp
+  LazyComplexVectorTest.cpp
   LazyVectorTest.cpp
   MayHaveNullsRecursiveTest.cpp
   SelectivityVectorTest.cpp
@@ -58,6 +59,7 @@ add_test(bolt_vector_test bolt_vector_test)
 target_link_libraries(
   bolt_vector_test
   bolt_testutils
+  bolt_row_fast
   GTest::gtest
   GTest::gtest_main
 )

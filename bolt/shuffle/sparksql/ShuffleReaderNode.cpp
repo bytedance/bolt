@@ -16,7 +16,9 @@
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "bolt/vector/LazyComplexCodec.h"
 using namespace bytedance::bolt::shuffle::sparksql;
+using namespace bytedance::bolt;
 
 SparkShuffleReader::SparkShuffleReader(
     int32_t operatorId,
@@ -44,12 +46,17 @@ SparkShuffleReader::SparkShuffleReader(
           shuffleReaderOptions_.forceShuffleWriterType)),
       partitioningShortName_(shuffleReaderOptions_.partitionShortName),
       rowBufferPool_(std::make_shared<RowBufferPool>(arrowPool_.get())),
+      // When a lazy codec is active, the wire schema has complex
+      // positions replaced by VARBINARY. Use that schema to drive the
+      // Arrow deserialiser; wrap the resulting VARBINARY children back
+      // as LazyComplexVector before returning from getOutput().
+      wireOutputType_(lazyBundleWireRowType(shuffleReaderNode->outputType())),
       row2ColConverter_(std::make_shared<ShuffleRowToColumnarConverter>(
-          outputType_,
+          wireOutputType_,
           pool())) {
-  isValidityBuffer_.reserve(outputType_->size());
-  for (size_t i = 0; i < outputType_->size(); ++i) {
-    switch (outputType_->childAt(i)->kind()) {
+  isValidityBuffer_.reserve(wireOutputType_->size());
+  for (size_t i = 0; i < wireOutputType_->size(); ++i) {
+    switch (wireOutputType_->childAt(i)->kind()) {
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
         isValidityBuffer_.push_back(true);
@@ -84,9 +91,7 @@ SparkShuffleReader::SparkShuffleReader(
 }
 
 void SparkShuffleReader::init() {
-  // Bolt operator should not alloc memory during construct, so init schema and
-  // codec here
-  schema_ = boltTypeToArrowSchema(outputType_, pool());
+  schema_ = boltTypeToArrowSchema(wireOutputType_, pool());
   zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
       1 /*not used*/, false, arrowPool_.get());
 }
@@ -102,7 +107,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
                 std::move(in),
                 schema_,
                 codec_,
-                outputType_,
+                wireOutputType_,
                 batchSize_,
                 shuffleBatchByteSize_,
                 arrowPool_.get(),
@@ -123,7 +128,10 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
 
     auto output = columnarBatchDeserializer_->next();
     if (output) {
-      return output;
+      // Wrap VARBINARY wire children at complex positions back as
+      // LazyComplexVector of the original type. No-op when codec is
+      // inactive or wire already matches outputType_.
+      return fromLazyBundleWireRowVector(output, outputType_, pool());
     } else {
       columnarBatchDeserializer_ = nullptr;
     }

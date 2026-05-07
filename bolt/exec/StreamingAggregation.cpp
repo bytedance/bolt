@@ -60,6 +60,7 @@ void StreamingAggregation::initialize() {
   decodedKeys_.resize(numKeys);
 
   auto inputType = aggregationNode_->sources()[0]->outputType();
+  inputLazyModes_.assign(inputType->size(), InputLazyMode::kForceDecoded);
 
   std::vector<TypePtr> groupingKeyTypes;
   groupingKeyTypes.reserve(numKeys);

@@ -355,6 +355,9 @@ std::string printTypeAndEncodingTree(
       }
       break;
     }
+    case VectorEncoding::Simple::LAZY_COMPLEX:
+      printEncodingAndType(vector, indent, out);
+      break;
     default:
       BOLT_UNSUPPORTED(
           "Unsupported encoding: {}",

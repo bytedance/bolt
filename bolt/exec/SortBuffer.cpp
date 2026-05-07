@@ -34,6 +34,8 @@
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/RowToColumnVector.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
+#include "bolt/vector/LazyComplexCodec.h"
+#include "bolt/vector/LazyComplexVector.h"
 
 #ifdef ENABLE_META_SORT
 #include "bolt/exec/meta/MetaRowSorterApi.h"
@@ -142,6 +144,17 @@ SortBuffer::~SortBuffer() {
   pool_->release();
 }
 
+std::vector<InputLazyMode> SortBuffer::inputLazyModes() const {
+  if (hybridSortEnabled_) {
+    return {};
+  }
+  std::vector<column_index_t> channels(columnMap_.size());
+  for (const auto& cp : columnMap_) {
+    channels[cp.inputChannel] = cp.outputChannel;
+  }
+  return data_->inputLazyModes(channels);
+}
+
 void SortBuffer::addInput(const VectorPtr& input) {
   BOLT_CHECK(!noMoreInput_);
   ensureInputFits(input);
@@ -194,11 +207,9 @@ void SortBuffer::addInput(const VectorPtr& input) {
     for (const auto& columnProjection : columnMap_) {
       DecodedVector decoded(
           *inputRow->childAt(columnProjection.outputChannel), allRows);
-      auto kind =
-          inputRow->childAt(columnProjection.outputChannel)->type()->kind();
       BOLT_DYNAMIC_TYPE_DISPATCH(
           data_->storeColumn,
-          kind,
+          decoded.base()->typeKind(),
           decoded,
           input->size(),
           rows,
@@ -550,6 +561,9 @@ void SortBuffer::prepareOutput(vector_size_t batchSize) {
     VectorPtr output = std::move(output_);
     BaseVector::prepareForReuse(output, batchSize);
     output_ = std::static_pointer_cast<RowVector>(output);
+  } else if (
+      LazyComplexCodec::activeCodec() != nullptr && !hybridSortEnabled_) {
+    output_ = allocateLazyAwareRowVector(input_, batchSize, pool_);
   } else {
     output_ = std::static_pointer_cast<RowVector>(
         BaseVector::create(input_, batchSize, pool_));
@@ -585,10 +599,14 @@ void SortBuffer::getOutputWithoutSpill() {
     }
   } else {
     for (const auto& columnProjection : columnMap_) {
+      // Use the overload with resultOffset=0, which checks isLazyComplex and
+      // routes lazy columns into the inner FlatVector<StringView> of
+      // the pre-allocated LazyComplexVector in output_.
       data_->extractColumn(
           sortedRows_.data() + numOutputRows_,
           output_->size(),
           columnProjection.inputChannel,
+          /*resultOffset=*/0,
           output_->childAt(columnProjection.outputChannel));
     }
   }

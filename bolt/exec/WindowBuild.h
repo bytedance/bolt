@@ -82,6 +82,12 @@ class WindowBuild {
   // Adds new input rows to the WindowBuild.
   virtual void addInput(RowVectorPtr input) = 0;
 
+  // Per-input-column lazy mode vector for Operator::inputLazyModes().
+  // Forwards to `data_->inputLazyModes(inputChannels_)`.
+  std::vector<InputLazyMode> inputLazyModes() const {
+    return data_->inputLazyModes(inputChannels_);
+  }
+
   // Can be called any time before noMoreInput().
   virtual void spill() = 0;
 

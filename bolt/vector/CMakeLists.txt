@@ -32,6 +32,8 @@ bolt_add_library(
   ConstantVector.cpp
   DecodedVector.cpp
   FlatVector.cpp
+  LazyComplexCodec.cpp
+  LazyComplexVector.cpp
   LazyVector.cpp
   SelectivityVector.cpp
   SequenceVector.cpp

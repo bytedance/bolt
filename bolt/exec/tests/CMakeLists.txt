@@ -79,6 +79,7 @@ add_executable(
   PrintPlanWithStatsTest.cpp
   ProbeOperatorStateTest.cpp
   RoundRobinPartitionFunctionTest.cpp
+  LazyComplexOperatorTest.cpp
   RowContainerTest.cpp
   RowNumberTest.cpp
   RowStreamingWindowTest.cpp

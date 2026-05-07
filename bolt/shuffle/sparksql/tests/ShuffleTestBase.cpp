@@ -36,6 +36,7 @@
 #include "bolt/shuffle/sparksql/tests/LocalFileReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/tests/MockRssClient.h"
+#include "bolt/vector/LazyComplexCodec.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -662,11 +663,17 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       auto curBatch = readerCursor->current();
       // deep copy to avoid hold shuffle reader memory
       if (param.verifyOutput) {
-        VectorPtr copy =
-            BaseVector::create(curBatch->type(), curBatch->size(), pool());
-        copy->copy(curBatch.get(), 0, 0, curBatch->size());
-        result.partitionOutputs[i].push_back(
-            std::dynamic_pointer_cast<RowVector>(copy));
+        // The reader emits LazyComplexVector children at complex
+        // positions when the lazy codec is active; allocate the copy
+        // target through the lazy-aware helper so copyRanges stays a
+        // lazy-to-lazy byte copy. Falls back to BaseVector::create
+        // otherwise.
+        auto copyRv = bolt::allocateLazyAwareRowVector(
+            std::dynamic_pointer_cast<const RowType>(curBatch->type()),
+            curBatch->size(),
+            pool());
+        copyRv->copy(curBatch.get(), 0, 0, curBatch->size());
+        result.partitionOutputs[i].push_back(copyRv);
       }
       readerCursor->current().reset();
     }
@@ -712,6 +719,25 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
   return result;
 }
+
+namespace {
+// When a lazy-complex codec is active, SparkShuffleReader emits
+// RowVectors whose complex children are LazyComplexVector. For value-
+// level comparison against the original input, decode them back to
+// their original complex representation first. A no-op when no codec
+// is active or no lazy children are present.
+std::vector<RowVectorPtr> maybeDecodeLazyComplex(
+    std::vector<RowVectorPtr> batches,
+    bytedance::bolt::memory::MemoryPool* pool) {
+  if (bytedance::bolt::LazyComplexCodec::activeCodec() == nullptr) {
+    return batches;
+  }
+  for (auto& batch : batches) {
+    batch = bytedance::bolt::decodeLazyColumns(batch, pool);
+  }
+  return batches;
+}
+} // namespace
 
 void ShuffleTestBase::executeTestWithCustomInput(
     const ShuffleTestParam& param,
@@ -765,12 +791,11 @@ void ShuffleTestBase::executeTestWithCustomInput(
     }
 
     for (int i = 0; i < param.numPartitions; ++i) {
+      auto decodedOutput =
+          maybeDecodeLazyComplex(result.partitionOutputs[i], pool());
       assertEqualTypeAndNumRows(
-          outputType,
-          countRows(expectedPartitions[i]),
-          result.partitionOutputs[i]);
-      ASSERT_TRUE(assertEqualResults(
-          expectedPartitions[i], result.partitionOutputs[i]));
+          outputType, countRows(expectedPartitions[i]), decodedOutput);
+      ASSERT_TRUE(assertEqualResults(expectedPartitions[i], decodedOutput));
     }
   } else {
     // Flatten all outputs
@@ -779,6 +804,7 @@ void ShuffleTestBase::executeTestWithCustomInput(
       allOutputs.insert(
           allOutputs.end(), partBatches.begin(), partBatches.end());
     }
+    allOutputs = maybeDecodeLazyComplex(std::move(allOutputs), pool());
     assertEqualTypeAndNumRows(outputType, totalRows, allOutputs);
     ASSERT_TRUE(assertEqualResults(allBaseBatches, allOutputs));
   }
