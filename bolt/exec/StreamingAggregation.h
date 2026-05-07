@@ -102,7 +102,7 @@ class StreamingAggregation : public Operator {
 
   // Will hold on accept new input if groups_ size large than
   // groupNumberThreshold_
-  const uint32_t groupNumberThreshold_;
+  const vector_size_t groupNumberThreshold_;
 
   // Used at initialize() and gets reset() afterward.
   std::shared_ptr<const core::AggregationNode> aggregationNode_;

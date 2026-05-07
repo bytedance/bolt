@@ -15,6 +15,9 @@
  */
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
 
 #include "bolt/common/base/RandomUtil.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -292,6 +295,54 @@ TEST_F(PercentileApproxTest, partialFull) {
       makeFlatVector<int32_t>(117, [](auto row) { return row < 7 ? 20 : 10; }),
   });
   exec::test::assertQuery(params, {expected});
+}
+
+TEST_F(PercentileApproxTest, percentileArrayWithNaNIsNonDecreasing) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<double> rawData{
+      8814.79, 7960.1,  8492.04, 6837.15, 8429.88, 6034.46, 4464.18, 6628.85,
+      7465.74, 8335.13, 7883.56, 6673.07, 7160.19, 7303.34, 6371.66, 7277.8,
+      4463.77, 8233.78, 8605.39, 8370.71, 6054.61, 4520.48, 5278.29, 6743.67,
+      8697.81, 8828.3,  6975.8,  5624.5,  5544.61, 6099.35, 6562.43, 6507.85,
+      4379.5,  7273.95, 6862.91, 6767.65, 6664.36, 0.0,     5624.5,  7143.87,
+      6277.58, 5624.5,  7123.34, 6662.73, 7083.62, 4863.93, 0.0,     6831.25,
+      6827.66, 6179.52, 6111.47, 6430.53, 644.48,  7262.85, 6425.22, 6804.15,
+      0.0,     nan,     nan,     nan};
+
+  auto rows = makeRowVector({makeFlatVector<double>(rawData)});
+  auto plan = PlanBuilder()
+                  .values({rows})
+                  .project(
+                      {"c0",
+                       "array_constructor(0.10, 0.20, 0.30, 0.40, 0.50, "
+                       "0.60, 0.70, 0.80, 0.90, 0.91, 0.92, 0.93, "
+                       "0.94, 0.95, 0.96, 0.97, 0.98, 0.99) as pct"})
+                  .singleAggregation({}, {"percentile_approx(c0, pct)"})
+                  .planNode();
+
+  auto result = AssertQueryBuilder(plan).copyResults(pool());
+  ASSERT_EQ(result->size(), 1);
+
+  auto arrayResult = result->childAt(0)->asUnchecked<ArrayVector>();
+  ASSERT_FALSE(arrayResult->isNullAt(0));
+  ASSERT_EQ(arrayResult->sizeAt(0), 18);
+
+  auto elements = arrayResult->elements()->asUnchecked<FlatVector<double>>();
+  const auto offset = arrayResult->offsetAt(0);
+  bool seenNaN = false;
+  std::optional<double> previous;
+  for (vector_size_t i = 0; i < arrayResult->sizeAt(0); ++i) {
+    auto current = elements->valueAt(offset + i);
+    if (std::isnan(current)) {
+      seenNaN = true;
+      continue;
+    }
+    ASSERT_FALSE(seenNaN) << "finite value after NaN at index: " << i;
+    if (previous.has_value()) {
+      ASSERT_LE(previous.value(), current) << "index: " << i;
+    }
+    previous = current;
+  }
 }
 
 TEST_F(PercentileApproxTest, finalAggregateAccuracy) {

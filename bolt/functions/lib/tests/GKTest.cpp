@@ -15,9 +15,13 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <optional>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 
 #include "bolt/type/Type.h"
@@ -238,6 +242,123 @@ TEST_F(GKTest, randomInput) {
   }
 }
 
+TEST_F(GKTest, doubleNaNSingleSummaryFollowsSparkHeadSort) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  gk.insert(1.0);
+  gk.insert(2.0);
+  gk.insert(nan);
+  gk.compress();
+
+  const auto result = getPercentiles(gk, {0.0, 0.5, 0.9999, 1.0});
+  ASSERT_EQ(result.size(), 4);
+  EXPECT_EQ(result[0], 1.0);
+  EXPECT_EQ(result[1], 2.0);
+  EXPECT_TRUE(std::isnan(result[2]));
+  EXPECT_TRUE(std::isnan(result[3]));
+}
+
+TEST_F(GKTest, doubleSignedZeroSingleSummaryFollowsSparkHeadSort) {
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  gk.insert(0.0);
+  gk.insert(-0.0);
+  gk.compress();
+
+  const auto result = getPercentiles(gk, {0.0, 1.0});
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_TRUE(std::signbit(result[0]));
+  EXPECT_FALSE(std::signbit(result[1]));
+}
+
+TEST_F(GKTest, doubleNaNPartialMergeMatchesSparkCompress) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  gk.insert(1.0);
+  gk.insert(2.0);
+  gk.compress();
+
+  GKQuantileSummaries<double> other(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  other.insert(nan);
+  other.compress();
+  gk.merge(other);
+
+  const auto result = getPercentiles(gk, {0.5, 0.9, 0.99, 0.9999, 1.0});
+  ASSERT_EQ(result.size(), 5);
+  for (const auto value : result) {
+    EXPECT_EQ(value, 2.0);
+  }
+}
+
+TEST_F(GKTest, doublePercentilesWithNaNAreNonDecreasing) {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<double> firstPartial{
+      8814.79, 7960.1,  8492.04, 6837.15, 8429.88, 6034.46, 4464.18, 6628.85,
+      7465.74, 8335.13, 7883.56, 6673.07, 7160.19, 7303.34, 6371.66, 7277.8,
+      4463.77, 8233.78, 8605.39, 8370.71, 6054.61, 4520.48, 5278.29, 6743.67,
+      8697.81, 8828.3,  6975.8,  5624.5,  5544.61, 6099.35, 6562.43, 6507.85,
+      4379.5,  7273.95, 6862.91, 6767.65, 6664.36, 0.0,     5624.5,  7143.87,
+      6277.58, 5624.5,  7123.34, 6662.73, 7083.62, 4863.93, 0.0,     6831.25,
+      6827.66, 6179.52, 6111.47, 6430.53, 644.48,  7262.85, 6425.22, 6804.15,
+      0.0};
+  const std::vector<double> secondPartial{nan, nan, nan, 0.0};
+
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  for (auto value : firstPartial) {
+    gk.insert(value);
+  }
+  gk.compress();
+
+  GKQuantileSummaries<double> other(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  for (auto value : secondPartial) {
+    other.insert(value);
+  }
+  other.compress();
+  gk.merge(other);
+
+  const auto result = getPercentiles(
+      gk,
+      {0.10,
+       0.20,
+       0.30,
+       0.40,
+       0.50,
+       0.60,
+       0.70,
+       0.80,
+       0.90,
+       0.91,
+       0.92,
+       0.93,
+       0.94,
+       0.95,
+       0.96,
+       0.97,
+       0.98,
+       0.99});
+
+  bool seenNaN = false;
+  std::optional<double> previous;
+  for (auto i = 0; i < result.size(); ++i) {
+    if (std::isnan(result[i])) {
+      seenNaN = true;
+      continue;
+    }
+    ASSERT_FALSE(seenNaN) << "finite value after NaN at index: " << i;
+    if (previous.has_value()) {
+      ASSERT_LE(previous.value(), result[i]) << "index: " << i;
+    }
+    previous = result[i];
+  }
+}
+
 TEST_F(GKTest, serializeAndDeserialize) {
   testSerde<double>();
   testSerde<float>();
@@ -247,6 +368,67 @@ TEST_F(GKTest, serializeAndDeserialize) {
   testSerde<int16_t>();
   testSerde<int8_t>();
   testSerde<Timestamp>();
+}
+
+TEST_F(GKTest, deserializeClearsExistingState) {
+  GKQuantileSummaries<double> source(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  std::unique_ptr<char[]> buffer(new char[source.serializedByteSize()]);
+  source.serialize(buffer.get());
+
+  GKQuantileSummaries<double> target(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  target.insert(1.0);
+  target.insert(2.0);
+  target.compress();
+
+  target.deserialize(buffer.get(), source.serializedByteSize());
+  EXPECT_TRUE(target.empty());
+  EXPECT_EQ(target.count(), 0);
+}
+
+TEST_F(GKTest, deserializeRejectsInvalidSize) {
+  GKQuantileSummaries<double> source(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  source.insert(1.0);
+  source.insert(2.0);
+  source.compress();
+  const auto serializedSize = source.serializedByteSize();
+  std::unique_ptr<char[]> buffer(new char[serializedSize]);
+  source.serialize(buffer.get());
+
+  GKQuantileSummaries<double> target(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  BOLT_ASSERT_THROW(
+      target.deserialize(buffer.get(), serializedSize - 1), "Invalid size");
+  BOLT_ASSERT_THROW(
+      target.deserialize(buffer.get(), serializedSize + 1), "Invalid size");
+}
+
+TEST_F(GKTest, resetClearsState) {
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  gk.insert(1.0);
+  gk.insert(2.0);
+  gk.compress();
+
+  gk.reset();
+  EXPECT_TRUE(gk.empty());
+  EXPECT_EQ(gk.count(), 0);
+  EXPECT_TRUE(gk.isCompressed());
+
+  gk.insert(3.0);
+  gk.compress();
+  EXPECT_EQ(gk.query(0.5), 3.0);
+}
+
+TEST_F(GKTest, queryEmptyPercentiles) {
+  GKQuantileSummaries<double> gk(
+      pool_.get(), kEpsilon, kDefaultCompressThreshold, kDefaultHeadSize);
+  gk.insert(1.0);
+  gk.compress();
+
+  EXPECT_TRUE(gk.query(std::vector<double>{}).empty());
 }
 
 TEST_F(GKTest, merge) {
