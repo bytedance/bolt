@@ -34,8 +34,6 @@
 #include <arrow/array/array_binary.h>
 #include <arrow/buffer.h>
 #include <arrow/io/buffered.h>
-#include <arrow/result.h>
-#include <fmt/chrono.h>
 
 #include "arrow/c/bridge.h"
 #include "arrow/c/helpers.h"
@@ -51,7 +49,6 @@
 
 #include <cstdint>
 #include <iostream>
-#include <memory>
 
 // using namespace facebook;
 using namespace bytedance::bolt;
