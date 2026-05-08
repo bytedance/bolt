@@ -35,16 +35,3 @@ target_link_libraries(
         ${FOLLY_BENCHMARK}
         glog::glog
 )
-
-add_executable(
-    bolt_shuffle_reader_merge_benchmark ShuffleReaderMergeBenchmark.cpp)
-
-target_link_libraries(
-    bolt_shuffle_reader_merge_benchmark
-    PRIVATE
-        bolt_shuffle_spark_impl
-        bolt_testutils
-        Folly::folly
-        ${FOLLY_BENCHMARK}
-        glog::glog
-)
