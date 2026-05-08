@@ -152,6 +152,44 @@ TEST_F(LazyComplexVectorTest, copyRangesLazyToLazy) {
   }
 }
 
+TEST_F(LazyComplexVectorTest, decodedVectorThroughDictionaryOverLazy) {
+  // Spark shuffle reproduces this shape: a DictionaryVector wraps a
+  // LazyComplexVector. DecodedVector::combineWrappers must walk through
+  // the lazy wrapper to its inner FlatVector<StringView>; otherwise it
+  // hits "Unsupported vector encoding".
+  ScopedActiveLazyFormat scopedCodec("compact_row");
+
+  row::CompactRowLazyCodec codec;
+  auto original = makeArrayVector<int64_t>({{1, 2, 3}, {}, {4, 5}, {6}});
+  auto lazy = codec.encode(original, pool());
+
+  // Build dictionary indices that pick rows [3, 0, 2] from the lazy bytes.
+  const std::vector<vector_size_t> picks{3, 0, 2};
+  auto indices = AlignedBuffer::allocate<vector_size_t>(picks.size(), pool());
+  std::memcpy(
+      indices->asMutable<vector_size_t>(),
+      picks.data(),
+      sizeof(vector_size_t) * picks.size());
+  auto dict = BaseVector::wrapInDictionary(
+      /*nulls=*/nullptr, indices, picks.size(), VectorPtr(lazy));
+
+  // Decode through the dictionary; the inner FlatVector<StringView> bytes
+  // are exposed via the dictionary's index mapping.
+  SelectivityVector rows(picks.size());
+  DecodedVector decoded;
+  decoded.decode(*dict, rows, /*loadLazy=*/true);
+
+  ASSERT_EQ(decoded.base()->encoding(), VectorEncoding::Simple::FLAT);
+  ASSERT_EQ(decoded.base()->typeKind(), TypeKind::VARBINARY);
+  const auto* baseFlat = decoded.base()->as<FlatVector<StringView>>();
+  ASSERT_NE(baseFlat, nullptr);
+  for (vector_size_t i = 0; i < static_cast<vector_size_t>(picks.size());
+       ++i) {
+    EXPECT_EQ(baseFlat->valueAt(decoded.index(i)), lazy->valueAt(picks[i]))
+        << "byte mismatch at picked row " << i;
+  }
+}
+
 TEST_F(LazyComplexVectorTest, copyRangesFromNonLazyThrows) {
   ScopedActiveLazyFormat scopedCodec("compact_row");
 

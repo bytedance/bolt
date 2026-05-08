@@ -207,6 +207,13 @@ void DecodedVector::combineWrappers(
         values = values->valueVector().get();
         break;
       }
+      case VectorEncoding::Simple::LAZY_COMPLEX: {
+        // Walk through the lazy wrapper to its inner FlatVector<StringView>.
+        // The next iteration terminates at setBaseData with the bytes view.
+        values =
+            values->asUnchecked<LazyComplexVector>()->encoded().get();
+        break;
+      }
       default:
         BOLT_CHECK(false, "Unsupported vector encoding");
     }
