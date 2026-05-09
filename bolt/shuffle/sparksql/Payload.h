@@ -204,7 +204,7 @@ class InMemoryPayload final : public Payload {
       uint32_t index) override;
 
   int64_t bufferSizeAt(uint32_t index) const {
-      return buffers_[index] ? buffers_[index]->size() : 0;
+    return buffers_[index] ? buffers_[index]->size() : 0;
   }
 
   arrow::Result<std::unique_ptr<BlockPayload>> toBlockPayload(
