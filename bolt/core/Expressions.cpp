@@ -30,6 +30,7 @@
 
 #include "bolt/core/Expressions.h"
 #include "bolt/common/encode/Base64.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/vector/VectorSaver.h"
 namespace bytedance::bolt::core {
 
@@ -123,6 +124,9 @@ TypedExprPtr ConstantTypedExpr::create(
   std::istringstream dataStream(serializedData);
 
   auto* pool = static_cast<memory::MemoryPool*>(context);
+  if (pool == nullptr) {
+    pool = memory::MemoryManager::getInstance()->tracePool();
+  }
 
   return std::make_shared<ConstantTypedExpr>(restoreVector(dataStream, pool));
 }

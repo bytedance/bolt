@@ -20,6 +20,7 @@
 
 #include <folly/dynamic.h>
 
+#include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/ConnectorOptions.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -148,6 +149,9 @@ std::shared_ptr<connector::ColumnHandle> HiveObjectFactory::makeColumnHandle(
     case static_cast<int>(HiveColumnType::kSynthesized):
       hiveColumnType = HiveColumnType::kSynthesized;
       break;
+    case static_cast<int>(HiveColumnType::kRowIndex):
+      hiveColumnType = HiveColumnType::kRowIndex;
+      break;
 
     default:
       BOLT_UNSUPPORTED("Unsupported ColumnType ", columnType);
@@ -201,8 +205,8 @@ std::shared_ptr<ConnectorTableHandle> HiveObjectFactory::makeTableHandle(
 
   core::TypedExprPtr remainingFilter = nullptr;
   if (auto rf = options.get_ptr("remainingFilter")) {
-    // assuming rf["expr"] holds the serialized expression
-    remainingFilter = ISerializable::deserialize<core::ITypedExpr>(*rf);
+    remainingFilter = ISerializable::deserialize<core::ITypedExpr>(
+        *rf, memory::MemoryManager::getInstance()->tracePool());
   }
 
   std::unordered_map<std::string, std::string> tableParameters;
@@ -212,17 +216,22 @@ std::shared_ptr<ConnectorTableHandle> HiveObjectFactory::makeTableHandle(
     }
   }
 
-  // build RowTypePtr from columnHandles
-  std::vector<std::string> names;
-  std::vector<TypePtr> types;
-  names.reserve(columnHandles.size());
-  types.reserve(columnHandles.size());
-  for (auto& col : columnHandles) {
-    auto hiveCol = std::static_pointer_cast<const HiveColumnHandle>(col);
-    names.push_back(hiveCol->name());
-    types.push_back(hiveCol->dataType());
+  RowTypePtr dataColumns;
+  if (const auto* dc = options.get_ptr("dataColumns")) {
+    dataColumns = std::dynamic_pointer_cast<const RowType>(
+        ISerializable::deserialize<Type>(*dc, nullptr));
+  } else {
+    std::vector<std::string> names;
+    std::vector<TypePtr> types;
+    names.reserve(columnHandles.size());
+    types.reserve(columnHandles.size());
+    for (const auto& col : columnHandles) {
+      auto hiveCol = std::static_pointer_cast<const HiveColumnHandle>(col);
+      names.push_back(hiveCol->name());
+      types.push_back(hiveCol->dataType());
+    }
+    dataColumns = ROW(std::move(names), std::move(types));
   }
-  auto dataColumns = ROW(std::move(names), std::move(types));
 
   return std::make_shared<HiveTableHandle>(
       connectorId(),
