@@ -68,6 +68,19 @@ target_link_libraries(
   bolt_aggregates
 )
 
+bolt_add_library(
+        bolt_exec_connector_test_lib
+        ConnectorTestBase.cpp
+        ConnectorTestBootstrap.cpp
+)
+
+target_link_libraries(
+  bolt_exec_connector_test_lib
+  bolt_exec_test_lib
+  bolt_hive_connector
+  bolt_tpch_connector
+)
+
 if(${BOLT_ENABLE_TORCH})
   target_compile_definitions(bolt_exec_test_lib PRIVATE BOLT_HAS_TORCH=1)
   target_include_directories(bolt_exec_test_lib SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})

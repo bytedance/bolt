@@ -1,0 +1,48 @@
+/*
+ * Copyright (c) International Business Machines Corporation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bolt/exec/tests/utils/ConnectorTestBootstrap.h"
+
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/hive/HiveConnector.h"
+#include "bolt/connectors/tpch/TpchConnector.h"
+
+namespace bytedance::bolt::exec::test {
+
+void registerConnectorTestFactories(const std::string& connectorName) {
+  if (connector::hasConnectorFactory(connectorName)) {
+    return;
+  }
+
+  if (connectorName == connector::kHiveConnectorName ||
+      connectorName == connector::kHiveHadoop2ConnectorName ||
+      connectorName == connector::kTosConnectorName) {
+    connector::hive::registerHiveConnectorFactories();
+    return;
+  }
+
+  if (connectorName == connector::kTpchConnectorName) {
+    connector::tpch::registerTpchConnectorFactories();
+    return;
+  }
+
+  BOLT_FAIL(
+      "ConnectorFactory with name '{}' is not bootstrapped", connectorName);
+}
+
+} // namespace bytedance::bolt::exec::test
