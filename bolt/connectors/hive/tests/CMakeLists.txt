@@ -47,3 +47,20 @@ target_link_libraries(
   GTest::gtest
   GTest::gtest_main
 )
+
+add_executable(
+  bolt_hive_bucketed_table_write_test
+  HiveBucketedTableWriteTest.cpp
+)
+add_test(
+  bolt_hive_bucketed_table_write_test
+  bolt_hive_bucketed_table_write_test
+)
+
+target_link_libraries(
+  bolt_hive_bucketed_table_write_test
+  bolt_exec_connector_test_lib
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
+)
