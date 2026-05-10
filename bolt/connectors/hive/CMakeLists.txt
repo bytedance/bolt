@@ -52,6 +52,7 @@ bolt_add_library(
   PaimonRowIterator.cpp
   PaimonSplitReader.cpp
   PartitionIdGenerator.cpp
+  RegisterHiveConnector.cpp
   SplitReader.cpp
   TableHandle.cpp
 )

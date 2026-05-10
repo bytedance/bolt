@@ -160,6 +160,8 @@ void HiveConnectorFactory::initialize() {
   static bool once = []() {
     HiveTableHandle::registerSerDe();
     HiveColumnHandle::registerSerDe();
+    LocationHandle::registerSerDe();
+    HiveInsertTableHandle::registerSerDe();
     dwio::common::registerFileSinks();
     dwrf::registerDwrfReaderFactory();
     dwrf::registerDwrfWriterFactory();
