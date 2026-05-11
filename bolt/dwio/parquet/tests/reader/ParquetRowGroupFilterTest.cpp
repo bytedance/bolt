@@ -21,8 +21,6 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/connectors/hive/HiveConfig.h"
-#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/tests/utils/DataSetBuilder.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -34,8 +32,8 @@
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/TableScan.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/functions/sparksql/registration/Register.h"
@@ -43,7 +41,6 @@
 #include "bolt/type/Type.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::common::test;
@@ -52,14 +49,14 @@ using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::parquet;
 using namespace bytedance::bolt::dwio::common;
 
-class ParquetRowGroupFilterTest : public virtual HiveConnectorTestBase {
+class ParquetRowGroupFilterTest : public virtual ConnectorTestBase {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
   }
 
   static void SetUpTestCase() {
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
   }
 
  protected:
@@ -131,14 +128,17 @@ void ParquetRowGroupFilterTest::testSubfieldPruning(
 
   std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
       assignments;
-  assignments["a"] = std::make_shared<HiveColumnHandle>(
-      "a", HiveColumnHandle::ColumnType::kRegular, BIGINT(), BIGINT());
-  assignments["b"] = std::make_shared<HiveColumnHandle>(
-      "b",
-      HiveColumnHandle::ColumnType::kRegular,
-      mapType,
-      mapType,
-      std::move(bSubfields));
+  assignments["a"] = makeColumnHandle("a", BIGINT());
+
+  folly::dynamic requiredSubfields = folly::dynamic::array;
+  for (const auto& subfield : bSubfields) {
+    requiredSubfields.push_back(subfield.toString());
+  }
+  auto bOptions = connector::makeOptions(
+      {{"columnType", kColumnTypeRegular}, {"hiveType", mapType->serialize()}});
+  bOptions.options["requiredSubfields"] = std::move(requiredSubfields);
+  assignments["b"] =
+      connectorObjectFactory()->makeColumnHandle("b", mapType, bOptions);
 
   auto op = PlanBuilder()
                 .startTableScan()
@@ -149,7 +149,7 @@ void ParquetRowGroupFilterTest::testSubfieldPruning(
                 .assignments(assignments)
                 .endTableScan()
                 .planNode();
-  auto split = makeHiveConnectorSplits(
+  auto split = makeConnectorSplits(
       filePath->path, 1, dwio::common::FileFormat::PARQUET)[0];
   auto result = AssertQueryBuilder(op).split(split).copyResults(this->pool());
 

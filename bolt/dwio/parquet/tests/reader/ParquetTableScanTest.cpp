@@ -32,18 +32,17 @@
 #include <simdjson.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/connectors/hive/HiveConfig.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/sparksql/VariantEncoding.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 
-#include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -112,21 +111,14 @@ RowVectorPtr makeVariantParquetBatch(
 
 } // namespace
 
-class ParquetTableScanTest : public HiveConnectorTestBase {
+class ParquetTableScanTest : public ConnectorTestBase {
  protected:
   using OperatorTestBase::assertQuery;
 
   void SetUp() {
+    ConnectorTestBase::SetUp();
     registerParquetReaderFactory();
     functions::sparksql::registerFunctions("");
-
-    auto hiveConnector =
-        connector::getConnectorFactory(connector::kHiveConnectorName)
-            ->newConnector(
-                kHiveConnectorId,
-                std::make_shared<config::ConfigBase>(
-                    std::unordered_map<std::string, std::string>()));
-    connector::registerConnector(hiveConnector);
   }
 
   void assertSelect(
@@ -201,7 +193,7 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
           std::shared_ptr<connector::ColumnHandle>>& assignments,
       const std::string& sql) {
     auto rowType = getRowType(std::move(outputColumnNames));
-    auto tableHandle = makeTableHandle({}, nullptr, "hive_table", rowType);
+    auto tableHandle = makeTableHandle("hive_table");
     auto plan =
         PlanBuilder().tableScan(rowType, tableHandle, assignments).planNode();
     assertQuery(plan, splits_, sql);
@@ -269,19 +261,36 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     return bytedance::bolt::test::getDataFilePath("../examples/" + fileName);
   }
 
-  std::shared_ptr<connector::hive::HiveConnectorSplit> makeSplit(
+  std::shared_ptr<connector::ConnectorSplit> makeSplit(
       const std::string& filePath,
       const std::optional<
           std::unordered_map<std::string, std::optional<std::string>>>&
           partitionKeys = std::nullopt,
       const std::optional<std::unordered_map<std::string, std::string>>&
           infoColumns = std::nullopt) {
-    return makeHiveConnectorSplits(
-        filePath,
-        1,
-        dwio::common::FileFormat::PARQUET,
-        partitionKeys,
-        infoColumns)[0];
+    auto options = connector::makeOptions(
+        {{"fileFormat", static_cast<int>(dwio::common::FileFormat::PARQUET)}});
+    if (partitionKeys) {
+      folly::dynamic serializedPartitionKeys = folly::dynamic::object;
+      for (const auto& [key, value] : *partitionKeys) {
+        serializedPartitionKeys[key] = value ? *value : folly::dynamic(nullptr);
+      }
+      options.options["partitionKeys"] = std::move(serializedPartitionKeys);
+    }
+    if (infoColumns) {
+      folly::dynamic serializedInfoColumns = folly::dynamic::object;
+      for (const auto& [key, value] : *infoColumns) {
+        serializedInfoColumns[key] = value;
+      }
+      options.options["infoColumns"] = std::move(serializedInfoColumns);
+    }
+
+    auto file = filesystems::getFileSystem(filePath, nullptr)
+                    ->openFileForRead(filePath);
+    const auto effectivePath =
+        filePath.find('/') == 0 ? "file:" + filePath : filePath;
+    return connectorObjectFactory()->makeConnectorSplit(
+        effectivePath, 0, file->size(), options);
   }
 
   const std::vector<std::shared_ptr<connector::ConnectorSplit>>& splits()
@@ -762,11 +771,9 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
   std::shared_ptr<core::QueryCtx> queryCtx =
       core::QueryCtx::create(executor.get());
   std::unordered_map<std::string, std::string> session = {
-      {std::string(
-           connector::hive::HiveConfig::kFileColumnNamesReadAsLowerCaseSession),
-       "true"}};
+      {"file_column_names_read_as_lower_case", "true"}};
   queryCtx->setConnectorSessionOverridesUnsafe(
-      kHiveConnectorId, std::move(session));
+      connectorId(), std::move(session));
   params.queryCtx = queryCtx;
   params.planNode = plan;
   const int numSplitsPerFile = 1;
@@ -774,12 +781,12 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
   bool noMoreSplits = false;
   auto addSplits = [&](exec::Task* task) {
     if (!noMoreSplits) {
-      auto const splits = HiveConnectorTestBase::makeHiveConnectorSplits(
+      auto splits = makeConnectorSplits(
           {getExampleFilePath("upper.parquet")},
           numSplitsPerFile,
           dwio::common::FileFormat::PARQUET);
-      for (const auto& split : splits) {
-        task->addSplit("0", exec::Split(split));
+      for (auto& split : splits) {
+        task->addSplit("0", exec::Split(std::move(split)));
       }
       task->noMoreSplits("0");
     }
@@ -812,23 +819,21 @@ TEST_F(ParquetTableScanTest, rowIndex) {
       std::unordered_map<std::string, std::string>{{kPath, filePath}});
   std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
       assignments;
-  assignments["a"] = std::make_shared<connector::hive::HiveColumnHandle>(
-      "a",
-      connector::hive::HiveColumnHandle::ColumnType::kRegular,
-      BIGINT(),
-      BIGINT());
-  assignments["b"] = std::make_shared<connector::hive::HiveColumnHandle>(
-      "b",
-      connector::hive::HiveColumnHandle::ColumnType::kRegular,
-      DOUBLE(),
-      DOUBLE());
-  assignments[kPath] = synthesizedColumn(kPath, VARCHAR());
+  assignments["a"] = makeColumnHandle("a", BIGINT());
+  assignments["b"] = makeColumnHandle("b", DOUBLE());
+  assignments[kPath] = connectorObjectFactory()->makeColumnHandle(
+      kPath,
+      VARCHAR(),
+      connector::makeOptions(
+          {{"columnType", kColumnTypeSynthesized},
+           {"hiveType", VARCHAR()->serialize()}}));
   assignments["_tmp_metadata_row_index"] =
-      std::make_shared<connector::hive::HiveColumnHandle>(
+      connectorObjectFactory()->makeColumnHandle(
           "_tmp_metadata_row_index",
-          connector::hive::HiveColumnHandle::ColumnType::kRowIndex,
           BIGINT(),
-          BIGINT());
+          connector::makeOptions(
+              {{"columnType", kColumnTypeRowIndex},
+               {"hiveType", BIGINT()->serialize()}}));
 
   assertSelectWithAssignments({"a"}, assignments, "SELECT a FROM tmp");
   assertSelectWithAssignments(
@@ -1047,10 +1052,9 @@ TEST_F(ParquetTableScanTest, timestampPrecisionMicrosecond) {
           std::thread::hardware_concurrency());
   auto queryCtx = core::QueryCtx::create(executor.get());
   std::unordered_map<std::string, std::string> session = {
-      {std::string(connector::hive::HiveConfig::kReadTimestampUnitSession),
-       "6"}};
+      {"hive.reader.timestamp_unit", "6"}};
   queryCtx->setConnectorSessionOverridesUnsafe(
-      kHiveConnectorId, std::move(session));
+      connectorId(), std::move(session));
   params.queryCtx = queryCtx;
   params.planNode = plan;
   const int numSplitsPerFile = 1;
@@ -1058,10 +1062,10 @@ TEST_F(ParquetTableScanTest, timestampPrecisionMicrosecond) {
   bool noMoreSplits = false;
   auto addSplits = [&](exec::Task* task) {
     if (!noMoreSplits) {
-      auto const splits = HiveConnectorTestBase::makeHiveConnectorSplits(
+      auto splits = makeConnectorSplits(
           {file->path}, numSplitsPerFile, dwio::common::FileFormat::PARQUET);
-      for (const auto& split : splits) {
-        task->addSplit("0", exec::Split(split));
+      for (auto& split : splits) {
+        task->addSplit("0", exec::Split(std::move(split)));
       }
       task->noMoreSplits("0");
     }
@@ -1089,9 +1093,7 @@ TEST_F(ParquetTableScanTest, structMatchByName) {
         const auto plan = builder.planNode();
         auto query = AssertQueryBuilder(plan, duckDbQueryRunner_);
         query.connectorSessionProperty(
-            kHiveConnectorId,
-            connector::hive::HiveConfig::kParquetUseColumnNamesSession,
-            "true");
+            connectorId(), "hive_parquet_use_column_names", "true");
         query.splits(splits());
         if (remainingFilter.empty()) {
           query.assertResults(sql);
@@ -1159,9 +1161,7 @@ TEST_F(ParquetTableScanTest, structMatchByName) {
   const auto result =
       AssertQueryBuilder(plan)
           .connectorSessionProperty(
-              kHiveConnectorId,
-              connector::hive::HiveConfig::kParquetUseColumnNamesSession,
-              "true")
+              connectorId(), "hive_parquet_use_column_names", "true")
           .split(split)
           .copyResults(pool());
   const auto rows = result->as<RowVector>();
@@ -1193,13 +1193,9 @@ TEST_F(ParquetTableScanTest, structMatchByName) {
       PlanBuilder().tableScan(rowType, {}, "", rowType).planNode();
   AssertQueryBuilder(lowerCasePlan, duckDbQueryRunner_)
       .connectorSessionProperty(
-          kHiveConnectorId,
-          connector::hive::HiveConfig::kParquetUseColumnNamesSession,
-          "true")
+          connectorId(), "hive_parquet_use_column_names", "true")
       .connectorSessionProperty(
-          kHiveConnectorId,
-          connector::hive::HiveConfig::kFileColumnNamesReadAsLowerCaseSession,
-          "true")
+          connectorId(), "file_column_names_read_as_lower_case", "true")
       .splits(splits())
       .assertResults("SELECT 2, ('Janet', null, 'Jones'), '567 Maple Drive'");
 }
@@ -1259,10 +1255,10 @@ TEST_F(ParquetTableScanTest, dcMapContainsDifferentDynamicColumns) {
   auto addSplits = [&](exec::Task* task) {
     if (!noMoreSplits) {
       for (const auto& file : files) {
-        auto const splits = HiveConnectorTestBase::makeHiveConnectorSplits(
+        auto splits = makeConnectorSplits(
             file, numSplitsPerFile, dwio::common::FileFormat::PARQUET);
-        for (const auto& split : splits) {
-          task->addSplit("0", exec::Split(split));
+        for (auto& split : splits) {
+          task->addSplit("0", exec::Split(std::move(split)));
         }
       }
       task->noMoreSplits("0");

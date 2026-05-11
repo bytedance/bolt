@@ -36,7 +36,7 @@
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/TpchQueryBuilder.h"
@@ -74,7 +74,7 @@ class ParquetTpchTest : public testing::Test {
     auto hiveConnector =
         connector::getConnectorFactory(connector::kHiveConnectorName)
             ->newConnector(
-                kHiveConnectorId,
+                std::string(kHiveConnectorId),
                 std::make_shared<config::ConfigBase>(
                     std::unordered_map<std::string, std::string>()));
     connector::registerConnector(hiveConnector);
@@ -92,7 +92,7 @@ class ParquetTpchTest : public testing::Test {
   }
 
   static void TearDownTestSuite() {
-    connector::unregisterConnector(kHiveConnectorId);
+    connector::unregisterConnector(std::string(kHiveConnectorId));
     connector::unregisterConnector(kBoltTpchConnectorId);
     bytedance::bolt::parquet::unregisterParquetReaderFactory();
     bytedance::bolt::parquet::unregisterParquetWriterFactory();
@@ -117,8 +117,8 @@ class ParquetTpchTest : public testing::Test {
               .tpchTableScan(
                   table, std::move(columnNames), 0.01, kBoltTpchConnectorId)
               .planNode();
-      auto split =
-          exec::Split(std::make_shared<connector::tpch::TpchConnectorSplit>(
+      auto split = exec::Split(
+          std::make_shared<connector::tpch::TpchConnectorSplit>(
               kBoltTpchConnectorId, 1, 0));
 
       auto rows =
@@ -153,10 +153,13 @@ class ParquetTpchTest : public testing::Test {
       if (!noMoreSplits) {
         for (const auto& entry : tpchPlan.dataFiles) {
           for (const auto& path : entry.second) {
-            auto const splits = HiveConnectorTestBase::makeHiveConnectorSplits(
-                path, kNumSplits, tpchPlan.dataFileFormat);
+            auto const splits = ConnectorTestBase::makeConnectorSplits(
+                connector::kHiveConnectorName,
+                path,
+                kNumSplits,
+                tpchPlan.dataFileFormat);
             for (const auto& split : splits) {
-              task->addSplit(entry.first, Split(split));
+              task->addSplit(entry.first, Split(std::shared_ptr(split)));
             }
           }
           task->noMoreSplits(entry.first);
