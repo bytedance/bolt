@@ -37,6 +37,9 @@
 
 #include "bolt/common/hyperloglog/SparseHll.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"

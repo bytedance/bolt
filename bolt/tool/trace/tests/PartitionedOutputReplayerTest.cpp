@@ -34,6 +34,9 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/TraceUtil.h"
