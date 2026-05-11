@@ -35,7 +35,7 @@
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/exec/Task.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/Type.h"
@@ -44,7 +44,7 @@
 #include <folly/init/Init.h>
 #include <algorithm>
 using namespace bytedance::bolt;
-using exec::test::HiveConnectorTestBase;
+using exec::test::ConnectorTestBase;
 
 // This file contains a step-by-step minimal example of a workflow that:
 //

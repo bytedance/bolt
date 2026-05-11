@@ -33,18 +33,18 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/substrait/SubstraitToBoltPlan.h"
 #include "bolt/type/Type.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec;
 
-class Substrait2BoltPlanConversionTest
-    : public exec::test::HiveConnectorTestBase {
+namespace {
+
+class Substrait2BoltPlanConversionTest : public exec::test::ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
@@ -73,11 +73,12 @@ class Substrait2BoltPlanConversionTest
       auto path = fmt::format("{}{}", tmpDir_->path, paths[i]);
       auto start = starts[i];
       auto length = lengths[i];
-      auto split = bytedance::bolt::exec::test::HiveConnectorSplitBuilder(path)
-                       .fileFormat(fileFormat)
-                       .start(start)
-                       .length(length)
-                       .build();
+      auto split = makeConnectorSplit(
+          path,
+          start,
+          length,
+          connector::makeOptions(
+              {{"fileFormat", static_cast<int>(fileFormat)}}));
       splits.emplace_back(split);
     }
     return splits;
@@ -303,3 +304,5 @@ TEST_F(Substrait2BoltPlanConversionTest, DISABLED_q6) {
       .splits(makeSplits(planConverter, planNode))
       .assertResults(expectedResult);
 }
+
+} // namespace

@@ -49,7 +49,7 @@
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Split.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/TpchQueryBuilder.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
