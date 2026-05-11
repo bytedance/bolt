@@ -51,7 +51,7 @@
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -69,12 +69,12 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::common::hll;
 namespace bytedance::bolt::tool::trace::test {
-class HashJoinReplayerTest : public HiveConnectorTestBase {
+class HashJoinReplayerTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
@@ -94,7 +94,7 @@ class HashJoinReplayerTest : public HiveConnectorTestBase {
   void TearDown() override {
     probeInput_.clear();
     buildInput_.clear();
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   struct PlanWithSplits {
@@ -130,7 +130,7 @@ class HashJoinReplayerTest : public HiveConnectorTestBase {
 
   std::vector<RowVectorPtr>
   makeVectors(int32_t count, int32_t rowsPerVector, const RowTypePtr& rowType) {
-    return HiveConnectorTestBase::makeVectors(rowType, count, rowsPerVector);
+    return ConnectorTestBase::makeVectors(rowType, count, rowsPerVector);
   }
 
   std::vector<Split> makeSplits(
@@ -141,7 +141,7 @@ class HashJoinReplayerTest : public HiveConnectorTestBase {
     for (auto i = 0; i < 4; ++i) {
       const std::string filePath = fmt::format("{}/{}", path, i);
       writeToFile(filePath, inputs);
-      splits.emplace_back(makeHiveConnectorSplit(filePath));
+      splits.emplace_back(makeConnectorSplit(filePath));
     }
 
     return splits;

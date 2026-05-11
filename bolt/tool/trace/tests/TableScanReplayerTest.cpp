@@ -46,7 +46,7 @@
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -65,11 +65,11 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::common::hll;
 namespace bytedance::bolt::tool::trace::test {
-class TableScanReplayerTest : public HiveConnectorTestBase {
+class TableScanReplayerTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
@@ -91,7 +91,7 @@ class TableScanReplayerTest : public HiveConnectorTestBase {
       int32_t rowsPerVector,
       const RowTypePtr& rowType = nullptr) {
     auto inputs = rowType ? rowType : rowType_;
-    return HiveConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
+    return ConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
   }
 
   core::PlanNodePtr tableScanNode() {
@@ -140,7 +140,7 @@ TEST_F(TableScanReplayerTest, runner) {
           .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
           .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
           .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-          .splits(makeHiveConnectorSplits(splitFiles))
+          .splits(makeConnectorSplits(splitFiles))
           .copyResults(pool(), task);
 
   const auto taskTraceDir =
@@ -201,7 +201,7 @@ TEST_F(TableScanReplayerTest, basic) {
 
   const auto plan = tableScanNode();
   auto results = AssertQueryBuilder(plan)
-                     .splits(makeHiveConnectorSplits(splitFiles))
+                     .splits(makeConnectorSplits(splitFiles))
                      .copyResults(pool());
 
   std::shared_ptr<Task> task;
@@ -213,7 +213,7 @@ TEST_F(TableScanReplayerTest, basic) {
           .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
           .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
           .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-          .splits(makeHiveConnectorSplits(splitFiles))
+          .splits(makeConnectorSplits(splitFiles))
           .copyResults(pool(), task);
 
   assertEqualResults({results}, {traceResult});
@@ -270,7 +270,7 @@ TEST_F(TableScanReplayerTest, columnPrunning) {
       tableScanNode(ROW({"c0", "c3", "c5"}, {BIGINT(), REAL(), VARCHAR()}));
 
   const auto results = AssertQueryBuilder(plan)
-                           .splits(makeHiveConnectorSplits(splitFiles))
+                           .splits(makeConnectorSplits(splitFiles))
                            .copyResults(pool());
 
   std::shared_ptr<Task> task;
@@ -282,7 +282,7 @@ TEST_F(TableScanReplayerTest, columnPrunning) {
           .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
           .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
           .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-          .splits(makeHiveConnectorSplits(splitFiles))
+          .splits(makeConnectorSplits(splitFiles))
           .copyResults(pool(), task);
 
   assertEqualResults({results}, {traceResult});
@@ -331,7 +331,7 @@ TEST_F(TableScanReplayerTest, subfieldPrunning) {
                         .endTableScan()
                         .capturePlanNodeId(traceNodeId_)
                         .planNode();
-  const auto split = makeHiveConnectorSplit(filePath->getPath());
+  const auto split = makeConnectorSplit(filePath->getPath());
   const auto results =
       AssertQueryBuilder(plan).split(split).copyResults(pool());
 
@@ -386,7 +386,7 @@ TEST_F(TableScanReplayerTest, concurrent) {
           .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
           .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
           .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-          .splits(makeHiveConnectorSplits(splitFiles))
+          .splits(makeConnectorSplits(splitFiles))
           .copyResults(pool(), task);
 
   const auto taskId = task->taskId();
