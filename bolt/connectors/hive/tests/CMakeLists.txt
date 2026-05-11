@@ -29,6 +29,7 @@ add_executable(
   bolt_hive_connector_test
   FileHandleTest.cpp
   HiveConfigTest.cpp
+  HiveConnectorTestBase.cpp
   HiveConnectorSerDeTest.cpp
   HiveConnectorTest.cpp
   HiveRowIndexTest.cpp

@@ -29,19 +29,36 @@
  */
 
 #include <gtest/gtest.h>
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/connectors/hive/tests/HiveConnectorTestBase.h"
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
+#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/HiveDataSource.h"
+#include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "dwio/common/tests/utils/BatchMaker.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec::test;
 
-class HiveConnectorTest : public exec::test::HiveConnectorTestBase {
+class HiveConnectorTest : public HiveConnectorTestBase {
+ public:
+  std::vector<RowVectorPtr> makeHiveVectors(
+      const RowTypePtr& rowType,
+      int32_t numVectors,
+      int32_t rowsPerVector) {
+    std::vector<RowVectorPtr> vectors;
+    for (int32_t i = 0; i < numVectors; ++i) {
+      auto vector = std::dynamic_pointer_cast<RowVector>(
+          bolt::test::BatchMaker::createBatch(rowType, rowsPerVector, *pool_));
+      vectors.push_back(vector);
+    }
+    return vectors;
+  }
+
  protected:
   std::shared_ptr<memory::MemoryPool> pool_ =
       memory::memoryManager()->addLeafPool();
@@ -73,6 +90,16 @@ groupSubfields(const std::vector<Subfield>& subfields) {
     grouped[name].push_back(&subfield);
   }
   return grouped;
+}
+
+void verifyCacheStats(
+    const SimpleLRUCacheStats& cacheStats,
+    size_t curSize,
+    size_t numHits,
+    size_t numLookups) {
+  EXPECT_EQ(cacheStats.curSize, curSize);
+  EXPECT_EQ(cacheStats.numHits, numHits);
+  EXPECT_EQ(cacheStats.numLookups, numLookups);
 }
 
 TEST_F(HiveConnectorTest, hiveConfig) {
@@ -450,6 +477,57 @@ TEST_F(HiveConnectorTest, extractFiltersFromRemainingFilter) {
   ASSERT_TRUE(remaining);
   ASSERT_EQ(
       remaining->toString(), "not(lt(ROW[\"c2\"],cast 0 as DECIMAL(20, 0)))");
+}
+
+TEST_F(HiveConnectorTest, hivePartitionFunctionSpecToString) {
+  auto data = makeRowVector(
+      {makeFlatVector<int16_t>({0, 1, 2}),
+       makeFlatVector<int32_t>({0, 1, 2}),
+       makeFlatVector<int64_t>({0, 1, 2})});
+
+  auto hiveSpec = std::make_shared<HivePartitionFunctionSpec>(
+      4,
+      std::vector<int>{0, 1, 0, 1},
+      std::vector<column_index_t>{1, 2},
+      std::vector<VectorPtr>{});
+
+  auto plan = exec::test::PlanBuilder()
+                  .values({data})
+                  .partitionedOutput({"c1", "c2"}, 2, false, hiveSpec)
+                  .planNode();
+  ASSERT_EQ("-- PartitionedOutput[1]\n", plan->toString(false, false, true));
+  ASSERT_EQ(
+      "-- PartitionedOutput[1][partitionFunction: HIVE((1, 2) buckets: 4) with 2 partitions] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false, true));
+}
+
+TEST_F(HiveConnectorTest, connectorStats) {
+  auto hiveConnector =
+      std::dynamic_pointer_cast<connector::hive::HiveConnector>(
+          connector::getConnector(connectorId()));
+  EXPECT_NE(nullptr, hiveConnector);
+  verifyCacheStats(hiveConnector->fileHandleCacheStats(), 0, 0, 0);
+
+  RowTypePtr rowType =
+      ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6"},
+          {BIGINT(),
+           INTEGER(),
+           SMALLINT(),
+           REAL(),
+           DOUBLE(),
+           VARCHAR(),
+           TINYINT()});
+  for (size_t i = 0; i < 99; i++) {
+    auto vectors = makeHiveVectors(rowType, 10, 10);
+    auto filePath = TempFilePath::create();
+    writeToFile(filePath->path, vectors);
+    createDuckDbTable(vectors);
+    auto plan = PlanBuilder(pool_.get()).tableScan(rowType).planNode();
+    assertQuery(plan, {filePath}, "SELECT * FROM tmp");
+  }
+
+  verifyCacheStats(hiveConnector->fileHandleCacheStats(), 99, 0, 99);
+  verifyCacheStats(hiveConnector->clearFileHandleCache(), 0, 0, 99);
 }
 
 } // namespace

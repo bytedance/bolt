@@ -32,6 +32,7 @@ add_test(bolt_tpch_connector_test bolt_tpch_connector_test)
 target_link_libraries(
   bolt_tpch_connector_test
   bolt_tpch_connector
+  bolt_exec_connector_test_lib
   bolt_testutils
   GTest::gtest
   GTest::gtest_main
@@ -40,5 +41,5 @@ target_link_libraries(
 add_executable(bolt_tpch_speed_test SpeedTest.cpp)
 
 target_link_libraries(
-  bolt_tpch_speed_test bolt_tpch_connector bolt_testutils
+  bolt_tpch_speed_test bolt_tpch_connector bolt_exec_connector_test_lib bolt_testutils
 )

@@ -39,7 +39,6 @@
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 #include "gtest/gtest.h"
