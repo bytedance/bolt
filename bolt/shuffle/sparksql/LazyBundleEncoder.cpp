@@ -112,7 +112,7 @@ RowVectorPtr encodeAndBundleLazyWireRowVector(
   // Size pass. Matches the serialize-pass per-cell rule: null cells
   // contribute 0 bytes (the bundle bitmap carries null); non-null cells
   // contribute sizeof(uint32_t) length prefix + cell payload.
-  const int64_t perRowBitmap = static_cast<int64_t>(nullByteCount);
+  const auto perRowBitmap = static_cast<int64_t>(nullByteCount);
   const int64_t perRowLenPrefix =
       static_cast<int64_t>(numComplex) * sizeof(uint32_t);
   int64_t total = static_cast<int64_t>(size) * (perRowBitmap + perRowLenPrefix);
@@ -150,7 +150,7 @@ RowVectorPtr encodeAndBundleLazyWireRowVector(
   // scoped memset + CompactRow::serialize (CompactRow requires pre-zero
   // on the target region to use setBit on null-flag bytes).  Prefixes
   // (null bitmap + uint32 lens) are written explicitly row-by-row.
-  const size_t wantBytes = static_cast<size_t>(total > 0 ? total : 1);
+  const auto wantBytes = static_cast<size_t>(total > 0 ? total : 1);
   auto arena = AlignedBuffer::allocate<char>(wantBytes, pool);
   auto* base = arena->asMutable<char>();
   auto valuesBuf =
@@ -182,7 +182,7 @@ RowVectorPtr encodeAndBundleLazyWireRowVector(
           len = static_cast<uint32_t>(pj.compact->rowSize(r));
         }
       } else {
-        rowStart[j >> 3] |= static_cast<char>(1u << (j & 7));
+        rowStart[j >> 3] |= static_cast<char>(1U << (j & 7));
       }
       *reinterpret_cast<uint32_t*>(p) = len;
       p += sizeof(uint32_t);

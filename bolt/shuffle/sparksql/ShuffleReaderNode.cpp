@@ -17,8 +17,9 @@
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/LazyComplexCodec.h"
-using namespace bytedance::bolt::shuffle::sparksql;
-using namespace bytedance::bolt;
+using bytedance::bolt::RowVectorPtr;
+using bytedance::bolt::shuffle::sparksql::SparkShuffleReader;
+using bytedance::bolt::shuffle::sparksql::SparkShuffleReaderNode;
 
 SparkShuffleReader::SparkShuffleReader(
     int32_t operatorId,

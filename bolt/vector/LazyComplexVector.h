@@ -54,7 +54,7 @@ class LazyComplexVector : public BaseVector {
 
   VectorPtr slice(vector_size_t offset, vector_size_t length) const override;
 
-  void resize(vector_size_t newSize, bool setNotNull = true) override;
+  void resize(vector_size_t newSize, bool setNotNull) override;
 
   void prepareForReuse() override;
 

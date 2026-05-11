@@ -61,7 +61,7 @@ void LazyComplexVector::copyRanges(
   BOLT_CHECK(
       source->encoding() == VectorEncoding::Simple::LAZY_COMPLEX,
       "LazyComplexVector::copyRanges requires a LAZY_COMPLEX source; encodeToLazy first");
-  auto* lazySource = static_cast<const LazyComplexVector*>(source);
+  const auto* lazySource = static_cast<const LazyComplexVector*>(source);
   BOLT_CHECK(
       type()->equivalent(*lazySource->type()),
       "LazyComplexVector::copyRanges requires matching original types");
@@ -100,7 +100,7 @@ void LazyComplexVector::prepareForReuse() {
 VectorPtr LazyComplexVector::decode(
     const SelectivityVector& rows,
     memory::MemoryPool* pool) const {
-  auto* codec = LazyComplexCodec::activeCodec();
+  const auto* codec = LazyComplexCodec::activeCodec();
   BOLT_CHECK_NOT_NULL(
       codec,
       "LazyComplexVector::decode() called but no active codec; call LazyComplexCodec::setActiveFormat() first");

@@ -313,10 +313,10 @@ RowVectorPtr toLazyBundleWireRowVector(
     p += nullByteCount;
     for (size_t j = 0; j < numComplex; ++j) {
       const auto& view = viewsPerCol[j][r];
-      const uint32_t len = static_cast<uint32_t>(view.size());
+      const auto len = static_cast<uint32_t>(view.size());
       // Invariant: null iff len == 0. Bit stays 0 for non-null.
       if (len == 0) {
-        rowStart[j >> 3] |= static_cast<char>(1u << (j & 7));
+        rowStart[j >> 3] |= static_cast<char>(1U << (j & 7));
       }
       *reinterpret_cast<uint32_t*>(p) = len;
       p += sizeof(uint32_t);
@@ -426,7 +426,7 @@ RowVectorPtr fromLazyBundleWireRowVector(
           p + len, end, "lazy bundle parse: truncated data at row {}", r);
       perColRaw[j][r] = StringView(p, len);
       p += len;
-      if ((rowNullBytes[j >> 3] & (1u << (j & 7))) != 0) {
+      if ((rowNullBytes[j >> 3] & (1U << (j & 7))) != 0) {
         bits::setBit(perColRawNulls[j], r, bits::kNull);
         anyNull = true;
       }
