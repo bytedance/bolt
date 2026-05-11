@@ -30,7 +30,7 @@
 
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
 #include <gtest/gtest.h>
@@ -40,7 +40,7 @@ using namespace bytedance::bolt::exec::test;
 
 using bytedance::bolt::exec::test::PlanBuilder;
 
-class PrintPlanWithStatsTest : public HiveConnectorTestBase {};
+class PrintPlanWithStatsTest : public ConnectorTestBase {};
 
 struct ExpectedLine {
   std::string line;
@@ -137,7 +137,7 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_innerJoinWithTableScan) {
 
   auto task =
       AssertQueryBuilder(op, duckDbQueryRunner_)
-          .splits(leftScanId, makeHiveConnectorSplits(leftFiles))
+          .splits(leftScanId, makeConnectorSplits(leftFiles))
           .assertResults(
               "SELECT t.c0, t.c1 + 1, t.c1 + u.c1 FROM t, u WHERE t.c0 = u.c0");
 
@@ -264,7 +264,7 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
             .config(
                 core::QueryConfig::kMaxSplitPreloadPerDriver,
                 std::to_string(numPrefetchSplit))
-            .splits(makeHiveConnectorSplits({filePath}))
+            .splits(makeConnectorSplits({filePath}))
             .assertResults(
                 "SELECT c5, max(c0), sum(c1), sum(c2), sum(c3), sum(c4) FROM tmp group by c5");
     ensureTaskCompletion(task.get());

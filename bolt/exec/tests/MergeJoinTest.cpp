@@ -32,7 +32,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -79,7 +79,7 @@ makeDictionaryJoinRegressionData() {
 
 } // namespace
 
-class MergeJoinTest : public HiveConnectorTestBase {
+class MergeJoinTest : public ConnectorTestBase {
  protected:
   using OperatorTestBase::assertQuery;
 
@@ -1039,8 +1039,8 @@ TEST_F(MergeJoinTest, lazyVectors) {
                   .planNode();
 
     AssertQueryBuilder(op, duckDbQueryRunner_)
-        .split(rightScanId, makeHiveConnectorSplit(rightFile->path))
-        .split(leftScanId, makeHiveConnectorSplit(leftFile->path))
+        .split(rightScanId, makeConnectorSplit(rightFile->path))
+        .split(leftScanId, makeConnectorSplit(leftFile->path))
         .assertResults(fmt::format(
             "SELECT c0, rc0, c1, rc1, c2, c3 FROM t {} JOIN u "
             "ON t.c0 = u.rc0 AND c1 + rc1 < 30",

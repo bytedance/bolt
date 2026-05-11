@@ -37,6 +37,12 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::memory;
 namespace bytedance::bolt::exec::test {
+namespace {
+constexpr const char* kOrcWriterMaxStripeSizeSession =
+    "orc_optimized_writer_max_stripe_size";
+constexpr const char* kOrcWriterMaxDictionaryMemorySession =
+    "orc_optimized_writer_max_dictionary_memory";
+} // namespace
 
 std::shared_ptr<core::QueryCtx> newQueryCtx(
     MemoryManager* memoryManager,
@@ -361,19 +367,11 @@ QueryTestResult runWriteTask(
             // Set stripe size to extreme large to avoid writer internal
             // triggered flush.
             .connectorSessionProperty(
-                kHiveConnectorId,
-                connector::hive::HiveConfig::kOrcWriterMaxStripeSizeSession,
-                "1GB")
+                kHiveConnectorId, kOrcWriterMaxStripeSizeSession, "1GB")
             .connectorSessionProperty(
-                kHiveConnectorId,
-                connector::hive::HiveConfig::
-                    kOrcWriterMaxDictionaryMemorySession,
-                "1GB")
+                kHiveConnectorId, kOrcWriterMaxDictionaryMemorySession, "1GB")
             .connectorSessionProperty(
-                kHiveConnectorId,
-                connector::hive::HiveConfig::
-                    kOrcWriterMaxDictionaryMemorySession,
-                "1GB")
+                kHiveConnectorId, kOrcWriterMaxDictionaryMemorySession, "1GB")
             .queryCtx(queryCtx)
             .maxDrivers(numDrivers)
             .copyResults(pool, result.task);

@@ -30,7 +30,6 @@
 
 #include "bolt/common/process/ThreadDebugInfo.h"
 
-#include <folly/Unit.h>
 #include <folly/init/Init.h>
 #include <gtest/gtest.h>
 

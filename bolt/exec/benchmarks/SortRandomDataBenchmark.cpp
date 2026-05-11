@@ -20,7 +20,7 @@
 #include <string>
 
 #include "bolt/exec/Operator.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
@@ -104,7 +104,7 @@ struct SortBenchmarkResult {
   }
 };
 
-class SortRandomDataBenchmark : public HiveConnectorTestBase {
+class SortRandomDataBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::SetUpTestCase();
@@ -115,7 +115,7 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
   }
 
   explicit SortRandomDataBenchmark() {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
 
     inputType_ = ROW(
         {{"i32", INTEGER()},
@@ -179,7 +179,7 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
   }
 
   ~SortRandomDataBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -239,7 +239,7 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     task->noMoreSplits("0");
 
     suspender.dismiss();

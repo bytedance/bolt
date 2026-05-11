@@ -17,7 +17,7 @@
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
@@ -25,10 +25,10 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 
-class MorselDrivenTest : public HiveConnectorTestBase {
+class MorselDrivenTest : public ConnectorTestBase {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     window::prestosql::registerAllWindowFunctions();
     exec::ExchangeSource::factories().clear();
     exec::ExchangeSource::registerFactory(createLocalExchangeSource);
@@ -163,8 +163,7 @@ TEST_F(MorselDrivenTest, morselDrivenEnabledForPartialAgg) {
 
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
 
   auto task = queryBuilder.maxDrivers(4)
@@ -251,8 +250,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForFinalAgg) {
 
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
 
   auto task = queryBuilder.maxDrivers(4)
@@ -311,8 +309,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForWindow) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
 
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
   auto task =
       queryBuilder.maxDrivers(4)

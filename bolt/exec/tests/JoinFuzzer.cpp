@@ -32,8 +32,8 @@
 #include <boost/random/uniform_int_distribution.hpp>
 #include <core/PlanNode.h>
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/hive/HiveConnector.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/ConnectorObjectFactory.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -758,8 +758,14 @@ void writeToFile(
 // static
 std::shared_ptr<connector::ConnectorSplit> JoinFuzzer::makeSplit(
     const std::string& filePath) {
-  return std::make_shared<connector::hive::HiveConnectorSplit>(
-      kHiveConnectorId, filePath, dwio::common::FileFormat::DWRF);
+  return connector::getConnectorObjectFactory(connector::kHiveConnectorName)
+      ->makeConnectorSplit(
+          filePath,
+          0,
+          std::numeric_limits<uint64_t>::max(),
+          connector::makeOptions(
+              {{"fileFormat",
+                static_cast<int>(dwio::common::FileFormat::DWRF)}}));
 }
 
 bool isTableScanSupported(const TypePtr& type) {

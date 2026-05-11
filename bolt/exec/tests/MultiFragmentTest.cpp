@@ -31,7 +31,6 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/Exchange.h"
@@ -39,7 +38,7 @@
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/RoundRobinPartitionFunction.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -52,10 +51,10 @@ using bytedance::bolt::test::BatchMaker;
 namespace bytedance::bolt::exec {
 namespace {
 
-class MultiFragmentTest : public HiveConnectorTestBase {
+class MultiFragmentTest : public ConnectorTestBase {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     exec::ExchangeSource::factories().clear();
     exec::ExchangeSource::registerFactory(createLocalExchangeSource);
     BOLT_TEST_VALUE_ENABLE();
@@ -63,7 +62,7 @@ class MultiFragmentTest : public HiveConnectorTestBase {
 
   void TearDown() override {
     vectors_.clear();
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   static std::string makeTaskId(const std::string& prefix, int num) {
@@ -141,34 +140,24 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     return vectors;
   }
 
-  static void addHiveSplits(
+  void addSplits(
       const std::shared_ptr<Task>& task,
       const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
     for (auto& filePath : filePaths) {
-      auto split = exec::Split(
-          std::make_shared<connector::hive::HiveConnectorSplit>(
-              kHiveConnectorId,
-              "file:" + filePath->path,
-              bytedance::bolt::dwio::common::FileFormat::DWRF),
-          -1);
+      auto split = exec::Split(makeConnectorSplit(filePath->path), -1);
       task->addSplit("0", std::move(split));
       VLOG(1) << filePath->path << "\n";
     }
     task->noMoreSplits("0");
   }
 
-  static void addHiveSplits(
+  void addSplits(
       const std::shared_ptr<Task>& task,
       const std::vector<std::string>& scanNodeIds,
       const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
     for (auto i = 0; i < filePaths.size(); ++i) {
       const auto& filePath = filePaths[i];
-      auto split = exec::Split(
-          std::make_shared<connector::hive::HiveConnectorSplit>(
-              kHiveConnectorId,
-              "file:" + filePath->getPath(),
-              bytedance::bolt::dwio::common::FileFormat::DWRF),
-          -1);
+      auto split = exec::Split(makeConnectorSplit(filePath->getPath()), -1);
       task->addSplit(scanNodeIds[i % scanNodeIds.size()], std::move(split));
       VLOG(1) << filePath->getPath() << "\n";
     }
@@ -292,7 +281,7 @@ TEST_F(MultiFragmentTest, aggregationSingleKey) {
     auto leafTask = makeTask(leafTaskId, partialAggPlan, 0);
     tasks.push_back(leafTask);
     leafTask->start(4);
-    addHiveSplits(leafTask, filePaths_);
+    addSplits(leafTask, filePaths_);
   }
 
   core::PlanNodePtr finalAggPlan;
@@ -379,7 +368,7 @@ TEST_F(MultiFragmentTest, aggregationMultiKey) {
     auto leafTask = makeTask(leafTaskId, partialAggPlan, 0);
     tasks.push_back(leafTask);
     leafTask->start(4);
-    addHiveSplits(leafTask, filePaths_);
+    addSplits(leafTask, filePaths_);
   }
 
   core::PlanNodePtr finalAggPlan;
@@ -425,7 +414,7 @@ TEST_F(MultiFragmentTest, distributedTableScan) {
 
     auto leafTask = makeTask(leafTaskId, leafPlan, 0);
     leafTask->start(4);
-    addHiveSplits(leafTask, filePaths_);
+    addSplits(leafTask, filePaths_);
 
     auto op = PlanBuilder().exchange(leafPlan->outputType()).planNode();
     auto task =
@@ -477,7 +466,7 @@ TEST_F(MultiFragmentTest, mergeExchange) {
     auto sortTask = makeTask(sortTaskId, partialSortPlan, tasks.size());
     tasks.push_back(sortTask);
     sortTask->start(2);
-    addHiveSplits(sortTask, scanNodeIds, filePathsList[i]);
+    addSplits(sortTask, scanNodeIds, filePathsList[i]);
     outputType = partialSortPlan->outputType();
   }
 
@@ -687,7 +676,7 @@ TEST_F(MultiFragmentTest, mergeExchangeMultiMerge) {
     sortTask->setSpillDirectory(spillDirectories[i]->getPath());
     tasks.push_back(sortTask);
     sortTask->start(2);
-    addHiveSplits(sortTask, scanNodeIds, filePathsList[i]);
+    addSplits(sortTask, scanNodeIds, filePathsList[i]);
     outputType = partialSortPlan->outputType();
   }
 
@@ -1055,8 +1044,7 @@ TEST_F(MultiFragmentTest, limit) {
   auto leafTask = makeTask(leafTaskId, leafPlan, 0);
   leafTask->start(1);
 
-  leafTask.get()->addSplit(
-      "0", exec::Split(makeHiveConnectorSplit(file->path)));
+  leafTask.get()->addSplit("0", exec::Split(makeConnectorSplit(file->path)));
 
   // Make final task: Exchange -> FinalLimit(10).
   auto plan = PlanBuilder()
@@ -1696,7 +1684,7 @@ TEST_F(MultiFragmentTest, exchangeDestruction) {
 
   auto leafTask = makeTask(leafTaskId, leafPlan, 0);
   leafTask->start(1);
-  addHiveSplits(leafTask, filePaths_);
+  addSplits(leafTask, filePaths_);
 
   auto rootPlan =
       PlanBuilder()
@@ -1879,7 +1867,7 @@ DEBUG_ONLY_TEST_F(
                                    .planNode();
   auto leafTask = makeTask(leafTaskId, leafPlan, 0);
   leafTask->start(1);
-  addHiveSplits(leafTask, filePaths_);
+  addSplits(leafTask, filePaths_);
 
   const std::string kRootTaskId("root-task");
   std::atomic_bool readyToTerminate{false};
@@ -1942,7 +1930,7 @@ TEST_F(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
 
   auto task = makeTask(taskId, leafPlan, 0);
   task->start(1);
-  addHiveSplits(task, filePaths_);
+  addSplits(task, filePaths_);
 
   const uint64_t maxBytes = std::numeric_limits<uint64_t>::max();
   const int destination = 0;
@@ -2146,7 +2134,7 @@ DEBUG_ONLY_TEST_F(MultiFragmentTest, mergeWithEarlyTermination) {
 
   auto partialSortTask = makeTask(sortTaskId, partialSortPlan, 1);
   partialSortTask->start(1);
-  addHiveSplits(partialSortTask, filePaths);
+  addSplits(partialSortTask, filePaths);
 
   std::atomic<bool> blockMergeOnce{true};
   std::atomic<bool> mergeIsBlockedReady{false};
@@ -2404,7 +2392,7 @@ TEST_F(MultiFragmentTest, earlyTaskFailure) {
 
     auto partialSortTask = makeTask(partialSortTaskId, partialSortPlan, 1);
     partialSortTask->start(1);
-    addHiveSplits(partialSortTask, filePaths_);
+    addSplits(partialSortTask, filePaths_);
     auto outputType = partialSortPlan->outputType();
 
     auto finalSortTaskId = makeTaskId("finalSortBy", 0);
