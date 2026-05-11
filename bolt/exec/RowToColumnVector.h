@@ -312,9 +312,11 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
   // inner FlatVector<StringView>. The RowContainer stored lazy columns as
   // VARBINARY StringView bytes, so writing into the inner bytes vector yields
   // a correctly-populated LazyComplexVector for the caller.
-  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
-  const auto& inner = isLazyComplex ?
-      result->asUnchecked<LazyComplexVector>()->encoded() : result;
+  bool isLazyComplex =
+      result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex
+      ? result->asUnchecked<LazyComplexVector>()->encoded()
+      : result;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -336,9 +338,11 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
   // inner FlatVector<StringView>. The RowContainer stored lazy columns as
   // VARBINARY StringView bytes, so writing into the inner bytes vector yields
   // a correctly-populated LazyComplexVector for the caller.
-  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
-  const auto& inner = isLazyComplex ?
-      result->asUnchecked<LazyComplexVector>()->encoded() : result;
+  bool isLazyComplex =
+      result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex
+      ? result->asUnchecked<LazyComplexVector>()->encoded()
+      : result;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),

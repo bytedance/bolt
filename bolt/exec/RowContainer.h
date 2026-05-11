@@ -1683,8 +1683,11 @@ inline void RowContainer::extractColumn(
   // bytes into its inner FlatVector<StringView> — the column is lazy-
   // configured in the container (storage kind is VARBINARY) so the
   // VARBINARY typed extract is the right dispatch.
-  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
-  const auto& inner = isLazyComplex ? result->asUnchecked<LazyComplexVector>()->encoded() : result;
+  bool isLazyComplex =
+      result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex
+      ? result->asUnchecked<LazyComplexVector>()->encoded()
+      : result;
   // Dispatch on inner->typeKind(): for lazy-complex this is VARBINARY (the
   // storage kind), matching how the column is stored in the row container.
   // For non-lazy results inner == result so the kind is identical.
@@ -1707,8 +1710,11 @@ inline void RowContainer::extractColumn(
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
-  bool isLazyComplex = result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
-  const auto& inner = isLazyComplex ? result->asUnchecked<LazyComplexVector>()->encoded() : result;
+  bool isLazyComplex =
+      result->encoding() == VectorEncoding::Simple::LAZY_COMPLEX;
+  const auto& inner = isLazyComplex
+      ? result->asUnchecked<LazyComplexVector>()->encoded()
+      : result;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       inner->typeKind(),

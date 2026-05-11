@@ -113,9 +113,13 @@ TEST_F(LazyComplexVectorTest, copyRangesLazyToLazy) {
   auto srcLazy = codec.encode(srcOriginal, pool());
   ASSERT_EQ(srcLazy->size(), 4);
 
-  // Build empty target lazy vector of the same type, size 6.
+  // Build empty target lazy vector of the same type, size 6. Values must be
+  // default-initialised — pool memory can come back recycled with garbage
+  // that downstream copyRanges / decode would interpret as out-of-line
+  // StringView pointers.
   const vector_size_t targetSize = 6;
-  auto targetValues = AlignedBuffer::allocate<StringView>(targetSize, pool());
+  auto targetValues = AlignedBuffer::allocate<StringView>(
+      targetSize, pool(), std::optional<StringView>{StringView{}});
   auto targetFlat = std::make_shared<FlatVector<StringView>>(
       pool(),
       VARBINARY(),
@@ -139,9 +143,13 @@ TEST_F(LazyComplexVectorTest, copyRangesLazyToLazy) {
   }
 
   // Decode-then-compare: decoded target [2, 5) should match decoded source
-  // [0, 3). Confirms the bytes actually round-trip.
-  SelectivityVector allTarget(targetSize);
-  auto decodedTarget = targetLazy->decode(allTarget, pool());
+  // [0, 3). Confirms the bytes actually round-trip. Rows outside [2, 5) are
+  // uninitialized StringViews — feeding them to the decoder reads garbage,
+  // so restrict the SelectivityVector to the copied range.
+  SelectivityVector copiedRows(targetSize, false);
+  copiedRows.setValidRange(2, 5, true);
+  copiedRows.updateBounds();
+  auto decodedTarget = targetLazy->decode(copiedRows, pool());
 
   SelectivityVector allSrc(srcLazy->size());
   auto decodedSrc = srcLazy->decode(allSrc, pool());
@@ -183,8 +191,7 @@ TEST_F(LazyComplexVectorTest, decodedVectorThroughDictionaryOverLazy) {
   ASSERT_EQ(decoded.base()->typeKind(), TypeKind::VARBINARY);
   const auto* baseFlat = decoded.base()->as<FlatVector<StringView>>();
   ASSERT_NE(baseFlat, nullptr);
-  for (vector_size_t i = 0; i < static_cast<vector_size_t>(picks.size());
-       ++i) {
+  for (vector_size_t i = 0; i < static_cast<vector_size_t>(picks.size()); ++i) {
     EXPECT_EQ(baseFlat->valueAt(decoded.index(i)), lazy->valueAt(picks[i]))
         << "byte mismatch at picked row " << i;
   }

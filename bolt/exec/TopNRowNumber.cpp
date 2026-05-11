@@ -550,10 +550,7 @@ RowVectorPtr TopNRowNumber::getOutputFromMemory() {
     // 5-arg extractColumn routes lazy-configured columns into the inner
     // FlatVector<StringView> of the pre-allocated LazyComplexVector.
     data_->extractColumn(
-        outputRows_.data(),
-        offset,
-        i,
-        output->childAt(inputChannels_[i]));
+        outputRows_.data(), offset, i, output->childAt(inputChannels_[i]));
   }
 
   return output;

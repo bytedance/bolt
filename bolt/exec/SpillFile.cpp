@@ -303,8 +303,7 @@ RowVectorPtr SpillWriter::prepareWireRows(const RowVectorPtr& rows) {
     auto wireChildren = type_->children();
     for (size_t i = 0; i < rows->children().size(); ++i) {
       const auto& child = rows->children()[i];
-      if (child &&
-          child->encoding() == VectorEncoding::Simple::LAZY_COMPLEX) {
+      if (child && child->encoding() == VectorEncoding::Simple::LAZY_COMPLEX) {
         if (lazyOriginalTypes_.empty()) {
           lazyOriginalTypes_.assign(rows->children().size(), nullptr);
         }
@@ -314,8 +313,7 @@ RowVectorPtr SpillWriter::prepareWireRows(const RowVectorPtr& rows) {
     }
     wireType_ = lazyOriginalTypes_.empty()
         ? type_
-        : ROW(
-              std::vector<std::string>(type_->names()),
+        : ROW(std::vector<std::string>(type_->names()),
               std::move(wireChildren));
   }
   if (lazyOriginalTypes_.empty()) {

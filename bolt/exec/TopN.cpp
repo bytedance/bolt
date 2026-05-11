@@ -141,8 +141,8 @@ RowVectorPtr TopN::getOutput() {
   BOLT_CHECK_GT(numRowsToReturn, 0);
 
   auto* pool = operatorCtx_->pool();
-  auto result = data_->allocateOutputRowVector(
-      outputType_, numRowsToReturn, pool);
+  auto result =
+      data_->allocateOutputRowVector(outputType_, numRowsToReturn, pool);
 
   for (auto i = 0; i < outputType_->size(); ++i) {
     data_->extractColumn(

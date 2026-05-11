@@ -210,8 +210,7 @@ void DecodedVector::combineWrappers(
       case VectorEncoding::Simple::LAZY_COMPLEX: {
         // Walk through the lazy wrapper to its inner FlatVector<StringView>.
         // The next iteration terminates at setBaseData with the bytes view.
-        values =
-            values->asUnchecked<LazyComplexVector>()->encoded().get();
+        values = values->asUnchecked<LazyComplexVector>()->encoded().get();
         break;
       }
       default:

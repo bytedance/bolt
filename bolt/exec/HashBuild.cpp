@@ -280,7 +280,8 @@ void HashBuild::setupTable() {
 
   {
     std::vector<column_index_t> channels = keyChannels_;
-    channels.insert(channels.end(), dependentChannels_.begin(), dependentChannels_.end());
+    channels.insert(
+        channels.end(), dependentChannels_.begin(), dependentChannels_.end());
     inputLazyModes_ = table_->rows()->inputLazyModes(channels);
   }
 

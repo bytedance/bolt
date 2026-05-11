@@ -347,7 +347,8 @@ RowContainer::RowContainer(
   // Keys (sort keys, hash keys, partition keys) always retain their original
   // complex form so that compare/hash paths can read values. Lazy encoding
   // is strictly a payload-side optimisation.
-  // TODO since ComplexType data is also store as string for key, we may also encoding on keys and support compare direct in row format
+  // TODO since ComplexType data is also store as string for key, we may also
+  // encoding on keys and support compare direct in row format
   const auto numCols = types_.size();
   lazyOriginalTypes_.assign(numCols, nullptr);
   lazyCodec_ = LazyComplexCodec::activeCodec();
@@ -889,7 +890,8 @@ std::vector<InputLazyMode> RowContainer::inputLazyModes(
   if (lazyCodec_ == nullptr) {
     return {};
   }
-  column_index_t maxCol = *std::max_element(inputChannels.begin(), inputChannels.end());
+  column_index_t maxCol =
+      *std::max_element(inputChannels.begin(), inputChannels.end());
   std::vector<InputLazyMode> out(maxCol + 1, InputLazyMode::kAny);
   for (size_t rc = 0; rc < lazyOriginalTypes_.size(); ++rc) {
     if (lazyOriginalTypes_[rc] != nullptr && rc < inputChannels.size()) {
