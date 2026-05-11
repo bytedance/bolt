@@ -33,14 +33,13 @@
 #include <string>
 
 #include "bolt/exec/PlanNodeStats.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 7'000;
@@ -49,7 +48,7 @@ static constexpr int32_t kRowsPerVector = 4'000;
 namespace {
 
 // Compare performance of sum(x) with equivalent reduce_agg(x,..).
-class TwoStringKeysBenchmark : public HiveConnectorTestBase {
+class TwoStringKeysBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::SetUpTestCase();
@@ -60,7 +59,7 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
   }
 
   explicit TwoStringKeysBenchmark() {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
 
     inputType_ = ROW({
         {"k1", VARCHAR()},
@@ -84,7 +83,7 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
   }
 
   ~TwoStringKeysBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -139,7 +138,7 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
         exec::Task::ExecutionMode::kParallel,
         exec::Consumer{});
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_->path)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_->path)));
     task->noMoreSplits("0");
     return task;
   }

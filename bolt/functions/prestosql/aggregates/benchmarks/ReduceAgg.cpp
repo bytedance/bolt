@@ -32,14 +32,13 @@
 #include <folly/init/Init.h>
 #include <string>
 
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 10;
@@ -48,7 +47,7 @@ static constexpr int32_t kRowsPerVector = 10'000;
 namespace {
 
 // Compare performance of sum(x) with equivalent reduce_agg(x,..).
-class ReduceAggBenchmark : public HiveConnectorTestBase {
+class ReduceAggBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::SetUpTestCase();
@@ -60,7 +59,7 @@ class ReduceAggBenchmark : public HiveConnectorTestBase {
 
   explicit ReduceAggBenchmark() {
     OperatorTestBase::SetUpTestCase();
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
 
     inputType_ = ROW({
         {"i16", SMALLINT()},
@@ -81,7 +80,7 @@ class ReduceAggBenchmark : public HiveConnectorTestBase {
   }
 
   ~ReduceAggBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -215,7 +214,7 @@ class ReduceAggBenchmark : public HiveConnectorTestBase {
         core::QueryCtx::create(executor_.get()),
         exec::Task::ExecutionMode::kSerial);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_->path)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_->path)));
     task->noMoreSplits("0");
     return task;
   }

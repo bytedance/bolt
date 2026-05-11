@@ -17,19 +17,18 @@
 #include <fmt/format.h>
 #include <string>
 
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 1'0;
 static constexpr int32_t kRowsPerVector = 10'000;
 namespace bytedance::bolt::aggregate::test {
 
-class AggregationLazyInputTest : public HiveConnectorTestBase {
+class AggregationLazyInputTest : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::SetUpTestCase();
@@ -73,7 +72,7 @@ class AggregationLazyInputTest : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     task->noMoreSplits("0");
 
     while (auto result = task->next()) {
