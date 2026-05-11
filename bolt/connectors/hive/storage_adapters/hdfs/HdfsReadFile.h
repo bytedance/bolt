@@ -44,7 +44,8 @@ class HdfsReadFile final : public ReadFile {
   explicit HdfsReadFile(
       filesystems::arrow::io::internal::LibHdfsShim* driver,
       hdfsFS hdfs,
-      std::string_view path);
+      std::string_view path,
+      int bufferSize = 0);
   ~HdfsReadFile() override;
 
   std::string_view pread(uint64_t offset, uint64_t length, void* buf)

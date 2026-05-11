@@ -38,6 +38,7 @@
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HivePartitionFunction.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 #include "bolt/core/ITypedExpr.h"
 #include "bolt/dwio/common/SortingWriter.h"
 #include "bolt/exec/OperatorUtils.h"
@@ -410,6 +411,8 @@ HiveDataSink::HiveDataSink(
       fileOptions_.values[key] = value.value();
     }
   }
+  filesystems::setHdfsOpenFileOptionsFromConfig(
+      connectorQueryCtx_->sessionProperties(), fileOptions_);
 
   if (!isBucketed()) {
     return;

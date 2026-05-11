@@ -31,6 +31,7 @@
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsFileSystem.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsReadFile.h"
+#include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsWriteFile.h"
 #include "bolt/external/hdfs/ArrowHdfsInternal.h"
 namespace bytedance::bolt::filesystems {
@@ -123,7 +124,7 @@ std::string HdfsFileSystem::name() const {
 
 std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
     std::string_view path,
-    const FileOptions& /*unused*/) {
+    const FileOptions& options) {
   // Only remove the scheme for hdfs path.
   if (path.find(kScheme) == 0) {
     path.remove_prefix(kScheme.length());
@@ -131,15 +132,23 @@ std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
       path.remove_prefix(index);
     }
   }
+  const auto bufferSize =
+      parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBufferSize);
   return std::make_unique<HdfsReadFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path);
+      impl_->hdfsShim(), impl_->hdfsClient(), path, bufferSize);
 }
 
 std::unique_ptr<WriteFile> HdfsFileSystem::openFileForWrite(
     std::string_view path,
-    const FileOptions& /*unused*/) {
+    const FileOptions& options) {
+  const auto hdfsOptions = getHdfsOpenFileOptions(options);
   return std::make_unique<HdfsWriteFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path);
+      impl_->hdfsShim(),
+      impl_->hdfsClient(),
+      path,
+      hdfsOptions.bufferSize,
+      hdfsOptions.replication,
+      hdfsOptions.blockSize);
 }
 
 void HdfsFileSystem::close() {

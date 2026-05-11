@@ -30,8 +30,27 @@
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <string_view>
+
+#include <folly/Conv.h>
+
+#include "bolt/common/config/Config.h"
+#include "bolt/common/file/FileSystems.h"
+
 namespace bytedance::bolt::filesystems {
+
+struct HdfsOpenFileOptions {
+  static constexpr const char* kBufferSize = "bolt.io.file.buffer.size";
+  static constexpr const char* kReplication = "bolt.dfs.replication";
+  static constexpr const char* kBlockSize = "bolt.dfs.blocksize";
+
+  int bufferSize{0};
+  short replication{0};
+  int blockSize{0};
+};
 
 inline std::string getHdfsPath(
     const std::string& filePath,
@@ -44,6 +63,72 @@ inline std::string getHdfsPath(
   }
 
   return std::string(filePath.substr(endOfAuthority));
+}
+
+inline int parseHdfsOpenFileIntOption(
+    const FileOptions& options,
+    const char* key) {
+  auto it = options.values.find(key);
+  if (it == options.values.end()) {
+    return 0;
+  }
+
+  auto value = folly::tryTo<int64_t>(it->second);
+  BOLT_CHECK(
+      value.hasValue(),
+      "Invalid HDFS open file option '{}': '{}'. Expected an integer.",
+      key,
+      it->second);
+  BOLT_CHECK_GE(
+      value.value(),
+      0,
+      "Invalid HDFS open file option '{}': '{}'. Expected a non-negative integer.",
+      key,
+      it->second);
+  BOLT_CHECK_LE(
+      value.value(),
+      std::numeric_limits<int>::max(),
+      "Invalid HDFS open file option '{}': '{}'. Exceeds int range.",
+      key,
+      it->second);
+  return static_cast<int>(value.value());
+}
+
+inline HdfsOpenFileOptions getHdfsOpenFileOptions(const FileOptions& options) {
+  HdfsOpenFileOptions hdfsOptions;
+  hdfsOptions.bufferSize =
+      parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBufferSize);
+  hdfsOptions.blockSize =
+      parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBlockSize);
+
+  const auto replication =
+      parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kReplication);
+  BOLT_CHECK_LE(
+      replication,
+      std::numeric_limits<short>::max(),
+      "Invalid HDFS open file option '{}': '{}'. Exceeds short range.",
+      HdfsOpenFileOptions::kReplication,
+      replication);
+  hdfsOptions.replication = static_cast<short>(replication);
+  return hdfsOptions;
+}
+
+inline void setHdfsOpenFileOptionsFromConfig(
+    const config::ConfigBase* config,
+    FileOptions& options) {
+  if (config == nullptr) {
+    return;
+  }
+
+  for (const auto* key :
+       {HdfsOpenFileOptions::kBufferSize,
+        HdfsOpenFileOptions::kReplication,
+        HdfsOpenFileOptions::kBlockSize}) {
+    auto value = config->get<std::string>(key);
+    if (value.hasValue()) {
+      options.values[key] = value.value();
+    }
+  }
 }
 
 } // namespace bytedance::bolt::filesystems

@@ -80,8 +80,11 @@ hdfsWriteFileSinkGenerator() {
               getHdfsPath(fileURI, HdfsFileSystem::kScheme);
           auto fileSystem =
               filesystems::getFileSystem(fileURI, options.connectorProperties);
+          const auto fileOptions = options.fileOptions == nullptr
+              ? FileOptions{}
+              : *options.fileOptions;
           return std::make_unique<dwio::common::WriteFileSink>(
-              fileSystem->openFileForWrite(pathSuffix),
+              fileSystem->openFileForWrite(pathSuffix, fileOptions),
               fileURI,
               options.metricLogger,
               options.stats);
