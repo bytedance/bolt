@@ -123,6 +123,10 @@ GroupingSet::GroupingSet(
   }
 
   for (auto& aggregate : aggregates_) {
+    if (!hasExternalMemoryAccumulators_ &&
+        aggregate.function->accumulatorUsesExternalMemory()) {
+      hasExternalMemoryAccumulators_ = true;
+    }
     if (aggregate.distinct) {
       BOLT_USER_CHECK(
           !isPartial_,
@@ -2150,10 +2154,24 @@ void GroupingSet::toIntermediate(
 }
 
 std::optional<int64_t> GroupingSet::estimateOutputRowSize() const {
-  if (table_ == nullptr) {
+  if (table_ == nullptr || table_->numDistinct() == 0) {
     return std::nullopt;
   }
-  return table_->rows()->estimateRowSize();
+
+  const auto rowSizeFromContainer = table_->rows()->estimateRowSize();
+  if (!hasExternalMemoryAccumulators_) {
+    return rowSizeFromContainer;
+  }
+
+  // RowContainer::estimateRowSize() only accounts for RowContainer's row blocks
+  // and HashStringAllocator (e.g. strings). For aggregates which allocate state
+  // directly from MemoryPool (external memory), incorporate pool usage per
+  // group to avoid under-estimation and too large output batches.
+  const int64_t rowSizeFromPool = std::max<int64_t>(
+      1, static_cast<int64_t>(pool_.currentBytes() / table_->numDistinct()));
+  const int64_t rowSize =
+      std::max<int64_t>(rowSizeFromPool, rowSizeFromContainer.value_or(0));
+  return rowSize;
 }
 
 void GroupingSet::convertCompositeInput(
