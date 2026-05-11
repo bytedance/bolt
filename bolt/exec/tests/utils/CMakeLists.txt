@@ -69,9 +69,10 @@ target_link_libraries(
 )
 
 bolt_add_library(
-        bolt_exec_connector_test_lib
-        ConnectorTestBase.cpp
-        ConnectorTestBootstrap.cpp
+  bolt_exec_connector_test_lib
+  ConnectorTestBase.cpp
+  ConnectorTestBootstrap.cpp
+  PlanBuilderConnectors.cpp
 )
 
 target_link_libraries(
