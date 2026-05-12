@@ -34,11 +34,11 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/StatsReporter.h"
 #include "bolt/common/base/Uuid.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HivePartitionFunction.h"
 #include "bolt/connectors/hive/TableHandle.h"
-#include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 #include "bolt/core/ITypedExpr.h"
 #include "bolt/dwio/common/SortingWriter.h"
 #include "bolt/exec/OperatorUtils.h"
@@ -411,7 +411,7 @@ HiveDataSink::HiveDataSink(
       fileOptions_.values[key] = value.value();
     }
   }
-  filesystems::setHdfsOpenFileOptionsFromConfig(
+  filesystems::copyOpenFileOptionsFromConfig(
       connectorQueryCtx_->sessionProperties(), fileOptions_);
 
   if (!isBucketed()) {

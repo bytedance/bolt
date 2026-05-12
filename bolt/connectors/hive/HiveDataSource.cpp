@@ -36,13 +36,13 @@
 #include <string>
 #include <unordered_map>
 
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/IgnoreCorruptFile.h"
 #include "bolt/connectors/hive/PaimonMiscHelpers.h"
 #include "bolt/connectors/hive/PaimonSplitReader.h"
 #include "bolt/connectors/hive/SplitReader.h"
-#include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/common/exception/Exception.h"
 #include "bolt/expression/FieldReference.h"
@@ -76,7 +76,7 @@ HiveDataSource::HiveDataSource(
       fsSessionConfig_.values[key] = value.value();
     }
   }
-  filesystems::setHdfsOpenFileOptionsFromConfig(
+  filesystems::copyOpenFileOptionsFromConfig(
       connectorQueryCtx_->sessionProperties(), fsSessionConfig_);
   fsSessionConfig_.bufferSize = static_cast<size_t>(hiveConfig_->loadQuantum());
   native_cache_enabled = queryConfig.isNativeCacheEnabled();

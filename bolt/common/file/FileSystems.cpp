@@ -33,6 +33,7 @@
 #include <folly/executors/thread_factory/NamedThreadFactory.h>
 #include <folly/synchronization/CallOnce.h>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
 
 #include <cstdio>
@@ -56,6 +57,22 @@ RegisteredFileSystems& registeredFileSystems() {
 }
 
 } // namespace
+
+void copyOpenFileOptionsFromConfig(
+    const config::ConfigBase* config,
+    FileOptions& options,
+    std::string_view prefix) {
+  if (config == nullptr) {
+    return;
+  }
+
+  for (const auto& [key, value] : config->rawConfigsCopy()) {
+    if (key.size() >= prefix.size() &&
+        key.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0) {
+      options.values[key] = value;
+    }
+  }
+}
 
 std::map<std::string, std::string> getConfFromString(
     const std::string& confstr) {

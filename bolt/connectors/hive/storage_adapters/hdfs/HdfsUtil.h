@@ -37,7 +37,7 @@
 
 #include <folly/Conv.h>
 
-#include "bolt/common/config/Config.h"
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/file/FileSystems.h"
 
 namespace bytedance::bolt::filesystems {
@@ -111,24 +111,6 @@ inline HdfsOpenFileOptions getHdfsOpenFileOptions(const FileOptions& options) {
       replication);
   hdfsOptions.replication = static_cast<short>(replication);
   return hdfsOptions;
-}
-
-inline void setHdfsOpenFileOptionsFromConfig(
-    const config::ConfigBase* config,
-    FileOptions& options) {
-  if (config == nullptr) {
-    return;
-  }
-
-  for (const auto* key :
-       {HdfsOpenFileOptions::kBufferSize,
-        HdfsOpenFileOptions::kReplication,
-        HdfsOpenFileOptions::kBlockSize}) {
-    auto value = config->get<std::string>(key);
-    if (value.hasValue()) {
-      options.values[key] = value.value();
-    }
-  }
 }
 
 } // namespace bytedance::bolt::filesystems

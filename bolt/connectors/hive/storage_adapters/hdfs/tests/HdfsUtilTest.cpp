@@ -31,8 +31,6 @@
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/file/FileSystems.h"
-
 #include "gtest/gtest.h"
 using namespace bytedance::bolt::filesystems;
 
@@ -91,20 +89,4 @@ TEST(HdfsUtilTest, getHdfsOpenFileOptionsRejectsInvalidValues) {
   EXPECT_THROW(
       getHdfsOpenFileOptions(invalidBufferSize),
       bytedance::bolt::BoltException);
-}
-
-TEST(HdfsUtilTest, setHdfsOpenFileOptionsFromConfig) {
-  auto config = std::make_shared<const bytedance::bolt::config::ConfigBase>(
-      std::unordered_map<std::string, std::string>{
-          {HdfsOpenFileOptions::kBufferSize, "4096"},
-          {HdfsOpenFileOptions::kReplication, "2"},
-          {HdfsOpenFileOptions::kBlockSize, "134217728"}});
-
-  FileOptions fileOptions;
-  setHdfsOpenFileOptionsFromConfig(config.get(), fileOptions);
-
-  EXPECT_EQ(fileOptions.values.at(HdfsOpenFileOptions::kBufferSize), "4096");
-  EXPECT_EQ(fileOptions.values.at(HdfsOpenFileOptions::kReplication), "2");
-  EXPECT_EQ(
-      fileOptions.values.at(HdfsOpenFileOptions::kBlockSize), "134217728");
 }
