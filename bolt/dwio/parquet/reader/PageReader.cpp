@@ -33,8 +33,6 @@
 #include <zstd.h>
 #include <zstd_errors.h>
 
-#include <glog/logging.h>
-
 #include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/common/ColumnVisitors.h"
 #include "bolt/dwio/parquet/reader/Decompression.h"
@@ -283,7 +281,7 @@ void PageReader::readPageDefLevels() {
       wideDefineDecoder_, "parquet read error with maxDefine = {}", maxDefine_);
   wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
   leafNulls_.resize(bits::nwords(numRepDefsInPage_));
-  leafNullsSize_ = getLengthsAndNulls(
+  numRowsInPage_ = getLengthsAndNulls(
       LevelMode::kNulls,
       leafInfo_,
       0,
@@ -292,7 +290,7 @@ void PageReader::readPageDefLevels() {
       nullptr,
       leafNulls_.data(),
       0);
-  numRowsInPage_ = checkedInt64ToInt32(leafNullsSize_, "leafNullsSize_");
+  leafNullsSize_ = numRowsInPage_;
   numLeafNullsConsumed_ = 0;
 }
 
@@ -770,7 +768,7 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
         leafNulls_.data(),
         leafNullsSize_);
     leafNullsSize_ += numLeaves;
-    numLeavesInPage_.push_back(checkedInt64ToInt32(numLeaves, "numLeaves"));
+    numLeavesInPage_.push_back(numLeaves);
   }
   return;
 }
@@ -933,7 +931,7 @@ void PageReader::decodeRepDefsFromBuffer() {
   const auto& repDefData = preloadedRepDefs_.front();
   const auto* rawData = repDefData.data();
   constexpr int32_t WordBits = 64;
-  size_t erasedBits = erasedLeafNullWords_ * WordBits;
+  int64_t erasedBits = erasedLeafNullWords_ * WordBits;
   BOLT_CHECK_LE(numLeafNullsConsumed_, leafNullsSize_ + erasedBits);
   // clear consumed nulls
   if (numLeafNullsConsumed_ - erasedBits > WordBits) {
@@ -1028,17 +1026,17 @@ void PageReader::decodeRepDefsFromBuffer() {
         leafNulls_.data(),
         leafNullsSize_);
     leafNullsSize_ += numLeaves;
-    numLeavesInPage_.push_back(checkedInt64ToInt32(numLeaves, "numLeaves"));
+    numLeavesInPage_.push_back(numLeaves);
   }
   preloadedRepDefs_.pop_front();
 }
 
-int64_t PageReader::getLengthsAndNulls(
+int32_t PageReader::getLengthsAndNulls(
     LevelMode mode,
     const arrow::LevelInfo& info,
-    int64_t begin,
-    int64_t end,
-    int64_t maxItems,
+    int32_t begin,
+    int32_t end,
+    int32_t maxItems,
     int32_t* lengths,
     uint64_t* nulls,
     int64_t nullsStartIndex) const {
@@ -1063,7 +1061,7 @@ int64_t PageReader::getLengthsAndNulls(
           &bits,
           lengths);
       // Convert offsets to lengths.
-      for (int64_t i = 0; i < bits.values_read; ++i) {
+      for (auto i = 0; i < bits.values_read; ++i) {
         lengths[i] = lengths[i + 1] - lengths[i];
       }
       break;
@@ -1078,7 +1076,12 @@ int64_t PageReader::getLengthsAndNulls(
       break;
     }
   }
-  return bits.values_read;
+  BOLT_CHECK(
+      bits.values_read >= 0 && bits.values_read <= maxItems,
+      "values_read out of range: {}, maxItems: {}",
+      bits.values_read,
+      maxItems);
+  return static_cast<int32_t>(bits.values_read);
 }
 
 void PageReader::makeDecoder() {
@@ -1273,11 +1276,11 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
   const int64_t erasedBits = erasedLeafNullWords_ * 64;
   const int64_t relativeConsumed = numLeafNullsConsumed_ - erasedBits;
   BOLT_CHECK(
-      !leafNulls_.empty() && leafNullsSize_ >= 0 &&
-          numLeafNullsConsumed_ >= erasedBits && relativeConsumed >= 0 &&
-          relativeConsumed <= leafNullsSize_ &&
-          relativeConsumed + numValues <= leafNullsSize_,
-      "invalid leafNulls range in readNulls(non-top): maxDefine_={} numValues={} numLeafNullsConsumed_={} erasedLeafNullWords_={} erasedBits={} relativeConsumed={} leafNullsSize_={} leafNullsWords={}",
+      relativeConsumed >= 0 && leafNullsSize_ >= numValues &&
+          relativeConsumed <= leafNullsSize_ - numValues,
+      "invalid leafNulls range in readNulls(non-top): maxDefine_={} "
+      "numValues={} numLeafNullsConsumed_={} erasedLeafNullWords_={} "
+      "erasedBits={} relativeConsumed={} leafNullsSize_={} leafNullsWords={}",
       maxDefine_,
       numValues,
       numLeafNullsConsumed_,

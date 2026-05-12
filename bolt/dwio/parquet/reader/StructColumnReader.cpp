@@ -254,7 +254,7 @@ void StructColumnReader::setNullsFromRepDefs(PageReader& pageReader) {
   int32_t numRepDefs = repDefRange.second - repDefRange.first;
   dwio::common::ensureCapacity<uint64_t>(
       nullsInReadRange_, bits::nwords(numRepDefs), &memoryPool_);
-  auto numStructs64 = pageReader.getLengthsAndNulls(
+  auto numStructs = pageReader.getLengthsAndNulls(
       levelMode_,
       levelInfo_,
       repDefRange.first,
@@ -263,8 +263,7 @@ void StructColumnReader::setNullsFromRepDefs(PageReader& pageReader) {
       nullptr,
       nullsInReadRange()->asMutable<uint64_t>(),
       0);
-  formatData_->as<ParquetData>().setNulls(
-      nullsInReadRange(), checkedInt64ToInt32(numStructs64, "numStructs"));
+  formatData_->as<ParquetData>().setNulls(nullsInReadRange(), numStructs);
 }
 
 void StructColumnReader::filterRowGroups(

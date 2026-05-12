@@ -30,10 +30,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <limits>
-
-#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/compression/Compression.h"
 #include "bolt/dwio/common/BitConcatenation.h"
 #include "bolt/dwio/common/DirectDecoder.h"
@@ -53,16 +49,6 @@
 namespace bytedance::bolt::parquet {
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
-
-inline int32_t checkedInt64ToInt32(int64_t value, const char* what) {
-  BOLT_CHECK(
-      value >= 0 &&
-          value <= static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
-      "{} out of int32_t range: {}",
-      what,
-      value);
-  return static_cast<int32_t>(value);
-}
 
 struct CryptoContext {
   CryptoContext(
@@ -144,12 +130,12 @@ class PageReader {
   /// to produce. 'lengths' is only filled for mode kList. 'nulls' is filled
   /// from bit position 'nullsStartIndex'. Returns the number of lengths/nulls
   /// filled.
-  int64_t getLengthsAndNulls(
+  int32_t getLengthsAndNulls(
       LevelMode mode,
       const arrow::LevelInfo& info,
-      int64_t begin,
-      int64_t end,
-      int64_t maxItems,
+      int32_t begin,
+      int32_t end,
+      int32_t maxItems,
       int32_t* FOLLY_NULLABLE lengths,
       uint64_t* FOLLY_NULLABLE nulls,
       int64_t nullsStartIndex) const;

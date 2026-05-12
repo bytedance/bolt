@@ -198,7 +198,7 @@ void MapColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   memset(lengths->asMutable<uint64_t>(), 0, lengths->size());
   dwio::common::ensureCapacity<uint64_t>(
       nullsInReadRange_, bits::nwords(numRepDefs), &memoryPool_);
-  auto numLists64 = pageReader.getLengthsAndNulls(
+  auto numLists = pageReader.getLengthsAndNulls(
       LevelMode::kList,
       levelInfo_,
       repDefRange.first,
@@ -207,8 +207,7 @@ void MapColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
       lengths->asMutable<int32_t>(),
       nullsInReadRange()->asMutable<uint64_t>(),
       0);
-  const int32_t numLists = checkedInt64ToInt32(numLists64, "numLists");
-  lengths->setSize(static_cast<uint64_t>(numLists) * sizeof(int32_t));
+  lengths->setSize(numLists * sizeof(int32_t));
   formatData_->as<ParquetData>().setNulls(nullsInReadRange(), numLists);
   setLengths(std::move(lengths));
 }
@@ -313,7 +312,7 @@ void ListColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   memset(lengths->asMutable<uint64_t>(), 0, lengths->size());
   dwio::common::ensureCapacity<uint64_t>(
       nullsInReadRange_, bits::nwords(numRepDefs), &memoryPool_);
-  auto numLists64 = pageReader.getLengthsAndNulls(
+  auto numLists = pageReader.getLengthsAndNulls(
       LevelMode::kList,
       levelInfo_,
       repDefRange.first,
@@ -322,8 +321,7 @@ void ListColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
       lengths->asMutable<int32_t>(),
       nullsInReadRange()->asMutable<uint64_t>(),
       0);
-  const int32_t numLists = checkedInt64ToInt32(numLists64, "numLists");
-  lengths->setSize(static_cast<uint64_t>(numLists) * sizeof(int32_t));
+  lengths->setSize(numLists * sizeof(int32_t));
   formatData_->as<ParquetData>().setNulls(nullsInReadRange(), numLists);
   setLengths(std::move(lengths));
 }
