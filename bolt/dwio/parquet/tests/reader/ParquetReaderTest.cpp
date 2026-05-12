@@ -1503,6 +1503,68 @@ TEST_F(ParquetReaderTest, skip) {
   EXPECT_EQ(0, rowReader->next(1000, result));
 }
 
+TEST_F(ParquetReaderTest, nestedMapValueNulls) {
+  std::vector<std::map<
+      std::optional<int32_t>,
+      std::optional<std::vector<std::pair<int32_t, std::optional<int32_t>>>>>>
+      maps;
+  maps.reserve(20000);
+  for (auto i = 0; i < 20000; ++i) {
+    if (i % 19 == 0) {
+      maps.push_back({});
+    } else if (i % 17 == 0) {
+      maps.push_back({{i, std::nullopt}});
+    } else if (i % 13 == 0) {
+      maps.push_back(
+          {{i, std::vector<std::pair<int32_t, std::optional<int32_t>>>{}}});
+    } else {
+      maps.push_back(
+          {{i,
+            std::vector<std::pair<int32_t, std::optional<int32_t>>>{
+                {i + 1, i + 2}, {i + 3, std::nullopt}}}});
+    }
+  }
+
+  auto nestedStruct = makeRowVector(
+      {"m", "x"},
+      {createMapOfMapVector(maps),
+       makeFlatVector<int32_t>(
+           20000, [](auto row) { return row; }, nullEvery(23))});
+  auto expected = makeRowVector({"c0"}, {nestedStruct});
+  auto rowType = std::static_pointer_cast<const RowType>(expected->type());
+
+  auto sink = std::make_unique<MemorySink>(
+      1024 * 1024, dwio::common::FileSink::Options{.pool = leafPool_.get()});
+  auto sinkPtr = sink.get();
+
+  bytedance::bolt::parquet::WriterOptions writerOptions;
+  writerOptions.memoryPool = rootPool_.get();
+  auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+      std::move(sink), writerOptions, rowType);
+  writer->write(expected);
+  writer->close();
+
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  std::string data(sinkPtr->data(), sinkPtr->size());
+  auto reader = std::make_unique<ParquetReader>(
+      std::make_unique<dwio::common::BufferedInput>(
+          std::make_shared<InMemoryReadFile>(std::move(data)), *leafPool_),
+      readerOptions);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  vector_size_t offset = 0;
+  while (auto readRows = rowReader->next(1000, result)) {
+    EXPECT_EQ(readRows, result->size());
+    assertEqualVectorPart(expected, result, offset);
+    offset += readRows;
+  }
+  EXPECT_EQ(offset, expected->size());
+}
+
 TEST_F(ParquetReaderTest, readVarbinaryFromFLBA) {
   const std::string filename("varbinary_flba.parquet");
   const std::string sample(getExampleFilePath(filename));

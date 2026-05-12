@@ -154,7 +154,8 @@ StructColumnReader::findBestLeaf() {
     auto child = children_[i];
     auto kind = child->fileType().type()->kind();
     // Complex type child repdefs must be read in any case.
-    if (kind == TypeKind::ROW || kind == TypeKind::ARRAY) {
+    if (kind == TypeKind::ROW || kind == TypeKind::ARRAY ||
+        kind == TypeKind::MAP) {
       return child;
     }
     if (!best) {
