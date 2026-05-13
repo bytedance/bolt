@@ -813,13 +813,19 @@ void Spiller::spill(const RowContainerIterator* startRowIter) {
   BOLT_CHECK(
       type_ != Type::kHashJoinProbe && type_ != Type::kOrderByOutput &&
       type_ != Type::kLocalMergeInput);
-  const bool doPotentialRangePartitionCheck =
-      (supportSkewPartition_ && container_ &&
-       container_->numRows() >
-           std::max(maxSpillRunRows_, kDefaultSpillRunRows));
   uint64_t totalTimeUs{0};
   {
     MicrosecondTimer timer(&totalTimeUs);
+
+    uint64_t maxRowsPerPartition{0};
+    if (supportSkewPartition_) {
+      if (skewedVictim_.has_value() && maxRowsPerFile_ > 0) {
+        maxRowsPerPartition = maxRowsPerFile_;
+      } else if (!isAnySpilled()) {
+        maxRowsPerPartition =
+            bits::divRoundUp(container_->numRows(), state_.maxPartitions());
+      }
+    }
     markAllPartitionsSpilled();
 
     RowContainerIterator rowIter;
@@ -829,9 +835,9 @@ void Spiller::spill(const RowContainerIterator* startRowIter) {
 
     bool lastRun{false};
     do {
-      lastRun = fillSpillRuns(&rowIter);
+      lastRun = fillSpillRuns(&rowIter, maxRowsPerPartition);
       runSpill(lastRun);
-      if (doPotentialRangePartitionCheck || skewedVictim_ >= 0) {
+      if (supportSkewPartition_ || skewedVictim_.has_value()) {
         prepareForRangPartitionIfNeeded();
       }
     } while (!lastRun);
@@ -901,8 +907,8 @@ void Spiller::spill(uint32_t partition, const RowVectorPtr& spillVector) {
     state_.appendToPartition(partition, spillVector);
   }
   updateSpillTotalTime(totalTimeUs);
-  if (supportSkewPartition_ && partition == skewedVictim_ &&
-      maxRowsPerFile_ > 0 &&
+  if (supportSkewPartition_ && skewedVictim_.has_value() &&
+      partition == *skewedVictim_ && maxRowsPerFile_ > 0 &&
       state_.rowsInCurrentFile(partition) >= maxRowsPerFile_) {
     state_.finishFile(partition);
   }
@@ -941,7 +947,9 @@ void Spiller::finalizeSpill() {
   finalized_ = true;
 }
 
-bool Spiller::fillSpillRuns(RowContainerIterator* iterator) {
+bool Spiller::fillSpillRuns(
+    RowContainerIterator* iterator,
+    const uint64_t maxRowsPerPartition) {
   checkEmptySpillRuns();
   bool lastRun{false};
   uint64_t execTimeUs{0};
@@ -955,6 +963,7 @@ bool Spiller::fillSpillRuns(RowContainerIterator* iterator) {
     const bool isSinglePartition = bits_.numPartitions() == 1;
 
     uint64_t totalRows{0};
+    bool maxRowsPerPartitionReached = false;
     for (;;) {
       const auto numRows =
           container_->listRows(iterator, rows.size(), rows.data());
@@ -983,9 +992,20 @@ bool Spiller::fillSpillRuns(RowContainerIterator* iterator) {
         spillRuns_[partition].rows.push_back(rows[i]);
         spillRuns_[partition].numBytes += container_->rowSize(rows[i]);
       }
-
       totalRows += numRows;
-      if (maxSpillRunRows_ > 0 && totalRows >= maxSpillRunRows_) {
+      // Stop filling this run once any partition reaches the per-partition row
+      // target, so the skewed partition can be identified before writing an
+      // oversized spill file.
+      if (maxRowsPerPartition > 0 && !maxRowsPerPartitionReached) {
+        for (auto partition = 0; partition < spillRuns_.size(); ++partition) {
+          if (spillRuns_[partition].rows.size() >= maxRowsPerPartition) {
+            maxRowsPerPartitionReached = true;
+            break;
+          }
+        }
+      }
+      if ((maxSpillRunRows_ > 0 && totalRows >= maxSpillRunRows_) ||
+          maxRowsPerPartitionReached) {
         break;
       }
     }
@@ -1109,9 +1129,9 @@ void Spiller::trySplitSkewPartition(SpillPartitionSet& partitionSet) {
 }
 
 void Spiller::prepareForRangPartitionIfNeeded() {
-  if (skewedVictim_ >= 0 && maxRowsPerFile_ >= 0 &&
-      state_.rowsInCurrentFile(skewedVictim_) >= maxRowsPerFile_) {
-    state_.finishFile(skewedVictim_);
+  if (skewedVictim_.has_value() && maxRowsPerFile_ > 0 &&
+      state_.rowsInCurrentFile(*skewedVictim_) >= maxRowsPerFile_) {
+    state_.finishFile(*skewedVictim_);
     return;
   }
   const auto& rowCountVec = state_.spilledRowCount();
@@ -1122,11 +1142,11 @@ void Spiller::prepareForRangPartitionIfNeeded() {
   for (auto i = 0; i < rowCountVec.size(); ++i) {
     auto rowCount = rowCountVec[i];
     if (rowCount > 0) {
-      if (rowCountVec[i] > maxRowCount) {
+      if (rowCount > maxRowCount) {
         maxRowCount = rowCount;
         skewedPartitionNumber = i;
       }
-      minRowCount = std::min(minRowCount, rowCountVec[i]);
+      minRowCount = std::min(minRowCount, rowCount);
     }
   }
   if (minRowCount != 0 &&
@@ -1137,7 +1157,7 @@ void Spiller::prepareForRangPartitionIfNeeded() {
     state_.finishFile(skewedPartitionNumber);
     BOLT_CHECK(state_.numFinishedFiles(skewedPartitionNumber) > 0);
     LOG(INFO) << __FUNCTION__ << ": set maxRowsPerFile_ = " << maxRowsPerFile_
-              << ", skewedVictim_ = " << skewedVictim_;
+              << ", skewedVictim_ = " << *skewedVictim_;
   }
 }
 
