@@ -31,7 +31,9 @@
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 namespace bytedance::bolt::exec::test {
 
 using connector::hive::HiveConnectorSplitBuilder;
@@ -42,23 +44,22 @@ HiveConnectorTestBase::HiveConnectorTestBase() {
 
 void HiveConnectorTestBase::SetUp() {
   OperatorTestBase::SetUp();
-  bytedance::bolt::connector::hive::CheckHiveConnectorFactoryInit<
-      bytedance::bolt::connector::hive::HiveConnectorFactory>();
-  auto hiveConnector =
-      connector::getConnectorFactory(connector::kHiveConnectorName)
-          ->newConnector(
-              kHiveConnectorId,
-              std::make_shared<config::ConfigBase>(
-                  std::unordered_map<std::string, std::string>()),
-              ioExecutor_.get());
-  connector::registerConnector(hiveConnector);
+  auto emptyConfig = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>());
+  connector::test::registerTestConnector(
+      connector::kHiveConnectorName,
+      kHiveConnectorId,
+      ioExecutor_.get(),
+      emptyConfig,
+      &connector::hive::registerHiveConnectorFactories);
 }
 
 void HiveConnectorTestBase::TearDown() {
   // Make sure all pending loads are finished or cancelled before unregister
   // connector.
   ioExecutor_.reset();
-  connector::unregisterConnector(kHiveConnectorId);
+  connector::test::unregisterTestConnector(
+      connector::kHiveConnectorName, kHiveConnectorId);
   OperatorTestBase::TearDown();
 }
 
