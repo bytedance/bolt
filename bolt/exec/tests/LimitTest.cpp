@@ -29,16 +29,39 @@
  */
 
 #include "bolt/common/testutil/TempFilePath.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/OutputBufferManager.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::test;
 
-class LimitTest : public HiveConnectorTestBase {};
+class LimitTest : public OperatorTestBase,
+                  public ::testing::WithParamInterface<
+                      connector::test::ConnectorTestParam> {
+ protected:
+  void SetUp() override {
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
 
-TEST_F(LimitTest, basic) {
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
+  }
+};
+
+TEST_P(LimitTest, basic) {
   vector_size_t batchSize = 1'000;
   std::vector<RowVectorPtr> vectors;
   for (int32_t i = 0; i < 3; ++i) {
@@ -80,7 +103,7 @@ TEST_F(LimitTest, basic) {
   assertQueryReturnsEmptyResult(makePlan(12'345, 10));
 }
 
-TEST_F(LimitTest, limitOverLocalExchange) {
+TEST_P(LimitTest, limitOverLocalExchange) {
   auto data = makeRowVector(
       {makeFlatVector<int32_t>(1'000, [](auto row) { return row; })});
 
@@ -99,7 +122,9 @@ TEST_F(LimitTest, limitOverLocalExchange) {
 
   auto cursor = TaskCursor::create(params);
   cursor->task()->addSplit(
-      scanNodeId, exec::Split(makeHiveConnectorSplit(file->path)));
+      scanNodeId,
+      exec::Split(connector::test::makeConnectorSplit(
+          GetParam().connectorName, file->path)));
 
   int32_t numRead = 0;
   while (cursor->moveNext()) {
@@ -114,7 +139,7 @@ TEST_F(LimitTest, limitOverLocalExchange) {
   ASSERT_TRUE(waitForTaskCompletion(cursor->task().get()));
 }
 
-TEST_F(LimitTest, partialLimitEagerFlush) {
+TEST_P(LimitTest, partialLimitEagerFlush) {
   std::vector<RowVectorPtr> batches(
       10, makeRowVector({makeFlatVector(std::vector<int64_t>(1, 0))}));
   auto test = [&](bool projectInBetween) {
@@ -146,3 +171,9 @@ TEST_F(LimitTest, partialLimitEagerFlush) {
   test(true);
   test(false);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    LimitTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));

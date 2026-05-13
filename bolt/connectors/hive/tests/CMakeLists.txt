@@ -33,6 +33,7 @@ add_executable(
   HiveConnectorTest.cpp
   HiveRowIndexTest.cpp
   HiveDataSinkTest.cpp
+  HivePartitionFunctionPlanNodeToStringTest.cpp
   HivePartitionFunctionTest.cpp
   HivePartitionUtilTest.cpp
   PartitionIdGeneratorTest.cpp
@@ -43,6 +44,9 @@ add_test(bolt_hive_connector_test bolt_hive_connector_test)
 target_link_libraries(
   bolt_hive_connector_test
   bolt_testutils
+  bolt_exec_test_lib
+  bolt_hive_connector
+  bolt_vector_test_lib
   GTest::gtest
   GTest::gtest_main
 )

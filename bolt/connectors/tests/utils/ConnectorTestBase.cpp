@@ -20,6 +20,7 @@
 
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/serialization/Serializable.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/type/filter/FilterBase.h"
 
 namespace bytedance::bolt::connector::test {
@@ -60,6 +61,23 @@ void unregisterTestConnector(
   connector::unregisterConnectorObjectFactory(connectorName);
 }
 
+ConnectorTestParam paramFor(const std::string& connectorName) {
+  return {
+      connectorName,
+      "test-" + connectorName,
+      /*factoryRegistrar=*/nullptr};
+}
+
+std::vector<ConnectorTestParam> paramsFor(
+    std::vector<std::string> connectorNames) {
+  std::vector<ConnectorTestParam> params;
+  params.reserve(connectorNames.size());
+  for (auto& name : connectorNames) {
+    params.push_back(paramFor(name));
+  }
+  return params;
+}
+
 std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
     const std::string& connectorName,
     const std::string& directoryPath,
@@ -68,9 +86,8 @@ std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
   for (const auto& path :
        std::filesystem::recursive_directory_iterator(directoryPath)) {
     if (path.is_regular_file()) {
-      splits.emplace_back(
-          makeConnectorSplits(connectorName, path.path().string(), 1, format)
-              [0]);
+      splits.emplace_back(makeConnectorSplits(
+          connectorName, path.path().string(), 1, format)[0]);
     }
   }
   return splits;
@@ -85,6 +102,24 @@ std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
   for (const auto& filePath : filePaths) {
     splits.emplace_back(
         makeConnectorSplits(connectorName, filePath.string(), 1, format)[0]);
+  }
+  return splits;
+}
+
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+        filePaths) {
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
+  splits.reserve(filePaths.size());
+  for (const auto& filePath : filePaths) {
+    splits.emplace_back(makeConnectorSplit(
+        connectorName,
+        filePath->path,
+        filePath->fileSize(),
+        filePath->fileModifiedTime(),
+        0,
+        std::numeric_limits<uint64_t>::max()));
   }
   return splits;
 }
@@ -280,8 +315,7 @@ ConnectorTestBase::makeConnectorSplit(
       start,
       length,
       connector::makeOptions(
-          {{"fileFormat",
-            static_cast<int>(dwio::common::FileFormat::DWRF)}}));
+          {{"fileFormat", static_cast<int>(dwio::common::FileFormat::DWRF)}}));
 }
 
 std::shared_ptr<connector::ConnectorSplit>

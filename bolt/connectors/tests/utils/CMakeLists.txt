@@ -24,6 +24,7 @@ target_link_libraries(
   bolt_dwio_common
   bolt_file
   bolt_serialization
+  bolt_temp_path
   bolt_type
   bolt_filter
   bolt_vector_test_lib

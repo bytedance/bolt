@@ -29,9 +29,11 @@
  */
 
 #include "bolt/common/testutil/TempFilePath.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
 #include <gtest/gtest.h>
@@ -42,7 +44,28 @@ using namespace bytedance::bolt::test;
 
 using bytedance::bolt::exec::test::PlanBuilder;
 
-class PrintPlanWithStatsTest : public HiveConnectorTestBase {};
+class PrintPlanWithStatsTest : public OperatorTestBase,
+                               public ::testing::WithParamInterface<
+                                   connector::test::ConnectorTestParam> {
+ protected:
+  void SetUp() override {
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
+  }
+};
 
 struct ExpectedLine {
   std::string line;
@@ -89,7 +112,7 @@ void ensureTaskCompletion(exec::Task* task) {
 // printPlanWithStats. A failure likely means that the documentation needs an
 // update as well.
 
-TEST_F(PrintPlanWithStatsTest, DISABLED_innerJoinWithTableScan) {
+TEST_P(PrintPlanWithStatsTest, DISABLED_innerJoinWithTableScan) {
   const int32_t numSplits = 20;
   const int32_t numRowsProbe = 1024;
   const int32_t numRowsBuild = 100;
@@ -139,7 +162,10 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_innerJoinWithTableScan) {
 
   auto task =
       AssertQueryBuilder(op, duckDbQueryRunner_)
-          .splits(leftScanId, makeHiveConnectorSplits(leftFiles))
+          .splits(
+              leftScanId,
+              connector::test::makeConnectorSplits(
+                  GetParam().connectorName, leftFiles))
           .assertResults(
               "SELECT t.c0, t.c1 + 1, t.c1 + u.c1 FROM t, u WHERE t.c0 = u.c0");
 
@@ -240,7 +266,7 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_innerJoinWithTableScan) {
        {"            runningGetOutputWallNanos\\s+sum: .+, count: 1, min: .+, max: .+"}});
 }
 
-TEST_F(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
+TEST_P(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
   RowTypePtr rowType{
       ROW({"c0", "c1", "c2", "c3", "c4", "c5"},
           {BIGINT(), INTEGER(), SMALLINT(), REAL(), DOUBLE(), VARCHAR()})};
@@ -266,7 +292,8 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
             .config(
                 core::QueryConfig::kMaxSplitPreloadPerDriver,
                 std::to_string(numPrefetchSplit))
-            .splits(makeHiveConnectorSplits({filePath}))
+            .splits(connector::test::makeConnectorSplits(
+                GetParam().connectorName, {filePath}))
             .assertResults(
                 "SELECT c5, max(c0), sum(c1), sum(c2), sum(c3), sum(c4) FROM tmp group by c5");
     ensureTaskCompletion(task.get());
@@ -326,3 +353,9 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
          {"        totalScanTime    [ ]* sum: .+, count: .+, min: .+, max: .+"}});
   }
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    PrintPlanWithStatsTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));

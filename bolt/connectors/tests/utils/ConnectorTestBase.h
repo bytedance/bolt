@@ -59,6 +59,22 @@ struct ConnectorTestParam {
   FactoryRegistrar factoryRegistrar;
 };
 
+/// Returns a ConnectorTestParam for the named connector. factoryRegistrar is
+/// nullptr; the connector's factory is expected to already be registered with
+/// the runtime before tests run -- either via the connector library's
+/// static-init self-registration (i.e. linking bolt_<name>_connector), or via
+/// an explicit register<Name>ConnectorFactories() call somewhere ahead of
+/// INSTANTIATE_TEST_SUITE_P (e.g. in main() or a TestEnvironment).
+///
+/// Use this helper so test source files can stay connector-agnostic: they
+/// reference connector names as strings (kHiveConnectorName etc.) instead of
+/// including connector-specific headers like HiveConnector.h.
+ConnectorTestParam paramFor(const std::string& connectorName);
+
+/// Convenience: returns params for a list of connector names.
+std::vector<ConnectorTestParam> paramsFor(
+    std::vector<std::string> connectorNames);
+
 /// Builds connector splits for every regular file under @c directoryPath via
 /// the connector object factory registered for @c connectorName.
 std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
@@ -72,7 +88,7 @@ std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
     const std::vector<std::filesystem::path>& filePaths,
     dwio::common::FileFormat format = dwio::common::FileFormat::DWRF);
 
-/// Builds connector splits from a list of ::bytedance::bolt::test::TempFilePath, preserving
+/// Builds connector splits from a list of TempFilePath, preserving
 /// $file_size and $file_modified_time info columns.
 std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
     const std::string& connectorName,
