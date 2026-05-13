@@ -15,11 +15,13 @@
  */
 
 #include "bolt/common/testutil/TempFilePath.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 using namespace bytedance::bolt;
@@ -27,13 +29,29 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::test;
 
-class MorselDrivenTest : public HiveConnectorTestBase {
+class MorselDrivenTest : public OperatorTestBase,
+                         public ::testing::WithParamInterface<
+                             connector::test::ConnectorTestParam> {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
     window::prestosql::registerAllWindowFunctions();
     exec::ExchangeSource::factories().clear();
     exec::ExchangeSource::registerFactory(createLocalExchangeSource);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
   }
 
   template <typename T>
@@ -128,7 +146,7 @@ class MorselDrivenTest : public HiveConnectorTestBase {
 };
 
 // Test 1: Verify "LocalExchange + PartialAgg" is morsel-driven
-TEST_F(MorselDrivenTest, morselDrivenEnabledForPartialAgg) {
+TEST_P(MorselDrivenTest, morselDrivenEnabledForPartialAgg) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({makeFlatSequence<int32_t>(0, 100)}),
       makeRowVector({makeFlatSequence<int32_t>(53, 100)}),
@@ -166,7 +184,9 @@ TEST_F(MorselDrivenTest, morselDrivenEnabledForPartialAgg) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
 
   auto task = queryBuilder.maxDrivers(4)
@@ -180,7 +200,7 @@ TEST_F(MorselDrivenTest, morselDrivenEnabledForPartialAgg) {
 }
 
 // Test 2: Verify  morsel-driven is disabled for "LocalExchange + SingleAgg"
-TEST_F(MorselDrivenTest, morselDrivenDisabledForSingleAgg) {
+TEST_P(MorselDrivenTest, morselDrivenDisabledForSingleAgg) {
   std::vector<RowVectorPtr> vectors;
   for (auto i = 0; i < 21; i++) {
     vectors.emplace_back(makeRowVector({makeFlatVector<int32_t>(
@@ -216,7 +236,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForSingleAgg) {
 }
 
 // Test 3: Verify  morsel-driven is disabled for "LocalExchange + FinalAgg"
-TEST_F(MorselDrivenTest, morselDrivenDisabledForFinalAgg) {
+TEST_P(MorselDrivenTest, morselDrivenDisabledForFinalAgg) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({makeFlatSequence<int32_t>(0, 100)}),
       makeRowVector({makeFlatSequence<int32_t>(53, 100)}),
@@ -254,7 +274,9 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForFinalAgg) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
 
   auto task = queryBuilder.maxDrivers(4)
@@ -268,7 +290,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForFinalAgg) {
 }
 
 // Test 4: Verify  morsel-driven is disabled for "LocalExchange + Window"
-TEST_F(MorselDrivenTest, morselDrivenDisabledForWindow) {
+TEST_P(MorselDrivenTest, morselDrivenDisabledForWindow) {
   const vector_size_t size = 1'000;
 
   std::vector<RowVectorPtr> vectors = {
@@ -314,7 +336,9 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForWindow) {
 
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
   auto task =
       queryBuilder.maxDrivers(4)
@@ -327,7 +351,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForWindow) {
 
 // Test 5: Verify  morsel-driven is disabled for "HashBuild" for efficiency
 // reason
-TEST_F(MorselDrivenTest, morselDrivenDisabledForHashBuild) {
+TEST_P(MorselDrivenTest, morselDrivenDisabledForHashBuild) {
   std::vector<RowVectorPtr> probeVectors = {
       makeRowVector(
           {"t_k1", "t_p", "t_s"},
@@ -386,7 +410,7 @@ TEST_F(MorselDrivenTest, morselDrivenDisabledForHashBuild) {
 // Test 6: Verify  morsel-driven can rollback plan rewrite (inserting a
 // localPartition in between Exchange->HashJoin) when the resulting pipeline
 // (hashProbe+singleAgg) cannot be morsel-driven.
-TEST_F(MorselDrivenTest, morselDrivenPlanRewriteRollback) {
+TEST_P(MorselDrivenTest, morselDrivenPlanRewriteRollback) {
   std::vector<std::shared_ptr<Task>> tasks;
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "true";
@@ -464,7 +488,7 @@ TEST_F(MorselDrivenTest, morselDrivenPlanRewriteRollback) {
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "false";
 }
 
-TEST_F(MorselDrivenTest, improvedEarlyCompletion) {
+TEST_P(MorselDrivenTest, improvedEarlyCompletion) {
   std::vector<std::shared_ptr<Task>> tasks;
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "true";
@@ -533,3 +557,9 @@ TEST_F(MorselDrivenTest, improvedEarlyCompletion) {
 
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "false";
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    MorselDrivenTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));

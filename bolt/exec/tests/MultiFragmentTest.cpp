@@ -33,7 +33,8 @@
 #include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/Exchange.h"
@@ -41,8 +42,8 @@
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/RoundRobinPartitionFunction.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "folly/experimental/EventCount.h"
 
@@ -54,10 +55,20 @@ using bytedance::bolt::test::BatchMaker;
 namespace bytedance::bolt::exec {
 namespace {
 
-class MultiFragmentTest : public HiveConnectorTestBase {
+class MultiFragmentTest : public OperatorTestBase,
+                          public ::testing::WithParamInterface<
+                              connector::test::ConnectorTestParam> {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
     exec::ExchangeSource::factories().clear();
     exec::ExchangeSource::registerFactory(createLocalExchangeSource);
     BOLT_TEST_VALUE_ENABLE();
@@ -65,7 +76,9 @@ class MultiFragmentTest : public HiveConnectorTestBase {
 
   void TearDown() override {
     vectors_.clear();
-    HiveConnectorTestBase::TearDown();
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
   }
 
   static std::string makeTaskId(const std::string& prefix, int num) {
@@ -149,10 +162,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
           filePaths) {
     for (auto& filePath : filePaths) {
       auto split = exec::Split(
-          std::make_shared<connector::hive::HiveConnectorSplit>(
-              kHiveConnectorId,
-              "file:" + filePath->path,
-              bytedance::bolt::dwio::common::FileFormat::DWRF),
+          connector::test::makeConnectorSplit(
+              GetParam().connectorName, std::move(filePath->path)),
           -1);
       task->addSplit("0", std::move(split));
       VLOG(1) << filePath->path << "\n";
@@ -168,10 +179,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
     for (auto i = 0; i < filePaths.size(); ++i) {
       const auto& filePath = filePaths[i];
       auto split = exec::Split(
-          std::make_shared<connector::hive::HiveConnectorSplit>(
-              kHiveConnectorId,
-              "file:" + filePath->getPath(),
-              bytedance::bolt::dwio::common::FileFormat::DWRF),
+          connector::test::makeConnectorSplit(
+              GetParam().connectorName, std::move(filePath->path)),
           -1);
       task->addSplit(scanNodeIds[i % scanNodeIds.size()], std::move(split));
       VLOG(1) << filePath->getPath() << "\n";
@@ -281,7 +290,7 @@ class MultiFragmentTest : public HiveConnectorTestBase {
       OutputBufferManager::getInstance().lock()};
 };
 
-TEST_F(MultiFragmentTest, aggregationSingleKey) {
+TEST_P(MultiFragmentTest, aggregationSingleKey) {
   setupSources(10, 1000);
   std::vector<std::shared_ptr<Task>> tasks;
   auto leafTaskId = makeTaskId("leaf", 0);
@@ -368,7 +377,7 @@ TEST_F(MultiFragmentTest, aggregationSingleKey) {
   }
 }
 
-TEST_F(MultiFragmentTest, aggregationMultiKey) {
+TEST_P(MultiFragmentTest, aggregationMultiKey) {
   setupSources(10, 1'000);
   std::vector<std::shared_ptr<Task>> tasks;
   auto leafTaskId = makeTaskId("leaf", 0);
@@ -416,7 +425,7 @@ TEST_F(MultiFragmentTest, aggregationMultiKey) {
   }
 }
 
-TEST_F(MultiFragmentTest, distributedTableScan) {
+TEST_P(MultiFragmentTest, distributedTableScan) {
   setupSources(10, 1000);
   // Run the table scan several times to test the caching.
   for (int i = 0; i < 3; ++i) {
@@ -442,7 +451,7 @@ TEST_F(MultiFragmentTest, distributedTableScan) {
   }
 }
 
-TEST_F(MultiFragmentTest, mergeExchange) {
+TEST_P(MultiFragmentTest, mergeExchange) {
   setupSources(20, 1000);
 
   static const core::SortOrder kAscNullsLast(true, false);
@@ -508,7 +517,7 @@ TEST_F(MultiFragmentTest, mergeExchange) {
 }
 
 // Test reordering and dropping columns in PartitionedOutput operator.
-TEST_F(MultiFragmentTest, partitionedOutput) {
+TEST_P(MultiFragmentTest, partitionedOutput) {
   setupSources(10, 1000);
 
   // Test dropping columns only
@@ -644,7 +653,7 @@ TEST_F(MultiFragmentTest, partitionedOutput) {
   }
 }
 
-TEST_F(MultiFragmentTest, mergeExchangeMultiMerge) {
+TEST_P(MultiFragmentTest, mergeExchangeMultiMerge) {
   setupSources(20, 1000);
   static const core::SortOrder kAscNullsLast(true, false);
   std::vector<std::shared_ptr<Task>> tasks;
@@ -739,7 +748,7 @@ TEST_F(MultiFragmentTest, mergeExchangeMultiMerge) {
   EXPECT_LT(0, mergeExchangeStats.rawInputBytes);
 }
 
-TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
+TEST_P(MultiFragmentTest, partitionedOutputWithLargeInput) {
   // Verify that partitionedOutput operator is able to split a single input
   // vector if it hits memory or row limits.
   // We create a large vector that hits the row limit (70% - 120% of 10,000).
@@ -814,7 +823,7 @@ TEST_F(MultiFragmentTest, partitionedOutputWithLargeInput) {
   }
 }
 
-TEST_F(MultiFragmentTest, broadcast) {
+TEST_P(MultiFragmentTest, broadcast) {
   auto data = makeRowVector(
       {makeFlatVector<int32_t>(1'000, [](auto row) { return row; })});
 
@@ -860,7 +869,7 @@ TEST_F(MultiFragmentTest, broadcast) {
   leafTask->updateOutputBuffers(finalAggTaskIds.size(), true);
 }
 
-TEST_F(MultiFragmentTest, roundRobinPartition) {
+TEST_P(MultiFragmentTest, roundRobinPartition) {
   auto data = {
       makeRowVector({
           makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
@@ -925,7 +934,7 @@ TEST_F(MultiFragmentTest, roundRobinPartition) {
 }
 
 // Test PartitionedOutput operator with constant partitioning keys.
-TEST_F(MultiFragmentTest, constantKeys) {
+TEST_P(MultiFragmentTest, constantKeys) {
   auto data = makeRowVector({
       makeFlatVector<int32_t>(
           1'000, [](auto row) { return row; }, nullEvery(7)),
@@ -985,7 +994,7 @@ TEST_F(MultiFragmentTest, constantKeys) {
   }
 }
 
-TEST_F(MultiFragmentTest, replicateNullsAndAny) {
+TEST_P(MultiFragmentTest, replicateNullsAndAny) {
   auto data = makeRowVector({makeFlatVector<int32_t>(
       1'000, [](auto row) { return row; }, nullEvery(7))});
 
@@ -1044,7 +1053,7 @@ TEST_F(MultiFragmentTest, replicateNullsAndAny) {
 }
 
 // Test query finishing before all splits have been scheduled.
-TEST_F(MultiFragmentTest, limit) {
+TEST_P(MultiFragmentTest, limit) {
   auto data = makeRowVector({makeFlatVector<int32_t>(
       1'000, [](auto row) { return row; }, nullEvery(7))});
 
@@ -1063,7 +1072,9 @@ TEST_F(MultiFragmentTest, limit) {
   leafTask->start(1);
 
   leafTask.get()->addSplit(
-      "0", exec::Split(makeHiveConnectorSplit(file->path)));
+      "0",
+      exec::Split(connector::test::makeConnectorSplit(
+          GetParam().connectorName, file->path)));
 
   // Make final task: Exchange -> FinalLimit(10).
   auto plan = PlanBuilder()
@@ -1090,7 +1101,7 @@ TEST_F(MultiFragmentTest, limit) {
   ASSERT_TRUE(waitForTaskCompletion(leafTask.get())) << leafTask->taskId();
 }
 
-TEST_F(MultiFragmentTest, mergeExchangeOverEmptySources) {
+TEST_P(MultiFragmentTest, mergeExchangeOverEmptySources) {
   std::vector<std::shared_ptr<Task>> tasks;
   std::vector<std::string> leafTaskIds;
 
@@ -1120,7 +1131,7 @@ TEST_F(MultiFragmentTest, mergeExchangeOverEmptySources) {
   }
 }
 
-DEBUG_ONLY_TEST_F(MultiFragmentTest, mergeExchangeFailureOnStart) {
+DEBUG_ONLY_TEST_P(MultiFragmentTest, mergeExchangeFailureOnStart) {
   std::vector<std::shared_ptr<Task>> tasks;
   std::vector<std::string> leafTaskIds;
 
@@ -1205,7 +1216,7 @@ core::PlanNodePtr makeSequentialJoinsOverExchangePlan(
 }
 } // namespace
 
-TEST_F(MultiFragmentTest, earlyCompletion) {
+TEST_P(MultiFragmentTest, earlyCompletion) {
   // Setup a distributed query with 4 tasks:
   // - 1 leaf task with results partitioned 2 ways;
   // - 2 intermediate tasks reading from 2 partitions produced by the leaf task.
@@ -1278,7 +1289,7 @@ TEST_F(MultiFragmentTest, earlyCompletion) {
   }
 }
 
-TEST_F(MultiFragmentTest, morselDrivenEarlyCompletion) {
+TEST_P(MultiFragmentTest, morselDrivenEarlyCompletion) {
   // We leverage the same test plan of earlyCompletion to test MorselDriven
   // execution model under early termination and verify:
   //  1. "Exchange->HashJoin(probe)" is split to two pipelines,
@@ -1369,7 +1380,7 @@ TEST_F(MultiFragmentTest, morselDrivenEarlyCompletion) {
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "false";
 }
 
-TEST_F(MultiFragmentTest, morselDrivenEarlyCompletion2) {
+TEST_P(MultiFragmentTest, morselDrivenEarlyCompletion2) {
   // We test early termination of MorselDriven execution model in the
   // "Exchange->HashJoin(probe)->HashJoin(probe)" and verify:
   //  1. "Exchange->HashJoin(probe)->HashJoin(probe)" is split to two pipelines,
@@ -1465,7 +1476,7 @@ TEST_F(MultiFragmentTest, morselDrivenEarlyCompletion2) {
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "false";
 }
 
-TEST_F(MultiFragmentTest, earlyCompletionBroadcast) {
+TEST_P(MultiFragmentTest, earlyCompletionBroadcast) {
   // Same as 'earlyCompletion' test, but broadcasts leaf task results to all
   // intermediate tasks.
 
@@ -1530,7 +1541,7 @@ TEST_F(MultiFragmentTest, earlyCompletionBroadcast) {
   }
 }
 
-TEST_F(MultiFragmentTest, earlyCompletionMerge) {
+TEST_P(MultiFragmentTest, earlyCompletionMerge) {
   // Same as 'earlyCompletion' test, but uses MergeExchange instead of Exchange.
 
   std::vector<std::shared_ptr<Task>> tasks;
@@ -1680,7 +1691,7 @@ class SlowOperatorTranslator : public Operator::PlanNodeTranslator {
   }
 };
 
-TEST_F(MultiFragmentTest, exchangeDestruction) {
+TEST_P(MultiFragmentTest, exchangeDestruction) {
   // This unit test tests the proper destruction of ExchangeClient upon
   // task destruction.
   Operator::registerOperator(std::make_unique<SlowOperatorTranslator>());
@@ -1729,7 +1740,7 @@ TEST_F(MultiFragmentTest, exchangeDestruction) {
   rootTask = nullptr;
 }
 
-TEST_F(MultiFragmentTest, cancelledExchange) {
+TEST_P(MultiFragmentTest, cancelledExchange) {
   // Create a source fragment borrow the output type from it.
   auto planFragment = exec::test::PlanBuilder()
                           .tableScan(rowType_)
@@ -1827,7 +1838,7 @@ class TestCustomExchangeTranslator : public exec::Operator::PlanNodeTranslator {
   }
 };
 
-TEST_F(MultiFragmentTest, customPlanNodeWithExchangeClient) {
+TEST_P(MultiFragmentTest, customPlanNodeWithExchangeClient) {
   setupSources(5, 100);
   Operator::registerOperator(std::make_unique<TestCustomExchangeTranslator>());
   auto leafTaskId = makeTaskId("leaf", 0);
@@ -1874,7 +1885,7 @@ TEST_F(MultiFragmentTest, customPlanNodeWithExchangeClient) {
 //     task is not running.
 // T5: task terminate processes the pending remote splits by accessing the
 //     associated exchange client and run into segment fault.
-DEBUG_ONLY_TEST_F(
+DEBUG_ONLY_TEST_P(
     MultiFragmentTest,
     raceBetweenTaskTerminateAndTaskNoMoreSplits) {
   setupSources(10, 1000);
@@ -1940,7 +1951,7 @@ DEBUG_ONLY_TEST_F(
   ASSERT_TRUE(waitForTaskFailure(rootTask.get(), 1'000'000'000));
 }
 
-TEST_F(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
+TEST_P(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
   setupSources(8, 1000);
   auto taskId = makeTaskId("task", 0);
   core::PlanNodePtr leafPlan;
@@ -2005,7 +2016,7 @@ TEST_F(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
   task.reset();
 }
 
-TEST_F(MultiFragmentTest, taskTerminateWithProblematicRemainingRemoteSplits) {
+TEST_P(MultiFragmentTest, taskTerminateWithProblematicRemainingRemoteSplits) {
   // Start the task with 2 drivers.
   auto probeData =
       makeRowVector({"p_c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
@@ -2054,7 +2065,7 @@ TEST_F(MultiFragmentTest, taskTerminateWithProblematicRemainingRemoteSplits) {
   ASSERT_TRUE(waitForTaskFailure(task.get(), 30'000'000)) << task->taskId();
 }
 
-TEST_F(
+TEST_P(
     MultiFragmentTest,
     morselDrivenTestSplitHashJoinWithExchangeOnBuildSide) {
   // We leverage the same test plan of
@@ -2131,7 +2142,7 @@ TEST_F(
   configSettings_[core::QueryConfig::kEnableMorselDriven] = "false";
 }
 
-DEBUG_ONLY_TEST_F(MultiFragmentTest, mergeWithEarlyTermination) {
+DEBUG_ONLY_TEST_P(MultiFragmentTest, mergeWithEarlyTermination) {
   setupSources(10, 1000);
 
   std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> filePaths(
@@ -2282,7 +2293,7 @@ class DataFetcher {
 /// granularity. It can do so only if PartitionedOutput operator limits the size
 /// of individual pages. PartitionedOutput operator is expected to limit page
 /// sizes to no more than 1MB give and take 30%.
-TEST_F(MultiFragmentTest, maxBytes) {
+TEST_P(MultiFragmentTest, maxBytes) {
   std::string s(25, 'x');
   // Keep the row count under 7000 to avoid hitting the row limit in the
   // operator instead.
@@ -2346,7 +2357,7 @@ TEST_F(MultiFragmentTest, maxBytes) {
 }
 
 /// Verify that ExchangeClient stats are populated even if task fails.
-DEBUG_ONLY_TEST_F(MultiFragmentTest, exchangeStatsOnFailure) {
+DEBUG_ONLY_TEST_P(MultiFragmentTest, exchangeStatsOnFailure) {
   // Trigger a failure after fetching first 10 pages.
   BOLT_TEST_VALUE_ENABLE();
   SCOPED_TESTVALUE_SET(
@@ -2392,7 +2403,7 @@ DEBUG_ONLY_TEST_F(MultiFragmentTest, exchangeStatsOnFailure) {
   ASSERT_TRUE(waitForTaskCompletion(producerTask.get(), 3'000'000));
 }
 
-TEST_F(MultiFragmentTest, earlyTaskFailure) {
+TEST_P(MultiFragmentTest, earlyTaskFailure) {
   setupSources(1, 10);
 
   const auto partialSortTaskId = makeTaskId("partialSortBy", 0);
@@ -2447,7 +2458,7 @@ TEST_F(MultiFragmentTest, earlyTaskFailure) {
   }
 }
 
-TEST_F(MultiFragmentTest, mergeSmallBatchesInExchange) {
+TEST_P(MultiFragmentTest, mergeSmallBatchesInExchange) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   const int32_t numPartitions = 100;
@@ -2505,6 +2516,12 @@ TEST_F(MultiFragmentTest, mergeSmallBatchesInExchange) {
   test(10'000, 5);
   test(100'000, 1);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    MultiFragmentTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));
 
 } // namespace
 } // namespace bytedance::bolt::exec

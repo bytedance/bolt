@@ -28,19 +28,18 @@
  * --------------------------------------------------------------------------
  */
 
-#include <core/PlanNode.h>
+#include <fmt/format.h>
 #include <re2/re2.h>
 
-#include <fmt/format.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/core/PlanNode.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/HashBuild.h"
 #include "bolt/exec/HashJoinBridge.h"
 #include "bolt/exec/PlanNodeStats.h"
-#include "bolt/exec/TableScan.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/Cursor.h"
@@ -864,10 +863,12 @@ class HashJoinTest : public HiveConnectorTestBase {
               vectorSize, [](auto row) { return row * 3; })});
         });
 
-    std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile = ::bytedance::bolt::test::TempFilePath::create();
+    std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile =
+        ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(probeFile->getPath(), probeVectors);
 
-    std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile = ::bytedance::bolt::test::TempFilePath::create();
+    std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile =
+        ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(buildFile->getPath(), buildVectors);
 
     createDuckDbTable("t", probeVectors);
@@ -7597,7 +7598,8 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimFromJoinBuild) {
   std::vector<bool> sameQueries = {false, true};
   for (bool sameQuery : sameQueries) {
     SCOPED_TRACE(fmt::format("sameQuery {}", sameQuery));
-    const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     std::shared_ptr<core::QueryCtx> fakeQueryCtx =
         newQueryCtx(memoryManager.get(), executor_.get(), kMemoryCapacity * 2);
     std::shared_ptr<core::QueryCtx> joinQueryCtx;
@@ -7955,7 +7957,8 @@ DEBUG_ONLY_TEST_F(HashJoinTest, arbitrationTriggeredByEnsureJoinTableFit) {
   fuzzerOpts_.vectorSize = 128;
   auto probeVectors = createVectors(10, probeType_, fuzzerOpts_);
   auto buildVectors = createVectors(20, buildType_, fuzzerOpts_);
-  const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(1)
       .spillDirectory(spillDirectory->path)
@@ -8008,7 +8011,8 @@ DEBUG_ONLY_TEST_F(HashJoinTest, joinBuildSpillError) {
       }));
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   auto plan = PlanBuilder(planNodeIdGenerator)
                   .values(vectors)
                   .project({"c0 AS t0", "c1 AS t1", "c2 AS t2"})

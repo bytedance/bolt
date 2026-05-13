@@ -34,19 +34,24 @@
 #include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Values.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "folly/experimental/EventCount.h"
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
+using namespace bytedance::bolt::test;
+
 namespace bytedance::bolt::exec::test {
 namespace {
 // A test join node whose build is skewed in terms of process time. The driver
@@ -469,7 +474,9 @@ class TestBadMemoryTranslator : public exec::Operator::PlanNodeTranslator {
   }
 };
 } // namespace
-class TaskTest : public HiveConnectorTestBase {
+class TaskTest : public OperatorTestBase,
+                 public ::testing::WithParamInterface<
+                     connector::test::ConnectorTestParam> {
  protected:
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
@@ -481,7 +488,25 @@ class TaskTest : public HiveConnectorTestBase {
     OperatorTestBase::TearDownTestCase();
   }
 
-  static std::pair<std::shared_ptr<exec::Task>, std::vector<RowVectorPtr>>
+  void SetUp() override {
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
+  }
+
+  std::pair<std::shared_ptr<exec::Task>, std::vector<RowVectorPtr>>
   executeSerial(
       core::PlanFragment plan,
       const std::unordered_map<std::string, std::vector<std::string>>&
@@ -495,7 +520,10 @@ class TaskTest : public HiveConnectorTestBase {
 
     for (const auto& [nodeId, paths] : filePaths) {
       for (const auto& path : paths) {
-        task->addSplit(nodeId, exec::Split(makeHiveConnectorSplit(path)));
+        task->addSplit(
+            nodeId,
+            exec::Split(connector::test::makeConnectorSplit(
+                GetParam().connectorName, path)));
       }
       task->noMoreSplits(nodeId);
     }
@@ -529,7 +557,7 @@ class TaskTest : public HiveConnectorTestBase {
   }
 };
 
-TEST_F(TaskTest, wrongPlanNodeForSplit) {
+TEST_P(TaskTest, wrongPlanNodeForSplit) {
   auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
       "test",
       "file:/tmp/abc",
@@ -610,7 +638,7 @@ TEST_F(TaskTest, wrongPlanNodeForSplit) {
       errorMessage)
 }
 
-TEST_F(TaskTest, duplicatePlanNodeIds) {
+TEST_P(TaskTest, duplicatePlanNodeIds) {
   auto plan = PlanBuilder()
                   .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))
                   .hashJoin(
@@ -647,7 +675,7 @@ TEST_F(TaskTest, duplicatePlanNodeIds) {
 // task. Setting error requires to acquire the same task lock again.
 // 6. Since we use immediate executor to execute these futures, a deadlock
 // happens.
-TEST_F(TaskTest, testTerminateDeadlock) {
+TEST_P(TaskTest, testTerminateDeadlock) {
   const int64_t kSlowJoinBuildDelaySeconds = 2;
   const int64_t kTaskAbortDelaySeconds = 1;
   const int64_t kMaxErrorTimeSeconds = 3;
@@ -707,7 +735,7 @@ TEST_F(TaskTest, testTerminateDeadlock) {
       cursor->task()->toString().find("zombie drivers:"), std::string::npos);
 }
 
-TEST_F(TaskTest, singleThreadedExecution) {
+TEST_P(TaskTest, singleThreadedExecution) {
   auto data = makeRowVector({
       makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
   });
@@ -787,7 +815,7 @@ TEST_F(TaskTest, singleThreadedExecution) {
   BOLT_ASSERT_THROW(executeSerial(plan), "division by zero");
 }
 
-TEST_F(TaskTest, singleThreadedHashJoin) {
+TEST_P(TaskTest, singleThreadedHashJoin) {
   auto left = makeRowVector(
       {"t_c0", "t_c1"},
       {
@@ -836,7 +864,7 @@ TEST_F(TaskTest, singleThreadedHashJoin) {
   }
 }
 
-TEST_F(TaskTest, singleThreadedCrossJoin) {
+TEST_P(TaskTest, singleThreadedCrossJoin) {
   auto left = makeRowVector({"t_c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
   auto leftPath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(leftPath->path, {left});
@@ -873,7 +901,7 @@ TEST_F(TaskTest, singleThreadedCrossJoin) {
   }
 }
 
-TEST_F(TaskTest, singleThreadedExecutionExternalBlockable) {
+TEST_P(TaskTest, singleThreadedExecutionExternalBlockable) {
   exec::Operator::registerOperator(
       std::make_unique<TestExternalBlockableTranslator>());
   auto data = makeRowVector({
@@ -944,7 +972,7 @@ TEST_F(TaskTest, singleThreadedExecutionExternalBlockable) {
   EXPECT_EQ(3, results.size());
 }
 
-TEST_F(TaskTest, supportSerialExecutionMode) {
+TEST_P(TaskTest, supportSerialExecutionMode) {
   auto plan = PlanBuilder()
                   .tableScan(ROW({"c0"}, {BIGINT()}))
                   .project({"c0 % 10"})
@@ -960,7 +988,7 @@ TEST_F(TaskTest, supportSerialExecutionMode) {
       "");
 }
 
-TEST_F(TaskTest, updateBroadCastOutputBuffers) {
+TEST_P(TaskTest, updateBroadCastOutputBuffers) {
   auto plan = PlanBuilder()
                   .tableScan(ROW({"c0"}, {BIGINT()}))
                   .project({"c0 % 10"})
@@ -1007,7 +1035,7 @@ TEST_F(TaskTest, updateBroadCastOutputBuffers) {
   }
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, outputDriverFinishEarly) {
+DEBUG_ONLY_TEST_P(TaskTest, outputDriverFinishEarly) {
   const int32_t numBatches = 10;
   std::vector<RowVectorPtr> dataBatches;
   dataBatches.reserve(numBatches);
@@ -1091,7 +1119,7 @@ DEBUG_ONLY_TEST_F(TaskTest, outputDriverFinishEarly) {
 }
 
 /// Test that we export operator stats for unfinished (running) operators.
-DEBUG_ONLY_TEST_F(TaskTest, liveStats) {
+DEBUG_ONLY_TEST_P(TaskTest, liveStats) {
   constexpr int32_t numBatches = 10;
   std::vector<RowVectorPtr> dataBatches;
   dataBatches.reserve(numBatches);
@@ -1179,7 +1207,7 @@ DEBUG_ONLY_TEST_F(TaskTest, liveStats) {
   EXPECT_EQ(terminationTimeMs, task->taskStats().terminationTimeMs);
 }
 
-TEST_F(TaskTest, outputBufferSize) {
+TEST_P(TaskTest, outputBufferSize) {
   constexpr int32_t numBatches = 10;
   std::vector<RowVectorPtr> dataBatches;
   dataBatches.reserve(numBatches);
@@ -1224,7 +1252,7 @@ TEST_F(TaskTest, outputBufferSize) {
   task->requestCancel();
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, inconsistentExecutionMode) {
+DEBUG_ONLY_TEST_P(TaskTest, inconsistentExecutionMode) {
   {
     // Scenario 1: Parallel execution starts first then kicks in Serial
     // execution.
@@ -1286,7 +1314,7 @@ DEBUG_ONLY_TEST_F(TaskTest, inconsistentExecutionMode) {
   }
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, findPeerOperators) {
+DEBUG_ONLY_TEST_P(TaskTest, findPeerOperators) {
   const std::vector<RowVectorPtr> probeVectors = {makeRowVector(
       {"t_c0", "t_c1"},
       {
@@ -1355,7 +1383,7 @@ DEBUG_ONLY_TEST_F(TaskTest, findPeerOperators) {
   }
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, raceBetweenTaskPauseAndTerminate) {
+DEBUG_ONLY_TEST_P(TaskTest, raceBetweenTaskPauseAndTerminate) {
   const std::vector<RowVectorPtr> values = {makeRowVector(
       {"t_c0", "t_c1"},
       {
@@ -1428,7 +1456,7 @@ DEBUG_ONLY_TEST_F(TaskTest, raceBetweenTaskPauseAndTerminate) {
   taskThread.join();
 }
 
-TEST_F(TaskTest, driverCreationMemoryAllocationCheck) {
+TEST_P(TaskTest, driverCreationMemoryAllocationCheck) {
   exec::Operator::registerOperator(std::make_unique<TestBadMemoryTranslator>());
   auto data = makeRowVector({
       makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
@@ -1466,7 +1494,7 @@ TEST_F(TaskTest, driverCreationMemoryAllocationCheck) {
   }
 }
 
-TEST_F(TaskTest, spillDirectoryLifecycleManagement) {
+TEST_P(TaskTest, spillDirectoryLifecycleManagement) {
   // Marks the spill directory as not already created and ensures that the Task
   // handles creating it on first use and eventually deleting it on destruction.
   auto data = makeRowVector({
@@ -1506,7 +1534,7 @@ TEST_F(TaskTest, spillDirectoryLifecycleManagement) {
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 
-TEST_F(TaskTest, spillDirNotCreated) {
+TEST_P(TaskTest, spillDirNotCreated) {
   // Verify that no spill directory is created if spilling is not engaged.
   const std::vector<RowVectorPtr> probeVectors = {makeRowVector(
       {"t_c0", "t_c1"},
@@ -1564,7 +1592,7 @@ TEST_F(TaskTest, spillDirNotCreated) {
   EXPECT_FALSE(fs->exists(tmpDirectoryPath));
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, resumeAfterTaskFinish) {
+DEBUG_ONLY_TEST_P(TaskTest, resumeAfterTaskFinish) {
   auto probeVector = makeRowVector(
       {"t_c0"}, {makeFlatVector<int32_t>(10, [](auto row) { return row; })});
   auto buildVector = makeRowVector(
@@ -1615,7 +1643,7 @@ DEBUG_ONLY_TEST_F(TaskTest, resumeAfterTaskFinish) {
   waitForAllTasksToBeDeleted();
 }
 
-DEBUG_ONLY_TEST_F(
+DEBUG_ONLY_TEST_P(
     TaskTest,
     singleThreadedLongRunningOperatorInTaskReclaimerAbort) {
   auto data = makeRowVector({
@@ -1690,7 +1718,7 @@ DEBUG_ONLY_TEST_F(
   });
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, longRunningOperatorInTaskReclaimerAbort) {
+DEBUG_ONLY_TEST_P(TaskTest, longRunningOperatorInTaskReclaimerAbort) {
   auto data = makeRowVector({
       makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
   });
@@ -1748,7 +1776,7 @@ DEBUG_ONLY_TEST_F(TaskTest, longRunningOperatorInTaskReclaimerAbort) {
   });
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, taskReclaimStats) {
+DEBUG_ONLY_TEST_P(TaskTest, taskReclaimStats) {
   const auto data = makeRowVector({
       makeFlatVector<int64_t>(50, folly::identity),
       makeFlatVector<int64_t>(50, folly::identity),
@@ -1800,7 +1828,7 @@ DEBUG_ONLY_TEST_F(TaskTest, taskReclaimStats) {
   waitForAllTasksToBeDeleted();
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, driverEnqueAfterFailedAndPausedTask) {
+DEBUG_ONLY_TEST_P(TaskTest, driverEnqueAfterFailedAndPausedTask) {
   const auto data = makeRowVector({
       makeFlatVector<int64_t>(50, [](auto row) { return row; }),
       makeFlatVector<int64_t>(50, [](auto row) { return row; }),
@@ -1848,4 +1876,11 @@ DEBUG_ONLY_TEST_F(TaskTest, driverEnqueAfterFailedAndPausedTask) {
   task.reset();
   waitForAllTasksToBeDeleted();
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    TaskTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));
+
 } // namespace bytedance::bolt::exec::test

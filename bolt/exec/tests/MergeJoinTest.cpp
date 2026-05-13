@@ -32,8 +32,10 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -81,9 +83,29 @@ makeDictionaryJoinRegressionData() {
 
 } // namespace
 
-class MergeJoinTest : public HiveConnectorTestBase {
+class MergeJoinTest : public OperatorTestBase,
+                      public ::testing::WithParamInterface<
+                          connector::test::ConnectorTestParam> {
  protected:
   using OperatorTestBase::assertQuery;
+
+  void SetUp() override {
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
+  }
 
   CursorParameters makeCursorParameters(
       const std::shared_ptr<const core::PlanNode>& planNode,
@@ -533,27 +555,27 @@ class MergeJoinTest : public HiveConnectorTestBase {
   }
 };
 
-TEST_F(MergeJoinTest, oneToOneAllMatch) {
+TEST_P(MergeJoinTest, oneToOneAllMatch) {
   testJoin<int32_t>([](auto row) { return row; }, [](auto row) { return row; });
 }
 
-TEST_F(MergeJoinTest, someDontMatch) {
+TEST_P(MergeJoinTest, someDontMatch) {
   testJoin<int32_t>(
       [](auto row) { return row % 5 == 0 ? row - 1 : row; },
       [](auto row) { return row % 7 == 0 ? row - 1 : row; });
 }
 
-TEST_F(MergeJoinTest, fewMatch) {
+TEST_P(MergeJoinTest, fewMatch) {
   testJoin<int32_t>(
       [](auto row) { return row * 5; }, [](auto row) { return row * 7; });
 }
 
-TEST_F(MergeJoinTest, duplicateMatch) {
+TEST_P(MergeJoinTest, duplicateMatch) {
   testJoin<int32_t>(
       [](auto row) { return row / 2; }, [](auto row) { return row / 3; });
 }
 
-TEST_F(MergeJoinTest, allRowsMatch) {
+TEST_P(MergeJoinTest, allRowsMatch) {
   std::vector<VectorPtr> leftKeys = {
       makeFlatVector<int32_t>(2, [](auto /* row */) { return 5; }),
       makeFlatVector<int32_t>(3, [](auto /* row */) { return 5; }),
@@ -566,13 +588,13 @@ TEST_F(MergeJoinTest, allRowsMatch) {
   testJoin(rightKeys, leftKeys);
 }
 
-TEST_F(MergeJoinTest, keySkew) {
+TEST_P(MergeJoinTest, keySkew) {
   testJoin<int32_t>(
       [](auto row) { return row; },
       [](auto row) { return row < 10 ? row : row + 10240; });
 }
 
-TEST_F(MergeJoinTest, dictionaryEncodedRightProjectionRegression) {
+TEST_P(MergeJoinTest, dictionaryEncodedRightProjectionRegression) {
   const auto [leftRows, rightRows] = makeDictionaryJoinRegressionData();
 
   auto leftBatch = makeDictionaryJoinLeftBatch(leftRows);
@@ -609,7 +631,7 @@ TEST_F(MergeJoinTest, dictionaryEncodedRightProjectionRegression) {
       "u._hoodie_record_key");
 }
 
-TEST_F(MergeJoinTest, aggregationOverJoin) {
+TEST_P(MergeJoinTest, aggregationOverJoin) {
   auto left =
       makeRowVector({"t_c0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5})});
   auto right = makeRowVector({"u_c0"}, {makeFlatVector<int32_t>({2, 4, 6})});
@@ -633,7 +655,7 @@ TEST_F(MergeJoinTest, aggregationOverJoin) {
   ASSERT_EQ(2, result.value<int64_t>());
 }
 
-TEST_F(MergeJoinTest, nonFirstJoinKeys) {
+TEST_P(MergeJoinTest, nonFirstJoinKeys) {
   auto left = makeRowVector(
       {"t_data", "t_key"},
       {
@@ -663,7 +685,7 @@ TEST_F(MergeJoinTest, nonFirstJoinKeys) {
   assertQuery(plan, "VALUES (2, 40, 23), (4, 20, 22)");
 }
 
-TEST_F(MergeJoinTest, innerJoinFilter) {
+TEST_P(MergeJoinTest, innerJoinFilter) {
   vector_size_t size = 1'000;
   // Join keys on the left side: 0, 10, 20,..
   // Payload on the left side: 0, 1, 2, 3,..
@@ -735,7 +757,7 @@ TEST_F(MergeJoinTest, innerJoinFilter) {
       "SELECT t_c0, u_c0, u_c1 FROM t, u WHERE t_c0 = u_c0 AND (t_c1 + u_c1) % 2 = 0");
 }
 
-TEST_F(MergeJoinTest, leftAndRightJoinFilter) {
+TEST_P(MergeJoinTest, leftAndRightJoinFilter) {
   // Each row on the left side has at most one match on the right side.
   auto left = makeRowVector(
       {"t_c0", "t_c1"},
@@ -831,7 +853,7 @@ TEST_F(MergeJoinTest, leftAndRightJoinFilter) {
   }
 }
 
-TEST_F(MergeJoinTest, rightJoinWithDuplicateMatch) {
+TEST_P(MergeJoinTest, rightJoinWithDuplicateMatch) {
   // Each row on the left side has at most one match on the right side.
   auto left = makeRowVector(
       {"a", "b"},
@@ -870,7 +892,7 @@ TEST_F(MergeJoinTest, rightJoinWithDuplicateMatch) {
       .assertResults("SELECT * from t RIGHT JOIN u ON a = c AND b < d");
 }
 
-TEST_F(MergeJoinTest, fullJoinNullLess) {
+TEST_P(MergeJoinTest, fullJoinNullLess) {
   // Each row on the left side has at most one match on the right side.
   auto right = makeRowVector(
       {"c", "d"},
@@ -914,7 +936,7 @@ TEST_F(MergeJoinTest, fullJoinNullLess) {
       .assertResults("SELECT * from t full JOIN u ON t.a=u.c and t.b=u.d");
 }
 
-TEST_F(MergeJoinTest, rightJoinFilterWithNull) {
+TEST_P(MergeJoinTest, rightJoinFilterWithNull) {
   auto left = makeRowVector(
       {"a", "b"},
       {
@@ -953,7 +975,7 @@ TEST_F(MergeJoinTest, rightJoinFilterWithNull) {
 
 // Verify that both left-side and right-side pipelines feeding the merge join
 // always run single-threaded.
-TEST_F(MergeJoinTest, numDrivers) {
+TEST_P(MergeJoinTest, numDrivers) {
   auto left = makeRowVector({"t_c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
   auto right = makeRowVector({"u_c0"}, {makeFlatVector<int32_t>({0, 2, 5})});
 
@@ -979,7 +1001,7 @@ TEST_F(MergeJoinTest, numDrivers) {
   EXPECT_EQ(2, task->numFinishedDrivers());
 }
 
-TEST_F(MergeJoinTest, lazyVectors) {
+TEST_P(MergeJoinTest, lazyVectors) {
   // A dataset of multiple row groups with multiple columns. We create
   // different dictionary wrappings for different columns and load the
   // rows in scope at different times. We make 11000 repeats of 300
@@ -1041,8 +1063,14 @@ TEST_F(MergeJoinTest, lazyVectors) {
                   .planNode();
 
     AssertQueryBuilder(op, duckDbQueryRunner_)
-        .split(rightScanId, makeHiveConnectorSplit(rightFile->path))
-        .split(leftScanId, makeHiveConnectorSplit(leftFile->path))
+        .split(
+            rightScanId,
+            connector::test::makeConnectorSplit(
+                GetParam().connectorName, rightFile->path))
+        .split(
+            leftScanId,
+            connector::test::makeConnectorSplit(
+                GetParam().connectorName, leftFile->path))
         .assertResults(fmt::format(
             "SELECT c0, rc0, c1, rc1, c2, c3 FROM t {} JOIN u "
             "ON t.c0 = u.rc0 AND c1 + rc1 < 30",
@@ -1051,7 +1079,7 @@ TEST_F(MergeJoinTest, lazyVectors) {
 }
 
 // Ensures the output of merge joins are dictionaries.
-TEST_F(MergeJoinTest, dictionaryOutput) {
+TEST_P(MergeJoinTest, dictionaryOutput) {
   auto left =
       makeRowVector({"t_c0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5})});
   auto right = makeRowVector({"u_c0"}, {makeFlatVector<int32_t>({2, 4, 6})});
@@ -1098,7 +1126,7 @@ TEST_F(MergeJoinTest, dictionaryOutput) {
   output.reset();
 }
 
-TEST_F(MergeJoinTest, semiJoin) {
+TEST_P(MergeJoinTest, semiJoin) {
   auto left = makeRowVector(
       {"t0"}, {makeNullableFlatVector<int64_t>({1, 2, 2, 6, std::nullopt})});
 
@@ -1141,7 +1169,7 @@ TEST_F(MergeJoinTest, semiJoin) {
       core::JoinType::kRightSemiFilter);
 }
 
-TEST_F(MergeJoinTest, semiJoinWithMultiMatchedRowsInDifferentBatches) {
+TEST_P(MergeJoinTest, semiJoinWithMultiMatchedRowsInDifferentBatches) {
   auto left =
       makeRowVector({"t0"}, {makeNullableFlatVector<int64_t>({2, 2, 2, 2, 2})});
 
@@ -1199,7 +1227,7 @@ TEST_F(MergeJoinTest, semiJoinWithMultiMatchedRowsInDifferentBatches) {
       core::JoinType::kRightSemiFilter);
 }
 
-TEST_F(MergeJoinTest, leftJoinWithFilter) {
+TEST_P(MergeJoinTest, leftJoinWithFilter) {
   auto left = makeRowVector({"t0"}, {makeNullableFlatVector<int64_t>({1, 1})});
 
   auto right = makeRowVector({"u0"}, {makeNullableFlatVector<int64_t>({1, 1})});
@@ -1263,7 +1291,7 @@ TEST_F(
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0 AND t.t0 > 2 ) ");
 }
 
-TEST_F(MergeJoinTest, antiJoinWithFilterWithMultiMatchedRows) {
+TEST_P(MergeJoinTest, antiJoinWithFilterWithMultiMatchedRows) {
   auto left = makeRowVector({"t0"}, {makeNullableFlatVector<int64_t>({1, 2})});
 
   auto right =
@@ -1291,7 +1319,7 @@ TEST_F(MergeJoinTest, antiJoinWithFilterWithMultiMatchedRows) {
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0 AND t.t0 > 2 ) ");
 }
 
-TEST_F(MergeJoinTest, antiJoinWithTwoJoinKeysInDifferentBatch) {
+TEST_P(MergeJoinTest, antiJoinWithTwoJoinKeysInDifferentBatch) {
   auto left = makeRowVector(
       {"a", "b"},
       {makeNullableFlatVector<int32_t>({1, 1, 1, 1}),
@@ -1325,7 +1353,7 @@ TEST_F(MergeJoinTest, antiJoinWithTwoJoinKeysInDifferentBatch) {
           "SELECT * FROM t WHERE NOT exists (select * from u where t.a = u.c and t.b < u.d)");
 }
 
-TEST_F(MergeJoinTest, rightJoin) {
+TEST_P(MergeJoinTest, rightJoin) {
   auto left = makeRowVector(
       {"t0"},
       {makeNullableFlatVector<int64_t>(
@@ -1371,7 +1399,7 @@ TEST_F(MergeJoinTest, rightJoin) {
   AssertQueryBuilder(rightPlan).assertResults(expectedResult);
 }
 
-TEST_F(MergeJoinTest, nullKeys) {
+TEST_P(MergeJoinTest, nullKeys) {
   auto left = makeRowVector(
       {"t0"}, {makeNullableFlatVector<int64_t>({1, 2, 5, std::nullopt})});
 
@@ -1427,7 +1455,7 @@ TEST_F(MergeJoinTest, nullKeys) {
       .assertResults("SELECT * FROM t FULL JOIN u ON t.t0 = u.u0");
 }
 
-TEST_F(MergeJoinTest, antiJoinWithFilter) {
+TEST_P(MergeJoinTest, antiJoinWithFilter) {
   auto left = makeRowVector(
       {"t0"},
       {makeNullableFlatVector<int64_t>(
@@ -1460,7 +1488,7 @@ TEST_F(MergeJoinTest, antiJoinWithFilter) {
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0 AND t.t0 > 2 ) ");
 }
 
-TEST_F(MergeJoinTest, antiJoinFailed) {
+TEST_P(MergeJoinTest, antiJoinFailed) {
   auto size = 1'00;
   auto left = makeRowVector(
       {"t0"}, {makeFlatVector<int64_t>(size, [](auto row) { return row; })});
@@ -1492,7 +1520,7 @@ TEST_F(MergeJoinTest, antiJoinFailed) {
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0) ");
 }
 
-TEST_F(MergeJoinTest, antiJoinWithTwoJoinKeys) {
+TEST_P(MergeJoinTest, antiJoinWithTwoJoinKeys) {
   auto left = makeRowVector(
       {"a", "b"},
       {makeNullableFlatVector<int32_t>(
@@ -1529,7 +1557,7 @@ TEST_F(MergeJoinTest, antiJoinWithTwoJoinKeys) {
           "SELECT * FROM t WHERE NOT exists (select * from u where t.a = u.c and t.b < u.d)");
 }
 
-TEST_F(MergeJoinTest, antiJoinWithUniqueJoinKeys) {
+TEST_P(MergeJoinTest, antiJoinWithUniqueJoinKeys) {
   auto left = makeRowVector(
       {"a", "b"},
       {makeNullableFlatVector<int32_t>(
@@ -1564,7 +1592,7 @@ TEST_F(MergeJoinTest, antiJoinWithUniqueJoinKeys) {
           "SELECT * FROM t WHERE NOT exists (select * from u where t.a = u.c and t.b < u.d)");
 }
 
-TEST_F(MergeJoinTest, antiJoinNoFilter) {
+TEST_P(MergeJoinTest, antiJoinNoFilter) {
   auto left = makeRowVector(
       {"t0"},
       {makeNullableFlatVector<int64_t>(
@@ -1597,7 +1625,7 @@ TEST_F(MergeJoinTest, antiJoinNoFilter) {
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0)");
 }
 
-TEST_F(MergeJoinTest, fullOuterJoin) {
+TEST_P(MergeJoinTest, fullOuterJoin) {
   auto left = makeRowVector(
       {"t0"},
       {makeNullableFlatVector<int64_t>(
@@ -1629,7 +1657,7 @@ TEST_F(MergeJoinTest, fullOuterJoin) {
           "SELECT * FROM t FULL OUTER JOIN u ON t.t0 = u.u0 AND t.t0 > 2");
 }
 
-TEST_F(MergeJoinTest, fullOuterJoinWithDuplicateMatch) {
+TEST_P(MergeJoinTest, fullOuterJoinWithDuplicateMatch) {
   // Each row on the left side has at most one match on the right side.
   auto left = makeRowVector(
       {"a", "b"},
@@ -1668,7 +1696,7 @@ TEST_F(MergeJoinTest, fullOuterJoinWithDuplicateMatch) {
       .assertResults("SELECT * from t FULL OUTER JOIN u ON a = c AND b < d");
 }
 
-TEST_F(MergeJoinTest, fullOuterJoinNoFilter) {
+TEST_P(MergeJoinTest, fullOuterJoinNoFilter) {
   auto left = makeRowVector(
       {"t0", "t1", "t2", "t3"},
       {makeNullableFlatVector<int64_t>(
@@ -1728,7 +1756,7 @@ TEST_F(MergeJoinTest, fullOuterJoinNoFilter) {
           "SELECT t0, t1 FROM t FULL OUTER JOIN u ON t3 = u3 and t2 = u2 and t1 = u1 and t.t0 = u.u0");
 }
 
-TEST_F(MergeJoinTest, fullOuterJoinWithNullCompare) {
+TEST_P(MergeJoinTest, fullOuterJoinWithNullCompare) {
   auto right = makeRowVector(
       {"u0", "u1"},
       {makeNullableFlatVector<bool>({false, true}),
@@ -1761,7 +1789,7 @@ TEST_F(MergeJoinTest, fullOuterJoinWithNullCompare) {
           "SELECT t0, t1, u0, u1 FROM t FULL OUTER JOIN u ON t.t0 = u.u0 and t1 = u1");
 }
 
-TEST_F(MergeJoinTest, complexTypedFilter) {
+TEST_P(MergeJoinTest, complexTypedFilter) {
   constexpr vector_size_t size{1000};
 
   auto right = makeRowVector(
@@ -1868,7 +1896,7 @@ TEST_F(MergeJoinTest, complexTypedFilter) {
   }
 }
 
-TEST_F(MergeJoinTest, aggregationOverFullJoin) {
+TEST_P(MergeJoinTest, aggregationOverFullJoin) {
   auto left =
       makeRowVector({"t_c0"}, {makeFlatVector<int32_t>({1, 2, 3, 4, 5})});
   auto right = makeRowVector({"u_c0"}, {makeFlatVector<int32_t>({2, 4, 6})});
@@ -1890,7 +1918,7 @@ TEST_F(MergeJoinTest, aggregationOverFullJoin) {
   ASSERT_EQ(6, result.value<int64_t>());
 }
 
-TEST_F(MergeJoinTest, nonFirstJoinKeysFullJoin) {
+TEST_P(MergeJoinTest, nonFirstJoinKeysFullJoin) {
   auto left = makeRowVector(
       {"t_data", "t_key"},
       {
@@ -1920,7 +1948,7 @@ TEST_F(MergeJoinTest, nonFirstJoinKeysFullJoin) {
       "VALUES (1, 50, null), (2, 40, 23), (3, 30, null), (4, 20, 22), (5, 10, null), (null, null, 21)");
 }
 
-TEST_F(MergeJoinTest, outputRightRestRows) {
+TEST_P(MergeJoinTest, outputRightRestRows) {
   // S5 match finished, output right rest
   std::vector<VectorPtr> leftKeys = {
       makeNullableFlatVector<int32_t>({0, 0, 0, 1, 3}),
@@ -1939,7 +1967,7 @@ TEST_F(MergeJoinTest, outputRightRestRows) {
   testJoin1(leftKeys, rightKeys);
   testJoin1(rightKeys, leftKeys);
 }
-TEST_F(MergeJoinTest, outputAfterRightMatch) {
+TEST_P(MergeJoinTest, outputAfterRightMatch) {
   // S4 rightMatch_ get all inputs (across different batchs), go to next
   // nonNullRow
   std::vector<VectorPtr> leftKeys = {
@@ -1956,7 +1984,7 @@ TEST_F(MergeJoinTest, outputAfterRightMatch) {
   testJoin1(leftKeys, rightKeys);
   testJoin1(rightKeys, leftKeys);
 }
-TEST_F(MergeJoinTest, outputAfterRightMatchInBatch) {
+TEST_P(MergeJoinTest, outputAfterRightMatchInBatch) {
   // S3 rightMatch_ and leftMatch_ complete(in one batch), right go to next
   // nonNullRow
   std::vector<VectorPtr> leftKeys = {
@@ -1974,7 +2002,7 @@ TEST_F(MergeJoinTest, outputAfterRightMatchInBatch) {
   testJoin1(rightKeys, leftKeys);
 }
 
-TEST_F(MergeJoinTest, outputLeftRightComplete) {
+TEST_P(MergeJoinTest, outputLeftRightComplete) {
   // S3 rightMatch_ and leftMatch_ complete(in one batch), right go to next
   // nonNullRow
   std::vector<VectorPtr> leftKeys = {
@@ -1996,7 +2024,7 @@ TEST_F(MergeJoinTest, outputLeftRightComplete) {
   testJoin1(rightKeys, leftKeys);
 }
 
-TEST_F(MergeJoinTest, outputAfterRightMoveNext) {
+TEST_P(MergeJoinTest, outputAfterRightMoveNext) {
   // S6 Match miss, right go down to 1st nonNullRow  with S2
   std::vector<VectorPtr> leftKeys = {
       makeNullableFlatVector<int32_t>({1, 2, 3, 4, 5}),
@@ -2025,7 +2053,7 @@ TEST_F(MergeJoinTest, outputAfterRightMoveNext) {
   testJoin1(rightKeys, leftKeys);
 }
 
-DEBUG_ONLY_TEST_F(MergeJoinTest, failureOnRightSide) {
+DEBUG_ONLY_TEST_P(MergeJoinTest, failureOnRightSide) {
   // Test that the Task terminates cleanly when the right side of the join
   // throws an exception.
 
@@ -2101,3 +2129,9 @@ DEBUG_ONLY_TEST_F(MergeJoinTest, failureOnRightSide) {
 
   waitForAllTasksToBeDeleted();
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    MergeJoinTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));
