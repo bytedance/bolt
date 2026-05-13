@@ -60,6 +60,140 @@ void unregisterTestConnector(
   connector::unregisterConnectorObjectFactory(connectorName);
 }
 
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::string& directoryPath,
+    dwio::common::FileFormat format) {
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
+  for (const auto& path :
+       std::filesystem::recursive_directory_iterator(directoryPath)) {
+    if (path.is_regular_file()) {
+      splits.emplace_back(
+          makeConnectorSplits(connectorName, path.path().string(), 1, format)
+              [0]);
+    }
+  }
+  return splits;
+}
+
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::vector<std::filesystem::path>& filePaths,
+    dwio::common::FileFormat format) {
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
+  splits.reserve(filePaths.size());
+  for (const auto& filePath : filePaths) {
+    splits.emplace_back(
+        makeConnectorSplits(connectorName, filePath.string(), 1, format)[0]);
+  }
+  return splits;
+}
+
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint32_t splitCount,
+    dwio::common::FileFormat format) {
+  auto file =
+      filesystems::getFileSystem(filePath, nullptr)->openFileForRead(filePath);
+  const int64_t fileSize = file->size();
+  const auto splitSize =
+      static_cast<uint64_t>((fileSize + splitCount - 1) / splitCount);
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
+  splits.reserve(splitCount);
+  auto factory = connector::getConnectorObjectFactory(connectorName);
+  const auto effectivePath = toEffectivePath(filePath);
+  for (uint32_t i = 0; i < splitCount; ++i) {
+    splits.emplace_back(factory->makeConnectorSplit(
+        effectivePath,
+        i * splitSize,
+        splitSize,
+        connector::makeOptions({{"fileFormat", static_cast<int>(format)}})));
+  }
+  return splits;
+}
+
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint64_t start,
+    uint64_t length) {
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeConnectorSplit(
+          toEffectivePath(filePath),
+          start,
+          length,
+          connector::makeOptions(
+              {{"fileFormat",
+                static_cast<int>(dwio::common::FileFormat::DWRF)}}));
+}
+
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint64_t start,
+    uint64_t length,
+    connector::DynamicConnectorOptions options) {
+  if (!options.options.isObject()) {
+    options.options = folly::dynamic::object;
+  }
+  if (!options.options.count("fileFormat")) {
+    options.options["fileFormat"] =
+        static_cast<int>(dwio::common::FileFormat::DWRF);
+  }
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeConnectorSplit(toEffectivePath(filePath), start, length, options);
+}
+
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    int64_t fileSize,
+    int64_t fileModifiedTime,
+    uint64_t start,
+    uint64_t length) {
+  connector::DynamicConnectorOptions options;
+  options.options = folly::dynamic::object;
+  options.options["fileFormat"] =
+      static_cast<int>(dwio::common::FileFormat::DWRF);
+  folly::dynamic infoColumns = folly::dynamic::object;
+  infoColumns["$file_size"] = fmt::format("{}", fileSize);
+  infoColumns["$file_modified_time"] = fmt::format("{}", fileModifiedTime);
+  options.options["infoColumns"] = infoColumns;
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeConnectorSplit(toEffectivePath(filePath), start, length, options);
+}
+
+std::shared_ptr<connector::ColumnHandle> makeColumnHandle(
+    const std::string& connectorName,
+    const std::string& name,
+    const TypePtr& type) {
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeColumnHandle(name, type, connector::makeOptions({}));
+}
+
+std::shared_ptr<connector::ColumnHandle> makeColumnHandle(
+    const std::string& connectorName,
+    const std::string& name,
+    const TypePtr& type,
+    connector::ConnectorOptions options) {
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeColumnHandle(name, type, options);
+}
+
+std::shared_ptr<connector::ConnectorTableHandle> makeTableHandle(
+    const std::string& connectorName,
+    const std::string& tableName,
+    const core::TypedExprPtr& remainingFilter) {
+  auto tableOptions = connector::makeOptions({});
+  if (remainingFilter) {
+    tableOptions.options["remainingFilter"] =
+        ISerializable::serialize(remainingFilter);
+  }
+  return connector::getConnectorObjectFactory(connectorName)
+      ->makeTableHandle(tableName, {}, tableOptions);
+}
+
 ConnectorTestBase::ConnectorTestBase(
     std::string connectorName,
     std::string connectorId,

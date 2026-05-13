@@ -49,6 +49,79 @@ using ColumnHandleMap =
 /// connector::tpch::registerTpchConnectorFactories).
 using FactoryRegistrar = std::function<void()>;
 
+/// Parameter type for connector-parameterized GTest fixtures. Tests that need
+/// to run against multiple connectors instantiate one ConnectorTestParam per
+/// connector and use ::testing::WithParamInterface<ConnectorTestParam>.
+struct ConnectorTestParam {
+  std::string connectorName;
+  std::string connectorId;
+  FactoryRegistrar factoryRegistrar;
+};
+
+/// Builds connector splits for every regular file under @c directoryPath via
+/// the connector object factory registered for @c connectorName.
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::string& directoryPath,
+    dwio::common::FileFormat format = dwio::common::FileFormat::DWRF);
+
+/// Builds connector splits, one per file in @c filePaths.
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::vector<std::filesystem::path>& filePaths,
+    dwio::common::FileFormat format = dwio::common::FileFormat::DWRF);
+
+/// Splits @c filePath into @c splitCount contiguous chunks.
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint32_t splitCount,
+    dwio::common::FileFormat format);
+
+/// Single DWRF split covering [start, start + length).
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint64_t start = 0,
+    uint64_t length = std::numeric_limits<uint64_t>::max());
+
+/// Single split with explicit options merged in. Adds fileFormat=DWRF if not
+/// already present in @c options.
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    uint64_t start,
+    uint64_t length,
+    connector::DynamicConnectorOptions options);
+
+/// Single DWRF split carrying $file_size / $file_modified_time info columns.
+std::shared_ptr<connector::ConnectorSplit> makeConnectorSplit(
+    const std::string& connectorName,
+    const std::string& filePath,
+    int64_t fileSize,
+    int64_t fileModifiedTime,
+    uint64_t start,
+    uint64_t length);
+
+/// Regular column handle (no required subfields) via the factory registered
+/// for @c connectorName.
+std::shared_ptr<connector::ColumnHandle> makeColumnHandle(
+    const std::string& connectorName,
+    const std::string& name,
+    const TypePtr& type);
+
+std::shared_ptr<connector::ColumnHandle> makeColumnHandle(
+    const std::string& connectorName,
+    const std::string& name,
+    const TypePtr& type,
+    connector::ConnectorOptions options);
+
+/// Default table handle with optional remaining filter.
+std::shared_ptr<connector::ConnectorTableHandle> makeTableHandle(
+    const std::string& connectorName,
+    const std::string& tableName = "test_table",
+    const core::TypedExprPtr& remainingFilter = nullptr);
+
 /// Registers the named connector instance with the runtime: invokes
 /// @c factoryRegistrar (if non-null and the factory isn't already registered),
 /// then registers an object factory under @c connectorId and a Connector
