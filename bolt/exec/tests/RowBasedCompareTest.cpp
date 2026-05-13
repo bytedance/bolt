@@ -25,11 +25,11 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/RowBasedCompare.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/RowBasedSerde.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
@@ -40,6 +40,7 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::memory;
 namespace bytedance::bolt::exec::test {

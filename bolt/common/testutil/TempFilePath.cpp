@@ -28,8 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempFilePath.h"
-namespace bytedance::bolt::exec::test {
+#include "bolt/common/testutil/TempFilePath.h"
+namespace bytedance::bolt::test {
 
 std::shared_ptr<TempFilePath> TempFilePath::create() {
   struct SharedTempFilePath : public TempFilePath {
@@ -38,4 +38,4 @@ std::shared_ptr<TempFilePath> TempFilePath::create() {
   return std::make_shared<SharedTempFilePath>();
 }
 
-} // namespace bytedance::bolt::exec::test
+} // namespace bytedance::bolt::test

@@ -31,13 +31,13 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
   // Create a temporary dir to store the local file created. Note that this
   // directory is automatically removed when the `tempDir` object runs out of
   // scope.
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   // Once we finalize setting up the Hive connector, let's define our query
   // plan. We use the helper `PlanBuilder` class to generate the query plan

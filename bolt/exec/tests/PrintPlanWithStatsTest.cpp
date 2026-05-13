@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -37,6 +38,7 @@
 #include <re2/re2.h>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 using bytedance::bolt::exec::test::PlanBuilder;
 
@@ -249,7 +251,7 @@ TEST_F(PrintPlanWithStatsTest, DISABLED_partialAggregateWithTableScan) {
   for (const auto& numPrefetchSplit : numPrefetchSplits) {
     SCOPED_TRACE(fmt::format("numPrefetchSplit {}", numPrefetchSplit));
     asyncDataCache_->clear();
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->path, vectors);
 
     auto op =

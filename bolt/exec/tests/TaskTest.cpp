@@ -31,6 +31,8 @@
 #include "bolt/exec/Task.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/future/BoltPromise.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -42,7 +44,6 @@
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
@@ -765,7 +766,7 @@ TEST_F(TaskTest, singleThreadedExecution) {
   ASSERT_EQ(numDeletedTasks + 1, Task::numDeletedTasks());
 
   // Project + Aggregation over TableScan.
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {data, data});
 
   core::PlanNodeId scanId;
@@ -793,7 +794,7 @@ TEST_F(TaskTest, singleThreadedHashJoin) {
           makeFlatVector<int64_t>({1, 2, 3, 4}),
           makeFlatVector<int64_t>({10, 20, 30, 40}),
       });
-  auto leftPath = TempFilePath::create();
+  auto leftPath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(leftPath->path, {left});
 
   auto right = makeRowVector(
@@ -801,7 +802,7 @@ TEST_F(TaskTest, singleThreadedHashJoin) {
       {
           makeFlatVector<int64_t>({0, 1, 3, 5}),
       });
-  auto rightPath = TempFilePath::create();
+  auto rightPath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(rightPath->path, {right});
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
@@ -837,11 +838,11 @@ TEST_F(TaskTest, singleThreadedHashJoin) {
 
 TEST_F(TaskTest, singleThreadedCrossJoin) {
   auto left = makeRowVector({"t_c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
-  auto leftPath = TempFilePath::create();
+  auto leftPath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(leftPath->path, {left});
 
   auto right = makeRowVector({"u_c0"}, {makeFlatVector<int64_t>({10, 20})});
-  auto rightPath = TempFilePath::create();
+  auto rightPath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(rightPath->path, {right});
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
@@ -1489,7 +1490,7 @@ TEST_F(TaskTest, spillDirectoryLifecycleManagement) {
 
   auto cursor = TaskCursor::create(params);
   std::shared_ptr<Task> task = cursor->task();
-  auto rootTempDir = exec::test::TempDirectoryPath::create();
+  auto rootTempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto tmpDirectoryPath =
       rootTempDir->path + "/spillDirectoryLifecycleManagement";
   task->setSpillDirectory(tmpDirectoryPath, false);
@@ -1546,7 +1547,7 @@ TEST_F(TaskTest, spillDirNotCreated) {
 
   auto cursor = TaskCursor::create(params);
   auto* task = cursor->task().get();
-  auto rootTempDir = exec::test::TempDirectoryPath::create();
+  auto rootTempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto tmpDirectoryPath = rootTempDir->path + "/spillDirNotCreated";
   task->setSpillDirectory(tmpDirectoryPath, false);
 

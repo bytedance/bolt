@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -97,7 +98,7 @@ TEST_F(AssertQueryBuilderTest, config) {
 TEST_F(AssertQueryBuilderTest, hiveSplits) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
 
   // Single leaf node.
@@ -131,7 +132,7 @@ TEST_F(AssertQueryBuilderTest, hiveSplits) {
 
   // Two leaf nodes.
   auto buildData = makeRowVector({makeFlatVector<int32_t>({2, 3})});
-  auto buildFile = TempFilePath::create();
+  auto buildFile = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(buildFile->path, {buildData});
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();

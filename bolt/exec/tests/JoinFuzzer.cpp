@@ -32,13 +32,13 @@
 #include <boost/random/uniform_int_distribution.hpp>
 #include <core/PlanNode.h>
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_int32(steps, 10, "Number of plans to generate and test.");
@@ -362,10 +362,10 @@ RowVectorPtr JoinFuzzer::execute(const PlanWithSplits& plan, bool injectSpill) {
     builder.splits(nodeId, nodeSplits);
   }
 
-  std::shared_ptr<TempDirectoryPath> spillDirectory;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> spillDirectory;
   int32_t spillPct{0};
   if (injectSpill) {
-    spillDirectory = exec::test::TempDirectoryPath::create();
+    spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     builder.config(core::QueryConfig::kSpillEnabled, "true")
         .config(core::QueryConfig::kAggregationSpillEnabled, "true")
         .spillDirectory(spillDirectory->path);
@@ -873,7 +873,7 @@ void JoinFuzzer::verify(core::JoinType joinType) {
   makeAlternativePlans(plan.plan, probeInput, buildInput, altPlans);
   makeAlternativePlans(plan.plan, flatProbeInput, flatBuildInput, altPlans);
 
-  auto directory = exec::test::TempDirectoryPath::create();
+  auto directory = bytedance::bolt::test::TempDirectoryPath::create();
 
   if (isTableScanSupported(probeInput[0]->type()) &&
       isTableScanSupported(buildInput[0]->type())) {

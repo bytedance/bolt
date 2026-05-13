@@ -36,7 +36,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/parse/Expressions.h"
 #include "bolt/parse/ExpressionsParser.h"
@@ -101,7 +101,7 @@ class ExpressionVerifierUnitTest : public testing::Test, public VectorTestBase {
 
 TEST_F(ExpressionVerifierUnitTest, persistReproInfo) {
   filesystems::registerLocalFileSystem();
-  auto reproFolder = exec::test::TempDirectoryPath::create();
+  auto reproFolder = bytedance::bolt::test::TempDirectoryPath::create();
   const auto reproPath = reproFolder->path;
   auto localFs = filesystems::getFileSystem(reproPath, nullptr);
 

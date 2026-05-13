@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/exec/PlanNodeStats.h"
@@ -29,7 +30,6 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/VectorPrinter.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "folly/experimental/EventCount.h"
@@ -45,6 +45,7 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::exec::test {
 class LocalShuffleTest : public OperatorTestBase {
  protected:

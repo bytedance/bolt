@@ -33,6 +33,8 @@
 
 #include <fmt/format.h>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/HashBuild.h"
@@ -44,13 +46,13 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/VectorTestUtil.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "folly/experimental/EventCount.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::common::testutil;
 
 using bytedance::bolt::connector::hive::HiveConnectorSplitBuilder;
@@ -620,7 +622,7 @@ class HashJoinBuilder {
     }
     int32_t spillPct{0};
     if (injectSpill) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       builder.spillDirectory(spillDirectory->path);
       config(core::QueryConfig::kJitLevel, "-1");
       config(core::QueryConfig::kSpillEnabled, "true");
@@ -634,7 +636,7 @@ class HashJoinBuilder {
           enableSkewedPartitionTest ? "true" : "false");
       spillPct = 100;
     } else if (spillMemoryThreshold_ != 0) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       builder.spillDirectory(spillDirectory->path);
       config(core::QueryConfig::kSpillEnabled, "true");
       config(core::QueryConfig::kMaxSpillLevel, std::to_string(maxSpillLevel));
@@ -805,7 +807,9 @@ class HashJoinTest : public HiveConnectorTestBase {
   // Make splits with each plan node having a number of source files.
   SplitInput makeSpiltInput(
       const std::vector<core::PlanNodeId>& nodeIds,
-      const std::vector<std::vector<std::shared_ptr<TempFilePath>>>& files) {
+      const std::vector<
+          std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>>&
+          files) {
     BOLT_CHECK_EQ(nodeIds.size(), files.size());
     SplitInput splitInput;
     for (int i = 0; i < nodeIds.size(); ++i) {
@@ -860,10 +864,10 @@ class HashJoinTest : public HiveConnectorTestBase {
               vectorSize, [](auto row) { return row * 3; })});
         });
 
-    std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+    std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(probeFile->getPath(), probeVectors);
 
-    std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
+    std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(buildFile->getPath(), buildVectors);
 
     createDuckDbTable("t", probeVectors);
@@ -1920,10 +1924,12 @@ TEST_P(MultiThreadedHashJoinTest, semiFilterOverLazyVectors) {
         });
   });
 
-  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(probeFile->path, probeVectors);
 
-  std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(buildFile->path, buildVectors);
 
   createDuckDbTable("t", probeVectors);
@@ -3582,10 +3588,12 @@ TEST_F(HashJoinTest, nullAwareRightSemiProjectOverScan) {
           makeNullableFlatVector<int32_t>({1, 2, 3, std::nullopt}),
       });
 
-  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(probeFile->path, {probe});
 
-  std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(buildFile->path, {build});
 
   createDuckDbTable("t", {probe});
@@ -4182,10 +4190,12 @@ TEST_F(HashJoinTest, semiProjectOverLazyVectors) {
         });
   });
 
-  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(probeFile->path, probeVectors);
 
-  std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> buildFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(buildFile->path, buildVectors);
 
   createDuckDbTable("t", probeVectors);
@@ -4329,16 +4339,16 @@ TEST_F(HashJoinTest, lazyVectors) {
                  10'000, [](auto row) { return row % 31; })});
       });
 
-  std::vector<std::shared_ptr<TempFilePath>> tempFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> tempFiles;
 
   for (const auto& probeVector : probeVectors) {
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->path, probeVector);
   }
   createDuckDbTable("t", probeVectors);
 
   for (const auto& buildVector : buildVectors) {
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->path, buildVector);
   }
   createDuckDbTable("u", buildVectors);
@@ -4577,7 +4587,7 @@ TEST_F(HashJoinTest, dynamicFilters) {
   std::vector<RowVectorPtr> probeVectors;
   probeVectors.reserve(numSplits);
 
-  std::vector<std::shared_ptr<TempFilePath>> tempFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> tempFiles;
   for (int32_t i = 0; i < numSplits; ++i) {
     auto rowVector = makeRowVector({
         makeFlatVector<int32_t>(
@@ -4585,7 +4595,7 @@ TEST_F(HashJoinTest, dynamicFilters) {
         makeFlatVector<int64_t>(numRowsProbe, [](auto row) { return row; }),
     });
     probeVectors.push_back(rowVector);
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->path, rowVector);
   }
   auto makeInputSplits = [&](const core::PlanNodeId& nodeId) {
@@ -5239,7 +5249,7 @@ TEST_F(HashJoinTest, dynamicFiltersStatsWithChainedJoins) {
 
   std::vector<RowVectorPtr> probeVectors;
   probeVectors.reserve(numSplits);
-  std::vector<std::shared_ptr<TempFilePath>> tempFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> tempFiles;
   for (int32_t i = 0; i < numSplits; ++i) {
     auto rowVector = makeRowVector({
         makeFlatVector<int32_t>(
@@ -5247,7 +5257,7 @@ TEST_F(HashJoinTest, dynamicFiltersStatsWithChainedJoins) {
         makeFlatVector<int64_t>(numProbeRows, [](auto row) { return row; }),
     });
     probeVectors.push_back(rowVector);
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->getPath(), rowVector);
   }
   auto makeInputSplits = [&](const core::PlanNodeId& nodeId) {
@@ -5338,7 +5348,7 @@ TEST_F(HashJoinTest, dynamicFiltersWithSkippedSplits) {
   std::vector<RowVectorPtr> probeVectors;
   probeVectors.reserve(numSplits);
 
-  std::vector<std::shared_ptr<TempFilePath>> tempFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> tempFiles;
   // Each split has a column containing
   // the split number. This is used to filter out whole splits based
   // on metadata. We test how using metadata for dropping splits
@@ -5354,7 +5364,7 @@ TEST_F(HashJoinTest, dynamicFiltersWithSkippedSplits) {
             numRowsProbe, [&](auto /*row*/) { return i % 2 == 0 ? 0 : i; }),
     });
     probeVectors.push_back(rowVector);
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->path, rowVector);
   }
 
@@ -5559,7 +5569,7 @@ TEST_F(HashJoinTest, dynamicFiltersAppliedToPreloadedSplits) {
   probeVectors.reserve(numSplits);
 
   // Prepare probe side table.
-  std::vector<std::shared_ptr<TempFilePath>> tempFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> tempFiles;
   std::vector<exec::Split> probeSplits;
   for (int32_t i = 0; i < numSplits; ++i) {
     auto rowVector = makeRowVector(
@@ -5570,7 +5580,7 @@ TEST_F(HashJoinTest, dynamicFiltersAppliedToPreloadedSplits) {
             makeFlatVector<int64_t>(size, [&](auto /*row*/) { return i; }),
         });
     probeVectors.push_back(rowVector);
-    tempFiles.push_back(TempFilePath::create());
+    tempFiles.push_back(::bytedance::bolt::test::TempFilePath::create());
     writeToFile(tempFiles.back()->path, rowVector);
     auto split = HiveConnectorSplitBuilder(tempFiles.back()->path)
                      .connectorId(kHiveConnectorId)
@@ -5646,7 +5656,8 @@ TEST_F(HashJoinTest, dynamicFiltersPushDownThroughAgg) {
       makeFlatVector<int32_t>(numRowsProbe, [&](auto row) { return row - 10; }),
       makeFlatVector<int64_t>(numRowsProbe, folly::identity),
   })};
-  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> probeFile =
+      ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(probeFile->getPath(), probeVectors);
 
   // Create build data
@@ -5723,7 +5734,7 @@ TEST_F(HashJoinTest, noDynamicFiltersPushDownThroughRightJoin) {
           makeFlatVector<int64_t>(10, folly::identity),
           makeFlatVector<int64_t>(10, folly::identity),
       })};
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->getPath(), rightProbe);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   core::PlanNodeId scanNodeId;
@@ -6149,7 +6160,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, buildReservationReleaseCheck) {
   // NOTE: the spilling setup is to trigger memory reservation code path which
   // only gets executed when spilling is enabled. We don't care about if
   // spilling is really triggered in test or not.
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   params.spillDirectory = spillDirectory->path;
   params.queryCtx->testingOverrideConfigUnsafe(
       {{core::QueryConfig::kSpillEnabled, "true"},
@@ -6258,7 +6269,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringInputProcessing) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryPool = memory::memoryManager()->addRootPool(
         "", kMaxBytes, memory::MemoryReclaimer::create());
 
@@ -6407,7 +6418,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringReserve) {
   createDuckDbTable("t", probeVectors);
   createDuckDbTable("u", buildVectors);
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryPool = memory::memoryManager()->addRootPool(
       "", kMaxBytes, memory::MemoryReclaimer::create());
 
@@ -6539,7 +6550,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringAllocation) {
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryPool = memory::memoryManager()->addRootPool("", kMaxBytes);
 
     core::PlanNodeId probeScanId;
@@ -6671,7 +6682,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringOutputProcessing) {
   const std::vector<bool> enableSpillings = {false, true};
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryPool = memory::memoryManager()->addRootPool(
         "", kMaxBytes, memory::MemoryReclaimer::create());
 
@@ -6798,7 +6809,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
   createDuckDbTable("t", probeVectors);
   createDuckDbTable("u", buildVectors);
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryPool = memory::memoryManager()->addRootPool(
       "", kMaxBytes, memory::MemoryReclaimer::create());
 
@@ -7388,7 +7399,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, minSpillableMemoryReservation) {
               currentUsedBytes * minSpillableReservationPct / 100);
         })));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
         .hybridJoin(hybridJoin_)
@@ -7432,7 +7443,7 @@ TEST_F(HashJoinTest, exceededMaxSpillLevel) {
                       concat(probeType_->names(), buildType_->names()))
                   .planNode();
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   const int exceededMaxSpillLevelCount =
       common::globalSpillStats().spillMaxLevelExceededCount;
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
@@ -7483,7 +7494,7 @@ TEST_F(HashJoinTest, maxSpillBytes) {
                       core::JoinType::kInner)
                   .planNode();
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   struct {
@@ -7541,7 +7552,7 @@ TEST_F(HashJoinTest, onlyHashBuildMaxSpillBytes) {
                       core::JoinType::kInner)
                   .planNode();
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   struct {
@@ -7586,7 +7597,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimFromJoinBuild) {
   std::vector<bool> sameQueries = {false, true};
   for (bool sameQuery : sameQueries) {
     SCOPED_TRACE(fmt::format("sameQuery {}", sameQuery));
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     std::shared_ptr<core::QueryCtx> fakeQueryCtx =
         newQueryCtx(memoryManager.get(), executor_.get(), kMemoryCapacity * 2);
     std::shared_ptr<core::QueryCtx> joinQueryCtx;
@@ -7944,7 +7955,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, arbitrationTriggeredByEnsureJoinTableFit) {
   fuzzerOpts_.vectorSize = 128;
   auto probeVectors = createVectors(10, probeType_, fuzzerOpts_);
   auto buildVectors = createVectors(20, buildType_, fuzzerOpts_);
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(1)
       .spillDirectory(spillDirectory->path)
@@ -7997,7 +8008,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, joinBuildSpillError) {
       }));
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto plan = PlanBuilder(planNodeIdGenerator)
                   .values(vectors)
                   .project({"c0 AS t0", "c1 AS t1", "c2 AS t2"})
@@ -8157,7 +8168,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, skewPartitionSpill) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryPool = memory::memoryManager()->addRootPool(
         "", kMaxBytes, memory::MemoryReclaimer::create());
 

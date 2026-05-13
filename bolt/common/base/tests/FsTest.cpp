@@ -30,14 +30,15 @@
 
 #include "bolt/common/base/Fs.h"
 #include <gtest/gtest.h>
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "boost/filesystem.hpp"
 namespace bytedance::bolt::common {
 
 class FsTest : public testing::Test {};
 
 TEST_F(FsTest, createDirectory) {
-  auto rootPath = exec::test::TempDirectoryPath::createTempDirectory();
+  auto rootPath =
+      bytedance::bolt::test::TempDirectoryPath::createTempDirectory();
   auto tmpDirectoryPath = rootPath + "/first/second/third";
   // First time should generate directory successfully.
   EXPECT_FALSE(fs::exists(tmpDirectoryPath.c_str()));

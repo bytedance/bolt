@@ -27,6 +27,7 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/ConnectorObjectFactory.h"
 #include "bolt/connectors/ConnectorOptions.h"
@@ -70,6 +71,13 @@ std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
     const std::string& connectorName,
     const std::vector<std::filesystem::path>& filePaths,
     dwio::common::FileFormat format = dwio::common::FileFormat::DWRF);
+
+/// Builds connector splits from a list of ::bytedance::bolt::test::TempFilePath, preserving
+/// $file_size and $file_modified_time info columns.
+std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(
+    const std::string& connectorName,
+    const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+        filePaths);
 
 /// Splits @c filePath into @c splitCount contiguous chunks.
 std::vector<std::shared_ptr<connector::ConnectorSplit>> makeConnectorSplits(

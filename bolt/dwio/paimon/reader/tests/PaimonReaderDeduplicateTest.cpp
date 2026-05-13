@@ -38,12 +38,12 @@
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/paimon_merge_engines/PaimonRowKind.h"
 #include "bolt/dwio/paimon/reader/tests/PaimonTestUtils.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
 #include <algorithm>
@@ -132,7 +132,7 @@ TEST_F(PaimonReaderDeduplicateTest, insertAllUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -239,7 +239,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicNoUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
    _KEY_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -346,7 +346,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicFirstUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -453,7 +453,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicLastUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -559,7 +559,7 @@ TEST_F(PaimonReaderDeduplicateTest, differentPrimaryKeys) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   PK  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -667,7 +667,7 @@ TEST_F(PaimonReaderDeduplicateTest, multiplePrimaryKeys) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_a  _KEY_b   a   b  c _SEQUENCE_NUMBER  _VALUE_KIND
@@ -775,7 +775,7 @@ TEST_F(PaimonReaderDeduplicateTest, multiplePrimaryKeysReverse) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_b  _KEY_a   a   b  c _SEQUENCE_NUMBER  _VALUE_KIND
@@ -883,7 +883,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicIgnoreDeleteAll) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   PK_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -980,7 +980,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicIgnoreLastDelete) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following:
   PK_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -1091,7 +1091,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicIgnoreNonLastDelete) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
 
@@ -1198,7 +1198,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicNoIgnoreLastDelete) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following:
   PK_a  a  b _SEQUENCE_NUMBER  _VALUE_KIND
@@ -1306,7 +1306,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicMultipleBatchesAllUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   int len = 20000;
@@ -1439,7 +1439,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicMultipleBatchesNoUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   int len = 20000;
@@ -1572,7 +1572,7 @@ TEST_F(PaimonReaderDeduplicateTest, basicMultipleBatches) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following:
  _KEY_a  _SEQUENCE_NUMBER  _VALUE_KIND      a      b

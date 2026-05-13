@@ -16,14 +16,15 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Window.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::exec {
 
 namespace {

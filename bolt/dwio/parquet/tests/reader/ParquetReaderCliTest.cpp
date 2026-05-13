@@ -43,7 +43,7 @@ class ParquetReaderCliTest : public ParquetTestBase {
       uint32_t batchCount = kBatchCount,
       uint32_t numRows = kNumRows,
       uint32_t numRowsPerGroup = kNumRowsPerGroup) {
-    fileDirectory_ = exec::test::TempDirectoryPath::create();
+    fileDirectory_ = bytedance::bolt::test::TempDirectoryPath::create();
     auto dataSetBuilder_ = std::make_unique<DataSetBuilder>(*leafPool_, 0);
 
     for (uint32_t i = 0; i < numFiles; i++) {
@@ -76,8 +76,7 @@ class ParquetReaderCliTest : public ParquetTestBase {
 
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<bytedance::bolt::exec::test::TempDirectoryPath>
-      fileDirectory_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> fileDirectory_;
   std::vector<std::shared_ptr<ReadFile>> files_;
 };
 

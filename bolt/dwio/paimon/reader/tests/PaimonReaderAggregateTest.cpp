@@ -38,12 +38,12 @@
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/paimon_merge_engines/PaimonRowKind.h"
 #include "bolt/dwio/paimon/reader/tests/PaimonTestUtils.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
 #include <algorithm>
@@ -134,7 +134,7 @@ TEST_F(PaimonReaderAggregateTest, sumNoPrimaryKey) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW(
       {{"a", INTEGER()},
@@ -269,7 +269,7 @@ TEST_F(PaimonReaderAggregateTest, sumWithPrimaryKey) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW(
       {{"a", INTEGER()},
@@ -408,7 +408,7 @@ TEST_F(PaimonReaderAggregateTest, listAgg) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW({{"a", INTEGER()}, {"b", VARCHAR()}});
   auto fileRowType = createPaimonFile(
@@ -509,7 +509,7 @@ TEST_F(PaimonReaderAggregateTest, listAggDelimiter) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW({{"a", INTEGER()}, {"b", VARCHAR()}});
   auto fileRowType = createPaimonFile(
@@ -610,7 +610,7 @@ TEST_F(PaimonReaderAggregateTest, collectWithPrimaryKey) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW(
       {{"a", INTEGER()},
@@ -751,7 +751,7 @@ TEST_F(PaimonReaderAggregateTest, collectDistinctWithPrimaryKey) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto rowType = ROW(
       {{"a", INTEGER()},

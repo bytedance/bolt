@@ -34,6 +34,8 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnector.h"
@@ -47,7 +49,6 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/type/Timestamp.h"
@@ -66,6 +67,7 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::common::test;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 DECLARE_int32(cache_prefetch_min_pct);
 
@@ -120,14 +122,16 @@ class TableScanTest : public virtual HiveConnectorTestBase {
 
   std::shared_ptr<Task> assertQuery(
       const PlanNodePtr& plan,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths,
       const std::string& duckDbSql) {
     return HiveConnectorTestBase::assertQuery(plan, filePaths, duckDbSql);
   }
 
   std::shared_ptr<Task> assertQuery(
       const PlanNodePtr& plan,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths,
       const std::string& duckDbSql,
       const int32_t numPrefetchSplit) {
     return AssertQueryBuilder(plan, duckDbQueryRunner_)
@@ -141,7 +145,8 @@ class TableScanTest : public virtual HiveConnectorTestBase {
   // Run query with spill enabled.
   std::shared_ptr<Task> assertQuery(
       const PlanNodePtr& plan,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths,
       const std::string& spillDirectory,
       const std::string& duckDbSql) {
     return AssertQueryBuilder(plan, duckDbQueryRunner_)
@@ -276,7 +281,7 @@ class TableScanTest : public virtual HiveConnectorTestBase {
 
 TEST_F(TableScanTest, allColumns) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -302,7 +307,7 @@ TEST_F(TableScanTest, directBufferInputRawInputBytes) {
       makeFlatVector<int64_t>(kSize, folly::identity),
       makeFlatVector<int64_t>(kSize, folly::identity),
   });
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   createDuckDbTable({vector});
   writeToFile(filePath->getPath(), {vector});
 
@@ -358,7 +363,7 @@ DEBUG_ONLY_TEST_F(TableScanTest, pendingCoalescedIoWhenTaskFailed) {
   for (int i = 0; i < numBatches; ++i) {
     tableInputs.push_back(fuzzer.fuzzInputRow(tableType));
   }
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->getPath(), tableInputs);
 
   auto plan = PlanBuilder(pool_.get())
@@ -413,7 +418,7 @@ TEST_F(TableScanTest, connectorStats) {
 
   for (size_t i = 0; i < 99; i++) {
     auto vectors = makeVectors(10, 10);
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->path, vectors);
     createDuckDbTable(vectors);
     auto plan = tableScanNode();
@@ -426,7 +431,7 @@ TEST_F(TableScanTest, connectorStats) {
 
 TEST_F(TableScanTest, columnAliases) {
   auto vectors = makeVectors(1, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -467,7 +472,7 @@ TEST_F(TableScanTest, columnAliases) {
 
 TEST_F(TableScanTest, partitionKeyAlias) {
   auto vectors = makeVectors(1, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -494,7 +499,7 @@ TEST_F(TableScanTest, partitionKeyAlias) {
 
 TEST_F(TableScanTest, columnPruning) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -531,7 +536,7 @@ TEST_F(TableScanTest, timestamp) {
              return row % 5 == 0; /* null every 5 rows */
            })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
   createDuckDbTable({rowVector});
 
@@ -608,12 +613,12 @@ DEBUG_ONLY_TEST_F(TableScanTest, timeLimitInGetOutput) {
   // Prepare the data files and tables with 2/3 of them having no null row
   // vector.
   const size_t numFiles{20};
-  std::vector<std::shared_ptr<TempFilePath>> filePaths;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> filePaths;
   std::vector<RowVectorPtr> vectorsForDuckDb;
   filePaths.reserve(numFiles);
   vectorsForDuckDb.reserve(numFiles);
   for (auto i = 0; i < numFiles; ++i) {
-    filePaths.emplace_back(TempFilePath::create());
+    filePaths.emplace_back(::bytedance::bolt::test::TempFilePath::create());
     const auto& vec = (i % 3 == 0) ? rowVector : rowVectorNoNulls;
     writeToFile(filePaths.back()->path, vec);
     vectorsForDuckDb.emplace_back(vec);
@@ -669,7 +674,7 @@ TEST_F(TableScanTest, subfieldPruningRowType) {
   auto columnType = ROW({"c", "d"}, {innerType, BIGINT()});
   auto rowType = ROW({"e"}, {columnType});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   std::vector<common::Subfield> requiredSubfields;
   requiredSubfields.emplace_back("e.c");
@@ -724,7 +729,7 @@ TEST_F(TableScanTest, subfieldPruningRemainingFilterSubfieldsMissing) {
   auto columnType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), BIGINT()});
   auto rowType = ROW({"e"}, {columnType});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   std::vector<common::Subfield> requiredSubfields;
   requiredSubfields.emplace_back("e.c");
@@ -763,7 +768,7 @@ TEST_F(TableScanTest, subfieldPruningRemainingFilterRootFieldMissing) {
   auto columnType = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), BIGINT()});
   auto rowType = ROW({"d", "e"}, {BIGINT(), columnType});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
       assignments;
@@ -800,7 +805,7 @@ TEST_F(TableScanTest, subfieldPruningRemainingFilterStruct) {
   auto structType = ROW({"a", "b"}, {BIGINT(), BIGINT()});
   auto rowType = ROW({"c", "d"}, {structType, BIGINT()});
   auto vectors = makeVectors(3, 10, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   enum { kNoOutput = 0, kWholeColumn = 1, kSubfieldOnly = 2 };
   for (int outputColumn = kNoOutput; outputColumn <= kSubfieldOnly;
@@ -886,7 +891,7 @@ TEST_F(TableScanTest, subfieldPruningRemainingFilterMap) {
   auto vector = makeRowVector(
       {"a", "b"}, {makeFlatVector<int64_t>(10, folly::identity), mapVector});
   auto rowType = asRowType(vector->type());
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {vector});
   enum { kNoOutput = 0, kWholeColumn = 1, kSubfieldOnly = 2 };
   for (int outputColumn = kNoOutput; outputColumn <= kSubfieldOnly;
@@ -972,7 +977,7 @@ TEST_F(TableScanTest, subfieldPruningRemainingFilterMapNullChecks) {
   auto vector = makeRowVector(
       {"a", "b"}, {makeFlatVector<int64_t>(10, folly::identity), mapVector});
   auto rowType = asRowType(vector->type());
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {vector});
 
   // Test different null check filters
@@ -1148,7 +1153,7 @@ TEST_F(TableScanTest, subfieldPruningMapType) {
     vectors.push_back(makeRowVector({"c"}, {maps}));
   }
   auto rowType = asRowType(vectors[0]->type());
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   std::vector<common::Subfield> requiredSubfields;
   requiredSubfields.emplace_back("c[0]");
@@ -1223,7 +1228,7 @@ TEST_F(TableScanTest, subfieldPruningArrayType) {
     vectors.push_back(makeRowVector({"c"}, {arrays}));
   }
   auto rowType = asRowType(vectors[0]->type());
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   std::vector<common::Subfield> requiredSubfields;
   requiredSubfields.emplace_back("c[3]");
@@ -1418,7 +1423,7 @@ TEST_F(TableScanTest, constDictLazy) {
            [](auto row) { return row; },
            [](auto row) { return row * 0.1; })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
 
   createDuckDbTable({rowVector});
@@ -1461,7 +1466,7 @@ TEST_F(TableScanTest, constDictLazy) {
 
 TEST_F(TableScanTest, count) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;
@@ -1500,7 +1505,7 @@ TEST_F(TableScanTest, batchSize) {
       ROW(std::move(names), std::vector<TypePtr>(numColumns, BIGINT()));
   auto vector = makeVectors(1, numRows, rowType);
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vector);
 
   createDuckDbTable(vector);
@@ -1577,7 +1582,7 @@ TEST_F(TableScanTest, batchSize) {
 // double read and the 2nd split is ignored.
 TEST_F(TableScanTest, sequentialSplitNoDoubleRead) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;
@@ -1607,7 +1612,7 @@ TEST_F(TableScanTest, sequentialSplitNoDoubleRead) {
 // ignored.
 TEST_F(TableScanTest, outOfOrderSplits) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;
@@ -1637,7 +1642,7 @@ TEST_F(TableScanTest, outOfOrderSplits) {
 // double read, as expected.
 TEST_F(TableScanTest, splitDoubleRead) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;
@@ -1749,7 +1754,7 @@ TEST_F(TableScanTest, waitForSplit) {
 
 TEST_F(TableScanTest, splitOffsetAndLength) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -1803,7 +1808,7 @@ TEST_F(TableScanTest, validFileNoData) {
 
 // An invalid (size = 0) file.
 TEST_F(TableScanTest, emptyFile) {
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
 
   try {
     assertQuery(
@@ -1819,7 +1824,7 @@ TEST_F(TableScanTest, emptyFile) {
 TEST_F(TableScanTest, partitionedTableVarcharKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -1829,7 +1834,7 @@ TEST_F(TableScanTest, partitionedTableVarcharKey) {
 TEST_F(TableScanTest, partitionedTableBigIntKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, BIGINT(), "123456789123456789");
@@ -1838,7 +1843,7 @@ TEST_F(TableScanTest, partitionedTableBigIntKey) {
 TEST_F(TableScanTest, partitionedTableIntegerKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, INTEGER(), "123456789");
@@ -1847,7 +1852,7 @@ TEST_F(TableScanTest, partitionedTableIntegerKey) {
 TEST_F(TableScanTest, partitionedTableSmallIntKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, SMALLINT(), "1");
@@ -1856,7 +1861,7 @@ TEST_F(TableScanTest, partitionedTableSmallIntKey) {
 TEST_F(TableScanTest, partitionedTableTinyIntKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, TINYINT(), "1");
@@ -1865,7 +1870,7 @@ TEST_F(TableScanTest, partitionedTableTinyIntKey) {
 TEST_F(TableScanTest, partitionedTableBooleanKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, BOOLEAN(), "0");
@@ -1874,7 +1879,7 @@ TEST_F(TableScanTest, partitionedTableBooleanKey) {
 TEST_F(TableScanTest, partitionedTableRealKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, REAL(), "3.5");
@@ -1883,7 +1888,7 @@ TEST_F(TableScanTest, partitionedTableRealKey) {
 TEST_F(TableScanTest, partitionedTableDoubleKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
   testPartitionedTable(filePath->path, DOUBLE(), "3.5");
@@ -1892,7 +1897,7 @@ TEST_F(TableScanTest, partitionedTableDoubleKey) {
 TEST_F(TableScanTest, partitionedTableDateKey) {
   auto rowType = ROW({"c0", "c1"}, {BIGINT(), DOUBLE()});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->getPath(), vectors);
   createDuckDbTable(vectors);
   const std::string partitionValue = "2023-10-27";
@@ -2890,7 +2895,7 @@ TEST_F(TableScanTest, integerNotEqualFilter) {
        makeFlatVector<int64_t>(
            size, [](auto row) { return row % 210; }, nullEvery(11))});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, rowVector);
   createDuckDbTable({rowVector});
 
@@ -2925,7 +2930,7 @@ TEST_F(TableScanTest, integerNotEqualFilter) {
 
 TEST_F(TableScanTest, floatingPointNotEqualFilter) {
   auto vectors = makeVectors(1, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -2963,7 +2968,7 @@ TEST_F(TableScanTest, stringNotEqualFilter) {
          return colourViews[row % colourViews.size()];
        })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, rowVector);
   createDuckDbTable({rowVector});
 
@@ -3169,7 +3174,7 @@ TEST_F(TableScanTest, skipStridesForParentNulls) {
   auto b = makeFlatVector<int64_t>(10'000, folly::identity);
   auto a = makeRowVector({"b"}, {b}, [](auto i) { return i % 2 == 0; });
   auto vector = makeRowVector({"a"}, {a});
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {vector});
   auto plan = PlanBuilder()
                   .tableScan(asRowType(vector->type()), {"a.b IS NULL"})
@@ -3213,7 +3218,7 @@ TEST_F(TableScanTest, remainingFilterConstantResult) {
       }),
   };
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, data);
   createDuckDbTable(data);
 
@@ -3232,7 +3237,7 @@ TEST_F(TableScanTest, remainingFilterConstantResult) {
 
 TEST_F(TableScanTest, aggregationPushdown) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -3357,7 +3362,7 @@ TEST_F(TableScanTest, decimalDisableAggregationPushdown) {
           size, [](auto row) { return row; }, nullptr, DECIMAL(18, 2)),
   });
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->getPath(), {rowVector});
 
   createDuckDbTable({rowVector});
@@ -3378,7 +3383,7 @@ TEST_F(TableScanTest, decimalDisableAggregationPushdown) {
 
 TEST_F(TableScanTest, bitwiseAggregationPushdown) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -3424,7 +3429,7 @@ TEST_F(TableScanTest, structLazy) {
            [](auto row) { return row; },
            [](auto row) { return row * 0.1; })})});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
 
   // Exclude struct columns as DuckDB doesn't support complex types yet.
@@ -3452,7 +3457,7 @@ TEST_F(TableScanTest, interleaveLazyEager) {
        makeRowVector({makeFlatVector<int64_t>(kSize, folly::identity)})});
   auto rows = makeRowVector({column});
   auto rowType = asRowType(rows->type());
-  auto lazyFile = TempFilePath::create();
+  auto lazyFile = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(lazyFile->path, {rows});
   auto rowsWithNulls = makeVectors(1, kSize, rowType);
   int numNonNull = 0;
@@ -3464,7 +3469,7 @@ TEST_F(TableScanTest, interleaveLazyEager) {
     auto& c0c0 = c0->asUnchecked<RowVector>()->childAt(0);
     numNonNull += !c0c0->isNullAt(i);
   }
-  auto eagerFile = TempFilePath::create();
+  auto eagerFile = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(eagerFile->path, rowsWithNulls);
 
   ColumnHandleMap assignments = {{"c0", regularColumn("c0", column->type())}};
@@ -3495,7 +3500,7 @@ TEST_F(TableScanTest, lazyVectorAccessTwiceWithDifferentRows) {
       makeNullableFlatVector<int64_t>({0, 1, 2, 3}),
   });
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {data});
   createDuckDbTable({data});
 
@@ -3541,7 +3546,7 @@ TEST_F(TableScanTest, structInArrayOrMap) {
            sizes,
            innerRow)});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
 
   // Exclude struct columns as DuckDB doesn't support complex types yet.
@@ -3561,7 +3566,7 @@ TEST_F(TableScanTest, addSplitsToFailedTask) {
   auto data = makeRowVector(
       {makeFlatVector<int32_t>(12'000, [](auto row) { return row % 5; })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {data});
 
   core::PlanNodeId scanNodeId;
@@ -3589,7 +3594,7 @@ TEST_F(TableScanTest, errorInLoadLazy) {
   auto cache = cache::AsyncDataCache::getInstance();
   BOLT_CHECK_NOT_NULL(cache);
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   std::atomic<int32_t> counter = 0;
@@ -3629,7 +3634,7 @@ TEST_F(TableScanTest, parallelPrepare) {
   auto data = makeRowVector(
       {makeFlatVector<int32_t>(10, [](auto row) { return row % 5; })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {data});
   auto plan =
       exec::test::PlanBuilder(pool_.get())
@@ -3666,7 +3671,7 @@ TEST_F(TableScanTest, dictionaryMemo) {
       makeFlatVector<std::string>({baseStrings[0], baseStrings[1]}));
   auto rows = makeRowVector({"a", "b"}, {dict, makeRowVector({"c"}, {dict})});
   auto rowType = asRowType(rows->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {rows});
   auto plan = PlanBuilder()
                   .tableScan(rowType, {}, "a like '%m'")
@@ -3697,7 +3702,7 @@ TEST_F(TableScanTest, reuseRowVector) {
   auto iota = makeFlatVector<int32_t>(10, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
   auto plan = PlanBuilder()
                   .tableScan(rowType, {}, "c0 < 5")
@@ -3717,7 +3722,7 @@ TEST_F(TableScanTest, readMissingFields) {
   vector_size_t size = 10;
   auto iota = makeFlatVector<int64_t>(size, folly::identity);
   auto rowVector = makeRowVector({makeRowVector({iota, iota}), iota});
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
   // Create a row type with additional fields not present in the file.
   auto rowType = makeRowType(
@@ -3734,7 +3739,7 @@ TEST_F(TableScanTest, readExtraFields) {
   vector_size_t size = 10;
   auto iota = makeFlatVector<int64_t>(size, folly::identity);
   auto rowVector = makeRowVector({makeRowVector({iota, iota}), iota});
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
   auto rowType = makeRowType({makeRowType({BIGINT()}), BIGINT()});
   auto op = PlanBuilder().tableScan(rowType).planNode();
@@ -3753,7 +3758,7 @@ TEST_F(TableScanTest, readMissingFieldsFilesVary) {
       makeFlatVector<int64_t>(size, [](auto row) { return row; }),
   })});
 
-  auto missingFieldsFilePath = TempFilePath::create();
+  auto missingFieldsFilePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(missingFieldsFilePath->path, {rowVectorMissingFields});
 
   auto rowVectorWithAllFields = makeRowVector({makeRowVector({
@@ -3763,7 +3768,7 @@ TEST_F(TableScanTest, readMissingFieldsFilesVary) {
       makeFlatVector<int64_t>(size, [](auto row) { return row + 1; }),
   })});
 
-  auto allFieldsFilePath = TempFilePath::create();
+  auto allFieldsFilePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(allFieldsFilePath->path, {rowVectorWithAllFields});
 
   auto op = PlanBuilder()
@@ -3834,7 +3839,7 @@ TEST_F(TableScanTest, readMissingFieldsInArray) {
   }
   auto arrayVector = makeArrayVector(offsets, rowVector);
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {makeRowVector({arrayVector})});
   // Create a row type with additional fields not present in the file.
   auto rowType = makeRowType(
@@ -3891,7 +3896,7 @@ TEST_F(TableScanTest, readMissingFieldsInMap) {
   auto mapVector = makeMapVector(offsets, keysVector, valuesVector);
   auto arrayVector = makeArrayVector(offsets, valuesVector);
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {makeRowVector({mapVector, arrayVector})});
 
   // Create a row type with additional fields in the structure not present in
@@ -4036,7 +4041,7 @@ TEST_F(TableScanTest, tableScanProjections) {
       makeFlatVector<int64_t>(size, [](auto row) { return row + 3; }),
   });
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
 
   auto testQueryRow = [&](const std::vector<int32_t>& projections) {
@@ -4108,7 +4113,7 @@ TEST_F(TableScanTest, readMissingFieldsWithMoreColumns) {
          return fruitViews[row % fruitViews.size()];
        })});
 
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, {rowVector});
 
   // Create a row type with additional fields in the structure not present in
@@ -4243,7 +4248,7 @@ TEST_F(TableScanTest, readMissingFieldsWithMoreColumns) {
 
 TEST_F(TableScanTest, varbinaryPartitionKey) {
   auto vectors = makeVectors(1, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   createDuckDbTable(vectors);
 
@@ -4284,7 +4289,7 @@ TEST_F(TableScanTest, timestampPartitionKey) {
               }),
       });
   auto vectors = makeVectors(1, 1);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
   ColumnHandleMap assignments = {{"t", partitionKey("t", TIMESTAMP())}};
   std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
@@ -4308,7 +4313,7 @@ TEST_F(TableScanTest, paimonDeletionVector) {
   auto iota = makeFlatVector<int32_t>(15, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
   auto plan = PlanBuilder()
                   .tableScan(rowType, {}, "c0 < 7")
@@ -4438,7 +4443,7 @@ TEST_F(TableScanTest, structMatchByName) {
   const auto address = makeFlatVector<std::string>({"567 Maple Drive"});
   auto vector = makeRowVector({"id", "name", "address"}, {id, name, address});
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->getPath(), {vector});
 
   // Add one non-existing subfield 'middle' to the 'name' field and rename filed
@@ -4499,7 +4504,7 @@ DEBUG_ONLY_TEST_F(
     TableScanTest,
     DISABLED_memoryArbitrationByTableScanAllocation) {
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->getPath(), vectors);
   createDuckDbTable(vectors);
 
@@ -4593,7 +4598,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareDisable) {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
-    auto file = TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(file->path, {data});
     auto plan = PlanBuilder()
                     .tableScan(rowType, {}, "c0 < 5")
@@ -4625,7 +4630,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareAttempt3) {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
-    auto file = TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(file->path, {data});
     auto plan = PlanBuilder()
                     .tableScan(rowType, {}, "c0 < 5")
@@ -4663,7 +4668,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareCanIgnore) {
   auto iota = makeFlatVector<int32_t>(10, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
   auto plan = PlanBuilder()
                   .tableScan(rowType, {}, "c0 < 5")
@@ -4697,7 +4702,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextDisable) {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
-    auto file = TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(file->path, {data});
     auto plan = PlanBuilder()
                     .tableScan(rowType, {}, "c0 < 5")
@@ -4731,7 +4736,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextAttempt3) {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
-    auto file = TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(file->path, {data});
     auto plan = PlanBuilder()
                     .tableScan(rowType, {}, "c0 < 5")
@@ -4768,7 +4773,7 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
   auto iota = makeFlatVector<int32_t>(10, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
   auto plan = PlanBuilder()
                   .tableScan(rowType, {}, "c0 < 5")
@@ -4794,7 +4799,7 @@ TEST_F(TableScanTest, filterMissingFields) {
   constexpr int kSize = 10;
   auto iota = makeFlatVector<int64_t>(kSize, folly::identity);
   auto data = makeRowVector({makeRowVector({iota})});
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->getPath(), {data});
   auto schema = makeRowType({
       makeRowType({BIGINT(), BIGINT()}),
@@ -4851,10 +4856,10 @@ TEST_F(TableScanTest, dynamicFilterWithRowIndexColumn) {
           connector::hive::HiveColumnHandle::ColumnType::kRowIndex,
           BIGINT(),
           BIGINT());
-  std::shared_ptr<TempFilePath> files[2];
-  files[0] = TempFilePath::create();
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> files[2];
+  files[0] = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(files[0]->getPath(), {aVector});
-  files[1] = TempFilePath::create();
+  files[1] = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(files[1]->getPath(), {bVector});
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   core::PlanNodeId aScanId;
@@ -4886,7 +4891,7 @@ TEST_F(TableScanTest, rowNumberInRemainingFilter) {
   auto vector = makeRowVector({
       makeFlatVector<int64_t>(kSize, folly::identity),
   });
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->getPath(), {vector});
   auto outputType = ROW({"c0"}, {BIGINT()});
   auto remainingFilter = parseExpr("r1 % 2 == 0", ROW({"r1"}, {BIGINT()}));
@@ -4923,7 +4928,7 @@ TEST_F(TableScanTest, duplicateFieldProject) {
           makeFlatVector<std::string>({"Alice", "John"}),
       });
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->getPath(), vector);
   createDuckDbTable({vector});
 

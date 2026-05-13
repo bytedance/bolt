@@ -36,8 +36,8 @@
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
@@ -190,7 +190,7 @@ TEST(InMemoryFile, preadv) {
 
 TEST(LocalFile, writeAndRead) {
   for (bool useIOBuf : {true, false}) {
-    auto tempFile = ::exec::test::TempFilePath::create();
+    auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
     const auto& filename = tempFile->path.c_str();
     remove(filename);
     {
@@ -220,7 +220,7 @@ TEST(LocalFile, writeAndRead) {
 
 TEST(LocalFile, viaRegistry) {
   filesystems::registerLocalFileSystem();
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path.c_str();
   remove(filename);
   auto lfs = filesystems::getFileSystem(filename, nullptr);
@@ -237,7 +237,7 @@ TEST(LocalFile, viaRegistry) {
 
 TEST(LocalFile, rename) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
   auto a = fmt::format("{}/a", tempFolder->path);
   auto b = fmt::format("{}/b", tempFolder->path);
   auto newA = fmt::format("{}/newA", tempFolder->path);
@@ -265,7 +265,7 @@ TEST(LocalFile, rename) {
 
 TEST(LocalFile, exists) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
   auto a = fmt::format("{}/a", tempFolder->path);
   auto b = fmt::format("{}/b", tempFolder->path);
   auto localFs = filesystems::getFileSystem(a, nullptr);
@@ -285,7 +285,7 @@ TEST(LocalFile, exists) {
 
 TEST(LocalFile, list) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
   auto a = fmt::format("{}/1", tempFolder->path);
   auto b = fmt::format("{}/2", tempFolder->path);
   auto localFs = filesystems::getFileSystem(a, nullptr);
@@ -305,7 +305,7 @@ TEST(LocalFile, list) {
 }
 
 TEST(LocalFile, readFileDestructor) {
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path.c_str();
   remove(filename);
   {
@@ -338,7 +338,7 @@ TEST(LocalFile, readFileDestructor) {
 
 TEST(LocalFile, mkdir) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
 
   std::string path = tempFolder->path;
   auto localFs = filesystems::getFileSystem(path, nullptr);
@@ -364,7 +364,7 @@ TEST(LocalFile, mkdir) {
 
 TEST(LocalFile, rmdir) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
 
   std::string path = tempFolder->path;
   auto localFs = filesystems::getFileSystem(path, nullptr);
@@ -398,7 +398,7 @@ TEST(LocalFile, rmdir) {
 
 TEST(LocalFile, fileNotFound) {
   filesystems::registerLocalFileSystem();
-  auto tempFolder = ::exec::test::TempDirectoryPath::create();
+  auto tempFolder = ::test::TempDirectoryPath::create();
   auto path = fmt::format("{}/file", tempFolder->path);
   auto localFs = filesystems::getFileSystem(path, nullptr);
   BOLT_ASSERT_RUNTIME_THROW_CODE(

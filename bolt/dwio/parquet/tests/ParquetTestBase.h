@@ -33,13 +33,13 @@
 #include <gtest/gtest.h>
 #include <string>
 #include "bolt/common/base/Fs.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/Reader.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/reader/PageReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 namespace bytedance::bolt::parquet {
@@ -54,7 +54,7 @@ class ParquetTestBase : public testing::Test, public test::VectorTestBase {
     dwio::common::LocalFileSink::registerFactory();
     rootPool_ = memory::memoryManager()->addRootPool("ParquetTests");
     leafPool_ = rootPool_->addLeafChild("ParquetTests");
-    tempPath_ = exec::test::TempDirectoryPath::create();
+    tempPath_ = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
   static RowTypePtr sampleSchema() {
@@ -210,7 +210,7 @@ class ParquetTestBase : public testing::Test, public test::VectorTestBase {
   static constexpr uint64_t kBytesInRowGroup = 128 * 1'024 * 1'024;
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
   TimestampPrecision timestampPrecision_{TimestampPrecision::kMilliseconds};
 };
 } // namespace bytedance::bolt::parquet

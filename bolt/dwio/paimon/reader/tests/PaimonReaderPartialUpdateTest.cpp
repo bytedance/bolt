@@ -31,11 +31,11 @@
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/PaimonConstants.h"
 #include "bolt/connectors/hive/paimon_merge_engines/PaimonRowKind.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
 using namespace bytedance::bolt;
@@ -146,7 +146,7 @@ TEST_F(PaimonReaderPartialUpdateTest, nonNullUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b      c      _SEQUENCE_NUMBER  _VALUE_KIND
@@ -286,7 +286,7 @@ TEST_F(PaimonReaderPartialUpdateTest, sequenceGroupUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b      g_1  c   d   g_2 _SEQUENCE_NUMBER  _VALUE_KIND
@@ -464,7 +464,7 @@ TEST_F(PaimonReaderPartialUpdateTest, multipleSequenceGroupUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b      g_1  c   d   g_2 g_3 _SEQUENCE_NUMBER  _VALUE_KIND
@@ -641,7 +641,7 @@ TEST_F(PaimonReaderPartialUpdateTest, sequenceGroupAggregateUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b       c      d    _SEQUENCE_NUMBER  _VALUE_KIND
@@ -830,7 +830,7 @@ TEST_F(PaimonReaderPartialUpdateTest, multipleSequenceGroupAggregateUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b   g_1    c      g_2     g_3  _SEQUENCE_NUMBER _VALUE_KIND
@@ -1013,7 +1013,7 @@ TEST_F(PaimonReaderPartialUpdateTest, sequenceGroupDefaultAggregateUpdate) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /* Merging following
   _KEY_k  k   a      b     c     d   _SEQUENCE_NUMBER   _VALUE_KIND
@@ -1200,7 +1200,7 @@ TEST_F(PaimonReaderPartialUpdateTest, uninitializedMemoryTest) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /*
    * We want to test that if a column is NEVER updated for a PK, it should be
@@ -1334,7 +1334,7 @@ TEST_F(PaimonReaderPartialUpdateTest, samePrimaryKeyAcrossOutputBatches) {
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency()));
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
 
   /*
    * Reproducer:

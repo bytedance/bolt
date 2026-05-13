@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/Statistics.h"
@@ -22,7 +23,6 @@
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
@@ -94,8 +94,8 @@ class ParquetWriterBenchmark {
 
  private:
   const std::string fileName_ = "test.parquet";
-  const std::shared_ptr<bytedance::bolt::exec::test::TempDirectoryPath>
-      fileFolder_ = bytedance::bolt::exec::test::TempDirectoryPath::create();
+  const std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> fileFolder_ =
+      bytedance::bolt::test::TempDirectoryPath::create();
   const bool disableDictionary_;
 
   std::unique_ptr<test::DataSetBuilder> dataSetBuilder_;

@@ -31,6 +31,7 @@
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveDataSink.h"
 #include "bolt/connectors/tests/utils/ConnectorTestBase.h"
@@ -74,7 +75,8 @@ void HiveConnectorTestBase::resetHiveConnector(
 
 std::shared_ptr<exec::Task> HiveConnectorTestBase::assertQuery(
     const core::PlanNodePtr& plan,
-    const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
+    const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+        filePaths,
     const std::string& duckDbSql) {
   return OperatorTestBase::assertQuery(
       plan, makeHiveConnectorSplits(filePaths), duckDbSql);
@@ -149,7 +151,8 @@ HiveConnectorTestBase::makeColumnHandle(
 
 std::vector<std::shared_ptr<connector::ConnectorSplit>>
 HiveConnectorTestBase::makeHiveConnectorSplits(
-    const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
+    const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+        filePaths) {
   std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
   for (auto filePath : filePaths) {
     splits.push_back(makeHiveConnectorSplit(

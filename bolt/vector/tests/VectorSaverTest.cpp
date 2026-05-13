@@ -32,8 +32,8 @@
 #include <fstream>
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/functions/prestosql/types/HyperLogLogType.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -131,7 +131,7 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
   // Writes the passed vector to file and reads it back, returns the read
   // vector.
   VectorPtr takeRoundTrip(const VectorPtr& vector) {
-    auto path = exec::test::TempFilePath::create();
+    auto path = ::bytedance::bolt::test::TempFilePath::create();
 
     std::ofstream outputFile(path->path, std::ofstream::binary);
     saveVector(*vector, outputFile);
@@ -150,7 +150,7 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
   }
 
   void testTypeRoundTrip(const TypePtr& type) {
-    auto path = exec::test::TempFilePath::create();
+    auto path = ::bytedance::bolt::test::TempFilePath::create();
 
     std::ofstream outputFile(path->path, std::ofstream::binary);
     saveType(type, outputFile);
@@ -643,7 +643,7 @@ TEST_F(VectorSaverTest, LazyVector) {
 
 TEST_F(VectorSaverTest, stdVector) {
   std::vector<column_index_t> intVector = {1, 2, 3, 4, 5};
-  auto path = exec::test::TempFilePath::create();
+  auto path = ::bytedance::bolt::test::TempFilePath::create();
   saveStdVectorToFile<column_index_t>(intVector, path->path.c_str());
   auto copy = restoreStdVectorFromFile<column_index_t>(path->path.c_str());
   ASSERT_EQ(intVector, copy);
@@ -662,7 +662,7 @@ struct VectorSaverInfo {
 /// A demonstration of using VectorSaver to save 'current' vector being
 /// processed to disk in case of an exception.
 TEST_F(VectorSaverTest, exceptionContext) {
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto messageFunction = [](BoltException::Type /*exceptionType*/,
                             auto* arg) -> std::string {

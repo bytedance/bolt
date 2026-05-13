@@ -32,6 +32,7 @@
 
 #include <bolt/type/Timestamp.h>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/TableScan.h"
@@ -39,6 +40,7 @@
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/type/Type.h"
+
 namespace bytedance::bolt::exec::test {
 
 class GroupedExecutionTest : public virtual HiveConnectorTestBase {
@@ -218,7 +220,7 @@ TEST_F(GroupedExecutionTest, groupedExecutionErrors) {
 TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
   // Create source file - we will read from it in 6 splits.
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   // A chain of three pipelines separated by local exchange with the leaf one
@@ -331,7 +333,7 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
 TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
   // Create source file - we will read from it in 6 splits.
   auto vectors = makeVectors(4, 20);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   // Run the test twice - for Hash and Cross Join.
@@ -498,7 +500,7 @@ TEST_F(GroupedExecutionTest, groupedExecution) {
   // Create source file - we will read from it in 6 splits.
   const size_t numSplits{6};
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;

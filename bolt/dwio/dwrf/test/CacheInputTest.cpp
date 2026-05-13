@@ -36,10 +36,10 @@
 #include "bolt/common/io/IoStatistics.h"
 #include "bolt/common/io/Options.h"
 #include "bolt/common/memory/MmapAllocator.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/CachedBufferedInput.h"
 #include "bolt/dwio/dwrf/common/Common.h"
 #include "bolt/dwio/dwrf/test/TestReadFile.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <gtest/gtest.h>
 using namespace bytedance::bolt;
@@ -89,7 +89,7 @@ class CacheTest : public testing::Test {
     std::unique_ptr<SsdCache> ssd;
     if (ssdBytes) {
       FLAGS_ssd_odirect = false;
-      tempDirectory_ = exec::test::TempDirectoryPath::create();
+      tempDirectory_ = bytedance::bolt::test::TempDirectoryPath::create();
       ssd = std::make_unique<SsdCache>(
           fmt::format("{}/cache", tempDirectory_->path),
           ssdBytes,
@@ -387,7 +387,7 @@ class CacheTest : public testing::Test {
   std::mutex mutex_;
   std::vector<StringIdLease> fileIds_;
   folly::F14FastMap<uint64_t, std::shared_ptr<TestReadFile>> pathToInput_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDirectory_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDirectory_;
   cache::FileGroupStats* FOLLY_NULLABLE groupStats_ = nullptr;
   std::shared_ptr<memory::MemoryAllocator> allocator_;
   std::shared_ptr<AsyncDataCache> cache_;
@@ -691,7 +691,8 @@ TEST_F(CacheTest, readAhead) {
             const void* buffer;
             int32_t size;
             if (!files[i]->next(buffer, size)) {
-              // End of file. Check that a multiple of file size has been read.
+              // End of file. Check that a multiple of file size has been
+              // read.
               EXPECT_EQ(0, totalRead[i] % FileWithReadAhead::kFileSize);
               if (totalRead[i] >= 3 * FileWithReadAhead::kFileSize) {
                 files[i] = nullptr;

@@ -35,8 +35,8 @@
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/fuzzer/AggregationFuzzerBase.h"
@@ -750,7 +750,7 @@ bool AggregationFuzzer::verifyAggregation(
   std::vector<PlanWithSplits> plans;
   plans.push_back({firstPlan, {}});
 
-  auto directory = exec::test::TempDirectoryPath::create();
+  auto directory = bytedance::bolt::test::TempDirectoryPath::create();
 
   // Alternate between using Values and TableScan node.
 
@@ -861,10 +861,10 @@ bool AggregationFuzzer::verifySortedAggregation(
          {}});
   }
 
-  std::shared_ptr<exec::test::TempDirectoryPath> directory;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> directory;
   const auto inputRowType = asRowType(input[0]->type());
   if (isTableScanSupported(inputRowType)) {
-    directory = exec::test::TempDirectoryPath::create();
+    directory = bytedance::bolt::test::TempDirectoryPath::create();
     auto splits = makeSplits(input, directory->path);
 
     plans.push_back(
@@ -1168,10 +1168,10 @@ bool AggregationFuzzer::verifyDistinctAggregation(
 
   // Alternate between using Values and TableScan node.
 
-  std::shared_ptr<exec::test::TempDirectoryPath> directory;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> directory;
   const auto inputRowType = asRowType(input[0]->type());
   if (isTableScanSupported(inputRowType) && vectorFuzzer_.coinToss(0.5)) {
-    directory = exec::test::TempDirectoryPath::create();
+    directory = bytedance::bolt::test::TempDirectoryPath::create();
     auto splits = makeSplits(input, directory->path);
 
     plans.push_back(

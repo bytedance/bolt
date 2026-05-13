@@ -37,9 +37,9 @@
 #include "bolt/common/compression/Compression.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MmapAllocator.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/tests/SpillerBenchmarkBase.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_string(
@@ -120,7 +120,7 @@ void SpillerBenchmarkBase::setUp() {
   }
 
   if (FLAGS_spiller_benchmark_path.empty()) {
-    tempDir_ = exec::test::TempDirectoryPath::create();
+    tempDir_ = bytedance::bolt::test::TempDirectoryPath::create();
     spillDir_ = tempDir_->path;
   } else {
     spillDir_ = FLAGS_spiller_benchmark_path;

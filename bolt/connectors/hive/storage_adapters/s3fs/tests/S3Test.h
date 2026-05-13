@@ -29,12 +29,12 @@
  */
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/File.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/FileHandle.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/S3FileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/S3Util.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/tests/MinioServer.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 
 #include "gtest/gtest.h"
 

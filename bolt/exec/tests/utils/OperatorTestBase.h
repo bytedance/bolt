@@ -33,12 +33,11 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
-#include "bolt/common/caching/SsdCache.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/parse/ExpressionsParser.h"
-#include "bolt/type/Variant.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -49,9 +48,11 @@ namespace bytedance::bolt::dwrf {
 class Config;
 }
 
-namespace bytedance::bolt::exec::test {
-
+namespace bytedance::bolt::test {
 class TempFilePath;
+}
+
+namespace bytedance::bolt::exec::test {
 
 class OperatorTestBase : public testing::Test,
                          public bolt::test::VectorTestBase {
@@ -101,9 +102,9 @@ class OperatorTestBase : public testing::Test,
       std::shared_ptr<dwrf::Config> config = nullptr);
 
   void writeToFile(
-    const std::string& path,
-    const VectorPtr& vector,
-    memory::MemoryPool* pool);
+      const std::string& path,
+      const VectorPtr& vector,
+      memory::MemoryPool* pool);
 
   /// Generates 'numVectors' RowVectors of 'rowType', each containing
   /// 'rowsPerVector' rows of random data drawn from BatchMaker.
@@ -112,8 +113,9 @@ class OperatorTestBase : public testing::Test,
       int32_t numVectors,
       int32_t rowsPerVector);
 
-  /// Returns 'count' unique TempFilePath handles.
-  static std::vector<std::shared_ptr<TempFilePath>> makeFilePaths(int count);
+  /// Returns 'count' unique ::bytedance::bolt::test::TempFilePath handles.
+  static std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+  makeFilePaths(int count);
 
   void createDuckDbTable(const std::vector<RowVectorPtr>& data) {
     duckDbQueryRunner_.createTable("tmp", data);

@@ -34,6 +34,7 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/SharedArbitrator.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
@@ -41,7 +42,6 @@
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/Expressions.h"
@@ -235,12 +235,12 @@ std::vector<RowVectorPtr> OperatorTestBase::makeVectors(
 }
 
 /*static*/
-std::vector<std::shared_ptr<TempFilePath>> OperatorTestBase::makeFilePaths(
-    int count) {
-  std::vector<std::shared_ptr<TempFilePath>> filePaths;
+std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+OperatorTestBase::makeFilePaths(int count) {
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> filePaths;
   filePaths.reserve(count);
   for (auto i = 0; i < count; ++i) {
-    filePaths.emplace_back(TempFilePath::create());
+    filePaths.emplace_back(::bytedance::bolt::test::TempFilePath::create());
   }
   return filePaths;
 }

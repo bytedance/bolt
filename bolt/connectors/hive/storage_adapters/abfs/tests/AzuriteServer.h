@@ -29,7 +29,7 @@
  */
 
 #include "bolt/common/config/Config.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include <azure/storage/blobs/blob_container_client.hpp>
 #include <azure/storage/blobs/block_blob_client.hpp>
@@ -42,7 +42,7 @@
 namespace bytedance::bolt::filesystems {
 
 using namespace Azure::Storage::Blobs;
-using TempDirectoryPath = exec::test::TempDirectoryPath;
+using TempDirectoryPath = bytedance::bolt::test::TempDirectoryPath;
 static std::string_view kAzuriteServerExecutableName{"azurite-blob"};
 static std::string_view kAzuriteSearchPath{":/usr/bin/azurite"};
 

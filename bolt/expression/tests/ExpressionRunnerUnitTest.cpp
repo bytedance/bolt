@@ -29,8 +29,8 @@
  */
 
 #include <gtest/gtest.h>
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/SignatureBinder.h"
 #include "bolt/expression/fuzzer/ExpressionFuzzer.h"
@@ -59,9 +59,9 @@ class ExpressionRunnerUnitTest : public testing::Test, public VectorTestBase {
 };
 
 TEST_F(ExpressionRunnerUnitTest, run) {
-  auto inputFile = exec::test::TempFilePath::create();
-  auto sqlFile = exec::test::TempFilePath::create();
-  auto resultFile = exec::test::TempFilePath::create();
+  auto inputFile = ::bytedance::bolt::test::TempFilePath::create();
+  auto sqlFile = ::bytedance::bolt::test::TempFilePath::create();
+  auto resultFile = ::bytedance::bolt::test::TempFilePath::create();
   const char* inputPath = inputFile->path.data();
   const char* resultPath = resultFile->path.data();
   const int vectorSize = 100;
@@ -107,8 +107,8 @@ TEST_F(ExpressionRunnerUnitTest, persistAndReproComplexSql) {
   auto rowVector = makeRowVector(complexConstants);
 
   // Emulate a reproduce from complex constant SQL
-  auto sqlFile = exec::test::TempFilePath::create();
-  auto complexConstantsFile = exec::test::TempFilePath::create();
+  auto sqlFile = ::bytedance::bolt::test::TempFilePath::create();
+  auto complexConstantsFile = ::bytedance::bolt::test::TempFilePath::create();
   auto sqlPath = sqlFile->path.c_str();
   auto complexConstantsPath = complexConstantsFile->path.c_str();
 

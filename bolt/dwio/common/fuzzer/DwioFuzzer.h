@@ -18,8 +18,8 @@
 
 #include <boost/random/uniform_int_distribution.hpp>
 #include <chrono>
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/Options.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "gtest/gtest.h"
 namespace bytedance::bolt::dwio {
@@ -118,7 +118,7 @@ class DwioFuzzer {
       const std::unique_ptr<common::Reader> reader,
       const RowTypePtr& rowType);
 
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
 
   Options options_;
 

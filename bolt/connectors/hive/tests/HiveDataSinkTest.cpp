@@ -36,15 +36,16 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/config/Config.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::common::testutil;
 
 constexpr const char* kHiveConnectorId = "test-hive";
@@ -705,7 +706,7 @@ TEST_F(HiveDataSinkTest, memoryReclaim) {
     std::shared_ptr<TempDirectoryPath> spillDirectory;
     std::unique_ptr<SpillConfig> spillConfig;
     if (testData.writerSpillEnabled) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       spillConfig =
           getSpillConfig(spillDirectory->path, testData.writerFlushThreshold);
       auto connectorQueryCtx = std::make_unique<connector::ConnectorQueryCtx>(
@@ -843,7 +844,7 @@ TEST_F(HiveDataSinkTest, memoryReclaimAfterClose) {
     std::shared_ptr<TempDirectoryPath> spillDirectory;
     std::unique_ptr<SpillConfig> spillConfig;
     if (testData.writerSpillEnabled) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       spillConfig = getSpillConfig(spillDirectory->path, 0);
       auto connectorQueryCtx = std::make_unique<connector::ConnectorQueryCtx>(
           opPool_.get(),
@@ -934,7 +935,7 @@ DEBUG_ONLY_TEST_F(HiveDataSinkTest, sortWriterFailureTest) {
           std::make_shared<HiveSortingColumn>(
               "c1", core::SortOrder{false, false})});
   const std::shared_ptr<TempDirectoryPath> spillDirectory =
-      exec::test::TempDirectoryPath::create();
+      bytedance::bolt::test::TempDirectoryPath::create();
   std::unique_ptr<SpillConfig> spillConfig =
       getSpillConfig(spillDirectory->path, 0);
   // Triggers the memory reservation in sort buffer.

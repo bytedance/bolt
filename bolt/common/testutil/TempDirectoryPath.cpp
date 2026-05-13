@@ -28,10 +28,10 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include "boost/filesystem.hpp"
-namespace bytedance::bolt::exec::test {
+namespace bytedance::bolt::test {
 
 std::shared_ptr<TempDirectoryPath> TempDirectoryPath::create() {
   struct SharedTempDirectoryPath : public TempDirectoryPath {
@@ -50,4 +50,4 @@ TempDirectoryPath::~TempDirectoryPath() {
   }
 }
 
-} // namespace bytedance::bolt::exec::test
+} // namespace bytedance::bolt::test

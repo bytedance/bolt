@@ -30,13 +30,13 @@
 
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/FileSink.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <gtest/gtest.h>
 
 using namespace ::testing;
-using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::dwio::common {
 
 class LocalFileSinkTest : public testing::Test {

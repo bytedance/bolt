@@ -28,12 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 
 #include "bolt/connectors/hive/storage_adapters/abfs/AzureDataLakeFileClient.h"
 
 using namespace Azure::Storage::Files::DataLake::Models;
-using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 namespace bytedance::bolt::filesystems {
 
@@ -41,7 +41,7 @@ namespace bytedance::bolt::filesystems {
 class MockDataLakeFileClient : public AzureDataLakeFileClient {
  public:
   MockDataLakeFileClient() {
-    auto tempFile = TempFilePath::create();
+    auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
     filePath_ = tempFile->getPath();
   }
 

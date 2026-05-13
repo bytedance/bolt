@@ -18,8 +18,8 @@
 
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
@@ -96,7 +96,7 @@ void readDataAsyncForWirteBuffers(
 }
 
 TEST(AsyncLocalFile, writeAndRead) {
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path.c_str();
   remove(filename);
   {
@@ -109,7 +109,7 @@ TEST(AsyncLocalFile, writeAndRead) {
 
 TEST(AsyncLocalFile, viaRegistry) {
   filesystems::registerLocalFileSystem();
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path.c_str();
   remove(filename);
   auto lfs = filesystems::getFileSystem(filename, nullptr);
@@ -124,7 +124,7 @@ TEST(AsyncLocalFile, viaRegistry) {
 
 TEST(AsyncLocalFileWrite, viaWriteBuffer) {
   filesystems::registerLocalFileSystem();
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path.c_str();
   remove(filename);
   auto lfs = filesystems::getFileSystem(filename, nullptr);

@@ -35,6 +35,8 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/OperatorTraceWriter.h"
@@ -48,9 +50,9 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::exec::trace::test {
 class OperatorTraceTest : public HiveConnectorTestBase {
  protected:
@@ -752,9 +754,10 @@ TEST_F(OperatorTraceTest, traceSplitRoundTrip) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < numSplits; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -819,9 +822,10 @@ TEST_F(OperatorTraceTest, traceSplitPartial) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < numSplits; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -908,9 +912,10 @@ TEST_F(OperatorTraceTest, traceSplitCorrupted) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < numSplits; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -1164,9 +1169,10 @@ TEST_F(OperatorTraceTest, hiveConnectorId) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < numSplits; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }

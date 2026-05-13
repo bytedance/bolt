@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/arrow/ArrowMemoryConnector.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/TableHandle.h"
@@ -39,7 +40,6 @@
 #include "bolt/exec/RoundRobinPartitionFunction.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/WindowFunction.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/expression/FunctionCallToSpecialForm.h"

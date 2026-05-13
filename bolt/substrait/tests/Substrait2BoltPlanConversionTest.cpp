@@ -31,11 +31,11 @@
 #include "bolt/substrait/tests/JsonToProtoConverter.h"
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/substrait/SubstraitToBoltPlan.h"
 #include "bolt/type/Type.h"
 using namespace bytedance::bolt;
@@ -83,8 +83,8 @@ class Substrait2BoltPlanConversionTest
     return splits;
   }
 
-  std::shared_ptr<exec::test::TempDirectoryPath> tmpDir_{
-      exec::test::TempDirectoryPath::create()};
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tmpDir_{
+      bytedance::bolt::test::TempDirectoryPath::create()};
 };
 
 // This test will firstly generate mock TPC-H lineitem ORC file. Then, Bolt's

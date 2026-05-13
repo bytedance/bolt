@@ -30,6 +30,8 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/common/FileSink.h"
@@ -42,10 +44,10 @@
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
 
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 using bytedance::bolt::common::testutil::TestValue;
 using bytedance::bolt::test::BatchMaker;
@@ -143,7 +145,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
 
   static void addHiveSplits(
       const std::shared_ptr<Task>& task,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths) {
     for (auto& filePath : filePaths) {
       auto split = exec::Split(
           std::make_shared<connector::hive::HiveConnectorSplit>(
@@ -160,7 +163,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
   static void addHiveSplits(
       const std::shared_ptr<Task>& task,
       const std::vector<std::string>& scanNodeIds,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths) {
     for (auto i = 0; i < filePaths.size(); ++i) {
       const auto& filePath = filePaths[i];
       auto split = exec::Split(
@@ -270,7 +274,8 @@ class MultiFragmentTest : public HiveConnectorTestBase {
       ROW({"c0", "c1", "c2", "c3", "c4", "c5"},
           {BIGINT(), INTEGER(), SMALLINT(), REAL(), DOUBLE(), VARCHAR()})};
   std::unordered_map<std::string, std::string> configSettings_;
-  std::vector<std::shared_ptr<TempFilePath>> filePaths_;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      filePaths_;
   std::vector<RowVectorPtr> vectors_;
   std::shared_ptr<OutputBufferManager> bufferManager_{
       OutputBufferManager::getInstance().lock()};
@@ -443,13 +448,14 @@ TEST_F(MultiFragmentTest, mergeExchange) {
   static const core::SortOrder kAscNullsLast(true, false);
   std::vector<std::shared_ptr<Task>> tasks;
 
-  std::vector<std::shared_ptr<TempFilePath>> filePaths0(
-      filePaths_.begin(), filePaths_.begin() + 10);
-  std::vector<std::shared_ptr<TempFilePath>> filePaths1(
-      filePaths_.begin() + 10, filePaths_.end());
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      filePaths0(filePaths_.begin(), filePaths_.begin() + 10);
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      filePaths1(filePaths_.begin() + 10, filePaths_.end());
 
-  std::vector<std::vector<std::shared_ptr<TempFilePath>>> filePathsList = {
-      filePaths0, filePaths1};
+  std::vector<
+      std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>>
+      filePathsList = {filePaths0, filePaths1};
 
   std::vector<std::string> partialSortTaskIds;
   RowTypePtr outputType;
@@ -642,12 +648,13 @@ TEST_F(MultiFragmentTest, mergeExchangeMultiMerge) {
   setupSources(20, 1000);
   static const core::SortOrder kAscNullsLast(true, false);
   std::vector<std::shared_ptr<Task>> tasks;
-  std::vector<std::shared_ptr<TempFilePath>> filePaths0(
-      filePaths_.begin(), filePaths_.begin() + 10);
-  std::vector<std::shared_ptr<TempFilePath>> filePaths1(
-      filePaths_.begin() + 10, filePaths_.end());
-  std::vector<std::vector<std::shared_ptr<TempFilePath>>> filePathsList = {
-      filePaths0, filePaths1};
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      filePaths0(filePaths_.begin(), filePaths_.begin() + 10);
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      filePaths1(filePaths_.begin() + 10, filePaths_.end());
+  std::vector<
+      std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>>
+      filePathsList = {filePaths0, filePaths1};
   std::vector<std::string> partialSortTaskIds;
   RowTypePtr outputType;
   std::vector<std::shared_ptr<TempDirectoryPath>> spillDirectories;
@@ -1041,7 +1048,7 @@ TEST_F(MultiFragmentTest, limit) {
   auto data = makeRowVector({makeFlatVector<int32_t>(
       1'000, [](auto row) { return row; }, nullEvery(7))});
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
 
   // Make leaf task: Values -> PartialLimit(10) -> Repartitioning(0).
@@ -2127,7 +2134,7 @@ TEST_F(
 DEBUG_ONLY_TEST_F(MultiFragmentTest, mergeWithEarlyTermination) {
   setupSources(10, 1000);
 
-  std::vector<std::shared_ptr<TempFilePath>> filePaths(
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> filePaths(
       filePaths_.begin(), filePaths_.begin());
 
   std::vector<std::string> partialSortTaskIds;

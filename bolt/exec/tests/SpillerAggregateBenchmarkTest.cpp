@@ -58,7 +58,8 @@ int main(int argc, char* argv[]) {
         "The spiller type {} is not one of [AGGREGATE_INPUT, AGGREGATE_OUTPUT], the aggregate spiller dose not support it.",
         spillerTypeName);
   }
-  auto test = std::make_unique<test::AggregateSpillBenchmarkBase>(spillerType);
+  auto test =
+      std::make_unique<exec::test::AggregateSpillBenchmarkBase>(spillerType);
   test->setUp();
   test->run();
   test->printStats();

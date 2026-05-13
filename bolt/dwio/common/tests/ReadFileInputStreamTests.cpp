@@ -29,8 +29,8 @@
  */
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/dwio/common/InputStream.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 
 #include <string_view>
 #include "folly/io/Cursor.h"
@@ -48,7 +48,7 @@ class ReadFileInputStreamTest : public testing::Test {
 };
 
 TEST_F(ReadFileInputStreamTest, LocalReadFile) {
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path;
   remove(filename.c_str());
   {

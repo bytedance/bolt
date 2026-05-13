@@ -33,11 +33,11 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/expression/StringWriter.h"
@@ -1770,7 +1770,7 @@ TEST_F(ParquetReaderTest, integerToVarcharSchemaMismatchCast) {
   auto data =
       makeRowVector({"col"}, {makeFlatVector<int32_t>({1, 2, 3, 42, -100})});
 
-  auto tempFile = exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   {
     auto writeFile =
         std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
@@ -1832,7 +1832,7 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   auto data = makeRowVector(
       {"col"}, {makeFlatVector<StringView>({"100", "200", "300", "-42", "0"})});
 
-  auto tempFile = exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   {
     auto writeFile =
         std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);

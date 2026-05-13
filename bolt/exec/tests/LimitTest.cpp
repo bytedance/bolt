@@ -28,11 +28,13 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 class LimitTest : public HiveConnectorTestBase {};
 
@@ -82,7 +84,7 @@ TEST_F(LimitTest, limitOverLocalExchange) {
   auto data = makeRowVector(
       {makeFlatVector<int32_t>(1'000, [](auto row) { return row; })});
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(file->path, {data});
 
   core::PlanNodeId scanNodeId;

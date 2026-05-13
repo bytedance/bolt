@@ -31,8 +31,8 @@
 #pragma once
 
 #include "bolt/common/config/Config.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/PortUtil.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include "boost/process.hpp"
 
@@ -48,7 +48,7 @@ constexpr char const* kMinioSecretKey{"miniopass"};
 // Adapted from the Apache Arrow library.
 class MinioServer {
  public:
-  MinioServer() : tempPath_(::exec::test::TempDirectoryPath::create()) {
+  MinioServer() : tempPath_(::test::TempDirectoryPath::create()) {
     constexpr auto kHostAddressTemplate = "127.0.0.1:{}";
     auto ports = bytedance::bolt::exec::test::getFreePorts(2);
     connectionString_ = fmt::format(kHostAddressTemplate, ports[0]);
@@ -88,7 +88,7 @@ class MinioServer {
   }
 
  private:
-  const std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  const std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
   std::string connectionString_;
   std::string consoleAddress_;
   const std::string accessKey_ = kMinioAccessKey;

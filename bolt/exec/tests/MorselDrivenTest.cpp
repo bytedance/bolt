@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -24,6 +25,7 @@
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 class MorselDrivenTest : public HiveConnectorTestBase {
  protected:
@@ -49,8 +51,8 @@ class MorselDrivenTest : public HiveConnectorTestBase {
     return fmt::format("local://{}-{}", prefix, num);
   }
 
-  std::vector<std::shared_ptr<TempFilePath>> writeToFiles(
-      const std::vector<RowVectorPtr>& vectors) {
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+  writeToFiles(const std::vector<RowVectorPtr>& vectors) {
     auto filePaths = makeFilePaths(vectors.size());
     for (auto i = 0; i < vectors.size(); i++) {
       writeToFile(filePaths[i]->path, vectors[i]);

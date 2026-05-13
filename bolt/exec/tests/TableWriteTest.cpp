@@ -31,6 +31,8 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/hyperloglog/SparseHll.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HivePartitionFunction.h"
@@ -40,7 +42,6 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "folly/dynamic.h"
@@ -57,6 +58,7 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::dwio::common;
@@ -289,7 +291,8 @@ class TableWriteTest : public HiveConnectorTestBase {
 
   std::shared_ptr<Task> assertQueryWithWriterConfigs(
       const core::PlanNodePtr& plan,
-      std::vector<std::shared_ptr<TempFilePath>> filePaths,
+      std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+          filePaths,
       const std::string& duckDbSql,
       bool spillEnabled = false) {
     std::vector<Split> splits;
@@ -310,7 +313,8 @@ class TableWriteTest : public HiveConnectorTestBase {
           .splits(splits)
           .assertResults(duckDbSql);
     }
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     TestScopedSpillInjection scopedSpillInjection(100);
     return AssertQueryBuilder(plan, duckDbQueryRunner_)
         .spillDirectory(spillDirectory->path)
@@ -348,7 +352,8 @@ class TableWriteTest : public HiveConnectorTestBase {
           .assertResults(duckDbSql);
     }
 
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     TestScopedSpillInjection scopedSpillInjection(100);
     return AssertQueryBuilder(plan, duckDbQueryRunner_)
         .spillDirectory(spillDirectory->path)
@@ -381,7 +386,8 @@ class TableWriteTest : public HiveConnectorTestBase {
           .copyResults(pool());
     }
 
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     return AssertQueryBuilder(plan, duckDbQueryRunner_)
         .spillDirectory(spillDirectory->path)
         .maxDrivers(
@@ -1107,7 +1113,7 @@ TEST_F(BasicTableWriteTest, roundTrip) {
           size, [](auto row) { return row * 2; }, nullEvery(7)),
   });
 
-  auto sourceFilePath = TempFilePath::create();
+  auto sourceFilePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(sourceFilePath->path, data);
 
   auto targetDirectoryPath = TempDirectoryPath::create();
@@ -3647,7 +3653,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, reclaimFromTableWriter) {
             }
           })));
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       auto outputDirectory = TempDirectoryPath::create();
       auto writerPlan =
           PlanBuilder()
@@ -3734,7 +3740,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, reclaimFromSortTableWriter) {
             }
           })));
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       auto outputDirectory = TempDirectoryPath::create();
       auto writerPlan =
           PlanBuilder()
@@ -3825,7 +3831,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, writerFlushThreshold) {
             }
           })));
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       auto outputDirectory = TempDirectoryPath::create();
       auto writerPlan =
           PlanBuilder()
@@ -3911,7 +3917,8 @@ DEBUG_ONLY_TEST_F(
               {fmt::format("sum({})", TableWriteTraits::rowCountColumnName())})
           .planNode();
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   AssertQueryBuilder(duckDbQueryRunner_)
       .queryCtx(queryCtx)
       .maxDrivers(1)
@@ -4003,7 +4010,8 @@ DEBUG_ONLY_TEST_F(
               {fmt::format("sum({})", TableWriteTraits::rowCountColumnName())})
           .planNode();
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   AssertQueryBuilder(duckDbQueryRunner_)
       .queryCtx(queryCtx)
       .maxDrivers(1)
@@ -4092,7 +4100,8 @@ DEBUG_ONLY_TEST_F(
           .planNode();
 
   const auto spillStats = common::globalSpillStats();
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   AssertQueryBuilder(duckDbQueryRunner_)
       .queryCtx(queryCtx)
       .maxDrivers(1)
@@ -4163,7 +4172,8 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableFileWriteError) {
         BOLT_FAIL("inject writer error");
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   const auto outputDirectory = TempDirectoryPath::create();
   auto writerPlan = PlanBuilder()
                         .values(vectors)
@@ -4252,7 +4262,8 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteSpillUseMoreMemory) {
         injectedWriterAllocation.free();
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   const auto outputDirectory = TempDirectoryPath::create();
   auto writerPlan = PlanBuilder()
                         .values(vectors)
@@ -4343,7 +4354,8 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteReclaimOnClose) {
       std::function<void(dwrf::Writer*)>(
           [&](dwrf::Writer* writer) { fakeAllocation.free(); }));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   const auto outputDirectory = TempDirectoryPath::create();
   auto writerPlan =
       PlanBuilder()

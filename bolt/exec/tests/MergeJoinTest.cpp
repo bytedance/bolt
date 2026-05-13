@@ -30,6 +30,7 @@
 
 #include <optional>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -41,6 +42,7 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 namespace {
 
@@ -1003,11 +1005,11 @@ TEST_F(MergeJoinTest, lazyVectors) {
           makeFlatVector<int64_t>(10'000, [](auto row) { return row % 31; }),
       });
 
-  auto leftFile = TempFilePath::create();
+  auto leftFile = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(leftFile->path, leftVectors);
   createDuckDbTable("t", {leftVectors});
 
-  auto rightFile = TempFilePath::create();
+  auto rightFile = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(rightFile->path, rightVectors);
   createDuckDbTable("u", {rightVectors});
 

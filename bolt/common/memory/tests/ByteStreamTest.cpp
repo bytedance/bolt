@@ -34,7 +34,7 @@
 #include "bolt/common/file/FileInputStream.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MmapAllocator.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
@@ -342,7 +342,7 @@ class InputByteStreamTest : public ByteStreamTest,
 
   void SetUp() override {
     ByteStreamTest::SetUp();
-    tempDirPath_ = exec::test::TempDirectoryPath::create();
+    tempDirPath_ = bytedance::bolt::test::TempDirectoryPath::create();
     fs_ = filesystems::getFileSystem(tempDirPath_->getPath(), nullptr);
   }
 
@@ -366,7 +366,7 @@ class InputByteStreamTest : public ByteStreamTest,
   }
 
   std::atomic_uint64_t fileId_{0};
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDirPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDirPath_;
   std::shared_ptr<filesystems::FileSystem> fs_;
 };
 

@@ -31,10 +31,10 @@
 #include "bolt/connectors/hive/storage_adapters/gcs/GcsFileSystem.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/File.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 #include "bolt/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/gcs/tests/GcsEmulator.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 
 #include "gtest/gtest.h"
 
@@ -244,7 +244,7 @@ TEST_F(GcsFileSystemTest, credentialsConfig) {
       "  \"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n" +
       "  \"client_x509_cert_url\": \"https://www.googleapis.com/robot/v1/metadata/x509/foo-email%40foo-project.iam.g" +
       std::string("serviceaccount") + ".com\"\n" + "}\n";
-  auto jsonFile = ::bytedance::bolt::exec::test::TempFilePath::create();
+  auto jsonFile = ::bytedance::bolt::test::TempFilePath::create();
   std::ofstream credsOut(jsonFile->getPath());
   credsOut << kCreds;
   credsOut.close();

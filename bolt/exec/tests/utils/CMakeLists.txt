@@ -25,10 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-bolt_add_library(bolt_temp_path TempDirectoryPath.cpp TempFilePath.cpp)
-
-target_link_libraries(bolt_temp_path bolt_exception)
-
 bolt_add_library(
   bolt_exec_test_lib
   ArbitratorTestUtil.cpp

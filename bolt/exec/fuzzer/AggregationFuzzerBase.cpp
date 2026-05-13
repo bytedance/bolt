@@ -33,12 +33,12 @@
 #include <boost/random/uniform_int_distribution.hpp>
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/Fs.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/fuzzer/DuckQueryRunner.h"
 #include "bolt/exec/fuzzer/PrestoQueryRunner.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/expression/SignatureBinder.h"
 #include "bolt/expression/fuzzer/ArgumentTypeFuzzer.h"
 #include "bolt/vector/VectorSaver.h"
@@ -431,14 +431,14 @@ bolt::fuzzer::ResultOrError AggregationFuzzerBase::execute(
 
   bolt::fuzzer::ResultOrError resultOrError;
   try {
-    std::shared_ptr<TempDirectoryPath> spillDirectory;
+    std::shared_ptr<bolt::test::TempDirectoryPath> spillDirectory;
     AssertQueryBuilder builder(plan);
 
     builder.configs(queryConfigs_);
 
     int32_t spillPct{0};
     if (injectSpill) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       builder.spillDirectory(spillDirectory->path)
           .config(core::QueryConfig::kSpillEnabled, "true")
           .config(core::QueryConfig::kAggregationSpillEnabled, "true")

@@ -39,7 +39,7 @@
 #include "bolt/expression/Expr.h"
 
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/expression/CoalesceExpr.h"
 #include "bolt/expression/ConjunctExpr.h"
 #include "bolt/expression/ConstantExpr.h"
@@ -2507,7 +2507,7 @@ TEST_P(ParameterizedExprTest, exceptionContext) {
   }
 
   // Enable saving vector and expression SQL for system errors only.
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   FLAGS_bolt_save_input_on_expression_system_failure_path = tempDirectory->path;
 
   try {

@@ -38,10 +38,10 @@
 #include <random>
 #include "HdfsMiniCluster.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsReadFile.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "bolt/core/QueryConfig.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
 
@@ -89,8 +89,8 @@ class HdfsFileSystemTest : public testing::Test {
   static std::shared_ptr<filesystems::test::HdfsMiniCluster> miniCluster;
 
  private:
-  static std::shared_ptr<::exec::test::TempFilePath> createFile() {
-    auto tempFile = ::exec::test::TempFilePath::create();
+  static std::shared_ptr<::bytedance::bolt::test::TempFilePath> createFile() {
+    auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
     tempFile->append("aaaaa");
     tempFile->append("bbbbb");
     tempFile->append(std::string(kOneMB, 'c'));

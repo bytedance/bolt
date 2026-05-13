@@ -28,9 +28,9 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 using namespace bytedance::bolt::functions::aggregate::test;

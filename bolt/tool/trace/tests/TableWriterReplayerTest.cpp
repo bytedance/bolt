@@ -37,6 +37,8 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/hyperloglog/SparseHll.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/TableWriter.h"
@@ -44,7 +46,6 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/tool/trace/TableWriterReplayer.h"
 #include "bolt/tool/trace/TraceReplayRunner.h"
@@ -55,6 +56,7 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::dwio::common;
@@ -284,7 +286,7 @@ TEST_F(TableWriterReplayerTest, runner) {
       makeFlatVector<int32_t>(
           size, [](auto row) { return row * 2; }, nullEvery(7)),
   });
-  auto sourceFilePath = TempFilePath::create();
+  auto sourceFilePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(sourceFilePath->getPath(), data);
 
   std::string traceNodeId;
@@ -355,7 +357,7 @@ TEST_F(TableWriterReplayerTest, basic) {
       makeFlatVector<int32_t>(
           size, [](auto row) { return row * 2; }, nullEvery(7)),
   });
-  auto sourceFilePath = TempFilePath::create();
+  auto sourceFilePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(sourceFilePath->getPath(), data);
 
   std::string planNodeId;

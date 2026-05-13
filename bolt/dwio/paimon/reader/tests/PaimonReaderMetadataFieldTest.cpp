@@ -27,6 +27,7 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/file/Utils.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
@@ -35,7 +36,6 @@
 #include "bolt/dwio/paimon/reader/tests/PaimonTestUtils.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/Expressions.h"
 #include "bolt/parse/TypeResolver.h"
@@ -101,7 +101,7 @@ class PaimonReaderMetadataFieldTest
   void assertOutput(
       const RowTypePtr& readType,
       RowTypePtr fileRowType,
-      const std::shared_ptr<exec::test::TempDirectoryPath>& tempDir,
+      const std::shared_ptr<bytedance::bolt::test::TempDirectoryPath>& tempDir,
       std::unordered_map<std::string, std::string> tableParameters,
       std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>
           assignments,
@@ -204,7 +204,7 @@ class PaimonReaderMetadataFieldTest
 const std::string PaimonReaderMetadataFieldTest::kHiveConnectorId = "test-hive";
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIndex) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
 
   // Create vectors with 20000 elements, a starts at 101, b starts at 103
@@ -280,7 +280,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIndex) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIndexWithFilters) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto numRows = 3 * 1024 * 1024; // roughly 3 row groups with default settings
   auto aVec = std::vector<int32_t>(numRows);
@@ -406,7 +406,7 @@ TEST_F(
   // DISABLED until bug in parquet filter pushdown is resolved
 
   // reads high end of file that has multiple row groups with filters
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto numRows = 3 * 1024 * 1024; // roughly 3 row groups with default settings
   auto aVec = std::vector<int32_t>(numRows);
@@ -488,7 +488,7 @@ TEST_F(
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIndexWithSelectiveFilter) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto numRows = 3 * 1024 * 1024;
   auto aVec = std::vector<int32_t>(numRows);
@@ -548,7 +548,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIndexWithSelectiveFilter) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowId) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -612,7 +612,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowId) {
 
 // Disabled until paimon support querying extra columns
 TEST_F(PaimonReaderMetadataFieldTest, DISABLED_testPaimonExtraColumns) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -686,7 +686,7 @@ TEST_F(PaimonReaderMetadataFieldTest, DISABLED_testPaimonExtraColumns) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumn) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -761,7 +761,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumn) {
           vectorMaker_.flatVector<std::string>({}),
           vectorMaker_.flatVector<int32_t>({}),
       });
-  auto emptyTableDir = exec::test::TempDirectoryPath::create();
+  auto emptyTableDir = bytedance::bolt::test::TempDirectoryPath::create();
   assertOutput(
       readType,
       fileRowType,
@@ -772,7 +772,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumn) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumnMultiFile) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -886,7 +886,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumnMultiFile) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonBucketColumn) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -949,7 +949,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonBucketColumn) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonPartitionColumn) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -1042,7 +1042,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonPartitionColumn) {
 TEST_F(
     PaimonReaderMetadataFieldTest,
     testPaimonPartitionColumnPreservesDeclaredSchemaOrder) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   auto fileRowType = createPaimonFile(
       vectorMaker_,
@@ -1087,7 +1087,7 @@ TEST_F(
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIdColumnWithoutRowIdInFile) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   // write a paimon file, without the rowId column
   auto fileRowType = createPaimonFile(
@@ -1164,7 +1164,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIdColumnWithoutRowIdInFile) {
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIdColumnWithRowIdInFile) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   // write a paimon file, with the rowId column
   auto fileRowType = createPaimonFile(
@@ -1233,7 +1233,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIdColumnWithRowIdInFile) {
 TEST_F(
     PaimonReaderMetadataFieldTest,
     testPaimonSequenceNumberColumnWithSequenceNumberInFile) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   // write a paimon file, with the sequence number column
   auto fileRowType = createPaimonFile(
@@ -1312,7 +1312,7 @@ TEST_F(
 TEST_F(
     PaimonReaderMetadataFieldTest,
     testPaimonSequenceNumberColumnWithoutSequenceNumberInFile) {
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
   // write a paimon file, with the sequence number column
   auto fileRowType = createPaimonFile(

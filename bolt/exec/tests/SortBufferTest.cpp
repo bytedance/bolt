@@ -33,13 +33,14 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::memory;
 namespace bytedance::bolt::functions::test {
@@ -386,7 +387,7 @@ TEST_F(SortBufferTest, batchOutput) {
   TestScopedSpillInjection scopedSpillInjection(100);
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto spillConfig = common::SpillConfig(
         [&]() -> const std::string& { return spillDirectory->path; },
         [&](uint64_t) {},
@@ -500,7 +501,7 @@ TEST_F(SortBufferTest, spill) {
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     // memory pool limit is 20M
     // Set 'kSpillableReservationGrowthPct' to an extreme large value to trigger
     // memory reservation failure and thus trigger disk spilling.
@@ -577,7 +578,7 @@ TEST_F(SortBufferTest, spill) {
 }
 
 DEBUG_ONLY_TEST_F(SortBufferTest, reserveMemoryGetOutput) {
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto spillConfig = common::SpillConfig(
       [&]() -> const std::string& { return spillDirectory->getPath(); },
       [&](uint64_t) {},
@@ -657,7 +658,7 @@ TEST_F(SortBufferTest, emptySpill) {
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto spillConfig = getSpillConfig(spillDirectory->path);
     auto sortBuffer = std::make_unique<SortBuffer>(
         inputType_,
@@ -681,7 +682,7 @@ TEST_F(SortBufferTest, emptySpill) {
 }
 
 TEST_F(SortBufferTest, rowBasedSpillMemory) {
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   // memory pool limit is 20M
   // Set 'kSpillableReservationGrowthPct' to an extreme large value to trigger
   // memory reservation failure and thus trigger disk spilling.
@@ -766,7 +767,7 @@ TEST_F(SortBufferTest, spillWithHybridModeValidateOutput) {
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto spillConfig = common::SpillConfig(
         [&]() -> const std::string& { return spillDirectory->path; },
         [&](uint64_t) {},

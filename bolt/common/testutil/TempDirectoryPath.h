@@ -36,7 +36,7 @@
 #include <string>
 
 #include "bolt/common/base/Exceptions.h"
-namespace bytedance::bolt::exec::test {
+namespace bytedance::bolt::test {
 
 // It manages the lifetime of a temporary directory.
 class TempDirectoryPath {
@@ -65,4 +65,4 @@ class TempDirectoryPath {
     return tempDirectoryPath;
   }
 };
-} // namespace bytedance::bolt::exec::test
+} // namespace bytedance::bolt::test
