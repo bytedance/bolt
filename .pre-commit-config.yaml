@@ -74,8 +74,8 @@ repos:
     hooks:
       - id: license-header-check
         name: Check for license headers
-        entry: go run -C .github/license_check check_license.go
-        language: golang
+        entry: bash -c 'GOFLAGS=-buildvcs=false go run -C .github/license_check check_license.go "$@"' --
+        language: system
         pass_filenames: true
         require_serial: true
       - id: clang-tidy

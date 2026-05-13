@@ -396,34 +396,10 @@ arrow::Status BoltShuffleWriterV2::splitRowVector(
   RETURN_NOT_OK(
       splitFixedWidthValueBuffer(rv, partitionFixedWidthValueAddrsVector_));
   RETURN_NOT_OK(splitValidityBuffer<false>(rv));
+  RETURN_NOT_OK(withShuffleCheck(
+      rv, std::string(__FILE__) + ":" + std::to_string(__LINE__)));
   RETURN_NOT_OK(splitBinaryArray(rv));
   RETURN_NOT_OK(splitComplexType(rv));
-  RETURN_NOT_OK(withShuffleCheck(
-      rv,
-      std::string(__FILE__) + ":" + std::to_string(__LINE__),
-      [&](const bytedance::bolt::RowVector& vector, std::string funcLine) {
-        std::vector<std::vector<uint8_t*>> currentFixedWidthValueAddrs(
-            fixedWidthColumnCount_);
-        for (auto col = 0; col < fixedWidthColumnCount_; ++col) {
-          const uint64_t valueWidth = fixedColValueSize_[col];
-          currentFixedWidthValueAddrs[col].resize(numPartitions_, nullptr);
-          for (auto pid = 0; pid < numPartitions_; ++pid) {
-            const auto& buffers =
-                partitionFixedWidthValueAddrsVector_[col][pid];
-            if (!buffers.empty()) {
-              auto* addr = buffers.back();
-              if (valueWidth) {
-                addr +=
-                    static_cast<uint64_t>(partitionBufferBaseInBatches_[pid]) *
-                    valueWidth;
-              }
-              currentFixedWidthValueAddrs[col][pid] = addr;
-            }
-          }
-        }
-        return checkFixedColumnCopyValue(
-            vector, currentFixedWidthValueAddrs, std::move(funcLine), true);
-      }));
 
   for (auto& pid : partitionUsed_) {
     partitionBufferBase_[pid] += partition2RowCount_[pid];

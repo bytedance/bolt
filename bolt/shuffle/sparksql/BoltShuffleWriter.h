@@ -327,16 +327,6 @@ class BoltShuffleWriter : public ShuffleWriter {
   }
 
  protected:
-  using FixedColumnCheckFunction = void (BoltShuffleWriter::*)(
-      const uint8_t* srcAddrs,
-      const uint8_t* srcNulls,
-      const std::vector<uint8_t*>& dstAddrs,
-      const std::vector<uint8_t*>& dstNulls,
-      int colId,
-      const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
-
   virtual arrow::Status init();
 
   virtual arrow::Status initPartitions();
@@ -377,18 +367,13 @@ class BoltShuffleWriter : public ShuffleWriter {
       const bytedance::bolt::RowVector& rv,
       T& valueAddrs);
 
-  template <typename T>
-  arrow::Status checkFixedColumnCopyValue(
+  arrow::Status checkFixedColumnCopyNulls(
       const bytedance::bolt::RowVector& rv,
-      T& fixedWidthValueAddrs,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition = false);
+      const std::string& funcLine);
 
-  template <typename Fn>
   arrow::Status withShuffleCheck(
       const bytedance::bolt::RowVector& rv,
-      std::string funcLine,
-      Fn&& fn) {
+      std::string funcLine) {
     const auto shuffleCheckRatio =
         std::clamp(options_.shuffleCheckRatio, 0.0, 1.0);
     if (shuffleCheckRatio <= 0.0) {
@@ -401,33 +386,8 @@ class BoltShuffleWriter : public ShuffleWriter {
     }
     ++shuffleCheckCount_;
     bytedance::bolt::NanosecondTimer timer(&shuffleCheckTimeNanos_);
-    return fn(rv, std::move(funcLine));
+    return checkFixedColumnCopyNulls(rv, std::move(funcLine));
   }
-
-  template <typename T>
-  void checkCopyValue(
-      const uint8_t* srcAddrs,
-      const uint8_t* srcNulls,
-      const std::vector<uint8_t*>& dstAddrs,
-      const std::vector<uint8_t*>& dstNulls,
-      int colId,
-      const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
-
-  template <typename T>
-  void checkCopyValueTyped(
-      const uint8_t* srcAddrs,
-      const uint8_t* srcNulls,
-      const std::vector<uint8_t*>& dstAddrs,
-      const std::vector<uint8_t*>& dstNulls,
-      int colId,
-      const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
-
-  arrow::Result<FixedColumnCheckFunction> createFixedColumnCheckFunction(
-      arrow::Type::type typeId) const;
 
   arrow::Status splitBoolType(
       const uint8_t* srcAddr,
@@ -694,8 +654,6 @@ class BoltShuffleWriter : public ShuffleWriter {
   std::vector<std::vector<uint8_t*>> partitionValidityAddrs_;
   // Used by fixed-width types. Stores raw pointers of partition buffers.
   std::vector<std::vector<uint8_t*>> partitionFixedWidthValueAddrs_;
-  std::vector<FixedColumnCheckFunction> fixedWidthCheckFunctions_;
-  std::vector<std::string> fixedWidthTypeNames_;
   // Used by binary types. Stores raw pointers and metadata of partition
   // buffers.
   std::vector<std::vector<BinaryBuf>> partitionBinaryAddrs_;
@@ -801,6 +759,7 @@ class BoltShuffleWriter : public ShuffleWriter {
   uint64_t stopTime_{0};
   uint64_t shuffleCheckTimeNanos_{0};
   uint64_t shuffleCheckCount_{0};
+  uint64_t shuffleCheckNulls_{0};
   std::mt19937 shuffleCheckRandomEngine_{std::random_device{}()};
   std::bernoulli_distribution shuffleCheckDistribution_;
 
