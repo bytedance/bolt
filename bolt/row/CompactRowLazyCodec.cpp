@@ -26,10 +26,16 @@ namespace bytedance::bolt::row {
 namespace {
 
 RowVectorPtr wrapAsRow(const VectorPtr& input, memory::MemoryPool* pool) {
+  // Do not propagate input->nulls() onto the wrapper — its capacity may be
+  // smaller than bits::nbytes(input->size()) when the source was wrapped or
+  // peeled upstream, which trips the BaseVector capacity check. The wrapper
+  // only exists to feed CompactRow; the encode loop reads nulls directly off
+  // input via input->rawNulls(), and CompactRow itself decodes through to
+  // the child so the outer ROW's nulls don't matter.
   return std::make_shared<RowVector>(
       pool,
       ROW({input->type()}),
-      input->nulls(),
+      /*nulls=*/nullptr,
       input->size(),
       std::vector<VectorPtr>{input});
 }
@@ -83,10 +89,19 @@ std::shared_ptr<LazyComplexVector> CompactRowLazyCodec::encode(
     const auto len = offsets[i + 1] - offsets[i];
     rawViews[i] = len > 0 ? StringView(base + offsets[i], len) : StringView();
   }
+  // Cannot reuse input->nulls() directly: its capacity may be smaller than
+  // bits::nbytes(size) when the source vector was wrapped/sliced/peeled, and
+  // the BaseVector constructor BOLT_CHECKs nulls->capacity() >= byteSize(len).
+  // Copy into a freshly sized buffer when nulls are actually present.
+  BufferPtr nullsBuf;
+  if (rawNulls != nullptr) {
+    nullsBuf = AlignedBuffer::allocate<bool>(size, pool, bits::kNotNull);
+    std::memcpy(nullsBuf->asMutable<char>(), rawNulls, bits::nbytes(size));
+  }
   auto flat = std::make_shared<FlatVector<StringView>>(
       pool,
       VARBINARY(),
-      /*nulls*/ input->nulls(),
+      std::move(nullsBuf),
       size,
       valuesBuf,
       std::vector<BufferPtr>{arena});
