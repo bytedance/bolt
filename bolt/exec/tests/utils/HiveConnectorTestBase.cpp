@@ -32,9 +32,6 @@
 
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/HiveDataSink.h"
-#include "bolt/dwio/common/tests/utils/BatchMaker.h"
-#include "bolt/dwio/dwrf/reader/DwrfReader.h"
-#include "bolt/dwio/dwrf/writer/Writer.h"
 namespace bytedance::bolt::exec::test {
 
 using connector::hive::HiveConnectorSplitBuilder;
@@ -74,61 +71,12 @@ void HiveConnectorTestBase::resetHiveConnector(
   connector::registerConnector(hiveConnector);
 }
 
-void HiveConnectorTestBase::writeToFile(
-    const std::string& filePath,
-    RowVectorPtr vector) {
-  writeToFile(filePath, std::vector{vector});
-}
-
-void HiveConnectorTestBase::writeToFile(
-    const std::string& filePath,
-    const std::vector<RowVectorPtr>& vectors,
-    std::shared_ptr<dwrf::Config> config) {
-  bolt::dwrf::WriterOptions options;
-  options.config = config;
-  options.schema = vectors[0]->type();
-  auto localWriteFile = std::make_unique<LocalWriteFile>(filePath, true, false);
-  auto sink = std::make_unique<dwio::common::WriteFileSink>(
-      std::move(localWriteFile), filePath);
-  auto childPool = rootPool_->addAggregateChild("HiveConnectorTestBase.Writer");
-  options.memoryPool = childPool.get();
-  bytedance::bolt::dwrf::Writer writer{std::move(sink), options};
-  for (size_t i = 0; i < vectors.size(); ++i) {
-    writer.write(vectors[i]);
-  }
-  writer.close();
-}
-
-std::vector<RowVectorPtr> HiveConnectorTestBase::makeVectors(
-    const RowTypePtr& rowType,
-    int32_t numVectors,
-    int32_t rowsPerVector) {
-  std::vector<RowVectorPtr> vectors;
-  for (int32_t i = 0; i < numVectors; ++i) {
-    auto vector = std::dynamic_pointer_cast<RowVector>(
-        bolt::test::BatchMaker::createBatch(rowType, rowsPerVector, *pool_));
-    vectors.push_back(vector);
-  }
-  return vectors;
-}
-
 std::shared_ptr<exec::Task> HiveConnectorTestBase::assertQuery(
     const core::PlanNodePtr& plan,
     const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
     const std::string& duckDbSql) {
   return OperatorTestBase::assertQuery(
       plan, makeHiveConnectorSplits(filePaths), duckDbSql);
-}
-
-std::vector<std::shared_ptr<TempFilePath>> HiveConnectorTestBase::makeFilePaths(
-    int count) {
-  std::vector<std::shared_ptr<TempFilePath>> filePaths;
-
-  filePaths.reserve(count);
-  for (auto i = 0; i < count; ++i) {
-    filePaths.emplace_back(TempFilePath::create());
-  }
-  return filePaths;
 }
 
 std::vector<std::shared_ptr<connector::hive::HiveConnectorSplit>>

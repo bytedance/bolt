@@ -38,8 +38,12 @@
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/OutputBufferManager.h"
+#include "bolt/dwio/common/tests/utils/BatchMaker.h"
+#include "bolt/dwio/dwrf/common/Config.h"
+#include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
+#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/Expressions.h"
@@ -174,6 +178,58 @@ void OperatorTestBase::TearDown() {
   pool_.reset();
   rootPool_.reset();
   resetMemory();
+}
+
+void OperatorTestBase::writeToFile(
+    const std::string& filePath,
+    RowVectorPtr vector) {
+  writeToFile(filePath, std::vector{std::move(vector)});
+}
+
+void OperatorTestBase::writeToFile(
+    const std::string& filePath,
+    const std::vector<RowVectorPtr>& vectors,
+    std::shared_ptr<dwrf::Config> config) {
+  bolt::dwrf::WriterOptions options;
+  if (config == nullptr) {
+    config = std::make_shared<bytedance::bolt::dwrf::Config>();
+  }
+  options.config = config;
+  options.schema = vectors[0]->type();
+  auto localWriteFile = std::make_unique<LocalWriteFile>(filePath, true, false);
+  auto sink = std::make_unique<dwio::common::WriteFileSink>(
+      std::move(localWriteFile), filePath);
+  auto childPool = rootPool_->addAggregateChild("OperatorTestBase.Writer");
+  options.memoryPool = childPool.get();
+  bytedance::bolt::dwrf::Writer writer{std::move(sink), options};
+  for (const auto& vector : vectors) {
+    writer.write(vector);
+  }
+  writer.close();
+}
+
+std::vector<RowVectorPtr> OperatorTestBase::makeVectors(
+    const RowTypePtr& rowType,
+    int32_t numVectors,
+    int32_t rowsPerVector) {
+  std::vector<RowVectorPtr> vectors;
+  for (int32_t i = 0; i < numVectors; ++i) {
+    auto vector = std::dynamic_pointer_cast<RowVector>(
+        bolt::test::BatchMaker::createBatch(rowType, rowsPerVector, *pool_));
+    vectors.push_back(vector);
+  }
+  return vectors;
+}
+
+/*static*/
+std::vector<std::shared_ptr<TempFilePath>> OperatorTestBase::makeFilePaths(
+    int count) {
+  std::vector<std::shared_ptr<TempFilePath>> filePaths;
+  filePaths.reserve(count);
+  for (auto i = 0; i < count; ++i) {
+    filePaths.emplace_back(TempFilePath::create());
+  }
+  return filePaths;
 }
 
 std::shared_ptr<Task> OperatorTestBase::assertQuery(
