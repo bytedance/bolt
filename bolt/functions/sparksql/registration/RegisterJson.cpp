@@ -36,9 +36,9 @@ void registerJsonFunctions(const std::string& prefix) {
   exec::registerStatefulVectorFunction(
       prefix + "json_tuple_with_codegen", jsonTupleSignatures(), makeJsonTuple);
   registerJsonType(); // to register Json type
-  registerFunction<WrapperJsonArrayLengthFunction, int64_t, Json>(
+  registerFunction<WrapperJsonArrayLengthFunction, int32_t, Json>(
       {prefix + "json_array_length"});
-  registerFunction<WrapperJsonArrayLengthFunction, int64_t, Varchar>(
+  registerFunction<WrapperJsonArrayLengthFunction, int32_t, Varchar>(
       {prefix + "json_array_length"});
 
   //   registerFunction<SIMDGetJsonObjectFunction, Varchar, Varchar, Varchar>(

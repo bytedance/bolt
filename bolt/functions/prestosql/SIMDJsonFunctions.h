@@ -344,12 +344,21 @@ class WrapperJsonArrayLengthFunction {
     useSonic = config.enableSonicJsonArrayLength();
   }
 
-  FOLLY_ALWAYS_INLINE bool call(int64_t& len, const arg_type<Json>& json) {
+  template <typename TResult>
+  FOLLY_ALWAYS_INLINE bool call(TResult& len, const arg_type<Json>& json) {
+    int64_t jsonArrayLength;
     if (useSonic) {
-      return SonicJsonArrayLengthFunction<T>::call(len, json);
+      if (!SonicJsonArrayLengthFunction<T>::call(jsonArrayLength, json)) {
+        return false;
+      }
     } else {
-      return SIMDJsonArrayLengthFunction<T>::call(len, json);
+      if (!SIMDJsonArrayLengthFunction<T>::call(jsonArrayLength, json)) {
+        return false;
+      }
     }
+
+    len = static_cast<TResult>(jsonArrayLength);
+    return true;
   }
 
   bool useSonic = true;

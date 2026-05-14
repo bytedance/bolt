@@ -131,6 +131,31 @@ TEST_F(JsonFucntionTest, array_test) {
   }
 }
 
+TEST_F(JsonFucntionTest, jsonArrayLength) {
+  auto signatures = getSignatureStrings("json_array_length");
+  ASSERT_EQ(2, signatures.size());
+  ASSERT_EQ(1, signatures.count("(json) -> integer"));
+  ASSERT_EQ(1, signatures.count("(varchar) -> integer"));
+
+  for (auto value : {"true", "false"}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kEnableSonicJsonArrayLength, value}});
+
+    EXPECT_EQ(
+        std::optional<int32_t>(4),
+        evaluateOnce<int32_t>(
+            "json_array_length(c0)", std::optional<std::string>("[1,2,3,4]")));
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateOnce<int32_t>(
+            "json_array_length(c0)", std::optional<std::string>("{}")));
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateOnce<int32_t>(
+            "json_array_length(c0)", std::optional<std::string>()));
+  }
+}
+
 TEST_F(JsonFucntionTest, CornerCases) {
   // test dom
   for (auto value : {"true", "false"}) {
