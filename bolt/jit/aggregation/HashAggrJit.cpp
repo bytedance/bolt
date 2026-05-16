@@ -156,6 +156,20 @@ void clearAccumulatorNull(
       builder.CreateAnd(byte, mask));
 }
 
+void setAccumulatorNull(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) {
+  auto* byte = loadValue(builder, group, builder.getInt8Ty(), slot.nullByte);
+  auto* mask = llvm::ConstantInt::get(builder.getInt8Ty(), slot.nullMask);
+  storeValue(
+      builder,
+      group,
+      builder.getInt8Ty(),
+      slot.nullByte,
+      builder.CreateOr(byte, mask));
+}
+
 llvm::Value* loadDecodedValue(
     llvm::IRBuilder<>& builder,
     llvm::Module& module,
@@ -229,7 +243,89 @@ void genNonNullUpdate(
   }
 }
 
-bool genAddDenseIR(llvm::Module& module, const std::string& fn, const std::vector<HashAggrJitSlot>& slots) {
+bool genAddDenseIR(
+    llvm::Module& module,
+    const std::string& fn,
+    const std::vector<HashAggrJitSlot>& slots,
+    bool checkInputNulls);
+
+bool genInitIR(
+    llvm::Module& module,
+    const std::string& fn,
+    const std::vector<HashAggrJitSlot>& slots) {
+  auto& context = module.getContext();
+  llvm::IRBuilder<> builder(context);
+  auto* voidTy = builder.getVoidTy();
+  auto* i8PtrTy = llvm::PointerType::get(context, 0);
+  auto* i8PtrPtrTy = i8PtrTy->getPointerTo();
+  auto* i32Ty = builder.getInt32Ty();
+  auto* funcTy = llvm::FunctionType::get(voidTy, {i8PtrPtrTy, i32Ty}, false);
+  auto* func = llvm::Function::Create(
+      funcTy, llvm::Function::ExternalLinkage, fn, module);
+  auto argIt = func->arg_begin();
+  llvm::Value* newGroups = &*argIt++;
+  newGroups->setName("new_groups");
+  llvm::Value* numNewGroups = &*argIt++;
+  numNewGroups->setName("num_new_groups");
+
+  auto* entry = llvm::BasicBlock::Create(context, "entry", func);
+  auto* loop = llvm::BasicBlock::Create(context, "loop", func);
+  auto* end = llvm::BasicBlock::Create(context, "end", func);
+  builder.SetInsertPoint(entry);
+  builder.CreateCondBr(
+      builder.CreateICmpSLE(numNewGroups, builder.getInt32(0)), end, loop);
+
+  builder.SetInsertPoint(loop);
+  auto* index = builder.CreatePHI(i32Ty, 2, "idx");
+  index->addIncoming(builder.getInt32(0), entry);
+  auto* groupAddr = builder.CreateInBoundsGEP(i8PtrTy, newGroups, index);
+  auto* group = builder.CreateLoad(i8PtrTy, groupAddr);
+
+  for (const auto& slot : slots) {
+    if (slot.kind != HashAggrJitKind::Count) {
+      setAccumulatorNull(builder, group, slot);
+    }
+    auto* accType = llvmType(builder, slot.accumulatorKind);
+    if (isFloatKind(slot.accumulatorKind)) {
+      storeValue(
+          builder,
+          group,
+          accType,
+          slot.offset,
+          llvm::ConstantFP::get(accType, 0.0));
+    } else {
+      storeValue(
+          builder,
+          group,
+          accType,
+          slot.offset,
+          llvm::ConstantInt::get(accType, 0));
+    }
+    if (slot.kind == HashAggrJitKind::Avg) {
+      storeValue(
+          builder,
+          group,
+          builder.getInt64Ty(),
+          slot.offset + 8,
+          builder.getInt64(0));
+    }
+  }
+
+  auto* next = builder.CreateAdd(index, builder.getInt32(1));
+  index->addIncoming(next, builder.GetInsertBlock());
+  builder.CreateCondBr(builder.CreateICmpSLT(next, numNewGroups), loop, end);
+
+  builder.SetInsertPoint(end);
+  builder.CreateRetVoid();
+
+  return llvm::verifyFunction(*func, &llvm::errs());
+}
+
+bool genAddDenseIR(
+    llvm::Module& module,
+    const std::string& fn,
+    const std::vector<HashAggrJitSlot>& slots,
+    bool checkInputNulls) {
   ensureBuiltinDeclarations(module);
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
@@ -266,14 +362,18 @@ bool genAddDenseIR(llvm::Module& module, const std::string& fn, const std::vecto
       continue;
     }
 
-    auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
-    auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
-    auto* isNull = builder.CreateICmpNE(
-        builder.CreateCall(module.getFunction("jit_GetDecodedIsNull"), {decoded, row}),
-        builder.getInt8(0));
     auto* updateBlock = llvm::BasicBlock::Create(context, "slot_update", func, end);
     auto* nextBlock = llvm::BasicBlock::Create(context, "slot_next", func, end);
-    builder.CreateCondBr(isNull, nextBlock, updateBlock);
+    auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
+    auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
+    if (checkInputNulls) {
+      auto* isNull = builder.CreateICmpNE(
+          builder.CreateCall(module.getFunction("jit_GetDecodedIsNull"), {decoded, row}),
+          builder.getInt8(0));
+      builder.CreateCondBr(isNull, nextBlock, updateBlock);
+    } else {
+      builder.CreateBr(updateBlock);
+    }
 
     builder.SetInsertPoint(updateBlock);
     if (slot.kind == HashAggrJitKind::Count) {
@@ -335,7 +435,7 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 
 std::string HashAggrJitChunk::functionName() const {
   std::ostringstream out;
-  out << "jit_hashaggr_add_dense_v1_n" << slots_.size();
+  out << "jit_hashaggr_v2_n" << slots_.size();
   for (const auto& slot : slots_) {
     out << "_" << static_cast<int>(slot.kind) << hashAggrJitValueKindName(slot.inputKind)
         << hashAggrJitValueKindName(slot.accumulatorKind) << "o" << slot.offset
@@ -343,6 +443,14 @@ std::string HashAggrJitChunk::functionName() const {
         << (slot.countStar ? "s" : "x");
   }
   return out.str();
+}
+
+std::string HashAggrJitChunk::initFunctionName() const {
+  return functionName() + "_init";
+}
+
+std::string HashAggrJitChunk::addDenseNoNullFunctionName() const {
+  return functionName() + "_add_dense_no_null";
 }
 
 bool HashAggrJitChunk::codegen() {
@@ -353,15 +461,26 @@ bool HashAggrJitChunk::codegen() {
   if (jit == nullptr) {
     return false;
   }
-  const auto fn = functionName();
+  const auto moduleKey = functionName();
+  const auto initFn = initFunctionName();
+  const auto addFn = moduleKey + "_add_dense";
+  const auto addNoNullFn = addDenseNoNullFunctionName();
   module_ = jit->CompileModule(
-      [&](llvm::Module& module) { return genAddDenseIR(module, fn, slots_); }, fn);
+      [&](llvm::Module& module) {
+        return genInitIR(module, initFn, slots_) ||
+            genAddDenseIR(module, addFn, slots_, true) ||
+            genAddDenseIR(module, addNoNullFn, slots_, false);
+      },
+      moduleKey);
   if (!module_) {
     disabled_ = true;
     return false;
   }
-  addDense_ = reinterpret_cast<HashAggrJitAddDenseFunc>(module_->getFuncPtr(fn));
-  if (addDense_ == nullptr) {
+  init_ = reinterpret_cast<HashAggrJitInitFunc>(module_->getFuncPtr(initFn));
+  addDense_ = reinterpret_cast<HashAggrJitAddDenseFunc>(module_->getFuncPtr(addFn));
+  addDenseNoNull_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
+      module_->getFuncPtr(addNoNullFn));
+  if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr) {
     disabled_ = true;
     return false;
   }

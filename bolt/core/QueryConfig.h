@@ -657,6 +657,8 @@ class QueryConfig {
       "hashaggr.jit.min_fuse_width";
   static constexpr const char* kHashAggrJitMaxFuseWidth =
       "hashaggr.jit.max_fuse_width";
+  static constexpr const char* kHashAggrJitCompileMinCount =
+      "hashaggr.jit.compile_min_count";
 
   // expired, to deleted later
   static constexpr const char* kBoltJitEnabled = "bolt.jit.enabled";
@@ -1622,6 +1624,10 @@ class QueryConfig {
 
   int32_t hashAggrJitMaxFuseWidth() const {
     return get<int32_t>(kHashAggrJitMaxFuseWidth, 16);
+  }
+
+  int32_t hashAggrJitCompileMinCount() const {
+    return get<int32_t>(kHashAggrJitCompileMinCount, 3);
   }
 
   int exceptionTraceLevel() const {

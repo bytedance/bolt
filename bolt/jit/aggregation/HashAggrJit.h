@@ -41,6 +41,7 @@ struct HashAggrJitSlot {
 };
 
 using HashAggrJitAddDenseFunc = void (*)(char** groups, int32_t numRows, char** decodedInputs);
+using HashAggrJitInitFunc = void (*)(char** newGroups, int32_t numNewGroups);
 
 class HashAggrJitChunk {
  public:
@@ -56,7 +57,19 @@ class HashAggrJitChunk {
     disabled_ = true;
   }
 
-  void addDense(char** groups, int32_t numRows, char** decodedInputs) const {
+  void init(char** newGroups, int32_t numNewGroups) const {
+    init_(newGroups, numNewGroups);
+  }
+
+  void addDense(
+      char** groups,
+      int32_t numRows,
+      char** decodedInputs,
+      bool inputsMayHaveNulls) const {
+    if (!inputsMayHaveNulls && addDenseNoNull_ != nullptr) {
+      addDenseNoNull_(groups, numRows, decodedInputs);
+      return;
+    }
     addDense_(groups, numRows, decodedInputs);
   }
 
@@ -65,11 +78,15 @@ class HashAggrJitChunk {
   }
 
   std::string functionName() const;
+  std::string initFunctionName() const;
+  std::string addDenseNoNullFunctionName() const;
 
  private:
   std::vector<HashAggrJitSlot> slots_;
   CompiledModuleSP module_;
+  HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};
+  HashAggrJitAddDenseFunc addDenseNoNull_{nullptr};
   bool disabled_{false};
 };
 

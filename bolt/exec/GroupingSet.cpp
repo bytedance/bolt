@@ -928,6 +928,9 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
 
   const auto minFuseWidth = std::max<int32_t>(1, queryConfig_.hashAggrJitMinFuseWidth());
   const auto maxFuseWidth = std::max<int32_t>(1, queryConfig_.hashAggrJitMaxFuseWidth());
+  const auto compileMinCount =
+      std::max<int32_t>(1, queryConfig_.hashAggrJitCompileMinCount());
+  const auto minChunkWidth = std::max(minFuseWidth, compileMinCount);
   std::unordered_map<std::string, std::vector<jit::HashAggrJitSlot>> groups;
   for (auto i = 0; i < aggregates_.size(); ++i) {
     auto slot = makeHashAggrJitSlot(i, aggregates_[i]);
@@ -938,14 +941,14 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   }
 
   for (auto& [_, slots] : groups) {
-    if (slots.size() < minFuseWidth) {
+    if (slots.size() < minChunkWidth) {
       continue;
     }
     for (auto begin = 0; begin < slots.size(); begin += maxFuseWidth) {
       const auto end = std::min<int32_t>(begin + maxFuseWidth, slots.size());
       std::vector<jit::HashAggrJitSlot> chunkSlots(
           slots.begin() + begin, slots.begin() + end);
-      if (chunkSlots.size() < minFuseWidth) {
+      if (chunkSlots.size() < minChunkWidth) {
         continue;
       }
       jit::HashAggrJitChunk chunk(std::move(chunkSlots));
@@ -963,7 +966,7 @@ void GroupingSet::runHashAggrJitChunks(
     bool mayPushdown,
     std::vector<uint8_t>& jitExecuted) {
   if (hashAggrJitChunks_.empty() || hasSpilled() || bypassProbeHT_ ||
-      !activeRows_.isAllSelected()) {
+      supportRowBasedOutput_ || !activeRows_.isAllSelected()) {
     return;
   }
 
@@ -979,6 +982,7 @@ void GroupingSet::runHashAggrJitChunks(
     hashAggrJitDecodedPtrs_.assign(numSlots, nullptr);
 
     bool canRunChunk = true;
+    bool inputsMayHaveNulls = false;
     for (auto slotIndex = 0; slotIndex < numSlots; ++slotIndex) {
       const auto& slot = chunk.slots()[slotIndex];
       const auto& aggregate = aggregates_[slot.aggregateIndex];
@@ -1012,6 +1016,8 @@ void GroupingSet::runHashAggrJitChunks(
       }
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
+      inputsMayHaveNulls =
+          inputsMayHaveNulls || hashAggrJitDecoded_[slotIndex].mayHaveNulls();
       hashAggrJitDecodedPtrs_[slotIndex] = reinterpret_cast<char*>(&hashAggrJitDecoded_[slotIndex]);
     }
 
@@ -1020,12 +1026,18 @@ void GroupingSet::runHashAggrJitChunks(
     }
 
     if (!newGroups.empty()) {
-      for (const auto& slot : chunk.slots()) {
-        aggregates_[slot.aggregateIndex].function->initializeNewGroups(groups, newGroups);
+      hashAggrJitNewGroups_.resize(newGroups.size());
+      for (auto i = 0; i < newGroups.size(); ++i) {
+        hashAggrJitNewGroups_[i] = groups[newGroups[i]];
       }
+      chunk.init(hashAggrJitNewGroups_.data(), newGroups.size());
     }
 
-    chunk.addDense(groups, activeRows_.end(), hashAggrJitDecodedPtrs_.data());
+    chunk.addDense(
+        groups,
+        activeRows_.end(),
+        hashAggrJitDecodedPtrs_.data(),
+        inputsMayHaveNulls);
     for (const auto& slot : chunk.slots()) {
       jitExecuted[slot.aggregateIndex] = 1;
     }

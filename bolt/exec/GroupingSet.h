@@ -461,6 +461,7 @@ class GroupingSet {
   std::vector<DecodedVector> hashAggrJitDecoded_;
   std::vector<VectorPtr> hashAggrJitInputVectors_;
   std::vector<char*> hashAggrJitDecodedPtrs_;
+  std::vector<char*> hashAggrJitNewGroups_;
 #endif
 
   // True if any aggregate accumulator allocates memory outside RowContainer's
