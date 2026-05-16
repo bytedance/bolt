@@ -41,6 +41,14 @@ struct AggregateInfo {
   /// Instance of the Aggregate class.
   std::unique_ptr<Aggregate> function;
 
+  /// Function name used to create the aggregate. Kept for optional fast paths
+  /// such as aggregation JIT planning.
+  std::string name;
+
+  /// Raw input types from the plan. Kept to identify JIT-able numeric variants
+  /// without depending on concrete Aggregate subclasses.
+  std::vector<TypePtr> rawInputTypes;
+
   /// Indices of the input columns in the input RowVector.
   std::vector<column_index_t> inputs;
 

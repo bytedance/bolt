@@ -66,6 +66,18 @@ class Aggregate {
     return resultType_;
   }
 
+  int32_t accumulatorOffset() const {
+    return offset_;
+  }
+
+  int32_t accumulatorNullByte() const {
+    return nullByte_;
+  }
+
+  uint8_t accumulatorNullMask() const {
+    return nullMask_;
+  }
+
   // Returns the fixed number of bytes the accumulator takes on a group
   // row. Variable width accumulators will reference the variable
   // width part of the state from the fixed part.

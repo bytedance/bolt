@@ -39,6 +39,10 @@
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/VectorHasher.h"
+#ifdef ENABLE_BOLT_JIT
+#include "bolt/jit/aggregation/HashAggrJit.h"
+#endif
+#include "bolt/vector/DecodedVector.h"
 namespace bytedance::bolt::exec {
 
 class GroupingSet {
@@ -282,6 +286,16 @@ class GroupingSet {
   // index for this aggregation), otherwise it returns reference to activeRows_.
   const SelectivityVector& getSelectivityVector(size_t aggregateIndex) const;
 
+#ifdef ENABLE_BOLT_JIT
+  void maybeCreateHashAggrJitPlan();
+  void runHashAggrJitChunks(
+      char** groups,
+      folly::Range<const vector_size_t*> newGroups,
+      const RowVectorPtr& input,
+      bool mayPushdown,
+      std::vector<uint8_t>& jitExecuted);
+#endif
+
   // Checks if input will fit in the existing memory and increases reservation
   // if not. If reservation cannot be increased, spills enough to make 'input'
   // fit.
@@ -441,6 +455,13 @@ class GroupingSet {
   AggregationMasks masks_;
   std::unique_ptr<SortedAggregations> sortedAggregations_;
   std::vector<std::unique_ptr<DistinctAggregations>> distinctAggregations_;
+
+#ifdef ENABLE_BOLT_JIT
+  std::vector<jit::HashAggrJitChunk> hashAggrJitChunks_;
+  std::vector<DecodedVector> hashAggrJitDecoded_;
+  std::vector<VectorPtr> hashAggrJitInputVectors_;
+  std::vector<char*> hashAggrJitDecodedPtrs_;
+#endif
 
   // True if any aggregate accumulator allocates memory outside RowContainer's
   // HashStringAllocator (e.g. directly from MemoryPool). In that case,

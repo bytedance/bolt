@@ -652,6 +652,12 @@ class QueryConfig {
    */
   static constexpr const char* kJitLevel = "jit.level";
 
+  static constexpr const char* kHashAggrJitEnabled = "hashaggr.jit.enabled";
+  static constexpr const char* kHashAggrJitMinFuseWidth =
+      "hashaggr.jit.min_fuse_width";
+  static constexpr const char* kHashAggrJitMaxFuseWidth =
+      "hashaggr.jit.max_fuse_width";
+
   // expired, to deleted later
   static constexpr const char* kBoltJitEnabled = "bolt.jit.enabled";
   // For morsel-driven Bolt
@@ -1604,6 +1610,18 @@ class QueryConfig {
   bool enableJitRowCmpRow() const {
     int32_t flag = get<int32_t>(kJitLevel, -1);
     return flag & 1;
+  }
+
+  bool enableHashAggrJit() const {
+    return get<bool>(kHashAggrJitEnabled, false);
+  }
+
+  int32_t hashAggrJitMinFuseWidth() const {
+    return get<int32_t>(kHashAggrJitMinFuseWidth, 4);
+  }
+
+  int32_t hashAggrJitMaxFuseWidth() const {
+    return get<int32_t>(kHashAggrJitMaxFuseWidth, 16);
   }
 
   int exceptionTraceLevel() const {

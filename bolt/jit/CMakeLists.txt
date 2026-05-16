@@ -16,6 +16,7 @@
 bolt_add_library(
   bolt_thrustjit CompiledModule.cpp
                  ThrustJITv2.cpp
+                 aggregation/HashAggrJit.cpp
                  RowContainer/RowContainerCodeGenerator.cpp
                  RowContainer/RowEqVectorsCodeGenerator.cpp
 )

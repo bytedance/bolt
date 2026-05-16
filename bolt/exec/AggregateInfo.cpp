@@ -71,6 +71,8 @@ std::vector<AggregateInfo> toAggregateInfo(
   for (auto i = 0; i < numAggregates; i++) {
     const auto& aggregate = aggregationNode.aggregates()[i];
     AggregateInfo info;
+    info.name = aggregate.call->name();
+    info.rawInputTypes = aggregate.rawInputTypes;
     // Populate input.
     auto& channels = info.inputs;
     auto& constants = info.constantInputs;
