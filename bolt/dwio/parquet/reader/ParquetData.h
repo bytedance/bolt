@@ -175,8 +175,14 @@ class ParquetData : public dwio::common::FormatData {
       const uint64_t* FOLLY_NULLABLE incomingNulls,
       BufferPtr& nulls,
       bool nullsOnly = false) override {
+    // If the query accesses only nulls, read the nulls from the pages in range.
+    // If nulls are preread, return those minus any skipped.
     if (presetNulls_) {
       const int32_t available = presetNullsSize_ - presetNullsConsumed_;
+      // Tolerate parquet writer defects where an inner column's rep/def
+      // level stream is shorter than what the parent repeated reader
+      // expects. Pad the missing tail positions with null bits (length 0
+      // entries) so reading does not crash.
       const int32_t toCopy = std::min<int32_t>(numValues, available);
 
       if (!presetNullsConsumed_ && numValues == presetNullsSize_) {
@@ -204,6 +210,8 @@ class ParquetData : public dwio::common::FormatData {
       readNullsOnly(numValues, nulls);
       return;
     }
+    // There are no column-level nulls in Parquet, only page-level ones, so this
+    // is always non-null.
     nulls = nullptr;
   }
 
