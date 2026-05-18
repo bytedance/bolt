@@ -33,6 +33,7 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
