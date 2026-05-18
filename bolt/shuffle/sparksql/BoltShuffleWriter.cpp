@@ -869,8 +869,8 @@ arrow::Status BoltShuffleWriter::splitRowVector(
           for (auto pid = 0; pid < numPartitions_; ++pid) {
             auto* addr = partitionFixedWidthValueAddrs_[col][pid];
             if (addr != nullptr && valueWidth > 0) {
-              addr += static_cast<uint64_t>(partitionBufferBase_[pid]) *
-                  valueWidth;
+              addr +=
+                  static_cast<uint64_t>(partitionBufferBase_[pid]) * valueWidth;
             }
             currentFixedWidthValueAddrs[col][pid] = addr;
           }
