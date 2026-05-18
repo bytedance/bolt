@@ -1061,6 +1061,13 @@ TEST_F(VectorTest, createOpaque) {
   EXPECT_EQ(NonPOD::alive, 0);
 }
 
+TEST_F(VectorTest, makeFlatVectorSingleElementInitializerList) {
+  auto vector = makeFlatVector<int64_t>({0});
+
+  ASSERT_EQ(vector->size(), 1);
+  EXPECT_EQ(vector->valueAt(0), 0);
+}
+
 TEST_F(VectorTest, getOrCreateEmpty) {
   auto empty = BaseVector::getOrCreateEmpty(nullptr, VARCHAR(), pool());
   EXPECT_NE(empty, nullptr);
