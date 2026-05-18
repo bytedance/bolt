@@ -2427,8 +2427,7 @@ TEST_F(ParquetReaderTest, readNestedMap) {
       TypeKind::BIGINT);
 
   auto rowType =
-      ROW({"id", "data"},
-          {BIGINT(), MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()))});
+      ROW({"id", "data"}, {BIGINT(), MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()))});
   auto rowReaderOpts = getReaderOpts(rowType);
   rowReaderOpts.setScanSpec(makeScanSpec(rowType));
   auto rowReader = reader->createRowReader(rowReaderOpts);
@@ -2469,7 +2468,8 @@ TEST_F(ParquetReaderTest, readNestedMap) {
 
   // Helper: collect outer entries of a row as (key, [(innerKey, innerValue)]).
   auto collectOuter = [&](vector_size_t rowIdx) {
-    std::vector<std::pair<std::string, std::vector<std::pair<std::string, int64_t>>>>
+    std::vector<
+        std::pair<std::string, std::vector<std::pair<std::string, int64_t>>>>
         out;
     auto offset = outerMap->offsetAt(rowIdx);
     auto size = outerMap->sizeAt(rowIdx);
@@ -2549,8 +2549,7 @@ TEST_F(ParquetReaderTest, readNestedMap) {
 TEST_F(ParquetReaderTest, repeatedLengthsTolerateShortBuffer) {
   bytedance::bolt::parquet::RepeatedLengths repeatedLengths;
   // Underlying buffer has only 3 lengths.
-  auto lengthsBuffer =
-      AlignedBuffer::allocate<int32_t>(3, leafPool_.get());
+  auto lengthsBuffer = AlignedBuffer::allocate<int32_t>(3, leafPool_.get());
   auto* rawLengths = lengthsBuffer->asMutable<int32_t>();
   rawLengths[0] = 11;
   rawLengths[1] = 22;

@@ -65,8 +65,7 @@ class RepeatedLengths {
           toCopy * sizeof(int32_t));
     }
     if (toCopy < numLengths) {
-      std::memset(
-          lengths + toCopy, 0, (numLengths - toCopy) * sizeof(int32_t));
+      std::memset(lengths + toCopy, 0, (numLengths - toCopy) * sizeof(int32_t));
     }
     nextLengthIndex_ += toCopy;
   }
