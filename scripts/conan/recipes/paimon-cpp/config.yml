@@ -13,5 +13,5 @@
 # limitations under the License.
 
 versions:
-  "0.0.3-bolt":
+  "0.0.4-bolt":
     folder: all

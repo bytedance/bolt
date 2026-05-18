@@ -64,7 +64,6 @@ class PaimonCppConan(ConanFile):
         # Core dependencies
         self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
         self.requires("fmt/9.0.0")
-        self.requires("onetbb/2021.12.0")
         self.requires("glog/0.7.1")
         self.requires("rapidjson/cci.20250205", force=True)
         self.requires("zlib/1.2.13")
@@ -132,13 +131,6 @@ class PaimonCppConan(ConanFile):
 
     def configure(self):
         """Adjust transitive dependency options required by recipes."""
-        # Ensure hwloc is shared to satisfy onetbb's constraint
-        try:
-            self.options["hwloc/*"].shared = True
-        except Exception:
-            # If not present in graph yet, Conan will still apply the pattern
-            # when hwloc enters via transitive requirements.
-            pass
 
         arrow_simd_level = "default"
         if str(self.settings.arch) in ["x86", "x86_64"]:
@@ -192,7 +184,24 @@ class PaimonCppConan(ConanFile):
 
         # roaring_bitmap and xxhash are static libs linked into paimon;
         # consumers linking the static paimon lib must also link these.
-        core.requires = ["roaring_bitmap", "xxhash"]
+        core.requires = [
+            "tbb",
+            "roaring_bitmap",
+            "xxhash",
+            "arrow::arrow",
+            "fmt::fmt",
+            "glog::glog",
+            "rapidjson::rapidjson",
+            "zstd::zstd",
+            "lz4::lz4",
+            "zlib::zlib",
+            "snappy::snappy",
+        ]
+
+        # TBB is built from source via ExternalProject (ThirdpartyToolchain)
+        tbb_comp = self.cpp_info.components["tbb"]
+        tbb_comp.libs = ["tbb"]
+        tbb_comp.set_property("cmake_target_name", "Paimon::tbb")
 
         # Internal static libraries (no headers to export — included via paimon's include/)
         rb = self.cpp_info.components["roaring_bitmap"]

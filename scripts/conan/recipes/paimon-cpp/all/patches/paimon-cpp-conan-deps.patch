@@ -11,7 +11,7 @@ index 57e0078..a9bcc25 100644
 +CMakeUserPresets.json
 +.clangd
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 3f09d15..213a71e 100644
+index 3f09d15..8058d0c 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -275,8 +275,20 @@ include_directories(src)
@@ -36,7 +36,7 @@ index 3f09d15..213a71e 100644
 
  add_custom_target(paimon_dependencies)
 
-@@ -289,6 +301,15 @@ set(PAIMON_SHARED_PRIVATE_LINK_LIBS ${PAIMON_STATIC_LINK_LIBS})
+@@ -289,6 +301,17 @@ set(PAIMON_SHARED_PRIVATE_LINK_LIBS ${PAIMON_STATIC_LINK_LIBS})
  add_subdirectory(third_party/roaring_bitmap EXCLUDE_FROM_ALL)
  add_subdirectory(third_party/xxhash EXCLUDE_FROM_ALL)
 
@@ -48,11 +48,13 @@ index 3f09d15..213a71e 100644
 +        DESTINATION ${CMAKE_INSTALL_LIBDIR})
 +install(FILES $<TARGET_FILE:xxhash>
 +        DESTINATION ${CMAKE_INSTALL_LIBDIR})
++install(FILES $<TARGET_FILE:tbb>
++        DESTINATION ${CMAKE_INSTALL_LIBDIR})
 +
  if(PAIMON_ENABLE_LANCE)
      add_subdirectory(third_party/lance EXCLUDE_FROM_ALL)
      link_directories(third_party/lance/lance_lib/target/release)
-@@ -341,11 +362,50 @@ if(PAIMON_ENABLE_LUMINA)
+@@ -341,11 +364,49 @@ if(PAIMON_ENABLE_LUMINA)
      include_directories("${CMAKE_SOURCE_DIR}/third_party/lumina/include")
  endif()
 
@@ -60,9 +62,6 @@ index 3f09d15..213a71e 100644
 -include_directories(SYSTEM ${TBB_INCLUDE_DIR})
 +if(ARROW_INCLUDE_DIR)
 +  include_directories(SYSTEM ${ARROW_INCLUDE_DIR})
-+endif()
-+if(TBB_INCLUDE_DIR)
-+  include_directories(SYSTEM ${TBB_INCLUDE_DIR})
 +endif()
 +if(GLOG_INCLUDE_DIR)
 +  include_directories(SYSTEM ${GLOG_INCLUDE_DIR})
@@ -86,12 +85,12 @@ index 3f09d15..213a71e 100644
 +if(ZLIB_INCLUDE_DIR)
 +  include_directories(SYSTEM ${ZLIB_INCLUDE_DIR})
 +endif()
++
++# Include toolchain macros; guarded builds inside the module.
++include(ThirdpartyToolchain)
 
 -include_directories(SYSTEM ${GLOG_INCLUDE_DIR})
 -add_compile_definitions("GLOG_USE_GLOG_EXPORT")
-+# Include toolchain macros; guarded builds inside the module.
-+include(ThirdpartyToolchain)
-+
 +# If using Conan but ORC is enabled and not provided by Conan, build ORC from source.
 +if(PAIMON_USE_CONAN_DEPS AND PAIMON_ENABLE_ORC AND NOT TARGET orc::orc)
 +  message(STATUS "ORC not found via Conan; falling back to source build")
@@ -104,15 +103,17 @@ index 3f09d15..213a71e 100644
 +  message(STATUS "Avro not found via Conan; falling back to source build")
 +  build_avro()
 +endif()
++
++include_directories(SYSTEM ${TBB_INCLUDE_DIR})
 
  set(THREADS_PREFER_PTHREAD_FLAG ON)
  find_package(Threads REQUIRED)
 diff --git a/cmake_modules/PaimonConanDeps.cmake b/cmake_modules/PaimonConanDeps.cmake
 new file mode 100644
-index 0000000..8462b02
+index 0000000..e9318f6
 --- /dev/null
 +++ b/cmake_modules/PaimonConanDeps.cmake
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,174 @@
 +# Copyright 2024-present Alibaba Inc.
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -141,7 +142,6 @@ index 0000000..8462b02
 +    find_package(Arrow QUIET CONFIG)
 +    find_package(arrow QUIET CONFIG)
 +    find_package(Parquet QUIET CONFIG)
-+    find_package(TBB QUIET CONFIG)
 +    find_package(fmt)
 +    find_package(glog QUIET CONFIG)
 +    find_package(RapidJSON REQUIRED CONFIG)
@@ -181,7 +181,6 @@ index 0000000..8462b02
 +    # These are set by the *-data.cmake files that find_package() includes.
 +    # Note: variable names use the Conan package name (e.g. onetbb not TBB).
 +    _paimon_conan_var(ARROW_INCLUDE_DIR  arrow_INCLUDE_DIRS)
-+    _paimon_conan_var(TBB_INCLUDE_DIR    onetbb_INCLUDE_DIRS)
 +    _paimon_conan_var(FMT_INCLUDE_DIR    fmt_INCLUDE_DIRS)
 +    _paimon_conan_var(GLOG_INCLUDE_DIR   glog_INCLUDE_DIRS)
 +    _paimon_conan_var(LZ4_INCLUDE_DIR    lz4_INCLUDE_DIRS)
@@ -212,14 +211,6 @@ index 0000000..8462b02
 +        add_library(parquet INTERFACE IMPORTED)
 +        if(TARGET Parquet::parquet)
 +            target_link_libraries(parquet INTERFACE Parquet::parquet)
-+        endif()
-+    endif()
-+
-+    if(NOT TARGET tbb)
-+        add_library(tbb INTERFACE IMPORTED)
-+        if(TARGET TBB::tbb)
-+            target_link_libraries(tbb INTERFACE TBB::tbb)
-+            target_include_directories(tbb INTERFACE ${TBB_INCLUDE_DIR})
 +        endif()
 +    endif()
 +
@@ -298,7 +289,7 @@ index 0000000..8462b02
 +
 +endmacro()
 diff --git a/cmake_modules/ThirdpartyToolchain.cmake b/cmake_modules/ThirdpartyToolchain.cmake
-index 9e3c47d..d286951 100644
+index 9e3c47d..ba7695c 100644
 --- a/cmake_modules/ThirdpartyToolchain.cmake
 +++ b/cmake_modules/ThirdpartyToolchain.cmake
 @@ -468,7 +468,8 @@ macro(build_jieba)
@@ -508,7 +499,7 @@ index 9e3c47d..d286951 100644
 -build_zlib()
 -build_lz4()
 -build_arrow()
--build_tbb()
+ build_tbb()
 -build_glog()
 -
 -if(PAIMON_ENABLE_AVRO)
@@ -535,7 +526,6 @@ index 9e3c47d..d286951 100644
 +    build_zlib()
 +    build_lz4()
 +    build_arrow()
-+    build_tbb()
 +    build_glog()
 +
 +    if(PAIMON_ENABLE_AVRO)
@@ -557,10 +547,10 @@ index 9e3c47d..d286951 100644
  endif()
 diff --git a/conanfile.py b/conanfile.py
 new file mode 100644
-index 0000000..81992cb
+index 0000000..fd74f5d
 --- /dev/null
 +++ b/conanfile.py
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,266 @@
 +from conan import ConanFile
 +from conan.errors import ConanInvalidConfiguration
 +from conan.tools.cmake import CMake, CMakeToolchain, CMakeDeps, cmake_layout
@@ -571,7 +561,7 @@ index 0000000..81992cb
 +
 +class PaimonCppConan(ConanFile):
 +    name = "paimon-cpp"
-+    version = "0.1.0-bolt"
++    version = "0.0.3-bolt"
 +    package_type = "library"
 +    license = "Apache-2.0"
 +    url = "https://github.com/alibaba/paimon-cpp"  # informational
@@ -611,7 +601,6 @@ index 0000000..81992cb
 +        # Core dependencies
 +        self.requires("arrow/15.0.1-oss", transitive_headers=True, transitive_libs=True)
 +        self.requires("fmt/9.0.0")
-+        self.requires("onetbb/2021.12.0")
 +        self.requires("glog/0.7.1")
 +        self.requires("rapidjson/cci.20250205", force=True)
 +        self.requires("zlib/1.2.13")
@@ -696,18 +685,7 @@ index 0000000..81992cb
 +
 +    def configure(self):
 +        """Adjust transitive dependency options required by recipes.
-+
-+        onetbb requires hwloc to be built as shared in your remote. Enforce it
-+        here to avoid Invalid configuration errors during resolution.
 +        """
-+        # Ensure hwloc is shared to satisfy onetbb's constraint
-+        try:
-+            self.options["hwloc/*"].shared = True
-+        except Exception:
-+            # If not present in graph yet, Conan will still apply the pattern
-+            # when hwloc enters via transitive requirements.
-+            pass
-+
 +        arrow_simd_level = "default"
 +        if str(self.settings.arch) in ["x86", "x86_64"]:
 +            arrow_simd_level = "avx2"
@@ -749,7 +727,7 @@ index 0000000..81992cb
 +        core.includedirs = ["include"]
 +        # roaring_bitmap and xxhash are static libs linked into paimon;
 +        # consumers linking the static paimon lib must also link these.
-+        core.requires = ["roaring_bitmap", "xxhash"]
++        core.requires = ["tbb", "roaring_bitmap", "xxhash", "arrow::arrow", "fmt::fmt", "glog::glog", "rapidjson::rapidjson", "zstd::zstd", "lz4::lz4", "zlib::zlib", "snappy::snappy"]
 +
 +        # Internal static libraries (no headers to export — included via paimon's include/)
 +        rb = self.cpp_info.components["roaring_bitmap"]
@@ -759,6 +737,11 @@ index 0000000..81992cb
 +        xh = self.cpp_info.components["xxhash"]
 +        xh.libs = ["xxhash"]
 +        xh.set_property("cmake_target_name", "Paimon::xxhash")
++
++        # TBB is built from source via ExternalProject (ThirdpartyToolchain)
++        tbb_comp = self.cpp_info.components["tbb"]
++        tbb_comp.libs = ["tbb"]
++        tbb_comp.set_property("cmake_target_name", "Paimon::tbb")
 +
 +        # Many targets link libdl + pthread somewhere in the chain on Linux.
 +        if str(self.settings.os) == "Linux":
