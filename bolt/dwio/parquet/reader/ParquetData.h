@@ -181,6 +181,7 @@ class ParquetData : public dwio::common::FormatData {
 
       if (!presetNullsConsumed_ && numValues == presetNullsSize_) {
         nulls = std::move(presetNulls_);
+        presetNullsConsumed_ = numValues;
       } else {
         dwio::common::ensureCapacity<bool>(nulls, numValues, &pool_);
         auto bits = nulls->asMutable<uint64_t>();
@@ -195,11 +196,15 @@ class ParquetData : public dwio::common::FormatData {
         if (numValues > available) {
           bits::fillBits(bits, toCopy, numValues, bits::kNull);
         }
+        presetNullsConsumed_ += toCopy;
       }
-      presetNullsConsumed_ += toCopy;
       return;
     }
-    nullsOnly ? readNullsOnly(numValues, nulls) : nulls = nullptr;
+    if (nullsOnly) {
+      readNullsOnly(numValues, nulls);
+      return;
+    }
+    nulls = nullptr;
   }
 
   uint64_t skipNulls(uint64_t numValues, bool nullsOnly) override {
