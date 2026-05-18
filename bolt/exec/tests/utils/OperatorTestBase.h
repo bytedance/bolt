@@ -100,6 +100,11 @@ class OperatorTestBase : public testing::Test,
       const std::vector<RowVectorPtr>& vectors,
       std::shared_ptr<dwrf::Config> config = nullptr);
 
+  void writeToFile(
+    const std::string& path,
+    const VectorPtr& vector,
+    memory::MemoryPool* pool);
+
   /// Generates 'numVectors' RowVectors of 'rowType', each containing
   /// 'rowsPerVector' rows of random data drawn from BatchMaker.
   std::vector<RowVectorPtr> makeVectors(

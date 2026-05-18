@@ -36,8 +36,6 @@
 #include "bolt/common/memory/SharedArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/FileSink.h"
-#include "bolt/exec/Exchange.h"
-#include "bolt/exec/OutputBufferManager.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/dwrf/common/Config.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
@@ -205,6 +203,21 @@ void OperatorTestBase::writeToFile(
   for (const auto& vector : vectors) {
     writer.write(vector);
   }
+  writer.close();
+}
+
+void OperatorTestBase::writeToFile(
+    const std::string& path,
+    const VectorPtr& vector,
+    memory::MemoryPool* pool) {
+  bolt::dwrf::WriterOptions options;
+  options.schema = vector->type();
+  options.memoryPool = pool;
+  auto writeFile = std::make_unique<LocalWriteFile>(path, true, false);
+  auto sink =
+      std::make_unique<dwio::common::WriteFileSink>(std::move(writeFile), path);
+  bytedance::bolt::dwrf::Writer writer{std::move(sink), options};
+  writer.write(vector);
   writer.close();
 }
 

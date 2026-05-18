@@ -45,9 +45,6 @@ class AggregationTestBase : public exec::test::OperatorTestBase {
   static void SetUpTestCase();
   static void TearDownTestCase();
 
-  std::vector<RowVectorPtr>
-  makeVectors(const RowTypePtr& rowType, vector_size_t size, int numVectors);
-
   /// Generates a variety of logically equivalent plans to compute aggregations
   /// using combinations of partial, final, single, and intermediate
   /// aggregations with and without local exchanges. Runs all these plans and
