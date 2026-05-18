@@ -334,8 +334,7 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::vector<uint8_t*>& dstNulls,
       int colId,
       const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
+      const std::string& funcLine);
 
   virtual arrow::Status init();
 
@@ -377,12 +376,10 @@ class BoltShuffleWriter : public ShuffleWriter {
       const bytedance::bolt::RowVector& rv,
       T& valueAddrs);
 
-  template <typename T>
   arrow::Status checkFixedColumnCopyValue(
       const bytedance::bolt::RowVector& rv,
-      T& fixedWidthValueAddrs,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition = false);
+      const std::vector<std::vector<uint8_t*>>& fixedWidthValueAddrs,
+      const std::string& funcLine);
 
   template <typename Fn>
   arrow::Status withShuffleCheck(
@@ -412,8 +409,7 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::vector<uint8_t*>& dstNulls,
       int colId,
       const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
+      const std::string& funcLine);
 
   template <typename T>
   void checkCopyValueTyped(
@@ -423,8 +419,7 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::vector<uint8_t*>& dstNulls,
       int colId,
       const std::string& name,
-      const std::string& funcLine,
-      bool valueAddrsPointToWritePosition);
+      const std::string& funcLine);
 
   arrow::Result<FixedColumnCheckFunction> createFixedColumnCheckFunction(
       arrow::Type::type typeId) const;
@@ -694,6 +689,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   std::vector<std::vector<uint8_t*>> partitionValidityAddrs_;
   // Used by fixed-width types. Stores raw pointers of partition buffers.
   std::vector<std::vector<uint8_t*>> partitionFixedWidthValueAddrs_;
+  // Byte width of each fixed-width column's single value. 0 for boolean.
+  std::vector<uint16_t> fixedColValueSize_;
   std::vector<FixedColumnCheckFunction> fixedWidthCheckFunctions_;
   std::vector<std::string> fixedWidthTypeNames_;
   // Used by binary types. Stores raw pointers and metadata of partition
