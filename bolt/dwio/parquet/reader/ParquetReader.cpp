@@ -69,6 +69,19 @@ namespace {
   }
   return algo;
 }
+
+bool isParquetReservedKeyword(
+    std::string_view name,
+    uint32_t parentSchemaIdx,
+    uint32_t curSchemaIdx) {
+  // We skip this for the top-level nodes.
+  return (
+      (parentSchemaIdx == 0 && curSchemaIdx == 0) ||
+      (parentSchemaIdx != 0 &&
+       (name == "key_value" || name == "key" || name == "value" ||
+        name == "list" || name == "element" || name == "bag" ||
+        name == "array_element")));
+}
 } // namespace
 
 /// Metadata and options for reading Parquet.
@@ -166,7 +179,8 @@ class ReaderBase {
       uint32_t& schemaIdx,
       uint32_t& columnIdx,
       const TypePtr& requestedType,
-      const TypePtr& parentRequestedType) const;
+      const TypePtr& parentRequestedType,
+      std::vector<std::string>& columnNames) const;
 
   TypePtr convertType(
       const thrift::SchemaElement& schemaElement,
@@ -374,6 +388,7 @@ void ReaderBase::initializeSchema() {
   uint32_t schemaIdx = 0;
   uint32_t columnIdx = 0;
   uint32_t maxSchemaElementIdx = fileMetaData_->schema.size() - 1;
+  std::vector<std::string> columnNames;
   // Setting the parent schema index of the root("hive_schema") to be 0, which
   // is the root itself. This is ok because it's never required to check the
   // parent of the root in getParquetColumnInfo().
@@ -385,7 +400,8 @@ void ReaderBase::initializeSchema() {
       schemaIdx,
       columnIdx,
       options_.getFileSchema(),
-      nullptr);
+      nullptr,
+      columnNames);
   schema_ = createRowType(
       schemaWithId_->getChildren(), isFileColumnNamesReadAsLowerCase());
 
@@ -403,7 +419,8 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
     uint32_t& schemaIdx,
     uint32_t& columnIdx,
     const TypePtr& requestedType,
-    const TypePtr& parentRequestedType) const {
+    const TypePtr& parentRequestedType,
+    std::vector<std::string>& columnNames) const {
   BOLT_CHECK(fileMetaData_ != nullptr);
   BOLT_CHECK_LT(schemaIdx, fileMetaData_->schema.size());
 
@@ -433,6 +450,15 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
   if (isFileColumnNamesReadAsLowerCase()) {
     folly::toLowerAscii(name);
   }
+
+  if (!options_.isUseColumnNamesForColumnMapping() &&
+      options_.getFileSchema()) {
+    if (isParquetReservedKeyword(name, parentSchemaIdx, curSchemaIdx)) {
+      columnNames.push_back(name);
+    }
+  } else {
+    columnNames.push_back(name);
+  }
   if (!schemaElement.__isset.type) { // inner node
     BOLT_CHECK(
         schemaElement.__isset.num_children && schemaElement.num_children > 0,
@@ -452,11 +478,39 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
       }
 
       TypePtr childRequestedType = nullptr;
-      if (requestedType && requestedType->isRow()) {
-        auto fileTypeIdx =
-            requestedType->asRow().getChildIdxIfExists(childName);
-        if (fileTypeIdx.has_value()) {
-          childRequestedType = requestedType->asRow().childAt(*fileTypeIdx);
+      bool followChild = true;
+
+      {
+        RowTypePtr requestedRowType = nullptr;
+        if (requestedType) {
+          if (requestedType->isRow()) {
+            requestedRowType =
+                std::dynamic_pointer_cast<const RowType>(requestedType);
+          } else if (
+              requestedType->isArray() && isRepeated &&
+              requestedType->asArray().elementType()->isRow()) {
+            // Handle the case of unannotated array of structs (repeated group
+            // without LIST annotation).
+            requestedRowType = std::dynamic_pointer_cast<const RowType>(
+                requestedType->asArray().elementType());
+          }
+        }
+
+        if (requestedRowType) {
+          if (options_.isUseColumnNamesForColumnMapping()) {
+            auto fileTypeIdx = requestedRowType->getChildIdxIfExists(childName);
+            if (fileTypeIdx.has_value()) {
+              childRequestedType = requestedRowType->childAt(*fileTypeIdx);
+            }
+          } else {
+            // Handle schema evolution.
+            if (i < requestedRowType->size()) {
+              columnNames.push_back(requestedRowType->nameOf(i));
+              childRequestedType = requestedRowType->childAt(i);
+            } else {
+              followChild = false;
+            }
+          }
         }
       }
 
@@ -475,18 +529,23 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
         }
       }
 
-      auto child = getParquetColumnInfo(
-          maxSchemaElementIdx,
-          maxRepeat,
-          maxDefine,
-          curSchemaIdx,
-          schemaIdx,
-          columnIdx,
-          childRequestedType,
-          requestedType);
-      children.push_back(std::move(child));
+      if (followChild) {
+        auto child = getParquetColumnInfo(
+            maxSchemaElementIdx,
+            maxRepeat,
+            maxDefine,
+            curSchemaIdx,
+            schemaIdx,
+            columnIdx,
+            childRequestedType,
+            requestedType,
+            columnNames);
+        children.push_back(std::move(child));
+      }
     }
     BOLT_CHECK(!children.empty());
+
+    name = columnNames.at(curSchemaIdx);
 
     // Detect Spark 4.0 Variant structure: STRUCT<value BINARY, metadata BINARY>
     // Promote only when the requested logical type explicitly asks for
@@ -747,7 +806,7 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
               isOptional,
               isRepeated);
         } else {
-          // Row type
+          // Row type in a repeated field without LIST/MAP annotation.
           // To support list backward compatibility, need create a new row type
           // instance and set all the fields as its children.
           auto childrenRowType =
@@ -806,6 +865,7 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
       }
     }
   } else { // leaf node
+    name = columnNames.at(curSchemaIdx);
     const auto boltType = convertType(schemaElement, requestedType);
     int32_t precision =
         schemaElement.__isset.precision ? schemaElement.precision : 0;

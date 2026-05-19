@@ -1290,7 +1290,6 @@ TEST_F(ParquetReaderTest, readEncryptedParquetWithProjection) {
   const std::string sample(getExampleFilePath("encrypted_sample.parquet"));
 
   bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
-  readerOptions.setFileSchema(projectedType);
   auto reader = createReader(sample, readerOptions);
 
   auto rowReaderOpts = getReaderOpts(projectedType);
