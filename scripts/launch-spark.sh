@@ -127,7 +127,7 @@ EOF
 # Toolchain setup.
 # ----------------------------------------------------------------------------
 _is_jdk17() {
-  [[ -x "$1/bin/java" ]] || return 1
+  [[ -x "$1/bin/java" && -x "$1/bin/javac" ]] || return 1
   "$1/bin/java" -version 2>&1 | head -n1 | grep -qE 'version "17[. ]'
 }
 detect_jdk17() {
