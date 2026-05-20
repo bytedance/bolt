@@ -72,7 +72,7 @@ namespace {
 
 // Schema-mismatch checks for ReaderBase::convertType.
 constexpr const char* kTypeMappingErrorFmtStr =
-    "Parquet column cannot be converted. Column: [{}], Expected: {}";
+    "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
 
 // Checks whether 'type' is an integer type at least as wide as
 // 'minTypeKind'. Used to gate integer widening:
@@ -1001,11 +1001,13 @@ TypePtr ReaderBase::convertType(
         const bool unannotatedArrayMatch = !strictMatch && isRepeated &&
             requestedType->isArray() &&
             isCompatibleFunc(requestedType->asArray().elementType());
-        BOLT_USER_CHECK(
-            strictMatch || unannotatedArrayMatch,
-            kTypeMappingErrorFmtStr,
-            schemaElement.name,
-            requestedType->toString());
+        if (!(strictMatch || unannotatedArrayMatch)) {
+          BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
+              kTypeMappingErrorFmtStr,
+              schemaElement.name,
+              schemaElement.type,
+              mapTypeKindToName(requestedType->kind())));
+        }
         if (unannotatedArrayMatch) {
           LOG_FIRST_N(INFO, 8)
               << "Reading unannotated array (legacy Parquet 1.0): column '"
