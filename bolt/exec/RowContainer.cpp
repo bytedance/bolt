@@ -37,6 +37,7 @@
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/vector/DecodedVector.h"
+#include "bolt/vector/FlatVector.h"
 
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
@@ -1746,6 +1747,24 @@ __attribute__((__visibility__("default"))) double jit_GetDecodedValueDouble(
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)
       ->valueAt<double>(index);
 }
+
+__attribute__((__visibility__("default"))) double
+jit_GetDecodedRowFieldDouble(char* vec, int32_t index, int32_t field) {
+  auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
+  auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
+  bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
+  return fieldDecoded.valueAt<double>(decoded->index(index));
+}
+
+__attribute__((__visibility__("default"))) int64_t jit_GetDecodedRowFieldI64(
+    char* vec,
+    int32_t index,
+    int32_t field) {
+  auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
+  auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
+  bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
+  return fieldDecoded.valueAt<int64_t>(decoded->index(index));
+}
 // get decoded value string
 __attribute__((__visibility__("default"))) const char*
 jit_GetDecodedValueStringView(char* vec, int32_t index) {
@@ -1772,6 +1791,72 @@ __attribute__((__visibility__("default"))) int8_t jit_GetDecodedIsNull(
     int32_t index) {
   return reinterpret_cast<bytedance::bolt::DecodedVector*>(vec)->isNullAt(
       index);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrResizeVector(
+    char* vector,
+    int32_t size) {
+  reinterpret_cast<bytedance::bolt::BaseVector*>(vector)->resize(size);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatI8(
+    char* vector,
+    int32_t row,
+    int8_t value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<int8_t>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatI16(
+    char* vector,
+    int32_t row,
+    int16_t value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<int16_t>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatI32(
+    char* vector,
+    int32_t row,
+    int32_t value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<int32_t>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatI64(
+    char* vector,
+    int32_t row,
+    int64_t value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<int64_t>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatFloat(
+    char* vector,
+    int32_t row,
+    float value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<float>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrSetFlatDouble(
+    char* vector,
+    int32_t row,
+    double value,
+    int8_t isNull) {
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<double>>();
+  isNull ? flat->setNull(row, true) : flat->set(row, value);
 }
 
 __attribute__((__visibility__("default"))) int8_t jit_ComplexTypeRowEqVectors(

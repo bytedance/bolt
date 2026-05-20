@@ -294,6 +294,11 @@ class GroupingSet {
       const RowVectorPtr& input,
       bool mayPushdown,
       std::vector<uint8_t>& jitExecuted);
+  void runHashAggrJitExtractChunks(
+      folly::Range<char**> groups,
+      const RowVectorPtr& result,
+      int32_t aggregateOutputOffset,
+      std::vector<uint8_t>& jitExtracted);
 #endif
 
   // Checks if input will fit in the existing memory and increases reservation
@@ -462,6 +467,7 @@ class GroupingSet {
   std::vector<VectorPtr> hashAggrJitInputVectors_;
   std::vector<char*> hashAggrJitDecodedPtrs_;
   std::vector<char*> hashAggrJitNewGroups_;
+  std::vector<char*> hashAggrJitResultPtrs_;
 #endif
 
   // True if any aggregate accumulator allocates memory outside RowContainer's

@@ -25,6 +25,7 @@ enum class HashAggrJitValueKind : uint8_t {
   Int16,
   Int32,
   Int64,
+  Int128,
   Float,
   Double,
 };
@@ -38,10 +39,13 @@ struct HashAggrJitSlot {
   int32_t nullByte;
   uint8_t nullMask;
   bool countStar{false};
+  bool mergeInput{false};
+  bool decimal{false};
 };
 
 using HashAggrJitAddDenseFunc = void (*)(char** groups, int32_t numRows, char** decodedInputs);
 using HashAggrJitInitFunc = void (*)(char** newGroups, int32_t numNewGroups);
+using HashAggrJitExtractFunc = void (*)(char** groups, int32_t numGroups, char** resultVectors);
 
 class HashAggrJitChunk {
  public:
@@ -52,6 +56,8 @@ class HashAggrJitChunk {
   bool enabled() const {
     return addDense_ != nullptr && !disabled_;
   }
+
+  bool canExtract(bool partialOutput) const;
 
   void disable() {
     disabled_ = true;
@@ -73,6 +79,10 @@ class HashAggrJitChunk {
     addDense_(groups, numRows, decodedInputs);
   }
 
+  void extract(char** groups, int32_t numGroups, char** resultVectors) const {
+    extract_(groups, numGroups, resultVectors);
+  }
+
   const std::vector<HashAggrJitSlot>& slots() const {
     return slots_;
   }
@@ -80,6 +90,7 @@ class HashAggrJitChunk {
   std::string functionName() const;
   std::string initFunctionName() const;
   std::string addDenseNoNullFunctionName() const;
+  std::string extractFunctionName() const;
 
  private:
   std::vector<HashAggrJitSlot> slots_;
@@ -87,6 +98,7 @@ class HashAggrJitChunk {
   HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};
   HashAggrJitAddDenseFunc addDenseNoNull_{nullptr};
+  HashAggrJitExtractFunc extract_{nullptr};
   bool disabled_{false};
 };
 

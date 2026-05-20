@@ -30,8 +30,11 @@
 
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/functions/lib/aggregates/tests/SumTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
+
+#include <limits>
 
 using bytedance::bolt::exec::test::PlanBuilder;
 using namespace bytedance::bolt::exec::test;
@@ -129,6 +132,67 @@ TEST_F(SumAggregationTest, overflow) {
 
 TEST_F(SumAggregationTest, hookLimits) {
   testHookLimits<int64_t, int64_t, true>();
+}
+
+TEST_F(SumAggregationTest, hashAggrJitDecimalSumAndFloatingMinMax) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(256, [](auto row) { return row % 8; }),
+       makeFlatVector<int64_t>(
+           256, [](auto row) { return row * 100; }, nullptr, DECIMAL(12, 2)),
+       makeFlatVector<double>(256, [](auto row) {
+         return row % 31 == 0 ? std::numeric_limits<double>::quiet_NaN()
+                              : static_cast<double>(row);
+       }),
+       makeFlatVector<double>(256, [](auto row) {
+         return row % 37 == 0 ? std::numeric_limits<double>::quiet_NaN()
+                              : static_cast<double>(1000 - row);
+       })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .singleAggregation(
+                      {"c0"},
+                      {"spark_sum(c1)", "min(c2)", "max(c3)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitMergeAndExtract) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return 1000 - row; }),
+       makeFlatVector<int64_t>(
+           512,
+           [](auto row) { return row; },
+           [](auto row) { return row % 7 == 0; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation(
+                      {"c0"},
+                      {"spark_sum(c1)", "spark_avg(c1)", "min(c2)", "count(c3)"})
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
 }
 
 TEST_F(SumAggregationTest, decimalSum) {
