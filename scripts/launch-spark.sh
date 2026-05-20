@@ -64,6 +64,9 @@ BOLT_MARKER="$BOLT_HOME/_build/.spark_exported"
 PYSPARK_VENV="${PYSPARK_VENV:-$TMP_ROOT/pyenv-3.11}"
 VENV_PYTHON="$PYSPARK_VENV/bin/python"
 
+# Spark sbin scripts use $USER to construct PID-file names; export a sane
+# default so we run cleanly in minimal containers / non-login shells.
+export USER="${USER:-$(id -un)}"
 export SPARK_PID_DIR="$TMP_ROOT/pids"
 export SPARK_LOG_DIR="$TMP_ROOT/logs"
 
