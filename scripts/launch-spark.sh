@@ -176,6 +176,11 @@ ensure_pyspark_venv() {
 
 ensure_spark() {
   [[ -x "$SPARK_HOME/bin/spark-shell" ]] && return
+  if ! command -v aria2c > /dev/null 2>&1; then
+    warn "aria2c not found; falling back to curl (the Spark archive download"
+    warn "will be ~10x slower over archive.apache.org)."
+    warn "Install: sudo apt install -y aria2  (or 'brew install aria2' on macOS)"
+  fi
   mkdir -p "$TMP_ROOT"
   local tgz_name="spark-${SPARK_VERSION}-bin-hadoop3.tgz"
   local tgz="$TMP_ROOT/$tgz_name" url

@@ -22,12 +22,16 @@ locates / builds the Gluten bundle JAR, then starts a long-lived Spark
 Connect Server in standalone mode (one master + one worker JVM). Exposes:
 
 ```bash
+# run SQL, which automatically starts a Spark server if one isn't already running.
+scripts/launch-spark.sh sql -e "select count(*) from range(1e7)"
+
+# start/stop/status spark server
 scripts/launch-spark.sh start                            # start server (reuses cached Bolt + Gluten JAR)
 scripts/launch-spark.sh start --build                    # rebuild Bolt + Gluten first, then start
-scripts/launch-spark.sh sql -e "select count(*) from range(1e7)"
-scripts/launch-spark.sh shell                            # Python REPL
 scripts/launch-spark.sh stop                             # stop server
 scripts/launch-spark.sh status                           # show state
+
+scripts/launch-spark.sh shell                            # Python REPL
 ```
 
 See `scripts/launch-spark.sh --help` for env vars (ports, JAVA_HOME, etc.).
