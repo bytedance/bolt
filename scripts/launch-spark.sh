@@ -12,9 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Copyright (c) ByteDance Ltd. and/or its affiliates.
-# SPDX-License-Identifier: Apache-2.0
 #
 # One-click launcher for Spark + Gluten + Bolt.
 #
@@ -71,6 +68,7 @@ export SPARK_PID_DIR="$TMP_ROOT/pids"
 export SPARK_LOG_DIR="$TMP_ROOT/logs"
 
 GLUTEN_JAR=""
+GLUTEN_BACKEND=""
 
 # ----------------------------------------------------------------------------
 # Logging.
@@ -204,11 +202,20 @@ ensure_spark() {
 # as needed (on --build, or when their artifacts are missing), then locate
 # the bundle JAR.
 _find_gluten_jar() {
-  find "$GLUTEN_HOME" -type f \
-    \( -path '*/target/gluten-*bundle*spark3.5*.jar' \
-    -o -path '*/target/gluten*bolt*spark3.5*.jar' \) \
-    ! -name '*-original.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' \
-    -printf '%T@ %p\n' 2> /dev/null | sort -rn | head -n1 | cut -d' ' -f2-
+  # Prefer the Bolt-flavored bundle. Fall back to a Velox bundle if no Bolt
+  # bundle exists in the checkout — that's how you point this launcher at a
+  # pre-built Velox Gluten for backend comparison runs.
+  local tag jar
+  for tag in bolt velox; do
+    jar=$(find "$GLUTEN_HOME" -type f \
+      -path "*/target/gluten*${tag}*bundle*spark3.5*.jar" \
+      ! -name '*-original.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' \
+      -printf '%T@ %p\n' 2> /dev/null | sort -rn | head -n1 | cut -d' ' -f2-)
+    if [[ -n "$jar" ]]; then
+      echo "$jar"
+      return
+    fi
+  done
 }
 
 ensure_gluten_jar() {
@@ -235,8 +242,20 @@ ensure_gluten_jar() {
   fi
 
   [[ -n "$GLUTEN_JAR" ]] \
-    || die "No Gluten bundle JAR under $GLUTEN_HOME after build."
-  ok "Gluten JAR: $GLUTEN_JAR"
+    || die "No Gluten bundle JAR under $GLUTEN_HOME. Run with --build to build it."
+  # Detect which backend's native lib is shaded into the jar. Use bash
+  # substring match (no pipe) so 'grep -q' SIGPIPE'ing echo under
+  # set -o pipefail doesn't false-negative the check.
+  local listing
+  listing="$(unzip -l "$GLUTEN_JAR" 2> /dev/null || true)"
+  if [[ "$listing" == *libbolt_backend.so* ]]; then
+    GLUTEN_BACKEND=bolt
+  elif [[ "$listing" == *libvelox.so* || "$listing" == *libgluten.so* ]]; then
+    GLUTEN_BACKEND=velox
+  else
+    die "Gluten JAR $GLUTEN_JAR does not contain a known native backend lib (libbolt_backend.so / libvelox.so / libgluten.so)."
+  fi
+  ok "Gluten JAR: $GLUTEN_JAR (backend=$GLUTEN_BACKEND)"
 }
 
 prepare_env() {

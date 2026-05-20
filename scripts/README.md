@@ -32,6 +32,32 @@ scripts/launch-spark.sh status                           # show state
 
 See `scripts/launch-spark.sh --help` for env vars (ports, JAVA_HOME, etc.).
 
+### Custom `GLUTEN_HOME`
+
+Point at an existing Gluten checkout instead of letting the launcher clone
+into `/tmp/spark-bolt/gluten`. If the checkout already has a built bundle
+JAR (`<dir>/package/target/gluten-bolt-bundle-spark3.5*.jar`), `start`
+reuses it; otherwise `start --build` will build inside that directory.
+
+```bash
+export GLUTEN_HOME=$HOME/work/gluten         # your existing checkout
+scripts/launch-spark.sh start                # reuse cached JAR
+scripts/launch-spark.sh start --build        # rebuild Bolt + Gluten in $GLUTEN_HOME
+```
+
+`GLUTEN_FORK_URL` / `GLUTEN_FORK_BRANCH` override the auto-clone source
+when `$GLUTEN_HOME` is empty (defaults: `WangGuangxin/gluten` @
+`add_bolt_backend`).
+
+The launcher prefers a Bolt-backend bundle JAR
+(`gluten-*bolt*bundle*spark3.5*.jar`) but falls back to a Velox bundle
+(`gluten-*velox*bundle*spark3.5*.jar`) if no Bolt one is present. The
+detected backend is printed on `start`:
+
+```
+OK: Gluten JAR: .../gluten-velox-bundle-spark3.5_*.jar (backend=velox)
+```
+
 ## Dependencies
 
 ### JDK 17
