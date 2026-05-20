@@ -60,6 +60,18 @@ jobs:
       - name: Generate Compile Database
         run: |
           make compile_db_all
+      - name: Ensure generated headers exist
+        run: |
+          # _compile_db (invoked by compile_db_all) is supposed to build these,
+          # but make it explicit so clang-tidy in the next step never races
+          # against a missing dwrf_schema.pb.h / parquet thrift header. If the
+          # underlying chain already produced them, this is a no-op rebuild.
+          cmake --build --preset conan-release \
+            --target generate_parquet_thrift \
+            --target bolt_dwio_dwrf_proto
+          test -f _build/Release/bolt/dwio/dwrf/proto/dwrf_schema.pb.h \
+            || { echo "::error::dwrf_schema.pb.h missing after proto build" >&2; \
+                 ls -la _build/Release/bolt/dwio/dwrf/proto/ || true; exit 1; }
       - name: Run pre-commit hooks
         run: |
           pre-commit run --all-files
