@@ -9,9 +9,8 @@ Developer tooling for the Bolt repo.
 | `install-gcc.sh` | Installs the GCC toolchain Bolt builds against (root required). |
 | `run-clang-tidy.py` | Runs clang-tidy on changed lines only; used by pre-commit + CI. |
 | `launch-spark.sh` | One-click Spark + Gluten + Bolt launcher with a long-lived Connect Server. |
-| `connect.py` | pyspark Connect client used by `launch-spark.sh sql` / `shell`. |
-| `test-queries.sql` | Smoke-test SQL covering scan/agg/join paths for Bolt offload verification. |
-| `tpcds.sh`, `tpcds.py` | TPC-DS benchmark runner; data gen via dsdgen, queries via the Connect Server. |
+| `launch-spark/connect.py` | pyspark Connect client used by `launch-spark.sh sql` / `shell`. |
+| `launch-spark/test-queries.sql` | Smoke-test SQL covering scan/agg/join paths for Bolt offload verification. |
 | `conan/` | Conan profiles consumed by Bolt's build. |
 
 ## `launch-spark.sh`

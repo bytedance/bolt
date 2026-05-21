@@ -520,7 +520,7 @@ do_sql() {
   pid="$(_ensure_running)"
   # CONNECT_SERVER_PID enables connect.py's JVM-death watchdog.
   CONNECT_SERVER_PID="$pid" SPARK_LOG_DIR="$SPARK_LOG_DIR" \
-    exec "$VENV_PYTHON" "$SCRIPT_DIR/connect.py" sql \
+    exec "$VENV_PYTHON" "$SCRIPT_DIR/launch-spark/connect.py" sql \
     --remote "sc://localhost:$CONNECT_PORT" "$@"
 }
 
@@ -528,7 +528,7 @@ do_shell() {
   local pid
   pid="$(_ensure_running)"
   CONNECT_SERVER_PID="$pid" SPARK_LOG_DIR="$SPARK_LOG_DIR" \
-    exec "$VENV_PYTHON" "$SCRIPT_DIR/connect.py" shell \
+    exec "$VENV_PYTHON" "$SCRIPT_DIR/launch-spark/connect.py" shell \
     --remote "sc://localhost:$CONNECT_PORT" "$@"
 }
 

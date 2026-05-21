@@ -14,9 +14,9 @@
 
 -- Smoke-test queries for Spark + Gluten + Bolt.
 -- Usage:
---   ./scripts/launch-spark.sh sql -- -f scripts/test-queries.sql
+--   ./scripts/launch-spark.sh sql -f scripts/launch-spark/test-queries.sql
 -- Compare against vanilla:
---   ./scripts/launch-spark.sh sql --vanilla -- -f scripts/test-queries.sql
+--   ./scripts/launch-spark.sh sql --vanilla -f scripts/launch-spark/test-queries.sql
 --
 -- Each section is followed by an EXPLAIN so you can spot whether Gluten
 -- (look for `GlutenColumnar*` / `VeloxColumnar*` / native operator names) is
