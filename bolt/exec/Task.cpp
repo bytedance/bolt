@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <string>
 #include <thread>
 
 #include "bolt/common/base/Counters.h"
@@ -312,6 +311,7 @@ Task::Task(
     std::function<void(std::exception_ptr)> onError)
     : uuid_{makeUuid()},
       taskId_(taskId),
+      sparkTaskAttemptId_(memorypressure::extractSparkTaskAttemptId(taskId)),
       destination_(destination),
       mode_(mode),
       memoryArbitrationPriority_(memoryArbitrationPriority),
@@ -328,6 +328,20 @@ Task::Task(
   VLOG(1) << "Task initialize: " << taskId_ << ", plan: "
           << folly::json::serialize(planFragment_.planNode->serialize(), opts);
   maybeInitTrace();
+}
+
+Task::MemoryPressureSnapshot Task::memoryPressureSnapshot() const {
+  return memorypressure::snapshot(
+      memoryPressureWatermarkBytes(), sparkTaskAttemptId_);
+}
+
+std::optional<Task::ScopedMemoryExpansionGuard>
+Task::maybeScopedDisableMemoryExpansion() const {
+  return memorypressure::maybeScopedDisableMemoryExpansion(sparkTaskAttemptId_);
+}
+
+std::string Task::memoryPressureDetails() const {
+  return memorypressure::details();
 }
 
 Task::~Task() {
@@ -3226,6 +3240,8 @@ uint64_t Task::MemoryReclaimer::reclaimTask(
   if (task->isCancelled()) {
     return 0;
   }
+
+  task->recordMemoryPressureWatermarkBytes(task->pool()->currentBytes());
 
   uint64_t reclaimedBytes{0};
   reclaimedBytes = memory::MemoryReclaimer::reclaim(

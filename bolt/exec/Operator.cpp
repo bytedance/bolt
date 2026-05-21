@@ -292,12 +292,13 @@ int32_t OperatorCtx::getConcurrency() const {
 
 std::string OperatorCtx::toString() const {
   return fmt::format(
-      "{}#{}[taskId={}, pipelineId={}, driverId={}]",
+      "{}#{}[task={}, pipe={}, driver={}, op={}]",
       operatorType(),
-      operatorId(),
+      planNodeId(),
       taskId(),
       driverCtx_->pipelineId,
-      driverCtx_->driverId);
+      driverCtx_->driverId,
+      operatorId());
 }
 
 void OperatorCtx::traverseOpToGetRowCount(
