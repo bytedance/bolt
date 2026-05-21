@@ -200,7 +200,9 @@ class PaimonCppConan(ConanFile):
 
         # TBB is built from source via ExternalProject (ThirdpartyToolchain)
         tbb_comp = self.cpp_info.components["tbb"]
-        tbb_comp.libs = ["tbb"]
+        tbb_comp.libs = [
+            "tbb_debug" if str(self.settings.build_type) == "Debug" else "tbb"
+        ]
         tbb_comp.set_property("cmake_target_name", "Paimon::tbb")
 
         # Internal static libraries (no headers to export — included via paimon's include/)
