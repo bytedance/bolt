@@ -69,6 +69,59 @@ namespace {
   }
   return algo;
 }
+
+// Schema-mismatch checks for ReaderBase::convertType.
+constexpr const char* kTypeMappingErrorFmtStr =
+    "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
+
+// Checks whether 'type' is an integer type at least as wide as
+// 'minTypeKind'. Used to gate integer widening:
+//   minTypeKind=TINYINT  accepts TINYINT/SMALLINT/INTEGER/BIGINT (INT_8 leaf)
+//   minTypeKind=SMALLINT accepts SMALLINT/INTEGER/BIGINT          (INT_16 leaf)
+//   minTypeKind=INTEGER  accepts INTEGER/BIGINT                   (INT_32 leaf)
+//   minTypeKind=BIGINT   accepts BIGINT only                      (INT_64 leaf)
+bool isIntCompatible(
+    const bytedance::bolt::TypePtr& type,
+    bytedance::bolt::TypeKind minTypeKind) {
+  using TK = bytedance::bolt::TypeKind;
+  static_assert(
+      static_cast<int>(TK::TINYINT) < static_cast<int>(TK::SMALLINT) &&
+      static_cast<int>(TK::SMALLINT) < static_cast<int>(TK::INTEGER) &&
+      static_cast<int>(TK::INTEGER) < static_cast<int>(TK::BIGINT));
+  const auto kind = type->kind();
+  switch (kind) {
+    case TK::TINYINT:
+    case TK::SMALLINT:
+    case TK::INTEGER:
+    case TK::BIGINT:
+      return static_cast<int>(kind) >= static_cast<int>(minTypeKind);
+    default:
+      return false;
+  }
+}
+
+// Predicates for the cross-family implicit cast that the column reader
+// layer performs at read time (Spark/Hive STRING<->INT compatibility):
+//   - StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file ->
+//     int family requested type
+//   - IntegerColumnReader::makeCastExpr handles int family file ->
+//     VARCHAR/VARBINARY requested type
+// Both makeCastExpr paths compile unconditionally so convertType keeps
+// these schema pairs uniform across build flavours. Non-Spark builds
+// still get the strict check at ParquetColumnReader.cpp:95 via
+// matchType() for the VARCHAR-file -> INT-requested direction, which
+// fires after convertType and throws with its existing error message.
+bool acceptsVarcharFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+  using TK = bytedance::bolt::TypeKind;
+  const auto k = t->kind();
+  return k == TK::TINYINT || k == TK::SMALLINT || k == TK::INTEGER ||
+      k == TK::BIGINT;
+}
+bool acceptsIntFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+  return t->kind() == bytedance::bolt::TypeKind::VARCHAR ||
+      t->kind() == bytedance::bolt::TypeKind::VARBINARY;
+}
+
 } // namespace
 
 /// Metadata and options for reading Parquet.
@@ -925,6 +978,44 @@ TypePtr ReaderBase::convertType(
           schemaElement.__isset.type_length,
       "FIXED_LEN_BYTE_ARRAY requires length to be set");
 
+  // Whether this leaf is a Parquet "repeated" field (unannotated array).
+  // Allows requestedType=ARRAY<element> to be satisfied by checking against
+  // the element type — see isCompatible() in the anonymous namespace.
+  const bool isRepeated = schemaElement.__isset.repetition_type &&
+      schemaElement.repetition_type == thrift::FieldRepetitionType::REPEATED;
+
+  // Common helper: emits a user-error matching Spark's
+  // SchemaColumnConvertNotSupportedException semantics when the requested
+  // type can't be satisfied by this Parquet leaf. No-op when there is no
+  // requested type (caller is only inferring the file's declared schema).
+  auto checkRequested =
+      [&](const std::function<bool(const TypePtr&)>& isCompatibleFunc) {
+        if (requestedType == nullptr) {
+          return;
+        }
+        const bool strictMatch = isCompatibleFunc(requestedType);
+        // Legacy Parquet 1.0 unannotated array: a repeated field that
+        // isn't wrapped in a LIST group. If requestedType is ARRAY and
+        // the leaf is REPEATED, fall back to checking the array's
+        // element type.
+        const bool unannotatedArrayMatch = !strictMatch && isRepeated &&
+            requestedType->isArray() &&
+            isCompatibleFunc(requestedType->asArray().elementType());
+        if (!(strictMatch || unannotatedArrayMatch)) {
+          BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
+              kTypeMappingErrorFmtStr,
+              schemaElement.name,
+              schemaElement.type,
+              mapTypeKindToName(requestedType->kind())));
+        }
+        if (unannotatedArrayMatch) {
+          LOG_FIRST_N(INFO, 8)
+              << "Reading unannotated array (legacy Parquet 1.0): column '"
+              << schemaElement.name << "', requested type "
+              << requestedType->toString();
+        }
+      };
+
   if (schemaElement.__isset.converted_type) {
     switch (schemaElement.converted_type) {
       case thrift::ConvertedType::INT_8:
@@ -932,6 +1023,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT8 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::TINYINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return TINYINT();
 
       case thrift::ConvertedType::INT_16:
@@ -939,6 +1034,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT16 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::SMALLINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return SMALLINT();
 
       case thrift::ConvertedType::INT_32:
@@ -946,6 +1045,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT32 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::INTEGER) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return INTEGER();
 
       case thrift::ConvertedType::INT_64:
@@ -953,6 +1056,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "INT64 converted type can only be set for value of thrift::Type::INT64");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::BIGINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return BIGINT();
 
       case thrift::ConvertedType::UINT_8:
@@ -960,6 +1067,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_8 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::TINYINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return TINYINT();
 
       case thrift::ConvertedType::UINT_16:
@@ -967,6 +1078,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_16 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::SMALLINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return SMALLINT();
 
       case thrift::ConvertedType::UINT_32:
@@ -974,6 +1089,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_32 converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::INTEGER) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return INTEGER();
 
       case thrift::ConvertedType::UINT_64:
@@ -981,6 +1100,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "UINT_64 converted type can only be set for value of thrift::Type::INT64");
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::BIGINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return BIGINT();
 
       case thrift::ConvertedType::DATE:
@@ -988,6 +1111,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "DATE converted type can only be set for value of thrift::Type::INT32");
+        checkRequested([](const TypePtr& t) { return t->isDate(); });
         return DATE();
 
       case thrift::ConvertedType::TIMESTAMP_MICROS:
@@ -996,12 +1120,26 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "TIMESTAMP_MICROS or TIMESTAMP_MILLIS converted type can only be set for value of thrift::Type::INT64");
+        checkRequested(
+            [](const TypePtr& t) { return t->kind() == TypeKind::TIMESTAMP; });
         return TIMESTAMP();
 
       case thrift::ConvertedType::DECIMAL: {
         BOLT_CHECK(
             schemaElement.__isset.precision && schemaElement.__isset.scale,
             "DECIMAL requires a length and scale specifier!");
+        // Decimal widening: scale must not shrink and precision must grow
+        // at least as fast as scale
+        const auto filePrecision = schemaElement.precision;
+        const auto fileScale = schemaElement.scale;
+        checkRequested([&](const TypePtr& t) {
+          if (!t->isDecimal()) {
+            return false;
+          }
+          auto [precision, scale] = getDecimalPrecisionScale(*t);
+          return scale >= fileScale &&
+              (precision - filePrecision) >= (scale - fileScale);
+        });
         return DECIMAL(schemaElement.precision, schemaElement.scale);
       }
 
@@ -1010,6 +1148,10 @@ TypePtr ReaderBase::convertType(
         switch (schemaElement.type) {
           case thrift::Type::BYTE_ARRAY:
           case thrift::Type::FIXED_LEN_BYTE_ARRAY:
+            checkRequested([](const TypePtr& t) {
+              return t->kind() == TypeKind::VARCHAR ||
+                  acceptsVarcharFileForReaderCast(t);
+            });
             return VARCHAR();
           default:
             BOLT_FAIL(
@@ -1021,6 +1163,10 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::BYTE_ARRAY,
             "ENUM converted type can only be set for value of thrift::Type::BYTE_ARRAY");
+        checkRequested([](const TypePtr& t) {
+          return t->kind() == TypeKind::VARCHAR ||
+              acceptsVarcharFileForReaderCast(t);
+        });
         return VARCHAR();
       }
       case thrift::ConvertedType::MAP:
@@ -1038,13 +1184,22 @@ TypePtr ReaderBase::convertType(
   } else {
     switch (schemaElement.type) {
       case thrift::Type::type::BOOLEAN:
+        checkRequested(
+            [](const TypePtr& t) { return t->kind() == TypeKind::BOOLEAN; });
         return BOOLEAN();
       case thrift::Type::type::INT32:
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::INTEGER) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return INTEGER();
       case thrift::Type::type::INT64:
         // For Int64 Timestamp in nano precision
         if (schemaElement.__isset.logicalType &&
             schemaElement.logicalType.__isset.TIMESTAMP) {
+          checkRequested([](const TypePtr& t) {
+            return t->kind() == TypeKind::TIMESTAMP;
+          });
           return TIMESTAMP();
         }
         if (schemaElement.__isset.converted_type &&
@@ -1052,17 +1207,36 @@ TypePtr ReaderBase::convertType(
                  thrift::ConvertedType::TIMESTAMP_MILLIS ||
              schemaElement.converted_type ==
                  thrift::ConvertedType::TIMESTAMP_MICROS)) {
+          checkRequested([](const TypePtr& t) {
+            return t->kind() == TypeKind::TIMESTAMP;
+          });
           return TIMESTAMP();
         }
+        checkRequested([](const TypePtr& t) {
+          return isIntCompatible(t, TypeKind::BIGINT) ||
+              acceptsIntFileForReaderCast(t);
+        });
         return BIGINT();
       case thrift::Type::type::INT96:
+        checkRequested(
+            [](const TypePtr& t) { return t->kind() == TypeKind::TIMESTAMP; });
         return TIMESTAMP(); // INT96 only maps to a timestamp
       case thrift::Type::type::FLOAT:
+        checkRequested([](const TypePtr& t) {
+          return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE;
+        });
         return REAL();
       case thrift::Type::type::DOUBLE:
+        checkRequested(
+            [](const TypePtr& t) { return t->kind() == TypeKind::DOUBLE; });
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:
       case thrift::Type::type::FIXED_LEN_BYTE_ARRAY:
+        checkRequested([](const TypePtr& t) {
+          return t->kind() == TypeKind::VARCHAR ||
+              t->kind() == TypeKind::VARBINARY ||
+              acceptsVarcharFileForReaderCast(t);
+        });
         if (requestedType && requestedType->isVarchar()) {
           return VARCHAR();
         } else {

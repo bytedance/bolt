@@ -178,20 +178,31 @@ class ParquetData : public dwio::common::FormatData {
     // If the query accesses only nulls, read the nulls from the pages in range.
     // If nulls are preread, return those minus any skipped.
     if (presetNulls_) {
-      BOLT_CHECK_LE(numValues, presetNullsSize_ - presetNullsConsumed_);
+      const int32_t available = presetNullsSize_ - presetNullsConsumed_;
+      // Tolerate parquet writer defects where an inner column's rep/def
+      // level stream is shorter than what the parent repeated reader
+      // expects. Pad the missing tail positions with null bits (length 0
+      // entries) so reading does not crash.
+      const int32_t toCopy = std::min<int32_t>(numValues, available);
+
       if (!presetNullsConsumed_ && numValues == presetNullsSize_) {
         nulls = std::move(presetNulls_);
         presetNullsConsumed_ = numValues;
       } else {
         dwio::common::ensureCapacity<bool>(nulls, numValues, &pool_);
         auto bits = nulls->asMutable<uint64_t>();
-        bits::copyBits(
-            presetNulls_->as<uint64_t>(),
-            presetNullsConsumed_,
-            bits,
-            0,
-            numValues);
-        presetNullsConsumed_ += numValues;
+        if (toCopy > 0) {
+          bits::copyBits(
+              presetNulls_->as<uint64_t>(),
+              presetNullsConsumed_,
+              bits,
+              0,
+              toCopy);
+        }
+        if (numValues > available) {
+          bits::fillBits(bits, toCopy, numValues, bits::kNull);
+        }
+        presetNullsConsumed_ += toCopy;
       }
       return;
     }

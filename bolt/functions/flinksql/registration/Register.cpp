@@ -15,11 +15,13 @@
  */
 
 #include "bolt/functions/flinksql/registration/Register.h"
+#include "bolt/expression/SpecialFormRegistry.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/Rand.h"
 #include "bolt/functions/flinksql/String.h"
+#include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 
 namespace bytedance::bolt::functions {
 // If the function registration order is Presto, Spark, Flink,
@@ -88,12 +90,24 @@ static void registerArrayFunctions(const std::string& prefix) {
   registerFlinkElementAtFunction(prefix + "element_at");
 }
 
+namespace {
+
+void registerSpecialFormFunctions(const std::string& prefix) {
+  exec::registerFunctionCallToSpecialForm(
+      "cast", std::make_unique<FlinkCastCallToSpecialForm>());
+  exec::registerFunctionCallToSpecialForm(
+      "try_cast", std::make_unique<FlinkTryCastCallToSpecialForm>());
+}
+
+} // namespace
+
 void registerFunctions(const std::string& prefix) {
   registerStringFunctions(prefix);
   registerDatetimeFunctions(prefix);
   registerMathFunctions(prefix);
   registerJsonFunctions(prefix);
   registerArrayFunctions(prefix);
+  registerSpecialFormFunctions(prefix);
 }
 } // namespace flinksql
 } // namespace bytedance::bolt::functions

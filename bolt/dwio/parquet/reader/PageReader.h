@@ -47,7 +47,6 @@
 
 #include <arrow/util/rle_encoding.h>
 namespace bytedance::bolt::parquet {
-
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
 
@@ -139,7 +138,7 @@ class PageReader {
       int32_t maxItems,
       int32_t* FOLLY_NULLABLE lengths,
       uint64_t* FOLLY_NULLABLE nulls,
-      int32_t nullsStartIndex) const;
+      int64_t nullsStartIndex) const;
 
   /// Applies 'visitor' to values in the ColumnChunk of 'this'. The
   /// operation to perform and The operand rows are given by
@@ -519,7 +518,7 @@ class PageReader {
   raw_vector<int16_t> repetitionLevels_;
 
   // Number of valid bits in 'leafNulls_'
-  int32_t leafNullsSize_{0};
+  int64_t leafNullsSize_{0};
 
   // Number of leaf nulls read.
   int64_t numLeafNullsConsumed_{0};

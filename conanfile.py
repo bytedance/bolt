@@ -284,7 +284,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("spark_compatible"):
             self.requires("celeborn-cpp-client/main-20251212")
         if self.options.get_safe("enable_paimon"):
-            self.requires("paimon-cpp/0.0.3-bolt")
+            self.requires("paimon-cpp/0.0.4-bolt")
         if self.options.get_safe("enable_testutil"):
             self.requires("gtest/1.17.0", force=True)
             self.requires("duckdb/0.8.1")
@@ -671,6 +671,7 @@ class BoltConan(ConanFile):
                     "paimon-cpp::format_avro",
                     "paimon-cpp::avro",
                     "paimon-cpp::fs_local",
+                    "paimon-cpp::tbb",
                 ]
             )
 

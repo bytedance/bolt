@@ -422,7 +422,7 @@ arrow::Status BoltShuffleWriterV2::splitRowVector(
           }
         }
         return checkFixedColumnCopyValue(
-            vector, currentFixedWidthValueAddrs, std::move(funcLine), true);
+            vector, currentFixedWidthValueAddrs, std::move(funcLine));
       }));
 
   for (auto& pid : partitionUsed_) {
@@ -444,18 +444,14 @@ arrow::Status BoltShuffleWriterV2::initFixedColumnSize(
       bytedance::bolt::bits::roundUp(rv.childrenSize(), 8) / 8;
   needAlignmentBitmap_.resize(bitmapBytes, 0);
 
+  // fixedColValueSize_ has been populated by the base class in
+  // initColumnTypes.
   for (size_t i = 0; i < fixedWidthColumnCount_; ++i) {
-    switch (arrowColumnTypes_[simpleColumnIndices_[i]]->id()) {
-      case arrow::BooleanType::type_id: {
-        ++numberBooleanColumns;
-        fixedColValueSize_.push_back(0);
-      } break;
-      default: {
-        fixedColValueSize_.push_back(valueBufferSizeForFixedWidthArray(i, 1));
-        if (fixedColValueSize_.back() > 8) {
-          bytedance::bolt::bits::setBit(needAlignmentBitmap_.data(), i);
-        }
-      } break;
+    if (arrowColumnTypes_[simpleColumnIndices_[i]]->id() ==
+        arrow::BooleanType::type_id) {
+      ++numberBooleanColumns;
+    } else if (fixedColValueSize_[i] > 8) {
+      bytedance::bolt::bits::setBit(needAlignmentBitmap_.data(), i);
     }
   }
 

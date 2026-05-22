@@ -33,10 +33,16 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+
+#include <folly/Range.h>
 namespace bytedance::bolt {
 namespace config {
 class ConfigBase;
@@ -72,6 +78,13 @@ struct FileOptions {
   /// NOTE: this only applies for write open file.
   bool shouldThrowOnFileAlreadyExists{true};
 };
+
+inline constexpr std::string_view kOpenFileOptionConfigPrefix{"bolt."};
+
+void copyOpenFileOptionsFromConfig(
+    const config::ConfigBase* config,
+    FileOptions& options,
+    std::string_view prefix = kOpenFileOptionConfigPrefix);
 
 /// Defines directory options
 struct DirectoryOptions : FileOptions {

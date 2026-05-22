@@ -228,6 +228,7 @@ TEST_F(BitUtilTest, nwords) {
   EXPECT_EQ(nwords(63), 1);
   EXPECT_EQ(nwords(64), 1);
   EXPECT_EQ(nwords(65), 2);
+  EXPECT_EQ(nwords(uint32_t{65}), 2);
 }
 
 TEST_F(BitUtilTest, setBits) {

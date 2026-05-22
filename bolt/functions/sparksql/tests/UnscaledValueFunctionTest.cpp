@@ -51,5 +51,14 @@ TEST_F(UnscaledValueFunctionTest, unscaledValue) {
       testUnscaledValue({1000, 2000, -3000, -4000}, DECIMAL(20, 3)),
       "Expect short decimal type, but got: DECIMAL(20, 3)");
 }
+
+TEST_F(UnscaledValueFunctionTest, nullableShortDecimal) {
+  auto input = makeNullableFlatVector<int64_t>(
+      {1111111, std::nullopt, 10000}, DECIMAL(15, 10));
+  auto expected =
+      makeNullableFlatVector<int64_t>({1111111, std::nullopt, 10000});
+  auto result = evaluate("unscaled_value(c0)", makeRowVector({input}));
+  assertEqualVectors(expected, result);
+}
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

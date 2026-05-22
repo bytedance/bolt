@@ -30,8 +30,10 @@
 
 #include <fcntl.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <unordered_map>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -42,6 +44,25 @@ using namespace bytedance::bolt;
 using bytedance::bolt::common::Region;
 
 constexpr int kOneMB = 1 << 20;
+
+TEST(FileOptionsTest, copyOpenFileOptionsFromConfig) {
+  auto config = std::make_shared<const config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {"bolt.dfs.replication", "2"},
+          {"bolt.tos.endpoint", "tos-endpoint"},
+          {"spark.hadoop.dfs.replication", "3"}});
+
+  filesystems::FileOptions fileOptions;
+  fileOptions.values["bolt.dfs.replication"] = "1";
+  fileOptions.values["existing.option"] = "existing";
+
+  filesystems::copyOpenFileOptionsFromConfig(config.get(), fileOptions);
+
+  EXPECT_EQ(fileOptions.values.at("bolt.dfs.replication"), "2");
+  EXPECT_EQ(fileOptions.values.at("bolt.tos.endpoint"), "tos-endpoint");
+  EXPECT_EQ(fileOptions.values.at("existing.option"), "existing");
+  EXPECT_EQ(fileOptions.values.count("spark.hadoop.dfs.replication"), 0);
+}
 
 void writeData(WriteFile* writeFile, bool useIOBuf = false) {
   if (useIOBuf) {

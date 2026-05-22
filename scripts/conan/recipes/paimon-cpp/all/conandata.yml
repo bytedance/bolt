@@ -13,10 +13,10 @@
 # limitations under the License.
 
 sources:
-  "0.0.3-bolt":
+  "0.0.4-bolt":
     url: "https://github.com/alibaba/paimon-cpp.git"
     revision: "d474ebc24ac302239ca596a2d72f32210586b882"
 patches:
-  "0.0.3-bolt":
+  "0.0.4-bolt":
     - patch_file: "patches/paimon-cpp-conan-deps.patch"
       patch_description: "Add Conan dependencies support"

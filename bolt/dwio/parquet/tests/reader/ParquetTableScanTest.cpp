@@ -1301,6 +1301,260 @@ TEST_F(ParquetTableScanTest, deltaByteArray) {
   assertSelect({"a"}, "SELECT a from expected");
 }
 
+// Plan-level matrix coverage for the strict convertType policy.
+//
+// Each case writes a 3-row parquet file using `fileType`, then runs a
+// TableScan plan declaring `declaredType` (propagated to HiveConnector
+// via dataColumns, which becomes ReaderOptions::fileSchema). We assert:
+//   - shouldThrow=true: AssertQueryBuilder.copyResults raises an error
+//     whose message contains Case::errMsg (defaults to the BoltUserError
+//     from convertType; non-Spark builds also see matchType rejections).
+//   - shouldThrow=false: copyResults returns 3 rows of declaredType
+//     and (when `expectedValues` is supplied) the values match.
+TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
+  struct Case {
+    const char* name;
+    TypePtr fileType;
+    TypePtr declaredType;
+    bool shouldThrow;
+    // Substring to match against the thrown error. Defaults to the
+    // BoltUserError raised by ReaderBase::convertType via
+    // BOLT_SCHEMA_MISMATCH_ERROR (same error code as DWRF/ORC, same
+    // "Schema mismatch, ..., From Kind: X, To Kind: Y" layout).
+    // Override when a case is rejected by a later layer with a
+    // different message (e.g. ParquetColumnReader::matchType in
+    // non-Spark builds).
+    const char* errMsg = "Schema mismatch";
+  };
+
+  // clang-format off
+  const std::vector<Case> cases = {
+    // ---- Reject: structural mismatch (the original SIGSEGV bug) ----
+    {"array_declared_vs_varchar_file", VARCHAR(),       ARRAY(VARCHAR()),   true},
+    {"array_declared_vs_bigint_file",  BIGINT(),        ARRAY(BIGINT()),    true},
+
+    // ---- Reject: integer narrowing ----
+    {"bigint_to_integer",              BIGINT(),        INTEGER(),          true},
+    {"integer_to_smallint",            INTEGER(),       SMALLINT(),         true},
+    {"integer_to_tinyint",             INTEGER(),       TINYINT(),          true},
+
+    // ---- Reject: cross-family with no column-reader auto-cast ----
+    {"integer_to_double",              INTEGER(),       DOUBLE(),           true},
+    {"bigint_to_double",               BIGINT(),        DOUBLE(),           true},
+    {"integer_to_real",                INTEGER(),       REAL(),             true},
+
+    // ---- Reject: float narrowing ----
+    {"double_to_real",                 DOUBLE(),        REAL(),             true},
+
+    // ---- Reject: BOOLEAN cross-family ----
+    {"boolean_to_integer",             BOOLEAN(),       INTEGER(),          true},
+    {"boolean_to_varchar",             BOOLEAN(),       VARCHAR(),          true},
+
+    // ---- Reject: DECIMAL widening violations ----
+    {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
+    {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
+    {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
+
+    // ---- Reject: DECIMAL cross-family ----
+    {"decimal_to_bigint",              DECIMAL(10, 2),  BIGINT(),           true},
+    {"decimal_to_varchar",             DECIMAL(10, 2),  VARCHAR(),          true},
+
+    // ---- Accept: identity ----
+    {"bigint_to_bigint",   BIGINT(),  BIGINT(),   false},
+    {"varchar_to_varchar", VARCHAR(), VARCHAR(),  false},
+    {"double_to_double",   DOUBLE(),  DOUBLE(),   false},
+    {"boolean_to_boolean", BOOLEAN(), BOOLEAN(),  false},
+
+    // ---- Accept: integer widening within int family ----
+    {"tinyint_to_smallint", TINYINT(), SMALLINT(), false},
+    {"tinyint_to_integer",  TINYINT(), INTEGER(),  false},
+    {"tinyint_to_bigint",   TINYINT(), BIGINT(),   false},
+    {"smallint_to_integer", SMALLINT(),INTEGER(),  false},
+    {"smallint_to_bigint",  SMALLINT(),BIGINT(),   false},
+    {"integer_to_bigint",   INTEGER(), BIGINT(),   false},
+
+    // ---- Accept: float widening (REAL -> DOUBLE, lossless) ----
+    {"real_to_double",      REAL(),    DOUBLE(),   false},
+
+    // ---- Accept: DECIMAL widening ----
+    {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
+    {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
+    {"decimal_widen_both",            DECIMAL(10, 2),  DECIMAL(20, 5),     false},
+    {"decimal_widen_to_long_decimal", DECIMAL(10, 2),  DECIMAL(28, 5),     false},
+
+    // ---- Accept: column-reader auto-cast int family -> VARCHAR ----
+    //  (IntegerColumnReader::makeCastExpr; the cast path compiles in
+    //  both build flavours and matchType() lets INT fileType fall
+    //  through to its default branch, so this works in non-Spark too.)
+    {"tinyint_to_varchar", TINYINT(), VARCHAR(), false},
+    {"smallint_to_varchar",SMALLINT(),VARCHAR(), false},
+    {"integer_to_varchar", INTEGER(), VARCHAR(), false},
+    {"bigint_to_varchar",  BIGINT(),  VARCHAR(), false},
+
+    // ---- Column-reader auto-cast VARCHAR -> int family ----
+    //  StringColumnReader::makeCastExpr handles the cast in both build
+    //  flavours; convertType accepts the pair. In non-Spark builds an
+    //  extra matchType() check at ParquetColumnReader.cpp:95 then
+    //  rejects VARCHAR-file -> INT-requested with its own message, so
+    //  the case expectation flips per flavour.
+#ifdef SPARK_COMPATIBLE
+    {"varchar_to_tinyint", VARCHAR(), TINYINT(), false},
+    {"varchar_to_smallint",VARCHAR(), SMALLINT(),false},
+    {"varchar_to_integer", VARCHAR(), INTEGER(), false},
+    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  false},
+#else
+    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  true, "file schema type"},
+#endif
+  };
+  // clang-format on
+
+  // 3-row sample data builder. DECIMAL is INT64-backed and gets the
+  // type override; the rest use their native C++ types.
+  auto makeSampleData = [&](const TypePtr& fileType) -> RowVectorPtr {
+    if (fileType->isDecimal()) {
+      return makeRowVector(
+          {"c0"}, {makeFlatVector<int64_t>({100, 200, 300}, fileType)});
+    }
+    switch (fileType->kind()) {
+      case TypeKind::TINYINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
+      case TypeKind::SMALLINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
+      case TypeKind::INTEGER:
+        return makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+      case TypeKind::BIGINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
+      case TypeKind::REAL:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<float>({1.0f, 2.0f, 3.0f})});
+      case TypeKind::DOUBLE:
+        return makeRowVector({"c0"}, {makeFlatVector<double>({1.0, 2.0, 3.0})});
+      case TypeKind::BOOLEAN:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<bool>({true, false, true})});
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
+      default:
+        BOLT_FAIL("unsupported test fileType: {}", fileType->toString());
+    }
+  };
+
+  for (const auto& c : cases) {
+    SCOPED_TRACE(c.name);
+
+    auto data = makeSampleData(c.fileType);
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    auto declaredRowType = ROW({"c0"}, {c.declaredType});
+    auto plan = PlanBuilder(pool())
+                    .tableScan(declaredRowType, {}, "", declaredRowType)
+                    .planNode();
+
+    if (c.shouldThrow) {
+      BOLT_ASSERT_THROW(
+          AssertQueryBuilder(plan)
+              .split(makeSplit(file->getPath()))
+              .copyResults(pool()),
+          c.errMsg);
+    } else {
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      ASSERT_NE(result, nullptr);
+      EXPECT_EQ(result->size(), 3) << "expected 3 rows, got " << result->size();
+      EXPECT_TRUE(result->type()->equivalent(*declaredRowType))
+          << "expected " << declaredRowType->toString() << ", got "
+          << result->type()->toString();
+    }
+  }
+}
+
+// Targeted value-validation companion for the matrix above. The cases
+// here exercise the data path (not just convertType), so we explicitly
+// check the column-reader-level cast and the integer-widening path
+// produce the right values.
+TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
+  // 1. INT widening: file INT32 [1,2,3] read as BIGINT -> [1,2,3].
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BIGINT()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // 2. Float widening: REAL [1.5, 2.5, 3.5] read as DOUBLE.
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<float>({1.5f, 2.5f, 3.5f})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {DOUBLE()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<double>({1.5, 2.5, 3.5})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+#ifdef SPARK_COMPATIBLE
+  // 3. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
+  //    Skipped in non-Spark builds because matchType() at
+  //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
+  //    before the column-reader cast can run.
+  {
+    auto data = makeRowVector(
+        {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BIGINT()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<int64_t>({100, 200, 300})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+#endif
+
+  // 4. Auto-cast INTEGER -> VARCHAR: [1,2,3] -> ["1","2","3"].
+  //    Works in both build flavours: matchType() lets INT fileType fall
+  //    through, and IntegerColumnReader::makeCastExpr handles the cast.
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {VARCHAR()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   // todo: use folly::Init init after upgrade folly lib

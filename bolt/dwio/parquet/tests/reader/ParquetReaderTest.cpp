@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include "bolt/core/QueryCtx.h"
+#include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/tests/utils/TempFilePath.h"
@@ -2377,6 +2378,213 @@ TEST_F(ParquetReaderTest, dcMapContainsMap) {
   });
 
   assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}
+
+TEST_F(ParquetReaderTest, readNestedMap) {
+  // Verifies reading a parquet file with a nested
+  // MAP<VARCHAR, MAP<VARCHAR, BIGINT>> column.
+  //
+  // nested_map.parquet schema (one row group, 5 rows):
+  //   message schema {
+  //     optional int64 id;
+  //     optional group data (MAP) {
+  //       repeated group key_value {
+  //         required binary key (STRING);
+  //         optional group value (MAP) {
+  //           repeated group key_value {
+  //             required binary key (STRING);
+  //             optional int64 value;
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  // Row contents:
+  //   id=10, data={"a":{"x":1,"y":2}, "b":{"z":3}}
+  //   id=20, data=null
+  //   id=30, data={"k":{}, "m":{"q":7}}
+  //   id=40, data={"only":{"w":100,"x":101,"y":102}}
+  //   id=50, data={}
+  const std::string sample(getExampleFilePath("nested_map.parquet"));
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(sample, readerOptions);
+  EXPECT_EQ(reader->numberOfRows(), 5ULL);
+
+  auto fileRowType = reader->rowType();
+  ASSERT_EQ(fileRowType->size(), 2ULL);
+  EXPECT_TRUE(fileRowType->containsChild("id"));
+  EXPECT_TRUE(fileRowType->containsChild("data"));
+  auto nestedMapType = fileRowType->findChild("data");
+  ASSERT_EQ(nestedMapType->kind(), TypeKind::MAP);
+  EXPECT_EQ(nestedMapType->asMap().keyType()->kind(), TypeKind::VARCHAR);
+  ASSERT_EQ(nestedMapType->asMap().valueType()->kind(), TypeKind::MAP);
+  EXPECT_EQ(
+      nestedMapType->asMap().valueType()->asMap().keyType()->kind(),
+      TypeKind::VARCHAR);
+  EXPECT_EQ(
+      nestedMapType->asMap().valueType()->asMap().valueType()->kind(),
+      TypeKind::BIGINT);
+
+  auto rowType =
+      ROW({"id", "data"}, {BIGINT(), MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()))});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  auto rowsRead = rowReader->next(100, result);
+  ASSERT_EQ(rowsRead, 5);
+  ASSERT_EQ(result->size(), 5);
+
+  auto row = result->as<RowVector>();
+  ASSERT_NE(row, nullptr);
+
+  // Validate the BIGINT id column.
+  auto idVec = row->childAt(0)->loadedVector()->as<SimpleVector<int64_t>>();
+  ASSERT_NE(idVec, nullptr);
+  EXPECT_EQ(idVec->valueAt(0), 10);
+  EXPECT_EQ(idVec->valueAt(1), 20);
+  EXPECT_EQ(idVec->valueAt(2), 30);
+  EXPECT_EQ(idVec->valueAt(3), 40);
+  EXPECT_EQ(idVec->valueAt(4), 50);
+
+  // Validate the outer MAP<VARCHAR, MAP<VARCHAR, BIGINT>> structure.
+  auto outerMap = row->childAt(1)->loadedVector()->as<MapVector>();
+  ASSERT_NE(outerMap, nullptr);
+  ASSERT_EQ(outerMap->size(), 5);
+  EXPECT_EQ(outerMap->mapKeys()->typeKind(), TypeKind::VARCHAR);
+  auto innerMap = outerMap->mapValues()->loadedVector()->as<MapVector>();
+  ASSERT_NE(innerMap, nullptr);
+  EXPECT_EQ(innerMap->mapKeys()->typeKind(), TypeKind::VARCHAR);
+  EXPECT_EQ(innerMap->mapValues()->typeKind(), TypeKind::BIGINT);
+
+  auto outerKeys = outerMap->mapKeys()->as<SimpleVector<StringView>>();
+  auto innerKeys = innerMap->mapKeys()->as<SimpleVector<StringView>>();
+  auto innerValues = innerMap->mapValues()->as<SimpleVector<int64_t>>();
+  ASSERT_NE(outerKeys, nullptr);
+  ASSERT_NE(innerKeys, nullptr);
+  ASSERT_NE(innerValues, nullptr);
+
+  // Helper: collect outer entries of a row as (key, [(innerKey, innerValue)]).
+  auto collectOuter = [&](vector_size_t rowIdx) {
+    std::vector<
+        std::pair<std::string, std::vector<std::pair<std::string, int64_t>>>>
+        out;
+    auto offset = outerMap->offsetAt(rowIdx);
+    auto size = outerMap->sizeAt(rowIdx);
+    for (vector_size_t i = 0; i < size; ++i) {
+      auto outerIdx = offset + i;
+      std::string outerKey(outerKeys->valueAt(outerIdx));
+      std::vector<std::pair<std::string, int64_t>> innerEntries;
+      auto innerOffset = innerMap->offsetAt(outerIdx);
+      auto innerSize = innerMap->sizeAt(outerIdx);
+      for (vector_size_t j = 0; j < innerSize; ++j) {
+        auto innerIdx = innerOffset + j;
+        innerEntries.emplace_back(
+            std::string(innerKeys->valueAt(innerIdx)),
+            innerValues->valueAt(innerIdx));
+      }
+      out.emplace_back(std::move(outerKey), std::move(innerEntries));
+    }
+    return out;
+  };
+
+  // Row 0: {"a":{"x":1,"y":2}, "b":{"z":3}}
+  EXPECT_FALSE(outerMap->isNullAt(0));
+  {
+    auto entries = collectOuter(0);
+    ASSERT_EQ(entries.size(), 2);
+    EXPECT_EQ(entries[0].first, "a");
+    EXPECT_EQ(
+        entries[0].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"x", 1}, {"y", 2}}));
+    EXPECT_EQ(entries[1].first, "b");
+    EXPECT_EQ(
+        entries[1].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"z", 3}}));
+  }
+
+  // Row 1: null outer map.
+  EXPECT_TRUE(outerMap->isNullAt(1));
+
+  // Row 2: {"k":{}, "m":{"q":7}}
+  EXPECT_FALSE(outerMap->isNullAt(2));
+  {
+    auto entries = collectOuter(2);
+    ASSERT_EQ(entries.size(), 2);
+    EXPECT_EQ(entries[0].first, "k");
+    EXPECT_TRUE(entries[0].second.empty());
+    EXPECT_EQ(entries[1].first, "m");
+    EXPECT_EQ(
+        entries[1].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"q", 7}}));
+  }
+
+  // Row 3: {"only":{"w":100,"x":101,"y":102}}
+  EXPECT_FALSE(outerMap->isNullAt(3));
+  {
+    auto entries = collectOuter(3);
+    ASSERT_EQ(entries.size(), 1);
+    EXPECT_EQ(entries[0].first, "only");
+    EXPECT_EQ(
+        entries[0].second,
+        (std::vector<std::pair<std::string, int64_t>>{
+            {"w", 100}, {"x", 101}, {"y", 102}}));
+  }
+
+  // Row 4: empty outer map.
+  EXPECT_FALSE(outerMap->isNullAt(4));
+  EXPECT_EQ(outerMap->sizeAt(4), 0);
+
+  EXPECT_FALSE(rowReader->next(100, result));
+}
+
+// Regression test for the parquet writer-defect tolerance fix in
+// RepeatedLengths::readLengths. When the underlying lengths buffer holds
+// fewer entries than the parent reader requests (which can happen if a
+// nested column's rep/def stream is shorter than its parent expects),
+// readLengths must pad the missing tail with zero-length entries instead
+// of failing the BOLT_CHECK_LE assertion.
+TEST_F(ParquetReaderTest, repeatedLengthsTolerateShortBuffer) {
+  bytedance::bolt::parquet::RepeatedLengths repeatedLengths;
+  // Underlying buffer has only 3 lengths.
+  auto lengthsBuffer = AlignedBuffer::allocate<int32_t>(3, leafPool_.get());
+  auto* rawLengths = lengthsBuffer->asMutable<int32_t>();
+  rawLengths[0] = 11;
+  rawLengths[1] = 22;
+  rawLengths[2] = 33;
+  lengthsBuffer->setSize(3 * sizeof(int32_t));
+  repeatedLengths.setLengths(lengthsBuffer);
+
+  // Case 1: request fewer than available (normal path).
+  std::array<int32_t, 5> out{};
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 2);
+  EXPECT_EQ(out[0], 11);
+  EXPECT_EQ(out[1], 22);
+  EXPECT_EQ(out[2], -1);
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 2);
+
+  // Case 2: request more than remaining (defect-tolerance path). Only 1
+  // entry remains in the buffer; the trailing 3 positions must be zeroed.
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 4);
+  EXPECT_EQ(out[0], 33);
+  EXPECT_EQ(out[1], 0);
+  EXPECT_EQ(out[2], 0);
+  EXPECT_EQ(out[3], 0);
+  EXPECT_EQ(out[4], -1);
+  // Index advances only by the available count, not the requested count.
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 3);
+
+  // Case 3: request from already-exhausted buffer; all positions zeroed.
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 2);
+  EXPECT_EQ(out[0], 0);
+  EXPECT_EQ(out[1], 0);
+  EXPECT_EQ(out[2], -1);
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 3);
 }
 
 // Comprehensive test matrix covering all combinations:

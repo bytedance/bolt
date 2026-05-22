@@ -341,7 +341,6 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
   std::vector<std::vector<std::unique_ptr<arrow::ResizableBuffer>>>
       partitionBooleanValueBuffers_;
   std::map<uint32_t, bool> fullBatch_;
-  std::vector<uint16_t> fixedColValueSize_;
   std::vector<uint8_t> needAlignmentBitmap_;
   std::vector<uint32_t> partitionBytesPerBatch_;
   std::vector<bool> isValidityBufferRowVectorMode_;

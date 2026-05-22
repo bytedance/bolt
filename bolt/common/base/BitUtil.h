@@ -129,6 +129,19 @@ constexpr inline uint64_t nwords(int32_t bits) {
   return roundUp(bits, 64) / 64;
 }
 
+constexpr inline uint64_t nwords(uint32_t bits) {
+  return roundUp(bits, 64) / 64;
+}
+
+constexpr inline uint64_t nwords(int64_t bits) {
+  return bits <= 0 ? 0
+                   : roundUp<uint64_t>(static_cast<uint64_t>(bits), 64) / 64;
+}
+
+constexpr inline uint64_t nwords(uint64_t bits) {
+  return roundUp(bits, 64) / 64;
+}
+
 inline int32_t getAndClearLastSetBit(uint16_t& bits) {
   int32_t trailingZeros = __builtin_ctz(bits);
   // erase last non-zero bit
