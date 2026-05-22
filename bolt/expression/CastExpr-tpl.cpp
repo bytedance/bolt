@@ -254,7 +254,7 @@ class Converter {
 
   template <typename K>
   static constexpr bool isDecimal =
-      K::deco == Decoration::ShortDecimal || K::deco == Decoration::LongDecimal;
+      std::is_same_v<K, ShortDecimalKind> || std::is_same_v<K, LongDecimalKind>;
 
   static constexpr bool fromBool = std::is_same_v<FromKind, BooleanKind>;
   static constexpr bool fromString = std::is_same_v<FromKind, StringKind>;
@@ -274,21 +274,21 @@ class Converter {
 
  public:
   Converter(exec::EvalCtx& context, TypePtr fromType, TypePtr toType) {
-    if (FromKind::deco == Decoration::ShortDecimal) {
+    if constexpr (std::is_same_v<FromKind, ShortDecimalKind>) {
       fromPrecision_ = fromType->asShortDecimal().precision();
       fromScale_ = fromType->asShortDecimal().scale();
       fromDecimalMaxSize_ = DecimalUtil::stringSize(fromPrecision_, fromScale_);
       canAsInlinedStr_ = StringView::isInline(fromDecimalMaxSize_);
-    } else if (FromKind::deco == Decoration::LongDecimal) {
+    } else if constexpr (std::is_same_v<FromKind, LongDecimalKind>) {
       fromPrecision_ = fromType->asLongDecimal().precision();
       fromScale_ = fromType->asLongDecimal().scale();
       fromDecimalMaxSize_ = DecimalUtil::stringSize(fromPrecision_, fromScale_);
       canAsInlinedStr_ = StringView::isInline(fromDecimalMaxSize_);
     }
-    if (ToKind::deco == Decoration::ShortDecimal) {
+    if constexpr (std::is_same_v<ToKind, ShortDecimalKind>) {
       toPrecision_ = toType->asShortDecimal().precision();
       toScale_ = toType->asShortDecimal().scale();
-    } else if (ToKind::deco == Decoration::LongDecimal) {
+    } else if constexpr (std::is_same_v<ToKind, LongDecimalKind>) {
       toPrecision_ = toType->asLongDecimal().precision();
       toScale_ = toType->asLongDecimal().scale();
     }
@@ -533,7 +533,7 @@ class Converter {
             from, fromScale_, fromDecimalMaxSize_, cached);
         to.set(std::string_view(cached, strSize));
       }
-    } else if constexpr (FromKind::deco == Decoration::Date) {
+    } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
         auto output = DATE()->toString(from);
         to.set(output);
@@ -626,7 +626,7 @@ class Converter {
         return nullOutput ? ConvertStatus::OTHER_FAILURE
                           : ConvertStatus::SUCCESS;
       }
-    } else if constexpr (FromKind::deco == Decoration::Date) {
+    } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       static const int64_t kMillisPerDay{86'400'000};
       to = Timestamp::fromMillis(from * kMillisPerDay);
       bool hasError = false;
@@ -789,7 +789,7 @@ class VectorConverter : public ConverterBase {
 
   template <typename K>
   static constexpr bool isDecimalKind =
-      K::deco == Decoration::ShortDecimal || K::deco == Decoration::LongDecimal;
+      std::is_same_v<K, ShortDecimalKind> || std::is_same_v<K, LongDecimalKind>;
 
   static constexpr bool kLegacySensitive = std::is_same_v<ToKind, StringKind> &&
       (std::is_same_v<FromKind, TimestampKind> || isFloatKind<FromKind>);
@@ -912,7 +912,10 @@ class VectorConverter : public ConverterBase {
 struct CastKindKey {
   TypeKind storage;
   Decoration deco;
-  bool operator==(const CastKindKey& o) const = default;
+  bool operator==(const CastKindKey& o) const {
+    return storage == o.storage && deco == o.deco;
+  }
+
   bool operator<(const CastKindKey& o) const {
     return std::tie(storage, deco) < std::tie(o.storage, o.deco);
   }
