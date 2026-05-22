@@ -74,32 +74,6 @@ namespace {
 constexpr const char* kTypeMappingErrorFmtStr =
     "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
 
-// Checks whether 'type' is an integer type at least as wide as
-// 'minTypeKind'. Used to gate integer widening:
-//   minTypeKind=TINYINT  accepts TINYINT/SMALLINT/INTEGER/BIGINT (INT_8 leaf)
-//   minTypeKind=SMALLINT accepts SMALLINT/INTEGER/BIGINT          (INT_16 leaf)
-//   minTypeKind=INTEGER  accepts INTEGER/BIGINT                   (INT_32 leaf)
-//   minTypeKind=BIGINT   accepts BIGINT only                      (INT_64 leaf)
-bool isIntCompatible(
-    const bytedance::bolt::TypePtr& type,
-    bytedance::bolt::TypeKind minTypeKind) {
-  using TK = bytedance::bolt::TypeKind;
-  static_assert(
-      static_cast<int>(TK::TINYINT) < static_cast<int>(TK::SMALLINT) &&
-      static_cast<int>(TK::SMALLINT) < static_cast<int>(TK::INTEGER) &&
-      static_cast<int>(TK::INTEGER) < static_cast<int>(TK::BIGINT));
-  const auto kind = type->kind();
-  switch (kind) {
-    case TK::TINYINT:
-    case TK::SMALLINT:
-    case TK::INTEGER:
-    case TK::BIGINT:
-      return static_cast<int>(kind) >= static_cast<int>(minTypeKind);
-    default:
-      return false;
-  }
-}
-
 // Predicates for the cross-family implicit cast that the column reader
 // layer performs at read time (Spark/Hive STRING<->INT compatibility):
 //   - StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file ->
@@ -111,6 +85,11 @@ bool isIntCompatible(
 // still get the strict check at ParquetColumnReader.cpp:95 via
 // matchType() for the VARCHAR-file -> INT-requested direction, which
 // fires after convertType and throws with its existing error message.
+// Cross-family implicit cast for VARCHAR/VARBINARY file columns:
+// StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file -> int
+// family requested type. Non-Spark builds also get a strict check at
+// ParquetColumnReader.cpp:95 via matchType() that fires after convertType
+// and throws with its own error message for that case.
 bool acceptsVarcharFileForReaderCast(const bytedance::bolt::TypePtr& t) {
   using TK = bytedance::bolt::TypeKind;
   const auto k = t->kind();
@@ -120,6 +99,30 @@ bool acceptsVarcharFileForReaderCast(const bytedance::bolt::TypePtr& t) {
 bool acceptsIntFileForReaderCast(const bytedance::bolt::TypePtr& t) {
   return t->kind() == bytedance::bolt::TypeKind::VARCHAR ||
       t->kind() == bytedance::bolt::TypeKind::VARBINARY;
+}
+
+// Compatibility predicate for Parquet INT32-physical source columns
+// (INT_8 / INT_16 / INT_32 / UINT_* annotated, plus unannotated INT32).
+// Accepts:
+//   - Any int-family target. Narrowing (file INT32 -> requested ByteType /
+//     ShortType) is silently truncated at read time, matching Spark's
+//     vectorized reader. Covers HIVE-14294 where Hive 1.x writes
+//     TINYINT/SMALLINT as unannotated INT32 (SPARK-16632).
+//   - VARCHAR / VARBINARY target via IntegerColumnReader::makeCastExpr,
+//     which performs the int-to-string cast at read time.
+bool isInt32Compatible(const bytedance::bolt::TypePtr& type) {
+  using TK = bytedance::bolt::TypeKind;
+  const auto k = type->kind();
+  return k == TK::TINYINT || k == TK::SMALLINT || k == TK::INTEGER ||
+      k == TK::BIGINT || acceptsIntFileForReaderCast(type);
+}
+
+// Compatibility predicate for Parquet INT64-physical source columns.
+// Accepts BIGINT only (no integer narrowing), plus VARCHAR / VARBINARY
+// via IntegerColumnReader::makeCastExpr.
+bool isInt64Compatible(const bytedance::bolt::TypePtr& type) {
+  using TK = bytedance::bolt::TypeKind;
+  return type->kind() == TK::BIGINT || acceptsIntFileForReaderCast(type);
 }
 
 } // namespace
@@ -1023,10 +1026,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT8 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::TINYINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return TINYINT();
 
       case thrift::ConvertedType::INT_16:
@@ -1034,10 +1034,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT16 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::SMALLINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return SMALLINT();
 
       case thrift::ConvertedType::INT_32:
@@ -1045,10 +1042,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "INT32 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::INTEGER) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return INTEGER();
 
       case thrift::ConvertedType::INT_64:
@@ -1056,10 +1050,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "INT64 converted type can only be set for value of thrift::Type::INT64");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::BIGINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt64Compatible(t); });
         return BIGINT();
 
       case thrift::ConvertedType::UINT_8:
@@ -1067,10 +1058,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_8 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::TINYINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return TINYINT();
 
       case thrift::ConvertedType::UINT_16:
@@ -1078,10 +1066,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_16 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::SMALLINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return SMALLINT();
 
       case thrift::ConvertedType::UINT_32:
@@ -1089,10 +1074,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_32 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::INTEGER) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return INTEGER();
 
       case thrift::ConvertedType::UINT_64:
@@ -1100,10 +1082,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "UINT_64 converted type can only be set for value of thrift::Type::INT64");
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::BIGINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt64Compatible(t); });
         return BIGINT();
 
       case thrift::ConvertedType::DATE:
@@ -1188,10 +1167,7 @@ TypePtr ReaderBase::convertType(
             [](const TypePtr& t) { return t->kind() == TypeKind::BOOLEAN; });
         return BOOLEAN();
       case thrift::Type::type::INT32:
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::INTEGER) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return INTEGER();
       case thrift::Type::type::INT64:
         // For Int64 Timestamp in nano precision
@@ -1212,10 +1188,7 @@ TypePtr ReaderBase::convertType(
           });
           return TIMESTAMP();
         }
-        checkRequested([](const TypePtr& t) {
-          return isIntCompatible(t, TypeKind::BIGINT) ||
-              acceptsIntFileForReaderCast(t);
-        });
+        checkRequested([](const TypePtr& t) { return isInt64Compatible(t); });
         return BIGINT();
       case thrift::Type::type::INT96:
         checkRequested(

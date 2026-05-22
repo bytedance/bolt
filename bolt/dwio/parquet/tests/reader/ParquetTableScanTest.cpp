@@ -1333,10 +1333,21 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"array_declared_vs_varchar_file", VARCHAR(),       ARRAY(VARCHAR()),   true},
     {"array_declared_vs_bigint_file",  BIGINT(),        ARRAY(BIGINT()),    true},
 
-    // ---- Reject: integer narrowing ----
+    // ---- Reject: INT64 narrowing (both flavours; Spark INT64 reader
+    //               also rejects Byte/Short/Integer requests). ----
     {"bigint_to_integer",              BIGINT(),        INTEGER(),          true},
-    {"integer_to_smallint",            INTEGER(),       SMALLINT(),         true},
-    {"integer_to_tinyint",             INTEGER(),       TINYINT(),          true},
+    {"bigint_to_smallint",             BIGINT(),        SMALLINT(),         true},
+    {"bigint_to_tinyint",              BIGINT(),        TINYINT(),          true},
+
+    // ---- Accept: INT32 narrowing. File INT32 -> requested Byte/Short
+    //      is silently truncated at read time by IntegerColumnReader,
+    //      matching Spark's vectorized reader (ByteUpdater/ShortUpdater)
+    //      and covering HIVE-14294 / SPARK-16632 where Hive 1.x writes
+    //      TINYINT/SMALLINT as unannotated INT32. See the
+    //      integer-narrowing block in convertTypePolicyValueChecks
+    //      for end-to-end values. ----
+    {"integer_to_smallint",            INTEGER(),       SMALLINT(),         false},
+    {"integer_to_tinyint",             INTEGER(),       TINYINT(),          false},
 
     // ---- Reject: cross-family with no column-reader auto-cast ----
     {"integer_to_double",              INTEGER(),       DOUBLE(),           true},
@@ -1534,6 +1545,41 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 #endif
+
+  // 3a/3b. INT32 narrowing: file INT32 read back as TINYINT and SMALLINT.
+  //        Models HIVE-14294 / SPARK-16632 where Hive 1.x writes TINYINT/
+  //        SMALLINT as unannotated INT32. The matching matrix cases only
+  //        assert no-throw; these check the data path actually narrows
+  //        correctly instead of returning garbage. IntegerColumnReader
+  //        does the silent truncation, matching Spark / Trino / parquet-mr.
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    {
+      auto declared = ROW({"c0"}, {TINYINT()});
+      auto plan =
+          PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      auto expected =
+          makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
+      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    }
+    {
+      auto declared = ROW({"c0"}, {SMALLINT()});
+      auto plan =
+          PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      auto expected =
+          makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
+      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    }
+  }
 
   // 4. Auto-cast INTEGER -> VARCHAR: [1,2,3] -> ["1","2","3"].
   //    Works in both build flavours: matchType() lets INT fileType fall
