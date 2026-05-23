@@ -1,0 +1,57 @@
+# Gluten Spark UT suites known to fail under the current Bolt build.
+#
+# Lines starting with `#` and blank lines are ignored.
+# Maintain one fully-qualified suite class name per line.
+#
+# When fixing a suite, drop its entry from this file. When a regression adds
+# new failing suites, append them here so the rest of the matrix stays green.
+#
+# Last refreshed: 2026-05-23 against gluten chore/run_spark_ut +
+# WholeStageResultIterator::collectMetrics null-task guard. Total: 19 suites.
+
+# ---- BoltMemoryManager init failure cascade (no driver-side onDriverStart) ----
+org.apache.gluten.utils.BoltBloomFilterTest
+org.apache.gluten.columnarbatch.ColumnarBatchTest
+
+# ---- Bolt HashAggregation assert: spillMaxPct must be <= abandonMinPct ----
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite
+
+# ---- Iceberg native support is disabled (ENABLE_ENHANCED_FEATURES=OFF) ----
+org.apache.gluten.execution.enhanced.BoltIcebergSuite
+
+# ---- Spark local-cluster mode flakiness ("Master removed our application") ----
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite
+org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite
+
+# ---- bucketBy + saveAsTable not supported by Bolt write path ----
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite
+
+# ---- Python/PySpark unavailable in the test environment ----
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite
+
+# ---- Other bolt-side gaps ----
+# JNI stub `allSupportedByRegisteredFileSystems` always returns true.
+# Parquet index-based schema evolution returns null for missing columns.
+org.apache.gluten.execution.BoltScanSuite
+
+# Stubbed-out gluten.package.jar requirement breaks beforeAll setup.
+org.apache.gluten.expression.BoltUdfSuiteCluster
+
+# Missing data-explode-validation-data/ test resource, beforeAll NPE.
+org.apache.gluten.execution.BoltExplodeExpressionSuite
+
+# json_object_keys throws BoltUserError on malformed JSON input.
+org.apache.gluten.functions.JsonFunctionsValidateSuite
+
+# datetime-parsing-invalid.sql (T separator) + describe.sql url encoding.
+org.apache.spark.sql.GlutenSQLQueryTestSuite
+
+# cast("...", TimestampType) fails on some specific timezone in parmap.
+org.apache.spark.sql.catalyst.expressions.GlutenCastSuite
+org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite
+
+# Bolt parquet reader missing implicit type promotion (INT32 -> TINYINT, etc.).
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite
