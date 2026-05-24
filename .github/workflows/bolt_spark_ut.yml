@@ -2,17 +2,13 @@
 # scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-suite isolation,
 # slow-suites priority dispatch, case-level blacklist).
 #
-# Runtime: ~10-15 min after the arrow cache is warm. The first run on a new
-# cache key (i.e. when gluten patches arrow's build) pays ~25 min extra to
-# build org.apache.arrow:*:15.0.0-gluten from source via dev/build_arrow.sh,
-# since those jars are a private fork that Maven Central can't serve.
-#
-# Why a self-hosted runner with the bolt-ci container?
-#  * bwrap (used by run.sh for per-suite isolation) needs SYS_ADMIN; hence
-#    container options include --privileged.
-#  * Native bolt libs (cpp/build/bolt/) are expected to be present on the
-#    runner. This workflow does NOT build them; pair with the bolt build
-#    pipeline or stage cpp/build ahead of time.
+# Runtime: ~25 min on a warm runner; the first run on a fresh runner takes
+# ~1.5h because of three one-time builds:
+#   * gluten-arrow:15.0.0-gluten Java jars (~25 min via dev/build_arrow.sh)
+#   * Spark 3.5.5 tarballs (~1 min once cached)
+#   * Gluten cpp natives, including libglutenlibloader.so and libbolt_backend.so
+#     (~30-60 min clean; ccache + conan cache drop subsequent runs to ~5-10 min)
+# All three are cached across runs via actions/cache or persistent volumes.
 
 name: Bolt Spark UT
 
@@ -25,6 +21,11 @@ on:
 env:
   GLUTEN_REPO: zhangxffff/gluten
   GLUTEN_REF: chore/run_gluten_ut
+  # Matches build-test.yml — ccache + conan cache live under /data on the host.
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAX_SIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -37,7 +38,14 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       # --privileged: bwrap (run.sh per-suite isolation) needs SYS_ADMIN.
       options: --user root --init --privileged
-    timeout-minutes: 180
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    timeout-minutes: 240
     steps:
       - name: Checkout bolt (this repo)
         uses: actions/checkout@v6
@@ -66,6 +74,25 @@ jobs:
           rm -rf /tmp/bwrap
           bwrap --version
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+
+      - name: Set up bolt build environment (conan)
+        uses: ./.github/actions/bolt-build-base
+
+      - name: Export local bolt as a conan recipe
+        # gluten's `make bolt-recipe` clones bolt from github.com/bytedance/bolt
+        # at the BOLT_BUILD_VERSION tag — that bypasses any PR changes. Stand in
+        # for it by exporting the LOCAL bolt checkout (which has this PR's diff)
+        # into the conan cache under the same `bolt/main` reference.
+        run: conan export ./conanfile.py --name=bolt --version=main
+
+      - name: Build gluten native libs (make release)
+        working-directory: ${{ github.workspace }}/gluten
+        # Produces cpp/build/releases/libglutenlibloader.so and
+        # libbolt_backend.so. backends-bolt/pom.xml's <resource> declaration
+        # copies them into target/scala-2.12/classes/linux/amd64/ at
+        # mvn-install time, where the JNI loader on the test classpath
+        # finds them.
+        run: make release BOLT_BUILD_VERSION=main
 
       - name: Restore gluten-arrow:15.0.0-gluten jars
         id: arrow-cache
