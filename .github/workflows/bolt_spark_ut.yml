@@ -90,9 +90,13 @@ jobs:
         # absent, so no source-build layout shim is needed.
         # Source tarball: extract only the SQL test resources that some
         # Gluten suites read at runtime.
+        # Mirror choice: dlcdn.apache.org only serves the *latest* 3.5.x (now
+        # 3.5.8) and archive.apache.org is unreachably slow from this runner
+        # (saw a 2h47m hang). huaweicloud mirrors retired versions and is
+        # responsive from CN networks.
         run: |
           set -e
-          BASE=https://archive.apache.org/dist/spark/spark-3.5.5
+          BASE=https://mirrors.huaweicloud.com/apache/spark/spark-3.5.5
           DEST=shims/spark35/spark_home
           mkdir -p "$DEST"
           wget -qO- "$BASE/spark-3.5.5-bin-hadoop3.tgz" | tar -xz --strip-components=1 -C "$DEST"
