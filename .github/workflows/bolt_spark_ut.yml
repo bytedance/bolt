@@ -50,11 +50,12 @@ jobs:
           path: gluten
 
       - name: Install JDK 17 + bubblewrap
-        # bolt-ci already has maven; default-jdk-headless on Debian 12 is 17.
+        # Full JDK (not -headless) is required: arrow's cmake JNI detection
+        # needs AWT, which is only present in the full openjdk-17-jdk package.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            openjdk-17-jdk-headless bubblewrap
+            openjdk-17-jdk bubblewrap
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
       - name: Restore gluten-arrow:15.0.0-gluten jars
