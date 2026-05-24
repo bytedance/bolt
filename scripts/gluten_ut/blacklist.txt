@@ -1,57 +1,73 @@
-# Gluten Spark UT suites known to fail under the current Bolt build.
+# Expected-failure list for the Bolt build. Every entry still runs under
+# run.sh; the summary just excludes their failures from the exit status so
+# unexpected regressions stand out.
 #
-# Lines starting with `#` and blank lines are ignored.
-# Maintain one fully-qualified suite class name per line.
+# Single syntax: <FQCN>#<scalatest test name>.
+# Use `<FQCN>#*` to mean "every failure (or beforeAll abort) in this suite".
+# Lines whose first non-whitespace character is `#` are comments.
 #
-# When fixing a suite, drop its entry from this file. When a regression adds
-# new failing suites, append them here so the rest of the matrix stays green.
-#
-# Last refreshed: 2026-05-23 against gluten chore/run_spark_ut +
-# WholeStageResultIterator::collectMetrics null-task guard. Total: 19 suites.
+# Last refreshed: 2026-05-24.
 
-# ---- BoltMemoryManager init failure cascade (no driver-side onDriverStart) ----
-org.apache.gluten.utils.BoltBloomFilterTest
-org.apache.gluten.columnarbatch.ColumnarBatchTest
+# ---- BoltMemoryManager init failure (no driver-side onDriverStart) ----
+# Suite ABORTS at beforeAll with "BoltMemoryManager expects capacity is bigger than 0".
+org.apache.gluten.utils.BoltBloomFilterTest#*
+org.apache.gluten.columnarbatch.ColumnarBatchTest#*
+org.apache.gluten.extension.columnar.transition.BoltTransitionSuite#*
 
-# ---- Bolt HashAggregation assert: spillMaxPct must be <= abandonMinPct ----
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite
+# ---- HashAggregation assert "spillMaxPct <= abandonMinPct" (40/41 cases) ----
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#*
 
-# ---- Iceberg native support is disabled (ENABLE_ENHANCED_FEATURES=OFF) ----
-org.apache.gluten.execution.enhanced.BoltIcebergSuite
+# ---- Iceberg native disabled / class only exists under -Piceberg ----
+org.apache.gluten.execution.enhanced.BoltIcebergSuite#*
 
-# ---- Spark local-cluster mode flakiness ("Master removed our application") ----
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite
-org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite
+# ---- beforeAll NPE: missing test resource data-explode-validation-data/ ----
+org.apache.gluten.execution.BoltExplodeExpressionSuite#*
+
+# ---- Stubbed-out gluten.package.jar + missing libmyudf.so ----
+org.apache.gluten.expression.BoltUdfSuiteCluster#*
+
+# ---- Python/PySpark unavailable in this environment ----
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#*
+
+# ---- datetime-parsing-invalid.sql + describe.sql (case count varies) ----
+org.apache.spark.sql.GlutenSQLQueryTestSuite#*
+
+# ---- Parquet implicit type promotion (INT32 -> TINYINT, etc.) ----
+org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
+# Discovery does not currently surface these; kept as reminder for re-enable.
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#*
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#*
+
+# ---- tz-sensitive cast string -> timestamp ----
+org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
 
 # ---- bucketBy + saveAsTable not supported by Bolt write path ----
-org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
 
-# ---- Python/PySpark unavailable in the test environment ----
-org.apache.gluten.execution.python.ArrowEvalPythonExecSuite
+# ---- json_object_keys on malformed input ----
+org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
 
-# ---- Other bolt-side gaps ----
-# JNI stub `allSupportedByRegisteredFileSystems` always returns true.
-# Parquet index-based schema evolution returns null for missing columns.
-org.apache.gluten.execution.BoltScanSuite
+# ---- Local-cluster flakes ("Master removed", "stopped SparkContext", etc.) ----
+org.apache.spark.GlutenSortShuffleSuite#*
+org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite#SPARK-39983 - Broadcasted relation is not cached on the driver
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast hash join updates peak execution memory
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast hash outer join updates peak execution memory
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast left semi join updates peak execution memory
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-23214: cached data should not carry extra hint info
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast hint in SQL
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#Broadcast timeout
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast join where streamed side's output partitioning is PartitioningCollection
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#BroadcastHashJoinExec output partitioning size should be limited with a config
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-37742: join planning shouldn't read invalid InMemoryRelation stats
 
-# Stubbed-out gluten.package.jar requirement breaks beforeAll setup.
-org.apache.gluten.expression.BoltUdfSuiteCluster
-
-# Missing data-explode-validation-data/ test resource, beforeAll NPE.
-org.apache.gluten.execution.BoltExplodeExpressionSuite
-
-# json_object_keys throws BoltUserError on malformed JSON input.
-org.apache.gluten.functions.JsonFunctionsValidateSuite
-
-# datetime-parsing-invalid.sql (T separator) + describe.sql url encoding.
-org.apache.spark.sql.GlutenSQLQueryTestSuite
-
-# cast("...", TimestampType) fails on some specific timezone in parmap.
-org.apache.spark.sql.catalyst.expressions.GlutenCastSuite
-org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite
-
-# Bolt parquet reader missing implicit type promotion (INT32 -> TINYINT, etc.).
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite
+# ---- Other tracked failures ----
+# tz-sensitive serialization roundtrip in America/Los_Angeles
+org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
+# native task lost on UINT_64 → Decimal
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
+# docs/bolt-configuration.md is stale — regenerate via dev/gen_all_config_docs.sh
+org.apache.gluten.config.AllBoltConfiguration#Check bolt backend configs

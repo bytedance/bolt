@@ -1,0 +1,82 @@
+# Run the full gluten Spark UT matrix against the Bolt backend via
+# scripts/gluten_ut/run.sh (parallel dispatcher: bwrap per-suite isolation,
+# slow-suites priority, case-level blacklist).
+#
+# The bolt repo owns the runner + blacklist/slow lists. Gluten is checked out
+# as a sibling at zhangxffff/gluten#chore/run_gluten_ut so we can pin the
+# tested gluten state explicitly. Native bolt libs (cpp/build/bolt/) are
+# expected to be already present on the runner; this workflow does NOT build
+# them. Pair with a build job or use a self-hosted runner with cpp/build
+# pre-staged.
+
+name: Bolt Spark UT
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bolt_spark_ut.yml'
+      - 'scripts/gluten_ut/**'
+
+env:
+  GLUTEN_REPO: zhangxffff/gluten
+  GLUTEN_REF: chore/run_gluten_ut
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  spark-ut:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout bolt (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout gluten at ${{ env.GLUTEN_REF }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GLUTEN_REPO }}
+          ref: ${{ env.GLUTEN_REF }}
+          path: gluten
+
+      - name: Install Java 17 + maven + bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            openjdk-17-jdk-headless maven bubblewrap
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-bolt-ut-${{ hashFiles('gluten/**/pom.xml') }}
+          restore-keys: m2-bolt-ut-
+
+      - name: Install Spark 3.5.5 binary + test resources
+        env:
+          INSTALL_DIR: ${{ github.workspace }}/gluten
+        working-directory: ${{ github.workspace }}/gluten
+        run: bash .github/workflows/util/install_spark_resources.sh 3.5
+
+      - name: Run gluten Spark UT (parallel, blacklist-aware)
+        env:
+          GLUTEN_HOME: ${{ github.workspace }}/gluten
+          SPARK_HOME: ${{ github.workspace }}/gluten/shims/spark35/spark_home/
+        run: bash scripts/gluten_ut/run.sh
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolt-spark-ut-reports
+          path: |
+            scripts/gluten_ut/logs/_install.log
+            scripts/gluten_ut/logs/_dispatch.log
+            scripts/gluten_ut/logs/_suites.tsv
+            scripts/gluten_ut/logs/_suites_dispatch_order.tsv
+            scripts/gluten_ut/logs/reports/**/TEST-*.xml
+            scripts/gluten_ut/logs/*.log
+          if-no-files-found: warn
+          retention-days: 14

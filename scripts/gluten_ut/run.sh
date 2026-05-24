@@ -1,302 +1,234 @@
 #!/usr/bin/env bash
 #
-# Run the full gluten Spark UT suite against the Bolt backend.
+# Run the gluten Spark UT matrix against the Bolt backend.
 #
-# Modes:
-#   (default)          One reactor-wide `mvn clean test` invocation, single log.
-#                      Fastest end-to-end but failures cluster in one log file.
-#   --parallel [JOBS]  Pre-compile everything once, discover all test suites,
-#                      then run each suite in its own mvn invocation in
-#                      parallel. Per-suite stdout/stderr lands in $LOG_DIR/<fqcn>.log.
-#                      JOBS defaults to $(nproc).
+# JOBS=1  : single reactor-wide `mvn clean test` (returns mvn's exit code,
+#           sees failures via per-module surefire-reports/).
+# JOBS>=2 : parallel mode —
+#   1. mvn install -DskipTests        build jars + test-classes
+#   2. scan test-classes/             discover every test suite
+#   3. xargs -P JOBS                  one mvn per suite, slow ones first,
+#                                     bwrap-isolated target/surefire{,-reports}
+#   4. summarize TEST-*.xml           split failures into expected/unexpected
+#                                     by blacklist (suite- or case-level).
 #
-# Required environment variables:
-#   GLUTEN_HOME : path to the gluten source checkout (the repo that ships
-#                 backends-bolt/, gluten-ut/, etc.)
-#   SPARK_HOME  : path to the spark source checkout used by suites that
-#                 reference -Dspark.test.home (e.g. gluten-ut/spark35).
+# Required env: GLUTEN_HOME, SPARK_HOME.
+# Optional env: JOBS (parallelism, default nproc/3).
 #
-# Optional environment variables:
-#   MVN              : maven binary to invoke (default: mvn)
-#   LOG_DIR          : where per-suite logs land in parallel mode
-#                      (default: $GLUTEN_HOME/gluten-ut-logs)
-#   EXTRA_MVN_ARGS   : extra args appended to every mvn command line
-#   BLACKLIST_FILE   : path to the suite blacklist (default: alongside this
-#                      script as blacklist.txt). In parallel mode the listed
-#                      suites are SKIPPED entirely — they neither run nor count
-#                      against the exit status. Remove an entry as soon as the
-#                      suite is fixed so it joins the green matrix again.
+# Logs + reports go to $SCRIPT_DIR/logs/ (gitignored).
+# blacklist.txt and slow_suites.txt live next to this script.
 #
-# Exit status:
-#   Sequential mode: returns whatever the single mvn invocation returns
-#                    (which is 0 with -Dmaven.test.failure.ignore=true even
-#                    when individual tests fail; inspect surefire reports to
-#                    decide pass/fail).
-#   Parallel mode:   0 when every non-blacklisted suite is green; 1 otherwise.
-#                    Prints a per-suite failure summary on stderr at the end.
+# Parallel-mode exit: 0 iff every failing case is on the blacklist, else 1.
 
 set -euo pipefail
 
 ###############################################################################
-# Args
+# Maven profiles — edit here to (de)activate optional sub-systems.
 ###############################################################################
-MODE="sequential"
-PARALLEL_JOBS=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --parallel)
-      MODE="parallel"
-      shift
-      if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
-        PARALLEL_JOBS="$1"
-        shift
-      fi
-      ;;
-    --jobs|-j)
-      PARALLEL_JOBS="$2"
-      shift 2
-      ;;
-    -h|--help)
-      sed -n '2,40p' "$0"
-      exit 0
-      ;;
-    *)
-      echo "Unknown flag: $1" >&2
-      exit 2
-      ;;
-  esac
-done
-
-if [[ "$MODE" == "parallel" && -z "$PARALLEL_JOBS" ]]; then
-  PARALLEL_JOBS="$(nproc 2>/dev/null || echo 4)"
-fi
+# Active by default: Spark 3.5 with UT shims, Java 17, Bolt backend, Celeborn.
+#
+# Intentionally OMITTED data-lake profiles (-Piceberg / -Phudi / -Pdelta /
+# -Ppaimon):
+#   Activating any of these makes Maven compile the matching backends-bolt
+#   `src-<name>/` sources into backends-bolt.jar, which ships a
+#   META-INF/gluten-components/Bolt<Name>Component marker. Gluten's component
+#   discovery then reflectively loads Bolt<Name>Component on every test JVM,
+#   and that class statically references symbols in gluten-<name>.jar — a
+#   sibling module that is NOT on a per-suite `mvn -pl <module>` classpath.
+#   The result is `NoClassDefFoundError: OffloadIcebergScan$` (or the paimon /
+#   hudi / delta equivalent) inside SparkSession.applyExtensions, which Spark
+#   silently catches — dropping ALL Gluten extensions for that session and
+#   yielding hundreds of spurious plan-shape failures across unrelated suites.
+#
+#   If you need to test the iceberg / paimon / hudi / delta integration,
+#   either (a) add gluten-<name> as a test-scope dep in every gluten-ut
+#   module's POM under the matching profile, or (b) run just those suites
+#   under a one-off `mvn ... -P<name>` invocation outside this script.
+MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17)
 
 ###############################################################################
-# Env validation + shared config
+# Config
 ###############################################################################
 : "${GLUTEN_HOME:?GLUTEN_HOME must point to the gluten source checkout}"
-: "${SPARK_HOME:?SPARK_HOME must point to the spark source checkout (test resources)}"
-
+: "${SPARK_HOME:?SPARK_HOME must point to the spark binary + test resources}"
 [[ -d "$GLUTEN_HOME" ]] || { echo "GLUTEN_HOME=$GLUTEN_HOME is not a directory" >&2; exit 1; }
 [[ -d "$SPARK_HOME"  ]] || { echo "SPARK_HOME=$SPARK_HOME is not a directory"   >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BLACKLIST_FILE="${BLACKLIST_FILE:-$SCRIPT_DIR/blacklist.txt}"
-MVN_BIN="${MVN:-mvn}"
+BLACKLIST_FILE="$SCRIPT_DIR/blacklist.txt"
+SLOW_SUITES_FILE="$SCRIPT_DIR/slow_suites.txt"
+LOG_DIR="$SCRIPT_DIR/logs"
+MVN_BIN=mvn
 
-MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Piceberg -Pceleborn -Pjava-17)
-COMMON_MVN_ARGS=(
-  -DfailIfNoTests=false
-  -Dexec.skip
-  -Dmaven.test.failure.ignore=true
-  -DargLine="-Dspark.test.home=$SPARK_HOME"
-)
-
-echo "GLUTEN_HOME=$GLUTEN_HOME"
-echo "SPARK_HOME=$SPARK_HOME"
-echo "MODE=$MODE${PARALLEL_JOBS:+ (jobs=$PARALLEL_JOBS)}"
-if [[ -f "$BLACKLIST_FILE" ]]; then
-  echo "BLACKLIST_FILE=$BLACKLIST_FILE"
+# Empirically each suite needs ~3 active threads (mvn + surefire JVM + Spark
+# internals). nproc/3 saturates CPU without thrashing. Override via JOBS.
+if [[ -z "${JOBS:-}" ]]; then
+  JOBS=$(( $(nproc 2>/dev/null || echo 4) / 3 ))
+  (( JOBS < 1 )) && JOBS=1
 fi
 
-cd "$GLUTEN_HOME"
-
-###############################################################################
-# Sequential mode
-###############################################################################
-if [[ "$MODE" == "sequential" ]]; then
-  exec "$MVN_BIN" clean test \
-    "${MVN_PROFILES[@]}" \
-    "${COMMON_MVN_ARGS[@]}" \
-    ${EXTRA_MVN_ARGS:-}
-fi
-
-###############################################################################
-# Parallel mode
-###############################################################################
-LOG_DIR="${LOG_DIR:-$GLUTEN_HOME/gluten-ut-logs}"
 mkdir -p "$LOG_DIR"
-# Clear old per-suite logs but keep the meta-step logs across runs if reused.
-find "$LOG_DIR" -maxdepth 1 -name '*.log' -not -name '_*.log' -delete 2>/dev/null || true
-
+cd "$GLUTEN_HOME"
 step() { echo "===== $* ====="; }
+echo "GLUTEN_HOME=$GLUTEN_HOME  SPARK_HOME=$SPARK_HOME  JOBS=$JOBS"
 
-step "Step 1/3: build & install all jars + test-classes (skipTests, -T $PARALLEL_JOBS)"
-# `-DskipTests` keeps test-compile running but skips surefire/scalatest
-# execution, so target/test-classes/ is populated for the discovery below.
-# `-T $PARALLEL_JOBS` parallelizes the maven reactor across modules so this
-# step doesn't dominate wall time.
-"$MVN_BIN" clean install \
-  -T "$PARALLEL_JOBS" \
-  "${MVN_PROFILES[@]}" \
-  -DskipTests \
-  -Dexec.skip \
-  ${EXTRA_MVN_ARGS:-} \
+###############################################################################
+# Sequential mode (JOBS=1): single reactor-wide mvn invocation.
+###############################################################################
+if (( JOBS == 1 )); then
+  step "Sequential mode: mvn clean test (reactor-wide)"
+  exec "$MVN_BIN" clean test "${MVN_PROFILES[@]}" \
+    -DfailIfNoTests=false -Dexec.skip \
+    -DargLine="-Dspark.test.home=$SPARK_HOME"
+fi
+
+# Parallel mode requires bwrap for per-suite target/ isolation.
+command -v bwrap >/dev/null 2>&1 || {
+  echo "bwrap is required for parallel mode. Install bubblewrap or set JOBS=1." >&2
+  exit 1
+}
+
+###############################################################################
+# Step 1/3: install jars + test-classes
+###############################################################################
+step "Step 1/3: mvn clean install -DskipTests (-T $JOBS)"
+"$MVN_BIN" clean install -T "$JOBS" "${MVN_PROFILES[@]}" \
+  -DskipTests -Dexec.skip \
   >"$LOG_DIR/_install.log" 2>&1 || {
     echo "Install step failed; see $LOG_DIR/_install.log" >&2
     tail -40 "$LOG_DIR/_install.log" >&2
     exit 1
   }
 
+###############################################################################
+# Step 2/3: discover suites
+###############################################################################
 step "Step 2/3: discover suites"
-SUITE_MAP_ALL="$LOG_DIR/_suites_all.tsv"   # tab-separated: <module>\t<fqcn>
-SUITE_MAP="$LOG_DIR/_suites.tsv"           # after blacklist filtering
-SKIPPED_MAP="$LOG_DIR/_suites_skipped.tsv"
-: >"$SUITE_MAP_ALL"
+SUITE_MAP="$LOG_DIR/_suites.tsv"   # tab-separated: <module>\t<fqcn>
 : >"$SUITE_MAP"
-: >"$SKIPPED_MAP"
 
-# Load blacklist into a hashable form.
-declare -A BLACKLIST
-if [[ -f "$BLACKLIST_FILE" ]]; then
-  while IFS= read -r raw; do
-    line="${raw%%#*}"
-    line="${line#"${line%%[![:space:]]*}"}"   # ltrim
-    line="${line%"${line##*[![:space:]]}"}"   # rtrim
-    [[ -z "$line" ]] && continue
-    BLACKLIST["$line"]=1
-  done <"$BLACKLIST_FILE"
-fi
-
-# Auto-discover modules with compiled tests by scanning for test-classes/.
-# We deliberately consider both maven-style (target/test-classes) and the
-# scala-2.12 layout (target/scala-*/test-classes) that scalatest emits.
-mapfile -t TEST_CLASSES_DIRS < <(
-  {
-    find . -mindepth 2 -maxdepth 6 -type d -name 'test-classes' 2>/dev/null
-  } | sed 's|^\./||' | sort -u
-)
-
-# Class-name pattern broad enough to catch every TEST-*.xml the sequential
-# `mvn test` produced: Suite/Spec/Test plus a handful of one-off names that
-# don't follow the usual convention. Anything that slips through and is not
-# actually a test class produces a no-op invocation, not a missed report.
+# Test-class FQCNs we accept. Anything outside still skips for free since
+# `mvn -Dtest=X` with -DfailIfNoTests=false is a no-op when X doesn't match.
 NAME_REGEX='(Suite|Spec|Test|Validation|Statistics|Generator|Configuration|EncodingLong)'
-
-for test_classes in "${TEST_CLASSES_DIRS[@]}"; do
-  [[ -d "$test_classes" ]] || continue
-  # Derive the module path from <module>/target/... or <module>/target/scala-*/...
-  module="${test_classes%%/target/*}"
+mapfile -t TEST_CLASSES_DIRS < <(
+  find . -mindepth 2 -maxdepth 6 -type d -name 'test-classes' 2>/dev/null \
+    | sed 's|^\./||' | sort -u
+)
+for tc in "${TEST_CLASSES_DIRS[@]}"; do
+  module="${tc%%/target/*}"
   while IFS= read -r class_file; do
-    rel="${class_file#$test_classes/}"
-    [[ "$rel" == *'$'* ]] && continue          # skip inner / anon classes
+    rel="${class_file#$tc/}"
+    [[ "$rel" == *'$'* ]] && continue   # skip inner / anon classes
     cls="${rel%.class}"
     cls="${cls//\//.}"
-    [[ "$cls" == *DiscoverySuite* ]] && continue  # scalatest's runtime artifacts
+    [[ "$cls" == *DiscoverySuite* ]] && continue
     [[ "$cls" =~ $NAME_REGEX ]] || continue
-    # Drop abstract base classes — they cannot be instantiated as a runnable
-    # suite. javap shows e.g. "public abstract class X extends Y".
-    if javap -p "$class_file" 2>/dev/null \
-         | grep -qE '^(public[[:space:]]+)?abstract[[:space:]]+(class|interface)\b'; then
-      continue
-    fi
-    printf '%s\t%s\n' "$module" "$cls" >>"$SUITE_MAP_ALL"
-    if [[ -n "${BLACKLIST[$cls]:-}" ]]; then
-      printf '%s\t%s\n' "$module" "$cls" >>"$SKIPPED_MAP"
-    else
-      printf '%s\t%s\n' "$module" "$cls" >>"$SUITE_MAP"
-    fi
-  done < <(find "$test_classes" -name '*.class' -type f)
+    # Drop abstract base classes; they can't be instantiated as a suite.
+    javap -p "$class_file" 2>/dev/null \
+      | grep -qE '^(public[[:space:]]+)?abstract[[:space:]]+(class|interface)\b' \
+      && continue
+    printf '%s\t%s\n' "$module" "$cls" >>"$SUITE_MAP"
+  done < <(find "$tc" -name '*.class' -type f)
 done
+# Same FQCN can compile into multiple modules' test-classes; dedup by FQCN.
+sort -u -t$'\t' -k2,2 -o "$SUITE_MAP" "$SUITE_MAP"
 
-# Some FQCNs appear in more than one module's test-classes (e.g. shared
-# gluten-ut copies). Dedup by FQCN so each suite gets dispatched exactly once;
-# pick whichever module sorts first to make the choice reproducible.
-sort -u -t$'\t' -k2,2 -o "$SUITE_MAP_ALL" "$SUITE_MAP_ALL"
-sort -u -t$'\t' -k2,2 -o "$SUITE_MAP"     "$SUITE_MAP"
-sort -u -t$'\t' -k2,2 -o "$SKIPPED_MAP"   "$SKIPPED_MAP"
-
-NUM_ALL=$(wc -l <"$SUITE_MAP_ALL" | tr -d ' ')
-NUM_RUN=$(wc -l <"$SUITE_MAP"     | tr -d ' ')
-NUM_SKIP=$(wc -l <"$SKIPPED_MAP"  | tr -d ' ')
-echo "Discovered $NUM_ALL suites total; will run $NUM_RUN, skip $NUM_SKIP (blacklisted)."
-if (( NUM_SKIP > 0 )); then
-  echo "Blacklisted (skipped):"
-  cut -f2 "$SKIPPED_MAP" | sed 's/^/  - /'
+NUM_RUN=$(wc -l <"$SUITE_MAP" | tr -d ' ')
+echo "Discovered $NUM_RUN suites total."
+if [[ -f "$BLACKLIST_FILE" ]]; then
+  bl_total=$(grep -cvE '^\s*(#|$)' "$BLACKLIST_FILE" || true)
+  bl_case=$(grep -vE '^\s*(#|$)' "$BLACKLIST_FILE" | grep -c '#' || true)
+  echo "Blacklist: $((bl_total - bl_case)) suite-level + $bl_case case-level entries."
 fi
 
-step "Step 3/3: run $NUM_RUN suites with $PARALLEL_JOBS parallel jobs"
+###############################################################################
+# Step 3/3: dispatch + summarize
+###############################################################################
+step "Step 3/3: run $NUM_RUN suites with $JOBS parallel jobs"
 
-# Each suite needs its own `target/surefire/` (booter jar tempDir) and
-# `target/surefire-reports/` to avoid 48 concurrent mvn invocations on the
-# same module clobbering each other ("The forked VM terminated without
-# properly saying goodbye"). Neither surefire-maven-plugin nor
-# scalatest-maven-plugin exposes a user-property override for those paths,
-# so we bind-mount them per-suite with bubblewrap.
-if ! command -v bwrap >/dev/null 2>&1; then
-  echo "bwrap is required for parallel mode (per-suite target/ isolation)." >&2
-  echo "Install bubblewrap (e.g. 'apt install bubblewrap') and re-run." >&2
-  exit 1
-fi
-
-WORK_ROOT="$LOG_DIR/work"        # per-suite writable target/surefire/
-REPORTS_ROOT="$LOG_DIR/reports"   # per-suite writable target/surefire-reports/
+WORK_ROOT="$LOG_DIR/work"
+REPORTS_ROOT="$LOG_DIR/reports"
 rm -rf "$WORK_ROOT" "$REPORTS_ROOT"
 mkdir -p "$WORK_ROOT" "$REPORTS_ROOT"
 
-# Wipe and pre-create the per-module surefire/ and surefire-reports/ paths so
-# bwrap has stable mountpoints to bind onto.
+# Pre-create per-module bind mountpoints used by run_one_suite below.
 while IFS= read -r module; do
   [[ -z "$module" ]] && continue
   rm -rf "$module/target/surefire-reports" 2>/dev/null || true
   mkdir -p "$module/target/surefire" "$module/target/surefire-reports"
-done < <(cut -f1 "$SUITE_MAP_ALL" | sort -u)
+done < <(cut -f1 "$SUITE_MAP" | sort -u)
 
-export MVN_BIN GLUTEN_HOME SPARK_HOME LOG_DIR
+export MVN_BIN GLUTEN_HOME SPARK_HOME LOG_DIR WORK_ROOT REPORTS_ROOT
 export MVN_PROFILES_STR="${MVN_PROFILES[*]}"
-export COMMON_MVN_ARGS_STR="${COMMON_MVN_ARGS[*]}"
-export EXTRA_MVN_ARGS="${EXTRA_MVN_ARGS:-}"
-
-export WORK_ROOT REPORTS_ROOT
 
 run_one_suite() {
-  local module="$1"
-  local suite="$2"
+  local module="$1" suite="$2"
   local log="$LOG_DIR/${suite}.log"
-  local surefire_temp="$WORK_ROOT/$suite/surefire"
-  local reports_dir="$REPORTS_ROOT/$suite"
-  mkdir -p "$surefire_temp" "$reports_dir"
-  # Bubblewrap bind-mounts give each worker its own private
-  #   $module/target/surefire        -> $WORK_ROOT/$suite/surefire   (booter jars + tmp files)
-  #   $module/target/surefire-reports -> $REPORTS_ROOT/$suite        (TEST-*.xml + *.txt)
-  # Everything else on the filesystem (host paths, .m2 cache, source tree,
-  # compiled classes) stays shared read-write so we don't have to copy
-  # gigabytes per worker.
+  local sur="$WORK_ROOT/$suite/surefire"
+  local rep="$REPORTS_ROOT/$suite"
+  mkdir -p "$sur" "$rep"
+  # Find the module's test-classes/ dir (Scala or Java layout).
+  local tc=""
+  for d in "$GLUTEN_HOME/$module/target/scala-2.12/test-classes" \
+           "$GLUTEN_HOME/$module/target/test-classes"; do
+    [[ -d "$d" ]] && { tc="$d"; break; }
+  done
+  # Per-suite isolation via bwrap:
+  #   --bind          : private target/surefire (booter jar) + target/surefire-reports
+  #   --tmp-overlay   : writable overlay on the module's test-classes/, so the
+  #                     shared `unit-tests-working-home/` (used as Spark warehouse +
+  #                     metastore by GlutenSQLTestsTrait.prepareWorkDir) is private
+  #                     per suite. Writes go to an invisible tmpfs; the original
+  #                     test-classes/ on disk is untouched.
+  #   --ro-bind $SPARK_HOME : re-expose SPARK_HOME, otherwise --tmpfs /tmp would hide it.
+  local overlay_args=()
+  [[ -n "$tc" ]] && overlay_args=(--overlay-src "$tc" --tmp-overlay "$tc")
   # shellcheck disable=SC2086
   bwrap \
-    --dev-bind / / \
-    --tmpfs /tmp \
-    --bind "$surefire_temp" "$GLUTEN_HOME/$module/target/surefire" \
-    --bind "$reports_dir"   "$GLUTEN_HOME/$module/target/surefire-reports" \
+    --dev-bind / / --tmpfs /tmp \
+    --ro-bind "$SPARK_HOME" "$SPARK_HOME" \
+    --bind "$sur" "$GLUTEN_HOME/$module/target/surefire" \
+    --bind "$rep" "$GLUTEN_HOME/$module/target/surefire-reports" \
+    "${overlay_args[@]}" \
     --chdir "$GLUTEN_HOME" \
-    "$MVN_BIN" \
-      surefire:test \
-      scalatest:test \
+    "$MVN_BIN" surefire:test scalatest:test \
       -pl "$module" \
       $MVN_PROFILES_STR \
-      $COMMON_MVN_ARGS_STR \
-      -Dtest="$suite" \
-      -DwildcardSuites="$suite" \
-      -DfailIfNoTests=false \
-      $EXTRA_MVN_ARGS \
+      -DfailIfNoTests=false -Dexec.skip -Dmaven.test.failure.ignore=true \
+      -DargLine="-Dspark.test.home=$SPARK_HOME" \
+      -Dtest="$suite" -DwildcardSuites="$suite" \
       >"$log" 2>&1 || true
   printf 'finished\t%s\n' "$suite"
 }
 export -f run_one_suite
 
-# Feed module\tsuite tuples via xargs -L 1, parallelism = $PARALLEL_JOBS.
-# Each line becomes two positional args ($1=module, $2=suite) to the wrapper.
+# Slow-list priority: xargs preserves input order, so suites listed in
+# slow_suites.txt grab the first JOBS workers and the long tail can't dangle.
+DISPATCH_MAP="$LOG_DIR/_suites_dispatch_order.tsv"
+if [[ -f "$SLOW_SUITES_FILE" ]]; then
+  awk '
+    NR==FNR { sub(/#.*/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+              if ($0 != "") slow[$0]=1; next }
+    { print ($2 in slow ? "0\t" : "1\t") $0 }
+  ' "$SLOW_SUITES_FILE" "$SUITE_MAP" \
+    | sort -s -k1,1 | cut -f2- >"$DISPATCH_MAP"
+  num_slow=$(awk -v f="$SLOW_SUITES_FILE" '
+    NR==FNR { sub(/#.*/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+              if ($0 != "") slow[$0]=1; next }
+    $2 in slow { n++ } END { print n+0 }
+  ' "$SLOW_SUITES_FILE" "$SUITE_MAP")
+  echo "Slow-suite priority queue: $num_slow suite(s) dispatched first."
+else
+  cp "$SUITE_MAP" "$DISPATCH_MAP"
+fi
+
 (
-  if (( NUM_RUN > 0 )); then
-    tr '\t' ' ' <"$SUITE_MAP" \
-      | xargs -P "$PARALLEL_JOBS" -L 1 \
-        bash -c 'run_one_suite "$1" "$2"' _
-  fi
+  tr '\t' ' ' <"$DISPATCH_MAP" | xargs -P "$JOBS" -L 1 \
+    bash -c 'run_one_suite "$1" "$2"' _
 ) >"$LOG_DIR/_dispatch.log" 2>&1 &
 DISPATCH_PID=$!
 
-# Live progress (best-effort heartbeat).
+# Best-effort progress heartbeat.
 while kill -0 $DISPATCH_PID 2>/dev/null; do
   sleep 10
   done_count=$(grep -c '^finished\b' "$LOG_DIR/_dispatch.log" 2>/dev/null || echo 0)
@@ -304,95 +236,51 @@ while kill -0 $DISPATCH_PID 2>/dev/null; do
 done
 wait $DISPATCH_PID || true
 
-###############################################################################
-# Summarize
-###############################################################################
 step "Summary"
-python3 - "$GLUTEN_HOME" "$BLACKLIST_FILE" "$SUITE_MAP" "$SKIPPED_MAP" "$REPORTS_ROOT" <<'PY'
-import glob
-import os
-import sys
-import xml.etree.ElementTree as ET
+# Walk each per-suite log, classify scalatest's `*** FAILED ***` /
+# `*** ABORTED ***` markers as expected/unexpected against the blacklist.
+# Blacklist syntax: `<FQCN>#<case>` for one case, `<FQCN>#*` for whole suite.
+# Detailed failure messages live in $LOG_DIR/<suite>.log.
 
-home          = sys.argv[1]
-blacklist_path = sys.argv[2]
-suite_map      = sys.argv[3]
-skipped_map    = sys.argv[4]
-reports_root   = sys.argv[5]
+# Materialize the blacklist into a single grep-friendly file (one entry per line,
+# blanks and comment lines stripped).
+bl=$(mktemp); trap 'rm -f "$bl"' EXIT
+sed -E '/^[[:space:]]*(#|$)/d; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+    "$BLACKLIST_FILE" >"$bl"
 
-def load_names(path):
-    out = set()
-    if not os.path.isfile(path):
-        return out
-    with open(path) as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            # support either bare FQCN or <module>\t<fqcn>
-            out.add(line.split("\t")[-1])
-    return out
+expected=0
+unexpected=0
+unexpected_lines=""
+for log in "$LOG_DIR"/*.log; do
+  name="${log##*/}"
+  case "$name" in _*) continue ;; esac     # skip _install.log, _dispatch.log
+  suite="${name%.log}"
+  bl_hit=0
+  grep -Fxq -- "$suite#*" "$bl" && bl_hit=1     # whole-suite blacklisted?
 
-blacklisted = load_names(blacklist_path)
-ran          = load_names(suite_map)
-skipped_set  = load_names(skipped_map)
+  # Strip ANSI codes, pull the test-case name out of each FAILED marker.
+  cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
+          | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/\1/p')
+  if [[ -n "$cases" ]]; then
+    while IFS= read -r c; do
+      if (( bl_hit )) || grep -Fxq -- "$suite#$c" "$bl"; then
+        expected=$((expected + 1))
+      else
+        unexpected=$((unexpected + 1))
+        unexpected_lines+="  ! $suite#$c"$'\n'
+      fi
+    done <<<"$cases"
+  elif sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -q '\*\*\* ABORTED \*\*\*'; then
+    if (( bl_hit )); then
+      expected=$((expected + 1))
+    else
+      unexpected=$((unexpected + 1))
+      unexpected_lines+="  ! $suite (aborted)"$'\n'
+    fi
+  fi
+done
 
-results = {}  # fqcn -> (tests, errors, failures, skipped)
-# Per-suite isolated reports first, then any leftover module-level reports.
-candidate_globs = [
-    os.path.join(reports_root, "*", "TEST-*.xml"),
-    os.path.join(home, "**", "surefire-reports", "TEST-*.xml"),
-]
-seen = set()
-for pat in candidate_globs:
-    for path in glob.glob(pat, recursive=True):
-        if path in seen:
-            continue
-        seen.add(path)
-        try:
-            root = ET.parse(path).getroot()
-        except ET.ParseError:
-            continue
-        name = root.get("name") or os.path.basename(path)
-        tests = int(root.get("tests", 0))
-        prev  = results.get(name)
-        if prev is None or tests >= prev[0]:
-            results[name] = (
-                tests,
-                int(root.get("errors", 0)),
-                int(root.get("failures", 0)),
-                int(root.get("skipped", 0)),
-            )
-
-# Only count suites we attempted to run.
-counted = {name: r for name, r in results.items() if name in ran or not ran}
-
-total_tests    = sum(r[0] for r in counted.values())
-total_errors   = sum(r[1] for r in counted.values())
-total_failures = sum(r[2] for r in counted.values())
-total_skipped  = sum(r[3] for r in counted.values())
-passed         = total_tests - total_errors - total_failures - total_skipped
-
-failed_suites = [
-    (name, *r) for name, r in counted.items() if r[1] + r[2] > 0
-]
-failed_suites.sort(key=lambda x: (-x[2] - x[3], x[0]))
-
-print(f"Suites attempted: {len(counted)}")
-print(f"Suites skipped (blacklisted): {len(skipped_set)}")
-print(f"Total tests:    {total_tests}")
-print(f"  passed:       {passed}")
-print(f"  failures:     {total_failures}")
-print(f"  errors:       {total_errors}")
-print(f"  skipped/canceled: {total_skipped}")
-print()
-if failed_suites:
-    fail_case_count = sum(s[2] + s[3] for s in failed_suites)
-    print(f"FAILED: {len(failed_suites)} suite(s), {fail_case_count} failing case(s)")
-    for name, tests, errors, failures, _ in failed_suites:
-        print(f"  ! {name}: errors={errors} failures={failures} (of {tests})")
-    sys.exit(1)
-
-print("All attempted suites PASSED.")
-sys.exit(0)
-PY
+[[ -n "$unexpected_lines" ]] && printf '%s' "$unexpected_lines"
+echo "expected failures:   $expected (on blacklist; not counted)"
+echo "unexpected failures: $unexpected"
+exit $(( unexpected > 0 ? 1 : 0 ))
