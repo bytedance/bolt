@@ -2,22 +2,17 @@
 # scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-suite isolation,
 # slow-suites priority dispatch, case-level blacklist).
 #
-# Runtime: ~10-15 min after the m2 cache is warm; the first run on a new
-# runner takes longer because it needs gluten-arrow:15.0.0-gluten to be
-# present in /root/.m2. Those jars are NOT on Maven Central; build them
-# once via `dev/build_arrow.sh` from the gluten checkout (or rely on a
-# prior bolt build that already populated the cache).
+# Runtime: ~10-15 min after the arrow cache is warm. The first run on a new
+# cache key (i.e. when gluten patches arrow's build) pays ~25 min extra to
+# build org.apache.arrow:*:15.0.0-gluten from source via dev/build_arrow.sh,
+# since those jars are a private fork that Maven Central can't serve.
 #
 # Why a self-hosted runner with the bolt-ci container?
-#  * gluten-arrow:15.0.0-gluten is a private fork (Maven Central can't
-#    serve it), so the m2 must already have it — only feasible on a
-#    persistent runner with a mounted m2 volume.
-#  * bwrap (used by run.sh for per-suite isolation) needs SYS_ADMIN.
-#    Hence container options include --privileged.
-#
-# Native bolt libs (cpp/build/bolt/) are expected to be present on the
-# runner. This workflow does NOT build them; pair with the bolt build
-# pipeline or stage cpp/build ahead of time.
+#  * bwrap (used by run.sh for per-suite isolation) needs SYS_ADMIN; hence
+#    container options include --privileged.
+#  * Native bolt libs (cpp/build/bolt/) are expected to be present on the
+#    runner. This workflow does NOT build them; pair with the bolt build
+#    pipeline or stage cpp/build ahead of time.
 
 name: Bolt Spark UT
 
@@ -42,10 +37,7 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       # --privileged: bwrap (run.sh per-suite isolation) needs SYS_ADMIN.
       options: --user root --init --privileged
-      volumes:
-        # Persistent maven cache: holds gluten-arrow:15.0.0-gluten across runs.
-        - /data/m2-cache:/root/.m2
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout bolt (this repo)
         uses: actions/checkout@v6
@@ -65,23 +57,21 @@ jobs:
             openjdk-17-jdk-headless bubblewrap
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
-      - name: Verify gluten-arrow:15.0.0-gluten is present
-        # If this fails, the runner's /data/m2-cache hasn't been seeded.
-        # Seed it once by running gluten's dev/build_arrow.sh on the host
-        # (writes into the same /root/.m2 mount).
-        run: |
-          missing=0
-          for a in arrow-memory-core arrow-memory-unsafe arrow-vector arrow-c-data arrow-dataset; do
-            f=/root/.m2/repository/org/apache/arrow/$a/15.0.0-gluten/$a-15.0.0-gluten.jar
-            if [ ! -f "$f" ]; then
-              echo "MISSING: $f"
-              missing=1
-            fi
-          done
-          if [ $missing -ne 0 ]; then
-            echo "::error::Seed /data/m2-cache by running gluten/dev/build_arrow.sh once on the runner."
-            exit 1
-          fi
+      - name: Restore gluten-arrow:15.0.0-gluten jars
+        id: arrow-cache
+        uses: actions/cache@v4
+        with:
+          path: /root/.m2/repository/org/apache/arrow
+          # Cache invalidates when arrow patches or the build script change.
+          key: arrow-15.0.0-gluten-${{ hashFiles('gluten/ep/build-velox/src/modify_arrow*.patch', 'gluten/ep/build-velox/src/cmake-compatibility.patch', 'gluten/dev/build_arrow.sh') }}
+
+      - name: Build gluten-arrow (first run only; ~25 min)
+        if: steps.arrow-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}/gluten
+        # dev/build_arrow.sh: downloads apache/arrow 15.0.0, applies gluten
+        # patches, builds C++ + Java, installs *:15.0.0-gluten jars to
+        # /root/.m2. Heavy on the first run; cached afterwards.
+        run: bash dev/build_arrow.sh
 
       - name: Install Spark 3.5.5 binary + test resources
         working-directory: ${{ github.workspace }}/gluten
