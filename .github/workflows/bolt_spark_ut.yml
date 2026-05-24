@@ -49,13 +49,22 @@ jobs:
           ref: ${{ env.GLUTEN_REF }}
           path: gluten
 
-      - name: Install JDK 17 + bubblewrap
+      - name: Install JDK 17 + build bubblewrap >=0.10 from source
         # Full JDK (not -headless) is required: arrow's cmake JNI detection
         # needs AWT, which is only present in the full openjdk-17-jdk package.
+        # bubblewrap: Debian 12 ships 0.8.0 which lacks --overlay-src /
+        # --tmp-overlay (added in 0.10.0). run.sh uses those flags for
+        # per-suite test-classes isolation, so we build a newer release.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            openjdk-17-jdk bubblewrap
+            openjdk-17-jdk meson ninja-build libcap-dev pkg-config
+          git clone --depth 1 --branch v0.11.0 https://github.com/containers/bubblewrap.git /tmp/bwrap
+          meson setup /tmp/bwrap/build /tmp/bwrap --buildtype=release -Dman=disabled
+          meson compile -C /tmp/bwrap/build
+          install -m 0755 /tmp/bwrap/build/bwrap /usr/local/bin/bwrap
+          rm -rf /tmp/bwrap
+          bwrap --version
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
       - name: Restore gluten-arrow:15.0.0-gluten jars
