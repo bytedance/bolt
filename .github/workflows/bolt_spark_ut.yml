@@ -74,11 +74,27 @@ jobs:
         # /root/.m2. Heavy on the first run; cached afterwards.
         run: bash dev/build_arrow.sh
 
+      - name: Restore Spark 3.5.5 binary + test resources
+        id: spark-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/gluten/shims/spark35/spark_home
+          key: spark-3.5.5-bin-hadoop3-resources-v1
+
       - name: Install Spark 3.5.5 binary + test resources
+        if: steps.spark-cache.outputs.cache-hit != 'true'
         working-directory: ${{ github.workspace }}/gluten
-        # install_spark_resources.sh takes INSTALL_DIR from $2 (env ignored);
-        # passing the gluten checkout positionally lands shims/ inside it.
-        run: bash .github/workflows/util/install_spark_resources.sh 3.5 ${{ github.workspace }}/gluten
+        # closer.lua mirror selection has been pathologically slow from the
+        # runner (~36 min on the first attempt). Pin to archive.apache.org
+        # which serves directly. install_spark_resources.sh takes INSTALL_DIR
+        # from $2 (env ignored); passing the gluten checkout positionally
+        # lands shims/ inside it.
+        run: |
+          sed -i \
+            -e "s|https://www.apache.org/dyn/closer.lua/|https://archive.apache.org/dist/|" \
+            -e "s|?action=download||" \
+            .github/workflows/util/install_spark_resources.sh
+          bash .github/workflows/util/install_spark_resources.sh 3.5 ${{ github.workspace }}/gluten
 
       - name: Run gluten Spark UT (parallel, blacklist-aware)
         env:
