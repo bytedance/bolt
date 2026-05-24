@@ -55,10 +55,10 @@ jobs:
           restore-keys: m2-bolt-ut-
 
       - name: Install Spark 3.5.5 binary + test resources
-        env:
-          INSTALL_DIR: ${{ github.workspace }}/gluten
         working-directory: ${{ github.workspace }}/gluten
-        run: bash .github/workflows/util/install_spark_resources.sh 3.5
+        # The helper unconditionally takes INSTALL_DIR from $2 (env is ignored);
+        # passing the gluten checkout positionally lands shims/ inside it.
+        run: bash .github/workflows/util/install_spark_resources.sh 3.5 ${{ github.workspace }}/gluten
 
       - name: Run gluten Spark UT (parallel, blacklist-aware)
         env:
