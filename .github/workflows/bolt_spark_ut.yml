@@ -84,32 +84,19 @@ jobs:
       - name: Install Spark 3.5.5 binary + test resources
         if: steps.spark-cache.outputs.cache-hit != 'true'
         working-directory: ${{ github.workspace }}/gluten
-        # Inlined instead of using .github/workflows/util/install_spark_resources.sh
-        # because that script's closer.lua mirror was pathologically slow from
-        # this runner (~36 min on the first attempt). archive.apache.org serves
-        # the tarballs directly without redirection.
+        # Pipe wget directly into tar so nothing hits disk twice.
+        # Binary distribution lays jars/bin/python under SPARK_HOME — Spark's
+        # launcher falls back to $SPARK_HOME/jars when assembly/target is
+        # absent, so no source-build layout shim is needed.
+        # Source tarball: extract only the SQL test resources that some
+        # Gluten suites read at runtime.
         run: |
           set -e
           BASE=https://archive.apache.org/dist/spark/spark-3.5.5
-          BIN=spark-3.5.5-bin-hadoop3.tgz
-          SRC=spark-3.5.5.tgz
           DEST=shims/spark35/spark_home
-
-          wget --no-verbose "$BASE/$BIN" "$BASE/$SRC"
-
-          mkdir -p "$DEST/assembly/target/scala-2.12"
-          tar --strip-components=1 -xf "$BIN" \
-            spark-3.5.5-bin-hadoop3/jars/ \
-            spark-3.5.5-bin-hadoop3/python \
-            spark-3.5.5-bin-hadoop3/bin
-          mv jars "$DEST/assembly/target/scala-2.12/"
-          mv python bin "$DEST/"
-
-          # Source tarball: only the SQL test resources, used by GlutenSQLQueryTestSuite.
-          tar --strip-components=1 -xf "$SRC" spark-3.5.5/sql/core/src/test/resources/
-          mv sql "$DEST/"
-
-          rm -f "$BIN" "$SRC"
+          mkdir -p "$DEST"
+          wget -qO- "$BASE/spark-3.5.5-bin-hadoop3.tgz" | tar -xz --strip-components=1 -C "$DEST"
+          wget -qO- "$BASE/spark-3.5.5.tgz" | tar -xz --strip-components=1 -C "$DEST" spark-3.5.5/sql/core/src/test/resources/
 
       - name: Run gluten Spark UT (parallel, blacklist-aware)
         env:
