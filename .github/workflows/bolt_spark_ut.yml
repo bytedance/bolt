@@ -1,13 +1,23 @@
 # Run the full gluten Spark UT matrix against the Bolt backend via
-# scripts/gluten_ut/run.sh (parallel dispatcher: bwrap per-suite isolation,
-# slow-suites priority, case-level blacklist).
+# scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-suite isolation,
+# slow-suites priority dispatch, case-level blacklist).
 #
-# The bolt repo owns the runner + blacklist/slow lists. Gluten is checked out
-# as a sibling at zhangxffff/gluten#chore/run_gluten_ut so we can pin the
-# tested gluten state explicitly. Native bolt libs (cpp/build/bolt/) are
-# expected to be already present on the runner; this workflow does NOT build
-# them. Pair with a build job or use a self-hosted runner with cpp/build
-# pre-staged.
+# Runtime: ~10-15 min after the m2 cache is warm; the first run on a new
+# runner takes longer because it needs gluten-arrow:15.0.0-gluten to be
+# present in /root/.m2. Those jars are NOT on Maven Central; build them
+# once via `dev/build_arrow.sh` from the gluten checkout (or rely on a
+# prior bolt build that already populated the cache).
+#
+# Why a self-hosted runner with the bolt-ci container?
+#  * gluten-arrow:15.0.0-gluten is a private fork (Maven Central can't
+#    serve it), so the m2 must already have it — only feasible on a
+#    persistent runner with a mounted m2 volume.
+#  * bwrap (used by run.sh for per-suite isolation) needs SYS_ADMIN.
+#    Hence container options include --privileged.
+#
+# Native bolt libs (cpp/build/bolt/) are expected to be present on the
+# runner. This workflow does NOT build them; pair with the bolt build
+# pipeline or stage cpp/build ahead of time.
 
 name: Bolt Spark UT
 
@@ -27,36 +37,55 @@ concurrency:
 
 jobs:
   spark-ut:
-    runs-on: ubuntu-22.04
+    runs-on: [ self-hosted, medium ]
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      # --privileged: bwrap (run.sh per-suite isolation) needs SYS_ADMIN.
+      options: --user root --init --privileged
+      volumes:
+        # Persistent maven cache: holds gluten-arrow:15.0.0-gluten across runs.
+        - /data/m2-cache:/root/.m2
     timeout-minutes: 120
     steps:
       - name: Checkout bolt (this repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Checkout gluten at ${{ env.GLUTEN_REF }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.GLUTEN_REPO }}
           ref: ${{ env.GLUTEN_REF }}
           path: gluten
 
-      - name: Install Java 17 + maven + bubblewrap
+      - name: Install JDK 17 + bubblewrap
+        # bolt-ci already has maven; default-jdk-headless on Debian 12 is 17.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            openjdk-17-jdk-headless maven bubblewrap
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            openjdk-17-jdk-headless bubblewrap
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
-      - name: Cache Maven repository
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: m2-bolt-ut-${{ hashFiles('gluten/**/pom.xml') }}
-          restore-keys: m2-bolt-ut-
+      - name: Verify gluten-arrow:15.0.0-gluten is present
+        # If this fails, the runner's /data/m2-cache hasn't been seeded.
+        # Seed it once by running gluten's dev/build_arrow.sh on the host
+        # (writes into the same /root/.m2 mount).
+        run: |
+          missing=0
+          for a in arrow-memory-core arrow-memory-unsafe arrow-vector arrow-c-data arrow-dataset; do
+            f=/root/.m2/repository/org/apache/arrow/$a/15.0.0-gluten/$a-15.0.0-gluten.jar
+            if [ ! -f "$f" ]; then
+              echo "MISSING: $f"
+              missing=1
+            fi
+          done
+          if [ $missing -ne 0 ]; then
+            echo "::error::Seed /data/m2-cache by running gluten/dev/build_arrow.sh once on the runner."
+            exit 1
+          fi
 
       - name: Install Spark 3.5.5 binary + test resources
         working-directory: ${{ github.workspace }}/gluten
-        # The helper unconditionally takes INSTALL_DIR from $2 (env is ignored);
+        # install_spark_resources.sh takes INSTALL_DIR from $2 (env ignored);
         # passing the gluten checkout positionally lands shims/ inside it.
         run: bash .github/workflows/util/install_spark_resources.sh 3.5 ${{ github.workspace }}/gluten
 
