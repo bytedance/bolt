@@ -148,11 +148,7 @@ jobs:
         with:
           name: bolt-gluten-ut-reports
           path: |
-            scripts/gluten_ut/logs/_install.log
-            scripts/gluten_ut/logs/_dispatch.log
-            scripts/gluten_ut/logs/_suites.tsv
-            scripts/gluten_ut/logs/_suites_dispatch_order.tsv
-            scripts/gluten_ut/logs/reports/**/TEST-*.xml
             scripts/gluten_ut/logs/*.log
+            scripts/gluten_ut/logs/*.tsv
+            scripts/gluten_ut/logs/reports/**/TEST-*.xml
           if-no-files-found: warn
-          retention-days: 14
