@@ -229,7 +229,6 @@ step "Summary"
 # Detailed failure messages live in $LOG_DIR/<suite>.log.
 expected=0
 unexpected=0
-unexpected_lines=""
 for log in "$LOG_DIR"/*.log; do
   name="${log##*/}"
   case "$name" in _*) continue ;; esac # skip _install.log, _dispatch.log
@@ -243,12 +242,11 @@ for log in "$LOG_DIR"/*.log; do
       expected=$((expected + 1))
     else
       unexpected=$((unexpected + 1))
-      unexpected_lines+="  ! $key"$'\n'
+      echo "  ! $key"
     fi
   done <<< "$keys"
 done
 
-[[ -n "$unexpected_lines" ]] && printf '%s' "$unexpected_lines"
 echo "expected failures:   $expected (on blacklist; not counted)"
 echo "unexpected failures: $unexpected"
 exit $((unexpected > 0 ? 1 : 0))
