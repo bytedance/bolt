@@ -68,7 +68,20 @@ fi
 
 mkdir -p "$LOG_DIR"
 cd "$GLUTEN_HOME"
-step() { echo "===== $* ====="; }
+# step() prefixes each banner with "[<m:ss total> | prev <m:ss>]" so the
+# wall-time of each phase is visible from the banner that opens the NEXT one.
+SCRIPT_START=$(date +%s)
+LAST_STEP=$SCRIPT_START
+step() {
+  local now total delta
+  now=$(date +%s)
+  total=$((now - SCRIPT_START))
+  delta=$((now - LAST_STEP))
+  printf '===== [%d:%02d total | prev %d:%02d] %s =====\n' \
+    "$((total / 60))" "$((total % 60))" \
+    "$((delta / 60))" "$((delta % 60))" "$*"
+  LAST_STEP=$now
+}
 echo "GLUTEN_HOME=$GLUTEN_HOME  SPARK_HOME=$SPARK_HOME  JOBS=$JOBS"
 
 command -v bwrap > /dev/null 2>&1 || {

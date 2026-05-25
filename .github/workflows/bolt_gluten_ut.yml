@@ -19,9 +19,6 @@ on:
         default: ''
 
 env:
-  # `inputs.*` is populated only on workflow_dispatch; on pull_request it's
-  # empty so the `||` falls back to the hardcoded defaults. Repo variables
-  # aren't usable here because pull_request runs from forks can't see them.
   GLUTEN_REPO: ${{ inputs.gluten_repo || 'zhangxffff/gluten' }}
   GLUTEN_REF: ${{ inputs.gluten_ref || 'chore/run_gluten_ut' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
@@ -43,6 +40,8 @@ jobs:
       options: --user root --init --privileged
       volumes:
         - /data/ccache-data:/data/ccache-data
+        - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
+        - /data/bolt-gluten-ut-spark:/data/bolt-gluten-ut-spark
     services:
       conanserver:
         image: bolt-registry:5000/conan-server:latest
@@ -99,44 +98,47 @@ jobs:
         working-directory: ${{ github.workspace }}/gluten
         run: make release
 
-      - name: Restore gluten-arrow:15.0.0-gluten jars
-        id: arrow-cache
-        uses: actions/cache@v4
-        with:
-          path: /root/.m2/repository/org/apache/arrow
-          # Cache invalidates when arrow patches or the build script change.
-          key: arrow-15.0.0-gluten-${{ hashFiles('gluten/ep/build-velox/src/modify_arrow*.patch', 'gluten/ep/build-velox/src/cmake-compatibility.patch', 'gluten/dev/build_arrow.sh') }}
-
-      - name: Build gluten-arrow (first run only; ~25 min)
-        if: steps.arrow-cache.outputs.cache-hit != 'true'
+      - name: Build gluten-arrow if jars missing or patches changed
+        # arrow jars live on the /data/bolt-gluten-ut-arrow host volume
+        # (mounted at /root/.m2/repository/org/apache/arrow). A stamp file
+        # records the hash of the arrow patches + build script so we
+        # rebuild only when those actually change
         working-directory: ${{ github.workspace }}/gluten
-        run: bash dev/build_arrow.sh
+        run: |
+          STAMP=/root/.m2/repository/org/apache/arrow/.gluten-15.0.0.stamp
+          KEY=$(sha256sum ep/build-velox/src/modify_arrow*.patch \
+                          ep/build-velox/src/cmake-compatibility.patch \
+                          dev/build_arrow.sh 2>/dev/null \
+                | sha256sum | cut -d' ' -f1)
+          if [[ -f $STAMP && "$(cat $STAMP)" == "$KEY" ]] \
+             && ls /root/.m2/repository/org/apache/arrow/arrow-dataset/15.0.0-gluten/*.jar > /dev/null 2>&1; then
+            echo "arrow jars match stamp $KEY — skip rebuild"
+          else
+            bash dev/build_arrow.sh
+            echo "$KEY" > "$STAMP"
+          fi
 
-      - name: Restore Spark 3.5.5 source resources
-        id: spark-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/gluten/shims/spark35/spark_home
-          key: spark-3.5.5-src-resources-v1
-
-      - name: Install Spark 3.5.5 source resources
-        if: steps.spark-cache.outputs.cache-hit != 'true'
-        working-directory: ${{ github.workspace }}/gluten
-        # Source tarball only (~30 MB). Gluten tests resolve Spark's runtime
-        # jars from Maven Central via pom; SPARK_HOME only feeds
-        # spark.test.home (sql/core/src/test/resources/). Suites that need
-        # bin/spark-submit + jars/ for local-cluster sub-JVMs are blacklisted.
+      - name: Populate /data/bolt-gluten-ut-spark if empty
         run: |
           set -e
-          BASE=https://archive.apache.org/dist/spark/spark-3.5.5
-          DEST=shims/spark35/spark_home
-          mkdir -p "$DEST"
-          wget -qO- "$BASE/spark-3.5.5.tgz" | tar -xz --strip-components=1 -C "$DEST"
+          CACHE=/data/bolt-gluten-ut-spark/spark-3.5.5-src
+          if [[ -d "$CACHE" ]]; then
+            exit 0
+          fi
+          mkdir -p /data/bolt-gluten-ut-spark
+          (
+            flock -x 200
+            [[ -d "$CACHE" ]] && exit 0
+            mkdir -p "${CACHE}.tmp"
+            wget -qO- https://archive.apache.org/dist/spark/spark-3.5.5/spark-3.5.5.tgz \
+              | tar -xz --strip-components=1 -C "${CACHE}.tmp"
+            mv "${CACHE}.tmp" "$CACHE"
+          ) 200> /data/bolt-gluten-ut-spark/.lock
 
       - name: Run Gluten UT (parallel, blacklist-aware)
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
-          SPARK_HOME: ${{ github.workspace }}/gluten/shims/spark35/spark_home/
+          SPARK_HOME: /data/bolt-gluten-ut-spark/spark-3.5.5-src/
           JOBS: '8'
         run: bash scripts/gluten_ut/run.sh
 
