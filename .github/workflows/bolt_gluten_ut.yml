@@ -10,19 +10,20 @@ on:
   workflow_dispatch:
     inputs:
       gluten_repo:
-        description: 'Gluten repo (override BOLT_RUNNER_GLUTEN_REPO); leave blank to use the variable default.'
+        description: 'Gluten repo to check out; leave blank to use the hardcoded default below.'
         required: false
         default: ''
       gluten_ref:
-        description: 'Gluten branch/tag/sha (override BOLT_RUNNER_GLUTEN_REF); leave blank to use the variable default.'
+        description: 'Gluten branch/tag/sha to check out; leave blank to use the hardcoded default below.'
         required: false
         default: ''
 
 env:
-  # Manual-dispatch inputs override the repo variables; on pull_request `inputs.*`
-  # is empty so the `||` falls back to vars.*.
-  GLUTEN_REPO: ${{ inputs.gluten_repo || vars.BOLT_RUNNER_GLUTEN_REPO }}
-  GLUTEN_REF: ${{ inputs.gluten_ref || vars.BOLT_RUNNER_GLUTEN_REF }}
+  # `inputs.*` is populated only on workflow_dispatch; on pull_request it's
+  # empty so the `||` falls back to the hardcoded defaults. Repo variables
+  # aren't usable here because pull_request runs from forks can't see them.
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'zhangxffff/gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'chore/run_gluten_ut' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
@@ -49,27 +50,6 @@ jobs:
           - /data/conan-server-data:/var/conan/data
     timeout-minutes: 240
     steps:
-      - name: Probe vars + verify required env
-        # Prints what the workflow sees for the BOLT_RUNNER_* repo variables,
-        # then hard-fails if either GLUTEN_REPO or GLUTEN_REF resolved to empty
-        # — actions/checkout silently falls back to the current repo on empty
-        # `repository:`, which masks the problem until much later steps fail
-        # with "No such file or directory".
-        run: |
-          echo "::group::vars probe"
-          echo "vars.BOLT_RUNNER_GLUTEN_REPO=[${{ vars.BOLT_RUNNER_GLUTEN_REPO }}]"
-          echo "vars.BOLT_RUNNER_GLUTEN_REF=[${{ vars.BOLT_RUNNER_GLUTEN_REF }}]"
-          echo "vars.BOLT_RUNNER_CONAN_HOME=[${{ vars.BOLT_RUNNER_CONAN_HOME }}]"
-          echo "inputs.gluten_repo=[${{ inputs.gluten_repo }}]"
-          echo "inputs.gluten_ref=[${{ inputs.gluten_ref }}]"
-          echo "env.GLUTEN_REPO=[$GLUTEN_REPO]"
-          echo "env.GLUTEN_REF=[$GLUTEN_REF]"
-          echo "::endgroup::"
-          [[ -n "$GLUTEN_REPO" && -n "$GLUTEN_REF" ]] || {
-            echo "::error::GLUTEN_REPO / GLUTEN_REF empty. Set vars.BOLT_RUNNER_GLUTEN_REPO and vars.BOLT_RUNNER_GLUTEN_REF in bytedance/bolt repository variables, or pass inputs via workflow_dispatch."
-            exit 1
-          }
-
       - name: Checkout bolt (this repo)
         uses: actions/checkout@v6
 
