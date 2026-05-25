@@ -113,7 +113,7 @@ jobs:
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: ${{ github.workspace }}/gluten/shims/spark35/spark_home/
-          JOBS: '8'
+          JOBS: '16'
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
