@@ -14,17 +14,15 @@
 # limitations under the License.
 
 #
-# Run the gluten Spark UT matrix against the Bolt backend.
+# Run the Gluten UT matrix against the Bolt backend.
 #
-# JOBS=1  : single reactor-wide `mvn clean test` (returns mvn's exit code).
-# JOBS>=2 : parallel mode —
 #   1. mvn install -DskipTests        build jars + test-classes
 #   2. scan test-classes/             discover every test suite
 #   3. xargs -P JOBS                  one mvn per suite, slow ones first,
 #                                     bwrap-isolated target/surefire{,-reports}
 #   4. classify FAILED/ABORTED        against blacklist.txt (whole-file fixed-string match).
 #
-# Required env: GLUTEN_HOME, SPARK_HOME.
+# Required env: GLUTEN_HOME, SPARK_HOME, bubblewrap binary on PATH.
 # Optional env: JOBS (parallelism, default nproc/3).
 #
 # Logs + reports go to $SCRIPT_DIR/logs/.
@@ -32,7 +30,7 @@
 # no comments, no blanks. Blacklist entry shape: `<FQCN>#<caseName>` for a
 # specific failure, or `<FQCN>#(aborted)` for a whole-suite abort.
 #
-# Parallel-mode exit: 0 if every failure is on the blacklist, else 1.
+# Exit status: 0 if every failure is on the blacklist, else 1.
 
 set -euo pipefail
 
@@ -45,7 +43,7 @@ MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17)
 # Config
 ###############################################################################
 : "${GLUTEN_HOME:?GLUTEN_HOME must point to the gluten source checkout}"
-: "${SPARK_HOME:?SPARK_HOME must point to the spark binary + test resources}"
+: "${SPARK_HOME:?SPARK_HOME must point to an unpacked Spark source tree (for spark.test.home)}"
 [[ -d "$GLUTEN_HOME" ]] || {
   echo "GLUTEN_HOME=$GLUTEN_HOME is not a directory" >&2
   exit 1
@@ -73,21 +71,8 @@ cd "$GLUTEN_HOME"
 step() { echo "===== $* ====="; }
 echo "GLUTEN_HOME=$GLUTEN_HOME  SPARK_HOME=$SPARK_HOME  JOBS=$JOBS"
 
-###############################################################################
-# Sequential mode (JOBS=1): single reactor-wide mvn invocation.
-###############################################################################
-if ((JOBS == 1)); then
-  step "Sequential mode: mvn clean test (reactor-wide)"
-  exec "$MVN_BIN" clean test "${MVN_PROFILES[@]}" \
-    -DfailIfNoTests=false -Dexec.skip -DDmaven.test.failure.ignore=true \
-    -DargLine="-Dspark.test.home=$SPARK_HOME" > "$LOG_DIR"/sequential.log 2>&1og
-  status=$?
-  if [ $status -eq 0 ] && grep -q "\*\*\* FAILED \*\*\*" "$LOG_DIR"/sequential.log; then exit 1; fi; exit $status
-fi
-
-# Parallel mode requires bwrap for per-suite target/ isolation.
 command -v bwrap > /dev/null 2>&1 || {
-  echo "bwrap is required for parallel mode. Install bubblewrap or set JOBS=1." >&2
+  echo "bwrap is required for per-suite target/ isolation. Install bubblewrap." >&2
   exit 1
 }
 
@@ -118,7 +103,7 @@ SUITE_MAP="$LOG_DIR/_suites.tsv" # tab-separated: <module>\t<fqcn>
 # like a runnable test, and dedup by FQCN (same class can land in multiple
 # modules' test-classes).
 find . -path '*/test-classes/*.class' \
-       \! -path '*$*' \! -path '*DiscoverySuite*' \! -path '*/ep/_ep/*' \
+  \! -path '*$*' \! -path '*DiscoverySuite*' \! -path '*/ep/_ep/*' \
   | xargs -P "$JOBS" -I{} sh -c '
       javap -p "{}" 2>/dev/null | head -3 \
         | grep -qE "^(public +)?abstract +(class|interface) " || echo "{}"
@@ -202,7 +187,7 @@ export -f run_one_suite
 # can't dangle. Both partitions keep SUITE_MAP's original order.
 DISPATCH_MAP="$LOG_DIR/_suites_dispatch_order.tsv"
 if [[ -f "$SLOW_SUITES_FILE" ]]; then
-  awk 'NR==FNR{s[$0]=1;next}   $2 in s'  "$SLOW_SUITES_FILE" "$SUITE_MAP" >  "$DISPATCH_MAP"
+  awk 'NR==FNR{s[$0]=1;next}   $2 in s' "$SLOW_SUITES_FILE" "$SUITE_MAP" > "$DISPATCH_MAP"
   awk 'NR==FNR{s[$0]=1;next} !($2 in s)' "$SLOW_SUITES_FILE" "$SUITE_MAP" >> "$DISPATCH_MAP"
   echo "Slow-suite priority queue: $(wc -l < "$SLOW_SUITES_FILE") suite(s) dispatched first."
 else
@@ -227,6 +212,7 @@ step "Summary"
 # Walk each per-suite log; turn FAILED / ABORTED scalatest markers into
 # `<FQCN>#<case>` / `<FQCN>#(aborted)` keys and grep -Fxq against blacklist.txt.
 # Detailed failure messages live in $LOG_DIR/<suite>.log.
+declare -A fired
 expected=0
 unexpected=0
 for log in "$LOG_DIR"/*.log; do
@@ -239,6 +225,7 @@ for log in "$LOG_DIR"/*.log; do
   while IFS= read -r key; do
     [[ -z "$key" ]] && continue
     if grep -Fxq -- "$key" "$BLACKLIST_FILE"; then
+      fired[$key]=1
       expected=$((expected + 1))
     else
       unexpected=$((unexpected + 1))
@@ -246,6 +233,12 @@ for log in "$LOG_DIR"/*.log; do
     fi
   done <<< "$keys"
 done
+
+# Blacklist entries that didn't match any real failure — candidates for
+# removal once verified stable.
+while IFS= read -r entry; do
+  [[ -v fired[$entry] ]] || echo "  ? $entry"
+done < "$BLACKLIST_FILE"
 
 echo "expected failures:   $expected (on blacklist; not counted)"
 echo "unexpected failures: $unexpected"
