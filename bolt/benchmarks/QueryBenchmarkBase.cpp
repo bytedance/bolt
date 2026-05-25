@@ -30,6 +30,8 @@
 
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
 
+#include "bolt/common/caching/SsdCache.h"
+
 DEFINE_string(data_format, "parquet", "Data format");
 
 DEFINE_validator(
