@@ -16,23 +16,23 @@
 #
 # Run the gluten Spark UT matrix against the Bolt backend.
 #
-# JOBS=1  : single reactor-wide `mvn clean test` (returns mvn's exit code,
-#           sees failures via per-module surefire-reports/).
+# JOBS=1  : single reactor-wide `mvn clean test` (returns mvn's exit code).
 # JOBS>=2 : parallel mode —
 #   1. mvn install -DskipTests        build jars + test-classes
 #   2. scan test-classes/             discover every test suite
 #   3. xargs -P JOBS                  one mvn per suite, slow ones first,
 #                                     bwrap-isolated target/surefire{,-reports}
-#   4. summarize TEST-*.xml           split failures into expected/unexpected
-#                                     by blacklist (suite- or case-level).
+#   4. classify FAILED/ABORTED        against blacklist.txt (whole-file fixed-string match).
 #
 # Required env: GLUTEN_HOME, SPARK_HOME.
 # Optional env: JOBS (parallelism, default nproc/3).
 #
 # Logs + reports go to $SCRIPT_DIR/logs/.
-# blacklist.txt and slow_suites.txt live next to this script.
+# blacklist.txt / slow_suites.txt live next to this script. One entry per line,
+# no comments, no blanks. Blacklist entry shape: `<FQCN>#<caseName>` for a
+# specific failure, or `<FQCN>#(aborted)` for a whole-suite abort.
 #
-# Parallel-mode exit: 0 if every failing case is on the blacklist, else 1.
+# Parallel-mode exit: 0 if every failure is on the blacklist, else 1.
 
 set -euo pipefail
 
@@ -138,11 +138,7 @@ sort -u -t$'\t' -k2,2 -o "$SUITE_MAP" "$SUITE_MAP"
 
 NUM_RUN=$(wc -l < "$SUITE_MAP" | tr -d ' ')
 echo "Discovered $NUM_RUN suites total."
-if [[ -f "$BLACKLIST_FILE" ]]; then
-  bl_total=$(grep -cvE '^\s*(#|$)' "$BLACKLIST_FILE" || true)
-  bl_case=$(grep -vE '^\s*(#|$)' "$BLACKLIST_FILE" | grep -c '#' || true)
-  echo "Blacklist: $((bl_total - bl_case)) suite-level + $bl_case case-level entries."
-fi
+[[ -f "$BLACKLIST_FILE" ]] && echo "Blacklist: $(wc -l < "$BLACKLIST_FILE" | tr -d ' ') entries."
 
 ###############################################################################
 # Step 3/3: dispatch + summarize
@@ -212,18 +208,10 @@ export -f run_one_suite
 # slow_suites.txt grab the first JOBS workers and the long tail can't dangle.
 DISPATCH_MAP="$LOG_DIR/_suites_dispatch_order.tsv"
 if [[ -f "$SLOW_SUITES_FILE" ]]; then
-  awk '
-    NR==FNR { sub(/#.*/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-              if ($0 != "") slow[$0]=1; next }
-    { print ($2 in slow ? "0\t" : "1\t") $0 }
-  ' "$SLOW_SUITES_FILE" "$SUITE_MAP" \
+  awk 'NR==FNR { slow[$0]=1; next } { print ($2 in slow ? 0 : 1) "\t" $0 }' \
+    "$SLOW_SUITES_FILE" "$SUITE_MAP" \
     | sort -s -k1,1 | cut -f2- > "$DISPATCH_MAP"
-  num_slow=$(awk -v f="$SLOW_SUITES_FILE" '
-    NR==FNR { sub(/#.*/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-              if ($0 != "") slow[$0]=1; next }
-    $2 in slow { n++ } END { print n+0 }
-  ' "$SLOW_SUITES_FILE" "$SUITE_MAP")
-  echo "Slow-suite priority queue: $num_slow suite(s) dispatched first."
+  echo "Slow-suite priority queue: $(wc -l < "$SLOW_SUITES_FILE" | tr -d ' ') suite(s) dispatched first."
 else
   cp "$SUITE_MAP" "$DISPATCH_MAP"
 fi
@@ -243,18 +231,9 @@ done
 wait $DISPATCH_PID || true
 
 step "Summary"
-# Walk each per-suite log, classify scalatest's `*** FAILED ***` /
-# `*** ABORTED ***` markers as expected/unexpected against the blacklist.
-# Blacklist syntax: `<FQCN>#<case>` for one case, `<FQCN>#*` for whole suite.
+# Walk each per-suite log; turn FAILED / ABORTED scalatest markers into
+# `<FQCN>#<case>` / `<FQCN>#(aborted)` keys and grep -Fxq against blacklist.txt.
 # Detailed failure messages live in $LOG_DIR/<suite>.log.
-
-# Materialize the blacklist into a single grep-friendly file (one entry per line,
-# blanks and comment lines stripped).
-bl=$(mktemp)
-trap 'rm -f "$bl"' EXIT
-sed -E '/^[[:space:]]*(#|$)/d; s/^[[:space:]]+//; s/[[:space:]]+$//' \
-  "$BLACKLIST_FILE" > "$bl"
-
 expected=0
 unexpected=0
 unexpected_lines=""
@@ -262,29 +241,18 @@ for log in "$LOG_DIR"/*.log; do
   name="${log##*/}"
   case "$name" in _*) continue ;; esac # skip _install.log, _dispatch.log
   suite="${name%.log}"
-  bl_hit=0
-  grep -Fxq -- "$suite#*" "$bl" && bl_hit=1 # whole-suite blacklisted?
-
-  # Strip ANSI codes, pull the test-case name out of each FAILED marker.
-  cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
-    | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/\1/p')
-  if [[ -n "$cases" ]]; then
-    while IFS= read -r c; do
-      if ((bl_hit)) || grep -Fxq -- "$suite#$c" "$bl"; then
-        expected=$((expected + 1))
-      else
-        unexpected=$((unexpected + 1))
-        unexpected_lines+="  ! $suite#$c"$'\n'
-      fi
-    done <<< "$cases"
-  elif sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -q '\*\*\* ABORTED \*\*\*'; then
-    if ((bl_hit)); then
+  clean=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")
+  keys=$(echo "$clean" | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/'"$suite"'#\1/p')
+  echo "$clean" | grep -q '\*\*\* ABORTED \*\*\*' && keys+=$'\n'"$suite#(aborted)"
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    if grep -Fxq -- "$key" "$BLACKLIST_FILE"; then
       expected=$((expected + 1))
     else
       unexpected=$((unexpected + 1))
-      unexpected_lines+="  ! $suite (aborted)"$'\n'
+      unexpected_lines+="  ! $key"$'\n'
     fi
-  fi
+  done <<< "$keys"
 done
 
 [[ -n "$unexpected_lines" ]] && printf '%s' "$unexpected_lines"

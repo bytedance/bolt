@@ -1,9 +1,4 @@
-# Long-tail suites dispatched first by run.sh so they don't trail the run.
-# Threshold: >= 5 min observed wall (below that, natural scheduling absorbs them).
-# Format: one FQCN per line; `#`-prefixed lines and trailing `# comment` ignored.
-# Last refreshed: 2026-05-24.
-
-org.apache.spark.sql.GlutenSQLQueryTestSuite                                     # 11m48s
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite    # 9m59s
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite    # 9m16s
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetRowIndexSuite    # 6m59s
+org.apache.spark.sql.GlutenSQLQueryTestSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetRowIndexSuite

@@ -1,82 +1,91 @@
-# Expected-failure list for the Bolt build. Every entry still runs under
-# run.sh; the summary just excludes their failures from the exit status so
-# unexpected regressions stand out.
-#
-# Single syntax: <FQCN>#<scalatest test name>.
-# Use `<FQCN>#*` to mean "every failure (or beforeAll abort) in this suite".
-# Lines whose first non-whitespace character is `#` are comments.
-#
-# Last refreshed: 2026-05-24.
-
-# ---- BoltMemoryManager init failure (no driver-side onDriverStart) ----
-# Suite ABORTS at beforeAll with "BoltMemoryManager expects capacity is bigger than 0".
-org.apache.gluten.utils.BoltBloomFilterTest#*
-org.apache.gluten.columnarbatch.ColumnarBatchTest#*
-org.apache.gluten.extension.columnar.transition.BoltTransitionSuite#*
-
-# ---- HashAggregation assert "spillMaxPct <= abandonMinPct" (40/41 cases) ----
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#*
-
-# ---- Iceberg native disabled / class only exists under -Piceberg ----
-org.apache.gluten.execution.enhanced.BoltIcebergSuite#*
-
-# ---- beforeAll NPE: missing test resource data-explode-validation-data/ ----
-org.apache.gluten.execution.BoltExplodeExpressionSuite#*
-
-# ---- Stubbed-out gluten.package.jar + missing libmyudf.so ----
-org.apache.gluten.expression.BoltUdfSuiteCluster#*
-
-# ---- Python/PySpark unavailable in this environment ----
-org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#*
-
-# ---- datetime-parsing-invalid.sql + describe.sql (case count varies) ----
-org.apache.spark.sql.GlutenSQLQueryTestSuite#*
-
-# ---- Parquet implicit type promotion (INT32 -> TINYINT, etc.) ----
-org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
-
-# ---- CI-only: bolt built with ENABLE_HDFS=True registers more FS schemes,
-# ---- so "unsupported://" gets matched and assert(=false) fails. Local
-# ---- defaults disable HDFS so it passes there.
+org.apache.gluten.config.AllBoltConfiguration#Check bolt backend configs
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#approx_count_distinct
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#avg
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#bind reference failed when subquery in agg expressions
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#bit_and bit_or bit_xor
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#collect_list null inputs
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#complex type with null
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#corr covar_pop covar_samp
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#count
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#count(1)
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#distinct functions
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#drop redundant partial sort which has pre-project when offload sortAgg
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#first
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate decimal sum
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - agg input already distributed by keys
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - double sum when floatingPointMode is loose
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - double sum when floatingPointMode is strict
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#group sets
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#groupby
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#kurtosis
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#last
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#max_by
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min and max
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min_by
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min_by/max_by
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_intercept
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_r2
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_slope
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_sxy regr_sxx regr_syy
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#skewness
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#stddev_pop
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#stddev_samp
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#sum
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test collect_set
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test collect_set/collect_list with null
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, FallbackFinal
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, FallbackPartial
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, Offload
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#var_pop
+org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#var_samp
+org.apache.gluten.execution.BoltExplodeExpressionSuite#(aborted)
 org.apache.gluten.execution.BoltScanSuite#Test file scheme validation
-
-# ---- CI-only: SsdFile cache needs O_DIRECT on /tmp, but bwrap's --tmpfs /tmp
-# ---- doesn't support it ("Invalid argument" on open). Suite aborts at init.
-org.apache.spark.sql.execution.BoltLocalCacheSuite#*
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
-# Discovery does not currently surface these; kept as reminder for re-enable.
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#*
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#*
-
-# ---- tz-sensitive cast string -> timestamp ----
+org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with preprojection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with unrelated projection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: without projection
+org.apache.gluten.expression.BoltUdfSuiteCluster#(aborted)
+org.apache.gluten.extension.columnar.transition.BoltTransitionSuite#(aborted)
+org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
+org.apache.spark.GlutenSortShuffleSuite#SPARK-36206: shuffle checksum detect disk corruption
+org.apache.spark.GlutenSortShuffleSuite#SortShuffleManager properly cleans up files for shuffles that use the deserialized path
+org.apache.spark.GlutenSortShuffleSuite#SortShuffleManager properly cleans up files for shuffles that use the serialized path
+org.apache.spark.GlutenSortShuffleSuite#[SPARK-4085] rerun map stage if reduce stage cannot find its local shuffle file
+org.apache.spark.GlutenSortShuffleSuite#cannot find its local shuffle file if no execution of the stage and rerun shuffle
+org.apache.spark.GlutenSortShuffleSuite#cogroup using mutable pairs
+org.apache.spark.GlutenSortShuffleSuite#metrics for shuffle with aggregation
+org.apache.spark.GlutenSortShuffleSuite#metrics for shuffle without aggregation
+org.apache.spark.GlutenSortShuffleSuite#multiple simultaneous attempts for one task (SPARK-8029)
+org.apache.spark.GlutenSortShuffleSuite#shuffle non-zero block size
+org.apache.spark.GlutenSortShuffleSuite#shuffle on mutable pairs
+org.apache.spark.GlutenSortShuffleSuite#shuffle serializer
+org.apache.spark.GlutenSortShuffleSuite#shuffle with different compression settings (SPARK-3426)
+org.apache.spark.GlutenSortShuffleSuite#sort with Java non serializable class - Java
+org.apache.spark.GlutenSortShuffleSuite#sort with Java non serializable class - Kryo
+org.apache.spark.GlutenSortShuffleSuite#sorting on mutable pairs
+org.apache.spark.GlutenSortShuffleSuite#subtract mutable pairs
+org.apache.spark.GlutenSortShuffleSuite#zero sized blocks
+org.apache.spark.GlutenSortShuffleSuite#zero sized blocks without kryo
+org.apache.spark.sql.GlutenDynamicPartitionPruningV1SuiteAEOn#broadcast multiple keys in an UnsafeHashedRelation
+org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
+org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-parsing-invalid.sql
+org.apache.spark.sql.GlutenSQLQueryTestSuite#describe.sql
 org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
-
-# ---- bucketBy + saveAsTable not supported by Bolt write path ----
-org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
 org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
-
-# ---- json_object_keys on malformed input ----
-org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
-
-# ---- Local-cluster flakes ("Master removed", "stopped SparkContext", etc.) ----
-org.apache.spark.GlutenSortShuffleSuite#*
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
 org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite#SPARK-39983 - Broadcasted relation is not cached on the driver
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#Broadcast timeout
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#BroadcastHashJoinExec output partitioning size should be limited with a config
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-23214: cached data should not carry extra hint info
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-37742: join planning shouldn't read invalid InMemoryRelation stats
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast hint in SQL
+org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast join where streamed side's output partitioning is PartitioningCollection
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast hash join updates peak execution memory
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast hash outer join updates peak execution memory
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#unsafe broadcast left semi join updates peak execution memory
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-23214: cached data should not carry extra hint info
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast hint in SQL
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#Broadcast timeout
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#broadcast join where streamed side's output partitioning is PartitioningCollection
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#BroadcastHashJoinExec output partitioning size should be limited with a config
-org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-37742: join planning shouldn't read invalid InMemoryRelation stats
-
-# ---- Other tracked failures ----
-# tz-sensitive serialization roundtrip in America/Los_Angeles
-org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
-# native task lost on UINT_64 → Decimal
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
-# docs/bolt-configuration.md is stale — regenerate via dev/gen_all_config_docs.sh
-org.apache.gluten.config.AllBoltConfiguration#Check bolt backend configs
