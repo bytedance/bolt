@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "bolt/exec/HashTable.h"
 #include "bolt/exec/JoinBridge.h"
 #include "bolt/exec/MemoryReclaimer.h"
@@ -45,6 +47,9 @@ class HashJoinBridge : public JoinBridge {
   HashJoinBridge(bool isMorselDriven = false) : JoinBridge(isMorselDriven){};
   void start() override;
 
+  using HashJoinTableSpillFunc =
+      std::function<SpillPartitionSet(std::shared_ptr<BaseHashTable>)>;
+
   /// Invoked by HashBuild operator ctor to add to this bridge by incrementing
   /// 'numBuilders_'. The latter is used to split the spill partition data among
   /// HashBuild operators to parallelize the restoring operation.
@@ -58,7 +63,8 @@ class HashJoinBridge : public JoinBridge {
       std::unique_ptr<BaseHashTable> table,
       SpillPartitionSet spillPartitionSet,
       bool hasNullKeys,
-      SpillOffsetToBitsSet offsetToJoinBits = nullptr);
+      SpillOffsetToBitsSet offsetToJoinBits = nullptr,
+      HashJoinTableSpillFunc tableSpillFunc = nullptr);
 
   void setAntiJoinHasNullKeys();
 
@@ -124,6 +130,8 @@ class HashJoinBridge : public JoinBridge {
   std::optional<SpillInput> spillInputOrFuture(
       ContinueFuture* FOLLY_NONNULL future);
 
+  uint64_t reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats);
+
   uint32_t numBuilders() const {
     return numBuilders_;
   }
@@ -138,6 +146,12 @@ class HashJoinBridge : public JoinBridge {
   uint32_t numBuilders_{0};
 
   std::optional<HashBuildResult> buildResult_;
+
+  bool probeStarted_{false};
+
+  bool tableSpillInProgress_{false};
+
+  HashJoinTableSpillFunc tableSpillFunc_;
 
   // restoringSpillPartitionXxx member variables are populated by the
   // bridge itself. When probe side finished processing, the bridge picks the
@@ -172,6 +186,13 @@ bool canDropDuplicates(
 
 class HashJoinMemoryReclaimer final : public MemoryReclaimer {
  public:
+  static std::unique_ptr<memory::MemoryReclaimer> create(
+      std::shared_ptr<HashJoinBridge> joinBridge,
+      int32_t priority = 0) {
+    return std::unique_ptr<memory::MemoryReclaimer>(
+        new HashJoinMemoryReclaimer(std::move(joinBridge), priority));
+  }
+
   static std::unique_ptr<memory::MemoryReclaimer> create(int32_t priority = 0) {
     return std::unique_ptr<memory::MemoryReclaimer>(
         new HashJoinMemoryReclaimer(priority));
@@ -185,6 +206,13 @@ class HashJoinMemoryReclaimer final : public MemoryReclaimer {
 
  private:
   HashJoinMemoryReclaimer(int32_t priority) : MemoryReclaimer(priority) {}
+
+  HashJoinMemoryReclaimer(
+      std::shared_ptr<HashJoinBridge> joinBridge,
+      int32_t priority)
+      : MemoryReclaimer(priority), joinBridge_(std::move(joinBridge)) {}
+
+  std::weak_ptr<HashJoinBridge> joinBridge_;
 };
 
 /// Returns true if 'pool' is a hash build operator's memory pool. The check is

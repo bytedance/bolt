@@ -378,7 +378,7 @@ void HashBuild::setupSpiller(
         HashBitRange(startBit, startBit + spillConfig.joinRepartitionBits);
   }
 
-  bool firstLevelSpill = (hashBits.begin() == spillConfig.startPartitionBit);
+  const bool useRangePartition = canUseRangePartition(hashBits);
   spiller_ = std::make_unique<Spiller>(
       Spiller::Type::kHashJoinBuild,
       table_->rows(),
@@ -386,9 +386,7 @@ void HashBuild::setupSpiller(
       std::move(hashBits),
       &spillConfig,
       spillConfig.maxFileSize,
-      (firstLevelSpill && supportSkewPartition() &&
-       joinBridge_->numBuilders() == 1 &&
-       operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1));
+      useRangePartition);
   spiller_->setSpillConfig(&spillConfig);
   spiller_->setSkewThreshold(
       skewFileSizeRatioThreshold_, skewRowCountRatioThreshold_);
@@ -1229,18 +1227,97 @@ bool HashBuild::finishHashBuild() {
     }
   }
 
+  auto tableSpillFunc =
+      spillPartitions.empty() ? createTableSpillFunc() : nullptr;
+  // Release the unused reservation before publishing the built table to probe.
+  // This drops the temporary reservation while keeping the actual hash table
+  // memory as used reservation.
+  pool()->release();
+
   if (joinBridge_->setHashTable(
           std::move(table_),
           std::move(spillPartitions),
           joinHasNullKeys_,
-          &offsetTojoinBits_)) {
+          &offsetTojoinBits_,
+          std::move(tableSpillFunc))) {
     intermediateStateCleared_ = true;
     spillGroup_->restart();
   }
-  // Release the unused memory reservation since we have finished the merged
-  // table build.
-  pool()->release();
   return true;
+}
+
+HashJoinBridge::HashJoinTableSpillFunc HashBuild::createTableSpillFunc() {
+  if (!spillEnabled() || isInputFromSpill() || spiller_ == nullptr ||
+      exceededMaxSpillLevelLimit_) {
+    VLOG(1) << name()
+            << " createTableSpillFunc disabled: spillEnabled=" << spillEnabled()
+            << ", isInputFromSpill=" << isInputFromSpill()
+            << ", hasSpiller=" << (spiller_ != nullptr)
+            << ", exceededMaxSpillLevelLimit=" << exceededMaxSpillLevelLimit_;
+    return nullptr;
+  }
+
+  auto tableSpillConfig = std::make_shared<common::SpillConfig>(*spillConfig());
+  auto tableSpillSpiller = std::make_shared<Spiller>(
+      Spiller::Type::kHashJoinBuild,
+      table_->rows(),
+      tableType_,
+      spiller_->hashBits(),
+      tableSpillConfig.get(),
+      tableSpillConfig->maxFileSize,
+      canUseRangePartition(spiller_->hashBits()));
+  tableSpillSpiller->setSpillConfig(tableSpillConfig.get());
+  tableSpillSpiller->setSkewThreshold(
+      skewFileSizeRatioThreshold_, skewRowCountRatioThreshold_);
+  if (hybridJoin_ && table_->hybridData()) {
+    tableSpillSpiller->setHybridMode(true, table_->hybridData());
+  }
+  auto operatorName = name();
+  tableSpillStats_ =
+      std::make_shared<folly::Synchronized<common::SpillStats>>();
+  auto tableSpillStats = tableSpillStats_;
+
+  return [tableSpillConfig, tableSpillSpiller, tableSpillStats, operatorName](
+             std::shared_ptr<BaseHashTable> table) {
+    SpillPartitionSet spillPartitions;
+    tableSpillSpiller->spill();
+    tableSpillSpiller->finishSpill(spillPartitions);
+    auto iter = spillPartitions.begin();
+    while (iter != spillPartitions.end()) {
+      if (iter->second->numFiles() > 0) {
+        ++iter;
+      } else {
+        iter = spillPartitions.erase(iter);
+      }
+    }
+    const auto spillStats = tableSpillSpiller->stats();
+    BOLT_CHECK_EQ(spillStats.spillSortTimeUs, 0);
+    *tableSpillStats->wlock() += spillStats;
+    LOG(INFO) << operatorName << " bridge table spill callback: finish, "
+              << "spilledPartitions=" << spillPartitions.size()
+              << ", spilledBytes=" << succinctBytes(spillStats.spilledBytes)
+              << ", spilledFiles=" << spillStats.spilledFiles
+              << ", spillTotalTimeUs=" << spillStats.spillTotalTimeUs;
+    return spillPartitions;
+  };
+}
+
+OperatorStats HashBuild::stats(bool clear) {
+  auto stats = Operator::stats(clear);
+  if (tableSpillStats_ != nullptr) {
+    auto lockedTableSpillStats = tableSpillStats_->wlock();
+    stats.addSpillStats(*lockedTableSpillStats);
+    if (clear) {
+      lockedTableSpillStats->reset();
+    }
+  }
+  return stats;
+}
+
+bool HashBuild::canUseRangePartition(const HashBitRange& hashBits) const {
+  return hashBits.begin() == spillConfig()->startPartitionBit &&
+      supportSkewPartition() && joinBridge_->numBuilders() == 1 &&
+      operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1;
 }
 
 void HashBuild::recordSpillStats() {

@@ -157,6 +157,17 @@ class HashJoinBridgeTest : public testing::Test,
     return partitionSet;
   }
 
+  SpillPartitionSet makeSingleFakeSpillPartitionSet(
+      uint8_t partitionBitOffset) {
+    SpillPartitionSet partitionSet;
+    const SpillPartitionId id(partitionBitOffset, 0);
+    partitionSet.emplace(
+        id,
+        std::make_unique<SpillPartition>(
+            id, makeFakeSpillFiles(numSpillFilesPerPartition_)));
+    return partitionSet;
+  }
+
   int32_t getSpillLevel(uint8_t partitionBitOffset) {
     return (partitionBitOffset - startPartitionBitOffset_) / numPartitionBits_;
   }
@@ -382,6 +393,268 @@ TEST_P(HashJoinBridgeTest, withSpill) {
       }
     }
   }
+}
+
+TEST_P(HashJoinBridgeTest, reclaimReadyTableBeforeProbeStarts) {
+  auto joinBridge = createJoinBridge();
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    joinBridge->addBuilder();
+  }
+  joinBridge->start();
+
+  bool spillCallbackCalled = false;
+  auto spilledPartitions =
+      makeSingleFakeSpillPartitionSet(startPartitionBitOffset_);
+  const auto spilledPartitionIds = toSpillPartitionIdSet(spilledPartitions);
+  ASSERT_TRUE(joinBridge->setHashTable(
+      createFakeHashTable(),
+      {},
+      false,
+      nullptr,
+      [&](std::shared_ptr<BaseHashTable> table) {
+        EXPECT_NE(table, nullptr);
+        spillCallbackCalled = true;
+        return std::move(spilledPartitions);
+      }));
+
+  auto buildFutures = createEmptyFutures(numBuilders_);
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    ASSERT_FALSE(joinBridge->spillInputOrFuture(&buildFutures[i]).has_value());
+    ASSERT_TRUE(buildFutures[i].valid());
+  }
+
+  memory::MemoryReclaimer::Stats stats;
+  ASSERT_EQ(joinBridge->reclaim(0, stats), 0);
+  ASSERT_TRUE(spillCallbackCalled);
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    buildFutures[i].wait();
+    ASSERT_FALSE(joinBridge->spillInputOrFuture(&buildFutures[i]).has_value());
+    ASSERT_TRUE(buildFutures[i].valid());
+  }
+
+  auto probeFutures = createEmptyFutures(numProbers_);
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_NE(tableOr->table, nullptr);
+    ASSERT_FALSE(tableOr->restoredPartitionId.has_value());
+    ASSERT_EQ(tableOr->spillPartitionIds, spilledPartitionIds);
+  }
+
+  ASSERT_TRUE(joinBridge->probeFinished());
+  std::optional<SpillPartitionId> restoredPartitionId;
+  int32_t numSpilledFiles = 0;
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    buildFutures[i].wait();
+    auto inputOr = joinBridge->spillInputOrFuture(&buildFutures[i]);
+    ASSERT_TRUE(inputOr.has_value());
+    ASSERT_NE(inputOr->spillPartition, nullptr);
+    restoredPartitionId = inputOr->spillPartition->id();
+    ASSERT_TRUE(spilledPartitionIds.contains(restoredPartitionId.value()));
+    numSpilledFiles += inputOr->spillPartition->numFiles();
+  }
+  ASSERT_EQ(numSpilledFiles, numSpillFilesPerPartition_);
+
+  ASSERT_FALSE(joinBridge->setHashTable(createFakeHashTable(), {}, false));
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_NE(tableOr->table, nullptr);
+    ASSERT_EQ(tableOr->restoredPartitionId, restoredPartitionId);
+  }
+}
+
+TEST_P(HashJoinBridgeTest, reclaimReadyTableDisabledAfterProbeStarts) {
+  auto joinBridge = createJoinBridge();
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    joinBridge->addBuilder();
+  }
+  joinBridge->start();
+
+  bool spillCallbackCalled = false;
+  ASSERT_TRUE(joinBridge->setHashTable(
+      createFakeHashTable(),
+      {},
+      false,
+      nullptr,
+      [&](std::shared_ptr<BaseHashTable> /*table*/) {
+        spillCallbackCalled = true;
+        return makeFakeSpillPartitionSet(startPartitionBitOffset_);
+      }));
+
+  auto buildFutures = createEmptyFutures(numBuilders_);
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    ASSERT_FALSE(joinBridge->spillInputOrFuture(&buildFutures[i]).has_value());
+    ASSERT_TRUE(buildFutures[i].valid());
+  }
+
+  auto probeFutures = createEmptyFutures(numProbers_);
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_NE(tableOr->table, nullptr);
+  }
+
+  memory::MemoryReclaimer::Stats stats;
+  ASSERT_EQ(joinBridge->reclaim(0, stats), 0);
+  ASSERT_FALSE(spillCallbackCalled);
+
+  ASSERT_FALSE(joinBridge->probeFinished());
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    buildFutures[i].wait();
+    auto inputOr = joinBridge->spillInputOrFuture(&buildFutures[i]);
+    ASSERT_TRUE(inputOr.has_value());
+    ASSERT_EQ(inputOr->spillPartition, nullptr);
+  }
+}
+
+TEST_P(HashJoinBridgeTest, reclaimReadyTableWithPendingProbeFuture) {
+  auto joinBridge = createJoinBridge();
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    joinBridge->addBuilder();
+  }
+  joinBridge->start();
+
+  auto probeFutures = createEmptyFutures(numProbers_);
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    ASSERT_FALSE(joinBridge->tableOrFuture(&probeFutures[i]).has_value());
+    ASSERT_TRUE(probeFutures[i].valid());
+  }
+
+  bool spillCallbackCalled = false;
+  auto spilledPartitions =
+      makeSingleFakeSpillPartitionSet(startPartitionBitOffset_);
+  const auto spilledPartitionIds = toSpillPartitionIdSet(spilledPartitions);
+  ASSERT_TRUE(joinBridge->setHashTable(
+      createFakeHashTable(),
+      {},
+      false,
+      nullptr,
+      [&](std::shared_ptr<BaseHashTable> table) {
+        EXPECT_NE(table, nullptr);
+        spillCallbackCalled = true;
+        return std::move(spilledPartitions);
+      }));
+
+  memory::MemoryReclaimer::Stats stats;
+  ASSERT_EQ(joinBridge->reclaim(0, stats), 0);
+  ASSERT_TRUE(spillCallbackCalled);
+
+  auto buildFutures = createEmptyFutures(numBuilders_);
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    ASSERT_FALSE(joinBridge->spillInputOrFuture(&buildFutures[i]).has_value());
+    ASSERT_TRUE(buildFutures[i].valid());
+  }
+
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    probeFutures[i].wait();
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_NE(tableOr->table, nullptr);
+    ASSERT_FALSE(tableOr->restoredPartitionId.has_value());
+    ASSERT_EQ(tableOr->spillPartitionIds, spilledPartitionIds);
+  }
+
+  ASSERT_TRUE(joinBridge->probeFinished());
+  std::optional<SpillPartitionId> restoredPartitionId;
+  int32_t numSpilledFiles = 0;
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    buildFutures[i].wait();
+    auto inputOr = joinBridge->spillInputOrFuture(&buildFutures[i]);
+    ASSERT_TRUE(inputOr.has_value());
+    ASSERT_NE(inputOr->spillPartition, nullptr);
+    restoredPartitionId = inputOr->spillPartition->id();
+    ASSERT_TRUE(spilledPartitionIds.contains(restoredPartitionId.value()));
+    numSpilledFiles += inputOr->spillPartition->numFiles();
+  }
+  ASSERT_EQ(numSpilledFiles, numSpillFilesPerPartition_);
+
+  ASSERT_FALSE(joinBridge->setHashTable(createFakeHashTable(), {}, false));
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_NE(tableOr->table, nullptr);
+    ASSERT_EQ(tableOr->restoredPartitionId, restoredPartitionId);
+  }
+}
+
+TEST_P(HashJoinBridgeTest, reclaimReadyTableKeepsTableIfNoPartitionsSpilled) {
+  auto joinBridge = createJoinBridge();
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    joinBridge->addBuilder();
+  }
+  joinBridge->start();
+
+  bool spillCallbackCalled = false;
+  BaseHashTable* rawTable = nullptr;
+  auto table = createFakeHashTable();
+  rawTable = table.get();
+  ASSERT_TRUE(joinBridge->setHashTable(
+      std::move(table),
+      {},
+      false,
+      nullptr,
+      [&](std::shared_ptr<BaseHashTable> table) {
+        EXPECT_NE(table, nullptr);
+        spillCallbackCalled = true;
+        return SpillPartitionSet{};
+      }));
+
+  memory::MemoryReclaimer::Stats stats;
+  ASSERT_EQ(joinBridge->reclaim(0, stats), 0);
+  ASSERT_TRUE(spillCallbackCalled);
+
+  auto probeFutures = createEmptyFutures(numProbers_);
+  for (int32_t i = 0; i < numProbers_; ++i) {
+    auto tableOr = joinBridge->tableOrFuture(&probeFutures[i]);
+    ASSERT_TRUE(tableOr.has_value());
+    ASSERT_FALSE(tableOr->hasNullKeys);
+    ASSERT_EQ(tableOr->table.get(), rawTable);
+    ASSERT_TRUE(tableOr->spillPartitionIds.empty());
+    ASSERT_FALSE(tableOr->restoredPartitionId.has_value());
+  }
+
+  auto buildFutures = createEmptyFutures(numBuilders_);
+  ASSERT_FALSE(joinBridge->probeFinished());
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    auto inputOr = joinBridge->spillInputOrFuture(&buildFutures[i]);
+    ASSERT_TRUE(inputOr.has_value());
+    ASSERT_EQ(inputOr->spillPartition, nullptr);
+  }
+}
+
+TEST_P(HashJoinBridgeTest, reclaimReadyTableSkippedIfBuildAlreadySpilled) {
+  auto joinBridge = createJoinBridge();
+  for (int32_t i = 0; i < numBuilders_; ++i) {
+    joinBridge->addBuilder();
+  }
+  joinBridge->start();
+
+  bool spillCallbackCalled = false;
+  auto buildSpillPartitions =
+      makeFakeSpillPartitionSet(startPartitionBitOffset_);
+  const auto buildSpillPartitionIds =
+      toSpillPartitionIdSet(buildSpillPartitions);
+  ASSERT_TRUE(joinBridge->setHashTable(
+      createFakeHashTable(),
+      std::move(buildSpillPartitions),
+      false,
+      nullptr,
+      [&](std::shared_ptr<BaseHashTable>) {
+        spillCallbackCalled = true;
+        return makeFakeSpillPartitionSet(startPartitionBitOffset_);
+      }));
+
+  memory::MemoryReclaimer::Stats stats;
+  ASSERT_EQ(joinBridge->reclaim(1, stats), 0);
+  ASSERT_FALSE(spillCallbackCalled);
+
+  auto future = ContinueFuture::makeEmpty();
+  auto tableOr = joinBridge->tableOrFuture(&future);
+  ASSERT_TRUE(tableOr.has_value());
+  ASSERT_FALSE(future.valid());
+  ASSERT_NE(tableOr->table, nullptr);
+  ASSERT_EQ(tableOr->spillPartitionIds, buildSpillPartitionIds);
 }
 
 TEST_P(HashJoinBridgeTest, multiThreading) {

@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/HashJoinBridge.h"
+#include "bolt/common/base/SuccinctPrinter.h"
 namespace bytedance::bolt::exec {
 void HashJoinBridge::start() {
   std::lock_guard<std::mutex> l(mutex_);
@@ -56,12 +57,13 @@ bool HashJoinBridge::setHashTable(
     std::unique_ptr<BaseHashTable> table,
     SpillPartitionSet spillPartitionSet,
     bool hasNullKeys,
-    SpillOffsetToBitsSet offsetToJoinBits) {
+    SpillOffsetToBitsSet offsetToJoinBits,
+    HashJoinTableSpillFunc tableSpillFunc) {
   BOLT_CHECK_NOT_NULL(table, "setHashTable called with null table");
 
   auto spillPartitionIdSet = toSpillPartitionIdSet(spillPartitionSet);
 
-  bool hasSpillData;
+  bool mayHaveSpillData;
   std::vector<ContinuePromise> promises;
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -88,13 +90,16 @@ bool HashJoinBridge::setHashTable(
         std::move(spillPartitionIdSet),
         hasNullKeys,
         offsetToJoinBits);
+    probeStarted_ = false;
+    tableSpillFunc_ = std::move(tableSpillFunc);
     restoringSpillPartitionId_.reset();
 
-    hasSpillData = !spillPartitionSets_.empty();
+    mayHaveSpillData =
+        !spillPartitionSets_.empty() || tableSpillFunc_ != nullptr;
     promises = std::move(promises_);
   }
   notify(std::move(promises));
-  return hasSpillData;
+  return mayHaveSpillData;
 }
 
 void HashJoinBridge::setAntiJoinHasNullKeys() {
@@ -107,6 +112,8 @@ void HashJoinBridge::setAntiJoinHasNullKeys() {
     BOLT_CHECK(restoringSpillShards_.empty());
 
     buildResult_ = HashBuildResult{};
+    probeStarted_ = false;
+    tableSpillFunc_ = nullptr;
     restoringSpillPartitionId_.reset();
     spillPartitions.swap(spillPartitionSets_);
     promises = std::move(promises_);
@@ -116,20 +123,34 @@ void HashJoinBridge::setAntiJoinHasNullKeys() {
 
 std::optional<HashJoinBridge::HashBuildResult> HashJoinBridge::tableOrFuture(
     ContinueFuture* future) {
-  std::lock_guard<std::mutex> l(mutex_);
-  BOLT_CHECK(started_);
-  BOLT_CHECK(!cancelled_, "Getting hash table after join is aborted");
-  BOLT_CHECK(
-      !buildResult_.has_value() ||
-      (!restoringSpillPartitionId_.has_value() &&
-       restoringSpillShards_.empty()));
+  std::optional<HashBuildResult> result;
+  std::vector<ContinuePromise> promises;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    BOLT_CHECK(started_);
+    BOLT_CHECK(!cancelled_, "Getting hash table after join is aborted");
+    BOLT_CHECK(
+        !buildResult_.has_value() ||
+        (!restoringSpillPartitionId_.has_value() &&
+         restoringSpillShards_.empty()));
 
-  if (buildResult_.has_value()) {
-    return buildResult_.value();
+    if (buildResult_.has_value() && !tableSpillInProgress_) {
+      if (tableSpillFunc_ != nullptr) {
+        tableSpillFunc_ = nullptr;
+        if (spillPartitionSets_.empty()) {
+          promises = std::move(promises_);
+        }
+      }
+      probeStarted_ = true;
+      result = buildResult_.value();
+    } else {
+      promises_.emplace_back("HashJoinBridge::tableOrFuture");
+      *future = promises_.back().getSemiFuture();
+      return std::nullopt;
+    }
   }
-  promises_.emplace_back("HashJoinBridge::tableOrFuture");
-  *future = promises_.back().getSemiFuture();
-  return std::nullopt;
+  notify(std::move(promises));
+  return result;
 }
 
 bool HashJoinBridge::probeFinished() {
@@ -148,6 +169,7 @@ bool HashJoinBridge::probeFinished() {
     // not needed anymore. We'll wait for the HashBuild operator to build a new
     // table from the next spill partition now.
     buildResult_.reset();
+    tableSpillFunc_ = nullptr;
 
     if (!spillPartitionSets_.empty()) {
       hasSpillInput = true;
@@ -158,7 +180,7 @@ bool HashJoinBridge::probeFinished() {
       spillPartitionSets_.erase(spillPartitionSets_.begin());
       promises = std::move(promises_);
     } else {
-      BOLT_CHECK(promises_.empty());
+      promises = std::move(promises_);
     }
   }
   notify(std::move(promises));
@@ -175,6 +197,12 @@ std::optional<HashJoinBridge::SpillInput> HashJoinBridge::spillInputOrFuture(
 
   if (!restoringSpillPartitionId_.has_value()) {
     if (spillPartitionSets_.empty()) {
+      if (tableSpillInProgress_ ||
+          (buildResult_.has_value() && tableSpillFunc_ != nullptr)) {
+        promises_.emplace_back("HashJoinBridge::spillInputOrFuture");
+        *future = promises_.back().getSemiFuture();
+        return std::nullopt;
+      }
       return HashJoinBridge::SpillInput{};
     } else {
       promises_.emplace_back("HashJoinBridge::spillInputOrFuture");
@@ -186,6 +214,98 @@ std::optional<HashJoinBridge::SpillInput> HashJoinBridge::spillInputOrFuture(
   auto spillShard = std::move(restoringSpillShards_.back());
   restoringSpillShards_.pop_back();
   return SpillInput(std::move(spillShard));
+}
+
+uint64_t HashJoinBridge::reclaim(
+    uint64_t targetBytes,
+    memory::MemoryReclaimer::Stats& /*stats*/) {
+  int64_t reclaimedBytes{0};
+  std::shared_ptr<BaseHashTable> table;
+  HashJoinTableSpillFunc tableSpillFunc;
+  std::vector<ContinuePromise> promises;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (probeStarted_ || tableSpillInProgress_ || !buildResult_.has_value() ||
+        buildResult_->table == nullptr || !spillPartitionSets_.empty() ||
+        tableSpillFunc_ == nullptr) {
+      return 0;
+    }
+
+    table = buildResult_->table;
+    tableSpillFunc = std::move(tableSpillFunc_);
+    tableSpillFunc_ = nullptr;
+    tableSpillInProgress_ = true;
+    LOG(INFO) << "HashJoinBridge::reclaim: start table spill, targetBytes="
+              << succinctBytes(targetBytes)
+              << ", tableRows=" << table->rows()->numRows()
+              << ", tableDistinct=" << table->numDistinct()
+              << ", tableCurrentBytes="
+              << succinctBytes(table->rows()->pool()->currentBytes())
+              << ", tableReservedBytes="
+              << succinctBytes(table->rows()->pool()->reservedBytes());
+  }
+
+  SpillPartitionSet spillPartitionSet;
+  SpillPartitionIdSet spillPartitionIdSet;
+  try {
+    {
+      memory::ScopedReclaimedBytesRecorder recorder(
+          table->rows()->pool(), &reclaimedBytes);
+      spillPartitionSet = tableSpillFunc(table);
+      spillPartitionIdSet = toSpillPartitionIdSet(spillPartitionSet);
+      if (!spillPartitionSet.empty()) {
+        table->clear();
+        table->rows()->pool()->release();
+      }
+      LOG(INFO) << "HashJoinBridge::reclaim: finish table spill, "
+                << "spilledPartitions=" << spillPartitionSet.size()
+                << ", reclaimedBytes=" << succinctBytes(reclaimedBytes)
+                << ", tableCurrentBytes="
+                << succinctBytes(table->rows()->pool()->currentBytes())
+                << ", tableReservedBytes="
+                << succinctBytes(table->rows()->pool()->reservedBytes());
+    }
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      BOLT_CHECK(tableSpillInProgress_);
+      tableSpillInProgress_ = false;
+      promises = std::move(promises_);
+    }
+    LOG(ERROR) << "HashJoinBridge::reclaim: table spill failed";
+    notify(std::move(promises));
+    throw;
+  }
+
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    BOLT_CHECK(tableSpillInProgress_);
+    tableSpillInProgress_ = false;
+
+    if (spillPartitionSet.empty()) {
+      promises = std::move(promises_);
+    } else {
+      BOLT_CHECK(buildResult_.has_value());
+      BOLT_CHECK_NOT_NULL(buildResult_->table);
+
+      BOLT_CHECK(spillPartitionSets_.empty());
+      for (auto& partitionEntry : spillPartitionSet) {
+        const auto id = partitionEntry.first;
+        BOLT_CHECK_EQ(spillPartitionSets_.count(id), 0);
+        spillPartitionSets_.emplace(id, std::move(partitionEntry.second));
+      }
+
+      buildResult_->spillPartitionIds = std::move(spillPartitionIdSet);
+      LOG(INFO) << "HashJoinBridge::reclaim: table spill published to probe, "
+                << "spillPartitionIds="
+                << buildResult_->spillPartitionIds.size()
+                << ", pendingSpillPartitions=" << spillPartitionSets_.size();
+
+      promises = std::move(promises_);
+    }
+  }
+  notify(std::move(promises));
+  return reclaimedBytes;
 }
 
 bool isLeftNullAwareJoinWithFilter(
@@ -221,6 +341,12 @@ uint64_t HashJoinMemoryReclaimer::reclaim(
     reclaimedBytes = child->reclaim(targetBytes, maxWaitMs, stats);
     return false;
   });
+  if (reclaimedBytes == 0 || reclaimedBytes < targetBytes) {
+    if (auto joinBridge = joinBridge_.lock()) {
+      reclaimedBytes += memory::MemoryReclaimer::run(
+          [&]() { return joinBridge->reclaim(targetBytes, stats); }, stats);
+    }
+  }
   return reclaimedBytes;
 }
 

@@ -106,6 +106,9 @@ class HashBuild final : public Operator {
 
   bool isFinished() override;
 
+  using Operator::stats;
+  OperatorStats stats(bool clear) override;
+
   void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
       override;
 
@@ -147,6 +150,10 @@ class HashBuild final : public Operator {
   // barrier for the next round of hash table build operation if it needs.
   bool finishHashBuild();
 
+  // Creates a spill callback for the finished build table held by the join
+  // bridge before probe starts.
+  HashJoinBridge::HashJoinTableSpillFunc createTableSpillFunc();
+
   // [Morsel-driven] same as HashProbe::skipProbeOnEmptyBuild
   bool skipProbeOnEmptyBuild() const {
     return isInnerJoin(joinType_) || isLeftSemiFilterJoin(joinType_) ||
@@ -173,6 +180,8 @@ class HashBuild final : public Operator {
   void recordSpillStats();
   void recordSpillStats(Spiller* spiller);
   void recordSpillReadStats();
+
+  bool canUseRangePartition(const HashBitRange& hashBits) const;
 
   // Indicates if the input is read from spill data or not.
   bool isInputFromSpill() const;
@@ -448,6 +457,8 @@ class HashBuild final : public Operator {
   bool isDREnabled_{false};
   int32_t maxHashTableBucketCount_{std::numeric_limits<int32_t>::max()};
   std::shared_ptr<RowFormatInfo> rowFormatInfo_{nullptr};
+
+  std::shared_ptr<folly::Synchronized<common::SpillStats>> tableSpillStats_;
 
   // For hybrid join
   bool hybridJoin_{false};
