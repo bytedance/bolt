@@ -29,35 +29,16 @@
 # Required env: GLUTEN_HOME, SPARK_HOME.
 # Optional env: JOBS (parallelism, default nproc/3).
 #
-# Logs + reports go to $SCRIPT_DIR/logs/ (gitignored).
+# Logs + reports go to $SCRIPT_DIR/logs/.
 # blacklist.txt and slow_suites.txt live next to this script.
 #
-# Parallel-mode exit: 0 iff every failing case is on the blacklist, else 1.
+# Parallel-mode exit: 0 if every failing case is on the blacklist, else 1.
 
 set -euo pipefail
 
 ###############################################################################
 # Maven profiles — edit here to (de)activate optional sub-systems.
 ###############################################################################
-# Active by default: Spark 3.5 with UT shims, Java 17, Bolt backend, Celeborn.
-#
-# Intentionally OMITTED data-lake profiles (-Piceberg / -Phudi / -Pdelta /
-# -Ppaimon):
-#   Activating any of these makes Maven compile the matching backends-bolt
-#   `src-<name>/` sources into backends-bolt.jar, which ships a
-#   META-INF/gluten-components/Bolt<Name>Component marker. Gluten's component
-#   discovery then reflectively loads Bolt<Name>Component on every test JVM,
-#   and that class statically references symbols in gluten-<name>.jar — a
-#   sibling module that is NOT on a per-suite `mvn -pl <module>` classpath.
-#   The result is `NoClassDefFoundError: OffloadIcebergScan$` (or the paimon /
-#   hudi / delta equivalent) inside SparkSession.applyExtensions, which Spark
-#   silently catches — dropping ALL Gluten extensions for that session and
-#   yielding hundreds of spurious plan-shape failures across unrelated suites.
-#
-#   If you need to test the iceberg / paimon / hudi / delta integration,
-#   either (a) add gluten-<name> as a test-scope dep in every gluten-ut
-#   module's POM under the matching profile, or (b) run just those suites
-#   under a one-off `mvn ... -P<name>` invocation outside this script.
 MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17)
 
 ###############################################################################
@@ -98,8 +79,10 @@ echo "GLUTEN_HOME=$GLUTEN_HOME  SPARK_HOME=$SPARK_HOME  JOBS=$JOBS"
 if ((JOBS == 1)); then
   step "Sequential mode: mvn clean test (reactor-wide)"
   exec "$MVN_BIN" clean test "${MVN_PROFILES[@]}" \
-    -DfailIfNoTests=false -Dexec.skip \
-    -DargLine="-Dspark.test.home=$SPARK_HOME"
+    -DfailIfNoTests=false -Dexec.skip -DDmaven.test.failure.ignore=true \
+    -DargLine="-Dspark.test.home=$SPARK_HOME" > "$LOG_DIR"/sequential.log 2>&1og
+  status=$?
+  if [ $status -eq 0 ] && grep -q "\*\*\* FAILED \*\*\*" "$LOG_DIR"/sequential.log; then exit 1; fi; exit $status
 fi
 
 # Parallel mode requires bwrap for per-suite target/ isolation.
