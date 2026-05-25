@@ -78,12 +78,20 @@ jobs:
       - name: Set up bolt build environment (conan)
         uses: ./.github/actions/bolt-build-base
 
-      - name: Export local bolt as a conan recipe
-        # gluten's `make bolt-recipe` clones bolt from github.com/bytedance/bolt
-        # at the BOLT_BUILD_VERSION tag — that bypasses any PR changes. Stand in
-        # for it by exporting the LOCAL bolt checkout (which has this PR's diff)
-        # into the conan cache under the same `bolt/main` reference.
-        run: conan export ./conanfile.py --name=bolt --version=main
+      - name: Build local bolt (make release_spark)
+        # Build LOCAL bolt source into _build/Release/. Without this, gluten's
+        # `make release` resolves bolt by either pulling a stale binary from
+        # conanserver OR running bolt's conanfile source() which clones
+        # https://github.com/bytedance/bolt.git — both bypass this PR's bolt
+        # changes. Going through bolt's own Makefile uses `conan build ../..`
+        # which compiles from local source.
+        run: make release_spark
+
+      - name: Export built bolt to local conan cache (make install)
+        # Publishes the just-built bolt as `bolt/main` in the local conan
+        # cache via `conan export-pkg`, so gluten's next conan install
+        # finds OUR build instead of downloading from conanserver.
+        run: make install
 
       - name: Build gluten native libs (make release)
         working-directory: ${{ github.workspace }}/gluten
