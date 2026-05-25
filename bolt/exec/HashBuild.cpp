@@ -49,8 +49,6 @@
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
 namespace {
-constexpr uint64_t kProbeAdmissionOutputBatchMultiple = 8;
-
 // Map HashBuild 'state' to the corresponding driver blocking reason.
 BlockingReason fromStateToBlockingReason(HashBuild::State state) {
   switch (state) {
@@ -1278,13 +1276,18 @@ uint64_t HashBuild::probeAdmissionExtraReservationBytes(
             << succinctBytes(pressureWatermarkBytes) << ", details "
             << task->memoryPressureDetails();
   if (pressureWatermarkBytes != 0 &&
-      currentBytes > pressureWatermarkBytes * 0.7) {
+      currentBytes > pressureWatermarkBytes *
+              operatorCtx_->driverCtx()
+                  ->queryConfig()
+                  .memoryPressureWatermarkRatio()) {
     return pressureWatermarkBytes;
   }
 
   const uint64_t probeReservationLimit =
       operatorCtx_->driverCtx()->queryConfig().preferredOutputBatchBytes() *
-      kProbeAdmissionOutputBatchMultiple;
+      operatorCtx_->driverCtx()
+          ->queryConfig()
+          .outputBatchMemoryReservationMultiple();
   return std::min<uint64_t>(currentBytes / 2, probeReservationLimit);
 }
 
