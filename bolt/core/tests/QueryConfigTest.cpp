@@ -59,6 +59,18 @@ TEST_F(QueryConfigTest, setConfig) {
   ASSERT_TRUE(config.isLegacyCast());
 }
 
+TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+  ASSERT_TRUE(queryCtx->queryConfig()
+                  .hashBuildProbeAdmissionUnderMemoryPressureEnabled());
+
+  std::unordered_map<std::string, std::string> configData(
+      {{QueryConfig::kHashBuildProbeAdmissionUnderMemoryPressure, "false"}});
+  queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  ASSERT_FALSE(queryCtx->queryConfig()
+                   .hashBuildProbeAdmissionUnderMemoryPressureEnabled());
+}
+
 TEST_F(QueryConfigTest, taskWriterCountConfig) {
   struct {
     std::optional<int> numWriterCounter;

@@ -440,6 +440,11 @@ class QueryConfig {
   static constexpr const char* kHashProbeFinishEarlyOnEmptyBuild =
       "hash_probe_finish_early_on_empty_build";
 
+  /// If true, reserve extra hash build memory for probe admission when the task
+  /// is under memory pressure.
+  static constexpr const char* kHashBuildProbeAdmissionUnderMemoryPressure =
+      "hash_build_probe_admission_under_memory_pressure_enabled";
+
   /// The minimum number of table rows that can trigger the parallel hash join
   /// table build.
   static constexpr const char* kMinTableRowsForParallelJoinBuild =
@@ -1417,6 +1422,10 @@ class QueryConfig {
 
   bool hashProbeFinishEarlyOnEmptyBuild() const {
     return get<bool>(kHashProbeFinishEarlyOnEmptyBuild, true);
+  }
+
+  bool hashBuildProbeAdmissionUnderMemoryPressureEnabled() const {
+    return get<bool>(kHashBuildProbeAdmissionUnderMemoryPressure, true);
   }
 
   uint32_t minTableRowsForParallelJoinBuild() const {

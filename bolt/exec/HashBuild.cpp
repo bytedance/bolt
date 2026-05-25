@@ -1250,6 +1250,9 @@ bool HashBuild::finishHashBuild() {
 uint64_t HashBuild::probeAdmissionExtraReservationBytes(
     uint64_t numRows) const {
   const bool notReadyForProbeAdmission =
+      !operatorCtx_->driverCtx()
+           ->queryConfig()
+           .hashBuildProbeAdmissionUnderMemoryPressureEnabled() ||
       !spillEnabled() || isInputFromSpill() || numRows == 0;
   const bool spillUnavailable = spiller_ == nullptr ||
       spiller_->isAllSpilled() || exceededMaxSpillLevelLimit_;
