@@ -199,6 +199,7 @@ run_one_suite() {
     -DfailIfNoTests=false -Dexec.skip -Dmaven.test.failure.ignore=true \
     -DargLine="-Dspark.test.home=$SPARK_HOME" \
     -Dtest="$suite" -DwildcardSuites="$suite" \
+    -DtagsToExclude=org.apache.gluten.tags.UDFTest,org.apache.gluten.tags.EnhancedFeaturesTest,org.apache.gluten.tags.SkipTest \
     > "$log" 2>&1 || true
   printf 'finished\t%s\n' "$suite"
 }

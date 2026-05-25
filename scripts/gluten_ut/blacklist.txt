@@ -45,7 +45,6 @@ org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
 org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with preprojection
 org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with unrelated projection
 org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: without projection
-org.apache.gluten.expression.BoltUdfSuiteCluster#(aborted)
 org.apache.gluten.extension.columnar.transition.BoltTransitionSuite#(aborted)
 org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
 org.apache.spark.GlutenSortShuffleSuite#SPARK-36206: shuffle checksum detect disk corruption
