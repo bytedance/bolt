@@ -108,33 +108,25 @@ step "Step 1/3: mvn clean install -DskipTests (-T $JOBS)"
 ###############################################################################
 step "Step 2/3: discover suites"
 SUITE_MAP="$LOG_DIR/_suites.tsv" # tab-separated: <module>\t<fqcn>
-: > "$SUITE_MAP"
 
-# Test-class FQCNs we accept. Anything outside still skips for free since
-# `mvn -Dtest=X` with -DfailIfNoTests=false is a no-op when X doesn't match.
-NAME_REGEX='(Suite|Spec|Test|Validation|Statistics|Generator|Configuration|EncodingLong)'
-mapfile -t TEST_CLASSES_DIRS < <(
-  find . -mindepth 2 -maxdepth 6 -type d -name 'test-classes' 2> /dev/null \
-    | sed 's|^\./||' | sort -u
-)
-for tc in "${TEST_CLASSES_DIRS[@]}"; do
-  module="${tc%%/target/*}"
-  while IFS= read -r class_file; do
-    rel="${class_file#$tc/}"
-    [[ "$rel" == *'$'* ]] && continue # skip inner / anon classes
-    cls="${rel%.class}"
-    cls="${cls//\//.}"
-    [[ "$cls" == *DiscoverySuite* ]] && continue
-    [[ "$cls" =~ $NAME_REGEX ]] || continue
-    # Drop abstract base classes; they can't be instantiated as a suite.
-    javap -p "$class_file" 2> /dev/null \
-      | grep -qE '^(public[[:space:]]+)?abstract[[:space:]]+(class|interface)\b' \
-      && continue
-    printf '%s\t%s\n' "$module" "$cls" >> "$SUITE_MAP"
-  done < <(find "$tc" -name '*.class' -type f)
-done
-# Same FQCN can compile into multiple modules' test-classes; dedup by FQCN.
-sort -u -t$'\t' -k2,2 -o "$SUITE_MAP" "$SUITE_MAP"
+# Walk every .class under <module>/target/.../test-classes/, ignoring:
+#   - inner/anon classes (`$` in path)
+#   - scalatest's leftover DiscoverySuite stubs
+#   - arrow's own Java tests under ep/_ep/arrow_ep
+#   - abstract base classes (parallel `javap | grep abstract`)
+# Then rewrite each surviving path into `<module>\t<FQCN>`, keep names looking
+# like a runnable test, and dedup by FQCN (same class can land in multiple
+# modules' test-classes).
+find . -path '*/test-classes/*.class' \
+       \! -path '*$*' \! -path '*DiscoverySuite*' \! -path '*/ep/_ep/*' \
+  | xargs -P "$JOBS" -I{} sh -c '
+      javap -p "{}" 2>/dev/null | head -3 \
+        | grep -qE "^(public +)?abstract +(class|interface) " || echo "{}"
+    ' \
+  | sed -nE 's|^\./(.+)/target/(scala-[^/]+/)?test-classes/(.+)\.class$|\1\t\3|p' \
+  | awk -F'\t' -v OFS='\t' '{ gsub("/",".",$2) }
+                            $2 ~ /(Suite|Spec|Test|Validation|Statistics|Generator|Configuration|EncodingLong)/' \
+  | sort -u -t$'\t' -k2,2 > "$SUITE_MAP"
 
 NUM_RUN=$(wc -l < "$SUITE_MAP" | tr -d ' ')
 echo "Discovered $NUM_RUN suites total."
@@ -205,14 +197,14 @@ run_one_suite() {
 }
 export -f run_one_suite
 
-# Slow-list priority: xargs preserves input order, so suites listed in
-# slow_suites.txt grab the first JOBS workers and the long tail can't dangle.
+# Slow-list priority: xargs pulls from this file top-down so the suites
+# named in slow_suites.txt grab the first JOBS workers and the long tail
+# can't dangle. Both partitions keep SUITE_MAP's original order.
 DISPATCH_MAP="$LOG_DIR/_suites_dispatch_order.tsv"
 if [[ -f "$SLOW_SUITES_FILE" ]]; then
-  awk 'NR==FNR { slow[$0]=1; next } { print ($2 in slow ? 0 : 1) "\t" $0 }' \
-    "$SLOW_SUITES_FILE" "$SUITE_MAP" \
-    | sort -s -k1,1 | cut -f2- > "$DISPATCH_MAP"
-  echo "Slow-suite priority queue: $(wc -l < "$SLOW_SUITES_FILE" | tr -d ' ') suite(s) dispatched first."
+  awk 'NR==FNR{s[$0]=1;next}   $2 in s'  "$SLOW_SUITES_FILE" "$SUITE_MAP" >  "$DISPATCH_MAP"
+  awk 'NR==FNR{s[$0]=1;next} !($2 in s)' "$SLOW_SUITES_FILE" "$SUITE_MAP" >> "$DISPATCH_MAP"
+  echo "Slow-suite priority queue: $(wc -l < "$SLOW_SUITES_FILE") suite(s) dispatched first."
 else
   cp "$SUITE_MAP" "$DISPATCH_MAP"
 fi
