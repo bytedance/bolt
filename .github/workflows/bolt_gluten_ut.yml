@@ -49,6 +49,27 @@ jobs:
           - /data/conan-server-data:/var/conan/data
     timeout-minutes: 240
     steps:
+      - name: Probe vars + verify required env
+        # Prints what the workflow sees for the BOLT_RUNNER_* repo variables,
+        # then hard-fails if either GLUTEN_REPO or GLUTEN_REF resolved to empty
+        # — actions/checkout silently falls back to the current repo on empty
+        # `repository:`, which masks the problem until much later steps fail
+        # with "No such file or directory".
+        run: |
+          echo "::group::vars probe"
+          echo "vars.BOLT_RUNNER_GLUTEN_REPO=[${{ vars.BOLT_RUNNER_GLUTEN_REPO }}]"
+          echo "vars.BOLT_RUNNER_GLUTEN_REF=[${{ vars.BOLT_RUNNER_GLUTEN_REF }}]"
+          echo "vars.BOLT_RUNNER_CONAN_HOME=[${{ vars.BOLT_RUNNER_CONAN_HOME }}]"
+          echo "inputs.gluten_repo=[${{ inputs.gluten_repo }}]"
+          echo "inputs.gluten_ref=[${{ inputs.gluten_ref }}]"
+          echo "env.GLUTEN_REPO=[$GLUTEN_REPO]"
+          echo "env.GLUTEN_REF=[$GLUTEN_REF]"
+          echo "::endgroup::"
+          [[ -n "$GLUTEN_REPO" && -n "$GLUTEN_REF" ]] || {
+            echo "::error::GLUTEN_REPO / GLUTEN_REF empty. Set vars.BOLT_RUNNER_GLUTEN_REPO and vars.BOLT_RUNNER_GLUTEN_REF in bytedance/bolt repository variables, or pass inputs via workflow_dispatch."
+            exit 1
+          }
+
       - name: Checkout bolt (this repo)
         uses: actions/checkout@v6
 
@@ -79,6 +100,17 @@ jobs:
 
       - name: Set up bolt build environment (conan)
         uses: ./.github/actions/bolt-build-base
+
+      - name: Align conan default profile with bolt.profile
+        # bolt's Makefile installs with `-pr default -pr scripts/conan/bolt.profile`,
+        # but gluten's Makefile only uses `-pr default`. The bolt profile injects a
+        # `[tool_requires] cmake/3.31.10`, which Conan 2 folds into bolt's
+        # package_id. Without merging, gluten resolves a different package_id for
+        # bolt than `make release_spark` exported, triggering a `--build=missing`
+        # rebuild from `source()` (which clones github main, NOT the local PR
+        # bolt). Append the bolt-profile fragment to default so both invocations
+        # agree on bolt's package_id and the cached binary is reused.
+        run: cat scripts/conan/bolt.profile >> ~/.conan2/profiles/default
 
       - name: Build local bolt (make release_spark)
         run: make release_spark && make export_release
