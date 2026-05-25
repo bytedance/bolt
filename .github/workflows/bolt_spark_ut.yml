@@ -88,33 +88,32 @@ jobs:
         working-directory: ${{ github.workspace }}/gluten
         run: bash dev/build_arrow.sh
 
-      - name: Restore Spark 3.5.5 binary + test resources
+      - name: Restore Spark 3.5.5 source resources
         id: spark-cache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/gluten/shims/spark35/spark_home
-          key: spark-3.5.5-bin-hadoop3-resources-v1
+          key: spark-3.5.5-src-resources-v1
 
-      - name: Install Spark 3.5.5 binary + test resources
+      - name: Install Spark 3.5.5 source resources
         if: steps.spark-cache.outputs.cache-hit != 'true'
         working-directory: ${{ github.workspace }}/gluten
-        # Pipe wget directly into tar so nothing hits disk twice.
-        # Binary distribution lays jars/bin/python under SPARK_HOME — Spark's
-        # launcher falls back to $SPARK_HOME/jars when assembly/target is
-        # absent, so no source-build layout shim is needed.
+        # Source tarball only (~30 MB). Gluten tests resolve Spark's runtime
+        # jars from Maven Central via pom; SPARK_HOME only feeds
+        # spark.test.home (sql/core/src/test/resources/). Suites that need
+        # bin/spark-submit + jars/ for local-cluster sub-JVMs are blacklisted.
         run: |
           set -e
           BASE=https://archive.apache.org/dist/spark/spark-3.5.5
           DEST=shims/spark35/spark_home
           mkdir -p "$DEST"
-          wget -qO- "$BASE/spark-3.5.5-bin-hadoop3.tgz" | tar -xz --strip-components=1 -C "$DEST"
-          wget -qO- "$BASE/spark-3.5.5.tgz" | tar -xz --strip-components=1 -C "$DEST" spark-3.5.5/sql/core/src/test/resources/
+          wget -qO- "$BASE/spark-3.5.5.tgz" | tar -xz --strip-components=1 -C "$DEST"
 
       - name: Run gluten Spark UT (parallel, blacklist-aware)
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: ${{ github.workspace }}/gluten/shims/spark35/spark_home/
-          JOBS: '1'
+          JOBS: '8'
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
