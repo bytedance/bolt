@@ -247,11 +247,15 @@ for log in "$LOG_DIR"/*.log; do
   done <<< "$keys"
 done
 
-# Blacklist entries that didn't match any real failure — candidates for
-# removal once verified stable.
-while IFS= read -r entry; do
+# Blacklist entries that didn't fire this run. If a case stays stale
+# across multiple runs it's a candidate for removal from blacklist.txt.
+stale=$(while IFS= read -r entry; do
   [[ -v fired[$entry] ]] || echo "  ? $entry"
-done < "$BLACKLIST_FILE"
+done < "$BLACKLIST_FILE")
+if [[ -n "$stale" ]]; then
+  echo "stale blacklist entries (didn't fail this run; remove if consistently passing):"
+  echo "$stale"
+fi
 
 echo "expected failures:   $expected (on blacklist; not counted)"
 echo "unexpected failures: $unexpected"

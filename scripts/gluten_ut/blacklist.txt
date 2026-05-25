@@ -50,12 +50,7 @@ org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
 org.apache.spark.GlutenSortShuffleSuite#SPARK-36206: shuffle checksum detect disk corruption
 org.apache.spark.GlutenSortShuffleSuite#SortShuffleManager properly cleans up files for shuffles that use the deserialized path
 org.apache.spark.GlutenSortShuffleSuite#SortShuffleManager properly cleans up files for shuffles that use the serialized path
-org.apache.spark.GlutenSortShuffleSuite#[SPARK-4085] rerun map stage if reduce stage cannot find its local shuffle file
-org.apache.spark.GlutenSortShuffleSuite#cannot find its local shuffle file if no execution of the stage and rerun shuffle
 org.apache.spark.GlutenSortShuffleSuite#cogroup using mutable pairs
-org.apache.spark.GlutenSortShuffleSuite#metrics for shuffle with aggregation
-org.apache.spark.GlutenSortShuffleSuite#metrics for shuffle without aggregation
-org.apache.spark.GlutenSortShuffleSuite#multiple simultaneous attempts for one task (SPARK-8029)
 org.apache.spark.GlutenSortShuffleSuite#shuffle non-zero block size
 org.apache.spark.GlutenSortShuffleSuite#shuffle on mutable pairs
 org.apache.spark.GlutenSortShuffleSuite#shuffle serializer
@@ -66,19 +61,13 @@ org.apache.spark.GlutenSortShuffleSuite#sorting on mutable pairs
 org.apache.spark.GlutenSortShuffleSuite#subtract mutable pairs
 org.apache.spark.GlutenSortShuffleSuite#zero sized blocks
 org.apache.spark.GlutenSortShuffleSuite#zero sized blocks without kryo
-org.apache.spark.sql.GlutenDynamicPartitionPruningV1SuiteAEOn#broadcast multiple keys in an UnsafeHashedRelation
 org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
 org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-parsing-invalid.sql
-org.apache.spark.sql.GlutenSQLQueryTestSuite#describe.sql
 org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
-org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
-org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
 org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite#SPARK-39983 - Broadcasted relation is not cached on the driver
 org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
-org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#Broadcast timeout
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#BroadcastHashJoinExec output partitioning size should be limited with a config
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-23214: cached data should not carry extra hint info
