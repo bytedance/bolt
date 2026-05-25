@@ -167,8 +167,7 @@ class ExecutionMemoryPool final
   const DynamicMemoryQuotaManagerOption option_;
   int64_t memIncreaseSize_{0};
   std::optional<int64_t> poolExtendSize_;
-  std::unordered_map<int64_t, uint32_t>
-      dynamicMemoryQuotaManagerDisableCounts_;
+  std::unordered_map<int64_t, uint32_t> dynamicMemoryQuotaManagerDisableCounts_;
   std::unordered_map<int64_t, int64_t> borrowFromRssWatermarkBytes_;
   DynamicMemoryQuotaManagerStatistics statistics_;
 };
