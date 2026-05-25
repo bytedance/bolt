@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "bolt/common/base/SpillStats.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/time/CpuWallTimer.h"
 #include "bolt/expression/ExprStats.h"
@@ -266,6 +267,7 @@ struct OperatorStats {
 
   void addRuntimeStat(const std::string& name, const RuntimeCounter& value);
   void setRuntimeStat(const std::string& name, const RuntimeCounter& value);
+  void addSpillStats(const common::SpillStats& spillStats);
   void add(const OperatorStats& other);
   void clear();
   folly::dynamic serialize() const {

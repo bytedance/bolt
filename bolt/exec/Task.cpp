@@ -544,20 +544,24 @@ memory::MemoryPool* Task::getOrAddJoinNodePool(
     return nodePools_[nodeId];
   }
   childPools_.push_back(pool_->addAggregateChild(
-      fmt::format("node.{}", nodeId), createNodeReclaimer(true)));
+      fmt::format("node.{}", nodeId),
+      createNodeReclaimer(true, planNodeId, splitGroupId)));
   auto* nodePool = childPools_.back().get();
   nodePools_[nodeId] = nodePool;
   return nodePool;
 }
 
 std::unique_ptr<memory::MemoryReclaimer> Task::createNodeReclaimer(
-    bool isHashJoinNode) const {
+    bool isHashJoinNode,
+    const core::PlanNodeId& planNodeId,
+    uint32_t splitGroupId) {
   if (pool()->reclaimer() == nullptr) {
     return nullptr;
   }
   // Sets memory reclaimer for the parent node memory pool on the first child
   // operator construction which has set memory reclaimer.
-  return isHashJoinNode ? HashJoinMemoryReclaimer::create()
+  return isHashJoinNode ? HashJoinMemoryReclaimer::create(
+                              getHashJoinBridgeLocked(splitGroupId, planNodeId))
                         : exec::MemoryReclaimer::create();
 }
 
