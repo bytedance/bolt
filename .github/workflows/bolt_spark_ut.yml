@@ -142,6 +142,10 @@ jobs:
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: ${{ github.workspace }}/gluten/shims/spark35/spark_home/
+          # run.sh's default `nproc/3` came out to 21 on this runner and the
+          # combined surefire JVM heap exceeded RAM (SIGKILL 137 at ~129/410
+          # suites). Cap at 8 — fewer parallel JVMs, slower wall but stable.
+          JOBS: '8'
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
