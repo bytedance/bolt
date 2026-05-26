@@ -1,4 +1,5 @@
 #include "bolt/common/memory/bm/DiskIoTypes.h"
+#include "bolt/common/memory/bm/MockIoBackend.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -48,4 +49,25 @@ TEST(DiskIoTypesTest, validateConfigRejectsInvalidDepth) {
   config.adaptiveDepth.maxDepth = 32;
 
   EXPECT_EQ(EINVAL, validateDiskIoSchedulerConfig(config));
+}
+
+TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
+  MockIoBackend backend;
+  IoRequest request;
+  request.opcode = IoOpcode::Read;
+  request.priority = IoPriority::Medium;
+  request.fd = 7;
+  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
+
+  EXPECT_TRUE(backend.submit(11, request));
+  EXPECT_TRUE(backend.submit(12, request));
+  ASSERT_EQ(2, backend.submitted().size());
+  EXPECT_EQ(11, backend.submitted()[0].requestId);
+  EXPECT_EQ(12, backend.submitted()[1].requestId);
+
+  backend.complete(12, IoResult{4096, 0});
+  auto completions = backend.reap();
+  ASSERT_EQ(1, completions.size());
+  EXPECT_EQ(12, completions[0].requestId);
+  EXPECT_EQ(4096, completions[0].result.bytes);
 }
