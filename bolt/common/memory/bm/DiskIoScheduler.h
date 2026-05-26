@@ -1,0 +1,66 @@
+#pragma once
+
+#include <array>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+
+#include "bolt/common/memory/bm/DiskIoTypes.h"
+#include "bolt/common/memory/bm/IoBackend.h"
+
+namespace bytedance::bolt::memory::bm {
+
+class DiskIoScheduler {
+ public:
+  DiskIoScheduler(
+      DiskIoSchedulerConfig config,
+      std::unique_ptr<IoBackend> backend);
+  ~DiskIoScheduler();
+
+  DiskIoScheduler(const DiskIoScheduler&) = delete;
+  DiskIoScheduler& operator=(const DiskIoScheduler&) = delete;
+
+  std::future<IoResult> submit(IoRequest request);
+  void stopAndDrain();
+  DiskIoSchedulerStats stats() const;
+
+ private:
+  struct QueuedRequest {
+    uint64_t requestId{0};
+    IoRequest request;
+    std::promise<IoResult> promise;
+  };
+
+  struct InflightRequest {
+    IoPriority priority{IoPriority::Medium};
+    std::promise<IoResult> promise;
+  };
+
+  static std::future<IoResult> completedFuture(IoResult result);
+
+  void run();
+  bool hasQueuedRequestsLocked() const;
+  bool drainedLocked() const;
+  bool dispatchOneLocked();
+  void reapCompletionsLocked();
+
+  const DiskIoSchedulerConfig config_;
+  const uint32_t currentDepth_;
+  std::unique_ptr<IoBackend> backend_;
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stopping_{false};
+  uint64_t nextRequestId_{1};
+  std::array<std::deque<QueuedRequest>, kIoPriorityCount> queues_;
+  std::unordered_map<uint64_t, InflightRequest> inflight_;
+  DiskIoSchedulerStats stats_;
+  std::thread worker_;
+};
+
+} // namespace bytedance::bolt::memory::bm
