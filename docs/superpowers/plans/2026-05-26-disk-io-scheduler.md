@@ -1,86 +1,86 @@
-# Disk IO Scheduler Implementation Plan
+# Disk IO 调度器实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给 agentic workers：** 必须使用子技能：superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，并按任务逐项执行本计划。步骤使用 checkbox（`- [ ]`）语法跟踪进度。
 
-**Goal:** 在 `bolt/common/memory/bm` 下实现一个独立的 Disk IO 调度基础库，提供 `std::future<IoResult>` API、三档优先级、可配置加权公平调度、吞吐导向 adaptive inflight depth、io_uring backend 和 mock backend。
+**目标：** 在 `bolt/common/memory/bm` 下实现一个独立的 Disk IO 调度基础库，提供 `std::future<IoResult>` API、三档优先级、可配置加权公平调度、吞吐导向 adaptive inflight depth、io_uring backend 和 mock backend。
 
-**Architecture:** 公共 API 保持标准库接口，不暴露 Folly。`DiskIoScheduler` 负责队列、调度、线程、promise completion、stats 和 adaptive depth；`IoBackend` 只负责 submit/reap；`MockIoBackend` 用于确定性单测，`IoUringBackend` 用于真实 IO。第一版 single-shard，不接入现有 spill/file 路径。
+**架构：** 公共 API 保持标准库接口，不暴露 Folly。`DiskIoScheduler` 负责队列、调度、线程、promise completion、stats 和 adaptive depth；`IoBackend` 只负责 submit/reap；`MockIoBackend` 用于确定性单测，`IoUringBackend` 用于真实 IO。第一版 single-shard，不接入现有 spill/file 路径。
 
-**Tech Stack:** C++20, std::future/std::promise, std::thread/std::condition_variable, GTest/GMock, io_uring/liburing behind `IO_URING_SUPPORTED`, new isolated `bolt_memory_bm` CMake target.
+**技术栈：** C++20、std::future/std::promise、std::thread/std::condition_variable、GTest/GMock、`IO_URING_SUPPORTED` 下的 io_uring/liburing，以及新的隔离 `bolt_memory_bm` CMake target。
 
 ---
 
-## File Structure
+## 文件结构
 
-- Create `bolt/common/memory/bm/DiskIoTypes.h`
-  - Public enums, request/result structs, config structs, stats structs, validation helpers.
-- Create `bolt/common/memory/bm/IoBackend.h`
-  - Internal backend interface and backend request/completion structs.
-- Create `bolt/common/memory/bm/MockIoBackend.h`
-  - Test-only backend declaration with deterministic submit log and controlled completions.
-- Create `bolt/common/memory/bm/MockIoBackend.cpp`
-  - Test-only mock backend implementation, compiled into `bolt_memory_bm_test`, not `bolt_memory_bm`.
-- Create `bolt/common/memory/bm/AdaptiveDepthController.h`
-  - Throughput hill-climbing controller, independent from scheduler threading.
-- Create `bolt/common/memory/bm/AdaptiveDepthController.cpp`
-  - Controller implementation.
-- Create `bolt/common/memory/bm/DiskIoScheduler.h`
-  - Public scheduler facade.
-- Create `bolt/common/memory/bm/DiskIoScheduler.cpp`
-  - Queueing, DWRR dispatch, backend completion, stats, shutdown/drain.
-- Create `bolt/common/memory/bm/IoUringBackend.h`
-  - Real backend declaration behind `IO_URING_SUPPORTED`.
-- Create `bolt/common/memory/bm/IoUringBackend.cpp`
-  - Real io_uring backend implementation behind `IO_URING_SUPPORTED`.
-- Create `bolt/common/memory/bm/CMakeLists.txt`
-  - Defines isolated `bolt_memory_bm` library target and adds `tests` when testing is enabled.
-- Create `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
-  - Mock backend tests for validation, FIFO, weighted fairness, depth, stats, shutdown.
-- Create `bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`
-  - Isolated controller tests.
-- Create `bolt/common/memory/bm/tests/IoUringBackendTest.cpp`
-  - Conditional integration tests for real read/write and invalid fd.
-- Create `bolt/common/memory/bm/tests/CMakeLists.txt`
-  - Defines isolated `bolt_memory_bm_test` executable target.
-- Modify `bolt/common/memory/CMakeLists.txt`
-  - Add only `add_subdirectory(bm)` so BM code is isolated from `bolt_memory`.
+- 新建 `bolt/common/memory/bm/DiskIoTypes.h`
+  - 公共枚举、请求/结果结构体、配置结构体、统计结构体和校验 helper。
+- 新建 `bolt/common/memory/bm/IoBackend.h`
+  - 内部 backend 接口，以及 backend request/completion 结构体。
+- 新建 `bolt/common/memory/bm/MockIoBackend.h`
+  - 测试专用 backend 声明，提供确定性的 submit 记录和可控 completion。
+- 新建 `bolt/common/memory/bm/MockIoBackend.cpp`
+  - 测试专用 mock backend 实现，只编进 `bolt_memory_bm_test`，不编进 `bolt_memory_bm`。
+- 新建 `bolt/common/memory/bm/AdaptiveDepthController.h`
+  - 吞吐 hill-climbing 控制器，独立于 scheduler 线程模型。
+- 新建 `bolt/common/memory/bm/AdaptiveDepthController.cpp`
+  - 控制器实现。
+- 新建 `bolt/common/memory/bm/DiskIoScheduler.h`
+  - 公共 scheduler facade。
+- 新建 `bolt/common/memory/bm/DiskIoScheduler.cpp`
+  - 排队、DWRR dispatch、backend completion、stats、shutdown/drain。
+- 新建 `bolt/common/memory/bm/IoUringBackend.h`
+  - `IO_URING_SUPPORTED` 下的真实 backend 声明。
+- 新建 `bolt/common/memory/bm/IoUringBackend.cpp`
+  - `IO_URING_SUPPORTED` 下的真实 io_uring backend 实现。
+- 新建 `bolt/common/memory/bm/CMakeLists.txt`
+  - 定义隔离的 `bolt_memory_bm` library target，并在启用测试时添加 `tests`。
+- 新建 `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+  - 基于 mock backend 的测试，覆盖校验、FIFO、加权公平、depth、stats 和 shutdown。
+- 新建 `bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`
+  - 独立 controller 测试。
+- 新建 `bolt/common/memory/bm/tests/IoUringBackendTest.cpp`
+  - 条件编译的集成测试，覆盖真实 read/write 和 invalid fd。
+- 新建 `bolt/common/memory/bm/tests/CMakeLists.txt`
+  - 定义隔离的 `bolt_memory_bm_test` executable target。
+- 修改 `bolt/common/memory/CMakeLists.txt`
+  - 只添加 `add_subdirectory(bm)`，确保 BM 代码与 `bolt_memory` 隔离。
 
-## Verification Commands
+## 验证命令
 
-Use these commands throughout the plan:
+整个计划执行过程中使用这些命令：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 ```
 
-Expected: build exits 0 and updates `_build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test`.
+预期：构建退出码为 0，并更新 `_build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test`.
 
 ```bash
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='*DiskIo*:*AdaptiveDepth*'
 ```
 
-Expected: all matching tests pass.
+预期：所有匹配的测试通过。
 
 ```bash
 PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH make release_with_test
 ```
 
-Expected: repository release build and tests complete successfully.
+预期：仓库 release 构建和测试全部成功。
 
 ---
 
-### Task 1: Public Types, Config, Stats, and Validation
+### 任务 1：公共类型、配置、统计和校验
 
-**Files:**
-- Create: `bolt/common/memory/bm/DiskIoTypes.h`
-- Create: `bolt/common/memory/bm/CMakeLists.txt`
-- Create: `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
-- Create: `bolt/common/memory/bm/tests/CMakeLists.txt`
-- Modify: `bolt/common/memory/CMakeLists.txt`
+**文件：**
+- 新建：`bolt/common/memory/bm/DiskIoTypes.h`
+- 新建：`bolt/common/memory/bm/CMakeLists.txt`
+- 新建：`bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+- 新建：`bolt/common/memory/bm/tests/CMakeLists.txt`
+- 修改：`bolt/common/memory/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing validation tests**
+- [ ] **步骤 1：编写失败的校验测试**
 
-Add `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp` with these initial tests:
+新增 `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`，写入以下初始测试：
 
 ```cpp
 #include "bolt/common/memory/bm/DiskIoTypes.h"
@@ -136,9 +136,9 @@ TEST(DiskIoTypesTest, validateConfigRejectsInvalidDepth) {
 }
 ```
 
-- [ ] **Step 2: Add tests to CMake and verify they fail**
+- [ ] **步骤 2：把测试加入 CMake 并确认失败**
 
-Create `bolt/common/memory/bm/CMakeLists.txt`:
+新建 `bolt/common/memory/bm/CMakeLists.txt`：
 
 ```cmake
 if(${BOLT_BUILD_TESTING})
@@ -158,7 +158,7 @@ target_link_libraries(
 )
 ```
 
-Create `bolt/common/memory/bm/tests/CMakeLists.txt`:
+新建 `bolt/common/memory/bm/tests/CMakeLists.txt`：
 
 ```cmake
 include(GoogleTest)
@@ -182,7 +182,7 @@ target_link_libraries(
 gtest_add_tests(bolt_memory_bm_test "" AUTO)
 ```
 
-Modify `bolt/common/memory/CMakeLists.txt` near the top:
+修改 `bolt/common/memory/CMakeLists.txt` 顶部附近：
 
 ```cmake
 add_subdirectory(bm)
@@ -193,17 +193,17 @@ if(${BOLT_BUILD_TESTING})
 endif()
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 ```
 
-Expected: FAIL because `bolt/common/memory/bm/DiskIoTypes.h` does not exist.
+预期：失败，因为 `bolt/common/memory/bm/DiskIoTypes.h` 不存在。
 
-- [ ] **Step 3: Implement public types and validation**
+- [ ] **步骤 3：实现公共类型和校验逻辑**
 
-Create `bolt/common/memory/bm/DiskIoTypes.h`:
+新建 `bolt/common/memory/bm/DiskIoTypes.h`：
 
 ```cpp
 #pragma once
@@ -340,20 +340,20 @@ inline int validateDiskIoSchedulerConfig(const DiskIoSchedulerConfig& config) {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 4: Verify isolated target**
+- [ ] **步骤 4：验证隔离 target**
 
-No source is added to `bolt_memory` in this task. `bolt_memory_bm` is an isolated interface target until `.cpp` files are introduced.
+本任务不向 `bolt_memory` 添加任何源码。在引入 `.cpp` 文件前，`bolt_memory_bm` 保持为隔离的 interface target。
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='DiskIoTypesTest.*'
 ```
 
-Expected: build exits 0; `3 tests from DiskIoTypesTest` pass.
+预期：构建退出码为 0；`DiskIoTypesTest` 的 3 个测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/CMakeLists.txt bolt/common/memory/bm/CMakeLists.txt bolt/common/memory/bm/DiskIoTypes.h bolt/common/memory/bm/tests/CMakeLists.txt bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp
@@ -362,18 +362,18 @@ git commit -m "feat: add disk io public types"
 
 ---
 
-### Task 2: Backend Interface and Deterministic Mock Backend
+### 任务 2：Backend 接口和确定性 Mock Backend
 
-**Files:**
-- Create: `bolt/common/memory/bm/IoBackend.h`
-- Create: `bolt/common/memory/bm/MockIoBackend.h`
-- Create: `bolt/common/memory/bm/MockIoBackend.cpp`
-- Modify: `bolt/common/memory/bm/tests/CMakeLists.txt`
-- Modify: `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+**文件：**
+- 新建：`bolt/common/memory/bm/IoBackend.h`
+- 新建：`bolt/common/memory/bm/MockIoBackend.h`
+- 新建：`bolt/common/memory/bm/MockIoBackend.cpp`
+- 修改：`bolt/common/memory/bm/tests/CMakeLists.txt`
+- 修改：`bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
 
-- [ ] **Step 1: Write failing mock backend tests**
+- [ ] **步骤 1：编写失败的 mock backend 测试**
 
-Append to `DiskIoSchedulerTest.cpp`:
+追加到 `DiskIoSchedulerTest.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/MockIoBackend.h"
@@ -400,17 +400,17 @@ TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
 }
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 ```
 
-Expected: FAIL because `MockIoBackend.h` does not exist.
+预期：失败，因为 `MockIoBackend.h` 不存在。
 
-- [ ] **Step 2: Define backend interface**
+- [ ] **步骤 2：定义 backend 接口**
 
-Create `bolt/common/memory/bm/IoBackend.h`:
+新建 `bolt/common/memory/bm/IoBackend.h`：
 
 ```cpp
 #pragma once
@@ -438,9 +438,9 @@ class IoBackend {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 3: Implement mock backend**
+- [ ] **步骤 3：实现 mock backend**
 
-Create `bolt/common/memory/bm/MockIoBackend.h`:
+新建 `bolt/common/memory/bm/MockIoBackend.h`：
 
 ```cpp
 #pragma once
@@ -478,7 +478,7 @@ class MockIoBackend : public IoBackend {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-Create `bolt/common/memory/bm/MockIoBackend.cpp`:
+新建 `bolt/common/memory/bm/MockIoBackend.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/MockIoBackend.h"
@@ -518,9 +518,9 @@ size_t MockIoBackend::inflight() const {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 4: Compile mock backend only into the isolated test target and verify**
+- [ ] **步骤 4：只把 mock backend 编进隔离测试 target 并验证**
 
-Modify `bolt/common/memory/bm/tests/CMakeLists.txt`:
+修改 `bolt/common/memory/bm/tests/CMakeLists.txt`：
 
 ```cmake
 add_executable(
@@ -530,16 +530,16 @@ add_executable(
 )
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='MockIoBackendTest.*'
 ```
 
-Expected: build exits 0; mock backend test passes.
+预期：构建退出码为 0；mock backend test 通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/IoBackend.h bolt/common/memory/bm/MockIoBackend.h bolt/common/memory/bm/MockIoBackend.cpp bolt/common/memory/bm/tests/CMakeLists.txt bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp
@@ -548,17 +548,17 @@ git commit -m "feat: add disk io backend abstraction"
 
 ---
 
-### Task 3: Scheduler Submit, Fixed Depth Dispatch, Completion, and Drain
+### 任务 3：Scheduler Submit、固定 Depth Dispatch、Completion 和 Drain
 
-**Files:**
-- Create: `bolt/common/memory/bm/DiskIoScheduler.h`
-- Create: `bolt/common/memory/bm/DiskIoScheduler.cpp`
-- Modify: `bolt/common/memory/bm/CMakeLists.txt`
-- Modify: `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+**文件：**
+- 新建：`bolt/common/memory/bm/DiskIoScheduler.h`
+- 新建：`bolt/common/memory/bm/DiskIoScheduler.cpp`
+- 修改：`bolt/common/memory/bm/CMakeLists.txt`
+- 修改：`bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
 
-- [ ] **Step 1: Write failing scheduler lifecycle tests**
+- [ ] **步骤 1：编写失败的 scheduler 生命周期测试**
 
-Append to `DiskIoSchedulerTest.cpp`:
+追加到 `DiskIoSchedulerTest.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
@@ -604,17 +604,17 @@ TEST(DiskIoSchedulerTest, submitsAndCompletesSingleRequest) {
 }
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 ```
 
-Expected: FAIL because `DiskIoScheduler.h` does not exist.
+预期：失败，因为 `DiskIoScheduler.h` 不存在。
 
-- [ ] **Step 2: Implement scheduler facade and constructor injection for tests**
+- [ ] **步骤 2：实现 scheduler facade 和测试用构造注入**
 
-Create `bolt/common/memory/bm/DiskIoScheduler.h`:
+新建 `bolt/common/memory/bm/DiskIoScheduler.h`：
 
 ```cpp
 #pragma once
@@ -674,9 +674,9 @@ class DiskIoScheduler {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 3: Implement minimal fixed-depth scheduler**
+- [ ] **步骤 3：实现最小 fixed-depth scheduler**
 
-Create `bolt/common/memory/bm/DiskIoScheduler.cpp` with a first implementation that scans priorities in enum order:
+新建 `bolt/common/memory/bm/DiskIoScheduler.cpp`，先实现按 enum 顺序扫描优先级的版本：
 
 ```cpp
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
@@ -838,9 +838,9 @@ DiskIoSchedulerStats DiskIoScheduler::stats() const {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 4: Convert isolated library target to compile scheduler source and verify**
+- [ ] **步骤 4：将隔离 library target 改为编译 scheduler 源码并验证**
 
-Replace the interface target in `bolt/common/memory/bm/CMakeLists.txt` with a real isolated library:
+将 `bolt/common/memory/bm/CMakeLists.txt` 中的 interface target 替换为真实的隔离 library：
 
 ```cmake
 if(${BOLT_BUILD_TESTING})
@@ -863,16 +863,16 @@ target_link_libraries(
 )
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='DiskIoSchedulerTest.invalidRequestReturnsCompletedErrorFuture:DiskIoSchedulerTest.submitsAndCompletesSingleRequest'
 ```
 
-Expected: selected tests pass.
+预期：选中的测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/CMakeLists.txt bolt/common/memory/bm/DiskIoScheduler.h bolt/common/memory/bm/DiskIoScheduler.cpp bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp
@@ -881,16 +881,16 @@ git commit -m "feat: add basic disk io scheduler"
 
 ---
 
-### Task 4: Weighted Fair Priority Scheduling
+### 任务 4：加权公平优先级调度
 
-**Files:**
-- Modify: `bolt/common/memory/bm/DiskIoScheduler.h`
-- Modify: `bolt/common/memory/bm/DiskIoScheduler.cpp`
-- Modify: `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+**文件：**
+- 修改：`bolt/common/memory/bm/DiskIoScheduler.h`
+- 修改：`bolt/common/memory/bm/DiskIoScheduler.cpp`
+- 修改：`bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
 
-- [ ] **Step 1: Write failing weighted fairness test**
+- [ ] **步骤 1：编写失败的加权公平测试**
 
-Append:
+追加：
 
 ```cpp
 TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {
@@ -941,35 +941,35 @@ TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {
 }
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='DiskIoSchedulerTest.dispatchesUsingConfiguredWeights'
 ```
 
-Expected: FAIL because fixed priority scan submits all `High` requests first.
+预期：失败，因为固定优先级扫描会先提交所有 `High` 请求。
 
-- [ ] **Step 2: Add DWRR state to scheduler**
+- [ ] **步骤 2：给 scheduler 添加 DWRR 状态**
 
-Add to private members in `DiskIoScheduler.h`:
+添加到 `DiskIoScheduler.h` 的 private 成员：
 
 ```cpp
   std::array<int64_t, kIoPriorityCount> deficits_{{0, 0, 0}};
   size_t nextPriorityCursor_{0};
 ```
 
-- [ ] **Step 3: Replace fixed scan with DWRR pick**
+- [ ] **步骤 3：用 DWRR pick 替换固定扫描**
 
-Add private method declaration:
+添加 private 方法声明：
 
 ```cpp
   std::optional<size_t> pickQueueLocked();
 ```
 
-Include `<optional>` in the header.
+在 header 中 include `<optional>`。
 
-Implement in `DiskIoScheduler.cpp`:
+在 `DiskIoScheduler.cpp` 中实现：
 
 ```cpp
 std::optional<size_t> DiskIoScheduler::pickQueueLocked() {
@@ -992,7 +992,7 @@ std::optional<size_t> DiskIoScheduler::pickQueueLocked() {
 }
 ```
 
-Change `dispatchOneLocked()` to use `pickQueueLocked()`:
+修改 `dispatchOneLocked()`，让它使用 `pickQueueLocked()`：
 
 ```cpp
 bool DiskIoScheduler::dispatchOneLocked() {
@@ -1020,18 +1020,18 @@ bool DiskIoScheduler::dispatchOneLocked() {
 }
 ```
 
-- [ ] **Step 4: Verify weighted fairness**
+- [ ] **步骤 4：验证加权公平**
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='DiskIoSchedulerTest.dispatchesUsingConfiguredWeights'
 ```
 
-Expected: selected test passes.
+预期：选中的测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/DiskIoScheduler.h bolt/common/memory/bm/DiskIoScheduler.cpp bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp
@@ -1040,18 +1040,18 @@ git commit -m "feat: add weighted disk io scheduling"
 
 ---
 
-### Task 5: Adaptive Depth Controller
+### 任务 5：Adaptive Depth Controller
 
-**Files:**
-- Create: `bolt/common/memory/bm/AdaptiveDepthController.h`
-- Create: `bolt/common/memory/bm/AdaptiveDepthController.cpp`
-- Create: `bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`
-- Modify: `bolt/common/memory/bm/CMakeLists.txt`
-- Modify: `bolt/common/memory/bm/tests/CMakeLists.txt`
+**文件：**
+- 新建：`bolt/common/memory/bm/AdaptiveDepthController.h`
+- 新建：`bolt/common/memory/bm/AdaptiveDepthController.cpp`
+- 新建：`bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`
+- 修改：`bolt/common/memory/bm/CMakeLists.txt`
+- 修改：`bolt/common/memory/bm/tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing controller tests**
+- [ ] **步骤 1：编写失败的 controller 测试**
 
-Create `bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`:
+新建 `bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/AdaptiveDepthController.h"
@@ -1091,11 +1091,11 @@ TEST(AdaptiveDepthControllerTest, rollsBackWhenThroughputDoesNotImprove) {
 }
 ```
 
-Add `AdaptiveDepthControllerTest.cpp` to `bolt_memory_bm_test`, run build, and expect missing header failure.
+将 `AdaptiveDepthControllerTest.cpp` 加入 `bolt_memory_bm_test`，运行构建，预期因为缺少 header 而失败。
 
-- [ ] **Step 2: Implement controller header**
+- [ ] **步骤 2：实现 controller header**
 
-Create `bolt/common/memory/bm/AdaptiveDepthController.h`:
+新建 `bolt/common/memory/bm/AdaptiveDepthController.h`：
 
 ```cpp
 #pragma once
@@ -1126,9 +1126,9 @@ class AdaptiveDepthController {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 3: Implement throughput hill-climbing**
+- [ ] **步骤 3：实现吞吐 hill-climbing**
 
-Create `bolt/common/memory/bm/AdaptiveDepthController.cpp`:
+新建 `bolt/common/memory/bm/AdaptiveDepthController.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/AdaptiveDepthController.h"
@@ -1173,30 +1173,30 @@ void AdaptiveDepthController::onWindow(
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 4: Add source/test to CMake and verify**
+- [ ] **步骤 4：把源码/测试加入 CMake 并验证**
 
-Modify `bolt/common/memory/bm/CMakeLists.txt`:
+修改 `bolt/common/memory/bm/CMakeLists.txt`：
 
 ```cmake
   AdaptiveDepthController.cpp
 ```
 
-Modify `bolt/common/memory/bm/tests/CMakeLists.txt`:
+修改 `bolt/common/memory/bm/tests/CMakeLists.txt`：
 
 ```cmake
   AdaptiveDepthControllerTest.cpp
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='AdaptiveDepthControllerTest.*'
 ```
 
-Expected: controller tests pass.
+预期：controller 测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/CMakeLists.txt bolt/common/memory/bm/AdaptiveDepthController.h bolt/common/memory/bm/AdaptiveDepthController.cpp bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp bolt/common/memory/bm/tests/CMakeLists.txt
@@ -1205,16 +1205,16 @@ git commit -m "feat: add adaptive disk io depth controller"
 
 ---
 
-### Task 6: Wire Adaptive Depth and Stats into Scheduler
+### 任务 6：将 Adaptive Depth 和 Stats 接入 Scheduler
 
-**Files:**
-- Modify: `bolt/common/memory/bm/DiskIoScheduler.h`
-- Modify: `bolt/common/memory/bm/DiskIoScheduler.cpp`
-- Modify: `bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
+**文件：**
+- 修改：`bolt/common/memory/bm/DiskIoScheduler.h`
+- 修改：`bolt/common/memory/bm/DiskIoScheduler.cpp`
+- 修改：`bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp`
 
-- [ ] **Step 1: Write failing scheduler stats and adaptive depth tests**
+- [ ] **步骤 1：编写失败的 scheduler stats 和 adaptive depth 测试**
 
-Append:
+追加：
 
 ```cpp
 TEST(DiskIoSchedulerTest, statsTrackCompletionAndDepth) {
@@ -1246,9 +1246,9 @@ TEST(DiskIoSchedulerTest, statsTrackCompletionAndDepth) {
 }
 ```
 
-- [ ] **Step 2: Add controller member and window accounting**
+- [ ] **步骤 2：添加 controller 成员和窗口计数**
 
-Add to `DiskIoScheduler.h`:
+添加到 `DiskIoScheduler.h`：
 
 ```cpp
 #include "bolt/common/memory/bm/AdaptiveDepthController.h"
@@ -1258,7 +1258,7 @@ Add to `DiskIoScheduler.h`:
   uint64_t windowCompletedBytes_{0};
 ```
 
-Initialize in constructor:
+在构造函数中初始化：
 
 ```cpp
       adaptiveDepth_(config_.adaptiveDepth),
@@ -1266,9 +1266,9 @@ Initialize in constructor:
   currentDepth_ = adaptiveDepth_.currentDepth();
 ```
 
-- [ ] **Step 3: Update stats and depth on completion windows**
+- [ ] **步骤 3：在 completion window 上更新 stats 和 depth**
 
-Add private method:
+添加 private 方法：
 
 ```cpp
   void updateAdaptiveDepthLocked(std::chrono::steady_clock::time_point now);
@@ -1296,25 +1296,25 @@ void DiskIoScheduler::updateAdaptiveDepthLocked(
 }
 ```
 
-In `reapCompletionsLocked()`, after `stats_.completedBytes += completion.result.bytes;` add:
+在 `reapCompletionsLocked()` 中，在 `stats_.completedBytes += completion.result.bytes;` 后添加：
 
 ```cpp
     windowCompletedBytes_ += completion.result.bytes;
     updateAdaptiveDepthLocked(std::chrono::steady_clock::now());
 ```
 
-- [ ] **Step 4: Verify scheduler stats**
+- [ ] **步骤 4：验证 scheduler stats**
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='DiskIoSchedulerTest.statsTrackCompletionAndDepth'
 ```
 
-Expected: selected test passes.
+预期：选中的测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/DiskIoScheduler.h bolt/common/memory/bm/DiskIoScheduler.cpp bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp
@@ -1323,18 +1323,18 @@ git commit -m "feat: track disk io scheduler stats"
 
 ---
 
-### Task 7: io_uring Backend and Integration Tests
+### 任务 7：io_uring Backend 和集成测试
 
-**Files:**
-- Create: `bolt/common/memory/bm/IoUringBackend.h`
-- Create: `bolt/common/memory/bm/IoUringBackend.cpp`
-- Create: `bolt/common/memory/bm/tests/IoUringBackendTest.cpp`
-- Modify: `bolt/common/memory/bm/CMakeLists.txt`
-- Modify: `bolt/common/memory/bm/tests/CMakeLists.txt`
+**文件：**
+- 新建：`bolt/common/memory/bm/IoUringBackend.h`
+- 新建：`bolt/common/memory/bm/IoUringBackend.cpp`
+- 新建：`bolt/common/memory/bm/tests/IoUringBackendTest.cpp`
+- 修改：`bolt/common/memory/bm/CMakeLists.txt`
+- 修改：`bolt/common/memory/bm/tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write conditional integration tests**
+- [ ] **步骤 1：编写条件编译的集成测试**
 
-Create `bolt/common/memory/bm/tests/IoUringBackendTest.cpp`:
+新建 `bolt/common/memory/bm/tests/IoUringBackendTest.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
@@ -1400,9 +1400,9 @@ TEST(IoUringBackendTest, writeAndReadTemporaryFile) {
 #endif
 ```
 
-- [ ] **Step 2: Implement io_uring backend declarations**
+- [ ] **步骤 2：实现 io_uring backend 声明**
 
-Create `bolt/common/memory/bm/IoUringBackend.h`:
+新建 `bolt/common/memory/bm/IoUringBackend.h`：
 
 ```cpp
 #pragma once
@@ -1432,9 +1432,9 @@ class IoUringBackend : public IoBackend {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 3: Implement io_uring backend**
+- [ ] **步骤 3：实现 io_uring backend**
 
-Create `bolt/common/memory/bm/IoUringBackend.cpp`:
+新建 `bolt/common/memory/bm/IoUringBackend.cpp`：
 
 ```cpp
 #include "bolt/common/memory/bm/IoUringBackend.h"
@@ -1518,9 +1518,9 @@ std::vector<BackendCompletion> IoUringBackend::reap() {
 } // namespace bytedance::bolt::memory::bm
 ```
 
-- [ ] **Step 4: Add conditional CMake wiring**
+- [ ] **步骤 4：添加条件式 CMake 接线**
 
-Modify `bolt/common/memory/bm/CMakeLists.txt` so the isolated library owns io_uring dependencies:
+修改 `bolt/common/memory/bm/CMakeLists.txt`，让隔离 library 自己持有 io_uring 依赖：
 
 ```cmake
 if(${BOLT_BUILD_TESTING})
@@ -1550,7 +1550,7 @@ if(KERNEL_SUPPORTS_IO_URING)
 endif()
 ```
 
-Modify the default constructor in `bolt/common/memory/bm/DiskIoScheduler.cpp` so production construction uses `IoUringBackend` when available:
+修改 `bolt/common/memory/bm/DiskIoScheduler.cpp` 的默认构造函数，让生产构造在可用时使用 `IoUringBackend`：
 
 ```cpp
 #include "bolt/common/memory/bm/IoUringBackend.h"
@@ -1566,22 +1566,22 @@ DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
 #endif
 ```
 
-Modify `bolt/common/memory/bm/tests/CMakeLists.txt`:
+修改 `bolt/common/memory/bm/tests/CMakeLists.txt`：
 
 ```cmake
   IoUringBackendTest.cpp
 ```
 
-Run:
+运行：
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='IoUringBackendTest.*'
 ```
 
-Expected: if `IO_URING_SUPPORTED` is enabled, integration test passes; otherwise gtest reports 0 matching tests or compiles with the test body excluded.
+预期：如果启用 `IO_URING_SUPPORTED`，集成测试通过；否则 gtest 报告 0 个匹配测试，或测试体被条件编译排除。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add bolt/common/memory/bm/CMakeLists.txt bolt/common/memory/bm/DiskIoScheduler.cpp bolt/common/memory/bm/IoUringBackend.h bolt/common/memory/bm/IoUringBackend.cpp bolt/common/memory/bm/tests/IoUringBackendTest.cpp bolt/common/memory/bm/tests/CMakeLists.txt
@@ -1590,50 +1590,50 @@ git commit -m "feat: add io_uring disk io backend"
 
 ---
 
-### Task 8: Final Verification and Cleanup
+### 任务 8：最终验证和清理
 
-**Files:**
-- Modify only files that fail formatting, compile, or tests from prior tasks.
+**文件：**
+- 只修改前面任务中因格式、编译或测试失败而必须调整的文件。
 
-- [ ] **Step 1: Run focused tests**
+- [ ] **步骤 1：运行聚焦测试**
 
 ```bash
 cmake --build _build/Release --target bolt_memory_bm_test -j 8
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test --gtest_filter='*DiskIo*:*AdaptiveDepth*:*IoUringBackend*'
 ```
 
-Expected: all matching tests pass.
+预期：所有匹配的测试通过。
 
-- [ ] **Step 2: Run full memory test binary**
+- [ ] **步骤 2：运行完整 memory BM 测试二进制**
 
 ```bash
 _build/Release/bolt/common/memory/bm/tests/bolt_memory_bm_test
 ```
 
-Expected: existing memory tests and new Disk IO tests pass.
+预期：已有 memory 测试和新的 Disk IO 测试都通过。
 
-- [ ] **Step 3: Run release verification**
+- [ ] **步骤 3：运行 release 验证**
 
 ```bash
 PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH make release_with_test
 ```
 
-Expected: command exits 0.
+预期：命令退出码为 0。
 
-- [ ] **Step 4: Inspect final diff**
+- [ ] **步骤 4：检查最终 diff**
 
 ```bash
 git status --short
 git diff --stat HEAD
 ```
 
-Expected: only intended Disk IO implementation, tests, and CMake files are modified.
+预期：只有预期的 Disk IO 实现、测试和 CMake 文件发生改动。
 
-- [ ] **Step 5: Commit final cleanup if any files changed**
+- [ ] **步骤 5：如有清理改动则提交**
 
 ```bash
 git add bolt/common/memory/bm bolt/common/memory/CMakeLists.txt bolt/common/memory/bm/tests/CMakeLists.txt bolt/common/memory/bm/tests/DiskIoSchedulerTest.cpp bolt/common/memory/bm/tests/AdaptiveDepthControllerTest.cpp bolt/common/memory/bm/tests/IoUringBackendTest.cpp
 git commit -m "chore: verify disk io scheduler"
 ```
 
-If Step 4 shows no uncommitted changes, skip this commit.
+如果步骤 4 显示没有未提交改动，则跳过这个提交。
