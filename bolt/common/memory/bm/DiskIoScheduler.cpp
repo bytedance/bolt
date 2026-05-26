@@ -71,6 +71,7 @@ void DiskIoScheduler::stopAndDrain() {
   }
   cv_.notify_one();
 
+  std::lock_guard<std::mutex> joinLock(joinMutex_);
   if (worker_.joinable()) {
     worker_.join();
   }
@@ -90,6 +91,8 @@ DiskIoSchedulerStats DiskIoScheduler::stats() const {
 void DiskIoScheduler::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
+    // The scheduler thread expects backend submit/reap to be nonblocking and
+    // callback-free; completions are observed by polling reap().
     reapCompletionsLocked();
 
     bool dispatched = false;
