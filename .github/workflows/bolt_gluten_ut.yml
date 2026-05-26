@@ -153,19 +153,29 @@ jobs:
           mkdir -p "$BASE"
           (
             flock -x 200
+            # spark-3.5.5 has been purged from dlcdn/aliyun/tuna/ustc and only
+            # lives on archive.apache.org, which is severely per-connection
+            # throttled (~150 KB/s — the binary tarball took ~50 min on a cold
+            # runner with single-stream wget). aria2c with multi-connection
+            # parallel download brings it back to multi-MB/s.
+            command -v aria2c > /dev/null \
+              || { apt-get update -qq && apt-get install -y --no-install-recommends aria2; }
+            ARIA="aria2c --quiet -x16 -s16 -k1M --max-tries=3 --retry-wait=5"
             URL=https://archive.apache.org/dist/spark/spark-3.5.5
             if [[ ! -d "$HOME_DIR/jars" ]]; then
               rm -rf "${HOME_DIR}.tmp"
               mkdir -p "${HOME_DIR}.tmp"
-              wget -qO- "$URL/spark-3.5.5-bin-hadoop3.tgz" \
-                | tar -xz --strip-components=1 -C "${HOME_DIR}.tmp"
+              $ARIA -d "${HOME_DIR}.tmp" -o spark.tgz "$URL/spark-3.5.5-bin-hadoop3.tgz"
+              tar -xz --strip-components=1 -C "${HOME_DIR}.tmp" -f "${HOME_DIR}.tmp/spark.tgz"
+              rm -f "${HOME_DIR}.tmp/spark.tgz"
               mv "${HOME_DIR}.tmp" "$HOME_DIR"
             fi
             if [[ ! -d "$SQL_DIR/core" ]]; then
               rm -rf "${SQL_DIR}.tmp"
               mkdir -p "${SQL_DIR}.tmp"
-              wget -qO- "$URL/spark-3.5.5.tgz" \
-                | tar -xz --strip-components=2 -C "${SQL_DIR}.tmp" spark-3.5.5/sql
+              $ARIA -d "${SQL_DIR}.tmp" -o spark-src.tgz "$URL/spark-3.5.5.tgz"
+              tar -xz --strip-components=2 -C "${SQL_DIR}.tmp" -f "${SQL_DIR}.tmp/spark-src.tgz" spark-3.5.5/sql
+              rm -f "${SQL_DIR}.tmp/spark-src.tgz"
               mv "${SQL_DIR}.tmp" "$SQL_DIR"
             fi
             ln -sfn ../sql "$HOME_DIR/sql"
