@@ -1,9 +1,14 @@
 #include "bolt/common/memory/bm/MockIoBackend.h"
 
+#include "bolt/common/base/Exceptions.h"
+
 namespace bytedance::bolt::memory::bm {
 
 bool MockIoBackend::submit(uint64_t requestId, const IoRequest& request) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (inflight_.count(requestId) != 0) {
+    return false;
+  }
   submitted_.push_back(MockSubmittedRequest{requestId, request});
   inflight_.insert(requestId);
   return true;
@@ -18,7 +23,7 @@ std::vector<BackendCompletion> MockIoBackend::reap() {
 
 void MockIoBackend::complete(uint64_t requestId, IoResult result) {
   std::lock_guard<std::mutex> lock(mutex_);
-  inflight_.erase(requestId);
+  BOLT_CHECK(inflight_.erase(requestId) == 1, "unknown requestId");
   completions_.push_back(BackendCompletion{requestId, result});
 }
 
