@@ -654,6 +654,9 @@ struct ToUtcTimestampFunction {
     auto fromTimezone = timezone_
         ? timezone_
         : tz::locateZone(std::string_view(timezone.data(), timezone.size()));
+    const auto adjusted = fromTimezone->correct_nonexistent_time(
+        std::chrono::seconds(result.getSeconds()));
+    result = Timestamp(adjusted.count(), result.getNanos());
     result.toGMT(*fromTimezone);
   }
 

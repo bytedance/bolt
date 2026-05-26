@@ -2875,6 +2875,20 @@ TEST_F(SparkSqlDateTimeFunctionsTest, toUtcTimestamp) {
   EXPECT_EQ(
       "2015-01-24 00:00:00.000000000",
       toUtcTimestamp("2015-01-24 05:30:00", "Asia/Kolkata"));
+  EXPECT_EQ(
+      "2021-03-28 01:32:20.000000000",
+      toUtcTimestamp("2021-03-28 01:32:20", "Europe/London"));
+
+  auto londonGapTimestamp = std::make_optional<Timestamp>(
+      util::fromTimestampString("2021-03-28 01:32:20", 19, nullptr));
+  auto londonGapToShanghai = evaluateOnce<Timestamp>(
+      "from_utc_timestamp(to_utc_timestamp(c0, c1), 'Asia/Shanghai')",
+      londonGapTimestamp,
+      std::make_optional<std::string>("Europe/London"));
+  EXPECT_EQ(
+      "2021-03-28 09:32:20.000000000",
+      timestampToString(londonGapToShanghai.value()));
+
   BOLT_ASSERT_THROW(
       toUtcTimestamp("2015-01-24 00:00:00", "Asia/Ooty"),
       "Unknown time zone: 'Asia/Ooty");
