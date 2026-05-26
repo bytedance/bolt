@@ -38,6 +38,7 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/file/Utils.h"
 #include "bolt/common/hyperloglog/SparseHll.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/HashJoinBridge.h"
@@ -50,7 +51,6 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/tool/trace/HashJoinReplayer.h"
 #include "bolt/tool/trace/TraceReplayRunner.h"
@@ -60,6 +60,7 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::dwio::common;

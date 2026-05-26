@@ -31,6 +31,7 @@
 #pragma once
 
 #include <optional>
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/HiveDataSink.h"
@@ -38,7 +39,6 @@
 #include "bolt/dwio/dwrf/common/Config.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 namespace bytedance::bolt::exec::test {
 
@@ -57,32 +57,19 @@ class HiveConnectorTestBase : public OperatorTestBase {
   void resetHiveConnector(
       const std::shared_ptr<const config::ConfigBase>& config);
 
-  void writeToFile(const std::string& filePath, RowVectorPtr vector);
-
-  void writeToFile(
-      const std::string& filePath,
-      const std::vector<RowVectorPtr>& vectors,
-      std::shared_ptr<dwrf::Config> config =
-          std::make_shared<bytedance::bolt::dwrf::Config>());
-
-  std::vector<RowVectorPtr> makeVectors(
-      const RowTypePtr& rowType,
-      int32_t numVectors,
-      int32_t rowsPerVector);
-
   using OperatorTestBase::assertQuery;
 
   /// Assumes plan has a single TableScan node.
   std::shared_ptr<exec::Task> assertQuery(
       const core::PlanNodePtr& plan,
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths,
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths,
       const std::string& duckDbSql);
-
-  static std::vector<std::shared_ptr<TempFilePath>> makeFilePaths(int count);
 
   static std::vector<std::shared_ptr<connector::ConnectorSplit>>
   makeHiveConnectorSplits(
-      const std::vector<std::shared_ptr<TempFilePath>>& filePaths);
+      const std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>&
+          filePaths);
 
   static std::shared_ptr<connector::ConnectorSplit> makeHiveConnectorSplit(
       const std::string& filePath,

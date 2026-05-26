@@ -29,11 +29,11 @@
  */
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 namespace bytedance::bolt::exec::test {
 
 class RowNumberTest : public OperatorTestBase {
@@ -45,7 +45,7 @@ class RowNumberTest : public OperatorTestBase {
 
 #ifndef SPARK_COMPATIBLE
 TEST_F(RowNumberTest, spill) {
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
   auto test = [&](int32_t vectorSize) {
     SCOPED_TRACE(vectorSize);
@@ -252,7 +252,7 @@ TEST_F(RowNumberTest, maxSpillBytes) {
     }
   } testSettings[] = {{1 << 30, false}, {16 << 20, true}, {0, false}};
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   for (const auto& testData : testSettings) {
@@ -296,7 +296,7 @@ TEST_F(RowNumberTest, memoryUsage) {
 
   for (const auto& spillEnable : {false, true}) {
     auto queryCtx = core::QueryCtx::create(executor_.get());
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     const std::string spillEnableConfig = std::to_string(spillEnable);
 
     std::shared_ptr<Task> task;

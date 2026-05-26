@@ -29,16 +29,17 @@
  */
 #include "bolt/exec/Merge.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::common::testutil;
 
 class MergeTest : public OperatorTestBase {

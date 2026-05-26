@@ -195,6 +195,9 @@ class HivePartitionFunctionSpec : public core::PartitionFunctionSpec {
 
 void registerHivePartitionFunctionSerDe();
 
+// Registers all built-in Hive connector factories for the current process.
+void registerHiveConnectorFactories();
+
 template <typename T>
 bool CheckHiveConnectorFactoryInit() {
   static bool init = bytedance::bolt::connector::registerConnectorFactory(

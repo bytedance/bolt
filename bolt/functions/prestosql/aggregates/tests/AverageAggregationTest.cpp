@@ -204,7 +204,7 @@ TEST_F(AverageAggregationTest, avgNulls) {
 
 TEST_F(AverageAggregationTest, avg) {
   auto testFunction = [this](const std::string& functionName) {
-    auto vectors = makeVectors(rowType_, 10, 100);
+    auto vectors = makeVectors(rowType_, 100, 10);
     createDuckDbTable(vectors);
 
     // global aggregation

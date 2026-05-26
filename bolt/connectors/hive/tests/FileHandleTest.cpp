@@ -33,14 +33,14 @@
 #include "bolt/common/caching/SimpleLRUCache.h"
 #include "bolt/common/file/File.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
 
 TEST(FileHandleTest, localFile) {
   filesystems::registerLocalFileSystem();
 
-  auto tempFile = ::exec::test::TempFilePath::create();
+  auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
   const auto& filename = tempFile->path;
   remove(filename.c_str());
 

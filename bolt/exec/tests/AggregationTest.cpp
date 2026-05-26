@@ -34,6 +34,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/cudf/tests/CudfResource.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
@@ -46,7 +47,6 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/SumNonPODAggregate.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/WithGPUParamInterface.h"
 #include "bolt/serializers/ArrowSerializer.h"
 #include "folly/experimental/EventCount.h"
@@ -1562,7 +1562,7 @@ TEST_P(AggregationTest, spillWithMemoryLimit) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto task = AssertQueryBuilder(plan)
                     .spillDirectory(spillDirectory->path)
                     .config(QueryConfig::kSpillEnabled, true)
@@ -1601,7 +1601,7 @@ TEST_P(AggregationTest, rowBasedspillWithMemoryLimit) {
 
   SCOPED_TRACE("rowbased aggregationMemLimit: 1, expectSpill: true");
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto task = AssertQueryBuilder(plan)
                   .spillDirectory(spillDirectory->path)
                   .config(QueryConfig::kSpillEnabled, true)
@@ -1691,7 +1691,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, DISABLED_spillWithEmptyPartition) {
                                .planNode())
             .copyResults(pool_.get());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -1815,7 +1815,7 @@ TEST_P(AggregationTest, DISABLED_spillWithNonSpillingPartition) {
                              .planNode())
           .copyResults(pool_.get());
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideMemoryPool(
       memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -1830,8 +1830,8 @@ TEST_P(AggregationTest, DISABLED_spillWithNonSpillingPartition) {
           .config(QueryConfig::kSpillEnabled, "true")
           .config(QueryConfig::kAggregationSpillEnabled, "true")
           // .config(QueryConfig::kAggregationSpillAll, "false")
-          // Set to increase the hash table a little bit to only trigger spill
-          // on the partition with most spillable data.
+          // Set to increase the hash table a little bit to only trigger
+          // spill on the partition with most spillable data.
           .config(QueryConfig::kSpillableReservationGrowthPct, "25")
           .config(QueryConfig::kPreferredOutputBatchBytes, "1024")
           .assertResults(results);
@@ -1866,7 +1866,7 @@ TEST_P(AggregationTest, spillAll) {
 
   auto results = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   auto task = AssertQueryBuilder(plan)
                   .spillDirectory(tempDirectory->path)
@@ -1903,7 +1903,7 @@ TEST_P(AggregationTest, spillWithArrowSerde) {
                   .planNode();
   auto results = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   bool sawArrowSerde = false;
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::SpillState::appendToPartition",
@@ -2482,7 +2482,7 @@ TEST_P(AggregationTest, outputBatchSizeCheckWithSpill) {
       inputs = largeVectors;
     }
     createDuckDbTable(inputs);
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     core::PlanNodeId aggrNodeId;
     auto task =
         AssertQueryBuilder(duckDbQueryRunner_)
@@ -2530,7 +2530,7 @@ TEST_P(AggregationTest, spillDuringOutputProcessing) {
   createDuckDbTable({input});
 
   const int numOutputRows = 5;
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   core::PlanNodeId aggrNodeId;
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
@@ -2681,7 +2681,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, minSpillableMemoryReservation) {
                   currentUsedBytes * minSpillableReservationPct / 100);
             })));
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto task =
         AssertQueryBuilder(duckDbQueryRunner_)
             .spillDirectory(spillDirectory->path)
@@ -2710,7 +2710,7 @@ TEST_P(AggregationTest, distinctWithSpilling) {
 
   auto vectors = makeVectors(rowType_, 10, 100);
   createDuckDbTable(vectors);
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   core::PlanNodeId aggrNodeId;
   auto task = AssertQueryBuilder(duckDbQueryRunner_)
                   .spillDirectory(spillDirectory->path)
@@ -2733,7 +2733,7 @@ TEST_P(AggregationTest, distinctWithSpilling) {
 TEST_P(AggregationTest, spillingForAggrsWithDistinct) {
   auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   core::PlanNodeId aggrNodeId;
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
@@ -2790,7 +2790,7 @@ TEST_P(AggregationTest, distinctSpillWithMemoryLimit) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -2858,7 +2858,7 @@ TEST_P(AggregationTest, spillingForAggrsWithSorting) {
 
   auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
   core::PlanNodeId aggrNodeId;
 
@@ -2911,7 +2911,7 @@ TEST_P(AggregationTest, preGroupedAggregationWithSpilling) {
          makeFlatVector<int64_t>(10, [](auto row) { return row; })}));
   }
   createDuckDbTable(vectors);
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   core::PlanNodeId aggrNodeId;
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
@@ -3019,7 +3019,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringInputProcessing) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
         queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -3165,7 +3165,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
     batches.push_back(fuzzer.fuzzRow(rowType));
   }
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
       queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -3278,7 +3278,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringAllocation) {
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -3408,7 +3408,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringOutputProcessing) {
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
         queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -3555,7 +3555,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringNonReclaimableSection) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(fmt::format("testData {}", testData.debugString()));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -3712,7 +3712,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimWithEmptyAggregationTable) {
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -4132,7 +4132,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyInput) {
         }
       }));
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
       queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -4205,7 +4205,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyOutput) {
         }
       })));
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
       queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -4220,8 +4220,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyOutput) {
           .queryCtx(queryCtx)
           .config(QueryConfig::kSpillEnabled, true)
           .config(QueryConfig::kAggregationSpillEnabled, true)
-          // Set the output query configs to ensure fetch the result in one
-          // output batch.
+          // Set the output query configs to ensure fetch the result in
+          // one output batch.
           .config(QueryConfig::kPreferredOutputBatchBytes, 1UL << 30)
           .config(QueryConfig::kMaxOutputBatchRows, 1024)
           .assertResults(expectedResult);
@@ -4248,7 +4248,7 @@ TEST_P(AggregationTest, maxSpillBytes) {
                         .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
                         .capturePlanNodeId(aggregationNodeId)
                         .planNode();
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   struct {
@@ -4310,7 +4310,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregation) {
           testingRunArbitration(op->pool());
         })));
 
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     core::PlanNodeId aggrNodeId;
     auto task =
         AssertQueryBuilder(duckDbQueryRunner_)
@@ -4362,7 +4363,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromDistinctAggregation) {
           testingRunArbitration(op->pool());
         })));
 
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     core::PlanNodeId aggrNodeId;
     auto task = AssertQueryBuilder(duckDbQueryRunner_)
                     .spillDirectory(spillDirectory->path)
@@ -4395,7 +4397,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationOnNoMoreInput) {
   std::vector<bool> sameQueries = {false, true};
   for (bool sameQuery : sameQueries) {
     SCOPED_TRACE(fmt::format("sameQuery {}", sameQuery));
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     std::shared_ptr<core::QueryCtx> fakeQueryCtx =
         core::QueryCtx::create(executor_.get());
     std::shared_ptr<core::QueryCtx> aggregationQueryCtx;
@@ -4487,7 +4490,8 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationDuringOutput) {
   std::vector<bool> sameQueries = {false, true};
   for (bool sameQuery : sameQueries) {
     SCOPED_TRACE(fmt::format("sameQuery {}", sameQuery));
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     std::shared_ptr<core::QueryCtx> fakeQueryCtx =
         core::QueryCtx::create(executor_.get());
     std::shared_ptr<core::QueryCtx> aggregationQueryCtx;
@@ -4568,7 +4572,8 @@ TEST_P(AggregationTest, reclaimFromCompletedAggregation) {
   std::vector<bool> sameQueries = {false, true};
   for (bool sameQuery : sameQueries) {
     SCOPED_TRACE(fmt::format("sameQuery {}", sameQuery));
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory =
+        bytedance::bolt::test::TempDirectoryPath::create();
     std::shared_ptr<core::QueryCtx> fakeQueryCtx =
         core::QueryCtx::create(executor_.get());
     std::shared_ptr<core::QueryCtx> aggregationQueryCtx;
@@ -4692,7 +4697,7 @@ TEST_P(AggregationTest, mutliKeysWithStringSpill) {
   createDuckDbTable({data});
   auto plan = makePlan(true);
   std::string duckDbSql = "SELECT c0, c1, sum(c2) FROM tmp GROUP BY c0, c1";
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideConfigUnsafe({
       {core::QueryConfig::kTestingSpillPct, "100"},
@@ -4747,7 +4752,7 @@ TEST_P(AggregationTest, partialSpillWithMemoryLimit) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto task =
         AssertQueryBuilder(plan)
             .spillDirectory(spillDirectory->path)
@@ -4811,7 +4816,7 @@ TEST_P(AggregationTest, partialDistinctSpillWithMemoryLimit) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto task =
         AssertQueryBuilder(plan)
             .spillDirectory(spillDirectory->path)
@@ -4877,7 +4882,7 @@ TEST_P(AggregationTest, rowBasedSpillNull) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto task =
         AssertQueryBuilder(plan)
             .spillDirectory(spillDirectory->path)

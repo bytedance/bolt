@@ -41,6 +41,7 @@
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsFileSystem.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsPath.h"
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsReadFile.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/AbfsWriteFile.h"
 #include "bolt/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
@@ -48,7 +49,6 @@
 #include "bolt/connectors/hive/storage_adapters/abfs/tests/MockDataLakeFileClient.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/exec/tests/utils/PortUtil.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "connectors/hive/storage_adapters/abfs/AzureClientProviderFactories.h"
 #include "connectors/hive/storage_adapters/abfs/AzureClientProviderImpl.h"
 #include "connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
@@ -126,8 +126,8 @@ class AbfsFileSystemTest : public testing::Test {
   }
 
  private:
-  static std::shared_ptr<TempFilePath> createFile() {
-    auto tempFile = TempFilePath::create();
+  static std::shared_ptr<::bytedance::bolt::test::TempFilePath> createFile() {
+    auto tempFile = ::bytedance::bolt::test::TempFilePath::create();
     tempFile->append("aaaaa");
     tempFile->append("bbbbb");
     tempFile->append(std::string(kOneMB, 'c'));

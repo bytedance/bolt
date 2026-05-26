@@ -33,8 +33,8 @@
 
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/BaseVector.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwio::common;

@@ -29,18 +29,18 @@
  */
 
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
-#include <core/QueryConfig.h>
-#include "bolt/common/base/tests/GTestUtils.h"
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/core/QueryConfig.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/AggregateCompanionSignatures.h"
 #include "bolt/exec/PlanNodeStats.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/SignatureBinder.h"
 
@@ -64,19 +64,6 @@ void enableAbandonPartialAggregation(AssertQueryBuilder& queryBuilder) {
 }
 
 } // namespace
-
-std::vector<RowVectorPtr> AggregationTestBase::makeVectors(
-    const RowTypePtr& rowType,
-    vector_size_t size,
-    int numVectors) {
-  std::vector<RowVectorPtr> vectors;
-  for (int32_t i = 0; i < numVectors; ++i) {
-    auto vector = std::dynamic_pointer_cast<RowVector>(
-        bolt::test::BatchMaker::createBatch(rowType, size, *pool_));
-    vectors.push_back(vector);
-  }
-  return vectors;
-}
 
 }; // namespace bytedance::bolt::functions::aggregate::test
 namespace bytedance::bolt::BaseStatsReporter {
@@ -408,7 +395,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
       builder.project(postAggregationProjections);
     }
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
     AssertQueryBuilder queryBuilder(builder.planNode(), duckDbQueryRunner_);
     queryBuilder.configs(config)
@@ -543,21 +530,6 @@ void AggregationTestBase::testAggregationsWithCompanion(
 
 namespace {
 
-void writeToFile(
-    const std::string& path,
-    const VectorPtr& vector,
-    memory::MemoryPool* pool) {
-  dwrf::WriterOptions options;
-  options.schema = vector->type();
-  options.memoryPool = pool;
-  auto writeFile = std::make_unique<LocalWriteFile>(path, true, false);
-  auto sink =
-      std::make_unique<dwio::common::WriteFileSink>(std::move(writeFile), path);
-  dwrf::Writer writer(std::move(sink), options);
-  writer.write(vector);
-  writer.close();
-}
-
 template <typename T>
 class ScopedChange {
  public:
@@ -595,11 +567,11 @@ void AggregationTestBase::testReadFromFiles(
   auto size2 = input->size() - size1;
   auto input1 = input->slice(0, size1);
   auto input2 = input->slice(size1, size2);
-  std::vector<std::shared_ptr<exec::test::TempFilePath>> files;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>> files;
   std::vector<exec::Split> splits;
   auto writerPool = rootPool_->addAggregateChild("AggregationTestBase.writer");
   for (auto& vector : {input1, input2}) {
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(file->path, vector, writerPool.get());
     files.push_back(file);
     splits.emplace_back(std::make_shared<connector::hive::HiveConnectorSplit>(
@@ -790,7 +762,7 @@ void AggregationTestBase::testAggregationsImpl(
         builder.project(postAggregationProjections);
       }
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
       ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
       const auto peakSpillMemoryUsage =
@@ -838,7 +810,7 @@ void AggregationTestBase::testAggregationsImpl(
         builder.project(postAggregationProjections);
       }
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
       ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
       const auto peakSpillMemoryUsage =
@@ -887,7 +859,7 @@ void AggregationTestBase::testAggregationsImpl(
         builder.project(postAggregationProjections);
       }
 
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
       ASSERT_EQ(memory::spillMemoryPool()->stats().currentBytes, 0);
       const auto peakSpillMemoryUsage =
@@ -981,7 +953,7 @@ void AggregationTestBase::testAggregationsImpl(
       builder.project(postAggregationProjections);
     }
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
 
     AssertQueryBuilder queryBuilder(builder.planNode(), duckDbQueryRunner_);
     queryBuilder.configs(config).config(core::QueryConfig::kTestingSpillPct, "100")

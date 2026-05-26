@@ -175,7 +175,7 @@ TEST_F(VarianceAggregationTest, varianceNulls) {
 // integers and enable more testing by calling allowInputShuffle() from
 // Setup().
 TEST_F(VarianceAggregationTest, varianceWithGlobalAggregation) {
-  auto vectors = makeVectors(rowType_, 10, 20);
+  auto vectors = makeVectors(rowType_, 20, 10);
   createDuckDbTable(vectors);
 
   for (const auto& aggrName : aggrNames_) {
@@ -206,7 +206,7 @@ TEST_F(VarianceAggregationTest, varianceWithGlobalAggregation) {
 }
 
 TEST_F(VarianceAggregationTest, varianceWithGlobalAggregationAndFilter) {
-  auto vectors = makeVectors(rowType_, 10, 20);
+  auto vectors = makeVectors(rowType_, 20, 10);
   createDuckDbTable(vectors);
 
   for (const auto& aggrName : aggrNames_) {
@@ -226,7 +226,7 @@ TEST_F(VarianceAggregationTest, varianceWithGlobalAggregationAndFilter) {
 TEST_F(VarianceAggregationTest, varianceWithGroupBy) {
   // TODO: increase number of batches after fixing
   // https://github.com/facebookincubator/velox/issues/6505.
-  auto vectors = makeVectors(rowType_, 10, 8);
+  auto vectors = makeVectors(rowType_, 8, 10);
   createDuckDbTable(vectors);
 
   for (const auto& aggrName : aggrNames_) {
@@ -265,7 +265,7 @@ TEST_F(VarianceAggregationTest, varianceWithGroupBy) {
 }
 
 TEST_F(VarianceAggregationTest, varianceWithGroupByAndFilter) {
-  auto vectors = makeVectors(rowType_, 10, 20);
+  auto vectors = makeVectors(rowType_, 20, 10);
   createDuckDbTable(vectors);
 
   for (const auto& aggrName : aggrNames_) {

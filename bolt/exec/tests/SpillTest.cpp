@@ -36,16 +36,16 @@
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/Spill.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::filesystems;
-using bytedance::bolt::exec::test::TempDirectoryPath;
+using bytedance::bolt::test::TempDirectoryPath;
 
 namespace {
 static const int64_t kGB = 1'000'000'000;
@@ -87,7 +87,7 @@ class SpillTest : public ::testing::TestWithParam<common::CompressionKind>,
 
   void SetUp() override {
     allocator_ = memory::memoryManager()->allocator();
-    tempDir_ = exec::test::TempDirectoryPath::create();
+    tempDir_ = bytedance::bolt::test::TempDirectoryPath::create();
     if (!isRegisteredVectorSerde()) {
       bytedance::bolt::serializer::presto::PrestoVectorSerde::
           registerVectorSerde();
@@ -471,7 +471,7 @@ TEST_P(SpillTest, DISABLED_spillState) {
 TEST_P(SpillTest, spillTimestamp) {
   // Verify that timestamp type retains it nanosecond precision when spilled and
   // read back.
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   std::vector<CompareFlags> emptyCompareFlags;
   const std::string spillPath = tempDirectory->path + "/test";
   std::vector<Timestamp> timeValues = {

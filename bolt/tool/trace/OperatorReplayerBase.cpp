@@ -32,13 +32,13 @@
 
 #include <utility>
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/TaskTraceReader.h"
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/tool/trace/OperatorReplayerBase.h"
 
 #include "bolt/tool/trace/TraceReplayTaskRunner.h"
@@ -91,9 +91,9 @@ OperatorReplayerBase::OperatorReplayerBase(
 
 RowVectorPtr OperatorReplayerBase::run(bool copyResults) {
   auto queryCtx = createQueryCtx();
-  std::shared_ptr<exec::test::TempDirectoryPath> spillDirectory;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> spillDirectory;
   if (queryCtx->queryConfig().spillEnabled()) {
-    spillDirectory = exec::test::TempDirectoryPath::create();
+    spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
   TraceReplayTaskRunner traceTaskRunner(createPlan(), std::move(queryCtx));

@@ -33,10 +33,10 @@
 #include <array>
 #include <random>
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/VectorHasher.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 namespace bytedance::bolt::exec::test {

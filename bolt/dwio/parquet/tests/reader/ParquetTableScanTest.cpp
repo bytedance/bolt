@@ -32,6 +32,7 @@
 #include <simdjson.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
@@ -136,7 +137,7 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
 
     auto plan = PlanBuilder().tableScan(rowType).planNode();
 
-    assertQuery(plan, splits_, sql);
+    OperatorTestBase::assertQuery(plan, splits_, sql);
   }
 
   void assertSelectWithDataColumns(
@@ -341,7 +342,7 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
             makeFlatVector<Timestamp>(values),
         });
     auto schema = asRowType(vector->type());
-    auto file = TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {vector}, options);
     loadData(file->getPath(), schema, vector);
 
@@ -489,7 +490,7 @@ TEST_F(ParquetTableScanTest, aggregatePushdownToSmallPages) {
             makeFlatVector<std::string>({std::to_string(row)}),
         }));
   }
-  const auto filePath = TempFilePath::create();
+  const auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   WriterOptions options;
   options.dataPageSize = 1;
   writeToParquetFile(filePath->getPath(), data, options);
@@ -581,7 +582,7 @@ TEST_F(ParquetTableScanTest, map) {
 }
 
 TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   WriterOptions writerOptions;
   auto data = makeVariantParquetBatch(
       pool(),
@@ -606,7 +607,8 @@ TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
   auto expected = makeRowVector(
       {"g", "sum_a"},
       {makeFlatVector<int64_t>({1, 2}), makeFlatVector<int64_t>({3, 3})});
-  ASSERT_TRUE(assertEqualResults({expected}, {results}));
+  ASSERT_TRUE(assertEqualResults(
+      std::vector<RowVectorPtr>{expected}, std::vector<RowVectorPtr>{results}));
 }
 
 TEST_F(ParquetTableScanTest, nullMap) {
@@ -788,7 +790,9 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
   auto result = readCursor(params, addSplits);
   ASSERT_TRUE(waitForTaskCompletion(result.first->task().get()));
   assertEqualResults(
-      result.second, {makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 1})})});
+      result.second,
+      std::vector<RowVectorPtr>{
+          makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 1})})});
 }
 
 TEST_F(ParquetTableScanTest, rowIndex) {
@@ -1034,7 +1038,7 @@ TEST_F(ParquetTableScanTest, timestampPrecisionMicrosecond) {
           kSize, [](auto i) { return Timestamp(i, i * 1'001'001); }),
   });
   auto schema = asRowType(vector->type());
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   WriterOptions options;
   options.writeInt96AsTimestamp = true;
   writeToParquetFile(file->getPath(), {vector}, options);
@@ -1073,7 +1077,7 @@ TEST_F(ParquetTableScanTest, timestampPrecisionMicrosecond) {
       makeFlatVector<Timestamp>(
           kSize, [](auto i) { return Timestamp(i, i * 1'001'000); }),
   });
-  assertEqualResults({expected}, result.second);
+  assertEqualResults(std::vector<RowVectorPtr>{expected}, result.second);
 }
 
 TEST_F(ParquetTableScanTest, structMatchByName) {
@@ -1112,7 +1116,7 @@ TEST_F(ParquetTableScanTest, structMatchByName) {
   const auto address = makeFlatVector<std::string>({"567 Maple Drive"});
   auto vector = makeRowVector({"id", "name", "address"}, {id, name, address});
 
-  auto file = TempFilePath::create();
+  auto file = ::bytedance::bolt::test::TempFilePath::create();
   writeToParquetFile(file->getPath(), {vector}, {});
 
   loadData(file->getPath(), asRowType(vector->type()), vector);
@@ -1178,7 +1182,7 @@ TEST_F(ParquetTableScanTest, structMatchByName) {
                makeFlatVector<std::string>({"Jones"}),
            }),
        address});
-  file = TempFilePath::create();
+  file = ::bytedance::bolt::test::TempFilePath::create();
   writeToParquetFile(file->getPath(), {vector}, {});
 
   rowType =
@@ -1456,7 +1460,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     SCOPED_TRACE(c.name);
 
     auto data = makeSampleData(c.fileType);
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     WriterOptions writerOptions;
     writeToParquetFile(file->getPath(), {data}, writerOptions);
 
@@ -1492,7 +1496,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   // 1. INT widening: file INT32 [1,2,3] read as BIGINT -> [1,2,3].
   {
     auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     auto declared = ROW({"c0"}, {BIGINT()});
@@ -1502,14 +1506,16 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                       .split(makeSplit(file->getPath()))
                       .copyResults(pool());
     auto expected = makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_TRUE(assertEqualResults(
+        std::vector<RowVectorPtr>{expected},
+        std::vector<RowVectorPtr>{result}));
   }
 
   // 2. Float widening: REAL [1.5, 2.5, 3.5] read as DOUBLE.
   {
     auto data =
         makeRowVector({"c0"}, {makeFlatVector<float>({1.5f, 2.5f, 3.5f})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     auto declared = ROW({"c0"}, {DOUBLE()});
@@ -1520,7 +1526,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                       .copyResults(pool());
     auto expected =
         makeRowVector({"c0"}, {makeFlatVector<double>({1.5, 2.5, 3.5})});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_TRUE(assertEqualResults(
+        std::vector<RowVectorPtr>{expected},
+        std::vector<RowVectorPtr>{result}));
   }
 
 #ifdef SPARK_COMPATIBLE
@@ -1531,7 +1539,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   {
     auto data = makeRowVector(
         {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     auto declared = ROW({"c0"}, {BIGINT()});
@@ -1542,7 +1550,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                       .copyResults(pool());
     auto expected =
         makeRowVector({"c0"}, {makeFlatVector<int64_t>({100, 200, 300})});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_TRUE(assertEqualResults(
+        std::vector<RowVectorPtr>{expected},
+        std::vector<RowVectorPtr>{result}));
   }
 #endif
 
@@ -1554,7 +1564,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   //        does the silent truncation, matching Spark / Trino / parquet-mr.
   {
     auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     {
@@ -1566,7 +1576,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                         .copyResults(pool());
       auto expected =
           makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
-      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+      EXPECT_TRUE(assertEqualResults(
+          std::vector<RowVectorPtr>{expected},
+          std::vector<RowVectorPtr>{result}));
     }
     {
       auto declared = ROW({"c0"}, {SMALLINT()});
@@ -1577,7 +1589,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                         .copyResults(pool());
       auto expected =
           makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
-      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+      EXPECT_TRUE(assertEqualResults(
+          std::vector<RowVectorPtr>{expected},
+          std::vector<RowVectorPtr>{result}));
     }
   }
 
@@ -1586,7 +1600,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   //    through, and IntegerColumnReader::makeCastExpr handles the cast.
   {
     auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     auto declared = ROW({"c0"}, {VARCHAR()});
@@ -1597,7 +1611,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                       .copyResults(pool());
     auto expected =
         makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_TRUE(assertEqualResults(
+        std::vector<RowVectorPtr>{expected},
+        std::vector<RowVectorPtr>{result}));
   }
 }
 

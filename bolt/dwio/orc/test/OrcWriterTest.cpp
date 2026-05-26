@@ -17,10 +17,10 @@
 #include <bolt/vector/tests/utils/VectorTestBase.h>
 #include <cstdio>
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/orc/writer/OrcWriter.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
@@ -38,7 +38,7 @@ class OrcWriterTest : public testing::Test, public test::VectorTestBase {
     dwio::common::LocalFileSink::registerFactory();
     rootPool_ = memory::memoryManager()->addRootPool("ParquetTests");
     leafPool_ = rootPool_->addLeafChild("ParquetTests");
-    tempPath_ = exec::test::TempDirectoryPath::create();
+    tempPath_ = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
  protected:
@@ -107,7 +107,7 @@ class OrcWriterTest : public testing::Test, public test::VectorTestBase {
 
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
 };
 
 std::map<CompressionKind, CompressionKind> compressionKindMap = {

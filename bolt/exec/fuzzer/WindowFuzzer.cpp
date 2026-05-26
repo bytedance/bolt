@@ -30,8 +30,8 @@
 
 #include "bolt/exec/fuzzer/WindowFuzzer.h"
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 DEFINE_bool(
     enable_window_reference_verification,
@@ -257,7 +257,7 @@ void WindowFuzzer::testAlternativePlans(
   }
 
   // With TableScan.
-  auto directory = exec::test::TempDirectoryPath::create();
+  auto directory = bytedance::bolt::test::TempDirectoryPath::create();
   const auto inputRowType = asRowType(input[0]->type());
   if (isTableScanSupported(inputRowType)) {
     auto splits = makeSplits(input, directory->path);

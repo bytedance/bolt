@@ -18,18 +18,18 @@
 
 #include <folly/synchronization/Baton.h>
 #include <folly/synchronization/Latch.h>
+
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/dwio/common/FileSink.h"
-#include "bolt/dwio/common/tests/utils/DataSetBuilder.h"
-#include "bolt/dwio/parquet/writer/Writer.h"
-#include "folly/experimental/EventCount.h"
-
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
+#include "bolt/dwio/common/tests/utils/DataSetBuilder.h"
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
+#include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/TableScan.h"
@@ -42,6 +42,7 @@
 #include "bolt/type/Timestamp.h"
 #include "bolt/type/Type.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
+#include "folly/experimental/EventCount.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::core;
@@ -110,7 +111,7 @@ void ParquetRowGroupFilterTest::testSubfieldPruning(
   }
   auto mapType = batch[0]->childAt(1)->type();
   auto rowType = asRowType(batch[0]->type());
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
 
   auto path = filePath->path;
   auto localWriteFile = std::make_unique<LocalWriteFile>(path, true, false);

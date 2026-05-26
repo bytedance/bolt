@@ -31,7 +31,7 @@
 #include "bolt/common/caching/FileIds.h"
 #include "bolt/common/caching/SsdCache.h"
 #include "bolt/common/memory/Memory.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include <folly/executors/QueuedImmediateExecutor.h>
 #include <glog/logging.h>
@@ -79,7 +79,7 @@ class SsdFileTest : public testing::Test {
 
     fileName_ = StringIdLease(fileIds(), "fileInStorage");
 
-    tempDirectory_ = exec::test::TempDirectoryPath::create();
+    tempDirectory_ = bytedance::bolt::test::TempDirectoryPath::create();
     ssdFile_ = std::make_unique<SsdFile>(
         fmt::format("{}/ssdtest", tempDirectory_->path),
         0, // shardId
@@ -243,7 +243,7 @@ class SsdFileTest : public testing::Test {
     readAndCheckPins(pins);
   }
 
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDirectory_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDirectory_;
 
   std::shared_ptr<AsyncDataCache> cache_;
   StringIdLease fileName_;

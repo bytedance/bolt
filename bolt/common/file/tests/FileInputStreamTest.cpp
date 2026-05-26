@@ -34,7 +34,7 @@
 #include "bolt/common/file/FileInputStream.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MmapAllocator.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include <vector>
 
@@ -59,7 +59,7 @@ class FileInputStreamTest : public testing::Test {
     mmapAllocator_ = static_cast<MmapAllocator*>(memoryManager_->allocator());
     pool_ = memoryManager_->addLeafPool("ByteStreamTest");
     rng_.seed(124);
-    tempDirPath_ = exec::test::TempDirectoryPath::create();
+    tempDirPath_ = bytedance::bolt::test::TempDirectoryPath::create();
     fs_ = filesystems::getFileSystem(tempDirPath_->getPath(), nullptr);
   }
 
@@ -87,7 +87,7 @@ class FileInputStreamTest : public testing::Test {
   MmapAllocator* mmapAllocator_;
   std::shared_ptr<memory::MemoryPool> pool_;
   std::atomic_uint64_t fileId_{0};
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDirPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDirPath_;
   std::shared_ptr<filesystems::FileSystem> fs_;
 };
 

@@ -19,11 +19,11 @@
 #include <gtest/gtest.h>
 #include <string>
 #include "bolt/common/base/Fs.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/common/Reader.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/txt/reader/TxtReader.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -39,7 +39,7 @@ class TxtTestBase : public testing::Test, public test::VectorTestBase {
     dwio::common::LocalFileSink::registerFactory();
     rootPool_ = memory::memoryManager()->addRootPool("TxtTests");
     leafPool_ = rootPool_->addLeafChild("TxtTests");
-    tempPath_ = exec::test::TempDirectoryPath::create();
+    tempPath_ = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
   static RowTypePtr sampleSchema() {
@@ -178,7 +178,7 @@ class TxtTestBase : public testing::Test, public test::VectorTestBase {
 
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
   TimestampPrecision timestampPrecision_{TimestampPrecision::kMilliseconds};
 };
 } // namespace bytedance::bolt::txt

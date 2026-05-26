@@ -29,16 +29,37 @@
  */
 
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::exec::test {
-using connector::hive::HiveConnectorSplitBuilder;
 
-class AssertQueryBuilderTest : public HiveConnectorTestBase {};
+class AssertQueryBuilderTest : public OperatorTestBase,
+                               public ::testing::WithParamInterface<
+                                   connector::test::ConnectorTestParam> {
+ protected:
+  void SetUp() override {
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
 
-TEST_F(AssertQueryBuilderTest, basic) {
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
+  }
+};
+
+TEST_P(AssertQueryBuilderTest, basic) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   AssertQueryBuilder(
@@ -49,7 +70,7 @@ TEST_F(AssertQueryBuilderTest, basic) {
       .assertResults(data);
 }
 
-TEST_F(AssertQueryBuilderTest, serialExecution) {
+TEST_P(AssertQueryBuilderTest, serialExecution) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   PlanBuilder builder;
@@ -62,7 +83,7 @@ TEST_F(AssertQueryBuilderTest, serialExecution) {
   AssertQueryBuilder(plan).serialExecution(true).assertResults(data);
 }
 
-TEST_F(AssertQueryBuilderTest, orderedResults) {
+TEST_P(AssertQueryBuilderTest, orderedResults) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   AssertQueryBuilder(
@@ -71,7 +92,7 @@ TEST_F(AssertQueryBuilderTest, orderedResults) {
       .assertResults("VALUES (3), (2), (1)", {{0}});
 }
 
-TEST_F(AssertQueryBuilderTest, concurrency) {
+TEST_P(AssertQueryBuilderTest, concurrency) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   AssertQueryBuilder(
@@ -84,7 +105,7 @@ TEST_F(AssertQueryBuilderTest, concurrency) {
       .assertResults({data, data, data});
 }
 
-TEST_F(AssertQueryBuilderTest, config) {
+TEST_P(AssertQueryBuilderTest, config) {
   auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
   AssertQueryBuilder(
@@ -94,72 +115,11 @@ TEST_F(AssertQueryBuilderTest, config) {
       .assertResults("VALUES (2), (4), (6)");
 }
 
-TEST_F(AssertQueryBuilderTest, hiveSplits) {
-  auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
+// Connector-specific split coverage (partition-keyed splits, etc.) lives in
+// each connector's test directory (e.g.
+// bolt/connectors/hive/tests/HiveAssertQueryBuilderTest.cpp for the Hive case).
 
-  auto file = TempFilePath::create();
-  writeToFile(file->path, {data});
-
-  // Single leaf node.
-  AssertQueryBuilder(
-      PlanBuilder().tableScan(asRowType(data->type())).planNode(),
-      duckDbQueryRunner_)
-      .split(makeHiveConnectorSplit(file->path))
-      .assertResults("VALUES (1), (2), (3)");
-
-  // Split with partition key.
-  ColumnHandleMap assignments = {
-      {"ds", partitionKey("ds", VARCHAR())},
-      {"c0", regularColumn("c0", BIGINT())}};
-
-  AssertQueryBuilder(
-      PlanBuilder()
-          .startTableScan()
-          .outputType(ROW({"c0", "ds"}, {INTEGER(), VARCHAR()}))
-          .tableHandle(makeTableHandle())
-          .assignments(assignments)
-          .endTableScan()
-          .planNode(),
-      duckDbQueryRunner_)
-      .split(HiveConnectorSplitBuilder(file->path)
-                 .connectorId(kHiveConnectorId)
-                 .fileFormat(dwio::common::FileFormat::DWRF)
-                 .partitionKey("ds", "2022-05-10")
-                 .build())
-      .assertResults(
-          "VALUES (1, '2022-05-10'), (2, '2022-05-10'), (3, '2022-05-10')");
-
-  // Two leaf nodes.
-  auto buildData = makeRowVector({makeFlatVector<int32_t>({2, 3})});
-  auto buildFile = TempFilePath::create();
-  writeToFile(buildFile->path, {buildData});
-
-  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  core::PlanNodeId probeScanId;
-  core::PlanNodeId buildScanId;
-  auto joinPlan = PlanBuilder(planNodeIdGenerator)
-                      .tableScan(asRowType(data->type()))
-                      .capturePlanNodeId(probeScanId)
-                      .hashJoin(
-                          {"c0"},
-                          {"b_c0"},
-                          PlanBuilder(planNodeIdGenerator)
-                              .tableScan(asRowType(data->type()))
-                              .capturePlanNodeId(buildScanId)
-                              .project({"c0 as b_c0"})
-                              .planNode(),
-                          "",
-                          {"c0", "b_c0"})
-                      .singleAggregation({}, {"count(1)"})
-                      .planNode();
-
-  AssertQueryBuilder(joinPlan, duckDbQueryRunner_)
-      .split(probeScanId, makeHiveConnectorSplit(file->path))
-      .split(buildScanId, makeHiveConnectorSplit(buildFile->path))
-      .assertResults("SELECT 2");
-}
-
-TEST_F(AssertQueryBuilderTest, encodedResults) {
+TEST_P(AssertQueryBuilderTest, encodedResults) {
   VectorFuzzer::Options opts;
   opts.vectorSize = 1000;
   opts.nullRatio = 0.1;
@@ -203,7 +163,7 @@ TEST_F(AssertQueryBuilderTest, encodedResults) {
   assertEqualResults({flatInput}, {input});
 }
 
-TEST_F(AssertQueryBuilderTest, nestedArrayMapResults) {
+TEST_P(AssertQueryBuilderTest, nestedArrayMapResults) {
   VectorFuzzer::Options opts;
   opts.vectorSize = 1000;
   opts.nullRatio = 0.1;
@@ -229,5 +189,11 @@ TEST_F(AssertQueryBuilderTest, nestedArrayMapResults) {
       fuzzer.fuzzFlat(ARRAY(MAP(INTEGER(), VARCHAR()))))});
   assertEqualResults({input}, {input});
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    AssertQueryBuilderTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));
 
 } // namespace bytedance::bolt::exec::test

@@ -32,13 +32,13 @@
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/tpch/TpchConnector.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/TpchQueryBuilder.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
@@ -47,6 +47,7 @@
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using bytedance::bolt::connector::tpch::kBoltTpchConnectorId;
 
 class ParquetTpchTest : public testing::Test {

@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 #include <string>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -24,6 +25,7 @@
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 static constexpr int32_t kNumVectors = 1'0;
 static constexpr int32_t kRowsPerVector = 10'000;
@@ -61,7 +63,7 @@ class AggregationLazyInputTest : public HiveConnectorTestBase {
       vectors.emplace_back(makeRowVector(inputType_->names(), children));
     }
 
-    filePath_ = TempFilePath::create()->path;
+    filePath_ = ::bytedance::bolt::test::TempFilePath::create()->path;
     writeToFile(filePath_, vectors);
     auto plan = PlanBuilder()
                     .tableScan(inputType_)

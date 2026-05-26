@@ -20,13 +20,13 @@
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
@@ -478,7 +478,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
   ShuffleRunResult result;
 
-  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto tempDir = bytedance::bolt::test::TempDirectoryPath::create();
   std::string localDir = tempDir->path + "/local_dir";
   std::filesystem::create_directories(localDir);
 

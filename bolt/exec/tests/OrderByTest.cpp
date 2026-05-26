@@ -40,6 +40,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/cudf/tests/CudfResource.h"
@@ -51,7 +52,6 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/WithGPUParamInterface.h"
 #include "bolt/serializers/ArrowSerializer.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
@@ -61,6 +61,7 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::exec::test {
 namespace {
 // Returns aggregated spilled stats by 'task'.
@@ -293,7 +294,7 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
     }
     {
       SCOPED_TRACE("run with spilling");
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
       auto queryCtx = core::QueryCtx::create(executor_.get());
       TestScopedSpillInjection scopedSpillInjection(100);
       queryCtx->testingOverrideConfigUnsafe({
@@ -1052,7 +1053,7 @@ TEST_P(OrderByTest, spill) {
 
   const auto expectedResult = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto task = AssertQueryBuilder(plan)
                   .spillDirectory(spillDirectory->path)
                   .config(core::QueryConfig::kSpillEnabled, true)
@@ -1110,7 +1111,7 @@ TEST_P(OrderByTest, spillWithArrowSerde) {
                   .capturePlanNodeId(orderById)
                   .planNode();
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   TestScopedSpillInjection scopedSpillInjection(100);
   bool sawArrowSerde = false;
@@ -1178,7 +1179,7 @@ TEST_P(OrderByTest, spillWithMemoryLimit) {
                       {1'000'000'000, false}};
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -1246,7 +1247,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
         queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -1389,7 +1390,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringReserve) {
     batches.push_back(fuzzer.fuzzRow(rowType));
   }
 
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
   queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
       queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -1506,7 +1507,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
   const std::vector<bool> enableSpillings = {false, true};
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -1640,7 +1641,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
   const std::vector<bool> enableSpillings = {false, true};
   for (bool enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    auto tempDirectory = bytedance::bolt::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
         queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
@@ -1980,7 +1981,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, spillWithNoMoreOutput) {
         ASSERT_EQ(reclaimerStats_.reclaimedBytes, 0);
       })));
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto task =
       AssertQueryBuilder(plan)
           .spillDirectory(spillDirectory->path)
@@ -2017,7 +2018,7 @@ TEST_P(OrderByTest, maxSpillBytes) {
           .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
           .capturePlanNodeId(orderNodeId)
           .planNode();
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = bytedance::bolt::test::TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   struct {
@@ -2076,7 +2077,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimFromOrderBy) {
         memory::testingRunArbitration();
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   core::PlanNodeId orderById;
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
@@ -2119,7 +2121,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimFromEmptyOrderBy) {
         testingRunArbitration(op->pool());
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory =
+      bytedance::bolt::test::TempDirectoryPath::create();
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
           .spillDirectory(spillDirectory->path)

@@ -35,16 +35,16 @@
 #include <gtest/gtest.h>
 
 #include "arrow/util/key_value_metadata.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/dwio/parquet/arrow/FileWriter.h"
 #include "bolt/dwio/parquet/arrow/tests/TestUtil.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 
 namespace bytedance::bolt::parquet::arrow {
 namespace metadata {
 namespace {
 void writeToFile(
-    std::shared_ptr<exec::test::TempFilePath> filePath,
+    std::shared_ptr<::bytedance::bolt::test::TempFilePath> filePath,
     std::shared_ptr<arrow::Buffer> buffer) {
   auto localWriteFile =
       std::make_unique<LocalWriteFile>(filePath->getPath(), false, false);
@@ -416,7 +416,7 @@ TEST(Metadata, TestAddKeyValueMetadata) {
   PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
 
   // Write the buffer to a temp file path
-  auto filePath = exec::test::TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath, buffer);
   memory::MemoryManager::testingSetInstance({});
   std::shared_ptr<bytedance::bolt::memory::MemoryPool> rootPool =
@@ -530,7 +530,7 @@ TEST(Metadata, TestSortingColumns) {
   PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
 
   // Write the buffer to a temp file path
-  auto filePath = exec::test::TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath, buffer);
   memory::MemoryManager::testingSetInstance({});
   std::shared_ptr<bytedance::bolt::memory::MemoryPool> rootPool =

@@ -28,26 +28,15 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/connectors/tpch/TpchConnector.h"
 
-#include "boost/filesystem.hpp"
-namespace bytedance::bolt::exec::test {
+namespace bytedance::bolt::connector::tpch {
 
-std::shared_ptr<TempDirectoryPath> TempDirectoryPath::create() {
-  struct SharedTempDirectoryPath : public TempDirectoryPath {
-    SharedTempDirectoryPath() : TempDirectoryPath() {}
-  };
-  return std::make_shared<SharedTempDirectoryPath>();
-}
-
-TempDirectoryPath::~TempDirectoryPath() {
-  LOG(INFO) << "TempDirectoryPath:: removing all files from" << path;
-  try {
-    boost::filesystem::remove_all(path.c_str());
-  } catch (...) {
-    LOG(WARNING)
-        << "TempDirectoryPath:: destructor failed while calling boost::filesystem::remove_all";
+void registerTpchConnectorFactories() {
+  if (!connector::hasConnectorFactory(kTpchConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<TpchConnectorFactory>());
   }
 }
 
-} // namespace bytedance::bolt::exec::test
+} // namespace bytedance::bolt::connector::tpch

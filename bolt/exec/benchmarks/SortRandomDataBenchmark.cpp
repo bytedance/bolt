@@ -19,10 +19,11 @@
 #include <folly/init/Init.h>
 #include <string>
 
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_string(temp_file_path, "", "file path of input file");
@@ -32,6 +33,7 @@ DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 static constexpr int32_t kNumVectors = 1'000;
 static constexpr int32_t kRowsPerVector = 10'000;
@@ -170,7 +172,7 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
         vectors.emplace_back(makeRowVector(inputType_->names(), children));
       }
 
-      filePath_ = TempFilePath::create()->path;
+      filePath_ = ::bytedance::bolt::test::TempFilePath::create()->path;
       writeToFile(filePath_, vectors);
       std::cout << filePath_ << std::endl;
     } else {

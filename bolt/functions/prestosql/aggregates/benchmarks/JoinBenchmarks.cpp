@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -39,6 +40,7 @@ DEFINE_int32(jit_level, 0, "jit level");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::common::testutil;
 
 static constexpr int32_t kNumVectors = 4000;
@@ -242,7 +244,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
         vectors.emplace_back(makeRowVector(inputType_->names(), children));
       }
 
-      filePath_ = TempFilePath::create()->path;
+      filePath_ = ::bytedance::bolt::test::TempFilePath::create()->path;
       writeToFile(filePath_, vectors);
       createDuckDbTable("t", vectors);
       std::cout << filePath_ << std::endl;

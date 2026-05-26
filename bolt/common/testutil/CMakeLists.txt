@@ -33,6 +33,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   endif()
 endif()
 
+bolt_add_library(bolt_temp_path TempDirectoryPath.cpp TempFilePath.cpp)
+
+target_link_libraries(bolt_temp_path bolt_exception)
+
 if(${BOLT_ENABLE_PERF})
   bolt_add_library(bolt_test_util_gperf OBJECT GPerf.cpp)
 

@@ -30,25 +30,45 @@
 
 #include <regex>
 
-#include <bolt/type/Timestamp.h>
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempFilePath.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/TableScan.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/type/Type.h"
+
 namespace bytedance::bolt::exec::test {
 
-class GroupedExecutionTest : public virtual HiveConnectorTestBase {
+class GroupedExecutionTest : public virtual OperatorTestBase,
+                             public ::testing::WithParamInterface<
+                                 connector::test::ConnectorTestParam> {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    OperatorTestBase::SetUp();
+    bytedance::bolt::filesystems::registerLocalFileSystem();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
   }
 
   static void SetUpTestCase() {
-    HiveConnectorTestBase::SetUpTestCase();
+    OperatorTestBase::SetUpTestCase();
   }
 
   std::vector<RowVectorPtr> makeVectors(
@@ -56,15 +76,19 @@ class GroupedExecutionTest : public virtual HiveConnectorTestBase {
       int32_t rowsPerVector,
       const RowTypePtr& rowType = nullptr) {
     auto inputs = rowType ? rowType : rowType_;
-    return HiveConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
+    return OperatorTestBase::makeVectors(inputs, count, rowsPerVector);
   }
 
-  exec::Split makeHiveSplitWithGroup(std::string path, int32_t group) {
-    return exec::Split(makeHiveConnectorSplit(std::move(path)), group);
+  exec::Split makeSplitWithGroup(std::string path, int32_t group) {
+    return exec::Split(
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, std::move(path)),
+        group);
   }
 
   exec::Split makeHiveSplit(std::string path) {
-    return exec::Split(makeHiveConnectorSplit(std::move(path)));
+    return exec::Split(connector::test::makeConnectorSplit(
+        GetParam().connectorName, std::move(path)));
   }
 
   static core::PlanNodePtr tableScanNode(const RowTypePtr& outputType) {
@@ -101,7 +125,7 @@ class GroupedExecutionTest : public virtual HiveConnectorTestBase {
 };
 
 // Here we test the grouped execution sanity checks.
-TEST_F(GroupedExecutionTest, groupedExecutionErrors) {
+TEST_P(GroupedExecutionTest, groupedExecutionErrors) {
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   core::PlanNodeId tableScanNodeId;
   core::PlanNodeId projectNodeId;
@@ -215,10 +239,10 @@ TEST_F(GroupedExecutionTest, groupedExecutionErrors) {
 
 // Here we test various aspects of grouped/bucketed execution involving
 // output buffer and 3 pipelines.
-TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
+TEST_P(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
   // Create source file - we will read from it in 6 splits.
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   // A chain of three pipelines separated by local exchange with the leaf one
@@ -254,7 +278,7 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
   EXPECT_EQ(0, task->numRunningDrivers());
 
   // Add one split for group (8).
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
 
   // Only one split group should be in the processing mode, so 9 drivers (3 per
   // pipeline).
@@ -262,11 +286,11 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
   EXPECT_EQ(std::unordered_set<int32_t>{}, getCompletedSplitGroups(task));
 
   // Add the rest of splits
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 1));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 5));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 5));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 1));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 5));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 5));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
 
   // One split group should be in the processing mode, so 9 drivers.
   EXPECT_EQ(9, task->numRunningDrivers());
@@ -328,10 +352,10 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithOutputBuffer) {
 
 // Here we test various aspects of grouped/bucketed execution involving
 // output buffer and 3 pipelines.
-TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
+TEST_P(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
   // Create source file - we will read from it in 6 splits.
   auto vectors = makeVectors(4, 20);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   // Run the test twice - for Hash and Cross Join.
@@ -398,10 +422,13 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
     EXPECT_EQ(3, task->numRunningDrivers());
 
     // Add single split to the build scan.
-    task->addSplit(buildScanNodeId, makeHiveSplit(filePath->path));
+    task->addSplit(
+        buildScanNodeId,
+        Split(connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePath->path)));
 
     // Add one split for group (8).
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 8));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 8));
 
     // Only one split group should be in the processing mode, so 9 drivers (3
     // per pipeline) grouped + 3 ungrouped.
@@ -409,11 +436,11 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
     EXPECT_EQ(std::unordered_set<int32_t>{}, getCompletedSplitGroups(task));
 
     // Add the rest of splits
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 1));
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 5));
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 8));
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 5));
-    task->addSplit(probeScanNodeId, makeHiveSplitWithGroup(filePath->path, 8));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 1));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 5));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 8));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 5));
+    task->addSplit(probeScanNodeId, makeSplitWithGroup(filePath->path, 8));
 
     // One split group should be in the processing mode, so 9 drivers (3 per
     // pipeline) grouped + 3 ungrouped.
@@ -494,11 +521,11 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
 }
 
 // Here we test various aspects of grouped/bucketed execution.
-TEST_F(GroupedExecutionTest, groupedExecution) {
+TEST_P(GroupedExecutionTest, groupedExecution) {
   // Create source file - we will read from it in 6 splits.
   const size_t numSplits{6};
   auto vectors = makeVectors(10, 1'000);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->path, vectors);
 
   CursorParameters params;
@@ -519,7 +546,7 @@ TEST_F(GroupedExecutionTest, groupedExecution) {
   auto task = cursor->task();
 
   // Add one splits before start to ensure we can handle such cases.
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
 
   // Start task now.
   cursor->start();
@@ -529,11 +556,11 @@ TEST_F(GroupedExecutionTest, groupedExecution) {
   EXPECT_EQ(std::unordered_set<int32_t>{}, getCompletedSplitGroups(task));
 
   // Add the rest of splits
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 1));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 5));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 5));
-  task->addSplit("0", makeHiveSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 1));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 5));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 5));
+  task->addSplit("0", makeSplitWithGroup(filePath->path, 8));
 
   // Only two split groups should be in the processing mode, so 4 drivers.
   EXPECT_EQ(4, task->numRunningDrivers());
@@ -586,5 +613,11 @@ TEST_F(GroupedExecutionTest, groupedExecution) {
       std::unordered_set<int32_t>({1, 3, 5, 8}), getCompletedSplitGroups(task));
   EXPECT_EQ(numRead, numSplits * 10'000);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    GroupedExecutionTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));
 
 } // namespace bytedance::bolt::exec::test

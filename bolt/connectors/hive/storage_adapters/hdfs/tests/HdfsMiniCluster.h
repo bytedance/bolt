@@ -28,7 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
 #include <pwd.h>
 #include <unistd.h>

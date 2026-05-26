@@ -32,6 +32,7 @@
 #include <folly/init/Init.h>
 #include <string>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -42,6 +43,7 @@ DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 static constexpr int32_t kNumVectors = 7'000;
 static constexpr int32_t kRowsPerVector = 4'000;
@@ -79,7 +81,7 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
       vectors.emplace_back(fuzzer.fuzzInputFlatRow(inputType_));
     }
 
-    filePath_ = TempFilePath::create();
+    filePath_ = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath_->path, vectors);
   }
 
@@ -145,7 +147,7 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
   }
 
   RowTypePtr inputType_;
-  std::shared_ptr<TempFilePath> filePath_;
+  std::shared_ptr<::bytedance::bolt::test::TempFilePath> filePath_;
 };
 
 std::unique_ptr<TwoStringKeysBenchmark> benchmark;

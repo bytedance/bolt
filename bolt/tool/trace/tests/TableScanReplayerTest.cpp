@@ -38,6 +38,8 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/hyperloglog/SparseHll.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/TableWriter.h"
@@ -45,7 +47,6 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/tool/trace/TableScanReplayer.h"
 #include "bolt/tool/trace/TraceReplayRunner.h"
@@ -56,6 +57,7 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::dwio::common;
@@ -120,9 +122,10 @@ TEST_F(TableScanReplayerTest, runner) {
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
   const int numSplits{5};
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < numSplits; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -189,9 +192,10 @@ TEST_F(TableScanReplayerTest, basic) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < 5; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -256,9 +260,10 @@ TEST_F(TableScanReplayerTest, columnPrunning) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < 5; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
@@ -309,7 +314,7 @@ TEST_F(TableScanReplayerTest, subfieldPrunning) {
   auto columnType = ROW({"c", "d"}, {innerType, BIGINT()});
   auto rowType = ROW({"e"}, {columnType});
   auto vectors = makeVectors(10, 1'000, rowType);
-  auto filePath = TempFilePath::create();
+  auto filePath = ::bytedance::bolt::test::TempFilePath::create();
   writeToFile(filePath->getPath(), vectors);
   std::vector<common::Subfield> requiredSubfields;
   requiredSubfields.emplace_back("e.c");
@@ -366,9 +371,10 @@ TEST_F(TableScanReplayerTest, concurrent) {
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
   const auto fs = filesystems::getFileSystem(testDir->getPath(), nullptr);
-  std::vector<std::shared_ptr<TempFilePath>> splitFiles;
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+      splitFiles;
   for (int i = 0; i < 2; ++i) {
-    auto filePath = TempFilePath::create();
+    auto filePath = ::bytedance::bolt::test::TempFilePath::create();
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }

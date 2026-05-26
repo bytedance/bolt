@@ -129,7 +129,7 @@ DwioFuzzer::DwioFuzzer(
     size_t initialSeed,
     const Options& options,
     common::FileFormat fileFormat)
-    : tempPath_(exec::test::TempDirectoryPath::create()),
+    : tempPath_(bytedance::bolt::test::TempDirectoryPath::create()),
       options_(options),
       fileFormat_{fileFormat},
       aggregatePool_(

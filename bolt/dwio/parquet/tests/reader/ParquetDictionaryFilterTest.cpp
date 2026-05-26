@@ -16,11 +16,11 @@
 
 #include <type/Subfield.h>
 #include <type/Timestamp.h>
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/dwio/common/ScanSpec.h"
 #include "bolt/dwio/parquet/reader/DictionaryFilter.h"
 #include "bolt/dwio/parquet/reader/ParquetData.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
-#include "bolt/exec/tests/utils/TempFilePath.h"
 #include "bolt/type/Type.h"
 #include "bolt/type/filter/FilterUtil.h"
 namespace bytedance::bolt::parquet {
@@ -30,7 +30,7 @@ class DictionaryFilterTest : public ParquetTestBase {
  protected:
   void SetUp() override {
     ParquetTestBase::SetUp();
-    filePath_ = exec::test::TempFilePath::create()->path;
+    filePath_ = ::bytedance::bolt::test::TempFilePath::create()->path;
   }
 
   void createTestFile() {

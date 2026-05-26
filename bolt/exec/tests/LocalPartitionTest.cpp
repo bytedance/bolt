@@ -28,18 +28,38 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/testutil/TempFilePath.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
-class LocalPartitionTest : public HiveConnectorTestBase {
+class LocalPartitionTest : public OperatorTestBase,
+                           public ::testing::WithParamInterface<
+                               connector::test::ConnectorTestParam> {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    OperatorTestBase::SetUp();
+    auto emptyConfig = std::make_shared<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>());
+    connector::test::registerTestConnector(
+        GetParam().connectorName,
+        GetParam().connectorId,
+        ioExecutor_.get(),
+        emptyConfig,
+        GetParam().factoryRegistrar);
+  }
+
+  void TearDown() override {
+    connector::test::unregisterTestConnector(
+        GetParam().connectorName, GetParam().connectorId);
+    OperatorTestBase::TearDown();
   }
 
   template <typename T>
@@ -53,8 +73,8 @@ class LocalPartitionTest : public HiveConnectorTestBase {
         size, [start, max](auto row) { return (start + row) % max; });
   }
 
-  std::vector<std::shared_ptr<TempFilePath>> writeToFiles(
-      const std::vector<RowVectorPtr>& vectors) {
+  std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+  writeToFiles(const std::vector<RowVectorPtr>& vectors) {
     auto filePaths = makeFilePaths(vectors.size());
     for (auto i = 0; i < vectors.size(); i++) {
       writeToFile(filePaths[i]->path, vectors[i]);
@@ -101,7 +121,7 @@ class LocalPartitionTest : public HiveConnectorTestBase {
   }
 };
 
-TEST_F(LocalPartitionTest, gather) {
+TEST_P(LocalPartitionTest, gather) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({makeFlatSequence<int32_t>(0, 100)}),
       makeRowVector({makeFlatSequence<int32_t>(53, 100)}),
@@ -154,14 +174,16 @@ TEST_F(LocalPartitionTest, gather) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
 
   task = queryBuilder.assertResults("SELECT 300, -71, 152");
   verifyExchangeSourceOperatorStats(task, 300, 3);
 }
 
-TEST_F(LocalPartitionTest, partition) {
+TEST_P(LocalPartitionTest, partition) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({makeFlatSequence<int32_t>(0, 100)}),
       makeRowVector({makeFlatSequence<int32_t>(53, 100)}),
@@ -200,7 +222,9 @@ TEST_F(LocalPartitionTest, partition) {
   queryBuilder.maxDrivers(2);
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
 
   auto task =
@@ -208,7 +232,7 @@ TEST_F(LocalPartitionTest, partition) {
   verifyExchangeSourceOperatorStats(task, 300, 6);
 }
 
-TEST_F(LocalPartitionTest, maxBufferSizeGather) {
+TEST_P(LocalPartitionTest, maxBufferSizeGather) {
   std::vector<RowVectorPtr> vectors;
   for (auto i = 0; i < 21; i++) {
     vectors.emplace_back(makeRowVector({makeFlatVector<int32_t>(
@@ -242,7 +266,7 @@ TEST_F(LocalPartitionTest, maxBufferSizeGather) {
   verifyExchangeSourceOperatorStats(task, 2100, 21);
 }
 
-TEST_F(LocalPartitionTest, maxBufferSizePartition) {
+TEST_P(LocalPartitionTest, maxBufferSizePartition) {
   std::vector<RowVectorPtr> vectors;
   for (auto i = 0; i < 21; i++) {
     vectors.emplace_back(makeRowVector({makeFlatVector<int32_t>(
@@ -281,7 +305,9 @@ TEST_F(LocalPartitionTest, maxBufferSizePartition) {
     queryBuilder.maxDrivers(2);
     for (auto i = 0; i < filePaths.size(); ++i) {
       queryBuilder.split(
-          scanNodeIds[i % 3], makeHiveConnectorSplit(filePaths[i]->path));
+          scanNodeIds[i % 3],
+          connector::test::makeConnectorSplit(
+              GetParam().connectorName, filePaths[i]->path));
     }
     queryBuilder.config(
         core::QueryConfig::kMaxLocalExchangeBufferSize, bufferSize);
@@ -299,7 +325,7 @@ TEST_F(LocalPartitionTest, maxBufferSizePartition) {
   verifyExchangeSourceOperatorStats(task, 2100, 42);
 }
 
-TEST_F(LocalPartitionTest, indicesBufferCapacity) {
+TEST_P(LocalPartitionTest, indicesBufferCapacity) {
   std::vector<RowVectorPtr> vectors;
   for (auto i = 0; i < 21; i++) {
     vectors.emplace_back(makeRowVector({makeFlatVector<int32_t>(
@@ -330,7 +356,9 @@ TEST_F(LocalPartitionTest, indicesBufferCapacity) {
   for (auto i = 0; i < filePaths.size(); ++i) {
     auto id = scanNodeIds[i % 3];
     cursor->task()->addSplit(
-        id, Split(makeHiveConnectorSplit(filePaths[i]->path)));
+        id,
+        Split(connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path)));
     cursor->task()->noMoreSplits(id);
   }
   int numRows = 0;
@@ -348,7 +376,7 @@ TEST_F(LocalPartitionTest, indicesBufferCapacity) {
   ASSERT_LE(capacity, 1.5 * numRows * sizeof(vector_size_t));
 }
 
-TEST_F(LocalPartitionTest, blockingOnLocalExchangeQueue) {
+TEST_P(LocalPartitionTest, blockingOnLocalExchangeQueue) {
   auto localExchangeBufferSize = "1024";
   auto baseVector = vectorMaker_.flatVector<int64_t>(
       10240, [](auto row) { return row / 10; });
@@ -420,7 +448,7 @@ TEST_F(LocalPartitionTest, blockingOnLocalExchangeQueue) {
   }
 }
 
-TEST_F(LocalPartitionTest, multipleExchanges) {
+TEST_P(LocalPartitionTest, multipleExchanges) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({
           makeFlatSequence<int32_t>(0, 100),
@@ -474,7 +502,9 @@ TEST_F(LocalPartitionTest, multipleExchanges) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
     queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+        scanNodeIds[i],
+        connector::test::makeConnectorSplit(
+            GetParam().connectorName, filePaths[i]->path));
   }
 
   queryBuilder.maxDrivers(2).assertResults(
@@ -483,7 +513,7 @@ TEST_F(LocalPartitionTest, multipleExchanges) {
       ") t GROUP BY 1");
 }
 
-TEST_F(LocalPartitionTest, earlyCompletion) {
+TEST_P(LocalPartitionTest, earlyCompletion) {
   std::vector<RowVectorPtr> data = {
       makeRowVector({makeFlatSequence(3, 100)}),
       makeRowVector({makeFlatSequence(7, 100)}),
@@ -508,7 +538,7 @@ TEST_F(LocalPartitionTest, earlyCompletion) {
   assertTaskReferenceCount(task, 1);
 }
 
-TEST_F(LocalPartitionTest, earlyCancelation) {
+TEST_P(LocalPartitionTest, earlyCancelation) {
   std::vector<RowVectorPtr> data = {
       makeRowVector({makeFlatSequence(3, 100)}),
       makeRowVector({makeFlatSequence(7, 100)}),
@@ -563,7 +593,7 @@ TEST_F(LocalPartitionTest, earlyCancelation) {
   assertTaskReferenceCount(task, 1);
 }
 
-TEST_F(LocalPartitionTest, producerError) {
+TEST_P(LocalPartitionTest, producerError) {
   std::vector<RowVectorPtr> data = {
       makeRowVector({makeFlatSequence(3, 100)}),
       makeRowVector({makeFlatSequence(7, 100)}),
@@ -600,7 +630,7 @@ TEST_F(LocalPartitionTest, producerError) {
   assertTaskReferenceCount(task, 1);
 }
 
-TEST_F(LocalPartitionTest, unionAll) {
+TEST_P(LocalPartitionTest, unionAll) {
   auto data1 = makeRowVector(
       {"d0", "d1"},
       {makeFlatVector<int32_t>({10, 11}),
@@ -631,7 +661,7 @@ TEST_F(LocalPartitionTest, unionAll) {
       "SELECT * FROM t1 UNION ALL SELECT * FROM t2");
 }
 
-TEST_F(LocalPartitionTest, unionAllLocalExchange) {
+TEST_P(LocalPartitionTest, unionAllLocalExchange) {
   auto data1 = makeRowVector({"d0"}, {makeFlatVector<StringView>({"x"})});
   auto data2 = makeRowVector({"e0"}, {makeFlatVector<StringView>({"y"})});
 
@@ -656,3 +686,9 @@ TEST_F(LocalPartitionTest, unionAllLocalExchange) {
       "   SELECT * FROM (VALUES ('y')) as t2(c0)"
       ")");
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    Connectors,
+    LocalPartitionTest,
+    ::testing::ValuesIn(connector::test::paramsFor(
+        {std::string(connector::kHiveConnectorName)})));

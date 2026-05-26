@@ -21,6 +21,7 @@
 #include <folly/init/Init.h>
 #include <string>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
@@ -37,6 +38,7 @@ DEFINE_bool(jit_row_eq_vectors, false, "enable jit row_eq_vectors");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 static constexpr int32_t kNumVectors = 4000;
 static constexpr int32_t kRowsPerVector = 1024;
@@ -234,7 +236,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
         vectors.emplace_back(makeRowVector(inputType_->names(), children));
       }
 
-      filePath_ = TempFilePath::create()->path;
+      filePath_ = ::bytedance::bolt::test::TempFilePath::create()->path;
       writeToFile(filePath_, vectors);
       std::cout << filePath_ << std::endl;
     } else {

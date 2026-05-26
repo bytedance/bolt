@@ -42,6 +42,7 @@
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::common::testutil;
 using bytedance::bolt::filesystems::FileSystem;
 
@@ -152,7 +153,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
   void SetUp() override {
     RowContainerTestBase::SetUp();
     rng_.seed(1);
-    tempDirPath_ = exec::test::TempDirectoryPath::create();
+    tempDirPath_ = bytedance::bolt::test::TempDirectoryPath::create();
     fs_ = filesystems::getFileSystem(tempDirPath_->path, nullptr);
     rowType_ = ROW({
         {"bool_val", BOOLEAN()},

@@ -30,12 +30,12 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/Merge.h"
 #include "bolt/exec/MergeSource.h"
 #include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/Spill.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -44,6 +44,7 @@
 
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::memory;
 
@@ -306,7 +307,7 @@ class MergerTest : public OperatorTestBase {
   const std::vector<SpillSortKey> sortingKeys_ =
       SpillState::makeSortingKeys(sortColumnIndices_, sortCompareFlags_);
   const std::shared_ptr<TempDirectoryPath> spillDirectory_ =
-      exec::test::TempDirectoryPath::create();
+      bytedance::bolt::test::TempDirectoryPath::create();
   const common::SpillConfig spillConfig_{
       [&]() -> const std::string& { return spillDirectory_->getPath(); },
       [&](uint64_t) {},

@@ -33,12 +33,12 @@
 #include <memory>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/Driver.h"
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 namespace bytedance::bolt::exec::test {
 
 constexpr int64_t KB = 1024L;

@@ -33,8 +33,8 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MmapAllocator.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/Spiller.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
@@ -78,7 +78,7 @@ class SpillerBenchmarkBase {
   std::unique_ptr<VectorFuzzer> vectorFuzzer_;
   std::vector<RowVectorPtr> rowVectors_;
   std::unique_ptr<folly::IOThreadPoolExecutor> executor_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDir_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDir_;
   std::string spillDir_;
   std::shared_ptr<filesystems::FileSystem> fs_;
   common::SpillConfig spillConfig_;

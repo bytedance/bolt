@@ -25,7 +25,10 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+add_subdirectory(utils)
+
 add_executable(bolt_connector_test ConnectorTest.cpp)
+
 add_test(bolt_connector_test bolt_connector_test)
 
 target_link_libraries(

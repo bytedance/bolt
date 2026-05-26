@@ -19,6 +19,7 @@
 #include <folly/init/Init.h>
 #include <string>
 
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/Window.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -39,6 +40,7 @@ DEFINE_int32(warmup_rounds, 0, "nums of warmup rounds");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 
 int32_t kNumVectors = 2000;
 int32_t kRowsPerVector = 1000;
@@ -203,8 +205,9 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
       vectors.emplace_back(input);
     }
 
-    filePath_ = FLAGS_temp_file_path.empty() ? TempFilePath::create()->path
-                                             : FLAGS_temp_file_path;
+    filePath_ = FLAGS_temp_file_path.empty()
+        ? ::bytedance::bolt::test::TempFilePath::create()->path
+        : FLAGS_temp_file_path;
 
     writeToFile(filePath_, vectors);
 

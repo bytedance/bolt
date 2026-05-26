@@ -28,14 +28,26 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/tests/utils/TempFilePath.h"
-namespace bytedance::bolt::exec::test {
+#include "bolt/common/testutil/TempDirectoryPath.h"
 
-std::shared_ptr<TempFilePath> TempFilePath::create() {
-  struct SharedTempFilePath : public TempFilePath {
-    SharedTempFilePath() : TempFilePath() {}
+#include "boost/filesystem.hpp"
+namespace bytedance::bolt::test {
+
+std::shared_ptr<TempDirectoryPath> TempDirectoryPath::create() {
+  struct SharedTempDirectoryPath : public TempDirectoryPath {
+    SharedTempDirectoryPath() : TempDirectoryPath() {}
   };
-  return std::make_shared<SharedTempFilePath>();
+  return std::make_shared<SharedTempDirectoryPath>();
 }
 
-} // namespace bytedance::bolt::exec::test
+TempDirectoryPath::~TempDirectoryPath() {
+  LOG(INFO) << "TempDirectoryPath:: removing all files from" << path;
+  try {
+    boost::filesystem::remove_all(path.c_str());
+  } catch (...) {
+    LOG(WARNING)
+        << "TempDirectoryPath:: destructor failed while calling boost::filesystem::remove_all";
+  }
+}
+
+} // namespace bytedance::bolt::test

@@ -25,13 +25,13 @@
 #include <paimon/table/source/plan.h>
 #include <paimon/table/source/table_scan.h>
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
@@ -43,7 +43,7 @@ class PaimonConnectorTest
  protected:
   static void SetUpTestCase() {
     // Create a temporary directory for the test
-    tempDir_ = exec::test::TempDirectoryPath::create();
+    tempDir_ = bytedance::bolt::test::TempDirectoryPath::create();
     LOG(INFO) << "Test using temporary directory: " << tempDir_->path;
 
     // Run create_test_tables.py with the temporary directory.
@@ -90,11 +90,11 @@ class PaimonConnectorTest
     exec::test::OperatorTestBase::TearDown();
   }
 
-  static std::shared_ptr<exec::test::TempDirectoryPath> tempDir_;
+  static std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDir_;
 };
 
-std::shared_ptr<exec::test::TempDirectoryPath> PaimonConnectorTest::tempDir_ =
-    nullptr;
+std::shared_ptr<bytedance::bolt::test::TempDirectoryPath>
+    PaimonConnectorTest::tempDir_ = nullptr;
 
 TEST_F(PaimonConnectorTest, TestTableScanBasic) {
   // Create Parquet data with unique id

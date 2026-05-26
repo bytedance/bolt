@@ -16,10 +16,10 @@
 
 #include "bolt/dwio/txt/writer/TxtWriter.h"
 #include <cstdio>
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/txt/reader/TxtReader.h"
 #include "bolt/dwio/txt/tests/TxtTestBase.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -40,7 +40,7 @@ class TxtWriterTest : public bytedance::bolt::txt::TxtTestBase {
     dwio::common::LocalFileSink::registerFactory();
     rootPool_ = memory::memoryManager()->addRootPool("txtWriterTests");
     leafPool_ = rootPool_->addLeafChild("txtWriterTests");
-    tempPath_ = exec::test::TempDirectoryPath::create();
+    tempPath_ = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
  protected:
@@ -113,7 +113,7 @@ class TxtWriterTest : public bytedance::bolt::txt::TxtTestBase {
 
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempPath_;
 };
 
 TEST_F(TxtWriterTest, comparison) {

@@ -25,10 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-bolt_add_library(bolt_temp_path TempDirectoryPath.cpp TempFilePath.cpp)
-
-target_link_libraries(bolt_temp_path bolt_exception)
-
 bolt_add_library(
   bolt_exec_test_lib
   ArbitratorTestUtil.cpp
@@ -61,6 +57,7 @@ target_link_libraries(
   bolt_dwio_common_test_utils
   bolt_file_test_utils
   bolt_type_fbhive
+  bolt_connector_test_lib
   bolt_hive_connector
   bolt_tpch_connector
   bolt_presto_serializer

@@ -30,73 +30,39 @@
 
 #pragma once
 
-#include <sys/stat.h>
 #include <unistd.h>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <string>
 
 #include "bolt/common/base/Exceptions.h"
-namespace bytedance::bolt::exec::test {
+namespace bytedance::bolt::test {
 
-// It manages the lifetime of a temporary file.
-class TempFilePath {
+// It manages the lifetime of a temporary directory.
+class TempDirectoryPath {
  public:
-  static std::shared_ptr<TempFilePath> create();
+  static std::shared_ptr<TempDirectoryPath> create();
 
-  virtual ~TempFilePath() {
-    unlink(path.c_str());
-    close(fd);
-  }
+  virtual ~TempDirectoryPath();
 
   const std::string path;
 
-  TempFilePath(const TempFilePath&) = delete;
-  TempFilePath& operator=(const TempFilePath&) = delete;
-
-  void append(std::string data) {
-    std::ofstream file(path, std::ios_base::app);
-    file << data;
-    file.flush();
-    file.close();
-  }
-
-  const int64_t fileSize() {
-    struct stat st;
-    ::stat(path.data(), &st);
-    return st.st_size;
-  }
-
-  int64_t fileModifiedTime() {
-    struct stat st;
-    ::stat(path.data(), &st);
-    return st.st_mtime;
-  }
-
-  /// If fault injection is enabled, the returned the file path has the faulty
-  /// file system prefix scheme. The bolt fs then opens the file through the
-  /// faulty file system. The actual file operation might either fails or
-  /// delegate to the actual file.
   const std::string& getPath() const {
     return path;
   }
 
- private:
-  int fd;
+  TempDirectoryPath(const TempDirectoryPath&) = delete;
+  TempDirectoryPath& operator=(const TempDirectoryPath&) = delete;
 
-  TempFilePath() : path(createTempFile(this)) {
-    BOLT_CHECK_NE(fd, -1);
-  }
+  TempDirectoryPath() : path(createTempDirectory()) {}
 
-  static std::string createTempFile(TempFilePath* tempFilePath) {
+  static std::string createTempDirectory() {
     char path[] = "/tmp/bolt_test_XXXXXX";
-    tempFilePath->fd = mkstemp(path);
-    if (tempFilePath->fd == -1) {
-      throw std::logic_error("Cannot open temp file");
+    const char* tempDirectoryPath = mkdtemp(path);
+    if (tempDirectoryPath == nullptr) {
+      throw std::logic_error("Cannot open temp directory");
     }
-    return path;
+    return tempDirectoryPath;
   }
 };
-
-} // namespace bytedance::bolt::exec::test
+} // namespace bytedance::bolt::test

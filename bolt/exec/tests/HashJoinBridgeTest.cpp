@@ -31,12 +31,12 @@
 #include "bolt/exec/HashJoinBridge.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/exec/HashTable.h"
 #include "bolt/exec/Spill.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
-using bytedance::bolt::exec::test::TempDirectoryPath;
+using bytedance::bolt::test::TempDirectoryPath;
 
 struct TestParam {
   int32_t numProbers{1};
@@ -73,7 +73,7 @@ class HashJoinBridgeTest : public testing::Test,
 
   void SetUp() override {
     rng_.seed(1245);
-    tempDir_ = exec::test::TempDirectoryPath::create();
+    tempDir_ = bytedance::bolt::test::TempDirectoryPath::create();
   }
 
   void TearDown() override {}

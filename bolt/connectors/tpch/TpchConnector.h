@@ -233,6 +233,8 @@ class TpchConnectorFactory : public ConnectorFactory {
   }
 };
 
+void registerTpchConnectorFactories();
+
 template <typename T>
 bool CheckTpchConnectorFactoryInit() {
   static bool init = bytedance::bolt::connector::registerConnectorFactory(

@@ -46,10 +46,10 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/SharedArbitrator.h"
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "gmock/gmock-matchers.h"
 
 DECLARE_bool(bolt_memory_leak_check_enabled);
@@ -59,6 +59,7 @@ using namespace ::testing;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::test;
 namespace bytedance::bolt::memory {
 static const std::string arbitratorKind("TEST");
 

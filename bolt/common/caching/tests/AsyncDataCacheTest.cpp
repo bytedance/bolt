@@ -39,8 +39,8 @@
 #ifndef NDEBUG
 #include "bolt/common/testutil/ScopedTestTime.h"
 #endif
+#include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "folly/experimental/EventCount.h"
 
 #include <folly/executors/IOThreadPoolExecutor.h>
@@ -118,7 +118,7 @@ class AsyncDataCacheTest : public testing::Test {
       // second creation of cache must find the checkpoint of the
       // previous one.
       if (tempDirectory_ == nullptr) {
-        tempDirectory_ = exec::test::TempDirectoryPath::create();
+        tempDirectory_ = bytedance::bolt::test::TempDirectoryPath::create();
       }
       ssdCache = std::make_unique<SsdCache>(
           fmt::format("{}/cache", tempDirectory_->path),
@@ -258,7 +258,7 @@ class AsyncDataCacheTest : public testing::Test {
     }
   }
 
-  std::shared_ptr<exec::test::TempDirectoryPath> tempDirectory_;
+  std::shared_ptr<bytedance::bolt::test::TempDirectoryPath> tempDirectory_;
   std::unique_ptr<memory::MemoryManager> manager_;
   memory::MemoryAllocator* allocator_;
   std::shared_ptr<AsyncDataCache> cache_;

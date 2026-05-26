@@ -472,6 +472,37 @@ def tidy(args):
                 f"Excluded {header_excluded} header file(s) (analyzed transitively via .cpp)."
             )
 
+        # Drop files not in compile_commands.json. Mechanical refactor sweeps
+        # (include-path / namespace renames) can touch files whose CMake
+        # targets are commented out (e.g. bolt/examples/ScanAndSort.cpp).
+        # Without a compile entry, clang-tidy falls back to default flags
+        # and emits spurious "file not found" errors for project-internal
+        # includes.
+        db_path = os.path.join(build_path, "compile_commands.json")
+        if os.path.isfile(db_path):
+            try:
+                with open(db_path) as _f:
+                    _db_files = {e["file"] for e in json.load(_f) if "file" in e}
+                _kept = []
+                _orphans = []
+                for _f in files_to_process:
+                    if to_repo_abs(_f, git_root) in _db_files:
+                        _kept.append(_f)
+                    else:
+                        _orphans.append(_f)
+                if _orphans:
+                    print(
+                        f"Skipped {len(_orphans)} file(s) not in compile_commands.json:"
+                    )
+                    for _o in _orphans:
+                        print(f"  {_o}")
+                files_to_process = _kept
+            except (json.JSONDecodeError, KeyError, OSError) as _e:
+                print(
+                    f"Warning: could not parse {db_path} for orphan filter: {_e}",
+                    file=sys.stderr,
+                )
+
         if not files_to_process:
             print("No changed C/C++ lines detected for clang-tidy.")
             return 0

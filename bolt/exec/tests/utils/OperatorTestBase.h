@@ -33,18 +33,27 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
-#include "bolt/common/caching/SsdCache.h"
+#include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/parse/ExpressionsParser.h"
-#include "bolt/type/Variant.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 DECLARE_bool(bolt_testing_enable_arbitration);
+
+namespace bytedance::bolt::dwrf {
+class Config;
+}
+
+namespace bytedance::bolt::test {
+class TempFilePath;
+}
+
 namespace bytedance::bolt::exec::test {
+
 class OperatorTestBase : public testing::Test,
                          public bolt::test::VectorTestBase {
  public:
@@ -81,6 +90,32 @@ class OperatorTestBase : public testing::Test,
   /// Allow base classes to register custom vector serde.
   /// By default, registers Presto-compatible serde.
   virtual void registerVectorSerde();
+
+  /// Writes 'vector' to 'filePath' as a single-batch DWRF file.
+  void writeToFile(const std::string& filePath, RowVectorPtr vector);
+
+  /// Writes 'vectors' to 'filePath' as a DWRF file. If 'config' is null, uses
+  /// a default-constructed dwrf::Config.
+  void writeToFile(
+      const std::string& filePath,
+      const std::vector<RowVectorPtr>& vectors,
+      std::shared_ptr<dwrf::Config> config = nullptr);
+
+  void writeToFile(
+      const std::string& path,
+      const VectorPtr& vector,
+      memory::MemoryPool* pool);
+
+  /// Generates 'numVectors' RowVectors of 'rowType', each containing
+  /// 'rowsPerVector' rows of random data drawn from BatchMaker.
+  std::vector<RowVectorPtr> makeVectors(
+      const RowTypePtr& rowType,
+      int32_t numVectors,
+      int32_t rowsPerVector);
+
+  /// Returns 'count' unique ::bytedance::bolt::test::TempFilePath handles.
+  static std::vector<std::shared_ptr<::bytedance::bolt::test::TempFilePath>>
+  makeFilePaths(int count);
 
   void createDuckDbTable(const std::vector<RowVectorPtr>& data) {
     duckDbQueryRunner_.createTable("tmp", data);

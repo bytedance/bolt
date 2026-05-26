@@ -28,41 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
+#include "bolt/connectors/hive/HiveConnector.h"
 
-#include <unistd.h>
-#include <cstdlib>
-#include <memory>
-#include <string>
+namespace bytedance::bolt::connector::hive {
 
-#include "bolt/common/base/Exceptions.h"
-namespace bytedance::bolt::exec::test {
-
-// It manages the lifetime of a temporary directory.
-class TempDirectoryPath {
- public:
-  static std::shared_ptr<TempDirectoryPath> create();
-
-  virtual ~TempDirectoryPath();
-
-  const std::string path;
-
-  const std::string& getPath() const {
-    return path;
+void registerHiveConnectorFactories() {
+  if (!connector::hasConnectorFactory(kHiveConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<HiveConnectorFactory>());
   }
-
-  TempDirectoryPath(const TempDirectoryPath&) = delete;
-  TempDirectoryPath& operator=(const TempDirectoryPath&) = delete;
-
-  TempDirectoryPath() : path(createTempDirectory()) {}
-
-  static std::string createTempDirectory() {
-    char path[] = "/tmp/bolt_test_XXXXXX";
-    const char* tempDirectoryPath = mkdtemp(path);
-    if (tempDirectoryPath == nullptr) {
-      throw std::logic_error("Cannot open temp directory");
-    }
-    return tempDirectoryPath;
+  if (!connector::hasConnectorFactory(kHiveHadoop2ConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<HiveHadoop2ConnectorFactory>());
   }
-};
-} // namespace bytedance::bolt::exec::test
+  if (!connector::hasConnectorFactory(kTosConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<TosConnectorFactory>());
+  }
+}
+
+} // namespace bytedance::bolt::connector::hive

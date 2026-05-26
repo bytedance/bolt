@@ -49,7 +49,7 @@ class BitwiseAggregationTest : public AggregationTestBase {
 };
 
 TEST_F(BitwiseAggregationTest, bitwiseOr) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   // Global aggregation.
@@ -76,7 +76,7 @@ TEST_F(BitwiseAggregationTest, bitwiseOr) {
 }
 
 TEST_F(BitwiseAggregationTest, bitwiseAnd) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   // Global aggregation.
@@ -103,7 +103,7 @@ TEST_F(BitwiseAggregationTest, bitwiseAnd) {
 }
 
 TEST_F(BitwiseAggregationTest, bitwiseXor) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   // Global aggregation.
