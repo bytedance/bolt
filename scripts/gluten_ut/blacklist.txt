@@ -11,6 +11,7 @@ org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json
 org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-parsing-invalid.sql
 org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
 org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
 org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
 org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
