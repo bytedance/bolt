@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(
   bolt_memory_bm_test
   ../MockIoBackend.cpp
+  AdaptiveDepthControllerTest.cpp
   DiskIoSchedulerTest.cpp
 )
 

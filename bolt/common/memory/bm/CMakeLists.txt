@@ -1,5 +1,6 @@
 add_library(
   bolt_memory_bm
+  AdaptiveDepthController.cpp
   DiskIoScheduler.cpp
 )
 
