@@ -1,6 +1,9 @@
 #include "bolt/common/memory/bm/DiskIoTypes.h"
 #include "bolt/common/memory/bm/MockIoBackend.h"
 
+#include "bolt/common/base/BoltException.h"
+#include "bolt/common/base/tests/GTestUtils.h"
+
 #include <cerrno>
 #include <cstdint>
 #include <memory>
@@ -61,13 +64,38 @@ TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
 
   EXPECT_TRUE(backend.submit(11, request));
   EXPECT_TRUE(backend.submit(12, request));
-  ASSERT_EQ(2, backend.submitted().size());
-  EXPECT_EQ(11, backend.submitted()[0].requestId);
-  EXPECT_EQ(12, backend.submitted()[1].requestId);
+  auto submitted = backend.submitted();
+  ASSERT_EQ(2, submitted.size());
+  EXPECT_EQ(11, submitted[0].requestId);
+  EXPECT_EQ(12, submitted[1].requestId);
 
   backend.complete(12, IoResult{4096, 0});
   auto completions = backend.reap();
   ASSERT_EQ(1, completions.size());
   EXPECT_EQ(12, completions[0].requestId);
   EXPECT_EQ(4096, completions[0].result.bytes);
+}
+
+TEST(MockIoBackendTest, duplicateSubmitReturnsFalseAndDoesNotRecord) {
+  MockIoBackend backend;
+  IoRequest request;
+  request.opcode = IoOpcode::Read;
+  request.priority = IoPriority::Medium;
+  request.fd = 7;
+  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
+
+  EXPECT_TRUE(backend.submit(11, request));
+  EXPECT_FALSE(backend.submit(11, request));
+
+  auto submitted = backend.submitted();
+  ASSERT_EQ(1, submitted.size());
+  EXPECT_EQ(11, submitted[0].requestId);
+  EXPECT_EQ(1, backend.inflight());
+}
+
+TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
+  MockIoBackend backend;
+
+  BOLT_ASSERT_THROW(
+      backend.complete(11, IoResult{4096, 0}), "unknown requestId");
 }
