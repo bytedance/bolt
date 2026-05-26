@@ -1,44 +1,4 @@
 org.apache.gluten.config.AllBoltConfiguration#Check bolt backend configs
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#approx_count_distinct
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#avg
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#bind reference failed when subquery in agg expressions
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#bit_and bit_or bit_xor
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#collect_list null inputs
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#complex type with null
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#corr covar_pop covar_samp
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#count
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#count(1)
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#distinct functions
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#drop redundant partial sort which has pre-project when offload sortAgg
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#first
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate decimal sum
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - agg input already distributed by keys
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - double sum when floatingPointMode is loose
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#flushable aggregate rule - double sum when floatingPointMode is strict
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#group sets
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#groupby
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#kurtosis
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#last
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#max_by
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min and max
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min_by
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#min_by/max_by
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_intercept
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_r2
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_slope
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#regr_sxy regr_sxx regr_syy
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#skewness
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#stddev_pop
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#stddev_samp
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#sum
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test collect_set
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test collect_set/collect_list with null
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, FallbackFinal
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, FallbackPartial
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#test fallback collect_set/collect_list with null, Offload
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#var_pop
-org.apache.gluten.execution.BoltAggregateFunctionsFlushSuite#var_samp
 org.apache.gluten.execution.BoltExplodeExpressionSuite#(aborted)
 org.apache.gluten.execution.BoltScanSuite#Test file scheme validation
 org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
@@ -61,13 +21,18 @@ org.apache.spark.GlutenSortShuffleSuite#sorting on mutable pairs
 org.apache.spark.GlutenSortShuffleSuite#subtract mutable pairs
 org.apache.spark.GlutenSortShuffleSuite#zero sized blocks
 org.apache.spark.GlutenSortShuffleSuite#zero sized blocks without kryo
+org.apache.spark.sql.GlutenDynamicPartitionPruningV2SuiteAEOnDisableScan#different broadcast subqueries with identical children
 org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
 org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-parsing-invalid.sql
+org.apache.spark.sql.GlutenSQLQueryTestSuite#describe.sql
 org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
 org.apache.spark.sql.execution.GlutenLocalBroadcastExchangeSuite#SPARK-39983 - Broadcasted relation is not cached on the driver
 org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2QuerySuite#SPARK-16632: read Parquet int32 as ByteType and ShortType
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#Broadcast timeout
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#BroadcastHashJoinExec output partitioning size should be limited with a config
 org.apache.spark.sql.execution.joins.GlutenBroadcastJoinSuite#SPARK-23214: cached data should not carry extra hint info
