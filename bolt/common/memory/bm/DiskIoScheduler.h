@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 
@@ -47,6 +48,7 @@ class DiskIoScheduler {
   void run();
   bool hasQueuedRequestsLocked() const;
   bool drainedLocked() const;
+  std::optional<size_t> pickQueueLocked();
   bool dispatchOneLocked();
   void reapCompletionsLocked();
 
@@ -59,6 +61,8 @@ class DiskIoScheduler {
   bool stopping_{false};
   uint64_t nextRequestId_{1};
   std::array<std::deque<QueuedRequest>, kIoPriorityCount> queues_;
+  std::array<int64_t, kIoPriorityCount> deficits_{{0, 0, 0}};
+  size_t nextPriorityCursor_{0};
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;
   std::thread worker_;
