@@ -31,6 +31,7 @@
 #include <regex>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/testutil/TempFilePath.h"
 #include "bolt/connectors/ConnectorNames.h"
 #include "bolt/connectors/tests/utils/ConnectorTestBase.h"
@@ -49,6 +50,7 @@ class GroupedExecutionTest : public virtual OperatorTestBase,
  protected:
   void SetUp() override {
     OperatorTestBase::SetUp();
+    bytedance::bolt::filesystems::registerLocalFileSystem();
     auto emptyConfig = std::make_shared<config::ConfigBase>(
         std::unordered_map<std::string, std::string>());
     connector::test::registerTestConnector(

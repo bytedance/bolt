@@ -30,6 +30,7 @@
 
 #include "bolt/exec/Task.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/future/BoltPromise.h"
 #include "bolt/common/testutil/TempDirectoryPath.h"
 #include "bolt/common/testutil/TempFilePath.h"
@@ -490,6 +491,7 @@ class TaskTest : public OperatorTestBase,
 
   void SetUp() override {
     OperatorTestBase::SetUp();
+    filesystems::registerLocalFileSystem();
     auto emptyConfig = std::make_shared<config::ConfigBase>(
         std::unordered_map<std::string, std::string>());
     connector::test::registerTestConnector(
