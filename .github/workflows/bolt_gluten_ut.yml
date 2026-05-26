@@ -120,22 +120,34 @@ jobs:
 
       - name: Populate Spark binary + source SQL test resources on /data
         # Layout under /data/bolt-gluten-ut-spark/:
-        #   spark_home/  — full Spark 3.5.5 binary distribution (jars/, bin/,
-        #                  python/, …) → SPARK_HOME points here.
-        #   sql/         — only the sql/ subtree from the source tarball
-        #                  (sql-tests inputs + golden files etc).
-        #   spark_home/sql → ../sql  (symlink that grafts the source's sql/
-        #                             onto the binary tree so gluten tests
-        #                             that read $SPARK_HOME/sql/core/src/...
-        #                             pick it up, and at the same time
-        #                             local-cluster tests can launch a
-        #                             Worker via spark-submit + jars/).
+        #   spark_home/                              — Spark 3.5.5 binary dist.
+        #                                              SPARK_HOME points here.
+        #   sql/                                     — sql/ subtree from the
+        #                                              source tarball only.
+        #   spark_home/sql → ../sql                  — grafts source sql/ onto
+        #                                              the binary tree (gluten
+        #                                              tests read this).
+        #   spark_home/launcher/target/scala-2.12/   — empty dir, satisfies
+        #                                              Spark's
+        #                                              AbstractCommandBuilder.
+        #                                              getScalaVersion() in
+        #                                              test mode. Without it,
+        #                                              local-cluster Worker
+        #                                              forks throw "Cannot
+        #                                              find any build
+        #                                              directories" and
+        #                                              GlutenSortShuffleSuite
+        #                                              / GlutenBroadcastJoin*
+        #                                              cascade-fail before any
+        #                                              Executor launches.
         run: |
           set -e
           BASE=/data/bolt-gluten-ut-spark
           HOME_DIR=$BASE/spark_home
           SQL_DIR=$BASE/sql
-          if [[ -d "$HOME_DIR/jars" && -d "$SQL_DIR/core" && -L "$HOME_DIR/sql" ]]; then
+          if [[ -d "$HOME_DIR/jars" && -d "$SQL_DIR/core" \
+                && -L "$HOME_DIR/sql" \
+                && -d "$HOME_DIR/launcher/target/scala-2.12" ]]; then
             exit 0
           fi
           mkdir -p "$BASE"
@@ -157,6 +169,7 @@ jobs:
               mv "${SQL_DIR}.tmp" "$SQL_DIR"
             fi
             ln -sfn ../sql "$HOME_DIR/sql"
+            mkdir -p "$HOME_DIR/launcher/target/scala-2.12"
           ) 200> "$BASE/.lock"
 
       - name: Run Gluten UT (parallel, blacklist-aware)
