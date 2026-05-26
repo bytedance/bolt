@@ -52,6 +52,74 @@ bool waitUntilReady(std::future<IoResult>& future) {
   return future.wait_for(kFutureTimeout) == std::future_status::ready;
 }
 
+void submitBalancedRequests(
+    DiskIoScheduler& scheduler,
+    std::vector<std::future<IoResult>>& futures,
+    size_t requestsPerPriority) {
+  for (size_t i = 0; i < requestsPerPriority; ++i) {
+    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::High)));
+    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Medium)));
+    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Low)));
+  }
+}
+
+bool completeSubmission(MockIoBackend& backend, size_t submittedIndex) {
+  const auto submitted = backend.submitted();
+  if (submittedIndex >= submitted.size()) {
+    return false;
+  }
+  backend.complete(submitted[submittedIndex].requestId, IoResult{4096, 0});
+  return true;
+}
+
+bool completeNextSubmittedWindow(
+    MockIoBackend& backend,
+    size_t& completedSubmissions,
+    size_t windowSize,
+    std::array<size_t, kIoPriorityCount>& submittedByPriority) {
+  for (size_t i = 0; i < windowSize; ++i) {
+    if (!waitUntilSubmitted(backend, completedSubmissions + 1)) {
+      return false;
+    }
+    const auto submitted = backend.submitted();
+    if (completedSubmissions >= submitted.size()) {
+      return false;
+    }
+    const auto& request = submitted[completedSubmissions];
+    ++submittedByPriority[priorityIndex(request.request.priority)];
+    backend.complete(request.requestId, IoResult{4096, 0});
+    ++completedSubmissions;
+  }
+  return true;
+}
+
+void completeAllSubmittedRequests(
+    MockIoBackend& backend,
+    size_t& completedSubmissions,
+    size_t expectedSubmissions) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (completedSubmissions < expectedSubmissions &&
+         std::chrono::steady_clock::now() < deadline) {
+    const auto submitted = backend.submitted();
+    for (size_t i = completedSubmissions; i < submitted.size(); ++i) {
+      backend.complete(submitted[i].requestId, IoResult{4096, 0});
+    }
+    completedSubmissions = submitted.size();
+    if (completedSubmissions < expectedSubmissions) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  EXPECT_EQ(expectedSubmissions, completedSubmissions);
+}
+
+void expectWeightedWindow(
+    const std::array<size_t, kIoPriorityCount>& submittedByPriority) {
+  EXPECT_EQ(3, submittedByPriority[priorityIndex(IoPriority::High)]);
+  EXPECT_EQ(2, submittedByPriority[priorityIndex(IoPriority::Medium)]);
+  EXPECT_EQ(1, submittedByPriority[priorityIndex(IoPriority::Low)]);
+}
+
 class FailingSubmitBackend : public IoBackend {
  public:
   bool submit(uint64_t /*requestId*/, const IoRequest& /*request*/) override {
@@ -228,45 +296,59 @@ TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.adaptiveDepth.initialDepth = 13;
+  config.adaptiveDepth.initialDepth = 1;
   config.priorityWeights = {{3, 2, 1}};
   DiskIoScheduler scheduler(config, std::move(backend));
 
   std::vector<std::future<IoResult>> futures;
-  futures.reserve(18);
-  for (size_t i = 0; i < 6; ++i) {
-    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::High)));
-    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Medium)));
-    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Low)));
-  }
+  futures.reserve(19);
+  futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Low)));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
 
-  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 6));
-  const auto submitted = backendPtr->submitted();
-  ASSERT_GE(submitted.size(), 6);
-
-  std::array<size_t, kIoPriorityCount> firstSixByPriority{{0, 0, 0}};
-  for (size_t i = 0; i < 6; ++i) {
-    ++firstSixByPriority[priorityIndex(submitted[i].request.priority)];
-  }
-  EXPECT_EQ(3, firstSixByPriority[priorityIndex(IoPriority::High)]);
-  EXPECT_EQ(2, firstSixByPriority[priorityIndex(IoPriority::Medium)]);
-  EXPECT_EQ(1, firstSixByPriority[priorityIndex(IoPriority::Low)]);
+  submitBalancedRequests(scheduler, futures, 6);
 
   size_t completedSubmissions = 0;
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (completedSubmissions < futures.size() &&
-         std::chrono::steady_clock::now() < deadline) {
-    const auto requests = backendPtr->submitted();
-    for (size_t i = completedSubmissions; i < requests.size(); ++i) {
-      backendPtr->complete(requests[i].requestId, IoResult{4096, 0});
-    }
-    completedSubmissions = requests.size();
-    if (completedSubmissions < futures.size()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+  ASSERT_TRUE(completeSubmission(*backendPtr, completedSubmissions++));
+  std::array<size_t, kIoPriorityCount> firstWeightedWindow{{0, 0, 0}};
+  ASSERT_TRUE(completeNextSubmittedWindow(
+      *backendPtr, completedSubmissions, 6, firstWeightedWindow));
+  expectWeightedWindow(firstWeightedWindow);
+  completeAllSubmittedRequests(
+      *backendPtr, completedSubmissions, futures.size());
+
+  for (auto& future : futures) {
+    ASSERT_TRUE(waitUntilReady(future));
+    EXPECT_EQ(0, future.get().errorCode);
   }
-  EXPECT_EQ(futures.size(), completedSubmissions);
+}
+
+TEST(DiskIoSchedulerTest, resetsDeficitWhenPriorityQueueDrains) {
+  auto backend = std::make_unique<MockIoBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoSchedulerConfig config;
+  config.adaptiveDepth.initialDepth = 1;
+  config.priorityWeights = {{3, 2, 1}};
+  DiskIoScheduler scheduler(config, std::move(backend));
+
+  std::vector<std::future<IoResult>> futures;
+  futures.reserve(20);
+  futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Low)));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+
+  futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Medium)));
+  size_t completedSubmissions = 0;
+  ASSERT_TRUE(completeSubmission(*backendPtr, completedSubmissions++));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 2));
+
+  submitBalancedRequests(scheduler, futures, 6);
+
+  ASSERT_TRUE(completeSubmission(*backendPtr, completedSubmissions++));
+  std::array<size_t, kIoPriorityCount> firstWeightedWindow{{0, 0, 0}};
+  ASSERT_TRUE(completeNextSubmittedWindow(
+      *backendPtr, completedSubmissions, 6, firstWeightedWindow));
+  expectWeightedWindow(firstWeightedWindow);
+  completeAllSubmittedRequests(
+      *backendPtr, completedSubmissions, futures.size());
 
   for (auto& future : futures) {
     ASSERT_TRUE(waitUntilReady(future));

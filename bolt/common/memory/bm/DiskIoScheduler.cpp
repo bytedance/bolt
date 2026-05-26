@@ -181,6 +181,9 @@ bool DiskIoScheduler::dispatchOneLocked() {
   auto queued = std::move(queue.front());
   queue.pop_front();
   stats_.queuedRequests[*priority] = queue.size();
+  if (queue.empty()) {
+    deficits_[*priority] = 0;
+  }
 
   if (!backend_->submit(queued.requestId, queued.request)) {
     queued.promise.set_value(IoResult{0, EIO});
