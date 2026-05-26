@@ -1,13 +1,18 @@
 #include "bolt/common/memory/bm/AdaptiveDepthController.h"
 
+#include "bolt/common/base/Exceptions.h"
+
 #include <algorithm>
+#include <cmath>
 
 namespace bytedance::bolt::memory::bm {
 
 AdaptiveDepthController::AdaptiveDepthController(AdaptiveDepthConfig config)
     : config_(config),
       currentDepth_(config.initialDepth),
-      bestDepth_(config.initialDepth) {}
+      bestDepth_(config.initialDepth) {
+  BOLT_CHECK(isValidConfig(config_), "invalid AdaptiveDepthConfig");
+}
 
 uint32_t AdaptiveDepthController::currentDepth() const {
   return currentDepth_;
@@ -20,21 +25,57 @@ double AdaptiveDepthController::recentThroughputBytesPerSecond() const {
 void AdaptiveDepthController::onWindow(
     double throughputBytesPerSecond,
     bool hasBacklog) {
-  recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
+  if (std::isfinite(throughputBytesPerSecond)) {
+    recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
+  }
 
   if (!config_.enabled || !hasBacklog) {
     return;
   }
 
-  if (!hasBestThroughput_ || throughputImproved(throughputBytesPerSecond)) {
+  if (!isValidThroughput(throughputBytesPerSecond)) {
+    if (measuringProbeDepth_) {
+      currentDepth_ = bestDepth_;
+      measuringProbeDepth_ = false;
+    }
+    return;
+  }
+
+  if (!hasBestThroughput_) {
     bestThroughputBytesPerSecond_ = throughputBytesPerSecond;
     bestDepth_ = currentDepth_;
     hasBestThroughput_ = true;
-    currentDepth_ = increasedDepth();
+    scheduleProbe();
+    return;
+  }
+
+  if (throughputImproved(throughputBytesPerSecond)) {
+    bestThroughputBytesPerSecond_ = throughputBytesPerSecond;
+    bestDepth_ = currentDepth_;
+    scheduleProbe();
+    return;
+  }
+
+  if (!measuringProbeDepth_) {
+    scheduleProbe();
     return;
   }
 
   currentDepth_ = bestDepth_;
+  measuringProbeDepth_ = false;
+}
+
+bool AdaptiveDepthController::isValidConfig(
+    const AdaptiveDepthConfig& config) {
+  return config.minDepth > 0 && config.increaseStep > 0 &&
+      config.minDepth <= config.initialDepth &&
+      config.initialDepth <= config.maxDepth && config.minThroughputGain >= 0;
+}
+
+bool AdaptiveDepthController::isValidThroughput(
+    double throughputBytesPerSecond) {
+  return std::isfinite(throughputBytesPerSecond) &&
+      throughputBytesPerSecond > 0;
 }
 
 bool AdaptiveDepthController::throughputImproved(
@@ -43,9 +84,12 @@ bool AdaptiveDepthController::throughputImproved(
       bestThroughputBytesPerSecond_ * (1.0 + config_.minThroughputGain);
 }
 
-uint32_t AdaptiveDepthController::increasedDepth() const {
+void AdaptiveDepthController::scheduleProbe() {
   const auto availableIncrease = config_.maxDepth - currentDepth_;
-  return currentDepth_ + std::min(config_.increaseStep, availableIncrease);
+  const auto nextDepth =
+      currentDepth_ + std::min(config_.increaseStep, availableIncrease);
+  measuringProbeDepth_ = nextDepth != currentDepth_;
+  currentDepth_ = nextDepth;
 }
 
 } // namespace bytedance::bolt::memory::bm
