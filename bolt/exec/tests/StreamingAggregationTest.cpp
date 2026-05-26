@@ -552,3 +552,78 @@ TEST_F(StreamingAggregationTest, distinctAggregations) {
   testMultiKeyDistinctAggregation(multiKeys, 1024);
   testMultiKeyDistinctAggregation(multiKeys, 3);
 }
+
+TEST_F(StreamingAggregationTest, flushOnPreferredOutputBatchBytes) {
+  // Construct an input with many distinct keys so that streaming aggregation
+  // accumulates a large number of groups, each carrying a non-trivial payload
+  // (an array_agg accumulator) so the total estimated byte size grows quickly.
+  const vector_size_t numRows = 1024;
+  auto keys = makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
+  auto payload =
+      makeFlatVector<int64_t>(numRows, [](auto row) { return row * 7; });
+  auto data = makeRowVector({keys, payload});
+  createDuckDbTable({data});
+
+  core::PlanNodeId aggrNodeId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .streamingAggregation(
+                      {"c0"},
+                      {"array_agg(c1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
+                  .capturePlanNodeId(aggrNodeId)
+                  .planNode();
+
+  // Use a larger row-based batch size so that the row threshold alone won't
+  // trigger flushing. The byte-based threshold is set extremely small so it
+  // must trigger early flushing of multiple output vectors.
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchRows, "10000")
+          .config(core::QueryConfig::kPreferredOutputBatchBytes, "1024")
+          .assertResults("SELECT c0, array_agg(c1) FROM tmp GROUP BY c0");
+
+  auto planStats = exec::toPlanStats(task->taskStats());
+  const auto& aggStats = planStats.at(aggrNodeId);
+  // With byte-based flushing, the operator must produce more than one output
+  // vector for `numRows` distinct groups.
+  ASSERT_GT(aggStats.outputVectors, 1);
+  ASSERT_EQ(aggStats.outputPositions, numRows);
+}
+
+TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
+  const vector_size_t numRows = 256;
+  auto keys = makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
+  auto payload =
+      makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
+  auto data = makeRowVector({keys, payload});
+  createDuckDbTable({data});
+
+  core::PlanNodeId aggrNodeId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .streamingAggregation(
+                      {"c0"},
+                      {"sum(c1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
+                  .capturePlanNodeId(aggrNodeId)
+                  .planNode();
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchRows, "10000")
+          .config(
+              core::QueryConfig::kPreferredOutputBatchBytes,
+              std::to_string(1UL << 30))
+          .assertResults("SELECT c0, sum(c1) FROM tmp GROUP BY c0");
+
+  auto planStats = exec::toPlanStats(task->taskStats());
+  const auto& aggStats = planStats.at(aggrNodeId);
+  // All groups should be flushed at end-of-input as a single output vector.
+  ASSERT_EQ(aggStats.outputVectors, 1);
+  ASSERT_EQ(aggStats.outputPositions, numRows);
+}
