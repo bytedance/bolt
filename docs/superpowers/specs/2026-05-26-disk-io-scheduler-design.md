@@ -1,41 +1,40 @@
-# Disk IO Scheduler Design
+# Disk IO 调度器设计
 
-## Context
+## 背景
 
-`bolt/common/memory/bm` is currently empty. Existing io_uring usage lives in
-`bolt/common/file/File.*` and is called directly by users such as spill code.
-This design adds an independent Disk IO foundation under
-`bolt/common/memory/bm` without changing existing spill or file behavior.
+`bolt/common/memory/bm` 目录当前为空。仓库里已有的 io_uring 使用主要在
+`bolt/common/file/File.*`，并且由 spill 等调用方直接使用。本设计在
+`bolt/common/memory/bm` 下新增一个独立的 Disk IO 基础库，不改变现有 spill
+或 file 路径的行为。
 
-The first version focuses on a small, testable scheduling layer over io_uring:
-single-buffer positional reads and writes, three priority classes, weighted
-fair scheduling, and adaptive inflight depth for throughput.
+第一版聚焦在一个小而可测试的 io_uring 调度层：单 buffer 的 positional
+read/write、三个优先级、加权公平调度，以及以吞吐为目标的自适应 inflight
+depth。
 
-## Goals
+## 目标
 
-- Provide an independent Disk IO scheduler library in `bolt/common/memory/bm`.
-- Use io_uring for real disk IO when `IO_URING_SUPPORTED` is available.
-- Keep IO scheduling separate from the io_uring backend.
-- Expose a `std::future<IoResult>` API.
-- Support `Read` and `Write` requests on caller-owned file descriptors.
-- Support three priorities: `High`, `Medium`, and `Low`.
-- Make priority weights configurable.
-- Dynamically adjust effective inflight depth to improve throughput.
-- Use shared buffer ownership to keep asynchronous IO buffers alive.
-- Provide a mock backend for deterministic unit tests.
+- 在 `bolt/common/memory/bm` 下提供独立的 Disk IO 调度器库。
+- 当 `IO_URING_SUPPORTED` 可用时，真实磁盘 IO 使用 io_uring。
+- 将 IO 调度逻辑和 io_uring backend 分离。
+- 对外暴露 `std::future<IoResult>` API。
+- 支持调用方已打开 fd 上的 `Read` 和 `Write` 请求。
+- 支持三个优先级：`High`、`Medium`、`Low`。
+- 优先级权重可配置。
+- 动态调整有效 inflight depth，以提升吞吐。
+- 使用 shared buffer ownership，保证异步 IO 完成前 buffer 仍然有效。
+- 提供 mock backend，用于确定性的单元测试。
 
-## Non-Goals
+## 非目标
 
-- No integration with existing spill or file paths in the first version.
-- No open, close, fsync, fdatasync, cancel, scatter/gather, or request
-  coalescing support.
-- No multi-shard scheduler API or implementation.
-- No Folly dependency in the public API.
-- No latency target or latency guard in the adaptive-depth controller.
+- 第一版不接入现有 spill 或 file 路径。
+- 不支持 open、close、fsync、fdatasync、cancel、scatter/gather 或请求合并。
+- 不提供 multi-shard 调度器 API 或实现。
+- 公共 API 不依赖 Folly。
+- 自适应 depth 控制器不使用 target latency，也不做 latency guard。
 
-## Architecture
+## 架构
 
-The module has three layers:
+模块分为三层：
 
 ```text
 DiskIoScheduler API
@@ -52,16 +51,15 @@ IoBackend
   -> MockIoBackend for tests
 ```
 
-The scheduler owns the request queues, scheduling policy, inflight accounting,
-and promise completion. The backend owns only the low-level submit and reap
-mechanics.
+调度器负责请求队列、调度策略、inflight 计数和 promise completion。Backend
+只负责底层 submit 和 reap completion 的机制。
 
-The caller owns file descriptor lifetime. A request references an already-open
-`fd`, a file offset, and one continuous buffer range.
+调用方负责 fd 生命周期。一个请求引用一个已经打开的 `fd`、一个文件 offset，
+以及一个连续的 buffer range。
 
-## Public API
+## 公共 API
 
-The public API is standard-library based:
+公共 API 基于 C++ 标准库：
 
 ```cpp
 enum class IoOpcode : uint8_t {
@@ -96,10 +94,10 @@ struct IoResult {
 };
 ```
 
-`errorCode == 0` means success. Ordinary IO failures are represented by
-`IoResult`, not exceptions from `future.get()`.
+`errorCode == 0` 表示成功。普通 IO 失败通过 `IoResult` 表达，不通过
+`future.get()` 抛异常表达。
 
-The scheduler facade:
+调度器 facade：
 
 ```cpp
 class DiskIoScheduler {
@@ -114,20 +112,20 @@ class DiskIoScheduler {
 };
 ```
 
-`submit()` validates basic request shape before enqueueing:
+`submit()` 在入队前做基础请求校验：
 
 - `fd >= 0`
-- buffer is not null
+- buffer 非空
 - `length > 0`
-- `offset + length <= size` without overflow
-- opcode and priority are valid
-- scheduler is still accepting requests
+- `offset + length <= size`，且不能发生 overflow
+- opcode 和 priority 合法
+- scheduler 仍在接收请求
 
-Invalid requests return an already completed future with an error code such as
-`EINVAL`. Submitting after shutdown starts returns an already completed future
-with `ESHUTDOWN` or the closest available platform error.
+非法请求返回一个已经完成的 future，错误码例如 `EINVAL`。如果 shutdown 已经
+开始，后续 submit 返回一个已经完成的 future，错误码使用 `ESHUTDOWN` 或最接近
+的平台错误码。
 
-## Configuration
+## 配置
 
 ```cpp
 struct AdaptiveDepthConfig {
@@ -151,10 +149,10 @@ struct DiskIoSchedulerConfig {
 };
 ```
 
-Validation rules:
+配置校验规则：
 
 - `ringDepth > 0`
-- all priority weights are greater than zero
+- 所有 priority weight 都必须大于 0
 - `minDepth > 0`
 - `minDepth <= initialDepth <= maxDepth`
 - `maxDepth <= ringDepth`
@@ -162,9 +160,9 @@ Validation rules:
 - `increaseStep > 0`
 - `minThroughputGain >= 0`
 
-## Scheduling Policy
+## 调度策略
 
-The scheduler has one FIFO queue per priority:
+调度器为每个优先级维护一个 FIFO 队列：
 
 ```text
 High
@@ -172,155 +170,144 @@ Medium
 Low
 ```
 
-It uses Deficit Weighted Round Robin. Each priority queue has a configurable
-weight and a deficit counter. Each scheduling round adds the configured weight
-to the corresponding non-empty queue. While the queue is non-empty, its deficit
-is positive, and `inflight < currentDepth`, the scheduler submits one request
-and decrements that queue's deficit by one.
+调度策略使用 Deficit Weighted Round Robin。每个优先级队列有一个可配置
+weight 和一个 deficit counter。每轮调度时，为非空队列增加对应 weight。当队列
+非空、deficit 为正，并且 `inflight < currentDepth` 时，调度器提交一个请求，
+并将该队列的 deficit 减 1。
 
-With the default weights, sustained load across all priorities receives
-approximately this long-term submit ratio:
+使用默认权重时，如果三个优先级都持续有请求，长期 submit 比例大致为：
 
 ```text
 High : Medium : Low ~= 8 : 4 : 1
 ```
 
-Requests in the same priority class preserve FIFO order. Priority affects only
-requests that have not yet been submitted to io_uring. Once submitted, requests
-are completed according to backend and kernel behavior.
+同一优先级内保持 FIFO。优先级只影响尚未提交到 io_uring 的请求。一旦请求已经
+提交，完成顺序由 backend 和内核行为决定。
 
-Each request has equal scheduling cost in the first version. The scheduler does
-not weight by byte size.
+第一版中，每个请求的调度成本相同，不按 byte size 加权。
 
-## Adaptive Depth
+## 自适应 Depth
 
-The io_uring ring depth is fixed at initialization. The dynamic control variable
-is the scheduler's effective inflight limit:
+io_uring ring depth 在初始化后固定。动态控制变量是调度器的有效 inflight
+上限：
 
 ```text
 currentDepth <= ringDepth
 ```
 
-The first version uses throughput-oriented hill climbing:
+第一版使用吞吐导向的 hill-climbing：
 
-1. Start at `initialDepth`.
-2. For each `controlInterval`, measure completed bytes per second.
-3. If queues are backlogged and a previous depth increase improved throughput
-   by at least `minThroughputGain`, increase `currentDepth` by `increaseStep`.
-4. If throughput is flat or lower after an increase, return to the best observed
-   recent depth.
-5. Clamp `currentDepth` to `[minDepth, maxDepth]`.
+1. 从 `initialDepth` 开始。
+2. 每个 `controlInterval` 统计 completed bytes per second。
+3. 如果队列有积压，并且上一次提升 depth 后吞吐至少提升了
+   `minThroughputGain`，则将 `currentDepth` 增加 `increaseStep`。
+4. 如果提升 depth 后吞吐持平或下降，则回退到近期观测到的 best depth。
+5. 始终将 `currentDepth` 限制在 `[minDepth, maxDepth]`。
 
-Latency is recorded in stats but does not affect control decisions in the first
-version.
+Latency 会记录到 stats，但第一版不参与控制决策。
 
-If adaptive depth is disabled, the scheduler uses `initialDepth` as a fixed
-inflight limit.
+如果关闭 adaptive depth，则调度器使用 `initialDepth` 作为固定 inflight 上限。
 
-## Threading Model
+## 线程模型
 
-`DiskIoScheduler` starts one background scheduler thread.
+`DiskIoScheduler` 启动一个后台 scheduler thread。
 
-Caller threads call `submit()`, which validates the request, creates a promise,
-enqueues the request, and returns the future.
+调用方线程调用 `submit()`，完成请求校验、创建 promise、请求入队，然后返回
+future。
 
-The scheduler thread:
+Scheduler thread 负责：
 
-- dispatches queued requests by weighted priority while `inflight < currentDepth`
-- submits selected requests to the backend
-- reaps backend completions
-- completes the corresponding promises
-- updates stats and adaptive-depth state
+- 当 `inflight < currentDepth` 时，按加权优先级从队列中 dispatch 请求
+- 将选中的请求提交给 backend
+- reap backend completions
+- 完成对应 promise
+- 更新 stats 和 adaptive-depth 状态
 
-The first version is single-shard only.
+第一版只支持 single-shard。
 
 ## Shutdown
 
-`stopAndDrain()` has two phases:
+`stopAndDrain()` 分为两个阶段：
 
-1. Stop accepting new requests.
-2. Continue dispatching queued requests and reaping inflight requests until all
-   accepted requests complete.
+1. 停止接收新请求。
+2. 继续 dispatch queued requests 并 reap inflight requests，直到所有已经接收
+   的请求都完成。
 
-`DiskIoScheduler` destructor calls `stopAndDrain()` if the caller has not
-already done so. Requests are not cancelled.
+如果调用方没有显式调用 `stopAndDrain()`，`DiskIoScheduler` 析构函数会兜底调用。
+请求不会被 cancel。
 
-## Backend Interface
+## Backend 接口
 
-The backend interface is internal to the module. It should expose only the
-operations the scheduler needs:
+Backend 接口是模块内部接口，只暴露 scheduler 需要的能力：
 
-- submit a request with a scheduler-owned request id
-- reap zero or more completions
-- wait or poll for completion events
-- shutdown backend resources after all inflight requests complete
+- 使用 scheduler-owned request id 提交请求
+- reap 零个或多个 completions
+- wait 或 poll completion events
+- 所有 inflight 请求完成后关闭 backend 资源
 
-`IoUringBackend` uses `io_uring_prep_read` and `io_uring_prep_write` for
-single-buffer positional IO. It stores the scheduler request id in `user_data`
-to route completions back to promises.
+`IoUringBackend` 使用 `io_uring_prep_read` 和 `io_uring_prep_write` 实现
+单 buffer positional IO。它将 scheduler request id 存入 `user_data`，用于将
+completion 路由回对应 promise。
 
-`MockIoBackend` is deterministic and test-only. It lets tests control completion
-order, returned byte counts, error codes, and synthetic latency.
+`MockIoBackend` 只用于测试，并且行为确定。测试可以控制 completion 顺序、返回
+字节数、错误码和模拟 latency。
 
-## Error Handling
+## 错误处理
 
-IO errors are returned as `IoResult`:
+IO 错误通过 `IoResult` 返回：
 
 ```text
 success: IoResult{bytes, 0}
 failure: IoResult{bytes, errno_value}
 ```
 
-Partial reads or writes return the byte count reported by the backend. The
-scheduler does not retry partial IO in the first version.
+部分读写返回 backend 报告的 byte count。第一版中，scheduler 不自动重试部分 IO。
 
-Configuration errors are detected during construction. Request validation errors
-return completed futures with error codes.
+配置错误在构造阶段检测。请求校验错误返回已经完成的 future，并携带错误码。
 
 ## Stats
 
-The scheduler exposes a stats snapshot containing at least:
+调度器暴露 stats snapshot，至少包含：
 
-- queued requests per priority
-- inflight requests
+- 每个优先级的 queued request 数
+- inflight request 数
 - current depth
 - completed request count
 - completed bytes
-- successful and failed request counts
+- successful 和 failed request counts
 - recent throughput
 - average observed latency
-- per-priority submitted and completed counts
+- 每个优先级的 submitted 和 completed counts
 
-Stats are used for tests, operational visibility, and future tuning.
+Stats 用于测试、运行时可观测性和后续调优。
 
-## Tests
+## 测试
 
-Unit tests use `MockIoBackend` to cover:
+单元测试使用 `MockIoBackend` 覆盖：
 
-- request validation
-- same-priority FIFO ordering
-- weighted fair scheduling across `High`, `Medium`, and `Low`
-- configurable priority weights
-- `currentDepth` limiting inflight requests
-- adaptive depth increase when throughput improves
-- adaptive depth rollback when throughput stops improving
-- shutdown drain behavior
-- IO error propagation through `IoResult`
-- stats updates
+- 请求校验
+- 同优先级 FIFO 顺序
+- `High`、`Medium`、`Low` 之间的加权公平调度
+- 可配置 priority weights
+- `currentDepth` 对 inflight request 数的限制
+- 吞吐提升时 adaptive depth 上升
+- 吞吐不再提升时 adaptive depth 回退
+- shutdown drain 行为
+- IO 错误通过 `IoResult` 传播
+- stats 更新
 
-io_uring integration tests compile only with `IO_URING_SUPPORTED` and cover:
+io_uring 集成测试只在 `IO_URING_SUPPORTED` 下编译，并覆盖：
 
-- temporary-file read and write
-- multiple concurrent requests
-- invalid fd error handling
-- `stopAndDrain()` with real inflight IO
+- 临时文件 read 和 write
+- 多请求并发
+- invalid fd 错误处理
+- 真实 inflight IO 下的 `stopAndDrain()`
 
-## Build Integration
+## 构建集成
 
-The implementation should add the new `bm` sources to `bolt_memory` or a new
-internal library under `bolt/common/memory`, depending on the final file layout.
-If the io_uring backend is compiled into the memory library, CMake must add the
-same conditional liburing dependency used by `bolt/common/file`.
+实现时应根据最终文件布局，将新的 `bm` sources 加入 `bolt_memory`，或在
+`bolt/common/memory` 下新增内部 library。如果 io_uring backend 编译进 memory
+library，CMake 需要增加与 `bolt/common/file` 相同的条件式 liburing 依赖。
 
-The mock backend and scheduler tests should live under the existing memory test
-tree and avoid requiring io_uring.
+Mock backend 和 scheduler tests 应放在现有 memory test tree 下，并且不要求
+io_uring。
