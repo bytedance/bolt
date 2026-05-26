@@ -1,15 +1,20 @@
-if(${BOLT_BUILD_TESTING})
-  add_subdirectory(tests)
-endif()
+add_library(
+  bolt_memory_bm
+  DiskIoScheduler.cpp
+)
 
-add_library(bolt_memory_bm INTERFACE)
+target_compile_features(bolt_memory_bm PUBLIC cxx_std_20)
 
-target_include_directories(bolt_memory_bm INTERFACE ${PROJECT_SOURCE_DIR})
+target_include_directories(bolt_memory_bm PUBLIC ${PROJECT_SOURCE_DIR})
 
 target_link_libraries(
   bolt_memory_bm
-  INTERFACE bolt_common_base
-            bolt_exception
-            Folly::folly
-            glog::glog
+  PUBLIC bolt_common_base
+         bolt_exception
+         Folly::folly
+         glog::glog
 )
+
+if(${BOLT_BUILD_TESTING})
+  add_subdirectory(tests)
+endif()
