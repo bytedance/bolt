@@ -61,6 +61,7 @@ class DiskIoScheduler {
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;
   std::thread worker_;
+  std::mutex joinMutex_;
 };
 
 } // namespace bytedance::bolt::memory::bm

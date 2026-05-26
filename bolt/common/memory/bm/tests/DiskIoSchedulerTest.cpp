@@ -230,6 +230,56 @@ TEST(DiskIoSchedulerTest, submitAfterStopAndDrainReturnsShutdownFuture) {
   EXPECT_EQ(ESHUTDOWN, result.errorCode);
 }
 
+TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
+  auto backend = std::make_unique<MockIoBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::High));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+
+  std::promise<void> firstStopFinished;
+  std::promise<void> secondStopFinished;
+  auto firstStopFuture = firstStopFinished.get_future();
+  auto secondStopFuture = secondStopFinished.get_future();
+  std::thread firstStopThread([&scheduler, &firstStopFinished] {
+    scheduler.stopAndDrain();
+    firstStopFinished.set_value();
+  });
+  std::thread secondStopThread([&scheduler, &secondStopFinished] {
+    scheduler.stopAndDrain();
+    secondStopFinished.set_value();
+  });
+
+  EXPECT_EQ(
+      std::future_status::timeout,
+      firstStopFuture.wait_for(std::chrono::milliseconds(10)));
+  EXPECT_EQ(
+      std::future_status::timeout,
+      secondStopFuture.wait_for(std::chrono::milliseconds(10)));
+
+  backendPtr->complete(1, IoResult{4096, 0});
+  ASSERT_EQ(
+      std::future_status::ready, firstStopFuture.wait_for(kFutureTimeout));
+  ASSERT_EQ(
+      std::future_status::ready, secondStopFuture.wait_for(kFutureTimeout));
+  firstStopThread.join();
+  secondStopThread.join();
+  scheduler.stopAndDrain();
+
+  ASSERT_TRUE(waitUntilReady(future));
+  const auto result = future.get();
+  EXPECT_EQ(4096, result.bytes);
+  EXPECT_EQ(0, result.errorCode);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(0, stats.inflightRequests);
+  EXPECT_EQ(0, stats.queuedRequests[priorityIndex(IoPriority::High)]);
+  EXPECT_EQ(1, stats.completedRequests);
+  EXPECT_EQ(4096, stats.completedBytes);
+  EXPECT_EQ(1, stats.successfulRequests);
+}
+
 TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
