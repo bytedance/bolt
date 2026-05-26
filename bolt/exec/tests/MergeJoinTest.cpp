@@ -91,6 +91,7 @@ class MergeJoinTest : public OperatorTestBase,
 
   void SetUp() override {
     OperatorTestBase::SetUp();
+    filesystems::registerLocalFileSystem();
     auto emptyConfig = std::make_shared<config::ConfigBase>(
         std::unordered_map<std::string, std::string>());
     connector::test::registerTestConnector(
@@ -1257,7 +1258,7 @@ TEST_P(MergeJoinTest, leftJoinWithFilter) {
           "SELECT t0 FROM t WHERE NOT exists (select 1 from u where t0 = u0 AND t.t0 > 2 ) ");
 }
 
-TEST_F(
+TEST_P(
     MergeJoinTest,
     antiJoinWithFilterWithMultiMatchedRowsInDifferentBatches) {
   auto left =
