@@ -16,32 +16,16 @@
 
 #include "bolt/exec/MemoryPressureUtils.h"
 
+#include "bolt/common/base/NumberParsing.h"
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
-
-#include <exception>
 
 namespace bytedance::bolt::exec::memorypressure {
 
 std::optional<int64_t> extractSparkTaskAttemptId(std::string_view taskId) {
   constexpr std::string_view kTaskAttemptIdPrefix = "_TID_";
   constexpr std::string_view kTaskAttemptIdSuffix = "_ATTEMPT_";
-
-  const auto begin = taskId.find(kTaskAttemptIdPrefix);
-  if (begin == std::string_view::npos) {
-    return std::nullopt;
-  }
-
-  const auto idBegin = begin + kTaskAttemptIdPrefix.size();
-  const auto idEnd = taskId.find(kTaskAttemptIdSuffix, idBegin);
-  if (idEnd == std::string_view::npos || idEnd == idBegin) {
-    return std::nullopt;
-  }
-
-  try {
-    return std::stoll(std::string(taskId.substr(idBegin, idEnd - idBegin)));
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
+  return extractNumberBetween(
+      taskId, kTaskAttemptIdPrefix, kTaskAttemptIdSuffix);
 }
 
 MemoryPressureSnapshot snapshot(

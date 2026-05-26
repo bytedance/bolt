@@ -37,6 +37,7 @@ add_executable(
   FsTest.cpp
   RangeTest.cpp
   RuntimeMetricsTest.cpp
+  NumberParsingTest.cpp
   ScopedLockTest.cpp
   SemaphoreTest.cpp
   SimdUtilTest.cpp
