@@ -107,23 +107,36 @@ step "Step 1/3: mvn clean install -DskipTests (-T $JOBS)"
 step "Step 2/3: discover suites"
 SUITE_MAP="$LOG_DIR/_suites.tsv" # tab-separated: <module>\t<fqcn>
 
-# Walk every .class under <module>/target/.../test-classes/, ignoring:
-#   - inner/anon classes (`$` in path)
-#   - scalatest's leftover DiscoverySuite stubs
-#   - arrow's own Java tests under ep/_ep/arrow_ep
-#   - abstract base classes (parallel `javap | grep abstract`)
-# Then rewrite each surviving path into `<module>\t<FQCN>`, keep names looking
-# like a runnable test, and dedup by FQCN (same class can land in multiple
-# modules' test-classes).
+# Walk every .class under <module>/target/.../test-classes/ and emit
+# `<module>\t<FQCN>` rows in $SUITE_MAP — one per runnable test suite.
+
+# A class is concrete (runnable) iff javap's declaration line is NOT
+# `abstract class` / `abstract interface` / plain `interface`.
+is_concrete_class() {
+  ! javap -p "$1" 2> /dev/null | head -3 \
+    | grep -qE "^(public +)?abstract +(class|interface) "
+}
+export -f is_concrete_class
+
+# Class names ending in one of these tokens are treated as test suites
+# (matches naming conventions used across gluten + bolt test code).
+SUITE_NAME_RE='(Suite|Spec|Test|Validation|Statistics|Generator|Configuration|EncodingLong)'
+
+# Pipeline stages:
+#   1. find    every <module>/target/[scala-X/]test-classes/*.class — skip
+#              inner/anon classes (`$` in path), scalatest's leftover
+#              DiscoverySuite stubs, and arrow's own Java tests under ep/_ep/.
+#   2. xargs   drop abstract base classes via parallel javap.
+#   3. sed     rewrite `./<module>/target/[scala-X/]test-classes/<path>.class`
+#              into `<module><TAB><path>`.
+#   4. awk     turn path slashes into FQCN dots and keep only suite-shaped names.
+#   5. sort -u dedup by FQCN (same class can land in several modules).
 find . -path '*/test-classes/*.class' \
   \! -path '*$*' \! -path '*DiscoverySuite*' \! -path '*/ep/_ep/*' \
-  | xargs -P "$JOBS" -I{} sh -c '
-      javap -p "{}" 2>/dev/null | head -3 \
-        | grep -qE "^(public +)?abstract +(class|interface) " || echo "{}"
-    ' \
+  | xargs -P "$JOBS" -I{} bash -c 'is_concrete_class "{}" && echo "{}" || :' \
   | sed -nE 's|^\./(.+)/target/(scala-[^/]+/)?test-classes/(.+)\.class$|\1\t\3|p' \
-  | awk -F'\t' -v OFS='\t' '{ gsub("/",".",$2) }
-                            $2 ~ /(Suite|Spec|Test|Validation|Statistics|Generator|Configuration|EncodingLong)/' \
+  | awk -F'\t' -v OFS='\t' -v re="$SUITE_NAME_RE" \
+    '{ gsub("/", ".", $2) } $2 ~ re' \
   | sort -u -t$'\t' -k2,2 > "$SUITE_MAP"
 
 NUM_RUN=$(wc -l < "$SUITE_MAP" | tr -d ' ')
