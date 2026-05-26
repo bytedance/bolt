@@ -1564,7 +1564,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   //        does the silent truncation, matching Spark / Trino / parquet-mr.
   {
     auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
-    auto file = exec::test::TempFilePath::create();
+    auto file = ::bytedance::bolt::test::TempFilePath::create();
     writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
     {
@@ -1576,7 +1576,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                         .copyResults(pool());
       auto expected =
           makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
-      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+      EXPECT_TRUE(assertEqualResults(
+          std::vector<RowVectorPtr>{expected},
+          std::vector<RowVectorPtr>{result}));
     }
     {
       auto declared = ROW({"c0"}, {SMALLINT()});
@@ -1587,7 +1589,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
                         .copyResults(pool());
       auto expected =
           makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
-      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+      EXPECT_TRUE(assertEqualResults(
+          std::vector<RowVectorPtr>{expected},
+          std::vector<RowVectorPtr>{result}));
     }
   }
 
