@@ -25,6 +25,8 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+add_subdirectory(bm)
+
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
   add_subdirectory(sparksql/tests)
