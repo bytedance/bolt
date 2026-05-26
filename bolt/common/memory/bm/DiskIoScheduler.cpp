@@ -136,6 +136,7 @@ bool DiskIoScheduler::dispatchOneLocked() {
     if (!backend_->submit(queued.requestId, queued.request)) {
       queued.promise.set_value(IoResult{0, EIO});
       ++stats_.completedRequests;
+      ++stats_.completedRequestsByPriority[i];
       ++stats_.failedRequests;
       return true;
     }
