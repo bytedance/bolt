@@ -112,18 +112,34 @@ TEST(AdaptiveDepthControllerTest, negativeThroughputDoesNotIncreaseDepth) {
   auto config = makeConfig();
   AdaptiveDepthController controller(config);
 
+  controller.onWindow(1000.0, false);
   controller.onWindow(-1.0, true);
 
   EXPECT_EQ(8, controller.currentDepth());
-  EXPECT_EQ(-1.0, controller.recentThroughputBytesPerSecond());
+  EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
 }
 
 TEST(AdaptiveDepthControllerTest, nonFiniteThroughputDoesNotIncreaseDepth) {
   auto config = makeConfig();
   AdaptiveDepthController controller(config);
 
-  controller.onWindow(1000.0, false);
+  controller.onWindow(1000.0, true);
+  EXPECT_EQ(12, controller.currentDepth());
+
   controller.onWindow(std::numeric_limits<double>::infinity(), true);
+
+  EXPECT_EQ(8, controller.currentDepth());
+  EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
+}
+
+TEST(AdaptiveDepthControllerTest, nanThroughputDoesNotIncreaseDepth) {
+  auto config = makeConfig();
+  AdaptiveDepthController controller(config);
+
+  controller.onWindow(1000.0, true);
+  EXPECT_EQ(12, controller.currentDepth());
+
+  controller.onWindow(std::numeric_limits<double>::quiet_NaN(), true);
 
   EXPECT_EQ(8, controller.currentDepth());
   EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
@@ -156,6 +172,18 @@ TEST(AdaptiveDepthControllerTest, invalidStandaloneConfigThrows) {
 
   config = makeConfig();
   config.minThroughputGain = -0.1;
+  BOLT_ASSERT_THROW(
+      [&] { AdaptiveDepthController controller(config); }(),
+      "invalid AdaptiveDepthConfig");
+
+  config = makeConfig();
+  config.controlInterval = std::chrono::milliseconds(0);
+  BOLT_ASSERT_THROW(
+      [&] { AdaptiveDepthController controller(config); }(),
+      "invalid AdaptiveDepthConfig");
+
+  config = makeConfig();
+  config.controlInterval = std::chrono::milliseconds(-1);
   BOLT_ASSERT_THROW(
       [&] { AdaptiveDepthController controller(config); }(),
       "invalid AdaptiveDepthConfig");

@@ -25,7 +25,8 @@ double AdaptiveDepthController::recentThroughputBytesPerSecond() const {
 void AdaptiveDepthController::onWindow(
     double throughputBytesPerSecond,
     bool hasBacklog) {
-  if (std::isfinite(throughputBytesPerSecond)) {
+  if (std::isfinite(throughputBytesPerSecond) &&
+      throughputBytesPerSecond >= 0) {
     recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
   }
 
@@ -69,7 +70,8 @@ bool AdaptiveDepthController::isValidConfig(
     const AdaptiveDepthConfig& config) {
   return config.minDepth > 0 && config.increaseStep > 0 &&
       config.minDepth <= config.initialDepth &&
-      config.initialDepth <= config.maxDepth && config.minThroughputGain >= 0;
+      config.initialDepth <= config.maxDepth &&
+      config.controlInterval.count() > 0 && config.minThroughputGain >= 0;
 }
 
 bool AdaptiveDepthController::isValidThroughput(
