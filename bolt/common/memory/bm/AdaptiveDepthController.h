@@ -15,8 +15,11 @@ class AdaptiveDepthController {
   void onWindow(double throughputBytesPerSecond, bool hasBacklog);
 
  private:
+  static bool isValidConfig(const AdaptiveDepthConfig& config);
+  static bool isValidThroughput(double throughputBytesPerSecond);
+
   bool throughputImproved(double throughputBytesPerSecond) const;
-  uint32_t increasedDepth() const;
+  void scheduleProbe();
 
   AdaptiveDepthConfig config_;
   uint32_t currentDepth_{0};
@@ -24,6 +27,7 @@ class AdaptiveDepthController {
   double recentThroughputBytesPerSecond_{0};
   double bestThroughputBytesPerSecond_{0};
   bool hasBestThroughput_{false};
+  bool measuringProbeDepth_{false};
 };
 
 } // namespace bytedance::bolt::memory::bm
