@@ -365,7 +365,7 @@ void MinMaxByAggregationTestBase::SetUp() {
     }
   }
   ASSERT_EQ(dataVectorsByType_.size(), kSupportedTypes.size());
-  rowVectors_ = makeVectors(rowType_, 5, 10);
+  rowVectors_ = makeVectors(rowType_, 10, 5);
   createDuckDbTable(rowVectors_);
 };
 

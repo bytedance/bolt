@@ -58,7 +58,7 @@ class CountAggregationTest : public AggregationTestBase {
 };
 
 TEST_F(CountAggregationTest, count) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   testAggregations(vectors, {}, {"count()"}, "SELECT count(1) FROM tmp");

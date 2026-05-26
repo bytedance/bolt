@@ -48,7 +48,7 @@ class BitwiseXorAggregationTest : public aggregate::test::AggregationTestBase {
 };
 
 TEST_F(BitwiseXorAggregationTest, bitwiseXor) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   // Global aggregation.

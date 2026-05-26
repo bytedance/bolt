@@ -87,7 +87,7 @@ TEST_F(CountIfAggregationTest, oneAggregateSingleGroup) {
 }
 
 TEST_F(CountIfAggregationTest, oneAggregateMultipleGroups) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   testAggregations(
@@ -98,7 +98,7 @@ TEST_F(CountIfAggregationTest, oneAggregateMultipleGroups) {
 }
 
 TEST_F(CountIfAggregationTest, twoAggregatesSingleGroup) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   testAggregations(
@@ -109,7 +109,7 @@ TEST_F(CountIfAggregationTest, twoAggregatesSingleGroup) {
 }
 
 TEST_F(CountIfAggregationTest, twoAggregatesMultipleGroups) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   testAggregations(
@@ -120,7 +120,7 @@ TEST_F(CountIfAggregationTest, twoAggregatesMultipleGroups) {
 }
 
 TEST_F(CountIfAggregationTest, twoAggregatesMultipleGroupsWrapped) {
-  auto vectors = makeVectors(rowType_, 10, 100);
+  auto vectors = makeVectors(rowType_, 100, 10);
   createDuckDbTable(vectors);
 
   testAggregations(
