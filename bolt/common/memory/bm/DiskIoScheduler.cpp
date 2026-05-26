@@ -1,5 +1,7 @@
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
 
+#include "bolt/common/base/Exceptions.h"
+
 #include <cerrno>
 #include <chrono>
 #include <stdexcept>
@@ -11,6 +13,11 @@ namespace {
 constexpr auto kIdlePollInterval = std::chrono::milliseconds(1);
 
 } // namespace
+
+DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
+    : config_(config), currentDepth_(config.adaptiveDepth.initialDepth) {
+  BOLT_FAIL("DiskIoScheduler default constructor requires IoUringBackend");
+}
 
 DiskIoScheduler::DiskIoScheduler(
     DiskIoSchedulerConfig config,

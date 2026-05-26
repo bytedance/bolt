@@ -17,6 +17,7 @@ namespace bytedance::bolt::memory::bm {
 
 class DiskIoScheduler {
  public:
+  explicit DiskIoScheduler(DiskIoSchedulerConfig config);
   DiskIoScheduler(
       DiskIoSchedulerConfig config,
       std::unique_ptr<IoBackend> backend);

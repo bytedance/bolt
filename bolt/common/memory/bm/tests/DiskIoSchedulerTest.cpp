@@ -151,6 +151,14 @@ TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
       backend.complete(11, IoResult{4096, 0}), "unknown requestId");
 }
 
+TEST(DiskIoSchedulerTest, facadeConstructorRequiresDefaultBackend) {
+  DiskIoSchedulerConfig config;
+
+  BOLT_ASSERT_THROW(
+      [&] { DiskIoScheduler scheduler(config); }(),
+      "DiskIoScheduler default constructor requires IoUringBackend");
+}
+
 TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
