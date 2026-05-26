@@ -132,34 +132,70 @@ bool DiskIoScheduler::drainedLocked() const {
   return inflight_.empty() && !hasQueuedRequestsLocked();
 }
 
-bool DiskIoScheduler::dispatchOneLocked() {
+std::optional<size_t> DiskIoScheduler::pickQueueLocked() {
+  auto hasDispatchableDeficit = [this] {
+    for (size_t i = 0; i < kIoPriorityCount; ++i) {
+      if (!queues_[i].empty() && deficits_[i] > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!hasDispatchableDeficit()) {
+    for (size_t i = 0; i < kIoPriorityCount; ++i) {
+      if (!queues_[i].empty()) {
+        deficits_[i] += config_.priorityWeights[i];
+      } else {
+        deficits_[i] = 0;
+      }
+    }
+  }
+
   for (size_t i = 0; i < kIoPriorityCount; ++i) {
-    auto& queue = queues_[i];
-    if (queue.empty()) {
+    const auto priority = nextPriorityCursor_;
+    nextPriorityCursor_ = (nextPriorityCursor_ + 1) % kIoPriorityCount;
+
+    if (queues_[priority].empty()) {
+      deficits_[priority] = 0;
+      continue;
+    }
+    if (deficits_[priority] <= 0) {
       continue;
     }
 
-    auto queued = std::move(queue.front());
-    queue.pop_front();
-    stats_.queuedRequests[i] = queue.size();
+    --deficits_[priority];
+    return priority;
+  }
 
-    if (!backend_->submit(queued.requestId, queued.request)) {
-      queued.promise.set_value(IoResult{0, EIO});
-      ++stats_.completedRequests;
-      ++stats_.completedRequestsByPriority[i];
-      ++stats_.failedRequests;
-      return true;
-    }
+  return std::nullopt;
+}
 
-    ++stats_.submittedRequests[i];
-    inflight_.emplace(
-        queued.requestId,
-        InflightRequest{queued.request.priority, std::move(queued.promise)});
-    stats_.inflightRequests = inflight_.size();
+bool DiskIoScheduler::dispatchOneLocked() {
+  const auto priority = pickQueueLocked();
+  if (!priority.has_value()) {
+    return false;
+  }
+
+  auto& queue = queues_[*priority];
+  auto queued = std::move(queue.front());
+  queue.pop_front();
+  stats_.queuedRequests[*priority] = queue.size();
+
+  if (!backend_->submit(queued.requestId, queued.request)) {
+    queued.promise.set_value(IoResult{0, EIO});
+    ++stats_.completedRequests;
+    ++stats_.completedRequestsByPriority[*priority];
+    ++stats_.failedRequests;
     return true;
   }
 
-  return false;
+  ++stats_.submittedRequests[*priority];
+  inflight_.emplace(
+      queued.requestId,
+      InflightRequest{queued.request.priority, std::move(queued.promise)});
+  stats_.inflightRequests = inflight_.size();
+  return true;
 }
 
 void DiskIoScheduler::reapCompletionsLocked() {
