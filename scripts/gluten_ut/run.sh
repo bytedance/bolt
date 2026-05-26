@@ -156,6 +156,7 @@ run_one_suite() {
   local sur="$WORK_ROOT/$suite/surefire"
   local rep="$REPORTS_ROOT/$suite"
   mkdir -p "$sur" "$rep"
+  local t0=$(date +%s)
   # Find the module's test-classes/ dir (Scala or Java layout).
   local tc=""
   for d in "$GLUTEN_HOME/$module/target/scala-2.12/test-classes" \
@@ -191,6 +192,13 @@ run_one_suite() {
     -Dtest="$suite" -DwildcardSuites="$suite" \
     -DtagsToExclude=org.apache.gluten.tags.UDFTest,org.apache.gluten.tags.EnhancedFeaturesTest,org.apache.gluten.tags.SkipTest \
     > "$log" 2>&1 || true
+  local secs=$(($(date +%s) - t0))
+  local cases
+  cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
+    | grep -oE 'Total number of tests run: [0-9]+' | tail -1 \
+    | grep -oE '[0-9]+')
+  # FD 3 = the parent's original stdout (terminal); see `exec 3>&1` below.
+  printf '  done [%4ds, %4s cases] %s\n' "$secs" "${cases:-?}" "$suite" >&3
   printf 'finished\t%s\n' "$suite"
 }
 export -f run_one_suite
@@ -207,6 +215,10 @@ else
   cp "$SUITE_MAP" "$DISPATCH_MAP"
 fi
 
+# Save the terminal stdout as FD 3 so run_one_suite can print a one-line
+# "done [...] <suite>" to the user as soon as each suite finishes, even
+# though the dispatcher's own stdout is captured to _dispatch.log.
+exec 3>&1
 (
   tr '\t' ' ' < "$DISPATCH_MAP" | xargs -P "$JOBS" -L 1 \
     bash -c 'run_one_suite "$1" "$2"' _
