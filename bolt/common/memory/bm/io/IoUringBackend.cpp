@@ -6,6 +6,7 @@
 #endif
 
 #include <cstring>
+#include <utility>
 
 #include "bolt/common/base/Exceptions.h"
 
@@ -62,7 +63,7 @@ std::vector<BackendCompletion> IoUringBackend::reap() {
       result.error = IoErrorCode::BackendIoError;
       result.nativeErrorCode = -cqe->res;
     }
-    completions.push_back(BackendCompletion{cqe->user_data, result});
+    completions.push_back(BackendCompletion{cqe->user_data, std::move(result)});
     io_uring_cqe_seen(&state_->ring, cqe);
     cqe = nullptr;
   }

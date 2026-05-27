@@ -17,17 +17,20 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 using namespace bytedance::bolt::memory::bm;
 
+static_assert(!std::is_copy_constructible_v<IoRequest>);
+static_assert(std::is_move_constructible_v<IoRequest>);
+
 namespace {
 
-std::shared_ptr<void> makeBuffer(size_t size) {
-  return std::shared_ptr<void>(
-      new char[size], [](void* ptr) { delete[] static_cast<char*>(ptr); });
+std::unique_ptr<char[]> makeBuffer(size_t size) {
+  return std::make_unique<char[]>(size);
 }
 
 constexpr auto kFutureTimeout = std::chrono::seconds(5);
@@ -103,7 +106,7 @@ bool completeNextSubmittedWindow(
       return false;
     }
     const auto& request = submitted[completedSubmissions];
-    ++submittedByPriority[priorityIndex(request.request.priority)];
+    ++submittedByPriority[priorityIndex(request.priority)];
     backend.complete(request.requestId, IoResult{4096});
     ++completedSubmissions;
   }
@@ -272,9 +275,9 @@ TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
   IoRequest request = makeValidRequest();
   request.fd = -1;
 
-  auto future = scheduler.submit(request);
+  auto future = scheduler.submit(std::move(request));
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
 
   EXPECT_EQ(0, result.bytes);
   EXPECT_EQ(IoErrorCode::InvalidRequest, result.error);
@@ -296,7 +299,7 @@ TEST(DiskIoSchedulerTest, submitsAndCompletesSingleRequest) {
 
   backendPtr->complete(1, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
 
   EXPECT_EQ(4096, result.bytes);
   EXPECT_EQ(IoErrorCode::Ok, result.error);
@@ -402,7 +405,7 @@ TEST(DiskIoSchedulerTest, submitAfterStopAndDrainReturnsShutdownFuture) {
 
   auto future = scheduler.submit(makeValidRequest());
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
 
   EXPECT_EQ(0, result.bytes);
   EXPECT_EQ(IoErrorCode::Shutdown, result.error);
@@ -447,7 +450,7 @@ TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
   scheduler.stopAndDrain();
 
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
   EXPECT_EQ(4096, result.bytes);
   EXPECT_EQ(IoErrorCode::Ok, result.error);
 
@@ -470,7 +473,7 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
   backendPtr->complete(1, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
   EXPECT_EQ(IoErrorCode::Ok, result.error);
 
   const auto stats = scheduler.stats();
@@ -532,7 +535,7 @@ TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
 
   auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
   ASSERT_TRUE(waitUntilReady(future));
-  const auto result = future.get();
+  auto result = future.get();
 
   EXPECT_EQ(1, backendPtr->submitAttempts());
   EXPECT_EQ(0, result.bytes);
