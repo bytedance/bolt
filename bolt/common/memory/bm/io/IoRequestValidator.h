@@ -15,7 +15,8 @@ inline IoErrorCode validateIoRequest(const IoRequest& request) {
   if (request.buffer.offset > request.buffer.size) {
     return IoErrorCode::InvalidRequest;
   }
-  if (request.buffer.length > request.buffer.size - request.buffer.offset) {
+  const auto available = request.buffer.size - request.buffer.offset;
+  if (request.buffer.length > available) {
     return IoErrorCode::InvalidRequest;
   }
   return IoErrorCode::Ok;

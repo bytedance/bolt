@@ -11,12 +11,12 @@
 namespace bytedance::bolt::memory::bm {
 
 struct DiskIoSchedulerStats {
-  std::array<uint64_t, kIoPriorityCount> queuedRequests{{0, 0, 0}};
-  std::array<uint64_t, kIoPriorityCount> submittedRequests{{0, 0, 0}};
-  std::array<uint64_t, kIoPriorityCount> completedRequestsByPriority{{0, 0, 0}};
-  std::array<uint64_t, kIoPriorityCount> completedBytesByPriority{{0, 0, 0}};
-  std::array<uint64_t, kIoPriorityCount> successfulRequestsByPriority{{0, 0, 0}};
-  std::array<uint64_t, kIoPriorityCount> failedRequestsByPriority{{0, 0, 0}};
+  std::array<uint64_t, kIoPriorityCount> queuedRequests{};
+  std::array<uint64_t, kIoPriorityCount> submittedRequests{};
+  std::array<uint64_t, kIoPriorityCount> completedRequestsByPriority{};
+  std::array<uint64_t, kIoPriorityCount> completedBytesByPriority{};
+  std::array<uint64_t, kIoPriorityCount> successfulRequestsByPriority{};
+  std::array<uint64_t, kIoPriorityCount> failedRequestsByPriority{};
   uint64_t inflightRequests{0};
   uint32_t currentDepth{0};
   uint64_t acceptedRequests{0};
@@ -32,6 +32,7 @@ struct DiskIoSchedulerStats {
   uint64_t maxObservedInflightRequests{0};
   double recentThroughputBytesPerSecond{0};
   uint64_t cumulativeLatencyUs{0};
+  uint64_t latencySamples{0};
   double averageLatencyUs{0};
   uint64_t minLatencyUs{0};
   uint64_t maxLatencyUs{0};
@@ -75,6 +76,7 @@ struct DiskIoSchedulerStats {
         << " recent_throughput_bytes_per_second="
         << recentThroughputBytesPerSecond
         << " cumulative_latency_us=" << cumulativeLatencyUs
+        << " latency_samples=" << latencySamples
         << " average_latency_us=" << averageLatencyUs
         << " min_latency_us=" << minLatencyUs
         << " max_latency_us=" << maxLatencyUs

@@ -65,12 +65,6 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++stats_.rejectedRequests;
-      ++stats_.completedRequests;
-      ++stats_.failedRequests;
-      if (validPriority(request.priority)) {
-        ++stats_.completedRequestsByPriority[priorityIndex(request.priority)];
-        ++stats_.failedRequestsByPriority[priorityIndex(request.priority)];
-      }
     }
     IoResult result{0, validationError};
     result.buffer = std::move(request.buffer);
@@ -85,10 +79,6 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) {
       ++stats_.shutdownRejectedRequests;
-      ++stats_.completedRequests;
-      ++stats_.completedRequestsByPriority[priorityIndex(request.priority)];
-      ++stats_.failedRequests;
-      ++stats_.failedRequestsByPriority[priorityIndex(request.priority)];
       IoResult result{0, IoErrorCode::Shutdown};
       result.buffer = std::move(request.buffer);
       rejectedResult = std::move(result);
@@ -96,14 +86,11 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
       const auto priority = priorityIndex(request.priority);
       queues_[priority].push_back(QueuedRequest{
           nextRequestId_++, std::move(request), std::move(promise)});
+      ++totalQueued_;
       stats_.queuedRequests[priority] = queues_[priority].size();
       ++stats_.acceptedRequests;
-      uint64_t queued = 0;
-      for (const auto& queue : queues_) {
-        queued += queue.size();
-      }
       stats_.maxObservedQueueDepth =
-          std::max(stats_.maxObservedQueueDepth, queued);
+          std::max(stats_.maxObservedQueueDepth, totalQueued_);
     }
   }
 
@@ -299,6 +286,7 @@ DiskIoScheduler::collectDispatchBatchLocked() {
     auto& queue = queues_[*priority];
     auto queued = std::move(queue.front());
     queue.pop_front();
+    --totalQueued_;
     stats_.queuedRequests[*priority] = queue.size();
     if (queue.empty()) {
       deficits_[*priority] = 0;
@@ -318,6 +306,7 @@ void DiskIoScheduler::applyDispatchResultsLocked(
       // back at the head so the next worker iteration can retry after reaping.
       auto& queue = queues_[priority];
       queue.push_front(std::move(dispatch.queued));
+      ++totalQueued_;
       stats_.queuedRequests[priority] = queue.size();
       continue;
     }
@@ -367,6 +356,7 @@ void DiskIoScheduler::applyCompletionsLocked(
             .count();
     stats_.cumulativeLatencyUs +=
         latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
+    ++stats_.latencySamples;
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
     stats_.completedBytes += completion.result.bytes;
@@ -383,10 +373,10 @@ void DiskIoScheduler::applyCompletionsLocked(
     }
     stats_.inflightRequests = inflight_.size();
     stats_.averageLatencyUs =
-        stats_.completedRequests == 0
+        stats_.latencySamples == 0
             ? 0
             : static_cast<double>(stats_.cumulativeLatencyUs) /
-                static_cast<double>(stats_.completedRequests);
+                static_cast<double>(stats_.latencySamples);
     if (latencyUs > 0) {
       const auto positiveLatencyUs = static_cast<uint64_t>(latencyUs);
       if (stats_.minLatencyUs == 0 || positiveLatencyUs < stats_.minLatencyUs) {
@@ -415,6 +405,7 @@ void DiskIoScheduler::failOutstandingLocked(
     while (!queue.empty()) {
       auto queued = std::move(queue.front());
       queue.pop_front();
+      --totalQueued_;
       IoResult result{0, IoErrorCode::Shutdown};
       result.buffer = std::move(queued.request.buffer);
       readyResults.push_back(
@@ -441,6 +432,7 @@ void DiskIoScheduler::failOutstandingLocked(
     ++stats_.failedRequestsByPriority[priority];
   }
   inflight_.clear();
+  totalQueued_ = 0;
   stats_.inflightRequests = 0;
 }
 
