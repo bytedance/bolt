@@ -432,11 +432,17 @@ void DiskIoScheduler::applyCompletionsLocked(
         std::chrono::duration_cast<std::chrono::microseconds>(
             now - inflight.submitTime)
             .count();
-    stats_.cumulativeLatencyUs +=
+    const auto measuredLatencyUs =
         latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
+    const auto firstLatencySample = stats_.latencySamples == 0;
+    stats_.cumulativeLatencyUs += measuredLatencyUs;
     ++stats_.latencySamples;
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
+    if (completion.result.ok() &&
+        completion.result.bytes != inflight.request.buffer.length) {
+      completion.result.error = IoErrorCode::ShortIo;
+    }
     stats_.completedBytes += completion.result.bytes;
     stats_.completedBytesByPriority[priority] += completion.result.bytes;
     if (completion.result.ok()) {
@@ -455,14 +461,10 @@ void DiskIoScheduler::applyCompletionsLocked(
             ? 0
             : static_cast<double>(stats_.cumulativeLatencyUs) /
                 static_cast<double>(stats_.latencySamples);
-    if (latencyUs > 0) {
-      const auto positiveLatencyUs = static_cast<uint64_t>(latencyUs);
-      if (stats_.minLatencyUs == 0 || positiveLatencyUs < stats_.minLatencyUs) {
-        stats_.minLatencyUs = positiveLatencyUs;
-      }
-      stats_.maxLatencyUs =
-          std::max(stats_.maxLatencyUs, positiveLatencyUs);
+    if (firstLatencySample || measuredLatencyUs < stats_.minLatencyUs) {
+      stats_.minLatencyUs = measuredLatencyUs;
     }
+    stats_.maxLatencyUs = std::max(stats_.maxLatencyUs, measuredLatencyUs);
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight.request.buffer);
     adaptiveDepth_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);

@@ -849,6 +849,29 @@ TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
       stats.toString().find("backend_io_error_requests=1"));
 }
 
+TEST(DiskIoSchedulerTest, shortCompletionIsReportedAsFailedShortIo) {
+  auto backend = std::make_unique<MockIoBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::Medium));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+  backendPtr->complete(1, IoResult{2048});
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+
+  EXPECT_EQ(2048, result.bytes);
+  EXPECT_EQ(IoErrorCode::ShortIo, result.error);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(1, stats.completedRequests);
+  EXPECT_EQ(0, stats.successfulRequests);
+  EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(1, stats.latencySamples);
+  EXPECT_EQ(
+      1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Medium)]);
+}
+
 TEST(DiskIoSchedulerTest, statsLoggingConfigRejectsNonPositiveInterval) {
   DiskIoSchedulerConfig config;
   config.enableStatsLogging = true;
