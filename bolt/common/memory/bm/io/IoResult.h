@@ -12,6 +12,7 @@ enum class IoErrorCode : uint8_t {
   Shutdown,
   BackendSubmitFailed,
   BackendIoError,
+  ShortIo,
 };
 
 struct IoResult {
