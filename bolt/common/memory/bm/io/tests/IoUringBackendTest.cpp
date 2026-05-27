@@ -21,9 +21,8 @@ using namespace bytedance::bolt::memory::bm;
 #ifdef IO_URING_SUPPORTED
 namespace {
 
-std::shared_ptr<void> makeBuffer(size_t size) {
-  return std::shared_ptr<void>(
-      new char[size], [](void* ptr) { delete[] static_cast<char*>(ptr); });
+std::unique_ptr<char[]> makeBuffer(size_t size) {
+  return std::make_unique<char[]>(size);
 }
 
 class TempFd {
@@ -60,7 +59,7 @@ DiskIoSchedulerConfig makeConfig() {
   return config;
 }
 
-IoRequest makeRequest(IoOpcode opcode, int fd, std::shared_ptr<void> buffer) {
+IoRequest makeRequest(IoOpcode opcode, int fd, std::unique_ptr<char[]> buffer) {
   IoRequest request;
   request.opcode = opcode;
   request.priority = IoPriority::High;
@@ -101,15 +100,19 @@ TEST(IoUringBackendTest, writeAndReadTemporaryFile) {
 
   auto writeBuffer = makeBuffer(4096);
   std::memset(writeBuffer.get(), 'x', 4096);
-  auto write = makeRequest(IoOpcode::Write, file.fd(), writeBuffer);
-  EXPECT_EQ(IoErrorCode::Ok, scheduler->submit(write).get().error);
+  auto write = makeRequest(IoOpcode::Write, file.fd(), std::move(writeBuffer));
+  auto writeResult = scheduler->submit(std::move(write)).get();
+  EXPECT_EQ(IoErrorCode::Ok, writeResult.error);
 
   auto readBuffer = makeBuffer(4096);
-  auto read = makeRequest(IoOpcode::Read, file.fd(), readBuffer);
-  auto result = scheduler->submit(read).get();
+  auto read = makeRequest(IoOpcode::Read, file.fd(), std::move(readBuffer));
+  auto result = scheduler->submit(std::move(read)).get();
   EXPECT_EQ(IoErrorCode::Ok, result.error);
   EXPECT_EQ(4096, result.bytes);
-  EXPECT_EQ(0, std::memcmp(writeBuffer.get(), readBuffer.get(), 4096));
+  EXPECT_EQ(
+      0,
+      std::memcmp(
+          writeResult.buffer.data.get(), result.buffer.data.get(), 4096));
 }
 
 TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {
@@ -121,8 +124,8 @@ TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {
   }
 
   auto buffer = makeBuffer(4096);
-  auto request = makeRequest(IoOpcode::Read, 999999, buffer);
-  auto result = scheduler->submit(request).get();
+  auto request = makeRequest(IoOpcode::Read, 999999, std::move(buffer));
+  auto result = scheduler->submit(std::move(request)).get();
 
   EXPECT_EQ(0, result.bytes);
   EXPECT_EQ(IoErrorCode::BackendIoError, result.error);

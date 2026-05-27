@@ -45,7 +45,7 @@ class DiskIoScheduler {
   };
 
   struct InflightRequest {
-    IoPriority priority{IoPriority::Medium};
+    IoRequest request;
     std::promise<IoResult> promise;
     std::chrono::steady_clock::time_point submitTime;
   };

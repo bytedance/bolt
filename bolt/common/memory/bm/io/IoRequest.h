@@ -9,7 +9,7 @@
 namespace bytedance::bolt::memory::bm {
 
 struct IoBuffer {
-  std::shared_ptr<void> data;
+  std::unique_ptr<char[]> data;
   size_t size{0};
   size_t offset{0};
   size_t length{0};

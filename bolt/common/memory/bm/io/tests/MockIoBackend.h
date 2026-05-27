@@ -11,7 +11,7 @@ namespace bytedance::bolt::memory::bm {
 
 struct MockSubmittedRequest {
   uint64_t requestId{0};
-  IoRequest request;
+  IoPriority priority{IoPriority::Medium};
 };
 
 class MockIoBackend : public IoBackend {

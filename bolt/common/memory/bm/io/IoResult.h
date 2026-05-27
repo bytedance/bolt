@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "bolt/common/memory/bm/io/IoRequest.h"
+
 namespace bytedance::bolt::memory::bm {
 
 enum class IoErrorCode : uint8_t {
@@ -13,9 +15,17 @@ enum class IoErrorCode : uint8_t {
 };
 
 struct IoResult {
+  IoResult() = default;
+  explicit IoResult(
+      uint64_t bytes,
+      IoErrorCode error = IoErrorCode::Ok,
+      int nativeErrorCode = 0)
+      : bytes(bytes), error(error), nativeErrorCode(nativeErrorCode) {}
+
   uint64_t bytes{0};
   IoErrorCode error{IoErrorCode::Ok};
   int nativeErrorCode{0};
+  IoBuffer buffer;
 
   bool ok() const {
     return error == IoErrorCode::Ok;
