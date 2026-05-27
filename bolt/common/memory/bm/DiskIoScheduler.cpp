@@ -1,6 +1,7 @@
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/bm/IoUringBackend.h"
 
 #include <cerrno>
 #include <chrono>
@@ -14,16 +15,29 @@ constexpr auto kIdlePollInterval = std::chrono::milliseconds(1);
 
 } // namespace
 
+#ifdef IO_URING_SUPPORTED
 DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
-    : config_(config), currentDepth_(config.adaptiveDepth.initialDepth) {
+    : DiskIoScheduler(
+          config,
+          std::make_unique<IoUringBackend>(config.ringDepth)) {}
+#else
+DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
+    : config_(config),
+      adaptiveDepth_(config_.adaptiveDepth),
+      currentDepth_(adaptiveDepth_.currentDepth()),
+      windowStart_(std::chrono::steady_clock::now()) {
   BOLT_FAIL("DiskIoScheduler default constructor requires IoUringBackend");
 }
+#endif
 
 DiskIoScheduler::DiskIoScheduler(
     DiskIoSchedulerConfig config,
     std::unique_ptr<IoBackend> backend)
-    : config_(config), currentDepth_(config.adaptiveDepth.initialDepth),
-      backend_(std::move(backend)) {
+    : config_(config),
+      adaptiveDepth_(config_.adaptiveDepth),
+      currentDepth_(adaptiveDepth_.currentDepth()),
+      backend_(std::move(backend)),
+      windowStart_(std::chrono::steady_clock::now()) {
   if (validateDiskIoSchedulerConfig(config_) != 0) {
     throw std::invalid_argument("invalid DiskIoSchedulerConfig");
   }
@@ -92,6 +106,8 @@ DiskIoSchedulerStats DiskIoScheduler::stats() const {
   }
   snapshot.inflightRequests = inflight_.size();
   snapshot.currentDepth = currentDepth_;
+  snapshot.recentThroughputBytesPerSecond =
+      adaptiveDepth_.recentThroughputBytesPerSecond();
   return snapshot;
 }
 
@@ -196,7 +212,10 @@ bool DiskIoScheduler::dispatchOneLocked() {
   ++stats_.submittedRequests[*priority];
   inflight_.emplace(
       queued.requestId,
-      InflightRequest{queued.request.priority, std::move(queued.promise)});
+      InflightRequest{
+          queued.request.priority,
+          std::move(queued.promise),
+          std::chrono::steady_clock::now()});
   stats_.inflightRequests = inflight_.size();
   return true;
 }
@@ -213,18 +232,50 @@ void DiskIoScheduler::reapCompletionsLocked() {
     inflight_.erase(it);
 
     const auto priority = priorityIndex(inflight.priority);
+    const auto now = std::chrono::steady_clock::now();
+    const auto latencyUs =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            now - inflight.submitTime)
+            .count();
+    cumulativeLatencyUs_ += latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
     stats_.completedBytes += completion.result.bytes;
+    windowCompletedBytes_ += completion.result.bytes;
     if (completion.result.errorCode == 0) {
       ++stats_.successfulRequests;
     } else {
       ++stats_.failedRequests;
     }
     stats_.inflightRequests = inflight_.size();
+    stats_.averageLatencyUs =
+        stats_.completedRequests == 0
+            ? 0
+            : static_cast<double>(cumulativeLatencyUs_) /
+                static_cast<double>(stats_.completedRequests);
+    updateAdaptiveDepthLocked(now);
 
     inflight.promise.set_value(completion.result);
   }
+}
+
+void DiskIoScheduler::updateAdaptiveDepthLocked(
+    std::chrono::steady_clock::time_point now) {
+  const auto elapsed = now - windowStart_;
+  if (elapsed < config_.adaptiveDepth.controlInterval) {
+    return;
+  }
+
+  const auto seconds = std::chrono::duration<double>(elapsed).count();
+  const auto throughput =
+      seconds > 0 ? static_cast<double>(windowCompletedBytes_) / seconds : 0;
+  adaptiveDepth_.onWindow(throughput, hasQueuedRequestsLocked());
+  currentDepth_ = adaptiveDepth_.currentDepth();
+  stats_.currentDepth = currentDepth_;
+  stats_.recentThroughputBytesPerSecond =
+      adaptiveDepth_.recentThroughputBytesPerSecond();
+  windowCompletedBytes_ = 0;
+  windowStart_ = now;
 }
 
 } // namespace bytedance::bolt::memory::bm
