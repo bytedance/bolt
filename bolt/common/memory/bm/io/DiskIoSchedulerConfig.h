@@ -15,6 +15,7 @@ struct DiskIoSchedulerConfig {
   AdaptiveDepthConfig adaptiveDepth;
   bool enableStatsLogging{false};
   std::chrono::milliseconds statsLogInterval{std::chrono::seconds(10)};
+  std::chrono::milliseconds drainTimeout{std::chrono::seconds(30)};
 };
 
 } // namespace bytedance::bolt::memory::bm

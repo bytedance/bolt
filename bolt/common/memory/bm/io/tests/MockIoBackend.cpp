@@ -6,14 +6,16 @@
 
 namespace bytedance::bolt::memory::bm {
 
-bool MockIoBackend::submit(uint64_t requestId, const IoRequest& request) {
+BackendSubmitStatus MockIoBackend::submit(
+    uint64_t requestId,
+    const IoRequest& request) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (inflight_.count(requestId) != 0) {
-    return false;
+    return BackendSubmitStatus::Failed;
   }
   submitted_.push_back(MockSubmittedRequest{requestId, request.priority});
   inflight_.insert(requestId);
-  return true;
+  return BackendSubmitStatus::Submitted;
 }
 
 std::vector<BackendCompletion> MockIoBackend::reap() {

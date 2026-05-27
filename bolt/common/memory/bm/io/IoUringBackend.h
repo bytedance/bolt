@@ -14,7 +14,9 @@ class IoUringBackend : public IoBackend {
   explicit IoUringBackend(uint32_t ringDepth);
   ~IoUringBackend() override;
 
-  bool submit(uint64_t requestId, const IoRequest& request) override;
+  BackendSubmitStatus submit(
+      uint64_t requestId,
+      const IoRequest& request) override;
   std::vector<BackendCompletion> reap() override;
 
  private:
