@@ -189,6 +189,7 @@ run_one_suite() {
   #   --ro-bind $SPARK_HOME : re-expose SPARK_HOME, otherwise --tmpfs /tmp would hide it.
   local overlay_args=()
   [[ -n "$tc" ]] && overlay_args=(--overlay-src "$tc" --tmp-overlay "$tc")
+  local rc=0
   # shellcheck disable=SC2086
   bwrap \
     --dev-bind / / --tmpfs /tmp \
@@ -204,12 +205,17 @@ run_one_suite() {
     -DargLine="-Dspark.test.home=$SPARK_HOME" \
     -Dtest="$suite" -DwildcardSuites="$suite" \
     -DtagsToExclude=org.apache.gluten.tags.UDFTest,org.apache.gluten.tags.EnhancedFeaturesTest,org.apache.gluten.tags.SkipTest \
-    > "$log" 2>&1 || true
+    > "$log" 2>&1 || rc=$?
   local secs=$(($(date +%s) - t0))
   local cases
   cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
     | grep -oE 'Total number of tests run: [0-9]+' | tail -1 \
     | grep -oE '[0-9]+')
+  # Trailing marker line for summary: distinguishes "mvn died before scalatest"
+  # (rc != 0, no FAILED / ABORTED markers in the log) from "scalatest ran and
+  # the suite passed" (rc == 0 because -Dmaven.test.failure.ignore=true; case
+  # failures still show up as `*** FAILED ***` lines).
+  echo "GLUTEN_UT_MVN_RC=$rc" >> "$log"
   # FD 3 = the parent's original stdout (terminal); see `exec 3>&1` below.
   printf '  done [%4ds, %4s cases] %s\n' "$secs" "${cases:-?}" "$suite" >&3
   printf 'finished\t%s\n' "$suite"
@@ -247,9 +253,14 @@ done
 wait $DISPATCH_PID || true
 
 step "Summary"
-# Walk each per-suite log; turn FAILED / ABORTED scalatest markers into
-# `<FQCN>#<case>` / `<FQCN>#(aborted)` keys and grep -Fxq against blacklist.txt.
-# Detailed failure messages live in $LOG_DIR/<suite>.log.
+# Walk each per-suite log and emit one key per failure:
+#   <FQCN>#<case>        — scalatest "*** FAILED ***" line
+#   <FQCN>#(aborted)     — scalatest "*** ABORTED ***" line
+#   <FQCN>#(mvn-failed)  — mvn itself died before scalatest could run (e.g.
+#                          compile error, missing dep, bwrap crash); recorded
+#                          via the GLUTEN_UT_MVN_RC trailer that
+#                          run_one_suite appends to every log.
+# Each key is grep -Fxq'd against blacklist.txt; unmatched → unexpected.
 declare -A fired
 expected=0
 unexpected=0
@@ -260,6 +271,8 @@ for log in "$LOG_DIR"/*.log; do
   clean=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")
   keys=$(echo "$clean" | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/'"$suite"'#\1/p')
   echo "$clean" | grep -q '\*\*\* ABORTED \*\*\*' && keys+=$'\n'"$suite#(aborted)"
+  rc=$(grep -m1 '^GLUTEN_UT_MVN_RC=' "$log" | cut -d= -f2)
+  [[ -n "$rc" && "$rc" != "0" ]] && keys+=$'\n'"$suite#(mvn-failed)"
   while IFS= read -r key; do
     [[ -z "$key" ]] && continue
     if grep -Fxq -- "$key" "$BLACKLIST_FILE"; then
