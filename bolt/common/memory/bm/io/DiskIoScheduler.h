@@ -58,6 +58,8 @@ class DiskIoScheduler {
   std::optional<size_t> pickQueueLocked();
   bool dispatchOneLocked();
   void reapCompletionsLocked();
+  DiskIoSchedulerStats snapshotStatsLocked() const;
+  void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
 
   const DiskIoSchedulerConfig config_;
   AdaptiveDepthController adaptiveDepth_;
@@ -72,6 +74,7 @@ class DiskIoScheduler {
   size_t nextPriorityCursor_{0};
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;
+  std::chrono::steady_clock::time_point lastStatsLogTime_;
   std::thread worker_;
   std::mutex joinMutex_;
 };
