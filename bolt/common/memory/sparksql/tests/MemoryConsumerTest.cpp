@@ -94,6 +94,14 @@ TEST_F(MemoryConsumerTest, basic) {
   BOLT_CHECK(memoryPool->memoryUsed() == 0, "Expect free all memory");
 }
 
+TEST_F(MemoryConsumerTest, debugStringDoesNotRequireGlobalInitialization) {
+  EXPECT_FALSE(ExecutionMemoryPool::inited());
+  EXPECT_NO_THROW({
+    const auto detail = ExecutionMemoryPool::debugString();
+    EXPECT_FALSE(detail.empty());
+  });
+}
+
 TEST_F(MemoryConsumerTest, multiTask) {
   const int runs = 10;
   for (int run = 0; run < runs; ++run) {
@@ -320,6 +328,104 @@ TEST_F(MemoryConsumerTest, multiConsumer) {
         consumeMem[i]);
     consumers[i]->freeMemory(consumeMem[i]);
   }
+}
+
+TEST_F(MemoryConsumerTest, scopedDisableDynamicMemoryQuotaManagerForTask) {
+  DynamicMemoryQuotaManagerOption option;
+  option.enable = true;
+  option.quotaTriggerRatio = 0.0;
+  option.rssMinRatio = 0.0;
+  option.rssMaxRatio = 0.0;
+  option.extendMinRatio = 2.0;
+  option.extendMaxRatio = 2.0;
+  option.extendScaleRatio = 1.0;
+  option.sampleRatio = 1.0;
+  option.sampleSize = 1;
+  option.changeThresholdRatio = 0.0;
+  option.logPrintFreq = 0.0;
+
+  constexpr int64_t kTaskAttemptId = 7;
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>(1, option);
+  memoryPool->setPoolSize(100);
+
+  EXPECT_EQ(memoryPool->acquireMemory(100, kTaskAttemptId), 100);
+
+  {
+    auto scopedDisable =
+        memoryPool->scopedDisableDynamicMemoryQuotaManagerForTask(
+            kTaskAttemptId);
+    EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 0);
+  }
+
+  EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 1);
+}
+
+TEST_F(
+    MemoryConsumerTest,
+    scopedDisableDynamicMemoryQuotaManagerForTaskSupportsNesting) {
+  DynamicMemoryQuotaManagerOption option;
+  option.enable = true;
+  option.quotaTriggerRatio = 0.0;
+  option.rssMinRatio = 0.0;
+  option.rssMaxRatio = 0.0;
+  option.extendMinRatio = 2.0;
+  option.extendMaxRatio = 2.0;
+  option.extendScaleRatio = 1.0;
+  option.sampleRatio = 1.0;
+  option.sampleSize = 1;
+  option.changeThresholdRatio = 0.0;
+  option.logPrintFreq = 0.0;
+
+  constexpr int64_t kTaskAttemptId = 7;
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>(1, option);
+  memoryPool->setPoolSize(100);
+
+  EXPECT_EQ(memoryPool->acquireMemory(100, kTaskAttemptId), 100);
+
+  auto outerScopedDisable =
+      memoryPool->scopedDisableDynamicMemoryQuotaManagerForTask(kTaskAttemptId);
+  {
+    auto innerScopedDisable =
+        memoryPool->scopedDisableDynamicMemoryQuotaManagerForTask(
+            kTaskAttemptId);
+    EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 0);
+  }
+
+  EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 0);
+}
+
+TEST_F(
+    MemoryConsumerTest,
+    scopedDisableDynamicMemoryQuotaManagerForTaskSurvivesReleaseAllMemory) {
+  DynamicMemoryQuotaManagerOption option;
+  option.enable = true;
+  option.quotaTriggerRatio = 0.0;
+  option.rssMinRatio = 0.0;
+  option.rssMaxRatio = 0.0;
+  option.extendMinRatio = 2.0;
+  option.extendMaxRatio = 2.0;
+  option.extendScaleRatio = 1.0;
+  option.sampleRatio = 1.0;
+  option.sampleSize = 1;
+  option.changeThresholdRatio = 0.0;
+  option.logPrintFreq = 0.0;
+
+  constexpr int64_t kTaskAttemptId = 7;
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>(1, option);
+  memoryPool->setPoolSize(100);
+
+  EXPECT_EQ(memoryPool->acquireMemory(100, kTaskAttemptId), 100);
+
+  {
+    auto scopedDisable =
+        memoryPool->scopedDisableDynamicMemoryQuotaManagerForTask(
+            kTaskAttemptId);
+    EXPECT_EQ(memoryPool->releaseMemory(100, kTaskAttemptId), 100);
+
+    EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 0);
+  }
+
+  EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 1);
 }
 
 } // namespace bytedance::bolt::memory::sparksql

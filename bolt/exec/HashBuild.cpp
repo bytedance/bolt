@@ -32,6 +32,7 @@
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 #include "bolt/common/base/Counters.h"
 #include "bolt/common/base/Exceptions.h"
@@ -1105,7 +1106,9 @@ bool HashBuild::finishHashBuild() {
     otherBuilds.push_back(build);
   }
 
-  ensureTableFits(numRows);
+  const uint64_t probeReservationBytes =
+      probeAdmissionExtraReservationBytes(numRows);
+  ensureTableFits(numRows, probeReservationBytes);
 
   std::vector<std::unique_ptr<BaseHashTable>> otherTables;
   otherTables.reserve(peers.size());
@@ -1228,7 +1231,6 @@ bool HashBuild::finishHashBuild() {
       }
     }
   }
-
   if (joinBridge_->setHashTable(
           std::move(table_),
           std::move(spillPartitions),
@@ -1241,6 +1243,52 @@ bool HashBuild::finishHashBuild() {
   // table build.
   pool()->release();
   return true;
+}
+
+uint64_t HashBuild::probeAdmissionExtraReservationBytes(
+    uint64_t numRows) const {
+  const bool notReadyForProbeAdmission =
+      !operatorCtx_->driverCtx()
+           ->queryConfig()
+           .hashBuildProbeAdmissionUnderMemoryPressureEnabled() ||
+      !spillEnabled() || isInputFromSpill() || numRows == 0;
+  const bool spillUnavailable = spiller_ == nullptr ||
+      spiller_->isAllSpilled() || exceededMaxSpillLevelLimit_;
+  if (notReadyForProbeAdmission || spillUnavailable) {
+    return 0;
+  }
+
+  const auto currentBytes = pool()->currentBytes();
+  const auto* task = operatorCtx_->task().get();
+  const auto pressure = task->memoryPressureSnapshot();
+  const auto pressureWatermarkBytes = pressure.admissionWatermarkBytes();
+  // Reclaim records a task-level pressure watermark. Borrow-from-RSS records
+  // the current task's execution memory usage at the point dynamic memory
+  // management is triggered. Taking the minimum non-zero watermark makes the
+  // earliest pressure signal drive a stronger pre-probe admission reservation
+  // while the build side can still spill.
+  LOG(INFO) << name() << " probeAdmissionExtraReservationBytes: currentBytes="
+            << succinctBytes(currentBytes) << ", reclaimWatermarkBytes="
+            << succinctBytes(pressure.reclaimWatermarkBytes)
+            << ", borrowFromRssWatermarkBytes="
+            << succinctBytes(pressure.borrowFromRssWatermarkBytes)
+            << ", pressureWatermarkBytes="
+            << succinctBytes(pressureWatermarkBytes) << ", details "
+            << task->memoryPressureDetails();
+  if (pressureWatermarkBytes != 0 &&
+      currentBytes > pressureWatermarkBytes *
+              operatorCtx_->driverCtx()
+                  ->queryConfig()
+                  .memoryPressureWatermarkRatio()) {
+    return pressureWatermarkBytes;
+  }
+
+  const uint64_t probeReservationLimit =
+      operatorCtx_->driverCtx()->queryConfig().preferredOutputBatchBytes() *
+      operatorCtx_->driverCtx()
+          ->queryConfig()
+          .outputBatchMemoryReservationMultiple();
+  return std::min<uint64_t>(currentBytes / 2, probeReservationLimit);
 }
 
 void HashBuild::recordSpillStats() {
@@ -1270,7 +1318,9 @@ void HashBuild::recordSpillStats(Spiller* spiller) {
   }
 }
 
-void HashBuild::ensureTableFits(uint64_t numRows) {
+void HashBuild::ensureTableFits(
+    uint64_t numRows,
+    uint64_t extraReservationBytes) {
   // NOTE: we don't need memory reservation if all the partitions have been
   // spilled as nothing need to be built.
   if (!spillEnabled() || spiller_ == nullptr || spiller_->isAllSpilled() ||
@@ -1280,11 +1330,29 @@ void HashBuild::ensureTableFits(uint64_t numRows) {
 
   // NOTE: reserve a bit more memory to consider the extra memory used for
   // parallel table build operation.
-  const uint64_t bytesToReserve = table_->estimateHashTableSize(numRows) * 1.1;
+  const uint64_t tableBytesToReserve =
+      table_->estimateHashTableSize(numRows) * 1.1;
+  const uint64_t bytesToReserve = tableBytesToReserve + extraReservationBytes;
+
   {
     Operator::ReclaimableSectionGuard guard(this);
     BOLT_TEST_ADJUST("bytedance::bolt::exec::HashBuild::ensureTableFits", this);
+    const auto scopedDisableMemoryExpansion =
+        operatorCtx_->task()->maybeScopedDisableMemoryExpansion();
+    LOG(INFO) << name() << " ensureTableFits: try to reserve "
+              << succinctBytes(bytesToReserve) << " for hash table, "
+              << "tableReservation=" << succinctBytes(tableBytesToReserve)
+              << ", probeExtraReservation="
+              << succinctBytes(extraReservationBytes) << ", " << pool()->name()
+              << "[" << succinctBytes(pool()->currentBytes()) << ", "
+              << succinctBytes(pool()->reservedBytes()) << ", "
+              << succinctBytes(pool()->capacity()) << "]"
+              << ", memoryPressure="
+              << operatorCtx_->task()->memoryPressureDetails();
     if (pool()->maybeReserve(bytesToReserve)) {
+      if (spiller_->isAllSpilled()) {
+        pool()->release();
+      }
       return;
     }
   }
@@ -1293,7 +1361,10 @@ void HashBuild::ensureTableFits(uint64_t numRows) {
                << succinctBytes(bytesToReserve) << " for memory pool "
                << pool()->name()
                << ", usage: " << succinctBytes(pool()->currentBytes())
-               << ", reservation: " << succinctBytes(pool()->reservedBytes());
+               << ", reservation: " << succinctBytes(pool()->reservedBytes())
+               << ", tableReservation=" << succinctBytes(tableBytesToReserve)
+               << ", probeExtraReservation="
+               << succinctBytes(extraReservationBytes);
 }
 
 void HashBuild::postHashBuildProcess() {

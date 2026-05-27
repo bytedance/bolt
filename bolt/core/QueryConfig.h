@@ -440,6 +440,21 @@ class QueryConfig {
   static constexpr const char* kHashProbeFinishEarlyOnEmptyBuild =
       "hash_probe_finish_early_on_empty_build";
 
+  /// If true, reserve extra hash build memory for probe admission when the task
+  /// is under memory pressure.
+  static constexpr const char* kHashBuildProbeAdmissionUnderMemoryPressure =
+      "hash_build_probe_admission_under_memory_pressure_enabled";
+
+  /// The multiple of preferred output batch size used to reserve enough memory
+  /// for output.
+  static constexpr const char* kOutputBatchMemoryReservationMultiple =
+      "output_batch_memory_reservation_multiple";
+
+  /// The ratio used to decide whether current memory usage is close enough to
+  /// the memory pressure watermark.
+  static constexpr const char* kMemoryPressureWatermarkRatio =
+      "memory_pressure_watermark_ratio";
+
   /// The minimum number of table rows that can trigger the parallel hash join
   /// table build.
   static constexpr const char* kMinTableRowsForParallelJoinBuild =
@@ -1417,6 +1432,18 @@ class QueryConfig {
 
   bool hashProbeFinishEarlyOnEmptyBuild() const {
     return get<bool>(kHashProbeFinishEarlyOnEmptyBuild, true);
+  }
+
+  bool hashBuildProbeAdmissionUnderMemoryPressureEnabled() const {
+    return get<bool>(kHashBuildProbeAdmissionUnderMemoryPressure, true);
+  }
+
+  uint64_t outputBatchMemoryReservationMultiple() const {
+    return get<uint64_t>(kOutputBatchMemoryReservationMultiple, 8);
+  }
+
+  double memoryPressureWatermarkRatio() const {
+    return get<double>(kMemoryPressureWatermarkRatio, 0.7);
   }
 
   uint32_t minTableRowsForParallelJoinBuild() const {
