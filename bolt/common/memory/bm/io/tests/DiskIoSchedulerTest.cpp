@@ -13,9 +13,11 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -156,6 +158,48 @@ class FailingSubmitBackend : public IoBackend {
   }
 
  private:
+  std::atomic<uint64_t> submitAttempts_{0};
+};
+
+class BlockingReapBackend : public IoBackend {
+ public:
+  bool submit(uint64_t /*requestId*/, const IoRequest& /*request*/) override {
+    submitAttempts_.fetch_add(1);
+    return false;
+  }
+
+  std::vector<BackendCompletion> reap() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!enteredReap_) {
+      enteredReap_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [this] { return allowReapReturn_; });
+    }
+    return {};
+  }
+
+  bool waitUntilEnteredReap() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, kFutureTimeout, [this] { return enteredReap_; });
+  }
+
+  void unblockReap() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      allowReapReturn_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  uint64_t submitAttempts() const {
+    return submitAttempts_.load();
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  bool enteredReap_{false};
+  bool allowReapReturn_{false};
   std::atomic<uint64_t> submitAttempts_{0};
 };
 
@@ -339,6 +383,28 @@ TEST(DiskIoSchedulerTest, fixedDepthOneKeepsSecondRequestQueued) {
   backendPtr->complete(2, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(second));
   EXPECT_EQ(IoErrorCode::Ok, second.get().error);
+}
+
+TEST(DiskIoSchedulerTest, submitDoesNotWaitForBackendReap) {
+  auto backend = std::make_unique<BlockingReapBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+  ASSERT_TRUE(backendPtr->waitUntilEnteredReap());
+
+  auto submitFuture = std::async(std::launch::async, [&scheduler] {
+    return scheduler.submit(makeValidRequest());
+  });
+
+  const auto submitStatus = submitFuture.wait_for(std::chrono::milliseconds(50));
+
+  backendPtr->unblockReap();
+  ASSERT_EQ(std::future_status::ready, submitStatus);
+  auto ioFuture = submitFuture.get();
+  scheduler.stopAndDrain();
+
+  EXPECT_EQ(1, backendPtr->submitAttempts());
+  ASSERT_TRUE(waitUntilReady(ioFuture));
+  EXPECT_EQ(IoErrorCode::BackendSubmitFailed, ioFuture.get().error);
 }
 
 TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {

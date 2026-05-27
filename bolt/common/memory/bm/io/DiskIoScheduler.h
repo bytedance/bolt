@@ -11,6 +11,7 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "bolt/common/memory/bm/io/AdaptiveDepthController.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
@@ -50,14 +51,31 @@ class DiskIoScheduler {
     std::chrono::steady_clock::time_point submitTime;
   };
 
+  struct ReadyResult {
+    std::promise<IoResult> promise;
+    IoResult result;
+  };
+
+  struct DispatchResult {
+    QueuedRequest queued;
+    bool submitted{false};
+    std::chrono::steady_clock::time_point submitTime;
+  };
+
   static std::future<IoResult> completedFuture(IoResult result);
+  static void fulfillReadyResults(std::vector<ReadyResult>& readyResults);
 
   void run();
   bool hasQueuedRequestsLocked() const;
   bool drainedLocked() const;
   std::optional<size_t> pickQueueLocked();
-  bool dispatchOneLocked();
-  void reapCompletionsLocked();
+  std::vector<QueuedRequest> collectDispatchBatchLocked();
+  void applyDispatchResultsLocked(
+      std::vector<DispatchResult>& results,
+      std::vector<ReadyResult>& readyResults);
+  void applyCompletionsLocked(
+      std::vector<BackendCompletion>& completions,
+      std::vector<ReadyResult>& readyResults);
   DiskIoSchedulerStats snapshotStatsLocked() const;
   void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
 
