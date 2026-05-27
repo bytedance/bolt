@@ -2,6 +2,7 @@
 
 #include <array>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <future>
@@ -11,6 +12,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "bolt/common/memory/bm/AdaptiveDepthController.h"
 #include "bolt/common/memory/bm/DiskIoTypes.h"
 #include "bolt/common/memory/bm/IoBackend.h"
 
@@ -41,6 +43,7 @@ class DiskIoScheduler {
   struct InflightRequest {
     IoPriority priority{IoPriority::Medium};
     std::promise<IoResult> promise;
+    std::chrono::steady_clock::time_point submitTime;
   };
 
   static std::future<IoResult> completedFuture(IoResult result);
@@ -51,9 +54,11 @@ class DiskIoScheduler {
   std::optional<size_t> pickQueueLocked();
   bool dispatchOneLocked();
   void reapCompletionsLocked();
+  void updateAdaptiveDepthLocked(std::chrono::steady_clock::time_point now);
 
   const DiskIoSchedulerConfig config_;
-  const uint32_t currentDepth_;
+  AdaptiveDepthController adaptiveDepth_;
+  uint32_t currentDepth_{0};
   std::unique_ptr<IoBackend> backend_;
 
   mutable std::mutex mutex_;
@@ -65,6 +70,9 @@ class DiskIoScheduler {
   size_t nextPriorityCursor_{0};
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;
+  std::chrono::steady_clock::time_point windowStart_;
+  uint64_t windowCompletedBytes_{0};
+  uint64_t cumulativeLatencyUs_{0};
   std::thread worker_;
   std::mutex joinMutex_;
 };

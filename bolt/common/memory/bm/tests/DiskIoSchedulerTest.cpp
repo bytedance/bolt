@@ -52,6 +52,18 @@ bool waitUntilReady(std::future<IoResult>& future) {
   return future.wait_for(kFutureTimeout) == std::future_status::ready;
 }
 
+bool waitUntilCurrentDepth(DiskIoScheduler& scheduler, uint32_t expected) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (scheduler.stats().currentDepth >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
 void submitBalancedRequests(
     DiskIoScheduler& scheduler,
     std::vector<std::future<IoResult>>& futures,
@@ -219,12 +231,24 @@ TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
       backend.complete(11, IoResult{4096, 0}), "unknown requestId");
 }
 
-TEST(DiskIoSchedulerTest, facadeConstructorRequiresDefaultBackend) {
+TEST(DiskIoSchedulerTest, facadeConstructorUsesDefaultBackendWhenSupported) {
   DiskIoSchedulerConfig config;
 
+#ifdef IO_URING_SUPPORTED
+  try {
+    DiskIoScheduler scheduler(config);
+    scheduler.stopAndDrain();
+  } catch (const std::exception& ex) {
+    EXPECT_NE(
+        std::string(ex.what()).find("Operation not permitted"),
+        std::string::npos)
+        << ex.what();
+  }
+#else
   BOLT_ASSERT_THROW(
       [&] { DiskIoScheduler scheduler(config); }(),
       "DiskIoScheduler default constructor requires IoUringBackend");
+#endif
 }
 
 TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
@@ -442,6 +466,46 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   EXPECT_EQ(0, stats.failedRequests);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::High)]);
+}
+
+TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklog) {
+  auto backend = std::make_unique<MockIoBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoSchedulerConfig config;
+  config.ringDepth = 4;
+  config.adaptiveDepth.minDepth = 1;
+  config.adaptiveDepth.initialDepth = 1;
+  config.adaptiveDepth.maxDepth = 4;
+  config.adaptiveDepth.controlInterval = std::chrono::milliseconds(1);
+  config.adaptiveDepth.increaseStep = 1;
+  config.adaptiveDepth.minThroughputGain = 0.0;
+  DiskIoScheduler scheduler(config, std::move(backend));
+
+  std::vector<std::future<IoResult>> futures;
+  futures.reserve(4);
+  for (int i = 0; i < 4; ++i) {
+    futures.push_back(scheduler.submit(makeValidRequest(IoPriority::Medium)));
+  }
+
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  backendPtr->complete(1, IoResult{4096, 0});
+
+  ASSERT_TRUE(waitUntilReady(futures[0]));
+  EXPECT_EQ(0, futures[0].get().errorCode);
+  ASSERT_TRUE(waitUntilCurrentDepth(scheduler, 2));
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(2, stats.currentDepth);
+  EXPECT_GT(stats.recentThroughputBytesPerSecond, 0);
+
+  size_t completedSubmissions = 1;
+  completeAllSubmittedRequests(
+      *backendPtr, completedSubmissions, futures.size());
+  for (size_t i = 1; i < futures.size(); ++i) {
+    ASSERT_TRUE(waitUntilReady(futures[i]));
+    EXPECT_EQ(0, futures[i].get().errorCode);
+  }
 }
 
 TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
