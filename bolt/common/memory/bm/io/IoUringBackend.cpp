@@ -29,10 +29,12 @@ IoUringBackend::~IoUringBackend() {
   }
 }
 
-bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
+BackendSubmitStatus IoUringBackend::submit(
+    uint64_t requestId,
+    const IoRequest& request) {
   auto* sqe = io_uring_get_sqe(&state_->ring);
   if (sqe == nullptr) {
-    return false;
+    return BackendSubmitStatus::RetryableBusy;
   }
 
   auto* base =
@@ -47,7 +49,8 @@ bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
   sqe->user_data = requestId;
 
   const int ret = io_uring_submit(&state_->ring);
-  return ret >= 0;
+  return ret >= 0 ? BackendSubmitStatus::Submitted
+                  : BackendSubmitStatus::Failed;
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {
@@ -81,10 +84,12 @@ IoUringBackend::IoUringBackend(uint32_t ringDepth) {
 
 IoUringBackend::~IoUringBackend() = default;
 
-bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
+BackendSubmitStatus IoUringBackend::submit(
+    uint64_t requestId,
+    const IoRequest& request) {
   (void)requestId;
   (void)request;
-  return false;
+  return BackendSubmitStatus::Failed;
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {

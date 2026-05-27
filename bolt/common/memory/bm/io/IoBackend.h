@@ -13,6 +13,14 @@ struct BackendCompletion {
   IoResult result;
 };
 
+enum class BackendSubmitStatus : uint8_t {
+  Submitted,
+  // Temporary backend backpressure, for example an io_uring SQ with no free
+  // SQE. The scheduler should retry later instead of failing the request.
+  RetryableBusy,
+  Failed,
+};
+
 class IoBackend {
  public:
   virtual ~IoBackend() = default;
@@ -22,7 +30,9 @@ class IoBackend {
   // and they must not depend on the scheduler mutex being held: backend work
   // may enter the kernel or scan many completions, so the scheduler keeps its
   // own lock out of this interface to preserve lightweight enqueue semantics.
-  virtual bool submit(uint64_t requestId, const IoRequest& request) = 0;
+  virtual BackendSubmitStatus submit(
+      uint64_t requestId,
+      const IoRequest& request) = 0;
   virtual std::vector<BackendCompletion> reap() = 0;
 };
 

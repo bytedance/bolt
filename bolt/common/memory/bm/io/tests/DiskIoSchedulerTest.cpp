@@ -144,9 +144,11 @@ void expectWeightedWindow(
 
 class FailingSubmitBackend : public IoBackend {
  public:
-  bool submit(uint64_t /*requestId*/, const IoRequest& /*request*/) override {
+  BackendSubmitStatus submit(
+      uint64_t /*requestId*/,
+      const IoRequest& /*request*/) override {
     ++submitAttempts_;
-    return false;
+    return BackendSubmitStatus::Failed;
   }
 
   std::vector<BackendCompletion> reap() override {
@@ -163,9 +165,11 @@ class FailingSubmitBackend : public IoBackend {
 
 class BlockingReapBackend : public IoBackend {
  public:
-  bool submit(uint64_t /*requestId*/, const IoRequest& /*request*/) override {
+  BackendSubmitStatus submit(
+      uint64_t /*requestId*/,
+      const IoRequest& /*request*/) override {
     submitAttempts_.fetch_add(1);
-    return false;
+    return BackendSubmitStatus::Failed;
   }
 
   std::vector<BackendCompletion> reap() override {
@@ -200,6 +204,69 @@ class BlockingReapBackend : public IoBackend {
   std::condition_variable cv_;
   bool enteredReap_{false};
   bool allowReapReturn_{false};
+  std::atomic<uint64_t> submitAttempts_{0};
+};
+
+class BusyOnceBackend : public IoBackend {
+ public:
+  BackendSubmitStatus submit(
+      uint64_t requestId,
+      const IoRequest& request) override {
+    submittedRequestId_ = requestId;
+    priority_ = request.priority;
+    ++submitAttempts_;
+    if (submitAttempts_.load() == 1) {
+      return BackendSubmitStatus::RetryableBusy;
+    }
+    submitted_ = true;
+    return BackendSubmitStatus::Submitted;
+  }
+
+  std::vector<BackendCompletion> reap() override {
+    if (!submitted_ || completed_) {
+      return {};
+    }
+    completed_ = true;
+    std::vector<BackendCompletion> completions;
+    completions.push_back(
+        BackendCompletion{submittedRequestId_, IoResult{4096}});
+    return completions;
+  }
+
+  uint64_t submitAttempts() const {
+    return submitAttempts_.load();
+  }
+
+  IoPriority priority() const {
+    return priority_;
+  }
+
+ private:
+  std::atomic<uint64_t> submitAttempts_{0};
+  uint64_t submittedRequestId_{0};
+  IoPriority priority_{IoPriority::Medium};
+  bool submitted_{false};
+  bool completed_{false};
+};
+
+class NeverCompleteBackend : public IoBackend {
+ public:
+  BackendSubmitStatus submit(
+      uint64_t /*requestId*/,
+      const IoRequest& /*request*/) override {
+    ++submitAttempts_;
+    return BackendSubmitStatus::Submitted;
+  }
+
+  std::vector<BackendCompletion> reap() override {
+    return {};
+  }
+
+  uint64_t submitAttempts() const {
+    return submitAttempts_.load();
+  }
+
+ private:
   std::atomic<uint64_t> submitAttempts_{0};
 };
 
@@ -253,8 +320,8 @@ TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
   request.fd = 7;
   request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
 
-  EXPECT_TRUE(backend.submit(11, request));
-  EXPECT_TRUE(backend.submit(12, request));
+  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
+  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(12, request));
   auto submitted = backend.submitted();
   ASSERT_EQ(2, submitted.size());
   EXPECT_EQ(11, submitted[0].requestId);
@@ -275,8 +342,8 @@ TEST(MockIoBackendTest, duplicateSubmitReturnsFalseAndDoesNotRecord) {
   request.fd = 7;
   request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
 
-  EXPECT_TRUE(backend.submit(11, request));
-  EXPECT_FALSE(backend.submit(11, request));
+  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
+  EXPECT_EQ(BackendSubmitStatus::Failed, backend.submit(11, request));
 
   auto submitted = backend.submitted();
   ASSERT_EQ(1, submitted.size());
@@ -641,6 +708,54 @@ TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::Low)]);
 }
 
+TEST(DiskIoSchedulerTest, retryableBackendBusyDoesNotFailRequest) {
+  auto backend = std::make_unique<BusyOnceBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+
+  EXPECT_EQ(2, backendPtr->submitAttempts());
+  EXPECT_EQ(IoPriority::Low, backendPtr->priority());
+  EXPECT_EQ(4096, result.bytes);
+  EXPECT_EQ(IoErrorCode::Ok, result.error);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(1, stats.completedRequests);
+  EXPECT_EQ(1, stats.successfulRequests);
+  EXPECT_EQ(0, stats.backendSubmitFailedRequests);
+  EXPECT_EQ(0, stats.failedRequests);
+}
+
+TEST(DiskIoSchedulerTest, stopAndDrainTimesOutInflightRequests) {
+  auto backend = std::make_unique<NeverCompleteBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoSchedulerConfig config;
+  config.drainTimeout = std::chrono::milliseconds(5);
+  DiskIoScheduler scheduler(config, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::High));
+  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
+  while (backendPtr->submitAttempts() == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(1, backendPtr->submitAttempts());
+
+  scheduler.stopAndDrain();
+
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+  EXPECT_EQ(0, result.bytes);
+  EXPECT_EQ(IoErrorCode::Shutdown, result.error);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(0, stats.inflightRequests);
+  EXPECT_EQ(1, stats.failedRequests);
+}
+
 TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
@@ -670,6 +785,15 @@ TEST(DiskIoSchedulerTest, statsLoggingConfigRejectsNonPositiveInterval) {
   DiskIoSchedulerConfig config;
   config.enableStatsLogging = true;
   config.statsLogInterval = std::chrono::milliseconds(0);
+
+  EXPECT_EQ(
+      IoErrorCode::InvalidRequest,
+      validateDiskIoSchedulerConfig(config));
+}
+
+TEST(DiskIoSchedulerTest, drainTimeoutConfigRejectsNonPositiveInterval) {
+  DiskIoSchedulerConfig config;
+  config.drainTimeout = std::chrono::milliseconds(0);
 
   EXPECT_EQ(
       IoErrorCode::InvalidRequest,

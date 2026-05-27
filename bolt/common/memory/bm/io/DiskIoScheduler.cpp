@@ -121,6 +121,9 @@ void DiskIoScheduler::stopAndDrain() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     stopping_ = true;
+    if (!drainDeadline_.has_value()) {
+      drainDeadline_ = std::chrono::steady_clock::now() + config_.drainTimeout;
+    }
   }
   cv_.notify_one();
 
@@ -167,10 +170,19 @@ void DiskIoScheduler::run() {
     std::vector<QueuedRequest> dispatchBatch;
     bool madeProgress = !completions.empty();
     bool shouldExit = false;
+    const auto now = std::chrono::steady_clock::now();
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       applyCompletionsLocked(completions, readyResults);
+      if (stopping_ && drainDeadline_.has_value() &&
+          now >= *drainDeadline_ && !drainedLocked()) {
+        // stopAndDrain() is often called from destructors. If the backend never
+        // produces completions, waiting forever would hang teardown and leave
+        // user futures blocked, so outstanding work is failed once the
+        // configured drain deadline expires.
+        failOutstandingLocked(readyResults);
+      }
       dispatchBatch = collectDispatchBatchLocked();
       madeProgress = madeProgress || !dispatchBatch.empty();
       shouldExit = stopping_ && drainedLocked() && dispatchBatch.empty();
@@ -183,9 +195,9 @@ void DiskIoScheduler::run() {
       // remain a lightweight enqueue operation even if the backend enters the
       // kernel or spends time scanning completions.
       const auto submitTime = std::chrono::steady_clock::now();
-      const bool submitted = backend_->submit(queued.requestId, queued.request);
+      const auto status = backend_->submit(queued.requestId, queued.request);
       dispatchResults.push_back(
-          DispatchResult{std::move(queued), submitted, submitTime});
+          DispatchResult{std::move(queued), status, submitTime});
     }
 
     {
@@ -301,7 +313,15 @@ void DiskIoScheduler::applyDispatchResultsLocked(
     std::vector<ReadyResult>& readyResults) {
   for (auto& dispatch : results) {
     const auto priority = priorityIndex(dispatch.queued.request.priority);
-    if (!dispatch.submitted) {
+    if (dispatch.status == BackendSubmitStatus::RetryableBusy) {
+      // A full SQ is backpressure, not user-visible IO failure. Put the request
+      // back at the head so the next worker iteration can retry after reaping.
+      auto& queue = queues_[priority];
+      queue.push_front(std::move(dispatch.queued));
+      stats_.queuedRequests[priority] = queue.size();
+      continue;
+    }
+    if (dispatch.status == BackendSubmitStatus::Failed) {
       IoResult result{0, IoErrorCode::BackendSubmitFailed};
       result.buffer = std::move(dispatch.queued.request.buffer);
       readyResults.push_back(
@@ -386,6 +406,42 @@ void DiskIoScheduler::applyCompletionsLocked(
     readyResults.push_back(
         ReadyResult{std::move(inflight.promise), std::move(result)});
   }
+}
+
+void DiskIoScheduler::failOutstandingLocked(
+    std::vector<ReadyResult>& readyResults) {
+  for (size_t priority = 0; priority < kIoPriorityCount; ++priority) {
+    auto& queue = queues_[priority];
+    while (!queue.empty()) {
+      auto queued = std::move(queue.front());
+      queue.pop_front();
+      IoResult result{0, IoErrorCode::Shutdown};
+      result.buffer = std::move(queued.request.buffer);
+      readyResults.push_back(
+          ReadyResult{std::move(queued.promise), std::move(result)});
+      ++stats_.completedRequests;
+      ++stats_.completedRequestsByPriority[priority];
+      ++stats_.failedRequests;
+      ++stats_.failedRequestsByPriority[priority];
+    }
+    stats_.queuedRequests[priority] = 0;
+    deficits_[priority] = 0;
+  }
+
+  for (auto& [requestId, inflight] : inflight_) {
+    (void)requestId;
+    const auto priority = priorityIndex(inflight.request.priority);
+    IoResult result{0, IoErrorCode::Shutdown};
+    result.buffer = std::move(inflight.request.buffer);
+    readyResults.push_back(
+        ReadyResult{std::move(inflight.promise), std::move(result)});
+    ++stats_.completedRequests;
+    ++stats_.completedRequestsByPriority[priority];
+    ++stats_.failedRequests;
+    ++stats_.failedRequestsByPriority[priority];
+  }
+  inflight_.clear();
+  stats_.inflightRequests = 0;
 }
 
 } // namespace bytedance::bolt::memory::bm

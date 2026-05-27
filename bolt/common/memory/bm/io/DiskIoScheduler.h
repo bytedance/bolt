@@ -58,7 +58,7 @@ class DiskIoScheduler {
 
   struct DispatchResult {
     QueuedRequest queued;
-    bool submitted{false};
+    BackendSubmitStatus status{BackendSubmitStatus::Failed};
     std::chrono::steady_clock::time_point submitTime;
   };
 
@@ -76,6 +76,7 @@ class DiskIoScheduler {
   void applyCompletionsLocked(
       std::vector<BackendCompletion>& completions,
       std::vector<ReadyResult>& readyResults);
+  void failOutstandingLocked(std::vector<ReadyResult>& readyResults);
   DiskIoSchedulerStats snapshotStatsLocked() const;
   void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
 
@@ -86,6 +87,7 @@ class DiskIoScheduler {
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   bool stopping_{false};
+  std::optional<std::chrono::steady_clock::time_point> drainDeadline_;
   uint64_t nextRequestId_{1};
   std::array<std::deque<QueuedRequest>, kIoPriorityCount> queues_;
   std::array<int64_t, kIoPriorityCount> deficits_{{0, 0, 0}};

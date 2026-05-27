@@ -10,7 +10,8 @@ inline IoErrorCode validateDiskIoSchedulerConfig(
   if (config.ringDepth == 0) {
     return IoErrorCode::InvalidRequest;
   }
-  if (config.statsLogInterval.count() <= 0) {
+  if (config.statsLogInterval.count() <= 0 ||
+      config.drainTimeout.count() <= 0) {
     return IoErrorCode::InvalidRequest;
   }
   for (const auto weight : config.priorityWeights) {
