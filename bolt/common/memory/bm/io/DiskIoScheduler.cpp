@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <utility>
 
 #include <glog/logging.h>
@@ -50,6 +51,14 @@ std::future<IoResult> DiskIoScheduler::completedFuture(IoResult result) {
   return future;
 }
 
+void DiskIoScheduler::fulfillReadyResults(
+    std::vector<ReadyResult>& readyResults) {
+  for (auto& ready : readyResults) {
+    ready.promise.set_value(std::move(ready.result));
+  }
+  readyResults.clear();
+}
+
 std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   const auto validationError = validateIoRequest(request);
   if (validationError != IoErrorCode::Ok) {
@@ -70,6 +79,7 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
 
   std::promise<IoResult> promise;
   auto future = promise.get_future();
+  std::optional<IoResult> rejectedResult;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -81,22 +91,27 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
       ++stats_.failedRequestsByPriority[priorityIndex(request.priority)];
       IoResult result{0, IoErrorCode::Shutdown};
       result.buffer = std::move(request.buffer);
-      promise.set_value(std::move(result));
-      return future;
+      rejectedResult = std::move(result);
+    } else {
+      const auto priority = priorityIndex(request.priority);
+      queues_[priority].push_back(QueuedRequest{
+          nextRequestId_++, std::move(request), std::move(promise)});
+      stats_.queuedRequests[priority] = queues_[priority].size();
+      ++stats_.acceptedRequests;
+      uint64_t queued = 0;
+      for (const auto& queue : queues_) {
+        queued += queue.size();
+      }
+      stats_.maxObservedQueueDepth =
+          std::max(stats_.maxObservedQueueDepth, queued);
     }
-
-    const auto priority = priorityIndex(request.priority);
-    queues_[priority].push_back(QueuedRequest{
-        nextRequestId_++, std::move(request), std::move(promise)});
-    stats_.queuedRequests[priority] = queues_[priority].size();
-    ++stats_.acceptedRequests;
-    uint64_t queued = 0;
-    for (const auto& queue : queues_) {
-      queued += queue.size();
-    }
-    stats_.maxObservedQueueDepth =
-        std::max(stats_.maxObservedQueueDepth, queued);
   }
+
+  if (rejectedResult.has_value()) {
+    promise.set_value(std::move(*rejectedResult));
+    return future;
+  }
+
   cv_.notify_one();
 
   return future;
@@ -146,23 +161,51 @@ void DiskIoScheduler::logStatsIfDueLocked(
 }
 
 void DiskIoScheduler::run() {
-  std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
-    // The scheduler thread expects backend submit/reap to be nonblocking and
-    // callback-free; completions are observed by polling reap().
-    reapCompletionsLocked();
+    std::vector<ReadyResult> readyResults;
+    auto completions = backend_->reap();
+    std::vector<QueuedRequest> dispatchBatch;
+    bool madeProgress = !completions.empty();
+    bool shouldExit = false;
 
-    bool dispatched = false;
-    while (inflight_.size() < adaptiveDepth_.currentDepth() &&
-           hasQueuedRequestsLocked()) {
-      dispatched = dispatchOneLocked() || dispatched;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      applyCompletionsLocked(completions, readyResults);
+      dispatchBatch = collectDispatchBatchLocked();
+      madeProgress = madeProgress || !dispatchBatch.empty();
+      shouldExit = stopping_ && drainedLocked() && dispatchBatch.empty();
     }
 
-    if (stopping_ && drainedLocked()) {
+    std::vector<DispatchResult> dispatchResults;
+    dispatchResults.reserve(dispatchBatch.size());
+    for (auto& queued : dispatchBatch) {
+      // Backend calls are deliberately made without mutex_. submit() should
+      // remain a lightweight enqueue operation even if the backend enters the
+      // kernel or spends time scanning completions.
+      const auto submitTime = std::chrono::steady_clock::now();
+      const bool submitted = backend_->submit(queued.requestId, queued.request);
+      dispatchResults.push_back(
+          DispatchResult{std::move(queued), submitted, submitTime});
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      applyDispatchResultsLocked(dispatchResults, readyResults);
+      shouldExit = shouldExit || (stopping_ && drainedLocked());
+    }
+
+    // Fulfill futures after releasing mutex_. A waiting caller may immediately
+    // call back into submit()/stats(); doing set_value() under the scheduler
+    // lock would make that wake-up contend with the worker and can deadlock
+    // with future implementations that run continuations inline.
+    fulfillReadyResults(readyResults);
+
+    if (shouldExit) {
       return;
     }
 
-    if (dispatched || !inflight_.empty()) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (madeProgress || !inflight_.empty()) {
       cv_.wait_for(lock, kIdlePollInterval);
       logStatsIfDueLocked(std::chrono::steady_clock::now());
     } else {
@@ -231,47 +274,62 @@ std::optional<size_t> DiskIoScheduler::pickQueueLocked() {
   return std::nullopt;
 }
 
-bool DiskIoScheduler::dispatchOneLocked() {
-  const auto priority = pickQueueLocked();
-  if (!priority.has_value()) {
-    return false;
-  }
+std::vector<DiskIoScheduler::QueuedRequest>
+DiskIoScheduler::collectDispatchBatchLocked() {
+  std::vector<QueuedRequest> batch;
+  while (inflight_.size() + batch.size() < adaptiveDepth_.currentDepth() &&
+         hasQueuedRequestsLocked()) {
+    const auto priority = pickQueueLocked();
+    if (!priority.has_value()) {
+      break;
+    }
 
-  auto& queue = queues_[*priority];
-  auto queued = std::move(queue.front());
-  queue.pop_front();
-  stats_.queuedRequests[*priority] = queue.size();
-  if (queue.empty()) {
-    deficits_[*priority] = 0;
+    auto& queue = queues_[*priority];
+    auto queued = std::move(queue.front());
+    queue.pop_front();
+    stats_.queuedRequests[*priority] = queue.size();
+    if (queue.empty()) {
+      deficits_[*priority] = 0;
+    }
+    batch.push_back(std::move(queued));
   }
-
-  if (!backend_->submit(queued.requestId, queued.request)) {
-    IoResult result{0, IoErrorCode::BackendSubmitFailed};
-    result.buffer = std::move(queued.request.buffer);
-    queued.promise.set_value(std::move(result));
-    ++stats_.completedRequests;
-    ++stats_.completedRequestsByPriority[*priority];
-    ++stats_.failedRequests;
-    ++stats_.failedRequestsByPriority[*priority];
-    ++stats_.backendSubmitFailedRequests;
-    return true;
-  }
-
-  ++stats_.submittedRequests[*priority];
-  inflight_.emplace(
-      queued.requestId,
-      InflightRequest{
-          std::move(queued.request),
-          std::move(queued.promise),
-          std::chrono::steady_clock::now()});
-  stats_.inflightRequests = inflight_.size();
-  stats_.maxObservedInflightRequests =
-      std::max<uint64_t>(stats_.maxObservedInflightRequests, inflight_.size());
-  return true;
+  return batch;
 }
 
-void DiskIoScheduler::reapCompletionsLocked() {
-  auto completions = backend_->reap();
+void DiskIoScheduler::applyDispatchResultsLocked(
+    std::vector<DispatchResult>& results,
+    std::vector<ReadyResult>& readyResults) {
+  for (auto& dispatch : results) {
+    const auto priority = priorityIndex(dispatch.queued.request.priority);
+    if (!dispatch.submitted) {
+      IoResult result{0, IoErrorCode::BackendSubmitFailed};
+      result.buffer = std::move(dispatch.queued.request.buffer);
+      readyResults.push_back(
+          ReadyResult{std::move(dispatch.queued.promise), std::move(result)});
+      ++stats_.completedRequests;
+      ++stats_.completedRequestsByPriority[priority];
+      ++stats_.failedRequests;
+      ++stats_.failedRequestsByPriority[priority];
+      ++stats_.backendSubmitFailedRequests;
+      continue;
+    }
+
+    ++stats_.submittedRequests[priority];
+    inflight_.emplace(
+        dispatch.queued.requestId,
+        InflightRequest{
+            std::move(dispatch.queued.request),
+            std::move(dispatch.queued.promise),
+            dispatch.submitTime});
+    stats_.inflightRequests = inflight_.size();
+    stats_.maxObservedInflightRequests = std::max<uint64_t>(
+        stats_.maxObservedInflightRequests, inflight_.size());
+  }
+}
+
+void DiskIoScheduler::applyCompletionsLocked(
+    std::vector<BackendCompletion>& completions,
+    std::vector<ReadyResult>& readyResults) {
   for (auto& completion : completions) {
     auto it = inflight_.find(completion.requestId);
     if (it == inflight_.end()) {
@@ -325,7 +383,8 @@ void DiskIoScheduler::reapCompletionsLocked() {
         adaptiveDepth_.recentThroughputBytesPerSecond();
     stats_.adaptive = adaptiveDepth_.stats();
 
-    inflight.promise.set_value(std::move(result));
+    readyResults.push_back(
+        ReadyResult{std::move(inflight.promise), std::move(result)});
   }
 }
 
