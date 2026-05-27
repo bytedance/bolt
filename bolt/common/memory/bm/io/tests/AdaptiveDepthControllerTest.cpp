@@ -30,14 +30,24 @@ TEST(AdaptiveDepthControllerTest, increasesDepthWhenThroughputImproves) {
   AdaptiveDepthController controller(config);
 
   EXPECT_EQ(8, controller.currentDepth());
+  EXPECT_EQ(8, controller.stats().currentDepth);
+  EXPECT_EQ(8, controller.stats().bestDepth);
+  EXPECT_TRUE(controller.stats().enabled);
 
   controller.onWindow(1000.0, true);
   EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
   EXPECT_EQ(12, controller.currentDepth());
+  EXPECT_EQ(1, controller.stats().completedWindows);
+  EXPECT_EQ(1000.0, controller.stats().lastWindowThroughputBytesPerSecond);
+  EXPECT_EQ(1000.0, controller.stats().bestThroughputBytesPerSecond);
+  EXPECT_TRUE(controller.stats().measuringProbeDepth);
 
   controller.onWindow(1150.0, true);
   EXPECT_EQ(1150.0, controller.recentThroughputBytesPerSecond());
   EXPECT_EQ(16, controller.currentDepth());
+  EXPECT_EQ(2, controller.stats().completedWindows);
+  EXPECT_EQ(16, controller.stats().currentDepth);
+  EXPECT_EQ(12, controller.stats().bestDepth);
 }
 
 TEST(AdaptiveDepthControllerTest, rollsBackWhenThroughputDoesNotImprove) {

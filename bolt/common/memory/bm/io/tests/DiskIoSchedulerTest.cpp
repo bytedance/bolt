@@ -283,6 +283,14 @@ TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
   EXPECT_EQ(IoErrorCode::InvalidRequest, result.error);
   EXPECT_EQ(0, result.nativeErrorCode);
   EXPECT_TRUE(backendPtr->submitted().empty());
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(1, stats.rejectedRequests);
+  EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Medium)]);
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("rejected_requests=1"));
 }
 
 TEST(DiskIoSchedulerTest, submitsAndCompletesSingleRequest) {
@@ -410,6 +418,10 @@ TEST(DiskIoSchedulerTest, submitAfterStopAndDrainReturnsShutdownFuture) {
   EXPECT_EQ(0, result.bytes);
   EXPECT_EQ(IoErrorCode::Shutdown, result.error);
   EXPECT_EQ(0, result.nativeErrorCode);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(1, stats.shutdownRejectedRequests);
+  EXPECT_EQ(1, stats.failedRequests);
 }
 
 TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
@@ -481,11 +493,19 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   EXPECT_EQ(64, stats.currentDepth);
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(4096, stats.completedBytes);
+  EXPECT_EQ(4096, stats.completedBytesByPriority[priorityIndex(IoPriority::High)]);
   EXPECT_EQ(1, stats.successfulRequests);
+  EXPECT_EQ(
+      1, stats.successfulRequestsByPriority[priorityIndex(IoPriority::High)]);
   EXPECT_EQ(0, stats.failedRequests);
   EXPECT_GT(stats.cumulativeLatencyUs, 0);
+  EXPECT_GT(stats.maxLatencyUs, 0);
+  EXPECT_LE(stats.minLatencyUs, stats.maxLatencyUs);
+  EXPECT_GE(stats.maxObservedInflightRequests, 1);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::High)]);
+  EXPECT_NE(std::string::npos, stats.toString().find("completed_requests=1"));
+  EXPECT_NE(std::string::npos, stats.toString().find("adaptive_current_depth=64"));
 }
 
 TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklog) {
@@ -517,6 +537,9 @@ TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklo
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(2, stats.currentDepth);
+  EXPECT_EQ(2, stats.adaptive.currentDepth);
+  EXPECT_EQ(1, stats.adaptive.completedWindows);
+  EXPECT_GT(stats.adaptive.lastWindowThroughputBytesPerSecond, 0);
   EXPECT_GT(stats.recentThroughputBytesPerSecond, 0);
 
   size_t completedSubmissions = 1;
@@ -546,6 +569,43 @@ TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
   EXPECT_EQ(0, stats.inflightRequests);
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(1, stats.backendSubmitFailedRequests);
+  EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Low)]);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::Low)]);
+}
+
+TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
+  auto backend = std::make_unique<MockIoBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+  backendPtr->complete(
+      1, IoResult{0, IoErrorCode::BackendIoError, EIO});
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+
+  EXPECT_EQ(IoErrorCode::BackendIoError, result.error);
+  EXPECT_EQ(EIO, result.nativeErrorCode);
+
+  const auto stats = scheduler.stats();
+  EXPECT_EQ(1, stats.completedRequests);
+  EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(1, stats.backendIoErrorRequests);
+  EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Low)]);
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("backend_io_error_requests=1"));
+}
+
+TEST(DiskIoSchedulerTest, statsLoggingConfigRejectsNonPositiveInterval) {
+  DiskIoSchedulerConfig config;
+  config.enableStatsLogging = true;
+  config.statsLogInterval = std::chrono::milliseconds(0);
+
+  EXPECT_EQ(
+      IoErrorCode::InvalidRequest,
+      validateDiskIoSchedulerConfig(config));
 }

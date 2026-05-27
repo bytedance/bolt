@@ -5,8 +5,11 @@
 #include "bolt/common/memory/bm/io/IoRequestValidator.h"
 #include "bolt/common/memory/bm/io/IoUringBackend.h"
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
+
+#include <glog/logging.h>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -25,12 +28,14 @@ DiskIoScheduler::DiskIoScheduler(
     std::unique_ptr<IoBackend> backend)
     : config_(config),
       adaptiveDepth_(config_.adaptiveDepth),
-      backend_(std::move(backend)) {
+      backend_(std::move(backend)),
+      lastStatsLogTime_(std::chrono::steady_clock::now()) {
   BOLT_CHECK(
       validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
       "invalid DiskIoSchedulerConfig");
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
   stats_.currentDepth = adaptiveDepth_.currentDepth();
+  stats_.adaptive = adaptiveDepth_.stats();
   worker_ = std::thread([this] { run(); });
 }
 
@@ -48,6 +53,16 @@ std::future<IoResult> DiskIoScheduler::completedFuture(IoResult result) {
 std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   const auto validationError = validateIoRequest(request);
   if (validationError != IoErrorCode::Ok) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++stats_.rejectedRequests;
+      ++stats_.completedRequests;
+      ++stats_.failedRequests;
+      if (validPriority(request.priority)) {
+        ++stats_.completedRequestsByPriority[priorityIndex(request.priority)];
+        ++stats_.failedRequestsByPriority[priorityIndex(request.priority)];
+      }
+    }
     IoResult result{0, validationError};
     result.buffer = std::move(request.buffer);
     return completedFuture(std::move(result));
@@ -59,6 +74,11 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) {
+      ++stats_.shutdownRejectedRequests;
+      ++stats_.completedRequests;
+      ++stats_.completedRequestsByPriority[priorityIndex(request.priority)];
+      ++stats_.failedRequests;
+      ++stats_.failedRequestsByPriority[priorityIndex(request.priority)];
       IoResult result{0, IoErrorCode::Shutdown};
       result.buffer = std::move(request.buffer);
       promise.set_value(std::move(result));
@@ -69,6 +89,13 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
     queues_[priority].push_back(QueuedRequest{
         nextRequestId_++, std::move(request), std::move(promise)});
     stats_.queuedRequests[priority] = queues_[priority].size();
+    ++stats_.acceptedRequests;
+    uint64_t queued = 0;
+    for (const auto& queue : queues_) {
+      queued += queue.size();
+    }
+    stats_.maxObservedQueueDepth =
+        std::max(stats_.maxObservedQueueDepth, queued);
   }
   cv_.notify_one();
 
@@ -90,6 +117,10 @@ void DiskIoScheduler::stopAndDrain() {
 
 DiskIoSchedulerStats DiskIoScheduler::stats() const {
   std::lock_guard<std::mutex> lock(mutex_);
+  return snapshotStatsLocked();
+}
+
+DiskIoSchedulerStats DiskIoScheduler::snapshotStatsLocked() const {
   auto snapshot = stats_;
   for (size_t i = 0; i < kIoPriorityCount; ++i) {
     snapshot.queuedRequests[i] = queues_[i].size();
@@ -98,7 +129,20 @@ DiskIoSchedulerStats DiskIoScheduler::stats() const {
   snapshot.currentDepth = adaptiveDepth_.currentDepth();
   snapshot.recentThroughputBytesPerSecond =
       adaptiveDepth_.recentThroughputBytesPerSecond();
+  snapshot.adaptive = adaptiveDepth_.stats();
   return snapshot;
+}
+
+void DiskIoScheduler::logStatsIfDueLocked(
+    std::chrono::steady_clock::time_point now) {
+  if (!config_.enableStatsLogging) {
+    return;
+  }
+  if (now - lastStatsLogTime_ < config_.statsLogInterval) {
+    return;
+  }
+  lastStatsLogTime_ = now;
+  LOG(INFO) << snapshotStatsLocked().toString();
 }
 
 void DiskIoScheduler::run() {
@@ -120,8 +164,17 @@ void DiskIoScheduler::run() {
 
     if (dispatched || !inflight_.empty()) {
       cv_.wait_for(lock, kIdlePollInterval);
+      logStatsIfDueLocked(std::chrono::steady_clock::now());
     } else {
-      cv_.wait(lock, [this] { return stopping_ || hasQueuedRequestsLocked(); });
+      if (config_.enableStatsLogging) {
+        cv_.wait_for(lock, config_.statsLogInterval, [this] {
+          return stopping_ || hasQueuedRequestsLocked();
+        });
+        logStatsIfDueLocked(std::chrono::steady_clock::now());
+      } else {
+        cv_.wait(
+            lock, [this] { return stopping_ || hasQueuedRequestsLocked(); });
+      }
     }
   }
 }
@@ -199,6 +252,8 @@ bool DiskIoScheduler::dispatchOneLocked() {
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[*priority];
     ++stats_.failedRequests;
+    ++stats_.failedRequestsByPriority[*priority];
+    ++stats_.backendSubmitFailedRequests;
     return true;
   }
 
@@ -210,6 +265,8 @@ bool DiskIoScheduler::dispatchOneLocked() {
           std::move(queued.promise),
           std::chrono::steady_clock::now()});
   stats_.inflightRequests = inflight_.size();
+  stats_.maxObservedInflightRequests =
+      std::max<uint64_t>(stats_.maxObservedInflightRequests, inflight_.size());
   return true;
 }
 
@@ -235,10 +292,16 @@ void DiskIoScheduler::reapCompletionsLocked() {
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
     stats_.completedBytes += completion.result.bytes;
+    stats_.completedBytesByPriority[priority] += completion.result.bytes;
     if (completion.result.ok()) {
       ++stats_.successfulRequests;
+      ++stats_.successfulRequestsByPriority[priority];
     } else {
       ++stats_.failedRequests;
+      ++stats_.failedRequestsByPriority[priority];
+      if (completion.result.error == IoErrorCode::BackendIoError) {
+        ++stats_.backendIoErrorRequests;
+      }
     }
     stats_.inflightRequests = inflight_.size();
     stats_.averageLatencyUs =
@@ -246,12 +309,21 @@ void DiskIoScheduler::reapCompletionsLocked() {
             ? 0
             : static_cast<double>(stats_.cumulativeLatencyUs) /
                 static_cast<double>(stats_.completedRequests);
+    if (latencyUs > 0) {
+      const auto positiveLatencyUs = static_cast<uint64_t>(latencyUs);
+      if (stats_.minLatencyUs == 0 || positiveLatencyUs < stats_.minLatencyUs) {
+        stats_.minLatencyUs = positiveLatencyUs;
+      }
+      stats_.maxLatencyUs =
+          std::max(stats_.maxLatencyUs, positiveLatencyUs);
+    }
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight.request.buffer);
     adaptiveDepth_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
     stats_.currentDepth = adaptiveDepth_.currentDepth();
     stats_.recentThroughputBytesPerSecond =
         adaptiveDepth_.recentThroughputBytesPerSecond();
+    stats_.adaptive = adaptiveDepth_.stats();
 
     inflight.promise.set_value(std::move(result));
   }

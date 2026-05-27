@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include "bolt/common/memory/bm/io/AdaptiveDepthConfig.h"
+#include "bolt/common/memory/bm/io/AdaptiveDepthStats.h"
 
 namespace bytedance::bolt::memory::bm {
 
@@ -13,6 +14,7 @@ class AdaptiveDepthController {
 
   uint32_t currentDepth() const;
   double recentThroughputBytesPerSecond() const;
+  AdaptiveDepthStats stats() const;
   void onCompletion(
       uint64_t completedBytes,
       bool hasBacklog,
@@ -36,6 +38,8 @@ class AdaptiveDepthController {
   bool hasBestThroughput_{false};
   bool hasRecentThroughput_{false};
   bool measuringProbeDepth_{false};
+  uint64_t completedWindows_{0};
+  double lastWindowThroughputBytesPerSecond_{0};
 };
 
 } // namespace bytedance::bolt::memory::bm

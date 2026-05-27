@@ -23,6 +23,18 @@ double AdaptiveDepthController::recentThroughputBytesPerSecond() const {
   return recentThroughputBytesPerSecond_;
 }
 
+AdaptiveDepthStats AdaptiveDepthController::stats() const {
+  return AdaptiveDepthStats{
+      config_.enabled,
+      currentDepth_,
+      bestDepth_,
+      recentThroughputBytesPerSecond_,
+      bestThroughputBytesPerSecond_,
+      measuringProbeDepth_,
+      completedWindows_,
+      lastWindowThroughputBytesPerSecond_};
+}
+
 void AdaptiveDepthController::onCompletion(
     uint64_t completedBytes,
     bool hasBacklog,
@@ -44,6 +56,11 @@ void AdaptiveDepthController::onCompletion(
 void AdaptiveDepthController::onWindow(
     double throughputBytesPerSecond,
     bool hasBacklog) {
+  ++completedWindows_;
+  if (std::isfinite(throughputBytesPerSecond) &&
+      throughputBytesPerSecond >= 0) {
+    lastWindowThroughputBytesPerSecond_ = throughputBytesPerSecond;
+  }
   const auto validSample = std::isfinite(throughputBytesPerSecond) &&
       throughputBytesPerSecond >= 0;
   if (validSample) {
