@@ -12,9 +12,13 @@
 #include <thread>
 #include <unordered_map>
 
-#include "bolt/common/memory/bm/AdaptiveDepthController.h"
-#include "bolt/common/memory/bm/DiskIoTypes.h"
-#include "bolt/common/memory/bm/IoBackend.h"
+#include "bolt/common/memory/bm/io/AdaptiveDepthController.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
+#include "bolt/common/memory/bm/io/IoBackend.h"
+#include "bolt/common/memory/bm/io/IoPriority.h"
+#include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoResult.h"
 
 namespace bytedance::bolt::memory::bm {
 

@@ -1,5 +1,9 @@
-#include "bolt/common/memory/bm/DiskIoScheduler.h"
-#include "bolt/common/memory/bm/IoUringBackend.h"
+#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
+#include "bolt/common/memory/bm/io/IoPriority.h"
+#include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoResult.h"
+#include "bolt/common/memory/bm/io/IoUringBackend.h"
 
 #include <fcntl.h>
 #include <unistd.h>

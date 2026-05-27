@@ -1,6 +1,11 @@
-#include "bolt/common/memory/bm/DiskIoScheduler.h"
-#include "bolt/common/memory/bm/DiskIoTypes.h"
-#include "bolt/common/memory/bm/tests/MockIoBackend.h"
+#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerConfigValidator.h"
+#include "bolt/common/memory/bm/io/IoPriority.h"
+#include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoRequestValidator.h"
+#include "bolt/common/memory/bm/io/IoResult.h"
+#include "bolt/common/memory/bm/io/tests/MockIoBackend.h"
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -153,7 +158,7 @@ class FailingSubmitBackend : public IoBackend {
 
 } // namespace
 
-TEST(DiskIoTypesTest, validateRequestAcceptsValidRead) {
+TEST(IoRequestValidatorTest, validateRequestAcceptsValidRead) {
   IoRequest request;
   request.opcode = IoOpcode::Read;
   request.priority = IoPriority::High;
@@ -164,13 +169,13 @@ TEST(DiskIoTypesTest, validateRequestAcceptsValidRead) {
   EXPECT_EQ(IoErrorCode::Ok, validateIoRequest(request));
 }
 
-TEST(DiskIoTypesTest, priorityCountTracksPriorityEnumSentinel) {
+TEST(IoPriorityTest, priorityCountTracksPriorityEnumSentinel) {
   EXPECT_EQ(
       static_cast<size_t>(IoPriority::Count),
       kIoPriorityCount);
 }
 
-TEST(DiskIoTypesTest, validateRequestRejectsBadBufferRange) {
+TEST(IoRequestValidatorTest, validateRequestRejectsBadBufferRange) {
   IoRequest request;
   request.opcode = IoOpcode::Write;
   request.priority = IoPriority::Low;
@@ -181,7 +186,7 @@ TEST(DiskIoTypesTest, validateRequestRejectsBadBufferRange) {
   EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
 }
 
-TEST(DiskIoTypesTest, validateConfigRejectsInvalidDepth) {
+TEST(DiskIoSchedulerConfigValidatorTest, validateConfigRejectsInvalidDepth) {
   DiskIoSchedulerConfig config;
   config.ringDepth = 16;
   config.adaptiveDepth.minDepth = 1;
