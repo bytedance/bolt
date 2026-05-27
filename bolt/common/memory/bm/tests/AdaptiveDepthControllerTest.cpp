@@ -5,6 +5,7 @@
 #include "bolt/common/memory/bm/DiskIoTypes.h"
 
 #include <limits>
+#include <chrono>
 
 #include <gtest/gtest.h>
 
@@ -18,6 +19,7 @@ AdaptiveDepthConfig makeConfig() {
   config.maxDepth = 16;
   config.increaseStep = 4;
   config.minThroughputGain = 0.10;
+  config.throughputSmoothingFactor = 1.0;
   return config;
 }
 
@@ -73,6 +75,27 @@ TEST(AdaptiveDepthControllerTest, disabledControllerOnlyUpdatesRecentThroughput)
 
   EXPECT_EQ(8, controller.currentDepth());
   EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
+}
+
+TEST(AdaptiveDepthControllerTest, completionWindowComputesSmoothedThroughput) {
+  auto config = makeConfig();
+  config.controlInterval = std::chrono::milliseconds(10);
+  config.throughputSmoothingFactor = 0.25;
+  AdaptiveDepthController controller(config);
+  const auto start = std::chrono::steady_clock::now();
+
+  controller.onCompletion(1000, true, start);
+  EXPECT_EQ(0.0, controller.recentThroughputBytesPerSecond());
+  EXPECT_EQ(8, controller.currentDepth());
+
+  controller.onCompletion(1000, true, start + std::chrono::milliseconds(10));
+  EXPECT_GT(controller.recentThroughputBytesPerSecond(), 100000.0);
+  EXPECT_EQ(12, controller.currentDepth());
+
+  const auto firstThroughput = controller.recentThroughputBytesPerSecond();
+  controller.onCompletion(0, true, start + std::chrono::milliseconds(20));
+  EXPECT_LT(controller.recentThroughputBytesPerSecond(), firstThroughput);
+  EXPECT_GT(controller.recentThroughputBytesPerSecond(), 0.0);
 }
 
 TEST(AdaptiveDepthControllerTest, noBacklogOnlyUpdatesRecentThroughput) {

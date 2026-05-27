@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 
 #include "bolt/common/memory/bm/DiskIoTypes.h"
 
@@ -12,6 +13,10 @@ class AdaptiveDepthController {
 
   uint32_t currentDepth() const;
   double recentThroughputBytesPerSecond() const;
+  void onCompletion(
+      uint64_t completedBytes,
+      bool hasBacklog,
+      std::chrono::steady_clock::time_point now);
   void onWindow(double throughputBytesPerSecond, bool hasBacklog);
 
  private:
@@ -24,9 +29,12 @@ class AdaptiveDepthController {
   AdaptiveDepthConfig config_;
   uint32_t currentDepth_{0};
   uint32_t bestDepth_{0};
+  std::chrono::steady_clock::time_point windowStart_;
+  uint64_t windowCompletedBytes_{0};
   double recentThroughputBytesPerSecond_{0};
   double bestThroughputBytesPerSecond_{0};
   bool hasBestThroughput_{false};
+  bool hasRecentThroughput_{false};
   bool measuringProbeDepth_{false};
 };
 

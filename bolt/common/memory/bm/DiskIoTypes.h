@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -18,9 +17,10 @@ enum class IoPriority : uint8_t {
   High = 0,
   Medium = 1,
   Low = 2,
+  Count,
 };
 
-constexpr size_t kIoPriorityCount = 3;
+constexpr size_t kIoPriorityCount = static_cast<size_t>(IoPriority::Count);
 
 inline size_t priorityIndex(IoPriority priority) {
   return static_cast<size_t>(priority);
@@ -41,12 +41,21 @@ struct IoRequest {
   IoBuffer buffer;
 };
 
+enum class IoErrorCode : uint8_t {
+  Ok,
+  InvalidRequest,
+  Shutdown,
+  BackendSubmitFailed,
+  BackendIoError,
+};
+
 struct IoResult {
   uint64_t bytes{0};
-  int errorCode{0};
+  IoErrorCode error{IoErrorCode::Ok};
+  int nativeErrorCode{0};
 
   bool ok() const {
-    return errorCode == 0;
+    return error == IoErrorCode::Ok;
   }
 };
 
@@ -58,6 +67,7 @@ struct AdaptiveDepthConfig {
   std::chrono::milliseconds controlInterval{200};
   uint32_t increaseStep{4};
   double minThroughputGain{0.02};
+  double throughputSmoothingFactor{0.5};
 };
 
 struct DiskIoSchedulerConfig {
@@ -77,6 +87,7 @@ struct DiskIoSchedulerStats {
   uint64_t successfulRequests{0};
   uint64_t failedRequests{0};
   double recentThroughputBytesPerSecond{0};
+  uint64_t cumulativeLatencyUs{0};
   double averageLatencyUs{0};
 };
 
@@ -88,45 +99,48 @@ inline bool validPriority(IoPriority priority) {
   return priorityIndex(priority) < kIoPriorityCount;
 }
 
-inline int validateIoRequest(const IoRequest& request) {
+inline IoErrorCode validateIoRequest(const IoRequest& request) {
   if (!validOpcode(request.opcode) || !validPriority(request.priority)) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   if (request.fd < 0 || !request.buffer.data || request.buffer.length == 0) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   if (request.buffer.offset > request.buffer.size) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   if (request.buffer.length > request.buffer.size - request.buffer.offset) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
-  return 0;
+  return IoErrorCode::Ok;
 }
 
-inline int validateDiskIoSchedulerConfig(const DiskIoSchedulerConfig& config) {
+inline IoErrorCode validateDiskIoSchedulerConfig(
+    const DiskIoSchedulerConfig& config) {
   if (config.ringDepth == 0) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   for (const auto weight : config.priorityWeights) {
     if (weight == 0) {
-      return EINVAL;
+      return IoErrorCode::InvalidRequest;
     }
   }
   const auto& adaptive = config.adaptiveDepth;
   if (adaptive.minDepth == 0 || adaptive.increaseStep == 0) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   if (adaptive.minDepth > adaptive.initialDepth ||
       adaptive.initialDepth > adaptive.maxDepth ||
       adaptive.maxDepth > config.ringDepth) {
-    return EINVAL;
+    return IoErrorCode::InvalidRequest;
   }
   if (adaptive.controlInterval.count() <= 0 ||
-      adaptive.minThroughputGain < 0) {
-    return EINVAL;
+      adaptive.minThroughputGain < 0 ||
+      adaptive.throughputSmoothingFactor <= 0 ||
+      adaptive.throughputSmoothingFactor > 1) {
+    return IoErrorCode::InvalidRequest;
   }
-  return 0;
+  return IoErrorCode::Ok;
 }
 
 } // namespace bytedance::bolt::memory::bm

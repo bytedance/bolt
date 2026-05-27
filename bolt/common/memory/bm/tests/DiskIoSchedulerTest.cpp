@@ -80,7 +80,7 @@ bool completeSubmission(MockIoBackend& backend, size_t submittedIndex) {
   if (submittedIndex >= submitted.size()) {
     return false;
   }
-  backend.complete(submitted[submittedIndex].requestId, IoResult{4096, 0});
+  backend.complete(submitted[submittedIndex].requestId, IoResult{4096});
   return true;
 }
 
@@ -99,7 +99,7 @@ bool completeNextSubmittedWindow(
     }
     const auto& request = submitted[completedSubmissions];
     ++submittedByPriority[priorityIndex(request.request.priority)];
-    backend.complete(request.requestId, IoResult{4096, 0});
+    backend.complete(request.requestId, IoResult{4096});
     ++completedSubmissions;
   }
   return true;
@@ -115,7 +115,7 @@ void completeAllSubmittedRequests(
          std::chrono::steady_clock::now() < deadline) {
     const auto submitted = backend.submitted();
     for (size_t i = completedSubmissions; i < submitted.size(); ++i) {
-      backend.complete(submitted[i].requestId, IoResult{4096, 0});
+      backend.complete(submitted[i].requestId, IoResult{4096});
     }
     completedSubmissions = submitted.size();
     if (completedSubmissions < expectedSubmissions) {
@@ -161,7 +161,13 @@ TEST(DiskIoTypesTest, validateRequestAcceptsValidRead) {
   request.fileOffset = 128;
   request.buffer = IoBuffer{makeBuffer(4096), 4096, 64, 1024};
 
-  EXPECT_EQ(0, validateIoRequest(request));
+  EXPECT_EQ(IoErrorCode::Ok, validateIoRequest(request));
+}
+
+TEST(DiskIoTypesTest, priorityCountTracksPriorityEnumSentinel) {
+  EXPECT_EQ(
+      static_cast<size_t>(IoPriority::Count),
+      kIoPriorityCount);
 }
 
 TEST(DiskIoTypesTest, validateRequestRejectsBadBufferRange) {
@@ -172,7 +178,7 @@ TEST(DiskIoTypesTest, validateRequestRejectsBadBufferRange) {
   request.fileOffset = 0;
   request.buffer = IoBuffer{makeBuffer(128), 128, 64, 128};
 
-  EXPECT_EQ(EINVAL, validateIoRequest(request));
+  EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
 }
 
 TEST(DiskIoTypesTest, validateConfigRejectsInvalidDepth) {
@@ -182,7 +188,9 @@ TEST(DiskIoTypesTest, validateConfigRejectsInvalidDepth) {
   config.adaptiveDepth.initialDepth = 32;
   config.adaptiveDepth.maxDepth = 32;
 
-  EXPECT_EQ(EINVAL, validateDiskIoSchedulerConfig(config));
+  EXPECT_EQ(
+      IoErrorCode::InvalidRequest,
+      validateDiskIoSchedulerConfig(config));
 }
 
 TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
@@ -200,7 +208,7 @@ TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
   EXPECT_EQ(11, submitted[0].requestId);
   EXPECT_EQ(12, submitted[1].requestId);
 
-  backend.complete(12, IoResult{4096, 0});
+  backend.complete(12, IoResult{4096});
   auto completions = backend.reap();
   ASSERT_EQ(1, completions.size());
   EXPECT_EQ(12, completions[0].requestId);
@@ -228,7 +236,7 @@ TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
   MockIoBackend backend;
 
   BOLT_ASSERT_THROW(
-      backend.complete(11, IoResult{4096, 0}), "unknown requestId");
+      backend.complete(11, IoResult{4096}), "unknown requestId");
 }
 
 TEST(DiskIoSchedulerTest, facadeConstructorUsesDefaultBackendWhenSupported) {
@@ -264,7 +272,8 @@ TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
   const auto result = future.get();
 
   EXPECT_EQ(0, result.bytes);
-  EXPECT_EQ(EINVAL, result.errorCode);
+  EXPECT_EQ(IoErrorCode::InvalidRequest, result.error);
+  EXPECT_EQ(0, result.nativeErrorCode);
   EXPECT_TRUE(backendPtr->submitted().empty());
 }
 
@@ -280,12 +289,12 @@ TEST(DiskIoSchedulerTest, submitsAndCompletesSingleRequest) {
   ASSERT_EQ(1, submitted.size());
   EXPECT_EQ(1, submitted[0].requestId);
 
-  backendPtr->complete(1, IoResult{4096, 0});
+  backendPtr->complete(1, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(future));
   const auto result = future.get();
 
   EXPECT_EQ(4096, result.bytes);
-  EXPECT_EQ(0, result.errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, result.error);
 }
 
 TEST(DiskIoSchedulerTest, fixedDepthOneKeepsSecondRequestQueued) {
@@ -306,14 +315,14 @@ TEST(DiskIoSchedulerTest, fixedDepthOneKeepsSecondRequestQueued) {
   EXPECT_EQ(1, stats.inflightRequests);
   EXPECT_EQ(1, stats.queuedRequests[priorityIndex(IoPriority::Medium)]);
 
-  backendPtr->complete(1, IoResult{4096, 0});
+  backendPtr->complete(1, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(first));
-  EXPECT_EQ(0, first.get().errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, first.get().error);
 
   ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 2));
-  backendPtr->complete(2, IoResult{4096, 0});
+  backendPtr->complete(2, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(second));
-  EXPECT_EQ(0, second.get().errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, second.get().error);
 }
 
 TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {
@@ -342,7 +351,7 @@ TEST(DiskIoSchedulerTest, dispatchesUsingConfiguredWeights) {
 
   for (auto& future : futures) {
     ASSERT_TRUE(waitUntilReady(future));
-    EXPECT_EQ(0, future.get().errorCode);
+    EXPECT_EQ(IoErrorCode::Ok, future.get().error);
   }
 }
 
@@ -376,7 +385,7 @@ TEST(DiskIoSchedulerTest, resetsDeficitWhenPriorityQueueDrains) {
 
   for (auto& future : futures) {
     ASSERT_TRUE(waitUntilReady(future));
-    EXPECT_EQ(0, future.get().errorCode);
+    EXPECT_EQ(IoErrorCode::Ok, future.get().error);
   }
 }
 
@@ -391,7 +400,8 @@ TEST(DiskIoSchedulerTest, submitAfterStopAndDrainReturnsShutdownFuture) {
   const auto result = future.get();
 
   EXPECT_EQ(0, result.bytes);
-  EXPECT_EQ(ESHUTDOWN, result.errorCode);
+  EXPECT_EQ(IoErrorCode::Shutdown, result.error);
+  EXPECT_EQ(0, result.nativeErrorCode);
 }
 
 TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
@@ -422,7 +432,7 @@ TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
       std::future_status::timeout,
       secondStopFuture.wait_for(std::chrono::milliseconds(10)));
 
-  backendPtr->complete(1, IoResult{4096, 0});
+  backendPtr->complete(1, IoResult{4096});
   ASSERT_EQ(
       std::future_status::ready, firstStopFuture.wait_for(kFutureTimeout));
   ASSERT_EQ(
@@ -434,7 +444,7 @@ TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
   ASSERT_TRUE(waitUntilReady(future));
   const auto result = future.get();
   EXPECT_EQ(4096, result.bytes);
-  EXPECT_EQ(0, result.errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, result.error);
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
@@ -452,10 +462,11 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   auto future = scheduler.submit(makeValidRequest(IoPriority::High));
   ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
 
-  backendPtr->complete(1, IoResult{4096, 0});
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  backendPtr->complete(1, IoResult{4096});
   ASSERT_TRUE(waitUntilReady(future));
   const auto result = future.get();
-  EXPECT_EQ(0, result.errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, result.error);
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
@@ -464,6 +475,7 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   EXPECT_EQ(4096, stats.completedBytes);
   EXPECT_EQ(1, stats.successfulRequests);
   EXPECT_EQ(0, stats.failedRequests);
+  EXPECT_GT(stats.cumulativeLatencyUs, 0);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::High)]);
 }
@@ -489,10 +501,10 @@ TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklo
 
   ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  backendPtr->complete(1, IoResult{4096, 0});
+  backendPtr->complete(1, IoResult{4096});
 
   ASSERT_TRUE(waitUntilReady(futures[0]));
-  EXPECT_EQ(0, futures[0].get().errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, futures[0].get().error);
   ASSERT_TRUE(waitUntilCurrentDepth(scheduler, 2));
 
   const auto stats = scheduler.stats();
@@ -504,7 +516,7 @@ TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklo
       *backendPtr, completedSubmissions, futures.size());
   for (size_t i = 1; i < futures.size(); ++i) {
     ASSERT_TRUE(waitUntilReady(futures[i]));
-    EXPECT_EQ(0, futures[i].get().errorCode);
+    EXPECT_EQ(IoErrorCode::Ok, futures[i].get().error);
   }
 }
 
@@ -519,7 +531,8 @@ TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
 
   EXPECT_EQ(1, backendPtr->submitAttempts());
   EXPECT_EQ(0, result.bytes);
-  EXPECT_EQ(EIO, result.errorCode);
+  EXPECT_EQ(IoErrorCode::BackendSubmitFailed, result.error);
+  EXPECT_EQ(0, result.nativeErrorCode);
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);

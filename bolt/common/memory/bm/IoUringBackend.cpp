@@ -5,35 +5,31 @@
 #include <liburing/io_uring.h>
 #endif
 
-#include <cerrno>
 #include <cstring>
 
 #include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::memory::bm {
 
-IoUringBackend::IoUringBackend(uint32_t ringDepth) {
 #ifdef IO_URING_SUPPORTED
-  ring_ = std::make_unique<io_uring>();
-  const int ret = io_uring_queue_init(ringDepth, ring_.get(), 0);
+struct IoUringState {
+  io_uring ring;
+};
+
+IoUringBackend::IoUringBackend(uint32_t ringDepth) {
+  state_ = std::make_unique<IoUringState>();
+  const int ret = io_uring_queue_init(ringDepth, &state_->ring, 0);
   BOLT_CHECK_GE(ret, 0, "io_uring_queue_init failed: {}", std::strerror(-ret));
-#else
-  (void)ringDepth;
-  BOLT_FAIL("IoUringBackend requires IO_URING_SUPPORTED");
-#endif
 }
 
 IoUringBackend::~IoUringBackend() {
-#ifdef IO_URING_SUPPORTED
-  if (ring_) {
-    io_uring_queue_exit(ring_.get());
+  if (state_) {
+    io_uring_queue_exit(&state_->ring);
   }
-#endif
 }
 
 bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
-#ifdef IO_URING_SUPPORTED
-  auto* sqe = io_uring_get_sqe(ring_.get());
+  auto* sqe = io_uring_get_sqe(&state_->ring);
   if (sqe == nullptr) {
     return false;
   }
@@ -49,34 +45,51 @@ bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
   }
   sqe->user_data = requestId;
 
-  const int ret = io_uring_submit(ring_.get());
+  const int ret = io_uring_submit(&state_->ring);
   return ret >= 0;
-#else
-  (void)requestId;
-  (void)request;
-  return false;
-#endif
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {
   std::vector<BackendCompletion> completions;
-#ifdef IO_URING_SUPPORTED
   io_uring_cqe* cqe = nullptr;
-  while (io_uring_peek_cqe(ring_.get(), &cqe) == 0 && cqe != nullptr) {
+  while (io_uring_peek_cqe(&state_->ring, &cqe) == 0 && cqe != nullptr) {
     IoResult result;
     if (cqe->res >= 0) {
       result.bytes = static_cast<uint64_t>(cqe->res);
-      result.errorCode = 0;
+      result.error = IoErrorCode::Ok;
     } else {
       result.bytes = 0;
-      result.errorCode = -cqe->res;
+      result.error = IoErrorCode::BackendIoError;
+      result.nativeErrorCode = -cqe->res;
     }
     completions.push_back(BackendCompletion{cqe->user_data, result});
-    io_uring_cqe_seen(ring_.get(), cqe);
+    io_uring_cqe_seen(&state_->ring, cqe);
     cqe = nullptr;
   }
-#endif
   return completions;
 }
+
+#else
+
+struct IoUringState {};
+
+IoUringBackend::IoUringBackend(uint32_t ringDepth) {
+  (void)ringDepth;
+  BOLT_FAIL("IoUringBackend requires IO_URING_SUPPORTED");
+}
+
+IoUringBackend::~IoUringBackend() = default;
+
+bool IoUringBackend::submit(uint64_t requestId, const IoRequest& request) {
+  (void)requestId;
+  (void)request;
+  return false;
+}
+
+std::vector<BackendCompletion> IoUringBackend::reap() {
+  return {};
+}
+
+#endif
 
 } // namespace bytedance::bolt::memory::bm

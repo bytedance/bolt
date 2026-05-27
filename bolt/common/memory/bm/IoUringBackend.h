@@ -5,11 +5,9 @@
 
 #include "bolt/common/memory/bm/IoBackend.h"
 
-#ifdef IO_URING_SUPPORTED
-struct io_uring;
-#endif
-
 namespace bytedance::bolt::memory::bm {
+
+struct IoUringState;
 
 class IoUringBackend : public IoBackend {
  public:
@@ -20,9 +18,7 @@ class IoUringBackend : public IoBackend {
   std::vector<BackendCompletion> reap() override;
 
  private:
-#ifdef IO_URING_SUPPORTED
-  std::unique_ptr<io_uring> ring_;
-#endif
+  std::unique_ptr<IoUringState> state_;
 };
 
 } // namespace bytedance::bolt::memory::bm

@@ -3,9 +3,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/IoUringBackend.h"
 
-#include <cerrno>
 #include <chrono>
-#include <stdexcept>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
@@ -15,36 +13,22 @@ constexpr auto kIdlePollInterval = std::chrono::milliseconds(1);
 
 } // namespace
 
-#ifdef IO_URING_SUPPORTED
 DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
     : DiskIoScheduler(
           config,
           std::make_unique<IoUringBackend>(config.ringDepth)) {}
-#else
-DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
-    : config_(config),
-      adaptiveDepth_(config_.adaptiveDepth),
-      currentDepth_(adaptiveDepth_.currentDepth()),
-      windowStart_(std::chrono::steady_clock::now()) {
-  BOLT_FAIL("DiskIoScheduler default constructor requires IoUringBackend");
-}
-#endif
 
 DiskIoScheduler::DiskIoScheduler(
     DiskIoSchedulerConfig config,
     std::unique_ptr<IoBackend> backend)
     : config_(config),
       adaptiveDepth_(config_.adaptiveDepth),
-      currentDepth_(adaptiveDepth_.currentDepth()),
-      backend_(std::move(backend)),
-      windowStart_(std::chrono::steady_clock::now()) {
-  if (validateDiskIoSchedulerConfig(config_) != 0) {
-    throw std::invalid_argument("invalid DiskIoSchedulerConfig");
-  }
-  if (!backend_) {
-    throw std::invalid_argument("DiskIoScheduler requires an IoBackend");
-  }
-  stats_.currentDepth = currentDepth_;
+      backend_(std::move(backend)) {
+  BOLT_CHECK(
+      validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
+      "invalid DiskIoSchedulerConfig");
+  BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
+  stats_.currentDepth = adaptiveDepth_.currentDepth();
   worker_ = std::thread([this] { run(); });
 }
 
@@ -61,7 +45,7 @@ std::future<IoResult> DiskIoScheduler::completedFuture(IoResult result) {
 
 std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   const auto validationError = validateIoRequest(request);
-  if (validationError != 0) {
+  if (validationError != IoErrorCode::Ok) {
     return completedFuture(IoResult{0, validationError});
   }
 
@@ -71,7 +55,7 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) {
-      promise.set_value(IoResult{0, ESHUTDOWN});
+      promise.set_value(IoResult{0, IoErrorCode::Shutdown});
       return future;
     }
 
@@ -105,7 +89,7 @@ DiskIoSchedulerStats DiskIoScheduler::stats() const {
     snapshot.queuedRequests[i] = queues_[i].size();
   }
   snapshot.inflightRequests = inflight_.size();
-  snapshot.currentDepth = currentDepth_;
+  snapshot.currentDepth = adaptiveDepth_.currentDepth();
   snapshot.recentThroughputBytesPerSecond =
       adaptiveDepth_.recentThroughputBytesPerSecond();
   return snapshot;
@@ -119,7 +103,8 @@ void DiskIoScheduler::run() {
     reapCompletionsLocked();
 
     bool dispatched = false;
-    while (inflight_.size() < currentDepth_ && hasQueuedRequestsLocked()) {
+    while (inflight_.size() < adaptiveDepth_.currentDepth() &&
+           hasQueuedRequestsLocked()) {
       dispatched = dispatchOneLocked() || dispatched;
     }
 
@@ -202,7 +187,7 @@ bool DiskIoScheduler::dispatchOneLocked() {
   }
 
   if (!backend_->submit(queued.requestId, queued.request)) {
-    queued.promise.set_value(IoResult{0, EIO});
+    queued.promise.set_value(IoResult{0, IoErrorCode::BackendSubmitFailed});
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[*priority];
     ++stats_.failedRequests;
@@ -237,12 +222,12 @@ void DiskIoScheduler::reapCompletionsLocked() {
         std::chrono::duration_cast<std::chrono::microseconds>(
             now - inflight.submitTime)
             .count();
-    cumulativeLatencyUs_ += latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
+    stats_.cumulativeLatencyUs +=
+        latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
     stats_.completedBytes += completion.result.bytes;
-    windowCompletedBytes_ += completion.result.bytes;
-    if (completion.result.errorCode == 0) {
+    if (completion.result.ok()) {
       ++stats_.successfulRequests;
     } else {
       ++stats_.failedRequests;
@@ -251,31 +236,16 @@ void DiskIoScheduler::reapCompletionsLocked() {
     stats_.averageLatencyUs =
         stats_.completedRequests == 0
             ? 0
-            : static_cast<double>(cumulativeLatencyUs_) /
+            : static_cast<double>(stats_.cumulativeLatencyUs) /
                 static_cast<double>(stats_.completedRequests);
-    updateAdaptiveDepthLocked(now);
+    adaptiveDepth_.onCompletion(
+        completion.result.bytes, hasQueuedRequestsLocked(), now);
+    stats_.currentDepth = adaptiveDepth_.currentDepth();
+    stats_.recentThroughputBytesPerSecond =
+        adaptiveDepth_.recentThroughputBytesPerSecond();
 
     inflight.promise.set_value(completion.result);
   }
-}
-
-void DiskIoScheduler::updateAdaptiveDepthLocked(
-    std::chrono::steady_clock::time_point now) {
-  const auto elapsed = now - windowStart_;
-  if (elapsed < config_.adaptiveDepth.controlInterval) {
-    return;
-  }
-
-  const auto seconds = std::chrono::duration<double>(elapsed).count();
-  const auto throughput =
-      seconds > 0 ? static_cast<double>(windowCompletedBytes_) / seconds : 0;
-  adaptiveDepth_.onWindow(throughput, hasQueuedRequestsLocked());
-  currentDepth_ = adaptiveDepth_.currentDepth();
-  stats_.currentDepth = currentDepth_;
-  stats_.recentThroughputBytesPerSecond =
-      adaptiveDepth_.recentThroughputBytesPerSecond();
-  windowCompletedBytes_ = 0;
-  windowStart_ = now;
 }
 
 } // namespace bytedance::bolt::memory::bm
