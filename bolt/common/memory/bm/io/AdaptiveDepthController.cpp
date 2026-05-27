@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/AdaptiveDepthController.h"
+#include "bolt/common/memory/bm/io/AdaptiveDepthController.h"
 
 #include "bolt/common/base/Exceptions.h"
 

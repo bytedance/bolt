@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "bolt/common/memory/bm/DiskIoTypes.h"
+#include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoResult.h"
 
 namespace bytedance::bolt::memory::bm {
 

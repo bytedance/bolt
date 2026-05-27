@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "bolt/common/memory/bm/IoBackend.h"
+#include "bolt/common/memory/bm/io/IoBackend.h"
 
 namespace bytedance::bolt::memory::bm {
 

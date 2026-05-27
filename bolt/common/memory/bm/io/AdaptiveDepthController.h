@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <chrono>
 
-#include "bolt/common/memory/bm/DiskIoTypes.h"
+#include "bolt/common/memory/bm/io/AdaptiveDepthConfig.h"
 
 namespace bytedance::bolt::memory::bm {
 

@@ -1,7 +1,9 @@
-#include "bolt/common/memory/bm/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/IoUringBackend.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerConfigValidator.h"
+#include "bolt/common/memory/bm/io/IoRequestValidator.h"
+#include "bolt/common/memory/bm/io/IoUringBackend.h"
 
 #include <chrono>
 #include <utility>
