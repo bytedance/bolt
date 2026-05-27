@@ -538,8 +538,9 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDateWithFormat) {
                                  std::optional<StringView> format) {
     return evaluateOnce<int64_t>(
         "unix_timestamp(c0, c1)",
-        makeNullableFlatVector<int32_t>({date}, DATE()),
-        makeNullableFlatVector<StringView>({format}));
+        makeRowVector(
+            {makeNullableFlatVector<int32_t>({date}, DATE()),
+             makeNullableFlatVector<StringView>({format})}));
   };
 
   EXPECT_EQ(0, unixTimestamp(DATE()->toDays("1970-01-01"), "yyyy-MM-dd"));
