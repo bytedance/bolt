@@ -14,6 +14,7 @@ class IoUringBackend : public IoBackend {
   explicit IoUringBackend(uint32_t ringDepth);
   ~IoUringBackend() override;
 
+  int completionFd() const override;
   BackendSubmitStatus submit(
       uint64_t requestId,
       const IoRequest& request) override;

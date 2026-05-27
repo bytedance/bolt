@@ -30,6 +30,11 @@ class IoBackend {
   // and they must not depend on the scheduler mutex being held: backend work
   // may enter the kernel or scan many completions, so the scheduler keeps its
   // own lock out of this interface to preserve lightweight enqueue semantics.
+  //
+  // completionFd() must return an fd that becomes readable when completions may
+  // be available. The signal is only a hint: reap() must drain both the backend
+  // completion queue and the fd notification counter before returning.
+  virtual int completionFd() const = 0;
   virtual BackendSubmitStatus submit(
       uint64_t requestId,
       const IoRequest& request) = 0;

@@ -9,24 +9,50 @@
 #include <utility>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/bm/io/EventFd.h"
 
 namespace bytedance::bolt::memory::bm {
 
 #ifdef IO_URING_SUPPORTED
 struct IoUringState {
   io_uring ring;
+  EventFd completionEvent;
+  bool ringInitialized{false};
+  bool eventRegistered{false};
 };
 
 IoUringBackend::IoUringBackend(uint32_t ringDepth) {
   state_ = std::make_unique<IoUringState>();
   const int ret = io_uring_queue_init(ringDepth, &state_->ring, 0);
   BOLT_CHECK_GE(ret, 0, "io_uring_queue_init failed: {}", std::strerror(-ret));
+  state_->ringInitialized = true;
+  const int registerRet =
+      io_uring_register_eventfd(&state_->ring, state_->completionEvent.fd());
+  if (registerRet < 0) {
+    io_uring_queue_exit(&state_->ring);
+    state_->ringInitialized = false;
+  }
+  BOLT_CHECK_GE(
+      registerRet,
+      0,
+      "io_uring_register_eventfd failed: {}",
+      std::strerror(-registerRet));
+  state_->eventRegistered = true;
 }
 
 IoUringBackend::~IoUringBackend() {
   if (state_) {
-    io_uring_queue_exit(&state_->ring);
+    if (state_->eventRegistered) {
+      io_uring_unregister_eventfd(&state_->ring);
+    }
+    if (state_->ringInitialized) {
+      io_uring_queue_exit(&state_->ring);
+    }
   }
+}
+
+int IoUringBackend::completionFd() const {
+  return state_->completionEvent.fd();
 }
 
 BackendSubmitStatus IoUringBackend::submit(
@@ -54,6 +80,7 @@ BackendSubmitStatus IoUringBackend::submit(
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {
+  state_->completionEvent.drain();
   std::vector<BackendCompletion> completions;
   io_uring_cqe* cqe = nullptr;
   while (io_uring_peek_cqe(&state_->ring, &cqe) == 0 && cqe != nullptr) {
@@ -83,6 +110,10 @@ IoUringBackend::IoUringBackend(uint32_t ringDepth) {
 }
 
 IoUringBackend::~IoUringBackend() = default;
+
+int IoUringBackend::completionFd() const {
+  BOLT_FAIL("IoUringBackend requires IO_URING_SUPPORTED");
+}
 
 BackendSubmitStatus IoUringBackend::submit(
     uint64_t requestId,

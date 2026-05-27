@@ -2,6 +2,7 @@ add_library(
   bolt_memory_bm_io
   AdaptiveDepthController.cpp
   DiskIoScheduler.cpp
+  EventFd.cpp
   IoUringBackend.cpp
 )
 

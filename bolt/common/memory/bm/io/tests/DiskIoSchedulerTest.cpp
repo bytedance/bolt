@@ -1,6 +1,7 @@
 #include "bolt/common/memory/bm/io/DiskIoScheduler.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfigValidator.h"
+#include "bolt/common/memory/bm/io/EventFd.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoRequestValidator.h"
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <poll.h>
 
 using namespace bytedance::bolt::memory::bm;
 
@@ -144,6 +146,10 @@ void expectWeightedWindow(
 
 class FailingSubmitBackend : public IoBackend {
  public:
+  int completionFd() const override {
+    return completionEvent_.fd();
+  }
+
   BackendSubmitStatus submit(
       uint64_t /*requestId*/,
       const IoRequest& /*request*/) override {
@@ -161,10 +167,15 @@ class FailingSubmitBackend : public IoBackend {
 
  private:
   std::atomic<uint64_t> submitAttempts_{0};
+  EventFd completionEvent_;
 };
 
 class BlockingReapBackend : public IoBackend {
  public:
+  int completionFd() const override {
+    return completionEvent_.fd();
+  }
+
   BackendSubmitStatus submit(
       uint64_t /*requestId*/,
       const IoRequest& /*request*/) override {
@@ -205,10 +216,15 @@ class BlockingReapBackend : public IoBackend {
   bool enteredReap_{false};
   bool allowReapReturn_{false};
   std::atomic<uint64_t> submitAttempts_{0};
+  EventFd completionEvent_;
 };
 
 class BusyOnceBackend : public IoBackend {
  public:
+  int completionFd() const override {
+    return completionEvent_.fd();
+  }
+
   BackendSubmitStatus submit(
       uint64_t requestId,
       const IoRequest& request) override {
@@ -247,10 +263,15 @@ class BusyOnceBackend : public IoBackend {
   IoPriority priority_{IoPriority::Medium};
   bool submitted_{false};
   bool completed_{false};
+  EventFd completionEvent_;
 };
 
 class NeverCompleteBackend : public IoBackend {
  public:
+  int completionFd() const override {
+    return completionEvent_.fd();
+  }
+
   BackendSubmitStatus submit(
       uint64_t /*requestId*/,
       const IoRequest& /*request*/) override {
@@ -268,6 +289,7 @@ class NeverCompleteBackend : public IoBackend {
 
  private:
   std::atomic<uint64_t> submitAttempts_{0};
+  EventFd completionEvent_;
 };
 
 } // namespace
@@ -368,6 +390,30 @@ TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
       backend.complete(11, IoResult{4096}), "unknown requestId");
 }
 
+TEST(MockIoBackendTest, completionFdSignalsCompletedRequests) {
+  MockIoBackend backend;
+  IoRequest request;
+  request.opcode = IoOpcode::Read;
+  request.priority = IoPriority::Medium;
+  request.fd = 7;
+  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
+
+  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
+
+  pollfd completionEvent{backend.completionFd(), POLLIN, 0};
+  EXPECT_EQ(0, ::poll(&completionEvent, 1, 0));
+
+  backend.complete(11, IoResult{4096});
+  ASSERT_EQ(1, ::poll(&completionEvent, 1, 100));
+  EXPECT_NE(0, completionEvent.revents & POLLIN);
+
+  auto completions = backend.reap();
+  ASSERT_EQ(1, completions.size());
+  EXPECT_EQ(11, completions[0].requestId);
+  completionEvent.revents = 0;
+  EXPECT_EQ(0, ::poll(&completionEvent, 1, 0));
+}
+
 TEST(DiskIoSchedulerTest, facadeConstructorUsesDefaultBackendWhenSupported) {
   DiskIoSchedulerConfig config;
 
@@ -384,7 +430,7 @@ TEST(DiskIoSchedulerTest, facadeConstructorUsesDefaultBackendWhenSupported) {
 #else
   BOLT_ASSERT_THROW(
       [&] { DiskIoScheduler scheduler(config); }(),
-      "DiskIoScheduler default constructor requires IoUringBackend");
+      "IoUringBackend requires IO_URING_SUPPORTED");
 #endif
 }
 
