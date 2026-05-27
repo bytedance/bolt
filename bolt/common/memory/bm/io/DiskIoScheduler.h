@@ -90,7 +90,8 @@ class DiskIoScheduler {
   std::optional<std::chrono::steady_clock::time_point> drainDeadline_;
   uint64_t nextRequestId_{1};
   std::array<std::deque<QueuedRequest>, kIoPriorityCount> queues_;
-  std::array<int64_t, kIoPriorityCount> deficits_{{0, 0, 0}};
+  uint64_t totalQueued_{0};
+  std::array<int64_t, kIoPriorityCount> deficits_{};
   size_t nextPriorityCursor_{0};
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;

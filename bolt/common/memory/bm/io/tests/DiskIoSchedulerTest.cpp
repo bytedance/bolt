@@ -300,6 +300,16 @@ TEST(IoRequestValidatorTest, validateRequestRejectsBadBufferRange) {
   EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
 }
 
+TEST(IoRequestValidatorTest, validateRequestRejectsOffsetAtEndWithLength) {
+  IoRequest request;
+  request.opcode = IoOpcode::Read;
+  request.priority = IoPriority::Medium;
+  request.fd = 3;
+  request.buffer = IoBuffer{makeBuffer(128), 128, 128, 1};
+
+  EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
+}
+
 TEST(DiskIoSchedulerConfigValidatorTest, validateConfigRejectsInvalidDepth) {
   DiskIoSchedulerConfig config;
   config.ringDepth = 16;
@@ -397,8 +407,11 @@ TEST(DiskIoSchedulerTest, invalidRequestReturnsCompletedErrorFuture) {
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(1, stats.rejectedRequests);
-  EXPECT_EQ(1, stats.failedRequests);
-  EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Medium)]);
+  EXPECT_EQ(0, stats.acceptedRequests);
+  EXPECT_EQ(0, stats.completedRequests);
+  EXPECT_EQ(0, stats.failedRequests);
+  EXPECT_EQ(0, stats.latencySamples);
+  EXPECT_EQ(0, stats.failedRequestsByPriority[priorityIndex(IoPriority::Medium)]);
   EXPECT_NE(
       std::string::npos,
       stats.toString().find("rejected_requests=1"));
@@ -554,7 +567,9 @@ TEST(DiskIoSchedulerTest, submitAfterStopAndDrainReturnsShutdownFuture) {
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(1, stats.shutdownRejectedRequests);
-  EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(0, stats.completedRequests);
+  EXPECT_EQ(0, stats.failedRequests);
+  EXPECT_EQ(0, stats.latencySamples);
 }
 
 TEST(DiskIoSchedulerTest, stopAndDrainWaitsForInflightCompletion) {
@@ -632,6 +647,8 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
       1, stats.successfulRequestsByPriority[priorityIndex(IoPriority::High)]);
   EXPECT_EQ(0, stats.failedRequests);
   EXPECT_GT(stats.cumulativeLatencyUs, 0);
+  EXPECT_EQ(1, stats.latencySamples);
+  EXPECT_GT(stats.averageLatencyUs, 0);
   EXPECT_GT(stats.maxLatencyUs, 0);
   EXPECT_LE(stats.minLatencyUs, stats.maxLatencyUs);
   EXPECT_GE(stats.maxObservedInflightRequests, 1);
@@ -703,6 +720,8 @@ TEST(DiskIoSchedulerTest, backendSubmitFailureCompletesFutureAndStats) {
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(1, stats.failedRequests);
   EXPECT_EQ(1, stats.backendSubmitFailedRequests);
+  EXPECT_EQ(0, stats.latencySamples);
+  EXPECT_EQ(0, stats.averageLatencyUs);
   EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Low)]);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::Low)]);
@@ -725,6 +744,7 @@ TEST(DiskIoSchedulerTest, retryableBackendBusyDoesNotFailRequest) {
   const auto stats = scheduler.stats();
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(1, stats.successfulRequests);
+  EXPECT_EQ(1, stats.latencySamples);
   EXPECT_EQ(0, stats.backendSubmitFailedRequests);
   EXPECT_EQ(0, stats.failedRequests);
 }
@@ -754,6 +774,7 @@ TEST(DiskIoSchedulerTest, stopAndDrainTimesOutInflightRequests) {
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
   EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(0, stats.latencySamples);
 }
 
 TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
@@ -774,6 +795,7 @@ TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
   const auto stats = scheduler.stats();
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(1, stats.failedRequests);
+  EXPECT_EQ(1, stats.latencySamples);
   EXPECT_EQ(1, stats.backendIoErrorRequests);
   EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Low)]);
   EXPECT_NE(
