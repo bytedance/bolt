@@ -10,7 +10,8 @@ namespace bytedance::bolt::memory::bm {
 AdaptiveDepthController::AdaptiveDepthController(AdaptiveDepthConfig config)
     : config_(config),
       currentDepth_(config.initialDepth),
-      bestDepth_(config.initialDepth) {
+      bestDepth_(config.initialDepth),
+      windowStart_(std::chrono::steady_clock::now()) {
   BOLT_CHECK(isValidConfig(config_), "invalid AdaptiveDepthConfig");
 }
 
@@ -22,19 +23,46 @@ double AdaptiveDepthController::recentThroughputBytesPerSecond() const {
   return recentThroughputBytesPerSecond_;
 }
 
+void AdaptiveDepthController::onCompletion(
+    uint64_t completedBytes,
+    bool hasBacklog,
+    std::chrono::steady_clock::time_point now) {
+  windowCompletedBytes_ += completedBytes;
+  const auto elapsed = now - windowStart_;
+  if (elapsed < config_.controlInterval) {
+    return;
+  }
+
+  const auto seconds = std::chrono::duration<double>(elapsed).count();
+  const auto throughputBytesPerSecond =
+      seconds > 0 ? static_cast<double>(windowCompletedBytes_) / seconds : 0;
+  onWindow(throughputBytesPerSecond, hasBacklog);
+  windowCompletedBytes_ = 0;
+  windowStart_ = now;
+}
+
 void AdaptiveDepthController::onWindow(
     double throughputBytesPerSecond,
     bool hasBacklog) {
-  if (std::isfinite(throughputBytesPerSecond) &&
-      throughputBytesPerSecond >= 0) {
-    recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
+  const auto validSample = std::isfinite(throughputBytesPerSecond) &&
+      throughputBytesPerSecond >= 0;
+  if (validSample) {
+    if (!hasRecentThroughput_) {
+      recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
+      hasRecentThroughput_ = true;
+    } else {
+      const auto alpha = config_.throughputSmoothingFactor;
+      recentThroughputBytesPerSecond_ =
+          alpha * throughputBytesPerSecond +
+          (1.0 - alpha) * recentThroughputBytesPerSecond_;
+    }
   }
 
   if (!config_.enabled || !hasBacklog) {
     return;
   }
 
-  if (!isValidThroughput(throughputBytesPerSecond)) {
+  if (!validSample || !isValidThroughput(recentThroughputBytesPerSecond_)) {
     if (measuringProbeDepth_) {
       currentDepth_ = bestDepth_;
       measuringProbeDepth_ = false;
@@ -43,15 +71,15 @@ void AdaptiveDepthController::onWindow(
   }
 
   if (!hasBestThroughput_) {
-    bestThroughputBytesPerSecond_ = throughputBytesPerSecond;
+    bestThroughputBytesPerSecond_ = recentThroughputBytesPerSecond_;
     bestDepth_ = currentDepth_;
     hasBestThroughput_ = true;
     scheduleProbe();
     return;
   }
 
-  if (throughputImproved(throughputBytesPerSecond)) {
-    bestThroughputBytesPerSecond_ = throughputBytesPerSecond;
+  if (throughputImproved(recentThroughputBytesPerSecond_)) {
+    bestThroughputBytesPerSecond_ = recentThroughputBytesPerSecond_;
     bestDepth_ = currentDepth_;
     scheduleProbe();
     return;
@@ -71,7 +99,9 @@ bool AdaptiveDepthController::isValidConfig(
   return config.minDepth > 0 && config.increaseStep > 0 &&
       config.minDepth <= config.initialDepth &&
       config.initialDepth <= config.maxDepth &&
-      config.controlInterval.count() > 0 && config.minThroughputGain >= 0;
+      config.controlInterval.count() > 0 && config.minThroughputGain >= 0 &&
+      config.throughputSmoothingFactor > 0 &&
+      config.throughputSmoothingFactor <= 1;
 }
 
 bool AdaptiveDepthController::isValidThroughput(

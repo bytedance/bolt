@@ -98,12 +98,12 @@ TEST(IoUringBackendTest, writeAndReadTemporaryFile) {
   auto writeBuffer = makeBuffer(4096);
   std::memset(writeBuffer.get(), 'x', 4096);
   auto write = makeRequest(IoOpcode::Write, file.fd(), writeBuffer);
-  EXPECT_EQ(0, scheduler->submit(write).get().errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, scheduler->submit(write).get().error);
 
   auto readBuffer = makeBuffer(4096);
   auto read = makeRequest(IoOpcode::Read, file.fd(), readBuffer);
   auto result = scheduler->submit(read).get();
-  EXPECT_EQ(0, result.errorCode);
+  EXPECT_EQ(IoErrorCode::Ok, result.error);
   EXPECT_EQ(4096, result.bytes);
   EXPECT_EQ(0, std::memcmp(writeBuffer.get(), readBuffer.get(), 4096));
 }
@@ -121,6 +121,7 @@ TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {
   auto result = scheduler->submit(request).get();
 
   EXPECT_EQ(0, result.bytes);
-  EXPECT_EQ(EBADF, result.errorCode);
+  EXPECT_EQ(IoErrorCode::BackendIoError, result.error);
+  EXPECT_EQ(EBADF, result.nativeErrorCode);
 }
 #endif
