@@ -1,6 +1,6 @@
 #include "bolt/common/memory/bm/DiskIoScheduler.h"
 #include "bolt/common/memory/bm/DiskIoTypes.h"
-#include "bolt/common/memory/bm/MockIoBackend.h"
+#include "bolt/common/memory/bm/tests/MockIoBackend.h"
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/tests/GTestUtils.h"
