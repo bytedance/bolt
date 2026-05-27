@@ -30,6 +30,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/Expressions.h"
+#include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -590,7 +591,7 @@ TEST_F(StreamingAggregationTest, flushOnPreferredOutputBatchBytes) {
   // With byte-based flushing, the operator must produce more than one output
   // vector for `numRows` distinct groups.
   ASSERT_GT(aggStats.outputVectors, 1);
-  ASSERT_EQ(aggStats.outputPositions, numRows);
+  ASSERT_EQ(aggStats.outputRows, numRows);
 }
 
 TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
@@ -623,5 +624,5 @@ TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
   const auto& aggStats = planStats.at(aggrNodeId);
   // All groups should be flushed at end-of-input as a single output vector.
   ASSERT_EQ(aggStats.outputVectors, 1);
-  ASSERT_EQ(aggStats.outputPositions, numRows);
+  ASSERT_EQ(aggStats.outputRows, numRows);
 }
