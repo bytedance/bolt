@@ -596,8 +596,7 @@ TEST_F(StreamingAggregationTest, flushOnPreferredOutputBatchBytes) {
 TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
   const vector_size_t numRows = 256;
   auto keys = makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
-  auto payload =
-      makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
+  auto payload = makeFlatVector<int64_t>(numRows, [](auto row) { return row; });
   auto data = makeRowVector({keys, payload});
   createDuckDbTable({data});
 
@@ -613,13 +612,12 @@ TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
                   .capturePlanNodeId(aggrNodeId)
                   .planNode();
 
-  auto task =
-      AssertQueryBuilder(plan, duckDbQueryRunner_)
-          .config(core::QueryConfig::kPreferredOutputBatchRows, "10000")
-          .config(
-              core::QueryConfig::kPreferredOutputBatchBytes,
-              std::to_string(1UL << 30))
-          .assertResults("SELECT c0, sum(c1) FROM tmp GROUP BY c0");
+  auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                  .config(core::QueryConfig::kPreferredOutputBatchRows, "10000")
+                  .config(
+                      core::QueryConfig::kPreferredOutputBatchBytes,
+                      std::to_string(1UL << 30))
+                  .assertResults("SELECT c0, sum(c1) FROM tmp GROUP BY c0");
 
   auto planStats = exec::toPlanStats(task->taskStats());
   const auto& aggStats = planStats.at(aggrNodeId);

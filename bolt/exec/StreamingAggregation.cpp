@@ -333,10 +333,9 @@ RowVectorPtr StreamingAggregation::getOutput() {
     outputSize = outputBatchSize_;
   } else if (
       numGroups_ > 1 &&
-      rows_->estimateRowSize().value_or(0) * rows_->numRows() >
-          outputBytes_) {
+      rows_->estimateRowSize().value_or(0) * rows_->numRows() > outputBytes_) {
     outputSize = numGroups_ - 1;
-          }
+  }
 
   if (outputSize > 0) {
     output = createOutput(outputSize);
