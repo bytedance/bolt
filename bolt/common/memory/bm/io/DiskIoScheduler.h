@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <condition_variable>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -16,6 +15,7 @@
 #include "bolt/common/memory/bm/io/AdaptiveDepthController.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
+#include "bolt/common/memory/bm/io/EventFd.h"
 #include "bolt/common/memory/bm/io/IoBackend.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
@@ -79,13 +79,17 @@ class DiskIoScheduler {
   void failOutstandingLocked(std::vector<ReadyResult>& readyResults);
   DiskIoSchedulerStats snapshotStatsLocked() const;
   void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
+  int computeWaitTimeoutMsLocked(std::chrono::steady_clock::time_point now);
+  void waitForWorkerEvent(int timeoutMs);
+  void notifyWorker() const;
 
   const DiskIoSchedulerConfig config_;
   AdaptiveDepthController adaptiveDepth_;
   std::unique_ptr<IoBackend> backend_;
+  EventFd wakeupEvent_;
+  int epollFd_{-1};
 
   mutable std::mutex mutex_;
-  std::condition_variable cv_;
   bool stopping_{false};
   std::optional<std::chrono::steady_clock::time_point> drainDeadline_;
   uint64_t nextRequestId_{1};

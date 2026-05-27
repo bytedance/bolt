@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "bolt/common/memory/bm/io/EventFd.h"
 #include "bolt/common/memory/bm/io/IoBackend.h"
 
 namespace bytedance::bolt::memory::bm {
@@ -16,6 +17,7 @@ struct MockSubmittedRequest {
 
 class MockIoBackend : public IoBackend {
  public:
+  int completionFd() const override;
   BackendSubmitStatus submit(
       uint64_t requestId,
       const IoRequest& request) override;
@@ -31,6 +33,7 @@ class MockIoBackend : public IoBackend {
   std::vector<MockSubmittedRequest> submitted_;
   std::vector<BackendCompletion> completions_;
   std::unordered_set<uint64_t> inflight_;
+  EventFd completionEvent_;
 };
 
 } // namespace bytedance::bolt::memory::bm

@@ -6,16 +6,47 @@
 #include "bolt/common/memory/bm/io/IoUringBackend.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <optional>
 #include <utility>
 
 #include <glog/logging.h>
+#include <sys/epoll.h>
+#include <unistd.h>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
 
-constexpr auto kIdlePollInterval = std::chrono::milliseconds(1);
+constexpr uint32_t kWakeupEvent = 1;
+constexpr uint32_t kCompletionEvent = 2;
+
+int createEpollFd() {
+  const int fd = ::epoll_create1(EPOLL_CLOEXEC);
+  BOLT_CHECK_GE(fd, 0, "epoll_create1 failed: {}", std::strerror(errno));
+  return fd;
+}
+
+void registerEpollFd(int epollFd, int fd, uint32_t eventId) {
+  epoll_event event{};
+  event.events = EPOLLIN;
+  event.data.u32 = eventId;
+  BOLT_CHECK_EQ(
+      ::epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event),
+      0,
+      "epoll_ctl add failed: {}",
+      std::strerror(errno));
+}
+
+int toEpollTimeoutMs(std::chrono::steady_clock::duration duration) {
+  if (duration <= std::chrono::steady_clock::duration::zero()) {
+    return 0;
+  }
+  const auto timeoutMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+  return static_cast<int>(std::max<int64_t>(1, timeoutMs.count()));
+}
 
 } // namespace
 
@@ -30,11 +61,14 @@ DiskIoScheduler::DiskIoScheduler(
     : config_(config),
       adaptiveDepth_(config_.adaptiveDepth),
       backend_(std::move(backend)),
+      epollFd_(createEpollFd()),
       lastStatsLogTime_(std::chrono::steady_clock::now()) {
   BOLT_CHECK(
       validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
       "invalid DiskIoSchedulerConfig");
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
+  registerEpollFd(epollFd_, wakeupEvent_.fd(), kWakeupEvent);
+  registerEpollFd(epollFd_, backend_->completionFd(), kCompletionEvent);
   stats_.currentDepth = adaptiveDepth_.currentDepth();
   stats_.adaptive = adaptiveDepth_.stats();
   worker_ = std::thread([this] { run(); });
@@ -42,6 +76,9 @@ DiskIoScheduler::DiskIoScheduler(
 
 DiskIoScheduler::~DiskIoScheduler() {
   stopAndDrain();
+  if (epollFd_ >= 0) {
+    ::close(epollFd_);
+  }
 }
 
 std::future<IoResult> DiskIoScheduler::completedFuture(IoResult result) {
@@ -99,7 +136,7 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
     return future;
   }
 
-  cv_.notify_one();
+  notifyWorker();
 
   return future;
 }
@@ -112,7 +149,7 @@ void DiskIoScheduler::stopAndDrain() {
       drainDeadline_ = std::chrono::steady_clock::now() + config_.drainTimeout;
     }
   }
-  cv_.notify_one();
+  notifyWorker();
 
   std::lock_guard<std::mutex> joinLock(joinMutex_);
   if (worker_.joinable()) {
@@ -153,10 +190,13 @@ void DiskIoScheduler::logStatsIfDueLocked(
 void DiskIoScheduler::run() {
   while (true) {
     std::vector<ReadyResult> readyResults;
+    wakeupEvent_.drain();
     auto completions = backend_->reap();
     std::vector<QueuedRequest> dispatchBatch;
     bool madeProgress = !completions.empty();
     bool shouldExit = false;
+    bool shouldContinue = false;
+    int waitTimeoutMs = -1;
     const auto now = std::chrono::steady_clock::now();
 
     {
@@ -191,6 +231,13 @@ void DiskIoScheduler::run() {
       std::lock_guard<std::mutex> lock(mutex_);
       applyDispatchResultsLocked(dispatchResults, readyResults);
       shouldExit = shouldExit || (stopping_ && drainedLocked());
+      shouldContinue =
+          madeProgress ||
+          (hasQueuedRequestsLocked() &&
+           inflight_.size() < adaptiveDepth_.currentDepth());
+      logStatsIfDueLocked(std::chrono::steady_clock::now());
+      waitTimeoutMs =
+          computeWaitTimeoutMsLocked(std::chrono::steady_clock::now());
     }
 
     // Fulfill futures after releasing mutex_. A waiting caller may immediately
@@ -203,22 +250,53 @@ void DiskIoScheduler::run() {
       return;
     }
 
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (madeProgress || !inflight_.empty()) {
-      cv_.wait_for(lock, kIdlePollInterval);
-      logStatsIfDueLocked(std::chrono::steady_clock::now());
-    } else {
-      if (config_.enableStatsLogging) {
-        cv_.wait_for(lock, config_.statsLogInterval, [this] {
-          return stopping_ || hasQueuedRequestsLocked();
-        });
-        logStatsIfDueLocked(std::chrono::steady_clock::now());
-      } else {
-        cv_.wait(
-            lock, [this] { return stopping_ || hasQueuedRequestsLocked(); });
-      }
+    if (!shouldContinue) {
+      // New work and backend completions are both fd-driven, so the worker can
+      // sleep here without periodic polling. Timeouts are reserved for real
+      // deadlines such as stats logging and stopAndDrain() expiry.
+      waitForWorkerEvent(waitTimeoutMs);
     }
   }
+}
+
+int DiskIoScheduler::computeWaitTimeoutMsLocked(
+    std::chrono::steady_clock::time_point now) {
+  std::optional<std::chrono::steady_clock::duration> waitTime;
+  auto includeDeadline =
+      [&waitTime, now](std::chrono::steady_clock::time_point deadline) {
+        const auto duration = deadline - now;
+        waitTime = waitTime.has_value() ? std::min(*waitTime, duration)
+                                        : std::optional(duration);
+      };
+
+  if (stopping_ && drainDeadline_.has_value() && !drainedLocked()) {
+    includeDeadline(*drainDeadline_);
+  }
+  if (config_.enableStatsLogging) {
+    includeDeadline(lastStatsLogTime_ + config_.statsLogInterval);
+  }
+  if (!waitTime.has_value()) {
+    return -1;
+  }
+  return toEpollTimeoutMs(*waitTime);
+}
+
+void DiskIoScheduler::waitForWorkerEvent(int timeoutMs) {
+  epoll_event events[2];
+  while (true) {
+    const int ready = ::epoll_wait(epollFd_, events, 2, timeoutMs);
+    if (ready >= 0) {
+      return;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    BOLT_CHECK(false, "epoll_wait failed: {}", std::strerror(errno));
+  }
+}
+
+void DiskIoScheduler::notifyWorker() const {
+  wakeupEvent_.notify();
 }
 
 bool DiskIoScheduler::hasQueuedRequestsLocked() const {
