@@ -111,6 +111,7 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
   std::promise<IoResult> promise;
   auto future = promise.get_future();
   std::optional<IoResult> rejectedResult;
+  const auto enqueueTime = std::chrono::steady_clock::now();
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -122,7 +123,10 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) {
     } else {
       const auto priority = priorityIndex(request.priority);
       queues_[priority].push_back(QueuedRequest{
-          nextRequestId_++, std::move(request), std::move(promise)});
+          nextRequestId_++,
+          std::move(request),
+          std::move(promise),
+          enqueueTime});
       ++totalQueued_;
       stats_.queuedRequests[priority] = queues_[priority].size();
       ++stats_.acceptedRequests;
@@ -377,6 +381,16 @@ DiskIoScheduler::collectDispatchBatchLocked() {
 void DiskIoScheduler::applyDispatchResultsLocked(
     std::vector<DispatchResult>& results,
     std::vector<ReadyResult>& readyResults) {
+  if (!results.empty()) {
+    ++stats_.submitBatches;
+    stats_.submittedRequestsInBatches += results.size();
+    stats_.maxSubmitBatchSize =
+        std::max<uint64_t>(stats_.maxSubmitBatchSize, results.size());
+    stats_.averageSubmitBatchSize =
+        static_cast<double>(stats_.submittedRequestsInBatches) /
+        static_cast<double>(stats_.submitBatches);
+  }
+
   for (auto& dispatch : results) {
     const auto priority = priorityIndex(dispatch.queued.request.priority);
     if (dispatch.status == BackendSubmitStatus::RetryableBusy) {
@@ -402,11 +416,25 @@ void DiskIoScheduler::applyDispatchResultsLocked(
     }
 
     ++stats_.submittedRequests[priority];
+    const auto queueWaitUs =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            dispatch.submitTime - dispatch.queued.enqueueTime)
+            .count();
+    const auto measuredQueueWaitUs =
+        queueWaitUs > 0 ? static_cast<uint64_t>(queueWaitUs) : 0;
+    stats_.cumulativeQueueWaitUs += measuredQueueWaitUs;
+    ++stats_.queueWaitSamples;
+    stats_.averageQueueWaitUs =
+        static_cast<double>(stats_.cumulativeQueueWaitUs) /
+        static_cast<double>(stats_.queueWaitSamples);
+    stats_.maxQueueWaitUs =
+        std::max(stats_.maxQueueWaitUs, measuredQueueWaitUs);
     inflight_.emplace(
         dispatch.queued.requestId,
         InflightRequest{
             std::move(dispatch.queued.request),
             std::move(dispatch.queued.promise),
+            dispatch.queued.enqueueTime,
             dispatch.submitTime});
     stats_.inflightRequests = inflight_.size();
     stats_.maxObservedInflightRequests = std::max<uint64_t>(
@@ -417,6 +445,16 @@ void DiskIoScheduler::applyDispatchResultsLocked(
 void DiskIoScheduler::applyCompletionsLocked(
     std::vector<BackendCompletion>& completions,
     std::vector<ReadyResult>& readyResults) {
+  if (!completions.empty()) {
+    ++stats_.completionBatches;
+    stats_.completedRequestsInBatches += completions.size();
+    stats_.maxCompletionBatchSize =
+        std::max<uint64_t>(stats_.maxCompletionBatchSize, completions.size());
+    stats_.averageCompletionBatchSize =
+        static_cast<double>(stats_.completedRequestsInBatches) /
+        static_cast<double>(stats_.completionBatches);
+  }
+
   for (auto& completion : completions) {
     auto it = inflight_.find(completion.requestId);
     if (it == inflight_.end()) {
@@ -434,8 +472,15 @@ void DiskIoScheduler::applyCompletionsLocked(
             .count();
     const auto measuredLatencyUs =
         latencyUs > 0 ? static_cast<uint64_t>(latencyUs) : 0;
+    const auto endToEndLatencyUs =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            now - inflight.enqueueTime)
+            .count();
+    const auto measuredEndToEndLatencyUs =
+        endToEndLatencyUs > 0 ? static_cast<uint64_t>(endToEndLatencyUs) : 0;
     const auto firstLatencySample = stats_.latencySamples == 0;
     stats_.cumulativeLatencyUs += measuredLatencyUs;
+    stats_.cumulativeEndToEndLatencyUs += measuredEndToEndLatencyUs;
     ++stats_.latencySamples;
     ++stats_.completedRequests;
     ++stats_.completedRequestsByPriority[priority];
@@ -461,10 +506,16 @@ void DiskIoScheduler::applyCompletionsLocked(
             ? 0
             : static_cast<double>(stats_.cumulativeLatencyUs) /
                 static_cast<double>(stats_.latencySamples);
+    stats_.averageDeviceLatencyUs = stats_.averageLatencyUs;
+    stats_.averageEndToEndLatencyUs =
+        static_cast<double>(stats_.cumulativeEndToEndLatencyUs) /
+        static_cast<double>(stats_.latencySamples);
     if (firstLatencySample || measuredLatencyUs < stats_.minLatencyUs) {
       stats_.minLatencyUs = measuredLatencyUs;
     }
     stats_.maxLatencyUs = std::max(stats_.maxLatencyUs, measuredLatencyUs);
+    stats_.maxEndToEndLatencyUs =
+        std::max(stats_.maxEndToEndLatencyUs, measuredEndToEndLatencyUs);
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight.request.buffer);
     adaptiveDepth_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);

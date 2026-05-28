@@ -43,11 +43,13 @@ class DiskIoScheduler {
     uint64_t requestId{0};
     IoRequest request;
     std::promise<IoResult> promise;
+    std::chrono::steady_clock::time_point enqueueTime;
   };
 
   struct InflightRequest {
     IoRequest request;
     std::promise<IoResult> promise;
+    std::chrono::steady_clock::time_point enqueueTime;
     std::chrono::steady_clock::time_point submitTime;
   };
 

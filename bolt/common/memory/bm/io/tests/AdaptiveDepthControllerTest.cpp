@@ -15,6 +15,7 @@ namespace {
 
 AdaptiveDepthConfig makeConfig() {
   AdaptiveDepthConfig config;
+  config.enabled = true;
   config.initialDepth = 8;
   config.maxDepth = 16;
   config.increaseStep = 4;

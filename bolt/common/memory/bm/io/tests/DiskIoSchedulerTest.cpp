@@ -344,6 +344,13 @@ TEST(DiskIoSchedulerConfigValidatorTest, validateConfigRejectsInvalidDepth) {
       validateDiskIoSchedulerConfig(config));
 }
 
+TEST(DiskIoSchedulerConfigTest, defaultConfigUsesFixedDepth) {
+  DiskIoSchedulerConfig config;
+
+  EXPECT_FALSE(config.adaptiveDepth.enabled);
+  EXPECT_EQ(config.adaptiveDepth.initialDepth, config.adaptiveDepth.maxDepth);
+}
+
 TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
   MockIoBackend backend;
   IoRequest request;
@@ -695,12 +702,36 @@ TEST(DiskIoSchedulerTest, statsReflectSuccessfulCompletion) {
   EXPECT_GT(stats.cumulativeLatencyUs, 0);
   EXPECT_EQ(1, stats.latencySamples);
   EXPECT_GT(stats.averageLatencyUs, 0);
+  EXPECT_EQ(1, stats.queueWaitSamples);
+  EXPECT_GE(stats.averageEndToEndLatencyUs, stats.averageLatencyUs);
+  EXPECT_GE(stats.maxEndToEndLatencyUs, stats.maxLatencyUs);
+  EXPECT_EQ(1, stats.submitBatches);
+  EXPECT_EQ(1, stats.submittedRequestsInBatches);
+  EXPECT_EQ(1, stats.maxSubmitBatchSize);
+  EXPECT_EQ(1, stats.completionBatches);
+  EXPECT_EQ(1, stats.completedRequestsInBatches);
+  EXPECT_EQ(1, stats.maxCompletionBatchSize);
   EXPECT_GT(stats.maxLatencyUs, 0);
   EXPECT_LE(stats.minLatencyUs, stats.maxLatencyUs);
   EXPECT_GE(stats.maxObservedInflightRequests, 1);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::High)]);
   EXPECT_NE(std::string::npos, stats.toString().find("completed_requests=1"));
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("average_queue_wait_us="));
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("average_device_latency_us="));
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("average_end_to_end_latency_us="));
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("average_submit_batch_size="));
+  EXPECT_NE(
+      std::string::npos,
+      stats.toString().find("average_completion_batch_size="));
   EXPECT_NE(std::string::npos, stats.toString().find("adaptive_current_depth=64"));
 }
 
@@ -709,6 +740,7 @@ TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklo
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
   config.ringDepth = 4;
+  config.adaptiveDepth.enabled = true;
   config.adaptiveDepth.minDepth = 1;
   config.adaptiveDepth.initialDepth = 1;
   config.adaptiveDepth.maxDepth = 4;

@@ -34,8 +34,24 @@ struct DiskIoSchedulerStats {
   uint64_t cumulativeLatencyUs{0};
   uint64_t latencySamples{0};
   double averageLatencyUs{0};
+  double averageDeviceLatencyUs{0};
   uint64_t minLatencyUs{0};
   uint64_t maxLatencyUs{0};
+  uint64_t cumulativeQueueWaitUs{0};
+  uint64_t queueWaitSamples{0};
+  double averageQueueWaitUs{0};
+  uint64_t maxQueueWaitUs{0};
+  uint64_t cumulativeEndToEndLatencyUs{0};
+  double averageEndToEndLatencyUs{0};
+  uint64_t maxEndToEndLatencyUs{0};
+  uint64_t submitBatches{0};
+  uint64_t submittedRequestsInBatches{0};
+  double averageSubmitBatchSize{0};
+  uint64_t maxSubmitBatchSize{0};
+  uint64_t completionBatches{0};
+  uint64_t completedRequestsInBatches{0};
+  double averageCompletionBatchSize{0};
+  uint64_t maxCompletionBatchSize{0};
   AdaptiveDepthStats adaptive;
 
   std::string toString() const {
@@ -78,8 +94,26 @@ struct DiskIoSchedulerStats {
         << " cumulative_latency_us=" << cumulativeLatencyUs
         << " latency_samples=" << latencySamples
         << " average_latency_us=" << averageLatencyUs
+        << " cumulative_device_latency_us=" << cumulativeLatencyUs
+        << " average_device_latency_us=" << averageDeviceLatencyUs
         << " min_latency_us=" << minLatencyUs
         << " max_latency_us=" << maxLatencyUs
+        << " cumulative_queue_wait_us=" << cumulativeQueueWaitUs
+        << " queue_wait_samples=" << queueWaitSamples
+        << " average_queue_wait_us=" << averageQueueWaitUs
+        << " max_queue_wait_us=" << maxQueueWaitUs
+        << " cumulative_end_to_end_latency_us="
+        << cumulativeEndToEndLatencyUs
+        << " average_end_to_end_latency_us=" << averageEndToEndLatencyUs
+        << " max_end_to_end_latency_us=" << maxEndToEndLatencyUs
+        << " submit_batches=" << submitBatches
+        << " submitted_requests_in_batches=" << submittedRequestsInBatches
+        << " average_submit_batch_size=" << averageSubmitBatchSize
+        << " max_submit_batch_size=" << maxSubmitBatchSize
+        << " completion_batches=" << completionBatches
+        << " completed_requests_in_batches=" << completedRequestsInBatches
+        << " average_completion_batch_size=" << averageCompletionBatchSize
+        << " max_completion_batch_size=" << maxCompletionBatchSize
         << " adaptive_enabled=" << adaptive.enabled
         << " adaptive_current_depth=" << adaptive.currentDepth
         << " adaptive_best_depth=" << adaptive.bestDepth
