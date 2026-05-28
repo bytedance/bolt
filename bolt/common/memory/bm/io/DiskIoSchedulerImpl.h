@@ -7,13 +7,13 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "bolt/common/memory/bm/io/DepthController.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
 #include "bolt/common/memory/bm/io/EventFd.h"
+#include "bolt/common/memory/bm/io/InflightRegistry.h"
 #include "bolt/common/memory/bm/io/IoBackend.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
@@ -38,13 +38,6 @@ class DiskIoSchedulerImpl {
   DiskIoSchedulerStats stats() const;
 
  private:
-  struct InflightRequest {
-    IoRequest request;
-    std::promise<IoResult> promise;
-    std::chrono::steady_clock::time_point enqueueTime;
-    std::chrono::steady_clock::time_point submitTime;
-  };
-
   struct ReadyResult {
     std::promise<IoResult> promise;
     IoResult result;
@@ -87,7 +80,7 @@ class DiskIoSchedulerImpl {
   bool stopping_{false};
   uint64_t nextRequestId_{1};
   IoRequestQueue requestQueue_;
-  std::unordered_map<uint64_t, InflightRequest> inflight_;
+  InflightRegistry inflight_;
   DiskIoSchedulerStats stats_;
   std::chrono::steady_clock::time_point lastStatsLogTime_;
   std::thread worker_;
