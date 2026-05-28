@@ -39,6 +39,24 @@ class DiskIoScheduler {
   DiskIoSchedulerStats stats() const;
 
  private:
+  class ScopedFd {
+   public:
+    ScopedFd() = default;
+    explicit ScopedFd(int fd);
+    ~ScopedFd();
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+    ScopedFd(ScopedFd&& other) noexcept;
+    ScopedFd& operator=(ScopedFd&& other) noexcept;
+
+    int get() const;
+    void reset(int fd = -1);
+
+   private:
+    int fd_{-1};
+  };
+
   struct QueuedRequest {
     uint64_t requestId{0};
     IoRequest request;
@@ -89,7 +107,7 @@ class DiskIoScheduler {
   AdaptiveDepthController adaptiveDepth_;
   std::unique_ptr<IoBackend> backend_;
   EventFd wakeupEvent_;
-  int epollFd_{-1};
+  ScopedFd epollFd_;
 
   mutable std::mutex mutex_;
   bool stopping_{false};
