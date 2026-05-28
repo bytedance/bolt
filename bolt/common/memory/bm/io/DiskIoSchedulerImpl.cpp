@@ -14,7 +14,6 @@
 
 #include <glog/logging.h>
 #include <sys/epoll.h>
-#include <unistd.h>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -50,37 +49,6 @@ int toEpollTimeoutMs(std::chrono::steady_clock::duration duration) {
 
 } // namespace
 
-DiskIoSchedulerImpl::ScopedFd::ScopedFd(int fd) : fd_(fd) {}
-
-DiskIoSchedulerImpl::ScopedFd::~ScopedFd() {
-  reset();
-}
-
-DiskIoSchedulerImpl::ScopedFd::ScopedFd(ScopedFd&& other) noexcept
-    : fd_(other.fd_) {
-  other.fd_ = -1;
-}
-
-DiskIoSchedulerImpl::ScopedFd& DiskIoSchedulerImpl::ScopedFd::operator=(
-    ScopedFd&& other) noexcept {
-  if (this != &other) {
-    reset(other.fd_);
-    other.fd_ = -1;
-  }
-  return *this;
-}
-
-int DiskIoSchedulerImpl::ScopedFd::get() const {
-  return fd_;
-}
-
-void DiskIoSchedulerImpl::ScopedFd::reset(int fd) {
-  if (fd_ >= 0) {
-    ::close(fd_);
-  }
-  fd_ = fd;
-}
-
 DiskIoSchedulerImpl::DiskIoSchedulerImpl(DiskIoSchedulerConfig config)
     : DiskIoSchedulerImpl(
           config,
@@ -90,7 +58,7 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
     DiskIoSchedulerConfig config,
     std::unique_ptr<IoBackend> backend)
     : config_(config),
-      adaptiveDepth_(config_.adaptiveDepth),
+      depthController_(config_.adaptiveDepth),
       backend_(std::move(backend)),
       epollFd_(createEpollFd()),
       lastStatsLogTime_(std::chrono::steady_clock::now()) {
@@ -100,8 +68,8 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
   registerEpollFd(epollFd_.get(), wakeupEvent_.fd(), kWakeupEvent);
   registerEpollFd(epollFd_.get(), backend_->completionFd(), kCompletionEvent);
-  stats_.currentDepth = adaptiveDepth_.currentDepth();
-  stats_.adaptive = adaptiveDepth_.stats();
+  stats_.currentDepth = depthController_.currentDepth();
+  stats_.adaptive = depthController_.stats();
   worker_ = std::thread([this] { run(); });
 }
 
@@ -197,10 +165,10 @@ DiskIoSchedulerStats DiskIoSchedulerImpl::snapshotStatsLocked() const {
     snapshot.queuedRequests[i] = queues_[i].size();
   }
   snapshot.inflightRequests = inflight_.size();
-  snapshot.currentDepth = adaptiveDepth_.currentDepth();
+  snapshot.currentDepth = depthController_.currentDepth();
   snapshot.recentThroughputBytesPerSecond =
-      adaptiveDepth_.recentThroughputBytesPerSecond();
-  snapshot.adaptive = adaptiveDepth_.stats();
+      depthController_.recentThroughputBytesPerSecond();
+  snapshot.adaptive = depthController_.stats();
   return snapshot;
 }
 
@@ -264,7 +232,7 @@ void DiskIoSchedulerImpl::run() {
       shouldContinue =
           madeProgress || dispatchMadeProgress ||
           (hasQueuedRequestsLocked() &&
-           inflight_.size() < adaptiveDepth_.currentDepth() &&
+           inflight_.size() < depthController_.currentDepth() &&
            !(!dispatchResults.empty() && !dispatchMadeProgress));
       logStatsIfDueLocked(std::chrono::steady_clock::now());
       waitTimeoutMs =
@@ -382,7 +350,7 @@ std::optional<size_t> DiskIoSchedulerImpl::pickQueueLocked() {
 std::vector<DiskIoSchedulerImpl::QueuedRequest>
 DiskIoSchedulerImpl::collectDispatchBatchLocked() {
   std::vector<QueuedRequest> batch;
-  while (inflight_.size() + batch.size() < adaptiveDepth_.currentDepth() &&
+  while (inflight_.size() + batch.size() < depthController_.currentDepth() &&
          hasQueuedRequestsLocked()) {
     const auto priority = pickQueueLocked();
     if (!priority.has_value()) {
@@ -546,11 +514,11 @@ void DiskIoSchedulerImpl::applyCompletionsLocked(
         std::max(stats_.maxEndToEndLatencyUs, measuredEndToEndLatencyUs);
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight.request.buffer);
-    adaptiveDepth_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
-    stats_.currentDepth = adaptiveDepth_.currentDepth();
+    depthController_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
+    stats_.currentDepth = depthController_.currentDepth();
     stats_.recentThroughputBytesPerSecond =
-        adaptiveDepth_.recentThroughputBytesPerSecond();
-    stats_.adaptive = adaptiveDepth_.stats();
+        depthController_.recentThroughputBytesPerSecond();
+    stats_.adaptive = depthController_.stats();
 
     readyResults.push_back(
         ReadyResult{std::move(inflight.promise), std::move(result)});
