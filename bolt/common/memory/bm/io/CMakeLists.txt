@@ -1,10 +1,12 @@
 add_library(
   bolt_memory_bm_io
   AdaptiveDepthController.cpp
+  DepthController.cpp
   DiskIoScheduler.cpp
   DiskIoSchedulerImpl.cpp
   EventFd.cpp
   IoUringBackend.cpp
+  ScopedFd.cpp
 )
 
 target_compile_features(bolt_memory_bm_io PUBLIC cxx_std_20)

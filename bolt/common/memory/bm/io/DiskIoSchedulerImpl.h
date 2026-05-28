@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "bolt/common/memory/bm/io/AdaptiveDepthController.h"
+#include "bolt/common/memory/bm/io/DepthController.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
 #include "bolt/common/memory/bm/io/EventFd.h"
@@ -20,6 +20,7 @@
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
+#include "bolt/common/memory/bm/io/ScopedFd.h"
 
 namespace bytedance::bolt::memory::bm {
 
@@ -38,24 +39,6 @@ class DiskIoSchedulerImpl {
   DiskIoSchedulerStats stats() const;
 
  private:
-  class ScopedFd {
-   public:
-    ScopedFd() = default;
-    explicit ScopedFd(int fd);
-    ~ScopedFd();
-
-    ScopedFd(const ScopedFd&) = delete;
-    ScopedFd& operator=(const ScopedFd&) = delete;
-    ScopedFd(ScopedFd&& other) noexcept;
-    ScopedFd& operator=(ScopedFd&& other) noexcept;
-
-    int get() const;
-    void reset(int fd = -1);
-
-   private:
-    int fd_{-1};
-  };
-
   struct QueuedRequest {
     uint64_t requestId{0};
     IoRequest request;
@@ -104,7 +87,7 @@ class DiskIoSchedulerImpl {
   void notifyWorker() const;
 
   const DiskIoSchedulerConfig config_;
-  AdaptiveDepthController adaptiveDepth_;
+  DepthController depthController_;
   std::unique_ptr<IoBackend> backend_;
   EventFd wakeupEvent_;
   ScopedFd epollFd_;
