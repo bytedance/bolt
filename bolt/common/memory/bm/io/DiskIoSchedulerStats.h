@@ -5,7 +5,7 @@
 #include <sstream>
 #include <string>
 
-#include "bolt/common/memory/bm/io/AdaptiveDepthStats.h"
+#include "bolt/common/memory/bm/io/DepthControlStats.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
 namespace bytedance::bolt::memory::bm {
@@ -18,7 +18,6 @@ struct DiskIoSchedulerStats {
   std::array<uint64_t, kIoPriorityCount> successfulRequestsByPriority{};
   std::array<uint64_t, kIoPriorityCount> failedRequestsByPriority{};
   uint64_t inflightRequests{0};
-  uint32_t currentDepth{0};
   uint64_t acceptedRequests{0};
   uint64_t rejectedRequests{0};
   uint64_t shutdownRejectedRequests{0};
@@ -30,7 +29,6 @@ struct DiskIoSchedulerStats {
   uint64_t backendIoErrorRequests{0};
   uint64_t maxObservedQueueDepth{0};
   uint64_t maxObservedInflightRequests{0};
-  double recentThroughputBytesPerSecond{0};
   uint64_t cumulativeDeviceLatencyUs{0};
   uint64_t latencySamples{0};
   double averageDeviceLatencyUs{0};
@@ -51,7 +49,7 @@ struct DiskIoSchedulerStats {
   uint64_t completedRequestsInBatches{0};
   double averageCompletionBatchSize{0};
   uint64_t maxCompletionBatchSize{0};
-  AdaptiveDepthStats adaptive;
+  DepthControlStatsPtr depthControl;
 
   std::string toString() const {
     auto formatArray = [](const std::array<uint64_t, kIoPriorityCount>& values) {
@@ -75,7 +73,6 @@ struct DiskIoSchedulerStats {
         << " failed_requests_by_priority="
         << formatArray(failedRequestsByPriority)
         << " inflight_requests=" << inflightRequests
-        << " current_depth=" << currentDepth
         << " accepted_requests=" << acceptedRequests
         << " rejected_requests=" << rejectedRequests
         << " shutdown_rejected_requests=" << shutdownRejectedRequests
@@ -88,8 +85,6 @@ struct DiskIoSchedulerStats {
         << " backend_io_error_requests=" << backendIoErrorRequests
         << " max_observed_queue_depth=" << maxObservedQueueDepth
         << " max_observed_inflight_requests=" << maxObservedInflightRequests
-        << " recent_throughput_bytes_per_second="
-        << recentThroughputBytesPerSecond
         << " latency_samples=" << latencySamples
         << " cumulative_device_latency_us=" << cumulativeDeviceLatencyUs
         << " average_device_latency_us=" << averageDeviceLatencyUs
@@ -110,19 +105,10 @@ struct DiskIoSchedulerStats {
         << " completion_batches=" << completionBatches
         << " completed_requests_in_batches=" << completedRequestsInBatches
         << " average_completion_batch_size=" << averageCompletionBatchSize
-        << " max_completion_batch_size=" << maxCompletionBatchSize
-        << " adaptive_enabled=" << adaptive.enabled
-        << " adaptive_current_depth=" << adaptive.currentDepth
-        << " adaptive_best_depth=" << adaptive.bestDepth
-        << " adaptive_recent_throughput_bytes_per_second="
-        << adaptive.recentThroughputBytesPerSecond
-        << " adaptive_best_throughput_bytes_per_second="
-        << adaptive.bestThroughputBytesPerSecond
-        << " adaptive_measuring_probe_depth="
-        << adaptive.measuringProbeDepth
-        << " adaptive_completed_windows=" << adaptive.completedWindows
-        << " adaptive_last_window_throughput_bytes_per_second="
-        << adaptive.lastWindowThroughputBytesPerSecond;
+        << " max_completion_batch_size=" << maxCompletionBatchSize;
+    if (depthControl != nullptr) {
+      out << depthControl->toString();
+    }
     return out.str();
   }
 };

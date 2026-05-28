@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -29,16 +30,15 @@ double AdaptiveDepthController::recentThroughputBytesPerSecond() const {
   return recentThroughputBytesPerSecond_;
 }
 
-AdaptiveDepthStats AdaptiveDepthController::stats() const {
-  return AdaptiveDepthStats{
-      config_.enabled,
+DepthControlStatsPtr AdaptiveDepthController::stats() const {
+  return std::make_shared<AdaptiveDepthStats>(
       currentDepth_,
-      bestDepth_,
       recentThroughputBytesPerSecond_,
-      bestThroughputBytesPerSecond_,
-      measuringProbeDepth_,
       completedWindows_,
-      lastWindowThroughputBytesPerSecond_};
+      lastWindowThroughputBytesPerSecond_,
+      bestDepth_,
+      bestThroughputBytesPerSecond_,
+      measuringProbeDepth_);
 }
 
 void AdaptiveDepthController::onCompletion(
@@ -79,10 +79,6 @@ void AdaptiveDepthController::onWindow(
           alpha * throughputBytesPerSecond +
           (1.0 - alpha) * recentThroughputBytesPerSecond_;
     }
-  }
-
-  if (!config_.enabled) {
-    return;
   }
 
   if (!hasBacklog) {

@@ -362,18 +362,24 @@ DiskIoSchedulerConfig schedulerConfig(
     bool adaptive) {
   DiskIoSchedulerConfig config;
   config.ringDepth = std::max<uint32_t>(1, depth);
-  config.adaptiveDepth.enabled = adaptive;
-  config.adaptiveDepth.minDepth = 1;
-  config.adaptiveDepth.initialDepth =
-      adaptive ? FLAGS_bm_io_adaptive_initial_depth : depth;
-  config.adaptiveDepth.maxDepth = std::max<uint32_t>(
-      config.adaptiveDepth.initialDepth,
-      adaptive ? FLAGS_bm_io_adaptive_max_depth : depth);
-  config.ringDepth = std::max(config.ringDepth, config.adaptiveDepth.maxDepth);
-  config.adaptiveDepth.increaseStep =
-      std::max<uint32_t>(1, FLAGS_bm_io_adaptive_increase_step);
-  config.adaptiveDepth.controlInterval =
-      std::chrono::milliseconds(FLAGS_bm_io_adaptive_control_interval_ms);
+  if (adaptive) {
+    config.depthControl.mode = DepthControlMode::Adaptive;
+    config.depthControl.adaptive.minDepth = 1;
+    config.depthControl.adaptive.initialDepth =
+        FLAGS_bm_io_adaptive_initial_depth;
+    config.depthControl.adaptive.maxDepth = std::max<uint32_t>(
+        config.depthControl.adaptive.initialDepth,
+        FLAGS_bm_io_adaptive_max_depth);
+    config.depthControl.adaptive.increaseStep =
+        std::max<uint32_t>(1, FLAGS_bm_io_adaptive_increase_step);
+    config.depthControl.adaptive.controlInterval =
+        std::chrono::milliseconds(FLAGS_bm_io_adaptive_control_interval_ms);
+    config.ringDepth =
+        std::max(config.ringDepth, config.depthControl.adaptive.maxDepth);
+  } else {
+    config.depthControl.mode = DepthControlMode::Fixed;
+    config.depthControl.fixed.depth = depth;
+  }
   return config;
 }
 

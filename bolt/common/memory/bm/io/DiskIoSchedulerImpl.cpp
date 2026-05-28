@@ -59,7 +59,7 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
     DiskIoSchedulerConfig config,
     std::unique_ptr<IoBackend> backend)
     : config_(config),
-      depthController_(config_.adaptiveDepth),
+      depthController_(createDepthController(config_.depthControl)),
       backend_(std::move(backend)),
       epollFd_(createEpollFd()),
       requestQueue_(config_.priorityWeights),
@@ -70,8 +70,7 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
   registerEpollFd(epollFd_.get(), wakeupEvent_.fd(), kWakeupEvent);
   registerEpollFd(epollFd_.get(), backend_->completionFd(), kCompletionEvent);
-  stats_.currentDepth = depthController_.currentDepth();
-  stats_.adaptive = depthController_.stats();
+  stats_.depthControl = depthController_->stats();
   worker_ = std::thread([this] { run(); });
 }
 
@@ -164,10 +163,7 @@ DiskIoSchedulerStats DiskIoSchedulerImpl::snapshotStatsLocked() const {
   auto snapshot = stats_;
   snapshot.queuedRequests = requestQueue_.queuedCounts();
   snapshot.inflightRequests = inflight_.size();
-  snapshot.currentDepth = depthController_.currentDepth();
-  snapshot.recentThroughputBytesPerSecond =
-      depthController_.recentThroughputBytesPerSecond();
-  snapshot.adaptive = depthController_.stats();
+  snapshot.depthControl = depthController_->stats();
   return snapshot;
 }
 
@@ -230,8 +226,8 @@ void DiskIoSchedulerImpl::run() {
       shouldExit = shouldExit || (stopping_ && drainedLocked());
       shouldContinue =
           madeProgress || dispatchMadeProgress ||
-          (hasQueuedRequestsLocked() &&
-           inflight_.size() < depthController_.currentDepth() &&
+           (hasQueuedRequestsLocked() &&
+           inflight_.size() < depthController_->currentDepth() &&
            !(!dispatchResults.empty() && !dispatchMadeProgress));
       logStatsIfDueLocked(std::chrono::steady_clock::now());
       waitTimeoutMs =
@@ -304,10 +300,11 @@ bool DiskIoSchedulerImpl::drainedLocked() const {
 
 std::vector<QueuedIoRequest>
 DiskIoSchedulerImpl::collectDispatchBatchLocked() {
-  if (inflight_.size() >= depthController_.currentDepth()) {
+  if (inflight_.size() >= depthController_->currentDepth()) {
     return {};
   }
-  const auto availableSlots = depthController_.currentDepth() - inflight_.size();
+  const auto availableSlots =
+      depthController_->currentDepth() - inflight_.size();
   auto dispatchBatch = requestQueue_.collect(availableSlots);
   DiskIoStatsCollector::recordQueuedSnapshot(
       stats_, requestQueue_.queuedCounts());
@@ -400,11 +397,8 @@ void DiskIoSchedulerImpl::applyCompletionsLocked(
         inflight_.size());
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight->request.buffer);
-    depthController_.onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
-    stats_.currentDepth = depthController_.currentDepth();
-    stats_.recentThroughputBytesPerSecond =
-        depthController_.recentThroughputBytesPerSecond();
-    stats_.adaptive = depthController_.stats();
+    depthController_->onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
+    stats_.depthControl = depthController_->stats();
 
     readyResults.push_back(
         ReadyResult{std::move(inflight->promise), std::move(result)});

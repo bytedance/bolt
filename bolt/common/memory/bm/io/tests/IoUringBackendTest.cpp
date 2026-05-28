@@ -54,8 +54,8 @@ class TempFd {
 DiskIoSchedulerConfig makeConfig() {
   DiskIoSchedulerConfig config;
   config.ringDepth = 32;
-  config.adaptiveDepth.enabled = false;
-  config.adaptiveDepth.initialDepth = 4;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 4;
   return config;
 }
 

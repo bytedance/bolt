@@ -75,7 +75,9 @@ bool waitUntilCurrentDepth(DiskIoSchedulerImpl& scheduler, uint32_t expected) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (scheduler.stats().currentDepth >= expected) {
+    const auto stats = scheduler.stats();
+    if (stats.depthControl != nullptr &&
+        stats.depthControl->currentDepth >= expected) {
       return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -338,8 +340,8 @@ TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
 
   DiskIoSchedulerConfig config;
   config.ringDepth = 16;
-  config.adaptiveDepth.initialDepth = 32;
-  config.adaptiveDepth.maxDepth = 32;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 32;
 
   BOLT_ASSERT_THROW(
       [&] {
@@ -423,7 +425,8 @@ TEST(DiskIoSchedulerImplTest, fixedDepthOneKeepsSecondRequestQueued) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.adaptiveDepth.initialDepth = 1;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 1;
   DiskIoSchedulerImpl scheduler(config, std::move(backend));
 
   auto first = scheduler.submit(makeValidRequest());
@@ -472,7 +475,8 @@ TEST(DiskIoSchedulerImplTest, dispatchesUsingConfiguredWeights) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.adaptiveDepth.initialDepth = 1;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 1;
   config.priorityWeights = {{3, 2, 1}};
   DiskIoSchedulerImpl scheduler(config, std::move(backend));
 
@@ -502,7 +506,8 @@ TEST(DiskIoSchedulerImplTest, resetsDeficitWhenPriorityQueueDrains) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.adaptiveDepth.initialDepth = 1;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 1;
   config.priorityWeights = {{3, 2, 1}};
   DiskIoSchedulerImpl scheduler(config, std::move(backend));
 
@@ -579,7 +584,8 @@ TEST(DiskIoSchedulerImplTest, statsReflectSuccessfulCompletion) {
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
-  EXPECT_EQ(64, stats.currentDepth);
+  ASSERT_NE(nullptr, stats.depthControl);
+  EXPECT_EQ(64, stats.depthControl->currentDepth);
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(4096, stats.completedBytes);
   EXPECT_EQ(4096, stats.completedBytesByPriority[priorityIndex(IoPriority::High)]);
@@ -620,21 +626,22 @@ TEST(DiskIoSchedulerImplTest, statsReflectSuccessfulCompletion) {
   EXPECT_NE(
       std::string::npos,
       stats.toString().find("average_completion_batch_size="));
-  EXPECT_NE(std::string::npos, stats.toString().find("adaptive_current_depth=64"));
+  EXPECT_NE(std::string::npos, stats.toString().find("depth_current=64"));
 }
 
-TEST(DiskIoSchedulerImplTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklog) {
+TEST(DiskIoSchedulerImplTest, adaptiveDepthControlIncreasesWhenThroughputImprovesWithQueuedRequests) {
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
   config.ringDepth = 4;
-  config.adaptiveDepth.enabled = true;
-  config.adaptiveDepth.minDepth = 1;
-  config.adaptiveDepth.initialDepth = 1;
-  config.adaptiveDepth.maxDepth = 4;
-  config.adaptiveDepth.controlInterval = std::chrono::milliseconds(1);
-  config.adaptiveDepth.increaseStep = 1;
-  config.adaptiveDepth.minThroughputGain = 0.0;
+  config.depthControl.mode = DepthControlMode::Adaptive;
+  config.depthControl.adaptive.minDepth = 1;
+  config.depthControl.adaptive.initialDepth = 1;
+  config.depthControl.adaptive.maxDepth = 4;
+  config.depthControl.adaptive.controlInterval =
+      std::chrono::milliseconds(1);
+  config.depthControl.adaptive.increaseStep = 1;
+  config.depthControl.adaptive.minThroughputGain = 0.0;
   DiskIoSchedulerImpl scheduler(config, std::move(backend));
 
   std::vector<std::future<IoResult>> futures;
@@ -649,7 +656,9 @@ TEST(DiskIoSchedulerImplTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBa
 
   ASSERT_TRUE(waitUntilReady(futures[0]));
   EXPECT_EQ(IoErrorCode::Ok, futures[0].get().error);
-  EXPECT_EQ(1, scheduler.stats().currentDepth);
+  auto stats = scheduler.stats();
+  ASSERT_NE(nullptr, stats.depthControl);
+  EXPECT_EQ(1, stats.depthControl->currentDepth);
 
   ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 2));
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -659,12 +668,16 @@ TEST(DiskIoSchedulerImplTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBa
   EXPECT_EQ(IoErrorCode::Ok, futures[1].get().error);
   ASSERT_TRUE(waitUntilCurrentDepth(scheduler, 2));
 
-  const auto stats = scheduler.stats();
-  EXPECT_EQ(2, stats.currentDepth);
-  EXPECT_EQ(2, stats.adaptive.currentDepth);
-  EXPECT_EQ(2, stats.adaptive.completedWindows);
-  EXPECT_GT(stats.adaptive.lastWindowThroughputBytesPerSecond, 0);
-  EXPECT_GT(stats.recentThroughputBytesPerSecond, 0);
+  stats = scheduler.stats();
+  ASSERT_NE(nullptr, stats.depthControl);
+  const auto* adaptiveStats =
+      dynamic_cast<const AdaptiveDepthStats*>(stats.depthControl.get());
+  ASSERT_NE(nullptr, adaptiveStats);
+  EXPECT_EQ(2, stats.depthControl->currentDepth);
+  EXPECT_EQ(2, adaptiveStats->currentDepth);
+  EXPECT_EQ(2, adaptiveStats->completedWindows);
+  EXPECT_GT(adaptiveStats->lastWindowThroughputBytesPerSecond, 0);
+  EXPECT_GT(adaptiveStats->recentThroughputBytesPerSecond, 0);
 
   size_t completedSubmissions = 2;
   completeAllSubmittedRequests(
@@ -765,7 +778,8 @@ TEST(DiskIoSchedulerImplTest, destructorFailsQueuedAndWaitsForInflightCompletion
   auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.adaptiveDepth.initialDepth = 1;
+  config.depthControl.mode = DepthControlMode::Fixed;
+  config.depthControl.fixed.depth = 1;
   auto scheduler =
       std::make_unique<DiskIoSchedulerImpl>(config, std::move(backend));
 
