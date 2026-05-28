@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
@@ -69,11 +69,11 @@ IoRequest makeRequest(IoOpcode opcode, int fd, std::unique_ptr<char[]> buffer) {
   return request;
 }
 
-std::unique_ptr<DiskIoScheduler> makeSchedulerOrSkip(
+std::unique_ptr<DiskIoSchedulerImpl> makeSchedulerOrSkip(
     const DiskIoSchedulerConfig& config,
     std::string& skipReason) {
   try {
-    return std::make_unique<DiskIoScheduler>(
+    return std::make_unique<DiskIoSchedulerImpl>(
         config, std::make_unique<IoUringBackend>(config.ringDepth));
   } catch (const std::exception& ex) {
     if (std::string(ex.what()).find("Operation not permitted") !=
