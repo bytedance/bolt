@@ -4,8 +4,10 @@ add_library(
   DepthController.cpp
   DiskIoScheduler.cpp
   DiskIoSchedulerImpl.cpp
+  DiskIoStatsCollector.cpp
   DrrDispatcher.cpp
   EventFd.cpp
+  InflightRegistry.cpp
   IoRequestQueue.cpp
   IoUringBackend.cpp
   ScopedFd.cpp
