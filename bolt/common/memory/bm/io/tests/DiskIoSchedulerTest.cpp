@@ -729,19 +729,27 @@ TEST(DiskIoSchedulerTest, adaptiveDepthIncreasesWhenThroughputImprovesWithBacklo
 
   ASSERT_TRUE(waitUntilReady(futures[0]));
   EXPECT_EQ(IoErrorCode::Ok, futures[0].get().error);
+  EXPECT_EQ(1, scheduler.stats().currentDepth);
+
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 2));
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  backendPtr->complete(2, IoResult{4096});
+
+  ASSERT_TRUE(waitUntilReady(futures[1]));
+  EXPECT_EQ(IoErrorCode::Ok, futures[1].get().error);
   ASSERT_TRUE(waitUntilCurrentDepth(scheduler, 2));
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(2, stats.currentDepth);
   EXPECT_EQ(2, stats.adaptive.currentDepth);
-  EXPECT_EQ(1, stats.adaptive.completedWindows);
+  EXPECT_EQ(2, stats.adaptive.completedWindows);
   EXPECT_GT(stats.adaptive.lastWindowThroughputBytesPerSecond, 0);
   EXPECT_GT(stats.recentThroughputBytesPerSecond, 0);
 
-  size_t completedSubmissions = 1;
+  size_t completedSubmissions = 2;
   completeAllSubmittedRequests(
       *backendPtr, completedSubmissions, futures.size());
-  for (size_t i = 1; i < futures.size(); ++i) {
+  for (size_t i = 2; i < futures.size(); ++i) {
     ASSERT_TRUE(waitUntilReady(futures[i]));
     EXPECT_EQ(IoErrorCode::Ok, futures[i].get().error);
   }

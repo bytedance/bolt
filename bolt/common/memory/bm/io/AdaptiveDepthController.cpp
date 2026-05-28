@@ -6,6 +6,12 @@
 #include <cmath>
 
 namespace bytedance::bolt::memory::bm {
+namespace {
+
+constexpr uint32_t kRequiredPressureWindows = 2;
+constexpr uint32_t kProbeCooldownWindowsAfterRollback = 1;
+
+} // namespace
 
 AdaptiveDepthController::AdaptiveDepthController(AdaptiveDepthConfig config)
     : config_(config),
@@ -75,15 +81,28 @@ void AdaptiveDepthController::onWindow(
     }
   }
 
-  if (!config_.enabled || !hasBacklog) {
+  if (!config_.enabled) {
     return;
   }
 
-  if (!validSample || !isValidThroughput(recentThroughputBytesPerSecond_)) {
-    if (measuringProbeDepth_) {
-      currentDepth_ = bestDepth_;
-      measuringProbeDepth_ = false;
-    }
+  if (!hasBacklog) {
+    validPressureWindows_ = 0;
+    return;
+  }
+
+  if (!validSample || !isValidThroughput(throughputBytesPerSecond)) {
+    validPressureWindows_ = 0;
+    return;
+  }
+
+  ++validPressureWindows_;
+
+  if (probeCooldownWindows_ > 0) {
+    --probeCooldownWindows_;
+    return;
+  }
+
+  if (validPressureWindows_ < kRequiredPressureWindows) {
     return;
   }
 
@@ -109,6 +128,8 @@ void AdaptiveDepthController::onWindow(
 
   currentDepth_ = bestDepth_;
   measuringProbeDepth_ = false;
+  probeCooldownWindows_ = kProbeCooldownWindowsAfterRollback;
+  validPressureWindows_ = 0;
 }
 
 bool AdaptiveDepthController::isValidConfig(
