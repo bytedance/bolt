@@ -5,13 +5,17 @@ add_executable(
   MockIoBackend.cpp
   AdaptiveDepthControllerTest.cpp
   DepthControllerTest.cpp
+  DiskIoSchedulerConfigTest.cpp
   DiskIoSchedulerImplTest.cpp
   DiskIoStatsCollectorTest.cpp
   DiskIoSchedulerTest.cpp
   DrrDispatcherTest.cpp
   InflightRegistryTest.cpp
+  IoPriorityTest.cpp
+  IoRequestValidatorTest.cpp
   IoRequestQueueTest.cpp
   IoUringBackendTest.cpp
+  MockIoBackendTest.cpp
   ScopedFdTest.cpp
 )
 

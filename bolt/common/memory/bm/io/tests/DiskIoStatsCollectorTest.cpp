@@ -27,9 +27,9 @@ TEST(DiskIoStatsCollectorTest, RecordsCompletionLatencyAndOutcome) {
   EXPECT_EQ(stats.completedBytes, 4096);
   EXPECT_EQ(stats.successfulRequests, 1);
   EXPECT_EQ(stats.latencySamples, 1);
-  EXPECT_EQ(stats.cumulativeLatencyUs, 7);
+  EXPECT_EQ(stats.cumulativeDeviceLatencyUs, 7);
   EXPECT_EQ(stats.cumulativeEndToEndLatencyUs, 11);
-  EXPECT_DOUBLE_EQ(stats.averageLatencyUs, 7);
+  EXPECT_DOUBLE_EQ(stats.averageDeviceLatencyUs, 7);
   EXPECT_DOUBLE_EQ(stats.averageEndToEndLatencyUs, 11);
   EXPECT_EQ(stats.minLatencyUs, 7);
   EXPECT_EQ(stats.maxLatencyUs, 7);
