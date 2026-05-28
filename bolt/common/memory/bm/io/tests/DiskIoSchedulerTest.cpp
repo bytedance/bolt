@@ -9,6 +9,7 @@
 #include "bolt/common/memory/bm/io/tests/MockIoBackend.h"
 
 #include "bolt/common/base/BoltException.h"
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 
 #include <atomic>
@@ -23,6 +24,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <dirent.h>
 #include <gtest/gtest.h>
 #include <poll.h>
 
@@ -62,6 +64,18 @@ bool waitUntilSubmitted(MockIoBackend& backend, size_t expected) {
 
 bool waitUntilReady(std::future<IoResult>& future) {
   return future.wait_for(kFutureTimeout) == std::future_status::ready;
+}
+
+size_t countOpenFds() {
+  DIR* dir = ::opendir("/proc/self/fd");
+  BOLT_CHECK(dir != nullptr, "failed to open /proc/self/fd");
+
+  size_t count = 0;
+  while (::readdir(dir) != nullptr) {
+    ++count;
+  }
+  ::closedir(dir);
+  return count;
 }
 
 bool waitUntilCurrentDepth(DiskIoScheduler& scheduler, uint32_t expected) {
@@ -381,6 +395,24 @@ TEST(DiskIoSchedulerConfigTest, defaultConfigUsesFixedDepth) {
 
   EXPECT_FALSE(config.adaptiveDepth.enabled);
   EXPECT_EQ(config.adaptiveDepth.initialDepth, config.adaptiveDepth.maxDepth);
+}
+
+TEST(DiskIoSchedulerTest, constructorClosesEpollFdWhenValidationThrows) {
+  const auto openFdsBefore = countOpenFds();
+
+  DiskIoSchedulerConfig config;
+  config.ringDepth = 16;
+  config.adaptiveDepth.initialDepth = 32;
+  config.adaptiveDepth.maxDepth = 32;
+
+  BOLT_ASSERT_THROW(
+      [&] {
+        auto backend = std::make_unique<MockIoBackend>();
+        DiskIoScheduler scheduler(config, std::move(backend));
+      }(),
+      "invalid DiskIoSchedulerConfig");
+
+  EXPECT_EQ(openFdsBefore, countOpenFds());
 }
 
 TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {

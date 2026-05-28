@@ -50,6 +50,37 @@ int toEpollTimeoutMs(std::chrono::steady_clock::duration duration) {
 
 } // namespace
 
+DiskIoScheduler::ScopedFd::ScopedFd(int fd) : fd_(fd) {}
+
+DiskIoScheduler::ScopedFd::~ScopedFd() {
+  reset();
+}
+
+DiskIoScheduler::ScopedFd::ScopedFd(ScopedFd&& other) noexcept
+    : fd_(other.fd_) {
+  other.fd_ = -1;
+}
+
+DiskIoScheduler::ScopedFd& DiskIoScheduler::ScopedFd::operator=(
+    ScopedFd&& other) noexcept {
+  if (this != &other) {
+    reset(other.fd_);
+    other.fd_ = -1;
+  }
+  return *this;
+}
+
+int DiskIoScheduler::ScopedFd::get() const {
+  return fd_;
+}
+
+void DiskIoScheduler::ScopedFd::reset(int fd) {
+  if (fd_ >= 0) {
+    ::close(fd_);
+  }
+  fd_ = fd;
+}
+
 DiskIoScheduler::DiskIoScheduler(DiskIoSchedulerConfig config)
     : DiskIoScheduler(
           config,
@@ -67,8 +98,8 @@ DiskIoScheduler::DiskIoScheduler(
       validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
       "invalid DiskIoSchedulerConfig");
   BOLT_CHECK(backend_ != nullptr, "DiskIoScheduler requires an IoBackend");
-  registerEpollFd(epollFd_, wakeupEvent_.fd(), kWakeupEvent);
-  registerEpollFd(epollFd_, backend_->completionFd(), kCompletionEvent);
+  registerEpollFd(epollFd_.get(), wakeupEvent_.fd(), kWakeupEvent);
+  registerEpollFd(epollFd_.get(), backend_->completionFd(), kCompletionEvent);
   stats_.currentDepth = adaptiveDepth_.currentDepth();
   stats_.adaptive = adaptiveDepth_.stats();
   worker_ = std::thread([this] { run(); });
@@ -76,9 +107,6 @@ DiskIoScheduler::DiskIoScheduler(
 
 DiskIoScheduler::~DiskIoScheduler() {
   stopAndDrain();
-  if (epollFd_ >= 0) {
-    ::close(epollFd_);
-  }
 }
 
 std::future<IoResult> DiskIoScheduler::completedFuture(IoResult result) {
@@ -284,7 +312,7 @@ int DiskIoScheduler::computeWaitTimeoutMsLocked(
 void DiskIoScheduler::waitForWorkerEvent(int timeoutMs) {
   epoll_event events[2];
   while (true) {
-    const int ready = ::epoll_wait(epollFd_, events, 2, timeoutMs);
+    const int ready = ::epoll_wait(epollFd_.get(), events, 2, timeoutMs);
     if (ready >= 0) {
       return;
     }
