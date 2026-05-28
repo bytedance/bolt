@@ -4,21 +4,21 @@
 #include <chrono>
 
 #include "bolt/common/memory/bm/io/AdaptiveDepthConfig.h"
-#include "bolt/common/memory/bm/io/AdaptiveDepthStats.h"
+#include "bolt/common/memory/bm/io/DepthController.h"
 
 namespace bytedance::bolt::memory::bm {
 
-class AdaptiveDepthController {
+class AdaptiveDepthController : public DepthController {
  public:
   explicit AdaptiveDepthController(AdaptiveDepthConfig config);
 
-  uint32_t currentDepth() const;
-  double recentThroughputBytesPerSecond() const;
-  AdaptiveDepthStats stats() const;
+  uint32_t currentDepth() const override;
+  double recentThroughputBytesPerSecond() const override;
+  DepthControlStatsPtr stats() const override;
   void onCompletion(
       uint64_t completedBytes,
       bool hasBacklog,
-      std::chrono::steady_clock::time_point now);
+      std::chrono::steady_clock::time_point now) override;
   void onWindow(double throughputBytesPerSecond, bool hasBacklog);
 
  private:

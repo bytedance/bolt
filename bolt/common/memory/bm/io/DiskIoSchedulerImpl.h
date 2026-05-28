@@ -71,7 +71,7 @@ class DiskIoSchedulerImpl {
   void notifyWorker() const;
 
   const DiskIoSchedulerConfig config_;
-  DepthController depthController_;
+  std::unique_ptr<DepthController> depthController_;
   std::unique_ptr<IoBackend> backend_;
   EventFd wakeupEvent_;
   ScopedFd epollFd_;

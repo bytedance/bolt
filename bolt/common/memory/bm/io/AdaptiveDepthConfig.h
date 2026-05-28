@@ -6,7 +6,6 @@
 namespace bytedance::bolt::memory::bm {
 
 struct AdaptiveDepthConfig {
-  bool enabled{false};
   uint32_t minDepth{1};
   uint32_t initialDepth{64};
   uint32_t maxDepth{64};

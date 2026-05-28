@@ -7,6 +7,7 @@ add_library(
   DiskIoStatsCollector.cpp
   DrrDispatcher.cpp
   EventFd.cpp
+  FixedDepthController.cpp
   InflightRegistry.cpp
   IoRequestQueue.cpp
   IoUringBackend.cpp

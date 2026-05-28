@@ -15,7 +15,6 @@ namespace {
 
 AdaptiveDepthConfig makeConfig() {
   AdaptiveDepthConfig config;
-  config.enabled = true;
   config.initialDepth = 8;
   config.maxDepth = 16;
   config.increaseStep = 4;
@@ -31,29 +30,42 @@ TEST(AdaptiveDepthControllerTest, increasesDepthWhenThroughputImproves) {
   AdaptiveDepthController controller(config);
 
   EXPECT_EQ(8, controller.currentDepth());
-  EXPECT_EQ(8, controller.stats().currentDepth);
-  EXPECT_EQ(8, controller.stats().bestDepth);
-  EXPECT_TRUE(controller.stats().enabled);
+  auto stats = controller.stats();
+  EXPECT_EQ(DepthControlMode::Adaptive, stats->mode);
+  EXPECT_EQ(8, stats->currentDepth);
+  const auto* adaptiveStats =
+      dynamic_cast<const AdaptiveDepthStats*>(stats.get());
+  ASSERT_NE(nullptr, adaptiveStats);
+  EXPECT_EQ(8, adaptiveStats->bestDepth);
 
   controller.onWindow(1000.0, true);
   EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
   EXPECT_EQ(8, controller.currentDepth());
-  EXPECT_FALSE(controller.stats().measuringProbeDepth);
+  stats = controller.stats();
+  adaptiveStats = dynamic_cast<const AdaptiveDepthStats*>(stats.get());
+  ASSERT_NE(nullptr, adaptiveStats);
+  EXPECT_FALSE(adaptiveStats->measuringProbeDepth);
 
   controller.onWindow(1000.0, true);
   EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
   EXPECT_EQ(12, controller.currentDepth());
-  EXPECT_EQ(2, controller.stats().completedWindows);
-  EXPECT_EQ(1000.0, controller.stats().lastWindowThroughputBytesPerSecond);
-  EXPECT_EQ(1000.0, controller.stats().bestThroughputBytesPerSecond);
-  EXPECT_TRUE(controller.stats().measuringProbeDepth);
+  stats = controller.stats();
+  adaptiveStats = dynamic_cast<const AdaptiveDepthStats*>(stats.get());
+  ASSERT_NE(nullptr, adaptiveStats);
+  EXPECT_EQ(2, stats->completedWindows);
+  EXPECT_EQ(1000.0, stats->lastWindowThroughputBytesPerSecond);
+  EXPECT_EQ(1000.0, adaptiveStats->bestThroughputBytesPerSecond);
+  EXPECT_TRUE(adaptiveStats->measuringProbeDepth);
 
   controller.onWindow(1150.0, true);
   EXPECT_EQ(1150.0, controller.recentThroughputBytesPerSecond());
   EXPECT_EQ(16, controller.currentDepth());
-  EXPECT_EQ(3, controller.stats().completedWindows);
-  EXPECT_EQ(16, controller.stats().currentDepth);
-  EXPECT_EQ(12, controller.stats().bestDepth);
+  stats = controller.stats();
+  adaptiveStats = dynamic_cast<const AdaptiveDepthStats*>(stats.get());
+  ASSERT_NE(nullptr, adaptiveStats);
+  EXPECT_EQ(3, stats->completedWindows);
+  EXPECT_EQ(16, stats->currentDepth);
+  EXPECT_EQ(12, adaptiveStats->bestDepth);
 }
 
 TEST(AdaptiveDepthControllerTest, rollsBackWhenThroughputDoesNotImprove) {
@@ -102,17 +114,6 @@ TEST(AdaptiveDepthControllerTest, cooldownPreventsImmediateProbeAfterRollback) {
   EXPECT_EQ(8, controller.currentDepth());
   controller.onWindow(1000.0, true);
   EXPECT_EQ(12, controller.currentDepth());
-}
-
-TEST(AdaptiveDepthControllerTest, disabledControllerOnlyUpdatesRecentThroughput) {
-  auto config = makeConfig();
-  config.enabled = false;
-  AdaptiveDepthController controller(config);
-
-  controller.onWindow(1000.0, true);
-
-  EXPECT_EQ(8, controller.currentDepth());
-  EXPECT_EQ(1000.0, controller.recentThroughputBytesPerSecond());
 }
 
 TEST(AdaptiveDepthControllerTest, completionWindowComputesSmoothedThroughput) {
