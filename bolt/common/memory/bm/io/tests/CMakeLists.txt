@@ -4,6 +4,7 @@ add_executable(
   bolt_memory_bm_io_test
   MockIoBackend.cpp
   AdaptiveDepthControllerTest.cpp
+  DiskIoSchedulerImplTest.cpp
   DiskIoSchedulerTest.cpp
   IoUringBackendTest.cpp
 )

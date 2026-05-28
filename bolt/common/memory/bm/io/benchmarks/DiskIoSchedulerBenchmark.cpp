@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
@@ -399,7 +399,7 @@ IoRequest makeRequest(
 }
 
 PhaseMetrics runSchedulerPhase(
-    DiskIoScheduler& scheduler,
+    DiskIoSchedulerImpl& scheduler,
     int fd,
     Phase phase,
     size_t blockSize,
@@ -494,7 +494,7 @@ CaseMetrics runSchedulerCase(
   PhaseMetrics write;
   std::string writeStats;
   {
-    DiskIoScheduler scheduler(writeConfig);
+    DiskIoSchedulerImpl scheduler(writeConfig);
     write = runSchedulerPhase(
         scheduler, fd, Phase::Write, blockSize, ops, writeConfig.ringDepth);
     writeStats = scheduler.stats().toString();
@@ -506,7 +506,7 @@ CaseMetrics runSchedulerCase(
   PhaseMetrics read;
   std::string readStats;
   {
-    DiskIoScheduler scheduler(readConfig);
+    DiskIoSchedulerImpl scheduler(readConfig);
     read = runSchedulerPhase(
         scheduler, fd, Phase::Read, blockSize, ops, readConfig.ringDepth);
     readStats = scheduler.stats().toString();
@@ -645,7 +645,7 @@ int main(int argc, char** argv) {
 
   std::string schedulerSkipReason;
   try {
-    DiskIoScheduler scheduler(schedulerConfig(FLAGS_bm_io_fixed_depth, false));
+    DiskIoSchedulerImpl scheduler(schedulerConfig(FLAGS_bm_io_fixed_depth, false));
   } catch (const std::exception& ex) {
     schedulerSkipReason = conciseReason(ex.what());
   }
