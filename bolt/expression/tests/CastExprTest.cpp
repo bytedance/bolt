@@ -852,6 +852,25 @@ TEST_F(CastExprTest, timestampToString) {
           std::nullopt,
       });
 }
+
+TEST_F(CastExprTest, timestampToStringFlinkCompatible) {
+  setLegacyCast(false);
+  setFlinkCompatible(true);
+  testCast<Timestamp, std::string>(
+      "string",
+      {
+          Timestamp(946729316, 0),
+          Timestamp(946729316, 123),
+          Timestamp(946729316, 129900000),
+          Timestamp(946729316, 999999999),
+      },
+      {
+          "2000-01-01 12:21:56.000",
+          "2000-01-01 12:21:56.000000123",
+          "2000-01-01 12:21:56.1299",
+          "2000-01-01 12:21:56.999999999",
+      });
+}
 #endif
 
 TEST_F(CastExprTest, dateToTimestamp) {
