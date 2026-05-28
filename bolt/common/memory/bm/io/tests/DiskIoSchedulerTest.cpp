@@ -239,6 +239,7 @@ class BusyOnceBackend : public IoBackend {
   }
 
   std::vector<BackendCompletion> reap() override {
+    completionEvent_.drain();
     if (!submitted_ || completed_) {
       return {};
     }
@@ -257,12 +258,43 @@ class BusyOnceBackend : public IoBackend {
     return priority_;
   }
 
+  void wake() {
+    completionEvent_.notify();
+  }
+
  private:
   std::atomic<uint64_t> submitAttempts_{0};
   uint64_t submittedRequestId_{0};
   IoPriority priority_{IoPriority::Medium};
   bool submitted_{false};
   bool completed_{false};
+  EventFd completionEvent_;
+};
+
+class AlwaysBusyBackend : public IoBackend {
+ public:
+  int completionFd() const override {
+    return completionEvent_.fd();
+  }
+
+  BackendSubmitStatus submit(
+      uint64_t /*requestId*/,
+      const IoRequest& /*request*/) override {
+    ++submitAttempts_;
+    return BackendSubmitStatus::RetryableBusy;
+  }
+
+  std::vector<BackendCompletion> reap() override {
+    completionEvent_.drain();
+    return {};
+  }
+
+  uint64_t submitAttempts() const {
+    return submitAttempts_.load();
+  }
+
+ private:
+  std::atomic<uint64_t> submitAttempts_{0};
   EventFd completionEvent_;
 };
 
@@ -818,6 +850,17 @@ TEST(DiskIoSchedulerTest, retryableBackendBusyDoesNotFailRequest) {
   DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
 
   auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
+  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
+  while (backendPtr->submitAttempts() < 1 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(1, backendPtr->submitAttempts());
+  EXPECT_EQ(
+      std::future_status::timeout,
+      future.wait_for(std::chrono::milliseconds(10)));
+
+  backendPtr->wake();
   ASSERT_TRUE(waitUntilReady(future));
   auto result = future.get();
 
@@ -832,6 +875,32 @@ TEST(DiskIoSchedulerTest, retryableBackendBusyDoesNotFailRequest) {
   EXPECT_EQ(1, stats.latencySamples);
   EXPECT_EQ(0, stats.backendSubmitFailedRequests);
   EXPECT_EQ(0, stats.failedRequests);
+}
+
+TEST(DiskIoSchedulerTest, retryableBackendBusyWaitsForWakeupBeforeRetrying) {
+  auto backend = std::make_unique<AlwaysBusyBackend>();
+  auto* backendPtr = backend.get();
+  DiskIoScheduler scheduler(DiskIoSchedulerConfig{}, std::move(backend));
+
+  auto future = scheduler.submit(makeValidRequest(IoPriority::Low));
+  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
+  while (backendPtr->submitAttempts() < 1 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(1, backendPtr->submitAttempts());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(1, backendPtr->submitAttempts());
+  EXPECT_EQ(
+      std::future_status::timeout,
+      future.wait_for(std::chrono::milliseconds(0)));
+
+  scheduler.stopAndDrain();
+  ASSERT_TRUE(waitUntilReady(future));
+  auto result = future.get();
+  EXPECT_EQ(0, result.bytes);
+  EXPECT_EQ(IoErrorCode::Shutdown, result.error);
 }
 
 TEST(DiskIoSchedulerTest, stopAndDrainFailsQueuedAndWaitsForInflightCompletion) {

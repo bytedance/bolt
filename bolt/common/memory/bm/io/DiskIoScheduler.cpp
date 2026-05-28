@@ -213,7 +213,6 @@ void DiskIoScheduler::run() {
       if (!stopping_) {
         dispatchBatch = collectDispatchBatchLocked();
       }
-      madeProgress = madeProgress || !dispatchBatch.empty();
       shouldExit = stopping_ && drainedLocked() && dispatchBatch.empty();
     }
 
@@ -231,12 +230,14 @@ void DiskIoScheduler::run() {
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      applyDispatchResultsLocked(dispatchResults, readyResults);
+      const auto dispatchMadeProgress =
+          applyDispatchResultsLocked(dispatchResults, readyResults);
       shouldExit = shouldExit || (stopping_ && drainedLocked());
       shouldContinue =
-          madeProgress ||
+          madeProgress || dispatchMadeProgress ||
           (hasQueuedRequestsLocked() &&
-           inflight_.size() < adaptiveDepth_.currentDepth());
+           inflight_.size() < adaptiveDepth_.currentDepth() &&
+           !(!dispatchResults.empty() && !dispatchMadeProgress));
       logStatsIfDueLocked(std::chrono::steady_clock::now());
       waitTimeoutMs =
           computeWaitTimeoutMsLocked(std::chrono::steady_clock::now());
@@ -373,9 +374,10 @@ DiskIoScheduler::collectDispatchBatchLocked() {
   return batch;
 }
 
-void DiskIoScheduler::applyDispatchResultsLocked(
+bool DiskIoScheduler::applyDispatchResultsLocked(
     std::vector<DispatchResult>& results,
     std::vector<ReadyResult>& readyResults) {
+  bool madeProgress = false;
   if (!results.empty()) {
     ++stats_.submitBatches;
     stats_.submittedRequestsInBatches += results.size();
@@ -398,6 +400,7 @@ void DiskIoScheduler::applyDispatchResultsLocked(
       continue;
     }
     if (dispatch.status == BackendSubmitStatus::Failed) {
+      madeProgress = true;
       IoResult result{0, IoErrorCode::BackendSubmitFailed};
       result.buffer = std::move(dispatch.queued.request.buffer);
       readyResults.push_back(
@@ -410,6 +413,7 @@ void DiskIoScheduler::applyDispatchResultsLocked(
       continue;
     }
 
+    madeProgress = true;
     ++stats_.submittedRequests[priority];
     const auto queueWaitUs =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -435,6 +439,7 @@ void DiskIoScheduler::applyDispatchResultsLocked(
     stats_.maxObservedInflightRequests = std::max<uint64_t>(
         stats_.maxObservedInflightRequests, inflight_.size());
   }
+  return madeProgress;
 }
 
 void DiskIoScheduler::applyCompletionsLocked(

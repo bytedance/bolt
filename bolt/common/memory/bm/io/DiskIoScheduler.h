@@ -72,7 +72,7 @@ class DiskIoScheduler {
   bool drainedLocked() const;
   std::optional<size_t> pickQueueLocked();
   std::vector<QueuedRequest> collectDispatchBatchLocked();
-  void applyDispatchResultsLocked(
+  bool applyDispatchResultsLocked(
       std::vector<DispatchResult>& results,
       std::vector<ReadyResult>& readyResults);
   void applyCompletionsLocked(
