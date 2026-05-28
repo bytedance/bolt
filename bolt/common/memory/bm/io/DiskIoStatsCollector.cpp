@@ -98,7 +98,7 @@ void DiskIoStatsCollector::recordCompletion(
   const auto priorityIdx = priorityIndex(priority);
   const auto firstLatencySample = stats.latencySamples == 0;
 
-  stats.cumulativeLatencyUs += deviceLatencyUs;
+  stats.cumulativeDeviceLatencyUs += deviceLatencyUs;
   stats.cumulativeEndToEndLatencyUs += endToEndLatencyUs;
   ++stats.latencySamples;
   ++stats.completedRequests;
@@ -117,10 +117,9 @@ void DiskIoStatsCollector::recordCompletion(
   }
 
   stats.inflightRequests = inflightSize;
-  stats.averageLatencyUs =
-      static_cast<double>(stats.cumulativeLatencyUs) /
+  stats.averageDeviceLatencyUs =
+      static_cast<double>(stats.cumulativeDeviceLatencyUs) /
       static_cast<double>(stats.latencySamples);
-  stats.averageDeviceLatencyUs = stats.averageLatencyUs;
   stats.averageEndToEndLatencyUs =
       static_cast<double>(stats.cumulativeEndToEndLatencyUs) /
       static_cast<double>(stats.latencySamples);

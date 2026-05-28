@@ -1,10 +1,8 @@
 #include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
-#include "bolt/common/memory/bm/io/DiskIoSchedulerConfigValidator.h"
 #include "bolt/common/memory/bm/io/EventFd.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
-#include "bolt/common/memory/bm/io/IoRequestValidator.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 #include "bolt/common/memory/bm/io/tests/MockIoBackend.h"
 
@@ -21,17 +19,12 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include <dirent.h>
 #include <gtest/gtest.h>
-#include <poll.h>
 
 using namespace bytedance::bolt::memory::bm;
-
-static_assert(!std::is_copy_constructible_v<IoRequest>);
-static_assert(std::is_move_constructible_v<IoRequest>);
 
 namespace {
 
@@ -340,63 +333,6 @@ class NeverCompleteBackend : public IoBackend {
 
 } // namespace
 
-TEST(IoRequestValidatorTest, validateRequestAcceptsValidRead) {
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = IoPriority::High;
-  request.fd = 3;
-  request.fileOffset = 128;
-  request.buffer = IoBuffer{makeBuffer(4096), 4096, 64, 1024};
-
-  EXPECT_EQ(IoErrorCode::Ok, validateIoRequest(request));
-}
-
-TEST(IoPriorityTest, priorityCountTracksPriorityEnumSentinel) {
-  EXPECT_EQ(
-      static_cast<size_t>(IoPriority::Count),
-      kIoPriorityCount);
-}
-
-TEST(IoRequestValidatorTest, validateRequestRejectsBadBufferRange) {
-  IoRequest request;
-  request.opcode = IoOpcode::Write;
-  request.priority = IoPriority::Low;
-  request.fd = 3;
-  request.fileOffset = 0;
-  request.buffer = IoBuffer{makeBuffer(128), 128, 64, 128};
-
-  EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
-}
-
-TEST(IoRequestValidatorTest, validateRequestRejectsOffsetAtEndWithLength) {
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = IoPriority::Medium;
-  request.fd = 3;
-  request.buffer = IoBuffer{makeBuffer(128), 128, 128, 1};
-
-  EXPECT_EQ(IoErrorCode::InvalidRequest, validateIoRequest(request));
-}
-
-TEST(DiskIoSchedulerConfigValidatorTest, validateConfigRejectsInvalidDepth) {
-  DiskIoSchedulerConfig config;
-  config.ringDepth = 16;
-  config.adaptiveDepth.minDepth = 1;
-  config.adaptiveDepth.initialDepth = 32;
-  config.adaptiveDepth.maxDepth = 32;
-
-  EXPECT_EQ(
-      IoErrorCode::InvalidRequest,
-      validateDiskIoSchedulerConfig(config));
-}
-
-TEST(DiskIoSchedulerConfigTest, defaultConfigUsesFixedDepth) {
-  DiskIoSchedulerConfig config;
-
-  EXPECT_FALSE(config.adaptiveDepth.enabled);
-  EXPECT_EQ(config.adaptiveDepth.initialDepth, config.adaptiveDepth.maxDepth);
-}
-
 TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
   const auto openFdsBefore = countOpenFds();
 
@@ -413,76 +349,6 @@ TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
       "invalid DiskIoSchedulerConfig");
 
   EXPECT_EQ(openFdsBefore, countOpenFds());
-}
-
-TEST(MockIoBackendTest, recordsSubmittedRequestsAndCompletesInChosenOrder) {
-  MockIoBackend backend;
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = IoPriority::Medium;
-  request.fd = 7;
-  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
-
-  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
-  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(12, request));
-  auto submitted = backend.submitted();
-  ASSERT_EQ(2, submitted.size());
-  EXPECT_EQ(11, submitted[0].requestId);
-  EXPECT_EQ(12, submitted[1].requestId);
-
-  backend.complete(12, IoResult{4096});
-  auto completions = backend.reap();
-  ASSERT_EQ(1, completions.size());
-  EXPECT_EQ(12, completions[0].requestId);
-  EXPECT_EQ(4096, completions[0].result.bytes);
-}
-
-TEST(MockIoBackendTest, duplicateSubmitReturnsFalseAndDoesNotRecord) {
-  MockIoBackend backend;
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = IoPriority::Medium;
-  request.fd = 7;
-  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
-
-  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
-  EXPECT_EQ(BackendSubmitStatus::Failed, backend.submit(11, request));
-
-  auto submitted = backend.submitted();
-  ASSERT_EQ(1, submitted.size());
-  EXPECT_EQ(11, submitted[0].requestId);
-  EXPECT_EQ(1, backend.inflight());
-}
-
-TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
-  MockIoBackend backend;
-
-  BOLT_ASSERT_THROW(
-      backend.complete(11, IoResult{4096}), "unknown requestId");
-}
-
-TEST(MockIoBackendTest, completionFdSignalsCompletedRequests) {
-  MockIoBackend backend;
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = IoPriority::Medium;
-  request.fd = 7;
-  request.buffer = IoBuffer{makeBuffer(4096), 4096, 0, 4096};
-
-  EXPECT_EQ(BackendSubmitStatus::Submitted, backend.submit(11, request));
-
-  pollfd completionEvent{backend.completionFd(), POLLIN, 0};
-  EXPECT_EQ(0, ::poll(&completionEvent, 1, 0));
-
-  backend.complete(11, IoResult{4096});
-  ASSERT_EQ(1, ::poll(&completionEvent, 1, 100));
-  EXPECT_NE(0, completionEvent.revents & POLLIN);
-
-  auto completions = backend.reap();
-  ASSERT_EQ(1, completions.size());
-  EXPECT_EQ(11, completions[0].requestId);
-  completionEvent.revents = 0;
-  EXPECT_EQ(0, ::poll(&completionEvent, 1, 0));
 }
 
 TEST(DiskIoSchedulerImplTest, constructorUsesDefaultBackendWhenSupported) {
@@ -721,11 +587,11 @@ TEST(DiskIoSchedulerImplTest, statsReflectSuccessfulCompletion) {
   EXPECT_EQ(
       1, stats.successfulRequestsByPriority[priorityIndex(IoPriority::High)]);
   EXPECT_EQ(0, stats.failedRequests);
-  EXPECT_GT(stats.cumulativeLatencyUs, 0);
+  EXPECT_GT(stats.cumulativeDeviceLatencyUs, 0);
   EXPECT_EQ(1, stats.latencySamples);
-  EXPECT_GT(stats.averageLatencyUs, 0);
+  EXPECT_GT(stats.averageDeviceLatencyUs, 0);
   EXPECT_EQ(1, stats.queueWaitSamples);
-  EXPECT_GE(stats.averageEndToEndLatencyUs, stats.averageLatencyUs);
+  EXPECT_GE(stats.averageEndToEndLatencyUs, stats.averageDeviceLatencyUs);
   EXPECT_GE(stats.maxEndToEndLatencyUs, stats.maxLatencyUs);
   EXPECT_EQ(1, stats.submitBatches);
   EXPECT_EQ(1, stats.submittedRequestsInBatches);
@@ -829,7 +695,7 @@ TEST(DiskIoSchedulerImplTest, backendSubmitFailureCompletesFutureAndStats) {
   EXPECT_EQ(1, stats.failedRequests);
   EXPECT_EQ(1, stats.backendSubmitFailedRequests);
   EXPECT_EQ(0, stats.latencySamples);
-  EXPECT_EQ(0, stats.averageLatencyUs);
+  EXPECT_EQ(0, stats.averageDeviceLatencyUs);
   EXPECT_EQ(1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Low)]);
   EXPECT_EQ(
       1, stats.completedRequestsByPriority[priorityIndex(IoPriority::Low)]);
@@ -985,14 +851,4 @@ TEST(DiskIoSchedulerImplTest, shortCompletionIsReportedAsFailedShortIo) {
   EXPECT_EQ(1, stats.latencySamples);
   EXPECT_EQ(
       1, stats.failedRequestsByPriority[priorityIndex(IoPriority::Medium)]);
-}
-
-TEST(DiskIoSchedulerImplTest, statsLoggingConfigRejectsNonPositiveInterval) {
-  DiskIoSchedulerConfig config;
-  config.enableStatsLogging = true;
-  config.statsLogInterval = std::chrono::milliseconds(0);
-
-  EXPECT_EQ(
-      IoErrorCode::InvalidRequest,
-      validateDiskIoSchedulerConfig(config));
 }

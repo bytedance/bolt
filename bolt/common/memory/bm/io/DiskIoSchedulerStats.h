@@ -31,9 +31,8 @@ struct DiskIoSchedulerStats {
   uint64_t maxObservedQueueDepth{0};
   uint64_t maxObservedInflightRequests{0};
   double recentThroughputBytesPerSecond{0};
-  uint64_t cumulativeLatencyUs{0};
+  uint64_t cumulativeDeviceLatencyUs{0};
   uint64_t latencySamples{0};
-  double averageLatencyUs{0};
   double averageDeviceLatencyUs{0};
   uint64_t minLatencyUs{0};
   uint64_t maxLatencyUs{0};
@@ -91,10 +90,8 @@ struct DiskIoSchedulerStats {
         << " max_observed_inflight_requests=" << maxObservedInflightRequests
         << " recent_throughput_bytes_per_second="
         << recentThroughputBytesPerSecond
-        << " cumulative_latency_us=" << cumulativeLatencyUs
         << " latency_samples=" << latencySamples
-        << " average_latency_us=" << averageLatencyUs
-        << " cumulative_device_latency_us=" << cumulativeLatencyUs
+        << " cumulative_device_latency_us=" << cumulativeDeviceLatencyUs
         << " average_device_latency_us=" << averageDeviceLatencyUs
         << " min_latency_us=" << minLatencyUs
         << " max_latency_us=" << maxLatencyUs
