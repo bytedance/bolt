@@ -107,7 +107,7 @@ class BoltConan(ConanFile):
         "python_bind": False,
         "enable_asan": False,
         # presto cpp worker needs bolt's testutil for ut
-        "enable_testutil": True,
+        "enable_testutil": False,
         "enable_parquet": True,
         "enable_orc": True,
         "enable_txt": True,
@@ -232,7 +232,8 @@ class BoltConan(ConanFile):
             "fmt/9.0.0", transitive_headers=True, transitive_libs=True, force=True
         )
         self.requires("ryu/2.0.1", transitive_headers=True, transitive_libs=True)
-        self.requires("cpr/1.10.5")
+        if self.options.get_safe("enable_testutil"):
+            self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
         self.requires("zstd/1.5.7", override=True)
         self.requires(
@@ -263,8 +264,7 @@ class BoltConan(ConanFile):
             self.requires("pybind11/2.13.1")
         if self.options.get_safe("enable_colocate"):
             self.requires("grpc/1.50.0")
-        # upgrade libcurl from 8.11.1 to 8.12.1 to avoid SIGABRT issue in https://github.com/curl/curl/issues/15725
-        self.requires("libcurl/8.12.1", override=True)
+
         if (
             self.options.enable_torch is not None
             and self.options.enable_torch.value is not None
@@ -517,6 +517,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_testutil"):
             tc.cache_variables["BOLT_ENABLE_DUCKDB"] = "ON"
             tc.cache_variables["BOLT_BUILD_TEST_UTILS"] = "ON"
+            tc.cache_variables["BOLT_ENABLE_PARSE"] = "ON"
 
         # hdfs file system, arrow implement as default
         if self.options.get_safe("enable_hdfs"):
@@ -632,7 +633,6 @@ class BoltConan(ConanFile):
                 "xxhash::xxhash",
                 "fmt::fmt",
                 "ryu::ryu",
-                "cpr::cpr",
                 "timsort::timsort",
                 "utf8proc::utf8proc",
                 "date::date",
@@ -648,6 +648,12 @@ class BoltConan(ConanFile):
                 "libbacktrace::libbacktrace",
             ]
         )
+        if self.options.get_safe("enable_testutil"):
+            self.cpp_info.components["bolt_engine"].requires.append(
+                "gtest::gtest",
+                "cpr::cpr",
+                "duckdb::duckdb",
+            )
         if self.options.get_safe("enable_jit"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "llvm-core::llvm-core"

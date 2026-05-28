@@ -19,12 +19,10 @@ bolt_add_library(
         InternalFileDecryptor.cpp)
 
 find_package(Arrow CONFIG REQUIRED)
-find_package(CURL CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_dwio_parquet_encryption
   bolt_type
   bolt_memory
   arrow::arrow
-  CURL::libcurl
 )

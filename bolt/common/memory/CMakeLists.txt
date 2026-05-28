@@ -67,7 +67,10 @@ if(NOT APPLE)
   include_directories(${JEMALLOC_INCLUDE_DIRS})
 endif()
 
-find_package(GTest CONFIG REQUIRED)
+if (BOLT_BUILD_TEST_UTILS)
+  find_package(GTest CONFIG REQUIRED)
+endif()
+
 find_package(Arrow CONFIG REQUIRED)
 
 target_link_libraries(
@@ -79,7 +82,7 @@ target_link_libraries(
          bolt_time
          bolt_type_base
          Folly::folly
-         ${FMT}
+         fmt::fmt
          gflags::gflags
          glog::glog
          arrow::arrow
