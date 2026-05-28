@@ -3,11 +3,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <deque>
 #include <future>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -19,6 +17,7 @@
 #include "bolt/common/memory/bm/io/IoBackend.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoRequestQueue.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 #include "bolt/common/memory/bm/io/ScopedFd.h"
 
@@ -39,13 +38,6 @@ class DiskIoSchedulerImpl {
   DiskIoSchedulerStats stats() const;
 
  private:
-  struct QueuedRequest {
-    uint64_t requestId{0};
-    IoRequest request;
-    std::promise<IoResult> promise;
-    std::chrono::steady_clock::time_point enqueueTime;
-  };
-
   struct InflightRequest {
     IoRequest request;
     std::promise<IoResult> promise;
@@ -59,7 +51,7 @@ class DiskIoSchedulerImpl {
   };
 
   struct DispatchResult {
-    QueuedRequest queued;
+    QueuedIoRequest queued;
     BackendSubmitStatus status{BackendSubmitStatus::Failed};
     std::chrono::steady_clock::time_point submitTime;
   };
@@ -71,8 +63,7 @@ class DiskIoSchedulerImpl {
   void run();
   bool hasQueuedRequestsLocked() const;
   bool drainedLocked() const;
-  std::optional<size_t> pickQueueLocked();
-  std::vector<QueuedRequest> collectDispatchBatchLocked();
+  std::vector<QueuedIoRequest> collectDispatchBatchLocked();
   bool applyDispatchResultsLocked(
       std::vector<DispatchResult>& results,
       std::vector<ReadyResult>& readyResults);
@@ -95,10 +86,7 @@ class DiskIoSchedulerImpl {
   mutable std::mutex mutex_;
   bool stopping_{false};
   uint64_t nextRequestId_{1};
-  std::array<std::deque<QueuedRequest>, kIoPriorityCount> queues_;
-  uint64_t totalQueued_{0};
-  std::array<int64_t, kIoPriorityCount> deficits_{};
-  size_t nextPriorityCursor_{0};
+  IoRequestQueue requestQueue_;
   std::unordered_map<uint64_t, InflightRequest> inflight_;
   DiskIoSchedulerStats stats_;
   std::chrono::steady_clock::time_point lastStatsLogTime_;
