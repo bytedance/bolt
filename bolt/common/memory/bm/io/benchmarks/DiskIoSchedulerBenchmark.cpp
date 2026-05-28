@@ -2,10 +2,12 @@
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
+#include "bolt/common/memory/bm/io/IoUringBackend.h"
 
 #include "bolt/common/base/Exceptions.h"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -43,19 +45,19 @@ DEFINE_uint32(
 DEFINE_uint32(
     bm_io_adaptive_max_depth,
     64,
-    "Maximum depth for adaptive scheduler cases.");
+    "Maximum depth for adaptive scheduler experiments.");
 DEFINE_uint32(
     bm_io_adaptive_initial_depth,
     1,
-    "Initial depth for adaptive scheduler cases.");
+    "Initial depth for adaptive scheduler experiments.");
 DEFINE_uint32(
     bm_io_adaptive_increase_step,
     4,
-    "Depth increase step for adaptive scheduler cases.");
+    "Depth increase step for adaptive scheduler experiments.");
 DEFINE_int32(
     bm_io_adaptive_control_interval_ms,
     50,
-    "Adaptive depth control interval in milliseconds.");
+    "Adaptive depth control interval in milliseconds for experiments.");
 DEFINE_bool(
     bm_io_keep_files,
     false,
@@ -72,6 +74,12 @@ constexpr size_t k256K = 256 * 1024;
 enum class Phase {
   Write,
   Read,
+};
+
+enum class Runner {
+  RawThreaded,
+  RawIoUring,
+  Scheduler,
 };
 
 struct PhaseMetrics {
@@ -185,6 +193,15 @@ void fillBuffer(char* data, size_t size, uint64_t op) {
   std::memset(data, static_cast<int>(op & 0xff), size);
 }
 
+std::unique_ptr<char[]> makeBuffer(size_t blockSize, uint64_t op);
+
+IoRequest makeRequest(
+    Phase phase,
+    int fd,
+    size_t blockSize,
+    uint64_t op,
+    std::unique_ptr<char[]> buffer);
+
 PhaseMetrics runRawPhase(
     int fd,
     Phase phase,
@@ -235,6 +252,109 @@ PhaseMetrics runRawPhase(
       completedBytes.load(),
       errors.load(),
       elapsedMs(start, end)};
+}
+
+void waitForRawIoUringCompletion(IoUringBackend& backend) {
+  pollfd completionEvent{backend.completionFd(), POLLIN, 0};
+  while (true) {
+    const int ready = ::poll(&completionEvent, 1, -1);
+    if (ready > 0) {
+      return;
+    }
+    if (ready < 0 && errno == EINTR) {
+      continue;
+    }
+    BOLT_CHECK_GE(ready, 0, "poll failed: {}", std::strerror(errno));
+  }
+}
+
+struct RawIoUringSlot {
+  bool active{false};
+  IoRequest request;
+};
+
+PhaseMetrics runRawIoUringPhase(
+    int fd,
+    Phase phase,
+    size_t blockSize,
+    uint64_t ops,
+    uint32_t depth) {
+  IoUringBackend backend(std::max<uint32_t>(1, depth));
+  const auto slotCount = std::max<uint32_t>(1, depth);
+  std::vector<RawIoUringSlot> slots(slotCount);
+  std::vector<size_t> freeSlots;
+  freeSlots.reserve(slotCount);
+  for (size_t i = 0; i < slotCount; ++i) {
+    freeSlots.push_back(slotCount - i - 1);
+  }
+
+  uint64_t nextOp = 0;
+  uint64_t inflight = 0;
+  uint64_t completedOps = 0;
+  uint64_t completedBytes = 0;
+  uint64_t errors = 0;
+
+  const auto start = Clock::now();
+  while (completedOps + errors < ops) {
+    bool madeProgress = false;
+    while (nextOp < ops && inflight < slotCount && !freeSlots.empty()) {
+      const auto slot = freeSlots.back();
+      freeSlots.pop_back();
+      auto buffer = std::move(slots[slot].request.buffer.data);
+      if (buffer == nullptr) {
+        buffer = makeBuffer(blockSize, nextOp);
+      } else if (phase == Phase::Write) {
+        fillBuffer(buffer.get(), blockSize, nextOp);
+      }
+
+      auto request =
+          makeRequest(phase, fd, blockSize, nextOp, std::move(buffer));
+      const auto status = backend.submit(slot + 1, request);
+      if (status == BackendSubmitStatus::RetryableBusy) {
+        freeSlots.push_back(slot);
+        break;
+      }
+      ++nextOp;
+      madeProgress = true;
+      if (status == BackendSubmitStatus::Failed) {
+        ++errors;
+        freeSlots.push_back(slot);
+        continue;
+      }
+      slots[slot].request = std::move(request);
+      slots[slot].active = true;
+      ++inflight;
+    }
+
+    auto completions = backend.reap();
+    madeProgress = madeProgress || !completions.empty();
+    for (auto& completion : completions) {
+      const auto slot = completion.requestId == 0
+          ? slotCount
+          : static_cast<size_t>(completion.requestId - 1);
+      if (slot >= slotCount || !slots[slot].active) {
+        ++errors;
+        continue;
+      }
+      slots[slot].active = false;
+      --inflight;
+      if (completion.result.ok() && completion.result.bytes == blockSize) {
+        ++completedOps;
+        completedBytes += completion.result.bytes;
+      } else {
+        ++errors;
+      }
+      freeSlots.push_back(slot);
+    }
+
+    if (!madeProgress && inflight > 0) {
+      waitForRawIoUringCompletion(backend);
+    }
+  }
+  const auto end = Clock::now();
+
+  return PhaseMetrics{
+      completedOps, completedBytes, errors, elapsedMs(start, end)};
 }
 
 DiskIoSchedulerConfig schedulerConfig(
@@ -347,6 +467,22 @@ CaseMetrics runRawCase(
   return CaseMetrics{write, read, fsyncMs, "", ""};
 }
 
+CaseMetrics runRawIoUringCase(
+    const std::string& path,
+    size_t blockSize,
+    uint64_t ops,
+    uint32_t depth) {
+  int fd = openForWrite(path);
+  auto write = runRawIoUringPhase(fd, Phase::Write, blockSize, ops, depth);
+  const auto fsyncMs = fsyncAndClose(fd);
+
+  fd = openForRead(path);
+  auto read = runRawIoUringPhase(fd, Phase::Read, blockSize, ops, depth);
+  closeFd(fd);
+
+  return CaseMetrics{write, read, fsyncMs, "", ""};
+}
+
 CaseMetrics runSchedulerCase(
     const std::string& path,
     size_t blockSize,
@@ -396,8 +532,11 @@ void printPhaseSummary(
             << " adaptive=" << adaptive
             << " buffered_io=true"
             << " preallocate=false"
-            << " drop_cache=false"
-            << " write_read_barrier=fsync_close_reopen"
+            << " drop_cache=false";
+  if (phase == Phase::Read) {
+    std::cout << " read_cache_state=warm_page_cache";
+  }
+  std::cout << " write_read_barrier=fsync_close_reopen"
             << " ops=" << metrics.ops
             << " bytes=" << metrics.bytes
             << " errors=" << metrics.errors
@@ -408,8 +547,14 @@ void printPhaseSummary(
             << " mib_per_second=" << std::fixed << std::setprecision(2)
             << mibPerSecond(metrics);
   if (phase == Phase::Write) {
+    PhaseMetrics writeWithFsync = metrics;
+    writeWithFsync.elapsedMs += fsyncMs;
     std::cout << " fsync_ms=" << std::fixed << std::setprecision(3)
-              << fsyncMs;
+              << fsyncMs
+              << " write_total_elapsed_ms=" << std::fixed
+              << std::setprecision(3) << writeWithFsync.elapsedMs
+              << " write_total_mib_per_second=" << std::fixed
+              << std::setprecision(2) << mibPerSecond(writeWithFsync);
   }
   std::cout << "\n";
 }
@@ -442,21 +587,26 @@ void runCase(
     size_t blockSize,
     uint32_t depth,
     bool adaptive,
-    bool scheduler,
-    const std::string& schedulerSkipReason) {
+    Runner runner,
+    const std::string& skipReason) {
   const auto ops = roundOps(FLAGS_bm_io_total_bytes, blockSize);
   const auto path = benchmarkPath(caseName);
-  if (scheduler && !schedulerSkipReason.empty()) {
+  if (!skipReason.empty()) {
     std::cout << "bm_io_benchmark"
               << " case=" << caseName
               << " skipped=true"
-              << " reason=\"" << schedulerSkipReason << "\"\n";
+              << " reason=\"" << skipReason << "\"\n";
     return;
   }
   try {
-    const auto metrics = scheduler
-        ? runSchedulerCase(path, blockSize, ops, depth, adaptive)
-        : runRawCase(path, blockSize, ops, depth);
+    CaseMetrics metrics;
+    if (runner == Runner::Scheduler) {
+      metrics = runSchedulerCase(path, blockSize, ops, depth, adaptive);
+    } else if (runner == Runner::RawIoUring) {
+      metrics = runRawIoUringCase(path, blockSize, ops, depth);
+    } else {
+      metrics = runRawCase(path, blockSize, ops, depth);
+    }
     printCaseSummary(caseName, blockSize, depth, adaptive, metrics);
   } catch (const std::exception& ex) {
     std::cout << "bm_io_benchmark"
@@ -500,26 +650,33 @@ int main(int argc, char** argv) {
     schedulerSkipReason = conciseReason(ex.what());
   }
 
+  std::string ioUringSkipReason;
+  try {
+    IoUringBackend backend(FLAGS_bm_io_fixed_depth);
+  } catch (const std::exception& ex) {
+    ioUringSkipReason = conciseReason(ex.what());
+  }
+
   runCase(
       "RawBufferedIo_4K_FixedDepth",
       k4K,
       FLAGS_bm_io_fixed_depth,
       false,
+      Runner::RawThreaded,
+      "");
+  runCase(
+      "RawIoUringBufferedIo_4K_FixedDepth",
+      k4K,
+      FLAGS_bm_io_fixed_depth,
       false,
-      schedulerSkipReason);
+      Runner::RawIoUring,
+      ioUringSkipReason);
   runCase(
       "DiskIoScheduler_4K_FixedDepth",
       k4K,
       FLAGS_bm_io_fixed_depth,
       false,
-      true,
-      schedulerSkipReason);
-  runCase(
-      "DiskIoScheduler_4K_AdaptiveDepth",
-      k4K,
-      FLAGS_bm_io_adaptive_max_depth,
-      true,
-      true,
+      Runner::Scheduler,
       schedulerSkipReason);
 
   runCase(
@@ -527,21 +684,21 @@ int main(int argc, char** argv) {
       k256K,
       FLAGS_bm_io_fixed_depth,
       false,
+      Runner::RawThreaded,
+      "");
+  runCase(
+      "RawIoUringBufferedIo_256K_FixedDepth",
+      k256K,
+      FLAGS_bm_io_fixed_depth,
       false,
-      schedulerSkipReason);
+      Runner::RawIoUring,
+      ioUringSkipReason);
   runCase(
       "DiskIoScheduler_256K_FixedDepth",
       k256K,
       FLAGS_bm_io_fixed_depth,
       false,
-      true,
-      schedulerSkipReason);
-  runCase(
-      "DiskIoScheduler_256K_AdaptiveDepth",
-      k256K,
-      FLAGS_bm_io_adaptive_max_depth,
-      true,
-      true,
+      Runner::Scheduler,
       schedulerSkipReason);
 
   return 0;
