@@ -275,7 +275,7 @@ class BoltConan(ConanFile):
         if self.settings.os in ["Linux", "FreeBSD"]:
             if self.options.get_safe("enable_perf"):
                 self.requires("gperftools/2.16")
-            self.requires("libunwind/1.8.3", override=True)
+            self.requires("libunwind/1.8.3", force=True)
         self.requires("utf8proc/2.11.0", transitive_headers=True, transitive_libs=True)
         self.requires("date/3.0.4-bolt", transitive_headers=True, transitive_libs=True)
         self.requires("libbacktrace/cci.20210118")
