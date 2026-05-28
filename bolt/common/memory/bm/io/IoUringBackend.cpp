@@ -5,7 +5,9 @@
 #include <liburing/io_uring.h>
 #endif
 
+#include <cerrno>
 #include <cstring>
+#include <thread>
 #include <utility>
 
 #include "bolt/common/base/Exceptions.h"
@@ -72,11 +74,25 @@ BackendSubmitStatus IoUringBackend::submit(
     io_uring_prep_write(
         sqe, request.fd, base, request.buffer.length, request.fileOffset);
   }
-  sqe->user_data = requestId;
+  io_uring_sqe_set_data64(sqe, requestId);
 
-  const int ret = io_uring_submit(&state_->ring);
-  return ret >= 0 ? BackendSubmitStatus::Submitted
-                  : BackendSubmitStatus::Failed;
+  while (true) {
+    const int ret = io_uring_submit(&state_->ring);
+    if (ret == 1) {
+      return BackendSubmitStatus::Submitted;
+    }
+    if (ret == -EINTR || ret == -EAGAIN || ret == -EBUSY) {
+      std::this_thread::yield();
+      continue;
+    }
+    BOLT_CHECK_EQ(
+        ret,
+        1,
+        "io_uring_submit after SQE preparation must submit exactly one SQE, "
+        "got {}: {}",
+        ret,
+        ret < 0 ? std::strerror(-ret) : "no SQE submitted");
+  }
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {

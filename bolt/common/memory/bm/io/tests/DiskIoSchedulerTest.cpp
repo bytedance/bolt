@@ -533,10 +533,9 @@ TEST(DiskIoSchedulerTest, submitDoesNotWaitForBackendReap) {
   backendPtr->unblockReap();
   ASSERT_EQ(std::future_status::ready, submitStatus);
   auto ioFuture = submitFuture.get();
-  scheduler.stopAndDrain();
 
-  EXPECT_EQ(1, backendPtr->submitAttempts());
   ASSERT_TRUE(waitUntilReady(ioFuture));
+  EXPECT_EQ(1, backendPtr->submitAttempts());
   EXPECT_EQ(IoErrorCode::BackendSubmitFailed, ioFuture.get().error);
 }
 
@@ -835,32 +834,52 @@ TEST(DiskIoSchedulerTest, retryableBackendBusyDoesNotFailRequest) {
   EXPECT_EQ(0, stats.failedRequests);
 }
 
-TEST(DiskIoSchedulerTest, stopAndDrainTimesOutInflightRequests) {
-  auto backend = std::make_unique<NeverCompleteBackend>();
+TEST(DiskIoSchedulerTest, stopAndDrainFailsQueuedAndWaitsForInflightCompletion) {
+  auto backend = std::make_unique<MockIoBackend>();
   auto* backendPtr = backend.get();
   DiskIoSchedulerConfig config;
-  config.drainTimeout = std::chrono::milliseconds(5);
+  config.adaptiveDepth.initialDepth = 1;
   DiskIoScheduler scheduler(config, std::move(backend));
 
-  auto future = scheduler.submit(makeValidRequest(IoPriority::High));
-  const auto deadline = std::chrono::steady_clock::now() + kFutureTimeout;
-  while (backendPtr->submitAttempts() == 0 &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  ASSERT_EQ(1, backendPtr->submitAttempts());
+  auto inflightFuture = scheduler.submit(makeValidRequest(IoPriority::High));
+  auto queuedFuture = scheduler.submit(makeValidRequest(IoPriority::Low));
+  ASSERT_TRUE(waitUntilSubmitted(*backendPtr, 1));
+  ASSERT_EQ(1, backendPtr->submitted().size());
 
-  scheduler.stopAndDrain();
+  std::promise<void> stopFinished;
+  auto stopFuture = stopFinished.get_future();
+  std::thread stopThread([&scheduler, &stopFinished] {
+    scheduler.stopAndDrain();
+    stopFinished.set_value();
+  });
 
-  ASSERT_TRUE(waitUntilReady(future));
-  auto result = future.get();
-  EXPECT_EQ(0, result.bytes);
-  EXPECT_EQ(IoErrorCode::Shutdown, result.error);
+  ASSERT_TRUE(waitUntilReady(queuedFuture));
+  auto queuedResult = queuedFuture.get();
+  EXPECT_EQ(0, queuedResult.bytes);
+  EXPECT_EQ(IoErrorCode::Shutdown, queuedResult.error);
+
+  EXPECT_EQ(
+      std::future_status::timeout,
+      inflightFuture.wait_for(std::chrono::milliseconds(10)));
+  EXPECT_EQ(
+      std::future_status::timeout,
+      stopFuture.wait_for(std::chrono::milliseconds(10)));
+
+  backendPtr->complete(1, IoResult{4096});
+  ASSERT_TRUE(waitUntilReady(inflightFuture));
+  auto inflightResult = inflightFuture.get();
+  EXPECT_EQ(4096, inflightResult.bytes);
+  EXPECT_EQ(IoErrorCode::Ok, inflightResult.error);
+
+  ASSERT_EQ(
+      std::future_status::ready, stopFuture.wait_for(kFutureTimeout));
+  stopThread.join();
 
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
   EXPECT_EQ(1, stats.failedRequests);
-  EXPECT_EQ(0, stats.latencySamples);
+  EXPECT_EQ(1, stats.successfulRequests);
+  EXPECT_EQ(1, stats.latencySamples);
 }
 
 TEST(DiskIoSchedulerTest, backendIoErrorStatsIncludePriorityAndNativeError) {
@@ -916,15 +935,6 @@ TEST(DiskIoSchedulerTest, statsLoggingConfigRejectsNonPositiveInterval) {
   DiskIoSchedulerConfig config;
   config.enableStatsLogging = true;
   config.statsLogInterval = std::chrono::milliseconds(0);
-
-  EXPECT_EQ(
-      IoErrorCode::InvalidRequest,
-      validateDiskIoSchedulerConfig(config));
-}
-
-TEST(DiskIoSchedulerTest, drainTimeoutConfigRejectsNonPositiveInterval) {
-  DiskIoSchedulerConfig config;
-  config.drainTimeout = std::chrono::milliseconds(0);
 
   EXPECT_EQ(
       IoErrorCode::InvalidRequest,

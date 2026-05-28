@@ -149,9 +149,6 @@ void DiskIoScheduler::stopAndDrain() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     stopping_ = true;
-    if (!drainDeadline_.has_value()) {
-      drainDeadline_ = std::chrono::steady_clock::now() + config_.drainTimeout;
-    }
   }
   notifyWorker();
 
@@ -201,20 +198,21 @@ void DiskIoScheduler::run() {
     bool shouldExit = false;
     bool shouldContinue = false;
     int waitTimeoutMs = -1;
-    const auto now = std::chrono::steady_clock::now();
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       applyCompletionsLocked(completions, readyResults);
-      if (stopping_ && drainDeadline_.has_value() &&
-          now >= *drainDeadline_ && !drainedLocked()) {
-        // stopAndDrain() is often called from destructors. If the backend never
-        // produces completions, waiting forever would hang teardown and leave
-        // user futures blocked, so outstanding work is failed once the
-        // configured drain deadline expires.
-        failOutstandingLocked(readyResults);
+      if (stopping_) {
+        // Requests that have not reached the backend are owned only by the
+        // scheduler, so their buffers can be safely returned as Shutdown. Once
+        // a request is inflight, io_uring may still hold a pointer to its
+        // buffer; that buffer must remain owned here until the real CQE is
+        // reaped.
+        failQueuedLocked(readyResults);
       }
-      dispatchBatch = collectDispatchBatchLocked();
+      if (!stopping_) {
+        dispatchBatch = collectDispatchBatchLocked();
+      }
       madeProgress = madeProgress || !dispatchBatch.empty();
       shouldExit = stopping_ && drainedLocked() && dispatchBatch.empty();
     }
@@ -273,9 +271,6 @@ int DiskIoScheduler::computeWaitTimeoutMsLocked(
                                         : std::optional(duration);
       };
 
-  if (stopping_ && drainDeadline_.has_value() && !drainedLocked()) {
-    includeDeadline(*drainDeadline_);
-  }
   if (config_.enableStatsLogging) {
     includeDeadline(lastStatsLogTime_ + config_.statsLogInterval);
   }
@@ -529,7 +524,7 @@ void DiskIoScheduler::applyCompletionsLocked(
   }
 }
 
-void DiskIoScheduler::failOutstandingLocked(
+void DiskIoScheduler::failQueuedLocked(
     std::vector<ReadyResult>& readyResults) {
   for (size_t priority = 0; priority < kIoPriorityCount; ++priority) {
     auto& queue = queues_[priority];
@@ -550,21 +545,7 @@ void DiskIoScheduler::failOutstandingLocked(
     deficits_[priority] = 0;
   }
 
-  for (auto& [requestId, inflight] : inflight_) {
-    (void)requestId;
-    const auto priority = priorityIndex(inflight.request.priority);
-    IoResult result{0, IoErrorCode::Shutdown};
-    result.buffer = std::move(inflight.request.buffer);
-    readyResults.push_back(
-        ReadyResult{std::move(inflight.promise), std::move(result)});
-    ++stats_.completedRequests;
-    ++stats_.completedRequestsByPriority[priority];
-    ++stats_.failedRequests;
-    ++stats_.failedRequestsByPriority[priority];
-  }
-  inflight_.clear();
   totalQueued_ = 0;
-  stats_.inflightRequests = 0;
 }
 
 } // namespace bytedance::bolt::memory::bm
