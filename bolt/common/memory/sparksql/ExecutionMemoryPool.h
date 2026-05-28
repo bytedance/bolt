@@ -137,6 +137,8 @@ class ExecutionMemoryPool final
 
   static uint64_t borrowFromRssWatermarkBytes(int64_t taskAttemptId);
 
+  static uint64_t configuredTaskMemoryQuotaBytes();
+
   // For testing only, reset pool size to test new cases with new pool size
   static void testingResetPoolSize(int64_t newSize);
 

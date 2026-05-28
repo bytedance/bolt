@@ -32,13 +32,18 @@ MemoryPressureSnapshot snapshot(
     uint64_t reclaimWatermarkBytes,
     const std::optional<int64_t>& sparkTaskAttemptId) {
   uint64_t borrowFromRssWatermarkBytes = 0;
+  uint64_t configuredTaskMemoryQuotaBytes = 0;
   if (sparkTaskAttemptId.has_value()) {
     borrowFromRssWatermarkBytes =
         memory::sparksql::ExecutionMemoryPool::borrowFromRssWatermarkBytes(
             *sparkTaskAttemptId);
+    configuredTaskMemoryQuotaBytes =
+        memory::sparksql::ExecutionMemoryPool::configuredTaskMemoryQuotaBytes();
   }
   return MemoryPressureSnapshot{
-      reclaimWatermarkBytes, borrowFromRssWatermarkBytes};
+      reclaimWatermarkBytes,
+      borrowFromRssWatermarkBytes,
+      configuredTaskMemoryQuotaBytes};
 }
 
 std::optional<ScopedMemoryExpansionGuard> maybeScopedDisableMemoryExpansion(

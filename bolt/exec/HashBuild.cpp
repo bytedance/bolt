@@ -1272,6 +1272,8 @@ uint64_t HashBuild::probeAdmissionExtraReservationBytes(
             << succinctBytes(pressure.reclaimWatermarkBytes)
             << ", borrowFromRssWatermarkBytes="
             << succinctBytes(pressure.borrowFromRssWatermarkBytes)
+            << ", configuredTaskMemoryQuotaBytes="
+            << succinctBytes(pressure.configuredTaskMemoryQuotaBytes)
             << ", pressureWatermarkBytes="
             << succinctBytes(pressureWatermarkBytes) << ", details "
             << task->memoryPressureDetails();

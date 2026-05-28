@@ -210,6 +210,44 @@ TEST_F(TopNRowNumberTest, preservesOrderAcrossOutputBatches) {
       .assertResults(sql, std::vector<uint32_t>{0, 1});
 }
 
+TEST_F(TopNRowNumberTest, doesNotSpillBeforeOutputWithoutMemoryPressure) {
+  const vector_size_t size = 1'000;
+  auto data = split(
+      makeRowVector({
+          makeFlatVector<int64_t>(size, [](auto row) { return row % 100; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return size - row; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+      }),
+      10);
+
+  createDuckDbTable(data);
+
+  core::PlanNodeId topNRowNumberId;
+  auto plan = PlanBuilder()
+                  .values(data)
+                  .topNRowNumber({"c0"}, {"c1"}, 10, true)
+                  .capturePlanNodeId(topNRowNumberId)
+                  .planNode();
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                  .config(core::QueryConfig::kSpillEnabled, "true")
+                  .config(core::QueryConfig::kTopNRowNumberSpillEnabled, "true")
+                  .config(core::QueryConfig::kPreferredOutputBatchBytes, "128")
+                  .spillDirectory(spillDirectory->path)
+                  .assertResults(
+                      "SELECT * FROM (SELECT *, row_number() over "
+                      "(partition by c0 order by c1) as rn FROM tmp) "
+                      "WHERE rn <= 10");
+
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(topNRowNumberId);
+  ASSERT_EQ(stats.spilledBytes, 0);
+  ASSERT_EQ(stats.spilledRows, 0);
+  ASSERT_EQ(stats.spilledFiles, 0);
+  ASSERT_EQ(stats.spilledPartitions, 0);
+}
+
 TEST_F(TopNRowNumberTest, manyPartitions) {
   const vector_size_t size = 10'000;
   auto data = split(

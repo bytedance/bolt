@@ -408,6 +408,20 @@ uint64_t ExecutionMemoryPool::borrowFromRssWatermarkBytes(
   return it == instance()->borrowFromRssWatermarkBytes_.end() ? 0 : it->second;
 }
 
+uint64_t ExecutionMemoryPool::configuredTaskMemoryQuotaBytes() {
+  if (!inited()) {
+    return 0;
+  }
+
+  auto self = instance();
+  MemoryMutexGuard guard(self->lock_);
+  const auto activeTasks = self->memoryForTask_.size();
+  if (!self->poolExtendSize_.has_value() || activeTasks == 0) {
+    return 0;
+  }
+  return self->poolSize_.value_or(0) / activeTasks;
+}
+
 std::ostream& operator<<(std::ostream& os, const ExecutionMemoryPool& pool) {
   os << "ExecutionMemoryPool(poolSize=" << pool.poolSize_.value_or(0)
      << ", poolExtendSize=" << pool.poolExtendSize_.value_or(0)

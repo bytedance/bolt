@@ -63,10 +63,12 @@ class ScopedMemoryExpansionGuard {
 struct MemoryPressureSnapshot {
   uint64_t reclaimWatermarkBytes{0};
   uint64_t borrowFromRssWatermarkBytes{0};
+  uint64_t configuredTaskMemoryQuotaBytes{0};
 
   uint64_t admissionWatermarkBytes() const {
     if (reclaimWatermarkBytes == 0) {
-      return borrowFromRssWatermarkBytes;
+      return borrowFromRssWatermarkBytes == 0 ? configuredTaskMemoryQuotaBytes
+                                              : borrowFromRssWatermarkBytes;
     }
     if (borrowFromRssWatermarkBytes == 0) {
       return reclaimWatermarkBytes;
