@@ -8,12 +8,12 @@ class FileBlockAllocator {
  public:
   virtual ~FileBlockAllocator() = default;
 
-  virtual FileAllocateResult allocate(int64_t size) = 0;
-  virtual FileFreeResult free(const FileExtent& extent) = 0;
+  virtual FileAllocateResult Allocate(int64_t size) = 0;
+  virtual FileFreeResult Free(const FileExtent& extent) = 0;
 };
 
-void initFileBlockAllocator(FileBlockAllocatorConfig config);
-FileBlockAllocator& fileBlockAllocator();
-void shutdownFileBlockAllocator();
+void InitFileBlockAllocator(FileBlockAllocatorConfig config);
+FileBlockAllocator& GetFileBlockAllocator();
+void ShutdownFileBlockAllocator();
 
 } // namespace bytedance::bolt::memory::bm

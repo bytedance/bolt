@@ -11,26 +11,26 @@ namespace bytedance::bolt::memory::bm {
 
 namespace {
 
-std::mutex gAllocatorMutex;
-std::unique_ptr<FileBlockAllocatorImpl> gAllocator;
+std::mutex g_allocator_mutex;
+std::unique_ptr<FileBlockAllocatorImpl> g_allocator;
 
 } // namespace
 
-void initFileBlockAllocator(FileBlockAllocatorConfig config) {
-  std::lock_guard<std::mutex> lock(gAllocatorMutex);
-  BOLT_CHECK(gAllocator == nullptr, "FileBlockAllocator already initialized");
-  gAllocator = std::make_unique<FileBlockAllocatorImpl>(std::move(config));
+void InitFileBlockAllocator(FileBlockAllocatorConfig config) {
+  std::lock_guard<std::mutex> lock(g_allocator_mutex);
+  BOLT_CHECK(g_allocator == nullptr, "FileBlockAllocator already initialized");
+  g_allocator = std::make_unique<FileBlockAllocatorImpl>(std::move(config));
 }
 
-FileBlockAllocator& fileBlockAllocator() {
-  std::lock_guard<std::mutex> lock(gAllocatorMutex);
-  BOLT_CHECK(gAllocator != nullptr, "FileBlockAllocator is not initialized");
-  return *gAllocator;
+FileBlockAllocator& GetFileBlockAllocator() {
+  std::lock_guard<std::mutex> lock(g_allocator_mutex);
+  BOLT_CHECK(g_allocator != nullptr, "FileBlockAllocator is not initialized");
+  return *g_allocator;
 }
 
-void shutdownFileBlockAllocator() {
-  std::lock_guard<std::mutex> lock(gAllocatorMutex);
-  gAllocator.reset();
+void ShutdownFileBlockAllocator() {
+  std::lock_guard<std::mutex> lock(g_allocator_mutex);
+  g_allocator.reset();
 }
 
 } // namespace bytedance::bolt::memory::bm
