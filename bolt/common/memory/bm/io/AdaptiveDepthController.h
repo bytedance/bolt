@@ -38,6 +38,8 @@ class AdaptiveDepthController {
   bool hasBestThroughput_{false};
   bool hasRecentThroughput_{false};
   bool measuringProbeDepth_{false};
+  uint32_t validPressureWindows_{0};
+  uint32_t probeCooldownWindows_{0};
   uint64_t completedWindows_{0};
   double lastWindowThroughputBytesPerSecond_{0};
 };
