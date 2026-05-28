@@ -4,7 +4,9 @@ add_library(
   DepthController.cpp
   DiskIoScheduler.cpp
   DiskIoSchedulerImpl.cpp
+  DrrDispatcher.cpp
   EventFd.cpp
+  IoRequestQueue.cpp
   IoUringBackend.cpp
   ScopedFd.cpp
 )

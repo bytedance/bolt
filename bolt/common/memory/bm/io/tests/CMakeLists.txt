@@ -7,6 +7,8 @@ add_executable(
   DepthControllerTest.cpp
   DiskIoSchedulerImplTest.cpp
   DiskIoSchedulerTest.cpp
+  DrrDispatcherTest.cpp
+  IoRequestQueueTest.cpp
   IoUringBackendTest.cpp
   ScopedFdTest.cpp
 )

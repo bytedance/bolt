@@ -61,6 +61,7 @@ DiskIoSchedulerImpl::DiskIoSchedulerImpl(
       depthController_(config_.adaptiveDepth),
       backend_(std::move(backend)),
       epollFd_(createEpollFd()),
+      requestQueue_(config_.priorityWeights),
       lastStatsLogTime_(std::chrono::steady_clock::now()) {
   BOLT_CHECK(
       validateDiskIoSchedulerConfig(config_) == IoErrorCode::Ok,
@@ -117,17 +118,15 @@ std::future<IoResult> DiskIoSchedulerImpl::submit(IoRequest request) {
       result.buffer = std::move(request.buffer);
       rejectedResult = std::move(result);
     } else {
-      const auto priority = priorityIndex(request.priority);
-      queues_[priority].push_back(QueuedRequest{
+      requestQueue_.enqueue(QueuedIoRequest{
           nextRequestId_++,
           std::move(request),
           std::move(promise),
           enqueueTime});
-      ++totalQueued_;
-      stats_.queuedRequests[priority] = queues_[priority].size();
+      stats_.queuedRequests = requestQueue_.queuedCounts();
       ++stats_.acceptedRequests;
       stats_.maxObservedQueueDepth =
-          std::max(stats_.maxObservedQueueDepth, totalQueued_);
+          std::max(stats_.maxObservedQueueDepth, requestQueue_.totalQueued());
     }
   }
 
@@ -161,9 +160,7 @@ DiskIoSchedulerStats DiskIoSchedulerImpl::stats() const {
 
 DiskIoSchedulerStats DiskIoSchedulerImpl::snapshotStatsLocked() const {
   auto snapshot = stats_;
-  for (size_t i = 0; i < kIoPriorityCount; ++i) {
-    snapshot.queuedRequests[i] = queues_[i].size();
-  }
+  snapshot.queuedRequests = requestQueue_.queuedCounts();
   snapshot.inflightRequests = inflight_.size();
   snapshot.currentDepth = depthController_.currentDepth();
   snapshot.recentThroughputBytesPerSecond =
@@ -189,7 +186,7 @@ void DiskIoSchedulerImpl::run() {
     std::vector<ReadyResult> readyResults;
     wakeupEvent_.drain();
     auto completions = backend_->reap();
-    std::vector<QueuedRequest> dispatchBatch;
+    std::vector<QueuedIoRequest> dispatchBatch;
     bool madeProgress = !completions.empty();
     bool shouldExit = false;
     bool shouldContinue = false;
@@ -296,78 +293,22 @@ void DiskIoSchedulerImpl::notifyWorker() const {
 }
 
 bool DiskIoSchedulerImpl::hasQueuedRequestsLocked() const {
-  for (const auto& queue : queues_) {
-    if (!queue.empty()) {
-      return true;
-    }
-  }
-  return false;
+  return requestQueue_.hasRequests();
 }
 
 bool DiskIoSchedulerImpl::drainedLocked() const {
   return inflight_.empty() && !hasQueuedRequestsLocked();
 }
 
-std::optional<size_t> DiskIoSchedulerImpl::pickQueueLocked() {
-  auto hasDispatchableDeficit = [this] {
-    for (size_t i = 0; i < kIoPriorityCount; ++i) {
-      if (!queues_[i].empty() && deficits_[i] > 0) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  if (!hasDispatchableDeficit()) {
-    for (size_t i = 0; i < kIoPriorityCount; ++i) {
-      if (!queues_[i].empty()) {
-        deficits_[i] += config_.priorityWeights[i];
-      } else {
-        deficits_[i] = 0;
-      }
-    }
-  }
-
-  for (size_t i = 0; i < kIoPriorityCount; ++i) {
-    const auto priority = nextPriorityCursor_;
-    nextPriorityCursor_ = (nextPriorityCursor_ + 1) % kIoPriorityCount;
-
-    if (queues_[priority].empty()) {
-      deficits_[priority] = 0;
-      continue;
-    }
-    if (deficits_[priority] <= 0) {
-      continue;
-    }
-
-    --deficits_[priority];
-    return priority;
-  }
-
-  return std::nullopt;
-}
-
-std::vector<DiskIoSchedulerImpl::QueuedRequest>
+std::vector<QueuedIoRequest>
 DiskIoSchedulerImpl::collectDispatchBatchLocked() {
-  std::vector<QueuedRequest> batch;
-  while (inflight_.size() + batch.size() < depthController_.currentDepth() &&
-         hasQueuedRequestsLocked()) {
-    const auto priority = pickQueueLocked();
-    if (!priority.has_value()) {
-      break;
-    }
-
-    auto& queue = queues_[*priority];
-    auto queued = std::move(queue.front());
-    queue.pop_front();
-    --totalQueued_;
-    stats_.queuedRequests[*priority] = queue.size();
-    if (queue.empty()) {
-      deficits_[*priority] = 0;
-    }
-    batch.push_back(std::move(queued));
+  if (inflight_.size() >= depthController_.currentDepth()) {
+    return {};
   }
-  return batch;
+  const auto availableSlots = depthController_.currentDepth() - inflight_.size();
+  auto dispatchBatch = requestQueue_.collect(availableSlots);
+  stats_.queuedRequests = requestQueue_.queuedCounts();
+  return dispatchBatch;
 }
 
 bool DiskIoSchedulerImpl::applyDispatchResultsLocked(
@@ -389,10 +330,10 @@ bool DiskIoSchedulerImpl::applyDispatchResultsLocked(
     if (dispatch.status == BackendSubmitStatus::RetryableBusy) {
       // A full SQ is backpressure, not user-visible IO failure. Put the request
       // back at the head so the next worker iteration can retry after reaping.
-      auto& queue = queues_[priority];
-      queue.push_front(std::move(dispatch.queued));
-      ++totalQueued_;
-      stats_.queuedRequests[priority] = queue.size();
+      requestQueue_.returnToFront(std::move(dispatch.queued));
+      stats_.queuedRequests = requestQueue_.queuedCounts();
+      stats_.maxObservedQueueDepth = std::max(
+          stats_.maxObservedQueueDepth, requestQueue_.totalQueued());
       continue;
     }
     if (dispatch.status == BackendSubmitStatus::Failed) {
@@ -527,26 +468,19 @@ void DiskIoSchedulerImpl::applyCompletionsLocked(
 
 void DiskIoSchedulerImpl::failQueuedLocked(
     std::vector<ReadyResult>& readyResults) {
-  for (size_t priority = 0; priority < kIoPriorityCount; ++priority) {
-    auto& queue = queues_[priority];
-    while (!queue.empty()) {
-      auto queued = std::move(queue.front());
-      queue.pop_front();
-      --totalQueued_;
-      IoResult result{0, IoErrorCode::Shutdown};
-      result.buffer = std::move(queued.request.buffer);
-      readyResults.push_back(
-          ReadyResult{std::move(queued.promise), std::move(result)});
-      ++stats_.completedRequests;
-      ++stats_.completedRequestsByPriority[priority];
-      ++stats_.failedRequests;
-      ++stats_.failedRequestsByPriority[priority];
-    }
-    stats_.queuedRequests[priority] = 0;
-    deficits_[priority] = 0;
+  auto queuedRequests = requestQueue_.drainAll();
+  for (auto& queued : queuedRequests) {
+    const auto priority = priorityIndex(queued.request.priority);
+    IoResult result{0, IoErrorCode::Shutdown};
+    result.buffer = std::move(queued.request.buffer);
+    readyResults.push_back(
+        ReadyResult{std::move(queued.promise), std::move(result)});
+    ++stats_.completedRequests;
+    ++stats_.completedRequestsByPriority[priority];
+    ++stats_.failedRequests;
+    ++stats_.failedRequestsByPriority[priority];
   }
-
-  totalQueued_ = 0;
+  stats_.queuedRequests = requestQueue_.queuedCounts();
 }
 
 } // namespace bytedance::bolt::memory::bm
