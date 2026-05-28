@@ -545,7 +545,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDateWithFormat) {
 
   EXPECT_EQ(0, unixTimestamp(DATE()->toDays("1970-01-01"), "yyyy-MM-dd"));
   EXPECT_EQ(
-      1563922800, unixTimestamp(DATE()->toDays("2019-07-24"), "yyyyMMdd"));
+      1563926400, unixTimestamp(DATE()->toDays("2019-07-24"), "yyyyMMdd"));
 
   setQueryTimeZone("Asia/Shanghai");
   EXPECT_EQ(
