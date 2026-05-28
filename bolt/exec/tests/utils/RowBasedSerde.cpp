@@ -80,7 +80,8 @@ void serializeOne<TypeKind::ROW>(
   // deserialization.
   auto childrenSize = type.size();
   auto children = row->children();
-  std::vector<uint64_t> nulls(bits::nwords(childrenSize));
+  std::vector<uint64_t> nulls(
+      bits::nwords(static_cast<uint64_t>(childrenSize)));
   for (auto i = 0; i < childrenSize; ++i) {
     if (i >= children.size() || !children[i] ||
         children[i]->isNullAt(wrappedIndex)) {

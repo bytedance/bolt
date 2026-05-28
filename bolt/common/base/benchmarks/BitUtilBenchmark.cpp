@@ -161,7 +161,7 @@ void BM_forEachBit(
     size_t numBits,
     std::optional<size_t> bitToClear = std::nullopt) {
   folly::BenchmarkSuspender suspender;
-  uint32_t size = bits::nwords(numBits);
+  uint32_t size = bits::nwords(static_cast<uint64_t>(numBits));
   std::vector<uint64_t> data(size);
   uint64_t* rawData = data.data();
   bits::fillBits(rawData, 0, numBits, true);
