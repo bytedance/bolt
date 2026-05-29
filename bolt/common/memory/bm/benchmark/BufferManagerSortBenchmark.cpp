@@ -1,5 +1,5 @@
-#include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
+#include "bolt/common/memory/bm/benchmark/SparkListenableArbitratorContext.h"
 
 #include <algorithm>
 #include <chrono>
@@ -383,11 +383,10 @@ void sortActiveRun(ActiveRun& run) {
 
 uint64_t spillActiveRun(
     ActiveRun& run,
-    const std::shared_ptr<MemoryPool>& root) {
+    SparkListenableArbitratorContext& memoryContext) {
   sortActiveRun(run);
   run.batchUnpin();
-  MemoryReclaimer::Stats stats;
-  return root->reclaim(0, 0, stats);
+  return memoryContext.reclaimThroughArbitrator(0);
 }
 
 bool verifySortedRuns(
@@ -456,9 +455,12 @@ int runBenchmark() {
   std::filesystem::remove_all(FLAGS_bm_sort_spill_dir);
   std::filesystem::create_directories(FLAGS_bm_sort_spill_dir);
 
-  MemoryManager memoryManager;
-  auto root = memoryManager.addRootPool(
-      "bm-sort-benchmark-root", memoryLimitBytes, MemoryReclaimer::create());
+  SparkListenableArbitratorContext memoryContext{
+      SparkListenableArbitratorContextOptions{
+          .name = "bm-sort-benchmark",
+          .memoryLimitBytes = static_cast<int64_t>(memoryLimitBytes),
+          .sessionConf = {}}};
+  auto root = memoryContext.rootPool();
 
   BufferManagerConfig config;
   config.poolName = "bm-sort-benchmark";
@@ -468,7 +470,7 @@ int runBenchmark() {
   std::vector<SortedRun> runs;
   ActiveRun active;
   UInt64DataGenerator generator{totalValues, FLAGS_bm_sort_seed};
-  uint64_t spilledBytes = 0;
+  uint64_t arbitratorReclaimedBytes = 0;
   double generateAndRunSortMs = 0;
   double verifyMs = 0;
 
@@ -476,7 +478,7 @@ int runBenchmark() {
     ScopedTimer timer{generateAndRunSortMs};
     while (!generator.empty()) {
       if (!manager->MaybeReserve(blockBytes) && !active.empty()) {
-        spilledBytes += spillActiveRun(active, root);
+        arbitratorReclaimedBytes += spillActiveRun(active, memoryContext);
         runs.push_back(std::move(active.metadata));
         active.clear();
         manager->ReleaseUnusedReservation();
@@ -495,7 +497,7 @@ int runBenchmark() {
     }
 
     if (!active.empty()) {
-      spilledBytes += spillActiveRun(active, root);
+      arbitratorReclaimedBytes += spillActiveRun(active, memoryContext);
       runs.push_back(std::move(active.metadata));
       active.clear();
       manager->ReleaseUnusedReservation();
@@ -514,7 +516,8 @@ int runBenchmark() {
             << " memory_gb=" << FLAGS_bm_sort_memory_gb
             << " allocate_size=" << toString(allocateSize)
             << " block_bytes=" << blockBytes << " runs=" << runs.size()
-            << " values=" << totalValues << " spilled_bytes=" << spilledBytes
+            << " values=" << totalValues
+            << " arbitrator_reclaimed_bytes=" << arbitratorReclaimedBytes
             << " bm_reclaimed_bytes=" << stats.reclaimedBytes
             << " generate_sort_ms=" << generateAndRunSortMs
             << " verify_ms=" << verifyMs
