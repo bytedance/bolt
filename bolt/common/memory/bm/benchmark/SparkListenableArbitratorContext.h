@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -19,6 +20,8 @@ struct SparkListenableArbitratorContextOptions {
   bool memoryIsolation{false};
   double overAcquiredRatio{0};
   std::unordered_map<std::string, std::string> sessionConf;
+  int32_t maxTaskNumber{1};
+  bool initializeExecutionMemoryPool{true};
 };
 
 struct SparkListenableArbitratorContextStats {
@@ -45,10 +48,16 @@ class SparkListenableArbitratorContext {
   void installAutomaticReclaimSpill();
   SparkListenableArbitratorContextStats stats() const;
 
+  static void initializeExecutionMemoryPool(
+      int64_t memoryLimitBytes,
+      int64_t minMemoryMaxWaitMs,
+      int32_t maxTaskNumber);
+
  private:
   int64_t spillFixedSize(int64_t size);
 
   SparkListenableArbitratorContextOptions options_;
+  mutable std::mutex statsMutex_;
   SparkListenableArbitratorContextStats stats_;
   std::shared_ptr<sparksql::TaskMemoryManager> taskMemoryManager_;
   sparksql::BoltMemoryManagerHolder* holder_{nullptr};
