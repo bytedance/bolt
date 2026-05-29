@@ -149,7 +149,7 @@ struct PinnedRunBlock {
 };
 
 struct RunCursor {
-  const SortedRun* run{nullptr};
+  SortedRun* run{nullptr};
   BufferManager* manager{nullptr};
   size_t runIndex{0};
   size_t blockIndex{0};
@@ -157,7 +157,7 @@ struct RunCursor {
   PinnedRunBlock pinned;
 
   RunCursor(
-      const SortedRun& sortedRun,
+      SortedRun& sortedRun,
       BufferManager& bufferManager,
       size_t index)
       : run(&sortedRun), manager(&bufferManager), runIndex(index) {}
@@ -168,7 +168,9 @@ struct RunCursor {
       return false;
     }
     const auto currentBlockIndex = blockIndex++;
-    const auto& block = run->blocks[currentBlockIndex];
+    auto& block = run->blocks[currentBlockIndex];
+    BOLT_CHECK_NOT_NULL(block.block);
+    auto blockHandle = std::move(block.block);
     auto before = manager->stats();
     VLOG(1) << "BM sort verify pin begin"
             << " run_index=" << runIndex
@@ -181,7 +183,7 @@ struct RunCursor {
             << " prefetching_bytes=" << before.prefetchingBytes
             << " reclaim_count=" << before.reclaimCount
             << " reclaimed_bytes=" << before.reclaimedBytes;
-    pinned.handle = manager->Pin(block.block);
+    pinned.handle = manager->Pin(blockHandle);
     auto after = manager->stats();
     VLOG(1) << "BM sort verify pin end"
             << " run_index=" << runIndex
@@ -418,7 +420,7 @@ void finalizeActiveRun(ActiveRun& run) {
 
 bool verifySortedRuns(
     BufferManager& manager,
-    const std::vector<SortedRun>& runs,
+    std::vector<SortedRun>& runs,
     uint64_t expectedValues) {
   struct HeapEntry {
     uint64_t value{0};
