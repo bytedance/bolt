@@ -36,6 +36,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 
   BufferHandle Allocate(
       size_t size,
+      MemoryTag tag,
       std::shared_ptr<BlockHandle>* block = nullptr);
 
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
@@ -54,6 +55,24 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 后续 `Pin`、`BatchPin` 或 `Prefetch` 使用。该签名刻意贴近 DuckDB
 `BufferManager::Allocate`：返回 `BufferHandle`，并通过可选 out-param 返回
 `BlockHandle`。
+
+`MemoryTag` 用来标识 block 的申请来源，便于后续 debug、日志和 fatal 诊断。
+第一版可以定义为轻量 enum，并提供 `toString(MemoryTag)`：
+
+```cpp
+enum class MemoryTag : uint8_t {
+  kUnknown,
+  kHashBuild,
+  kAggregation,
+  kSort,
+  kWindow,
+  kExchange,
+  kTesting,
+};
+```
+
+调用方应传入最贴近业务来源的 tag；无法分类时使用 `kUnknown`。`MemoryTag` 只做
+归因和诊断，不影响 reclaim 优先级、IO 优先级或 MemoryPool 记账。
 
 `BufferHandle` 内部强持有对应 `BlockHandle`。如果调用方不传 `block`，该 block
 只通过返回的 `BufferHandle` 存活；handle 析构后如果没有其它引用，block 可以
@@ -137,6 +156,9 @@ BM 始终单线程使用，可以改为 `threadSafe=false` 以减少 `MemoryPool
 
 `BufferHandle` 不可 copy。move 构造和 move 赋值转移 pin 所有权。
 `Destroy()` 是幂等的。`Ptr()` 返回 resident payload 指针，并检查 handle 有效。
+
+`BlockMemory` 保存 `MemoryTag`。所有和 block 相关的 debug 日志、FATAL 诊断、
+测试可观测输出都应包含该 tag。
 
 `BufferHandle` 持有 `std::weak_ptr<BufferManager>` 用于诊断。weak owner 不是为了
 支持 late destruction；它的价值是让“BM 已经销毁但 handle 仍然存活”的生命周期
@@ -376,14 +398,15 @@ manager-owned file allocator 也不是线程安全对象，只在相同的单线
   中二次尝试删除底层文件。
 - 内部状态不变量违规必须走 FATAL，不能用会抛异常的检查宏。
 
-FATAL 诊断至少包含 block id、block size、当前状态、pin count、extent id、fd、
-offset、操作名和底层错误码中可获得的信息。
+FATAL 诊断至少包含 block id、block size、memory tag、当前状态、pin count、
+extent id、fd、offset、操作名和底层错误码中可获得的信息。
 
 ## 测试
 
 单测需要覆盖：
 
-- `Allocate` 返回 pinned handle，并写出可选 `BlockHandle`。
+- `Allocate` 记录调用方传入的 `MemoryTag`，返回 pinned handle，并写出可选
+  `BlockHandle`。
 - `BufferHandle` move-only，且只 unpin 一次。
 - `Pin` resident block 时不触发 IO。
 - `Pin` spilled block 时读回 payload，并释放旧 file extent。
@@ -404,6 +427,7 @@ offset、操作名和底层错误码中可获得的信息。
 - Eviction queue stale entry 通过 sequence number 跳过。
 - `BufferHandle` late destruction 触发 FATAL。
 - `OwnedFileExtent` 析构释放 extent 失败触发 FATAL。
+- FATAL 诊断信息包含 `MemoryTag`。
 - file extent 在 pin、reclaim、destruction 路径中只释放一次。
 - `BufferManagerReclaimer::reclaimableBytes` 跟随 `unpinnedResidentBytes_`。
 - debug single-thread/reentrancy guard 能发现违反 BM 串行化约束的调用。
