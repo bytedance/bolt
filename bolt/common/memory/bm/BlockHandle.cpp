@@ -1,11 +1,20 @@
 #include "bolt/common/memory/bm/BlockHandle.h"
 
+#include "bolt/common/memory/bm/BufferManager.h"
+
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
 
 BlockMemory::BlockMemory(uint64_t id, size_t size, MemoryTag tag)
     : id(id), size(size), tag(tag) {}
+
+BlockMemory::~BlockMemory() noexcept {
+  auto manager = owner.lock();
+  if (manager) {
+    manager->OnBlockMemoryDestroy(*this);
+  }
+}
 
 BlockHandle::BlockHandle(std::shared_ptr<BlockMemory> memory)
     : memory_(std::move(memory)) {}

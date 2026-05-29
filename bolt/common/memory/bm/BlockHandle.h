@@ -11,6 +11,8 @@
 
 namespace bytedance::bolt::memory::bm {
 
+class BufferManager;
+
 enum class BlockMemoryState : uint8_t {
   kInMemory,
   kSpilled,
@@ -20,10 +22,12 @@ enum class BlockMemoryState : uint8_t {
 
 struct BlockMemory {
   BlockMemory(uint64_t id, size_t size, MemoryTag tag);
+  ~BlockMemory() noexcept;
 
   uint64_t id;
   size_t size;
   MemoryTag tag;
+  std::weak_ptr<BufferManager> owner;
   BlockMemoryState state{BlockMemoryState::kInMemory};
   uint32_t pinCount{0};
   uint64_t evictionSequence{0};
