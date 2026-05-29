@@ -31,6 +31,7 @@ env:
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
   CI_NUM_THREADS: "16"
+  CI_NUM_LINK_JOB: "12"
   IN_CI: '1'
 
 jobs:
@@ -114,3 +115,43 @@ jobs:
         run: |
           echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
           make ${{ matrix.build_target }}
+
+  gluten-cpp-build:
+    needs: changes
+    if: ${{ needs.changes.outputs.source_code == 'true' }}
+    runs-on: [ self-hosted, medium ]
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+      options: --user root --init
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - id: env-setup
+      uses: ./.github/actions/bolt-build-base
+
+    - name: Build bolt
+      run: |
+        make release_spark
+
+    - name: Export bolt to conan server
+      run: |
+        make export_release
+
+    - name: Checkout gluten
+      uses: actions/checkout@v6
+      with:
+        repository: WangGuangxin/gluten
+        ref: add_bolt_backend
+        path: gluten-src
+
+    - name: Build gluten
+      run: |
+        cd gluten-src && make release
