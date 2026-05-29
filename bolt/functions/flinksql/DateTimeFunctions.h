@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <string>
 namespace bytedance::bolt::functions::flinksql {
 
 template <typename T>
@@ -145,6 +146,39 @@ struct FlinkFromUnixtimeFunction : public sparksql::FromUnixtimeFunction<T> {
       const arg_type<Varchar>& timeZoneString) {
     return sparksql::FromUnixtimeFunction<T>::call(
         result, unixtime == LongMinValue ? 0 : unixtime, formatString);
+  }
+};
+
+template <typename T>
+struct FlinkTimestampToStringV2Function {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Varchar>& result,
+      const arg_type<Timestamp>& timestamp,
+      const arg_type<int32_t>& precision) {
+    int32_t trimmedPrecision = precision;
+    if (trimmedPrecision < 0) {
+      trimmedPrecision = 0;
+    } else if (trimmedPrecision > 9) {
+      trimmedPrecision = 9;
+    }
+    TimestampToStringOptions options;
+    options.precision = TimestampToStringOptions::Precision::kNanoseconds;
+    options.zeroPaddingYear = true;
+    options.dateTimeSeparator = ' ';
+    auto output = timestamp.toString(options);
+    auto dot = output.find('.');
+    if (dot != std::string::npos) {
+      while (output.size() - dot - 1 > static_cast<size_t>(trimmedPrecision) &&
+             output.back() == '0') {
+        output.pop_back();
+      }
+      if (trimmedPrecision == 0 && output.back() == '.') {
+        output.pop_back();
+      }
+    }
+    result.copy_from(output);
   }
 };
 
