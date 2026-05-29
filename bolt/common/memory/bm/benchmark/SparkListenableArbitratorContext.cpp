@@ -5,6 +5,8 @@
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/common/memory/sparksql/MemoryTarget.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -42,7 +44,11 @@ class AutomaticReclaimSpiller final : public sparksql::Spiller {
     if (size <= 0) {
       return 0;
     }
-    return spill_(size);
+    VLOG(1) << "BM sort automatic spiller invoked, requested_bytes=" << size;
+    const auto reclaimed = spill_(size);
+    VLOG(1) << "BM sort automatic spiller finished, requested_bytes=" << size
+            << ", returned_bytes=" << reclaimed;
+    return reclaimed;
   }
 
   const std::set<sparksql::SpillerPhase>& applicablePhases() override {
@@ -102,6 +108,7 @@ void SparkListenableArbitratorContext::installAutomaticReclaimSpill() {
         return spillFixedSize(size);
       });
   holder_->appendSpiller(spiller);
+  VLOG(1) << "BM sort installed automatic reclaim spiller";
 }
 
 SparkListenableArbitratorContextStats
@@ -122,15 +129,23 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
 
   auto manager = holder_->getManager();
   BOLT_CHECK_NOT_NULL(manager);
+  VLOG(1) << "BM sort spillFixedSize begin, requested_bytes=" << size
+          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
   const auto shrunken = manager->shrink(size);
   stats_.automaticSpillShrunkenBytes += static_cast<uint64_t>(shrunken);
   const auto remaining = size - shrunken;
+  VLOG(1) << "BM sort spillFixedSize after shrink, requested_bytes=" << size
+          << ", shrunken_bytes=" << shrunken
+          << ", remaining_bytes=" << remaining
+          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
   if (remaining <= 0) {
     stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
     stats_.automaticSpillTimeUs +=
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start)
             .count();
+    VLOG(1) << "BM sort spillFixedSize end after shrink, returned_bytes="
+            << shrunken;
     return shrunken;
   }
 
@@ -145,6 +160,11 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - start)
           .count();
+  VLOG(1) << "BM sort spillFixedSize end, requested_bytes=" << size
+          << ", shrunken_bytes=" << shrunken
+          << ", reclaimed_bytes=" << reclaimed
+          << ", returned_bytes=" << returned
+          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
   return returned;
 }
 
