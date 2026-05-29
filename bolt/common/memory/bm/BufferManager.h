@@ -5,13 +5,15 @@
 #include "bolt/common/memory/bm/file/FileBlockAllocator.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
-#include <deque>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace bytedance::bolt::memory::bm {
+
+class BufferManagerIo;
+class EvictionQueue;
 
 struct BufferManagerConfig {
   std::string poolName;
@@ -34,6 +36,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   static std::shared_ptr<BufferManager> Create(
       MemoryPool& parent,
       BufferManagerConfig config);
+  ~BufferManager();
 
   BufferHandle Allocate(
       size_t size,
@@ -49,11 +52,6 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   BufferManagerStats stats() const;
 
  private:
-  struct EvictionEntry {
-    std::weak_ptr<BlockMemory> block;
-    uint64_t sequence{0};
-  };
-
   explicit BufferManager(BufferManagerConfig config);
 
   void Initialize(MemoryPool& parent);
@@ -69,16 +67,16 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 
   std::shared_ptr<FileBlockAllocator> allocator_;
   std::shared_ptr<MemoryPool> pool_;
+  std::unique_ptr<BufferManagerIo> io_;
   BufferManagerConfig config_;
   uint64_t nextBlockId_{1};
   uint64_t unpinnedResidentBytes_{0};
   uint64_t reclaimedBytes_{0};
   uint64_t prefetchSubmitFailures_{0};
   uint64_t prefetchIoFailures_{0};
-  std::deque<EvictionEntry> evictionQueue_;
+  std::unique_ptr<EvictionQueue> evictionQueue_;
 
   friend class BufferHandle;
-  friend class BufferManagerReclaimer;
 };
 
 } // namespace bytedance::bolt::memory::bm

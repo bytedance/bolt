@@ -1,5 +1,5 @@
-#include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
 
 #include <array>
@@ -18,9 +18,9 @@ class BufferManagerTest : public testing::Test {
  protected:
   void SetUp() override {
     root_ = manager_.addRootPool(
-        fmt::format("bm-root-{}", testing::UnitTest::GetInstance()
-                                      ->current_test_info()
-                                      ->name()),
+        fmt::format(
+            "bm-root-{}",
+            testing::UnitTest::GetInstance()->current_test_info()->name()),
         kMaxMemory,
         MemoryReclaimer::create());
   }
@@ -126,6 +126,38 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   auto repin = bm->Pin(block);
   EXPECT_EQ(9, repin.Ptr()[0]);
   EXPECT_EQ(9, repin.Ptr()[4095]);
+}
+
+TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
+  auto bm = makeBufferManager("reclaim-submit-failure");
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    std::memset(handle.Ptr(), 13, block->size());
+  }
+
+  try {
+    (void)bm->ReclaimForTest(4096);
+  } catch (const std::exception& e) {
+    if (!IsIoUringUnavailable(e)) {
+      throw;
+    }
+    EXPECT_EQ(4096, bm->reclaimableBytes());
+
+    try {
+      (void)bm->ReclaimForTest(4096);
+    } catch (const std::exception& second) {
+      if (!IsIoUringUnavailable(second)) {
+        throw;
+      }
+      auto repin = bm->Pin(block);
+      EXPECT_EQ(13, repin.Ptr()[0]);
+      return;
+    }
+    FAIL() << "expected unavailable scheduler to retry reclaim submission";
+  }
+
+  GTEST_SKIP() << "Disk IO scheduler is available; failure path not exercised";
 }
 
 TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {
