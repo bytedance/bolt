@@ -154,4 +154,5 @@ jobs:
 
     - name: Build gluten
       run: |
+        export JAVA_HOME=/usr/lib/jvm/java-8-openjdk
         cd gluten-src && make release
