@@ -164,7 +164,7 @@ struct PinnedRunBlock {
 };
 
 struct RunCursor {
-  const SortedRun* run{nullptr};
+  SortedRun* run{nullptr};
   BufferManager* manager{nullptr};
   size_t workerIndex{0};
   size_t runIndex{0};
@@ -173,7 +173,7 @@ struct RunCursor {
   PinnedRunBlock pinned;
 
   RunCursor(
-      const SortedRun& sortedRun,
+      SortedRun& sortedRun,
       BufferManager& bufferManager,
       size_t worker,
       size_t index)
@@ -188,13 +188,15 @@ struct RunCursor {
       return false;
     }
     const auto currentBlockIndex = blockIndex++;
-    const auto& block = run->blocks[currentBlockIndex];
+    auto& block = run->blocks[currentBlockIndex];
+    BOLT_CHECK_NOT_NULL(block.block);
+    auto blockHandle = std::move(block.block);
     VLOG(1) << "BM parallel sort verify pin begin"
             << " worker=" << workerIndex
             << " run_index=" << runIndex
             << " block_index=" << currentBlockIndex
             << " run_blocks=" << run->blocks.size();
-    pinned.handle = manager->Pin(block.block);
+    pinned.handle = manager->Pin(blockHandle);
     pinned.values = reinterpret_cast<uint64_t*>(pinned.handle.Ptr());
     pinned.count = block.values;
     pinned.index = 0;
@@ -437,7 +439,7 @@ size_t countRunBlocks(const std::vector<SortedRun>& runs) {
 bool verifySortedRuns(
     size_t workerIndex,
     BufferManager& manager,
-    const std::vector<SortedRun>& runs,
+    std::vector<SortedRun>& runs,
     uint64_t expectedValues) {
   struct HeapEntry {
     uint64_t value{0};
