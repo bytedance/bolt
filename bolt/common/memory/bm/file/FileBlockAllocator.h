@@ -16,7 +16,7 @@ class FileBlockAllocator {
   virtual FileFreeResult Free(const FileExtent& extent) = 0;
 };
 
-std::unique_ptr<FileBlockAllocator> CreateFileBlockAllocator(
+std::shared_ptr<FileBlockAllocator> CreateFileBlockAllocator(
     FileBlockAllocatorConfig config);
 
 } // namespace bytedance::bolt::memory::bm
