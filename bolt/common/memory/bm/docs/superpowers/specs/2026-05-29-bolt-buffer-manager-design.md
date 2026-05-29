@@ -62,7 +62,8 @@ file allocation 失败和 IO 失败沿用 Bolt 现有异常路径。这和 `Memo
 
 `BatchPin` 对调用方表现为 all-or-throw：如果所有 block 都 pin 成功，返回顺序
 和输入顺序一致的 handles；如果任意 block pin 失败，函数抛异常，调用过程中
-已经创建的 handles 会在栈展开时自动析构并 unpin。
+已经创建的 handles 会在栈展开时自动析构并 unpin。所有 handle 析构路径都是
+`noexcept`，栈展开期间不会再次抛异常。
 
 `Prefetch` 是 fire-and-forget hint。它不返回 handle，不增加 pin count，也不
 保证 block 在后续 `Pin` 前仍然 resident。
@@ -135,7 +136,9 @@ spill 文件位置用 `OwnedFileExtent` RAII helper 包装。BM 内部持有
 `std::shared_ptr<FileBlockAllocator>`；`OwnedFileExtent` 保存 `FileExtent` 和
 `std::weak_ptr<FileBlockAllocator>`。析构时 lock allocator 并调用
 `Free(extent)`，但析构路径必须 `noexcept`，因此不能抛异常。析构路径如果发现
-allocator 已失效或 `Free` 返回非 ok，只记录严重日志并放弃继续处理。
+allocator 已失效或 `Free` 返回非 ok，必须走不抛异常的 fatal/abort 路径。析构
+期间的 extent 释放失败表示 allocator 生命周期或元数据不变量被破坏，继续运行会
+隐藏文件空间泄漏或 double-free 风险。
 
 显式释放路径必须检查 `FileFreeResult`。例如 `Pin` 读回成功后释放旧 extent，
 如果 `Free` 返回非 ok，则触发 fatal/abort。此时不回滚已经安装好的 payload；旧
@@ -390,8 +393,8 @@ manager-owned file allocator 也不是线程安全对象，只在相同的单线
 
 内存分配失败和内存仲裁失败使用现有 `MemoryPool` 异常。
 
-file allocator 错误转换成 Bolt 异常，并携带 file error code 和 native errno
-信息。
+普通 file allocator 错误转换成 Bolt 异常，并携带 file error code 和 native
+errno 信息。会破坏 BM 状态不变量的 file extent 释放失败走 fatal/abort。
 
 IO scheduler 错误转换成 Bolt 异常，并携带 IO error code 和 native errno 信息。
 
@@ -400,7 +403,8 @@ in-memory payload，再抛异常。
 
 显式释放旧 extent 时，如果 `FileBlockAllocator::Free` 返回非 ok，`Pin` /
 prefetch harvest 路径走 fatal/abort；其它显式释放路径按调用点语义转换成 Bolt
-异常或 fatal。析构路径中调用 `Free` 时不能抛异常；失败只记录严重日志。
+异常或 fatal。析构路径中调用 `Free` 时不能抛异常；失败必须走不抛异常的
+fatal/abort 路径。
 
 析构策略统一为：
 
@@ -408,9 +412,10 @@ prefetch harvest 路径走 fatal/abort；其它显式释放路径按调用点语
   已失效、pin count 异常或 block 状态不满足 unpin 条件，走 fatal/abort 诊断，
   不抛异常。
 - `OwnedFileExtent::~OwnedFileExtent() noexcept`：best-effort 调用
-  `Free(extent)`。如果 allocator 已失效或 `Free` 返回非 ok，记录 `LOG(ERROR)`
-  并允许该 extent 泄漏；不在析构中抛异常，也不在析构中二次尝试删除底层文件。
-- 显式释放路径承担错误报告责任，失败时抛 Bolt 异常。
+  `Free(extent)`。如果 allocator 已失效或 `Free` 返回非 ok，走 fatal/abort
+  诊断；不在析构中抛异常，也不在析构中二次尝试删除底层文件。
+- 显式释放路径承担错误报告责任；失败时按调用点语义抛 Bolt 异常或走
+  fatal/abort。
 
 该异常会沿 `MemoryReclaimer::reclaim` 向上传播给 memory arbitrator。v1 不在
 BM 内部重试 IO，也不吞掉 reclaim write 失败；arbitrator 对该异常是让当前
@@ -418,7 +423,7 @@ reclaimer 本轮失败还是让整个仲裁失败，取决于现有 memory arbit
 取舍是有意的：v1 优先保持数据状态正确和错误可见，后续可以在
 `BufferManagerConfig` 中增加 retry policy。
 
-内部状态不变量违规使用 `BOLT_CHECK`。
+内部状态不变量违规必须走不抛异常的 fatal/abort 路径，不能用会抛异常的检查宏。
 
 ## 测试
 
@@ -444,7 +449,7 @@ reclaimer 本轮失败还是让整个仲裁失败，取决于现有 memory arbit
 - Eviction queue stale entry 通过 sequence number 跳过。
 - Reclaim 写 IO 失败时恢复 payload，并保持 block resident。
 - `Pin` / prefetch harvest 读回成功后释放旧 extent 失败会触发 fatal 诊断；
-  析构释放 extent 失败不抛。
+  析构释放 extent 失败走 fatal/abort 且不抛异常。
 - `BufferHandle` late destruction 触发 fatal 诊断。
 - file extent 在 pin、reclaim、destruction 路径中只释放一次。
 - `BufferManagerReclaimer::reclaimableBytes` 跟随 `unpinnedResidentBytes_`。
