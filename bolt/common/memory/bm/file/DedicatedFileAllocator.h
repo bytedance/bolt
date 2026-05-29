@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -21,10 +20,10 @@ class DedicatedFileAllocator {
 
   FileAllocation Allocate(int64_t requested_size, uint64_t extent_id);
   FileFreeResult Free(const ExtentRecord& record);
+  void RemoveAllFiles();
 
  private:
   const std::string directory_;
-  std::mutex mutex_;
   std::unordered_map<uint64_t, OwnedFile> files_;
 };
 

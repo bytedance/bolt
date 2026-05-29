@@ -21,7 +21,6 @@ BucketBlockAllocator::BucketBlockAllocator(
       max_open_files_(max_open_files) {}
 
 BucketBlockAllocator::~BucketBlockAllocator() {
-  std::lock_guard<std::mutex> lock(mutex_);
   for (auto& file : files_) {
     file->file.CloseAndRemove();
   }
@@ -33,14 +32,13 @@ FileAllocation BucketBlockAllocator::Allocate(
     uint64_t extent_id) {
   FileAllocation allocation;
 
-  std::lock_guard<std::mutex> lock(mutex_);
-  BucketFile* file = FindReusableFileLocked();
+  BucketFile* file = FindReusableFile();
   if (file == nullptr) {
     if (files_.size() >= max_open_files_) {
       allocation.result.error = FileErrorCode::kTooManyOpenFiles;
       return allocation;
     }
-    auto created = CreateFileLocked();
+    auto created = CreateFile();
     if (!created.ok()) {
       allocation.result = created;
       return allocation;
@@ -72,8 +70,7 @@ FileAllocation BucketBlockAllocator::Allocate(
 }
 
 FileFreeResult BucketBlockAllocator::Free(const ExtentRecord& record) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto* file = FindFileByIndexLocked(record.file_index);
+  auto* file = FindFileByIndex(record.file_index);
   if (file == nullptr || file->active_blocks == 0) {
     FileFreeResult result;
     result.error = FileErrorCode::kInvalidExtent;
@@ -84,13 +81,12 @@ FileFreeResult BucketBlockAllocator::Free(const ExtentRecord& record) {
   --file->active_blocks;
 
   if (file->active_blocks == 0) {
-    DeleteFileLocked(record.file_index);
+    DeleteFile(record.file_index);
   }
   return FileFreeResult{};
 }
 
-BucketBlockAllocator::BucketFile*
-BucketBlockAllocator::FindReusableFileLocked() {
+BucketBlockAllocator::BucketFile* BucketBlockAllocator::FindReusableFile() {
   for (auto& file : files_) {
     if (!file->free_offsets.empty() ||
         file->next_offset + bucket_size_ <= file_size_limit_bytes_) {
@@ -100,7 +96,7 @@ BucketBlockAllocator::FindReusableFileLocked() {
   return nullptr;
 }
 
-FileAllocateResult BucketBlockAllocator::CreateFileLocked() {
+FileAllocateResult BucketBlockAllocator::CreateFile() {
   const auto file_index = next_file_index_++;
   const auto path = MakeBucketFilePath(directory_, bucket_size_, file_index);
   const int fd =
@@ -120,7 +116,7 @@ FileAllocateResult BucketBlockAllocator::CreateFileLocked() {
 }
 
 BucketBlockAllocator::BucketFile*
-BucketBlockAllocator::FindFileByIndexLocked(uint64_t file_index) {
+BucketBlockAllocator::FindFileByIndex(uint64_t file_index) {
   for (auto& file : files_) {
     if (file->file_index == file_index) {
       return file.get();
@@ -129,7 +125,7 @@ BucketBlockAllocator::FindFileByIndexLocked(uint64_t file_index) {
   return nullptr;
 }
 
-void BucketBlockAllocator::DeleteFileLocked(uint64_t file_index) {
+void BucketBlockAllocator::DeleteFile(uint64_t file_index) {
   auto it = std::remove_if(
       files_.begin(),
       files_.end(),

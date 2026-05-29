@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <unordered_map>
 
 #include "bolt/common/memory/bm/file/FileBlockAllocatorTypes.h"
@@ -27,7 +26,6 @@ class ExtentRegistry {
   FileErrorCode Take(uint64_t extent_id, ExtentRecord* record);
 
  private:
-  std::mutex mutex_;
   uint64_t next_extent_id_{1};
   std::unordered_map<uint64_t, ExtentRecord> records_;
 };

@@ -13,7 +13,10 @@ DedicatedFileAllocator::DedicatedFileAllocator(std::string directory)
     : directory_(std::move(directory)) {}
 
 DedicatedFileAllocator::~DedicatedFileAllocator() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  RemoveAllFiles();
+}
+
+void DedicatedFileAllocator::RemoveAllFiles() {
   for (auto& [_, file] : files_) {
     file.CloseAndRemove();
   }
@@ -41,10 +44,7 @@ FileAllocation DedicatedFileAllocator::Allocate(
   extent.kind = FileExtentKind::kDedicated;
   extent.id = extent_id;
 
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    files_.emplace(extent_id, OwnedFile(path, fd));
-  }
+  files_.emplace(extent_id, OwnedFile(path, fd));
 
   allocation.result.extent = extent;
   allocation.record.extent = extent;
@@ -53,17 +53,14 @@ FileAllocation DedicatedFileAllocator::Allocate(
 
 FileFreeResult DedicatedFileAllocator::Free(const ExtentRecord& record) {
   OwnedFile file;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto it = files_.find(record.extent.id);
-    if (it == files_.end()) {
-      FileFreeResult result;
-      result.error = FileErrorCode::kInvalidExtent;
-      return result;
-    }
-    file = std::move(it->second);
-    files_.erase(it);
+  const auto it = files_.find(record.extent.id);
+  if (it == files_.end()) {
+    FileFreeResult result;
+    result.error = FileErrorCode::kInvalidExtent;
+    return result;
   }
+  file = std::move(it->second);
+  files_.erase(it);
 
   file.CloseAndRemove();
   return FileFreeResult{};

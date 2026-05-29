@@ -6,6 +6,7 @@
 #include "bolt/common/memory/bm/file/ExtentRegistry.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace bytedance::bolt::memory::bm {
@@ -28,6 +29,8 @@ class FileBlockAllocatorImpl : public FileBlockAllocator {
   FileFreeResult FreeDedicated(const ExtentRecord& record);
 
   FileBlockAllocatorConfig config_;
+  std::string allocator_id_;
+  std::string directory_;
   std::vector<std::unique_ptr<BucketBlockAllocator>> buckets_;
   DedicatedFileAllocator dedicated_allocator_;
   ExtentRegistry registry_;
