@@ -22,7 +22,7 @@ struct FileExtent {
 
 using namespace bytedance::bolt::memory::bm;
 
-std::unique_ptr<FileBlockAllocator> CreateAllocator() {
+std::shared_ptr<FileBlockAllocator> CreateAllocator() {
   FileBlockAllocatorConfig config;
   config.directory = "/tmp/bolt-bm-file";
   config.bucket_sizes = {32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024};
