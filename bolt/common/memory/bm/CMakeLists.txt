@@ -6,11 +6,11 @@ add_library(
   BlockHandle.cpp
   BufferHandle.cpp
   BufferManager.cpp
-  BufferManagerIo.cpp
   BufferManagerReclaimer.cpp
   EvictionQueue.cpp
   MemoryTag.cpp
   OwnedFileExtent.cpp
+  SpillStore.cpp
 )
 
 target_compile_features(bolt_memory_bm PUBLIC cxx_std_20)

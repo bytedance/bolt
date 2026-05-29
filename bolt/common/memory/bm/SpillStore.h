@@ -10,11 +10,9 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class BufferManagerIo {
+class SpillStore {
  public:
-  BufferManagerIo(
-      std::shared_ptr<FileBlockAllocator> allocator,
-      MemoryPool* pool);
+  SpillStore(std::shared_ptr<FileBlockAllocator> allocator, MemoryPool* pool);
 
   FileAllocateResult AllocateExtent(size_t size);
   FileFreeResult FreeExtent(const FileExtent& extent);

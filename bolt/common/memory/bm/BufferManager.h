@@ -12,8 +12,8 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class BufferManagerIo;
 class EvictionQueue;
+class SpillStore;
 
 struct BufferManagerConfig {
   std::string poolName;
@@ -67,7 +67,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 
   std::shared_ptr<FileBlockAllocator> allocator_;
   std::shared_ptr<MemoryPool> pool_;
-  std::unique_ptr<BufferManagerIo> io_;
+  std::unique_ptr<SpillStore> spillStore_;
   BufferManagerConfig config_;
   uint64_t nextBlockId_{1};
   uint64_t unpinnedResidentBytes_{0};

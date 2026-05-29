@@ -1,9 +1,9 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/BufferManagerIo.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
+#include "bolt/common/memory/bm/SpillStore.h"
 
 #include <glog/logging.h>
 
@@ -61,7 +61,7 @@ void BufferManager::Initialize(MemoryPool& parent) {
   // instances this can be optimized to addLeafChild(name, false) later.
   pool_ = parent.addLeafChild(config_.poolName);
   BOLT_CHECK_NOT_NULL(pool_);
-  io_ = std::make_unique<BufferManagerIo>(allocator_, pool_.get());
+  spillStore_ = std::make_unique<SpillStore>(allocator_, pool_.get());
   pool_->setReclaimer(
       std::make_unique<BufferManagerReclaimer>(weak_from_this()));
 }
@@ -250,7 +250,7 @@ void BufferManager::SubmitRead(
   BOLT_CHECK(memory.extent.has_value());
 
   memory.prefetchFuture =
-      io_->SubmitRead(*memory.extent, memory.size, priority);
+      spillStore_->SubmitRead(*memory.extent, memory.size, priority);
   memory.state = BlockMemoryState::kPrefetching;
 }
 
@@ -261,7 +261,7 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   BOLT_CHECK(memory->payload.has_value());
   BOLT_CHECK_GE(unpinnedResidentBytes_, memory->size);
 
-  auto allocation = io_->AllocateExtent(memory->size);
+  auto allocation = spillStore_->AllocateExtent(memory->size);
   if (!allocation.ok()) {
     ThrowFileAllocateFailure(allocation, memory->id);
   }
@@ -273,9 +273,10 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
 
   IoResult result;
   try {
-    result = io_->Write(allocation.extent, payload, config_.writePriority);
+    result =
+        spillStore_->Write(allocation.extent, payload, config_.writePriority);
   } catch (...) {
-    auto freeResult = io_->FreeExtent(allocation.extent);
+    auto freeResult = spillStore_->FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
       LOG(FATAL)
           << "BM failed to free extent after spill write exception, block_id="
@@ -294,7 +295,7 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   }
 
   if (!result.ok()) {
-    auto freeResult = io_->FreeExtent(allocation.extent);
+    auto freeResult = spillStore_->FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
       LOG(FATAL)
           << "BM failed to free extent after failed spill write, block_id="
@@ -307,7 +308,7 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
     ThrowIoFailure("write", result, memory->id);
   }
 
-  memory->extent = io_->OwnExtent(allocation.extent);
+  memory->extent = spillStore_->OwnExtent(allocation.extent);
   memory->state = BlockMemoryState::kSpilled;
   ++memory->evictionSequence;
   return memory->size;
