@@ -1,29 +1,28 @@
-# Bolt BufferManager Design
+# Bolt BufferManager 设计
 
-## Scope
+## 范围
 
-This design adds a DuckDB-style BufferManager under
-`bolt/common/memory/bm`. The first version manages execution-time temporary
-blocks only. It does not manage persistent database pages, checkpoints, WAL, or
-page-cache semantics.
+在 `bolt/common/memory/bm` 下新增一个 DuckDB 风格的
+`BufferManager`。第一版只管理执行过程中的临时 block，不管理数据库持久化
+数据页、checkpoint、WAL 或 page cache。
 
-The manager owns resident block memory through a dedicated child
-`MemoryPool`, spills unpinned blocks through the existing BM file allocator, and
-uses the BM disk IO scheduler for read and write requests.
+`BufferManager` 通过专属 child `MemoryPool` 持有 resident block 内存，
+通过现有 BM file allocator spill 未被 pin 的 block，并通过 BM disk IO
+scheduler 处理读写请求。
 
-Out of scope for the first version:
+第一版不做以下能力：
 
-- `PinReadOnly` or const buffer handles.
-- `canDestroy` / destroyable blocks.
-- block resize / `ReAllocate`.
-- independent BufferManager memory limits.
-- queue purge or compaction.
-- thread-safe public API.
+- `PinReadOnly` 或 const buffer handle。
+- `canDestroy` / destroyable block。
+- block resize / `ReAllocate`。
+- BufferManager 自己的独立内存上限。
+- eviction queue purge 或 compact。
+- 线程安全 public API。
 
-## Public API
+## 公开 API
 
-`BufferManager` is created through a factory so handles can keep a weak owner
-reference for diagnostics:
+`BufferManager` 通过 factory 创建。这样 handle 可以保存 weak owner 引用，
+用于诊断生命周期问题：
 
 ```cpp
 class BufferManager : public std::enable_shared_from_this<BufferManager> {
@@ -47,26 +46,22 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 };
 ```
 
-`Allocate` follows DuckDB's model: it creates a block and returns an already
-pinned mutable `BufferHandle`. If `block` is not null, the created
-`BlockHandle` is written there for future `Pin`, `BatchPin`, or `Prefetch`
-calls.
+`Allocate` 采用 DuckDB 的语义：创建一个新 block，并返回已经 pinned 的
+mutable `BufferHandle`。如果 `block` 非空，创建出的 `BlockHandle` 会写入
+该参数，调用方后续可以用它调用 `Pin`、`BatchPin` 或 `Prefetch`。
 
-`Pin`, `BatchPin`, and `Allocate` return handles directly. Resource failures
-such as memory allocation failure, memory arbitration failure, file allocation
-failure, and IO failure use Bolt's existing exception path. This keeps memory
-failure behavior aligned with `MemoryPool` and DuckDB.
+`Allocate`、`Pin`、`BatchPin` 直接返回 handle。内存分配失败、内存仲裁失败、
+file allocation 失败和 IO 失败沿用 Bolt 现有异常路径。这和 `MemoryPool`
+以及 DuckDB 的行为一致。
 
-`BatchPin` is all-or-throw from the caller's perspective. If every block is
-pinned, it returns handles in input order. If any pin fails, the function throws
-and any handles already created during the call are destroyed during stack
-unwind.
+`BatchPin` 对调用方表现为 all-or-throw：如果所有 block 都 pin 成功，返回顺序
+和输入顺序一致的 handles；如果任意 block pin 失败，函数抛异常，调用过程中
+已经创建的 handles 会在栈展开时自动析构并 unpin。
 
-`Prefetch` is fire-and-forget. It does not return a handle, does not pin the
-block, and does not guarantee that the block remains resident until a later
-`Pin`.
+`Prefetch` 是 fire-and-forget hint。它不返回 handle，不增加 pin count，也不
+保证 block 在后续 `Pin` 前仍然 resident。
 
-## Configuration
+## 配置
 
 ```cpp
 struct BufferManagerConfig {
@@ -78,185 +73,179 @@ struct BufferManagerConfig {
 };
 ```
 
-The manager creates a leaf child pool from `parent` and installs a
-BufferManager memory reclaimer on that pool. The manager also creates and owns a
-dedicated `FileBlockAllocator` with `CreateFileBlockAllocator`.
+`BufferManager` 从传入的 parent pool 创建一个 leaf child pool，并在该 pool
+上安装 `BufferManagerReclaimer`。同时，`BufferManager` 通过
+`CreateFileBlockAllocator` 创建并持有一个专属 `FileBlockAllocator`。
 
-## Core Types
+## 核心类型
 
-The type model mirrors DuckDB:
+类型模型参考 DuckDB：
 
-- `BlockHandle`: caller-visible logical block handle. It wraps a
-  `std::shared_ptr<BlockMemory>`.
-- `BlockMemory`: internal state and resource owner for a block.
-- `BufferHandle`: move-only RAII pin guard. Destruction calls
-  `BufferManager::Unpin`.
+- `BlockHandle`：调用方可见的逻辑 block handle，内部包装
+  `std::shared_ptr<BlockMemory>`。
+- `BlockMemory`：block 的内部状态和资源所有者。
+- `BufferHandle`：move-only RAII pin guard，析构时调用
+  `BufferManager::Unpin`。
 
-`BufferHandle` is not copyable. Move construction and move assignment transfer
-the pin. `Destroy()` is idempotent. `Ptr()` returns the resident payload pointer
-and checks that the handle is valid.
+`BufferHandle` 不可 copy。move 构造和 move 赋值转移 pin 所有权。
+`Destroy()` 是幂等的。`Ptr()` 返回 resident payload 指针，并检查 handle
+有效。
 
-`BufferHandle` holds a `std::weak_ptr<BufferManager>` for diagnostics. On
-destruction it locks the manager and calls `Unpin`; lock failure is a
-`BOLT_CHECK` because handles must not outlive their manager.
+`BufferHandle` 持有 `std::weak_ptr<BufferManager>` 用于诊断。析构时 lock
+manager 并调用 `Unpin`；如果 lock 失败，触发 `BOLT_CHECK`，因为
+`BufferHandle` 不允许晚于创建它的 `BufferManager` 析构。
 
-## Resource Ownership
+## 资源所有权
 
-Resident payload memory is an `IoBuffer` allocated from the manager's leaf pool:
+resident payload 使用 manager 的 leaf pool 分配出来的 `IoBuffer`：
 
 ```cpp
 IoBuffer::allocateFromPool(pool_.get(), size)
 ```
 
-`BlockMemory` stores the resident payload as an `IoBuffer`, not as a raw
-pointer. When a payload is moved into an IO request, scheduler ownership keeps
-the memory alive until the `IoResult` is returned. If the `IoBuffer` is
-destroyed, its deleter frees memory back to the leaf pool.
+`BlockMemory` 保存 resident payload 时直接保存 `IoBuffer`，不保存裸指针。
+当 payload 被 move 到 IO request 中时，scheduler 会持有这段内存直到
+`IoResult` 返回。如果 `IoBuffer` 被销毁，它的 deleter 会把内存释放回 leaf
+pool。
 
-Spill locations are wrapped in an `OwnedFileExtent` RAII helper. The helper
-stores a `FileExtent` and a `std::weak_ptr<FileBlockAllocator>`. Destruction
-locks the allocator and calls `Free(extent)`. Lock failure or free failure is a
-`BOLT_CHECK`, because extents must not outlive their manager-owned allocator and
-each extent must be freed exactly once.
+spill 文件位置用 `OwnedFileExtent` RAII helper 包装。该 helper 保存
+`FileExtent` 和 `std::weak_ptr<FileBlockAllocator>`。析构时 lock allocator
+并调用 `Free(extent)`。如果 lock 失败或 `Free` 失败，触发 `BOLT_CHECK`：
+extent 不允许晚于 manager-owned allocator 存活，并且每个 extent 只能释放一次。
 
-`BufferManager` is expected to outlive all `BlockHandle`, `BlockMemory`, and
-`BufferHandle` objects it creates. Weak owner references exist to diagnose
-violations, not to make late destruction supported.
+`BufferManager` 应当比它创建的所有 `BlockHandle`、`BlockMemory` 和
+`BufferHandle` 存活更久。weak owner 引用只用于诊断生命周期违规，不表示支持
+late destruction。
 
-## Block States
+## Block 状态
 
-The first version uses three states:
+第一版只有三个状态：
 
 ```text
-IN_MEMORY    payload is resident in the leaf MemoryPool
-SPILLED      payload is not resident; a FileExtent holds the durable copy
-PREFETCHING  async read has been submitted; the old FileExtent is still held
+IN_MEMORY    payload resident 在 leaf MemoryPool 中
+SPILLED      payload 不在内存中；FileExtent 保存可恢复副本
+PREFETCHING  已提交异步 read；旧 FileExtent 仍然保留
 ```
 
-There is no dirty bit. Any in-memory unpinned block selected by reclaim is
-written to a fresh file extent.
+不维护 dirty bit。任何被 reclaim 选中的 in-memory unpinned block 都写入一个
+新的 file extent。
 
-### State Transitions
+### 状态转移
 
-`Allocate(size)`:
+`Allocate(size)`：
 
 ```text
 new block -> IN_MEMORY(pin_count = 1)
 ```
 
-`Unpin`:
+`Unpin`：
 
 ```text
 IN_MEMORY(pin_count > 1) -> IN_MEMORY(pin_count - 1)
-IN_MEMORY(pin_count == 1) -> IN_MEMORY(pin_count = 0), enqueue for eviction
+IN_MEMORY(pin_count == 1) -> IN_MEMORY(pin_count = 0), 加入 eviction queue
 ```
 
-`Pin`:
+`Pin`：
 
 ```text
 IN_MEMORY    -> pin_count++
-SPILLED      -> read extent synchronously, install payload, free extent,
-                pin_count = 1
-PREFETCHING  -> wait for prefetch future, install payload, free extent,
-                pin_count = 1
+SPILLED      -> 同步读取 extent，安装 payload，释放 extent，pin_count = 1
+PREFETCHING  -> 等待 prefetch future，安装 payload，释放 extent，pin_count = 1
 ```
 
-If prefetch IO fails and a later `Pin` observes that result, the block returns
-to `SPILLED` and `Pin` retries with a synchronous read. A synchronous read
-failure throws and leaves the block spilled.
+如果 prefetch IO 失败，后续 `Pin` 观察到该结果时，block 回到 `SPILLED`，
+然后 `Pin` 再发起一次同步 read。同步 read 失败会抛异常，并保持 block 为
+spilled。
 
-`Prefetch`:
+`Prefetch`：
 
 ```text
 SPILLED -> PREFETCHING(read future)
 ```
 
-`Prefetch` skips blocks already `IN_MEMORY` or `PREFETCHING`.
+`Prefetch` 遇到已经 `IN_MEMORY` 或 `PREFETCHING` 的 block 会跳过。
 
-`Reclaim`:
+`Reclaim`：
 
 ```text
-IN_MEMORY(pin_count = 0) -> write fresh extent synchronously
-                         -> SPILLED on success
+IN_MEMORY(pin_count = 0) -> 同步写入新 extent
+                         -> 成功后变为 SPILLED
 ```
 
-Reclaim skips `SPILLED`, pinned `IN_MEMORY`, and unfinished `PREFETCHING`
-blocks. Before selecting victims, reclaim performs non-blocking harvest of
-ready prefetch futures. A harvested block becomes `IN_MEMORY(pin_count = 0)`
-and can be reclaimed in the same pass.
+Reclaim 会跳过 `SPILLED`、pinned `IN_MEMORY` 和尚未完成的 `PREFETCHING`
+block。选择 victim 前，reclaim 会 non-blocking harvest 已 ready 的 prefetch
+future。成功 harvest 的 block 变为 `IN_MEMORY(pin_count = 0)`，本轮 reclaim
+可以继续 spill 它。
 
-## IO Integration
+## IO 集成
 
-All read and write requests use `DiskIoScheduler`.
+所有读写请求都使用 `DiskIoScheduler`。
 
-Readback from `SPILLED`:
+从 `SPILLED` 读回：
 
-1. Allocate an `IoBuffer` from the BM leaf pool.
-2. Submit a read request using the block's file extent.
-3. Wait for the future.
-4. On success, move `result.buffer` into `BlockMemory::payload`.
-5. Release the old `OwnedFileExtent`.
-6. On failure, let `result.buffer` release memory and throw.
+1. 从 BM leaf pool 分配一个 `IoBuffer`。
+2. 使用 block 的 file extent 提交 read request。
+3. 等待 future 完成。
+4. 成功后，把 `result.buffer` move 到 `BlockMemory::payload`。
+5. 释放旧 `OwnedFileExtent`。
+6. 失败时让 `result.buffer` 自动释放内存，然后抛异常。
 
-Spill from `IN_MEMORY`:
+从 `IN_MEMORY` spill：
 
-1. Allocate a fresh file extent for the block size.
-2. Move `BlockMemory::payload` into a write request.
-3. Submit and wait for the future.
-4. On success, keep the fresh `OwnedFileExtent`; let `result.buffer` release
-   memory back to the pool; set state to `SPILLED`.
-5. On failure, move `result.buffer` back into `BlockMemory::payload`, free the
-   fresh extent, keep state `IN_MEMORY`, and throw.
+1. 按 block size 分配一个新的 file extent。
+2. 把 `BlockMemory::payload` move 到 write request。
+3. 提交 IO 并等待 future。
+4. 成功后，保存新的 `OwnedFileExtent`；让 `result.buffer` 释放内存回 pool；
+   状态变为 `SPILLED`。
+5. 失败时，把 `result.buffer` move 回 `BlockMemory::payload`，释放新 extent，
+   保持 `IN_MEMORY`，然后抛异常。
 
-Prefetch:
+Prefetch：
 
-1. Allocate an `IoBuffer` from the BM leaf pool.
-2. Submit a read request.
-3. Store the returned future in the block and set state to `PREFETCHING`.
-4. Later `Pin` waits for the future, or reclaim/API entry points harvest it
-   with a zero-timeout readiness check.
+1. 从 BM leaf pool 分配一个 `IoBuffer`。
+2. 提交 read request。
+3. 把 returned future 存入 block，状态设为 `PREFETCHING`。
+4. 后续 `Pin` 等待该 future；或者 BM API / reclaim 入口用 zero-timeout
+   readiness check 做 non-blocking harvest。
 
-## File Allocator Integration
+## File Allocator 集成
 
-The manager owns one non-thread-safe `FileBlockAllocator` instance. This fits
-the first-version single-threaded BM contract.
+manager 持有一个非线程安全的 `FileBlockAllocator` 实例。这和第一版
+BufferManager 的单线程约束一致。
 
-Each spill write allocates a fresh extent. Pin or successful prefetch releases
-the old extent after the payload is installed in memory. This keeps the state
-model simple: when a block is resident, it has no retained disk copy.
+每次 spill write 都分配 fresh extent。`Pin` 或成功 prefetch 会在 payload
+安装进内存后释放旧 extent。这样状态模型保持简单：block resident 时不保留磁盘
+副本。
 
-## MemoryPool And Reclaim Integration
+## MemoryPool 和 Reclaim 集成
 
-`BufferManager::Create` creates a leaf child pool and installs a
-`BufferManagerReclaimer` using `setReclaimer`.
+`BufferManager::Create` 创建 leaf child pool，并通过 `setReclaimer` 安装
+`BufferManagerReclaimer`。
 
-The reclaimer holds a `std::weak_ptr<BufferManager>`. Normal use expects the
-manager to be alive. If the weak pointer has expired, the reclaimer reports no
-reclaimable memory.
+reclaimer 持有 `std::weak_ptr<BufferManager>`。正常生命周期下 manager 应当
+存在；如果 weak pointer 已过期，reclaimer 报告没有可 reclaim 内存。
 
-`reclaimableBytes()` returns `unpinnedResidentBytes_`. Under the single-thread
-contract this is effectively exact and avoids scanning the eviction queue.
+`reclaimableBytes()` 返回 `unpinnedResidentBytes_`。在单线程约束下，这个值
+基本精确，并且不需要扫描 eviction queue。
 
-`unpinnedResidentBytes_` updates:
+`unpinnedResidentBytes_` 更新规则：
 
-- `Allocate`: no change because the new block is pinned.
-- `Unpin` to zero in `IN_MEMORY`: add block size.
-- `Pin` of an unpinned `IN_MEMORY` block: subtract block size.
-- `Pin` from `SPILLED` or `PREFETCHING`: no change because the result is pinned.
-- ready prefetch harvest to `IN_MEMORY(pin_count = 0)`: add block size.
-- successful reclaim of an unpinned resident block: subtract block size.
+- `Allocate`：不变，因为新 block 是 pinned。
+- `Unpin` 到 0 且状态为 `IN_MEMORY`：加 block size。
+- `Pin` 一个 unpinned `IN_MEMORY` block：减 block size。
+- 从 `SPILLED` 或 `PREFETCHING` `Pin`：不变，因为读回结果直接是 pinned。
+- ready prefetch harvest 成 `IN_MEMORY(pin_count = 0)`：加 block size。
+- 成功 reclaim 一个 unpinned resident block：减 block size。
 
-`reclaim(targetBytes, maxWaitMs, stats)` drives the same logic as
-`ReclaimForTest`. IO or file errors throw. The returned reclaimed bytes are the
-actual resident bytes released by successful spills.
+`reclaim(targetBytes, maxWaitMs, stats)` 和 `ReclaimForTest` 使用同一套逻辑。
+IO 或 file 错误会抛异常。返回值是成功 spill 后实际释放的 resident bytes。
 
-`maxWaitMs` is accepted for interface compatibility. The first version may
-ignore it because spill writes are synchronous from the reclaimer's point of
-view.
+`maxWaitMs` 为了兼容 `MemoryReclaimer` 接口保留。第一版可以忽略它，因为从
+reclaimer 视角看 spill write 是同步等待的。
 
 ## Eviction Queue
 
-The eviction queue follows DuckDB's append-only sequence-number model:
+eviction queue 使用 DuckDB 的 append-only sequence-number 模型：
 
 ```cpp
 struct EvictionEntry {
@@ -265,70 +254,63 @@ struct EvictionEntry {
 };
 ```
 
-Each `BlockMemory` has an `evictionSequence`.
+每个 `BlockMemory` 有一个 `evictionSequence`。
 
-- `Unpin` to zero increments the sequence and appends an entry.
-- `Pin` increments the sequence, invalidating older queue entries.
-- Reclaim pops from the front and skips expired weak pointers, sequence
-  mismatches, pinned blocks, and non-`IN_MEMORY` blocks.
+- `Unpin` 到 0 时递增 sequence，并追加一个 entry。
+- `Pin` 时递增 sequence，使旧 queue entry 失效。
+- Reclaim 从队头 pop，跳过 expired weak pointer、sequence mismatch、pinned
+  block 和非 `IN_MEMORY` block。
 
-The first version does not implement DuckDB-style purge. Stale queue entries
-are removed naturally when reclaim scans the queue.
+第一版不实现 DuckDB 风格的 purge。stale queue entry 在 reclaim 扫描时自然
+清理。
 
-## Threading Model
+## 线程模型
 
-The first version is not a thread-safe BufferManager.
+第一版 `BufferManager` 不是线程安全组件。
 
-Callers must serialize all public calls on a manager instance, including
-`Allocate`, `Pin`, `BatchPin`, `Prefetch`, `ReclaimForTest`, and handle
-destruction. Production reclaim must enter through existing Bolt
-operator/task reclaim coordination so that BM reclaim does not race with normal
-BM API calls.
+调用方必须串行化同一个 manager 实例上的所有 public calls，包括 `Allocate`、
+`Pin`、`BatchPin`、`Prefetch`、`ReclaimForTest` 和 handle destruction。
+生产 reclaim 必须通过 Bolt 现有 operator/task reclaim 协议进入，保证 BM
+reclaim 不和正常 BM API 调用并发。
 
-`Prefetch` submits asynchronous IO, but background IO completion does not
-mutate BM state directly. State installation happens in `Pin` or in
-non-blocking harvest performed by BM API/reclaim entry points.
+`Prefetch` 会提交异步 IO，但后台 IO completion 不直接修改 BM 状态。状态安装
+发生在 `Pin` 中，或发生在 BM API / reclaim 入口做的 non-blocking harvest 中。
 
-The owned file allocator is also not thread-safe and is only used under the
-same single-threaded BM contract.
+manager-owned file allocator 也不是线程安全对象，只在相同的单线程 BM 约束下
+使用。
 
-## Error Handling
+## 错误处理
 
-Memory allocation and memory arbitration failures use existing `MemoryPool`
-exceptions.
+内存分配失败和内存仲裁失败使用现有 `MemoryPool` 异常。
 
-File allocator errors are converted to Bolt exceptions with the file error code
-and native errno where available.
+file allocator 错误转换成 Bolt 异常，并携带 file error code 和 native errno
+信息。
 
-IO scheduler errors are converted to Bolt exceptions with the IO error code and
-native errno where available.
+IO scheduler 错误转换成 Bolt 异常，并携带 IO error code 和 native errno 信息。
 
-Reclaim write failure preserves the in-memory payload by moving the returned
-`IoBuffer` back into the block before throwing.
+reclaim write 失败时，必须先把返回的 `IoBuffer` move 回 block，恢复
+in-memory payload，再抛异常。
 
-Invalid internal states use `BOLT_CHECK`.
+内部状态不变量违规使用 `BOLT_CHECK`。
 
-## Tests
+## 测试
 
-Unit tests should cover:
+单测需要覆盖：
 
-- `Allocate` returns a pinned handle and writes the optional `BlockHandle`.
-- `BufferHandle` is move-only and unpins exactly once.
-- `Pin` returns existing resident payload without IO.
-- `ReclaimForTest` spills unpinned blocks and releases MemoryPool bytes.
-- `Pin` reads a spilled block back and releases the old file extent.
-- `BatchPin` pins all blocks in order and unpins already-pinned handles on
-  failure.
-- `Prefetch` transitions `SPILLED` to `PREFETCHING`; `Pin` harvests the future.
-- Reclaim harvests ready prefetches and can spill those blocks in the same
-  pass.
-- Reclaim skips pinned blocks.
-- Eviction queue stale entries are skipped by sequence number.
-- IO write failure during reclaim restores payload and leaves the block
-  resident.
-- File extent is freed exactly once across pin, reclaim, and destruction paths.
-- `BufferManagerReclaimer::reclaimableBytes` follows `unpinnedResidentBytes_`.
+- `Allocate` 返回 pinned handle，并写出可选 `BlockHandle`。
+- `BufferHandle` move-only，且只 unpin 一次。
+- `Pin` resident block 时不触发 IO。
+- `ReclaimForTest` spill unpinned block，并释放 MemoryPool bytes。
+- `Pin` spilled block 时读回 payload，并释放旧 file extent。
+- `BatchPin` 按输入顺序 pin 所有 blocks；失败时已 pin 的 handles 自动 unpin。
+- `Prefetch` 将 `SPILLED` 转为 `PREFETCHING`；`Pin` 能 harvest 该 future。
+- Reclaim 能 harvest ready prefetch，并在同一轮 spill 这些 blocks。
+- Reclaim 跳过 pinned blocks。
+- Eviction queue stale entry 通过 sequence number 跳过。
+- Reclaim 写 IO 失败时恢复 payload，并保持 block resident。
+- file extent 在 pin、reclaim、destruction 路径中只释放一次。
+- `BufferManagerReclaimer::reclaimableBytes` 跟随 `unpinnedResidentBytes_`。
 
-Integration tests should verify interaction with a real `MemoryPool`, real
-`FileBlockAllocator`, and `DiskIoScheduler` where the environment supports the
-configured IO backend.
+集成测试需要验证真实 `MemoryPool`、真实 `FileBlockAllocator` 和
+`DiskIoScheduler` 的组合行为；如果运行环境支持对应 IO backend，再覆盖真实 IO
+路径。
