@@ -493,6 +493,15 @@ class Converter {
               }
             }
             to.set(output);
+          } else if (isInSpark) {
+            constexpr TimestampToStringOptions options = {
+                .precision = TimestampToStringOptions::Precision::kMicroseconds,
+                .leadingPositiveSign = true,
+                .skipTrailingZeros = true,
+                .zeroPaddingYear = true,
+                .dateTimeSeparator = ' '};
+            ts.toTimezone(*timeZone_);
+            to.set(ts.toString(options));
           } else {
             to.set(from.toString(
                 TimestampToStringOptions::Precision::kMilliseconds, timeZone_));
