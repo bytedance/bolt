@@ -145,6 +145,11 @@ jobs:
       run: |
         make export_release
 
+    - name: Install JDK
+      run: |
+        sudo apt update
+        sudo apt install -y --no-install-recommends default-jdk
+
     - name: Checkout gluten
       uses: actions/checkout@v6
       with:
