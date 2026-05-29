@@ -146,6 +146,164 @@ Snappy 没有 ZSTD/LZ4 那种 reusable compression context 模型。它可以有
 - 算法实现、policy 判断、allocation、耗时统计和 fallback 都集中在 `CompressionCodec.cpp`。
 - 新增一个运行时模式会牵涉 format enum 和 reader validation，即使产出的 bytes 格式没有变化。
 - benchmark 切换虽然方便，但生产语义不够干净。
+- 写路径存在额外 payload copy。当前压缩接口消费 `IoBuffer`，`SpillStore` 为了 IO 失败时恢复 BM 内存状态，必须先把原始 payload 拷贝成 `payloadCopy` 再交给压缩模块。
+- record 组装还存在额外 copy。当前 IO 写接口接收一个连续 `IoBuffer`，所以无论 body 是压缩结果还是原始 payload，都需要再拼成 `[header][stored payload]` 这个连续 record buffer。
+
+## 当前写路径的 Copy 问题
+
+BM spill 写路径的理想目标是：
+
+- 压缩收益好时：原始 payload 只读参与压缩，压缩结果直接进入最终落盘 buffer。除算法本身生成压缩输出外，不再额外 copy。
+- 压缩收益不好时：尽量不复制原始 payload，直接把原始 payload 作为 body 写出。
+- IO 写失败时：原始 payload 必须仍然完整保留，BM 可以恢复 block 的 in-memory 状态。
+
+当前实现还没达到这个目标，主要有两个独立问题。
+
+### 问题 1：压缩接口消费输入，导致必须先复制原始 payload
+
+当前 `CompressionCodec::TryCompress` 的输入是一个可移动的 `IoBuffer`。压缩模块会拥有这个 buffer，并在收益不足时把它作为 fallback payload 返回。
+
+这让 `SpillStore::WriteBlock` 不能直接把 BM 的原始 payload move 给压缩模块。原因是 spill write 可能失败，一旦原始 payload 被 move 走，BM 就无法恢复内存状态。于是当前代码只能先复制一份完整原文：
+
+```cpp
+auto payloadCopy = IoBuffer::allocateFromPool(pool_, rawSize);
+std::memcpy(payloadCopy.data(), payload.data(), rawSize);
+
+auto compressed = compressionCodec_.TryCompress(
+    std::move(payloadCopy), config_.compressionConfig, pool_);
+```
+
+这意味着压缩成功路径会多一次完整原文 copy：
+
+1. `payload -> payloadCopy`：为了失败恢复而复制原文。
+2. `payloadCopy -> compressed buffer`：算法生成压缩输出。
+3. `compressed buffer -> record body`：组装连续 record。
+4. `record -> IO`：提交给 IO 层。
+
+压缩收益不足路径也会多 copy：
+
+1. `payload -> payloadCopy`：为了失败恢复而复制原文。
+2. `payloadCopy -> record body`：fallback 原文拼入连续 record。
+3. `record -> IO`：提交给 IO 层。
+
+理想改法是把压缩接口改为只读输入：
+
+```cpp
+uint64_t Compress(
+    std::span<const char> input,
+    std::span<char> output,
+    const CompressionOptions& options,
+    CompressionContextPoolSet& pools) const;
+```
+
+`SpillStore` 只把 `payload.data()` 作为只读输入传给 codec。这样原始 payload 从始至终留在 BM 写路径手里，IO 失败时可以直接恢复，不需要 `payloadCopy`。
+
+### 问题 2：连续 record buffer 导致 body 还要再 copy
+
+当前 spill record 的内存形态是一个连续 buffer：
+
+```text
+[SpillRecordHeader][stored payload]
+```
+
+这要求 `SpillStore` 最终必须构造一个连续 `IoBuffer record`。因此当前实现会把压缩结果再复制到 record body：
+
+```cpp
+std::memcpy(record.data(), encodedHeader.data(), encodedHeader.size());
+std::memcpy(
+    record.data() + encodedHeader.size(),
+    compressed.buffer.data(),
+    compressed.storedSize);
+```
+
+如果压缩收益不足，需要落原文，那么在“单次连续 buffer 写”的模型下，也必须把原始 payload 复制到 record body。因为 header 和原始 payload 本来不是连续内存。
+
+这里有三个可选优化层级。
+
+#### 方案 A：压缩输出直接写到 header 后面
+
+这个方案优先解决压缩成功路径。
+
+`SpillStore` 可以先分配最终 record buffer，预留 header 空间，然后把压缩输出直接写到 `record.data() + headerSize`：
+
+```cpp
+const auto headerSize = sizeof(SpillRecordHeader);
+const auto maxBodySize = codec.MaxCompressedLength(rawSize);
+auto record = IoBuffer::allocateFromPool(pool_, headerSize + maxBodySize);
+
+auto compressedSize = codec.Compress(
+    std::span<const char>(payload.data(), rawSize),
+    std::span<char>(record.data() + headerSize, maxBodySize),
+    options,
+    pools);
+```
+
+如果压缩收益达标，再回填 header，并把 record length 设置为 `headerSize + compressedSize`。这样压缩成功路径不再需要 `compressed buffer -> record body` 这次 copy。
+
+对应路径：
+
+1. 原始 payload 只读输入。
+2. 压缩结果直接生成到最终 record body。
+3. 回填 header。
+4. 单次 IO 写出连续 record。
+
+这是短期最值得做的优化，改动集中在压缩接口和 `SpillStore::WriteBlock`，不需要改 IO 层。
+
+#### 方案 B：收益不足时使用两段顺序 IO
+
+这个方案解决 fallback 原文路径的 copy。
+
+如果压缩收益不足，不必为了拼连续 `[header][payload]` record 去复制原始 payload。可以分配一个很小的 header buffer，然后提交两个顺序 IO：
+
+1. 写 header 到 `extent.offset`。
+2. 写原始 payload 到 `extent.offset + headerSize`。
+
+落盘布局仍然是：
+
+```text
+[SpillRecordHeader][original payload]
+```
+
+读路径不需要变化，仍然可以一次读完整 record。
+
+这个方案的关键约束：
+
+- 两个 IO 必须按顺序执行。不能并发提交后假设完成顺序正确。
+- 如果 header 写失败，不再写 payload，释放 extent 并恢复 BM block。
+- 如果 header 写成功但 payload 写失败，释放整个 extent，并恢复 BM block。磁盘上可能留下半条无主 record，但只要 extent 没有被读路径持有，这在 BM spill 场景中可以接受。
+- 成本是 fallback 路径多一次 IO submit/completion。是否划算需要 benchmark，但对大 block 来说，减少一次大 payload copy 通常值得评估。
+
+#### 方案 C：长期支持 scatter/gather write
+
+更通用的长期方案是让 `DiskIoScheduler`/`IoRequest` 支持 scatter/gather write，一次请求写多个 slice：
+
+```text
+header slice + body slice
+```
+
+它可以覆盖两种路径：
+
+- 压缩成功：`header slice + compressed body slice`
+- 收益不足：`header slice + original payload slice`
+
+优点是语义最清晰，避免两段顺序 IO 的调度和失败处理中间态。缺点是改动会进入 IO 层，范围比方案 A/B 更大。
+
+对应的理想路径：
+
+压缩成功且收益达标：
+
+1. 原始 payload 只读输入。
+2. 压缩结果直接生成到最终 record body。
+3. 填 header。
+4. 提交 record 给 IO。
+
+压缩收益不足：
+
+1. 原始 payload 只读参与压缩尝试。
+2. 放弃压缩结果。
+3. 通过两段顺序 IO 或 scatter/gather 写 `header + original payload`。
+
+如果暂时不做两段顺序 IO，也不改 scatter/gather，那么压缩收益不足路径仍然需要一次 `original payload -> record body` copy；但至少可以先通过只读压缩接口消除 `payload -> payloadCopy` 这次完整原文 copy。
 
 ## 推荐目标设计
 
@@ -302,7 +460,7 @@ class CompressionManager {
  public:
   explicit CompressionManager(CompressionConfig config);
 
-  CompressResult TryCompress(IoBuffer payload, MemoryPool* pool);
+  CompressResult TryCompress(std::span<const char> payload, MemoryPool* pool);
 
   IoBuffer Decompress(
       IoBuffer storedPayload,
@@ -322,14 +480,16 @@ class CompressionManager {
 
 `CompressionManager::TryCompress` 流程：
 
-1. 如果 `kind == kNone`，直接返回原始 payload。
-2. 如果 payload 小于 `minCompressBytes`，直接返回原始 payload。
+1. 如果 `kind == kNone`，返回未压缩决策，不消费原始 payload。
+2. 如果 payload 小于 `minCompressBytes`，返回未压缩决策，不消费原始 payload。
 3. 根据稳定 `kind` 获取 codec。
 4. 用 `codec.MaxCompressedLength(rawSize)` 分配输出 buffer。
 5. 调用 `codec.Compress(...)`。
 6. 用实际 compressed size 和 `minCompressionRatio` 比较收益。
-7. 如果收益不达标，返回原始 payload，`storedKind = kNone`。
+7. 如果收益不达标，返回未压缩决策，`storedKind = kNone`。
 8. 如果收益达标，返回压缩 payload，`storedKind = config.kind`。
+
+这里的关键点是 `CompressionManager` 不拥有、不移动原始 payload。它只读原始 payload，并告诉 `SpillStore` 最终应该写压缩 body 还是原始 body。
 
 ### Spill Header
 
@@ -435,8 +595,9 @@ BM 仍然对压缩无感，只看到：
 
 写路径：
 
-- `compression_.TryCompress(...)`
+- `compression_.TryCompress(std::span<const char>(payload.data(), payload.length()), ...)`
 - header 写稳定 `storedKind`
+- 原始 payload 在整个写路径中保持可恢复，不再为了压缩先复制 `payloadCopy`
 - record payload 格式保持 `[header][stored payload]`
 
 读路径：
@@ -444,7 +605,27 @@ BM 仍然对压缩无感，只看到：
 - decode header
 - `compression_.Decompress(...)`
 
-### Step 5: 更新测试
+### Step 5: 优化 Record 组装和写路径 Copy
+
+先做不改 IO 层的短期优化：
+
+- 压缩成功时，把压缩输出直接写入最终 record body，即 `record.data() + headerSize`。
+- 收益不足时，如果仍然坚持单次连续 buffer 写，则需要把原始 payload copy 到 record body。
+
+再评估不改 IO 层接口的 fallback 优化：
+
+- 压缩收益不足时，提交两个顺序 IO：先写 header，再写原始 payload。
+- 两个 IO 必须顺序执行，任一失败都释放 extent，并恢复 BM block。
+- 这个方案不需要 scatter/gather，但 fallback 路径会多一次 IO submit/completion。
+
+最后再评估长期 IO 层优化：
+
+- 给 DiskIoScheduler/IoRequest 增加 scatter/gather write 能力。
+- SpillStore 写 record 时一次提交 `header slice + body slice`。
+- 压缩成功和收益不足路径都能避免为了拼连续 record 产生额外 body copy。
+- 是否值得改 IO 层，应以后续 benchmark 和 IO scheduler 复杂度为准。
+
+### Step 6: 更新测试
 
 UT 应覆盖：
 
@@ -457,8 +638,11 @@ UT 应覆盖：
 - header 拒绝未知稳定 kind。
 - context pool 能跨 block 复用 context。
 - 并发压缩不会因为单个 codec mutex 被全部串行化。
+- 压缩接口不消费原始 payload，IO 写失败时原始 payload 仍可恢复。
+- 压缩成功路径不再出现 `compressed buffer -> record body` 的额外 copy。
+- 如果实现两段顺序 IO 或 scatter/gather write，收益不足路径不再出现 `original payload -> record body` 的额外 copy。
 
-### Step 6: 更新 Benchmark
+### Step 7: 更新 Benchmark
 
 benchmark 参数建议拆成：
 
