@@ -4,7 +4,7 @@
 #include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/BufferManagerObservability.h"
-#include "bolt/common/memory/bm/file/FileBlockAllocator.h"
+#include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
 #include <array>
@@ -20,7 +20,7 @@ class SpillStore;
 
 struct BufferManagerConfig {
   std::string poolName;
-  FileBlockAllocatorConfig fileAllocatorConfig;
+  SpillStoreConfig spillStoreConfig;
   IoPriority readPriority{IoPriority::High};
   IoPriority writePriority{IoPriority::Medium};
   IoPriority prefetchPriority{IoPriority::Low};
@@ -66,7 +66,6 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   BufferManagerTagStats& MutableTagStats(MemoryTag tag);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
-  std::shared_ptr<FileBlockAllocator> allocator_;
   std::shared_ptr<MemoryPool> pool_;
   std::unique_ptr<SpillStore> spillStore_;
   BufferManagerConfig config_;

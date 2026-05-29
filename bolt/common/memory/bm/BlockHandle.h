@@ -2,6 +2,7 @@
 
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/common/memory/bm/OwnedFileExtent.h"
+#include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
 #include <cstdint>
@@ -33,7 +34,7 @@ struct BlockMemory {
   uint64_t evictionSequence{0};
   std::optional<IoBuffer> payload;
   std::optional<OwnedFileExtent> extent;
-  std::optional<std::future<IoResult>> prefetchFuture;
+  std::optional<SpillReadFuture> prefetchFuture;
 };
 
 class BlockHandle {
