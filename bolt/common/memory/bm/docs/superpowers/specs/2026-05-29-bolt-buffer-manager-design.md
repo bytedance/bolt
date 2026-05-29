@@ -46,7 +46,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 
   void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks);
 
-  uint64_t ReclaimForTest(uint64_t targetBytes);
+  uint64_t Reclaim(uint64_t targetBytes);
 };
 ```
 
@@ -301,7 +301,7 @@ reclaim write 失败必须先恢复 in-memory payload，再抛异常。异常会
 IO，也不吞掉 reclaim write 失败；arbitrator 对该异常是让当前 reclaimer 本轮失
 败还是让整个仲裁失败，取决于现有 memory arbitration 实现。
 
-`reclaim(targetBytes, maxWaitMs, stats)` 和 `ReclaimForTest` 使用同一套逻辑。
+`reclaim(targetBytes, maxWaitMs, stats)` 和 `Reclaim` 使用同一套逻辑。
 返回值是成功 spill 后实际释放的 resident bytes。
 
 `maxWaitMs` 为了兼容 `MemoryReclaimer` 接口保留。第一版暂时忽略该参数：一旦
@@ -362,7 +362,7 @@ purge/compact。N 和 X 由压测确定，初始建议值为 N=4；X 可以先�
 第一版 `BufferManager` 不是线程安全组件。
 
 调用方必须串行化同一个 manager 实例上的所有 public calls，包括 `Allocate`、
-`Pin`、`BatchPin`、`Prefetch`、`ReclaimForTest` 和 handle destruction。生产
+`Pin`、`BatchPin`、`Prefetch`、`Reclaim` 和 handle destruction。生产
 reclaim 必须通过 Bolt 现有 operator/task reclaim 协议进入，保证 BM reclaim 不
 和正常 BM API 调用并发。
 
@@ -422,7 +422,7 @@ extent id、fd、offset、操作名和底层错误码中可获得的信息。
 - Reclaim 写期间 block 进入 `SPILLING`，写成功变 `SPILLED`，写失败恢复
   `IN_MEMORY`。
 - Reclaim 写 IO 失败时恢复 payload，并保持 block resident。
-- `ReclaimForTest` spill unpinned block，并释放 MemoryPool bytes。
+- `Reclaim` spill unpinned block，并释放 MemoryPool bytes。
 - `maxWaitMs` 在 v1 被忽略，reclaim 仍然返回实际释放 bytes。
 - Eviction queue stale entry 通过 sequence number 跳过。
 - `BufferHandle` late destruction 触发 FATAL。

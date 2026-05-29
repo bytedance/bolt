@@ -273,7 +273,7 @@ TEST(BufferManagerTest, reclaimSpillsUnpinnedBlockAndPinReadsBack) {
     auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
     handle.Ptr()[0] = 99;
   }
-  EXPECT_GE(bm->ReclaimForTest(4096), 4096);
+  EXPECT_GE(bm->Reclaim(4096), 4096);
   auto handle = bm->Pin(block);
   EXPECT_EQ(99, handle.Ptr()[0]);
 }

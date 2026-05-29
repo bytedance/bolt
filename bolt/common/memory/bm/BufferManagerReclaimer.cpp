@@ -23,18 +23,28 @@ bool BufferManagerReclaimer::reclaimableBytes(
 }
 
 uint64_t BufferManagerReclaimer::reclaim(
-    MemoryPool* /*pool*/,
+    MemoryPool* pool,
     uint64_t targetBytes,
     uint64_t maxWaitMs,
-    Stats& /*stats*/) {
+    Stats& stats) {
   // v1 intentionally ignores maxWaitMs. Reclaim writes are synchronous and
   // timeout budgeting will be added with the production arbitration policy.
   (void)maxWaitMs;
+  BOLT_CHECK_NOT_NULL(pool);
   auto manager = manager_.lock();
   if (!manager) {
     return 0;
   }
-  return manager->ReclaimForTest(targetBytes);
+  return memory::MemoryReclaimer::run(
+      [&]() {
+        int64_t reclaimedBytes{0};
+        {
+          memory::ScopedReclaimedBytesRecorder recorder(pool, &reclaimedBytes);
+          manager->Reclaim(targetBytes);
+        }
+        return reclaimedBytes;
+      },
+      stats);
 }
 
 } // namespace bytedance::bolt::memory::bm

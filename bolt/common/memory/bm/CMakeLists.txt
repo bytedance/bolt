@@ -3,6 +3,7 @@ add_subdirectory(file)
 
 add_library(
   bolt_memory_bm
+  AllocateSize.cpp
   BlockHandle.cpp
   BufferHandle.cpp
   BufferManager.cpp
@@ -10,8 +11,7 @@ add_library(
   EvictionQueue.cpp
   MemoryTag.cpp
   OwnedFileExtent.cpp
-  SpillStore.cpp
-)
+  SpillStore.cpp)
 
 target_compile_features(bolt_memory_bm PUBLIC cxx_std_20)
 
@@ -26,9 +26,12 @@ target_link_libraries(
          bolt_common_config
          bolt_exception
          Folly::folly
-         glog::glog
-)
+         glog::glog)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
+endif()
+
+if(${BOLT_BUILD_BENCHMARKS})
+  add_subdirectory(benchmark)
 endif()
