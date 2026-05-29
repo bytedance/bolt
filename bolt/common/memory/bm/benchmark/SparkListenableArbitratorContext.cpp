@@ -5,7 +5,12 @@
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/common/memory/sparksql/MemoryTarget.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <limits>
+#include <set>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
@@ -27,6 +32,26 @@ void initializeExecutionMemoryPool(
   }
   sparksql::ExecutionMemoryPool::testingResetPoolSize(memoryLimitBytes);
 }
+
+class AutomaticReclaimSpiller final : public sparksql::Spiller {
+ public:
+  explicit AutomaticReclaimSpiller(std::function<int64_t(int64_t)> spill)
+      : spill_(std::move(spill)) {}
+
+  int64_t spill(sparksql::MemoryTargetWeakPtr /*self*/, int64_t size) override {
+    if (size <= 0) {
+      return 0;
+    }
+    return spill_(size);
+  }
+
+  const std::set<sparksql::SpillerPhase>& applicablePhases() override {
+    return sparksql::SpillerHelper::phaseSetAll();
+  }
+
+ private:
+  std::function<int64_t(int64_t)> spill_;
+};
 
 } // namespace
 
@@ -70,10 +95,57 @@ std::shared_ptr<MemoryPool> SparkListenableArbitratorContext::rootPool() const {
   return pool->shared_from_this();
 }
 
-uint64_t SparkListenableArbitratorContext::reclaimThroughArbitrator(
-    uint64_t targetBytes) {
+void SparkListenableArbitratorContext::installAutomaticReclaimSpill() {
   BOLT_CHECK_NOT_NULL(holder_);
-  return holder_->getManager()->getMemoryManager()->shrinkPools(targetBytes);
+  sparksql::SpillerPtr spiller =
+      std::make_shared<AutomaticReclaimSpiller>([this](int64_t size) {
+        return spillFixedSize(size);
+      });
+  holder_->appendSpiller(spiller);
+}
+
+SparkListenableArbitratorContextStats
+SparkListenableArbitratorContext::stats() const {
+  return stats_;
+}
+
+int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
+  BOLT_CHECK_NOT_NULL(holder_);
+  BOLT_CHECK_GE(size, 0);
+  if (size == 0) {
+    return 0;
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  ++stats_.automaticSpillTriggers;
+  stats_.automaticSpillRequestedBytes += static_cast<uint64_t>(size);
+
+  auto manager = holder_->getManager();
+  BOLT_CHECK_NOT_NULL(manager);
+  const auto shrunken = manager->shrink(size);
+  stats_.automaticSpillShrunkenBytes += static_cast<uint64_t>(shrunken);
+  const auto remaining = size - shrunken;
+  if (remaining <= 0) {
+    stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
+    stats_.automaticSpillTimeUs +=
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    return shrunken;
+  }
+
+  const auto reclaimed =
+      manager->getMemoryManager()->shrinkPools(static_cast<uint64_t>(remaining));
+  stats_.automaticSpillReclaimedBytes += reclaimed;
+  const auto cappedReclaimed = std::min<uint64_t>(
+      reclaimed, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+  const auto returned = shrunken + static_cast<int64_t>(cappedReclaimed);
+  stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(returned);
+  stats_.automaticSpillTimeUs +=
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+  return returned;
 }
 
 } // namespace bytedance::bolt::memory::bm

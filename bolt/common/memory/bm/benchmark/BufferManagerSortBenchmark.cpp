@@ -60,6 +60,14 @@ struct ScopedTimer {
   Clock::time_point start_;
 };
 
+double gibPerSecond(uint64_t bytes, double elapsedMs) {
+  if (elapsedMs <= 0) {
+    return 0;
+  }
+  return (static_cast<double>(bytes) / static_cast<double>(kGiB)) /
+      (elapsedMs / 1'000.0);
+}
+
 AllocateSize parseAllocateSize(const std::string& value) {
   if (value == "small") {
     return AllocateSize::kSmall;
@@ -123,13 +131,13 @@ FileBlockAllocatorConfig fileAllocatorConfig(const std::string& directory) {
   return config;
 }
 
-struct SortedBlock {
+struct RunBlock {
   std::shared_ptr<BlockHandle> block;
   size_t values{0};
 };
 
 struct SortedRun {
-  std::vector<SortedBlock> blocks;
+  std::vector<RunBlock> blocks;
   uint64_t values{0};
 };
 
@@ -363,10 +371,6 @@ struct ActiveRun {
     metadata = {};
     handles.clear();
   }
-
-  void batchUnpin() {
-    handles.clear();
-  }
 };
 
 void sortActiveRun(ActiveRun& run) {
@@ -381,12 +385,8 @@ void sortActiveRun(ActiveRun& run) {
   std::sort(array.begin(), array.end());
 }
 
-uint64_t spillActiveRun(
-    ActiveRun& run,
-    SparkListenableArbitratorContext& memoryContext) {
+void finalizeActiveRun(ActiveRun& run) {
   sortActiveRun(run);
-  run.batchUnpin();
-  return memoryContext.reclaimThroughArbitrator(0);
 }
 
 bool verifySortedRuns(
@@ -441,6 +441,14 @@ bool verifySortedRuns(
   return true;
 }
 
+size_t countRunBlocks(const std::vector<SortedRun>& runs) {
+  size_t blocks = 0;
+  for (const auto& run : runs) {
+    blocks += run.blocks.size();
+  }
+  return blocks;
+}
+
 int runBenchmark() {
   const auto allocateSize = parseAllocateSize(FLAGS_bm_sort_allocate_size);
   const auto blockBytes = allocateSizeBytes(allocateSize);
@@ -466,11 +474,11 @@ int runBenchmark() {
   config.poolName = "bm-sort-benchmark";
   config.fileAllocatorConfig = fileAllocatorConfig(FLAGS_bm_sort_spill_dir);
   auto manager = BufferManager::Create(*root, std::move(config));
+  memoryContext.installAutomaticReclaimSpill();
 
   std::vector<SortedRun> runs;
   ActiveRun active;
   UInt64DataGenerator generator{totalValues, FLAGS_bm_sort_seed};
-  uint64_t arbitratorReclaimedBytes = 0;
   double generateAndRunSortMs = 0;
   double verifyMs = 0;
 
@@ -478,7 +486,7 @@ int runBenchmark() {
     ScopedTimer timer{generateAndRunSortMs};
     while (!generator.empty()) {
       if (!manager->MaybeReserve(blockBytes) && !active.empty()) {
-        arbitratorReclaimedBytes += spillActiveRun(active, memoryContext);
+        finalizeActiveRun(active);
         runs.push_back(std::move(active.metadata));
         active.clear();
         manager->ReleaseUnusedReservation();
@@ -491,13 +499,13 @@ int runBenchmark() {
       const auto blockValues = generator.pull(values, valuesPerBlock);
 
       active.metadata.blocks.push_back(
-          SortedBlock{std::move(block), blockValues});
+          RunBlock{std::move(block), blockValues});
       active.metadata.values += blockValues;
       active.handles.push_back(std::move(handle));
     }
 
     if (!active.empty()) {
-      arbitratorReclaimedBytes += spillActiveRun(active, memoryContext);
+      finalizeActiveRun(active);
       runs.push_back(std::move(active.metadata));
       active.clear();
       manager->ReleaseUnusedReservation();
@@ -511,17 +519,45 @@ int runBenchmark() {
   }
 
   const auto stats = manager->stats();
-  std::cout << "bm_sort_benchmark"
+  const auto contextStats = memoryContext.stats();
+  const auto runBlocks = countRunBlocks(runs);
+  const auto totalMs = generateAndRunSortMs + verifyMs;
+  std::cout << "bm_sort_benchmark\n"
+            << "config"
             << " data_gb=" << FLAGS_bm_sort_data_gb
             << " memory_gb=" << FLAGS_bm_sort_memory_gb
             << " allocate_size=" << toString(allocateSize)
-            << " block_bytes=" << blockBytes << " runs=" << runs.size()
-            << " values=" << totalValues
-            << " arbitrator_reclaimed_bytes=" << arbitratorReclaimedBytes
-            << " bm_reclaimed_bytes=" << stats.reclaimedBytes
+            << " block_bytes=" << blockBytes << "\n"
+            << "runs"
+            << " count=" << runs.size()
+            << " blocks=" << runBlocks
+            << " values=" << totalValues << "\n"
+            << "timing"
             << " generate_sort_ms=" << generateAndRunSortMs
             << " verify_ms=" << verifyMs
-            << " verified=" << (verified ? "true" : "false") << "\n";
+            << " total_ms=" << totalMs
+            << " generate_sort_gib_per_s="
+            << gibPerSecond(totalBytes, generateAndRunSortMs)
+            << " verify_gib_per_s="
+            << gibPerSecond(totalBytes, verifyMs)
+            << " verified=" << (verified ? "true" : "false") << "\n"
+            << "automatic_spill"
+            << " triggers=" << contextStats.automaticSpillTriggers
+            << " requested_bytes="
+            << contextStats.automaticSpillRequestedBytes
+            << " shrunken_bytes=" << contextStats.automaticSpillShrunkenBytes
+            << " reclaimed_bytes=" << contextStats.automaticSpillReclaimedBytes
+            << " returned_bytes=" << contextStats.automaticSpillReturnedBytes
+            << " time_us=" << contextStats.automaticSpillTimeUs << "\n"
+            << "bm_summary"
+            << " reclaimable_bytes=" << manager->reclaimableBytes()
+            << " reclaimed_bytes=" << stats.reclaimedBytes
+            << " spill_write_bytes=" << stats.spillWriteBytes
+            << " spill_read_bytes=" << stats.spillReadBytes
+            << " spill_write_count=" << stats.spillWriteCount
+            << " spill_read_count=" << stats.spillReadCount << "\n"
+            << "bm_debug " << manager->debugString() << "\n"
+            << "root_pool " << root->toString(true) << "\n";
 
   if (!FLAGS_bm_sort_keep_spill_files) {
     std::filesystem::remove_all(FLAGS_bm_sort_spill_dir);
