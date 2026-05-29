@@ -122,11 +122,43 @@ BufferHandle BufferManager::Allocate(
 }
 
 bool BufferManager::MaybeReserve(size_t size) {
-  return pool_->maybeReserve(size);
+  VLOG(1) << "BM MaybeReserve begin"
+          << " size=" << size
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
+  const auto ok = pool_->maybeReserve(size);
+  VLOG(1) << "BM MaybeReserve end"
+          << " ok=" << ok
+          << " size=" << size
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
+  return ok;
 }
 
 void BufferManager::ReleaseUnusedReservation() {
+  VLOG(1) << "BM ReleaseUnusedReservation begin"
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
   pool_->release();
+  VLOG(1) << "BM ReleaseUnusedReservation end"
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
 }
 
 BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
@@ -196,16 +228,50 @@ void BufferManager::Prefetch(
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   ++stats_.reclaimCount;
   uint64_t reclaimed = 0;
+  VLOG(1) << "BM Reclaim begin"
+          << " target_bytes=" << targetBytes
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
   while (targetBytes == 0 || reclaimed < targetBytes) {
     auto memory = evictionQueue_->PopEvictable();
     if (!memory) {
+      VLOG(1) << "BM Reclaim no evictable block"
+              << " target_bytes=" << targetBytes
+              << " reclaimed_bytes=" << reclaimed
+              << " bm=" << debugString();
       break;
     }
     ++stats_.reclaimAttemptedBlocks;
+    VLOG(1) << "BM Reclaim spill candidate"
+            << " block_id=" << memory->id
+            << " tag=" << toString(memory->tag)
+            << " size=" << memory->size
+            << " state=" << static_cast<int>(memory->state)
+            << " pin_count=" << memory->pinCount
+            << " sequence=" << memory->evictionSequence
+            << " reclaimed_so_far=" << reclaimed
+            << " target_bytes=" << targetBytes;
 
     try {
-      reclaimed += SpillBlock(memory);
+      const auto blockReclaimed = SpillBlock(memory);
+      reclaimed += blockReclaimed;
+      VLOG(1) << "BM Reclaim spill finished"
+              << " block_id=" << memory->id
+              << " block_reclaimed_bytes=" << blockReclaimed
+              << " reclaimed_so_far=" << reclaimed
+              << " target_bytes=" << targetBytes
+              << " bm=" << debugString();
     } catch (...) {
+      VLOG(1) << "BM Reclaim spill failed"
+              << " block_id=" << memory->id
+              << " state=" << static_cast<int>(memory->state)
+              << " pin_count=" << memory->pinCount
+              << " payload=" << memory->payload.has_value()
+              << " reclaimed_so_far=" << reclaimed;
       if (memory->pinCount == 0 &&
           memory->state == BlockMemoryState::kInMemory &&
           memory->payload.has_value()) {
@@ -216,6 +282,15 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   }
 
   stats_.reclaimedBytes += reclaimed;
+  VLOG(1) << "BM Reclaim end"
+          << " target_bytes=" << targetBytes
+          << " reclaimed_bytes=" << reclaimed
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
   return reclaimed;
 }
 
@@ -363,6 +438,16 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   BOLT_CHECK(memory->payload.has_value());
   BOLT_CHECK_GE(stats_.unpinnedResidentBytes, memory->size);
 
+  VLOG(1) << "BM SpillBlock begin"
+          << " block_id=" << memory->id
+          << " tag=" << toString(memory->tag)
+          << " size=" << memory->size
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
   auto allocation = spillStore_->AllocateExtent(memory->size);
   if (!allocation.ok()) {
     ++stats_.fileAllocateFailures;
@@ -380,6 +465,13 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   tagStats.residentBytes -= memory->size;
   tagStats.unpinnedResidentBytes -= memory->size;
   tagStats.spillingBytes += memory->size;
+  VLOG(1) << "BM SpillBlock write begin"
+          << " block_id=" << memory->id
+          << " size=" << memory->size
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " bm=" << debugString();
 
   IoResult result;
   try {
@@ -440,6 +532,15 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   tagStats.reclaimedBytes += memory->size;
   ++tagStats.spillWriteCount;
   ++memory->evictionSequence;
+  VLOG(1) << "BM SpillBlock end"
+          << " block_id=" << memory->id
+          << " size=" << memory->size
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
   return memory->size;
 }
 
