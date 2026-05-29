@@ -112,7 +112,7 @@ TEST(IoUringBackendTest, writeAndReadTemporaryFile) {
   EXPECT_EQ(
       0,
       std::memcmp(
-          writeResult.buffer.data.get(), result.buffer.data.get(), 4096));
+          writeResult.buffer.data(), result.buffer.data(), 4096));
 }
 
 TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {

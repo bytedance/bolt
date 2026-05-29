@@ -385,7 +385,7 @@ void DiskIoSchedulerImpl::applyCompletionsLocked(
     const auto measuredEndToEndLatencyUs =
         endToEndLatencyUs > 0 ? static_cast<uint64_t>(endToEndLatencyUs) : 0;
     if (completion.result.ok() &&
-        completion.result.bytes != inflight->request.buffer.length) {
+        completion.result.bytes != inflight->request.buffer.length()) {
       completion.result.error = IoErrorCode::ShortIo;
     }
     DiskIoStatsCollector::recordCompletion(

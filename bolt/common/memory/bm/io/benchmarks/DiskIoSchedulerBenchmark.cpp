@@ -201,6 +201,12 @@ IoRequest makeRequest(
     size_t blockSize,
     uint64_t op,
     std::unique_ptr<char[]> buffer);
+IoRequest makeRequest(
+    Phase phase,
+    int fd,
+    size_t blockSize,
+    uint64_t op,
+    IoBuffer buffer);
 
 PhaseMetrics runRawPhase(
     int fd,
@@ -300,11 +306,12 @@ PhaseMetrics runRawIoUringPhase(
     while (nextOp < ops && inflight < slotCount && !freeSlots.empty()) {
       const auto slot = freeSlots.back();
       freeSlots.pop_back();
-      auto buffer = std::move(slots[slot].request.buffer.data);
-      if (buffer == nullptr) {
-        buffer = makeBuffer(blockSize, nextOp);
+      auto buffer = std::move(slots[slot].request.buffer);
+      if (!buffer.valid()) {
+        buffer =
+            IoBuffer{makeBuffer(blockSize, nextOp), blockSize, 0, blockSize};
       } else if (phase == Phase::Write) {
-        fillBuffer(buffer.get(), blockSize, nextOp);
+        fillBuffer(buffer.data(), blockSize, nextOp);
       }
 
       auto request =
@@ -394,13 +401,27 @@ IoRequest makeRequest(
     int fd,
     size_t blockSize,
     uint64_t op,
-    std::unique_ptr<char[]> buffer) {
+  std::unique_ptr<char[]> buffer) {
+  return makeRequest(
+      phase,
+      fd,
+      blockSize,
+      op,
+      IoBuffer{std::move(buffer), blockSize, 0, blockSize});
+}
+
+IoRequest makeRequest(
+    Phase phase,
+    int fd,
+    size_t blockSize,
+    uint64_t op,
+    IoBuffer buffer) {
   IoRequest request;
   request.opcode = phase == Phase::Write ? IoOpcode::Write : IoOpcode::Read;
   request.priority = IoPriority::Medium;
   request.fd = fd;
   request.fileOffset = op * blockSize;
-  request.buffer = IoBuffer{std::move(buffer), blockSize, 0, blockSize};
+  request.buffer = std::move(buffer);
   return request;
 }
 
@@ -416,7 +437,7 @@ PhaseMetrics runSchedulerPhase(
   uint64_t completedBytes = 0;
   uint64_t errors = 0;
   uint64_t nextOp = 0;
-  std::vector<std::unique_ptr<char[]>> reusableBuffers;
+  std::vector<IoBuffer> reusableBuffers;
   reusableBuffers.reserve(batchSize);
   std::vector<std::future<IoResult>> futures;
   futures.reserve(batchSize);
@@ -427,15 +448,16 @@ PhaseMetrics runSchedulerPhase(
     const auto batchEnd =
         std::min<uint64_t>(ops, nextOp + static_cast<uint64_t>(batchSize));
     for (; nextOp < batchEnd; ++nextOp) {
-      std::unique_ptr<char[]> buffer;
+      IoBuffer buffer;
       if (!reusableBuffers.empty()) {
         buffer = std::move(reusableBuffers.back());
         reusableBuffers.pop_back();
         if (phase == Phase::Write) {
-          fillBuffer(buffer.get(), blockSize, nextOp);
+          fillBuffer(buffer.data(), blockSize, nextOp);
         }
       } else {
-        buffer = makeBuffer(blockSize, nextOp);
+        buffer =
+            IoBuffer{makeBuffer(blockSize, nextOp), blockSize, 0, blockSize};
       }
       futures.push_back(scheduler.submit(
           makeRequest(phase, fd, blockSize, nextOp, std::move(buffer))));
@@ -449,7 +471,7 @@ PhaseMetrics runSchedulerPhase(
       } else {
         ++errors;
       }
-      reusableBuffers.push_back(std::move(result.buffer.data));
+      reusableBuffers.push_back(std::move(result.buffer));
     }
   }
   const auto end = Clock::now();
