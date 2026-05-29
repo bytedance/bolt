@@ -1,6 +1,7 @@
 #include "bolt/common/memory/bm/file/FileBlockAllocatorImpl.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/Uuid.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -9,17 +10,21 @@
 namespace bytedance::bolt::memory::bm {
 
 FileBlockAllocatorImpl::FileBlockAllocatorImpl(FileBlockAllocatorConfig config)
-    : config_(std::move(config)), dedicated_allocator_(config_.directory) {
+    : config_(std::move(config)),
+      allocator_id_(bytedance::bolt::makeUuid()),
+      directory_((std::filesystem::path(config_.directory) / allocator_id_)
+                     .string()),
+      dedicated_allocator_(directory_) {
   BOLT_CHECK(
       ValidateFileBlockAllocatorConfig(config_) == FileErrorCode::kOk,
       "invalid FileBlockAllocatorConfig");
-  std::filesystem::remove_all(config_.directory);
   std::filesystem::create_directories(config_.directory);
+  std::filesystem::create_directories(directory_);
 
   buckets_.reserve(config_.bucket_sizes.size());
   for (const auto bucket_size : config_.bucket_sizes) {
     buckets_.push_back(std::make_unique<BucketBlockAllocator>(
-        config_.directory,
+        directory_,
         static_cast<uint64_t>(bucket_size),
         static_cast<uint64_t>(config_.file_size_limit_bytes),
         config_.max_open_files_per_bucket));
@@ -28,6 +33,9 @@ FileBlockAllocatorImpl::FileBlockAllocatorImpl(FileBlockAllocatorConfig config)
 
 FileBlockAllocatorImpl::~FileBlockAllocatorImpl() {
   shutdown_ = true;
+  buckets_.clear();
+  dedicated_allocator_.RemoveAllFiles();
+  std::filesystem::remove_all(directory_);
 }
 
 FileAllocateResult FileBlockAllocatorImpl::Allocate(int64_t size) {

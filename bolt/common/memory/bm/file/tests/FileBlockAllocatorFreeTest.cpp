@@ -50,8 +50,8 @@ TEST(FileBlockAllocatorFreeTest, DeletesDedicatedFileOnFree) {
 
   auto allocation = allocator.Allocate(128 * 1024);
   ASSERT_TRUE(allocation.ok());
-  const auto path =
-      directory + "/dedicated_" + std::to_string(allocation.extent.id) + ".bm";
+  const auto path = OnlyAllocatorDirectory(directory) /
+      ("dedicated_" + std::to_string(allocation.extent.id) + ".bm");
   ASSERT_TRUE(std::filesystem::exists(path));
 
   EXPECT_TRUE(allocator.Free(allocation.extent).ok());
@@ -69,7 +69,7 @@ TEST(FileBlockAllocatorFreeTest, DeletesEmptyBucketFileAndReleasesOpenFileSlot) 
 
   auto first = allocator.Allocate(4 * 1024);
   ASSERT_TRUE(first.ok());
-  const auto first_path = directory + "/bucket_4096_0.bm";
+  const auto first_path = OnlyAllocatorDirectory(directory) / "bucket_4096_0.bm";
   ASSERT_TRUE(std::filesystem::exists(first_path));
   EXPECT_TRUE(allocator.Free(first.extent).ok());
   EXPECT_FALSE(std::filesystem::exists(first_path));

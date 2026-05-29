@@ -22,18 +22,17 @@ struct FileExtent {
 
 using namespace bytedance::bolt::memory::bm;
 
-void InitAllocator() {
+std::unique_ptr<FileBlockAllocator> CreateAllocator() {
   FileBlockAllocatorConfig config;
   config.directory = "/tmp/bolt-bm-file";
   config.bucket_sizes = {32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024};
   config.file_size_limit_bytes = 1024 * 1024 * 1024; // 1 GiB
   config.max_open_files_per_bucket = 16;
 
-  InitFileBlockAllocator(std::move(config));
+  return CreateFileBlockAllocator(std::move(config));
 }
 
-bool WriteData(const char* data, int64_t size) {
-  auto& allocator = GetFileBlockAllocator();
+bool WriteData(FileBlockAllocator& allocator, const char* data, int64_t size) {
   auto allocation = allocator.Allocate(size);
   if (!allocation.ok()) {
     return false;
@@ -50,10 +49,6 @@ bool WriteData(const char* data, int64_t size) {
   auto free_result = allocator.Free(extent);
   return free_result.ok();
 }
-
-void ShutdownAllocator() {
-  ShutdownFileBlockAllocator();
-}
 ```
 
 ## 分配策略
@@ -68,10 +63,11 @@ void ShutdownAllocator() {
 
 ## 配置约束
 
-`InitFileBlockAllocator()` 会校验配置。配置不合法时会触发 `BOLT_CHECK` 异常。
+`CreateFileBlockAllocator()` 会校验配置。配置不合法时会触发 `BOLT_CHECK` 异常。
 
 - `directory` 不能为空。
-- 初始化时会先删除 `directory` 下已有内容，再重新创建目录。
+- allocator 会在 `directory` 下创建一个带 uuid 的实例子目录，实际 bucket 和 dedicated 文件都位于该子目录下。
+- 创建 allocator 不会删除 `directory` 下已有内容。
 - `bucket_sizes` 不能为空。
 - `bucket_sizes` 必须严格单调递增，不能乱序，不能重复。
 - 每个 bucket size 必须 4 KiB 对齐。
@@ -98,7 +94,7 @@ void ShutdownAllocator() {
 调用方必须在对应 IO 完成后再调用：
 
 ```cpp
-auto result = GetFileBlockAllocator().Free(extent);
+auto result = allocator.Free(extent);
 ```
 
 注意：
@@ -106,11 +102,12 @@ auto result = GetFileBlockAllocator().Free(extent);
 - `Free()` 只表示这段空间可以被复用或对应文件可以删除。
 - 如果异步 IO 还没有完成就释放，后续分配可能复用同一个 offset，导致数据竞争或文件被提前删除。
 - 同一个 `FileExtent` 只能释放一次；重复释放返回 `FileErrorCode::kDoubleFree`。
+- `FileExtent` 必须交回创建它的同一个 allocator 释放。
 - 调用方不能关闭 `extent.fd`。fd 生命周期由 allocator 管理。
 
 ## 错误处理
 
-初始化属于低频路径，配置错误或重复初始化通过异常暴露。`Allocate()` 和 `Free()` 属于高频路径，通过错误码返回。
+初始化属于低频路径，配置错误通过异常暴露。`Allocate()` 和 `Free()` 属于高频路径，通过错误码返回。
 
 常见错误码：
 
@@ -121,23 +118,23 @@ auto result = GetFileBlockAllocator().Free(extent);
 - `FileErrorCode::kInvalidExtent`：extent 元数据不一致。
 - `FileErrorCode::kShutdown`：allocator 已进入 shutdown 状态。
 
-## 生命周期
+## 生命周期和线程安全
 
-生产路径推荐使用全局单例：
+生产路径推荐由调用方显式持有 allocator：
 
 ```cpp
-InitFileBlockAllocator(config);
-auto& allocator = GetFileBlockAllocator();
-auto allocation = allocator.Allocate(size);
-allocator.Free(allocation.extent);
-ShutdownFileBlockAllocator();
+auto allocator = CreateFileBlockAllocator(config);
+auto allocation = allocator->Allocate(size);
+allocator->Free(allocation.extent);
 ```
 
 约束：
 
-- `InitFileBlockAllocator()` 只能调用一次；重复初始化会触发异常。
-- 需要重新初始化时，先调用 `ShutdownFileBlockAllocator()`。
-- `ShutdownFileBlockAllocator()` 会关闭并删除 allocator 管理的 bucket 和 dedicated 文件。
-- shutdown 前调用方应确保没有未完成的 IO，也没有继续使用旧 fd 的线程。
+- `FileBlockAllocator` 不是线程安全对象。
+- 调用方必须保证同一个 allocator 实例的 `Allocate()` / `Free()` 不并发执行。
+- 如果需要并发，调用方应在外层用对象级锁、分片锁或其他上层同步机制保护同一个 allocator。
+- 可以同时创建多个 allocator；即使它们使用相同的 base `directory`，也会写入不同的 uuid 子目录。
+- allocator 析构时会关闭并删除自己管理的 bucket 和 dedicated 文件，并删除自己的 uuid 子目录。
+- 析构前调用方应确保没有未完成的 IO，也没有继续使用旧 fd 的线程。
 
-单测可以直接实例化 `FileBlockAllocatorImpl`，避免污染全局 singleton。
+单测可以直接实例化 `FileBlockAllocatorImpl`，也可以通过 `CreateFileBlockAllocator()` 验证公共接口。

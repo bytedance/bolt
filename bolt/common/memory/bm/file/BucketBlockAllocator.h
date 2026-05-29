@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -36,17 +35,16 @@ class BucketBlockAllocator {
     std::vector<uint64_t> free_offsets;
   };
 
-  BucketFile* FindReusableFileLocked();
-  FileAllocateResult CreateFileLocked();
-  BucketFile* FindFileByIndexLocked(uint64_t file_index);
-  void DeleteFileLocked(uint64_t file_index);
+  BucketFile* FindReusableFile();
+  FileAllocateResult CreateFile();
+  BucketFile* FindFileByIndex(uint64_t file_index);
+  void DeleteFile(uint64_t file_index);
 
   const std::string directory_;
   const uint64_t bucket_size_;
   const uint64_t file_size_limit_bytes_;
   const uint32_t max_open_files_;
 
-  std::mutex mutex_;
   uint64_t next_file_index_{0};
   std::vector<std::unique_ptr<BucketFile>> files_;
 };

@@ -9,7 +9,7 @@
 using namespace bytedance::bolt::memory::bm;
 using namespace bytedance::bolt::memory::bm::test;
 
-TEST(FileBlockAllocatorImplTest, RemovesAndRecreatesExistingDirectory) {
+TEST(FileBlockAllocatorImplTest, PreservesExistingBaseDirectoryContents) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-existing");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
@@ -21,7 +21,8 @@ TEST(FileBlockAllocatorImplTest, RemovesAndRecreatesExistingDirectory) {
   FileBlockAllocatorImpl allocator(ValidConfigWithDirectory(directory));
 
   EXPECT_TRUE(std::filesystem::exists(directory));
-  EXPECT_FALSE(std::filesystem::exists(directory + "/old-file"));
+  EXPECT_TRUE(std::filesystem::exists(directory + "/old-file"));
+  EXPECT_FALSE(OnlyAllocatorDirectory(directory).empty());
 }
 
 TEST(FileBlockAllocatorImplTest, DoesNotCreateBucketFilesDuringInit) {
@@ -30,7 +31,9 @@ TEST(FileBlockAllocatorImplTest, DoesNotCreateBucketFilesDuringInit) {
 
   FileBlockAllocatorImpl allocator(ValidConfigWithDirectory(directory));
 
-  EXPECT_TRUE(std::filesystem::is_empty(directory));
+  const auto allocator_directory = OnlyAllocatorDirectory(directory);
+  ASSERT_FALSE(allocator_directory.empty());
+  EXPECT_TRUE(std::filesystem::is_empty(allocator_directory));
 }
 
 TEST(FileBlockAllocatorImplTest, AllocatesRequestToFirstFittingBucket) {

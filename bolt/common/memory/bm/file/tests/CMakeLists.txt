@@ -2,11 +2,10 @@ include(GoogleTest)
 
 add_executable(
   bolt_memory_bm_file_test
-  FileBlockAllocatorConcurrencyTest.cpp
   FileBlockAllocatorConfigTest.cpp
+  FileBlockAllocatorFactoryTest.cpp
   FileBlockAllocatorFreeTest.cpp
   FileBlockAllocatorImplTest.cpp
-  FileBlockAllocatorSingletonTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_file_test PRIVATE cxx_std_20)
