@@ -2,6 +2,8 @@
 #include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
 
 #include <filesystem>
+#include <memory>
+#include <type_traits>
 
 #include <gtest/gtest.h>
 
@@ -18,6 +20,19 @@ TEST(FileBlockAllocatorFactoryTest, CreatesAllocatorThroughFactory) {
   auto allocation = allocator->Allocate(4 * 1024);
 
   EXPECT_TRUE(allocation.ok());
+}
+
+TEST(FileBlockAllocatorFactoryTest, CreateReturnsSharedAllocator) {
+  const auto directory = UniqueTempDir("bolt-bm-file-allocator-shared");
+  std::filesystem::remove_all(directory);
+
+  auto allocator =
+      CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
+  static_assert(std::is_same_v<decltype(allocator), std::shared_ptr<FileBlockAllocator>>);
+  ASSERT_NE(nullptr, allocator);
+
+  auto other = allocator;
+  EXPECT_EQ(2, allocator.use_count());
 }
 
 TEST(FileBlockAllocatorFactoryTest, UsesUniqueDirectoryPerAllocator) {

@@ -7,9 +7,9 @@
 
 namespace bytedance::bolt::memory::bm {
 
-std::unique_ptr<FileBlockAllocator> CreateFileBlockAllocator(
+std::shared_ptr<FileBlockAllocator> CreateFileBlockAllocator(
     FileBlockAllocatorConfig config) {
-  return std::make_unique<FileBlockAllocatorImpl>(std::move(config));
+  return std::make_shared<FileBlockAllocatorImpl>(std::move(config));
 }
 
 } // namespace bytedance::bolt::memory::bm
