@@ -49,6 +49,12 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
 `Allocate` 采用 DuckDB 的语义：创建一个新 block，并返回已经 pinned 的
 mutable `BufferHandle`。如果 `block` 非空，创建出的 `BlockHandle` 会写入
 该参数，调用方后续可以用它调用 `Pin`、`BatchPin` 或 `Prefetch`。
+该签名刻意贴近 DuckDB `BufferManager::Allocate`，即返回 `BufferHandle`
+并通过可选 out-param 返回 `BlockHandle`，以便后续语义对齐。
+
+`BufferHandle` 内部强持有对应 `BlockHandle`。如果调用方不传 `block`，
+则该 block 只通过返回的 `BufferHandle` 存活；handle 析构后如果没有其它引用，
+block 可以自然销毁。这是一次性临时 buffer 语义，不支持后续再次 `Pin`。
 
 `Allocate`、`Pin`、`BatchPin` 直接返回 handle。内存分配失败、内存仲裁失败、
 file allocation 失败和 IO 失败沿用 Bolt 现有异常路径。这和 `MemoryPool`
@@ -92,8 +98,13 @@ struct BufferManagerConfig {
 有效。
 
 `BufferHandle` 持有 `std::weak_ptr<BufferManager>` 用于诊断。析构时 lock
-manager 并调用 `Unpin`；如果 lock 失败，触发 `BOLT_CHECK`，因为
-`BufferHandle` 不允许晚于创建它的 `BufferManager` 析构。
+manager 并调用 `Unpin`。weak owner 不是为了支持 late destruction；它的价值是
+让“BM 已经销毁但 handle 仍然存活”的生命周期 bug 可以被结构化观察到，而不是
+表现为 raw pointer use-after-free。
+
+析构路径必须是 `noexcept`。如果 lock 失败，或发现其它生命周期 invariant
+被破坏，不能抛异常；必须走不抛异常的 fatal/abort 路径，并输出足够定位的信息，
+至少包括 block id、block size、当前状态、pin count 和触发的操作名。
 
 ## 资源所有权
 
@@ -115,7 +126,9 @@ extent 不允许晚于 manager-owned allocator 存活，并且每个 extent 只�
 
 `BufferManager` 应当比它创建的所有 `BlockHandle`、`BlockMemory` 和
 `BufferHandle` 存活更久。weak owner 引用只用于诊断生命周期违规，不表示支持
-late destruction。
+late destruction。BM 推荐由比所有 block consumer 都长寿的 owner 持有，典型
+位置是 query/operator 上下文的根对象，避免 operator 析构顺序或测试局部变量把
+BM 提前销毁。
 
 ## Block 状态
 
@@ -261,8 +274,13 @@ struct EvictionEntry {
 - Reclaim 从队头 pop，跳过 expired weak pointer、sequence mismatch、pinned
   block 和非 `IN_MEMORY` block。
 
-第一版不实现 DuckDB 风格的 purge。stale queue entry 在 reclaim 扫描时自然
-清理。
+第一版不实现 DuckDB 风格的 purge。stale queue entry 在 reclaim 扫描时通过
+`std::deque::pop_front` 自然清理前缀，避免已经扫描过的 entry 长期占用内存。
+
+这是 v1 的明确 limitation：如果长任务中 eviction queue 长度持续超过 live
+unpinned block 数的 N 倍，或 queue 自身内存占用超过 BM leaf pool 的 X%，需要
+引入 purge/compact。N 和 X 由压测确定，初始建议值为 N=4；X 可以先作为观测指标
+保留。
 
 ## 线程模型
 
@@ -290,6 +308,12 @@ IO scheduler 错误转换成 Bolt 异常，并携带 IO error code 和 native er
 
 reclaim write 失败时，必须先把返回的 `IoBuffer` move 回 block，恢复
 in-memory payload，再抛异常。
+
+该异常会沿 `MemoryReclaimer::reclaim` 向上传播给 memory arbitrator。v1 不在
+BM 内部重试 IO，也不吞掉 reclaim write 失败；arbitrator 对该异常是让当前
+reclaimer 本轮失败还是让整个仲裁失败，取决于现有 memory arbitration 实现。这个
+取舍是有意的：v1 优先保持数据状态正确和错误可见，后续可以在
+`BufferManagerConfig` 中增加 retry policy。
 
 内部状态不变量违规使用 `BOLT_CHECK`。
 
