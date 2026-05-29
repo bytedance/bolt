@@ -65,14 +65,13 @@ BackendSubmitStatus IoUringBackend::submit(
     return BackendSubmitStatus::RetryableBusy;
   }
 
-  auto* base =
-      static_cast<char*>(request.buffer.data.get()) + request.buffer.offset;
+  auto* base = request.buffer.ioData();
   if (request.opcode == IoOpcode::Read) {
     io_uring_prep_read(
-        sqe, request.fd, base, request.buffer.length, request.fileOffset);
+        sqe, request.fd, base, request.buffer.length(), request.fileOffset);
   } else {
     io_uring_prep_write(
-        sqe, request.fd, base, request.buffer.length, request.fileOffset);
+        sqe, request.fd, base, request.buffer.length(), request.fileOffset);
   }
   io_uring_sqe_set_data64(sqe, requestId);
 

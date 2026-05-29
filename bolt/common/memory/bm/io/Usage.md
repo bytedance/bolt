@@ -40,18 +40,27 @@ struct IoRequest {
 };
 ```
 
-buffer 由 `IoBuffer` 描述，内部使用 `std::unique_ptr<char[]>` 持有内存：
+buffer 由 move-only 的 `IoBuffer` 描述。`IoBuffer` 持有一段连续内存和对应的释放逻辑，默认兼容 `std::unique_ptr<char[]>`，也可以通过 `fromOwned()` 传入自定义 deleter：
 
 ```cpp
-struct IoBuffer {
-  std::unique_ptr<char[]> data;
-  size_t size;
-  size_t offset;
-  size_t length;
-};
+auto* data = new char[size];
+auto buffer = IoBuffer::fromOwned(
+    data,
+    size,
+    0,
+    size,
+    [](char* p) noexcept { delete[] p; });
 ```
 
 所有权规则：调用 `submit(std::move(request))` 之后，buffer 所有权转移给 scheduler。返回的 future ready 之后，buffer 会通过 `IoResult::buffer` 归还给调用方。
+
+如果 buffer 来自 `MemoryPool`，优先使用 `allocateFromPool()`，完成后 `IoBuffer` 析构会通过同一个 pool 释放内存：
+
+```cpp
+request.buffer = IoBuffer::allocateFromPool(pool, size);
+```
+
+不使用 shared ownership 时，调用方必须保证 `MemoryPool*` 的生命周期覆盖所有相关 `IoResult` 的生命周期。
 
 ## 提交写请求
 
@@ -107,7 +116,7 @@ std::future<IoResult> submitRead(int fd, uint64_t offset, size_t size) {
 
 auto result = submitRead(fd, 0, 4096).get();
 if (result.ok()) {
-  const char* bytes = result.buffer.data.get();
+  const char* bytes = result.buffer.data();
   const uint64_t bytesRead = result.bytes;
 }
 ```
@@ -127,10 +136,10 @@ scheduler 内部使用加权调度。一般 BM 读写请求建议使用 `Medium`
 如果请求非法，`submit()` 会直接返回 ready future，结果为 `IoErrorCode::InvalidRequest`。常见非法请求包括：
 
 - `fd < 0`
-- `buffer.data == nullptr`
-- `buffer.length == 0`
-- `buffer.offset > buffer.size`
-- `buffer.offset + buffer.length` 超过 `buffer.size`
+- `buffer.data() == nullptr`
+- `buffer.length() == 0`
+- `buffer.offset() > buffer.size()`
+- `buffer.offset() + buffer.length()` 超过 `buffer.size()`
 - 非法 opcode 或 priority
 
 `IoErrorCode` 取值：
