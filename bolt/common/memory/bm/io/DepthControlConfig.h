@@ -13,7 +13,7 @@ enum class DepthControlMode : uint8_t {
 };
 
 struct FixedDepthConfig {
-  uint32_t depth{64};
+  uint32_t depth{128};
   std::chrono::milliseconds statsWindow{200};
 };
 
