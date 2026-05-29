@@ -1112,6 +1112,36 @@ void doCastArrayToVarchar(
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
   const bool legacyComplex = isInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
+  if (queryConfig.enableFlinkCompatible() &&
+      arrayElements->type()->isTimestamp()) {
+    auto flatElements = resultElements->as<FlatVector<StringView>>();
+    nestedRows.applyToSelected([&](auto row) INLINE_LAMBDA {
+      if (flatElements->isNullAt(row)) {
+        return;
+      }
+      auto value = flatElements->valueAt(row);
+      int32_t dot = -1;
+      for (int32_t i = 0; i < value.size(); ++i) {
+        if (value.data()[i] == '.') {
+          dot = i;
+          break;
+        }
+      }
+      if (dot == -1) {
+        return;
+      }
+      bool allZeros = true;
+      for (int32_t i = dot + 1; i < value.size(); ++i) {
+        if (value.data()[i] != '0') {
+          allZeros = false;
+          break;
+        }
+      }
+      if (allZeros) {
+        flatElements->set(row, StringView(value.data(), dot));
+      }
+    });
+  }
 
   auto rawElements = resultElements->as<FlatVector<StringView>>()->rawValues();
   rows.applyToSelected([&](auto row) INLINE_LAMBDA {

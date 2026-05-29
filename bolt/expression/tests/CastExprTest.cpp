@@ -3217,6 +3217,26 @@ TEST_F(CastExprTest, mapCastStringFlinkCompatible) {
             "[{1=11, 3=10}, {0=10, 2=11}, {1=11, 1=10}]",
             "[{0=null}, {0=10}]",
         }));
+
+    std::vector<std::optional<std::vector<std::optional<Timestamp>>>>
+        arrayOfTimestampData = {
+            std::vector<std::optional<Timestamp>>{
+                Timestamp(946729316, 0),
+                Timestamp(946729316, 123),
+                std::nullopt},
+            std::vector<std::optional<Timestamp>>{
+                Timestamp(946729316, 129900000)},
+            std::nullopt,
+        };
+    auto arrayOfTimestamp = makeNullableArrayVector<Timestamp>(
+        arrayOfTimestampData, ARRAY(TIMESTAMP()));
+    testCast(
+        arrayOfTimestamp,
+        makeNullableFlatVector<StringView>({
+            "[2000-01-01 12:21:56, 2000-01-01 12:21:56.000000123, null]",
+            "[2000-01-01 12:21:56.1299]",
+            std::nullopt,
+        }));
   };
 
   setFlinkCompatible(true);
