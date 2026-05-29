@@ -56,6 +56,12 @@ TEST(BufferManagerApiTest, MemoryTagHasStableNames) {
   EXPECT_STREQ("Testing", toString(MemoryTag::kTesting));
 }
 
+TEST(BufferManagerApiTest, AllocateSizeMapsToStableByteSizes) {
+  EXPECT_EQ(256 * 1024, allocateSizeBytes(AllocateSize::kSmall));
+  EXPECT_EQ(1024 * 1024, allocateSizeBytes(AllocateSize::kMedium));
+  EXPECT_EQ(4 * 1024 * 1024, allocateSizeBytes(AllocateSize::kLarge));
+}
+
 TEST(BufferManagerHandleTest, BlockHandleExposesSizeAndTag) {
   auto block = testingCreateBlockHandle(4096, MemoryTag::kTesting);
   EXPECT_EQ(4096, block->size());
@@ -114,7 +120,7 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
 
   EXPECT_EQ(4096, bm->reclaimableBytes());
   try {
-    EXPECT_EQ(4096, bm->ReclaimForTest(4096));
+    EXPECT_EQ(4096, bm->Reclaim(4096));
   } catch (const std::exception& e) {
     if (IsIoUringUnavailable(e)) {
       GTEST_SKIP() << e.what();
@@ -137,7 +143,7 @@ TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
   }
 
   try {
-    (void)bm->ReclaimForTest(4096);
+    (void)bm->Reclaim(4096);
   } catch (const std::exception& e) {
     if (!IsIoUringUnavailable(e)) {
       throw;
@@ -145,7 +151,7 @@ TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
     EXPECT_EQ(4096, bm->reclaimableBytes());
 
     try {
-      (void)bm->ReclaimForTest(4096);
+      (void)bm->Reclaim(4096);
     } catch (const std::exception& second) {
       if (!IsIoUringUnavailable(second)) {
         throw;
@@ -168,7 +174,7 @@ TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {
     std::memset(handle.Ptr(), 11, block->size());
   }
   try {
-    ASSERT_EQ(4096, bm->ReclaimForTest(4096));
+    ASSERT_EQ(4096, bm->Reclaim(4096));
   } catch (const std::exception& e) {
     if (IsIoUringUnavailable(e)) {
       GTEST_SKIP() << e.what();

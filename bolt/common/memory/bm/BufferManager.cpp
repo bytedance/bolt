@@ -81,6 +81,14 @@ BufferHandle BufferManager::Allocate(
   return MakeHandle(handle);
 }
 
+bool BufferManager::MaybeReserve(size_t size) {
+  return pool_->maybeReserve(size);
+}
+
+void BufferManager::ReleaseUnusedReservation() {
+  pool_->release();
+}
+
 BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
   BOLT_CHECK_NOT_NULL(block);
   auto& memory = *block->memory_;
@@ -141,7 +149,7 @@ void BufferManager::Prefetch(
   }
 }
 
-uint64_t BufferManager::ReclaimForTest(uint64_t targetBytes) {
+uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   uint64_t reclaimed = 0;
   while (targetBytes == 0 || reclaimed < targetBytes) {
     auto memory = evictionQueue_->PopEvictable();

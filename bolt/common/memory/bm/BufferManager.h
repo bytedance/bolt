@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/file/FileBlockAllocator.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
@@ -42,12 +43,14 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
       size_t size,
       MemoryTag tag,
       std::shared_ptr<BlockHandle>* block = nullptr);
+  bool MaybeReserve(size_t size);
+  void ReleaseUnusedReservation();
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
   std::vector<BufferHandle> BatchPin(
       std::span<const std::shared_ptr<BlockHandle>> blocks);
   void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks) noexcept;
 
-  uint64_t ReclaimForTest(uint64_t targetBytes);
+  uint64_t Reclaim(uint64_t targetBytes);
   uint64_t reclaimableBytes() const;
   BufferManagerStats stats() const;
 
