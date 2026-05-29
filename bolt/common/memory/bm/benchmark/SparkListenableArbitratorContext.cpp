@@ -23,18 +23,6 @@ int64_t nextTaskAttemptId() {
   return id++;
 }
 
-void initializeExecutionMemoryPool(
-    int64_t memoryLimitBytes,
-    int64_t minMemoryMaxWaitMs) {
-  BOLT_CHECK_GT(memoryLimitBytes, 0);
-  if (!sparksql::ExecutionMemoryPool::inited()) {
-    sparksql::ExecutionMemoryPool::init(
-        true, memoryLimitBytes, 1, {}, minMemoryMaxWaitMs);
-    return;
-  }
-  sparksql::ExecutionMemoryPool::testingResetPoolSize(memoryLimitBytes);
-}
-
 class AutomaticReclaimSpiller final : public sparksql::Spiller {
  public:
   explicit AutomaticReclaimSpiller(std::function<int64_t(int64_t)> spill)
@@ -64,8 +52,12 @@ class AutomaticReclaimSpiller final : public sparksql::Spiller {
 SparkListenableArbitratorContext::SparkListenableArbitratorContext(
     SparkListenableArbitratorContextOptions options)
     : options_(std::move(options)) {
-  initializeExecutionMemoryPool(
-      options_.memoryLimitBytes, options_.minMemoryMaxWaitMs);
+  if (options_.initializeExecutionMemoryPool) {
+    initializeExecutionMemoryPool(
+        options_.memoryLimitBytes,
+        options_.minMemoryMaxWaitMs,
+        options_.maxTaskNumber);
+  }
 
   taskMemoryManager_ = std::make_shared<sparksql::TaskMemoryManager>(
       sparksql::ExecutionMemoryPool::instance(), nextTaskAttemptId());
@@ -113,7 +105,29 @@ void SparkListenableArbitratorContext::installAutomaticReclaimSpill() {
 
 SparkListenableArbitratorContextStats
 SparkListenableArbitratorContext::stats() const {
+  std::lock_guard<std::mutex> lock(statsMutex_);
   return stats_;
+}
+
+void SparkListenableArbitratorContext::initializeExecutionMemoryPool(
+    int64_t memoryLimitBytes,
+    int64_t minMemoryMaxWaitMs,
+    int32_t maxTaskNumber) {
+  BOLT_CHECK_GT(memoryLimitBytes, 0);
+  BOLT_CHECK_GT(maxTaskNumber, 0);
+  if (!sparksql::ExecutionMemoryPool::inited()) {
+    sparksql::ExecutionMemoryPool::init(
+        true, memoryLimitBytes, maxTaskNumber, {}, minMemoryMaxWaitMs);
+    return;
+  }
+  BOLT_CHECK_GE(
+      sparksql::ExecutionMemoryPool::instance()->maxTaskNumber(),
+      maxTaskNumber,
+      "ExecutionMemoryPool is already initialized with maxTaskNumber {}, "
+      "which is smaller than requested maxTaskNumber {}",
+      sparksql::ExecutionMemoryPool::instance()->maxTaskNumber(),
+      maxTaskNumber);
+  sparksql::ExecutionMemoryPool::testingResetPoolSize(memoryLimitBytes);
 }
 
 int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
@@ -124,48 +138,75 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
   }
 
   const auto start = std::chrono::steady_clock::now();
-  ++stats_.automaticSpillTriggers;
-  stats_.automaticSpillRequestedBytes += static_cast<uint64_t>(size);
+  {
+    std::lock_guard<std::mutex> lock(statsMutex_);
+    ++stats_.automaticSpillTriggers;
+    stats_.automaticSpillRequestedBytes += static_cast<uint64_t>(size);
+  }
 
   auto manager = holder_->getManager();
   BOLT_CHECK_NOT_NULL(manager);
+  auto aggregatePool = manager->getAggregateMemoryPool();
+  BOLT_CHECK_NOT_NULL(aggregatePool);
   VLOG(1) << "BM sort spillFixedSize begin, requested_bytes=" << size
-          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
+          << ", aggregate_pool=" << aggregatePool->toString();
+  MemoryReclaimer::Stats reclaimStats;
+  uint64_t reclaimed = 0;
+  {
+    ScopedMemoryArbitrationContext arbitrationContext{aggregatePool.get()};
+    reclaimed = aggregatePool->reclaim(
+        static_cast<uint64_t>(size),
+        static_cast<uint64_t>(options_.minMemoryMaxWaitMs),
+        reclaimStats);
+  }
+  {
+    std::lock_guard<std::mutex> lock(statsMutex_);
+    stats_.automaticSpillReclaimedBytes += reclaimed;
+  }
+  VLOG(1) << "BM sort spillFixedSize after local reclaim"
+          << ", requested_bytes=" << size
+          << ", reclaimed_bytes=" << reclaimed
+          << ", aggregate_pool=" << aggregatePool->toString();
   const auto shrunken = manager->shrink(size);
-  stats_.automaticSpillShrunkenBytes += static_cast<uint64_t>(shrunken);
+  {
+    std::lock_guard<std::mutex> lock(statsMutex_);
+    stats_.automaticSpillShrunkenBytes += static_cast<uint64_t>(shrunken);
+  }
   const auto remaining = size - shrunken;
   VLOG(1) << "BM sort spillFixedSize after shrink, requested_bytes=" << size
           << ", shrunken_bytes=" << shrunken
           << ", remaining_bytes=" << remaining
-          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
+          << ", aggregate_pool=" << aggregatePool->toString();
   if (remaining <= 0) {
-    stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
-    stats_.automaticSpillTimeUs +=
+    const auto elapsedUs =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start)
             .count();
+    {
+      std::lock_guard<std::mutex> lock(statsMutex_);
+      stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
+      stats_.automaticSpillTimeUs += elapsedUs;
+    }
     VLOG(1) << "BM sort spillFixedSize end after shrink, returned_bytes="
             << shrunken;
     return shrunken;
   }
 
-  const auto reclaimed =
-      manager->getMemoryManager()->shrinkPools(static_cast<uint64_t>(remaining));
-  stats_.automaticSpillReclaimedBytes += reclaimed;
-  const auto cappedReclaimed = std::min<uint64_t>(
-      reclaimed, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
-  const auto returned = shrunken + static_cast<int64_t>(cappedReclaimed);
-  stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(returned);
-  stats_.automaticSpillTimeUs +=
+  const auto elapsedUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - start)
           .count();
-  VLOG(1) << "BM sort spillFixedSize end, requested_bytes=" << size
+  {
+    std::lock_guard<std::mutex> lock(statsMutex_);
+    stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
+    stats_.automaticSpillTimeUs += elapsedUs;
+  }
+  VLOG(1) << "BM sort spillFixedSize end after local shrink only"
+          << ", requested_bytes=" << size
           << ", shrunken_bytes=" << shrunken
-          << ", reclaimed_bytes=" << reclaimed
-          << ", returned_bytes=" << returned
-          << ", aggregate_pool=" << manager->getAggregateMemoryPool()->toString();
-  return returned;
+          << ", remaining_bytes=" << remaining
+          << ", aggregate_pool=" << aggregatePool->toString();
+  return shrunken;
 }
 
 } // namespace bytedance::bolt::memory::bm
