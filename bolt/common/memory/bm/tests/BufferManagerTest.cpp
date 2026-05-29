@@ -190,4 +190,118 @@ TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {
   EXPECT_EQ(0, bm->stats().prefetchSubmitFailures);
 }
 
+TEST_F(BufferManagerTest, StatsTrackPinnedAndUnpinnedResidentBytes) {
+  auto bm = makeBufferManager("stats-resident");
+  std::shared_ptr<BlockHandle> block;
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+
+  auto stats = bm->stats();
+  EXPECT_EQ(1, stats.allocatedBlocks);
+  EXPECT_EQ(1, stats.liveBlocks);
+  EXPECT_EQ(4096, stats.pinnedResidentBytes);
+  EXPECT_EQ(0, stats.unpinnedResidentBytes);
+  EXPECT_EQ(0, stats.evictionQueueSize);
+
+  handle = BufferHandle{};
+  stats = bm->stats();
+  EXPECT_EQ(0, stats.pinnedResidentBytes);
+  EXPECT_EQ(4096, stats.unpinnedResidentBytes);
+  EXPECT_EQ(1, stats.evictionQueueSize);
+}
+
+TEST_F(BufferManagerTest, StatsDropTempBlockWhenLastHandleIsDestroyed) {
+  auto bm = makeBufferManager("stats-temp-destroy");
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    auto stats = bm->stats();
+    EXPECT_EQ(1, stats.liveBlocks);
+    EXPECT_EQ(4096, stats.pinnedResidentBytes);
+  }
+
+  auto stats = bm->stats();
+  EXPECT_EQ(0, stats.liveBlocks);
+  EXPECT_EQ(0, stats.pinnedResidentBytes);
+  EXPECT_EQ(0, stats.unpinnedResidentBytes);
+}
+
+TEST_F(BufferManagerTest, TagStatsTrackAllocationSource) {
+  auto bm = makeBufferManager("tag-stats");
+  std::shared_ptr<BlockHandle> sortBlock;
+  std::shared_ptr<BlockHandle> aggBlock;
+  auto sortHandle = bm->Allocate(4096, MemoryTag::kSort, &sortBlock);
+  auto aggHandle = bm->Allocate(8192, MemoryTag::kAggregation, &aggBlock);
+  sortHandle = BufferHandle{};
+
+  const auto tagStats = bm->tagStats();
+  const auto findTag = [&](MemoryTag tag) -> const BufferManagerTagStats* {
+    for (const auto& stats : tagStats) {
+      if (stats.tag == tag) {
+        return &stats;
+      }
+    }
+    return nullptr;
+  };
+
+  const auto* sortStats = findTag(MemoryTag::kSort);
+  ASSERT_NE(nullptr, sortStats);
+  EXPECT_EQ(1, sortStats->allocatedBlocks);
+  EXPECT_EQ(1, sortStats->liveBlocks);
+  EXPECT_EQ(4096, sortStats->residentBytes);
+  EXPECT_EQ(4096, sortStats->unpinnedResidentBytes);
+
+  const auto* aggStats = findTag(MemoryTag::kAggregation);
+  ASSERT_NE(nullptr, aggStats);
+  EXPECT_EQ(1, aggStats->allocatedBlocks);
+  EXPECT_EQ(1, aggStats->liveBlocks);
+  EXPECT_EQ(8192, aggStats->residentBytes);
+  EXPECT_EQ(8192, aggStats->pinnedResidentBytes);
+}
+
+TEST_F(BufferManagerTest, StatsTrackSpillAndReadback) {
+  auto bm = makeBufferManager("stats-spill-read");
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    std::memset(handle.Ptr(), 17, block->size());
+  }
+
+  try {
+    ASSERT_EQ(4096, bm->Reclaim(4096));
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  auto stats = bm->stats();
+  EXPECT_EQ(0, stats.unpinnedResidentBytes);
+  EXPECT_EQ(4096, stats.spilledBytes);
+  EXPECT_EQ(4096, stats.reclaimedBytes);
+  EXPECT_EQ(1, stats.reclaimCount);
+  EXPECT_EQ(1, stats.spillWriteCount);
+  EXPECT_EQ(4096, stats.spillWriteBytes);
+
+  auto repin = bm->Pin(block);
+  EXPECT_EQ(17, repin.Ptr()[0]);
+
+  stats = bm->stats();
+  EXPECT_EQ(4096, stats.pinnedResidentBytes);
+  EXPECT_EQ(0, stats.spilledBytes);
+  EXPECT_EQ(1, stats.spillReadCount);
+  EXPECT_EQ(4096, stats.spillReadBytes);
+}
+
+TEST_F(BufferManagerTest, DebugStringContainsCoreCounters) {
+  auto bm = makeBufferManager("debug-string");
+  std::shared_ptr<BlockHandle> block;
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+  handle = BufferHandle{};
+
+  const auto debug = bm->debugString();
+  EXPECT_NE(std::string::npos, debug.find("allocated_blocks=1"));
+  EXPECT_NE(std::string::npos, debug.find("unpinned_resident_bytes=4096"));
+  EXPECT_NE(std::string::npos, debug.find("tag=Testing"));
+}
+
 } // namespace bytedance::bolt::memory::bm

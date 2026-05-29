@@ -7,6 +7,7 @@ add_library(
   BlockHandle.cpp
   BufferHandle.cpp
   BufferManager.cpp
+  BufferManagerObservability.cpp
   BufferManagerReclaimer.cpp
   EvictionQueue.cpp
   MemoryTag.cpp

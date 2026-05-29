@@ -9,9 +9,15 @@ namespace bytedance::bolt::memory::bm {
 
 class EvictionQueue {
  public:
+  struct Stats {
+    uint64_t size{0};
+    uint64_t staleEntries{0};
+  };
+
   void Add(const std::shared_ptr<BlockMemory>& block);
   std::shared_ptr<BlockMemory> PopEvictable();
   bool empty() const;
+  Stats stats() const;
 
  private:
   struct Entry {
@@ -24,6 +30,7 @@ class EvictionQueue {
       uint64_t sequence);
 
   std::deque<Entry> queue_;
+  uint64_t staleEntries_{0};
 };
 
 } // namespace bytedance::bolt::memory::bm

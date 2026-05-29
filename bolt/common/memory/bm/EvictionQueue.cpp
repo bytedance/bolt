@@ -15,12 +15,17 @@ std::shared_ptr<BlockMemory> EvictionQueue::PopEvictable() {
     if (IsEvictable(block, entry.sequence)) {
       return block;
     }
+    ++staleEntries_;
   }
   return nullptr;
 }
 
 bool EvictionQueue::empty() const {
   return queue_.empty();
+}
+
+EvictionQueue::Stats EvictionQueue::stats() const {
+  return Stats{queue_.size(), staleEntries_};
 }
 
 bool EvictionQueue::IsEvictable(
