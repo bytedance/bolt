@@ -11,7 +11,7 @@ namespace bytedance::bolt::memory::bm {
 
 struct DiskIoSchedulerConfig {
   uint32_t ringDepth{256};
-  std::array<uint32_t, kIoPriorityCount> priorityWeights{{8, 4, 1}};
+  std::array<uint32_t, kIoPriorityCount> priorityWeights{{4, 2, 1}};
   DepthControlConfig depthControl;
   bool enableStatsLogging{false};
   std::chrono::milliseconds statsLogInterval{std::chrono::seconds(10)};
