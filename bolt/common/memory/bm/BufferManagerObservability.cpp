@@ -43,6 +43,11 @@ std::string toDebugString(
       << ", spill_read_count=" << stats.spillReadCount
       << ", spill_write_bytes=" << stats.spillWriteBytes
       << ", spill_read_bytes=" << stats.spillReadBytes
+      << ", spill_physical_write_bytes=" << stats.spillPhysicalWriteBytes
+      << ", spill_physical_read_bytes=" << stats.spillPhysicalReadBytes
+      << ", spill_compressed_blocks=" << stats.spillCompressedBlocks
+      << ", spill_compression_time_us=" << stats.spillCompressionTimeUs
+      << ", spill_decompression_time_us=" << stats.spillDecompressionTimeUs
       << ", file_allocate_failures=" << stats.fileAllocateFailures
       << ", file_free_failures=" << stats.fileFreeFailures
       << ", read_io_failures=" << stats.readIoFailures

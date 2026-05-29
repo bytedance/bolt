@@ -85,14 +85,12 @@ BufferManager::BufferManager(BufferManagerConfig config)
 BufferManager::~BufferManager() = default;
 
 void BufferManager::Initialize(MemoryPool& parent) {
-  allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
-  BOLT_CHECK_NOT_NULL(allocator_);
-
   // v1 keeps the default thread-safe leaf pool. For strictly thread-local BM
   // instances this can be optimized to addLeafChild(name, false) later.
   pool_ = parent.addLeafChild(config_.poolName);
   BOLT_CHECK_NOT_NULL(pool_);
-  spillStore_ = std::make_unique<SpillStore>(allocator_, pool_.get());
+  spillStore_ =
+      std::make_unique<SpillStore>(config_.spillStoreConfig, pool_.get());
   pool_->setReclaimer(
       std::make_unique<BufferManagerReclaimer>(weak_from_this()));
 }
@@ -379,24 +377,24 @@ BufferHandle BufferManager::PinPrefetching(
     const std::shared_ptr<BlockHandle>& block) {
   auto& memory = *block->memory_;
   BOLT_CHECK(memory.prefetchFuture.has_value());
-  auto result = memory.prefetchFuture->get();
+  auto read = memory.prefetchFuture->get();
   memory.prefetchFuture.reset();
   BOLT_CHECK_GE(stats_.prefetchingBytes, memory.size);
   stats_.prefetchingBytes -= memory.size;
   auto& tagStats = MutableTagStats(memory.tag);
   BOLT_CHECK_GE(tagStats.prefetchingBytes, memory.size);
   tagStats.prefetchingBytes -= memory.size;
-  if (!result.ok()) {
+  if (!read.ok()) {
     ++stats_.prefetchIoFailures;
     ++stats_.readIoFailures;
     memory.state = BlockMemoryState::kSpilled;
-    ThrowIoFailure("read", result, memory.id);
+    ThrowIoFailure("read", read.io, memory.id);
   }
 
   BOLT_CHECK(memory.extent.has_value());
   auto oldExtent = std::move(*memory.extent);
   memory.extent.reset();
-  memory.payload = std::move(result.buffer);
+  memory.payload = std::move(read.io.buffer);
   memory.state = BlockMemoryState::kInMemory;
   memory.pinCount = 1;
   BOLT_CHECK_GE(stats_.spilledBytes, memory.size);
@@ -405,6 +403,8 @@ BufferHandle BufferManager::PinPrefetching(
   ++stats_.pinReadCount;
   ++stats_.spillReadCount;
   stats_.spillReadBytes += memory.size;
+  stats_.spillPhysicalReadBytes += read.physicalBytes;
+  stats_.spillDecompressionTimeUs += read.decompressionTimeUs;
   BOLT_CHECK_GE(tagStats.spilledBytes, memory.size);
   tagStats.spilledBytes -= memory.size;
   tagStats.residentBytes += memory.size;
@@ -425,7 +425,7 @@ void BufferManager::SubmitRead(
   BOLT_CHECK(memory.extent.has_value());
 
   memory.prefetchFuture =
-      spillStore_->SubmitRead(*memory.extent, memory.size, priority);
+      spillStore_->SubmitReadBlock(*memory.extent, memory.size, priority);
   memory.state = BlockMemoryState::kPrefetching;
   stats_.prefetchingBytes += memory.size;
   MutableTagStats(memory.tag).prefetchingBytes += memory.size;
@@ -448,12 +448,6 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
           << " pool_available_reservation=" << pool_->availableReservation()
           << " pool_releasable_reservation=" << pool_->releasableReservation()
           << " bm=" << debugString();
-  auto allocation = spillStore_->AllocateExtent(memory->size);
-  if (!allocation.ok()) {
-    ++stats_.fileAllocateFailures;
-    ThrowFileAllocateFailure(allocation, memory->id);
-  }
-
   auto payload = std::move(*memory->payload);
   memory->payload.reset();
   memory->state = BlockMemoryState::kSpilling;
@@ -475,22 +469,18 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
 
   IoResult result;
   try {
-    result =
-        spillStore_->Write(allocation.extent, payload, config_.writePriority);
+    auto write =
+        spillStore_->WriteBlock(payload, memory->size, config_.writePriority);
+    result = std::move(write.io);
+    if (result.ok()) {
+      memory->extent = std::move(write.extent);
+      stats_.spillPhysicalWriteBytes += write.physicalBytes;
+      stats_.spillCompressionTimeUs += write.compressionTimeUs;
+      if (write.compressed) {
+        ++stats_.spillCompressedBlocks;
+      }
+    }
   } catch (...) {
-    auto freeResult = spillStore_->FreeExtent(allocation.extent);
-    if (!freeResult.ok()) {
-      ++stats_.fileFreeFailures;
-      LOG(FATAL)
-          << "BM failed to free extent after spill write exception, block_id="
-          << memory->id << ", file_error=" << static_cast<int>(freeResult.error)
-          << ", native_error=" << freeResult.native_error_code;
-    }
-    if (!payload.valid()) {
-      LOG(FATAL)
-          << "BM spill write threw after payload ownership was moved, block_id="
-          << memory->id;
-    }
     memory->payload = std::move(payload);
     memory->state = BlockMemoryState::kInMemory;
     stats_.spillingBytes -= memory->size;
@@ -502,16 +492,8 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   }
 
   if (!result.ok()) {
-    auto freeResult = spillStore_->FreeExtent(allocation.extent);
-    if (!freeResult.ok()) {
-      ++stats_.fileFreeFailures;
-      LOG(FATAL)
-          << "BM failed to free extent after failed spill write, block_id="
-          << memory->id << ", file_error=" << static_cast<int>(freeResult.error)
-          << ", native_error=" << freeResult.native_error_code;
-    }
     ++stats_.writeIoFailures;
-    memory->payload = std::move(result.buffer);
+    memory->payload = std::move(payload);
     memory->state = BlockMemoryState::kInMemory;
     stats_.spillingBytes -= memory->size;
     stats_.unpinnedResidentBytes += memory->size;
@@ -521,7 +503,6 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
     ThrowIoFailure("write", result, memory->id);
   }
 
-  memory->extent = spillStore_->OwnExtent(allocation.extent);
   memory->state = BlockMemoryState::kSpilled;
   stats_.spillingBytes -= memory->size;
   stats_.spilledBytes += memory->size;

@@ -25,14 +25,22 @@ class BufferManagerTest : public testing::Test {
         MemoryReclaimer::create());
   }
 
-  std::shared_ptr<BufferManager> makeBufferManager(const std::string& name) {
+  std::shared_ptr<BufferManager> makeBufferManager(
+      const std::string& name,
+      compress::CompressionKind compressionKind =
+          compress::CompressionKind::kLz4,
+      size_t minCompressBytes = 256 * 1024) {
     const auto directory =
         test::UniqueTempDir(fmt::format("bolt-bm-buffer-manager-{}", name));
     std::filesystem::remove_all(directory);
 
     BufferManagerConfig config;
     config.poolName = fmt::format("bm-{}", name);
-    config.fileAllocatorConfig = test::ValidConfigWithDirectory(directory);
+    config.spillStoreConfig.fileAllocatorConfig =
+        test::ValidConfigWithDirectory(directory);
+    config.spillStoreConfig.compressionConfig.kind = compressionKind;
+    config.spillStoreConfig.compressionConfig.minCompressBytes =
+        minCompressBytes;
     return BufferManager::Create(*root_, std::move(config));
   }
 
@@ -291,6 +299,67 @@ TEST_F(BufferManagerTest, StatsTrackSpillAndReadback) {
   EXPECT_EQ(1, stats.spillReadCount);
   EXPECT_EQ(4096, stats.spillReadBytes);
 }
+
+TEST_F(BufferManagerTest, DefaultCompressionSpillsAndReadsBackPayload) {
+  auto bm =
+      makeBufferManager("default-compression", compress::CompressionKind::kLz4, 1);
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(256 * 1024, MemoryTag::kTesting, &block);
+    std::memset(handle.Ptr(), 'a', block->size());
+  }
+
+  try {
+    ASSERT_EQ(256 * 1024, bm->Reclaim(256 * 1024));
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  auto stats = bm->stats();
+  EXPECT_EQ(1, stats.spillCompressedBlocks);
+  EXPECT_LT(stats.spillPhysicalWriteBytes, stats.spillWriteBytes);
+
+  auto repin = bm->Pin(block);
+  EXPECT_EQ('a', repin.Ptr()[0]);
+  EXPECT_EQ('a', repin.Ptr()[block->size() - 1]);
+}
+
+class BufferManagerCompressionKindTest
+    : public BufferManagerTest,
+      public testing::WithParamInterface<compress::CompressionKind> {};
+
+TEST_P(BufferManagerCompressionKindTest, CompressionKindSpillsAndReadsBack) {
+  auto bm = makeBufferManager("compression-kind", GetParam(), 1);
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(128 * 1024, MemoryTag::kTesting, &block);
+    std::memset(handle.Ptr(), 21, block->size());
+  }
+
+  try {
+    ASSERT_EQ(128 * 1024, bm->Reclaim(128 * 1024));
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  auto repin = bm->Pin(block);
+  EXPECT_EQ(21, repin.Ptr()[0]);
+  EXPECT_EQ(21, repin.Ptr()[block->size() - 1]);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Algorithms,
+    BufferManagerCompressionKindTest,
+    testing::Values(
+        compress::CompressionKind::kLz4,
+        compress::CompressionKind::kZstd,
+        compress::CompressionKind::kSnappy));
 
 TEST_F(BufferManagerTest, DebugStringContainsCoreCounters) {
   auto bm = makeBufferManager("debug-string");

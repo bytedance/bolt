@@ -510,7 +510,8 @@ WorkerResult runWorker(
 
   BufferManagerConfig config;
   config.poolName = "bm-parallel-sort-" + std::to_string(workerIndex);
-  config.fileAllocatorConfig = fileAllocatorConfig(spillDir.string());
+  config.spillStoreConfig.fileAllocatorConfig =
+      fileAllocatorConfig(spillDir.string());
   auto manager = BufferManager::Create(root, std::move(config));
 
   const auto blockBytes = allocateSizeBytes(allocateSize);

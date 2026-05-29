@@ -564,7 +564,8 @@ int runBenchmark() {
 
   BufferManagerConfig config;
   config.poolName = "bm-sort-benchmark";
-  config.fileAllocatorConfig = fileAllocatorConfig(FLAGS_bm_sort_spill_dir);
+  config.spillStoreConfig.fileAllocatorConfig =
+      fileAllocatorConfig(FLAGS_bm_sort_spill_dir);
   auto manager = BufferManager::Create(*root, std::move(config));
   memoryContext.installAutomaticReclaimSpill();
 

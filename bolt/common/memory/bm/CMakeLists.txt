@@ -1,5 +1,6 @@
 add_subdirectory(io)
 add_subdirectory(file)
+add_subdirectory(compress)
 
 add_library(
   bolt_memory_bm
@@ -22,6 +23,7 @@ target_link_libraries(
   bolt_memory_bm
   PUBLIC bolt_memory_bm_file
          bolt_memory_bm_io
+         bolt_memory_bm_compress
          bolt_memory
          bolt_common_base
          bolt_common_config

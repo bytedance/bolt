@@ -32,14 +32,15 @@ using namespace bytedance::bolt::memory::bm;
 ```cpp
 BufferManagerConfig config;
 config.poolName = "sort-buffer-manager"; // 同一个父 pool 下必须唯一
-config.fileAllocatorConfig.directory = "/tmp/bolt-bm-sort";
-config.fileAllocatorConfig.bucket_sizes = {
+config.spillStoreConfig.fileAllocatorConfig.directory = "/tmp/bolt-bm-sort";
+config.spillStoreConfig.fileAllocatorConfig.bucket_sizes = {
     static_cast<int64_t>(allocateSizeBytes(AllocateSize::kSmall)),
     static_cast<int64_t>(allocateSizeBytes(AllocateSize::kMedium)),
     static_cast<int64_t>(allocateSizeBytes(AllocateSize::kLarge)),
 };
-config.fileAllocatorConfig.file_size_limit_bytes = 1024LL * 1024LL * 1024LL;
-config.fileAllocatorConfig.max_open_files_per_bucket = 64;
+config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
+    1024LL * 1024LL * 1024LL;
+config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 64;
 
 auto manager = BufferManager::Create(parentPool, std::move(config));
 ```
