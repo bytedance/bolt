@@ -148,8 +148,8 @@ jobs:
     - name: Checkout gluten
       uses: actions/checkout@v6
       with:
-        repository: WangGuangxin/gluten
-        ref: add_bolt_backend
+        repository: ZacBlanco/incubator-gluten
+        ref: update-duckdb-dependency
         path: gluten-src
 
     - name: Build gluten
