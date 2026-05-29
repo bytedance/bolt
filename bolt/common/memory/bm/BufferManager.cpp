@@ -1,12 +1,12 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/MemoryArbitrator.h"
-#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/BufferManagerIo.h"
+#include "bolt/common/memory/bm/BufferManagerReclaimer.h"
+#include "bolt/common/memory/bm/EvictionQueue.h"
 
 #include <glog/logging.h>
 
-#include <algorithm>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
@@ -35,56 +35,23 @@ namespace {
       result.bytes);
 }
 
-class BufferManagerReclaimer final : public memory::MemoryReclaimer {
- public:
-  explicit BufferManagerReclaimer(std::weak_ptr<BufferManager> manager)
-      : memory::MemoryReclaimer(0), manager_(std::move(manager)) {}
-
-  bool reclaimableBytes(
-      const MemoryPool& /*pool*/,
-      uint64_t& reclaimableBytes) const override {
-    auto manager = manager_.lock();
-    if (!manager) {
-      reclaimableBytes = 0;
-      return false;
-    }
-    reclaimableBytes = manager->reclaimableBytes();
-    return reclaimableBytes > 0;
-  }
-
-  uint64_t reclaim(
-      MemoryPool* /*pool*/,
-      uint64_t targetBytes,
-      uint64_t maxWaitMs,
-      Stats& /*stats*/) override {
-    // v1 intentionally ignores maxWaitMs. Reclaim writes are synchronous and
-    // timeout budgeting will be added with the production arbitration policy.
-    (void)maxWaitMs;
-    auto manager = manager_.lock();
-    if (!manager) {
-      return 0;
-    }
-    return manager->ReclaimForTest(targetBytes);
-  }
-
- private:
-  std::weak_ptr<BufferManager> manager_;
-};
-
 } // namespace
 
 std::shared_ptr<BufferManager> BufferManager::Create(
     MemoryPool& parent,
     BufferManagerConfig config) {
   BOLT_CHECK(!config.poolName.empty());
-  auto manager = std::shared_ptr<BufferManager>(
-      new BufferManager(std::move(config)));
+  auto manager =
+      std::shared_ptr<BufferManager>(new BufferManager(std::move(config)));
   manager->Initialize(parent);
   return manager;
 }
 
 BufferManager::BufferManager(BufferManagerConfig config)
-    : config_(std::move(config)) {}
+    : config_(std::move(config)),
+      evictionQueue_(std::make_unique<EvictionQueue>()) {}
+
+BufferManager::~BufferManager() = default;
 
 void BufferManager::Initialize(MemoryPool& parent) {
   allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
@@ -94,7 +61,9 @@ void BufferManager::Initialize(MemoryPool& parent) {
   // instances this can be optimized to addLeafChild(name, false) later.
   pool_ = parent.addLeafChild(config_.poolName);
   BOLT_CHECK_NOT_NULL(pool_);
-  pool_->setReclaimer(std::make_unique<BufferManagerReclaimer>(weak_from_this()));
+  io_ = std::make_unique<BufferManagerIo>(allocator_, pool_.get());
+  pool_->setReclaimer(
+      std::make_unique<BufferManagerReclaimer>(weak_from_this()));
 }
 
 BufferHandle BufferManager::Allocate(
@@ -123,7 +92,8 @@ BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
     case BlockMemoryState::kPrefetching:
       return PinPrefetching(block);
     case BlockMemoryState::kSpilling:
-      BOLT_FAIL("BM cannot pin a block while it is spilling, block_id={}", memory.id);
+      BOLT_FAIL(
+          "BM cannot pin a block while it is spilling, block_id={}", memory.id);
   }
   BOLT_FAIL("BM encountered unknown block state, block_id={}", memory.id);
 }
@@ -161,8 +131,8 @@ void BufferManager::Prefetch(
       }
     } catch (const std::exception& e) {
       ++prefetchSubmitFailures_;
-      LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id()
-                   << ": " << e.what();
+      LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id() << ": "
+                   << e.what();
     } catch (...) {
       ++prefetchSubmitFailures_;
       LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id()
@@ -173,19 +143,22 @@ void BufferManager::Prefetch(
 
 uint64_t BufferManager::ReclaimForTest(uint64_t targetBytes) {
   uint64_t reclaimed = 0;
-  while (!evictionQueue_.empty() &&
-         (targetBytes == 0 || reclaimed < targetBytes)) {
-    auto entry = evictionQueue_.front();
-    evictionQueue_.pop_front();
-
-    auto memory = entry.block.lock();
-    if (!memory || memory->evictionSequence != entry.sequence ||
-        memory->pinCount != 0 ||
-        memory->state != BlockMemoryState::kInMemory || !memory->payload) {
-      continue;
+  while (targetBytes == 0 || reclaimed < targetBytes) {
+    auto memory = evictionQueue_->PopEvictable();
+    if (!memory) {
+      break;
     }
 
-    reclaimed += SpillBlock(memory);
+    try {
+      reclaimed += SpillBlock(memory);
+    } catch (...) {
+      if (memory->pinCount == 0 &&
+          memory->state == BlockMemoryState::kInMemory &&
+          memory->payload.has_value()) {
+        evictionQueue_->Add(memory);
+      }
+      throw;
+    }
   }
 
   reclaimedBytes_ += reclaimed;
@@ -221,7 +194,7 @@ void BufferManager::Unpin(const std::shared_ptr<BlockHandle>& block) noexcept {
   if (memory.pinCount == 0 && memory.state == BlockMemoryState::kInMemory) {
     ++memory.evictionSequence;
     unpinnedResidentBytes_ += memory.size;
-    evictionQueue_.push_back({block->memory_, memory.evictionSequence});
+    evictionQueue_->Add(block->memory_);
   }
 }
 
@@ -276,34 +249,19 @@ void BufferManager::SubmitRead(
       "BM read submission expects a spilled block");
   BOLT_CHECK(memory.extent.has_value());
 
-  // Force scheduler initialization before allocating the read buffer or
-  // changing block state. If initialization fails, the block stays spilled.
-  (void)diskIoScheduler().stats();
-
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = priority;
-  request.fd = memory.extent->extent().fd;
-  request.fileOffset = memory.extent->extent().offset;
-  request.buffer = IoBuffer::allocateFromPool(pool_.get(), memory.size);
-
-  memory.prefetchFuture = diskIoScheduler().submit(std::move(request));
+  memory.prefetchFuture =
+      io_->SubmitRead(*memory.extent, memory.size, priority);
   memory.state = BlockMemoryState::kPrefetching;
 }
 
-uint64_t BufferManager::SpillBlock(
-    const std::shared_ptr<BlockMemory>& memory) {
+uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   BOLT_CHECK_NOT_NULL(memory);
   BOLT_CHECK(memory->state == BlockMemoryState::kInMemory);
   BOLT_CHECK_EQ(memory->pinCount, 0);
   BOLT_CHECK(memory->payload.has_value());
   BOLT_CHECK_GE(unpinnedResidentBytes_, memory->size);
 
-  // Force scheduler initialization before file allocation or payload movement.
-  // If initialization fails, the block remains reclaimable in memory.
-  (void)diskIoScheduler().stats();
-
-  auto allocation = allocator_->Allocate(static_cast<int64_t>(memory->size));
+  auto allocation = io_->AllocateExtent(memory->size);
   if (!allocation.ok()) {
     ThrowFileAllocateFailure(allocation, memory->id);
   }
@@ -313,21 +271,35 @@ uint64_t BufferManager::SpillBlock(
   memory->state = BlockMemoryState::kSpilling;
   unpinnedResidentBytes_ -= memory->size;
 
-  IoRequest request;
-  request.opcode = IoOpcode::Write;
-  request.priority = config_.writePriority;
-  request.fd = allocation.extent.fd;
-  request.fileOffset = allocation.extent.offset;
-  request.buffer = std::move(payload);
-
-  auto result = diskIoScheduler().submit(std::move(request)).get();
-  if (!result.ok()) {
-    auto freeResult = allocator_->Free(allocation.extent);
+  IoResult result;
+  try {
+    result = io_->Write(allocation.extent, payload, config_.writePriority);
+  } catch (...) {
+    auto freeResult = io_->FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
-      LOG(FATAL) << "BM failed to free extent after failed spill write, block_id="
-                 << memory->id
-                 << ", file_error=" << static_cast<int>(freeResult.error)
-                 << ", native_error=" << freeResult.native_error_code;
+      LOG(FATAL)
+          << "BM failed to free extent after spill write exception, block_id="
+          << memory->id << ", file_error=" << static_cast<int>(freeResult.error)
+          << ", native_error=" << freeResult.native_error_code;
+    }
+    if (!payload.valid()) {
+      LOG(FATAL)
+          << "BM spill write threw after payload ownership was moved, block_id="
+          << memory->id;
+    }
+    memory->payload = std::move(payload);
+    memory->state = BlockMemoryState::kInMemory;
+    unpinnedResidentBytes_ += memory->size;
+    throw;
+  }
+
+  if (!result.ok()) {
+    auto freeResult = io_->FreeExtent(allocation.extent);
+    if (!freeResult.ok()) {
+      LOG(FATAL)
+          << "BM failed to free extent after failed spill write, block_id="
+          << memory->id << ", file_error=" << static_cast<int>(freeResult.error)
+          << ", native_error=" << freeResult.native_error_code;
     }
     memory->payload = std::move(result.buffer);
     memory->state = BlockMemoryState::kInMemory;
@@ -335,13 +307,14 @@ uint64_t BufferManager::SpillBlock(
     ThrowIoFailure("write", result, memory->id);
   }
 
-  memory->extent = OwnedFileExtent{allocation.extent, allocator_};
+  memory->extent = io_->OwnExtent(allocation.extent);
   memory->state = BlockMemoryState::kSpilled;
   ++memory->evictionSequence;
   return memory->size;
 }
 
-BufferHandle BufferManager::MakeHandle(const std::shared_ptr<BlockHandle>& block) {
+BufferHandle BufferManager::MakeHandle(
+    const std::shared_ptr<BlockHandle>& block) {
   auto& memory = *block->memory_;
   BOLT_CHECK(memory.payload.has_value());
   BOLT_CHECK(memory.payload->valid());

@@ -6,6 +6,9 @@ add_library(
   BlockHandle.cpp
   BufferHandle.cpp
   BufferManager.cpp
+  BufferManagerIo.cpp
+  BufferManagerReclaimer.cpp
+  EvictionQueue.cpp
   MemoryTag.cpp
   OwnedFileExtent.cpp
 )
