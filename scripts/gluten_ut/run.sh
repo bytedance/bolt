@@ -35,9 +35,25 @@
 set -euo pipefail
 
 ###############################################################################
-# Maven profiles — edit here to (de)activate optional sub-systems.
+# Maven profiles. Override via env to switch Spark versions:
+#   DEFAULT_SPARK_VERSION=3.5                  (default; the version that
+#                                               gluten-parent's pom hard-
+#                                               codes as the property defaults
+#                                               for ${sparkshim.artifactId} /
+#                                               ${spark.major.version} / etc.)
+#   MVN_PROFILES='-Pspark-3.4 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17'
+#
+# When MVN_PROFILES targets a non-default spark version, run_one_suite adds
+# `-am` so gluten-parent / gluten-substrait join the per-suite reactor and
+# their property defaults get re-resolved via -P.
 ###############################################################################
-MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17)
+DEFAULT_SPARK_VERSION="${DEFAULT_SPARK_VERSION:-3.5}"
+MVN_PROFILES="${MVN_PROFILES:--Pspark-${DEFAULT_SPARK_VERSION} -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17}"
+
+MVN_AM=""
+if [[ "$MVN_PROFILES" =~ -Pspark-(3\.[0-9]+) ]]; then
+  [[ "${BASH_REMATCH[1]}" != "$DEFAULT_SPARK_VERSION" ]] && MVN_AM="-am"
+fi
 
 ###############################################################################
 # Config
@@ -53,16 +69,25 @@ MVN_PROFILES=(-Pspark-3.5 -Pspark-ut -Pbackends-bolt -Pceleborn -Pjava-17)
   exit 1
 }
 
+# Spark's AbstractCommandBuilder.getScalaVersion() reads either of these dirs
+# in source-build mode (only one allowed, otherwise "ambiguous Scala version").
+# Without it, local-cluster Worker forks die with "Cannot find any build
+# directories" before any Executor launches. The dir only has to exist — it
+# stays empty. Idempotent so safe to repeat across runs.
+mkdir -p "$SPARK_HOME/launcher/target/scala-2.12" 2> /dev/null || true
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BLACKLIST_FILE="$SCRIPT_DIR/blacklist.txt"
-SLOW_SUITES_FILE="$SCRIPT_DIR/slow_suites.txt"
-LOG_DIR="$SCRIPT_DIR/logs"
-MVN_BIN=mvn
+# Override via env to pick per-spark-version lists (e.g. blacklist-3.4.txt),
+# or to share lists across multiple bolt checkouts.
+BLACKLIST_FILE="${BLACKLIST_FILE:-$SCRIPT_DIR/blacklist.txt}"
+SLOW_SUITES_FILE="${SLOW_SUITES_FILE:-$SCRIPT_DIR/slow_suites.txt}"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
+MVN_BIN="${MVN_BIN:-mvn}"
 
 # Empirically each suite needs ~3 active threads (mvn + surefire JVM + Spark
-# internals). nproc/3 saturates CPU without thrashing. Override via JOBS.
+# internals). cpus/3 saturates CPU without thrashing. Override via JOBS.
 if [[ -z "${JOBS:-}" ]]; then
-  JOBS=$(($(nproc 2> /dev/null || echo 4) / 3))
+  JOBS=$(($(grep -c ^processor /proc/cpuinfo 2> /dev/null || echo 4) / 3))
   ((JOBS < 1)) && JOBS=1
 fi
 
@@ -93,7 +118,11 @@ command -v bwrap > /dev/null 2>&1 || {
 # Step 1/3: install jars + test-classes
 ###############################################################################
 step "Step 1/3: mvn clean install -DskipTests (-T $JOBS)"
-"$MVN_BIN" clean install -T "$JOBS" "${MVN_PROFILES[@]}" \
+# clear stale targets
+find . -path '*/target/test-classes' -prune -exec rm -rf {} + 2> /dev/null
+find . -path '*/target/scala-*/test-classes' -prune -exec rm -rf {} + 2> /dev/null
+# shellcheck disable=SC2086
+"$MVN_BIN" clean install -T "$JOBS" $MVN_PROFILES \
   -DskipTests -Dexec.skip \
   > "$LOG_DIR/_install.log" 2>&1 || {
   echo "Install step failed; see $LOG_DIR/_install.log" >&2
@@ -152,6 +181,8 @@ WORK_ROOT="$LOG_DIR/work"
 REPORTS_ROOT="$LOG_DIR/reports"
 rm -rf "$WORK_ROOT" "$REPORTS_ROOT"
 mkdir -p "$WORK_ROOT" "$REPORTS_ROOT"
+# Drop stale per-suite logs from previous runs
+find "$LOG_DIR" -maxdepth 1 -type f -name '*.log' \! -name '_*' -delete
 
 # Pre-create per-module bind mountpoints used by run_one_suite below.
 while IFS= read -r module; do
@@ -161,7 +192,7 @@ while IFS= read -r module; do
 done < <(cut -f1 "$SUITE_MAP" | sort -u)
 
 export MVN_BIN GLUTEN_HOME SPARK_HOME LOG_DIR WORK_ROOT REPORTS_ROOT
-export MVN_PROFILES_STR="${MVN_PROFILES[*]}"
+export MVN_PROFILES MVN_AM
 
 run_one_suite() {
   local module="$1" suite="$2"
@@ -180,15 +211,24 @@ run_one_suite() {
     }
   done
   # Per-suite isolation via bwrap:
-  #   --bind          : private target/surefire (booter jar) + target/surefire-reports
-  #   --tmp-overlay   : writable overlay on the module's test-classes/, so the
-  #                     shared `unit-tests-working-home/` (used as Spark warehouse +
-  #                     metastore by GlutenSQLTestsTrait.prepareWorkDir) is private
-  #                     per suite. Writes go to an invisible tmpfs; the original
-  #                     test-classes/ on disk is untouched.
-  #   --ro-bind $SPARK_HOME : re-expose SPARK_HOME, otherwise --tmpfs /tmp would hide it.
-  local overlay_args=()
-  [[ -n "$tc" ]] && overlay_args=(--overlay-src "$tc" --tmp-overlay "$tc")
+  #   --bind                : private target/surefire (booter jar) + target/surefire-reports
+  #   --bind sandbox        : full copy of test-classes/ under /tmp, with the
+  #                           conflicting `unit-tests-working-home/` (used as
+  #                           Spark warehouse + metastore by GlutenSQLTestsTrait.
+  #                           prepareWorkDir) carved out as a fresh dir per
+  #                           suite.
+  #   --ro-bind $SPARK_HOME : re-expose SPARK_HOME, otherwise --tmpfs /tmp may hide it.
+  local bind_args=()
+  local sandbox=""
+  if [[ -n "$tc" ]]; then
+    sandbox="/tmp/gluten-ut-sandbox/$suite/test-classes"
+    rm -rf "/tmp/gluten-ut-sandbox/$suite"
+    mkdir -p "$sandbox"
+    cp -a "$tc/." "$sandbox/" 2> /dev/null
+    rm -rf "$sandbox/unit-tests-working-home" 2> /dev/null
+    mkdir "$sandbox/unit-tests-working-home"
+    bind_args=(--bind "$sandbox" "$tc")
+  fi
   local rc=0
   # shellcheck disable=SC2086
   bwrap \
@@ -196,16 +236,17 @@ run_one_suite() {
     --ro-bind "$SPARK_HOME" "$SPARK_HOME" \
     --bind "$sur" "$GLUTEN_HOME/$module/target/surefire" \
     --bind "$rep" "$GLUTEN_HOME/$module/target/surefire-reports" \
-    "${overlay_args[@]}" \
+    "${bind_args[@]}" \
     --chdir "$GLUTEN_HOME" \
     "$MVN_BIN" surefire:test scalatest:test \
-    -pl "$module" \
-    $MVN_PROFILES_STR \
+    -pl "$module" $MVN_AM \
+    $MVN_PROFILES \
     -DfailIfNoTests=false -Dexec.skip -Dmaven.test.failure.ignore=true \
     -DargLine="-Dspark.test.home=$SPARK_HOME" \
     -Dtest="$suite" -DwildcardSuites="$suite" \
     -DtagsToExclude=org.apache.gluten.tags.UDFTest,org.apache.gluten.tags.EnhancedFeaturesTest,org.apache.gluten.tags.SkipTest \
     > "$log" 2>&1 || rc=$?
+  [[ -n "$sandbox" ]] && rm -rf "/tmp/gluten-ut-sandbox/$suite"
   local secs=$(($(date +%s) - t0))
   local cases
   cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
@@ -256,23 +297,29 @@ step "Summary"
 # Walk each per-suite log and emit one key per failure:
 #   <FQCN>#<case>        — scalatest "*** FAILED ***" line
 #   <FQCN>#(aborted)     — scalatest "*** ABORTED ***" line
-#   <FQCN>#(mvn-failed)  — mvn itself died before scalatest could run (e.g.
-#                          compile error, missing dep, bwrap crash); recorded
-#                          via the GLUTEN_UT_MVN_RC trailer that
-#                          run_one_suite appends to every log.
 # Each key is grep -Fxq'd against blacklist.txt; unmatched → unexpected.
 declare -A fired
 expected=0
 unexpected=0
-for log in "$LOG_DIR"/*.log; do
-  name="${log##*/}"
-  case "$name" in _*) continue ;; esac # skip _install.log, _dispatch.log
-  suite="${name%.log}"
+# Walk the suites that were actually dispatched this run (SUITE_MAP is the
+# canonical list), not $LOG_DIR/*.log — that would also pick up stale per-
+# suite logs left over from a previous run with a different profile / spark
+# version.
+while IFS=$'\t' read -r _module suite; do
+  log="$LOG_DIR/$suite.log"
+  [[ -f "$log" ]] || continue
+  # mvn-failed (rc != 0 → mvn died before scalatest could run) bypasses the
+  # blacklist: it always counts as unexpected, since blacklisting infra
+  # failures would mask real regressions across PRs.
+  rc=$(grep -m1 '^GLUTEN_UT_MVN_RC=' "$log" | cut -d= -f2)
+  if [[ -n "$rc" && "$rc" != "0" ]]; then
+    unexpected=$((unexpected + 1))
+    echo "  ! $suite#(mvn-failed)"
+    continue
+  fi
   clean=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")
   keys=$(echo "$clean" | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/'"$suite"'#\1/p')
   echo "$clean" | grep -q '\*\*\* ABORTED \*\*\*' && keys+=$'\n'"$suite#(aborted)"
-  rc=$(grep -m1 '^GLUTEN_UT_MVN_RC=' "$log" | cut -d= -f2)
-  [[ -n "$rc" && "$rc" != "0" ]] && keys+=$'\n'"$suite#(mvn-failed)"
   while IFS= read -r key; do
     [[ -z "$key" ]] && continue
     if grep -Fxq -- "$key" "$BLACKLIST_FILE"; then
@@ -283,7 +330,7 @@ for log in "$LOG_DIR"/*.log; do
       echo "  ! $key"
     fi
   done <<< "$keys"
-done
+done < "$SUITE_MAP"
 
 # Blacklist entries that didn't fire this run. If a case stays stale
 # across multiple runs it's a candidate for removal from blacklist.txt.

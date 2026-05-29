@@ -36,8 +36,7 @@ jobs:
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      # --privileged: bwrap (run.sh per-suite isolation) needs SYS_ADMIN.
-      options: --user root --init --privileged
+      options: --user root --init
       volumes:
         - /data/ccache-data:/data/ccache-data
         - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
@@ -59,21 +58,13 @@ jobs:
           ref: ${{ env.GLUTEN_REF }}
           path: gluten
 
-      - name: Install JDK 17 + build bubblewrap >=0.10 from source
+      - name: Install JDK 17 + bubblewrap
         # Full JDK (not -headless) is required: arrow's cmake JNI detection
         # needs AWT, which is only present in the full openjdk-17-jdk package.
-        # bubblewrap: Debian 12 ships 0.8.0 which lacks --overlay-src /
-        # --tmp-overlay (added in 0.10.0). run.sh uses those flags for
-        # per-suite test-classes isolation, so we build a newer release.
+        # bubblewrap is used to run each suite in a isolated environment.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends \
-            openjdk-17-jdk meson ninja-build libcap-dev pkg-config
-          git clone --depth 1 --branch v0.11.0 https://github.com/containers/bubblewrap.git /tmp/bwrap
-          meson setup /tmp/bwrap/build /tmp/bwrap --buildtype=release -Dman=disabled
-          meson compile -C /tmp/bwrap/build
-          install -m 0755 /tmp/bwrap/build/bwrap /usr/local/bin/bwrap
-          rm -rf /tmp/bwrap
+          apt-get install -y --no-install-recommends openjdk-17-jdk bubblewrap
           bwrap --version
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
@@ -82,13 +73,8 @@ jobs:
 
       - name: Align conan default profile with bolt.profile
         # bolt's Makefile installs with `-pr default -pr scripts/conan/bolt.profile`,
-        # but gluten's Makefile only uses `-pr default`. The bolt profile injects a
-        # `[tool_requires] cmake/3.31.10`, which Conan 2 folds into bolt's
-        # package_id. Without merging, gluten resolves a different package_id for
-        # bolt than `make release_spark` exported, triggering a `--build=missing`
-        # rebuild from `source()` (which clones github main, NOT the local PR
-        # bolt). Append the bolt-profile fragment to default so both invocations
-        # agree on bolt's package_id and the cached binary is reused.
+        # but gluten's Makefile only uses `-pr default`. merge to default so that gluten build
+        # with same profile with bolt.
         run: cat scripts/conan/bolt.profile >> ~/.conan2/profiles/default
 
       - name: Build local bolt (make release_spark)
@@ -99,87 +85,51 @@ jobs:
         run: make release
 
       - name: Build gluten-arrow if jars missing or patches changed
-        # arrow jars live on the /data/bolt-gluten-ut-arrow host volume
-        # (mounted at /root/.m2/repository/org/apache/arrow). A stamp file
-        # records the hash of the arrow patches + build script so we
-        # rebuild only when those actually change
         working-directory: ${{ github.workspace }}/gluten
         run: |
-          STAMP=/root/.m2/repository/org/apache/arrow/.gluten-15.0.0.stamp
+          ARROW_DIR=/root/.m2/repository/org/apache/arrow
+          STAMP=$ARROW_DIR/.gluten-15.0.0.stamp
           KEY=$(sha256sum ep/build-velox/src/modify_arrow*.patch \
                           ep/build-velox/src/cmake-compatibility.patch \
                           dev/build_arrow.sh 2>/dev/null \
                 | sha256sum | cut -d' ' -f1)
-          if [[ -f $STAMP && "$(cat $STAMP)" == "$KEY" ]] \
-             && ls /root/.m2/repository/org/apache/arrow/arrow-dataset/15.0.0-gluten/*.jar > /dev/null 2>&1; then
-            echo "arrow jars match stamp $KEY — skip rebuild"
-          else
-            bash dev/build_arrow.sh
-            echo "$KEY" > "$STAMP"
-          fi
+          mkdir -p "$ARROW_DIR"
+          (
+            flock -x 200
+            if [[ -f $STAMP && "$(cat $STAMP)" == "$KEY" ]] \
+               && ls $ARROW_DIR/arrow-dataset/15.0.0-gluten/*.jar > /dev/null 2>&1; then
+              echo "arrow jars match stamp $KEY — skip rebuild"
+            else
+              bash dev/build_arrow.sh
+              echo "$KEY" > "$STAMP"
+            fi
+          ) 200> "$ARROW_DIR/.lock"
 
       - name: Populate Spark binary + source SQL test resources on /data
         # Layout under /data/bolt-gluten-ut-spark/:
-        #   spark_home/                              — Spark 3.5.5 binary dist.
-        #                                              SPARK_HOME points here.
-        #   sql/                                     — sql/ subtree from the
-        #                                              source tarball only.
-        #   spark_home/sql → ../sql                  — grafts source sql/ onto
-        #                                              the binary tree (gluten
-        #                                              tests read this).
-        #   spark_home/launcher/target/scala-2.12/   — empty dir, satisfies
-        #                                              Spark's
-        #                                              AbstractCommandBuilder.
-        #                                              getScalaVersion() in
-        #                                              test mode. Without it,
-        #                                              local-cluster Worker
-        #                                              forks throw "Cannot
-        #                                              find any build
-        #                                              directories" and
-        #                                              GlutenSortShuffleSuite
-        #                                              / GlutenBroadcastJoin*
-        #                                              cascade-fail before any
-        #                                              Executor launches.
+        #   spark_home/             — Spark 3.5.5 binary dist. SPARK_HOME points here.
+        #   spark_src/              — full Spark 3.5.5 source tree.
+        #   spark_home/sql → ../spark_src/sql — gluten tests read source sql/ from here.
         run: |
           set -e
           BASE=/data/bolt-gluten-ut-spark
-          HOME_DIR=$BASE/spark_home
-          SQL_DIR=$BASE/sql
-          if [[ -d "$HOME_DIR/jars" && -d "$SQL_DIR/core" \
-                && -L "$HOME_DIR/sql" \
-                && -d "$HOME_DIR/launcher/target/scala-2.12" ]]; then
-            exit 0
-          fi
+          [[ -d "$BASE/spark_home/jars" && -d "$BASE/spark_src/sql" && -L "$BASE/spark_home/sql" ]] && exit 0
           mkdir -p "$BASE"
+          # flock guards against concurrent CI jobs
           (
             flock -x 200
-            # spark-3.5.5 has been purged from dlcdn/aliyun/tuna/ustc and only
-            # lives on archive.apache.org, which is severely per-connection
-            # throttled (~150 KB/s — the binary tarball took ~50 min on a cold
-            # runner with single-stream wget). aria2c with multi-connection
-            # parallel download brings it back to multi-MB/s.
+            [[ -d "$BASE/spark_home/jars" && -d "$BASE/spark_src/sql" && -L "$BASE/spark_home/sql" ]] && exit 0
             command -v aria2c > /dev/null \
               || { apt-get update -qq && apt-get install -y --no-install-recommends aria2; }
-            ARIA="aria2c --quiet -x16 -s16 -k1M --max-tries=3 --retry-wait=5"
             URL=https://archive.apache.org/dist/spark/spark-3.5.5
-            if [[ ! -d "$HOME_DIR/jars" ]]; then
-              rm -rf "${HOME_DIR}.tmp"
-              mkdir -p "${HOME_DIR}.tmp"
-              $ARIA -d "${HOME_DIR}.tmp" -o spark.tgz "$URL/spark-3.5.5-bin-hadoop3.tgz"
-              tar -xz --strip-components=1 -C "${HOME_DIR}.tmp" -f "${HOME_DIR}.tmp/spark.tgz"
-              rm -f "${HOME_DIR}.tmp/spark.tgz"
-              mv "${HOME_DIR}.tmp" "$HOME_DIR"
-            fi
-            if [[ ! -d "$SQL_DIR/core" ]]; then
-              rm -rf "${SQL_DIR}.tmp"
-              mkdir -p "${SQL_DIR}.tmp"
-              $ARIA -d "${SQL_DIR}.tmp" -o spark-src.tgz "$URL/spark-3.5.5.tgz"
-              tar -xz --strip-components=2 -C "${SQL_DIR}.tmp" -f "${SQL_DIR}.tmp/spark-src.tgz" spark-3.5.5/sql
-              rm -f "${SQL_DIR}.tmp/spark-src.tgz"
-              mv "${SQL_DIR}.tmp" "$SQL_DIR"
-            fi
-            ln -sfn ../sql "$HOME_DIR/sql"
-            mkdir -p "$HOME_DIR/launcher/target/scala-2.12"
+            cd "$BASE"
+            aria2c --quiet -x16 -s16 -k1M -o bin.tgz "$URL/spark-3.5.5-bin-hadoop3.tgz"
+            aria2c --quiet -x16 -s16 -k1M -o src.tgz "$URL/spark-3.5.5.tgz"
+            mkdir -p spark_home spark_src
+            tar -xzf bin.tgz --strip-components=1 -C spark_home
+            tar -xzf src.tgz --strip-components=1 -C spark_src
+            ln -sfn ../spark_src/sql spark_home/sql
+            rm -f bin.tgz src.tgz
           ) 200> "$BASE/.lock"
 
       - name: Run Gluten UT (parallel, blacklist-aware)
