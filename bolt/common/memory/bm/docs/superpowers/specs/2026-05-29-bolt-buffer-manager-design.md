@@ -138,7 +138,7 @@ spill 文件位置用 `OwnedFileExtent` RAII helper 包装。BM 内部持有
 allocator 已失效或 `Free` 返回非 ok，只记录严重日志并放弃继续处理。
 
 显式释放路径必须检查 `FileFreeResult`。例如 `Pin` 读回成功后释放旧 extent，
-如果 `Free` 返回非 ok，则抛 Bolt 异常。此时不回滚已经安装好的 payload；旧
+如果 `Free` 返回非 ok，则触发 fatal/abort。此时不回滚已经安装好的 payload；旧
 extent 释放失败表示 allocator 元数据或文件状态异常，而不是 block 内容恢复失败。
 
 `BufferManager` 应当比它创建的所有 `BlockHandle`、`BlockMemory` 和
@@ -178,12 +178,13 @@ std::shared_ptr<BufferManager> BufferManager::Create(
 
 ## Block 状态
 
-第一版只有三个状态：
+第一版有四个状态：
 
 ```text
 IN_MEMORY    payload resident 在 leaf MemoryPool 中
 SPILLED      payload 不在内存中；FileExtent 保存可恢复副本
 PREFETCHING  已提交异步 read；旧 FileExtent 仍然保留
+SPILLING     已提交 write；payload 正由 IO request 持有
 ```
 
 不维护 dirty bit。任何被 reclaim 选中的 in-memory unpinned block 都写入一个
@@ -229,14 +230,15 @@ SPILLED -> PREFETCHING(read future)
 `Reclaim`：
 
 ```text
-IN_MEMORY(pin_count = 0) -> 同步写入新 extent
-                         -> 成功后变为 SPILLED
+IN_MEMORY(pin_count = 0) -> SPILLING(write future, target extent)
+SPILLING                 -> 写成功后变为 SPILLED
+SPILLING                 -> 写失败后恢复为 IN_MEMORY(pin_count = 0)
 ```
 
-Reclaim 会跳过 `SPILLED`、pinned `IN_MEMORY` 和尚未完成的 `PREFETCHING`
-block。选择 victim 前，reclaim 会 non-blocking harvest 已 ready 的 prefetch
-future。成功 harvest 的 block 变为 `IN_MEMORY(pin_count = 0)`，本轮 reclaim
-可以继续 spill 它。
+Reclaim 会跳过 `SPILLED`、`SPILLING`、pinned `IN_MEMORY` 和尚未完成的
+`PREFETCHING` block。选择 victim 前，reclaim 会 non-blocking harvest 已 ready
+的 prefetch future。成功 harvest 的 block 变为 `IN_MEMORY(pin_count = 0)`，
+本轮 reclaim 可以继续 spill 它。
 
 ## IO 集成
 
@@ -251,14 +253,15 @@ future。成功 harvest 的 block 变为 `IN_MEMORY(pin_count = 0)`，本轮 rec
 5. 释放旧 `OwnedFileExtent`。
 6. 失败时让 `result.buffer` 自动释放内存，然后抛异常。
 
-如果读回成功但释放旧 extent 失败，`Pin` 不回滚已经安装好的 payload，而是抛出
-allocator 释放错误。此时 block 内容已经在内存中，失败只表示旧文件空间未能正确
-归还给 allocator。
+如果读回成功但释放旧 extent 失败，`Pin` 不回滚已经安装好的 payload，而是触发
+fatal/abort。此时 block 内容已经在内存中，旧 extent 又没有成功归还给 allocator；
+如果继续运行，block 可能永久保持 pinned 或泄漏文件空间。该情况表示 allocator
+状态或生命周期不变量已经被破坏。
 
 从 `IN_MEMORY` spill：
 
 1. 按 block size 分配一个新的 file extent。
-2. 把 `BlockMemory::payload` move 到 write request。
+2. 把 `BlockMemory::payload` move 到 write request，状态设为 `SPILLING`。
 3. 提交 IO 并等待 future。
 4. 成功后，保存新的 `OwnedFileExtent`；让 `result.buffer` 释放内存回 pool；
    状态变为 `SPILLED`。
@@ -316,7 +319,9 @@ reclaimable 估算。
 - `Pin` 一个 unpinned `IN_MEMORY` block：减 block size。
 - 从 `SPILLED` 或 `PREFETCHING` `Pin`：不变，因为读回结果直接是 pinned。
 - ready prefetch harvest 成 `IN_MEMORY(pin_count = 0)`：加 block size。
-- 成功 reclaim 一个 unpinned resident block：减 block size。
+- reclaim 选中 unpinned resident block 并进入 `SPILLING`：减 block size。
+- `SPILLING` 写失败并恢复为 `IN_MEMORY(pin_count = 0)`：加回 block size。
+- `SPILLING` 写成功变为 `SPILLED`：不再调整，因为进入 `SPILLING` 时已经扣减。
 
 `reclaim(targetBytes, maxWaitMs, stats)` 和 `ReclaimForTest` 使用同一套逻辑。
 IO 或 file 错误会抛异常。返回值是成功 spill 后实际释放的 resident bytes。
@@ -393,8 +398,9 @@ IO scheduler 错误转换成 Bolt 异常，并携带 IO error code 和 native er
 reclaim write 失败时，必须先把返回的 `IoBuffer` move 回 block，恢复
 in-memory payload，再抛异常。
 
-显式释放旧 extent 时，如果 `FileBlockAllocator::Free` 返回非 ok，转换成 Bolt
-异常。析构路径中调用 `Free` 时不能抛异常；失败只记录严重日志。
+显式释放旧 extent 时，如果 `FileBlockAllocator::Free` 返回非 ok，`Pin` /
+prefetch harvest 路径走 fatal/abort；其它显式释放路径按调用点语义转换成 Bolt
+异常或 fatal。析构路径中调用 `Free` 时不能抛异常；失败只记录严重日志。
 
 析构策略统一为：
 
@@ -432,10 +438,13 @@ reclaimer 本轮失败还是让整个仲裁失败，取决于现有 memory arbit
 - `PREFETCHING` 不计入第一版 `reclaimableBytes`，并有对应注释/测试约束。
 - 大量 `Prefetch` 占用 leaf pool 但不增加 `reclaimableBytes` 的行为。
 - Reclaim 跳过 pinned blocks。
+- Reclaim 写期间 block 进入 `SPILLING`，写成功变 `SPILLED`，写失败恢复
+  `IN_MEMORY`。
 - `maxWaitMs` 在 v1 被忽略，reclaim 仍然返回实际释放 bytes。
 - Eviction queue stale entry 通过 sequence number 跳过。
 - Reclaim 写 IO 失败时恢复 payload，并保持 block resident。
-- 显式释放 extent 失败会抛异常；析构释放 extent 失败不抛。
+- `Pin` / prefetch harvest 读回成功后释放旧 extent 失败会触发 fatal 诊断；
+  析构释放 extent 失败不抛。
 - `BufferHandle` late destruction 触发 fatal 诊断。
 - file extent 在 pin、reclaim、destruction 路径中只释放一次。
 - `BufferManagerReclaimer::reclaimableBytes` 跟随 `unpinnedResidentBytes_`。
