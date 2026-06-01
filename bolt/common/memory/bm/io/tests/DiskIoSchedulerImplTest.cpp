@@ -585,7 +585,7 @@ TEST(DiskIoSchedulerImplTest, statsReflectSuccessfulCompletion) {
   const auto stats = scheduler.stats();
   EXPECT_EQ(0, stats.inflightRequests);
   ASSERT_NE(nullptr, stats.depthControl);
-  EXPECT_EQ(64, stats.depthControl->currentDepth);
+  EXPECT_EQ(128, stats.depthControl->currentDepth);
   EXPECT_EQ(1, stats.completedRequests);
   EXPECT_EQ(4096, stats.completedBytes);
   EXPECT_EQ(4096, stats.completedBytesByPriority[priorityIndex(IoPriority::High)]);
@@ -626,7 +626,7 @@ TEST(DiskIoSchedulerImplTest, statsReflectSuccessfulCompletion) {
   EXPECT_NE(
       std::string::npos,
       stats.toString().find("average_completion_batch_size="));
-  EXPECT_NE(std::string::npos, stats.toString().find("depth_current=64"));
+  EXPECT_NE(std::string::npos, stats.toString().find("depth_current=128"));
 }
 
 TEST(DiskIoSchedulerImplTest, adaptiveDepthControlIncreasesWhenThroughputImprovesWithQueuedRequests) {

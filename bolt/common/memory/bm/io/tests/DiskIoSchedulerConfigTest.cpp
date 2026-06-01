@@ -22,7 +22,7 @@ TEST(DiskIoSchedulerConfigTest, defaultConfigUsesFixedDepth) {
   DiskIoSchedulerConfig config;
 
   EXPECT_EQ(DepthControlMode::Fixed, config.depthControl.mode);
-  EXPECT_EQ(64, config.depthControl.fixed.depth);
+  EXPECT_EQ(128, config.depthControl.fixed.depth);
 }
 
 TEST(DiskIoSchedulerConfigValidatorTest, validatesOnlySelectedDepthMode) {
