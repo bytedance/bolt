@@ -19,7 +19,7 @@
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoRequestQueue.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
-#include "bolt/common/memory/bm/io/ScopedFd.h"
+#include "bolt/common/memory/bm/ScopedFd.h"
 
 namespace bytedance::bolt::memory::bm {
 

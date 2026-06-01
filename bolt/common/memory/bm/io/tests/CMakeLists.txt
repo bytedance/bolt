@@ -16,7 +16,6 @@ add_executable(
   IoRequestQueueTest.cpp
   IoUringBackendTest.cpp
   MockIoBackendTest.cpp
-  ScopedFdTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_io_test PRIVATE cxx_std_20)

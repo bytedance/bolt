@@ -11,7 +11,6 @@ add_library(
   InflightRegistry.cpp
   IoRequestQueue.cpp
   IoUringBackend.cpp
-  ScopedFd.cpp
 )
 
 target_compile_features(bolt_memory_bm_io PUBLIC cxx_std_20)

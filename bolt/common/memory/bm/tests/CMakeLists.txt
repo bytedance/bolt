@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(
   bolt_memory_bm_test
   BufferManagerTest.cpp
+  ScopedFdTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_test PRIVATE cxx_std_20)

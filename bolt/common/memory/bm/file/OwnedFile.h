@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bolt/common/memory/bm/ScopedFd.h"
+
 #include <string>
 
 namespace bytedance::bolt::memory::bm {
@@ -16,7 +18,7 @@ class OwnedFile {
   OwnedFile& operator=(OwnedFile&& other) noexcept;
 
   int fd() const {
-    return fd_;
+    return fd_.get();
   }
 
   const std::string& path() const {
@@ -24,7 +26,7 @@ class OwnedFile {
   }
 
   bool valid() const {
-    return fd_ >= 0;
+    return fd_.get() >= 0;
   }
 
   void Close();
@@ -32,7 +34,7 @@ class OwnedFile {
 
  private:
   std::string path_;
-  int fd_{-1};
+  ScopedFd fd_;
 };
 
 } // namespace bytedance::bolt::memory::bm
