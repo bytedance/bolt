@@ -1,12 +1,10 @@
 #include "bolt/common/memory/bm/file/BucketBlockAllocator.h"
 
 #include "bolt/common/memory/bm/file/FileAllocatorPath.h"
+#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <utility>
-
-#include <fcntl.h>
 
 namespace bytedance::bolt::memory::bm {
 
@@ -99,18 +97,17 @@ BucketBlockAllocator::BucketFile* BucketBlockAllocator::FindReusableFile() {
 FileAllocateResult BucketBlockAllocator::CreateFile() {
   const auto file_index = next_file_index_++;
   const auto path = MakeBucketFilePath(directory_, bucket_size_, file_index);
-  const int fd =
-      ::open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
-  if (fd < 0) {
+  auto created = CreateExclusiveReadWriteOwnedFile(path);
+  if (!created.ok()) {
     FileAllocateResult result;
-    result.error = FileErrorCode::kIoError;
-    result.native_error_code = errno;
+    result.error = created.error;
+    result.native_error_code = created.native_error_code;
     return result;
   }
 
   auto file = std::make_unique<BucketFile>();
   file->file_index = file_index;
-  file->file = OwnedFile(path, fd);
+  file->file = std::move(created.file);
   files_.push_back(std::move(file));
   return FileAllocateResult{};
 }

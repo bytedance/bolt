@@ -1,5 +1,6 @@
 #include "bolt/common/memory/bm/io/IoRequestValidator.h"
 
+#include "bolt/common/memory/bm/io/IoBuffer.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
