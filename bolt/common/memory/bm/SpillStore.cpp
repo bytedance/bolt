@@ -23,6 +23,25 @@ IoResult MakeInvalidRecordResult(IoBuffer buffer) {
 
 } // namespace
 
+SpillWriteFuture::SpillWriteFuture(
+    std::future<IoResult> rawFuture,
+    OwnedFileExtent extent,
+    SpillWriteMetadata metadata)
+    : rawFuture_(std::move(rawFuture)),
+      extent_(std::move(extent)),
+      metadata_(metadata) {}
+
+SpillWriteResult SpillWriteFuture::get() {
+  SpillWriteResult result;
+  result.io = rawFuture_.get();
+  result.extent = std::move(extent_);
+  result.rawBytes = metadata_.rawBytes;
+  result.physicalBytes = metadata_.physicalBytes;
+  result.compressionTimeUs = metadata_.compressionTimeUs;
+  result.compressed = metadata_.compressed;
+  return result;
+}
+
 SpillReadFuture::SpillReadFuture(
     std::future<IoResult> rawFuture,
     std::shared_ptr<SpillCodec> codec,
@@ -104,14 +123,15 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
         record.physicalSize);
   }
 
-  SpillWriteFuture write;
-  write.rawBytes = rawSize;
-  write.physicalBytes = record.physicalSize;
-  write.compressionTimeUs = record.compressionTimeUs;
-  write.compressed = record.compressed;
+  SpillWriteMetadata metadata;
+  metadata.rawBytes = rawSize;
+  metadata.physicalBytes = record.physicalSize;
+  metadata.compressionTimeUs = record.compressionTimeUs;
+  metadata.compressed = record.compressed;
+
+  std::future<IoResult> rawFuture;
   try {
-    write.future =
-        io_->SubmitWriteRaw(allocation.extent, record.record, priority);
+    rawFuture = io_->SubmitWriteRaw(allocation.extent, record.record, priority);
   } catch (...) {
     auto freeResult = FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
@@ -124,8 +144,8 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
     throw;
   }
 
-  write.extent = OwnExtent(allocation.extent);
-  return write;
+  return SpillWriteFuture{
+      std::move(rawFuture), OwnExtent(allocation.extent), metadata};
 }
 
 SpillReadFuture SpillStore::SubmitReadBlock(

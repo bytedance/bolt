@@ -28,13 +28,27 @@ struct SpillWriteResult {
   }
 };
 
-struct SpillWriteFuture {
-  std::future<IoResult> future;
-  OwnedFileExtent extent;
+struct SpillWriteMetadata {
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t compressionTimeUs{0};
   bool compressed{false};
+};
+
+class SpillWriteFuture {
+ public:
+  SpillWriteFuture() = default;
+  SpillWriteFuture(
+      std::future<IoResult> rawFuture,
+      OwnedFileExtent extent,
+      SpillWriteMetadata metadata);
+
+  SpillWriteResult get();
+
+ private:
+  std::future<IoResult> rawFuture_;
+  OwnedFileExtent extent_;
+  SpillWriteMetadata metadata_;
 };
 
 struct SpillReadResult {

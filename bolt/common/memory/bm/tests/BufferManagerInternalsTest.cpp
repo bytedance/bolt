@@ -419,17 +419,25 @@ TEST_F(
   }
 }
 
-TEST_F(BufferManagerInternalsTest, SpillWriteFutureCarriesWriteMetadata) {
-  SpillWriteFuture write;
-  write.rawBytes = 1024;
-  write.physicalBytes = 512;
-  write.compressionTimeUs = 7;
-  write.compressed = true;
+TEST_F(BufferManagerInternalsTest, SpillWriteFutureCompletesToResult) {
+  std::promise<IoResult> promise;
+  promise.set_value(IoResult{512});
 
-  EXPECT_EQ(1024, write.rawBytes);
-  EXPECT_EQ(512, write.physicalBytes);
-  EXPECT_EQ(7, write.compressionTimeUs);
-  EXPECT_TRUE(write.compressed);
+  SpillWriteMetadata metadata;
+  metadata.rawBytes = 1024;
+  metadata.physicalBytes = 512;
+  metadata.compressionTimeUs = 7;
+  metadata.compressed = true;
+
+  SpillWriteFuture write{promise.get_future(), {}, metadata};
+  auto result = write.get();
+
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(512, result.io.bytes);
+  EXPECT_EQ(1024, result.rawBytes);
+  EXPECT_EQ(512, result.physicalBytes);
+  EXPECT_EQ(7, result.compressionTimeUs);
+  EXPECT_TRUE(result.compressed);
 }
 
 TEST_F(BufferManagerInternalsTest, OwnedFileExtentMoveAndExplicitFree) {

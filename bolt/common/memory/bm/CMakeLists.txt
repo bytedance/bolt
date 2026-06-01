@@ -17,6 +17,7 @@ add_library(
   OwnedFileExtent.cpp
   SpillCodec.cpp
   SpillIo.cpp
+  SpillWriteCoordinator.cpp
   SpillStore.cpp)
 
 target_compile_features(bolt_memory_bm PUBLIC cxx_std_20)
