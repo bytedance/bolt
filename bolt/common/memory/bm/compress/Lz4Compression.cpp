@@ -9,14 +9,14 @@
 namespace bytedance::bolt::memory::bm::compress {
 namespace {
 
-LZ4_stream_t* ensureLz4Context(CompressionAlgorithmContext* context) {
+LZ4_stream_t* ensureLz4Context(Lz4CompressionContext* context) {
   if (context == nullptr) {
     return LZ4_createStream();
   }
-  if (context->lz4Context == nullptr) {
-    context->lz4Context = LZ4_createStream();
+  if (context->native == nullptr) {
+    context->native = LZ4_createStream();
   }
-  return static_cast<LZ4_stream_t*>(context->lz4Context);
+  return static_cast<LZ4_stream_t*>(context->native);
 }
 
 } // namespace
@@ -26,7 +26,7 @@ size_t Lz4MaxCompressedLength(size_t rawSize) {
 }
 
 uint64_t Lz4Compress(
-    CompressionAlgorithmContext* context,
+    Lz4CompressionContext* context,
     const Lz4Options& options,
     const char* source,
     size_t sourceSize,
@@ -104,9 +104,9 @@ void Lz4Decompress(
   }
 }
 
-void DestroyLz4Context(void* context) {
-  if (context != nullptr) {
-    LZ4_freeStream(static_cast<LZ4_stream_t*>(context));
+Lz4CompressionContext::~Lz4CompressionContext() {
+  if (native != nullptr) {
+    LZ4_freeStream(static_cast<LZ4_stream_t*>(native));
   }
 }
 

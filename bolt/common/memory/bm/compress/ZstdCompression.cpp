@@ -45,14 +45,14 @@ uint64_t zstdCompressWithContext(
   return static_cast<uint64_t>(written);
 }
 
-ZSTD_CCtx* ensureZstdContext(CompressionAlgorithmContext* context) {
+ZSTD_CCtx* ensureZstdContext(ZstdCompressionContext* context) {
   if (context == nullptr) {
     return ZSTD_createCCtx();
   }
-  if (context->zstdContext == nullptr) {
-    context->zstdContext = ZSTD_createCCtx();
+  if (context->native == nullptr) {
+    context->native = ZSTD_createCCtx();
   }
-  return static_cast<ZSTD_CCtx*>(context->zstdContext);
+  return static_cast<ZSTD_CCtx*>(context->native);
 }
 
 } // namespace
@@ -62,7 +62,7 @@ size_t ZstdMaxCompressedLength(size_t rawSize) {
 }
 
 uint64_t ZstdCompress(
-    CompressionAlgorithmContext* context,
+    ZstdCompressionContext* context,
     const ZstdOptions& options,
     const char* source,
     size_t sourceSize,
@@ -117,9 +117,9 @@ void ZstdDecompress(
   }
 }
 
-void DestroyZstdContext(void* context) {
-  if (context != nullptr) {
-    ZSTD_freeCCtx(static_cast<ZSTD_CCtx*>(context));
+ZstdCompressionContext::~ZstdCompressionContext() {
+  if (native != nullptr) {
+    ZSTD_freeCCtx(static_cast<ZSTD_CCtx*>(native));
   }
 }
 

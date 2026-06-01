@@ -2,7 +2,7 @@ include(GoogleTest)
 
 add_executable(
   bolt_memory_bm_compress_test
-  CompressionCodecTest.cpp
+  CompressionManagerTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_compress_test PRIVATE cxx_std_20)

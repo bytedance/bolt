@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/compress/CompressionCodec.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
 #include <cstring>
