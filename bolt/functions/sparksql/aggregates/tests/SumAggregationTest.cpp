@@ -195,6 +195,29 @@ TEST_F(SumAggregationTest, hashAggrJitMergeAndExtract) {
   assertEqualResults({noJit}, {jit});
 }
 
+TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
+  auto input = makeRowVector(
+      {makeFlatVector<int64_t>(2048, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 3; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 7; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation(
+                      {"c0"}, {"spark_avg(c1)", "spark_avg(c2)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
 TEST_F(SumAggregationTest, decimalSum) {
   std::vector<std::optional<int64_t>> shortDecimalRawVector;
   std::vector<std::optional<int128_t>> longDecimalRawVector;

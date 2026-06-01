@@ -1859,6 +1859,26 @@ __attribute__((__visibility__("default"))) void jit_HashAggrSetFlatDouble(
   isNull ? flat->setNull(row, true) : flat->set(row, value);
 }
 
+__attribute__((__visibility__("default"))) void jit_HashAggrSetPartialAvgDouble(
+    char* vector,
+    int32_t row,
+    double sum,
+    int64_t count,
+    int8_t isNull) {
+  auto* rowVector =
+      reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+          ->as<bytedance::bolt::RowVector>();
+  auto* sumVector = rowVector->childAt(0)->asFlatVector<double>();
+  auto* countVector = rowVector->childAt(1)->asFlatVector<int64_t>();
+  if (isNull) {
+    rowVector->setNull(row, true);
+    return;
+  }
+  rowVector->setNull(row, false);
+  sumVector->set(row, sum);
+  countVector->set(row, count);
+}
+
 __attribute__((__visibility__("default"))) int8_t jit_ComplexTypeRowEqVectors(
     const char* row,
     int32_t offset,

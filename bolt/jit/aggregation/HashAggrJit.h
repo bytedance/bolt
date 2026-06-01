@@ -49,7 +49,9 @@ using HashAggrJitExtractFunc = void (*)(char** groups, int32_t numGroups, char**
 
 class HashAggrJitChunk {
  public:
-  explicit HashAggrJitChunk(std::vector<HashAggrJitSlot> slots);
+  explicit HashAggrJitChunk(
+      std::vector<HashAggrJitSlot> slots,
+      bool partialOutput = false);
 
   bool codegen();
 
@@ -57,7 +59,7 @@ class HashAggrJitChunk {
     return addDense_ != nullptr && !disabled_;
   }
 
-  bool canExtract(bool partialOutput) const;
+  bool canExtract() const;
 
   void disable() {
     disabled_ = true;
@@ -94,6 +96,7 @@ class HashAggrJitChunk {
 
  private:
   std::vector<HashAggrJitSlot> slots_;
+  bool partialOutput_{false};
   CompiledModuleSP module_;
   HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};

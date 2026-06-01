@@ -977,7 +977,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
       if (chunkSlots.size() < minChunkWidth) {
         continue;
       }
-      jit::HashAggrJitChunk chunk(std::move(chunkSlots));
+      jit::HashAggrJitChunk chunk(std::move(chunkSlots), isPartial_);
       if (chunk.codegen()) {
         hashAggrJitChunks_.push_back(std::move(chunk));
       }
@@ -1082,7 +1082,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
 
   jitExtracted.assign(aggregates_.size(), 0);
   for (auto& chunk : hashAggrJitChunks_) {
-    if (!chunk.canExtract(isPartial_)) {
+    if (!chunk.canExtract()) {
       continue;
     }
     const auto numSlots = chunk.slots().size();
@@ -1097,7 +1097,11 @@ void GroupingSet::runHashAggrJitExtractChunks(
         break;
       }
       auto& aggregateVector = result->childAt(slot.aggregateIndex + aggregateOutputOffset);
-      if (aggregateVector->encoding() != VectorEncoding::Simple::FLAT) {
+      const auto expectedEncoding =
+          (isPartial_ && slot.kind == jit::HashAggrJitKind::Avg)
+          ? VectorEncoding::Simple::ROW
+          : VectorEncoding::Simple::FLAT;
+      if (aggregateVector->encoding() != expectedEncoding) {
         canRunChunk = false;
         break;
       }

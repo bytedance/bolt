@@ -150,6 +150,11 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(module, "jit_HashAggrSetFlatI64", voidTy, {i8PtrTy, i32Ty, i64Ty, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatFloat", voidTy, {i8PtrTy, i32Ty, floatTy, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatDouble", voidTy, {i8PtrTy, i32Ty, doubleTy, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrSetPartialAvgDouble",
+      voidTy,
+      {i8PtrTy, i32Ty, doubleTy, i64Ty, i8Ty});
 }
 
 llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
@@ -619,7 +624,8 @@ std::string setFlatValueFunction(HashAggrJitValueKind kind) {
 bool genExtractIR(
     llvm::Module& module,
     const std::string& fn,
-    const std::vector<HashAggrJitSlot>& slots) {
+    const std::vector<HashAggrJitSlot>& slots,
+    bool partialOutput) {
   ensureBuiltinDeclarations(module);
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
@@ -667,6 +673,18 @@ bool genExtractIR(
     HashAggrJitValueKind resultKind = slot.accumulatorKind;
     llvm::Value* value = nullptr;
     llvm::Value* isNull = nullptr;
+    if (partialOutput && slot.kind == HashAggrJitKind::Avg) {
+      auto* sum = loadValue(
+          builder, group, llvmType(builder, slot.accumulatorKind), slot.offset);
+      auto* count =
+          loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
+      auto* isNullValue = builder.CreateZExt(
+          isAccumulatorNull(builder, group, slot), builder.getInt8Ty());
+      builder.CreateCall(
+          module.getFunction("jit_HashAggrSetPartialAvgDouble"),
+          {vector, row, sum, count, isNullValue});
+      continue;
+    }
     if (slot.kind == HashAggrJitKind::Avg) {
       auto* sum = loadValue(builder, group, llvmType(builder, slot.accumulatorKind), slot.offset);
       auto* count = loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
@@ -699,8 +717,10 @@ bool genExtractIR(
 
 } // namespace
 
-HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
-    : slots_(std::move(slots)) {}
+HashAggrJitChunk::HashAggrJitChunk(
+    std::vector<HashAggrJitSlot> slots,
+    bool partialOutput)
+    : slots_(std::move(slots)), partialOutput_(partialOutput) {}
 
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
   switch (kind) {
@@ -738,7 +758,8 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 
 std::string HashAggrJitChunk::functionName() const {
   std::ostringstream out;
-  out << "jit_hashaggr_v2_n" << slots_.size();
+  out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
+      << slots_.size();
   for (const auto& slot : slots_) {
     out << "_" << static_cast<int>(slot.kind) << hashAggrJitValueKindName(slot.inputKind)
         << hashAggrJitValueKindName(slot.accumulatorKind) << "o" << slot.offset
@@ -749,13 +770,12 @@ std::string HashAggrJitChunk::functionName() const {
   return out.str();
 }
 
-bool HashAggrJitChunk::canExtract(bool partialOutput) const {
+bool HashAggrJitChunk::canExtract() const {
   if (extract_ == nullptr || disabled_) {
     return false;
   }
   for (const auto& slot : slots_) {
-    if (slot.decimal || slot.accumulatorKind == HashAggrJitValueKind::Int128 ||
-        (partialOutput && slot.kind == HashAggrJitKind::Avg)) {
+    if (slot.decimal || slot.accumulatorKind == HashAggrJitValueKind::Int128) {
       return false;
     }
   }
@@ -792,7 +812,7 @@ bool HashAggrJitChunk::codegen() {
         return genInitIR(module, initFn, slots_) ||
             genAddDenseIR(module, addFn, slots_, true) ||
             genAddDenseIR(module, addNoNullFn, slots_, false) ||
-            genExtractIR(module, extractFn, slots_);
+            genExtractIR(module, extractFn, slots_, partialOutput_);
       },
       moduleKey);
   if (!module_) {
