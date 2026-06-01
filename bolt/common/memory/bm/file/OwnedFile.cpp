@@ -3,8 +3,6 @@
 #include <filesystem>
 #include <utility>
 
-#include <unistd.h>
-
 namespace bytedance::bolt::memory::bm {
 
 OwnedFile::OwnedFile(std::string path, int fd)
@@ -15,9 +13,7 @@ OwnedFile::~OwnedFile() {
 }
 
 OwnedFile::OwnedFile(OwnedFile&& other) noexcept
-    : path_(std::move(other.path_)), fd_(other.fd_) {
-  other.fd_ = -1;
-}
+    : path_(std::move(other.path_)), fd_(std::move(other.fd_)) {}
 
 OwnedFile& OwnedFile::operator=(OwnedFile&& other) noexcept {
   if (this == &other) {
@@ -25,16 +21,12 @@ OwnedFile& OwnedFile::operator=(OwnedFile&& other) noexcept {
   }
   Close();
   path_ = std::move(other.path_);
-  fd_ = other.fd_;
-  other.fd_ = -1;
+  fd_ = std::move(other.fd_);
   return *this;
 }
 
 void OwnedFile::Close() {
-  if (fd_ >= 0) {
-    ::close(fd_);
-    fd_ = -1;
-  }
+  fd_.reset();
 }
 
 void OwnedFile::CloseAndRemove() {
