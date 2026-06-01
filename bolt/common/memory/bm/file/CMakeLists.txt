@@ -7,6 +7,7 @@ add_library(
   FileSegmentAllocator.cpp
   FileSegmentAllocatorConfig.cpp
   FileSegmentAllocatorImpl.cpp
+  ManagedFileSegment.cpp
   ManagedOpenFile.cpp
   ManagedOpenFileFactory.cpp
 )
@@ -17,7 +18,8 @@ target_include_directories(bolt_memory_bm_file PUBLIC ${PROJECT_SOURCE_DIR})
 
 target_link_libraries(
   bolt_memory_bm_file
-  PUBLIC bolt_common_base
+  PUBLIC bolt_memory_bm_base
+         bolt_common_base
          bolt_exception
          Folly::folly
          glog::glog

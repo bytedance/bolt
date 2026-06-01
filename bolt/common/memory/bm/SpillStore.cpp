@@ -1,14 +1,49 @@
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/SpillCodec.h"
-#include "bolt/common/memory/bm/SpillIo.h"
+#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/io/IoRequest.h"
 
 #include <memory>
 #include <span>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
+namespace {
+
+std::future<IoResult> SubmitReadRaw(
+    const ManagedFileSegment& segment,
+    size_t size,
+    IoPriority priority) {
+  IoRequest request;
+  request.opcode = IoOpcode::Read;
+  request.priority = priority;
+  request.fd = segment.segment().fd;
+  request.fileOffset = segment.segment().offset;
+  request.buffer = IoBuffer::allocateFromMalloc(size);
+
+  return diskIoScheduler().submit(std::move(request));
+}
+
+std::future<IoResult> SubmitWriteRaw(
+    const FileSegment& segment,
+    IoBuffer& payload,
+    IoPriority priority) {
+  // Keep scheduler initialization before moving the only payload owner into
+  // IoRequest, so initialization failure cannot destroy resident payload.
+  diskIoScheduler().ensureReady();
+
+  IoRequest request;
+  request.opcode = IoOpcode::Write;
+  request.priority = priority;
+  request.fd = segment.fd;
+  request.fileOffset = segment.offset;
+  request.buffer = std::move(payload);
+
+  return diskIoScheduler().submit(std::move(request));
+}
+
+} // namespace
 
 SpillWriteFuture::SpillWriteFuture(
     std::future<IoResult> rawFuture,
@@ -31,14 +66,14 @@ SpillWriteResult SpillWriteFuture::get() {
 
 SpillReadFuture::SpillReadFuture(
     std::future<IoResult> rawFuture,
-    std::shared_ptr<SpillCodec> codec,
+    std::shared_ptr<compress::CompressionManager> compression,
     MemoryPool* pool,
     size_t expectedRawSize)
     : rawFuture_(std::move(rawFuture)),
-      codec_(std::move(codec)),
+      compression_(std::move(compression)),
       pool_(pool),
       expectedRawSize_(expectedRawSize) {
-  BOLT_CHECK_NOT_NULL(codec_);
+  BOLT_CHECK_NOT_NULL(compression_);
   BOLT_CHECK_NOT_NULL(pool_);
 }
 
@@ -51,7 +86,7 @@ SpillReadResult SpillReadFuture::get() {
     return result;
   }
 
-  auto decoded = codec_->Decode(
+  auto decoded = compression_->DecodeSpillRecord(
       std::span<const char>(raw.buffer.data(), raw.buffer.length()),
       expectedRawSize_,
       pool_,
@@ -64,8 +99,9 @@ SpillReadResult SpillReadFuture::get() {
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
     : config_(std::move(config)),
-      codec_(std::make_shared<SpillCodec>(config_.compressionConfig)),
-      io_(std::make_unique<SpillIo>()),
+      compression_(
+          std::make_shared<compress::CompressionManager>(
+              config_.compressionConfig)),
       pool_(pool) {
   allocator_ = CreateFileSegmentAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
@@ -93,8 +129,8 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   BOLT_CHECK(payload.valid());
   BOLT_CHECK_EQ(payload.length(), rawSize);
 
-  auto record =
-      codec_->Build(std::span<const char>(payload.data(), payload.length()));
+  auto record = compression_->BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()));
 
   auto allocation = AllocateSegment(record.physicalSize);
   if (!allocation.ok()) {
@@ -112,8 +148,7 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   metadata.compressed = record.compressed;
 
   auto ownedSegment = OwnSegment(allocation.segment);
-  auto rawFuture =
-      io_->SubmitWriteRaw(ownedSegment.segment(), record.record, priority);
+  auto rawFuture = SubmitWriteRaw(ownedSegment.segment(), record.record, priority);
 
   return SpillWriteFuture{
       std::move(rawFuture), std::move(ownedSegment), metadata};
@@ -124,8 +159,8 @@ SpillReadFuture SpillStore::SubmitReadBlock(
     size_t expectedRawSize,
     IoPriority priority) {
   return SpillReadFuture{
-      io_->SubmitReadRaw(segment, segment.segment().requested_size, priority),
-      codec_,
+      SubmitReadRaw(segment, segment.segment().requested_size, priority),
+      compression_,
       pool_,
       expectedRawSize};
 }

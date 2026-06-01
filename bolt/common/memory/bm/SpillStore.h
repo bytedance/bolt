@@ -1,9 +1,10 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
-#include "bolt/common/memory/bm/ManagedFileSegment.h"
+#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
@@ -11,9 +12,6 @@
 #include <memory>
 
 namespace bytedance::bolt::memory::bm {
-
-class SpillCodec;
-class SpillIo;
 
 struct SpillWriteResult {
   IoResult io;
@@ -67,7 +65,7 @@ class SpillReadFuture {
   SpillReadFuture() = default;
   SpillReadFuture(
       std::future<IoResult> rawFuture,
-      std::shared_ptr<SpillCodec> codec,
+      std::shared_ptr<compress::CompressionManager> compression,
       MemoryPool* pool,
       size_t expectedRawSize);
 
@@ -75,7 +73,7 @@ class SpillReadFuture {
 
  private:
   std::future<IoResult> rawFuture_;
-  std::shared_ptr<SpillCodec> codec_;
+  std::shared_ptr<compress::CompressionManager> compression_;
   MemoryPool* pool_{nullptr};
   size_t expectedRawSize_{0};
 };
@@ -99,8 +97,7 @@ class SpillStore {
   ManagedFileSegment OwnSegment(FileSegment segment) const;
 
   SpillStoreConfig config_;
-  std::shared_ptr<SpillCodec> codec_;
-  std::unique_ptr<SpillIo> io_;
+  std::shared_ptr<compress::CompressionManager> compression_;
   std::shared_ptr<FileSegmentAllocator> allocator_;
   MemoryPool* pool_{nullptr};
 };

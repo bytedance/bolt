@@ -1,6 +1,6 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
-#include "bolt/common/memory/bm/SpillCodec.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
@@ -92,7 +92,7 @@ TEST_F(BufferManagerPrivateStateTest, PinPrefetchingReportsReadFailure) {
   block->memory_->state = BlockMemoryState::kPrefetching;
   block->memory_->prefetchFuture = SpillReadFuture{
       promise.get_future(),
-      std::make_shared<SpillCodec>(bm->config_.spillStoreConfig.compressionConfig),
+      std::make_shared<compress::CompressionManager>(bm->config_.spillStoreConfig.compressionConfig),
       bm->pool_.get(),
       block->size()};
   bm->accounting_->OnReadSubmitted(*block->memory_);

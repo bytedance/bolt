@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/ScopedFd.h"
+#include "bolt/common/memory/bm/base/ScopedFd.h"
 
 #include <fcntl.h>
 #include <unistd.h>

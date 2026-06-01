@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/ManagedFileSegment.h"
+#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include <cstdint>
