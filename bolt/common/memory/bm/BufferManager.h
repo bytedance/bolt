@@ -4,7 +4,7 @@
 #include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/BufferManagerObservability.h"
-#include "bolt/common/memory/bm/SpillStore.h"
+#include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
 #include <memory>
