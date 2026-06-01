@@ -7,7 +7,7 @@
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
 #include "bolt/common/memory/bm/SpillStore.h"
-#include "bolt/common/memory/bm/SpillWriteCoordinator.h"
+#include "bolt/common/memory/bm/ReclaimWriteWindow.h"
 
 #include <glog/logging.h>
 
@@ -171,7 +171,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
           << " bm=" << debugString();
   BOLT_CHECK_GT(config_.maxReclaimWriteInflight, 0);
 
-  SpillWriteCoordinator writeCoordinator{
+  ReclaimWriteWindow writeWindow{
       config_.maxReclaimWriteInflight,
       config_.writePriority,
       [this](IoBuffer& payload, size_t rawSize, IoPriority priority) {
@@ -183,7 +183,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   bool noMoreEvictable = false;
 
   auto submitMore = [&]() {
-    while (writeCoordinator.canSubmit() &&
+    while (writeWindow.canSubmit() &&
            (targetBytes == 0 || submitted < targetBytes) && !noMoreEvictable) {
       auto memory = evictionQueue_->PopEvictable();
       if (!memory) {
@@ -209,14 +209,14 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
               << " target_bytes=" << targetBytes;
 
       const auto blockSize = memory->size;
-      writeCoordinator.Submit(std::move(memory));
+      writeWindow.Submit(std::move(memory));
       submitted += blockSize;
     }
   };
 
   submitMore();
-  while (writeCoordinator.hasPending()) {
-    auto result = writeCoordinator.HarvestNext();
+  while (writeWindow.hasPending()) {
+    auto result = writeWindow.HarvestNext();
     if (!result.ok()) {
       BOLT_FAIL(
           "BM spill write failed, block_id={}, io_error={}, native_error={}, bytes={}",
@@ -233,7 +233,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
             << " submitted_so_far=" << submitted
             << " reclaimed_so_far=" << reclaimed
             << " target_bytes=" << targetBytes
-            << " inflight=" << writeCoordinator.pendingCount()
+            << " inflight=" << writeWindow.pendingCount()
             << " bm=" << debugString();
 
     if (targetBytes == 0 || reclaimed < targetBytes) {

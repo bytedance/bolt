@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/SpillWriteCoordinator.h"
+#include "bolt/common/memory/bm/ReclaimWriteWindow.h"
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
@@ -8,7 +8,7 @@
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
-SpillWriteCoordinator::SpillWriteCoordinator(
+ReclaimWriteWindow::ReclaimWriteWindow(
     size_t maxInflight,
     IoPriority priority,
     SubmitWrite submitWrite,
@@ -21,19 +21,19 @@ SpillWriteCoordinator::SpillWriteCoordinator(
   BOLT_CHECK(static_cast<bool>(submitWrite_));
 }
 
-bool SpillWriteCoordinator::canSubmit() const {
+bool ReclaimWriteWindow::canSubmit() const {
   return pending_.size() < maxInflight_;
 }
 
-bool SpillWriteCoordinator::hasPending() const {
+bool ReclaimWriteWindow::hasPending() const {
   return !pending_.empty();
 }
 
-size_t SpillWriteCoordinator::pendingCount() const {
+size_t ReclaimWriteWindow::pendingCount() const {
   return pending_.size();
 }
 
-void SpillWriteCoordinator::Submit(std::shared_ptr<BlockMemory> memory) {
+void ReclaimWriteWindow::Submit(std::shared_ptr<BlockMemory> memory) {
   BOLT_CHECK_NOT_NULL(memory);
   BOLT_CHECK(canSubmit());
 
@@ -44,7 +44,7 @@ void SpillWriteCoordinator::Submit(std::shared_ptr<BlockMemory> memory) {
       PendingWrite{std::move(memory), std::move(payload), std::move(write)});
 }
 
-SpillWriteCoordinator::HarvestResult SpillWriteCoordinator::HarvestNext() {
+ReclaimWriteWindow::HarvestResult ReclaimWriteWindow::HarvestNext() {
   BOLT_CHECK(!pending_.empty());
 
   auto pending = std::move(pending_.front());
