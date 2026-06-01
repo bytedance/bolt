@@ -16,7 +16,7 @@ class SpillIo {
       size_t size,
       IoPriority priority);
 
-  IoResult WriteRaw(
+  std::future<IoResult> SubmitWriteRaw(
       const FileExtent& extent,
       IoBuffer& payload,
       IoPriority priority);

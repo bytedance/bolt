@@ -21,7 +21,7 @@ std::future<IoResult> SpillIo::SubmitReadRaw(
   return diskIoScheduler().submit(std::move(request));
 }
 
-IoResult SpillIo::WriteRaw(
+std::future<IoResult> SpillIo::SubmitWriteRaw(
     const FileExtent& extent,
     IoBuffer& payload,
     IoPriority priority) {
@@ -37,7 +37,7 @@ IoResult SpillIo::WriteRaw(
   request.fileOffset = extent.offset;
   request.buffer = std::move(payload);
 
-  return diskIoScheduler().submit(std::move(request)).get();
+  return diskIoScheduler().submit(std::move(request));
 }
 
 void SpillIo::EnsureWriteSchedulerReady() {

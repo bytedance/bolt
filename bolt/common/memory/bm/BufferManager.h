@@ -25,6 +25,7 @@ struct BufferManagerConfig {
   IoPriority readPriority{IoPriority::High};
   IoPriority writePriority{IoPriority::Medium};
   IoPriority prefetchPriority{IoPriority::Low};
+  uint32_t maxReclaimWriteBatchSize{32};
 };
 
 class BufferManager : public std::enable_shared_from_this<BufferManager> {
@@ -64,7 +65,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   void SubmitRead(
       const std::shared_ptr<BlockHandle>& block,
       IoPriority priority);
-  uint64_t SpillBlock(const std::shared_ptr<BlockMemory>& memory);
+  uint64_t SpillBlocksForReclaim(uint64_t targetBytes);
   BufferHandle MakeHandle(const std::shared_ptr<BlockHandle>& block);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 

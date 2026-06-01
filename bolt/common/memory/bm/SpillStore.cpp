@@ -85,15 +85,15 @@ OwnedFileExtent SpillStore::OwnExtent(FileExtent extent) const {
   return OwnedFileExtent{extent, allocator_};
 }
 
-SpillWriteResult SpillStore::WriteBlock(
+SpillWriteFuture SpillStore::SubmitWriteBlock(
     IoBuffer& payload,
     size_t rawSize,
     IoPriority priority) {
   BOLT_CHECK(payload.valid());
   BOLT_CHECK_EQ(payload.length(), rawSize);
 
-  auto record = codec_->Build(
-      std::span<const char>(payload.data(), payload.length()));
+  auto record =
+      codec_->Build(std::span<const char>(payload.data(), payload.length()));
 
   auto allocation = AllocateExtent(record.physicalSize);
   if (!allocation.ok()) {
@@ -104,13 +104,14 @@ SpillWriteResult SpillStore::WriteBlock(
         record.physicalSize);
   }
 
-  SpillWriteResult write;
+  SpillWriteFuture write;
   write.rawBytes = rawSize;
   write.physicalBytes = record.physicalSize;
   write.compressionTimeUs = record.compressionTimeUs;
   write.compressed = record.compressed;
   try {
-    write.io = io_->WriteRaw(allocation.extent, record.record, priority);
+    write.future =
+        io_->SubmitWriteRaw(allocation.extent, record.record, priority);
   } catch (...) {
     auto freeResult = FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
@@ -121,18 +122,6 @@ SpillWriteResult SpillStore::WriteBlock(
           << ", native_error=" << freeResult.native_error_code;
     }
     throw;
-  }
-
-  if (!write.io.ok()) {
-    auto freeResult = FreeExtent(allocation.extent);
-    if (!freeResult.ok()) {
-      LOG(FATAL)
-          << "BM failed to free extent after failed spill write, extent_id="
-          << allocation.extent.id
-          << ", file_error=" << static_cast<int>(freeResult.error)
-          << ", native_error=" << freeResult.native_error_code;
-    }
-    return write;
   }
 
   write.extent = OwnExtent(allocation.extent);

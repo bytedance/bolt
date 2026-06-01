@@ -11,6 +11,7 @@
 #include <glog/logging.h>
 
 #include <utility>
+#include <vector>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -26,6 +27,39 @@ namespace {
       static_cast<int>(result.error),
       result.nativeErrorCode,
       result.bytes);
+}
+
+struct PendingSpill {
+  std::shared_ptr<BlockMemory> memory;
+  IoBuffer payload;
+  SpillWriteFuture write;
+};
+
+SpillWriteResult CompleteWriteFuture(SpillWriteFuture&& write) {
+  SpillWriteResult result;
+  result.io = write.future.get();
+  result.extent = std::move(write.extent);
+  result.rawBytes = write.rawBytes;
+  result.physicalBytes = write.physicalBytes;
+  result.compressionTimeUs = write.compressionTimeUs;
+  result.compressed = write.compressed;
+  return result;
+}
+
+void RequeueIfEvictable(
+    EvictionQueue& evictionQueue,
+    const std::shared_ptr<BlockMemory>& memory) {
+  if (memory->pinCount == 0 && memory->state == BlockMemoryState::kInMemory &&
+      memory->payload.has_value()) {
+    evictionQueue.Add(memory);
+  }
+}
+
+void WaitForWriteNoThrow(SpillWriteFuture& write) noexcept {
+  try {
+    (void)write.future.get();
+  } catch (...) {
+  }
 }
 
 } // namespace
@@ -191,7 +225,6 @@ void BufferManager::Prefetch(
 
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   accounting_->RecordReclaim();
-  uint64_t reclaimed = 0;
   VLOG(1) << "BM Reclaim begin"
           << " target_bytes=" << targetBytes
           << " pool_used=" << pool_->usedBytes()
@@ -200,49 +233,15 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
           << " pool_available_reservation=" << pool_->availableReservation()
           << " pool_releasable_reservation=" << pool_->releasableReservation()
           << " bm=" << debugString();
+  uint64_t reclaimed = 0;
   while (targetBytes == 0 || reclaimed < targetBytes) {
-    auto memory = evictionQueue_->PopEvictable();
-    if (!memory) {
-      VLOG(1) << "BM Reclaim no evictable block"
-              << " target_bytes=" << targetBytes
-              << " reclaimed_bytes=" << reclaimed
-              << " bm=" << debugString();
+    const auto remaining =
+        targetBytes == 0 ? 0 : targetBytes - reclaimed;
+    const auto batchReclaimed = SpillBlocksForReclaim(remaining);
+    if (batchReclaimed == 0) {
       break;
     }
-    accounting_->RecordReclaimAttemptedBlock();
-    VLOG(1) << "BM Reclaim spill candidate"
-            << " block_id=" << memory->id
-            << " tag=" << toString(memory->tag)
-            << " size=" << memory->size
-            << " state=" << static_cast<int>(memory->state)
-            << " pin_count=" << memory->pinCount
-            << " sequence=" << memory->evictionSequence
-            << " reclaimed_so_far=" << reclaimed
-            << " target_bytes=" << targetBytes;
-
-    try {
-      const auto blockReclaimed = SpillBlock(memory);
-      reclaimed += blockReclaimed;
-      VLOG(1) << "BM Reclaim spill finished"
-              << " block_id=" << memory->id
-              << " block_reclaimed_bytes=" << blockReclaimed
-              << " reclaimed_so_far=" << reclaimed
-              << " target_bytes=" << targetBytes
-              << " bm=" << debugString();
-    } catch (...) {
-      VLOG(1) << "BM Reclaim spill failed"
-              << " block_id=" << memory->id
-              << " state=" << static_cast<int>(memory->state)
-              << " pin_count=" << memory->pinCount
-              << " payload=" << memory->payload.has_value()
-              << " reclaimed_so_far=" << reclaimed;
-      if (memory->pinCount == 0 &&
-          memory->state == BlockMemoryState::kInMemory &&
-          memory->payload.has_value()) {
-        evictionQueue_->Add(memory);
-      }
-      throw;
-    }
+    reclaimed += batchReclaimed;
   }
 
   accounting_->RecordReclaimedBytes(reclaimed);
@@ -345,63 +344,96 @@ void BufferManager::SubmitRead(
   accounting_->OnReadSubmitted(memory);
 }
 
-uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
-  BOLT_CHECK_NOT_NULL(memory);
-  BOLT_CHECK(memory->state == BlockMemoryState::kInMemory);
-  BOLT_CHECK_EQ(memory->pinCount, 0);
-  BOLT_CHECK(memory->payload.has_value());
+uint64_t BufferManager::SpillBlocksForReclaim(uint64_t targetBytes) {
+  BOLT_CHECK_GT(config_.maxReclaimWriteBatchSize, 0);
 
-  VLOG(1) << "BM SpillBlock begin"
-          << " block_id=" << memory->id
-          << " tag=" << toString(memory->tag)
-          << " size=" << memory->size
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
-  auto payload = BlockStateMachine::BeginSpill(*memory);
-  accounting_->OnSpillStarted(*memory);
-  VLOG(1) << "BM SpillBlock write begin"
-          << " block_id=" << memory->id
-          << " size=" << memory->size
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " bm=" << debugString();
-
-  IoResult result;
-  try {
-    auto write =
-        spillStore_->WriteBlock(payload, memory->size, config_.writePriority);
-    result = std::move(write.io);
-    if (result.ok()) {
-      accounting_->OnSpillCompleted(*memory, write);
-      BlockStateMachine::CompleteSpill(*memory, std::move(write.extent));
+  std::vector<PendingSpill> pending;
+  pending.reserve(config_.maxReclaimWriteBatchSize);
+  uint64_t submittedBytes = 0;
+  while (pending.size() < config_.maxReclaimWriteBatchSize &&
+         (targetBytes == 0 || submittedBytes < targetBytes)) {
+    auto memory = evictionQueue_->PopEvictable();
+    if (!memory) {
+      VLOG(1) << "BM Reclaim no evictable block"
+              << " target_bytes=" << targetBytes
+              << " submitted_bytes=" << submittedBytes
+              << " bm=" << debugString();
+      break;
     }
-  } catch (...) {
-    BlockStateMachine::RollbackSpill(*memory, std::move(payload));
-    accounting_->OnSpillRolledBack(*memory);
-    throw;
+
+    accounting_->RecordReclaimAttemptedBlock();
+    VLOG(1) << "BM Reclaim spill candidate"
+            << " block_id=" << memory->id
+            << " tag=" << toString(memory->tag)
+            << " size=" << memory->size
+            << " state=" << static_cast<int>(memory->state)
+            << " pin_count=" << memory->pinCount
+            << " sequence=" << memory->evictionSequence
+            << " submitted_so_far=" << submittedBytes
+            << " target_bytes=" << targetBytes;
+
+    auto payload = BlockStateMachine::BeginSpill(*memory);
+    accounting_->OnSpillStarted(*memory);
+    try {
+      auto write = spillStore_->SubmitWriteBlock(
+          payload, memory->size, config_.writePriority);
+      submittedBytes += memory->size;
+      pending.push_back(PendingSpill{
+          std::move(memory), std::move(payload), std::move(write)});
+    } catch (...) {
+      BlockStateMachine::RollbackSpill(*memory, std::move(payload));
+      accounting_->OnSpillRolledBack(*memory);
+      RequeueIfEvictable(*evictionQueue_, memory);
+      throw;
+    }
   }
 
-  if (!result.ok()) {
-    accounting_->RecordWriteIoFailure();
-    BlockStateMachine::RollbackSpill(*memory, std::move(payload));
-    accounting_->OnSpillRolledBack(*memory);
-    ThrowIoFailure("write", result, memory->id);
+  uint64_t reclaimed = 0;
+  for (size_t i = 0; i < pending.size(); ++i) {
+    auto& spill = pending[i];
+    SpillWriteResult write;
+    try {
+      write = CompleteWriteFuture(std::move(spill.write));
+    } catch (...) {
+      BlockStateMachine::RollbackSpill(*spill.memory, std::move(spill.payload));
+      accounting_->OnSpillRolledBack(*spill.memory);
+      RequeueIfEvictable(*evictionQueue_, spill.memory);
+      for (size_t j = i + 1; j < pending.size(); ++j) {
+        WaitForWriteNoThrow(pending[j].write);
+        BlockStateMachine::RollbackSpill(
+            *pending[j].memory, std::move(pending[j].payload));
+        accounting_->OnSpillRolledBack(*pending[j].memory);
+        RequeueIfEvictable(*evictionQueue_, pending[j].memory);
+      }
+      throw;
+    }
+    if (!write.ok()) {
+      accounting_->RecordWriteIoFailure();
+      BlockStateMachine::RollbackSpill(*spill.memory, std::move(spill.payload));
+      accounting_->OnSpillRolledBack(*spill.memory);
+      RequeueIfEvictable(*evictionQueue_, spill.memory);
+      for (size_t j = i + 1; j < pending.size(); ++j) {
+        WaitForWriteNoThrow(pending[j].write);
+        BlockStateMachine::RollbackSpill(
+            *pending[j].memory, std::move(pending[j].payload));
+        accounting_->OnSpillRolledBack(*pending[j].memory);
+        RequeueIfEvictable(*evictionQueue_, pending[j].memory);
+      }
+      ThrowIoFailure("write", write.io, spill.memory->id);
+    }
+
+    accounting_->OnSpillCompleted(*spill.memory, write);
+    BlockStateMachine::CompleteSpill(*spill.memory, std::move(write.extent));
+    reclaimed += spill.memory->size;
+    VLOG(1) << "BM Reclaim spill finished"
+            << " block_id=" << spill.memory->id
+            << " block_reclaimed_bytes=" << spill.memory->size
+            << " reclaimed_so_far=" << reclaimed
+            << " target_bytes=" << targetBytes
+            << " bm=" << debugString();
   }
-  VLOG(1) << "BM SpillBlock end"
-          << " block_id=" << memory->id
-          << " size=" << memory->size
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
-  return memory->size;
+
+  return reclaimed;
 }
 
 BufferHandle BufferManager::MakeHandle(
