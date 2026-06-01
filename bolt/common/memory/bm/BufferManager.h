@@ -15,6 +15,7 @@
 
 namespace bytedance::bolt::memory::bm {
 
+struct BlockMemory;
 class EvictionQueue;
 class SpillStore;
 

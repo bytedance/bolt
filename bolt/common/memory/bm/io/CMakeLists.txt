@@ -1,9 +1,11 @@
 add_library(
   bolt_memory_bm_io
   AdaptiveDepthController.cpp
+  DepthControlStats.cpp
   DepthController.cpp
   DiskIoScheduler.cpp
   DiskIoSchedulerImpl.cpp
+  DiskIoSchedulerStats.cpp
   DiskIoStatsCollector.cpp
   DrrDispatcher.cpp
   EventFd.cpp

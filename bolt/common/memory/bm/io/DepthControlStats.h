@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <memory>
-#include <sstream>
 #include <string>
 
 #include "bolt/common/memory/bm/io/DepthControlConfig.h"
@@ -24,18 +24,7 @@ struct DepthControlStats {
   }
   virtual ~DepthControlStats() = default;
 
-  std::string toString() const {
-    std::ostringstream out;
-    out << " depth_control_mode=" << depthControlModeName(mode)
-        << " depth_current=" << currentDepth
-        << " depth_recent_throughput_bytes_per_second="
-        << recentThroughputBytesPerSecond
-        << " depth_completed_windows=" << completedWindows
-        << " depth_last_window_throughput_bytes_per_second="
-        << lastWindowThroughputBytesPerSecond;
-    appendFields(out);
-    return out.str();
-  }
+  std::string toString() const;
 
   DepthControlMode mode;
   uint32_t currentDepth{0};
@@ -67,9 +56,7 @@ struct FixedDepthStats final : public DepthControlStats {
   uint32_t configuredDepth{0};
 
  private:
-  void appendFields(std::ostringstream& out) const override {
-    out << " depth_fixed_configured_depth=" << configuredDepth;
-  }
+  void appendFields(std::ostringstream& out) const override;
 };
 
 struct AdaptiveDepthStats final : public DepthControlStats {
@@ -96,12 +83,7 @@ struct AdaptiveDepthStats final : public DepthControlStats {
   bool measuringProbeDepth{false};
 
  private:
-  void appendFields(std::ostringstream& out) const override {
-    out << " depth_adaptive_best_depth=" << bestDepth
-        << " depth_adaptive_best_throughput_bytes_per_second="
-        << bestThroughputBytesPerSecond
-        << " depth_adaptive_measuring_probe_depth=" << measuringProbeDepth;
-  }
+  void appendFields(std::ostringstream& out) const override;
 };
 
 } // namespace bytedance::bolt::memory::bm

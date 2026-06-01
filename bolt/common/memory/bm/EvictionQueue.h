@@ -1,11 +1,11 @@
 #pragma once
 
-#include "bolt/common/memory/bm/BlockHandle.h"
-
 #include <deque>
 #include <memory>
 
 namespace bytedance::bolt::memory::bm {
+
+struct BlockMemory;
 
 class EvictionQueue {
  public:

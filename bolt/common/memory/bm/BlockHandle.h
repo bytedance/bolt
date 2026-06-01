@@ -1,41 +1,16 @@
 #pragma once
 
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/OwnedFileExtent.h"
-#include "bolt/common/memory/bm/SpillStore.h"
-#include "bolt/common/memory/bm/io/IoResult.h"
 
+#include <cstddef>
 #include <cstdint>
-#include <future>
 #include <memory>
-#include <optional>
 
 namespace bytedance::bolt::memory::bm {
 
+class BufferHandle;
 class BufferManager;
-
-enum class BlockMemoryState : uint8_t {
-  kInMemory,
-  kSpilled,
-  kPrefetching,
-  kSpilling,
-};
-
-struct BlockMemory {
-  BlockMemory(uint64_t id, size_t size, MemoryTag tag);
-  ~BlockMemory() noexcept;
-
-  uint64_t id;
-  size_t size;
-  MemoryTag tag;
-  std::weak_ptr<BufferManager> owner;
-  BlockMemoryState state{BlockMemoryState::kInMemory};
-  uint32_t pinCount{0};
-  uint64_t evictionSequence{0};
-  std::optional<IoBuffer> payload;
-  std::optional<OwnedFileExtent> extent;
-  std::optional<SpillReadFuture> prefetchFuture;
-};
+struct BlockMemory;
 
 class BlockHandle {
  public:

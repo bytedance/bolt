@@ -1,5 +1,6 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
+#include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
