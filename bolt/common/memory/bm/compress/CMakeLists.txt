@@ -1,7 +1,8 @@
 add_library(
   bolt_memory_bm_compress
   CompressionAlgorithm.cpp
-  CompressionCodec.cpp
+  CompressionManager.cpp
+  CompressionRecord.cpp
   Lz4Compression.cpp
   SnappyCompression.cpp
   SpillRecordHeader.cpp

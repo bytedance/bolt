@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bolt/common/memory/bm/compress/CompressionAlgorithmContext.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 
 #include <cstddef>
@@ -7,18 +8,11 @@
 
 namespace bytedance::bolt::memory::bm::compress {
 
-struct CompressionAlgorithmContext {
-  void* lz4Context{nullptr};
-  void* zstdContext{nullptr};
-};
-
-void DestroyCompressionAlgorithmContext(CompressionAlgorithmContext& context);
-
 bool SupportedCompressionKind(CompressionKind kind);
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize);
 
 uint64_t CompressWithAlgorithm(
-    CompressionAlgorithmContext* context,
+    const CompressionContextSet& contexts,
     CompressionKind kind,
     const CompressionConfig& config,
     const char* source,
@@ -35,7 +29,7 @@ void DecompressWithAlgorithm(
 
 size_t Lz4MaxCompressedLength(size_t rawSize);
 uint64_t Lz4Compress(
-    CompressionAlgorithmContext* context,
+    Lz4CompressionContext* context,
     const Lz4Options& options,
     const char* source,
     size_t sourceSize,
@@ -47,11 +41,9 @@ void Lz4Decompress(
     char* target,
     size_t targetSize);
 
-void DestroyLz4Context(void* context);
-
 size_t ZstdMaxCompressedLength(size_t rawSize);
 uint64_t ZstdCompress(
-    CompressionAlgorithmContext* context,
+    ZstdCompressionContext* context,
     const ZstdOptions& options,
     const char* source,
     size_t sourceSize,
@@ -62,8 +54,6 @@ void ZstdDecompress(
     size_t sourceSize,
     char* target,
     size_t targetSize);
-void DestroyZstdContext(void* context);
-
 size_t SnappyMaxCompressedLength(size_t rawSize);
 uint64_t SnappyCompress(
     const SnappyOptions& options,

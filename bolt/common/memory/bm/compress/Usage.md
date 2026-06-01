@@ -80,7 +80,7 @@ Most production code should go through BufferManager or SpillStore. Direct
 manager usage is mainly useful for tests and focused benchmarks.
 
 ```cpp
-#include "bolt/common/memory/bm/compress/CompressionCodec.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 
 using namespace bytedance::bolt::memory::bm;
 

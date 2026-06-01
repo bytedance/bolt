@@ -4,13 +4,6 @@
 
 namespace bytedance::bolt::memory::bm::compress {
 
-void DestroyCompressionAlgorithmContext(CompressionAlgorithmContext& context) {
-  DestroyLz4Context(context.lz4Context);
-  context.lz4Context = nullptr;
-  DestroyZstdContext(context.zstdContext);
-  context.zstdContext = nullptr;
-}
-
 bool SupportedCompressionKind(CompressionKind kind) {
   return kind == CompressionKind::kNone ||
       kind == CompressionKind::kLz4Block ||
@@ -32,7 +25,7 @@ size_t MaxCompressedLength(CompressionKind kind, size_t rawSize) {
 }
 
 uint64_t CompressWithAlgorithm(
-    CompressionAlgorithmContext* context,
+    const CompressionContextSet& contexts,
     CompressionKind kind,
     const CompressionConfig& config,
     const char* source,
@@ -42,10 +35,15 @@ uint64_t CompressWithAlgorithm(
   switch (kind) {
     case CompressionKind::kLz4Block:
       return Lz4Compress(
-          context, config.lz4, source, sourceSize, target, targetCapacity);
+          contexts.lz4, config.lz4, source, sourceSize, target, targetCapacity);
     case CompressionKind::kZstdFrame:
       return ZstdCompress(
-          context, config.zstd, source, sourceSize, target, targetCapacity);
+          contexts.zstd,
+          config.zstd,
+          source,
+          sourceSize,
+          target,
+          targetCapacity);
     case CompressionKind::kSnappyRaw:
       return SnappyCompress(
           config.snappy, source, sourceSize, target, targetCapacity);

@@ -2,7 +2,7 @@
 
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/OwnedFileExtent.h"
-#include "bolt/common/memory/bm/compress/CompressionCodec.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
