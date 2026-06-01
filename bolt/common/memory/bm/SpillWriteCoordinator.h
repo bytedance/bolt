@@ -1,0 +1,67 @@
+#pragma once
+
+#include "bolt/common/memory/bm/SpillStore.h"
+#include "bolt/common/memory/bm/io/IoPriority.h"
+#include "bolt/common/memory/bm/io/IoResult.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+
+namespace bytedance::bolt::memory::bm {
+
+class BufferManagerAccounting;
+class EvictionQueue;
+struct BlockMemory;
+
+class SpillWriteCoordinator {
+ public:
+  using SubmitWrite =
+      std::function<SpillWriteFuture(IoBuffer&, size_t, IoPriority)>;
+
+  struct HarvestResult {
+    std::shared_ptr<BlockMemory> memory;
+    IoResult io;
+    uint64_t reclaimedBytes{0};
+
+    bool ok() const {
+      return io.ok();
+    }
+  };
+
+  SpillWriteCoordinator(
+      size_t maxInflight,
+      IoPriority priority,
+      SubmitWrite submitWrite,
+      BufferManagerAccounting& accounting,
+      EvictionQueue& evictionQueue);
+
+  bool canSubmit() const;
+  bool hasPending() const;
+  size_t pendingCount() const;
+
+  void Submit(std::shared_ptr<BlockMemory> memory);
+  HarvestResult HarvestNext();
+  void RollbackPending();
+
+ private:
+  struct PendingWrite {
+    std::shared_ptr<BlockMemory> memory;
+    IoBuffer payload;
+    SpillWriteFuture write;
+  };
+
+  void Rollback(PendingWrite&& pending);
+  void RollbackCurrentAndPending(PendingWrite&& current);
+
+  size_t maxInflight_{0};
+  IoPriority priority_;
+  SubmitWrite submitWrite_;
+  BufferManagerAccounting& accounting_;
+  EvictionQueue& evictionQueue_;
+  std::deque<PendingWrite> pending_;
+};
+
+} // namespace bytedance::bolt::memory::bm
