@@ -218,6 +218,49 @@ TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
   assertEqualResults({noJit}, {jit});
 }
 
+TEST_F(SumAggregationTest, hashAggrJitSplitsContiguousSegments) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 2; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return 1000 - row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 5; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 7; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 11; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 13; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row % 9; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row % 17; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .singleAggregation(
+                      {"c0"},
+                      {"min(c1)",
+                       "max(c2)",
+                       "spark_sum(c3)",
+                       "spark_avg(c4)",
+                       "min(c5)",
+                       "max(c6)",
+                       "spark_sum(c7)",
+                       "spark_avg(c8)",
+                       "spark_collect_list(c1)",
+                       "spark_collect_list(c2)",
+                       "min(c9)",
+                       "max(c9)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
+                 .config(core::QueryConfig::kHashAggrJitMaxFuseWidth, "4")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
 TEST_F(SumAggregationTest, decimalSum) {
   std::vector<std::optional<int64_t>> shortDecimalRawVector;
   std::vector<std::optional<int128_t>> longDecimalRawVector;

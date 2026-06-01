@@ -96,17 +96,6 @@ std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
   return aggregate.function->createHashAggrJitSlot(aggregateIndex, *descriptor);
 }
 
-std::string hashAggrJitSignature(const jit::HashAggrJitSlot& slot) {
-  return jit::HashAggrJitDescriptor{
-      slot.kind,
-      slot.inputKind,
-      slot.accumulatorKind,
-      slot.countStar,
-      slot.mergeInput,
-      slot.decimal}
-      .signature();
-}
-
 } // namespace
 
 GroupingSet::GroupingSet(
@@ -841,32 +830,36 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   const auto compileMinCount =
       std::max<int32_t>(1, queryConfig_.hashAggrJitCompileMinCount());
   const auto minChunkWidth = std::max(minFuseWidth, compileMinCount);
-  std::unordered_map<std::string, std::vector<jit::HashAggrJitSlot>> groups;
+  std::vector<jit::HashAggrJitSlot> currentChunkSlots;
+  currentChunkSlots.reserve(maxFuseWidth);
+
+  auto flushChunk = [&]() {
+    if (currentChunkSlots.size() < minChunkWidth) {
+      currentChunkSlots.clear();
+      return;
+    }
+    jit::HashAggrJitChunk chunk(std::move(currentChunkSlots), isPartial_);
+    if (chunk.codegen()) {
+      hashAggrJitChunks_.push_back(std::move(chunk));
+    }
+    currentChunkSlots.clear();
+    currentChunkSlots.reserve(maxFuseWidth);
+  };
+
   for (auto i = 0; i < aggregates_.size(); ++i) {
     auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_, isPartial_);
     if (!slot.has_value()) {
+      flushChunk();
       continue;
     }
-    groups[hashAggrJitSignature(*slot)].push_back(*slot);
+
+    if (currentChunkSlots.size() >= maxFuseWidth) {
+      flushChunk();
+    }
+    currentChunkSlots.push_back(*slot);
   }
 
-  for (auto& [_, slots] : groups) {
-    if (slots.size() < minChunkWidth) {
-      continue;
-    }
-    for (auto begin = 0; begin < slots.size(); begin += maxFuseWidth) {
-      const auto end = std::min<int32_t>(begin + maxFuseWidth, slots.size());
-      std::vector<jit::HashAggrJitSlot> chunkSlots(
-          slots.begin() + begin, slots.begin() + end);
-      if (chunkSlots.size() < minChunkWidth) {
-        continue;
-      }
-      jit::HashAggrJitChunk chunk(std::move(chunkSlots), isPartial_);
-      if (chunk.codegen()) {
-        hashAggrJitChunks_.push_back(std::move(chunk));
-      }
-    }
-  }
+  flushChunk();
 }
 
 void GroupingSet::runHashAggrJitChunks(
