@@ -1,28 +1,19 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
 #include "bolt/common/memory/bm/BlockMemory.h"
+#include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/bm/BufferManagerAccounting.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include <glog/logging.h>
 
-#include <array>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
-
-[[noreturn]] void ThrowFileAllocateFailure(
-    const FileAllocateResult& result,
-    uint64_t blockId) {
-  BOLT_FAIL(
-      "BM file allocation failed, block_id={}, file_error={}, native_error={}",
-      blockId,
-      static_cast<int>(result.error),
-      result.native_error_code);
-}
 
 [[noreturn]] void ThrowIoFailure(
     const char* operation,
@@ -37,33 +28,7 @@ namespace {
       result.bytes);
 }
 
-void SubtractOrFatal(
-    uint64_t& value,
-    uint64_t delta,
-    const char* field,
-    const BlockMemory& memory) noexcept {
-  if (value < delta) {
-    LOG(FATAL) << "BM observability counter underflow, field=" << field
-               << ", value=" << value << ", delta=" << delta
-               << ", block_id=" << memory.id
-               << ", tag=" << toString(memory.tag)
-               << ", size=" << memory.size
-               << ", state=" << static_cast<int>(memory.state)
-               << ", pin_count=" << memory.pinCount;
-  }
-  value -= delta;
-}
-
 } // namespace
-
-constexpr std::array<MemoryTag, kMemoryTagCount> kMemoryTags{
-    MemoryTag::kUnknown,
-    MemoryTag::kHashBuild,
-    MemoryTag::kAggregation,
-    MemoryTag::kSort,
-    MemoryTag::kWindow,
-    MemoryTag::kExchange,
-    MemoryTag::kTesting};
 
 std::shared_ptr<BufferManager> BufferManager::Create(
     MemoryPool& parent,
@@ -77,10 +42,8 @@ std::shared_ptr<BufferManager> BufferManager::Create(
 
 BufferManager::BufferManager(BufferManagerConfig config)
     : config_(std::move(config)),
+      accounting_(std::make_unique<BufferManagerAccounting>()),
       evictionQueue_(std::make_unique<EvictionQueue>()) {
-  for (size_t i = 0; i < kMemoryTags.size(); ++i) {
-    tagStats_[i].tag = kMemoryTags[i];
-  }
 }
 
 BufferManager::~BufferManager() = default;
@@ -118,14 +81,7 @@ BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
   memory->owner = weak_from_this();
   memory->payload = IoBuffer::allocateFromPool(pool_.get(), size);
   memory->pinCount = 1;
-  ++stats_.allocatedBlocks;
-  ++stats_.liveBlocks;
-  stats_.pinnedResidentBytes += size;
-  auto& tagStats = MutableTagStats(tag);
-  ++tagStats.allocatedBlocks;
-  ++tagStats.liveBlocks;
-  tagStats.residentBytes += size;
-  tagStats.pinnedResidentBytes += size;
+  accounting_->RecordAllocate(*memory);
   auto handle = std::make_shared<BlockHandle>(std::move(memory));
   return MakeHandle(handle);
 }
@@ -172,8 +128,7 @@ void BufferManager::ReleaseUnusedReservation() {
 
 BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
   BOLT_CHECK_NOT_NULL(block);
-  ++stats_.pinCount;
-  ++MutableTagStats(block->tag()).pinCount;
+  accounting_->RecordPinRequest(block->tag());
   auto& memory = *block->memory_;
   switch (memory.state) {
     case BlockMemoryState::kInMemory:
@@ -191,7 +146,7 @@ BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
 
 std::vector<BufferHandle> BufferManager::BatchPin(
     std::span<const std::shared_ptr<BlockHandle>> blocks) {
-  ++stats_.batchPinCount;
+  accounting_->RecordBatchPin();
   for (const auto& block : blocks) {
     BOLT_CHECK_NOT_NULL(block);
     auto& memory = *block->memory_;
@@ -210,10 +165,10 @@ std::vector<BufferHandle> BufferManager::BatchPin(
 
 void BufferManager::Prefetch(
     std::span<const std::shared_ptr<BlockHandle>> blocks) noexcept {
-  ++stats_.prefetchCount;
+  accounting_->RecordPrefetch();
   for (const auto& block : blocks) {
     if (!block) {
-      ++stats_.prefetchSubmitFailures;
+      accounting_->RecordPrefetchSubmitFailure();
       LOG(WARNING) << "BM Prefetch ignored null block";
       continue;
     }
@@ -223,11 +178,11 @@ void BufferManager::Prefetch(
         SubmitRead(block, config_.prefetchPriority);
       }
     } catch (const std::exception& e) {
-      ++stats_.prefetchSubmitFailures;
+      accounting_->RecordPrefetchSubmitFailure();
       LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id() << ": "
                    << e.what();
     } catch (...) {
-      ++stats_.prefetchSubmitFailures;
+      accounting_->RecordPrefetchSubmitFailure();
       LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id()
                    << " with unknown exception";
     }
@@ -235,7 +190,7 @@ void BufferManager::Prefetch(
 }
 
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
-  ++stats_.reclaimCount;
+  accounting_->RecordReclaim();
   uint64_t reclaimed = 0;
   VLOG(1) << "BM Reclaim begin"
           << " target_bytes=" << targetBytes
@@ -254,7 +209,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
               << " bm=" << debugString();
       break;
     }
-    ++stats_.reclaimAttemptedBlocks;
+    accounting_->RecordReclaimAttemptedBlock();
     VLOG(1) << "BM Reclaim spill candidate"
             << " block_id=" << memory->id
             << " tag=" << toString(memory->tag)
@@ -290,7 +245,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
     }
   }
 
-  stats_.reclaimedBytes += reclaimed;
+  accounting_->RecordReclaimedBytes(reclaimed);
   VLOG(1) << "BM Reclaim end"
           << " target_bytes=" << targetBytes
           << " reclaimed_bytes=" << reclaimed
@@ -304,13 +259,11 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
 }
 
 uint64_t BufferManager::reclaimableBytes() const {
-  // The current BM threading contract serializes reclaimer calls with API
-  // calls. If that changes, this field must become atomic or be protected.
-  return stats_.unpinnedResidentBytes;
+  return accounting_->reclaimableBytes();
 }
 
 BufferManagerStats BufferManager::stats() const {
-  auto result = stats_;
+  auto result = accounting_->stats();
   const auto queueStats = evictionQueue_->stats();
   result.evictionQueueSize = queueStats.size;
   result.evictionQueueStaleEntries = queueStats.staleEntries;
@@ -319,14 +272,11 @@ BufferManagerStats BufferManager::stats() const {
 }
 
 std::vector<BufferManagerTagStats> BufferManager::tagStats() const {
-  return nonEmptyTagStats(
-      std::vector<BufferManagerTagStats>{tagStats_.begin(), tagStats_.end()});
+  return accounting_->tagStats();
 }
 
 std::string BufferManager::debugString() const {
-  return toDebugString(
-      stats(),
-      std::vector<BufferManagerTagStats>{tagStats_.begin(), tagStats_.end()});
+  return toDebugString(stats(), accounting_->allTagStats());
 }
 
 void BufferManager::Unpin(const std::shared_ptr<BlockHandle>& block) noexcept {
@@ -339,22 +289,9 @@ void BufferManager::Unpin(const std::shared_ptr<BlockHandle>& block) noexcept {
     LOG(FATAL) << "BM Unpin underflow, block_id=" << memory.id
                << ", tag=" << toString(memory.tag);
   }
-  --memory.pinCount;
+  BlockStateMachine::Unpin(memory);
   if (memory.pinCount == 0 && memory.state == BlockMemoryState::kInMemory) {
-    ++memory.evictionSequence;
-    SubtractOrFatal(
-        stats_.pinnedResidentBytes,
-        memory.size,
-        "pinnedResidentBytes",
-        memory);
-    stats_.unpinnedResidentBytes += memory.size;
-    auto& tagStats = MutableTagStats(memory.tag);
-    SubtractOrFatal(
-        tagStats.pinnedResidentBytes,
-        memory.size,
-        "tag.pinnedResidentBytes",
-        memory);
-    tagStats.unpinnedResidentBytes += memory.size;
+    accounting_->OnResidentUnpinned(memory);
     evictionQueue_->Add(block->memory_);
   }
 }
@@ -363,18 +300,9 @@ BufferHandle BufferManager::PinInMemory(
     const std::shared_ptr<BlockHandle>& block) {
   auto& memory = *block->memory_;
   BOLT_CHECK(memory.payload.has_value(), "resident BM block has no payload");
-  if (memory.pinCount == 0) {
-    BOLT_CHECK_GE(stats_.unpinnedResidentBytes, memory.size);
-    stats_.unpinnedResidentBytes -= memory.size;
-    stats_.pinnedResidentBytes += memory.size;
-    auto& tagStats = MutableTagStats(memory.tag);
-    BOLT_CHECK_GE(tagStats.unpinnedResidentBytes, memory.size);
-    tagStats.unpinnedResidentBytes -= memory.size;
-    tagStats.pinnedResidentBytes += memory.size;
-  }
-  ++memory.pinCount;
-  ++memory.evictionSequence;
-  ++stats_.pinInMemoryCount;
+  accounting_->OnResidentPinned(memory);
+  BlockStateMachine::PinResident(memory);
+  accounting_->RecordPinInMemory();
   return MakeHandle(block);
 }
 
@@ -387,41 +315,17 @@ BufferHandle BufferManager::PinSpilled(
 BufferHandle BufferManager::PinPrefetching(
     const std::shared_ptr<BlockHandle>& block) {
   auto& memory = *block->memory_;
-  BOLT_CHECK(memory.prefetchFuture.has_value());
-  auto read = memory.prefetchFuture->get();
-  memory.prefetchFuture.reset();
-  BOLT_CHECK_GE(stats_.prefetchingBytes, memory.size);
-  stats_.prefetchingBytes -= memory.size;
-  auto& tagStats = MutableTagStats(memory.tag);
-  BOLT_CHECK_GE(tagStats.prefetchingBytes, memory.size);
-  tagStats.prefetchingBytes -= memory.size;
+  auto read = BlockStateMachine::ConsumePrefetch(memory);
+  accounting_->OnReadFutureConsumed(memory);
   if (!read.ok()) {
-    ++stats_.prefetchIoFailures;
-    ++stats_.readIoFailures;
-    memory.state = BlockMemoryState::kSpilled;
+    accounting_->RecordReadIoFailure();
+    BlockStateMachine::MarkReadFailed(memory);
     ThrowIoFailure("read", read.io, memory.id);
   }
 
-  BOLT_CHECK(memory.extent.has_value());
-  auto oldExtent = std::move(*memory.extent);
-  memory.extent.reset();
-  memory.payload = std::move(read.io.buffer);
-  memory.state = BlockMemoryState::kInMemory;
-  memory.pinCount = 1;
-  BOLT_CHECK_GE(stats_.spilledBytes, memory.size);
-  stats_.spilledBytes -= memory.size;
-  stats_.pinnedResidentBytes += memory.size;
-  ++stats_.pinReadCount;
-  ++stats_.spillReadCount;
-  stats_.spillReadBytes += memory.size;
-  stats_.spillPhysicalReadBytes += read.physicalBytes;
-  stats_.spillDecompressionTimeUs += read.decompressionTimeUs;
-  BOLT_CHECK_GE(tagStats.spilledBytes, memory.size);
-  tagStats.spilledBytes -= memory.size;
-  tagStats.residentBytes += memory.size;
-  tagStats.pinnedResidentBytes += memory.size;
-  ++tagStats.spillReadCount;
-  ++memory.evictionSequence;
+  accounting_->OnReadCompleted(memory, read);
+  auto oldExtent =
+      BlockStateMachine::CompleteRead(memory, std::move(read.io.buffer));
   oldExtent.FreeOrFatal("BufferManager::PinPrefetching");
   return MakeHandle(block);
 }
@@ -435,11 +339,10 @@ void BufferManager::SubmitRead(
       "BM read submission expects a spilled block");
   BOLT_CHECK(memory.extent.has_value());
 
-  memory.prefetchFuture =
+  auto future =
       spillStore_->SubmitReadBlock(*memory.extent, memory.size, priority);
-  memory.state = BlockMemoryState::kPrefetching;
-  stats_.prefetchingBytes += memory.size;
-  MutableTagStats(memory.tag).prefetchingBytes += memory.size;
+  BlockStateMachine::SubmitRead(memory, std::move(future));
+  accounting_->OnReadSubmitted(memory);
 }
 
 uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
@@ -447,7 +350,6 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
   BOLT_CHECK(memory->state == BlockMemoryState::kInMemory);
   BOLT_CHECK_EQ(memory->pinCount, 0);
   BOLT_CHECK(memory->payload.has_value());
-  BOLT_CHECK_GE(stats_.unpinnedResidentBytes, memory->size);
 
   VLOG(1) << "BM SpillBlock begin"
           << " block_id=" << memory->id
@@ -459,17 +361,8 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
           << " pool_available_reservation=" << pool_->availableReservation()
           << " pool_releasable_reservation=" << pool_->releasableReservation()
           << " bm=" << debugString();
-  auto payload = std::move(*memory->payload);
-  memory->payload.reset();
-  memory->state = BlockMemoryState::kSpilling;
-  stats_.unpinnedResidentBytes -= memory->size;
-  stats_.spillingBytes += memory->size;
-  auto& tagStats = MutableTagStats(memory->tag);
-  BOLT_CHECK_GE(tagStats.residentBytes, memory->size);
-  BOLT_CHECK_GE(tagStats.unpinnedResidentBytes, memory->size);
-  tagStats.residentBytes -= memory->size;
-  tagStats.unpinnedResidentBytes -= memory->size;
-  tagStats.spillingBytes += memory->size;
+  auto payload = BlockStateMachine::BeginSpill(*memory);
+  accounting_->OnSpillStarted(*memory);
   VLOG(1) << "BM SpillBlock write begin"
           << " block_id=" << memory->id
           << " size=" << memory->size
@@ -484,46 +377,21 @@ uint64_t BufferManager::SpillBlock(const std::shared_ptr<BlockMemory>& memory) {
         spillStore_->WriteBlock(payload, memory->size, config_.writePriority);
     result = std::move(write.io);
     if (result.ok()) {
-      memory->extent = std::move(write.extent);
-      stats_.spillPhysicalWriteBytes += write.physicalBytes;
-      stats_.spillCompressionTimeUs += write.compressionTimeUs;
-      if (write.compressed) {
-        ++stats_.spillCompressedBlocks;
-      }
+      accounting_->OnSpillCompleted(*memory, write);
+      BlockStateMachine::CompleteSpill(*memory, std::move(write.extent));
     }
   } catch (...) {
-    memory->payload = std::move(payload);
-    memory->state = BlockMemoryState::kInMemory;
-    stats_.spillingBytes -= memory->size;
-    stats_.unpinnedResidentBytes += memory->size;
-    tagStats.spillingBytes -= memory->size;
-    tagStats.residentBytes += memory->size;
-    tagStats.unpinnedResidentBytes += memory->size;
+    BlockStateMachine::RollbackSpill(*memory, std::move(payload));
+    accounting_->OnSpillRolledBack(*memory);
     throw;
   }
 
   if (!result.ok()) {
-    ++stats_.writeIoFailures;
-    memory->payload = std::move(payload);
-    memory->state = BlockMemoryState::kInMemory;
-    stats_.spillingBytes -= memory->size;
-    stats_.unpinnedResidentBytes += memory->size;
-    tagStats.spillingBytes -= memory->size;
-    tagStats.residentBytes += memory->size;
-    tagStats.unpinnedResidentBytes += memory->size;
+    accounting_->RecordWriteIoFailure();
+    BlockStateMachine::RollbackSpill(*memory, std::move(payload));
+    accounting_->OnSpillRolledBack(*memory);
     ThrowIoFailure("write", result, memory->id);
   }
-
-  memory->state = BlockMemoryState::kSpilled;
-  stats_.spillingBytes -= memory->size;
-  stats_.spilledBytes += memory->size;
-  ++stats_.spillWriteCount;
-  stats_.spillWriteBytes += memory->size;
-  tagStats.spillingBytes -= memory->size;
-  tagStats.spilledBytes += memory->size;
-  tagStats.reclaimedBytes += memory->size;
-  ++tagStats.spillWriteCount;
-  ++memory->evictionSequence;
   VLOG(1) << "BM SpillBlock end"
           << " block_id=" << memory->id
           << " size=" << memory->size
@@ -544,71 +412,8 @@ BufferHandle BufferManager::MakeHandle(
   return BufferHandle{weak_from_this(), block, memory.payload->data()};
 }
 
-BufferManagerTagStats& BufferManager::MutableTagStats(MemoryTag tag) {
-  const auto index = static_cast<size_t>(tag);
-  if (index < tagStats_.size() && tagStats_[index].tag == tag) {
-    return tagStats_[index];
-  }
-  return tagStats_[static_cast<size_t>(MemoryTag::kUnknown)];
-}
-
 void BufferManager::OnBlockMemoryDestroy(const BlockMemory& memory) noexcept {
-  SubtractOrFatal(stats_.liveBlocks, 1, "liveBlocks", memory);
-  auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(tagStats.liveBlocks, 1, "tag.liveBlocks", memory);
-
-  switch (memory.state) {
-    case BlockMemoryState::kInMemory:
-      if (memory.pinCount == 0) {
-        SubtractOrFatal(
-            stats_.unpinnedResidentBytes,
-            memory.size,
-            "unpinnedResidentBytes",
-            memory);
-        SubtractOrFatal(
-            tagStats.unpinnedResidentBytes,
-            memory.size,
-            "tag.unpinnedResidentBytes",
-            memory);
-      } else {
-        SubtractOrFatal(
-            stats_.pinnedResidentBytes,
-            memory.size,
-            "pinnedResidentBytes",
-            memory);
-        SubtractOrFatal(
-            tagStats.pinnedResidentBytes,
-            memory.size,
-            "tag.pinnedResidentBytes",
-            memory);
-      }
-      SubtractOrFatal(
-          tagStats.residentBytes, memory.size, "tag.residentBytes", memory);
-      break;
-    case BlockMemoryState::kSpilled:
-      SubtractOrFatal(stats_.spilledBytes, memory.size, "spilledBytes", memory);
-      SubtractOrFatal(
-          tagStats.spilledBytes, memory.size, "tag.spilledBytes", memory);
-      break;
-    case BlockMemoryState::kPrefetching:
-      SubtractOrFatal(stats_.spilledBytes, memory.size, "spilledBytes", memory);
-      SubtractOrFatal(
-          stats_.prefetchingBytes, memory.size, "prefetchingBytes", memory);
-      SubtractOrFatal(
-          tagStats.spilledBytes, memory.size, "tag.spilledBytes", memory);
-      SubtractOrFatal(
-          tagStats.prefetchingBytes,
-          memory.size,
-          "tag.prefetchingBytes",
-          memory);
-      break;
-    case BlockMemoryState::kSpilling:
-      SubtractOrFatal(
-          stats_.spillingBytes, memory.size, "spillingBytes", memory);
-      SubtractOrFatal(
-          tagStats.spillingBytes, memory.size, "tag.spillingBytes", memory);
-      break;
-  }
+  accounting_->OnBlockMemoryDestroy(memory);
 }
 
 } // namespace bytedance::bolt::memory::bm
