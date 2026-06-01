@@ -24,6 +24,7 @@ class BufferHandle {
   BufferHandle& operator=(const BufferHandle&) = delete;
 
   char* Ptr() const;
+  std::shared_ptr<BlockHandle> block() const;
   bool valid() const;
   void Destroy() noexcept;
 

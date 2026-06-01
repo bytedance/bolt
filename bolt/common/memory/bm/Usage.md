@@ -55,14 +55,14 @@ auto manager = BufferManager::Create(parentPool, std::move(config));
 ## 分配 Block
 
 `Allocate()` 会从 BM 的 leaf `MemoryPool` 分配连续内存，并返回已经 pin 住的
-`BufferHandle`。如果需要之后再次访问，应传入 out-param 保存 `BlockHandle`。
+`BufferHandle`。如果需要之后再次访问，可以从 handle 中取出并保存
+`BlockHandle`。
 
 ```cpp
-std::shared_ptr<BlockHandle> block;
 BufferHandle handle =
     manager->Allocate(allocateSizeBytes(AllocateSize::kLarge),
-                      MemoryTag::kSort,
-                      &block);
+                      MemoryTag::kSort);
+std::shared_ptr<BlockHandle> block = handle.block();
 
 char* data = handle.Ptr();
 // 写入数据...
@@ -73,8 +73,27 @@ char* data = handle.Ptr();
 `MemoryTag` 用于可观测性和问题排查，优先传真实来源，例如 `kSort`、
 `kHashBuild`、`kAggregation`，不要长期使用 `kUnknown`。
 
-如果不传 `block`，返回的 `BufferHandle` 仍然可用，但没有外部 `BlockHandle`
-用于后续再次 pin，通常只适合临时 buffer 场景。
+如果不保存 `handle.block()`，该 block 会随最后一个 `BufferHandle` 销毁而释放，
+通常只适合临时 buffer 场景。
+
+## 批量分配 Block
+
+`BatchAllocate()` 用于一次创建多个同 size、同 tag 的 pinned block：
+
+```cpp
+std::vector<BufferHandle> handles =
+    manager->BatchAllocate(blockCount, blockBytes, MemoryTag::kSort);
+
+for (auto& handle : handles) {
+  auto block = handle.block();
+  FillBlock(handle.Ptr());
+  currentRunBlocks.push_back(std::move(block));
+  currentRunPins.push_back(std::move(handle));
+}
+```
+
+`BatchAllocate(0, 0, tag)` 返回空 vector。非空 batch 的 size 必须大于 0。
+返回结果的统计语义等价于连续调用 `Allocate()`。
 
 ## Pin 和 Unpin
 
@@ -164,8 +183,8 @@ if (!manager->MaybeReserve(nextBlockBytes) && !activeRun.empty()) {
   manager->ReleaseUnusedReservation();
 }
 
-std::shared_ptr<BlockHandle> block;
-auto handle = manager->Allocate(nextBlockBytes, MemoryTag::kSort, &block);
+auto handle = manager->Allocate(nextBlockBytes, MemoryTag::kSort);
+auto block = handle.block();
 ```
 
 注意：
@@ -246,8 +265,8 @@ while (HasMoreInput()) {
     continue;
   }
 
-  std::shared_ptr<BlockHandle> block;
-  auto handle = manager->Allocate(blockBytes, MemoryTag::kSort, &block);
+  auto handle = manager->Allocate(blockBytes, MemoryTag::kSort);
+  auto block = handle.block();
   FillBlock(handle.Ptr());
 
   currentRunBlocks.push_back(std::move(block));

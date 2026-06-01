@@ -532,8 +532,8 @@ WorkerResult runWorker(
         continue;
       }
 
-      std::shared_ptr<BlockHandle> block;
-      auto handle = manager->Allocate(blockBytes, MemoryTag::kUnknown, &block);
+      auto handle = manager->Allocate(blockBytes, MemoryTag::kUnknown);
+      auto block = handle.block();
       auto* values = reinterpret_cast<uint64_t*>(handle.Ptr());
       const auto blockValues = generator.pull(values, valuesPerBlock);
       active.metadata.blocks.push_back(

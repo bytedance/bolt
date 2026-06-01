@@ -95,10 +95,23 @@ void BufferManager::Initialize(MemoryPool& parent) {
       std::make_unique<BufferManagerReclaimer>(weak_from_this()));
 }
 
-BufferHandle BufferManager::Allocate(
+BufferHandle BufferManager::Allocate(size_t size, MemoryTag tag) {
+  return AllocateOne(size, tag);
+}
+
+std::vector<BufferHandle> BufferManager::BatchAllocate(
+    size_t count,
     size_t size,
-    MemoryTag tag,
-    std::shared_ptr<BlockHandle>* block) {
+    MemoryTag tag) {
+  std::vector<BufferHandle> handles;
+  handles.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    handles.push_back(AllocateOne(size, tag));
+  }
+  return handles;
+}
+
+BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
   BOLT_CHECK_GT(size, 0);
   auto memory = std::make_shared<BlockMemory>(nextBlockId_++, size, tag);
   memory->owner = weak_from_this();
@@ -113,9 +126,6 @@ BufferHandle BufferManager::Allocate(
   tagStats.residentBytes += size;
   tagStats.pinnedResidentBytes += size;
   auto handle = std::make_shared<BlockHandle>(std::move(memory));
-  if (block != nullptr) {
-    *block = handle;
-  }
   return MakeHandle(handle);
 }
 

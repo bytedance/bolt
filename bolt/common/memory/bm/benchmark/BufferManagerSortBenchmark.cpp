@@ -614,7 +614,6 @@ int runBenchmark() {
         continue;
       }
 
-      std::shared_ptr<BlockHandle> block;
       VLOG(1) << "BM sort Allocate begin"
               << " generated_values=" << generator.generated()
               << " active_blocks=" << active.metadata.blocks.size()
@@ -623,7 +622,8 @@ int runBenchmark() {
               << " block_bytes=" << blockBytes
               << " bm=" << manager->debugString()
               << " root_pool=" << root->toString(true);
-      auto handle = manager->Allocate(blockBytes, MemoryTag::kUnknown, &block);
+      auto handle = manager->Allocate(blockBytes, MemoryTag::kUnknown);
+      auto block = handle.block();
       auto* values = reinterpret_cast<uint64_t*>(handle.Ptr());
       const auto blockValues = generator.pull(values, valuesPerBlock);
       VLOG(1) << "BM sort Allocate end"

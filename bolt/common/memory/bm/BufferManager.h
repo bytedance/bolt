@@ -33,10 +33,11 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
       BufferManagerConfig config);
   ~BufferManager();
 
-  BufferHandle Allocate(
+  BufferHandle Allocate(size_t size, MemoryTag tag);
+  std::vector<BufferHandle> BatchAllocate(
+      size_t count,
       size_t size,
-      MemoryTag tag,
-      std::shared_ptr<BlockHandle>* block = nullptr);
+      MemoryTag tag);
   bool MaybeReserve(size_t size);
   void ReleaseUnusedReservation();
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
@@ -54,6 +55,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   explicit BufferManager(BufferManagerConfig config);
 
   void Initialize(MemoryPool& parent);
+  BufferHandle AllocateOne(size_t size, MemoryTag tag);
   void Unpin(const std::shared_ptr<BlockHandle>& block) noexcept;
   BufferHandle PinInMemory(const std::shared_ptr<BlockHandle>& block);
   BufferHandle PinSpilled(const std::shared_ptr<BlockHandle>& block);
