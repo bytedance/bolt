@@ -3,7 +3,6 @@
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/BufferManagerAccounting.h"
-#include "bolt/common/memory/bm/EvictionQueue.h"
 #include "bolt/common/memory/bm/io/IoBuffer.h"
 
 #include <cerrno>
@@ -45,7 +44,6 @@ SpillWriteFuture makeFailedWrite() {
 
 TEST(SpillWriteCoordinatorTest, SubmitAndHarvestCompletesSpillLifecycle) {
   BufferManagerAccounting accounting;
-  EvictionQueue evictionQueue;
   auto block = makeUnpinnedResidentBlock(4096);
   accounting.RecordAllocate(*block);
   accounting.OnResidentUnpinned(*block);
@@ -59,8 +57,7 @@ TEST(SpillWriteCoordinatorTest, SubmitAndHarvestCompletesSpillLifecycle) {
         EXPECT_EQ(IoPriority::Medium, priority);
         return makeCompletedWrite(rawSize);
       },
-      accounting,
-      evictionQueue};
+      accounting};
 
   coordinator.Submit(block);
 
@@ -78,9 +75,8 @@ TEST(SpillWriteCoordinatorTest, SubmitAndHarvestCompletesSpillLifecycle) {
   EXPECT_EQ(0, coordinator.pendingCount());
 }
 
-TEST(SpillWriteCoordinatorTest, SubmitFailureRollsBackAndRequeuesBlock) {
+TEST(SpillWriteCoordinatorTest, SubmitFailurePropagatesWithoutRollback) {
   BufferManagerAccounting accounting;
-  EvictionQueue evictionQueue;
   auto block = makeUnpinnedResidentBlock(4096);
   accounting.RecordAllocate(*block);
   accounting.OnResidentUnpinned(*block);
@@ -91,21 +87,17 @@ TEST(SpillWriteCoordinatorTest, SubmitFailureRollsBackAndRequeuesBlock) {
       [](IoBuffer&, size_t, IoPriority) -> SpillWriteFuture {
         throw std::runtime_error("submit failed");
       },
-      accounting,
-      evictionQueue};
+      accounting};
 
   EXPECT_THROW(coordinator.Submit(block), std::runtime_error);
 
-  EXPECT_EQ(BlockMemoryState::kInMemory, block->state);
-  ASSERT_TRUE(block->payload.has_value());
-  EXPECT_TRUE(block->payload->valid());
-  EXPECT_EQ(block, evictionQueue.PopEvictable());
+  EXPECT_EQ(BlockMemoryState::kSpilling, block->state);
+  EXPECT_FALSE(block->payload.has_value());
   EXPECT_EQ(0, coordinator.pendingCount());
 }
 
-TEST(SpillWriteCoordinatorTest, HarvestFailureRollsBackCurrentAndPending) {
+TEST(SpillWriteCoordinatorTest, HarvestIoFailurePropagatesWithoutRollback) {
   BufferManagerAccounting accounting;
-  EvictionQueue evictionQueue;
   auto first = makeUnpinnedResidentBlock(4096);
   auto second = makeUnpinnedResidentBlock(8192);
   accounting.RecordAllocate(*first);
@@ -124,8 +116,7 @@ TEST(SpillWriteCoordinatorTest, HarvestFailureRollsBackCurrentAndPending) {
         }
         return makeCompletedWrite(rawSize);
       },
-      accounting,
-      evictionQueue};
+      accounting};
 
   coordinator.Submit(first);
   coordinator.Submit(second);
@@ -134,15 +125,11 @@ TEST(SpillWriteCoordinatorTest, HarvestFailureRollsBackCurrentAndPending) {
 
   ASSERT_FALSE(result.ok());
   EXPECT_EQ(first, result.memory);
-  EXPECT_EQ(BlockMemoryState::kInMemory, first->state);
-  EXPECT_EQ(BlockMemoryState::kInMemory, second->state);
-  ASSERT_TRUE(first->payload.has_value());
-  ASSERT_TRUE(second->payload.has_value());
-  EXPECT_TRUE(first->payload->valid());
-  EXPECT_TRUE(second->payload->valid());
-  EXPECT_EQ(0, coordinator.pendingCount());
-  EXPECT_EQ(first, evictionQueue.PopEvictable());
-  EXPECT_EQ(second, evictionQueue.PopEvictable());
+  EXPECT_EQ(BlockMemoryState::kSpilling, first->state);
+  EXPECT_EQ(BlockMemoryState::kSpilling, second->state);
+  EXPECT_FALSE(first->payload.has_value());
+  EXPECT_FALSE(second->payload.has_value());
+  EXPECT_EQ(1, coordinator.pendingCount());
 }
 
 } // namespace bytedance::bolt::memory::bm

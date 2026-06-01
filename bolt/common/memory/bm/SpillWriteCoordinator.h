@@ -13,7 +13,6 @@
 namespace bytedance::bolt::memory::bm {
 
 class BufferManagerAccounting;
-class EvictionQueue;
 struct BlockMemory;
 
 class SpillWriteCoordinator {
@@ -35,8 +34,7 @@ class SpillWriteCoordinator {
       size_t maxInflight,
       IoPriority priority,
       SubmitWrite submitWrite,
-      BufferManagerAccounting& accounting,
-      EvictionQueue& evictionQueue);
+      BufferManagerAccounting& accounting);
 
   bool canSubmit() const;
   bool hasPending() const;
@@ -44,7 +42,6 @@ class SpillWriteCoordinator {
 
   void Submit(std::shared_ptr<BlockMemory> memory);
   HarvestResult HarvestNext();
-  void RollbackPending();
 
  private:
   struct PendingWrite {
@@ -53,14 +50,10 @@ class SpillWriteCoordinator {
     SpillWriteFuture write;
   };
 
-  void Rollback(PendingWrite&& pending);
-  void RollbackCurrentAndPending(PendingWrite&& current);
-
   size_t maxInflight_{0};
   IoPriority priority_;
   SubmitWrite submitWrite_;
   BufferManagerAccounting& accounting_;
-  EvictionQueue& evictionQueue_;
   std::deque<PendingWrite> pending_;
 };
 

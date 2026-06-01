@@ -14,23 +14,6 @@
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
-namespace {
-
-[[noreturn]] void ThrowIoFailure(
-    const char* operation,
-    const IoResult& result,
-    uint64_t blockId) {
-  BOLT_FAIL(
-      "BM {} IO failed, block_id={}, io_error={}, native_error={}, bytes={}",
-      operation,
-      blockId,
-      static_cast<int>(result.error),
-      result.nativeErrorCode,
-      result.bytes);
-}
-
-} // namespace
-
 std::shared_ptr<BufferManager> BufferManager::Create(
     MemoryPool& parent,
     BufferManagerConfig config) {
@@ -165,27 +148,13 @@ std::vector<BufferHandle> BufferManager::BatchPin(
 }
 
 void BufferManager::Prefetch(
-    std::span<const std::shared_ptr<BlockHandle>> blocks) noexcept {
+    std::span<const std::shared_ptr<BlockHandle>> blocks) {
   accounting_->RecordPrefetch();
   for (const auto& block : blocks) {
-    if (!block) {
-      accounting_->RecordPrefetchSubmitFailure();
-      LOG(WARNING) << "BM Prefetch ignored null block";
-      continue;
-    }
-    try {
-      auto& memory = *block->memory_;
-      if (memory.state == BlockMemoryState::kSpilled) {
-        SubmitRead(block, config_.prefetchPriority);
-      }
-    } catch (const std::exception& e) {
-      accounting_->RecordPrefetchSubmitFailure();
-      LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id() << ": "
-                   << e.what();
-    } catch (...) {
-      accounting_->RecordPrefetchSubmitFailure();
-      LOG(WARNING) << "BM Prefetch failed for block_id=" << block->id()
-                   << " with unknown exception";
+    BOLT_CHECK_NOT_NULL(block);
+    auto& memory = *block->memory_;
+    if (memory.state == BlockMemoryState::kSpilled) {
+      SubmitRead(block, config_.prefetchPriority);
     }
   }
 }
@@ -208,8 +177,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
       [this](IoBuffer& payload, size_t rawSize, IoPriority priority) {
         return spillStore_->SubmitWriteBlock(payload, rawSize, priority);
       },
-      *accounting_,
-      *evictionQueue_};
+      *accounting_};
   uint64_t submitted = 0;
   uint64_t reclaimed = 0;
   bool noMoreEvictable = false;
@@ -250,7 +218,12 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   while (writeCoordinator.hasPending()) {
     auto result = writeCoordinator.HarvestNext();
     if (!result.ok()) {
-      ThrowIoFailure("write", result.io, result.memory->id);
+      BOLT_FAIL(
+          "BM spill write failed, block_id={}, io_error={}, native_error={}, bytes={}",
+          result.memory->id,
+          static_cast<int>(result.io.error),
+          result.io.nativeErrorCode,
+          result.io.bytes);
     }
 
     reclaimed += result.reclaimedBytes;
@@ -343,7 +316,12 @@ BufferHandle BufferManager::PinPrefetching(
   if (!read.ok()) {
     accounting_->RecordReadIoFailure();
     BlockStateMachine::MarkReadFailed(memory);
-    ThrowIoFailure("read", read.io, memory.id);
+    BOLT_FAIL(
+        "BM spill read failed, block_id={}, io_error={}, native_error={}, bytes={}",
+        memory.id,
+        static_cast<int>(read.io.error),
+        read.io.nativeErrorCode,
+        read.io.bytes);
   }
 
   accounting_->OnReadCompleted(memory, read);

@@ -317,10 +317,10 @@ TEST_F(BufferManagerInternalsTest, PublicControlsDoNotRequireSpillIo) {
   auto handle = bm->Allocate(4096, MemoryTag::kTesting);
   auto block = handle.block();
   std::array<std::shared_ptr<BlockHandle>, 2> blocks{nullptr, block};
-  bm->Prefetch(blocks);
+  EXPECT_THROW(bm->Prefetch(blocks), std::exception);
   const auto stats = bm->stats();
   EXPECT_EQ(1, stats.prefetchCount);
-  EXPECT_EQ(1, stats.prefetchSubmitFailures);
+  EXPECT_EQ(0, stats.prefetchSubmitFailures);
 }
 
 TEST_F(BufferManagerInternalsTest, PublicValidationFailuresAreReported) {
@@ -377,7 +377,7 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
 
 TEST_F(
     BufferManagerInternalsTest,
-    SpillReadFutureReportsFailedAndInvalidReads) {
+    SpillReadFutureReportsFailedReadsAndThrowsInvalidRecords) {
   {
     std::promise<IoResult> promise;
     IoResult failed;
@@ -411,11 +411,7 @@ TEST_F(
         std::make_shared<SpillCodec>(compress::CompressionConfig{}),
         root_.get(),
         4096};
-    auto result = future.get();
-    EXPECT_FALSE(result.ok());
-    EXPECT_EQ(IoErrorCode::InvalidRequest, result.io.error);
-    EXPECT_TRUE(result.io.buffer.valid());
-    EXPECT_EQ(8, result.physicalBytes);
+    EXPECT_THROW((void)future.get(), std::exception);
   }
 }
 

@@ -45,7 +45,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
   std::vector<BufferHandle> BatchPin(
       std::span<const std::shared_ptr<BlockHandle>> blocks);
-  void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks) noexcept;
+  void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks);
 
   uint64_t Reclaim(uint64_t targetBytes);
   uint64_t reclaimableBytes() const;
