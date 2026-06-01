@@ -7,7 +7,6 @@
 #include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
-#include <array>
 #include <memory>
 #include <span>
 #include <string>
@@ -16,6 +15,7 @@
 namespace bytedance::bolt::memory::bm {
 
 struct BlockMemory;
+class BufferManagerAccounting;
 class EvictionQueue;
 class SpillStore;
 
@@ -66,15 +66,13 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
       IoPriority priority);
   uint64_t SpillBlock(const std::shared_ptr<BlockMemory>& memory);
   BufferHandle MakeHandle(const std::shared_ptr<BlockHandle>& block);
-  BufferManagerTagStats& MutableTagStats(MemoryTag tag);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
   std::shared_ptr<MemoryPool> pool_;
   std::unique_ptr<SpillStore> spillStore_;
   BufferManagerConfig config_;
   uint64_t nextBlockId_{1};
-  BufferManagerStats stats_;
-  std::array<BufferManagerTagStats, kMemoryTagCount> tagStats_;
+  std::unique_ptr<BufferManagerAccounting> accounting_;
   std::unique_ptr<EvictionQueue> evictionQueue_;
 
   friend class BufferHandle;

@@ -6,7 +6,9 @@ add_library(
   bolt_memory_bm
   AllocateSize.cpp
   BlockHandle.cpp
+  BlockStateMachine.cpp
   BufferHandle.cpp
+  BufferManagerAccounting.cpp
   BufferManager.cpp
   BufferManagerObservability.cpp
   BufferManagerReclaimer.cpp
