@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "bolt/common/memory/bm/io/IoRequest.h"
+#include "bolt/common/memory/bm/io/IoBuffer.h"
 
 namespace bytedance::bolt::memory::bm {
 

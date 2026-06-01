@@ -1,11 +1,9 @@
 #include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
 
 #include "bolt/common/memory/bm/file/FileAllocatorPath.h"
+#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
 
-#include <cerrno>
 #include <utility>
-
-#include <fcntl.h>
 
 namespace bytedance::bolt::memory::bm {
 
@@ -28,23 +26,22 @@ FileAllocation DedicatedFileAllocator::Allocate(
     uint64_t extent_id) {
   FileAllocation allocation;
   const auto path = MakeDedicatedFilePath(directory_, extent_id);
-  const int fd =
-      ::open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
-  if (fd < 0) {
+  auto created = CreateExclusiveReadWriteOwnedFile(path);
+  if (!created.ok()) {
     allocation.result.error = FileErrorCode::kIoError;
-    allocation.result.native_error_code = errno;
+    allocation.result.native_error_code = created.native_error_code;
     return allocation;
   }
 
   FileExtent extent;
-  extent.fd = fd;
+  extent.fd = created.file.fd();
   extent.offset = 0;
   extent.requested_size = static_cast<uint64_t>(requested_size);
   extent.allocated_size = static_cast<uint64_t>(requested_size);
   extent.kind = FileExtentKind::kDedicated;
   extent.id = extent_id;
 
-  files_.emplace(extent_id, OwnedFile(path, fd));
+  files_.emplace(extent_id, std::move(created.file));
 
   allocation.result.extent = extent;
   allocation.record.extent = extent;

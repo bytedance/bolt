@@ -10,6 +10,7 @@ add_executable(
   DiskIoStatsCollectorTest.cpp
   DiskIoSchedulerTest.cpp
   DrrDispatcherTest.cpp
+  EventFdTest.cpp
   InflightRegistryTest.cpp
   IoPriorityTest.cpp
   IoRequestValidatorTest.cpp

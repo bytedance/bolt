@@ -6,44 +6,22 @@
 #include <cstdint>
 #include <cstring>
 #include <sys/eventfd.h>
-#include <unistd.h>
 
 namespace bytedance::bolt::memory::bm {
 
 EventFd::EventFd() {
-  fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  BOLT_CHECK_GE(fd_, 0, "eventfd failed: {}", std::strerror(errno));
-}
-
-EventFd::~EventFd() {
-  if (fd_ >= 0) {
-    ::close(fd_);
-  }
-}
-
-EventFd::EventFd(EventFd&& other) noexcept : fd_(other.fd_) {
-  other.fd_ = -1;
-}
-
-EventFd& EventFd::operator=(EventFd&& other) noexcept {
-  if (this != &other) {
-    if (fd_ >= 0) {
-      ::close(fd_);
-    }
-    fd_ = other.fd_;
-    other.fd_ = -1;
-  }
-  return *this;
+  fd_.reset(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
+  BOLT_CHECK_GE(fd_.get(), 0, "eventfd failed: {}", std::strerror(errno));
 }
 
 int EventFd::fd() const {
-  return fd_;
+  return fd_.get();
 }
 
 void EventFd::notify() const {
   uint64_t value = 1;
   while (true) {
-    const auto written = ::write(fd_, &value, sizeof(value));
+    const auto written = ::write(fd_.get(), &value, sizeof(value));
     if (written == sizeof(value)) {
       return;
     }
@@ -62,7 +40,7 @@ void EventFd::notify() const {
 void EventFd::drain() const {
   uint64_t value = 0;
   while (true) {
-    const auto bytes = ::read(fd_, &value, sizeof(value));
+    const auto bytes = ::read(fd_.get(), &value, sizeof(value));
     if (bytes == sizeof(value)) {
       continue;
     }
