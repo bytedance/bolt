@@ -22,9 +22,9 @@ class SpillIo {
       IoPriority priority);
 
  private:
-  void EnsureSchedulerReadyForPayloadMove();
+  void EnsureWriteSchedulerReady();
 
-  bool schedulerReadyForPayloadMove_{false};
+  bool writeSchedulerReady_{false};
 };
 
 } // namespace bytedance::bolt::memory::bm

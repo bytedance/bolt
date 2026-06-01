@@ -14,6 +14,7 @@ class DiskIoScheduler {
   DiskIoScheduler& operator=(const DiskIoScheduler&) = delete;
 
   std::future<IoResult> submit(IoRequest request) const;
+  void ensureReady() const;
   DiskIoSchedulerStats stats() const;
 
  private:
