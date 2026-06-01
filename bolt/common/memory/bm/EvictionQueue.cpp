@@ -1,5 +1,7 @@
 #include "bolt/common/memory/bm/EvictionQueue.h"
 
+#include "bolt/common/memory/bm/BlockMemory.h"
+
 namespace bytedance::bolt::memory::bm {
 
 void EvictionQueue::Add(const std::shared_ptr<BlockMemory>& block) {

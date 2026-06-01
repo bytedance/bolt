@@ -1,5 +1,6 @@
 #include "bolt/common/memory/bm/BlockHandle.h"
 
+#include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 
 #include <utility>
