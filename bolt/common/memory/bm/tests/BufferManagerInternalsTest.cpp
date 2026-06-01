@@ -6,11 +6,11 @@
 #include "bolt/common/memory/bm/BufferManagerAccounting.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/OwnedFileExtent.h"
+#include "bolt/common/memory/bm/OwnedFileSegment.h"
 #include "bolt/common/memory/bm/SpillCodec.h"
 #include "bolt/common/memory/bm/SpillStore.h"
-#include "bolt/common/memory/bm/file/FileBlockAllocator.h"
-#include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
+#include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
 #include <cerrno>
@@ -436,32 +436,32 @@ TEST_F(BufferManagerInternalsTest, SpillWriteFutureCompletesToResult) {
   EXPECT_TRUE(result.compressed);
 }
 
-TEST_F(BufferManagerInternalsTest, OwnedFileExtentMoveAndExplicitFree) {
-  const auto directory = test::UniqueTempDir("bolt-bm-owned-file-extent");
+TEST_F(BufferManagerInternalsTest, OwnedFileSegmentMoveAndExplicitFree) {
+  const auto directory = test::UniqueTempDir("bolt-bm-owned-file-segment");
   std::filesystem::remove_all(directory);
   auto allocator =
-      CreateFileBlockAllocator(test::ValidConfigWithDirectory(directory));
+      CreateFileSegmentAllocator(test::ValidConfigWithDirectory(directory));
   ASSERT_NE(nullptr, allocator);
 
   auto first = allocator->Allocate(4096);
   ASSERT_TRUE(first.ok());
-  OwnedFileExtent extent{first.extent, allocator};
-  ASSERT_TRUE(extent.valid());
-  EXPECT_EQ(first.extent.id, extent.extent().id);
+  OwnedFileSegment segment{first.segment, allocator};
+  ASSERT_TRUE(segment.valid());
+  EXPECT_EQ(first.segment.id, segment.segment().id);
 
-  OwnedFileExtent moved{std::move(extent)};
-  EXPECT_FALSE(extent.valid());
+  OwnedFileSegment moved{std::move(segment)};
+  EXPECT_FALSE(segment.valid());
   ASSERT_TRUE(moved.valid());
 
   auto second = allocator->Allocate(4096);
   ASSERT_TRUE(second.ok());
-  OwnedFileExtent assigned{second.extent, allocator};
+  OwnedFileSegment assigned{second.segment, allocator};
   assigned = std::move(moved);
   EXPECT_FALSE(moved.valid());
   ASSERT_TRUE(assigned.valid());
-  EXPECT_EQ(first.extent.id, assigned.extent().id);
+  EXPECT_EQ(first.segment.id, assigned.segment().id);
 
-  assigned.FreeOrFatal("OwnedFileExtentMoveAndExplicitFree");
+  assigned.FreeOrFatal("OwnedFileSegmentMoveAndExplicitFree");
   EXPECT_FALSE(assigned.valid());
   std::filesystem::remove_all(directory);
 }

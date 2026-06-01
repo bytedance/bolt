@@ -1,5 +1,5 @@
-#include "bolt/common/memory/bm/file/FileBlockAllocator.h"
-#include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
+#include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <filesystem>
 #include <memory>
@@ -10,37 +10,37 @@
 using namespace bytedance::bolt::memory::bm;
 using namespace bytedance::bolt::memory::bm::test;
 
-TEST(FileBlockAllocatorFactoryTest, CreatesAllocatorThroughFactory) {
+TEST(FileSegmentAllocatorFactoryTest, CreatesAllocatorThroughFactory) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-factory");
   std::filesystem::remove_all(directory);
 
   auto allocator =
-      CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
+      CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
 
   auto allocation = allocator->Allocate(4 * 1024);
 
   EXPECT_TRUE(allocation.ok());
 }
 
-TEST(FileBlockAllocatorFactoryTest, CreateReturnsSharedAllocator) {
+TEST(FileSegmentAllocatorFactoryTest, CreateReturnsSharedAllocator) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-shared");
   std::filesystem::remove_all(directory);
 
   auto allocator =
-      CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
-  static_assert(std::is_same_v<decltype(allocator), std::shared_ptr<FileBlockAllocator>>);
+      CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
+  static_assert(std::is_same_v<decltype(allocator), std::shared_ptr<FileSegmentAllocator>>);
   ASSERT_NE(nullptr, allocator);
 
   auto other = allocator;
   EXPECT_EQ(2, allocator.use_count());
 }
 
-TEST(FileBlockAllocatorFactoryTest, UsesUniqueDirectoryPerAllocator) {
+TEST(FileSegmentAllocatorFactoryTest, UsesUniqueDirectoryPerAllocator) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-unique-dir");
   std::filesystem::remove_all(directory);
 
-  auto first = CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
-  auto second = CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
+  auto first = CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
+  auto second = CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
 
   ASSERT_TRUE(first->Allocate(4 * 1024).ok());
   ASSERT_TRUE(second->Allocate(4 * 1024).ok());
@@ -54,12 +54,12 @@ TEST(FileBlockAllocatorFactoryTest, UsesUniqueDirectoryPerAllocator) {
   }
 }
 
-TEST(FileBlockAllocatorFactoryTest, DestroysOnlyOwnedDirectory) {
+TEST(FileSegmentAllocatorFactoryTest, DestroysOnlyOwnedDirectory) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-owned-dir");
   std::filesystem::remove_all(directory);
 
-  auto first = CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
-  auto second = CreateFileBlockAllocator(ValidConfigWithDirectory(directory));
+  auto first = CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
+  auto second = CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
   ASSERT_TRUE(first->Allocate(4 * 1024).ok());
   ASSERT_TRUE(second->Allocate(4 * 1024).ok());
 

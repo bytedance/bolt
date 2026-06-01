@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/OwnedFileExtent.h"
+#include "bolt/common/memory/bm/OwnedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include <cstdint>
@@ -31,7 +31,7 @@ struct BlockMemory {
   uint32_t pinCount{0};
   uint64_t evictionSequence{0};
   std::optional<IoBuffer> payload;
-  std::optional<OwnedFileExtent> extent;
+  std::optional<OwnedFileSegment> segment;
   std::optional<SpillReadFuture> prefetchFuture;
 };
 

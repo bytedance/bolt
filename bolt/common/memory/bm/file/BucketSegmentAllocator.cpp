@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/file/BucketBlockAllocator.h"
+#include "bolt/common/memory/bm/file/BucketSegmentAllocator.h"
 
 #include "bolt/common/memory/bm/file/FileAllocatorPath.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
@@ -8,7 +8,7 @@
 
 namespace bytedance::bolt::memory::bm {
 
-BucketBlockAllocator::BucketBlockAllocator(
+BucketSegmentAllocator::BucketSegmentAllocator(
     std::string directory,
     uint64_t bucket_size,
     uint64_t file_size_limit_bytes,
@@ -18,16 +18,16 @@ BucketBlockAllocator::BucketBlockAllocator(
       file_size_limit_bytes_(file_size_limit_bytes),
       max_open_files_(max_open_files) {}
 
-BucketBlockAllocator::~BucketBlockAllocator() {
+BucketSegmentAllocator::~BucketSegmentAllocator() {
   for (auto& file : files_) {
     file->file.CloseAndRemove();
   }
   files_.clear();
 }
 
-FileAllocation BucketBlockAllocator::Allocate(
+FileAllocation BucketSegmentAllocator::Allocate(
     int64_t requested_size,
-    uint64_t extent_id) {
+    uint64_t segment_id) {
   FileAllocation allocation;
 
   BucketFile* file = FindReusableFile();
@@ -45,48 +45,48 @@ FileAllocation BucketBlockAllocator::Allocate(
   }
 
   uint64_t offset = 0;
-  if (!file->free_offsets.empty()) {
-    offset = file->free_offsets.back();
-    file->free_offsets.pop_back();
+  if (!file->free_segment_offsets.empty()) {
+    offset = file->free_segment_offsets.back();
+    file->free_segment_offsets.pop_back();
   } else {
     offset = file->next_offset;
     file->next_offset += bucket_size_;
   }
-  ++file->active_blocks;
+  ++file->active_segments;
 
-  auto& extent = allocation.result.extent;
-  extent.fd = file->file.fd();
-  extent.offset = offset;
-  extent.requested_size = static_cast<uint64_t>(requested_size);
-  extent.allocated_size = bucket_size_;
-  extent.kind = FileExtentKind::kBucket;
-  extent.id = extent_id;
+  auto& segment = allocation.result.segment;
+  segment.fd = file->file.fd();
+  segment.offset = offset;
+  segment.requested_size = static_cast<uint64_t>(requested_size);
+  segment.allocated_size = bucket_size_;
+  segment.kind = FileSegmentKind::kBucket;
+  segment.id = segment_id;
 
-  allocation.record.extent = extent;
+  allocation.record.segment = segment;
   allocation.record.file_index = file->file_index;
   return allocation;
 }
 
-FileFreeResult BucketBlockAllocator::Free(const ExtentRecord& record) {
+FileFreeResult BucketSegmentAllocator::Free(const SegmentRecord& record) {
   auto* file = FindFileByIndex(record.file_index);
-  if (file == nullptr || file->active_blocks == 0) {
+  if (file == nullptr || file->active_segments == 0) {
     FileFreeResult result;
-    result.error = FileErrorCode::kInvalidExtent;
+    result.error = FileErrorCode::kInvalidSegment;
     return result;
   }
 
-  file->free_offsets.push_back(record.extent.offset);
-  --file->active_blocks;
+  file->free_segment_offsets.push_back(record.segment.offset);
+  --file->active_segments;
 
-  if (file->active_blocks == 0) {
+  if (file->active_segments == 0) {
     DeleteFile(record.file_index);
   }
   return FileFreeResult{};
 }
 
-BucketBlockAllocator::BucketFile* BucketBlockAllocator::FindReusableFile() {
+BucketSegmentAllocator::BucketFile* BucketSegmentAllocator::FindReusableFile() {
   for (auto& file : files_) {
-    if (!file->free_offsets.empty() ||
+    if (!file->free_segment_offsets.empty() ||
         file->next_offset + bucket_size_ <= file_size_limit_bytes_) {
       return file.get();
     }
@@ -94,7 +94,7 @@ BucketBlockAllocator::BucketFile* BucketBlockAllocator::FindReusableFile() {
   return nullptr;
 }
 
-FileAllocateResult BucketBlockAllocator::CreateFile() {
+FileAllocateResult BucketSegmentAllocator::CreateFile() {
   const auto file_index = next_file_index_++;
   const auto path = MakeBucketFilePath(directory_, bucket_size_, file_index);
   auto created = CreateExclusiveReadWriteManagedOpenFile(path);
@@ -112,8 +112,8 @@ FileAllocateResult BucketBlockAllocator::CreateFile() {
   return FileAllocateResult{};
 }
 
-BucketBlockAllocator::BucketFile*
-BucketBlockAllocator::FindFileByIndex(uint64_t file_index) {
+BucketSegmentAllocator::BucketFile*
+BucketSegmentAllocator::FindFileByIndex(uint64_t file_index) {
   for (auto& file : files_) {
     if (file->file_index == file_index) {
       return file.get();
@@ -122,7 +122,7 @@ BucketBlockAllocator::FindFileByIndex(uint64_t file_index) {
   return nullptr;
 }
 
-void BucketBlockAllocator::DeleteFile(uint64_t file_index) {
+void BucketSegmentAllocator::DeleteFile(uint64_t file_index) {
   auto it = std::remove_if(
       files_.begin(),
       files_.end(),

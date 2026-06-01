@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bolt/common/memory/bm/file/FileBlockAllocatorTypes.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorTypes.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFile.h"
 
 #include <string>

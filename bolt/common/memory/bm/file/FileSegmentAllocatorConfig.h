@@ -3,20 +3,20 @@
 #include <string>
 #include <vector>
 
-#include "bolt/common/memory/bm/file/FileBlockAllocatorTypes.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorTypes.h"
 
 namespace bytedance::bolt::memory::bm {
 
-struct FileBlockAllocatorConfig {
+struct FileSegmentAllocatorConfig {
   std::string directory;
   std::vector<int64_t> bucket_sizes;
   int64_t file_size_limit_bytes{0};
   uint32_t max_open_files_per_bucket{0};
 };
 
-bool IsFileBlockAligned(int64_t value);
+bool IsFileSegmentAligned(int64_t value);
 
-FileErrorCode ValidateFileBlockAllocatorConfig(
-    const FileBlockAllocatorConfig& config);
+FileErrorCode ValidateFileSegmentAllocatorConfig(
+    const FileSegmentAllocatorConfig& config);
 
 } // namespace bytedance::bolt::memory::bm

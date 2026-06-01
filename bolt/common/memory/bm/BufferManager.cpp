@@ -325,9 +325,9 @@ BufferHandle BufferManager::PinPrefetching(
   }
 
   accounting_->OnReadCompleted(memory, read);
-  auto oldExtent =
+  auto oldSegment =
       BlockStateMachine::CompleteRead(memory, std::move(read.io.buffer));
-  oldExtent.FreeOrFatal("BufferManager::PinPrefetching");
+  oldSegment.FreeOrFatal("BufferManager::PinPrefetching");
   return MakeHandle(block);
 }
 
@@ -338,10 +338,10 @@ void BufferManager::SubmitRead(
   BOLT_CHECK(
       memory.state == BlockMemoryState::kSpilled,
       "BM read submission expects a spilled block");
-  BOLT_CHECK(memory.extent.has_value());
+  BOLT_CHECK(memory.segment.has_value());
 
   auto future =
-      spillStore_->SubmitReadBlock(*memory.extent, memory.size, priority);
+      spillStore_->SubmitReadBlock(*memory.segment, memory.size, priority);
   BlockStateMachine::SubmitRead(memory, std::move(future));
   accounting_->OnReadSubmitted(memory);
 }

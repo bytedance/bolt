@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
-#include "bolt/common/memory/bm/OwnedFileExtent.h"
+#include "bolt/common/memory/bm/OwnedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
@@ -17,7 +17,7 @@ class SpillIo;
 
 struct SpillWriteResult {
   IoResult io;
-  OwnedFileExtent extent;
+  OwnedFileSegment segment;
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t compressionTimeUs{0};
@@ -40,14 +40,14 @@ class SpillWriteFuture {
   SpillWriteFuture() = default;
   SpillWriteFuture(
       std::future<IoResult> rawFuture,
-      OwnedFileExtent extent,
+      OwnedFileSegment segment,
       SpillWriteMetadata metadata);
 
   SpillWriteResult get();
 
  private:
   std::future<IoResult> rawFuture_;
-  OwnedFileExtent extent_;
+  OwnedFileSegment segment_;
   SpillWriteMetadata metadata_;
 };
 
@@ -89,19 +89,19 @@ class SpillStore {
   SubmitWriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
 
   SpillReadFuture SubmitReadBlock(
-      const OwnedFileExtent& extent,
+      const OwnedFileSegment& segment,
       size_t expectedRawSize,
       IoPriority priority);
 
  private:
-  FileAllocateResult AllocateExtent(size_t size);
-  FileFreeResult FreeExtent(const FileExtent& extent);
-  OwnedFileExtent OwnExtent(FileExtent extent) const;
+  FileAllocateResult AllocateSegment(size_t size);
+  FileFreeResult FreeSegment(const FileSegment& segment);
+  OwnedFileSegment OwnSegment(FileSegment segment) const;
 
   SpillStoreConfig config_;
   std::shared_ptr<SpillCodec> codec_;
   std::unique_ptr<SpillIo> io_;
-  std::shared_ptr<FileBlockAllocator> allocator_;
+  std::shared_ptr<FileSegmentAllocator> allocator_;
   MemoryPool* pool_{nullptr};
 };
 

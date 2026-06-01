@@ -8,21 +8,21 @@
 namespace bytedance::bolt::memory::bm {
 
 std::future<IoResult> SpillIo::SubmitReadRaw(
-    const OwnedFileExtent& extent,
+    const OwnedFileSegment& segment,
     size_t size,
     IoPriority priority) {
   IoRequest request;
   request.opcode = IoOpcode::Read;
   request.priority = priority;
-  request.fd = extent.extent().fd;
-  request.fileOffset = extent.extent().offset;
+  request.fd = segment.segment().fd;
+  request.fileOffset = segment.segment().offset;
   request.buffer = IoBuffer::allocateFromMalloc(size);
 
   return diskIoScheduler().submit(std::move(request));
 }
 
 std::future<IoResult> SpillIo::SubmitWriteRaw(
-    const FileExtent& extent,
+    const FileSegment& segment,
     IoBuffer& payload,
     IoPriority priority) {
   // This is intentionally outside BufferManager hot path. The current scheduler
@@ -33,8 +33,8 @@ std::future<IoResult> SpillIo::SubmitWriteRaw(
   IoRequest request;
   request.opcode = IoOpcode::Write;
   request.priority = priority;
-  request.fd = extent.fd;
-  request.fileOffset = extent.offset;
+  request.fd = segment.fd;
+  request.fileOffset = segment.offset;
   request.buffer = std::move(payload);
 
   return diskIoScheduler().submit(std::move(request));

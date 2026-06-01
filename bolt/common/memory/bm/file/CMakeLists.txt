@@ -1,12 +1,12 @@
 add_library(
   bolt_memory_bm_file
-  BucketBlockAllocator.cpp
+  BucketSegmentAllocator.cpp
   DedicatedFileAllocator.cpp
-  ExtentRegistry.cpp
+  SegmentRegistry.cpp
   FileAllocatorPath.cpp
-  FileBlockAllocator.cpp
-  FileBlockAllocatorConfig.cpp
-  FileBlockAllocatorImpl.cpp
+  FileSegmentAllocator.cpp
+  FileSegmentAllocatorConfig.cpp
+  FileSegmentAllocatorImpl.cpp
   ManagedOpenFile.cpp
   ManagedOpenFileFactory.cpp
 )
