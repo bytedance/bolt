@@ -265,5 +265,23 @@ TEST_F(FromJsonTest, invalidJson) {
   testFromJson(input, makeRowVector({"a"}, {expected}));
 }
 
+TEST_F(FromJsonTest, scalarRootDocumentDoesNotThrow) {
+  auto scalarInput = makeFlatVector<std::string>({R"("abc")", "1", "true"});
+
+  auto expectedArray = makeNullableArrayVector<int64_t>(
+      {std::nullopt, std::nullopt, std::nullopt});
+  testFromJson(scalarInput, expectedArray);
+
+  auto expectedMap = makeNullableMapVector<std::string, int64_t>(
+      {std::nullopt, std::nullopt, std::nullopt});
+  testFromJson(scalarInput, expectedMap);
+
+  auto expectedRow = makeRowVector(
+      {"a"},
+      {makeNullableFlatVector<int64_t>(
+          {std::nullopt, std::nullopt, std::nullopt})});
+  testFromJson(scalarInput, expectedRow);
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

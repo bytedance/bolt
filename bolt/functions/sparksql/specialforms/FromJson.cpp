@@ -489,13 +489,21 @@ class FromJsonFunction final : public exec::VectorFunction {
   static simdjson::error_code extractJsonToWriter(
       simdjson::ondemand::document& doc,
       exec::VectorWriter<Any>& writer) {
-    if (doc.is_null()) {
-      writer.commitNull();
-    } else {
-      SIMDJSON_TRY(
-          ExtractJsonTypeImpl<simdjson::ondemand::document&>::apply<kind>(
-              doc, writer.current(), true));
-      writer.commit(true);
+    try {
+      if (doc.is_null()) {
+        writer.commitNull();
+      } else {
+        SIMDJSON_TRY(
+            ExtractJsonTypeImpl<simdjson::ondemand::document&>::apply<kind>(
+                doc, writer.current(), true));
+        writer.commit(true);
+      }
+    } catch (const simdjson::simdjson_error& e) {
+      // Scalar top-level JSON documents (e.g. '"abc"', '1', 'true') should
+      // not escape as exceptions for complex root schemas. Let the caller map
+      // simdjson errors to NULL, which matches Spark's permissive from_json
+      // behavior under partial-results mode.
+      return e.error();
     }
     return simdjson::SUCCESS;
   }
