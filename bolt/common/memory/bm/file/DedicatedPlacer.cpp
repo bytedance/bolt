@@ -1,31 +1,31 @@
-#include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
+#include "bolt/common/memory/bm/file/DedicatedPlacer.h"
 
-#include "bolt/common/memory/bm/file/FileAllocatorPath.h"
+#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
 
-DedicatedFileAllocator::DedicatedFileAllocator(std::string directory)
+DedicatedPlacer::DedicatedPlacer(std::string directory)
     : directory_(std::move(directory)) {}
 
-DedicatedFileAllocator::~DedicatedFileAllocator() {
+DedicatedPlacer::~DedicatedPlacer() {
   RemoveAllFiles();
 }
 
-void DedicatedFileAllocator::RemoveAllFiles() {
+void DedicatedPlacer::RemoveAllFiles() {
   for (auto& [_, file] : files_) {
     file.CloseAndRemove();
   }
   files_.clear();
 }
 
-FileAllocation DedicatedFileAllocator::Allocate(
+FileAllocation DedicatedPlacer::Allocate(
     int64_t requested_size,
     uint64_t segment_id) {
   FileAllocation allocation;
-  const auto path = MakeDedicatedFilePath(directory_, segment_id);
+  const auto path = MakeDedicatedSegmentFilePath(directory_, segment_id);
   auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     allocation.result.error = FileErrorCode::kIoError;
@@ -48,7 +48,7 @@ FileAllocation DedicatedFileAllocator::Allocate(
   return allocation;
 }
 
-FileFreeResult DedicatedFileAllocator::Free(const SegmentRecord& record) {
+FileFreeResult DedicatedPlacer::Free(const SegmentRecord& record) {
   ManagedOpenFile file;
   const auto it = files_.find(record.segment.id);
   if (it == files_.end()) {

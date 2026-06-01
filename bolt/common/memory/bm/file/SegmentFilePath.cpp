@@ -1,10 +1,10 @@
-#include "bolt/common/memory/bm/file/FileAllocatorPath.h"
+#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 
 #include <string>
 
 namespace bytedance::bolt::memory::bm {
 
-std::string MakeBucketFilePath(
+std::string MakeBucketSegmentFilePath(
     const std::string& directory,
     uint64_t bucket_size,
     uint64_t file_index) {
@@ -12,7 +12,7 @@ std::string MakeBucketFilePath(
       std::to_string(file_index) + ".bm";
 }
 
-std::string MakeDedicatedFilePath(
+std::string MakeDedicatedSegmentFilePath(
     const std::string& directory,
     uint64_t segment_id) {
   return directory + "/dedicated_" + std::to_string(segment_id) + ".bm";

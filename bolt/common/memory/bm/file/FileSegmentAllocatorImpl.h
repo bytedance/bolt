@@ -1,8 +1,8 @@
 #pragma once
 
 #include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
-#include "bolt/common/memory/bm/file/BucketSegmentAllocator.h"
-#include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
+#include "bolt/common/memory/bm/file/BucketPlacer.h"
+#include "bolt/common/memory/bm/file/DedicatedPlacer.h"
 #include "bolt/common/memory/bm/file/SegmentRegistry.h"
 
 #include <memory>
@@ -31,8 +31,8 @@ class FileSegmentAllocatorImpl : public FileSegmentAllocator {
   FileSegmentAllocatorConfig config_;
   std::string allocator_id_;
   std::string directory_;
-  std::vector<std::unique_ptr<BucketSegmentAllocator>> buckets_;
-  DedicatedFileAllocator dedicated_allocator_;
+  std::vector<std::unique_ptr<BucketPlacer>> buckets_;
+  DedicatedPlacer dedicated_placer_;
   SegmentRegistry registry_;
   bool shutdown_{false};
 };

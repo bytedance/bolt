@@ -11,17 +11,17 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class BucketSegmentAllocator {
+class BucketPlacer {
  public:
-  BucketSegmentAllocator(
+  BucketPlacer(
       std::string directory,
       uint64_t bucket_size,
       uint64_t file_size_limit_bytes,
       uint32_t max_open_files);
-  ~BucketSegmentAllocator();
+  ~BucketPlacer();
 
-  BucketSegmentAllocator(const BucketSegmentAllocator&) = delete;
-  BucketSegmentAllocator& operator=(const BucketSegmentAllocator&) = delete;
+  BucketPlacer(const BucketPlacer&) = delete;
+  BucketPlacer& operator=(const BucketPlacer&) = delete;
 
   FileAllocation Allocate(int64_t requested_size, uint64_t segment_id);
   FileFreeResult Free(const SegmentRecord& record);

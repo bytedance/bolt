@@ -10,13 +10,13 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class DedicatedFileAllocator {
+class DedicatedPlacer {
  public:
-  explicit DedicatedFileAllocator(std::string directory);
-  ~DedicatedFileAllocator();
+  explicit DedicatedPlacer(std::string directory);
+  ~DedicatedPlacer();
 
-  DedicatedFileAllocator(const DedicatedFileAllocator&) = delete;
-  DedicatedFileAllocator& operator=(const DedicatedFileAllocator&) = delete;
+  DedicatedPlacer(const DedicatedPlacer&) = delete;
+  DedicatedPlacer& operator=(const DedicatedPlacer&) = delete;
 
   FileAllocation Allocate(int64_t requested_size, uint64_t segment_id);
   FileFreeResult Free(const SegmentRecord& record);
