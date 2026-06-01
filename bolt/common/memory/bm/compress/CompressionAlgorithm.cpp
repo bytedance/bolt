@@ -53,6 +53,7 @@ uint64_t CompressWithAlgorithm(
 }
 
 void DecompressWithAlgorithm(
+    const DecompressionContextSet& contexts,
     CompressionKind kind,
     const char* source,
     size_t sourceSize,
@@ -60,13 +61,13 @@ void DecompressWithAlgorithm(
     size_t targetSize) {
   switch (kind) {
     case CompressionKind::kLz4Block:
-      Lz4Decompress(source, sourceSize, target, targetSize);
+      Lz4Decompress(contexts.lz4, source, sourceSize, target, targetSize);
       return;
     case CompressionKind::kZstdFrame:
-      ZstdDecompress(source, sourceSize, target, targetSize);
+      ZstdDecompress(contexts.zstd, source, sourceSize, target, targetSize);
       return;
     case CompressionKind::kSnappyRaw:
-      SnappyDecompress(source, sourceSize, target, targetSize);
+      SnappyDecompress(contexts.snappy, source, sourceSize, target, targetSize);
       return;
     default:
       BOLT_FAIL("BM unsupported compression kind={}", static_cast<int>(kind));

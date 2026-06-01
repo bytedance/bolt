@@ -44,6 +44,7 @@ uint64_t SnappyCompress(
 }
 
 void SnappyDecompress(
+    SnappyDecompressionContext* /*context*/,
     const char* source,
     size_t sourceSize,
     char* target,
