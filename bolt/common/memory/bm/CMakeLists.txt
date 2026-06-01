@@ -1,3 +1,4 @@
+add_subdirectory(base)
 add_subdirectory(io)
 add_subdirectory(file)
 add_subdirectory(compress)
@@ -14,9 +15,6 @@ add_library(
   BufferManagerReclaimer.cpp
   EvictionQueue.cpp
   MemoryTag.cpp
-  ManagedFileSegment.cpp
-  SpillCodec.cpp
-  SpillIo.cpp
   SpillWriteCoordinator.cpp
   SpillStore.cpp)
 
@@ -26,7 +24,8 @@ target_include_directories(bolt_memory_bm PUBLIC ${PROJECT_SOURCE_DIR})
 
 target_link_libraries(
   bolt_memory_bm
-  PUBLIC bolt_memory_bm_file
+  PUBLIC bolt_memory_bm_base
+         bolt_memory_bm_file
          bolt_memory_bm_io
          bolt_memory_bm_compress
          bolt_memory

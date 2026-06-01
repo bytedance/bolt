@@ -21,7 +21,8 @@ target_include_directories(bolt_memory_bm_io PUBLIC ${PROJECT_SOURCE_DIR})
 
 target_link_libraries(
   bolt_memory_bm_io
-  PUBLIC bolt_common_base
+  PUBLIC bolt_memory_bm_base
+         bolt_common_base
          bolt_exception
          Folly::folly
          glog::glog

@@ -6,8 +6,8 @@
 #include "bolt/common/memory/bm/BufferManagerAccounting.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/ManagedFileSegment.h"
-#include "bolt/common/memory/bm/SpillCodec.h"
+#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
@@ -300,7 +300,7 @@ TEST_F(BufferManagerInternalsTest, ReclaimerHandlesExpiredAndLiveManagers) {
   EXPECT_EQ(4096, reclaimable);
 }
 
-TEST_F(BufferManagerInternalsTest, PublicControlsDoNotRequireSpillIo) {
+TEST_F(BufferManagerInternalsTest, PublicControlsDoNotRequireSpillPath) {
   BufferManagerConfig invalidConfig;
   EXPECT_THROW(
       (void)BufferManager::Create(*root_, std::move(invalidConfig)),
@@ -350,8 +350,8 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
 
   compress::CompressionConfig config;
   config.kind = compress::CompressionKind::kNone;
-  SpillCodec codec{config};
-  auto record = codec.Build(std::span<const char>(raw.data(), raw.length()));
+  compress::CompressionManager codec{config};
+  auto record = codec.BuildSpillRecord(std::span<const char>(raw.data(), raw.length()));
 
   std::promise<IoResult> promise;
   IoResult io;
@@ -362,7 +362,7 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
   auto leaf = root_->addLeafChild("spill-read-success");
   SpillReadFuture future{
       promise.get_future(),
-      std::make_shared<SpillCodec>(config),
+      std::make_shared<compress::CompressionManager>(config),
       leaf.get(),
       kSize};
   auto result = future.get();
@@ -388,7 +388,7 @@ TEST_F(
 
     SpillReadFuture future{
         promise.get_future(),
-        std::make_shared<SpillCodec>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
         root_.get(),
         4096};
     auto result = future.get();
@@ -408,7 +408,7 @@ TEST_F(
 
     SpillReadFuture future{
         promise.get_future(),
-        std::make_shared<SpillCodec>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
         root_.get(),
         4096};
     EXPECT_THROW((void)future.get(), std::exception);

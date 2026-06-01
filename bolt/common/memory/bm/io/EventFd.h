@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bolt/common/memory/bm/ScopedFd.h"
+#include "bolt/common/memory/bm/base/ScopedFd.h"
 
 namespace bytedance::bolt::memory::bm {
 

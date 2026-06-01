@@ -1,7 +1,7 @@
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
-#include "bolt/common/memory/bm/SpillCodec.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/Memory.h"
 
 #include <cerrno>
@@ -38,7 +38,7 @@ class BlockStateMachineTest : public testing::Test {
 
     return SpillReadFuture{
         promise.get_future(),
-        std::make_shared<SpillCodec>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
         root_.get(),
         4096};
   }

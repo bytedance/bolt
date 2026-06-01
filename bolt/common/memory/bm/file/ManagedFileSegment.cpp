@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/ManagedFileSegment.h"
+#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 
 #include <glog/logging.h>
 
