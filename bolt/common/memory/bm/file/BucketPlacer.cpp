@@ -1,6 +1,6 @@
-#include "bolt/common/memory/bm/file/BucketSegmentAllocator.h"
+#include "bolt/common/memory/bm/file/BucketPlacer.h"
 
-#include "bolt/common/memory/bm/file/FileAllocatorPath.h"
+#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 
 #include <algorithm>
@@ -8,7 +8,7 @@
 
 namespace bytedance::bolt::memory::bm {
 
-BucketSegmentAllocator::BucketSegmentAllocator(
+BucketPlacer::BucketPlacer(
     std::string directory,
     uint64_t bucket_size,
     uint64_t file_size_limit_bytes,
@@ -18,14 +18,14 @@ BucketSegmentAllocator::BucketSegmentAllocator(
       file_size_limit_bytes_(file_size_limit_bytes),
       max_open_files_(max_open_files) {}
 
-BucketSegmentAllocator::~BucketSegmentAllocator() {
+BucketPlacer::~BucketPlacer() {
   for (auto& file : files_) {
     file->file.CloseAndRemove();
   }
   files_.clear();
 }
 
-FileAllocation BucketSegmentAllocator::Allocate(
+FileAllocation BucketPlacer::Allocate(
     int64_t requested_size,
     uint64_t segment_id) {
   FileAllocation allocation;
@@ -67,7 +67,7 @@ FileAllocation BucketSegmentAllocator::Allocate(
   return allocation;
 }
 
-FileFreeResult BucketSegmentAllocator::Free(const SegmentRecord& record) {
+FileFreeResult BucketPlacer::Free(const SegmentRecord& record) {
   auto* file = FindFileByIndex(record.file_index);
   if (file == nullptr || file->active_segments == 0) {
     FileFreeResult result;
@@ -84,7 +84,7 @@ FileFreeResult BucketSegmentAllocator::Free(const SegmentRecord& record) {
   return FileFreeResult{};
 }
 
-BucketSegmentAllocator::BucketFile* BucketSegmentAllocator::FindReusableFile() {
+BucketPlacer::BucketFile* BucketPlacer::FindReusableFile() {
   for (auto& file : files_) {
     if (!file->free_segment_offsets.empty() ||
         file->next_offset + bucket_size_ <= file_size_limit_bytes_) {
@@ -94,9 +94,9 @@ BucketSegmentAllocator::BucketFile* BucketSegmentAllocator::FindReusableFile() {
   return nullptr;
 }
 
-FileAllocateResult BucketSegmentAllocator::CreateFile() {
+FileAllocateResult BucketPlacer::CreateFile() {
   const auto file_index = next_file_index_++;
-  const auto path = MakeBucketFilePath(directory_, bucket_size_, file_index);
+  const auto path = MakeBucketSegmentFilePath(directory_, bucket_size_, file_index);
   auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     FileAllocateResult result;
@@ -112,8 +112,8 @@ FileAllocateResult BucketSegmentAllocator::CreateFile() {
   return FileAllocateResult{};
 }
 
-BucketSegmentAllocator::BucketFile*
-BucketSegmentAllocator::FindFileByIndex(uint64_t file_index) {
+BucketPlacer::BucketFile*
+BucketPlacer::FindFileByIndex(uint64_t file_index) {
   for (auto& file : files_) {
     if (file->file_index == file_index) {
       return file.get();
@@ -122,7 +122,7 @@ BucketSegmentAllocator::FindFileByIndex(uint64_t file_index) {
   return nullptr;
 }
 
-void BucketSegmentAllocator::DeleteFile(uint64_t file_index) {
+void BucketPlacer::DeleteFile(uint64_t file_index) {
   auto it = std::remove_if(
       files_.begin(),
       files_.end(),

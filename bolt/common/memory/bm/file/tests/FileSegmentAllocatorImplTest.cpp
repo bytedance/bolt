@@ -1,6 +1,6 @@
 #include "bolt/common/memory/bm/file/FileSegmentAllocatorImpl.h"
-#include "bolt/common/memory/bm/file/BucketSegmentAllocator.h"
-#include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
+#include "bolt/common/memory/bm/file/BucketPlacer.h"
+#include "bolt/common/memory/bm/file/DedicatedPlacer.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <filesystem>
@@ -145,28 +145,28 @@ TEST(FileSegmentAllocatorImplTest, ReportsCreateFileErrors) {
   EXPECT_THROW((void)FileSegmentAllocatorImpl(config), std::exception);
 }
 
-TEST(FileSegmentAllocatorImplTest, BucketAllocatorReportsCreateFileErrors) {
+TEST(FileSegmentAllocatorImplTest, BucketPlacerReportsCreateFileErrors) {
   const auto directory = UniqueTempDir("bolt-bm-bucket-create-error");
   std::filesystem::remove_all(directory);
   std::ofstream file(directory);
   file << "not a directory";
   file.close();
 
-  BucketSegmentAllocator allocator(directory, 4096, 4096, 1);
+  BucketPlacer allocator(directory, 4096, 4096, 1);
   auto allocation = allocator.Allocate(4096, 1);
 
   EXPECT_FALSE(allocation.result.ok());
   EXPECT_EQ(FileErrorCode::kIoError, allocation.result.error);
 }
 
-TEST(FileSegmentAllocatorImplTest, DedicatedAllocatorReportsCreateAndFreeErrors) {
+TEST(FileSegmentAllocatorImplTest, DedicatedPlacerReportsCreateAndFreeErrors) {
   const auto directory = UniqueTempDir("bolt-bm-dedicated-create-error");
   std::filesystem::remove_all(directory);
   std::ofstream file(directory);
   file << "not a directory";
   file.close();
 
-  DedicatedFileAllocator allocator(directory);
+  DedicatedPlacer allocator(directory);
   auto allocation = allocator.Allocate(128 * 1024, 7);
 
   EXPECT_FALSE(allocation.result.ok());

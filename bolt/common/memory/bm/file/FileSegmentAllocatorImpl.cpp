@@ -14,7 +14,7 @@ FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(FileSegmentAllocatorConfig co
       allocator_id_(bytedance::bolt::makeUuid()),
       directory_((std::filesystem::path(config_.directory) / allocator_id_)
                      .string()),
-      dedicated_allocator_(directory_) {
+      dedicated_placer_(directory_) {
   BOLT_CHECK(
       ValidateFileSegmentAllocatorConfig(config_) == FileErrorCode::kOk,
       "invalid FileSegmentAllocatorConfig");
@@ -23,7 +23,7 @@ FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(FileSegmentAllocatorConfig co
 
   buckets_.reserve(config_.bucket_sizes.size());
   for (const auto bucket_size : config_.bucket_sizes) {
-    buckets_.push_back(std::make_unique<BucketSegmentAllocator>(
+    buckets_.push_back(std::make_unique<BucketPlacer>(
         directory_,
         static_cast<uint64_t>(bucket_size),
         static_cast<uint64_t>(config_.file_size_limit_bytes),
@@ -34,7 +34,7 @@ FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(FileSegmentAllocatorConfig co
 FileSegmentAllocatorImpl::~FileSegmentAllocatorImpl() {
   shutdown_ = true;
   buckets_.clear();
-  dedicated_allocator_.RemoveAllFiles();
+  dedicated_placer_.RemoveAllFiles();
   std::filesystem::remove_all(directory_);
 }
 
@@ -89,7 +89,7 @@ FileAllocateResult FileSegmentAllocatorImpl::AllocateBucket(
 
 FileAllocateResult FileSegmentAllocatorImpl::AllocateDedicated(int64_t size) {
   const auto segment_id = registry_.NextSegmentId();
-  auto allocation = dedicated_allocator_.Allocate(size, segment_id);
+  auto allocation = dedicated_placer_.Allocate(size, segment_id);
   if (!allocation.result.ok()) {
     return allocation.result;
   }
@@ -108,7 +108,7 @@ FileFreeResult FileSegmentAllocatorImpl::FreeBucket(const SegmentRecord& record)
 
 FileFreeResult FileSegmentAllocatorImpl::FreeDedicated(
     const SegmentRecord& record) {
-  return dedicated_allocator_.Free(record);
+  return dedicated_placer_.Free(record);
 }
 
 } // namespace bytedance::bolt::memory::bm
