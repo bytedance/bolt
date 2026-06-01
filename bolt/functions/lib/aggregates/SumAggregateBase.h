@@ -102,8 +102,104 @@ class SumAggregateBase
         accumulatorKind,
         false,
         !context.isRawInput,
-        decimal};
+        decimal,
+        hashAggrJitOps()};
   }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    if (slot.decimal) {
+      codegen.setAccumulatorNull(group, slot);
+      codegen.builder().CreateCall(
+          codegen.module().getFunction(
+              slot.kind == jit::HashAggrJitKind::Sum
+                  ? "jit_HashAggrInitDecimalSum"
+                  : "jit_HashAggrInitDecimalAvg"),
+          {group, codegen.builder().getInt32(slot.offset)});
+      return;
+    }
+    codegen.setAccumulatorNull(group, slot);
+    auto* accType = codegen.llvmType(slot.accumulatorKind);
+    if (codegen.isFloatKind(slot.accumulatorKind)) {
+      codegen.storeValue(
+          group, accType, slot.offset, llvm::ConstantFP::get(accType, 0.0));
+    } else {
+      codegen.storeValue(
+          group, accType, slot.offset, llvm::ConstantInt::get(accType, 0));
+    }
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+    if (slot.decimal) {
+      codegen.clearAccumulatorNull(group, slot);
+      const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+          ? "jit_HashAggrUpdateDecimalSumI128"
+          : "jit_HashAggrUpdateDecimalSumI64";
+      codegen.builder().CreateCall(
+          codegen.module().getFunction(helper),
+          {group,
+           codegen.builder().getInt32(slot.offset),
+           slot.inputKind == jit::HashAggrJitValueKind::Int128
+               ? codegen.castValue(
+                     rawValue,
+                     slot.inputKind,
+                     jit::HashAggrJitValueKind::Int128)
+               : rawValue});
+      return;
+    }
+    auto* value =
+        codegen.castValue(rawValue, slot.inputKind, slot.accumulatorKind);
+    auto* accType = codegen.llvmType(slot.accumulatorKind);
+    codegen.clearAccumulatorNull(group, slot);
+    auto* oldValue = codegen.loadValue(group, accType, slot.offset);
+    auto* newValue = codegen.isFloatKind(slot.accumulatorKind)
+        ? codegen.builder().CreateFAdd(oldValue, value)
+        : codegen.builder().CreateAdd(oldValue, value);
+    codegen.storeValue(group, accType, slot.offset, newValue);
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot& slot,
+      bool) {
+    return !slot.decimal &&
+        slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      const jit::HashAggrJitExtractTarget& target) {
+    auto* value = codegen.loadValue(
+        group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+    auto* isNull = codegen.builder().CreateZExt(
+        codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
+    codegen.emitFlatValue(
+        target.resultVector, target.row, slot.accumulatorKind, value, isNull);
+  }
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "sum",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+
+ public:
 #endif
 
   void toIntermediate(

@@ -199,6 +199,8 @@ std::string decodedValueFunction(HashAggrJitValueKind kind) {
   return "jit_GetDecodedValueI64";
 }
 
+std::string setFlatValueFunction(HashAggrJitValueKind kind);
+
 bool isFloatKind(HashAggrJitValueKind kind) {
   return kind == HashAggrJitValueKind::Float ||
       kind == HashAggrJitValueKind::Double;
@@ -300,144 +302,112 @@ llvm::Value* loadDecodedValue(
   return builder.CreateCall(callee, {decoded, row});
 }
 
-void genCountUpdate(
-    llvm::IRBuilder<>& builder,
-    llvm::Value* group,
-    const HashAggrJitSlot& slot) {
-  auto* state = loadValue(builder, group, builder.getInt64Ty(), slot.offset);
-  storeValue(
-      builder,
-      group,
-      builder.getInt64Ty(),
-      slot.offset,
-      builder.CreateAdd(state, builder.getInt64(1)));
+} // namespace
+
+HashAggrJitCodegen::HashAggrJitCodegen(llvm::Module& module) : module_(module) {
+  ensureBuiltinDeclarations(module_);
 }
 
-void genNonNullUpdate(
-    llvm::IRBuilder<>& builder,
-    llvm::Module& module,
-    llvm::Value* group,
-    llvm::Value* rawValue,
-    const HashAggrJitSlot& slot) {
-  auto* accType = llvmType(builder, slot.accumulatorKind);
-  auto* value = castValue(builder, rawValue, slot.inputKind, slot.accumulatorKind);
-  if (slot.decimal) {
-    clearAccumulatorNull(builder, group, slot);
-    const auto helper = slot.kind == HashAggrJitKind::Sum
-        ? (slot.inputKind == HashAggrJitValueKind::Int128
-               ? "jit_HashAggrUpdateDecimalSumI128"
-               : "jit_HashAggrUpdateDecimalSumI64")
-        : (slot.inputKind == HashAggrJitValueKind::Int128
-               ? "jit_HashAggrUpdateDecimalAvgI128"
-               : "jit_HashAggrUpdateDecimalAvgI64");
-    builder.CreateCall(
-        module.getFunction(helper),
-        {group,
-         builder.getInt32(slot.offset),
-         slot.inputKind == HashAggrJitValueKind::Int128 ? value : rawValue});
-    return;
-  }
-  switch (slot.kind) {
-    case HashAggrJitKind::Sum: {
-      clearAccumulatorNull(builder, group, slot);
-      auto* oldValue = loadValue(builder, group, accType, slot.offset);
-      auto* newValue = isFloatKind(slot.accumulatorKind)
-          ? builder.CreateFAdd(oldValue, value)
-          : builder.CreateAdd(oldValue, value);
-      storeValue(builder, group, accType, slot.offset, newValue);
-      break;
-    }
-    case HashAggrJitKind::Avg: {
-      clearAccumulatorNull(builder, group, slot);
-      auto* oldSum = loadValue(builder, group, accType, slot.offset);
-      auto* newSum = builder.CreateFAdd(oldSum, value);
-      storeValue(builder, group, accType, slot.offset, newSum);
-      auto* oldCount = loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
-      storeValue(
-          builder,
-          group,
-          builder.getInt64Ty(),
-          slot.offset + 8,
-          builder.CreateAdd(oldCount, builder.getInt64(1)));
-      break;
-    }
-    case HashAggrJitKind::Min:
-    case HashAggrJitKind::Max: {
-      auto* oldValue = loadValue(builder, group, accType, slot.offset);
-      auto* nullState = isAccumulatorNull(builder, group, slot);
-      llvm::Value* better;
-      if (isFloatKind(slot.accumulatorKind)) {
-        auto* oldIsNan = builder.CreateFCmpUNO(oldValue, oldValue);
-        auto* valueIsNan = builder.CreateFCmpUNO(value, value);
-        if (slot.kind == HashAggrJitKind::Min) {
-          better = builder.CreateOr(
-              builder.CreateAnd(oldIsNan, builder.CreateNot(valueIsNan)),
-              builder.CreateAnd(
-                  builder.CreateNot(valueIsNan),
-                  builder.CreateFCmpOGT(oldValue, value)));
-        } else {
-          better = builder.CreateAnd(
-              builder.CreateNot(oldIsNan),
-              builder.CreateOr(valueIsNan, builder.CreateFCmpOLT(oldValue, value)));
-        }
-      } else {
-        better = slot.kind == HashAggrJitKind::Min
-            ? builder.CreateICmpSLT(value, oldValue)
-            : builder.CreateICmpSGT(value, oldValue);
-      }
-      auto* shouldStore = builder.CreateOr(nullState, better);
-      auto* selected = builder.CreateSelect(shouldStore, value, oldValue);
-      storeValue(builder, group, accType, slot.offset, selected);
-      clearAccumulatorNull(builder, group, slot);
-      break;
-    }
-    case HashAggrJitKind::Count:
-      if (slot.mergeInput) {
-        auto* state = loadValue(builder, group, builder.getInt64Ty(), slot.offset);
-        storeValue(
-            builder,
-            group,
-            builder.getInt64Ty(),
-            slot.offset,
-            builder.CreateAdd(state, castValue(builder, rawValue, slot.inputKind, HashAggrJitValueKind::Int64)));
-      } else {
-        genCountUpdate(builder, group, slot);
-      }
-      break;
-  }
+llvm::Type* HashAggrJitCodegen::llvmType(HashAggrJitValueKind kind) const {
+  return ::bytedance::bolt::jit::llvmType(builder(), kind);
 }
 
-void genAvgMergeUpdate(
-    llvm::IRBuilder<>& builder,
-    llvm::Module& module,
-    llvm::Value* group,
+llvm::Value* HashAggrJitCodegen::loadDecodedValue(
     llvm::Value* decoded,
     llvm::Value* row,
-    const HashAggrJitSlot& slot) {
-  clearAccumulatorNull(builder, group, slot);
-  auto* sum = builder.CreateCall(
-      module.getFunction("jit_GetDecodedRowFieldDouble"),
-      {decoded, row, builder.getInt32(0)});
-  auto* count = builder.CreateCall(
-      module.getFunction("jit_GetDecodedRowFieldI64"),
-      {decoded, row, builder.getInt32(1)});
-
-  auto* oldSum = loadValue(builder, group, builder.getDoubleTy(), slot.offset);
-  storeValue(
-      builder,
-      group,
-      builder.getDoubleTy(),
-      slot.offset,
-      builder.CreateFAdd(oldSum, sum));
-
-  auto* oldCount = loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
-  storeValue(
-      builder,
-      group,
-      builder.getInt64Ty(),
-      slot.offset + 8,
-      builder.CreateAdd(oldCount, count));
+    const HashAggrJitSlot& slot) const {
+  return ::bytedance::bolt::jit::loadDecodedValue(
+      builder(), module_, decoded, row, slot);
 }
+
+llvm::Value* HashAggrJitCodegen::isAccumulatorNull(
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) const {
+  return ::bytedance::bolt::jit::isAccumulatorNull(builder(), group, slot);
+}
+
+void HashAggrJitCodegen::clearAccumulatorNull(
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) const {
+  ::bytedance::bolt::jit::clearAccumulatorNull(builder(), group, slot);
+}
+
+void HashAggrJitCodegen::setAccumulatorNull(
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) const {
+  ::bytedance::bolt::jit::setAccumulatorNull(builder(), group, slot);
+}
+
+llvm::LoadInst* HashAggrJitCodegen::loadValue(
+    llvm::Value* row,
+    llvm::Type* type,
+    int32_t offset) const {
+  return ::bytedance::bolt::jit::loadValue(builder(), row, type, offset);
+}
+
+void HashAggrJitCodegen::storeValue(
+    llvm::Value* row,
+    llvm::Type* type,
+    int32_t offset,
+    llvm::Value* value) const {
+  ::bytedance::bolt::jit::storeValue(builder(), row, type, offset, value);
+}
+
+llvm::Value* HashAggrJitCodegen::castValue(
+    llvm::Value* value,
+    HashAggrJitValueKind from,
+    HashAggrJitValueKind to) const {
+  return ::bytedance::bolt::jit::castValue(builder(), value, from, to);
+}
+
+bool HashAggrJitCodegen::isFloatKind(HashAggrJitValueKind kind) const {
+  return ::bytedance::bolt::jit::isFloatKind(kind);
+}
+
+llvm::Value* HashAggrJitCodegen::loadAvgMergeField(
+    llvm::Value* decoded,
+    llvm::Value* row,
+    int32_t field,
+    llvm::Type* type) const {
+  const char* name = type->isDoubleTy() ? "jit_GetDecodedRowFieldDouble"
+                                        : "jit_GetDecodedRowFieldI64";
+  return builder().CreateCall(
+      module_.getFunction(name), {decoded, row, builder().getInt32(field)});
+}
+
+void HashAggrJitCodegen::emitFlatValue(
+    llvm::Value* vector,
+    llvm::Value* row,
+    HashAggrJitValueKind kind,
+    llvm::Value* value,
+    llvm::Value* isNull) const {
+  const auto setter = setFlatValueFunction(kind);
+  if (setter.empty()) {
+    return;
+  }
+  builder().CreateCall(
+      module_.getFunction(setter), {vector, row, value, isNull});
+}
+
+void HashAggrJitCodegen::resizeResultVector(
+    llvm::Value* vector,
+    llvm::Value* size) const {
+  builder().CreateCall(
+      module_.getFunction("jit_HashAggrResizeVector"), {vector, size});
+}
+
+void HashAggrJitCodegen::emitPartialAvgResult(
+    llvm::Value* vector,
+    llvm::Value* row,
+    llvm::Value* sum,
+    llvm::Value* count,
+    llvm::Value* isNull) const {
+  builder().CreateCall(
+      module_.getFunction("jit_HashAggrSetPartialAvgDouble"),
+      {vector, row, sum, count, isNull});
+}
+
+namespace {
 
 bool genAddDenseIR(
     llvm::Module& module,
@@ -449,9 +419,10 @@ bool genInitIR(
     llvm::Module& module,
     const std::string& fn,
     const std::vector<HashAggrJitSlot>& slots) {
-  ensureBuiltinDeclarations(module);
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
+  HashAggrJitCodegen codegen(module);
+  codegen.setBuilder(&builder);
   auto* voidTy = builder.getVoidTy();
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
   auto* i8PtrPtrTy = i8PtrTy->getPointerTo();
@@ -479,41 +450,10 @@ bool genInitIR(
   auto* group = builder.CreateLoad(i8PtrTy, groupAddr);
 
   for (const auto& slot : slots) {
-    if (slot.kind != HashAggrJitKind::Count) {
-      setAccumulatorNull(builder, group, slot);
+    if (slot.ops == nullptr || slot.ops->create == nullptr) {
+      return true;
     }
-    if (slot.decimal) {
-      builder.CreateCall(
-          module.getFunction(
-              slot.kind == HashAggrJitKind::Sum ? "jit_HashAggrInitDecimalSum"
-                                                : "jit_HashAggrInitDecimalAvg"),
-          {group, builder.getInt32(slot.offset)});
-      continue;
-    }
-    auto* accType = llvmType(builder, slot.accumulatorKind);
-    if (isFloatKind(slot.accumulatorKind)) {
-      storeValue(
-          builder,
-          group,
-          accType,
-          slot.offset,
-          llvm::ConstantFP::get(accType, 0.0));
-    } else {
-      storeValue(
-          builder,
-          group,
-          accType,
-          slot.offset,
-          llvm::ConstantInt::get(accType, 0));
-    }
-    if (slot.kind == HashAggrJitKind::Avg) {
-      storeValue(
-          builder,
-          group,
-          builder.getInt64Ty(),
-          slot.offset + 8,
-          builder.getInt64(0));
-    }
+    slot.ops->create(codegen, group, slot);
   }
 
   auto* next = builder.CreateAdd(index, builder.getInt32(1));
@@ -531,9 +471,10 @@ bool genAddDenseIR(
     const std::string& fn,
     const std::vector<HashAggrJitSlot>& slots,
     bool checkInputNulls) {
-  ensureBuiltinDeclarations(module);
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
+  HashAggrJitCodegen codegen(module);
+  codegen.setBuilder(&builder);
   auto* voidTy = builder.getVoidTy();
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
   auto* i8PtrPtrTy = i8PtrTy->getPointerTo();
@@ -562,16 +503,11 @@ bool genAddDenseIR(
 
   for (auto i = 0; i < slots.size(); ++i) {
     const auto& slot = slots[i];
-    if (slot.kind == HashAggrJitKind::Count && slot.countStar) {
-      genCountUpdate(builder, group, slot);
-      continue;
-    }
-
     auto* updateBlock = llvm::BasicBlock::Create(context, "slot_update", func, end);
     auto* nextBlock = llvm::BasicBlock::Create(context, "slot_next", func, end);
     auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
     auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
-    if (checkInputNulls) {
+    if (checkInputNulls && !slot.countStar) {
       auto* isNull = builder.CreateICmpNE(
           builder.CreateCall(module.getFunction("jit_GetDecodedIsNull"), {decoded, row}),
           builder.getInt8(0));
@@ -581,14 +517,10 @@ bool genAddDenseIR(
     }
 
     builder.SetInsertPoint(updateBlock);
-    if (slot.kind == HashAggrJitKind::Count && !slot.mergeInput) {
-      genCountUpdate(builder, group, slot);
-    } else if (slot.kind == HashAggrJitKind::Avg && slot.mergeInput) {
-      genAvgMergeUpdate(builder, module, group, decoded, row, slot);
-    } else {
-      auto* value = loadDecodedValue(builder, module, decoded, row, slot);
-      genNonNullUpdate(builder, module, group, value, slot);
+    if (slot.ops == nullptr || slot.ops->add == nullptr) {
+      return true;
     }
+    slot.ops->add(codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
     builder.CreateBr(nextBlock);
     builder.SetInsertPoint(nextBlock);
   }
@@ -628,9 +560,10 @@ bool genExtractIR(
     const std::string& fn,
     const std::vector<HashAggrJitSlot>& slots,
     bool partialOutput) {
-  ensureBuiltinDeclarations(module);
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
+  HashAggrJitCodegen codegen(module);
+  codegen.setBuilder(&builder);
   auto* voidTy = builder.getVoidTy();
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
   auto* i8PtrPtrTy = i8PtrTy->getPointerTo();
@@ -650,12 +583,13 @@ bool genExtractIR(
   auto* end = llvm::BasicBlock::Create(context, "end", func);
   builder.SetInsertPoint(entry);
   for (auto i = 0; i < slots.size(); ++i) {
-    if (slots[i].decimal || slots[i].accumulatorKind == HashAggrJitValueKind::Int128) {
+    if (slots[i].ops == nullptr || slots[i].ops->canExtract == nullptr ||
+        !slots[i].ops->canExtract(slots[i], partialOutput)) {
       continue;
     }
     auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
     auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
-    builder.CreateCall(module.getFunction("jit_HashAggrResizeVector"), {vector, numGroups});
+    codegen.resizeResultVector(vector, numGroups);
   }
   builder.CreateCondBr(builder.CreateICmpSLE(numGroups, builder.getInt32(0)), end, loop);
 
@@ -667,44 +601,17 @@ bool genExtractIR(
 
   for (auto i = 0; i < slots.size(); ++i) {
     const auto& slot = slots[i];
-    if (slot.decimal || slot.accumulatorKind == HashAggrJitValueKind::Int128) {
+    if (slot.ops == nullptr || slot.ops->canExtract == nullptr ||
+        !slot.ops->canExtract(slot, partialOutput)) {
       continue;
     }
     auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
     auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
-    HashAggrJitValueKind resultKind = slot.accumulatorKind;
-    llvm::Value* value = nullptr;
-    llvm::Value* isNull = nullptr;
-    if (partialOutput && slot.kind == HashAggrJitKind::Avg) {
-      auto* sum = loadValue(
-          builder, group, llvmType(builder, slot.accumulatorKind), slot.offset);
-      auto* count =
-          loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
-      auto* isNullValue = builder.CreateZExt(
-          isAccumulatorNull(builder, group, slot), builder.getInt8Ty());
-      builder.CreateCall(
-          module.getFunction("jit_HashAggrSetPartialAvgDouble"),
-          {vector, row, sum, count, isNullValue});
-      continue;
+    if (slot.ops->extract == nullptr) {
+      return true;
     }
-    if (slot.kind == HashAggrJitKind::Avg) {
-      auto* sum = loadValue(builder, group, llvmType(builder, slot.accumulatorKind), slot.offset);
-      auto* count = loadValue(builder, group, builder.getInt64Ty(), slot.offset + 8);
-      auto* countIsZero = builder.CreateICmpEQ(count, builder.getInt64(0));
-      auto* divisor = builder.CreateSIToFP(count, llvmType(builder, slot.accumulatorKind));
-      value = builder.CreateFDiv(sum, divisor);
-      isNull = builder.CreateZExt(countIsZero, builder.getInt8Ty());
-    } else {
-      value = loadValue(builder, group, llvmType(builder, resultKind), slot.offset);
-      isNull = slot.kind == HashAggrJitKind::Count
-          ? builder.getInt8(0)
-          : builder.CreateZExt(isAccumulatorNull(builder, group, slot), builder.getInt8Ty());
-    }
-    const auto setter = setFlatValueFunction(resultKind);
-    if (setter.empty()) {
-      continue;
-    }
-    builder.CreateCall(module.getFunction(setter), {vector, row, value, isNull});
+    slot.ops->extract(
+        codegen, group, slot, HashAggrJitExtractTarget{vector, row, partialOutput});
   }
 
   auto* next = builder.CreateAdd(row, builder.getInt32(1));
@@ -781,7 +688,8 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 
 std::string HashAggrJitDescriptor::signature() const {
   return fmt::format(
-      "{}_{}_{}_{}_{}",
+      "{}_{}_{}_{}_{}_{}",
+      ops != nullptr ? ops->id : "unknown",
       static_cast<int>(kind),
       hashAggrJitValueKindName(inputKind),
       hashAggrJitValueKindName(accumulatorKind),
@@ -794,7 +702,8 @@ std::string HashAggrJitChunk::functionName() const {
   out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
       << slots_.size();
   for (const auto& slot : slots_) {
-    out << "_" << static_cast<int>(slot.kind) << hashAggrJitValueKindName(slot.inputKind)
+    out << "_" << (slot.ops != nullptr ? slot.ops->id : "unknown") << "_"
+        << static_cast<int>(slot.kind) << hashAggrJitValueKindName(slot.inputKind)
         << hashAggrJitValueKindName(slot.accumulatorKind) << "o" << slot.offset
         << "n" << slot.nullByte << "m" << static_cast<int>(slot.nullMask)
         << (slot.countStar ? "s" : "x") << (slot.mergeInput ? "g" : "r")
@@ -808,7 +717,8 @@ bool HashAggrJitChunk::canExtract() const {
     return false;
   }
   for (const auto& slot : slots_) {
-    if (slot.decimal || slot.accumulatorKind == HashAggrJitValueKind::Int128) {
+    if (slot.ops == nullptr || slot.ops->canExtract == nullptr ||
+        !slot.ops->canExtract(slot, partialOutput_)) {
       return false;
     }
   }

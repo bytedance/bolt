@@ -351,7 +351,8 @@ jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
       accumulatorNullMask(),
       descriptor.countStar,
       descriptor.mergeInput,
-      descriptor.decimal};
+      descriptor.decimal,
+      descriptor.ops};
 }
 #endif
 

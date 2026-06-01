@@ -85,8 +85,78 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
         jit::HashAggrJitValueKind::Int64,
         context.isCountStar(),
         !context.isRawInput,
-        false};
+        false,
+        hashAggrJitOps()};
   }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.storeValue(
+        group,
+        codegen.builder().getInt64Ty(),
+        slot.offset,
+        codegen.builder().getInt64(0));
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    auto* state = codegen.loadValue(group, codegen.builder().getInt64Ty(), slot.offset);
+    llvm::Value* inc = nullptr;
+    if (slot.countStar || !slot.mergeInput) {
+      inc = codegen.builder().getInt64(1);
+    } else {
+      inc = codegen.castValue(
+          codegen.loadDecodedValue(decoded, row, slot),
+          slot.inputKind,
+          jit::HashAggrJitValueKind::Int64);
+    }
+    codegen.storeValue(
+        group,
+        codegen.builder().getInt64Ty(),
+        slot.offset,
+        codegen.builder().CreateAdd(state, inc));
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot&,
+      bool) {
+    return true;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      const jit::HashAggrJitExtractTarget& target) {
+    auto* value = codegen.loadValue(group, codegen.builder().getInt64Ty(), slot.offset);
+    codegen.emitFlatValue(
+        target.resultVector,
+        target.row,
+        jit::HashAggrJitValueKind::Int64,
+        value,
+        codegen.builder().getInt8(0));
+  }
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "count",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+
+ public:
 #endif
 
   void toIntermediate(

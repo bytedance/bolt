@@ -76,11 +76,100 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
         *inputKind,
         false,
         !context.isRawInput,
-        false};
+        false,
+        hashAggrJitOps()};
+  }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.setAccumulatorNull(group, slot);
+    auto* type = codegen.llvmType(slot.accumulatorKind);
+    if (codegen.isFloatKind(slot.accumulatorKind)) {
+      codegen.storeValue(group, type, slot.offset, llvm::ConstantFP::get(type, 0.0));
+    } else {
+      codegen.storeValue(group, type, slot.offset, llvm::ConstantInt::get(type, 0));
+    }
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    auto* value = codegen.castValue(
+        codegen.loadDecodedValue(decoded, row, slot),
+        slot.inputKind,
+        slot.accumulatorKind);
+    auto* type = codegen.llvmType(slot.accumulatorKind);
+    auto* oldValue = codegen.loadValue(group, type, slot.offset);
+    auto* nullState = codegen.isAccumulatorNull(group, slot);
+    llvm::Value* better = nullptr;
+    if (codegen.isFloatKind(slot.accumulatorKind)) {
+      auto* oldIsNan = codegen.builder().CreateFCmpUNO(oldValue, oldValue);
+      auto* valueIsNan = codegen.builder().CreateFCmpUNO(value, value);
+      if (slot.kind == jit::HashAggrJitKind::Min) {
+        better = codegen.builder().CreateOr(
+            codegen.builder().CreateAnd(oldIsNan, codegen.builder().CreateNot(valueIsNan)),
+            codegen.builder().CreateAnd(
+                codegen.builder().CreateNot(valueIsNan),
+                codegen.builder().CreateFCmpOGT(oldValue, value)));
+      } else {
+        better = codegen.builder().CreateAnd(
+            codegen.builder().CreateNot(oldIsNan),
+            codegen.builder().CreateOr(
+                valueIsNan, codegen.builder().CreateFCmpOLT(oldValue, value)));
+      }
+    } else {
+      better = slot.kind == jit::HashAggrJitKind::Min
+          ? codegen.builder().CreateICmpSLT(value, oldValue)
+          : codegen.builder().CreateICmpSGT(value, oldValue);
+    }
+    auto* shouldStore = codegen.builder().CreateOr(nullState, better);
+    codegen.storeValue(
+        group,
+        type,
+        slot.offset,
+        codegen.builder().CreateSelect(shouldStore, value, oldValue));
+    codegen.clearAccumulatorNull(group, slot);
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot& slot,
+      bool) {
+    return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      const jit::HashAggrJitExtractTarget& target) {
+    auto* value = codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+    auto* isNull = codegen.builder().CreateZExt(
+        codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
+    codegen.emitFlatValue(
+        target.resultVector, target.row, slot.accumulatorKind, value, isNull);
+  }
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "minmax",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
   }
 
  protected:
   virtual jit::HashAggrJitKind jitKind() const = 0;
+ public:
 #endif
 
   int32_t accumulatorFixedWidthSize() const override {

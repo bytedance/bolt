@@ -90,7 +90,7 @@ std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
     return std::nullopt;
   }
   auto descriptor = aggregate.function->createHashAggrJitDescriptor(context);
-  if (!descriptor.has_value()) {
+  if (!descriptor.has_value() || descriptor->ops == nullptr) {
     return std::nullopt;
   }
   return aggregate.function->createHashAggrJitSlot(aggregateIndex, *descriptor);
