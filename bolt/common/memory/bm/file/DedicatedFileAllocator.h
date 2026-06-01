@@ -6,7 +6,7 @@
 
 #include "bolt/common/memory/bm/file/ExtentRegistry.h"
 #include "bolt/common/memory/bm/file/FileBlockAllocatorTypes.h"
-#include "bolt/common/memory/bm/file/OwnedFile.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFile.h"
 
 namespace bytedance::bolt::memory::bm {
 
@@ -24,7 +24,7 @@ class DedicatedFileAllocator {
 
  private:
   const std::string directory_;
-  std::unordered_map<uint64_t, OwnedFile> files_;
+  std::unordered_map<uint64_t, ManagedOpenFile> files_;
 };
 
 } // namespace bytedance::bolt::memory::bm

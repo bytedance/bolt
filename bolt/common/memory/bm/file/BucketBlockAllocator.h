@@ -7,7 +7,7 @@
 
 #include "bolt/common/memory/bm/file/ExtentRegistry.h"
 #include "bolt/common/memory/bm/file/FileBlockAllocatorTypes.h"
-#include "bolt/common/memory/bm/file/OwnedFile.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFile.h"
 
 namespace bytedance::bolt::memory::bm {
 
@@ -29,7 +29,7 @@ class BucketBlockAllocator {
  private:
   struct BucketFile {
     uint64_t file_index{0};
-    OwnedFile file;
+    ManagedOpenFile file;
     uint64_t next_offset{0};
     uint64_t active_blocks{0};
     std::vector<uint64_t> free_offsets;

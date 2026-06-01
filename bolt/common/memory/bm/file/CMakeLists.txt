@@ -7,8 +7,8 @@ add_library(
   FileBlockAllocator.cpp
   FileBlockAllocatorConfig.cpp
   FileBlockAllocatorImpl.cpp
-  OwnedFile.cpp
-  OwnedFileFactory.cpp
+  ManagedOpenFile.cpp
+  ManagedOpenFileFactory.cpp
 )
 
 target_compile_features(bolt_memory_bm_file PUBLIC cxx_std_20)

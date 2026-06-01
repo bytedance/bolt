@@ -6,16 +6,16 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class OwnedFile {
+class ManagedOpenFile {
  public:
-  OwnedFile() = default;
-  OwnedFile(std::string path, int fd);
-  ~OwnedFile();
+  ManagedOpenFile() = default;
+  ManagedOpenFile(std::string path, int fd);
+  ~ManagedOpenFile();
 
-  OwnedFile(const OwnedFile&) = delete;
-  OwnedFile& operator=(const OwnedFile&) = delete;
-  OwnedFile(OwnedFile&& other) noexcept;
-  OwnedFile& operator=(OwnedFile&& other) noexcept;
+  ManagedOpenFile(const ManagedOpenFile&) = delete;
+  ManagedOpenFile& operator=(const ManagedOpenFile&) = delete;
+  ManagedOpenFile(ManagedOpenFile&& other) noexcept;
+  ManagedOpenFile& operator=(ManagedOpenFile&& other) noexcept;
 
   int fd() const {
     return fd_.get();

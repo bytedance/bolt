@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 #include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
 
 #include <filesystem>
@@ -8,13 +8,13 @@
 using namespace bytedance::bolt::memory::bm;
 using namespace bytedance::bolt::memory::bm::test;
 
-TEST(OwnedFileFactoryTest, createExclusiveReadWriteFileReturnsOwnedFile) {
+TEST(ManagedOpenFileFactoryTest, createExclusiveReadWriteFileReturnsManagedOpenFile) {
   const auto directory = UniqueTempDir("bolt-bm-owned-file-factory");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   const auto path = (std::filesystem::path(directory) / "spill-file").string();
 
-  auto result = CreateExclusiveReadWriteOwnedFile(path);
+  auto result = CreateExclusiveReadWriteManagedOpenFile(path);
 
   ASSERT_TRUE(result.ok());
   EXPECT_TRUE(result.file.valid());
@@ -22,17 +22,17 @@ TEST(OwnedFileFactoryTest, createExclusiveReadWriteFileReturnsOwnedFile) {
   EXPECT_TRUE(std::filesystem::exists(path));
 }
 
-TEST(OwnedFileFactoryTest, createExclusiveReadWriteFileReportsNativeError) {
+TEST(ManagedOpenFileFactoryTest, createExclusiveReadWriteFileReportsNativeError) {
   const auto directory = UniqueTempDir("bolt-bm-owned-file-factory-existing");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   const auto path = (std::filesystem::path(directory) / "spill-file").string();
   {
-    auto result = CreateExclusiveReadWriteOwnedFile(path);
+    auto result = CreateExclusiveReadWriteManagedOpenFile(path);
     ASSERT_TRUE(result.ok());
   }
 
-  auto result = CreateExclusiveReadWriteOwnedFile(path);
+  auto result = CreateExclusiveReadWriteManagedOpenFile(path);
 
   EXPECT_EQ(FileErrorCode::kIoError, result.error);
   EXPECT_NE(0, result.native_error_code);
