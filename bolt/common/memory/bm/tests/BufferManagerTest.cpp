@@ -28,7 +28,7 @@ class BufferManagerTest : public testing::Test {
   std::shared_ptr<BufferManager> makeBufferManager(
       const std::string& name,
       compress::CompressionKind compressionKind =
-          compress::CompressionKind::kLz4,
+          compress::CompressionKind::kLz4Block,
       size_t minCompressBytes = 256 * 1024) {
     const auto directory =
         test::UniqueTempDir(fmt::format("bolt-bm-buffer-manager-{}", name));
@@ -302,7 +302,8 @@ TEST_F(BufferManagerTest, StatsTrackSpillAndReadback) {
 
 TEST_F(BufferManagerTest, DefaultCompressionSpillsAndReadsBackPayload) {
   auto bm =
-      makeBufferManager("default-compression", compress::CompressionKind::kLz4, 1);
+      makeBufferManager(
+          "default-compression", compress::CompressionKind::kLz4Block, 1);
   std::shared_ptr<BlockHandle> block;
   {
     auto handle = bm->Allocate(256 * 1024, MemoryTag::kTesting, &block);
@@ -357,9 +358,9 @@ INSTANTIATE_TEST_SUITE_P(
     Algorithms,
     BufferManagerCompressionKindTest,
     testing::Values(
-        compress::CompressionKind::kLz4,
-        compress::CompressionKind::kZstd,
-        compress::CompressionKind::kSnappy));
+        compress::CompressionKind::kLz4Block,
+        compress::CompressionKind::kZstdFrame,
+        compress::CompressionKind::kSnappyRaw));
 
 TEST_F(BufferManagerTest, DebugStringContainsCoreCounters) {
   auto bm = makeBufferManager("debug-string");

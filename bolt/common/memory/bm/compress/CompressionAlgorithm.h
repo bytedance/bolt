@@ -20,7 +20,7 @@ size_t MaxCompressedLength(CompressionKind kind, size_t rawSize);
 uint64_t CompressWithAlgorithm(
     CompressionAlgorithmContext* context,
     CompressionKind kind,
-    int compressionLevel,
+    const CompressionConfig& config,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -36,8 +36,7 @@ void DecompressWithAlgorithm(
 size_t Lz4MaxCompressedLength(size_t rawSize);
 uint64_t Lz4Compress(
     CompressionAlgorithmContext* context,
-    CompressionKind kind,
-    int compressionLevel,
+    const Lz4Options& options,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -53,8 +52,7 @@ void DestroyLz4Context(void* context);
 size_t ZstdMaxCompressedLength(size_t rawSize);
 uint64_t ZstdCompress(
     CompressionAlgorithmContext* context,
-    CompressionKind kind,
-    int compressionLevel,
+    const ZstdOptions& options,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -68,8 +66,7 @@ void DestroyZstdContext(void* context);
 
 size_t SnappyMaxCompressedLength(size_t rawSize);
 uint64_t SnappyCompress(
-    CompressionKind kind,
-    int compressionLevel,
+    const SnappyOptions& options,
     const char* source,
     size_t sourceSize,
     char* target,

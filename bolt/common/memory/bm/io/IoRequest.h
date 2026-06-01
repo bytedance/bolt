@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -9,6 +10,7 @@
 
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::memory::bm {
 
@@ -135,6 +137,16 @@ class IoBuffer {
             pool, static_cast<int64_t>(size), alignment, true});
   }
 
+  static IoBuffer allocateFromMalloc(size_t size) {
+    const auto allocationSize = size == 0 ? 1 : size;
+    auto* data = static_cast<char*>(std::malloc(allocationSize));
+    if (data == nullptr) {
+      BOLT_FAIL("BM IoBuffer malloc failed, size={}", size);
+    }
+    return fromOwned(
+        data, size, 0, size, [](char* p) noexcept { std::free(p); });
+  }
+
   template <typename Deleter>
   static IoBuffer fromOwned(
       char* data,
@@ -168,6 +180,11 @@ class IoBuffer {
 
   size_t length() const {
     return length_;
+  }
+
+  void setLength(size_t length) {
+    BOLT_CHECK_LE(length, size_ - offset_);
+    length_ = length;
   }
 
   bool valid() const {

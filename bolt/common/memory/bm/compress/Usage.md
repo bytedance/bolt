@@ -16,58 +16,68 @@ using namespace bytedance::bolt::memory::bm;
 BufferManagerConfig config;
 config.spillStoreConfig.fileAllocatorConfig = fileAllocatorConfig;
 config.spillStoreConfig.compressionConfig.kind =
-    compress::CompressionKind::kZstdContext;
+    compress::CompressionKind::kZstdFrame;
 config.spillStoreConfig.compressionConfig.minCompressBytes = 256 * 1024;
-config.spillStoreConfig.compressionConfig.minCompressionRatio = 0.95;
-config.spillStoreConfig.compressionConfig.compressionLevel = 3;
+config.spillStoreConfig.compressionConfig.zstd.strategy =
+    compress::ZstdStrategy::kPooledContext;
+config.spillStoreConfig.compressionConfig.zstd.compressionLevel = 3;
 
 auto bm = BufferManager::Create(parentPool, std::move(config));
 ```
 
-Compression is enabled by default with `compress::CompressionKind::kLz4`.
-Blocks smaller than `minCompressBytes` are stored uncompressed. Blocks that do
-not reach `minCompressionRatio` are also stored uncompressed.
-
-For example, the default `minCompressionRatio = 0.95` means the compressed
-payload must be smaller than 95% of the original payload. Otherwise the original
-payload is written.
+Compression is enabled by default with `compress::CompressionKind::kLz4Block`.
+Blocks smaller than `minCompressBytes` are stored uncompressed. First-version
+BM spill compression does not perform compression-ratio probing; if compression
+is attempted and succeeds, the compressed payload is written.
 
 ## Compression Kinds
 
 `bm/compress` uses its own `compress::CompressionKind`. Do not use
 `common::CompressionKind` for BM spill compression.
 
-Available kinds:
+Available stable record formats:
 
-- `kNone`: disable compression.
-- `kLz4`: alias of `kLz4Default`.
-- `kLz4Default`: `LZ4_compress_default`.
-- `kLz4Fast`: `LZ4_compress_fast`; `compressionLevel` is used as LZ4 acceleration.
-- `kLz4Context`: `LZ4_compress_fast_extState` with a reusable `LZ4_stream_t`.
-- `kZstd`: alias of `kZstdOneShot`.
-- `kZstdOneShot`: `ZSTD_compress`.
-- `kZstdContext`: `ZSTD_compressCCtx` with a reusable `ZSTD_CCtx`.
-- `kSnappy`: alias of `kSnappyRaw`.
-- `kSnappyRaw`: `snappy::RawCompress`.
-- `kSnappyLevel`: `snappy::RawCompress` with `snappy::CompressionOptions`.
+- `kNone`: store the original payload.
+- `kLz4Block`: LZ4 block payload.
+- `kZstdFrame`: ZSTD frame payload.
+- `kSnappyRaw`: Snappy raw payload.
 
-`compressionLevel` is interpreted by the selected algorithm. For Snappy level
-mode, the value is clamped to the range supported by Snappy.
+The spill record header stores only the stable `CompressionKind`. Writer-side
+strategy and level options are runtime policy and are not persisted.
 
-## Context Reuse
+## Algorithm Options
 
-`SpillStore` owns a `compress::CompressionCodec` instance. Context-based kinds
-reuse their internal compression contexts for the lifetime of that `SpillStore`.
-This avoids allocating and freeing ZSTD/LZ4 contexts for every spilled block.
+LZ4 options:
 
-The reusable codec serializes compression calls internally because algorithm
-contexts are not thread-safe. Decompression remains stateless and happens when
-`SpillReadFuture::get()` is consumed.
+- `Lz4Strategy::kDefault`: `LZ4_compress_default`.
+- `Lz4Strategy::kFast`: `LZ4_compress_fast`; `acceleration` is used as the LZ4
+  acceleration value.
+- `Lz4Strategy::kPooledContext`: `LZ4_compress_fast_extState` with a pooled
+  `LZ4_stream_t`.
 
-## Direct Codec Usage
+ZSTD options:
 
-Most production code should go through BufferManager or SpillStore. Direct codec
-usage is mainly useful for tests and focused benchmarks.
+- `ZstdStrategy::kOneShot`: `ZSTD_compress`.
+- `ZstdStrategy::kPooledContext`: `ZSTD_compressCCtx` with a pooled
+  `ZSTD_CCtx`.
+
+Snappy options:
+
+- `SnappyStrategy::kRaw`: `snappy::RawCompress`.
+- `SnappyStrategy::kWithOptions`: `snappy::RawCompress` with
+  `snappy::CompressionOptions`; `compressionLevel` is clamped by Snappy.
+
+## Buffer Ownership
+
+Spill write records are built inside `CompressionManager` as malloc-backed
+`IoBuffer`s. Spill raw read records are also malloc-backed. Decoded payloads in
+`SpillStore` are allocated from the BufferManager `MemoryPool`, so the resident
+block payload does not need an extra transfer after decompression.
+
+## Direct Manager Usage
+
+Most production code should go through BufferManager or SpillStore. Direct
+manager usage is mainly useful for tests and focused benchmarks.
 
 ```cpp
 #include "bolt/common/memory/bm/compress/CompressionCodec.h"
@@ -75,33 +85,27 @@ usage is mainly useful for tests and focused benchmarks.
 using namespace bytedance::bolt::memory::bm;
 
 compress::CompressionConfig config;
-config.kind = compress::CompressionKind::kZstdContext;
+config.kind = compress::CompressionKind::kZstdFrame;
 config.minCompressBytes = 1;
-config.minCompressionRatio = 1.0;
+config.zstd.strategy = compress::ZstdStrategy::kPooledContext;
 
-compress::CompressionCodec codec;
-auto compressed =
-    codec.TryCompress(std::move(payload), config, /*pool=*/nullptr);
+compress::CompressionManager compression(config);
+auto record = compression.BuildSpillRecord(
+    std::span<const char>(payload.data(), payload.length()));
 
-auto decompressed = compress::Decompress(
-    std::move(compressed.buffer),
-    compressed.rawSize,
-    compressed.storedSize,
-    compressed.storedKind,
-    /*pool=*/nullptr,
+auto decoded = compression.DecodeSpillRecord(
+    std::span<const char>(record.record.data(), record.record.length()),
+    record.rawSize,
+    outputPool,
     /*decompressionTimeUs=*/nullptr);
 ```
-
-When a `MemoryPool*` is supplied, output buffers are allocated from that pool.
-Passing `nullptr` uses heap allocation and is intended for tests or isolated
-experiments.
 
 ## Spill Record Format
 
 SpillStore writes a small self-describing header before each stored payload.
-The header records the raw size, stored size, and actual stored compression
-kind. If compression is skipped because of threshold or ratio checks, the
-stored kind is `kNone`.
+The header records the raw size, stored size, and stable stored compression
+kind. If compression is disabled or skipped because the payload is below
+`minCompressBytes`, the stored kind is `kNone`.
 
 Callers should not parse this header directly. Use `SpillStore::SubmitReadBlock`
 or BufferManager pin/prefetch APIs.

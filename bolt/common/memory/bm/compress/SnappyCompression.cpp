@@ -13,21 +13,19 @@ size_t SnappyMaxCompressedLength(size_t rawSize) {
 }
 
 uint64_t SnappyCompress(
-    CompressionKind kind,
-    int compressionLevel,
+    const SnappyOptions& options,
     const char* source,
     size_t sourceSize,
     char* target,
     size_t targetCapacity) {
   size_t written = 0;
-  switch (kind) {
-    case CompressionKind::kSnappy:
-    case CompressionKind::kSnappyRaw:
+  switch (options.strategy) {
+    case SnappyStrategy::kRaw:
       snappy::RawCompress(source, sourceSize, target, &written);
       return static_cast<uint64_t>(written);
-    case CompressionKind::kSnappyLevel: {
+    case SnappyStrategy::kWithOptions: {
       const auto level = std::clamp(
-          compressionLevel,
+          options.compressionLevel,
           snappy::CompressionOptions::MinCompressionLevel(),
           snappy::CompressionOptions::MaxCompressionLevel());
       snappy::RawCompress(
@@ -40,7 +38,8 @@ uint64_t SnappyCompress(
     }
     default:
       BOLT_FAIL(
-          "BM unsupported Snappy compression kind={}", static_cast<int>(kind));
+          "BM unsupported Snappy strategy={}",
+          static_cast<int>(options.strategy));
   }
 }
 
