@@ -14,8 +14,8 @@ std::string MakeBucketFilePath(
 
 std::string MakeDedicatedFilePath(
     const std::string& directory,
-    uint64_t extent_id) {
-  return directory + "/dedicated_" + std::to_string(extent_id) + ".bm";
+    uint64_t segment_id) {
+  return directory + "/dedicated_" + std::to_string(segment_id) + ".bm";
 }
 
 } // namespace bytedance::bolt::memory::bm

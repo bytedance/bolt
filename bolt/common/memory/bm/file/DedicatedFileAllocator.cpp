@@ -23,9 +23,9 @@ void DedicatedFileAllocator::RemoveAllFiles() {
 
 FileAllocation DedicatedFileAllocator::Allocate(
     int64_t requested_size,
-    uint64_t extent_id) {
+    uint64_t segment_id) {
   FileAllocation allocation;
-  const auto path = MakeDedicatedFilePath(directory_, extent_id);
+  const auto path = MakeDedicatedFilePath(directory_, segment_id);
   auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     allocation.result.error = FileErrorCode::kIoError;
@@ -33,27 +33,27 @@ FileAllocation DedicatedFileAllocator::Allocate(
     return allocation;
   }
 
-  FileExtent extent;
-  extent.fd = created.file.fd();
-  extent.offset = 0;
-  extent.requested_size = static_cast<uint64_t>(requested_size);
-  extent.allocated_size = static_cast<uint64_t>(requested_size);
-  extent.kind = FileExtentKind::kDedicated;
-  extent.id = extent_id;
+  FileSegment segment;
+  segment.fd = created.file.fd();
+  segment.offset = 0;
+  segment.requested_size = static_cast<uint64_t>(requested_size);
+  segment.allocated_size = static_cast<uint64_t>(requested_size);
+  segment.kind = FileSegmentKind::kDedicated;
+  segment.id = segment_id;
 
-  files_.emplace(extent_id, std::move(created.file));
+  files_.emplace(segment_id, std::move(created.file));
 
-  allocation.result.extent = extent;
-  allocation.record.extent = extent;
+  allocation.result.segment = segment;
+  allocation.record.segment = segment;
   return allocation;
 }
 
-FileFreeResult DedicatedFileAllocator::Free(const ExtentRecord& record) {
+FileFreeResult DedicatedFileAllocator::Free(const SegmentRecord& record) {
   ManagedOpenFile file;
-  const auto it = files_.find(record.extent.id);
+  const auto it = files_.find(record.segment.id);
   if (it == files_.end()) {
     FileFreeResult result;
-    result.error = FileErrorCode::kInvalidExtent;
+    result.error = FileErrorCode::kInvalidSegment;
     return result;
   }
   file = std::move(it->second);

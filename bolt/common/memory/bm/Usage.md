@@ -9,7 +9,7 @@
 
 - `BlockHandle` 表示一块逻辑 block，可长期保存，用于后续再次访问。
 - `BufferHandle` 表示一次 pin，RAII 持有 block payload，析构时自动 unpin。
-- `BlockMemory` 是内部状态，记录 payload、spill extent、pin count 和状态机。
+- `BlockMemory` 是内部状态，记录 payload、spill segment、pin count 和状态机。
 - `BufferManager` 自己创建 leaf `MemoryPool`，并在该 pool 上安装 reclaimer。
 
 ## 头文件
@@ -109,7 +109,7 @@ for (auto& handle : handles) {
 调用方不需要关心 block 当前是否在内存中：
 
 - 如果 block 是 `IN_MEMORY`，`Pin()` 直接返回。
-- 如果 block 是 `SPILLED`，`Pin()` 会同步提交并等待 read，读回后释放旧 file extent。
+- 如果 block 是 `SPILLED`，`Pin()` 会同步提交并等待 read，读回后释放旧 file segment。
 - 如果 block 是 `PREFETCHING`，`Pin()` 会等待已有 read future 并安装 payload。
 
 `BufferHandle` 是 move-only 类型。不要拷贝，不要在 `BufferHandle` 析构后继续
@@ -202,7 +202,7 @@ auto block = handle.block();
 - 如果 `BufferHandle` 析构时发现 owner `BufferManager` 已经销毁，会走 fatal
   诊断路径，而不是支持 late destruction。
 - `BlockHandle` 可以保存到 operator/run metadata 中，但对应 BM 必须仍然存活。
-- spill 文件 extent 的释放由 BM 内部管理，调用方不要直接操作 extent。
+- spill 文件 segment 的释放由 BM 内部管理，调用方不要直接操作 segment。
 
 推荐由 query/operator 级别的根对象持有 `std::shared_ptr<BufferManager>`，并保证
 所有 handle/block metadata 在 BM 销毁前释放。

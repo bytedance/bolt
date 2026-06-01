@@ -60,7 +60,7 @@ SpillWriteCoordinator::HarvestResult SpillWriteCoordinator::HarvestNext() {
   }
 
   accounting_.OnSpillCompleted(*pending.memory, write);
-  BlockStateMachine::CompleteSpill(*pending.memory, std::move(write.extent));
+  BlockStateMachine::CompleteSpill(*pending.memory, std::move(write.segment));
   const auto reclaimedBytes = pending.memory->size;
   return HarvestResult{
       std::move(pending.memory), std::move(write.io), reclaimedBytes};

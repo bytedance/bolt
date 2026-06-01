@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/file/FileBlockAllocatorImpl.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorImpl.h"
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Uuid.h"
@@ -9,21 +9,21 @@
 
 namespace bytedance::bolt::memory::bm {
 
-FileBlockAllocatorImpl::FileBlockAllocatorImpl(FileBlockAllocatorConfig config)
+FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(FileSegmentAllocatorConfig config)
     : config_(std::move(config)),
       allocator_id_(bytedance::bolt::makeUuid()),
       directory_((std::filesystem::path(config_.directory) / allocator_id_)
                      .string()),
       dedicated_allocator_(directory_) {
   BOLT_CHECK(
-      ValidateFileBlockAllocatorConfig(config_) == FileErrorCode::kOk,
-      "invalid FileBlockAllocatorConfig");
+      ValidateFileSegmentAllocatorConfig(config_) == FileErrorCode::kOk,
+      "invalid FileSegmentAllocatorConfig");
   std::filesystem::create_directories(config_.directory);
   std::filesystem::create_directories(directory_);
 
   buckets_.reserve(config_.bucket_sizes.size());
   for (const auto bucket_size : config_.bucket_sizes) {
-    buckets_.push_back(std::make_unique<BucketBlockAllocator>(
+    buckets_.push_back(std::make_unique<BucketSegmentAllocator>(
         directory_,
         static_cast<uint64_t>(bucket_size),
         static_cast<uint64_t>(config_.file_size_limit_bytes),
@@ -31,14 +31,14 @@ FileBlockAllocatorImpl::FileBlockAllocatorImpl(FileBlockAllocatorConfig config)
   }
 }
 
-FileBlockAllocatorImpl::~FileBlockAllocatorImpl() {
+FileSegmentAllocatorImpl::~FileSegmentAllocatorImpl() {
   shutdown_ = true;
   buckets_.clear();
   dedicated_allocator_.RemoveAllFiles();
   std::filesystem::remove_all(directory_);
 }
 
-FileAllocateResult FileBlockAllocatorImpl::Allocate(int64_t size) {
+FileAllocateResult FileSegmentAllocatorImpl::Allocate(int64_t size) {
   if (shutdown_) {
     FileAllocateResult result;
     result.error = FileErrorCode::kShutdown;
@@ -59,26 +59,26 @@ FileAllocateResult FileBlockAllocatorImpl::Allocate(int64_t size) {
       size, static_cast<size_t>(it - config_.bucket_sizes.begin()));
 }
 
-FileFreeResult FileBlockAllocatorImpl::Free(const FileExtent& extent) {
-  ExtentRecord record;
-  const auto registry_error = registry_.Take(extent.id, &record);
+FileFreeResult FileSegmentAllocatorImpl::Free(const FileSegment& segment) {
+  SegmentRecord record;
+  const auto registry_error = registry_.Take(segment.id, &record);
   if (registry_error != FileErrorCode::kOk) {
     FileFreeResult result;
     result.error = registry_error;
     return result;
   }
 
-  if (record.extent.kind == FileExtentKind::kDedicated) {
+  if (record.segment.kind == FileSegmentKind::kDedicated) {
     return FreeDedicated(record);
   }
   return FreeBucket(record);
 }
 
-FileAllocateResult FileBlockAllocatorImpl::AllocateBucket(
+FileAllocateResult FileSegmentAllocatorImpl::AllocateBucket(
     int64_t size,
     size_t bucket_index) {
-  const auto extent_id = registry_.NextExtentId();
-  auto allocation = buckets_[bucket_index]->Allocate(size, extent_id);
+  const auto segment_id = registry_.NextSegmentId();
+  auto allocation = buckets_[bucket_index]->Allocate(size, segment_id);
   if (!allocation.result.ok()) {
     return allocation.result;
   }
@@ -87,9 +87,9 @@ FileAllocateResult FileBlockAllocatorImpl::AllocateBucket(
   return allocation.result;
 }
 
-FileAllocateResult FileBlockAllocatorImpl::AllocateDedicated(int64_t size) {
-  const auto extent_id = registry_.NextExtentId();
-  auto allocation = dedicated_allocator_.Allocate(size, extent_id);
+FileAllocateResult FileSegmentAllocatorImpl::AllocateDedicated(int64_t size) {
+  const auto segment_id = registry_.NextSegmentId();
+  auto allocation = dedicated_allocator_.Allocate(size, segment_id);
   if (!allocation.result.ok()) {
     return allocation.result;
   }
@@ -97,17 +97,17 @@ FileAllocateResult FileBlockAllocatorImpl::AllocateDedicated(int64_t size) {
   return allocation.result;
 }
 
-FileFreeResult FileBlockAllocatorImpl::FreeBucket(const ExtentRecord& record) {
+FileFreeResult FileSegmentAllocatorImpl::FreeBucket(const SegmentRecord& record) {
   if (record.bucket_index >= buckets_.size()) {
     FileFreeResult result;
-    result.error = FileErrorCode::kInvalidExtent;
+    result.error = FileErrorCode::kInvalidSegment;
     return result;
   }
   return buckets_[record.bucket_index]->Free(record);
 }
 
-FileFreeResult FileBlockAllocatorImpl::FreeDedicated(
-    const ExtentRecord& record) {
+FileFreeResult FileSegmentAllocatorImpl::FreeDedicated(
+    const SegmentRecord& record) {
   return dedicated_allocator_.Free(record);
 }
 

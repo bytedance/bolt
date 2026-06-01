@@ -12,16 +12,16 @@ namespace bytedance::bolt::memory::bm {
 
 SpillWriteFuture::SpillWriteFuture(
     std::future<IoResult> rawFuture,
-    OwnedFileExtent extent,
+    OwnedFileSegment segment,
     SpillWriteMetadata metadata)
     : rawFuture_(std::move(rawFuture)),
-      extent_(std::move(extent)),
+      segment_(std::move(segment)),
       metadata_(metadata) {}
 
 SpillWriteResult SpillWriteFuture::get() {
   SpillWriteResult result;
   result.io = rawFuture_.get();
-  result.extent = std::move(extent_);
+  result.segment = std::move(segment_);
   result.rawBytes = metadata_.rawBytes;
   result.physicalBytes = metadata_.physicalBytes;
   result.compressionTimeUs = metadata_.compressionTimeUs;
@@ -67,23 +67,23 @@ SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
       codec_(std::make_shared<SpillCodec>(config_.compressionConfig)),
       io_(std::make_unique<SpillIo>()),
       pool_(pool) {
-  allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
+  allocator_ = CreateFileSegmentAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
   BOLT_CHECK_NOT_NULL(pool_);
 }
 
 SpillStore::~SpillStore() = default;
 
-FileAllocateResult SpillStore::AllocateExtent(size_t size) {
+FileAllocateResult SpillStore::AllocateSegment(size_t size) {
   return allocator_->Allocate(static_cast<int64_t>(size));
 }
 
-FileFreeResult SpillStore::FreeExtent(const FileExtent& extent) {
-  return allocator_->Free(extent);
+FileFreeResult SpillStore::FreeSegment(const FileSegment& segment) {
+  return allocator_->Free(segment);
 }
 
-OwnedFileExtent SpillStore::OwnExtent(FileExtent extent) const {
-  return OwnedFileExtent{extent, allocator_};
+OwnedFileSegment SpillStore::OwnSegment(FileSegment segment) const {
+  return OwnedFileSegment{segment, allocator_};
 }
 
 SpillWriteFuture SpillStore::SubmitWriteBlock(
@@ -96,7 +96,7 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   auto record =
       codec_->Build(std::span<const char>(payload.data(), payload.length()));
 
-  auto allocation = AllocateExtent(record.physicalSize);
+  auto allocation = AllocateSegment(record.physicalSize);
   if (!allocation.ok()) {
     BOLT_FAIL(
         "BM file allocation failed for spill record, file_error={}, native_error={}, bytes={}",
@@ -111,20 +111,20 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   metadata.compressionTimeUs = record.compressionTimeUs;
   metadata.compressed = record.compressed;
 
-  auto ownedExtent = OwnExtent(allocation.extent);
+  auto ownedSegment = OwnSegment(allocation.segment);
   auto rawFuture =
-      io_->SubmitWriteRaw(ownedExtent.extent(), record.record, priority);
+      io_->SubmitWriteRaw(ownedSegment.segment(), record.record, priority);
 
   return SpillWriteFuture{
-      std::move(rawFuture), std::move(ownedExtent), metadata};
+      std::move(rawFuture), std::move(ownedSegment), metadata};
 }
 
 SpillReadFuture SpillStore::SubmitReadBlock(
-    const OwnedFileExtent& extent,
+    const OwnedFileSegment& segment,
     size_t expectedRawSize,
     IoPriority priority) {
   return SpillReadFuture{
-      io_->SubmitReadRaw(extent, extent.extent().requested_size, priority),
+      io_->SubmitReadRaw(segment, segment.segment().requested_size, priority),
       codec_,
       pool_,
       expectedRawSize};

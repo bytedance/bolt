@@ -27,7 +27,7 @@ void BlockStateMachine::SubmitRead(
   BOLT_CHECK(
       memory.state == BlockMemoryState::kSpilled,
       "BM read submission expects a spilled block");
-  BOLT_CHECK(memory.extent.has_value());
+  BOLT_CHECK(memory.segment.has_value());
   memory.prefetchFuture = std::move(future);
   memory.state = BlockMemoryState::kPrefetching;
 }
@@ -43,17 +43,17 @@ void BlockStateMachine::MarkReadFailed(BlockMemory& memory) {
   memory.state = BlockMemoryState::kSpilled;
 }
 
-OwnedFileExtent BlockStateMachine::CompleteRead(
+OwnedFileSegment BlockStateMachine::CompleteRead(
     BlockMemory& memory,
     IoBuffer payload) {
-  BOLT_CHECK(memory.extent.has_value());
-  auto oldExtent = std::move(*memory.extent);
-  memory.extent.reset();
+  BOLT_CHECK(memory.segment.has_value());
+  auto oldSegment = std::move(*memory.segment);
+  memory.segment.reset();
   memory.payload = std::move(payload);
   memory.state = BlockMemoryState::kInMemory;
   memory.pinCount = 1;
   ++memory.evictionSequence;
-  return oldExtent;
+  return oldSegment;
 }
 
 IoBuffer BlockStateMachine::BeginSpill(BlockMemory& memory) {
@@ -76,8 +76,8 @@ void BlockStateMachine::RollbackSpill(
 
 void BlockStateMachine::CompleteSpill(
     BlockMemory& memory,
-    OwnedFileExtent extent) {
-  memory.extent = std::move(extent);
+    OwnedFileSegment segment) {
+  memory.segment = std::move(segment);
   memory.state = BlockMemoryState::kSpilled;
   ++memory.evictionSequence;
 }

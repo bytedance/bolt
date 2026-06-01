@@ -77,10 +77,10 @@ TEST_F(BlockStateMachineTest, BeginRollbackAndCompleteSpillMovePayloadAndState) 
   EXPECT_EQ(BlockMemoryState::kInMemory, memory.state);
 
   payload = BlockStateMachine::BeginSpill(memory);
-  OwnedFileExtent extent;
-  BlockStateMachine::CompleteSpill(memory, std::move(extent));
+  OwnedFileSegment segment;
+  BlockStateMachine::CompleteSpill(memory, std::move(segment));
   EXPECT_FALSE(memory.payload.has_value());
-  EXPECT_TRUE(memory.extent.has_value());
+  EXPECT_TRUE(memory.segment.has_value());
   EXPECT_EQ(BlockMemoryState::kSpilled, memory.state);
   EXPECT_EQ(1, memory.evictionSequence);
 }
@@ -88,7 +88,7 @@ TEST_F(BlockStateMachineTest, BeginRollbackAndCompleteSpillMovePayloadAndState) 
 TEST_F(BlockStateMachineTest, SubmitConsumeFailAndCompleteReadTransitions) {
   BlockMemory memory{9, 4096, MemoryTag::kTesting};
   memory.state = BlockMemoryState::kSpilled;
-  memory.extent.emplace();
+  memory.segment.emplace();
 
   BlockStateMachine::SubmitRead(memory, MakeFailedReadFuture());
   EXPECT_EQ(BlockMemoryState::kPrefetching, memory.state);
@@ -102,10 +102,10 @@ TEST_F(BlockStateMachineTest, SubmitConsumeFailAndCompleteReadTransitions) {
   BlockStateMachine::MarkReadFailed(memory);
   EXPECT_EQ(BlockMemoryState::kSpilled, memory.state);
 
-  auto oldExtent =
+  auto oldSegment =
       BlockStateMachine::CompleteRead(memory, MakePayload(memory.size, 'c'));
-  EXPECT_FALSE(oldExtent.valid());
-  EXPECT_FALSE(memory.extent.has_value());
+  EXPECT_FALSE(oldSegment.valid());
+  EXPECT_FALSE(memory.segment.has_value());
   ASSERT_TRUE(memory.payload.has_value());
   EXPECT_EQ('c', memory.payload->data()[0]);
   EXPECT_EQ(BlockMemoryState::kInMemory, memory.state);

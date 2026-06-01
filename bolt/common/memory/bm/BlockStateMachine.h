@@ -11,10 +11,10 @@ class BlockStateMachine {
   static void SubmitRead(BlockMemory& memory, SpillReadFuture future);
   static SpillReadResult ConsumePrefetch(BlockMemory& memory);
   static void MarkReadFailed(BlockMemory& memory);
-  static OwnedFileExtent CompleteRead(BlockMemory& memory, IoBuffer payload);
+  static OwnedFileSegment CompleteRead(BlockMemory& memory, IoBuffer payload);
   static IoBuffer BeginSpill(BlockMemory& memory);
   static void RollbackSpill(BlockMemory& memory, IoBuffer payload);
-  static void CompleteSpill(BlockMemory& memory, OwnedFileExtent extent);
+  static void CompleteSpill(BlockMemory& memory, OwnedFileSegment segment);
 };
 
 } // namespace bytedance::bolt::memory::bm

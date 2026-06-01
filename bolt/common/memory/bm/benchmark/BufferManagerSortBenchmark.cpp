@@ -119,8 +119,8 @@ class UInt64DataGenerator {
   uint64_t state_{0};
 };
 
-FileBlockAllocatorConfig fileAllocatorConfig(const std::string& directory) {
-  FileBlockAllocatorConfig config;
+FileSegmentAllocatorConfig fileAllocatorConfig(const std::string& directory) {
+  FileSegmentAllocatorConfig config;
   config.directory = directory;
   config.bucket_sizes = {
       static_cast<int64_t>(allocateSizeBytes(AllocateSize::kSmall)),
@@ -580,7 +580,7 @@ int runBenchmark() {
     while (!generator.empty()) {
       VLOG(1) << "BM sort MaybeReserve begin"
               << " generated_values=" << generator.generated()
-              << " active_blocks=" << active.metadata.blocks.size()
+              << " active_segments=" << active.metadata.blocks.size()
               << " active_values=" << active.metadata.values
               << " run_count=" << runs.size()
               << " block_bytes=" << blockBytes
@@ -590,7 +590,7 @@ int runBenchmark() {
       VLOG(1) << "BM sort MaybeReserve end"
               << " ok=" << reserveOk
               << " generated_values=" << generator.generated()
-              << " active_blocks=" << active.metadata.blocks.size()
+              << " active_segments=" << active.metadata.blocks.size()
               << " active_values=" << active.metadata.values
               << " run_count=" << runs.size()
               << " block_bytes=" << blockBytes
@@ -599,7 +599,7 @@ int runBenchmark() {
       if (!reserveOk && !active.empty()) {
         VLOG(1) << "BM sort finalize active run after MaybeReserve failure"
                 << " generated_values=" << generator.generated()
-                << " active_blocks=" << active.metadata.blocks.size()
+                << " active_segments=" << active.metadata.blocks.size()
                 << " active_values=" << active.metadata.values
                 << " bm=" << manager->debugString()
                 << " root_pool=" << root->toString(true);
@@ -616,7 +616,7 @@ int runBenchmark() {
 
       VLOG(1) << "BM sort Allocate begin"
               << " generated_values=" << generator.generated()
-              << " active_blocks=" << active.metadata.blocks.size()
+              << " active_segments=" << active.metadata.blocks.size()
               << " active_values=" << active.metadata.values
               << " run_count=" << runs.size()
               << " block_bytes=" << blockBytes
@@ -630,7 +630,7 @@ int runBenchmark() {
               << " generated_values=" << generator.generated()
               << " block_id=" << block->id()
               << " block_values=" << blockValues
-              << " active_blocks_before_push=" << active.metadata.blocks.size()
+              << " active_segments_before_push=" << active.metadata.blocks.size()
               << " active_values_before_push=" << active.metadata.values
               << " run_count=" << runs.size()
               << " bm=" << manager->debugString()
@@ -642,7 +642,7 @@ int runBenchmark() {
       active.handles.push_back(std::move(handle));
       VLOG(1) << "BM sort active run appended"
               << " generated_values=" << generator.generated()
-              << " active_blocks=" << active.metadata.blocks.size()
+              << " active_segments=" << active.metadata.blocks.size()
               << " active_values=" << active.metadata.values
               << " run_count=" << runs.size()
               << " bm=" << manager->debugString()
@@ -652,7 +652,7 @@ int runBenchmark() {
     if (!active.empty()) {
       VLOG(1) << "BM sort finalize last active run"
               << " generated_values=" << generator.generated()
-              << " active_blocks=" << active.metadata.blocks.size()
+              << " active_segments=" << active.metadata.blocks.size()
               << " active_values=" << active.metadata.values
               << " bm=" << manager->debugString()
               << " root_pool=" << root->toString(true);

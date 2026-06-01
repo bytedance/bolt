@@ -2,10 +2,10 @@ include(GoogleTest)
 
 add_executable(
   bolt_memory_bm_file_test
-  FileBlockAllocatorConfigTest.cpp
-  FileBlockAllocatorFactoryTest.cpp
-  FileBlockAllocatorFreeTest.cpp
-  FileBlockAllocatorImplTest.cpp
+  FileSegmentAllocatorConfigTest.cpp
+  FileSegmentAllocatorFactoryTest.cpp
+  FileSegmentAllocatorFreeTest.cpp
+  FileSegmentAllocatorImplTest.cpp
   ManagedOpenFileFactoryTest.cpp
 )
 

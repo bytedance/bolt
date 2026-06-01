@@ -134,8 +134,8 @@ class UInt64DataGenerator {
   uint64_t state_{0};
 };
 
-FileBlockAllocatorConfig fileAllocatorConfig(const std::string& directory) {
-  FileBlockAllocatorConfig config;
+FileSegmentAllocatorConfig fileAllocatorConfig(const std::string& directory) {
+  FileSegmentAllocatorConfig config;
   config.directory = directory;
   config.bucket_sizes = {
       static_cast<int64_t>(allocateSizeBytes(AllocateSize::kSmall)),

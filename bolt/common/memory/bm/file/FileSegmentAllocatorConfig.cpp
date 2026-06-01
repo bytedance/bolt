@@ -1,24 +1,24 @@
-#include "bolt/common/memory/bm/file/FileBlockAllocatorConfig.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorConfig.h"
 
 namespace bytedance::bolt::memory::bm {
 
-bool IsFileBlockAligned(int64_t value) {
-  return value > 0 && value % kFileBlockAlignment == 0;
+bool IsFileSegmentAligned(int64_t value) {
+  return value > 0 && value % kFileSegmentAlignment == 0;
 }
 
-FileErrorCode ValidateFileBlockAllocatorConfig(
-    const FileBlockAllocatorConfig& config) {
+FileErrorCode ValidateFileSegmentAllocatorConfig(
+    const FileSegmentAllocatorConfig& config) {
   if (config.directory.empty() || config.bucket_sizes.empty() ||
       config.file_size_limit_bytes <= 0 ||
       config.max_open_files_per_bucket == 0) {
     return FileErrorCode::kInvalidConfig;
   }
-  if (!IsFileBlockAligned(config.file_size_limit_bytes)) {
+  if (!IsFileSegmentAligned(config.file_size_limit_bytes)) {
     return FileErrorCode::kInvalidConfig;
   }
   int64_t previous = 0;
   for (const auto bucket_size : config.bucket_sizes) {
-    if (!IsFileBlockAligned(bucket_size) || bucket_size <= previous) {
+    if (!IsFileSegmentAligned(bucket_size) || bucket_size <= previous) {
       return FileErrorCode::kInvalidConfig;
     }
     previous = bucket_size;

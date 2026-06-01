@@ -1,7 +1,7 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/SpillCodec.h"
-#include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
+#include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
 #include <cerrno>

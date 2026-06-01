@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bolt/common/memory/bm/file/FileBlockAllocatorConfig.h"
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorConfig.h"
 
 #include <filesystem>
 #include <string>
@@ -8,8 +8,8 @@
 
 namespace bytedance::bolt::memory::bm::test {
 
-inline FileBlockAllocatorConfig ValidConfig() {
-  FileBlockAllocatorConfig config;
+inline FileSegmentAllocatorConfig ValidConfig() {
+  FileSegmentAllocatorConfig config;
   config.directory = "/tmp/bolt-bm-file-allocator-test";
   config.bucket_sizes = {4 * 1024, 8 * 1024, 16 * 1024};
   config.file_size_limit_bytes = 64 * 1024;
@@ -21,7 +21,7 @@ inline std::string UniqueTempDir(const std::string& name) {
   return (std::filesystem::temp_directory_path() / name).string();
 }
 
-inline FileBlockAllocatorConfig ValidConfigWithDirectory(
+inline FileSegmentAllocatorConfig ValidConfigWithDirectory(
     const std::string& path) {
   auto config = ValidConfig();
   config.directory = path;

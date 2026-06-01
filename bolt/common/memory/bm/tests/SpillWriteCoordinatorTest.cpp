@@ -71,7 +71,7 @@ TEST(SpillWriteCoordinatorTest, SubmitAndHarvestCompletesSpillLifecycle) {
   EXPECT_EQ(block, result.memory);
   EXPECT_EQ(4096, result.reclaimedBytes);
   EXPECT_EQ(BlockMemoryState::kSpilled, block->state);
-  EXPECT_TRUE(block->extent.has_value());
+  EXPECT_TRUE(block->segment.has_value());
   EXPECT_EQ(0, coordinator.pendingCount());
 }
 
