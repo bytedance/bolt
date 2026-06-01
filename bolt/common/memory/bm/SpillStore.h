@@ -2,7 +2,7 @@
 
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/OwnedFileExtent.h"
-#include "bolt/common/memory/bm/compress/CompressionManager.h"
+#include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
@@ -10,6 +10,9 @@
 #include <memory>
 
 namespace bytedance::bolt::memory::bm {
+
+class SpillCodec;
+class SpillIo;
 
 struct SpillStoreConfig {
   FileBlockAllocatorConfig fileAllocatorConfig;
@@ -61,6 +64,7 @@ class SpillReadFuture {
 class SpillStore {
  public:
   SpillStore(SpillStoreConfig config, MemoryPool* pool);
+  ~SpillStore();
 
   SpillWriteResult
   WriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
@@ -74,16 +78,12 @@ class SpillStore {
   FileAllocateResult AllocateExtent(size_t size);
   FileFreeResult FreeExtent(const FileExtent& extent);
   OwnedFileExtent OwnExtent(FileExtent extent) const;
-  std::future<IoResult>
-  SubmitReadRaw(const OwnedFileExtent& extent, size_t size, IoPriority priority);
-  IoResult WriteRaw(const FileExtent& extent, IoBuffer& payload, IoPriority priority);
-  void EnsureSchedulerReadyForPayloadMove();
 
   SpillStoreConfig config_;
-  compress::CompressionManager compression_;
+  std::unique_ptr<SpillCodec> codec_;
+  std::unique_ptr<SpillIo> io_;
   std::shared_ptr<FileBlockAllocator> allocator_;
   MemoryPool* pool_{nullptr};
-  bool schedulerReadyForPayloadMove_{false};
 };
 
 } // namespace bytedance::bolt::memory::bm
