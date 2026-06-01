@@ -7,17 +7,17 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class OwnedFileSegment {
+class ManagedFileSegment {
  public:
-  OwnedFileSegment() = default;
-  OwnedFileSegment(FileSegment segment, std::weak_ptr<FileSegmentAllocator> allocator);
-  ~OwnedFileSegment() noexcept;
+  ManagedFileSegment() = default;
+  ManagedFileSegment(FileSegment segment, std::weak_ptr<FileSegmentAllocator> allocator);
+  ~ManagedFileSegment() noexcept;
 
-  OwnedFileSegment(OwnedFileSegment&& other) noexcept;
-  OwnedFileSegment& operator=(OwnedFileSegment&& other) noexcept;
+  ManagedFileSegment(ManagedFileSegment&& other) noexcept;
+  ManagedFileSegment& operator=(ManagedFileSegment&& other) noexcept;
 
-  OwnedFileSegment(const OwnedFileSegment&) = delete;
-  OwnedFileSegment& operator=(const OwnedFileSegment&) = delete;
+  ManagedFileSegment(const ManagedFileSegment&) = delete;
+  ManagedFileSegment& operator=(const ManagedFileSegment&) = delete;
 
   const FileSegment& segment() const;
   bool valid() const;

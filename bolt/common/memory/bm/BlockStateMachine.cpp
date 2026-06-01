@@ -43,7 +43,7 @@ void BlockStateMachine::MarkReadFailed(BlockMemory& memory) {
   memory.state = BlockMemoryState::kSpilled;
 }
 
-OwnedFileSegment BlockStateMachine::CompleteRead(
+ManagedFileSegment BlockStateMachine::CompleteRead(
     BlockMemory& memory,
     IoBuffer payload) {
   BOLT_CHECK(memory.segment.has_value());
@@ -76,7 +76,7 @@ void BlockStateMachine::RollbackSpill(
 
 void BlockStateMachine::CompleteSpill(
     BlockMemory& memory,
-    OwnedFileSegment segment) {
+    ManagedFileSegment segment) {
   memory.segment = std::move(segment);
   memory.state = BlockMemoryState::kSpilled;
   ++memory.evictionSequence;

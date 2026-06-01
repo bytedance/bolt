@@ -1,28 +1,28 @@
-#include "bolt/common/memory/bm/OwnedFileSegment.h"
+#include "bolt/common/memory/bm/ManagedFileSegment.h"
 
 #include <glog/logging.h>
 
 namespace bytedance::bolt::memory::bm {
 
-OwnedFileSegment::OwnedFileSegment(
+ManagedFileSegment::ManagedFileSegment(
     FileSegment segment,
     std::weak_ptr<FileSegmentAllocator> allocator)
     : segment_(segment), allocator_(std::move(allocator)), valid_(true) {}
 
-OwnedFileSegment::~OwnedFileSegment() noexcept {
-  ResetNoexcept("OwnedFileSegment::~OwnedFileSegment");
+ManagedFileSegment::~ManagedFileSegment() noexcept {
+  ResetNoexcept("ManagedFileSegment::~ManagedFileSegment");
 }
 
-OwnedFileSegment::OwnedFileSegment(OwnedFileSegment&& other) noexcept
+ManagedFileSegment::ManagedFileSegment(ManagedFileSegment&& other) noexcept
     : segment_(other.segment_),
       allocator_(std::move(other.allocator_)),
       valid_(other.valid_) {
   other.valid_ = false;
 }
 
-OwnedFileSegment& OwnedFileSegment::operator=(OwnedFileSegment&& other) noexcept {
+ManagedFileSegment& ManagedFileSegment::operator=(ManagedFileSegment&& other) noexcept {
   if (this != &other) {
-    ResetNoexcept("OwnedFileSegment::operator=");
+    ResetNoexcept("ManagedFileSegment::operator=");
     segment_ = other.segment_;
     allocator_ = std::move(other.allocator_);
     valid_ = other.valid_;
@@ -31,19 +31,19 @@ OwnedFileSegment& OwnedFileSegment::operator=(OwnedFileSegment&& other) noexcept
   return *this;
 }
 
-const FileSegment& OwnedFileSegment::segment() const {
+const FileSegment& ManagedFileSegment::segment() const {
   return segment_;
 }
 
-bool OwnedFileSegment::valid() const {
+bool ManagedFileSegment::valid() const {
   return valid_;
 }
 
-void OwnedFileSegment::FreeOrFatal(std::string_view context) noexcept {
+void ManagedFileSegment::FreeOrFatal(std::string_view context) noexcept {
   ResetNoexcept(context);
 }
 
-void OwnedFileSegment::ResetNoexcept(std::string_view context) noexcept {
+void ManagedFileSegment::ResetNoexcept(std::string_view context) noexcept {
   if (!valid_) {
     return;
   }
