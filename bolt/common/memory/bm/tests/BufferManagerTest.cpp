@@ -78,8 +78,8 @@ TEST(BufferManagerHandleTest, BlockHandleExposesSizeAndTag) {
 
 TEST_F(BufferManagerTest, AllocateReturnsPinnedWritablePayload) {
   auto bm = makeBufferManager("allocate");
-  std::shared_ptr<BlockHandle> block;
-  auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto block = handle.block();
 
   ASSERT_NE(nullptr, block);
   ASSERT_NE(nullptr, handle.Ptr());
@@ -92,7 +92,8 @@ TEST_F(BufferManagerTest, PinResidentBlockSeesWrittenBytes) {
   auto bm = makeBufferManager("pin-resident");
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
     handle.Ptr()[0] = 42;
   }
 
@@ -105,8 +106,10 @@ TEST_F(BufferManagerTest, BatchPinResidentBlocks) {
   std::shared_ptr<BlockHandle> first;
   std::shared_ptr<BlockHandle> second;
   {
-    auto firstHandle = bm->Allocate(4096, MemoryTag::kTesting, &first);
-    auto secondHandle = bm->Allocate(4096, MemoryTag::kTesting, &second);
+    auto firstHandle = bm->Allocate(4096, MemoryTag::kTesting);
+    auto secondHandle = bm->Allocate(4096, MemoryTag::kTesting);
+    first = firstHandle.block();
+    second = secondHandle.block();
     firstHandle.Ptr()[0] = 1;
     secondHandle.Ptr()[0] = 2;
   }
@@ -118,11 +121,42 @@ TEST_F(BufferManagerTest, BatchPinResidentBlocks) {
   EXPECT_EQ(2, handles[1].Ptr()[0]);
 }
 
+TEST_F(BufferManagerTest, BatchAllocateReturnsPinnedWritablePayloads) {
+  auto bm = makeBufferManager("batch-allocate");
+  auto handles = bm->BatchAllocate(3, 4096, MemoryTag::kTesting);
+
+  ASSERT_EQ(3, handles.size());
+  std::vector<std::shared_ptr<BlockHandle>> blocks;
+  blocks.reserve(handles.size());
+  for (size_t i = 0; i < handles.size(); ++i) {
+    ASSERT_TRUE(handles[i].valid());
+    auto block = handles[i].block();
+    ASSERT_NE(nullptr, block);
+    EXPECT_EQ(4096, block->size());
+    EXPECT_EQ(MemoryTag::kTesting, block->tag());
+    handles[i].Ptr()[0] = static_cast<char>(i + 1);
+    blocks.push_back(std::move(block));
+  }
+
+  EXPECT_NE(blocks[0]->id(), blocks[1]->id());
+  EXPECT_NE(blocks[1]->id(), blocks[2]->id());
+  EXPECT_EQ(3, bm->stats().allocatedBlocks);
+  EXPECT_EQ(3 * 4096, bm->stats().pinnedResidentBytes);
+}
+
+TEST_F(BufferManagerTest, BatchAllocateZeroCountReturnsEmpty) {
+  auto bm = makeBufferManager("batch-allocate-empty");
+  auto handles = bm->BatchAllocate(0, 0, MemoryTag::kTesting);
+  EXPECT_TRUE(handles.empty());
+  EXPECT_EQ(0, bm->stats().allocatedBlocks);
+}
+
 TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   auto bm = makeBufferManager("reclaim-pin");
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 9, block->size());
   }
 
@@ -146,7 +180,8 @@ TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
   auto bm = makeBufferManager("reclaim-submit-failure");
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 13, block->size());
   }
 
@@ -178,7 +213,8 @@ TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {
   auto bm = makeBufferManager("prefetch");
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 11, block->size());
   }
   try {
@@ -200,8 +236,8 @@ TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {
 
 TEST_F(BufferManagerTest, StatsTrackPinnedAndUnpinnedResidentBytes) {
   auto bm = makeBufferManager("stats-resident");
-  std::shared_ptr<BlockHandle> block;
-  auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto block = handle.block();
 
   auto stats = bm->stats();
   EXPECT_EQ(1, stats.allocatedBlocks);
@@ -234,10 +270,9 @@ TEST_F(BufferManagerTest, StatsDropTempBlockWhenLastHandleIsDestroyed) {
 
 TEST_F(BufferManagerTest, TagStatsTrackAllocationSource) {
   auto bm = makeBufferManager("tag-stats");
-  std::shared_ptr<BlockHandle> sortBlock;
-  std::shared_ptr<BlockHandle> aggBlock;
-  auto sortHandle = bm->Allocate(4096, MemoryTag::kSort, &sortBlock);
-  auto aggHandle = bm->Allocate(8192, MemoryTag::kAggregation, &aggBlock);
+  auto sortHandle = bm->Allocate(4096, MemoryTag::kSort);
+  auto aggHandle = bm->Allocate(8192, MemoryTag::kAggregation);
+  auto sortBlock = sortHandle.block();
   sortHandle = BufferHandle{};
 
   const auto tagStats = bm->tagStats();
@@ -269,7 +304,8 @@ TEST_F(BufferManagerTest, StatsTrackSpillAndReadback) {
   auto bm = makeBufferManager("stats-spill-read");
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 17, block->size());
   }
 
@@ -306,7 +342,8 @@ TEST_F(BufferManagerTest, DefaultCompressionSpillsAndReadsBackPayload) {
           "default-compression", compress::CompressionKind::kLz4Block, 1);
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(256 * 1024, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(256 * 1024, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 'a', block->size());
   }
 
@@ -336,7 +373,8 @@ TEST_P(BufferManagerCompressionKindTest, CompressionKindSpillsAndReadsBack) {
   auto bm = makeBufferManager("compression-kind", GetParam(), 1);
   std::shared_ptr<BlockHandle> block;
   {
-    auto handle = bm->Allocate(128 * 1024, MemoryTag::kTesting, &block);
+    auto handle = bm->Allocate(128 * 1024, MemoryTag::kTesting);
+    block = handle.block();
     std::memset(handle.Ptr(), 21, block->size());
   }
 
@@ -364,8 +402,8 @@ INSTANTIATE_TEST_SUITE_P(
 
 TEST_F(BufferManagerTest, DebugStringContainsCoreCounters) {
   auto bm = makeBufferManager("debug-string");
-  std::shared_ptr<BlockHandle> block;
-  auto handle = bm->Allocate(4096, MemoryTag::kTesting, &block);
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto block = handle.block();
   handle = BufferHandle{};
 
   const auto debug = bm->debugString();

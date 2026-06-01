@@ -41,6 +41,11 @@ char* BufferHandle::Ptr() const {
   return data_;
 }
 
+std::shared_ptr<BlockHandle> BufferHandle::block() const {
+  BOLT_CHECK_NOT_NULL(block_);
+  return block_;
+}
+
 bool BufferHandle::valid() const {
   return data_ != nullptr && block_ != nullptr;
 }
