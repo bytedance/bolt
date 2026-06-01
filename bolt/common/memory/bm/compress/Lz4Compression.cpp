@@ -83,6 +83,7 @@ uint64_t Lz4Compress(
 }
 
 void Lz4Decompress(
+    Lz4DecompressionContext* /*context*/,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -103,6 +104,8 @@ void Lz4Decompress(
         targetSize);
   }
 }
+
+Lz4DecompressionContext::~Lz4DecompressionContext() = default;
 
 Lz4CompressionContext::~Lz4CompressionContext() {
   if (native != nullptr) {

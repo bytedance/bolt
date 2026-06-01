@@ -354,7 +354,10 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
 
   auto leaf = root_->addLeafChild("spill-read-success");
   SpillReadFuture future{
-      promise.get_future(), leaf.get(), config, kSize};
+      promise.get_future(),
+      std::make_shared<SpillCodec>(config),
+      leaf.get(),
+      kSize};
   auto result = future.get();
 
   ASSERT_TRUE(result.ok());
@@ -375,7 +378,10 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureReportsFailedAndInvalidReads) 
     promise.set_value(std::move(failed));
 
     SpillReadFuture future{
-        promise.get_future(), root_.get(), compress::CompressionConfig{}, 4096};
+        promise.get_future(),
+        std::make_shared<SpillCodec>(compress::CompressionConfig{}),
+        root_.get(),
+        4096};
     auto result = future.get();
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(IoErrorCode::BackendIoError, result.io.error);
@@ -392,7 +398,10 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureReportsFailedAndInvalidReads) 
     promise.set_value(std::move(invalid));
 
     SpillReadFuture future{
-        promise.get_future(), root_.get(), compress::CompressionConfig{}, 4096};
+        promise.get_future(),
+        std::make_shared<SpillCodec>(compress::CompressionConfig{}),
+        root_.get(),
+        4096};
     auto result = future.get();
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(IoErrorCode::InvalidRequest, result.io.error);

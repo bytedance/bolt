@@ -25,13 +25,14 @@ IoResult MakeInvalidRecordResult(IoBuffer buffer) {
 
 SpillReadFuture::SpillReadFuture(
     std::future<IoResult> rawFuture,
+    std::shared_ptr<SpillCodec> codec,
     MemoryPool* pool,
-    compress::CompressionConfig compressionConfig,
     size_t expectedRawSize)
     : rawFuture_(std::move(rawFuture)),
+      codec_(std::move(codec)),
       pool_(pool),
-      compressionConfig_(std::move(compressionConfig)),
       expectedRawSize_(expectedRawSize) {
+  BOLT_CHECK_NOT_NULL(codec_);
   BOLT_CHECK_NOT_NULL(pool_);
 }
 
@@ -45,8 +46,7 @@ SpillReadResult SpillReadFuture::get() {
   }
 
   try {
-    SpillCodec codec(compressionConfig_);
-    auto decoded = codec.Decode(
+    auto decoded = codec_->Decode(
         std::span<const char>(raw.buffer.data(), raw.buffer.length()),
         expectedRawSize_,
         pool_,
@@ -63,7 +63,7 @@ SpillReadResult SpillReadFuture::get() {
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
     : config_(std::move(config)),
-      codec_(std::make_unique<SpillCodec>(config_.compressionConfig)),
+      codec_(std::make_shared<SpillCodec>(config_.compressionConfig)),
       io_(std::make_unique<SpillIo>()),
       pool_(pool) {
   allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
@@ -145,8 +145,8 @@ SpillReadFuture SpillStore::SubmitReadBlock(
     IoPriority priority) {
   return SpillReadFuture{
       io_->SubmitReadRaw(extent, extent.extent().requested_size, priority),
+      codec_,
       pool_,
-      config_.compressionConfig,
       expectedRawSize};
 }
 

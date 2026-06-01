@@ -247,6 +247,7 @@ TEST_F(CompressionManagerTest, HeaderRejectsMalformedRecords) {
 TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
   CompressionConfig config;
   CompressionContextSet contexts;
+  DecompressionContextSet decompressionContexts;
   const auto original = compressiblePayload(1024);
   std::vector<char> compressed(4096);
   std::vector<char> decoded(original.size());
@@ -266,6 +267,7 @@ TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
       std::exception);
   EXPECT_THROW(
       DecompressWithAlgorithm(
+          decompressionContexts,
           static_cast<CompressionKind>(99),
           compressed.data(),
           compressed.size(),
@@ -309,6 +311,78 @@ TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
       std::exception);
 }
 
+TEST_F(CompressionManagerTest, AlgorithmsDecodeWithReusableContexts) {
+  const auto original = compressiblePayload(64 * 1024);
+  std::vector<char> compressed(MaxCompressedLength(
+      CompressionKind::kZstdFrame, original.size()));
+  std::vector<char> decoded(original.size());
+
+  Lz4CompressionContext lz4Compression;
+  Lz4DecompressionContext lz4Decompression;
+  Lz4Options lz4;
+  lz4.strategy = Lz4Strategy::kPooledContext;
+  const auto lz4Bytes = Lz4Compress(
+      &lz4Compression,
+      lz4,
+      original.data(),
+      original.size(),
+      compressed.data(),
+      compressed.size());
+  DecompressionContextSet lz4Contexts;
+  lz4Contexts.lz4 = &lz4Decompression;
+  DecompressWithAlgorithm(
+      lz4Contexts,
+      CompressionKind::kLz4Block,
+      compressed.data(),
+      lz4Bytes,
+      decoded.data(),
+      decoded.size());
+  EXPECT_EQ(original, std::string(decoded.data(), decoded.size()));
+
+  ZstdCompressionContext zstdCompression;
+  ZstdDecompressionContext zstdDecompression;
+  ZstdOptions zstd;
+  zstd.strategy = ZstdStrategy::kPooledContext;
+  const auto zstdBytes = ZstdCompress(
+      &zstdCompression,
+      zstd,
+      original.data(),
+      original.size(),
+      compressed.data(),
+      compressed.size());
+  std::fill(decoded.begin(), decoded.end(), '\0');
+  DecompressionContextSet zstdContexts;
+  zstdContexts.zstd = &zstdDecompression;
+  DecompressWithAlgorithm(
+      zstdContexts,
+      CompressionKind::kZstdFrame,
+      compressed.data(),
+      zstdBytes,
+      decoded.data(),
+      decoded.size());
+  EXPECT_EQ(original, std::string(decoded.data(), decoded.size()));
+
+  SnappyDecompressionContext snappyDecompression;
+  SnappyOptions snappy;
+  const auto snappyBytes = SnappyCompress(
+      snappy,
+      original.data(),
+      original.size(),
+      compressed.data(),
+      compressed.size());
+  std::fill(decoded.begin(), decoded.end(), '\0');
+  DecompressionContextSet snappyContexts;
+  snappyContexts.snappy = &snappyDecompression;
+  DecompressWithAlgorithm(
+      snappyContexts,
+      CompressionKind::kSnappyRaw,
+      compressed.data(),
+      snappyBytes,
+      decoded.data(),
+      decoded.size());
+  EXPECT_EQ(original, std::string(decoded.data(), decoded.size()));
+}
+
 TEST_F(CompressionManagerTest, AlgorithmsRejectInvalidCompressedPayloads) {
   const auto original = compressiblePayload(1024);
   std::vector<char> compressed(2048);
@@ -323,7 +397,12 @@ TEST_F(CompressionManagerTest, AlgorithmsRejectInvalidCompressedPayloads) {
       compressed.data(),
       compressed.size());
   EXPECT_THROW(
-      Lz4Decompress(compressed.data(), lz4Bytes, decoded.data(), decoded.size() + 1),
+      Lz4Decompress(
+          nullptr,
+          compressed.data(),
+          lz4Bytes,
+          decoded.data(),
+          decoded.size() + 1),
       std::exception);
 
   ZstdOptions zstd;
@@ -336,11 +415,16 @@ TEST_F(CompressionManagerTest, AlgorithmsRejectInvalidCompressedPayloads) {
       compressed.size());
   EXPECT_THROW(
       ZstdDecompress(
-          compressed.data(), zstdBytes, decoded.data(), decoded.size() + 1),
+          nullptr,
+          compressed.data(),
+          zstdBytes,
+          decoded.data(),
+          decoded.size() + 1),
       std::exception);
 
   EXPECT_THROW(
       SnappyDecompress(
+          nullptr,
           "not-a-snappy-record",
           std::strlen("not-a-snappy-record"),
           decoded.data(),
@@ -362,6 +446,7 @@ TEST_F(CompressionManagerTest, Lz4RejectsOversizedInputs) {
       std::exception);
   EXPECT_THROW(
       Lz4Decompress(
+          nullptr,
           oneByte.data(),
           static_cast<size_t>(std::numeric_limits<int>::max()) + 1,
           oneByte.data(),

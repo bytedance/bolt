@@ -55,6 +55,17 @@ ZSTD_CCtx* ensureZstdContext(ZstdCompressionContext* context) {
   return static_cast<ZSTD_CCtx*>(context->native);
 }
 
+ZSTD_DCtx* ensureZstdDecompressionContext(
+    ZstdDecompressionContext* context) {
+  if (context == nullptr) {
+    return ZSTD_createDCtx();
+  }
+  if (context->native == nullptr) {
+    context->native = ZSTD_createDCtx();
+  }
+  return static_cast<ZSTD_DCtx*>(context->native);
+}
+
 } // namespace
 
 size_t ZstdMaxCompressedLength(size_t rawSize) {
@@ -103,17 +114,32 @@ uint64_t ZstdCompress(
 }
 
 void ZstdDecompress(
+    ZstdDecompressionContext* context,
     const char* source,
     size_t sourceSize,
     char* target,
     size_t targetSize) {
-  const auto read = ZSTD_decompress(target, targetSize, source, sourceSize);
+  auto* zstdContext = ensureZstdDecompressionContext(context);
+  if (zstdContext == nullptr) {
+    BOLT_FAIL("BM ZSTD decompression context allocation failed");
+  }
+  const auto read =
+      ZSTD_decompressDCtx(zstdContext, target, targetSize, source, sourceSize);
+  if (context == nullptr) {
+    ZSTD_freeDCtx(zstdContext);
+  }
   if (ZSTD_isError(read) || read != targetSize) {
     BOLT_FAIL(
         "BM ZSTD decompression failed, decoded_size={}, expected={}, error={}",
         ZSTD_isError(read) ? 0 : read,
         targetSize,
         ZSTD_isError(read) ? ZSTD_getErrorName(read) : "");
+  }
+}
+
+ZstdDecompressionContext::~ZstdDecompressionContext() {
+  if (native != nullptr) {
+    ZSTD_freeDCtx(static_cast<ZSTD_DCtx*>(native));
   }
 }
 

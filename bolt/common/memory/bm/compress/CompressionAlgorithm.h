@@ -21,6 +21,7 @@ uint64_t CompressWithAlgorithm(
     size_t targetCapacity);
 
 void DecompressWithAlgorithm(
+    const DecompressionContextSet& contexts,
     CompressionKind kind,
     const char* source,
     size_t sourceSize,
@@ -36,6 +37,7 @@ uint64_t Lz4Compress(
     char* target,
     size_t targetCapacity);
 void Lz4Decompress(
+    Lz4DecompressionContext* context,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -50,6 +52,7 @@ uint64_t ZstdCompress(
     char* target,
     size_t targetCapacity);
 void ZstdDecompress(
+    ZstdDecompressionContext* context,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -62,6 +65,7 @@ uint64_t SnappyCompress(
     char* target,
     size_t targetCapacity);
 void SnappyDecompress(
+    SnappyDecompressionContext* context,
     const char* source,
     size_t sourceSize,
     char* target,

@@ -44,16 +44,16 @@ class SpillReadFuture {
   SpillReadFuture() = default;
   SpillReadFuture(
       std::future<IoResult> rawFuture,
+      std::shared_ptr<SpillCodec> codec,
       MemoryPool* pool,
-      compress::CompressionConfig compressionConfig,
       size_t expectedRawSize);
 
   SpillReadResult get();
 
  private:
   std::future<IoResult> rawFuture_;
+  std::shared_ptr<SpillCodec> codec_;
   MemoryPool* pool_{nullptr};
-  compress::CompressionConfig compressionConfig_;
   size_t expectedRawSize_{0};
 };
 
@@ -76,7 +76,7 @@ class SpillStore {
   OwnedFileExtent OwnExtent(FileExtent extent) const;
 
   SpillStoreConfig config_;
-  std::unique_ptr<SpillCodec> codec_;
+  std::shared_ptr<SpillCodec> codec_;
   std::unique_ptr<SpillIo> io_;
   std::shared_ptr<FileBlockAllocator> allocator_;
   MemoryPool* pool_{nullptr};

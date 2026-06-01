@@ -37,6 +37,9 @@ struct CompressionManager::Impl {
 
   CompressionContextPool<Lz4CompressionContext> lz4Contexts;
   CompressionContextPool<ZstdCompressionContext> zstdContexts;
+  CompressionContextPool<Lz4DecompressionContext> lz4DecodeContexts;
+  CompressionContextPool<ZstdDecompressionContext> zstdDecodeContexts;
+  CompressionContextPool<SnappyDecompressionContext> snappyDecodeContexts;
   CompressionConfig config;
 };
 
@@ -123,7 +126,22 @@ IoBuffer CompressionManager::DecodeSpillRecord(
 
   {
     MicrosecondTimer timer(decompressionTimeUs);
+    DecompressionContextSet contexts;
+    CompressionContextPool<Lz4DecompressionContext>::Ref lz4Context;
+    CompressionContextPool<ZstdDecompressionContext>::Ref zstdContext;
+    CompressionContextPool<SnappyDecompressionContext>::Ref snappyContext;
+    if (storedKind == CompressionKind::kLz4Block) {
+      lz4Context = impl_->lz4DecodeContexts.Acquire();
+      contexts.lz4 = lz4Context.get();
+    } else if (storedKind == CompressionKind::kZstdFrame) {
+      zstdContext = impl_->zstdDecodeContexts.Acquire();
+      contexts.zstd = zstdContext.get();
+    } else if (storedKind == CompressionKind::kSnappyRaw) {
+      snappyContext = impl_->snappyDecodeContexts.Acquire();
+      contexts.snappy = snappyContext.get();
+    }
     DecompressWithAlgorithm(
+        contexts,
         storedKind,
         storedPayload.data(),
         storedPayload.size(),
