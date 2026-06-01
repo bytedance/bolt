@@ -1,10 +1,12 @@
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
+#include "bolt/common/memory/bm/SpillCodec.h"
+#include "bolt/common/memory/bm/SpillIo.h"
 
 #include <glog/logging.h>
 
+#include <memory>
 #include <span>
 #include <utility>
 
@@ -43,8 +45,8 @@ SpillReadResult SpillReadFuture::get() {
   }
 
   try {
-    compress::CompressionManager compression(compressionConfig_);
-    auto decoded = compression.DecodeSpillRecord(
+    SpillCodec codec(compressionConfig_);
+    auto decoded = codec.Decode(
         std::span<const char>(raw.buffer.data(), raw.buffer.length()),
         expectedRawSize_,
         pool_,
@@ -61,12 +63,15 @@ SpillReadResult SpillReadFuture::get() {
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
     : config_(std::move(config)),
-      compression_(config_.compressionConfig),
+      codec_(std::make_unique<SpillCodec>(config_.compressionConfig)),
+      io_(std::make_unique<SpillIo>()),
       pool_(pool) {
   allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
   BOLT_CHECK_NOT_NULL(pool_);
 }
+
+SpillStore::~SpillStore() = default;
 
 FileAllocateResult SpillStore::AllocateExtent(size_t size) {
   return allocator_->Allocate(static_cast<int64_t>(size));
@@ -80,39 +85,6 @@ OwnedFileExtent SpillStore::OwnExtent(FileExtent extent) const {
   return OwnedFileExtent{extent, allocator_};
 }
 
-std::future<IoResult> SpillStore::SubmitReadRaw(
-    const OwnedFileExtent& extent,
-    size_t size,
-    IoPriority priority) {
-  IoRequest request;
-  request.opcode = IoOpcode::Read;
-  request.priority = priority;
-  request.fd = extent.extent().fd;
-  request.fileOffset = extent.extent().offset;
-  request.buffer = IoBuffer::allocateFromMalloc(size);
-
-  return diskIoScheduler().submit(std::move(request));
-}
-
-IoResult SpillStore::WriteRaw(
-    const FileExtent& extent,
-    IoBuffer& payload,
-    IoPriority priority) {
-  // This is intentionally outside BufferManager hot path. The current scheduler
-  // facade initializes lazily; do it before moving the only payload owner into
-  // IoRequest so initialization failure cannot destroy the resident payload.
-  EnsureSchedulerReadyForPayloadMove();
-
-  IoRequest request;
-  request.opcode = IoOpcode::Write;
-  request.priority = priority;
-  request.fd = extent.fd;
-  request.fileOffset = extent.offset;
-  request.buffer = std::move(payload);
-
-  return diskIoScheduler().submit(std::move(request)).get();
-}
-
 SpillWriteResult SpillStore::WriteBlock(
     IoBuffer& payload,
     size_t rawSize,
@@ -120,7 +92,7 @@ SpillWriteResult SpillStore::WriteBlock(
   BOLT_CHECK(payload.valid());
   BOLT_CHECK_EQ(payload.length(), rawSize);
 
-  auto record = compression_.BuildSpillRecord(
+  auto record = codec_->Build(
       std::span<const char>(payload.data(), payload.length()));
 
   auto allocation = AllocateExtent(record.physicalSize);
@@ -138,7 +110,7 @@ SpillWriteResult SpillStore::WriteBlock(
   write.compressionTimeUs = record.compressionTimeUs;
   write.compressed = record.compressed;
   try {
-    write.io = WriteRaw(allocation.extent, record.record, priority);
+    write.io = io_->WriteRaw(allocation.extent, record.record, priority);
   } catch (...) {
     auto freeResult = FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
@@ -172,18 +144,10 @@ SpillReadFuture SpillStore::SubmitReadBlock(
     size_t expectedRawSize,
     IoPriority priority) {
   return SpillReadFuture{
-      SubmitReadRaw(extent, extent.extent().requested_size, priority),
+      io_->SubmitReadRaw(extent, extent.extent().requested_size, priority),
       pool_,
       config_.compressionConfig,
       expectedRawSize};
-}
-
-void SpillStore::EnsureSchedulerReadyForPayloadMove() {
-  if (schedulerReadyForPayloadMove_) {
-    return;
-  }
-  (void)diskIoScheduler().stats();
-  schedulerReadyForPayloadMove_ = true;
 }
 
 } // namespace bytedance::bolt::memory::bm
