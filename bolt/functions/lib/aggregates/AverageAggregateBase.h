@@ -102,6 +102,54 @@ class AverageAggregateBase : public exec::Aggregate {
     return true;
   }
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.isRawInput) {
+      return context.inputType->isDecimal() ||
+          jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+          context.inputType->kind() == TypeKind::HUGEINT;
+    }
+    return context.inputType->isRow() && context.inputType->size() == 2 &&
+        context.inputType->childAt(1)->kind() == TypeKind::BIGINT &&
+        context.inputType->childAt(0)->kind() == TypeKind::DOUBLE;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    if (!context.isRawInput) {
+      return jit::HashAggrJitDescriptor{
+          jit::HashAggrJitKind::Avg,
+          jit::HashAggrJitValueKind::Double,
+          jit::HashAggrJitValueKind::Double,
+          false,
+          true,
+          false};
+    }
+
+    const bool decimal = context.inputType->isDecimal();
+    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Avg,
+        *inputKind,
+        decimal ? jit::HashAggrJitValueKind::Int128
+                : jit::HashAggrJitValueKind::Double,
+        false,
+        false,
+        decimal};
+  }
+#endif
+
   FLATTEN void toIntermediate(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,

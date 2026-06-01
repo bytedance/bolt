@@ -63,6 +63,49 @@ class SumAggregateBase
     return true;
   }
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.inputType->isRow()) {
+      return false;
+    }
+    return context.inputType->isDecimal() ||
+        jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+        context.inputType->kind() == TypeKind::HUGEINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    const bool decimal = context.isRawInput && context.inputType->isDecimal();
+    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+
+    auto accumulatorKind = decimal
+        ? jit::HashAggrJitValueKind::Int128
+        : ((*inputKind == jit::HashAggrJitValueKind::Float ||
+            *inputKind == jit::HashAggrJitValueKind::Double)
+              ? jit::HashAggrJitValueKind::Double
+              : jit::HashAggrJitValueKind::Int64);
+
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Sum,
+        *inputKind,
+        accumulatorKind,
+        false,
+        !context.isRawInput,
+        decimal};
+  }
+#endif
+
   void toIntermediate(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,

@@ -62,166 +62,50 @@ bool areAllLazyNotLoaded(const std::vector<VectorPtr>& vectors) {
   });
 }
 
-#ifdef ENABLE_BOLT_JIT
-std::string normalizedAggName(const std::string& name) {
-  static constexpr std::string_view kSparkPrefix{"spark_"};
-  if (name.size() > kSparkPrefix.size() &&
-      name.compare(0, kSparkPrefix.size(), kSparkPrefix) == 0) {
-    return name.substr(kSparkPrefix.size());
-  }
-  return name;
-}
-
-std::optional<jit::HashAggrJitKind> hashAggrJitKind(const std::string& name) {
-  const auto normalized = normalizedAggName(name);
-  if (normalized == "count") {
-    return jit::HashAggrJitKind::Count;
-  }
-  if (normalized == "sum") {
-    return jit::HashAggrJitKind::Sum;
-  }
-  if (normalized == "min") {
-    return jit::HashAggrJitKind::Min;
-  }
-  if (normalized == "max") {
-    return jit::HashAggrJitKind::Max;
-  }
-  if (normalized == "avg") {
-    return jit::HashAggrJitKind::Avg;
-  }
-  return std::nullopt;
-}
-
-std::optional<jit::HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind) {
-  switch (kind) {
-    case TypeKind::TINYINT:
-      return jit::HashAggrJitValueKind::Int8;
-    case TypeKind::SMALLINT:
-      return jit::HashAggrJitValueKind::Int16;
-    case TypeKind::INTEGER:
-      return jit::HashAggrJitValueKind::Int32;
-    case TypeKind::BIGINT:
-      return jit::HashAggrJitValueKind::Int64;
-    case TypeKind::HUGEINT:
-      return jit::HashAggrJitValueKind::Int128;
-    case TypeKind::REAL:
-      return jit::HashAggrJitValueKind::Float;
-    case TypeKind::DOUBLE:
-      return jit::HashAggrJitValueKind::Double;
-    default:
-      return std::nullopt;
-  }
-}
-
 std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
     int32_t aggregateIndex,
     const AggregateInfo& aggregate,
-    bool isRawInput) {
+    bool isRawInput,
+    bool isPartialOutput) {
   if (aggregate.distinct || aggregate.mask.has_value() ||
       !aggregate.sortingKeys.empty()) {
     return std::nullopt;
   }
 
-  auto kind = hashAggrJitKind(aggregate.name);
-  if (!kind.has_value()) {
+  const int32_t inputCount = aggregate.inputs.size();
+  if (!(isRawInput && inputCount == 0) && inputCount != 1) {
     return std::nullopt;
   }
 
-  const bool countStar = *kind == jit::HashAggrJitKind::Count &&
-      aggregate.inputs.empty() && isRawInput;
-  if (!countStar && aggregate.inputs.size() != 1) {
+  const auto inputType =
+      inputCount == 0 ? nullptr
+                      : (isRawInput ? aggregate.rawInputTypes[0]
+                                    : aggregate.intermediateType);
+  const jit::HashAggrJitPlanContext context{
+      .isRawInput = isRawInput,
+      .isPartialOutput = isPartialOutput,
+      .inputCount = inputCount,
+      .inputType = inputType};
+  if (!aggregate.function->supportsHashAggrJit(context)) {
     return std::nullopt;
   }
-
-  jit::HashAggrJitValueKind inputKind = jit::HashAggrJitValueKind::Int64;
-  bool decimal = false;
-  if (!countStar) {
-    const auto& inputType = isRawInput ? aggregate.rawInputTypes[0]
-                                       : aggregate.intermediateType;
-    decimal = isRawInput && inputType->isDecimal() &&
-        (*kind == jit::HashAggrJitKind::Sum || *kind == jit::HashAggrJitKind::Avg);
-    if (decimal) {
-      auto maybeInputKind = hashAggrJitValueKind(inputType->kind());
-      if (!maybeInputKind.has_value() ||
-          (*maybeInputKind != jit::HashAggrJitValueKind::Int64 &&
-           *maybeInputKind != jit::HashAggrJitValueKind::Int128)) {
-        return std::nullopt;
-      }
-      inputKind = *maybeInputKind;
-    } else if (!isRawInput && *kind == jit::HashAggrJitKind::Avg) {
-      if (!inputType->isRow() || inputType->size() != 2 ||
-          inputType->childAt(1)->kind() != TypeKind::BIGINT) {
-        return std::nullopt;
-      }
-      auto maybeInputKind = hashAggrJitValueKind(inputType->childAt(0)->kind());
-      if (!maybeInputKind.has_value() ||
-          *maybeInputKind != jit::HashAggrJitValueKind::Double) {
-        return std::nullopt;
-      }
-      inputKind = *maybeInputKind;
-    } else if (inputType->isDecimal() || inputType->isRow() ||
-        !jit::isHashAggrJitSupportedType(inputType->kind())) {
-      return std::nullopt;
-    } else {
-      auto maybeInputKind = hashAggrJitValueKind(inputType->kind());
-      if (!maybeInputKind.has_value()) {
-        return std::nullopt;
-      }
-      inputKind = *maybeInputKind;
-    }
+  auto descriptor = aggregate.function->createHashAggrJitDescriptor(context);
+  if (!descriptor.has_value()) {
+    return std::nullopt;
   }
-
-  jit::HashAggrJitValueKind accumulatorKind = inputKind;
-  switch (*kind) {
-    case jit::HashAggrJitKind::Count:
-      accumulatorKind = jit::HashAggrJitValueKind::Int64;
-      break;
-    case jit::HashAggrJitKind::Sum:
-      if (decimal) {
-        accumulatorKind = jit::HashAggrJitValueKind::Int128;
-        break;
-      }
-      accumulatorKind = (inputKind == jit::HashAggrJitValueKind::Float ||
-                         inputKind == jit::HashAggrJitValueKind::Double)
-          ? jit::HashAggrJitValueKind::Double
-          : jit::HashAggrJitValueKind::Int64;
-      break;
-    case jit::HashAggrJitKind::Avg:
-      if (decimal) {
-        accumulatorKind = jit::HashAggrJitValueKind::Int128;
-        break;
-      }
-      accumulatorKind = jit::HashAggrJitValueKind::Double;
-      break;
-    case jit::HashAggrJitKind::Min:
-    case jit::HashAggrJitKind::Max:
-      accumulatorKind = inputKind;
-      break;
-  }
-
-  return jit::HashAggrJitSlot{
-      aggregateIndex,
-      *kind,
-      inputKind,
-      accumulatorKind,
-      aggregate.function->accumulatorOffset(),
-      aggregate.function->accumulatorNullByte(),
-      aggregate.function->accumulatorNullMask(),
-      countStar,
-      !isRawInput,
-      decimal};
+  return aggregate.function->createHashAggrJitSlot(aggregateIndex, *descriptor);
 }
 
 std::string hashAggrJitSignature(const jit::HashAggrJitSlot& slot) {
-  return fmt::format(
-      "{}_{}_{}_{}_{}",
-      static_cast<int>(slot.kind),
-      jit::hashAggrJitValueKindName(slot.inputKind),
-      jit::hashAggrJitValueKindName(slot.accumulatorKind),
+  return jit::HashAggrJitDescriptor{
+      slot.kind,
+      slot.inputKind,
+      slot.accumulatorKind,
+      slot.countStar,
       slot.mergeInput,
-      slot.decimal);
+      slot.decimal}
+      .signature();
 }
-#endif
 
 } // namespace
 
@@ -959,7 +843,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   const auto minChunkWidth = std::max(minFuseWidth, compileMinCount);
   std::unordered_map<std::string, std::vector<jit::HashAggrJitSlot>> groups;
   for (auto i = 0; i < aggregates_.size(); ++i) {
-    auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_);
+    auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_, isPartial_);
     if (!slot.has_value()) {
       continue;
     }

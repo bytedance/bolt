@@ -39,6 +39,9 @@
 #include "bolt/exec/AggregateUtil.h"
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/functions/InlineFlatten.h"
+#ifdef ENABLE_BOLT_JIT
+#include "bolt/jit/aggregation/HashAggrJit.h"
+#endif
 #include "bolt/vector/BaseVector.h"
 namespace bytedance::bolt::core {
 class ExpressionEvaluator;
@@ -111,6 +114,18 @@ class Aggregate {
   virtual bool supportsToIntermediate() const {
     return false;
   }
+
+#ifdef ENABLE_BOLT_JIT
+  virtual bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const;
+
+  virtual std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const;
+
+  jit::HashAggrJitSlot createHashAggrJitSlot(
+      int32_t aggregateIndex,
+      const jit::HashAggrJitDescriptor& descriptor) const;
+#endif
 
   void setAllocator(HashStringAllocator* allocator) {
     setAllocatorInternal(allocator);

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,17 @@
 #include "bolt/type/Type.h"
 
 namespace bytedance::bolt::jit {
+
+struct HashAggrJitPlanContext {
+  bool isRawInput{false};
+  bool isPartialOutput{false};
+  int32_t inputCount{0};
+  TypePtr inputType;
+
+  bool isCountStar() const {
+    return isRawInput && inputCount == 0;
+  }
+};
 
 enum class HashAggrJitKind : uint8_t {
   Count,
@@ -28,6 +40,17 @@ enum class HashAggrJitValueKind : uint8_t {
   Int128,
   Float,
   Double,
+};
+
+struct HashAggrJitDescriptor {
+  HashAggrJitKind kind;
+  HashAggrJitValueKind inputKind;
+  HashAggrJitValueKind accumulatorKind;
+  bool countStar{false};
+  bool mergeInput{false};
+  bool decimal{false};
+
+  std::string signature() const;
 };
 
 struct HashAggrJitSlot {
@@ -106,6 +129,7 @@ class HashAggrJitChunk {
 };
 
 bool isHashAggrJitSupportedType(TypeKind kind);
+std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind);
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind);
 
 } // namespace bytedance::bolt::jit

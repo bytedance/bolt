@@ -327,4 +327,32 @@ void Aggregate::clearInternal() {
   numNulls_ = 0;
 }
 
+#ifdef ENABLE_BOLT_JIT
+bool Aggregate::supportsHashAggrJit(
+    const jit::HashAggrJitPlanContext& /*context*/) const {
+  return false;
+}
+
+std::optional<jit::HashAggrJitDescriptor> Aggregate::createHashAggrJitDescriptor(
+    const jit::HashAggrJitPlanContext& /*context*/) const {
+  return std::nullopt;
+}
+
+jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
+    int32_t aggregateIndex,
+    const jit::HashAggrJitDescriptor& descriptor) const {
+  return jit::HashAggrJitSlot{
+      aggregateIndex,
+      descriptor.kind,
+      descriptor.inputKind,
+      descriptor.accumulatorKind,
+      accumulatorOffset(),
+      accumulatorNullByte(),
+      accumulatorNullMask(),
+      descriptor.countStar,
+      descriptor.mergeInput,
+      descriptor.decimal};
+}
+#endif
+
 } // namespace bytedance::bolt::exec

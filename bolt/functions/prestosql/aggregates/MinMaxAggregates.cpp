@@ -52,6 +52,37 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
  public:
   explicit MinMaxAggregate(TypePtr resultType) : BaseAggregate(resultType) {}
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    return context.inputCount == 1 && context.inputType != nullptr &&
+        !context.inputType->isRow() && !context.inputType->isDecimal() &&
+        (jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+         context.inputType->kind() == TypeKind::HUGEINT);
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+    return jit::HashAggrJitDescriptor{
+        jitKind(),
+        *inputKind,
+        *inputKind,
+        false,
+        !context.isRawInput,
+        false};
+  }
+
+ protected:
+  virtual jit::HashAggrJitKind jitKind() const = 0;
+#endif
+
   int32_t accumulatorFixedWidthSize() const override {
     return sizeof(T);
   }
@@ -134,6 +165,15 @@ class MaxAggregate : public MinMaxAggregate<T> {
 
  public:
   explicit MaxAggregate(TypePtr resultType) : MinMaxAggregate<T>(resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+ protected:
+  jit::HashAggrJitKind jitKind() const override {
+    return jit::HashAggrJitKind::Max;
+  }
+
+ public:
+#endif
 
   void initializeNewGroups(
       char** groups,
@@ -224,6 +264,15 @@ class MinAggregate : public MinMaxAggregate<T> {
 
  public:
   explicit MinAggregate(TypePtr resultType) : MinMaxAggregate<T>(resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+ protected:
+  jit::HashAggrJitKind jitKind() const override {
+    return jit::HashAggrJitKind::Min;
+  }
+
+ public:
+#endif
 
   void initializeNewGroups(
       char** groups,

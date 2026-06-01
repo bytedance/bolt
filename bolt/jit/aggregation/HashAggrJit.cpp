@@ -9,6 +9,8 @@
 #include <cmath>
 #include <sstream>
 
+#include <fmt/format.h>
+
 #include "bolt/jit/ThrustJITv2.h"
 
 extern "C" {
@@ -742,6 +744,27 @@ std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
   return "unknown";
 }
 
+std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind) {
+  switch (kind) {
+    case TypeKind::TINYINT:
+      return HashAggrJitValueKind::Int8;
+    case TypeKind::SMALLINT:
+      return HashAggrJitValueKind::Int16;
+    case TypeKind::INTEGER:
+      return HashAggrJitValueKind::Int32;
+    case TypeKind::BIGINT:
+      return HashAggrJitValueKind::Int64;
+    case TypeKind::HUGEINT:
+      return HashAggrJitValueKind::Int128;
+    case TypeKind::REAL:
+      return HashAggrJitValueKind::Float;
+    case TypeKind::DOUBLE:
+      return HashAggrJitValueKind::Double;
+    default:
+      return std::nullopt;
+  }
+}
+
 bool isHashAggrJitSupportedType(TypeKind kind) {
   switch (kind) {
     case TypeKind::TINYINT:
@@ -754,6 +777,16 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
     default:
       return false;
   }
+}
+
+std::string HashAggrJitDescriptor::signature() const {
+  return fmt::format(
+      "{}_{}_{}_{}_{}",
+      static_cast<int>(kind),
+      hashAggrJitValueKindName(inputKind),
+      hashAggrJitValueKindName(accumulatorKind),
+      mergeInput,
+      decimal);
 }
 
 std::string HashAggrJitChunk::functionName() const {

@@ -53,6 +53,42 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     return true;
   }
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.isRawInput) {
+      return context.inputCount == 0 ||
+          (context.inputCount == 1 && context.inputType != nullptr &&
+           !context.inputType->isRow() && !context.inputType->isDecimal() &&
+           jit::isHashAggrJitSupportedType(context.inputType->kind()));
+    }
+    return context.inputCount == 1 && context.inputType != nullptr &&
+        context.inputType->kind() == TypeKind::BIGINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    auto inputKind = jit::HashAggrJitValueKind::Int64;
+    if (!context.isCountStar()) {
+      auto maybeInputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+      if (!maybeInputKind.has_value()) {
+        return std::nullopt;
+      }
+      inputKind = *maybeInputKind;
+    }
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Count,
+        inputKind,
+        jit::HashAggrJitValueKind::Int64,
+        context.isCountStar(),
+        !context.isRawInput,
+        false};
+  }
+#endif
+
   void toIntermediate(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
