@@ -1,21 +1,21 @@
-#include "bolt/common/memory/bm/file/OwnedFile.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFile.h"
 
 #include <filesystem>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
 
-OwnedFile::OwnedFile(std::string path, int fd)
+ManagedOpenFile::ManagedOpenFile(std::string path, int fd)
     : path_(std::move(path)), fd_(fd) {}
 
-OwnedFile::~OwnedFile() {
+ManagedOpenFile::~ManagedOpenFile() {
   Close();
 }
 
-OwnedFile::OwnedFile(OwnedFile&& other) noexcept
+ManagedOpenFile::ManagedOpenFile(ManagedOpenFile&& other) noexcept
     : path_(std::move(other.path_)), fd_(std::move(other.fd_)) {}
 
-OwnedFile& OwnedFile::operator=(OwnedFile&& other) noexcept {
+ManagedOpenFile& ManagedOpenFile::operator=(ManagedOpenFile&& other) noexcept {
   if (this == &other) {
     return *this;
   }
@@ -25,11 +25,11 @@ OwnedFile& OwnedFile::operator=(OwnedFile&& other) noexcept {
   return *this;
 }
 
-void OwnedFile::Close() {
+void ManagedOpenFile::Close() {
   fd_.reset();
 }
 
-void OwnedFile::CloseAndRemove() {
+void ManagedOpenFile::CloseAndRemove() {
   Close();
   if (!path_.empty()) {
     std::filesystem::remove(path_);

@@ -1,7 +1,7 @@
 #include "bolt/common/memory/bm/file/BucketBlockAllocator.h"
 
 #include "bolt/common/memory/bm/file/FileAllocatorPath.h"
-#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 
 #include <algorithm>
 #include <utility>
@@ -97,7 +97,7 @@ BucketBlockAllocator::BucketFile* BucketBlockAllocator::FindReusableFile() {
 FileAllocateResult BucketBlockAllocator::CreateFile() {
   const auto file_index = next_file_index_++;
   const auto path = MakeBucketFilePath(directory_, bucket_size_, file_index);
-  auto created = CreateExclusiveReadWriteOwnedFile(path);
+  auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     FileAllocateResult result;
     result.error = created.error;

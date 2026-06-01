@@ -1,7 +1,7 @@
 #include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
 
 #include "bolt/common/memory/bm/file/FileAllocatorPath.h"
-#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 
 #include <utility>
 
@@ -26,7 +26,7 @@ FileAllocation DedicatedFileAllocator::Allocate(
     uint64_t extent_id) {
   FileAllocation allocation;
   const auto path = MakeDedicatedFilePath(directory_, extent_id);
-  auto created = CreateExclusiveReadWriteOwnedFile(path);
+  auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     allocation.result.error = FileErrorCode::kIoError;
     allocation.result.native_error_code = created.native_error_code;
@@ -49,7 +49,7 @@ FileAllocation DedicatedFileAllocator::Allocate(
 }
 
 FileFreeResult DedicatedFileAllocator::Free(const ExtentRecord& record) {
-  OwnedFile file;
+  ManagedOpenFile file;
   const auto it = files_.find(record.extent.id);
   if (it == files_.end()) {
     FileFreeResult result;

@@ -6,7 +6,7 @@ add_executable(
   FileBlockAllocatorFactoryTest.cpp
   FileBlockAllocatorFreeTest.cpp
   FileBlockAllocatorImplTest.cpp
-  OwnedFileFactoryTest.cpp
+  ManagedOpenFileFactoryTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_file_test PRIVATE cxx_std_20)

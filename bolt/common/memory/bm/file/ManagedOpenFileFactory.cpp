@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/file/OwnedFileFactory.h"
+#include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
 
 #include <cerrno>
 
@@ -6,19 +6,19 @@
 
 namespace bytedance::bolt::memory::bm {
 
-OwnedFileCreateResult CreateExclusiveReadWriteOwnedFile(
+ManagedOpenFileCreateResult CreateExclusiveReadWriteManagedOpenFile(
     const std::string& path) {
   const int fd =
       ::open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
   if (fd < 0) {
-    OwnedFileCreateResult result;
+    ManagedOpenFileCreateResult result;
     result.error = FileErrorCode::kIoError;
     result.native_error_code = errno;
     return result;
   }
 
-  OwnedFileCreateResult result;
-  result.file = OwnedFile(path, fd);
+  ManagedOpenFileCreateResult result;
+  result.file = ManagedOpenFile(path, fd);
   return result;
 }
 
