@@ -5,10 +5,12 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <type_traits>
 
 #include <fmt/format.h>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 namespace bytedance::bolt::memory::bm {
@@ -17,6 +19,7 @@ namespace {
 class BufferManagerTest : public testing::Test {
  protected:
   void SetUp() override {
+    FLAGS_v = 1;
     root_ = manager_.addRootPool(
         fmt::format(
             "bm-root-{}",
@@ -207,6 +210,41 @@ TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
   }
 
   GTEST_SKIP() << "Disk IO scheduler is available; failure path not exercised";
+}
+
+TEST_F(BufferManagerTest, ReclaimAllocationFailureRollsBackAndKeepsBlockReclaimable) {
+  const auto directory =
+      test::UniqueTempDir("bolt-bm-buffer-manager-reclaim-alloc-failure");
+  std::filesystem::remove_all(directory);
+
+  BufferManagerConfig config;
+  config.poolName = "bm-reclaim-alloc-failure";
+  config.spillStoreConfig.fileAllocatorConfig =
+      test::ValidConfigWithDirectory(directory);
+  config.spillStoreConfig.fileAllocatorConfig.bucket_sizes = {4 * 1024};
+  config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes = 4 * 1024;
+  auto bm = BufferManager::Create(*root_, std::move(config));
+
+  const auto allocatorDirectory = test::OnlyAllocatorDirectory(directory);
+  ASSERT_FALSE(allocatorDirectory.empty());
+  std::filesystem::remove_all(allocatorDirectory);
+  {
+    std::ofstream file(allocatorDirectory);
+    file << "not a directory";
+  }
+
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
+    std::memset(handle.Ptr(), 17, block->size());
+  }
+
+  EXPECT_THROW((void)bm->Reclaim(4096), std::exception);
+  EXPECT_EQ(4096, bm->reclaimableBytes());
+  auto repin = bm->Pin(block);
+  EXPECT_EQ(17, repin.Ptr()[0]);
+  EXPECT_EQ(1, bm->stats().reclaimAttemptedBlocks);
 }
 
 TEST_F(BufferManagerTest, PrefetchIsHintAndPinHarvestsResult) {

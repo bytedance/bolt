@@ -1,7 +1,9 @@
+#include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
 #include <cstring>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
@@ -193,6 +195,177 @@ TEST_F(CompressionManagerTest, HeaderRejectsUnknownCompressionKind) {
 
   EXPECT_THROW(
       DecodeSpillRecordHeader(encoded.data(), encoded.size(), 4096),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, HeaderRejectsMalformedRecords) {
+  SpillRecordHeader header;
+  header.compressionKind = static_cast<uint32_t>(CompressionKind::kNone);
+  header.rawSize = 4096;
+  header.storedSize = 4096;
+
+  auto encoded = EncodeSpillRecordHeader(header);
+
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(encoded.data(), sizeof(SpillRecordHeader) - 1, 4096),
+      std::exception);
+
+  auto badMagic = encoded;
+  reinterpret_cast<SpillRecordHeader*>(badMagic.data())->magic = 1;
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(badMagic.data(), badMagic.size(), 4096),
+      std::exception);
+
+  auto badVersion = encoded;
+  reinterpret_cast<SpillRecordHeader*>(badVersion.data())->version = 99;
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(badVersion.data(), badVersion.size(), 4096),
+      std::exception);
+
+  auto smallHeader = encoded;
+  reinterpret_cast<SpillRecordHeader*>(smallHeader.data())->headerSize =
+      sizeof(SpillRecordHeader) - 1;
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(smallHeader.data(), smallHeader.size(), 4096),
+      std::exception);
+
+  auto wrongRawSize = encoded;
+  reinterpret_cast<SpillRecordHeader*>(wrongRawSize.data())->rawSize = 2048;
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(wrongRawSize.data(), wrongRawSize.size(), 4096),
+      std::exception);
+
+  auto payloadOverflow = encoded;
+  reinterpret_cast<SpillRecordHeader*>(payloadOverflow.data())->storedSize =
+      4096;
+  EXPECT_THROW(
+      DecodeSpillRecordHeader(
+          payloadOverflow.data(), sizeof(SpillRecordHeader), 4096),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
+  CompressionConfig config;
+  CompressionContextSet contexts;
+  const auto original = compressiblePayload(1024);
+  std::vector<char> compressed(4096);
+  std::vector<char> decoded(original.size());
+
+  EXPECT_THROW(
+      MaxCompressedLength(static_cast<CompressionKind>(99), original.size()),
+      std::exception);
+  EXPECT_THROW(
+      CompressWithAlgorithm(
+          contexts,
+          static_cast<CompressionKind>(99),
+          config,
+          original.data(),
+          original.size(),
+          compressed.data(),
+          compressed.size()),
+      std::exception);
+  EXPECT_THROW(
+      DecompressWithAlgorithm(
+          static_cast<CompressionKind>(99),
+          compressed.data(),
+          compressed.size(),
+          decoded.data(),
+          decoded.size()),
+      std::exception);
+
+  Lz4Options lz4;
+  lz4.strategy = static_cast<Lz4Strategy>(99);
+  EXPECT_THROW(
+      Lz4Compress(
+          nullptr,
+          lz4,
+          original.data(),
+          original.size(),
+          compressed.data(),
+          compressed.size()),
+      std::exception);
+
+  ZstdOptions zstd;
+  zstd.strategy = static_cast<ZstdStrategy>(99);
+  EXPECT_THROW(
+      ZstdCompress(
+          nullptr,
+          zstd,
+          original.data(),
+          original.size(),
+          compressed.data(),
+          compressed.size()),
+      std::exception);
+
+  SnappyOptions snappy;
+  snappy.strategy = static_cast<SnappyStrategy>(99);
+  EXPECT_THROW(
+      SnappyCompress(
+          snappy,
+          original.data(),
+          original.size(),
+          compressed.data(),
+          compressed.size()),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, AlgorithmsRejectInvalidCompressedPayloads) {
+  const auto original = compressiblePayload(1024);
+  std::vector<char> compressed(2048);
+  std::vector<char> decoded(original.size());
+
+  Lz4Options lz4;
+  auto lz4Bytes = Lz4Compress(
+      nullptr,
+      lz4,
+      original.data(),
+      original.size(),
+      compressed.data(),
+      compressed.size());
+  EXPECT_THROW(
+      Lz4Decompress(compressed.data(), lz4Bytes, decoded.data(), decoded.size() + 1),
+      std::exception);
+
+  ZstdOptions zstd;
+  auto zstdBytes = ZstdCompress(
+      nullptr,
+      zstd,
+      original.data(),
+      original.size(),
+      compressed.data(),
+      compressed.size());
+  EXPECT_THROW(
+      ZstdDecompress(
+          compressed.data(), zstdBytes, decoded.data(), decoded.size() + 1),
+      std::exception);
+
+  EXPECT_THROW(
+      SnappyDecompress(
+          "not-a-snappy-record",
+          std::strlen("not-a-snappy-record"),
+          decoded.data(),
+          decoded.size()),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, Lz4RejectsOversizedInputs) {
+  Lz4Options options;
+  std::vector<char> oneByte(1);
+  EXPECT_THROW(
+      Lz4Compress(
+          nullptr,
+          options,
+          oneByte.data(),
+          static_cast<size_t>(std::numeric_limits<int>::max()) + 1,
+          oneByte.data(),
+          oneByte.size()),
+      std::exception);
+  EXPECT_THROW(
+      Lz4Decompress(
+          oneByte.data(),
+          static_cast<size_t>(std::numeric_limits<int>::max()) + 1,
+          oneByte.data(),
+          oneByte.size()),
       std::exception);
 }
 
