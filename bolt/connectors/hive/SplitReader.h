@@ -34,6 +34,7 @@
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/HiveSplitReaderBase.h"
 #include "bolt/connectors/hive/PaimonMetadataColumn.h"
+#include "bolt/dwio/common/Mutation.h"
 #include "bolt/dwio/common/Options.h"
 
 DECLARE_string(testing_only_set_scan_exception_mesg_for_prepare);
@@ -125,6 +126,14 @@ class SplitReader : public HiveSplitReaderBase {
       const HiveConnectorSplitCacheLimit* hiveConnectorSplitCacheLimit);
 
   virtual uint64_t next(int64_t size, VectorPtr& output);
+
+  // Variant that forwards a caller-owned Mutation (e.g. a row-skip bitmap)
+  // directly to the underlying RowReader. Bypasses Paimon deletion-vector
+  // handling; do not mix with Paimon-configured readers.
+  uint64_t next(
+      int64_t size,
+      VectorPtr& output,
+      const dwio::common::Mutation* mutation);
 
   void resetFilterCaches();
 

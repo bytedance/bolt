@@ -122,6 +122,12 @@ std::unique_ptr<SplitReader> SplitReader::create(
     const std::shared_ptr<HiveConfig>& hiveConfig,
     const std::shared_ptr<io::IoStatistics>& ioStats,
     const bool isPartOfPaimonSplit) {
+
+  // LOG(ERROR) << "Hive split info: " << folly::toJson(hiveSplit->serialize());
+  // for (auto splitInfo : hiveSplit->customSplitInfo) {
+  //   LOG(ERROR) << splitInfo.first << "->" << splitInfo.second;
+  // }
+
   return std::make_unique<SplitReader>(
       hiveSplit,
       hiveTableHandle,
@@ -546,6 +552,13 @@ uint64_t SplitReader::next(int64_t size, VectorPtr& output) {
   }
 
   return rows;
+}
+
+uint64_t SplitReader::next(
+    int64_t size,
+    VectorPtr& output,
+    const dwio::common::Mutation* mutation) {
+  return baseRowReader_->next(size, output, mutation);
 }
 
 // Adds constant metadata columns into the result.

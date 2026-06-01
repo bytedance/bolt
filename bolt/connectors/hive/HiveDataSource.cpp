@@ -43,6 +43,9 @@
 #include "bolt/connectors/hive/PaimonMiscHelpers.h"
 #include "bolt/connectors/hive/PaimonSplitReader.h"
 #include "bolt/connectors/hive/SplitReader.h"
+#include "bolt/connectors/hive/bytelake/BytelakeConnectorUtil.h"
+#include "bolt/connectors/hive/bytelake/BytelakeScanSpecUtil.h"
+#include "bolt/connectors/hive/bytelake/BytelakeSplitReader.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/common/exception/Exception.h"
 #include "bolt/expression/FieldReference.h"
@@ -335,6 +338,10 @@ bool isPaimonConnectorSplit(const std::shared_ptr<ConnectorSplit>& split) {
   return std::dynamic_pointer_cast<PaimonConnectorSplit>(split) != nullptr;
 }
 
+bool isBytelakeConnectorSplit(const std::shared_ptr<ConnectorSplit>& split) {
+  return std::dynamic_pointer_cast<BytelakeConnectorSplit>(split) != nullptr;
+}
+
 std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
     const std::shared_ptr<HiveConnectorSplit>& split,
     const bool isPartOfPaimonSplit) {
@@ -404,13 +411,17 @@ void HiveDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
   if (isPaimonConnectorSplit(split)) {
     addSplit(std::dynamic_pointer_cast<PaimonConnectorSplit>(split));
     return;
+  } else if (isBytelakeConnectorSplit(split)) {
+    addSplit(std::dynamic_pointer_cast<BytelakeConnectorSplit>(split));
+    return;
   }
 
   addSplit(std::dynamic_pointer_cast<HiveConnectorSplit>(split));
 }
 
-bolt::RowTypePtr HiveDataSource::getRowTypeForFile(
-    std::shared_ptr<PaimonConnectorSplit> split) {
+template <typename SplitType>
+bolt::RowTypePtr HiveDataSource::getRowTypeForFileImpl(
+    std::shared_ptr<SplitType> split) {
   std::vector<int> columnCacheBlackList;
   auto hiveSplit = split->hiveSplits[0];
   auto fileHandle =
@@ -595,6 +606,91 @@ void HiveDataSource::addSplit(
   }
 
   splitReader_ = createConfiguredSplitReader(split, false);
+}
+
+void HiveDataSource::addSplit(
+    const std::shared_ptr<BytelakeConnectorSplit>& split) {
+  split_ = split;
+
+  if (splitReader_) {
+    splitReader_.reset();
+  }
+
+  const auto& splitInfo = split->hiveSplits[0]->customSplitInfo;
+
+  auto fileType = getRowTypeForFile(split);
+  const auto& fileColNames = fileType->names();
+  const auto& fileColTypes = fileType->children();
+
+  auto primaryKeyNames =
+      getBytelakePrimaryKeys(hiveTableHandle_->tableName(), splitInfo);
+  auto precombineKeyNames = getBytelakePrecombineFields(splitInfo);
+  auto deletedFieldName = getBytelakeDeletedField(splitInfo);
+
+  // Build a local extended (names, types) for keyOnlySchema construction
+  // only; we don't mutate scanSpec_ or readerOutputType_ so Phase 3 reads
+  // the user output schema directly.
+  auto tmpNames = readerOutputType_->names();
+  auto tmpTypes = std::vector<TypePtr>(
+      readerOutputType_->children().begin(),
+      readerOutputType_->children().end());
+
+  auto findOrAppendLocal = [&](const std::string& colName) -> int {
+    auto iter = std::find(tmpNames.begin(), tmpNames.end(), colName);
+    if (iter != tmpNames.end()) {
+      return static_cast<int>(iter - tmpNames.begin());
+    }
+    auto fileIdx =
+        std::find(fileColNames.begin(), fileColNames.end(), colName) -
+        fileColNames.begin();
+    tmpNames.push_back(colName);
+    tmpTypes.push_back(fileColTypes[fileIdx]);
+    return static_cast<int>(tmpNames.size() - 1);
+  };
+
+  std::vector<int> pkIndices;
+  pkIndices.reserve(primaryKeyNames.size());
+  for (const auto& n : primaryKeyNames) {
+    pkIndices.push_back(findOrAppendLocal(n));
+  }
+  std::vector<int> pcIndices;
+  pcIndices.reserve(precombineKeyNames.size());
+  for (const auto& n : precombineKeyNames) {
+    pcIndices.push_back(findOrAppendLocal(n));
+  }
+  const int isDeletedIndex = findOrAppendLocal(deletedFieldName);
+
+  auto tmpExtendedRowType = ROW(std::move(tmpNames), std::move(tmpTypes));
+  auto keyOnlySchema = makeBytelakeKeyOnlySchema(
+      tmpExtendedRowType, pkIndices, pcIndices, isDeletedIndex);
+
+  // Phase 3 readers: user schema and scanSpec, unmodified.
+  std::vector<std::unique_ptr<SplitReader>> hiveSplitReaders;
+  for (auto& hiveSplit : split->hiveSplits) {
+    hiveSplitReaders.push_back(
+        createConfiguredSplitReader(hiveSplit, false));
+  }
+
+  // Phase 1 readers: swap to keyOnly state for construction, then restore.
+  std::vector<std::unique_ptr<SplitReader>> keyOnlySplitReaders;
+  {
+    auto savedScanSpec = scanSpec_;
+    auto savedReaderOutputType = readerOutputType_;
+    scanSpec_ = keyOnlySchema.scanSpec;
+    readerOutputType_ = keyOnlySchema.rowType;
+    for (auto& hiveSplit : split->hiveSplits) {
+      keyOnlySplitReaders.push_back(
+          createConfiguredSplitReader(hiveSplit, false));
+    }
+    scanSpec_ = savedScanSpec;
+    readerOutputType_ = savedReaderOutputType;
+  }
+
+  splitReader_ = std::make_unique<BytelakeSplitReader>(
+      std::move(hiveSplitReaders),
+      ioStats_,
+      std::move(keyOnlySplitReaders),
+      std::move(keyOnlySchema));
 }
 
 vector_size_t getLength(std::shared_ptr<ConnectorSplit>& split) {

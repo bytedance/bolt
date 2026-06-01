@@ -38,6 +38,7 @@
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/SplitReader.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#include "bolt/connectors/hive/bytelake/BytelakeConnectorSplit.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/dwio/common/Reader.h"
@@ -151,8 +152,19 @@ class HiveDataSource : public DataSource {
   // filterEvalCtx_.selectedIndices and selectedBits are not updated.
   vector_size_t evaluateRemainingFilter(RowVectorPtr& rowVector);
 
+  template <typename SplitType>
+  bolt::RowTypePtr getRowTypeForFileImpl(
+      std::shared_ptr<SplitType> split);
+
   bolt::RowTypePtr getRowTypeForFile(
-      std::shared_ptr<PaimonConnectorSplit> split);
+      std::shared_ptr<PaimonConnectorSplit> split) {
+    return getRowTypeForFileImpl(split);
+  }
+
+  bolt::RowTypePtr getRowTypeForFile(
+    std::shared_ptr<BytelakeConnectorSplit> split) {
+    return getRowTypeForFileImpl(split);
+  }
 
   // Clear split_ after split has been fully processed.  Keep readers around
   // to hold adaptation.
@@ -168,6 +180,8 @@ class HiveDataSource : public DataSource {
   void addSplit(const std::shared_ptr<PaimonConnectorSplit>& split);
 
   void addSplit(const std::shared_ptr<HiveConnectorSplit>& split);
+
+  void addSplit(const std::shared_ptr<BytelakeConnectorSplit>& split);
 
   std::vector<std::string> getPaimonPrimaryKeys(
       const std::unordered_map<std::string, std::string>& tableParameters);

@@ -27,6 +27,9 @@
 
 add_executable(
   bolt_hive_connector_test
+  BytelakeHashDedupTest.cpp
+  BytelakeKeyPackerTest.cpp
+  BytelakeScanSpecUtilTest.cpp
   FileHandleTest.cpp
   HiveConfigTest.cpp
   HiveConnectorSerDeTest.cpp
