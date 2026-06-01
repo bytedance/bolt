@@ -6,13 +6,13 @@
 
 - 8 个 worker 并发工作，每个 worker 拥有独立的 `BufferManager`。
 - 所有 worker 共享一个 `ExecutionMemoryPool` 容量上限。
-- 数据生成阶段通过 `BufferManager::MaybeReserve` 判断当前 active run 是否应当结束。
+- 数据生成阶段通过 `BufferManager::MaybeReserve` 判断当前 active run 是否应当结束，并通过 `BatchAllocate` 固定批量申请 block。
 - 当内存压力出现时，依赖 `ExecutionMemoryPool` / `ListenableArbitrator` / `TaskMemoryManager` 路径自动触发 BM reclaimer spill。
 - verify 阶段通过 k-way merge 读回所有 sorted run，验证全局输出顺序。
 
 现有 verify 阶段的读回方式是每个 run cursor 消费完当前 block 后同步 `Pin` 下一个 block。这个路径能验证基础正确性，但没有利用 `BufferManager::BatchPin` 和 `BufferManager::Prefetch` 的能力，因此无法观察批量读回、异步预读对 merge 阶段的影响。
 
-本设计新增一个独立 benchmark，在保留现有 parallel sort 数据生成、排序、spill/reclaim 路径的基础上，只优化 verify/k-way merge 阶段。
+本设计新增一个独立 benchmark，在保留现有 parallel sort 排序、spill/reclaim 路径的基础上，同时覆盖生成阶段的 `BatchAllocate` 和 verify/k-way merge 阶段的 `BatchPin` / `Prefetch`。
 
 ## 目标
 
@@ -30,7 +30,8 @@ bolt/common/memory/bm/benchmark/BufferManagerParallelSortPrefetchBenchmark.cpp
 
 目标能力：
 
-- 基于现有 parallel sort benchmark，不改变 active run 形成、排序、spill 触发方式。
+- 基于现有 parallel sort benchmark，不改变排序、spill 触发方式。
+- 生成阶段使用固定 batch size 调用 `BatchAllocate`，每批申请 4 或 8 个 block 这类较小批次。
 - verify 阶段使用 `BatchPin` 批量 pin 每个 run 的首个 block。
 - verify 阶段使用 `Prefetch` 对每个 run 的后续 block 做异步预读。
 - 保持现有“消费式 move `BlockHandle`”语义，避免已经读回且消费完的 block 因仍被 `SortedRun` 持有而再次进入可 spill 集合。
@@ -42,6 +43,7 @@ bolt/common/memory/bm/benchmark/BufferManagerParallelSortPrefetchBenchmark.cpp
 - 不新增显式主动 spill 逻辑。
 - 不绕过 `ExecutionMemoryPool` / `ListenableArbitrator` 的自动仲裁路径。
 - 不在 verify 阶段同时 pin 每个 run 的多个 block。
+- 不实现自适应 batch size 降级；固定 batch 更利于解释 benchmark 结果。
 - 不把当前 benchmark 重构成公共库。第一版允许复制现有 benchmark 的主体逻辑，以降低对现有 benchmark 的影响。
 
 ## Benchmark 参数
@@ -62,11 +64,13 @@ bolt/common/memory/bm/benchmark/BufferManagerParallelSortPrefetchBenchmark.cpp
 新增参数：
 
 ```text
+--bm_parallel_sort_prefetch_allocate_batch_blocks
 --bm_parallel_sort_prefetch_distance
 ```
 
 含义：
 
+- `allocate_batch_blocks`：生成阶段每次 `BatchAllocate` 申请的 block 数，默认值建议为 `8`，必须大于 0。
 - 每个 run cursor 最多向前提交多少个 block 的 `Prefetch`。
 - 默认值建议为 `4`。
 - 设置为 `0` 时关闭 Prefetch，但仍保留首批 `BatchPin`，方便做局部对比。
@@ -87,9 +91,12 @@ bolt/common/memory/bm/benchmark/BufferManagerParallelSortPrefetchBenchmark.cpp
 1. 每个 worker 创建自己的 `SparkListenableArbitratorContext`、`TaskMemoryManager`、root memory pool 和 `BufferManager`。
 2. 所有 worker 共享同一个 `ExecutionMemoryPool` 容量限制。
 3. worker 从逻辑数据 generator 中持续拉取 uint64 数据，不一次性生成完整 10 GiB 数据。
-4. 每次准备分配新 block 前调用 `manager->MaybeReserve(blockBytes)`。
-5. 如果 `MaybeReserve` 返回 false 且 active run 非空，则排序当前 active run，然后释放其 `BufferHandle`，让这些 block 变成可被 BM reclaimer spill 的 resident unpinned block。
-6. 后续内存压力由 `ExecutionMemoryPool` 仲裁路径触发 reclaim，不在 benchmark 里手动调用 `BufferManager::Reclaim`。
+4. 每次准备分配新 batch 前，按剩余数据量将 batch block 数截断到 `allocate_batch_blocks` 以内。
+5. 调用 `manager->MaybeReserve(batchBlocks * blockBytes)`。
+6. 如果 `MaybeReserve` 返回 false 且 active run 非空，则排序当前 active run，然后释放其 `BufferHandle`，让这些 block 变成可被 BM reclaimer spill 的 resident unpinned block。
+7. 如果 active run 为空，即使 `MaybeReserve` 失败也继续调用 `BatchAllocate`，保持 benchmark 前进语义；真正无法分配时由现有 MemoryPool 路径报错。
+8. `BatchAllocate(batchBlocks, blockBytes, tag)` 返回的每个 `BufferHandle` 都通过 `handle.block()` 保存到 run metadata 中，再将 handle 保存到 active run pins。
+9. 后续内存压力由 `ExecutionMemoryPool` 仲裁路径触发 reclaim，不在 benchmark 里手动调用 `BufferManager::Reclaim`。
 
 ### 2. verify/k-way merge
 
@@ -175,6 +182,7 @@ auto blockHandle = std::move(run.blocks[index].block);
 内存控制仍然依赖：
 
 - active run 阶段的 `MaybeReserve`。
+- active run 阶段固定 batch size 的 `BatchAllocate`。
 - `ExecutionMemoryPool` cap。
 - `ListenableArbitrator` 在内存压力下触发 `TaskMemoryManager` spill。
 - `BufferManagerReclaimer` 将 unpinned resident block 下刷。
@@ -191,6 +199,10 @@ verify 阶段的额外内存来源：
 benchmark 输出应包含现有 parallel sort benchmark 的统计，并额外突出以下字段：
 
 - `prefetch_distance`
+- `allocate_batch_blocks`
+- `batch_allocate_calls`
+- `batch_allocate_requested_blocks`
+- `batch_allocate_returned_blocks`
 - `batchPinCount`
 - `prefetchCount`
 - `pinCount`
@@ -213,6 +225,7 @@ benchmark 输出应包含现有 parallel sort benchmark 的统计，并额外突
 这些指标用于回答：
 
 - Prefetch 是否确实被提交。
+- BatchAllocate 是否按固定 batch 生效，调用次数是否明显少于 block 数。
 - BatchPin 是否确实被调用。
 - verify 阶段读 IO 是否从同步 `Pin` 转向 prefetch 命中。
 - 自动 spill 是否仍然来自 ExecutionMemoryPool 仲裁路径。
@@ -265,6 +278,7 @@ PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH make benchmarks-buil
   --bm_parallel_sort_prefetch_threads=2 \
   --bm_parallel_sort_prefetch_memory_gb=2 \
   --bm_parallel_sort_prefetch_data_gb_per_thread=1 \
+  --bm_parallel_sort_prefetch_allocate_batch_blocks=8 \
   --bm_parallel_sort_prefetch_distance=4 \
   --logtostderr=1
 ```
@@ -282,6 +296,8 @@ PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH make benchmarks-buil
 对比重点：
 
 - 两者都应 `status value=ok`。
+- 新 benchmark 的 `batch_allocate_returned_blocks` 应接近总 block 数。
+- 新 benchmark 的 `batch_allocate_calls` 应小于总 block 数，除非 `allocate_batch_blocks=1`。
 - 新 benchmark 的 `batchPinCount` 应大于 0。
 - 新 benchmark 的 `prefetchCount` 在 prefetch distance 大于 0 时应大于 0。
 - 新 benchmark 不应出现 `prefetchSubmitFailures` 或 `prefetchIoFailures` 的持续增长。
@@ -290,6 +306,7 @@ PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH make benchmarks-buil
 ## 已知取舍
 
 - 第一版复制现有 benchmark 主体逻辑，避免为了复用而先做大规模 benchmark 框架重构。
+- 生成阶段使用固定 batch size，不实现自适应降级；默认 8 个 large block 不算大，结果更直接。
 - `BatchPin` 主要用于首批 block。k-way merge 后续每次通常只有一个 cursor 前进，强行攒批会让控制流复杂，并可能延迟 heap merge。
 - `Prefetch` 是主要优化点，因为每个 run 内部访问是顺序的，适合提前提交异步读。
 - 第一版不实现 prefetch bytes budget，只提供 `prefetchDistance` 控制提交深度。
