@@ -15,7 +15,7 @@ namespace bytedance::bolt::memory::bm {
 class BufferManagerAccounting;
 struct BlockMemory;
 
-class SpillWriteCoordinator {
+class ReclaimWriteWindow {
  public:
   using SubmitWrite =
       std::function<SpillWriteFuture(IoBuffer&, size_t, IoPriority)>;
@@ -30,7 +30,7 @@ class SpillWriteCoordinator {
     }
   };
 
-  SpillWriteCoordinator(
+  ReclaimWriteWindow(
       size_t maxInflight,
       IoPriority priority,
       SubmitWrite submitWrite,

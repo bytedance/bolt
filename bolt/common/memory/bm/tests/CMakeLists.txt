@@ -7,7 +7,7 @@ add_executable(
   BufferManagerInternalsTest.cpp
   BufferManagerPrivateStateTest.cpp
   ScopedFdTest.cpp
-  SpillWriteCoordinatorTest.cpp
+  ReclaimWriteWindowTest.cpp
 )
 
 target_compile_features(bolt_memory_bm_test PRIVATE cxx_std_20)
