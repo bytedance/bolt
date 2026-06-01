@@ -27,8 +27,7 @@ size_t Lz4MaxCompressedLength(size_t rawSize) {
 
 uint64_t Lz4Compress(
     CompressionAlgorithmContext* context,
-    CompressionKind kind,
-    int compressionLevel,
+    const Lz4Options& options,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -39,24 +38,23 @@ uint64_t Lz4Compress(
   }
 
   int written = 0;
-  switch (kind) {
-    case CompressionKind::kLz4:
-    case CompressionKind::kLz4Default:
+  switch (options.strategy) {
+    case Lz4Strategy::kDefault:
       written = LZ4_compress_default(
           source,
           target,
           static_cast<int>(sourceSize),
           static_cast<int>(targetCapacity));
       break;
-    case CompressionKind::kLz4Fast:
+    case Lz4Strategy::kFast:
       written = LZ4_compress_fast(
           source,
           target,
           static_cast<int>(sourceSize),
           static_cast<int>(targetCapacity),
-          compressionLevel > 0 ? compressionLevel : 1);
+          options.acceleration > 0 ? options.acceleration : 1);
       break;
-    case CompressionKind::kLz4Context: {
+    case Lz4Strategy::kPooledContext: {
       auto* lz4Context = ensureLz4Context(context);
       if (lz4Context == nullptr) {
         BOLT_FAIL("BM LZ4 context allocation failed");
@@ -67,14 +65,16 @@ uint64_t Lz4Compress(
           target,
           static_cast<int>(sourceSize),
           static_cast<int>(targetCapacity),
-          compressionLevel > 0 ? compressionLevel : 1);
+          options.acceleration > 0 ? options.acceleration : 1);
       if (context == nullptr) {
         LZ4_freeStream(lz4Context);
       }
       break;
     }
     default:
-      BOLT_FAIL("BM unsupported LZ4 compression kind={}", static_cast<int>(kind));
+      BOLT_FAIL(
+          "BM unsupported LZ4 strategy={}",
+          static_cast<int>(options.strategy));
   }
   if (written <= 0) {
     BOLT_FAIL("BM LZ4 compression failed, source_size={}", sourceSize);

@@ -21,6 +21,7 @@ gtest_add_tests(bolt_memory_bm_compress_test "" AUTO)
 target_sources(
   bolt_memory_bm_compress_test
   PRIVATE $<TARGET_OBJECTS:bolt_exception>
+          $<TARGET_OBJECTS:bolt_time>
           $<TARGET_OBJECTS:bolt_flag_definitions>
           $<TARGET_OBJECTS:bolt_process>
 )

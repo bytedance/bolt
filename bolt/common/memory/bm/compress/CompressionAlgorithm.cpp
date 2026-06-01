@@ -12,32 +12,19 @@ void DestroyCompressionAlgorithmContext(CompressionAlgorithmContext& context) {
 }
 
 bool SupportedCompressionKind(CompressionKind kind) {
-  return kind == CompressionKind::kNone || kind == CompressionKind::kLz4 ||
-      kind == CompressionKind::kLz4Default ||
-      kind == CompressionKind::kLz4Fast ||
-      kind == CompressionKind::kLz4Context ||
-      kind == CompressionKind::kZstd ||
-      kind == CompressionKind::kZstdOneShot ||
-      kind == CompressionKind::kZstdContext ||
-      kind == CompressionKind::kSnappy ||
-      kind == CompressionKind::kSnappyRaw ||
-      kind == CompressionKind::kSnappyLevel;
+  return kind == CompressionKind::kNone ||
+      kind == CompressionKind::kLz4Block ||
+      kind == CompressionKind::kZstdFrame ||
+      kind == CompressionKind::kSnappyRaw;
 }
 
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize) {
   switch (kind) {
-    case CompressionKind::kLz4:
-    case CompressionKind::kLz4Default:
-    case CompressionKind::kLz4Fast:
-    case CompressionKind::kLz4Context:
+    case CompressionKind::kLz4Block:
       return Lz4MaxCompressedLength(rawSize);
-    case CompressionKind::kZstd:
-    case CompressionKind::kZstdOneShot:
-    case CompressionKind::kZstdContext:
+    case CompressionKind::kZstdFrame:
       return ZstdMaxCompressedLength(rawSize);
-    case CompressionKind::kSnappy:
     case CompressionKind::kSnappyRaw:
-    case CompressionKind::kSnappyLevel:
       return SnappyMaxCompressedLength(rawSize);
     default:
       BOLT_FAIL("BM unsupported compression kind={}", static_cast<int>(kind));
@@ -47,45 +34,21 @@ size_t MaxCompressedLength(CompressionKind kind, size_t rawSize) {
 uint64_t CompressWithAlgorithm(
     CompressionAlgorithmContext* context,
     CompressionKind kind,
-    int compressionLevel,
+    const CompressionConfig& config,
     const char* source,
     size_t sourceSize,
     char* target,
     size_t targetCapacity) {
   switch (kind) {
-    case CompressionKind::kLz4:
-    case CompressionKind::kLz4Default:
-    case CompressionKind::kLz4Fast:
-    case CompressionKind::kLz4Context:
+    case CompressionKind::kLz4Block:
       return Lz4Compress(
-          context,
-          kind,
-          compressionLevel,
-          source,
-          sourceSize,
-          target,
-          targetCapacity);
-    case CompressionKind::kZstd:
-    case CompressionKind::kZstdOneShot:
-    case CompressionKind::kZstdContext:
+          context, config.lz4, source, sourceSize, target, targetCapacity);
+    case CompressionKind::kZstdFrame:
       return ZstdCompress(
-          context,
-          kind,
-          compressionLevel,
-          source,
-          sourceSize,
-          target,
-          targetCapacity);
-    case CompressionKind::kSnappy:
+          context, config.zstd, source, sourceSize, target, targetCapacity);
     case CompressionKind::kSnappyRaw:
-    case CompressionKind::kSnappyLevel:
       return SnappyCompress(
-          kind,
-          compressionLevel,
-          source,
-          sourceSize,
-          target,
-          targetCapacity);
+          config.snappy, source, sourceSize, target, targetCapacity);
     default:
       BOLT_FAIL("BM unsupported compression kind={}", static_cast<int>(kind));
   }
@@ -98,20 +61,13 @@ void DecompressWithAlgorithm(
     char* target,
     size_t targetSize) {
   switch (kind) {
-    case CompressionKind::kLz4:
-    case CompressionKind::kLz4Default:
-    case CompressionKind::kLz4Fast:
-    case CompressionKind::kLz4Context:
+    case CompressionKind::kLz4Block:
       Lz4Decompress(source, sourceSize, target, targetSize);
       return;
-    case CompressionKind::kZstd:
-    case CompressionKind::kZstdOneShot:
-    case CompressionKind::kZstdContext:
+    case CompressionKind::kZstdFrame:
       ZstdDecompress(source, sourceSize, target, targetSize);
       return;
-    case CompressionKind::kSnappy:
     case CompressionKind::kSnappyRaw:
-    case CompressionKind::kSnappyLevel:
       SnappyDecompress(source, sourceSize, target, targetSize);
       return;
     default:

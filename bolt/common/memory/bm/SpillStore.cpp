@@ -1,12 +1,11 @@
 #include "bolt/common/memory/bm/SpillStore.h"
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 #include "bolt/common/memory/bm/io/DiskIoScheduler.h"
 
 #include <glog/logging.h>
 
-#include <cstring>
+#include <span>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
@@ -25,9 +24,11 @@ IoResult MakeInvalidRecordResult(IoBuffer buffer) {
 SpillReadFuture::SpillReadFuture(
     std::future<IoResult> rawFuture,
     MemoryPool* pool,
+    compress::CompressionConfig compressionConfig,
     size_t expectedRawSize)
     : rawFuture_(std::move(rawFuture)),
       pool_(pool),
+      compressionConfig_(std::move(compressionConfig)),
       expectedRawSize_(expectedRawSize) {
   BOLT_CHECK_NOT_NULL(pool_);
 }
@@ -42,22 +43,14 @@ SpillReadResult SpillReadFuture::get() {
   }
 
   try {
-    const auto header = compress::DecodeSpillRecordHeader(
-        raw.buffer.data(), raw.buffer.length(), expectedRawSize_);
-    result.rawBytes = header.rawSize;
-    auto storedPayload = IoBuffer::allocateFromPool(pool_, header.storedSize);
-    std::memcpy(
-        storedPayload.data(),
-        raw.buffer.data() + header.headerSize,
-        header.storedSize);
-    auto decoded = compress::Decompress(
-        std::move(storedPayload),
-        header.rawSize,
-        header.storedSize,
-        static_cast<compress::CompressionKind>(header.compressionKind),
+    compress::CompressionManager compression(compressionConfig_);
+    auto decoded = compression.DecodeSpillRecord(
+        std::span<const char>(raw.buffer.data(), raw.buffer.length()),
+        expectedRawSize_,
         pool_,
         &result.decompressionTimeUs);
-    result.io.bytes = header.rawSize;
+    result.rawBytes = decoded.length();
+    result.io.bytes = decoded.length();
     result.io.buffer = std::move(decoded);
     return result;
   } catch (...) {
@@ -67,7 +60,9 @@ SpillReadResult SpillReadFuture::get() {
 }
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
-    : config_(std::move(config)), pool_(pool) {
+    : config_(std::move(config)),
+      compression_(config_.compressionConfig),
+      pool_(pool) {
   allocator_ = CreateFileBlockAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
   BOLT_CHECK_NOT_NULL(pool_);
@@ -94,7 +89,7 @@ std::future<IoResult> SpillStore::SubmitReadRaw(
   request.priority = priority;
   request.fd = extent.extent().fd;
   request.fileOffset = extent.extent().offset;
-  request.buffer = IoBuffer::allocateFromPool(pool_, size);
+  request.buffer = IoBuffer::allocateFromMalloc(size);
 
   return diskIoScheduler().submit(std::move(request));
 }
@@ -125,40 +120,25 @@ SpillWriteResult SpillStore::WriteBlock(
   BOLT_CHECK(payload.valid());
   BOLT_CHECK_EQ(payload.length(), rawSize);
 
-  auto payloadCopy = IoBuffer::allocateFromPool(pool_, rawSize);
-  std::memcpy(payloadCopy.data(), payload.data(), rawSize);
-  auto compressed = compressionCodec_.TryCompress(
-      std::move(payloadCopy), config_.compressionConfig, pool_);
+  auto record = compression_.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()));
 
-  compress::SpillRecordHeader header;
-  header.compressionKind = static_cast<uint32_t>(compressed.storedKind);
-  header.rawSize = compressed.rawSize;
-  header.storedSize = compressed.storedSize;
-  const auto encodedHeader = compress::EncodeSpillRecordHeader(header);
-  const auto recordSize = encodedHeader.size() + compressed.storedSize;
-  auto record = IoBuffer::allocateFromPool(pool_, recordSize);
-  std::memcpy(record.data(), encodedHeader.data(), encodedHeader.size());
-  std::memcpy(
-      record.data() + encodedHeader.size(),
-      compressed.buffer.data(),
-      compressed.storedSize);
-
-  auto allocation = AllocateExtent(recordSize);
+  auto allocation = AllocateExtent(record.physicalSize);
   if (!allocation.ok()) {
     BOLT_FAIL(
         "BM file allocation failed for spill record, file_error={}, native_error={}, bytes={}",
         static_cast<int>(allocation.error),
         allocation.native_error_code,
-        recordSize);
+        record.physicalSize);
   }
 
   SpillWriteResult write;
   write.rawBytes = rawSize;
-  write.physicalBytes = recordSize;
-  write.compressionTimeUs = compressed.compressionTimeUs;
-  write.compressed = compressed.compressed;
+  write.physicalBytes = record.physicalSize;
+  write.compressionTimeUs = record.compressionTimeUs;
+  write.compressed = record.compressed;
   try {
-    write.io = WriteRaw(allocation.extent, record, priority);
+    write.io = WriteRaw(allocation.extent, record.record, priority);
   } catch (...) {
     auto freeResult = FreeExtent(allocation.extent);
     if (!freeResult.ok()) {
@@ -194,6 +174,7 @@ SpillReadFuture SpillStore::SubmitReadBlock(
   return SpillReadFuture{
       SubmitReadRaw(extent, extent.extent().requested_size, priority),
       pool_,
+      config_.compressionConfig,
       expectedRawSize};
 }
 

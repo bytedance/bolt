@@ -46,6 +46,7 @@ class SpillReadFuture {
   SpillReadFuture(
       std::future<IoResult> rawFuture,
       MemoryPool* pool,
+      compress::CompressionConfig compressionConfig,
       size_t expectedRawSize);
 
   SpillReadResult get();
@@ -53,6 +54,7 @@ class SpillReadFuture {
  private:
   std::future<IoResult> rawFuture_;
   MemoryPool* pool_{nullptr};
+  compress::CompressionConfig compressionConfig_;
   size_t expectedRawSize_{0};
 };
 
@@ -78,7 +80,7 @@ class SpillStore {
   void EnsureSchedulerReadyForPayloadMove();
 
   SpillStoreConfig config_;
-  compress::CompressionCodec compressionCodec_;
+  compress::CompressionManager compression_;
   std::shared_ptr<FileBlockAllocator> allocator_;
   MemoryPool* pool_{nullptr};
   bool schedulerReadyForPayloadMove_{false};

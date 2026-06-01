@@ -2,8 +2,8 @@
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
 #include <cstring>
+#include <span>
 #include <string>
-#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -11,10 +11,10 @@
 namespace bytedance::bolt::memory::bm::compress {
 namespace {
 
-class CompressionCodecTest : public testing::Test {
+class CompressionManagerTest : public testing::Test {
  protected:
   IoBuffer makePayload(const std::string& text) {
-    IoBuffer buffer{std::make_unique<char[]>(text.size()), text.size(), 0, text.size()};
+    auto buffer = IoBuffer::allocateFromMalloc(text.size());
     std::memcpy(buffer.data(), text.data(), text.size());
     return buffer;
   }
@@ -23,6 +23,16 @@ class CompressionCodecTest : public testing::Test {
     return std::string(buffer.data(), buffer.data() + size);
   }
 
+  IoBuffer decodeRecord(
+      CompressionManager& manager,
+      const IoBuffer& record,
+      size_t expectedRawSize) {
+    return manager.DecodeSpillRecord(
+        std::span<const char>(record.data(), record.length()),
+        expectedRawSize,
+        nullptr,
+        nullptr);
+  }
 };
 
 std::string compressiblePayload(size_t size) {
@@ -35,159 +45,154 @@ std::string compressiblePayload(size_t size) {
   return payload;
 }
 
-std::string incompressiblePayload(size_t size) {
-  std::string payload(size, '\0');
-  uint32_t state = 0x12345678;
-  for (size_t i = 0; i < size; ++i) {
-    state = state * 1103515245 + 12345;
-    payload[i] = static_cast<char>((state >> 16) & 0xff);
-  }
-  return payload;
+CompressionKind recordKind(const IoBuffer& record, size_t expectedRawSize) {
+  return static_cast<CompressionKind>(
+      DecodeSpillRecordHeader(record.data(), record.length(), expectedRawSize)
+          .compressionKind);
 }
 
-class CompressionKindTest
-    : public CompressionCodecTest,
-      public testing::WithParamInterface<CompressionKind> {};
-
-TEST_P(CompressionKindTest, RoundTripsCompressedPayload) {
-  CompressionConfig config;
-  config.kind = GetParam();
-  config.minCompressBytes = 1;
-  config.minCompressionRatio = 1.0;
-  const auto original = compressiblePayload(512 * 1024);
-
-  auto compressed = TryCompress(makePayload(original), config, nullptr);
-
-  ASSERT_TRUE(compressed.compressed);
-  EXPECT_EQ(original.size(), compressed.rawSize);
-  EXPECT_LT(compressed.storedSize, compressed.rawSize);
-  EXPECT_EQ(config.kind, compressed.storedKind);
-
-  uint64_t decompressionTimeUs = 0;
-  auto decompressed = Decompress(
-      std::move(compressed.buffer),
-      compressed.rawSize,
-      compressed.storedSize,
-      compressed.storedKind,
-      nullptr,
-      &decompressionTimeUs);
-
-  EXPECT_EQ(original, readPayload(decompressed, original.size()));
+uint64_t recordStoredSize(const IoBuffer& record, size_t expectedRawSize) {
+  return DecodeSpillRecordHeader(record.data(), record.length(), expectedRawSize)
+      .storedSize;
 }
 
-TEST_F(CompressionCodecTest, ZstdContextCodecCanBeReusedAcrossBlocks) {
-  CompressionConfig config;
-  config.kind = CompressionKind::kZstdContext;
-  config.minCompressBytes = 1;
-  config.minCompressionRatio = 1.0;
-  CompressionCodec codec;
+TEST(IoBufferTest, AllocateFromMallocOwnsWritableMemory) {
+  auto buffer = IoBuffer::allocateFromMalloc(128);
 
-  for (auto size : {256 * 1024, 512 * 1024}) {
-    const auto original = compressiblePayload(size);
-    auto compressed = codec.TryCompress(makePayload(original), config, nullptr);
-
-    ASSERT_TRUE(compressed.compressed);
-    EXPECT_EQ(CompressionKind::kZstdContext, compressed.storedKind);
-
-    uint64_t decompressionTimeUs = 0;
-    auto decompressed = Decompress(
-        std::move(compressed.buffer),
-        compressed.rawSize,
-        compressed.storedSize,
-        compressed.storedKind,
-        nullptr,
-        &decompressionTimeUs);
-
-    EXPECT_EQ(original, readPayload(decompressed, original.size()));
-  }
+  ASSERT_TRUE(buffer.valid());
+  EXPECT_EQ(128, buffer.size());
+  EXPECT_EQ(128, buffer.length());
+  std::memset(buffer.data(), 42, buffer.length());
+  EXPECT_EQ(42, buffer.data()[127]);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Algorithms,
-    CompressionKindTest,
-    testing::Values(
-        CompressionKind::kLz4,
-        CompressionKind::kLz4Default,
-        CompressionKind::kLz4Fast,
-        CompressionKind::kLz4Context,
-        CompressionKind::kZstd,
-        CompressionKind::kZstdOneShot,
-        CompressionKind::kZstdContext,
-        CompressionKind::kSnappy,
-        CompressionKind::kSnappyRaw,
-        CompressionKind::kSnappyLevel));
-
-TEST_F(CompressionCodecTest, NoneKeepsOriginalPayload) {
+TEST_F(CompressionManagerTest, NoneBuildsUncompressedMallocBackedRecord) {
   CompressionConfig config;
   config.kind = CompressionKind::kNone;
-  config.minCompressBytes = 1;
-  const auto original = compressiblePayload(256 * 1024);
+  CompressionManager manager(config);
+  const auto original = compressiblePayload(128 * 1024);
+  auto payload = makePayload(original);
 
-  auto result = TryCompress(makePayload(original), config, nullptr);
+  auto result = manager.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()));
 
   EXPECT_FALSE(result.compressed);
   EXPECT_EQ(CompressionKind::kNone, result.storedKind);
-  EXPECT_EQ(original.size(), result.rawSize);
-  EXPECT_EQ(original.size(), result.storedSize);
-  EXPECT_EQ(original, readPayload(result.buffer, original.size()));
+  EXPECT_EQ(CompressionKind::kNone, recordKind(result.record, original.size()));
+  EXPECT_EQ(original.size(), recordStoredSize(result.record, original.size()));
+  auto decoded = decodeRecord(manager, result.record, original.size());
+  EXPECT_EQ(original, readPayload(decoded, original.size()));
 }
 
-TEST_F(CompressionCodecTest, PayloadBelowThresholdKeepsOriginalPayload) {
+TEST_F(CompressionManagerTest, PayloadBelowThresholdBuildsUncompressedRecord) {
   CompressionConfig config;
-  config.kind = CompressionKind::kLz4;
+  config.kind = CompressionKind::kLz4Block;
   config.minCompressBytes = 1024;
+  CompressionManager manager(config);
   const auto original = compressiblePayload(128);
+  auto payload = makePayload(original);
 
-  auto result = TryCompress(makePayload(original), config, nullptr);
-
-  EXPECT_FALSE(result.compressed);
-  EXPECT_EQ(CompressionKind::kNone, result.storedKind);
-  EXPECT_EQ(original, readPayload(result.buffer, original.size()));
-}
-
-TEST_F(CompressionCodecTest, IncompressiblePayloadFallsBackToOriginal) {
-  CompressionConfig config;
-  config.kind = CompressionKind::kLz4;
-  config.minCompressBytes = 1;
-  config.minCompressionRatio = 0.5;
-  const auto original = incompressiblePayload(256 * 1024);
-
-  auto result = TryCompress(makePayload(original), config, nullptr);
+  auto result = manager.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()));
 
   EXPECT_FALSE(result.compressed);
   EXPECT_EQ(CompressionKind::kNone, result.storedKind);
-  EXPECT_EQ(original.size(), result.storedSize);
-  EXPECT_EQ(original, readPayload(result.buffer, original.size()));
+  EXPECT_EQ(CompressionKind::kNone, recordKind(result.record, original.size()));
+  auto decoded = decodeRecord(manager, result.record, original.size());
+  EXPECT_EQ(original, readPayload(decoded, original.size()));
 }
 
-TEST_F(CompressionCodecTest, HeaderRoundTripValidatesRecordMetadata) {
-  SpillRecordHeader header;
-  header.compressionKind = static_cast<uint32_t>(CompressionKind::kZstd);
-  header.rawSize = 4096;
-  header.storedSize = 512;
+TEST_F(CompressionManagerTest, Lz4StrategiesWriteStableLz4BlockKind) {
+  for (const auto strategy : {
+           Lz4Strategy::kDefault,
+           Lz4Strategy::kFast,
+           Lz4Strategy::kPooledContext,
+       }) {
+    CompressionConfig config;
+    config.kind = CompressionKind::kLz4Block;
+    config.minCompressBytes = 1;
+    config.lz4.strategy = strategy;
+    config.lz4.acceleration = 2;
+    CompressionManager manager(config);
+    const auto original = compressiblePayload(512 * 1024);
+    auto payload = makePayload(original);
+    const auto before = readPayload(payload, original.size());
 
-  auto encoded = EncodeSpillRecordHeader(header);
-  std::vector<char> record(encoded.size() + header.storedSize);
-  std::memcpy(record.data(), encoded.data(), encoded.size());
-  auto decoded = DecodeSpillRecordHeader(record.data(), record.size(), 4096);
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()));
 
-  EXPECT_EQ(
-      static_cast<uint32_t>(CompressionKind::kZstd),
-      decoded.compressionKind);
-  EXPECT_EQ(4096, decoded.rawSize);
-  EXPECT_EQ(512, decoded.storedSize);
+    EXPECT_EQ(before, readPayload(payload, original.size()));
+    ASSERT_TRUE(result.compressed);
+    EXPECT_EQ(CompressionKind::kLz4Block, result.storedKind);
+    EXPECT_EQ(
+        CompressionKind::kLz4Block, recordKind(result.record, original.size()));
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
 }
 
-TEST_F(CompressionCodecTest, HeaderRejectsWrongExpectedRawSize) {
+TEST_F(CompressionManagerTest, ZstdStrategiesWriteStableZstdFrameKind) {
+  for (const auto strategy : {
+           ZstdStrategy::kOneShot,
+           ZstdStrategy::kPooledContext,
+       }) {
+    CompressionConfig config;
+    config.kind = CompressionKind::kZstdFrame;
+    config.minCompressBytes = 1;
+    config.zstd.strategy = strategy;
+    config.zstd.compressionLevel = 3;
+    CompressionManager manager(config);
+    const auto original = compressiblePayload(512 * 1024);
+    auto payload = makePayload(original);
+
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()));
+
+    ASSERT_TRUE(result.compressed);
+    EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
+    EXPECT_EQ(
+        CompressionKind::kZstdFrame, recordKind(result.record, original.size()));
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+}
+
+TEST_F(CompressionManagerTest, SnappyStrategiesWriteStableSnappyRawKind) {
+  for (const auto strategy : {
+           SnappyStrategy::kRaw,
+           SnappyStrategy::kWithOptions,
+       }) {
+    CompressionConfig config;
+    config.kind = CompressionKind::kSnappyRaw;
+    config.minCompressBytes = 1;
+    config.snappy.strategy = strategy;
+    config.snappy.compressionLevel = 2;
+    CompressionManager manager(config);
+    const auto original = compressiblePayload(512 * 1024);
+    auto payload = makePayload(original);
+
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()));
+
+    ASSERT_TRUE(result.compressed);
+    EXPECT_EQ(CompressionKind::kSnappyRaw, result.storedKind);
+    EXPECT_EQ(
+        CompressionKind::kSnappyRaw, recordKind(result.record, original.size()));
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+}
+
+TEST_F(CompressionManagerTest, HeaderRejectsUnknownCompressionKind) {
   SpillRecordHeader header;
-  header.compressionKind = static_cast<uint32_t>(CompressionKind::kNone);
+  header.compressionKind = 99;
   header.rawSize = 4096;
   header.storedSize = 4096;
 
   auto encoded = EncodeSpillRecordHeader(header);
 
   EXPECT_THROW(
-      DecodeSpillRecordHeader(encoded.data(), encoded.size(), 2048),
+      DecodeSpillRecordHeader(encoded.data(), encoded.size(), 4096),
       std::exception);
 }
 

@@ -63,29 +63,27 @@ size_t ZstdMaxCompressedLength(size_t rawSize) {
 
 uint64_t ZstdCompress(
     CompressionAlgorithmContext* context,
-    CompressionKind kind,
-    int compressionLevel,
+    const ZstdOptions& options,
     const char* source,
     size_t sourceSize,
     char* target,
     size_t targetCapacity) {
-  switch (kind) {
-    case CompressionKind::kZstd:
-    case CompressionKind::kZstdOneShot:
+  switch (options.strategy) {
+    case ZstdStrategy::kOneShot:
       return zstdCompressOneShot(
-          compressionLevel,
+          options.compressionLevel,
           source,
           sourceSize,
           target,
           targetCapacity);
-    case CompressionKind::kZstdContext: {
+    case ZstdStrategy::kPooledContext: {
       auto* zstdContext = ensureZstdContext(context);
       if (zstdContext == nullptr) {
         BOLT_FAIL("BM ZSTD context allocation failed");
       }
       const auto written = zstdCompressWithContext(
           zstdContext,
-          compressionLevel,
+          options.compressionLevel,
           source,
           sourceSize,
           target,
@@ -97,9 +95,11 @@ uint64_t ZstdCompress(
     }
     default:
       BOLT_FAIL(
-          "BM unsupported ZSTD compression kind={}", static_cast<int>(kind));
+          "BM unsupported ZSTD strategy={}",
+          static_cast<int>(options.strategy));
   }
-  BOLT_FAIL("BM unreachable ZSTD compression kind={}", static_cast<int>(kind));
+  BOLT_FAIL(
+      "BM unreachable ZSTD strategy={}", static_cast<int>(options.strategy));
 }
 
 void ZstdDecompress(

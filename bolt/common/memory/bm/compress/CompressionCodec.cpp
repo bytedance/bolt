@@ -2,158 +2,228 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
+#include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 #include "bolt/common/time/Timer.h"
 
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 namespace bytedance::bolt::memory::bm::compress {
 namespace {
 
-IoBuffer allocateBuffer(MemoryPool* pool, size_t size) {
-  if (pool != nullptr) {
-    return IoBuffer::allocateFromPool(pool, size);
+class AlgorithmContextPool {
+ public:
+  class Ref {
+   public:
+    Ref() = default;
+
+    Ref(
+        std::unique_ptr<CompressionAlgorithmContext> context,
+        AlgorithmContextPool* pool)
+        : context_(std::move(context)), pool_(pool) {}
+
+    ~Ref() {
+      reset();
+    }
+
+    Ref(const Ref&) = delete;
+    Ref& operator=(const Ref&) = delete;
+
+    Ref(Ref&& other) noexcept
+        : context_(std::move(other.context_)), pool_(other.pool_) {
+      other.pool_ = nullptr;
+    }
+
+    Ref& operator=(Ref&& other) noexcept {
+      if (this != &other) {
+        reset();
+        context_ = std::move(other.context_);
+        pool_ = other.pool_;
+        other.pool_ = nullptr;
+      }
+      return *this;
+    }
+
+    CompressionAlgorithmContext* get() const {
+      return context_.get();
+    }
+
+   private:
+    void reset() noexcept {
+      if (context_ == nullptr) {
+        return;
+      }
+      if (pool_ != nullptr) {
+        pool_->Release(std::move(context_));
+      } else {
+        DestroyCompressionAlgorithmContext(*context_);
+      }
+    }
+
+    std::unique_ptr<CompressionAlgorithmContext> context_;
+    AlgorithmContextPool* pool_{nullptr};
+  };
+
+  ~AlgorithmContextPool() {
+    for (auto& context : idle_) {
+      DestroyCompressionAlgorithmContext(*context);
+    }
   }
-  return IoBuffer{std::make_unique<char[]>(size), size, 0, size};
+
+  Ref Acquire() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (idle_.empty()) {
+      return Ref{std::make_unique<CompressionAlgorithmContext>(), this};
+    }
+    auto context = std::move(idle_.back());
+    idle_.pop_back();
+    return Ref{std::move(context), this};
+  }
+
+ private:
+  void Release(std::unique_ptr<CompressionAlgorithmContext> context) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    idle_.push_back(std::move(context));
+  }
+
+  std::mutex mutex_;
+  std::vector<std::unique_ptr<CompressionAlgorithmContext>> idle_;
+};
+
+void writeHeader(
+    IoBuffer& record,
+    CompressionKind storedKind,
+    uint64_t rawSize,
+    uint64_t storedSize) {
+  SpillRecordHeader header;
+  header.compressionKind = static_cast<uint32_t>(storedKind);
+  header.rawSize = rawSize;
+  header.storedSize = storedSize;
+  const auto encoded = EncodeSpillRecordHeader(header);
+  std::memcpy(record.data(), encoded.data(), encoded.size());
 }
 
-void decompressInto(
-    CompressionKind kind,
-    const char* source,
-    size_t sourceSize,
-    char* target,
-    size_t targetSize) {
-  switch (kind) {
-    case CompressionKind::kNone:
-      if (sourceSize != targetSize) {
-        BOLT_FAIL(
-            "BM uncompressed spill payload size mismatch, source_size={}, target_size={}",
-            sourceSize,
-            targetSize);
-      }
-      std::memcpy(target, source, targetSize);
-      return;
-    case CompressionKind::kLz4:
-    case CompressionKind::kLz4Default:
-    case CompressionKind::kLz4Fast:
-    case CompressionKind::kLz4Context:
-    case CompressionKind::kZstd:
-    case CompressionKind::kZstdOneShot:
-    case CompressionKind::kZstdContext:
-    case CompressionKind::kSnappy:
-    case CompressionKind::kSnappyRaw:
-    case CompressionKind::kSnappyLevel:
-      DecompressWithAlgorithm(kind, source, sourceSize, target, targetSize);
-      return;
-    default:
-      BOLT_FAIL("BM unsupported compression kind={}", static_cast<int>(kind));
+IoBuffer allocateRawPayload(MemoryPool* outputPool, uint64_t rawSize) {
+  if (outputPool == nullptr) {
+    return IoBuffer::allocateFromMalloc(rawSize);
   }
+  return IoBuffer::allocateFromPool(outputPool, rawSize);
 }
 
 } // namespace
 
-struct CompressionCodec::Impl {
-  ~Impl() {
-    DestroyCompressionAlgorithmContext(context);
-  }
+struct CompressionManager::Impl {
+  explicit Impl(CompressionConfig config) : config(std::move(config)) {}
 
-  CompressionAlgorithmContext context;
-  std::mutex mutex;
+  AlgorithmContextPool lz4Contexts;
+  AlgorithmContextPool zstdContexts;
+  CompressionConfig config;
 };
 
-CompressionCodec::CompressionCodec() : impl_(std::make_unique<Impl>()) {}
+CompressionManager::CompressionManager(CompressionConfig config)
+    : impl_(std::make_unique<Impl>(std::move(config))) {
+  BOLT_CHECK(SupportedCompressionKind(impl_->config.kind));
+}
 
-CompressionCodec::~CompressionCodec() = default;
+CompressionManager::~CompressionManager() = default;
 
-CompressResult CompressionCodec::TryCompress(
-    IoBuffer payload,
-    const CompressionConfig& config,
-    MemoryPool* pool) {
-  BOLT_CHECK(payload.valid());
-  BOLT_CHECK_GE(config.minCompressionRatio, 0.0);
-  BOLT_CHECK_LE(config.minCompressionRatio, 1.0);
-  BOLT_CHECK(SupportedCompressionKind(config.kind));
+CompressionRecordResult CompressionManager::BuildSpillRecord(
+    std::span<const char> payload) {
+  const auto rawSize = static_cast<uint64_t>(payload.size());
+  const auto headerSize = sizeof(SpillRecordHeader);
 
-  CompressResult result;
-  result.rawSize = payload.length();
-  result.storedSize = payload.length();
+  auto buildUncompressed = [&]() {
+    auto record = IoBuffer::allocateFromMalloc(headerSize + payload.size());
+    writeHeader(record, CompressionKind::kNone, rawSize, rawSize);
+    if (!payload.empty()) {
+      std::memcpy(record.data() + headerSize, payload.data(), payload.size());
+    }
 
-  if (config.kind == CompressionKind::kNone ||
-      payload.length() < config.minCompressBytes || payload.length() == 0) {
-    result.buffer = std::move(payload);
+    CompressionRecordResult result;
+    result.record = std::move(record);
+    result.rawSize = rawSize;
+    result.physicalSize = headerSize + rawSize;
+    result.storedKind = CompressionKind::kNone;
+    result.compressed = false;
     return result;
+  };
+
+  if (impl_->config.kind == CompressionKind::kNone ||
+      payload.size() < impl_->config.minCompressBytes || payload.empty()) {
+    return buildUncompressed();
   }
 
-  const auto capacity = MaxCompressedLength(config.kind, payload.length());
-  auto compressed = allocateBuffer(pool, capacity);
+  const auto capacity = MaxCompressedLength(impl_->config.kind, payload.size());
+  auto record = IoBuffer::allocateFromMalloc(headerSize + capacity);
+
+  auto context =
+      impl_->config.kind == CompressionKind::kLz4Block
+      ? impl_->lz4Contexts.Acquire()
+      : impl_->config.kind == CompressionKind::kZstdFrame
+          ? impl_->zstdContexts.Acquire()
+          : AlgorithmContextPool::Ref{};
 
   uint64_t compressionTimeUs = 0;
   uint64_t storedSize = 0;
   {
     MicrosecondTimer timer(&compressionTimeUs);
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     storedSize = CompressWithAlgorithm(
-        &impl_->context,
-        config.kind,
-        config.compressionLevel,
+        context.get(),
+        impl_->config.kind,
+        impl_->config,
         payload.data(),
-        payload.length(),
-        compressed.data(),
-        compressed.length());
+        payload.size(),
+        record.data() + headerSize,
+        capacity);
   }
 
+  writeHeader(record, impl_->config.kind, rawSize, storedSize);
+  record.setLength(headerSize + storedSize);
+
+  CompressionRecordResult result;
+  result.record = std::move(record);
+  result.rawSize = rawSize;
+  result.physicalSize = headerSize + storedSize;
+  result.storedKind = impl_->config.kind;
   result.compressionTimeUs = compressionTimeUs;
-  if (static_cast<double>(storedSize) >=
-      static_cast<double>(payload.length()) * config.minCompressionRatio) {
-    result.buffer = std::move(payload);
-    result.storedSize = result.rawSize;
-    return result;
-  }
-
-  result.buffer = std::move(compressed);
-  result.storedSize = storedSize;
-  result.storedKind = config.kind;
   result.compressed = true;
   return result;
 }
 
-CompressResult TryCompress(
-    IoBuffer payload,
-    const CompressionConfig& config,
-    MemoryPool* pool) {
-  CompressionCodec codec;
-  return codec.TryCompress(std::move(payload), config, pool);
-}
-
-IoBuffer Decompress(
-    IoBuffer storedPayload,
-    uint64_t rawSize,
-    uint64_t storedSize,
-    CompressionKind storedKind,
-    MemoryPool* pool,
+IoBuffer CompressionManager::DecodeSpillRecord(
+    std::span<const char> record,
+    uint64_t expectedRawSize,
+    MemoryPool* outputPool,
     uint64_t* decompressionTimeUs) {
-  BOLT_CHECK(storedPayload.valid());
-  BOLT_CHECK_LE(storedSize, storedPayload.length());
-  BOLT_CHECK(SupportedCompressionKind(storedKind));
+  const auto header =
+      DecodeSpillRecordHeader(record.data(), record.size(), expectedRawSize);
+  const auto storedKind =
+      static_cast<CompressionKind>(header.compressionKind);
+  const auto* storedPayload = record.data() + header.headerSize;
 
+  auto rawPayload = allocateRawPayload(outputPool, header.rawSize);
   if (storedKind == CompressionKind::kNone) {
-    if (storedSize != rawSize) {
+    if (header.storedSize != header.rawSize) {
       BOLT_FAIL(
           "BM uncompressed spill payload size mismatch, stored_size={}, raw_size={}",
-          storedSize,
-          rawSize);
+          header.storedSize,
+          header.rawSize);
     }
-    return std::move(storedPayload);
+    if (header.rawSize > 0) {
+      std::memcpy(rawPayload.data(), storedPayload, header.rawSize);
+    }
+    return rawPayload;
   }
 
-  auto rawPayload = allocateBuffer(pool, rawSize);
   {
     MicrosecondTimer timer(decompressionTimeUs);
-    decompressInto(
+    DecompressWithAlgorithm(
         storedKind,
-        storedPayload.data(),
-        storedSize,
+        storedPayload,
+        header.storedSize,
         rawPayload.data(),
         rawPayload.length());
   }
