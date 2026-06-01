@@ -6,7 +6,7 @@
 #include "bolt/common/memory/bm/BufferManagerAccounting.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/OwnedFileSegment.h"
+#include "bolt/common/memory/bm/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/SpillCodec.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
@@ -436,7 +436,7 @@ TEST_F(BufferManagerInternalsTest, SpillWriteFutureCompletesToResult) {
   EXPECT_TRUE(result.compressed);
 }
 
-TEST_F(BufferManagerInternalsTest, OwnedFileSegmentMoveAndExplicitFree) {
+TEST_F(BufferManagerInternalsTest, ManagedFileSegmentMoveAndExplicitFree) {
   const auto directory = test::UniqueTempDir("bolt-bm-owned-file-segment");
   std::filesystem::remove_all(directory);
   auto allocator =
@@ -445,23 +445,23 @@ TEST_F(BufferManagerInternalsTest, OwnedFileSegmentMoveAndExplicitFree) {
 
   auto first = allocator->Allocate(4096);
   ASSERT_TRUE(first.ok());
-  OwnedFileSegment segment{first.segment, allocator};
+  ManagedFileSegment segment{first.segment, allocator};
   ASSERT_TRUE(segment.valid());
   EXPECT_EQ(first.segment.id, segment.segment().id);
 
-  OwnedFileSegment moved{std::move(segment)};
+  ManagedFileSegment moved{std::move(segment)};
   EXPECT_FALSE(segment.valid());
   ASSERT_TRUE(moved.valid());
 
   auto second = allocator->Allocate(4096);
   ASSERT_TRUE(second.ok());
-  OwnedFileSegment assigned{second.segment, allocator};
+  ManagedFileSegment assigned{second.segment, allocator};
   assigned = std::move(moved);
   EXPECT_FALSE(moved.valid());
   ASSERT_TRUE(assigned.valid());
   EXPECT_EQ(first.segment.id, assigned.segment().id);
 
-  assigned.FreeOrFatal("OwnedFileSegmentMoveAndExplicitFree");
+  assigned.FreeOrFatal("ManagedFileSegmentMoveAndExplicitFree");
   EXPECT_FALSE(assigned.valid());
   std::filesystem::remove_all(directory);
 }

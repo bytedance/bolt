@@ -77,7 +77,7 @@ TEST_F(BlockStateMachineTest, BeginRollbackAndCompleteSpillMovePayloadAndState) 
   EXPECT_EQ(BlockMemoryState::kInMemory, memory.state);
 
   payload = BlockStateMachine::BeginSpill(memory);
-  OwnedFileSegment segment;
+  ManagedFileSegment segment;
   BlockStateMachine::CompleteSpill(memory, std::move(segment));
   EXPECT_FALSE(memory.payload.has_value());
   EXPECT_TRUE(memory.segment.has_value());

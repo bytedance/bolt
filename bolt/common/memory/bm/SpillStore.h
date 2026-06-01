@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
-#include "bolt/common/memory/bm/OwnedFileSegment.h"
+#include "bolt/common/memory/bm/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
@@ -17,7 +17,7 @@ class SpillIo;
 
 struct SpillWriteResult {
   IoResult io;
-  OwnedFileSegment segment;
+  ManagedFileSegment segment;
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t compressionTimeUs{0};
@@ -40,14 +40,14 @@ class SpillWriteFuture {
   SpillWriteFuture() = default;
   SpillWriteFuture(
       std::future<IoResult> rawFuture,
-      OwnedFileSegment segment,
+      ManagedFileSegment segment,
       SpillWriteMetadata metadata);
 
   SpillWriteResult get();
 
  private:
   std::future<IoResult> rawFuture_;
-  OwnedFileSegment segment_;
+  ManagedFileSegment segment_;
   SpillWriteMetadata metadata_;
 };
 
@@ -89,14 +89,14 @@ class SpillStore {
   SubmitWriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
 
   SpillReadFuture SubmitReadBlock(
-      const OwnedFileSegment& segment,
+      const ManagedFileSegment& segment,
       size_t expectedRawSize,
       IoPriority priority);
 
  private:
   FileAllocateResult AllocateSegment(size_t size);
   FileFreeResult FreeSegment(const FileSegment& segment);
-  OwnedFileSegment OwnSegment(FileSegment segment) const;
+  ManagedFileSegment OwnSegment(FileSegment segment) const;
 
   SpillStoreConfig config_;
   std::shared_ptr<SpillCodec> codec_;

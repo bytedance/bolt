@@ -12,7 +12,7 @@ namespace bytedance::bolt::memory::bm {
 
 SpillWriteFuture::SpillWriteFuture(
     std::future<IoResult> rawFuture,
-    OwnedFileSegment segment,
+    ManagedFileSegment segment,
     SpillWriteMetadata metadata)
     : rawFuture_(std::move(rawFuture)),
       segment_(std::move(segment)),
@@ -82,8 +82,8 @@ FileFreeResult SpillStore::FreeSegment(const FileSegment& segment) {
   return allocator_->Free(segment);
 }
 
-OwnedFileSegment SpillStore::OwnSegment(FileSegment segment) const {
-  return OwnedFileSegment{segment, allocator_};
+ManagedFileSegment SpillStore::OwnSegment(FileSegment segment) const {
+  return ManagedFileSegment{segment, allocator_};
 }
 
 SpillWriteFuture SpillStore::SubmitWriteBlock(
@@ -120,7 +120,7 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
 }
 
 SpillReadFuture SpillStore::SubmitReadBlock(
-    const OwnedFileSegment& segment,
+    const ManagedFileSegment& segment,
     size_t expectedRawSize,
     IoPriority priority) {
   return SpillReadFuture{

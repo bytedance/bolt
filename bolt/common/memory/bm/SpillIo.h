@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bolt/common/memory/bm/OwnedFileSegment.h"
+#include "bolt/common/memory/bm/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
@@ -12,7 +12,7 @@ namespace bytedance::bolt::memory::bm {
 class SpillIo {
  public:
   std::future<IoResult> SubmitReadRaw(
-      const OwnedFileSegment& segment,
+      const ManagedFileSegment& segment,
       size_t size,
       IoPriority priority);
 

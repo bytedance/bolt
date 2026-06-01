@@ -14,7 +14,7 @@ add_library(
   BufferManagerReclaimer.cpp
   EvictionQueue.cpp
   MemoryTag.cpp
-  OwnedFileSegment.cpp
+  ManagedFileSegment.cpp
   SpillCodec.cpp
   SpillIo.cpp
   SpillWriteCoordinator.cpp

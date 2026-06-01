@@ -8,7 +8,7 @@
 namespace bytedance::bolt::memory::bm {
 
 std::future<IoResult> SpillIo::SubmitReadRaw(
-    const OwnedFileSegment& segment,
+    const ManagedFileSegment& segment,
     size_t size,
     IoPriority priority) {
   IoRequest request;
