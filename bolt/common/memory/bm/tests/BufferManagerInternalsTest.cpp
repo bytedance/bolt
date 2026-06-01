@@ -368,7 +368,9 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
   EXPECT_EQ('r', result.io.buffer.data()[kSize - 1]);
 }
 
-TEST_F(BufferManagerInternalsTest, SpillReadFutureReportsFailedAndInvalidReads) {
+TEST_F(
+    BufferManagerInternalsTest,
+    SpillReadFutureReportsFailedAndInvalidReads) {
   {
     std::promise<IoResult> promise;
     IoResult failed;
@@ -408,6 +410,19 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureReportsFailedAndInvalidReads) 
     EXPECT_TRUE(result.io.buffer.valid());
     EXPECT_EQ(8, result.physicalBytes);
   }
+}
+
+TEST_F(BufferManagerInternalsTest, SpillWriteFutureCarriesWriteMetadata) {
+  SpillWriteFuture write;
+  write.rawBytes = 1024;
+  write.physicalBytes = 512;
+  write.compressionTimeUs = 7;
+  write.compressed = true;
+
+  EXPECT_EQ(1024, write.rawBytes);
+  EXPECT_EQ(512, write.physicalBytes);
+  EXPECT_EQ(7, write.compressionTimeUs);
+  EXPECT_TRUE(write.compressed);
 }
 
 TEST_F(BufferManagerInternalsTest, OwnedFileExtentMoveAndExplicitFree) {

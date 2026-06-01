@@ -28,6 +28,15 @@ struct SpillWriteResult {
   }
 };
 
+struct SpillWriteFuture {
+  std::future<IoResult> future;
+  OwnedFileExtent extent;
+  uint64_t rawBytes{0};
+  uint64_t physicalBytes{0};
+  uint64_t compressionTimeUs{0};
+  bool compressed{false};
+};
+
 struct SpillReadResult {
   IoResult io;
   uint64_t rawBytes{0};
@@ -62,8 +71,8 @@ class SpillStore {
   SpillStore(SpillStoreConfig config, MemoryPool* pool);
   ~SpillStore();
 
-  SpillWriteResult
-  WriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
+  SpillWriteFuture
+  SubmitWriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
 
   SpillReadFuture SubmitReadBlock(
       const OwnedFileExtent& extent,
