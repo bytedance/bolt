@@ -1,4 +1,6 @@
 #include "bolt/common/memory/bm/file/FileBlockAllocatorImpl.h"
+#include "bolt/common/memory/bm/file/BucketBlockAllocator.h"
+#include "bolt/common/memory/bm/file/DedicatedFileAllocator.h"
 #include "bolt/common/memory/bm/file/tests/FileBlockAllocatorTestUtil.h"
 
 #include <filesystem>
@@ -116,4 +118,97 @@ TEST(FileBlockAllocatorImplTest, AllocatesDedicatedFileForLargeRequest) {
   EXPECT_EQ(128 * 1024, result.extent.requested_size);
   EXPECT_EQ(128 * 1024, result.extent.allocated_size);
   EXPECT_GE(result.extent.fd, 0);
+}
+
+TEST(FileBlockAllocatorImplTest, RejectsInvalidSizesAndUnknownFreeExtents) {
+  const auto directory = UniqueTempDir("bolt-bm-file-allocator-invalid");
+  std::filesystem::remove_all(directory);
+  FileBlockAllocatorImpl allocator(ValidConfigWithDirectory(directory));
+
+  EXPECT_EQ(FileErrorCode::kInvalidSize, allocator.Allocate(0).error);
+  EXPECT_EQ(FileErrorCode::kInvalidSize, allocator.Allocate(-1).error);
+
+  FileExtent unknown;
+  unknown.id = 999;
+  unknown.kind = FileExtentKind::kBucket;
+  EXPECT_EQ(FileErrorCode::kDoubleFree, allocator.Free(unknown).error);
+}
+
+TEST(FileBlockAllocatorImplTest, ReportsCreateFileErrors) {
+  const auto directory = UniqueTempDir("bolt-bm-file-allocator-create-error");
+  std::filesystem::remove_all(directory);
+  std::ofstream file(directory);
+  file << "not a directory";
+  file.close();
+
+  auto config = ValidConfigWithDirectory(directory);
+  EXPECT_THROW((void)FileBlockAllocatorImpl(config), std::exception);
+}
+
+TEST(FileBlockAllocatorImplTest, BucketAllocatorReportsCreateFileErrors) {
+  const auto directory = UniqueTempDir("bolt-bm-bucket-create-error");
+  std::filesystem::remove_all(directory);
+  std::ofstream file(directory);
+  file << "not a directory";
+  file.close();
+
+  BucketBlockAllocator allocator(directory, 4096, 4096, 1);
+  auto allocation = allocator.Allocate(4096, 1);
+
+  EXPECT_FALSE(allocation.result.ok());
+  EXPECT_EQ(FileErrorCode::kIoError, allocation.result.error);
+}
+
+TEST(FileBlockAllocatorImplTest, DedicatedAllocatorReportsCreateAndFreeErrors) {
+  const auto directory = UniqueTempDir("bolt-bm-dedicated-create-error");
+  std::filesystem::remove_all(directory);
+  std::ofstream file(directory);
+  file << "not a directory";
+  file.close();
+
+  DedicatedFileAllocator allocator(directory);
+  auto allocation = allocator.Allocate(128 * 1024, 7);
+
+  EXPECT_FALSE(allocation.result.ok());
+  EXPECT_EQ(FileErrorCode::kIoError, allocation.result.error);
+
+  ExtentRecord unknown;
+  unknown.extent.id = 999;
+  EXPECT_EQ(FileErrorCode::kInvalidExtent, allocator.Free(unknown).error);
+}
+
+TEST(FileBlockAllocatorImplTest, ResultOkReflectsErrorCode) {
+  FileAllocateResult allocateResult;
+  EXPECT_TRUE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kInvalidConfig;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kInvalidSize;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kInvalidExtent;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kDoubleFree;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kTooManyOpenFiles;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kIoError;
+  EXPECT_FALSE(allocateResult.ok());
+  allocateResult.error = FileErrorCode::kShutdown;
+  EXPECT_FALSE(allocateResult.ok());
+
+  FileFreeResult freeResult;
+  EXPECT_TRUE(freeResult.ok());
+  freeResult.error = FileErrorCode::kInvalidConfig;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kInvalidSize;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kInvalidExtent;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kDoubleFree;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kTooManyOpenFiles;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kIoError;
+  EXPECT_FALSE(freeResult.ok());
+  freeResult.error = FileErrorCode::kShutdown;
+  EXPECT_FALSE(freeResult.ok());
 }

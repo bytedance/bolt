@@ -1,6 +1,7 @@
 #include "bolt/common/memory/bm/io/IoRequestValidator.h"
 
 #include "bolt/common/memory/bm/io/IoBuffer.h"
+#include "bolt/common/memory/bm/io/IoBufferOwner.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 
@@ -84,4 +85,81 @@ TEST(IoRequestValidatorTest, ioBufferRunsCustomDeleterOnceAfterMove) {
   }
 
   EXPECT_EQ(1, freeCount);
+}
+
+TEST(IoRequestValidatorTest, ioBufferValidReflectsOwnershipAndRange) {
+  int freeCount = 0;
+
+  IoBuffer empty;
+  EXPECT_FALSE(empty.valid());
+
+  auto valid = IoBuffer::fromOwned(
+      new char[256], 256, 64, 128, CountingDeleter{&freeCount});
+  EXPECT_TRUE(valid.valid());
+  EXPECT_EQ(valid.data() + 64, valid.ioData());
+  EXPECT_EQ(64, valid.offset());
+  EXPECT_EQ(128, valid.length());
+  valid.setLength(192);
+  EXPECT_EQ(192, valid.length());
+  EXPECT_THROW(valid.setLength(193), std::exception);
+
+  auto offsetAtEnd = IoBuffer::fromOwned(
+      new char[64], 64, 64, 0, CountingDeleter{&freeCount});
+  EXPECT_TRUE(offsetAtEnd.valid());
+
+  auto offsetPastEnd = IoBuffer::fromOwned(
+      new char[64], 64, 65, 0, CountingDeleter{&freeCount});
+  EXPECT_FALSE(offsetPastEnd.valid());
+
+  auto lengthPastEnd = IoBuffer::fromOwned(
+      new char[64], 64, 32, 33, CountingDeleter{&freeCount});
+  EXPECT_FALSE(lengthPastEnd.valid());
+}
+
+TEST(IoRequestValidatorTest, uniqueBufferOwnerResetAndMoveAssignment) {
+  int freeCount = 0;
+  UniqueBufferOwner empty;
+  EXPECT_FALSE(empty.owns());
+  empty.reset();
+
+  UniqueBufferOwner owner(new char[8], CountingDeleter{&freeCount});
+  EXPECT_TRUE(owner.owns());
+  owner.reset();
+  EXPECT_FALSE(owner.owns());
+  EXPECT_EQ(1, freeCount);
+
+  UniqueBufferOwner first(new char[8], CountingDeleter{&freeCount});
+  UniqueBufferOwner second(new char[8], CountingDeleter{&freeCount});
+  first = std::move(second);
+  EXPECT_TRUE(first.owns());
+  EXPECT_FALSE(second.owns());
+  EXPECT_EQ(2, freeCount);
+
+  first = std::move(first);
+  EXPECT_TRUE(first.owns());
+}
+
+TEST(IoRequestValidatorTest, ioResultOkReflectsErrorCode) {
+  IoResult result;
+  EXPECT_TRUE(result.ok());
+
+  result.error = IoErrorCode::InvalidRequest;
+  EXPECT_FALSE(result.ok());
+  result.error = IoErrorCode::Shutdown;
+  EXPECT_FALSE(result.ok());
+  result.error = IoErrorCode::BackendSubmitFailed;
+  EXPECT_FALSE(result.ok());
+  result.error = IoErrorCode::BackendIoError;
+  EXPECT_FALSE(result.ok());
+  result.error = IoErrorCode::ShortIo;
+  EXPECT_FALSE(result.ok());
+
+  result = IoResult(128, IoErrorCode::Ok);
+  EXPECT_TRUE(result.ok());
+  EXPECT_EQ(128, result.bytes);
+
+  result = IoResult(64, IoErrorCode::ShortIo, 5);
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(64, result.bytes);
+  EXPECT_EQ(5, result.nativeErrorCode);
 }

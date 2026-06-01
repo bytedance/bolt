@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -27,6 +28,21 @@ TEST(FixedDepthControllerTest, keepsInitialDepthAndTracksThroughput) {
   ASSERT_NE(nullptr, fixedStats);
   EXPECT_EQ(8, fixedStats->configuredDepth);
   EXPECT_GT(controller.recentThroughputBytesPerSecond(), 0);
+}
+
+TEST(DepthControlStatsTest, adaptiveStatsStringIncludesAdaptiveFields) {
+  AdaptiveDepthStats stats{4, 1000, 2, 900, 8, 1200, true};
+
+  const auto text = stats.toString();
+
+  EXPECT_NE(std::string::npos, text.find("depth_control_mode=adaptive"));
+  EXPECT_NE(std::string::npos, text.find("depth_adaptive_best_depth=8"));
+  EXPECT_NE(
+      std::string::npos,
+      text.find("depth_adaptive_best_throughput_bytes_per_second=1200"));
+  EXPECT_NE(
+      std::string::npos,
+      text.find("depth_adaptive_measuring_probe_depth=1"));
 }
 
 TEST(DepthControllerFactoryTest, createsFixedControllerWhenAdaptiveDisabled) {

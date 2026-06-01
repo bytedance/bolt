@@ -2,7 +2,10 @@ include(GoogleTest)
 
 add_executable(
   bolt_memory_bm_test
+  BlockStateMachineTest.cpp
   BufferManagerTest.cpp
+  BufferManagerInternalsTest.cpp
+  BufferManagerPrivateStateTest.cpp
   ScopedFdTest.cpp
 )
 

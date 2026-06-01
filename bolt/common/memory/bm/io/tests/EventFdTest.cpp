@@ -1,6 +1,9 @@
 #include "bolt/common/memory/bm/io/EventFd.h"
 
+#include <cstdint>
+#include <limits>
 #include <poll.h>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 
@@ -40,4 +43,20 @@ TEST(EventFdTest, moveAssignmentClosesPreviousFdAndTransfersEvent) {
 
   EXPECT_EQ(sourceFd, target.fd());
   EXPECT_TRUE(isReadable(target.fd()));
+}
+
+TEST(EventFdTest, notifyReturnsWhenCounterIsAlreadySaturated) {
+  EventFd event;
+  const uint64_t saturated = std::numeric_limits<uint64_t>::max() - 1;
+
+  ASSERT_EQ(
+      static_cast<ssize_t>(sizeof(saturated)),
+      ::write(event.fd(), &saturated, sizeof(saturated)));
+  ASSERT_TRUE(isReadable(event.fd()));
+
+  event.notify();
+
+  EXPECT_TRUE(isReadable(event.fd()));
+  event.drain();
+  EXPECT_FALSE(isReadable(event.fd()));
 }
