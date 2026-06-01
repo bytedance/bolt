@@ -19,6 +19,10 @@ std::future<IoResult> DiskIoScheduler::submit(IoRequest request) const {
   return globalDiskIoSchedulerImpl().submit(std::move(request));
 }
 
+void DiskIoScheduler::ensureReady() const {
+  (void)globalDiskIoSchedulerImpl();
+}
+
 DiskIoSchedulerStats DiskIoScheduler::stats() const {
   return globalDiskIoSchedulerImpl().stats();
 }

@@ -28,7 +28,7 @@ IoResult SpillIo::WriteRaw(
   // This is intentionally outside BufferManager hot path. The current scheduler
   // facade initializes lazily; do it before moving the only payload owner into
   // IoRequest so initialization failure cannot destroy the resident payload.
-  EnsureSchedulerReadyForPayloadMove();
+  EnsureWriteSchedulerReady();
 
   IoRequest request;
   request.opcode = IoOpcode::Write;
@@ -40,12 +40,12 @@ IoResult SpillIo::WriteRaw(
   return diskIoScheduler().submit(std::move(request)).get();
 }
 
-void SpillIo::EnsureSchedulerReadyForPayloadMove() {
-  if (schedulerReadyForPayloadMove_) {
+void SpillIo::EnsureWriteSchedulerReady() {
+  if (writeSchedulerReady_) {
     return;
   }
-  (void)diskIoScheduler().stats();
-  schedulerReadyForPayloadMove_ = true;
+  diskIoScheduler().ensureReady();
+  writeSchedulerReady_ = true;
 }
 
 } // namespace bytedance::bolt::memory::bm
