@@ -2,6 +2,7 @@
 
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/OwnedFileExtent.h"
+#include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
@@ -13,11 +14,6 @@ namespace bytedance::bolt::memory::bm {
 
 class SpillCodec;
 class SpillIo;
-
-struct SpillStoreConfig {
-  FileBlockAllocatorConfig fileAllocatorConfig;
-  compress::CompressionConfig compressionConfig;
-};
 
 struct SpillWriteResult {
   IoResult io;
