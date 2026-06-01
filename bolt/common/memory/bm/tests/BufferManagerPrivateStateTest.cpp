@@ -69,15 +69,15 @@ TEST_F(BufferManagerPrivateStateTest, PinRejectsSpillingAndUnknownStates) {
   EXPECT_THROW((void)bm->Pin(block), std::exception);
 }
 
-TEST_F(BufferManagerPrivateStateTest, PrefetchRecordsSubmitFailure) {
+TEST_F(BufferManagerPrivateStateTest, PrefetchSubmitFailurePropagates) {
   auto bm = makeBufferManager("prefetch-failure");
   auto block = testingCreateBlockHandle(4096, MemoryTag::kTesting);
   block->memory_->state = BlockMemoryState::kSpilled;
 
   std::array<std::shared_ptr<BlockHandle>, 1> blocks{block};
-  bm->Prefetch(blocks);
+  EXPECT_THROW(bm->Prefetch(blocks), std::exception);
 
-  EXPECT_EQ(1, bm->stats().prefetchSubmitFailures);
+  EXPECT_EQ(0, bm->stats().prefetchSubmitFailures);
 }
 
 TEST_F(BufferManagerPrivateStateTest, PinPrefetchingReportsReadFailure) {

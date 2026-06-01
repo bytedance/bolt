@@ -4,24 +4,11 @@
 #include "bolt/common/memory/bm/SpillCodec.h"
 #include "bolt/common/memory/bm/SpillIo.h"
 
-#include <glog/logging.h>
-
 #include <memory>
 #include <span>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
-
-namespace {
-
-IoResult MakeInvalidRecordResult(IoBuffer buffer) {
-  IoResult result;
-  result.error = IoErrorCode::InvalidRequest;
-  result.buffer = std::move(buffer);
-  return result;
-}
-
-} // namespace
 
 SpillWriteFuture::SpillWriteFuture(
     std::future<IoResult> rawFuture,
@@ -64,20 +51,15 @@ SpillReadResult SpillReadFuture::get() {
     return result;
   }
 
-  try {
-    auto decoded = codec_->Decode(
-        std::span<const char>(raw.buffer.data(), raw.buffer.length()),
-        expectedRawSize_,
-        pool_,
-        &result.decompressionTimeUs);
-    result.rawBytes = decoded.length();
-    result.io.bytes = decoded.length();
-    result.io.buffer = std::move(decoded);
-    return result;
-  } catch (...) {
-    result.io = MakeInvalidRecordResult(std::move(raw.buffer));
-    return result;
-  }
+  auto decoded = codec_->Decode(
+      std::span<const char>(raw.buffer.data(), raw.buffer.length()),
+      expectedRawSize_,
+      pool_,
+      &result.decompressionTimeUs);
+  result.rawBytes = decoded.length();
+  result.io.bytes = decoded.length();
+  result.io.buffer = std::move(decoded);
+  return result;
 }
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
@@ -129,23 +111,12 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   metadata.compressionTimeUs = record.compressionTimeUs;
   metadata.compressed = record.compressed;
 
-  std::future<IoResult> rawFuture;
-  try {
-    rawFuture = io_->SubmitWriteRaw(allocation.extent, record.record, priority);
-  } catch (...) {
-    auto freeResult = FreeExtent(allocation.extent);
-    if (!freeResult.ok()) {
-      LOG(FATAL)
-          << "BM failed to free extent after spill write exception, extent_id="
-          << allocation.extent.id
-          << ", file_error=" << static_cast<int>(freeResult.error)
-          << ", native_error=" << freeResult.native_error_code;
-    }
-    throw;
-  }
+  auto ownedExtent = OwnExtent(allocation.extent);
+  auto rawFuture =
+      io_->SubmitWriteRaw(ownedExtent.extent(), record.record, priority);
 
   return SpillWriteFuture{
-      std::move(rawFuture), OwnExtent(allocation.extent), metadata};
+      std::move(rawFuture), std::move(ownedExtent), metadata};
 }
 
 SpillReadFuture SpillStore::SubmitReadBlock(

@@ -179,7 +179,7 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   EXPECT_EQ(9, repin.Ptr()[4095]);
 }
 
-TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
+TEST_F(BufferManagerTest, ReclaimSubmitFailurePropagatesWithoutRollback) {
   auto bm = makeBufferManager("reclaim-submit-failure");
   std::shared_ptr<BlockHandle> block;
   {
@@ -194,25 +194,15 @@ TEST_F(BufferManagerTest, ReclaimSubmitFailureKeepsBlockReclaimable) {
     if (!IsIoUringUnavailable(e)) {
       throw;
     }
-    EXPECT_EQ(4096, bm->reclaimableBytes());
-
-    try {
-      (void)bm->Reclaim(4096);
-    } catch (const std::exception& second) {
-      if (!IsIoUringUnavailable(second)) {
-        throw;
-      }
-      auto repin = bm->Pin(block);
-      EXPECT_EQ(13, repin.Ptr()[0]);
-      return;
-    }
-    FAIL() << "expected unavailable scheduler to retry reclaim submission";
+    EXPECT_EQ(0, bm->reclaimableBytes());
+    EXPECT_THROW((void)bm->Pin(block), std::exception);
+    return;
   }
 
   GTEST_SKIP() << "Disk IO scheduler is available; failure path not exercised";
 }
 
-TEST_F(BufferManagerTest, ReclaimAllocationFailureRollsBackAndKeepsBlockReclaimable) {
+TEST_F(BufferManagerTest, ReclaimAllocationFailurePropagatesWithoutRollback) {
   const auto directory =
       test::UniqueTempDir("bolt-bm-buffer-manager-reclaim-alloc-failure");
   std::filesystem::remove_all(directory);
@@ -241,9 +231,8 @@ TEST_F(BufferManagerTest, ReclaimAllocationFailureRollsBackAndKeepsBlockReclaima
   }
 
   EXPECT_THROW((void)bm->Reclaim(4096), std::exception);
-  EXPECT_EQ(4096, bm->reclaimableBytes());
-  auto repin = bm->Pin(block);
-  EXPECT_EQ(17, repin.Ptr()[0]);
+  EXPECT_EQ(0, bm->reclaimableBytes());
+  EXPECT_THROW((void)bm->Pin(block), std::exception);
   EXPECT_EQ(1, bm->stats().reclaimAttemptedBlocks);
 }
 

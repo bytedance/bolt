@@ -150,9 +150,8 @@ manager->Prefetch(blocks);
 BufferHandle handle = manager->Pin(block);
 ```
 
-`Prefetch()` 不返回 handle，也不保证数据一定已经读回。它的失败语义是尽量温和：
-内存分配失败、非法 block、IO 提交失败等会记录日志和统计，block 保持可由后续
-`Pin()` 正常处理的状态。
+`Prefetch()` 不返回 handle，也不保证数据一定已经读回。提交 read 失败、非法
+block、内存分配失败等错误会通过异常向上传播；BM 不会吞掉异常或尝试恢复。
 
 ## Reclaim
 
