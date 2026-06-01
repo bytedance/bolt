@@ -97,6 +97,13 @@ TEST(BufferManagerValueMappingTest, AllAllocateSizesHaveStableNamesAndBytes) {
   EXPECT_THROW((void)toString(static_cast<AllocateSize>(99)), std::exception);
 }
 
+TEST(
+    BufferManagerValueMappingTest,
+    DefaultReclaimWriteInflightMatchesRingDepth) {
+  BufferManagerConfig config;
+  EXPECT_EQ(128, config.maxReclaimWriteInflight);
+}
+
 TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
   BufferManagerAccounting accounting;
   auto memory = makeBlock(4096, MemoryTag::kSort);
