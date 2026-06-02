@@ -299,6 +299,7 @@ arrow::Status BoltShuffleWriterV2::stop() {
 }
 
 arrow::Status BoltShuffleWriterV2::tryEvict(int64_t memLimit) {
+  // add EvictGuard to avoid recursive evict
   BOLT_CHECK(evictState_ == EvictState::kEvictable);
   EvictGuard evictGuard{evictState_};
   if (vectorLayout_ == RowVectorLayout::kColumnar) {

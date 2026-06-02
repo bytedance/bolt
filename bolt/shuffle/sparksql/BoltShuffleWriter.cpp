@@ -2202,6 +2202,7 @@ int32_t BoltShuffleWriter::calculatePreallocBufferSize(
 
 // for CompositeRowVector
 arrow::Status BoltShuffleWriter::tryEvict(int64_t) {
+  // add EvictGuard to avoid recursive evict
   BOLT_CHECK(evictState_ == EvictState::kEvictable);
   EvictGuard evictGuard{evictState_};
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
