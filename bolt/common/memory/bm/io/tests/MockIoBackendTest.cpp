@@ -63,8 +63,7 @@ TEST(MockIoBackendTest, duplicateSubmitReturnsFalseAndDoesNotRecord) {
 TEST(MockIoBackendTest, completeUnknownRequestFailsFast) {
   MockIoBackend backend;
 
-  BOLT_ASSERT_THROW(
-      backend.complete(11, IoResult{4096}), "unknown requestId");
+  BOLT_ASSERT_THROW(backend.complete(11, IoResult{4096}), "unknown requestId");
 }
 
 TEST(MockIoBackendTest, completionFdSignalsCompletedRequests) {

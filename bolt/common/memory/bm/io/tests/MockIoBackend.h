@@ -18,9 +18,8 @@ struct MockSubmittedRequest {
 class MockIoBackend : public IoBackend {
  public:
   int completionFd() const override;
-  BackendSubmitStatus submit(
-      uint64_t requestId,
-      const IoRequest& request) override;
+  BackendSubmitStatus submit(uint64_t requestId, const IoRequest& request)
+      override;
   std::vector<BackendCompletion> reap() override;
 
   void complete(uint64_t requestId, IoResult result);

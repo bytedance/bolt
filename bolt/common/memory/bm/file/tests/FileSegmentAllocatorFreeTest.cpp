@@ -40,7 +40,8 @@ TEST(FileSegmentAllocatorFreeTest, RejectsDoubleFree) {
   ASSERT_TRUE(allocation.ok());
 
   EXPECT_TRUE(allocator.Free(allocation.segment).ok());
-  EXPECT_EQ(FileErrorCode::kDoubleFree, allocator.Free(allocation.segment).error);
+  EXPECT_EQ(
+      FileErrorCode::kDoubleFree, allocator.Free(allocation.segment).error);
 }
 
 TEST(FileSegmentAllocatorFreeTest, DeletesDedicatedFileOnFree) {
@@ -58,7 +59,9 @@ TEST(FileSegmentAllocatorFreeTest, DeletesDedicatedFileOnFree) {
   EXPECT_FALSE(std::filesystem::exists(path));
 }
 
-TEST(FileSegmentAllocatorFreeTest, DeletesEmptyBucketFileAndReleasesOpenFileSlot) {
+TEST(
+    FileSegmentAllocatorFreeTest,
+    DeletesEmptyBucketFileAndReleasesOpenFileSlot) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-delete-empty");
   std::filesystem::remove_all(directory);
   auto config = ValidConfigWithDirectory(directory);
@@ -69,7 +72,8 @@ TEST(FileSegmentAllocatorFreeTest, DeletesEmptyBucketFileAndReleasesOpenFileSlot
 
   auto first = allocator.Allocate(4 * 1024);
   ASSERT_TRUE(first.ok());
-  const auto first_path = OnlyAllocatorDirectory(directory) / "bucket_4096_0.bm";
+  const auto first_path =
+      OnlyAllocatorDirectory(directory) / "bucket_4096_0.bm";
   ASSERT_TRUE(std::filesystem::exists(first_path));
   EXPECT_TRUE(allocator.Free(first.segment).ok());
   EXPECT_FALSE(std::filesystem::exists(first_path));

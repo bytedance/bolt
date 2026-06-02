@@ -20,7 +20,8 @@ ManagedFileSegment::ManagedFileSegment(ManagedFileSegment&& other) noexcept
   other.valid_ = false;
 }
 
-ManagedFileSegment& ManagedFileSegment::operator=(ManagedFileSegment&& other) noexcept {
+ManagedFileSegment& ManagedFileSegment::operator=(
+    ManagedFileSegment&& other) noexcept {
   if (this != &other) {
     ResetNoexcept("ManagedFileSegment::operator=");
     segment_ = other.segment_;

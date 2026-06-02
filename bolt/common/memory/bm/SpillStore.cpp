@@ -99,9 +99,8 @@ SpillReadResult SpillReadFuture::get() {
 
 SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
     : config_(std::move(config)),
-      compression_(
-          std::make_shared<compress::CompressionManager>(
-              config_.compressionConfig)),
+      compression_(std::make_shared<compress::CompressionManager>(
+          config_.compressionConfig)),
       pool_(pool) {
   allocator_ = CreateFileSegmentAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
@@ -148,7 +147,8 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   metadata.compressed = record.compressed;
 
   auto ownedSegment = OwnSegment(allocation.segment);
-  auto rawFuture = SubmitWriteRaw(ownedSegment.segment(), record.record, priority);
+  auto rawFuture =
+      SubmitWriteRaw(ownedSegment.segment(), record.record, priority);
 
   return SpillWriteFuture{
       std::move(rawFuture), std::move(ownedSegment), metadata};

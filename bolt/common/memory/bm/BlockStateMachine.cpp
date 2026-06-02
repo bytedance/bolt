@@ -67,9 +67,7 @@ IoBuffer BlockStateMachine::BeginSpill(BlockMemory& memory) {
   return payload;
 }
 
-void BlockStateMachine::RollbackSpill(
-    BlockMemory& memory,
-    IoBuffer payload) {
+void BlockStateMachine::RollbackSpill(BlockMemory& memory, IoBuffer payload) {
   memory.payload = std::move(payload);
   memory.state = BlockMemoryState::kInMemory;
 }

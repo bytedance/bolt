@@ -36,10 +36,8 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   ~BufferManager();
 
   BufferHandle Allocate(size_t size, MemoryTag tag);
-  std::vector<BufferHandle> BatchAllocate(
-      size_t count,
-      size_t size,
-      MemoryTag tag);
+  std::vector<BufferHandle>
+  BatchAllocate(size_t count, size_t size, MemoryTag tag);
   bool MaybeReserve(size_t size);
   void ReleaseUnusedReservation();
   BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);

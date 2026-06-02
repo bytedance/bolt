@@ -41,8 +41,7 @@ TEST(DepthControlStatsTest, adaptiveStatsStringIncludesAdaptiveFields) {
       std::string::npos,
       text.find("depth_adaptive_best_throughput_bytes_per_second=1200"));
   EXPECT_NE(
-      std::string::npos,
-      text.find("depth_adaptive_measuring_probe_depth=1"));
+      std::string::npos, text.find("depth_adaptive_measuring_probe_depth=1"));
 }
 
 TEST(DepthControllerFactoryTest, createsFixedControllerWhenAdaptiveDisabled) {

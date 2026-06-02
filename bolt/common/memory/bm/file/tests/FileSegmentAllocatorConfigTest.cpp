@@ -7,7 +7,8 @@ using namespace bytedance::bolt::memory::bm;
 using namespace bytedance::bolt::memory::bm::test;
 
 TEST(FileSegmentAllocatorConfigTest, AcceptsValidConfig) {
-  EXPECT_EQ(FileErrorCode::kOk, ValidateFileSegmentAllocatorConfig(ValidConfig()));
+  EXPECT_EQ(
+      FileErrorCode::kOk, ValidateFileSegmentAllocatorConfig(ValidConfig()));
 }
 
 TEST(FileSegmentAllocatorConfigTest, RejectsEmptyDirectory) {

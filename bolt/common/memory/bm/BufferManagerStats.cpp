@@ -27,8 +27,7 @@ void SubtractOrFatal(
   if (value < delta) {
     LOG(FATAL) << "BM observability counter underflow, field=" << field
                << ", value=" << value << ", delta=" << delta
-               << ", block_id=" << memory.id
-               << ", tag=" << toString(memory.tag)
+               << ", block_id=" << memory.id << ", tag=" << toString(memory.tag)
                << ", size=" << memory.size
                << ", state=" << static_cast<int>(memory.state)
                << ", pin_count=" << memory.pinCount;
@@ -202,7 +201,10 @@ void BufferManagerStatsCollector::OnResidentPinned(const BlockMemory& memory) {
     return;
   }
   SubtractOrFatal(
-      stats_.unpinnedResidentBytes, memory.size, "unpinnedResidentBytes", memory);
+      stats_.unpinnedResidentBytes,
+      memory.size,
+      "unpinnedResidentBytes",
+      memory);
   stats_.pinnedResidentBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
@@ -240,10 +242,7 @@ void BufferManagerStatsCollector::OnReadFutureConsumed(
       stats_.prefetchingBytes, memory.size, "prefetchingBytes", memory);
   auto& tagStats = MutableTagStats(memory.tag);
   SubtractOrFatal(
-      tagStats.prefetchingBytes,
-      memory.size,
-      "tag.prefetchingBytes",
-      memory);
+      tagStats.prefetchingBytes, memory.size, "tag.prefetchingBytes", memory);
 }
 
 void BufferManagerStatsCollector::OnReadCompleted(
@@ -267,7 +266,10 @@ void BufferManagerStatsCollector::OnReadCompleted(
 
 void BufferManagerStatsCollector::OnSpillStarted(const BlockMemory& memory) {
   SubtractOrFatal(
-      stats_.unpinnedResidentBytes, memory.size, "unpinnedResidentBytes", memory);
+      stats_.unpinnedResidentBytes,
+      memory.size,
+      "unpinnedResidentBytes",
+      memory);
   stats_.spillingBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);

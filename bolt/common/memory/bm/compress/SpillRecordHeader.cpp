@@ -44,7 +44,8 @@ SpillRecordHeader DecodeSpillRecordHeader(
     BOLT_FAIL("BM spill record header has invalid magic={}", header.magic);
   }
   if (header.version != kSpillRecordVersion) {
-    BOLT_FAIL("BM spill record header has unsupported version={}", header.version);
+    BOLT_FAIL(
+        "BM spill record header has unsupported version={}", header.version);
   }
   if (header.headerSize < sizeof(SpillRecordHeader)) {
     BOLT_FAIL(
@@ -63,7 +64,8 @@ SpillRecordHeader DecodeSpillRecordHeader(
         "BM spill record has unsupported compression kind={}",
         header.compressionKind);
   }
-  if (header.headerSize > size || header.storedSize > size - header.headerSize) {
+  if (header.headerSize > size ||
+      header.storedSize > size - header.headerSize) {
     BOLT_FAIL(
         "BM spill record payload exceeds record size, header_size={}, stored_size={}, record_size={}",
         header.headerSize,

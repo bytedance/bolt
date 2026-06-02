@@ -364,9 +364,8 @@ TEST_F(BufferManagerTest, StatsTrackSpillAndReadback) {
 }
 
 TEST_F(BufferManagerTest, DefaultCompressionSpillsAndReadsBackPayload) {
-  auto bm =
-      makeBufferManager(
-          "default-compression", compress::CompressionKind::kLz4Block, 1);
+  auto bm = makeBufferManager(
+      "default-compression", compress::CompressionKind::kLz4Block, 1);
   std::shared_ptr<BlockHandle> block;
   {
     auto handle = bm->Allocate(256 * 1024, MemoryTag::kTesting);

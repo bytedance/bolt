@@ -105,8 +105,7 @@ IoBuffer CompressionManager::DecodeSpillRecord(
     uint64_t* decompressionTimeUs) {
   const auto header =
       DecodeSpillRecordHeader(record.data(), record.size(), expectedRawSize);
-  const auto storedKind =
-      static_cast<CompressionKind>(header.compressionKind);
+  const auto storedKind = static_cast<CompressionKind>(header.compressionKind);
   const auto storedPayload =
       StoredPayloadSpan(record, header.headerSize, header.storedSize);
 

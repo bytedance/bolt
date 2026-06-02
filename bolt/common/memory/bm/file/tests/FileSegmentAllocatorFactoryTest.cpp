@@ -28,7 +28,9 @@ TEST(FileSegmentAllocatorFactoryTest, CreateReturnsSharedAllocator) {
 
   auto allocator =
       CreateFileSegmentAllocator(ValidConfigWithDirectory(directory));
-  static_assert(std::is_same_v<decltype(allocator), std::shared_ptr<FileSegmentAllocator>>);
+  static_assert(std::is_same_v<
+                decltype(allocator),
+                std::shared_ptr<FileSegmentAllocator>>);
   ASSERT_NE(nullptr, allocator);
 
   auto other = allocator;

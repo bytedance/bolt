@@ -74,12 +74,12 @@ TEST(IoBufferTest, ValidReflectsOwnershipAndRange) {
   EXPECT_EQ(192, valid.length());
   EXPECT_THROW(valid.setLength(193), std::exception);
 
-  auto offsetAtEnd = IoBuffer::fromOwned(
-      new char[64], 64, 64, 0, CountingDeleter{&freeCount});
+  auto offsetAtEnd =
+      IoBuffer::fromOwned(new char[64], 64, 64, 0, CountingDeleter{&freeCount});
   EXPECT_TRUE(offsetAtEnd.valid());
 
-  auto offsetPastEnd = IoBuffer::fromOwned(
-      new char[64], 64, 65, 0, CountingDeleter{&freeCount});
+  auto offsetPastEnd =
+      IoBuffer::fromOwned(new char[64], 64, 65, 0, CountingDeleter{&freeCount});
   EXPECT_FALSE(offsetPastEnd.valid());
 
   auto lengthPastEnd = IoBuffer::fromOwned(

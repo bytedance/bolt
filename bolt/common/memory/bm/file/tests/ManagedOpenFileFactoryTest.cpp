@@ -8,7 +8,9 @@
 using namespace bytedance::bolt::memory::bm;
 using namespace bytedance::bolt::memory::bm::test;
 
-TEST(ManagedOpenFileFactoryTest, createExclusiveReadWriteFileReturnsManagedOpenFile) {
+TEST(
+    ManagedOpenFileFactoryTest,
+    createExclusiveReadWriteFileReturnsManagedOpenFile) {
   const auto directory = UniqueTempDir("bolt-bm-owned-file-factory");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
@@ -22,7 +24,9 @@ TEST(ManagedOpenFileFactoryTest, createExclusiveReadWriteFileReturnsManagedOpenF
   EXPECT_TRUE(std::filesystem::exists(path));
 }
 
-TEST(ManagedOpenFileFactoryTest, createExclusiveReadWriteFileReportsNativeError) {
+TEST(
+    ManagedOpenFileFactoryTest,
+    createExclusiveReadWriteFileReportsNativeError) {
   const auto directory = UniqueTempDir("bolt-bm-owned-file-factory-existing");
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);

@@ -21,8 +21,7 @@ void DiskIoStatsCollector::recordRejected(DiskIoSchedulerStats& stats) {
   ++stats.rejectedRequests;
 }
 
-void DiskIoStatsCollector::recordShutdownRejected(
-    DiskIoSchedulerStats& stats) {
+void DiskIoStatsCollector::recordShutdownRejected(DiskIoSchedulerStats& stats) {
   ++stats.shutdownRejectedRequests;
 }
 
@@ -53,8 +52,7 @@ void DiskIoStatsCollector::recordSubmitted(
   ++stats.submittedRequests[priorityIndex(priority)];
   stats.cumulativeQueueWaitUs += queueWaitUs;
   ++stats.queueWaitSamples;
-  stats.averageQueueWaitUs =
-      static_cast<double>(stats.cumulativeQueueWaitUs) /
+  stats.averageQueueWaitUs = static_cast<double>(stats.cumulativeQueueWaitUs) /
       static_cast<double>(stats.queueWaitSamples);
   stats.maxQueueWaitUs = std::max(stats.maxQueueWaitUs, queueWaitUs);
   stats.inflightRequests = inflightSize;

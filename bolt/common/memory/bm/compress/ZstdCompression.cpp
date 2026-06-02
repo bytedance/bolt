@@ -13,8 +13,8 @@ uint64_t zstdCompressOneShot(
     size_t sourceSize,
     char* target,
     size_t targetCapacity) {
-  const auto written =
-      ZSTD_compress(target, targetCapacity, source, sourceSize, compressionLevel);
+  const auto written = ZSTD_compress(
+      target, targetCapacity, source, sourceSize, compressionLevel);
   if (ZSTD_isError(written)) {
     BOLT_FAIL(
         "BM ZSTD compression failed, source_size={}, error={}",
@@ -55,8 +55,7 @@ ZSTD_CCtx* ensureZstdContext(ZstdCompressionContext* context) {
   return static_cast<ZSTD_CCtx*>(context->native);
 }
 
-ZSTD_DCtx* ensureZstdDecompressionContext(
-    ZstdDecompressionContext* context) {
+ZSTD_DCtx* ensureZstdDecompressionContext(ZstdDecompressionContext* context) {
   if (context == nullptr) {
     return ZSTD_createDCtx();
   }
@@ -82,11 +81,7 @@ uint64_t ZstdCompress(
   switch (options.strategy) {
     case ZstdStrategy::kOneShot:
       return zstdCompressOneShot(
-          options.compressionLevel,
-          source,
-          sourceSize,
-          target,
-          targetCapacity);
+          options.compressionLevel, source, sourceSize, target, targetCapacity);
     case ZstdStrategy::kPooledContext: {
       auto* zstdContext = ensureZstdContext(context);
       if (zstdContext == nullptr) {

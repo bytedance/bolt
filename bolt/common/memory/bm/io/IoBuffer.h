@@ -76,11 +76,7 @@ class IoBuffer {
       BOLT_FAIL("BM IoBuffer malloc failed, size={}", size);
     }
     return fromOwned(
-        data,
-        allocationSize,
-        0,
-        size,
-        [](char* p) noexcept { std::free(p); });
+        data, allocationSize, 0, size, [](char* p) noexcept { std::free(p); });
   }
 
   template <typename Deleter>

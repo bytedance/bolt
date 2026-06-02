@@ -33,10 +33,7 @@ DEFINE_uint64(
     bm_parallel_sort_memory_gb,
     8,
     "Shared ExecutionMemoryPool limit, in GiB.");
-DEFINE_uint64(
-    bm_parallel_sort_threads,
-    8,
-    "Number of parallel sort workers.");
+DEFINE_uint64(bm_parallel_sort_threads, 8, "Number of parallel sort workers.");
 DEFINE_string(
     bm_parallel_sort_allocate_size,
     "large",
@@ -192,8 +189,7 @@ struct RunCursor {
     BOLT_CHECK_NOT_NULL(block.block);
     auto blockHandle = std::move(block.block);
     VLOG(1) << "BM parallel sort verify pin begin"
-            << " worker=" << workerIndex
-            << " run_index=" << runIndex
+            << " worker=" << workerIndex << " run_index=" << runIndex
             << " block_index=" << currentBlockIndex
             << " run_blocks=" << run->blocks.size();
     pinned.handle = manager->Pin(blockHandle);
@@ -536,8 +532,7 @@ WorkerResult runWorker(
       auto block = handle.block();
       auto* values = reinterpret_cast<uint64_t*>(handle.Ptr());
       const auto blockValues = generator.pull(values, valuesPerBlock);
-      active.metadata.blocks.push_back(
-          RunBlock{std::move(block), blockValues});
+      active.metadata.blocks.push_back(RunBlock{std::move(block), blockValues});
       active.metadata.values += blockValues;
       active.handles.push_back(std::move(handle));
     }
@@ -572,8 +567,7 @@ void addStats(
     SparkListenableArbitratorContextStats& aggregate,
     const SparkListenableArbitratorContextStats& stats) {
   aggregate.automaticSpillTriggers += stats.automaticSpillTriggers;
-  aggregate.automaticSpillRequestedBytes +=
-      stats.automaticSpillRequestedBytes;
+  aggregate.automaticSpillRequestedBytes += stats.automaticSpillRequestedBytes;
   aggregate.automaticSpillShrunkenBytes += stats.automaticSpillShrunkenBytes;
   aggregate.automaticSpillReclaimedBytes += stats.automaticSpillReclaimedBytes;
   aggregate.automaticSpillReturnedBytes += stats.automaticSpillReturnedBytes;
@@ -612,8 +606,7 @@ void addStats(BufferManagerStats& aggregate, const BufferManagerStats& stats) {
 }
 
 int runBenchmark() {
-  const auto threadCount =
-      static_cast<size_t>(FLAGS_bm_parallel_sort_threads);
+  const auto threadCount = static_cast<size_t>(FLAGS_bm_parallel_sort_threads);
   const auto allocateSize =
       parseAllocateSize(FLAGS_bm_parallel_sort_allocate_size);
   const auto blockBytes = allocateSizeBytes(allocateSize);
@@ -716,8 +709,8 @@ int runBenchmark() {
 
     std::cout << "bm_parallel_sort_worker"
               << " worker=" << i
-              << " status=" << (results[i].ok ? "ok" : "failed")
-              << " error=\"" << results[i].error << "\""
+              << " status=" << (results[i].ok ? "ok" : "failed") << " error=\""
+              << results[i].error << "\""
               << " runs=" << results[i].runCount
               << " blocks=" << results[i].blockCount
               << " values=" << results[i].totalValues
@@ -730,22 +723,19 @@ int runBenchmark() {
               << " automatic_spill_triggers="
               << contexts[i]->stats().automaticSpillTriggers
               << " automatic_spill_returned_bytes="
-              << contexts[i]->stats().automaticSpillReturnedBytes
-              << "\n";
+              << contexts[i]->stats().automaticSpillReturnedBytes << "\n";
   }
 
   std::cout << "bm_parallel_sort_benchmark\n"
             << "status value=" << (ok ? "ok" : "failed") << "\n"
             << "config"
-            << " threads=" << threadCount
-            << " data_gb_per_thread="
+            << " threads=" << threadCount << " data_gb_per_thread="
             << FLAGS_bm_parallel_sort_data_gb_per_thread
             << " memory_gb=" << FLAGS_bm_parallel_sort_memory_gb
             << " allocate_size=" << toString(allocateSize)
             << " block_bytes=" << blockBytes << "\n"
             << "runs"
-            << " count=" << aggregateRuns
-            << " blocks=" << aggregateBlocks
+            << " count=" << aggregateRuns << " blocks=" << aggregateBlocks
             << " values=" << aggregateValues << "\n"
             << "timing"
             << " wall_ms=" << totalMs
@@ -763,8 +753,7 @@ int runBenchmark() {
             << aggregateContextStats.automaticSpillReclaimedBytes
             << " returned_bytes="
             << aggregateContextStats.automaticSpillReturnedBytes
-            << " time_us=" << aggregateContextStats.automaticSpillTimeUs
-            << "\n"
+            << " time_us=" << aggregateContextStats.automaticSpillTimeUs << "\n"
             << "bm_summary"
             << " reclaimed_bytes=" << aggregateStats.reclaimedBytes
             << " spill_write_bytes=" << aggregateStats.spillWriteBytes

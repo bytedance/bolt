@@ -4,20 +4,20 @@
 #include "bolt/common/memory/bm/file/FileSegmentAllocatorConfig.h"
 #include "bolt/common/memory/bm/io/IoBuffer.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <vector>
 
 #include <gflags/gflags.h>
@@ -46,9 +46,11 @@
 //   bm_write_all: allocate/fill/unpin blocks before timing; time only
 //     BufferManager::Reclaim(totalBytes), which performs spill record build,
 //     file allocation, write submission, harvest, and state/accounting updates.
-//   direct_read_batch: prepare files before timing; time windowed io_uring reads
+//   direct_read_batch: prepare files before timing; time windowed io_uring
+//   reads
 //     plus optional zstd decompression and verification.
-//   bm_read_batch: prepare spilled blocks before timing; time BatchPin() batches
+//   bm_read_batch: prepare spilled blocks before timing; time BatchPin()
+//   batches
 //     plus optional verification.
 
 DEFINE_string(
@@ -71,10 +73,7 @@ DEFINE_bool(
     bm_spill_io_verify,
     true,
     "Verify read payloads after direct and BM read cases.");
-DEFINE_string(
-    bm_spill_io_codec,
-    "all",
-    "Codec filter: all, none, or zstd.");
+DEFINE_string(bm_spill_io_codec, "all", "Codec filter: all, none, or zstd.");
 DEFINE_string(
     bm_spill_io_direction,
     "all",
@@ -134,10 +133,7 @@ struct ScopedRing {
   explicit ScopedRing(uint32_t entries) {
     const int ret = io_uring_queue_init(entries, &ring, 0);
     BOLT_CHECK_GE(
-        ret,
-        0,
-        "io_uring_queue_init failed: {}",
-        std::strerror(-ret));
+        ret, 0, "io_uring_queue_init failed: {}", std::strerror(-ret));
   }
 
   ~ScopedRing() {
@@ -245,7 +241,8 @@ IoBuffer makeRecord(uint64_t blockIndex, uint64_t blockSize, CodecKind codec) {
   return compressed;
 }
 
-IoBuffer decodeRecord(const IoBuffer& record, uint64_t rawSize, CodecKind codec) {
+IoBuffer
+decodeRecord(const IoBuffer& record, uint64_t rawSize, CodecKind codec) {
   if (codec == CodecKind::kNone) {
     auto decoded = IoBuffer::allocateFromMalloc(rawSize);
     BOLT_CHECK_EQ(record.length(), rawSize);
@@ -278,13 +275,12 @@ void writeFull(int fd, const char* data, size_t size, uint64_t offset) {
   size_t written = 0;
   while (written < size) {
     const auto ret = ::pwrite(
-        fd, data + written, size - written, static_cast<off_t>(offset + written));
+        fd,
+        data + written,
+        size - written,
+        static_cast<off_t>(offset + written));
     BOLT_CHECK_GT(
-        ret,
-        0,
-        "pwrite failed errno={} {}",
-        errno,
-        std::strerror(errno));
+        ret, 0, "pwrite failed errno={} {}", errno, std::strerror(errno));
     written += static_cast<size_t>(ret);
   }
 }
@@ -296,7 +292,11 @@ struct DirectRequest {
   uint64_t physicalSize{0};
 };
 
-void submitWrite(ScopedRing& ring, int fd, uint64_t offset, DirectRequest* request) {
+void submitWrite(
+    ScopedRing& ring,
+    int fd,
+    uint64_t offset,
+    DirectRequest* request) {
   auto* sqe = io_uring_get_sqe(&ring.ring);
   BOLT_CHECK_NOT_NULL(sqe);
   io_uring_prep_write(
@@ -308,13 +308,14 @@ void submitWrite(ScopedRing& ring, int fd, uint64_t offset, DirectRequest* reque
   io_uring_sqe_set_data(sqe, request);
   const int ret = io_uring_submit(&ring.ring);
   BOLT_CHECK_GE(
-      ret,
-      0,
-      "io_uring_submit write failed: {}",
-      std::strerror(-ret));
+      ret, 0, "io_uring_submit write failed: {}", std::strerror(-ret));
 }
 
-void submitRead(ScopedRing& ring, int fd, const StoredBlock& block, DirectRequest* request) {
+void submitRead(
+    ScopedRing& ring,
+    int fd,
+    const StoredBlock& block,
+    DirectRequest* request) {
   auto* sqe = io_uring_get_sqe(&ring.ring);
   BOLT_CHECK_NOT_NULL(sqe);
   io_uring_prep_read(
@@ -325,11 +326,7 @@ void submitRead(ScopedRing& ring, int fd, const StoredBlock& block, DirectReques
       static_cast<off_t>(block.offset));
   io_uring_sqe_set_data(sqe, request);
   const int ret = io_uring_submit(&ring.ring);
-  BOLT_CHECK_GE(
-      ret,
-      0,
-      "io_uring_submit read failed: {}",
-      std::strerror(-ret));
+  BOLT_CHECK_GE(ret, 0, "io_uring_submit read failed: {}", std::strerror(-ret));
 }
 
 TimedResult runDirectWrite(
@@ -366,10 +363,7 @@ TimedResult runDirectWrite(
     io_uring_cqe* cqe = nullptr;
     const int ret = io_uring_wait_cqe(&ring.ring, &cqe);
     BOLT_CHECK_GE(
-        ret,
-        0,
-        "io_uring_wait_cqe write failed: {}",
-        std::strerror(-ret));
+        ret, 0, "io_uring_wait_cqe write failed: {}", std::strerror(-ret));
     auto* request = static_cast<DirectRequest*>(io_uring_cqe_get_data(cqe));
     BOLT_CHECK_EQ(cqe->res, static_cast<int>(request->physicalSize));
     physicalBytes += request->physicalSize;
@@ -444,10 +438,7 @@ TimedResult runDirectRead(
     io_uring_cqe* cqe = nullptr;
     const int ret = io_uring_wait_cqe(&ring.ring, &cqe);
     BOLT_CHECK_GE(
-        ret,
-        0,
-        "io_uring_wait_cqe read failed: {}",
-        std::strerror(-ret));
+        ret, 0, "io_uring_wait_cqe read failed: {}", std::strerror(-ret));
     auto* request = static_cast<DirectRequest*>(io_uring_cqe_get_data(cqe));
     BOLT_CHECK_EQ(cqe->res, static_cast<int>(request->physicalSize));
     request->buffer.setLength(request->physicalSize);
@@ -528,7 +519,10 @@ BmPreparedBlocks prepareBmBlocks(
     handle.Destroy();
   }
   return BmPreparedBlocks{
-      std::move(memoryManager), std::move(root), std::move(manager), std::move(blocks)};
+      std::move(memoryManager),
+      std::move(root),
+      std::move(manager),
+      std::move(blocks)};
 }
 
 TimedResult runBmWrite(BmPreparedBlocks& prepared, uint64_t totalBytes) {
@@ -541,14 +535,16 @@ TimedResult runBmWrite(BmPreparedBlocks& prepared, uint64_t totalBytes) {
       elapsedMs, stats.spillWriteBytes, stats.spillPhysicalWriteBytes};
 }
 
-TimedResult runBmRead(BmPreparedBlocks& prepared, uint64_t blockSize, uint32_t inflight) {
+TimedResult
+runBmRead(BmPreparedBlocks& prepared, uint64_t blockSize, uint32_t inflight) {
   std::vector<std::shared_ptr<BlockHandle>> batch;
   batch.reserve(inflight);
   uint64_t logicalBytes = 0;
   Timer timer;
   for (size_t offset = 0; offset < prepared.blocks.size(); offset += inflight) {
     batch.clear();
-    const auto end = std::min<size_t>(prepared.blocks.size(), offset + inflight);
+    const auto end =
+        std::min<size_t>(prepared.blocks.size(), offset + inflight);
     for (size_t i = offset; i < end; ++i) {
       batch.push_back(prepared.blocks[i]);
     }
@@ -634,8 +630,7 @@ void runCase(uint64_t blockSize, CodecKind codec) {
 }
 
 int runBenchmark() {
-  if (FLAGS_bm_spill_io_codec != "all" &&
-      FLAGS_bm_spill_io_codec != "none" &&
+  if (FLAGS_bm_spill_io_codec != "all" && FLAGS_bm_spill_io_codec != "none" &&
       FLAGS_bm_spill_io_codec != "zstd") {
     throw std::invalid_argument("bm_spill_io_codec must be all, none, or zstd");
   }

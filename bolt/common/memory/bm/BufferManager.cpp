@@ -1,13 +1,13 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
-#include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
-#include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/ReclaimWriteWindow.h"
+#include "bolt/common/memory/bm/SpillStore.h"
 
 #include <glog/logging.h>
 
@@ -27,8 +27,7 @@ std::shared_ptr<BufferManager> BufferManager::Create(
 BufferManager::BufferManager(BufferManagerConfig config)
     : config_(std::move(config)),
       accounting_(std::make_unique<BufferManagerStatsCollector>()),
-      evictionQueue_(std::make_unique<EvictionQueue>()) {
-}
+      evictionQueue_(std::make_unique<EvictionQueue>()) {}
 
 BufferManager::~BufferManager() = default;
 
@@ -47,10 +46,8 @@ BufferHandle BufferManager::Allocate(size_t size, MemoryTag tag) {
   return AllocateOne(size, tag);
 }
 
-std::vector<BufferHandle> BufferManager::BatchAllocate(
-    size_t count,
-    size_t size,
-    MemoryTag tag) {
+std::vector<BufferHandle>
+BufferManager::BatchAllocate(size_t count, size_t size, MemoryTag tag) {
   std::vector<BufferHandle> handles;
   handles.reserve(count);
   for (size_t i = 0; i < count; ++i) {
@@ -72,8 +69,7 @@ BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
 
 bool BufferManager::MaybeReserve(size_t size) {
   VLOG(1) << "BM MaybeReserve begin"
-          << " size=" << size
-          << " pool_used=" << pool_->usedBytes()
+          << " size=" << size << " pool_used=" << pool_->usedBytes()
           << " pool_current=" << pool_->currentBytes()
           << " pool_reserved=" << pool_->reservedBytes()
           << " pool_available_reservation=" << pool_->availableReservation()
@@ -81,8 +77,7 @@ bool BufferManager::MaybeReserve(size_t size) {
           << " bm=" << debugString();
   const auto ok = pool_->maybeReserve(size);
   VLOG(1) << "BM MaybeReserve end"
-          << " ok=" << ok
-          << " size=" << size
+          << " ok=" << ok << " size=" << size
           << " pool_used=" << pool_->usedBytes()
           << " pool_current=" << pool_->currentBytes()
           << " pool_reserved=" << pool_->reservedBytes()
@@ -191,15 +186,13 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
         VLOG(1) << "BM Reclaim no evictable block"
                 << " target_bytes=" << targetBytes
                 << " submitted_bytes=" << submitted
-                << " reclaimed_bytes=" << reclaimed
-                << " bm=" << debugString();
+                << " reclaimed_bytes=" << reclaimed << " bm=" << debugString();
         break;
       }
 
       accounting_->RecordReclaimAttemptedBlock();
       VLOG(1) << "BM Reclaim spill candidate"
-              << " block_id=" << memory->id
-              << " tag=" << toString(memory->tag)
+              << " block_id=" << memory->id << " tag=" << toString(memory->tag)
               << " size=" << memory->size
               << " state=" << static_cast<int>(memory->state)
               << " pin_count=" << memory->pinCount
@@ -243,8 +236,7 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
 
   accounting_->RecordReclaimedBytes(reclaimed);
   VLOG(1) << "BM Reclaim end"
-          << " target_bytes=" << targetBytes
-          << " reclaimed_bytes=" << reclaimed
+          << " target_bytes=" << targetBytes << " reclaimed_bytes=" << reclaimed
           << " pool_used=" << pool_->usedBytes()
           << " pool_current=" << pool_->currentBytes()
           << " pool_reserved=" << pool_->reservedBytes()

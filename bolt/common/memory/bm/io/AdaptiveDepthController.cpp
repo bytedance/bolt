@@ -67,16 +67,15 @@ void AdaptiveDepthController::onWindow(
       throughputBytesPerSecond >= 0) {
     lastWindowThroughputBytesPerSecond_ = throughputBytesPerSecond;
   }
-  const auto validSample = std::isfinite(throughputBytesPerSecond) &&
-      throughputBytesPerSecond >= 0;
+  const auto validSample =
+      std::isfinite(throughputBytesPerSecond) && throughputBytesPerSecond >= 0;
   if (validSample) {
     if (!hasRecentThroughput_) {
       recentThroughputBytesPerSecond_ = throughputBytesPerSecond;
       hasRecentThroughput_ = true;
     } else {
       const auto alpha = config_.throughputSmoothingFactor;
-      recentThroughputBytesPerSecond_ =
-          alpha * throughputBytesPerSecond +
+      recentThroughputBytesPerSecond_ = alpha * throughputBytesPerSecond +
           (1.0 - alpha) * recentThroughputBytesPerSecond_;
     }
   }
@@ -128,8 +127,7 @@ void AdaptiveDepthController::onWindow(
   validPressureWindows_ = 0;
 }
 
-bool AdaptiveDepthController::isValidConfig(
-    const AdaptiveDepthConfig& config) {
+bool AdaptiveDepthController::isValidConfig(const AdaptiveDepthConfig& config) {
   return config.minDepth > 0 && config.increaseStep > 0 &&
       config.minDepth <= config.initialDepth &&
       config.initialDepth <= config.maxDepth &&

@@ -5,8 +5,7 @@
 namespace bytedance::bolt::memory::bm {
 namespace {
 
-std::string formatArray(
-    const std::array<uint64_t, kIoPriorityCount>& values) {
+std::string formatArray(const std::array<uint64_t, kIoPriorityCount>& values) {
   std::ostringstream out;
   out << "[high=" << values[priorityIndex(IoPriority::High)]
       << ",medium=" << values[priorityIndex(IoPriority::Medium)]
@@ -50,8 +49,7 @@ std::string DiskIoSchedulerStats::toString() const {
       << " queue_wait_samples=" << queueWaitSamples
       << " average_queue_wait_us=" << averageQueueWaitUs
       << " max_queue_wait_us=" << maxQueueWaitUs
-      << " cumulative_end_to_end_latency_us="
-      << cumulativeEndToEndLatencyUs
+      << " cumulative_end_to_end_latency_us=" << cumulativeEndToEndLatencyUs
       << " average_end_to_end_latency_us=" << averageEndToEndLatencyUs
       << " max_end_to_end_latency_us=" << maxEndToEndLatencyUs
       << " submit_batches=" << submitBatches

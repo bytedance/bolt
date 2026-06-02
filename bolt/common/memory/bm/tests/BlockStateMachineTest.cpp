@@ -1,7 +1,7 @@
-#include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
-#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/memory/bm/BlockMemory.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 
 #include <cerrno>
 #include <cstring>
@@ -37,7 +37,8 @@ class BlockStateMachineTest : public testing::Test {
 
     return SpillReadFuture{
         promise.get_future(),
-        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(
+            compress::CompressionConfig{}),
         root_.get(),
         4096};
   }
@@ -61,7 +62,9 @@ TEST_F(BlockStateMachineTest, PinAndUnpinResidentBlockUpdateCountsAndSequence) {
   EXPECT_EQ(2, memory.evictionSequence);
 }
 
-TEST_F(BlockStateMachineTest, BeginRollbackAndCompleteSpillMovePayloadAndState) {
+TEST_F(
+    BlockStateMachineTest,
+    BeginRollbackAndCompleteSpillMovePayloadAndState) {
   BlockMemory memory{8, 4096, MemoryTag::kTesting};
   memory.payload = MakePayload(memory.size, 'b');
 
