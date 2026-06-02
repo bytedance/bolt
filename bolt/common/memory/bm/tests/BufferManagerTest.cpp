@@ -179,6 +179,41 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   EXPECT_EQ(9, repin.Ptr()[4095]);
 }
 
+TEST_F(BufferManagerTest, SpillBlocksSpillsOnlyUnpinnedResidentBlocks) {
+  auto bm = makeBufferManager("spill-blocks");
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto block = handle.block();
+  std::memset(handle.Ptr(), 23, block->size());
+
+  std::array<std::shared_ptr<BlockHandle>, 1> blocks{block};
+  bm->SpillBlocks(blocks);
+
+  auto stats = bm->stats();
+  EXPECT_EQ(4096, stats.pinnedResidentBytes);
+  EXPECT_EQ(0, stats.spilledBytes);
+
+  handle = BufferHandle{};
+  EXPECT_EQ(4096, bm->reclaimableBytes());
+
+  try {
+    bm->SpillBlocks(blocks);
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  stats = bm->stats();
+  EXPECT_EQ(0, bm->reclaimableBytes());
+  EXPECT_EQ(0, stats.unpinnedResidentBytes);
+  EXPECT_EQ(4096, stats.spilledBytes);
+
+  auto repin = bm->Pin(block);
+  EXPECT_EQ(23, repin.Ptr()[0]);
+  EXPECT_EQ(23, repin.Ptr()[4095]);
+}
+
 TEST_F(BufferManagerTest, ReclaimSubmitFailurePropagatesWithoutRollback) {
   auto bm = makeBufferManager("reclaim-submit-failure");
   std::shared_ptr<BlockHandle> block;

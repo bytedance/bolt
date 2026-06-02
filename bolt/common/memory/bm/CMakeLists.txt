@@ -15,6 +15,8 @@ add_library(
   EvictionQueue.cpp
   MemoryTag.cpp
   ReclaimWriteWindow.cpp
+  SpillCandidateProvider.cpp
+  SpillWriteDriver.cpp
   SpillStore.cpp)
 
 target_compile_features(bolt_memory_bm PUBLIC cxx_std_20)
