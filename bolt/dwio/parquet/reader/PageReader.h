@@ -74,6 +74,8 @@ struct CryptoContext {
 /// encodings and presents the combination of pages and encoded values as a
 /// continuous stream accessible via readWithVisitor().
 class PageReader {
+  friend class PageReaderTestPeer;
+
  public:
   PageReader(
       std::unique_ptr<dwio::common::SeekableInputStream> stream,
