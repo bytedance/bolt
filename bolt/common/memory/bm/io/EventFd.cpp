@@ -37,7 +37,7 @@ void EventFd::notify() const {
   }
 }
 
-void EventFd::drain() const {
+void EventFd::drainNonBlocking() const {
   uint64_t value = 0;
   while (true) {
     const auto bytes = ::read(fd_.get(), &value, sizeof(value));

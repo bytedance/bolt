@@ -29,7 +29,7 @@ TEST(EventFdTest, moveTransfersReadableEvent) {
 
   EXPECT_EQ(originalFd, moved.fd());
   EXPECT_TRUE(isReadable(moved.fd()));
-  moved.drain();
+  moved.drainNonBlocking();
   EXPECT_FALSE(isReadable(moved.fd()));
 }
 
@@ -57,6 +57,6 @@ TEST(EventFdTest, notifyReturnsWhenCounterIsAlreadySaturated) {
   event.notify();
 
   EXPECT_TRUE(isReadable(event.fd()));
-  event.drain();
+  event.drainNonBlocking();
   EXPECT_FALSE(isReadable(event.fd()));
 }
