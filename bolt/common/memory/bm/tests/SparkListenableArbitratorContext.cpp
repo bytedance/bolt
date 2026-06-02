@@ -1,4 +1,4 @@
-#include "bolt/common/memory/bm/benchmark/SparkListenableArbitratorContext.h"
+#include "bolt/common/memory/bm/tests/SparkListenableArbitratorContext.h"
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/sparksql/ConfigurationResolver.h"
