@@ -4,12 +4,14 @@ add_executable(
   bolt_memory_bm_test
   BlockStateMachineTest.cpp
   BufferManagerValueMappingTest.cpp
+  BufferManagerExecutionMemoryPoolTest.cpp
   BufferManagerTest.cpp
   BufferManagerInternalsTest.cpp
   BufferManagerPrivateStateTest.cpp
   EvictionQueueTest.cpp
   ScopedFdTest.cpp
   ReclaimWriteWindowTest.cpp
+  SparkListenableArbitratorContext.cpp
 )
 
 target_compile_features(bolt_memory_bm_test PRIVATE cxx_std_20)
