@@ -2202,6 +2202,8 @@ int32_t BoltShuffleWriter::calculatePreallocBufferSize(
 
 // for CompositeRowVector
 arrow::Status BoltShuffleWriter::tryEvict(int64_t) {
+  BOLT_CHECK(evictState_ == EvictState::kEvictable);
+  EvictGuard evictGuard{evictState_};
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     partitionWriter_->setRowFormat(false);
     for (auto pid = 0; pid < numPartitions_; ++pid) {

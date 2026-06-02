@@ -299,6 +299,8 @@ arrow::Status BoltShuffleWriterV2::stop() {
 }
 
 arrow::Status BoltShuffleWriterV2::tryEvict(int64_t memLimit) {
+  BOLT_CHECK(evictState_ == EvictState::kEvictable);
+  EvictGuard evictGuard{evictState_};
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     partitionWriter_->setRowFormat(false);
     RETURN_NOT_OK(evictFullPartitions());
