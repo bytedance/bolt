@@ -67,13 +67,20 @@ class IoBuffer {
   }
 
   static IoBuffer allocateFromMalloc(size_t size) {
-    const auto allocationSize = size == 0 ? 1 : size;
+    constexpr size_t kAlignment = 4096;
+    BOLT_CHECK_GT(size, 0);
+    const auto allocationSize =
+        ((size + kAlignment - 1) / kAlignment) * kAlignment;
     auto* data = static_cast<char*>(std::malloc(allocationSize));
     if (data == nullptr) {
       BOLT_FAIL("BM IoBuffer malloc failed, size={}", size);
     }
     return fromOwned(
-        data, size, 0, size, [](char* p) noexcept { std::free(p); });
+        data,
+        allocationSize,
+        0,
+        size,
+        [](char* p) noexcept { std::free(p); });
   }
 
   template <typename Deleter>
