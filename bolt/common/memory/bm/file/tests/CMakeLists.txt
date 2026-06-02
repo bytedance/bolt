@@ -6,6 +6,7 @@ add_executable(
   FileSegmentAllocatorFactoryTest.cpp
   FileSegmentAllocatorFreeTest.cpp
   FileSegmentAllocatorImplTest.cpp
+  ManagedFileSegmentTest.cpp
   ManagedOpenFileFactoryTest.cpp
 )
 
