@@ -9,6 +9,7 @@
 namespace bytedance::bolt::memory::bm {
 
 TEST(BufferManagerValueMappingTest, AllMemoryTagsHaveStableNames) {
+  EXPECT_EQ(static_cast<size_t>(MemoryTag::kCount), kMemoryTagCount);
   EXPECT_STREQ("Unknown", toString(MemoryTag::kUnknown));
   EXPECT_STREQ("HashBuild", toString(MemoryTag::kHashBuild));
   EXPECT_STREQ("Aggregation", toString(MemoryTag::kAggregation));
