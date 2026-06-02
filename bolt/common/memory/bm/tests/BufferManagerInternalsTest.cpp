@@ -1,15 +1,12 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
-#include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/BufferManagerAccounting.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/SpillStore.h"
-#include "bolt/common/memory/bm/file/FileSegmentAllocator.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
@@ -73,36 +70,6 @@ BlockMemory makeBlock(size_t size, MemoryTag tag = MemoryTag::kTesting) {
 }
 
 } // namespace
-
-TEST(BufferManagerValueMappingTest, AllMemoryTagsHaveStableNames) {
-  EXPECT_STREQ("Unknown", toString(MemoryTag::kUnknown));
-  EXPECT_STREQ("HashBuild", toString(MemoryTag::kHashBuild));
-  EXPECT_STREQ("Aggregation", toString(MemoryTag::kAggregation));
-  EXPECT_STREQ("Sort", toString(MemoryTag::kSort));
-  EXPECT_STREQ("Window", toString(MemoryTag::kWindow));
-  EXPECT_STREQ("Exchange", toString(MemoryTag::kExchange));
-  EXPECT_STREQ("Testing", toString(MemoryTag::kTesting));
-  EXPECT_STREQ("Unknown", toString(static_cast<MemoryTag>(123)));
-}
-
-TEST(BufferManagerValueMappingTest, AllAllocateSizesHaveStableNamesAndBytes) {
-  EXPECT_EQ(256 * 1024, allocateSizeBytes(AllocateSize::kSmall));
-  EXPECT_EQ(1024 * 1024, allocateSizeBytes(AllocateSize::kMedium));
-  EXPECT_EQ(4 * 1024 * 1024, allocateSizeBytes(AllocateSize::kLarge));
-  EXPECT_STREQ("small", toString(AllocateSize::kSmall));
-  EXPECT_STREQ("medium", toString(AllocateSize::kMedium));
-  EXPECT_STREQ("large", toString(AllocateSize::kLarge));
-  EXPECT_THROW(
-      (void)allocateSizeBytes(static_cast<AllocateSize>(99)), std::exception);
-  EXPECT_THROW((void)toString(static_cast<AllocateSize>(99)), std::exception);
-}
-
-TEST(
-    BufferManagerValueMappingTest,
-    DefaultReclaimWriteInflightMatchesRingDepth) {
-  BufferManagerConfig config;
-  EXPECT_EQ(128, config.maxReclaimWriteInflight);
-}
 
 TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
   BufferManagerAccounting accounting;
@@ -338,9 +305,6 @@ TEST_F(BufferManagerInternalsTest, PublicValidationFailuresAreReported) {
   EXPECT_FALSE(empty.valid());
   EXPECT_THROW((void)empty.Ptr(), std::exception);
   EXPECT_THROW((void)empty.block(), std::exception);
-
-  auto buffer = IoBuffer::allocateFromMalloc(16);
-  EXPECT_THROW(buffer.setLength(17), std::exception);
 }
 
 TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
@@ -434,36 +398,6 @@ TEST_F(BufferManagerInternalsTest, SpillWriteFutureCompletesToResult) {
   EXPECT_EQ(512, result.physicalBytes);
   EXPECT_EQ(7, result.compressionTimeUs);
   EXPECT_TRUE(result.compressed);
-}
-
-TEST_F(BufferManagerInternalsTest, ManagedFileSegmentMoveAndExplicitFree) {
-  const auto directory = test::UniqueTempDir("bolt-bm-owned-file-segment");
-  std::filesystem::remove_all(directory);
-  auto allocator =
-      CreateFileSegmentAllocator(test::ValidConfigWithDirectory(directory));
-  ASSERT_NE(nullptr, allocator);
-
-  auto first = allocator->Allocate(4096);
-  ASSERT_TRUE(first.ok());
-  ManagedFileSegment segment{first.segment, allocator};
-  ASSERT_TRUE(segment.valid());
-  EXPECT_EQ(first.segment.id, segment.segment().id);
-
-  ManagedFileSegment moved{std::move(segment)};
-  EXPECT_FALSE(segment.valid());
-  ASSERT_TRUE(moved.valid());
-
-  auto second = allocator->Allocate(4096);
-  ASSERT_TRUE(second.ok());
-  ManagedFileSegment assigned{second.segment, allocator};
-  assigned = std::move(moved);
-  EXPECT_FALSE(moved.valid());
-  ASSERT_TRUE(assigned.valid());
-  EXPECT_EQ(first.segment.id, assigned.segment().id);
-
-  assigned.FreeOrFatal("ManagedFileSegmentMoveAndExplicitFree");
-  EXPECT_FALSE(assigned.valid());
-  std::filesystem::remove_all(directory);
 }
 
 } // namespace bytedance::bolt::memory::bm

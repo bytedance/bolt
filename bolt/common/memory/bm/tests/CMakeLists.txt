@@ -3,9 +3,11 @@ include(GoogleTest)
 add_executable(
   bolt_memory_bm_test
   BlockStateMachineTest.cpp
+  BufferManagerValueMappingTest.cpp
   BufferManagerTest.cpp
   BufferManagerInternalsTest.cpp
   BufferManagerPrivateStateTest.cpp
+  EvictionQueueTest.cpp
   ScopedFdTest.cpp
   ReclaimWriteWindowTest.cpp
 )
