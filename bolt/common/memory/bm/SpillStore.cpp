@@ -5,6 +5,7 @@
 #include "bolt/common/memory/bm/io/IoRequest.h"
 
 #include <memory>
+#include <mutex>
 #include <span>
 #include <utility>
 
@@ -31,7 +32,9 @@ std::future<IoResult> SubmitWriteRaw(
     IoPriority priority) {
   // Keep scheduler initialization before moving the only payload owner into
   // IoRequest, so initialization failure cannot destroy resident payload.
-  diskIoScheduler().ensureReady();
+  static std::once_flag schedulerReadyOnce;
+  std::call_once(
+      schedulerReadyOnce, [] { diskIoScheduler().ensureReady(); });
 
   IoRequest request;
   request.opcode = IoOpcode::Write;
