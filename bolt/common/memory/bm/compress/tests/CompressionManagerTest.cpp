@@ -58,16 +58,6 @@ uint64_t recordStoredSize(const IoBuffer& record, size_t expectedRawSize) {
       .storedSize;
 }
 
-TEST(IoBufferTest, AllocateFromMallocOwnsWritableMemory) {
-  auto buffer = IoBuffer::allocateFromMalloc(128);
-
-  ASSERT_TRUE(buffer.valid());
-  EXPECT_EQ(128, buffer.size());
-  EXPECT_EQ(128, buffer.length());
-  std::memset(buffer.data(), 42, buffer.length());
-  EXPECT_EQ(42, buffer.data()[127]);
-}
-
 TEST_F(CompressionManagerTest, NoneBuildsUncompressedMallocBackedRecord) {
   CompressionConfig config;
   config.kind = CompressionKind::kNone;

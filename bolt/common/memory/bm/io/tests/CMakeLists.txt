@@ -12,6 +12,7 @@ add_executable(
   DrrDispatcherTest.cpp
   EventFdTest.cpp
   InflightRegistryTest.cpp
+  IoBufferTest.cpp
   IoPriorityTest.cpp
   IoRequestValidatorTest.cpp
   IoRequestQueueTest.cpp
