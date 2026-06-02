@@ -7,9 +7,6 @@ add_executable(
   bolt_memory_bm_spill_io_benchmark
   BufferManagerSpillIoBenchmark.cpp)
 
-target_compile_features(bolt_memory_bm_sort_benchmark PRIVATE cxx_std_20)
-target_compile_features(
-  bolt_memory_bm_parallel_sort_benchmark PRIVATE cxx_std_20)
 target_compile_features(
   bolt_memory_bm_parallel_sort_prefetch_benchmark PRIVATE cxx_std_20)
 target_compile_features(bolt_memory_bm_spill_io_benchmark PRIVATE cxx_std_20)
