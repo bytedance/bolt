@@ -29,6 +29,8 @@ struct BlockMemory {
   std::weak_ptr<BufferManager> owner;
   BlockMemoryState state{BlockMemoryState::kInMemory};
   uint32_t pinCount{0};
+  // Generation token for lazy eviction queue entries. It changes whenever an
+  // older queued entry should no longer represent this block's evictability.
   uint64_t evictionSequence{0};
   std::optional<IoBuffer> payload;
   std::optional<ManagedFileSegment> segment;
