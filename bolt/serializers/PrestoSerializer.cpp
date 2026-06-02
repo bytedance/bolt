@@ -30,6 +30,8 @@
 
 #include "bolt/serializers/PrestoSerializer.h"
 #include <folly/compression/Zstd.h>
+
+#include <limits>
 #include "bolt/common/base/Crc.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
@@ -3249,7 +3251,7 @@ void flushUncompressed(
     int32_t numRows,
     OutputStream* out,
     PrestoOutputStreamListener* listener) {
-  int32_t offset = out->tellp();
+  const auto offset = out->tellp();
 
   char codecMask = 0;
 #ifdef BOLT_ENABLE_CRC
@@ -3291,13 +3293,23 @@ void flushUncompressed(
 #endif
 
   // Fill in uncompressedSizeInBytes & sizeInBytes
-  int32_t size = (int32_t)out->tellp() - offset;
+  const auto endOffset = out->tellp();
+  const auto size = static_cast<int64_t>(endOffset - offset);
   BOLT_CHECK(
-      size > 0,
-      "uncompressed size {} should be positive, numRows {}",
+      size > kHeaderSize,
+      "serialized page size {} should exceed header size {}, numRows {}",
       size,
+      kHeaderSize,
       numRows);
-  int32_t uncompressedSize = size - kHeaderSize;
+
+  const int64_t uncompressedSize64 = size - kHeaderSize;
+  BOLT_CHECK(
+      uncompressedSize64 <= std::numeric_limits<int32_t>::max(),
+      "uncompressed size {} exceeds INT32_MAX, numRows {}",
+      uncompressedSize64,
+      numRows);
+  const auto uncompressedSize = static_cast<int32_t>(uncompressedSize64);
+
 #ifdef BOLT_ENABLE_CRC
   int64_t crc = 0;
   if (listener) {
@@ -3305,13 +3317,13 @@ void flushUncompressed(
   }
 #endif
 
-  out->seekp(offset + kSizeInBytesOffset);
+  out->seekp(offset + static_cast<std::streampos>(kSizeInBytesOffset));
   writeInt32(out, uncompressedSize);
   writeInt32(out, uncompressedSize);
 #ifdef BOLT_ENABLE_CRC
   writeInt64(out, crc);
 #endif
-  out->seekp(offset + size);
+  out->seekp(endOffset);
 }
 
 void flushSerialization(
@@ -3342,7 +3354,7 @@ void flushSerialization(
   if (listener) {
     listener->pause();
   }
-  const int32_t endSize = output->tellp();
+  const auto endSize = output->tellp();
   // Fill in crc
   int64_t crc = 0;
   if (listener) {
@@ -3382,12 +3394,18 @@ void flushCompressed(
     stream->flush(&out);
   }
 
-  const int32_t uncompressedSize = out.tellp();
+  const auto uncompressedSize64 = out.tellp();
   BOLT_CHECK(
-      uncompressedSize > 0,
+      uncompressedSize64 > 0,
       "uncompressedSize {} should be positive, numRows {}",
-      uncompressedSize,
+      uncompressedSize64,
       numRows);
+  BOLT_CHECK(
+      uncompressedSize64 <= std::numeric_limits<int32_t>::max(),
+      "uncompressedSize {} exceeds INT32_MAX, numRows {}",
+      uncompressedSize64,
+      numRows);
+  const auto uncompressedSize = static_cast<int32_t>(uncompressedSize64);
   auto iobuf = out.getIOBuf();
 
   // compress

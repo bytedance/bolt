@@ -31,6 +31,9 @@
 #include "bolt/serializers/PrestoSerializer.h"
 #include <folly/Random.h>
 #include <gtest/gtest.h>
+
+#include <limits>
+
 #include <vector>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/ByteStream.h"
@@ -720,6 +723,73 @@ TEST_P(PrestoSerializerTest, ioBufRoundTrip) {
 
     assertEqualVectors(inputRowVector, outputRowVector);
   }
+}
+
+TEST_P(PrestoSerializerTest, largeAbsoluteOffsetDoesNotOverflowWhenFlushing) {
+  auto rowVector = makeTestVector(1024);
+  auto paramOptions = getParamSerdeOptions(nullptr);
+  auto arena = std::make_unique<StreamArena>(pool_.get());
+  auto rowType = asRowType(rowVector->type());
+  auto serializer = serde_->createSerializer(
+      rowType, rowVector->size(), arena.get(), &paramOptions);
+  serializer->append(rowVector);
+
+  class LargeOffsetOutputStream : public OutputStream {
+   public:
+    explicit LargeOffsetOutputStream(
+        std::streampos initialPos,
+        OutputStreamListener* listener = nullptr)
+        : OutputStream(listener), pos_(initialPos), maxPos_(initialPos) {}
+
+    void write(const char* s, std::streamsize count) override {
+      pos_ += count;
+      if (maxPos_ < pos_) {
+        maxPos_ = pos_;
+      }
+      if (listener_) {
+        listener_->onWrite(s, count);
+      }
+    }
+
+    std::streampos tellp() const override {
+      return pos_;
+    }
+
+    void seekp(std::streampos pos) override {
+      if (static_cast<int64_t>(pos) < 0) {
+        sawNegativeSeek_ = true;
+      }
+      pos_ = pos;
+      if (maxPos_ < pos_) {
+        maxPos_ = pos_;
+      }
+    }
+
+    std::streampos maxPos() const {
+      return maxPos_;
+    }
+
+    bool sawNegativeSeek() const {
+      return sawNegativeSeek_;
+    }
+
+   private:
+    std::streampos pos_;
+    std::streampos maxPos_;
+    bool sawNegativeSeek_{false};
+  };
+
+  const auto initialPos =
+      static_cast<std::streampos>(std::numeric_limits<int32_t>::max() - 128);
+  bytedance::bolt::serializer::presto::PrestoOutputStreamListener listener;
+  LargeOffsetOutputStream out(initialPos, &listener);
+
+  serializer->flush(&out);
+
+  EXPECT_FALSE(out.sawNegativeSeek());
+  EXPECT_GT(
+      static_cast<int64_t>(out.maxPos()), std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(out.tellp(), out.maxPos());
 }
 
 #ifdef IS_BUILDING_WITH_ASAN
