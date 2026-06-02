@@ -9,10 +9,9 @@ add_library(
   BlockHandle.cpp
   BlockStateMachine.cpp
   BufferHandle.cpp
-  BufferManagerAccounting.cpp
   BufferManager.cpp
-  BufferManagerObservability.cpp
   BufferManagerReclaimer.cpp
+  BufferManagerStats.cpp
   EvictionQueue.cpp
   MemoryTag.cpp
   ReclaimWriteWindow.cpp

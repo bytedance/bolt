@@ -2,7 +2,7 @@
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
-#include "bolt/common/memory/bm/BufferManagerAccounting.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
@@ -72,7 +72,7 @@ BlockMemory makeBlock(size_t size, MemoryTag tag = MemoryTag::kTesting) {
 } // namespace
 
 TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
-  BufferManagerAccounting accounting;
+  BufferManagerStatsCollector accounting;
   auto memory = makeBlock(4096, MemoryTag::kSort);
   memory.pinCount = 1;
 
@@ -122,7 +122,7 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
 }
 
 TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
-  BufferManagerAccounting accounting;
+  BufferManagerStatsCollector accounting;
   auto memory = makeBlock(8192, MemoryTag::kAggregation);
   memory.pinCount = 1;
 
@@ -178,7 +178,7 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
 
 TEST_F(BufferManagerInternalsTest, AccountingDestroysBlocksInEachState) {
   {
-    BufferManagerAccounting accounting;
+    BufferManagerStatsCollector accounting;
     auto memory = makeBlock(1024, MemoryTag::kTesting);
     memory.pinCount = 1;
     accounting.RecordAllocate(memory);
@@ -186,7 +186,7 @@ TEST_F(BufferManagerInternalsTest, AccountingDestroysBlocksInEachState) {
     EXPECT_EQ(0, accounting.stats().liveBlocks);
   }
   {
-    BufferManagerAccounting accounting;
+    BufferManagerStatsCollector accounting;
     auto memory = makeBlock(1024, MemoryTag::kTesting);
     memory.pinCount = 1;
     accounting.RecordAllocate(memory);
@@ -196,7 +196,7 @@ TEST_F(BufferManagerInternalsTest, AccountingDestroysBlocksInEachState) {
     EXPECT_EQ(0, accounting.stats().liveBlocks);
   }
   {
-    BufferManagerAccounting accounting;
+    BufferManagerStatsCollector accounting;
     auto memory = makeBlock(1024, MemoryTag::kTesting);
     memory.pinCount = 1;
     accounting.RecordAllocate(memory);
@@ -208,7 +208,7 @@ TEST_F(BufferManagerInternalsTest, AccountingDestroysBlocksInEachState) {
     EXPECT_EQ(0, accounting.stats().liveBlocks);
   }
   {
-    BufferManagerAccounting accounting;
+    BufferManagerStatsCollector accounting;
     auto memory = makeBlock(1024, MemoryTag::kTesting);
     memory.pinCount = 1;
     accounting.RecordAllocate(memory);
@@ -224,7 +224,7 @@ TEST_F(BufferManagerInternalsTest, AccountingDestroysBlocksInEachState) {
     EXPECT_EQ(0, accounting.stats().liveBlocks);
   }
   {
-    BufferManagerAccounting accounting;
+    BufferManagerStatsCollector accounting;
     auto memory = makeBlock(1024, MemoryTag::kTesting);
     memory.pinCount = 1;
     accounting.RecordAllocate(memory);

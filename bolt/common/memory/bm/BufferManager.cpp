@@ -3,7 +3,7 @@
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/common/memory/bm/BufferManagerAccounting.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
 #include "bolt/common/memory/bm/SpillStore.h"
@@ -26,7 +26,7 @@ std::shared_ptr<BufferManager> BufferManager::Create(
 
 BufferManager::BufferManager(BufferManagerConfig config)
     : config_(std::move(config)),
-      accounting_(std::make_unique<BufferManagerAccounting>()),
+      accounting_(std::make_unique<BufferManagerStatsCollector>()),
       evictionQueue_(std::make_unique<EvictionQueue>()) {
 }
 
