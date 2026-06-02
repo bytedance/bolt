@@ -3,12 +3,15 @@
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/BufferManagerStats.h"
+#include "bolt/common/memory/bm/SpillCandidateProvider.h"
+#include "bolt/common/memory/bm/SpillWriteDriver.h"
 #include "bolt/common/memory/bm/io/IoBuffer.h"
 
 #include <cerrno>
 #include <future>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -130,6 +133,65 @@ TEST(ReclaimWriteWindowTest, HarvestIoFailurePropagatesWithoutRollback) {
   EXPECT_FALSE(first->payload.has_value());
   EXPECT_FALSE(second->payload.has_value());
   EXPECT_EQ(1, window.pendingCount());
+}
+
+TEST(SpillCandidateProviderTest, SkipsPinnedAndReturnsUnpinnedResidentBlocks) {
+  auto pinned = std::make_shared<BlockMemory>(1, 4096, MemoryTag::kTesting);
+  pinned->payload = IoBuffer::allocateFromMalloc(4096);
+  pinned->pinCount = 1;
+  auto pinnedHandle = std::make_shared<BlockHandle>(pinned);
+
+  auto unpinned = makeUnpinnedResidentBlock(8192);
+  auto unpinnedHandle = std::make_shared<BlockHandle>(unpinned);
+
+  std::vector<std::shared_ptr<BlockHandle>> blocks{
+      pinnedHandle, nullptr, unpinnedHandle};
+  auto provider = MakeBlockHandleSpillCandidateProvider(blocks);
+
+  EXPECT_EQ(unpinned, provider());
+  EXPECT_EQ(nullptr, provider());
+}
+
+TEST(SpillWriteDriverTest, SpillsCandidatesWithFakeWrites) {
+  BufferManagerStatsCollector accounting;
+  auto first = makeUnpinnedResidentBlock(4096);
+  auto second = makeUnpinnedResidentBlock(8192);
+  accounting.RecordAllocate(*first);
+  accounting.RecordAllocate(*second);
+  accounting.OnResidentUnpinned(*first);
+  accounting.OnResidentUnpinned(*second);
+
+  std::vector<std::shared_ptr<BlockMemory>> candidates{first, second};
+  size_t index = 0;
+  size_t submitCount = 0;
+
+  SpillWriteDriver driver{
+      1,
+      IoPriority::Medium,
+      [&submitCount](IoBuffer& payload, size_t rawSize, IoPriority priority) {
+        EXPECT_TRUE(payload.valid());
+        EXPECT_EQ(IoPriority::Medium, priority);
+        ++submitCount;
+        return makeCompletedWrite(rawSize);
+      },
+      accounting};
+
+  const auto reclaimed = driver.Spill(0, [&]() -> std::shared_ptr<BlockMemory> {
+    if (index == candidates.size()) {
+      return nullptr;
+    }
+    return candidates[index++];
+  });
+
+  EXPECT_EQ(2, submitCount);
+  EXPECT_EQ(4096 + 8192, reclaimed);
+  EXPECT_EQ(BlockMemoryState::kSpilled, first->state);
+  EXPECT_EQ(BlockMemoryState::kSpilled, second->state);
+
+  const auto stats = accounting.stats();
+  EXPECT_EQ(2, stats.reclaimAttemptedBlocks);
+  EXPECT_EQ(2, stats.spillWriteCount);
+  EXPECT_EQ(4096 + 8192, stats.reclaimedBytes);
 }
 
 } // namespace bytedance::bolt::memory::bm

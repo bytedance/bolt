@@ -4,13 +4,22 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <span>
 
 namespace bytedance::bolt::memory::bm {
 
 class BufferHandle;
 class BufferManager;
 struct BlockMemory;
+class BlockHandle;
+
+using SpillCandidateProvider =
+    std::function<std::shared_ptr<BlockMemory>()>;
+
+SpillCandidateProvider MakeBlockHandleSpillCandidateProvider(
+    std::span<const std::shared_ptr<BlockHandle>> blocks);
 
 class BlockHandle {
  public:
@@ -23,6 +32,8 @@ class BlockHandle {
  private:
   std::shared_ptr<BlockMemory> memory_;
 
+  friend SpillCandidateProvider MakeBlockHandleSpillCandidateProvider(
+      std::span<const std::shared_ptr<BlockHandle>> blocks);
   friend class BufferHandle;
   friend class BufferManager;
 };

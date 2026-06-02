@@ -6,8 +6,9 @@
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
 #include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
-#include "bolt/common/memory/bm/ReclaimWriteWindow.h"
+#include "bolt/common/memory/bm/SpillCandidateProvider.h"
 #include "bolt/common/memory/bm/SpillStore.h"
+#include "bolt/common/memory/bm/SpillWriteDriver.h"
 
 #include <glog/logging.h>
 
@@ -154,6 +155,32 @@ void BufferManager::Prefetch(
   }
 }
 
+void BufferManager::SpillBlocks(
+    std::span<const std::shared_ptr<BlockHandle>> blocks) {
+  VLOG(1) << "BM SpillBlocks begin"
+          << " requested_blocks=" << blocks.size()
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
+
+  auto driver = MakeSpillWriteDriver();
+  const auto reclaimed =
+      driver.Spill(0, MakeBlockHandleSpillCandidateProvider(blocks));
+
+  VLOG(1) << "BM SpillBlocks end"
+          << " requested_blocks=" << blocks.size()
+          << " reclaimed_bytes=" << reclaimed
+          << " pool_used=" << pool_->usedBytes()
+          << " pool_current=" << pool_->currentBytes()
+          << " pool_reserved=" << pool_->reservedBytes()
+          << " pool_available_reservation=" << pool_->availableReservation()
+          << " pool_releasable_reservation=" << pool_->releasableReservation()
+          << " bm=" << debugString();
+}
+
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   accounting_->RecordReclaim();
   VLOG(1) << "BM Reclaim begin"
@@ -164,77 +191,26 @@ uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
           << " pool_available_reservation=" << pool_->availableReservation()
           << " pool_releasable_reservation=" << pool_->releasableReservation()
           << " bm=" << debugString();
-  BOLT_CHECK_GT(config_.maxReclaimWriteInflight, 0);
 
-  ReclaimWriteWindow writeWindow{
-      config_.maxReclaimWriteInflight,
-      config_.writePriority,
-      [this](IoBuffer& payload, size_t rawSize, IoPriority priority) {
-        return spillStore_->SubmitWriteBlock(payload, rawSize, priority);
-      },
-      *accounting_};
-  uint64_t submitted = 0;
-  uint64_t reclaimed = 0;
-  bool noMoreEvictable = false;
-
-  auto submitMore = [&]() {
-    while (writeWindow.canSubmit() &&
-           (targetBytes == 0 || submitted < targetBytes) && !noMoreEvictable) {
-      auto memory = evictionQueue_->PopEvictable();
-      if (!memory) {
-        noMoreEvictable = true;
-        VLOG(1) << "BM Reclaim no evictable block"
-                << " target_bytes=" << targetBytes
-                << " submitted_bytes=" << submitted
-                << " reclaimed_bytes=" << reclaimed << " bm=" << debugString();
-        break;
-      }
-
-      accounting_->RecordReclaimAttemptedBlock();
-      VLOG(1) << "BM Reclaim spill candidate"
-              << " block_id=" << memory->id << " tag=" << toString(memory->tag)
-              << " size=" << memory->size
-              << " state=" << static_cast<int>(memory->state)
-              << " pin_count=" << memory->pinCount
-              << " sequence=" << memory->evictionSequence
-              << " submitted_so_far=" << submitted
-              << " reclaimed_so_far=" << reclaimed
-              << " target_bytes=" << targetBytes;
-
-      const auto blockSize = memory->size;
-      writeWindow.Submit(std::move(memory));
-      submitted += blockSize;
-    }
-  };
-
-  submitMore();
-  while (writeWindow.hasPending()) {
-    auto result = writeWindow.HarvestNext();
-    if (!result.ok()) {
-      BOLT_FAIL(
-          "BM spill write failed, block_id={}, io_error={}, native_error={}, bytes={}",
-          result.memory->id,
-          static_cast<int>(result.io.error),
-          result.io.nativeErrorCode,
-          result.io.bytes);
+  auto driver = MakeSpillWriteDriver();
+  const auto reclaimed = driver.Spill(targetBytes, [this, targetBytes]() {
+    auto memory = evictionQueue_->PopEvictable();
+    if (!memory) {
+      VLOG(1) << "BM Reclaim no evictable block"
+              << " target_bytes=" << targetBytes << " bm=" << debugString();
+      return memory;
     }
 
-    reclaimed += result.reclaimedBytes;
-    VLOG(1) << "BM Reclaim spill finished"
-            << " block_id=" << result.memory->id
-            << " block_reclaimed_bytes=" << result.reclaimedBytes
-            << " submitted_so_far=" << submitted
-            << " reclaimed_so_far=" << reclaimed
-            << " target_bytes=" << targetBytes
-            << " inflight=" << writeWindow.pendingCount()
-            << " bm=" << debugString();
+    VLOG(1) << "BM Reclaim spill candidate"
+            << " block_id=" << memory->id << " tag=" << toString(memory->tag)
+            << " size=" << memory->size
+            << " state=" << static_cast<int>(memory->state)
+            << " pin_count=" << memory->pinCount
+            << " sequence=" << memory->evictionSequence
+            << " target_bytes=" << targetBytes;
+    return memory;
+  });
 
-    if (targetBytes == 0 || reclaimed < targetBytes) {
-      submitMore();
-    }
-  }
-
-  accounting_->RecordReclaimedBytes(reclaimed);
   VLOG(1) << "BM Reclaim end"
           << " target_bytes=" << targetBytes << " reclaimed_bytes=" << reclaimed
           << " pool_used=" << pool_->usedBytes()
@@ -336,6 +312,16 @@ void BufferManager::SubmitRead(
       spillStore_->SubmitReadBlock(*memory.segment, memory.size, priority);
   BlockStateMachine::SubmitRead(memory, std::move(future));
   accounting_->OnReadSubmitted(memory);
+}
+
+SpillWriteDriver BufferManager::MakeSpillWriteDriver() {
+  return SpillWriteDriver{
+      config_.maxReclaimWriteInflight,
+      config_.writePriority,
+      [this](IoBuffer& payload, size_t rawSize, IoPriority priority) {
+        return spillStore_->SubmitWriteBlock(payload, rawSize, priority);
+      },
+      *accounting_};
 }
 
 BufferHandle BufferManager::MakeHandle(

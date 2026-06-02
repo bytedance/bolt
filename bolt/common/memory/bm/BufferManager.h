@@ -17,6 +17,7 @@ namespace bytedance::bolt::memory::bm {
 struct BlockMemory;
 class BufferManagerStatsCollector;
 class EvictionQueue;
+class SpillWriteDriver;
 class SpillStore;
 
 struct BufferManagerConfig {
@@ -36,15 +37,17 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   ~BufferManager();
 
   BufferHandle Allocate(size_t size, MemoryTag tag);
+  BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
+
   std::vector<BufferHandle>
   BatchAllocate(size_t count, size_t size, MemoryTag tag);
-  bool MaybeReserve(size_t size);
-  void ReleaseUnusedReservation();
-  BufferHandle Pin(const std::shared_ptr<BlockHandle>& block);
   std::vector<BufferHandle> BatchPin(
       std::span<const std::shared_ptr<BlockHandle>> blocks);
   void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks);
+  void SpillBlocks(std::span<const std::shared_ptr<BlockHandle>> blocks);
 
+  bool MaybeReserve(size_t size);
+  void ReleaseUnusedReservation();
   uint64_t Reclaim(uint64_t targetBytes);
   uint64_t reclaimableBytes() const;
   BufferManagerStats stats() const;
@@ -63,6 +66,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   void SubmitRead(
       const std::shared_ptr<BlockHandle>& block,
       IoPriority priority);
+  SpillWriteDriver MakeSpillWriteDriver();
   BufferHandle MakeHandle(const std::shared_ptr<BlockHandle>& block);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
