@@ -12,7 +12,7 @@
 
 namespace bytedance::bolt::memory::bm {
 
-class BufferManagerAccounting;
+class BufferManagerStatsCollector;
 struct BlockMemory;
 
 class ReclaimWriteWindow {
@@ -34,7 +34,7 @@ class ReclaimWriteWindow {
       size_t maxInflight,
       IoPriority priority,
       SubmitWrite submitWrite,
-      BufferManagerAccounting& accounting);
+      BufferManagerStatsCollector& accounting);
 
   bool canSubmit() const;
   bool hasPending() const;
@@ -53,7 +53,7 @@ class ReclaimWriteWindow {
   size_t maxInflight_{0};
   IoPriority priority_;
   SubmitWrite submitWrite_;
-  BufferManagerAccounting& accounting_;
+  BufferManagerStatsCollector& accounting_;
   std::deque<PendingWrite> pending_;
 };
 

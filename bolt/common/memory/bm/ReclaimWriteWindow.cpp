@@ -3,7 +3,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
-#include "bolt/common/memory/bm/BufferManagerAccounting.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 
 #include <utility>
 
@@ -12,7 +12,7 @@ ReclaimWriteWindow::ReclaimWriteWindow(
     size_t maxInflight,
     IoPriority priority,
     SubmitWrite submitWrite,
-    BufferManagerAccounting& accounting)
+    BufferManagerStatsCollector& accounting)
     : maxInflight_(maxInflight),
       priority_(priority),
       submitWrite_(std::move(submitWrite)),

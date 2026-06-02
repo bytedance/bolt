@@ -3,7 +3,7 @@
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
-#include "bolt/common/memory/bm/BufferManagerObservability.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 
@@ -15,7 +15,7 @@
 namespace bytedance::bolt::memory::bm {
 
 struct BlockMemory;
-class BufferManagerAccounting;
+class BufferManagerStatsCollector;
 class EvictionQueue;
 class SpillStore;
 
@@ -72,7 +72,7 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   std::unique_ptr<SpillStore> spillStore_;
   BufferManagerConfig config_;
   uint64_t nextBlockId_{1};
-  std::unique_ptr<BufferManagerAccounting> accounting_;
+  std::unique_ptr<BufferManagerStatsCollector> accounting_;
   std::unique_ptr<EvictionQueue> evictionQueue_;
 
   friend class BufferHandle;

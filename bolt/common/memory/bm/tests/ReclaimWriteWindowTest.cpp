@@ -2,7 +2,7 @@
 
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
-#include "bolt/common/memory/bm/BufferManagerAccounting.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/io/IoBuffer.h"
 
 #include <cerrno>
@@ -43,7 +43,7 @@ SpillWriteFuture makeFailedWrite() {
 } // namespace
 
 TEST(ReclaimWriteWindowTest, SubmitAndHarvestCompletesSpillLifecycle) {
-  BufferManagerAccounting accounting;
+  BufferManagerStatsCollector accounting;
   auto block = makeUnpinnedResidentBlock(4096);
   accounting.RecordAllocate(*block);
   accounting.OnResidentUnpinned(*block);
@@ -76,7 +76,7 @@ TEST(ReclaimWriteWindowTest, SubmitAndHarvestCompletesSpillLifecycle) {
 }
 
 TEST(ReclaimWriteWindowTest, SubmitFailurePropagatesWithoutRollback) {
-  BufferManagerAccounting accounting;
+  BufferManagerStatsCollector accounting;
   auto block = makeUnpinnedResidentBlock(4096);
   accounting.RecordAllocate(*block);
   accounting.OnResidentUnpinned(*block);
@@ -97,7 +97,7 @@ TEST(ReclaimWriteWindowTest, SubmitFailurePropagatesWithoutRollback) {
 }
 
 TEST(ReclaimWriteWindowTest, HarvestIoFailurePropagatesWithoutRollback) {
-  BufferManagerAccounting accounting;
+  BufferManagerStatsCollector accounting;
   auto first = makeUnpinnedResidentBlock(4096);
   auto second = makeUnpinnedResidentBlock(8192);
   accounting.RecordAllocate(*first);

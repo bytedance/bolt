@@ -15,7 +15,7 @@
 
 #define private public
 #include "bolt/common/memory/bm/BlockHandle.h"
-#include "bolt/common/memory/bm/BufferManagerAccounting.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #undef private
 
