@@ -5,6 +5,7 @@
 namespace bytedance::bolt::memory::bm {
 
 void EvictionQueue::Add(const std::shared_ptr<BlockMemory>& block) {
+  // Snapshot the block generation so stale entries can be skipped lazily.
   queue_.push_back({block, block->evictionSequence});
 }
 
@@ -33,6 +34,8 @@ EvictionQueue::Stats EvictionQueue::stats() const {
 bool EvictionQueue::IsEvictable(
     const std::shared_ptr<BlockMemory>& block,
     uint64_t sequence) {
+  // A mismatched generation means this queue entry predates a pin/unpin or
+  // spill/read transition, so it must not be used as a reclaim candidate.
   return block && block->evictionSequence == sequence && block->pinCount == 0 &&
       block->state == BlockMemoryState::kInMemory && block->payload.has_value();
 }
