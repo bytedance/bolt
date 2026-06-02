@@ -2,11 +2,11 @@
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BufferManager.h"
-#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
-#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/SpillStore.h"
+#include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
@@ -315,7 +315,8 @@ TEST_F(BufferManagerInternalsTest, SpillReadFutureDecodesRawRecord) {
   compress::CompressionConfig config;
   config.kind = compress::CompressionKind::kNone;
   compress::CompressionManager codec{config};
-  auto record = codec.BuildSpillRecord(std::span<const char>(raw.data(), raw.length()));
+  auto record =
+      codec.BuildSpillRecord(std::span<const char>(raw.data(), raw.length()));
 
   std::promise<IoResult> promise;
   IoResult io;
@@ -352,7 +353,8 @@ TEST_F(
 
     SpillReadFuture future{
         promise.get_future(),
-        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(
+            compress::CompressionConfig{}),
         root_.get(),
         4096};
     auto result = future.get();
@@ -372,7 +374,8 @@ TEST_F(
 
     SpillReadFuture future{
         promise.get_future(),
-        std::make_shared<compress::CompressionManager>(compress::CompressionConfig{}),
+        std::make_shared<compress::CompressionManager>(
+            compress::CompressionConfig{}),
         root_.get(),
         4096};
     EXPECT_THROW((void)future.get(), std::exception);

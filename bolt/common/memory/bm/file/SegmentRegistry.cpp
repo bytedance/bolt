@@ -12,7 +12,9 @@ void SegmentRegistry::Register(SegmentRecord record) {
   records_.emplace(record.segment.id, std::move(record));
 }
 
-FileErrorCode SegmentRegistry::Take(uint64_t segment_id, SegmentRecord* record) {
+FileErrorCode SegmentRegistry::Take(
+    uint64_t segment_id,
+    SegmentRecord* record) {
   const auto it = records_.find(segment_id);
   if (it == records_.end()) {
     return FileErrorCode::kDoubleFree;

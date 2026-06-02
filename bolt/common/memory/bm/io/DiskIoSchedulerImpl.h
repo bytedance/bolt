@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "bolt/common/memory/bm/base/ScopedFd.h"
 #include "bolt/common/memory/bm/io/DepthController.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
@@ -19,7 +20,6 @@
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoRequestQueue.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
-#include "bolt/common/memory/bm/base/ScopedFd.h"
 
 namespace bytedance::bolt::memory::bm {
 

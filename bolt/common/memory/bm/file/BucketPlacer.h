@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "bolt/common/memory/bm/file/SegmentRegistry.h"
 #include "bolt/common/memory/bm/file/FileSegmentAllocatorTypes.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFile.h"
+#include "bolt/common/memory/bm/file/SegmentRegistry.h"
 
 namespace bytedance::bolt::memory::bm {
 

@@ -9,11 +9,12 @@
 
 namespace bytedance::bolt::memory::bm {
 
-FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(FileSegmentAllocatorConfig config)
+FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(
+    FileSegmentAllocatorConfig config)
     : config_(std::move(config)),
       allocator_id_(bytedance::bolt::makeUuid()),
-      directory_((std::filesystem::path(config_.directory) / allocator_id_)
-                     .string()),
+      directory_(
+          (std::filesystem::path(config_.directory) / allocator_id_).string()),
       dedicated_placer_(directory_) {
   BOLT_CHECK(
       ValidateFileSegmentAllocatorConfig(config_) == FileErrorCode::kOk,
@@ -50,8 +51,8 @@ FileAllocateResult FileSegmentAllocatorImpl::Allocate(int64_t size) {
     return result;
   }
 
-  const auto it =
-      std::lower_bound(config_.bucket_sizes.begin(), config_.bucket_sizes.end(), size);
+  const auto it = std::lower_bound(
+      config_.bucket_sizes.begin(), config_.bucket_sizes.end(), size);
   if (it == config_.bucket_sizes.end()) {
     return AllocateDedicated(size);
   }
@@ -97,7 +98,8 @@ FileAllocateResult FileSegmentAllocatorImpl::AllocateDedicated(int64_t size) {
   return allocation.result;
 }
 
-FileFreeResult FileSegmentAllocatorImpl::FreeBucket(const SegmentRecord& record) {
+FileFreeResult FileSegmentAllocatorImpl::FreeBucket(
+    const SegmentRecord& record) {
   if (record.bucket_index >= buckets_.size()) {
     FileFreeResult result;
     result.error = FileErrorCode::kInvalidSegment;

@@ -1,5 +1,5 @@
-#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 #include "bolt/common/memory/bm/io/IoUringBackend.h"
@@ -139,8 +139,7 @@ uint64_t roundOps(uint64_t totalBytes, size_t blockSize) {
 
 std::string sanitizedName(std::string name) {
   for (auto& c : name) {
-    const bool keep =
-        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
         (c >= '0' && c <= '9');
     if (!keep) {
       c = '_';
@@ -152,8 +151,8 @@ std::string sanitizedName(std::string name) {
 std::string benchmarkPath(const std::string& caseName) {
   std::ostringstream out;
   out << FLAGS_bm_io_benchmark_dir << "/bolt_bm_io_"
-      << static_cast<uint64_t>(::getpid()) << "_"
-      << sanitizedName(caseName) << ".dat";
+      << static_cast<uint64_t>(::getpid()) << "_" << sanitizedName(caseName)
+      << ".dat";
   return out.str();
 }
 
@@ -235,8 +234,7 @@ PhaseMetrics runRawPhase(
           fillBuffer(buffer.data(), buffer.size(), op + worker);
         }
         const auto offset = static_cast<off_t>(op * blockSize);
-        const auto rc =
-            phase == Phase::Write
+        const auto rc = phase == Phase::Write
             ? ::pwrite(fd, buffer.data(), blockSize, offset)
             : ::pread(fd, buffer.data(), blockSize, offset);
         if (rc == static_cast<ssize_t>(blockSize)) {
@@ -364,9 +362,7 @@ PhaseMetrics runRawIoUringPhase(
       completedOps, completedBytes, errors, elapsedMs(start, end)};
 }
 
-DiskIoSchedulerConfig schedulerConfig(
-    uint32_t depth,
-    bool adaptive) {
+DiskIoSchedulerConfig schedulerConfig(uint32_t depth, bool adaptive) {
   DiskIoSchedulerConfig config;
   config.ringDepth = std::max<uint32_t>(1, depth);
   if (adaptive) {
@@ -401,7 +397,7 @@ IoRequest makeRequest(
     int fd,
     size_t blockSize,
     uint64_t op,
-  std::unique_ptr<char[]> buffer) {
+    std::unique_ptr<char[]> buffer) {
   return makeRequest(
       phase,
       fd,
@@ -476,7 +472,8 @@ PhaseMetrics runSchedulerPhase(
   }
   const auto end = Clock::now();
 
-  return PhaseMetrics{completedOps, completedBytes, errors, elapsedMs(start, end)};
+  return PhaseMetrics{
+      completedOps, completedBytes, errors, elapsedMs(start, end)};
 }
 
 CaseMetrics runRawCase(
@@ -553,32 +550,25 @@ void printPhaseSummary(
     const PhaseMetrics& metrics,
     double fsyncMs = 0) {
   std::cout << "bm_io_benchmark"
-            << " case=" << caseName
-            << " phase=" << phaseName(phase)
-            << " block_size=" << blockSize
-            << " depth=" << depth
-            << " adaptive=" << adaptive
-            << " buffered_io=true"
+            << " case=" << caseName << " phase=" << phaseName(phase)
+            << " block_size=" << blockSize << " depth=" << depth
+            << " adaptive=" << adaptive << " buffered_io=true"
             << " preallocate=false"
             << " drop_cache=false";
   if (phase == Phase::Read) {
     std::cout << " read_cache_state=warm_page_cache";
   }
   std::cout << " write_read_barrier=fsync_close_reopen"
-            << " ops=" << metrics.ops
-            << " bytes=" << metrics.bytes
-            << " errors=" << metrics.errors
-            << " elapsed_ms=" << std::fixed << std::setprecision(3)
-            << metrics.elapsedMs
-            << " iops=" << std::fixed << std::setprecision(2)
-            << iops(metrics)
+            << " ops=" << metrics.ops << " bytes=" << metrics.bytes
+            << " errors=" << metrics.errors << " elapsed_ms=" << std::fixed
+            << std::setprecision(3) << metrics.elapsedMs
+            << " iops=" << std::fixed << std::setprecision(2) << iops(metrics)
             << " mib_per_second=" << std::fixed << std::setprecision(2)
             << mibPerSecond(metrics);
   if (phase == Phase::Write) {
     PhaseMetrics writeWithFsync = metrics;
     writeWithFsync.elapsedMs += fsyncMs;
-    std::cout << " fsync_ms=" << std::fixed << std::setprecision(3)
-              << fsyncMs
+    std::cout << " fsync_ms=" << std::fixed << std::setprecision(3) << fsyncMs
               << " write_total_elapsed_ms=" << std::fixed
               << std::setprecision(3) << writeWithFsync.elapsedMs
               << " write_total_mib_per_second=" << std::fixed
@@ -594,7 +584,12 @@ void printCaseSummary(
     bool adaptive,
     const CaseMetrics& metrics) {
   printPhaseSummary(
-      caseName, Phase::Write, blockSize, depth, adaptive, metrics.write,
+      caseName,
+      Phase::Write,
+      blockSize,
+      depth,
+      adaptive,
+      metrics.write,
       metrics.fsyncMs);
   printPhaseSummary(
       caseName, Phase::Read, blockSize, depth, adaptive, metrics.read);
@@ -621,8 +616,7 @@ void runCase(
   const auto path = benchmarkPath(caseName);
   if (!skipReason.empty()) {
     std::cout << "bm_io_benchmark"
-              << " case=" << caseName
-              << " skipped=true"
+              << " case=" << caseName << " skipped=true"
               << " reason=\"" << skipReason << "\"\n";
     return;
   }
@@ -638,8 +632,7 @@ void runCase(
     printCaseSummary(caseName, blockSize, depth, adaptive, metrics);
   } catch (const std::exception& ex) {
     std::cout << "bm_io_benchmark"
-              << " case=" << caseName
-              << " skipped=true"
+              << " case=" << caseName << " skipped=true"
               << " reason=\"" << conciseReason(ex.what()) << "\"\n";
   }
   removeFile(path);
@@ -673,7 +666,8 @@ int main(int argc, char** argv) {
 
   std::string schedulerSkipReason;
   try {
-    DiskIoSchedulerImpl scheduler(schedulerConfig(FLAGS_bm_io_fixed_depth, false));
+    DiskIoSchedulerImpl scheduler(
+        schedulerConfig(FLAGS_bm_io_fixed_depth, false));
   } catch (const std::exception& ex) {
     schedulerSkipReason = conciseReason(ex.what());
   }

@@ -95,16 +95,14 @@ std::shared_ptr<MemoryPool> SparkListenableArbitratorContext::rootPool() const {
 
 void SparkListenableArbitratorContext::installAutomaticReclaimSpill() {
   BOLT_CHECK_NOT_NULL(holder_);
-  sparksql::SpillerPtr spiller =
-      std::make_shared<AutomaticReclaimSpiller>([this](int64_t size) {
-        return spillFixedSize(size);
-      });
+  sparksql::SpillerPtr spiller = std::make_shared<AutomaticReclaimSpiller>(
+      [this](int64_t size) { return spillFixedSize(size); });
   holder_->appendSpiller(spiller);
   VLOG(1) << "BM sort installed automatic reclaim spiller";
 }
 
-SparkListenableArbitratorContextStats
-SparkListenableArbitratorContext::stats() const {
+SparkListenableArbitratorContextStats SparkListenableArbitratorContext::stats()
+    const {
   std::lock_guard<std::mutex> lock(statsMutex_);
   return stats_;
 }
@@ -164,8 +162,7 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
     stats_.automaticSpillReclaimedBytes += reclaimed;
   }
   VLOG(1) << "BM sort spillFixedSize after local reclaim"
-          << ", requested_bytes=" << size
-          << ", reclaimed_bytes=" << reclaimed
+          << ", requested_bytes=" << size << ", reclaimed_bytes=" << reclaimed
           << ", aggregate_pool=" << aggregatePool->toString();
   const auto shrunken = manager->shrink(size);
   {
@@ -192,18 +189,16 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
     return shrunken;
   }
 
-  const auto elapsedUs =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - start)
-          .count();
+  const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
   {
     std::lock_guard<std::mutex> lock(statsMutex_);
     stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
     stats_.automaticSpillTimeUs += elapsedUs;
   }
   VLOG(1) << "BM sort spillFixedSize end after local shrink only"
-          << ", requested_bytes=" << size
-          << ", shrunken_bytes=" << shrunken
+          << ", requested_bytes=" << size << ", shrunken_bytes=" << shrunken
           << ", remaining_bytes=" << remaining
           << ", aggregate_pool=" << aggregatePool->toString();
   return shrunken;

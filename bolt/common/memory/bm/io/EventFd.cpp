@@ -2,10 +2,10 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <sys/eventfd.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <sys/eventfd.h>
 
 namespace bytedance::bolt::memory::bm {
 

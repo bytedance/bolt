@@ -1,5 +1,5 @@
-#include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/EvictionQueue.h"
+#include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/io/IoBuffer.h"
 
 #include <cstring>

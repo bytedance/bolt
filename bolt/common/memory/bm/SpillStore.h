@@ -1,10 +1,10 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
-#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
+#include "bolt/common/memory/bm/file/ManagedFileSegment.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
 

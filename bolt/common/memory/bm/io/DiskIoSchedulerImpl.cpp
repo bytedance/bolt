@@ -224,9 +224,8 @@ void DiskIoSchedulerImpl::run() {
       const auto dispatchMadeProgress =
           applyDispatchResultsLocked(dispatchResults, readyResults);
       shouldExit = shouldExit || (stopping_ && drainedLocked());
-      shouldContinue =
-          madeProgress || dispatchMadeProgress ||
-           (hasQueuedRequestsLocked() &&
+      shouldContinue = madeProgress || dispatchMadeProgress ||
+          (hasQueuedRequestsLocked() &&
            inflight_.size() < depthController_->currentDepth() &&
            !(!dispatchResults.empty() && !dispatchMadeProgress));
       logStatsIfDueLocked(std::chrono::steady_clock::now());
@@ -256,12 +255,12 @@ void DiskIoSchedulerImpl::run() {
 int DiskIoSchedulerImpl::computeWaitTimeoutMsLocked(
     std::chrono::steady_clock::time_point now) {
   std::optional<std::chrono::steady_clock::duration> waitTime;
-  auto includeDeadline =
-      [&waitTime, now](std::chrono::steady_clock::time_point deadline) {
-        const auto duration = deadline - now;
-        waitTime = waitTime.has_value() ? std::min(*waitTime, duration)
-                                        : std::optional(duration);
-      };
+  auto includeDeadline = [&waitTime,
+                          now](std::chrono::steady_clock::time_point deadline) {
+    const auto duration = deadline - now;
+    waitTime = waitTime.has_value() ? std::min(*waitTime, duration)
+                                    : std::optional(duration);
+  };
 
   if (config_.enableStatsLogging) {
     includeDeadline(lastStatsLogTime_ + config_.statsLogInterval);
@@ -298,8 +297,7 @@ bool DiskIoSchedulerImpl::drainedLocked() const {
   return inflight_.empty() && !hasQueuedRequestsLocked();
 }
 
-std::vector<QueuedIoRequest>
-DiskIoSchedulerImpl::collectDispatchBatchLocked() {
+std::vector<QueuedIoRequest> DiskIoSchedulerImpl::collectDispatchBatchLocked() {
   if (inflight_.size() >= depthController_->currentDepth()) {
     return {};
   }
@@ -397,7 +395,8 @@ void DiskIoSchedulerImpl::applyCompletionsLocked(
         inflight_.size());
     auto result = std::move(completion.result);
     result.buffer = std::move(inflight->request.buffer);
-    depthController_->onCompletion(result.bytes, hasQueuedRequestsLocked(), now);
+    depthController_->onCompletion(
+        result.bytes, hasQueuedRequestsLocked(), now);
     stats_.depthControl = depthController_->stats();
 
     readyResults.push_back(

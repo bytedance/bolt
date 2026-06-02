@@ -10,7 +10,9 @@ namespace bytedance::bolt::memory::bm {
 class ManagedFileSegment {
  public:
   ManagedFileSegment() = default;
-  ManagedFileSegment(FileSegment segment, std::weak_ptr<FileSegmentAllocator> allocator);
+  ManagedFileSegment(
+      FileSegment segment,
+      std::weak_ptr<FileSegmentAllocator> allocator);
   ~ManagedFileSegment() noexcept;
 
   ManagedFileSegment(ManagedFileSegment&& other) noexcept;

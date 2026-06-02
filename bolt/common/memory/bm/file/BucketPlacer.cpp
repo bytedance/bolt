@@ -1,7 +1,7 @@
 #include "bolt/common/memory/bm/file/BucketPlacer.h"
 
-#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
+#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 
 #include <algorithm>
 #include <utility>
@@ -96,7 +96,8 @@ BucketPlacer::BucketFile* BucketPlacer::FindReusableFile() {
 
 FileAllocateResult BucketPlacer::CreateFile() {
   const auto file_index = next_file_index_++;
-  const auto path = MakeBucketSegmentFilePath(directory_, bucket_size_, file_index);
+  const auto path =
+      MakeBucketSegmentFilePath(directory_, bucket_size_, file_index);
   auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     FileAllocateResult result;
@@ -112,8 +113,7 @@ FileAllocateResult BucketPlacer::CreateFile() {
   return FileAllocateResult{};
 }
 
-BucketPlacer::BucketFile*
-BucketPlacer::FindFileByIndex(uint64_t file_index) {
+BucketPlacer::BucketFile* BucketPlacer::FindFileByIndex(uint64_t file_index) {
   for (auto& file : files_) {
     if (file->file_index == file_index) {
       return file.get();

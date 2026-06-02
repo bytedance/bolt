@@ -47,16 +47,13 @@ uint64_t BufferManagerReclaimer::reclaim(
   auto manager = manager_.lock();
   if (!manager) {
     VLOG(1) << "BM reclaimer reclaim skipped, manager expired"
-            << " pool=" << pool->name()
-            << " target_bytes=" << targetBytes
+            << " pool=" << pool->name() << " target_bytes=" << targetBytes
             << " max_wait_ms=" << maxWaitMs;
     return 0;
   }
   VLOG(1) << "BM reclaimer reclaim begin"
-          << " pool=" << pool->name()
-          << " target_bytes=" << targetBytes
-          << " max_wait_ms=" << maxWaitMs
-          << " pool_used=" << pool->usedBytes()
+          << " pool=" << pool->name() << " target_bytes=" << targetBytes
+          << " max_wait_ms=" << maxWaitMs << " pool_used=" << pool->usedBytes()
           << " pool_current=" << pool->currentBytes()
           << " pool_reserved=" << pool->reservedBytes()
           << " pool_available_reservation=" << pool->availableReservation()
@@ -72,14 +69,14 @@ uint64_t BufferManagerReclaimer::reclaim(
           pool->release();
         }
         VLOG(1) << "BM reclaimer reclaim body end"
-                << " pool=" << pool->name()
-                << " target_bytes=" << targetBytes
+                << " pool=" << pool->name() << " target_bytes=" << targetBytes
                 << " manager_reclaimed_bytes=" << managerReclaimedBytes
                 << " recorder_reclaimed_bytes=" << reclaimedBytes
                 << " pool_used=" << pool->usedBytes()
                 << " pool_current=" << pool->currentBytes()
                 << " pool_reserved=" << pool->reservedBytes()
-                << " pool_available_reservation=" << pool->availableReservation()
+                << " pool_available_reservation="
+                << pool->availableReservation()
                 << " pool_releasable_reservation="
                 << pool->releasableReservation()
                 << " bm=" << manager->debugString();
@@ -87,8 +84,7 @@ uint64_t BufferManagerReclaimer::reclaim(
       },
       stats);
   VLOG(1) << "BM reclaimer reclaim end"
-          << " pool=" << pool->name()
-          << " target_bytes=" << targetBytes
+          << " pool=" << pool->name() << " target_bytes=" << targetBytes
           << " returned_bytes=" << reclaimedByRecorder
           << " pool_used=" << pool->usedBytes()
           << " pool_current=" << pool->currentBytes()

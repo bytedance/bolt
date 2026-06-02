@@ -15,8 +15,8 @@
 
 #define private public
 #include "bolt/common/memory/bm/BlockHandle.h"
-#include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/BufferManager.h"
+#include "bolt/common/memory/bm/BufferManagerStats.h"
 #undef private
 
 namespace bytedance::bolt::memory::bm {
@@ -92,7 +92,8 @@ TEST_F(BufferManagerPrivateStateTest, PinPrefetchingReportsReadFailure) {
   block->memory_->state = BlockMemoryState::kPrefetching;
   block->memory_->prefetchFuture = SpillReadFuture{
       promise.get_future(),
-      std::make_shared<compress::CompressionManager>(bm->config_.spillStoreConfig.compressionConfig),
+      std::make_shared<compress::CompressionManager>(
+          bm->config_.spillStoreConfig.compressionConfig),
       bm->pool_.get(),
       block->size()};
   bm->accounting_->OnReadSubmitted(*block->memory_);

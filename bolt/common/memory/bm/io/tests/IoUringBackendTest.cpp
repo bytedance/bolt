@@ -1,9 +1,9 @@
-#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
+#include "bolt/common/memory/bm/io/IoUringBackend.h"
 #include "bolt/common/memory/bm/io/DiskIoSchedulerConfig.h"
+#include "bolt/common/memory/bm/io/DiskIoSchedulerImpl.h"
 #include "bolt/common/memory/bm/io/IoPriority.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 #include "bolt/common/memory/bm/io/IoResult.h"
-#include "bolt/common/memory/bm/io/IoUringBackend.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -110,9 +110,7 @@ TEST(IoUringBackendTest, writeAndReadTemporaryFile) {
   EXPECT_EQ(IoErrorCode::Ok, result.error);
   EXPECT_EQ(4096, result.bytes);
   EXPECT_EQ(
-      0,
-      std::memcmp(
-          writeResult.buffer.data(), result.buffer.data(), 4096));
+      0, std::memcmp(writeResult.buffer.data(), result.buffer.data(), 4096));
 }
 
 TEST(IoUringBackendTest, invalidFdReturnsErrorResult) {

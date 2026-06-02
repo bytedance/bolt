@@ -73,8 +73,7 @@ uint64_t Lz4Compress(
     }
     default:
       BOLT_FAIL(
-          "BM unsupported LZ4 strategy={}",
-          static_cast<int>(options.strategy));
+          "BM unsupported LZ4 strategy={}", static_cast<int>(options.strategy));
   }
   if (written <= 0) {
     BOLT_FAIL("BM LZ4 compression failed, source_size={}", sourceSize);

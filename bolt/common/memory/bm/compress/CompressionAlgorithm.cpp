@@ -5,8 +5,7 @@
 namespace bytedance::bolt::memory::bm::compress {
 
 bool SupportedCompressionKind(CompressionKind kind) {
-  return kind == CompressionKind::kNone ||
-      kind == CompressionKind::kLz4Block ||
+  return kind == CompressionKind::kNone || kind == CompressionKind::kLz4Block ||
       kind == CompressionKind::kZstdFrame ||
       kind == CompressionKind::kSnappyRaw;
 }

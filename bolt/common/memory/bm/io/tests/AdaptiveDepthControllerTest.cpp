@@ -4,8 +4,8 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/bm/io/AdaptiveDepthConfig.h"
 
-#include <limits>
 #include <chrono>
+#include <limits>
 
 #include <gtest/gtest.h>
 

@@ -108,7 +108,9 @@ class BufferManagerStatsCollector {
   void OnReadCompleted(const BlockMemory& memory, const SpillReadResult& read);
   void OnSpillStarted(const BlockMemory& memory);
   void OnSpillRolledBack(const BlockMemory& memory);
-  void OnSpillCompleted(const BlockMemory& memory, const SpillWriteResult& write);
+  void OnSpillCompleted(
+      const BlockMemory& memory,
+      const SpillWriteResult& write);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
  private:

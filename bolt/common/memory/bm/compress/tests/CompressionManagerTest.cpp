@@ -1,5 +1,5 @@
-#include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
+#include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
 #include <cstring>
@@ -54,7 +54,8 @@ CompressionKind recordKind(const IoBuffer& record, size_t expectedRawSize) {
 }
 
 uint64_t recordStoredSize(const IoBuffer& record, size_t expectedRawSize) {
-  return DecodeSpillRecordHeader(record.data(), record.length(), expectedRawSize)
+  return DecodeSpillRecordHeader(
+             record.data(), record.length(), expectedRawSize)
       .storedSize;
 }
 
@@ -143,7 +144,8 @@ TEST_F(CompressionManagerTest, ZstdStrategiesWriteStableZstdFrameKind) {
     ASSERT_TRUE(result.compressed);
     EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
     EXPECT_EQ(
-        CompressionKind::kZstdFrame, recordKind(result.record, original.size()));
+        CompressionKind::kZstdFrame,
+        recordKind(result.record, original.size()));
     auto decoded = decodeRecord(manager, result.record, original.size());
     EXPECT_EQ(original, readPayload(decoded, original.size()));
   }
@@ -169,7 +171,8 @@ TEST_F(CompressionManagerTest, SnappyStrategiesWriteStableSnappyRawKind) {
     ASSERT_TRUE(result.compressed);
     EXPECT_EQ(CompressionKind::kSnappyRaw, result.storedKind);
     EXPECT_EQ(
-        CompressionKind::kSnappyRaw, recordKind(result.record, original.size()));
+        CompressionKind::kSnappyRaw,
+        recordKind(result.record, original.size()));
     auto decoded = decodeRecord(manager, result.record, original.size());
     EXPECT_EQ(original, readPayload(decoded, original.size()));
   }
@@ -197,7 +200,8 @@ TEST_F(CompressionManagerTest, HeaderRejectsMalformedRecords) {
   auto encoded = EncodeSpillRecordHeader(header);
 
   EXPECT_THROW(
-      DecodeSpillRecordHeader(encoded.data(), sizeof(SpillRecordHeader) - 1, 4096),
+      DecodeSpillRecordHeader(
+          encoded.data(), sizeof(SpillRecordHeader) - 1, 4096),
       std::exception);
 
   auto badMagic = encoded;
@@ -303,8 +307,8 @@ TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
 
 TEST_F(CompressionManagerTest, AlgorithmsDecodeWithReusableContexts) {
   const auto original = compressiblePayload(64 * 1024);
-  std::vector<char> compressed(MaxCompressedLength(
-      CompressionKind::kZstdFrame, original.size()));
+  std::vector<char> compressed(
+      MaxCompressedLength(CompressionKind::kZstdFrame, original.size()));
   std::vector<char> decoded(original.size());
 
   Lz4CompressionContext lz4Compression;

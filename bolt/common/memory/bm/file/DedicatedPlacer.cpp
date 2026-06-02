@@ -1,7 +1,7 @@
 #include "bolt/common/memory/bm/file/DedicatedPlacer.h"
 
-#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 #include "bolt/common/memory/bm/file/ManagedOpenFileFactory.h"
+#include "bolt/common/memory/bm/file/SegmentFilePath.h"
 
 #include <utility>
 

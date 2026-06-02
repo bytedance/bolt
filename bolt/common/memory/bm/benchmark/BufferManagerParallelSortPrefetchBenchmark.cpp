@@ -234,8 +234,8 @@ struct PrefetchingRunCursor {
     if (prefetchDistance == 0) {
       return;
     }
-    const auto target = std::min(
-        run->blocks.size(), nextBlockIndex + prefetchDistance);
+    const auto target =
+        std::min(run->blocks.size(), nextBlockIndex + prefetchDistance);
     std::vector<std::shared_ptr<BlockHandle>> blocks;
     blocks.reserve(target - submittedPrefetchIndex);
     const auto begin = submittedPrefetchIndex;
@@ -247,8 +247,7 @@ struct PrefetchingRunCursor {
     }
     if (!blocks.empty()) {
       VLOG(1) << "BM parallel sort prefetch submit"
-              << " worker=" << workerIndex
-              << " run_index=" << runIndex
+              << " worker=" << workerIndex << " run_index=" << runIndex
               << " begin_block=" << begin
               << " end_block=" << submittedPrefetchIndex;
       manager->Prefetch(blocks);
@@ -263,8 +262,7 @@ struct PrefetchingRunCursor {
     const auto blockIndex = nextBlockIndex;
     auto block = takeNextBlock();
     VLOG(1) << "BM parallel sort prefetch verify pin begin"
-            << " worker=" << workerIndex
-            << " run_index=" << runIndex
+            << " worker=" << workerIndex << " run_index=" << runIndex
             << " block_index=" << blockIndex
             << " run_blocks=" << run->blocks.size();
     installPinnedBlock(manager->Pin(block), blockIndex);
@@ -525,8 +523,7 @@ void appendAllocatedBatchToActiveRun(
     auto block = handle.block();
     auto* values = reinterpret_cast<uint64_t*>(handle.Ptr());
     const auto blockValues = generator.pull(values, valuesPerBlock);
-    active.metadata.blocks.push_back(
-        RunBlock{std::move(block), blockValues});
+    active.metadata.blocks.push_back(RunBlock{std::move(block), blockValues});
     active.metadata.values += blockValues;
     active.handles.push_back(std::move(handle));
     if (generator.empty()) {
@@ -565,11 +562,10 @@ bool verifySortedRuns(
   for (size_t i = 0; i < runs.size(); ++i) {
     cursors.emplace_back(runs[i], manager, workerIndex, i, prefetchDistance);
     if (cursors.back().hasNextBlock()) {
-      initialPins.push_back(
-          InitialPin{
-              cursors.size() - 1,
-              cursors.back().nextBlockIndex,
-              cursors.back().takeNextBlock()});
+      initialPins.push_back(InitialPin{
+          cursors.size() - 1,
+          cursors.back().nextBlockIndex,
+          cursors.back().takeNextBlock()});
     }
   }
 
@@ -579,8 +575,7 @@ bool verifySortedRuns(
     firstBlocks.push_back(pin.block);
   }
   VLOG(1) << "BM parallel sort prefetch initial BatchPin"
-          << " worker=" << workerIndex
-          << " blocks=" << firstBlocks.size()
+          << " worker=" << workerIndex << " blocks=" << firstBlocks.size()
           << " runs=" << runs.size()
           << " prefetch_distance=" << prefetchDistance;
   auto firstHandles = manager.BatchPin(firstBlocks);
@@ -697,13 +692,8 @@ WorkerResult runWorker(
   result.verified = true;
   if (FLAGS_bm_parallel_sort_prefetch_verify) {
     ScopedTimer timer{result.verifyMs};
-    result.verified =
-        verifySortedRuns(
-            workerIndex,
-            *manager,
-            runs,
-            result.totalValues,
-            prefetchDistance);
+    result.verified = verifySortedRuns(
+        workerIndex, *manager, runs, result.totalValues, prefetchDistance);
   }
 
   result.bmStats = manager->stats();
@@ -719,8 +709,7 @@ void addStats(
     SparkListenableArbitratorContextStats& aggregate,
     const SparkListenableArbitratorContextStats& stats) {
   aggregate.automaticSpillTriggers += stats.automaticSpillTriggers;
-  aggregate.automaticSpillRequestedBytes +=
-      stats.automaticSpillRequestedBytes;
+  aggregate.automaticSpillRequestedBytes += stats.automaticSpillRequestedBytes;
   aggregate.automaticSpillShrunkenBytes += stats.automaticSpillShrunkenBytes;
   aggregate.automaticSpillReclaimedBytes += stats.automaticSpillReclaimedBytes;
   aggregate.automaticSpillReturnedBytes += stats.automaticSpillReturnedBytes;
@@ -764,10 +753,12 @@ int runBenchmark() {
   const auto allocateSize =
       parseAllocateSize(FLAGS_bm_parallel_sort_prefetch_allocate_size);
   const auto blockBytes = allocateSizeBytes(allocateSize);
-  const auto dataBytes = FLAGS_bm_parallel_sort_prefetch_data_gb_per_thread * kGiB;
-  const auto memoryLimitBytes = FLAGS_bm_parallel_sort_prefetch_memory_gb * kGiB;
-  const auto allocateBatchBlocks =
-      static_cast<size_t>(FLAGS_bm_parallel_sort_prefetch_allocate_batch_blocks);
+  const auto dataBytes =
+      FLAGS_bm_parallel_sort_prefetch_data_gb_per_thread * kGiB;
+  const auto memoryLimitBytes =
+      FLAGS_bm_parallel_sort_prefetch_memory_gb * kGiB;
+  const auto allocateBatchBlocks = static_cast<size_t>(
+      FLAGS_bm_parallel_sort_prefetch_allocate_batch_blocks);
   const auto prefetchDistance =
       static_cast<size_t>(FLAGS_bm_parallel_sort_prefetch_distance);
   if (threadCount == 0 || dataBytes == 0 || memoryLimitBytes == 0) {
@@ -778,7 +769,8 @@ int runBenchmark() {
     throw std::invalid_argument("allocate_batch_blocks must be positive");
   }
 
-  const std::filesystem::path spillRoot{FLAGS_bm_parallel_sort_prefetch_spill_dir};
+  const std::filesystem::path spillRoot{
+      FLAGS_bm_parallel_sort_prefetch_spill_dir};
   std::filesystem::remove_all(spillRoot);
   std::filesystem::create_directories(spillRoot);
 
@@ -880,12 +872,11 @@ int runBenchmark() {
 
     std::cout << "bm_parallel_sort_prefetch_worker"
               << " worker=" << i
-              << " status=" << (results[i].ok ? "ok" : "failed")
-              << " error=\"" << results[i].error << "\""
+              << " status=" << (results[i].ok ? "ok" : "failed") << " error=\""
+              << results[i].error << "\""
               << " runs=" << results[i].runCount
               << " blocks=" << results[i].blockCount
-              << " batch_allocate_calls="
-              << results[i].batchAllocateCalls
+              << " batch_allocate_calls=" << results[i].batchAllocateCalls
               << " batch_allocate_requested_blocks="
               << results[i].batchAllocateRequestedBlocks
               << " batch_allocate_returned_blocks="
@@ -900,67 +891,57 @@ int runBenchmark() {
               << " automatic_spill_triggers="
               << contexts[i]->stats().automaticSpillTriggers
               << " automatic_spill_returned_bytes="
-              << contexts[i]->stats().automaticSpillReturnedBytes
-              << "\n";
+              << contexts[i]->stats().automaticSpillReturnedBytes << "\n";
   }
 
-  std::cout << "bm_parallel_sort_prefetch_benchmark\n"
-            << "status value=" << (ok ? "ok" : "failed") << "\n"
-            << "config"
-            << " threads=" << threadCount
-            << " data_gb_per_thread="
-            << FLAGS_bm_parallel_sort_prefetch_data_gb_per_thread
-            << " memory_gb=" << FLAGS_bm_parallel_sort_prefetch_memory_gb
-            << " allocate_size=" << toString(allocateSize)
-            << " block_bytes=" << blockBytes
-            << " allocate_batch_blocks=" << allocateBatchBlocks
-            << " prefetch_distance=" << prefetchDistance << "\n"
-            << "runs"
-            << " count=" << aggregateRuns
-            << " blocks=" << aggregateBlocks
-            << " values=" << aggregateValues << "\n"
-            << "batch_allocate"
-            << " calls=" << aggregateBatchAllocateCalls
-            << " requested_blocks="
-            << aggregateBatchAllocateRequestedBlocks
-            << " returned_blocks="
-            << aggregateBatchAllocateReturnedBlocks << "\n"
-            << "timing"
-            << " wall_ms=" << totalMs
-            << " worker_generate_sort_ms_sum=" << aggregateGenerateMs
-            << " worker_verify_ms_sum=" << aggregateVerifyMs
-            << " wall_gib_per_s=" << gibPerSecond(aggregateBytes, totalMs)
-            << "\n"
-            << "automatic_spill"
-            << " triggers=" << aggregateContextStats.automaticSpillTriggers
-            << " requested_bytes="
-            << aggregateContextStats.automaticSpillRequestedBytes
-            << " shrunken_bytes="
-            << aggregateContextStats.automaticSpillShrunkenBytes
-            << " reclaimed_bytes="
-            << aggregateContextStats.automaticSpillReclaimedBytes
-            << " returned_bytes="
-            << aggregateContextStats.automaticSpillReturnedBytes
-            << " time_us=" << aggregateContextStats.automaticSpillTimeUs
-            << "\n"
-            << "bm_summary"
-            << " reclaimed_bytes=" << aggregateStats.reclaimedBytes
-            << " spill_write_bytes=" << aggregateStats.spillWriteBytes
-            << " spill_read_bytes=" << aggregateStats.spillReadBytes
-            << " spill_write_count=" << aggregateStats.spillWriteCount
-            << " spill_read_count=" << aggregateStats.spillReadCount
-            << " reclaim_count=" << aggregateStats.reclaimCount
-            << " batch_pin_count=" << aggregateStats.batchPinCount
-            << " prefetch_count=" << aggregateStats.prefetchCount
-            << " pin_count=" << aggregateStats.pinCount
-            << " pin_in_memory_count=" << aggregateStats.pinInMemoryCount
-            << " pin_read_count=" << aggregateStats.pinReadCount
-            << " prefetch_submit_failures="
-            << aggregateStats.prefetchSubmitFailures
-            << " prefetch_io_failures="
-            << aggregateStats.prefetchIoFailures << "\n"
-            << "execution_pool "
-            << sparksql::ExecutionMemoryPool::instance()->toString() << "\n";
+  std::cout
+      << "bm_parallel_sort_prefetch_benchmark\n"
+      << "status value=" << (ok ? "ok" : "failed") << "\n"
+      << "config"
+      << " threads=" << threadCount << " data_gb_per_thread="
+      << FLAGS_bm_parallel_sort_prefetch_data_gb_per_thread
+      << " memory_gb=" << FLAGS_bm_parallel_sort_prefetch_memory_gb
+      << " allocate_size=" << toString(allocateSize)
+      << " block_bytes=" << blockBytes
+      << " allocate_batch_blocks=" << allocateBatchBlocks
+      << " prefetch_distance=" << prefetchDistance << "\n"
+      << "runs"
+      << " count=" << aggregateRuns << " blocks=" << aggregateBlocks
+      << " values=" << aggregateValues << "\n"
+      << "batch_allocate"
+      << " calls=" << aggregateBatchAllocateCalls
+      << " requested_blocks=" << aggregateBatchAllocateRequestedBlocks
+      << " returned_blocks=" << aggregateBatchAllocateReturnedBlocks << "\n"
+      << "timing"
+      << " wall_ms=" << totalMs
+      << " worker_generate_sort_ms_sum=" << aggregateGenerateMs
+      << " worker_verify_ms_sum=" << aggregateVerifyMs
+      << " wall_gib_per_s=" << gibPerSecond(aggregateBytes, totalMs) << "\n"
+      << "automatic_spill"
+      << " triggers=" << aggregateContextStats.automaticSpillTriggers
+      << " requested_bytes="
+      << aggregateContextStats.automaticSpillRequestedBytes
+      << " shrunken_bytes=" << aggregateContextStats.automaticSpillShrunkenBytes
+      << " reclaimed_bytes="
+      << aggregateContextStats.automaticSpillReclaimedBytes
+      << " returned_bytes=" << aggregateContextStats.automaticSpillReturnedBytes
+      << " time_us=" << aggregateContextStats.automaticSpillTimeUs << "\n"
+      << "bm_summary"
+      << " reclaimed_bytes=" << aggregateStats.reclaimedBytes
+      << " spill_write_bytes=" << aggregateStats.spillWriteBytes
+      << " spill_read_bytes=" << aggregateStats.spillReadBytes
+      << " spill_write_count=" << aggregateStats.spillWriteCount
+      << " spill_read_count=" << aggregateStats.spillReadCount
+      << " reclaim_count=" << aggregateStats.reclaimCount
+      << " batch_pin_count=" << aggregateStats.batchPinCount
+      << " prefetch_count=" << aggregateStats.prefetchCount
+      << " pin_count=" << aggregateStats.pinCount
+      << " pin_in_memory_count=" << aggregateStats.pinInMemoryCount
+      << " pin_read_count=" << aggregateStats.pinReadCount
+      << " prefetch_submit_failures=" << aggregateStats.prefetchSubmitFailures
+      << " prefetch_io_failures=" << aggregateStats.prefetchIoFailures << "\n"
+      << "execution_pool "
+      << sparksql::ExecutionMemoryPool::instance()->toString() << "\n";
 
   if (!FLAGS_bm_parallel_sort_prefetch_keep_spill_files) {
     std::filesystem::remove_all(spillRoot);
@@ -977,7 +958,8 @@ int main(int argc, char** argv) {
   try {
     return bytedance::bolt::memory::bm::runBenchmark();
   } catch (const std::exception& e) {
-    std::cerr << "BM parallel sort prefetch benchmark failed: " << e.what() << "\n";
+    std::cerr << "BM parallel sort prefetch benchmark failed: " << e.what()
+              << "\n";
     return 1;
   }
 }

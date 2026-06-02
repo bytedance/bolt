@@ -5,8 +5,7 @@
 
 namespace bytedance::bolt::memory::bm {
 
-IoRequestQueue::IoRequestQueue(
-    std::array<uint32_t, kIoPriorityCount> weights)
+IoRequestQueue::IoRequestQueue(std::array<uint32_t, kIoPriorityCount> weights)
     : dispatcher_(weights) {}
 
 void IoRequestQueue::enqueue(QueuedIoRequest request) {

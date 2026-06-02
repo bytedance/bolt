@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 
 #include "bolt/common/memory/bm/io/AdaptiveDepthConfig.h"
 #include "bolt/common/memory/bm/io/DepthController.h"
