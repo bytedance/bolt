@@ -24,7 +24,7 @@ BackendSubmitStatus MockIoBackend::submit(
 
 std::vector<BackendCompletion> MockIoBackend::reap() {
   std::lock_guard<std::mutex> lock(mutex_);
-  completionEvent_.drain();
+  completionEvent_.drainNonBlocking();
   auto completions = std::move(completions_);
   completions_.clear();
   return completions;

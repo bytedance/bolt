@@ -247,7 +247,7 @@ class BusyOnceBackend : public IoBackend {
   }
 
   std::vector<BackendCompletion> reap() override {
-    completionEvent_.drain();
+    completionEvent_.drainNonBlocking();
     if (!submitted_ || completed_) {
       return {};
     }
@@ -293,7 +293,7 @@ class AlwaysBusyBackend : public IoBackend {
   }
 
   std::vector<BackendCompletion> reap() override {
-    completionEvent_.drain();
+    completionEvent_.drainNonBlocking();
     return {};
   }
 

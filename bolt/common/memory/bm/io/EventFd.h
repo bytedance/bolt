@@ -17,7 +17,8 @@ class EventFd {
 
   int fd() const;
   void notify() const;
-  void drain() const;
+  // Clears all currently pending notifications without waiting for a new one.
+  void drainNonBlocking() const;
 
  private:
   ScopedFd fd_;

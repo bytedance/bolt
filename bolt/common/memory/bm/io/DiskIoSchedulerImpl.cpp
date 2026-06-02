@@ -181,9 +181,19 @@ void DiskIoSchedulerImpl::logStatsIfDueLocked(
 
 void DiskIoSchedulerImpl::run() {
   while (true) {
+    // One scheduler iteration coalesces wakeup signals, reaps completed IO,
+    // dispatches queued IO, fulfills completed futures, then sleeps only if no
+    // more immediate work is available.
     std::vector<ReadyResult> readyResults;
-    wakeupEvent_.drain();
+
+    // 1. Consume worker wakeups. The eventfd is non-blocking; this only clears
+    // already-observed notifications so epoll will not immediately fire again.
+    wakeupEvent_.drainNonBlocking();
+
+    // 2. Reap backend completions before taking the scheduler lock. Backend
+    // calls may enter the kernel, so keep them outside mutex_.
     auto completions = backend_->reap();
+
     std::vector<QueuedIoRequest> dispatchBatch;
     bool madeProgress = !completions.empty();
     bool shouldExit = false;
@@ -191,6 +201,8 @@ void DiskIoSchedulerImpl::run() {
     int waitTimeoutMs = -1;
 
     {
+      // 3. Apply completions, handle shutdown, and collect queued work while
+      // holding mutex_ to protect scheduler-owned state.
       std::lock_guard<std::mutex> lock(mutex_);
       applyCompletionsLocked(completions, readyResults);
       if (stopping_) {
@@ -210,9 +222,8 @@ void DiskIoSchedulerImpl::run() {
     std::vector<DispatchResult> dispatchResults;
     dispatchResults.reserve(dispatchBatch.size());
     for (auto& queued : dispatchBatch) {
-      // Backend calls are deliberately made without mutex_. submit() should
-      // remain a lightweight enqueue operation even if the backend enters the
-      // kernel or spends time scanning completions.
+      // 4. Submit dispatchable requests without mutex_. submit() should remain
+      // a lightweight enqueue operation even if the backend enters the kernel.
       const auto submitTime = std::chrono::steady_clock::now();
       const auto status = backend_->submit(queued.requestId, queued.request);
       dispatchResults.push_back(
@@ -220,6 +231,8 @@ void DiskIoSchedulerImpl::run() {
     }
 
     {
+      // 5. Publish dispatch results and decide whether to exit, continue, or
+      // sleep for the next fd-driven event.
       std::lock_guard<std::mutex> lock(mutex_);
       const auto dispatchMadeProgress =
           applyDispatchResultsLocked(dispatchResults, readyResults);
@@ -233,10 +246,10 @@ void DiskIoSchedulerImpl::run() {
           computeWaitTimeoutMsLocked(std::chrono::steady_clock::now());
     }
 
-    // Fulfill futures after releasing mutex_. A waiting caller may immediately
-    // call back into submit()/stats(); doing set_value() under the scheduler
-    // lock would make that wake-up contend with the worker and can deadlock
-    // with future implementations that run continuations inline.
+    // 6. Fulfill futures after releasing mutex_. A waiting caller may
+    // immediately call back into submit()/stats(); doing set_value() under the
+    // scheduler lock would make that wake-up contend with the worker and can
+    // deadlock with future implementations that run continuations inline.
     fulfillReadyResults(readyResults);
 
     if (shouldExit) {
@@ -244,9 +257,9 @@ void DiskIoSchedulerImpl::run() {
     }
 
     if (!shouldContinue) {
-      // New work and backend completions are both fd-driven, so the worker can
-      // sleep here without periodic polling. Timeouts are reserved for real
-      // deadlines such as stats logging.
+      // 7. Sleep only when this iteration made no useful progress. New work and
+      // backend completions are both fd-driven, so no periodic polling is
+      // needed. Timeouts are reserved for real deadlines such as stats logging.
       waitForWorkerEvent(waitTimeoutMs);
     }
   }

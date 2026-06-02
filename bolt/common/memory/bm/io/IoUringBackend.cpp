@@ -95,7 +95,7 @@ BackendSubmitStatus IoUringBackend::submit(
 }
 
 std::vector<BackendCompletion> IoUringBackend::reap() {
-  state_->completionEvent.drain();
+  state_->completionEvent.drainNonBlocking();
   std::vector<BackendCompletion> completions;
   io_uring_cqe* cqe = nullptr;
   while (io_uring_peek_cqe(&state_->ring, &cqe) == 0 && cqe != nullptr) {
