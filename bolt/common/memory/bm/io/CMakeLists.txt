@@ -36,7 +36,3 @@ endif()
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
-
-if(${BOLT_BUILD_BENCHMARKS})
-  add_subdirectory(benchmarks)
-endif()
