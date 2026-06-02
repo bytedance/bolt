@@ -5,7 +5,6 @@ add_subdirectory(compress)
 
 add_library(
   bolt_memory_bm
-  AllocateSize.cpp
   BlockHandle.cpp
   BlockStateMachine.cpp
   BufferHandle.cpp
@@ -13,7 +12,6 @@ add_library(
   BufferManagerReclaimer.cpp
   BufferManagerStats.cpp
   EvictionQueue.cpp
-  MemoryTag.cpp
   ReclaimWriteWindow.cpp
   SpillCandidateProvider.cpp
   SpillWriteDriver.cpp
