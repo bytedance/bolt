@@ -109,6 +109,10 @@ class PaimonCppConan(ConanFile):
     def generate(self):
         tc = CMakeToolchain(self)
 
+        flags = "-Wno-error=uninitialized -Wno-error=maybe-uninitialized"
+        tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
+        tc.cache_variables["CMAKE_C_FLAGS"] = flags
+
         tc.variables["PAIMON_BUILD_TESTS"] = False
         tc.variables["PAIMON_BUILD_SHARED"] = bool(self.options.shared)
         tc.variables["PAIMON_BUILD_STATIC"] = not bool(self.options.shared)
