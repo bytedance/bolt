@@ -151,6 +151,10 @@ const std::optional<trace::TraceConfig>& DriverCtx::traceConfig() const {
   return task->traceConfig();
 }
 
+std::shared_ptr<memory::bm::BufferManager> DriverCtx::bufferManager() const {
+  return task ? task->bufferManager() : nullptr;
+}
+
 bolt::memory::MemoryPool* DriverCtx::addOperatorPool(
     const core::PlanNodeId& planNodeId,
     const std::string& operatorType) {
