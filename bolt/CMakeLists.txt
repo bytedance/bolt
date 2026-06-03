@@ -250,6 +250,7 @@ target_link_libraries(bolt_engine PUBLIC
                                   $<$<BOOL:${ENABLE_BOLT_JIT}>:llvm-core::llvm-core>
                                   Folly::folly
                                   gfx::timsort
+                                  bolt_memory_bm
                                   date::date
                                   re2::re2
                                   ryu::ryu

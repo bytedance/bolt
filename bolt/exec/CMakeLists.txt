@@ -144,6 +144,7 @@ target_link_libraries(
   bolt_expression
   bolt_presto_serializer
   bolt_cpu_usage
+  bolt_memory_bm
   $<TARGET_NAME_IF_EXISTS:bolt_thrustjit>
   gfx::timsort
   arrow::arrow

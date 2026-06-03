@@ -1799,6 +1799,66 @@ DEBUG_ONLY_TEST_F(TaskTest, taskReclaimStats) {
   waitForAllTasksToBeDeleted();
 }
 
+TEST_F(TaskTest, taskBufferManagerDisabledByDefault) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+
+  auto task = Task::create(
+      "task.buffer.manager.disabled",
+      std::move(plan),
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{});
+
+  ASSERT_EQ(nullptr, task->bufferManager());
+}
+
+TEST_F(TaskTest, taskCreatesBufferManagerWhenEnabled) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{std::unordered_map<std::string, std::string>{
+          {core::QueryConfig::kBufferManagerEnabled, "true"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.enabled",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(),
+          .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  DriverCtx ctx(task, 0, 0, 0, 0);
+  ASSERT_EQ(task->bufferManager().get(), ctx.bufferManager().get());
+}
+
+TEST_F(TaskTest, taskBufferManagerEnabledRequiresSpillDirectory) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{std::unordered_map<std::string, std::string>{
+          {core::QueryConfig::kBufferManagerEnabled, "true"}}});
+
+  BOLT_ASSERT_THROW(
+      Task::create(
+          "task.buffer.manager.no.spill",
+          std::move(plan),
+          0,
+          std::move(queryCtx),
+          Task::ExecutionMode::kParallel,
+          exec::Consumer{}),
+      "BufferManager is enabled, but spill directory is not configured");
+}
+
 DEBUG_ONLY_TEST_F(TaskTest, driverEnqueAfterFailedAndPausedTask) {
   const auto data = makeRowVector({
       makeFlatVector<int64_t>(50, [](auto row) { return row; }),

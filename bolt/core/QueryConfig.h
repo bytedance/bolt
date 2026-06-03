@@ -233,6 +233,10 @@ class QueryConfig {
   /// Global enable spilling flag.
   static constexpr const char* kSpillEnabled = "spill_enabled";
 
+  /// Enables the task-level BufferManager for operators that opt in.
+  static constexpr const char* kBufferManagerEnabled =
+      "buffer-manager-enabled";
+
   /// Aggregation spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kAggregationSpillEnabled =
       "aggregation_spill_enabled";
@@ -1028,6 +1032,10 @@ class QueryConfig {
   /// Returns true if spilling is enabled.
   bool spillEnabled() const {
     return get<bool>(kSpillEnabled, false);
+  }
+
+  bool bufferManagerEnabled() const {
+    return get<bool>(kBufferManagerEnabled, false);
   }
 
   config::AB_MODE spillUringEnabled() const {

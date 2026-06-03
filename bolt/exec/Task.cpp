@@ -38,6 +38,7 @@
 #include "bolt/common/base/Uuid.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/HashBuild.h"
@@ -370,6 +371,7 @@ Task::~Task() {
   CLEAR(exception_ = nullptr);
   CLEAR(nodePools_.clear());
   CLEAR(childPools_.clear());
+  CLEAR(bmBufferManager_.reset());
   CLEAR(pool_.reset());
   CLEAR(planFragment_ = core::PlanFragment());
   CLEAR(queryCtx_.reset());
@@ -381,6 +383,7 @@ void Task::init(std::optional<common::SpillDiskOptions>&& spillDiskOpts) {
   initTaskPool();
 
   setSpillDiskConfig(std::move(spillDiskOpts));
+  maybeCreateBufferManager();
 
   if (mode_ != Task::ExecutionMode::kSerial) {
     return;
@@ -439,6 +442,38 @@ void Task::setSpillDiskConfig(
   spillDirectory_ = std::move(spillDiskOpts->spillDirPath);
   spillDirectoryCreated_ = spillDiskOpts->spillDirCreated;
   spillDirectoryCallback_ = std::move(spillDiskOpts->spillDirCreateCb);
+}
+
+void Task::maybeCreateBufferManager() {
+  if (!queryCtx_->queryConfig().bufferManagerEnabled()) {
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(pool_);
+  BOLT_CHECK_NULL(bmBufferManager_);
+  BOLT_CHECK(
+      !spillDirectory_.empty() || spillDirectoryCallback_,
+      "BufferManager is enabled, but spill directory is not configured");
+
+  const auto& spillDir = getOrCreateSpillDirectory();
+  memory::bm::BufferManagerConfig config;
+  config.poolName = fmt::format("task-bm-{}", taskId_);
+  config.spillStoreConfig.fileAllocatorConfig.directory =
+      fmt::format("{}/bm", spillDir);
+  config.spillStoreConfig.fileAllocatorConfig.bucket_sizes = {
+      32 * 1024,
+      64 * 1024,
+      128 * 1024,
+      256 * 1024,
+      512 * 1024,
+      1024 * 1024,
+      2 * 1024 * 1024,
+      4 * 1024 * 1024,
+  };
+  config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
+      1024LL * 1024LL * 1024LL;
+  config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 64;
+  bmBufferManager_ =
+      memory::bm::BufferManager::Create(*pool_, std::move(config));
 }
 
 uint64_t Task::timeSinceStartMsLocked() const {
