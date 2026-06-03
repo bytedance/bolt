@@ -139,4 +139,58 @@ void DiskIoStatsCollector::recordQueuedShutdown(
   ++stats.failedRequestsByPriority[priorityIdx];
 }
 
+void DiskIoStatsCollector::recordBackendReap(
+    DiskIoSchedulerStats& stats,
+    uint64_t durationUs) {
+  ++stats.backendReapCalls;
+  stats.cumulativeBackendReapUs += durationUs;
+  stats.averageBackendReapUs =
+      static_cast<double>(stats.cumulativeBackendReapUs) /
+      static_cast<double>(stats.backendReapCalls);
+  stats.maxBackendReapUs = std::max(stats.maxBackendReapUs, durationUs);
+}
+
+void DiskIoStatsCollector::recordBackendSubmit(
+    DiskIoSchedulerStats& stats,
+    uint64_t durationUs) {
+  ++stats.backendSubmitCalls;
+  stats.cumulativeBackendSubmitUs += durationUs;
+  stats.averageBackendSubmitUs =
+      static_cast<double>(stats.cumulativeBackendSubmitUs) /
+      static_cast<double>(stats.backendSubmitCalls);
+  stats.maxBackendSubmitUs = std::max(stats.maxBackendSubmitUs, durationUs);
+}
+
+void DiskIoStatsCollector::recordWorkerWait(
+    DiskIoSchedulerStats& stats,
+    uint64_t durationUs) {
+  ++stats.workerWaitCalls;
+  stats.cumulativeWorkerWaitUs += durationUs;
+  stats.averageWorkerWaitUs =
+      static_cast<double>(stats.cumulativeWorkerWaitUs) /
+      static_cast<double>(stats.workerWaitCalls);
+  stats.maxWorkerWaitUs = std::max(stats.maxWorkerWaitUs, durationUs);
+}
+
+void DiskIoStatsCollector::recordFutureFulfill(
+    DiskIoSchedulerStats& stats,
+    uint64_t durationUs,
+    size_t batchSize) {
+  if (batchSize == 0) {
+    return;
+  }
+  ++stats.futureFulfillBatches;
+  stats.fulfilledResults += batchSize;
+  stats.cumulativeFutureFulfillUs += durationUs;
+  stats.averageFutureFulfillUs =
+      static_cast<double>(stats.cumulativeFutureFulfillUs) /
+      static_cast<double>(stats.futureFulfillBatches);
+  stats.averageFutureFulfillBatchSize =
+      static_cast<double>(stats.fulfilledResults) /
+      static_cast<double>(stats.futureFulfillBatches);
+  stats.maxFutureFulfillUs = std::max(stats.maxFutureFulfillUs, durationUs);
+  stats.maxFutureFulfillBatchSize =
+      std::max<uint64_t>(stats.maxFutureFulfillBatchSize, batchSize);
+}
+
 } // namespace bytedance::bolt::memory::bm

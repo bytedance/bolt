@@ -47,6 +47,7 @@ class DiskIoSchedulerImpl {
     QueuedIoRequest queued;
     BackendSubmitStatus status{BackendSubmitStatus::Failed};
     std::chrono::steady_clock::time_point submitTime;
+    uint64_t submitDurationUs{0};
   };
 
   static std::future<IoResult> completedFuture(IoResult result);
@@ -67,7 +68,7 @@ class DiskIoSchedulerImpl {
   DiskIoSchedulerStats snapshotStatsLocked() const;
   void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
   int computeWaitTimeoutMsLocked(std::chrono::steady_clock::time_point now);
-  void waitForWorkerEvent(int timeoutMs);
+  uint64_t waitForWorkerEvent(int timeoutMs);
   void notifyWorker() const;
 
   const DiskIoSchedulerConfig config_;

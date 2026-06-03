@@ -48,6 +48,25 @@ struct DiskIoSchedulerStats {
   uint64_t completedRequestsInBatches{0};
   double averageCompletionBatchSize{0};
   uint64_t maxCompletionBatchSize{0};
+  uint64_t backendReapCalls{0};
+  uint64_t cumulativeBackendReapUs{0};
+  double averageBackendReapUs{0};
+  uint64_t maxBackendReapUs{0};
+  uint64_t backendSubmitCalls{0};
+  uint64_t cumulativeBackendSubmitUs{0};
+  double averageBackendSubmitUs{0};
+  uint64_t maxBackendSubmitUs{0};
+  uint64_t workerWaitCalls{0};
+  uint64_t cumulativeWorkerWaitUs{0};
+  double averageWorkerWaitUs{0};
+  uint64_t maxWorkerWaitUs{0};
+  uint64_t futureFulfillBatches{0};
+  uint64_t fulfilledResults{0};
+  uint64_t cumulativeFutureFulfillUs{0};
+  double averageFutureFulfillUs{0};
+  double averageFutureFulfillBatchSize{0};
+  uint64_t maxFutureFulfillUs{0};
+  uint64_t maxFutureFulfillBatchSize{0};
   DepthControlStatsPtr depthControl;
 
   std::string toString() const;
