@@ -38,7 +38,7 @@ MemoryPressureSnapshot snapshot(
         memory::sparksql::ExecutionMemoryPool::borrowFromRssWatermarkBytes(
             *sparkTaskAttemptId);
     configuredTaskMemoryQuotaBytes =
-        memory::sparksql::ExecutionMemoryPool::configuredTaskMemoryQuotaBytes();
+        memory::sparksql::ExecutionMemoryPool::getConfiguredMemoryPerTask();
   }
   return MemoryPressureSnapshot{
       reclaimWatermarkBytes,

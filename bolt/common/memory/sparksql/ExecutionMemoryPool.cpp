@@ -408,7 +408,7 @@ uint64_t ExecutionMemoryPool::borrowFromRssWatermarkBytes(
   return it == instance()->borrowFromRssWatermarkBytes_.end() ? 0 : it->second;
 }
 
-uint64_t ExecutionMemoryPool::configuredTaskMemoryQuotaBytes() {
+uint64_t ExecutionMemoryPool::getConfiguredMemoryPerTask() {
   if (!inited()) {
     return 0;
   }
