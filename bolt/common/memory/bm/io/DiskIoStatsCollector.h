@@ -43,6 +43,19 @@ class DiskIoStatsCollector {
   static void recordQueuedShutdown(
       DiskIoSchedulerStats& stats,
       IoPriority priority);
+  static void recordBackendReap(
+      DiskIoSchedulerStats& stats,
+      uint64_t durationUs);
+  static void recordBackendSubmit(
+      DiskIoSchedulerStats& stats,
+      uint64_t durationUs);
+  static void recordWorkerWait(
+      DiskIoSchedulerStats& stats,
+      uint64_t durationUs);
+  static void recordFutureFulfill(
+      DiskIoSchedulerStats& stats,
+      uint64_t durationUs,
+      size_t batchSize);
 };
 
 } // namespace bytedance::bolt::memory::bm

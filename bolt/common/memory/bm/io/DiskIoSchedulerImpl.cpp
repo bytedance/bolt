@@ -22,6 +22,15 @@ namespace {
 constexpr uint32_t kWakeupEvent = 1;
 constexpr uint32_t kCompletionEvent = 2;
 
+uint64_t elapsedUs(
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end) {
+  const auto duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count();
+  return duration > 0 ? static_cast<uint64_t>(duration) : 0;
+}
+
 int createEpollFd() {
   const int fd = ::epoll_create1(EPOLL_CLOEXEC);
   BOLT_CHECK_GE(fd, 0, "epoll_create1 failed: {}", std::strerror(errno));
@@ -192,7 +201,10 @@ void DiskIoSchedulerImpl::run() {
 
     // 2. Reap backend completions before taking the scheduler lock. Backend
     // calls may enter the kernel, so keep them outside mutex_.
+    const auto reapStart = std::chrono::steady_clock::now();
     auto completions = backend_->reap();
+    const auto backendReapUs =
+        elapsedUs(reapStart, std::chrono::steady_clock::now());
 
     std::vector<QueuedIoRequest> dispatchBatch;
     bool madeProgress = !completions.empty();
@@ -216,6 +228,7 @@ void DiskIoSchedulerImpl::run() {
       if (!stopping_) {
         dispatchBatch = collectDispatchBatchLocked();
       }
+      DiskIoStatsCollector::recordBackendReap(stats_, backendReapUs);
       shouldExit = stopping_ && drainedLocked() && dispatchBatch.empty();
     }
 
@@ -226,8 +239,11 @@ void DiskIoSchedulerImpl::run() {
       // a lightweight enqueue operation even if the backend enters the kernel.
       const auto submitTime = std::chrono::steady_clock::now();
       const auto status = backend_->submit(queued.requestId, queued.request);
+      const auto submitDurationUs =
+          elapsedUs(submitTime, std::chrono::steady_clock::now());
       dispatchResults.push_back(
-          DispatchResult{std::move(queued), status, submitTime});
+          DispatchResult{
+              std::move(queued), status, submitTime, submitDurationUs});
     }
 
     {
@@ -250,7 +266,16 @@ void DiskIoSchedulerImpl::run() {
     // immediately call back into submit()/stats(); doing set_value() under the
     // scheduler lock would make that wake-up contend with the worker and can
     // deadlock with future implementations that run continuations inline.
+    const auto readyResultCount = readyResults.size();
+    const auto fulfillStart = std::chrono::steady_clock::now();
     fulfillReadyResults(readyResults);
+    const auto futureFulfillUs =
+        elapsedUs(fulfillStart, std::chrono::steady_clock::now());
+    if (readyResultCount > 0) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      DiskIoStatsCollector::recordFutureFulfill(
+          stats_, futureFulfillUs, readyResultCount);
+    }
 
     if (shouldExit) {
       return;
@@ -260,7 +285,9 @@ void DiskIoSchedulerImpl::run() {
       // 7. Sleep only when this iteration made no useful progress. New work and
       // backend completions are both fd-driven, so no periodic polling is
       // needed. Timeouts are reserved for real deadlines such as stats logging.
-      waitForWorkerEvent(waitTimeoutMs);
+      const auto workerWaitUs = waitForWorkerEvent(waitTimeoutMs);
+      std::lock_guard<std::mutex> lock(mutex_);
+      DiskIoStatsCollector::recordWorkerWait(stats_, workerWaitUs);
     }
   }
 }
@@ -284,12 +311,13 @@ int DiskIoSchedulerImpl::computeWaitTimeoutMsLocked(
   return toEpollTimeoutMs(*waitTime);
 }
 
-void DiskIoSchedulerImpl::waitForWorkerEvent(int timeoutMs) {
+uint64_t DiskIoSchedulerImpl::waitForWorkerEvent(int timeoutMs) {
+  const auto waitStart = std::chrono::steady_clock::now();
   epoll_event events[2];
   while (true) {
     const int ready = ::epoll_wait(epollFd_.get(), events, 2, timeoutMs);
     if (ready >= 0) {
-      return;
+      return elapsedUs(waitStart, std::chrono::steady_clock::now());
     }
     if (errno == EINTR) {
       continue;
@@ -330,6 +358,8 @@ bool DiskIoSchedulerImpl::applyDispatchResultsLocked(
 
   for (auto& dispatch : results) {
     const auto priority = dispatch.queued.request.priority;
+    DiskIoStatsCollector::recordBackendSubmit(
+        stats_, dispatch.submitDurationUs);
     if (dispatch.status == BackendSubmitStatus::RetryableBusy) {
       // A full SQ is backpressure, not user-visible IO failure. Put the request
       // back at the head so the next worker iteration can retry after reaping.

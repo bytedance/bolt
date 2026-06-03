@@ -59,7 +59,26 @@ std::string DiskIoSchedulerStats::toString() const {
       << " completion_batches=" << completionBatches
       << " completed_requests_in_batches=" << completedRequestsInBatches
       << " average_completion_batch_size=" << averageCompletionBatchSize
-      << " max_completion_batch_size=" << maxCompletionBatchSize;
+      << " max_completion_batch_size=" << maxCompletionBatchSize
+      << " backend_reap_calls=" << backendReapCalls
+      << " cumulative_backend_reap_us=" << cumulativeBackendReapUs
+      << " average_backend_reap_us=" << averageBackendReapUs
+      << " max_backend_reap_us=" << maxBackendReapUs
+      << " backend_submit_calls=" << backendSubmitCalls
+      << " cumulative_backend_submit_us=" << cumulativeBackendSubmitUs
+      << " average_backend_submit_us=" << averageBackendSubmitUs
+      << " max_backend_submit_us=" << maxBackendSubmitUs
+      << " worker_wait_calls=" << workerWaitCalls
+      << " cumulative_worker_wait_us=" << cumulativeWorkerWaitUs
+      << " average_worker_wait_us=" << averageWorkerWaitUs
+      << " max_worker_wait_us=" << maxWorkerWaitUs
+      << " future_fulfill_batches=" << futureFulfillBatches
+      << " fulfilled_results=" << fulfilledResults
+      << " cumulative_future_fulfill_us=" << cumulativeFutureFulfillUs
+      << " average_future_fulfill_us=" << averageFutureFulfillUs
+      << " average_future_fulfill_batch_size=" << averageFutureFulfillBatchSize
+      << " max_future_fulfill_us=" << maxFutureFulfillUs
+      << " max_future_fulfill_batch_size=" << maxFutureFulfillBatchSize;
   if (depthControl != nullptr) {
     out << depthControl->toString();
   }
