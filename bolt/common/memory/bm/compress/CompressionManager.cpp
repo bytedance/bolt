@@ -59,6 +59,10 @@ CompressionRecordResult CompressionManager::BuildSpillRecord(
 
   const auto rawSize = static_cast<uint64_t>(payload.size());
   const auto capacity = MaxCompressedLength(impl_->config.kind, payload.size());
+  // TODO: This allocates a fresh malloc-backed spill record for every write.
+  // Consider a malloc-backed reusable buffer pool here, but do not allocate
+  // from MemoryPool because spill itself can be triggered under MemoryPool
+  // pressure and pool allocation may recurse back into spill.
   auto record = AllocateSpillRecord(capacity);
 
   CompressionContextSet contexts;

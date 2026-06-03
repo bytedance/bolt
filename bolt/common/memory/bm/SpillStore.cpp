@@ -21,6 +21,10 @@ std::future<IoResult> SubmitReadRaw(
   request.priority = priority;
   request.fd = segment.segment().fd;
   request.fileOffset = segment.segment().offset;
+  // TODO: This allocates a fresh malloc-backed read buffer for every spill
+  // read. Consider a malloc-backed reusable buffer pool here, but do not
+  // allocate from MemoryPool because spill reads can happen while MemoryPool is
+  // under pressure and pool allocation may recurse back into spill.
   request.buffer = IoBuffer::allocateFromMalloc(size);
 
   return diskIoScheduler().submit(std::move(request));
