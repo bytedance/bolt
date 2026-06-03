@@ -30,7 +30,8 @@ class RowsStreamingWindowPartition : public WindowPartitionImpl<R> {
       const folly::Range<char**>& rows,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
-          sortKeyInfo);
+          sortKeyInfo,
+      bool enableJit = false);
 
   // Returns the number of rows in the current partial window partition,
   // including the offset within the full partition.

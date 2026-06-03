@@ -154,5 +154,34 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, fromUnixtimeWithTimezone) {
       "1970-01-01 08:00:00",
       fromUnixtimeOnce(LongMinValue, "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
 }
+
+TEST_F(FlinkSqlDateTimeFunctionsTest, timestampToStringV2) {
+  const auto formatOnce = [&](Timestamp timestamp, int32_t precision) {
+    return evaluateOnce<std::string>(
+        "flink_timestamp_to_string_v2(c0, c1)",
+        makeRowVector(
+            {makeFlatVector<Timestamp>({timestamp}),
+             makeFlatVector<int32_t>({precision})}));
+  };
+
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56"),
+      formatOnce(Timestamp(946729316, 0), 0));
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56.123"),
+      formatOnce(Timestamp(946729316, 123000000), 3));
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56.123456789"),
+      formatOnce(Timestamp(946729316, 123456789), 3));
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56.000000123"),
+      formatOnce(Timestamp(946729316, 123), 9));
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56.000000123"),
+      formatOnce(Timestamp(946729316, 123), 12));
+  EXPECT_EQ(
+      std::optional<std::string>("2000-01-01 12:21:56.1"),
+      formatOnce(Timestamp(946729316, 100000000), -1));
+}
 } // namespace
 } // namespace bytedance::bolt::functions::flinksql::test

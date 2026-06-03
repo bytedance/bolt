@@ -298,6 +298,7 @@ class Converter {
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
       timeZone_ = tz::locateZone(sessionTzName);
     }
+    isFlinkCompatible_ = queryConfig.enableFlinkCompatible();
   }
 
   TO_KIND(BooleanKind) convert(const FromType& from, ToType& to) {
@@ -473,25 +474,75 @@ class Converter {
       try {
         auto ts = from;
         if (timeZone_) {
-          ts.toTimezone(*(timeZone_));
-        }
-        if (isInSpark) {
-          constexpr TimestampToStringOptions options = {
-              .precision = TimestampToStringOptions::Precision::kMicroseconds,
-              .leadingPositiveSign = true,
-              .skipTrailingZeros = true,
-              .zeroPaddingYear = true,
-              .dateTimeSeparator = ' '};
-          to.set(ts.toString(options));
-        } else {
-          TimestampToStringOptions options;
-          options.precision =
-              TimestampToStringOptions::Precision::kMilliseconds;
-          if constexpr (!legacy) {
+          if (isFlinkCompatible_) {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kNanoseconds;
+            options.skipTrailingZeros = true;
             options.zeroPaddingYear = true;
             options.dateTimeSeparator = ' ';
+            ts.toTimezone(*timeZone_);
+            auto output = ts.toString(options);
+            auto dot = output.find('.');
+            if (dot == std::string::npos) {
+              output.append(".000");
+            } else {
+              const auto fractionalSize = output.size() - dot - 1;
+              if (fractionalSize < 3) {
+                output.append(3 - fractionalSize, '0');
+              }
+            }
+            to.set(output);
+          } else if (isInSpark) {
+            constexpr TimestampToStringOptions options = {
+                .precision = TimestampToStringOptions::Precision::kMicroseconds,
+                .leadingPositiveSign = true,
+                .skipTrailingZeros = true,
+                .zeroPaddingYear = true,
+                .dateTimeSeparator = ' '};
+            ts.toTimezone(*timeZone_);
+            to.set(ts.toString(options));
+          } else {
+            to.set(from.toString(
+                TimestampToStringOptions::Precision::kMilliseconds, timeZone_));
           }
-          to.set(ts.toString(options));
+        } else {
+          if (isFlinkCompatible_) {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kNanoseconds;
+            options.skipTrailingZeros = true;
+            options.zeroPaddingYear = true;
+            options.dateTimeSeparator = ' ';
+            auto output = ts.toString(options);
+            auto dot = output.find('.');
+            if (dot == std::string::npos) {
+              output.append(".000");
+            } else {
+              const auto fractionalSize = output.size() - dot - 1;
+              if (fractionalSize < 3) {
+                output.append(3 - fractionalSize, '0');
+              }
+            }
+            to.set(output);
+          } else if (isInSpark) {
+            constexpr TimestampToStringOptions options = {
+                .precision = TimestampToStringOptions::Precision::kMicroseconds,
+                .leadingPositiveSign = true,
+                .skipTrailingZeros = true,
+                .zeroPaddingYear = true,
+                .dateTimeSeparator = ' '};
+            to.set(ts.toString(options));
+          } else {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kMilliseconds;
+            if constexpr (!legacy) {
+              options.zeroPaddingYear = true;
+              options.dateTimeSeparator = ' ';
+            }
+            to.set(ts.toString(options));
+          }
         }
       } catch (...) {
         return ConvertStatus::OTHER_FAILURE;
@@ -737,6 +788,7 @@ class Converter {
   int toPrecision_ = 0;
   int toScale_ = 0;
   const tz::TimeZone* timeZone_ = nullptr;
+  bool isFlinkCompatible_ = false;
 
   bool canAsInlinedStr_ = false;
 };
@@ -1069,6 +1121,36 @@ void doCastArrayToVarchar(
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
   const bool legacyComplex = isInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
+  if (queryConfig.enableFlinkCompatible() &&
+      arrayElements->type()->isTimestamp()) {
+    auto flatElements = resultElements->as<FlatVector<StringView>>();
+    nestedRows.applyToSelected([&](auto row) INLINE_LAMBDA {
+      if (flatElements->isNullAt(row)) {
+        return;
+      }
+      auto value = flatElements->valueAt(row);
+      int32_t dot = -1;
+      for (int32_t i = 0; i < value.size(); ++i) {
+        if (value.data()[i] == '.') {
+          dot = i;
+          break;
+        }
+      }
+      if (dot == -1) {
+        return;
+      }
+      bool allZeros = true;
+      for (int32_t i = dot + 1; i < value.size(); ++i) {
+        if (value.data()[i] != '0') {
+          allZeros = false;
+          break;
+        }
+      }
+      if (allZeros) {
+        flatElements->set(row, StringView(value.data(), dot));
+      }
+    });
+  }
 
   auto rawElements = resultElements->as<FlatVector<StringView>>()->rawValues();
   rows.applyToSelected([&](auto row) INLINE_LAMBDA {

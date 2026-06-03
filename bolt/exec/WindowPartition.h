@@ -56,7 +56,8 @@ class WindowPartition {
       const folly::Range<char**>& rows,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
-          sortKeyInfo);
+          sortKeyInfo,
+      bool enableJit = false);
 
   virtual ~WindowPartition() = default;
 
@@ -191,8 +192,7 @@ class WindowPartition {
       vector_size_t prevPeerStart,
       vector_size_t prevPeerEnd,
       vector_size_t* rawPeerStarts,
-      vector_size_t* rawPeerEnds,
-      bool enableJit = false) const;
+      vector_size_t* rawPeerEnds) const;
 
   /// Sets in 'rawFrameBounds' the frame boundary for the k range
   /// preceding/following frame.
@@ -250,10 +250,7 @@ class WindowPartition {
   };
 
  private:
-  virtual bool compareRowsWithSortKeys(
-      const char* lhs,
-      const char* rhs,
-      RowRowCompare rowCmpRowFunc_ = nullptr) const;
+  virtual bool compareRowsWithSortKeys(const char* lhs, const char* rhs) const;
 
   // Searches for frameColumn[startRow] in orderByColumn[startRow+-]
   // preceding or following based on the range search params.
@@ -302,6 +299,15 @@ class WindowPartition {
   // corresponding indexes of their input arguments into this vector.
   // They will request for column vector values at the respective index.
   std::vector<exec::RowColumn> columns_;
+
+  bool enableJit_{false};
+
+#ifdef ENABLE_BOLT_JIT
+  // Cached JIT module for peer row comparison in computePeerBuffers.
+  // Must be a member to keep the compiled module alive across calls.
+  mutable bolt::jit::CompiledModuleSP jitModuleRow_{nullptr};
+  mutable RowRowCompare rowCmpRowFunc_{nullptr};
+#endif
 };
 
 enum class RowFormat { kRowContainer, kSerializedRows };
@@ -314,7 +320,8 @@ class WindowPartitionImpl : public WindowPartition {
       const folly::Range<char**>& rows,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
-          sortKeyInfo);
+          sortKeyInfo,
+      bool enableJit = false);
 
   /// Copies the values at 'columnIndex' into 'result' (starting at
   /// 'resultOffset') for the rows at positions in the 'rowNumbers'
@@ -334,10 +341,7 @@ class WindowPartitionImpl : public WindowPartition {
       const VectorPtr& result,
       bool exactSize = false) const override;
 
-  bool compareRowsWithSortKeys(
-      const char* lhs,
-      const char* rhs,
-      RowRowCompare rowCmpRowFunc_ = nullptr) const override;
+  bool compareRowsWithSortKeys(const char* lhs, const char* rhs) const override;
 
   /// Sets in 'rawFrameBounds' the frame boundary for the k range
   /// preceding/following frame.
@@ -391,7 +395,8 @@ class SpilledWindowPartition : public WindowPartitionImpl<R> {
       uint64_t numRows,
       const RowTypePtr& outputType,
       const std::vector<column_index_t>* outputChannels,
-      bolt::memory::MemoryPool* pool);
+      bolt::memory::MemoryPool* pool,
+      bool enableJit = false);
 
   bool isSpilled() override {
     return true;

@@ -109,7 +109,7 @@ std::shared_ptr<WindowPartition> StreamingWindowBuild::nextPartition() {
       partitionSize);
 
   return std::make_shared<WindowPartitionImpl<RowFormat::kRowContainer>>(
-      data_.get(), partition, inversedInputChannels_, sortKeyInfo_);
+      data_.get(), partition, inversedInputChannels_, sortKeyInfo_, enableJit_);
 }
 
 bool StreamingWindowBuild::hasNextPartition() {

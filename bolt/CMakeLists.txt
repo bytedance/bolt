@@ -265,12 +265,11 @@ target_link_libraries(bolt_engine PUBLIC
                                   roaring::roaring
                                   Boost::boost
                                   Boost::url
-                                  cpr::cpr
+                                  $<$<BOOL:${BOLT_BUILD_TEST_UTILS}>:cpr::cpr>
                                   $<$<BOOL:${BOLT_ENABLE_SPARK_COMPATIBLE}>:celeborn-cpp-client::celeborn-cpp-client>
                                   $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
                                   $<$<BOOL:${BOLT_ENABLE_GCS}>:google-cloud-cpp::storage>
                                   $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs Azure::azure-storage-files-datalake Azure::azure-identity>
-                                  CURL::libcurl
 )
 
 if(${BOLT_BUILD_TEST_UTILS})

@@ -31,6 +31,11 @@ class JsonFunctionsTest : public FlinkFunctionBaseTest {
   }
 };
 
+TEST_F(JsonFunctionsTest, flinkCompatibleConfigEnabled) {
+  setFlinkCompatible(true);
+  EXPECT_TRUE(queryCtx_->queryConfig().enableFlinkCompatible());
+}
+
 TEST_F(JsonFunctionsTest, jsonStrToMap) {
   auto evaluateExpr = [&](std::optional<StringView> json,
                           std::optional<bool> logFailuresOnly = std::nullopt) {

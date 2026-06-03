@@ -137,14 +137,19 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
           break;
       }
     }
-    if (cacheTypes->size() > 0 && module->getUserData() == nullptr) {
-      module->setUserData(static_cast<void*>(cacheTypes.release()));
-      module->appendCleanCallback([mod = module.get()] {
-        auto* cacheTypes = static_cast<std::vector<bytedance::bolt::TypePtr>*>(
-            mod->getUserData());
-        delete cacheTypes;
-        mod->setUserData(nullptr);
-      });
+
+    if (cacheTypes->size() > 0) {
+      auto* userData = static_cast<void*>(cacheTypes.get());
+      if (module->compareExchangeUserData(nullptr, userData)) {
+        cacheTypes.release();
+        module->appendCleanCallback([mod = module.get()] {
+          auto* raw = mod->getUserData();
+          mod->compareExchangeUserData(raw, nullptr);
+          auto* cacheTypes =
+              static_cast<std::vector<bytedance::bolt::TypePtr>*>(raw);
+          delete cacheTypes;
+        });
+      }
     }
   }
   return module;
