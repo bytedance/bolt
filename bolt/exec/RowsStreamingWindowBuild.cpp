@@ -59,7 +59,8 @@ void RowsStreamingWindowBuild<needSort>::buildNextInputOrPartition(
             data_.get(),
             folly::Range<char**>(nullptr, nullptr),
             inversedInputChannels_,
-            sortKeyInfo_));
+            sortKeyInfo_,
+            enableJit_));
   }
 
   windowPartitions_[inputCurrentPartition_]->addNewRows(inputRows_);
@@ -86,7 +87,8 @@ void RowsStreamingWindowBuild<needSort>::buildNextInputOrPartitionFromSpill(
               data_.get(),
               folly::Range<char**>(nullptr, nullptr),
               inversedInputChannels_,
-              sortKeyInfo_));
+              sortKeyInfo_,
+              enableJit_));
     }
     windowPartitions_[inputCurrentPartition_]->addNewRows(
         windowPartitions_[inputCurrentPartition_]

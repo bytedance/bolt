@@ -436,7 +436,11 @@ std::shared_ptr<WindowPartition> SortWindowBuild::nextPartition() {
     BOLT_CHECK(!sortRows_.empty(), "No window partitions available");
     auto partition = folly::Range(sortRows_.data(), sortRows_.size());
     return std::make_shared<WindowPartitionImpl<RowFormat::kRowContainer>>(
-        data_.get(), partition, inversedInputChannels_, sortKeyInfo_);
+        data_.get(),
+        partition,
+        inversedInputChannels_,
+        sortKeyInfo_,
+        enableJit_);
   }
 
   if (rowBasedSpillSortMerger_ != nullptr) {
@@ -479,7 +483,11 @@ std::shared_ptr<WindowPartition> SortWindowBuild::nextPartition() {
         sortRows_.data() + partitionStartRows_[currentPartition_],
         partitionSize);
     return std::make_shared<WindowPartitionImpl<RowFormat::kSerializedRows>>(
-        data_.get(), partition, inversedInputChannels_, sortKeyInfo_);
+        data_.get(),
+        partition,
+        inversedInputChannels_,
+        sortKeyInfo_,
+        enableJit_);
   }
 
   BOLT_CHECK(!partitionStartRows_.empty(), "No window partitions available")
@@ -496,7 +504,7 @@ std::shared_ptr<WindowPartition> SortWindowBuild::nextPartition() {
   auto partition = folly::Range(
       sortRows_.data() + partitionStartRows_[currentPartition_], partitionSize);
   return std::make_shared<WindowPartitionImpl<RowFormat::kRowContainer>>(
-      data_.get(), partition, inversedInputChannels_, sortKeyInfo_);
+      data_.get(), partition, inversedInputChannels_, sortKeyInfo_, enableJit_);
 }
 
 bool SortWindowBuild::hasNextPartition() {

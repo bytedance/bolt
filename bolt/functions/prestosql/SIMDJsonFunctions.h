@@ -84,6 +84,23 @@ struct SIMDIsJsonScalarFunction {
 };
 
 template <typename T>
+struct SIMDIsJsonObjectFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE static void call(
+      bool& result,
+      const arg_type<Json>& json) {
+    ParserContext ctx(json.data(), json.size());
+    try {
+      ctx.parseDocument();
+      result = (ctx.jsonDoc.type() == simdjson::ondemand::json_type::object);
+    } catch (const simdjson::simdjson_error&) {
+      result = false;
+    }
+  }
+};
+
+template <typename T>
 struct SonicIsJsonScalarFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
@@ -106,6 +123,23 @@ struct SonicIsJsonScalarFunction {
 };
 
 template <typename T>
+struct SonicIsJsonObjectFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE static void call(
+      bool& result,
+      const arg_type<Json>& json) {
+    sonic_json::Document jsonDoc;
+    jsonDoc.Parse(json.data(), json.size());
+    if (jsonDoc.HasParseError()) {
+      result = false;
+      return;
+    }
+    result = jsonDoc.IsObject();
+  }
+};
+
+template <typename T>
 class WrapperIsJsonScalarFunction {
  public:
   BOLT_DEFINE_FUNCTION_TYPES(T);
@@ -122,6 +156,29 @@ class WrapperIsJsonScalarFunction {
       SonicIsJsonScalarFunction<T>::call(result, json);
     } else {
       SIMDIsJsonScalarFunction<T>::call(result, json);
+    }
+  }
+
+  bool useSonic = true;
+};
+
+template <typename T>
+class WrapperIsJsonObjectFunction {
+ public:
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<Json>* /*json*/) {
+    useSonic = config.enableSonicIsJsonScalar();
+  }
+
+  FOLLY_ALWAYS_INLINE void call(bool& result, const arg_type<Json>& json) {
+    if (useSonic) {
+      SonicIsJsonObjectFunction<T>::call(result, json);
+    } else {
+      SIMDIsJsonObjectFunction<T>::call(result, json);
     }
   }
 
