@@ -64,7 +64,7 @@ ZstdCodec::ZstdCodec(const ZstdCodecOptions& options)
 
 std::string ZstdCodec::toString() const {
   if (nbWorkers_ > 0) {
-    return fmt::format("{}: {}, nbWorkers: {}", name(), nbWorkers_);
+    return fmt::format("{}, nbWorkers: {}", name(), nbWorkers_);
   }
   return Codec::toString();
 }
