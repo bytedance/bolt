@@ -129,7 +129,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot&,
       bool) {
-    return true;
+    return false;
   }
 
   static void compileHashAggrJitExtract(

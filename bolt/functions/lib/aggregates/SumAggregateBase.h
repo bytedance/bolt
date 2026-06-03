@@ -172,8 +172,9 @@ class SumAggregateBase
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot& slot,
       bool) {
-    return !slot.decimal &&
-        slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+    // return !slot.decimal &&
+    //     slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+    return false;
   }
 
   static void compileHashAggrJitExtract(

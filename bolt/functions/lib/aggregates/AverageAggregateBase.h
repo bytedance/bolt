@@ -244,10 +244,13 @@ class AverageAggregateBase : public exec::Aggregate {
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot& slot,
       bool partialOutput) {
-    if (slot.decimal || slot.accumulatorKind == jit::HashAggrJitValueKind::Int128) {
-      return false;
-    }
-    return !partialOutput || slot.accumulatorKind == jit::HashAggrJitValueKind::Double;
+    // if (slot.decimal || slot.accumulatorKind ==
+    // jit::HashAggrJitValueKind::Int128) {
+    //   return false;
+    // }
+    // return !partialOutput || slot.accumulatorKind ==
+    // jit::HashAggrJitValueKind::Double;
+    return false;
   }
 
   static void compileHashAggrJitExtract(

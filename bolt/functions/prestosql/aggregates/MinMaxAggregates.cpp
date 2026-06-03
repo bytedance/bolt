@@ -142,7 +142,8 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot& slot,
       bool) {
-    return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+    // return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
+    return false;
   }
 
   static void compileHashAggrJitExtract(
