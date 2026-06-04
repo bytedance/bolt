@@ -342,17 +342,17 @@ jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
     int32_t aggregateIndex,
     const jit::HashAggrJitDescriptor& descriptor) const {
   return jit::HashAggrJitSlot{
-      aggregateIndex,
-      descriptor.kind,
-      descriptor.inputKind,
-      descriptor.accumulatorKind,
-      accumulatorOffset(),
-      accumulatorNullByte(),
-      accumulatorNullMask(),
-      descriptor.countStar,
-      descriptor.mergeInput,
-      descriptor.decimal,
-      descriptor.ops};
+      .aggregateIndex = aggregateIndex,
+      .kind = descriptor.kind,
+      .inputKind = descriptor.inputKind,
+      .accumulatorKind = descriptor.accumulatorKind,
+      .offset = accumulatorOffset(),
+      .nullByte = accumulatorNullByte(),
+      .nullMask = accumulatorNullMask(),
+      .countStar = descriptor.countStar,
+      .mergeInput = descriptor.mergeInput,
+      .decimal = descriptor.decimal,
+      .ops = descriptor.ops};
 }
 #endif
 

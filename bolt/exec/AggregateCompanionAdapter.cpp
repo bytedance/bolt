@@ -42,6 +42,7 @@ void AggregateCompanionFunctionBase::setOffsetsInternal(
     int32_t nullByte,
     uint8_t nullMask,
     int32_t rowSizeOffset) {
+  Aggregate::setOffsetsInternal(offset, nullByte, nullMask, rowSizeOffset);
   fn_->setOffsets(offset, nullByte, nullMask, rowSizeOffset);
 }
 
@@ -64,6 +65,19 @@ bool AggregateCompanionFunctionBase::isFixedSize() const {
 bool AggregateCompanionFunctionBase::supportsToIntermediate() const {
   return fn_->supportsToIntermediate();
 }
+
+#ifdef ENABLE_BOLT_JIT
+bool AggregateCompanionFunctionBase::supportsHashAggrJit(
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->supportsHashAggrJit(context);
+}
+
+std::optional<jit::HashAggrJitDescriptor>
+AggregateCompanionFunctionBase::createHashAggrJitDescriptor(
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->createHashAggrJitDescriptor(context);
+}
+#endif
 
 bool AggregateCompanionFunctionBase::supportAccumulatorSerde() const {
   return fn_->supportAccumulatorSerde();

@@ -52,6 +52,14 @@ class AggregateCompanionFunctionBase : public Aggregate {
 
   bool supportsToIntermediate() const override final;
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override final;
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override final;
+#endif
+
   bool supportAccumulatorSerde() const override final;
 
   uint32_t getAccumulatorSerializeSize(char* group) const override final;
