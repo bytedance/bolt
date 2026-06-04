@@ -33,6 +33,7 @@
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/VectorFunction.h"
+
 namespace bytedance::bolt::exec {
 
 class AggregateCompanionFunctionBase : public Aggregate {
@@ -54,10 +55,10 @@ class AggregateCompanionFunctionBase : public Aggregate {
 
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
-      const jit::HashAggrJitPlanContext& context) const override final;
+      const jit::HashAggrJitPlanContext& context) const override;
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
-      const jit::HashAggrJitPlanContext& context) const override final;
+      const jit::HashAggrJitPlanContext& context) const override;
 #endif
 
   bool supportAccumulatorSerde() const override final;
@@ -132,6 +133,14 @@ struct AggregateCompanionAdapter {
         const TypePtr& resultType)
         : AggregateCompanionFunctionBase{std::move(fn), resultType} {}
 
+#ifdef ENABLE_BOLT_JIT
+    bool supportsHashAggrJit(
+        const jit::HashAggrJitPlanContext& context) const override;
+
+    std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+        const jit::HashAggrJitPlanContext& context) const override;
+#endif
+
     void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
         override;
   };
@@ -147,7 +156,7 @@ struct AggregateCompanionAdapter {
     void toIntermediate(
         const SelectivityVector& rows,
         std::vector<VectorPtr>& args,
-        VectorPtr& result) const override final;
+        VectorPtr& result) const final;
 
     void addRawInput(
         char** groups,
@@ -160,6 +169,14 @@ struct AggregateCompanionAdapter {
         const SelectivityVector& rows,
         const std::vector<VectorPtr>& args,
         bool mayPushdown) override;
+
+#ifdef ENABLE_BOLT_JIT
+    bool supportsHashAggrJit(
+        const jit::HashAggrJitPlanContext& context) const override;
+
+    std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+        const jit::HashAggrJitPlanContext& context) const override;
+#endif
 
     void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
         override;
