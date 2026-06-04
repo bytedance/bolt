@@ -2,9 +2,11 @@
 
 #include "bolt/jit/aggregation/HashAggrJit.h"
 
+#include <glog/logging.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 
 #include <cmath>
 #include <sstream>
@@ -16,6 +18,32 @@
 extern "C" {
 
 namespace {
+
+void logHashAggrJitFunctionIR(
+    const llvm::Module& module,
+    const std::string& moduleKey,
+    llvm::StringRef functionName,
+    llvm::StringRef stage,
+    bool hasError) {
+  if (!VLOG_IS_ON(1)) {
+    return;
+  }
+  const auto* function = module.getFunction(functionName);
+  if (function == nullptr) {
+    VLOG(1) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
+            << " stage=" << stage.str() << " function=" << functionName.str()
+            << " error=" << hasError << ": <missing function>";
+    return;
+  }
+  std::string ir;
+  llvm::raw_string_ostream out(ir);
+  function->print(out);
+  out.flush();
+  VLOG(1) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
+          << " stage=" << stage.str() << " function=" << functionName.str()
+          << " error=" << hasError << ":\n"
+          << ir;
+}
 
 struct JitDecimalSumState {
   bytedance::bolt::int128_t sum{0};
@@ -752,10 +780,21 @@ bool HashAggrJitChunk::codegen() {
   const auto extractFn = extractFunctionName();
   module_ = jit->CompileModule(
       [&](llvm::Module& module) {
-        return genInitIR(module, initFn, slots_) ||
+        const bool hasError = genInitIR(module, initFn, slots_) ||
             genAddDenseIR(module, addFn, slots_, true) ||
             genAddDenseIR(module, addNoNullFn, slots_, false) ||
             genExtractIR(module, extractFn, slots_, partialOutput_);
+        logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
+        logHashAggrJitFunctionIR(module, moduleKey, addFn, "add_dense", hasError);
+        logHashAggrJitFunctionIR(
+            module,
+            moduleKey,
+            addNoNullFn,
+            "add_dense_no_null",
+            hasError);
+        logHashAggrJitFunctionIR(
+            module, moduleKey, extractFn, "extract", hasError);
+        return hasError;
       },
       moduleKey);
   if (!module_) {
