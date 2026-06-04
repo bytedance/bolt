@@ -54,6 +54,12 @@ bolt_add_library(
   PartitionIdGenerator.cpp
   SplitReader.cpp
   TableHandle.cpp
+  bytelake/BytelakeHashDedup.cpp
+  bytelake/BytelakeKeyPacker.cpp
+  bytelake/BytelakeScanSpecUtil.cpp
+  bytelake/BytelakeConnectorSplit.cpp
+  bytelake/BytelakeConnectorUtil.cpp
+  bytelake/BytelakeSplitReader.cpp
 )
 
 set(ENABLED_DWIO_FORMATS "")
