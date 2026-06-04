@@ -72,8 +72,12 @@ class SumAggregateBase
     if (context.inputType->isRow()) {
       return false;
     }
-    return context.inputType->isDecimal() ||
-        jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+    if (context.inputType->isDecimal()) {
+      return context.isRawInput &&
+          (context.inputType->isShortDecimal() ||
+           context.inputType->isLongDecimal());
+    }
+    return jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
         context.inputType->kind() == TypeKind::HUGEINT;
   }
 
@@ -84,9 +88,18 @@ class SumAggregateBase
     }
 
     const bool decimal = context.isRawInput && context.inputType->isDecimal();
-    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
-    if (!inputKind.has_value()) {
-      return std::nullopt;
+    std::optional<jit::HashAggrJitValueKind> inputKind;
+    if (decimal) {
+      inputKind = context.inputType->isShortDecimal()
+          ? std::optional<
+                jit::HashAggrJitValueKind>{jit::HashAggrJitValueKind::Int64}
+          : std::optional<jit::HashAggrJitValueKind>{
+                jit::HashAggrJitValueKind::Int128};
+    } else {
+      inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+      if (!inputKind.has_value()) {
+        return std::nullopt;
+      }
     }
 
     auto accumulatorKind = decimal
