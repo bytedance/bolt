@@ -28,8 +28,7 @@ void registerReadMemoryBenchmarks(const std::vector<DatasetSpec>& specs) {
             rows.insert(rows.end(), batchRows.begin(), batchRows.end());
           });
           suspender.dismiss();
-          readBackRowContainer(
-              container, rows, spec->keyTypes.front(), leaf.get());
+          readBackRowContainer(container, rows, allTypes(*spec), leaf.get());
           suspender.rehire();
           return 1;
         });
@@ -57,8 +56,7 @@ void registerReadMemoryBenchmarks(const std::vector<DatasetSpec>& specs) {
             rows.insert(rows.end(), batchRows.begin(), batchRows.end());
           });
           suspender.dismiss();
-          readBackBmRowContainer(
-              container, rows, spec->keyTypes.front(), leaf.get());
+          readBackBmRowContainer(container, rows, allTypes(*spec), leaf.get());
           const auto stats = bm->stats();
           folly::doNotOptimizeAway(stats.pinCount);
           suspender.rehire();

@@ -50,6 +50,8 @@ struct RowContainerReadSpillStats {
 
 std::vector<DatasetSpec> makeDatasetSpecs();
 
+std::vector<TypePtr> allTypes(const DatasetSpec& spec);
+
 uint64_t benchmarkPoolCapacityBytes();
 
 std::shared_ptr<memory::bm::BufferManager> makeBufferManager(
@@ -80,13 +82,13 @@ void appendBmRowContainerBatch(BmRowContainer& container, const Dataset& dataset
 void readBackRowContainer(
     RowContainer& container,
     const std::vector<char*>& rows,
-    const TypePtr& type,
+    const std::vector<TypePtr>& types,
     memory::MemoryPool* pool);
 
 void readBackBmRowContainer(
     BmRowContainer& container,
     const std::vector<RowId>& rows,
-    const TypePtr& type,
+    const std::vector<TypePtr>& types,
     memory::MemoryPool* pool);
 
 std::unique_ptr<Spiller> makeRowContainerSpiller(
