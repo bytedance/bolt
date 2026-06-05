@@ -8,35 +8,26 @@ task-level `BufferManager`。现有 `RowContainer` 不改，现有使用方不�
 这份文档只描述容器本身。Window 侧如何消费 `BmRowContainer`，见
 `docs/superpowers/specs/2026-06-04-bm-row-container-window-integration.md`。
 
-第一版目标：
+当前设计目标：
 
 - fixed row 存在 BM row blocks；
 - variable-width bytes 存在 BM heap blocks；
-- 对外 row identity 从长期 `char*` 改为稳定 `BmRowRef`；
+- 对外 row identity 从长期 `char*` 改为稳定 `RowId`；
 - fixed row 内的变长字段保存 offset 引用，不保存 heap pointer；
-- 内存充足时 append blocks 可以保持 pinned；
-- 需要新 block 且 `MaybeReserve` 失败时，释放冷 pins 并用 `SpillBlocks` 下刷；
-- 第一版 benchmark 只比较容器层能力，不接入 Window operator。
-
-第一版非目标：
-
-- aggregate accumulator 存储；
-- hash join `next` 链；
-- probed flag；
-- normalized key/JIT；
-- `RowContainer::listRows(char**)` 兼容；
-- row-based spiller 兼容；
-- 多 segment combine 语义。
+- 使用 `BmPressureAwareBlockArena` 统一管理 BM blocks，row/heap 只是 `BmRowContainer` 对 block 的解释；
+- 内存充足时 blocks 可以保持 pinned，读写路径复用已 pinned 的 block data；
+- 需要新 block 或 pin block 且 `MaybeReserve` 失败时，由 arena 释放可回收 pins，再用
+  `SpillBlocks` 下刷可回收 blocks；
+- benchmark 对比容器层 write、spill、read memory、read spill 四类能力。
 
 ## 2. 为什么不能沿用 char*
 
-`RowContainer` 的现有操作模型建立在长期有效的 `char*` row 地址上：
+现有 `RowContainer` 的操作模型建立在长期有效的 `char*` row 地址上：
 
 - `RowContainer::newRow()` 返回 `char*`；
 - 调用方会把这些指针保存在 row vector、partition range、sort rows 等结构中；
 - `RowContainer::extractColumn()`、`extractNulls()`、`compare()` 等接口直接解引用这些指针；
-- `RowContainer` 把变长值存成 `StringView` 或 `std::string_view`，这些 view 可能指向
-  `HashStringAllocator` 管理的内存。
+- 变长值可能通过 view 指向容器内部管理的字符串内存。
 
 `BufferManager` 的地址语义不同：
 
@@ -44,16 +35,14 @@ task-level `BufferManager`。现有 `RowContainer` 不改，现有使用方不�
 - `BufferHandle::Ptr()` 只在 block 被 pin 住期间有效；
 - block unpin 并被 reclaim 后，同一个 block 再次 pin 回来时虚拟地址可能变化。
 
-因此 `BmRowContainer` 不能把 `char*` 暴露成稳定 row identity。否则只有两种结果：
-
-- 为了保证 `char*` 永远有效，所有 blocks 必须长期 pinned，BM 无法发挥 reclaim/spill 价值；
-- 允许 block unpin/reload 后，旧 `char*` 会失效，后续解引用变成未定义行为。
+因此 `BmRowContainer` 不把 `char*` 暴露成稳定 row identity。对外只暴露稳定逻辑位置，
+容器内部在访问时根据逻辑位置 pin 对应 block 并生成临时地址。
 
 核心不变量：
 
 ```text
-外部长期保存 BmRowRef。
-容器内部在访问期间把 BmRowRef 转成临时 char*。
+外部长期保存 RowId。
+容器内部在访问期间把 RowId 转成临时 char*。
 临时 char* 的生命周期必须被对应 BufferHandle 覆盖，且不能逃逸。
 ```
 
@@ -62,63 +51,63 @@ task-level `BufferManager`。现有 `RowContainer` 不改，现有使用方不�
 本节是 `BmRowContainer` 与 Window 集成文档共同使用的接口定义。两份文档必须保持一致；如果接口
 需要调整，以本节为准，并同步更新 Window 集成文档。
 
-`BmRowRef` 是稳定 row identity：
+`RowId` 是稳定 row identity：
 
 ```cpp
-struct BmRowRef {
-  uint32_t rowBlockId;
+struct RowId {
+  uint32_t blockId;
   uint32_t rowOffset;
 };
 ```
 
-`BmRowRef` 通过 row block 和 block 内 offset 定位 fixed row。它可以安全保存在
-`std::vector<BmRowRef>` 中，也可以跨 unpin/reclaim 长期存在。
+`RowId` 通过 block id 和 block 内 offset 定位 fixed row。它可以安全保存在
+`std::vector<RowId>` 中，并跨 unpin/reclaim 长期存在。
 
-fixed row 内的变长字段保存 `BmVarRef`：
+fixed row 内的变长字段保存 `VarData`：
 
 ```cpp
-struct BmVarRef {
-  uint32_t heapBlockId;
-  uint32_t heapOffset;
+struct VarData {
+  uint32_t blockId;
+  uint32_t offset;
   uint32_t size;
 };
 ```
 
-核心公开操作都基于 `BmRowRef`：
+核心公开操作都基于 `RowId`：
 
 ```cpp
 class BmRowContainer {
  public:
-  BmRowRef newRow();
+  RowId newRow();
 
   void store(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      BmRowRef row,
+      RowId row,
       int32_t column);
 
   void store(const RowVectorPtr& input);
 
   int32_t compare(
-      BmRowRef left,
-      BmRowRef right,
+      RowId left,
+      RowId right,
       int32_t column,
       CompareFlags flags = {});
 
   int32_t compareRows(
-      BmRowRef left,
-      BmRowRef right,
+      RowId left,
+      RowId right,
       const std::vector<CompareFlags>& flags = {});
 
   void extractColumn(
-      folly::Range<const BmRowRef*> rows,
+      folly::Range<const RowId*> rows,
       int32_t column,
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false);
 
   void extractNulls(
-      folly::Range<const BmRowRef*> rows,
+      folly::Range<const RowId*> rows,
       int32_t column,
       const BufferPtr& result);
 
@@ -137,46 +126,30 @@ class BmRowContainer {
 };
 ```
 
-`BmRowContainer` 不暴露 `PinnedRows`、`BufferHandle` 或稳定 `char*`。
+`BmRowContainer` 不暴露 `BufferHandle` 或稳定 `char*`。所有 `char*` 都是容器内部临时访问地址，
+调用方只能长期保存 `RowId`。
 
-## 4. RowContainer 接口取舍
+## 4. 操作模型
 
-第一版必须重做的接口：
+`BmRowContainer` 的公开操作以 `RowId` 为输入输出，不向调用方返回可长期保存的 row 指针。
 
-| RowContainer 接口 | BmRowContainer 对应接口 | 第一版状态 |
-| --- | --- | --- |
-| `char* newRow()` | `BmRowRef newRow()` | 必须实现 |
-| `store(decoded, index, char*, column)` | `store(decoded, index, BmRowRef, column)` | 必须实现 |
-| `store(RowVectorPtr)` | `store(RowVectorPtr)` | 建议实现，便于 benchmark |
-| `extractColumn(char**/rowNumbers, ...)` | `extractColumn(BmRowRef range, ...)` | 必须实现 |
-| `extractNulls(char**, ...)` | `extractNulls(BmRowRef range, ...)` | 必须实现 |
-| `compare(char*, char*, column, flags)` | `compare(BmRowRef, BmRowRef, column, flags)` | 必须实现 |
-| `compareRows(char*, char*, flags)` | `compareRows(BmRowRef, BmRowRef, flags)` | 必须实现 |
-| `eraseRows(char**)` | 暂无强制对应接口 | 第一版不实现 |
-| `numRows()` | `numRows()` | 必须实现 |
-| `fixedRowSize()` | `fixedRowSize()` | 必须实现 |
-| `allocatedBytes()/usedBytes()` | `allocatedBytes()/usedBytes()` | 必须实现 |
-| `estimateRowSize()` | `estimateRowSize()` | 必须实现 |
-| `columnAt()/columns()/columnTypes()/keyTypes()` | 同名 accessor | 必须实现 |
-
-第一版明确不实现的接口：
-
-| RowContainer 接口 | 不实现原因 |
+| 操作 | 语义 |
 | --- | --- |
-| `extractSerializedRows()` / `storeSerializedRow()` | 服务现有 spiller，不是第一版容器目标 |
-| `copySerializedRow()` | 依赖现有 row serialization 格式 |
-| `extractProbedFlags()` / `setProbedFlag()` | join 专用 |
-| `hash()` | hash table 专用 |
-| `listRows(char**)` / `listPartitionRows()` / `createRowPartitions()` | 强绑定长期 `char*` |
-| `normalizedKey()` / `disableNormalizedKeys()` | JIT/sort/hash 优化，第一版不做 |
-| `JITable()` / `codegenCompare()` / `codegenRowEqVectors()` | JIT 第一版不做 |
-| `stringAllocator()` / `stringAllocatorShared()` | `BmRowContainer` 不使用 `HashStringAllocator` |
-| `pool()` | BM 管理自己的 leaf pool，不向使用方暴露为 row 分配入口 |
-| `prepareRead()` | 依赖 `HashStringAllocator` 链式数据 |
+| `newRow()` | 在 active row block 中创建 fixed row，返回 `RowId` |
+| `store(decoded, sourceIndex, RowId, column)` | 把指定列写入 `RowId` 对应 row |
+| `store(RowVectorPtr)` | 批量写入输入 batch，返回 rows 对应的 `RowId` 列表 |
+| `extractColumn(RowId range, column, ...)` | 按 `RowId` 列表提取指定列 |
+| `extractNulls(RowId range, column, ...)` | 按 `RowId` 列表提取 null bits |
+| `compare(RowId, RowId, column, flags)` | 比较两行指定列 |
+| `compareRows(RowId, RowId, flags)` | 按 key columns 比较两行 |
+| `clear()` | 清空 block handles、pins 和统计状态 |
+
+所有内部访问都通过 `BmPressureAwareBlockArena::pinnedData()` 把 `RowId` 或 `VarData`
+转成短生命周期 `char*`。这些地址只在 `BmRowContainer` 方法执行期间使用，不写入外部状态。
 
 ## 5. 存储布局
 
-`BmRowContainer` 复用 `RowContainer` 的 row layout 思路：
+`BmRowContainer` 使用 row-format fixed layout：
 
 - key types 在前；
 - dependent types 在 key 后；
@@ -184,49 +157,59 @@ class BmRowContainer {
 - null flags 放在 fixed row bytes 里；
 - fixed-width 值 inline 存储。
 
-物理存储从 `AllocationPool + HashStringAllocator` 改成 BufferManager blocks：
+物理存储使用一组统一的 BufferManager blocks：
 
 ```text
 BmRowContainer
-  rowBlocks_
+  BmPressureAwareBlockArena blocks_
     block 0: fixed rows
-    block 1: fixed rows
-    ...
-
-  heapBlocks_
-    block 0: variable-width bytes
     block 1: variable-width bytes
+    block 2: fixed rows
+    block 3: variable-width bytes
     ...
 ```
 
-block 元数据：
+`BmPressureAwareBlockArena` 不理解 row/heap，也不保存 block kind。它只管理 block 生命周期。
+`BmRowContainer` 通过 `activeRowBlockId_`、`activeHeapBlockId_`、`RowId` 和 `VarData`
+解释某个 block 的用途。
+
+arena block 元数据：
 
 ```cpp
 struct BmBlockState {
   std::shared_ptr<memory::bm::BlockHandle> block;
   std::optional<memory::bm::BufferHandle> pinnedHandle;
+  char* data{nullptr};
+  uint32_t capacity;
   uint32_t usedBytes;
   uint32_t liveRows;
+  uint64_t lastAccess;
 };
 ```
 
-第一版 row block 和 heap block 都使用 `bytedance::bolt::memory::bm::AllocateSize::kLarge`，
-也就是 `allocateSizeBytes(AllocateSize::kLarge)` 对应的 4MB block。`BmRowRef::rowOffset`
-指向 fixed row 在 row block 内的起始位置。
+row block 和 heap block 都使用 `bytedance::bolt::memory::bm::AllocateSize::kLarge`，
+也就是 `allocateSizeBytes(AllocateSize::kLarge)` 对应的 4MB block。`capacity` 记录每个
+block 的实际容量，允许后续扩展出不同大小的 blocks。
 
-`pinnedHandle` 表示 `BmRowContainer` 当前是否持有这个 block 的 pin。不要在 `BmBlockState`
-里单独维护一个 `bool pinned`，因为 pin 状态应该由 RAII handle 本身表达：`pinnedHandle`
-存在即容器持有 pin，`pinnedHandle.reset()` 即释放 pin。也不要为了这个需求修改 `BlockMemory`；
-`BlockMemory::pinCount` 是 BufferManager 的全局内部状态，不适合作为 `BmRowContainer` 的局部
-append/read 生命周期标记。
+`pinnedHandle` 表示 `BmRowContainer` 当前是否持有这个 block 的 pin。`data` 只在
+`pinnedHandle.has_value()` 时有效，必须和 `pinnedHandle` 同步更新。不要在 `BmBlockState`
+里单独维护一个 `bool pinned`，因为 pin 状态应该由 RAII handle 本身表达：
+`pinnedHandle` 存在即容器持有 pin，`pinnedHandle.reset()` 即释放 pin 并清空 `data`。
+`BlockMemory::pinCount` 是 BufferManager 的全局内部状态，`BmRowContainer` 不直接读取或修改它。
+
+`lastAccess` 用于内存压力下选择优先释放哪些可回收 blocks。arena 用单调递增的
+`accessClock_` 更新：
+
+```cpp
+block.lastAccess = ++accessClock_;
+```
 
 ## 6. 变长字段
 
 变长值在 `store()` 时直接转成 offset 引用。
 
-不要在 fixed row 里保存 heap `char*` 指针，而是保存 `BmVarRef`。对于 `VARCHAR` 和
-`VARBINARY`，`RowContainer` 里原来放 `StringView` 的 fixed row 位置，在 `BmRowContainer` 中改为
-放 `BmVarRef`。对于序列化成 bytes 的 complex types，也同样放 `BmVarRef`。
+不要在 fixed row 里保存 heap `char*` 指针，而是保存 `VarData`。`VARCHAR` 和 `VARBINARY`
+的 fixed row 槽位保存 `VarData`，实际 bytes 写入 heap block。
 
 写入流程：
 
@@ -234,32 +217,33 @@ append/read 生命周期标记。
 DecodedVector value
   -> 从当前 heap block 分配 bytes
   -> 把 bytes copy 到 pinned heap block
-  -> 在 fixed row 中写入 BmVarRef{heapBlockId, heapOffset, size}
+  -> 在 fixed row 中写入 VarData{blockId, offset, size}
 ```
 
 读取、比较、提取流程：
 
 ```text
-BmRowRef
-  -> pin row block
-  -> 从 fixed row 读 BmVarRef
-  -> pin heap block
-  -> data = heapHandle.Ptr() + heapOffset
+RowId
+  -> arena.pinnedData(blockId)
+  -> 从 fixed row 读 VarData
+  -> arena.pinnedData(blockId)
+  -> data = heapHandle.Ptr() + offset
 ```
 
-这样可以避开 DuckDB 的 `base_heap_ptr` 和 `RecomputeHeapPointers` 机制。fixed row 里没有旧 heap
-地址，因此不存在需要修复的 stale pointer。
+fixed row 里没有 heap 地址，因此 block unpin/re-pin 后不需要修复 pointer。
 
 ## 7. Append 和 pin 生命周期
 
 append 热路径需要持有当前可写 blocks 的 `BufferHandle`，避免每一行每一列都 pin/unpin。
+读路径复用 `BmPressureAwareBlockArena` 中的 `pinnedHandle`，在内存充足时让读过的 blocks
+保持 pinned；当 `MaybeReserve` 失败时，再按 `lastAccess` 释放可回收 blocks。
 
 内存充足时：
 
 - 当前 active row block 保持 pinned；
 - 当前 active heap block 保持 pinned；
-- 写满但仍希望留在内存中的历史 blocks 也可以继续 pinned；
-- 新 row 返回 `BmRowRef`，不会把 `char*` 暴露给调用方。
+- 写满或读过的可回收 blocks 可以继续 pinned，直到内存压力触发 arena reclaim；
+- 新 row 返回 `RowId`，不会把 `char*` 暴露给调用方。
 
 当需要新 row/heap block 时：
 
@@ -271,95 +255,277 @@ append 热路径需要持有当前可写 blocks 的 `BufferHandle`，避免每�
   -> 失败：进入 spill 触发流程
 ```
 
-建议增加 batch appender：
+可以增加 batch appender 作为 batch 写入的轻量状态：
 
 ```cpp
 class BmRowAppender {
  public:
-  BmRowRef newRow();
+  RowId newRow();
   void store(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      BmRowRef row,
+      RowId row,
       int32_t column);
 };
 ```
 
-容器层 benchmark 和后续 StreamingWindowBuild 都可以每个 input batch 创建一个 appender。
+容器层 benchmark 和后续 StreamingWindowBuild 每个 input batch 可以创建一个 appender。
 
-## 8. Spill 触发策略
+## 8. BmPressureAwareBlockArena
 
-`BmRowContainer` 不在任意 row 访问过程中抢占式 spill，而是在需要分配新 block 的安全点触发。
+`BmPressureAwareBlockArena` 是 `BmRowContainer` 内部通用 block 生命周期管理器。它统一持有
+BufferManager blocks，并实现 pressure-aware 策略：
 
-推荐流程：
+```text
+内存充足:
+  访问过的 blocks 保持 pinned，后续读写直接复用 data。
+
+MaybeReserve 失败:
+  按 lastAccess 释放 canReclaim(blockId) 允许释放的 pinned blocks。
+  对已经 unpinned 且 canReclaim(blockId) 的 blocks 调用 SpillBlocks。
+  再次 MaybeReserve，仍失败则报错。
+```
+
+arena 不理解 row/heap，也不判断 active block。`BmRowContainer` 通过 `canReclaimBlock(blockId)`
+告诉 arena 哪些 block 当前可以被 unpin/spill：
 
 ```cpp
-bool BmRowContainer::ensureNewBlockReservation(size_t blockSize) {
-  if (bm_->MaybeReserve(blockSize)) {
-    return true;
-  }
-
-  releaseColdPins();
-
-  auto candidates = collectSpillCandidates();
-  if (!candidates.empty()) {
-    bm_->SpillBlocks(candidates);
-  }
-
-  if (bm_->MaybeReserve(blockSize)) {
-    return true;
-  }
-
-  BOLT_FAIL("BmRowContainer failed to reserve new block, size={}", blockSize);
+bool BmRowContainer::canReclaimBlock(uint32_t blockId) const {
+  return blockId != activeRowBlockId_ &&
+         blockId != activeHeapBlockId_;
 }
 ```
 
-`releaseColdPins()` 负责销毁冷 blocks 的 `BufferHandle`，让它们从 pinned 变成 unpinned。
-`collectSpillCandidates()` 只能返回已经 unpinned、且当前没有被访问的 blocks：
+### 8.1 Arena 接口
 
-- 已经写满或不再作为 append target 的 row blocks；
-- 已经写满或不再作为 append target 的 heap blocks；
-- 不能包含当前正在写入的 active row block；
-- 不能包含当前正在写入的 active heap block；
-- 不能包含当前 compare/extract scope 正在 pin 的 blocks。
+```cpp
+class BmPressureAwareBlockArena {
+ public:
+  static constexpr uint32_t kInvalidBlockId =
+      std::numeric_limits<uint32_t>::max();
 
-如果第二次 `MaybeReserve(blockSize)` 仍然失败，直接向上抛出内存不足错误。第一版不做多轮 spill，
-也不 fallback 到 `BufferManager::Reclaim(blockSize)`。
+  using CanReclaimFn = folly::FunctionRef<bool(uint32_t blockId)>;
+
+  BmPressureAwareBlockArena(
+      std::shared_ptr<memory::bm::BufferManager> bufferManager,
+      memory::bm::MemoryTag tag);
+
+  uint32_t allocateBlock(uint32_t capacity, CanReclaimFn canReclaim);
+  char* pinnedData(uint32_t blockId, CanReclaimFn canReclaim);
+  char* activeData(uint32_t blockId);
+
+  BmBlockState& block(uint32_t blockId);
+  const BmBlockState& block(uint32_t blockId) const;
+
+  bool empty() const;
+  uint32_t size() const;
+  uint64_t allocatedBytes() const;
+  uint64_t usedBytes() const;
+
+  uint64_t makeBlocksReclaimable(
+      uint64_t targetBytes,
+      CanReclaimFn canReclaim);
+
+  std::vector<std::shared_ptr<memory::bm::BlockHandle>>
+  reclaimableBlocks(CanReclaimFn canReclaim) const;
+
+  void spillReclaimableBlocks(
+      uint64_t targetBytes,
+      CanReclaimFn canReclaim);
+
+  void clear();
+};
+```
+
+### 8.2 allocateBlock
+
+`allocateBlock(capacity, canReclaim)` 用于 append 需要新的 row/heap block：
+
+```text
+ensureMemoryForBlock(capacity, canReclaim)
+  -> BufferManager::Allocate(capacity, tag)
+  -> 保存 BlockHandle、BufferHandle、data、capacity、lastAccess
+  -> 返回 blockId
+```
+
+新 block 初始保持 pinned。调用方负责解释它是 row block 还是 heap block，并更新
+`activeRowBlockId_` 或 `activeHeapBlockId_`。
+
+### 8.3 pinnedData 和 activeData
+
+`pinnedData(blockId, canReclaim)` 用于访问任意 block：
+
+```text
+如果 block 已经 pinned:
+  更新 lastAccess，返回 data。
+
+如果 block 未 pinned:
+  ensureMemoryForBlock(block.capacity, canReclaim)
+  BufferManager::Pin(block.block)
+  保存 BufferHandle 和 data
+  更新 lastAccess
+  返回 data。
+```
+
+`activeData(blockId)` 只用于当前 active row/heap block：
+
+```text
+要求 block 已经 pinned。
+更新 lastAccess。
+返回 data。
+```
+
+### 8.4 ensureMemoryForBlock
+
+arena 在两个安全点准备 block 级内存：
+
+- append 需要分配新的 row/heap block；
+- 读写任意 block 时发现目标 block 当前没有 pinned handle，需要重新 pin。
+
+两类路径都通过 arena 内部 helper：
+
+```cpp
+void BmPressureAwareBlockArena::ensureMemoryForBlock(
+    uint32_t capacity,
+    CanReclaimFn canReclaim,
+    std::string_view failureMessage) {
+  BOLT_CHECK_GT(capacity, 0);
+
+  if (bufferManager_->MaybeReserve(capacity)) {
+    return;
+  }
+
+  makeBlocksReclaimable(capacity, canReclaim);
+
+  auto candidates = reclaimableBlocks(canReclaim);
+  if (!candidates.empty()) {
+    bufferManager_->SpillBlocks(candidates);
+  }
+
+  if (bufferManager_->MaybeReserve(capacity)) {
+    return;
+  }
+
+  BOLT_FAIL("{}", failureMessage);
+}
+```
+
+`MaybeReserve(capacity)` 在 append 分配新 block 时是精确需求；在 pin 已存在 block 时是保守需求，
+表示“如果目标 block 已经被 spill，最坏需要读回一个 block 的内存”。如果目标 block 仍 resident，
+后续 `Pin` 可能不消耗新的 payload 内存，`ReleaseUnusedReservation()` 会释放多余 reservation。
+
+### 8.5 makeBlocksReclaimable
+
+`makeBlocksReclaimable()` 负责销毁可回收 blocks 的 `BufferHandle`，让它们从 pinned 变成
+unpinned，并清空对应 `data`：
+
+```cpp
+uint64_t BmPressureAwareBlockArena::makeBlocksReclaimable(
+    uint64_t targetBytes,
+    CanReclaimFn canReclaim);
+```
+
+语义：
+
+```text
+targetBytes > 0:
+  按 lastAccess 从冷到热 unpin canReclaim(blockId) 为 true 的 blocks，
+  累计 block size >= targetBytes 后停止。
+
+targetBytes == 0:
+  unpin 所有 canReclaim(blockId) 为 true 的 pinned blocks。
+```
+
+它只释放 pin，不直接释放内存，也不直接 spill。返回值是被 unpin 的 block size 累计值，不是
+MemoryPool 已经 reclaimed 的真实字节数。
+
+`BmRowContainer` 传入的 `canReclaimBlock()` 会排除当前 active row block 和 active heap block。
+`BmRowContainer` 按单线程访问设计，pin/unpin 路径不处理并发读写 scope。
+
+### 8.6 reclaimableBlocks 和 spillReclaimableBlocks
+
+`reclaimableBlocks()` 只返回已经 unpinned、且 `canReclaim(blockId)` 为 true 的 blocks：
+
+```cpp
+std::vector<std::shared_ptr<memory::bm::BlockHandle>>
+BmPressureAwareBlockArena::reclaimableBlocks(CanReclaimFn canReclaim) const;
+```
+
+`spillReclaimableBlocks()` 是组合 helper：
+
+```cpp
+void BmPressureAwareBlockArena::spillReclaimableBlocks(
+    uint64_t targetBytes,
+    CanReclaimFn canReclaim);
+```
+
+流程：
+
+```text
+makeBlocksReclaimable(targetBytes)
+  -> reclaimableBlocks(canReclaim)
+  -> BufferManager::SpillBlocks(blocks)
+```
+
+`spillReclaimableBlocks(0, canReclaim)` 表示 unpin 并 spill 所有可回收 blocks。benchmark
+强制 readback 复用这个接口。
+
+如果第二次 `MaybeReserve(blockSize)` 仍然失败，直接向上抛出内存不足错误。
 
 这个策略的好处是：
 
 - spill 发生在 block 边界，不会破坏半写入 row；
 - 对固定行和变长数据统一适用；
-- 上层仍然只持有 `BmRowRef` 和 `BmVarRef`，不会因为 block 被 spill 而失效；
-- benchmark 可以复用同一机制，也可以额外提供 `spillAllBlocksForBenchmark()` 做强制 readback 测试。
+- 上层仍然只持有 `RowId` 和 `VarData`，不会因为 block 被 spill 而失效；
+- read path 命中 `BmBlockState::pinnedHandle` 时可以直接使用 `data`，避免重复 `Pin`；
+- benchmark 复用同一机制，`spillAllBlocksForBenchmark()` 调用 arena 的
+  `spillReclaimableBlocks(0, canReclaim)` 做强制 readback 测试。
 
-## 9. 读路径和 PinnedRows
+## 9. 读写路径的 pinned block 访问
 
-`PinnedRows` 是 `BmRowContainer` 内部 RAII helper，不是 public API。
-
-示例形态：
+读写路径通过 `BmPressureAwareBlockArena` 访问 block。`BmRowContainer` 持有：
 
 ```cpp
-class PinnedRows {
- public:
-  const char* row(size_t index) const;
-
- private:
-  std::vector<memory::bm::BufferHandle> rowHandles_;
-  std::vector<const char*> rows_;
-};
+BmPressureAwareBlockArena blocks_;
+uint32_t activeRowBlockId_{BmPressureAwareBlockArena::kInvalidBlockId};
+uint32_t activeHeapBlockId_{BmPressureAwareBlockArena::kInvalidBlockId};
 ```
 
-它的职责是把 `BmRowRef` 转成临时 `char*`，并保证这些 `char*` 的生命周期被对应
-`BufferHandle` 覆盖。
+`RowId::blockId` 和 `VarData::blockId` 都指向 `blocks_` 中的统一 block id。
 
-它在 `BmRowContainer` 方法内部使用：
+row 访问：
 
-- `compare()` pin 左右 row block，并按被比较列需要 pin heap block；
-- `extractColumn()` 为请求的 row range pin row blocks，并为变长值 pin heap blocks；
-- `extractNulls()` 只需要 pin row blocks。
+```text
+pinRow(RowId):
+  blocks_.pinnedData(row.blockId, canReclaim) + row.rowOffset
+```
 
-调用方不保存 `PinnedRows`，也不能从容器 API 获得长期有效的 `char*`。
+变长访问：
+
+```text
+stringView(row, column):
+  从 fixed row 读 VarData
+  blocks_.pinnedData(ref.blockId, canReclaim) + ref.offset
+```
+
+写路径：
+
+```text
+newRow():
+  如果 active row block 无空间，blocks_.allocateBlock(rowBlockSize_, canReclaim)
+  使用 blocks_.activeData(activeRowBlockId_) 写 fixed row
+
+appendVariableWidth():
+  如果 active heap block 无空间，blocks_.allocateBlock(heapBlockSize_, canReclaim)
+  使用 blocks_.activeData(activeHeapBlockId_) 写 bytes
+
+store(decoded, sourceIndex, RowId, column):
+  使用 blocks_.pinnedData(row.blockId, canReclaim) 写指定 row
+```
+
+这个设计的语义是 pressure-driven pinned arena：读过或写过的可回收 block 可以继续 pinned，
+直到 `MaybeReserve` 失败时由 arena 按冷到热释放。
+
 
 ## 10. BufferManager 来源
 
@@ -370,10 +536,9 @@ class PinnedRows {
 - `std::shared_ptr<memory::bm::BufferManager>`；
 - row block size；
 - heap block size；
-- `memory::bm::MemoryTag`，第一版默认使用 `memory::bm::MemoryTag::kWindow`。
+- `memory::bm::MemoryTag`，默认使用 `memory::bm::MemoryTag::kWindow`。
 
-如果 BM 不可用，`BmRowContainer` 构造必须直接失败。不要在 `BmRowContainer` 内部 fallback 到
-现有 `RowContainer`，也不要静默退回普通内存分配路径。
+如果 BM 不可用，`BmRowContainer` 构造失败。
 
 ## 11. 内存统计和 RAII Unpin
 
@@ -385,17 +550,26 @@ uint64_t usedBytes() const;
 std::optional<int64_t> estimateRowSize() const;
 ```
 
-第一版不提供 `releaseRows()`。行数据的 resident 内存释放依赖 `BufferHandle` 的 RAII unpin：
+行数据的 resident 内存释放依赖 `BufferHandle` 的 RAII unpin：
 
-- append 阶段内存充足时，当前可写 row/heap blocks 可以保持 pinned；
-- `MaybeReserve` 失败时，容器释放一批冷 block 的 append/read handles；
+- append/read 阶段内存充足时，row/heap blocks 可以保持 pinned；
+- `MaybeReserve` 失败时，arena 通过 `makeBlocksReclaimable()` 释放一批可回收 block handles；
 - handles 析构后对应 blocks 变成 unpinned，随后通过 `BufferManager::SpillBlocks()` 下刷；
-- `BmRowRef` 和 `BmVarRef` 仍然保存逻辑位置，不依赖 resident 地址。
+- `RowId` 和 `VarData` 仍然保存逻辑位置，不依赖 resident 地址。
 
-`BlockHandle` 仍由 `BmRowContainer` 持有，用于后续 pin/readback。第一版不设计按 row 或 partition
-主动 drop block handle 的接口。
+`BlockHandle` 仍由 `BmRowContainer` 持有，用于后续 pin/readback。
 
 ## 12. 测试计划
+
+新增 `BmPressureAwareBlockArena` 单测：
+
+- `allocateBlock()` 创建 block 后保持 pinned；
+- `pinnedData()` 命中已 pinned block 时复用 `data`；
+- `makeBlocksReclaimable(targetBytes)` 按 `lastAccess` 优先 unpin 冷 blocks；
+- `makeBlocksReclaimable(0)` unpin 所有 `canReclaim(blockId)` 为 true 的 pinned blocks；
+- `makeBlocksReclaimable()` 跳过 `canReclaim(blockId)` 为 false 的 blocks；
+- `spillReclaimableBlocks(0)` unpin 并 spill 所有可回收 blocks，后续 `pinnedData()` 可读回；
+- `MaybeReserve` 第二次失败时直接报错。
 
 `BmRowContainer` 单测：
 
@@ -407,9 +581,10 @@ std::optional<int64_t> estimateRowSize() const;
 - variable-width column compare；
 - 多 row blocks；
 - 多 heap blocks；
-- `BmRowRef` 在 BM reclaim 和 re-pin 后仍有效；
-- `MaybeReserve` 失败时先释放冷 pins，再触发 `SpillBlocks`；
-- `MaybeReserve` 第二次失败时直接报错。
+- `RowId` 在 BM reclaim 和 re-pin 后仍有效；
+- `RowId::blockId` 和 `VarData::blockId` 都通过统一 arena block id 正确定位；
+- active row/heap block 被 `canReclaimBlock()` 保护，spill 后仍可继续 append；
+- `spillAllBlocksForBenchmark()` 触发 arena spill 后 readback 数据仍正确。
 
 回归测试：
 
@@ -418,17 +593,27 @@ std::optional<int64_t> estimateRowSize() const;
 
 ## 13. Benchmark 计划
 
-第一版 benchmark 只比较容器层能力，不接入 Window operator。
-
-新增一个 exec benchmark 可执行文件，例如：
+benchmark 放在 `bolt/exec/bm/benchmarks`，只比较容器层能力。目标可执行文件：
 
 ```text
-bolt/exec/benchmarks/BmRowContainerBenchmark.cpp
-target: bolt_bm_row_container_benchmark
+_build/Release/bolt/exec/bm/benchmarks/bolt_bm_row_container_benchmark
 ```
 
-这个 benchmark 对比现有 `RowContainer` 和新增 `BmRowContainer` 在相同输入数据下的
-append、spill/readback、extract 和 compare 成本。
+benchmark 对比 `RowContainer` 和 `BmRowContainer` 在相同输入数据下的四类场景：
+
+```text
+Write:
+  只测写入容器的成本。
+
+Spill:
+  写入完成后触发 spill，测 spill 写出成本。
+
+ReadMemory:
+  数据保持 resident/pinned 策略下，测从容器读取列的成本。
+
+ReadSpill:
+  数据 spill 后再读取，测 readback + extract 成本。
+```
 
 Benchmark 数据集至少覆盖三类输入：
 
@@ -440,53 +625,44 @@ mixed_fixed:
   INTEGER, BIGINT, DOUBLE, BOOLEAN
 
 varchar_payload:
-  BIGINT key, VARCHAR payload
+  BIGINT key, VARCHAR payload，payload 使用随机字符
 ```
 
-`varchar_payload` 覆盖两种 string 分布：
-
-- small string：大部分能 inline 或很短，例如 8 到 16 bytes；
-- large string：明显走 heap，例如 128 bytes、1KB、4KB。
-
-数据规模用参数控制：
+数据规模用参数控制。默认按 GiB 级数据量生成：
 
 ```text
-rows: 10K, 100K, 1M
-null ratio: 0%, 10%
-string size: 16B, 128B, 1KB, 4KB
+--bm_row_container_data_gib=<N>
+--bm_row_container_pool_capacity_gib=<N>
+--bm_row_container_print_stats=<true|false>
 ```
 
-推荐第一版 baseline：
+benchmark 文件按场景拆分：
 
 ```text
-RowContainerNoSpill
-BmRowContainerNoSpill
-BmRowContainerSpillReadback
+BmRowContainerWriteBenchmark.cpp
+BmRowContainerSpillBenchmark.cpp
+BmRowContainerReadMemoryBenchmark.cpp
+BmRowContainerReadSpillBenchmark.cpp
+BmRowContainerBenchmarkUtil.cpp
 ```
 
-`RowContainerNoSpill` 衡量现有纯内存路径。
-`BmRowContainerNoSpill` 衡量 BM block 化但不触发 spill 的额外成本。
-`BmRowContainerSpillReadback` 衡量真正 unpin、spill、pin readback 的成本。
-
-BM case 的 benchmark 流程：
+BmRowContainer spill case 的流程：
 
 ```text
 1. 创建 BufferManager，spill directory 使用 /tmp 下临时目录。
 2. 创建 BmRowContainer，使用 MemoryTag::kWindow。
 3. append/store 全部 rows。
-4. 释放 append 阶段的冷 pinned handles。
-5. 对 row blocks 和 heap blocks 调用 SpillBlocks。
-6. 执行 readback workload：
+4. 调用 `spillAllBlocksForBenchmark()` 释放并 spill arena 中所有可回收 blocks。
+5. 执行 readback workload：
    - extractColumn 全量或按 batch 提取；
-   - compare 相邻 rows；
-   - optional: sort-like compare loop。
-7. 收集 BufferManagerStats 和 benchmark 耗时。
+   - compare 相邻 rows。
+6. 收集 BufferManagerStats 和 benchmark 耗时。
 ```
 
-为了让 benchmark 能主动触发 spill，`BmRowContainer` 可以提供受控接口：
+benchmark 使用受控接口主动触发 spill：
 
 ```cpp
-void spillAllBlocksForBenchmark();
+void spillAllBlocksForBenchmark(); // 内部调用 blocks_.spillReclaimableBlocks(0, canReclaim)
 ```
 
 每个 case 输出：
@@ -508,7 +684,7 @@ bmSpilledBytes
 bmStats.debugString()
 ```
 
-Benchmark 注册方式复用现有 `bolt/exec/benchmarks/CMakeLists.txt` 风格：
+Benchmark 注册在 `bolt/exec/bm/benchmarks/CMakeLists.txt`：
 
 ```cmake
 add_executable(bolt_bm_row_container_benchmark BmRowContainerBenchmark.cpp)
@@ -521,28 +697,25 @@ target_link_libraries(
 )
 ```
 
-第一版 benchmark 不包含：
-
-- Window operator 端到端；
-- SortWindowBenchmark 扩展；
-- 多线程并发 pin/reclaim；
-- JIT compare；
-- RowContainer spiller 的完整公平对齐；
-- 不同压缩算法矩阵。
-
 ## 14. 主要设计决策
 
-1. `newRow()` 返回 `BmRowRef`，不返回 `char*`。
+1. `newRow()` 返回 `RowId`，不返回 `char*`。
 2. fixed row 存在 BM row blocks。
 3. variable-width bytes 存在 BM heap blocks。
-4. fixed row 存 `BmVarRef`，不存 heap pointer。
-5. `PinnedRows` 是容器内部 RAII 状态，不对外暴露。
-6. row/heap blocks 第一版统一使用 `AllocateSize::kLarge`。
-7. `BmBlockState` 用 `std::optional<BufferHandle>` 表达容器是否持有 pin，不新增裸 bool，也不修改
-   `BlockMemory`。
-8. 内存充足时 append blocks 可以保持 pinned。
-9. 运行时在需要新 block 时先 `MaybeReserve`，失败后释放冷 pins 并 `SpillBlocks` 冷 blocks。
-10. 第二次 `MaybeReserve` 失败直接报错。
-11. 第一版不提供 `releaseRows()`。
-12. 第一版 benchmark 只做容器层，不做 Window 端到端。
-13. 现有 `RowContainer` 对当前使用方保持不变。
+4. fixed row 存 `VarData`，不存 heap pointer。
+5. `BmPressureAwareBlockArena` 统一管理所有 BM blocks，不区分 row/heap kind。
+6. `RowId::blockId` 和 `VarData::blockId` 都引用 arena 中的统一 block id。
+7. `BmRowContainer` 通过 `activeRowBlockId_`、`activeHeapBlockId_` 和 `canReclaimBlock()` 定义
+   哪些 blocks 不能被 unpin/spill。
+8. 读写路径通过 `blocks_.pinnedData()` 把 `RowId` / `VarData` 转成容器内部临时 `char*`，不对外暴露。
+9. row/heap blocks 统一使用 `AllocateSize::kLarge`。
+10. `BmBlockState` 用 `std::optional<BufferHandle>` 表达 arena 是否持有 pin。
+11. `BmBlockState::data` 只在 `pinnedHandle` 存在时有效，释放 pin 时必须清空。
+12. 内存充足时 append/read blocks 可以保持 pinned。
+13. 运行时在需要新 block 或 pin block 时先 `MaybeReserve`，失败后 arena 根据 `canReclaimBlock()`
+    释放 pins 并 `SpillBlocks` 可回收 blocks。
+14. `makeBlocksReclaimable(0)` 表示 unpin 所有可回收 pinned blocks；
+    `spillReclaimableBlocks(0, canReclaim)` 表示 unpin 并 spill 所有可回收 blocks。
+15. 第二次 `MaybeReserve` 失败直接报错。
+16. benchmark 只做容器层 write/spill/read memory/read spill 对比。
+17. 现有 `RowContainer` 对当前使用方保持不变。
