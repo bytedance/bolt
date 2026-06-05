@@ -1,16 +1,18 @@
 #pragma once
 
-#include "bolt/exec/bm/BmRowTypes.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/buffer/Buffer.h"
+#include "bolt/exec/bm/BmPressureAwareBlockArena.h"
+#include "bolt/exec/bm/BmRowTypes.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -109,32 +111,19 @@ class BmRowContainer {
   void spillAllBlocksForBenchmark();
 
  private:
-  enum class StorageBlockKind {
-    kRow,
-    kHeap,
-  };
-
-  struct BmBlockState {
-    std::shared_ptr<memory::bm::BlockHandle> block;
-    std::optional<memory::bm::BufferHandle> pinnedHandle;
-    uint32_t usedBytes{0};
-    uint32_t liveRows{0};
-  };
-
   void computeLayout();
   BmBlockState& ensureWritableRowBlock();
   bool hasRowCapacity(const BmBlockState& block) const;
   char* mutableRow(RowId row);
-  const char* pinRow(RowId row, std::vector<memory::bm::BufferHandle>& pins);
-  StringView stringView(
-      const char* row,
-      BmRowColumn column,
-      std::vector<memory::bm::BufferHandle>& pins);
+  const char* pinRow(RowId row);
+  StringView stringView(const char* row, BmRowColumn column);
   char* initializeRow(char* row);
-  void reserveNewBlock(StorageBlockKind kind);
   VarData appendVariableWidth(StringView value);
-  void releaseColdPins();
-  std::vector<std::shared_ptr<memory::bm::BlockHandle>> coldBlocks() const;
+  uint32_t allocateBlockAfterPressure(uint32_t capacity, const char* failureMessage);
+  const char* pinnedBlockDataAfterPressure(
+      uint32_t blockId,
+      const char* failureMessage);
+  bool canReclaimBlock(uint32_t blockId) const;
   void storeDispatch(
       TypeKind kind,
       const DecodedVector& decoded,
@@ -155,7 +144,6 @@ class BmRowContainer {
       const char* left,
       const char* right,
       BmRowColumn column,
-      std::vector<memory::bm::BufferHandle>& pins,
       CompareFlags flags);
 
   template <TypeKind Kind>
@@ -181,7 +169,6 @@ class BmRowContainer {
       const char* left,
       const char* right,
       BmRowColumn column,
-      std::vector<memory::bm::BufferHandle>& pins,
       CompareFlags flags);
 
   std::vector<TypePtr> keyTypes_;
@@ -195,6 +182,7 @@ class BmRowContainer {
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   memory::bm::MemoryTag tag_;
+  BmPressureAwareBlockArena blocks_;
   uint32_t rowBlockSize_;
   uint32_t heapBlockSize_;
   int32_t fixedRowSize_{0};
@@ -203,10 +191,9 @@ class BmRowContainer {
   int32_t freeFlagOffset_{0};
   int64_t numRows_{0};
 
-  std::vector<BmBlockState> rowBlocks_;
-  std::vector<BmBlockState> heapBlocks_;
-  uint32_t activeRowBlockId_{0};
-  uint32_t activeHeapBlockId_{0};
+  std::vector<uint32_t> heapBlockIds_;
+  uint32_t activeRowBlockId_{std::numeric_limits<uint32_t>::max()};
+  uint32_t activeHeapBlockId_{std::numeric_limits<uint32_t>::max()};
 };
 
 } // namespace bytedance::bolt::exec

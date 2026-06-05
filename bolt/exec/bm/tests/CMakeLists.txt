@@ -1,5 +1,6 @@
 add_executable(
   bolt_exec_bm_test
+  BmPressureAwareBlockArenaTest.cpp
   BmRowContainerTest.cpp
 )
 

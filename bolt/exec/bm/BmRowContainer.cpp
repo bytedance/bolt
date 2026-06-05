@@ -61,16 +61,6 @@ int32_t compareStringAsc(StringView left, StringView right) {
   return result < 0 ? -1 : result > 0 ? 1 : 0;
 }
 
-class PinnedRows {
- public:
-  std::vector<memory::bm::BufferHandle>& handles() {
-    return handles_;
-  }
-
- private:
-  std::vector<memory::bm::BufferHandle> handles_;
-};
-
 } // namespace
 
 BmRowContainer::BmRowContainer(
@@ -84,6 +74,7 @@ BmRowContainer::BmRowContainer(
       dependentTypes_(std::move(dependentTypes)),
       bufferManager_(std::move(bufferManager)),
       tag_(tag),
+      blocks_(bufferManager_, tag),
       rowBlockSize_(rowBlockSize == 0
               ? memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)
               : rowBlockSize),
@@ -99,10 +90,7 @@ BmRowContainer::BmRowContainer(
 }
 
 BmRowContainer::~BmRowContainer() {
-  rowBlocks_.clear();
-  if (bufferManager_) {
-    bufferManager_->ReleaseUnusedReservation();
-  }
+  blocks_.clear();
 }
 
 void BmRowContainer::computeLayout() {
@@ -163,7 +151,7 @@ RowId BmRowContainer::newRow() {
   auto& block = ensureWritableRowBlock();
   const auto rowOffset = bits::roundUp(block.usedBytes, alignment_);
   BOLT_CHECK_LE(rowOffset + fixedRowSize_, rowBlockSize_);
-  auto* row = block.pinnedHandle->Ptr() + rowOffset;
+  auto* row = blocks_.activeData(activeRowBlockId_) + rowOffset;
   initializeRow(row);
   block.usedBytes = rowOffset + fixedRowSize_;
   ++block.liveRows;
@@ -230,11 +218,10 @@ void BmRowContainer::extractColumn(
   BOLT_CHECK_LT(column, rowColumns_.size());
   BOLT_CHECK_LE(resultOffset + rows.size(), result->size());
 
-  PinnedRows pinnedRows;
   std::vector<const char*> rowPtrs;
   rowPtrs.reserve(rows.size());
   for (auto row : rows) {
-    rowPtrs.push_back(pinRow(row, pinnedRows.handles()));
+    rowPtrs.push_back(pinRow(row));
   }
   extractDispatch(
       typeKinds_[column],
@@ -247,23 +234,19 @@ void BmRowContainer::extractColumn(
 }
 
 uint64_t BmRowContainer::allocatedBytes() const {
-  return static_cast<uint64_t>(rowBlocks_.size()) * rowBlockSize_ +
-      static_cast<uint64_t>(heapBlocks_.size()) * heapBlockSize_;
+  return blocks_.allocatedBytes();
 }
 
 uint64_t BmRowContainer::usedBytes() const {
-  uint64_t bytes = 0;
-  for (const auto& block : rowBlocks_) {
-    bytes += block.usedBytes;
-  }
-  for (const auto& block : heapBlocks_) {
-    bytes += block.usedBytes;
-  }
-  return bytes;
+  return blocks_.usedBytes();
 }
 
 uint64_t BmRowContainer::heapAllocatedBytes() const {
-  return static_cast<uint64_t>(heapBlocks_.size()) * heapBlockSize_;
+  uint64_t bytes = 0;
+  for (auto blockId : heapBlockIds_) {
+    bytes += blocks_.block(blockId).capacity;
+  }
+  return bytes;
 }
 
 std::optional<int64_t> BmRowContainer::estimateRowSize() const {
@@ -274,22 +257,16 @@ std::optional<int64_t> BmRowContainer::estimateRowSize() const {
 }
 
 void BmRowContainer::clear() {
-  rowBlocks_.clear();
-  heapBlocks_.clear();
-  activeRowBlockId_ = 0;
-  activeHeapBlockId_ = 0;
+  blocks_.clear();
+  heapBlockIds_.clear();
+  activeRowBlockId_ = std::numeric_limits<uint32_t>::max();
+  activeHeapBlockId_ = std::numeric_limits<uint32_t>::max();
   numRows_ = 0;
-  if (bufferManager_) {
-    bufferManager_->ReleaseUnusedReservation();
-  }
 }
 
 void BmRowContainer::spillAllBlocksForBenchmark() {
-  releaseColdPins();
-  auto blocks = coldBlocks();
-  if (!blocks.empty()) {
-    bufferManager_->SpillBlocks(blocks);
-  }
+  blocks_.spillReclaimableBlocks(
+      0, [this](uint32_t blockId) { return canReclaimBlock(blockId); });
 }
 
 void BmRowContainer::extractNulls(
@@ -312,9 +289,8 @@ void BmRowContainer::extractNulls(
   bits::fillBits(rawResult, 0, rows.size(), false);
   const auto rowColumn = rowColumns_[column];
 
-  PinnedRows pinnedRows;
   for (auto i = 0; i < rows.size(); ++i) {
-    const auto* row = pinRow(rows[i], pinnedRows.handles());
+    const auto* row = pinRow(rows[i]);
     if (isNullAt(row, rowColumn.nullByte(), rowColumn.nullMask())) {
       bits::setBit(rawResult, i, true);
     }
@@ -329,15 +305,13 @@ int32_t BmRowContainer::compare(
   BOLT_CHECK_GE(column, 0);
   BOLT_CHECK_LT(column, rowColumns_.size());
 
-  std::vector<memory::bm::BufferHandle> pins;
-  const auto* leftRow = pinRow(left, pins);
-  const auto* rightRow = pinRow(right, pins);
+  const auto* leftRow = pinRow(left);
+  const auto* rightRow = pinRow(right);
   return compareDispatch(
       typeKinds_[column],
       leftRow,
       rightRow,
       rowColumns_[column],
-      pins,
       flags);
 }
 
@@ -356,11 +330,13 @@ int32_t BmRowContainer::compareRows(
   return 0;
 }
 
-BmRowContainer::BmBlockState& BmRowContainer::ensureWritableRowBlock() {
-  if (rowBlocks_.empty() || !hasRowCapacity(rowBlocks_[activeRowBlockId_])) {
-    reserveNewBlock(StorageBlockKind::kRow);
+BmBlockState& BmRowContainer::ensureWritableRowBlock() {
+  if (activeRowBlockId_ == std::numeric_limits<uint32_t>::max() ||
+      !hasRowCapacity(blocks_.block(activeRowBlockId_))) {
+    activeRowBlockId_ = allocateBlockAfterPressure(
+        rowBlockSize_, "BmRowContainer cannot allocate a new row block");
   }
-  return rowBlocks_[activeRowBlockId_];
+  return blocks_.block(activeRowBlockId_);
 }
 
 bool BmRowContainer::hasRowCapacity(const BmBlockState& block) const {
@@ -369,47 +345,31 @@ bool BmRowContainer::hasRowCapacity(const BmBlockState& block) const {
 }
 
 char* BmRowContainer::mutableRow(RowId row) {
-  BOLT_CHECK_LT(row.rowBlockId, rowBlocks_.size());
-  auto& block = rowBlocks_[row.rowBlockId];
-  BOLT_CHECK(block.pinnedHandle.has_value());
+  auto& block = blocks_.block(row.blockId);
   BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
-  return block.pinnedHandle->Ptr() + row.rowOffset;
+  return blocks_.activeData(row.blockId) + row.rowOffset;
 }
 
-const char* BmRowContainer::pinRow(
-    RowId row,
-    std::vector<memory::bm::BufferHandle>& pins) {
-  BOLT_CHECK_LT(row.rowBlockId, rowBlocks_.size());
-  auto& block = rowBlocks_[row.rowBlockId];
+const char* BmRowContainer::pinRow(RowId row) {
+  auto& block = blocks_.block(row.blockId);
   BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
-  if (block.pinnedHandle.has_value()) {
-    return block.pinnedHandle->Ptr() + row.rowOffset;
-  }
-  auto handle = bufferManager_->Pin(block.block);
-  const auto* ptr = handle.Ptr() + row.rowOffset;
-  pins.push_back(std::move(handle));
-  return ptr;
+  return pinnedBlockDataAfterPressure(
+             row.blockId, "BmRowContainer cannot pin a row block") +
+      row.rowOffset;
 }
 
-StringView BmRowContainer::stringView(
-    const char* row,
-    BmRowColumn column,
-    std::vector<memory::bm::BufferHandle>& pins) {
+StringView BmRowContainer::stringView(const char* row, BmRowColumn column) {
   const auto ref = *reinterpret_cast<const VarData*>(row + column.offset());
   if (ref.size == 0) {
     return StringView("", 0);
   }
-  BOLT_CHECK_LT(ref.heapBlockId, heapBlocks_.size());
-  auto& block = heapBlocks_[ref.heapBlockId];
-  BOLT_CHECK_LE(ref.heapOffset + ref.size, block.usedBytes);
-  if (block.pinnedHandle.has_value()) {
-    return StringView(block.pinnedHandle->Ptr() + ref.heapOffset, ref.size);
-  }
-
-  auto handle = bufferManager_->Pin(block.block);
-  const auto* ptr = handle.Ptr() + ref.heapOffset;
-  pins.push_back(std::move(handle));
-  return StringView(ptr, ref.size);
+  auto& block = blocks_.block(ref.blockId);
+  BOLT_CHECK_LE(ref.offset + ref.size, block.usedBytes);
+  return StringView(
+      pinnedBlockDataAfterPressure(
+          ref.blockId, "BmRowContainer cannot pin a heap block") +
+          ref.offset,
+      ref.size);
 }
 
 char* BmRowContainer::initializeRow(char* row) {
@@ -427,89 +387,67 @@ char* BmRowContainer::initializeRow(char* row) {
   return row;
 }
 
-void BmRowContainer::reserveNewBlock(StorageBlockKind kind) {
-  auto& blocks =
-      kind == StorageBlockKind::kRow ? rowBlocks_ : heapBlocks_;
-  auto& activeBlockId =
-      kind == StorageBlockKind::kRow ? activeRowBlockId_ : activeHeapBlockId_;
-  const auto blockSize =
-      kind == StorageBlockKind::kRow ? rowBlockSize_ : heapBlockSize_;
-  const auto* failureMessage = kind == StorageBlockKind::kRow
-      ? "BmRowContainer cannot reserve a new row block"
-      : "BmRowContainer cannot reserve a new heap block";
-
-  if (!bufferManager_->MaybeReserve(blockSize)) {
-    releaseColdPins();
-    auto blocksToSpill = coldBlocks();
-    if (!blocksToSpill.empty()) {
-      bufferManager_->SpillBlocks(blocksToSpill);
-    }
-    BOLT_CHECK(bufferManager_->MaybeReserve(blockSize), failureMessage);
-  }
-
-  auto handle = bufferManager_->Allocate(blockSize, tag_);
-  bufferManager_->ReleaseUnusedReservation();
-  BmBlockState state;
-  state.block = handle.block();
-  state.pinnedHandle.emplace(std::move(handle));
-  blocks.push_back(std::move(state));
-  activeBlockId = blocks.size() - 1;
-}
-
 VarData BmRowContainer::appendVariableWidth(StringView value) {
   BOLT_CHECK_LE(value.size(), heapBlockSize_);
   if (value.size() == 0) {
     return VarData{};
   }
-  if (heapBlocks_.empty() ||
-      heapBlocks_[activeHeapBlockId_].usedBytes + value.size() > heapBlockSize_) {
-    reserveNewBlock(StorageBlockKind::kHeap);
+  if (activeHeapBlockId_ == std::numeric_limits<uint32_t>::max() ||
+      blocks_.block(activeHeapBlockId_).usedBytes + value.size() >
+          heapBlockSize_) {
+    activeHeapBlockId_ = allocateBlockAfterPressure(
+        heapBlockSize_, "BmRowContainer cannot allocate a new heap block");
+    heapBlockIds_.push_back(activeHeapBlockId_);
   }
 
-  auto& block = heapBlocks_[activeHeapBlockId_];
-  BOLT_CHECK(block.pinnedHandle.has_value());
+  auto& block = blocks_.block(activeHeapBlockId_);
   const auto offset = block.usedBytes;
-  std::memcpy(block.pinnedHandle->Ptr() + offset, value.data(), value.size());
+  std::memcpy(
+      blocks_.activeData(activeHeapBlockId_) + offset,
+      value.data(),
+      value.size());
   block.usedBytes += value.size();
   return VarData{
-      activeHeapBlockId_, static_cast<uint32_t>(offset), static_cast<uint32_t>(value.size())};
+      activeHeapBlockId_,
+      static_cast<uint32_t>(offset),
+      static_cast<uint32_t>(value.size())};
 }
 
-void BmRowContainer::releaseColdPins() {
-  if (rowBlocks_.empty()) {
-    return;
+uint32_t BmRowContainer::allocateBlockAfterPressure(
+    uint32_t capacity,
+    const char* failureMessage) {
+  auto blockId = blocks_.tryAllocateBlock(capacity);
+  if (blockId.has_value()) {
+    return blockId.value();
   }
-  for (uint32_t i = 0; i < rowBlocks_.size(); ++i) {
-    if (i == activeRowBlockId_) {
-      continue;
-    }
-    rowBlocks_[i].pinnedHandle.reset();
-  }
-  for (uint32_t i = 0; i < heapBlocks_.size(); ++i) {
-    if (i == activeHeapBlockId_) {
-      continue;
-    }
-    heapBlocks_[i].pinnedHandle.reset();
-  }
+
+  blocks_.spillReclaimableBlocks(
+      0, [this](uint32_t candidateBlockId) {
+        return canReclaimBlock(candidateBlockId);
+      });
+  blockId = blocks_.tryAllocateBlock(capacity);
+  BOLT_CHECK(blockId.has_value(), failureMessage);
+  return blockId.value();
 }
 
-std::vector<std::shared_ptr<memory::bm::BlockHandle>>
-BmRowContainer::coldBlocks() const {
-  std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
-  blocks.reserve(rowBlocks_.size());
-  for (uint32_t i = 0; i < rowBlocks_.size(); ++i) {
-    const auto& block = rowBlocks_[i];
-    if (i != activeRowBlockId_ && !block.pinnedHandle.has_value()) {
-      blocks.push_back(block.block);
-    }
+const char* BmRowContainer::pinnedBlockDataAfterPressure(
+    uint32_t blockId,
+    const char* failureMessage) {
+  if (const auto* data = blocks_.tryPinnedData(blockId)) {
+    return data;
   }
-  for (uint32_t i = 0; i < heapBlocks_.size(); ++i) {
-    const auto& block = heapBlocks_[i];
-    if (i != activeHeapBlockId_ && !block.pinnedHandle.has_value()) {
-      blocks.push_back(block.block);
-    }
-  }
-  return blocks;
+
+  blocks_.spillReclaimableBlocks(
+      0, [this, blockId](uint32_t candidateBlockId) {
+        return candidateBlockId != blockId && canReclaimBlock(candidateBlockId);
+      });
+  const auto* data = blocks_.tryPinnedData(blockId);
+  BOLT_CHECK_NOT_NULL(data, failureMessage);
+  return data;
+}
+
+bool BmRowContainer::canReclaimBlock(uint32_t blockId) const {
+  return blockId != activeRowBlockId_ && blockId != activeHeapBlockId_;
 }
 
 void BmRowContainer::storeDispatch(
@@ -553,10 +491,9 @@ int32_t BmRowContainer::compareDispatch(
     const char* left,
     const char* right,
     BmRowColumn column,
-    std::vector<memory::bm::BufferHandle>& pins,
     CompareFlags flags) {
   return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      compareTyped, kind, left, right, column, pins, flags);
+      compareTyped, kind, left, right, column, flags);
 }
 
 template <TypeKind Kind>
@@ -618,7 +555,6 @@ void BmRowContainer::extractColumnTyped(
     auto* flatResult = result->asFlatVector<T>();
     BOLT_CHECK_NOT_NULL(flatResult);
     if constexpr (std::is_same_v<T, StringView>) {
-      PinnedRows pinnedRows;
       for (int32_t i = 0; i < numRows; ++i) {
         const auto* row = rows[i];
         const auto isNull = row == nullptr ||
@@ -629,7 +565,7 @@ void BmRowContainer::extractColumnTyped(
         }
         flatResult->setStringViewValue(
             resultOffset + i,
-            stringView(row, column, pinnedRows.handles()),
+            stringView(row, column),
             exactSize);
       }
     } else {
@@ -654,7 +590,6 @@ int32_t BmRowContainer::compareTyped(
     const char* left,
     const char* right,
     BmRowColumn column,
-    std::vector<memory::bm::BufferHandle>& pins,
     CompareFlags flags) {
   if constexpr (
       Kind == TypeKind::UNKNOWN || Kind == TypeKind::OPAQUE ||
@@ -676,8 +611,7 @@ int32_t BmRowContainer::compareTyped(
 
     int32_t result;
     if constexpr (std::is_same_v<T, StringView>) {
-      result = compareStringAsc(
-          stringView(left, column, pins), stringView(right, column, pins));
+      result = compareStringAsc(stringView(left, column), stringView(right, column));
     } else {
       result = comparePrimitiveAsc(
           *reinterpret_cast<const T*>(left + column.offset()),

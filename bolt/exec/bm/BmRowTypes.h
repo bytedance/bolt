@@ -5,13 +5,13 @@
 namespace bytedance::bolt::exec {
 
 struct RowId {
-  uint32_t rowBlockId{0};
+  uint32_t blockId{0};
   uint32_t rowOffset{0};
 };
 
 struct VarData {
-  uint32_t heapBlockId{0};
-  uint32_t heapOffset{0};
+  uint32_t blockId{0};
+  uint32_t offset{0};
   uint32_t size{0};
 };
 

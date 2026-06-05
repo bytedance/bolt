@@ -365,7 +365,7 @@ TEST_F(BmRowContainerTest, ExtractsRowsAcrossMultipleBlocks) {
   while (container.allocatedBytes() < 2 * kLargeBlockBytes) {
     auto row = container.newRow();
     container.store(decoded, 0, row, 0);
-    if (sampledRows.empty() || row.rowBlockId != sampledRows.back().rowBlockId) {
+    if (sampledRows.empty() || row.blockId != sampledRows.back().blockId) {
       sampledRows.push_back(row);
     }
   }
@@ -398,7 +398,7 @@ TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
       auto row = container.newRow();
       container.store(decoded, 0, row, 0);
       if (sampledRows.empty() ||
-          row.rowBlockId != sampledRows.back().rowBlockId) {
+          row.blockId != sampledRows.back().blockId) {
         sampledRows.push_back(row);
       }
     }
@@ -479,7 +479,7 @@ TEST_F(BmRowContainerTest, StoresVariableWidthDataAcrossMultipleHeapBlocks) {
     auto row = container.newRow();
     container.store(decoded, 0, row, 0);
     if (sampledRows.empty() ||
-        row.rowBlockId != sampledRows.back().rowBlockId) {
+        row.blockId != sampledRows.back().blockId) {
       sampledRows.push_back(row);
     }
   }
@@ -512,7 +512,7 @@ TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
     while (container.heapAllocatedBytes() < 6 * kLargeBlockBytes) {
       auto row = container.newRow();
       container.store(decoded, 0, row, 0);
-      if (rows.empty() || row.rowBlockId != rows.back().rowBlockId) {
+      if (rows.empty() || row.blockId != rows.back().blockId) {
         rows.push_back(row);
       }
     }
