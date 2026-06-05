@@ -15,7 +15,7 @@ void registerWriteBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("row-container-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf = root->addLeafChild("row-container-benchmark-vectors");
           RowContainer container(spec->keyTypes, spec->dependentTypes, leaf.get());
@@ -36,7 +36,7 @@ void registerWriteBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("bm-row-container-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf = root->addLeafChild("bm-row-container-benchmark-vectors");
           auto bm = makeBufferManager(*root, spec->name);

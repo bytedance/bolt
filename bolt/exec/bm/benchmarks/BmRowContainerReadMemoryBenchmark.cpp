@@ -16,7 +16,7 @@ void registerReadMemoryBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("row-container-readback-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf =
               root->addLeafChild("row-container-readback-benchmark-vectors");
@@ -42,7 +42,7 @@ void registerReadMemoryBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("bm-row-container-readback-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf =
               root->addLeafChild("bm-row-container-readback-benchmark-vectors");

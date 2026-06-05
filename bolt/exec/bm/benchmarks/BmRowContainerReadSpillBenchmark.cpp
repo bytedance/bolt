@@ -16,7 +16,7 @@ void registerReadSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("row-container-read-spill-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf =
               root->addLeafChild("row-container-read-spill-benchmark-vectors");
@@ -52,7 +52,7 @@ void registerReadSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
               fmt::format(
                   "bm-row-container-spilled-readback-benchmark-{}",
                   spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf = root->addLeafChild(
               "bm-row-container-spilled-readback-benchmark-vectors");

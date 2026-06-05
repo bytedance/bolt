@@ -17,8 +17,6 @@
 namespace bytedance::bolt::exec {
 
 inline constexpr vector_size_t kBmRowContainerBenchmarkBatchRows = 16'384;
-inline constexpr uint64_t kBmRowContainerBenchmarkPoolCapacity = 8ULL << 30;
-
 enum class DatasetKind {
   kFixedInt64,
   kMixedFixed,
@@ -51,6 +49,8 @@ struct RowContainerReadSpillStats {
 };
 
 std::vector<DatasetSpec> makeDatasetSpecs();
+
+uint64_t benchmarkPoolCapacityBytes();
 
 std::shared_ptr<memory::bm::BufferManager> makeBufferManager(
     memory::MemoryPool& root,

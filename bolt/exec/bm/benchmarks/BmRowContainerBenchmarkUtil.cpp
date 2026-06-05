@@ -26,10 +26,18 @@ DEFINE_bool(
     "Print detailed RowContainer spiller and BufferManager stats for bm row "
     "container benchmarks.");
 
+DEFINE_double(
+    bm_row_container_pool_capacity_gib,
+    0.0,
+    "Benchmark root memory pool capacity in GiB. Values <= 0 use an auto "
+    "capacity based on bm_row_container_data_gib.");
+
 namespace bytedance::bolt::exec {
 namespace {
 
 constexpr uint64_t kGiB = 1024ULL * 1024 * 1024;
+constexpr uint64_t kMinBenchmarkPoolCapacity = 8ULL * kGiB;
+constexpr double kAutoPoolCapacityMultiplier = 4.0;
 
 template <typename T>
 VectorPtr makeFlatVector(
@@ -191,6 +199,17 @@ std::vector<DatasetSpec> makeDatasetSpecs() {
           {VARCHAR()},
           8 + 1024},
   };
+}
+
+uint64_t benchmarkPoolCapacityBytes() {
+  if (FLAGS_bm_row_container_pool_capacity_gib > 0) {
+    return static_cast<uint64_t>(
+        FLAGS_bm_row_container_pool_capacity_gib * kGiB);
+  }
+  return std::max<uint64_t>(
+      kMinBenchmarkPoolCapacity,
+      static_cast<uint64_t>(
+          FLAGS_bm_row_container_data_gib * kAutoPoolCapacityMultiplier * kGiB));
 }
 
 std::shared_ptr<memory::bm::BufferManager> makeBufferManager(
