@@ -168,6 +168,8 @@ if(${BOLT_ENABLE_CUDF})
   target_link_libraries(bolt_exec bolt_cudf_exec cudf::cudf)
 endif()
 
+add_subdirectory(bm)
+
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)
   add_subdirectory(tests)
