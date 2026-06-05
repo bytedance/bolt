@@ -1756,6 +1756,16 @@ jit_GetDecodedRowFieldDouble(char* vec, int32_t index, int32_t field) {
   return fieldDecoded.valueAt<double>(decoded->index(index));
 }
 
+__attribute__((__visibility__("default"))) int8_t jit_GetDecodedRowFieldI8(
+    char* vec,
+    int32_t index,
+    int32_t field) {
+  auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
+  auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
+  bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
+  return fieldDecoded.valueAt<bool>(decoded->index(index));
+}
+
 __attribute__((__visibility__("default"))) int64_t jit_GetDecodedRowFieldI64(
     char* vec,
     int32_t index,
@@ -1764,6 +1774,24 @@ __attribute__((__visibility__("default"))) int64_t jit_GetDecodedRowFieldI64(
   auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
   bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
   return fieldDecoded.valueAt<int64_t>(decoded->index(index));
+}
+
+__attribute__((__visibility__("default"))) bytedance::bolt::int128_t
+jit_GetDecodedRowFieldI128(char* vec, int32_t index, int32_t field) {
+  auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
+  auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
+  bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
+  return fieldDecoded.valueAt<bytedance::bolt::int128_t>(decoded->index(index));
+}
+
+__attribute__((__visibility__("default"))) int8_t jit_GetDecodedRowFieldIsNull(
+    char* vec,
+    int32_t index,
+    int32_t field) {
+  auto* decoded = reinterpret_cast<bytedance::bolt::DecodedVector*>(vec);
+  auto* rowVector = decoded->base()->as<bytedance::bolt::RowVector>();
+  bytedance::bolt::DecodedVector fieldDecoded(*rowVector->childAt(field));
+  return fieldDecoded.isNullAt(decoded->index(index));
 }
 // get decoded value string
 __attribute__((__visibility__("default"))) const char*

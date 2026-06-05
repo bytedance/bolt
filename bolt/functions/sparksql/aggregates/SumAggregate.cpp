@@ -37,7 +37,112 @@ namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
 template <typename TInput, typename TAccumulator, typename ResultType>
-using SumAggregate = SumAggregateBase<TInput, TAccumulator, ResultType>;
+class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
+ public:
+  explicit SumAggregate(TypePtr resultType)
+      : SumAggregateBase<TInput, TAccumulator, ResultType>(resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.inputType->isRow() || context.inputType->isDecimal()) {
+      return false;
+    }
+    return jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+        context.inputType->kind() == TypeKind::HUGEINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+
+    const auto accumulatorKind =
+        (*inputKind == jit::HashAggrJitValueKind::Float ||
+         *inputKind == jit::HashAggrJitValueKind::Double)
+        ? jit::HashAggrJitValueKind::Double
+        : jit::HashAggrJitValueKind::Int64;
+
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Sum,
+        *inputKind,
+        accumulatorKind,
+        false,
+        !context.isRawInput,
+        false,
+        hashAggrJitOps()};
+  }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.setAccumulatorNull(group, slot);
+    auto* accType = codegen.llvmType(slot.accumulatorKind);
+    if (codegen.isFloatKind(slot.accumulatorKind)) {
+      codegen.storeValue(
+          group, accType, slot.offset, llvm::ConstantFP::get(accType, 0.0));
+    } else {
+      codegen.storeValue(
+          group, accType, slot.offset, llvm::ConstantInt::get(accType, 0));
+    }
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+    auto* value =
+        codegen.castValue(rawValue, slot.inputKind, slot.accumulatorKind);
+    auto* accType = codegen.llvmType(slot.accumulatorKind);
+    codegen.clearAccumulatorNull(group, slot);
+    auto* oldValue = codegen.loadValue(group, accType, slot.offset);
+    auto* newValue = codegen.isFloatKind(slot.accumulatorKind)
+        ? codegen.builder().CreateFAdd(oldValue, value)
+        : codegen.builder().CreateAdd(oldValue, value);
+    codegen.storeValue(group, accType, slot.offset, newValue);
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot&,
+      bool) {
+    return false;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen&,
+      llvm::Value*,
+      const jit::HashAggrJitSlot&,
+      const jit::HashAggrJitExtractTarget&) {}
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "sum",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+
+ public:
+#endif
+};
 
 TypePtr getDecimalSumType(
     const TypePtr& resultType,

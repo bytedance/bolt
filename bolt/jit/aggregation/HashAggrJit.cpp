@@ -13,6 +13,7 @@
 
 #include <fmt/format.h>
 
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/jit/ThrustJITv2.h"
 
 extern "C" {
@@ -123,6 +124,48 @@ __attribute__((__visibility__("default"))) void jit_HashAggrUpdateDecimalAvgI128
   ++state->count;
 }
 
+__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalSumI64(
+    char* group,
+    int32_t offset,
+    int64_t value,
+    int8_t isEmpty) {
+  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
+  state->overflow += jitHashAggrAddWithOverflow(
+      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
+  state->isEmpty = state->isEmpty && static_cast<bool>(isEmpty);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalSumI128(
+    char* group,
+    int32_t offset,
+    bytedance::bolt::int128_t value,
+    int8_t isEmpty) {
+  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
+  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
+  state->isEmpty = state->isEmpty && static_cast<bool>(isEmpty);
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalAvgI64(
+    char* group,
+    int32_t offset,
+    int64_t value,
+    int64_t count) {
+  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
+  state->overflow += jitHashAggrAddWithOverflow(
+      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
+  state->count += count;
+}
+
+__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalAvgI128(
+    char* group,
+    int32_t offset,
+    bytedance::bolt::int128_t value,
+    int64_t count) {
+  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
+  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
+  state->count += count;
+}
+
 } // extern "C"
 
 namespace bytedance::bolt::jit {
@@ -161,7 +204,13 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(
       module, "jit_GetDecodedRowFieldDouble", doubleTy, {i8PtrTy, i32Ty, i32Ty});
   declareFunction(
+      module, "jit_GetDecodedRowFieldI8", i8Ty, {i8PtrTy, i32Ty, i32Ty});
+  declareFunction(
       module, "jit_GetDecodedRowFieldI64", i64Ty, {i8PtrTy, i32Ty, i32Ty});
+  declareFunction(
+      module, "jit_GetDecodedRowFieldI128", i128Ty, {i8PtrTy, i32Ty, i32Ty});
+  declareFunction(
+      module, "jit_GetDecodedRowFieldIsNull", i8Ty, {i8PtrTy, i32Ty, i32Ty});
   declareFunction(module, "jit_GetDecodedIsNull", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_HashAggrInitDecimalSum", voidTy, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_HashAggrInitDecimalAvg", voidTy, {i8PtrTy, i32Ty});
@@ -173,6 +222,26 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
       module, "jit_HashAggrUpdateDecimalAvgI64", voidTy, {i8PtrTy, i32Ty, i64Ty});
   declareFunction(
       module, "jit_HashAggrUpdateDecimalAvgI128", voidTy, {i8PtrTy, i32Ty, i128Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrMergeDecimalSumI64",
+      voidTy,
+      {i8PtrTy, i32Ty, i64Ty, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrMergeDecimalSumI128",
+      voidTy,
+      {i8PtrTy, i32Ty, i128Ty, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrMergeDecimalAvgI64",
+      voidTy,
+      {i8PtrTy, i32Ty, i64Ty, i64Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrMergeDecimalAvgI128",
+      voidTy,
+      {i8PtrTy, i32Ty, i128Ty, i64Ty});
   declareFunction(module, "jit_HashAggrResizeVector", voidTy, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_HashAggrSetFlatI8", voidTy, {i8PtrTy, i32Ty, i8Ty, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatI16", voidTy, {i8PtrTy, i32Ty, i16Ty, i8Ty});
@@ -225,6 +294,24 @@ std::string decodedValueFunction(HashAggrJitValueKind kind) {
       return "jit_GetDecodedValueDouble";
   }
   return "jit_GetDecodedValueI64";
+}
+
+std::string decodedRowFieldFunction(HashAggrJitValueKind kind) {
+  switch (kind) {
+    case HashAggrJitValueKind::Int8:
+      return "jit_GetDecodedRowFieldI8";
+    case HashAggrJitValueKind::Int64:
+      return "jit_GetDecodedRowFieldI64";
+    case HashAggrJitValueKind::Int128:
+      return "jit_GetDecodedRowFieldI128";
+    case HashAggrJitValueKind::Double:
+      return "jit_GetDecodedRowFieldDouble";
+    case HashAggrJitValueKind::Int16:
+    case HashAggrJitValueKind::Int32:
+    case HashAggrJitValueKind::Float:
+      break;
+  }
+  return "";
 }
 
 std::string setFlatValueFunction(HashAggrJitValueKind kind);
@@ -392,15 +479,27 @@ bool HashAggrJitCodegen::isFloatKind(HashAggrJitValueKind kind) const {
   return ::bytedance::bolt::jit::isFloatKind(kind);
 }
 
-llvm::Value* HashAggrJitCodegen::loadAvgMergeField(
+llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
     llvm::Value* decoded,
     llvm::Value* row,
     int32_t field,
-    llvm::Type* type) const {
-  const char* name = type->isDoubleTy() ? "jit_GetDecodedRowFieldDouble"
-                                        : "jit_GetDecodedRowFieldI64";
+    HashAggrJitValueKind kind) const {
+  const auto name = decodedRowFieldFunction(kind);
+  BOLT_CHECK(
+      !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
   return builder().CreateCall(
       module_.getFunction(name), {decoded, row, builder().getInt32(field)});
+}
+
+llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
+    llvm::Value* decoded,
+    llvm::Value* row,
+    int32_t field) const {
+  return builder().CreateICmpNE(
+      builder().CreateCall(
+          module_.getFunction("jit_GetDecodedRowFieldIsNull"),
+          {decoded, row, builder().getInt32(field)}),
+      builder().getInt8(0));
 }
 
 void HashAggrJitCodegen::emitFlatValue(

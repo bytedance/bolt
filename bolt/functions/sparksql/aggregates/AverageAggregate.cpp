@@ -42,6 +42,149 @@ class AverageAggregate
   explicit AverageAggregate(TypePtr resultType)
       : AverageAggregateBase<TInput, TAccumulator, TResult>(resultType) {}
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.isRawInput) {
+      if (context.inputType->isDecimal()) {
+        return false;
+      }
+      return jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+          context.inputType->kind() == TypeKind::HUGEINT;
+    }
+    return context.inputType->isRow() && context.inputType->size() == 2 &&
+        context.inputType->childAt(1)->kind() == TypeKind::BIGINT &&
+        context.inputType->childAt(0)->kind() == TypeKind::DOUBLE;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    if (!context.isRawInput) {
+      return jit::HashAggrJitDescriptor{
+          jit::HashAggrJitKind::Avg,
+          jit::HashAggrJitValueKind::Double,
+          jit::HashAggrJitValueKind::Double,
+          false,
+          true,
+          false,
+          hashAggrJitOps()};
+    }
+
+    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Avg,
+        *inputKind,
+        jit::HashAggrJitValueKind::Double,
+        false,
+        false,
+        false,
+        hashAggrJitOps()};
+  }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.setAccumulatorNull(group, slot);
+    codegen.storeValue(
+        group,
+        codegen.llvmType(slot.accumulatorKind),
+        slot.offset,
+        llvm::ConstantFP::get(codegen.llvmType(slot.accumulatorKind), 0.0));
+    codegen.storeValue(
+        group,
+        codegen.builder().getInt64Ty(),
+        slot.offset + 8,
+        codegen.builder().getInt64(0));
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    if (slot.mergeInput) {
+      codegen.clearAccumulatorNull(group, slot);
+      auto* sum = codegen.loadDecodedRowField(
+          decoded, row, 0, jit::HashAggrJitValueKind::Double);
+      auto* count = codegen.loadDecodedRowField(
+          decoded, row, 1, jit::HashAggrJitValueKind::Int64);
+      auto* oldSum =
+          codegen.loadValue(group, codegen.builder().getDoubleTy(), slot.offset);
+      codegen.storeValue(
+          group,
+          codegen.builder().getDoubleTy(),
+          slot.offset,
+          codegen.builder().CreateFAdd(oldSum, sum));
+      auto* oldCount = codegen.loadValue(
+          group, codegen.builder().getInt64Ty(), slot.offset + 8);
+      codegen.storeValue(
+          group,
+          codegen.builder().getInt64Ty(),
+          slot.offset + 8,
+          codegen.builder().CreateAdd(oldCount, count));
+      return;
+    }
+
+    auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+    auto* value =
+        codegen.castValue(rawValue, slot.inputKind, slot.accumulatorKind);
+    codegen.clearAccumulatorNull(group, slot);
+    auto* oldSum =
+        codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+    codegen.storeValue(
+        group,
+        codegen.llvmType(slot.accumulatorKind),
+        slot.offset,
+        codegen.builder().CreateFAdd(oldSum, value));
+    auto* oldCount = codegen.loadValue(
+        group, codegen.builder().getInt64Ty(), slot.offset + 8);
+    codegen.storeValue(
+        group,
+        codegen.builder().getInt64Ty(),
+        slot.offset + 8,
+        codegen.builder().CreateAdd(oldCount, codegen.builder().getInt64(1)));
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot&,
+      bool) {
+    return false;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen&,
+      llvm::Value*,
+      const jit::HashAggrJitSlot&,
+      const jit::HashAggrJitExtractTarget&) {}
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "avg",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+
+ public:
+#endif
+
   void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
       override {
     auto rowVector = (*result)->as<RowVector>();
@@ -92,6 +235,41 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
  public:
   explicit DecimalAverageAggregate(TypePtr resultType, TypePtr sumType)
       : DecimalAggregate<TInputType>(resultType), sumType_(sumType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.isRawInput) {
+      return context.inputType->isDecimal() &&
+          (context.inputType->isShortDecimal() ||
+           context.inputType->isLongDecimal());
+    }
+    return context.inputType->isRow() && context.inputType->size() == 2 &&
+        context.inputType->childAt(0)->isDecimal() &&
+        context.inputType->childAt(1)->kind() == TypeKind::BIGINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    const auto& valueType =
+        context.isRawInput ? context.inputType : context.inputType->childAt(0);
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Avg,
+        valueType->isShortDecimal() ? jit::HashAggrJitValueKind::Int64
+                                    : jit::HashAggrJitValueKind::Int128,
+        jit::HashAggrJitValueKind::Int128,
+        false,
+        !context.isRawInput,
+        true,
+        hashAggrJitOps()};
+  }
+#endif
 
   void addIntermediateResults(
       char** groups,
@@ -333,6 +511,117 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
   }
 
  private:
+#ifdef ENABLE_BOLT_JIT
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.setAccumulatorNull(group, slot);
+    codegen.builder().CreateCall(
+        codegen.module().getFunction("jit_HashAggrInitDecimalAvg"),
+        {group, codegen.builder().getInt32(slot.offset)});
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock* nextBlock) {
+    if (slot.mergeInput) {
+      auto* function = codegen.builder().GetInsertBlock()->getParent();
+      auto* continueBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "avg_decimal_merge_cont",
+          function,
+          nextBlock);
+      auto* overflowBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "avg_decimal_merge_overflow",
+          function,
+          continueBlock);
+      auto* mergeBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "avg_decimal_merge",
+          function,
+          continueBlock);
+      auto* sumIsNull = codegen.isDecodedRowFieldNull(decoded, row, 0);
+      auto* countIsNull = codegen.isDecodedRowFieldNull(decoded, row, 1);
+      auto* count = codegen.loadDecodedRowField(
+          decoded, row, 1, jit::HashAggrJitValueKind::Int64);
+      auto* countPositive = codegen.builder().CreateICmpSGT(
+          count, codegen.builder().getInt64(0));
+      auto* isOverflow = codegen.builder().CreateAnd(
+          sumIsNull,
+          codegen.builder().CreateAnd(
+              codegen.builder().CreateNot(countIsNull), countPositive));
+      codegen.builder().CreateCondBr(isOverflow, overflowBlock, mergeBlock);
+
+      codegen.builder().SetInsertPoint(overflowBlock);
+      codegen.setAccumulatorNull(group, slot);
+      codegen.builder().CreateBr(continueBlock);
+
+      codegen.builder().SetInsertPoint(mergeBlock);
+      auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.inputKind);
+      codegen.clearAccumulatorNull(group, slot);
+      const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+          ? "jit_HashAggrMergeDecimalAvgI128"
+          : "jit_HashAggrMergeDecimalAvgI64";
+      codegen.builder().CreateCall(
+          codegen.module().getFunction(helper),
+          {group,
+           codegen.builder().getInt32(slot.offset),
+           slot.inputKind == jit::HashAggrJitValueKind::Int128
+               ? codegen.castValue(
+                     sum, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+               : sum,
+           count});
+      codegen.builder().CreateBr(continueBlock);
+
+      codegen.builder().SetInsertPoint(continueBlock);
+      return;
+    }
+
+    auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+    codegen.clearAccumulatorNull(group, slot);
+    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+        ? "jit_HashAggrUpdateDecimalAvgI128"
+        : "jit_HashAggrUpdateDecimalAvgI64";
+    codegen.builder().CreateCall(
+        codegen.module().getFunction(helper),
+        {group,
+         codegen.builder().getInt32(slot.offset),
+         slot.inputKind == jit::HashAggrJitValueKind::Int128
+             ? codegen.castValue(
+                   rawValue, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+             : rawValue});
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot&,
+      bool) {
+    return false;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen&,
+      llvm::Value*,
+      const jit::HashAggrJitSlot&,
+      const jit::HashAggrJitExtractTarget&) {}
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "avg_decimal",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+#endif
+
   template <typename UnscaledType>
   inline void mergeSumCount(
       LongDecimalWithOverflowState* accumulator,

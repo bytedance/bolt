@@ -61,6 +61,149 @@ class DecimalSumAggregate : public exec::Aggregate {
     return alignof(DecimalSum);
   }
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (context.inputCount != 1 || !context.inputType) {
+      return false;
+    }
+    if (context.isRawInput) {
+      return context.inputType->isDecimal() &&
+          (context.inputType->isShortDecimal() ||
+           context.inputType->isLongDecimal());
+    }
+    return context.inputType->isRow() && context.inputType->size() == 2 &&
+        context.inputType->childAt(0)->isDecimal() &&
+        context.inputType->childAt(1)->kind() == TypeKind::BOOLEAN;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    const auto& valueType =
+        context.isRawInput ? context.inputType : context.inputType->childAt(0);
+    return jit::HashAggrJitDescriptor{
+        jit::HashAggrJitKind::Sum,
+        valueType->isShortDecimal() ? jit::HashAggrJitValueKind::Int64
+                                    : jit::HashAggrJitValueKind::Int128,
+        jit::HashAggrJitValueKind::Int128,
+        false,
+        !context.isRawInput,
+        true,
+        hashAggrJitOps()};
+  }
+
+ private:
+  static void compileHashAggrJitCreate(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot) {
+    codegen.setAccumulatorNull(group, slot);
+    codegen.builder().CreateCall(
+        codegen.module().getFunction("jit_HashAggrInitDecimalSum"),
+        {group, codegen.builder().getInt32(slot.offset)});
+  }
+
+  static void compileHashAggrJitAdd(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock* nextBlock) {
+    if (slot.mergeInput) {
+      auto* function = codegen.builder().GetInsertBlock()->getParent();
+      auto* continueBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "sum_decimal_merge_cont",
+          function,
+          nextBlock);
+      auto* overflowBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "sum_decimal_merge_overflow",
+          function,
+          continueBlock);
+      auto* mergeBlock = llvm::BasicBlock::Create(
+          codegen.module().getContext(),
+          "sum_decimal_merge",
+          function,
+          continueBlock);
+      auto* sumIsNull = codegen.isDecodedRowFieldNull(decoded, row, 0);
+      auto* isEmpty = codegen.loadDecodedRowField(
+          decoded, row, 1, jit::HashAggrJitValueKind::Int8);
+      auto* isNotEmpty =
+          codegen.builder().CreateICmpEQ(isEmpty, codegen.builder().getInt8(0));
+      auto* isOverflow = codegen.builder().CreateAnd(sumIsNull, isNotEmpty);
+      codegen.builder().CreateCondBr(isOverflow, overflowBlock, mergeBlock);
+
+      codegen.builder().SetInsertPoint(overflowBlock);
+      codegen.setAccumulatorNull(group, slot);
+      codegen.builder().CreateBr(continueBlock);
+
+      codegen.builder().SetInsertPoint(mergeBlock);
+      auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.inputKind);
+      codegen.clearAccumulatorNull(group, slot);
+      const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+          ? "jit_HashAggrMergeDecimalSumI128"
+          : "jit_HashAggrMergeDecimalSumI64";
+      codegen.builder().CreateCall(
+          codegen.module().getFunction(helper),
+          {group,
+           codegen.builder().getInt32(slot.offset),
+           slot.inputKind == jit::HashAggrJitValueKind::Int128
+               ? codegen.castValue(
+                     sum, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+               : sum,
+           isEmpty});
+      codegen.builder().CreateBr(continueBlock);
+
+      codegen.builder().SetInsertPoint(continueBlock);
+      return;
+    }
+
+    auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+    codegen.clearAccumulatorNull(group, slot);
+    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+        ? "jit_HashAggrUpdateDecimalSumI128"
+        : "jit_HashAggrUpdateDecimalSumI64";
+    codegen.builder().CreateCall(
+        codegen.module().getFunction(helper),
+        {group,
+         codegen.builder().getInt32(slot.offset),
+         slot.inputKind == jit::HashAggrJitValueKind::Int128
+             ? codegen.castValue(
+                   rawValue, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+             : rawValue});
+  }
+
+  static bool canCompileHashAggrJitExtract(
+      const jit::HashAggrJitSlot&,
+      bool) {
+    return false;
+  }
+
+  static void compileHashAggrJitExtract(
+      jit::HashAggrJitCodegen&,
+      llvm::Value*,
+      const jit::HashAggrJitSlot&,
+      const jit::HashAggrJitExtractTarget&) {}
+
+  static const jit::HashAggrJitOps* hashAggrJitOps() {
+    static const jit::HashAggrJitOps kOps{
+        "sum_decimal",
+        &compileHashAggrJitCreate,
+        &compileHashAggrJitAdd,
+        &canCompileHashAggrJitExtract,
+        &compileHashAggrJitExtract};
+    return &kOps;
+  }
+
+ public:
+#endif
+
   void initializeNewGroups(
       char** groups,
       folly::Range<const vector_size_t*> indices) override {

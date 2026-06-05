@@ -147,11 +147,15 @@ class HashAggrJitCodegen {
       HashAggrJitValueKind from,
       HashAggrJitValueKind to) const;
   bool isFloatKind(HashAggrJitValueKind kind) const;
-  llvm::Value* loadAvgMergeField(
+  llvm::Value* loadDecodedRowField(
       llvm::Value* decoded,
       llvm::Value* row,
       int32_t field,
-      llvm::Type* type) const;
+      HashAggrJitValueKind kind) const;
+  llvm::Value* isDecodedRowFieldNull(
+      llvm::Value* decoded,
+      llvm::Value* row,
+      int32_t field) const;
   void emitFlatValue(
       llvm::Value* vector,
       llvm::Value* row,
