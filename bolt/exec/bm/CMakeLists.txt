@@ -1,5 +1,6 @@
 bolt_add_library(
   bolt_exec_bm
+  BmPressureAwareBlockArena.cpp
   BmRowContainer.cpp
 )
 
