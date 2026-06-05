@@ -495,6 +495,44 @@ TEST_F(BmRowContainerTest, StoresVariableWidthDataAcrossMultipleHeapBlocks) {
   }
 }
 
+TEST_F(BmRowContainerTest, ExtractsVariableWidthWithExactSizeAtResultOffset) {
+  auto bufferManager = makeBufferManager("varchar-exact-size-offset");
+  BmRowContainer container({BIGINT()}, {VARCHAR()}, bufferManager);
+
+  auto bigints = makeBigintVector(leaf_.get(), {10, 20, 30, 40});
+  const std::string largeValue(256, 'e');
+  auto strings = makeVarcharVector(
+      leaf_.get(),
+      {StringView("aa"),
+       StringView(""),
+       std::nullopt,
+       StringView(largeValue)});
+  DecodedVector decodedBigints(*bigints);
+  DecodedVector decodedStrings(*strings);
+
+  std::vector<RowId> rows;
+  for (auto i = 0; i < bigints->size(); ++i) {
+    auto row = container.newRow();
+    container.store(decodedBigints, i, row, 0);
+    container.store(decodedStrings, i, row, 1);
+    rows.push_back(row);
+  }
+
+  auto result = BaseVector::create(VARCHAR(), rows.size() + 2, leaf_.get());
+  container.extractColumn(
+      folly::Range<const RowId*>(rows.data(), rows.size()),
+      1,
+      1,
+      result,
+      true);
+
+  auto* actual = result->asFlatVector<StringView>();
+  EXPECT_EQ("aa", actual->valueAt(1).getString());
+  EXPECT_EQ("", actual->valueAt(2).getString());
+  EXPECT_TRUE(result->isNullAt(3));
+  EXPECT_EQ(largeValue, actual->valueAt(4).getString());
+}
+
 TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
   auto limitedRoot = memoryManager_.addRootPool(
       "bm-row-container-heap-spill-root",

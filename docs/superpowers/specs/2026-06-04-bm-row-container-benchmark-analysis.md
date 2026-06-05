@@ -1,440 +1,15 @@
 # BmRowContainer Benchmark 性能分析
 
-日期：2026-06-04
+日期：2026-06-05
 
-本文整理 `bolt/exec/bm/benchmarks/BmRowContainerBenchmark.cpp` 的最新一次 1GiB benchmark 结果，并结合 `log.txt` 中的细粒度 stats 分析 `RowContainer` 和 `BmRowContainer` 在写入、spill、读内存、读 spill 场景下的性能差异。
+本文基于最新 `bolt_bm_row_container_benchmark --bm_row_container_data_gib=1`
+结果和 `log.txt` 中的 stats，分析 `RowContainer` 与 `BmRowContainer`
+在写入、spill 写出、内存读回、spill 读回四类场景下的差异，并给出
+`BmRowContainer` 读路径 fast path 的完整优化方案。
 
-## 测试配置
+## 当前 Benchmark 口径
 
 运行命令：
-
-```bash
-_build/Release/bolt/exec/bm/benchmarks/bolt_bm_row_container_benchmark \
-  --bm_row_container_print_stats=true \
-  2>log.txt
-```
-
-当前 benchmark 的关键配置：
-
-- 每个 dataset 的逻辑输入大小为 1GiB。
-- RowContainer 使用 row-based spiller，`rowBasedSpillMode=COMPRESSION`。
-- RowContainer spill 压缩为 `CompressionKind_ZSTD`。
-- BmRowContainer 使用 BufferManager block spill，压缩为 `kZstdFrame`。
-- `varchar_payload` 使用确定性伪随机 1024 字节字符串，不再使用单一字符 payload。
-- 当前 ReadMemory / ReadSpill 读取的是第 0 列：
-  - `fixed_int64`：`BIGINT`
-  - `mixed_fixed`：`INTEGER`
-  - `varchar_payload`：`BIGINT key`，不是 `VARCHAR payload`
-
-## Benchmark 结果
-
-| Dataset | 场景 | RowContainer | BmRowContainer | BM 相对表现 |
-| --- | ---: | ---: | ---: | ---: |
-| fixed_int64 | Write | 3.34s | 4.81s | 慢 1.44x |
-| fixed_int64 | Spill | 5.59s | 3.11s | 快 1.80x |
-| fixed_int64 | ReadMemory | 211.25ms | 1.77s | 慢 8.38x |
-| fixed_int64 | ReadSpill | 2.29s | 13.23s | 慢 5.78x |
-| mixed_fixed | Write | 3.02s | 3.85s | 慢 1.27x |
-| mixed_fixed | Spill | 5.02s | 4.49s | 快 1.12x |
-| mixed_fixed | ReadMemory | 124.17ms | 368.24ms | 慢 2.97x |
-| mixed_fixed | ReadSpill | 1.81s | 5.94s | 慢 3.28x |
-| varchar_payload | Write | 2.94s | 3.14s | 慢 1.07x |
-| varchar_payload | Spill | 3.80s | 1.30s | 快 2.92x |
-| varchar_payload | ReadMemory | 3.02ms | 8.49ms | 慢 2.81x |
-| varchar_payload | ReadSpill | 1.23s | 105.47ms | 快 11.66x |
-
-## Spill 写出分析
-
-双方都启用 ZSTD 后，`BmRowContainerSpill` 在三个 dataset 上都优于或接近 RowContainer。
-
-### fixed_int64
-
-RowContainer stats：
-
-```text
-input_bytes=1,207,968,776
-spilled_bytes=140,803,703
-rows=134,217,728
-total_us=5,586,112
-fill_us=1,261,177
-serialization_us=1,267,526
-flush_us=2,944,687
-write_us=70,180
-```
-
-BmRowContainer stats：
-
-```text
-spill_write_bytes=2,143,289,344
-spill_physical_write_bytes=140,558,469
-spill_write_count=511
-compressed_blocks=511
-compression_us=3,069,375
-```
-
-结论：
-
-- BM 的物理写出大小和 RowContainer 非常接近，都是约 140MB。
-- BM 总耗时约 3.11s，几乎全部是 ZSTD 压缩时间。
-- RowContainer 总耗时约 5.59s，其中 row fill + serialization 约 2.53s，压缩 flush 约 2.94s。
-- fixed_int64 下 BM 的优势来自省掉 row-based fill/serialization 的 CPU 成本。
-- BM 需要压缩的逻辑字节更多，约 2.14GB；RowContainer row-based serialized input 约 1.21GB。这说明 BM block layout 比 RowContainer spill format 更膨胀，但仍然通过避免逐行序列化获得优势。
-
-### mixed_fixed
-
-RowContainer stats：
-
-```text
-input_bytes=1,124,880,970
-spilled_bytes=281,965,150
-rows=51,130,563
-total_us=5,018,096
-fill_us=584,792
-serialization_us=476,125
-flush_us=3,800,064
-write_us=138,640
-```
-
-BmRowContainer stats：
-
-```text
-spill_write_bytes=1,224,736,768
-spill_physical_write_bytes=272,369,411
-spill_write_count=292
-compressed_blocks=292
-compression_us=4,476,864
-```
-
-结论：
-
-- mixed_fixed 下 BM 仍略快，但优势较小，4.49s vs 5.02s。
-- 两边物理写出大小接近，BM 约 272MB，RowContainer 约 282MB。
-- BM 的压缩时间约 4.48s，基本等于总耗时。
-- RowContainer 的 row fill/serialization 约 1.06s，flush 压缩约 3.80s。
-- BM 节省了 row-based 逐行处理，但 ZSTD 压缩本身更慢，抵消了大部分收益。
-
-### varchar_payload
-
-RowContainer stats：
-
-```text
-input_bytes=984,894,351
-spilled_bytes=813,153,472
-rows=1,040,447
-total_us=3,801,551
-fill_us=6,314
-serialization_us=96,987
-flush_us=3,325,056
-write_us=373,113
-```
-
-BmRowContainer stats：
-
-```text
-spill_write_bytes=985,661,440
-spill_physical_write_bytes=796,763,220
-spill_write_count=235
-compressed_blocks=235
-compression_us=1,274,699
-```
-
-结论：
-
-- BM 在 varchar_payload spill 写出上优势明显，1.30s vs 3.80s。
-- 两边逻辑写出大小接近，约 985MB；物理写出也接近，BM 约 797MB，RowContainer 约 813MB。
-- RowContainer 的 ZSTD flush 花费 3.33s，BM 的 ZSTD 压缩只花 1.27s。
-- 该场景行数少，RowContainer fill/serialization 不是主要问题；主要差异来自两条压缩路径和写出路径的效率。
-
-## ReadMemory 分析
-
-BM 在所有 ReadMemory 场景都慢于 RowContainer：
-
-| Dataset | RowContainer | BmRowContainer | 差异 |
-| --- | ---: | ---: | ---: |
-| fixed_int64 | 211.25ms | 1.77s | 慢 8.38x |
-| mixed_fixed | 124.17ms | 368.24ms | 慢 2.97x |
-| varchar_payload | 3.02ms | 8.49ms | 慢 2.81x |
-
-该场景没有 spill read，也没有解压。BM stats 中 `pin_count=0`，因为 blocks 仍在 `BmBlockState::pinnedHandle` 中。即使如此 BM 仍慢，说明基础读路径存在明显开销：
-
-- `RowId` 需要转换成 block pointer + row offset。
-- `extractColumn` 会构造 `std::vector<const char*> rowPtrs`。
-- fixed-width 高行数场景会放大 per-row 指针解析和 rowPtrs 构造成本。
-
-ReadMemory 的结果说明，BM 读路径问题不只来自 unspill，而是 `extractColumn` 基础设计还缺少 block-level fast path。
-
-## ReadSpill 分析
-
-### fixed_int64
-
-RowContainer read spill：
-
-```text
-ReadSpill benchmark=2.29s
-read_us=2,008,782
-decompress_us=845,039
-read_io_us=19,708
-```
-
-BmRowContainer read spill：
-
-```text
-ReadSpill benchmark=13.23s
-pin_count=133,955,584
-pin_in_memory=133,955,073
-pin_read=511
-spill_read_bytes=2,143,289,344
-spill_physical_read_bytes=140,558,469
-decompression_us=1,103,615
-```
-
-结论：
-
-- BM 真正触发磁盘读的次数只有 511 次，和 spilled block 数一致。
-- BM 解压耗时约 1.10s，不足以解释 13.23s 的总耗时。
-- `pin_count` 接近行数，说明当前读路径对每行都进入 `pinRow` / `BufferManager::Pin` 路径。
-- 主要瓶颈是行数级别的 `RowId -> row pointer` 转换、Pin 路径调用和 rowPtrs 构造。
-
-### mixed_fixed
-
-RowContainer read spill：
-
-```text
-ReadSpill benchmark=1.81s
-read_us=1,701,964
-decompress_us=1,206,676
-read_io_us=46,127
-```
-
-BmRowContainer read spill：
-
-```text
-ReadSpill benchmark=5.94s
-pin_count=51,030,504
-pin_in_memory=51,030,212
-pin_read=292
-spill_read_bytes=1,224,736,768
-spill_physical_read_bytes=272,369,416
-decompression_us=1,570,438
-```
-
-结论：
-
-- BM 只实际读回 292 个 blocks。
-- 解压约 1.57s，但总耗时 5.94s。
-- 和 fixed_int64 一样，剩余耗时主要来自每行 pin/lookup/extract 开销。
-
-### varchar_payload
-
-RowContainer read spill：
-
-```text
-ReadSpill benchmark=1.23s
-read_us=1,225,063
-decompress_us=1,053,468
-read_io_us=112,838
-```
-
-BmRowContainer read spill：
-
-```text
-ReadSpill benchmark=105.47ms
-pin_count=917,504
-pin_read=7
-spill_read_bytes=29,360,128
-spill_physical_read_bytes=2,355,453
-decompression_us=25,524
-spilled_bytes remaining=956,301,312
-```
-
-结论：
-
-- 当前 benchmark 只读第 0 列 `BIGINT key`，没有读取 `VARCHAR payload`。
-- BM 只读回 7 个 row blocks，约 29MB logical bytes，没有读取大部分 heap payload blocks。
-- 因此 BM 的 varchar_payload ReadSpill 很快，不能证明 BM 读取 VARCHAR payload 本身很快。
-- 它只能说明：当只读取 key 列时，BM 可以避免读回大部分 payload blocks，这是 block-level layout 的一个潜在优势。
-
-## 10GiB 实验结果
-
-后续又执行了一组 10GiB 逻辑数据规模的实验：
-
-```bash
-_build/Release/bolt/exec/bm/benchmarks/bolt_bm_row_container_benchmark \
-  --bm_row_container_data_gib=10 \
-  2>log.txt
-```
-
-注意：当前 spill 写出仍是 buffered IO。row-based spill 在本地文件路径下最终走
-`fwrite`，不是 direct IO；BM spill 也没有在 benchmark 计时外强制同步落盘。因此 spill
-写出结果会受到 OS page cache、后台 writeback 和 benchmark 执行顺序影响。下面的结果适合比较
-当前实现路径下的端到端耗时趋势，不应直接解释为稳定物理落盘吞吐。
-
-### 10GiB Benchmark 结果
-
-| Dataset | 场景 | RowContainer | BmRowContainer | BM 相对表现 |
-| --- | ---: | ---: | ---: | ---: |
-| fixed_int64 | Write | 36.55s | 47.62s | 慢 1.30x |
-| fixed_int64 | Spill | 1.01min | 31.70s | 快 1.91x |
-| fixed_int64 | ReadMemory | 2.13s | 18.33s | 慢 8.61x |
-| fixed_int64 | ReadSpill | 22.89s | 2.25min | 慢 5.90x |
-| mixed_fixed | Write | 32.04s | 40.07s | 慢 1.25x |
-| mixed_fixed | Spill | 59.12s | 46.98s | 快 1.26x |
-| mixed_fixed | ReadMemory | 1.31s | 3.60s | 慢 2.75x |
-| mixed_fixed | ReadSpill | 18.17s | 59.09s | 慢 3.25x |
-| varchar_payload | Write | 31.10s | 29.54s | 快 1.05x |
-| varchar_payload | Spill | 1.30min | 11.90s | 快 6.55x |
-| varchar_payload | ReadMemory | 33.48ms | 80.84ms | 慢 2.41x |
-| varchar_payload | ReadSpill | 12.16s | 1.16s | 快 10.48x |
-
-### 10GiB Stats 摘要
-
-fixed_int64 spill：
-
-```text
-RowContainer:
-input_bytes=12,079,687,696
-spilled_bytes=1,407,583,699
-rows=1,342,177,280
-total_us=60,484,269
-fill_us=12,285,029
-serialization_us=12,529,696
-flush_us=29,907,878
-write_us=5,397,327
-
-BmRowContainer:
-spill_write_bytes=21,470,642,176
-spill_physical_write_bytes=1,407,668,198
-spill_write_count=5,119
-compression_us=31,515,824
-```
-
-mixed_fixed spill：
-
-```text
-RowContainer:
-input_bytes=11,248,809,692
-spilled_bytes=2,915,848,555
-rows=511,305,630
-total_us=59,118,523
-fill_us=3,081,090
-serialization_us=4,689,857
-flush_us=40,099,373
-write_us=11,243,588
-
-BmRowContainer:
-spill_write_bytes=12,268,339,200
-spill_physical_write_bytes=3,111,214,045
-spill_write_count=2,925
-compression_us=46,901,113
-```
-
-varchar_payload spill：
-
-```text
-RowContainer:
-input_bytes=9,848,950,739
-spilled_bytes=8,131,683,793
-rows=10,404,475
-total_us=77,958,254
-fill_us=70,745
-serialization_us=1,016,872
-flush_us=34,764,844
-write_us=42,102,472
-
-BmRowContainer:
-spill_write_bytes=9,919,528,960
-spill_physical_write_bytes=7,992,256,878
-spill_write_count=2,365
-compression_us=11,800,078
-```
-
-fixed_int64 ReadSpill：
-
-```text
-RowContainer:
-read_rows=1,342,177,280
-read_us=19,954,175
-decompress_us=8,312,544
-read_io_us=200,014
-
-BmRowContainer:
-pin_count=1,341,915,136
-pin_read=5,119
-spill_read_bytes=21,470,642,176
-spill_physical_read_bytes=1,407,668,198
-decompression_us=11,128,623
-```
-
-mixed_fixed ReadSpill：
-
-```text
-RowContainer:
-read_rows=511,305,630
-read_us=17,049,636
-decompress_us=12,173,108
-read_io_us=398,701
-
-BmRowContainer:
-pin_count=511,178,850
-pin_read=2,925
-spill_read_bytes=12,268,339,200
-spill_physical_read_bytes=3,111,211,705
-decompression_us=15,133,363
-```
-
-varchar_payload ReadSpill：
-
-```text
-RowContainer:
-read_rows=10,404,475
-read_us=12,133,004
-decompress_us=10,521,243
-read_io_us=1,016,665
-
-BmRowContainer:
-pin_count=10,354,688
-pin_read=79
-spill_read_bytes=331,350,016
-spill_physical_read_bytes=27,286,163
-decompression_us=274,680
-spilled_bytes remaining=9,588,178,944
-```
-
-### 10GiB 实验结论
-
-10GiB 实验和 1GiB 实验的核心趋势一致：
-
-1. `BmRowContainer` 的 spill 写出方向仍然成立。
-   - fixed_int64：BM 快约 1.91x。
-   - mixed_fixed：BM 快约 1.26x。
-   - varchar_payload：BM 快约 6.55x，优势比 1GiB 实验更明显。
-
-2. `BmRowContainer` 的 Write 在 fixed/mixed 仍慢于 RowContainer。
-   - fixed_int64 慢约 1.30x。
-   - mixed_fixed 慢约 1.25x。
-   - varchar_payload 在这次实验中略快约 1.05x，可以先看作基本持平。
-
-3. `BmRowContainer` 的 ReadMemory 仍然明显慢。
-   - fixed_int64 慢约 8.61x。
-   - mixed_fixed 慢约 2.75x。
-   - varchar_payload 慢约 2.41x。
-
-4. fixed/mixed 的 ReadSpill 短板没有变化。
-   - fixed_int64 慢约 5.90x。
-   - mixed_fixed 慢约 3.25x。
-   - stats 显示 `pin_count` 仍是行数级别，而真正 `pin_read` 是 block 数级别。
-   - 因此主要瓶颈仍然是每行 `RowId -> row pointer`、Pin 路径检查和 `rowPtrs` 构造，而不是磁盘读或解压本身。
-
-5. varchar_payload 的 ReadSpill 仍然需要谨慎解释。
-   - 当前读取的是第 0 列 `BIGINT key`，不是 `VARCHAR payload`。
-   - BM 只读回 79 个 row blocks，仍有约 9.59GB spilled bytes 没有读回。
-   - 这说明 BM 在只读 key 列时可以跳过 heap payload blocks，但不能证明读取 VARCHAR payload 本身很快。
-
-## 2026-06-05 1GiB 最新实验
-
-后续在 `BmPressureAwareBlockArena` 中引入 block-level pinned handle 缓存，并将
-`BmRowContainer` 改为在 `MaybeReserve` 失败时由外围统一批量 spill 可回收 blocks。
-修改后重新执行 1GiB benchmark：
 
 ```bash
 _build/Release/bolt/exec/bm/benchmarks/bolt_bm_row_container_benchmark \
@@ -442,193 +17,539 @@ _build/Release/bolt/exec/bm/benchmarks/bolt_bm_row_container_benchmark \
   2>log.txt
 ```
 
-### 最新 1GiB Benchmark 结果
+当前 benchmark 的关键口径：
+
+- 每个 dataset 逻辑输入大小为 1GiB。
+- RowContainer 使用 row-based spiller，`rowBasedSpillMode=COMPRESSION`。
+- RowContainer spill 压缩为 `CompressionKind_ZSTD`。
+- BmRowContainer 使用 BufferManager block spill，压缩为 `kZstdFrame`。
+- `varchar_payload` 使用确定性伪随机 1024 字节字符串。
+- ReadMemory / ReadSpill 已改为读取全部列：
+  - `fixed_int64`：读 `BIGINT`
+  - `mixed_fixed`：读 `INTEGER, BIGINT, DOUBLE, BOOLEAN`
+  - `varchar_payload`：读 `BIGINT key, VARCHAR payload`
+
+因此，最新 `varchar_payload` ReadSpill 不再是只读 key 的列裁剪场景，而是会读回
+row blocks 和 heap payload blocks。
+
+## 最新 Benchmark 结果
 
 | Dataset | 场景 | RowContainer | BmRowContainer | BM 相对表现 |
 | --- | ---: | ---: | ---: | ---: |
-| fixed_int64 | Write | 3.38s | 5.93s | 慢 1.75x |
-| fixed_int64 | Spill | 5.46s | 3.15s | 快 1.73x |
-| fixed_int64 | ReadMemory | 209.62ms | 2.47s | 慢 11.78x |
-| fixed_int64 | ReadSpill | 2.31s | 3.61s | 慢 1.56x |
-| mixed_fixed | Write | 2.90s | 5.05s | 慢 1.74x |
-| mixed_fixed | Spill | 4.98s | 4.49s | 快 1.11x |
-| mixed_fixed | ReadMemory | 125.94ms | 573.46ms | 慢 4.55x |
-| mixed_fixed | ReadSpill | 1.81s | 2.27s | 慢 1.25x |
-| varchar_payload | Write | 2.95s | 3.21s | 慢 1.09x |
-| varchar_payload | Spill | 3.79s | 1.30s | 快 2.92x |
-| varchar_payload | ReadMemory | 3.08ms | 12.20ms | 慢 3.96x |
-| varchar_payload | ReadSpill | 1.23s | 37.92ms | 快 32.44x |
+| fixed_int64 | Write | 3.37s | 5.82s | 慢 1.73x |
+| fixed_int64 | Spill | 5.42s | 3.20s | 快 1.69x |
+| fixed_int64 | ReadMemory | 209.52ms | 2.57s | 慢 12.27x |
+| fixed_int64 | ReadSpill | 2.30s | 3.73s | 慢 1.62x |
+| mixed_fixed | Write | 2.87s | 4.68s | 慢 1.63x |
+| mixed_fixed | Spill | 4.81s | 4.50s | 快 1.07x |
+| mixed_fixed | ReadMemory | 380.19ms | 2.19s | 慢 5.76x |
+| mixed_fixed | ReadSpill | 1.82s | 3.90s | 慢 2.14x |
+| varchar_payload | Write | 2.94s | 3.18s | 慢 1.08x |
+| varchar_payload | Spill | 3.87s | 1.31s | 快 2.95x |
+| varchar_payload | ReadMemory | 416.89ms | 469.35ms | 慢 1.13x |
+| varchar_payload | ReadSpill | 1.23s | 1.71s | 慢 1.39x |
 
-### 最新 stats 摘要
+## Stats 关键观察
 
-Spill 写出：
+### Spill 写出
+
+fixed_int64：
 
 ```text
-fixed_int64_BmRowContainerSpill:
+RowContainer:
+input_bytes=1207968776
+spilled_bytes=140803703
+rows=134217728
+total_us=5416499
+fill_us=1099767
+serialization_us=1255142
+flush_us=2949689
+write_us=71949
+
+BmRowContainer:
 spill_write_count=511
 spill_write_bytes=2143289344
 spill_physical_write_bytes=140558469
-compression_us=3104675
+compression_us=3153285
+reclaimed_bytes=2143289344
+```
 
-mixed_fixed_BmRowContainerSpill:
+mixed_fixed：
+
+```text
+RowContainer:
+input_bytes=1124880970
+spilled_bytes=281965150
+rows=51130563
+total_us=4812218
+fill_us=423006
+serialization_us=467506
+flush_us=3775300
+write_us=130644
+
+BmRowContainer:
 spill_write_count=292
 spill_write_bytes=1224736768
-spill_physical_write_bytes=272369431
-compression_us=4479040
+spill_physical_write_bytes=272369430
+compression_us=4490888
+reclaimed_bytes=1224736768
+```
 
-varchar_payload_BmRowContainerSpill:
+varchar_payload：
+
+```text
+RowContainer:
+input_bytes=984894351
+spilled_bytes=813153472
+rows=1040447
+total_us=3871881
+fill_us=8924
+serialization_us=97407
+flush_us=3381943
+write_us=383092
+
+BmRowContainer:
 spill_write_count=235
 spill_write_bytes=985661440
 spill_physical_write_bytes=796762045
-compression_us=1277817
+compression_us=1282525
+reclaimed_bytes=985661440
 ```
 
-ReadMemory：
+结论：
+
+- BM spill 写出方向成立。
+- fixed_int64 下 BM 快 1.69x，主要来自省掉 row-based fill/serialization。
+- mixed_fixed 下 BM 只快 1.07x，因为 BM 的 ZSTD `compression_us=4.49s`，几乎等于总耗时。
+- varchar_payload 下 BM 快 2.95x，主要来自 BM block 压缩路径明显快于 RowContainer row-based flush。
+- BM spill 写出阶段主要瓶颈是压缩 CPU，不是物理写 IO。
+
+### ReadMemory
+
+BM stats：
 
 ```text
-fixed_int64_BmRowContainerReadMemory:
+fixed_int64:
 allocated_blocks=512
 pin_count=0
 pinned_resident_bytes=2147483648
 
-mixed_fixed_BmRowContainerReadMemory:
+mixed_fixed:
 allocated_blocks=293
 pin_count=0
 pinned_resident_bytes=1228931072
 
-varchar_payload_BmRowContainerReadMemory:
+varchar_payload:
 allocated_blocks=237
 pin_count=0
 pinned_resident_bytes=994050048
 ```
 
-ReadSpill：
+结论：
+
+- ReadMemory 没有 spill read，没有解压，也没有 pin：`pin_count=0`。
+- 读路径慢不是 BufferManager IO 或 Pin 成本导致的，而是 `BmRowContainer::extractColumn`
+  的 CPU 开销。
+- fixed_int64 慢 12.27x，mixed_fixed 慢 5.76x，都是高行数 fixed-width 场景。
+- varchar_payload 全列读取后只慢 1.13x，说明行数较少时 per-row 开销没那么突出。
+
+### ReadSpill
+
+fixed_int64：
 
 ```text
-fixed_int64_BmRowContainerReadSpill.after_read:
+RowContainer:
+read_rows=134217728
+read_us=1996858
+decompress_us=829343
+read_io_us=19210
+
+BmRowContainer.after_read:
 pin_count=511
 pin_read=511
 spill_read_bytes=2143289344
 spill_physical_read_bytes=140558469
-decompression_us=1135211
+decompression_us=1150464
+pinned_resident_bytes=2147483648
+spilled_bytes=0
+```
 
-mixed_fixed_BmRowContainerReadSpill.after_read:
+mixed_fixed：
+
+```text
+RowContainer:
+read_rows=51130563
+read_us=1702056
+decompress_us=1215958
+read_io_us=38231
+
+BmRowContainer.after_read:
 pin_count=292
 pin_read=292
 spill_read_bytes=1224736768
-spill_physical_read_bytes=272369937
-decompression_us=1600043
-
-varchar_payload_BmRowContainerReadSpill.after_read:
-pin_count=7
-pin_read=7
-spill_read_bytes=29360128
-spill_physical_read_bytes=2354278
-decompression_us=24524
-spilled_bytes remaining=956301312
+spill_physical_read_bytes=272369707
+decompression_us=1620608
+pinned_resident_bytes=1228931072
+spilled_bytes=0
 ```
 
-### 最新实验分析
+varchar_payload：
 
-1. ReadSpill 的主要瓶颈已经从“每行 pin”下降到“每 block pin”。
-   - fixed_int64 的 `pin_count` 从历史行数级别下降到 511，等于 spilled row block 数。
-   - mixed_fixed 的 `pin_count` 下降到 292。
-   - 这说明 block state 持有 pinned handle 的设计有效，避免了每行反复进入
-     `BufferManager::Pin` 路径。
+```text
+RowContainer:
+read_rows=1040447
+read_us=1222064
+decompress_us=1052770
+read_io_us=109456
 
-2. fixed/mixed ReadSpill 大幅改善，但还没有完全追上 RowContainer。
-   - fixed_int64：BM 从历史 13s 量级下降到 3.61s，但仍慢于 RowContainer 2.31s。
-   - mixed_fixed：BM 下降到 2.27s，接近 RowContainer 1.81s。
-   - 当前剩余差距更可能来自 `RowId -> block + offset`、per-row 边界检查、
-     `rowPtrs` 构造和 extract 循环本身，而不再是 BM pin/read 反复调用。
+BmRowContainer.after_read:
+pin_count=235
+pin_read=235
+spill_read_bytes=985661440
+spill_physical_read_bytes=796762045
+decompression_us=1177826
+pinned_resident_bytes=994050048
+spilled_bytes=0
+```
 
-3. ReadMemory 仍然是最明显短板。
-   - stats 中 `pin_count=0`，说明所有 blocks 已经 pinned，没有 IO、Pin 或解压。
-   - fixed_int64 仍慢 11.78x，mixed_fixed 慢 4.55x，varchar_payload 慢 3.96x。
-   - 这说明内存读路径 CPU 开销仍然很高，尤其是高行数 fixed-width 场景。
+结论：
 
-4. Spill 写出方向继续成立。
-   - fixed_int64 BM 快 1.73x。
-   - mixed_fixed BM 只快 1.11x，主要因为 BM 的 ZSTD 压缩时间约 4.48s，几乎等于总耗时。
-   - varchar_payload BM 快 2.92x。
-   - 最新 stats 仍显示 BM spill 写出阶段主要被 `compression_us` 主导。
+- 全列读取后，varchar_payload 也读回全部 BM blocks：`pin_read=235`，
+  `spill_read_bytes=985661440`，`spilled_bytes=0`。
+- `pin_count` 已经是 block 数级别，不再是行数级别。
+- 因此 fixed/mixed ReadSpill 的剩余慢点不是每行 `BufferManager::Pin`，而是每行
+  `RowId -> block state -> base pointer -> row pointer`、null 检查、`rowPtrs`
+  构造和 extract 循环本身。
+- varchar_payload ReadSpill 现在慢 1.39x，之前只读 key 时的巨大优势已经消失；
+  当前结果才代表全量 payload 读回性能。
 
-5. varchar_payload ReadSpill 继续需要谨慎解释。
-   - 当前 benchmark 读取第 0 列 `BIGINT key`，不是 `VARCHAR payload`。
-   - BM 只 read 7 个 row blocks，仍有约 956MB spilled bytes 没有读回。
-   - 这个结果证明 BM 能跳过无关 heap payload blocks，但不能证明读取 `VARCHAR`
-     payload 自身很快。
+## 目前暴露出的核心问题
 
-## 当前性能判断
+### 1. ReadMemory 是最大短板
 
-### 成立的方向
+ReadMemory 没有 IO、没有解压、没有 pin，但 fixed_int64 仍慢 12.27x，mixed_fixed
+慢 5.76x。这说明当前 `extractColumn` 的基础 CPU 路径不够好。
 
-1. BM block-level spill 写出方向成立。
-   - 在双方都 ZSTD 的情况下，BM 在三个 dataset 上都快于或接近 RowContainer。
-   - fixed_int64 和 varchar_payload 优势明显。
+当前大致路径是：
 
-2. BM 可以避免读无关 payload blocks。
-   - varchar_payload 读 key 列时，只读回少量 row blocks，没有读 heap payload blocks。
+```cpp
+for row in rows:
+  rowPtr = pinRow(row)
+  rowPtrs.push_back(rowPtr)
 
-3. block-level pinned handle 缓存方向成立。
-   - 最新 1GiB 实验中 fixed/mixed ReadSpill 的 `pin_count` 已经下降到 block 数级别。
-   - ReadSpill 耗时从历史 fixed 13s、mixed 5-6s 量级分别下降到 3.61s 和 2.27s。
+extractDispatch(rowPtrs, column, result)
+```
 
-### 主要问题
+问题：
 
-1. BM ReadMemory 仍然明显慢。
-   - 即使 blocks 已经 pinned，BM 仍慢于 RowContainer。
-   - 最新 fixed_int64 慢 11.78x，mixed_fixed 慢 4.55x，varchar_payload 慢 3.96x。
-   - 说明基础 `extractColumn` 路径仍需要优化。
+- `pinRow` 每行都会做 `blocks_.block(row.blockId)`。
+- 每行都会进入 `pinnedBlockDataAfterPressure` / `tryPinnedData` 判断。
+- 每行都有边界检查和 row pointer 构造。
+- `extractColumn` 先构造 `std::vector<const char*> rowPtrs`，再二次遍历 rowPtrs。
+- fixed-width 高行数场景会把这些 per-row 开销放大到秒级。
 
-2. BM fixed/mixed ReadSpill 仍有剩余差距。
-   - `pin_count` 已经降到 block 数级别，问题不再是每行 Pin。
-   - 剩余开销更可能来自每行 RowId 解析、row pointer 构造和 extract 循环。
+### 2. ReadSpill 已解决 Pin 次数问题，但仍有 per-row CPU 开销
 
-3. varchar_payload 读路径 benchmark 还不完整。
-   - 当前只测读取 key 列。
-   - 尚未测读取 `VARCHAR` dependent payload 列。
+引入 block-level pinned handle 后：
 
-## 建议下一步
+- fixed_int64 `pin_count=511`
+- mixed_fixed `pin_count=292`
+- varchar_payload `pin_count=235`
 
-优先级 1：优化 `BmRowContainer::extractColumn`
+这说明每个 block 只 read/pin 一次，方向是对的。但 ReadSpill 仍慢于 RowContainer，
+说明下一步必须优化 block 已经 pinned 之后的 extract CPU 路径。
 
-- 按连续 `rowBlockId` 分组。
-- 每个 row block 只 resolve base pointer 一次。
-- fixed-width 列直接从 `blockBase + rowOffset + columnOffset` 批量 extract。
-- 避免每行调用 `pinRow`。
-- 避免构造 `rowPtrs` 中间数组，至少在 fixed-width fast path 中移除。
+### 3. Spill 写出主要受压缩影响
 
-预期收益：
+BM spill 写出总体有价值，但 mixed_fixed 优势很小。stats 显示 BM 的 spill 总时间基本
+等于 `compression_us`，后续如果要继续优化 spill 写出，需要单独评估 ZSTD/LZ4/None
+或压缩 block layout，而不是继续在 write path 上猜。
 
-- fixed_int64 / mixed_fixed 的 `ReadMemory` 明显下降。
-- fixed_int64 / mixed_fixed 的 `ReadSpill` 继续下降。
-- `pin_count` 已经降到 block 数级别，下一步目标是降低 per-row CPU 开销。
+## 解决方案：Block-Level Extract Fast Path
 
-优先级 2：补充 VARCHAR payload 读取 benchmark
+可以一步实现完整版本，不必分阶段。目标是让 `BmRowContainer::extractColumn` 在支持的
+类型上直接按 block 批量读取，绕过当前 rowPtrs + per-row pin 路径。
 
-- 新增读取 dependent `VARCHAR` 列的 ReadMemory / ReadSpill。
-- 对比读取 key 列和读取 payload 列的差异。
-- 验证 BM heap blocks 的 read spill 性能。
+### 总体思路
 
-优先级 3：继续拆分压缩策略
+当前路径是行粒度 resolve：
 
-建议后续分别跑：
+```cpp
+for row in rows:
+  rowPtr = pinRow(row)
+  rowPtrs.push_back(rowPtr)
+extractColumnTyped(rowPtrs, ...)
+```
 
-- ZSTD
-- LZ4
-- None
+fast path 改为 block 粒度 resolve：
 
-这样可以区分 block-level spill 自身优势和压缩算法成本。当前 ZSTD 下，写出阶段几乎都被压缩时间主导。
+```cpp
+while i < rows.size:
+  blockId = rows[i].blockId
+  blockBase = pinnedBlockDataAfterPressure(blockId)
 
-## 结论
+  while i < rows.size && rows[i].blockId == blockId:
+    row = blockBase + rows[i].rowOffset
+    extract row[column] into result
+    ++i
+```
 
-在双方都启用 ZSTD 的情况下，`BmRowContainer` 的 spill 写出性能已经体现出价值；它通过 block-level spill 避免 RowContainer row-based fill/serialization，在 fixed_int64 和 varchar_payload 上优势明显。
+收益：
 
-引入 block-level pinned handle 缓存后，fixed/mixed 的 ReadSpill 已经明显改善，`pin_count`
-从行数级别下降到 block 数级别。这说明之前最大的 ReadSpill 问题已经被定位并缓解。
+- 每个连续 block group 只 resolve 一次 base pointer。
+- 不再构造 `rowPtrs` 中间数组。
+- fixed-width 列直接从 `blockBase + rowOffset + column.offset()` 取值。
+- null 也直接从 row 内 null byte 读取。
+- ReadMemory 和 ReadSpill 共享收益。
 
-当前最大短板转移到 ReadMemory 以及 ReadSpill 剩余的 per-row CPU 开销。要让
-`BmRowContainer` 真正适合 StreamingWindowBuild 这类场景，下一步应优先实现
-block-level batch read fast path：按 block 解析 base pointer，直接批量读取 fixed-width
-列，减少每行 `RowId -> pointer`、边界检查和 `rowPtrs` 构造成本。
+### 新增接口
+
+在 `BmRowContainer` 中新增私有入口。这里不额外引入能力判断 helper；直接在
+`extractColumn` 中展开类型判断，加注释说明哪些类型暂时走 generic fallback。
+
+```cpp
+void extractColumnFast(
+    TypeKind kind,
+    folly::Range<const RowId*> rows,
+    BmRowColumn column,
+    vector_size_t resultOffset,
+    const VectorPtr& result,
+    bool exactSize);
+
+template <TypeKind Kind>
+void extractColumnFastTyped(
+    folly::Range<const RowId*> rows,
+    BmRowColumn column,
+    vector_size_t resultOffset,
+    const VectorPtr& result,
+    bool exactSize);
+```
+
+`extractColumn(...)` 的结构调整为：
+
+```cpp
+void BmRowContainer::extractColumn(...) {
+  validate inputs;
+
+  switch (typeKinds_[column]) {
+    // 复杂类型第一版仍走 generic 路径，避免在 fast path 中重新实现嵌套结构语义。
+    case TypeKind::UNKNOWN:
+    case TypeKind::OPAQUE:
+    case TypeKind::ARRAY:
+    case TypeKind::MAP:
+    case TypeKind::ROW:
+    case TypeKind::VARIANT:
+      break;
+    default:
+      extractColumnFast(
+          typeKinds_[column],
+          rows,
+          rowColumns_[column],
+          resultOffset,
+          result,
+          exactSize);
+      return;
+  }
+
+  // fallback：保留当前 rowPtrs + extractDispatch 路径
+}
+```
+
+进入 `extractColumnFast` 后，表示该类型必须由 fast path 完整处理；如果复杂类型意外进入
+fast path，直接 `BOLT_NYI`，这是实现错误。
+
+### Fixed-Width Fast Path
+
+固定宽度 primitive 类型直接支持：
+
+- BOOLEAN
+- TINYINT / SMALLINT / INTEGER / BIGINT
+- REAL / DOUBLE
+- DATE / TIMESTAMP 等已有 `TypeTraits<Kind>::NativeType` 支持的 fixed-width 类型
+
+逻辑：
+
+```cpp
+template <TypeKind Kind>
+void extractColumnFastTyped(...) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    extractStringColumnFast(...);
+    return;
+  }
+
+  if constexpr (is unsupported complex type) {
+    BOLT_NYI("BmRowContainer fast extract does not support type {}", ...);
+  }
+
+  using T = typename TypeTraits<Kind>::NativeType;
+  auto* flat = result->asFlatVector<T>();
+  BOLT_CHECK_NOT_NULL(flat);
+
+  for each contiguous block group:
+    base = pinnedBlockDataAfterPressure(blockId, ...);
+    for each row in group:
+      rowPtr = base + row.rowOffset;
+      isNull = isNullAt(rowPtr, column.nullByte(), column.nullMask());
+      flat->setNull(resultIndex, isNull);
+      if (!isNull) {
+        flat->set(resultIndex, *reinterpret_cast<const T*>(
+            rowPtr + column.offset()));
+      }
+}
+```
+
+注意点：
+
+- `resultOffset` 必须参与 result index 计算。
+- `exactSize` 对 fixed-width 没有特殊含义，可以忽略。
+- 仍然保留每行 `rowOffset + fixedRowSize_ <= block.usedBytes` 的 debug check；
+  如果担心性能，可以只在 debug 或 `BOLT_DCHECK` 风格下保留。
+
+### VARCHAR / VARBINARY Fast Path
+
+全列读取后，varchar_payload 的 ReadMemory/ReadSpill 也进入真实 payload 读回，因此
+VARCHAR 也应该纳入 fast path。
+
+VARCHAR 的 row block 中存 `VarData`：
+
+```cpp
+struct VarData {
+  uint32_t blockId;
+  uint32_t offset;
+  uint32_t size;
+};
+```
+
+fast path：
+
+```cpp
+for each contiguous row block group:
+  rowBase = pinnedBlockDataAfterPressure(rowBlockId, ...)
+
+  uint32_t cachedHeapBlockId = invalid;
+  const char* cachedHeapBase = nullptr;
+
+  for row in group:
+    rowPtr = rowBase + row.rowOffset
+    if null:
+      result.setNull(...)
+      continue
+
+    ref = *reinterpret_cast<const VarData*>(rowPtr + column.offset())
+    if ref.size == 0:
+      result.setStringViewValue(..., StringView("", 0), exactSize)
+      continue
+
+    if ref.blockId != cachedHeapBlockId:
+      cachedHeapBase = pinnedBlockDataAfterPressure(ref.blockId, ...)
+      cachedHeapBlockId = ref.blockId
+
+    result.setStringViewValue(
+        resultIndex,
+        StringView(cachedHeapBase + ref.offset, ref.size),
+        exactSize)
+```
+
+为什么需要 heap block cache：
+
+- payload 写入通常是 append 顺序，同一批连续 rows 大概率落在同一个或相邻 heap block。
+- cache 可以避免每个字符串都 resolve heap block。
+- 即使 rows 跨 heap block，也只是每个 heap block resolve 一次或少数几次。
+
+### 输入 rows 顺序假设
+
+当前 benchmark 和 WindowBuild 的主路径通常是 append 顺序或接近 append 顺序，因此
+`rows` 中连续 row 大概率同属一个 block。fast path 按“连续 block group”处理即可。
+
+不建议第一版对 rows 做排序或重排：
+
+- extract 必须保持输出顺序。
+- 排序会引入额外索引映射和内存开销。
+- 当前问题已能通过连续 block group 解决大部分高行数顺序读场景。
+
+如果未来存在强随机访问模式，可以单独设计 block cache 或 prefetch 策略，不应混入第一版。
+
+### Arena 侧接口要求
+
+`BmPressureAwareBlockArena` 现有 `tryPinnedData/pinnedData` 能支撑 fast path，但建议新增
+语义更明确的轻量接口：
+
+```cpp
+const char* resolveBlockData(uint32_t blockId);
+```
+
+或者直接在 `BmRowContainer` 中继续调用：
+
+```cpp
+pinnedBlockDataAfterPressure(blockId, failureMessage)
+```
+
+关键要求：
+
+- fast path 每个 block group 调用一次，不要每行调用。
+- `touch(lastAccess)` 只在 block 级 resolve 时发生，不要每行 touch。
+- pin 失败仍沿用现有策略：外围批量 spill 可回收 blocks，再重试一次，失败就报错。
+
+### Generic Fallback 策略
+
+以下情况走当前 generic 路径：
+
+- `extractColumn` switch 中明确排除的类型：ARRAY / MAP / ROW / OPAQUE / UNKNOWN / VARIANT。
+- 后续新增但还没有明确 fast path 语义的类型。
+
+未被 switch 排除的类型必须由 `extractColumnFast` 完整处理，包括 fixed-width primitive
+和 VARCHAR / VARBINARY。
+
+### 测试计划
+
+需要补 `BmRowContainerTest`，不要只靠 benchmark：
+
+1. fixed-width fast path：
+   - 多个 row blocks。
+   - 有 null。
+   - `resultOffset != 0`。
+   - 提取 BIGINT / INTEGER / DOUBLE / BOOLEAN。
+
+2. VARCHAR fast path：
+   - 多个 row blocks。
+   - 多个 heap blocks。
+   - null string、empty string、普通 string。
+   - `exactSize=true/false` 至少覆盖一个。
+
+3. spilled block readback：
+   - 复用现有 spill skip 机制，io_uring 不可用时 skip。
+   - 验证 spilled row blocks 和 heap blocks 读回后全列一致。
+
+4. fallback：
+   - 不支持复杂类型仍然 NYI 或走既有行为，不要 silent wrong result。
+
+### Benchmark 预期
+
+实现 fast path 后，预期变化：
+
+- `fixed_int64_BmRowContainerReadMemory` 应显著下降，这是最主要收益点。
+- `mixed_fixed_BmRowContainerReadMemory` 会下降，但全列读取有 4 列，仍会比 fixed 多扫描成本。
+- `fixed_int64_BmRowContainerReadSpill` 和 `mixed_fixed_BmRowContainerReadSpill` 会继续下降，
+  因为 pin/read 已是 block 级，剩余主要就是 per-row extract CPU。
+- `varchar_payload_BmRowContainerReadMemory/ReadSpill` 可能小幅改善，收益取决于 heap block cache
+  命中率和 `setStringViewValue` 成本。
+
+### 风险和边界
+
+- Fast path 会绕过当前通用 `extractColumnTyped(rowPtrs)`，必须保证 null 语义完全一致。
+- VARCHAR 的 `StringView` 生命周期依赖 pinned heap block，fast path 中必须保证 heap block handle
+  保持在 arena 中 pinned，不能用局部临时 handle。
+- 如果 fast path 读取很多 spilled heap blocks，会把这些 blocks pin 回内存；这是当前全列读取语义下
+  正确的行为，但需要继续依赖 BM 的内存压力机制和外围批量 spill 策略。
+- 不要在 fast path 中做输出重排；输出顺序必须与输入 `rows` 顺序一致。
+
+## 最终结论
+
+最新全列读取 benchmark 修正了之前只读 key 的口径问题。现在可以确认：
+
+1. BM spill 写出方向成立，fixed/varchar 有明显优势，mixed 接近持平。
+2. BM ReadSpill 已经解决行数级 Pin 问题，`pin_count` 降到 block 数级别。
+3. 当前最大瓶颈是 ReadMemory 和 ReadSpill 剩余的 per-row extract CPU 开销。
+4. 下一步应实现 `BmRowContainer::extractColumn` 的 block-level fast path，一步覆盖
+   fixed-width primitive 和 VARCHAR/VARBINARY，按 block resolve base pointer，避免每行
+   `pinRow` 和 `rowPtrs` 构造。

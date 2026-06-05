@@ -138,6 +138,13 @@ class BmRowContainer {
       const VectorPtr& result,
       vector_size_t resultOffset,
       bool exactSize);
+  void extractColumnFast(
+      TypeKind kind,
+      folly::Range<const RowId*> rows,
+      BmRowColumn column,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
+      bool exactSize);
 
   int32_t compareDispatch(
       TypeKind kind,
@@ -162,6 +169,14 @@ class BmRowContainer {
       BmRowColumn column,
       const VectorPtr& result,
       vector_size_t resultOffset,
+      bool exactSize);
+
+  template <TypeKind Kind>
+  void extractColumnFastTyped(
+      folly::Range<const RowId*> rows,
+      BmRowColumn column,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
       bool exactSize);
 
   template <TypeKind Kind>
