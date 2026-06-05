@@ -10,8 +10,8 @@
 
 第一版 Window 接入目标：
 
-- StreamingWindowBuild 保存 `BmRowRef`，不保存长期 `char*`；
-- WindowPartition 消费 `BmRowRef` range；
+- StreamingWindowBuild 保存 `RowId`，不保存长期 `char*`；
+- WindowPartition 消费 `RowId` range；
 - partition 输出、peer 计算、frame 计算通过 `BmRowContainer` 的 compare/extract 接口访问数据；
 - Window 代码不直接持有 `PinnedRows`、`BufferHandle` 或任何 row/heap `char*`；
 - BM enabled 但 task-level BufferManager 缺失时直接报错，不做 failover。
@@ -30,20 +30,20 @@
 Window 集成使用的接口必须和 `BmRowContainer` 容器设计文档保持一致。这里复述同一份契约，避免
 Window 侧引入另一套 row identity。
 
-`BmRowRef` 是 Window 侧唯一长期保存的 row identity：
+`RowId` 是 Window 侧唯一长期保存的 row identity：
 
 ```cpp
-struct BmRowRef {
+struct RowId {
   uint32_t rowBlockId;
   uint32_t rowOffset;
 };
 ```
 
-`BmVarRef` 是容器 fixed row 内部的变长字段引用。Window 侧不直接读取或保存它，但接口契约中列出，
+`VarData` 是容器 fixed row 内部的变长字段引用。Window 侧不直接读取或保存它，但接口契约中列出，
 用于说明变长字段也不会通过 heap pointer 暴露给 Window：
 
 ```cpp
-struct BmVarRef {
+struct VarData {
   uint32_t heapBlockId;
   uint32_t heapOffset;
   uint32_t size;
@@ -55,36 +55,36 @@ Window 侧只通过下面这些 `BmRowContainer` 方法访问数据：
 ```cpp
 class BmRowContainer {
  public:
-  BmRowRef newRow();
+  RowId newRow();
 
   void store(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      BmRowRef row,
+      RowId row,
       int32_t column);
 
   void store(const RowVectorPtr& input);
 
   int32_t compare(
-      BmRowRef left,
-      BmRowRef right,
+      RowId left,
+      RowId right,
       int32_t column,
       CompareFlags flags = {});
 
   int32_t compareRows(
-      BmRowRef left,
-      BmRowRef right,
+      RowId left,
+      RowId right,
       const std::vector<CompareFlags>& flags = {});
 
   void extractColumn(
-      folly::Range<const BmRowRef*> rows,
+      folly::Range<const RowId*> rows,
       int32_t column,
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false);
 
   void extractNulls(
-      folly::Range<const BmRowRef*> rows,
+      folly::Range<const RowId*> rows,
       int32_t column,
       const BufferPtr& result);
 
@@ -117,24 +117,24 @@ RowContainer 时代：
   Window 把 char* 传回 RowContainer/RowContainer static helpers 访问数据
 
 BmRowContainer 时代：
-  BmRowContainer::newRow() -> BmRowRef
-  Window 长期保存 BmRowRef
-  Window 把 BmRowRef 传回 BmRowContainer 方法访问数据
+  BmRowContainer::newRow() -> RowId
+  Window 长期保存 RowId
+  Window 把 RowId 传回 BmRowContainer 方法访问数据
 ```
 
 Window 不能做的事情：
 
-- 不能把 `BmRowRef` 转成 `char*`；
+- 不能把 `RowId` 转成 `char*`；
 - 不能保存 `BufferHandle`；
 - 不能保存 `PinnedRows`；
-- 不能直接读取 `BmVarRef`；
+- 不能直接读取 `VarData`；
 - 不能假设 row/heap block 当前 resident；
 - 不能在 BM 不可用时静默退回 `RowContainer`。
 
 Window 可以做的事情：
 
-- 保存和移动 `BmRowRef`；
-- 对 `std::vector<BmRowRef>` 做 partition 范围管理；
+- 保存和移动 `RowId`；
+- 对 `std::vector<RowId>` 做 partition 范围管理；
 - 调用 `BmRowContainer::compare()` 判断 partition 或 peer boundary；
 - 调用 `BmRowContainer::extractColumn()` / `extractNulls()` 生成输出向量；
 - 调用 `BmRowContainer::estimateRowSize()` / `usedBytes()` 做统计或估算。
@@ -147,7 +147,7 @@ Window 可以做的事情：
 
 - 保留现有 `RowContainer` 给当前非 BM window paths 使用；
 - BM enabled 路径持有 `std::unique_ptr<BmRowContainer> bmData_`；
-- BM 路径里的 row vectors 使用 `std::vector<BmRowRef>`；
+- BM 路径里的 row vectors 使用 `std::vector<RowId>`；
 - `addInput()` 中使用 `BmRowAppender` 批量写入当前 input；
 - partition boundary 判断使用 `bmData_->compare(...)`；
 - 不设计按 prefix partition 主动释放的接口；
@@ -162,7 +162,7 @@ RowContainer path:
   inputRows_.push_back(newRow)
 
 BmRowContainer path:
-  BmRowRef newRow = appender.newRow()
+  RowId newRow = appender.newRow()
   appender.store(decoded, sourceRow, newRow, col)
   bmInputRows_.push_back(newRow)
 ```
@@ -172,7 +172,7 @@ BmRowContainer path:
 
 ## 5. BmWindowPartition
 
-增加一个 BM partition 实现，持有 `BmRowRef` range，而不是 `char**`。
+增加一个 BM partition 实现，持有 `RowId` range，而不是 `char**`。
 
 概念形态：
 
@@ -181,7 +181,7 @@ class BmWindowPartition : public WindowPartition {
  public:
   BmWindowPartition(
       BmRowContainer* data,
-      folly::Range<const BmRowRef*> rows,
+      folly::Range<const RowId*> rows,
       ...);
 
   void extractColumn(...) const override;
@@ -196,7 +196,7 @@ class BmWindowPartition : public WindowPartition {
 - 新增 sibling partition base，BM path 使用新的 partition 类型；
 - 小心泛化现有 `WindowPartition`，但不影响旧路径。
 
-无论选择哪种，BM partition 都必须保持同一个边界：partition 保存 `BmRowRef`，访问数据时调用
+无论选择哪种，BM partition 都必须保持同一个边界：partition 保存 `RowId`，访问数据时调用
 `BmRowContainer` 方法，不直接处理 pin/readback。
 
 ## 6. Window 访问路径映射
@@ -205,13 +205,13 @@ class BmWindowPartition : public WindowPartition {
 
 | Window 需求 | RowContainer 方式 | BmRowContainer 方式 |
 | --- | --- | --- |
-| 保存输入行 | `std::vector<char*>` | `std::vector<BmRowRef>` |
-| 新增行 | `data_->newRow()` 返回 `char*` | `appender.newRow()` 返回 `BmRowRef` |
-| 写入列 | `data_->store(decoded, row, char*, col)` | `appender.store(decoded, row, BmRowRef, col)` |
-| partition boundary | `data_->compare(char*, char*, key, flags)` | `bmData_->compare(BmRowRef, BmRowRef, key, flags)` |
-| peer boundary | `data_->compare(char*, char*, key, flags)` | `bmData_->compare(BmRowRef, BmRowRef, key, flags)` |
-| extract output column | `RowContainer::extractColumn(char**, ...)` | `bmData_->extractColumn(BmRowRef range, ...)` |
-| extract nulls | `RowContainer::extractNulls(char**, ...)` | `bmData_->extractNulls(BmRowRef range, ...)` |
+| 保存输入行 | `std::vector<char*>` | `std::vector<RowId>` |
+| 新增行 | `data_->newRow()` 返回 `char*` | `appender.newRow()` 返回 `RowId` |
+| 写入列 | `data_->store(decoded, row, char*, col)` | `appender.store(decoded, row, RowId, col)` |
+| partition boundary | `data_->compare(char*, char*, key, flags)` | `bmData_->compare(RowId, RowId, key, flags)` |
+| peer boundary | `data_->compare(char*, char*, key, flags)` | `bmData_->compare(RowId, RowId, key, flags)` |
+| extract output column | `RowContainer::extractColumn(char**, ...)` | `bmData_->extractColumn(RowId range, ...)` |
+| extract nulls | `RowContainer::extractNulls(char**, ...)` | `bmData_->extractNulls(RowId range, ...)` |
 | direct null check | `RowContainer::isNullAt(char*, ...)` | `bmData_->extractNulls(...)` 或容器内封装方法 |
 
 如果 Window 现有代码中有直接 `RowContainer::isNullAt(partition_[i], ...)` 的逻辑，BM path 不能照搬。
@@ -219,7 +219,7 @@ class BmWindowPartition : public WindowPartition {
 
 ## 7. Pinning 和 spill 归属
 
-Window 代码不直接持有 `PinnedRows`。它只持有 `BmRowRef`，并通过容器接口访问：
+Window 代码不直接持有 `PinnedRows`。它只持有 `RowId`，并通过容器接口访问：
 
 - `extractColumn()` 内部按请求范围 pin row/heap blocks；
 - `extractNulls()` 内部只 pin row blocks；
@@ -242,7 +242,7 @@ row/heap block handle。
 - 当后续 append 需要新 block 且 `MaybeReserve` 失败时，容器释放冷 block handles；
 - handles 析构后 blocks 变成 unpinned；
 - 容器把这些 unpinned cold blocks 交给 `BufferManager::SpillBlocks()` 下刷；
-- Window 侧保存的 `BmRowRef` 不受影响，后续访问时由容器重新 pin/readback。
+- Window 侧保存的 `RowId` 不受影响，后续访问时由容器重新 pin/readback。
 
 ## 9. 测试计划
 
@@ -289,9 +289,9 @@ BmRowContainer StreamingWindowBuild
 
 ## 11. 主要设计决策
 
-1. Window 保存 `BmRowRef`，不保存 `char*`。
+1. Window 保存 `RowId`，不保存 `char*`。
 2. Window 通过 `BmRowContainer::compare/extractColumn/extractNulls` 访问数据。
-3. Window 代码不直接持有 `PinnedRows`、`BufferHandle` 或 `BmVarRef`。
+3. Window 代码不直接持有 `PinnedRows`、`BufferHandle` 或 `VarData`。
 4. 不设计 `releaseRows()`；resident 内存释放依赖容器内部 `BufferHandle` RAII unpin。
 5. BM enabled 但 task-level BufferManager 缺失时直接报错，不做 failover。
 6. 第一版只接 StreamingWindowBuild，不覆盖其他 WindowBuild。
