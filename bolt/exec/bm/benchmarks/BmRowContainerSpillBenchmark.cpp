@@ -16,7 +16,7 @@ void registerSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("row-container-spill-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf = root->addLeafChild("row-container-spill-benchmark-vectors");
           RowContainer container(spec->keyTypes, spec->dependentTypes, leaf.get());
@@ -48,7 +48,7 @@ void registerSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
           memory::MemoryManager manager;
           auto root = manager.addRootPool(
               fmt::format("bm-row-container-spill-only-benchmark-{}", spec->name),
-              kBmRowContainerBenchmarkPoolCapacity,
+              benchmarkPoolCapacityBytes(),
               memory::MemoryReclaimer::create());
           auto leaf =
               root->addLeafChild("bm-row-container-spill-only-benchmark-vectors");
