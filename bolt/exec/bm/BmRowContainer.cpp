@@ -518,48 +518,15 @@ void BmRowContainer::storeDispatch(
     vector_size_t index,
     char* row,
     BmRowColumn column) {
-  switch (kind) {
-    case TypeKind::BOOLEAN:
-      return storeWithNulls<TypeKind::BOOLEAN>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::TINYINT:
-      return storeWithNulls<TypeKind::TINYINT>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::SMALLINT:
-      return storeWithNulls<TypeKind::SMALLINT>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::INTEGER:
-      return storeWithNulls<TypeKind::INTEGER>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::BIGINT:
-      return storeWithNulls<TypeKind::BIGINT>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::HUGEINT:
-      return storeWithNulls<TypeKind::HUGEINT>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::REAL:
-      return storeWithNulls<TypeKind::REAL>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::DOUBLE:
-      return storeWithNulls<TypeKind::DOUBLE>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::TIMESTAMP:
-      return storeWithNulls<TypeKind::TIMESTAMP>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::VARCHAR:
-      return storeWithNulls<TypeKind::VARCHAR>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::VARBINARY:
-      return storeWithNulls<TypeKind::VARBINARY>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    case TypeKind::VARIANT:
-      return storeWithNulls<TypeKind::VARIANT>(
-          decoded, index, row, column.offset(), column.nullByte(), column.nullMask());
-    default:
-      BOLT_NYI(
-          "BmRowContainer store does not support type {} yet",
-          mapTypeKindToName(kind));
-  }
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      storeWithNulls,
+      kind,
+      decoded,
+      index,
+      row,
+      column.offset(),
+      column.nullByte(),
+      column.nullMask());
 }
 
 void BmRowContainer::extractDispatch(
@@ -570,48 +537,15 @@ void BmRowContainer::extractDispatch(
       const VectorPtr& result,
       vector_size_t resultOffset,
       bool exactSize) {
-  switch (kind) {
-    case TypeKind::BOOLEAN:
-      return extractColumnTyped<TypeKind::BOOLEAN>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::TINYINT:
-      return extractColumnTyped<TypeKind::TINYINT>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::SMALLINT:
-      return extractColumnTyped<TypeKind::SMALLINT>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::INTEGER:
-      return extractColumnTyped<TypeKind::INTEGER>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::BIGINT:
-      return extractColumnTyped<TypeKind::BIGINT>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::HUGEINT:
-      return extractColumnTyped<TypeKind::HUGEINT>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::REAL:
-      return extractColumnTyped<TypeKind::REAL>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::DOUBLE:
-      return extractColumnTyped<TypeKind::DOUBLE>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::TIMESTAMP:
-      return extractColumnTyped<TypeKind::TIMESTAMP>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::VARCHAR:
-      return extractColumnTyped<TypeKind::VARCHAR>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::VARBINARY:
-      return extractColumnTyped<TypeKind::VARBINARY>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    case TypeKind::VARIANT:
-      return extractColumnTyped<TypeKind::VARIANT>(
-          rows, numRows, column, result, resultOffset, exactSize);
-    default:
-      BOLT_NYI(
-          "BmRowContainer extract does not support type {} yet",
-          mapTypeKindToName(kind));
-  }
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      extractColumnTyped,
+      kind,
+      rows,
+      numRows,
+      column,
+      result,
+      resultOffset,
+      exactSize);
 }
 
 int32_t BmRowContainer::compareDispatch(
@@ -621,34 +555,8 @@ int32_t BmRowContainer::compareDispatch(
     BmRowColumn column,
     std::vector<memory::bm::BufferHandle>& pins,
     CompareFlags flags) {
-  switch (kind) {
-    case TypeKind::BOOLEAN:
-      return compareTyped<TypeKind::BOOLEAN>(left, right, column, pins, flags);
-    case TypeKind::TINYINT:
-      return compareTyped<TypeKind::TINYINT>(left, right, column, pins, flags);
-    case TypeKind::SMALLINT:
-      return compareTyped<TypeKind::SMALLINT>(left, right, column, pins, flags);
-    case TypeKind::INTEGER:
-      return compareTyped<TypeKind::INTEGER>(left, right, column, pins, flags);
-    case TypeKind::BIGINT:
-      return compareTyped<TypeKind::BIGINT>(left, right, column, pins, flags);
-    case TypeKind::HUGEINT:
-      return compareTyped<TypeKind::HUGEINT>(left, right, column, pins, flags);
-    case TypeKind::REAL:
-      return compareTyped<TypeKind::REAL>(left, right, column, pins, flags);
-    case TypeKind::DOUBLE:
-      return compareTyped<TypeKind::DOUBLE>(left, right, column, pins, flags);
-    case TypeKind::TIMESTAMP:
-      return compareTyped<TypeKind::TIMESTAMP>(left, right, column, pins, flags);
-    case TypeKind::VARCHAR:
-      return compareTyped<TypeKind::VARCHAR>(left, right, column, pins, flags);
-    case TypeKind::VARBINARY:
-      return compareTyped<TypeKind::VARBINARY>(left, right, column, pins, flags);
-    default:
-      BOLT_NYI(
-          "BmRowContainer compare does not support type {} yet",
-          mapTypeKindToName(kind));
-  }
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      compareTyped, kind, left, right, column, pins, flags);
 }
 
 template <TypeKind Kind>
@@ -659,25 +567,34 @@ void BmRowContainer::storeWithNulls(
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask) {
-  using T = typename TypeTraits<Kind>::NativeType;
-  if (decoded.isNullAt(index)) {
-    row[nullByte] |= nullMask;
-    if constexpr (std::is_arithmetic_v<T>) {
-      *reinterpret_cast<T*>(row + offset) = std::numeric_limits<T>::max();
-    } else if constexpr (std::is_same_v<T, StringView>) {
-      *reinterpret_cast<VarData*>(row + offset) = VarData{};
-    } else {
-      *reinterpret_cast<T*>(row + offset) = T();
-    }
-    return;
-  }
-
-  row[nullByte] &= ~nullMask;
-  if constexpr (std::is_same_v<T, StringView>) {
-    *reinterpret_cast<VarData*>(row + offset) =
-        appendVariableWidth(decoded.valueAt<StringView>(index));
+  if constexpr (
+      Kind == TypeKind::UNKNOWN || Kind == TypeKind::OPAQUE ||
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    BOLT_NYI(
+        "BmRowContainer store does not support type {} yet",
+        mapTypeKindToName(Kind));
   } else {
-    *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(index);
+    using T = typename TypeTraits<Kind>::NativeType;
+    if (decoded.isNullAt(index)) {
+      row[nullByte] |= nullMask;
+      if constexpr (std::is_arithmetic_v<T>) {
+        *reinterpret_cast<T*>(row + offset) = std::numeric_limits<T>::max();
+      } else if constexpr (std::is_same_v<T, StringView>) {
+        *reinterpret_cast<VarData*>(row + offset) = VarData{};
+      } else {
+        *reinterpret_cast<T*>(row + offset) = T();
+      }
+      return;
+    }
+
+    row[nullByte] &= ~nullMask;
+    if constexpr (std::is_same_v<T, StringView>) {
+      *reinterpret_cast<VarData*>(row + offset) =
+          appendVariableWidth(decoded.valueAt<StringView>(index));
+    } else {
+      *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(index);
+    }
   }
 }
 
@@ -689,35 +606,45 @@ void BmRowContainer::extractColumnTyped(
     const VectorPtr& result,
     vector_size_t resultOffset,
     bool exactSize) {
-  using T = typename TypeTraits<Kind>::NativeType;
-  auto* flatResult = result->asFlatVector<T>();
-  BOLT_CHECK_NOT_NULL(flatResult);
-  if constexpr (std::is_same_v<T, StringView>) {
-    PinnedRows pinnedRows;
-    for (int32_t i = 0; i < numRows; ++i) {
-      const auto* row = rows[i];
-      const auto isNull =
-          row == nullptr || isNullAt(row, column.nullByte(), column.nullMask());
-      flatResult->setNull(resultOffset + i, isNull);
-      if (isNull) {
-        continue;
-      }
-      flatResult->setStringViewValue(
-          resultOffset + i,
-          stringView(row, column, pinnedRows.handles()),
-          exactSize);
-    }
+  if constexpr (
+      Kind == TypeKind::UNKNOWN || Kind == TypeKind::OPAQUE ||
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    BOLT_NYI(
+        "BmRowContainer extract does not support type {} yet",
+        mapTypeKindToName(Kind));
   } else {
-    for (int32_t i = 0; i < numRows; ++i) {
-      const auto* row = rows[i];
-      const auto isNull =
-          row == nullptr || isNullAt(row, column.nullByte(), column.nullMask());
-      flatResult->setNull(resultOffset + i, isNull);
-      if (isNull) {
-        continue;
+    using T = typename TypeTraits<Kind>::NativeType;
+    auto* flatResult = result->asFlatVector<T>();
+    BOLT_CHECK_NOT_NULL(flatResult);
+    if constexpr (std::is_same_v<T, StringView>) {
+      PinnedRows pinnedRows;
+      for (int32_t i = 0; i < numRows; ++i) {
+        const auto* row = rows[i];
+        const auto isNull = row == nullptr ||
+            isNullAt(row, column.nullByte(), column.nullMask());
+        flatResult->setNull(resultOffset + i, isNull);
+        if (isNull) {
+          continue;
+        }
+        flatResult->setStringViewValue(
+            resultOffset + i,
+            stringView(row, column, pinnedRows.handles()),
+            exactSize);
       }
-      flatResult->set(
-          resultOffset + i, *reinterpret_cast<const T*>(row + column.offset()));
+    } else {
+      for (int32_t i = 0; i < numRows; ++i) {
+        const auto* row = rows[i];
+        const auto isNull = row == nullptr ||
+            isNullAt(row, column.nullByte(), column.nullMask());
+        flatResult->setNull(resultOffset + i, isNull);
+        if (isNull) {
+          continue;
+        }
+        flatResult->set(
+            resultOffset + i,
+            *reinterpret_cast<const T*>(row + column.offset()));
+      }
     }
   }
 }
@@ -729,26 +656,35 @@ int32_t BmRowContainer::compareTyped(
     BmRowColumn column,
     std::vector<memory::bm::BufferHandle>& pins,
     CompareFlags flags) {
-  using T = typename TypeTraits<Kind>::NativeType;
-  const bool leftNull = isNullAt(left, column.nullByte(), column.nullMask());
-  const bool rightNull = isNullAt(right, column.nullByte(), column.nullMask());
-  if (leftNull) {
-    return rightNull ? 0 : flags.nullsFirst ? -1 : 1;
-  }
-  if (rightNull) {
-    return flags.nullsFirst ? 1 : -1;
-  }
-
-  int32_t result;
-  if constexpr (std::is_same_v<T, StringView>) {
-    result = compareStringAsc(
-        stringView(left, column, pins), stringView(right, column, pins));
+  if constexpr (
+      Kind == TypeKind::UNKNOWN || Kind == TypeKind::OPAQUE ||
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW || Kind == TypeKind::VARIANT) {
+    BOLT_NYI(
+        "BmRowContainer compare does not support type {} yet",
+        mapTypeKindToName(Kind));
   } else {
-    result = comparePrimitiveAsc(
-        *reinterpret_cast<const T*>(left + column.offset()),
-        *reinterpret_cast<const T*>(right + column.offset()));
+    using T = typename TypeTraits<Kind>::NativeType;
+    const bool leftNull = isNullAt(left, column.nullByte(), column.nullMask());
+    const bool rightNull = isNullAt(right, column.nullByte(), column.nullMask());
+    if (leftNull) {
+      return rightNull ? 0 : flags.nullsFirst ? -1 : 1;
+    }
+    if (rightNull) {
+      return flags.nullsFirst ? 1 : -1;
+    }
+
+    int32_t result;
+    if constexpr (std::is_same_v<T, StringView>) {
+      result = compareStringAsc(
+          stringView(left, column, pins), stringView(right, column, pins));
+    } else {
+      result = comparePrimitiveAsc(
+          *reinterpret_cast<const T*>(left + column.offset()),
+          *reinterpret_cast<const T*>(right + column.offset()));
+    }
+    return flags.ascending ? result : -result;
   }
-  return flags.ascending ? result : -result;
 }
 
 } // namespace bytedance::bolt::exec
