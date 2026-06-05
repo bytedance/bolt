@@ -22,7 +22,7 @@ DEFINE_double(
 
 DEFINE_bool(
     bm_row_container_print_stats,
-    false,
+    true,
     "Print detailed RowContainer spiller and BufferManager stats for bm row "
     "container benchmarks.");
 
