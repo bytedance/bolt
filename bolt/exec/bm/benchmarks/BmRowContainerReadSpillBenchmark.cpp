@@ -69,8 +69,7 @@ void registerReadSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
           container.spillAllBlocksForBenchmark();
           const auto spillStats = bm->stats();
           suspender.dismiss();
-          readBackBmRowContainer(
-              container, rows, spec->keyTypes.front(), leaf.get());
+          readBackBmRowContainer(container, rows, allTypes(*spec), leaf.get());
           const auto readStats = bm->stats();
           folly::doNotOptimizeAway(readStats.pinCount);
           suspender.rehire();

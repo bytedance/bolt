@@ -201,6 +201,14 @@ std::vector<DatasetSpec> makeDatasetSpecs() {
   };
 }
 
+std::vector<TypePtr> allTypes(const DatasetSpec& spec) {
+  std::vector<TypePtr> types;
+  types.reserve(spec.keyTypes.size() + spec.dependentTypes.size());
+  types.insert(types.end(), spec.keyTypes.begin(), spec.keyTypes.end());
+  types.insert(types.end(), spec.dependentTypes.begin(), spec.dependentTypes.end());
+  return types;
+}
+
 uint64_t benchmarkPoolCapacityBytes() {
   if (FLAGS_bm_row_container_pool_capacity_gib > 0) {
     return static_cast<uint64_t>(
@@ -348,37 +356,53 @@ void appendBmRowContainerBatch(BmRowContainer& container, const Dataset& dataset
 void readBackRowContainer(
     RowContainer& container,
     const std::vector<char*>& rows,
-    const TypePtr& type,
+    const std::vector<TypePtr>& types,
     memory::MemoryPool* pool) {
-  auto result = BaseVector::create(
-      type,
-      std::min<vector_size_t>(kBmRowContainerBenchmarkBatchRows, rows.size()),
-      pool);
+  std::vector<VectorPtr> results;
+  results.reserve(types.size());
+  for (const auto& type : types) {
+    results.push_back(BaseVector::create(
+        type,
+        std::min<vector_size_t>(kBmRowContainerBenchmarkBatchRows, rows.size()),
+        pool));
+  }
+
   for (size_t offset = 0; offset < rows.size();) {
     const auto batchRows = std::min<vector_size_t>(
         kBmRowContainerBenchmarkBatchRows, rows.size() - offset);
-    container.extractColumn(rows.data() + offset, batchRows, 0, result);
+    for (auto column = 0; column < types.size(); ++column) {
+      container.extractColumn(
+          rows.data() + offset, batchRows, column, results[column]);
+    }
     offset += batchRows;
   }
-  folly::doNotOptimizeAway(result);
+  folly::doNotOptimizeAway(results);
 }
 
 void readBackBmRowContainer(
     BmRowContainer& container,
     const std::vector<RowId>& rows,
-    const TypePtr& type,
+    const std::vector<TypePtr>& types,
     memory::MemoryPool* pool) {
-  auto result = BaseVector::create(
-      type,
-      std::min<vector_size_t>(kBmRowContainerBenchmarkBatchRows, rows.size()),
-      pool);
+  std::vector<VectorPtr> results;
+  results.reserve(types.size());
+  for (const auto& type : types) {
+    results.push_back(BaseVector::create(
+        type,
+        std::min<vector_size_t>(kBmRowContainerBenchmarkBatchRows, rows.size()),
+        pool));
+  }
+
   for (size_t offset = 0; offset < rows.size();) {
     const auto batchRows = std::min<vector_size_t>(
         kBmRowContainerBenchmarkBatchRows, rows.size() - offset);
-    container.extractColumn(rows.data() + offset, batchRows, 0, result);
+    for (auto column = 0; column < types.size(); ++column) {
+      container.extractColumn(
+          rows.data() + offset, batchRows, column, results[column]);
+    }
     offset += batchRows;
   }
-  folly::doNotOptimizeAway(result);
+  folly::doNotOptimizeAway(results);
 }
 
 std::unique_ptr<Spiller> makeRowContainerSpiller(
