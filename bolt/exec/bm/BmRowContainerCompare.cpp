@@ -44,12 +44,11 @@ int32_t BmRowContainer::compare(
   BOLT_CHECK_GE(column, 0);
   BOLT_CHECK_LT(column, layout_.numColumns());
 
-  const auto* leftRow = pinRow(left);
-  const auto* rightRow = pinRow(right);
-  return compareDispatch(
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      compareTyped,
       layout_.typeKindAt(column),
-      leftRow,
-      rightRow,
+      left,
+      right,
       layout_.columnAt(column),
       flags);
 }
@@ -69,20 +68,10 @@ int32_t BmRowContainer::compareRows(
   return 0;
 }
 
-int32_t BmRowContainer::compareDispatch(
-    TypeKind kind,
-    const char* left,
-    const char* right,
-    BmRowColumn column,
-    CompareFlags flags) {
-  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      compareTyped, kind, left, right, column, flags);
-}
-
 template <TypeKind Kind>
 int32_t BmRowContainer::compareTyped(
-    const char* left,
-    const char* right,
+    RowId left,
+    RowId right,
     BmRowColumn column,
     CompareFlags flags) {
   if constexpr (
@@ -94,8 +83,23 @@ int32_t BmRowContainer::compareTyped(
         mapTypeKindToName(Kind));
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    const bool leftNull = isNullAt(left, column.nullByte(), column.nullMask());
-    const bool rightNull = isNullAt(right, column.nullByte(), column.nullMask());
+    const auto* leftRow = pinRow(left);
+    const bool leftNull =
+        isNullAt(leftRow, column.nullByte(), column.nullMask());
+    std::conditional_t<std::is_same_v<T, StringView>, std::string, T>
+        leftValue{};
+    if (!leftNull) {
+      if constexpr (std::is_same_v<T, StringView>) {
+        auto value = stringView(leftRow, column);
+        leftValue.assign(value.data(), value.size());
+      } else {
+        leftValue = *reinterpret_cast<const T*>(leftRow + column.offset());
+      }
+    }
+
+    const auto* rightRow = pinRow(right);
+    const bool rightNull =
+        isNullAt(rightRow, column.nullByte(), column.nullMask());
     if (leftNull) {
       return rightNull ? 0 : flags.nullsFirst ? -1 : 1;
     }
@@ -105,11 +109,13 @@ int32_t BmRowContainer::compareTyped(
 
     int32_t result;
     if constexpr (std::is_same_v<T, StringView>) {
-      result = compareStringAsc(stringView(left, column), stringView(right, column));
+      auto rightValue = stringView(rightRow, column);
+      result = compareStringAsc(
+          StringView(leftValue), rightValue);
     } else {
       result = comparePrimitiveAsc(
-          *reinterpret_cast<const T*>(left + column.offset()),
-          *reinterpret_cast<const T*>(right + column.offset()));
+          leftValue,
+          *reinterpret_cast<const T*>(rightRow + column.offset()));
     }
     return flags.ascending ? result : -result;
   }

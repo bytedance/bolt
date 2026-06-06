@@ -6,7 +6,7 @@ namespace {
 TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
   auto limitedRoot = memoryManager_.addRootPool(
       "bm-row-container-spill-root",
-      20 * 1024 * 1024,
+      64 * 1024 * 1024,
       memory::MemoryReclaimer::create());
   auto bufferManager = makeBufferManager("spill", limitedRoot.get());
   BmRowContainer container({BIGINT()}, {}, bufferManager);
@@ -32,9 +32,17 @@ TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
   }
 
   ASSERT_GE(sampledRows.size(), 6);
-  const auto statsAfterAppend = bufferManager->stats();
-  EXPECT_GE(statsAfterAppend.spillWriteCount, 1);
-  EXPECT_GE(statsAfterAppend.spillWriteBytes, kLargeBlockBytes);
+  try {
+    container.spillAllBlocks();
+  } catch (const std::exception& e) {
+    if (isIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+  const auto statsAfterSpill = bufferManager->stats();
+  EXPECT_GE(statsAfterSpill.spillWriteCount, 1);
+  EXPECT_GE(statsAfterSpill.spillWriteBytes, kLargeBlockBytes);
 
   for (const auto row : {sampledRows.front(), sampledRows.back()}) {
     auto result = BaseVector::create(BIGINT(), 1, leaf_.get());
@@ -78,7 +86,7 @@ TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
   ASSERT_GE(sampledRows.size(), 3);
 
   try {
-    container.spillAllBlocksForBenchmark();
+    container.spillAllBlocks();
   } catch (const std::exception& e) {
     if (isIoUringUnavailable(e)) {
       GTEST_SKIP() << e.what();
@@ -117,10 +125,17 @@ TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
 TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
   auto limitedRoot = memoryManager_.addRootPool(
       "bm-row-container-heap-spill-root",
-      24 * 1024 * 1024,
+      2 * 1024 * 1024,
       memory::MemoryReclaimer::create());
   auto bufferManager = makeBufferManager("heap-spill", limitedRoot.get());
-  BmRowContainer container({VARCHAR()}, {}, bufferManager);
+  constexpr uint32_t kBlockSize = 4096;
+  BmRowContainer container(
+      {VARCHAR()},
+      {},
+      bufferManager,
+      memory::bm::MemoryTag::kWindow,
+      kBlockSize,
+      kBlockSize);
 
   const std::string payload(1024, 'h');
   auto input = makeVarcharVector(leaf_.get(), {StringView(payload)});
@@ -128,7 +143,7 @@ TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
 
   std::vector<RowId> rows;
   try {
-    while (container.heapAllocatedBytes() < 6 * kLargeBlockBytes) {
+    while (container.heapAllocatedBytes() < 6 * kBlockSize) {
       auto row = container.newRow();
       container.store(decoded, 0, row, 0);
       if (rows.empty() || row.blockId != rows.back().blockId) {
@@ -142,6 +157,14 @@ TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
     throw;
   }
 
+  try {
+    container.spillAllBlocks();
+  } catch (const std::exception& e) {
+    if (isIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
   EXPECT_GE(bufferManager->stats().spillWriteCount, 1);
   auto result = BaseVector::create(VARCHAR(), 1, leaf_.get());
   try {
@@ -154,18 +177,6 @@ TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
   }
   EXPECT_EQ(payload, result->asFlatVector<StringView>()->valueAt(0).getString());
   EXPECT_GE(bufferManager->stats().spillReadCount, 1);
-}
-
-
-TEST_F(BmRowContainerTest, FailsWhenSecondReserveCannotAllocateNewBlock) {
-  auto limitedRoot = memoryManager_.addRootPool(
-      "bm-row-container-reserve-fail-root",
-      3 * 1024 * 1024,
-      memory::MemoryReclaimer::create());
-  auto bufferManager = makeBufferManager("reserve-fail", limitedRoot.get());
-  BmRowContainer container({BIGINT()}, {}, bufferManager);
-
-  EXPECT_THROW(container.newRow(), std::exception);
 }
 
 

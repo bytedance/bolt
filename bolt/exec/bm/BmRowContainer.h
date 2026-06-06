@@ -45,9 +45,6 @@ class BmRowContainer {
 
   std::vector<RowId> store(const RowVectorPtr& input);
 
-  // 尝试store数据，先检查内存是否够，不够就返回false
-  bool tryStore(const RowVectorPtr& input);
-
   // 1. 在Sort多路合并之前，多个路可以同时preload。
   // 2. 在Hash Join的时候，把所有数据尝试加载到内存，优化访问
   void preload(std::vector<BlockId>& blockIds);
@@ -118,8 +115,8 @@ class BmRowContainer {
     return layout_.keyTypes();
   }
 
-  void clear();
-  void spillAllBlocksForBenchmark();
+  void discardAllRows();
+  void spillAllBlocks();
 
  private:
   BmBlockState& ensureWritableRowBlock();
@@ -129,40 +126,10 @@ class BmRowContainer {
   StringView stringView(const char* row, BmRowColumn column);
   char* initializeRow(char* row);
   VarData appendVariableWidth(StringView value);
-  uint32_t allocateBlockAfterPressure(uint32_t capacity, const char* failureMessage);
-  const char* pinnedBlockDataAfterPressure(
+  const char* pinBlockForRead(
       uint32_t blockId,
       const char* failureMessage);
   bool canReclaimBlock(uint32_t blockId) const;
-  void storeDispatch(
-      TypeKind kind,
-      const DecodedVector& decoded,
-      vector_size_t index,
-      char* row,
-      BmRowColumn column);
-  void extractDispatch(
-      TypeKind kind,
-      const char* const* rows,
-      int32_t numRows,
-      BmRowColumn column,
-      const VectorPtr& result,
-      vector_size_t resultOffset,
-      bool exactSize);
-  void extractColumnFast(
-      TypeKind kind,
-      folly::Range<const RowId*> rows,
-      BmRowColumn column,
-      vector_size_t resultOffset,
-      const VectorPtr& result,
-      bool exactSize);
-
-  int32_t compareDispatch(
-      TypeKind kind,
-      const char* left,
-      const char* right,
-      BmRowColumn column,
-      CompareFlags flags);
-
   template <TypeKind Kind>
   void storeWithNulls(
       const DecodedVector& decoded,
@@ -171,15 +138,6 @@ class BmRowContainer {
       int32_t offset,
       int32_t nullByte,
       uint8_t nullMask);
-
-  template <TypeKind Kind>
-  void extractColumnTyped(
-      const char* const* rows,
-      int32_t numRows,
-      BmRowColumn column,
-      const VectorPtr& result,
-      vector_size_t resultOffset,
-      bool exactSize);
 
   template <TypeKind Kind>
   void extractColumnFastTyped(
@@ -191,8 +149,8 @@ class BmRowContainer {
 
   template <TypeKind Kind>
   int32_t compareTyped(
-      const char* left,
-      const char* right,
+      RowId left,
+      RowId right,
       BmRowColumn column,
       CompareFlags flags);
 

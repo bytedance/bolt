@@ -59,7 +59,7 @@ void registerSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
             appendBmRowContainerBatch(container, dataset);
           });
           suspender.dismiss();
-          container.spillAllBlocksForBenchmark();
+          container.spillAllBlocks();
           const auto stats = bm->stats();
           folly::doNotOptimizeAway(stats.spillWriteBytes);
           suspender.rehire();

@@ -16,23 +16,6 @@ bool isNullAt(const char* row, int32_t nullByte, uint8_t nullMask) {
 
 } // namespace
 
-void BmRowContainer::extractColumnFast(
-    TypeKind kind,
-    folly::Range<const RowId*> rows,
-    BmRowColumn column,
-    vector_size_t resultOffset,
-    const VectorPtr& result,
-    bool exactSize) {
-  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      extractColumnFastTyped,
-      kind,
-      rows,
-      column,
-      resultOffset,
-      result,
-      exactSize);
-}
-
 template <TypeKind Kind>
 void BmRowContainer::extractColumnFastTyped(
     folly::Range<const RowId*> rows,
@@ -52,27 +35,14 @@ void BmRowContainer::extractColumnFastTyped(
     auto* flatResult = result->asFlatVector<T>();
     BOLT_CHECK_NOT_NULL(flatResult);
     if constexpr (std::is_same_v<T, StringView>) {
-      constexpr auto kInvalidBlockId = std::numeric_limits<uint32_t>::max();
-      uint32_t rowBlockId = kInvalidBlockId;
-      const char* rowBlockData = nullptr;
-      uint32_t heapBlockId = kInvalidBlockId;
-      const char* heapBlockData = nullptr;
-
       for (auto i = 0; i < rows.size(); ++i) {
         const auto row = rows[i];
-        if (row.blockId != rowBlockId) {
-          auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(
-              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
-          rowBlockData = pinnedBlockDataAfterPressure(
-              row.blockId,
-              "BmRowContainer cannot pin a row block for fast extract");
-          rowBlockId = row.blockId;
-        } else {
-          auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(
-              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
-        }
+        auto& rowBlock = blocks_->block(row.blockId);
+        BOLT_CHECK_LE(
+            row.rowOffset + layout_.fixedRowSize(), rowBlock.usedBytes);
+        const auto* rowBlockData = pinBlockForRead(
+            row.blockId,
+            "BmRowContainer cannot pin a row block for fast extract");
 
         const auto* rowPtr = rowBlockData + row.rowOffset;
         const auto output = resultOffset + i;
@@ -90,17 +60,11 @@ void BmRowContainer::extractColumnFastTyped(
           continue;
         }
 
-        if (ref.blockId != heapBlockId) {
-          auto& block = blocks_->block(ref.blockId);
-          BOLT_CHECK_LE(ref.offset + ref.size, block.usedBytes);
-          heapBlockData = pinnedBlockDataAfterPressure(
-              ref.blockId,
-              "BmRowContainer cannot pin a heap block for fast extract");
-          heapBlockId = ref.blockId;
-        } else {
-          auto& block = blocks_->block(ref.blockId);
-          BOLT_CHECK_LE(ref.offset + ref.size, block.usedBytes);
-        }
+        auto& heapBlock = blocks_->block(ref.blockId);
+        BOLT_CHECK_LE(ref.offset + ref.size, heapBlock.usedBytes);
+        const auto* heapBlockData = pinBlockForRead(
+            ref.blockId,
+            "BmRowContainer cannot pin a heap block for fast extract");
 
         flatResult->setStringViewValue(
             output,
@@ -116,7 +80,7 @@ void BmRowContainer::extractColumnFastTyped(
           auto& block = blocks_->block(row.blockId);
           BOLT_CHECK_LE(
               row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
-          rowBlockData = pinnedBlockDataAfterPressure(
+          rowBlockData = pinBlockForRead(
               row.blockId,
               "BmRowContainer cannot pin a row block for fast extract");
           rowBlockId = row.blockId;
@@ -139,6 +103,26 @@ void BmRowContainer::extractColumnFastTyped(
       }
     }
   }
+}
+
+void BmRowContainer::extractColumn(
+    folly::Range<const RowId*> rows,
+    int32_t column,
+    vector_size_t resultOffset,
+    const VectorPtr& result,
+    bool exactSize) {
+  BOLT_CHECK_GE(column, 0);
+  BOLT_CHECK_LT(column, layout_.numColumns());
+  BOLT_CHECK_LE(resultOffset + rows.size(), result->size());
+
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      extractColumnFastTyped,
+      layout_.typeKindAt(column),
+      rows,
+      layout_.columnAt(column),
+      resultOffset,
+      result,
+      exactSize);
 }
 
 } // namespace bytedance::bolt::exec
