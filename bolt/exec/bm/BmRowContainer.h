@@ -4,7 +4,6 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/buffer/Buffer.h"
-#include "bolt/exec/bm/BmPressureAwareBlockArena.h"
 #include "bolt/exec/bm/BmRowTypes.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
@@ -20,6 +19,9 @@
 #include <folly/Range.h>
 
 namespace bytedance::bolt::exec {
+
+struct BmBlockState;
+class BmPressureAwareBlockArena;
 
 class BmRowContainer {
  public:
@@ -203,9 +205,8 @@ class BmRowContainer {
   std::vector<BmRowColumn> rowColumns_;
   std::vector<char> initialNulls_;
 
-  std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   memory::bm::MemoryTag tag_;
-  BmPressureAwareBlockArena blocks_;
+  std::unique_ptr<BmPressureAwareBlockArena> blocks_;
   uint32_t rowBlockSize_;
   uint32_t heapBlockSize_;
   int32_t fixedRowSize_{0};

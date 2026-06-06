@@ -31,11 +31,20 @@ class BmPressureAwareBlockArena {
       memory::bm::MemoryTag tag);
   ~BmPressureAwareBlockArena();
 
+  bool tryReserve(uint64_t bytes);
   std::optional<uint32_t> tryAllocateBlock(uint32_t capacity);
-  uint32_t allocateBlock(uint32_t capacity, const CanReclaimFn& canReclaim);
+  uint32_t allocateBlock(
+      uint32_t capacity,
+      const CanReclaimFn& canReclaim,
+      const char* failureMessage =
+          "BmPressureAwareBlockArena cannot allocate a new block");
   char* activeData(uint32_t blockId);
   const char* tryPinnedData(uint32_t blockId);
-  const char* pinnedData(uint32_t blockId, const CanReclaimFn& canReclaim);
+  const char* pinnedData(
+      uint32_t blockId,
+      const CanReclaimFn& canReclaim,
+      const char* failureMessage =
+          "BmPressureAwareBlockArena cannot reserve memory to pin a block");
   void pinBlocks(
       std::span<const uint32_t> blockIds,
       const CanReclaimFn& canReclaim);
