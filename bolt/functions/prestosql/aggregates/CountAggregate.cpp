@@ -91,7 +91,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
   }
 
  private:
-  static void compileHashAggrJitCreate(
+  static void compileHashAggrJitInitGroup(
       jit::HashAggrJitCodegen& codegen,
       llvm::Value* group,
       const jit::HashAggrJitSlot& slot) {
@@ -102,7 +102,32 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
         codegen.builder().getInt64(0));
   }
 
-  static void compileHashAggrJitAdd(
+  static void addInc(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      llvm::Value* inc) {
+    auto* state =
+        codegen.loadValue(group, codegen.builder().getInt64Ty(), slot.offset);
+    codegen.storeValue(
+        group,
+        codegen.builder().getInt64Ty(),
+        slot.offset,
+        codegen.builder().CreateAdd(state, inc));
+  }
+
+  static void compileHashAggrJitAddRawInput(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* /*decoded*/,
+      llvm::Value* /*row*/,
+      const jit::HashAggrJitSlot& slot,
+      bool,
+      llvm::BasicBlock*) {
+    addInc(codegen, group, slot, codegen.builder().getInt64(1));
+  }
+
+  static void compileHashAggrJitAddIntermediateResults(
       jit::HashAggrJitCodegen& codegen,
       llvm::Value* group,
       llvm::Value* decoded,
@@ -110,21 +135,13 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
       const jit::HashAggrJitSlot& slot,
       bool,
       llvm::BasicBlock*) {
-    auto* state = codegen.loadValue(group, codegen.builder().getInt64Ty(), slot.offset);
-    llvm::Value* inc = nullptr;
-    if (slot.countStar || !slot.mergeInput) {
-      inc = codegen.builder().getInt64(1);
-    } else {
-      inc = codegen.castValue(
-          codegen.loadDecodedValue(decoded, row, slot),
-          slot.inputKind,
-          jit::HashAggrJitValueKind::Int64);
-    }
-    codegen.storeValue(
-        group,
-        codegen.builder().getInt64Ty(),
-        slot.offset,
-        codegen.builder().CreateAdd(state, inc));
+    llvm::Value* inc = slot.countStar
+        ? codegen.builder().getInt64(1)
+        : codegen.castValue(
+              codegen.loadDecodedValue(decoded, row, slot),
+              slot.inputKind,
+              jit::HashAggrJitValueKind::Int64);
+    addInc(codegen, group, slot, inc);
   }
 
   static bool canCompileHashAggrJitExtract(
@@ -150,8 +167,9 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
   static const jit::HashAggrJitOps* hashAggrJitOps() {
     static const jit::HashAggrJitOps kOps{
         "count",
-        &compileHashAggrJitCreate,
-        &compileHashAggrJitAdd,
+        &compileHashAggrJitInitGroup,
+        &compileHashAggrJitAddRawInput,
+        &compileHashAggrJitAddIntermediateResults,
         &canCompileHashAggrJitExtract,
         &compileHashAggrJitExtract};
     return &kOps;

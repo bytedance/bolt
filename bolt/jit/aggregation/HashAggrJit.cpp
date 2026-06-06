@@ -582,10 +582,10 @@ bool genInitIR(
   auto* group = builder.CreateLoad(i8PtrTy, groupAddr);
 
   for (const auto& slot : slots) {
-    if (slot.ops == nullptr || slot.ops->create == nullptr) {
+    if (slot.ops == nullptr || slot.ops->initGroup == nullptr) {
       return true;
     }
-    slot.ops->create(codegen, group, slot);
+    slot.ops->initGroup(codegen, group, slot);
   }
 
   auto* next = builder.CreateAdd(index, builder.getInt32(1));
@@ -649,10 +649,15 @@ bool genAddDenseIR(
     }
 
     builder.SetInsertPoint(updateBlock);
-    if (slot.ops == nullptr || slot.ops->add == nullptr) {
+    if (slot.ops == nullptr) {
       return true;
     }
-    slot.ops->add(codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
+    auto* addFn =
+        slot.mergeInput ? slot.ops->addIntermediateResults : slot.ops->addRawInput;
+    if (addFn == nullptr) {
+      return true;
+    }
+    addFn(codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
     builder.CreateBr(nextBlock);
     builder.SetInsertPoint(nextBlock);
   }

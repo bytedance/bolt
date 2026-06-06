@@ -83,7 +83,7 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
   }
 
  private:
-  static void compileHashAggrJitCreate(
+  static void compileHashAggrJitInitGroup(
       jit::HashAggrJitCodegen& codegen,
       llvm::Value* group,
       const jit::HashAggrJitSlot& slot) {
@@ -98,7 +98,9 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
     }
   }
 
-  static void compileHashAggrJitAdd(
+  // sum uses the same logic for raw input and intermediate merge: add the
+  // decoded value into the running accumulator.
+  static void compileHashAggrJitAccumulate(
       jit::HashAggrJitCodegen& codegen,
       llvm::Value* group,
       llvm::Value* decoded,
@@ -118,6 +120,30 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
     codegen.storeValue(group, accType, slot.offset, newValue);
   }
 
+  static void compileHashAggrJitAddRawInput(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool checkInputNulls,
+      llvm::BasicBlock* nextBlock) {
+    compileHashAggrJitAccumulate(
+        codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
+  }
+
+  static void compileHashAggrJitAddIntermediateResults(
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      llvm::Value* decoded,
+      llvm::Value* row,
+      const jit::HashAggrJitSlot& slot,
+      bool checkInputNulls,
+      llvm::BasicBlock* nextBlock) {
+    compileHashAggrJitAccumulate(
+        codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
+  }
+
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot&,
       bool) {
@@ -133,8 +159,9 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
   static const jit::HashAggrJitOps* hashAggrJitOps() {
     static const jit::HashAggrJitOps kOps{
         "sum",
-        &compileHashAggrJitCreate,
-        &compileHashAggrJitAdd,
+        &compileHashAggrJitInitGroup,
+        &compileHashAggrJitAddRawInput,
+        &compileHashAggrJitAddIntermediateResults,
         &canCompileHashAggrJitExtract,
         &compileHashAggrJitExtract};
     return &kOps;

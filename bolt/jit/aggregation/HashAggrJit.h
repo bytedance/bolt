@@ -82,8 +82,9 @@ struct HashAggrJitOps {
       const HashAggrJitExtractTarget&);
 
   const char* id;
-  CreateFn create;
-  AddFn add;
+  CreateFn initGroup;
+  AddFn addRawInput;
+  AddFn addIntermediateResults;
   CanExtractFn canExtract;
   ExtractFn extract;
 };
