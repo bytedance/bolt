@@ -42,15 +42,15 @@ int32_t BmRowContainer::compare(
     int32_t column,
     CompareFlags flags) {
   BOLT_CHECK_GE(column, 0);
-  BOLT_CHECK_LT(column, rowColumns_.size());
+  BOLT_CHECK_LT(column, layout_.numColumns());
 
   const auto* leftRow = pinRow(left);
   const auto* rightRow = pinRow(right);
   return compareDispatch(
-      typeKinds_[column],
+      layout_.typeKindAt(column),
       leftRow,
       rightRow,
-      rowColumns_[column],
+      layout_.columnAt(column),
       flags);
 }
 
@@ -58,8 +58,8 @@ int32_t BmRowContainer::compareRows(
     RowId left,
     RowId right,
     const std::vector<CompareFlags>& flags) {
-  BOLT_CHECK(flags.empty() || flags.size() == keyTypes_.size());
-  for (auto i = 0; i < keyTypes_.size(); ++i) {
+  BOLT_CHECK(flags.empty() || flags.size() == layout_.keyTypes().size());
+  for (auto i = 0; i < layout_.keyTypes().size(); ++i) {
     const auto result =
         compare(left, right, i, flags.empty() ? CompareFlags() : flags[i]);
     if (result != 0) {

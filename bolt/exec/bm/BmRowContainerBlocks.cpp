@@ -26,19 +26,19 @@ BmBlockState& BmRowContainer::ensureWritableRowBlock() {
 }
 
 bool BmRowContainer::hasRowCapacity(const BmBlockState& block) const {
-  const auto rowOffset = bits::roundUp(block.usedBytes, alignment_);
-  return rowOffset + fixedRowSize_ <= rowBlockSize_;
+  const auto rowOffset = bits::roundUp(block.usedBytes, layout_.alignment());
+  return rowOffset + layout_.fixedRowSize() <= rowBlockSize_;
 }
 
 char* BmRowContainer::mutableRow(RowId row) {
   auto& block = blocks_->block(row.blockId);
-  BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+  BOLT_CHECK_LE(row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
   return blocks_->activeData(row.blockId) + row.rowOffset;
 }
 
 const char* BmRowContainer::pinRow(RowId row) {
   auto& block = blocks_->block(row.blockId);
-  BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+  BOLT_CHECK_LE(row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
   return pinnedBlockDataAfterPressure(
              row.blockId, "BmRowContainer cannot pin a row block") +
       row.rowOffset;

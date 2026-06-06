@@ -27,8 +27,7 @@ BmRowContainer::BmRowContainer(
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
     uint32_t heapBlockSize)
-    : keyTypes_(std::move(keyTypes)),
-      dependentTypes_(std::move(dependentTypes)),
+    : layout_(std::move(keyTypes), std::move(dependentTypes)),
       tag_(tag),
       blocks_(std::make_unique<BmPressureAwareBlockArena>(
           requireBufferManager(std::move(bufferManager)),
@@ -39,9 +38,8 @@ BmRowContainer::BmRowContainer(
       heapBlockSize_(heapBlockSize == 0
               ? memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)
               : heapBlockSize) {
-  computeLayout();
-  BOLT_CHECK_GT(fixedRowSize_, 0);
-  BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);
+  BOLT_CHECK_GT(layout_.fixedRowSize(), 0);
+  BOLT_CHECK_LE(layout_.fixedRowSize(), rowBlockSize_);
 }
 
 BmRowContainer::~BmRowContainer() {

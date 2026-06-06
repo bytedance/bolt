@@ -4,10 +4,10 @@ bolt_add_library(
   BmRowContainerBlocks.cpp
   BmRowContainerCompare.cpp
   BmRowContainer.cpp
-  BmRowContainerLayout.cpp
   BmRowContainerRead.cpp
   BmRowContainerReadFast.cpp
   BmRowContainerStore.cpp
+  BmRowLayout.cpp
 )
 
 target_compile_features(bolt_exec_bm PRIVATE cxx_std_20)

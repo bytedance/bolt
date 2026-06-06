@@ -1,10 +1,11 @@
-#include "bolt/exec/bm/BmRowContainer.h"
+#include "bolt/exec/bm/BmRowLayout.h"
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace bytedance::bolt::exec {
 namespace {
@@ -26,35 +27,44 @@ int32_t typeKindSize(TypeKind kind) {
 
 } // namespace
 
-void BmRowContainer::computeLayout() {
+BmRowLayout::BmRowLayout(
+    std::vector<TypePtr> keyTypes,
+    std::vector<TypePtr> dependentTypes,
+    int32_t alignment)
+    : keyTypes_(std::move(keyTypes)),
+      dependentTypes_(std::move(dependentTypes)),
+      alignment_(alignment) {
+  compute();
+}
+
+void BmRowLayout::compute() {
   int32_t offset = 0;
   int32_t nullOffset = 0;
-  bool isVariableWidth = false;
   for (auto& type : keyTypes_) {
     types_.push_back(type);
     typeKinds_.push_back(type->kind());
     offsets_.push_back(offset);
     offset += typeKindSize(type->kind());
     nullOffsets_.push_back(nullOffset++);
-    isVariableWidth |= !type->isFixedWidth();
+    hasVariableWidth_ |= !type->isFixedWidth();
   }
 
   offset = std::max<int32_t>(offset, sizeof(void*));
-  const int32_t firstNullByteOffset = offset;
+  firstNullByteOffset_ = offset;
 
   for (auto& type : dependentTypes_) {
     types_.push_back(type);
     typeKinds_.push_back(type->kind());
     nullOffsets_.push_back(nullOffset++);
-    isVariableWidth |= !type->isFixedWidth();
+    hasVariableWidth_ |= !type->isFixedWidth();
   }
 
   nullOffsets_.push_back(nullOffset);
-  freeFlagOffset_ = nullOffset + firstNullByteOffset * 8;
+  freeFlagOffset_ = nullOffset + firstNullByteOffset_ * 8;
   ++nullOffset;
 
   for (auto& null : nullOffsets_) {
-    null += firstNullByteOffset * 8;
+    null += firstNullByteOffset_ * 8;
   }
 
   const int32_t nullBytes = bits::nbytes(nullOffsets_.size());
@@ -65,7 +75,7 @@ void BmRowContainer::computeLayout() {
     offset += typeKindSize(type->kind());
   }
 
-  if (isVariableWidth) {
+  if (hasVariableWidth_) {
     rowSizeOffset_ = offset;
     offset += sizeof(uint32_t);
   }
@@ -76,7 +86,7 @@ void BmRowContainer::computeLayout() {
   }
 
   for (auto i = 0; i < offsets_.size(); ++i) {
-    rowColumns_.emplace_back(offsets_[i], nullOffsets_[i]);
+    columns_.emplace_back(offsets_[i], nullOffsets_[i]);
   }
 }
 
