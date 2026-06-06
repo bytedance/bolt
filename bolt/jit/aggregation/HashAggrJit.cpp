@@ -192,6 +192,7 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   auto* voidTy = llvm::Type::getVoidTy(context);
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
 
+  declareFunction(module, "jit_GetDecodedValueBool", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_GetDecodedValueI8", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_GetDecodedValueI16", i16Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_GetDecodedValueI32", i32Ty, {i8PtrTy, i32Ty});
@@ -258,6 +259,7 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
 
 llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
   switch (kind) {
+    case HashAggrJitValueKind::Bool:
     case HashAggrJitValueKind::Int8:
       return builder.getInt8Ty();
     case HashAggrJitValueKind::Int16:
@@ -278,6 +280,8 @@ llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
 
 std::string decodedValueFunction(HashAggrJitValueKind kind) {
   switch (kind) {
+    case HashAggrJitValueKind::Bool:
+      return "jit_GetDecodedValueBool";
     case HashAggrJitValueKind::Int8:
       return "jit_GetDecodedValueI8";
     case HashAggrJitValueKind::Int16:
@@ -298,6 +302,7 @@ std::string decodedValueFunction(HashAggrJitValueKind kind) {
 
 std::string decodedRowFieldFunction(HashAggrJitValueKind kind) {
   switch (kind) {
+    case HashAggrJitValueKind::Bool:
     case HashAggrJitValueKind::Int8:
       return "jit_GetDecodedRowFieldI8";
     case HashAggrJitValueKind::Int64:
@@ -676,6 +681,9 @@ std::string setFlatValueFunction(HashAggrJitValueKind kind) {
       return "jit_HashAggrSetFlatFloat";
     case HashAggrJitValueKind::Double:
       return "jit_HashAggrSetFlatDouble";
+    // Bool output vectors are FlatVector<bool>, which cannot reuse the int8
+    // setter. JIT extract is not yet supported for Bool.
+    case HashAggrJitValueKind::Bool:
     case HashAggrJitValueKind::Int128:
       return "";
   }
@@ -760,6 +768,8 @@ HashAggrJitChunk::HashAggrJitChunk(
 
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
   switch (kind) {
+    case HashAggrJitValueKind::Bool:
+      return "bool";
     case HashAggrJitValueKind::Int8:
       return "i8";
     case HashAggrJitValueKind::Int16:
@@ -781,6 +791,7 @@ std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
 std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind) {
   switch (kind) {
     case TypeKind::BOOLEAN:
+      return HashAggrJitValueKind::Bool;
     case TypeKind::TINYINT:
       return HashAggrJitValueKind::Int8;
     case TypeKind::SMALLINT:

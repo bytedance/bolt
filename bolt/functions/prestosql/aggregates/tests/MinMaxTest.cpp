@@ -230,20 +230,31 @@ TEST_F(MinMaxTest, hashAggrJitBooleanMinMax) {
            [](auto row) { return row % 5 < 2; },
            [](auto row) { return row % 11 == 0; })});
 
-  auto plan = PlanBuilder()
-                  .values({data})
-                  .partialAggregation({"c0"}, {"min(c1)", "max(c1)"})
-                  .finalAggregation()
-                  .planNode();
-
-  auto noJit = AssertQueryBuilder(plan, duckDbQueryRunner_)
-                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+  for (const auto& makePlan :
+       std::vector<std::function<core::PlanNodePtr()>>{
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .singleAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .planNode();
+           },
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .partialAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .finalAggregation()
+                 .planNode();
+           }}) {
+    auto plan = makePlan();
+    auto noJit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                     .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                     .copyResults(pool());
+    auto jit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                   .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
                    .copyResults(pool());
-  auto jit = AssertQueryBuilder(plan, duckDbQueryRunner_)
-                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
-                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
-                 .copyResults(pool());
-  assertEqualResults({noJit}, {jit});
+    assertEqualResults({noJit}, {jit});
+  }
 }
 
 TEST_F(MinMaxTest, constVarchar) {

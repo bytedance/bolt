@@ -41,6 +41,7 @@ enum class HashAggrJitKind : uint8_t {
 };
 
 enum class HashAggrJitValueKind : uint8_t {
+  Bool,
   Int8,
   Int16,
   Int32,
