@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
@@ -128,6 +129,32 @@ TEST_F(BmPressureAwareBlockArenaTest, TryPinnedDataReturnsNullOnPressure) {
   EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
   EXPECT_TRUE(arena.block(other).pinnedHandle.has_value());
   EXPECT_NE(nullptr, arena.block(other).data);
+}
+
+TEST_F(BmPressureAwareBlockArenaTest, PinBlocksBatchPinsResidentBlocks) {
+  auto bufferManager = makeBufferManager("pin-blocks");
+  BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
+
+  const auto canReclaim = [](uint32_t) { return true; };
+  const auto blockId = arena.allocateBlock(4096, canReclaim);
+  auto* data = arena.activeData(blockId);
+  std::memcpy(data, "arena-pin-blocks", 17);
+  arena.block(blockId).usedBytes = 17;
+
+  ASSERT_EQ(4096, arena.makeBlocksReclaimable(0, canReclaim));
+  ASSERT_FALSE(arena.block(blockId).pinnedHandle.has_value());
+  ASSERT_EQ(nullptr, arena.block(blockId).data);
+
+  const std::vector<uint32_t> blockIds{blockId};
+  const auto statsBeforePin = bufferManager->stats();
+  arena.pinBlocks(blockIds, canReclaim);
+
+  const auto statsAfterPin = bufferManager->stats();
+  EXPECT_EQ(statsBeforePin.batchPinCount + 1, statsAfterPin.batchPinCount);
+  EXPECT_EQ(0, statsAfterPin.spillReadCount);
+  ASSERT_TRUE(arena.block(blockId).pinnedHandle.has_value());
+  ASSERT_NE(nullptr, arena.block(blockId).data);
+  EXPECT_EQ(0, std::memcmp(arena.block(blockId).data, "arena-pin-blocks", 17));
 }
 
 TEST_F(BmPressureAwareBlockArenaTest, SpillReclaimableBlocksAndPinReadback) {

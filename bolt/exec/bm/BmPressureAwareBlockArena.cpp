@@ -82,6 +82,61 @@ const char* BmPressureAwareBlockArena::pinnedData(
   return data;
 }
 
+void BmPressureAwareBlockArena::pinBlocks(
+    std::span<const uint32_t> blockIds,
+    const CanReclaimFn& canReclaim) {
+  std::vector<uint32_t> toPin;
+  toPin.reserve(blockIds.size());
+  uint64_t bytesToReserve = 0;
+  for (auto blockId : blockIds) {
+    auto& state = block(blockId);
+    if (state.pinnedHandle.has_value()) {
+      touch(state);
+      continue;
+    }
+    if (std::find(toPin.begin(), toPin.end(), blockId) != toPin.end()) {
+      continue;
+    }
+    toPin.push_back(blockId);
+    bytesToReserve += state.capacity;
+  }
+  if (toPin.empty()) {
+    return;
+  }
+
+  const auto canReclaimOthers = [&](uint32_t candidateBlockId) {
+    return std::find(toPin.begin(), toPin.end(), candidateBlockId) ==
+        toPin.end() && canReclaim(candidateBlockId);
+  };
+  ensureMemoryForBlock(
+      bytesToReserve,
+      canReclaimOthers,
+      "BmPressureAwareBlockArena cannot reserve memory to pin blocks");
+
+  std::vector<std::shared_ptr<memory::bm::BlockHandle>> handles;
+  handles.reserve(toPin.size());
+  for (auto blockId : toPin) {
+    handles.push_back(block(blockId).block);
+  }
+
+  std::vector<memory::bm::BufferHandle> pinnedHandles;
+  try {
+    pinnedHandles = bufferManager_->BatchPin(handles);
+  } catch (...) {
+    bufferManager_->ReleaseUnusedReservation();
+    throw;
+  }
+  BOLT_CHECK_EQ(pinnedHandles.size(), toPin.size());
+  for (auto i = 0; i < toPin.size(); ++i) {
+    auto& state = block(toPin[i]);
+    state.pinnedHandle.emplace(std::move(pinnedHandles[i]));
+    state.data = state.pinnedHandle->Ptr();
+    BOLT_CHECK_NOT_NULL(state.data);
+    touch(state);
+  }
+  bufferManager_->ReleaseUnusedReservation();
+}
+
 const char* BmPressureAwareBlockArena::tryPinnedData(uint32_t blockId) {
   auto& state = block(blockId);
   if (!state.pinnedHandle.has_value()) {

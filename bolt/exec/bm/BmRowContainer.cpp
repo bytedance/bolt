@@ -194,6 +194,25 @@ std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
   return rows;
 }
 
+bool BmRowContainer::tryStore() {
+  if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max() &&
+      hasRowCapacity(blocks_.block(activeRowBlockId_))) {
+    return true;
+  }
+
+  const auto canReserve = bufferManager_->MaybeReserve(rowBlockSize_);
+  bufferManager_->ReleaseUnusedReservation();
+  return canReserve;
+}
+
+void BmRowContainer::preload(std::vector<BlockId>& blockIds) {
+  blocks_.pinBlocks(
+      blockIds,
+      [this](uint32_t candidateBlockId) {
+        return canReclaimBlock(candidateBlockId);
+      });
+}
+
 void BmRowContainer::extractColumn(
     const RowId* rows,
     int32_t numRows,
