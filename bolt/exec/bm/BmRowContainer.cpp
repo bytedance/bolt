@@ -194,13 +194,45 @@ std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
   return rows;
 }
 
-bool BmRowContainer::tryStore() {
-  if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max() &&
-      hasRowCapacity(blocks_.block(activeRowBlockId_))) {
-    return true;
+bool BmRowContainer::tryStore(const RowVectorPtr& input) {
+  BOLT_CHECK_NOT_NULL(input);
+  BOLT_CHECK_EQ(input->childrenSize(), types_.size());
+  const auto variableBytes = rowSizeOffset_ == 0 ? 0 : input->estimateFlatSize();
+
+  const auto rowsPerBlock = rowBlockSize_ / fixedRowSize_;
+  BOLT_CHECK_GT(rowsPerBlock, 0);
+  uint64_t availableRows = 0;
+  if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max()) {
+    const auto& block = blocks_.block(activeRowBlockId_);
+    const auto rowOffset = bits::roundUp(block.usedBytes, alignment_);
+    if (rowOffset < rowBlockSize_) {
+      availableRows = (rowBlockSize_ - rowOffset) / fixedRowSize_;
+    }
   }
 
-  const auto canReserve = bufferManager_->MaybeReserve(rowBlockSize_);
+  const auto remainingRows =
+      input->size() > availableRows ? input->size() - availableRows : 0;
+  const auto rowBlocks =
+      (remainingRows + rowsPerBlock - 1) / rowsPerBlock;
+
+  uint64_t heapBlocks = 0;
+  uint64_t remainingHeapBytes = 0;
+  if (activeHeapBlockId_ != std::numeric_limits<uint32_t>::max()) {
+    const auto& block = blocks_.block(activeHeapBlockId_);
+    BOLT_CHECK_LE(block.usedBytes, heapBlockSize_);
+    remainingHeapBytes = heapBlockSize_ - block.usedBytes;
+  }
+  if (variableBytes > remainingHeapBytes) {
+    const auto newHeapBytes = variableBytes - remainingHeapBytes;
+    heapBlocks = (newHeapBytes + heapBlockSize_ - 1) / heapBlockSize_;
+  }
+
+  const auto bytesToReserve =
+      rowBlocks * rowBlockSize_ + heapBlocks * heapBlockSize_;
+  if (bytesToReserve == 0) {
+    return true;
+  }
+  const auto canReserve = bufferManager_->MaybeReserve(bytesToReserve);
   bufferManager_->ReleaseUnusedReservation();
   return canReserve;
 }
