@@ -1,7 +1,13 @@
 bolt_add_library(
   bolt_exec_bm
   BmPressureAwareBlockArena.cpp
+  BmRowContainerBlocks.cpp
+  BmRowContainerCompare.cpp
   BmRowContainer.cpp
+  BmRowContainerLayout.cpp
+  BmRowContainerRead.cpp
+  BmRowContainerReadFast.cpp
+  BmRowContainerStore.cpp
 )
 
 target_compile_features(bolt_exec_bm PRIVATE cxx_std_20)

@@ -1,7 +1,11 @@
 add_executable(
   bolt_exec_bm_test
   BmPressureAwareBlockArenaTest.cpp
-  BmRowContainerTest.cpp
+  BmRowContainerBasicTest.cpp
+  BmRowContainerCompareTest.cpp
+  BmRowContainerExtractTest.cpp
+  BmRowContainerSpillTest.cpp
+  BmRowContainerStoreTest.cpp
 )
 
 add_test(

@@ -22,17 +22,26 @@ BmPressureAwareBlockArena::~BmPressureAwareBlockArena() {
 
 uint32_t BmPressureAwareBlockArena::allocateBlock(
     uint32_t capacity,
-    const CanReclaimFn& canReclaim) {
+    const CanReclaimFn& canReclaim,
+    const char* failureMessage) {
   auto blockId = tryAllocateBlock(capacity);
   if (blockId.has_value()) {
     return blockId.value();
   }
 
-  ensureMemoryForBlock(
-      capacity, canReclaim, "BmPressureAwareBlockArena cannot reserve a new block");
+  ensureMemoryForBlock(capacity, canReclaim, failureMessage);
   blockId = tryAllocateBlock(capacity);
-  BOLT_CHECK(blockId.has_value(), "BmPressureAwareBlockArena cannot allocate a new block");
+  BOLT_CHECK(blockId.has_value(), failureMessage);
   return blockId.value();
+}
+
+bool BmPressureAwareBlockArena::tryReserve(uint64_t bytes) {
+  if (bytes == 0) {
+    return true;
+  }
+  const auto canReserve = bufferManager_->MaybeReserve(bytes);
+  bufferManager_->ReleaseUnusedReservation();
+  return canReserve;
 }
 
 std::optional<uint32_t> BmPressureAwareBlockArena::tryAllocateBlock(
@@ -64,7 +73,8 @@ char* BmPressureAwareBlockArena::activeData(uint32_t blockId) {
 
 const char* BmPressureAwareBlockArena::pinnedData(
     uint32_t blockId,
-    const CanReclaimFn& canReclaim) {
+    const CanReclaimFn& canReclaim,
+    const char* failureMessage) {
   if (const auto* data = tryPinnedData(blockId)) {
     return data;
   }
@@ -76,9 +86,9 @@ const char* BmPressureAwareBlockArena::pinnedData(
   ensureMemoryForBlock(
       state.capacity,
       canReclaimOthers,
-      "BmPressureAwareBlockArena cannot reserve memory to pin a block");
+      failureMessage);
   const auto* data = tryPinnedData(blockId);
-  BOLT_CHECK_NOT_NULL(data);
+  BOLT_CHECK_NOT_NULL(data, failureMessage);
   return data;
 }
 

@@ -109,6 +109,26 @@ TEST_F(BmPressureAwareBlockArenaTest, TryAllocateBlockReturnsEmptyOnPressure) {
   EXPECT_NE(nullptr, arena.block(second).data);
 }
 
+TEST_F(BmPressureAwareBlockArenaTest, TryReserveReleasesReservationWithoutReclaiming) {
+  auto root = memoryManager_.addRootPool(
+      "bm-pressure-aware-arena-try-reserve-root",
+      16 << 20,
+      memory::MemoryReclaimer::create());
+  auto bufferManager = makeBufferManager("try-reserve", root.get());
+  BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
+
+  const auto canReclaim = [](uint32_t) { return true; };
+  const auto first = arena.allocateBlock(8 << 20, canReclaim);
+  const auto second = arena.allocateBlock(8 << 20, canReclaim);
+
+  EXPECT_FALSE(arena.tryReserve(8 << 20));
+  EXPECT_TRUE(arena.tryReserve(0));
+  EXPECT_TRUE(arena.block(first).pinnedHandle.has_value());
+  EXPECT_TRUE(arena.block(second).pinnedHandle.has_value());
+  EXPECT_NE(nullptr, arena.block(first).data);
+  EXPECT_NE(nullptr, arena.block(second).data);
+}
+
 TEST_F(BmPressureAwareBlockArenaTest, TryPinnedDataReturnsNullOnPressure) {
   auto root = memoryManager_.addRootPool(
       "bm-pressure-aware-arena-try-pin-root",
