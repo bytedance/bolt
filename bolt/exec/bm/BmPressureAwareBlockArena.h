@@ -2,6 +2,7 @@
 
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/BufferManager.h"
+#include "bolt/exec/bm/BmBlockReclaimPolicy.h"
 
 #include <cstdint>
 #include <functional>
@@ -24,44 +25,33 @@ struct BmBlockState {
 
 class BmPressureAwareBlockArena {
  public:
-  using CanReclaimFn = std::function<bool(uint32_t blockId)>;
+  using CanReclaimFn = std::function<bool(BlockId blockId)>;
 
   BmPressureAwareBlockArena(
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
-      memory::bm::MemoryTag tag);
+      memory::bm::MemoryTag tag,
+      std::unique_ptr<BmBlockReclaimPolicy> reclaimPolicy = nullptr);
   ~BmPressureAwareBlockArena();
 
-  bool tryReserve(uint64_t bytes);
-  std::optional<uint32_t> tryAllocateBlock(uint32_t capacity);
-  uint32_t allocateBlock(
-      uint32_t capacity,
-      const CanReclaimFn& canReclaim,
-      const char* failureMessage =
-          "BmPressureAwareBlockArena cannot allocate a new block");
-  char* activeData(uint32_t blockId);
-  const char* tryPinnedData(uint32_t blockId);
+  BlockId allocateReservedBlock(uint32_t capacity);
+  char* activeData(BlockId blockId);
   const char* pinnedData(
-      uint32_t blockId,
+      BlockId blockId,
       const CanReclaimFn& canReclaim,
       const char* failureMessage =
           "BmPressureAwareBlockArena cannot reserve memory to pin a block");
   void pinBlocks(
-      std::span<const uint32_t> blockIds,
+      std::span<const BlockId> blockIds,
       const CanReclaimFn& canReclaim);
 
-  BmBlockState& block(uint32_t blockId);
-  const BmBlockState& block(uint32_t blockId) const;
+  BmBlockState& block(BlockId blockId);
+  const BmBlockState& block(BlockId blockId) const;
 
   uint64_t allocatedBytes() const;
   uint64_t usedBytes() const;
   uint32_t size() const;
   bool empty() const;
 
-  uint64_t makeBlocksReclaimable(
-      uint64_t targetBytes,
-      const CanReclaimFn& canReclaim);
-  std::vector<std::shared_ptr<memory::bm::BlockHandle>> reclaimableBlocks(
-      const CanReclaimFn& canReclaim) const;
   uint32_t spillReclaimableBlocks(
       uint64_t targetBytes,
       const CanReclaimFn& canReclaim);
@@ -69,14 +59,26 @@ class BmPressureAwareBlockArena {
   void clear();
 
  private:
-  void ensureMemoryForBlock(
+  const char* tryPinBlock(BlockId blockId);
+  void ensureCapacityForPinnedRead(
       uint32_t capacity,
       const CanReclaimFn& canReclaim,
       const char* failureMessage);
+  std::vector<BmBlockReclaimCandidate> reclaimCandidates(
+      const CanReclaimFn& canReclaim,
+      bool pinnedOnly) const;
+  std::vector<BlockId> selectVictims(
+      uint64_t targetBytes,
+      const CanReclaimFn& canReclaim,
+      bool pinnedOnly) const;
+  uint64_t releasePinnedVictims(std::span<const BlockId> victims);
+  std::vector<std::shared_ptr<memory::bm::BlockHandle>> unpinnedVictimBlocks(
+      std::span<const BlockId> victims) const;
   void touch(BmBlockState& block);
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   memory::bm::MemoryTag tag_;
+  std::unique_ptr<BmBlockReclaimPolicy> reclaimPolicy_;
   std::vector<BmBlockState> blocks_;
   uint64_t accessCounter_{0};
 };

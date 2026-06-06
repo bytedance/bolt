@@ -1,7 +1,9 @@
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/AllocateSize.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
+#include "bolt/exec/bm/BmBlockReclaimPolicy.h"
 #include "bolt/exec/bm/BmPressureAwareBlockArena.h"
 
 #include <cstring>
@@ -18,6 +20,14 @@ namespace {
 bool isIoUringUnavailable(const std::exception& e) {
   return std::string(e.what()).find("io_uring_queue_init failed") !=
       std::string::npos;
+}
+
+uint32_t allocateReservedBlock(
+    BmPressureAwareBlockArena& arena,
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager,
+    uint32_t capacity) {
+  BOLT_CHECK(bufferManager->MaybeReserve(capacity));
+  return arena.allocateReservedBlock(capacity);
 }
 
 class BmPressureAwareBlockArenaTest : public testing::Test {
@@ -50,12 +60,33 @@ class BmPressureAwareBlockArenaTest : public testing::Test {
   std::shared_ptr<memory::MemoryPool> root_;
 };
 
+class LatestPinnedBlockReclaimPolicy final : public BmBlockReclaimPolicy {
+ public:
+  std::vector<BlockId> selectVictims(
+      const BmBlockReclaimContext& context) const override {
+    std::vector<BlockId> victims;
+    for (const auto& candidate : context.candidates) {
+      if (candidate.pinned) {
+        victims.assign({candidate.blockId});
+      }
+    }
+    return victims;
+  }
+};
+
+class InvalidBlockReclaimPolicy final : public BmBlockReclaimPolicy {
+ public:
+  std::vector<BlockId> selectVictims(
+      const BmBlockReclaimContext& /*context*/) const override {
+    return {0};
+  }
+};
+
 TEST_F(BmPressureAwareBlockArenaTest, AllocateBlockPinsAndTracksBytes) {
   auto bufferManager = makeBufferManager("allocate");
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
-  const auto canReclaim = [](uint32_t) { return true; };
-  const auto blockId = arena.allocateBlock(4096, canReclaim);
+  const auto blockId = allocateReservedBlock(arena, bufferManager, 4096);
 
   EXPECT_EQ(1, arena.size());
   EXPECT_EQ(4096, arena.allocatedBytes());
@@ -67,69 +98,76 @@ TEST_F(BmPressureAwareBlockArenaTest, AllocateBlockPinsAndTracksBytes) {
   EXPECT_EQ(128, arena.usedBytes());
 }
 
-TEST_F(BmPressureAwareBlockArenaTest, MakeBlocksReclaimableSkipsPinnedActiveBlock) {
-  auto bufferManager = makeBufferManager("reclaim");
-  BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
+TEST_F(BmPressureAwareBlockArenaTest, SpillUsesInjectedPolicy) {
+  auto bufferManager = makeBufferManager("policy");
+  BmPressureAwareBlockArena arena(
+      bufferManager,
+      memory::bm::MemoryTag::kWindow,
+      std::make_unique<LatestPinnedBlockReclaimPolicy>());
 
-  const auto reclaimAll = [](uint32_t) { return true; };
-  const auto first = arena.allocateBlock(4096, reclaimAll);
-  const auto active = arena.allocateBlock(4096, reclaimAll);
-  const auto third = arena.allocateBlock(4096, reclaimAll);
+  const auto lruVictim = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  const auto policyVictim = allocateReservedBlock(arena, bufferManager, 8 << 20);
 
-  const auto skipActive = [&](uint32_t blockId) { return blockId != active; };
-  const auto released = arena.makeBlocksReclaimable(0, skipActive);
+  const auto canReclaim = [](BlockId) { return true; };
+  try {
+    arena.spillReclaimableBlocks(8 << 20, canReclaim);
+  } catch (const std::exception& e) {
+    if (!isIoUringUnavailable(e)) {
+      throw;
+    }
+  }
 
-  EXPECT_EQ(8192, released);
-  EXPECT_FALSE(arena.block(first).pinnedHandle.has_value());
-  EXPECT_TRUE(arena.block(active).pinnedHandle.has_value());
-  EXPECT_FALSE(arena.block(third).pinnedHandle.has_value());
-  EXPECT_EQ(nullptr, arena.block(first).data);
-  EXPECT_NE(nullptr, arena.block(active).data);
-  EXPECT_EQ(nullptr, arena.block(third).data);
+  EXPECT_TRUE(arena.block(lruVictim).pinnedHandle.has_value());
+  EXPECT_FALSE(arena.block(policyVictim).pinnedHandle.has_value());
 }
 
-TEST_F(BmPressureAwareBlockArenaTest, TryAllocateBlockReturnsEmptyOnPressure) {
+TEST_F(BmPressureAwareBlockArenaTest, PolicyCannotBypassCanReclaim) {
+  auto bufferManager = makeBufferManager("policy-guard");
+  BmPressureAwareBlockArena arena(
+      bufferManager,
+      memory::bm::MemoryTag::kWindow,
+      std::make_unique<InvalidBlockReclaimPolicy>());
+
+  const auto protectedBlock =
+      allocateReservedBlock(arena, bufferManager, 4096);
+  const auto reclaimableBlock =
+      allocateReservedBlock(arena, bufferManager, 4096);
+
+  const auto canReclaim = [&](BlockId blockId) {
+    return blockId == reclaimableBlock;
+  };
+
+  EXPECT_THROW(
+      arena.spillReclaimableBlocks(4096, canReclaim),
+      BoltException);
+  EXPECT_TRUE(arena.block(protectedBlock).pinnedHandle.has_value());
+  EXPECT_TRUE(arena.block(reclaimableBlock).pinnedHandle.has_value());
+}
+
+TEST_F(BmPressureAwareBlockArenaTest, PinReadDoesNotReclaimProtectedBlocks) {
   auto root = memoryManager_.addRootPool(
-      "bm-pressure-aware-arena-try-allocate-root",
+      "bm-pressure-aware-arena-protected-pin-root",
       16 << 20,
       memory::MemoryReclaimer::create());
-  auto bufferManager = makeBufferManager("try-allocate", root.get());
+  auto bufferManager = makeBufferManager("reclaim", root.get());
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
-  const auto canReclaim = [](uint32_t) { return true; };
-  const auto first = arena.allocateBlock(8 << 20, canReclaim);
-  const auto second = arena.allocateBlock(8 << 20, canReclaim);
+  const auto target = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  const auto protectedBlock = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  arena.block(target).pinnedHandle.reset();
+  arena.block(target).data = nullptr;
 
-  const auto failed = arena.tryAllocateBlock(8 << 20);
+  const auto canReclaim = [&](BlockId blockId) {
+    return blockId != protectedBlock;
+  };
 
-  EXPECT_FALSE(failed.has_value());
-  EXPECT_TRUE(arena.block(first).pinnedHandle.has_value());
-  EXPECT_TRUE(arena.block(second).pinnedHandle.has_value());
-  EXPECT_NE(nullptr, arena.block(first).data);
-  EXPECT_NE(nullptr, arena.block(second).data);
+  EXPECT_THROW(arena.pinnedData(target, canReclaim), BoltException);
+  EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
+  EXPECT_TRUE(arena.block(protectedBlock).pinnedHandle.has_value());
+  EXPECT_NE(nullptr, arena.block(protectedBlock).data);
 }
 
-TEST_F(BmPressureAwareBlockArenaTest, TryReserveReleasesReservationWithoutReclaiming) {
-  auto root = memoryManager_.addRootPool(
-      "bm-pressure-aware-arena-try-reserve-root",
-      16 << 20,
-      memory::MemoryReclaimer::create());
-  auto bufferManager = makeBufferManager("try-reserve", root.get());
-  BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
-
-  const auto canReclaim = [](uint32_t) { return true; };
-  const auto first = arena.allocateBlock(8 << 20, canReclaim);
-  const auto second = arena.allocateBlock(8 << 20, canReclaim);
-
-  EXPECT_FALSE(arena.tryReserve(8 << 20));
-  EXPECT_TRUE(arena.tryReserve(0));
-  EXPECT_TRUE(arena.block(first).pinnedHandle.has_value());
-  EXPECT_TRUE(arena.block(second).pinnedHandle.has_value());
-  EXPECT_NE(nullptr, arena.block(first).data);
-  EXPECT_NE(nullptr, arena.block(second).data);
-}
-
-TEST_F(BmPressureAwareBlockArenaTest, TryPinnedDataReturnsNullOnPressure) {
+TEST_F(BmPressureAwareBlockArenaTest, PinnedDataThrowsOnPressureWithoutVictims) {
   auto root = memoryManager_.addRootPool(
       "bm-pressure-aware-arena-try-pin-root",
       16 << 20,
@@ -137,15 +175,14 @@ TEST_F(BmPressureAwareBlockArenaTest, TryPinnedDataReturnsNullOnPressure) {
   auto bufferManager = makeBufferManager("try-pin", root.get());
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
-  const auto canReclaim = [](uint32_t) { return true; };
-  const auto target = arena.allocateBlock(8 << 20, canReclaim);
-  const auto other = arena.allocateBlock(8 << 20, canReclaim);
+  const auto target = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  const auto other = allocateReservedBlock(arena, bufferManager, 8 << 20);
   arena.block(target).pinnedHandle.reset();
   arena.block(target).data = nullptr;
 
-  const auto* data = arena.tryPinnedData(target);
+  const auto canReclaimNone = [](BlockId) { return false; };
 
-  EXPECT_EQ(nullptr, data);
+  EXPECT_THROW(arena.pinnedData(target, canReclaimNone), BoltException);
   EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
   EXPECT_TRUE(arena.block(other).pinnedHandle.has_value());
   EXPECT_NE(nullptr, arena.block(other).data);
@@ -156,14 +193,13 @@ TEST_F(BmPressureAwareBlockArenaTest, PinBlocksBatchPinsResidentBlocks) {
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
   const auto canReclaim = [](uint32_t) { return true; };
-  const auto blockId = arena.allocateBlock(4096, canReclaim);
+  const auto blockId = allocateReservedBlock(arena, bufferManager, 4096);
   auto* data = arena.activeData(blockId);
   std::memcpy(data, "arena-pin-blocks", 17);
   arena.block(blockId).usedBytes = 17;
 
-  ASSERT_EQ(4096, arena.makeBlocksReclaimable(0, canReclaim));
-  ASSERT_FALSE(arena.block(blockId).pinnedHandle.has_value());
-  ASSERT_EQ(nullptr, arena.block(blockId).data);
+  arena.block(blockId).pinnedHandle.reset();
+  arena.block(blockId).data = nullptr;
 
   const std::vector<uint32_t> blockIds{blockId};
   const auto statsBeforePin = bufferManager->stats();
@@ -182,9 +218,10 @@ TEST_F(BmPressureAwareBlockArenaTest, SpillReclaimableBlocksAndPinReadback) {
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
   const auto canReclaim = [](uint32_t) { return true; };
-  const auto blockId = arena.allocateBlock(
-      memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge),
-      canReclaim);
+  const auto blockId = allocateReservedBlock(
+      arena,
+      bufferManager,
+      memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge));
   auto* data = arena.activeData(blockId);
   std::memcpy(data, "arena-spill-readback", 21);
   arena.block(blockId).usedBytes = 21;
