@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace bytedance::bolt::exec {
@@ -35,6 +36,9 @@ class BmPressureAwareBlockArena {
   char* activeData(uint32_t blockId);
   const char* tryPinnedData(uint32_t blockId);
   const char* pinnedData(uint32_t blockId, const CanReclaimFn& canReclaim);
+  void pinBlocks(
+      std::span<const uint32_t> blockIds,
+      const CanReclaimFn& canReclaim);
 
   BmBlockState& block(uint32_t blockId);
   const BmBlockState& block(uint32_t blockId) const;

@@ -42,6 +42,14 @@ class BmRowContainer {
 
   std::vector<RowId> store(const RowVectorPtr& input);
 
+  // 尝试store数据，先检查内存是否够，不够就返回false
+  bool tryStore();
+
+  // 1. 在Sort多路合并之前，多个路可以同时preload。
+  // 2. 在Hash Join的时候，把所有数据尝试加载到内存，优化访问
+  void preload(std::vector<BlockId>& blockIds);
+
+  // 对Row Container的访问，要么就零散地走Extract Column，要么就走Batch Preload。
   void extractColumn(
       const RowId* rows,
       int32_t numRows,

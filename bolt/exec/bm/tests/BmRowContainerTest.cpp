@@ -354,6 +354,18 @@ TEST_F(BmRowContainerTest, StoresRowVectorBatch) {
   EXPECT_EQ("cccc", actualStrings->valueAt(2).getString());
 }
 
+TEST_F(BmRowContainerTest, TryStoreChecksNextRowBlockReservation) {
+  auto limitedRoot = memoryManager_.addRootPool(
+      "bm-row-container-try-store-root",
+      3 * 1024 * 1024,
+      memory::MemoryReclaimer::create());
+  auto bufferManager = makeBufferManager("try-store", limitedRoot.get());
+  BmRowContainer container({BIGINT()}, {}, bufferManager);
+
+  EXPECT_FALSE(container.tryStore());
+  EXPECT_EQ(0, container.allocatedBytes());
+}
+
 TEST_F(BmRowContainerTest, ExtractsRowsAcrossMultipleBlocks) {
   auto bufferManager = makeBufferManager("multi-block");
   BmRowContainer container({BIGINT()}, {}, bufferManager);
@@ -430,6 +442,64 @@ TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
     EXPECT_EQ(42, actual->valueAt(0));
   }
   EXPECT_GE(bufferManager->stats().spillReadCount, 1);
+}
+
+TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
+  auto limitedRoot = memoryManager_.addRootPool(
+      "bm-row-container-preload-root",
+      64 * 1024 * 1024,
+      memory::MemoryReclaimer::create());
+  auto bufferManager = makeBufferManager("preload", limitedRoot.get());
+  BmRowContainer container(
+      {BIGINT()}, {}, bufferManager, memory::bm::MemoryTag::kWindow, 4096);
+
+  auto input = makeBigintVector(leaf_.get(), {99});
+  DecodedVector decoded(*input);
+
+  std::vector<RowId> sampledRows;
+  while (container.allocatedBytes() < 3 * 4096) {
+    auto row = container.newRow();
+    container.store(decoded, 0, row, 0);
+    if (sampledRows.empty() || row.blockId != sampledRows.back().blockId) {
+      sampledRows.push_back(row);
+    }
+  }
+  ASSERT_GE(sampledRows.size(), 3);
+
+  try {
+    container.spillAllBlocksForBenchmark();
+  } catch (const std::exception& e) {
+    if (isIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+  ASSERT_GE(bufferManager->stats().spillWriteCount, 1);
+
+  std::vector<BlockId> blockIds{sampledRows.front().blockId};
+  const auto statsBeforePreload = bufferManager->stats();
+  try {
+    container.preload(blockIds);
+  } catch (const std::exception& e) {
+    if (isIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+  const auto statsAfterPreload = bufferManager->stats();
+  EXPECT_EQ(
+      statsBeforePreload.batchPinCount + 1,
+      statsAfterPreload.batchPinCount);
+  EXPECT_GE(
+      statsAfterPreload.spillReadCount,
+      statsBeforePreload.spillReadCount + 1);
+
+  auto result = BaseVector::create(BIGINT(), 1, leaf_.get());
+  container.extractColumn(&sampledRows.front(), 1, 0, result);
+  EXPECT_EQ(
+      statsAfterPreload.spillReadCount,
+      bufferManager->stats().spillReadCount);
+  EXPECT_EQ(99, result->asFlatVector<int64_t>()->valueAt(0));
 }
 
 TEST_F(BmRowContainerTest, StoresExtractsAndComparesVariableWidthColumns) {
