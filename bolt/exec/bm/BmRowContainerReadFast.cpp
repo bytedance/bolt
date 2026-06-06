@@ -62,14 +62,16 @@ void BmRowContainer::extractColumnFastTyped(
         const auto row = rows[i];
         if (row.blockId != rowBlockId) {
           auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+          BOLT_CHECK_LE(
+              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
           rowBlockData = pinnedBlockDataAfterPressure(
               row.blockId,
               "BmRowContainer cannot pin a row block for fast extract");
           rowBlockId = row.blockId;
         } else {
           auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+          BOLT_CHECK_LE(
+              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
         }
 
         const auto* rowPtr = rowBlockData + row.rowOffset;
@@ -112,14 +114,16 @@ void BmRowContainer::extractColumnFastTyped(
         const auto row = rows[i];
         if (row.blockId != rowBlockId) {
           auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+          BOLT_CHECK_LE(
+              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
           rowBlockData = pinnedBlockDataAfterPressure(
               row.blockId,
               "BmRowContainer cannot pin a row block for fast extract");
           rowBlockId = row.blockId;
         } else {
           auto& block = blocks_->block(row.blockId);
-          BOLT_CHECK_LE(row.rowOffset + fixedRowSize_, block.usedBytes);
+          BOLT_CHECK_LE(
+              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
         }
 
         const auto* rowPtr = rowBlockData + row.rowOffset;

@@ -36,12 +36,12 @@ void BmRowContainer::extractColumn(
     int32_t column,
     vector_size_t resultOffset,
     const VectorPtr& result,
-    bool exactSize) {
+  bool exactSize) {
   BOLT_CHECK_GE(column, 0);
-  BOLT_CHECK_LT(column, rowColumns_.size());
+  BOLT_CHECK_LT(column, layout_.numColumns());
   BOLT_CHECK_LE(resultOffset + rows.size(), result->size());
 
-  switch (typeKinds_[column]) {
+  switch (layout_.typeKindAt(column)) {
     // Complex types still use the generic path, which currently reports NYI.
     // The fast path below is only valid for flat fixed-width and string types.
     case TypeKind::ARRAY:
@@ -51,9 +51,9 @@ void BmRowContainer::extractColumn(
       break;
     default:
       extractColumnFast(
-          typeKinds_[column],
+          layout_.typeKindAt(column),
           rows,
-          rowColumns_[column],
+          layout_.columnAt(column),
           resultOffset,
           result,
           exactSize);
@@ -66,10 +66,10 @@ void BmRowContainer::extractColumn(
     rowPtrs.push_back(pinRow(row));
   }
   extractDispatch(
-      typeKinds_[column],
+      layout_.typeKindAt(column),
       rowPtrs.data(),
       rows.size(),
-      rowColumns_[column],
+      layout_.columnAt(column),
       result,
       resultOffset,
       exactSize);
@@ -88,12 +88,12 @@ void BmRowContainer::extractNulls(
     int32_t column,
     const BufferPtr& result) {
   BOLT_CHECK_GE(column, 0);
-  BOLT_CHECK_LT(column, rowColumns_.size());
+  BOLT_CHECK_LT(column, layout_.numColumns());
   BOLT_CHECK_GE(result->size(), bits::nbytes(rows.size()));
 
   auto* rawResult = result->asMutable<uint64_t>();
   bits::fillBits(rawResult, 0, rows.size(), false);
-  const auto rowColumn = rowColumns_[column];
+  const auto rowColumn = layout_.columnAt(column);
 
   for (auto i = 0; i < rows.size(); ++i) {
     const auto* row = pinRow(rows[i]);

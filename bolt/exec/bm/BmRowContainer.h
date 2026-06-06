@@ -4,6 +4,7 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/buffer/Buffer.h"
+#include "bolt/exec/bm/BmRowLayout.h"
 #include "bolt/exec/bm/BmRowTypes.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
@@ -93,7 +94,7 @@ class BmRowContainer {
   }
 
   int32_t fixedRowSize() const {
-    return fixedRowSize_;
+    return layout_.fixedRowSize();
   }
 
   uint64_t allocatedBytes() const;
@@ -102,26 +103,25 @@ class BmRowContainer {
   std::optional<int64_t> estimateRowSize() const;
 
   const BmRowColumn& columnAt(int32_t column) const {
-    return rowColumns_.at(column);
+    return layout_.columnAt(column);
   }
 
   const std::vector<BmRowColumn>& columns() const {
-    return rowColumns_;
+    return layout_.columns();
   }
 
   const std::vector<TypePtr>& columnTypes() const {
-    return types_;
+    return layout_.columnTypes();
   }
 
   const std::vector<TypePtr>& keyTypes() const {
-    return keyTypes_;
+    return layout_.keyTypes();
   }
 
   void clear();
   void spillAllBlocksForBenchmark();
 
  private:
-  void computeLayout();
   BmBlockState& ensureWritableRowBlock();
   bool hasRowCapacity(const BmBlockState& block) const;
   char* mutableRow(RowId row);
@@ -196,23 +196,11 @@ class BmRowContainer {
       BmRowColumn column,
       CompareFlags flags);
 
-  std::vector<TypePtr> keyTypes_;
-  std::vector<TypePtr> dependentTypes_;
-  std::vector<TypePtr> types_;
-  std::vector<TypeKind> typeKinds_;
-  std::vector<int32_t> offsets_;
-  std::vector<int32_t> nullOffsets_;
-  std::vector<BmRowColumn> rowColumns_;
-  std::vector<char> initialNulls_;
-
+  BmRowLayout layout_;
   memory::bm::MemoryTag tag_;
   std::unique_ptr<BmPressureAwareBlockArena> blocks_;
   uint32_t rowBlockSize_;
   uint32_t heapBlockSize_;
-  int32_t fixedRowSize_{0};
-  int32_t alignment_{8};
-  int32_t rowSizeOffset_{0};
-  int32_t freeFlagOffset_{0};
   int64_t numRows_{0};
 
   std::vector<uint32_t> heapBlockIds_;

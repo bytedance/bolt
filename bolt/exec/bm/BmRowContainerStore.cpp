@@ -20,11 +20,11 @@ void clearBit(char* bits, uint32_t idx) {
 
 RowId BmRowContainer::newRow() {
   auto& block = ensureWritableRowBlock();
-  const auto rowOffset = bits::roundUp(block.usedBytes, alignment_);
-  BOLT_CHECK_LE(rowOffset + fixedRowSize_, rowBlockSize_);
+  const auto rowOffset = bits::roundUp(block.usedBytes, layout_.alignment());
+  BOLT_CHECK_LE(rowOffset + layout_.fixedRowSize(), rowBlockSize_);
   auto* row = blocks_->activeData(activeRowBlockId_) + rowOffset;
   initializeRow(row);
-  block.usedBytes = rowOffset + fixedRowSize_;
+  block.usedBytes = rowOffset + layout_.fixedRowSize();
   ++block.liveRows;
   ++numRows_;
   return RowId{activeRowBlockId_, static_cast<uint32_t>(rowOffset)};
@@ -36,20 +36,20 @@ void BmRowContainer::store(
     RowId row,
     int32_t column) {
   BOLT_CHECK_GE(column, 0);
-  BOLT_CHECK_LT(column, typeKinds_.size());
+  BOLT_CHECK_LT(column, layout_.numColumns());
   auto* rowPtr = mutableRow(row);
-  const auto rowColumn = rowColumns_[column];
-  storeDispatch(typeKinds_[column], decoded, index, rowPtr, rowColumn);
+  const auto rowColumn = layout_.columnAt(column);
+  storeDispatch(layout_.typeKindAt(column), decoded, index, rowPtr, rowColumn);
 }
 
 std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
   BOLT_CHECK_NOT_NULL(input);
-  BOLT_CHECK_EQ(input->childrenSize(), types_.size());
+  BOLT_CHECK_EQ(input->childrenSize(), layout_.columnTypes().size());
 
   std::vector<DecodedVector> decoded;
-  decoded.reserve(types_.size());
-  for (auto i = 0; i < types_.size(); ++i) {
-    BOLT_CHECK(input->childAt(i)->type()->equivalent(*types_[i]));
+  decoded.reserve(layout_.columnTypes().size());
+  for (auto i = 0; i < layout_.columnTypes().size(); ++i) {
+    BOLT_CHECK(input->childAt(i)->type()->equivalent(*layout_.typeAt(i)));
     decoded.emplace_back(*input->childAt(i));
   }
 
@@ -67,17 +67,19 @@ std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
 
 bool BmRowContainer::tryStore(const RowVectorPtr& input) {
   BOLT_CHECK_NOT_NULL(input);
-  BOLT_CHECK_EQ(input->childrenSize(), types_.size());
-  const auto variableBytes = rowSizeOffset_ == 0 ? 0 : input->estimateFlatSize();
+  BOLT_CHECK_EQ(input->childrenSize(), layout_.columnTypes().size());
+  const auto variableBytes =
+      layout_.hasVariableWidth() ? input->estimateFlatSize() : 0;
 
-  const auto rowsPerBlock = rowBlockSize_ / fixedRowSize_;
+  const auto rowsPerBlock = rowBlockSize_ / layout_.fixedRowSize();
   BOLT_CHECK_GT(rowsPerBlock, 0);
   uint64_t availableRows = 0;
   if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max()) {
     const auto& block = blocks_->block(activeRowBlockId_);
-    const auto rowOffset = bits::roundUp(block.usedBytes, alignment_);
+    const auto rowOffset =
+        bits::roundUp(block.usedBytes, layout_.alignment());
     if (rowOffset < rowBlockSize_) {
-      availableRows = (rowBlockSize_ - rowOffset) / fixedRowSize_;
+      availableRows = (rowBlockSize_ - rowOffset) / layout_.fixedRowSize();
     }
   }
 
@@ -107,17 +109,17 @@ bool BmRowContainer::tryStore(const RowVectorPtr& input) {
 }
 
 char* BmRowContainer::initializeRow(char* row) {
-  std::memset(row, 0, fixedRowSize_);
-  if (!initialNulls_.empty()) {
+  std::memset(row, 0, layout_.fixedRowSize());
+  if (!layout_.initialNulls().empty()) {
     std::memcpy(
-        row + BmRowColumn::nullByte(nullOffsets_[0]),
-        initialNulls_.data(),
-        initialNulls_.size());
+        row + layout_.firstNullByteOffset(),
+        layout_.initialNulls().data(),
+        layout_.initialNulls().size());
   }
-  if (rowSizeOffset_) {
-    *reinterpret_cast<uint32_t*>(row + rowSizeOffset_) = 0;
+  if (layout_.hasVariableWidth()) {
+    *reinterpret_cast<uint32_t*>(row + layout_.rowSizeOffset()) = 0;
   }
-  clearBit(row, freeFlagOffset_);
+  clearBit(row, layout_.freeFlagOffset());
   return row;
 }
 
