@@ -1,18 +1,27 @@
 #include "bolt/exec/bm/BmPressureAwareBlockArena.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/bm/BmBlockReclaimPolicy.h"
 
 #include <algorithm>
 #include <stdexcept>
+
+#include <folly/container/F14Set.h>
 
 namespace bytedance::bolt::exec {
 
 BmPressureAwareBlockArena::BmPressureAwareBlockArena(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
-    memory::bm::MemoryTag tag)
-    : bufferManager_(std::move(bufferManager)), tag_(tag) {
+    memory::bm::MemoryTag tag,
+    std::unique_ptr<BmBlockReclaimPolicy> reclaimPolicy)
+    : bufferManager_(std::move(bufferManager)),
+      tag_(tag),
+      reclaimPolicy_(std::move(reclaimPolicy)) {
   if (!bufferManager_) {
     throw std::invalid_argument("BmPressureAwareBlockArena requires BufferManager");
+  }
+  if (!reclaimPolicy_) {
+    reclaimPolicy_ = std::make_unique<BmLruBlockReclaimPolicy>();
   }
 }
 
@@ -20,37 +29,9 @@ BmPressureAwareBlockArena::~BmPressureAwareBlockArena() {
   clear();
 }
 
-uint32_t BmPressureAwareBlockArena::allocateBlock(
-    uint32_t capacity,
-    const CanReclaimFn& canReclaim,
-    const char* failureMessage) {
-  auto blockId = tryAllocateBlock(capacity);
-  if (blockId.has_value()) {
-    return blockId.value();
-  }
-
-  ensureMemoryForBlock(capacity, canReclaim, failureMessage);
-  blockId = tryAllocateBlock(capacity);
-  BOLT_CHECK(blockId.has_value(), failureMessage);
-  return blockId.value();
-}
-
-bool BmPressureAwareBlockArena::tryReserve(uint64_t bytes) {
-  if (bytes == 0) {
-    return true;
-  }
-  const auto canReserve = bufferManager_->MaybeReserve(bytes);
-  bufferManager_->ReleaseUnusedReservation();
-  return canReserve;
-}
-
-std::optional<uint32_t> BmPressureAwareBlockArena::tryAllocateBlock(
+BlockId BmPressureAwareBlockArena::allocateReservedBlock(
     uint32_t capacity) {
-  if (!bufferManager_->MaybeReserve(capacity)) {
-    return std::nullopt;
-  }
   auto handle = bufferManager_->Allocate(capacity, tag_);
-  bufferManager_->ReleaseUnusedReservation();
 
   BmBlockState state;
   state.block = handle.block();
@@ -63,7 +44,7 @@ std::optional<uint32_t> BmPressureAwareBlockArena::tryAllocateBlock(
   return static_cast<uint32_t>(blocks_.size() - 1);
 }
 
-char* BmPressureAwareBlockArena::activeData(uint32_t blockId) {
+char* BmPressureAwareBlockArena::activeData(BlockId blockId) {
   auto& state = block(blockId);
   BOLT_CHECK(state.pinnedHandle.has_value());
   BOLT_CHECK_NOT_NULL(state.data);
@@ -72,31 +53,33 @@ char* BmPressureAwareBlockArena::activeData(uint32_t blockId) {
 }
 
 const char* BmPressureAwareBlockArena::pinnedData(
-    uint32_t blockId,
+    BlockId blockId,
     const CanReclaimFn& canReclaim,
     const char* failureMessage) {
-  if (const auto* data = tryPinnedData(blockId)) {
+  if (const auto* data = tryPinBlock(blockId)) {
     return data;
   }
 
   auto& state = block(blockId);
-  const auto canReclaimOthers = [&](uint32_t candidateBlockId) {
+  const auto canReclaimOthers = [&](BlockId candidateBlockId) {
     return candidateBlockId != blockId && canReclaim(candidateBlockId);
   };
-  ensureMemoryForBlock(
+  ensureCapacityForPinnedRead(
       state.capacity,
       canReclaimOthers,
       failureMessage);
-  const auto* data = tryPinnedData(blockId);
+  const auto* data = tryPinBlock(blockId);
   BOLT_CHECK_NOT_NULL(data, failureMessage);
   return data;
 }
 
 void BmPressureAwareBlockArena::pinBlocks(
-    std::span<const uint32_t> blockIds,
+    std::span<const BlockId> blockIds,
     const CanReclaimFn& canReclaim) {
-  std::vector<uint32_t> toPin;
+  std::vector<BlockId> toPin;
   toPin.reserve(blockIds.size());
+  folly::F14FastSet<BlockId> seen;
+  seen.reserve(blockIds.size());
   uint64_t bytesToReserve = 0;
   for (auto blockId : blockIds) {
     auto& state = block(blockId);
@@ -104,7 +87,7 @@ void BmPressureAwareBlockArena::pinBlocks(
       touch(state);
       continue;
     }
-    if (std::find(toPin.begin(), toPin.end(), blockId) != toPin.end()) {
+    if (!seen.insert(blockId).second) {
       continue;
     }
     toPin.push_back(blockId);
@@ -114,14 +97,16 @@ void BmPressureAwareBlockArena::pinBlocks(
     return;
   }
 
-  const auto canReclaimOthers = [&](uint32_t candidateBlockId) {
-    return std::find(toPin.begin(), toPin.end(), candidateBlockId) ==
-        toPin.end() && canReclaim(candidateBlockId);
-  };
-  ensureMemoryForBlock(
-      bytesToReserve,
-      canReclaimOthers,
-      "BmPressureAwareBlockArena cannot reserve memory to pin blocks");
+  if (!bufferManager_->MaybeReserve(bytesToReserve)) {
+    bufferManager_->ReleaseUnusedReservation();
+    for (auto blockId : toPin) {
+      pinnedData(
+          blockId,
+          canReclaim,
+          "BmPressureAwareBlockArena cannot reserve memory to pin blocks");
+    }
+    return;
+  }
 
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> handles;
   handles.reserve(toPin.size());
@@ -147,7 +132,7 @@ void BmPressureAwareBlockArena::pinBlocks(
   bufferManager_->ReleaseUnusedReservation();
 }
 
-const char* BmPressureAwareBlockArena::tryPinnedData(uint32_t blockId) {
+const char* BmPressureAwareBlockArena::tryPinBlock(BlockId blockId) {
   auto& state = block(blockId);
   if (!state.pinnedHandle.has_value()) {
     if (!bufferManager_->MaybeReserve(state.capacity)) {
@@ -162,12 +147,12 @@ const char* BmPressureAwareBlockArena::tryPinnedData(uint32_t blockId) {
   return state.data;
 }
 
-BmBlockState& BmPressureAwareBlockArena::block(uint32_t blockId) {
+BmBlockState& BmPressureAwareBlockArena::block(BlockId blockId) {
   BOLT_CHECK_LT(blockId, blocks_.size());
   return blocks_[blockId];
 }
 
-const BmBlockState& BmPressureAwareBlockArena::block(uint32_t blockId) const {
+const BmBlockState& BmPressureAwareBlockArena::block(BlockId blockId) const {
   BOLT_CHECK_LT(blockId, blocks_.size());
   return blocks_[blockId];
 }
@@ -196,53 +181,12 @@ bool BmPressureAwareBlockArena::empty() const {
   return blocks_.empty();
 }
 
-uint64_t BmPressureAwareBlockArena::makeBlocksReclaimable(
-    uint64_t targetBytes,
-    const CanReclaimFn& canReclaim) {
-  std::vector<uint32_t> candidates;
-  candidates.reserve(blocks_.size());
-  for (uint32_t i = 0; i < blocks_.size(); ++i) {
-    if (blocks_[i].pinnedHandle.has_value() && canReclaim(i)) {
-      candidates.push_back(i);
-    }
-  }
-
-  std::sort(candidates.begin(), candidates.end(), [&](auto left, auto right) {
-    return blocks_[left].lastAccess < blocks_[right].lastAccess;
-  });
-
-  uint64_t released = 0;
-  for (auto blockId : candidates) {
-    auto& state = blocks_[blockId];
-    released += state.capacity;
-    state.pinnedHandle.reset();
-    state.data = nullptr;
-    if (targetBytes != 0 && released >= targetBytes) {
-      break;
-    }
-  }
-  return released;
-}
-
-std::vector<std::shared_ptr<memory::bm::BlockHandle>>
-BmPressureAwareBlockArena::reclaimableBlocks(
-    const CanReclaimFn& canReclaim) const {
-  std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
-  blocks.reserve(blocks_.size());
-  for (uint32_t i = 0; i < blocks_.size(); ++i) {
-    const auto& state = blocks_[i];
-    if (!state.pinnedHandle.has_value() && canReclaim(i)) {
-      blocks.push_back(state.block);
-    }
-  }
-  return blocks;
-}
-
 uint32_t BmPressureAwareBlockArena::spillReclaimableBlocks(
     uint64_t targetBytes,
     const CanReclaimFn& canReclaim) {
-  makeBlocksReclaimable(targetBytes, canReclaim);
-  auto blocks = reclaimableBlocks(canReclaim);
+  const auto victims = selectVictims(targetBytes, canReclaim, false);
+  releasePinnedVictims(victims);
+  auto blocks = unpinnedVictimBlocks(victims);
   if (blocks.empty()) {
     return 0;
   }
@@ -257,7 +201,7 @@ void BmPressureAwareBlockArena::clear() {
   }
 }
 
-void BmPressureAwareBlockArena::ensureMemoryForBlock(
+void BmPressureAwareBlockArena::ensureCapacityForPinnedRead(
     uint32_t capacity,
     const CanReclaimFn& canReclaim,
     const char* failureMessage) {
@@ -265,13 +209,89 @@ void BmPressureAwareBlockArena::ensureMemoryForBlock(
     return;
   }
 
-  makeBlocksReclaimable(capacity, canReclaim);
-  auto blocks = reclaimableBlocks(canReclaim);
+  const auto victims = selectVictims(capacity, canReclaim, false);
+  releasePinnedVictims(victims);
+  if (bufferManager_->MaybeReserve(capacity)) {
+    return;
+  }
+
+  auto blocks = unpinnedVictimBlocks(victims);
   if (!blocks.empty()) {
     bufferManager_->SpillBlocks(blocks);
   }
 
   BOLT_CHECK(bufferManager_->MaybeReserve(capacity), failureMessage);
+}
+
+std::vector<BmBlockReclaimCandidate>
+BmPressureAwareBlockArena::reclaimCandidates(
+    const CanReclaimFn& canReclaim,
+    bool pinnedOnly) const {
+  std::vector<BmBlockReclaimCandidate> candidates;
+  candidates.reserve(blocks_.size());
+  for (BlockId i = 0; i < blocks_.size(); ++i) {
+    const auto& state = blocks_[i];
+    const auto pinned = state.pinnedHandle.has_value();
+    if ((!pinnedOnly || pinned) && canReclaim(i)) {
+      candidates.push_back(BmBlockReclaimCandidate{
+          .blockId = i,
+          .capacity = state.capacity,
+          .pinned = pinned,
+          .lastAccess = state.lastAccess,
+      });
+    }
+  }
+  return candidates;
+}
+
+std::vector<BlockId> BmPressureAwareBlockArena::selectVictims(
+    uint64_t targetBytes,
+    const CanReclaimFn& canReclaim,
+    bool pinnedOnly) const {
+  const auto candidates = reclaimCandidates(canReclaim, pinnedOnly);
+  auto victims = reclaimPolicy_->selectVictims(BmBlockReclaimContext{
+      .candidates = candidates,
+      .targetBytes = targetBytes,
+  });
+  for (auto victim : victims) {
+    const auto selectedFromCandidates = std::any_of(
+        candidates.begin(),
+        candidates.end(),
+        [&](const auto& candidate) { return candidate.blockId == victim; });
+    BOLT_CHECK(
+        selectedFromCandidates,
+        "BmBlockReclaimPolicy selected a non-reclaimable block");
+  }
+  return victims;
+}
+
+uint64_t BmPressureAwareBlockArena::releasePinnedVictims(
+    std::span<const BlockId> victims) {
+  uint64_t released = 0;
+  for (auto blockId : victims) {
+    auto& state = block(blockId);
+    if (!state.pinnedHandle.has_value()) {
+      continue;
+    }
+    released += state.capacity;
+    state.pinnedHandle.reset();
+    state.data = nullptr;
+  }
+  return released;
+}
+
+std::vector<std::shared_ptr<memory::bm::BlockHandle>>
+BmPressureAwareBlockArena::unpinnedVictimBlocks(
+    std::span<const BlockId> victims) const {
+  std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
+  blocks.reserve(victims.size());
+  for (auto blockId : victims) {
+    const auto& state = block(blockId);
+    if (!state.pinnedHandle.has_value()) {
+      blocks.push_back(state.block);
+    }
+  }
+  return blocks;
 }
 
 void BmPressureAwareBlockArena::touch(BmBlockState& block) {
