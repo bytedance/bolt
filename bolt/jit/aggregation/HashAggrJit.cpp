@@ -780,6 +780,7 @@ std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
 
 std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind) {
   switch (kind) {
+    case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
       return HashAggrJitValueKind::Int8;
     case TypeKind::SMALLINT:
@@ -801,6 +802,7 @@ std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind) {
 
 bool isHashAggrJitSupportedType(TypeKind kind) {
   switch (kind) {
+    case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
     case TypeKind::SMALLINT:
     case TypeKind::INTEGER:

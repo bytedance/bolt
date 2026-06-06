@@ -94,6 +94,44 @@ TEST_F(CountAggregationTest, count) {
       "SELECT c0 % 10, count(c7) FROM tmp GROUP BY 1");
 }
 
+TEST_F(CountAggregationTest, hashAggrJitBooleanCount) {
+  auto data = makeRowVector(
+      {makeFlatVector<int64_t>(256, [](auto row) { return row % 11; }),
+       makeFlatVector<bool>(
+           256,
+           [](auto row) { return row % 3 == 0; },
+           [](auto row) { return row % 7 == 0; })});
+
+  auto singlePlan = PlanBuilder()
+                        .values({data})
+                        .singleAggregation({"c0"}, {"count(c1)"})
+                        .planNode();
+
+  auto singleNoJit = AssertQueryBuilder(singlePlan, duckDbQueryRunner_)
+                         .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                         .copyResults(pool());
+  auto singleJit = AssertQueryBuilder(singlePlan, duckDbQueryRunner_)
+                       .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                       .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                       .copyResults(pool());
+  assertEqualResults({singleNoJit}, {singleJit});
+
+  auto partialFinalPlan = PlanBuilder()
+                              .values({data})
+                              .partialAggregation({"c0"}, {"count(c1)"})
+                              .finalAggregation()
+                              .planNode();
+
+  auto partialFinalNoJit = AssertQueryBuilder(partialFinalPlan, duckDbQueryRunner_)
+                               .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                               .copyResults(pool());
+  auto partialFinalJit = AssertQueryBuilder(partialFinalPlan, duckDbQueryRunner_)
+                             .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                             .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                             .copyResults(pool());
+  assertEqualResults({partialFinalNoJit}, {partialFinalJit});
+}
+
 TEST_F(CountAggregationTest, mask) {
   std::vector<RowVectorPtr> data;
   // Make batches where some batches have mask all true, some half and half and

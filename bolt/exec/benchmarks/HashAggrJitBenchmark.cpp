@@ -229,7 +229,6 @@ class HashAggrJitBenchmark : public VectorTestBase {
         .config(core::QueryConfig::kHashAggrJitEnabled, enableJit ? "true" : "false")
         .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "4")
         .config(core::QueryConfig::kHashAggrJitMaxFuseWidth, "16")
-        .config(core::QueryConfig::kHashAggrJitCompileMinCount, "3")
         .copyResults(pool_.get());
   }
 

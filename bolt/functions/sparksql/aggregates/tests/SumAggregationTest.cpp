@@ -161,7 +161,6 @@ TEST_F(SumAggregationTest, hashAggrJitDecimalSumAndFloatingMinMax) {
   auto jit = AssertQueryBuilder(plan)
                  .config(core::QueryConfig::kHashAggrJitEnabled, "true")
                  .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
-                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
                  .copyResults(pool());
   assertEqualResults({noJit}, {jit});
 }
@@ -190,7 +189,6 @@ TEST_F(SumAggregationTest, hashAggrJitMergeAndExtract) {
   auto jit = AssertQueryBuilder(plan)
                  .config(core::QueryConfig::kHashAggrJitEnabled, "true")
                  .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
-                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
                  .copyResults(pool());
   assertEqualResults({noJit}, {jit});
 }
@@ -213,7 +211,6 @@ TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
   auto jit = AssertQueryBuilder(plan)
                  .config(core::QueryConfig::kHashAggrJitEnabled, "true")
                  .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
-                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
                  .copyResults(pool());
   assertEqualResults({noJit}, {jit});
 }
@@ -255,7 +252,6 @@ TEST_F(SumAggregationTest, hashAggrJitSplitsContiguousSegments) {
   auto jit = AssertQueryBuilder(plan)
                  .config(core::QueryConfig::kHashAggrJitEnabled, "true")
                  .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
-                 .config(core::QueryConfig::kHashAggrJitCompileMinCount, "1")
                  .config(core::QueryConfig::kHashAggrJitMaxFuseWidth, "4")
                  .copyResults(pool());
   assertEqualResults({noJit}, {jit});

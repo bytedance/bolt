@@ -879,17 +879,16 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     return;
   }
 
-  const auto minFuseWidth = std::max<int32_t>(1, queryConfig_.hashAggrJitMinFuseWidth());
-  const auto maxFuseWidth = std::max<int32_t>(1, queryConfig_.hashAggrJitMaxFuseWidth());
-  const auto compileMinCount =
-      std::max<int32_t>(1, queryConfig_.hashAggrJitCompileMinCount());
-  const auto minChunkWidth = std::max(minFuseWidth, compileMinCount);
+  const auto minFuseWidth =
+      std::max<int32_t>(1, queryConfig_.hashAggrJitMinFuseWidth());
+  const auto maxFuseWidth =
+      std::max<int32_t>(1, queryConfig_.hashAggrJitMaxFuseWidth());
+  const auto minChunkWidth = minFuseWidth;
   LOG(INFO) << "HashAggrJit planning starts: isRawInput=" << isRawInput_
             << " isPartial=" << isPartial_
             << " aggregates=" << aggregates_.size()
             << " minFuseWidth=" << minFuseWidth
             << " maxFuseWidth=" << maxFuseWidth
-            << " compileMinCount=" << compileMinCount
             << " minChunkWidth=" << minChunkWidth;
   std::vector<jit::HashAggrJitSlot> currentChunkSlots;
   currentChunkSlots.reserve(maxFuseWidth);
