@@ -257,6 +257,80 @@ TEST_F(MinMaxTest, hashAggrJitBooleanMinMax) {
   }
 }
 
+TEST_F(MinMaxTest, hashAggrJitShortDecimalMinMax) {
+  auto data = makeRowVector(
+      {makeFlatVector<int64_t>(256, [](auto row) { return row % 13; }),
+       makeFlatVector<int64_t>(
+           256,
+           [](auto row) { return (row * 7) % 101; },
+           [](auto row) { return row % 11 == 0; },
+           DECIMAL(18, 3))});
+
+  for (const auto& makePlan :
+       std::vector<std::function<core::PlanNodePtr()>>{
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .singleAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .planNode();
+           },
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .partialAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .finalAggregation()
+                 .planNode();
+           }}) {
+    auto plan = makePlan();
+    auto noJit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                     .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                     .copyResults(pool());
+    auto jit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                   .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                   .copyResults(pool());
+    assertEqualResults({noJit}, {jit});
+  }
+}
+
+TEST_F(MinMaxTest, hashAggrJitLongDecimalMinMax) {
+  auto data = makeRowVector(
+      {makeFlatVector<int64_t>(256, [](auto row) { return row % 13; }),
+       makeFlatVector<int128_t>(
+           256,
+           [](auto row) {
+             return HugeInt::build(row % 9, (row * 31) % 997);
+           },
+           [](auto row) { return row % 11 == 0; },
+           DECIMAL(38, 19))});
+
+  for (const auto& makePlan :
+       std::vector<std::function<core::PlanNodePtr()>>{
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .singleAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .planNode();
+           },
+           [&]() {
+             return PlanBuilder()
+                 .values({data})
+                 .partialAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                 .finalAggregation()
+                 .planNode();
+           }}) {
+    auto plan = makePlan();
+    auto noJit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                     .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                     .copyResults(pool());
+    auto jit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                   .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                   .copyResults(pool());
+    assertEqualResults({noJit}, {jit});
+  }
+}
+
 TEST_F(MinMaxTest, constVarchar) {
   // Create two batches of the source data for the aggregation:
   // Column c0 with 1K of "apple" and 1K of "banana".

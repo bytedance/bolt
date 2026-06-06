@@ -132,6 +132,51 @@ TEST_F(CountAggregationTest, hashAggrJitBooleanCount) {
   assertEqualResults({partialFinalNoJit}, {partialFinalJit});
 }
 
+TEST_F(CountAggregationTest, hashAggrJitDecimalCount) {
+  auto shortDecimal = makeRowVector(
+      {makeFlatVector<int64_t>(256, [](auto row) { return row % 11; }),
+       makeFlatVector<int64_t>(
+           256,
+           [](auto row) { return (row * 7) % 101; },
+           [](auto row) { return row % 7 == 0; },
+           DECIMAL(18, 3))});
+  auto longDecimal = makeRowVector(
+      {makeFlatVector<int64_t>(256, [](auto row) { return row % 11; }),
+       makeFlatVector<int128_t>(
+           256,
+           [](auto row) { return HugeInt::build(row % 9, (row * 31) % 997); },
+           [](auto row) { return row % 7 == 0; },
+           DECIMAL(38, 19))});
+
+  for (const auto& data : {shortDecimal, longDecimal}) {
+    for (const auto& makePlan :
+         std::vector<std::function<core::PlanNodePtr()>>{
+             [&]() {
+               return PlanBuilder()
+                   .values({data})
+                   .singleAggregation({"c0"}, {"count(c1)"})
+                   .planNode();
+             },
+             [&]() {
+               return PlanBuilder()
+                   .values({data})
+                   .partialAggregation({"c0"}, {"count(c1)"})
+                   .finalAggregation()
+                   .planNode();
+             }}) {
+      auto plan = makePlan();
+      auto noJit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                       .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                       .copyResults(pool());
+      auto jit = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                     .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                     .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                     .copyResults(pool());
+      assertEqualResults({noJit}, {jit});
+    }
+  }
+}
+
 TEST_F(CountAggregationTest, mask) {
   std::vector<RowVectorPtr> data;
   // Make batches where some batches have mask all true, some half and half and

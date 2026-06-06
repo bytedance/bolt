@@ -56,8 +56,9 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
     return context.inputCount == 1 && context.inputType != nullptr &&
-        !context.inputType->isRow() && !context.inputType->isDecimal() &&
-        (jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
+        !context.inputType->isRow() &&
+        (context.inputType->isDecimal() ||
+         jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
          context.inputType->kind() == TypeKind::HUGEINT);
   }
 

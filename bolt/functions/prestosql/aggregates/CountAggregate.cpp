@@ -59,8 +59,9 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     if (context.isRawInput) {
       return context.inputCount == 0 ||
           (context.inputCount == 1 && context.inputType != nullptr &&
-           !context.inputType->isRow() && !context.inputType->isDecimal() &&
-           jit::isHashAggrJitSupportedType(context.inputType->kind()));
+           !context.inputType->isRow() &&
+           (context.inputType->isDecimal() ||
+            jit::isHashAggrJitSupportedType(context.inputType->kind())));
     }
     return context.inputCount == 1 && context.inputType != nullptr &&
         context.inputType->kind() == TypeKind::BIGINT;
