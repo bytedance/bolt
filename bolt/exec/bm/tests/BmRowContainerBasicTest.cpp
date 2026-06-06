@@ -31,7 +31,7 @@ TEST_F(BmRowContainerTest, ExposesRequiredAccessorsAndClear) {
   ASSERT_TRUE(container.estimateRowSize().has_value());
   EXPECT_GT(container.estimateRowSize().value(), 0);
 
-  container.clear();
+  container.discardAllRows();
   EXPECT_EQ(0, container.numRows());
   EXPECT_EQ(0, container.allocatedBytes());
   EXPECT_EQ(0, container.usedBytes());

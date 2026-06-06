@@ -66,7 +66,7 @@ void registerReadSpillBenchmarks(const std::vector<DatasetSpec>& specs) {
                 appendBmRowContainerBatchReturningRows(container, dataset);
             rows.insert(rows.end(), batchRows.begin(), batchRows.end());
           });
-          container.spillAllBlocksForBenchmark();
+          container.spillAllBlocks();
           const auto spillStats = bm->stats();
           suspender.dismiss();
           readBackBmRowContainer(container, rows, allTypes(*spec), leaf.get());

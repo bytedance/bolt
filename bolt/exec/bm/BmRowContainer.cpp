@@ -69,7 +69,7 @@ std::optional<int64_t> BmRowContainer::estimateRowSize() const {
   return static_cast<int64_t>(usedBytes() / numRows_);
 }
 
-void BmRowContainer::clear() {
+void BmRowContainer::discardAllRows() {
   blocks_->clear();
   heapBlockIds_.clear();
   activeRowBlockId_ = std::numeric_limits<uint32_t>::max();
@@ -77,9 +77,10 @@ void BmRowContainer::clear() {
   numRows_ = 0;
 }
 
-void BmRowContainer::spillAllBlocksForBenchmark() {
-  blocks_->spillReclaimableBlocks(
-      0, [this](uint32_t blockId) { return canReclaimBlock(blockId); });
+void BmRowContainer::spillAllBlocks() {
+  blocks_->spillReclaimableBlocks(0, [](uint32_t) { return true; });
+  activeRowBlockId_ = std::numeric_limits<uint32_t>::max();
+  activeHeapBlockId_ = std::numeric_limits<uint32_t>::max();
 }
 
 } // namespace bytedance::bolt::exec

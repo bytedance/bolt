@@ -39,7 +39,15 @@ void BmRowContainer::store(
   BOLT_CHECK_LT(column, layout_.numColumns());
   auto* rowPtr = mutableRow(row);
   const auto rowColumn = layout_.columnAt(column);
-  storeDispatch(layout_.typeKindAt(column), decoded, index, rowPtr, rowColumn);
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      storeWithNulls,
+      layout_.typeKindAt(column),
+      decoded,
+      index,
+      rowPtr,
+      rowColumn.offset(),
+      rowColumn.nullByte(),
+      rowColumn.nullMask());
 }
 
 std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
@@ -65,49 +73,6 @@ std::vector<RowId> BmRowContainer::store(const RowVectorPtr& input) {
   return rows;
 }
 
-bool BmRowContainer::tryStore(const RowVectorPtr& input) {
-  BOLT_CHECK_NOT_NULL(input);
-  BOLT_CHECK_EQ(input->childrenSize(), layout_.columnTypes().size());
-  const auto variableBytes =
-      layout_.hasVariableWidth() ? input->estimateFlatSize() : 0;
-
-  const auto rowsPerBlock = rowBlockSize_ / layout_.fixedRowSize();
-  BOLT_CHECK_GT(rowsPerBlock, 0);
-  uint64_t availableRows = 0;
-  if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max()) {
-    const auto& block = blocks_->block(activeRowBlockId_);
-    const auto rowOffset =
-        bits::roundUp(block.usedBytes, layout_.alignment());
-    if (rowOffset < rowBlockSize_) {
-      availableRows = (rowBlockSize_ - rowOffset) / layout_.fixedRowSize();
-    }
-  }
-
-  const auto remainingRows =
-      input->size() > availableRows ? input->size() - availableRows : 0;
-  const auto rowBlocks =
-      (remainingRows + rowsPerBlock - 1) / rowsPerBlock;
-
-  uint64_t heapBlocks = 0;
-  uint64_t remainingHeapBytes = 0;
-  if (activeHeapBlockId_ != std::numeric_limits<uint32_t>::max()) {
-    const auto& block = blocks_->block(activeHeapBlockId_);
-    BOLT_CHECK_LE(block.usedBytes, heapBlockSize_);
-    remainingHeapBytes = heapBlockSize_ - block.usedBytes;
-  }
-  if (variableBytes > remainingHeapBytes) {
-    const auto newHeapBytes = variableBytes - remainingHeapBytes;
-    heapBlocks = (newHeapBytes + heapBlockSize_ - 1) / heapBlockSize_;
-  }
-
-  const auto bytesToReserve =
-      rowBlocks * rowBlockSize_ + heapBlocks * heapBlockSize_;
-  if (bytesToReserve == 0) {
-    return true;
-  }
-  return blocks_->tryReserve(bytesToReserve);
-}
-
 char* BmRowContainer::initializeRow(char* row) {
   std::memset(row, 0, layout_.fixedRowSize());
   if (!layout_.initialNulls().empty()) {
@@ -131,8 +96,7 @@ VarData BmRowContainer::appendVariableWidth(StringView value) {
   if (activeHeapBlockId_ == std::numeric_limits<uint32_t>::max() ||
       blocks_->block(activeHeapBlockId_).usedBytes + value.size() >
           heapBlockSize_) {
-    activeHeapBlockId_ = allocateBlockAfterPressure(
-        heapBlockSize_, "BmRowContainer cannot allocate a new heap block");
+    activeHeapBlockId_ = blocks_->allocateReservedBlock(heapBlockSize_);
     heapBlockIds_.push_back(activeHeapBlockId_);
   }
 
@@ -147,23 +111,6 @@ VarData BmRowContainer::appendVariableWidth(StringView value) {
       activeHeapBlockId_,
       static_cast<uint32_t>(offset),
       static_cast<uint32_t>(value.size())};
-}
-
-void BmRowContainer::storeDispatch(
-    TypeKind kind,
-    const DecodedVector& decoded,
-    vector_size_t index,
-    char* row,
-    BmRowColumn column) {
-  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      storeWithNulls,
-      kind,
-      decoded,
-      index,
-      row,
-      column.offset(),
-      column.nullByte(),
-      column.nullMask());
 }
 
 template <TypeKind Kind>
