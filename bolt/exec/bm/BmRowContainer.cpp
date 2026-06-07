@@ -78,7 +78,7 @@ void BmRowContainer::discardAllRows() {
 }
 
 void BmRowContainer::spillAllBlocks() {
-  blocks_->spillReclaimableBlocks(0, [](uint32_t) { return true; });
+  blocks_->spillReclaimableBlocks(0, {});
   activeRowBlockId_ = std::numeric_limits<uint32_t>::max();
   activeHeapBlockId_ = std::numeric_limits<uint32_t>::max();
 }

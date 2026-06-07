@@ -5,7 +5,6 @@
 #include "bolt/exec/bm/BmBlockReclaimPolicy.h"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -25,8 +24,6 @@ struct BmBlockState {
 
 class BmPressureAwareBlockArena {
  public:
-  using CanReclaimFn = std::function<bool(BlockId blockId)>;
-
   BmPressureAwareBlockArena(
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       memory::bm::MemoryTag tag,
@@ -37,12 +34,12 @@ class BmPressureAwareBlockArena {
   char* activeData(BlockId blockId);
   const char* pinnedData(
       BlockId blockId,
-      const CanReclaimFn& canReclaim,
+      std::span<const BlockId> protectedBlocks,
       const char* failureMessage =
           "BmPressureAwareBlockArena cannot reserve memory to pin a block");
   void pinBlocks(
       std::span<const BlockId> blockIds,
-      const CanReclaimFn& canReclaim);
+      std::span<const BlockId> protectedBlocks);
 
   BmBlockState& block(BlockId blockId);
   const BmBlockState& block(BlockId blockId) const;
@@ -54,7 +51,7 @@ class BmPressureAwareBlockArena {
 
   uint32_t spillReclaimableBlocks(
       uint64_t targetBytes,
-      const CanReclaimFn& canReclaim);
+      std::span<const BlockId> protectedBlocks);
 
   void clear();
 
@@ -62,15 +59,18 @@ class BmPressureAwareBlockArena {
   const char* tryPinBlock(BlockId blockId);
   void ensureCapacityForPinnedRead(
       uint32_t capacity,
-      const CanReclaimFn& canReclaim,
+      std::span<const BlockId> protectedBlocks,
       const char* failureMessage);
   std::vector<BmBlockReclaimCandidate> reclaimCandidates(
-      const CanReclaimFn& canReclaim,
+      std::span<const BlockId> protectedBlocks,
       bool pinnedOnly) const;
   std::vector<BlockId> selectVictims(
       uint64_t targetBytes,
-      const CanReclaimFn& canReclaim,
+      std::span<const BlockId> protectedBlocks,
       bool pinnedOnly) const;
+  bool containsProtectedBlock(
+      std::span<const BlockId> protectedBlocks,
+      BlockId blockId) const;
   uint64_t releasePinnedVictims(std::span<const BlockId> victims);
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> unpinnedVictimBlocks(
       std::span<const BlockId> victims) const;

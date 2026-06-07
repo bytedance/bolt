@@ -9,11 +9,8 @@
 namespace bytedance::bolt::exec {
 
 void BmRowContainer::preload(std::vector<BlockId>& blockIds) {
-  blocks_->pinBlocks(
-      blockIds,
-      [this](uint32_t candidateBlockId) {
-        return canReclaimBlock(candidateBlockId);
-      });
+  const auto protectedBlocks = protectedBlocksForRead(blockIds);
+  blocks_->pinBlocks(blockIds, protectedBlocks);
 }
 
 BmBlockState& BmRowContainer::ensureWritableRowBlock() {
@@ -45,16 +42,28 @@ const char* BmRowContainer::pinRow(RowId row) {
 const char* BmRowContainer::pinBlockForRead(
     uint32_t blockId,
     const char* failureMessage) {
+  const auto protectedBlocks =
+      protectedBlocksForRead(std::span<const BlockId>(&blockId, 1));
   return blocks_->pinnedData(
       blockId,
-      [this, blockId](uint32_t candidateBlockId) {
-        return candidateBlockId != blockId && canReclaimBlock(candidateBlockId);
-      },
+      protectedBlocks,
       failureMessage);
 }
 
-bool BmRowContainer::canReclaimBlock(uint32_t blockId) const {
-  return blockId != activeRowBlockId_ && blockId != activeHeapBlockId_;
+std::vector<BlockId> BmRowContainer::protectedBlocksForRead(
+    std::span<const BlockId> blockIds) const {
+  std::vector<BlockId> protectedBlocks;
+  protectedBlocks.reserve(blockIds.size() + 2);
+  for (auto blockId : blockIds) {
+    protectedBlocks.push_back(blockId);
+  }
+  if (activeRowBlockId_ != std::numeric_limits<uint32_t>::max()) {
+    protectedBlocks.push_back(activeRowBlockId_);
+  }
+  if (activeHeapBlockId_ != std::numeric_limits<uint32_t>::max()) {
+    protectedBlocks.push_back(activeHeapBlockId_);
+  }
+  return protectedBlocks;
 }
 
 } // namespace bytedance::bolt::exec
