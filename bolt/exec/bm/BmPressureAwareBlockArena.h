@@ -40,6 +40,7 @@ class BmPressureAwareBlockArena {
   void pinBlocks(
       std::span<const BlockId> blockIds,
       std::span<const BlockId> protectedBlocks);
+  void tryPinBlocks(std::span<const BlockId> blockIds);
 
   BmBlockState& block(BlockId blockId);
   const BmBlockState& block(BlockId blockId) const;

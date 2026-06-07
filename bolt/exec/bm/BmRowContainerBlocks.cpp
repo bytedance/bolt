@@ -6,11 +6,30 @@
 
 #include <limits>
 
+#include <folly/container/F14Set.h>
+
 namespace bytedance::bolt::exec {
 
-void BmRowContainer::preload(std::vector<BlockId>& blockIds) {
-  const auto protectedBlocks = protectedBlocksForRead(blockIds);
-  blocks_->pinBlocks(blockIds, protectedBlocks);
+void BmRowContainer::preloadRows(folly::Range<const RowId*> rows) {
+  std::vector<BlockId> blockIds;
+  blockIds.reserve(rows.size() * 2);
+  folly::F14FastSet<BlockId> seen;
+  seen.reserve(rows.size() * 2);
+
+  const auto addBlock = [&](BlockId blockId) {
+    if (seen.insert(blockId).second) {
+      blockIds.push_back(blockId);
+    }
+  };
+
+  for (const auto row : rows) {
+    addBlock(row.rowBlockId());
+    if (const auto heapBlockId = row.primaryHeapBlockId()) {
+      addBlock(*heapBlockId);
+    }
+  }
+
+  blocks_->tryPinBlocks(blockIds);
 }
 
 BmBlockState& BmRowContainer::ensureWritableRowBlock() {
@@ -27,16 +46,17 @@ bool BmRowContainer::hasRowCapacity(const BmBlockState& block) const {
 }
 
 char* BmRowContainer::mutableRow(RowId row) {
-  auto& block = blocks_->block(row.blockId);
-  BOLT_CHECK_LE(row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
-  return blocks_->activeData(row.blockId) + row.rowOffset;
+  auto& block = blocks_->block(row.rowBlockId());
+  BOLT_CHECK_LE(row.rowOffset() + layout_.fixedRowSize(), block.usedBytes);
+  return blocks_->activeData(row.rowBlockId()) + row.rowOffset();
 }
 
 const char* BmRowContainer::pinRow(RowId row) {
-  auto& block = blocks_->block(row.blockId);
-  BOLT_CHECK_LE(row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
-  return pinBlockForRead(row.blockId, "BmRowContainer cannot pin a row block") +
-      row.rowOffset;
+  auto& block = blocks_->block(row.rowBlockId());
+  BOLT_CHECK_LE(row.rowOffset() + layout_.fixedRowSize(), block.usedBytes);
+  return pinBlockForRead(
+             row.rowBlockId(), "BmRowContainer cannot pin a row block") +
+      row.rowOffset();
 }
 
 const char* BmRowContainer::pinBlockForRead(

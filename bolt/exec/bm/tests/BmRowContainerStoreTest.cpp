@@ -3,6 +3,24 @@
 namespace bytedance::bolt::exec {
 namespace {
 
+TEST_F(BmRowContainerTest, RowIdStoresPrimaryHeapBlockHintInEightBytes) {
+  static_assert(sizeof(RowId) == sizeof(uint64_t));
+
+  auto bufferManager = makeBufferManager("row-id-heap-hint");
+  BmRowContainer container({VARCHAR()}, {}, bufferManager);
+
+  auto input = makeVarcharVector(leaf_.get(), {StringView("hello")});
+  DecodedVector decoded(*input);
+
+  auto row = container.newRow();
+  EXPECT_FALSE(row.primaryHeapBlockId().has_value());
+
+  container.store(decoded, 0, row, 0);
+
+  ASSERT_TRUE(row.primaryHeapBlockId().has_value());
+  EXPECT_NE(row.rowBlockId(), row.primaryHeapBlockId().value());
+}
+
 TEST_F(BmRowContainerTest, StoresAndExtractsFixedWidthColumnByRowRef) {
   auto bufferManager = makeBufferManager("fixed-width");
   BmRowContainer container({BIGINT()}, {}, bufferManager);

@@ -37,14 +37,14 @@ void BmRowContainer::extractColumnFastTyped(
     if constexpr (std::is_same_v<T, StringView>) {
       for (auto i = 0; i < rows.size(); ++i) {
         const auto row = rows[i];
-        auto& rowBlock = blocks_->block(row.blockId);
+        auto& rowBlock = blocks_->block(row.rowBlockId());
         BOLT_CHECK_LE(
-            row.rowOffset + layout_.fixedRowSize(), rowBlock.usedBytes);
+            row.rowOffset() + layout_.fixedRowSize(), rowBlock.usedBytes);
         const auto* rowBlockData = pinBlockForRead(
-            row.blockId,
+            row.rowBlockId(),
             "BmRowContainer cannot pin a row block for fast extract");
 
-        const auto* rowPtr = rowBlockData + row.rowOffset;
+        const auto* rowPtr = rowBlockData + row.rowOffset();
         const auto output = resultOffset + i;
         const auto isNull =
             isNullAt(rowPtr, column.nullByte(), column.nullMask());
@@ -76,21 +76,21 @@ void BmRowContainer::extractColumnFastTyped(
       const char* rowBlockData = nullptr;
       for (auto i = 0; i < rows.size(); ++i) {
         const auto row = rows[i];
-        if (row.blockId != rowBlockId) {
-          auto& block = blocks_->block(row.blockId);
+        if (row.rowBlockId() != rowBlockId) {
+          auto& block = blocks_->block(row.rowBlockId());
           BOLT_CHECK_LE(
-              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
+              row.rowOffset() + layout_.fixedRowSize(), block.usedBytes);
           rowBlockData = pinBlockForRead(
-              row.blockId,
+              row.rowBlockId(),
               "BmRowContainer cannot pin a row block for fast extract");
-          rowBlockId = row.blockId;
+          rowBlockId = row.rowBlockId();
         } else {
-          auto& block = blocks_->block(row.blockId);
+          auto& block = blocks_->block(row.rowBlockId());
           BOLT_CHECK_LE(
-              row.rowOffset + layout_.fixedRowSize(), block.usedBytes);
+              row.rowOffset() + layout_.fixedRowSize(), block.usedBytes);
         }
 
-        const auto* rowPtr = rowBlockData + row.rowOffset;
+        const auto* rowPtr = rowBlockData + row.rowOffset();
         const auto output = resultOffset + i;
         const auto isNull =
             isNullAt(rowPtr, column.nullByte(), column.nullMask());

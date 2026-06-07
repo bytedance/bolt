@@ -20,7 +20,7 @@ TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
       auto row = container.newRow();
       container.store(decoded, 0, row, 0);
       if (sampledRows.empty() ||
-          row.blockId != sampledRows.back().blockId) {
+          row.rowBlockId() != sampledRows.back().rowBlockId()) {
         sampledRows.push_back(row);
       }
     }
@@ -63,7 +63,7 @@ TEST_F(BmRowContainerTest, SpillsColdBlocksAndReadsThemBack) {
 }
 
 
-TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
+TEST_F(BmRowContainerTest, PreloadRowsPinsSpilledBlocksForLaterAccess) {
   auto limitedRoot = memoryManager_.addRootPool(
       "bm-row-container-preload-root",
       64 * 1024 * 1024,
@@ -79,7 +79,8 @@ TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
   while (container.allocatedBytes() < 3 * 4096) {
     auto row = container.newRow();
     container.store(decoded, 0, row, 0);
-    if (sampledRows.empty() || row.blockId != sampledRows.back().blockId) {
+    if (sampledRows.empty() ||
+        row.rowBlockId() != sampledRows.back().rowBlockId()) {
       sampledRows.push_back(row);
     }
   }
@@ -95,10 +96,9 @@ TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
   }
   ASSERT_GE(bufferManager->stats().spillWriteCount, 1);
 
-  std::vector<BlockId> blockIds{sampledRows.front().blockId};
   const auto statsBeforePreload = bufferManager->stats();
   try {
-    container.preload(blockIds);
+    container.preloadRows(folly::Range<const RowId*>(sampledRows.data(), 1));
   } catch (const std::exception& e) {
     if (isIoUringUnavailable(e)) {
       GTEST_SKIP() << e.what();
@@ -106,9 +106,6 @@ TEST_F(BmRowContainerTest, PreloadBatchPinsSpilledBlocksForLaterAccess) {
     throw;
   }
   const auto statsAfterPreload = bufferManager->stats();
-  EXPECT_EQ(
-      statsBeforePreload.batchPinCount + 1,
-      statsAfterPreload.batchPinCount);
   EXPECT_GE(
       statsAfterPreload.spillReadCount,
       statsBeforePreload.spillReadCount + 1);
@@ -146,7 +143,7 @@ TEST_F(BmRowContainerTest, SpillsVariableWidthHeapBlocksAndReadsThemBack) {
     while (container.heapAllocatedBytes() < 6 * kBlockSize) {
       auto row = container.newRow();
       container.store(decoded, 0, row, 0);
-      if (rows.empty() || row.blockId != rows.back().blockId) {
+      if (rows.empty() || row.rowBlockId() != rows.back().rowBlockId()) {
         rows.push_back(row);
       }
     }
