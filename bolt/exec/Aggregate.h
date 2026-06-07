@@ -125,6 +125,14 @@ class Aggregate {
   jit::HashAggrJitSlot createHashAggrJitSlot(
       int32_t aggregateIndex,
       const jit::HashAggrJitDescriptor& descriptor) const;
+
+  // HashAggr JIT initGroup marks accumulators as null by writing the null bit
+  // directly, bypassing setAllNulls/setNull. Since non-JIT extract relies on
+  // numNulls_ (see isNull()), GroupingSet must keep it in sync after running
+  // the JIT init path for the corresponding number of new groups.
+  void addNumNulls(uint64_t count) {
+    numNulls_ += count;
+  }
 #endif
 
   void setAllocator(HashStringAllocator* allocator) {

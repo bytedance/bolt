@@ -92,6 +92,7 @@ class DecimalSumAggregate : public exec::Aggregate {
         false,
         !context.isRawInput,
         true,
+        /*initSetsNull=*/true,
         hashAggrJitOps()};
   }
 

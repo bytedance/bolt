@@ -74,6 +74,7 @@ class AverageAggregate
           false,
           true,
           false,
+          /*initSetsNull=*/true,
           hashAggrJitOps()};
     }
 
@@ -88,6 +89,7 @@ class AverageAggregate
         false,
         false,
         false,
+        /*initSetsNull=*/true,
         hashAggrJitOps()};
   }
 
@@ -274,6 +276,7 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
         false,
         !context.isRawInput,
         true,
+        /*initSetsNull=*/true,
         hashAggrJitOps()};
   }
 #endif

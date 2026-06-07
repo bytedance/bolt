@@ -58,6 +58,10 @@ struct HashAggrJitDescriptor {
   bool countStar{false};
   bool mergeInput{false};
   bool decimal{false};
+  // Whether initGroup marks the accumulator as null for each new group. When
+  // true, GroupingSet must keep Aggregate::numNulls_ in sync (non-JIT extract
+  // relies on it), mirroring the non-JIT initializeNewGroups path.
+  bool initSetsNull{false};
   const struct HashAggrJitOps* ops{nullptr};
 
   std::string signature() const;
@@ -100,6 +104,7 @@ struct HashAggrJitSlot {
   bool countStar{false};
   bool mergeInput{false};
   bool decimal{false};
+  bool initSetsNull{false};
   const HashAggrJitOps* ops{nullptr};
 };
 

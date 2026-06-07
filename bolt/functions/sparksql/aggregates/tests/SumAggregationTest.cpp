@@ -215,6 +215,33 @@ TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
   assertEqualResults({noJit}, {jit});
 }
 
+TEST_F(SumAggregationTest, hashAggrJitAllNullGroup) {
+  // Repro: one group (c0 == 1) has all-null sum input. Spark sum over an
+  // all-null group must yield null, not 0. Partial+final two-stage plan.
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(8, [](auto row) { return row % 2; }),
+       makeFlatVector<double>(
+           8,
+           [](auto row) { return static_cast<double>(row); },
+           // c0 == 1 rows (odd rows) are all null.
+           [](auto row) { return row % 2 == 1; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation({"c0"}, {"spark_sum(c1)"})
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
 TEST_F(SumAggregationTest, hashAggrJitSplitsContiguousSegments) {
   auto input = makeRowVector(
       {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),

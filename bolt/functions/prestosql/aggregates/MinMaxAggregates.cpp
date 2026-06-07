@@ -78,6 +78,7 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
         false,
         !context.isRawInput,
         false,
+        /*initSetsNull=*/true,
         hashAggrJitOps()};
   }
 
