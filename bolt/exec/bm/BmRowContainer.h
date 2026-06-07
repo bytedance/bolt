@@ -41,14 +41,13 @@ class BmRowContainer {
   void store(
       const DecodedVector& decoded,
       vector_size_t index,
-      RowId row,
+      RowId& row,
       int32_t column);
 
   std::vector<RowId> store(const RowVectorPtr& input);
 
-  // 1. 在Sort多路合并之前，多个路可以同时preload。
-  // 2. 在Hash Join的时候，把所有数据尝试加载到内存，优化访问
-  void preload(std::vector<BlockId>& blockIds);
+  // 尝试把行所在的row block和主heap block加载进内存，不保证全部成功。
+  void preloadRows(folly::Range<const RowId*> rows);
 
   // 对Row Container的访问，要么就零散地走Extract Column，要么就走Batch Preload。
   void extractColumn(
@@ -136,6 +135,7 @@ class BmRowContainer {
   void storeWithNulls(
       const DecodedVector& decoded,
       vector_size_t index,
+      RowId& rowId,
       char* row,
       int32_t offset,
       int32_t nullByte,

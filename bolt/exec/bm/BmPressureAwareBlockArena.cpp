@@ -143,6 +143,16 @@ void BmPressureAwareBlockArena::pinBlocks(
   bufferManager_->ReleaseUnusedReservation();
 }
 
+void BmPressureAwareBlockArena::tryPinBlocks(std::span<const BlockId> blockIds) {
+  for (auto blockId : blockIds) {
+    try {
+      tryPinBlock(blockId);
+    } catch (...) {
+      bufferManager_->ReleaseUnusedReservation();
+    }
+  }
+}
+
 const char* BmPressureAwareBlockArena::tryPinBlock(BlockId blockId) {
   auto& state = block(blockId);
   if (!state.pinnedHandle.has_value()) {

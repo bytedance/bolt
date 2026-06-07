@@ -91,7 +91,8 @@ TEST_F(BmRowContainerTest, ExtractsRowsAcrossMultipleBlocks) {
   while (container.allocatedBytes() < 2 * kLargeBlockBytes) {
     auto row = container.newRow();
     container.store(decoded, 0, row, 0);
-    if (sampledRows.empty() || row.blockId != sampledRows.back().blockId) {
+    if (sampledRows.empty() ||
+        row.rowBlockId() != sampledRows.back().rowBlockId()) {
       sampledRows.push_back(row);
     }
   }
@@ -156,7 +157,7 @@ TEST_F(BmRowContainerTest, StoresVariableWidthDataAcrossMultipleHeapBlocks) {
     auto row = container.newRow();
     container.store(decoded, 0, row, 0);
     if (sampledRows.empty() ||
-        row.blockId != sampledRows.back().blockId) {
+        row.rowBlockId() != sampledRows.back().rowBlockId()) {
       sampledRows.push_back(row);
     }
   }

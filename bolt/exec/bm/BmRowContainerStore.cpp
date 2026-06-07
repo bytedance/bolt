@@ -27,13 +27,13 @@ RowId BmRowContainer::newRow() {
   block.usedBytes = rowOffset + layout_.fixedRowSize();
   ++block.liveRows;
   ++numRows_;
-  return RowId{activeRowBlockId_, static_cast<uint32_t>(rowOffset)};
+  return RowId::make(activeRowBlockId_, static_cast<uint32_t>(rowOffset));
 }
 
 void BmRowContainer::store(
     const DecodedVector& decoded,
     vector_size_t index,
-    RowId row,
+    RowId& row,
     int32_t column) {
   BOLT_CHECK_GE(column, 0);
   BOLT_CHECK_LT(column, layout_.numColumns());
@@ -44,6 +44,7 @@ void BmRowContainer::store(
       layout_.typeKindAt(column),
       decoded,
       index,
+      row,
       rowPtr,
       rowColumn.offset(),
       rowColumn.nullByte(),
@@ -117,6 +118,7 @@ template <TypeKind Kind>
 void BmRowContainer::storeWithNulls(
     const DecodedVector& decoded,
     vector_size_t index,
+    RowId& rowId,
     char* row,
     int32_t offset,
     int32_t nullByte,
@@ -144,8 +146,11 @@ void BmRowContainer::storeWithNulls(
 
     row[nullByte] &= ~nullMask;
     if constexpr (std::is_same_v<T, StringView>) {
-      *reinterpret_cast<VarData*>(row + offset) =
-          appendVariableWidth(decoded.valueAt<StringView>(index));
+      const auto ref = appendVariableWidth(decoded.valueAt<StringView>(index));
+      *reinterpret_cast<VarData*>(row + offset) = ref;
+      if (ref.size != 0 && !rowId.primaryHeapBlockId().has_value()) {
+        rowId.setPrimaryHeapBlockId(ref.blockId);
+      }
     } else {
       *reinterpret_cast<T*>(row + offset) = decoded.valueAt<T>(index);
     }

@@ -207,6 +207,29 @@ TEST_F(BmPressureAwareBlockArenaTest, PinBlocksBatchPinsResidentBlocks) {
   EXPECT_EQ(0, std::memcmp(arena.block(blockId).data, "arena-pin-blocks", 17));
 }
 
+TEST_F(BmPressureAwareBlockArenaTest, TryPinBlocksSkipsBlocksOnPressure) {
+  auto root = memoryManager_.addRootPool(
+      "bm-pressure-aware-arena-try-pin-blocks-root",
+      16 << 20,
+      memory::MemoryReclaimer::create());
+  auto bufferManager = makeBufferManager("try-pin-blocks", root.get());
+  BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
+
+  const auto target = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  const auto other = allocateReservedBlock(arena, bufferManager, 8 << 20);
+  arena.block(target).pinnedHandle.reset();
+  arena.block(target).data = nullptr;
+
+  const std::vector<BlockId> blockIds{target};
+  const auto statsBeforePin = bufferManager->stats();
+  arena.tryPinBlocks(blockIds);
+
+  const auto statsAfterPin = bufferManager->stats();
+  EXPECT_EQ(statsBeforePin.spillWriteCount, statsAfterPin.spillWriteCount);
+  EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
+  EXPECT_TRUE(arena.block(other).pinnedHandle.has_value());
+}
+
 TEST_F(BmPressureAwareBlockArenaTest, SpillReclaimableBlocksAndPinReadback) {
   auto bufferManager = makeBufferManager("spill-readback");
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
