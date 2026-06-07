@@ -1,0 +1,109 @@
+#pragma once
+
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <vector>
+
+namespace bytedance::bolt::exec::bm {
+
+using SegmentId = uint32_t;
+using SortedRunId = uint32_t;
+using BlockId = uint32_t;
+using RowOffset = uint32_t;
+using RowNumber = uint32_t;
+using PartitionId = uint32_t;
+using ChunkId = uint32_t;
+using PartId = uint32_t;
+
+constexpr BlockId kNoBlock = std::numeric_limits<BlockId>::max();
+constexpr PartitionId kDefaultPartition = 0;
+
+enum class SegmentState {
+  kActiveResident,
+  kFinalizedResident,
+  kFinalizedFlushed,
+};
+
+enum class ReadMode {
+  kFullyResident,
+  kWindowRead,
+};
+
+enum class SortedRunLayout {
+  kRowIdOrder,
+  kMaterializedOrder,
+};
+
+enum class ReleaseReason {
+  kConsumed,
+  kDiscarded,
+};
+
+struct RowId {
+  SegmentId segmentId{0};
+  RowNumber rowNumber{0};
+  BlockId rowBlockId{kNoBlock};
+  RowOffset rowOffset{0};
+  BlockId primaryHeapBlockId{kNoBlock};
+};
+
+struct RowHandle {
+  RowId id;
+  char* ptr{nullptr};
+};
+
+struct ReadSessionOptions {
+  uint64_t maxPinnedBytes{0};
+  bool releaseWhenConsumed{false};
+};
+
+struct SortedRunOptions {
+  SortedRunLayout preferredLayout{SortedRunLayout::kRowIdOrder};
+};
+
+struct HeapBaseRef {
+  BlockId heapBlockId{kNoBlock};
+  uintptr_t baseAddress{0};
+  uint32_t capacity{0};
+};
+
+struct ChunkPartMeta {
+  PartId id{0};
+  ChunkId chunkId{0};
+  BlockId rowBlockId{kNoBlock};
+  uint32_t rowBlockOffset{0};
+  uint32_t rowCount{0};
+  std::vector<HeapBaseRef> heapBases;
+};
+
+struct DataChunkMeta {
+  ChunkId id{0};
+  SegmentId segmentId{0};
+  RowNumber firstRowNumber{0};
+  uint32_t rowCount{0};
+  std::vector<PartId> parts;
+  std::vector<BlockId> rowBlocks;
+  std::vector<BlockId> heapBlocks;
+};
+
+struct SegmentMeta {
+  SegmentId id{0};
+  SegmentState state{SegmentState::kActiveResident};
+  std::optional<PartitionId> partitionId;
+  std::vector<BlockId> rowBlocks;
+  std::vector<BlockId> heapBlocks;
+  std::vector<ChunkId> chunks;
+  uint64_t numRows{0};
+};
+
+struct SortedRunMeta {
+  SortedRunId id{0};
+  SortedRunLayout layout{SortedRunLayout::kRowIdOrder};
+  std::vector<SegmentId> sourceSegments;
+  std::vector<RowId> sortedRows;
+  std::optional<SegmentId> materializedSegment;
+  uint64_t numRows{0};
+};
+
+} // namespace bytedance::bolt::exec::bm
