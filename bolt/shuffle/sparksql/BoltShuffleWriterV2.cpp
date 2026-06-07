@@ -296,7 +296,7 @@ arrow::Status BoltShuffleWriterV2::stop() {
 }
 
 arrow::Status BoltShuffleWriterV2::tryEvict(int64_t memLimit) {
-  // Mark as unevictable to avoid recursive spill.
+  // add EvictGuard to avoid recursive evict
   EvictGuard evictGuard{evictState_};
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     partitionWriter_->setRowFormat(false);
