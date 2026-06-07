@@ -166,8 +166,7 @@ arrow::Status BoltRowBasedSortShuffleWriter::initFromRowVector(
 }
 
 arrow::Status BoltRowBasedSortShuffleWriter::tryEvict(int64_t) {
-  // add EvictGuard to avoid recursive evict
-  BOLT_CHECK(evictState_ == EvictState::kEvictable);
+  // Mark as unevictable to avoid recursive spill.
   EvictGuard evictGuard{evictState_};
   BOLT_DCHECK(vectorLayout_ != RowVectorLayout::kInvalid);
   if (vectorLayout_ == RowVectorLayout::kColumnar) {

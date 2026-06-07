@@ -36,6 +36,7 @@ bolt_add_library(
   Cursor.cpp
   HiveConnectorTestBase.cpp
   LocalExchangeSource.cpp
+  MemoryHogOperator.cpp
   OperatorTestBase.cpp
   PlanBuilder.cpp
   PortUtil.cpp
