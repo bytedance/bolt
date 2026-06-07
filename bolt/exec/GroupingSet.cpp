@@ -873,7 +873,7 @@ const SelectivityVector& GroupingSet::getSelectivityVector(
 void GroupingSet::maybeCreateHashAggrJitPlan() {
   hashAggrJitChunks_.clear();
   if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
-    LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
+    VLOG(1) << "HashAggrJit plan disabled: enableHashAggrJit="
               << queryConfig_.enableHashAggrJit() << " isGlobal=" << isGlobal_
               << " ignoreNullKeys=" << ignoreNullKeys_;
     return;
@@ -884,7 +884,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   const auto maxFuseWidth =
       std::max<int32_t>(1, queryConfig_.hashAggrJitMaxFuseWidth());
   const auto minChunkWidth = minFuseWidth;
-  LOG(INFO) << "HashAggrJit planning starts: isRawInput=" << isRawInput_
+  VLOG(1) << "HashAggrJit planning starts: isRawInput=" << isRawInput_
             << " isPartial=" << isPartial_
             << " aggregates=" << aggregates_.size()
             << " minFuseWidth=" << minFuseWidth
@@ -904,7 +904,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
           const auto& slot = currentChunkSlots[i];
           out << hashAggrJitSlotDebugString(slot, &aggregates_[slot.aggregateIndex]);
         }
-        LOG(INFO) << "HashAggrJit discard chunk candidate due to width "
+        VLOG(1) << "HashAggrJit discard chunk candidate due to width "
                   << currentChunkSlots.size() << " < " << minChunkWidth
                   << ": [" << out.str() << "]";
       }
@@ -914,11 +914,11 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     jit::HashAggrJitChunk chunk(std::move(currentChunkSlots), isPartial_);
     if (chunk.codegen()) {
       hashAggrJitChunks_.push_back(std::move(chunk));
-      LOG(INFO) << "HashAggrJit formed chunk: "
+      VLOG(1) << "HashAggrJit formed chunk: "
                 << hashAggrJitChunkDebugString(
                        hashAggrJitChunks_.back(), aggregates_);
     } else {
-      LOG(INFO) << "HashAggrJit chunk codegen failed for chunk "
+      VLOG(1) << "HashAggrJit chunk codegen failed for chunk "
                 << chunk.functionName();
     }
     currentChunkSlots.clear();
@@ -928,7 +928,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   for (auto i = 0; i < aggregates_.size(); ++i) {
     auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_, isPartial_);
     if (!slot.has_value()) {
-      LOG(INFO) << "HashAggrJit aggregate is not JIT-able: agg#" << i << "("
+      VLOG(1) << "HashAggrJit aggregate is not JIT-able: agg#" << i << "("
                 << aggregates_[i].name << ") rawInputTypes=["
                 << [&]() {
                      std::ostringstream out;
@@ -953,13 +953,13 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     if (currentChunkSlots.size() >= maxFuseWidth) {
       flushChunk();
     }
-    LOG(INFO) << "HashAggrJit aggregate is JIT-able: "
+    VLOG(1) << "HashAggrJit aggregate is JIT-able: "
               << hashAggrJitSlotDebugString(*slot, &aggregates_[i]);
     currentChunkSlots.push_back(*slot);
   }
 
   flushChunk();
-  LOG(INFO) << "HashAggrJit planning finished: totalChunks="
+  VLOG(1) << "HashAggrJit planning finished: totalChunks="
             << hashAggrJitChunks_.size();
 }
 
@@ -971,7 +971,7 @@ void GroupingSet::runHashAggrJitChunks(
     std::vector<uint8_t>& jitExecuted) {
   if (hashAggrJitChunks_.empty() || hasSpilled() || bypassProbeHT_ ||
       supportRowBasedOutput_ || !activeRows_.isAllSelected()) {
-    LOG(INFO) << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
+    VLOG(1) << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
               << " hasSpilled=" << hasSpilled()
               << " bypassProbeHT=" << bypassProbeHT_
               << " supportRowBasedOutput=" << supportRowBasedOutput_
@@ -982,7 +982,7 @@ void GroupingSet::runHashAggrJitChunks(
   jitExecuted.assign(aggregates_.size(), 0);
   for (auto& chunk : hashAggrJitChunks_) {
     if (!chunk.enabled()) {
-      LOG(INFO) << "HashAggrJit chunk disabled, skip add: "
+      VLOG(1) << "HashAggrJit chunk disabled, skip add: "
                 << hashAggrJitChunkDebugString(chunk, aggregates_);
       continue;
     }
@@ -1038,7 +1038,7 @@ void GroupingSet::runHashAggrJitChunks(
     }
 
     if (!canRunChunk) {
-      LOG(INFO) << "HashAggrJit chunk cannot run add path, fallback to non-JIT: "
+      VLOG(1) << "HashAggrJit chunk cannot run add path, fallback to non-JIT: "
                 << hashAggrJitChunkDebugString(chunk, aggregates_)
                 << " reason=" << skipReason;
       continue;
@@ -1060,7 +1060,7 @@ void GroupingSet::runHashAggrJitChunks(
               newGroups.size());
         }
       }
-      LOG(INFO) << "HashAggrJit initialized new groups for chunk "
+      VLOG(1) << "HashAggrJit initialized new groups for chunk "
                 << chunk.functionName() << " newGroups=" << newGroups.size();
     }
 
@@ -1069,13 +1069,13 @@ void GroupingSet::runHashAggrJitChunks(
         activeRows_.end(),
         hashAggrJitDecodedPtrs_.data(),
         inputsMayHaveNulls);
-    LOG(INFO) << "HashAggrJit add executed: chunk=" << chunk.functionName()
+    VLOG(1) << "HashAggrJit add executed: chunk=" << chunk.functionName()
               << " rows=" << activeRows_.end()
               << " inputsMayHaveNulls=" << inputsMayHaveNulls
               << " slots=" << hashAggrJitChunkDebugString(chunk, aggregates_);
     for (const auto& slot : chunk.slots()) {
       jitExecuted[slot.aggregateIndex] = 1;
-      LOG(INFO) << "HashAggrJit slot executed in add path: "
+      VLOG(1) << "HashAggrJit slot executed in add path: "
                 << hashAggrJitSlotDebugString(
                        slot, &aggregates_[slot.aggregateIndex]);
     }
@@ -1089,7 +1089,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
     std::vector<uint8_t>& jitExtracted) {
   if (hashAggrJitChunks_.empty() || groups.empty() || hasSpilled() ||
       supportRowBasedOutput_) {
-    LOG(INFO) << "HashAggrJit extract skipped: chunks=" << hashAggrJitChunks_.size()
+    VLOG(1) << "HashAggrJit extract skipped: chunks=" << hashAggrJitChunks_.size()
               << " groups=" << groups.size() << " hasSpilled=" << hasSpilled()
               << " supportRowBasedOutput=" << supportRowBasedOutput_;
     return;
@@ -1098,7 +1098,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
   jitExtracted.assign(aggregates_.size(), 0);
   for (auto& chunk : hashAggrJitChunks_) {
     if (!chunk.canExtract()) {
-      LOG(INFO) << "HashAggrJit chunk cannot extract, fallback to non-JIT extract: "
+      VLOG(1) << "HashAggrJit chunk cannot extract, fallback to non-JIT extract: "
                 << hashAggrJitChunkDebugString(chunk, aggregates_);
       continue;
     }
@@ -1128,18 +1128,18 @@ void GroupingSet::runHashAggrJitExtractChunks(
       hashAggrJitResultPtrs_[slotIndex] = reinterpret_cast<char*>(aggregateVector.get());
     }
     if (!canRunChunk) {
-      LOG(INFO) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
+      VLOG(1) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
                 << hashAggrJitChunkDebugString(chunk, aggregates_)
                 << " reason=" << skipReason;
       continue;
     }
     chunk.extract(groups.data(), groups.size(), hashAggrJitResultPtrs_.data());
-    LOG(INFO) << "HashAggrJit extract executed: chunk=" << chunk.functionName()
+    VLOG(1) << "HashAggrJit extract executed: chunk=" << chunk.functionName()
               << " groups=" << groups.size()
               << " slots=" << hashAggrJitChunkDebugString(chunk, aggregates_);
     for (const auto& slot : chunk.slots()) {
       jitExtracted[slot.aggregateIndex] = 1;
-      LOG(INFO) << "HashAggrJit slot executed in extract path: "
+      VLOG(1) << "HashAggrJit slot executed in extract path: "
                 << hashAggrJitSlotDebugString(
                        slot, &aggregates_[slot.aggregateIndex]);
     }
