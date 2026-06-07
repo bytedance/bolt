@@ -54,19 +54,23 @@ char* BmPressureAwareBlockArena::activeData(BlockId blockId) {
 
 const char* BmPressureAwareBlockArena::pinnedData(
     BlockId blockId,
-    const CanReclaimFn& canReclaim,
+    std::span<const BlockId> protectedBlocks,
     const char* failureMessage) {
   if (const auto* data = tryPinBlock(blockId)) {
     return data;
   }
 
   auto& state = block(blockId);
-  const auto canReclaimOthers = [&](BlockId candidateBlockId) {
-    return candidateBlockId != blockId && canReclaim(candidateBlockId);
-  };
+  std::vector<BlockId> readProtectedBlocks;
+  readProtectedBlocks.reserve(protectedBlocks.size() + 1);
+  readProtectedBlocks.push_back(blockId);
+  readProtectedBlocks.insert(
+      readProtectedBlocks.end(),
+      protectedBlocks.begin(),
+      protectedBlocks.end());
   ensureCapacityForPinnedRead(
       state.capacity,
-      canReclaimOthers,
+      readProtectedBlocks,
       failureMessage);
   const auto* data = tryPinBlock(blockId);
   BOLT_CHECK_NOT_NULL(data, failureMessage);
@@ -75,7 +79,7 @@ const char* BmPressureAwareBlockArena::pinnedData(
 
 void BmPressureAwareBlockArena::pinBlocks(
     std::span<const BlockId> blockIds,
-    const CanReclaimFn& canReclaim) {
+    std::span<const BlockId> protectedBlocks) {
   std::vector<BlockId> toPin;
   toPin.reserve(blockIds.size());
   folly::F14FastSet<BlockId> seen;
@@ -99,10 +103,17 @@ void BmPressureAwareBlockArena::pinBlocks(
 
   if (!bufferManager_->MaybeReserve(bytesToReserve)) {
     bufferManager_->ReleaseUnusedReservation();
+    std::vector<BlockId> readProtectedBlocks;
+    readProtectedBlocks.reserve(protectedBlocks.size() + toPin.size());
+    readProtectedBlocks.insert(
+        readProtectedBlocks.end(),
+        protectedBlocks.begin(),
+        protectedBlocks.end());
+    readProtectedBlocks.insert(readProtectedBlocks.end(), toPin.begin(), toPin.end());
     for (auto blockId : toPin) {
       pinnedData(
           blockId,
-          canReclaim,
+          readProtectedBlocks,
           "BmPressureAwareBlockArena cannot reserve memory to pin blocks");
     }
     return;
@@ -148,12 +159,12 @@ const char* BmPressureAwareBlockArena::tryPinBlock(BlockId blockId) {
 }
 
 BmBlockState& BmPressureAwareBlockArena::block(BlockId blockId) {
-  BOLT_CHECK_LT(blockId, blocks_.size());
+  BOLT_DCHECK_LT(blockId, blocks_.size());
   return blocks_[blockId];
 }
 
 const BmBlockState& BmPressureAwareBlockArena::block(BlockId blockId) const {
-  BOLT_CHECK_LT(blockId, blocks_.size());
+  BOLT_DCHECK_LT(blockId, blocks_.size());
   return blocks_[blockId];
 }
 
@@ -183,8 +194,8 @@ bool BmPressureAwareBlockArena::empty() const {
 
 uint32_t BmPressureAwareBlockArena::spillReclaimableBlocks(
     uint64_t targetBytes,
-    const CanReclaimFn& canReclaim) {
-  const auto victims = selectVictims(targetBytes, canReclaim, false);
+    std::span<const BlockId> protectedBlocks) {
+  const auto victims = selectVictims(targetBytes, protectedBlocks, false);
   releasePinnedVictims(victims);
   auto blocks = unpinnedVictimBlocks(victims);
   if (blocks.empty()) {
@@ -203,13 +214,13 @@ void BmPressureAwareBlockArena::clear() {
 
 void BmPressureAwareBlockArena::ensureCapacityForPinnedRead(
     uint32_t capacity,
-    const CanReclaimFn& canReclaim,
+    std::span<const BlockId> protectedBlocks,
     const char* failureMessage) {
   if (bufferManager_->MaybeReserve(capacity)) {
     return;
   }
 
-  const auto victims = selectVictims(capacity, canReclaim, false);
+  const auto victims = selectVictims(capacity, protectedBlocks, false);
   releasePinnedVictims(victims);
   if (bufferManager_->MaybeReserve(capacity)) {
     return;
@@ -225,14 +236,14 @@ void BmPressureAwareBlockArena::ensureCapacityForPinnedRead(
 
 std::vector<BmBlockReclaimCandidate>
 BmPressureAwareBlockArena::reclaimCandidates(
-    const CanReclaimFn& canReclaim,
+    std::span<const BlockId> protectedBlocks,
     bool pinnedOnly) const {
   std::vector<BmBlockReclaimCandidate> candidates;
   candidates.reserve(blocks_.size());
   for (BlockId i = 0; i < blocks_.size(); ++i) {
     const auto& state = blocks_[i];
     const auto pinned = state.pinnedHandle.has_value();
-    if ((!pinnedOnly || pinned) && canReclaim(i)) {
+    if ((!pinnedOnly || pinned) && !containsProtectedBlock(protectedBlocks, i)) {
       candidates.push_back(BmBlockReclaimCandidate{
           .blockId = i,
           .capacity = state.capacity,
@@ -246,9 +257,9 @@ BmPressureAwareBlockArena::reclaimCandidates(
 
 std::vector<BlockId> BmPressureAwareBlockArena::selectVictims(
     uint64_t targetBytes,
-    const CanReclaimFn& canReclaim,
+    std::span<const BlockId> protectedBlocks,
     bool pinnedOnly) const {
-  const auto candidates = reclaimCandidates(canReclaim, pinnedOnly);
+  const auto candidates = reclaimCandidates(protectedBlocks, pinnedOnly);
   auto victims = reclaimPolicy_->selectVictims(BmBlockReclaimContext{
       .candidates = candidates,
       .targetBytes = targetBytes,
@@ -263,6 +274,15 @@ std::vector<BlockId> BmPressureAwareBlockArena::selectVictims(
         "BmBlockReclaimPolicy selected a non-reclaimable block");
   }
   return victims;
+}
+
+bool BmPressureAwareBlockArena::containsProtectedBlock(
+    std::span<const BlockId> protectedBlocks,
+    BlockId blockId) const {
+  return std::find(
+             protectedBlocks.begin(),
+             protectedBlocks.end(),
+             blockId) != protectedBlocks.end();
 }
 
 uint64_t BmPressureAwareBlockArena::releasePinnedVictims(

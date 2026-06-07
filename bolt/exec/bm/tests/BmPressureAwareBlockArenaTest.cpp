@@ -108,9 +108,8 @@ TEST_F(BmPressureAwareBlockArenaTest, SpillUsesInjectedPolicy) {
   const auto lruVictim = allocateReservedBlock(arena, bufferManager, 8 << 20);
   const auto policyVictim = allocateReservedBlock(arena, bufferManager, 8 << 20);
 
-  const auto canReclaim = [](BlockId) { return true; };
   try {
-    arena.spillReclaimableBlocks(8 << 20, canReclaim);
+    arena.spillReclaimableBlocks(8 << 20, {});
   } catch (const std::exception& e) {
     if (!isIoUringUnavailable(e)) {
       throw;
@@ -133,12 +132,10 @@ TEST_F(BmPressureAwareBlockArenaTest, PolicyCannotBypassCanReclaim) {
   const auto reclaimableBlock =
       allocateReservedBlock(arena, bufferManager, 4096);
 
-  const auto canReclaim = [&](BlockId blockId) {
-    return blockId == reclaimableBlock;
-  };
+  const std::vector<BlockId> protectedBlocks{protectedBlock};
 
   EXPECT_THROW(
-      arena.spillReclaimableBlocks(4096, canReclaim),
+      arena.spillReclaimableBlocks(4096, protectedBlocks),
       BoltException);
   EXPECT_TRUE(arena.block(protectedBlock).pinnedHandle.has_value());
   EXPECT_TRUE(arena.block(reclaimableBlock).pinnedHandle.has_value());
@@ -157,11 +154,9 @@ TEST_F(BmPressureAwareBlockArenaTest, PinReadDoesNotReclaimProtectedBlocks) {
   arena.block(target).pinnedHandle.reset();
   arena.block(target).data = nullptr;
 
-  const auto canReclaim = [&](BlockId blockId) {
-    return blockId != protectedBlock;
-  };
+  const std::vector<BlockId> protectedBlocks{protectedBlock};
 
-  EXPECT_THROW(arena.pinnedData(target, canReclaim), BoltException);
+  EXPECT_THROW(arena.pinnedData(target, protectedBlocks), BoltException);
   EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
   EXPECT_TRUE(arena.block(protectedBlock).pinnedHandle.has_value());
   EXPECT_NE(nullptr, arena.block(protectedBlock).data);
@@ -180,9 +175,9 @@ TEST_F(BmPressureAwareBlockArenaTest, PinnedDataThrowsOnPressureWithoutVictims) 
   arena.block(target).pinnedHandle.reset();
   arena.block(target).data = nullptr;
 
-  const auto canReclaimNone = [](BlockId) { return false; };
+  const std::vector<BlockId> protectedBlocks{other};
 
-  EXPECT_THROW(arena.pinnedData(target, canReclaimNone), BoltException);
+  EXPECT_THROW(arena.pinnedData(target, protectedBlocks), BoltException);
   EXPECT_FALSE(arena.block(target).pinnedHandle.has_value());
   EXPECT_TRUE(arena.block(other).pinnedHandle.has_value());
   EXPECT_NE(nullptr, arena.block(other).data);
@@ -192,7 +187,6 @@ TEST_F(BmPressureAwareBlockArenaTest, PinBlocksBatchPinsResidentBlocks) {
   auto bufferManager = makeBufferManager("pin-blocks");
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
-  const auto canReclaim = [](uint32_t) { return true; };
   const auto blockId = allocateReservedBlock(arena, bufferManager, 4096);
   auto* data = arena.activeData(blockId);
   std::memcpy(data, "arena-pin-blocks", 17);
@@ -203,7 +197,7 @@ TEST_F(BmPressureAwareBlockArenaTest, PinBlocksBatchPinsResidentBlocks) {
 
   const std::vector<uint32_t> blockIds{blockId};
   const auto statsBeforePin = bufferManager->stats();
-  arena.pinBlocks(blockIds, canReclaim);
+  arena.pinBlocks(blockIds, {});
 
   const auto statsAfterPin = bufferManager->stats();
   EXPECT_EQ(statsBeforePin.batchPinCount + 1, statsAfterPin.batchPinCount);
@@ -217,7 +211,6 @@ TEST_F(BmPressureAwareBlockArenaTest, SpillReclaimableBlocksAndPinReadback) {
   auto bufferManager = makeBufferManager("spill-readback");
   BmPressureAwareBlockArena arena(bufferManager, memory::bm::MemoryTag::kWindow);
 
-  const auto canReclaim = [](uint32_t) { return true; };
   const auto blockId = allocateReservedBlock(
       arena,
       bufferManager,
@@ -227,12 +220,12 @@ TEST_F(BmPressureAwareBlockArenaTest, SpillReclaimableBlocksAndPinReadback) {
   arena.block(blockId).usedBytes = 21;
 
   try {
-    const auto spilled = arena.spillReclaimableBlocks(0, canReclaim);
+    const auto spilled = arena.spillReclaimableBlocks(0, {});
     EXPECT_EQ(1, spilled);
     EXPECT_FALSE(arena.block(blockId).pinnedHandle.has_value());
     EXPECT_EQ(nullptr, arena.block(blockId).data);
 
-    const auto* pinned = arena.pinnedData(blockId, canReclaim);
+    const auto* pinned = arena.pinnedData(blockId, {});
     EXPECT_EQ(0, std::memcmp(pinned, "arena-spill-readback", 21));
     EXPECT_TRUE(arena.block(blockId).pinnedHandle.has_value());
   } catch (const std::exception& e) {

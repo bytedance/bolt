@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <folly/Range.h>
@@ -129,7 +130,8 @@ class BmRowContainer {
   const char* pinBlockForRead(
       uint32_t blockId,
       const char* failureMessage);
-  bool canReclaimBlock(uint32_t blockId) const;
+  std::vector<BlockId> protectedBlocksForRead(
+      std::span<const BlockId> blockIds) const;
   template <TypeKind Kind>
   void storeWithNulls(
       const DecodedVector& decoded,
