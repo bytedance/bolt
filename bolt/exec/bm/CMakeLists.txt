@@ -1,0 +1,21 @@
+bolt_add_library(
+  bolt_exec_bm
+  BmRowContainer.cpp
+  BmRowContainerRead.cpp
+  BmRowContainerRow.cpp
+  BmRowContainerSegment.cpp
+)
+
+target_compile_features(bolt_exec_bm PRIVATE cxx_std_20)
+
+target_link_libraries(
+  bolt_exec_bm
+  bolt_exec
+  bolt_memory_bm
+  bolt_vector
+  bolt_common_base
+)
+
+if(${BOLT_BUILD_TESTING})
+  add_subdirectory(tests)
+endif()
