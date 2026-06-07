@@ -353,6 +353,10 @@ jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
       .mergeInput = descriptor.mergeInput,
       .decimal = descriptor.decimal,
       .initSetsNull = descriptor.initSetsNull,
+      .precision = descriptor.precision,
+      .scale = descriptor.scale,
+      .auxPrecision = descriptor.auxPrecision,
+      .auxScale = descriptor.auxScale,
       .ops = descriptor.ops};
 }
 #endif

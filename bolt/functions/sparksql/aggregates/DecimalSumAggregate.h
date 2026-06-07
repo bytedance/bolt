@@ -84,6 +84,8 @@ class DecimalSumAggregate : public exec::Aggregate {
     }
     const auto& valueType =
         context.isRawInput ? context.inputType : context.inputType->childAt(0);
+    const auto [resultPrecision, resultScale] =
+        getDecimalPrecisionScale(*sumType_.get());
     return jit::HashAggrJitDescriptor{
         jit::HashAggrJitKind::Sum,
         valueType->isShortDecimal() ? jit::HashAggrJitValueKind::Int64
@@ -93,6 +95,10 @@ class DecimalSumAggregate : public exec::Aggregate {
         !context.isRawInput,
         true,
         /*initSetsNull=*/true,
+        /*precision=*/resultPrecision,
+        /*scale=*/resultScale,
+        /*auxPrecision=*/0,
+        /*auxScale=*/0,
         hashAggrJitOps()};
   }
 
@@ -189,14 +195,17 @@ class DecimalSumAggregate : public exec::Aggregate {
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot&,
       bool) {
-    return false;
+    return true;
   }
 
   static void compileHashAggrJitExtract(
-      jit::HashAggrJitCodegen&,
-      llvm::Value*,
-      const jit::HashAggrJitSlot&,
-      const jit::HashAggrJitExtractTarget&) {}
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      const jit::HashAggrJitExtractTarget& target) {
+    codegen.emitDecimalSumExtract(
+        target.resultVector, target.row, group, slot, target.partialOutput);
+  }
 
   static const jit::HashAggrJitOps* hashAggrJitOps() {
     static const jit::HashAggrJitOps kOps{

@@ -32,6 +32,100 @@
 
 #include "bolt/functions/lib/aggregates/SumAggregateBase.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
+
+#ifdef ENABLE_BOLT_JIT
+#include "bolt/type/DecimalUtil.h"
+
+namespace {
+// Mirrors DecimalSumAggregate::computeFinalValue: applies overflow adjustment
+// and reports whether the value overflows the result precision range.
+bytedance::bolt::int128_t jitDecimalSumComputeFinal(
+    const bytedance::bolt::jit::JitDecimalSumState* state,
+    int32_t precision,
+    bool& overflow) {
+  using bytedance::bolt::DecimalUtil;
+  bytedance::bolt::int128_t sum = state->sum;
+  if ((state->overflow == 1 && state->sum < 0) ||
+      (state->overflow == -1 && state->sum > 0)) {
+    sum = static_cast<bytedance::bolt::int128_t>(
+        DecimalUtil::kOverflowMultiplier * state->overflow + state->sum);
+  } else if (state->overflow != 0) {
+    overflow = true;
+    return 0;
+  }
+  overflow = !DecimalUtil::valueInPrecisionRange(sum, precision);
+  return sum;
+}
+} // namespace
+
+extern "C" {
+
+// Final decimal sum extract: write FlatVector<int128_t>. Null when the group is
+// empty (all inputs null) or the sum overflows the result precision.
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractFinalDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/,
+    int8_t /*longDecimal*/) {
+  auto* state =
+      reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
+  auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+                   ->as<bytedance::bolt::FlatVector<bytedance::bolt::int128_t>>();
+  if (state->isEmpty) {
+    flat->setNull(row, true);
+    return;
+  }
+  bool overflow = false;
+  auto result = jitDecimalSumComputeFinal(state, precision, overflow);
+  if (overflow) {
+    flat->setNull(row, true);
+  } else {
+    flat->set(row, result);
+  }
+}
+
+// Partial decimal sum extract: write row(sum:decimal, isEmpty:bool).
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractPartialDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/,
+    int8_t /*longDecimal*/) {
+  auto* state =
+      reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
+  auto* rowVector =
+      reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
+          ->as<bytedance::bolt::RowVector>();
+  auto* sumVector = rowVector->childAt(0)
+                        ->asFlatVector<bytedance::bolt::int128_t>();
+  auto* isEmptyVector = rowVector->childAt(1)->asFlatVector<bool>();
+  rowVector->setNull(row, false);
+  if (state->isEmpty) {
+    sumVector->set(row, 0);
+    isEmptyVector->set(row, true);
+    return;
+  }
+  bool overflow = false;
+  auto result = jitDecimalSumComputeFinal(state, precision, overflow);
+  if (overflow) {
+    sumVector->setNull(row, true);
+    isEmptyVector->set(row, false);
+  } else {
+    sumVector->set(row, result);
+    isEmptyVector->set(row, state->isEmpty);
+  }
+}
+
+} // extern "C"
+#endif
+
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
@@ -80,6 +174,10 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
         !context.isRawInput,
         false,
         /*initSetsNull=*/true,
+        /*precision=*/0,
+        /*scale=*/0,
+        /*auxPrecision=*/0,
+        /*auxScale=*/0,
         hashAggrJitOps()};
   }
 
@@ -146,16 +244,25 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
   }
 
   static bool canCompileHashAggrJitExtract(
-      const jit::HashAggrJitSlot&,
+      const jit::HashAggrJitSlot& slot,
       bool) {
-    return false;
+    // spark sum intermediate type == result type (bigint=bigint / double=double).
+    return slot.accumulatorKind == jit::HashAggrJitValueKind::Int64 ||
+        slot.accumulatorKind == jit::HashAggrJitValueKind::Double;
   }
 
   static void compileHashAggrJitExtract(
-      jit::HashAggrJitCodegen&,
-      llvm::Value*,
-      const jit::HashAggrJitSlot&,
-      const jit::HashAggrJitExtractTarget&) {}
+      jit::HashAggrJitCodegen& codegen,
+      llvm::Value* group,
+      const jit::HashAggrJitSlot& slot,
+      const jit::HashAggrJitExtractTarget& target) {
+    auto* value =
+        codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+    auto* isNull = codegen.builder().CreateZExt(
+        codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
+    codegen.emitFlatValue(
+        target.resultVector, target.row, slot.accumulatorKind, value, isNull);
+  }
 
   static const jit::HashAggrJitOps* hashAggrJitOps() {
     static const jit::HashAggrJitOps kOps{

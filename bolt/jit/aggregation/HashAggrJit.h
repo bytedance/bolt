@@ -18,6 +18,22 @@
 namespace bytedance::bolt::jit {
 
 class HashAggrJitCodegen;
+
+// JIT-internal accumulator layouts for decimal sum/avg. Shared between the JIT
+// codegen runtime helpers and the extract runtime helpers (which live in a
+// different translation unit and need DecimalUtil).
+struct JitDecimalSumState {
+  bytedance::bolt::int128_t sum{0};
+  int64_t overflow{0};
+  bool isEmpty{true};
+};
+
+struct JitDecimalAvgState {
+  bytedance::bolt::int128_t sum{0};
+  int64_t count{0};
+  int64_t overflow{0};
+};
+
 struct HashAggrJitSlot;
 struct HashAggrJitExtractTarget;
 
@@ -62,6 +78,14 @@ struct HashAggrJitDescriptor {
   // true, GroupingSet must keep Aggregate::numNulls_ in sync (non-JIT extract
   // relies on it), mirroring the non-JIT initializeNewGroups path.
   bool initSetsNull{false};
+  // Result decimal precision/scale, used by decimal extract overflow checks.
+  // Only meaningful when decimal == true.
+  int32_t precision{0};
+  int32_t scale{0};
+  // Secondary decimal precision/scale. For decimal avg extract, precision/scale
+  // carry the intermediate sum type and aux* carry the result type.
+  int32_t auxPrecision{0};
+  int32_t auxScale{0};
   const struct HashAggrJitOps* ops{nullptr};
 
   std::string signature() const;
@@ -105,6 +129,10 @@ struct HashAggrJitSlot {
   bool mergeInput{false};
   bool decimal{false};
   bool initSetsNull{false};
+  int32_t precision{0};
+  int32_t scale{0};
+  int32_t auxPrecision{0};
+  int32_t auxScale{0};
   const HashAggrJitOps* ops{nullptr};
 };
 
@@ -176,6 +204,21 @@ class HashAggrJitCodegen {
       llvm::Value* sum,
       llvm::Value* count,
       llvm::Value* isNull) const;
+  // Decimal extract: calls a runtime helper that reads the JIT decimal
+  // accumulator from 'group + slot.offset', applies overflow/precision checks
+  // and writes the result (final flat decimal / partial row) into 'vector'.
+  void emitDecimalSumExtract(
+      llvm::Value* vector,
+      llvm::Value* row,
+      llvm::Value* group,
+      const HashAggrJitSlot& slot,
+      bool partialOutput) const;
+  void emitDecimalAvgExtract(
+      llvm::Value* vector,
+      llvm::Value* row,
+      llvm::Value* group,
+      const HashAggrJitSlot& slot,
+      bool partialOutput) const;
 
  private:
   llvm::Module& module_;

@@ -18,6 +18,9 @@
 
 extern "C" {
 
+using bytedance::bolt::jit::JitDecimalAvgState;
+using bytedance::bolt::jit::JitDecimalSumState;
+
 namespace {
 
 void logHashAggrJitFunctionIR(
@@ -45,18 +48,6 @@ void logHashAggrJitFunctionIR(
           << " error=" << hasError << ":\n"
           << ir;
 }
-
-struct JitDecimalSumState {
-  bytedance::bolt::int128_t sum{0};
-  int64_t overflow{0};
-  bool isEmpty{true};
-};
-
-struct JitDecimalAvgState {
-  bytedance::bolt::int128_t sum{0};
-  int64_t count{0};
-  int64_t overflow{0};
-};
 
 int64_t jitHashAggrAddWithOverflow(
     bytedance::bolt::int128_t left,
@@ -255,6 +246,28 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
       "jit_HashAggrSetPartialAvgDouble",
       voidTy,
       {i8PtrTy, i32Ty, doubleTy, i64Ty, i8Ty});
+  // Decimal extract helpers: (vector, row, group, offset, precision, scale,
+  // longDecimal).
+  declareFunction(
+      module,
+      "jit_HashAggrExtractFinalDecimalSum",
+      voidTy,
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrExtractPartialDecimalSum",
+      voidTy,
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrExtractFinalDecimalAvg",
+      voidTy,
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
+  declareFunction(
+      module,
+      "jit_HashAggrExtractPartialDecimalAvg",
+      voidTy,
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
 }
 
 llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
@@ -537,6 +550,48 @@ void HashAggrJitCodegen::emitPartialAvgResult(
   builder().CreateCall(
       module_.getFunction("jit_HashAggrSetPartialAvgDouble"),
       {vector, row, sum, count, isNull});
+}
+
+void HashAggrJitCodegen::emitDecimalSumExtract(
+    llvm::Value* vector,
+    llvm::Value* row,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    bool partialOutput) const {
+  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalSum"
+                                 : "jit_HashAggrExtractFinalDecimalSum";
+  auto* longDecimal = builder().getInt8(
+      slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+  builder().CreateCall(
+      module_.getFunction(fn),
+      {vector,
+       row,
+       group,
+       builder().getInt32(slot.offset),
+       builder().getInt32(slot.precision),
+       builder().getInt32(slot.scale),
+       longDecimal});
+}
+
+void HashAggrJitCodegen::emitDecimalAvgExtract(
+    llvm::Value* vector,
+    llvm::Value* row,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    bool partialOutput) const {
+  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
+                                 : "jit_HashAggrExtractFinalDecimalAvg";
+  auto* longDecimal = builder().getInt8(
+      slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+  builder().CreateCall(
+      module_.getFunction(fn),
+      {vector,
+       row,
+       group,
+       builder().getInt32(slot.offset),
+       builder().getInt32(slot.precision),
+       builder().getInt32(slot.scale),
+       longDecimal});
 }
 
 namespace {

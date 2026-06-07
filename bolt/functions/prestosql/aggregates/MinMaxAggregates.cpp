@@ -79,6 +79,10 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
         !context.isRawInput,
         false,
         /*initSetsNull=*/true,
+        /*precision=*/0,
+        /*scale=*/0,
+        /*auxPrecision=*/0,
+        /*auxScale=*/0,
         hashAggrJitOps()};
   }
 
@@ -170,8 +174,10 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
   static bool canCompileHashAggrJitExtract(
       const jit::HashAggrJitSlot& slot,
       bool) {
-    // return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128;
-    return false;
+    // Flat setters exist for i8/i16/i32/i64/f32/f64 only. Int128 (long decimal)
+    // and Bool have no flat setter yet, fall back to non-JIT extract.
+    return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128 &&
+        slot.accumulatorKind != jit::HashAggrJitValueKind::Bool;
   }
 
   static void compileHashAggrJitExtract(
