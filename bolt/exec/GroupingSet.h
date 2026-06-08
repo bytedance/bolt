@@ -468,6 +468,7 @@ class GroupingSet {
   std::vector<VectorPtr> hashAggrJitInputVectors_;
   std::vector<char*> hashAggrJitDecodedPtrs_;
   std::vector<char*> hashAggrJitNewGroups_;
+  std::vector<jit::HashAggrJitOutput> hashAggrJitOutputs_;
   std::vector<char*> hashAggrJitResultPtrs_;
 #endif
 

@@ -329,3 +329,232 @@ width16 下趋势更明显：
    的 microbenchmark，避免 `copyResults` 稀释定位。
 5. **继续限制 fuse width 的甜点区间**：当前 width16/32 仍有收益，但并未出现 POC 的巨大收益。考虑先保持
    `maxFuseWidth=16` 或最多 32；更宽时需要结合 cache/TLB 数据重新评估。
+
+## 9. JIT extract raw output descriptor 优化验证
+
+### 9.1 优化内容
+
+本轮继续优化第 8.6 节定位出的 extract 瓶颈：JIT extract 不再对普通 FLAT primitive 输出逐行调用
+`jit_HashAggrSetFlat*` helper，而是由 `GroupingSet` 为每个 aggregate output 准备
+`HashAggrJitOutput` descriptor：
+
+1. `values`：`FlatVector<T>::mutableRawValues()`；
+2. `nulls`：`BaseVector::mutableRawNulls()`；
+3. `vector`：原始 `BaseVector*`，保留给 decimal / partial avg ROW 等复杂输出 helper fallback。
+
+JIT extract IR 对 `Int8/Int16/Int32/Int64/Float/Double` 直接执行：
+
+```text
+values[row] = value
+isNull ? clear null bitmap bit : set null bitmap bit
+```
+
+`Bool`、`Int128/decimal`、partial avg ROW output 暂不做 raw 写，仍通过 descriptor 中的 `vector` 走原 helper。
+
+### 9.2 功能与性能验证命令
+
+构建：
+
+```bash
+cmake --build --preset conan-release --target bolt_hashaggr_jit_benchmark --parallel 2
+```
+
+功能覆盖（sum/avg/min/count/decimal/double min-max）：
+
+```bash
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_min_iters=3 --bm_max_secs=2 \
+  --bm_regex='^width8_(sum|avg|min|count|double_min|double_max|decimal_sum|decimal_avg)_(nojit|jit)$'
+```
+
+sum 宽度扫描：
+
+```bash
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_min_iters=20 --bm_max_secs=5 \
+  --bm_regex='^width(4|8|16|32)_sum_(nojit|jit)$'
+```
+
+
+### 9.3 最新 width8 结果
+
+| case | no-JIT | JIT | speedup = nojit / jit |
+|------|-------:|----:|----------------------:|
+| width8_sum | 4.61ms | 3.55ms | **1.30x** |
+| width8_avg | 5.41ms | 4.18ms | **1.29x** |
+| width8_min | 3.71ms | 3.48ms | **1.07x** |
+| width8_count | 4.30ms | 2.41ms | **1.78x** |
+| width8_decimal_sum | 12.13ms | 9.58ms | **1.27x** |
+| width8_decimal_avg | 16.49ms | 14.77ms | **1.12x** |
+| width8_double_min | 4.94ms | 4.23ms | **1.17x** |
+| width8_double_max | 4.21ms | 3.81ms | **1.10x** |
+
+对比第 7.4 节，`min` / `double_max` 已从略慢于 no-JIT 变为正收益；`sum`、`avg`、`count` 也继续提升。
+
+### 9.4 最新 sum 宽度扫描
+
+| case | no-JIT | JIT | speedup = nojit / jit |
+|------|-------:|----:|----------------------:|
+| width4_sum | 2.60ms | 2.44ms | **1.07x** |
+| width8_sum | 4.65ms | 3.45ms | **1.35x** |
+| width16_sum | 9.06ms | 6.06ms | **1.50x** |
+| width32_sum | 17.28ms | 12.21ms | **1.42x** |
+
+相比第 8.3 节（extract 优化前 width16_sum 约 1.19x、width32_sum 约 1.15x），raw output descriptor 后
+宽聚合收益明显扩大，说明之前 extract helper/type-dispatch 确实抵消了大量 add_dense 的融合收益。
+
+
+### 9.5 详细数据
+
+```
+$ ./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark 
+============================================================================
+[...]c/benchmarks/HashAggrJitBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+width4_sum_nojit                                            2.57ms    388.70
+width4_sum_jit                                              2.40ms    416.48
+----------------------------------------------------------------------------
+width4_avg_nojit                                            3.27ms    306.05
+width4_avg_jit                                              2.59ms    385.86
+----------------------------------------------------------------------------
+width4_min_nojit                                            2.40ms    417.30
+width4_min_jit                                              2.42ms    413.22
+----------------------------------------------------------------------------
+width4_count_nojit                                          2.42ms    413.03
+width4_count_jit                                            1.90ms    525.58
+----------------------------------------------------------------------------
+width4_merge_sum_nojit                                      3.60ms    277.57
+width4_merge_sum_jit                                        3.29ms    303.98
+----------------------------------------------------------------------------
+width4_merge_avg_nojit                                      4.58ms    218.27
+width4_merge_avg_jit                                        7.19ms    138.99
+----------------------------------------------------------------------------
+width4_merge_min_nojit                                      3.42ms    292.16
+width4_merge_min_jit                                        3.33ms    300.62
+----------------------------------------------------------------------------
+width4_merge_count_nojit                                    3.37ms    296.86
+width4_merge_count_jit                                      2.88ms    346.72
+----------------------------------------------------------------------------
+width8_sum_nojit                                            4.62ms    216.54
+width8_sum_jit                                              3.36ms    297.77
+----------------------------------------------------------------------------
+width8_avg_nojit                                            5.37ms    186.22
+width8_avg_jit                                              4.14ms    241.70
+----------------------------------------------------------------------------
+width8_min_nojit                                            3.70ms    270.01
+width8_min_jit                                              3.50ms    285.84
+----------------------------------------------------------------------------
+width8_count_nojit                                          4.26ms    235.01
+width8_count_jit                                            2.35ms    425.31
+----------------------------------------------------------------------------
+width8_merge_sum_nojit                                      6.18ms    161.79
+width8_merge_sum_jit                                        4.60ms    217.60
+----------------------------------------------------------------------------
+width8_merge_avg_nojit                                      7.70ms    129.85
+width8_merge_avg_jit                                       12.31ms     81.22
+----------------------------------------------------------------------------
+width8_merge_min_nojit                                      5.31ms    188.20
+width8_merge_min_jit                                        4.83ms    206.90
+----------------------------------------------------------------------------
+width8_merge_count_nojit                                    5.72ms    174.70
+width8_merge_count_jit                                      3.58ms    279.62
+----------------------------------------------------------------------------
+width16_sum_nojit                                           9.01ms    110.95
+width16_sum_jit                                             5.93ms    168.53
+----------------------------------------------------------------------------
+width16_avg_nojit                                          10.53ms     94.95
+width16_avg_jit                                             7.38ms    135.53
+----------------------------------------------------------------------------
+width16_min_nojit                                           7.92ms    126.22
+width16_min_jit                                             6.24ms    160.20
+----------------------------------------------------------------------------
+width16_count_nojit                                         7.73ms    129.35
+width16_count_jit                                           3.50ms    285.49
+----------------------------------------------------------------------------
+width16_merge_sum_nojit                                    11.44ms     87.44
+width16_merge_sum_jit                                       7.58ms    131.87
+----------------------------------------------------------------------------
+width16_merge_avg_nojit                                    15.68ms     63.79
+width16_merge_avg_jit                                      23.72ms     42.16
+----------------------------------------------------------------------------
+width16_merge_min_nojit                                    10.21ms     97.95
+width16_merge_min_jit                                       7.94ms    125.98
+----------------------------------------------------------------------------
+width16_merge_count_nojit                                  10.10ms     98.97
+width16_merge_count_jit                                     5.22ms    191.41
+----------------------------------------------------------------------------
+width32_sum_nojit                                          17.20ms     58.13
+width32_sum_jit                                            12.08ms     82.76
+----------------------------------------------------------------------------
+width32_avg_nojit                                          19.42ms     51.48
+width32_avg_jit                                            15.11ms     66.20
+----------------------------------------------------------------------------
+width32_min_nojit                                          15.56ms     64.26
+width32_min_jit                                            12.53ms     79.78
+----------------------------------------------------------------------------
+width32_count_nojit                                        15.66ms     63.85
+width32_count_jit                                           7.12ms    140.37
+----------------------------------------------------------------------------
+width32_merge_sum_nojit                                    23.30ms     42.91
+width32_merge_sum_jit                                      16.24ms     61.59
+----------------------------------------------------------------------------
+width32_merge_avg_nojit                                    30.22ms     33.09
+width32_merge_avg_jit                                      47.82ms     20.91
+----------------------------------------------------------------------------
+width32_merge_min_nojit                                    19.79ms     50.52
+width32_merge_min_jit                                      15.78ms     63.37
+----------------------------------------------------------------------------
+width32_merge_count_nojit                                  19.32ms     51.75
+width32_merge_count_jit                                    10.17ms     98.30
+----------------------------------------------------------------------------
+width8_decimal_sum_nojit                                   12.03ms     83.13
+width8_decimal_sum_jit                                      9.83ms    101.71
+----------------------------------------------------------------------------
+width8_decimal_avg_nojit                                   16.29ms     61.38
+width8_decimal_avg_jit                                     14.77ms     67.70
+----------------------------------------------------------------------------
+width8_double_min_nojit                                     5.05ms    197.94
+width8_double_min_jit                                       4.16ms    240.16
+----------------------------------------------------------------------------
+width8_double_max_nojit                                     4.18ms    239.18
+width8_double_max_jit                                       3.84ms    260.33
+----------------------------------------------------------------------------
+width8_high_card_partial_avg_extract_nojit                 61.78ms     16.19
+width8_high_card_partial_avg_extract_jit                   80.29ms     12.46
+----------------------------------------------------------------------------
+width8_high_card_partial_sum_extract_nojit                 27.36ms     36.54
+width8_high_card_partial_sum_extract_jit                   23.51ms     42.54
+----------------------------------------------------------------------------
+```
+
+
+
+### 9.5 perf 验证
+
+代表性命令：
+
+```bash
+/usr/lib/linux-tools-5.15.0-160/perf record -F 2999 \
+  -o /tmp/bolt-width16-sum-jit-outputdesc.perf.data -- \
+  ./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_min_iters=200 --bm_max_secs=8 --bm_regex='^width16_sum_jit$'
+
+/usr/lib/linux-tools-5.15.0-160/perf report \
+  -i /tmp/bolt-width16-sum-jit-outputdesc.perf.data \
+  --stdio --no-children --sort symbol --percent-limit 0 \
+  | grep -E 'jit_HashAggrSetFlatI64|dynamic_cast|__dynamic|__do_dyncast|HashAggrSetFlat'
+```
+
+结果：`jit_HashAggrSetFlatI64` / `HashAggrSetFlat*` 不再出现在 perf report 中；`__dynamic_cast` 降到
+约 **0.27%**，`__do_dyncast` 合计约 **0.15%**。对比第 8.5 节，extract helper 与 dynamic_cast/type
+dispatch 从 JIT 路径约 **13%** 的显性热点降为噪声级别。
+
+### 9.6 更新后的结论
+
+- direct decoded input descriptor 解决了 add_dense 的外部取值 helper；raw output descriptor 继续解决了
+  extract 的 per-row setter helper / dynamic_cast。
+- 当前 width8 常见数值聚合已全部为正收益；sum 宽度扫描在 width16 达到约 **1.50x**，更接近最初 multi_sum
+  POC 的方向性预期。
+- 剩余瓶颈主要回到真正的 JIT 生成码、hash/vector encoding、RowContainer 和 result copy 等公共成本；后续
+  若继续优化，优先考虑 flat/no-null add_dense 快路径、减少 per-row accumulator null clear，以及拆分纯
+  `GroupingSet` add microbenchmark 来单独观察 kernel 收益。

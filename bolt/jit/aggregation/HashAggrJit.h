@@ -59,6 +59,16 @@ struct HashAggrJitDecodedInput {
   const void* decodedVector{nullptr};
 };
 
+// Runtime output descriptor consumed by JIT extract functions. GroupingSet
+// prepares one descriptor per aggregate output after resizing the result vector.
+// Primitive flat outputs write values/null bits directly from generated IR;
+// complex outputs keep using vector helper fallbacks via 'vector'.
+struct HashAggrJitOutput {
+  void* values{nullptr};
+  uint64_t* nulls{nullptr};
+  void* vector{nullptr};
+};
+
 struct HashAggrJitPlanContext {
   bool isRawInput{false};
   bool isPartialOutput{false};

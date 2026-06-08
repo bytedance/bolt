@@ -339,6 +339,65 @@ bool isFloatKind(HashAggrJitValueKind kind) {
       kind == HashAggrJitValueKind::Double;
 }
 
+bool supportsRawFlatOutput(HashAggrJitValueKind kind) {
+  switch (kind) {
+    case HashAggrJitValueKind::Int8:
+    case HashAggrJitValueKind::Int16:
+    case HashAggrJitValueKind::Int32:
+    case HashAggrJitValueKind::Int64:
+    case HashAggrJitValueKind::Float:
+    case HashAggrJitValueKind::Double:
+      return true;
+    case HashAggrJitValueKind::Bool:
+    case HashAggrJitValueKind::Int128:
+      return false;
+  }
+  return false;
+}
+
+llvm::Value* loadOutputValues(llvm::IRBuilder<>& builder, llvm::Value* output) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* valuesPtrPtr = builder.CreatePointerCast(output, i8PtrTy->getPointerTo());
+  return builder.CreateLoad(i8PtrTy, valuesPtrPtr, "output_values");
+}
+
+llvm::Value* loadOutputNulls(llvm::IRBuilder<>& builder, llvm::Value* output) {
+  auto* i64Ty = builder.getInt64Ty();
+  auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), output, static_cast<uint64_t>(sizeof(void*)));
+  auto* nullsPtrPtr =
+      builder.CreatePointerCast(nullsAddr, i64Ty->getPointerTo()->getPointerTo());
+  return builder.CreateLoad(i64Ty->getPointerTo(), nullsPtrPtr, "output_nulls");
+}
+
+llvm::Value* loadOutputVector(llvm::IRBuilder<>& builder, llvm::Value* output) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), output, static_cast<uint64_t>(2 * sizeof(void*)));
+  auto* vectorPtrPtr = builder.CreatePointerCast(vectorAddr, i8PtrTy->getPointerTo());
+  return builder.CreateLoad(i8PtrTy, vectorPtrPtr, "output_vector");
+}
+
+void emitOutputNullBit(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* nulls,
+    llvm::Value* row,
+    llvm::Value* isNull) {
+  auto* i64Ty = builder.getInt64Ty();
+  auto* wordIndex = builder.CreateLShr(row, builder.getInt32(6));
+  auto* bitIndex = builder.CreateAnd(row, builder.getInt32(63));
+  auto* wordAddr = builder.CreateInBoundsGEP(
+      i64Ty, nulls, builder.CreateZExt(wordIndex, builder.getInt64Ty()));
+  auto* word = builder.CreateLoad(i64Ty, wordAddr);
+  auto* mask = builder.CreateShl(
+      builder.getInt64(1), builder.CreateZExt(bitIndex, builder.getInt64Ty()));
+  auto* notNullWord = builder.CreateOr(word, mask);
+  auto* nullWord = builder.CreateAnd(word, builder.CreateNot(mask));
+  auto* isNullBool = builder.CreateICmpNE(isNull, builder.getInt8(0));
+  builder.CreateStore(
+      builder.CreateSelect(isNullBool, nullWord, notNullWord), wordAddr);
+}
+
 llvm::LoadInst* loadValue(
     llvm::IRBuilder<>& builder,
     llvm::Value* row,
@@ -600,39 +659,55 @@ llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
 }
 
 void HashAggrJitCodegen::emitFlatValue(
-    llvm::Value* vector,
+    llvm::Value* output,
     llvm::Value* row,
     HashAggrJitValueKind kind,
     llvm::Value* value,
     llvm::Value* isNull) const {
+  if (supportsRawFlatOutput(kind)) {
+    auto* type = llvmType(kind);
+    auto* values = ::bytedance::bolt::jit::loadOutputValues(builder(), output);
+    auto* typedValues = builder().CreatePointerCast(values, type->getPointerTo());
+    auto* valueAddr = builder().CreateInBoundsGEP(
+        type, typedValues, builder().CreateZExt(row, builder().getInt64Ty()));
+    auto* store = builder().CreateStore(value, valueAddr);
+    store->setAlignment(llvm::Align(1));
+    auto* nulls = ::bytedance::bolt::jit::loadOutputNulls(builder(), output);
+    ::bytedance::bolt::jit::emitOutputNullBit(builder(), nulls, row, isNull);
+    return;
+  }
+
   const auto setter = setFlatValueFunction(kind);
   if (setter.empty()) {
     return;
   }
+  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(setter), {vector, row, value, isNull});
 }
 
 void HashAggrJitCodegen::resizeResultVector(
-    llvm::Value* vector,
+    llvm::Value* output,
     llvm::Value* size) const {
+  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction("jit_HashAggrResizeVector"), {vector, size});
 }
 
 void HashAggrJitCodegen::emitPartialAvgResult(
-    llvm::Value* vector,
+    llvm::Value* output,
     llvm::Value* row,
     llvm::Value* sum,
     llvm::Value* count,
     llvm::Value* isNull) const {
+  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction("jit_HashAggrSetPartialAvgDouble"),
       {vector, row, sum, count, isNull});
 }
 
 void HashAggrJitCodegen::emitDecimalSumExtract(
-    llvm::Value* vector,
+    llvm::Value* output,
     llvm::Value* row,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
@@ -641,6 +716,7 @@ void HashAggrJitCodegen::emitDecimalSumExtract(
                                  : "jit_HashAggrExtractFinalDecimalSum";
   auto* longDecimal = builder().getInt8(
       slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
       {vector,
@@ -653,7 +729,7 @@ void HashAggrJitCodegen::emitDecimalSumExtract(
 }
 
 void HashAggrJitCodegen::emitDecimalAvgExtract(
-    llvm::Value* vector,
+    llvm::Value* output,
     llvm::Value* row,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
@@ -662,6 +738,7 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
                                  : "jit_HashAggrExtractFinalDecimalAvg";
   auto* longDecimal = builder().getInt8(
       slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
       {vector,

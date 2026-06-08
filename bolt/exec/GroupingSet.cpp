@@ -42,6 +42,7 @@
 #endif
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
+#include "bolt/vector/FlatVector.h"
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
@@ -66,6 +67,29 @@ bool areAllLazyNotLoaded(const std::vector<VectorPtr>& vectors) {
 #ifdef ENABLE_BOLT_JIT
 std::string hashAggrJitTypeName(const TypePtr& type) {
   return type == nullptr ? "null" : type->toString();
+}
+
+void* hashAggrJitRawOutputValues(
+    BaseVector* vector,
+    jit::HashAggrJitValueKind kind) {
+  switch (kind) {
+    case jit::HashAggrJitValueKind::Int8:
+      return vector->asUnchecked<FlatVector<int8_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int16:
+      return vector->asUnchecked<FlatVector<int16_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int32:
+      return vector->asUnchecked<FlatVector<int32_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int64:
+      return vector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Float:
+      return vector->asUnchecked<FlatVector<float>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Double:
+      return vector->asUnchecked<FlatVector<double>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Bool:
+    case jit::HashAggrJitValueKind::Int128:
+      return nullptr;
+  }
+  return nullptr;
 }
 
 std::string hashAggrJitSlotDebugString(
@@ -1110,6 +1134,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
       continue;
     }
     const auto numSlots = chunk.slots().size();
+    hashAggrJitOutputs_.assign(numSlots, jit::HashAggrJitOutput{});
     hashAggrJitResultPtrs_.assign(numSlots, nullptr);
     bool canRunChunk = true;
     std::string skipReason;
@@ -1132,7 +1157,18 @@ void GroupingSet::runHashAggrJitExtractChunks(
         skipReason = "unexpected result vector encoding";
         break;
       }
-      hashAggrJitResultPtrs_[slotIndex] = reinterpret_cast<char*>(aggregateVector.get());
+      // Prepare stable raw output pointers after resizing. The JIT extract
+      // function still receives char** for ABI compatibility, but each element
+      // now points to HashAggrJitOutput rather than BaseVector directly.
+      aggregateVector->resize(groups.size());
+      hashAggrJitOutputs_[slotIndex].vector = aggregateVector.get();
+      if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
+        hashAggrJitOutputs_[slotIndex].values =
+            hashAggrJitRawOutputValues(aggregateVector.get(), slot.accumulatorKind);
+        hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
+      }
+      hashAggrJitResultPtrs_[slotIndex] =
+          reinterpret_cast<char*>(&hashAggrJitOutputs_[slotIndex]);
     }
     if (!canRunChunk) {
       VLOG(1) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
