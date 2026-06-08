@@ -37,6 +37,28 @@ struct JitDecimalAvgState {
 struct HashAggrJitSlot;
 struct HashAggrJitExtractTarget;
 
+// Runtime input descriptor consumed by JIT add_dense functions.
+// GroupingSet prepares one descriptor per aggregate input for each batch by
+// decoding the original vector into a flat/constant base plus a single indices
+// mapping. This keeps generated IR independent of the batch's original vector
+// encoding (flat/dictionary/constant) while allowing the hot loop to load
+// values directly instead of calling jit_GetDecodedValue* helpers per row.
+struct HashAggrJitDecodedInput {
+  const void* values{nullptr};
+  // Always points to a top-level-row -> base-row mapping. For flat inputs this
+  // is a consecutive mapping; for constant inputs it maps every row to the
+  // constant value index.
+  const int32_t* indices{nullptr};
+  // Top-level nulls. If non-null, bit 'row' indicates whether the input row is
+  // null. This is intentionally row-based rather than base-index-based to keep
+  // generated IR independent of dictionary/null wrapping details.
+  const uint64_t* nulls{nullptr};
+  // Original DecodedVector pointer. Raw single-value inputs use the descriptor
+  // fields above directly; intermediate ROW inputs still use row-field helper
+  // APIs and therefore need the DecodedVector object.
+  const void* decodedVector{nullptr};
+};
+
 struct HashAggrJitPlanContext {
   bool isRawInput{false};
   bool isPartialOutput{false};
@@ -163,6 +185,8 @@ class HashAggrJitCodegen {
       llvm::Value* decoded,
       llvm::Value* row,
       const HashAggrJitSlot& slot) const;
+  llvm::Value* loadDecodedNulls(llvm::Value* decoded) const;
+  llvm::Value* isDecodedNull(llvm::Value* nulls, llvm::Value* row) const;
   llvm::Value* isAccumulatorNull(
       llvm::Value* group,
       const HashAggrJitSlot& slot) const;

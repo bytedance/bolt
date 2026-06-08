@@ -427,12 +427,80 @@ void setAccumulatorNull(
 
 llvm::Value* loadDecodedValue(
     llvm::IRBuilder<>& builder,
-    llvm::Module& module,
     llvm::Value* decoded,
     llvm::Value* row,
     const HashAggrJitSlot& slot) {
-  auto* callee = module.getFunction(decodedValueFunction(slot.inputKind));
-  return builder.CreateCall(callee, {decoded, row});
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* i32Ty = builder.getInt32Ty();
+
+  auto* valuesPtrPtr = builder.CreatePointerCast(decoded, i8PtrTy->getPointerTo());
+  auto* values = builder.CreateLoad(i8PtrTy, valuesPtrPtr, "decoded_values");
+
+  auto* indicesAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), decoded, static_cast<uint64_t>(sizeof(void*)));
+  auto* indicesPtrPtr =
+      builder.CreatePointerCast(indicesAddr, i32Ty->getPointerTo()->getPointerTo());
+  auto* indices = builder.CreateLoad(i32Ty->getPointerTo(), indicesPtrPtr, "decoded_indices");
+  auto* index = builder.CreateLoad(
+      i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
+
+  if (slot.inputKind == HashAggrJitValueKind::Bool) {
+    auto* wordTy = builder.getInt64Ty();
+    auto* wordIndex = builder.CreateLShr(index, builder.getInt32(6));
+    auto* bitIndex = builder.CreateAnd(index, builder.getInt32(63));
+    auto* words = builder.CreatePointerCast(values, wordTy->getPointerTo());
+    auto* word = builder.CreateLoad(
+        wordTy,
+        builder.CreateInBoundsGEP(
+            wordTy, words, builder.CreateZExt(wordIndex, builder.getInt64Ty())));
+    auto* shifted = builder.CreateLShr(word, builder.CreateZExt(bitIndex, wordTy));
+    return builder.CreateZExt(
+        builder.CreateICmpNE(
+            builder.CreateAnd(shifted, builder.getInt64(1)), builder.getInt64(0)),
+        builder.getInt8Ty());
+  }
+
+  auto* type = llvmType(builder, slot.inputKind);
+  auto* typedValues = builder.CreatePointerCast(values, type->getPointerTo());
+  auto* valueAddr = builder.CreateInBoundsGEP(
+      type, typedValues, builder.CreateZExt(index, builder.getInt64Ty()));
+  auto* load = builder.CreateLoad(type, valueAddr);
+  load->setAlignment(llvm::Align(1));
+  return load;
+}
+
+llvm::Value* loadDecodedNulls(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), decoded, static_cast<uint64_t>(2 * sizeof(void*)));
+  auto* nullsPtrPtr = builder.CreatePointerCast(nullsAddr, i8PtrTy->getPointerTo());
+  return builder.CreateLoad(i8PtrTy, nullsPtrPtr, "decoded_nulls");
+}
+
+llvm::Value* isDecodedNull(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* nulls,
+    llvm::Value* row) {
+  auto* i64Ty = builder.getInt64Ty();
+  auto* nullWords = builder.CreatePointerCast(nulls, i64Ty->getPointerTo());
+  auto* wordIndex = builder.CreateLShr(row, builder.getInt32(6));
+  auto* bitIndex = builder.CreateAnd(row, builder.getInt32(63));
+  auto* word = builder.CreateLoad(
+      i64Ty,
+      builder.CreateInBoundsGEP(
+          i64Ty, nullWords, builder.CreateZExt(wordIndex, builder.getInt64Ty())));
+  auto* shifted = builder.CreateLShr(word, builder.CreateZExt(bitIndex, i64Ty));
+  return builder.CreateICmpNE(
+      builder.CreateAnd(shifted, builder.getInt64(1)), builder.getInt64(0));
+}
+
+llvm::Value* loadDecodedVector(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* decodedVectorAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), decoded, static_cast<uint64_t>(3 * sizeof(void*)));
+  auto* decodedVectorPtrPtr =
+      builder.CreatePointerCast(decodedVectorAddr, i8PtrTy->getPointerTo());
+  return builder.CreateLoad(i8PtrTy, decodedVectorPtrPtr, "decoded_vector");
 }
 
 } // namespace
@@ -449,8 +517,17 @@ llvm::Value* HashAggrJitCodegen::loadDecodedValue(
     llvm::Value* decoded,
     llvm::Value* row,
     const HashAggrJitSlot& slot) const {
-  return ::bytedance::bolt::jit::loadDecodedValue(
-      builder(), module_, decoded, row, slot);
+  return ::bytedance::bolt::jit::loadDecodedValue(builder(), decoded, row, slot);
+}
+
+llvm::Value* HashAggrJitCodegen::loadDecodedNulls(llvm::Value* decoded) const {
+  return ::bytedance::bolt::jit::loadDecodedNulls(builder(), decoded);
+}
+
+llvm::Value* HashAggrJitCodegen::isDecodedNull(
+    llvm::Value* nulls,
+    llvm::Value* row) const {
+  return ::bytedance::bolt::jit::isDecodedNull(builder(), nulls, row);
 }
 
 llvm::Value* HashAggrJitCodegen::isAccumulatorNull(
@@ -505,18 +582,20 @@ llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
   const auto name = decodedRowFieldFunction(kind);
   BOLT_CHECK(
       !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
+  auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
   return builder().CreateCall(
-      module_.getFunction(name), {decoded, row, builder().getInt32(field)});
+      module_.getFunction(name), {decodedVector, row, builder().getInt32(field)});
 }
 
 llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
     llvm::Value* decoded,
     llvm::Value* row,
     int32_t field) const {
+  auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
   return builder().CreateICmpNE(
       builder().CreateCall(
           module_.getFunction("jit_GetDecodedRowFieldIsNull"),
-          {decoded, row, builder().getInt32(field)}),
+          {decodedVector, row, builder().getInt32(field)}),
       builder().getInt8(0));
 }
 
@@ -695,9 +774,15 @@ bool genAddDenseIR(
     auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
     auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
     if (checkInputNulls && !slot.countStar) {
-      auto* isNull = builder.CreateICmpNE(
-          builder.CreateCall(module.getFunction("jit_GetDecodedIsNull"), {decoded, row}),
-          builder.getInt8(0));
+      auto* nulls = codegen.loadDecodedNulls(decoded);
+      auto* nullCheckBlock =
+          llvm::BasicBlock::Create(context, "slot_null_check", func, end);
+      auto* hasNulls = builder.CreateICmpNE(
+          nulls, llvm::ConstantPointerNull::get(i8PtrTy));
+      builder.CreateCondBr(hasNulls, nullCheckBlock, updateBlock);
+
+      builder.SetInsertPoint(nullCheckBlock);
+      auto* isNull = codegen.isDecodedNull(nulls, row);
       builder.CreateCondBr(isNull, nextBlock, updateBlock);
     } else {
       builder.CreateBr(updateBlock);

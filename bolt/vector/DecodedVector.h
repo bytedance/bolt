@@ -151,6 +151,10 @@ class DecodedVector {
     return reinterpret_cast<const T*>(data_);
   }
 
+  const void* dataAsVoid() const {
+    return data_;
+  }
+
   /// Returns the raw nulls buffer for the base vector combined with nulls found
   /// in dictionary wrappings. May return nullptr if there are no nulls. Use
   /// top-level row numbers to access individual null flags, e.g.

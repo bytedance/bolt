@@ -464,6 +464,7 @@ class GroupingSet {
 #ifdef ENABLE_BOLT_JIT
   std::vector<jit::HashAggrJitChunk> hashAggrJitChunks_;
   std::vector<DecodedVector> hashAggrJitDecoded_;
+  std::vector<jit::HashAggrJitDecodedInput> hashAggrJitDecodedInputs_;
   std::vector<VectorPtr> hashAggrJitInputVectors_;
   std::vector<char*> hashAggrJitDecodedPtrs_;
   std::vector<char*> hashAggrJitNewGroups_;

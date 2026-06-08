@@ -989,6 +989,7 @@ void GroupingSet::runHashAggrJitChunks(
 
     const auto numSlots = chunk.slots().size();
     hashAggrJitDecoded_.resize(numSlots);
+    hashAggrJitDecodedInputs_.resize(numSlots);
     hashAggrJitInputVectors_.assign(numSlots, nullptr);
     hashAggrJitDecodedPtrs_.assign(numSlots, nullptr);
 
@@ -1032,9 +1033,15 @@ void GroupingSet::runHashAggrJitChunks(
       }
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
+      hashAggrJitDecodedInputs_[slotIndex] = jit::HashAggrJitDecodedInput{
+          hashAggrJitDecoded_[slotIndex].dataAsVoid(),
+          hashAggrJitDecoded_[slotIndex].indices(),
+          hashAggrJitDecoded_[slotIndex].nulls(&activeRows_),
+          &hashAggrJitDecoded_[slotIndex]};
       inputsMayHaveNulls =
           inputsMayHaveNulls || hashAggrJitDecoded_[slotIndex].mayHaveNulls();
-      hashAggrJitDecodedPtrs_[slotIndex] = reinterpret_cast<char*>(&hashAggrJitDecoded_[slotIndex]);
+      hashAggrJitDecodedPtrs_[slotIndex] =
+          reinterpret_cast<char*>(&hashAggrJitDecodedInputs_[slotIndex]);
     }
 
     if (!canRunChunk) {
