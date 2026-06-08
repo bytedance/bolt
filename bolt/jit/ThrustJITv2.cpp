@@ -21,15 +21,80 @@
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/Object/SymbolSize.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 namespace bytedance::bolt::jit {
+
+namespace {
+
+// Returns whether perf-map emission is enabled. The conan LLVM package is built
+// without LLVM_USE_PERF, so llvm::JITEventListener::createPerfJITEventListener()
+// is a no-op stub that returns nullptr. We therefore emit the perf map file
+// ourselves. Controlled by the BOLT_JIT_PERF env var to avoid file IO overhead
+// in normal runs.
+bool perfMapEnabled() {
+  static const bool enabled = std::getenv("BOLT_JIT_PERF") != nullptr;
+  return enabled;
+}
+
+// Appends symbols of a freshly loaded JIT object to /tmp/perf-<PID>.map so that
+// `perf report` can resolve JIT-generated machine code to function names.
+// Format per line: "<hex start addr> <hex size> <symbol name>".
+void appendPerfMap(
+    const llvm::object::ObjectFile& obj,
+    const llvm::RuntimeDyld::LoadedObjectInfo& loadedInfo) {
+  // Use the relocated/loaded object so symbol addresses are the runtime ones.
+  auto debugObjOwner = loadedInfo.getObjectForDebug(obj);
+  const llvm::object::ObjectFile& debugObj = *debugObjOwner.getBinary();
+
+  static std::mutex perfMapMutex;
+  std::lock_guard<std::mutex> guard(perfMapMutex);
+
+  std::string path =
+      "/tmp/perf-" + std::to_string(llvm::sys::Process::getProcessId()) +
+      ".map";
+  std::FILE* file = std::fopen(path.c_str(), "a");
+  if (file == nullptr) {
+    return;
+  }
+
+  for (const auto& [symbol, size] :
+       llvm::object::computeSymbolSizes(debugObj)) {
+    auto typeOr = symbol.getType();
+    if (!typeOr || *typeOr != llvm::object::SymbolRef::ST_Function) {
+      continue;
+    }
+    auto addrOr = symbol.getAddress();
+    auto nameOr = symbol.getName();
+    if (!addrOr || !nameOr || size == 0) {
+      llvm::consumeError(addrOr.takeError());
+      llvm::consumeError(nameOr.takeError());
+      continue;
+    }
+    std::fprintf(
+        file,
+        "%llx %llx %.*s\n",
+        static_cast<unsigned long long>(*addrOr),
+        static_cast<unsigned long long>(size),
+        static_cast<int>(nameOr->size()),
+        nameOr->data());
+  }
+  std::fclose(file);
+}
+
+} // namespace
 
 llvm::Expected<std::unique_ptr<ThrustJITv2>> ThrustJITv2::Create() {
   static std::once_flag llvmTargetInitialized;
@@ -59,7 +124,11 @@ llvm::Expected<std::unique_ptr<ThrustJITv2>> ThrustJITv2::Create() {
                     [tracker](
                         llvm::orc::MaterializationResponsibility& mr,
                         const llvm::object::ObjectFile& obj,
-                        const llvm::RuntimeDyld::LoadedObjectInfo&) {
+                        const llvm::RuntimeDyld::LoadedObjectInfo&
+                            loadedInfo) {
+                      if (perfMapEnabled()) {
+                        appendPerfMap(obj, loadedInfo);
+                      }
                       llvm::orc::ResourceKey resourceKey = 0;
                       if (auto err = mr.withResourceKeyDo(
                               [&](llvm::orc::ResourceKey key) {
