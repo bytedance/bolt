@@ -25,12 +25,17 @@
 
 DEFINE_uint64(
     bm_row_container_data_bytes,
-    1ULL << 30,
+    50ULL << 30,
     "Logical input bytes processed by BM row container benchmarks.");
 DEFINE_uint32(
     bm_row_container_batch_rows,
     4096,
     "Input rows per generated batch.");
+DEFINE_uint64(
+    bm_row_container_reusable_input_bytes,
+    128ULL << 20,
+    "Logical input bytes to materialize once and repeatedly feed into BM row "
+    "container benchmarks. Set to 0 to materialize the full logical input.");
 DEFINE_uint32(
     bm_row_container_string_length,
     1024,
@@ -118,6 +123,31 @@ VectorPtr makeResultVector(
     vector_size_t size,
     memory::MemoryPool* pool) {
   return BaseVector::create(type, size, pool);
+}
+
+RowVectorPtr prefixRows(const RowVectorPtr& batch, vector_size_t size) {
+  if (size == batch->size()) {
+    return batch;
+  }
+  return std::dynamic_pointer_cast<RowVector>(batch->slice(0, size));
+}
+
+template <typename Store>
+void storeReusableInputBatches(
+    const ReusableInputBatches& input,
+    uint64_t totalRows,
+    Store store) {
+  BOLT_CHECK(!input.batches.empty());
+  size_t nextBatch = 0;
+  uint64_t remaining = totalRows;
+  while (remaining > 0) {
+    const auto& batch = input.batches[nextBatch];
+    const auto batchRows = static_cast<vector_size_t>(
+        std::min<uint64_t>(batch->size(), remaining));
+    store(prefixRows(batch, batchRows));
+    remaining -= batchRows;
+    nextBatch = (nextBatch + 1) % input.batches.size();
+  }
 }
 
 } // namespace
@@ -257,6 +287,31 @@ RowVectorPtr makeInputBatch(
   return maker.rowVector(std::move(children));
 }
 
+ReusableInputBatches makeReusableInputBatches(
+    memory::MemoryPool* pool,
+    const BenchmarkOptions& options) {
+  const auto totalRows = rowCount(options);
+  const auto rowBytes = logicalRowBytes(options);
+  const auto cacheBytes = FLAGS_bm_row_container_reusable_input_bytes == 0
+      ? options.dataBytes
+      : std::min<uint64_t>(
+            options.dataBytes, FLAGS_bm_row_container_reusable_input_bytes);
+  const auto reusableRows = std::min<uint64_t>(
+      totalRows, std::max<uint64_t>(1, (cacheBytes + rowBytes - 1) / rowBytes));
+
+  ReusableInputBatches input;
+  input.rows = reusableRows;
+  input.batches.reserve((reusableRows + options.batchRows - 1) /
+      options.batchRows);
+  for (uint64_t offset = 0; offset < reusableRows;) {
+    const auto batchSize = static_cast<vector_size_t>(
+        std::min<uint64_t>(options.batchRows, reusableRows - offset));
+    input.batches.push_back(makeInputBatch(pool, options, offset, batchSize));
+    offset += batchSize;
+  }
+  return input;
+}
+
 void storeInputBatchOld(
     RowContainer& container,
     const RowVectorPtr& batch,
@@ -282,6 +337,32 @@ void storeInputBatchBm(
   if (rows != nullptr) {
     rows->insert(rows->end(), appended.rows.begin(), appended.rows.end());
   }
+}
+
+void storeReusableInputBatchesOld(
+    RowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    std::vector<char*>* rows) {
+  if (rows != nullptr) {
+    rows->reserve(rowCount(options));
+  }
+  storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
+    storeInputBatchOld(container, batch, rows);
+  });
+}
+
+void storeReusableInputBatchesBm(
+    BmRowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    std::vector<char*>* rows) {
+  if (rows != nullptr) {
+    rows->reserve(rowCount(options));
+  }
+  storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
+    storeInputBatchBm(container, batch, rows);
+  });
 }
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
@@ -331,17 +412,8 @@ void storeOldRowsOnly(
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
     std::vector<char*>* rows) {
-  const auto totalRows = rowCount(options);
-  if (rows != nullptr) {
-    rows->reserve(totalRows);
-  }
-  for (uint64_t offset = 0; offset < totalRows;) {
-    const auto batchSize = static_cast<vector_size_t>(
-        std::min<uint64_t>(options.batchRows, totalRows - offset));
-    auto batch = makeInputBatch(pool, options, offset, batchSize);
-    storeInputBatchOld(container, batch, rows);
-    offset += batchSize;
-  }
+  auto input = makeReusableInputBatches(pool, options);
+  storeReusableInputBatchesOld(container, input, options, rows);
 }
 
 void storeBmRowsOnly(
@@ -349,17 +421,8 @@ void storeBmRowsOnly(
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
     std::vector<char*>* rows) {
-  const auto totalRows = rowCount(options);
-  if (rows != nullptr) {
-    rows->reserve(totalRows);
-  }
-  for (uint64_t offset = 0; offset < totalRows;) {
-    const auto batchSize = static_cast<vector_size_t>(
-        std::min<uint64_t>(options.batchRows, totalRows - offset));
-    auto batch = makeInputBatch(pool, options, offset, batchSize);
-    storeInputBatchBm(container, batch, rows);
-    offset += batchSize;
-  }
+  auto input = makeReusableInputBatches(pool, options);
+  storeReusableInputBatchesBm(container, input, options, rows);
 }
 
 void extractOldRows(
