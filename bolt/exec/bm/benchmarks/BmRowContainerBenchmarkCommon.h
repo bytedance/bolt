@@ -40,7 +40,7 @@ struct OldStoredRows {
 
 struct BmStoredRows {
   std::unique_ptr<BmRowContainer> container;
-  std::vector<RowHandle> handles;
+  std::vector<char*> rows;
 };
 
 struct OldSpillData {
@@ -50,9 +50,6 @@ struct OldSpillData {
 
 struct BmSpillData {
   std::unique_ptr<BmRowContainer> container;
-  // Keep RowIds for now even though this metadata is large at 1G/10G scale.
-  // A future streaming cursor can avoid materializing the full RowId list.
-  std::vector<RowId> rowIds;
   SegmentId segment{0};
 };
 
@@ -78,7 +75,7 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<RowHandle>* handles = nullptr);
+    std::vector<char*>* rows = nullptr);
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
     DatasetKind dataset,
@@ -108,7 +105,7 @@ void storeBmRowsOnly(
     BmRowContainer& container,
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
-    std::vector<RowHandle>* handles = nullptr);
+    std::vector<char*>* rows = nullptr);
 
 void extractOldRows(
     RowContainer& container,
@@ -118,11 +115,12 @@ void extractOldRows(
 
 void extractBmRowsResident(
     BmRowContainer& container,
-    const std::vector<RowHandle>& handles,
+    const std::vector<char*>& rows,
     const BenchmarkOptions& options,
     memory::MemoryPool* pool);
 
-void extractBmRowsFromReadSession(
+void extractBmRowsFromRowIds(
+    BmRowContainer& container,
     BulkReadSession& session,
     const std::vector<RowId>& rowIds,
     const BenchmarkOptions& options,

@@ -82,13 +82,19 @@ BmRowContainer::SegmentData& BmRowContainer::activeSegment(
     return segmentData(it->second);
   }
 
+  auto& segment = createSegment(partition);
+  activeSegments_[partition] = segment.meta.id;
+  return segment;
+}
+
+BmRowContainer::SegmentData& BmRowContainer::createSegment(
+    std::optional<PartitionId> partition) {
   SegmentData segment;
   segment.meta.id = nextSegmentId_++;
   segment.meta.state = SegmentState::kActiveResident;
-  segment.meta.partitionId = partition;
+  segment.meta.partitionId = std::move(partition);
   const auto id = segment.meta.id;
   auto [inserted, _] = segments_.emplace(id, std::move(segment));
-  activeSegments_[partition] = id;
   return inserted->second;
 }
 
@@ -96,6 +102,13 @@ SegmentId BmRowContainer::finalizeAndFlush(PartitionId partition) {
   auto active = activeSegments_.find(partition);
   BOLT_CHECK(active != activeSegments_.end());
   auto& segment = segmentData(active->second);
+  const auto id = finalizeAndFlushSegment(segment);
+  partitionSegments_[partition].push_back(id);
+  activeSegments_.erase(active);
+  return id;
+}
+
+SegmentId BmRowContainer::finalizeAndFlushSegment(SegmentData& segment) {
   BOLT_CHECK(segment.meta.state == SegmentState::kActiveResident);
   segment.meta.state = SegmentState::kFinalizedResident;
 
@@ -114,8 +127,6 @@ SegmentId BmRowContainer::finalizeAndFlush(PartitionId partition) {
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
   segment.meta.state = SegmentState::kFinalizedFlushed;
-  partitionSegments_[partition].push_back(segment.meta.id);
-  activeSegments_.erase(active);
   return segment.meta.id;
 }
 
@@ -155,7 +166,7 @@ BmRowContainer::BlockRef& BmRowContainer::addBlock(
 
 BmRowContainer::BlockRef& BmRowContainer::ensureRowBlock(SegmentData& segment) {
   if (!segment.rowBlocks.empty() &&
-      segment.rowBlocks.back().used + fixedRowSize_ + sizeof(RowId) <=
+      segment.rowBlocks.back().used + fixedRowSize_ <=
           segment.rowBlocks.back().size) {
     return segment.rowBlocks.back();
   }
@@ -188,24 +199,48 @@ BmRowContainer::BlockRef& BmRowContainer::blockRef(
   BOLT_FAIL("Unknown {} block {}", isRowBlock ? "row" : "heap", id);
 }
 
-RowHandle BmRowContainer::newRowInSegment(SegmentData& segment) {
+char* BmRowContainer::newRowInSegment(SegmentData& segment) {
   BOLT_CHECK(segment.meta.state == SegmentState::kActiveResident);
   auto& block = ensureRowBlock(segment);
   const auto offset = block.used;
   auto* row = block.ptr + offset;
-  block.used += fixedRowSize_ + sizeof(RowId);
-  std::memset(row, 0, fixedRowSize_ + sizeof(RowId));
+  block.used += fixedRowSize_;
+  std::memset(row, 0, fixedRowSize_);
 
   RowId rowId;
   rowId.segmentId = segment.meta.id;
   rowId.rowNumber = segment.nextRowNumber++;
   rowId.rowBlockId = block.id;
   rowId.rowOffset = offset;
-  auto* storedRowId = reinterpret_cast<RowId*>(row + fixedRowSize_);
-  *storedRowId = rowId;
   ++segment.meta.numRows;
   updateChunkForRow(segment, rowId);
-  return {rowId, row};
+  return row;
+}
+
+char* BmRowContainer::copyRowToSegment(
+    SegmentData& segment,
+    const char* source) {
+  auto* target = newRowInSegment(segment);
+  std::memcpy(target, source, fixedRowSize_);
+
+  for (int32_t column = 0; column < types_.size(); ++column) {
+    const auto kind = types_[column]->kind();
+    if ((kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) ||
+        isNull(target, column)) {
+      continue;
+    }
+    auto* value = reinterpret_cast<StringView*>(valueAddress(target, column));
+    if (value->isInline()) {
+      continue;
+    }
+    auto& heap = ensureHeapBlock(segment, value->size());
+    auto* stringTarget = heap.ptr + heap.used;
+    std::memcpy(stringTarget, value->data(), value->size());
+    heap.used += value->size();
+    *value = StringView(stringTarget, value->size());
+    recordHeapForCurrentPart(segment, heap);
+  }
+  return target;
 }
 
 void BmRowContainer::updateChunkForRow(
@@ -292,6 +327,83 @@ const DataChunkMeta& BmRowContainer::chunkForRow(
     }
   }
   BOLT_FAIL("Unknown row number {} in segment {}", rowNumber, segment.meta.id);
+}
+
+BmRowContainer::SegmentData& BmRowContainer::owningActiveSegment(
+    const char* row) {
+  const auto address = reinterpret_cast<uintptr_t>(row);
+  for (auto& [_, segment] : segments_) {
+    if (segment.meta.state != SegmentState::kActiveResident) {
+      continue;
+    }
+    for (const auto& block : segment.rowBlocks) {
+      const auto begin = reinterpret_cast<uintptr_t>(block.ptr);
+      const auto end = begin + block.used;
+      if (begin <= address && address < end) {
+        return segment;
+      }
+    }
+  }
+  BOLT_FAIL("Row pointer does not belong to an active BmRowContainer segment");
+}
+
+RowId BmRowContainer::rowIdForRowNumber(
+    const SegmentData& segment,
+    RowNumber rowNumber) const {
+  const auto& chunk = chunkForRow(segment, rowNumber);
+  auto remaining = rowNumber - chunk.firstRowNumber;
+  for (auto partId : chunk.parts) {
+    const auto& part = segment.parts[partId];
+    if (remaining < part.rowCount) {
+      return {
+          segment.meta.id,
+          rowNumber,
+          part.rowBlockId,
+          static_cast<RowOffset>(
+              part.rowBlockOffset + remaining * rowStride()),
+          kNoBlock};
+    }
+    remaining -= part.rowCount;
+  }
+  BOLT_FAIL("Unknown row number {} in segment {}", rowNumber, segment.meta.id);
+}
+
+void BmRowContainer::appendRowIdsForSegment(
+    const SegmentData& segment,
+    std::vector<RowId>& rows) const {
+  rows.reserve(rows.size() + segment.meta.numRows);
+  for (const auto& chunk : segment.chunks) {
+    RowNumber rowNumber = chunk.firstRowNumber;
+    for (auto partId : chunk.parts) {
+      const auto& part = segment.parts[partId];
+      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
+        rows.push_back(
+            {segment.meta.id,
+             rowNumber++,
+             part.rowBlockId,
+             static_cast<RowOffset>(
+                 part.rowBlockOffset + rowIndex * rowStride()),
+             kNoBlock});
+      }
+    }
+  }
+}
+
+void BmRowContainer::appendRowPointersForSegment(
+    SegmentData& segment,
+    std::vector<char*>& rows) {
+  rows.reserve(rows.size() + segment.meta.numRows);
+  for (const auto& chunk : segment.chunks) {
+    for (auto partId : chunk.parts) {
+      const auto& part = segment.parts[partId];
+      auto& rowBlock = blockRef(segment, part.rowBlockId, true);
+      BOLT_CHECK_NOT_NULL(rowBlock.ptr);
+      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
+        rows.push_back(
+            rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride());
+      }
+    }
+  }
 }
 
 char* BmRowContainer::rowPointer(const RowId& id) {
@@ -468,7 +580,7 @@ uint64_t BmRowContainer::segmentBytes(const SegmentData& segment) const {
 }
 
 uint32_t BmRowContainer::rowStride() const {
-  return fixedRowSize_ + sizeof(RowId);
+  return fixedRowSize_;
 }
 
 } // namespace bytedance::bolt::exec::bm

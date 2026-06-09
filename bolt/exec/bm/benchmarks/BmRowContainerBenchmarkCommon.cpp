@@ -230,16 +230,16 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<RowHandle>* handles) {
+    std::vector<char*>* rows) {
   std::vector<DecodedVector> decoded;
   decodeBatch(batch, decoded);
   for (vector_size_t row = 0; row < batch->size(); ++row) {
-    auto handle = container.newRow();
-    if (handles != nullptr) {
-      handles->push_back(handle);
+    auto* target = container.newRow();
+    if (rows != nullptr) {
+      rows->push_back(target);
     }
     for (auto column = 0; column < batch->childrenSize(); ++column) {
-      container.store(decoded[column], row, handle.ptr, column);
+      container.store(decoded[column], row, target, column);
     }
   }
 }
@@ -277,7 +277,7 @@ BmStoredRows storeBmRows(
   stored.container = makeBmRowContainer(options.dataset, context.bufferManager);
   storeBmRowsOnly(
       *stored.container, context.pool.get(), options,
-      keepHandles ? &stored.handles : nullptr);
+      keepHandles ? &stored.rows : nullptr);
   return stored;
 }
 
@@ -303,16 +303,16 @@ void storeBmRowsOnly(
     BmRowContainer& container,
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
-    std::vector<RowHandle>* handles) {
+    std::vector<char*>* rows) {
   const auto totalRows = rowCount(options);
-  if (handles != nullptr) {
-    handles->reserve(totalRows);
+  if (rows != nullptr) {
+    rows->reserve(totalRows);
   }
   for (uint64_t offset = 0; offset < totalRows;) {
     const auto batchSize = static_cast<vector_size_t>(
         std::min<uint64_t>(options.batchRows, totalRows - offset));
     auto batch = makeInputBatch(pool, options, offset, batchSize);
-    storeInputBatchBm(container, batch, handles);
+    storeInputBatchBm(container, batch, rows);
     offset += batchSize;
   }
 }
@@ -338,18 +338,18 @@ void extractOldRows(
 
 void extractBmRowsResident(
     BmRowContainer& container,
-    const std::vector<RowHandle>& handles,
+    const std::vector<char*>& inputRows,
     const BenchmarkOptions& options,
     memory::MemoryPool* pool) {
   const auto types = columnTypes(options.dataset);
   std::vector<const char*> rows;
   rows.reserve(options.batchRows);
-  for (size_t offset = 0; offset < handles.size();) {
+  for (size_t offset = 0; offset < inputRows.size();) {
     const auto batchSize = static_cast<vector_size_t>(
-        std::min<size_t>(options.batchRows, handles.size() - offset));
+        std::min<size_t>(options.batchRows, inputRows.size() - offset));
     rows.clear();
     for (vector_size_t i = 0; i < batchSize; ++i) {
-      rows.push_back(handles[offset + i].ptr);
+      rows.push_back(inputRows[offset + i]);
     }
     for (auto column = 0; column < types.size(); ++column) {
       auto result = makeResultVector(types[column], batchSize, pool);
@@ -361,22 +361,27 @@ void extractBmRowsResident(
   }
 }
 
-void extractBmRowsFromReadSession(
+void extractBmRowsFromRowIds(
+    BmRowContainer& container,
     BulkReadSession& session,
     const std::vector<RowId>& rowIds,
     const BenchmarkOptions& options,
     memory::MemoryPool* pool) {
   const auto types = columnTypes(options.dataset);
+  std::vector<const char*> rows;
+  rows.reserve(options.batchRows);
   for (size_t offset = 0; offset < rowIds.size();) {
     const auto batchSize = static_cast<vector_size_t>(
         std::min<size_t>(options.batchRows, rowIds.size() - offset));
+    auto window = session.loadRows(
+        {rowIds.data() + offset, static_cast<size_t>(batchSize)});
+    rows.clear();
+    for (const auto& row : window.rows) {
+      rows.push_back(row.ptr);
+    }
     for (auto column = 0; column < types.size(); ++column) {
       auto result = makeResultVector(types[column], batchSize, pool);
-      session.extractColumn(
-          {rowIds.data() + offset, static_cast<size_t>(batchSize)},
-          column,
-          0,
-          result);
+      container.extractColumnResident(rows.data(), batchSize, column, result);
       folly::doNotOptimizeAway(result);
     }
     offset += batchSize;
@@ -405,16 +410,9 @@ OldSpillData spillOldRows(
 BmSpillData spillBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options) {
-  auto stored = storeBmRows(context, options, true);
+  auto stored = storeBmRows(context, options, false);
   BmSpillData spill;
   spill.container = std::move(stored.container);
-  // Keep all RowIds for now to match the current RowContainer access contract.
-  // For large fixed-width data sets this metadata can be sizable; optimize this
-  // later with a streaming row cursor if the benchmark memory footprint matters.
-  spill.rowIds.reserve(stored.handles.size());
-  for (const auto& handle : stored.handles) {
-    spill.rowIds.push_back(handle.id);
-  }
   spill.segment = spill.container->flushActiveSegment();
   return spill;
 }

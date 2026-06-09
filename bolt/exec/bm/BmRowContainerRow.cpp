@@ -95,8 +95,7 @@ void BmRowContainer::store(
       *reinterpret_cast<StringView*>(target) = value;
       return;
     }
-    auto* rowId = reinterpret_cast<RowId*>(row + fixedRowSize_);
-    auto& segment = segmentData(rowId->segmentId);
+    auto& segment = owningActiveSegment(row);
     auto& heap = ensureHeapBlock(segment, value.size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value.data(), value.size());
@@ -104,9 +103,6 @@ void BmRowContainer::store(
     *reinterpret_cast<StringView*>(target) =
         StringView(stringTarget, value.size());
     recordHeapForCurrentPart(segment, heap);
-    if (rowId->primaryHeapBlockId == kNoBlock) {
-      rowId->primaryHeapBlockId = heap.id;
-    }
     return;
   }
   BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
@@ -159,21 +155,6 @@ void BmRowContainer::extractColumnResident(
   for (vector_size_t i = 0; i < numRows; ++i) {
     extractOne(rows[i], column, i, result, exactSize);
   }
-}
-
-char* BmRowContainer::resolveRowResident(const RowId& row) {
-  return rowPointer(row);
-}
-
-folly::Range<char* const*> BmRowContainer::resolveRowsResident(
-    folly::Range<const RowId*> rows,
-    std::vector<char*>& result) {
-  result.clear();
-  result.reserve(rows.size());
-  for (const auto& row : rows) {
-    result.push_back(resolveRowResident(row));
-  }
-  return {result.data(), result.size()};
 }
 
 bool BmRowContainer::isNull(const char* row, int32_t column) const {

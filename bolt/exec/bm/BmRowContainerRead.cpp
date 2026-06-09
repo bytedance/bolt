@@ -13,86 +13,65 @@ BulkReadSession::BulkReadSession(
     : container_(container),
       mode_(mode),
       pins_(std::move(pins)),
-      segments_(segments.begin(), segments.end()),
-      options_(options) {}
+      segmentOrder_(std::move(segments)),
+      segments_(segmentOrder_.begin(), segmentOrder_.end()),
+      options_(std::move(options)) {}
 
-folly::Range<char* const*> BulkReadSession::resolveRows(
-    folly::Range<const RowId*> rows,
-    std::vector<char*>& result) {
+LoadAllResult BulkReadSession::tryLoadAll(
+    std::vector<char*>& rows,
+    std::vector<RowId>& rowIds) {
   BOLT_CHECK_NOT_NULL(container_);
-  BOLT_CHECK(mode_ == ReadMode::kFullyResident);
-  result.clear();
-  result.reserve(rows.size());
+  rows.clear();
+  rowIds.clear();
+
+  if (mode_ == ReadMode::kFullyResident) {
+    for (auto segment : segmentOrder_) {
+      container_->appendRowPointersForSegment(
+          container_->segmentData(segment), rows);
+    }
+    return LoadAllResult::kLoadedPointers;
+  }
+
+  for (auto segment : segmentOrder_) {
+    container_->appendRowIdsForSegment(container_->segmentData(segment), rowIds);
+  }
+  return LoadAllResult::kNeedWindowRead;
+}
+
+RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
+  BOLT_CHECK_NOT_NULL(container_);
+  windowPins_.clear();
+  rowViews_.clear();
+  rowViews_.reserve(rows.size());
+
+  std::unordered_set<uint64_t> pinnedChunks;
   for (const auto& row : rows) {
     BOLT_CHECK(
         segments_.count(row.segmentId) != 0,
         "Row segment {} is not covered by this read session",
         row.segmentId);
-    result.push_back(container_->rowPointer(row));
-  }
-  return {result.data(), result.size()};
-}
-
-void BulkReadSession::extractColumn(
-    folly::Range<const RowId*> rows,
-    int32_t column,
-    vector_size_t resultOffset,
-    const VectorPtr& result,
-    bool exactSize) {
-  if (mode_ == ReadMode::kFullyResident) {
-    std::vector<char*> resolved;
-    resolveRows(rows, resolved);
-    for (vector_size_t i = 0; i < resolved.size(); ++i) {
-      container_->extractOne(
-          resolved[i], column, resultOffset + i, result, exactSize);
-    }
-    return;
-  }
-
-  for (vector_size_t i = 0; i < rows.size(); ++i) {
-    const auto& row = rows[i];
-    BOLT_CHECK(
-        segments_.count(row.segmentId) != 0,
-        "Row segment {} is not covered by this read session",
-        row.segmentId);
     auto& segment = container_->segmentData(row.segmentId);
     const auto& chunk = container_->chunkForRow(segment, row.rowNumber);
-    auto pins = container_->pinChunk(segment, chunk);
-    container_->extractOne(
-        container_->rowPointer(row),
-        column,
-        resultOffset + i,
-        result,
-        exactSize);
+    const auto key =
+        (static_cast<uint64_t>(row.segmentId) << 32) | chunk.id;
+    if (pinnedChunks.insert(key).second) {
+      auto pins = container_->pinChunk(segment, chunk);
+      for (auto& pin : pins) {
+        windowPins_.push_back(std::move(pin));
+      }
+    }
   }
+
+  for (const auto& row : rows) {
+    rowViews_.push_back({row, container_->rowPointer(row)});
+  }
+  return {{rowViews_.data(), rowViews_.size()}};
 }
 
-void BulkReadSession::extractNulls(
-    folly::Range<const RowId*> rows,
-    int32_t column,
-    const BufferPtr& result) {
-  auto* raw = result->asMutable<uint64_t>();
-  if (mode_ == ReadMode::kFullyResident) {
-    std::vector<char*> resolved;
-    resolveRows(rows, resolved);
-    for (vector_size_t i = 0; i < resolved.size(); ++i) {
-      bits::setNull(raw, i, container_->isNull(resolved[i], column));
-    }
-    return;
-  }
-
-  for (vector_size_t i = 0; i < rows.size(); ++i) {
-    const auto& row = rows[i];
-    BOLT_CHECK(
-        segments_.count(row.segmentId) != 0,
-        "Row segment {} is not covered by this read session",
-        row.segmentId);
-    auto& segment = container_->segmentData(row.segmentId);
-    const auto& chunk = container_->chunkForRow(segment, row.rowNumber);
-    auto pins = container_->pinChunk(segment, chunk);
-    bits::setNull(
-        raw, i, container_->isNull(container_->rowPointer(row), column));
-  }
+char* BulkReadSession::loadRow(const RowId& row) {
+  auto window = loadRows({&row, 1});
+  BOLT_CHECK_EQ(1, window.rows.size());
+  return window.rows[0].ptr;
 }
 
 SegmentCursor::SegmentCursor(
@@ -119,14 +98,13 @@ void SegmentCursor::loadCurrent() {
     return;
   }
 
-  BOLT_CHECK(
-      run.layout == SortedRunLayout::kRowIdOrder,
-      "Materialized sorted run cursor is not implemented yet");
-  currentRowId_ = run.sortedRows[index_];
-  auto& segment = container_->segmentData(currentRowId_.segmentId);
-  const auto& chunk = container_->chunkForRow(segment, currentRowId_.rowNumber);
+  BOLT_CHECK(run.layout == SortedRunLayout::kMaterializedOrder);
+  auto& segment = container_->segmentData(run.materializedSegment);
+  auto rowId =
+      container_->rowIdForRowNumber(segment, static_cast<RowNumber>(index_));
+  const auto& chunk = container_->chunkForRow(segment, rowId.rowNumber);
   pins_ = container_->pinChunk(segment, chunk);
-  currentRow_ = container_->rowPointer(currentRowId_);
+  currentRow_ = container_->rowPointer(rowId);
 }
 
 MergeReadSession::MergeReadSession(
@@ -135,7 +113,7 @@ MergeReadSession::MergeReadSession(
     ReadSessionOptions options)
     : container_(container),
       runs_(runs.begin(), runs.end()),
-      options_(options) {}
+      options_(std::move(options)) {}
 
 SegmentCursor MergeReadSession::cursor(SortedRunId run) {
   BOLT_CHECK_NOT_NULL(container_);
@@ -154,30 +132,25 @@ int32_t MergeReadSession::compareCurrentRows(
 }
 
 SortedRunId BmRowContainer::finalizeSortedRun(
-    folly::Range<const RowHandle*> sortedRows,
+    folly::Range<char* const*> sortedRows,
     const SortedRunOptions& options) {
   BOLT_CHECK(!sortedRows.empty());
-  const auto segmentId = sortedRows[0].id.segmentId;
-  auto& segment = segmentData(segmentId);
-  BOLT_CHECK(segment.meta.state == SegmentState::kActiveResident);
+  BOLT_CHECK(options.preferredLayout == SortedRunLayout::kMaterializedOrder);
+
+  auto& materialized = createSegment(std::nullopt);
+  const auto materializedSegment = materialized.meta.id;
+  for (auto* row : sortedRows) {
+    copyRowToSegment(materialized, row);
+  }
+  finalizeAndFlushSegment(materialized);
 
   SortedRunMeta meta;
   meta.id = nextSortedRunId_++;
-  meta.layout = options.preferredLayout;
+  meta.layout = SortedRunLayout::kMaterializedOrder;
+  meta.materializedSegment = materializedSegment;
   meta.numRows = sortedRows.size();
-  meta.sourceSegments.push_back(segmentId);
-  meta.sortedRows.reserve(sortedRows.size());
-  for (const auto& row : sortedRows) {
-    BOLT_CHECK_EQ(segmentId, row.id.segmentId);
-    meta.sortedRows.push_back(row.id);
-  }
-
-  if (meta.layout == SortedRunLayout::kMaterializedOrder) {
-    BOLT_NYI("Materialized sorted run is not implemented yet");
-  }
 
   sortedRuns_.emplace(meta.id, std::move(meta));
-  finalizeAndFlush(segment.meta.partitionId.value_or(kDefaultPartition));
   return nextSortedRunId_ - 1;
 }
 

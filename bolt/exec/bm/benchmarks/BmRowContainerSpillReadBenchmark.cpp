@@ -36,18 +36,17 @@ void spillReadBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
     auto opts = options(dataset, dataBytes(bytes));
     BenchmarkContext context("spill-read-bm", opts.dataBytes);
     auto spill = spillBmRows(context, opts);
-    std::vector<char*> resolved;
+    std::vector<char*> rows;
+    std::vector<RowId> rowIds;
     suspender.dismiss();
     auto session =
         spill.container->beginBulkReadSegments({&spill.segment, 1});
-    for (size_t offset = 0; offset < spill.rowIds.size();) {
-      const auto batchSize = static_cast<vector_size_t>(
-          std::min<size_t>(opts.batchRows, spill.rowIds.size() - offset));
-      auto range = session.resolveRows(
-          {spill.rowIds.data() + offset, static_cast<size_t>(batchSize)},
-          resolved);
-      folly::doNotOptimizeAway(range.data());
-      offset += batchSize;
+    auto result = session.tryLoadAll(rows, rowIds);
+    if (result == LoadAllResult::kLoadedPointers) {
+      folly::doNotOptimizeAway(rows.data());
+    } else {
+      extractBmRowsFromRowIds(
+          *spill.container, session, rowIds, opts, context.pool.get());
     }
     suspender.rehire();
   }

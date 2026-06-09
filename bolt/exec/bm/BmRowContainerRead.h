@@ -15,6 +15,15 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer;
 
+struct RowView {
+  RowId id;
+  char* ptr{nullptr};
+};
+
+struct RowWindow {
+  folly::Range<const RowView*> rows;
+};
+
 class BulkReadSession {
  public:
   BulkReadSession() = default;
@@ -23,21 +32,13 @@ class BulkReadSession {
     return mode_;
   }
 
-  folly::Range<char* const*> resolveRows(
-      folly::Range<const RowId*> rows,
-      std::vector<char*>& result);
+  LoadAllResult tryLoadAll(
+      std::vector<char*>& rows,
+      std::vector<RowId>& rowIds);
 
-  void extractColumn(
-      folly::Range<const RowId*> rows,
-      int32_t column,
-      vector_size_t resultOffset,
-      const VectorPtr& result,
-      bool exactSize = false);
+  RowWindow loadRows(folly::Range<const RowId*> rows);
 
-  void extractNulls(
-      folly::Range<const RowId*> rows,
-      int32_t column,
-      const BufferPtr& result);
+  char* loadRow(const RowId& row);
 
  private:
   BulkReadSession(
@@ -50,6 +51,9 @@ class BulkReadSession {
   BmRowContainer* container_{nullptr};
   ReadMode mode_{ReadMode::kFullyResident};
   std::vector<memory::bm::BufferHandle> pins_;
+  std::vector<memory::bm::BufferHandle> windowPins_;
+  std::vector<RowView> rowViews_;
+  std::vector<SegmentId> segmentOrder_;
   std::unordered_set<SegmentId> segments_;
   ReadSessionOptions options_;
 
@@ -62,10 +66,6 @@ class SegmentCursor {
 
   bool hasCurrent() const {
     return container_ != nullptr && currentRow_ != nullptr;
-  }
-
-  RowId currentRowId() const {
-    return currentRowId_;
   }
 
   const char* currentRow() const {
@@ -86,7 +86,6 @@ class SegmentCursor {
   SortedRunId run_{0};
   ReadSessionOptions options_;
   uint64_t index_{0};
-  RowId currentRowId_;
   char* currentRow_{nullptr};
   std::vector<memory::bm::BufferHandle> pins_;
 

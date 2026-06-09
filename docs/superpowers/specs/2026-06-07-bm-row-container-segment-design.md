@@ -67,7 +67,9 @@ enum class SegmentState {
 
 ## 3. Row 身份和指针
 
-上层同时拿到 `RowId` 和 `char*`：
+写入和 resident 快路径只向上层暴露 `char*`。`RowId` 不是写入阶段的返回值，也不作为
+RowContainer 内部逐行保存的元数据；它只在 `BulkReadSession::tryLoadAll()` 进入 window read
+fallback 时，根据 Segment / DataChunk / ChunkPart 元数据批量构造出来。
 
 ```cpp
 using SegmentId = uint32_t;
@@ -85,10 +87,6 @@ struct RowId {
   BlockId primaryHeapBlockId; // hint；sentinel 表示没有 out-of-line value
 };
 
-struct RowHandle {
-  RowId id;
-  char* ptr; // 仅在所属 segment resident 或 read session 当前窗口内有效
-};
 ```
 
 `rowBlockId + rowOffset` 用于直接定位 row bytes。`rowNumber` 用于把 row 映射到 `DataChunk`，避免
@@ -99,8 +97,8 @@ window read 为了定位 chunk 反查所有 block 元数据。`primaryHeapBlockI
 flush 后，上层必须清空对应 cached pointer：
 
 ```text
-for each cached RowHandle in flushed segment:
-  handle.ptr = nullptr
+for each cached char* in flushed segment:
+  ptr = nullptr
 ```
 
 可以给 segment 增加 debug epoch，在 debug build 中检查 cached pointer 是否来自当前有效 epoch。
@@ -244,14 +242,14 @@ Pointer rebasing 只允许发生在：
 非 partitioned 算子使用默认 active segment：
 
 ```cpp
-RowHandle newRow();
+char* newRow();
 SegmentId flushActiveSegment();
 ```
 
 Partitioned Hash Build 使用按 partition 独立的 active segment：
 
 ```cpp
-RowHandle newRow(PartitionId partition);
+char* newRow(PartitionId partition);
 SegmentId flushActivePartitionSegment(PartitionId partition);
 ```
 
@@ -282,14 +280,12 @@ Flush 是上层显式生命周期边界，不是内部 LRU。它是全量、大�
 
 ## 7. SortedRun
 
-Sort 和 Hash Agg 需要 sorted run。Sorted run 的物理形态先不在 RowContainer 层定死，必须兼容两种
-layout：
+Sort 和 Hash Agg 需要 sorted run。新版设计只采用物理有序 run：调用方用 resident pointer 排序后，
+RowContainer 按排序结果把 rows 拷贝到新的 materialized segment。这样 merge 阶段只需要顺序 cursor，
+不需要向上层暴露 RowId 顺序数组。
 
 ```cpp
 enum class SortedRunLayout {
-  // 逻辑有序：sortedRows 描述访问顺序，payload 仍在 source segments 中。
-  kRowIdOrder,
-
   // 物理有序：materializedSegment 内的 row 顺序就是排序顺序。
   kMaterializedOrder,
 };
@@ -297,9 +293,7 @@ enum class SortedRunLayout {
 struct SortedRunMeta {
   SortedRunId id;
   SortedRunLayout layout;
-  std::vector<SegmentId> sourceSegments;
-  std::vector<RowId> sortedRows; // layout == kRowIdOrder
-  std::optional<SegmentId> materializedSegment; // layout == kMaterializedOrder
+  SegmentId materializedSegment;
   uint64_t numRows;
 };
 
@@ -308,7 +302,7 @@ struct SortedRunOptions {
 };
 
 SortedRunId finalizeSortedRun(
-    folly::Range<const RowHandle*> sortedRows,
+    folly::Range<char* const*> sortedRows,
     const SortedRunOptions& options);
 ```
 
@@ -316,23 +310,14 @@ SortedRunId finalizeSortedRun(
 
 ```text
 1. 调用方已经用 resident ptr 排好 sortedRows。
-2. RowContainer finalize source active segment。
-3. RowContainer 根据 options 生成 SortedRunMeta。
+2. RowContainer 按 `sortedRows` 顺序写出新的 materialized segment。
+3. RowContainer 生成 `SortedRunMeta`。
 4. 返回 SortedRunId，供 MergeReadSession 使用。
-5. RowContainer 为后续写入创建新的 active segment。
-6. 调用方清空 source segment 的 cached pointers。
+5. 调用方清空不再有效的 cached pointers。
 ```
 
-当 layout 是 `kRowIdOrder`：
-
-- 保存排序后的 `RowId` 序列。
-- source segment 进入 `kFinalizedFlushed`，可通过 BM 读回。
-- 不拷贝 fixed rows，也不拷贝 heap payload。
-- merge cursor 按 sorted RowId window 批量 pin/rebase。
-
-当 layout 是 `kMaterializedOrder`：
-
-- 按 sortedRows 顺序写出一个新的 materialized run segment。
+- materialized segment 内 row 顺序就是 sorted run 顺序。
+- MergeReadSession 每个 cursor 只顺序 pin 当前窗口并返回 `char*`。
 - materialized segment 的物理行顺序就是排序顺序。
 - materialized segment 进入 `kFinalizedFlushed`，供后续 merge 顺序扫描。
 - source segment 在没有其他引用后可以释放；是否也下刷 source segment 取决于实现是否还需要它。
@@ -368,8 +353,8 @@ pin、read、rebase 或 IO。
 
 ## 9. BulkReadSession
 
-`BulkReadSession` 用于“我有一批 segments/RowIds，要 materialize 某些列”的场景。创建 session 时
-先尝试一次性加载全部目标 segments；如果失败，再进入 window read。
+`BulkReadSession` 用于“我有一批 segments，要把 working set 准备好”的场景。创建 session 时先尝试
+一次性加载全部目标 segments；如果失败，再进入 window read。
 
 ```cpp
 enum class ReadMode {
@@ -386,21 +371,13 @@ class BulkReadSession {
  public:
   ReadMode mode() const;
 
-  folly::Range<char* const*> resolveRows(
-      folly::Range<const RowId*> rows,
-      std::vector<char*>& result);
+  LoadAllResult tryLoadAll(
+      std::vector<char*>& rows,
+      std::vector<RowId>& rowIds);
 
-  void extractColumn(
-      folly::Range<const RowId*> rows,
-      int32_t column,
-      vector_size_t resultOffset,
-      const VectorPtr& result,
-      bool exactSize = false);
+  RowWindow loadRows(folly::Range<const RowId*> rows);
 
-  void extractNulls(
-      folly::Range<const RowId*> rows,
-      int32_t column,
-      const BufferPtr& result);
+  char* loadRow(const RowId& row);
 };
 
 BulkReadSession beginBulkReadSegments(
@@ -411,26 +388,35 @@ BulkReadSession beginBulkReadSegments(
 Session 创建流程：
 
 1. 尝试 pin/load 目标 segments 的所有 row/heap blocks。
-2. 如果成功，`mode() == kFullyResident`，对相关 parts 做 pointer rebase。
-3. 如果失败，`mode() == kWindowRead`，后续 extract 按 chunk/window 读取。
+2. 如果成功，`mode() == kFullyResident`，`tryLoadAll()` 只填充 `rows`，这些 pointer 在 session
+   生命周期内稳定。
+3. 如果失败，`mode() == kWindowRead`，`tryLoadAll()` 只填充 `rowIds`。这些 RowId 是根据
+   chunk/part 元数据构造出来的 durable fallback handle，不在写入阶段逐行保存。
 
-`resolveRows()` 用于把长期身份 `RowId` 批量解析成当前 session 内有效的 `char*`。它不是
-`BmRowContainer` 顶层的单行随机访问接口，不能隐式触发单 row IO。
-
-第一版建议只要求 `kFullyResident` 支持 `resolveRows()`：
+`tryLoadAll()` 是互斥输出：
 
 ```text
-resolveRows(rowIds, result)
-  -> 要求 rowIds 都属于 beginBulkReadSegments() 覆盖的 segments
-  -> 要求 session mode == kFullyResident
-  -> 根据 RowId 的 rowBlockId + rowOffset 批量生成 char*
-  -> 返回 result 中的指针视图
+kLoadedPointers:
+  rows 非空，rowIds 为空
+
+kNeedWindowRead:
+  rows 为空，rowIds 非空
 ```
 
-这些指针在 `BulkReadSession` 生命周期内有效。session 结束后，上层不能继续保存这些指针。
+window read 下，上层可以通过两类显式慢路径重新获得 pointer：
 
-`kWindowRead` 下不提供跨窗口稳定的 `resolveRows()` 结果；需要访问 row pointer 的实现应在窗口加载
-后使用当前窗口内部的指针，或者继续使用 `extractColumn()` 这类由 session 管理窗口生命周期的接口。
+```text
+loadRows(rowIds)
+  -> 批量加载 rowIds 所在 chunks
+  -> 返回 RowView { RowId id; char* ptr }
+
+loadRow(rowId)
+  -> 显式单行慢路径
+  -> 可以触发 row 所在 chunk 的 pin/load/rebase
+```
+
+`loadRow()` 是公开 API，但它不是 resident 快路径；调用方必须把它当作显式慢路径。它可能推进或替换
+session 当前窗口，并让之前 `loadRows()` / `loadRow()` 返回的临时 pointer 失效。
 
 Window read 流程：
 
@@ -458,7 +444,6 @@ for each needed DataChunk in output order:
 class SegmentCursor {
  public:
   bool hasCurrent() const;
-  RowId currentRowId() const;
   const char* currentRow() const; // 当前 cursor window 内有效
   void advance();
 };
@@ -483,11 +468,8 @@ MergeReadSession beginMergeReadSegments(
     ReadSessionOptions options = {});
 ```
 
-Cursor 对上层暴露统一行为：`currentRowId()` 和 `currentRow()` 始终表示当前 run 的下一条逻辑有序
-row。内部根据 layout 选择窗口组织方式：
-
-- `kRowIdOrder`：按 `SortedRunMeta::sortedRows` 维护 RowId window，窗口内批量 pin/rebase。
-- `kMaterializedOrder`：按 `materializedSegment` 的 chunk/part 顺序扫描。
+Cursor 对上层只暴露 `currentRow()`：它始终表示当前 run 的下一条逻辑有序 row。内部按
+`materializedSegment` 的 chunk/part 顺序扫描。
 
 `compareCurrentRows()` 只比较窗口内已经有效的 row pointer，不触发单行 IO。
 
@@ -526,8 +508,8 @@ release 是销毁数据，之后对应 `RowId` 不再可用。
 ```cpp
 class BmRowContainer {
  public:
-  RowHandle newRow();
-  RowHandle newRow(PartitionId partition);
+  char* newRow();
+  char* newRow(PartitionId partition);
 
   void store(
       const DecodedVector& decoded,
@@ -550,7 +532,7 @@ class BmRowContainer {
   SegmentId flushActivePartitionSegment(PartitionId partition);
 
   SortedRunId finalizeSortedRun(
-      folly::Range<const RowHandle*> sortedRows,
+      folly::Range<char* const*> sortedRows,
       const SortedRunOptions& options);
 
   BulkReadSession beginBulkReadSegments(
@@ -572,7 +554,7 @@ class BmRowContainer {
 
 | 维度 | 现有 `RowContainer` | 新 `BmRowContainer` |
 | --- | --- | --- |
-| 长期 row identity | `char*` | `RowId` |
+| 长期 row identity | `char*` | window fallback 下构造的 `RowId` |
 | 快路径 row access | `char*` | resident/session 内 `char*` |
 | flush 后 pointer | 不适用 | 全部失效，上层清空 |
 | variable-width slot | `StringView` | `StringView` |
@@ -589,9 +571,8 @@ class BmRowContainer {
 
 - 只支持 `VARCHAR` / `VARBINARY` 的 pointer rebasing；复杂类型后续扩展。
 - 单个 out-of-line value 不跨 heap block；大 value 使用 dedicated large block。
-- Sort/HashAgg 的 sorted run 保留 `kRowIdOrder` 和 `kMaterializedOrder` 两种方案；具体采用哪种策略
-  不在本文档中提前定死。
-- HashJoin flushed partition 不支持单行随机 probe。
+- Sort/HashAgg 的 sorted run 使用 `kMaterializedOrder`，按排序结果物理重排写出。
+- HashJoin flushed partition 的单行访问只能通过 `BulkReadSession::loadRow()` 显式慢路径发生。
 - HashJoin flushed partition 第一版必须走 partition restore：读回 build partition、重建局部
   resident hash table、再处理对应 probe partition。
 - 如果某个 read window 连一个 row block 加必要 heap blocks 都无法 pin，直接报内存不足；
@@ -599,13 +580,14 @@ class BmRowContainer {
 
 ## 15. 实现顺序建议
 
-1. 实现 row/heap block 写入、`RowId`、`RowHandle` 和 resident compare/extract。
+1. 实现 row/heap block 写入、resident pointer compare/extract，以及可由 chunk/part 元数据构造的
+   `RowId`。
 2. 实现 Segment、DataChunk、ChunkPart 元数据生成。
 3. 实现 variable-width `StringView` 存储和 ChunkPart pointer rebasing。
 4. 实现 `flushActiveSegment()`、`flushActivePartitionSegment()` 和 finalized segment 状态管理。
 5. 实现 `BulkReadSession` 的全量加载尝试和 window read。
-6. 实现 `SortedRunMeta`、`finalizeSortedRun()` 和 `MergeReadSession`，接口上保留两种
-   `SortedRunLayout`。
+6. 实现 `SortedRunMeta`、`finalizeSortedRun()` 和 `MergeReadSession`，只支持
+   `kMaterializedOrder`。
 7. 实现 `releaseSegment(s)`，支持 read/merge session 结束后的显式销毁。
 8. 实现 partitioned active segments，支持每个 partition 多次 flush。
 9. 为 RowContainer 本体补齐单元测试和压力测试：resident 快路径、flush/read、window read、
