@@ -23,7 +23,7 @@ Sort、Hash Agg、Hash Build / Hash Join 的接入流程见
 - `char*` 是短期快路径，只在 resident 阶段或 read session 当前窗口内有效。
 - 上层算子可以缓存 `char*`，但在 flush 对应 segment 后必须主动清空这些指针。
 - `compare(const char*, const char*)` 永远不触发 IO，也不做 pin/load。
-- `store()` 只写当前 resident active segment，不触发读回。
+- `appendBatch()` 和 `appendRow()` 只写当前 resident active segment，不触发读回。
 - BufferManager 读回和置换只发生在显式 read/merge 边界。
 - Sort、Hash Agg、Hash Join 都不在 comparator、hash probe 命中点或单 row 访问处做随机 IO。
 
@@ -242,26 +242,35 @@ Pointer rebasing 只允许发生在：
 非 partitioned 算子使用默认 active segment：
 
 ```cpp
-char* newRow();
+AppendBatchResult appendBatch(const RowVectorPtr& input);
+RowWriter appendRow();
 SegmentId flushActiveSegment();
 ```
 
 Partitioned Hash Build 使用按 partition 独立的 active segment：
 
 ```cpp
-char* newRow(PartitionId partition);
+AppendBatchResult appendBatch(const RowVectorPtr& input, PartitionId partition);
+RowWriter appendRow(PartitionId partition);
 SegmentId flushActivePartitionSegment(PartitionId partition);
 ```
 
-`store()` 只接受当前 resident row pointer：
+`appendBatch()` 面向 Sort 这类批量 materialize 场景，容器内部批量分配 rows、构造
+DataChunk/ChunkPart，并决定 fixed-width 列走列式写入、variable-width 列如何使用 writer context。
+`appendRow()` 面向 HashBuild、Window、TopN 等 row-local 写入场景，返回的 `RowWriter` 保存
+segment/chunk/part 写入上下文：
 
 ```cpp
-void store(
-    const DecodedVector& decoded,
-    vector_size_t sourceIndex,
-    char* row,
-    int32_t column);
+class RowWriter {
+ public:
+  char* row() const;
+  void store(const DecodedVector& decoded, vector_size_t sourceIndex, int32_t column);
+  void finish();
+};
 ```
+
+`char*` 是 resident 读、比较和排序句柄，不再作为写入句柄。variable-width 写入必须通过
+`appendBatch()` 或 `RowWriter` 携带的写入上下文完成，不能在裸 `char*` 上反查 segment/part。
 
 Flush 语义：
 
@@ -337,11 +346,11 @@ BmRowContainer(
     memory::bm::MemoryTag tag,
     ...);
 
-void storeColumn(
-    const DecodedVector& decoded,
-    vector_size_t size,
-    char* const* rows,
-    int32_t column);
+AppendBatchResult appendBatch(
+    const RowVectorPtr& input,
+    PartitionId partition = kDefaultPartition);
+
+RowWriter appendRow(PartitionId partition = kDefaultPartition);
 
 int32_t compare(
     const char* left,
@@ -362,9 +371,8 @@ void extractColumnResident(
 ```
 
 `nullable` 是列级 layout 属性，由上层算子创建 container 时传入。非 nullable 列不分配 null bit，
-store 时不接受 null，extract 时走无 null 检查的 typed 快路径；nullable 列才读取对应 null bit。
-批量写入时，fixed-width 列应优先走 `storeColumn()`，让 type dispatch 和 nullable 判断发生在列级；
-variable-width 列可以根据元数据维护成本选择列式写入或在 `newRow()` 后立即按行写入。
+写入时不接受 null，extract 时走无 null 检查的 typed 快路径；nullable 列才读取对应 null bit。
+批量写入策略由 `appendBatch()` 内部决定，上层不直接调用列式写入 helper。
 
 这些接口的前提是 rows 所属 segment resident，且 variable-width pointers 已经有效。它们不触发
 pin、read、rebase 或 IO。`extractColumnResident()` 接收 `char* const*`，是为了让上层直接传
@@ -534,20 +542,11 @@ class BmRowContainer {
       memory::bm::MemoryTag tag,
       ...);
 
-  char* newRow();
-  char* newRow(PartitionId partition);
+  AppendBatchResult appendBatch(
+      const RowVectorPtr& input,
+      PartitionId partition = kDefaultPartition);
 
-  void store(
-      const DecodedVector& decoded,
-      vector_size_t sourceIndex,
-      char* row,
-      int32_t column);
-
-  void storeColumn(
-      const DecodedVector& decoded,
-      vector_size_t size,
-      char* const* rows,
-      int32_t column);
+  RowWriter appendRow(PartitionId partition = kDefaultPartition);
 
   int32_t compare(
       const char* left,

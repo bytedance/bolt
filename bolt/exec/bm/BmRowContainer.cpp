@@ -75,12 +75,11 @@ BmRowContainer::BmRowContainer(
   BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);
 }
 
-char* BmRowContainer::newRow() {
-  return newRow(kDefaultPartition);
-}
-
-char* BmRowContainer::newRow(PartitionId partition) {
-  return newRowInSegment(activeSegment(partition));
+BmRowContainer::RowWriter BmRowContainer::appendRow(PartitionId partition) {
+  auto& segment = activeSegment(partition);
+  auto* row = newRowInSegment(segment);
+  return RowWriter(
+      this, segment.meta.id, segment.currentChunk, segment.currentPart, row);
 }
 
 } // namespace bytedance::bolt::exec::bm

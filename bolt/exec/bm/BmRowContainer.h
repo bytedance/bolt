@@ -6,6 +6,7 @@
 #include "bolt/exec/bm/BmRowContainerRead.h"
 #include "bolt/exec/bm/BmRowContainerTypes.h"
 #include "bolt/type/Type.h"
+#include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -21,6 +22,47 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer {
  public:
+  struct AppendBatchResult {
+    std::vector<char*> rows;
+  };
+
+  class RowWriter {
+   public:
+    RowWriter() = default;
+
+    char* row() const {
+      return row_;
+    }
+
+    void store(
+        const DecodedVector& decoded,
+        vector_size_t sourceIndex,
+        int32_t column);
+
+    void finish();
+
+   private:
+    friend class BmRowContainer;
+
+    RowWriter(
+        BmRowContainer* container,
+        SegmentId segment,
+        ChunkId chunk,
+        PartId part,
+        char* row)
+        : container_(container),
+          segment_(segment),
+          chunk_(chunk),
+          part_(part),
+          row_(row) {}
+
+    BmRowContainer* container_{nullptr};
+    SegmentId segment_{0};
+    ChunkId chunk_{kNoBlock};
+    PartId part_{kNoBlock};
+    char* row_{nullptr};
+  };
+
   BmRowContainer(
       std::vector<TypePtr> types,
       std::vector<bool> nullable,
@@ -32,20 +74,11 @@ class BmRowContainer {
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t chunkRowCount = 1024);
 
-  char* newRow();
-  char* newRow(PartitionId partition);
+  AppendBatchResult appendBatch(
+      const RowVectorPtr& input,
+      PartitionId partition = kDefaultPartition);
 
-  void store(
-      const DecodedVector& decoded,
-      vector_size_t sourceIndex,
-      char* row,
-      int32_t column);
-
-  void storeColumn(
-      const DecodedVector& decoded,
-      vector_size_t size,
-      char* const* rows,
-      int32_t column);
+  RowWriter appendRow(PartitionId partition = kDefaultPartition);
 
   int32_t compare(
       const char* left,
@@ -140,17 +173,12 @@ class BmRowContainer {
   char* copyRowToSegment(SegmentData& segment, const char* source);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
   void recordHeapForCurrentPart(SegmentData& segment, const BlockRef& heap);
-  void recordHeapForRow(
+  void recordHeapForPart(
       SegmentData& segment,
-      const char* row,
-      const BlockRef& heap);
-  void recordHeapForRow(
-      SegmentData& segment,
-      const char* row,
+      ChunkId chunk,
+      PartId part,
       const BlockRef& heap,
-      ChunkId& chunkHint,
-      PartId& partHint);
-  SegmentData& owningActiveSegment(const char* row);
+      const char* row);
   const DataChunkMeta& chunkForRow(
       const SegmentData& segment,
       RowNumber rowNumber) const;
@@ -173,14 +201,19 @@ class BmRowContainer {
       const char* left,
       const char* right,
       int32_t column) const;
+  void storeValue(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriter& writer,
+      int32_t column);
   template <TypeKind Kind>
   void storeValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      char* row,
+      RowWriter& writer,
       const ColumnLayout& column);
   template <TypeKind Kind>
-  void storeColumnTyped(
+  void storeFixedColumnTyped(
       const DecodedVector& decoded,
       vector_size_t size,
       char* const* rows,

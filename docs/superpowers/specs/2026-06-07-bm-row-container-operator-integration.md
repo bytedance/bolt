@@ -12,7 +12,9 @@
 
 算子只能依赖以下语义：
 
-- `newRow()` / `newRow(partition)` 返回 `char*`。
+- `appendBatch()` 返回批量 resident `char*`，用于 Sort/HashAgg 这类批量 materialize 路径。
+- `appendRow(partition)` 返回 `RowWriter`，用于 HashBuild、Window、TopN 这类 row-local 写入路径；
+  `RowWriter::row()` 返回 resident `char*`。
 - `char*` 只在 resident 阶段、全量 read session 生命周期内，或 read session 当前窗口内有效。
 - `RowId` 只在 `BulkReadSession::tryLoadAll()` 失败后暴露，是 window fallback 的 durable handle。
 - 算子在 flush 对应 segment 后必须主动清空 cached pointers。
@@ -37,9 +39,8 @@ Sort 仍以 resident pointer 排序为快路径。
 
 ```text
 addInput
-  -> row = container.newRow()
-  -> container.store(..., row, ...)
-  -> rows.push_back(row)
+  -> appended = container.appendBatch(input)
+  -> rows.insert(appended.rows)
 
 noMoreInput
   -> sort rows by char*
@@ -126,8 +127,9 @@ Build 输入：
 
 ```text
 计算 build row partition
-  -> row = container.newRow(partition)
-  -> container.store(..., row, ...)
+  -> writer = container.appendRow(partition)
+  -> writer.store(...)
+  -> row = writer.row()
   -> 如果该 partition resident，插入 resident hash table
 ```
 
