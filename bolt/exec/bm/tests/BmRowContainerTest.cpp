@@ -42,25 +42,10 @@ class BmRowContainerTest : public testing::Test,
   }
 
   std::vector<char*> storeAll(BmRowContainer& container, RowVectorPtr input) {
-    SelectivityVector rows(input->size());
-    std::vector<DecodedVector> decoded(input->childrenSize());
-    for (auto i = 0; i < input->childrenSize(); ++i) {
-      decoded[i].decode(*input->childAt(i), rows);
-    }
-
-    std::vector<char*> rowsOut;
-    rowsOut.reserve(input->size());
-    for (auto row = 0; row < input->size(); ++row) {
-      auto* target = container.newRow();
-      for (auto column = 0; column < input->childrenSize(); ++column) {
-        container.store(decoded[column], row, target, column);
-      }
-      rowsOut.push_back(target);
-    }
-    return rowsOut;
+    return container.appendBatch(input).rows;
   }
 
-  std::vector<char*> storeAllByColumn(
+  std::vector<char*> storeAllByRowWriter(
       BmRowContainer& container,
       RowVectorPtr input) {
     SelectivityVector rows(input->size());
@@ -72,11 +57,12 @@ class BmRowContainerTest : public testing::Test,
     std::vector<char*> rowsOut;
     rowsOut.reserve(input->size());
     for (auto row = 0; row < input->size(); ++row) {
-      rowsOut.push_back(container.newRow());
-    }
-    for (auto column = 0; column < input->childrenSize(); ++column) {
-      container.storeColumn(
-          decoded[column], input->size(), rowsOut.data(), column);
+      auto writer = container.appendRow();
+      for (auto column = 0; column < input->childrenSize(); ++column) {
+        writer.store(decoded[column], row, column);
+      }
+      rowsOut.push_back(writer.row());
+      writer.finish();
     }
     return rowsOut;
   }
@@ -92,7 +78,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
-  auto rows = storeAll(container, input);
+  auto rows = storeAllByRowWriter(container, input);
 
   EXPECT_GT(container.compare(rows[0], rows[1], 0), 0);
   EXPECT_LT(container.compare(rows[1], rows[2], 0), 0);
@@ -109,7 +95,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_EQ(3, flat->valueAt(3));
 }
 
-TEST_F(BmRowContainerTest, StoreColumnBatchAndStringCompare) {
+TEST_F(BmRowContainerTest, AppendBatchAndStringCompare) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -120,7 +106,7 @@ TEST_F(BmRowContainerTest, StoreColumnBatchAndStringCompare) {
       makeFlatVector<std::string>(
           {"prefix_same_a", "prefix_same_b", "prefix_same_a"}),
   });
-  auto rows = storeAllByColumn(container, input);
+  auto rows = storeAll(container, input);
 
   EXPECT_LT(container.compare(rows[0], rows[1], 1), 0);
   EXPECT_EQ(0, container.compare(rows[0], rows[2], 1));
@@ -285,12 +271,14 @@ TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
   DecodedVector decoded;
   decoded.decode(*input->childAt(0), rows);
 
-  auto* first = container.newRow(7);
-  container.store(decoded, 0, first, 0);
+  auto firstWriter = container.appendRow(7);
+  firstWriter.store(decoded, 0, 0);
+  firstWriter.finish();
   auto firstSegment = container.flushActivePartitionSegment(7);
 
-  auto* second = container.newRow(7);
-  container.store(decoded, 1, second, 0);
+  auto secondWriter = container.appendRow(7);
+  secondWriter.store(decoded, 1, 0);
+  secondWriter.finish();
   auto secondSegment = container.flushActivePartitionSegment(7);
 
   EXPECT_NE(firstSegment, secondSegment);
