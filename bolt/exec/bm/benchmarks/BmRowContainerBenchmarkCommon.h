@@ -93,7 +93,7 @@ OldStoredRows storeOldRows(
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
-    bool keepHandles);
+    bool keepRows);
 
 void storeOldRowsOnly(
     RowContainer& container,
@@ -119,12 +119,10 @@ void extractBmRowsResident(
     const BenchmarkOptions& options,
     memory::MemoryPool* pool);
 
-void extractBmRowsFromRowIds(
+void readBmSpill(
     BmRowContainer& container,
-    BulkReadSession& session,
-    const std::vector<RowId>& rowIds,
-    const BenchmarkOptions& options,
-    memory::MemoryPool* pool);
+    SegmentId segment,
+    const BenchmarkOptions& options);
 
 OldSpillData spillOldRows(
     BenchmarkContext& context,
