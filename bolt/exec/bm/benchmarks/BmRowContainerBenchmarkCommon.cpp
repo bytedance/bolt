@@ -17,8 +17,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <mutex>
 #include <random>
+#include <unordered_set>
 
 DEFINE_uint64(
     bm_row_container_data_bytes,
@@ -42,6 +45,11 @@ DEFINE_uint32(
     "Root memory pool capacity as a multiplier of logical input bytes. "
     "Use a larger value for old row-based spill read because it holds source, "
     "reader buffers and restored rows at the same time.");
+DEFINE_bool(
+    bm_row_container_spill_metrics,
+    true,
+    "Print per-call spill read/write phase metrics for BM row container "
+    "benchmarks to stderr so metric lines can be redirected separately.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
@@ -113,6 +121,35 @@ VectorPtr makeResultVector(
 }
 
 } // namespace
+
+uint64_t benchmarkNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+double nsToMs(uint64_t ns) {
+  return static_cast<double>(ns) / 1'000'000.0;
+}
+
+uint64_t counterDelta(uint64_t before, uint64_t after) {
+  return after >= before ? after - before : 0;
+}
+
+const char* datasetName(DatasetKind dataset) {
+  return dataset == DatasetKind::kFixed ? "fixed" : "variable";
+}
+
+bool shouldPrintSpillMetrics(const char* benchmark, DatasetKind dataset) {
+  if (!FLAGS_bm_row_container_spill_metrics) {
+    return false;
+  }
+  static std::mutex mutex;
+  static std::unordered_set<std::string> printed;
+  const auto key = fmt::format("{}:{}", benchmark, datasetName(dataset));
+  std::lock_guard<std::mutex> l(mutex);
+  return printed.insert(key).second;
+}
 
 BenchmarkContext::BenchmarkContext(
     const std::string& name,
@@ -366,11 +403,30 @@ void extractBmRowsResident(
 void readBmSpill(
     BmRowContainer& container,
     SegmentId segment,
-    const BenchmarkOptions& options) {
+    const BenchmarkOptions& options,
+    BmSpillReadMetrics* metrics) {
+  const auto beginStart = benchmarkNowNs();
   auto session = container.beginBulkReadSegments({&segment, 1});
+  if (metrics != nullptr) {
+    metrics->beginNs += benchmarkNowNs() - beginStart;
+  }
+
+  const auto tryLoadAllStart = benchmarkNowNs();
   std::vector<char*> rows;
   std::vector<RowId> rowIds;
+  const auto totalRows = rowCount(options);
+  rows.reserve(totalRows);
+  rowIds.reserve(totalRows);
   auto result = session.tryLoadAll(rows, rowIds);
+  if (metrics != nullptr) {
+    metrics->tryLoadAllNs += benchmarkNowNs() - tryLoadAllStart;
+    metrics->result = result;
+    if (result == LoadAllResult::kLoadedPointers) {
+      metrics->rows += rows.size();
+    } else {
+      metrics->rowIds += rowIds.size();
+    }
+  }
   if (result == LoadAllResult::kLoadedPointers) {
     folly::doNotOptimizeAway(rows.data());
     folly::doNotOptimizeAway(rows.size());
@@ -380,8 +436,13 @@ void readBmSpill(
   for (size_t offset = 0; offset < rowIds.size();) {
     const auto batchSize = static_cast<vector_size_t>(
         std::min<size_t>(options.batchRows, rowIds.size() - offset));
+    const auto windowStart = benchmarkNowNs();
     auto window = session.loadRows(
         {rowIds.data() + offset, static_cast<size_t>(batchSize)});
+    if (metrics != nullptr) {
+      metrics->windowLoadNs += benchmarkNowNs() - windowStart;
+      ++metrics->windows;
+    }
     folly::doNotOptimizeAway(window.rows.data());
     folly::doNotOptimizeAway(window.rows.size());
     offset += batchSize;
@@ -391,7 +452,9 @@ void readBmSpill(
 OldSpillData spillOldRows(
     BenchmarkContext& context,
     RowContainer& container,
-    DatasetKind dataset) {
+    DatasetKind dataset,
+    OldSpillWriteMetrics* metrics) {
+  const auto spillStart = benchmarkNowNs();
   auto config = makeOldSpillConfig(context.spillDir);
   Spiller spiller(
       Spiller::Type::kHashJoinBuild,
@@ -403,6 +466,12 @@ OldSpillData spillOldRows(
       /*supportSkewPartition=*/false);
   spiller.spill();
   auto partition = spiller.finishSpill();
+  if (metrics != nullptr) {
+    metrics->spillNs += benchmarkNowNs() - spillStart;
+    metrics->rows += partition.rowCount();
+    metrics->spillBytes += partition.size();
+    metrics->files += partition.numFiles();
+  }
   auto rowFormat = std::make_unique<RowFormatInfo>(&container, true);
   return {std::move(rowFormat), std::move(partition)};
 }
@@ -420,14 +489,62 @@ BmSpillData spillBmRows(
 std::unique_ptr<RowContainer> readOldSpillIntoNewRowContainer(
     BenchmarkContext& context,
     OldSpillData& spillData,
-    DatasetKind dataset) {
+    DatasetKind dataset,
+    OldSpillReadMetrics* metrics,
+    std::vector<char*>* restoredRows) {
   auto target = makeOldRowContainer(dataset, context.pool.get());
+  if (restoredRows != nullptr) {
+    restoredRows->clear();
+    restoredRows->reserve(spillData.partition.rowCount());
+  }
+  const auto createReaderStart = benchmarkNowNs();
   auto reader = spillData.partition.createUnorderedReader(
       context.pool.get(), /*spillUringEnabled=*/false, /*isRowBased=*/true);
+  if (metrics != nullptr) {
+    metrics->createReaderNs += benchmarkNowNs() - createReaderStart;
+  }
+
   std::vector<char*> rows;
-  while (reader->nextBatch(rows) != 0) {
+  for (;;) {
+    const auto nextBatchStart = benchmarkNowNs();
+    const auto batchBytes = reader->nextBatch(rows);
+    if (metrics != nullptr) {
+      metrics->nextBatchNs += benchmarkNowNs() - nextBatchStart;
+    }
+    if (batchBytes == 0) {
+      break;
+    }
+    if (metrics != nullptr) {
+      ++metrics->batches;
+      metrics->rows += rows.size();
+      metrics->serializedBytes += batchBytes;
+    }
+    const auto copyRowsStart = benchmarkNowNs();
     for (auto* row : rows) {
       target->copySerializedRow(row, spillData.rowFormat.get());
+    }
+    if (metrics != nullptr) {
+      metrics->copyRowsNs += benchmarkNowNs() - copyRowsStart;
+    }
+  }
+  if (restoredRows != nullptr) {
+    const auto listRowsStart = benchmarkNowNs();
+    RowContainerIterator iter;
+    const auto numRows = static_cast<int32_t>(target->numRows());
+    restoredRows->resize(numRows);
+    auto* output = restoredRows->data();
+    auto remaining = numRows;
+    while (remaining > 0) {
+      const auto listed = target->listRows(&iter, remaining, output);
+      if (listed == 0) {
+        break;
+      }
+      output += listed;
+      remaining -= listed;
+    }
+    restoredRows->resize(output - restoredRows->data());
+    if (metrics != nullptr) {
+      metrics->listRowsNs += benchmarkNowNs() - listRowsStart;
     }
   }
   return target;
