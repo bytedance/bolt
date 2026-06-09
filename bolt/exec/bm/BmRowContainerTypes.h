@@ -90,6 +90,11 @@ struct ChunkPartMeta {
   BlockId rowBlockId{kNoBlock};
   uint32_t rowBlockOffset{0};
   uint32_t rowCount{0};
+  // A part is split by row-block continuity, not by heap-block changes. This
+  // deliberately preserves the old RowContainer newRow()+store(...) write
+  // model where variable-width sizes are not known when the row is allocated.
+  // Therefore one part can reference multiple heap blocks for StringView
+  // pointer rebasing.
   std::vector<HeapBaseRef> heapBases;
 };
 

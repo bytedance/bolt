@@ -320,6 +320,9 @@ void BmRowContainer::recordHeapForCurrentPart(
     chunk.heapBlocks.push_back(heap.id);
   }
 
+  // Heap block changes do not split ChunkPart. A part owns a contiguous range
+  // of rows in one row block and records all heap blocks referenced by those
+  // rows so rebasing can repair StringViews after pinning.
   auto& part = segment.parts[segment.currentPart];
   auto it = std::find_if(
       part.heapBases.begin(),
@@ -361,6 +364,8 @@ void BmRowContainer::recordHeapForPart(
     chunk.heapBlocks.push_back(heap.id);
   }
 
+  // See recordHeapForCurrentPart(): parts are row-block ranges, while heap
+  // bases are the referenced variable-width storage for pointer rebasing.
   auto it = std::find_if(
       part.heapBases.begin(),
       part.heapBases.end(),
@@ -653,6 +658,12 @@ void BmRowContainer::rebaseChunk(
         }
       }
     } else {
+      // Multi-heap parts are expected to be uncommon and small because parts
+      // are still bounded by row-block continuity. Keep the lookup as a linear
+      // scan for now: it is cache-friendly for small vectors and avoids per-part
+      // index construction. If metrics show large heapBases vectors in real
+      // workloads, add a last-hit cache or sort ranges by oldBase and use
+      // upper_bound for interval lookup.
       for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
         auto* row = rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride();
         for (const auto& column : stringColumns_) {
