@@ -16,7 +16,7 @@ void spillReadOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
     auto opts = options(dataset, dataBytes(bytes));
-    BenchmarkContext context("spill-read-old", opts.dataBytes);
+    BenchmarkContext context("spill-read-old", opts.dataBytes, 8);
     auto stored = storeOldRows(context, opts, false);
     auto spill = spillOldRows(context, *stored.container, dataset);
     stored.container.reset();

@@ -36,6 +36,12 @@ DEFINE_uint64(
     bm_row_container_spill_write_buffer_bytes,
     4ULL << 20,
     "Write buffer size used by old RowContainer Spiller benchmarks.");
+DEFINE_uint32(
+    bm_row_container_memory_multiplier,
+    6,
+    "Root memory pool capacity as a multiplier of logical input bytes. "
+    "Use a larger value for old row-based spill read because it holds source, "
+    "reader buffers and restored rows at the same time.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
@@ -110,12 +116,16 @@ VectorPtr makeResultVector(
 
 BenchmarkContext::BenchmarkContext(
     const std::string& name,
-    uint64_t dataBytes) {
+    uint64_t dataBytes,
+    uint32_t memoryMultiplier) {
   const auto id = benchmarkId.fetch_add(1);
   const auto poolName = fmt::format("bm-row-container-benchmark-{}-{}", name, id);
+  const auto multiplier =
+      memoryMultiplier == 0 ? FLAGS_bm_row_container_memory_multiplier
+                            : memoryMultiplier;
   rootPool = memory::memoryManager()->addRootPool(
       poolName,
-      std::max<uint64_t>(dataBytes * 3, 1ULL << 30),
+      std::max<uint64_t>(dataBytes * multiplier, 1ULL << 30),
       memory::MemoryReclaimer::create());
   pool = rootPool->addLeafChild("rows");
   spillDir = (std::filesystem::temp_directory_path() /
