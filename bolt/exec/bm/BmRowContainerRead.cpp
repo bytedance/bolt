@@ -23,19 +23,47 @@ LoadAllResult BulkReadSession::tryLoadAll(
   BOLT_CHECK_NOT_NULL(container_);
   rows.clear();
   rowIds.clear();
+  pins_.clear();
 
-  if (mode_ == ReadMode::kFullyResident) {
+  uint64_t bytes = 0;
+  for (auto segment : segmentOrder_) {
+    bytes += container_->segmentBytes(container_->segmentData(segment));
+  }
+
+  const auto returnWindowRead = [&]() {
+    mode_ = ReadMode::kWindowRead;
+    for (auto segment : segmentOrder_) {
+      container_->appendRowIdsForSegment(
+          container_->segmentData(segment), rowIds);
+    }
+    return LoadAllResult::kNeedWindowRead;
+  };
+
+  if (options_.maxPinnedBytes != 0 && bytes > options_.maxPinnedBytes) {
+    return returnWindowRead();
+  }
+
+  const bool reserved =
+      bytes == 0 || container_->bufferManager_->MaybeReserve(bytes);
+  if (!reserved) {
+    return returnWindowRead();
+  }
+
+  try {
+    pins_ = container_->pinSegments(segmentOrder_);
+    container_->bufferManager_->ReleaseUnusedReservation();
+    mode_ = ReadMode::kFullyResident;
     for (auto segment : segmentOrder_) {
       container_->appendRowPointersForSegment(
           container_->segmentData(segment), rows);
     }
     return LoadAllResult::kLoadedPointers;
+  } catch (const std::exception&) {
+    pins_.clear();
+    container_->bufferManager_->ReleaseUnusedReservation();
+    rows.clear();
+    return returnWindowRead();
   }
-
-  for (auto segment : segmentOrder_) {
-    container_->appendRowIdsForSegment(container_->segmentData(segment), rowIds);
-  }
-  return LoadAllResult::kNeedWindowRead;
 }
 
 RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
@@ -158,27 +186,12 @@ BulkReadSession BmRowContainer::beginBulkReadSegments(
     folly::Range<const SegmentId*> segments,
     ReadSessionOptions options) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
-  uint64_t bytes = 0;
   for (auto segment : segmentIds) {
-    bytes += segmentBytes(segmentData(segment));
-  }
-  if (options.maxPinnedBytes != 0 && bytes > options.maxPinnedBytes) {
-    return BulkReadSession(
-        this, ReadMode::kWindowRead, {}, std::move(segmentIds), options);
+    (void)segmentData(segment);
   }
 
-  try {
-    auto pins = pinSegments(segments);
-    return BulkReadSession(
-        this,
-        ReadMode::kFullyResident,
-        std::move(pins),
-        std::move(segmentIds),
-        options);
-  } catch (const std::exception&) {
-    return BulkReadSession(
-        this, ReadMode::kWindowRead, {}, std::move(segmentIds), options);
-  }
+  return BulkReadSession(
+      this, ReadMode::kWindowRead, {}, std::move(segmentIds), options);
 }
 
 MergeReadSession BmRowContainer::beginMergeReadSegments(
