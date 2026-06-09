@@ -52,9 +52,26 @@ struct RowId {
   BlockId primaryHeapBlockId{kNoBlock};
 };
 
+struct BulkLoadMetrics {
+  uint64_t estimateBytesNs{0};
+  uint64_t reserveNs{0};
+  uint64_t collectBlocksNs{0};
+  uint64_t batchPinNs{0};
+  uint64_t updateBlockPointersNs{0};
+  uint64_t rebaseStringViewsNs{0};
+  uint64_t appendRowPointersNs{0};
+  uint64_t appendRowIdsNs{0};
+  uint64_t estimatedBytes{0};
+  uint64_t pinnedBlocks{0};
+  uint64_t rebasedStringViews{0};
+  uint64_t pointerRows{0};
+  uint64_t rowIdRows{0};
+};
+
 struct ReadSessionOptions {
   uint64_t maxPinnedBytes{0};
   bool releaseWhenConsumed{false};
+  BulkLoadMetrics* bulkLoadMetrics{nullptr};
 };
 
 struct SortedRunOptions {

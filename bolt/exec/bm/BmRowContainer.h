@@ -142,6 +142,13 @@ class BmRowContainer {
     uint32_t used{0};
   };
 
+  struct StringColumnLayout {
+    uint32_t offset{0};
+    bool nullable{false};
+    uint32_t nullByte{0};
+    uint8_t nullMask{0};
+  };
+
   struct SegmentData {
     SegmentMeta meta;
     std::vector<BlockRef> rowBlocks;
@@ -190,7 +197,8 @@ class BmRowContainer {
       std::vector<RowId>& rows) const;
   void appendRowPointersForSegment(
       SegmentData& segment,
-      std::vector<char*>& rows);
+      std::vector<char*>& rows,
+      BulkLoadMetrics* metrics = nullptr);
   char* rowPointer(const RowId& id);
   const char* rowPointer(const RowId& id) const;
   bool isNull(const char* row, int32_t column) const;
@@ -226,21 +234,25 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize) const;
   std::vector<memory::bm::BufferHandle> pinSegments(
-      folly::Range<const SegmentId*> segments);
+      folly::Range<const SegmentId*> segments,
+      BulkLoadMetrics* metrics = nullptr);
   std::vector<memory::bm::BufferHandle> pinChunk(
       SegmentData& segment,
       const DataChunkMeta& chunk);
   void rebaseStringViews(
       SegmentData& segment,
       const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-          heapRebases);
+          heapRebases,
+      BulkLoadMetrics* metrics = nullptr);
   void rebaseChunk(
       SegmentData& segment,
       const DataChunkMeta& chunk,
       const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-          heapRebases);
+          heapRebases,
+      BulkLoadMetrics* metrics = nullptr);
   uint64_t segmentBytes(const SegmentData& segment) const;
   uint32_t rowStride() const;
+  bool isNull(const char* row, const StringColumnLayout& column) const;
 
   friend class BulkReadSession;
   friend class SegmentCursor;
@@ -248,6 +260,7 @@ class BmRowContainer {
 
   std::vector<TypePtr> types_;
   std::vector<ColumnLayout> columns_;
+  std::vector<StringColumnLayout> stringColumns_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   memory::bm::MemoryTag tag_;
   uint32_t rowBlockSize_;

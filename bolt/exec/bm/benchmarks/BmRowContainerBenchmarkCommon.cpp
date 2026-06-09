@@ -406,7 +406,11 @@ void readBmSpill(
     const BenchmarkOptions& options,
     BmSpillReadMetrics* metrics) {
   const auto beginStart = benchmarkNowNs();
-  auto session = container.beginBulkReadSegments({&segment, 1});
+  ReadSessionOptions readOptions;
+  if (metrics != nullptr) {
+    readOptions.bulkLoadMetrics = &metrics->bulkLoad;
+  }
+  auto session = container.beginBulkReadSegments({&segment, 1}, readOptions);
   if (metrics != nullptr) {
     metrics->beginNs += benchmarkNowNs() - beginStart;
   }

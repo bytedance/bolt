@@ -2,7 +2,18 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <chrono>
+
 namespace bytedance::bolt::exec::bm {
+namespace {
+
+uint64_t nowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
 
 BulkReadSession::BulkReadSession(
     BmRowContainer* container,
@@ -21,20 +32,32 @@ LoadAllResult BulkReadSession::tryLoadAll(
     std::vector<char*>& rows,
     std::vector<RowId>& rowIds) {
   BOLT_CHECK_NOT_NULL(container_);
+  BOLT_CHECK_NOT_NULL(container_->bufferManager_);
   rows.clear();
   rowIds.clear();
   pins_.clear();
 
+  auto* metrics = options_.bulkLoadMetrics;
+  const auto estimateStart = metrics == nullptr ? 0 : nowNs();
   uint64_t bytes = 0;
   for (auto segment : segmentOrder_) {
     bytes += container_->segmentBytes(container_->segmentData(segment));
   }
+  if (metrics != nullptr) {
+    metrics->estimateBytesNs += nowNs() - estimateStart;
+    metrics->estimatedBytes += bytes;
+  }
 
   const auto returnWindowRead = [&]() {
     mode_ = ReadMode::kWindowRead;
+    const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
       container_->appendRowIdsForSegment(
           container_->segmentData(segment), rowIds);
+    }
+    if (metrics != nullptr) {
+      metrics->appendRowIdsNs += nowNs() - appendStart;
+      metrics->rowIdRows += rowIds.size();
     }
     return LoadAllResult::kNeedWindowRead;
   };
@@ -43,19 +66,27 @@ LoadAllResult BulkReadSession::tryLoadAll(
     return returnWindowRead();
   }
 
+  const auto reserveStart = metrics == nullptr ? 0 : nowNs();
   const bool reserved =
       bytes == 0 || container_->bufferManager_->MaybeReserve(bytes);
+  if (metrics != nullptr) {
+    metrics->reserveNs += nowNs() - reserveStart;
+  }
   if (!reserved) {
     return returnWindowRead();
   }
 
   try {
-    pins_ = container_->pinSegments(segmentOrder_);
+    pins_ = container_->pinSegments(segmentOrder_, metrics);
     container_->bufferManager_->ReleaseUnusedReservation();
     mode_ = ReadMode::kFullyResident;
+    const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
       container_->appendRowPointersForSegment(
-          container_->segmentData(segment), rows);
+          container_->segmentData(segment), rows, metrics);
+    }
+    if (metrics != nullptr) {
+      metrics->appendRowPointersNs += nowNs() - appendStart;
     }
     return LoadAllResult::kLoadedPointers;
   } catch (const std::exception&) {
