@@ -317,6 +317,105 @@ void BmRowContainer::recordHeapForCurrentPart(
   }
 }
 
+void BmRowContainer::recordHeapForRow(
+    SegmentData& segment,
+    const char* row,
+    const BlockRef& heap) {
+  ChunkId chunkHint = kNoBlock;
+  PartId partHint = kNoBlock;
+  recordHeapForRow(segment, row, heap, chunkHint, partHint);
+}
+
+void BmRowContainer::recordHeapForRow(
+    SegmentData& segment,
+    const char* row,
+    const BlockRef& heap,
+    ChunkId& chunkHint,
+    PartId& partHint) {
+  const auto address = reinterpret_cast<uintptr_t>(row);
+  BlockId rowBlockId = kNoBlock;
+  uint32_t rowBlockOffset = 0;
+  for (const auto& block : segment.rowBlocks) {
+    const auto begin = reinterpret_cast<uintptr_t>(block.ptr);
+    const auto end = begin + block.used;
+    if (begin <= address && address < end) {
+      rowBlockId = block.id;
+      rowBlockOffset = static_cast<uint32_t>(address - begin);
+      break;
+    }
+  }
+  BOLT_CHECK(rowBlockId != kNoBlock);
+
+  auto record = [&](DataChunkMeta& chunk, ChunkPartMeta& part) {
+    if (std::find(chunk.heapBlocks.begin(), chunk.heapBlocks.end(), heap.id) ==
+        chunk.heapBlocks.end()) {
+      chunk.heapBlocks.push_back(heap.id);
+    }
+
+    auto it = std::find_if(
+        part.heapBases.begin(),
+        part.heapBases.end(),
+        [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; });
+    if (it == part.heapBases.end()) {
+      part.heapBases.push_back(
+          {heap.id, reinterpret_cast<uintptr_t>(heap.ptr), heap.size});
+    } else {
+      it->baseAddress = reinterpret_cast<uintptr_t>(heap.ptr);
+      it->capacity = heap.size;
+    }
+  };
+
+  auto contains = [&](const ChunkPartMeta& part) {
+    if (part.rowBlockId != rowBlockId) {
+      return false;
+    }
+    const auto partBegin = part.rowBlockOffset;
+    const auto partEnd = partBegin + part.rowCount * rowStride();
+    return partBegin <= rowBlockOffset && rowBlockOffset < partEnd;
+  };
+
+  if (chunkHint != kNoBlock && partHint != kNoBlock &&
+      chunkHint < segment.chunks.size() && partHint < segment.parts.size()) {
+    auto& part = segment.parts[partHint];
+    if (contains(part)) {
+      record(segment.chunks[chunkHint], part);
+      return;
+    }
+  }
+
+  const auto startChunk =
+      chunkHint != kNoBlock && chunkHint < segment.chunks.size() ? chunkHint
+                                                                 : 0;
+  for (size_t chunkIndex = startChunk; chunkIndex < segment.chunks.size();
+       ++chunkIndex) {
+    auto& chunk = segment.chunks[chunkIndex];
+    for (auto candidatePartId : chunk.parts) {
+      auto& part = segment.parts[candidatePartId];
+      if (contains(part)) {
+        chunkHint = static_cast<ChunkId>(chunkIndex);
+        partHint = candidatePartId;
+        record(chunk, part);
+        return;
+      }
+    }
+  }
+
+  for (size_t chunkIndex = 0; chunkIndex < startChunk; ++chunkIndex) {
+    auto& chunk = segment.chunks[chunkIndex];
+    for (auto candidatePartId : chunk.parts) {
+      auto& part = segment.parts[candidatePartId];
+      if (contains(part)) {
+        chunkHint = static_cast<ChunkId>(chunkIndex);
+        partHint = candidatePartId;
+        record(chunk, part);
+        return;
+      }
+    }
+  }
+
+  BOLT_FAIL("Row pointer does not belong to a known BmRowContainer part");
+}
+
 const DataChunkMeta& BmRowContainer::chunkForRow(
     const SegmentData& segment,
     RowNumber rowNumber) const {

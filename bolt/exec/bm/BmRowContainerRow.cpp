@@ -2,6 +2,8 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 #include <string_view>
 
@@ -15,21 +17,48 @@ int32_t compareValues(const char* left, const char* right) {
   return l < r ? -1 : (l > r ? 1 : 0);
 }
 
-template <TypeKind Kind>
-void storeFixedWidthValue(
-    const DecodedVector& decoded,
-    vector_size_t sourceIndex,
-    char* target,
-    const TypePtr& type) {
-  if constexpr (
-      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY ||
-      Kind == TypeKind::UNKNOWN) {
-    BOLT_NYI("Unsupported store type {}", type->toString());
-  } else {
-    using T = typename TypeTraits<Kind>::NativeType;
-    static_assert(TypeTraits<Kind>::isFixedWidth);
-    *reinterpret_cast<T*>(target) = decoded.valueAt<T>(sourceIndex);
+int32_t normalizeCompare(int32_t result) {
+  return result < 0 ? -1 : (result > 0 ? 1 : 0);
+}
+
+int32_t compareStringViewsAsc(StringView left, StringView right) {
+  uint32_t leftPrefix = *(reinterpret_cast<const uint32_t*>(&left) + 1);
+  uint32_t rightPrefix = *(reinterpret_cast<const uint32_t*>(&right) + 1);
+  if constexpr (std::endian::native == std::endian::little) {
+    leftPrefix = __builtin_bswap32(leftPrefix);
+    rightPrefix = __builtin_bswap32(rightPrefix);
   }
+  if (leftPrefix != rightPrefix) {
+    return leftPrefix < rightPrefix ? -1 : 1;
+  }
+
+  const auto suffixSize =
+      static_cast<int32_t>(std::min(left.size(), right.size())) -
+      StringView::kPrefixSize;
+  if (suffixSize <= 0) {
+    return normalizeCompare(
+        static_cast<int32_t>(left.size()) -
+        static_cast<int32_t>(right.size()));
+  }
+
+  if (left.isInline() && right.isInline()) {
+    uint64_t leftInlined = reinterpret_cast<const uint64_t*>(&left)[1];
+    uint64_t rightInlined = reinterpret_cast<const uint64_t*>(&right)[1];
+    if constexpr (std::endian::native == std::endian::little) {
+      leftInlined = __builtin_bswap64(leftInlined);
+      rightInlined = __builtin_bswap64(rightInlined);
+    }
+    if (leftInlined != rightInlined) {
+      return leftInlined < rightInlined ? -1 : 1;
+    }
+    return normalizeCompare(
+        static_cast<int32_t>(left.size()) -
+        static_cast<int32_t>(right.size()));
+  }
+
+  return normalizeCompare(
+      std::string_view(left.data(), left.size())
+          .compare(std::string_view(right.data(), right.size())));
 }
 
 template <TypeKind Kind>
@@ -40,10 +69,7 @@ int32_t compareScalarValue(
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     const auto leftValue = *reinterpret_cast<const StringView*>(left);
     const auto rightValue = *reinterpret_cast<const StringView*>(right);
-    const auto cmp = std::string_view(leftValue.data(), leftValue.size())
-                         .compare(std::string_view(
-                             rightValue.data(), rightValue.size()));
-    return cmp < 0 ? -1 : (cmp > 0 ? 1 : 0);
+    return compareStringViewsAsc(leftValue, rightValue);
   } else if constexpr (Kind == TypeKind::UNKNOWN) {
     BOLT_NYI("Unsupported compare type {}", type->toString());
   } else {
@@ -62,9 +88,10 @@ void BmRowContainer::store(
     int32_t column) {
   BOLT_CHECK_NOT_NULL(row);
   BOLT_CHECK_LT(column, columns_.size());
+  const auto& layout = columns_[column];
   const bool null = decoded.isNullAt(sourceIndex);
   BOLT_CHECK(
-      !null || columns_[column].nullable,
+      !null || layout.nullable,
       "Column {} is not nullable",
       column);
   setNull(row, column, null);
@@ -72,26 +99,23 @@ void BmRowContainer::store(
     return;
   }
 
-  auto* target = valueAddress(row, column);
-  const auto kind = types_[column]->kind();
-  if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
-    const auto value = decoded.valueAt<StringView>(sourceIndex);
-    if (value.isInline()) {
-      *reinterpret_cast<StringView*>(target) = value;
-      return;
-    }
-    auto& segment = owningActiveSegment(row);
-    auto& heap = ensureHeapBlock(segment, value.size());
-    auto* stringTarget = heap.ptr + heap.used;
-    std::memcpy(stringTarget, value.data(), value.size());
-    heap.used += value.size();
-    *reinterpret_cast<StringView*>(target) =
-        StringView(stringTarget, value.size());
-    recordHeapForCurrentPart(segment, heap);
-    return;
-  }
   BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      storeFixedWidthValue, kind, decoded, sourceIndex, target, types_[column]);
+      storeValueTyped,
+      types_[column]->kind(),
+      decoded,
+      sourceIndex,
+      row,
+      layout);
+}
+
+void BmRowContainer::storeColumn(
+    const DecodedVector& decoded,
+    vector_size_t size,
+    char* const* rows,
+    int32_t column) {
+  BOLT_CHECK_LT(column, columns_.size());
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      storeColumnTyped, types_[column]->kind(), decoded, size, rows, column);
 }
 
 int32_t BmRowContainer::compare(
@@ -99,6 +123,13 @@ int32_t BmRowContainer::compare(
     const char* right,
     int32_t column,
     CompareFlags flags) {
+  BOLT_CHECK_LT(column, columns_.size());
+  const auto& layout = columns_[column];
+  if (!layout.nullable) {
+    auto result = compareNonNull(left, right, column);
+    return flags.ascending ? result : -result;
+  }
+
   const auto leftNull = isNull(left, column);
   const auto rightNull = isNull(right, column);
   if (leftNull || rightNull) {
@@ -186,6 +217,118 @@ int32_t BmRowContainer::compareNonNull(
   const auto* r = valueAddress(right, column);
   return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
       compareScalarValue, types_[column]->kind(), l, r, types_[column]);
+}
+
+template <TypeKind Kind>
+void BmRowContainer::storeValueTyped(
+    const DecodedVector& decoded,
+    vector_size_t sourceIndex,
+    char* row,
+    const ColumnLayout& column) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    auto* target = reinterpret_cast<StringView*>(row + column.offset);
+    const auto value = decoded.valueAt<StringView>(sourceIndex);
+    if (value.isInline()) {
+      *target = value;
+      return;
+    }
+    auto& segment = owningActiveSegment(row);
+    auto& heap = ensureHeapBlock(segment, value.size());
+    auto* stringTarget = heap.ptr + heap.used;
+    std::memcpy(stringTarget, value.data(), value.size());
+    heap.used += value.size();
+    *target = StringView(stringTarget, value.size());
+    recordHeapForCurrentPart(segment, heap);
+  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+    BOLT_NYI("Unsupported store type {}", column.type->toString());
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    static_assert(TypeTraits<Kind>::isFixedWidth);
+    *reinterpret_cast<T*>(row + column.offset) =
+        decoded.valueAt<T>(sourceIndex);
+  }
+}
+
+template <TypeKind Kind>
+void BmRowContainer::storeColumnTyped(
+    const DecodedVector& decoded,
+    vector_size_t size,
+    char* const* rows,
+    int32_t column) {
+  const auto& layout = columns_[column];
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    auto rowBelongsToSegment = [](const SegmentData& segment, const char* row) {
+      const auto address = reinterpret_cast<uintptr_t>(row);
+      for (const auto& block : segment.rowBlocks) {
+        const auto begin = reinterpret_cast<uintptr_t>(block.ptr);
+        const auto end = begin + block.used;
+        if (begin <= address && address < end) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    SegmentData* segment = nullptr;
+    ChunkId chunkHint = kNoBlock;
+    PartId partHint = kNoBlock;
+    auto storeString = [&](vector_size_t i, char* row) {
+      auto* target = reinterpret_cast<StringView*>(row + layout.offset);
+      const auto value = decoded.valueAt<StringView>(i);
+      if (value.isInline()) {
+        *target = value;
+        return;
+      }
+      if (segment == nullptr || !rowBelongsToSegment(*segment, row)) {
+        segment = &owningActiveSegment(row);
+        chunkHint = kNoBlock;
+        partHint = kNoBlock;
+      }
+      auto& heap = ensureHeapBlock(*segment, value.size());
+      auto* stringTarget = heap.ptr + heap.used;
+      std::memcpy(stringTarget, value.data(), value.size());
+      heap.used += value.size();
+      *target = StringView(stringTarget, value.size());
+      recordHeapForRow(*segment, row, heap, chunkHint, partHint);
+    };
+
+    if (!layout.nullable) {
+      for (vector_size_t i = 0; i < size; ++i) {
+        storeString(i, rows[i]);
+      }
+      return;
+    }
+
+    const auto mask = static_cast<char>(layout.nullMask);
+    for (vector_size_t i = 0; i < size; ++i) {
+      auto* row = rows[i];
+      if (decoded.isNullAt(i)) {
+        row[layout.nullByte] |= mask;
+        continue;
+      }
+      row[layout.nullByte] &= ~mask;
+      storeString(i, row);
+    }
+    return;
+  }
+
+  if (!layout.nullable) {
+    for (vector_size_t i = 0; i < size; ++i) {
+      storeValueTyped<Kind>(decoded, i, rows[i], layout);
+    }
+    return;
+  }
+
+  const auto mask = static_cast<char>(layout.nullMask);
+  for (vector_size_t i = 0; i < size; ++i) {
+    auto* row = rows[i];
+    if (decoded.isNullAt(i)) {
+      row[layout.nullByte] |= mask;
+      continue;
+    }
+    row[layout.nullByte] &= ~mask;
+    storeValueTyped<Kind>(decoded, i, row, layout);
+  }
 }
 
 template <TypeKind Kind>

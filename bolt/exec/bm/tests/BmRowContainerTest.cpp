@@ -60,6 +60,27 @@ class BmRowContainerTest : public testing::Test,
     return rowsOut;
   }
 
+  std::vector<char*> storeAllByColumn(
+      BmRowContainer& container,
+      RowVectorPtr input) {
+    SelectivityVector rows(input->size());
+    std::vector<DecodedVector> decoded(input->childrenSize());
+    for (auto i = 0; i < input->childrenSize(); ++i) {
+      decoded[i].decode(*input->childAt(i), rows);
+    }
+
+    std::vector<char*> rowsOut;
+    rowsOut.reserve(input->size());
+    for (auto row = 0; row < input->size(); ++row) {
+      rowsOut.push_back(container.newRow());
+    }
+    for (auto column = 0; column < input->childrenSize(); ++column) {
+      container.storeColumn(
+          decoded[column], input->size(), rowsOut.data(), column);
+    }
+    return rowsOut;
+  }
+
   std::shared_ptr<MemoryPool> root_;
   std::shared_ptr<BufferManager> bufferManager_;
 };
@@ -86,6 +107,31 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_EQ(3, flat->valueAt(1));
   EXPECT_EQ(7, flat->valueAt(2));
   EXPECT_EQ(3, flat->valueAt(3));
+}
+
+TEST_F(BmRowContainerTest, StoreColumnBatchAndStringCompare) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      makeFlatVector<std::string>(
+          {"prefix_same_a", "prefix_same_b", "prefix_same_a"}),
+  });
+  auto rows = storeAllByColumn(container, input);
+
+  EXPECT_LT(container.compare(rows[0], rows[1], 1), 0);
+  EXPECT_EQ(0, container.compare(rows[0], rows[2], 1));
+
+  auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("prefix_same_a", flat->valueAt(0).str());
+  EXPECT_EQ("prefix_same_b", flat->valueAt(1).str());
+  EXPECT_EQ("prefix_same_a", flat->valueAt(2).str());
 }
 
 TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {

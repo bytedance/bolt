@@ -41,6 +41,12 @@ class BmRowContainer {
       char* row,
       int32_t column);
 
+  void storeColumn(
+      const DecodedVector& decoded,
+      vector_size_t size,
+      char* const* rows,
+      int32_t column);
+
   int32_t compare(
       const char* left,
       const char* right,
@@ -134,6 +140,16 @@ class BmRowContainer {
   char* copyRowToSegment(SegmentData& segment, const char* source);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
   void recordHeapForCurrentPart(SegmentData& segment, const BlockRef& heap);
+  void recordHeapForRow(
+      SegmentData& segment,
+      const char* row,
+      const BlockRef& heap);
+  void recordHeapForRow(
+      SegmentData& segment,
+      const char* row,
+      const BlockRef& heap,
+      ChunkId& chunkHint,
+      PartId& partHint);
   SegmentData& owningActiveSegment(const char* row);
   const DataChunkMeta& chunkForRow(
       const SegmentData& segment,
@@ -157,6 +173,18 @@ class BmRowContainer {
       const char* left,
       const char* right,
       int32_t column) const;
+  template <TypeKind Kind>
+  void storeValueTyped(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      char* row,
+      const ColumnLayout& column);
+  template <TypeKind Kind>
+  void storeColumnTyped(
+      const DecodedVector& decoded,
+      vector_size_t size,
+      char* const* rows,
+      int32_t column);
   template <TypeKind Kind>
   void extractColumnTyped(
       char* const* rows,
