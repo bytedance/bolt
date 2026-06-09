@@ -56,9 +56,47 @@ struct BmSpillData {
   SegmentId segment{0};
 };
 
+struct OldSpillWriteMetrics {
+  uint64_t spillNs{0};
+  uint64_t rows{0};
+  uint64_t spillBytes{0};
+  uint64_t files{0};
+};
+
+struct OldSpillReadMetrics {
+  uint64_t createReaderNs{0};
+  uint64_t nextBatchNs{0};
+  uint64_t copyRowsNs{0};
+  uint64_t listRowsNs{0};
+  uint64_t batches{0};
+  uint64_t rows{0};
+  uint64_t serializedBytes{0};
+};
+
+struct BmSpillReadMetrics {
+  uint64_t beginNs{0};
+  uint64_t tryLoadAllNs{0};
+  uint64_t windowLoadNs{0};
+  uint64_t rows{0};
+  uint64_t rowIds{0};
+  uint64_t windows{0};
+  LoadAllResult result{LoadAllResult::kNeedWindowRead};
+  memory::bm::BufferManagerStats statsDelta;
+};
+
 BenchmarkOptions options(DatasetKind dataset, uint64_t dataBytes);
 
 uint64_t rowCount(const BenchmarkOptions& options);
+
+uint64_t benchmarkNowNs();
+
+double nsToMs(uint64_t ns);
+
+uint64_t counterDelta(uint64_t before, uint64_t after);
+
+const char* datasetName(DatasetKind dataset);
+
+bool shouldPrintSpillMetrics(const char* benchmark, DatasetKind dataset);
 
 std::vector<TypePtr> columnTypes(DatasetKind dataset);
 
@@ -125,12 +163,14 @@ void extractBmRowsResident(
 void readBmSpill(
     BmRowContainer& container,
     SegmentId segment,
-    const BenchmarkOptions& options);
+    const BenchmarkOptions& options,
+    BmSpillReadMetrics* metrics = nullptr);
 
 OldSpillData spillOldRows(
     BenchmarkContext& context,
     RowContainer& container,
-    DatasetKind dataset);
+    DatasetKind dataset,
+    OldSpillWriteMetrics* metrics = nullptr);
 
 BmSpillData spillBmRows(
     BenchmarkContext& context,
@@ -139,6 +179,8 @@ BmSpillData spillBmRows(
 std::unique_ptr<RowContainer> readOldSpillIntoNewRowContainer(
     BenchmarkContext& context,
     OldSpillData& spillData,
-    DatasetKind dataset);
+    DatasetKind dataset,
+    OldSpillReadMetrics* metrics = nullptr,
+    std::vector<char*>* restoredRows = nullptr);
 
 } // namespace bytedance::bolt::exec::bm::benchmarks
