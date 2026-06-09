@@ -330,6 +330,13 @@ SortedRunId finalizeSortedRun(
 resident 阶段提供接近现有 `RowContainer` 的接口：
 
 ```cpp
+BmRowContainer(
+    std::vector<TypePtr> types,
+    std::vector<bool> nullable,
+    std::shared_ptr<memory::bm::BufferManager> bufferManager,
+    memory::bm::MemoryTag tag,
+    ...);
+
 int32_t compare(
     const char* left,
     const char* right,
@@ -342,14 +349,18 @@ int32_t compareRows(
     const std::vector<CompareFlags>& flags = {});
 
 void extractColumnResident(
-    const char* const* rows,
+    char* const* rows,
     int32_t numRows,
     int32_t column,
     const VectorPtr& result);
 ```
 
+`nullable` 是列级 layout 属性，由上层算子创建 container 时传入。非 nullable 列不分配 null bit，
+store 时不接受 null，extract 时走无 null 检查的 typed 快路径；nullable 列才读取对应 null bit。
+
 这些接口的前提是 rows 所属 segment resident，且 variable-width pointers 已经有效。它们不触发
-pin、read、rebase 或 IO。
+pin、read、rebase 或 IO。`extractColumnResident()` 接收 `char* const*`，是为了让上层直接传
+`std::vector<char*>` 的连续切片，避免 read 快路径为了 const 转换额外拷贝指针数组。
 
 ## 9. BulkReadSession
 
@@ -508,6 +519,13 @@ release 是销毁数据，之后对应 `RowId` 不再可用。
 ```cpp
 class BmRowContainer {
  public:
+  BmRowContainer(
+      std::vector<TypePtr> types,
+      std::vector<bool> nullable,
+      std::shared_ptr<memory::bm::BufferManager> bufferManager,
+      memory::bm::MemoryTag tag,
+      ...);
+
   char* newRow();
   char* newRow(PartitionId partition);
 

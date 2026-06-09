@@ -34,6 +34,7 @@ const std::vector<SegmentId> BmRowContainer::kEmptySegments_{};
 
 BmRowContainer::BmRowContainer(
     std::vector<TypePtr> types,
+    std::vector<bool> nullable,
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
@@ -46,14 +47,29 @@ BmRowContainer::BmRowContainer(
       heapBlockSize_(heapBlockSize),
       chunkRowCount_(chunkRowCount) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
-  nullBytes_ = bits::nbytes(types_.size());
+  BOLT_CHECK_EQ(types_.size(), nullable.size());
+  uint32_t nullBits = 0;
+  for (auto isNullable : nullable) {
+    if (isNullable) {
+      ++nullBits;
+    }
+  }
+  nullBytes_ = bits::nbytes(nullBits);
   fixedRowSize_ = nullBytes_;
   columns_.reserve(types_.size());
-  for (const auto& type : types_) {
+  uint32_t nullOffset = 0;
+  for (auto i = 0; i < types_.size(); ++i) {
+    const auto& type = types_[i];
     const auto width = typeWidth(type);
     const auto alignment = std::min<uint32_t>(width, 8);
     fixedRowSize_ = alignUp(fixedRowSize_, std::max<uint32_t>(alignment, 1));
-    columns_.push_back({type, fixedRowSize_, width});
+    ColumnLayout column{type, fixedRowSize_, width, nullable[i], 0, 0};
+    if (nullable[i]) {
+      column.nullByte = nullOffset / 8;
+      column.nullMask = static_cast<uint8_t>(1u << (nullOffset & 7));
+      ++nullOffset;
+    }
+    columns_.push_back(std::move(column));
     fixedRowSize_ += width;
   }
   BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);

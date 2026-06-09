@@ -66,7 +66,10 @@ class BmRowContainerTest : public testing::Test,
 
 TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeInput();
   auto rows = storeAll(container, input);
 
@@ -75,12 +78,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_GT(container.compare(rows[0], rows[1], 1), 0);
 
   auto result = BaseVector::create(BIGINT(), rows.size(), pool());
-  std::vector<const char*> inputRows;
-  inputRows.reserve(rows.size());
-  for (const auto* row : rows) {
-    inputRows.push_back(row);
-  }
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 0, result);
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
 
   auto flat = result->asFlatVector<int64_t>();
   ASSERT_NE(nullptr, flat);
@@ -92,7 +90,10 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
 
 TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeInput();
   storeAll(container, input);
 
@@ -111,8 +112,7 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   EXPECT_LT(container.compare(rows[1], rows[3], 1), 0);
 
   auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
-  std::vector<const char*> inputRows(rows.begin(), rows.end());
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+  container.extractColumnResident(rows.data(), rows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
@@ -124,7 +124,10 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
 
 TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeInput();
   storeAll(container, input);
 
@@ -145,7 +148,7 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   ASSERT_EQ(reordered.size(), window.rows.size());
 
   auto result = BaseVector::create(VARCHAR(), reordered.size(), pool());
-  std::vector<const char*> inputRows;
+  std::vector<char*> inputRows;
   inputRows.reserve(window.rows.size());
   for (const auto& row : window.rows) {
     inputRows.push_back(row.ptr);
@@ -161,14 +164,48 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
 
   auto* alpha = session.loadRow(rowIds[1]);
   auto single = BaseVector::create(VARCHAR(), 1, pool());
-  const char* alphaRow = alpha;
+  char* alphaRow = alpha;
   container.extractColumnResident(&alphaRow, 1, 1, single);
   EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
 }
 
+TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 7}),
+      makeNullableFlatVector<std::string>({"delta", std::nullopt, "alpha"}),
+  });
+  auto rows = storeAll(container, input);
+
+  auto bigintResult = BaseVector::create(BIGINT(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, bigintResult);
+  auto bigintFlat = bigintResult->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, bigintFlat);
+  EXPECT_FALSE(bigintFlat->isNullAt(0));
+  EXPECT_TRUE(bigintFlat->isNullAt(1));
+  EXPECT_FALSE(bigintFlat->isNullAt(2));
+  EXPECT_EQ(10, bigintFlat->valueAt(0));
+  EXPECT_EQ(7, bigintFlat->valueAt(2));
+
+  auto varcharResult = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, varcharResult);
+  auto varcharFlat = varcharResult->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, varcharFlat);
+  EXPECT_EQ("delta", varcharFlat->valueAt(0).str());
+  EXPECT_TRUE(varcharFlat->isNullAt(1));
+  EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
+}
+
 TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeInput();
   auto rows = storeAll(container, input);
 
@@ -184,7 +221,7 @@ TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
   std::vector<std::string> values;
   while (cursor.hasCurrent()) {
     auto result = BaseVector::create(VARCHAR(), 1, pool());
-    const char* row = cursor.currentRow();
+    auto* row = const_cast<char*>(cursor.currentRow());
     container.extractColumnResident(&row, 1, 1, result);
     values.push_back(result->asFlatVector<StringView>()->valueAt(0).str());
     cursor.advance();
@@ -195,7 +232,8 @@ TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
 }
 
 TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
-  BmRowContainer container({BIGINT()}, bufferManager_, MemoryTag::kTesting);
+  BmRowContainer container(
+      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting);
   auto input = makeRowVector({makeFlatVector<int64_t>({1, 2})});
   SelectivityVector rows(input->size());
   DecodedVector decoded;
