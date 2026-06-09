@@ -132,12 +132,15 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   auto segment = container.flushActiveSegment();
   ASSERT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
 
+  const auto batchPinsBeforeBegin = bufferManager_->stats().batchPinCount;
   auto session = container.beginBulkReadSegments({&segment, 1});
-  ASSERT_EQ(ReadMode::kFullyResident, session.mode());
+  EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
 
   std::vector<char*> rows;
   std::vector<RowId> rowIds;
   ASSERT_EQ(LoadAllResult::kLoadedPointers, session.tryLoadAll(rows, rowIds));
+  EXPECT_EQ(ReadMode::kFullyResident, session.mode());
+  EXPECT_EQ(batchPinsBeforeBegin + 1, bufferManager_->stats().batchPinCount);
   ASSERT_EQ(input->size(), rows.size());
   ASSERT_TRUE(rowIds.empty());
   EXPECT_EQ(0, container.compare(rows[1], rows[3], 0));
@@ -166,12 +169,15 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   auto segment = container.flushActiveSegment();
   ReadSessionOptions options;
   options.maxPinnedBytes = 1;
+  const auto batchPinsBeforeBegin = bufferManager_->stats().batchPinCount;
   auto session = container.beginBulkReadSegments({&segment, 1}, options);
-  ASSERT_EQ(ReadMode::kWindowRead, session.mode());
+  EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
 
   std::vector<char*> rows;
   std::vector<RowId> rowIds;
   ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  EXPECT_EQ(ReadMode::kWindowRead, session.mode());
+  EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
   ASSERT_TRUE(rows.empty());
   ASSERT_EQ(input->size(), rowIds.size());
 

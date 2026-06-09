@@ -446,41 +446,45 @@ const char* BmRowContainer::rowPointer(const RowId& id) const {
 std::vector<memory::bm::BufferHandle> BmRowContainer::pinSegments(
     folly::Range<const SegmentId*> segments) {
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
+  std::vector<BlockRef*> blockRefs;
+  std::vector<bool> isHeapBlock;
   for (const auto segmentId : segments) {
     auto& segment = segmentData(segmentId);
-    blocks.reserve(
-        blocks.size() + segment.rowBlocks.size() + segment.heapBlocks.size());
-    for (const auto& block : segment.rowBlocks) {
+    const auto blockCount = segment.rowBlocks.size() + segment.heapBlocks.size();
+    blocks.reserve(blocks.size() + blockCount);
+    blockRefs.reserve(blockRefs.size() + blockCount);
+    isHeapBlock.reserve(isHeapBlock.size() + blockCount);
+    for (auto& block : segment.rowBlocks) {
       blocks.push_back(block.block);
+      blockRefs.push_back(&block);
+      isHeapBlock.push_back(false);
     }
-    for (const auto& block : segment.heapBlocks) {
+    for (auto& block : segment.heapBlocks) {
       blocks.push_back(block.block);
+      blockRefs.push_back(&block);
+      isHeapBlock.push_back(true);
     }
   }
 
   auto pins = bufferManager_->BatchPin(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
+  BOLT_CHECK_EQ(pins.size(), blockRefs.size());
+
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
-  for (auto& pin : pins) {
-    const auto blockId = pin.block()->id();
-    for (auto& [_, segment] : segments_) {
-      for (auto& rowBlock : segment.rowBlocks) {
-        if (rowBlock.block->id() == blockId) {
-          rowBlock.ptr = pin.Ptr();
-        }
-      }
-      for (auto& heapBlock : segment.heapBlocks) {
-        if (heapBlock.block->id() == blockId) {
-          const auto oldBase = reinterpret_cast<uintptr_t>(heapBlock.ptr);
-          const auto newBase = reinterpret_cast<uintptr_t>(pin.Ptr());
-          if (oldBase != 0 && oldBase != newBase) {
-            heapRebases[heapBlock.id] = {oldBase, newBase};
-          }
-          heapBlock.ptr = pin.Ptr();
-        }
+  for (size_t i = 0; i < pins.size(); ++i) {
+    auto& block = *blockRefs[i];
+    auto* const newPtr = pins[i].Ptr();
+    if (isHeapBlock[i]) {
+      // Heap payloads can be read back at a different address. Keep the old
+      // and new bases so StringView values stored in row blocks can be rebased.
+      const auto oldBase = reinterpret_cast<uintptr_t>(block.ptr);
+      const auto newBase = reinterpret_cast<uintptr_t>(newPtr);
+      if (oldBase != 0 && oldBase != newBase) {
+        heapRebases[block.id] = {oldBase, newBase};
       }
     }
+    block.ptr = newPtr;
   }
   if (!heapRebases.empty()) {
     for (const auto segmentId : segments) {
@@ -494,35 +498,43 @@ std::vector<memory::bm::BufferHandle> BmRowContainer::pinChunk(
     SegmentData& segment,
     const DataChunkMeta& chunk) {
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
+  std::vector<BlockRef*> blockRefs;
+  std::vector<bool> isHeapBlock;
   blocks.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
+  blockRefs.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
+  isHeapBlock.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
   for (auto blockId : chunk.rowBlocks) {
-    blocks.push_back(blockRef(segment, blockId, true).block);
+    auto& block = blockRef(segment, blockId, true);
+    blocks.push_back(block.block);
+    blockRefs.push_back(&block);
+    isHeapBlock.push_back(false);
   }
   for (auto blockId : chunk.heapBlocks) {
-    blocks.push_back(blockRef(segment, blockId, false).block);
+    auto& block = blockRef(segment, blockId, false);
+    blocks.push_back(block.block);
+    blockRefs.push_back(&block);
+    isHeapBlock.push_back(true);
   }
 
   auto pins = bufferManager_->BatchPin(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
+  BOLT_CHECK_EQ(pins.size(), blockRefs.size());
+
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
-  for (auto& pin : pins) {
-    const auto bmBlockId = pin.block()->id();
-    for (auto& rowBlock : segment.rowBlocks) {
-      if (rowBlock.block->id() == bmBlockId) {
-        rowBlock.ptr = pin.Ptr();
+  for (size_t i = 0; i < pins.size(); ++i) {
+    auto& block = *blockRefs[i];
+    auto* const newPtr = pins[i].Ptr();
+    if (isHeapBlock[i]) {
+      // Window reads pin only the chunk blocks, but heap StringViews in the
+      // chunk still need the same old-base to new-base pointer rebasing.
+      const auto oldBase = reinterpret_cast<uintptr_t>(block.ptr);
+      const auto newBase = reinterpret_cast<uintptr_t>(newPtr);
+      if (oldBase != 0 && oldBase != newBase) {
+        heapRebases[block.id] = {oldBase, newBase};
       }
     }
-    for (auto& heapBlock : segment.heapBlocks) {
-      if (heapBlock.block->id() == bmBlockId) {
-        const auto oldBase = reinterpret_cast<uintptr_t>(heapBlock.ptr);
-        const auto newBase = reinterpret_cast<uintptr_t>(pin.Ptr());
-        if (oldBase != 0 && oldBase != newBase) {
-          heapRebases[heapBlock.id] = {oldBase, newBase};
-        }
-        heapBlock.ptr = pin.Ptr();
-      }
-    }
+    block.ptr = newPtr;
   }
   if (!heapRebases.empty()) {
     rebaseChunk(segment, chunk, heapRebases);
