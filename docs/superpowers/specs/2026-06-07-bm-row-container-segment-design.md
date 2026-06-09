@@ -116,7 +116,7 @@ DataChunk
   segment 内的逻辑扫描窗口。它记录一批连续 rowNumber 需要哪些 row blocks、heap blocks 和 parts。
 
 ChunkPart
-  chunk 内的物理连续切片。它是 pointer rebasing 的元数据单位。
+  chunk 内按 row block 切分出的连续 row 区间。它是 pointer rebasing 的元数据单位。
 ```
 
 ### Segment
@@ -165,7 +165,8 @@ struct DataChunkMeta {
 
 ### ChunkPart
 
-ChunkPart 描述 chunk 内一段物理连续 rows，并记录这些 rows 写入时关联的 heap block base。
+ChunkPart 描述 chunk 内一段位于同一个 row block 的连续 rows，并记录这些 rows 写入时关联的
+heap block base 集合。ChunkPart 不按 heap block 切分。
 
 ```cpp
 struct HeapBaseRef {
@@ -183,6 +184,20 @@ struct ChunkPartMeta {
   std::vector<HeapBaseRef> heapBases;
 };
 ```
+
+这个定义是为了兼容 old RowContainer 风格的 `newRow() + store(decoded, row, ptr, column)`
+逐行逐列写入模型。调用方在 `newRow()` 时通常还不知道这一行所有 variable-width 字段的总长度，
+也不知道后续 store 会切换到哪个 heap block。如果强制 `ChunkPart = row block + heap block`，
+就需要所有 variable 写入路径提前提供 row-level size hint，并改变现有算子的写入方式。
+
+因此，本设计有意做如下取舍：
+
+- `ChunkPart` 只按 row block 边界切分；
+- heap block 变化不会切 `ChunkPart`；
+- 一个 `ChunkPart` 可以记录多个 `HeapBaseRef`；
+- `DataChunk::heapBlocks` 仍记录该 chunk 需要 pin 的 heap block 去重集合；
+- pointer rebasing 在 part 内根据 `heapBases` 判断每个 out-of-line `StringView` 属于哪个 heap
+  block。
 
 `HeapBaseRef` 的作用是支持 pointer rebasing。它记录 row 内 `StringView` pointer 当前对应的 heap
 block base。当 heap block 重新 pin 到新地址时，窗口加载阶段可以批量修正 pointer。
@@ -210,7 +225,8 @@ heap block 完整存放，避免 compare/extract 需要 multipart reader。
 
 - 将 bytes 写入当前 pinned heap block。
 - 在 row 内写 `StringView(pointer, size)`。
-- 更新当前 `ChunkPartMeta::heapBases`。
+- 更新当前 `ChunkPartMeta::heapBases`。如果同一个 part 内写入经过多个 heap block，这些 heap
+  block 都会记录在该 vector 中。
 - 如果该 row 还没有 `primaryHeapBlockId`，把该 heap block 记入 `RowId` hint。
 
 当 heap block 地址变化时，在窗口加载边界执行 rebasing：
