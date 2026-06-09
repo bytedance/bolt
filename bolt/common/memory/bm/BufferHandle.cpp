@@ -16,7 +16,7 @@ BufferHandle::BufferHandle(
     : manager_(std::move(manager)), block_(std::move(block)), data_(data) {}
 
 BufferHandle::~BufferHandle() noexcept {
-  Destroy();
+  reset();
 }
 
 BufferHandle::BufferHandle(BufferHandle&& other) noexcept
@@ -28,7 +28,7 @@ BufferHandle::BufferHandle(BufferHandle&& other) noexcept
 
 BufferHandle& BufferHandle::operator=(BufferHandle&& other) noexcept {
   if (this != &other) {
-    Destroy();
+    reset();
     manager_ = std::move(other.manager_);
     block_ = std::move(other.block_);
     data_ = other.data_;
@@ -51,7 +51,7 @@ bool BufferHandle::valid() const {
   return data_ != nullptr && block_ != nullptr;
 }
 
-void BufferHandle::Destroy() noexcept {
+void BufferHandle::reset() noexcept {
   if (!block_) {
     return;
   }

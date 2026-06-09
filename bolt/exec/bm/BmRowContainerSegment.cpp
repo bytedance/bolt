@@ -132,12 +132,12 @@ SegmentId BmRowContainer::finalizeAndFlushSegment(SegmentData& segment) {
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   blocks.reserve(segment.rowBlocks.size() + segment.heapBlocks.size());
   for (auto& block : segment.rowBlocks) {
-    block.handle.Destroy();
+    block.handle = memory::bm::BufferHandle{};
     block.ptr = nullptr;
     blocks.push_back(block.block);
   }
   for (auto& block : segment.heapBlocks) {
-    block.handle.Destroy();
+    block.handle = memory::bm::BufferHandle{};
     blocks.push_back(block.block);
   }
   bufferManager_->SpillBlocks(
