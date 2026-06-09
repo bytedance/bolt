@@ -529,7 +529,131 @@ width8_high_card_partial_sum_extract_jit                   23.51ms     42.54
 
 
 
-### 9.5 perf 验证
+### 9.6 当前剩余瓶颈分析
+
+从完整 benchmark 结果看，direct decoded input descriptor 和 raw output descriptor 已经解决了此前最明显的
+两类 helper 开销：`jit_GetDecodedValue*` 输入读取 helper，以及 `jit_HashAggrSetFlat*` / `dynamic_cast`
+输出写 helper。普通 FLAT primitive 聚合现在基本都已经转为正收益，但仍有几类结构性瓶颈。
+
+#### 9.6.1 最大负收益：merge avg 的 ROW intermediate 路径
+
+目前最明显的回退集中在 `merge_avg_jit`：
+
+| case | no-JIT | JIT | speedup = nojit / jit |
+|------|-------:|----:|----------------------:|
+| width4_merge_avg | 4.58ms | 7.19ms | **0.64x** |
+| width8_merge_avg | 7.70ms | 12.31ms | **0.63x** |
+| width16_merge_avg | 15.68ms | 23.72ms | **0.66x** |
+| width32_merge_avg | 30.22ms | 47.82ms | **0.63x** |
+
+这个比例在不同 width 下非常稳定，说明不是 benchmark 噪声，而是路径本身还没有被优化。根因是 avg merge
+的 intermediate input 是 `ROW(sum, count)`，没有完全吃到 raw decoded descriptor 优化：普通数值输入已经能
+通过 `values + indices + nulls` 在 JIT IR 中直接 load，但 ROW field 读取仍然需要类似
+`jit_GetDecodedRowFieldDouble` / `jit_GetDecodedRowFieldI64` / `jit_GetDecodedRowFieldIsNull` 的 helper 或
+DecodedVector row-field 路径。
+
+partial avg extract 也印证了这个结论：
+
+| case | no-JIT | JIT | speedup = nojit / jit |
+|------|-------:|----:|----------------------:|
+| width8_high_card_partial_avg_extract | 61.78ms | 80.29ms | **0.77x** |
+| width8_high_card_partial_sum_extract | 27.36ms | 23.51ms | **1.16x** |
+
+partial sum 输出是 FLAT，已经受益于 raw output descriptor；partial avg 输出是 ROW，目前仍走 helper fallback，
+因此仍然更慢。
+
+**建议**：短期可考虑禁用 `merge_avg_jit` 和 `partial_avg_extract_jit`；长期需要为 ROW input/output 增加
+descriptor，把 `sum` / `count` 两个 child vector 的 raw values/nulls 直接传给 JIT。
+
+#### 9.6.2 主路径瓶颈：JIT add_dense 仍是 row-based scalar RMW loop
+
+普通 sum/avg/count 已经有明显正收益：
+
+| 聚合 | width4 | width8 | width16 | width32 |
+|------|-------:|-------:|--------:|--------:|
+| sum | 1.07x | 1.38x | 1.52x | 1.42x |
+| avg | 1.26x | 1.30x | 1.43x | 1.29x |
+| count | 1.27x | 1.81x | 2.21x | 2.20x |
+
+count 收益显著高于 sum/avg，因为 count 不需要读取 input value，也不需要做加法以外的复杂状态维护。sum/avg
+的剩余成本主要回到 JIT 生成码本身：
+
+```text
+group = groups[row]
+index = indices[row]
+value = values[index]
+load accumulator
+clear accumulator null bit
+add / update count
+store accumulator
+```
+
+这仍然是 row-based scalar read-modify-write loop：`groups[row]` 是间接指针访问，`indices[row]` 即使在 flat
+input 下也要额外 load，accumulator 存在 RowContainer row storage 中而不是连续 columnar buffer，LLVM 很难
+做 SIMD 化。
+
+**建议**：优先做 flat/no-null add_dense 快路径。在 input 是 flat identity mapping 且没有 null 时，直接生成
+`value = values[row]`，跳过 `indices[row]` 和 input null 分支。
+
+#### 9.6.3 小 width 收益有限：公共固定成本占比高
+
+width4 下收益明显弱于 width8/16/32：
+
+| case | speedup |
+|------|--------:|
+| width4_sum | 1.07x |
+| width4_min | 0.99x |
+| width4_count | 1.27x |
+
+width4 中可 fusion 的 aggregate 数量少，JIT 能省下的 per-aggregate dispatch / loop traversal 不多，但 descriptor
+准备、JIT chunk 调用、result vector resize、output materialization、RowContainer / hash probe / copyResults 等
+完整 query 公共成本仍然存在。
+
+**建议**：默认启用策略上应更偏向 width8+ 或 count/sum 这类收益稳定的 case；低 width case 需要结合实际
+query 成本谨慎启用。
+
+#### 9.6.4 min/max 收益较小：compare 与 null-init 分支仍偏重
+
+min/max 已经转为正收益，但弱于 sum/count：
+
+| case | speedup |
+|------|--------:|
+| width8_min | 1.06x |
+| width16_min | 1.27x |
+| width32_min | 1.24x |
+| width8_double_min | 1.21x |
+| width8_double_max | 1.09x |
+
+min/max 每行更新不仅要读取 input value，还要处理 accumulator 是否 null、首次 non-null 初始化、compare 分支；
+double min/max 还可能受 NaN / ordering 语义影响。相比 sum 的简单加法，这些分支更难被 LLVM 优化。
+
+**建议**：后续可为 no-null + accumulator initialized 场景生成更简单的 compare-only 快路径。
+
+#### 9.6.5 decimal 仍受复杂 overflow/precision 逻辑限制
+
+decimal 现在已经是正收益，但幅度有限：
+
+| case | no-JIT | JIT | speedup = nojit / jit |
+|------|-------:|----:|----------------------:|
+| width8_decimal_sum | 12.03ms | 9.83ms | **1.22x** |
+| width8_decimal_avg | 16.29ms | 14.77ms | **1.10x** |
+
+decimal update/extract 仍包含 int128 accumulator、overflow state、precision/scale 检查、final extract overflow
+处理以及 decimal avg rescale 等复杂逻辑，无法像 primitive sum 一样完全变成简单 raw load/store。
+
+**建议**：decimal 可以继续专项优化，但优先级低于 ROW avg 路径和 flat/no-null add_dense 快路径。
+
+#### 9.6.6 当前瓶颈优先级
+
+1. **P0：ROW avg 路径**：`merge_avg_jit` 和 `partial_avg_extract_jit` 是目前唯一大幅负收益路径。短期禁用，
+   长期做 ROW input/output descriptor。
+2. **P1：flat/no-null add_dense 快路径**：减少 `indices[row]` 间接读取和 null 分支，继续提升 sum/avg/min 主路径。
+3. **P2：减少 per-row accumulator null clear**：对于 no-null input 或 accumulator 已初始化场景，把 null clear 从
+   per-row 下沉到更粗粒度。
+4. **P3：min/max compare 快路径**：减少 accumulator null/init 分支。
+5. **P4：decimal 专项优化**：拆解 overflow/precision helper，但收益优先级相对靠后。
+
+### 9.7 perf 验证
 
 代表性命令：
 
@@ -549,12 +673,14 @@ width8_high_card_partial_sum_extract_jit                   23.51ms     42.54
 约 **0.27%**，`__do_dyncast` 合计约 **0.15%**。对比第 8.5 节，extract helper 与 dynamic_cast/type
 dispatch 从 JIT 路径约 **13%** 的显性热点降为噪声级别。
 
-### 9.6 更新后的结论
+### 9.8 更新后的结论
 
 - direct decoded input descriptor 解决了 add_dense 的外部取值 helper；raw output descriptor 继续解决了
   extract 的 per-row setter helper / dynamic_cast。
-- 当前 width8 常见数值聚合已全部为正收益；sum 宽度扫描在 width16 达到约 **1.50x**，更接近最初 multi_sum
-  POC 的方向性预期。
-- 剩余瓶颈主要回到真正的 JIT 生成码、hash/vector encoding、RowContainer 和 result copy 等公共成本；后续
-  若继续优化，优先考虑 flat/no-null add_dense 快路径、减少 per-row accumulator null clear，以及拆分纯
+- 当前 width8 常见 FLAT primitive 数值聚合已全部为正收益；sum 宽度扫描在 width16 达到约 **1.52x**，更接近
+  最初 multi_sum POC 的方向性预期。
+- 最大遗留问题是 ROW intermediate/output：`merge_avg_jit` 和 `partial_avg_extract_jit` 仍显著慢于 no-JIT，应
+  优先禁用或实现 ROW descriptor。
+- 主路径剩余瓶颈回到真正的 JIT add_dense 生成码、hash/vector encoding、RowContainer 和 result copy 等公共成本；
+  后续若继续优化，优先考虑 flat/no-null add_dense 快路径、减少 per-row accumulator null clear，以及拆分纯
   `GroupingSet` add microbenchmark 来单独观察 kernel 收益。
