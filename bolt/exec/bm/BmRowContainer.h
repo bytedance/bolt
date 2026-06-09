@@ -23,6 +23,7 @@ class BmRowContainer {
  public:
   BmRowContainer(
       std::vector<TypePtr> types,
+      std::vector<bool> nullable,
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       memory::bm::MemoryTag tag,
       uint32_t rowBlockSize = static_cast<uint32_t>(
@@ -52,7 +53,7 @@ class BmRowContainer {
       const std::vector<CompareFlags>& flags = {});
 
   void extractColumnResident(
-      const char* const* rows,
+      char* const* rows,
       int32_t numRows,
       int32_t column,
       const VectorPtr& result,
@@ -88,6 +89,9 @@ class BmRowContainer {
     TypePtr type;
     uint32_t offset{0};
     uint32_t width{0};
+    bool nullable{false};
+    uint32_t nullByte{0};
+    uint8_t nullMask{0};
   };
 
   struct BlockRef {
@@ -153,10 +157,11 @@ class BmRowContainer {
       const char* left,
       const char* right,
       int32_t column) const;
-  void extractOne(
-      const char* row,
-      int32_t column,
-      vector_size_t resultIndex,
+  template <TypeKind Kind>
+  void extractColumnTyped(
+      char* const* rows,
+      int32_t numRows,
+      const ColumnLayout& column,
       const VectorPtr& result,
       bool exactSize) const;
   std::vector<memory::bm::BufferHandle> pinSegments(

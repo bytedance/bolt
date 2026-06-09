@@ -53,25 +53,6 @@ int32_t compareScalarValue(
   }
 }
 
-template <TypeKind Kind>
-void extractScalarValue(
-    const char* value,
-    vector_size_t resultIndex,
-    const VectorPtr& result,
-    const TypePtr& type) {
-  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-    result->asFlatVector<StringView>()->set(
-        resultIndex, *reinterpret_cast<const StringView*>(value));
-  } else if constexpr (Kind == TypeKind::UNKNOWN) {
-    BOLT_NYI("Unsupported extract type {}", type->toString());
-  } else {
-    using T = typename TypeTraits<Kind>::NativeType;
-    static_assert(TypeTraits<Kind>::isFixedWidth);
-    result->asFlatVector<T>()->set(
-        resultIndex, *reinterpret_cast<const T*>(value));
-  }
-}
-
 } // namespace
 
 void BmRowContainer::store(
@@ -82,6 +63,10 @@ void BmRowContainer::store(
   BOLT_CHECK_NOT_NULL(row);
   BOLT_CHECK_LT(column, columns_.size());
   const bool null = decoded.isNullAt(sourceIndex);
+  BOLT_CHECK(
+      !null || columns_[column].nullable,
+      "Column {} is not nullable",
+      column);
   setNull(row, column, null);
   if (null) {
     return;
@@ -147,23 +132,35 @@ int32_t BmRowContainer::compareRows(
 }
 
 void BmRowContainer::extractColumnResident(
-    const char* const* rows,
+    char* const* rows,
     int32_t numRows,
     int32_t column,
     const VectorPtr& result,
     bool exactSize) {
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    extractOne(rows[i], column, i, result, exactSize);
-  }
+  BOLT_CHECK_LT(column, columns_.size());
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      extractColumnTyped,
+      types_[column]->kind(),
+      rows,
+      numRows,
+      columns_[column],
+      result,
+      exactSize);
 }
 
 bool BmRowContainer::isNull(const char* row, int32_t column) const {
-  return row[column / 8] & (1 << (column & 7));
+  const auto& layout = columns_[column];
+  return layout.nullMask != 0 && (row[layout.nullByte] & layout.nullMask);
 }
 
 void BmRowContainer::setNull(char* row, int32_t column, bool null) const {
-  auto& byte = row[column / 8];
-  const auto mask = static_cast<char>(1 << (column & 7));
+  const auto& layout = columns_[column];
+  if (layout.nullMask == 0) {
+    BOLT_CHECK(!null, "Column {} is not nullable", column);
+    return;
+  }
+  auto& byte = row[layout.nullByte];
+  const auto mask = static_cast<char>(layout.nullMask);
   if (null) {
     byte |= mask;
   } else {
@@ -191,21 +188,57 @@ int32_t BmRowContainer::compareNonNull(
       compareScalarValue, types_[column]->kind(), l, r, types_[column]);
 }
 
-void BmRowContainer::extractOne(
-    const char* row,
-    int32_t column,
-    vector_size_t resultIndex,
+template <TypeKind Kind>
+void BmRowContainer::extractColumnTyped(
+    char* const* rows,
+    int32_t numRows,
+    const ColumnLayout& column,
     const VectorPtr& result,
     bool /*exactSize*/) const {
-  if (isNull(row, column)) {
-    result->setNull(resultIndex, true);
+  if constexpr (Kind == TypeKind::UNKNOWN) {
+    BOLT_NYI("Unsupported extract type {}", column.type->toString());
     return;
   }
-  result->setNull(resultIndex, false);
-  const auto* value = valueAddress(row, column);
-  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      extractScalarValue, types_[column]->kind(), value, resultIndex, result,
-      types_[column]);
+
+  using T = typename TypeTraits<Kind>::NativeType;
+  auto* flatResult = result->asFlatVector<T>();
+  BOLT_CHECK_NOT_NULL(flatResult);
+  result->resize(numRows);
+
+  if (!column.nullable) {
+    result->clearNulls(0, numRows);
+    auto values =
+        flatResult->mutableValues(numRows)->template asMutableRange<T>();
+    for (vector_size_t i = 0; i < numRows; ++i) {
+      if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+        flatResult->set(
+            i, *reinterpret_cast<const StringView*>(
+                   rows[i] + column.offset));
+      } else {
+        values[i] = *reinterpret_cast<const T*>(rows[i] + column.offset);
+      }
+    }
+    return;
+  }
+
+  auto* nulls = result->mutableNulls(numRows)->asMutable<uint64_t>();
+  auto values =
+      flatResult->mutableValues(numRows)->template asMutableRange<T>();
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    const auto* row = rows[i];
+    if (row[column.nullByte] & column.nullMask) {
+      bits::setNull(nulls, i, true);
+      continue;
+    }
+    bits::setNull(nulls, i, false);
+    if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+      flatResult->set(
+          i,
+          *reinterpret_cast<const StringView*>(row + column.offset));
+    } else {
+      values[i] = *reinterpret_cast<const T*>(row + column.offset);
+    }
+  }
 }
 
 } // namespace bytedance::bolt::exec::bm

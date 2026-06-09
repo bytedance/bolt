@@ -263,8 +263,13 @@ std::unique_ptr<RowContainer> makeOldRowContainer(
 std::unique_ptr<BmRowContainer> makeBmRowContainer(
     DatasetKind dataset,
     const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
+  auto types = columnTypes(dataset);
+  std::vector<bool> nullable(types.size(), false);
   return std::make_unique<BmRowContainer>(
-      columnTypes(dataset), bufferManager, memory::bm::MemoryTag::kHashBuild);
+      std::move(types),
+      std::move(nullable),
+      bufferManager,
+      memory::bm::MemoryTag::kHashBuild);
 }
 
 OldStoredRows storeOldRows(
@@ -352,19 +357,13 @@ void extractBmRowsResident(
     const BenchmarkOptions& options,
     memory::MemoryPool* pool) {
   const auto types = columnTypes(options.dataset);
-  std::vector<const char*> rows;
-  rows.reserve(options.batchRows);
   for (size_t offset = 0; offset < inputRows.size();) {
     const auto batchSize = static_cast<vector_size_t>(
         std::min<size_t>(options.batchRows, inputRows.size() - offset));
-    rows.clear();
-    for (vector_size_t i = 0; i < batchSize; ++i) {
-      rows.push_back(inputRows[offset + i]);
-    }
     for (auto column = 0; column < types.size(); ++column) {
       auto result = makeResultVector(types[column], batchSize, pool);
       container.extractColumnResident(
-          rows.data(), batchSize, column, result);
+          inputRows.data() + offset, batchSize, column, result);
       folly::doNotOptimizeAway(result);
     }
     offset += batchSize;
