@@ -226,6 +226,12 @@ bool BmRowContainer::isNull(const char* row, int32_t column) const {
   return layout.nullMask != 0 && (row[layout.nullByte] & layout.nullMask);
 }
 
+bool BmRowContainer::isNull(
+    const char* row,
+    const StringColumnLayout& column) const {
+  return column.nullable && (row[column.nullByte] & column.nullMask);
+}
+
 void BmRowContainer::setNull(char* row, int32_t column, bool null) const {
   const auto& layout = columns_[column];
   if (layout.nullMask == 0) {

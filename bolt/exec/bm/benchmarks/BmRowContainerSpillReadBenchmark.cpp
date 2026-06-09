@@ -51,11 +51,19 @@ void printBmReadMetrics(
   }
   folly::BenchmarkSuspender suspender;
   const auto& stats = metrics.statsDelta;
+  const auto& bulk = metrics.bulkLoad;
   fmt::print(
       stderr,
       "[bm-row-container-metrics] spillReadBm dataset={} iterations={} "
       "logical_bytes={} rows={} row_ids={} windows={} result={} "
       "begin_ms={:.3f} try_load_all_ms={:.3f} window_load_ms={:.3f} "
+      "bulk_estimate_ms={:.3f} bulk_reserve_ms={:.3f} "
+      "bulk_collect_blocks_ms={:.3f} bulk_batch_pin_ms={:.3f} "
+      "bulk_update_ptrs_ms={:.3f} bulk_rebase_strings_ms={:.3f} "
+      "bulk_append_ptrs_ms={:.3f} bulk_append_row_ids_ms={:.3f} "
+      "bulk_estimated_bytes={} bulk_pinned_blocks={} "
+      "bulk_pointer_rows={} bulk_row_id_rows={} "
+      "bulk_rebased_string_views={} "
       "bm_batch_pins={} bm_pin_reads={} bm_spill_read_count={} "
       "bm_spill_read_bytes={} bm_spill_physical_read_bytes={} "
       "bm_decompress_ms={:.3f}\n",
@@ -69,6 +77,19 @@ void printBmReadMetrics(
       nsToMs(metrics.beginNs),
       nsToMs(metrics.tryLoadAllNs),
       nsToMs(metrics.windowLoadNs),
+      nsToMs(bulk.estimateBytesNs),
+      nsToMs(bulk.reserveNs),
+      nsToMs(bulk.collectBlocksNs),
+      nsToMs(bulk.batchPinNs),
+      nsToMs(bulk.updateBlockPointersNs),
+      nsToMs(bulk.rebaseStringViewsNs),
+      nsToMs(bulk.appendRowPointersNs),
+      nsToMs(bulk.appendRowIdsNs),
+      bulk.estimatedBytes,
+      bulk.pinnedBlocks,
+      bulk.pointerRows,
+      bulk.rowIdRows,
+      bulk.rebasedStringViews,
       stats.batchPinCount,
       stats.pinReadCount,
       stats.spillReadCount,

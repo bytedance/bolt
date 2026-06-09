@@ -3,10 +3,27 @@
 #include "bolt/common/base/Exceptions.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <span>
 
 namespace bytedance::bolt::exec::bm {
+namespace {
+
+uint64_t nowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+struct HeapRebaseRange {
+  HeapBaseRef* heapBase{nullptr};
+  uintptr_t oldBase{0};
+  uintptr_t newBase{0};
+  uintptr_t end{0};
+};
+
+} // namespace
 
 SegmentId BmRowContainer::flushActiveSegment() {
   return flushActivePartitionSegment(kDefaultPartition);
@@ -413,13 +430,17 @@ void BmRowContainer::appendRowIdsForSegment(
 
 void BmRowContainer::appendRowPointersForSegment(
     SegmentData& segment,
-    std::vector<char*>& rows) {
+    std::vector<char*>& rows,
+    BulkLoadMetrics* metrics) {
   rows.reserve(rows.size() + segment.meta.numRows);
   for (const auto& chunk : segment.chunks) {
     for (auto partId : chunk.parts) {
       const auto& part = segment.parts[partId];
       auto& rowBlock = blockRef(segment, part.rowBlockId, true);
       BOLT_CHECK_NOT_NULL(rowBlock.ptr);
+      if (metrics != nullptr) {
+        metrics->pointerRows += part.rowCount;
+      }
       for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
         rows.push_back(
             rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride());
@@ -444,7 +465,9 @@ const char* BmRowContainer::rowPointer(const RowId& id) const {
 }
 
 std::vector<memory::bm::BufferHandle> BmRowContainer::pinSegments(
-    folly::Range<const SegmentId*> segments) {
+    folly::Range<const SegmentId*> segments,
+    BulkLoadMetrics* metrics) {
+  const auto collectStart = metrics == nullptr ? 0 : nowNs();
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   std::vector<BlockRef*> blockRefs;
   std::vector<bool> isHeapBlock;
@@ -465,12 +488,21 @@ std::vector<memory::bm::BufferHandle> BmRowContainer::pinSegments(
       isHeapBlock.push_back(true);
     }
   }
+  if (metrics != nullptr) {
+    metrics->collectBlocksNs += nowNs() - collectStart;
+    metrics->pinnedBlocks += blocks.size();
+  }
 
+  const auto batchPinStart = metrics == nullptr ? 0 : nowNs();
   auto pins = bufferManager_->BatchPin(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
+  if (metrics != nullptr) {
+    metrics->batchPinNs += nowNs() - batchPinStart;
+  }
   BOLT_CHECK_EQ(pins.size(), blockRefs.size());
 
+  const auto updateStart = metrics == nullptr ? 0 : nowNs();
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
   for (size_t i = 0; i < pins.size(); ++i) {
     auto& block = *blockRefs[i];
@@ -486,9 +518,12 @@ std::vector<memory::bm::BufferHandle> BmRowContainer::pinSegments(
     }
     block.ptr = newPtr;
   }
+  if (metrics != nullptr) {
+    metrics->updateBlockPointersNs += nowNs() - updateStart;
+  }
   if (!heapRebases.empty()) {
     for (const auto segmentId : segments) {
-      rebaseStringViews(segmentData(segmentId), heapRebases);
+      rebaseStringViews(segmentData(segmentId), heapRebases, metrics);
     }
   }
   return pins;
@@ -537,7 +572,7 @@ std::vector<memory::bm::BufferHandle> BmRowContainer::pinChunk(
     block.ptr = newPtr;
   }
   if (!heapRebases.empty()) {
-    rebaseChunk(segment, chunk, heapRebases);
+    rebaseChunk(segment, chunk, heapRebases, nullptr);
   }
   return pins;
 }
@@ -545,9 +580,14 @@ std::vector<memory::bm::BufferHandle> BmRowContainer::pinChunk(
 void BmRowContainer::rebaseStringViews(
     SegmentData& segment,
     const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases) {
+        heapRebases,
+    BulkLoadMetrics* metrics) {
+  const auto rebaseStart = metrics == nullptr ? 0 : nowNs();
   for (const auto& chunk : segment.chunks) {
-    rebaseChunk(segment, chunk, heapRebases);
+    rebaseChunk(segment, chunk, heapRebases, metrics);
+  }
+  if (metrics != nullptr) {
+    metrics->rebaseStringViewsNs += nowNs() - rebaseStart;
   }
 }
 
@@ -555,49 +595,94 @@ void BmRowContainer::rebaseChunk(
     SegmentData& segment,
     const DataChunkMeta& chunk,
     const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases) {
+        heapRebases,
+    BulkLoadMetrics* metrics) {
+  if (stringColumns_.empty()) {
+    return;
+  }
   for (auto partId : chunk.parts) {
     auto& part = segment.parts[partId];
+    std::vector<HeapRebaseRange> ranges;
+    ranges.reserve(part.heapBases.size());
+    for (auto& heapBase : part.heapBases) {
+      const auto rebase = heapRebases.find(heapBase.heapBlockId);
+      if (rebase == heapRebases.end()) {
+        continue;
+      }
+      const auto oldBase = heapBase.baseAddress;
+      if (oldBase == 0) {
+        heapBase.baseAddress = rebase->second.second;
+        continue;
+      }
+      ranges.push_back(
+          {&heapBase,
+           oldBase,
+           rebase->second.second,
+           oldBase + heapBase.capacity});
+    }
+    if (ranges.empty()) {
+      continue;
+    }
+
     auto& rowBlock = blockRef(segment, part.rowBlockId, true);
     BOLT_CHECK_NOT_NULL(rowBlock.ptr);
-    for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
-      auto* row = rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride();
-      for (int32_t column = 0; column < types_.size(); ++column) {
-        const auto kind = types_[column]->kind();
-        if ((kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) ||
-            isNull(row, column)) {
-          continue;
-        }
-        auto* value = reinterpret_cast<StringView*>(valueAddress(row, column));
-        if (value->isInline()) {
-          continue;
-        }
-        const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
-        for (auto& heapBase : part.heapBases) {
-          const auto rebase = heapRebases.find(heapBase.heapBlockId);
-          if (rebase == heapRebases.end()) {
+
+    if (ranges.size() == 1) {
+      const auto range = ranges[0];
+      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
+        auto* row = rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride();
+        for (const auto& column : stringColumns_) {
+          if (isNull(row, column)) {
             continue;
           }
-          const auto oldBase = heapBase.baseAddress;
-          const auto newBase = rebase->second.second;
-          if (oldBase == 0) {
+          auto* value =
+              reinterpret_cast<StringView*>(row + column.offset);
+          if (value->isInline()) {
             continue;
           }
-          if (oldAddress >= oldBase &&
-              oldAddress < oldBase + heapBase.capacity) {
+          const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
+          if (oldAddress >= range.oldBase && oldAddress < range.end) {
             *value = StringView(
-                reinterpret_cast<const char*>(newBase + oldAddress - oldBase),
+                reinterpret_cast<const char*>(
+                    range.newBase + oldAddress - range.oldBase),
                 value->size());
-            break;
+            if (metrics != nullptr) {
+              ++metrics->rebasedStringViews;
+            }
+          }
+        }
+      }
+    } else {
+      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
+        auto* row = rowBlock.ptr + part.rowBlockOffset + rowIndex * rowStride();
+        for (const auto& column : stringColumns_) {
+          if (isNull(row, column)) {
+            continue;
+          }
+          auto* value =
+              reinterpret_cast<StringView*>(row + column.offset);
+          if (value->isInline()) {
+            continue;
+          }
+          const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
+          for (const auto& range : ranges) {
+            if (oldAddress >= range.oldBase && oldAddress < range.end) {
+              *value = StringView(
+                  reinterpret_cast<const char*>(
+                      range.newBase + oldAddress - range.oldBase),
+                  value->size());
+              if (metrics != nullptr) {
+                ++metrics->rebasedStringViews;
+              }
+              break;
+            }
           }
         }
       }
     }
-    for (auto& heapBase : part.heapBases) {
-      const auto rebase = heapRebases.find(heapBase.heapBlockId);
-      if (rebase != heapRebases.end()) {
-        heapBase.baseAddress = rebase->second.second;
-      }
+
+    for (auto& range : ranges) {
+      range.heapBase->baseAddress = range.newBase;
     }
   }
 }

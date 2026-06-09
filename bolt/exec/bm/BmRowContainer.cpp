@@ -57,6 +57,7 @@ BmRowContainer::BmRowContainer(
   nullBytes_ = bits::nbytes(nullBits);
   fixedRowSize_ = nullBytes_;
   columns_.reserve(types_.size());
+  stringColumns_.reserve(types_.size());
   uint32_t nullOffset = 0;
   for (auto i = 0; i < types_.size(); ++i) {
     const auto& type = types_[i];
@@ -70,6 +71,12 @@ BmRowContainer::BmRowContainer(
       ++nullOffset;
     }
     columns_.push_back(std::move(column));
+    const auto kind = type->kind();
+    if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+      const auto& stored = columns_.back();
+      stringColumns_.push_back(
+          {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
+    }
     fixedRowSize_ += width;
   }
   BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);

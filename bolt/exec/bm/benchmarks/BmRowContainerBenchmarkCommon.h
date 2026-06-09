@@ -81,6 +81,7 @@ struct BmSpillReadMetrics {
   uint64_t rowIds{0};
   uint64_t windows{0};
   LoadAllResult result{LoadAllResult::kNeedWindowRead};
+  BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
 };
 
