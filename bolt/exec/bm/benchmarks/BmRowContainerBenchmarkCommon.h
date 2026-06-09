@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bolt/common/memory/bm/io/DiskIoSchedulerStats.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/Spill.h"
 #include "bolt/exec/bm/BmRowContainer.h"
@@ -83,6 +84,7 @@ struct BmSpillReadMetrics {
   LoadAllResult result{LoadAllResult::kNeedWindowRead};
   BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
+  memory::bm::DiskIoSchedulerStats ioStatsDelta;
 };
 
 BenchmarkOptions options(DatasetKind dataset, uint64_t dataBytes);
