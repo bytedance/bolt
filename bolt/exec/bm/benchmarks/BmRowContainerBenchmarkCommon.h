@@ -24,7 +24,10 @@ struct BenchmarkOptions {
 };
 
 struct BenchmarkContext {
-  explicit BenchmarkContext(const std::string& name, uint64_t dataBytes);
+  explicit BenchmarkContext(
+      const std::string& name,
+      uint64_t dataBytes,
+      uint32_t memoryMultiplier = 0);
   ~BenchmarkContext();
 
   std::shared_ptr<memory::MemoryPool> rootPool;
