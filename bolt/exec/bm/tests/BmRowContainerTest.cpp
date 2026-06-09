@@ -41,25 +41,23 @@ class BmRowContainerTest : public testing::Test,
     });
   }
 
-  std::vector<RowHandle> storeAll(
-      BmRowContainer& container,
-      RowVectorPtr input) {
+  std::vector<char*> storeAll(BmRowContainer& container, RowVectorPtr input) {
     SelectivityVector rows(input->size());
     std::vector<DecodedVector> decoded(input->childrenSize());
     for (auto i = 0; i < input->childrenSize(); ++i) {
       decoded[i].decode(*input->childAt(i), rows);
     }
 
-    std::vector<RowHandle> handles;
-    handles.reserve(input->size());
+    std::vector<char*> rowsOut;
+    rowsOut.reserve(input->size());
     for (auto row = 0; row < input->size(); ++row) {
-      auto handle = container.newRow();
+      auto* target = container.newRow();
       for (auto column = 0; column < input->childrenSize(); ++column) {
-        container.store(decoded[column], row, handle.ptr, column);
+        container.store(decoded[column], row, target, column);
       }
-      handles.push_back(handle);
+      rowsOut.push_back(target);
     }
-    return handles;
+    return rowsOut;
   }
 
   std::shared_ptr<MemoryPool> root_;
@@ -70,19 +68,19 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
   auto input = makeInput();
-  auto handles = storeAll(container, input);
+  auto rows = storeAll(container, input);
 
-  EXPECT_GT(container.compare(handles[0].ptr, handles[1].ptr, 0), 0);
-  EXPECT_LT(container.compare(handles[1].ptr, handles[2].ptr, 0), 0);
-  EXPECT_GT(container.compare(handles[0].ptr, handles[1].ptr, 1), 0);
+  EXPECT_GT(container.compare(rows[0], rows[1], 0), 0);
+  EXPECT_LT(container.compare(rows[1], rows[2], 0), 0);
+  EXPECT_GT(container.compare(rows[0], rows[1], 1), 0);
 
-  auto result = BaseVector::create(BIGINT(), handles.size(), pool());
-  std::vector<const char*> rows;
-  rows.reserve(handles.size());
-  for (const auto& handle : handles) {
-    rows.push_back(handle.ptr);
+  auto result = BaseVector::create(BIGINT(), rows.size(), pool());
+  std::vector<const char*> inputRows;
+  inputRows.reserve(rows.size());
+  for (const auto* row : rows) {
+    inputRows.push_back(row);
   }
-  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 0, result);
 
   auto flat = result->asFlatVector<int64_t>();
   ASSERT_NE(nullptr, flat);
@@ -92,16 +90,11 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_EQ(3, flat->valueAt(3));
 }
 
-TEST_F(BmRowContainerTest, FlushBulkLoadResolveRowsAndExtract) {
+TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
   auto input = makeInput();
-  auto handles = storeAll(container, input);
-  std::vector<RowId> rowIds;
-  rowIds.reserve(handles.size());
-  for (const auto& handle : handles) {
-    rowIds.push_back(handle.id);
-  }
+  storeAll(container, input);
 
   auto segment = container.flushActiveSegment();
   ASSERT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
@@ -109,15 +102,17 @@ TEST_F(BmRowContainerTest, FlushBulkLoadResolveRowsAndExtract) {
   auto session = container.beginBulkReadSegments({&segment, 1});
   ASSERT_EQ(ReadMode::kFullyResident, session.mode());
 
-  std::vector<char*> resolved;
-  auto resolvedRange =
-      session.resolveRows({rowIds.data(), rowIds.size()}, resolved);
-  ASSERT_EQ(rowIds.size(), resolvedRange.size());
-  EXPECT_EQ(0, container.compare(resolved[1], resolved[3], 0));
-  EXPECT_LT(container.compare(resolved[1], resolved[3], 1), 0);
+  std::vector<char*> rows;
+  std::vector<RowId> rowIds;
+  ASSERT_EQ(LoadAllResult::kLoadedPointers, session.tryLoadAll(rows, rowIds));
+  ASSERT_EQ(input->size(), rows.size());
+  ASSERT_TRUE(rowIds.empty());
+  EXPECT_EQ(0, container.compare(rows[1], rows[3], 0));
+  EXPECT_LT(container.compare(rows[1], rows[3], 1), 0);
 
-  auto result = BaseVector::create(VARCHAR(), rowIds.size(), pool());
-  session.extractColumn({rowIds.data(), rowIds.size()}, 1, 0, result);
+  auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+  std::vector<const char*> inputRows(rows.begin(), rows.end());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
@@ -127,16 +122,11 @@ TEST_F(BmRowContainerTest, FlushBulkLoadResolveRowsAndExtract) {
   EXPECT_EQ("bravo", flat->valueAt(3).str());
 }
 
-TEST_F(BmRowContainerTest, WindowReadExtractsInCallerOrder) {
+TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
   auto input = makeInput();
-  auto handles = storeAll(container, input);
-  std::vector<RowId> rowIds;
-  rowIds.reserve(handles.size());
-  for (const auto& handle : handles) {
-    rowIds.push_back(handle.id);
-  }
+  storeAll(container, input);
 
   auto segment = container.flushActiveSegment();
   ReadSessionOptions options;
@@ -144,9 +134,23 @@ TEST_F(BmRowContainerTest, WindowReadExtractsInCallerOrder) {
   auto session = container.beginBulkReadSegments({&segment, 1}, options);
   ASSERT_EQ(ReadMode::kWindowRead, session.mode());
 
+  std::vector<char*> rows;
+  std::vector<RowId> rowIds;
+  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  ASSERT_TRUE(rows.empty());
+  ASSERT_EQ(input->size(), rowIds.size());
+
   std::vector<RowId> reordered{rowIds[2], rowIds[0], rowIds[3], rowIds[1]};
+  auto window = session.loadRows({reordered.data(), reordered.size()});
+  ASSERT_EQ(reordered.size(), window.rows.size());
+
   auto result = BaseVector::create(VARCHAR(), reordered.size(), pool());
-  session.extractColumn({reordered.data(), reordered.size()}, 1, 0, result);
+  std::vector<const char*> inputRows;
+  inputRows.reserve(window.rows.size());
+  for (const auto& row : window.rows) {
+    inputRows.push_back(row.ptr);
+  }
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
@@ -154,17 +158,23 @@ TEST_F(BmRowContainerTest, WindowReadExtractsInCallerOrder) {
   EXPECT_EQ("delta", flat->valueAt(1).str());
   EXPECT_EQ("bravo", flat->valueAt(2).str());
   EXPECT_EQ("alpha", flat->valueAt(3).str());
+
+  auto* alpha = session.loadRow(rowIds[1]);
+  auto single = BaseVector::create(VARCHAR(), 1, pool());
+  const char* alphaRow = alpha;
+  container.extractColumnResident(&alphaRow, 1, 1, single);
+  EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
 }
 
-TEST_F(BmRowContainerTest, SortedRunCursorReadsRowIdOrder) {
+TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()}, bufferManager_, MemoryTag::kTesting);
   auto input = makeInput();
-  auto handles = storeAll(container, input);
+  auto rows = storeAll(container, input);
 
-  std::vector<RowHandle> sorted{handles[1], handles[3], handles[2], handles[0]};
+  std::vector<char*> sorted{rows[1], rows[3], rows[2], rows[0]};
   SortedRunOptions options;
-  options.preferredLayout = SortedRunLayout::kRowIdOrder;
+  options.preferredLayout = SortedRunLayout::kMaterializedOrder;
   auto run = container.finalizeSortedRun({sorted.data(), sorted.size()}, options);
 
   auto session = container.beginMergeReadSegments({&run, 1});
@@ -191,12 +201,12 @@ TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
   DecodedVector decoded;
   decoded.decode(*input->childAt(0), rows);
 
-  auto first = container.newRow(7);
-  container.store(decoded, 0, first.ptr, 0);
+  auto* first = container.newRow(7);
+  container.store(decoded, 0, first, 0);
   auto firstSegment = container.flushActivePartitionSegment(7);
 
-  auto second = container.newRow(7);
-  container.store(decoded, 1, second.ptr, 0);
+  auto* second = container.newRow(7);
+  container.store(decoded, 1, second, 0);
   auto secondSegment = container.flushActivePartitionSegment(7);
 
   EXPECT_NE(firstSegment, secondSegment);

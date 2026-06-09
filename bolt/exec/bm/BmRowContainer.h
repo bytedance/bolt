@@ -31,8 +31,8 @@ class BmRowContainer {
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t chunkRowCount = 1024);
 
-  RowHandle newRow();
-  RowHandle newRow(PartitionId partition);
+  char* newRow();
+  char* newRow(PartitionId partition);
 
   void store(
       const DecodedVector& decoded,
@@ -58,17 +58,11 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize = false);
 
-  char* resolveRowResident(const RowId& row);
-
-  folly::Range<char* const*> resolveRowsResident(
-      folly::Range<const RowId*> rows,
-      std::vector<char*>& result);
-
   SegmentId flushActiveSegment();
   SegmentId flushActivePartitionSegment(PartitionId partition);
 
   SortedRunId finalizeSortedRun(
-      folly::Range<const RowHandle*> sortedRows,
+      folly::Range<char* const*> sortedRows,
       const SortedRunOptions& options);
 
   BulkReadSession beginBulkReadSegments(
@@ -117,8 +111,10 @@ class BmRowContainer {
     PartId currentPart{kNoBlock};
   };
 
+  SegmentData& createSegment(std::optional<PartitionId> partition);
   SegmentData& activeSegment(PartitionId partition);
   SegmentId finalizeAndFlush(PartitionId partition);
+  SegmentId finalizeAndFlushSegment(SegmentData& segment);
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
   SortedRunMeta& sortedRunData(SortedRunId run);
@@ -130,12 +126,23 @@ class BmRowContainer {
   BlockRef& ensureRowBlock(SegmentData& segment);
   BlockRef& ensureHeapBlock(SegmentData& segment, uint32_t minBytes);
   BlockRef& blockRef(SegmentData& segment, BlockId id, bool isRowBlock);
-  RowHandle newRowInSegment(SegmentData& segment);
+  char* newRowInSegment(SegmentData& segment);
+  char* copyRowToSegment(SegmentData& segment, const char* source);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
   void recordHeapForCurrentPart(SegmentData& segment, const BlockRef& heap);
+  SegmentData& owningActiveSegment(const char* row);
   const DataChunkMeta& chunkForRow(
       const SegmentData& segment,
       RowNumber rowNumber) const;
+  RowId rowIdForRowNumber(
+      const SegmentData& segment,
+      RowNumber rowNumber) const;
+  void appendRowIdsForSegment(
+      const SegmentData& segment,
+      std::vector<RowId>& rows) const;
+  void appendRowPointersForSegment(
+      SegmentData& segment,
+      std::vector<char*>& rows);
   char* rowPointer(const RowId& id);
   const char* rowPointer(const RowId& id) const;
   bool isNull(const char* row, int32_t column) const;

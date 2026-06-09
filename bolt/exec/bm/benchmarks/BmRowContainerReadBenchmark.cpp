@@ -35,7 +35,7 @@ void readBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
     auto stored = storeBmRows(context, opts, true);
     suspender.dismiss();
     extractBmRowsResident(
-        *stored.container, stored.handles, opts, context.pool.get());
+        *stored.container, stored.rows, opts, context.pool.get());
     suspender.rehire();
   }
 }

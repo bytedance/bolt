@@ -30,8 +30,12 @@ enum class ReadMode {
   kWindowRead,
 };
 
+enum class LoadAllResult {
+  kLoadedPointers,
+  kNeedWindowRead,
+};
+
 enum class SortedRunLayout {
-  kRowIdOrder,
   kMaterializedOrder,
 };
 
@@ -48,18 +52,13 @@ struct RowId {
   BlockId primaryHeapBlockId{kNoBlock};
 };
 
-struct RowHandle {
-  RowId id;
-  char* ptr{nullptr};
-};
-
 struct ReadSessionOptions {
   uint64_t maxPinnedBytes{0};
   bool releaseWhenConsumed{false};
 };
 
 struct SortedRunOptions {
-  SortedRunLayout preferredLayout{SortedRunLayout::kRowIdOrder};
+  SortedRunLayout preferredLayout{SortedRunLayout::kMaterializedOrder};
 };
 
 struct HeapBaseRef {
@@ -99,10 +98,8 @@ struct SegmentMeta {
 
 struct SortedRunMeta {
   SortedRunId id{0};
-  SortedRunLayout layout{SortedRunLayout::kRowIdOrder};
-  std::vector<SegmentId> sourceSegments;
-  std::vector<RowId> sortedRows;
-  std::optional<SegmentId> materializedSegment;
+  SortedRunLayout layout{SortedRunLayout::kMaterializedOrder};
+  SegmentId materializedSegment{0};
   uint64_t numRows{0};
 };
 

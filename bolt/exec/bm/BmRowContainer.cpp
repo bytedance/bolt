@@ -56,14 +56,14 @@ BmRowContainer::BmRowContainer(
     columns_.push_back({type, fixedRowSize_, width});
     fixedRowSize_ += width;
   }
-  BOLT_CHECK_LE(fixedRowSize_ + sizeof(RowId), rowBlockSize_);
+  BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);
 }
 
-RowHandle BmRowContainer::newRow() {
+char* BmRowContainer::newRow() {
   return newRow(kDefaultPartition);
 }
 
-RowHandle BmRowContainer::newRow(PartitionId partition) {
+char* BmRowContainer::newRow(PartitionId partition) {
   return newRowInSegment(activeSegment(partition));
 }
 
