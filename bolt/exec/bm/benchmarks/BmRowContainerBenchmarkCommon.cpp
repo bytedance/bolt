@@ -272,12 +272,12 @@ OldStoredRows storeOldRows(
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
-    bool keepHandles) {
+    bool keepRows) {
   BmStoredRows stored;
   stored.container = makeBmRowContainer(options.dataset, context.bufferManager);
   storeBmRowsOnly(
       *stored.container, context.pool.get(), options,
-      keepHandles ? &stored.rows : nullptr);
+      keepRows ? &stored.rows : nullptr);
   return stored;
 }
 
@@ -361,29 +361,27 @@ void extractBmRowsResident(
   }
 }
 
-void extractBmRowsFromRowIds(
+void readBmSpill(
     BmRowContainer& container,
-    BulkReadSession& session,
-    const std::vector<RowId>& rowIds,
-    const BenchmarkOptions& options,
-    memory::MemoryPool* pool) {
-  const auto types = columnTypes(options.dataset);
-  std::vector<const char*> rows;
-  rows.reserve(options.batchRows);
+    SegmentId segment,
+    const BenchmarkOptions& options) {
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  std::vector<char*> rows;
+  std::vector<RowId> rowIds;
+  auto result = session.tryLoadAll(rows, rowIds);
+  if (result == LoadAllResult::kLoadedPointers) {
+    folly::doNotOptimizeAway(rows.data());
+    folly::doNotOptimizeAway(rows.size());
+    return;
+  }
+
   for (size_t offset = 0; offset < rowIds.size();) {
     const auto batchSize = static_cast<vector_size_t>(
         std::min<size_t>(options.batchRows, rowIds.size() - offset));
     auto window = session.loadRows(
         {rowIds.data() + offset, static_cast<size_t>(batchSize)});
-    rows.clear();
-    for (const auto& row : window.rows) {
-      rows.push_back(row.ptr);
-    }
-    for (auto column = 0; column < types.size(); ++column) {
-      auto result = makeResultVector(types[column], batchSize, pool);
-      container.extractColumnResident(rows.data(), batchSize, column, result);
-      folly::doNotOptimizeAway(result);
-    }
+    folly::doNotOptimizeAway(window.rows.data());
+    folly::doNotOptimizeAway(window.rows.size());
     offset += batchSize;
   }
 }

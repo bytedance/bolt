@@ -8,9 +8,6 @@ DECLARE_uint64(bm_row_container_data_bytes);
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
 
-constexpr uint64_t kOneGiB = 1ULL << 30;
-constexpr uint64_t kTenGiB = 10ULL << 30;
-
 uint64_t dataBytes(uint64_t bytes) {
   return bytes == 0 ? FLAGS_bm_row_container_data_bytes : bytes;
 }
@@ -40,42 +37,10 @@ void readBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   }
 }
 
-BENCHMARK_NAMED_PARAM(readOld, old_fixed_1g, DatasetKind::kFixed, kOneGiB);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    readBm,
-    bm_fixed_1g,
-    DatasetKind::kFixed,
-    kOneGiB);
-BENCHMARK_NAMED_PARAM(readOld, old_fixed_10g, DatasetKind::kFixed, kTenGiB);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    readBm,
-    bm_fixed_10g,
-    DatasetKind::kFixed,
-    kTenGiB);
-BENCHMARK_NAMED_PARAM(readOld, old_variable_1g, DatasetKind::kVariable, kOneGiB);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    readBm,
-    bm_variable_1g,
-    DatasetKind::kVariable,
-    kOneGiB);
-BENCHMARK_NAMED_PARAM(
-    readOld,
-    old_variable_10g,
-    DatasetKind::kVariable,
-    kTenGiB);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    readBm,
-    bm_variable_10g,
-    DatasetKind::kVariable,
-    kTenGiB);
-BENCHMARK_NAMED_PARAM(readOld, old_fixed_custom, DatasetKind::kFixed, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_fixed_custom, DatasetKind::kFixed, 0);
-BENCHMARK_NAMED_PARAM(readOld, old_variable_custom, DatasetKind::kVariable, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    readBm,
-    bm_variable_custom,
-    DatasetKind::kVariable,
-    0);
+BENCHMARK_NAMED_PARAM(readOld, old_fixed, DatasetKind::kFixed, 0);
+BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_fixed, DatasetKind::kFixed, 0);
+BENCHMARK_NAMED_PARAM(readOld, old_variable, DatasetKind::kVariable, 0);
+BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_variable, DatasetKind::kVariable, 0);
 BENCHMARK_DRAW_LINE();
 
 } // namespace
