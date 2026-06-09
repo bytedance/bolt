@@ -243,14 +243,32 @@ void storeInputBatchBm(
     std::vector<char*>* rows) {
   std::vector<DecodedVector> decoded;
   decodeBatch(batch, decoded);
+  std::vector<char*> batchRows;
+  batchRows.reserve(batch->size());
+  std::vector<bool> variableColumns(batch->childrenSize(), false);
+  for (auto column = 0; column < batch->childrenSize(); ++column) {
+    const auto kind = batch->childAt(column)->typeKind();
+    variableColumns[column] =
+        kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY;
+  }
   for (vector_size_t row = 0; row < batch->size(); ++row) {
     auto* target = container.newRow();
+    batchRows.push_back(target);
     if (rows != nullptr) {
       rows->push_back(target);
     }
     for (auto column = 0; column < batch->childrenSize(); ++column) {
-      container.store(decoded[column], row, target, column);
+      if (variableColumns[column]) {
+        container.store(decoded[column], row, target, column);
+      }
     }
+  }
+  for (auto column = 0; column < batch->childrenSize(); ++column) {
+    if (variableColumns[column]) {
+      continue;
+    }
+    container.storeColumn(
+        decoded[column], batch->size(), batchRows.data(), column);
   }
 }
 

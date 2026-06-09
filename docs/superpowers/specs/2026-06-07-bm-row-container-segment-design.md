@@ -337,6 +337,12 @@ BmRowContainer(
     memory::bm::MemoryTag tag,
     ...);
 
+void storeColumn(
+    const DecodedVector& decoded,
+    vector_size_t size,
+    char* const* rows,
+    int32_t column);
+
 int32_t compare(
     const char* left,
     const char* right,
@@ -357,6 +363,8 @@ void extractColumnResident(
 
 `nullable` 是列级 layout 属性，由上层算子创建 container 时传入。非 nullable 列不分配 null bit，
 store 时不接受 null，extract 时走无 null 检查的 typed 快路径；nullable 列才读取对应 null bit。
+批量写入时，fixed-width 列应优先走 `storeColumn()`，让 type dispatch 和 nullable 判断发生在列级；
+variable-width 列可以根据元数据维护成本选择列式写入或在 `newRow()` 后立即按行写入。
 
 这些接口的前提是 rows 所属 segment resident，且 variable-width pointers 已经有效。它们不触发
 pin、read、rebase 或 IO。`extractColumnResident()` 接收 `char* const*`，是为了让上层直接传
@@ -533,6 +541,12 @@ class BmRowContainer {
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       char* row,
+      int32_t column);
+
+  void storeColumn(
+      const DecodedVector& decoded,
+      vector_size_t size,
+      char* const* rows,
       int32_t column);
 
   int32_t compare(
