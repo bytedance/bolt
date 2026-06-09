@@ -36,6 +36,8 @@
 #include "bolt/exec/DistinctAggregations.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/SortedAggregations.h"
+#include "bolt/exec/Task.h"
+
 namespace bytedance::bolt::exec {
 
 class RowContainer;
@@ -97,9 +99,14 @@ class StreamingAggregation : public Operator {
   // Initialize the aggregations setting allocator and offsets.
   void initializeAggregates(uint32_t numKeys);
 
+  // Returns the bytes size for the output batch.
+  int64_t outputBatchByteSize() const;
+
   /// Maximum number of rows in the output batch.
   const vector_size_t outputBatchSize_;
 
+  /// Maximum bytes of the output batch.
+  const int64_t outputBytes_;
   // Will hold on accept new input if groups_ size large than
   // groupNumberThreshold_
   const vector_size_t groupNumberThreshold_;

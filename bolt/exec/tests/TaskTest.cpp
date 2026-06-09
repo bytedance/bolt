@@ -528,6 +528,52 @@ class TaskTest : public HiveConnectorTestBase {
   }
 };
 
+TEST_F(TaskTest, sparkTaskAttemptId) {
+  auto plan = PlanBuilder()
+                  .values({makeRowVector(ROW({"c0"}, {BIGINT()}), 1)})
+                  .planFragment();
+  auto task = Task::create(
+      "query_0_TID_123_ATTEMPT_4",
+      std::move(plan),
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel);
+
+  EXPECT_EQ(task->sparkTaskAttemptId(), 123);
+
+  plan = PlanBuilder()
+             .values({makeRowVector(ROW({"c0"}, {BIGINT()}), 1)})
+             .planFragment();
+  task = Task::create(
+      "test_cursor_1",
+      std::move(plan),
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel);
+
+  EXPECT_EQ(task->sparkTaskAttemptId(), std::nullopt);
+}
+
+TEST_F(TaskTest, memoryPressureSnapshot) {
+  auto plan = PlanBuilder()
+                  .values({makeRowVector(ROW({"c0"}, {BIGINT()}), 1)})
+                  .planFragment();
+  auto task = Task::create(
+      "query_0_TID_123_ATTEMPT_4",
+      std::move(plan),
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel);
+
+  task->recordMemoryPressureWatermarkBytes(100);
+  task->recordMemoryPressureWatermarkBytes(50);
+
+  const auto snapshot = task->memoryPressureSnapshot();
+  EXPECT_EQ(snapshot.reclaimWatermarkBytes, 100);
+  EXPECT_EQ(snapshot.borrowFromRssWatermarkBytes, 0);
+  EXPECT_EQ(snapshot.admissionWatermarkBytes(), 100);
+}
+
 TEST_F(TaskTest, wrongPlanNodeForSplit) {
   auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
       "test",

@@ -787,8 +787,13 @@ StopReason Driver::runInternal(
                     nextOp,
                     curOperatorId_ + 1,
                     kOpMethodNoMoreInput);
+                auto* nextOpPool = nextOp->pool();
                 LOG_SPARK(INFO)
-                    << "Operator " << nextOp->name() << " no more input.";
+                    << "Operator " << nextOp->name() << " no more input. "
+                    << nextOpPool->name() << "["
+                    << succinctBytes(nextOpPool->currentBytes()) << ", "
+                    << succinctBytes(nextOpPool->reservedBytes()) << ", "
+                    << succinctBytes(nextOpPool->capacity()) << "]";
                 break;
               }
             }

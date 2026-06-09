@@ -44,13 +44,20 @@ StreamingAggregation::StreamingAggregation(
               ? "PartialStreamingAggregation"
               : "StreamingAggregation"),
       outputBatchSize_{outputBatchRows()},
-      groupNumberThreshold_{2 * outputBatchSize_},
+      outputBytes_(outputBatchByteSize()),
+      groupNumberThreshold_{static_cast<vector_size_t>(2 * outputBatchSize_)},
       aggregationNode_{aggregationNode},
       step_{aggregationNode->step()} {
   if (aggregationNode_->ignoreNullKeys()) {
     BOLT_UNSUPPORTED(
         "Streaming aggregation doesn't support ignoring null keys yet");
   }
+}
+
+int64_t StreamingAggregation::outputBatchByteSize() const {
+  const auto& queryConfig =
+      this->operatorCtx()->task()->queryCtx()->queryConfig();
+  return queryConfig.preferredOutputBatchBytes();
 }
 
 void StreamingAggregation::initialize() {
@@ -321,19 +328,28 @@ RowVectorPtr StreamingAggregation::getOutput() {
   }
 
   RowVectorPtr output;
+  uint32_t outputSize = 0;
   if (numGroups_ > outputBatchSize_) {
-    output = createOutput(outputBatchSize_);
+    outputSize = outputBatchSize_;
+  } else if (
+      numGroups_ > 1 &&
+      rows_->estimateRowSize().value_or(0) * rows_->numRows() > outputBytes_) {
+    outputSize = numGroups_ - 1;
+  }
+
+  if (outputSize > 0) {
+    output = createOutput(outputSize);
 
     // Rotate the entries in the groups_ vector to move the remaining groups to
     // the beginning and place reusable groups at the end.
     std::vector<char*> copy(groups_.size());
-    std::copy(groups_.begin() + outputBatchSize_, groups_.end(), copy.begin());
+    std::copy(groups_.begin() + outputSize, groups_.end(), copy.begin());
     std::copy(
         groups_.begin(),
-        groups_.begin() + outputBatchSize_,
-        copy.begin() + groups_.size() - outputBatchSize_);
+        groups_.begin() + outputSize,
+        copy.begin() + groups_.size() - outputSize);
     groups_ = std::move(copy);
-    numGroups_ -= outputBatchSize_;
+    numGroups_ -= outputSize;
   }
 
   return output;

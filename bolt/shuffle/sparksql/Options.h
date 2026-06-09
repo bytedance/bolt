@@ -61,6 +61,8 @@ static constexpr int32_t kDefaultPreAllocSize =
 static constexpr int32_t kDefaultAccumulateBatchMaxBatches = 65535;
 static constexpr int32_t kDefaultAccumulateBatchMaxColumns =
     0; // default is close
+static constexpr int32_t kDefaultShuffleCheckMaxColumns =
+    std::numeric_limits<int32_t>::max();
 
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
@@ -157,6 +159,7 @@ struct ShuffleWriterOptions {
   int32_t accumulateBatchMaxBatches = kDefaultAccumulateBatchMaxBatches;
   int32_t recommendedColumn2RowSize = 0;
   double shuffleCheckRatio = 0;
+  int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   PartitionWriterOptions partitionWriterOptions{};
 };
 

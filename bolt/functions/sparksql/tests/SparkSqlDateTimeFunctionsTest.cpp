@@ -533,6 +533,29 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDate) {
   EXPECT_EQ(std::nullopt, unixTimestamp(std::nullopt));
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDateWithFormat) {
+  const auto unixTimestamp = [&](std::optional<int32_t> date,
+                                 std::optional<StringView> format) {
+    return evaluateOnce<int64_t>(
+        "unix_timestamp(c0, c1)",
+        makeRowVector(
+            {makeNullableFlatVector<int32_t>({date}, DATE()),
+             makeNullableFlatVector<StringView>({format})}));
+  };
+
+  EXPECT_EQ(0, unixTimestamp(DATE()->toDays("1970-01-01"), "yyyy-MM-dd"));
+  EXPECT_EQ(
+      1563926400, unixTimestamp(DATE()->toDays("2019-07-24"), "yyyyMMdd"));
+
+  setQueryTimeZone("Asia/Shanghai");
+  EXPECT_EQ(
+      1437667200, unixTimestamp(DATE()->toDays("2015-07-24"), "yyyy-MM-dd"));
+
+  EXPECT_EQ(std::nullopt, unixTimestamp(std::nullopt, "yyyy-MM-dd"));
+  EXPECT_EQ(
+      std::nullopt, unixTimestamp(DATE()->toDays("2015-07-24"), std::nullopt));
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampTimestamp) {
   const auto unixTimestamp = [&](std::optional<Timestamp> timestamp) {
     return evaluateOnce<int64_t>("unix_timestamp(c0)", timestamp);
@@ -2875,6 +2898,20 @@ TEST_F(SparkSqlDateTimeFunctionsTest, toUtcTimestamp) {
   EXPECT_EQ(
       "2015-01-24 00:00:00.000000000",
       toUtcTimestamp("2015-01-24 05:30:00", "Asia/Kolkata"));
+  EXPECT_EQ(
+      "2021-03-28 01:32:20.000000000",
+      toUtcTimestamp("2021-03-28 01:32:20", "Europe/London"));
+
+  auto londonGapTimestamp = std::make_optional<Timestamp>(
+      util::fromTimestampString("2021-03-28 01:32:20", 19, nullptr));
+  auto londonGapToShanghai = evaluateOnce<Timestamp>(
+      "from_utc_timestamp(to_utc_timestamp(c0, c1), 'Asia/Shanghai')",
+      londonGapTimestamp,
+      std::make_optional<std::string>("Europe/London"));
+  EXPECT_EQ(
+      "2021-03-28 09:32:20.000000000",
+      timestampToString(londonGapToShanghai.value()));
+
   BOLT_ASSERT_THROW(
       toUtcTimestamp("2015-01-24 00:00:00", "Asia/Ooty"),
       "Unknown time zone: 'Asia/Ooty");

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/NumberParsing.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/StorageException.h"
 
 class IgnoreCorruptFileHelper {
@@ -113,25 +114,8 @@ class IgnoreCorruptFileHelper {
               << fmt::format("{}", fmt::join(exceptionKeyWords, ", "));
   }
   static int64_t extractAttemptNumber(const std::string& taskId) {
-    const std::string prefix = "ATTEMPT_";
-    size_t prefix_pos = taskId.find(prefix);
-    if (prefix_pos == std::string::npos) {
-      return -1;
-    }
-    size_t num_start = prefix_pos + prefix.length();
-    size_t num_end = num_start;
-    while (num_end < taskId.length() && std::isdigit(taskId[num_end])) {
-      num_end++;
-    }
-    if (num_end == num_start) {
-      return -1;
-    }
-    try {
-      return std::stoi(taskId.substr(num_start, num_end - num_start));
-    } catch (...) {
-      return -1;
-    }
-    return -1;
+    return bytedance::bolt::extractNumberAfterPrefix(taskId, "ATTEMPT_")
+        .value_or(-1);
   }
   inline static bool hasInitialized_{false};
   inline static int64_t taskMaxFailures_{0};

@@ -359,6 +359,29 @@ target_link_libraries(
   ${TEST_LINK_LIBS}
 )
 
+add_executable(dwrf_selective_string_dict_reader_test
+  SelectiveStringDictionaryColumnReaderTest.cpp
+)
+
+add_test(
+  NAME dwrf_selective_string_dict_reader_test
+  COMMAND dwrf_selective_string_dict_reader_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(
+  dwrf_selective_string_dict_reader_test
+  bolt_dwrf_test_utils
+  bolt_vector_test_lib
+  bolt_link_libs
+  Folly::folly
+  fmt::fmt
+  lz4::lz4
+  zstd::libzstd_static
+  ZLIB::ZLIB
+  ${TEST_LINK_LIBS}
+)
+
 add_executable(bolt_dwrf_e2e_filter_test E2EFilterTest.cpp)
 add_test(bolt_dwrf_e2e_filter_test bolt_dwrf_e2e_filter_test)
 

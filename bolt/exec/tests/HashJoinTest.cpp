@@ -1140,6 +1140,50 @@ TEST_P(MultiThreadedHashJoinTest, emptyProbeWithSpillMemoryThreshold) {
       .run();
 }
 
+TEST_P(MultiThreadedHashJoinTest, emptyProbeWithReclaimWatermark) {
+  if (numDrivers_ != 1) {
+    GTEST_SKIP() << "Covers single-driver finishHashBuild admission path only";
+  }
+
+  std::atomic<bool> injectOnce{true};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::finishHashBuild",
+      std::function<void(HashBuild*)>([&](HashBuild* buildOp) {
+        if (!injectOnce.exchange(false)) {
+          return;
+        }
+        auto task = buildOp->testingOperatorCtx()->task();
+        task->recordMemoryPressureWatermarkBytes(1);
+      }));
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto queryPool = memory::memoryManager()->addRootPool(
+      "", 8 << 20, memory::MemoryReclaimer::create());
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(numDrivers_)
+      .keyTypes({BIGINT()})
+      .probeVectors(0, 5)
+      .buildVectors(1500, 5)
+      .queryPool(std::move(queryPool))
+      .spillDirectory(spillDirectory->path)
+      .injectSpill(false)
+      .checkSpillStats(false)
+      .referenceQuery(
+          "SELECT t_k0, t_data, u_k0, u_data FROM t, u WHERE t_k0 = u_k0")
+      .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
+        const auto statsPair = taskSpilledStats(*task);
+        ASSERT_GT(statsPair.first.spilledRows, 0);
+        ASSERT_GT(statsPair.first.spilledBytes, 0);
+        ASSERT_GT(statsPair.first.spilledPartitions, 0);
+        ASSERT_GT(statsPair.first.spilledFiles, 0);
+        ASSERT_EQ(statsPair.second.spilledRows, 0);
+        ASSERT_EQ(statsPair.second.spilledBytes, 0);
+        ASSERT_GT(statsPair.second.spilledPartitions, 0);
+        ASSERT_EQ(statsPair.second.spilledFiles, 0);
+      })
+      .run();
+}
+
 DEBUG_ONLY_TEST_P(
     MultiThreadedHashJoinTest,
     raceBetweenTaskTerminationAndThesholdTriggeredSpill) {

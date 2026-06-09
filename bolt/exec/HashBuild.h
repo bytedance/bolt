@@ -147,6 +147,15 @@ class HashBuild final : public Operator {
   // barrier for the next round of hash table build operation if it needs.
   bool finishHashBuild();
 
+  // Invoked before the final merged join table is built to estimate the extra
+  // reservation needed to admit the table into probe. Normally this returns an
+  // incremental reservation derived from the current HashBuild memory
+  // footprint and the preferred output batch budget. If the current HashBuild
+  // footprint has already exceeded the task pressure watermark, it returns that
+  // watermark directly to make ensureTableFits() apply stronger admission
+  // pressure before publishing the table to probe.
+  uint64_t probeAdmissionExtraReservationBytes(uint64_t numRows) const;
+
   // [Morsel-driven] same as HashProbe::skipProbeOnEmptyBuild
   bool skipProbeOnEmptyBuild() const {
     return isInnerJoin(joinType_) || isLeftSemiFilterJoin(joinType_) ||
@@ -210,9 +219,11 @@ class HashBuild final : public Operator {
   bool ensureInputFits(RowVectorPtr& input, SpilledRows spilledRows);
 
   // Invoked to ensure there is sufficient memory to build the join table with
-  // the specified 'numRows' if spilling is enabled. The function throws to fail
-  // the query if the memory reservation fails.
-  void ensureTableFits(uint64_t numRows);
+  // the specified 'numRows' if spilling is enabled. 'extraReservationBytes'
+  // captures any additional pre-probe headroom requirement. If the merged join
+  // table cannot satisfy the reservation or the pre-probe admission threshold,
+  // the function triggers an inline build spill before probe starts.
+  void ensureTableFits(uint64_t numRows, uint64_t extraReservationBytes);
 
   // Invoked to reserve memory for 'input' if disk spilling is enabled. The
   // function returns true on success, otherwise false.

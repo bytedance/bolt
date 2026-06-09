@@ -45,9 +45,13 @@ void CompiledModule::setCodeSize(size_t codeSize) {
   codeSize_ = codeSize;
 }
 
-void CompiledModule::setUserData(void* data) noexcept {
-  userData_.store(data, std::memory_order_release);
+bool CompiledModule::compareExchangeUserData(
+    void* expected,
+    void* desired) noexcept {
+  return userData_.compare_exchange_strong(
+      expected, desired, std::memory_order_acq_rel, std::memory_order_acquire);
 }
+
 void* CompiledModule::getUserData() const noexcept {
   return userData_.load(std::memory_order_acquire);
 }

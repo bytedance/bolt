@@ -42,7 +42,7 @@ struct CompiledModule {
   // type-erasured user data, CompiledModule does not own the data and won't
   // manage its lifetime. The caller should make sure the data is valid during
   // the module's lifetime.
-  void setUserData(void* data) noexcept;
+  bool compareExchangeUserData(void* expected, void* desired) noexcept;
   void* getUserData() const noexcept;
 
   ~CompiledModule();

@@ -356,7 +356,7 @@ index 24a7af89b..27655cdf4 100644
              self.requires("grpc/1.50.0")
          if self._requires_rapidjson():
 -            self.requires("rapidjson/1.1.0")
-+            self.requires("rapidjson/[>=cci.20230929]")
++            self.requires("rapidjson/cci.20250205")
          if self.options.with_llvm:
              self.requires("llvm-core/13.0.0")
          if self.options.with_openssl:

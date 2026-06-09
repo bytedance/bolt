@@ -67,6 +67,7 @@ bolt_add_library(
   LocalShuffle.cpp
   MarkDistinct.cpp
   MemoryReclaimer.cpp
+  MemoryPressureUtils.cpp
   Merge.cpp
   MergeJoin.cpp
   MergeSource.cpp

@@ -431,18 +431,26 @@ TEST_F(ZipTest, flatArraysWithGapInElements) {
   assertEqualVectors(expected, result);
 }
 
-// Single arg not supported.
+// Single arg not supported for Presto `zip` (arity range is [2, 7]).
 TEST_F(ZipTest, singleArgument) {
   auto vector = makeNullableArrayVector<int64_t>(
       {{1, 2, 3, 4}, {3, 4, 5}, {std::nullopt}});
   BOLT_ASSERT_THROW(
       evaluate<ArrayVector>("zip(c0)", makeRowVector({vector})),
-      "Scalar function signature is not supported: zip(ARRAY<BIGINT>). Supported signatures: "
-      "(array(E00),array(E01)) -> array(row(E00,E01)), (array(E00),array(E01),array(E02)) -> "
-      "array(row(E00,E01,E02)), (array(E00),array(E01),array(E02),array(E03)) -> array(row(E0"
-      "0,E01,E02,E03)), (array(E00),array(E01),array(E02),array(E03),array(E04)) -> array(row"
-      "(E00,E01,E02,E03,E04)), (array(E00),array(E01),array(E02),array(E03),array(E04),array("
-      "E05)) -> array(row(E00,E01,E02,E03,E04,E05))");
+      "Scalar function signature is not supported: zip(ARRAY<BIGINT>).");
+}
+
+// Presto `zip` is documented as accepting 2..7 array arguments.
+// Verify the Spark-only arity expansion (1, 8+) is NOT exposed to Presto.
+TEST_F(ZipTest, prestoArityBoundsAreEnforced) {
+  auto a = makeArrayVector<int64_t>({{1, 2, 3}, {}, {7, 8}});
+
+  // Arity 8 is beyond Presto's documented max of 7.
+  BOLT_ASSERT_THROW(
+      evaluate<ArrayVector>(
+          "zip(c0, c0, c0, c0, c0, c0, c0, c0)",
+          makeRowVector({a, a, a, a, a, a, a, a})),
+      "not supported");
 }
 
 } // namespace

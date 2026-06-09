@@ -31,8 +31,10 @@
 #include "bolt/parse/QueryPlanner.h"
 #include "bolt/duckdb/conversion/DuckConversion.h"
 #include "bolt/parse/DuckLogicalOperator.h"
+#include "bolt/vector/VariantToVector.h"
 
 #include <duckdb.hpp> // @manual
+#include <duckdb/function/aggregate_function.hpp> // @manual
 #include <duckdb/main/connection.hpp> // @manual
 #include <duckdb/planner/expression/bound_aggregate_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_cast_expression.hpp> // @manual
@@ -140,23 +142,71 @@ PlanNodePtr toBoltPlan(
     std::vector<PlanNodePtr> sources,
     QueryContext& queryContext) {
   if (logicalGet.function.name == "unnest") {
-    BOLT_CHECK_EQ(1, sources.size());
+    // DuckDB 1.1.3 represents UNNEST as a standalone LOGICAL_GET with
+    // parameters embedded in the LogicalGet.
+    BOLT_CHECK_EQ(0, sources.size());
+
+    BOLT_CHECK_EQ(
+        logicalGet.parameters.size(),
+        1,
+        "UNNEST expects a single parameter, got {}",
+        logicalGet.parameters.size());
+
+    const auto& param = logicalGet.parameters[0];
+    BOLT_CHECK(
+        param.type().id() == ::duckdb::LogicalTypeId::LIST,
+        "UNNEST parameter must be a LIST, got {}",
+        param.type().ToString());
+
+    const auto& listType = param.type();
+    auto elementType =
+        duckdb::toBoltType(::duckdb::ListType::GetChildType(listType));
+    auto arrayType = ARRAY(elementType);
+
+    std::vector<variant> elements;
+    const auto& listValues = ::duckdb::ListValue::GetChildren(param);
+    elements.reserve(listValues.size());
+    for (const auto& value : listValues) {
+      elements.emplace_back(duckdb::duckValueToVariant(value));
+    }
+
+    auto arrayVector = variantArrayToVector(arrayType, elements, pool);
+    auto rowType = ROW({queryContext.nextColumnName()}, {arrayType});
+    auto rowVector = std::make_shared<RowVector>(
+        pool, rowType, nullptr, 1, std::vector<VectorPtr>{arrayVector});
+
+    std::vector<RowVectorPtr> vectors = {rowVector};
+    auto valuesNode =
+        std::make_shared<ValuesNode>(queryContext.nextNodeId(), vectors);
+
+    std::vector<TypedExprPtr> projections{
+        std::make_shared<FieldAccessTypedExpr>(
+            valuesNode->outputType()->childAt(0),
+            valuesNode->outputType()->asRow().nameOf(0))};
+    std::vector<std::string> projectionNames{queryContext.nextColumnName()};
+    auto projectNode = std::make_shared<ProjectNode>(
+        queryContext.nextNodeId(),
+        std::move(projectionNames),
+        std::move(projections),
+        std::move(valuesNode));
+
     return std::make_shared<UnnestNode>(
         queryContext.nextNodeId(),
         std::vector<FieldAccessTypedExprPtr>{}, // replicateVariables
         std::vector<FieldAccessTypedExprPtr>{
             std::make_shared<FieldAccessTypedExpr>(
-                sources[0]->outputType()->childAt(0),
-                sources[0]->outputType()->asRow().nameOf(0))},
-        std::vector<std::string>{"a"},
+                projectNode->outputType()->childAt(0),
+                projectNode->outputType()->asRow().nameOf(0))},
+        std::vector<std::string>{
+            logicalGet.names.empty() ? "a" : logicalGet.names[0]},
         std::nullopt, // ordinalityName
-        std::move(sources[0]));
+        std::move(projectNode));
   }
 
   BOLT_CHECK_EQ(logicalGet.function.name, "seq_scan");
   BOLT_CHECK_EQ(0, sources.size());
 
-  const auto& columnIds = logicalGet.column_ids;
+  const auto& columnIds = logicalGet.GetColumnIds();
   std::vector<std::string> names(columnIds.size());
   std::vector<TypePtr> types(columnIds.size());
 
@@ -464,6 +514,18 @@ PlanNodePtr toBoltPlan(
           pool,
           std::move(sources),
           queryContext);
+    case ::duckdb::LogicalOperatorType::LOGICAL_UNNEST:
+      BOLT_CHECK_EQ(1, sources.size());
+      return std::make_shared<UnnestNode>(
+          queryContext.nextNodeId(),
+          std::vector<FieldAccessTypedExprPtr>{}, // replicateVariables
+          std::vector<FieldAccessTypedExprPtr>{
+              std::make_shared<FieldAccessTypedExpr>(
+                  sources[0]->outputType()->childAt(0),
+                  sources[0]->outputType()->asRow().nameOf(0))},
+          std::vector<std::string>{"a"},
+          std::nullopt, // ordinalityName
+          std::move(sources[0]));
     default:
       BOLT_NYI(
           "Plan node is not supported yet: {}",
@@ -478,11 +540,14 @@ static void customScalarFunction(
   BOLT_UNREACHABLE();
 }
 
-static ::duckdb::idx_t customAggregateState() {
+::duckdb::idx_t customAggregateState(
+    const ::duckdb::AggregateFunction& /*function*/) {
   BOLT_UNREACHABLE();
 }
 
-static void customAggregateInitialize(::duckdb::data_ptr_t state) {
+void customAggregateInitialize(
+    const ::duckdb::AggregateFunction& /*function*/,
+    ::duckdb::data_ptr_t /* state */) {
   BOLT_UNREACHABLE();
 }
 

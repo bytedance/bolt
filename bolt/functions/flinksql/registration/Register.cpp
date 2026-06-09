@@ -67,6 +67,11 @@ static void registerDatetimeFunctions(const std::string& prefix) {
       int64_t,
       Varchar,
       Varchar>({prefix + "flink_from_unixtime"});
+  registerFunction<
+      FlinkTimestampToStringV2Function,
+      Varchar,
+      Timestamp,
+      int32_t>({prefix + "flink_timestamp_to_string_v2"});
 }
 
 static void registerMathFunctions(const std::string& prefix) {

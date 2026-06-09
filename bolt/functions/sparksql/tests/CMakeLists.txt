@@ -38,6 +38,7 @@ add_executable(
   ArrayShuffleTest.cpp
   ArraySliceSumTest.cpp
   ArrayUnionTest.cpp
+  ArraysZipTest.cpp
   AtLeastNNonNullsTest.cpp
   Base64Test.cpp
   BitwiseTest.cpp

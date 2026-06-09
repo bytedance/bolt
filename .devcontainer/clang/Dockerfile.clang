@@ -1,0 +1,140 @@
+FROM debian:bookworm
+
+ENV CMAKE_VERSION=3.31.8
+ENV MOLD_VERSION=2.40.4
+
+ARG DEB_REGION=""
+ARG https_proxy=""
+ARG no_proxy=""
+
+# check if deb region is not empty string. If it is, replace the default debian repository with the one for the region.
+RUN if [ "$DEB_REGION" != "" ]; then \
+    sed -i "s|http://deb.debian.org/debian|http://ftp.${DEB_REGION}.debian.org/debian|g" /etc/apt/sources.list.d/debian.sources; \
+fi
+
+RUN apt-get update && \
+    apt-get install -y \
+    curl \
+    tar
+
+RUN arch=$(arch) && \
+    https_proxy=${https_proxy} \
+    curl -L -# -o /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-${arch}.tar.gz  && \
+    tar -xzvf /tmp/cmake.tar.gz -C /opt && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/cmake /usr/local/bin/cmake && \
+    ln -s /opt/cmake-$CMAKE_VERSION-linux-${arch}/bin/ctest /usr/local/bin/ctest && \
+    rm /tmp/cmake.tar.gz
+
+RUN apt-get update && apt-get install -y \
+    sudo \
+    bash \
+    vim-tiny \
+    vim \
+    sudo \
+    git \
+    gdb \
+    python3 \
+    python3-pip \
+    python3-virtualenv \
+    ssh-client \
+    ninja-build \
+    bison \
+    maven \
+    net-tools \
+    telnet \
+    ssh \
+    rsync \
+    openssh-server \
+    lld \
+    ccache \
+    binutils-dev \
+    make \
+    automake \
+    autoconf \
+    htop \
+    less \
+    man \
+    nodejs \
+    npm \
+    bsdextrautils \
+    locales \
+    clang-19 \
+    clang++-19 \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 100 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /bin/bash /bin/sh
+
+RUN https_proxy=${https_proxy} curl -L -O --output-dir /tmp https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$(arch)-linux.tar.gz
+RUN cd /tmp && \
+    sudo tar -C /usr/local --strip-components=1 -xzf mold-$MOLD_VERSION-$(arch)-linux.tar.gz
+
+# Add mold's ld as the first on the path
+env PATH=/usr/local/libexec/mold:$PATH
+
+# License header check tool
+RUN https_proxy=${https_proxy} curl -L -# -o /tmp/skywalking-eyes-bin.tgz https://dlcdn.apache.org/skywalking/eyes/0.8.0/skywalking-license-eye-0.8.0-bin.tgz && \
+    mkdir -p /opt/skywalking-license-eye && \
+    sudo tar -C /opt/skywalking-license-eye --strip-components=1 -xzf /tmp/skywalking-eyes-bin.tgz
+
+ENV PATH="/opt/skywalking-license-eye/bin/linux:${PATH}"
+
+RUN export arch=$(arch | sed 's/^aarch64$/arm64/; s/^x86_64$/amd64/') && \
+    export https_proxy=${https_proxy} && \
+    export filename=go1.25.5.linux-${arch}.tar.gz && \
+    curl -L -O --output-dir /tmp https://go.dev/dl/${filename} && \
+    sudo rm -rf /usr/local/bin/go && tar -C /usr/local -xzf /tmp/${filename} && \
+    rm /tmp/${filename}
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Set up default python virtualenv, and make it the default on PATH
+RUN virtualenv -p python3 /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -f requirements.txt
+
+ARG USERNAME=code
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
+USER $USERNAME
+
+# Configure default conan profile to use the mold linker
+RUN arch=$(uname -m) && mkdir -p ~/.conan2/profiles && cat > ~/.conan2/profiles/default <<EOF
+[settings]
+arch=$( [ "$arch" = "aarch64" ] && echo "armv8" || echo "$arch" )
+build_type=Release
+compiler=clang
+compiler.cppstd=gnu17
+compiler.libcxx=libstdc++11
+compiler.version=19
+os=Linux
+
+[conf]
+tools.build:compiler_executables={"c": "clang", "cpp": "clang++"}
+tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+
+EOF
+
+# Generate Locales
+RUN sudo sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && \
+    sudo locale-gen && \
+    echo "export LC_ALL=en_US.UTF-8" >> ~/.bashrc && \
+    echo "export LANG=en_US.UTF-8" >> ~/.bashrc && \
+    echo "export LANGUAGE=en_US.UTF-8" >> ~/.bashrc
+
+
+ENV SHELL=/bin/bash
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/bin/bash", "-c"]
