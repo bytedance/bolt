@@ -24,6 +24,11 @@ struct BenchmarkOptions {
   uint32_t stringLength{0};
 };
 
+struct ReusableInputBatches {
+  std::vector<RowVectorPtr> batches;
+  uint64_t rows{0};
+};
+
 struct BenchmarkContext {
   explicit BenchmarkContext(
       const std::string& name,
@@ -111,6 +116,10 @@ RowVectorPtr makeInputBatch(
     uint64_t startRow,
     vector_size_t size);
 
+ReusableInputBatches makeReusableInputBatches(
+    memory::MemoryPool* pool,
+    const BenchmarkOptions& options);
+
 void storeInputBatchOld(
     RowContainer& container,
     const RowVectorPtr& batch,
@@ -119,6 +128,18 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
+    std::vector<char*>* rows = nullptr);
+
+void storeReusableInputBatchesOld(
+    RowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    std::vector<char*>* rows = nullptr);
+
+void storeReusableInputBatchesBm(
+    BmRowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
     std::vector<char*>* rows = nullptr);
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
