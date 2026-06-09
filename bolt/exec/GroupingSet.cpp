@@ -92,6 +92,80 @@ void* hashAggrJitRawOutputValues(
   return nullptr;
 }
 
+const void* hashAggrJitRawInputValues(
+    const BaseVector* vector,
+    jit::HashAggrJitValueKind kind) {
+  switch (kind) {
+    case jit::HashAggrJitValueKind::Int8:
+      return vector->asUnchecked<FlatVector<int8_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int16:
+      return vector->asUnchecked<FlatVector<int16_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int32:
+      return vector->asUnchecked<FlatVector<int32_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int64:
+      return vector->asUnchecked<FlatVector<int64_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int128:
+      return vector->asUnchecked<FlatVector<int128_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Float:
+      return vector->asUnchecked<FlatVector<float>>()->rawValues();
+    case jit::HashAggrJitValueKind::Double:
+      return vector->asUnchecked<FlatVector<double>>()->rawValues();
+    case jit::HashAggrJitValueKind::Bool:
+      return nullptr;
+  }
+  return nullptr;
+}
+
+void fillHashAggrJitRowFieldInputs(
+    jit::HashAggrJitDecodedInput& input,
+    const DecodedVector& decoded,
+    const jit::HashAggrJitSlot& slot) {
+  if (!slot.mergeInput || slot.kind != jit::HashAggrJitKind::Avg) {
+    return;
+  }
+  const auto* base = decoded.base();
+  if (base == nullptr || base->encoding() != VectorEncoding::Simple::ROW) {
+    return;
+  }
+  const auto* rowVector = base->asUnchecked<RowVector>();
+  if (rowVector->childrenSize() < 2) {
+    return;
+  }
+  const auto& sumVector = rowVector->childAt(0);
+  const auto& countVector = rowVector->childAt(1);
+  if (sumVector->encoding() != VectorEncoding::Simple::FLAT ||
+      countVector->encoding() != VectorEncoding::Simple::FLAT) {
+    return;
+  }
+  input.rowField0Values =
+      hashAggrJitRawInputValues(sumVector.get(), slot.inputKind);
+  input.rowField0Nulls = sumVector->rawNulls();
+  input.rowField1Values =
+      hashAggrJitRawInputValues(countVector.get(), jit::HashAggrJitValueKind::Int64);
+  input.rowField1Nulls = countVector->rawNulls();
+}
+
+void fillHashAggrJitPartialAvgOutput(
+    jit::HashAggrJitOutput& output,
+    BaseVector* vector) {
+  auto* rowVector = vector->asUnchecked<RowVector>();
+  if (rowVector->childrenSize() < 2) {
+    return;
+  }
+  auto& sumVector = rowVector->childAt(0);
+  auto& countVector = rowVector->childAt(1);
+  if (sumVector->encoding() != VectorEncoding::Simple::FLAT ||
+      countVector->encoding() != VectorEncoding::Simple::FLAT) {
+    return;
+  }
+  output.rowField0Values =
+      sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues();
+  output.rowField0Nulls = sumVector->mutableRawNulls();
+  output.rowField1Values =
+      countVector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
+  output.rowField1Nulls = countVector->mutableRawNulls();
+}
+
 std::string hashAggrJitSlotDebugString(
     const jit::HashAggrJitSlot& slot,
     const AggregateInfo* aggregate = nullptr) {
@@ -1062,6 +1136,10 @@ void GroupingSet::runHashAggrJitChunks(
           hashAggrJitDecoded_[slotIndex].indices(),
           hashAggrJitDecoded_[slotIndex].nulls(&activeRows_),
           &hashAggrJitDecoded_[slotIndex]};
+      fillHashAggrJitRowFieldInputs(
+          hashAggrJitDecodedInputs_[slotIndex],
+          hashAggrJitDecoded_[slotIndex],
+          slot);
       inputsMayHaveNulls =
           inputsMayHaveNulls || hashAggrJitDecoded_[slotIndex].mayHaveNulls();
       hashAggrJitDecodedPtrs_[slotIndex] =
@@ -1166,6 +1244,11 @@ void GroupingSet::runHashAggrJitExtractChunks(
         hashAggrJitOutputs_[slotIndex].values =
             hashAggrJitRawOutputValues(aggregateVector.get(), slot.accumulatorKind);
         hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
+      } else if (aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
+                 slot.kind == jit::HashAggrJitKind::Avg) {
+        hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
+        fillHashAggrJitPartialAvgOutput(
+            hashAggrJitOutputs_[slotIndex], aggregateVector.get());
       }
       hashAggrJitResultPtrs_[slotIndex] =
           reinterpret_cast<char*>(&hashAggrJitOutputs_[slotIndex]);

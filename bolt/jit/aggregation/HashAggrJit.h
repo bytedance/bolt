@@ -53,10 +53,15 @@ struct HashAggrJitDecodedInput {
   // null. This is intentionally row-based rather than base-index-based to keep
   // generated IR independent of dictionary/null wrapping details.
   const uint64_t* nulls{nullptr};
-  // Original DecodedVector pointer. Raw single-value inputs use the descriptor
-  // fields above directly; intermediate ROW inputs still use row-field helper
-  // APIs and therefore need the DecodedVector object.
+  // Original DecodedVector pointer. Kept as fallback for row-field helpers.
   const void* decodedVector{nullptr};
+  // Raw ROW child fields for intermediate avg merge inputs. The top-level
+  // ROW may still be dictionary/constant wrapped; 'indices' maps rows to the
+  // flat child row. Only the first two fields are needed by avg: sum, count.
+  const void* rowField0Values{nullptr};
+  const uint64_t* rowField0Nulls{nullptr};
+  const void* rowField1Values{nullptr};
+  const uint64_t* rowField1Nulls{nullptr};
 };
 
 // Runtime output descriptor consumed by JIT extract functions. GroupingSet
@@ -67,6 +72,13 @@ struct HashAggrJitOutput {
   void* values{nullptr};
   uint64_t* nulls{nullptr};
   void* vector{nullptr};
+  // Raw ROW child fields for partial avg output: field 0 = sum(double),
+  // field 1 = count(int64). Other outputs leave these null and use 'values'
+  // or helper fallback via 'vector'.
+  void* rowField0Values{nullptr};
+  uint64_t* rowField0Nulls{nullptr};
+  void* rowField1Values{nullptr};
+  uint64_t* rowField1Nulls{nullptr};
 };
 
 struct HashAggrJitPlanContext {

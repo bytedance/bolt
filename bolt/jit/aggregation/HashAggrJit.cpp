@@ -378,6 +378,68 @@ llvm::Value* loadOutputVector(llvm::IRBuilder<>& builder, llvm::Value* output) {
   return builder.CreateLoad(i8PtrTy, vectorPtrPtr, "output_vector");
 }
 
+llvm::Value* loadPointerField(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* descriptor,
+    uint64_t offset,
+    llvm::Type* pointerType,
+    llvm::StringRef name) {
+  auto* fieldAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), descriptor, offset);
+  auto* fieldPtrPtr = builder.CreatePointerCast(fieldAddr, pointerType->getPointerTo());
+  return builder.CreateLoad(pointerType, fieldPtrPtr, name);
+}
+
+llvm::Value* loadDecodedIndex(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* decoded,
+    llvm::Value* row) {
+  auto* i32Ty = builder.getInt32Ty();
+  auto* indices = loadPointerField(
+      builder,
+      decoded,
+      sizeof(void*),
+      i32Ty->getPointerTo(),
+      "decoded_indices");
+  return builder.CreateLoad(i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
+}
+
+llvm::Value* loadDecodedRowFieldPointer(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* decoded,
+    int32_t field,
+    bool nulls) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  const auto firstRowFieldOffset = static_cast<uint64_t>(4 * sizeof(void*));
+  auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
+  auto offset = firstRowFieldOffset + static_cast<uint64_t>(field) * 2 * sizeof(void*) +
+      (nulls ? sizeof(void*) : 0);
+  return loadPointerField(
+      builder,
+      decoded,
+      offset,
+      pointerType,
+      nulls ? "decoded_row_field_nulls" : "decoded_row_field_values");
+}
+
+llvm::Value* loadOutputRowFieldPointer(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output,
+    int32_t field,
+    bool nulls) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  const auto firstRowFieldOffset = static_cast<uint64_t>(3 * sizeof(void*));
+  auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
+  auto offset = firstRowFieldOffset + static_cast<uint64_t>(field) * 2 * sizeof(void*) +
+      (nulls ? sizeof(void*) : 0);
+  return loadPointerField(
+      builder,
+      output,
+      offset,
+      pointerType,
+      nulls ? "output_row_field_nulls" : "output_row_field_values");
+}
+
 void emitOutputNullBit(
     llvm::IRBuilder<>& builder,
     llvm::Value* nulls,
@@ -638,6 +700,18 @@ llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
     llvm::Value* row,
     int32_t field,
     HashAggrJitValueKind kind) const {
+  if (field == 0 || field == 1) {
+    auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
+        builder(), decoded, field, false);
+    auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
+    auto* type = llvmType(kind);
+    auto* typedValues = builder().CreatePointerCast(rawValues, type->getPointerTo());
+    auto* valueAddr = builder().CreateInBoundsGEP(
+        type, typedValues, builder().CreateZExt(index, builder().getInt64Ty()));
+    auto* value = builder().CreateLoad(type, valueAddr);
+    value->setAlignment(llvm::Align(1));
+    return value;
+  }
   const auto name = decodedRowFieldFunction(kind);
   BOLT_CHECK(
       !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
@@ -650,6 +724,30 @@ llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
     llvm::Value* decoded,
     llvm::Value* row,
     int32_t field) const {
+  if (field == 0 || field == 1) {
+    auto* rawNulls = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
+        builder(), decoded, field, true);
+    auto* hasRawNulls = builder().CreateICmpNE(
+        rawNulls, llvm::ConstantPointerNull::get(builder().getInt64Ty()->getPointerTo()));
+    auto* nullCheckBlock = llvm::BasicBlock::Create(
+        module_.getContext(), "row_field_null_check", builder().GetInsertBlock()->getParent());
+    auto* rawDoneBlock = llvm::BasicBlock::Create(
+        module_.getContext(), "row_field_null_done", builder().GetInsertBlock()->getParent());
+    builder().CreateCondBr(hasRawNulls, nullCheckBlock, rawDoneBlock);
+    auto* noNullsEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(nullCheckBlock);
+    auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
+    auto* isNull = ::bytedance::bolt::jit::isDecodedNull(builder(), rawNulls, index);
+    builder().CreateBr(rawDoneBlock);
+    auto* nullCheckEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(rawDoneBlock);
+    auto* fastNull = builder().CreatePHI(builder().getInt1Ty(), 2, "row_field_raw_is_null");
+    fastNull->addIncoming(builder().getFalse(), noNullsEnd);
+    fastNull->addIncoming(isNull, nullCheckEnd);
+    return fastNull;
+  }
   auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
   return builder().CreateICmpNE(
       builder().CreateCall(
@@ -700,10 +798,46 @@ void HashAggrJitCodegen::emitPartialAvgResult(
     llvm::Value* sum,
     llvm::Value* count,
     llvm::Value* isNull) const {
+  auto* sumValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
+      builder(), output, 0, false);
+  auto* hasRawRowOutput = builder().CreateICmpNE(
+      sumValues,
+      llvm::ConstantPointerNull::get(
+          llvm::PointerType::get(builder().getContext(), 0)));
+  auto* fastBlock = llvm::BasicBlock::Create(
+      module_.getContext(), "partial_avg_raw", builder().GetInsertBlock()->getParent());
+  auto* helperBlock = llvm::BasicBlock::Create(
+      module_.getContext(), "partial_avg_helper", builder().GetInsertBlock()->getParent());
+  auto* doneBlock = llvm::BasicBlock::Create(
+      module_.getContext(), "partial_avg_done", builder().GetInsertBlock()->getParent());
+  builder().CreateCondBr(hasRawRowOutput, fastBlock, helperBlock);
+
+  builder().SetInsertPoint(fastBlock);
+  auto* sumTypedValues =
+      builder().CreatePointerCast(sumValues, builder().getDoubleTy()->getPointerTo());
+  auto* countValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
+      builder(), output, 1, false);
+  auto* countTypedValues =
+      builder().CreatePointerCast(countValues, builder().getInt64Ty()->getPointerTo());
+  auto* row64 = builder().CreateZExt(row, builder().getInt64Ty());
+  auto* sumAddr = builder().CreateInBoundsGEP(builder().getDoubleTy(), sumTypedValues, row64);
+  auto* sumStore = builder().CreateStore(sum, sumAddr);
+  sumStore->setAlignment(llvm::Align(1));
+  auto* countAddr = builder().CreateInBoundsGEP(builder().getInt64Ty(), countTypedValues, row64);
+  auto* countStore = builder().CreateStore(count, countAddr);
+  countStore->setAlignment(llvm::Align(1));
+  auto* nulls = ::bytedance::bolt::jit::loadOutputNulls(builder(), output);
+  ::bytedance::bolt::jit::emitOutputNullBit(builder(), nulls, row, isNull);
+  builder().CreateBr(doneBlock);
+
+  builder().SetInsertPoint(helperBlock);
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction("jit_HashAggrSetPartialAvgDouble"),
       {vector, row, sum, count, isNull});
+  builder().CreateBr(doneBlock);
+
+  builder().SetInsertPoint(doneBlock);
 }
 
 void HashAggrJitCodegen::emitDecimalSumExtract(

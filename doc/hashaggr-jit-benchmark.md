@@ -679,8 +679,245 @@ dispatch 从 JIT 路径约 **13%** 的显性热点降为噪声级别。
   extract 的 per-row setter helper / dynamic_cast。
 - 当前 width8 常见 FLAT primitive 数值聚合已全部为正收益；sum 宽度扫描在 width16 达到约 **1.52x**，更接近
   最初 multi_sum POC 的方向性预期。
-- 最大遗留问题是 ROW intermediate/output：`merge_avg_jit` 和 `partial_avg_extract_jit` 仍显著慢于 no-JIT，应
-  优先禁用或实现 ROW descriptor。
+- 截至 raw output descriptor 阶段，最大遗留问题是 ROW intermediate/output：`merge_avg_jit` 和
+  `partial_avg_extract_jit` 仍显著慢于 no-JIT；第 10 章继续更新了 ROW descriptor 优化后的最新结果。
 - 主路径剩余瓶颈回到真正的 JIT add_dense 生成码、hash/vector encoding、RowContainer 和 result copy 等公共成本；
   后续若继续优化，优先考虑 flat/no-null add_dense 快路径、减少 per-row accumulator null clear，以及拆分纯
   `GroupingSet` add microbenchmark 来单独观察 kernel 收益。
+
+## 10. ROW avg input/output descriptor 优化验证
+
+### 10.1 优化内容
+
+针对第 9.6.1 节的 P0 瓶颈，本轮为 avg 的 `ROW(sum, count)` intermediate input/output 增加了 raw descriptor：
+
+1. `HashAggrJitDecodedInput` 增加 `rowField0Values/nulls`、`rowField1Values/nulls`，用于 avg merge 直接读取
+   partial 输出的 `sum` / `count` child FlatVector；
+2. `HashAggrJitOutput` 增加同名 row field 指针，用于 partial avg extract 直接写 `sum` / `count` child FlatVector；
+3. `loadDecodedRowField` / `isDecodedRowFieldNull` 对 field 0/1 走 `GEP + load` / raw null bitmap，避免逐行
+   `DecodedVector` ROW field helper；
+4. `emitPartialAvgResult` 在存在 row field raw output 时直接写 child values 和 row null bitmap，保留 helper fallback
+   以覆盖非预期编码。
+
+这个优化利用了 partial avg 的数据流约束：`addIntermediateResults` 的输入来自 `extractAccumulator`，而
+`extractAccumulator` 输出的 ROW child 均为 FLAT，因此 avg merge 拆 ROW 时只需要支持 child FlatVector 快路径。
+
+关键代码位置：
+
+- ROW input/output descriptor 字段：`bolt/jit/aggregation/HashAggrJit.h:61`
+- ROW field raw load/null check：`bolt/jit/aggregation/HashAggrJit.cpp:698` / `bolt/jit/aggregation/HashAggrJit.cpp:723`
+- partial avg ROW raw output 写入：`bolt/jit/aggregation/HashAggrJit.cpp:795`
+- avg merge ROW child raw input 填充：`bolt/exec/GroupingSet.cpp:120`
+- partial avg ROW child raw output 填充：`bolt/exec/GroupingSet.cpp:148`
+- JIT extract output descriptor 准备：`bolt/exec/GroupingSet.cpp:1194`
+
+### 10.2 验证命令
+
+构建：
+
+```bash
+cmake --build --preset conan-release --target bolt_hashaggr_jit_benchmark --parallel 1
+```
+
+完整 benchmark：
+
+```bash
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark --bm_min_iters=5
+```
+
+P0 专项复测：
+
+```bash
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_regex='width(4|8|16|32)_merge_avg' --bm_min_iters=20
+
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_regex='width8_high_card_partial_avg_extract' --bm_min_iters=50 --bm_max_secs=10
+```
+
+### 10.3 merge_avg 修复结果
+
+ROW input descriptor 后，`merge_avg_jit` 从此前稳定 0.63–0.66x 的最大负收益路径，变为稳定正收益：
+
+| case | 修复前 speedup | 修复后 no-JIT | 修复后 JIT | 修复后 speedup |
+|------|---------------:|--------------:|-----------:|---------------:|
+| width4_merge_avg | 0.64x | 4.63ms | 4.02ms | **1.15x** |
+| width8_merge_avg | 0.63x | 7.86ms | 5.88ms | **1.34x** |
+| width16_merge_avg | 0.66x | 14.83ms | 10.56ms | **1.40x** |
+| width32_merge_avg | 0.63x | 31.13ms | 24.21ms | **1.29x** |
+
+完整 benchmark 的同类结果也保持正收益：width4/8/16/32 分别约 **1.23x / 1.30x / 1.41x / 1.37x**。
+
+### 10.4 partial_avg_extract 结果
+
+partial avg extract 的 ROW output helper 已被 raw child 写入替换，较第 9.5 节中 80.29ms 的 JIT 路径有明显改善；
+但在当前完整查询 benchmark 中，端到端仍有波动且长跑仍略慢于 no-JIT：
+
+| case | 第 9.5 节 JIT | 修复后 no-JIT | 修复后 JIT | 修复后 speedup |
+|------|--------------:|--------------:|-----------:|---------------:|
+| width8_high_card_partial_avg_extract | 80.29ms | 60.17ms | 68.19ms | 0.88x |
+
+对照同一轮 partial sum extract：
+
+| case | no-JIT | JIT | speedup |
+|------|-------:|----:|--------:|
+| width8_high_card_partial_sum_extract | 27.50ms | 22.50ms | **1.22x** |
+
+因此，本轮对 partial avg extract 的结论是：ROW output helper 瓶颈已被削弱，但该 case 的端到端性能还没有稳定转正。
+剩余成本大概率不再只是 ROW child 写出，而是 high-cardinality 场景下每行新 group 初始化、avg accumulator
+`sum+count` 更新、RowVector 输出物化以及完整 `copyResults` 公共成本共同导致。
+
+### 10.5 完整 benchmark 快照
+
+完整 benchmark 命令：
+
+```bash
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark --bm_min_iters=5
+```
+
+本轮完整结果的 speedup 汇总如下（speedup = no-JIT / JIT，**> 1 表示 JIT 更快**）：
+
+| 聚合 | width4 | width8 | width16 | width32 |
+|------|-------:|-------:|--------:|--------:|
+| sum（single） | **1.04x** | **1.34x** | **1.48x** | **1.47x** |
+| avg（single） | **1.22x** | **1.27x** | **1.45x** | **1.30x** |
+| min（single） | **1.01x** | **1.07x** | **1.27x** | **1.27x** |
+| count（single） | **1.28x** | **1.77x** | **2.20x** | **2.28x** |
+| sum（merge） | **1.08x** | **1.34x** | **1.49x** | **1.43x** |
+| avg（merge） | **1.23x** | **1.30x** | **1.41x** | **1.37x** |
+| min（merge） | **1.03x** | **1.11x** | **1.28x** | **1.33x** |
+| count（merge） | **1.17x** | **1.57x** | **1.86x** | **1.97x** |
+
+其他 width8 用例：
+
+| case | no-JIT | JIT | speedup |
+|------|-------:|----:|--------:|
+| width8_decimal_sum | 12.05ms | 9.60ms | **1.26x** |
+| width8_decimal_avg | 16.15ms | 14.60ms | **1.11x** |
+| width8_double_min | 4.95ms | 4.15ms | **1.19x** |
+| width8_double_max | 4.13ms | 3.86ms | **1.07x** |
+| width8_high_card_partial_avg_extract | 58.15ms | 63.36ms | 0.92x |
+| width8_high_card_partial_sum_extract | 24.48ms | 21.34ms | **1.15x** |
+
+结论：ROW avg input/output descriptor 之后，完整 benchmark 中除 `partial_avg_extract` 外，当前覆盖的主要
+single / merge primitive 聚合均已转为正收益；`count` 和宽 `sum/avg/merge_avg` 收益最稳定。
+
+### 10.6 更新后的瓶颈优先级
+
+1. **P0 已基本解决：merge_avg ROW input**。`merge_avg_jit` 已从 0.63–0.66x 拉升到 1.15–1.40x，是本轮最主要收益。
+2. **P1：partial_avg_extract 仍需继续拆解**。ROW output raw descriptor 已降低 JIT 绝对耗时，但端到端仍约 0.88x；
+   下一步需要用 perf 区分 add/update、新 group 初始化、ROW output materialization 和 `copyResults` 的占比。
+3. **P2：flat/no-null add_dense 快路径**。普通 sum/avg/min 主路径仍有 `indices[row]` 和 per-row null 处理成本。
+4. **P3：减少 per-row accumulator null clear**。对于 no-null input 或 accumulator 已初始化场景，把 null clear 从 per-row
+   下沉到更粗粒度。
+5. **P4：min/max compare 和 decimal 专项优化**。收益优先级低于 partial avg extract 和 add_dense 主路径。
+
+### 10.7 本轮结论
+
+- avg merge 的 ROW intermediate input 已吃到 raw descriptor 优化，最大负收益 case 已转正。
+- partial avg extract 的 ROW output helper 已优化，但 benchmark 仍显示端到端略慢，需要继续 perf 定位剩余成本。
+- HashAggr JIT 当前更适合 sum/count/avg merge 这类宽融合场景；partial avg extract 暂不应作为默认开启 JIT 的依据。
+
+## 11. P1：partial_avg_extract 火焰图定位
+
+### 11.1 perf 采集与火焰图生成方法
+
+对 `width8_high_card_partial_avg_extract` 的 JIT / no-JIT 两条路径分别采样，并生成火焰图。
+
+采样（`-F 999 --call-graph dwarf`）：
+
+```bash
+# JIT 路径
+/usr/lib/linux-tools-5.15.0-160/perf record -F 999 --call-graph dwarf \
+  -o /tmp/bolt-partial-avg-extract-jit.perf.data -- \
+  ./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_min_iters=200 --bm_max_secs=20 \
+  --bm_regex='^width8_high_card_partial_avg_extract_jit$'
+
+# no-JIT 路径
+/usr/lib/linux-tools-5.15.0-160/perf record -F 999 --call-graph dwarf \
+  -o /tmp/bolt-partial-avg-extract-nojit.perf.data -- \
+  ./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark \
+  --bm_min_iters=200 --bm_max_secs=20 \
+  --bm_regex='^width8_high_card_partial_avg_extract_nojit$'
+```
+
+折叠栈并用 FlameGraph 生成 SVG：
+
+```bash
+FG=/data00/home/liyang.127/FlameGraph
+
+/usr/lib/linux-tools-5.15.0-160/perf script -i /tmp/bolt-partial-avg-extract-jit.perf.data \
+  | $FG/stackcollapse-perf.pl > /tmp/partial-avg-extract-jit.folded
+$FG/flamegraph.pl --title "width8_high_card_partial_avg_extract JIT" \
+  /tmp/partial-avg-extract-jit.folded \
+  > doc/hashaggr-jit-partial-avg-extract-jit-flamegraph.svg
+
+/usr/lib/linux-tools-5.15.0-160/perf script -i /tmp/bolt-partial-avg-extract-nojit.perf.data \
+  | $FG/stackcollapse-perf.pl > /tmp/partial-avg-extract-nojit.folded
+$FG/flamegraph.pl --title "width8_high_card_partial_avg_extract no-JIT" \
+  /tmp/partial-avg-extract-nojit.folded \
+  > doc/hashaggr-jit-partial-avg-extract-nojit-flamegraph.svg
+```
+
+> 选用 `--call-graph dwarf` 而非 fp/lbr：Release 二进制开启 `-fomit-frame-pointer`，帧指针回溯会断栈；
+> 该机器硬件 PMU/LBR 也不可用（只能用 software `cpu-clock`），dwarf 基于 `.eh_frame`/CFI 回溯，
+> 在优化过且含 JIT 匿名段的二进制上能还原完整调用栈，适合做火焰图，代价是数据量大、采样频率需调低到 999。
+
+产物火焰图：
+
+- `doc/hashaggr-jit-partial-avg-extract-jit-flamegraph.svg`
+- `doc/hashaggr-jit-partial-avg-extract-nojit-flamegraph.svg`
+
+### 11.2 采样结构与噪声剥离
+
+本次火焰图有两个需要先剥离的结构性噪声，否则会误判热点：
+
+1. **JIT 后台编译线程**：JIT 编译发生在 `CPUThreadPool0` 上的 `llvm::orc::*` / `PassManager` /
+   `SelectionDAG` 调用链，在原始火焰图里占比很大，但它属于一次性 plan 编译开销（LRU 缓存命中后不再编译），
+   不计入热路径。剥离方式是过滤掉 `llvm::orc` / `*PassManager` / `SelectionDAG` / `MachineFunction` 等编译栈。
+2. **benchmark 主线程**：`bolt_hashaggr_j` 主线程几乎全是 plan 解析（`Parser::parse`、`parseTypeSignature`）
+   和动态链接 setup（`elf_dynamic_do_Rela`、`do_lookup_x`），是 query 构建噪声，真正的算子执行在
+   `CPUThreadPool0` 执行线程上。
+
+剥离后，对执行线程上的真实算子热点做 leaf 归类对比（self time，已排除编译栈）。
+
+### 11.3 执行线程热点对比
+
+| leaf 热点 | JIT | no-JIT | 说明 |
+|----------|----:|-------:|------|
+| `[perf-*.map]`（JIT 生成码） | 9.7% | 9.7%（no-JIT 是其它匿名段） | JIT add/extract 生成码 |
+| `clear_page_erms` | 8.9% | 9.7% | 内核清零新申请页 |
+| `arrayGroupProbe` | 4.8% | 1.6% | hash 探测 |
+| `AverageAggregateBase::addRawInput` | 3.2% | 5.6% | avg accumulator 更新 |
+| `SumAggregateBase::addRawInput` | 3.2% | 2.4% | 子聚合更新 |
+| `MinAggregate::addRawInput` | 2.4% | 4.0% | 子聚合更新 |
+| `__memset_avx512` / `get_page_from_freelist` / `_int_malloc` | 合计 ~6% | 合计 ~5% | 新 group 内存分配 |
+| `RowContainer::initializeRow` / `HashStringAllocator::clear` | ~3% | ~3% | 新 group 初始化 |
+| `RowContainer::extractColumn` | 1.6% | 1.6% | 结果列抽取 |
+| `VectorHasher::makeValueIdsFlatNoNulls` | 1.6% | 1.6% | key 编码 |
+
+关键观察：
+
+1. **两条路径的执行线程热点几乎重合**：top 热点都是 `clear_page_erms` + 内存分配 + `arrayGroupProbe` +
+   各 accumulator 的 `addRawInput`，extract 相关符号（`extractColumn` / ROW child 写出）self time 都不到 2%。
+2. **extract 已经不是这个 case 的瓶颈**：第 10 章 ROW output raw descriptor 已把 extract helper 削掉，
+   火焰图里 extract 已沉到噪声级别。partial avg extract 端到端略慢，**不是 extract kernel 导致的**。
+3. **真正的成本是 high-cardinality 的新 group 物化**：该 case groups=batches×batch_size（每行一个新组），
+   每个新 group 都要 `clear_page` + `malloc` + `RowContainer::initializeRow`，这部分是 JIT/no-JIT 共有的固定成本，
+   且占执行线程相当大比例。JIT 在这部分没有任何优化空间。
+4. **JIT 反而在 `arrayGroupProbe` 上采样更高（4.8% vs 1.6%）**：在「每行新组」的极端高基数下，JIT chunk 的
+   group probe 调用方式相对 no-JIT 没有优势，叠加 add kernel 节省有限，导致端到端被新组物化稀释后呈现约 0.9x。
+
+### 11.4 P1 结论
+
+- partial_avg_extract 的 ROW output 瓶颈（第 9/10 章定位的 helper / dynamic_cast）已被 raw descriptor 解决，
+  火焰图确认 extract self time 已 <2%。
+- 该 case 当前端到端约 0.9x 的剩余差距**不在 JIT 可优化范围内**：主导成本是 high-cardinality「每行新 group」
+  带来的 `clear_page` / 内存分配 / `RowContainer::initializeRow` / `arrayGroupProbe`，JIT 与 no-JIT 共享这部分开销，
+  JIT 能优化的 add/extract kernel 占比已被压得很低。
+- 因此 P1 的处理结论是：**partial_avg_extract 不再作为独立优化项继续深挖**。它代表的是「聚合计算占比极低、
+  新组物化占比极高」的负向场景，应通过**白名单/启发式**避免对这类 high-cardinality partial 聚合启用 JIT，
+  而不是继续优化 extract 本身。
+- 真正还能换来 add kernel 收益的是 P2（flat/no-null add_dense 快路径）和 P3（下沉 per-row accumulator null clear），
+  它们作用于计算占比高的 case，优先级高于继续打磨 partial_avg_extract。
