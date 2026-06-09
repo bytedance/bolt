@@ -8,6 +8,7 @@
 #include <fstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include <fmt/format.h>
 #include <glog/logging.h>
@@ -54,6 +55,15 @@ class BufferManagerTest : public testing::Test {
 static_assert(!std::is_copy_constructible_v<BufferHandle>);
 static_assert(!std::is_copy_assignable_v<BufferHandle>);
 static_assert(std::is_move_constructible_v<BufferHandle>);
+
+template <typename T, typename = void>
+struct HasPublicDestroy : std::false_type {};
+
+template <typename T>
+struct HasPublicDestroy<T, std::void_t<decltype(std::declval<T&>().Destroy())>>
+    : std::true_type {};
+
+static_assert(!HasPublicDestroy<BufferHandle>::value);
 
 bool IsIoUringUnavailable(const std::exception& e) {
   return std::string(e.what()).find("io_uring_queue_init failed") !=

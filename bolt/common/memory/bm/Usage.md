@@ -7,7 +7,7 @@ resident block 可以被 spill 到磁盘；后续再次 `Pin()` 时会自动读�
 ## 核心概念
 
 - `BlockHandle`：逻辑 block 句柄。可以长期保存，用于后续再次访问同一块数据。
-- `BufferHandle`：一次 pin。它 RAII 持有 block payload，析构或 `Destroy()` 时自动 unpin。
+- `BufferHandle`：一次 pin。它 RAII 持有 block payload，析构时自动 unpin。
 - `BlockMemory`：BM 内部状态，记录 payload、spill segment、pin count 和状态机。
 - `BufferManager`：拥有自己的 leaf `MemoryPool`，并在该 pool 上安装 reclaimer。
 
@@ -141,10 +141,10 @@ runBlocks.push_back(handle.block());
 `BufferHandle` 是 move-only 类型。不要拷贝，也不要在 `BufferHandle` 析构后继续
 使用 `Ptr()` 返回的指针。
 
-如果需要提前释放 pin，可以显式调用：
+如果需要提前释放 pin，可以让 `BufferHandle` 离开作用域，或者显式赋空：
 
 ```cpp
-handle.Destroy();
+handle = BufferHandle{};
 ```
 
 多数场景直接依赖 RAII 即可。

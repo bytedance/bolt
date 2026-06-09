@@ -26,9 +26,10 @@ class BufferHandle {
   char* Ptr() const;
   std::shared_ptr<BlockHandle> block() const;
   bool valid() const;
-  void Destroy() noexcept;
 
  private:
+  void reset() noexcept;
+
   std::weak_ptr<BufferManager> manager_;
   std::shared_ptr<BlockHandle> block_;
   char* data_{nullptr};
