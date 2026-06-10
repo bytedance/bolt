@@ -18,14 +18,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <unordered_set>
 
 DEFINE_uint64(
     bm_row_container_data_bytes,
-    50ULL << 30,
+    35ULL << 30,
     "Logical input bytes processed by BM row container benchmarks.");
 DEFINE_uint32(
     bm_row_container_batch_rows,
@@ -238,6 +240,31 @@ uint64_t rowCount(const BenchmarkOptions& options) {
   return std::max<uint64_t>(
       1, (options.dataBytes + logicalRowBytes(options) - 1) /
           logicalRowBytes(options));
+}
+
+void checkOldRowBasedSpillBenchmarkSupported(
+    const BenchmarkOptions& options) {
+  constexpr uint64_t kMaxOldRowBasedSpillRows =
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+  const auto rows = rowCount(options);
+  if (rows <= kMaxOldRowBasedSpillRows) {
+    return;
+  }
+
+  fmt::print(
+      stderr,
+      "[bm-row-container-error] old row-based Spiller benchmark is not "
+      "supported for this input size: dataset={} logical_bytes={} "
+      "logical_row_bytes={} estimated_rows={} max_supported_rows={}. "
+      "The old Spiller records rowsWritten for one row-based spill run as "
+      "int32_t, and this benchmark does not split old spill runs. Reduce "
+      "--bm_row_container_data_bytes or run a BM-only benchmark.\n",
+      datasetName(options.dataset),
+      options.dataBytes,
+      logicalRowBytes(options),
+      rows,
+      kMaxOldRowBasedSpillRows);
+  std::exit(1);
 }
 
 std::vector<TypePtr> columnTypes(DatasetKind dataset) {

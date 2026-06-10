@@ -77,6 +77,7 @@ void spillWriteOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
     auto opts = options(dataset, dataBytes(bytes));
+    checkOldRowBasedSpillBenchmarkSupported(opts);
     printedOpts = opts;
     BenchmarkContext context("spill-write-old", opts.dataBytes);
     const auto storeStart = benchmarkNowNs();
