@@ -17,11 +17,18 @@ enum class DatasetKind {
   kVariable,
 };
 
+enum class SpillCompressionKind {
+  kRaw,
+  kLz4,
+  kZstd,
+};
+
 struct BenchmarkOptions {
   DatasetKind dataset{DatasetKind::kFixed};
   uint64_t dataBytes{0};
   vector_size_t batchRows{0};
   uint32_t stringLength{0};
+  SpillCompressionKind compression{SpillCompressionKind::kZstd};
 };
 
 struct ReusableInputBatches {
@@ -33,13 +40,15 @@ struct BenchmarkContext {
   explicit BenchmarkContext(
       const std::string& name,
       uint64_t dataBytes,
-      uint32_t memoryMultiplier = 0);
+      uint32_t memoryMultiplier = 0,
+      SpillCompressionKind compression = SpillCompressionKind::kZstd);
   ~BenchmarkContext();
 
   std::shared_ptr<memory::MemoryPool> rootPool;
   std::shared_ptr<memory::MemoryPool> pool;
   std::shared_ptr<memory::bm::BufferManager> bufferManager;
   std::string spillDir;
+  SpillCompressionKind compression{SpillCompressionKind::kZstd};
 };
 
 struct OldStoredRows {
@@ -92,7 +101,10 @@ struct BmSpillReadMetrics {
   memory::bm::DiskIoSchedulerStats ioStatsDelta;
 };
 
-BenchmarkOptions options(DatasetKind dataset, uint64_t dataBytes);
+BenchmarkOptions options(
+    DatasetKind dataset,
+    uint64_t dataBytes,
+    SpillCompressionKind compression = SpillCompressionKind::kZstd);
 
 uint64_t rowCount(const BenchmarkOptions& options);
 
@@ -107,7 +119,12 @@ uint64_t counterDelta(uint64_t before, uint64_t after);
 
 const char* datasetName(DatasetKind dataset);
 
-bool shouldPrintSpillMetrics(const char* benchmark, DatasetKind dataset);
+const char* spillCompressionName(SpillCompressionKind compression);
+
+bool shouldPrintSpillMetrics(
+    const char* benchmark,
+    DatasetKind dataset,
+    SpillCompressionKind compression = SpillCompressionKind::kZstd);
 
 std::vector<TypePtr> columnTypes(DatasetKind dataset);
 

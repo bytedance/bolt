@@ -27,7 +27,7 @@
 
 DEFINE_uint64(
     bm_row_container_data_bytes,
-    35ULL << 30,
+    25ULL << 30,
     "Logical input bytes processed by BM row container benchmarks.");
 DEFINE_uint32(
     bm_row_container_batch_rows,
@@ -94,6 +94,38 @@ uint64_t logicalRowBytes(const BenchmarkOptions& options) {
   return bytes;
 }
 
+common::CompressionKind oldCompressionKind(SpillCompressionKind compression) {
+  switch (compression) {
+    case SpillCompressionKind::kRaw:
+      return common::CompressionKind_NONE;
+    case SpillCompressionKind::kLz4:
+      return common::CompressionKind_LZ4;
+    case SpillCompressionKind::kZstd:
+      return common::CompressionKind_ZSTD;
+  }
+  BOLT_UNREACHABLE();
+}
+
+common::RowBasedSpillMode oldRowBasedSpillMode(
+    SpillCompressionKind compression) {
+  return compression == SpillCompressionKind::kRaw
+      ? common::RowBasedSpillMode::RAW
+      : common::RowBasedSpillMode::COMPRESSION;
+}
+
+memory::bm::compress::CompressionKind bmCompressionKind(
+    SpillCompressionKind compression) {
+  switch (compression) {
+    case SpillCompressionKind::kRaw:
+      return memory::bm::compress::CompressionKind::kNone;
+    case SpillCompressionKind::kLz4:
+      return memory::bm::compress::CompressionKind::kLz4Block;
+    case SpillCompressionKind::kZstd:
+      return memory::bm::compress::CompressionKind::kZstdFrame;
+  }
+  BOLT_UNREACHABLE();
+}
+
 void decodeBatch(
     const RowVectorPtr& batch,
     std::vector<DecodedVector>& decoded) {
@@ -104,7 +136,9 @@ void decodeBatch(
   }
 }
 
-common::SpillConfig makeOldSpillConfig(const std::string& spillDir) {
+common::SpillConfig makeOldSpillConfig(
+    const std::string& spillDir,
+    SpillCompressionKind compression) {
   common::SpillConfig config;
   config.getSpillDirPathCb = [&spillDir]() -> const std::string& {
     return spillDir;
@@ -114,8 +148,8 @@ common::SpillConfig makeOldSpillConfig(const std::string& spillDir) {
   config.maxFileSize = 0;
   config.spillUringEnabled = false;
   config.writeBufferSize = FLAGS_bm_row_container_spill_write_buffer_bytes;
-  config.compressionKind = common::CompressionKind_ZSTD;
-  config.rowBasedSpillMode = common::RowBasedSpillMode::COMPRESSION;
+  config.compressionKind = oldCompressionKind(compression);
+  config.rowBasedSpillMode = oldRowBasedSpillMode(compression);
   config.maxSpillRunRows = 0;
   return config;
 }
@@ -172,13 +206,32 @@ const char* datasetName(DatasetKind dataset) {
   return dataset == DatasetKind::kFixed ? "fixed" : "variable";
 }
 
-bool shouldPrintSpillMetrics(const char* benchmark, DatasetKind dataset) {
+const char* spillCompressionName(SpillCompressionKind compression) {
+  switch (compression) {
+    case SpillCompressionKind::kRaw:
+      return "raw";
+    case SpillCompressionKind::kLz4:
+      return "lz4";
+    case SpillCompressionKind::kZstd:
+      return "zstd";
+  }
+  BOLT_UNREACHABLE();
+}
+
+bool shouldPrintSpillMetrics(
+    const char* benchmark,
+    DatasetKind dataset,
+    SpillCompressionKind compression) {
   if (!FLAGS_bm_row_container_spill_metrics) {
     return false;
   }
   static std::mutex mutex;
   static std::unordered_set<std::string> printed;
-  const auto key = fmt::format("{}:{}", benchmark, datasetName(dataset));
+  const auto key = fmt::format(
+      "{}:{}:{}",
+      benchmark,
+      datasetName(dataset),
+      spillCompressionName(compression));
   std::lock_guard<std::mutex> l(mutex);
   return printed.insert(key).second;
 }
@@ -186,7 +239,9 @@ bool shouldPrintSpillMetrics(const char* benchmark, DatasetKind dataset) {
 BenchmarkContext::BenchmarkContext(
     const std::string& name,
     uint64_t dataBytes,
-    uint32_t memoryMultiplier) {
+    uint32_t memoryMultiplier,
+    SpillCompressionKind compression)
+    : compression(compression) {
   const auto id = benchmarkId.fetch_add(1);
   const auto poolName = fmt::format("bm-row-container-benchmark-{}-{}", name, id);
   const auto multiplier =
@@ -210,9 +265,10 @@ BenchmarkContext::BenchmarkContext(
   config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
       256 * 1024 * 1024;
   config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 16;
-  config.spillStoreConfig.compressionConfig.kind =
-      memory::bm::compress::CompressionKind::kZstdFrame;
+  config.spillStoreConfig.compressionConfig.kind = bmCompressionKind(compression);
   config.spillStoreConfig.compressionConfig.minCompressBytes = 1;
+  config.spillStoreConfig.compressionConfig.lz4.strategy =
+      memory::bm::compress::Lz4Strategy::kPooledContext;
   config.spillStoreConfig.compressionConfig.zstd.strategy =
       memory::bm::compress::ZstdStrategy::kPooledContext;
   config.spillStoreConfig.compressionConfig.zstd.compressionLevel = 3;
@@ -227,13 +283,17 @@ BenchmarkContext::~BenchmarkContext() {
   std::filesystem::remove_all(spillDir, error);
 }
 
-BenchmarkOptions options(DatasetKind dataset, uint64_t dataBytes) {
+BenchmarkOptions options(
+    DatasetKind dataset,
+    uint64_t dataBytes,
+    SpillCompressionKind compression) {
   return BenchmarkOptions{
       .dataset = dataset,
       .dataBytes = dataBytes,
       .batchRows = static_cast<vector_size_t>(
           FLAGS_bm_row_container_batch_rows),
-      .stringLength = FLAGS_bm_row_container_string_length};
+      .stringLength = FLAGS_bm_row_container_string_length,
+      .compression = compression};
 }
 
 uint64_t rowCount(const BenchmarkOptions& options) {
@@ -549,7 +609,7 @@ OldSpillData spillOldRows(
     DatasetKind dataset,
     OldSpillWriteMetrics* metrics) {
   const auto spillStart = benchmarkNowNs();
-  auto config = makeOldSpillConfig(context.spillDir);
+  auto config = makeOldSpillConfig(context.spillDir, context.compression);
   Spiller spiller(
       Spiller::Type::kHashJoinBuild,
       &container,
@@ -566,7 +626,8 @@ OldSpillData spillOldRows(
     metrics->spillBytes += partition.size();
     metrics->files += partition.numFiles();
   }
-  auto rowFormat = std::make_unique<RowFormatInfo>(&container, true);
+  auto rowFormat = std::make_unique<RowFormatInfo>(
+      &container, context.compression != SpillCompressionKind::kRaw);
   return {std::move(rowFormat), std::move(partition)};
 }
 
