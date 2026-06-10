@@ -169,7 +169,7 @@ std::string ShuffleTestParam::toString() const {
       numMappers,
       numPartitions,
       memStr,
-      rowFormat == bytedance::bolt::row::RowFormat::Compact ? "Compact"
+      rowFormat == bytedance::bolt::row::RowFormat::COMPACT ? "Compact"
                                                             : "Dense");
 }
 

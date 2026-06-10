@@ -47,9 +47,9 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
               }
               if (shuffleMode == 3) {
                 // RowBased: round-trip both on-wire row formats.
-                param.rowFormat = bytedance::bolt::row::RowFormat::Dense;
+                param.rowFormat = bytedance::bolt::row::RowFormat::DENSE;
                 params.push_back(param);
-                param.rowFormat = bytedance::bolt::row::RowFormat::Compact;
+                param.rowFormat = bytedance::bolt::row::RowFormat::COMPACT;
                 params.push_back(param);
               } else {
                 params.push_back(param);

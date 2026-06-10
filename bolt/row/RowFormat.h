@@ -20,14 +20,9 @@
 
 namespace bytedance::bolt::row {
 
-// On-wire row format selectable by the row-based shuffle. Values are stable
-// (persisted via out-of-band config; the writer and reader must agree, like the
-// existing row-based-vs-columnar decision). DenseRow is the bolt-native
-// null-fused/varint format; Compact is the Velox-derived CompactRow, used
-// exactly as elsewhere in the codebase (no behavior change in Compact mode).
 enum class RowFormat : uint8_t {
-  Dense = 0,
-  Compact = 1,
+  DENSE = 0,
+  COMPACT = 1,
 };
 
 } // namespace bytedance::bolt::row

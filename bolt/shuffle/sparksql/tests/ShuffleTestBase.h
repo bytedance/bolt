@@ -69,8 +69,7 @@ struct ShuffleTestParam {
   bool verifyOutput = true;
   // On-wire row format for the RowBased writer (shuffleMode == 3); ignored by
   // the other modes. Threaded into both writer and reader options.
-  bytedance::bolt::row::RowFormat rowFormat =
-      bytedance::bolt::row::RowFormat::Dense;
+  row::RowFormat rowFormat = bytedance::bolt::row::RowFormat::DENSE;
 
   std::string toString() const;
 

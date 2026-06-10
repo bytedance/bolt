@@ -40,7 +40,7 @@ addIntColumnSizes(const DecodedVector& dec, vector_size_t N, size_t* rowSizes) {
   // Fast path (contiguous, no value-nulls): portable xsimd size kernel
   // scattered per row. int64 directly, int8/int16/int32 via int32.
   if (identity && !mayNulls) {
-    detail::addIntColumnSizesSimd<T>(raw, rowSizes, static_cast<size_t>(N));
+    detail::addNullableIntColumnSizes<T>(raw, rowSizes, static_cast<size_t>(N));
     return;
   }
   // Flat BIGINT with nulls (the common Spark case that otherwise lands on the
@@ -51,10 +51,11 @@ addIntColumnSizes(const DecodedVector& dec, vector_size_t N, size_t* rowSizes) {
   if constexpr (std::is_same_v<T, int64_t>) {
     if (identity && mayNulls) {
       if (const uint64_t* nulls = dec.base()->rawNulls()) {
-        detail::addNullableInt64ColumnSizesSimd(
+        detail::addNullableIntColumnSizes(
             raw, nulls, rowSizes, static_cast<size_t>(N));
       } else {
-        detail::addIntColumnSizesSimd<T>(raw, rowSizes, static_cast<size_t>(N));
+        detail::addNullableIntColumnSizes<T>(
+            raw, rowSizes, static_cast<size_t>(N));
       }
       return;
     }

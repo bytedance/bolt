@@ -20,7 +20,7 @@
 // cursors and decode one value from each. This is already the fast shape — it
 // skips the SlotView machinery the general decoder uses — and there is no SIMD
 // batch decode because varint parsing is inherently sequential. The varint
-// readers (readVarint / decodeNullableInt64) use the BMI2 short-fast-path. The
+// readers (readVarint / readNullableInt64) use the BMI2 short-fast-path. The
 // input is always marker-less with no top-level null rows, so there is no
 // per-row row-null filtering here.
 //
@@ -53,8 +53,7 @@ void readIntColumn(
     RowCursor& c = cursors[r];
     bool isNull{false};
     int64_t v{0};
-    [[maybe_unused]] const bool ok =
-        decodeNullableInt64(c.cur, c.end, isNull, v);
+    [[maybe_unused]] const bool ok = readNullableInt64(c.cur, c.end, isNull, v);
     BOLT_DCHECK(ok, "DenseRow: malformed integer value at row {}", r);
     if (isNull) {
       flat->setNull(r, true);
@@ -232,7 +231,7 @@ void readColumn(
         bool isNull{false};
         int64_t micros{0};
         [[maybe_unused]] const bool ok =
-            decodeNullableInt64(c.cur, c.end, isNull, micros);
+            readNullableInt64(c.cur, c.end, isNull, micros);
         BOLT_DCHECK(ok, "DenseRow: malformed timestamp at row {}", r);
         if (isNull) {
           flat->setNull(r, true);
@@ -251,7 +250,7 @@ void readColumn(
         bool isNull{false};
         int128_t v{0};
         [[maybe_unused]] const bool ok =
-            decodeNullableInt128(c.cur, c.end, isNull, v);
+            readNullableInt128(c.cur, c.end, isNull, v);
         BOLT_DCHECK(ok, "DenseRow: malformed hugeint at row {}", r);
         if (isNull) {
           flat->setNull(r, true);

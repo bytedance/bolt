@@ -44,7 +44,7 @@ class ShuffleRowToColumnarConverter {
       const bytedance::bolt::RowTypePtr& rowType,
       bytedance::bolt::memory::MemoryPool* memoryPool,
       bytedance::bolt::row::RowFormat rowFormat =
-          bytedance::bolt::row::RowFormat::Dense);
+          bytedance::bolt::row::RowFormat::COMPACT);
 
   bytedance::bolt::RowVectorPtr convert(std::vector<std::string_view>& rows);
 

@@ -62,7 +62,7 @@ void decodeIntegerBatch(
       bool isNull{false};
       int64_t v{0};
       BOLT_USER_CHECK(
-          decodeNullableInt64(c.cur, c.end, isNull, v),
+          readNullableInt64(c.cur, c.end, isNull, v),
           "DenseRow: malformed integer value at row {}",
           r);
       if (isNull) {
@@ -201,7 +201,7 @@ void decodeHugeintBatch(
       bool isNull{false};
       int128_t v{0};
       BOLT_USER_CHECK(
-          decodeNullableInt128(c.cur, c.end, isNull, v),
+          readNullableInt128(c.cur, c.end, isNull, v),
           "DenseRow: malformed hugeint at row {}",
           r);
       flat->setNull(static_cast<vector_size_t>(p), isNull);
@@ -298,7 +298,7 @@ void decodeTimestampBatch(
       bool isNull{false};
       int64_t micros{0};
       BOLT_USER_CHECK(
-          decodeNullableInt64(c.cur, c.end, isNull, micros),
+          readNullableInt64(c.cur, c.end, isNull, micros),
           "DenseRow: malformed timestamp at row {}",
           r);
       if (isNull) {

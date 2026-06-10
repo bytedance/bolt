@@ -111,8 +111,7 @@ struct ShuffleReaderOptions {
   int32_t forceShuffleWriterType = -1;
 
   // On-wire row format for the row-based shuffle. Must match the writer side.
-  bytedance::bolt::row::RowFormat rowFormat =
-      bytedance::bolt::row::RowFormat::Dense;
+  row::RowFormat rowFormat = row::RowFormat::COMPACT;
 
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
@@ -176,8 +175,7 @@ struct ShuffleWriterOptions {
   int32_t recommendedColumn2RowSize = 0;
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
-  bytedance::bolt::row::RowFormat rowFormat =
-      bytedance::bolt::row::RowFormat::Dense;
+  row::RowFormat rowFormat = row::RowFormat::COMPACT;
   PartitionWriterOptions partitionWriterOptions{};
 };
 

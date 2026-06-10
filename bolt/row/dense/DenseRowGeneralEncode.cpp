@@ -134,17 +134,6 @@ ColumnPlan buildPlan(const TypePtr& type, const VectorPtr& vector) {
 // Encode side
 // =============================================================================
 
-// Size sum for a contiguous non-null int range. Portable xsimd kernels: int64
-// directly, int8/int16/int32 via the int32 kernel (widen to int32).
-template <typename T>
-FOLLY_ALWAYS_INLINE size_t sumNullableIntSizes(const T* raw, size_t count) {
-  if constexpr (std::is_same_v<T, int64_t>) {
-    return detail::sumNullableInt64SizesSimd(raw, count);
-  } else {
-    return detail::sumNullableIntSizesSimd<T>(raw, count);
-  }
-}
-
 // Dedicated nullable-int encoder for any of int8/int16/int32/int64. Fast
 // path (identity-mapped + no nulls + no parentNulls): walks each slot
 // range as a contiguous int sequence and uses SIMD-batched varint sizing
@@ -172,7 +161,7 @@ void encodeIntegerBatchT(
       for (uint32_t i = lo; i < hi; ++i) {
         const auto& sr = in.slots[i];
         if constexpr (std::is_same_v<Sink, SizeSink>) {
-          s.bytes += sumNullableIntSizes<T>(raw + sr.base, sr.count);
+          s.bytes += detail::sumNullableIntSizes<T>(raw + sr.base, sr.count);
         } else {
           const uint32_t end = sr.base + sr.count;
           for (uint32_t p = sr.base; p < end; ++p) {

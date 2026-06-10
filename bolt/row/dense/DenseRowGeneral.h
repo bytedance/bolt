@@ -44,8 +44,8 @@ namespace bytedance::bolt::row::dense_row {
 
 // The BMI2 fast path is selected at compile time inside IntVarint.h (gated by
 // the x86_64 `#if`), so these are just the detail helpers under this namespace.
-using detail::decodeNullableInt128;
-using detail::decodeNullableInt64;
+using detail::readNullableInt128;
+using detail::readNullableInt64;
 using detail::readVarint;
 using detail::writeNullableInt128;
 using detail::writeNullableInt64;

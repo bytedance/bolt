@@ -43,11 +43,7 @@ ShuffleRowToColumnarConverter::ShuffleRowToColumnarConverter(
 
 RowVectorPtr ShuffleRowToColumnarConverter::convert(
     std::vector<std::string_view>& rows) {
-  // Shuffle's row framing is `[int32 rowSize | rowBytes]` and the
-  // partitioner guarantees no top-level row is null, so the wire here omits
-  // the per-row marker byte — paired with the write side's serialize(). The
-  // format must match what the writer used (rowFormat_).
-  if (rowFormat_ == row::RowFormat::Compact) {
+  if (rowFormat_ == row::RowFormat::COMPACT) {
     return row::CompactRow::deserialize(rows, rowType_, pool_);
   }
   return row::DenseRow::deserialize(rows, rowType_, pool_);
