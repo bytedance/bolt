@@ -131,16 +131,17 @@ void printOldReadMetrics(
     uint32_t iterations,
     const BenchmarkOptions& opts,
     const OldSpillReadMetrics& metrics) {
-  if (!shouldPrintSpillMetrics("spillReadOld", dataset)) {
+  if (!shouldPrintSpillMetrics("spillReadOld", dataset, opts.compression)) {
     return;
   }
   folly::BenchmarkSuspender suspender;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] spillReadOld dataset={} iterations={} "
-      "logical_bytes={} rows={} serialized_bytes={} batches={} "
-      "create_reader_ms={:.3f} next_batch_ms={:.3f} copy_rows_ms={:.3f} "
-      "list_rows_ms={:.3f}\n",
+      "[bm-row-container-metrics] spillReadOld compression={} dataset={} "
+      "iterations={} logical_bytes={} rows={} serialized_bytes={} batches={} "
+      "create_reader_ms={:.3f} next_batch_ms={:.3f} "
+      "copy_rows_ms={:.3f} list_rows_ms={:.3f}\n",
+      spillCompressionName(opts.compression),
       datasetName(dataset),
       iterations,
       opts.dataBytes,
@@ -158,7 +159,7 @@ void printBmReadMetrics(
     uint32_t iterations,
     const BenchmarkOptions& opts,
     const BmSpillReadMetrics& metrics) {
-  if (!shouldPrintSpillMetrics("spillReadBm", dataset)) {
+  if (!shouldPrintSpillMetrics("spillReadBm", dataset, opts.compression)) {
     return;
   }
   folly::BenchmarkSuspender suspender;
@@ -167,9 +168,10 @@ void printBmReadMetrics(
   const auto& bulk = metrics.bulkLoad;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] spillReadBm dataset={} iterations={} "
-      "logical_bytes={} rows={} row_ids={} windows={} result={} "
-      "begin_ms={:.3f} try_load_all_ms={:.3f} window_load_ms={:.3f} "
+      "[bm-row-container-metrics] spillReadBm compression={} dataset={} "
+      "iterations={} logical_bytes={} rows={} row_ids={} windows={} "
+      "result={} begin_ms={:.3f} try_load_all_ms={:.3f} "
+      "window_load_ms={:.3f} "
       "bulk_estimate_ms={:.3f} bulk_reserve_ms={:.3f} "
       "bulk_collect_blocks_ms={:.3f} bulk_batch_pin_ms={:.3f} "
       "bulk_update_ptrs_ms={:.3f} bulk_rebase_strings_ms={:.3f} "
@@ -190,6 +192,7 @@ void printBmReadMetrics(
       "io_end_to_end_latency_ms={:.3f} io_avg_end_to_end_latency_us={:.3f} "
       "io_backend_submit_ms={:.3f} io_backend_reap_ms={:.3f} "
       "io_worker_wait_ms={:.3f} io_future_fulfill_ms={:.3f}\n",
+      spillCompressionName(opts.compression),
       datasetName(dataset),
       iterations,
       opts.dataBytes,
@@ -249,15 +252,20 @@ void printBmReadMetrics(
       usToMs(ioStats.cumulativeFutureFulfillUs));
 }
 
-void spillReadOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+void spillReadOld(
+    uint32_t iterations,
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
   OldSpillReadMetrics metrics;
   BenchmarkOptions printedOpts;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes), compression);
     checkOldRowBasedSpillBenchmarkSupported(opts);
     printedOpts = opts;
-    BenchmarkContext context("spill-read-old", opts.dataBytes, 8);
+    BenchmarkContext context(
+        "spill-read-old", opts.dataBytes, 8, opts.compression);
     auto stored = storeOldRows(context, opts, false);
     auto spill = spillOldRows(context, *stored.container, dataset);
     stored.container.reset();
@@ -278,14 +286,19 @@ void spillReadOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   printOldReadMetrics(dataset, iterations, printedOpts, metrics);
 }
 
-void spillReadBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+void spillReadBm(
+    uint32_t iterations,
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
   BmSpillReadMetrics metrics;
   BenchmarkOptions printedOpts;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes), compression);
     printedOpts = opts;
-    BenchmarkContext context("spill-read-bm", opts.dataBytes);
+    BenchmarkContext context(
+        "spill-read-bm", opts.dataBytes, 0, opts.compression);
     auto spill = spillBmRows(context, opts);
     const auto statsBefore = context.bufferManager->stats();
     // DiskIoScheduler stats are process-wide, so only the read-stage delta is
@@ -322,17 +335,77 @@ void spillReadBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   printBmReadMetrics(dataset, iterations, printedOpts, metrics);
 }
 
-BENCHMARK_NAMED_PARAM(spillReadOld, old_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    spillReadBm,
-    bm_fixed,
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_raw_fixed,
     DatasetKind::kFixed,
+    SpillCompressionKind::kRaw,
     0);
-BENCHMARK_NAMED_PARAM(spillReadOld, old_variable, DatasetKind::kVariable, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     spillReadBm,
-    bm_variable,
+    bm_raw_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_lz4_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillReadBm,
+    bm_lz4_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillReadBm,
+    bm_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_raw_variable,
     DatasetKind::kVariable,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillReadBm,
+    bm_raw_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillReadBm,
+    bm_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillReadOld,
+    old_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillReadBm,
+    bm_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
     0);
 BENCHMARK_DRAW_LINE();
 

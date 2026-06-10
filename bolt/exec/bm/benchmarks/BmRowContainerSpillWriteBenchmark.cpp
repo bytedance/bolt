@@ -20,15 +20,17 @@ void printOldWriteMetrics(
     const BenchmarkOptions& opts,
     uint64_t storeNs,
     const OldSpillWriteMetrics& metrics) {
-  if (!shouldPrintSpillMetrics("spillWriteOld", dataset)) {
+  if (!shouldPrintSpillMetrics(
+          "spillWriteOld", dataset, opts.compression)) {
     return;
   }
   folly::BenchmarkSuspender suspender;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] spillWriteOld dataset={} iterations={} "
-      "logical_bytes={} rows={} store_setup_ms={:.3f} spill_ms={:.3f} "
-      "spill_bytes={} files={}\n",
+      "[bm-row-container-metrics] spillWriteOld compression={} dataset={} "
+      "iterations={} logical_bytes={} rows={} store_setup_ms={:.3f} "
+      "spill_ms={:.3f} spill_bytes={} files={}\n",
+      spillCompressionName(opts.compression),
       datasetName(dataset),
       iterations,
       opts.dataBytes,
@@ -46,17 +48,18 @@ void printBmWriteMetrics(
     uint64_t storeNs,
     uint64_t flushNs,
     const memory::bm::BufferManagerStats& stats) {
-  if (!shouldPrintSpillMetrics("spillWriteBm", dataset)) {
+  if (!shouldPrintSpillMetrics("spillWriteBm", dataset, opts.compression)) {
     return;
   }
   folly::BenchmarkSuspender suspender;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] spillWriteBm dataset={} iterations={} "
-      "logical_bytes={} rows={} store_setup_ms={:.3f} flush_ms={:.3f} "
-      "bm_spill_write_count={} bm_spill_write_bytes={} "
+      "[bm-row-container-metrics] spillWriteBm compression={} dataset={} "
+      "iterations={} logical_bytes={} rows={} store_setup_ms={:.3f} "
+      "flush_ms={:.3f} bm_spill_write_count={} bm_spill_write_bytes={} "
       "bm_spill_physical_write_bytes={} bm_compress_ms={:.3f} "
       "bm_compressed_blocks={}\n",
+      spillCompressionName(opts.compression),
       datasetName(dataset),
       iterations,
       opts.dataBytes,
@@ -70,16 +73,21 @@ void printBmWriteMetrics(
       stats.spillCompressedBlocks);
 }
 
-void spillWriteOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+void spillWriteOld(
+    uint32_t iterations,
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
   OldSpillWriteMetrics metrics;
   BenchmarkOptions printedOpts;
   uint64_t storeNs = 0;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes), compression);
     checkOldRowBasedSpillBenchmarkSupported(opts);
     printedOpts = opts;
-    BenchmarkContext context("spill-write-old", opts.dataBytes);
+    BenchmarkContext context(
+        "spill-write-old", opts.dataBytes, 0, opts.compression);
     const auto storeStart = benchmarkNowNs();
     auto stored = storeOldRows(context, opts, false);
     storeNs += benchmarkNowNs() - storeStart;
@@ -95,16 +103,21 @@ void spillWriteOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   printOldWriteMetrics(dataset, iterations, printedOpts, storeNs, metrics);
 }
 
-void spillWriteBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+void spillWriteBm(
+    uint32_t iterations,
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
   BenchmarkOptions printedOpts;
   uint64_t storeNs = 0;
   uint64_t flushNs = 0;
   memory::bm::BufferManagerStats stats;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes), compression);
     printedOpts = opts;
-    BenchmarkContext context("spill-write-bm", opts.dataBytes);
+    BenchmarkContext context(
+        "spill-write-bm", opts.dataBytes, 0, opts.compression);
     const auto storeStart = benchmarkNowNs();
     auto stored = storeBmRows(context, opts, false);
     storeNs += benchmarkNowNs() - storeStart;
@@ -135,17 +148,77 @@ void spillWriteBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
   printBmWriteMetrics(dataset, iterations, printedOpts, storeNs, flushNs, stats);
 }
 
-BENCHMARK_NAMED_PARAM(spillWriteOld, old_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(
-    spillWriteBm,
-    bm_fixed,
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_raw_fixed,
     DatasetKind::kFixed,
+    SpillCompressionKind::kRaw,
     0);
-BENCHMARK_NAMED_PARAM(spillWriteOld, old_variable, DatasetKind::kVariable, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     spillWriteBm,
-    bm_variable,
+    bm_raw_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_lz4_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillWriteBm,
+    bm_lz4_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillWriteBm,
+    bm_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_raw_variable,
     DatasetKind::kVariable,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillWriteBm,
+    bm_raw_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillWriteBm,
+    bm_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    spillWriteOld,
+    old_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    spillWriteBm,
+    bm_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
     0);
 BENCHMARK_DRAW_LINE();
 
