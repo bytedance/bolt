@@ -18,9 +18,12 @@
 #include "bolt/expression/SpecialFormRegistry.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
+#include "bolt/functions/flinksql/DateTimeDiff.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
+#include "bolt/functions/flinksql/HashCodeFunction.h"
 #include "bolt/functions/flinksql/Rand.h"
 #include "bolt/functions/flinksql/String.h"
+#include "bolt/functions/flinksql/ToTimestampFunction.h"
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 
 namespace bytedance::bolt::functions {
@@ -72,6 +75,34 @@ static void registerDatetimeFunctions(const std::string& prefix) {
       Varchar,
       Timestamp,
       int32_t>({prefix + "flink_timestamp_to_string_v2"});
+
+  // TIMESTAMPDIFF(unit, timestamp1, timestamp2)
+  registerFunction<
+      FlinkTimestampDiffFunction,
+      int32_t,
+      Varchar,
+      Timestamp,
+      Timestamp>({prefix + "timestampdiff"});
+  registerFunction<
+      FlinkTimestampDiffFunction,
+      int32_t,
+      Varchar,
+      Timestamp,
+      Date>({prefix + "timestampdiff"});
+  registerFunction<
+      FlinkTimestampDiffFunction,
+      int32_t,
+      Varchar,
+      Date,
+      Timestamp>({prefix + "timestampdiff"});
+  registerFunction<FlinkTimestampDiffFunction, int32_t, Varchar, Date, Date>(
+      {prefix + "timestampdiff"});
+
+  // TO_TIMESTAMP(string) and TO_TIMESTAMP(string, format)
+  registerFunction<FlinkToTimestampFunction, Timestamp, Varchar>(
+      {prefix + "to_timestamp"});
+  registerFunction<FlinkToTimestampFunction, Timestamp, Varchar, Varchar>(
+      {prefix + "to_timestamp"});
 }
 
 static void registerMathFunctions(const std::string& prefix) {
@@ -95,6 +126,36 @@ static void registerArrayFunctions(const std::string& prefix) {
   registerFlinkElementAtFunction(prefix + "element_at");
 }
 
+static void registerHashFunctions(const std::string& prefix) {
+  // HASH_CODE(expr) for supported types
+  registerFunction<FlinkHashCodeFunction, int32_t, int8_t>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, int16_t>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, int32_t>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, int64_t>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, bool>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, float>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, double>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, Varchar>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, Varbinary>(
+      {prefix + "hash_code"});
+  BOLT_REGISTER_VECTOR_FUNCTION(flink_hash_code_decimal, prefix + "hash_code");
+  // DATE is physically int32 days-since-epoch, but signature binding matches on
+  // the logical type name, so it needs its own registration; the int32_t call
+  // overload (Integer.hashCode == identity) serves it.
+  registerFunction<FlinkHashCodeFunction, int32_t, Date>(
+      {prefix + "hash_code"});
+  registerFunction<FlinkHashCodeFunction, int32_t, Timestamp>(
+      {prefix + "hash_code"});
+}
+
 namespace {
 
 void registerSpecialFormFunctions(const std::string& prefix) {
@@ -112,6 +173,7 @@ void registerFunctions(const std::string& prefix) {
   registerMathFunctions(prefix);
   registerJsonFunctions(prefix);
   registerArrayFunctions(prefix);
+  registerHashFunctions(prefix);
   registerSpecialFormFunctions(prefix);
 }
 } // namespace flinksql
