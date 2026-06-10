@@ -206,6 +206,49 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
 }
 
+TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  constexpr vector_size_t kRows = 3000;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("window-read-string-value-{}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.flushActiveSegment();
+  ReadSessionOptions options;
+  options.maxPinnedBytes = 1;
+  auto session = container.beginBulkReadSegments({&segment, 1}, options);
+
+  std::vector<char*> rows;
+  std::vector<RowId> rowIds;
+  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  ASSERT_EQ(kRows, rowIds.size());
+
+  auto window = session.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, window.rows.size());
+
+  std::vector<char*> inputRows;
+  inputRows.reserve(window.rows.size());
+  for (const auto& row : window.rows) {
+    inputRows.push_back(row.ptr);
+  }
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("window-read-string-value-0", flat->valueAt(0).str());
+  EXPECT_EQ("window-read-string-value-1024", flat->valueAt(1024).str());
+  EXPECT_EQ("window-read-string-value-2048", flat->valueAt(2048).str());
+  EXPECT_EQ("window-read-string-value-2999", flat->valueAt(2999).str());
+}
+
 TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},

@@ -135,13 +135,14 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinChunk(
     auto& block = *blockRefs[i];
     auto* const newPtr = pins[i].Ptr();
     if (isHeapBlock[i]) {
-      // Window reads pin only the chunk blocks, but heap StringViews in the
-      // chunk still need the same old-base to new-base pointer rebasing.
+      // Window reads can pin the same heap block for many chunks. A previous
+      // chunk may already have updated BlockRef::ptr to newPtr, while the
+      // current chunk's StringViews still point at their own recorded
+      // HeapBaseRef::baseAddress. Always pass the pinned heap base to
+      // rebaseChunk(); it decides per part whether rebasing is needed.
       const auto oldBase = reinterpret_cast<uintptr_t>(block.ptr);
       const auto newBase = reinterpret_cast<uintptr_t>(newPtr);
-      if (oldBase != 0 && oldBase != newBase) {
-        heapRebases[block.id] = {oldBase, newBase};
-      }
+      heapRebases[block.id] = {oldBase, newBase};
     }
     block.ptr = newPtr;
   }
@@ -186,6 +187,9 @@ void BmRowBlockLoader::rebaseChunk(
       const auto oldBase = heapBase.baseAddress;
       if (oldBase == 0) {
         heapBase.baseAddress = rebase->second.second;
+        continue;
+      }
+      if (oldBase == rebase->second.second) {
         continue;
       }
       ranges.push_back(

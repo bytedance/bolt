@@ -2,6 +2,7 @@ add_executable(
   bolt_exec_bm_row_container_benchmark
   BmRowContainerBenchmarkCommon.cpp
   BmRowContainerBenchmarkMain.cpp
+  BmRowContainerPipelineBenchmark.cpp
   BmRowContainerReadBenchmark.cpp
   BmRowContainerSpillReadBenchmark.cpp
   BmRowContainerSpillWriteBenchmark.cpp
