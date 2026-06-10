@@ -8,7 +8,7 @@
 namespace bytedance::bolt::exec::bm {
 
 using SegmentId = uint32_t;
-using SortedRunId = uint32_t;
+using ReorderedRunId = uint32_t;
 using BlockId = uint32_t;
 using RowOffset = uint32_t;
 using RowNumber = uint32_t;
@@ -35,7 +35,7 @@ enum class LoadAllResult {
   kNeedWindowRead,
 };
 
-enum class SortedRunLayout {
+enum class ReorderedRunLayout {
   kMaterializedOrder,
 };
 
@@ -74,8 +74,8 @@ struct ReadSessionOptions {
   BulkLoadMetrics* bulkLoadMetrics{nullptr};
 };
 
-struct SortedRunOptions {
-  SortedRunLayout preferredLayout{SortedRunLayout::kMaterializedOrder};
+struct ReorderedRunOptions {
+  ReorderedRunLayout preferredLayout{ReorderedRunLayout::kMaterializedOrder};
 };
 
 struct HeapBaseRef {
@@ -118,9 +118,9 @@ struct SegmentMeta {
   uint64_t numRows{0};
 };
 
-struct SortedRunMeta {
-  SortedRunId id{0};
-  SortedRunLayout layout{SortedRunLayout::kMaterializedOrder};
+struct ReorderedRunMeta {
+  ReorderedRunId id{0};
+  ReorderedRunLayout layout{ReorderedRunLayout::kMaterializedOrder};
   SegmentId materializedSegment{0};
   uint64_t numRows{0};
 };

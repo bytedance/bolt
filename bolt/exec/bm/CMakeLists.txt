@@ -1,6 +1,13 @@
 bolt_add_library(
   bolt_exec_bm
   BmRowContainer.cpp
+  BmRowBlockLoader.cpp
+  BmRowContainerCompare.cpp
+  BmRowContainerExtract.cpp
+  BmRowCopier.cpp
+  BmRowLayout.cpp
+  BmRowStorage.cpp
+  BmReorderedRun.cpp
   BmRowContainerRead.cpp
   BmRowContainerRow.cpp
   BmRowContainerSegment.cpp

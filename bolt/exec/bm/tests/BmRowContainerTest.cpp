@@ -237,7 +237,7 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
+TEST_F(BmRowContainerTest, ReorderedRunCursorReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -247,11 +247,11 @@ TEST_F(BmRowContainerTest, SortedRunCursorReadsMaterializedOrder) {
   auto rows = storeAll(container, input);
 
   std::vector<char*> sorted{rows[1], rows[3], rows[2], rows[0]};
-  SortedRunOptions options;
-  options.preferredLayout = SortedRunLayout::kMaterializedOrder;
-  auto run = container.finalizeSortedRun({sorted.data(), sorted.size()}, options);
+  ReorderedRunOptions options;
+  options.preferredLayout = ReorderedRunLayout::kMaterializedOrder;
+  auto run = container.finalizeReorderedRun({sorted.data(), sorted.size()}, options);
 
-  auto session = container.beginMergeReadSegments({&run, 1});
+  auto session = container.beginMergeReadRuns({&run, 1});
   auto cursor = session.cursor(run);
   ASSERT_TRUE(cursor.hasCurrent());
 
