@@ -120,7 +120,7 @@ void fillHashAggrJitRowFieldInputs(
     jit::HashAggrJitDecodedInput& input,
     const DecodedVector& decoded,
     const jit::HashAggrJitSlot& slot) {
-  if (!slot.mergeInput || slot.kind != jit::HashAggrJitKind::Avg) {
+  if (!slot.desc.mergeInput || slot.desc.kind != jit::HashAggrJitKind::Avg) {
     return;
   }
   const auto* base = decoded.base();
@@ -138,7 +138,7 @@ void fillHashAggrJitRowFieldInputs(
     return;
   }
   input.rowField0Values =
-      hashAggrJitRawInputValues(sumVector.get(), slot.inputKind);
+      hashAggrJitRawInputValues(sumVector.get(), slot.desc.inputKind);
   input.rowField0Nulls = sumVector->rawNulls();
   input.rowField1Values =
       hashAggrJitRawInputValues(countVector.get(), jit::HashAggrJitValueKind::Int64);
@@ -182,14 +182,14 @@ std::string hashAggrJitSlotDebugString(
     }
     out << "]";
   }
-  out << " kind=" << static_cast<int>(slot.kind)
-      << " inputKind=" << jit::hashAggrJitValueKindName(slot.inputKind)
-      << " accKind=" << jit::hashAggrJitValueKindName(slot.accumulatorKind)
+  out << " kind=" << static_cast<int>(slot.desc.kind)
+      << " inputKind=" << jit::hashAggrJitValueKindName(slot.desc.inputKind)
+      << " accKind=" << jit::hashAggrJitValueKindName(slot.desc.accumulatorKind)
       << " offset=" << slot.offset << " nullByte=" << slot.nullByte
       << " nullMask=" << static_cast<int>(slot.nullMask)
-      << " countStar=" << slot.countStar
-      << " mergeInput=" << slot.mergeInput << " decimal=" << slot.decimal
-      << " ops=" << (slot.ops != nullptr ? slot.ops->id : "null");
+      << " countStar=" << slot.desc.countStar
+      << " mergeInput=" << slot.desc.mergeInput << " decimal=" << slot.desc.decimal
+      << " ops=" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "null");
   return out.str();
 }
 
@@ -1109,7 +1109,7 @@ void GroupingSet::runHashAggrJitChunks(
         skipReason = "selectivity vector is not dense activeRows or has no selections";
         break;
       }
-      if (slot.countStar) {
+      if (slot.desc.countStar) {
         continue;
       }
       if (aggregate.inputs.size() != 1) {
@@ -1217,7 +1217,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
       }
       auto& aggregateVector = result->childAt(slot.aggregateIndex + aggregateOutputOffset);
       const auto expectedEncoding =
-          (isPartial_ && slot.kind == jit::HashAggrJitKind::Avg)
+          (isPartial_ && slot.desc.kind == jit::HashAggrJitKind::Avg)
           ? VectorEncoding::Simple::ROW
           : VectorEncoding::Simple::FLAT;
       if (aggregateVector->encoding() != expectedEncoding) {
@@ -1232,10 +1232,10 @@ void GroupingSet::runHashAggrJitExtractChunks(
       hashAggrJitOutputs_[slotIndex].vector = aggregateVector.get();
       if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
         hashAggrJitOutputs_[slotIndex].values =
-            hashAggrJitRawOutputValues(aggregateVector.get(), slot.accumulatorKind);
+            hashAggrJitRawOutputValues(aggregateVector.get(), slot.desc.accumulatorKind);
         hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
       } else if (aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
-                 slot.kind == jit::HashAggrJitKind::Avg) {
+                 slot.desc.kind == jit::HashAggrJitKind::Avg) {
         hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
         fillHashAggrJitPartialAvgOutput(
             hashAggrJitOutputs_[slotIndex], aggregateVector.get());

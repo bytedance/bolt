@@ -343,20 +343,10 @@ jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
     const jit::HashAggrJitDescriptor& descriptor) const {
   return jit::HashAggrJitSlot{
       .aggregateIndex = aggregateIndex,
-      .kind = descriptor.kind,
-      .inputKind = descriptor.inputKind,
-      .accumulatorKind = descriptor.accumulatorKind,
       .offset = accumulatorOffset(),
       .nullByte = accumulatorNullByte(),
       .nullMask = accumulatorNullMask(),
-      .countStar = descriptor.countStar,
-      .mergeInput = descriptor.mergeInput,
-      .decimal = descriptor.decimal,
-      .precision = descriptor.precision,
-      .scale = descriptor.scale,
-      .auxPrecision = descriptor.auxPrecision,
-      .auxScale = descriptor.auxScale,
-      .ops = descriptor.ops};
+      .desc = descriptor};
 }
 #endif
 

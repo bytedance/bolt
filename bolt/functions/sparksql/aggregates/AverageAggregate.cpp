@@ -124,17 +124,17 @@ class AverageAggregate
 
     if (!context.isRawInput) {
       return jit::HashAggrJitDescriptor{
-          jit::HashAggrJitKind::Avg,
-          jit::HashAggrJitValueKind::Double,
-          jit::HashAggrJitValueKind::Double,
-          false,
-          true,
-          false,
-          /*precision=*/0,
-          /*scale=*/0,
-          /*auxPrecision=*/0,
-          /*auxScale=*/0,
-          hashAggrJitOps()};
+          .kind = jit::HashAggrJitKind::Avg,
+          .inputKind = jit::HashAggrJitValueKind::Double,
+          .accumulatorKind = jit::HashAggrJitValueKind::Double,
+          .countStar = false,
+          .mergeInput = true,
+          .decimal = false,
+          .precision = 0,
+          .scale = 0,
+          .auxPrecision = 0,
+          .auxScale = 0,
+          .ops = hashAggrJitOps()};
     }
 
     auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
@@ -142,17 +142,17 @@ class AverageAggregate
       return std::nullopt;
     }
     return jit::HashAggrJitDescriptor{
-        jit::HashAggrJitKind::Avg,
-        *inputKind,
-        jit::HashAggrJitValueKind::Double,
-        false,
-        false,
-        false,
-        /*precision=*/0,
-        /*scale=*/0,
-        /*auxPrecision=*/0,
-        /*auxScale=*/0,
-        hashAggrJitOps()};
+        .kind = jit::HashAggrJitKind::Avg,
+        .inputKind = *inputKind,
+        .accumulatorKind = jit::HashAggrJitValueKind::Double,
+        .countStar = false,
+        .mergeInput = false,
+        .decimal = false,
+        .precision = 0,
+        .scale = 0,
+        .auxPrecision = 0,
+        .auxScale = 0,
+        .ops = hashAggrJitOps()};
   }
 
  private:
@@ -163,9 +163,9 @@ class AverageAggregate
     codegen.setAccumulatorNull(group, slot);
     codegen.storeValue(
         group,
-        codegen.llvmType(slot.accumulatorKind),
+        codegen.llvmType(slot.desc.accumulatorKind),
         slot.offset,
-        llvm::ConstantFP::get(codegen.llvmType(slot.accumulatorKind), 0.0));
+        llvm::ConstantFP::get(codegen.llvmType(slot.desc.accumulatorKind), 0.0));
     codegen.storeValue(
         group,
         codegen.builder().getInt64Ty(),
@@ -183,13 +183,13 @@ class AverageAggregate
       llvm::BasicBlock*) {
     auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
     auto* value =
-        codegen.castValue(rawValue, slot.inputKind, slot.accumulatorKind);
+        codegen.castValue(rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
     codegen.clearAccumulatorNull(group, slot);
     auto* oldSum =
-        codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+        codegen.loadValue(group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
     codegen.storeValue(
         group,
-        codegen.llvmType(slot.accumulatorKind),
+        codegen.llvmType(slot.desc.accumulatorKind),
         slot.offset,
         codegen.builder().CreateFAdd(oldSum, value));
     auto* oldCount = codegen.loadValue(
@@ -234,7 +234,7 @@ class AverageAggregate
       const jit::HashAggrJitSlot& slot,
       bool) {
     // Only double avg (sum=double@offset, count=int64@offset+8) is supported.
-    return slot.accumulatorKind == jit::HashAggrJitValueKind::Double;
+    return slot.desc.accumulatorKind == jit::HashAggrJitValueKind::Double;
   }
 
   static void compileHashAggrJitExtract(
@@ -361,18 +361,19 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
     const auto [resultPrecision, resultScale] =
         getDecimalPrecisionScale(*this->resultType().get());
     return jit::HashAggrJitDescriptor{
-        jit::HashAggrJitKind::Avg,
-        valueType->isShortDecimal() ? jit::HashAggrJitValueKind::Int64
-                                    : jit::HashAggrJitValueKind::Int128,
-        jit::HashAggrJitValueKind::Int128,
-        false,
-        !context.isRawInput,
-        true,
-        /*precision=*/sumPrecision,
-        /*scale=*/sumScale,
-        /*auxPrecision=*/resultPrecision,
-        /*auxScale=*/resultScale,
-        hashAggrJitOps()};
+        .kind = jit::HashAggrJitKind::Avg,
+        .inputKind = valueType->isShortDecimal()
+            ? jit::HashAggrJitValueKind::Int64
+            : jit::HashAggrJitValueKind::Int128,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int128,
+        .countStar = false,
+        .mergeInput = !context.isRawInput,
+        .decimal = true,
+        .precision = sumPrecision,
+        .scale = sumScale,
+        .auxPrecision = resultPrecision,
+        .auxScale = resultScale,
+        .ops = hashAggrJitOps()};
   }
 #endif
 
@@ -637,16 +638,16 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
       llvm::BasicBlock*) {
     auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
     codegen.clearAccumulatorNull(group, slot);
-    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+    const auto helper = slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
         ? "jit_HashAggrUpdateDecimalAvgI128"
         : "jit_HashAggrUpdateDecimalAvgI64";
     codegen.builder().CreateCall(
         codegen.module().getFunction(helper),
         {group,
          codegen.builder().getInt32(slot.offset),
-         slot.inputKind == jit::HashAggrJitValueKind::Int128
+         slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
              ? codegen.castValue(
-                   rawValue, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+                   rawValue, slot.desc.inputKind, jit::HashAggrJitValueKind::Int128)
              : rawValue});
   }
 
@@ -691,18 +692,18 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
     codegen.builder().CreateBr(continueBlock);
 
     codegen.builder().SetInsertPoint(mergeBlock);
-    auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.inputKind);
+    auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.desc.inputKind);
     codegen.clearAccumulatorNull(group, slot);
-    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+    const auto helper = slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
         ? "jit_HashAggrMergeDecimalAvgI128"
         : "jit_HashAggrMergeDecimalAvgI64";
     codegen.builder().CreateCall(
         codegen.module().getFunction(helper),
         {group,
          codegen.builder().getInt32(slot.offset),
-         slot.inputKind == jit::HashAggrJitValueKind::Int128
+         slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
              ? codegen.castValue(
-                   sum, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+                   sum, slot.desc.inputKind, jit::HashAggrJitValueKind::Int128)
              : sum,
          count});
     codegen.builder().CreateBr(continueBlock);

@@ -72,17 +72,17 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
       return std::nullopt;
     }
     return jit::HashAggrJitDescriptor{
-        jitKind(),
-        *inputKind,
-        *inputKind,
-        false,
-        !context.isRawInput,
-        false,
-        /*precision=*/0,
-        /*scale=*/0,
-        /*auxPrecision=*/0,
-        /*auxScale=*/0,
-        hashAggrJitOps()};
+        .kind = jitKind(),
+        .inputKind = *inputKind,
+        .accumulatorKind = *inputKind,
+        .countStar = false,
+        .mergeInput = !context.isRawInput,
+        .decimal = false,
+        .precision = 0,
+        .scale = 0,
+        .auxPrecision = 0,
+        .auxScale = 0,
+        .ops = hashAggrJitOps()};
   }
 
  private:
@@ -91,8 +91,8 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
       llvm::Value* group,
       const jit::HashAggrJitSlot& slot) {
     codegen.setAccumulatorNull(group, slot);
-    auto* type = codegen.llvmType(slot.accumulatorKind);
-    if (codegen.isFloatKind(slot.accumulatorKind)) {
+    auto* type = codegen.llvmType(slot.desc.accumulatorKind);
+    if (codegen.isFloatKind(slot.desc.accumulatorKind)) {
       codegen.storeValue(group, type, slot.offset, llvm::ConstantFP::get(type, 0.0));
     } else {
       codegen.storeValue(group, type, slot.offset, llvm::ConstantInt::get(type, 0));
@@ -111,16 +111,16 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
       llvm::BasicBlock*) {
     auto* value = codegen.castValue(
         codegen.loadDecodedValue(decoded, row, slot),
-        slot.inputKind,
-        slot.accumulatorKind);
-    auto* type = codegen.llvmType(slot.accumulatorKind);
+        slot.desc.inputKind,
+        slot.desc.accumulatorKind);
+    auto* type = codegen.llvmType(slot.desc.accumulatorKind);
     auto* oldValue = codegen.loadValue(group, type, slot.offset);
     auto* nullState = codegen.isAccumulatorNull(group, slot);
     llvm::Value* better = nullptr;
-    if (codegen.isFloatKind(slot.accumulatorKind)) {
+    if (codegen.isFloatKind(slot.desc.accumulatorKind)) {
       auto* oldIsNan = codegen.builder().CreateFCmpUNO(oldValue, oldValue);
       auto* valueIsNan = codegen.builder().CreateFCmpUNO(value, value);
-      if (slot.kind == jit::HashAggrJitKind::Min) {
+      if (slot.desc.kind == jit::HashAggrJitKind::Min) {
         better = codegen.builder().CreateOr(
             codegen.builder().CreateAnd(oldIsNan, codegen.builder().CreateNot(valueIsNan)),
             codegen.builder().CreateAnd(
@@ -133,7 +133,7 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
                 valueIsNan, codegen.builder().CreateFCmpOLT(oldValue, value)));
       }
     } else {
-      better = slot.kind == jit::HashAggrJitKind::Min
+      better = slot.desc.kind == jit::HashAggrJitKind::Min
           ? codegen.builder().CreateICmpSLT(value, oldValue)
           : codegen.builder().CreateICmpSGT(value, oldValue);
     }
@@ -175,8 +175,8 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
       bool) {
     // Flat setters exist for i8/i16/i32/i64/f32/f64 only. Int128 (long decimal)
     // and Bool have no flat setter yet, fall back to non-JIT extract.
-    return slot.accumulatorKind != jit::HashAggrJitValueKind::Int128 &&
-        slot.accumulatorKind != jit::HashAggrJitValueKind::Bool;
+    return slot.desc.accumulatorKind != jit::HashAggrJitValueKind::Int128 &&
+        slot.desc.accumulatorKind != jit::HashAggrJitValueKind::Bool;
   }
 
   static void compileHashAggrJitExtract(
@@ -184,11 +184,11 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
       llvm::Value* group,
       const jit::HashAggrJitSlot& slot,
       const jit::HashAggrJitExtractTarget& target) {
-    auto* value = codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+    auto* value = codegen.loadValue(group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
     auto* isNull = codegen.builder().CreateZExt(
         codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
     codegen.emitFlatValue(
-        target.resultVector, target.row, slot.accumulatorKind, value, isNull);
+        target.resultVector, target.row, slot.desc.accumulatorKind, value, isNull);
   }
 
   static const jit::HashAggrJitOps* hashAggrJitOps() {

@@ -81,17 +81,17 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
       inputKind = *maybeInputKind;
     }
     return jit::HashAggrJitDescriptor{
-        jit::HashAggrJitKind::Count,
-        inputKind,
-        jit::HashAggrJitValueKind::Int64,
-        context.isCountStar(),
-        !context.isRawInput,
-        false,
-        /*precision=*/0,
-        /*scale=*/0,
-        /*auxPrecision=*/0,
-        /*auxScale=*/0,
-        hashAggrJitOps()};
+        .kind = jit::HashAggrJitKind::Count,
+        .inputKind = inputKind,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int64,
+        .countStar = context.isCountStar(),
+        .mergeInput = !context.isRawInput,
+        .decimal = false,
+        .precision = 0,
+        .scale = 0,
+        .auxPrecision = 0,
+        .auxScale = 0,
+        .ops = hashAggrJitOps()};
   }
 
  private:
@@ -139,11 +139,11 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
       const jit::HashAggrJitSlot& slot,
       bool,
       llvm::BasicBlock*) {
-    llvm::Value* inc = slot.countStar
+    llvm::Value* inc = slot.desc.countStar
         ? codegen.builder().getInt64(1)
         : codegen.castValue(
               codegen.loadDecodedValue(decoded, row, slot),
-              slot.inputKind,
+              slot.desc.inputKind,
               jit::HashAggrJitValueKind::Int64);
     addInc(codegen, group, slot, inc);
   }

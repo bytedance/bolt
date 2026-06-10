@@ -594,7 +594,7 @@ llvm::Value* loadDecodedValue(
   auto* index = builder.CreateLoad(
       i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
 
-  if (slot.inputKind == HashAggrJitValueKind::Bool) {
+  if (slot.desc.inputKind == HashAggrJitValueKind::Bool) {
     auto* wordTy = builder.getInt64Ty();
     auto* wordIndex = builder.CreateLShr(index, builder.getInt32(6));
     auto* bitIndex = builder.CreateAnd(index, builder.getInt32(63));
@@ -610,7 +610,7 @@ llvm::Value* loadDecodedValue(
         builder.getInt8Ty());
   }
 
-  auto* type = llvmType(builder, slot.inputKind);
+  auto* type = llvmType(builder, slot.desc.inputKind);
   auto* typedValues = builder.CreatePointerCast(values, type->getPointerTo());
   auto* valueAddr = builder.CreateInBoundsGEP(
       type, typedValues, builder.CreateZExt(index, builder.getInt64Ty()));
@@ -878,7 +878,7 @@ void HashAggrJitCodegen::emitDecimalSumExtract(
   const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalSum"
                                  : "jit_HashAggrExtractFinalDecimalSum";
   auto* longDecimal = builder().getInt8(
-      slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+      slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
@@ -886,8 +886,8 @@ void HashAggrJitCodegen::emitDecimalSumExtract(
        row,
        group,
        builder().getInt32(slot.offset),
-       builder().getInt32(slot.precision),
-       builder().getInt32(slot.scale),
+       builder().getInt32(slot.desc.precision),
+       builder().getInt32(slot.desc.scale),
        longDecimal});
 }
 
@@ -900,7 +900,7 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
   const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
                                  : "jit_HashAggrExtractFinalDecimalAvg";
   auto* longDecimal = builder().getInt8(
-      slot.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+      slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
@@ -908,8 +908,8 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
        row,
        group,
        builder().getInt32(slot.offset),
-       builder().getInt32(slot.precision),
-       builder().getInt32(slot.scale),
+       builder().getInt32(slot.desc.precision),
+       builder().getInt32(slot.desc.scale),
        longDecimal});
 }
 
@@ -956,10 +956,10 @@ bool genInitIR(
   auto* group = builder.CreateLoad(i8PtrTy, groupAddr);
 
   for (const auto& slot : slots) {
-    if (slot.ops == nullptr || slot.ops->initGroup == nullptr) {
+    if (slot.desc.ops == nullptr || slot.desc.ops->initGroup == nullptr) {
       return true;
     }
-    slot.ops->initGroup(codegen, group, slot);
+    slot.desc.ops->initGroup(codegen, group, slot);
   }
 
   auto* next = builder.CreateAdd(index, builder.getInt32(1));
@@ -1013,7 +1013,7 @@ bool genAddDenseIR(
     auto* nextBlock = llvm::BasicBlock::Create(context, "slot_next", func, end);
     auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
     auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
-    if (checkInputNulls && !slot.countStar) {
+    if (checkInputNulls && !slot.desc.countStar) {
       auto* nulls = codegen.loadDecodedNulls(decoded);
       auto* nullCheckBlock =
           llvm::BasicBlock::Create(context, "slot_null_check", func, end);
@@ -1029,11 +1029,11 @@ bool genAddDenseIR(
     }
 
     builder.SetInsertPoint(updateBlock);
-    if (slot.ops == nullptr) {
+    if (slot.desc.ops == nullptr) {
       return true;
     }
     auto* addFn =
-        slot.mergeInput ? slot.ops->addIntermediateResults : slot.ops->addRawInput;
+        slot.desc.mergeInput ? slot.desc.ops->addIntermediateResults : slot.desc.ops->addRawInput;
     if (addFn == nullptr) {
       return true;
     }
@@ -1103,8 +1103,8 @@ bool genExtractIR(
   auto* end = llvm::BasicBlock::Create(context, "end", func);
   builder.SetInsertPoint(entry);
   for (auto i = 0; i < slots.size(); ++i) {
-    if (slots[i].ops == nullptr || slots[i].ops->canExtract == nullptr ||
-        !slots[i].ops->canExtract(slots[i], partialOutput)) {
+    if (slots[i].desc.ops == nullptr || slots[i].desc.ops->canExtract == nullptr ||
+        !slots[i].desc.ops->canExtract(slots[i], partialOutput)) {
       continue;
     }
     auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
@@ -1121,16 +1121,16 @@ bool genExtractIR(
 
   for (auto i = 0; i < slots.size(); ++i) {
     const auto& slot = slots[i];
-    if (slot.ops == nullptr || slot.ops->canExtract == nullptr ||
-        !slot.ops->canExtract(slot, partialOutput)) {
+    if (slot.desc.ops == nullptr || slot.desc.ops->canExtract == nullptr ||
+        !slot.desc.ops->canExtract(slot, partialOutput)) {
       continue;
     }
     auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
     auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
-    if (slot.ops->extract == nullptr) {
+    if (slot.desc.ops->extract == nullptr) {
       return true;
     }
-    slot.ops->extract(
+    slot.desc.ops->extract(
         codegen, group, slot, HashAggrJitExtractTarget{vector, row, partialOutput});
   }
 
@@ -1227,12 +1227,12 @@ std::string HashAggrJitChunk::functionName() const {
   out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
       << slots_.size();
   for (const auto& slot : slots_) {
-    out << "_" << (slot.ops != nullptr ? slot.ops->id : "unknown") << "_"
-        << static_cast<int>(slot.kind) << hashAggrJitValueKindName(slot.inputKind)
-        << hashAggrJitValueKindName(slot.accumulatorKind) << "o" << slot.offset
+    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown") << "_"
+        << static_cast<int>(slot.desc.kind) << hashAggrJitValueKindName(slot.desc.inputKind)
+        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o" << slot.offset
         << "n" << slot.nullByte << "m" << static_cast<int>(slot.nullMask)
-        << (slot.countStar ? "s" : "x") << (slot.mergeInput ? "g" : "r")
-        << (slot.decimal ? "d" : "n");
+        << (slot.desc.countStar ? "s" : "x") << (slot.desc.mergeInput ? "g" : "r")
+        << (slot.desc.decimal ? "d" : "n");
   }
   return out.str();
 }
@@ -1242,8 +1242,8 @@ bool HashAggrJitChunk::canExtract() const {
     return false;
   }
   for (const auto& slot : slots_) {
-    if (slot.ops == nullptr || slot.ops->canExtract == nullptr ||
-        !slot.ops->canExtract(slot, partialOutput_)) {
+    if (slot.desc.ops == nullptr || slot.desc.ops->canExtract == nullptr ||
+        !slot.desc.ops->canExtract(slot, partialOutput_)) {
       return false;
     }
   }

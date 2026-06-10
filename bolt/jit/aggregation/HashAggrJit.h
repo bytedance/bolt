@@ -159,20 +159,12 @@ struct HashAggrJitOps {
 
 struct HashAggrJitSlot {
   int32_t aggregateIndex;
-  HashAggrJitKind kind;
-  HashAggrJitValueKind inputKind;
-  HashAggrJitValueKind accumulatorKind;
   int32_t offset;
   int32_t nullByte;
   uint8_t nullMask;
-  bool countStar{false};
-  bool mergeInput{false};
-  bool decimal{false};
-  int32_t precision{0};
-  int32_t scale{0};
-  int32_t auxPrecision{0};
-  int32_t auxScale{0};
-  const HashAggrJitOps* ops{nullptr};
+  // All aggregate-level traits live in the descriptor; IR-side code reads them
+  // through 'desc'. Only the row-layout fields above are slot-specific.
+  HashAggrJitDescriptor desc;
 };
 
 struct HashAggrJitExtractTarget {

@@ -87,18 +87,19 @@ class DecimalSumAggregate : public exec::Aggregate {
     const auto [resultPrecision, resultScale] =
         getDecimalPrecisionScale(*sumType_.get());
     return jit::HashAggrJitDescriptor{
-        jit::HashAggrJitKind::Sum,
-        valueType->isShortDecimal() ? jit::HashAggrJitValueKind::Int64
-                                    : jit::HashAggrJitValueKind::Int128,
-        jit::HashAggrJitValueKind::Int128,
-        false,
-        !context.isRawInput,
-        true,
-        /*precision=*/resultPrecision,
-        /*scale=*/resultScale,
-        /*auxPrecision=*/0,
-        /*auxScale=*/0,
-        hashAggrJitOps()};
+        .kind = jit::HashAggrJitKind::Sum,
+        .inputKind = valueType->isShortDecimal()
+            ? jit::HashAggrJitValueKind::Int64
+            : jit::HashAggrJitValueKind::Int128,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int128,
+        .countStar = false,
+        .mergeInput = !context.isRawInput,
+        .decimal = true,
+        .precision = resultPrecision,
+        .scale = resultScale,
+        .auxPrecision = 0,
+        .auxScale = 0,
+        .ops = hashAggrJitOps()};
   }
 
  private:
@@ -122,16 +123,16 @@ class DecimalSumAggregate : public exec::Aggregate {
       llvm::BasicBlock*) {
     auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
     codegen.clearAccumulatorNull(group, slot);
-    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+    const auto helper = slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
         ? "jit_HashAggrUpdateDecimalSumI128"
         : "jit_HashAggrUpdateDecimalSumI64";
     codegen.builder().CreateCall(
         codegen.module().getFunction(helper),
         {group,
          codegen.builder().getInt32(slot.offset),
-         slot.inputKind == jit::HashAggrJitValueKind::Int128
+         slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
              ? codegen.castValue(
-                   rawValue, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+                   rawValue, slot.desc.inputKind, jit::HashAggrJitValueKind::Int128)
              : rawValue});
   }
 
@@ -172,18 +173,18 @@ class DecimalSumAggregate : public exec::Aggregate {
     codegen.builder().CreateBr(continueBlock);
 
     codegen.builder().SetInsertPoint(mergeBlock);
-    auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.inputKind);
+    auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.desc.inputKind);
     codegen.clearAccumulatorNull(group, slot);
-    const auto helper = slot.inputKind == jit::HashAggrJitValueKind::Int128
+    const auto helper = slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
         ? "jit_HashAggrMergeDecimalSumI128"
         : "jit_HashAggrMergeDecimalSumI64";
     codegen.builder().CreateCall(
         codegen.module().getFunction(helper),
         {group,
          codegen.builder().getInt32(slot.offset),
-         slot.inputKind == jit::HashAggrJitValueKind::Int128
+         slot.desc.inputKind == jit::HashAggrJitValueKind::Int128
              ? codegen.castValue(
-                   sum, slot.inputKind, jit::HashAggrJitValueKind::Int128)
+                   sum, slot.desc.inputKind, jit::HashAggrJitValueKind::Int128)
              : sum,
          isEmpty});
     codegen.builder().CreateBr(continueBlock);

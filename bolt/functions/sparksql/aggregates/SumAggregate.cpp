@@ -167,17 +167,17 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
         : jit::HashAggrJitValueKind::Int64;
 
     return jit::HashAggrJitDescriptor{
-        jit::HashAggrJitKind::Sum,
-        *inputKind,
-        accumulatorKind,
-        false,
-        !context.isRawInput,
-        false,
-        /*precision=*/0,
-        /*scale=*/0,
-        /*auxPrecision=*/0,
-        /*auxScale=*/0,
-        hashAggrJitOps()};
+        .kind = jit::HashAggrJitKind::Sum,
+        .inputKind = *inputKind,
+        .accumulatorKind = accumulatorKind,
+        .countStar = false,
+        .mergeInput = !context.isRawInput,
+        .decimal = false,
+        .precision = 0,
+        .scale = 0,
+        .auxPrecision = 0,
+        .auxScale = 0,
+        .ops = hashAggrJitOps()};
   }
 
  private:
@@ -186,8 +186,8 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       llvm::Value* group,
       const jit::HashAggrJitSlot& slot) {
     codegen.setAccumulatorNull(group, slot);
-    auto* accType = codegen.llvmType(slot.accumulatorKind);
-    if (codegen.isFloatKind(slot.accumulatorKind)) {
+    auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
+    if (codegen.isFloatKind(slot.desc.accumulatorKind)) {
       codegen.storeValue(
           group, accType, slot.offset, llvm::ConstantFP::get(accType, 0.0));
     } else {
@@ -208,11 +208,11 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       llvm::BasicBlock*) {
     auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
     auto* value =
-        codegen.castValue(rawValue, slot.inputKind, slot.accumulatorKind);
-    auto* accType = codegen.llvmType(slot.accumulatorKind);
+        codegen.castValue(rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
+    auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
     codegen.clearAccumulatorNull(group, slot);
     auto* oldValue = codegen.loadValue(group, accType, slot.offset);
-    auto* newValue = codegen.isFloatKind(slot.accumulatorKind)
+    auto* newValue = codegen.isFloatKind(slot.desc.accumulatorKind)
         ? codegen.builder().CreateFAdd(oldValue, value)
         : codegen.builder().CreateAdd(oldValue, value);
     codegen.storeValue(group, accType, slot.offset, newValue);
@@ -246,8 +246,8 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       const jit::HashAggrJitSlot& slot,
       bool) {
     // spark sum intermediate type == result type (bigint=bigint / double=double).
-    return slot.accumulatorKind == jit::HashAggrJitValueKind::Int64 ||
-        slot.accumulatorKind == jit::HashAggrJitValueKind::Double;
+    return slot.desc.accumulatorKind == jit::HashAggrJitValueKind::Int64 ||
+        slot.desc.accumulatorKind == jit::HashAggrJitValueKind::Double;
   }
 
   static void compileHashAggrJitExtract(
@@ -256,11 +256,11 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       const jit::HashAggrJitSlot& slot,
       const jit::HashAggrJitExtractTarget& target) {
     auto* value =
-        codegen.loadValue(group, codegen.llvmType(slot.accumulatorKind), slot.offset);
+        codegen.loadValue(group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
     auto* isNull = codegen.builder().CreateZExt(
         codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
     codegen.emitFlatValue(
-        target.resultVector, target.row, slot.accumulatorKind, value, isNull);
+        target.resultVector, target.row, slot.desc.accumulatorKind, value, isNull);
   }
 
   static const jit::HashAggrJitOps* hashAggrJitOps() {
