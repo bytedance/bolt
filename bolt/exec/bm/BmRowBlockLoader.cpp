@@ -74,7 +74,7 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
   if (metrics != nullptr) {
     metrics->batchPinNs += nowNs() - batchPinStart;
   }
-  BOLT_CHECK_EQ(pins.size(), blockRefs.size());
+  BOLT_DCHECK_EQ(pins.size(), blockRefs.size());
 
   const auto updateStart = metrics == nullptr ? 0 : nowNs();
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
@@ -128,7 +128,7 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinChunk(
   auto pins = bufferManager_->BatchPin(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
-  BOLT_CHECK_EQ(pins.size(), blockRefs.size());
+  BOLT_DCHECK_EQ(pins.size(), blockRefs.size());
 
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
   for (size_t i = 0; i < pins.size(); ++i) {
@@ -203,7 +203,7 @@ void BmRowBlockLoader::rebaseChunk(
     }
 
     auto& rowBlock = storage().blockRef(segment, part.rowBlockId, true);
-    BOLT_CHECK_NOT_NULL(rowBlock.ptr);
+    BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
 
     if (FOLLY_LIKELY(ranges.size() == 1)) {
       const auto range = ranges[0];

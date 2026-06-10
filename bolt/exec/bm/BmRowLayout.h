@@ -82,7 +82,7 @@ class BmRowLayout {
       bool null) const {
     const auto& layout = columns_[column];
     if (FOLLY_UNLIKELY(layout.nullMask == 0)) {
-      BOLT_CHECK(!null, "Column {} is not nullable", column);
+      BOLT_DCHECK(!null, "Column {} is not nullable", column);
       return;
     }
     auto& byte = row[layout.nullByte];

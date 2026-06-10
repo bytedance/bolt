@@ -148,7 +148,7 @@ class BmRowStorage {
   BlockRef& ensureHeapBlockSlow(SegmentData& segment, uint32_t minBytes);
 
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
-    BOLT_CHECK_NOT_NULL(layout_);
+    BOLT_DCHECK_NOT_NULL(layout_);
     return *layout_;
   }
 

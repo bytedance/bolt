@@ -127,7 +127,7 @@ SegmentId BmRowStorage::finalizeAndFlush(PartitionId partition) {
 }
 
 SegmentId BmRowStorage::finalizeAndFlushSegment(SegmentData& segment) {
-  BOLT_CHECK(segment.meta.state == SegmentState::kActiveResident);
+  BOLT_DCHECK(segment.meta.state == SegmentState::kActiveResident);
   segment.meta.state = SegmentState::kFinalizedResident;
 
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
@@ -206,7 +206,7 @@ BlockRef& BmRowStorage::blockRef(
 }
 
 char* BmRowStorage::newRowInSegment(SegmentData& segment) {
-  BOLT_CHECK(segment.meta.state == SegmentState::kActiveResident);
+  BOLT_DCHECK(segment.meta.state == SegmentState::kActiveResident);
   auto& block = ensureRowBlock(segment);
   const auto offset = block.used;
   auto* row = block.ptr + offset;
@@ -275,11 +275,19 @@ void BmRowStorage::updateChunkForRow(
 void BmRowStorage::recordHeapForCurrentPart(
     SegmentData& segment,
     const BlockRef& heap) {
-  BOLT_CHECK(segment.currentChunk != kNoBlock);
-  BOLT_CHECK(segment.currentPart != kNoBlock);
+  BOLT_DCHECK(segment.currentChunk != kNoBlock);
+  BOLT_DCHECK(segment.currentPart != kNoBlock);
   auto& chunk = segment.chunks[segment.currentChunk];
-  if (std::find(chunk.heapBlocks.begin(), chunk.heapBlocks.end(), heap.id) ==
-      chunk.heapBlocks.end()) {
+  if (chunk.heapBlocks.empty() || chunk.heapBlocks.back() != heap.id) {
+    // Same append-only invariant as recordHeapForPart(): heap usage inside one
+    // segment should not switch A->B->A. Release keeps only the cheap back()
+    // check; debug builds scan history to catch invariant violations.
+    BOLT_DCHECK(
+        std::find(chunk.heapBlocks.begin(), chunk.heapBlocks.end(), heap.id) ==
+            chunk.heapBlocks.end(),
+        "Heap block {} is reused non-contiguously in chunk {}",
+        heap.id,
+        chunk.id);
     chunk.heapBlocks.push_back(heap.id);
   }
 
@@ -287,17 +295,23 @@ void BmRowStorage::recordHeapForCurrentPart(
   // of rows in one row block and records all heap blocks referenced by those
   // rows so rebasing can repair StringViews after pinning.
   auto& part = segment.parts[segment.currentPart];
-  auto it = std::find_if(
-      part.heapBases.begin(),
-      part.heapBases.end(),
-      [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; });
-  if (it == part.heapBases.end()) {
-    part.heapBases.push_back(
-        {heap.id, reinterpret_cast<uintptr_t>(heap.ptr), heap.size});
-  } else {
-    it->baseAddress = reinterpret_cast<uintptr_t>(heap.ptr);
-    it->capacity = heap.size;
+  const auto base = reinterpret_cast<uintptr_t>(heap.ptr);
+  if (!part.heapBases.empty() &&
+      part.heapBases.back().heapBlockId == heap.id) {
+    part.heapBases.back().baseAddress = base;
+    part.heapBases.back().capacity = heap.size;
+    return;
   }
+  BOLT_DCHECK(
+      std::find_if(
+          part.heapBases.begin(),
+          part.heapBases.end(),
+          [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; }) ==
+          part.heapBases.end(),
+      "Heap block {} is reused non-contiguously in part {}",
+      heap.id,
+      part.id);
+  part.heapBases.push_back({heap.id, base, heap.size});
 }
 
 void BmRowStorage::recordHeapForPart(
@@ -425,7 +439,7 @@ void BmRowStorage::appendRowPointersForSegment(
     for (auto partId : chunk.parts) {
       const auto& part = segment.parts[partId];
       auto& rowBlock = blockRef(segment, part.rowBlockId, true);
-      BOLT_CHECK_NOT_NULL(rowBlock.ptr);
+      BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
       if (metrics != nullptr) {
         metrics->pointerRows += part.rowCount;
       }
@@ -441,7 +455,7 @@ char* BmRowStorage::rowPointer(const RowId& id) {
   auto& segment = segmentData(id.segmentId);
   for (auto& block : segment.rowBlocks) {
     if (block.id == id.rowBlockId) {
-      BOLT_CHECK_NOT_NULL(block.ptr);
+      BOLT_DCHECK_NOT_NULL(block.ptr);
       return block.ptr + id.rowOffset;
     }
   }

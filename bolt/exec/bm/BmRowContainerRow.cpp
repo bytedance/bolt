@@ -63,8 +63,8 @@ void BmRowContainer::storeValue(
     vector_size_t sourceIndex,
     RowWriteContext& context,
     int32_t column) {
-  BOLT_CHECK_NOT_NULL(context.row_);
-  BOLT_CHECK_LT(column, layout_.columns().size());
+  BOLT_DCHECK_NOT_NULL(context.row_);
+  BOLT_DCHECK_LT(column, layout_.columns().size());
   const auto& layout = layout_.column(column);
   const bool null = decoded.isNullAt(sourceIndex);
   BOLT_CHECK(

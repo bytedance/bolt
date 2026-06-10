@@ -22,17 +22,17 @@ class BmRowCopier {
 
  private:
   FOLLY_ALWAYS_INLINE const std::vector<TypePtr>& types() const {
-    BOLT_CHECK_NOT_NULL(types_);
+    BOLT_DCHECK_NOT_NULL(types_);
     return *types_;
   }
 
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
-    BOLT_CHECK_NOT_NULL(layout_);
+    BOLT_DCHECK_NOT_NULL(layout_);
     return *layout_;
   }
 
   FOLLY_ALWAYS_INLINE BmRowStorage& storage() const {
-    BOLT_CHECK_NOT_NULL(storage_);
+    BOLT_DCHECK_NOT_NULL(storage_);
     return *storage_;
   }
 
