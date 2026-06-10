@@ -81,32 +81,28 @@ int32_t compareScalarValue(
 
 } // namespace
 
-void BmRowContainer::RowWriter::store(
+void BmRowContainer::store(
+    RowWriteContext& context,
     const DecodedVector& decoded,
     vector_size_t sourceIndex,
     int32_t column) {
-  BOLT_CHECK_NOT_NULL(container_);
-  container_->storeValue(decoded, sourceIndex, *this, column);
+  storeValue(decoded, sourceIndex, context, column);
 }
 
-void BmRowContainer::RowWriter::finish() {
-  BOLT_CHECK_NOT_NULL(row_);
-}
-
-BmRowContainer::AppendBatchResult BmRowContainer::appendBatch(
+std::vector<char*> BmRowContainer::appendBatch(
     const RowVectorPtr& input,
     PartitionId partition) {
   BOLT_CHECK_EQ(input->childrenSize(), types_.size());
   auto* inputRow = input->as<RowVector>();
   BOLT_CHECK_NOT_NULL(inputRow);
 
-  AppendBatchResult result;
-  result.rows.reserve(input->size());
-  std::vector<RowWriter> writers;
-  writers.reserve(input->size());
+  std::vector<char*> rows;
+  rows.reserve(input->size());
+  std::vector<RowWriteContext> contexts;
+  contexts.reserve(input->size());
   for (vector_size_t row = 0; row < input->size(); ++row) {
-    writers.push_back(appendRow(partition));
-    result.rows.push_back(writers.back().row());
+    contexts.push_back(appendRow(partition));
+    rows.push_back(contexts.back().row());
   }
 
   SelectivityVector allRows(input->size());
@@ -116,7 +112,7 @@ BmRowContainer::AppendBatchResult BmRowContainer::appendBatch(
     const auto kind = types_[column]->kind();
     if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
       for (vector_size_t row = 0; row < input->size(); ++row) {
-        writers[row].store(decoded, row, column);
+        store(contexts[row], decoded, row, column);
       }
     } else {
       BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
@@ -124,21 +120,20 @@ BmRowContainer::AppendBatchResult BmRowContainer::appendBatch(
           kind,
           decoded,
           input->size(),
-          result.rows.data(),
+          rows.data(),
           column);
     }
   }
 
-  return result;
+  return rows;
 }
 
 void BmRowContainer::storeValue(
     const DecodedVector& decoded,
     vector_size_t sourceIndex,
-    RowWriter& writer,
+    RowWriteContext& context,
     int32_t column) {
-  BOLT_CHECK(writer.container_ == this);
-  BOLT_CHECK_NOT_NULL(writer.row_);
+  BOLT_CHECK_NOT_NULL(context.row_);
   BOLT_CHECK_LT(column, columns_.size());
   const auto& layout = columns_[column];
   const bool null = decoded.isNullAt(sourceIndex);
@@ -146,7 +141,7 @@ void BmRowContainer::storeValue(
       !null || layout.nullable,
       "Column {} is not nullable",
       column);
-  setNull(writer.row_, column, null);
+  setNull(context.row_, column, null);
   if (null) {
     return;
   }
@@ -156,7 +151,7 @@ void BmRowContainer::storeValue(
       types_[column]->kind(),
       decoded,
       sourceIndex,
-      writer,
+      context,
       layout);
 }
 
@@ -271,9 +266,9 @@ template <TypeKind Kind>
 void BmRowContainer::storeValueTyped(
     const DecodedVector& decoded,
     vector_size_t sourceIndex,
-    RowWriter& writer,
+    RowWriteContext& context,
     const ColumnLayout& column) {
-  auto* row = writer.row_;
+  auto* row = context.row_;
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     auto* target = reinterpret_cast<StringView*>(row + column.offset);
     const auto value = decoded.valueAt<StringView>(sourceIndex);
@@ -281,13 +276,13 @@ void BmRowContainer::storeValueTyped(
       *target = value;
       return;
     }
-    auto& segment = segmentData(writer.segment_);
+    auto& segment = segmentData(context.segment_);
     auto& heap = ensureHeapBlock(segment, value.size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value.data(), value.size());
     heap.used += value.size();
     *target = StringView(stringTarget, value.size());
-    recordHeapForPart(segment, writer.chunk_, writer.part_, heap, row);
+    recordHeapForPart(segment, context.chunk_, context.part_, heap, row);
   } else if constexpr (Kind == TypeKind::UNKNOWN) {
     BOLT_NYI("Unsupported store type {}", column.type->toString());
   } else {
@@ -306,7 +301,8 @@ void BmRowContainer::storeFixedColumnTyped(
     int32_t column) {
   const auto& layout = columns_[column];
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-    BOLT_FAIL("Variable-width columns must be stored through RowWriter");
+    BOLT_FAIL(
+        "Variable-width columns must be stored through RowWriteContext");
     return;
   } else if constexpr (Kind == TypeKind::UNKNOWN) {
     BOLT_NYI("Unsupported store type {}", layout.type->toString());

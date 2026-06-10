@@ -22,41 +22,27 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer {
  public:
-  struct AppendBatchResult {
-    std::vector<char*> rows;
-  };
-
-  class RowWriter {
+  class RowWriteContext {
    public:
-    RowWriter() = default;
+    RowWriteContext() = default;
 
     char* row() const {
       return row_;
     }
 
-    void store(
-        const DecodedVector& decoded,
-        vector_size_t sourceIndex,
-        int32_t column);
-
-    void finish();
-
    private:
     friend class BmRowContainer;
 
-    RowWriter(
-        BmRowContainer* container,
+    RowWriteContext(
         SegmentId segment,
         ChunkId chunk,
         PartId part,
         char* row)
-        : container_(container),
-          segment_(segment),
+        : segment_(segment),
           chunk_(chunk),
           part_(part),
           row_(row) {}
 
-    BmRowContainer* container_{nullptr};
     SegmentId segment_{0};
     ChunkId chunk_{kNoBlock};
     PartId part_{kNoBlock};
@@ -74,11 +60,17 @@ class BmRowContainer {
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t chunkRowCount = 1024);
 
-  AppendBatchResult appendBatch(
+  std::vector<char*> appendBatch(
       const RowVectorPtr& input,
       PartitionId partition = kDefaultPartition);
 
-  RowWriter appendRow(PartitionId partition = kDefaultPartition);
+  RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
+
+  void store(
+      RowWriteContext& context,
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      int32_t column);
 
   int32_t compare(
       const char* left,
@@ -212,13 +204,13 @@ class BmRowContainer {
   void storeValue(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      RowWriter& writer,
+      RowWriteContext& context,
       int32_t column);
   template <TypeKind Kind>
   void storeValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      RowWriter& writer,
+      RowWriteContext& context,
       const ColumnLayout& column);
   template <TypeKind Kind>
   void storeFixedColumnTyped(

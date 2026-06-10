@@ -422,7 +422,7 @@ void storeInputBatchBm(
     std::vector<char*>* rows) {
   auto appended = container.appendBatch(batch);
   if (rows != nullptr) {
-    rows->insert(rows->end(), appended.rows.begin(), appended.rows.end());
+    rows->insert(rows->end(), appended.begin(), appended.end());
   }
 }
 

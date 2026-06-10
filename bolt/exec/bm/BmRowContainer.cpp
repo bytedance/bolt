@@ -82,11 +82,12 @@ BmRowContainer::BmRowContainer(
   BOLT_CHECK_LE(fixedRowSize_, rowBlockSize_);
 }
 
-BmRowContainer::RowWriter BmRowContainer::appendRow(PartitionId partition) {
+BmRowContainer::RowWriteContext BmRowContainer::appendRow(
+    PartitionId partition) {
   auto& segment = activeSegment(partition);
   auto* row = newRowInSegment(segment);
-  return RowWriter(
-      this, segment.meta.id, segment.currentChunk, segment.currentPart, row);
+  return RowWriteContext(
+      segment.meta.id, segment.currentChunk, segment.currentPart, row);
 }
 
 } // namespace bytedance::bolt::exec::bm
