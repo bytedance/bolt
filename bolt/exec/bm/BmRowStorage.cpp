@@ -306,40 +306,60 @@ void BmRowStorage::recordHeapForPart(
     PartId partId,
     const BlockRef& heap,
     const char* row) {
-  BOLT_CHECK(chunkId < segment.chunks.size());
-  BOLT_CHECK(partId < segment.parts.size());
+  BOLT_DCHECK_LT(chunkId, segment.chunks.size());
+  BOLT_DCHECK_LT(partId, segment.parts.size());
   auto& chunk = segment.chunks[chunkId];
   auto& part = segment.parts[partId];
-  BOLT_CHECK_EQ(part.chunkId, chunk.id);
-  BOLT_CHECK(
+  BOLT_DCHECK_EQ(part.chunkId, chunk.id);
+  BOLT_DCHECK(
       std::find(chunk.parts.begin(), chunk.parts.end(), partId) !=
       chunk.parts.end());
 
-  const auto rowAddress = reinterpret_cast<uintptr_t>(row);
-  const auto& block = blockRef(segment, part.rowBlockId, true);
-  const auto blockBegin = reinterpret_cast<uintptr_t>(block.ptr);
-  const auto rowOffset = static_cast<uint32_t>(rowAddress - blockBegin);
-  BOLT_CHECK_GE(rowOffset, part.rowBlockOffset);
-  BOLT_CHECK_LT(rowOffset, part.rowBlockOffset + part.rowCount * rowStride());
+  BOLT_DCHECK([&]() {
+    const auto rowAddress = reinterpret_cast<uintptr_t>(row);
+    const auto& block = blockRef(segment, part.rowBlockId, true);
+    const auto blockBegin = reinterpret_cast<uintptr_t>(block.ptr);
+    const auto rowOffset = static_cast<uint32_t>(rowAddress - blockBegin);
+    return rowOffset >= part.rowBlockOffset &&
+        rowOffset < part.rowBlockOffset + part.rowCount * rowStride();
+  }());
 
-  if (std::find(chunk.heapBlocks.begin(), chunk.heapBlocks.end(), heap.id) ==
-      chunk.heapBlocks.end()) {
+  if (chunk.heapBlocks.empty() || chunk.heapBlocks.back() != heap.id) {
+    // Heap allocation is append-only inside a segment. Once a part records heap
+    // block A, then B, it should never go back to A. The release fast path
+    // relies on this A->B->A pattern not happening and only checks the back().
+    BOLT_DCHECK(
+        std::find(chunk.heapBlocks.begin(), chunk.heapBlocks.end(), heap.id) ==
+            chunk.heapBlocks.end(),
+        "Heap block {} is reused non-contiguously in chunk {}",
+        heap.id,
+        chunk.id);
     chunk.heapBlocks.push_back(heap.id);
   }
 
   // See recordHeapForCurrentPart(): parts are row-block ranges, while heap
   // bases are the referenced variable-width storage for pointer rebasing.
-  auto it = std::find_if(
-      part.heapBases.begin(),
-      part.heapBases.end(),
-      [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; });
-  if (it == part.heapBases.end()) {
-    part.heapBases.push_back(
-        {heap.id, reinterpret_cast<uintptr_t>(heap.ptr), heap.size});
-  } else {
-    it->baseAddress = reinterpret_cast<uintptr_t>(heap.ptr);
-    it->capacity = heap.size;
+  const auto base = reinterpret_cast<uintptr_t>(heap.ptr);
+  if (!part.heapBases.empty() &&
+      part.heapBases.back().heapBlockId == heap.id) {
+    part.heapBases.back().baseAddress = base;
+    part.heapBases.back().capacity = heap.size;
+    return;
   }
+
+  // Same append-only invariant as chunk.heapBlocks: a non-back duplicate means
+  // this part observed A->B->A heap usage, which would make the release fast
+  // path append duplicate HeapBaseRef entries.
+  BOLT_DCHECK(
+      std::find_if(
+          part.heapBases.begin(),
+          part.heapBases.end(),
+          [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; }) ==
+          part.heapBases.end(),
+      "Heap block {} is reused non-contiguously in part {}",
+      heap.id,
+      part.id);
+  part.heapBases.push_back({heap.id, base, heap.size});
 }
 
 const DataChunkMeta& BmRowStorage::chunkForRow(
