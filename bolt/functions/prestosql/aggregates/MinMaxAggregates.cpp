@@ -78,7 +78,6 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
         false,
         !context.isRawInput,
         false,
-        /*initSetsNull=*/true,
         /*precision=*/0,
         /*scale=*/0,
         /*auxPrecision=*/0,

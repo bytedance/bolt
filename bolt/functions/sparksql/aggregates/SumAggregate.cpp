@@ -173,7 +173,6 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
         false,
         !context.isRawInput,
         false,
-        /*initSetsNull=*/true,
         /*precision=*/0,
         /*scale=*/0,
         /*auxPrecision=*/0,

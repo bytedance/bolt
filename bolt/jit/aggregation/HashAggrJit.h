@@ -118,10 +118,6 @@ struct HashAggrJitDescriptor {
   bool countStar{false};
   bool mergeInput{false};
   bool decimal{false};
-  // Whether initGroup marks the accumulator as null for each new group. When
-  // true, GroupingSet must keep Aggregate::numNulls_ in sync (non-JIT extract
-  // relies on it), mirroring the non-JIT initializeNewGroups path.
-  bool initSetsNull{false};
   // Result decimal precision/scale, used by decimal extract overflow checks.
   // Only meaningful when decimal == true.
   int32_t precision{0};
@@ -172,7 +168,6 @@ struct HashAggrJitSlot {
   bool countStar{false};
   bool mergeInput{false};
   bool decimal{false};
-  bool initSetsNull{false};
   int32_t precision{0};
   int32_t scale{0};
   int32_t auxPrecision{0};

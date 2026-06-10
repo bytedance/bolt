@@ -87,7 +87,6 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
         context.isCountStar(),
         !context.isRawInput,
         false,
-        /*initSetsNull=*/false,
         /*precision=*/0,
         /*scale=*/0,
         /*auxPrecision=*/0,

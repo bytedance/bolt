@@ -352,7 +352,6 @@ jit::HashAggrJitSlot Aggregate::createHashAggrJitSlot(
       .countStar = descriptor.countStar,
       .mergeInput = descriptor.mergeInput,
       .decimal = descriptor.decimal,
-      .initSetsNull = descriptor.initSetsNull,
       .precision = descriptor.precision,
       .scale = descriptor.scale,
       .auxPrecision = descriptor.auxPrecision,

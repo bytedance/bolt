@@ -94,7 +94,6 @@ class DecimalSumAggregate : public exec::Aggregate {
         false,
         !context.isRawInput,
         true,
-        /*initSetsNull=*/true,
         /*precision=*/resultPrecision,
         /*scale=*/resultScale,
         /*auxPrecision=*/0,

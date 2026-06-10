@@ -1159,16 +1159,6 @@ void GroupingSet::runHashAggrJitChunks(
         hashAggrJitNewGroups_[i] = groups[newGroups[i]];
       }
       chunk.init(hashAggrJitNewGroups_.data(), newGroups.size());
-      // JIT initGroup writes the null bit directly without touching
-      // Aggregate::numNulls_. Non-JIT extract relies on numNulls_ (isNull()
-      // short-circuits when it is 0), so keep it in sync here, mirroring the
-      // non-JIT initializeNewGroups/setAllNulls path.
-      for (const auto& slot : chunk.slots()) {
-        if (slot.initSetsNull) {
-          aggregates_[slot.aggregateIndex].function->addNumNulls(
-              newGroups.size());
-        }
-      }
       VLOG(1) << "HashAggrJit initialized new groups for chunk "
                 << chunk.functionName() << " newGroups=" << newGroups.size();
     }
