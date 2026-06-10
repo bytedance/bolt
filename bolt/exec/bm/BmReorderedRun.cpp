@@ -5,10 +5,8 @@
 namespace bytedance::bolt::exec::bm {
 
 ReorderedRunId BmRowContainer::finalizeReorderedRun(
-    folly::Range<char* const*> rowsInOrder,
-    const ReorderedRunOptions& options) {
+    folly::Range<char* const*> rowsInOrder) {
   BOLT_CHECK(!rowsInOrder.empty());
-  BOLT_CHECK(options.preferredLayout == ReorderedRunLayout::kMaterializedOrder);
 
   auto& materialized = storage_.createSegment(std::nullopt);
   const auto materializedSegment = materialized.meta.id;
@@ -19,7 +17,6 @@ ReorderedRunId BmRowContainer::finalizeReorderedRun(
 
   ReorderedRunMeta meta;
   meta.id = nextReorderedRunId_++;
-  meta.layout = ReorderedRunLayout::kMaterializedOrder;
   meta.materializedSegment = materializedSegment;
   meta.numRows = rowsInOrder.size();
 

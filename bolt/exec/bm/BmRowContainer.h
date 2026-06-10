@@ -42,16 +42,13 @@ class BmRowContainer {
     RowWriteContext(
         SegmentId segment,
         ChunkId chunk,
-        PartId part,
         char* row)
         : segment_(segment),
           chunk_(chunk),
-          part_(part),
           row_(row) {}
 
     SegmentId segment_{0};
     ChunkId chunk_{kNoBlock};
-    PartId part_{kNoBlock};
     char* row_{nullptr};
   };
 
@@ -63,8 +60,7 @@ class BmRowContainer {
       uint32_t rowBlockSize = static_cast<uint32_t>(
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t heapBlockSize = static_cast<uint32_t>(
-          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
-      uint32_t chunkRowCount = 1024);
+          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)));
 
   std::vector<char*> appendBatch(
       const RowVectorPtr& input,
@@ -103,9 +99,7 @@ class BmRowContainer {
 
   // Materializes rows in the supplied order into a read run. The input rows must
   // be resident pointers at call time.
-  ReorderedRunId finalizeReorderedRun(
-      folly::Range<char* const*> sortedRows,
-      const ReorderedRunOptions& options);
+  ReorderedRunId finalizeReorderedRun(folly::Range<char* const*> sortedRows);
 
   // Creates a lazy read session. No blocks are pinned until tryLoadAll(),
   // loadRows(), or loadRow() is called.
@@ -166,10 +160,6 @@ class BmRowContainer {
   std::vector<TypePtr> types_;
   BmRowLayout layout_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
-  memory::bm::MemoryTag tag_;
-  uint32_t rowBlockSize_;
-  uint32_t heapBlockSize_;
-  uint32_t chunkRowCount_;
   BmRowStorage storage_;
   BmRowBlockLoader blockLoader_;
   BmRowCopier rowCopier_;

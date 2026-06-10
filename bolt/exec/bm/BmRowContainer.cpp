@@ -10,22 +10,16 @@ BmRowContainer::BmRowContainer(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
-    uint32_t heapBlockSize,
-      uint32_t chunkRowCount)
+    uint32_t heapBlockSize)
     : types_(std::move(types)),
       layout_(types_, nullable, rowBlockSize),
       bufferManager_(std::move(bufferManager)),
-      tag_(tag),
-      rowBlockSize_(rowBlockSize),
-      heapBlockSize_(heapBlockSize),
-      chunkRowCount_(chunkRowCount),
       storage_(
           bufferManager_,
-          tag_,
+          tag,
           &layout_,
-          rowBlockSize_,
-          heapBlockSize_,
-          chunkRowCount_),
+          rowBlockSize,
+          heapBlockSize),
       blockLoader_(bufferManager_, &layout_, &storage_),
       rowCopier_(&types_, &layout_, &storage_) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
@@ -35,8 +29,8 @@ BmRowContainer::RowWriteContext BmRowContainer::appendRow(
     PartitionId partition) {
   auto& segment = storage_.activeSegment(partition);
   auto* row = storage_.newRowInSegment(segment);
-  return RowWriteContext(
-      segment.meta.id, segment.currentChunk, segment.currentPart, row);
+  auto& chunk = storage_.currentChunk(segment);
+  return RowWriteContext(segment.meta.id, chunk.meta.id, row);
 }
 
 } // namespace bytedance::bolt::exec::bm
