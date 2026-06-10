@@ -32,6 +32,7 @@
 #include <arrow/array.h>
 #include <arrow/c/bridge.h>
 #include <arrow/io/interfaces.h>
+#include <arrow/memory_pool.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/util/thread_pool.h>
@@ -564,6 +565,12 @@ void Writer::writeRecordBatch(
     LOG(WARNING) << "Slow WriteRecordBatch detected: " << writeTimeMs
                  << "ms for " << recordBatch->num_rows() << " rows";
   }
+  VLOG(5) << "ParquetWriter::writeRecordBatch, rows: "
+          << recordBatch->num_rows() << ", arrow pool allocated memory: "
+          << succinctBytes(arrowPool_->bytes_allocated())
+          << ", arrow pool peak memory: "
+          << succinctBytes(arrowPool_->max_memory()) << ", memory stats: "
+          << arrowContext_->writer->memoryStats().toString();
   PARQUET_THROW_NOT_OK(stream_->Flush());
 }
 
