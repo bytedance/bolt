@@ -46,12 +46,12 @@ class BmRowBlockLoader {
       BulkLoadMetrics* metrics = nullptr);
 
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
-    BOLT_CHECK_NOT_NULL(layout_);
+    BOLT_DCHECK_NOT_NULL(layout_);
     return *layout_;
   }
 
   FOLLY_ALWAYS_INLINE BmRowStorage& storage() const {
-    BOLT_CHECK_NOT_NULL(storage_);
+    BOLT_DCHECK_NOT_NULL(storage_);
     return *storage_;
   }
 

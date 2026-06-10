@@ -131,7 +131,7 @@ RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
 
 char* BulkReadSession::loadRow(const RowId& row) {
   auto window = loadRows({&row, 1});
-  BOLT_CHECK_EQ(1, window.rows.size());
+  BOLT_DCHECK_EQ(1, window.rows.size());
   return window.rows[0].ptr;
 }
 
@@ -159,7 +159,7 @@ void SegmentCursor::loadCurrent() {
     return;
   }
 
-  BOLT_CHECK(run.layout == ReorderedRunLayout::kMaterializedOrder);
+  BOLT_DCHECK(run.layout == ReorderedRunLayout::kMaterializedOrder);
   auto& segment = container_->storage_.segmentData(run.materializedSegment);
   auto rowId = container_->storage_.rowIdForRowNumber(
       segment, static_cast<RowNumber>(index_));
@@ -187,9 +187,9 @@ int32_t MergeReadSession::compareCurrentRows(
     const SegmentCursor& left,
     const SegmentCursor& right,
     const std::vector<CompareFlags>& flags) {
-  BOLT_CHECK_NOT_NULL(container_);
-  BOLT_CHECK(left.hasCurrent());
-  BOLT_CHECK(right.hasCurrent());
+  BOLT_DCHECK_NOT_NULL(container_);
+  BOLT_DCHECK(left.hasCurrent());
+  BOLT_DCHECK(right.hasCurrent());
   return container_->compareRows(left.currentRow(), right.currentRow(), flags);
 }
 

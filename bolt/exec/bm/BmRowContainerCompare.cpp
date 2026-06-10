@@ -87,7 +87,7 @@ int32_t BmRowContainer::compare(
     const char* right,
     int32_t column,
     CompareFlags flags) {
-  BOLT_CHECK_LT(column, layout_.columns().size());
+  BOLT_DCHECK_LT(column, layout_.columns().size());
   const auto& layout = layout_.column(column);
   if (FOLLY_LIKELY(!layout.nullable)) {
     auto result = compareNonNull(left, right, column);
