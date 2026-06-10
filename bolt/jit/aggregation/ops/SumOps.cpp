@@ -1,0 +1,85 @@
+/*
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifdef ENABLE_BOLT_JIT
+
+#include "bolt/jit/aggregation/HashAggrJit.h"
+
+namespace bytedance::bolt::jit {
+
+namespace {
+
+void compileSumInitGroup(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) {
+  codegen.setAccumulatorNull(group, slot);
+  auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
+  if (codegen.isFloatKind(slot.desc.accumulatorKind)) {
+    codegen.storeValue(
+        group, accType, slot.offset, llvm::ConstantFP::get(accType, 0.0));
+  } else {
+    codegen.storeValue(
+        group, accType, slot.offset, llvm::ConstantInt::get(accType, 0));
+  }
+}
+
+// sum uses the same logic for raw input and intermediate merge: add the
+// decoded value into the running accumulator.
+void compileSumAccumulate(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    llvm::Value* decoded,
+    llvm::Value* row,
+    const HashAggrJitSlot& slot,
+    bool,
+    llvm::BasicBlock*) {
+  auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+  auto* value = codegen.castValue(
+      rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
+  auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
+  codegen.clearAccumulatorNull(group, slot);
+  auto* oldValue = codegen.loadValue(group, accType, slot.offset);
+  auto* newValue = codegen.isFloatKind(slot.desc.accumulatorKind)
+      ? codegen.builder().CreateFAdd(oldValue, value)
+      : codegen.builder().CreateAdd(oldValue, value);
+  codegen.storeValue(group, accType, slot.offset, newValue);
+}
+
+bool canCompileSumExtract(const HashAggrJitSlot& slot, bool) {
+  // spark sum intermediate type == result type (bigint=bigint / double=double).
+  return slot.desc.accumulatorKind == HashAggrJitValueKind::Int64 ||
+      slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
+}
+
+void compileSumExtract(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  auto* value = codegen.loadValue(
+      group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
+  auto* isNull = codegen.builder().CreateZExt(
+      codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
+  codegen.emitFlatValue(
+      target.resultVector, target.row, slot.desc.accumulatorKind, value, isNull);
+}
+
+} // namespace
+
+const HashAggrJitOps* getSumOps() {
+  static const HashAggrJitOps kOps{
+      "sum",
+      &compileSumInitGroup,
+      &compileSumAccumulate,
+      &compileSumAccumulate,
+      &canCompileSumExtract,
+      &compileSumExtract};
+  return &kOps;
+}
+
+} // namespace bytedance::bolt::jit
+
+#endif // ENABLE_BOLT_JIT

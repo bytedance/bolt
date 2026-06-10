@@ -17,6 +17,12 @@ bolt_add_library(
   bolt_thrustjit CompiledModule.cpp
                  ThrustJITv2.cpp
                  aggregation/HashAggrJit.cpp
+                 aggregation/ops/CountOps.cpp
+                 aggregation/ops/MinMaxOps.cpp
+                 aggregation/ops/SumOps.cpp
+                 aggregation/ops/AvgOps.cpp
+                 aggregation/ops/DecimalSumOps.cpp
+                 aggregation/ops/DecimalAvgOps.cpp
                  RowContainer/RowContainerCodeGenerator.cpp
                  RowContainer/RowEqVectorsCodeGenerator.cpp
 )

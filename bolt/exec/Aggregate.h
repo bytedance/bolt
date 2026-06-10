@@ -40,7 +40,7 @@
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/functions/InlineFlatten.h"
 #ifdef ENABLE_BOLT_JIT
-#include "bolt/jit/aggregation/HashAggrJit.h"
+#include "bolt/jit/aggregation/HashAggrJitTypes.h"
 #endif
 #include "bolt/vector/BaseVector.h"
 namespace bytedance::bolt::core {
