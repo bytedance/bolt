@@ -249,6 +249,64 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   EXPECT_EQ("window-read-string-value-2999", flat->valueAt(2999).str());
 }
 
+TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR(), VARCHAR()},
+      {false, false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      4 << 20,
+      256,
+      4);
+  constexpr vector_size_t kRows = 32;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("left-string-value-{:04}", row);
+      }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("right-string-value-{:04}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.flushActiveSegment();
+  ReadSessionOptions options;
+  options.maxPinnedBytes = 1;
+  auto session = container.beginBulkReadSegments({&segment, 1}, options);
+
+  std::vector<char*> rows;
+  std::vector<RowId> rowIds;
+  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  ASSERT_EQ(kRows, rowIds.size());
+
+  auto window = session.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, window.rows.size());
+
+  std::vector<char*> inputRows;
+  inputRows.reserve(window.rows.size());
+  for (const auto& row : window.rows) {
+    inputRows.push_back(row.ptr);
+  }
+
+  auto left = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, left);
+  auto leftFlat = left->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, leftFlat);
+
+  auto right = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 2, right);
+  auto rightFlat = right->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, rightFlat);
+
+  EXPECT_EQ("left-string-value-0000", leftFlat->valueAt(0).str());
+  EXPECT_EQ("right-string-value-0000", rightFlat->valueAt(0).str());
+  EXPECT_EQ("left-string-value-0017", leftFlat->valueAt(17).str());
+  EXPECT_EQ("right-string-value-0017", rightFlat->valueAt(17).str());
+  EXPECT_EQ("left-string-value-0031", leftFlat->valueAt(31).str());
+  EXPECT_EQ("right-string-value-0031", rightFlat->valueAt(31).str());
+}
+
 TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
