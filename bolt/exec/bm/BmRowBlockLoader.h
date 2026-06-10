@@ -27,9 +27,7 @@ class BmRowBlockLoader {
       folly::Range<const SegmentId*> segments,
       BulkLoadMetrics* metrics = nullptr);
 
-  std::vector<memory::bm::BufferHandle> pinChunk(
-      SegmentData& segment,
-      const DataChunkMeta& chunk);
+  std::vector<memory::bm::BufferHandle> pinChunk(ChunkData& chunk);
 
  private:
   void rebaseStringViews(
@@ -39,8 +37,7 @@ class BmRowBlockLoader {
       BulkLoadMetrics* metrics = nullptr);
 
   void rebaseChunk(
-      SegmentData& segment,
-      const DataChunkMeta& chunk,
+      ChunkData& chunk,
       const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
           heapRebases,
       BulkLoadMetrics* metrics = nullptr);

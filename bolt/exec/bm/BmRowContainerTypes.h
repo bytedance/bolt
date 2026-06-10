@@ -7,8 +7,8 @@
 
 namespace bytedance::bolt::exec::bm {
 
-// A segment is the flush/read/release unit visible to operators. It owns a
-// sequence of row blocks, heap blocks, and chunk metadata.
+// A segment is the flush/read/release unit visible to operators. It owns an
+// ordered sequence of chunks.
 using SegmentId = uint32_t;
 
 // A reordered run is a logical read sequence over rows. The current
@@ -29,13 +29,39 @@ using RowNumber = uint32_t;
 // operators such as simple sort/hash agg paths.
 using PartitionId = uint32_t;
 
-// A chunk groups rows for window read. Loading one chunk pins all blocks needed
-// by rows in that chunk.
+// A chunk is the row-view used by window read.
+//
+// DuckDB's TupleDataCollection separates the logical scan chunk from physical
+// storage slices: one logical TupleDataChunk can be described by multiple
+// TupleDataChunkParts, and each part maps a contiguous row slice to the row
+// block and heap slice needed to read that slice. This works well for DuckDB
+// because append happens from vectors: the writer can inspect a vector first,
+// know the fixed row count and variable-width payload sizes, then allocate row
+// and heap slices together.
+//
+// BM RowContainer cannot use that layout yet. Its current write API preserves
+// the old RowContainer usage pattern: callers allocate a row with
+// appendRow()/appendBatch(), then store columns later through RowWriteContext.
+// In appendBatch(), all fixed row slots are allocated first and variable-width
+// columns are written afterwards. Therefore the writer does not know the
+// VARCHAR/VARBINARY payload sizes when the row slot and chunk are created, and
+// different string columns can cross heap block boundaries at different rows.
+//
+// Because of that, the current design is intentionally simpler: one chunk is
+// anchored to one row block and owns the heap blocks referenced by rows in that
+// row block. Rebase metadata is tracked at chunk level, not part level.
+//
+// If upper operators stop using row-at-a-time allocation and all RowContainer
+// writes become vector writes, we can switch to a DuckDB-like design: plan row
+// and heap slices from the vector up front, then create finer chunk parts that
+// describe those slices precisely.
+//
+// The drawback of the current design is coarser metadata. A chunk can reference
+// several heap blocks, so window read pins all heap blocks for the chunk and
+// StringView rebasing scans the whole chunk against all relevant heap bases.
+// It is simpler and matches today's API, but less precise than a part-based
+// layout for large variable-width working sets.
 using ChunkId = uint32_t;
-
-// A part is a contiguous row-block range inside a chunk. It is the unit used for
-// fast row pointer reconstruction and StringView rebasing.
-using PartId = uint32_t;
 
 constexpr BlockId kNoBlock = std::numeric_limits<BlockId>::max();
 constexpr PartitionId kDefaultPartition = 0;
@@ -65,12 +91,6 @@ enum class LoadAllResult {
   kNeedWindowRead,
 };
 
-enum class ReorderedRunLayout {
-  // Rows are physically copied to a new segment in the requested order. Merge
-  // cursors can scan this segment sequentially.
-  kMaterializedOrder,
-};
-
 enum class ReleaseReason {
   // Data has been consumed successfully and does not need to be preserved.
   kConsumed,
@@ -88,10 +108,6 @@ struct RowId {
   BlockId rowBlockId{kNoBlock};
   // Offset inside rowBlockId.
   RowOffset rowOffset{0};
-  // Heap block that likely contains this row's first variable-width payload.
-  // It is a locality hint for read/rebase paths; a row can still reference
-  // additional heap blocks through chunk part metadata.
-  BlockId primaryHeapBlockId{kNoBlock};
 };
 
 struct BulkLoadMetrics {
@@ -127,21 +143,12 @@ struct ReadSessionOptions {
   // Optional hard limit for tryLoadAll(). If non-zero and the estimated pinned
   // bytes exceed this limit, tryLoadAll() immediately returns RowIds.
   uint64_t maxPinnedBytes{0};
-  // Reserved for future automatic release-on-consume support. Current callers
-  // should still release consumed segments explicitly.
-  bool releaseWhenConsumed{false};
   // Optional observer for bulk load timing/counter metrics.
   BulkLoadMetrics* bulkLoadMetrics{nullptr};
 };
 
-struct ReorderedRunOptions {
-  // Preferred physical representation for the run. Only kMaterializedOrder is
-  // currently supported.
-  ReorderedRunLayout preferredLayout{ReorderedRunLayout::kMaterializedOrder};
-};
-
 struct HeapBaseRef {
-  // Heap block referenced by one chunk part.
+  // Heap block referenced by one chunk.
   BlockId heapBlockId{kNoBlock};
   // Last known base address of the heap block. It is refreshed after pinning and
   // used to detect whether existing StringView pointers need rebasing.
@@ -149,25 +156,6 @@ struct HeapBaseRef {
   // Heap block capacity, used to test whether a StringView payload belongs to
   // this heap block.
   uint32_t capacity{0};
-};
-
-struct ChunkPartMeta {
-  // Part id inside SegmentData::parts.
-  PartId id{0};
-  // Owning chunk id.
-  ChunkId chunkId{0};
-  // Row block backing this contiguous row range.
-  BlockId rowBlockId{kNoBlock};
-  // First row offset in rowBlockId.
-  uint32_t rowBlockOffset{0};
-  // Number of rows in this part.
-  uint32_t rowCount{0};
-  // A part is split by row-block continuity, not by heap-block changes. This
-  // deliberately preserves the old RowContainer newRow()+store(...) write
-  // model where variable-width sizes are not known when the row is allocated.
-  // Therefore one part can reference multiple heap blocks for StringView
-  // pointer rebasing.
-  std::vector<HeapBaseRef> heapBases;
 };
 
 struct DataChunkMeta {
@@ -179,12 +167,6 @@ struct DataChunkMeta {
   RowNumber firstRowNumber{0};
   // Number of rows covered by this chunk.
   uint32_t rowCount{0};
-  // Part ids that make up this chunk.
-  std::vector<PartId> parts;
-  // Row blocks needed to load this chunk.
-  std::vector<BlockId> rowBlocks;
-  // Heap blocks needed to load this chunk.
-  std::vector<BlockId> heapBlocks;
 };
 
 struct SegmentMeta {
@@ -195,12 +177,6 @@ struct SegmentMeta {
   // Partition that produced this segment. std::nullopt is used only for
   // internally-created segments where partition identity is irrelevant.
   std::optional<PartitionId> partitionId;
-  // All row blocks owned by the segment.
-  std::vector<BlockId> rowBlocks;
-  // All heap blocks owned by the segment.
-  std::vector<BlockId> heapBlocks;
-  // Chunk ids in segment order.
-  std::vector<ChunkId> chunks;
   // Number of rows finalized into this segment.
   uint64_t numRows{0};
 };
@@ -208,9 +184,7 @@ struct SegmentMeta {
 struct ReorderedRunMeta {
   // Stable run id returned by finalizeReorderedRun().
   ReorderedRunId id{0};
-  // Physical layout used to read this run.
-  ReorderedRunLayout layout{ReorderedRunLayout::kMaterializedOrder};
-  // Segment containing rows in run order for kMaterializedOrder.
+  // Segment containing rows in run order.
   SegmentId materializedSegment{0};
   // Number of rows in the run.
   uint64_t numRows{0};

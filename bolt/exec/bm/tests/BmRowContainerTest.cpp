@@ -7,6 +7,8 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 namespace bytedance::bolt::exec::bm {
 namespace {
 
@@ -211,8 +213,9 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
       {BIGINT(), VARCHAR()},
       {false, false},
       bufferManager_,
-      MemoryTag::kTesting);
-  constexpr vector_size_t kRows = 3000;
+      MemoryTag::kTesting,
+      256 << 10);
+  constexpr vector_size_t kRows = 30000;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
       makeFlatVector<std::string>(kRows, [](auto row) {
@@ -246,7 +249,7 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   EXPECT_EQ("window-read-string-value-0", flat->valueAt(0).str());
   EXPECT_EQ("window-read-string-value-1024", flat->valueAt(1024).str());
   EXPECT_EQ("window-read-string-value-2048", flat->valueAt(2048).str());
-  EXPECT_EQ("window-read-string-value-2999", flat->valueAt(2999).str());
+  EXPECT_EQ("window-read-string-value-29999", flat->valueAt(29999).str());
 }
 
 TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
@@ -256,8 +259,7 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
       bufferManager_,
       MemoryTag::kTesting,
       4 << 20,
-      256,
-      4);
+      256);
   constexpr vector_size_t kRows = 32;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
@@ -307,6 +309,60 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
   EXPECT_EQ("right-string-value-0031", rightFlat->valueAt(31).str());
 }
 
+TEST_F(BmRowContainerTest, StorageDoesNotShareHeapBlocksAcrossChunks) {
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
+  BmRowStorage storage(
+      bufferManager_,
+      MemoryTag::kTesting,
+      &layout,
+      layout.rowSize(),
+      1024);
+  auto& segment = storage.createSegment(kDefaultPartition);
+
+  storage.newRowInSegment(segment);
+  auto& firstHeap = storage.ensureHeapBlock(segment, 16);
+  storage.recordHeapForCurrentChunk(segment, firstHeap);
+
+  storage.newRowInSegment(segment);
+  auto& secondHeap = storage.ensureHeapBlock(segment, 16);
+  storage.recordHeapForCurrentChunk(segment, secondHeap);
+
+  ASSERT_EQ(2, segment.chunks.size());
+  ASSERT_EQ(1, segment.chunks[0].heapBlocks.size());
+  ASSERT_EQ(1, segment.chunks[1].heapBlocks.size());
+  EXPECT_NE(
+      segment.chunks[0].heapBlocks[0].id,
+      segment.chunks[1].heapBlocks[0].id);
+}
+
+TEST_F(BmRowContainerTest, StorageZerosHeapTailWhenSwitchingHeapBlocks) {
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
+  BmRowStorage storage(
+      bufferManager_,
+      MemoryTag::kTesting,
+      &layout,
+      4 << 20,
+      64);
+  auto& segment = storage.createSegment(kDefaultPartition);
+  storage.newRowInSegment(segment);
+
+  auto& firstHeap = storage.ensureHeapBlock(segment, 40);
+  firstHeap.used = 40;
+  auto* const firstHeapPtr = firstHeap.ptr;
+  const auto firstHeapUsed = firstHeap.used;
+  const auto firstHeapSize = firstHeap.size;
+  const auto firstHeapId = firstHeap.id;
+  std::memset(
+      firstHeapPtr + firstHeapUsed, 0x7f, firstHeapSize - firstHeapUsed);
+
+  auto& secondHeap = storage.ensureHeapBlock(segment, 40);
+  ASSERT_NE(firstHeapId, secondHeap.id);
+
+  for (uint32_t offset = firstHeapUsed; offset < firstHeapSize; ++offset) {
+    EXPECT_EQ(0, firstHeapPtr[offset]) << "offset=" << offset;
+  }
+}
+
 TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -348,9 +404,7 @@ TEST_F(BmRowContainerTest, ReorderedRunCursorReadsMaterializedOrder) {
   auto rows = storeAll(container, input);
 
   std::vector<char*> sorted{rows[1], rows[3], rows[2], rows[0]};
-  ReorderedRunOptions options;
-  options.preferredLayout = ReorderedRunLayout::kMaterializedOrder;
-  auto run = container.finalizeReorderedRun({sorted.data(), sorted.size()}, options);
+  auto run = container.finalizeReorderedRun({sorted.data(), sorted.size()});
 
   auto session = container.beginMergeReadRuns({&run, 1});
   auto cursor = session.cursor(run);

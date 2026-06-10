@@ -47,19 +47,22 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
   std::vector<bool> isHeapBlock;
   for (const auto segmentId : segments) {
     auto& segment = storage().segmentData(segmentId);
-    const auto blockCount = segment.rowBlocks.size() + segment.heapBlocks.size();
+    size_t blockCount = 0;
+    for (const auto& chunk : segment.chunks) {
+      blockCount += 1 + chunk.heapBlocks.size();
+    }
     blocks.reserve(blocks.size() + blockCount);
     blockRefs.reserve(blockRefs.size() + blockCount);
     isHeapBlock.reserve(isHeapBlock.size() + blockCount);
-    for (auto& block : segment.rowBlocks) {
-      blocks.push_back(block.block);
-      blockRefs.push_back(&block);
+    for (auto& chunk : segment.chunks) {
+      blocks.push_back(chunk.rowBlock.block);
+      blockRefs.push_back(&chunk.rowBlock);
       isHeapBlock.push_back(false);
-    }
-    for (auto& block : segment.heapBlocks) {
-      blocks.push_back(block.block);
-      blockRefs.push_back(&block);
-      isHeapBlock.push_back(true);
+      for (auto& block : chunk.heapBlocks) {
+        blocks.push_back(block.block);
+        blockRefs.push_back(&block);
+        isHeapBlock.push_back(true);
+      }
     }
   }
   if (metrics != nullptr) {
@@ -104,22 +107,17 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
 }
 
 std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinChunk(
-    SegmentData& segment,
-    const DataChunkMeta& chunk) {
+    ChunkData& chunk) {
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   std::vector<BlockRef*> blockRefs;
   std::vector<bool> isHeapBlock;
-  blocks.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
-  blockRefs.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
-  isHeapBlock.reserve(chunk.rowBlocks.size() + chunk.heapBlocks.size());
-  for (auto blockId : chunk.rowBlocks) {
-    auto& block = storage().blockRef(segment, blockId, true);
-    blocks.push_back(block.block);
-    blockRefs.push_back(&block);
-    isHeapBlock.push_back(false);
-  }
-  for (auto blockId : chunk.heapBlocks) {
-    auto& block = storage().blockRef(segment, blockId, false);
+  blocks.reserve(1 + chunk.heapBlocks.size());
+  blockRefs.reserve(1 + chunk.heapBlocks.size());
+  isHeapBlock.reserve(1 + chunk.heapBlocks.size());
+  blocks.push_back(chunk.rowBlock.block);
+  blockRefs.push_back(&chunk.rowBlock);
+  isHeapBlock.push_back(false);
+  for (auto& block : chunk.heapBlocks) {
     blocks.push_back(block.block);
     blockRefs.push_back(&block);
     isHeapBlock.push_back(true);
@@ -147,7 +145,7 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinChunk(
     block.ptr = newPtr;
   }
   if (!heapRebases.empty()) {
-    rebaseChunk(segment, chunk, heapRebases, nullptr);
+    rebaseChunk(chunk, heapRebases, nullptr);
   }
   return pins;
 }
@@ -158,8 +156,8 @@ void BmRowBlockLoader::rebaseStringViews(
         heapRebases,
     BulkLoadMetrics* metrics) {
   const auto rebaseStart = metrics == nullptr ? 0 : nowNs();
-  for (const auto& chunk : segment.chunks) {
-    rebaseChunk(segment, chunk, heapRebases, metrics);
+  for (auto& chunk : segment.chunks) {
+    rebaseChunk(chunk, heapRebases, metrics);
   }
   if (metrics != nullptr) {
     metrics->rebaseStringViewsNs += nowNs() - rebaseStart;
@@ -167,59 +165,83 @@ void BmRowBlockLoader::rebaseStringViews(
 }
 
 void BmRowBlockLoader::rebaseChunk(
-    SegmentData& segment,
-    const DataChunkMeta& chunk,
+    ChunkData& chunk,
     const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
         heapRebases,
     BulkLoadMetrics* metrics) {
   if (FOLLY_LIKELY(layout().stringColumns().empty())) {
     return;
   }
-  for (auto partId : chunk.parts) {
-    auto& part = segment.parts[partId];
-    std::vector<HeapRebaseRange> ranges;
-    ranges.reserve(part.heapBases.size());
-    for (auto& heapBase : part.heapBases) {
-      const auto rebase = heapRebases.find(heapBase.heapBlockId);
-      if (rebase == heapRebases.end()) {
-        continue;
-      }
-      const auto oldBase = heapBase.baseAddress;
-      if (oldBase == 0) {
-        heapBase.baseAddress = rebase->second.second;
-        continue;
-      }
-      if (oldBase == rebase->second.second) {
-        continue;
-      }
-      ranges.push_back(
-          {&heapBase,
-           oldBase,
-           rebase->second.second,
-           oldBase + heapBase.capacity});
-    }
-    if (ranges.empty()) {
+  std::vector<HeapRebaseRange> ranges;
+  ranges.reserve(chunk.heapBases.size());
+  for (auto& heapBase : chunk.heapBases) {
+    const auto rebase = heapRebases.find(heapBase.heapBlockId);
+    if (rebase == heapRebases.end()) {
       continue;
     }
+    const auto oldBase = heapBase.baseAddress;
+    if (oldBase == 0) {
+      heapBase.baseAddress = rebase->second.second;
+      continue;
+    }
+    if (oldBase == rebase->second.second) {
+      continue;
+    }
+    ranges.push_back(
+        {&heapBase,
+         oldBase,
+         rebase->second.second,
+         oldBase + heapBase.capacity});
+  }
+  if (ranges.empty()) {
+    return;
+  }
 
-    auto& rowBlock = storage().blockRef(segment, part.rowBlockId, true);
-    BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
+  auto& rowBlock = chunk.rowBlock;
+  BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
 
-    if (FOLLY_LIKELY(ranges.size() == 1)) {
-      const auto range = ranges[0];
-      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
-        auto* row = rowBlock.ptr + part.rowBlockOffset +
-            rowIndex * storage().rowStride();
-        for (const auto& column : layout().stringColumns()) {
-          if (layout().isNull(row, column)) {
-            continue;
+  if (FOLLY_LIKELY(ranges.size() == 1)) {
+    const auto range = ranges[0];
+    for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
+      auto* row = rowBlock.ptr + rowIndex * storage().rowStride();
+      for (const auto& column : layout().stringColumns()) {
+        if (layout().isNull(row, column)) {
+          continue;
+        }
+        auto* value = reinterpret_cast<StringView*>(row + column.offset);
+        if (value->isInline()) {
+          continue;
+        }
+        const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
+        if (oldAddress >= range.oldBase && oldAddress < range.end) {
+          *value = StringView(
+              reinterpret_cast<const char*>(
+                  range.newBase + oldAddress - range.oldBase),
+              value->size());
+          if (metrics != nullptr) {
+            ++metrics->rebasedStringViews;
           }
-          auto* value =
-              reinterpret_cast<StringView*>(row + column.offset);
-          if (value->isInline()) {
-            continue;
-          }
-          const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
+        }
+      }
+    }
+  } else {
+    // Multi-heap chunks are expected when variable-width payloads cross heap
+    // block boundaries. Keep the lookup as a linear scan for now: it is
+    // cache-friendly for small vectors and avoids per-chunk index construction.
+    // If metrics show large heapBases vectors in real workloads, add a last-hit
+    // cache or sort ranges by oldBase and use upper_bound for interval lookup.
+    for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
+      auto* row = rowBlock.ptr + rowIndex * storage().rowStride();
+      for (const auto& column : layout().stringColumns()) {
+        if (layout().isNull(row, column)) {
+          continue;
+        }
+        auto* value = reinterpret_cast<StringView*>(row + column.offset);
+        if (value->isInline()) {
+          continue;
+        }
+        const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
+        for (const auto& range : ranges) {
           if (oldAddress >= range.oldBase && oldAddress < range.end) {
             *value = StringView(
                 reinterpret_cast<const char*>(
@@ -228,48 +250,15 @@ void BmRowBlockLoader::rebaseChunk(
             if (metrics != nullptr) {
               ++metrics->rebasedStringViews;
             }
-          }
-        }
-      }
-    } else {
-      // Multi-heap parts are expected to be uncommon and small because parts
-      // are still bounded by row-block continuity. Keep the lookup as a linear
-      // scan for now: it is cache-friendly for small vectors and avoids per-part
-      // index construction. If metrics show large heapBases vectors in real
-      // workloads, add a last-hit cache or sort ranges by oldBase and use
-      // upper_bound for interval lookup.
-      for (uint32_t rowIndex = 0; rowIndex < part.rowCount; ++rowIndex) {
-        auto* row = rowBlock.ptr + part.rowBlockOffset +
-            rowIndex * storage().rowStride();
-        for (const auto& column : layout().stringColumns()) {
-          if (layout().isNull(row, column)) {
-            continue;
-          }
-          auto* value =
-              reinterpret_cast<StringView*>(row + column.offset);
-          if (value->isInline()) {
-            continue;
-          }
-          const auto oldAddress = reinterpret_cast<uintptr_t>(value->data());
-          for (const auto& range : ranges) {
-            if (oldAddress >= range.oldBase && oldAddress < range.end) {
-              *value = StringView(
-                  reinterpret_cast<const char*>(
-                      range.newBase + oldAddress - range.oldBase),
-                  value->size());
-              if (metrics != nullptr) {
-                ++metrics->rebasedStringViews;
-              }
-              break;
-            }
+            break;
           }
         }
       }
     }
+  }
 
-    for (auto& range : ranges) {
-      range.heapBase->baseAddress = range.newBase;
-    }
+  for (auto& range : ranges) {
+    range.heapBase->baseAddress = range.newBase;
   }
 }
 

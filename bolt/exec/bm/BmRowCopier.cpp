@@ -38,7 +38,7 @@ char* BmRowCopier::copyRowToSegment(
     std::memcpy(stringTarget, value->data(), value->size());
     heap.used += value->size();
     *value = StringView(stringTarget, value->size());
-    storage().recordHeapForCurrentPart(segment, heap);
+    storage().recordHeapForCurrentChunk(segment, heap);
   }
   return target;
 }

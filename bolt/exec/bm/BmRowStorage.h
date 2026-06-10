@@ -33,25 +33,34 @@ struct BlockRef {
   uint32_t used{0};
 };
 
+struct ChunkData {
+  // Logical row range covered by this chunk.
+  DataChunkMeta meta;
+  // Fixed-width rows for this chunk. Current BM RowContainer deliberately keeps
+  // one chunk anchored to one row block; see BmRowContainerTypes.h for the
+  // DuckDB comparison.
+  BlockRef rowBlock;
+  // Variable-width payload blocks referenced by rows in this chunk. Heap blocks
+  // never cross chunk boundaries: cutting a new row block/chunk also cuts heap
+  // reuse, which keeps chunk ownership and window read pinning local.
+  std::vector<BlockRef> heapBlocks;
+  // Heap base addresses observed by StringView payloads in this chunk. They
+  // are used to rebase non-inline StringViews after BufferManager pins blocks
+  // at a different address.
+  std::vector<HeapBaseRef> heapBases;
+};
+
 struct SegmentData {
   // Public lifecycle and block/chunk summary.
   SegmentMeta meta;
-  // Row blocks contain fixed-width row payloads.
-  std::vector<BlockRef> rowBlocks;
-  // Heap blocks contain variable-width payload bytes, currently VARCHAR data.
-  std::vector<BlockRef> heapBlocks;
-  // Chunk metadata used by window read.
-  std::vector<DataChunkMeta> chunks;
-  // Chunk parts used to reconstruct row pointers and rebase StringViews.
-  std::vector<ChunkPartMeta> parts;
+  // Chunk data used by bulk/window read. SegmentData deliberately does not keep
+  // flat rowBlocks/heapBlocks mirrors; ownership lives in ChunkData so the
+  // hierarchy is Segment -> Chunk -> {row block, heap blocks, rebase metadata}.
+  std::vector<ChunkData> chunks;
   // Next row number to assign inside this segment.
   RowNumber nextRowNumber{0};
-  // Rows appended to currentChunk so far.
-  uint32_t currentChunkRowCount{0};
   // Active chunk while the segment accepts writes.
   ChunkId currentChunk{kNoBlock};
-  // Active part while the segment accepts writes.
-  PartId currentPart{kNoBlock};
 };
 
 // Owns segment/block/chunk metadata and all BufferManager block handles for one
@@ -63,8 +72,7 @@ class BmRowStorage {
       memory::bm::MemoryTag tag,
       const BmRowLayout* layout,
       uint32_t rowBlockSize,
-      uint32_t heapBlockSize,
-      uint32_t chunkRowCount);
+      uint32_t heapBlockSize);
 
   SegmentId flushActiveSegment();
   SegmentId flushActivePartitionSegment(PartitionId partition);
@@ -84,45 +92,35 @@ class BmRowStorage {
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
 
-  BlockRef& addBlock(
-      SegmentData& segment,
-      bool isRowBlock,
-      uint32_t blockSize);
-  FOLLY_ALWAYS_INLINE BlockRef& ensureRowBlock(SegmentData& segment) {
-    if (FOLLY_LIKELY(
-            !segment.rowBlocks.empty() &&
-            segment.rowBlocks.back().used + layout().rowSize() <=
-                segment.rowBlocks.back().size)) {
-      return segment.rowBlocks.back();
-    }
-    return ensureRowBlockSlow(segment);
-  }
-
   FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlock(
       SegmentData& segment,
       uint32_t minBytes) {
-    if (FOLLY_LIKELY(
-            !segment.heapBlocks.empty() &&
-            segment.heapBlocks.back().used + minBytes <=
-                segment.heapBlocks.back().size)) {
-      return segment.heapBlocks.back();
-    }
-    return ensureHeapBlockSlow(segment, minBytes);
+    return ensureHeapBlockInChunk(currentChunk(segment), minBytes);
+  }
+
+  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockForChunk(
+      SegmentData& segment,
+      ChunkId chunkId,
+      uint32_t minBytes) {
+    BOLT_DCHECK_LT(chunkId, segment.chunks.size());
+    return ensureHeapBlockInChunk(segment.chunks[chunkId], minBytes);
   }
 
   BlockRef& blockRef(SegmentData& segment, BlockId id, bool isRowBlock);
 
   char* newRowInSegment(SegmentData& segment);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
-  void recordHeapForCurrentPart(SegmentData& segment, const BlockRef& heap);
-  void recordHeapForPart(
+  void recordHeapForCurrentChunk(SegmentData& segment, const BlockRef& heap);
+  void recordHeapForChunk(
       SegmentData& segment,
       ChunkId chunk,
-      PartId part,
       const BlockRef& heap,
       const char* row);
 
-  const DataChunkMeta& chunkForRow(
+  ChunkData& currentChunk(SegmentData& segment);
+  const ChunkData& currentChunk(const SegmentData& segment) const;
+  ChunkData& chunkForRow(SegmentData& segment, RowNumber rowNumber);
+  const ChunkData& chunkForRow(
       const SegmentData& segment,
       RowNumber rowNumber) const;
   RowId rowIdForRowNumber(
@@ -144,8 +142,20 @@ class BmRowStorage {
   }
 
  private:
-  BlockRef& ensureRowBlockSlow(SegmentData& segment);
-  BlockRef& ensureHeapBlockSlow(SegmentData& segment, uint32_t minBytes);
+  BlockRef addBlock(uint32_t blockSize);
+  ChunkData& ensureWritableChunk(SegmentData& segment);
+  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockInChunk(
+      ChunkData& chunk,
+      uint32_t minBytes) {
+    if (FOLLY_LIKELY(
+            !chunk.heapBlocks.empty() &&
+            chunk.heapBlocks.back().used + minBytes <=
+                chunk.heapBlocks.back().size)) {
+      return chunk.heapBlocks.back();
+    }
+    return ensureHeapBlockSlow(chunk, minBytes);
+  }
+  BlockRef& ensureHeapBlockSlow(ChunkData& chunk, uint32_t minBytes);
 
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
     BOLT_DCHECK_NOT_NULL(layout_);
@@ -157,13 +167,11 @@ class BmRowStorage {
   const BmRowLayout* layout_{nullptr};
   uint32_t rowBlockSize_;
   uint32_t heapBlockSize_;
-  uint32_t chunkRowCount_;
   SegmentId nextSegmentId_{1};
   BlockId nextBlockId_{1};
   std::unordered_map<SegmentId, SegmentData> segments_;
   std::unordered_map<PartitionId, SegmentId> activeSegments_;
   std::unordered_map<PartitionId, std::vector<SegmentId>> partitionSegments_;
-  std::unordered_map<BlockId, std::pair<SegmentId, bool>> blockIndex_;
   static const std::vector<SegmentId> kEmptySegments_;
 };
 

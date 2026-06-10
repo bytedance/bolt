@@ -111,12 +111,12 @@ RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
         "Row segment {} is not covered by this read session",
         row.segmentId);
     auto& segment = container_->storage_.segmentData(row.segmentId);
-    const auto& chunk =
+    auto& chunk =
         container_->storage_.chunkForRow(segment, row.rowNumber);
     const auto key =
-        (static_cast<uint64_t>(row.segmentId) << 32) | chunk.id;
+        (static_cast<uint64_t>(row.segmentId) << 32) | chunk.meta.id;
     if (pinnedChunks.insert(key).second) {
-      auto pins = container_->blockLoader_.pinChunk(segment, chunk);
+      auto pins = container_->blockLoader_.pinChunk(chunk);
       for (auto& pin : pins) {
         windowPins_.push_back(std::move(pin));
       }
@@ -159,13 +159,12 @@ void SegmentCursor::loadCurrent() {
     return;
   }
 
-  BOLT_DCHECK(run.layout == ReorderedRunLayout::kMaterializedOrder);
   auto& segment = container_->storage_.segmentData(run.materializedSegment);
   auto rowId = container_->storage_.rowIdForRowNumber(
       segment, static_cast<RowNumber>(index_));
-  const auto& chunk =
+  auto& chunk =
       container_->storage_.chunkForRow(segment, rowId.rowNumber);
-  pins_ = container_->blockLoader_.pinChunk(segment, chunk);
+  pins_ = container_->blockLoader_.pinChunk(chunk);
   currentRow_ = container_->storage_.rowPointer(rowId);
 }
 

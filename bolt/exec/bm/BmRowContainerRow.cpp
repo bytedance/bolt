@@ -25,7 +25,7 @@ std::vector<char*> BmRowContainer::appendBatch(
 
   std::vector<char*> rows;
   rows.reserve(input->size());
-  // TODO: Consecutive rows in a batch usually share segment/chunk/part. Track
+  // TODO: Consecutive rows in a batch usually share segment/chunk. Track
   // append ranges and use one shared write context per range for variable-width
   // stores instead of keeping one RowWriteContext per row.
   std::vector<RowWriteContext> contexts;
@@ -100,13 +100,13 @@ void BmRowContainer::storeValueTyped(
       return;
     }
     auto& segment = storage_.segmentData(context.segment_);
-    auto& heap = storage_.ensureHeapBlock(segment, value.size());
+    auto& heap =
+        storage_.ensureHeapBlockForChunk(segment, context.chunk_, value.size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value.data(), value.size());
     heap.used += value.size();
     *target = StringView(stringTarget, value.size());
-    storage_.recordHeapForPart(
-        segment, context.chunk_, context.part_, heap, row);
+    storage_.recordHeapForChunk(segment, context.chunk_, heap, row);
   } else if constexpr (Kind == TypeKind::UNKNOWN) {
     BOLT_NYI("Unsupported store type {}", column.type->toString());
   } else {
