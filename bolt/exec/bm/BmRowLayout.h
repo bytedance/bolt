@@ -12,21 +12,33 @@
 namespace bytedance::bolt::exec::bm {
 
 struct ColumnLayout {
+  // Logical type of the column.
   TypePtr type;
+  // Offset of the fixed-width cell inside one row.
   uint32_t offset{0};
+  // Fixed-width cell size. VARCHAR stores StringView here; payload bytes live in
+  // heap blocks.
   uint32_t width{0};
+  // Whether this column owns a null bit.
   bool nullable{false};
+  // Byte offset of the null bit inside one row.
   uint32_t nullByte{0};
+  // Bit mask inside nullByte. Zero means non-nullable.
   uint8_t nullMask{0};
 };
 
 struct StringColumnLayout {
+  // Offset of StringView inside one row.
   uint32_t offset{0};
+  // Null metadata duplicated here so string rebasing can skip null values
+  // without looking up the full ColumnLayout.
   bool nullable{false};
   uint32_t nullByte{0};
   uint8_t nullMask{0};
 };
 
+// Computes the fixed row layout used by BmRowContainer. This class owns no row
+// memory; it only describes offsets, widths, and null-bit placement.
 class BmRowLayout {
  public:
   BmRowLayout() = default;

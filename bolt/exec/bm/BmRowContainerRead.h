@@ -16,14 +16,25 @@ namespace bytedance::bolt::exec::bm {
 class BmRowContainer;
 
 struct RowView {
+  // Stable row identity that can be submitted again for a later window read.
   RowId id;
+  // Resident row pointer. It is valid until the owning read session loads a new
+  // window or is destroyed.
   char* ptr{nullptr};
 };
 
 struct RowWindow {
+  // Views owned by BulkReadSession. Callers must copy the pointers/ids they need
+  // before the next loadRows()/loadRow() call.
   folly::Range<const RowView*> rows;
 };
 
+// Reads finalized/flushed segments back through BufferManager.
+//
+// A session first tries to pin the complete working set with tryLoadAll(). If it
+// succeeds, callers can use the returned char* rows directly. If it fails,
+// callers keep the returned RowIds and submit access windows back through
+// loadRows()/loadRow().
 class BulkReadSession {
  public:
   BulkReadSession() = default;
@@ -36,8 +47,11 @@ class BulkReadSession {
       std::vector<char*>& rows,
       std::vector<RowId>& rowIds);
 
+  // Pins all chunks needed by rows and returns resident pointers for this
+  // window. Replaces the previous window pins held by the session.
   RowWindow loadRows(folly::Range<const RowId*> rows);
 
+  // Explicit single-row slow path. Prefer loadRows() for operator hot paths.
   char* loadRow(const RowId& row);
 
  private:
@@ -50,16 +64,23 @@ class BulkReadSession {
 
   BmRowContainer* container_{nullptr};
   ReadMode mode_{ReadMode::kFullyResident};
+  // Pins for the fully-resident tryLoadAll() result.
   std::vector<memory::bm::BufferHandle> pins_;
+  // Pins for the most recent window read.
   std::vector<memory::bm::BufferHandle> windowPins_;
+  // Backing storage for RowWindow::rows.
   std::vector<RowView> rowViews_;
+  // Segment read order requested by the caller.
   std::vector<SegmentId> segmentOrder_;
+  // Fast validation set for RowIds submitted to this session.
   std::unordered_set<SegmentId> segments_;
   ReadSessionOptions options_;
 
   friend class BmRowContainer;
 };
 
+// Cursor over one reordered run. It pins the chunk containing currentRow() and
+// advances sequentially in run order.
 class SegmentCursor {
  public:
   SegmentCursor() = default;
@@ -85,13 +106,17 @@ class SegmentCursor {
   BmRowContainer* container_{nullptr};
   ReorderedRunId run_{0};
   ReadSessionOptions options_;
+  // Current row ordinal inside the run.
   uint64_t index_{0};
+  // Resident pointer for the current row. Valid until advance().
   char* currentRow_{nullptr};
+  // Pins for the current row's chunk.
   std::vector<memory::bm::BufferHandle> pins_;
 
   friend class MergeReadSession;
 };
 
+// Read session for comparing/scanning multiple reordered runs.
 class MergeReadSession {
  public:
   MergeReadSession() = default;

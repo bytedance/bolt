@@ -19,26 +19,43 @@
 namespace bytedance::bolt::exec::bm {
 
 struct BlockRef {
+  // Container-local block id.
   BlockId id{kNoBlock};
+  // BufferManager block ownership handle.
   std::shared_ptr<memory::bm::BlockHandle> block;
+  // Pin handle. When empty, ptr must not be dereferenced.
   memory::bm::BufferHandle handle;
+  // Raw address for the pinned block.
   char* ptr{nullptr};
+  // Block capacity in bytes.
   uint32_t size{0};
+  // Bytes already used by this segment.
   uint32_t used{0};
 };
 
 struct SegmentData {
+  // Public lifecycle and block/chunk summary.
   SegmentMeta meta;
+  // Row blocks contain fixed-width row payloads.
   std::vector<BlockRef> rowBlocks;
+  // Heap blocks contain variable-width payload bytes, currently VARCHAR data.
   std::vector<BlockRef> heapBlocks;
+  // Chunk metadata used by window read.
   std::vector<DataChunkMeta> chunks;
+  // Chunk parts used to reconstruct row pointers and rebase StringViews.
   std::vector<ChunkPartMeta> parts;
+  // Next row number to assign inside this segment.
   RowNumber nextRowNumber{0};
+  // Rows appended to currentChunk so far.
   uint32_t currentChunkRowCount{0};
+  // Active chunk while the segment accepts writes.
   ChunkId currentChunk{kNoBlock};
+  // Active part while the segment accepts writes.
   PartId currentPart{kNoBlock};
 };
 
+// Owns segment/block/chunk metadata and all BufferManager block handles for one
+// BmRowContainer. It does not know column semantics beyond row size.
 class BmRowStorage {
  public:
   BmRowStorage(
