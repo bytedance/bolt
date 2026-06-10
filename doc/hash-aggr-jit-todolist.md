@@ -2,6 +2,47 @@
 
 ## Resolved（已处理，保留遗留风险备忘）
 
+### HashAggrJitOps 散布在各 aggregate + Aggregate.h 硬依赖 LLVM 头
+
+**问题**
+- `Aggregate.h` `#include HashAggrJit.h`，后者 `#include <llvm/IR/IRBuilder.h>` 等重头，导致
+  所有 include `Aggregate.h` 的 TU（JIT 开启时）被拖进 LLVM IR 头，编译时间膨胀。
+- 每个 aggregate 子类内嵌一组 `compileHashAggrJit*` static codegen，依赖 IRBuilder；
+  `DecimalSumAggregate.h` 模板头塞了 ~120 行 codegen，每个实例化点重复展开。
+- runtime helper（`jit_HashAggrSetFlat*` 等）散落在 `RowContainer.cpp`，decimal extract
+  helper 散落在 `SumAggregate.cpp` / `AverageAggregate.cpp`。
+
+**本次处理（四点 + 遗留点，已编译验证）**
+1. 剥离 LLVM 头出 `Aggregate.h`：
+   - 新建 `bolt/jit/aggregation/HashAggrJitTypes.h`（纯 metadata，无 LLVM）：
+     state / decoded&output 描述符 / planContext / enum / `HashAggrJitDescriptor`
+     （`ops` 持有前向声明的 `HashAggrJitOps*`）/ `HashAggrJitSlot` / 三个自由函数声明
+     / `getXxxOps()` 声明。
+   - `HashAggrJit.h` 改为 `#include HashAggrJitTypes.h` + 仅保留 codegen-only
+     （`HashAggrJitOps` / `HashAggrJitExtractTarget` / `HashAggrJitCodegen` / `HashAggrJitChunk`）。
+   - `Aggregate.h` 的 include 改为 `HashAggrJitTypes.h`，LLVM 头不再进公共头。
+2. 各 aggregate codegen 迁到 `bolt/jit/aggregation/ops/*Ops.cpp`：
+   `CountOps / MinMaxOps / SumOps / AvgOps / DecimalSumOps / DecimalAvgOps`，各 `getXxxOps()`；
+   编入 `bolt_thrustjit`。aggregate 子类只留 `supportsHashAggrJit` + `createHashAggrJitDescriptor`
+   （`.ops = jit::getXxxOps()`）。须留类内：MinMax 的虚函数 `jitKind()`、Decimal 的
+   `sumType_` / `resultType()` 依赖。
+3. runtime helper 迁到 `bolt/jit/aggregation/runtime/`：
+   - `HashAggrRuntime.cpp`：`jit_HashAggrResizeVector` / `SetFlat*` / `SetPartialAvgDouble`
+     （原在 `RowContainer.cpp`）。
+   - `HashAggrDecimalRuntime.cpp`（遗留点）：`jit_HashAggrExtract{Final,Partial}Decimal{Sum,Avg}`
+     + `jitDecimalSumComputeFinal`（原在 `SumAggregate.cpp` / `AverageAggregate.cpp`）。
+   - 两文件只依赖 vector + `bolt/type/DecimalUtil.h`，编入 `bolt_exec`（同符号空间、
+     `ENABLE_EXPORTS`，仍 extern "C" + visibility default，dlsym 可解析）。
+4. 编译验证：`bolt_thrustjit` / `bolt_exec` / `bolt_aggregates` /
+   `bolt_functions_spark_aggregates` 均通过；nm 确认 `jit_HashAggr*` 12 个符号在新文件
+   以 `T` 导出，旧文件无残留定义。
+
+**未做 / 遗留**
+- 链接级端到端单测运行验证未做（当前为 release 纯库配置，无可执行 target）。
+  需要时配 `release_with_test` 跑 HashAggr JIT 单测。
+- 已知 `bolt/functions/sparksql/aggregates/CMakeLists.txt` 里 `SumAggregate.cpp` 被列两次
+  （历史问题，非本次范围，未改）。
+
 ### Descriptor ↔ Slot 字段重复 / positional init 易错
 
 **问题**
