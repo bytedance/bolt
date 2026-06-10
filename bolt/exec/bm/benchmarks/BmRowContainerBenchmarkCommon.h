@@ -96,6 +96,9 @@ BenchmarkOptions options(DatasetKind dataset, uint64_t dataBytes);
 
 uint64_t rowCount(const BenchmarkOptions& options);
 
+void checkOldRowBasedSpillBenchmarkSupported(
+    const BenchmarkOptions& options);
+
 uint64_t benchmarkNowNs();
 
 double nsToMs(uint64_t ns);

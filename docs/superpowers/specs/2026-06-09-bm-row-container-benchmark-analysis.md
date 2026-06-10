@@ -1,15 +1,15 @@
 # BM RowContainer Benchmark 分析
 
-本文基于 2026-06-09 的 `bolt_exec_bm_row_container_benchmark` 结果，分析 old `RowContainer` 与 `BmRowContainer` 在 Store、Read、SpillWrite、SpillRead 四类场景下的主要瓶颈。
+本文基于最新一次 `bolt_exec_bm_row_container_benchmark` 结果，分析 old `RowContainer` 与 `BmRowContainer` 在 Store、Read、SpillWrite、SpillRead 四类场景下的主要瓶颈。
 
 ## 基准口径
 
-本次输入逻辑数据量为 10 GiB：
+本次运行的输入逻辑数据量为 25 GiB：
 
 | 数据集 | 行数 | 逻辑形态 |
 | --- | ---: | --- |
-| fixed | 536,870,912 | `BIGINT + INTEGER + DOUBLE` |
-| variable | 10,284,884 | fixed 三列 + `VARCHAR(1024)` |
+| fixed | 1,342,177,280 | `BIGINT + INTEGER + DOUBLE` |
+| variable | 25,712,209 | fixed 三列 + `VARCHAR(1024)` |
 
 四类 benchmark 的计时范围不同：
 
@@ -20,53 +20,49 @@
 | SpillWrite | Folly benchmark 计时区只包含 spill/flush；stderr 的 `store_setup_ms` 是额外 metric，包含输入构造和写入 RowContainer。 |
 | SpillRead | 源 RowContainer 和 spill 文件在计时外构造；计时区包含从 spill 读回并恢复可访问结构。 |
 
-注意：`io_queue_wait_ms`、`io_device_latency_ms`、`io_end_to_end_latency_ms` 是所有 IO request 的累计时间，不是 wall time。它们可以说明每个 request 的排队/设备延迟，但不能直接与 `time/iter` 相加。
+注意：
+
+- `io_queue_wait_ms`、`io_device_latency_ms`、`io_end_to_end_latency_ms` 是所有 IO request 的累计时间，不是 wall time。它们可以说明每个 request 的排队/设备延迟，但不能直接与 `time/iter` 相加。
+- old row-based spill benchmark 不拆分 spill run。因为 old `Spiller::SpillStatus::rowsWritten` 是 `int32_t`，benchmark 会在 old spill read/write 入口按 `logical_bytes / logical_row_bytes` 估算行数；如果超过 `INT32_MAX`，会在构造 RowContainer 之前直接退出并打印错误，避免长时间运行后 coredump。本次 fixed 25 GiB 只有 13.42 亿行，未超过该限制。
 
 ## 总体结果
 
 | 场景 | 数据集 | old time | BM time | BM 相对速度 | 初步结论 |
 | --- | --- | ---: | ---: | ---: | --- |
-| Store | fixed | 17.73s | 14.66s | 120.98% | BM batch typed store 更快，瓶颈仍是大量 fixed row 写入。 |
-| Store | variable | 3.46s | 1.85s | 186.79% | BM variable store 优势明显，old 的逐行 store/string 路径成本更高。 |
-| Read | fixed | 2.87s | 1.93s | 148.53% | BM resident extract 已明显优于 old，瓶颈是大规模 fixed 列扫描/写 result vector。 |
-| Read | variable | 1.24s | 1.18s | 105.59% | 两边接近，瓶颈更偏向 string view/result vector 处理。 |
-| SpillWrite | fixed | 83.62s | 72.13s | 115.94% | BM 写出瓶颈几乎完全是压缩。 |
-| SpillWrite | variable | 6.62s | 6.05s | 109.46% | BM 小幅领先，瓶颈仍是压缩。 |
-| SpillRead | fixed | 44.19s | 26.42s | 167.23% | BM 主要瓶颈是 `BatchPin` 中的读回和解压，其次是构造全量 pointer vector。 |
-| SpillRead | variable | 5.85s | 2.31s | 252.63% | BM 避免重建 RowContainer，主要瓶颈是解压和 string view rebase。 |
+| Store | fixed | 44.51s | 34.15s | 130.35% | BM batch typed store 优势明显，fixed 写入仍偏内存带宽和循环成本。 |
+| Store | variable | 9.57s | 4.75s | 201.56% | BM variable store 优势非常明显，old 逐行 store/string 写入成本更高。 |
+| Read | fixed | 7.11s | 4.58s | 155.28% | BM resident extract 明显优于 old，主要是 fixed 列顺序扫描和 result vector 写入。 |
+| Read | variable | 3.04s | 2.84s | 107.22% | 两边接近，成本主要在 string view/result vector 处理。 |
+| SpillWrite | fixed | 3.44min | 3.11min | 110.48% | 两边都主要被 zstd 压缩支配，BM 小幅领先。 |
+| SpillWrite | variable | 16.72s | 14.91s | 112.16% | BM 小幅领先，压缩仍是主瓶颈。 |
+| SpillRead | fixed | 1.82min | 58.70s | 186.06% | BM 避免重建 RowContainer，主要瓶颈是解压，其次是全量 pointer vector 构造。 |
+| SpillRead | variable | 16.22s | 5.75s | 281.91% | BM 避免 `copySerializedRow()`，优势非常明显；瓶颈是解压和 string view rebase。 |
 
 ## Store
 
 ### fixed
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 17.73s |
-| BM | 14.66s |
+| old | 44.51s |
+| BM | 34.15s |
 
-Store benchmark 的输入 batch 已经在计时外构造，因此这里主要测 row container 写入本身。fixed 数据集有 5.37 亿行，每行 3 个 fixed-width 列，计时区内主要工作是：
+Store benchmark 的输入 batch 已经在计时外构造，因此这里主要测 row container 写入本身。fixed 数据集有 13.42 亿行，每行 3 个 fixed-width 列。
 
-- old：逐行 `newRow()`，逐列 `store(decoded[column], row, target, column)`。
-- BM：`appendBatch(batch)`，走 batch 写入路径。
+BM 比 old 快约 30%。这说明 fixed store 的 typed batch 路径已经产生稳定收益。old 仍然是逐行 `newRow()`、逐列 `store(decoded[column], row, target, column)`；BM 通过 `appendBatch(batch)` 减少了 per-row/per-column 调用和分支成本。
 
-BM 比 old 快约 21%。这说明现在 fixed store 的 typed batch 路径已经产生收益，old 的逐行逐列 store 调用成本更高。BM 侧剩余瓶颈大概率是内存写带宽、row block 分配和 fixed column copy 循环本身，而不是类型 dispatch 或 nullable 分支。
-
-下一步如果继续优化 Store fixed，需要增加 store 细分指标，例如 row block 分配次数、typed column copy 时间、pointer append 时间。当前 benchmark 没有这些内部拆分，不能进一步精确归因。
+BM 侧剩余瓶颈大概率是内存写带宽、row block 分配和 fixed column copy 循环本身。若继续优化 Store fixed，需要增加 row block 分配次数、typed column copy 时间、pointer append 时间等细分指标。
 
 ### variable
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 3.46s |
-| BM | 1.85s |
+| old | 9.57s |
+| BM | 4.75s |
 
-variable 行数只有 1,028 万，但每行有 1KB string。输入字符串已经在计时外生成，因此计时区主要是 string 写入 RowContainer 的成本。
+variable 行数为 2571 万，每行有 1KB string。输入字符串在计时外生成，因此计时区主要是 string 写入 RowContainer 的成本。
 
-BM 比 old 快约 87%。主要原因应是 BM 的 `appendBatch()` 对 variable 数据采用批量写入，减少了 old `newRow() + store()` 的逐行调用开销。这个场景下 BM 的剩余瓶颈主要是把 string payload 写入 heap block 的内存 copy。
+BM 比 old 快约 2.0 倍。主要原因是 BM 的 `appendBatch()` 对 variable 数据走批量写入路径，减少 old `newRow() + store()` 的逐行调用开销。这个场景下 BM 的剩余瓶颈主要是把 string payload 写入 heap block 的内存 copy。
 
 需要注意：这个 Store 场景与 SpillWrite 的 `store_setup_ms` 口径不同。SpillWrite 的 setup metric 包含输入构造，因此不能直接拿来解释 Store benchmark 的纯写入耗时。
 
@@ -74,16 +70,14 @@ BM 比 old 快约 87%。主要原因应是 BM 的 `appendBatch()` 对 variable �
 
 ### fixed
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 2.87s |
-| BM | 1.93s |
+| old | 7.11s |
+| BM | 4.58s |
 
 Read benchmark 测的是 resident extract：数据完全在内存中，输入是已保存的 row pointer，计时区对每个 batch、每个 column 调用 extract。
 
-fixed 数据集需要从 5.37 亿行里抽取 3 个 fixed-width 列。BM 比 old 快约 49%，说明目前 resident fixed extract 的 typed/non-null 快路径是有效的。这个场景没有 spill、pin、rebase 或 RowId 解析成本，瓶颈主要是顺序扫描 rows 并写出 result vector。
+fixed 数据集需要从 13.42 亿行里抽取 3 个 fixed-width 列。BM 比 old 快约 55%，说明 resident fixed extract 的 typed/non-null 快路径有效。这个场景没有 spill、pin、rebase 或 RowId 解析成本，瓶颈主要是顺序扫描 rows 并写出 result vector。
 
 后续优化重点不是 RowId 或 BufferManager，而是 resident extract 的 CPU/memory bandwidth：
 
@@ -93,14 +87,12 @@ fixed 数据集需要从 5.37 亿行里抽取 3 个 fixed-width 列。BM 比 old
 
 ### variable
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 1.24s |
-| BM | 1.18s |
+| old | 3.04s |
+| BM | 2.84s |
 
-variable read 两边非常接近，BM 只快约 6%。该场景行数少很多，但多一列 string。extract 主要处理 fixed columns 和 string view/result vector 写入，不复制 10 GiB string payload。
+variable read 两边非常接近，BM 快约 7%。该场景行数少很多，但多一列 string。extract 主要处理 fixed columns 和 string view/result vector 写入，不复制 25 GiB string payload。
 
 BM 在 variable read 上没有 fixed 那么明显的优势，说明当前主要成本已经不是 old 的类型 dispatch，而是 string view 处理、result vector 写入和 pointer 访问。若要继续优化，应先给 resident extract 增加列级 metrics，确认 string column 与 fixed columns 分别耗时多少。
 
@@ -108,176 +100,173 @@ BM 在 variable read 上没有 fixed 那么明显的优势，说明当前主要�
 
 ### fixed
 
-结果：
-
 | 实现 | spill time | setup metric | 写出信息 |
 | --- | ---: | ---: | --- |
-| old | 83.62s | 23.25s | `spill_bytes=9.45GB`, `files=10754` |
-| BM | 72.13s | 19.29s | `physical_write=9.32GB`, `write_count=3073` |
+| old | 206.32s | 44.69s | `spill_bytes=23.62GB`, `files=26883` |
+| BM | 186.75s | 34.35s | `physical_write=23.29GB`, `write_count=7681` |
 
-BM 的详细指标：
+old 当前指标只包含总 `spill_ms`、压缩后 `spill_bytes` 和 `files`。由于 old row-based spill 内部的 serialization、flush、write 时间没有在当前 benchmark metrics 中拆开，不能从这次输出里继续细分 old fixed write 的内部耗时。
+
+BM 详细指标：
 
 | 指标 | 值 |
 | --- | ---: |
-| `flush_ms` | 72.13s |
-| `bm_compress_ms` | 72.03s |
-| `bm_spill_write_count` | 3073 |
-| `bm_spill_write_bytes` | 12.89GB |
-| `bm_spill_physical_write_bytes` | 9.32GB |
+| `flush_ms` | 186.75s |
+| `bm_compress_ms` | 183.51s |
+| `bm_spill_write_count` | 7681 |
+| `bm_spill_write_bytes` | 32.22GB |
+| `bm_spill_physical_write_bytes` | 23.29GB |
 
-BM fixed spill write 的瓶颈非常明确：`flush_ms` 几乎全部被 `bm_compress_ms` 覆盖。RowContainer finalize、handle release、block 收集等逻辑不是主要成本。
+fixed SpillWrite 的核心瓶颈是压缩。BM 的 `flush_ms` 几乎全部被 `bm_compress_ms` 覆盖。old 没有同等级的压缩耗时拆分，但它最终写出 23.62GB，和 BM 的 23.29GB 接近，因此两边都被压缩和写出物理数据主导。
 
-old 的 stderr 没有压缩细分，但 spill time 为 83.62s，写出文件数为 10754，明显高于 BM 的 3073 个 block。old 侧主要成本应是 row-based serialization、压缩和更多 spill batch/file 管理成本的组合。
-
-下一步如果优化 fixed SpillWrite，应优先看压缩和 IO pipeline，而不是 RowContainer 元数据：
-
-- zstd level/strategy；
-- block size 与压缩块数量；
-- 压缩与写 IO 是否能 pipeline；
-- 是否需要对 fixed 数据提供更适合压缩器的 layout。
+BM 只快约 10%，原因是两边最终都要压缩并写出约 23GB 物理数据，结构差异被压缩成本覆盖。old 文件数为 26883，BM block 数为 7681，old 的 flush/write 调用更碎，但在 fixed write 中仍然不是压倒性差异。
 
 ### variable
 
-结果：
-
 | 实现 | spill time | setup metric | 写出信息 |
 | --- | ---: | ---: | --- |
-| old | 6.62s | 23.32s | `spill_bytes=341.8MB`, `files=10410` |
-| BM | 6.05s | 22.47s | `physical_write=340.6MB`, `write_count=2610` |
+| old | 16.72s | 9.99s | `spill_bytes=854.65MB`, `files=26025` |
+| BM | 14.91s | 5.21s | `physical_write=848.30MB`, `write_count=6524` |
 
-BM 的详细指标：
+old 当前指标只包含总 `spill_ms`、压缩后 `spill_bytes` 和 `files`，不能继续细分 serialization、flush、write 的各自耗时。
+
+BM 详细指标：
 
 | 指标 | 值 |
 | --- | ---: |
-| `flush_ms` | 6.05s |
-| `bm_compress_ms` | 5.98s |
-| `bm_spill_write_count` | 2610 |
-| `bm_spill_write_bytes` | 10.95GB |
-| `bm_spill_physical_write_bytes` | 340.6MB |
+| `flush_ms` | 14.91s |
+| `bm_compress_ms` | 14.74s |
+| `bm_spill_write_count` | 6524 |
+| `bm_spill_write_bytes` | 27.36GB |
+| `bm_spill_physical_write_bytes` | 848.30MB |
 
-variable 的物理写出只有约 340MB，压缩后数据量远小于逻辑输入。BM 仍然是压缩占绝对主导，`flush_ms - compress_ms` 只有约 66ms。
+variable 的物理写出只有约 850MB，压缩后数据量远小于逻辑输入。BM 仍然是压缩占绝对主导，`flush_ms - compress_ms` 只有约 171ms。
 
-因此 variable SpillWrite 的瓶颈同样不是 RowContainer flush 逻辑，而是压缩。BM 比 old 快约 9%，主要来自更少的写出块/文件和更直接的 block flush 路径。
+BM 比 old 快约 12%。old 的文件数约为 BM block 数的 4 倍，额外 file/batch 管理和 row-based serialization 可能带来成本，但当前 old metrics 还不足以精确拆分。BM 的 setup metric 也显著更低，说明 variable store 路径在 spill write 准备阶段也有收益，但 Folly benchmark 的正式计时区只包含 spill/flush。
 
 ## SpillRead
 
 ### fixed
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 44.19s |
-| BM | 26.42s |
+| old | 109.0s |
+| BM | 58.70s |
 
 old 详细指标：
 
 | 阶段 | 耗时 |
 | --- | ---: |
-| `create_reader_ms` | 3.66s |
-| `next_batch_ms` | 28.56s |
-| `copy_rows_ms` | 9.04s |
-| `list_rows_ms` | 1.69s |
-| `serialized_bytes` | 11.27GB |
-| `batches/files` | 10754 |
+| `create_reader_ms` | 8.39s |
+| `next_batch_ms` | 70.56s |
+| `copy_rows_ms` | 23.23s |
+| `list_rows_ms` | 4.22s |
+| `serialized_bytes` | 28.19GB |
+| `batches/files` | 26883 |
 
-old fixed 的最大成本是 `nextBatch()`，其次是把读回来的 serialized rows 重新 `copySerializedRow()` 到新 RowContainer。`list_rows_ms=1.69s` 是为了让 benchmark 对齐 BM，恢复后再构造全量 row pointer vector。这个成本与 BM 的 `bulk_append_ptrs_ms=1.70s` 基本等价。
+old fixed 的最大成本是 `nextBatch()`，其次是把读回来的 serialized rows 重新 `copySerializedRow()` 到新 RowContainer。`list_rows_ms=4.22s` 是为了让 benchmark 对齐 BM，恢复后再构造全量 row pointer vector。
 
 BM 详细指标：
 
 | 阶段 | 耗时 |
 | --- | ---: |
-| `try_load_all_ms` | 26.42s |
-| `bulk_batch_pin_ms` | 24.73s |
-| `bm_decompress_ms` | 21.25s |
-| `bulk_append_ptrs_ms` | 1.70s |
-| `bulk_update_ptrs_ms` | 0.04ms |
+| `try_load_all_ms` | 58.70s |
+| `bulk_batch_pin_ms` | 52.84s |
+| `bm_decompress_ms` | 50.35s |
+| `bulk_append_ptrs_ms` | 5.86s |
+| `bulk_update_ptrs_ms` | 0.08ms |
 | `bulk_rebase_strings_ms` | 0 |
-| `physical_read_bytes` | 9.32GB |
-| `pin_reads` | 3073 |
+| `physical_read_bytes` | 23.29GB |
+| `pin_reads` | 7681 |
 
 BM fixed 的耗时结构可以拆成：
 
 ```text
-BatchPin 非解压成本 ~= 24.73s - 21.25s = 3.48s
-pointer vector 构造 ~= 1.70s
+BatchPin 非解压成本 ~= 52.84s - 50.35s = 2.49s
+pointer vector 构造 ~= 5.86s
 其他 RowContainer 逻辑 ~= 可忽略
 ```
 
-这里 pointer vector 构造不是异常成本。fixed 有 5.37 亿行，全量输出 `vector<char*>` 本身要写约 4GB 指针数组；old 的 `list_rows_ms=1.69s` 与 BM 的 `bulk_append_ptrs_ms=1.70s` 对齐。
+这里 pointer vector 构造不是异常成本。fixed 有 13.42 亿行，全量输出 `vector<char*>` 本身要写约 10GB 指针数组；old 的 `list_rows_ms=4.22s` 与 BM 的 `bulk_append_ptrs_ms=5.86s` 是同一类成本。
 
 新增 IO 指标显示：
 
 | IO 指标 | 值 |
 | --- | ---: |
-| `io_completed` | 3073 |
-| `io_completed_bytes` | 9.32GB |
-| `io_submit_batches` | 25 |
-| `io_device_latency_ms` | 144,989ms |
-| `io_queue_wait_ms` | 3,513,838ms |
-| `io_avg_end_to_end_latency_us` | 1,190,637us |
+| `io_completed` | 7681 |
+| `io_completed_bytes` | 23.29GB |
+| `io_submit_batches` | 61 |
+| `io_device_latency_ms` | 269,855ms |
+| `io_queue_wait_ms` | 16,385,165ms |
+| `io_avg_end_to_end_latency_us` | 2,168,341us |
 
-这些 IO 时间是 request 级累计值，不能与 wall time 相加。它们说明 3073 个 4MB 级别 read request 在 scheduler 内部有明显排队和设备等待；因为并发执行，最终 wall time 体现为 `bulk_batch_pin_ms=24.73s`。
+这些 IO 时间是 request 级累计值，不能与 wall time 相加。它们说明 7681 个 read request 在 scheduler 内部有明显排队和设备等待；因为并发执行，最终 wall time 体现为 `bulk_batch_pin_ms=52.84s`。
 
 fixed SpillRead 的当前瓶颈排序：
 
-1. zstd 解压：21.25s，占 BM wall time 的约 80%。
-2. BatchPin 非解压读回路径：约 3.48s，包括 IO submit/wait、payload install、handle 构造等。
-3. 全量 row pointer vector 构造：1.70s，属于与 old 对齐后的必要成本。
+1. zstd 解压：50.35s，占 BM wall time 的约 86%。
+2. 全量 row pointer vector 构造：5.86s，数据量达到 10GB 指针写入。
+3. BatchPin 非解压读回路径：约 2.49s，包括 IO submit/wait、payload install、handle 构造等。
 
-下一步优化建议：
-
-- 先在 `BatchPin` 内部继续拆 metrics：submit reads、wait futures、install payload、make handles、unpin/bookkeeping。
-- 对 fixed 数据评估压缩配置和 block size。当前 BM read/write 的 fixed 主成本都被 zstd 覆盖。
-- pointer vector 构造可以暂时不作为重点，除非上层接口允许在某些路径不返回全量 pointer。
+BM 比 old 快约 1.86 倍，核心优势是避免 old 的 `copySerializedRow()` 重建 RowContainer，并且 block/file 数更少。
 
 ### variable
 
-结果：
-
 | 实现 | time |
 | --- | ---: |
-| old | 5.85s |
-| BM | 2.31s |
+| old | 16.22s |
+| BM | 5.75s |
 
 old 详细指标：
 
 | 阶段 | 耗时 |
 | --- | ---: |
-| `create_reader_ms` | 0.11s |
-| `next_batch_ms` | 1.93s |
-| `copy_rows_ms` | 3.63s |
-| `list_rows_ms` | 0.05s |
-| `serialized_bytes` | 10.91GB |
-| `batches/files` | 10410 |
+| `create_reader_ms` | 0.28s |
+| `next_batch_ms` | 4.87s |
+| `copy_rows_ms` | 10.63s |
+| `list_rows_ms` | 0.12s |
+| `serialized_bytes` | 27.28GB |
+| `batches/files` | 26025 |
 
-old variable 的主要瓶颈是 `copy_rows_ms=3.63s`。它需要把读回来的 serialized rows 重新插入新 RowContainer，variable string metadata/payload 处理成本较高。`next_batch_ms=1.93s` 是第二大成本。
+old variable 的主要瓶颈是 `copy_rows_ms=10.63s`。它需要把读回来的 serialized rows 重新插入新 RowContainer，variable string metadata/payload 处理成本较高。`next_batch_ms=4.87s` 是第二大成本。
 
 BM 详细指标：
 
 | 阶段 | 耗时 |
 | --- | ---: |
-| `try_load_all_ms` | 2.31s |
-| `bulk_batch_pin_ms` | 2.04s |
-| `bm_decompress_ms` | 1.90s |
-| `bulk_rebase_strings_ms` | 0.25s |
-| `bulk_append_ptrs_ms` | 0.02s |
-| `physical_read_bytes` | 339.2MB |
-| `pin_reads` | 2610 |
+| `try_load_all_ms` | 5.75s |
+| `bulk_batch_pin_ms` | 5.07s |
+| `bm_decompress_ms` | 4.70s |
+| `bulk_rebase_strings_ms` | 0.62s |
+| `bulk_append_ptrs_ms` | 0.06s |
+| `physical_read_bytes` | 847.08MB |
+| `pin_reads` | 6524 |
 
-BM variable 的最大优势是读回后不重建 RowContainer，而是通过 BatchPin 把 blocks 读回，并对 string views 做 pointer rebase。相比 old 的 `copySerializedRow()`，这条路径避免了大量 row 级复制。
+BM variable 的最大优势是读回后不重建 RowContainer，而是通过 BatchPin 把 blocks 读回，并对 string views 做 pointer rebase。相比 old 的 `copySerializedRow()`，这条路径避免了大量 row 级复制和 string 重写。
 
 variable SpillRead 的当前瓶颈排序：
 
-1. zstd 解压：1.90s，占 BM wall time 的约 82%。
-2. string view rebase：0.25s，占约 11%。
-3. BatchPin 非解压成本：约 0.15s。
-4. pointer vector 构造：0.02s，行数少，不是瓶颈。
+1. zstd 解压：4.70s，占 BM wall time 的约 82%。
+2. string view rebase：0.62s，占约 11%。
+3. BatchPin 非解压成本：约 0.37s。
+4. pointer vector 构造：0.06s，行数较少，不是瓶颈。
 
-后续优化重点：
+## 文件数与块数
 
-- 如果要优化 variable read，优先看解压，其次看 `rebaseStringViews()`。
-- `rebaseStringViews()` 当前已经有单 heap fast path；如果实际运行中一个 part 多 heap 的比例较高，再考虑为 heap base 匹配增加索引结构。当前这次 benchmark 里 rebase 0.25s，不是第一优先级。
+这次结果里 old 的 files/batches 明显多于 BM 的 blocks：
+
+| 数据集 | old files/batches | BM blocks |
+| --- | ---: | ---: |
+| fixed | 26883 | 7681 |
+| variable | 26025 | 6524 |
+
+这会影响 old read 的 `create_reader_ms`、`next_batch_ms`，也会影响 old write 的 flush/write 次数。后续如果要做更严格的 apples-to-apples 对比，可以单独调 old `writeBufferSize` 或 file/batch 参数，看 old 的 files 数下降后 read/write 是否改善。
+
+不过这不是 BM RowContainer 本身的问题。BM 当前的核心设计收益仍然来自：
+
+- resident 路径的 batch typed store/extract；
+- spill read 路径避免反序列化后重建 RowContainer；
+- block 数更少，读回时通过 BatchPin 批量 pin/load。
 
 ## 结论
 
@@ -289,13 +278,15 @@ variable SpillRead 的当前瓶颈排序：
 | Store variable | string payload 写入；BM 已明显优于 old。 |
 | Read fixed | resident extract 的顺序扫描和 result vector 写入。 |
 | Read variable | string view/result vector 处理，两边接近。 |
-| SpillWrite fixed | zstd 压缩。 |
-| SpillWrite variable | zstd 压缩。 |
-| SpillRead fixed | zstd 解压，其次 BatchPin 非解压读回路径，再其次全量 pointer vector 构造。 |
-| SpillRead variable | zstd 解压，其次 string view rebase。 |
+| SpillWrite fixed | zstd 压缩；BM 和 old 都主要被压缩覆盖。 |
+| SpillWrite variable | zstd 压缩；old 文件数更多，可能额外承担 row-based serialization 和更多 flush/write。 |
+| SpillRead fixed | zstd 解压，其次全量 pointer vector 构造，再其次 BatchPin 非解压路径。 |
+| SpillRead variable | zstd 解压，其次 string view rebase；BM 避免重建 RowContainer 是主要优势。 |
 
-短期最有价值的优化方向不是继续改 RowContainer 元数据结构，而是：
+短期最有价值的优化方向：
 
-1. 给 `BufferManager::BatchPin` 增加更细的 wall-time metrics，拆出 submit、wait、install、handle 构造。
-2. 针对 fixed spill read/write 评估压缩配置和 block size，因为 fixed 的读写主成本都被 zstd 覆盖。
-3. 对 resident read/store 只有在需要进一步压榨 CPU 性能时，再补列级 metrics 后优化 typed copy/extract 循环。
+1. 针对 fixed spill read/write 评估压缩配置和 block size，因为 fixed 的读写主成本都被 zstd 覆盖。
+2. 给 `BufferManager::BatchPin` 增加更细的 wall-time metrics，拆出 submit、wait、install、handle 构造。
+3. 如果继续优化 fixed SpillRead，关注全量 pointer vector 构造；25 GiB fixed 已经需要写约 10GB 指针数组。
+4. 如果还需要继续分析 old SpillWrite，先补 old row-based spiller 的 serialization、flush、write 细分 metrics。
+5. 对 resident read/store 只有在需要进一步压榨 CPU 性能时，再补列级 metrics 后优化 typed copy/extract 循环。
