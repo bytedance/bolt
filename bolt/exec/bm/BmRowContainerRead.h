@@ -77,13 +77,13 @@ class SegmentCursor {
  private:
   SegmentCursor(
       BmRowContainer* container,
-      SortedRunId run,
+      ReorderedRunId run,
       ReadSessionOptions options);
 
   void loadCurrent();
 
   BmRowContainer* container_{nullptr};
-  SortedRunId run_{0};
+  ReorderedRunId run_{0};
   ReadSessionOptions options_;
   uint64_t index_{0};
   char* currentRow_{nullptr};
@@ -96,7 +96,7 @@ class MergeReadSession {
  public:
   MergeReadSession() = default;
 
-  SegmentCursor cursor(SortedRunId run);
+  SegmentCursor cursor(ReorderedRunId run);
 
   int32_t compareCurrentRows(
       const SegmentCursor& left,
@@ -106,11 +106,11 @@ class MergeReadSession {
  private:
   MergeReadSession(
       BmRowContainer* container,
-      std::vector<SortedRunId> runs,
+      std::vector<ReorderedRunId> runs,
       ReadSessionOptions options);
 
   BmRowContainer* container_{nullptr};
-  std::unordered_set<SortedRunId> runs_;
+  std::unordered_set<ReorderedRunId> runs_;
   ReadSessionOptions options_;
 
   friend class BmRowContainer;

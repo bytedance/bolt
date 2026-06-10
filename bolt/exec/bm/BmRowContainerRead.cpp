@@ -41,7 +41,8 @@ LoadAllResult BulkReadSession::tryLoadAll(
   const auto estimateStart = metrics == nullptr ? 0 : nowNs();
   uint64_t bytes = 0;
   for (auto segment : segmentOrder_) {
-    bytes += container_->segmentBytes(container_->segmentData(segment));
+    bytes += container_->storage_.segmentBytes(
+        container_->storage_.segmentData(segment));
   }
   if (metrics != nullptr) {
     metrics->estimateBytesNs += nowNs() - estimateStart;
@@ -52,8 +53,8 @@ LoadAllResult BulkReadSession::tryLoadAll(
     mode_ = ReadMode::kWindowRead;
     const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
-      container_->appendRowIdsForSegment(
-          container_->segmentData(segment), rowIds);
+      container_->storage_.appendRowIdsForSegment(
+          container_->storage_.segmentData(segment), rowIds);
     }
     if (metrics != nullptr) {
       metrics->appendRowIdsNs += nowNs() - appendStart;
@@ -77,13 +78,13 @@ LoadAllResult BulkReadSession::tryLoadAll(
   }
 
   try {
-    pins_ = container_->pinSegments(segmentOrder_, metrics);
+    pins_ = container_->blockLoader_.pinSegments(segmentOrder_, metrics);
     container_->bufferManager_->ReleaseUnusedReservation();
     mode_ = ReadMode::kFullyResident;
     const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
-      container_->appendRowPointersForSegment(
-          container_->segmentData(segment), rows, metrics);
+      container_->storage_.appendRowPointersForSegment(
+          container_->storage_.segmentData(segment), rows, metrics);
     }
     if (metrics != nullptr) {
       metrics->appendRowPointersNs += nowNs() - appendStart;
@@ -109,12 +110,13 @@ RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
         segments_.count(row.segmentId) != 0,
         "Row segment {} is not covered by this read session",
         row.segmentId);
-    auto& segment = container_->segmentData(row.segmentId);
-    const auto& chunk = container_->chunkForRow(segment, row.rowNumber);
+    auto& segment = container_->storage_.segmentData(row.segmentId);
+    const auto& chunk =
+        container_->storage_.chunkForRow(segment, row.rowNumber);
     const auto key =
         (static_cast<uint64_t>(row.segmentId) << 32) | chunk.id;
     if (pinnedChunks.insert(key).second) {
-      auto pins = container_->pinChunk(segment, chunk);
+      auto pins = container_->blockLoader_.pinChunk(segment, chunk);
       for (auto& pin : pins) {
         windowPins_.push_back(std::move(pin));
       }
@@ -122,7 +124,7 @@ RowWindow BulkReadSession::loadRows(folly::Range<const RowId*> rows) {
   }
 
   for (const auto& row : rows) {
-    rowViews_.push_back({row, container_->rowPointer(row)});
+    rowViews_.push_back({row, container_->storage_.rowPointer(row)});
   }
   return {{rowViews_.data(), rowViews_.size()}};
 }
@@ -135,7 +137,7 @@ char* BulkReadSession::loadRow(const RowId& row) {
 
 SegmentCursor::SegmentCursor(
     BmRowContainer* container,
-    SortedRunId run,
+    ReorderedRunId run,
     ReadSessionOptions options)
     : container_(container), run_(run), options_(std::move(options)) {
   loadCurrent();
@@ -152,31 +154,32 @@ void SegmentCursor::advance() {
 void SegmentCursor::loadCurrent() {
   currentRow_ = nullptr;
   pins_.clear();
-  const auto& run = container_->sortedRunData(run_);
+  const auto& run = container_->reorderedRunData(run_);
   if (index_ >= run.numRows) {
     return;
   }
 
-  BOLT_CHECK(run.layout == SortedRunLayout::kMaterializedOrder);
-  auto& segment = container_->segmentData(run.materializedSegment);
-  auto rowId =
-      container_->rowIdForRowNumber(segment, static_cast<RowNumber>(index_));
-  const auto& chunk = container_->chunkForRow(segment, rowId.rowNumber);
-  pins_ = container_->pinChunk(segment, chunk);
-  currentRow_ = container_->rowPointer(rowId);
+  BOLT_CHECK(run.layout == ReorderedRunLayout::kMaterializedOrder);
+  auto& segment = container_->storage_.segmentData(run.materializedSegment);
+  auto rowId = container_->storage_.rowIdForRowNumber(
+      segment, static_cast<RowNumber>(index_));
+  const auto& chunk =
+      container_->storage_.chunkForRow(segment, rowId.rowNumber);
+  pins_ = container_->blockLoader_.pinChunk(segment, chunk);
+  currentRow_ = container_->storage_.rowPointer(rowId);
 }
 
 MergeReadSession::MergeReadSession(
     BmRowContainer* container,
-    std::vector<SortedRunId> runs,
+    std::vector<ReorderedRunId> runs,
     ReadSessionOptions options)
     : container_(container),
       runs_(runs.begin(), runs.end()),
       options_(std::move(options)) {}
 
-SegmentCursor MergeReadSession::cursor(SortedRunId run) {
+SegmentCursor MergeReadSession::cursor(ReorderedRunId run) {
   BOLT_CHECK_NOT_NULL(container_);
-  BOLT_CHECK(runs_.count(run) != 0, "Sorted run {} is not covered", run);
+  BOLT_CHECK(runs_.count(run) != 0, "Reordered run {} is not covered", run);
   return SegmentCursor(container_, run, options_);
 }
 
@@ -190,61 +193,16 @@ int32_t MergeReadSession::compareCurrentRows(
   return container_->compareRows(left.currentRow(), right.currentRow(), flags);
 }
 
-SortedRunId BmRowContainer::finalizeSortedRun(
-    folly::Range<char* const*> sortedRows,
-    const SortedRunOptions& options) {
-  BOLT_CHECK(!sortedRows.empty());
-  BOLT_CHECK(options.preferredLayout == SortedRunLayout::kMaterializedOrder);
-
-  auto& materialized = createSegment(std::nullopt);
-  const auto materializedSegment = materialized.meta.id;
-  for (auto* row : sortedRows) {
-    copyRowToSegment(materialized, row);
-  }
-  finalizeAndFlushSegment(materialized);
-
-  SortedRunMeta meta;
-  meta.id = nextSortedRunId_++;
-  meta.layout = SortedRunLayout::kMaterializedOrder;
-  meta.materializedSegment = materializedSegment;
-  meta.numRows = sortedRows.size();
-
-  sortedRuns_.emplace(meta.id, std::move(meta));
-  return nextSortedRunId_ - 1;
-}
-
 BulkReadSession BmRowContainer::beginBulkReadSegments(
     folly::Range<const SegmentId*> segments,
     ReadSessionOptions options) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
   for (auto segment : segmentIds) {
-    (void)segmentData(segment);
+    (void)storage_.segmentData(segment);
   }
 
   return BulkReadSession(
       this, ReadMode::kWindowRead, {}, std::move(segmentIds), options);
-}
-
-MergeReadSession BmRowContainer::beginMergeReadSegments(
-    folly::Range<const SortedRunId*> runs,
-    ReadSessionOptions options) {
-  std::vector<SortedRunId> runIds(runs.begin(), runs.end());
-  for (auto run : runIds) {
-    (void)sortedRunData(run);
-  }
-  return MergeReadSession(this, std::move(runIds), options);
-}
-
-SortedRunMeta& BmRowContainer::sortedRunData(SortedRunId run) {
-  auto it = sortedRuns_.find(run);
-  BOLT_CHECK(it != sortedRuns_.end(), "Unknown sorted run {}", run);
-  return it->second;
-}
-
-const SortedRunMeta& BmRowContainer::sortedRunData(SortedRunId run) const {
-  auto it = sortedRuns_.find(run);
-  BOLT_CHECK(it != sortedRuns_.end(), "Unknown sorted run {}", run);
-  return it->second;
 }
 
 } // namespace bytedance::bolt::exec::bm
