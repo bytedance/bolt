@@ -93,6 +93,50 @@
 
 ## Pending
 
+### [P0] JIT add/merge+extract 路径正确性 bug，被 test 链接丢符号长期掩盖
+
+**现象**
+- 单测 `SumAggregationTest.hashAggrJitMergeAndExtract` 与
+  `SumAggregationTest.hashAggrJitAllNullGroup`（均为 partial+final 两阶段、非 decimal）
+  在 JIT 路径**真正执行**时结果错误：
+  - `hashAggrJitAllNullGroup`：group sum 期望 12，得 0。
+  - `hashAggrJitMergeAndExtract`：sum/avg/min 全 null、count 全 0，相当于 add 完全没生效。
+- JIT 模块成功编译执行（无 "Symbols not found" / 无 fallback 日志），是**执行结果错**，
+  不是回退。
+
+**根因定位（已用 git stash 二分确认）**
+- 与本轮 decimal IR 化改动**无关**：在干净 HEAD 上、仅加一个把 runtime 符号
+  （如 `jit_HashAggrResizeVector`）拉进 test 可执行的 link anchor，这两个用例即 FAIL。
+- 真正背景：commit `4cbfc5e590`（runtime helper 迁出 `RowContainer.cpp` 到独立 .o）后，
+  这些 `jit_HashAggr*` 符号**未被 test/可执行链接**（无 C++ 引用，.o 被链接器丢弃）。
+  于是 JIT 在 test 二进制里 materialize 失败 → **静默回退非 JIT** → 结果恰好正确 →
+  **掩盖了 JIT 路径本身的既有正确性 bug**。
+- 本轮 decimal 改动新增的 link anchor 把这些符号拉回可执行，JIT 路径终于被真正执行，
+  从而**暴露**（非引入）该 bug。
+
+**潜在影响（需进一步确认）**
+- 若生产可执行同样没有引用这些 runtime .o，则 HashAggr JIT 在生产里可能**根本没在跑**
+  （一直静默回退非 JIT）。需要核实生产链接是否包含这些符号。
+- 一旦修复链接（让 JIT 真正执行），这个 add/merge+extract 正确性 bug 会立刻显现，
+  必须在「启用 JIT 执行」之前先修。
+
+**后续待办**
+- 定位 add/merge+extract 在两阶段非 decimal 场景下结果归零/全 null 的根因
+  （疑点：partial extract 与 final merge 的累加器布局 / null 语义，可能与
+  commit `f74cc21160` 删除 `numNulls_` 同步相关——`allNullGroup` 正是该语义守护用例）。
+- 当前 decimal 改动保留了 link anchor（benchmark 需要它，否则 JIT 符号缺失）；
+  注意 anchor 会让上述 bug 在跑相关单测时显现为 FAILED。
+
+**⚠️ 合入注意**
+- 本轮 decimal IR 改动保留了 link anchor，启用后 JIT 路径会真正执行，导致
+  `hashAggrJitMergeAndExtract` / `hashAggrJitAllNullGroup` 两个单测**变红（FAILED）**。
+- 这不是 decimal 改动引入的回归，而是上述既有 bug 被暴露；但**合入前必须先修该 P0 bug，
+  否则 CI 会红**。两个选项：
+  1. 先修 add/merge+extract 正确性 bug，再合入（推荐）。
+  2. 临时移除 link anchor —— 但那样 benchmark 里 JIT 符号又会解析失败、JIT 回退，
+     decimal 性能改善无法体现。
+- 简言之：**link anchor + 既有 bug 是绑定的**，要么一起修好，要么都先不动。
+
 ### [P2] chunk 同时 codegen `add_dense` 和 `add_dense_no_null`，编译时间与产物 ×2
 
 **现状**

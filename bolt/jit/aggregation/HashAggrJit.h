@@ -133,6 +133,17 @@ class HashAggrJitCodegen {
       const HashAggrJitSlot& slot,
       bool partialOutput) const;
 
+  // Inline i128 accumulate-with-overflow used by decimal sum/avg add+merge.
+  // Loads the i128 sum at 'group + sumOffset' and the i64 overflow counter at
+  // 'group + overflowOffset', computes sum += addend, updates the overflow
+  // counter by the carry direction (mirrors jitHashAggrAddWithOverflow), and
+  // stores both back. Replaces the per-row runtime helper call with pure IR.
+  void emitDecimalAddWithOverflow(
+      llvm::Value* group,
+      int32_t sumOffset,
+      int32_t overflowOffset,
+      llvm::Value* addend) const;
+
  private:
   llvm::Module& module_;
   llvm::IRBuilder<>* builder_{nullptr};

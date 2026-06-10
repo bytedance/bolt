@@ -1095,3 +1095,47 @@ P2 6.20 / 6.31 / 6.25ms——互有高低，落在噪声范围内。
   RowContainer 中的非连续布局），而非已被预取覆盖的 `indices[row]` 间接寻址。
 - P3（下沉 per-row accumulator null clear）的待确认正确性约束（新组创建与首次更新
   是否同 batch）经评估不成立、争议较大，暂缓，不在本轮实施。
+
+---
+
+## 13. Decimal sum/avg add/merge 纯 IR 化
+
+### 13.1 背景
+
+decimal sum/avg 的 add/merge 主路径此前不是真正的 inline IR：每行通过
+`CreateCall(jit_HashAggrUpdate/MergeDecimal*)` 把 i128 加法 + 溢出检测转交 C++
+runtime helper（`jitHashAggrAddWithOverflow`）。即 IR 只完成 decode + 路由，真正
+算子在跨函数调用里执行——付出了 LLVM 的代价却没拿到 inline 红利。
+
+### 13.2 改动
+
+- 新增 `HashAggrJitCodegen::emitDecimalAddWithOverflow`：纯 IR 实现 i128
+  `CreateAdd` + 溢出检测（`(a>0&&b>0&&r<0)||(a<0&&b<0&&r>=0)`，≤8 条 IR），
+  溢出计数用 `posOverflow - negOverflow` 累加。
+- `DecimalSumOps` / `DecimalAvgOps` 的 init/add-raw/add-merge 全部改为纯 IR：
+  - init：直接 store sum/overflow/(count|isEmpty)，替代 `jit_HashAggrInitDecimal*`。
+  - add/merge：`emitDecimalAddWithOverflow` + IR 内 `++count` / `isEmpty &&=`。
+  - state 字段访问用 `offsetof(JitDecimal*State, field)` 派生 offset，避免硬编码。
+- 删除不再被调用的 `jit_HashAggrInit/Update/MergeDecimal*` runtime helper 及其
+  builtin 声明、`jitHashAggrAddWithOverflow`。
+- per-row 的跨函数调用从 N 次降为 0（add 主路径全部内联到循环体）。
+
+### 13.3 性能（width8，bm_min_iters=50）
+
+| case | 改前 jit | 改后 jit | nojit（参考） | 改善 |
+|------|----------|----------|----------------|------|
+| width8_decimal_sum | 9.86ms | **9.01ms** | 11.79ms | ~9% |
+| width8_decimal_avg | 14.75ms | **13.88ms** | 16.72ms | ~6% |
+
+- nojit 基线基本不变，说明提升来自 JIT 侧 add/merge 内联，而非环境波动。
+- 多轮测量 decimal_sum_jit 稳定在 8.1–9.0ms 区间（取决于机器负载），均优于改前。
+- 收益幅度小于「翻倍」的乐观预期：i128 算术本身有成本，且热循环还有 group
+  寻址 / null 处理开销，per-row call 的消除只压缩了其中一部分。
+
+### 13.4 正确性
+
+- decimal 专项单测全部通过：`decimalSum` / `decimalGlobalSumOverflow` /
+  `decimalGroupBySumOverflow` / `decimalLargeCountRowsOverflow` /
+  `decimalSomeGroupsAllnullValues`（覆盖溢出、全 null 组等关键路径）。
+- extract 的 decimal 计算（依赖 `DecimalUtil` 精度判定、每组一次、非热路径）
+  保留 runtime helper，不在本次范围。

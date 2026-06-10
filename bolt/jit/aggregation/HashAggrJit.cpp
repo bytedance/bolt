@@ -21,8 +21,6 @@ extern "C" {
 
 using bytedance::bolt::jit::HashAggrJitDecodedInput;
 using bytedance::bolt::jit::HashAggrJitOutput;
-using bytedance::bolt::jit::JitDecimalAvgState;
-using bytedance::bolt::jit::JitDecimalSumState;
 
 namespace {
 
@@ -78,113 +76,30 @@ constexpr uint64_t kOutputRowFieldStride =
     offsetof(HashAggrJitOutput, rowField1Values) -
     offsetof(HashAggrJitOutput, rowField0Values);
 
-int64_t jitHashAggrAddWithOverflow(
-    bytedance::bolt::int128_t left,
-    bytedance::bolt::int128_t right,
-    bytedance::bolt::int128_t& result) {
-  result = left + right;
-  if (left > 0 && right > 0 && result < 0) {
-    return 1;
-  }
-  if (left < 0 && right < 0 && result >= 0) {
-    return -1;
-  }
-  return 0;
-}
-
 } // namespace
 
-__attribute__((__visibility__("default"))) void jit_HashAggrInitDecimalSum(
-    char* group,
-    int32_t offset) {
-  new (group + offset) JitDecimalSumState();
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrInitDecimalAvg(
-    char* group,
-    int32_t offset) {
-  new (group + offset) JitDecimalAvgState();
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrUpdateDecimalSumI64(
-    char* group,
-    int32_t offset,
-    int64_t value) {
-  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(
-      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
-  state->isEmpty = false;
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrUpdateDecimalSumI128(
+// Link anchor: the JIT extract/output runtime helpers live in separate
+// translation units (HashAggrRuntime.cpp / HashAggrDecimalRuntime.cpp) and are
+// only ever looked up by name through the ORC JIT global symbol table, never
+// referenced at C++ link time. Without an explicit reference the linker would
+// drop those objects from the final executable and the JIT would fail to
+// resolve the symbols. Referencing one symbol per object forces the whole
+// object (and thus every helper it defines) to be retained. This TU is always
+// pulled in by any JIT user (HashAggrJitChunk), so the anchor propagates.
+void jit_HashAggrResizeVector(char* vector, int32_t size);
+void jit_HashAggrExtractFinalDecimalSum(
+    char* vector,
+    int32_t row,
     char* group,
     int32_t offset,
-    bytedance::bolt::int128_t value) {
-  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
-  state->isEmpty = false;
-}
+    int32_t precision,
+    int32_t scale,
+    int8_t longDecimal);
 
-__attribute__((__visibility__("default"))) void jit_HashAggrUpdateDecimalAvgI64(
-    char* group,
-    int32_t offset,
-    int64_t value) {
-  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(
-      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
-  ++state->count;
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrUpdateDecimalAvgI128(
-    char* group,
-    int32_t offset,
-    bytedance::bolt::int128_t value) {
-  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
-  ++state->count;
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalSumI64(
-    char* group,
-    int32_t offset,
-    int64_t value,
-    int8_t isEmpty) {
-  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(
-      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
-  state->isEmpty = state->isEmpty && static_cast<bool>(isEmpty);
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalSumI128(
-    char* group,
-    int32_t offset,
-    bytedance::bolt::int128_t value,
-    int8_t isEmpty) {
-  auto* state = reinterpret_cast<JitDecimalSumState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
-  state->isEmpty = state->isEmpty && static_cast<bool>(isEmpty);
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalAvgI64(
-    char* group,
-    int32_t offset,
-    int64_t value,
-    int64_t count) {
-  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(
-      state->sum, static_cast<bytedance::bolt::int128_t>(value), state->sum);
-  state->count += count;
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrMergeDecimalAvgI128(
-    char* group,
-    int32_t offset,
-    bytedance::bolt::int128_t value,
-    int64_t count) {
-  auto* state = reinterpret_cast<JitDecimalAvgState*>(group + offset);
-  state->overflow += jitHashAggrAddWithOverflow(state->sum, value, state->sum);
-  state->count += count;
-}
+[[maybe_unused]] __attribute__((used)) const void* const
+    kHashAggrRuntimeLinkAnchors[] = {
+        reinterpret_cast<const void*>(&jit_HashAggrResizeVector),
+        reinterpret_cast<const void*>(&jit_HashAggrExtractFinalDecimalSum)};
 
 } // extern "C"
 
@@ -233,36 +148,6 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(
       module, "jit_GetDecodedRowFieldIsNull", i8Ty, {i8PtrTy, i32Ty, i32Ty});
   declareFunction(module, "jit_GetDecodedIsNull", i8Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_HashAggrInitDecimalSum", voidTy, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_HashAggrInitDecimalAvg", voidTy, {i8PtrTy, i32Ty});
-  declareFunction(
-      module, "jit_HashAggrUpdateDecimalSumI64", voidTy, {i8PtrTy, i32Ty, i64Ty});
-  declareFunction(
-      module, "jit_HashAggrUpdateDecimalSumI128", voidTy, {i8PtrTy, i32Ty, i128Ty});
-  declareFunction(
-      module, "jit_HashAggrUpdateDecimalAvgI64", voidTy, {i8PtrTy, i32Ty, i64Ty});
-  declareFunction(
-      module, "jit_HashAggrUpdateDecimalAvgI128", voidTy, {i8PtrTy, i32Ty, i128Ty});
-  declareFunction(
-      module,
-      "jit_HashAggrMergeDecimalSumI64",
-      voidTy,
-      {i8PtrTy, i32Ty, i64Ty, i8Ty});
-  declareFunction(
-      module,
-      "jit_HashAggrMergeDecimalSumI128",
-      voidTy,
-      {i8PtrTy, i32Ty, i128Ty, i8Ty});
-  declareFunction(
-      module,
-      "jit_HashAggrMergeDecimalAvgI64",
-      voidTy,
-      {i8PtrTy, i32Ty, i64Ty, i64Ty});
-  declareFunction(
-      module,
-      "jit_HashAggrMergeDecimalAvgI128",
-      voidTy,
-      {i8PtrTy, i32Ty, i128Ty, i64Ty});
   declareFunction(module, "jit_HashAggrResizeVector", voidTy, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_HashAggrSetFlatI8", voidTy, {i8PtrTy, i32Ty, i8Ty, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatI16", voidTy, {i8PtrTy, i32Ty, i16Ty, i8Ty});
@@ -911,6 +796,39 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
        builder().getInt32(slot.desc.precision),
        builder().getInt32(slot.desc.scale),
        longDecimal});
+}
+
+void HashAggrJitCodegen::emitDecimalAddWithOverflow(
+    llvm::Value* group,
+    int32_t sumOffset,
+    int32_t overflowOffset,
+    llvm::Value* addend) const {
+  auto& b = builder();
+  auto* i128Ty = b.getInt128Ty();
+  auto* i64Ty = b.getInt64Ty();
+  auto* zero128 = llvm::ConstantInt::get(i128Ty, 0);
+
+  auto* oldSum = loadValue(group, i128Ty, sumOffset);
+  auto* newSum = b.CreateAdd(oldSum, addend);
+  storeValue(group, i128Ty, sumOffset, newSum);
+
+  // Mirror jitHashAggrAddWithOverflow:
+  //   +1 if a>0 && b>0 && result<0   (positive overflow)
+  //   -1 if a<0 && b<0 && result>=0  (negative overflow)
+  auto* aPos = b.CreateICmpSGT(oldSum, zero128);
+  auto* bPos = b.CreateICmpSGT(addend, zero128);
+  auto* rNeg = b.CreateICmpSLT(newSum, zero128);
+  auto* posOverflow = b.CreateAnd(b.CreateAnd(aPos, bPos), rNeg);
+
+  auto* aNeg = b.CreateICmpSLT(oldSum, zero128);
+  auto* bNeg = b.CreateICmpSLT(addend, zero128);
+  auto* rNonNeg = b.CreateICmpSGE(newSum, zero128);
+  auto* negOverflow = b.CreateAnd(b.CreateAnd(aNeg, bNeg), rNonNeg);
+
+  auto* carry = b.CreateSub(
+      b.CreateZExt(posOverflow, i64Ty), b.CreateZExt(negOverflow, i64Ty));
+  auto* oldOverflow = loadValue(group, i64Ty, overflowOffset);
+  storeValue(group, i64Ty, overflowOffset, b.CreateAdd(oldOverflow, carry));
 }
 
 namespace {
