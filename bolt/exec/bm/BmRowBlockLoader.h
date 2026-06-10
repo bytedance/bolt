@@ -13,6 +13,9 @@
 
 namespace bytedance::bolt::exec::bm {
 
+// Pins row/heap blocks through BufferManager and repairs raw pointers after
+// blocks become resident. This is the only helper that should perform bulk
+// block pinning and StringView rebasing for BmRowContainer.
 class BmRowBlockLoader {
  public:
   BmRowBlockLoader(

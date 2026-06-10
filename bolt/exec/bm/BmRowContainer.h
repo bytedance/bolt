@@ -26,6 +26,8 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer {
  public:
+  // Location token returned by appendRow(). It is only meant for immediately
+  // storing columns of that row; do not keep it after flush.
   class RowWriteContext {
    public:
     RowWriteContext() = default;
@@ -68,6 +70,8 @@ class BmRowContainer {
       const RowVectorPtr& input,
       PartitionId partition = kDefaultPartition);
 
+  // Allocates one row in the active segment for partition. The caller must fill
+  // columns with store() before treating the row as complete.
   RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
 
   void store(
@@ -97,14 +101,19 @@ class BmRowContainer {
   SegmentId flushActiveSegment();
   SegmentId flushActivePartitionSegment(PartitionId partition);
 
+  // Materializes rows in the supplied order into a read run. The input rows must
+  // be resident pointers at call time.
   ReorderedRunId finalizeReorderedRun(
       folly::Range<char* const*> sortedRows,
       const ReorderedRunOptions& options);
 
+  // Creates a lazy read session. No blocks are pinned until tryLoadAll(),
+  // loadRows(), or loadRow() is called.
   BulkReadSession beginBulkReadSegments(
       folly::Range<const SegmentId*> segments,
       ReadSessionOptions options = {});
 
+  // Creates a session for scanning/comparing reordered runs.
   MergeReadSession beginMergeReadRuns(
       folly::Range<const ReorderedRunId*> runs,
       ReadSessionOptions options = {});
