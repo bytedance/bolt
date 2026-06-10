@@ -1132,10 +1132,10 @@ void GroupingSet::runHashAggrJitChunks(
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
       hashAggrJitDecodedInputs_[slotIndex] = jit::HashAggrJitDecodedInput{
-          hashAggrJitDecoded_[slotIndex].dataAsVoid(),
-          hashAggrJitDecoded_[slotIndex].indices(),
-          hashAggrJitDecoded_[slotIndex].nulls(&activeRows_),
-          &hashAggrJitDecoded_[slotIndex]};
+          .values = hashAggrJitDecoded_[slotIndex].dataAsVoid(),
+          .indices = hashAggrJitDecoded_[slotIndex].indices(),
+          .nulls = hashAggrJitDecoded_[slotIndex].nulls(&activeRows_),
+          .decodedVector = &hashAggrJitDecoded_[slotIndex]};
       fillHashAggrJitRowFieldInputs(
           hashAggrJitDecodedInputs_[slotIndex],
           hashAggrJitDecoded_[slotIndex],

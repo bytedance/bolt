@@ -7,6 +7,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
+#include <cstddef>
 
 #include <cmath>
 #include <sstream>
@@ -18,6 +19,8 @@
 
 extern "C" {
 
+using bytedance::bolt::jit::HashAggrJitDecodedInput;
+using bytedance::bolt::jit::HashAggrJitOutput;
 using bytedance::bolt::jit::JitDecimalAvgState;
 using bytedance::bolt::jit::JitDecimalSumState;
 
@@ -48,6 +51,32 @@ void logHashAggrJitFunctionIR(
           << " error=" << hasError << ":\n"
           << ir;
 }
+
+constexpr uint64_t kDecodedInputIndicesOffset =
+    offsetof(HashAggrJitDecodedInput, indices);
+constexpr uint64_t kDecodedInputNullsOffset =
+    offsetof(HashAggrJitDecodedInput, nulls);
+constexpr uint64_t kDecodedInputDecodedVectorOffset =
+    offsetof(HashAggrJitDecodedInput, decodedVector);
+constexpr uint64_t kDecodedInputFirstRowFieldOffset =
+    offsetof(HashAggrJitDecodedInput, rowField0Values);
+constexpr uint64_t kDecodedInputRowFieldNullsOffsetDelta =
+    offsetof(HashAggrJitDecodedInput, rowField0Nulls) -
+    offsetof(HashAggrJitDecodedInput, rowField0Values);
+constexpr uint64_t kDecodedInputRowFieldStride =
+    offsetof(HashAggrJitDecodedInput, rowField1Values) -
+    offsetof(HashAggrJitDecodedInput, rowField0Values);
+
+constexpr uint64_t kOutputNullsOffset = offsetof(HashAggrJitOutput, nulls);
+constexpr uint64_t kOutputVectorOffset = offsetof(HashAggrJitOutput, vector);
+constexpr uint64_t kOutputFirstRowFieldOffset =
+    offsetof(HashAggrJitOutput, rowField0Values);
+constexpr uint64_t kOutputRowFieldNullsOffsetDelta =
+    offsetof(HashAggrJitOutput, rowField0Nulls) -
+    offsetof(HashAggrJitOutput, rowField0Values);
+constexpr uint64_t kOutputRowFieldStride =
+    offsetof(HashAggrJitOutput, rowField1Values) -
+    offsetof(HashAggrJitOutput, rowField0Values);
 
 int64_t jitHashAggrAddWithOverflow(
     bytedance::bolt::int128_t left,
@@ -364,7 +393,7 @@ llvm::Value* loadOutputValues(llvm::IRBuilder<>& builder, llvm::Value* output) {
 llvm::Value* loadOutputNulls(llvm::IRBuilder<>& builder, llvm::Value* output) {
   auto* i64Ty = builder.getInt64Ty();
   auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), output, static_cast<uint64_t>(sizeof(void*)));
+      builder.getInt8Ty(), output, kOutputNullsOffset);
   auto* nullsPtrPtr =
       builder.CreatePointerCast(nullsAddr, i64Ty->getPointerTo()->getPointerTo());
   return builder.CreateLoad(i64Ty->getPointerTo(), nullsPtrPtr, "output_nulls");
@@ -373,7 +402,7 @@ llvm::Value* loadOutputNulls(llvm::IRBuilder<>& builder, llvm::Value* output) {
 llvm::Value* loadOutputVector(llvm::IRBuilder<>& builder, llvm::Value* output) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
   auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), output, static_cast<uint64_t>(2 * sizeof(void*)));
+      builder.getInt8Ty(), output, kOutputVectorOffset);
   auto* vectorPtrPtr = builder.CreatePointerCast(vectorAddr, i8PtrTy->getPointerTo());
   return builder.CreateLoad(i8PtrTy, vectorPtrPtr, "output_vector");
 }
@@ -398,7 +427,7 @@ llvm::Value* loadDecodedIndex(
   auto* indices = loadPointerField(
       builder,
       decoded,
-      sizeof(void*),
+      kDecodedInputIndicesOffset,
       i32Ty->getPointerTo(),
       "decoded_indices");
   return builder.CreateLoad(i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
@@ -410,10 +439,10 @@ llvm::Value* loadDecodedRowFieldPointer(
     int32_t field,
     bool nulls) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  const auto firstRowFieldOffset = static_cast<uint64_t>(4 * sizeof(void*));
   auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
-  auto offset = firstRowFieldOffset + static_cast<uint64_t>(field) * 2 * sizeof(void*) +
-      (nulls ? sizeof(void*) : 0);
+  auto offset = kDecodedInputFirstRowFieldOffset +
+      static_cast<uint64_t>(field) * kDecodedInputRowFieldStride +
+      (nulls ? kDecodedInputRowFieldNullsOffsetDelta : 0);
   return loadPointerField(
       builder,
       decoded,
@@ -428,10 +457,10 @@ llvm::Value* loadOutputRowFieldPointer(
     int32_t field,
     bool nulls) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  const auto firstRowFieldOffset = static_cast<uint64_t>(3 * sizeof(void*));
   auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
-  auto offset = firstRowFieldOffset + static_cast<uint64_t>(field) * 2 * sizeof(void*) +
-      (nulls ? sizeof(void*) : 0);
+  auto offset = kOutputFirstRowFieldOffset +
+      static_cast<uint64_t>(field) * kOutputRowFieldStride +
+      (nulls ? kOutputRowFieldNullsOffsetDelta : 0);
   return loadPointerField(
       builder,
       output,
@@ -558,7 +587,7 @@ llvm::Value* loadDecodedValue(
   auto* values = builder.CreateLoad(i8PtrTy, valuesPtrPtr, "decoded_values");
 
   auto* indicesAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, static_cast<uint64_t>(sizeof(void*)));
+      builder.getInt8Ty(), decoded, kDecodedInputIndicesOffset);
   auto* indicesPtrPtr =
       builder.CreatePointerCast(indicesAddr, i32Ty->getPointerTo()->getPointerTo());
   auto* indices = builder.CreateLoad(i32Ty->getPointerTo(), indicesPtrPtr, "decoded_indices");
@@ -593,7 +622,7 @@ llvm::Value* loadDecodedValue(
 llvm::Value* loadDecodedNulls(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
   auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, static_cast<uint64_t>(2 * sizeof(void*)));
+      builder.getInt8Ty(), decoded, kDecodedInputNullsOffset);
   auto* nullsPtrPtr = builder.CreatePointerCast(nullsAddr, i8PtrTy->getPointerTo());
   return builder.CreateLoad(i8PtrTy, nullsPtrPtr, "decoded_nulls");
 }
@@ -618,7 +647,7 @@ llvm::Value* isDecodedNull(
 llvm::Value* loadDecodedVector(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
   auto* decodedVectorAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, static_cast<uint64_t>(3 * sizeof(void*)));
+      builder.getInt8Ty(), decoded, kDecodedInputDecodedVectorOffset);
   auto* decodedVectorPtrPtr =
       builder.CreatePointerCast(decodedVectorAddr, i8PtrTy->getPointerTo());
   return builder.CreateLoad(i8PtrTy, decodedVectorPtrPtr, "decoded_vector");
