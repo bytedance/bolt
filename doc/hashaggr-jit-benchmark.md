@@ -921,3 +921,177 @@ $FG/flamegraph.pl --title "width8_high_card_partial_avg_extract no-JIT" \
   而不是继续优化 extract 本身。
 - 真正还能换来 add kernel 收益的是 P2（flat/no-null add_dense 快路径）和 P3（下沉 per-row accumulator null clear），
   它们作用于计算占比高的 case，优先级高于继续打磨 partial_avg_extract。
+
+附上此次优化后的benchmark report
+
+```
+$ ./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark  
+============================================================================
+[...]c/benchmarks/HashAggrJitBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+width4_sum_nojit                                            2.58ms    387.72
+width4_sum_jit                                              2.36ms    422.95
+----------------------------------------------------------------------------
+width4_avg_nojit                                            3.15ms    317.76
+width4_avg_jit                                              2.69ms    372.41
+----------------------------------------------------------------------------
+width4_min_nojit                                            2.46ms    407.31
+width4_min_jit                                              2.47ms    405.55
+----------------------------------------------------------------------------
+width4_count_nojit                                          2.40ms    416.38
+width4_count_jit                                            1.91ms    524.51
+----------------------------------------------------------------------------
+width4_merge_sum_nojit                                      3.70ms    270.06
+width4_merge_sum_jit                                        3.31ms    302.23
+----------------------------------------------------------------------------
+width4_merge_avg_nojit                                      4.53ms    220.94
+width4_merge_avg_jit                                        3.67ms    272.67
+----------------------------------------------------------------------------
+width4_merge_min_nojit                                      3.54ms    282.70
+width4_merge_min_jit                                        3.37ms    296.70
+----------------------------------------------------------------------------
+width4_merge_count_nojit                                    3.43ms    291.51
+width4_merge_count_jit                                      2.87ms    348.60
+----------------------------------------------------------------------------
+width8_sum_nojit                                            4.60ms    217.19
+width8_sum_jit                                              3.41ms    293.12
+----------------------------------------------------------------------------
+width8_avg_nojit                                            5.27ms    189.92
+width8_avg_jit                                              4.10ms    244.09
+----------------------------------------------------------------------------
+width8_min_nojit                                            3.76ms    266.31
+width8_min_jit                                              3.53ms    283.64
+----------------------------------------------------------------------------
+width8_count_nojit                                          4.31ms    231.77
+width8_count_jit                                            2.37ms    422.36
+----------------------------------------------------------------------------
+width8_merge_sum_nojit                                      6.17ms    162.07
+width8_merge_sum_jit                                        4.78ms    209.35
+----------------------------------------------------------------------------
+width8_merge_avg_nojit                                      7.26ms    137.75
+width8_merge_avg_jit                                        5.67ms    176.25
+----------------------------------------------------------------------------
+width8_merge_min_nojit                                      5.26ms    189.99
+width8_merge_min_jit                                        4.82ms    207.44
+----------------------------------------------------------------------------
+width8_merge_count_nojit                                    5.73ms    174.57
+width8_merge_count_jit                                      3.55ms    281.72
+----------------------------------------------------------------------------
+width16_sum_nojit                                           8.90ms    112.38
+width16_sum_jit                                             5.97ms    167.52
+----------------------------------------------------------------------------
+width16_avg_nojit                                          10.59ms     94.47
+width16_avg_jit                                             7.29ms    137.08
+----------------------------------------------------------------------------
+width16_min_nojit                                           7.66ms    130.62
+width16_min_jit                                             6.34ms    157.71
+----------------------------------------------------------------------------
+width16_count_nojit                                         7.70ms    129.92
+width16_count_jit                                           3.51ms    284.55
+----------------------------------------------------------------------------
+width16_merge_sum_nojit                                    11.17ms     89.55
+width16_merge_sum_jit                                       7.29ms    137.12
+----------------------------------------------------------------------------
+width16_merge_avg_nojit                                    14.74ms     67.86
+width16_merge_avg_jit                                      10.45ms     95.71
+----------------------------------------------------------------------------
+width16_merge_min_nojit                                    10.53ms     94.92
+width16_merge_min_jit                                       8.39ms    119.26
+----------------------------------------------------------------------------
+width16_merge_count_nojit                                  10.02ms     99.78
+width16_merge_count_jit                                     5.30ms    188.84
+----------------------------------------------------------------------------
+width32_sum_nojit                                          17.49ms     57.17
+width32_sum_jit                                            12.44ms     80.38
+----------------------------------------------------------------------------
+width32_avg_nojit                                          20.01ms     49.97
+width32_avg_jit                                            15.68ms     63.77
+----------------------------------------------------------------------------
+width32_min_nojit                                          15.48ms     64.62
+width32_min_jit                                            12.96ms     77.16
+----------------------------------------------------------------------------
+width32_count_nojit                                        16.00ms     62.52
+width32_count_jit                                           7.39ms    135.35
+----------------------------------------------------------------------------
+width32_merge_sum_nojit                                    22.50ms     44.45
+width32_merge_sum_jit                                      17.12ms     58.41
+----------------------------------------------------------------------------
+width32_merge_avg_nojit                                    27.85ms     35.90
+width32_merge_avg_jit                                      21.32ms     46.90
+----------------------------------------------------------------------------
+width32_merge_min_nojit                                    20.59ms     48.56
+width32_merge_min_jit                                      17.22ms     58.09
+----------------------------------------------------------------------------
+width32_merge_count_nojit                                  19.84ms     50.39
+width32_merge_count_jit                                    11.76ms     85.03
+----------------------------------------------------------------------------
+width8_decimal_sum_nojit                                   11.94ms     83.76
+width8_decimal_sum_jit                                      9.86ms    101.41
+----------------------------------------------------------------------------
+width8_decimal_avg_nojit                                   16.31ms     61.30
+width8_decimal_avg_jit                                     14.75ms     67.81
+----------------------------------------------------------------------------
+width8_double_min_nojit                                     4.97ms    201.05
+width8_double_min_jit                                       4.17ms    239.76
+----------------------------------------------------------------------------
+width8_double_max_nojit                                     4.29ms    233.10
+width8_double_max_jit                                       3.95ms    253.45
+----------------------------------------------------------------------------
+width8_high_card_partial_avg_extract_nojit                 62.12ms     16.10
+width8_high_card_partial_avg_extract_jit                   68.54ms     14.59
+----------------------------------------------------------------------------
+width8_high_card_partial_sum_extract_nojit                 25.27ms     39.58
+width8_high_card_partial_sum_extract_jit                   23.10ms     43.29
+----------------------------------------------------------------------------
+```
+
+## 12. P2：flat/identity add_dense 快路径验证（已验证无收益，回退）
+
+### 12.1 优化假设
+
+第 9.6.2 / 第 11 章曾把 add_dense 主路径的 `indices[row]` 间接寻址列为 P2 优化点：
+flat（identity mapping）输入时 `indices[row] == row`，`loadDecodedValue`
+（`bolt/jit/aggregation/HashAggrJit.cpp`）每行先 `index = indices[row]` 再
+`values[index]`，这一级 load 在 flat 下被认为是可省的冗余，预期省掉后能让取值-累加
+循环更利于向量化。
+
+### 12.2 实现与验证
+
+按方案 A 实现：
+
+1. `HashAggrJitDecodedInput` 增 `identityMapping` 标记字段；
+2. `GroupingSet` 在准备 descriptor 时用 `DecodedVector::isIdentityMapping()` 填标记；
+3. `loadDecodedValue` 在 IR 里据标记选择直接用 `row` 还是 `indices[row]`。
+
+验证：
+
+- **功能**：编译通过；dump add_dense IR 确认 identity 分支正确生成、descriptor
+  trailing bool 的 offset 读取正确（`align 1`）。spark aggregate JIT 单测
+  （`bolt_functions_spark_aggregates_test`，`--gtest_filter='*hashAggrJit*'`）
+  3 passed / 2 failed，其中 2 个失败（`hashAggrJitMergeAndExtract`、
+  `hashAggrJitAllNullGroup`）经 `git stash` 对比确认是**基线既有 bug，与 P2 无关**，
+  P2 未引入新回归。
+- **性能**：分别构建 baseline / P2 两个 benchmark binary，交替多轮对比
+  `width8/16/32` 的 sum/avg/min jit 耗时。
+
+### 12.3 实测结果
+
+| 实现方式 | 相对基线 | 说明 |
+|----------|----------|------|
+| select 版（IR 内 `select` 选 index） | **慢约 3–6%** | `select` 仍无条件 load `indices[row]`，额外多算 flag load + select，净增指令 |
+| branch 版（控制流跳过 `indices[row]` load） | **基本持平** | 多轮差异均在 ±1–2% 噪声内，无可测收益，且增加 IR 复杂度 |
+
+以 `width16_sum_jit` 三轮交替为例（branch 版）：base 6.48 / 6.24 / 6.48ms，
+P2 6.20 / 6.31 / 6.25ms——互有高低，落在噪声范围内。
+
+### 12.4 结论
+
+- **P2 在当前硬件 / 工作负载上没有可测收益，改动已全部回退到基线。**
+- 根因：第 11 章把 `indices[row]` 当瓶颈的假设在实测中不成立。flat 输入下
+  `indices` 是连续数组的顺序读，**硬件预取使其几乎零成本**，省掉它换不来收益；
+  select 版反而因多余指令小幅变慢。
+- 按「只做直接必要、不过度工程」的原则，无收益且增加复杂度的改动不保留。
+- 后续若再优化 add_dense 主路径，方向应转向真正的访存瓶颈（如 accumulator 在
+  RowContainer 中的非连续布局），而非已被预取覆盖的 `indices[row]` 间接寻址。
+- P3（下沉 per-row accumulator null clear）的待确认正确性约束（新组创建与首次更新
+  是否同 batch）经评估不成立、争议较大，暂缓，不在本轮实施。
