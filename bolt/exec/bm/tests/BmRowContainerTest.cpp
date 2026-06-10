@@ -42,10 +42,10 @@ class BmRowContainerTest : public testing::Test,
   }
 
   std::vector<char*> storeAll(BmRowContainer& container, RowVectorPtr input) {
-    return container.appendBatch(input).rows;
+    return container.appendBatch(input);
   }
 
-  std::vector<char*> storeAllByRowWriter(
+  std::vector<char*> storeAllByRowWriteContext(
       BmRowContainer& container,
       RowVectorPtr input) {
     SelectivityVector rows(input->size());
@@ -57,12 +57,11 @@ class BmRowContainerTest : public testing::Test,
     std::vector<char*> rowsOut;
     rowsOut.reserve(input->size());
     for (auto row = 0; row < input->size(); ++row) {
-      auto writer = container.appendRow();
+      auto context = container.appendRow();
       for (auto column = 0; column < input->childrenSize(); ++column) {
-        writer.store(decoded[column], row, column);
+        container.store(context, decoded[column], row, column);
       }
-      rowsOut.push_back(writer.row());
-      writer.finish();
+      rowsOut.push_back(context.row());
     }
     return rowsOut;
   }
@@ -78,7 +77,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
-  auto rows = storeAllByRowWriter(container, input);
+  auto rows = storeAllByRowWriteContext(container, input);
 
   EXPECT_GT(container.compare(rows[0], rows[1], 0), 0);
   EXPECT_LT(container.compare(rows[1], rows[2], 0), 0);
@@ -277,14 +276,12 @@ TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
   DecodedVector decoded;
   decoded.decode(*input->childAt(0), rows);
 
-  auto firstWriter = container.appendRow(7);
-  firstWriter.store(decoded, 0, 0);
-  firstWriter.finish();
+  auto firstContext = container.appendRow(7);
+  container.store(firstContext, decoded, 0, 0);
   auto firstSegment = container.flushActivePartitionSegment(7);
 
-  auto secondWriter = container.appendRow(7);
-  secondWriter.store(decoded, 1, 0);
-  secondWriter.finish();
+  auto secondContext = container.appendRow(7);
+  container.store(secondContext, decoded, 1, 0);
   auto secondSegment = container.flushActivePartitionSegment(7);
 
   EXPECT_NE(firstSegment, secondSegment);
