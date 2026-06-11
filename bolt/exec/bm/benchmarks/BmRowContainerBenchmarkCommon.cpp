@@ -556,51 +556,23 @@ void readBmSpill(
     const BenchmarkOptions& options,
     BmSpillReadMetrics* metrics) {
   const auto beginStart = benchmarkNowNs();
-  ReadSessionOptions readOptions;
-  if (metrics != nullptr) {
-    readOptions.bulkLoadMetrics = &metrics->bulkLoad;
-  }
-  auto session = container.beginBulkReadSegments({&segment, 1}, readOptions);
+  container.canLoadAllSegments({&segment, 1});
   if (metrics != nullptr) {
     metrics->beginNs += benchmarkNowNs() - beginStart;
   }
 
-  const auto tryLoadAllStart = benchmarkNowNs();
-  std::vector<char*> rows;
-  std::vector<RowId> rowIds;
+  const auto listRowsStart = benchmarkNowNs();
   const auto totalRows = rowCount(options);
-  rows.reserve(totalRows);
-  rowIds.reserve(totalRows);
-  auto result = session.tryLoadAll(rows, rowIds);
+  auto rows = container.listRows(
+      {&segment, 1}, metrics == nullptr ? nullptr : &metrics->bulkLoad);
   if (metrics != nullptr) {
-    metrics->tryLoadAllNs += benchmarkNowNs() - tryLoadAllStart;
-    metrics->result = result;
-    if (result == LoadAllResult::kLoadedPointers) {
-      metrics->rows += rows.size();
-    } else {
-      metrics->rowIds += rowIds.size();
-    }
+    metrics->listRowsNs += benchmarkNowNs() - listRowsStart;
+    metrics->resultPointers = true;
+    metrics->rows += rows.size();
   }
-  if (result == LoadAllResult::kLoadedPointers) {
-    folly::doNotOptimizeAway(rows.data());
-    folly::doNotOptimizeAway(rows.size());
-    return;
-  }
-
-  for (size_t offset = 0; offset < rowIds.size();) {
-    const auto batchSize = static_cast<vector_size_t>(
-        std::min<size_t>(options.batchRows, rowIds.size() - offset));
-    const auto windowStart = benchmarkNowNs();
-    auto window = session.loadRows(
-        {rowIds.data() + offset, static_cast<size_t>(batchSize)});
-    if (metrics != nullptr) {
-      metrics->windowLoadNs += benchmarkNowNs() - windowStart;
-      ++metrics->windows;
-    }
-    folly::doNotOptimizeAway(window.rows.data());
-    folly::doNotOptimizeAway(window.rows.size());
-    offset += batchSize;
-  }
+  BOLT_CHECK_EQ(totalRows, rows.size());
+  folly::doNotOptimizeAway(rows.data());
+  folly::doNotOptimizeAway(rows.size());
 }
 
 OldSpillData spillOldRows(

@@ -85,6 +85,7 @@ class BmRowStorage {
   SegmentState segmentState(SegmentId segment) const;
   const std::vector<SegmentId>& segmentsForPartition(
       PartitionId partition) const;
+  std::vector<SegmentId> allSegmentIds() const;
   int64_t numRows() const;
 
   SegmentData& activeSegment(PartitionId partition);

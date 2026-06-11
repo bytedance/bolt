@@ -129,6 +129,15 @@ const std::vector<SegmentId>& BmRowStorage::segmentsForPartition(
   return it->second;
 }
 
+std::vector<SegmentId> BmRowStorage::allSegmentIds() const {
+  std::vector<SegmentId> ids;
+  ids.reserve(segments_.size());
+  for (const auto& [id, _] : segments_) {
+    ids.push_back(id);
+  }
+  return ids;
+}
+
 int64_t BmRowStorage::numRows() const {
   int64_t rows = 0;
   for (const auto& [_, segment] : segments_) {

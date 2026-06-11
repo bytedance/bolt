@@ -121,7 +121,7 @@ TEST_F(BmRowContainerTest, AppendBatchAndStringCompare) {
   EXPECT_EQ("prefix_same_a", flat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
+TEST_F(BmRowContainerTest, ListRowsLoadsStablePointersWhenResident) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -134,15 +134,10 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   ASSERT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
 
   const auto batchPinsBeforeBegin = bufferManager_->stats().batchPinCount;
-  auto session = container.beginBulkReadSegments({&segment, 1});
-  EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
-
-  std::vector<char*> rows;
-  std::vector<RowId> rowIds;
-  ASSERT_EQ(LoadAllResult::kLoadedPointers, session.tryLoadAll(rows, rowIds));
+  ASSERT_TRUE(container.canLoadAllSegments({&segment, 1}));
+  auto rows = container.listRows({&segment, 1});
   EXPECT_EQ(batchPinsBeforeBegin + 1, bufferManager_->stats().batchPinCount);
   ASSERT_EQ(input->size(), rows.size());
-  ASSERT_TRUE(rowIds.empty());
   EXPECT_EQ(0, container.compare(rows[1], rows[3], 0));
   EXPECT_LT(container.compare(rows[1], rows[3], 1), 0);
 
@@ -157,7 +152,7 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   EXPECT_EQ("bravo", flat->valueAt(3).str());
 }
 
-TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
+TEST_F(BmRowContainerTest, ListRowIdsAndWindowReadRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -167,29 +162,17 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   storeAll(container, input);
 
   auto segment = container.flushActiveSegment();
-  ReadSessionOptions options;
-  options.maxPinnedBytes = 1;
   const auto batchPinsBeforeBegin = bufferManager_->stats().batchPinCount;
-  auto session = container.beginBulkReadSegments({&segment, 1}, options);
+  auto rowIds = container.listRowIds({&segment, 1});
   EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
-
-  std::vector<char*> rows;
-  std::vector<RowId> rowIds;
-  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
-  EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
-  ASSERT_TRUE(rows.empty());
   ASSERT_EQ(input->size(), rowIds.size());
 
+  auto session = container.beginWindowReadSegments({&segment, 1});
   std::vector<RowId> reordered{rowIds[2], rowIds[0], rowIds[3], rowIds[1]};
-  auto window = session.loadRows({reordered.data(), reordered.size()});
-  ASSERT_EQ(reordered.size(), window.rows.size());
+  auto inputRows = session.loadRows({reordered.data(), reordered.size()});
+  ASSERT_EQ(reordered.size(), inputRows.size());
 
   auto result = BaseVector::create(VARCHAR(), reordered.size(), pool());
-  std::vector<char*> inputRows;
-  inputRows.reserve(window.rows.size());
-  for (const auto& row : window.rows) {
-    inputRows.push_back(row.ptr);
-  }
   container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
@@ -204,6 +187,42 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   char* alphaRow = alpha;
   container.extractColumnResident(&alphaRow, 1, 1, single);
   EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
+}
+
+TEST_F(BmRowContainerTest, LoadedRowsCanBeSpilledAndLoadedAgain) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      256 << 10);
+  constexpr vector_size_t kRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("reload-string-value-{}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.flushActiveSegment();
+  auto rows = container.listRows({&segment, 1});
+  ASSERT_EQ(kRows, rows.size());
+
+  container.spillLoadedSegments({&segment, 1});
+
+  auto rowIds = container.listRowIds({&segment, 1});
+  auto window = container.beginWindowReadSegments({&segment, 1});
+  auto loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(loaded.data(), loaded.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("reload-string-value-0", flat->valueAt(0).str());
+  EXPECT_EQ("reload-string-value-1024", flat->valueAt(1024).str());
+  EXPECT_EQ("reload-string-value-4095", flat->valueAt(4095).str());
 }
 
 TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
@@ -223,23 +242,12 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   storeAll(container, input);
 
   auto segment = container.flushActiveSegment();
-  ReadSessionOptions options;
-  options.maxPinnedBytes = 1;
-  auto session = container.beginBulkReadSegments({&segment, 1}, options);
-
-  std::vector<char*> rows;
-  std::vector<RowId> rowIds;
-  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  auto session = container.beginWindowReadSegments({&segment, 1});
+  auto rowIds = container.listRowIds({&segment, 1});
   ASSERT_EQ(kRows, rowIds.size());
 
-  auto window = session.loadRows({rowIds.data(), rowIds.size()});
-  ASSERT_EQ(kRows, window.rows.size());
-
-  std::vector<char*> inputRows;
-  inputRows.reserve(window.rows.size());
-  for (const auto& row : window.rows) {
-    inputRows.push_back(row.ptr);
-  }
+  auto inputRows = session.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, inputRows.size());
   auto result = BaseVector::create(VARCHAR(), kRows, pool());
   container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
   auto flat = result->asFlatVector<StringView>();
@@ -271,23 +279,12 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
   storeAll(container, input);
 
   auto segment = container.flushActiveSegment();
-  ReadSessionOptions options;
-  options.maxPinnedBytes = 1;
-  auto session = container.beginBulkReadSegments({&segment, 1}, options);
-
-  std::vector<char*> rows;
-  std::vector<RowId> rowIds;
-  ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
+  auto session = container.beginWindowReadSegments({&segment, 1});
+  auto rowIds = container.listRowIds({&segment, 1});
   ASSERT_EQ(kRows, rowIds.size());
 
-  auto window = session.loadRows({rowIds.data(), rowIds.size()});
-  ASSERT_EQ(kRows, window.rows.size());
-
-  std::vector<char*> inputRows;
-  inputRows.reserve(window.rows.size());
-  for (const auto& row : window.rows) {
-    inputRows.push_back(row.ptr);
-  }
+  auto inputRows = session.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, inputRows.size());
 
   auto left = BaseVector::create(VARCHAR(), kRows, pool());
   container.extractColumnResident(inputRows.data(), inputRows.size(), 1, left);
@@ -414,22 +411,34 @@ TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
   EXPECT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
 
   auto session = container.beginMergeReadSegments({&segment, 1});
-  auto cursor = session.makeCursor(segment);
-  ASSERT_TRUE(cursor.hasCurrent());
-
+  std::vector<char*> batch;
   std::vector<std::string> values;
-  while (cursor.hasCurrent()) {
-    auto result = BaseVector::create(VARCHAR(), 1, pool());
-    auto* row = const_cast<char*>(cursor.currentRow());
-    container.extractColumnResident(&row, 1, 1, result);
-    values.push_back(result->asFlatVector<StringView>()->valueAt(0).str());
-    cursor.advance();
+  while (session.next(batch, 2)) {
+    auto result = BaseVector::create(VARCHAR(), batch.size(), pool());
+    container.extractColumnResident(batch.data(), batch.size(), 1, result);
+    auto flat = result->asFlatVector<StringView>();
+    for (auto i = 0; i < batch.size(); ++i) {
+      values.push_back(flat->valueAt(i).str());
+    }
   }
   EXPECT_EQ(
       (std::vector<std::string>{"alpha", "bravo", "charlie", "delta"}),
       values);
 
   container.releaseSegment(segment);
+  EXPECT_THROW(
+      container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
+}
+
+TEST_F(BmRowContainerTest, MergeReadRejectsUnorderedSegments) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeInput();
+  storeAll(container, input);
+  auto segment = container.flushActiveSegment();
   EXPECT_THROW(
       container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
 }
@@ -448,25 +457,20 @@ TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   auto segment =
       container.finalizeReorderedSegment({ordered.data(), ordered.size()});
   auto session = container.beginMergeReadSegments({&segment, 1});
-  auto cursor = session.makeCursor(segment);
-  ASSERT_TRUE(cursor.hasCurrent());
-
+  std::vector<char*> batch;
+  ASSERT_TRUE(session.next(batch, 1));
+  ASSERT_EQ(1, batch.size());
   auto first = BaseVector::create(BIGINT(), 1, pool());
-  auto* firstRow = const_cast<char*>(cursor.currentRow());
-  container.extractColumnResident(&firstRow, 1, 0, first);
+  container.extractColumnResident(batch.data(), batch.size(), 0, first);
   EXPECT_EQ(1, first->asFlatVector<int64_t>()->valueAt(0));
 
-  cursor.advance();
-  ASSERT_TRUE(cursor.hasCurrent());
+  ASSERT_TRUE(session.next(batch, 1));
+  ASSERT_EQ(1, batch.size());
   auto second = BaseVector::create(BIGINT(), 1, pool());
-  auto* secondRow = const_cast<char*>(cursor.currentRow());
-  container.extractColumnResident(&secondRow, 1, 0, second);
+  container.extractColumnResident(batch.data(), batch.size(), 0, second);
   EXPECT_EQ(2, second->asFlatVector<int64_t>()->valueAt(0));
 
-  auto bulk = container.beginBulkReadSegments({&segment, 1});
-  std::vector<char*> loadedRows;
-  std::vector<RowId> rowIds;
-  EXPECT_THROW(bulk.tryLoadAll(loadedRows, rowIds), BoltRuntimeError);
+  EXPECT_THROW(container.listRows({&segment, 1}), BoltRuntimeError);
 }
 
 TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
@@ -483,15 +487,11 @@ TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
   auto segment =
       container.finalizeReorderedSegment({ordered.data(), ordered.size()});
   auto session = container.beginMergeReadSegments({&segment, 1}, false);
-  auto cursor = session.makeCursor(segment);
-  ASSERT_TRUE(cursor.hasCurrent());
-  cursor.advance();
-  ASSERT_TRUE(cursor.hasCurrent());
+  std::vector<char*> batch;
+  ASSERT_TRUE(session.next(batch, 2));
+  ASSERT_EQ(2, batch.size());
 
-  auto bulk = container.beginBulkReadSegments({&segment, 1});
-  std::vector<char*> loadedRows;
-  std::vector<RowId> rowIds;
-  ASSERT_EQ(LoadAllResult::kLoadedPointers, bulk.tryLoadAll(loadedRows, rowIds));
+  auto loadedRows = container.listRows({&segment, 1});
   ASSERT_EQ(4, loadedRows.size());
 
   auto result = BaseVector::create(BIGINT(), loadedRows.size(), pool());
