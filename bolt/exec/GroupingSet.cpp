@@ -151,7 +151,8 @@ void fillHashAggrJitRowFieldInputs(
 // caller must fall back to the non-JIT extract path.
 bool fillHashAggrJitPartialAvgOutput(
     jit::HashAggrJitOutput& output,
-    BaseVector* vector) {
+    BaseVector* vector,
+    const jit::HashAggrJitSlot& slot) {
   auto* rowVector = vector->asUnchecked<RowVector>();
   if (rowVector->childrenSize() < 2) {
     return false;
@@ -162,8 +163,11 @@ bool fillHashAggrJitPartialAvgOutput(
       countVector->encoding() != VectorEncoding::Simple::FLAT) {
     return false;
   }
-  output.rowField0Values =
-      sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues();
+  output.rowField0Values = slot.desc.decimal
+      ? static_cast<void*>(
+            sumVector->asUnchecked<FlatVector<int128_t>>()->mutableRawValues())
+      : static_cast<void*>(
+            sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues());
   output.rowField0Nulls = sumVector->mutableRawNulls();
   output.rowField1Values =
       countVector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
@@ -1234,7 +1238,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
                  slot.desc.kind == jit::HashAggrJitKind::Avg) {
         hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
         if (!fillHashAggrJitPartialAvgOutput(
-                hashAggrJitOutputs_[slotIndex], aggregateVector.get())) {
+                hashAggrJitOutputs_[slotIndex], aggregateVector.get(), slot)) {
           canRunChunk = false;
           skipReason = "partial avg row fields are not flat";
           break;

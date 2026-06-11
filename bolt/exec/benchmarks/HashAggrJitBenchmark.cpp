@@ -74,8 +74,8 @@ class HashAggrJitBenchmark : public VectorTestBase {
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
     }
-    addCase(name + "_decimal_sum", rows, sums);
-    addCase(name + "_decimal_avg", rows, avgs);
+    addCase(name + "_decimal_sum", rows, sums, AggregationPlanKind::PartialFinal);
+    addCase(name + "_decimal_avg", rows, avgs, AggregationPlanKind::PartialFinal);
   }
 
   void addFloatingPointMinMaxBenchmark(const std::string& name, int32_t width) {
