@@ -226,6 +226,83 @@ BM RowContainer 的结构性优势也仍然成立：
 - BM block 数明显少于 old files/batches；
 - variable 场景下 BM 优势仍然明显。
 
+## 原始数据
+```
+wangxinshuo.db@n37-127-061:/data00/home/wangxinshuo.db/bolt$ ./_build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_benchmark 2>log.txt && cat log.txt 
+============================================================================
+[...]marks/BmRowContainerReadBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+readOld(old_fixed)                                           7.15s   139.83m
+readBm(bm_fixed)                                154.08%      4.64s   215.45m
+readOld(old_variable)                                        3.12s   320.27m
+readBm(bm_variable)                             106.58%      2.93s   341.35m
+----------------------------------------------------------------------------
+============================================================================
+[...]/BmRowContainerSpillReadBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+spillReadOld(old_raw_fixed)                                1.97min     8.45m
+spillReadBm(bm_raw_fixed)                       150.75%    1.31min    12.75m
+spillReadOld(old_lz4_fixed)                                1.81min     9.21m
+spillReadBm(bm_lz4_fixed)                       128.53%    1.41min    11.84m
+spillReadOld(old_zstd_fixed)                               1.70min     9.81m
+spillReadBm(bm_zstd_fixed)                      173.42%     58.76s    17.02m
+spillReadOld(old_raw_variable)                              54.78s    18.25m
+spillReadBm(bm_raw_variable)                    146.69%     37.34s    26.78m
+spillReadOld(old_lz4_variable)                              14.77s    67.72m
+spillReadBm(bm_lz4_variable)                     340.7%      4.33s   230.72m
+spillReadOld(old_zstd_variable)                             16.22s    61.65m
+spillReadBm(bm_zstd_variable)                   275.11%      5.90s   169.61m
+----------------------------------------------------------------------------
+============================================================================
+[...]BmRowContainerSpillWriteBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+spillWriteOld(old_raw_fixed)                                35.95s    27.82m
+spillWriteBm(bm_raw_fixed)                      862.82%      4.17s   239.99m
+spillWriteOld(old_lz4_fixed)                               1.68min     9.93m
+spillWriteBm(bm_lz4_fixed)                       148.5%    1.13min    14.74m
+spillWriteOld(old_zstd_fixed)                              3.63min     4.59m
+spillWriteBm(bm_zstd_fixed)                     121.11%    3.00min     5.56m
+spillWriteOld(old_raw_variable)                             13.92s    71.81m
+spillWriteBm(bm_raw_variable)                    390.8%      3.56s   280.65m
+spillWriteOld(old_lz4_variable)                             12.33s    81.10m
+spillWriteBm(bm_lz4_variable)                   205.87%      5.99s   166.97m
+spillWriteOld(old_zstd_variable)                            16.94s    59.04m
+spillWriteBm(bm_zstd_variable)                  112.53%     15.05s    66.44m
+----------------------------------------------------------------------------
+============================================================================
+[...]arks/BmRowContainerStoreBenchmark.cpp     relative  time/iter   iters/s
+============================================================================
+storeOld(old_fixed)                                         44.54s    22.45m
+storeBm(bm_fixed)                                129.8%     34.32s    29.14m
+storeOld(old_variable)                                       9.59s   104.27m
+storeBm(bm_variable)                            198.27%      4.84s   206.73m
+----------------------------------------------------------------------------
+[bm-row-container-metrics] spillReadOld compression=raw dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 serialized_bytes=28185722880 batches=26883 create_reader_ms=10038.790 next_batch_ms=18642.340 copy_rows_ms=24593.229 list_rows_ms=4248.689
+[bm-row-container-metrics] spillReadBm compression=raw dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 row_ids=0 windows=0 result=pointers begin_ms=0.002 try_load_all_ms=78459.992 window_load_ms=0.000 bulk_estimate_ms=0.030 bulk_reserve_ms=0.003 bulk_collect_blocks_ms=0.157 bulk_batch_pin_ms=73241.625 bulk_update_ptrs_ms=0.084 bulk_rebase_strings_ms=0.000 bulk_append_ptrs_ms=5217.832 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=32216449024 bulk_pinned_blocks=7681 bulk_pointer_rows=1342177280 bulk_row_id_rows=0 bulk_rebased_string_views=0 bm_batch_pins=1 bm_pin_reads=7681 bm_spill_read_count=7681 bm_spill_read_bytes=32216449024 bm_spill_physical_read_bytes=32216694816 bm_decompress_ms=0.000 io_accepted=7681 io_completed=7681 io_completed_bytes=32216694816 io_successful=7681 io_failed=0 io_rejected=0 io_submitted_high=7681 io_submitted_medium=0 io_submitted_low=0 io_completed_high=7681 io_completed_medium=0 io_completed_low=0 io_submit_batches=61 io_completion_batches=61 io_queue_wait_ms=22370088.564 io_avg_queue_wait_us=2912392.731 io_device_latency_ms=373133.896 io_avg_device_latency_us=48578.817 io_end_to_end_latency_ms=22743226.324 io_avg_end_to_end_latency_us=2960972.051 io_backend_submit_ms=5747.448 io_backend_reap_ms=0.251 io_worker_wait_ms=0.453 io_future_fulfill_ms=2.441
+[bm-row-container-metrics] spillReadOld compression=lz4 dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 serialized_bytes=28185722880 batches=26883 create_reader_ms=4596.212 next_batch_ms=29025.582 copy_rows_ms=24735.374 list_rows_ms=4231.402
+[bm-row-container-metrics] spillReadBm compression=lz4 dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 row_ids=0 windows=0 result=pointers begin_ms=0.002 try_load_all_ms=84440.725 window_load_ms=0.000 bulk_estimate_ms=0.031 bulk_reserve_ms=0.002 bulk_collect_blocks_ms=0.148 bulk_batch_pin_ms=79256.663 bulk_update_ptrs_ms=0.084 bulk_rebase_strings_ms=0.000 bulk_append_ptrs_ms=5183.504 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=32216449024 bulk_pinned_blocks=7681 bulk_pointer_rows=1342177280 bulk_row_id_rows=0 bulk_rebased_string_views=0 bm_batch_pins=1 bm_pin_reads=7681 bm_spill_read_count=7681 bm_spill_read_bytes=32216449024 bm_spill_physical_read_bytes=27766216315 bm_decompress_ms=11719.437 io_accepted=7681 io_completed=7681 io_completed_bytes=27766216315 io_successful=7681 io_failed=0 io_rejected=0 io_submitted_high=7681 io_submitted_medium=0 io_submitted_low=0 io_completed_high=7681 io_completed_medium=0 io_completed_low=0 io_submit_batches=61 io_completion_batches=61 io_queue_wait_ms=22306028.441 io_avg_queue_wait_us=2904052.655 io_device_latency_ms=416939.634 io_avg_device_latency_us=54281.947 io_end_to_end_latency_ms=22722971.931 io_avg_end_to_end_latency_us=2958335.104 io_backend_submit_ms=6062.435 io_backend_reap_ms=0.157 io_worker_wait_ms=0.436 io_future_fulfill_ms=2.458
+[bm-row-container-metrics] spillReadOld compression=zstd dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 serialized_bytes=28185722880 batches=26883 create_reader_ms=4317.595 next_batch_ms=66013.446 copy_rows_ms=24474.802 list_rows_ms=4220.924
+[bm-row-container-metrics] spillReadBm compression=zstd dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 row_ids=0 windows=0 result=pointers begin_ms=0.002 try_load_all_ms=58755.386 window_load_ms=0.000 bulk_estimate_ms=0.029 bulk_reserve_ms=0.003 bulk_collect_blocks_ms=0.139 bulk_batch_pin_ms=53438.675 bulk_update_ptrs_ms=0.089 bulk_rebase_strings_ms=0.000 bulk_append_ptrs_ms=5316.176 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=32216449024 bulk_pinned_blocks=7681 bulk_pointer_rows=1342177280 bulk_row_id_rows=0 bulk_rebased_string_views=0 bm_batch_pins=1 bm_pin_reads=7681 bm_spill_read_count=7681 bm_spill_read_bytes=32216449024 bm_spill_physical_read_bytes=23295136596 bm_decompress_ms=49895.495 io_accepted=7681 io_completed=7681 io_completed_bytes=23295136596 io_successful=7681 io_failed=0 io_rejected=0 io_submitted_high=7681 io_submitted_medium=0 io_submitted_low=0 io_completed_high=7681 io_completed_medium=0 io_completed_low=0 io_submit_batches=61 io_completion_batches=61 io_queue_wait_ms=16928907.854 io_avg_queue_wait_us=2203997.898 io_device_latency_ms=278267.206 io_avg_device_latency_us=36227.992 io_end_to_end_latency_ms=17207178.871 io_avg_end_to_end_latency_us=2240226.386 io_backend_submit_ms=4445.326 io_backend_reap_ms=0.149 io_worker_wait_ms=0.428 io_future_fulfill_ms=2.480
+[bm-row-container-metrics] spillReadOld compression=raw dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 serialized_bytes=27280653749 batches=26025 create_reader_ms=4392.869 next_batch_ms=3501.384 copy_rows_ms=10751.509 list_rows_ms=120.590
+[bm-row-container-metrics] spillReadBm compression=raw dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 row_ids=0 windows=0 result=pointers begin_ms=0.001 try_load_all_ms=37343.301 window_load_ms=0.000 bulk_estimate_ms=0.027 bulk_reserve_ms=0.002 bulk_collect_blocks_ms=0.066 bulk_batch_pin_ms=36686.594 bulk_update_ptrs_ms=0.432 bulk_rebase_strings_ms=609.378 bulk_append_ptrs_ms=46.518 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=27363639296 bulk_pinned_blocks=6524 bulk_pointer_rows=25712209 bulk_row_id_rows=0 bulk_rebased_string_views=25712209 bm_batch_pins=1 bm_pin_reads=6524 bm_spill_read_count=6524 bm_spill_read_bytes=27363639296 bm_spill_physical_read_bytes=27363848064 bm_decompress_ms=0.000 io_accepted=6524 io_completed=6524 io_completed_bytes=27363848064 io_successful=6524 io_failed=0 io_rejected=0 io_submitted_high=6524 io_submitted_medium=0 io_submitted_low=0 io_completed_high=6524 io_completed_medium=0 io_completed_low=0 io_submit_batches=52 io_completion_batches=52 io_queue_wait_ms=17206308.955 io_avg_queue_wait_us=2637386.412 io_device_latency_ms=322297.647 io_avg_device_latency_us=49401.847 io_end_to_end_latency_ms=17528609.845 io_avg_end_to_end_latency_us=2686788.756 io_backend_submit_ms=5154.090 io_backend_reap_ms=0.222 io_worker_wait_ms=0.200 io_future_fulfill_ms=2.146
+[bm-row-container-metrics] spillReadOld compression=lz4 dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 serialized_bytes=27280653749 batches=26025 create_reader_ms=345.804 next_batch_ms=3408.502 copy_rows_ms=10522.341 list_rows_ms=119.313
+[bm-row-container-metrics] spillReadBm compression=lz4 dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 row_ids=0 windows=0 result=pointers begin_ms=0.002 try_load_all_ms=4333.602 window_load_ms=0.000 bulk_estimate_ms=0.028 bulk_reserve_ms=0.002 bulk_collect_blocks_ms=0.078 bulk_batch_pin_ms=3667.592 bulk_update_ptrs_ms=0.366 bulk_rebase_strings_ms=618.298 bulk_append_ptrs_ms=46.951 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=27363639296 bulk_pinned_blocks=6524 bulk_pointer_rows=25712209 bulk_row_id_rows=0 bulk_rebased_string_views=25712209 bm_batch_pins=1 bm_pin_reads=6524 bm_spill_read_count=6524 bm_spill_read_bytes=27363639296 bm_spill_physical_read_bytes=1196187676 bm_decompress_ms=3199.945 io_accepted=6524 io_completed=6524 io_completed_bytes=1196187676 io_successful=6524 io_failed=0 io_rejected=0 io_submitted_high=6524 io_submitted_medium=0 io_submitted_low=0 io_completed_high=6524 io_completed_medium=0 io_completed_low=0 io_submit_batches=52 io_completion_batches=52 io_queue_wait_ms=1413216.026 io_avg_queue_wait_us=216618.030 io_device_latency_ms=16748.220 io_avg_device_latency_us=2567.170 io_end_to_end_latency_ms=1429967.569 io_avg_end_to_end_latency_us=219185.710 io_backend_submit_ms=261.808 io_backend_reap_ms=0.163 io_worker_wait_ms=0.250 io_future_fulfill_ms=2.140
+[bm-row-container-metrics] spillReadOld compression=zstd dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 serialized_bytes=27280653749 batches=26025 create_reader_ms=279.349 next_batch_ms=4896.257 copy_rows_ms=10576.323 list_rows_ms=122.378
+[bm-row-container-metrics] spillReadBm compression=zstd dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 row_ids=0 windows=0 result=pointers begin_ms=0.002 try_load_all_ms=5895.438 window_load_ms=0.000 bulk_estimate_ms=0.040 bulk_reserve_ms=0.003 bulk_collect_blocks_ms=0.072 bulk_batch_pin_ms=5226.815 bulk_update_ptrs_ms=0.400 bulk_rebase_strings_ms=621.181 bulk_append_ptrs_ms=46.623 bulk_append_row_ids_ms=0.000 bulk_estimated_bytes=27363639296 bulk_pinned_blocks=6524 bulk_pointer_rows=25712209 bulk_row_id_rows=0 bulk_rebased_string_views=25712209 bm_batch_pins=1 bm_pin_reads=6524 bm_spill_read_count=6524 bm_spill_read_bytes=27363639296 bm_spill_physical_read_bytes=844150284 bm_decompress_ms=4832.443 io_accepted=6524 io_completed=6524 io_completed_bytes=844150284 io_successful=6524 io_failed=0 io_rejected=0 io_submitted_high=6524 io_submitted_medium=0 io_submitted_low=0 io_completed_high=6524 io_completed_medium=0 io_completed_low=0 io_submit_batches=52 io_completion_batches=52 io_queue_wait_ms=1163500.882 io_avg_queue_wait_us=178341.643 io_device_latency_ms=13217.867 io_avg_device_latency_us=2026.037 io_end_to_end_latency_ms=1176721.974 io_avg_end_to_end_latency_us=180368.175 io_backend_submit_ms=205.188 io_backend_reap_ms=0.182 io_worker_wait_ms=0.284 io_future_fulfill_ms=2.071
+[bm-row-container-metrics] spillWriteOld compression=raw dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=44711.653 spill_ms=35951.512 spill_bytes=28185937944 files=26883
+[bm-row-container-metrics] spillWriteBm compression=raw dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=34374.598 flush_ms=4166.756 bm_spill_write_count=7681 bm_spill_write_bytes=32216449024 bm_spill_physical_write_bytes=32216694816 bm_compress_ms=0.000 bm_compressed_blocks=0
+[bm-row-container-metrics] spillWriteOld compression=lz4 dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=44609.438 spill_ms=100715.506 spill_bytes=27257858112 files=26883
+[bm-row-container-metrics] spillWriteBm compression=lz4 dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=34327.195 flush_ms=67821.113 bm_spill_write_count=7681 bm_spill_write_bytes=32216449024 bm_spill_physical_write_bytes=27764295018 bm_compress_ms=59662.186 bm_compressed_blocks=7681
+[bm-row-container-metrics] spillWriteOld compression=zstd dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=44659.004 spill_ms=217908.701 spill_bytes=23622070679 files=26883
+[bm-row-container-metrics] spillWriteBm compression=zstd dataset=fixed iterations=1 logical_bytes=26843545600 rows=1342177280 store_setup_ms=34402.994 flush_ms=179925.052 bm_spill_write_count=7681 bm_spill_write_bytes=32216449024 bm_spill_physical_write_bytes=23292101434 bm_compress_ms=178765.363 bm_compressed_blocks=7681
+[bm-row-container-metrics] spillWriteOld compression=raw dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=9844.455 spill_ms=13924.699 spill_bytes=27280861949 files=26025
+[bm-row-container-metrics] spillWriteBm compression=raw dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=5128.757 flush_ms=3563.126 bm_spill_write_count=6524 bm_spill_write_bytes=27363639296 bm_spill_physical_write_bytes=27363848064 bm_compress_ms=0.000 bm_compressed_blocks=0
+[bm-row-container-metrics] spillWriteOld compression=lz4 dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=9793.454 spill_ms=12330.235 spill_bytes=1232145318 files=26025
+[bm-row-container-metrics] spillWriteBm compression=lz4 dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=5072.203 flush_ms=5989.240 bm_spill_write_count=6524 bm_spill_write_bytes=27363639296 bm_spill_physical_write_bytes=1196013656 bm_compress_ms=5842.431 bm_compressed_blocks=6524
+[bm-row-container-metrics] spillWriteOld compression=zstd dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=9984.876 spill_ms=16936.646 spill_bytes=854646829 files=26025
+[bm-row-container-metrics] spillWriteBm compression=zstd dataset=variable iterations=1 logical_bytes=26843545600 rows=25712209 store_setup_ms=5401.663 flush_ms=15050.680 bm_spill_write_count=6524 bm_spill_write_bytes=27363639296 bm_spill_physical_write_bytes=844004971 bm_compress_ms=14876.023 bm_compressed_blocks=6524
+```
+
 ## 建议
 
 短期建议按以下顺序处理：
