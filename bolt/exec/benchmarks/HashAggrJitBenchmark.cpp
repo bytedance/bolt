@@ -88,6 +88,16 @@ class HashAggrJitBenchmark : public VectorTestBase {
     }
     addCase(name + "_double_min", rows, mins);
     addCase(name + "_double_max", rows, maxs);
+    addCase(
+        name + "_merge_double_min",
+        rows,
+        mins,
+        AggregationPlanKind::PartialFinal);
+    addCase(
+        name + "_merge_double_max",
+        rows,
+        maxs,
+        AggregationPlanKind::PartialFinal);
   }
 
   void addHighCardinalityExtractBenchmark(const std::string& name, int32_t width) {
@@ -100,8 +110,8 @@ class HashAggrJitBenchmark : public VectorTestBase {
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
     }
-    addCase(name + "_partial_avg_extract", rows, avgs, AggregationPlanKind::Partial);
-    addCase(name + "_partial_sum_extract", rows, sums, AggregationPlanKind::Partial);
+    addCase(name + "_partial_avg", rows, avgs, AggregationPlanKind::Partial);
+    addCase(name + "_partial_sum", rows, sums, AggregationPlanKind::Partial);
   }
 
   void addHighCardinalityMergeBenchmark(const std::string& name, int32_t width) {
@@ -121,10 +131,16 @@ class HashAggrJitBenchmark : public VectorTestBase {
       counts.push_back(fmt::format("count(c{})", i + 1));
     }
 
-    addCase(name + "_sum", rows, sums, AggregationPlanKind::PartialFinal);
-    addCase(name + "_avg", rows, avgs, AggregationPlanKind::PartialFinal);
-    addCase(name + "_min", rows, mins, AggregationPlanKind::PartialFinal);
-    addCase(name + "_count", rows, counts, AggregationPlanKind::PartialFinal);
+    addCase(name + "_sum", rows, sums);
+    addCase(name + "_avg", rows, avgs);
+    addCase(name + "_min", rows, mins);
+    addCase(name + "_count", rows, counts);
+
+    addCase(name + "_merge_sum", rows, sums, AggregationPlanKind::PartialFinal);
+    addCase(name + "_merge_avg", rows, avgs, AggregationPlanKind::PartialFinal);
+    addCase(name + "_merge_min", rows, mins, AggregationPlanKind::PartialFinal);
+    addCase(
+        name + "_merge_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
 
  private:
@@ -297,13 +313,26 @@ int main(int argc, char** argv) {
   benchmark.addBenchmark("width8", 8);
   benchmark.addBenchmark("width16", 16);
   benchmark.addBenchmark("width32", 32);
+
   benchmark.addHighCardinalityMergeBenchmark("width4_high_card", 4);
   benchmark.addHighCardinalityMergeBenchmark("width8_high_card", 8);
   benchmark.addHighCardinalityMergeBenchmark("width16_high_card", 16);
   benchmark.addHighCardinalityMergeBenchmark("width32_high_card", 32);
+
+  benchmark.addDecimalBenchmark("width4", 4);
   benchmark.addDecimalBenchmark("width8", 8);
+  benchmark.addDecimalBenchmark("width16", 16);
+  benchmark.addDecimalBenchmark("width32", 32);
+
+  benchmark.addFloatingPointMinMaxBenchmark("width4", 4);
   benchmark.addFloatingPointMinMaxBenchmark("width8", 8);
+  benchmark.addFloatingPointMinMaxBenchmark("width16", 16);
+  benchmark.addFloatingPointMinMaxBenchmark("width32", 32);
+
+  benchmark.addHighCardinalityExtractBenchmark("width4_high_card", 4);
   benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
+  benchmark.addHighCardinalityExtractBenchmark("width16_high_card", 16);
+  benchmark.addHighCardinalityExtractBenchmark("width32_high_card", 32);
 
   folly::runBenchmarks();
   return 0;
