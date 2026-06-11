@@ -120,10 +120,10 @@ void compileDecimalAvgAddIntermediateResults(
 }
 
 bool canCompileDecimalAvgExtract(const HashAggrJitSlot&, bool partialOutput) {
-  // Only the partial (extractAccumulators) path is JIT-supported for decimal
-  // avg. Final avg needs the full per-aggregate rescale logic and stays on
-  // the non-JIT path.
-  return partialOutput;
+  // Both partial (extractAccumulators) and final extract go through runtime
+  // helpers. Final decimal avg keeps the divide/rescale logic in the helper to
+  // avoid duplicating Spark decimal semantics in LLVM IR.
+  return true;
 }
 
 void compileDecimalAvgExtract(

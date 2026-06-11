@@ -155,8 +155,8 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(module, "jit_HashAggrSetFlatI64", voidTy, {i8PtrTy, i32Ty, i64Ty, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatFloat", voidTy, {i8PtrTy, i32Ty, floatTy, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatDouble", voidTy, {i8PtrTy, i32Ty, doubleTy, i8Ty});
-  // Decimal extract helpers: (vector, row, group, offset, precision, scale,
-  // longDecimal).
+  // Decimal extract helpers.
+  // Sum: (vector, row, group, offset, precision, scale, longDecimal).
   declareFunction(
       module,
       "jit_HashAggrExtractFinalDecimalSum",
@@ -171,12 +171,12 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
       module,
       "jit_HashAggrExtractFinalDecimalAvg",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty, i32Ty, i8Ty});
   declareFunction(
       module,
       "jit_HashAggrExtractPartialDecimalAvg",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i8Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty, i32Ty, i8Ty});
 }
 
 llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
@@ -612,13 +612,50 @@ llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
   if (field == 0 || field == 1) {
     auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
         builder(), decoded, field, false);
+    auto* hasRawValues = builder().CreateICmpNE(
+        rawValues,
+        llvm::ConstantPointerNull::get(
+            llvm::PointerType::get(builder().getContext(), 0)));
+    auto* fastBlock = llvm::BasicBlock::Create(
+        module_.getContext(),
+        "row_field_raw_load",
+        builder().GetInsertBlock()->getParent());
+    auto* slowBlock = llvm::BasicBlock::Create(
+        module_.getContext(),
+        "row_field_helper_load",
+        builder().GetInsertBlock()->getParent());
+    auto* doneBlock = llvm::BasicBlock::Create(
+        module_.getContext(),
+        "row_field_load_done",
+        builder().GetInsertBlock()->getParent());
+    builder().CreateCondBr(hasRawValues, fastBlock, slowBlock);
+
+    builder().SetInsertPoint(fastBlock);
     auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
     auto* type = llvmType(kind);
     auto* typedValues = builder().CreatePointerCast(rawValues, type->getPointerTo());
     auto* valueAddr = builder().CreateInBoundsGEP(
         type, typedValues, builder().CreateZExt(index, builder().getInt64Ty()));
-    auto* value = builder().CreateLoad(type, valueAddr);
-    value->setAlignment(llvm::Align(1));
+    auto* fastValue = builder().CreateLoad(type, valueAddr);
+    fastValue->setAlignment(llvm::Align(1));
+    builder().CreateBr(doneBlock);
+    auto* fastEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(slowBlock);
+    const auto name = decodedRowFieldFunction(kind);
+    BOLT_CHECK(
+        !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
+    auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
+    auto* slowValue = builder().CreateCall(
+        module_.getFunction(name),
+        {decodedVector, row, builder().getInt32(field)});
+    builder().CreateBr(doneBlock);
+    auto* slowEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(doneBlock);
+    auto* value = builder().CreatePHI(llvmType(kind), 2, "row_field_value");
+    value->addIncoming(fastValue, fastEnd);
+    value->addIncoming(slowValue, slowEnd);
     return value;
   }
   const auto name = decodedRowFieldFunction(kind);
@@ -635,14 +672,31 @@ llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
     llvm::Value* row,
     int32_t field) const {
   if (field == 0 || field == 1) {
+    auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
+        builder(), decoded, field, false);
     auto* rawNulls = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
         builder(), decoded, field, true);
+    auto* hasRawValues = builder().CreateICmpNE(
+        rawValues,
+        llvm::ConstantPointerNull::get(
+            llvm::PointerType::get(builder().getContext(), 0)));
+    auto* rawPathBlock = llvm::BasicBlock::Create(
+        module_.getContext(), "row_field_raw_null_path", builder().GetInsertBlock()->getParent());
+    auto* helperPathBlock = llvm::BasicBlock::Create(
+        module_.getContext(),
+        "row_field_helper_null_path",
+        builder().GetInsertBlock()->getParent());
+    auto* doneBlock = llvm::BasicBlock::Create(
+        module_.getContext(), "row_field_null_done", builder().GetInsertBlock()->getParent());
+    builder().CreateCondBr(hasRawValues, rawPathBlock, helperPathBlock);
+
+    builder().SetInsertPoint(rawPathBlock);
     auto* hasRawNulls = builder().CreateICmpNE(
         rawNulls, llvm::ConstantPointerNull::get(builder().getInt64Ty()->getPointerTo()));
     auto* nullCheckBlock = llvm::BasicBlock::Create(
         module_.getContext(), "row_field_null_check", builder().GetInsertBlock()->getParent());
     auto* rawDoneBlock = llvm::BasicBlock::Create(
-        module_.getContext(), "row_field_null_done", builder().GetInsertBlock()->getParent());
+        module_.getContext(), "row_field_raw_null_done", builder().GetInsertBlock()->getParent());
     builder().CreateCondBr(hasRawNulls, nullCheckBlock, rawDoneBlock);
     auto* noNullsEnd = builder().GetInsertBlock();
 
@@ -656,7 +710,25 @@ llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
     auto* fastNull = builder().CreatePHI(builder().getInt1Ty(), 2, "row_field_raw_is_null");
     fastNull->addIncoming(builder().getFalse(), noNullsEnd);
     fastNull->addIncoming(isNull, nullCheckEnd);
-    return fastNull;
+    builder().CreateBr(doneBlock);
+    auto* rawEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(helperPathBlock);
+    auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
+    auto* helperNull = builder().CreateICmpNE(
+        builder().CreateCall(
+            module_.getFunction("jit_GetDecodedRowFieldIsNull"),
+            {decodedVector, row, builder().getInt32(field)}),
+        builder().getInt8(0));
+    builder().CreateBr(doneBlock);
+    auto* helperEnd = builder().GetInsertBlock();
+
+    builder().SetInsertPoint(doneBlock);
+    auto* result =
+        builder().CreatePHI(builder().getInt1Ty(), 2, "row_field_is_null");
+    result->addIncoming(fastNull, rawEnd);
+    result->addIncoming(helperNull, helperEnd);
+    return result;
   }
   auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
   return builder().CreateICmpNE(
@@ -764,7 +836,9 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
   const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
                                  : "jit_HashAggrExtractFinalDecimalAvg";
   auto* longDecimal = builder().getInt8(
-      slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+      slot.desc.auxPrecision > bytedance::bolt::ShortDecimalType::kMaxPrecision
+          ? 1
+          : 0);
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
@@ -774,6 +848,8 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
        builder().getInt32(slot.offset),
        builder().getInt32(slot.desc.precision),
        builder().getInt32(slot.desc.scale),
+       builder().getInt32(slot.desc.auxPrecision),
+       builder().getInt32(slot.desc.auxScale),
        longDecimal});
 }
 

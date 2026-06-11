@@ -177,8 +177,9 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
         context.isRawInput ? context.inputType : context.inputType->childAt(0);
     const auto [sumPrecision, sumScale] =
         getDecimalPrecisionScale(*sumType_.get());
-    const auto [resultPrecision, resultScale] =
-        getDecimalPrecisionScale(*this->resultType().get());
+    const auto [resultPrecision, resultScale] = context.isPartialOutput
+        ? std::pair<int32_t, int32_t>{0, 0}
+        : getDecimalPrecisionScale(*this->resultType().get());
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::Avg,
         .inputKind = valueType->isShortDecimal()
