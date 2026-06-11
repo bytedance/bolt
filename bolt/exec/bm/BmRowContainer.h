@@ -9,7 +9,7 @@
 #include "bolt/exec/bm/BmRowWriteContext.h"
 #include "bolt/exec/bm/BmRowCopier.h"
 #include "bolt/exec/bm/BmRowLayout.h"
-#include "bolt/exec/bm/BmRowStorage.h"
+#include "bolt/exec/bm/BmSegmentCollection.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
@@ -166,14 +166,14 @@ class BmRowContainer {
   FOLLY_ALWAYS_INLINE void validateSegments(
       folly::Range<const SegmentId*> segments) const {
     for (auto segment : segments) {
-      (void)storage_.segmentData(segment);
+      (void)segments_.segmentData(segment);
     }
   }
 
   std::vector<TypePtr> types_;
   BmRowLayout layout_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
-  BmRowStorage storage_;
+  BmSegmentCollection segments_;
   BmRowBlockLoader blockLoader_;
   BmRowCopier rowCopier_;
 };

@@ -8,12 +8,12 @@ SegmentId BmRowContainer::finalizeReorderedSegment(
     folly::Range<char* const*> rowsInOrder) {
   BOLT_CHECK(!rowsInOrder.empty());
 
-  auto& materialized = storage_.createSegment(std::nullopt);
+  auto& materialized = segments_.createSegment(std::nullopt);
   const auto materializedSegment = materialized.meta.id;
   for (auto* row : rowsInOrder) {
     rowCopier_.copyRowToSegment(materialized, row);
   }
-  storage_.finalizeAndFlushSegment(materialized);
+  segments_.finalizeAndFlushSegment(materialized);
   materialized.meta.orderedForMerge = true;
   return materializedSegment;
 }
@@ -24,7 +24,7 @@ MergeReadSession BmRowContainer::beginMergeReadSegments(
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
   validateSegments({segmentIds.data(), segmentIds.size()});
   for (auto segment : segmentIds) {
-    const auto& data = storage_.segmentData(segment);
+    const auto& data = segments_.segmentData(segment);
     BOLT_CHECK(
         data.meta.orderedForMerge,
         "Segment {} is not ordered for merge read",

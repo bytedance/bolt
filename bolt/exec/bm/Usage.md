@@ -10,7 +10,7 @@ BufferManager 管理的 block；读回阶段优先尝试全量加载，失败后
 - `BmRowContainerRead.h`
 - `BmRowContainerTypes.h`
 
-`BmRowLayout`、`BmRowStorage`、`BmRowBlockLoader`、`BmRowCopier` 是内部实现拆分，
+`BmRowLayout`、`BmSegmentCollection`、`BmRowBlockLoader`、`BmRowCopier` 是内部实现拆分，
 算子侧通常不直接使用。
 
 ## 基本模型

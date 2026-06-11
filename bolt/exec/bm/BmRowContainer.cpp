@@ -14,21 +14,21 @@ BmRowContainer::BmRowContainer(
     : types_(std::move(types)),
       layout_(types_, nullable, rowBlockSize),
       bufferManager_(std::move(bufferManager)),
-      storage_(
+      segments_(
           bufferManager_,
           tag,
           &layout_,
           rowBlockSize,
           heapBlockSize),
-      blockLoader_(bufferManager_, &layout_, &storage_),
-      rowCopier_(&types_, &layout_, &storage_) {
+      blockLoader_(bufferManager_, &layout_, &segments_),
+      rowCopier_(&types_, &layout_, &segments_) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
 }
 
 RowWriteContext BmRowContainer::appendRow(PartitionId partition) {
-  auto& segment = storage_.activeSegment(partition);
-  auto* row = storage_.newRowInSegment(segment);
-  auto& chunk = storage_.currentChunk(segment);
+  auto& segment = segments_.activeSegment(partition);
+  auto* row = segments_.newRowInSegment(segment);
+  auto& chunk = segments_.currentChunk(segment);
   return RowWriteContext(segment.meta.id, chunk.meta.id, row);
 }
 

@@ -2,7 +2,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BufferManager.h"
-#include "bolt/exec/bm/BmRowStorage.h"
+#include "bolt/exec/bm/BmSegmentCollection.h"
 
 #include <folly/Portability.h>
 #include <folly/Range.h>
@@ -21,7 +21,7 @@ class BmRowBlockLoader {
   BmRowBlockLoader(
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       const BmRowLayout* layout,
-      BmRowStorage* storage);
+      BmSegmentCollection* storage);
 
   void loadSegments(
       folly::Range<const SegmentId*> segments,
@@ -51,14 +51,14 @@ class BmRowBlockLoader {
     return *layout_;
   }
 
-  FOLLY_ALWAYS_INLINE BmRowStorage& storage() const {
+  FOLLY_ALWAYS_INLINE BmSegmentCollection& storage() const {
     BOLT_DCHECK_NOT_NULL(storage_);
     return *storage_;
   }
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   const BmRowLayout* layout_{nullptr};
-  BmRowStorage* storage_{nullptr};
+  BmSegmentCollection* storage_{nullptr};
 };
 
 } // namespace bytedance::bolt::exec::bm
