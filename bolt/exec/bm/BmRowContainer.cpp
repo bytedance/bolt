@@ -25,8 +25,7 @@ BmRowContainer::BmRowContainer(
   BOLT_CHECK_NOT_NULL(bufferManager_);
 }
 
-BmRowContainer::RowWriteContext BmRowContainer::appendRow(
-    PartitionId partition) {
+RowWriteContext BmRowContainer::appendRow(PartitionId partition) {
   auto& segment = storage_.activeSegment(partition);
   auto* row = storage_.newRowInSegment(segment);
   auto& chunk = storage_.currentChunk(segment);

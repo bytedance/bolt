@@ -6,6 +6,7 @@
 #include "bolt/exec/bm/BmRowBlockLoader.h"
 #include "bolt/exec/bm/BmRowContainerRead.h"
 #include "bolt/exec/bm/BmRowContainerTypes.h"
+#include "bolt/exec/bm/BmRowWriteContext.h"
 #include "bolt/exec/bm/BmRowCopier.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 #include "bolt/exec/bm/BmRowStorage.h"
@@ -25,32 +26,6 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer {
  public:
-  // Location token returned by appendRow(). It is only meant for immediately
-  // storing columns of that row; do not keep it after flush.
-  class RowWriteContext {
-   public:
-    RowWriteContext() = default;
-
-    char* row() const {
-      return row_;
-    }
-
-   private:
-    friend class BmRowContainer;
-
-    RowWriteContext(
-        SegmentId segment,
-        ChunkId chunk,
-        char* row)
-        : segment_(segment),
-          chunk_(chunk),
-          row_(row) {}
-
-    SegmentId segment_{0};
-    ChunkId chunk_{kNoBlock};
-    char* row_{nullptr};
-  };
-
   BmRowContainer(
       std::vector<TypePtr> types,
       std::vector<bool> nullable,
