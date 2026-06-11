@@ -225,6 +225,10 @@ session 析构前有效。上层应尽量批量提交同一访问窗口内的 `R
 segment。Sort / HashAgg 可以把这个返回的 `SegmentId` 当作一个有序 run 保存，但
 RowContainer 本体只建模 segment。
 
+当前实现会把传入 rows 完整复制到一个新的 segment 后再 flush。这个路径能保证后续
+merge read 是顺序扫描，但会提高重排阶段的内存峰值；如果是在强内存压力下写出大 run，
+后续应改成分段物化、分段 flush 的接口。
+
 ```cpp
 std::vector<char*> orderedRows = ...;
 
@@ -253,16 +257,17 @@ int32_t r = mergeSession.compareCurrentRows(leftCursor, rightCursor, flags);
 
 cursor 内部按 chunk 加载当前 row 所在窗口。`currentRow()` 返回的指针在 cursor 前进前有效。
 
-如果调用方确认 merge read 是消费型单向读取，可以打开读后释放：
+merge read 默认是消费型单向读取。cursor 读完某个 chunk 后会释放该 chunk 的 BM
+block 引用，避免已消费数据在后续内存压力下再次 spill。chunk metadata 会保留，后续
+再次读取这个 segment 会失败。
+
+如果调用方需要重复读取同一个 segment，应显式关闭读后释放：
 
 ```cpp
 auto mergeSession = rows.beginMergeReadSegments(
     {segments.data(), segments.size()},
-    true);
+    false);
 ```
-
-`releaseAfterRead=true` 时，cursor 读完某个 chunk 后会释放该 chunk 的 BM block 引用，
-避免已消费数据在后续内存压力下再次 spill。chunk metadata 会保留，后续再次读取这个 segment 会失败。
 
 ## 释放数据
 
@@ -288,7 +293,7 @@ read session 不会自动释放 segment，消费完成后应显式调用 release
 2. 内存中比较时保留 row 指针，调用 `compareRows()`。
 3. 需要生成有序输出时，传入排序后的 row 指针调用 `finalizeReorderedSegment()`。
 4. 多个有序 segment 通过 `beginMergeReadSegments()` 和 cursor 顺序读回。
-5. 消费型 merge 可以使用 `releaseAfterRead=true`，否则输出完成后调用 `releaseSegment(segment)`。
+5. merge read 默认会释放已消费 chunk；如果后续还要复读，应传 `releaseAfterRead=false`。
 
 ### Hash Build
 

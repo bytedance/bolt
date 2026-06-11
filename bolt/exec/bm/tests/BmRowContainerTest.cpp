@@ -429,7 +429,7 @@ TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
       container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
 }
 
-TEST_F(BmRowContainerTest, MergeReadReleasesConsumedChunkBlocks) {
+TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   BmRowContainer container(
       {BIGINT()},
       {false},
@@ -442,7 +442,7 @@ TEST_F(BmRowContainerTest, MergeReadReleasesConsumedChunkBlocks) {
   std::vector<char*> ordered{rows[1], rows[3], rows[2], rows[0]};
   auto segment =
       container.finalizeReorderedSegment({ordered.data(), ordered.size()});
-  auto session = container.beginMergeReadSegments({&segment, 1}, true);
+  auto session = container.beginMergeReadSegments({&segment, 1});
   auto cursor = session.cursor(segment);
   ASSERT_TRUE(cursor.hasCurrent());
 
