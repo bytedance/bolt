@@ -1164,8 +1164,6 @@ void GroupingSet::runHashAggrJitChunks(
         hashAggrJitNewGroups_[i] = groups[newGroups[i]];
       }
       chunk.init(hashAggrJitNewGroups_.data(), newGroups.size());
-      VLOG(1) << "HashAggrJit initialized new groups for chunk "
-                << chunk.functionName() << " newGroups=" << newGroups.size();
     }
 
     chunk.addDense(
@@ -1173,15 +1171,8 @@ void GroupingSet::runHashAggrJitChunks(
         activeRows_.end(),
         hashAggrJitDecodedPtrs_.data(),
         inputsMayHaveNulls);
-    VLOG(1) << "HashAggrJit add executed: chunk=" << chunk.functionName()
-              << " rows=" << activeRows_.end()
-              << " inputsMayHaveNulls=" << inputsMayHaveNulls
-              << " slots=" << hashAggrJitChunkDebugString(chunk, aggregates_);
     for (const auto& slot : chunk.slots()) {
       jitExecuted[slot.aggregateIndex] = 1;
-      VLOG(1) << "HashAggrJit slot executed in add path: "
-                << hashAggrJitSlotDebugString(
-                       slot, &aggregates_[slot.aggregateIndex]);
     }
   }
 }
@@ -1259,14 +1250,8 @@ void GroupingSet::runHashAggrJitExtractChunks(
       continue;
     }
     chunk.extract(groups.data(), groups.size(), hashAggrJitResultPtrs_.data());
-    VLOG(1) << "HashAggrJit extract executed: chunk=" << chunk.functionName()
-              << " groups=" << groups.size()
-              << " slots=" << hashAggrJitChunkDebugString(chunk, aggregates_);
     for (const auto& slot : chunk.slots()) {
       jitExtracted[slot.aggregateIndex] = 1;
-      VLOG(1) << "HashAggrJit slot executed in extract path: "
-                << hashAggrJitSlotDebugString(
-                       slot, &aggregates_[slot.aggregateIndex]);
     }
   }
 }
