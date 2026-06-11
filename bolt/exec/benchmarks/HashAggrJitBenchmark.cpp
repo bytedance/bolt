@@ -55,26 +55,24 @@ class HashAggrJitBenchmark : public VectorTestBase {
       counts.push_back(fmt::format("count(c{})", i + 1));
     }
 
-    addCase(name + "_sum", rows, sums);
-    addCase(name + "_avg", rows, avgs);
-    addCase(name + "_min", rows, mins);
-    addCase(name + "_count", rows, counts);
-    addCase(name + "_merge_sum", rows, sums, AggregationPlanKind::PartialFinal);
-    addCase(name + "_merge_avg", rows, avgs, AggregationPlanKind::PartialFinal);
-    addCase(name + "_merge_min", rows, mins, AggregationPlanKind::PartialFinal);
-    addCase(name + "_merge_count", rows, counts, AggregationPlanKind::PartialFinal);
+    addCase(name + "_sum", rows, sums, AggregationPlanKind::PartialFinal);
+    addCase(name + "_avg", rows, avgs, AggregationPlanKind::PartialFinal);
+    addCase(name + "_min", rows, mins, AggregationPlanKind::PartialFinal);
+    addCase(name + "_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
 
   void addDecimalBenchmark(const std::string& name, int32_t width) {
     auto rows = makeDecimalRows(width);
     std::vector<std::string> sums;
     std::vector<std::string> avgs;
+    sums.reserve(width);
+    avgs.reserve(width);
     for (auto i = 0; i < width; ++i) {
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
     }
-    addCase(name + "_decimal_sum", rows, sums);
-    addCase(name + "_decimal_avg", rows, avgs);
+    addCase(name + "_decimal_sum", rows, sums, AggregationPlanKind::PartialFinal);
+    addCase(name + "_decimal_avg", rows, avgs, AggregationPlanKind::PartialFinal);
   }
 
   void addFloatingPointMinMaxBenchmark(const std::string& name, int32_t width) {
@@ -101,6 +99,29 @@ class HashAggrJitBenchmark : public VectorTestBase {
     }
     addCase(name + "_partial_avg_extract", rows, avgs, AggregationPlanKind::Partial);
     addCase(name + "_partial_sum_extract", rows, sums, AggregationPlanKind::Partial);
+  }
+
+  void addHighCardinalityMergeBenchmark(const std::string& name, int32_t width) {
+    auto rows = makeHighCardinalityRows(width);
+    std::vector<std::string> sums;
+    std::vector<std::string> avgs;
+    std::vector<std::string> mins;
+    std::vector<std::string> counts;
+    sums.reserve(width);
+    avgs.reserve(width);
+    mins.reserve(width);
+    counts.reserve(width);
+    for (auto i = 0; i < width; ++i) {
+      sums.push_back(fmt::format("spark_sum(c{})", i + 1));
+      avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
+      mins.push_back(fmt::format("min(c{})", i + 1));
+      counts.push_back(fmt::format("count(c{})", i + 1));
+    }
+
+    addCase(name + "_sum", rows, sums, AggregationPlanKind::PartialFinal);
+    addCase(name + "_avg", rows, avgs, AggregationPlanKind::PartialFinal);
+    addCase(name + "_min", rows, mins, AggregationPlanKind::PartialFinal);
+    addCase(name + "_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
 
  private:
@@ -273,7 +294,14 @@ int main(int argc, char** argv) {
   benchmark.addBenchmark("width8", 8);
   benchmark.addBenchmark("width16", 16);
   benchmark.addBenchmark("width32", 32);
+  benchmark.addHighCardinalityMergeBenchmark("width4_high_card", 4);
+  benchmark.addHighCardinalityMergeBenchmark("width8_high_card", 8);
+  benchmark.addHighCardinalityMergeBenchmark("width16_high_card", 16);
+  benchmark.addHighCardinalityMergeBenchmark("width32_high_card", 32);
+  benchmark.addDecimalBenchmark("width4", 4);
   benchmark.addDecimalBenchmark("width8", 8);
+  benchmark.addDecimalBenchmark("width16", 16);
+  benchmark.addDecimalBenchmark("width32", 32);
   benchmark.addFloatingPointMinMaxBenchmark("width8", 8);
   benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
 

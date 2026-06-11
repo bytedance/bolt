@@ -8,7 +8,8 @@
   benchmark 不依赖它）。
 - **benchmark**：`bolt/exec/benchmarks/HashAggrJitBenchmark.cpp`，目标
   `bolt_hashaggr_jit_benchmark`。覆盖 sum/avg/min/count（width 4/8/16/32）、
-  merge（partial+final）、decimal sum/avg、double min/max、partial extract。
+  merge（partial+final）、decimal sum/avg（当前按 `PartialFinal` 路径评测）、
+  double min/max、partial extract。
 - **数据规模**：每用例 20 batch × 10000 行。
 - **关键控制**：
   - JIT 模块为进程级 LRU 全局缓存，预热后**每个 JIT 函数仅编译一次**（已用 VLOG 验证
@@ -72,8 +73,9 @@ double_max 0.63x · partial_avg_extract 0.74x · partial_sum_extract 0.84x
    几乎相同（如 width8_sum jit ≈ 5.0ms 两者一致），说明耗时与组数无关、只与行数相关——
    即**每行 add 成本** JIT 高于非 JIT 的向量化路径。这正是“低基数本应让 JIT 更受益”的
    预期被反转的根本原因。
-4. **decimal_avg(0.75x) 优于 decimal_sum(0.40x)**：decimal_avg final 走非 JIT（spark
-   rescale 复杂逻辑），反而拖累较小，侧面印证当前 JIT 计算路径偏慢。
+4. **decimal_avg(0.75x) 曾优于 decimal_sum(0.40x)**：这组历史数据采集时，decimal_avg
+   final 仍走非 JIT（Spark rescale 复杂逻辑），因此拖累相对较小。当前已补齐 final
+   decimal avg extract JIT helper，新的 decimal_avg 结果需以 `PartialFinal` 基准重新观察。
 
 ## 5. 结论与建议
 
@@ -1190,9 +1192,9 @@ runtime helper（`jitHashAggrAddWithOverflow`）。即 IR 只完成 decode + 路
   系既有 P0 bug，见 todolist，与本次无关）。
 
 ### 14.5 当前性能
+
+
 ```
-============================================================================
-[...]c/benchmarks/HashAggrJitBenchmark.cpp     relative  time/iter   iters/s
 ============================================================================
 width4_sum_nojit                                            2.62ms    382.13
 width4_sum_jit                                              2.37ms    422.76
@@ -1310,4 +1312,60 @@ width8_high_card_partial_sum_extract_jit                   22.27ms     44.90
 ----------------------------------------------------------------------------
 ```
 
+## 15. decimal_avg final extract JIT 补齐说明
 
+### 15.1 背景
+
+在本轮修复前，decimal avg 只有 partial extract 走 JIT helper，final extract 仍留在 non-JIT 路径：
+
+- planner/codegen 侧通过 `canCompileDecimalAvgExtract(..., partialOutput)` 仅允许 partial path；
+- runtime 侧 `jit_HashAggrExtractFinalDecimalAvg` 是空 stub，仅用于 link 成功；
+- 因此历史上部分 `decimal_avg` benchmark 结果，实际测到的是“JIT add/merge + non-JIT final extract”的混合路径。
+
+这也是第 4 章里“decimal_avg 曾优于 decimal_sum”的一个背景因素：当时 decimal avg 没有承担 final decimal
+rescale/divide 的 JIT extract 成本。
+
+### 15.2 本轮实现
+
+本轮已补齐 final decimal avg extract 的 JIT 支持，策略是**继续保持 helper 模式**，不把 Spark decimal avg 的
+divide / overflow / precision-rescale 逻辑直接展开成 LLVM IR。
+
+具体改动：
+
+1. **放开 codegen**：`decimal avg` 的 extract 现在 partial / final 都允许编译；
+2. **扩展 helper ABI**：avg extract helper 额外接收最终结果 decimal 的 `resultPrecision/resultScale`；
+3. **实现 final runtime helper**：在 runtime 中镜像 non-JIT `computeAvg` 语义：
+   - `adjustSumForOverflow`
+   - `divideWithRoundUp`
+   - `rescaleWithRoundUp`
+   - short / long decimal 分类型写回 `FlatVector`
+4. **benchmark 口径更新**：`HashAggrJitBenchmark` 中 `decimal_sum/decimal_avg` 统一按 `PartialFinal` 路径评测，
+   避免继续把 decimal avg 记成“只测 partial + 非 JIT final extract”的旧口径。
+
+### 15.3 功能验证
+
+本轮未新增一组完整 benchmark 数据表，但已完成功能与构建验证：
+
+- 构建通过：`bolt_thrustjit`、`bolt_exec`、`bolt_functions_spark_aggregates_test`
+- Average 相关测试通过：
+  - `AverageAggregationTest.avgAllNulls`
+  - `AverageAggregationTest.avgDecimal`
+  - `AverageAggregationTest.avgDecimalWithMultipleRowVectors`
+  - `AverageAggregationTest.rowBasedSpillDecimalAvg`
+
+说明 final decimal avg extract JIT 至少已经满足当前 Spark avg 语义下的基础正确性要求：
+
+- `count == 0` 输出 null；
+- sum overflow 无法修正时输出 null；
+- divide / rescale overflow 时输出 null；
+- short decimal 与 long decimal 结果类型都可写回。
+
+### 15.4 对阅读本报告的影响
+
+1. **第 2/3/4 章中的早期 decimal_avg 结论需要加注理解**：这些历史结论产生时，final decimal avg extract 还未走 JIT。
+2. **后续若继续比较 decimal_avg 的 JIT/no-JIT 收益，应以当前 `PartialFinal` benchmark 口径为准**。
+3. **当前 decimal_avg benchmark 的收益解释更完整**：它现在同时覆盖 JIT add、JIT merge 和 JIT final extract，
+   比之前更接近真实生产路径。
+
+换句话说：从这一节之后，文档里关于 decimal avg 的性能讨论应默认理解为“**final extract JIT 已补齐**”的版本；
+如果引用更早的数据，需要显式说明那是旧口径历史快照。
