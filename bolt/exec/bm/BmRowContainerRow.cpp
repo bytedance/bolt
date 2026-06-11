@@ -99,14 +99,14 @@ void BmRowContainer::storeValueTyped(
       *target = value;
       return;
     }
-    auto& segment = storage_.segmentData(context.segment_);
+    auto& segment = segments_.segmentData(context.segment_);
     auto& heap =
-        storage_.ensureHeapBlockForChunk(segment, context.chunk_, value.size());
+        segments_.ensureHeapBlockForChunk(segment, context.chunk_, value.size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value.data(), value.size());
     heap.used += value.size();
     *target = StringView(stringTarget, value.size());
-    storage_.recordHeapForChunk(segment, context.chunk_, heap, row);
+    segments_.recordHeapForChunk(segment, context.chunk_, heap, row);
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       !TypeTraits<Kind>::isFixedWidth) {

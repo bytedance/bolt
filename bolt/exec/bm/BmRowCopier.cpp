@@ -9,7 +9,7 @@ namespace bytedance::bolt::exec::bm {
 BmRowCopier::BmRowCopier(
     const std::vector<TypePtr>* types,
     const BmRowLayout* layout,
-    BmRowStorage* storage)
+    BmSegmentCollection* storage)
     : types_(types), layout_(layout), storage_(storage) {
   BOLT_CHECK_NOT_NULL(types_);
   BOLT_CHECK_NOT_NULL(layout_);

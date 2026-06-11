@@ -69,9 +69,9 @@ struct SegmentData {
 
 // Owns segment/block/chunk metadata and all BufferManager block handles for one
 // BmRowContainer. It does not know column semantics beyond row size.
-class BmRowStorage {
+class BmSegmentCollection {
  public:
-  BmRowStorage(
+  BmSegmentCollection(
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       memory::bm::MemoryTag tag,
       const BmRowLayout* layout,

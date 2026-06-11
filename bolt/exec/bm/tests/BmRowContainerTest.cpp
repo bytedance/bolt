@@ -304,23 +304,23 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
   EXPECT_EQ("right-string-value-0031", rightFlat->valueAt(31).str());
 }
 
-TEST_F(BmRowContainerTest, StorageDoesNotShareHeapBlocksAcrossChunks) {
+TEST_F(BmRowContainerTest, SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) {
   BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
-  BmRowStorage storage(
+  BmSegmentCollection segments(
       bufferManager_,
       MemoryTag::kTesting,
       &layout,
       layout.rowSize(),
       1024);
-  auto& segment = storage.createSegment(kDefaultPartition);
+  auto& segment = segments.createSegment(kDefaultPartition);
 
-  storage.newRowInSegment(segment);
-  auto& firstHeap = storage.ensureHeapBlock(segment, 16);
-  storage.recordHeapForCurrentChunk(segment, firstHeap);
+  segments.newRowInSegment(segment);
+  auto& firstHeap = segments.ensureHeapBlock(segment, 16);
+  segments.recordHeapForCurrentChunk(segment, firstHeap);
 
-  storage.newRowInSegment(segment);
-  auto& secondHeap = storage.ensureHeapBlock(segment, 16);
-  storage.recordHeapForCurrentChunk(segment, secondHeap);
+  segments.newRowInSegment(segment);
+  auto& secondHeap = segments.ensureHeapBlock(segment, 16);
+  segments.recordHeapForCurrentChunk(segment, secondHeap);
 
   ASSERT_EQ(2, segment.chunks.size());
   ASSERT_EQ(1, segment.chunks[0].heapBlocks.size());
@@ -330,18 +330,18 @@ TEST_F(BmRowContainerTest, StorageDoesNotShareHeapBlocksAcrossChunks) {
       segment.chunks[1].heapBlocks[0].id);
 }
 
-TEST_F(BmRowContainerTest, StorageZerosHeapTailWhenSwitchingHeapBlocks) {
+TEST_F(BmRowContainerTest, SegmentCollectionZerosHeapTailWhenSwitchingHeapBlocks) {
   BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
-  BmRowStorage storage(
+  BmSegmentCollection segments(
       bufferManager_,
       MemoryTag::kTesting,
       &layout,
       4 << 20,
       64);
-  auto& segment = storage.createSegment(kDefaultPartition);
-  storage.newRowInSegment(segment);
+  auto& segment = segments.createSegment(kDefaultPartition);
+  segments.newRowInSegment(segment);
 
-  auto& firstHeap = storage.ensureHeapBlock(segment, 40);
+  auto& firstHeap = segments.ensureHeapBlock(segment, 40);
   firstHeap.used = 40;
   auto* const firstHeapPtr = firstHeap.ptr;
   const auto firstHeapUsed = firstHeap.used;
@@ -350,7 +350,7 @@ TEST_F(BmRowContainerTest, StorageZerosHeapTailWhenSwitchingHeapBlocks) {
   std::memset(
       firstHeapPtr + firstHeapUsed, 0x7f, firstHeapSize - firstHeapUsed);
 
-  auto& secondHeap = storage.ensureHeapBlock(segment, 40);
+  auto& secondHeap = segments.ensureHeapBlock(segment, 40);
   ASSERT_NE(firstHeapId, secondHeap.id);
 
   for (uint32_t offset = firstHeapUsed; offset < firstHeapSize; ++offset) {

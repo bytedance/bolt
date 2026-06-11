@@ -29,7 +29,7 @@ struct HeapRebaseRange {
 BmRowBlockLoader::BmRowBlockLoader(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     const BmRowLayout* layout,
-    BmRowStorage* storage)
+    BmSegmentCollection* storage)
     : bufferManager_(std::move(bufferManager)),
       layout_(layout),
       storage_(storage) {

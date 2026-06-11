@@ -38,7 +38,7 @@ uint64_t BmRowContainer::unloadedBytes(
     folly::Range<const SegmentId*> segments) const {
   uint64_t bytes = 0;
   for (auto segmentId : segments) {
-    const auto& segment = storage_.segmentData(segmentId);
+    const auto& segment = segments_.segmentData(segmentId);
     for (const auto& chunk : segment.chunks) {
       bytes += unloadedBytesForChunk(chunk);
     }
@@ -129,8 +129,8 @@ std::vector<char*> BmRowContainer::listRows(
   const auto appendStart = metrics == nullptr ? 0 : nowNs();
   std::vector<char*> rows;
   for (auto segment : segments) {
-    storage_.appendRowPointersForSegment(
-        storage_.segmentData(segment), rows, metrics);
+    segments_.appendRowPointersForSegment(
+        segments_.segmentData(segment), rows, metrics);
   }
   if (metrics != nullptr) {
     metrics->appendRowPointersNs += nowNs() - appendStart;
@@ -143,7 +143,7 @@ std::vector<RowId> BmRowContainer::listRowIds(
   validateSegments(segments);
   std::vector<RowId> rowIds;
   for (auto segment : segments) {
-    storage_.appendRowIdsForSegment(storage_.segmentData(segment), rowIds);
+    segments_.appendRowIdsForSegment(segments_.segmentData(segment), rowIds);
   }
   return rowIds;
 }
@@ -174,8 +174,8 @@ std::vector<char*> WindowReadSession::loadRows(
         segments_.count(row.segmentId) != 0,
         "Row segment {} is not covered by this read session",
         row.segmentId);
-    auto& segment = container_->storage_.segmentData(row.segmentId);
-    auto& chunk = container_->storage_.chunkForRow(segment, row.rowNumber);
+    auto& segment = container_->segments_.segmentData(row.segmentId);
+    auto& chunk = container_->segments_.chunkForRow(segment, row.rowNumber);
     const auto key =
         (static_cast<uint64_t>(row.segmentId) << 32) | chunk.meta.id;
     if (seenChunks.insert(key).second) {
@@ -188,7 +188,7 @@ std::vector<char*> WindowReadSession::loadRows(
   std::vector<char*> result;
   result.reserve(rows.size());
   for (const auto& row : rows) {
-    result.push_back(container_->storage_.rowPointer(row));
+    result.push_back(container_->segments_.rowPointer(row));
   }
   return result;
 }
@@ -259,7 +259,7 @@ void MergeReadSession::releasePendingChunks() {
 bool MergeReadSession::loadCursor(Cursor& cursor) {
   BOLT_CHECK_NOT_NULL(container_);
   cursor.currentRow = nullptr;
-  auto& segment = container_->storage_.segmentData(cursor.segment);
+  auto& segment = container_->segments_.segmentData(cursor.segment);
   while (cursor.chunkIndex < segment.chunks.size()) {
     auto& chunk = segment.chunks[cursor.chunkIndex];
     if (chunk.meta.rowCount == 0) {
@@ -280,13 +280,13 @@ bool MergeReadSession::loadCursor(Cursor& cursor) {
 }
 
 void MergeReadSession::advanceCursor(Cursor& cursor) {
-  auto& segment = container_->storage_.segmentData(cursor.segment);
+  auto& segment = container_->segments_.segmentData(cursor.segment);
   auto& chunk = segment.chunks[cursor.chunkIndex];
   ++cursor.rowIndexInChunk;
   if (cursor.rowIndexInChunk < chunk.meta.rowCount) {
     cursor.currentRow =
         chunk.rowBlock.ptr +
-        cursor.rowIndexInChunk * container_->storage_.rowStride();
+        cursor.rowIndexInChunk * container_->segments_.rowStride();
     return;
   }
 

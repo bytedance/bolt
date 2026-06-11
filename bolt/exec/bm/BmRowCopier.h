@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/exec/bm/BmRowStorage.h"
+#include "bolt/exec/bm/BmSegmentCollection.h"
 
 #include <folly/Portability.h>
 
@@ -16,7 +16,7 @@ class BmRowCopier {
   BmRowCopier(
       const std::vector<TypePtr>* types,
       const BmRowLayout* layout,
-      BmRowStorage* storage);
+      BmSegmentCollection* storage);
 
   char* copyRowToSegment(SegmentData& segment, const char* source);
 
@@ -31,14 +31,14 @@ class BmRowCopier {
     return *layout_;
   }
 
-  FOLLY_ALWAYS_INLINE BmRowStorage& storage() const {
+  FOLLY_ALWAYS_INLINE BmSegmentCollection& storage() const {
     BOLT_DCHECK_NOT_NULL(storage_);
     return *storage_;
   }
 
   const std::vector<TypePtr>* types_{nullptr};
   const BmRowLayout* layout_{nullptr};
-  BmRowStorage* storage_{nullptr};
+  BmSegmentCollection* storage_{nullptr};
 };
 
 } // namespace bytedance::bolt::exec::bm

@@ -33,15 +33,15 @@ void collectLoadedChunkBlocks(
 } // namespace
 
 SegmentId BmRowContainer::flushActiveSegment() {
-  return storage_.flushActiveSegment();
+  return segments_.flushActiveSegment();
 }
 
 SegmentId BmRowContainer::flushActivePartitionSegment(PartitionId partition) {
-  return storage_.flushActivePartitionSegment(partition);
+  return segments_.flushActivePartitionSegment(partition);
 }
 
 void BmRowContainer::releaseSegment(SegmentId segment) {
-  storage_.releaseSegment(segment);
+  segments_.releaseSegment(segment);
 }
 
 void BmRowContainer::releaseSegments(folly::Range<const SegmentId*> segments) {
@@ -51,13 +51,13 @@ void BmRowContainer::releaseSegments(folly::Range<const SegmentId*> segments) {
 }
 
 void BmRowContainer::releaseChunk(SegmentId segment, ChunkId chunk) {
-  auto& segmentData = storage_.segmentData(segment);
+  auto& segmentData = segments_.segmentData(segment);
   BOLT_CHECK_LT(chunk, segmentData.chunks.size());
-  storage_.releaseChunkBlocks(segmentData.chunks[chunk]);
+  segments_.releaseChunkBlocks(segmentData.chunks[chunk]);
 }
 
 void BmRowContainer::spillLoadedChunk(SegmentId segment, ChunkId chunk) {
-  auto& segmentData = storage_.segmentData(segment);
+  auto& segmentData = segments_.segmentData(segment);
   BOLT_CHECK(
       segmentData.meta.state != SegmentState::kActiveResident,
       "Cannot spill loaded blocks from active segment {}",
@@ -85,7 +85,7 @@ void BmRowContainer::spillLoadedSegments(
   validateSegments(segments);
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   for (auto segment : segments) {
-    auto& segmentData = storage_.segmentData(segment);
+    auto& segmentData = segments_.segmentData(segment);
     BOLT_CHECK(
         segmentData.meta.state != SegmentState::kActiveResident,
         "Cannot spill loaded blocks from active segment {}",
@@ -105,21 +105,21 @@ void BmRowContainer::spillLoadedSegments(
 }
 
 void BmRowContainer::spillAllLoadedBlocks() {
-  auto segments = storage_.allSegmentIds();
+  auto segments = segments_.allSegmentIds();
   spillLoadedSegments({segments.data(), segments.size()});
 }
 
 SegmentState BmRowContainer::segmentState(SegmentId segment) const {
-  return storage_.segmentState(segment);
+  return segments_.segmentState(segment);
 }
 
 const std::vector<SegmentId>& BmRowContainer::segmentsForPartition(
     PartitionId partition) const {
-  return storage_.segmentsForPartition(partition);
+  return segments_.segmentsForPartition(partition);
 }
 
 int64_t BmRowContainer::numRows() const {
-  return storage_.numRows();
+  return segments_.numRows();
 }
 
 } // namespace bytedance::bolt::exec::bm
