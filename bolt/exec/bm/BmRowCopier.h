@@ -9,8 +9,8 @@
 
 namespace bytedance::bolt::exec::bm {
 
-// Copies an already-resident row into another segment. Used by ReorderedRun
-// materialization so merge cursors can scan rows in physical order.
+// Copies an already-resident row into another segment. Used by reordered
+// segment materialization so merge cursors can scan rows in physical order.
 class BmRowCopier {
  public:
   BmRowCopier(

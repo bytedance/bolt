@@ -12,16 +12,14 @@ SegmentId BmRowContainer::flushActivePartitionSegment(PartitionId partition) {
   return storage_.flushActivePartitionSegment(partition);
 }
 
-void BmRowContainer::releaseSegment(
-    SegmentId segment,
-    ReleaseReason reason) {
-  storage_.releaseSegment(segment, reason);
+void BmRowContainer::releaseSegment(SegmentId segment) {
+  storage_.releaseSegment(segment);
 }
 
-void BmRowContainer::releaseSegments(
-    folly::Range<const SegmentId*> segments,
-    ReleaseReason reason) {
-  storage_.releaseSegments(segments, reason);
+void BmRowContainer::releaseSegments(folly::Range<const SegmentId*> segments) {
+  for (auto segment : segments) {
+    releaseSegment(segment);
+  }
 }
 
 SegmentState BmRowContainer::segmentState(SegmentId segment) const {

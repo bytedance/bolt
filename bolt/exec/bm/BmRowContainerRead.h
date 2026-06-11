@@ -79,8 +79,8 @@ class BulkReadSession {
   friend class BmRowContainer;
 };
 
-// Cursor over one reordered run. It pins the chunk containing currentRow() and
-// advances sequentially in run order.
+// Cursor over one physically ordered segment. It pins the current chunk and
+// advances sequentially inside that chunk before moving to the next chunk.
 class SegmentCursor {
  public:
   SegmentCursor() = default;
@@ -98,16 +98,16 @@ class SegmentCursor {
  private:
   SegmentCursor(
       BmRowContainer* container,
-      ReorderedRunId run,
-      ReadSessionOptions options);
+      SegmentId segment,
+      bool releaseAfterRead);
 
-  void loadCurrent();
+  void loadCurrentChunk();
 
   BmRowContainer* container_{nullptr};
-  ReorderedRunId run_{0};
-  ReadSessionOptions options_;
-  // Current row ordinal inside the run.
-  uint64_t index_{0};
+  SegmentId segment_{0};
+  size_t chunkIndex_{0};
+  uint32_t rowIndexInChunk_{0};
+  bool releaseAfterRead_{false};
   // Resident pointer for the current row. Valid until advance().
   char* currentRow_{nullptr};
   // Pins for the current row's chunk.
@@ -116,12 +116,12 @@ class SegmentCursor {
   friend class MergeReadSession;
 };
 
-// Read session for comparing/scanning multiple reordered runs.
+// Read session for comparing/scanning multiple physically ordered segments.
 class MergeReadSession {
  public:
   MergeReadSession() = default;
 
-  SegmentCursor cursor(ReorderedRunId run);
+  SegmentCursor cursor(SegmentId segment);
 
   int32_t compareCurrentRows(
       const SegmentCursor& left,
@@ -131,12 +131,12 @@ class MergeReadSession {
  private:
   MergeReadSession(
       BmRowContainer* container,
-      std::vector<ReorderedRunId> runs,
-      ReadSessionOptions options);
+      std::vector<SegmentId> segments,
+      bool releaseAfterRead);
 
   BmRowContainer* container_{nullptr};
-  std::unordered_set<ReorderedRunId> runs_;
-  ReadSessionOptions options_;
+  std::unordered_set<SegmentId> segments_;
+  bool releaseAfterRead_{false};
 
   friend class BmRowContainer;
 };

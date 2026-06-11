@@ -18,7 +18,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -97,9 +96,9 @@ class BmRowContainer {
   SegmentId flushActiveSegment();
   SegmentId flushActivePartitionSegment(PartitionId partition);
 
-  // Materializes rows in the supplied order into a read run. The input rows must
-  // be resident pointers at call time.
-  ReorderedRunId finalizeReorderedRun(folly::Range<char* const*> sortedRows);
+  // Materializes resident rows in the supplied order into a new finalized/flushed
+  // segment. The returned SegmentId can be scanned through MergeReadSession.
+  SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
   // Creates a lazy read session. No blocks are pinned until tryLoadAll(),
   // loadRows(), or loadRow() is called.
@@ -107,15 +106,14 @@ class BmRowContainer {
       folly::Range<const SegmentId*> segments,
       ReadSessionOptions options = {});
 
-  // Creates a session for scanning/comparing reordered runs.
-  MergeReadSession beginMergeReadRuns(
-      folly::Range<const ReorderedRunId*> runs,
-      ReadSessionOptions options = {});
-
-  void releaseSegment(SegmentId segment, ReleaseReason reason);
-  void releaseSegments(
+  // Creates a session for scanning/comparing physically ordered segments. If
+  // releaseAfterRead is true, each cursor drops chunk blocks after passing them.
+  MergeReadSession beginMergeReadSegments(
       folly::Range<const SegmentId*> segments,
-      ReleaseReason reason);
+      bool releaseAfterRead = false);
+
+  void releaseSegment(SegmentId segment);
+  void releaseSegments(folly::Range<const SegmentId*> segments);
 
   SegmentState segmentState(SegmentId segment) const;
   const std::vector<SegmentId>& segmentsForPartition(PartitionId partition)
@@ -123,8 +121,6 @@ class BmRowContainer {
   int64_t numRows() const;
 
  private:
-  ReorderedRunMeta& reorderedRunData(ReorderedRunId run);
-  const ReorderedRunMeta& reorderedRunData(ReorderedRunId run) const;
   int32_t compareNonNull(
       const char* left,
       const char* right,
@@ -163,8 +159,6 @@ class BmRowContainer {
   BmRowStorage storage_;
   BmRowBlockLoader blockLoader_;
   BmRowCopier rowCopier_;
-  ReorderedRunId nextReorderedRunId_{1};
-  std::unordered_map<ReorderedRunId, ReorderedRunMeta> reorderedRuns_;
 };
 
 } // namespace bytedance::bolt::exec::bm

@@ -11,10 +11,6 @@ namespace bytedance::bolt::exec::bm {
 // ordered sequence of chunks.
 using SegmentId = uint32_t;
 
-// A reordered run is a logical read sequence over rows. The current
-// implementation materializes that sequence into a dedicated segment.
-using ReorderedRunId = uint32_t;
-
 // BufferManager-backed row or heap block id. Block ids are unique inside one
 // row container and are used to rebuild pointers after pinning.
 using BlockId = uint32_t;
@@ -89,14 +85,6 @@ enum class LoadAllResult {
   kLoadedPointers,
   // Output vector contains RowIds. Pointer output is empty.
   kNeedWindowRead,
-};
-
-enum class ReleaseReason {
-  // Data has been consumed successfully and does not need to be preserved.
-  kConsumed,
-  // Data is abandoned before normal consumption, for example after an error or
-  // because an upstream branch no longer needs it.
-  kDiscarded,
 };
 
 struct RowId {
@@ -178,15 +166,6 @@ struct SegmentMeta {
   // internally-created segments where partition identity is irrelevant.
   std::optional<PartitionId> partitionId;
   // Number of rows finalized into this segment.
-  uint64_t numRows{0};
-};
-
-struct ReorderedRunMeta {
-  // Stable run id returned by finalizeReorderedRun().
-  ReorderedRunId id{0};
-  // Segment containing rows in run order.
-  SegmentId materializedSegment{0};
-  // Number of rows in the run.
   uint64_t numRows{0};
 };
 
