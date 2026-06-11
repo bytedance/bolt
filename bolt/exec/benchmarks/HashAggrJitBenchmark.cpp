@@ -43,25 +43,30 @@ class HashAggrJitBenchmark : public VectorTestBase {
     std::vector<std::string> sums;
     std::vector<std::string> avgs;
     std::vector<std::string> mins;
+    std::vector<std::string> maxs;
     std::vector<std::string> counts;
     sums.reserve(width);
     avgs.reserve(width);
     mins.reserve(width);
+    maxs.reserve(width);
     counts.reserve(width);
     for (auto i = 0; i < width; ++i) {
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
       mins.push_back(fmt::format("min(c{})", i + 1));
+      maxs.push_back(fmt::format("max(c{})", i + 1));
       counts.push_back(fmt::format("count(c{})", i + 1));
     }
 
-    addCase(name + "_sum", rows, sums);
-    addCase(name + "_avg", rows, avgs);
-    addCase(name + "_min", rows, mins);
-    addCase(name + "_count", rows, counts);
+    // addCase(name + "_sum", rows, sums);
+    // addCase(name + "_avg", rows, avgs);
+    // addCase(name + "_min", rows, mins);
+    // addCase(name + "_max", rows, maxs);
+    // addCase(name + "_count", rows, counts);
     addCase(name + "_merge_sum", rows, sums, AggregationPlanKind::PartialFinal);
     addCase(name + "_merge_avg", rows, avgs, AggregationPlanKind::PartialFinal);
     addCase(name + "_merge_min", rows, mins, AggregationPlanKind::PartialFinal);
+    addCase(name + "_merge_max", rows, maxs, AggregationPlanKind::PartialFinal);
     addCase(
         name + "_merge_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
@@ -74,8 +79,16 @@ class HashAggrJitBenchmark : public VectorTestBase {
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
     }
-    addCase(name + "_decimal_sum", rows, sums, AggregationPlanKind::PartialFinal);
-    addCase(name + "_decimal_avg", rows, avgs, AggregationPlanKind::PartialFinal);
+    addCase(
+        name + "_merge_decimal_sum",
+        rows,
+        sums,
+        AggregationPlanKind::PartialFinal);
+    addCase(
+        name + "_merge_decimal_avg",
+        rows,
+        avgs,
+        AggregationPlanKind::PartialFinal);
   }
 
   void addFloatingPointMinMaxBenchmark(const std::string& name, int32_t width) {
@@ -86,8 +99,8 @@ class HashAggrJitBenchmark : public VectorTestBase {
       mins.push_back(fmt::format("min(c{})", i + 1));
       maxs.push_back(fmt::format("max(c{})", i + 1));
     }
-    addCase(name + "_double_min", rows, mins);
-    addCase(name + "_double_max", rows, maxs);
+    // addCase(name + "_double_min", rows, mins);
+    // addCase(name + "_double_max", rows, maxs);
     addCase(
         name + "_merge_double_min",
         rows,
@@ -119,26 +132,31 @@ class HashAggrJitBenchmark : public VectorTestBase {
     std::vector<std::string> sums;
     std::vector<std::string> avgs;
     std::vector<std::string> mins;
+    std::vector<std::string> maxs;
     std::vector<std::string> counts;
     sums.reserve(width);
     avgs.reserve(width);
     mins.reserve(width);
+    maxs.reserve(width);
     counts.reserve(width);
     for (auto i = 0; i < width; ++i) {
       sums.push_back(fmt::format("spark_sum(c{})", i + 1));
       avgs.push_back(fmt::format("spark_avg(c{})", i + 1));
       mins.push_back(fmt::format("min(c{})", i + 1));
+      maxs.push_back(fmt::format("max(c{})", i + 1));
       counts.push_back(fmt::format("count(c{})", i + 1));
     }
 
-    addCase(name + "_sum", rows, sums);
-    addCase(name + "_avg", rows, avgs);
-    addCase(name + "_min", rows, mins);
-    addCase(name + "_count", rows, counts);
+    // addCase(name + "_sum", rows, sums);
+    // addCase(name + "_avg", rows, avgs);
+    // addCase(name + "_min", rows, mins);
+    // addCase(name + "_max", rows, maxs);
+    // addCase(name + "_count", rows, counts);
 
     addCase(name + "_merge_sum", rows, sums, AggregationPlanKind::PartialFinal);
     addCase(name + "_merge_avg", rows, avgs, AggregationPlanKind::PartialFinal);
     addCase(name + "_merge_min", rows, mins, AggregationPlanKind::PartialFinal);
+    addCase(name + "_merge_max", rows, maxs, AggregationPlanKind::PartialFinal);
     addCase(
         name + "_merge_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
@@ -329,10 +347,10 @@ int main(int argc, char** argv) {
   benchmark.addFloatingPointMinMaxBenchmark("width16", 16);
   benchmark.addFloatingPointMinMaxBenchmark("width32", 32);
 
-  benchmark.addHighCardinalityExtractBenchmark("width4_high_card", 4);
-  benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
-  benchmark.addHighCardinalityExtractBenchmark("width16_high_card", 16);
-  benchmark.addHighCardinalityExtractBenchmark("width32_high_card", 32);
+  // benchmark.addHighCardinalityExtractBenchmark("width4_high_card", 4);
+  // benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
+  // benchmark.addHighCardinalityExtractBenchmark("width16_high_card", 16);
+  // benchmark.addHighCardinalityExtractBenchmark("width32_high_card", 32);
 
   folly::runBenchmarks();
   return 0;
