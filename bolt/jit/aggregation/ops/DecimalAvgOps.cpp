@@ -42,13 +42,14 @@ void compileDecimalAvgInitGroup(
 void compileDecimalAvgAddRawInput(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
   auto& b = codegen.builder();
-  auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
   auto* value =
       codegen.castValue(rawValue, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
@@ -67,7 +68,7 @@ void compileDecimalAvgAddRawInput(
 void compileDecimalAvgAddIntermediateResults(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
@@ -86,10 +87,11 @@ void compileDecimalAvgAddIntermediateResults(
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "avg_decimal_merge", function, continueBlock);
-  auto* sumIsNull = codegen.isDecodedRowFieldNull(decoded, row, 0);
-  auto* countIsNull = codegen.isDecodedRowFieldNull(decoded, row, 1);
-  auto* count =
-      codegen.loadDecodedRowField(decoded, row, 1, HashAggrJitValueKind::Int64);
+  auto* sumRow = input.readRowField(row, 0, slot.desc.inputKind);
+  auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
+  auto* sumIsNull = IRRow::getIsNull(b, sumRow);
+  auto* countIsNull = IRRow::getIsNull(b, countRow);
+  auto* count = IRRow::getValue(b, countRow);
   auto* countPositive = b.CreateICmpSGT(count, b.getInt64(0));
   auto* isOverflow = b.CreateAnd(
       sumIsNull, b.CreateAnd(b.CreateNot(countIsNull), countPositive));
@@ -100,7 +102,7 @@ void compileDecimalAvgAddIntermediateResults(
   b.CreateBr(continueBlock);
 
   b.SetInsertPoint(mergeBlock);
-  auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.desc.inputKind);
+  auto* sum = IRRow::getValue(b, sumRow);
   auto* value =
       codegen.castValue(sum, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
@@ -132,7 +134,7 @@ void compileDecimalAvgExtract(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   codegen.emitDecimalAvgExtract(
-      target.resultVector, target.row, group, slot, target.partialOutput);
+      target.output.vector(), target.row, group, slot, target.partialOutput);
 }
 
 } // namespace

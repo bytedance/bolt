@@ -40,48 +40,65 @@ struct JitDecimalAvgState {
   int64_t overflow{0};
 };
 
-// Runtime input descriptor consumed by JIT add_dense functions.
-// GroupingSet prepares one descriptor per aggregate input for each batch by
-// decoding the original vector into a flat/constant base plus a single indices
-// mapping. This keeps generated IR independent of the batch's original vector
-// encoding (flat/dictionary/constant) while allowing the hot loop to load
-// values directly instead of calling jit_GetDecodedValue* helpers per row.
-struct HashAggrJitDecodedInput {
+// Runtime scalar input consumed by JIT add_dense functions. 'indices' maps the
+// add_dense row to the scalar value row. The owner decides the indexing
+// contract for 'nulls': top-level scalar inputs pass row-indexed nulls, while
+// ROW child scalar inputs pass child/base-indexed nulls and the row adapter
+// applies 'indices' before checking the bit.
+struct HashAggrJitScalarInputRuntime {
   const void* values{nullptr};
-  // Always points to a top-level-row -> base-row mapping. For flat inputs this
-  // is a consecutive mapping; for constant inputs it maps every row to the
-  // constant value index.
   const int32_t* indices{nullptr};
-  // Top-level nulls. If non-null, bit 'row' indicates whether the input row is
-  // null. This is intentionally row-based rather than base-index-based to keep
-  // generated IR independent of dictionary/null wrapping details.
   const uint64_t* nulls{nullptr};
-  // Original DecodedVector pointer. Kept as fallback for row-field helpers.
-  const void* decodedVector{nullptr};
-  // Raw ROW child fields for intermediate avg merge inputs. The top-level
-  // ROW may still be dictionary/constant wrapped; 'indices' maps rows to the
-  // flat child row. Only the first two fields are needed by avg: sum, count.
-  const void* rowField0Values{nullptr};
-  const uint64_t* rowField0Nulls{nullptr};
-  const void* rowField1Values{nullptr};
-  const uint64_t* rowField1Nulls{nullptr};
 };
 
-// Runtime output descriptor consumed by JIT extract functions. GroupingSet
-// prepares one descriptor per aggregate output after resizing the result vector.
-// Primitive flat outputs write values/null bits directly from generated IR;
-// complex outputs keep using vector helper fallbacks via 'vector'.
-struct HashAggrJitOutput {
+// Runtime ROW input. ROW itself has no value/indices wrapping in the generated
+// IR; children are scalar runtimes. Current JIT merge inputs only require
+// row-of-scalars, so recursive ROW children are intentionally not represented.
+struct HashAggrJitRowInputRuntime {
+  const uint64_t* nulls{nullptr};
+  const HashAggrJitScalarInputRuntime* const* children{nullptr};
+  int32_t numChildren{0};
+};
+
+// Shape-less runtime input. The generated code knows at compile time whether a
+// slot reads a scalar or row input and selects the corresponding union member
+// through InputAdapterCodegen.
+union HashAggrJitInputRuntime {
+  HashAggrJitInputRuntime() : scalar{} {}
+
+  HashAggrJitScalarInputRuntime scalar;
+  HashAggrJitRowInputRuntime row;
+};
+
+// Runtime scalar output consumed by JIT extract functions. Primitive flat
+// outputs write values/null bits directly from generated IR; outputs that need
+// vector semantics keep using helper fallbacks via 'vector'.
+struct HashAggrJitScalarOutputRuntime {
   void* values{nullptr};
   uint64_t* nulls{nullptr};
   void* vector{nullptr};
-  // Raw ROW child fields for partial avg output: field 0 = sum(double),
-  // field 1 = count(int64). Other outputs leave these null and use 'values'
-  // or helper fallback via 'vector'.
-  void* rowField0Values{nullptr};
-  uint64_t* rowField0Nulls{nullptr};
-  void* rowField1Values{nullptr};
-  uint64_t* rowField1Nulls{nullptr};
+};
+
+// Runtime ROW output. Current JIT partial outputs only require row-of-scalars,
+// so recursive ROW children are intentionally not represented. 'vector' keeps
+// the top-level vector available for helper based complex writes (e.g. decimal
+// partial extract), while child scalar runtimes expose raw field buffers for
+// direct generated-IR stores.
+struct HashAggrJitRowOutputRuntime {
+  uint64_t* nulls{nullptr};
+  HashAggrJitScalarOutputRuntime* const* children{nullptr};
+  int32_t numChildren{0};
+  void* vector{nullptr};
+};
+
+// Shape-less runtime output. The generated extract code knows at compile time
+// whether a slot writes a scalar or row output and selects the corresponding
+// union member through OutputAdapterCodegen.
+union HashAggrJitOutputRuntime {
+  HashAggrJitOutputRuntime() : scalar{} {}
+
+  HashAggrJitScalarOutputRuntime scalar;
+  HashAggrJitRowOutputRuntime row;
 };
 
 struct HashAggrJitPlanContext {

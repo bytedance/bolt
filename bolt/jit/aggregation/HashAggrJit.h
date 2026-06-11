@@ -19,6 +19,8 @@
 namespace bytedance::bolt::jit {
 
 class HashAggrJitCodegen;
+class InputAdapterCodegen;
+class OutputAdapterCodegen;
 struct HashAggrJitExtractTarget;
 
 struct HashAggrJitOps {
@@ -27,7 +29,7 @@ struct HashAggrJitOps {
   using AddFn = void (*)(
       HashAggrJitCodegen&,
       llvm::Value* group,
-      llvm::Value* decoded,
+      const InputAdapterCodegen& input,
       llvm::Value* row,
       const HashAggrJitSlot&,
       bool checkInputNulls,
@@ -48,9 +50,165 @@ struct HashAggrJitOps {
 };
 
 struct HashAggrJitExtractTarget {
-  llvm::Value* resultVector;
+  const OutputAdapterCodegen& output;
   llvm::Value* row;
   bool partialOutput;
+};
+
+class IRRow {
+ public:
+  // Framework-level invariant: IRRow<T> = {T, i1}. 'valueType' is owned by
+  // aggregate semantics; the null bit is always field 1.
+  static llvm::StructType* getType(
+      llvm::IRBuilder<>& builder,
+      llvm::Type* valueType) {
+    return llvm::StructType::get(valueType, builder.getInt1Ty());
+  }
+
+  static llvm::Value* getValue(llvm::IRBuilder<>& builder, llvm::Value* row) {
+    return builder.CreateExtractValue(row, {0});
+  }
+
+  static llvm::Value* getIsNull(llvm::IRBuilder<>& builder, llvm::Value* row) {
+    return builder.CreateExtractValue(row, {1});
+  }
+
+  static llvm::Value*
+  pack(llvm::IRBuilder<>& builder, llvm::Value* value, llvm::Value* isNull) {
+    auto* rowType = getType(builder, value->getType());
+    auto* withValue =
+        builder.CreateInsertValue(llvm::UndefValue::get(rowType), value, {0});
+    return builder.CreateInsertValue(withValue, isNull, {1});
+  }
+
+  static llvm::Value*
+  withValue(llvm::IRBuilder<>& builder, llvm::Value* row, llvm::Value* value) {
+    return builder.CreateInsertValue(row, value, {0});
+  }
+
+  static llvm::Value* withIsNull(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* row,
+      llvm::Value* isNull) {
+    return builder.CreateInsertValue(row, isNull, {1});
+  }
+
+  // Nested value access for aggregate-owned composite payloads, e.g.
+  // IRRow<{double, i64}> = {{double, i64}, i1}.
+  static llvm::Value*
+  getValueField(llvm::IRBuilder<>& builder, llvm::Value* row, unsigned field) {
+    return builder.CreateExtractValue(row, {0, field});
+  }
+};
+
+class InputAdapterCodegen {
+ public:
+  virtual ~InputAdapterCodegen() = default;
+
+  virtual llvm::StructType* irRowType(HashAggrJitValueKind kind) const = 0;
+  virtual llvm::Value* read(llvm::Value* row, HashAggrJitValueKind kind)
+      const = 0;
+  virtual llvm::Value* loadNulls() const = 0;
+  virtual llvm::Value* isNull(llvm::Value* row) const = 0;
+  virtual llvm::Value* readRowField(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind) const = 0;
+};
+
+class ScalarInputAdapterCodegen final : public InputAdapterCodegen {
+ public:
+  ScalarInputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* input);
+
+  llvm::StructType* irRowType(HashAggrJitValueKind kind) const override;
+  llvm::Value* read(llvm::Value* row, HashAggrJitValueKind kind) const override;
+  llvm::Value* loadNulls() const override;
+  llvm::Value* isNull(llvm::Value* row) const override;
+  llvm::Value* readRowField(llvm::Value*, int32_t, HashAggrJitValueKind)
+      const override;
+
+ private:
+  HashAggrJitCodegen& codegen_;
+  llvm::Value* input_;
+};
+
+class RowInputAdapterCodegen final : public InputAdapterCodegen {
+ public:
+  RowInputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* input);
+
+  llvm::StructType* irRowType(HashAggrJitValueKind kind) const override;
+  llvm::Value* read(llvm::Value*, HashAggrJitValueKind) const override;
+  llvm::Value* loadNulls() const override;
+  llvm::Value* isNull(llvm::Value* row) const override;
+  llvm::Value* readRowField(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind) const override;
+
+ private:
+  llvm::Value* loadChild(int32_t field) const;
+  llvm::Value* isRowFieldNull(llvm::Value* row, int32_t field) const;
+
+  HashAggrJitCodegen& codegen_;
+  llvm::Value* input_;
+};
+
+class OutputAdapterCodegen {
+ public:
+  virtual ~OutputAdapterCodegen() = default;
+
+  virtual llvm::Value* vector() const = 0;
+  virtual void resize(llvm::Value* size) const = 0;
+  virtual void write(
+      llvm::Value* row,
+      HashAggrJitValueKind kind,
+      llvm::Value* irRow) const = 0;
+  virtual void writeField(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind,
+      llvm::Value* irRow) const = 0;
+  virtual void writeNull(llvm::Value* row, llvm::Value* isNull) const = 0;
+};
+
+class ScalarOutputAdapterCodegen final : public OutputAdapterCodegen {
+ public:
+  ScalarOutputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* output);
+
+  llvm::Value* vector() const override;
+  void resize(llvm::Value* size) const override;
+  void write(
+      llvm::Value* row,
+      HashAggrJitValueKind kind,
+      llvm::Value* irRow) const override;
+  void writeField(llvm::Value*, int32_t, HashAggrJitValueKind, llvm::Value*)
+      const override;
+  void writeNull(llvm::Value* row, llvm::Value* isNull) const override;
+
+ private:
+  HashAggrJitCodegen& codegen_;
+  llvm::Value* output_;
+};
+
+class RowOutputAdapterCodegen final : public OutputAdapterCodegen {
+ public:
+  RowOutputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* output);
+
+  llvm::Value* vector() const override;
+  void resize(llvm::Value* size) const override;
+  void write(llvm::Value*, HashAggrJitValueKind, llvm::Value*) const override;
+  void writeField(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind,
+      llvm::Value* irRow) const override;
+  void writeNull(llvm::Value* row, llvm::Value* isNull) const override;
+
+ private:
+  llvm::Value* loadChild(int32_t field) const;
+
+  HashAggrJitCodegen& codegen_;
+  llvm::Value* output_;
 };
 
 class HashAggrJitCodegen {
@@ -70,12 +228,7 @@ class HashAggrJitCodegen {
   }
 
   llvm::Type* llvmType(HashAggrJitValueKind kind) const;
-  llvm::Value* loadDecodedValue(
-      llvm::Value* decoded,
-      llvm::Value* row,
-      const HashAggrJitSlot& slot) const;
-  llvm::Value* loadDecodedNulls(llvm::Value* decoded) const;
-  llvm::Value* isDecodedNull(llvm::Value* nulls, llvm::Value* row) const;
+  llvm::Value* isInputNull(llvm::Value* nulls, llvm::Value* row) const;
   llvm::Value* isAccumulatorNull(
       llvm::Value* group,
       const HashAggrJitSlot& slot) const;
@@ -95,35 +248,6 @@ class HashAggrJitCodegen {
       HashAggrJitValueKind from,
       HashAggrJitValueKind to) const;
   bool isFloatKind(HashAggrJitValueKind kind) const;
-  llvm::Value* loadDecodedRowField(
-      llvm::Value* decoded,
-      llvm::Value* row,
-      int32_t field,
-      HashAggrJitValueKind kind) const;
-  llvm::Value* isDecodedRowFieldNull(
-      llvm::Value* decoded,
-      llvm::Value* row,
-      int32_t field) const;
-  // Reads a bit-packed bool ROW field (e.g. decimal sum's isEmpty) as an i8
-  // 0/1. The raw fast path bit-reads the flat bool buffer; falls back to the
-  // jit_GetDecodedRowFieldI8 helper when the field's raw pointer is unset.
-  llvm::Value* loadDecodedRowFieldBool(
-      llvm::Value* decoded,
-      llvm::Value* row,
-      int32_t field) const;
-  void emitFlatValue(
-      llvm::Value* vector,
-      llvm::Value* row,
-      HashAggrJitValueKind kind,
-      llvm::Value* value,
-      llvm::Value* isNull) const;
-  void resizeResultVector(llvm::Value* vector, llvm::Value* size) const;
-  void emitPartialAvgResult(
-      llvm::Value* vector,
-      llvm::Value* row,
-      llvm::Value* sum,
-      llvm::Value* count,
-      llvm::Value* isNull) const;
   // Decimal extract: calls a runtime helper that reads the JIT decimal
   // accumulator from 'group + slot.offset', applies overflow/precision checks
   // and writes the result (final flat decimal / partial row) into 'vector'.
@@ -156,7 +280,8 @@ class HashAggrJitCodegen {
   llvm::IRBuilder<>* builder_{nullptr};
 };
 
-using HashAggrJitAddDenseFunc = void (*)(char** groups, int32_t numRows, char** decodedInputs);
+using HashAggrJitAddDenseFunc =
+    void (*)(char** groups, int32_t numRows, char** inputRuntimes);
 using HashAggrJitInitFunc = void (*)(char** newGroups, int32_t numNewGroups);
 using HashAggrJitExtractFunc = void (*)(char** groups, int32_t numGroups, char** resultVectors);
 
@@ -181,13 +306,13 @@ class HashAggrJitChunk {
   void addDense(
       char** groups,
       int32_t numRows,
-      char** decodedInputs,
+      char** inputRuntimes,
       bool inputsMayHaveNulls) const {
     if (!inputsMayHaveNulls && addDenseNoNull_ != nullptr) {
-      addDenseNoNull_(groups, numRows, decodedInputs);
+      addDenseNoNull_(groups, numRows, inputRuntimes);
       return;
     }
-    addDense_(groups, numRows, decodedInputs);
+    addDense_(groups, numRows, inputRuntimes);
   }
 
   void extract(char** groups, int32_t numGroups, char** resultVectors) const {

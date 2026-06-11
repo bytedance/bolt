@@ -116,9 +116,12 @@ const void* hashAggrJitRawInputValues(
   return nullptr;
 }
 
-void fillHashAggrJitRowFieldInputs(
-    jit::HashAggrJitDecodedInput& input,
-    const DecodedVector& decoded,
+bool fillHashAggrJitRowInputRuntime(
+    jit::HashAggrJitInputRuntime& input,
+    std::vector<jit::HashAggrJitScalarInputRuntime>& children,
+    std::vector<const jit::HashAggrJitScalarInputRuntime*>& childPtrs,
+    DecodedVector& decoded,
+    const SelectivityVector& rows,
     const jit::HashAggrJitSlot& slot) {
   // The raw row-field fast path applies to merge inputs whose intermediate
   // representation is ROW(field0, field1): avg's ROW(sum, count) and decimal
@@ -127,55 +130,71 @@ void fillHashAggrJitRowFieldInputs(
   // directly instead of calling the per-row jit_GetDecodedRowField* helper
   // (which rebuilds a field DecodedVector on every call).
   if (!slot.desc.mergeInput) {
-    return;
+    return false;
   }
   const bool isAvg = slot.desc.kind == jit::HashAggrJitKind::Avg;
   const bool isDecimalSum =
       slot.desc.kind == jit::HashAggrJitKind::Sum && slot.desc.decimal;
   if (!isAvg && !isDecimalSum) {
-    return;
+    return false;
   }
   const auto* base = decoded.base();
   if (base == nullptr || base->encoding() != VectorEncoding::Simple::ROW) {
-    return;
+    return false;
   }
   const auto* rowVector = base->asUnchecked<RowVector>();
   if (rowVector->childrenSize() < 2) {
-    return;
+    return false;
   }
   const auto& sumVector = rowVector->childAt(0);
   if (sumVector->encoding() != VectorEncoding::Simple::FLAT) {
-    return;
+    return false;
   }
-  input.rowField0Values =
-      hashAggrJitRawInputValues(sumVector.get(), slot.desc.inputKind);
-  input.rowField0Nulls = sumVector->rawNulls();
+  children.resize(2);
+  childPtrs.resize(2);
+  children[0] = jit::HashAggrJitScalarInputRuntime{
+      .values = hashAggrJitRawInputValues(sumVector.get(), slot.desc.inputKind),
+      .indices = decoded.indices(),
+      .nulls = sumVector->rawNulls()};
   // field1 differs by aggregate: avg's count is a flat int64 scalar; decimal
   // sum's isEmpty is a bit-packed bool whose rawValues() is the bit-word
-  // buffer consumed by loadDecodedRowFieldBool's bit-read fast path.
+  // buffer consumed by the scalar bool bit-read fast path.
   const auto& field1Vector = rowVector->childAt(1);
   if (field1Vector->encoding() != VectorEncoding::Simple::FLAT) {
-    return;
+    return false;
   }
   if (isAvg) {
-    input.rowField1Values = hashAggrJitRawInputValues(
-        field1Vector.get(), jit::HashAggrJitValueKind::Int64);
-    input.rowField1Nulls = field1Vector->rawNulls();
+    children[1] = jit::HashAggrJitScalarInputRuntime{
+        .values = hashAggrJitRawInputValues(
+            field1Vector.get(), jit::HashAggrJitValueKind::Int64),
+        .indices = decoded.indices(),
+        .nulls = field1Vector->rawNulls()};
   } else {
     // isEmpty is bit-packed bool: valuesAsVoid() exposes the underlying
-    // bit-word buffer (rawValues() throws for bool). loadDecodedRowFieldBool
-    // bit-reads it directly.
-    input.rowField1Values = field1Vector->valuesAsVoid();
-    input.rowField1Nulls = field1Vector->rawNulls();
+    // bit-word buffer (rawValues() throws for bool). RowInputAdapterCodegen
+    // bit-reads it directly via the scalar child runtime.
+    children[1] = jit::HashAggrJitScalarInputRuntime{
+        .values = field1Vector->valuesAsVoid(),
+        .indices = decoded.indices(),
+        .nulls = field1Vector->rawNulls()};
   }
+  childPtrs[0] = &children[0];
+  childPtrs[1] = &children[1];
+  input.row = jit::HashAggrJitRowInputRuntime{
+      .nulls = decoded.nulls(&rows),
+      .children = childPtrs.data(),
+      .numChildren = static_cast<int32_t>(children.size())};
+  return true;
 }
 
 // Fills the raw flat sum/count field pointers for a partial avg ROW output.
 // Returns false when the ROW children are not both FLAT (e.g. dictionary/
 // constant wrapped), in which case the JIT fast path is not applicable and the
 // caller must fall back to the non-JIT extract path.
-bool fillHashAggrJitPartialAvgOutput(
-    jit::HashAggrJitOutput& output,
+bool fillHashAggrJitRowOutputRuntime(
+    jit::HashAggrJitOutputRuntime& output,
+    std::vector<jit::HashAggrJitScalarOutputRuntime>& children,
+    std::vector<jit::HashAggrJitScalarOutputRuntime*>& childPtrs,
     BaseVector* vector,
     const jit::HashAggrJitSlot& slot) {
   auto* rowVector = vector->asUnchecked<RowVector>();
@@ -188,15 +207,27 @@ bool fillHashAggrJitPartialAvgOutput(
       countVector->encoding() != VectorEncoding::Simple::FLAT) {
     return false;
   }
-  output.rowField0Values = slot.desc.decimal
-      ? static_cast<void*>(
-            sumVector->asUnchecked<FlatVector<int128_t>>()->mutableRawValues())
-      : static_cast<void*>(
-            sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues());
-  output.rowField0Nulls = sumVector->mutableRawNulls();
-  output.rowField1Values =
-      countVector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
-  output.rowField1Nulls = countVector->mutableRawNulls();
+  children.resize(2);
+  childPtrs.resize(2);
+  children[0] = jit::HashAggrJitScalarOutputRuntime{
+      .values = slot.desc.decimal
+          ? static_cast<void*>(
+                sumVector->asUnchecked<FlatVector<int128_t>>()->mutableRawValues())
+          : static_cast<void*>(
+                sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues()),
+      .nulls = sumVector->mutableRawNulls(),
+      .vector = sumVector.get()};
+  children[1] = jit::HashAggrJitScalarOutputRuntime{
+      .values = countVector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues(),
+      .nulls = countVector->mutableRawNulls(),
+      .vector = countVector.get()};
+  childPtrs[0] = &children[0];
+  childPtrs[1] = &children[1];
+  output.row = jit::HashAggrJitRowOutputRuntime{
+      .nulls = vector->mutableRawNulls(),
+      .children = childPtrs.data(),
+      .numChildren = static_cast<int32_t>(children.size()),
+      .vector = vector};
   return true;
 }
 
@@ -1121,9 +1152,11 @@ void GroupingSet::runHashAggrJitChunks(
 
     const auto numSlots = chunk.slots().size();
     hashAggrJitDecoded_.resize(numSlots);
-    hashAggrJitDecodedInputs_.resize(numSlots);
+    hashAggrJitInputRuntimes_.resize(numSlots);
+    hashAggrJitRowChildren_.resize(numSlots);
+    hashAggrJitRowChildPtrs_.resize(numSlots);
     hashAggrJitInputVectors_.assign(numSlots, nullptr);
-    hashAggrJitDecodedPtrs_.assign(numSlots, nullptr);
+    hashAggrJitInputRuntimePtrs_.assign(numSlots, nullptr);
 
     bool canRunChunk = true;
     std::string skipReason;
@@ -1165,19 +1198,32 @@ void GroupingSet::runHashAggrJitChunks(
       }
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
-      hashAggrJitDecodedInputs_[slotIndex] = jit::HashAggrJitDecodedInput{
-          .values = hashAggrJitDecoded_[slotIndex].dataAsVoid(),
-          .indices = hashAggrJitDecoded_[slotIndex].indices(),
-          .nulls = hashAggrJitDecoded_[slotIndex].nulls(&activeRows_),
-          .decodedVector = &hashAggrJitDecoded_[slotIndex]};
-      fillHashAggrJitRowFieldInputs(
-          hashAggrJitDecodedInputs_[slotIndex],
-          hashAggrJitDecoded_[slotIndex],
-          slot);
+      const bool usesRowInputRuntime = slot.desc.mergeInput &&
+          (slot.desc.kind == jit::HashAggrJitKind::Avg ||
+           (slot.desc.kind == jit::HashAggrJitKind::Sum && slot.desc.decimal));
+      if (usesRowInputRuntime) {
+        if (!fillHashAggrJitRowInputRuntime(
+                hashAggrJitInputRuntimes_[slotIndex],
+                hashAggrJitRowChildren_[slotIndex],
+                hashAggrJitRowChildPtrs_[slotIndex],
+                hashAggrJitDecoded_[slotIndex],
+                activeRows_,
+                slot)) {
+          canRunChunk = false;
+          skipReason = "ROW input runtime requires flat scalar row children";
+          break;
+        }
+      } else {
+        hashAggrJitInputRuntimes_[slotIndex].scalar =
+            jit::HashAggrJitScalarInputRuntime{
+                .values = hashAggrJitDecoded_[slotIndex].dataAsVoid(),
+                .indices = hashAggrJitDecoded_[slotIndex].indices(),
+                .nulls = hashAggrJitDecoded_[slotIndex].nulls(&activeRows_)};
+      }
       inputsMayHaveNulls =
           inputsMayHaveNulls || hashAggrJitDecoded_[slotIndex].mayHaveNulls();
-      hashAggrJitDecodedPtrs_[slotIndex] =
-          reinterpret_cast<char*>(&hashAggrJitDecodedInputs_[slotIndex]);
+      hashAggrJitInputRuntimePtrs_[slotIndex] =
+          reinterpret_cast<char*>(&hashAggrJitInputRuntimes_[slotIndex]);
     }
 
     if (!canRunChunk) {
@@ -1198,7 +1244,7 @@ void GroupingSet::runHashAggrJitChunks(
     chunk.addDense(
         groups,
         activeRows_.end(),
-        hashAggrJitDecodedPtrs_.data(),
+        hashAggrJitInputRuntimePtrs_.data(),
         inputsMayHaveNulls);
     for (const auto& slot : chunk.slots()) {
       jitExecuted[slot.aggregateIndex] = 1;
@@ -1227,7 +1273,9 @@ void GroupingSet::runHashAggrJitExtractChunks(
       continue;
     }
     const auto numSlots = chunk.slots().size();
-    hashAggrJitOutputs_.assign(numSlots, jit::HashAggrJitOutput{});
+    hashAggrJitOutputRuntimes_.assign(numSlots, jit::HashAggrJitOutputRuntime{});
+    hashAggrJitRowOutputChildren_.resize(numSlots);
+    hashAggrJitRowOutputChildPtrs_.resize(numSlots);
     hashAggrJitResultPtrs_.assign(numSlots, nullptr);
     bool canRunChunk = true;
     std::string skipReason;
@@ -1252,25 +1300,30 @@ void GroupingSet::runHashAggrJitExtractChunks(
       }
       // Prepare stable raw output pointers after resizing. The JIT extract
       // function still receives char** for ABI compatibility, but each element
-      // now points to HashAggrJitOutput rather than BaseVector directly.
+      // now points to HashAggrJitOutputRuntime rather than BaseVector directly.
       aggregateVector->resize(groups.size());
-      hashAggrJitOutputs_[slotIndex].vector = aggregateVector.get();
       if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
-        hashAggrJitOutputs_[slotIndex].values =
-            hashAggrJitRawOutputValues(aggregateVector.get(), slot.desc.accumulatorKind);
-        hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
+        hashAggrJitOutputRuntimes_[slotIndex].scalar =
+            jit::HashAggrJitScalarOutputRuntime{
+                .values = hashAggrJitRawOutputValues(
+                    aggregateVector.get(), slot.desc.accumulatorKind),
+                .nulls = aggregateVector->mutableRawNulls(),
+                .vector = aggregateVector.get()};
       } else if (aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
                  slot.desc.kind == jit::HashAggrJitKind::Avg) {
-        hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
-        if (!fillHashAggrJitPartialAvgOutput(
-                hashAggrJitOutputs_[slotIndex], aggregateVector.get(), slot)) {
+        if (!fillHashAggrJitRowOutputRuntime(
+                hashAggrJitOutputRuntimes_[slotIndex],
+                hashAggrJitRowOutputChildren_[slotIndex],
+                hashAggrJitRowOutputChildPtrs_[slotIndex],
+                aggregateVector.get(),
+                slot)) {
           canRunChunk = false;
           skipReason = "partial avg row fields are not flat";
           break;
         }
       }
       hashAggrJitResultPtrs_[slotIndex] =
-          reinterpret_cast<char*>(&hashAggrJitOutputs_[slotIndex]);
+          reinterpret_cast<char*>(&hashAggrJitOutputRuntimes_[slotIndex]);
     }
     if (!canRunChunk) {
       VLOG(1) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "

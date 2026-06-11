@@ -39,7 +39,7 @@ void addInc(
 void compileCountAddRawInput(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* /*decoded*/,
+    const InputAdapterCodegen& /*input*/,
     llvm::Value* /*row*/,
     const HashAggrJitSlot& slot,
     bool,
@@ -50,17 +50,21 @@ void compileCountAddRawInput(
 void compileCountAddIntermediateResults(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
-  llvm::Value* inc = slot.desc.countStar
-      ? codegen.builder().getInt64(1)
-      : codegen.castValue(
-            codegen.loadDecodedValue(decoded, row, slot),
-            slot.desc.inputKind,
-            HashAggrJitValueKind::Int64);
+  llvm::Value* inc = nullptr;
+  if (slot.desc.countStar) {
+    inc = codegen.builder().getInt64(1);
+  } else {
+    auto* inputRow = input.read(row, slot.desc.inputKind);
+    inc = codegen.castValue(
+        IRRow::getValue(codegen.builder(), inputRow),
+        slot.desc.inputKind,
+        HashAggrJitValueKind::Int64);
+  }
   addInc(codegen, group, slot, inc);
 }
 
@@ -76,12 +80,10 @@ void compileCountExtract(
     const HashAggrJitExtractTarget& target) {
   auto* value =
       codegen.loadValue(group, codegen.builder().getInt64Ty(), slot.offset);
-  codegen.emitFlatValue(
-      target.resultVector,
+  target.output.write(
       target.row,
       HashAggrJitValueKind::Int64,
-      value,
-      codegen.builder().getInt8(0));
+      IRRow::pack(codegen.builder(), value, codegen.builder().getFalse()));
 }
 
 } // namespace

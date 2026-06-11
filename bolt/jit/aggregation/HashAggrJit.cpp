@@ -19,8 +19,12 @@
 
 extern "C" {
 
-using bytedance::bolt::jit::HashAggrJitDecodedInput;
-using bytedance::bolt::jit::HashAggrJitOutput;
+using bytedance::bolt::jit::HashAggrJitInputRuntime;
+using bytedance::bolt::jit::HashAggrJitOutputRuntime;
+using bytedance::bolt::jit::HashAggrJitRowInputRuntime;
+using bytedance::bolt::jit::HashAggrJitRowOutputRuntime;
+using bytedance::bolt::jit::HashAggrJitScalarInputRuntime;
+using bytedance::bolt::jit::HashAggrJitScalarOutputRuntime;
 
 namespace {
 
@@ -50,31 +54,29 @@ void logHashAggrJitFunctionIR(
           << ir;
 }
 
-constexpr uint64_t kDecodedInputIndicesOffset =
-    offsetof(HashAggrJitDecodedInput, indices);
-constexpr uint64_t kDecodedInputNullsOffset =
-    offsetof(HashAggrJitDecodedInput, nulls);
-constexpr uint64_t kDecodedInputDecodedVectorOffset =
-    offsetof(HashAggrJitDecodedInput, decodedVector);
-constexpr uint64_t kDecodedInputFirstRowFieldOffset =
-    offsetof(HashAggrJitDecodedInput, rowField0Values);
-constexpr uint64_t kDecodedInputRowFieldNullsOffsetDelta =
-    offsetof(HashAggrJitDecodedInput, rowField0Nulls) -
-    offsetof(HashAggrJitDecodedInput, rowField0Values);
-constexpr uint64_t kDecodedInputRowFieldStride =
-    offsetof(HashAggrJitDecodedInput, rowField1Values) -
-    offsetof(HashAggrJitDecodedInput, rowField0Values);
+constexpr uint64_t kScalarInputValuesOffset =
+    offsetof(HashAggrJitScalarInputRuntime, values);
+constexpr uint64_t kScalarInputIndicesOffset =
+    offsetof(HashAggrJitScalarInputRuntime, indices);
+constexpr uint64_t kScalarInputNullsOffset =
+    offsetof(HashAggrJitScalarInputRuntime, nulls);
+constexpr uint64_t kRowInputNullsOffset =
+    offsetof(HashAggrJitRowInputRuntime, nulls);
+constexpr uint64_t kRowInputChildrenOffset =
+    offsetof(HashAggrJitRowInputRuntime, children);
 
-constexpr uint64_t kOutputNullsOffset = offsetof(HashAggrJitOutput, nulls);
-constexpr uint64_t kOutputVectorOffset = offsetof(HashAggrJitOutput, vector);
-constexpr uint64_t kOutputFirstRowFieldOffset =
-    offsetof(HashAggrJitOutput, rowField0Values);
-constexpr uint64_t kOutputRowFieldNullsOffsetDelta =
-    offsetof(HashAggrJitOutput, rowField0Nulls) -
-    offsetof(HashAggrJitOutput, rowField0Values);
-constexpr uint64_t kOutputRowFieldStride =
-    offsetof(HashAggrJitOutput, rowField1Values) -
-    offsetof(HashAggrJitOutput, rowField0Values);
+constexpr uint64_t kScalarOutputValuesOffset =
+    offsetof(HashAggrJitScalarOutputRuntime, values);
+constexpr uint64_t kScalarOutputNullsOffset =
+    offsetof(HashAggrJitScalarOutputRuntime, nulls);
+constexpr uint64_t kScalarOutputVectorOffset =
+    offsetof(HashAggrJitScalarOutputRuntime, vector);
+constexpr uint64_t kRowOutputNullsOffset =
+    offsetof(HashAggrJitRowOutputRuntime, nulls);
+constexpr uint64_t kRowOutputChildrenOffset =
+    offsetof(HashAggrJitRowOutputRuntime, children);
+constexpr uint64_t kRowOutputVectorOffset =
+    offsetof(HashAggrJitRowOutputRuntime, vector);
 
 } // namespace
 
@@ -200,47 +202,6 @@ llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
   return builder.getInt64Ty();
 }
 
-std::string decodedValueFunction(HashAggrJitValueKind kind) {
-  switch (kind) {
-    case HashAggrJitValueKind::Bool:
-      return "jit_GetDecodedValueBool";
-    case HashAggrJitValueKind::Int8:
-      return "jit_GetDecodedValueI8";
-    case HashAggrJitValueKind::Int16:
-      return "jit_GetDecodedValueI16";
-    case HashAggrJitValueKind::Int32:
-      return "jit_GetDecodedValueI32";
-    case HashAggrJitValueKind::Int64:
-      return "jit_GetDecodedValueI64";
-    case HashAggrJitValueKind::Int128:
-      return "jit_GetDecodedValueI128";
-    case HashAggrJitValueKind::Float:
-      return "jit_GetDecodedValueFloat";
-    case HashAggrJitValueKind::Double:
-      return "jit_GetDecodedValueDouble";
-  }
-  return "jit_GetDecodedValueI64";
-}
-
-std::string decodedRowFieldFunction(HashAggrJitValueKind kind) {
-  switch (kind) {
-    case HashAggrJitValueKind::Bool:
-    case HashAggrJitValueKind::Int8:
-      return "jit_GetDecodedRowFieldI8";
-    case HashAggrJitValueKind::Int64:
-      return "jit_GetDecodedRowFieldI64";
-    case HashAggrJitValueKind::Int128:
-      return "jit_GetDecodedRowFieldI128";
-    case HashAggrJitValueKind::Double:
-      return "jit_GetDecodedRowFieldDouble";
-    case HashAggrJitValueKind::Int16:
-    case HashAggrJitValueKind::Int32:
-    case HashAggrJitValueKind::Float:
-      break;
-  }
-  return "";
-}
-
 std::string setFlatValueFunction(HashAggrJitValueKind kind);
 
 bool isFloatKind(HashAggrJitValueKind kind) {
@@ -264,27 +225,38 @@ bool supportsRawFlatOutput(HashAggrJitValueKind kind) {
   return false;
 }
 
-llvm::Value* loadOutputValues(llvm::IRBuilder<>& builder, llvm::Value* output) {
+llvm::Value* loadPointerField(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* descriptor,
+    uint64_t offset,
+    llvm::Type* pointerType,
+    llvm::StringRef name);
+
+llvm::Value* loadScalarOutputValues(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* valuesPtrPtr = builder.CreatePointerCast(output, i8PtrTy->getPointerTo());
-  return builder.CreateLoad(i8PtrTy, valuesPtrPtr, "output_values");
+  return loadPointerField(
+      builder, output, kScalarOutputValuesOffset, i8PtrTy, "output_values");
 }
 
-llvm::Value* loadOutputNulls(llvm::IRBuilder<>& builder, llvm::Value* output) {
-  auto* i64Ty = builder.getInt64Ty();
-  auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), output, kOutputNullsOffset);
-  auto* nullsPtrPtr =
-      builder.CreatePointerCast(nullsAddr, i64Ty->getPointerTo()->getPointerTo());
-  return builder.CreateLoad(i64Ty->getPointerTo(), nullsPtrPtr, "output_nulls");
+llvm::Value* loadScalarOutputNulls(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output) {
+  return loadPointerField(
+      builder,
+      output,
+      kScalarOutputNullsOffset,
+      builder.getInt64Ty()->getPointerTo(),
+      "output_nulls");
 }
 
-llvm::Value* loadOutputVector(llvm::IRBuilder<>& builder, llvm::Value* output) {
+llvm::Value* loadScalarOutputVector(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), output, kOutputVectorOffset);
-  auto* vectorPtrPtr = builder.CreatePointerCast(vectorAddr, i8PtrTy->getPointerTo());
-  return builder.CreateLoad(i8PtrTy, vectorPtrPtr, "output_vector");
+  return loadPointerField(
+      builder, output, kScalarOutputVectorOffset, i8PtrTy, "output_vector");
 }
 
 llvm::Value* loadPointerField(
@@ -299,54 +271,132 @@ llvm::Value* loadPointerField(
   return builder.CreateLoad(pointerType, fieldPtrPtr, name);
 }
 
-llvm::Value* loadDecodedIndex(
+llvm::Value* loadScalarInputIndex(
     llvm::IRBuilder<>& builder,
-    llvm::Value* decoded,
+    llvm::Value* input,
     llvm::Value* row) {
   auto* i32Ty = builder.getInt32Ty();
   auto* indices = loadPointerField(
       builder,
-      decoded,
-      kDecodedInputIndicesOffset,
+      input,
+      kScalarInputIndicesOffset,
       i32Ty->getPointerTo(),
-      "decoded_indices");
+      "input_indices");
   return builder.CreateLoad(i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
 }
 
-llvm::Value* loadDecodedRowFieldPointer(
+llvm::Value* loadScalarInputValues(
     llvm::IRBuilder<>& builder,
-    llvm::Value* decoded,
-    int32_t field,
-    bool nulls) {
+    llvm::Value* input) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
-  auto offset = kDecodedInputFirstRowFieldOffset +
-      static_cast<uint64_t>(field) * kDecodedInputRowFieldStride +
-      (nulls ? kDecodedInputRowFieldNullsOffsetDelta : 0);
   return loadPointerField(
-      builder,
-      decoded,
-      offset,
-      pointerType,
-      nulls ? "decoded_row_field_nulls" : "decoded_row_field_values");
+      builder, input, kScalarInputValuesOffset, i8PtrTy, "input_values");
 }
 
-llvm::Value* loadOutputRowFieldPointer(
+llvm::Value* loadScalarInputNulls(
     llvm::IRBuilder<>& builder,
-    llvm::Value* output,
-    int32_t field,
-    bool nulls) {
+    llvm::Value* input) {
+  return loadPointerField(
+      builder,
+      input,
+      kScalarInputNullsOffset,
+      builder.getInt64Ty()->getPointerTo(),
+      "input_nulls");
+}
+
+llvm::Value* loadRowInputNulls(llvm::IRBuilder<>& builder, llvm::Value* input) {
+  return loadPointerField(
+      builder,
+      input,
+      kRowInputNullsOffset,
+      builder.getInt64Ty()->getPointerTo(),
+      "row_input_nulls");
+}
+
+llvm::Value* loadRowInputChild(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* input,
+    int32_t field) {
   auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* pointerType = nulls ? builder.getInt64Ty()->getPointerTo() : i8PtrTy;
-  auto offset = kOutputFirstRowFieldOffset +
-      static_cast<uint64_t>(field) * kOutputRowFieldStride +
-      (nulls ? kOutputRowFieldNullsOffsetDelta : 0);
+  auto* children = loadPointerField(
+      builder,
+      input,
+      kRowInputChildrenOffset,
+      i8PtrTy->getPointerTo(),
+      "row_input_children");
+  auto* childAddr =
+      builder.CreateConstInBoundsGEP1_64(i8PtrTy, children, field);
+  return builder.CreateLoad(i8PtrTy, childAddr, "row_input_child");
+}
+
+llvm::Value* loadScalarInputValue(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* input,
+    llvm::Value* row,
+    HashAggrJitValueKind kind) {
+  auto* values = loadScalarInputValues(builder, input);
+  auto* index = loadScalarInputIndex(builder, input, row);
+
+  if (kind == HashAggrJitValueKind::Bool) {
+    auto* wordTy = builder.getInt64Ty();
+    auto* wordIndex = builder.CreateLShr(index, builder.getInt32(6));
+    auto* bitIndex = builder.CreateAnd(index, builder.getInt32(63));
+    auto* words = builder.CreatePointerCast(values, wordTy->getPointerTo());
+    auto* word = builder.CreateLoad(
+        wordTy,
+        builder.CreateInBoundsGEP(
+            wordTy,
+            words,
+            builder.CreateZExt(wordIndex, builder.getInt64Ty())));
+    auto* shifted =
+        builder.CreateLShr(word, builder.CreateZExt(bitIndex, wordTy));
+    return builder.CreateZExt(
+        builder.CreateICmpNE(
+            builder.CreateAnd(shifted, builder.getInt64(1)),
+            builder.getInt64(0)),
+        builder.getInt8Ty());
+  }
+
+  auto* type = llvmType(builder, kind);
+  auto* typedValues = builder.CreatePointerCast(values, type->getPointerTo());
+  auto* valueAddr = builder.CreateInBoundsGEP(
+      type, typedValues, builder.CreateZExt(index, builder.getInt64Ty()));
+  auto* load = builder.CreateLoad(type, valueAddr);
+  load->setAlignment(llvm::Align(1));
+  return load;
+}
+
+llvm::Value* loadRowOutputNulls(llvm::IRBuilder<>& builder, llvm::Value* output) {
   return loadPointerField(
       builder,
       output,
-      offset,
-      pointerType,
-      nulls ? "output_row_field_nulls" : "output_row_field_values");
+      kRowOutputNullsOffset,
+      builder.getInt64Ty()->getPointerTo(),
+      "row_output_nulls");
+}
+
+llvm::Value* loadRowOutputVector(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  return loadPointerField(
+      builder, output, kRowOutputVectorOffset, i8PtrTy, "row_output_vector");
+}
+
+llvm::Value* loadRowOutputChild(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* output,
+    int32_t field) {
+  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
+  auto* children = loadPointerField(
+      builder,
+      output,
+      kRowOutputChildrenOffset,
+      i8PtrTy->getPointerTo(),
+      "row_output_children");
+  auto* childAddr =
+      builder.CreateConstInBoundsGEP1_64(i8PtrTy, children, field);
+  return builder.CreateLoad(i8PtrTy, childAddr, "row_output_child");
 }
 
 void emitOutputNullBit(
@@ -364,7 +414,9 @@ void emitOutputNullBit(
       builder.getInt64(1), builder.CreateZExt(bitIndex, builder.getInt64Ty()));
   auto* notNullWord = builder.CreateOr(word, mask);
   auto* nullWord = builder.CreateAnd(word, builder.CreateNot(mask));
-  auto* isNullBool = builder.CreateICmpNE(isNull, builder.getInt8(0));
+  auto* isNullBool = isNull->getType()->isIntegerTy(1)
+      ? isNull
+      : builder.CreateICmpNE(isNull, builder.getInt8(0));
   builder.CreateStore(
       builder.CreateSelect(isNullBool, nullWord, notNullWord), wordAddr);
 }
@@ -455,62 +507,8 @@ void setAccumulatorNull(
       builder.CreateOr(byte, mask));
 }
 
-llvm::Value* loadDecodedValue(
-    llvm::IRBuilder<>& builder,
-    llvm::Value* decoded,
-    llvm::Value* row,
-    const HashAggrJitSlot& slot) {
-  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* i32Ty = builder.getInt32Ty();
-
-  auto* valuesPtrPtr = builder.CreatePointerCast(decoded, i8PtrTy->getPointerTo());
-  auto* values = builder.CreateLoad(i8PtrTy, valuesPtrPtr, "decoded_values");
-
-  auto* indicesAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, kDecodedInputIndicesOffset);
-  auto* indicesPtrPtr =
-      builder.CreatePointerCast(indicesAddr, i32Ty->getPointerTo()->getPointerTo());
-  auto* indices = builder.CreateLoad(i32Ty->getPointerTo(), indicesPtrPtr, "decoded_indices");
-  auto* index = builder.CreateLoad(
-      i32Ty, builder.CreateInBoundsGEP(i32Ty, indices, row));
-
-  if (slot.desc.inputKind == HashAggrJitValueKind::Bool) {
-    auto* wordTy = builder.getInt64Ty();
-    auto* wordIndex = builder.CreateLShr(index, builder.getInt32(6));
-    auto* bitIndex = builder.CreateAnd(index, builder.getInt32(63));
-    auto* words = builder.CreatePointerCast(values, wordTy->getPointerTo());
-    auto* word = builder.CreateLoad(
-        wordTy,
-        builder.CreateInBoundsGEP(
-            wordTy, words, builder.CreateZExt(wordIndex, builder.getInt64Ty())));
-    auto* shifted = builder.CreateLShr(word, builder.CreateZExt(bitIndex, wordTy));
-    return builder.CreateZExt(
-        builder.CreateICmpNE(
-            builder.CreateAnd(shifted, builder.getInt64(1)), builder.getInt64(0)),
-        builder.getInt8Ty());
-  }
-
-  auto* type = llvmType(builder, slot.desc.inputKind);
-  auto* typedValues = builder.CreatePointerCast(values, type->getPointerTo());
-  auto* valueAddr = builder.CreateInBoundsGEP(
-      type, typedValues, builder.CreateZExt(index, builder.getInt64Ty()));
-  auto* load = builder.CreateLoad(type, valueAddr);
-  load->setAlignment(llvm::Align(1));
-  return load;
-}
-
-llvm::Value* loadDecodedNulls(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
-  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* nullsAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, kDecodedInputNullsOffset);
-  auto* nullsPtrPtr = builder.CreatePointerCast(nullsAddr, i8PtrTy->getPointerTo());
-  return builder.CreateLoad(i8PtrTy, nullsPtrPtr, "decoded_nulls");
-}
-
-llvm::Value* isDecodedNull(
-    llvm::IRBuilder<>& builder,
-    llvm::Value* nulls,
-    llvm::Value* row) {
+llvm::Value*
+isInputNull(llvm::IRBuilder<>& builder, llvm::Value* nulls, llvm::Value* row) {
   auto* i64Ty = builder.getInt64Ty();
   auto* nullWords = builder.CreatePointerCast(nulls, i64Ty->getPointerTo());
   auto* wordIndex = builder.CreateLShr(row, builder.getInt32(6));
@@ -524,15 +522,6 @@ llvm::Value* isDecodedNull(
       builder.CreateAnd(shifted, builder.getInt64(1)), builder.getInt64(0));
 }
 
-llvm::Value* loadDecodedVector(llvm::IRBuilder<>& builder, llvm::Value* decoded) {
-  auto* i8PtrTy = llvm::PointerType::get(builder.getContext(), 0);
-  auto* decodedVectorAddr = builder.CreateConstInBoundsGEP1_64(
-      builder.getInt8Ty(), decoded, kDecodedInputDecodedVectorOffset);
-  auto* decodedVectorPtrPtr =
-      builder.CreatePointerCast(decodedVectorAddr, i8PtrTy->getPointerTo());
-  return builder.CreateLoad(i8PtrTy, decodedVectorPtrPtr, "decoded_vector");
-}
-
 } // namespace
 
 HashAggrJitCodegen::HashAggrJitCodegen(llvm::Module& module) : module_(module) {
@@ -543,21 +532,10 @@ llvm::Type* HashAggrJitCodegen::llvmType(HashAggrJitValueKind kind) const {
   return ::bytedance::bolt::jit::llvmType(builder(), kind);
 }
 
-llvm::Value* HashAggrJitCodegen::loadDecodedValue(
-    llvm::Value* decoded,
-    llvm::Value* row,
-    const HashAggrJitSlot& slot) const {
-  return ::bytedance::bolt::jit::loadDecodedValue(builder(), decoded, row, slot);
-}
-
-llvm::Value* HashAggrJitCodegen::loadDecodedNulls(llvm::Value* decoded) const {
-  return ::bytedance::bolt::jit::loadDecodedNulls(builder(), decoded);
-}
-
-llvm::Value* HashAggrJitCodegen::isDecodedNull(
+llvm::Value* HashAggrJitCodegen::isInputNull(
     llvm::Value* nulls,
     llvm::Value* row) const {
-  return ::bytedance::bolt::jit::isDecodedNull(builder(), nulls, row);
+  return ::bytedance::bolt::jit::isInputNull(builder(), nulls, row);
 }
 
 llvm::Value* HashAggrJitCodegen::isAccumulatorNull(
@@ -604,218 +582,152 @@ bool HashAggrJitCodegen::isFloatKind(HashAggrJitValueKind kind) const {
   return ::bytedance::bolt::jit::isFloatKind(kind);
 }
 
-llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
-    llvm::Value* decoded,
+ScalarInputAdapterCodegen::ScalarInputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* input)
+    : codegen_(codegen), input_(input) {}
+
+llvm::StructType* ScalarInputAdapterCodegen::irRowType(
+    HashAggrJitValueKind kind) const {
+  return IRRow::getType(codegen_.builder(), codegen_.llvmType(kind));
+}
+
+llvm::Value* ScalarInputAdapterCodegen::read(
+    llvm::Value* row,
+    HashAggrJitValueKind kind) const {
+  auto* value = ::bytedance::bolt::jit::loadScalarInputValue(
+      codegen_.builder(), input_, row, kind);
+  // add_dense emits the top-level null guard before invoking aggregate ops.
+  // Therefore rows reaching ops are non-null; keep the IRRow contract explicit
+  // without duplicating the null bitmap check in every aggregate.
+  return IRRow::pack(codegen_.builder(), value, codegen_.builder().getFalse());
+}
+
+llvm::Value* ScalarInputAdapterCodegen::loadNulls() const {
+  return ::bytedance::bolt::jit::loadScalarInputNulls(
+      codegen_.builder(), input_);
+}
+
+llvm::Value* ScalarInputAdapterCodegen::isNull(llvm::Value* row) const {
+  return codegen_.isInputNull(loadNulls(), row);
+}
+
+llvm::Value* ScalarInputAdapterCodegen::readRowField(
+    llvm::Value*,
+    int32_t,
+    HashAggrJitValueKind) const {
+  BOLT_UNSUPPORTED("ScalarInputAdapterCodegen does not support ROW field load");
+}
+
+RowInputAdapterCodegen::RowInputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* input)
+    : codegen_(codegen), input_(input) {}
+
+llvm::Value* RowInputAdapterCodegen::loadChild(int32_t field) const {
+  return ::bytedance::bolt::jit::loadRowInputChild(
+      codegen_.builder(), input_, field);
+}
+
+llvm::StructType* RowInputAdapterCodegen::irRowType(
+    HashAggrJitValueKind kind) const {
+  return IRRow::getType(codegen_.builder(), codegen_.llvmType(kind));
+}
+
+llvm::Value* RowInputAdapterCodegen::read(llvm::Value*, HashAggrJitValueKind)
+    const {
+  BOLT_UNSUPPORTED("RowInputAdapterCodegen does not support scalar loadValue");
+}
+
+llvm::Value* RowInputAdapterCodegen::loadNulls() const {
+  return ::bytedance::bolt::jit::loadRowInputNulls(codegen_.builder(), input_);
+}
+
+llvm::Value* RowInputAdapterCodegen::isNull(llvm::Value* row) const {
+  return codegen_.isInputNull(loadNulls(), row);
+}
+
+llvm::Value* RowInputAdapterCodegen::readRowField(
     llvm::Value* row,
     int32_t field,
     HashAggrJitValueKind kind) const {
-  if (field == 0 || field == 1) {
-    auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
-        builder(), decoded, field, false);
-    auto* hasRawValues = builder().CreateICmpNE(
-        rawValues,
-        llvm::ConstantPointerNull::get(
-            llvm::PointerType::get(builder().getContext(), 0)));
-    auto* fastBlock = llvm::BasicBlock::Create(
-        module_.getContext(),
-        "row_field_raw_load",
-        builder().GetInsertBlock()->getParent());
-    auto* slowBlock = llvm::BasicBlock::Create(
-        module_.getContext(),
-        "row_field_helper_load",
-        builder().GetInsertBlock()->getParent());
-    auto* doneBlock = llvm::BasicBlock::Create(
-        module_.getContext(),
-        "row_field_load_done",
-        builder().GetInsertBlock()->getParent());
-    builder().CreateCondBr(hasRawValues, fastBlock, slowBlock);
-
-    builder().SetInsertPoint(fastBlock);
-    auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
-    auto* type = llvmType(kind);
-    auto* typedValues = builder().CreatePointerCast(rawValues, type->getPointerTo());
-    auto* valueAddr = builder().CreateInBoundsGEP(
-        type, typedValues, builder().CreateZExt(index, builder().getInt64Ty()));
-    auto* fastValue = builder().CreateLoad(type, valueAddr);
-    fastValue->setAlignment(llvm::Align(1));
-    builder().CreateBr(doneBlock);
-    auto* fastEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(slowBlock);
-    const auto name = decodedRowFieldFunction(kind);
-    BOLT_CHECK(
-        !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
-    auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
-    auto* slowValue = builder().CreateCall(
-        module_.getFunction(name),
-        {decodedVector, row, builder().getInt32(field)});
-    builder().CreateBr(doneBlock);
-    auto* slowEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(doneBlock);
-    auto* value = builder().CreatePHI(llvmType(kind), 2, "row_field_value");
-    value->addIncoming(fastValue, fastEnd);
-    value->addIncoming(slowValue, slowEnd);
-    return value;
-  }
-  const auto name = decodedRowFieldFunction(kind);
-  BOLT_CHECK(
-      !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
-  auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
-  return builder().CreateCall(
-      module_.getFunction(name),
-      {decodedVector, row, builder().getInt32(field)});
+  auto* child = loadChild(field);
+  auto* value = ::bytedance::bolt::jit::loadScalarInputValue(
+      codegen_.builder(), child, row, kind);
+  return IRRow::pack(codegen_.builder(), value, isRowFieldNull(row, field));
 }
 
-llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
-    llvm::Value* decoded,
+llvm::Value* RowInputAdapterCodegen::isRowFieldNull(
     llvm::Value* row,
     int32_t field) const {
-  if (field == 0 || field == 1) {
-    auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
-        builder(), decoded, field, false);
-    auto* rawNulls = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
-        builder(), decoded, field, true);
-    auto* hasRawValues = builder().CreateICmpNE(
-        rawValues,
-        llvm::ConstantPointerNull::get(
-            llvm::PointerType::get(builder().getContext(), 0)));
-    auto* rawPathBlock = llvm::BasicBlock::Create(
-        module_.getContext(), "row_field_raw_null_path", builder().GetInsertBlock()->getParent());
-    auto* helperPathBlock = llvm::BasicBlock::Create(
-        module_.getContext(),
-        "row_field_helper_null_path",
-        builder().GetInsertBlock()->getParent());
-    auto* doneBlock = llvm::BasicBlock::Create(
-        module_.getContext(), "row_field_null_done", builder().GetInsertBlock()->getParent());
-    builder().CreateCondBr(hasRawValues, rawPathBlock, helperPathBlock);
-
-    builder().SetInsertPoint(rawPathBlock);
-    auto* hasRawNulls = builder().CreateICmpNE(
-        rawNulls, llvm::ConstantPointerNull::get(builder().getInt64Ty()->getPointerTo()));
-    auto* nullCheckBlock = llvm::BasicBlock::Create(
-        module_.getContext(), "row_field_null_check", builder().GetInsertBlock()->getParent());
-    auto* rawDoneBlock = llvm::BasicBlock::Create(
-        module_.getContext(), "row_field_raw_null_done", builder().GetInsertBlock()->getParent());
-    builder().CreateCondBr(hasRawNulls, nullCheckBlock, rawDoneBlock);
-    auto* noNullsEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(nullCheckBlock);
-    auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
-    auto* isNull = ::bytedance::bolt::jit::isDecodedNull(builder(), rawNulls, index);
-    builder().CreateBr(rawDoneBlock);
-    auto* nullCheckEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(rawDoneBlock);
-    auto* fastNull = builder().CreatePHI(builder().getInt1Ty(), 2, "row_field_raw_is_null");
-    fastNull->addIncoming(builder().getFalse(), noNullsEnd);
-    fastNull->addIncoming(isNull, nullCheckEnd);
-    builder().CreateBr(doneBlock);
-    auto* rawEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(helperPathBlock);
-    auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
-    auto* helperNull = builder().CreateICmpNE(
-        builder().CreateCall(
-            module_.getFunction("jit_GetDecodedRowFieldIsNull"),
-            {decodedVector, row, builder().getInt32(field)}),
-        builder().getInt8(0));
-    builder().CreateBr(doneBlock);
-    auto* helperEnd = builder().GetInsertBlock();
-
-    builder().SetInsertPoint(doneBlock);
-    auto* result =
-        builder().CreatePHI(builder().getInt1Ty(), 2, "row_field_is_null");
-    result->addIncoming(fastNull, rawEnd);
-    result->addIncoming(helperNull, helperEnd);
-    return result;
-  }
-  auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
-  return builder().CreateICmpNE(
-      builder().CreateCall(
-          module_.getFunction("jit_GetDecodedRowFieldIsNull"),
-          {decodedVector, row, builder().getInt32(field)}),
-      builder().getInt8(0));
-}
-
-llvm::Value* HashAggrJitCodegen::loadDecodedRowFieldBool(
-    llvm::Value* decoded,
-    llvm::Value* row,
-    int32_t field) const {
-  // Bool ROW fields are bit-packed, so the raw values pointer addresses an
-  // i64 word array indexed by bit, not a byte-per-value buffer. When the raw
-  // pointer is populated (merge fast path), read the bit directly; otherwise
-  // fall back to the helper which decodes the field per row.
-  auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
-      builder(), decoded, field, false);
-  auto* hasRawValues = builder().CreateICmpNE(
-      rawValues,
+  auto* child = loadChild(field);
+  auto* nulls =
+      ::bytedance::bolt::jit::loadScalarInputNulls(codegen_.builder(), child);
+  auto* hasNulls = codegen_.builder().CreateICmpNE(
+      nulls,
       llvm::ConstantPointerNull::get(
-          llvm::PointerType::get(builder().getContext(), 0)));
-  auto* fastBlock = llvm::BasicBlock::Create(
-      module_.getContext(),
-      "row_field_bool_raw_load",
-      builder().GetInsertBlock()->getParent());
-  auto* slowBlock = llvm::BasicBlock::Create(
-      module_.getContext(),
-      "row_field_bool_helper_load",
-      builder().GetInsertBlock()->getParent());
+          codegen_.builder().getInt64Ty()->getPointerTo()));
+  auto* function = codegen_.builder().GetInsertBlock()->getParent();
+  auto* nullCheckBlock = llvm::BasicBlock::Create(
+      codegen_.module().getContext(), "row_field_null_check", function);
   auto* doneBlock = llvm::BasicBlock::Create(
-      module_.getContext(),
-      "row_field_bool_load_done",
-      builder().GetInsertBlock()->getParent());
-  builder().CreateCondBr(hasRawValues, fastBlock, slowBlock);
+      codegen_.module().getContext(), "row_field_null_done", function);
+  codegen_.builder().CreateCondBr(hasNulls, nullCheckBlock, doneBlock);
+  auto* noNullsEnd = codegen_.builder().GetInsertBlock();
 
-  builder().SetInsertPoint(fastBlock);
-  auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
-  // bit at 'index' inside the i64 word array: word = index >> 6, bit = index &
-  // 63; value = (words[word] >> bit) & 1.
-  auto* i64Ty = builder().getInt64Ty();
-  auto* words = builder().CreatePointerCast(rawValues, i64Ty->getPointerTo());
-  auto* index64 = builder().CreateZExt(index, i64Ty);
-  auto* wordIndex = builder().CreateLShr(index64, builder().getInt64(6));
-  auto* bitIndex = builder().CreateAnd(index64, builder().getInt64(63));
-  auto* word = builder().CreateLoad(
-      i64Ty, builder().CreateInBoundsGEP(i64Ty, words, wordIndex));
-  auto* shifted = builder().CreateLShr(word, bitIndex);
-  auto* bit = builder().CreateAnd(shifted, builder().getInt64(1));
-  auto* fastValue = builder().CreateTrunc(bit, builder().getInt8Ty());
-  builder().CreateBr(doneBlock);
-  auto* fastEnd = builder().GetInsertBlock();
+  codegen_.builder().SetInsertPoint(nullCheckBlock);
+  auto* index = ::bytedance::bolt::jit::loadScalarInputIndex(
+      codegen_.builder(), child, row);
+  auto* isNull = codegen_.isInputNull(nulls, index);
+  codegen_.builder().CreateBr(doneBlock);
+  auto* nullCheckEnd = codegen_.builder().GetInsertBlock();
 
-  builder().SetInsertPoint(slowBlock);
-  auto* decodedVector =
-      ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
-  auto* slowValue = builder().CreateCall(
-      module_.getFunction("jit_GetDecodedRowFieldI8"),
-      {decodedVector, row, builder().getInt32(field)});
-  builder().CreateBr(doneBlock);
-  auto* slowEnd = builder().GetInsertBlock();
-
-  builder().SetInsertPoint(doneBlock);
-  auto* value =
-      builder().CreatePHI(builder().getInt8Ty(), 2, "row_field_bool_value");
-  value->addIncoming(fastValue, fastEnd);
-  value->addIncoming(slowValue, slowEnd);
-  return value;
+  codegen_.builder().SetInsertPoint(doneBlock);
+  auto* result = codegen_.builder().CreatePHI(
+      codegen_.builder().getInt1Ty(), 2, "row_field_is_null");
+  result->addIncoming(codegen_.builder().getFalse(), noNullsEnd);
+  result->addIncoming(isNull, nullCheckEnd);
+  return result;
 }
 
-void HashAggrJitCodegen::emitFlatValue(
-    llvm::Value* output,
+ScalarOutputAdapterCodegen::ScalarOutputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* output)
+    : codegen_(codegen), output_(output) {}
+
+llvm::Value* ScalarOutputAdapterCodegen::vector() const {
+  return ::bytedance::bolt::jit::loadScalarOutputVector(
+      codegen_.builder(), output_);
+}
+
+void ScalarOutputAdapterCodegen::resize(llvm::Value* size) const {
+  codegen_.builder().CreateCall(
+      codegen_.module().getFunction("jit_HashAggrResizeVector"),
+      {vector(), size});
+}
+
+void ScalarOutputAdapterCodegen::write(
     llvm::Value* row,
     HashAggrJitValueKind kind,
-    llvm::Value* value,
-    llvm::Value* isNull) const {
+    llvm::Value* irRow) const {
+  auto* value = IRRow::getValue(codegen_.builder(), irRow);
+  auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
   if (supportsRawFlatOutput(kind)) {
-    auto* type = llvmType(kind);
-    auto* values = ::bytedance::bolt::jit::loadOutputValues(builder(), output);
-    auto* typedValues = builder().CreatePointerCast(values, type->getPointerTo());
-    auto* valueAddr = builder().CreateInBoundsGEP(
-        type, typedValues, builder().CreateZExt(row, builder().getInt64Ty()));
-    auto* store = builder().CreateStore(value, valueAddr);
+    auto* type = codegen_.llvmType(kind);
+    auto* values = ::bytedance::bolt::jit::loadScalarOutputValues(
+        codegen_.builder(), output_);
+    auto* typedValues = codegen_.builder().CreatePointerCast(
+        values, type->getPointerTo());
+    auto* valueAddr = codegen_.builder().CreateInBoundsGEP(
+        type,
+        typedValues,
+        codegen_.builder().CreateZExt(row, codegen_.builder().getInt64Ty()));
+    auto* store = codegen_.builder().CreateStore(value, valueAddr);
     store->setAlignment(llvm::Align(1));
-    auto* nulls = ::bytedance::bolt::jit::loadOutputNulls(builder(), output);
-    ::bytedance::bolt::jit::emitOutputNullBit(builder(), nulls, row, isNull);
+    auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+        codegen_.builder(), output_);
+    ::bytedance::bolt::jit::emitOutputNullBit(
+        codegen_.builder(), nulls, row, isNull);
     return;
   }
 
@@ -823,48 +735,89 @@ void HashAggrJitCodegen::emitFlatValue(
   if (setter.empty()) {
     return;
   }
-  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
-  builder().CreateCall(
-      module_.getFunction(setter),
-      {vector, row, value, isNull});
+  auto* isNullI8 = codegen_.builder().CreateZExt(
+      isNull, codegen_.builder().getInt8Ty());
+  codegen_.builder().CreateCall(
+      codegen_.module().getFunction(setter), {vector(), row, value, isNullI8});
 }
 
-void HashAggrJitCodegen::resizeResultVector(
-    llvm::Value* output,
-    llvm::Value* size) const {
-  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
-  builder().CreateCall(
-      module_.getFunction("jit_HashAggrResizeVector"),
-      {vector, size});
+void ScalarOutputAdapterCodegen::writeField(
+    llvm::Value*,
+    int32_t,
+    HashAggrJitValueKind,
+    llvm::Value*) const {
+  BOLT_UNSUPPORTED("ScalarOutputAdapterCodegen does not support ROW field write");
 }
 
-void HashAggrJitCodegen::emitPartialAvgResult(
-    llvm::Value* output,
+void ScalarOutputAdapterCodegen::writeNull(
     llvm::Value* row,
-    llvm::Value* sum,
-    llvm::Value* count,
     llvm::Value* isNull) const {
-  // The extract admission path (runHashAggrJitExtractChunks) guarantees the
-  // partial avg ROW output has flat sum/count children before the chunk runs,
-  // so rowField0/1 values are always populated and we can write them directly
-  // without a runtime fast/helper branch.
-  auto* sumValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
-      builder(), output, 0, false);
-  auto* sumTypedValues =
-      builder().CreatePointerCast(sumValues, builder().getDoubleTy()->getPointerTo());
-  auto* countValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
-      builder(), output, 1, false);
-  auto* countTypedValues =
-      builder().CreatePointerCast(countValues, builder().getInt64Ty()->getPointerTo());
-  auto* row64 = builder().CreateZExt(row, builder().getInt64Ty());
-  auto* sumAddr = builder().CreateInBoundsGEP(builder().getDoubleTy(), sumTypedValues, row64);
-  auto* sumStore = builder().CreateStore(sum, sumAddr);
-  sumStore->setAlignment(llvm::Align(1));
-  auto* countAddr = builder().CreateInBoundsGEP(builder().getInt64Ty(), countTypedValues, row64);
-  auto* countStore = builder().CreateStore(count, countAddr);
-  countStore->setAlignment(llvm::Align(1));
-  auto* nulls = ::bytedance::bolt::jit::loadOutputNulls(builder(), output);
-  ::bytedance::bolt::jit::emitOutputNullBit(builder(), nulls, row, isNull);
+  auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+      codegen_.builder(), output_);
+  ::bytedance::bolt::jit::emitOutputNullBit(
+      codegen_.builder(), nulls, row, isNull);
+}
+
+RowOutputAdapterCodegen::RowOutputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* output)
+    : codegen_(codegen), output_(output) {}
+
+llvm::Value* RowOutputAdapterCodegen::loadChild(int32_t field) const {
+  return ::bytedance::bolt::jit::loadRowOutputChild(
+      codegen_.builder(), output_, field);
+}
+
+llvm::Value* RowOutputAdapterCodegen::vector() const {
+  return ::bytedance::bolt::jit::loadRowOutputVector(codegen_.builder(), output_);
+}
+
+void RowOutputAdapterCodegen::resize(llvm::Value* size) const {
+  codegen_.builder().CreateCall(
+      codegen_.module().getFunction("jit_HashAggrResizeVector"),
+      {vector(), size});
+}
+
+void RowOutputAdapterCodegen::write(
+    llvm::Value*,
+    HashAggrJitValueKind,
+    llvm::Value*) const {
+  BOLT_UNSUPPORTED("RowOutputAdapterCodegen does not support scalar write");
+}
+
+void RowOutputAdapterCodegen::writeField(
+    llvm::Value* row,
+    int32_t field,
+    HashAggrJitValueKind kind,
+    llvm::Value* irRow) const {
+  BOLT_CHECK(
+      supportsRawFlatOutput(kind),
+      "Unsupported raw ROW output field kind for HashAggrJit");
+  auto* child = loadChild(field);
+  auto* value = IRRow::getValue(codegen_.builder(), irRow);
+  auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
+  auto* type = codegen_.llvmType(kind);
+  auto* values = ::bytedance::bolt::jit::loadScalarOutputValues(
+      codegen_.builder(), child);
+  auto* typedValues =
+      codegen_.builder().CreatePointerCast(values, type->getPointerTo());
+  auto* row64 = codegen_.builder().CreateZExt(row, codegen_.builder().getInt64Ty());
+  auto* valueAddr = codegen_.builder().CreateInBoundsGEP(type, typedValues, row64);
+  auto* store = codegen_.builder().CreateStore(value, valueAddr);
+  store->setAlignment(llvm::Align(1));
+  auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+      codegen_.builder(), child);
+  ::bytedance::bolt::jit::emitOutputNullBit(
+      codegen_.builder(), nulls, row, isNull);
+}
+
+void RowOutputAdapterCodegen::writeNull(
+    llvm::Value* row,
+    llvm::Value* isNull) const {
+  auto* nulls = ::bytedance::bolt::jit::loadRowOutputNulls(
+      codegen_.builder(), output_);
+  ::bytedance::bolt::jit::emitOutputNullBit(
+      codegen_.builder(), nulls, row, isNull);
 }
 
 void HashAggrJitCodegen::emitDecimalSumExtract(
@@ -877,10 +830,9 @@ void HashAggrJitCodegen::emitDecimalSumExtract(
                                  : "jit_HashAggrExtractFinalDecimalSum";
   auto* longDecimal = builder().getInt8(
       slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
-  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
-      {vector,
+      {output,
        row,
        group,
        builder().getInt32(slot.offset),
@@ -901,10 +853,9 @@ void HashAggrJitCodegen::emitDecimalAvgExtract(
       slot.desc.auxPrecision > bytedance::bolt::ShortDecimalType::kMaxPrecision
           ? 1
           : 0);
-  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
       module_.getFunction(fn),
-      {vector,
+      {output,
        row,
        group,
        builder().getInt32(slot.offset),
@@ -949,6 +900,16 @@ void HashAggrJitCodegen::emitDecimalAddWithOverflow(
 }
 
 namespace {
+
+bool usesRowInputRuntime(const HashAggrJitSlot& slot) {
+  return slot.desc.mergeInput &&
+      (slot.desc.kind == HashAggrJitKind::Avg ||
+       (slot.desc.kind == HashAggrJitKind::Sum && slot.desc.decimal));
+}
+
+bool usesRowOutputRuntime(const HashAggrJitSlot& slot, bool partialOutput) {
+  return partialOutput && slot.desc.kind == HashAggrJitKind::Avg;
+}
 
 bool genAddDenseIR(
     llvm::Module& module,
@@ -1027,8 +988,8 @@ bool genAddDenseIR(
   groups->setName("groups");
   llvm::Value* numRows = &*argIt++;
   numRows->setName("num_rows");
-  llvm::Value* decodedInputs = &*argIt++;
-  decodedInputs->setName("decoded_inputs");
+  llvm::Value* inputRuntimes = &*argIt++;
+  inputRuntimes->setName("input_runtimes");
 
   auto* entry = llvm::BasicBlock::Create(context, "entry", func);
   auto* loop = llvm::BasicBlock::Create(context, "loop", func);
@@ -1046,18 +1007,27 @@ bool genAddDenseIR(
     const auto& slot = slots[i];
     auto* updateBlock = llvm::BasicBlock::Create(context, "slot_update", func, end);
     auto* nextBlock = llvm::BasicBlock::Create(context, "slot_next", func, end);
-    auto* decodedAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, decodedInputs, i);
-    auto* decoded = builder.CreateLoad(i8PtrTy, decodedAddr);
+    auto* inputAddr =
+        builder.CreateConstInBoundsGEP1_64(i8PtrTy, inputRuntimes, i);
+    auto* inputRuntime = builder.CreateLoad(i8PtrTy, inputAddr);
+    std::unique_ptr<InputAdapterCodegen> input;
+    if (usesRowInputRuntime(slot)) {
+      input = std::make_unique<RowInputAdapterCodegen>(codegen, inputRuntime);
+    } else {
+      input =
+          std::make_unique<ScalarInputAdapterCodegen>(codegen, inputRuntime);
+    }
     if (checkInputNulls && !slot.desc.countStar) {
-      auto* nulls = codegen.loadDecodedNulls(decoded);
+      auto* nulls = input->loadNulls();
       auto* nullCheckBlock =
           llvm::BasicBlock::Create(context, "slot_null_check", func, end);
       auto* hasNulls = builder.CreateICmpNE(
-          nulls, llvm::ConstantPointerNull::get(i8PtrTy));
+          nulls,
+          llvm::ConstantPointerNull::get(builder.getInt64Ty()->getPointerTo()));
       builder.CreateCondBr(hasNulls, nullCheckBlock, updateBlock);
 
       builder.SetInsertPoint(nullCheckBlock);
-      auto* isNull = codegen.isDecodedNull(nulls, row);
+      auto* isNull = codegen.isInputNull(nulls, row);
       builder.CreateCondBr(isNull, nextBlock, updateBlock);
     } else {
       builder.CreateBr(updateBlock);
@@ -1072,7 +1042,7 @@ bool genAddDenseIR(
     if (addFn == nullptr) {
       return false;
     }
-    addFn(codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
+    addFn(codegen, group, *input, row, slot, checkInputNulls, nextBlock);
     builder.CreateBr(nextBlock);
     builder.SetInsertPoint(nextBlock);
   }
@@ -1142,9 +1112,16 @@ bool genExtractIR(
         !slots[i].desc.ops->canExtract(slots[i], partialOutput)) {
       continue;
     }
-    auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
-    auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
-    codegen.resizeResultVector(vector, numGroups);
+    auto* outputAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
+    auto* outputRuntime = builder.CreateLoad(i8PtrTy, outputAddr);
+    std::unique_ptr<OutputAdapterCodegen> output;
+    if (usesRowOutputRuntime(slots[i], partialOutput)) {
+      output = std::make_unique<RowOutputAdapterCodegen>(codegen, outputRuntime);
+    } else {
+      output =
+          std::make_unique<ScalarOutputAdapterCodegen>(codegen, outputRuntime);
+    }
+    output->resize(numGroups);
   }
   builder.CreateCondBr(builder.CreateICmpSLE(numGroups, builder.getInt32(0)), end, loop);
 
@@ -1160,13 +1137,20 @@ bool genExtractIR(
         !slot.desc.ops->canExtract(slot, partialOutput)) {
       continue;
     }
-    auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
-    auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
+    auto* outputAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
+    auto* outputRuntime = builder.CreateLoad(i8PtrTy, outputAddr);
+    std::unique_ptr<OutputAdapterCodegen> output;
+    if (usesRowOutputRuntime(slot, partialOutput)) {
+      output = std::make_unique<RowOutputAdapterCodegen>(codegen, outputRuntime);
+    } else {
+      output =
+          std::make_unique<ScalarOutputAdapterCodegen>(codegen, outputRuntime);
+    }
     if (slot.desc.ops->extract == nullptr) {
       return false;
     }
     slot.desc.ops->extract(
-        codegen, group, slot, HashAggrJitExtractTarget{vector, row, partialOutput});
+        codegen, group, slot, HashAggrJitExtractTarget{*output, row, partialOutput});
   }
 
   auto* next = builder.CreateAdd(row, builder.getInt32(1));

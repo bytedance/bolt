@@ -33,12 +33,13 @@ void compileAvgInitGroup(
 void compileAvgAddRawInput(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
-  auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
   auto* value =
       codegen.castValue(rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
   codegen.clearAccumulatorNull(group, slot);
@@ -63,16 +64,16 @@ void compileAvgAddRawInput(
 void compileAvgAddIntermediateResults(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
   codegen.clearAccumulatorNull(group, slot);
-  auto* sum =
-      codegen.loadDecodedRowField(decoded, row, 0, HashAggrJitValueKind::Double);
-  auto* count =
-      codegen.loadDecodedRowField(decoded, row, 1, HashAggrJitValueKind::Int64);
+  auto* sumRow = input.readRowField(row, 0, HashAggrJitValueKind::Double);
+  auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
+  auto* sum = IRRow::getValue(codegen.builder(), sumRow);
+  auto* count = IRRow::getValue(codegen.builder(), countRow);
   auto* oldSum =
       codegen.loadValue(group, codegen.builder().getDoubleTy(), slot.offset);
   codegen.storeValue(
@@ -109,21 +110,27 @@ void compileAvgExtract(
     // Intermediate output is row(sum:double, count:bigint). All-null group
     // yields (0, 0) with a non-null top-level row (isNull = 0), matching the
     // non-JIT extractAccumulators path.
-    codegen.emitPartialAvgResult(
-        target.resultVector, target.row, sum, count, builder.getInt8(0));
+    target.output.writeField(
+        target.row,
+        0,
+        HashAggrJitValueKind::Double,
+        IRRow::pack(builder, sum, builder.getFalse()));
+    target.output.writeField(
+        target.row,
+        1,
+        HashAggrJitValueKind::Int64,
+        IRRow::pack(builder, count, builder.getFalse()));
+    target.output.writeNull(target.row, builder.getFalse());
     return;
   }
   // Final output is double avg. count == 0 means all inputs were null -> null.
-  auto* isNull = builder.CreateZExt(
-      builder.CreateICmpEQ(count, builder.getInt64(0)), builder.getInt8Ty());
+  auto* isNull = builder.CreateICmpEQ(count, builder.getInt64(0));
   auto* countAsDouble = builder.CreateSIToFP(count, builder.getDoubleTy());
   auto* avg = builder.CreateFDiv(sum, countAsDouble);
-  codegen.emitFlatValue(
-      target.resultVector,
+  target.output.write(
       target.row,
       HashAggrJitValueKind::Double,
-      avg,
-      isNull);
+      IRRow::pack(builder, avg, isNull));
 }
 
 } // namespace

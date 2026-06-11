@@ -42,13 +42,14 @@ void compileDecimalSumInitGroup(
 void compileDecimalSumAddRawInput(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
   auto& b = codegen.builder();
-  auto* rawValue = codegen.loadDecodedValue(decoded, row, slot);
+  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
   auto* value =
       codegen.castValue(rawValue, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
@@ -61,7 +62,7 @@ void compileDecimalSumAddRawInput(
 void compileDecimalSumAddIntermediateResults(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
@@ -80,9 +81,10 @@ void compileDecimalSumAddIntermediateResults(
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "sum_decimal_merge", function, continueBlock);
-  auto* sumIsNull = codegen.isDecodedRowFieldNull(decoded, row, 0);
-  auto* incomingIsEmpty =
-      codegen.loadDecodedRowFieldBool(decoded, row, 1);
+  auto* sumRow = input.readRowField(row, 0, slot.desc.inputKind);
+  auto* isEmptyRow = input.readRowField(row, 1, HashAggrJitValueKind::Bool);
+  auto* sumIsNull = IRRow::getIsNull(b, sumRow);
+  auto* incomingIsEmpty = IRRow::getValue(b, isEmptyRow);
   auto* isNotEmpty = b.CreateICmpEQ(incomingIsEmpty, b.getInt8(0));
   auto* isOverflow = b.CreateAnd(sumIsNull, isNotEmpty);
   b.CreateCondBr(isOverflow, overflowBlock, mergeBlock);
@@ -92,7 +94,7 @@ void compileDecimalSumAddIntermediateResults(
   b.CreateBr(continueBlock);
 
   b.SetInsertPoint(mergeBlock);
-  auto* sum = codegen.loadDecodedRowField(decoded, row, 0, slot.desc.inputKind);
+  auto* sum = IRRow::getValue(b, sumRow);
   auto* value =
       codegen.castValue(sum, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
@@ -124,7 +126,7 @@ void compileDecimalSumExtract(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   codegen.emitDecimalSumExtract(
-      target.resultVector, target.row, group, slot, target.partialOutput);
+      target.output.vector(), target.row, group, slot, target.partialOutput);
 }
 
 } // namespace

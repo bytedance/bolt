@@ -464,13 +464,21 @@ class GroupingSet {
 #ifdef ENABLE_BOLT_JIT
   std::vector<jit::HashAggrJitChunk> hashAggrJitChunks_;
   std::vector<DecodedVector> hashAggrJitDecoded_;
-  std::vector<jit::HashAggrJitDecodedInput> hashAggrJitDecodedInputs_;
+  std::vector<jit::HashAggrJitInputRuntime> hashAggrJitInputRuntimes_;
+  std::vector<std::vector<jit::HashAggrJitScalarInputRuntime>>
+      hashAggrJitRowChildren_;
+  std::vector<std::vector<const jit::HashAggrJitScalarInputRuntime*>>
+      hashAggrJitRowChildPtrs_;
   // Keeps input vectors alive for the DecodedVector buffers referenced by
   // JIT during addDense.
   std::vector<VectorPtr> hashAggrJitInputVectors_;
-  std::vector<char*> hashAggrJitDecodedPtrs_;
+  std::vector<char*> hashAggrJitInputRuntimePtrs_;
   std::vector<char*> hashAggrJitNewGroups_;
-  std::vector<jit::HashAggrJitOutput> hashAggrJitOutputs_;
+  std::vector<jit::HashAggrJitOutputRuntime> hashAggrJitOutputRuntimes_;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime>>
+      hashAggrJitRowOutputChildren_;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime*>>
+      hashAggrJitRowOutputChildPtrs_;
   std::vector<char*> hashAggrJitResultPtrs_;
 #endif
 

@@ -29,13 +29,14 @@ void compileMinMaxInitGroup(
 void compileMinMaxUpdate(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
-    llvm::Value* decoded,
+    const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     bool,
     llvm::BasicBlock*) {
+  auto* inputRow = input.read(row, slot.desc.inputKind);
   auto* value = codegen.castValue(
-      codegen.loadDecodedValue(decoded, row, slot),
+      IRRow::getValue(codegen.builder(), inputRow),
       slot.desc.inputKind,
       slot.desc.accumulatorKind);
   auto* type = codegen.llvmType(slot.desc.accumulatorKind);
@@ -85,10 +86,11 @@ void compileMinMaxExtract(
     const HashAggrJitExtractTarget& target) {
   auto* value = codegen.loadValue(
       group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
-  auto* isNull = codegen.builder().CreateZExt(
-      codegen.isAccumulatorNull(group, slot), codegen.builder().getInt8Ty());
-  codegen.emitFlatValue(
-      target.resultVector, target.row, slot.desc.accumulatorKind, value, isNull);
+  auto* isNull = codegen.isAccumulatorNull(group, slot);
+  target.output.write(
+      target.row,
+      slot.desc.accumulatorKind,
+      IRRow::pack(codegen.builder(), value, isNull));
 }
 
 } // namespace
