@@ -11,6 +11,8 @@ namespace bytedance::bolt::jit {
 
 namespace {
 
+constexpr int32_t kAvgCountOffset = offsetof(JitAvgState, count);
+
 void compileAvgInitGroup(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
@@ -24,7 +26,7 @@ void compileAvgInitGroup(
   codegen.storeValue(
       group,
       codegen.builder().getInt64Ty(),
-      slot.offset + 8,
+      slot.offset + kAvgCountOffset,
       codegen.builder().getInt64(0));
 }
 
@@ -48,11 +50,13 @@ void compileAvgAddRawInput(
       slot.offset,
       codegen.builder().CreateFAdd(oldSum, value));
   auto* oldCount = codegen.loadValue(
-      group, codegen.builder().getInt64Ty(), slot.offset + 8);
+      group,
+      codegen.builder().getInt64Ty(),
+      slot.offset + kAvgCountOffset);
   codegen.storeValue(
       group,
       codegen.builder().getInt64Ty(),
-      slot.offset + 8,
+      slot.offset + kAvgCountOffset,
       codegen.builder().CreateAdd(oldCount, codegen.builder().getInt64(1)));
 }
 
@@ -77,16 +81,18 @@ void compileAvgAddIntermediateResults(
       slot.offset,
       codegen.builder().CreateFAdd(oldSum, sum));
   auto* oldCount = codegen.loadValue(
-      group, codegen.builder().getInt64Ty(), slot.offset + 8);
+      group,
+      codegen.builder().getInt64Ty(),
+      slot.offset + kAvgCountOffset);
   codegen.storeValue(
       group,
       codegen.builder().getInt64Ty(),
-      slot.offset + 8,
+      slot.offset + kAvgCountOffset,
       codegen.builder().CreateAdd(oldCount, count));
 }
 
 bool canCompileAvgExtract(const HashAggrJitSlot& slot, bool) {
-  // Only double avg (sum=double@offset, count=int64@offset+8) is supported.
+  // Only double avg (JitAvgState) is supported.
   return slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
 }
 
@@ -97,7 +103,8 @@ void compileAvgExtract(
     const HashAggrJitExtractTarget& target) {
   auto& builder = codegen.builder();
   auto* sum = codegen.loadValue(group, builder.getDoubleTy(), slot.offset);
-  auto* count = codegen.loadValue(group, builder.getInt64Ty(), slot.offset + 8);
+  auto* count = codegen.loadValue(
+      group, builder.getInt64Ty(), slot.offset + kAvgCountOffset);
   if (target.partialOutput) {
     // Intermediate output is row(sum:double, count:bigint). All-null group
     // yields (0, 0) with a non-null top-level row (isNull = 0), matching the

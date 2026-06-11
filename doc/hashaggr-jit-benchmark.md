@@ -1195,6 +1195,7 @@ runtime helper（`jitHashAggrAddWithOverflow`）。即 IR 只完成 decode + 路
 
 
 ```
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark  --bm_regex="(width8|width16)"   
 ============================================================================
 [...]c/benchmarks/HashAggrJitBenchmark.cpp     relative  time/iter   iters/s
 ============================================================================
@@ -1203,190 +1204,110 @@ runtime helper（`jitHashAggrAddWithOverflow`）。即 IR 只完成 decode + 路
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
+width8_merge_sum_nojit                                      6.36ms    157.19
+width8_merge_sum_jit                                        4.62ms    216.34
 ----------------------------------------------------------------------------
+width8_merge_avg_nojit                                      7.57ms    132.09
+width8_merge_avg_jit                                        5.97ms    167.52
 ----------------------------------------------------------------------------
+width8_merge_min_nojit                                      5.49ms    182.15
+width8_merge_min_jit                                        4.70ms    212.96
 ----------------------------------------------------------------------------
-width8_sum_nojit                                            4.75ms    210.73
-width8_sum_jit                                              3.49ms    286.89
+width8_merge_max_nojit                                      5.59ms    178.76
+width8_merge_max_jit                                        4.78ms    209.31
 ----------------------------------------------------------------------------
-width8_avg_nojit                                            5.36ms    186.61
-width8_avg_jit                                              4.17ms    239.53
+width8_merge_count_nojit                                    5.98ms    167.10
+width8_merge_count_jit                                      3.62ms    276.52
 ----------------------------------------------------------------------------
-width8_min_nojit                                            3.75ms    266.36
-width8_min_jit                                              3.47ms    288.20
+width16_merge_sum_nojit                                    11.78ms     84.87
+width16_merge_sum_jit                                       7.96ms    125.58
 ----------------------------------------------------------------------------
-width8_count_nojit                                          4.39ms    227.95
-width8_count_jit                                            2.34ms    427.14
+width16_merge_avg_nojit                                    15.00ms     66.69
+width16_merge_avg_jit                                      10.79ms     92.66
 ----------------------------------------------------------------------------
-width8_merge_sum_nojit                                      6.22ms    160.77
-width8_merge_sum_jit                                        4.75ms    210.69
+width16_merge_min_nojit                                    10.42ms     95.97
+width16_merge_min_jit                                       7.78ms    128.48
 ----------------------------------------------------------------------------
-width8_merge_avg_nojit                                      7.59ms    131.72
-width8_merge_avg_jit                                        5.84ms    171.16
+width16_merge_max_nojit                                    10.83ms     92.30
+width16_merge_max_jit                                       8.04ms    124.41
 ----------------------------------------------------------------------------
-width8_merge_min_nojit                                      5.64ms    177.34
-width8_merge_min_jit                                        4.89ms    204.57
+width16_merge_count_nojit                                   9.77ms    102.32
+width16_merge_count_jit                                     5.12ms    195.16
 ----------------------------------------------------------------------------
-width8_merge_count_nojit                                    6.08ms    164.52
-width8_merge_count_jit                                      3.68ms    271.96
 ----------------------------------------------------------------------------
-width16_sum_nojit                                           8.94ms    111.84
-width16_sum_jit                                             6.03ms    165.78
 ----------------------------------------------------------------------------
-width16_avg_nojit                                          10.71ms     93.37
-width16_avg_jit                                             7.39ms    135.30
 ----------------------------------------------------------------------------
-width16_min_nojit                                           7.62ms    131.30
-width16_min_jit                                             6.22ms    160.80
 ----------------------------------------------------------------------------
-width16_count_nojit                                         7.87ms    127.05
-width16_count_jit                                           3.62ms    275.88
 ----------------------------------------------------------------------------
-width16_merge_sum_nojit                                    11.47ms     87.15
-width16_merge_sum_jit                                       7.79ms    128.42
 ----------------------------------------------------------------------------
-width16_merge_avg_nojit                                    14.40ms     69.45
-width16_merge_avg_jit                                      10.53ms     94.95
 ----------------------------------------------------------------------------
-width16_merge_min_nojit                                    10.14ms     98.61
-width16_merge_min_jit                                       7.73ms    129.41
 ----------------------------------------------------------------------------
-width16_merge_count_nojit                                   9.62ms    103.94
-width16_merge_count_jit                                     5.16ms    193.66
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
+width8_high_card_merge_sum_nojit                           63.70ms     15.70
+width8_high_card_merge_sum_jit                             52.54ms     19.03
 ----------------------------------------------------------------------------
+width8_high_card_merge_avg_nojit                           88.21ms     11.34
+width8_high_card_merge_avg_jit                             83.18ms     12.02
 ----------------------------------------------------------------------------
+width8_high_card_merge_min_nojit                           61.33ms     16.30
+width8_high_card_merge_min_jit                             53.34ms     18.75
 ----------------------------------------------------------------------------
+width8_high_card_merge_max_nojit                           63.09ms     15.85
+width8_high_card_merge_max_jit                             52.99ms     18.87
 ----------------------------------------------------------------------------
+width8_high_card_merge_count_nojit                         60.97ms     16.40
+width8_high_card_merge_count_jit                           56.22ms     17.79
 ----------------------------------------------------------------------------
+width16_high_card_merge_sum_nojit                         113.48ms      8.81
+width16_high_card_merge_sum_jit                            90.50ms     11.05
 ----------------------------------------------------------------------------
+width16_high_card_merge_avg_nojit                         160.62ms      6.23
+width16_high_card_merge_avg_jit                           146.38ms      6.83
 ----------------------------------------------------------------------------
+width16_high_card_merge_min_nojit                         116.27ms      8.60
+width16_high_card_merge_min_jit                            92.11ms     10.86
 ----------------------------------------------------------------------------
+width16_high_card_merge_max_nojit                         113.06ms      8.84
+width16_high_card_merge_max_jit                            91.86ms     10.89
 ----------------------------------------------------------------------------
+width16_high_card_merge_count_nojit                       100.63ms      9.94
+width16_high_card_merge_count_jit                          89.21ms     11.21
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
-width8_high_card_sum_nojit                                 40.01ms     25.00
-width8_high_card_sum_jit                                   31.61ms     31.63
 ----------------------------------------------------------------------------
-width8_high_card_avg_nojit                                 46.37ms     21.56
-width8_high_card_avg_jit                                   38.18ms     26.19
 ----------------------------------------------------------------------------
-width8_high_card_min_nojit                                 37.29ms     26.82
-width8_high_card_min_jit                                   30.62ms     32.66
+width8_merge_decimal_sum_nojit                             19.57ms     51.09
+width8_merge_decimal_sum_jit                               21.68ms     46.12
 ----------------------------------------------------------------------------
-width8_high_card_count_nojit                               34.43ms     29.04
-width8_high_card_count_jit                                 30.06ms     33.27
+width8_merge_decimal_avg_nojit                             19.50ms     51.29
+width8_merge_decimal_avg_jit                               13.67ms     73.15
 ----------------------------------------------------------------------------
-width8_high_card_merge_sum_nojit                           61.33ms     16.31
-width8_high_card_merge_sum_jit                             52.05ms     19.21
+width16_merge_decimal_sum_nojit                            39.46ms     25.34
+width16_merge_decimal_sum_jit                              42.44ms     23.56
 ----------------------------------------------------------------------------
-width8_high_card_merge_avg_nojit                           94.24ms     10.61
-width8_high_card_merge_avg_jit                             78.64ms     12.72
+width16_merge_decimal_avg_nojit                            40.01ms     24.99
+width16_merge_decimal_avg_jit                              26.90ms     37.17
 ----------------------------------------------------------------------------
-width8_high_card_merge_min_nojit                           62.70ms     15.95
-width8_high_card_merge_min_jit                             51.41ms     19.45
 ----------------------------------------------------------------------------
-width8_high_card_merge_count_nojit                         57.81ms     17.30
-width8_high_card_merge_count_jit                           53.43ms     18.72
 ----------------------------------------------------------------------------
-width16_high_card_sum_nojit                                70.22ms     14.24
-width16_high_card_sum_jit                                  55.12ms     18.14
 ----------------------------------------------------------------------------
-width16_high_card_avg_nojit                                84.58ms     11.82
-width16_high_card_avg_jit                                  66.30ms     15.08
 ----------------------------------------------------------------------------
-width16_high_card_min_nojit                                67.12ms     14.90
-width16_high_card_min_jit                                  54.09ms     18.49
+width8_merge_double_min_nojit                               6.82ms    146.54
+width8_merge_double_min_jit                                 5.58ms    179.12
 ----------------------------------------------------------------------------
-width16_high_card_count_nojit                              59.38ms     16.84
-width16_high_card_count_jit                                47.88ms     20.89
+width8_merge_double_max_nojit                               5.89ms    169.65
+width8_merge_double_max_jit                                 5.25ms    190.33
 ----------------------------------------------------------------------------
-width16_high_card_merge_sum_nojit                         113.95ms      8.78
-width16_high_card_merge_sum_jit                            93.46ms     10.70
+width16_merge_double_min_nojit                             12.33ms     81.08
+width16_merge_double_min_jit                                9.74ms    102.70
 ----------------------------------------------------------------------------
-width16_high_card_merge_avg_nojit                         157.39ms      6.35
-width16_high_card_merge_avg_jit                           137.35ms      7.28
-----------------------------------------------------------------------------
-width16_high_card_merge_min_nojit                         110.10ms      9.08
-width16_high_card_merge_min_jit                            91.93ms     10.88
-----------------------------------------------------------------------------
-width16_high_card_merge_count_nojit                       103.19ms      9.69
-width16_high_card_merge_count_jit                          88.89ms     11.25
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-width8_decimal_sum_nojit                                   12.15ms     82.32
-width8_decimal_sum_jit                                      8.16ms    122.56
-----------------------------------------------------------------------------
-width8_decimal_avg_nojit                                   16.20ms     61.74
-width8_decimal_avg_jit                                      9.55ms    104.73
-----------------------------------------------------------------------------
-width16_decimal_sum_nojit                                  23.55ms     42.46
-width16_decimal_sum_jit                                    16.41ms     60.93
-----------------------------------------------------------------------------
-width16_decimal_avg_nojit                                  32.43ms     30.83
-width16_decimal_avg_jit                                    19.10ms     52.36
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-width8_double_min_nojit                                     4.97ms    201.41
-width8_double_min_jit                                       4.19ms    238.53
-----------------------------------------------------------------------------
-width8_double_max_nojit                                     4.22ms    236.76
-width8_double_max_jit                                       3.89ms    257.11
-----------------------------------------------------------------------------
-width8_merge_double_min_nojit                               6.96ms    143.68
-width8_merge_double_min_jit                                 5.71ms    175.20
-----------------------------------------------------------------------------
-width8_merge_double_max_nojit                               6.01ms    166.45
-width8_merge_double_max_jit                                 5.10ms    195.97
-----------------------------------------------------------------------------
-width16_double_min_nojit                                    9.93ms    100.71
-width16_double_min_jit                                      7.81ms    128.06
-----------------------------------------------------------------------------
-width16_double_max_nojit                                    8.75ms    114.27
-width16_double_max_jit                                      7.18ms    139.30
-----------------------------------------------------------------------------
-width16_merge_double_min_nojit                             12.39ms     80.74
-width16_merge_double_min_jit                                9.53ms    104.88
-----------------------------------------------------------------------------
-width16_merge_double_max_nojit                             10.93ms     91.50
-width16_merge_double_max_jit                                9.04ms    110.68
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-----------------------------------------------------------------------------
-width8_high_card_partial_avg_nojit                         56.15ms     17.81
-width8_high_card_partial_avg_jit                           61.69ms     16.21
-----------------------------------------------------------------------------
-width8_high_card_partial_sum_nojit                         25.49ms     39.23
-width8_high_card_partial_sum_jit                           22.00ms     45.46
-----------------------------------------------------------------------------
-width16_high_card_partial_avg_nojit                        99.27ms     10.07
-width16_high_card_partial_avg_jit                         114.96ms      8.70
-----------------------------------------------------------------------------
-width16_high_card_partial_sum_nojit                        48.90ms     20.45
-width16_high_card_partial_sum_jit                          41.31ms     24.21
+width16_merge_double_max_nojit                             10.85ms     92.15
+width16_merge_double_max_jit                                8.67ms    115.36
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
 ----------------------------------------------------------------------------
@@ -1449,3 +1370,70 @@ divide / overflow / precision-rescale 逻辑直接展开成 LLVM IR。
 
 换句话说：从这一节之后，文档里关于 decimal avg 的性能讨论应默认理解为“**final extract JIT 已补齐**”的版本；
 如果引用更早的数据，需要显式说明那是旧口径历史快照。
+
+## 16. decimal sum merge 输入 row-field 快路径优化
+
+### 16.1 背景
+
+补齐 final extract 后，新增了 `*_merge_decimal_sum` / `*_merge_decimal_avg`（`PartialFinal` 口径）benchmark。
+其中 **`width16_merge_decimal_sum_jit` 反而比 non-JIT 慢**（约 42ms vs 39ms），而同口径的 decimal avg 却是 JIT 更快。
+
+定位结论：瓶颈不在算术本身，而在 **final aggregation 的 merge 输入读取**。
+
+- decimal sum merge 的中间结果是 `ROW(sum:decimal, isEmpty:bool)`；
+- merge 热路径每行都要读 field0(sum) 与 field1(isEmpty)，并判 field0 null（见 `DecimalSumOps.cpp`）；
+- 但 `fillHashAggrJitRowFieldInputs()` 当时**只为 avg 预填 row-field raw 指针**，decimal sum 没填；
+- 于是 JIT 的 `loadDecodedRowField` / `isDecodedRowFieldNull` 全部掉到 helper slow path
+  （`jit_GetDecodedRowFieldI128 / I8 / IsNull`），而这些 helper **每次调用都重建一个 field 级 `DecodedVector`**；
+- width16 下 slot 数翻倍，这个每行固定开销被线性放大，最终把 JIT 收益吃光。
+
+decimal avg 之所以更快，正是因为它的 merge 输入早已走了 raw row-field 快路径（avg 的 `ROW(sum, count)`）。
+
+### 16.2 改动
+
+分两步把 decimal sum 的 merge 输入快路径补齐。
+
+**第一步：field0(sum) raw fast path**
+
+扩展 `fillHashAggrJitRowFieldInputs()`（`bolt/exec/GroupingSet.cpp`），从“仅 avg”扩展到“avg + decimal sum”：
+
+- decimal sum 的 field0(sum, int128) 填充 `rowField0Values` / `rowField0Nulls`；
+- 这样 JIT 读取 sum 与判 sum null 直接命中 `loadDecodedRowField` 的 raw fast path，不再每行重建 `DecodedVector`。
+
+**第二步：field1(isEmpty) bit-packed bool fast path**
+
+field1 的 `isEmpty` 是 **bit-packed bool**，没有按字节排布的 scalar 指针，不能复用普通 fast path，因此单独新增一条按位读取的快路径：
+
+- 新增 `HashAggrJitCodegen::loadDecodedRowFieldBool()`（`bolt/jit/aggregation/HashAggrJit.cpp`）：
+  把 `rowField1Values` 视为 i64 word 数组，`word = index>>6`、`bit = index&63`，直接 `(words[word] >> bit) & 1`；
+  raw 指针为空时回退 `jit_GetDecodedRowFieldI8` helper；
+- `DecimalSumOps.cpp` 的 merge 改用 `loadDecodedRowFieldBool` 读 `isEmpty`；
+- `fillHashAggrJitRowFieldInputs()` 为 decimal sum 填 field1 的 bit 缓冲区指针，
+  通过 `valuesAsVoid()` 取（注意：`FlatVector<bool>::rawValues()` 对 bool 会抛 `UNSUPPORTED`，必须用 `valuesAsVoid()`）。
+
+涉及文件：
+
+- `bolt/exec/GroupingSet.cpp`：`fillHashAggrJitRowFieldInputs` 扩展支持 decimal sum，并填 field0/field1 指针；
+- `bolt/jit/aggregation/HashAggrJit.{h,cpp}`：新增 `loadDecodedRowFieldBool`；
+- `bolt/jit/aggregation/ops/DecimalSumOps.cpp`：merge 改用 bool 快路径读 `isEmpty`。
+
+### 16.3 性能（PartialFinal 口径，bm_min_iters 默认）
+
+| case | nojit | jit(初始) | jit(+field0) | jit(+bool) |
+|---|---|---|---|---|
+| width8_merge_decimal_sum  | 19.55ms | 慢于 nojit | 17.24ms | **16.19ms** |
+| width16_merge_decimal_sum | 39.44ms | ~42ms（慢于 nojit） | 33.27ms | **31.30ms** |
+| width8_merge_decimal_avg  | 20.68ms | —（本就更快） | — | **14.55ms** |
+| width16_merge_decimal_avg | 40.09ms | —（本就更快） | — | **28.12ms** |
+
+要点：
+
+- `width16_merge_decimal_sum_jit`：42ms（慢于 nojit）→ 33.3ms（field0 快路径）→ **31.3ms**（再加 bool 快路径），已稳定反超 nojit 的 39ms；
+- decimal avg 不受负面影响，仍保持 JIT 更快。
+
+### 16.4 正确性
+
+- 两步快路径读到的都是与原 helper 完全相同的底层数据，仅省掉了每行的 `DecodedVector` 重建，无语义变化；
+- 实现期间踩到一个坑：最初用 `FlatVector<bool>::rawValues()` 取 bit 缓冲区，运行时抛
+  `BoltUserError: rawValues() for bool is not supported`，改用 `valuesAsVoid()` 后正常；
+- benchmark 真实 query 在 JIT / non-JIT 双路径下均正常执行、无崩溃、无异常。

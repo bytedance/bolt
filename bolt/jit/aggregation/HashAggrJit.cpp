@@ -738,6 +738,68 @@ llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
       builder().getInt8(0));
 }
 
+llvm::Value* HashAggrJitCodegen::loadDecodedRowFieldBool(
+    llvm::Value* decoded,
+    llvm::Value* row,
+    int32_t field) const {
+  // Bool ROW fields are bit-packed, so the raw values pointer addresses an
+  // i64 word array indexed by bit, not a byte-per-value buffer. When the raw
+  // pointer is populated (merge fast path), read the bit directly; otherwise
+  // fall back to the helper which decodes the field per row.
+  auto* rawValues = ::bytedance::bolt::jit::loadDecodedRowFieldPointer(
+      builder(), decoded, field, false);
+  auto* hasRawValues = builder().CreateICmpNE(
+      rawValues,
+      llvm::ConstantPointerNull::get(
+          llvm::PointerType::get(builder().getContext(), 0)));
+  auto* fastBlock = llvm::BasicBlock::Create(
+      module_.getContext(),
+      "row_field_bool_raw_load",
+      builder().GetInsertBlock()->getParent());
+  auto* slowBlock = llvm::BasicBlock::Create(
+      module_.getContext(),
+      "row_field_bool_helper_load",
+      builder().GetInsertBlock()->getParent());
+  auto* doneBlock = llvm::BasicBlock::Create(
+      module_.getContext(),
+      "row_field_bool_load_done",
+      builder().GetInsertBlock()->getParent());
+  builder().CreateCondBr(hasRawValues, fastBlock, slowBlock);
+
+  builder().SetInsertPoint(fastBlock);
+  auto* index = ::bytedance::bolt::jit::loadDecodedIndex(builder(), decoded, row);
+  // bit at 'index' inside the i64 word array: word = index >> 6, bit = index &
+  // 63; value = (words[word] >> bit) & 1.
+  auto* i64Ty = builder().getInt64Ty();
+  auto* words = builder().CreatePointerCast(rawValues, i64Ty->getPointerTo());
+  auto* index64 = builder().CreateZExt(index, i64Ty);
+  auto* wordIndex = builder().CreateLShr(index64, builder().getInt64(6));
+  auto* bitIndex = builder().CreateAnd(index64, builder().getInt64(63));
+  auto* word = builder().CreateLoad(
+      i64Ty, builder().CreateInBoundsGEP(i64Ty, words, wordIndex));
+  auto* shifted = builder().CreateLShr(word, bitIndex);
+  auto* bit = builder().CreateAnd(shifted, builder().getInt64(1));
+  auto* fastValue = builder().CreateTrunc(bit, builder().getInt8Ty());
+  builder().CreateBr(doneBlock);
+  auto* fastEnd = builder().GetInsertBlock();
+
+  builder().SetInsertPoint(slowBlock);
+  auto* decodedVector =
+      ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
+  auto* slowValue = builder().CreateCall(
+      module_.getFunction("jit_GetDecodedRowFieldI8"),
+      {decodedVector, row, builder().getInt32(field)});
+  builder().CreateBr(doneBlock);
+  auto* slowEnd = builder().GetInsertBlock();
+
+  builder().SetInsertPoint(doneBlock);
+  auto* value =
+      builder().CreatePHI(builder().getInt8Ty(), 2, "row_field_bool_value");
+  value->addIncoming(fastValue, fastEnd);
+  value->addIncoming(slowValue, slowEnd);
+  return value;
+}
+
 void HashAggrJitCodegen::emitFlatValue(
     llvm::Value* output,
     llvm::Value* row,

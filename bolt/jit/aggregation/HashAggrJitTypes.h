@@ -2,6 +2,7 @@
 
 #ifdef ENABLE_BOLT_JIT
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -16,6 +17,13 @@
 // table, HashAggrJitCodegen, HashAggrJitChunk) live in HashAggrJit.h.
 
 namespace bytedance::bolt::jit {
+
+// JIT-internal accumulator layout for avg. Shared between avg ops codegen and
+// any runtime/helper logic that needs to reason about the in-row state layout.
+struct JitAvgState {
+  double sum{0};
+  int64_t count{0};
+};
 
 // JIT-internal accumulator layouts for decimal sum/avg. Shared between the JIT
 // codegen runtime helpers and the extract runtime helpers (which live in a

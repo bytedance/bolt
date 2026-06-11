@@ -104,6 +104,13 @@ class HashAggrJitCodegen {
       llvm::Value* decoded,
       llvm::Value* row,
       int32_t field) const;
+  // Reads a bit-packed bool ROW field (e.g. decimal sum's isEmpty) as an i8
+  // 0/1. The raw fast path bit-reads the flat bool buffer; falls back to the
+  // jit_GetDecodedRowFieldI8 helper when the field's raw pointer is unset.
+  llvm::Value* loadDecodedRowFieldBool(
+      llvm::Value* decoded,
+      llvm::Value* row,
+      int32_t field) const;
   void emitFlatValue(
       llvm::Value* vector,
       llvm::Value* row,

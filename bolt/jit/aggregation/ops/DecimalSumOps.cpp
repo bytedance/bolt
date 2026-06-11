@@ -82,7 +82,7 @@ void compileDecimalSumAddIntermediateResults(
       codegen.module().getContext(), "sum_decimal_merge", function, continueBlock);
   auto* sumIsNull = codegen.isDecodedRowFieldNull(decoded, row, 0);
   auto* incomingIsEmpty =
-      codegen.loadDecodedRowField(decoded, row, 1, HashAggrJitValueKind::Int8);
+      codegen.loadDecodedRowFieldBool(decoded, row, 1);
   auto* isNotEmpty = b.CreateICmpEQ(incomingIsEmpty, b.getInt8(0));
   auto* isOverflow = b.CreateAnd(sumIsNull, isNotEmpty);
   b.CreateCondBr(isOverflow, overflowBlock, mergeBlock);

@@ -120,7 +120,19 @@ void fillHashAggrJitRowFieldInputs(
     jit::HashAggrJitDecodedInput& input,
     const DecodedVector& decoded,
     const jit::HashAggrJitSlot& slot) {
-  if (!slot.desc.mergeInput || slot.desc.kind != jit::HashAggrJitKind::Avg) {
+  // The raw row-field fast path applies to merge inputs whose intermediate
+  // representation is ROW(field0, field1): avg's ROW(sum, count) and decimal
+  // sum's ROW(sum, isEmpty). For both, field0 is the running sum read on the
+  // hot merge path; populating its raw pointer lets generated IR load it
+  // directly instead of calling the per-row jit_GetDecodedRowField* helper
+  // (which rebuilds a field DecodedVector on every call).
+  if (!slot.desc.mergeInput) {
+    return;
+  }
+  const bool isAvg = slot.desc.kind == jit::HashAggrJitKind::Avg;
+  const bool isDecimalSum =
+      slot.desc.kind == jit::HashAggrJitKind::Sum && slot.desc.decimal;
+  if (!isAvg && !isDecimalSum) {
     return;
   }
   const auto* base = decoded.base();
@@ -132,17 +144,30 @@ void fillHashAggrJitRowFieldInputs(
     return;
   }
   const auto& sumVector = rowVector->childAt(0);
-  const auto& countVector = rowVector->childAt(1);
-  if (sumVector->encoding() != VectorEncoding::Simple::FLAT ||
-      countVector->encoding() != VectorEncoding::Simple::FLAT) {
+  if (sumVector->encoding() != VectorEncoding::Simple::FLAT) {
     return;
   }
   input.rowField0Values =
       hashAggrJitRawInputValues(sumVector.get(), slot.desc.inputKind);
   input.rowField0Nulls = sumVector->rawNulls();
-  input.rowField1Values =
-      hashAggrJitRawInputValues(countVector.get(), jit::HashAggrJitValueKind::Int64);
-  input.rowField1Nulls = countVector->rawNulls();
+  // field1 differs by aggregate: avg's count is a flat int64 scalar; decimal
+  // sum's isEmpty is a bit-packed bool whose rawValues() is the bit-word
+  // buffer consumed by loadDecodedRowFieldBool's bit-read fast path.
+  const auto& field1Vector = rowVector->childAt(1);
+  if (field1Vector->encoding() != VectorEncoding::Simple::FLAT) {
+    return;
+  }
+  if (isAvg) {
+    input.rowField1Values = hashAggrJitRawInputValues(
+        field1Vector.get(), jit::HashAggrJitValueKind::Int64);
+    input.rowField1Nulls = field1Vector->rawNulls();
+  } else {
+    // isEmpty is bit-packed bool: valuesAsVoid() exposes the underlying
+    // bit-word buffer (rawValues() throws for bool). loadDecodedRowFieldBool
+    // bit-reads it directly.
+    input.rowField1Values = field1Vector->valuesAsVoid();
+    input.rowField1Nulls = field1Vector->rawNulls();
+  }
 }
 
 // Fills the raw flat sum/count field pointers for a partial avg ROW output.
