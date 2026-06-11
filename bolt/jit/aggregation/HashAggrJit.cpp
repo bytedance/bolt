@@ -854,7 +854,7 @@ bool genInitIR(
 
   for (const auto& slot : slots) {
     if (slot.desc.ops == nullptr || slot.desc.ops->initGroup == nullptr) {
-      return true;
+      return false;
     }
     slot.desc.ops->initGroup(codegen, group, slot);
   }
@@ -866,7 +866,7 @@ bool genInitIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return llvm::verifyFunction(*func, &llvm::errs());
+  return !llvm::verifyFunction(*func, &llvm::errs());
 }
 
 bool genAddDenseIR(
@@ -927,12 +927,12 @@ bool genAddDenseIR(
 
     builder.SetInsertPoint(updateBlock);
     if (slot.desc.ops == nullptr) {
-      return true;
+      return false;
     }
     auto* addFn =
         slot.desc.mergeInput ? slot.desc.ops->addIntermediateResults : slot.desc.ops->addRawInput;
     if (addFn == nullptr) {
-      return true;
+      return false;
     }
     addFn(codegen, group, decoded, row, slot, checkInputNulls, nextBlock);
     builder.CreateBr(nextBlock);
@@ -946,7 +946,7 @@ bool genAddDenseIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return llvm::verifyFunction(*func, &llvm::errs());
+  return !llvm::verifyFunction(*func, &llvm::errs());
 }
 
 std::string setFlatValueFunction(HashAggrJitValueKind kind) {
@@ -1025,7 +1025,7 @@ bool genExtractIR(
     auto* vectorAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
     auto* vector = builder.CreateLoad(i8PtrTy, vectorAddr);
     if (slot.desc.ops->extract == nullptr) {
-      return true;
+      return false;
     }
     slot.desc.ops->extract(
         codegen, group, slot, HashAggrJitExtractTarget{vector, row, partialOutput});
@@ -1038,7 +1038,7 @@ bool genExtractIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return llvm::verifyFunction(*func, &llvm::errs());
+  return !llvm::verifyFunction(*func, &llvm::errs());
 }
 
 } // namespace
@@ -1135,7 +1135,7 @@ std::string HashAggrJitChunk::functionName() const {
 }
 
 bool HashAggrJitChunk::canExtract() const {
-  if (extract_ == nullptr || disabled_) {
+  if (extract_ == nullptr) {
     return false;
   }
   for (const auto& slot : slots_) {
@@ -1174,10 +1174,11 @@ bool HashAggrJitChunk::codegen() {
   const auto extractFn = extractFunctionName();
   module_ = jit->CompileModule(
       [&](llvm::Module& module) {
-        const bool hasError = genInitIR(module, initFn, slots_) ||
-            genAddDenseIR(module, addFn, slots_, true) ||
-            genAddDenseIR(module, addNoNullFn, slots_, false) ||
+        const bool ok = genInitIR(module, initFn, slots_) &&
+            genAddDenseIR(module, addFn, slots_, true) &&
+            genAddDenseIR(module, addNoNullFn, slots_, false) &&
             genExtractIR(module, extractFn, slots_, partialOutput_);
+        const bool hasError = !ok;
         logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
         logHashAggrJitFunctionIR(module, moduleKey, addFn, "add_dense", hasError);
         logHashAggrJitFunctionIR(
@@ -1192,7 +1193,6 @@ bool HashAggrJitChunk::codegen() {
       },
       moduleKey);
   if (!module_) {
-    disabled_ = true;
     return false;
   }
   init_ = reinterpret_cast<HashAggrJitInitFunc>(module_->getFuncPtr(initFn));
@@ -1202,7 +1202,6 @@ bool HashAggrJitChunk::codegen() {
   extract_ = reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
   if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr ||
       extract_ == nullptr) {
-    disabled_ = true;
     return false;
   }
   return true;

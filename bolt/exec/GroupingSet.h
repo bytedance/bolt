@@ -465,6 +465,8 @@ class GroupingSet {
   std::vector<jit::HashAggrJitChunk> hashAggrJitChunks_;
   std::vector<DecodedVector> hashAggrJitDecoded_;
   std::vector<jit::HashAggrJitDecodedInput> hashAggrJitDecodedInputs_;
+  // Keeps input vectors alive for the DecodedVector buffers referenced by
+  // JIT during addDense.
   std::vector<VectorPtr> hashAggrJitInputVectors_;
   std::vector<char*> hashAggrJitDecodedPtrs_;
   std::vector<char*> hashAggrJitNewGroups_;

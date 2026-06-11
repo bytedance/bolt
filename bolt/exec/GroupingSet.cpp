@@ -211,7 +211,7 @@ std::string hashAggrJitChunkDebugString(
     out << hashAggrJitSlotDebugString(slot, &aggregates[slot.aggregateIndex]);
   }
   out << "] canExtract=" << chunk.canExtract()
-      << " enabled=" << chunk.enabled();
+      << " codegenReady=" << chunk.isCodegenReady();
   return out.str();
 }
 #endif
@@ -1084,8 +1084,8 @@ void GroupingSet::runHashAggrJitChunks(
 
   jitExecuted.assign(aggregates_.size(), 0);
   for (auto& chunk : hashAggrJitChunks_) {
-    if (!chunk.enabled()) {
-      VLOG(1) << "HashAggrJit chunk disabled, skip add: "
+    if (!chunk.isCodegenReady()) {
+      VLOG(1) << "HashAggrJit chunk is not codegen-ready, skip add: "
                 << hashAggrJitChunkDebugString(chunk, aggregates_);
       continue;
     }

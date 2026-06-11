@@ -161,15 +161,11 @@ class HashAggrJitChunk {
 
   bool codegen();
 
-  bool enabled() const {
-    return addDense_ != nullptr && !disabled_;
+  bool isCodegenReady() const {
+    return addDense_ != nullptr;
   }
 
   bool canExtract() const;
-
-  void disable() {
-    disabled_ = true;
-  }
 
   void init(char** newGroups, int32_t numNewGroups) const {
     init_(newGroups, numNewGroups);
@@ -208,7 +204,6 @@ class HashAggrJitChunk {
   HashAggrJitAddDenseFunc addDense_{nullptr};
   HashAggrJitAddDenseFunc addDenseNoNull_{nullptr};
   HashAggrJitExtractFunc extract_{nullptr};
-  bool disabled_{false};
 };
 
 } // namespace bytedance::bolt::jit
