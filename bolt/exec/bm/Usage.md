@@ -242,7 +242,7 @@ SegmentId orderedSegment =
 std::vector<SegmentId> segments = ...;
 auto mergeSession = rows.beginMergeReadSegments({segments.data(), segments.size()});
 
-auto cursor = mergeSession.cursor(segments[0]);
+auto cursor = mergeSession.makeCursor(segments[0]);
 while (cursor.hasCurrent()) {
   const char* row = cursor.currentRow();
   cursor.advance();

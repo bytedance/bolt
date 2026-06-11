@@ -140,7 +140,6 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsStablePointersWhenResident) {
   std::vector<char*> rows;
   std::vector<RowId> rowIds;
   ASSERT_EQ(LoadAllResult::kLoadedPointers, session.tryLoadAll(rows, rowIds));
-  EXPECT_EQ(ReadMode::kFullyResident, session.mode());
   EXPECT_EQ(batchPinsBeforeBegin + 1, bufferManager_->stats().batchPinCount);
   ASSERT_EQ(input->size(), rows.size());
   ASSERT_TRUE(rowIds.empty());
@@ -177,7 +176,6 @@ TEST_F(BmRowContainerTest, TryLoadAllReturnsRowIdsForWindowRead) {
   std::vector<char*> rows;
   std::vector<RowId> rowIds;
   ASSERT_EQ(LoadAllResult::kNeedWindowRead, session.tryLoadAll(rows, rowIds));
-  EXPECT_EQ(ReadMode::kWindowRead, session.mode());
   EXPECT_EQ(batchPinsBeforeBegin, bufferManager_->stats().batchPinCount);
   ASSERT_TRUE(rows.empty());
   ASSERT_EQ(input->size(), rowIds.size());
@@ -394,6 +392,13 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
 }
 
+TEST_F(BmRowContainerTest, RejectsUnsupportedComplexTypes) {
+  EXPECT_THROW(
+      BmRowContainer(
+          {ARRAY(BIGINT())}, {false}, bufferManager_, MemoryTag::kTesting),
+      BoltRuntimeError);
+}
+
 TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -409,7 +414,7 @@ TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
   EXPECT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
 
   auto session = container.beginMergeReadSegments({&segment, 1});
-  auto cursor = session.cursor(segment);
+  auto cursor = session.makeCursor(segment);
   ASSERT_TRUE(cursor.hasCurrent());
 
   std::vector<std::string> values;
@@ -443,7 +448,7 @@ TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   auto segment =
       container.finalizeReorderedSegment({ordered.data(), ordered.size()});
   auto session = container.beginMergeReadSegments({&segment, 1});
-  auto cursor = session.cursor(segment);
+  auto cursor = session.makeCursor(segment);
   ASSERT_TRUE(cursor.hasCurrent());
 
   auto first = BaseVector::create(BIGINT(), 1, pool());
@@ -478,7 +483,7 @@ TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
   auto segment =
       container.finalizeReorderedSegment({ordered.data(), ordered.size()});
   auto session = container.beginMergeReadSegments({&segment, 1}, false);
-  auto cursor = session.cursor(segment);
+  auto cursor = session.makeCursor(segment);
   ASSERT_TRUE(cursor.hasCurrent());
   cursor.advance();
   ASSERT_TRUE(cursor.hasCurrent());

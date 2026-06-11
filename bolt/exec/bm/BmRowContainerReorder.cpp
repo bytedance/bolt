@@ -21,9 +21,7 @@ MergeReadSession BmRowContainer::beginMergeReadSegments(
     folly::Range<const SegmentId*> segments,
     bool releaseAfterRead) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
-  for (auto segment : segmentIds) {
-    (void)storage_.segmentData(segment);
-  }
+  validateSegments({segmentIds.data(), segmentIds.size()});
   return MergeReadSession(this, std::move(segmentIds), releaseAfterRead);
 }
 

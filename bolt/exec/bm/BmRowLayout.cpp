@@ -16,16 +16,17 @@ template <TypeKind Kind>
 uint32_t scalarTypeWidth(const TypePtr& type) {
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     return sizeof(StringView);
-  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("BmRowContainer does not support type {}", type->toString());
   } else {
-    static_assert(TypeTraits<Kind>::isFixedWidth);
     return sizeof(typename TypeTraits<Kind>::NativeType);
   }
 }
 
 uint32_t typeWidth(const TypePtr& type) {
-  return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       scalarTypeWidth, type->kind(), type);
 }
 

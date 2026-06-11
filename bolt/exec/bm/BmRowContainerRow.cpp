@@ -45,7 +45,7 @@ std::vector<char*> BmRowContainer::appendBatch(
         store(contexts[row], decoded, row, column);
       }
     } else {
-      BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           storeFixedColumnTyped,
           kind,
           decoded,
@@ -76,7 +76,7 @@ void BmRowContainer::storeValue(
     return;
   }
 
-  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+  BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       storeValueTyped,
       types_[column]->kind(),
       decoded,
@@ -107,11 +107,12 @@ void BmRowContainer::storeValueTyped(
     heap.used += value.size();
     *target = StringView(stringTarget, value.size());
     storage_.recordHeapForChunk(segment, context.chunk_, heap, row);
-  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("Unsupported store type {}", column.type->toString());
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    static_assert(TypeTraits<Kind>::isFixedWidth);
     *reinterpret_cast<T*>(row + column.offset) =
         decoded.valueAt<T>(sourceIndex);
   }
@@ -128,12 +129,13 @@ void BmRowContainer::storeFixedColumnTyped(
     BOLT_FAIL(
         "Variable-width columns must be stored through RowWriteContext");
     return;
-  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("Unsupported store type {}", layout.type->toString());
     return;
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    static_assert(TypeTraits<Kind>::isFixedWidth);
     if (FOLLY_LIKELY(!layout.nullable)) {
       for (vector_size_t i = 0; i < size; ++i) {
         *reinterpret_cast<T*>(rows[i] + layout.offset) =
