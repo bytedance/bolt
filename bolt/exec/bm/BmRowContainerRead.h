@@ -39,10 +39,6 @@ class BulkReadSession {
  public:
   BulkReadSession() = default;
 
-  ReadMode mode() const {
-    return mode_;
-  }
-
   LoadAllResult tryLoadAll(
       std::vector<char*>& rows,
       std::vector<RowId>& rowIds);
@@ -57,13 +53,10 @@ class BulkReadSession {
  private:
   BulkReadSession(
       BmRowContainer* container,
-      ReadMode mode,
-      std::vector<memory::bm::BufferHandle> pins,
       std::vector<SegmentId> segments,
       ReadSessionOptions options);
 
   BmRowContainer* container_{nullptr};
-  ReadMode mode_{ReadMode::kFullyResident};
   // Pins for the fully-resident tryLoadAll() result.
   std::vector<memory::bm::BufferHandle> pins_;
   // Pins for the most recent window read.
@@ -121,7 +114,7 @@ class MergeReadSession {
  public:
   MergeReadSession() = default;
 
-  SegmentCursor cursor(SegmentId segment);
+  SegmentCursor makeCursor(SegmentId segment);
 
   int32_t compareCurrentRows(
       const SegmentCursor& left,

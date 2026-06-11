@@ -72,14 +72,6 @@ enum class SegmentState {
   kFinalizedFlushed,
 };
 
-enum class ReadMode {
-  // All requested segments were pinned at once. tryLoadAll() returned pointers.
-  kFullyResident,
-  // The whole working set did not fit. The caller must submit RowIds back to the
-  // session through loadRows()/loadRow().
-  kWindowRead,
-};
-
 enum class LoadAllResult {
   // Output vector contains resident row pointers. RowId output is empty.
   kLoadedPointers,

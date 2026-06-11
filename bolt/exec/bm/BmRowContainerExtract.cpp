@@ -14,7 +14,7 @@ void BmRowContainer::extractColumnResident(
     const VectorPtr& result,
     bool exactSize) {
   BOLT_CHECK_LT(column, layout_.columns().size());
-  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+  BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       types_[column]->kind(),
       rows,
@@ -31,48 +31,51 @@ void BmRowContainer::extractColumnTyped(
     const ColumnLayout& column,
     const VectorPtr& result,
     bool /*exactSize*/) const {
-  if constexpr (Kind == TypeKind::UNKNOWN) {
+  if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      (!TypeTraits<Kind>::isFixedWidth && Kind != TypeKind::VARCHAR &&
+       Kind != TypeKind::VARBINARY)) {
     BOLT_NYI("Unsupported extract type {}", column.type->toString());
     return;
-  }
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    auto* flatResult = result->asFlatVector<T>();
+    BOLT_CHECK_NOT_NULL(flatResult);
+    result->resize(numRows);
 
-  using T = typename TypeTraits<Kind>::NativeType;
-  auto* flatResult = result->asFlatVector<T>();
-  BOLT_CHECK_NOT_NULL(flatResult);
-  result->resize(numRows);
+    if (FOLLY_LIKELY(!column.nullable)) {
+      result->clearNulls(0, numRows);
+      auto values =
+          flatResult->mutableValues(numRows)->template asMutableRange<T>();
+      for (vector_size_t i = 0; i < numRows; ++i) {
+        if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+          flatResult->set(
+              i, *reinterpret_cast<const StringView*>(
+                     rows[i] + column.offset));
+        } else {
+          values[i] = *reinterpret_cast<const T*>(rows[i] + column.offset);
+        }
+      }
+      return;
+    }
 
-  if (FOLLY_LIKELY(!column.nullable)) {
-    result->clearNulls(0, numRows);
+    auto* nulls = result->mutableNulls(numRows)->asMutable<uint64_t>();
     auto values =
         flatResult->mutableValues(numRows)->template asMutableRange<T>();
     for (vector_size_t i = 0; i < numRows; ++i) {
+      const auto* row = rows[i];
+      if (FOLLY_UNLIKELY(row[column.nullByte] & column.nullMask)) {
+        bits::setNull(nulls, i, true);
+        continue;
+      }
+      bits::setNull(nulls, i, false);
       if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
         flatResult->set(
-            i, *reinterpret_cast<const StringView*>(
-                   rows[i] + column.offset));
+            i,
+            *reinterpret_cast<const StringView*>(row + column.offset));
       } else {
-        values[i] = *reinterpret_cast<const T*>(rows[i] + column.offset);
+        values[i] = *reinterpret_cast<const T*>(row + column.offset);
       }
-    }
-    return;
-  }
-
-  auto* nulls = result->mutableNulls(numRows)->asMutable<uint64_t>();
-  auto values =
-      flatResult->mutableValues(numRows)->template asMutableRange<T>();
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    const auto* row = rows[i];
-    if (FOLLY_UNLIKELY(row[column.nullByte] & column.nullMask)) {
-      bits::setNull(nulls, i, true);
-      continue;
-    }
-    bits::setNull(nulls, i, false);
-    if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-      flatResult->set(
-          i,
-          *reinterpret_cast<const StringView*>(row + column.offset));
-    } else {
-      values[i] = *reinterpret_cast<const T*>(row + column.offset);
     }
   }
 }

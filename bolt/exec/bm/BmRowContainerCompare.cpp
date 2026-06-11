@@ -71,11 +71,12 @@ int32_t compareScalarValue(
     const auto leftValue = *reinterpret_cast<const StringView*>(left);
     const auto rightValue = *reinterpret_cast<const StringView*>(right);
     return compareStringViewsAsc(leftValue, rightValue);
-  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("Unsupported compare type {}", type->toString());
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    static_assert(TypeTraits<Kind>::isFixedWidth);
     return compareValues<T>(left, right);
   }
 }
@@ -132,7 +133,7 @@ int32_t BmRowContainer::compareNonNull(
     int32_t column) const {
   const auto* l = layout_.valueAddress(left, column);
   const auto* r = layout_.valueAddress(right, column);
-  return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       compareScalarValue, types_[column]->kind(), l, r, types_[column]);
 }
 

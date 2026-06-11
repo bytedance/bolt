@@ -208,11 +208,12 @@ void BmRowBlockLoader::rebaseChunk(
 
   auto& rowBlock = chunk.rowBlock;
   BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
+  const auto rowWidth = storage().rowStride();
 
   if (FOLLY_LIKELY(ranges.size() == 1)) {
     const auto range = ranges[0];
+    auto* row = rowBlock.ptr;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
-      auto* row = rowBlock.ptr + rowIndex * storage().rowStride();
       for (const auto& column : layout().stringColumns()) {
         if (layout().isNull(row, column)) {
           continue;
@@ -232,6 +233,7 @@ void BmRowBlockLoader::rebaseChunk(
           }
         }
       }
+      row += rowWidth;
     }
   } else {
     // Multi-heap chunks are expected when variable-width payloads cross heap
@@ -239,8 +241,8 @@ void BmRowBlockLoader::rebaseChunk(
     // cache-friendly for small vectors and avoids per-chunk index construction.
     // If metrics show large heapBases vectors in real workloads, add a last-hit
     // cache or sort ranges by oldBase and use upper_bound for interval lookup.
+    auto* row = rowBlock.ptr;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
-      auto* row = rowBlock.ptr + rowIndex * storage().rowStride();
       for (const auto& column : layout().stringColumns()) {
         if (layout().isNull(row, column)) {
           continue;
@@ -263,6 +265,7 @@ void BmRowBlockLoader::rebaseChunk(
           }
         }
       }
+      row += rowWidth;
     }
   }
 

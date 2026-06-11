@@ -134,6 +134,12 @@ class BmRowContainer {
   friend class SegmentCursor;
   friend class MergeReadSession;
 
+  FOLLY_ALWAYS_INLINE void validateSegments(folly::Range<const SegmentId*> segments) const {
+      for (auto segment : segments) {
+    (void)storage_.segmentData(segment);
+  }
+  }
+
   std::vector<TypePtr> types_;
   BmRowLayout layout_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;

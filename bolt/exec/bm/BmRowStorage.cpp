@@ -18,8 +18,8 @@ void zeroUnusedHeapTail(BlockRef& block) {
 }
 
 void zeroUnusedHeapTail(ChunkData& chunk) {
-  if (!chunk.heapBlocks.empty()) {
-    zeroUnusedHeapTail(chunk.heapBlocks.back());
+  for (auto& block : chunk.heapBlocks) {
+    zeroUnusedHeapTail(block);
   }
 }
 
@@ -330,13 +330,23 @@ ChunkData& BmRowStorage::chunkForRow(
 const ChunkData& BmRowStorage::chunkForRow(
     const SegmentData& segment,
     RowNumber rowNumber) const {
-  for (const auto& chunk : segment.chunks) {
-    if (rowNumber >= chunk.meta.firstRowNumber &&
-        rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount) {
-      return chunk;
-    }
-  }
-  BOLT_FAIL("Unknown row number {} in segment {}", rowNumber, segment.meta.id);
+  const auto rowsPerChunk = rowBlockSize_ / rowStride();
+  BOLT_DCHECK_GT(rowsPerChunk, 0);
+  const auto chunkIndex = rowNumber / rowsPerChunk;
+  BOLT_CHECK_LT(
+      chunkIndex,
+      segment.chunks.size(),
+      "Unknown row number {} in segment {}",
+      rowNumber,
+      segment.meta.id);
+  const auto& chunk = segment.chunks[chunkIndex];
+  BOLT_CHECK(
+      rowNumber >= chunk.meta.firstRowNumber &&
+          rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount,
+      "Unknown row number {} in segment {}",
+      rowNumber,
+      segment.meta.id);
+  return chunk;
 }
 
 RowId BmRowStorage::rowIdForRowNumber(
@@ -362,12 +372,14 @@ void BmRowStorage::appendRowIdsForSegment(
         chunk.meta.id,
         segment.meta.id);
     RowNumber rowNumber = chunk.meta.firstRowNumber;
+    RowOffset rowOffset = 0;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
       rows.push_back(
           {segment.meta.id,
            rowNumber++,
            chunk.rowBlock.id,
-           static_cast<RowOffset>(rowIndex * rowStride())});
+           rowOffset});
+      rowOffset += rowStride();
     }
   }
 }
@@ -388,8 +400,10 @@ void BmRowStorage::appendRowPointersForSegment(
     if (metrics != nullptr) {
       metrics->pointerRows += chunk.meta.rowCount;
     }
+    auto* row = rowBlock.ptr;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
-      rows.push_back(rowBlock.ptr + rowIndex * rowStride());
+      rows.push_back(row);
+      row += rowStride();
     }
   }
 }

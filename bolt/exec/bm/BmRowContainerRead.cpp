@@ -17,13 +17,9 @@ uint64_t nowNs() {
 
 BulkReadSession::BulkReadSession(
     BmRowContainer* container,
-    ReadMode mode,
-    std::vector<memory::bm::BufferHandle> pins,
     std::vector<SegmentId> segments,
     ReadSessionOptions options)
     : container_(container),
-      mode_(mode),
-      pins_(std::move(pins)),
       segmentOrder_(std::move(segments)),
       segments_(segmentOrder_.begin(), segmentOrder_.end()),
       options_(std::move(options)) {}
@@ -50,7 +46,6 @@ LoadAllResult BulkReadSession::tryLoadAll(
   }
 
   const auto returnWindowRead = [&]() {
-    mode_ = ReadMode::kWindowRead;
     const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
       container_->storage_.appendRowIdsForSegment(
@@ -80,7 +75,6 @@ LoadAllResult BulkReadSession::tryLoadAll(
   try {
     pins_ = container_->blockLoader_.pinSegments(segmentOrder_, metrics);
     container_->bufferManager_->ReleaseUnusedReservation();
-    mode_ = ReadMode::kFullyResident;
     const auto appendStart = metrics == nullptr ? 0 : nowNs();
     for (auto segment : segmentOrder_) {
       container_->storage_.appendRowPointersForSegment(
@@ -200,7 +194,7 @@ MergeReadSession::MergeReadSession(
       segments_(segments.begin(), segments.end()),
       releaseAfterRead_(releaseAfterRead) {}
 
-SegmentCursor MergeReadSession::cursor(SegmentId segment) {
+SegmentCursor MergeReadSession::makeCursor(SegmentId segment) {
   BOLT_CHECK_NOT_NULL(container_);
   BOLT_CHECK(
       segments_.count(segment) != 0,
@@ -223,12 +217,9 @@ BulkReadSession BmRowContainer::beginBulkReadSegments(
     folly::Range<const SegmentId*> segments,
     ReadSessionOptions options) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
-  for (auto segment : segmentIds) {
-    (void)storage_.segmentData(segment);
-  }
+  validateSegments({segmentIds.data(), segmentIds.size()});
 
-  return BulkReadSession(
-      this, ReadMode::kWindowRead, {}, std::move(segmentIds), options);
+  return BulkReadSession(this, std::move(segmentIds), options);
 }
 
 } // namespace bytedance::bolt::exec::bm
