@@ -12,7 +12,6 @@ bolt_add_library(
   BmSegmentCollectionRelease.cpp
   BmSegmentCollectionWrite.cpp
   BmMergeReadSession.cpp
-  BmStringViewRebaser.cpp
   BmRowContainerReorder.cpp
   BmRowContainerRow.cpp
   BmRowContainerSegment.cpp
