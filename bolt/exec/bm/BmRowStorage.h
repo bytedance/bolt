@@ -48,6 +48,10 @@ struct ChunkData {
   // are used to rebase non-inline StringViews after BufferManager pins blocks
   // at a different address.
   std::vector<HeapBaseRef> heapBases;
+  // Consuming merge reads can drop blocks after this chunk has been read. The
+  // metadata stays in place so rowNumber/chunk indexing is not disturbed, but
+  // the chunk can no longer be pinned or read.
+  bool consumed{false};
 };
 
 struct SegmentData {
@@ -76,10 +80,8 @@ class BmRowStorage {
 
   SegmentId flushActiveSegment();
   SegmentId flushActivePartitionSegment(PartitionId partition);
-  void releaseSegment(SegmentId segment, ReleaseReason reason);
-  void releaseSegments(
-      folly::Range<const SegmentId*> segments,
-      ReleaseReason reason);
+  void releaseSegment(SegmentId segment);
+  void releaseSegments(folly::Range<const SegmentId*> segments);
   SegmentState segmentState(SegmentId segment) const;
   const std::vector<SegmentId>& segmentsForPartition(
       PartitionId partition) const;
@@ -105,8 +107,6 @@ class BmRowStorage {
     BOLT_DCHECK_LT(chunkId, segment.chunks.size());
     return ensureHeapBlockInChunk(segment.chunks[chunkId], minBytes);
   }
-
-  BlockRef& blockRef(SegmentData& segment, BlockId id, bool isRowBlock);
 
   char* newRowInSegment(SegmentData& segment);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
@@ -135,6 +135,7 @@ class BmRowStorage {
       BulkLoadMetrics* metrics = nullptr);
   char* rowPointer(const RowId& id);
   const char* rowPointer(const RowId& id) const;
+  void releaseChunkBlocks(ChunkData& chunk);
 
   uint64_t segmentBytes(const SegmentData& segment) const;
   FOLLY_ALWAYS_INLINE uint32_t rowStride() const {

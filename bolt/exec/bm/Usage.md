@@ -219,27 +219,26 @@ char* row = session.loadRow(rowId);
 `loadRows()` 会按 chunk 去 pin 数据，返回的指针只在下一次 `loadRows()` / `loadRow()` 或
 session 析构前有效。上层应尽量批量提交同一访问窗口内的 `RowId`，避免退化成大量单行随机读。
 
-## Reordered run
+## Reordered segment
 
-`ReorderedRun` 表示一批 rows 的重排结果，不绑定 Sort 算子。当前实现只支持
-`kMaterializedOrder`：按照传入的 row 指针顺序物理写入一个新的 materialized segment。
+`finalizeReorderedSegment()` 按传入的 row 指针顺序物理写入一个新的 finalized/flushed
+segment。Sort / HashAgg 可以把这个返回的 `SegmentId` 当作一个有序 run 保存，但
+RowContainer 本体只建模 segment。
 
 ```cpp
 std::vector<char*> orderedRows = ...;
-ReorderedRunOptions options;
-options.preferredLayout = ReorderedRunLayout::kMaterializedOrder;
 
-ReorderedRunId run =
-    rows.finalizeReorderedRun({orderedRows.data(), orderedRows.size()}, options);
+SegmentId orderedSegment =
+    rows.finalizeReorderedSegment({orderedRows.data(), orderedRows.size()});
 ```
 
-读回多个 run：
+读回多个物理有序 segment：
 
 ```cpp
-std::vector<ReorderedRunId> runs = ...;
-auto mergeSession = rows.beginMergeReadRuns({runs.data(), runs.size()});
+std::vector<SegmentId> segments = ...;
+auto mergeSession = rows.beginMergeReadSegments({segments.data(), segments.size()});
 
-auto cursor = mergeSession.cursor(runs[0]);
+auto cursor = mergeSession.cursor(segments[0]);
 while (cursor.hasCurrent()) {
   const char* row = cursor.currentRow();
   cursor.advance();
@@ -254,25 +253,32 @@ int32_t r = mergeSession.compareCurrentRows(leftCursor, rightCursor, flags);
 
 cursor 内部按 chunk 加载当前 row 所在窗口。`currentRow()` 返回的指针在 cursor 前进前有效。
 
+如果调用方确认 merge read 是消费型单向读取，可以打开读后释放：
+
+```cpp
+auto mergeSession = rows.beginMergeReadSegments(
+    {segments.data(), segments.size()},
+    true);
+```
+
+`releaseAfterRead=true` 时，cursor 读完某个 chunk 后会释放该 chunk 的 BM block 引用，
+避免已消费数据在后续内存压力下再次 spill。chunk metadata 会保留，后续再次读取这个 segment 会失败。
+
 ## 释放数据
 
 segment 不再需要时，应显式释放：
 
 ```cpp
-rows.releaseSegment(segment, ReleaseReason::kConsumed);
+rows.releaseSegment(segment);
 ```
 
 批量释放：
 
 ```cpp
-rows.releaseSegments({segments.data(), segments.size()}, ReleaseReason::kConsumed);
+rows.releaseSegments({segments.data(), segments.size()});
 ```
 
-`ReleaseReason::kConsumed` 表示数据已经被消费，不需要再 spill 回去。
-`ReleaseReason::kDiscarded` 表示放弃这批数据。
-
-`ReadSessionOptions::releaseWhenConsumed` 当前还没有接入自动释放路径。调用方不要依赖
-read session 自动释放 segment，消费完成后应显式调用 release 接口。
+read session 不会自动释放 segment，消费完成后应显式调用 release 接口。
 
 ## 常见接入方式
 
@@ -280,9 +286,9 @@ read session 自动释放 segment，消费完成后应显式调用 release 接�
 
 1. 写入阶段使用 `appendBatch()` 或 `appendRow()`。
 2. 内存中比较时保留 row 指针，调用 `compareRows()`。
-3. 需要生成有序 run 时，传入排序后的 row 指针调用 `finalizeReorderedRun()`。
-4. 多个 run 通过 `beginMergeReadRuns()` 和 cursor 顺序读回。
-5. 输出完成后释放对应 segment。
+3. 需要生成有序输出时，传入排序后的 row 指针调用 `finalizeReorderedSegment()`。
+4. 多个有序 segment 通过 `beginMergeReadSegments()` 和 cursor 顺序读回。
+5. 消费型 merge 可以使用 `releaseAfterRead=true`，否则输出完成后调用 `releaseSegment(segment)`。
 
 ### Hash Build
 

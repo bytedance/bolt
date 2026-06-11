@@ -23,6 +23,44 @@ void zeroUnusedHeapTail(ChunkData& chunk) {
   }
 }
 
+void recordHeapBase(ChunkData& chunk, const BlockRef& heap) {
+  if (chunk.heapBlocks.empty() || chunk.heapBlocks.back().id != heap.id) {
+    // ensureHeapBlock() only reuses heap blocks from the owning chunk. A miss
+    // here means a write context no longer matches the row being stored.
+    BOLT_DCHECK(
+        std::find_if(
+            chunk.heapBlocks.begin(),
+            chunk.heapBlocks.end(),
+            [&](const BlockRef& block) { return block.id == heap.id; }) !=
+            chunk.heapBlocks.end(),
+        "Heap block {} was not allocated by chunk {}",
+        heap.id,
+        chunk.meta.id);
+  }
+
+  const auto base = reinterpret_cast<uintptr_t>(heap.ptr);
+  if (!chunk.heapBases.empty() &&
+      chunk.heapBases.back().heapBlockId == heap.id) {
+    chunk.heapBases.back().baseAddress = base;
+    chunk.heapBases.back().capacity = heap.size;
+    return;
+  }
+
+  // A non-back duplicate means this chunk observed A->B->A heap usage. That is
+  // unexpected for the current append-only writer and should be investigated
+  // before adding a more complex lookup structure.
+  BOLT_DCHECK(
+      std::find_if(
+          chunk.heapBases.begin(),
+          chunk.heapBases.end(),
+          [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; }) ==
+          chunk.heapBases.end(),
+      "Heap block {} is reused non-contiguously in chunk {}",
+      heap.id,
+      chunk.meta.id);
+  chunk.heapBases.push_back({heap.id, base, heap.size});
+}
+
 } // namespace
 
 const std::vector<SegmentId> BmRowStorage::kEmptySegments_{};
@@ -50,9 +88,7 @@ SegmentId BmRowStorage::flushActivePartitionSegment(PartitionId partition) {
   return finalizeAndFlush(partition);
 }
 
-void BmRowStorage::releaseSegment(
-    SegmentId segment,
-    ReleaseReason /*reason*/) {
+void BmRowStorage::releaseSegment(SegmentId segment) {
   auto it = segments_.find(segment);
   if (it == segments_.end()) {
     return;
@@ -74,11 +110,9 @@ void BmRowStorage::releaseSegment(
   segments_.erase(it);
 }
 
-void BmRowStorage::releaseSegments(
-    folly::Range<const SegmentId*> segments,
-    ReleaseReason reason) {
+void BmRowStorage::releaseSegments(folly::Range<const SegmentId*> segments) {
   for (auto segment : segments) {
-    releaseSegment(segment, reason);
+    releaseSegment(segment);
   }
 }
 
@@ -141,6 +175,7 @@ SegmentId BmRowStorage::finalizeAndFlushSegment(SegmentData& segment) {
 
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   for (auto& chunk : segment.chunks) {
+    BOLT_DCHECK(!chunk.consumed);
     blocks.reserve(blocks.size() + 1 + chunk.heapBlocks.size());
     zeroUnusedHeapTail(chunk);
     chunk.rowBlock.handle = memory::bm::BufferHandle{};
@@ -186,30 +221,11 @@ BlockRef BmRowStorage::addBlock(uint32_t blockSize) {
 BlockRef& BmRowStorage::ensureHeapBlockSlow(
     ChunkData& chunk,
     uint32_t minBytes) {
+  BOLT_DCHECK(!chunk.consumed);
   zeroUnusedHeapTail(chunk);
   const auto blockSize = std::max(heapBlockSize_, minBytes);
   chunk.heapBlocks.push_back(addBlock(blockSize));
   return chunk.heapBlocks.back();
-}
-
-BlockRef& BmRowStorage::blockRef(
-    SegmentData& segment,
-    BlockId id,
-    bool isRowBlock) {
-  for (auto& chunk : segment.chunks) {
-    if (isRowBlock) {
-      if (chunk.rowBlock.id == id) {
-        return chunk.rowBlock;
-      }
-      continue;
-    }
-    for (auto& block : chunk.heapBlocks) {
-      if (block.id == id) {
-        return block;
-      }
-    }
-  }
-  BOLT_FAIL("Unknown {} block {}", isRowBlock ? "row" : "heap", id);
 }
 
 ChunkData& BmRowStorage::ensureWritableChunk(SegmentData& segment) {
@@ -282,38 +298,7 @@ void BmRowStorage::recordHeapForCurrentChunk(
     const BlockRef& heap) {
   BOLT_DCHECK(segment.currentChunk != kNoBlock);
   auto& chunk = currentChunk(segment);
-  if (chunk.heapBlocks.empty() || chunk.heapBlocks.back().id != heap.id) {
-    // ensureHeapBlock() owns heap allocation for the active chunk. Recording is
-    // only allowed for a heap block already owned by this chunk; a miss here
-    // means a caller mixed a RowWriteContext with a different chunk.
-    BOLT_DCHECK(
-        std::find_if(
-            chunk.heapBlocks.begin(),
-            chunk.heapBlocks.end(),
-            [&](const BlockRef& block) { return block.id == heap.id; }) !=
-            chunk.heapBlocks.end(),
-        "Heap block {} was not allocated by chunk {}",
-        heap.id,
-        chunk.meta.id);
-  }
-
-  const auto base = reinterpret_cast<uintptr_t>(heap.ptr);
-  if (!chunk.heapBases.empty() &&
-      chunk.heapBases.back().heapBlockId == heap.id) {
-    chunk.heapBases.back().baseAddress = base;
-    chunk.heapBases.back().capacity = heap.size;
-    return;
-  }
-  BOLT_DCHECK(
-      std::find_if(
-          chunk.heapBases.begin(),
-          chunk.heapBases.end(),
-          [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; }) ==
-          chunk.heapBases.end(),
-      "Heap block {} is reused non-contiguously in chunk {}",
-      heap.id,
-      chunk.meta.id);
-  chunk.heapBases.push_back({heap.id, base, heap.size});
+  recordHeapBase(chunk, heap);
 }
 
 void BmRowStorage::recordHeapForChunk(
@@ -332,41 +317,7 @@ void BmRowStorage::recordHeapForChunk(
     return rowOffset < chunk.meta.rowCount * rowStride();
   }());
 
-  if (chunk.heapBlocks.empty() || chunk.heapBlocks.back().id != heap.id) {
-    // ensureHeapBlock() only reuses heap blocks from the owning chunk. If this
-    // fails, the write context no longer matches the row being stored.
-    BOLT_DCHECK(
-        std::find_if(
-            chunk.heapBlocks.begin(),
-            chunk.heapBlocks.end(),
-            [&](const BlockRef& block) { return block.id == heap.id; }) !=
-            chunk.heapBlocks.end(),
-        "Heap block {} was not allocated by chunk {}",
-        heap.id,
-        chunk.meta.id);
-  }
-
-  const auto base = reinterpret_cast<uintptr_t>(heap.ptr);
-  if (!chunk.heapBases.empty() &&
-      chunk.heapBases.back().heapBlockId == heap.id) {
-    chunk.heapBases.back().baseAddress = base;
-    chunk.heapBases.back().capacity = heap.size;
-    return;
-  }
-
-  // A non-back duplicate means this chunk observed A->B->A heap usage. That is
-  // unexpected for the current append-only writer and should be investigated
-  // before adding a more complex lookup structure.
-  BOLT_DCHECK(
-      std::find_if(
-          chunk.heapBases.begin(),
-          chunk.heapBases.end(),
-          [&](const HeapBaseRef& ref) { return ref.heapBlockId == heap.id; }) ==
-          chunk.heapBases.end(),
-      "Heap block {} is reused non-contiguously in chunk {}",
-      heap.id,
-      chunk.meta.id);
-  chunk.heapBases.push_back({heap.id, base, heap.size});
+  recordHeapBase(chunk, heap);
 }
 
 ChunkData& BmRowStorage::chunkForRow(
@@ -405,6 +356,11 @@ void BmRowStorage::appendRowIdsForSegment(
     std::vector<RowId>& rows) const {
   rows.reserve(rows.size() + segment.meta.numRows);
   for (const auto& chunk : segment.chunks) {
+    BOLT_CHECK(
+        !chunk.consumed,
+        "Cannot materialize RowIds for consumed chunk {} in segment {}",
+        chunk.meta.id,
+        segment.meta.id);
     RowNumber rowNumber = chunk.meta.firstRowNumber;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
       rows.push_back(
@@ -422,7 +378,12 @@ void BmRowStorage::appendRowPointersForSegment(
     BulkLoadMetrics* metrics) {
   rows.reserve(rows.size() + segment.meta.numRows);
   for (const auto& chunk : segment.chunks) {
-    auto& rowBlock = blockRef(segment, chunk.rowBlock.id, true);
+    BOLT_CHECK(
+        !chunk.consumed,
+        "Cannot materialize row pointers for consumed chunk {} in segment {}",
+        chunk.meta.id,
+        segment.meta.id);
+    const auto& rowBlock = chunk.rowBlock;
     BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
     if (metrics != nullptr) {
       metrics->pointerRows += chunk.meta.rowCount;
@@ -437,6 +398,11 @@ char* BmRowStorage::rowPointer(const RowId& id) {
   auto& segment = segmentData(id.segmentId);
   for (auto& chunk : segment.chunks) {
     if (chunk.rowBlock.id == id.rowBlockId) {
+      BOLT_CHECK(
+          !chunk.consumed,
+          "Cannot resolve row pointer for consumed chunk {} in segment {}",
+          chunk.meta.id,
+          segment.meta.id);
       BOLT_DCHECK_NOT_NULL(chunk.rowBlock.ptr);
       return chunk.rowBlock.ptr + id.rowOffset;
     }
@@ -448,9 +414,29 @@ const char* BmRowStorage::rowPointer(const RowId& id) const {
   return const_cast<BmRowStorage*>(this)->rowPointer(id);
 }
 
+void BmRowStorage::releaseChunkBlocks(ChunkData& chunk) {
+  if (chunk.consumed) {
+    return;
+  }
+  chunk.rowBlock.handle = memory::bm::BufferHandle{};
+  chunk.rowBlock.ptr = nullptr;
+  chunk.rowBlock.block.reset();
+  for (auto& block : chunk.heapBlocks) {
+    block.handle = memory::bm::BufferHandle{};
+    block.ptr = nullptr;
+    block.block.reset();
+  }
+  chunk.heapBlocks.clear();
+  chunk.heapBases.clear();
+  chunk.consumed = true;
+}
+
 uint64_t BmRowStorage::segmentBytes(const SegmentData& segment) const {
   uint64_t bytes = 0;
   for (const auto& chunk : segment.chunks) {
+    if (chunk.consumed) {
+      continue;
+    }
     bytes += chunk.rowBlock.size;
     for (const auto& block : chunk.heapBlocks) {
       bytes += block.size;

@@ -137,49 +137,76 @@ char* BulkReadSession::loadRow(const RowId& row) {
 
 SegmentCursor::SegmentCursor(
     BmRowContainer* container,
-    ReorderedRunId run,
-    ReadSessionOptions options)
-    : container_(container), run_(run), options_(std::move(options)) {
-  loadCurrent();
+    SegmentId segment,
+    bool releaseAfterRead)
+    : container_(container),
+      segment_(segment),
+      releaseAfterRead_(releaseAfterRead) {
+  loadCurrentChunk();
 }
 
 void SegmentCursor::advance() {
-  if (container_ == nullptr) {
+  if (!hasCurrent()) {
     return;
   }
-  ++index_;
-  loadCurrent();
-}
+  auto& segment = container_->storage_.segmentData(segment_);
+  auto& chunk = segment.chunks[chunkIndex_];
 
-void SegmentCursor::loadCurrent() {
+  ++rowIndexInChunk_;
+  if (rowIndexInChunk_ < chunk.meta.rowCount) {
+    currentRow_ =
+        chunk.rowBlock.ptr + rowIndexInChunk_ * container_->storage_.rowStride();
+    return;
+  }
+
   currentRow_ = nullptr;
   pins_.clear();
-  const auto& run = container_->reorderedRunData(run_);
-  if (index_ >= run.numRows) {
-    return;
+  if (releaseAfterRead_) {
+    container_->storage_.releaseChunkBlocks(chunk);
   }
 
-  auto& segment = container_->storage_.segmentData(run.materializedSegment);
-  auto rowId = container_->storage_.rowIdForRowNumber(
-      segment, static_cast<RowNumber>(index_));
-  auto& chunk =
-      container_->storage_.chunkForRow(segment, rowId.rowNumber);
-  pins_ = container_->blockLoader_.pinChunk(chunk);
-  currentRow_ = container_->storage_.rowPointer(rowId);
+  ++chunkIndex_;
+  rowIndexInChunk_ = 0;
+  loadCurrentChunk();
+}
+
+void SegmentCursor::loadCurrentChunk() {
+  currentRow_ = nullptr;
+  pins_.clear();
+  auto& segment = container_->storage_.segmentData(segment_);
+  while (chunkIndex_ < segment.chunks.size()) {
+    auto& chunk = segment.chunks[chunkIndex_];
+    if (chunk.meta.rowCount == 0) {
+      ++chunkIndex_;
+      continue;
+    }
+    BOLT_CHECK(
+        !chunk.consumed,
+        "Cannot read consumed chunk {} in segment {}",
+        chunk.meta.id,
+        segment.meta.id);
+    pins_ = container_->blockLoader_.pinChunk(chunk);
+    rowIndexInChunk_ = 0;
+    currentRow_ = chunk.rowBlock.ptr;
+    return;
+  }
 }
 
 MergeReadSession::MergeReadSession(
     BmRowContainer* container,
-    std::vector<ReorderedRunId> runs,
-    ReadSessionOptions options)
+    std::vector<SegmentId> segments,
+    bool releaseAfterRead)
     : container_(container),
-      runs_(runs.begin(), runs.end()),
-      options_(std::move(options)) {}
+      segments_(segments.begin(), segments.end()),
+      releaseAfterRead_(releaseAfterRead) {}
 
-SegmentCursor MergeReadSession::cursor(ReorderedRunId run) {
+SegmentCursor MergeReadSession::cursor(SegmentId segment) {
   BOLT_CHECK_NOT_NULL(container_);
-  BOLT_CHECK(runs_.count(run) != 0, "Reordered run {} is not covered", run);
-  return SegmentCursor(container_, run, options_);
+  BOLT_CHECK(
+      segments_.count(segment) != 0,
+      "Merge read segment {} is not covered",
+      segment);
+  return SegmentCursor(container_, segment, releaseAfterRead_);
 }
 
 int32_t MergeReadSession::compareCurrentRows(

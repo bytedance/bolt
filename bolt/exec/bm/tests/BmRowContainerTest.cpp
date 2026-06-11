@@ -394,7 +394,7 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, ReorderedRunCursorReadsMaterializedOrder) {
+TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -404,10 +404,12 @@ TEST_F(BmRowContainerTest, ReorderedRunCursorReadsMaterializedOrder) {
   auto rows = storeAll(container, input);
 
   std::vector<char*> sorted{rows[1], rows[3], rows[2], rows[0]};
-  auto run = container.finalizeReorderedRun({sorted.data(), sorted.size()});
+  auto segment =
+      container.finalizeReorderedSegment({sorted.data(), sorted.size()});
+  EXPECT_EQ(SegmentState::kFinalizedFlushed, container.segmentState(segment));
 
-  auto session = container.beginMergeReadRuns({&run, 1});
-  auto cursor = session.cursor(run);
+  auto session = container.beginMergeReadSegments({&segment, 1});
+  auto cursor = session.cursor(segment);
   ASSERT_TRUE(cursor.hasCurrent());
 
   std::vector<std::string> values;
@@ -421,6 +423,81 @@ TEST_F(BmRowContainerTest, ReorderedRunCursorReadsMaterializedOrder) {
   EXPECT_EQ(
       (std::vector<std::string>{"alpha", "bravo", "charlie", "delta"}),
       values);
+
+  container.releaseSegment(segment);
+  EXPECT_THROW(
+      container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
+}
+
+TEST_F(BmRowContainerTest, MergeReadReleasesConsumedChunkBlocks) {
+  BmRowContainer container(
+      {BIGINT()},
+      {false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      8);
+  auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});
+  auto rows = storeAll(container, input);
+
+  std::vector<char*> ordered{rows[1], rows[3], rows[2], rows[0]};
+  auto segment =
+      container.finalizeReorderedSegment({ordered.data(), ordered.size()});
+  auto session = container.beginMergeReadSegments({&segment, 1}, true);
+  auto cursor = session.cursor(segment);
+  ASSERT_TRUE(cursor.hasCurrent());
+
+  auto first = BaseVector::create(BIGINT(), 1, pool());
+  auto* firstRow = const_cast<char*>(cursor.currentRow());
+  container.extractColumnResident(&firstRow, 1, 0, first);
+  EXPECT_EQ(1, first->asFlatVector<int64_t>()->valueAt(0));
+
+  cursor.advance();
+  ASSERT_TRUE(cursor.hasCurrent());
+  auto second = BaseVector::create(BIGINT(), 1, pool());
+  auto* secondRow = const_cast<char*>(cursor.currentRow());
+  container.extractColumnResident(&secondRow, 1, 0, second);
+  EXPECT_EQ(2, second->asFlatVector<int64_t>()->valueAt(0));
+
+  auto bulk = container.beginBulkReadSegments({&segment, 1});
+  std::vector<char*> loadedRows;
+  std::vector<RowId> rowIds;
+  EXPECT_THROW(bulk.tryLoadAll(loadedRows, rowIds), BoltRuntimeError);
+}
+
+TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
+  BmRowContainer container(
+      {BIGINT()},
+      {false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      8);
+  auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});
+  auto rows = storeAll(container, input);
+
+  std::vector<char*> ordered{rows[1], rows[3], rows[2], rows[0]};
+  auto segment =
+      container.finalizeReorderedSegment({ordered.data(), ordered.size()});
+  auto session = container.beginMergeReadSegments({&segment, 1}, false);
+  auto cursor = session.cursor(segment);
+  ASSERT_TRUE(cursor.hasCurrent());
+  cursor.advance();
+  ASSERT_TRUE(cursor.hasCurrent());
+
+  auto bulk = container.beginBulkReadSegments({&segment, 1});
+  std::vector<char*> loadedRows;
+  std::vector<RowId> rowIds;
+  ASSERT_EQ(LoadAllResult::kLoadedPointers, bulk.tryLoadAll(loadedRows, rowIds));
+  ASSERT_EQ(4, loadedRows.size());
+
+  auto result = BaseVector::create(BIGINT(), loadedRows.size(), pool());
+  container.extractColumnResident(
+      loadedRows.data(), loadedRows.size(), 0, result);
+  auto flat = result->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ(1, flat->valueAt(0));
+  EXPECT_EQ(2, flat->valueAt(1));
+  EXPECT_EQ(3, flat->valueAt(2));
+  EXPECT_EQ(4, flat->valueAt(3));
 }
 
 TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {

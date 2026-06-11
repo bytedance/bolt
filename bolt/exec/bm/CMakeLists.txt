@@ -7,7 +7,7 @@ bolt_add_library(
   BmRowCopier.cpp
   BmRowLayout.cpp
   BmRowStorage.cpp
-  BmReorderedRun.cpp
+  BmRowContainerReorder.cpp
   BmRowContainerRead.cpp
   BmRowContainerRow.cpp
   BmRowContainerSegment.cpp
