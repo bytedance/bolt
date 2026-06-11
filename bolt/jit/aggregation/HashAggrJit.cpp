@@ -1046,7 +1046,24 @@ bool genExtractIR(
 HashAggrJitChunk::HashAggrJitChunk(
     std::vector<HashAggrJitSlot> slots,
     bool partialOutput)
-    : slots_(std::move(slots)), partialOutput_(partialOutput) {}
+    : slots_(std::move(slots)), partialOutput_(partialOutput) {
+  std::ostringstream out;
+  out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
+      << slots_.size();
+  for (const auto& slot : slots_) {
+    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown") << "_"
+        << static_cast<int>(slot.desc.kind) << hashAggrJitValueKindName(slot.desc.inputKind)
+        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o" << slot.offset
+        << "n" << slot.nullByte << "m" << static_cast<int>(slot.nullMask)
+        << (slot.desc.countStar ? "s" : "x") << (slot.desc.mergeInput ? "g" : "r")
+        << (slot.desc.decimal ? "d" : "n");
+  }
+  functionName_ = out.str();
+  initFunctionName_ = functionName_ + "_init";
+  addDenseFunctionName_ = functionName_ + "_add_dense";
+  addDenseNoNullFunctionName_ = functionName_ + "_add_dense_no_null";
+  extractFunctionName_ = functionName_ + "_extract";
+}
 
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
   switch (kind) {
@@ -1119,21 +1136,6 @@ std::string HashAggrJitDescriptor::signature() const {
       decimal);
 }
 
-std::string HashAggrJitChunk::functionName() const {
-  std::ostringstream out;
-  out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
-      << slots_.size();
-  for (const auto& slot : slots_) {
-    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown") << "_"
-        << static_cast<int>(slot.desc.kind) << hashAggrJitValueKindName(slot.desc.inputKind)
-        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o" << slot.offset
-        << "n" << slot.nullByte << "m" << static_cast<int>(slot.nullMask)
-        << (slot.desc.countStar ? "s" : "x") << (slot.desc.mergeInput ? "g" : "r")
-        << (slot.desc.decimal ? "d" : "n");
-  }
-  return out.str();
-}
-
 bool HashAggrJitChunk::canExtract() const {
   if (extract_ == nullptr) {
     return false;
@@ -1147,18 +1149,6 @@ bool HashAggrJitChunk::canExtract() const {
   return true;
 }
 
-std::string HashAggrJitChunk::initFunctionName() const {
-  return functionName() + "_init";
-}
-
-std::string HashAggrJitChunk::addDenseNoNullFunctionName() const {
-  return functionName() + "_add_dense_no_null";
-}
-
-std::string HashAggrJitChunk::extractFunctionName() const {
-  return functionName() + "_extract";
-}
-
 bool HashAggrJitChunk::codegen() {
   if (addDense_) {
     return true;
@@ -1167,11 +1157,11 @@ bool HashAggrJitChunk::codegen() {
   if (jit == nullptr) {
     return false;
   }
-  const auto moduleKey = functionName();
-  const auto initFn = initFunctionName();
-  const auto addFn = moduleKey + "_add_dense";
-  const auto addNoNullFn = addDenseNoNullFunctionName();
-  const auto extractFn = extractFunctionName();
+  const auto& moduleKey = functionName_;
+  const auto& initFn = initFunctionName_;
+  const auto& addFn = addDenseFunctionName_;
+  const auto& addNoNullFn = addDenseNoNullFunctionName_;
+  const auto& extractFn = extractFunctionName_;
   module_ = jit->CompileModule(
       [&](llvm::Module& module) {
         const bool ok = genInitIR(module, initFn, slots_) &&

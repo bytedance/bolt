@@ -191,14 +191,30 @@ class HashAggrJitChunk {
     return slots_;
   }
 
-  std::string functionName() const;
-  std::string initFunctionName() const;
-  std::string addDenseNoNullFunctionName() const;
-  std::string extractFunctionName() const;
+  const std::string& functionName() const {
+    return functionName_;
+  }
+  const std::string& initFunctionName() const {
+    return initFunctionName_;
+  }
+  const std::string& addDenseFunctionName() const {
+    return addDenseFunctionName_;
+  }
+  const std::string& addDenseNoNullFunctionName() const {
+    return addDenseNoNullFunctionName_;
+  }
+  const std::string& extractFunctionName() const {
+    return extractFunctionName_;
+  }
 
  private:
   std::vector<HashAggrJitSlot> slots_;
   bool partialOutput_{false};
+  std::string functionName_;
+  std::string initFunctionName_;
+  std::string addDenseFunctionName_;
+  std::string addDenseNoNullFunctionName_;
+  std::string extractFunctionName_;
   CompiledModuleSP module_;
   HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};
