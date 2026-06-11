@@ -16,8 +16,10 @@ namespace bytedance::bolt::exec::bm {
 class BmRowContainer;
 
 // RowId-driven reader for working sets that should not be fully loaded at once.
-// It does not own memory. Every load delegates to BmRowContainer, which pins the
-// required chunk blocks into BlockRef::handle and owns the resulting residency.
+//
+// WindowReadSession owns no BufferHandle. Each load delegates to the owning
+// BmRowContainer, which pins required chunk blocks into BlockRef::handle and
+// keeps the returned pointers valid until those chunks are spilled or released.
 class WindowReadSession {
  public:
   WindowReadSession() = default;
@@ -44,8 +46,13 @@ class WindowReadSession {
   friend class BmRowContainer;
 };
 
-// Read session for scanning multiple physically ordered segments. It owns no
-// block handles; all residency lives in BmRowContainer.
+// Read session for scanning multiple physically ordered segments.
+//
+// MergeReadSession owns cursor state, not block handles. It asks BmRowContainer
+// to pin each current chunk and, by default, releases a chunk only after the
+// next() call that returned its last row has completed and the following next()
+// call begins. That keeps the previous batch's returned pointers valid while
+// still avoiding future re-spill of already consumed chunks.
 class MergeReadSession {
  public:
   MergeReadSession() = default;
