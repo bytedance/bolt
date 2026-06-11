@@ -145,18 +145,22 @@ void fillHashAggrJitRowFieldInputs(
   input.rowField1Nulls = countVector->rawNulls();
 }
 
-void fillHashAggrJitPartialAvgOutput(
+// Fills the raw flat sum/count field pointers for a partial avg ROW output.
+// Returns false when the ROW children are not both FLAT (e.g. dictionary/
+// constant wrapped), in which case the JIT fast path is not applicable and the
+// caller must fall back to the non-JIT extract path.
+bool fillHashAggrJitPartialAvgOutput(
     jit::HashAggrJitOutput& output,
     BaseVector* vector) {
   auto* rowVector = vector->asUnchecked<RowVector>();
   if (rowVector->childrenSize() < 2) {
-    return;
+    return false;
   }
   auto& sumVector = rowVector->childAt(0);
   auto& countVector = rowVector->childAt(1);
   if (sumVector->encoding() != VectorEncoding::Simple::FLAT ||
       countVector->encoding() != VectorEncoding::Simple::FLAT) {
-    return;
+    return false;
   }
   output.rowField0Values =
       sumVector->asUnchecked<FlatVector<double>>()->mutableRawValues();
@@ -164,6 +168,7 @@ void fillHashAggrJitPartialAvgOutput(
   output.rowField1Values =
       countVector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
   output.rowField1Nulls = countVector->mutableRawNulls();
+  return true;
 }
 
 std::string hashAggrJitSlotDebugString(
@@ -1237,8 +1242,12 @@ void GroupingSet::runHashAggrJitExtractChunks(
       } else if (aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
                  slot.desc.kind == jit::HashAggrJitKind::Avg) {
         hashAggrJitOutputs_[slotIndex].nulls = aggregateVector->mutableRawNulls();
-        fillHashAggrJitPartialAvgOutput(
-            hashAggrJitOutputs_[slotIndex], aggregateVector.get());
+        if (!fillHashAggrJitPartialAvgOutput(
+                hashAggrJitOutputs_[slotIndex], aggregateVector.get())) {
+          canRunChunk = false;
+          skipReason = "partial avg row fields are not flat";
+          break;
+        }
       }
       hashAggrJitResultPtrs_[slotIndex] =
           reinterpret_cast<char*>(&hashAggrJitOutputs_[slotIndex]);

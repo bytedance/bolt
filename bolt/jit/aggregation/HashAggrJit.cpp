@@ -155,11 +155,6 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(module, "jit_HashAggrSetFlatI64", voidTy, {i8PtrTy, i32Ty, i64Ty, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatFloat", voidTy, {i8PtrTy, i32Ty, floatTy, i8Ty});
   declareFunction(module, "jit_HashAggrSetFlatDouble", voidTy, {i8PtrTy, i32Ty, doubleTy, i8Ty});
-  declareFunction(
-      module,
-      "jit_HashAggrSetPartialAvgDouble",
-      voidTy,
-      {i8PtrTy, i32Ty, doubleTy, i64Ty, i8Ty});
   // Decimal extract helpers: (vector, row, group, offset, precision, scale,
   // longDecimal).
   declareFunction(
@@ -631,7 +626,8 @@ llvm::Value* HashAggrJitCodegen::loadDecodedRowField(
       !name.empty(), "Unsupported decoded row field kind for HashAggrJit");
   auto* decodedVector = ::bytedance::bolt::jit::loadDecodedVector(builder(), decoded);
   return builder().CreateCall(
-      module_.getFunction(name), {decodedVector, row, builder().getInt32(field)});
+      module_.getFunction(name),
+      {decodedVector, row, builder().getInt32(field)});
 }
 
 llvm::Value* HashAggrJitCodegen::isDecodedRowFieldNull(
@@ -695,7 +691,8 @@ void HashAggrJitCodegen::emitFlatValue(
   }
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
-      module_.getFunction(setter), {vector, row, value, isNull});
+      module_.getFunction(setter),
+      {vector, row, value, isNull});
 }
 
 void HashAggrJitCodegen::resizeResultVector(
@@ -703,7 +700,8 @@ void HashAggrJitCodegen::resizeResultVector(
     llvm::Value* size) const {
   auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
   builder().CreateCall(
-      module_.getFunction("jit_HashAggrResizeVector"), {vector, size});
+      module_.getFunction("jit_HashAggrResizeVector"),
+      {vector, size});
 }
 
 void HashAggrJitCodegen::emitPartialAvgResult(
@@ -712,21 +710,12 @@ void HashAggrJitCodegen::emitPartialAvgResult(
     llvm::Value* sum,
     llvm::Value* count,
     llvm::Value* isNull) const {
+  // The extract admission path (runHashAggrJitExtractChunks) guarantees the
+  // partial avg ROW output has flat sum/count children before the chunk runs,
+  // so rowField0/1 values are always populated and we can write them directly
+  // without a runtime fast/helper branch.
   auto* sumValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
       builder(), output, 0, false);
-  auto* hasRawRowOutput = builder().CreateICmpNE(
-      sumValues,
-      llvm::ConstantPointerNull::get(
-          llvm::PointerType::get(builder().getContext(), 0)));
-  auto* fastBlock = llvm::BasicBlock::Create(
-      module_.getContext(), "partial_avg_raw", builder().GetInsertBlock()->getParent());
-  auto* helperBlock = llvm::BasicBlock::Create(
-      module_.getContext(), "partial_avg_helper", builder().GetInsertBlock()->getParent());
-  auto* doneBlock = llvm::BasicBlock::Create(
-      module_.getContext(), "partial_avg_done", builder().GetInsertBlock()->getParent());
-  builder().CreateCondBr(hasRawRowOutput, fastBlock, helperBlock);
-
-  builder().SetInsertPoint(fastBlock);
   auto* sumTypedValues =
       builder().CreatePointerCast(sumValues, builder().getDoubleTy()->getPointerTo());
   auto* countValues = ::bytedance::bolt::jit::loadOutputRowFieldPointer(
@@ -742,16 +731,6 @@ void HashAggrJitCodegen::emitPartialAvgResult(
   countStore->setAlignment(llvm::Align(1));
   auto* nulls = ::bytedance::bolt::jit::loadOutputNulls(builder(), output);
   ::bytedance::bolt::jit::emitOutputNullBit(builder(), nulls, row, isNull);
-  builder().CreateBr(doneBlock);
-
-  builder().SetInsertPoint(helperBlock);
-  auto* vector = ::bytedance::bolt::jit::loadOutputVector(builder(), output);
-  builder().CreateCall(
-      module_.getFunction("jit_HashAggrSetPartialAvgDouble"),
-      {vector, row, sum, count, isNull});
-  builder().CreateBr(doneBlock);
-
-  builder().SetInsertPoint(doneBlock);
 }
 
 void HashAggrJitCodegen::emitDecimalSumExtract(

@@ -10,7 +10,6 @@
 // They were previously colocated in RowContainer.cpp purely because the
 // jit_GetDecodedValue* helpers already lived there.
 
-#include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 
 extern "C" {
@@ -79,25 +78,6 @@ __attribute__((__visibility__("default"))) void jit_HashAggrSetFlatDouble(
   auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
                    ->as<bytedance::bolt::FlatVector<double>>();
   isNull ? flat->setNull(row, true) : flat->set(row, value);
-}
-
-__attribute__((__visibility__("default"))) void jit_HashAggrSetPartialAvgDouble(
-    char* vector,
-    int32_t row,
-    double sum,
-    int64_t count,
-    int8_t isNull) {
-  auto* rowVector = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                        ->as<bytedance::bolt::RowVector>();
-  auto* sumVector = rowVector->childAt(0)->asFlatVector<double>();
-  auto* countVector = rowVector->childAt(1)->asFlatVector<int64_t>();
-  if (isNull) {
-    rowVector->setNull(row, true);
-    return;
-  }
-  rowVector->setNull(row, false);
-  sumVector->set(row, sum);
-  countVector->set(row, count);
 }
 
 } // extern "C"

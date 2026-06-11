@@ -1139,3 +1139,51 @@ runtime helper（`jitHashAggrAddWithOverflow`）。即 IR 只完成 decode + 路
   `decimalSomeGroupsAllnullValues`（覆盖溢出、全 null 组等关键路径）。
 - extract 的 decimal 计算（依赖 `DecimalUtil` 精度判定、每组一次、非热路径）
   保留 runtime helper，不在本次范围。
+
+---
+
+## 14. partial avg extract 去掉运行时 fast/helper 分支
+
+### 14.1 背景
+
+`emitPartialAvgResult` 此前在 IR 里有 `hasRawRowOutput ? fast : helper` 的运行时
+分支（3 个 BasicBlock + 1 条件跳转）：当 partial avg 输出 ROW 的 sum/count 子字段
+为 FLAT 时走直写 fast 路径，否则回退 `jit_HashAggrSetPartialAvgDouble` helper。
+但该分支判定的是**循环不变量**（`rowField0Values` 在整个 extract 调用内不变）。
+
+### 14.2 改动
+
+- 把 fast/helper 的选择从「运行时」前移到「extract 准入」：
+  `fillHashAggrJitPartialAvgOutput` 改为返回 bool，当 ROW 子字段非 FLAT
+  （dictionary/constant 包装）时返回 false；`runHashAggrJitExtractChunks` 据此
+  令 `canRunChunk=false`、回退非 JIT 并打 VLOG（`skipReason="partial avg row
+  fields are not flat"`）。
+- 这样保证进入 JIT 的 chunk 其 rowField0/1 必被填充，IR 里直接走纯 fast 路径。
+- `emitPartialAvgResult` 删除运行时分支与 3 个 BasicBlock；删除不再被调用的
+  `jit_HashAggrSetPartialAvgDouble` runtime helper、builtin 声明及其
+  `ComplexVector.h` include。
+
+### 14.3 性能（bm_min_iters=50，基线=分支版，优化=纯 fast）
+
+| case | 基线 | 优化后(2 轮) | 变化 |
+|------|------|--------------|------|
+| width8_avg_jit | 4.26ms | 4.15 / 4.21ms | ~持平–3% |
+| width16_avg_jit | 8.75ms | 7.55 / 7.58ms | ~14% |
+| width8_merge_avg_jit | 6.22ms | 5.75 / 6.17ms | 波动，约 0–8% |
+| width16_merge_avg_jit | 11.44ms | 10.85 / 10.70ms | ~5–6% |
+| width8_high_card_partial_avg_extract_jit | 74.13ms | 70.00 / 68.84ms | ~6–7% |
+
+- 整体小幅改善或持平，无回归。改善幅度有限且部分用例有运行间波动——符合预期：
+  被删的分支是循环不变量，LLVM LICM + 分支预测本就覆盖了大部分开销，去掉它主要
+  减少了 codegen 出的 BasicBlock 数与少量恒命中的比较/跳转。
+- 价值更多在**正确性与可维护性**：把「子字段非 FLAT」从 IR 兜底分支收敛为 plan
+  阶段的显式准入回退，IR 不再生成永远走同一侧的运行时分叉。
+
+### 14.4 正确性
+
+- partial avg / average 相关单测通过：`hashAggrJitPartialAvgExtractAccumulators`
+  （直接覆盖本次 fast 路径）、`avgDecimal` / `avgAllNulls` /
+  `rowBasedSpillDecimalAvg` / `hashAggrJitDecimalSumAndFloatingMinMax` /
+  `hashAggrJitSplitsContiguousSegments`。
+- 无新增回归（`hashAggrJitMergeAndExtract` / `hashAggrJitAllNullGroup` 仍 FAIL，
+  系既有 P0 bug，见 todolist，与本次无关）。
