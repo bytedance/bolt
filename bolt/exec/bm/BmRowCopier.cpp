@@ -9,17 +9,17 @@ namespace bytedance::bolt::exec::bm {
 BmRowCopier::BmRowCopier(
     const std::vector<TypePtr>* types,
     const BmRowLayout* layout,
-    BmSegmentCollection* storage)
-    : types_(types), layout_(layout), storage_(storage) {
+    BmSegmentCollection* segments)
+    : types_(types), layout_(layout), segments_(segments) {
   BOLT_CHECK_NOT_NULL(types_);
   BOLT_CHECK_NOT_NULL(layout_);
-  BOLT_CHECK_NOT_NULL(storage_);
+  BOLT_CHECK_NOT_NULL(segments_);
 }
 
 char* BmRowCopier::copyRowToSegment(
     SegmentData& segment,
     const char* source) {
-  auto* target = storage().newRowInSegment(segment);
+  auto* target = segments().newRowInSegment(segment);
   std::memcpy(target, source, layout().rowSize());
 
   for (int32_t column = 0; column < types().size(); ++column) {
@@ -33,12 +33,12 @@ char* BmRowCopier::copyRowToSegment(
     if (value->isInline()) {
       continue;
     }
-    auto& heap = storage().ensureHeapBlock(segment, value->size());
+    auto& heap = segments().ensureHeapBlock(segment, value->size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value->data(), value->size());
     heap.used += value->size();
     *value = StringView(stringTarget, value->size());
-    storage().recordHeapForCurrentChunk(segment, heap);
+    segments().recordHeapForCurrentChunk(segment, heap);
   }
   return target;
 }

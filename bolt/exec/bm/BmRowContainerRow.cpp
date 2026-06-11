@@ -66,11 +66,22 @@ void BmRowContainer::storeValue(
   BOLT_DCHECK_NOT_NULL(context.row_);
   BOLT_DCHECK_LT(column, layout_.columns().size());
   const auto& layout = layout_.column(column);
+  if (FOLLY_LIKELY(!layout.nullable)) {
+    BOLT_DCHECK(
+        !decoded.isNullAt(sourceIndex),
+        "Column {} is not nullable",
+        column);
+    BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+        storeValueTyped,
+        types_[column]->kind(),
+        decoded,
+        sourceIndex,
+        context,
+        layout);
+    return;
+  }
+
   const bool null = decoded.isNullAt(sourceIndex);
-  BOLT_CHECK(
-      !null || layout.nullable,
-      "Column {} is not nullable",
-      column);
   layout_.setNull(context.row_, column, null);
   if (FOLLY_UNLIKELY(null)) {
     return;

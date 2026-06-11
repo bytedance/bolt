@@ -4,13 +4,19 @@ bolt_add_library(
   BmRowBlockLoader.cpp
   BmRowContainerCompare.cpp
   BmRowContainerExtract.cpp
+  BmRowContainerLoad.cpp
   BmRowCopier.cpp
   BmRowLayout.cpp
   BmSegmentCollection.cpp
+  BmSegmentCollectionRead.cpp
+  BmSegmentCollectionRelease.cpp
+  BmSegmentCollectionWrite.cpp
+  BmMergeReadSession.cpp
+  BmStringViewRebaser.cpp
   BmRowContainerReorder.cpp
-  BmRowContainerRead.cpp
   BmRowContainerRow.cpp
   BmRowContainerSegment.cpp
+  BmWindowReadSession.cpp
 )
 
 target_compile_features(bolt_exec_bm PRIVATE cxx_std_20)

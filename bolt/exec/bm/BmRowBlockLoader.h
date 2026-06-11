@@ -8,20 +8,20 @@
 #include <folly/Range.h>
 
 #include <memory>
-#include <unordered_map>
-#include <vector>
 
 namespace bytedance::bolt::exec::bm {
 
-// Pins row/heap blocks through BufferManager and repairs raw pointers after
-// blocks become resident. This is the only helper that should perform bulk
-// block pinning and StringView rebasing for BmRowContainer.
+// Pins row/heap blocks through BufferManager and refreshes BlockRef pointers.
+//
+// BmRowBlockLoader is the only helper that performs bulk block pinning for row
+// container read paths. It delegates StringView pointer repair after pinning so
+// block residency management and row payload rewriting stay separate.
 class BmRowBlockLoader {
  public:
   BmRowBlockLoader(
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       const BmRowLayout* layout,
-      BmSegmentCollection* storage);
+      BmSegmentCollection* segments);
 
   void loadSegments(
       folly::Range<const SegmentId*> segments,
@@ -34,31 +34,19 @@ class BmRowBlockLoader {
   void loadChunk(ChunkData& chunk);
 
  private:
-  void rebaseStringViews(
-      SegmentData& segment,
-      const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-          heapRebases,
-      BulkLoadMetrics* metrics = nullptr);
-
-  void rebaseChunk(
-      ChunkData& chunk,
-      const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-          heapRebases,
-      BulkLoadMetrics* metrics = nullptr);
-
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
     BOLT_DCHECK_NOT_NULL(layout_);
     return *layout_;
   }
 
-  FOLLY_ALWAYS_INLINE BmSegmentCollection& storage() const {
-    BOLT_DCHECK_NOT_NULL(storage_);
-    return *storage_;
+  FOLLY_ALWAYS_INLINE BmSegmentCollection& segments() const {
+    BOLT_DCHECK_NOT_NULL(segments_);
+    return *segments_;
   }
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   const BmRowLayout* layout_{nullptr};
-  BmSegmentCollection* storage_{nullptr};
+  BmSegmentCollection* segments_{nullptr};
 };
 
 } // namespace bytedance::bolt::exec::bm

@@ -67,8 +67,28 @@ struct SegmentData {
   ChunkId currentChunk{kNoBlock};
 };
 
-// Owns segment/block/chunk metadata and all BufferManager block handles for one
-// BmRowContainer. It does not know column semantics beyond row size.
+// Owns segment/chunk metadata and all BufferManager block handles for one
+// BmRowContainer. It does not know column semantics beyond row size; typed
+// store/compare/extract logic lives in BmRowContainer and BmRowCopier.
+//
+// Current physical hierarchy:
+//
+//   BmSegmentCollection
+//     SegmentData
+//       ChunkData
+//         rowBlock      fixed-width rows for one row block
+//         heapBlocks    variable-width payload blocks referenced by those rows
+//         heapBases     old/new heap base metadata for StringView rebasing
+//
+// A chunk is deliberately anchored to one row block and may own several heap
+// blocks. This differs from DuckDB's TupleDataChunk/ChunkPart model where a
+// logical chunk can be split into smaller parts that each describe precise row
+// and heap slices. Bolt keeps the old RowContainer write shape for now:
+// appendRow()/appendBatch() allocate row slots before every variable-width
+// payload size is known, so one-row-block chunks are simpler and keep window
+// read ownership local. The cost is coarser heap pinning/rebasing for variable
+// width data. If callers later switch fully to vector-planned writes, this
+// layer can adopt a finer DuckDB-like part model.
 class BmSegmentCollection {
  public:
   BmSegmentCollection(
@@ -146,6 +166,25 @@ class BmSegmentCollection {
  private:
   BlockRef addBlock(uint32_t blockSize);
   ChunkData& ensureWritableChunk(SegmentData& segment);
+  FOLLY_ALWAYS_INLINE ChunkData& chunkForRowUnchecked(
+      SegmentData& segment,
+      RowNumber rowNumber) const {
+    return const_cast<ChunkData&>(
+        chunkForRowUnchecked(std::as_const(segment), rowNumber));
+  }
+  FOLLY_ALWAYS_INLINE const ChunkData& chunkForRowUnchecked(
+      const SegmentData& segment,
+      RowNumber rowNumber) const {
+    const auto rowsPerChunk = rowBlockSize_ / rowStride();
+    BOLT_DCHECK_GT(rowsPerChunk, 0);
+    const auto chunkIndex = rowNumber / rowsPerChunk;
+    BOLT_DCHECK_LT(chunkIndex, segment.chunks.size());
+    const auto& chunk = segment.chunks[chunkIndex];
+    BOLT_DCHECK(
+        rowNumber >= chunk.meta.firstRowNumber &&
+        rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount);
+    return chunk;
+  }
   FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockInChunk(
       ChunkData& chunk,
       uint32_t minBytes) {
