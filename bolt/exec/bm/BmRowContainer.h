@@ -98,6 +98,12 @@ class BmRowContainer {
 
   // Materializes resident rows in the supplied order into a new finalized/flushed
   // segment. The returned SegmentId can be scanned through MergeReadSession.
+  //
+  // This implementation copies all rows into a second segment before flushing.
+  // It gives merge readers sequential scan locality, but it can temporarily
+  // double memory for the reordered rows. Use it only while the caller can
+  // tolerate that peak; large memory-pressure paths should eventually switch to
+  // segmented materialization that flushes smaller ordered pieces incrementally.
   SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
   // Creates a lazy read session. No blocks are pinned until tryLoadAll(),
@@ -110,7 +116,7 @@ class BmRowContainer {
   // releaseAfterRead is true, each cursor drops chunk blocks after passing them.
   MergeReadSession beginMergeReadSegments(
       folly::Range<const SegmentId*> segments,
-      bool releaseAfterRead = false);
+      bool releaseAfterRead = true);
 
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
