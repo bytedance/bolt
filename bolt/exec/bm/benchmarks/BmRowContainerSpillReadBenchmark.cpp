@@ -170,7 +170,7 @@ void printBmReadMetrics(
       stderr,
       "[bm-row-container-metrics] spillReadBm compression={} dataset={} "
       "iterations={} logical_bytes={} rows={} row_ids={} windows={} "
-      "result={} begin_ms={:.3f} try_load_all_ms={:.3f} "
+      "result={} begin_ms={:.3f} list_rows_ms={:.3f} "
       "window_load_ms={:.3f} "
       "bulk_estimate_ms={:.3f} bulk_reserve_ms={:.3f} "
       "bulk_collect_blocks_ms={:.3f} bulk_batch_pin_ms={:.3f} "
@@ -199,9 +199,9 @@ void printBmReadMetrics(
       metrics.rows,
       metrics.rowIds,
       metrics.windows,
-      metrics.result == LoadAllResult::kLoadedPointers ? "pointers" : "row_ids",
+      metrics.resultPointers ? "pointers" : "row_ids",
       nsToMs(metrics.beginNs),
-      nsToMs(metrics.tryLoadAllNs),
+      nsToMs(metrics.listRowsNs),
       nsToMs(metrics.windowLoadNs),
       nsToMs(bulk.estimateBytesNs),
       nsToMs(bulk.reserveNs),

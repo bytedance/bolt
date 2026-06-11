@@ -68,15 +68,9 @@ enum class SegmentState {
   // The segment is closed for writes but its blocks have not been flushed yet.
   kFinalizedResident,
   // The segment is closed and its blocks are managed by BufferManager. Callers
-  // must read it through BulkReadSession/MergeReadSession before using pointers.
+  // must load blocks back through BmRowContainer read APIs before using
+  // pointers.
   kFinalizedFlushed,
-};
-
-enum class LoadAllResult {
-  // Output vector contains resident row pointers. RowId output is empty.
-  kLoadedPointers,
-  // Output vector contains RowIds. Pointer output is empty.
-  kNeedWindowRead,
 };
 
 struct RowId {
@@ -91,7 +85,7 @@ struct RowId {
 };
 
 struct BulkLoadMetrics {
-  // Time spent estimating bytes that must be pinned for tryLoadAll().
+  // Time spent estimating bytes that must be pinned for listRows().
   uint64_t estimateBytesNs{0};
   // Time spent asking BufferManager to reserve estimated memory.
   uint64_t reserveNs{0};
@@ -109,7 +103,7 @@ struct BulkLoadMetrics {
   uint64_t appendRowIdsNs{0};
   // Estimated bytes for the full working set.
   uint64_t estimatedBytes{0};
-  // Number of blocks pinned by tryLoadAll().
+  // Number of blocks pinned by listRows()/window reads.
   uint64_t pinnedBlocks{0};
   // Number of StringViews whose pointer was rebased.
   uint64_t rebasedStringViews{0};
@@ -117,14 +111,6 @@ struct BulkLoadMetrics {
   uint64_t pointerRows{0};
   // Number of RowIds returned to caller.
   uint64_t rowIdRows{0};
-};
-
-struct ReadSessionOptions {
-  // Optional hard limit for tryLoadAll(). If non-zero and the estimated pinned
-  // bytes exceed this limit, tryLoadAll() immediately returns RowIds.
-  uint64_t maxPinnedBytes{0};
-  // Optional observer for bulk load timing/counter metrics.
-  BulkLoadMetrics* bulkLoadMetrics{nullptr};
 };
 
 struct HeapBaseRef {
@@ -159,6 +145,10 @@ struct SegmentMeta {
   std::optional<PartitionId> partitionId;
   // Number of rows finalized into this segment.
   uint64_t numRows{0};
+  // True when rows are physically materialized in merge order. MergeReadSession
+  // requires this because it only merges already-ordered segments; it does not
+  // sort inside a segment.
+  bool orderedForMerge{false};
 };
 
 } // namespace bytedance::bolt::exec::bm

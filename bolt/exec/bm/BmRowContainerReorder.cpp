@@ -14,6 +14,7 @@ SegmentId BmRowContainer::finalizeReorderedSegment(
     rowCopier_.copyRowToSegment(materialized, row);
   }
   storage_.finalizeAndFlushSegment(materialized);
+  materialized.meta.orderedForMerge = true;
   return materializedSegment;
 }
 
@@ -22,6 +23,13 @@ MergeReadSession BmRowContainer::beginMergeReadSegments(
     bool releaseAfterRead) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
   validateSegments({segmentIds.data(), segmentIds.size()});
+  for (auto segment : segmentIds) {
+    const auto& data = storage_.segmentData(segment);
+    BOLT_CHECK(
+        data.meta.orderedForMerge,
+        "Segment {} is not ordered for merge read",
+        segment);
+  }
   return MergeReadSession(this, std::move(segmentIds), releaseAfterRead);
 }
 

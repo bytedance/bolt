@@ -23,11 +23,15 @@ class BmRowBlockLoader {
       const BmRowLayout* layout,
       BmRowStorage* storage);
 
-  std::vector<memory::bm::BufferHandle> pinSegments(
+  void loadSegments(
       folly::Range<const SegmentId*> segments,
       BulkLoadMetrics* metrics = nullptr);
 
-  std::vector<memory::bm::BufferHandle> pinChunk(ChunkData& chunk);
+  void loadChunks(
+      folly::Range<ChunkData* const*> chunks,
+      BulkLoadMetrics* metrics = nullptr);
+
+  void loadChunk(ChunkData& chunk);
 
  private:
   void rebaseStringViews(

@@ -38,7 +38,7 @@ struct PipelineBmMetrics {
   uint64_t rows{0};
   uint64_t rowIds{0};
   uint64_t windows{0};
-  LoadAllResult result{LoadAllResult::kNeedWindowRead};
+  bool resultPointers{false};
   BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
 };
@@ -157,7 +157,7 @@ void printBmMetrics(
       metrics.rows,
       metrics.rowIds,
       metrics.windows,
-      metrics.result == LoadAllResult::kLoadedPointers ? "pointers" : "row_ids",
+      metrics.resultPointers ? "pointers" : "row_ids",
       nsToMs(metrics.storeNs),
       nsToMs(metrics.spillWriteNs),
       nsToMs(metrics.spillReadNs),
@@ -193,27 +193,19 @@ void printBmMetrics(
 
 void extractBmWindowRows(
     BmRowContainer& container,
-    BulkReadSession& session,
+    WindowReadSession& session,
     const std::vector<RowId>& rowIds,
     const BenchmarkOptions& opts,
     memory::MemoryPool* pool,
     PipelineBmMetrics& metrics) {
   const auto windowRows = static_cast<size_t>(
       std::max<uint64_t>(1, FLAGS_bm_row_container_pipeline_window_rows));
-  std::vector<char*> rows;
-  rows.reserve(std::min<size_t>(windowRows, rowIds.size()));
   for (size_t offset = 0; offset < rowIds.size();) {
     const auto batchRows = std::min(windowRows, rowIds.size() - offset);
     const auto spillReadStart = benchmarkNowNs();
-    auto window = session.loadRows({rowIds.data() + offset, batchRows});
+    auto rows = session.loadRows({rowIds.data() + offset, batchRows});
     metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
     ++metrics.windows;
-
-    rows.clear();
-    rows.reserve(window.rows.size());
-    for (const auto& row : window.rows) {
-      rows.push_back(row.ptr);
-    }
 
     const auto extractStart = benchmarkNowNs();
     extractBmRowsResident(container, rows, opts, pool);
@@ -295,39 +287,31 @@ void pipelineBm(
     const auto segment = container->flushActiveSegment();
     metrics.spillWriteNs += benchmarkNowNs() - spillWriteStart;
 
-    ReadSessionOptions readOptions;
-    readOptions.bulkLoadMetrics = FLAGS_bm_row_container_spill_metrics
-        ? &metrics.bulkLoad
-        : nullptr;
-    if (mode == PipelineBmReadMode::kWindowRead) {
-      readOptions.maxPinnedBytes = 1;
-    }
-    auto session = container->beginBulkReadSegments({&segment, 1}, readOptions);
-
     std::vector<char*> rows;
     std::vector<RowId> rowIds;
     rows.reserve(rowCount(opts));
     rowIds.reserve(rowCount(opts));
-    const auto spillReadStart = benchmarkNowNs();
-    const auto result = session.tryLoadAll(rows, rowIds);
-    metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
-    metrics.result = result;
 
     if (mode == PipelineBmReadMode::kLoadedPointers) {
-      BOLT_CHECK(
-          result == LoadAllResult::kLoadedPointers,
-          "pipelineBmLoaded expected kLoadedPointers but got kNeedWindowRead");
+      const auto spillReadStart = benchmarkNowNs();
+      rows = container->listRows(
+          {&segment, 1},
+          FLAGS_bm_row_container_spill_metrics ? &metrics.bulkLoad : nullptr);
+      metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
+      metrics.resultPointers = true;
       BOLT_CHECK(rowIds.empty());
       const auto extractStart = benchmarkNowNs();
       extractBmRowsResident(*container, rows, opts, context.pool.get());
       metrics.extractNs += benchmarkNowNs() - extractStart;
       folly::doNotOptimizeAway(rows.data());
     } else {
-      BOLT_CHECK(
-          result == LoadAllResult::kNeedWindowRead,
-          "pipelineBmWindow expected kNeedWindowRead but got kLoadedPointers");
+      const auto spillReadStart = benchmarkNowNs();
+      rowIds = container->listRowIds({&segment, 1});
+      metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
+      metrics.resultPointers = false;
       BOLT_CHECK(rows.empty());
       metrics.rowIds += rowIds.size();
+      auto session = container->beginWindowReadSegments({&segment, 1});
       extractBmWindowRows(
           *container, session, rowIds, opts, context.pool.get(), metrics);
       folly::doNotOptimizeAway(rowIds.data());

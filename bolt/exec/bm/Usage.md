@@ -27,7 +27,7 @@ row 的访问形态有两种：
 
 - `char*`：内存中已经 resident 的 row 指针，比较和 extract 的快路径都基于它。
 - `RowId`：当 working set 无法一次性全部 pin 住时使用。上层拿到 `RowId` 后，应交回
-  `BulkReadSession` 做 window read，不要自己把它变成随机 IO。
+  `WindowReadSession` 做 window read，不要自己把它变成随机 IO。
 
 ## 创建容器
 
@@ -132,10 +132,10 @@ rows.extractColumnResident(
 这个接口用于当前 rows 已经在内存中的场景，包括：
 
 - 写入后尚未 flush。
-- `tryLoadAll()` 成功返回了指针。
-- `loadRows()` 或 `loadRow()` window read 后返回了当前窗口内的指针。
+- `listRows()` 全量加载后返回了指针。
+- `WindowReadSession::loadRows()` 或 `loadRow()` 返回了指针。
 
-如果只有 `RowId`，需要先通过 `BulkReadSession` 转成当前窗口内的指针，再调用 extract。
+如果只有 `RowId`，需要先通过 `WindowReadSession` 转成指针，再调用 extract。
 
 ## Flush
 
@@ -160,52 +160,35 @@ flush 的语义：
 
 Sort / Hash Agg 通常 flush 少量 segment；Hash Build 可以对每个 partition 多次 flush。
 
-## Bulk read
-
-读回一组 segment 时，先创建 `BulkReadSession`。
+## 全量读
 
 ```cpp
 std::vector<SegmentId> segments = ...;
-ReadSessionOptions options;
-auto session = rows.beginBulkReadSegments({segments.data(), segments.size()}, options);
-```
 
-然后调用 `tryLoadAll()`：
-
-```cpp
-std::vector<char*> rowPtrs;
-std::vector<RowId> rowIds;
-auto result = session.tryLoadAll(rowPtrs, rowIds);
-
-if (result == LoadAllResult::kLoadedPointers) {
-  // 全量 load 成功，rowPtrs 可直接用于 compare / extract。
-} else {
-  // 全量 load 失败，rowIds 描述所有 rows，后续走 window read。
+if (rows.canLoadAllSegments({segments.data(), segments.size()})) {
+  std::vector<char*> rowPtrs =
+      rows.listRows({segments.data(), segments.size()});
+  // rowPtrs 可直接用于 compare / extract。
 }
 ```
 
-`tryLoadAll()` 会先估算需要 pin 的字节数：
+`canLoadAllSegments()` 只是快速判断，不保证紧接着 `listRows()` 一定成功。`listRows()`
+会真正 reserve / batch pin；如果内存不足或 IO 失败，会直接抛异常。
 
-- 如果 `ReadSessionOptions::maxPinnedBytes` 非 0 且估算值超过限制，直接返回
-  `kNeedWindowRead`。
-- 否则调用 BufferManager 的 reserve / batch pin 尝试全量加载。
-- 全量加载成功时返回 `rowPtrs`。
-- 失败时清理已 pin 的 block，并返回 `rowIds`。
+`listRows()` 成功后，所有相关 block 的 `BufferHandle` 由 `BmRowContainer` 持有，返回的
+`char*` 只是指针视图。指针有效到对应 chunk/segment 被 `spillLoaded...()` 重新写出、
+被 `release...()` 销毁，或 container 析构。
 
 ## Window read
 
-当 `tryLoadAll()` 返回 `kNeedWindowRead` 时，上层可以按自己的访问顺序组织 `RowId`，
-再批量交给 session 加载窗口。
+当 working set 不能全量加载时，先列出 `RowId`，再按上层需要的访问窗口批量加载。
 
 ```cpp
-std::vector<RowId> needed = ...;
-RowWindow window = session.loadRows({needed.data(), needed.size()});
+std::vector<RowId> rowIds = rows.listRowIds({segments.data(), segments.size()});
+auto session = rows.beginWindowReadSegments({segments.data(), segments.size()});
 
-std::vector<char*> rowPtrs;
-rowPtrs.reserve(window.rows.size());
-for (const auto& row : window.rows) {
-  rowPtrs.push_back(row.ptr);
-}
+std::vector<RowId> needed = ...;
+std::vector<char*> rowPtrs = session.loadRows({needed.data(), needed.size()});
 
 rows.extractColumnResident(rowPtrs.data(), rowPtrs.size(), column, result);
 ```
@@ -216,8 +199,14 @@ rows.extractColumnResident(rowPtrs.data(), rowPtrs.size(), column, result);
 char* row = session.loadRow(rowId);
 ```
 
-`loadRows()` 会按 chunk 去 pin 数据，返回的指针只在下一次 `loadRows()` / `loadRow()` 或
-session 析构前有效。上层应尽量批量提交同一访问窗口内的 `RowId`，避免退化成大量单行随机读。
+`WindowReadSession` 不持有内存；它只负责把 `RowId` 解析成需要加载的 chunk。真正的
+`BufferHandle` 仍然写回 `BmRowContainer`。因此读阶段内存压力也统一由 container 处理：
+
+```cpp
+rows.spillLoadedSegments({segments.data(), segments.size()});
+```
+
+如果数据已经不会再用，调用 `releaseSegment()` / `releaseSegments()`，不要重新 spill。
 
 ## Reordered segment
 
@@ -242,24 +231,19 @@ SegmentId orderedSegment =
 std::vector<SegmentId> segments = ...;
 auto mergeSession = rows.beginMergeReadSegments({segments.data(), segments.size()});
 
-auto cursor = mergeSession.makeCursor(segments[0]);
-while (cursor.hasCurrent()) {
-  const char* row = cursor.currentRow();
-  cursor.advance();
+std::vector<char*> rowPtrs;
+while (mergeSession.next(rowPtrs, maxRows)) {
+  rows.extractColumnResident(rowPtrs.data(), rowPtrs.size(), column, result);
 }
 ```
 
-比较两个 cursor 当前 row：
+`beginMergeReadSegments()` 只接受 `orderedForMerge=true` 的 segment。普通
+`flushActiveSegment()` 产生的 segment 不能直接进入 merge read；`finalizeReorderedSegment()`
+产生的 segment 会标记为可 merge。
 
-```cpp
-int32_t r = mergeSession.compareCurrentRows(leftCursor, rightCursor, flags);
-```
-
-cursor 内部按 chunk 加载当前 row 所在窗口。`currentRow()` 返回的指针在 cursor 前进前有效。
-
-merge read 默认是消费型单向读取。cursor 读完某个 chunk 后会释放该 chunk 的 BM
-block 引用，避免已消费数据在后续内存压力下再次 spill。chunk metadata 会保留，后续
-再次读取这个 segment 会失败。
+merge read 默认是消费型单向读取。`next()` 推进后，上一批已经读完的 chunk 会被释放，
+避免已消费数据在后续内存压力下再次 spill。chunk metadata 会保留，后续再次读取这个
+segment 会失败。
 
 如果调用方需要重复读取同一个 segment，应显式关闭读后释放：
 
@@ -270,6 +254,17 @@ auto mergeSession = rows.beginMergeReadSegments(
 ```
 
 ## 释放数据
+
+读阶段如果数据后面还可能再用，但需要释放当前内存，应重新 spill：
+
+```cpp
+rows.spillLoadedSegments({segments.data(), segments.size()});
+rows.spillAllLoadedBlocks();
+```
+
+这些接口会把当前 resident 的 loaded blocks 写回 BufferManager storage，然后释放
+`BufferHandle`，保留 segment/chunk metadata 和 `RowId` 可解析性。因为原 spill 文件读回
+后会被销毁，所以不能把读阶段数据当作 clean block 直接 evict。
 
 segment 不再需要时，应显式释放：
 
@@ -283,7 +278,7 @@ rows.releaseSegment(segment);
 rows.releaseSegments({segments.data(), segments.size()});
 ```
 
-read session 不会自动释放 segment，消费完成后应显式调用 release 接口。
+read session 不会自动释放整个 segment，消费完成后应显式调用 release 接口。
 
 ## 常见接入方式
 
@@ -292,7 +287,7 @@ read session 不会自动释放 segment，消费完成后应显式调用 release
 1. 写入阶段使用 `appendBatch()` 或 `appendRow()`。
 2. 内存中比较时保留 row 指针，调用 `compareRows()`。
 3. 需要生成有序输出时，传入排序后的 row 指针调用 `finalizeReorderedSegment()`。
-4. 多个有序 segment 通过 `beginMergeReadSegments()` 和 cursor 顺序读回。
+4. 多个有序 segment 通过 `beginMergeReadSegments()` 和 `next()` 顺序读回。
 5. merge read 默认会释放已消费 chunk；如果后续还要复读，应传 `releaseAfterRead=false`。
 
 ### Hash Build
@@ -300,7 +295,8 @@ read session 不会自动释放 segment，消费完成后应显式调用 release
 1. 按 partition 写入：`appendBatch(input, partition)` 或 `appendRow(partition)`。
 2. 每个 partition 可多次 `flushActivePartitionSegment(partition)`。
 3. probe 或后续处理某个 partition 时，取 `segmentsForPartition(partition)`。
-4. 先 `tryLoadAll()`。成功则用指针访问；失败则按 join probe 需要的顺序调用 `loadRows()`。
+4. 先 `canLoadAllSegments()`。能全量加载则 `listRows()`，否则 `listRowIds()` 后按 join
+   probe 需要的顺序调用 `WindowReadSession::loadRows()`。
 5. partition 完成后释放它的 segments。
 
 ## 使用约束

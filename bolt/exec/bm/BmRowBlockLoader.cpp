@@ -38,32 +38,61 @@ BmRowBlockLoader::BmRowBlockLoader(
   BOLT_CHECK_NOT_NULL(storage_);
 }
 
-std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
+void BmRowBlockLoader::loadSegments(
     folly::Range<const SegmentId*> segments,
+    BulkLoadMetrics* metrics) {
+  std::vector<ChunkData*> chunks;
+  for (const auto segmentId : segments) {
+    auto& segment = storage().segmentData(segmentId);
+    chunks.reserve(chunks.size() + segment.chunks.size());
+    for (auto& chunk : segment.chunks) {
+      chunks.push_back(&chunk);
+    }
+  }
+  loadChunks({chunks.data(), chunks.size()}, metrics);
+}
+
+void BmRowBlockLoader::loadChunks(
+    folly::Range<ChunkData* const*> chunks,
     BulkLoadMetrics* metrics) {
   const auto collectStart = metrics == nullptr ? 0 : nowNs();
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   std::vector<BlockRef*> blockRefs;
   std::vector<bool> isHeapBlock;
-  for (const auto segmentId : segments) {
-    auto& segment = storage().segmentData(segmentId);
+  std::vector<ChunkData*> touchedChunks;
+  for (auto* chunkPtr : chunks) {
+    BOLT_CHECK_NOT_NULL(chunkPtr);
+    auto& chunk = *chunkPtr;
+    BOLT_CHECK(
+        !chunk.consumed,
+        "Cannot pin consumed chunk {} in segment {}",
+        chunk.meta.id,
+        chunk.meta.segmentId);
     size_t blockCount = 0;
-    for (const auto& chunk : segment.chunks) {
-      BOLT_CHECK(
-          !chunk.consumed,
-          "Cannot pin consumed chunk {} in segment {}",
-          chunk.meta.id,
-          segment.meta.id);
-      blockCount += 1 + chunk.heapBlocks.size();
+    if (!chunk.rowBlock.handle.valid()) {
+      ++blockCount;
     }
+    for (const auto& block : chunk.heapBlocks) {
+      if (!block.handle.valid()) {
+        ++blockCount;
+      }
+    }
+    if (blockCount == 0) {
+      continue;
+    }
+    touchedChunks.push_back(&chunk);
     blocks.reserve(blocks.size() + blockCount);
     blockRefs.reserve(blockRefs.size() + blockCount);
     isHeapBlock.reserve(isHeapBlock.size() + blockCount);
-    for (auto& chunk : segment.chunks) {
+    if (!chunk.rowBlock.handle.valid()) {
+      BOLT_CHECK_NOT_NULL(chunk.rowBlock.block);
       blocks.push_back(chunk.rowBlock.block);
       blockRefs.push_back(&chunk.rowBlock);
       isHeapBlock.push_back(false);
-      for (auto& block : chunk.heapBlocks) {
+    }
+    for (auto& block : chunk.heapBlocks) {
+      if (!block.handle.valid()) {
+        BOLT_CHECK_NOT_NULL(block.block);
         blocks.push_back(block.block);
         blockRefs.push_back(&block);
         isHeapBlock.push_back(true);
@@ -73,6 +102,9 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
   if (metrics != nullptr) {
     metrics->collectBlocksNs += nowNs() - collectStart;
     metrics->pinnedBlocks += blocks.size();
+  }
+  if (blocks.empty()) {
+    return;
   }
 
   const auto batchPinStart = metrics == nullptr ? 0 : nowNs();
@@ -88,15 +120,14 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
   std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
   for (size_t i = 0; i < pins.size(); ++i) {
     auto& block = *blockRefs[i];
-    auto* const newPtr = pins[i].Ptr();
+    block.handle = std::move(pins[i]);
+    auto* const newPtr = block.handle.Ptr();
     if (isHeapBlock[i]) {
-      // Heap payloads can be read back at a different address. Keep the old
-      // and new bases so StringView values stored in row blocks can be rebased.
-      const auto oldBase = reinterpret_cast<uintptr_t>(block.ptr);
+      // Heap payloads can be read back at a different address. The reliable
+      // old address lives in chunk.heapBases because flushed BlockRef::ptr is
+      // cleared when handles are released.
       const auto newBase = reinterpret_cast<uintptr_t>(newPtr);
-      if (oldBase != 0 && oldBase != newBase) {
-        heapRebases[block.id] = {oldBase, newBase};
-      }
+      heapRebases[block.id] = {0, newBase};
     }
     block.ptr = newPtr;
   }
@@ -104,59 +135,19 @@ std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinSegments(
     metrics->updateBlockPointersNs += nowNs() - updateStart;
   }
   if (!heapRebases.empty()) {
-    for (const auto segmentId : segments) {
-      rebaseStringViews(storage().segmentData(segmentId), heapRebases, metrics);
+    const auto rebaseStart = metrics == nullptr ? 0 : nowNs();
+    for (auto* chunk : touchedChunks) {
+      rebaseChunk(*chunk, heapRebases, metrics);
+    }
+    if (metrics != nullptr) {
+      metrics->rebaseStringViewsNs += nowNs() - rebaseStart;
     }
   }
-  return pins;
 }
 
-std::vector<memory::bm::BufferHandle> BmRowBlockLoader::pinChunk(
-    ChunkData& chunk) {
-  BOLT_CHECK(
-      !chunk.consumed,
-      "Cannot pin consumed chunk {} in segment {}",
-      chunk.meta.id,
-      chunk.meta.segmentId);
-  std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
-  std::vector<BlockRef*> blockRefs;
-  std::vector<bool> isHeapBlock;
-  blocks.reserve(1 + chunk.heapBlocks.size());
-  blockRefs.reserve(1 + chunk.heapBlocks.size());
-  isHeapBlock.reserve(1 + chunk.heapBlocks.size());
-  blocks.push_back(chunk.rowBlock.block);
-  blockRefs.push_back(&chunk.rowBlock);
-  isHeapBlock.push_back(false);
-  for (auto& block : chunk.heapBlocks) {
-    blocks.push_back(block.block);
-    blockRefs.push_back(&block);
-    isHeapBlock.push_back(true);
-  }
-
-  auto pins = bufferManager_->BatchPin(
-      std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
-          blocks.data(), blocks.size()));
-  BOLT_DCHECK_EQ(pins.size(), blockRefs.size());
-
-  std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>> heapRebases;
-  for (size_t i = 0; i < pins.size(); ++i) {
-    auto& block = *blockRefs[i];
-    auto* const newPtr = pins[i].Ptr();
-    if (isHeapBlock[i]) {
-      // Window reads pin one chunk at a time. StringViews in the row block may
-      // still point at the heap base recorded for this chunk before the block was
-      // unpinned. Always pass the pinned heap base to rebaseChunk(); it decides
-      // from chunk-level HeapBaseRef metadata whether row values need rebasing.
-      const auto oldBase = reinterpret_cast<uintptr_t>(block.ptr);
-      const auto newBase = reinterpret_cast<uintptr_t>(newPtr);
-      heapRebases[block.id] = {oldBase, newBase};
-    }
-    block.ptr = newPtr;
-  }
-  if (!heapRebases.empty()) {
-    rebaseChunk(chunk, heapRebases, nullptr);
-  }
-  return pins;
+void BmRowBlockLoader::loadChunk(ChunkData& chunk) {
+  ChunkData* chunkPtr = &chunk;
+  loadChunks({&chunkPtr, 1}, nullptr);
 }
 
 void BmRowBlockLoader::rebaseStringViews(

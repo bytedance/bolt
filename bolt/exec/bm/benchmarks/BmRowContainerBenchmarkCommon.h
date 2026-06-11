@@ -90,12 +90,12 @@ struct OldSpillReadMetrics {
 
 struct BmSpillReadMetrics {
   uint64_t beginNs{0};
-  uint64_t tryLoadAllNs{0};
+  uint64_t listRowsNs{0};
   uint64_t windowLoadNs{0};
   uint64_t rows{0};
   uint64_t rowIds{0};
   uint64_t windows{0};
-  LoadAllResult result{LoadAllResult::kNeedWindowRead};
+  bool resultPointers{false};
   BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
   memory::bm::DiskIoSchedulerStats ioStatsDelta;
