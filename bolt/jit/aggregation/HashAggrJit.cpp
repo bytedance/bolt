@@ -1049,22 +1049,6 @@ bool genExtractIR(
   auto* loop = llvm::BasicBlock::Create(context, "loop", func);
   auto* end = llvm::BasicBlock::Create(context, "end", func);
   builder.SetInsertPoint(entry);
-  for (auto i = 0; i < slots.size(); ++i) {
-    if (slots[i].desc.ops == nullptr || slots[i].desc.ops->canExtract == nullptr ||
-        !slots[i].desc.ops->canExtract(slots[i], partialOutput)) {
-      continue;
-    }
-    auto* outputAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
-    auto* outputRuntime = builder.CreateLoad(i8PtrTy, outputAddr);
-    std::unique_ptr<OutputAdapterCodegen> output;
-    if (usesRowOutputRuntime(slots[i], partialOutput)) {
-      output = std::make_unique<RowOutputAdapterCodegen>(codegen, outputRuntime);
-    } else {
-      output =
-          std::make_unique<ScalarOutputAdapterCodegen>(codegen, outputRuntime);
-    }
-    output->resize(numGroups);
-  }
   builder.CreateCondBr(builder.CreateICmpSLE(numGroups, builder.getInt32(0)), end, loop);
 
   builder.SetInsertPoint(loop);
