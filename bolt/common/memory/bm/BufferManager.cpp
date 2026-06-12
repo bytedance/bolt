@@ -181,6 +181,52 @@ void BufferManager::SpillBlocks(
           << " bm=" << debugString();
 }
 
+bool BufferManager::HasSpillBacking(
+    const std::shared_ptr<BlockHandle>& block) const {
+  BOLT_CHECK_NOT_NULL(block);
+  BOLT_CHECK_NOT_NULL(block->memory_);
+  return block->memory_->segment.has_value();
+}
+
+bool BufferManager::IsDirty(const std::shared_ptr<BlockHandle>& block) const {
+  BOLT_CHECK_NOT_NULL(block);
+  BOLT_CHECK_NOT_NULL(block->memory_);
+  return block->memory_->dirty;
+}
+
+void BufferManager::MarkDirty(const std::shared_ptr<BlockHandle>& block) {
+  BOLT_CHECK_NOT_NULL(block);
+  BOLT_CHECK_NOT_NULL(block->memory_);
+  auto& memory = *block->memory_;
+  BOLT_CHECK(
+      memory.state == BlockMemoryState::kInMemory,
+      "BM can only mark resident blocks dirty, block_id={}",
+      memory.id);
+  memory.dirty = true;
+}
+
+uint64_t BufferManager::DiscardCleanResidentBlocks(
+    std::span<const std::shared_ptr<BlockHandle>> blocks) {
+  uint64_t reclaimed = 0;
+  for (const auto& block : blocks) {
+    if (!block || !block->memory_) {
+      continue;
+    }
+    auto& memory = *block->memory_;
+    if (memory.state != BlockMemoryState::kInMemory || memory.pinCount != 0 ||
+        !memory.payload.has_value() || !memory.segment.has_value() ||
+        memory.dirty) {
+      continue;
+    }
+
+    accounting_->OnCleanResidentDiscarded(memory);
+    auto payload = BlockStateMachine::DiscardResidentWithBacking(memory);
+    reclaimed += memory.size;
+  }
+  accounting_->RecordReclaimedBytes(reclaimed);
+  return reclaimed;
+}
+
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   accounting_->RecordReclaim();
   VLOG(1) << "BM Reclaim begin"
@@ -293,9 +339,7 @@ BufferHandle BufferManager::PinPrefetching(
   }
 
   accounting_->OnReadCompleted(memory, read);
-  auto oldSegment =
-      BlockStateMachine::CompleteRead(memory, std::move(read.io.buffer));
-  oldSegment.FreeOrFatal("BufferManager::PinPrefetching");
+  BlockStateMachine::CompleteReadKeepBacking(memory, std::move(read.io.buffer));
   return MakeHandle(block);
 }
 

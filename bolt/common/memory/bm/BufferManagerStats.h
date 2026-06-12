@@ -111,6 +111,7 @@ class BufferManagerStatsCollector {
   void OnSpillCompleted(
       const BlockMemory& memory,
       const SpillWriteResult& write);
+  void OnCleanResidentDiscarded(const BlockMemory& memory);
   void OnBlockMemoryDestroy(const BlockMemory& memory) noexcept;
 
  private:
