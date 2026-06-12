@@ -17,7 +17,7 @@
 #include <algorithm>
 
 #include "bolt/functions/sparksql/DecimalUtil.h"
-#include "bolt/jit/aggregation/HashAggrJitTypes.h"
+#include "bolt/jit/aggregation/HashAggrJitDecimalState.h"
 #include "bolt/type/DecimalUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"

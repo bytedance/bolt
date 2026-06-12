@@ -8,6 +8,7 @@
 #include <cstddef>
 
 #include "bolt/jit/aggregation/HashAggrJit.h"
+#include "bolt/jit/aggregation/HashAggrJitDecimalState.h"
 
 namespace bytedance::bolt::jit {
 

@@ -2,7 +2,6 @@
 
 #ifdef ENABLE_BOLT_JIT
 
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -17,21 +16,6 @@
 // table, HashAggrJitCodegen, HashAggrJitChunk) live in HashAggrJit.h.
 
 namespace bytedance::bolt::jit {
-
-// JIT-internal accumulator layouts for decimal sum/avg. Shared between the JIT
-// codegen runtime helpers and the extract runtime helpers (which live in a
-// different translation unit and need DecimalUtil).
-struct JitDecimalSumState {
-  bytedance::bolt::int128_t sum{0};
-  int64_t overflow{0};
-  bool isEmpty{true};
-};
-
-struct JitDecimalAvgState {
-  bytedance::bolt::int128_t sum{0};
-  int64_t count{0};
-  int64_t overflow{0};
-};
 
 // Runtime scalar input consumed by JIT add_dense functions. 'indices' maps the
 // add_dense row to the scalar value row. The owner decides the indexing
