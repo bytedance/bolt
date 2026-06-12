@@ -120,12 +120,7 @@ llvm::FunctionCallee declareFunction(
 void ensureBuiltinDeclarations(llvm::Module& module) {
   auto& context = module.getContext();
   auto* i8Ty = llvm::Type::getInt8Ty(context);
-  auto* i16Ty = llvm::Type::getInt16Ty(context);
   auto* i32Ty = llvm::Type::getInt32Ty(context);
-  auto* i64Ty = llvm::Type::getInt64Ty(context);
-  auto* i128Ty = llvm::Type::getInt128Ty(context);
-  auto* floatTy = llvm::Type::getFloatTy(context);
-  auto* doubleTy = llvm::Type::getDoubleTy(context);
   auto* voidTy = llvm::Type::getVoidTy(context);
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
 
