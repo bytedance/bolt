@@ -7,11 +7,20 @@
 
 #include "bolt/jit/aggregation/HashAggrJit.h"
 
+#include <type_traits>
+
 namespace bytedance::bolt::jit {
 
 namespace {
 
-constexpr int32_t kAvgCountOffset = offsetof(JitAvgState, count);
+struct AvgAccumulatorLayout {
+  double sum;
+  int64_t count;
+};
+
+static_assert(std::is_standard_layout_v<AvgAccumulatorLayout>);
+
+constexpr int32_t kAvgCountOffset = offsetof(AvgAccumulatorLayout, count);
 
 void compileAvgInitGroup(
     HashAggrJitCodegen& codegen,
@@ -93,7 +102,7 @@ void compileAvgAddIntermediateResults(
 }
 
 bool canCompileAvgExtract(const HashAggrJitSlot& slot, bool) {
-  // Only double avg (JitAvgState) is supported.
+  // Only double avg accumulator layout is supported.
   return slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
 }
 

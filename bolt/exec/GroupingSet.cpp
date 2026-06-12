@@ -123,21 +123,6 @@ bool fillHashAggrJitRowInputRuntime(
     DecodedVector& decoded,
     const SelectivityVector& rows,
     const jit::HashAggrJitSlot& slot) {
-  // The raw row-field fast path applies to merge inputs whose intermediate
-  // representation is ROW(field0, field1): avg's ROW(sum, count) and decimal
-  // sum's ROW(sum, isEmpty). For both, field0 is the running sum read on the
-  // hot merge path; populating its raw pointer lets generated IR load it
-  // directly instead of calling the per-row jit_GetDecodedRowField* helper
-  // (which rebuilds a field DecodedVector on every call).
-  if (!slot.desc.mergeInput) {
-    return false;
-  }
-  const bool isAvg = slot.desc.kind == jit::HashAggrJitKind::Avg;
-  const bool isDecimalSum =
-      slot.desc.kind == jit::HashAggrJitKind::Sum && slot.desc.decimal;
-  if (!isAvg && !isDecimalSum) {
-    return false;
-  }
   const auto* base = decoded.base();
   if (base == nullptr || base->encoding() != VectorEncoding::Simple::ROW) {
     return false;
@@ -1288,19 +1273,11 @@ void GroupingSet::runHashAggrJitExtractChunks(
         skipReason = "distinct/mask/sortingKeys not supported";
         break;
       }
-      auto& aggregateVector = result->childAt(slot.aggregateIndex + aggregateOutputOffset);
-      const auto expectedEncoding =
-          (isPartial_ && slot.desc.kind == jit::HashAggrJitKind::Avg)
-          ? VectorEncoding::Simple::ROW
-          : VectorEncoding::Simple::FLAT;
-      if (aggregateVector->encoding() != expectedEncoding) {
-        canRunChunk = false;
-        skipReason = "unexpected result vector encoding";
-        break;
-      }
       // Prepare stable raw output pointers after resizing. The JIT extract
       // function still receives char** for ABI compatibility, but each element
       // now points to HashAggrJitOutputRuntime rather than BaseVector directly.
+      auto& aggregateVector =
+          result->childAt(slot.aggregateIndex + aggregateOutputOffset);
       aggregateVector->resize(groups.size());
       if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
         hashAggrJitOutputRuntimes_[slotIndex].scalar =
