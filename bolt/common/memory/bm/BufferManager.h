@@ -45,6 +45,11 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
       std::span<const std::shared_ptr<BlockHandle>> blocks);
   void Prefetch(std::span<const std::shared_ptr<BlockHandle>> blocks);
   void SpillBlocks(std::span<const std::shared_ptr<BlockHandle>> blocks);
+  bool HasSpillBacking(const std::shared_ptr<BlockHandle>& block) const;
+  bool IsDirty(const std::shared_ptr<BlockHandle>& block) const;
+  void MarkDirty(const std::shared_ptr<BlockHandle>& block);
+  uint64_t DiscardCleanResidentBlocks(
+      std::span<const std::shared_ptr<BlockHandle>> blocks);
 
   bool MaybeReserve(size_t size);
   void ReleaseUnusedReservation();

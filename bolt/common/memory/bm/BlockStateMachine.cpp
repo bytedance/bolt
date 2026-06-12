@@ -52,8 +52,20 @@ ManagedFileSegment BlockStateMachine::CompleteRead(
   memory.payload = std::move(payload);
   memory.state = BlockMemoryState::kInMemory;
   memory.pinCount = 1;
+  memory.dirty = false;
   ++memory.evictionSequence;
   return oldSegment;
+}
+
+void BlockStateMachine::CompleteReadKeepBacking(
+    BlockMemory& memory,
+    IoBuffer payload) {
+  BOLT_CHECK(memory.segment.has_value());
+  memory.payload = std::move(payload);
+  memory.state = BlockMemoryState::kInMemory;
+  memory.pinCount = 1;
+  memory.dirty = false;
+  ++memory.evictionSequence;
 }
 
 IoBuffer BlockStateMachine::BeginSpill(BlockMemory& memory) {
@@ -67,6 +79,20 @@ IoBuffer BlockStateMachine::BeginSpill(BlockMemory& memory) {
   return payload;
 }
 
+IoBuffer BlockStateMachine::DiscardResidentWithBacking(BlockMemory& memory) {
+  BOLT_CHECK(memory.state == BlockMemoryState::kInMemory);
+  BOLT_CHECK_EQ(memory.pinCount, 0);
+  BOLT_CHECK(memory.payload.has_value());
+  BOLT_CHECK(memory.segment.has_value());
+  BOLT_CHECK(!memory.dirty);
+
+  auto payload = std::move(*memory.payload);
+  memory.payload.reset();
+  memory.state = BlockMemoryState::kSpilled;
+  ++memory.evictionSequence;
+  return payload;
+}
+
 void BlockStateMachine::RollbackSpill(BlockMemory& memory, IoBuffer payload) {
   memory.payload = std::move(payload);
   memory.state = BlockMemoryState::kInMemory;
@@ -77,6 +103,7 @@ void BlockStateMachine::CompleteSpill(
     ManagedFileSegment segment) {
   memory.segment = std::move(segment);
   memory.state = BlockMemoryState::kSpilled;
+  memory.dirty = false;
   ++memory.evictionSequence;
 }
 

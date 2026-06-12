@@ -29,6 +29,10 @@ struct BlockMemory {
   std::weak_ptr<BufferManager> owner;
   BlockMemoryState state{BlockMemoryState::kInMemory};
   uint32_t pinCount{0};
+  // True if resident payload may be newer than the spill backing. Newly
+  // allocated blocks are dirty until their first successful spill. Blocks read
+  // from spill backing are clean until a mutable caller explicitly marks them.
+  bool dirty{true};
   // Generation token for lazy eviction queue entries. It changes whenever an
   // older queued entry should no longer represent this block's evictability.
   uint64_t evictionSequence{0};

@@ -12,7 +12,9 @@ class BlockStateMachine {
   static SpillReadResult ConsumePrefetch(BlockMemory& memory);
   static void MarkReadFailed(BlockMemory& memory);
   static ManagedFileSegment CompleteRead(BlockMemory& memory, IoBuffer payload);
+  static void CompleteReadKeepBacking(BlockMemory& memory, IoBuffer payload);
   static IoBuffer BeginSpill(BlockMemory& memory);
+  static IoBuffer DiscardResidentWithBacking(BlockMemory& memory);
   static void RollbackSpill(BlockMemory& memory, IoBuffer payload);
   static void CompleteSpill(BlockMemory& memory, ManagedFileSegment segment);
 };

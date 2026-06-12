@@ -316,6 +316,27 @@ void BufferManagerStatsCollector::OnSpillCompleted(
   ++tagStats.spillWriteCount;
 }
 
+void BufferManagerStatsCollector::OnCleanResidentDiscarded(
+    const BlockMemory& memory) {
+  SubtractOrFatal(
+      stats_.unpinnedResidentBytes,
+      memory.size,
+      "unpinnedResidentBytes",
+      memory);
+  stats_.spilledBytes += memory.size;
+
+  auto& tagStats = MutableTagStats(memory.tag);
+  SubtractOrFatal(
+      tagStats.residentBytes, memory.size, "tag.residentBytes", memory);
+  SubtractOrFatal(
+      tagStats.unpinnedResidentBytes,
+      memory.size,
+      "tag.unpinnedResidentBytes",
+      memory);
+  tagStats.spilledBytes += memory.size;
+  tagStats.reclaimedBytes += memory.size;
+}
+
 void BufferManagerStatsCollector::OnBlockMemoryDestroy(
     const BlockMemory& memory) noexcept {
   SubtractOrFatal(stats_.liveBlocks, 1, "liveBlocks", memory);
