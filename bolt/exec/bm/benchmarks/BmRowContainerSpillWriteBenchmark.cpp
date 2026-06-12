@@ -124,7 +124,7 @@ void spillWriteBm(
     const auto statsBefore = context.bufferManager->stats();
     suspender.dismiss();
     const auto flushStart = benchmarkNowNs();
-    const auto segment = stored.container->flushActiveSegment();
+    const auto segment = stored.container->spillActiveSegment();
     flushNs += benchmarkNowNs() - flushStart;
     folly::doNotOptimizeAway(segment);
     suspender.rehire();

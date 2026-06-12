@@ -61,6 +61,7 @@ using ChunkId = uint32_t;
 
 constexpr BlockId kNoBlock = std::numeric_limits<BlockId>::max();
 constexpr PartitionId kDefaultPartition = 0;
+constexpr uint64_t kUnlimitedBytes = std::numeric_limits<uint64_t>::max();
 
 enum class SegmentState {
   // The segment is still accepting writes and all pointers are resident.
@@ -85,7 +86,7 @@ struct RowId {
 };
 
 struct BulkLoadMetrics {
-  // Time spent estimating bytes that must be pinned for listRows().
+  // Time spent estimating bytes that must be pinned for bulk/window reads.
   uint64_t estimateBytesNs{0};
   // Time spent asking BufferManager to reserve estimated memory.
   uint64_t reserveNs{0};
@@ -103,7 +104,7 @@ struct BulkLoadMetrics {
   uint64_t appendRowIdsNs{0};
   // Estimated bytes for the full working set.
   uint64_t estimatedBytes{0};
-  // Number of blocks pinned by listRows()/window reads.
+  // Number of blocks pinned by bulk/window reads.
   uint64_t pinnedBlocks{0};
   // Number of StringViews whose pointer was rebased.
   uint64_t rebasedStringViews{0};

@@ -42,11 +42,11 @@ BmSegmentCollection::BmSegmentCollection(
   BOLT_CHECK_NOT_NULL(layout_);
 }
 
-SegmentId BmSegmentCollection::flushActiveSegment() {
-  return flushActivePartitionSegment(kDefaultPartition);
+SegmentId BmSegmentCollection::spillActiveSegment() {
+  return spillActivePartitionSegment(kDefaultPartition);
 }
 
-SegmentId BmSegmentCollection::flushActivePartitionSegment(
+SegmentId BmSegmentCollection::spillActivePartitionSegment(
     PartitionId partition) {
   return finalizeAndFlush(partition);
 }

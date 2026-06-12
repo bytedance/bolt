@@ -531,23 +531,54 @@ void extractOldRows(
   }
 }
 
+namespace {
+
+void extractBmRowsResidentImpl(
+    BmRowContainer& container,
+    const char* const* inputRows,
+    size_t inputRowCount,
+    const BenchmarkOptions& options,
+    memory::MemoryPool* pool) {
+  const auto types = columnTypes(options.dataset);
+  for (size_t offset = 0; offset < inputRowCount;) {
+    const auto batchSize = static_cast<vector_size_t>(
+        std::min<size_t>(options.batchRows, inputRowCount - offset));
+    for (auto column = 0; column < types.size(); ++column) {
+      auto result = makeResultVector(types[column], batchSize, pool);
+      container.extractColumnResident(
+          inputRows + offset, batchSize, column, result);
+      folly::doNotOptimizeAway(result);
+    }
+    offset += batchSize;
+  }
+}
+
+} // namespace
+
 void extractBmRowsResident(
     BmRowContainer& container,
     const std::vector<char*>& inputRows,
     const BenchmarkOptions& options,
     memory::MemoryPool* pool) {
-  const auto types = columnTypes(options.dataset);
-  for (size_t offset = 0; offset < inputRows.size();) {
-    const auto batchSize = static_cast<vector_size_t>(
-        std::min<size_t>(options.batchRows, inputRows.size() - offset));
-    for (auto column = 0; column < types.size(); ++column) {
-      auto result = makeResultVector(types[column], batchSize, pool);
-      container.extractColumnResident(
-          inputRows.data() + offset, batchSize, column, result);
-      folly::doNotOptimizeAway(result);
-    }
-    offset += batchSize;
-  }
+  extractBmRowsResidentImpl(
+      container,
+      inputRows.data(),
+      inputRows.size(),
+      options,
+      pool);
+}
+
+void extractBmRowsResident(
+    BmRowContainer& container,
+    const std::vector<const char*>& inputRows,
+    const BenchmarkOptions& options,
+    memory::MemoryPool* pool) {
+  extractBmRowsResidentImpl(
+      container,
+      inputRows.data(),
+      inputRows.size(),
+      options,
+      pool);
 }
 
 void readBmSpill(
@@ -556,15 +587,15 @@ void readBmSpill(
     const BenchmarkOptions& options,
     BmSpillReadMetrics* metrics) {
   const auto beginStart = benchmarkNowNs();
-  container.canLoadAllSegments({&segment, 1});
+  container.canBulkRead({&segment, 1});
   if (metrics != nullptr) {
     metrics->beginNs += benchmarkNowNs() - beginStart;
   }
 
   const auto listRowsStart = benchmarkNowNs();
   const auto totalRows = rowCount(options);
-  auto rows = container.listRows(
-      {&segment, 1}, metrics == nullptr ? nullptr : &metrics->bulkLoad);
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  auto rows = session.loadRows(metrics == nullptr ? nullptr : &metrics->bulkLoad);
   if (metrics != nullptr) {
     metrics->listRowsNs += benchmarkNowNs() - listRowsStart;
     metrics->resultPointers = true;
@@ -609,7 +640,7 @@ BmSpillData spillBmRows(
   auto stored = storeBmRows(context, options, false);
   BmSpillData spill;
   spill.container = std::move(stored.container);
-  spill.segment = spill.container->flushActiveSegment();
+  spill.segment = spill.container->spillActiveSegment();
   return spill;
 }
 

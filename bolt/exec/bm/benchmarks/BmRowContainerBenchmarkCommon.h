@@ -204,6 +204,12 @@ void extractBmRowsResident(
     const BenchmarkOptions& options,
     memory::MemoryPool* pool);
 
+void extractBmRowsResident(
+    BmRowContainer& container,
+    const std::vector<const char*>& rows,
+    const BenchmarkOptions& options,
+    memory::MemoryPool* pool);
+
 void readBmSpill(
     BmRowContainer& container,
     SegmentId segment,

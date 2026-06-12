@@ -44,9 +44,9 @@ struct ChunkData {
   // never cross chunk boundaries: cutting a new row block/chunk also cuts heap
   // reuse, which keeps chunk ownership and window read pinning local.
   std::vector<BlockRef> heapBlocks;
-  // Heap base addresses observed by StringView payloads in this chunk. They
-  // are used to rebase non-inline StringViews after BufferManager pins blocks
-  // at a different address.
+  // Heap base addresses encoded in spilled row-block StringViews. Read-only
+  // window reads keep this as backing metadata, so a chunk's row block and heap
+  // blocks must be evicted together.
   std::vector<HeapBaseRef> heapBases;
   // Consuming merge reads can drop blocks after this chunk has been read. The
   // metadata stays in place so rowNumber/chunk indexing is not disturbed, but
@@ -78,7 +78,7 @@ struct SegmentData {
 //       ChunkData
 //         rowBlock      fixed-width rows for one row block
 //         heapBlocks    variable-width payload blocks referenced by those rows
-//         heapBases     old/new heap base metadata for StringView rebasing
+//         heapBases     spill-backing heap base metadata for StringView rebasing
 //
 // A chunk is deliberately anchored to one row block and may own several heap
 // blocks. This differs from DuckDB's TupleDataChunk/ChunkPart model where a
@@ -98,8 +98,8 @@ class BmSegmentCollection {
       uint32_t rowBlockSize,
       uint32_t heapBlockSize);
 
-  SegmentId flushActiveSegment();
-  SegmentId flushActivePartitionSegment(PartitionId partition);
+  SegmentId spillActiveSegment();
+  SegmentId spillActivePartitionSegment(PartitionId partition);
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   SegmentState segmentState(SegmentId segment) const;
