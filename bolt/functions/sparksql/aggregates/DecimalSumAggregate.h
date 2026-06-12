@@ -95,6 +95,9 @@ class DecimalSumAggregate : public exec::Aggregate {
         .countStar = false,
         .mergeInput = !context.isRawInput,
         .decimal = true,
+        .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
+                                         : jit::HashAggrJitRuntimeShape::Row,
+        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .precision = resultPrecision,
         .scale = resultScale,
         .auxPrecision = 0,

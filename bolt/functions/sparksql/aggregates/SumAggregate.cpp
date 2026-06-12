@@ -80,6 +80,8 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
         .countStar = false,
         .mergeInput = !context.isRawInput,
         .decimal = false,
+        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
+        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .precision = 0,
         .scale = 0,
         .auxPrecision = 0,

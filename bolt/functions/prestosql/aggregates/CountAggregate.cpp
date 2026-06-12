@@ -87,6 +87,8 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
         .countStar = context.isCountStar(),
         .mergeInput = !context.isRawInput,
         .decimal = false,
+        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
+        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .precision = 0,
         .scale = 0,
         .auxPrecision = 0,

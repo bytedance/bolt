@@ -129,7 +129,7 @@ bool fillHashAggrJitRowInputRuntime(
   // hot merge path; populating its raw pointer lets generated IR load it
   // directly instead of calling the per-row jit_GetDecodedRowField* helper
   // (which rebuilds a field DecodedVector on every call).
-  if (!slot.desc.mergeInput) {
+  if (slot.desc.inputShape != jit::HashAggrJitRuntimeShape::Row) {
     return false;
   }
   const bool isAvg = slot.desc.kind == jit::HashAggrJitKind::Avg;
@@ -1198,9 +1198,8 @@ void GroupingSet::runHashAggrJitChunks(
       }
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
-      const bool usesRowInputRuntime = slot.desc.mergeInput &&
-          (slot.desc.kind == jit::HashAggrJitKind::Avg ||
-           (slot.desc.kind == jit::HashAggrJitKind::Sum && slot.desc.decimal));
+      const bool usesRowInputRuntime =
+          slot.desc.inputShape == jit::HashAggrJitRuntimeShape::Row;
       if (usesRowInputRuntime) {
         if (!fillHashAggrJitRowInputRuntime(
                 hashAggrJitInputRuntimes_[slotIndex],
@@ -1291,7 +1290,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
       auto& aggregateVector =
           result->childAt(slot.aggregateIndex + aggregateOutputOffset);
       const auto expectedEncoding =
-          (isPartial_ && slot.desc.kind == jit::HashAggrJitKind::Avg)
+          slot.desc.outputShape == jit::HashAggrJitRuntimeShape::Row
           ? VectorEncoding::Simple::ROW
           : VectorEncoding::Simple::FLAT;
       if (aggregateVector->encoding() != expectedEncoding) {
@@ -1310,8 +1309,9 @@ void GroupingSet::runHashAggrJitExtractChunks(
                     aggregateVector.get(), slot.desc.accumulatorKind),
                 .nulls = aggregateVector->mutableRawNulls(),
                 .vector = aggregateVector.get()};
-      } else if (aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
-                 slot.desc.kind == jit::HashAggrJitKind::Avg) {
+      } else if (
+          aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
+          slot.desc.outputShape == jit::HashAggrJitRuntimeShape::Row) {
         if (!fillHashAggrJitRowOutputRuntime(
                 hashAggrJitOutputRuntimes_[slotIndex],
                 hashAggrJitRowOutputChildren_[slotIndex],
@@ -1319,7 +1319,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
                 aggregateVector.get(),
                 slot)) {
           canRunChunk = false;
-          skipReason = "partial avg row fields are not flat";
+          skipReason = "ROW output runtime requires flat scalar row children";
           break;
         }
       }

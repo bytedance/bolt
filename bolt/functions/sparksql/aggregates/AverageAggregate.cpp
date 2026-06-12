@@ -75,6 +75,10 @@ class AverageAggregate
           .countStar = false,
           .mergeInput = true,
           .decimal = false,
+          .inputShape = jit::HashAggrJitRuntimeShape::Row,
+          .outputShape = context.isPartialOutput
+              ? jit::HashAggrJitRuntimeShape::Row
+              : jit::HashAggrJitRuntimeShape::Scalar,
           .precision = 0,
           .scale = 0,
           .auxPrecision = 0,
@@ -93,6 +97,10 @@ class AverageAggregate
         .countStar = false,
         .mergeInput = false,
         .decimal = false,
+        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
+        .outputShape = context.isPartialOutput
+            ? jit::HashAggrJitRuntimeShape::Row
+            : jit::HashAggrJitRuntimeShape::Scalar,
         .precision = 0,
         .scale = 0,
         .auxPrecision = 0,
@@ -189,6 +197,11 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
         .countStar = false,
         .mergeInput = !context.isRawInput,
         .decimal = true,
+        .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
+                                         : jit::HashAggrJitRuntimeShape::Row,
+        .outputShape = context.isPartialOutput
+            ? jit::HashAggrJitRuntimeShape::Row
+            : jit::HashAggrJitRuntimeShape::Scalar,
         .precision = sumPrecision,
         .scale = sumScale,
         .auxPrecision = resultPrecision,

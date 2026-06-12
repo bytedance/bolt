@@ -858,14 +858,22 @@ void HashAggrJitCodegen::emitDecimalAddWithOverflow(
 
 namespace {
 
+char hashAggrJitRuntimeShapeName(HashAggrJitRuntimeShape shape) {
+  switch (shape) {
+    case HashAggrJitRuntimeShape::Scalar:
+      return 's';
+    case HashAggrJitRuntimeShape::Row:
+      return 'r';
+  }
+  return 'u';
+}
+
 bool usesRowInputRuntime(const HashAggrJitSlot& slot) {
-  return slot.desc.mergeInput &&
-      (slot.desc.kind == HashAggrJitKind::Avg ||
-       (slot.desc.kind == HashAggrJitKind::Sum && slot.desc.decimal));
+  return slot.desc.inputShape == HashAggrJitRuntimeShape::Row;
 }
 
 bool usesRowOutputRuntime(const HashAggrJitSlot& slot, bool partialOutput) {
-  return partialOutput && slot.desc.kind == HashAggrJitKind::Avg;
+  return partialOutput && slot.desc.outputShape == HashAggrJitRuntimeShape::Row;
 }
 
 bool genAddDenseIR(
@@ -1114,7 +1122,9 @@ HashAggrJitChunk::HashAggrJitChunk(
         << slot.offset << "n" << slot.nullByte << "m"
         << static_cast<int>(slot.nullMask) << (slot.desc.countStar ? "s" : "x")
         << (slot.desc.mergeInput ? "g" : "r")
-        << (slot.desc.decimal ? "d" : "n");
+        << (slot.desc.decimal ? "d" : "n") << "i"
+        << hashAggrJitRuntimeShapeName(slot.desc.inputShape) << "o"
+        << hashAggrJitRuntimeShapeName(slot.desc.outputShape);
   }
   functionName_ = out.str();
   initFunctionName_ = functionName_ + "_init";
@@ -1185,13 +1195,15 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 
 std::string HashAggrJitDescriptor::signature() const {
   return fmt::format(
-      "{}_{}_{}_{}_{}_{}",
+      "{}_{}_{}_{}_{}_{}_{}_{}",
       ops != nullptr ? ops->id : "unknown",
       static_cast<int>(kind),
       hashAggrJitValueKindName(inputKind),
       hashAggrJitValueKindName(accumulatorKind),
       mergeInput,
-      decimal);
+      decimal,
+      hashAggrJitRuntimeShapeName(inputShape),
+      hashAggrJitRuntimeShapeName(outputShape));
 }
 
 bool HashAggrJitChunk::canExtract() const {

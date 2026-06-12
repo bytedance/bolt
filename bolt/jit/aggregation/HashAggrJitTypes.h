@@ -124,6 +124,11 @@ enum class HashAggrJitValueKind : uint8_t {
   Double,
 };
 
+enum class HashAggrJitRuntimeShape : uint8_t {
+  Scalar,
+  Row,
+};
+
 // Forward declaration: the codegen function-pointer table is defined in
 // HashAggrJit.h (it references llvm:: types). Descriptors only hold a pointer
 // to it, so a forward declaration is enough here and keeps this header
@@ -137,6 +142,8 @@ struct HashAggrJitDescriptor {
   bool countStar{false};
   bool mergeInput{false};
   bool decimal{false};
+  HashAggrJitRuntimeShape inputShape{HashAggrJitRuntimeShape::Scalar};
+  HashAggrJitRuntimeShape outputShape{HashAggrJitRuntimeShape::Scalar};
   // Result decimal precision/scale, used by decimal extract overflow checks.
   // Only meaningful when decimal == true.
   int32_t precision{0};
