@@ -31,10 +31,10 @@ FOLLY_ALWAYS_INLINE std::vector<HeapRebaseRange> collectRebaseRanges(
       continue;
     }
     const auto oldBase = heapBase.baseAddress;
-    if (oldBase == 0) {
-      heapBase.baseAddress = rebase->second.second;
-      continue;
-    }
+    BOLT_CHECK_NE(
+        oldBase,
+        0,
+        "StringView rebase requires a recorded spill-backing heap base");
     if (oldBase == rebase->second.second) {
       continue;
     }
@@ -119,13 +119,6 @@ FOLLY_ALWAYS_INLINE void rebaseMultipleRanges(
   }
 }
 
-FOLLY_ALWAYS_INLINE void refreshHeapBases(
-    const std::vector<HeapRebaseRange>& ranges) {
-  for (auto& range : ranges) {
-    range.heapBase->baseAddress = range.newBase;
-  }
-}
-
 FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
     ChunkData& chunk,
     const BmRowLayout& layout,
@@ -144,14 +137,14 @@ FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
   } else {
     rebaseMultipleRanges(chunk, layout, rowStride, ranges, metrics);
   }
-  refreshHeapBases(ranges);
 }
 
 } // namespace detail
 
 // Rewrites non-inline StringView payload pointers after BufferManager pins heap
-// blocks at new virtual addresses. The caller owns block pinning; this helper
-// only understands row layout and chunk-local heap base metadata.
+// blocks at new virtual addresses. heapBases deliberately stays at the spill
+// backing base, not the resident base. ReadOnlyWindow eviction must therefore
+// evict the row block and all heap blocks of a chunk together.
 void rebaseStringViewsInChunk(
     ChunkData& chunk,
     const BmRowLayout& layout,

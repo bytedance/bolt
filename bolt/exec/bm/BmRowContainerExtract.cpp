@@ -8,7 +8,7 @@
 namespace bytedance::bolt::exec::bm {
 
 void BmRowContainer::extractColumnResident(
-    char* const* rows,
+    const char* const* rows,
     int32_t numRows,
     int32_t column,
     const VectorPtr& result,
@@ -26,7 +26,7 @@ void BmRowContainer::extractColumnResident(
 
 template <TypeKind Kind>
 void BmRowContainer::extractColumnTyped(
-    char* const* rows,
+    const char* const* rows,
     int32_t numRows,
     const ColumnLayout& column,
     const VectorPtr& result,

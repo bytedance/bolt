@@ -15,10 +15,10 @@
 `BmRowContainer` 是 row-based 临时数据容器。
 
 - 写入阶段优先在内存中追加 row。
-- 上层感知内存压力后调用 flush，把当前数据交给 BufferManager 管理。
-- flush 返回 `SegmentId`。后续读回、释放、partition 管理都以 `SegmentId` 为单位。
+- 上层感知内存压力后调用 spill，把当前 active segment 交给 BufferManager 管理。
+- spill 返回 `SegmentId`。后续读回、释放、partition 管理都以 `SegmentId` 为单位。
 - resident 阶段使用 `char*` row 指针；不能全量 resident 时使用 `RowId`，再交给
-  `WindowReadSession` 批量转成 resident 指针。
+  `ReadOnlyWindowReadSession` 批量转成只读 resident 指针。
 
 ## 创建
 
@@ -53,7 +53,7 @@ rows.store(context, decodedPayload, sourceIndex, payloadColumn);
 char* row = context.row();
 ```
 
-`RowWriteContext` 只描述当前 row 的写入位置，不要跨 container、跨 flush 或异步流程保存。
+`RowWriteContext` 只描述当前 row 的写入位置，不要跨 container、跨 spill 或异步流程保存。
 
 ## Resident 指针访问
 
@@ -70,24 +70,24 @@ rows.extractColumnResident(
     outputVector);
 ```
 
-flush 后旧指针不再有效。读回后需要重新通过 `listRows()`、`WindowReadSession` 或
-`MergeReadSession` 获取指针。
+spill 后旧指针不再有效。读回后需要重新通过 `BulkReadSession`、
+`ReadOnlyWindowReadSession` 或 `MergeReadSession` 获取指针。
 
-## Flush
+## Spill
 
 默认 partition：
 
 ```cpp
-SegmentId segment = rows.flushActiveSegment();
+SegmentId segment = rows.spillActiveSegment();
 ```
 
 多 partition：
 
 ```cpp
-SegmentId segment = rows.flushActivePartitionSegment(partitionId);
+SegmentId segment = rows.spillActivePartitionSegment(partitionId);
 ```
 
-同一个 partition 可以多次 flush，适合 Hash Build 这类分区写入场景：
+同一个 partition 可以多次 spill，适合 Hash Build 这类分区写入场景：
 
 ```cpp
 const auto& segments = rows.segmentsForPartition(partitionId);
@@ -101,39 +101,44 @@ const auto& segments = rows.segmentsForPartition(partitionId);
 std::vector<SegmentId> segments = ...;
 folly::Range<const SegmentId*> range(segments.data(), segments.size());
 
-if (rows.canLoadAllSegments(range)) {
-  std::vector<char*> rowPtrs = rows.listRows(range);
+if (rows.canBulkRead(range)) {
+  auto bulk = rows.beginBulkReadSegments(range);
+  std::vector<char*> rowPtrs = bulk.loadRows();
   // rowPtrs 可直接用于 compare / extractColumnResident。
 }
 ```
 
-`canLoadAllSegments()` 只是快速判断。`listRows()` 会真正 reserve 和 pin；如果期间内存状态
+`canBulkRead()` 只是快速判断。`BulkReadSession::loadRows()` 会真正 reserve 和 pin；如果期间内存状态
 变化，仍可能抛异常。
 
-`listRows()` 返回的 `char*` 由 container 持有的 resident block 支撑。指针有效到对应
-chunk/segment 被重新 spill、release，或 container 析构。
+`BulkReadSession::loadRows()` 返回的 `char*` 由 container 持有的 resident block 支撑。
+Bulk 读不提供局部 eviction 能力；如果需要按窗口释放 working set，使用
+`ReadOnlyWindowReadSession`。
 
 ## Window read
 
 如果不能全量加载，先列出 `RowId`，再按算子自己的访问窗口批量加载。
 
 ```cpp
-std::vector<RowId> rowIds = rows.listRowIds(range);
-auto session = rows.beginWindowReadSegments(range);
+auto session = rows.beginReadOnlyWindowReadSegments(range);
+std::vector<RowId> rowIds = session.listRowIds();
 
 std::vector<RowId> needed = ...;
-std::vector<char*> rowPtrs = session.loadRows(
+std::vector<const char*> rowPtrs = session.loadRows(
     folly::Range<const RowId*>(needed.data(), needed.size()));
 ```
 
 单行接口是显式慢路径：
 
 ```cpp
-char* row = session.loadRow(rowId);
+const char* row = session.loadRow(rowId);
 ```
 
-`WindowReadSession` 不管理内存释放。读阶段如果需要释放 resident 内存但未来还要继续使用这些
-数据，调用 `spillLoadedSegments()`；如果数据已经完全消费，调用 release 接口。
+`ReadOnlyWindowReadSession` 只返回 `const char*`。读阶段如果需要释放当前窗口的 resident
+内存但未来还要继续使用这些数据，调用 `session.evictLoadedChunks(targetBytes)`。eviction
+以 chunk 为粒度：一个 chunk 的 row block 和 heap blocks 会一起释放。已经有 spill backing
+且 clean 的 block 会直接丢弃；没有 backing 或被标记 dirty 的 block 会先写回。如果数据已经
+完全消费，调用 release 接口。
 
 ## Reordered Segment 和 Merge Read
 
@@ -158,7 +163,7 @@ while (merge.next(batch, maxRows)) {
 ```
 
 `beginMergeReadSegments()` 只接受 `finalizeReorderedSegment()` 产生的有序 segment。普通
-flush segment 不能直接进入 merge read。
+spill segment 不能直接进入 merge read。
 
 merge read 默认是消费型读取：读完的 chunk 会在安全时机释放，避免后续内存压力下再次 spill
 已经消费的数据。如果调用方需要重复读取，显式关闭读后释放：
@@ -167,13 +172,12 @@ merge read 默认是消费型读取：读完的 chunk 会在安全时机释放�
 auto merge = rows.beginMergeReadSegments(range, false);
 ```
 
-## 释放和重新 Spill
+## 释放和 Window Evict
 
 数据未来还可能再用，但当前需要释放 resident 内存：
 
 ```cpp
-rows.spillLoadedSegments(range);
-rows.spillAllLoadedBlocks();
+session.evictLoadedChunks(targetBytes);
 ```
 
 数据已经不会再用：
@@ -195,15 +199,16 @@ Sort / HashAgg：
 Hash Build：
 
 1. 按 partition 写入：`appendBatch(input, partition)` 或 `appendRow(partition)`。
-2. 每个 partition 可以多次 `flushActivePartitionSegment(partition)`。
+2. 每个 partition 可以多次 `spillActivePartitionSegment(partition)`。
 3. probe 或后续处理某个 partition 时，读取 `segmentsForPartition(partition)`。
-4. 能全量加载则 `listRows()`；不能则 `listRowIds()` + `WindowReadSession::loadRows()`。
+4. 能全量加载则 `BulkReadSession::loadRows()`；不能则
+   `ReadOnlyWindowReadSession::listRowIds()` + `ReadOnlyWindowReadSession::loadRows()`。
 5. partition 完成后释放对应 segments。
 
 ## 使用约束
 
-- flush 后不要继续使用旧 row 指针。
-- `RowId` 不建议由算子自行解析，应交回 `WindowReadSession`。
+- spill 后不要继续使用旧 row 指针。
+- `RowId` 不建议由算子自行解析，应交回 `ReadOnlyWindowReadSession`。
 - `compare()`、`compareRows()`、`extractColumnResident()` 都要求 row 指针 resident。
 - `RowWriteContext` 只用于当前 row 的逐列 store。
 - 当前常规快路径覆盖 fixed-width 类型、`VARCHAR` 和 `VARBINARY`；复杂类型不要作为接入假设。

@@ -44,7 +44,7 @@ uint64_t BmRowContainer::unloadedBytes(
   return bytes;
 }
 
-bool BmRowContainer::canLoadAllSegments(
+bool BmRowContainer::canBulkRead(
     folly::Range<const SegmentId*> segments) const {
   validateSegments(segments);
   const auto bytes = unloadedBytes(segments);
@@ -119,7 +119,7 @@ void BmRowContainer::ensureChunkLoaded(ChunkData& chunk) {
   ensureChunksLoaded({&chunkPtr, 1}, nullptr);
 }
 
-std::vector<char*> BmRowContainer::listRows(
+std::vector<char*> BmRowContainer::loadAllRows(
     folly::Range<const SegmentId*> segments,
     BulkLoadMetrics* metrics) {
   ensureSegmentsLoaded(segments, metrics);
@@ -136,7 +136,7 @@ std::vector<char*> BmRowContainer::listRows(
   return rows;
 }
 
-std::vector<RowId> BmRowContainer::listRowIds(
+std::vector<RowId> BmRowContainer::listRowIdsForSegments(
     folly::Range<const SegmentId*> segments) const {
   validateSegments(segments);
   std::vector<RowId> rowIds;
@@ -146,11 +146,18 @@ std::vector<RowId> BmRowContainer::listRowIds(
   return rowIds;
 }
 
-WindowReadSession BmRowContainer::beginWindowReadSegments(
+BulkReadSession BmRowContainer::beginBulkReadSegments(
     folly::Range<const SegmentId*> segments) {
   std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
   validateSegments({segmentIds.data(), segmentIds.size()});
-  return WindowReadSession(this, std::move(segmentIds));
+  return BulkReadSession(this, std::move(segmentIds));
+}
+
+ReadOnlyWindowReadSession BmRowContainer::beginReadOnlyWindowReadSegments(
+    folly::Range<const SegmentId*> segments) {
+  std::vector<SegmentId> segmentIds(segments.begin(), segments.end());
+  validateSegments({segmentIds.data(), segmentIds.size()});
+  return ReadOnlyWindowReadSession(this, std::move(segmentIds));
 }
 
 } // namespace bytedance::bolt::exec::bm

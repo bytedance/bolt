@@ -15,25 +15,44 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer;
 
-// RowId-driven reader for working sets that should not be fully loaded at once.
-//
-// WindowReadSession owns no BufferHandle. Each load delegates to the owning
-// BmRowContainer, which pins required chunk blocks into BlockRef::handle and
-// keeps the returned pointers valid until those chunks are spilled or released.
-class WindowReadSession {
+// Full segment reader. It materializes all rows in the bound segments and does
+// not provide loaded-block eviction. Use ReadOnlyWindowReadSession when the
+// working set should be released between windows.
+class BulkReadSession {
  public:
-  WindowReadSession() = default;
+  BulkReadSession() = default;
 
-  // Loads all chunks needed by rows and returns resident row pointers. The
-  // pointers remain valid until the owning BmRowContainer spills or releases the
-  // corresponding chunks/segments.
-  std::vector<char*> loadRows(folly::Range<const RowId*> rows);
-
-  // Explicit single-row slow path. Prefer loadRows() for operator hot paths.
-  char* loadRow(const RowId& row);
+  std::vector<char*> loadRows(BulkLoadMetrics* metrics = nullptr);
 
  private:
-  WindowReadSession(
+  BulkReadSession(BmRowContainer* container, std::vector<SegmentId> segments);
+
+  BmRowContainer* container_{nullptr};
+  std::vector<SegmentId> segments_;
+
+  friend class BmRowContainer;
+};
+
+// RowId-driven read-only reader for working sets that should not be fully kept
+// resident. Each load pins required chunks through the owning BmRowContainer.
+// evictLoadedChunks() releases resident memory for chunks loaded by this
+// session without destroying the underlying data. Eviction is intentionally
+// chunk-granular: a chunk's row block and heap blocks must be evicted together
+// so StringView rebase metadata can continue to describe the spill backing.
+class ReadOnlyWindowReadSession {
+ public:
+  ReadOnlyWindowReadSession() = default;
+
+  std::vector<RowId> listRowIds() const;
+
+  std::vector<const char*> loadRows(folly::Range<const RowId*> rows);
+
+  const char* loadRow(const RowId& row);
+
+  uint64_t evictLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);
+
+ private:
+  ReadOnlyWindowReadSession(
       BmRowContainer* container,
       std::vector<SegmentId> segments);
 
@@ -42,6 +61,8 @@ class WindowReadSession {
   std::vector<SegmentId> segmentOrder_;
   // Fast validation set for RowIds submitted to this session.
   std::unordered_set<SegmentId> segments_;
+  std::vector<std::pair<SegmentId, ChunkId>> loadedChunks_;
+  std::unordered_set<uint64_t> loadedChunkKeys_;
 
   friend class BmRowContainer;
 };

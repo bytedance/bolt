@@ -62,14 +62,14 @@ class BmRowContainer {
       const std::vector<CompareFlags>& flags = {});
 
   void extractColumnResident(
-      char* const* rows,
+      const char* const* rows,
       int32_t numRows,
       int32_t column,
       const VectorPtr& result,
       bool exactSize = false);
 
-  SegmentId flushActiveSegment();
-  SegmentId flushActivePartitionSegment(PartitionId partition);
+  SegmentId spillActiveSegment();
+  SegmentId spillActivePartitionSegment(PartitionId partition);
 
   // Materializes resident rows in the supplied order into a new finalized/flushed
   // segment. The returned SegmentId can be scanned through MergeReadSession.
@@ -81,22 +81,15 @@ class BmRowContainer {
   // segmented materialization that flushes smaller ordered pieces incrementally.
   SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
-  // Fast estimate for whether all blocks in segments can be loaded now. This is
-  // a hint only: listRows() still performs the actual reservation and may throw
-  // if memory changes.
-  bool canLoadAllSegments(folly::Range<const SegmentId*> segments) const;
+  // Fast estimate for whether all blocks in segments can be bulk loaded now.
+  // This is a hint only: BulkReadSession::loadRows() still performs the actual
+  // reservation and may throw if memory changes.
+  bool canBulkRead(folly::Range<const SegmentId*> segments) const;
 
-  // Loads all blocks in segments into this container and returns row pointers.
-  // The pointers remain valid until the corresponding chunks/segments are
-  // spilled again, released, or the container is destroyed.
-  std::vector<char*> listRows(
-      folly::Range<const SegmentId*> segments,
-      BulkLoadMetrics* metrics = nullptr);
+  BulkReadSession beginBulkReadSegments(
+      folly::Range<const SegmentId*> segments);
 
-  // Materializes stable RowIds without loading blocks.
-  std::vector<RowId> listRowIds(folly::Range<const SegmentId*> segments) const;
-
-  WindowReadSession beginWindowReadSegments(
+  ReadOnlyWindowReadSession beginReadOnlyWindowReadSegments(
       folly::Range<const SegmentId*> segments);
 
   // Creates a session for scanning/comparing physically ordered segments. If
@@ -108,13 +101,6 @@ class BmRowContainer {
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   void releaseChunk(SegmentId segment, ChunkId chunk);
-
-  // Writes currently resident loaded blocks back to BufferManager storage and
-  // releases their resident handles. Use this when read-stage data may be needed
-  // later. If data is fully consumed, use releaseChunk()/releaseSegment().
-  void spillLoadedChunk(SegmentId segment, ChunkId chunk);
-  void spillLoadedSegments(folly::Range<const SegmentId*> segments);
-  void spillAllLoadedBlocks();
 
   SegmentState segmentState(SegmentId segment) const;
   const std::vector<SegmentId>& segmentsForPartition(PartitionId partition)
@@ -145,7 +131,7 @@ class BmRowContainer {
       int32_t column);
   template <TypeKind Kind>
   void extractColumnTyped(
-      char* const* rows,
+      const char* const* rows,
       int32_t numRows,
       const ColumnLayout& column,
       const VectorPtr& result,
@@ -157,10 +143,19 @@ class BmRowContainer {
       folly::Range<ChunkData* const*> chunks,
       BulkLoadMetrics* metrics = nullptr);
   void ensureChunkLoaded(ChunkData& chunk);
+  std::vector<char*> loadAllRows(
+      folly::Range<const SegmentId*> segments,
+      BulkLoadMetrics* metrics = nullptr);
+  std::vector<RowId> listRowIdsForSegments(
+      folly::Range<const SegmentId*> segments) const;
+  uint64_t evictReadOnlyLoadedChunks(
+      folly::Range<const std::pair<SegmentId, ChunkId>*> chunks,
+      uint64_t targetBytes);
 
   uint64_t unloadedBytes(folly::Range<const SegmentId*> segments) const;
 
-  friend class WindowReadSession;
+  friend class BulkReadSession;
+  friend class ReadOnlyWindowReadSession;
   friend class MergeReadSession;
 
   FOLLY_ALWAYS_INLINE void validateSegments(

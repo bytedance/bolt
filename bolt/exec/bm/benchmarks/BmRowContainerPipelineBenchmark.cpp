@@ -193,7 +193,7 @@ void printBmMetrics(
 
 void extractBmWindowRows(
     BmRowContainer& container,
-    WindowReadSession& session,
+    ReadOnlyWindowReadSession& session,
     const std::vector<RowId>& rowIds,
     const BenchmarkOptions& opts,
     memory::MemoryPool* pool,
@@ -284,7 +284,7 @@ void pipelineBm(
     metrics.rows += rowCount(opts);
 
     const auto spillWriteStart = benchmarkNowNs();
-    const auto segment = container->flushActiveSegment();
+    const auto segment = container->spillActiveSegment();
     metrics.spillWriteNs += benchmarkNowNs() - spillWriteStart;
 
     std::vector<char*> rows;
@@ -294,8 +294,8 @@ void pipelineBm(
 
     if (mode == PipelineBmReadMode::kLoadedPointers) {
       const auto spillReadStart = benchmarkNowNs();
-      rows = container->listRows(
-          {&segment, 1},
+      auto bulk = container->beginBulkReadSegments({&segment, 1});
+      rows = bulk.loadRows(
           FLAGS_bm_row_container_spill_metrics ? &metrics.bulkLoad : nullptr);
       metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
       metrics.resultPointers = true;
@@ -306,12 +306,12 @@ void pipelineBm(
       folly::doNotOptimizeAway(rows.data());
     } else {
       const auto spillReadStart = benchmarkNowNs();
-      rowIds = container->listRowIds({&segment, 1});
+      auto session = container->beginReadOnlyWindowReadSegments({&segment, 1});
+      rowIds = session.listRowIds();
       metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
       metrics.resultPointers = false;
       BOLT_CHECK(rows.empty());
       metrics.rowIds += rowIds.size();
-      auto session = container->beginWindowReadSegments({&segment, 1});
       extractBmWindowRows(
           *container, session, rowIds, opts, context.pool.get(), metrics);
       folly::doNotOptimizeAway(rowIds.data());
