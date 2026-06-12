@@ -129,34 +129,7 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   auto* voidTy = llvm::Type::getVoidTy(context);
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
 
-  declareFunction(module, "jit_GetDecodedValueBool", i8Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_GetDecodedValueI8", i8Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_GetDecodedValueI16", i16Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_GetDecodedValueI32", i32Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_GetDecodedValueI64", i64Ty, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_GetDecodedValueI128", i128Ty, {i8PtrTy, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedValueFloat", floatTy, {i8PtrTy, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedValueDouble", doubleTy, {i8PtrTy, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedRowFieldDouble", doubleTy, {i8PtrTy, i32Ty, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedRowFieldI8", i8Ty, {i8PtrTy, i32Ty, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedRowFieldI64", i64Ty, {i8PtrTy, i32Ty, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedRowFieldI128", i128Ty, {i8PtrTy, i32Ty, i32Ty});
-  declareFunction(
-      module, "jit_GetDecodedRowFieldIsNull", i8Ty, {i8PtrTy, i32Ty, i32Ty});
-  declareFunction(module, "jit_GetDecodedIsNull", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_HashAggrResizeVector", voidTy, {i8PtrTy, i32Ty});
-  declareFunction(module, "jit_HashAggrSetFlatI8", voidTy, {i8PtrTy, i32Ty, i8Ty, i8Ty});
-  declareFunction(module, "jit_HashAggrSetFlatI16", voidTy, {i8PtrTy, i32Ty, i16Ty, i8Ty});
-  declareFunction(module, "jit_HashAggrSetFlatI32", voidTy, {i8PtrTy, i32Ty, i32Ty, i8Ty});
-  declareFunction(module, "jit_HashAggrSetFlatI64", voidTy, {i8PtrTy, i32Ty, i64Ty, i8Ty});
-  declareFunction(module, "jit_HashAggrSetFlatFloat", voidTy, {i8PtrTy, i32Ty, floatTy, i8Ty});
-  declareFunction(module, "jit_HashAggrSetFlatDouble", voidTy, {i8PtrTy, i32Ty, doubleTy, i8Ty});
   // Decimal extract helpers.
   // Sum: (vector, row, group, offset, precision, scale, longDecimal).
   declareFunction(
@@ -201,8 +174,6 @@ llvm::Type* llvmType(llvm::IRBuilder<>& builder, HashAggrJitValueKind kind) {
   }
   return builder.getInt64Ty();
 }
-
-std::string setFlatValueFunction(HashAggrJitValueKind kind);
 
 bool isFloatKind(HashAggrJitValueKind kind) {
   return kind == HashAggrJitValueKind::Float ||
@@ -730,15 +701,6 @@ void ScalarOutputAdapterCodegen::write(
         codegen_.builder(), nulls, row, isNull);
     return;
   }
-
-  const auto setter = setFlatValueFunction(kind);
-  if (setter.empty()) {
-    return;
-  }
-  auto* isNullI8 = codegen_.builder().CreateZExt(
-      isNull, codegen_.builder().getInt8Ty());
-  codegen_.builder().CreateCall(
-      codegen_.module().getFunction(setter), {vector(), row, value, isNullI8});
 }
 
 void ScalarOutputAdapterCodegen::writeField(
@@ -1055,29 +1017,6 @@ bool genAddDenseIR(
   builder.CreateRetVoid();
 
   return !llvm::verifyFunction(*func, &llvm::errs());
-}
-
-std::string setFlatValueFunction(HashAggrJitValueKind kind) {
-  switch (kind) {
-    case HashAggrJitValueKind::Int8:
-      return "jit_HashAggrSetFlatI8";
-    case HashAggrJitValueKind::Int16:
-      return "jit_HashAggrSetFlatI16";
-    case HashAggrJitValueKind::Int32:
-      return "jit_HashAggrSetFlatI32";
-    case HashAggrJitValueKind::Int64:
-      return "jit_HashAggrSetFlatI64";
-    case HashAggrJitValueKind::Float:
-      return "jit_HashAggrSetFlatFloat";
-    case HashAggrJitValueKind::Double:
-      return "jit_HashAggrSetFlatDouble";
-    // Bool output vectors are FlatVector<bool>, which cannot reuse the int8
-    // setter. JIT extract is not yet supported for Bool.
-    case HashAggrJitValueKind::Bool:
-    case HashAggrJitValueKind::Int128:
-      return "";
-  }
-  return "";
 }
 
 bool genExtractIR(
