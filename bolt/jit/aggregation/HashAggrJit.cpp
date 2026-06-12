@@ -1173,11 +1173,13 @@ HashAggrJitChunk::HashAggrJitChunk(
   out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
       << slots_.size();
   for (const auto& slot : slots_) {
-    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown") << "_"
-        << static_cast<int>(slot.desc.kind) << hashAggrJitValueKindName(slot.desc.inputKind)
-        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o" << slot.offset
-        << "n" << slot.nullByte << "m" << static_cast<int>(slot.nullMask)
-        << (slot.desc.countStar ? "s" : "x") << (slot.desc.mergeInput ? "g" : "r")
+    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown")
+        << "_" << static_cast<int>(slot.desc.kind)
+        << hashAggrJitValueKindName(slot.desc.inputKind)
+        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o"
+        << slot.offset << "n" << slot.nullByte << "m"
+        << static_cast<int>(slot.nullMask) << (slot.desc.countStar ? "s" : "x")
+        << (slot.desc.mergeInput ? "g" : "r")
         << (slot.desc.decimal ? "d" : "n");
   }
   functionName_ = out.str();
