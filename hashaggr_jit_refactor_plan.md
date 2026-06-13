@@ -1456,3 +1456,63 @@ if (!outputKind.has_value()) {
 
 - `bolt/exec/benchmarks/HashAggrJitBenchmark.cpp`：`addCase()` 内的 `fprintf` case 名打印 —— **已回退**。
 - `bolt/exec/GroupingSet.cpp`：`hashAggrJitRawOutputData` 的 `Int128` 分支临时 `return nullptr` —— **已恢复**为正常实现；正式修复落在 scalar 绑定处（见 §11.5）。
+
+---
+
+## 12. 优化：ROW merge 输入跳过 per-field null 检查（`readRowFieldValue`）
+
+### 12.1 背景
+
+`RowInputAdapterCodegen::readRowField` 对每个 ROW child 都会生成一段 per-field null 检查 CFG（`row_field_null_check` / `row_field_null_done` + PHI）来产出该 field 的 `is_null`，再 `IRRow::pack(value, is_null)`。
+
+但 `addIntermediateResults`（merge）路径上，框架外层 `genAddDenseIR` 已对 **top-level ROW null** 统一发射过 null guard；ROW 内部各 field 是否需要 null 位，取决于具体聚合语义：
+
+- **avg merge**（`ROW(double sum, bigint count)`）：业务上不读 field 的 null，只用 value；
+- **decimal sum merge**（`ROW(decimal sum, bool isEmpty)`）：仅 **sum** 字段的 null 被用来编码 overflow（JIT partial extract 溢出时 `sumVector->setNull`），`isEmpty` 字段的 null 不被消费；
+- **decimal avg merge**（`ROW(decimal sum, bigint count)`）：sum/count 的 null 都参与 overflow 判定，**不能跳过**。
+
+因此对“null 位未被业务消费”的 field，生成 null 检查 CFG 是纯浪费。由于 `nulls` 指针编译期未知，这段 CFG 在 decimal 路径上 LLVM 往往**折不掉**，既增加 IR 体积也增加实际指令。
+
+### 12.2 改动
+
+新增 value-only 接口 `InputAdapterCodegen::readRowFieldValue(row, field, kind)`：
+
+- 语义：只返回 ROW child 的裸值（`llvm::Value*`），**跳过** per-field null 检查 CFG；
+- 适用前提：该 field 在当前路径上保证非空（其 null 位不被聚合语义消费）；
+- `ScalarInputAdapterCodegen`：`BOLT_UNSUPPORTED`（与 `readRowField` 一致）；
+- `RowInputAdapterCodegen`：直接 `loadChild(field)` → `loadScalarInputValue(...)`，不调 `isRowFieldNull`。
+
+调用点改造（严格按 null 是否被消费区分）：
+
+| 调用点 | 处理 |
+|--------|------|
+| `compileAvgAddIntermediateResults`（sum/count） | 两字段全换 `readRowFieldValue` |
+| `compileDecimalSumAddIntermediateResults` — `isEmpty` | 换 `readRowFieldValue` |
+| `compileDecimalSumAddIntermediateResults` — `sum` | **保留** `readRowField`（`sumIsNull` 编码 overflow） |
+| `compileDecimalAvgAddIntermediateResults` — sum/count | **保留** `readRowField`（两个 null 都参与 overflow 判定） |
+
+### 12.3 正确性依据
+
+JIT 的 partial extract（`HashAggrDecimalRuntime.cpp` 的 `jit_HashAggrExtractPartialDecimalSum/Avg`）在 sum 溢出时会 `sumVector->setNull(row, true)`（整行 ROW 非 null）。下游 merge 正是靠读该 field 的 null 来识别并传播 overflow，故 decimal 的 sum 字段（及 decimal avg 的 count）**必须**保留 `readRowField`。注意：非 JIT 的 `extractAccumulators` 不置 sum-null，但 JIT pipeline 中上游可能是 JIT partial extract，跨阶段契约要求 merge 端兼容 sum=null。
+
+### 12.4 性能验证（Release，jit 路径，单位 ms，越小越好）
+
+| case | baseline | optimized | 变化 |
+|------|----------|-----------|------|
+| width8_merge_avg | 6.16 | 6.00 | -2.6% |
+| width16_merge_avg | 11.08 | 10.68 | -3.6% |
+| width32_merge_avg | 21.47 | 20.51 | -4.5% |
+| width4_merge_decimal_sum | 8.81 | 8.06 | -8.5% |
+| width8_merge_decimal_sum | 15.90 | 15.48 | -2.6% |
+| width16_merge_decimal_sum | 30.21 | 29.74 | -1.6% |
+| width32_merge_decimal_sum | 61.05 | 60.14 | -1.5% |
+
+- avg merge：宽度越大收益越明显（每多一列多省一段 null CFG，线性放大）；
+- decimal sum merge：稳定小幅提升；
+- `sum`（标量输入）不受影响；功能无回归，benchmark 无 crash。
+
+### 12.5 涉及文件
+
+- `bolt/jit/aggregation/HashAggrJit.h`：`InputAdapterCodegen` 新增 `readRowFieldValue` 纯虚 + 两子类声明；
+- `bolt/jit/aggregation/HashAggrJit.cpp`：两子类实现；
+- `bolt/jit/aggregation/ops/AvgOps.cpp`、`ops/DecimalSumOps.cpp`：按上表切换调用。

@@ -81,9 +81,9 @@ void compileDecimalSumAddIntermediateResults(
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "sum_decimal_merge", function, continueBlock);
   auto* sumRow = input.readRowField(row, 0, slot.desc.inputKind);
-  auto* isEmptyRow = input.readRowField(row, 1, HashAggrJitValueKind::Bool);
+  auto* incomingIsEmpty =
+      input.readRowFieldValue(row, 1, HashAggrJitValueKind::Bool);
   auto* sumIsNull = IRRow::getIsNull(b, sumRow);
-  auto* incomingIsEmpty = IRRow::getValue(b, isEmptyRow);
   auto* isNotEmpty = b.CreateICmpEQ(incomingIsEmpty, b.getInt8(0));
   auto* isOverflow = b.CreateAnd(sumIsNull, isNotEmpty);
   b.CreateCondBr(isOverflow, overflowBlock, mergeBlock);

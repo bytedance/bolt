@@ -77,10 +77,8 @@ void compileAvgAddIntermediateResults(
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
   codegen.clearAccumulatorNull(group, slot);
-  auto* sumRow = input.readRowField(row, 0, HashAggrJitValueKind::Double);
-  auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
-  auto* sum = IRRow::getValue(codegen.builder(), sumRow);
-  auto* count = IRRow::getValue(codegen.builder(), countRow);
+  auto* sum = input.readRowFieldValue(row, 0, HashAggrJitValueKind::Double);
+  auto* count = input.readRowFieldValue(row, 1, HashAggrJitValueKind::Int64);
   auto* oldSum =
       codegen.loadValue(group, codegen.builder().getDoubleTy(), slot.offset);
   codegen.storeValue(

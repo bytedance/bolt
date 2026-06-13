@@ -116,6 +116,13 @@ class InputAdapterCodegen {
       llvm::Value* row,
       int32_t field,
       HashAggrJitValueKind kind) const = 0;
+  // Reads only the raw value of a ROW child, skipping the per-field null check
+  // CFG. Use when the framework guarantees the field is non-null on this path
+  // (i.e. the field's null bit is not consumed by the aggregate semantics).
+  virtual llvm::Value* readRowFieldValue(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind) const = 0;
 };
 
 class ScalarInputAdapterCodegen final : public InputAdapterCodegen {
@@ -127,6 +134,8 @@ class ScalarInputAdapterCodegen final : public InputAdapterCodegen {
   llvm::Value* loadNulls() const override;
   llvm::Value* isNull(llvm::Value* row) const override;
   llvm::Value* readRowField(llvm::Value*, int32_t, HashAggrJitValueKind)
+      const override;
+  llvm::Value* readRowFieldValue(llvm::Value*, int32_t, HashAggrJitValueKind)
       const override;
 
  private:
@@ -143,6 +152,10 @@ class RowInputAdapterCodegen final : public InputAdapterCodegen {
   llvm::Value* loadNulls() const override;
   llvm::Value* isNull(llvm::Value* row) const override;
   llvm::Value* readRowField(
+      llvm::Value* row,
+      int32_t field,
+      HashAggrJitValueKind kind) const override;
+  llvm::Value* readRowFieldValue(
       llvm::Value* row,
       int32_t field,
       HashAggrJitValueKind kind) const override;

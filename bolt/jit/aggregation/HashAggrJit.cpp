@@ -583,6 +583,13 @@ llvm::Value* ScalarInputAdapterCodegen::readRowField(
   BOLT_UNSUPPORTED("ScalarInputAdapterCodegen does not support ROW field load");
 }
 
+llvm::Value* ScalarInputAdapterCodegen::readRowFieldValue(
+    llvm::Value*,
+    int32_t,
+    HashAggrJitValueKind) const {
+  BOLT_UNSUPPORTED("ScalarInputAdapterCodegen does not support ROW field load");
+}
+
 RowInputAdapterCodegen::RowInputAdapterCodegen(
     HashAggrJitCodegen& codegen,
     llvm::Value* input)
@@ -619,6 +626,18 @@ llvm::Value* RowInputAdapterCodegen::readRowField(
   auto* value = ::bytedance::bolt::jit::loadScalarInputValue(
       codegen_.builder(), child, row, kind);
   return IRRow::pack(codegen_.builder(), value, isRowFieldNull(row, field));
+}
+
+llvm::Value* RowInputAdapterCodegen::readRowFieldValue(
+    llvm::Value* row,
+    int32_t field,
+    HashAggrJitValueKind kind) const {
+  // Skips the per-field null check CFG: returns only the raw field value.
+  // Valid when the field is guaranteed non-null on this path (its null bit is
+  // not consumed by the aggregate's merge semantics).
+  auto* child = loadChild(field);
+  return ::bytedance::bolt::jit::loadScalarInputValue(
+      codegen_.builder(), child, row, kind);
 }
 
 llvm::Value* RowInputAdapterCodegen::isRowFieldNull(
