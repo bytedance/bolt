@@ -32,7 +32,6 @@ struct HashAggrJitOps {
       const InputAdapterCodegen& input,
       llvm::Value* row,
       const HashAggrJitSlot&,
-      bool checkInputNulls,
       llvm::BasicBlock* nextBlock);
   using CanExtractFn = bool (*)(const HashAggrJitSlot&, bool partialOutput);
   using ExtractFn = void (*)(
@@ -50,8 +49,11 @@ struct HashAggrJitOps {
 };
 
 struct HashAggrJitExtractTarget {
+  // Codegen adapter for the destination output vector to write results into.
   const OutputAdapterCodegen& output;
+  // The target row index (runtime llvm::Value) to write the extracted result.
   llvm::Value* row;
+  // Whether to emit partial (intermediate) results instead of final ones.
   bool partialOutput;
 };
 

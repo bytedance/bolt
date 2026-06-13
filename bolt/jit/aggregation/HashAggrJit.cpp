@@ -19,8 +19,6 @@
 
 extern "C" {
 
-using bytedance::bolt::jit::HashAggrJitInputRuntime;
-using bytedance::bolt::jit::HashAggrJitOutputRuntime;
 using bytedance::bolt::jit::HashAggrJitRowInputRuntime;
 using bytedance::bolt::jit::HashAggrJitRowOutputRuntime;
 using bytedance::bolt::jit::HashAggrJitScalarInputRuntime;
@@ -1007,7 +1005,7 @@ bool genAddDenseIR(
     if (addFn == nullptr) {
       return false;
     }
-    addFn(codegen, group, *input, row, slot, checkInputNulls, nextBlock);
+    addFn(codegen, group, *input, row, slot, nextBlock);
     builder.CreateBr(nextBlock);
     builder.SetInsertPoint(nextBlock);
   }
@@ -1244,11 +1242,8 @@ bool HashAggrJitChunk::codegen() {
   addDenseNoNull_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
       module_->getFuncPtr(addNoNullFn));
   extract_ = reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
-  if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr ||
-      extract_ == nullptr) {
-    return false;
-  }
-  return true;
+  return init_ != nullptr && addDense_ != nullptr &&
+      addDenseNoNull_ != nullptr && extract_ != nullptr;
 }
 
 } // namespace bytedance::bolt::jit

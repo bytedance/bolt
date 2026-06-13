@@ -42,7 +42,6 @@ void compileCountAddRawInput(
     const InputAdapterCodegen& /*input*/,
     llvm::Value* /*row*/,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   addInc(codegen, group, slot, codegen.builder().getInt64(1));
 }
@@ -53,7 +52,6 @@ void compileCountAddIntermediateResults(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   llvm::Value* inc = nullptr;
   if (slot.desc.countStar) {

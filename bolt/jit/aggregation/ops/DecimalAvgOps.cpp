@@ -46,7 +46,6 @@ void compileDecimalAvgAddRawInput(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   auto& b = codegen.builder();
   auto* inputRow = input.read(row, slot.desc.inputKind);
@@ -72,7 +71,6 @@ void compileDecimalAvgAddIntermediateResults(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock* nextBlock) {
   auto& b = codegen.builder();
   auto* function = b.GetInsertBlock()->getParent();

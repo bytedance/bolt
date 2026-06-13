@@ -45,7 +45,6 @@ void compileAvgAddRawInput(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   auto* inputRow = input.read(row, slot.desc.inputKind);
   auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
@@ -76,7 +75,6 @@ void compileAvgAddIntermediateResults(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   codegen.clearAccumulatorNull(group, slot);
   auto* sumRow = input.readRowField(row, 0, HashAggrJitValueKind::Double);

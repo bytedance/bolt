@@ -32,7 +32,6 @@ void compileMinMaxUpdate(
     const InputAdapterCodegen& input,
     llvm::Value* row,
     const HashAggrJitSlot& slot,
-    bool,
     llvm::BasicBlock*) {
   auto* inputRow = input.read(row, slot.desc.inputKind);
   auto* value = codegen.castValue(
