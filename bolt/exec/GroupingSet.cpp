@@ -540,7 +540,7 @@ void GroupingSet::addInputForActiveRows(
     auto& newGroups = lookup_->newGroups;
     std::vector<uint8_t> jitExecuted;
 #ifdef ENABLE_BOLT_JIT
-    runHashAggrJitChunks(groups, newGroups, input, mayPushdown, jitExecuted);
+    runHashAggrJitAddChunks(groups, newGroups, input, mayPushdown, jitExecuted);
 #endif
     for (auto i = 0; i < aggregates_.size(); ++i) {
       if (!jitExecuted.empty() && jitExecuted[i]) {
@@ -1124,7 +1124,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
             << hashAggrJitChunks_.size();
 }
 
-void GroupingSet::runHashAggrJitChunks(
+void GroupingSet::runHashAggrJitAddChunks(
     char** groups,
     folly::Range<const vector_size_t*> newGroups,
     const RowVectorPtr& input,

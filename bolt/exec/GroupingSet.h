@@ -288,7 +288,7 @@ class GroupingSet {
 
 #ifdef ENABLE_BOLT_JIT
   void maybeCreateHashAggrJitPlan();
-  void runHashAggrJitChunks(
+  void runHashAggrJitAddChunks(
       char** groups,
       folly::Range<const vector_size_t*> newGroups,
       const RowVectorPtr& input,
