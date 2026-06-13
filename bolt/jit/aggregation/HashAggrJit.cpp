@@ -419,7 +419,18 @@ void emitFlatScalarValue(
     auto* bit = value->getType()->isIntegerTy(1)
         ? value
         : builder.CreateICmpNE(value, builder.getInt8(0));
-    emitOutputNullBit(builder, values, row, bit);
+    auto* wordTy = builder.getInt64Ty();
+    auto* wordIndex = builder.CreateLShr(row, builder.getInt32(6));
+    auto* bitIndex = builder.CreateAnd(row, builder.getInt32(63));
+    auto* words = builder.CreatePointerCast(values, wordTy->getPointerTo());
+    auto* wordAddr = builder.CreateInBoundsGEP(
+        wordTy, words, builder.CreateZExt(wordIndex, builder.getInt64Ty()));
+    auto* word = builder.CreateLoad(wordTy, wordAddr);
+    auto* mask = builder.CreateShl(
+        builder.getInt64(1), builder.CreateZExt(bitIndex, builder.getInt64Ty()));
+    auto* trueWord = builder.CreateOr(word, mask);
+    auto* falseWord = builder.CreateAnd(word, builder.CreateNot(mask));
+    builder.CreateStore(builder.CreateSelect(bit, trueWord, falseWord), wordAddr);
     return;
   }
   auto* type = llvmType(builder, kind);
@@ -527,7 +538,7 @@ isInputNull(llvm::IRBuilder<>& builder, llvm::Value* nulls, llvm::Value* row) {
       builder.CreateInBoundsGEP(
           i64Ty, nullWords, builder.CreateZExt(wordIndex, builder.getInt64Ty())));
   auto* shifted = builder.CreateLShr(word, builder.CreateZExt(bitIndex, i64Ty));
-  return builder.CreateICmpNE(
+  return builder.CreateICmpEQ(
       builder.CreateAnd(shifted, builder.getInt64(1)), builder.getInt64(0));
 }
 
