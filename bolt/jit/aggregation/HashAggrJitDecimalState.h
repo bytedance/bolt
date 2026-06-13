@@ -14,10 +14,8 @@ namespace bytedance::bolt::jit {
 // also derive from, so the JIT and non-JIT in-memory layouts stay in sync by
 // construction (no mirrored copy to drift). The codegen / extract runtime read
 // fields via offsetof on these aliases.
-using JitDecimalSumState =
-    bytedance::bolt::functions::aggregate::DecimalSumAccumulatorLayout;
-using JitDecimalAvgState =
-    bytedance::bolt::functions::aggregate::LongDecimalWithOverflowLayout;
+using JitDecimalSumState = functions::aggregate::DecimalSumAccumulatorLayout;
+using JitDecimalAvgState = functions::aggregate::LongDecimalWithOverflowLayout;
 
 static_assert(std::is_standard_layout_v<JitDecimalSumState>);
 static_assert(std::is_standard_layout_v<JitDecimalAvgState>);
