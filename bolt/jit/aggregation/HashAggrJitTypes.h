@@ -138,7 +138,7 @@ struct HashAggrJitDescriptor {
   int32_t auxScale{0};
   const HashAggrJitOps* ops{nullptr};
 
-  std::string signature() const;
+  // std::string signature() const;
 };
 
 struct HashAggrJitSlot {

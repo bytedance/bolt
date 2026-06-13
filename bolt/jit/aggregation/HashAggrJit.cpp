@@ -1175,6 +1175,7 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
   }
 }
 
+/*
 std::string HashAggrJitDescriptor::signature() const {
   return fmt::format(
       "{}_{}_{}_{}_{}_{}_{}_{}",
@@ -1187,6 +1188,7 @@ std::string HashAggrJitDescriptor::signature() const {
       hashAggrJitRuntimeShapeName(inputShape),
       hashAggrJitRuntimeShapeName(outputShape));
 }
+*/
 
 bool HashAggrJitChunk::canExtract() const {
   if (extract_ == nullptr) {
