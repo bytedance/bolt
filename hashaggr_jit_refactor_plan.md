@@ -1364,3 +1364,95 @@ using HashAggrJitAddDenseFunc =
 - [ ] JIT add-dense ABI 传递的是 adapter-owned runtime payload；
 - [ ] row merge / row extract 不再出现 `rowField0/rowField1` 这类聚合专有字段名；
 - [ ] 新增一个 3-field intermediate 聚合时，不需要修改 InputAdapter/OutputAdapter 基类接口。
+
+---
+
+## 11. 事故复盘：`munmap_chunk(): invalid pointer`（commit `0722a59851` 引入）
+
+本章记录一次在 `HashAggrJitBenchmark` 上复现的堆破坏崩溃的完整定位过程与根因，作为 output runtime 绑定相关改动的回归警示。
+
+### 11.1 现象
+
+- 运行 `bolt_hashaggr_jit_benchmark`（RelWithDebInfo 行为，Release preset 构建）必崩。
+- 报错：`munmap_chunk(): invalid pointer`，`SIGABRT`。
+- 栈顶在算子关闭阶段析构中间结果 vector 时：
+  - `Driver::closeOperators()` → 释放 `RowVector` → 释放其 child `FlatVector<long>`(int64) 的 values buffer → glibc `free` 检测到非法 chunk 指针。
+- hint：bug 出现在最近 5 个 commit 中。
+
+### 11.2 定位过程
+
+1. **缩小到具体 case**：在 benchmark `addCase()` 的 warmup 处加临时 `fprintf` 打印每个 case 名（每个 case warmup 时会先跑 nojit 再跑 jit）。运行后最后一条输出停在 `width4_merge_decimal_avg` 的 `jit` 阶段，**坐实崩溃 case = `width4_merge_decimal_avg`**。
+2. **bisect 到 commit**：先前已通过 `git reset --hard` 确认 first bad commit = `0722a59851`（其 parent `f752929ecc` 不崩）。
+3. **gdb 观察**：
+   - 崩溃发生在第二阶段（final aggregation）输出路径 `GroupingSet::runHashAggrJitExtractChunks`。
+   - 在 decimal avg 的两个 helper 上下断：`jit_HashAggrExtractPartialDecimalAvg` 被调用 40000 次，但 `jit_HashAggrExtractFinalDecimalAvg` **一次都没进入**就崩了 → 说明堆已在 final 阶段“**extract 绑定阶段**”（`chunk.extract()` 之前）被破坏。
+4. **类型/精度推演**：
+   - `width4` 用 `DECIMAL(12,2)`（short decimal）。
+   - decimal avg 中间 sum 类型按签名 `ROW(DECIMAL(38, a_scale), BIGINT)` → `DECIMAL(38,2)` 是 **long decimal（int128）**。
+   - decimal avg final 结果类型 `r_precision=min(38,12+4)=16` → `DECIMAL(16,6)` 是 **short decimal**，存储为 **`FlatVector<int64_t>`**。
+   - 但 descriptor 的 `accumulatorKind = Int128`（见 `AverageAggregate.cpp` 的 `DecimalAverageAggregate::createHashAggrJitDescriptor`）。
+
+### 11.3 根因
+
+`0722a59851` 把 `GroupingSet.cpp` 里的 `hashAggrJitRawOutputValues`（改名为 `hashAggrJitRawOutputData`）的 `Int128` 分支，从父 commit 的 `return nullptr` 改成了：
+
+```cpp
+case jit::HashAggrJitValueKind::Int128:
+  return vector->asUnchecked<FlatVector<int128_t>>()->mutableRawValues();
+```
+
+而 `runHashAggrJitExtractChunks` 的 **scalar final 输出绑定**（`GroupingSet.cpp:1306` 附近）用 `slot.desc.accumulatorKind` 来解释输出列：
+
+```cpp
+.values = hashAggrJitRawOutputData(aggregateVector.get(), slot.desc.accumulatorKind)
+```
+
+对 decimal avg final：`accumulatorKind == Int128`，但 final 输出列真实类型是 short-decimal `FlatVector<int64_t>`。于是：
+
+1. 一个真实 `FlatVector<int64_t>` 被 `asUnchecked<FlatVector<int128_t>>()` 强转（类型混淆）。
+2. 调用 `mutableRawValues()`（见 `FlatVector.h:244`）：此时 `values_` 是按 int64（8B/elem）分配且非 mutable，函数进入重分配分支：
+   - 按 `int128`（16B/elem）**重新分配 buffer**；
+   - `memcpy(newValues, rawValues_, byteSize<int128_t>(length))` 即按 2× 字节数从只有 8B/elem 的旧 buffer **越界读**；
+   - 把该 vector 的 `values_` / `rawValues_` 替换成 int128 尺寸 buffer。
+3. 这步破坏堆（越界读踩坏相邻 chunk metadata，并把列状态搞乱），最终在算子析构释放该 `RowVector`/`FlatVector` 链时 glibc 报 `munmap_chunk(): invalid pointer`。
+
+**为何 parent commit 不崩**：原 `Int128` 分支 `return nullptr`，从不触碰该列 buffer。decimal avg final 真正写入走 helper `jit_HashAggrExtractFinalDecimalAvg`，由 `longDecimal` flag 正确按 int64/int128 写回，**根本不需要这个预取的 raw values 指针**。
+
+**关键定性**：crash 由 commit `0722a59851` 的这一行引入（`bolt/exec/GroupingSet.cpp` 内 `hashAggrJitRawOutputData` 的 `Int128` 分支），与 scalar-output 绑定处用 `accumulatorKind` 解释 short-decimal 输出列的错配共同作用。它本质是一个 **`accumulatorKind` ≠ 输出 vector 实际存储类型** 的类型混淆。
+
+### 11.4 验证
+
+把 `Int128` 分支临时改回 `return nullptr`（仅验证用，注释说明 Int128 scalar/decimal 输出走 helper 的 `vector()`，不读此 raw 指针），重编译运行：
+
+- `width4/8/16/32_merge_decimal_avg` 全部通过，crash 消失；
+- 整个 benchmark 跑完无 `munmap` / `Aborted`。
+
+→ 根因实锤。
+
+### 11.5 修复（已实施：方案 1）
+
+采用 §11.5 的方案 1：**scalar output 绑定按输出 vector 真实类型推导 kind**，而非 `accumulatorKind`。
+
+`runHashAggrJitExtractChunks` 的 FLAT scalar 输出绑定改为：
+
+```cpp
+const auto outputKind = hashAggrJitOutputValueKind(aggregateVector.get());
+if (!outputKind.has_value()) {
+  canRunChunk = false;
+  skipReason = "unsupported scalar output value kind";
+  break;
+}
+... .values = hashAggrJitRawOutputData(aggregateVector.get(), *outputKind) ...
+```
+
+`hashAggrJitOutputValueKind` 已存在，会按列真实类型（含 short/long decimal）推导 kind，从而保证 `hashAggrJitRawOutputData` 取到的指针宽度与列存储宽度一致，杜绝 int64↔int128 错配重分配。`hashAggrJitRawOutputData` 的 `Int128` 分支保持正常实现（用于真正的 long-decimal/HUGEINT 输出列）。
+
+其余备选方向（方案 2/3）未采用，记录备查：
+
+1. 对走 helper 的 decimal/Int128 输出不预取 raw values（保持 nullptr）；
+2. 统一约束指针宽度一致。
+
+### 11.6 临时改动清理（已完成）
+
+- `bolt/exec/benchmarks/HashAggrJitBenchmark.cpp`：`addCase()` 内的 `fprintf` case 名打印 —— **已回退**。
+- `bolt/exec/GroupingSet.cpp`：`hashAggrJitRawOutputData` 的 `Int128` 分支临时 `return nullptr` —— **已恢复**为正常实现；正式修复落在 scalar 绑定处（见 §11.5）。

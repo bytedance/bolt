@@ -1301,10 +1301,22 @@ void GroupingSet::runHashAggrJitExtractChunks(
       // now points to HashAggrJitOutputRuntime rather than BaseVector directly.
       aggregateVector->resize(groups.size());
       if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
+        // Derive the raw values kind from the output vector's actual storage
+        // type rather than slot.desc.accumulatorKind. They can differ: e.g.
+        // decimal avg's accumulatorKind is Int128 while its final result is a
+        // short decimal (FlatVector<int64_t>). Using accumulatorKind here would
+        // reinterpret an int64 buffer as int128 and corrupt the heap.
+        const auto outputKind =
+            hashAggrJitOutputValueKind(aggregateVector.get());
+        if (!outputKind.has_value()) {
+          canRunChunk = false;
+          skipReason = "unsupported scalar output value kind";
+          break;
+        }
         hashAggrJitOutputRuntimes_[slotIndex].scalar =
             jit::HashAggrJitScalarOutputRuntime{
                 .values = hashAggrJitRawOutputData(
-                    aggregateVector.get(), slot.desc.accumulatorKind),
+                    aggregateVector.get(), *outputKind),
                 .nulls = aggregateVector->mutableRawNulls(),
                 .vector = aggregateVector.get()};
       } else if (
