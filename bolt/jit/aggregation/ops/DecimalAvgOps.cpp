@@ -122,13 +122,6 @@ void compileDecimalAvgAddIntermediateResults(
   b.SetInsertPoint(continueBlock);
 }
 
-bool canCompileDecimalAvgExtract(const HashAggrJitSlot&, bool partialOutput) {
-  // Both partial (extractAccumulators) and final extract go through runtime
-  // helpers. Final decimal avg keeps the divide/rescale logic in the helper to
-  // avoid duplicating Spark decimal semantics in LLVM IR.
-  return true;
-}
-
 void emitDecimalAvgExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* vector,
@@ -192,7 +185,6 @@ const HashAggrJitOps* getDecimalAvgOps() {
       &compileDecimalAvgInitGroup,
       &compileDecimalAvgAddRawInput,
       &compileDecimalAvgAddIntermediateResults,
-      &canCompileDecimalAvgExtract,
       &compileDecimalAvgExtractAccumulators,
       &compileDecimalAvgExtractValues};
   return &kOps;

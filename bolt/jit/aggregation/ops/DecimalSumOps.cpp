@@ -124,10 +124,6 @@ void compileDecimalSumAddIntermediateResults(
   b.SetInsertPoint(continueBlock);
 }
 
-bool canCompileDecimalSumExtract(const HashAggrJitSlot&, bool) {
-  return true;
-}
-
 void emitDecimalSumExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* vector,
@@ -187,7 +183,6 @@ const HashAggrJitOps* getDecimalSumOps() {
       &compileDecimalSumInitGroup,
       &compileDecimalSumAddRawInput,
       &compileDecimalSumAddIntermediateResults,
-      &canCompileDecimalSumExtract,
       &compileDecimalSumExtractAccumulators,
       &compileDecimalSumExtractValues};
   return &kOps;

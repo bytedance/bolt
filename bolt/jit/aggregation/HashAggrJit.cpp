@@ -175,16 +175,15 @@ bool isFloatKind(HashAggrJitValueKind kind) {
 
 bool supportsRawFlatOutput(HashAggrJitValueKind kind) {
   switch (kind) {
+    case HashAggrJitValueKind::Bool:
     case HashAggrJitValueKind::Int8:
     case HashAggrJitValueKind::Int16:
     case HashAggrJitValueKind::Int32:
     case HashAggrJitValueKind::Int64:
+    case HashAggrJitValueKind::Int128:
     case HashAggrJitValueKind::Float:
     case HashAggrJitValueKind::Double:
       return true;
-    case HashAggrJitValueKind::Bool:
-    case HashAggrJitValueKind::Int128:
-      return false;
   }
   return false;
 }
@@ -383,6 +382,31 @@ void emitOutputNullBit(
       : builder.CreateICmpNE(isNull, builder.getInt8(0));
   builder.CreateStore(
       builder.CreateSelect(isNullBool, nullWord, notNullWord), wordAddr);
+}
+
+// Writes a scalar value into a flat output values buffer at 'row'. Bool uses
+// bit-packed storage (one bit per row in a uint64 word array), written with the
+// same word/mask/select pattern as the null bitmap; all other kinds are
+// fixed-width and written with a direct store.
+void emitFlatScalarValue(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* values,
+    llvm::Value* row,
+    HashAggrJitValueKind kind,
+    llvm::Value* value) {
+  if (kind == HashAggrJitValueKind::Bool) {
+    auto* bit = value->getType()->isIntegerTy(1)
+        ? value
+        : builder.CreateICmpNE(value, builder.getInt8(0));
+    emitOutputNullBit(builder, values, row, bit);
+    return;
+  }
+  auto* type = llvmType(builder, kind);
+  auto* typedValues = builder.CreatePointerCast(values, type->getPointerTo());
+  auto* valueAddr = builder.CreateInBoundsGEP(
+      type, typedValues, builder.CreateZExt(row, builder.getInt64Ty()));
+  auto* store = builder.CreateStore(value, valueAddr);
+  store->setAlignment(llvm::Align(1));
 }
 
 llvm::LoadInst* loadValue(
@@ -696,26 +720,16 @@ void ScalarOutputAdapterCodegen::write(
     llvm::Value* row,
     HashAggrJitValueKind kind,
     llvm::Value* irRow) const {
-  auto* value = IRRow::getValue(codegen_.builder(), irRow);
-  auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
-  if (supportsRawFlatOutput(kind)) {
-    auto* type = codegen_.llvmType(kind);
-    auto* values = loadScalarOutputValues(
-        codegen_.builder(), output_);
-    auto* typedValues = codegen_.builder().CreatePointerCast(
-        values, type->getPointerTo());
-    auto* valueAddr = codegen_.builder().CreateInBoundsGEP(
-        type,
-        typedValues,
-        codegen_.builder().CreateZExt(row, codegen_.builder().getInt64Ty()));
-    auto* store = codegen_.builder().CreateStore(value, valueAddr);
-    store->setAlignment(llvm::Align(1));
-    auto* nulls = loadScalarOutputNulls(
-        codegen_.builder(), output_);
-    emitOutputNullBit(
-        codegen_.builder(), nulls, row, isNull);
-    return;
-  }
+  auto& builder = codegen_.builder();
+  BOLT_CHECK(
+      supportsRawFlatOutput(kind),
+      "Unsupported raw flat scalar output kind for HashAggrJit");
+  auto* value = IRRow::getValue(builder, irRow);
+  auto* isNull = IRRow::getIsNull(builder, irRow);
+  auto* values = loadScalarOutputValues(builder, output_);
+  emitFlatScalarValue(builder, values, row, kind, value);
+  auto* nulls = loadScalarOutputNulls(builder, output_);
+  emitOutputNullBit(builder, nulls, row, isNull);
 }
 
 void ScalarOutputAdapterCodegen::writeField(
@@ -767,25 +781,17 @@ void RowOutputAdapterCodegen::writeField(
     int32_t field,
     HashAggrJitValueKind kind,
     llvm::Value* irRow) const {
+  auto& builder = codegen_.builder();
   BOLT_CHECK(
       supportsRawFlatOutput(kind),
       "Unsupported raw ROW output field kind for HashAggrJit");
   auto* child = loadChild(field);
-  auto* value = IRRow::getValue(codegen_.builder(), irRow);
-  auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
-  auto* type = codegen_.llvmType(kind);
-  auto* values = loadScalarOutputValues(
-      codegen_.builder(), child);
-  auto* typedValues =
-      codegen_.builder().CreatePointerCast(values, type->getPointerTo());
-  auto* row64 = codegen_.builder().CreateZExt(row, codegen_.builder().getInt64Ty());
-  auto* valueAddr = codegen_.builder().CreateInBoundsGEP(type, typedValues, row64);
-  auto* store = codegen_.builder().CreateStore(value, valueAddr);
-  store->setAlignment(llvm::Align(1));
-  auto* nulls = loadScalarOutputNulls(
-      codegen_.builder(), child);
-  emitOutputNullBit(
-      codegen_.builder(), nulls, row, isNull);
+  auto* value = IRRow::getValue(builder, irRow);
+  auto* isNull = IRRow::getIsNull(builder, irRow);
+  auto* values = loadScalarOutputValues(builder, child);
+  emitFlatScalarValue(builder, values, row, kind, value);
+  auto* nulls = loadScalarOutputNulls(builder, child);
+  emitOutputNullBit(builder, nulls, row, isNull);
 }
 
 void RowOutputAdapterCodegen::writeNull(
@@ -1000,8 +1006,7 @@ bool genExtractIR(
 
   for (auto i = 0; i < slots.size(); ++i) {
     const auto& slot = slots[i];
-    if (slot.desc.ops == nullptr || slot.desc.ops->canExtract == nullptr ||
-        !slot.desc.ops->canExtract(slot, partialOutput)) {
+    if (slot.desc.ops == nullptr) {
       continue;
     }
     auto* outputAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
@@ -1136,16 +1141,7 @@ std::string HashAggrJitDescriptor::signature() const {
 */
 
 bool HashAggrJitChunk::canExtract() const {
-  if (extract_ == nullptr) {
-    return false;
-  }
-  for (const auto& slot : slots_) {
-    if (slot.desc.ops == nullptr || slot.desc.ops->canExtract == nullptr ||
-        !slot.desc.ops->canExtract(slot, partialOutput_)) {
-      return false;
-    }
-  }
-  return true;
+  return extract_ != nullptr;
 }
 
 bool HashAggrJitChunk::codegen() {

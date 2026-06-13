@@ -33,7 +33,6 @@ struct HashAggrJitOps {
       llvm::Value* row,
       const HashAggrJitSlot&,
       llvm::BasicBlock* nextBlock);
-  using CanExtractFn = bool (*)(const HashAggrJitSlot&, bool partialOutput);
   using ExtractFn = void (*)(
       HashAggrJitCodegen&,
       llvm::Value* group,
@@ -44,7 +43,6 @@ struct HashAggrJitOps {
   CreateFn initGroup;
   AddFn addRawInput;
   AddFn addIntermediateResults;
-  CanExtractFn canExtract;
   // Writes the intermediate (partial) accumulator state to the output, mirroring
   // the non-JIT extractAccumulators path.
   ExtractFn extractAccumulators;

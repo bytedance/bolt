@@ -66,11 +66,6 @@ void compileCountAddIntermediateResults(
   addInc(codegen, group, slot, inc);
 }
 
-bool canCompileCountExtract(const HashAggrJitSlot&, bool) {
-  // count result is always BIGINT and never null.
-  return true;
-}
-
 // Count's intermediate accumulator and final result share the same scalar
 // representation, so partial/final extract emit identical IR. The two named
 // entry points below both forward to this helper.
@@ -111,7 +106,6 @@ const HashAggrJitOps* getCountOps() {
       &compileCountInitGroup,
       &compileCountAddRawInput,
       &compileCountAddIntermediateResults,
-      &canCompileCountExtract,
       &compileCountExtractAccumulators,
       &compileCountExtractValues};
   return &kOps;

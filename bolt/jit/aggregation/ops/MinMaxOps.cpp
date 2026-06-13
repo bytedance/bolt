@@ -71,13 +71,6 @@ void compileMinMaxUpdate(
   codegen.clearAccumulatorNull(group, slot);
 }
 
-bool canCompileMinMaxExtract(const HashAggrJitSlot& slot, bool) {
-  // Flat setters exist for i8/i16/i32/i64/f32/f64 only. Int128 (long decimal)
-  // and Bool have no flat setter yet, fall back to non-JIT extract.
-  return slot.desc.accumulatorKind != HashAggrJitValueKind::Int128 &&
-      slot.desc.accumulatorKind != HashAggrJitValueKind::Bool;
-}
-
 // Min/max's intermediate accumulator and final result share the same scalar
 // representation, so partial/final extract emit identical IR. The two named
 // entry points below both forward to this helper.
@@ -119,7 +112,6 @@ const HashAggrJitOps* getMinMaxOps() {
       &compileMinMaxInitGroup,
       &compileMinMaxUpdate,
       &compileMinMaxUpdate,
-      &canCompileMinMaxExtract,
       &compileMinMaxExtractAccumulators,
       &compileMinMaxExtractValues};
   return &kOps;

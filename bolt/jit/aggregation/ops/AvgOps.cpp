@@ -99,11 +99,6 @@ void compileAvgAddIntermediateResults(
       codegen.builder().CreateAdd(oldCount, count));
 }
 
-bool canCompileAvgExtract(const HashAggrJitSlot& slot, bool) {
-  // Only double avg accumulator layout is supported.
-  return slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
-}
-
 // Intermediate output is row(sum:double, count:bigint). All-null group yields
 // (0, 0) with a non-null top-level row (isNull = 0), matching the non-JIT
 // extractAccumulators path.
@@ -156,7 +151,6 @@ const HashAggrJitOps* getAvgOps() {
       &compileAvgInitGroup,
       &compileAvgAddRawInput,
       &compileAvgAddIntermediateResults,
-      &canCompileAvgExtract,
       &compileAvgExtractAccumulators,
       &compileAvgExtractValues};
   return &kOps;

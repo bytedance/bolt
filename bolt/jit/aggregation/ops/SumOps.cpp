@@ -48,12 +48,6 @@ void compileSumAccumulate(
   codegen.storeValue(group, accType, slot.offset, newValue);
 }
 
-bool canCompileSumExtract(const HashAggrJitSlot& slot, bool) {
-  // spark sum intermediate type == result type (bigint=bigint / double=double).
-  return slot.desc.accumulatorKind == HashAggrJitValueKind::Int64 ||
-      slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
-}
-
 // Sum's intermediate accumulator and final result share the same scalar
 // representation, so partial/final extract emit identical IR. The two named
 // entry points below both forward to this helper.
@@ -95,7 +89,6 @@ const HashAggrJitOps* getSumOps() {
       &compileSumInitGroup,
       &compileSumAccumulate,
       &compileSumAccumulate,
-      &canCompileSumExtract,
       &compileSumExtractAccumulators,
       &compileSumExtractValues};
   return &kOps;
