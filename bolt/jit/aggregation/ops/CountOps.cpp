@@ -71,6 +71,9 @@ bool canCompileCountExtract(const HashAggrJitSlot&, bool) {
   return true;
 }
 
+// Count's intermediate accumulator and final result share the same scalar
+// representation, so partial/final extract emit identical IR. The two named
+// entry points below both forward to this helper.
 void compileCountExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
@@ -84,6 +87,22 @@ void compileCountExtract(
       IRRow::pack(codegen.builder(), value, codegen.builder().getFalse()));
 }
 
+void compileCountExtractAccumulators(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileCountExtract(codegen, group, slot, target);
+}
+
+void compileCountExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileCountExtract(codegen, group, slot, target);
+}
+
 } // namespace
 
 const HashAggrJitOps* getCountOps() {
@@ -93,7 +112,8 @@ const HashAggrJitOps* getCountOps() {
       &compileCountAddRawInput,
       &compileCountAddIntermediateResults,
       &canCompileCountExtract,
-      &compileCountExtract};
+      &compileCountExtractAccumulators,
+      &compileCountExtractValues};
   return &kOps;
 }
 

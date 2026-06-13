@@ -78,6 +78,9 @@ bool canCompileMinMaxExtract(const HashAggrJitSlot& slot, bool) {
       slot.desc.accumulatorKind != HashAggrJitValueKind::Bool;
 }
 
+// Min/max's intermediate accumulator and final result share the same scalar
+// representation, so partial/final extract emit identical IR. The two named
+// entry points below both forward to this helper.
 void compileMinMaxExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
@@ -92,6 +95,22 @@ void compileMinMaxExtract(
       IRRow::pack(codegen.builder(), value, isNull));
 }
 
+void compileMinMaxExtractAccumulators(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileMinMaxExtract(codegen, group, slot, target);
+}
+
+void compileMinMaxExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileMinMaxExtract(codegen, group, slot, target);
+}
+
 } // namespace
 
 const HashAggrJitOps* getMinMaxOps() {
@@ -101,7 +120,8 @@ const HashAggrJitOps* getMinMaxOps() {
       &compileMinMaxUpdate,
       &compileMinMaxUpdate,
       &canCompileMinMaxExtract,
-      &compileMinMaxExtract};
+      &compileMinMaxExtractAccumulators,
+      &compileMinMaxExtractValues};
   return &kOps;
 }
 

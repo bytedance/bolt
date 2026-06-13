@@ -54,6 +54,9 @@ bool canCompileSumExtract(const HashAggrJitSlot& slot, bool) {
       slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
 }
 
+// Sum's intermediate accumulator and final result share the same scalar
+// representation, so partial/final extract emit identical IR. The two named
+// entry points below both forward to this helper.
 void compileSumExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
@@ -68,6 +71,22 @@ void compileSumExtract(
       IRRow::pack(codegen.builder(), value, isNull));
 }
 
+void compileSumExtractAccumulators(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileSumExtract(codegen, group, slot, target);
+}
+
+void compileSumExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  compileSumExtract(codegen, group, slot, target);
+}
+
 } // namespace
 
 const HashAggrJitOps* getSumOps() {
@@ -77,7 +96,8 @@ const HashAggrJitOps* getSumOps() {
       &compileSumAccumulate,
       &compileSumAccumulate,
       &canCompileSumExtract,
-      &compileSumExtract};
+      &compileSumExtractAccumulators,
+      &compileSumExtractValues};
   return &kOps;
 }
 

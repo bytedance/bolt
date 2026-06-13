@@ -1013,11 +1013,13 @@ bool genExtractIR(
       output =
           std::make_unique<ScalarOutputAdapterCodegen>(codegen, outputRuntime);
     }
-    if (slot.desc.ops->extract == nullptr) {
+    auto* extractFn = partialOutput ? slot.desc.ops->extractAccumulators
+                                    : slot.desc.ops->extractResults;
+    if (extractFn == nullptr) {
       return false;
     }
-    slot.desc.ops->extract(
-        codegen, group, slot, HashAggrJitExtractTarget{*output, row, partialOutput});
+    extractFn(
+        codegen, group, slot, HashAggrJitExtractTarget{*output, row});
   }
 
   auto* next = builder.CreateAdd(row, builder.getInt32(1));

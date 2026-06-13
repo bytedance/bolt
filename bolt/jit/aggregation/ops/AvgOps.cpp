@@ -104,7 +104,10 @@ bool canCompileAvgExtract(const HashAggrJitSlot& slot, bool) {
   return slot.desc.accumulatorKind == HashAggrJitValueKind::Double;
 }
 
-void compileAvgExtract(
+// Intermediate output is row(sum:double, count:bigint). All-null group yields
+// (0, 0) with a non-null top-level row (isNull = 0), matching the non-JIT
+// extractAccumulators path.
+void compileAvgExtractAccumulators(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
@@ -113,24 +116,29 @@ void compileAvgExtract(
   auto* sum = codegen.loadValue(group, builder.getDoubleTy(), slot.offset);
   auto* count = codegen.loadValue(
       group, builder.getInt64Ty(), slot.offset + kAvgCountOffset);
-  if (target.partialOutput) {
-    // Intermediate output is row(sum:double, count:bigint). All-null group
-    // yields (0, 0) with a non-null top-level row (isNull = 0), matching the
-    // non-JIT extractAccumulators path.
-    target.output.writeField(
-        target.row,
-        0,
-        HashAggrJitValueKind::Double,
-        IRRow::pack(builder, sum, builder.getFalse()));
-    target.output.writeField(
-        target.row,
-        1,
-        HashAggrJitValueKind::Int64,
-        IRRow::pack(builder, count, builder.getFalse()));
-    target.output.writeNull(target.row, builder.getFalse());
-    return;
-  }
-  // Final output is double avg. count == 0 means all inputs were null -> null.
+  target.output.writeField(
+      target.row,
+      0,
+      HashAggrJitValueKind::Double,
+      IRRow::pack(builder, sum, builder.getFalse()));
+  target.output.writeField(
+      target.row,
+      1,
+      HashAggrJitValueKind::Int64,
+      IRRow::pack(builder, count, builder.getFalse()));
+  target.output.writeNull(target.row, builder.getFalse());
+}
+
+// Final output is double avg. count == 0 means all inputs were null -> null.
+void compileAvgExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  auto& builder = codegen.builder();
+  auto* sum = codegen.loadValue(group, builder.getDoubleTy(), slot.offset);
+  auto* count = codegen.loadValue(
+      group, builder.getInt64Ty(), slot.offset + kAvgCountOffset);
   auto* isNull = builder.CreateICmpEQ(count, builder.getInt64(0));
   auto* countAsDouble = builder.CreateSIToFP(count, builder.getDoubleTy());
   auto* avg = builder.CreateFDiv(sum, countAsDouble);
@@ -149,7 +157,8 @@ const HashAggrJitOps* getAvgOps() {
       &compileAvgAddRawInput,
       &compileAvgAddIntermediateResults,
       &canCompileAvgExtract,
-      &compileAvgExtract};
+      &compileAvgExtractAccumulators,
+      &compileAvgExtractValues};
   return &kOps;
 }
 

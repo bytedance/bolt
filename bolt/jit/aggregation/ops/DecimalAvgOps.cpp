@@ -156,7 +156,7 @@ void emitDecimalAvgExtract(
        longDecimal});
 }
 
-void compileDecimalAvgExtract(
+void compileDecimalAvgExtractAccumulators(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
@@ -167,7 +167,21 @@ void compileDecimalAvgExtract(
       target.row,
       group,
       slot,
-      target.partialOutput);
+      /*partialOutput=*/true);
+}
+
+void compileDecimalAvgExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  emitDecimalAvgExtract(
+      codegen,
+      target.output.vector(),
+      target.row,
+      group,
+      slot,
+      /*partialOutput=*/false);
 }
 
 } // namespace
@@ -179,7 +193,8 @@ const HashAggrJitOps* getDecimalAvgOps() {
       &compileDecimalAvgAddRawInput,
       &compileDecimalAvgAddIntermediateResults,
       &canCompileDecimalAvgExtract,
-      &compileDecimalAvgExtract};
+      &compileDecimalAvgExtractAccumulators,
+      &compileDecimalAvgExtractValues};
   return &kOps;
 }
 

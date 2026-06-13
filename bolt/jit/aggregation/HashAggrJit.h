@@ -45,7 +45,12 @@ struct HashAggrJitOps {
   AddFn addRawInput;
   AddFn addIntermediateResults;
   CanExtractFn canExtract;
-  ExtractFn extract;
+  // Writes the intermediate (partial) accumulator state to the output, mirroring
+  // the non-JIT extractAccumulators path.
+  ExtractFn extractAccumulators;
+  // Writes the final aggregate result to the output, mirroring the non-JIT
+  // extractValues/extractResults path.
+  ExtractFn extractResults;
 };
 
 struct HashAggrJitExtractTarget {
@@ -53,8 +58,6 @@ struct HashAggrJitExtractTarget {
   const OutputAdapterCodegen& output;
   // The target row index (runtime llvm::Value) to write the extracted result.
   llvm::Value* row;
-  // Whether to emit partial (intermediate) results instead of final ones.
-  bool partialOutput;
 };
 
 class IRRow {

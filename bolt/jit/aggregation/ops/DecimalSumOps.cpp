@@ -151,7 +151,7 @@ void emitDecimalSumExtract(
        longDecimal});
 }
 
-void compileDecimalSumExtract(
+void compileDecimalSumExtractAccumulators(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
@@ -162,7 +162,21 @@ void compileDecimalSumExtract(
       target.row,
       group,
       slot,
-      target.partialOutput);
+      /*partialOutput=*/true);
+}
+
+void compileDecimalSumExtractValues(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    const HashAggrJitExtractTarget& target) {
+  emitDecimalSumExtract(
+      codegen,
+      target.output.vector(),
+      target.row,
+      group,
+      slot,
+      /*partialOutput=*/false);
 }
 
 } // namespace
@@ -174,7 +188,8 @@ const HashAggrJitOps* getDecimalSumOps() {
       &compileDecimalSumAddRawInput,
       &compileDecimalSumAddIntermediateResults,
       &canCompileDecimalSumExtract,
-      &compileDecimalSumExtract};
+      &compileDecimalSumExtractAccumulators,
+      &compileDecimalSumExtractValues};
   return &kOps;
 }
 
