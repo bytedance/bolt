@@ -9,14 +9,16 @@
 
 #include <type_traits>
 
+#include "bolt/functions/lib/aggregates/SumCount.h"
+
 namespace bytedance::bolt::jit {
 
 namespace {
 
-struct AvgAccumulatorLayout {
-  double sum;
-  int64_t count;
-};
+// Single source of truth for the AVG intermediate layout: derive the JIT field
+// offsets from the non-JIT SumCount struct so a change to SumCount is picked up
+// here automatically instead of silently desyncing a mirrored copy.
+using AvgAccumulatorLayout = functions::aggregate::SumCount<double>;
 
 static_assert(std::is_standard_layout_v<AvgAccumulatorLayout>);
 

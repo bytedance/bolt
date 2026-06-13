@@ -33,6 +33,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/functions/lib/aggregates/AggregateToIntermediate.h"
 #include "bolt/functions/lib/aggregates/DecimalAggregate.h"
+#include "bolt/functions/lib/aggregates/SumCount.h"
 #include "bolt/type/DecimalUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
@@ -76,12 +77,6 @@ const SelectivityVector* getBaseRows(
   }
   return baseRows;
 }
-
-template <typename TSum>
-struct SumCount {
-  TSum sum{0};
-  int64_t count{0};
-};
 
 } // namespace
 
