@@ -5,25 +5,19 @@
 #include <cstdint>
 #include <type_traits>
 
-#include "bolt/type/Type.h"
+#include "bolt/functions/lib/aggregates/DecimalAccumulatorLayout.h"
 
 namespace bytedance::bolt::jit {
 
-// JIT-internal decimal accumulator layouts shared only by decimal aggregate
-// codegen and decimal extract runtime helpers. Keep them out of the framework
-// planning/types header so non-decimal ops don't depend on aggregate-private
-// row state details.
-struct JitDecimalSumState {
-  int128_t sum{0};
-  int64_t overflow{0};
-  bool isEmpty{true};
-};
-
-struct JitDecimalAvgState {
-  int128_t sum{0};
-  int64_t count{0};
-  int64_t overflow{0};
-};
+// JIT-internal decimal accumulator layouts. These alias the shared POD layout
+// bases that the non-JIT accumulators (DecimalSum / LongDecimalWithOverflowState)
+// also derive from, so the JIT and non-JIT in-memory layouts stay in sync by
+// construction (no mirrored copy to drift). The codegen / extract runtime read
+// fields via offsetof on these aliases.
+using JitDecimalSumState =
+    bytedance::bolt::functions::aggregate::DecimalSumAccumulatorLayout;
+using JitDecimalAvgState =
+    bytedance::bolt::functions::aggregate::LongDecimalWithOverflowLayout;
 
 static_assert(std::is_standard_layout_v<JitDecimalSumState>);
 static_assert(std::is_standard_layout_v<JitDecimalAvgState>);

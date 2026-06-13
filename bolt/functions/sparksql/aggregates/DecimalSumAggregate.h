@@ -31,14 +31,11 @@
 #pragma once
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
+#include "bolt/functions/lib/aggregates/DecimalAccumulatorLayout.h"
 #include "bolt/vector/FlatVector.h"
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
-struct DecimalSum {
-  int128_t sum{0};
-  int64_t overflow{0};
-  bool isEmpty{true};
-
+struct DecimalSum : DecimalSumAccumulatorLayout {
   void mergeWith(const DecimalSum& other) {
     this->overflow += other.overflow;
     this->overflow +=
@@ -46,6 +43,8 @@ struct DecimalSum {
     this->isEmpty &= other.isEmpty;
   }
 };
+
+static_assert(std::is_standard_layout_v<DecimalSum>);
 
 template <typename TInputType, typename TResultType>
 class DecimalSumAggregate : public exec::Aggregate {
