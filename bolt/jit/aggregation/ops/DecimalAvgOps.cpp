@@ -24,6 +24,12 @@ constexpr int32_t kCountOffset =
 constexpr int32_t kOverflowOffset =
     static_cast<int32_t>(offsetof(JitDecimalAvgState, overflow));
 
+HashAggrJitValueKind decimalKindForPrecision(int32_t precision) {
+  return precision > bytedance::bolt::ShortDecimalType::kMaxPrecision
+      ? HashAggrJitValueKind::Int128
+      : HashAggrJitValueKind::Int64;
+}
+
 void compileDecimalAvgInitGroup(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
@@ -88,7 +94,8 @@ void compileDecimalAvgAddIntermediateResults(
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "avg_decimal_merge", function, continueBlock);
-  auto* sumRow = input.readRowField(row, 0, slot.desc.inputKind);
+  const auto sumKind = decimalKindForPrecision(slot.desc.precision);
+  auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
   auto* sumIsNull = IRRow::getIsNull(b, sumRow);
   auto* countIsNull = IRRow::getIsNull(b, countRow);
@@ -104,8 +111,7 @@ void compileDecimalAvgAddIntermediateResults(
 
   b.SetInsertPoint(mergeBlock);
   auto* sum = IRRow::getValue(b, sumRow);
-  auto* value =
-      codegen.castValue(sum, slot.desc.inputKind, HashAggrJitValueKind::Int128);
+  auto* value = codegen.castValue(sum, sumKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
   emitDecimalAddWithOverflow(
       codegen, group, slot.offset + kSumOffset, slot.offset + kOverflowOffset, value);
@@ -130,12 +136,18 @@ void emitDecimalAvgExtract(
     const HashAggrJitSlot& slot,
     bool partialOutput) {
   auto& b = codegen.builder();
-  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
-                                 : "jit_HashAggrExtractFinalDecimalAvg";
-  auto* longDecimal = b.getInt8(
-      slot.desc.auxPrecision > bytedance::bolt::ShortDecimalType::kMaxPrecision
-          ? 1
-          : 0);
+  // long/short decimal of the written sum column: partial output writes the
+  // intermediate sum decimal (precision/scale); final output writes the result
+  // decimal (auxPrecision/auxScale).
+  const int32_t outPrecision =
+      partialOutput ? slot.desc.precision : slot.desc.auxPrecision;
+  const bool longDecimal =
+      decimalKindForPrecision(outPrecision) == HashAggrJitValueKind::Int128;
+  const char* fn = partialOutput
+      ? (longDecimal ? "jit_HashAggrExtractPartialLongDecimalAvg"
+                     : "jit_HashAggrExtractPartialShortDecimalAvg")
+      : (longDecimal ? "jit_HashAggrExtractFinalLongDecimalAvg"
+                     : "jit_HashAggrExtractFinalShortDecimalAvg");
   b.CreateCall(
       codegen.module().getFunction(fn),
       {vector,
@@ -145,8 +157,7 @@ void emitDecimalAvgExtract(
        b.getInt32(slot.desc.precision),
        b.getInt32(slot.desc.scale),
        b.getInt32(slot.desc.auxPrecision),
-       b.getInt32(slot.desc.auxScale),
-       longDecimal});
+       b.getInt32(slot.desc.auxScale)});
 }
 
 void compileDecimalAvgExtractAccumulators(

@@ -10,6 +10,7 @@
 #include "bolt/jit/aggregation/HashAggrJit.h"
 #include "bolt/jit/aggregation/HashAggrJitDecimalState.h"
 #include "bolt/jit/aggregation/ops/DecimalOps.h"
+#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::jit {
 
@@ -22,6 +23,12 @@ constexpr int32_t kOverflowOffset =
     static_cast<int32_t>(offsetof(JitDecimalSumState, overflow));
 constexpr int32_t kIsEmptyOffset =
     static_cast<int32_t>(offsetof(JitDecimalSumState, isEmpty));
+
+HashAggrJitValueKind decimalKindForPrecision(int32_t precision) {
+  return precision > bytedance::bolt::ShortDecimalType::kMaxPrecision
+      ? HashAggrJitValueKind::Int128
+      : HashAggrJitValueKind::Int64;
+}
 
 void compileDecimalSumInitGroup(
     HashAggrJitCodegen& codegen,
@@ -85,7 +92,8 @@ void compileDecimalSumAddIntermediateResults(
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "sum_decimal_merge", function, continueBlock);
-  auto* sumRow = input.readRowField(row, 0, slot.desc.inputKind);
+  const auto sumKind = decimalKindForPrecision(slot.desc.precision);
+  auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* incomingIsEmpty =
       input.readRowFieldValue(row, 1, HashAggrJitValueKind::Bool);
   auto* sumIsNull = IRRow::getIsNull(b, sumRow);
@@ -99,8 +107,7 @@ void compileDecimalSumAddIntermediateResults(
 
   b.SetInsertPoint(mergeBlock);
   auto* sum = IRRow::getValue(b, sumRow);
-  auto* value =
-      codegen.castValue(sum, slot.desc.inputKind, HashAggrJitValueKind::Int128);
+  auto* value = codegen.castValue(sum, sumKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
   emitDecimalAddWithOverflow(
       codegen,
@@ -132,10 +139,18 @@ void emitDecimalSumExtract(
     const HashAggrJitSlot& slot,
     bool partialOutput) {
   auto& b = codegen.builder();
-  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalSum"
-                                 : "jit_HashAggrExtractFinalDecimalSum";
-  auto* longDecimal =
-      b.getInt8(slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
+  // long/short decimal is decided by the actual output decimal type, not the
+  // input kind: precision/scale carry the intermediate (partial) decimal type,
+  // auxPrecision/auxScale carry the final result decimal type.
+  const int32_t outPrecision =
+      partialOutput ? slot.desc.precision : slot.desc.auxPrecision;
+  const bool longDecimal =
+      decimalKindForPrecision(outPrecision) == HashAggrJitValueKind::Int128;
+  const char* fn = partialOutput
+      ? (longDecimal ? "jit_HashAggrExtractPartialLongDecimalSum"
+                     : "jit_HashAggrExtractPartialShortDecimalSum")
+      : (longDecimal ? "jit_HashAggrExtractFinalLongDecimalSum"
+                     : "jit_HashAggrExtractFinalShortDecimalSum");
   b.CreateCall(
       codegen.module().getFunction(fn),
       {vector,
@@ -143,8 +158,7 @@ void emitDecimalSumExtract(
        group,
        b.getInt32(slot.offset),
        b.getInt32(slot.desc.precision),
-       b.getInt32(slot.desc.scale),
-       longDecimal});
+       b.getInt32(slot.desc.scale)});
 }
 
 void compileDecimalSumExtractAccumulators(

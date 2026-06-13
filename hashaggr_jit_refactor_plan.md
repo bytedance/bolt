@@ -26,8 +26,6 @@ IRRow_t = llvm::StructType::get(value_type, i1_ty)
 
 `is_null` 永远在第二个字段，框架统一处理；`value_type` 内部结构对框架透明。
 
----
-
 ## 1. 当前问题（背景）
 
 落地前必须理解这些已存在的痛点，重构必须**逐项消除**。
@@ -1516,3 +1514,58 @@ JIT 的 partial extract（`HashAggrDecimalRuntime.cpp` 的 `jit_HashAggrExtractP
 - `bolt/jit/aggregation/HashAggrJit.h`：`InputAdapterCodegen` 新增 `readRowFieldValue` 纯虚 + 两子类声明；
 - `bolt/jit/aggregation/HashAggrJit.cpp`：两子类实现；
 - `bolt/jit/aggregation/ops/AvgOps.cpp`、`ops/DecimalSumOps.cpp`：按上表切换调用。
+
+---
+
+## 13. Decimal short/long 专用 helper 修复与性能结论（2026-06-13）
+
+本轮围绕 decimal sum/avg 的 short/long decimal 判断与 runtime helper 做了两类收敛：
+
+1. **descriptor 语义统一**：`precision/scale` 表示 intermediate/partial decimal 类型，`auxPrecision/auxScale` 表示 final result decimal 类型；decimal sum 因 partial/final 类型相同，所以 `aux*` 镜像 `precision/scale`。
+2. **short/long decimal 在 codegen 期固定**：不再把 `longDecimal` 作为外部 C++ runtime helper 参数传入，避免 LLVM 无法跨外部函数边界消除无效分支；`emitDecimalSumExtract` / `emitDecimalAvgExtract` 直接按实际输出精度选择 short/long 专用 helper。
+
+当前专用 helper 形态：
+
+```text
+jit_HashAggrExtractFinalShortDecimalSum
+jit_HashAggrExtractFinalLongDecimalSum
+jit_HashAggrExtractPartialShortDecimalSum
+jit_HashAggrExtractPartialLongDecimalSum
+jit_HashAggrExtractFinalShortDecimalAvg
+jit_HashAggrExtractFinalLongDecimalAvg
+jit_HashAggrExtractPartialShortDecimalAvg
+jit_HashAggrExtractPartialLongDecimalAvg
+```
+
+验证命令：
+
+```bash
+cmake --build --preset conan-release --target bolt_hashaggr_jit_benchmark --parallel 16
+./_build/Release/bolt/exec/benchmarks/bolt_hashaggr_jit_benchmark --bm_regex='(width8|width16)'
+```
+
+与用户提供的 baseline 单次结果相比，关键结论如下：
+
+| case | baseline | 当前 | 变化 |
+|---|---:|---:|---:|
+| `width8_merge_decimal_sum_jit` | 21.68ms | 15.24ms | **-29.70%** |
+| `width16_merge_decimal_sum_jit` | 42.44ms | 29.47ms | **-30.56%** |
+| `width8_merge_decimal_avg_jit` | 13.67ms | 13.73ms | +0.44% |
+| `width16_merge_decimal_avg_jit` | 26.90ms | 26.45ms | -1.67% |
+
+汇总：
+
+| 分组 | 几何平均变化 |
+|---|---:|
+| 所有 JIT 项 | **-4.23%** |
+| decimal JIT 项 | **-16.67%** |
+| 非 decimal JIT 项 | -1.98% |
+
+因此，当前结论是：
+
+- `decimal_sum_jit` 从 baseline 的“慢于 nojit”变成“明显快于 nojit”：
+  - width8：15.24ms vs nojit 19.52ms，约 **21.9%** faster；
+  - width16：29.47ms vs nojit 39.11ms，约 **24.6%** faster。
+- `decimal_avg_jit` 基本持平，无系统性回退。
+- 非 decimal 项与本轮改动无直接关系，单次结果有正有负，整体未观察到系统性退化。
+- 后续 decimal extract/merge 相关重构应继续坚持：**能在 codegen 期确定的类型选择，不要作为 runtime 参数留给外部 helper 分支处理**。

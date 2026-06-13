@@ -109,108 +109,91 @@ std::optional<TResult> jitDecimalAvgComputeFinal(
   return status.ok() ? std::optional<TResult>(rescaledValue) : std::nullopt;
 }
 
-} // namespace
-
-extern "C" {
-
-// Final decimal sum extract: write FlatVector<int128_t>. Null when the group is
-// empty (all inputs null) or the sum overflows the result precision.
-__attribute__((__visibility__("default"))) void
-jit_HashAggrExtractFinalDecimalSum(
+template <typename TResult>
+void jitHashAggrExtractFinalDecimalSum(
     char* vector,
     int32_t row,
     char* group,
     int32_t offset,
-    int32_t precision,
-    int32_t /*scale*/,
-    int8_t /*longDecimal*/) {
+    int32_t precision) {
   auto* state =
       reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
   auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                   ->as<bytedance::bolt::FlatVector<bytedance::bolt::int128_t>>();
+                   ->asUnchecked<bytedance::bolt::FlatVector<TResult>>();
   if (state->isEmpty) {
     flat->setNull(row, true);
     return;
   }
+
   bool overflow = false;
   auto result = jitDecimalSumComputeFinal(state, precision, overflow);
   if (overflow) {
     flat->setNull(row, true);
   } else {
-    flat->set(row, result);
+    flat->set(row, static_cast<TResult>(result));
   }
 }
 
-// Partial decimal sum extract: write row(sum:decimal, isEmpty:bool).
-__attribute__((__visibility__("default"))) void
-jit_HashAggrExtractPartialDecimalSum(
+template <typename TResult>
+void jitHashAggrExtractPartialDecimalSum(
     char* vector,
     int32_t row,
     char* group,
     int32_t offset,
-    int32_t precision,
-    int32_t /*scale*/,
-    int8_t /*longDecimal*/) {
+    int32_t precision) {
   auto* state =
       reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
   auto* rowVector = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                        ->as<bytedance::bolt::RowVector>();
+                        ->asUnchecked<bytedance::bolt::RowVector>();
   auto* sumVector =
-      rowVector->childAt(0)->asFlatVector<bytedance::bolt::int128_t>();
-  auto* isEmptyVector = rowVector->childAt(1)->asFlatVector<bool>();
+      rowVector->childAt(0)->asUnchecked<bytedance::bolt::FlatVector<TResult>>();
+  auto* isEmptyVector =
+      rowVector->childAt(1)->asUnchecked<bytedance::bolt::FlatVector<bool>>();
   rowVector->setNull(row, false);
   if (state->isEmpty) {
     sumVector->set(row, 0);
     isEmptyVector->set(row, true);
     return;
   }
+
   bool overflow = false;
   auto result = jitDecimalSumComputeFinal(state, precision, overflow);
   if (overflow) {
     sumVector->setNull(row, true);
-    isEmptyVector->set(row, false);
   } else {
-    sumVector->set(row, result);
-    isEmptyVector->set(row, state->isEmpty);
+    sumVector->set(row, static_cast<TResult>(result));
   }
+  isEmptyVector->set(row, overflow ? false : state->isEmpty);
 }
 
-// Partial decimal avg extract: write row(sum:decimal, count:bigint).
-// Overflow during sum adjustment -> sum child set to null, count kept.
-__attribute__((__visibility__("default"))) void
-jit_HashAggrExtractPartialDecimalAvg(
+template <typename TResult>
+void jitHashAggrExtractPartialDecimalAvg(
     char* vector,
     int32_t row,
     char* group,
-    int32_t offset,
-    int32_t /*precision*/,
-    int32_t /*scale*/,
-    int32_t /*resultPrecision*/,
-    int32_t /*resultScale*/,
-    int8_t /*longDecimal*/) {
+    int32_t offset) {
   auto* state =
       reinterpret_cast<bytedance::bolt::jit::JitDecimalAvgState*>(group + offset);
   auto* rowVector = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                        ->as<bytedance::bolt::RowVector>();
+                        ->asUnchecked<bytedance::bolt::RowVector>();
   auto* sumVector =
-      rowVector->childAt(0)->asFlatVector<bytedance::bolt::int128_t>();
-  auto* countVector = rowVector->childAt(1)->asFlatVector<int64_t>();
+      rowVector->childAt(0)->asUnchecked<bytedance::bolt::FlatVector<TResult>>();
+  auto* countVector =
+      rowVector->childAt(1)->asUnchecked<bytedance::bolt::FlatVector<int64_t>>();
   rowVector->setNull(row, false);
   countVector->set(row, state->count);
   std::optional<bytedance::bolt::int128_t> adjustedSum =
       bytedance::bolt::DecimalUtil::adjustSumForOverflow(
           state->sum, state->overflow);
   if (adjustedSum.has_value()) {
-    sumVector->set(row, adjustedSum.value());
+    sumVector->set(row, static_cast<TResult>(adjustedSum.value()));
   } else {
     sumVector->setNull(row, true);
   }
 }
 
-// Final decimal avg extract: write FlatVector<short/long decimal>. Null when
-// the group is empty (all inputs null) or any overflow/rescale step fails.
-__attribute__((__visibility__("default"))) void
-jit_HashAggrExtractFinalDecimalAvg(
+template <typename TResult>
+void jitHashAggrExtractFinalDecimalAvg(
     char* vector,
     int32_t row,
     char* group,
@@ -218,40 +201,151 @@ jit_HashAggrExtractFinalDecimalAvg(
     int32_t precision,
     int32_t scale,
     int32_t resultPrecision,
-    int32_t resultScale,
-    int8_t longDecimal) {
-  auto* state =
-      reinterpret_cast<bytedance::bolt::jit::JitDecimalAvgState*>(group + offset);
-  if (longDecimal) {
-    auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                     ->as<bytedance::bolt::FlatVector<bytedance::bolt::int128_t>>();
-    if (state->count == 0) {
-      flat->setNull(row, true);
-      return;
-    }
-    auto result = jitDecimalAvgComputeFinal<bytedance::bolt::int128_t>(
-        state, precision, scale, resultPrecision, resultScale);
-    if (result.has_value()) {
-      flat->set(row, result.value());
-    } else {
-      flat->setNull(row, true);
-    }
-    return;
-  }
-
+    int32_t resultScale) {
+  auto* state = reinterpret_cast<bytedance::bolt::jit::JitDecimalAvgState*>(
+      group + offset);
   auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
-                   ->as<bytedance::bolt::FlatVector<int64_t>>();
+                   ->asUnchecked<bytedance::bolt::FlatVector<TResult>>();
   if (state->count == 0) {
     flat->setNull(row, true);
     return;
   }
-  auto result =
-      jitDecimalAvgComputeFinal<int64_t>(state, precision, scale, resultPrecision, resultScale);
+
+  auto result = jitDecimalAvgComputeFinal<TResult>(
+      state, precision, scale, resultPrecision, resultScale);
   if (result.has_value()) {
     flat->set(row, result.value());
   } else {
     flat->setNull(row, true);
   }
+}
+
+} // namespace
+
+extern "C" {
+
+// Final decimal sum extract. Null when the group is empty (all inputs null) or
+// the sum overflows the result precision.
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractFinalShortDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/) {
+  jitHashAggrExtractFinalDecimalSum<int64_t>(
+      vector, row, group, offset, precision);
+}
+
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractFinalLongDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/) {
+  jitHashAggrExtractFinalDecimalSum<bytedance::bolt::int128_t>(
+      vector, row, group, offset, precision);
+}
+
+// Partial decimal sum extract: write row(sum:decimal, isEmpty:bool).
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractPartialShortDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/) {
+  jitHashAggrExtractPartialDecimalSum<int64_t>(
+      vector, row, group, offset, precision);
+}
+
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractPartialLongDecimalSum(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t /*scale*/) {
+  jitHashAggrExtractPartialDecimalSum<bytedance::bolt::int128_t>(
+      vector, row, group, offset, precision);
+}
+
+// Partial decimal avg extract: write row(sum:decimal, count:bigint).
+// Overflow during sum adjustment -> sum child set to null, count kept.
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractPartialShortDecimalAvg(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t /*precision*/,
+    int32_t /*scale*/,
+    int32_t /*resultPrecision*/,
+    int32_t /*resultScale*/) {
+  jitHashAggrExtractPartialDecimalAvg<int64_t>(vector, row, group, offset);
+}
+
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractPartialLongDecimalAvg(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t /*precision*/,
+    int32_t /*scale*/,
+    int32_t /*resultPrecision*/,
+    int32_t /*resultScale*/) {
+  jitHashAggrExtractPartialDecimalAvg<bytedance::bolt::int128_t>(
+      vector, row, group, offset);
+}
+
+// Final decimal avg extract: write FlatVector<short/long decimal>. Null when
+// the group is empty (all inputs null) or any overflow/rescale step fails.
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractFinalShortDecimalAvg(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t scale,
+    int32_t resultPrecision,
+    int32_t resultScale) {
+  jitHashAggrExtractFinalDecimalAvg<int64_t>(
+      vector,
+      row,
+      group,
+      offset,
+      precision,
+      scale,
+      resultPrecision,
+      resultScale);
+}
+
+__attribute__((__visibility__("default"))) void
+jit_HashAggrExtractFinalLongDecimalAvg(
+    char* vector,
+    int32_t row,
+    char* group,
+    int32_t offset,
+    int32_t precision,
+    int32_t scale,
+    int32_t resultPrecision,
+    int32_t resultScale) {
+  jitHashAggrExtractFinalDecimalAvg<bytedance::bolt::int128_t>(
+      vector,
+      row,
+      group,
+      offset,
+      precision,
+      scale,
+      resultPrecision,
+      resultScale);
 }
 
 } // extern "C"

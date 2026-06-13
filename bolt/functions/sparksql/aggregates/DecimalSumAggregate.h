@@ -83,7 +83,12 @@ class DecimalSumAggregate : public exec::Aggregate {
     }
     const auto& valueType =
         context.isRawInput ? context.inputType : context.inputType->childAt(0);
-    const auto [resultPrecision, resultScale] =
+    // Unified decimal precision/scale convention across decimal aggregates:
+    //   precision/scale       -> intermediate (partial) decimal type
+    //   auxPrecision/auxScale -> final result decimal type
+    // For decimal sum the intermediate and final decimal type are the same
+    // (both sumType_), so aux* mirror precision/scale.
+    const auto [sumPrecision, sumScale] =
         getDecimalPrecisionScale(*sumType_.get());
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::Sum,
@@ -97,10 +102,10 @@ class DecimalSumAggregate : public exec::Aggregate {
         .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
                                          : jit::HashAggrJitRuntimeShape::Row,
         .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = resultPrecision,
-        .scale = resultScale,
-        .auxPrecision = 0,
-        .auxScale = 0,
+        .precision = sumPrecision,
+        .scale = sumScale,
+        .auxPrecision = sumPrecision,
+        .auxScale = sumScale,
         .ops = jit::getDecimalSumOps()};
   }
 #endif
