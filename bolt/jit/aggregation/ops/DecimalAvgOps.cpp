@@ -9,6 +9,8 @@
 
 #include "bolt/jit/aggregation/HashAggrJit.h"
 #include "bolt/jit/aggregation/HashAggrJitDecimalState.h"
+#include "bolt/jit/aggregation/ops/DecimalOps.h"
+#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::jit {
 
@@ -53,8 +55,8 @@ void compileDecimalAvgAddRawInput(
   auto* value =
       codegen.castValue(rawValue, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
-  codegen.emitDecimalAddWithOverflow(
-      group, slot.offset + kSumOffset, slot.offset + kOverflowOffset, value);
+  emitDecimalAddWithOverflow(
+      codegen, group, slot.offset + kSumOffset, slot.offset + kOverflowOffset, value);
   // ++count.
   auto* oldCount =
       codegen.loadValue(group, b.getInt64Ty(), slot.offset + kCountOffset);
@@ -105,8 +107,8 @@ void compileDecimalAvgAddIntermediateResults(
   auto* value =
       codegen.castValue(sum, slot.desc.inputKind, HashAggrJitValueKind::Int128);
   codegen.clearAccumulatorNull(group, slot);
-  codegen.emitDecimalAddWithOverflow(
-      group, slot.offset + kSumOffset, slot.offset + kOverflowOffset, value);
+  emitDecimalAddWithOverflow(
+      codegen, group, slot.offset + kSumOffset, slot.offset + kOverflowOffset, value);
   // count += incoming count.
   auto* oldCount =
       codegen.loadValue(group, b.getInt64Ty(), slot.offset + kCountOffset);
@@ -127,13 +129,45 @@ bool canCompileDecimalAvgExtract(const HashAggrJitSlot&, bool partialOutput) {
   return true;
 }
 
+void emitDecimalAvgExtract(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* vector,
+    llvm::Value* row,
+    llvm::Value* group,
+    const HashAggrJitSlot& slot,
+    bool partialOutput) {
+  auto& b = codegen.builder();
+  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
+                                 : "jit_HashAggrExtractFinalDecimalAvg";
+  auto* longDecimal = b.getInt8(
+      slot.desc.auxPrecision > bytedance::bolt::ShortDecimalType::kMaxPrecision
+          ? 1
+          : 0);
+  b.CreateCall(
+      codegen.module().getFunction(fn),
+      {vector,
+       row,
+       group,
+       b.getInt32(slot.offset),
+       b.getInt32(slot.desc.precision),
+       b.getInt32(slot.desc.scale),
+       b.getInt32(slot.desc.auxPrecision),
+       b.getInt32(slot.desc.auxScale),
+       longDecimal});
+}
+
 void compileDecimalAvgExtract(
     HashAggrJitCodegen& codegen,
     llvm::Value* group,
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
-  codegen.emitDecimalAvgExtract(
-      target.output.vector(), target.row, group, slot, target.partialOutput);
+  emitDecimalAvgExtract(
+      codegen,
+      target.output.vector(),
+      target.row,
+      group,
+      slot,
+      target.partialOutput);
 }
 
 } // namespace

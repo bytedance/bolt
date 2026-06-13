@@ -14,13 +14,13 @@ namespace bytedance::bolt::jit {
 // planning/types header so non-decimal ops don't depend on aggregate-private
 // row state details.
 struct JitDecimalSumState {
-  bytedance::bolt::int128_t sum{0};
+  int128_t sum{0};
   int64_t overflow{0};
   bool isEmpty{true};
 };
 
 struct JitDecimalAvgState {
-  bytedance::bolt::int128_t sum{0};
+  int128_t sum{0};
   int64_t count{0};
   int64_t overflow{0};
 };

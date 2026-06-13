@@ -263,32 +263,6 @@ class HashAggrJitCodegen {
       HashAggrJitValueKind from,
       HashAggrJitValueKind to) const;
   bool isFloatKind(HashAggrJitValueKind kind) const;
-  // Decimal extract: calls a runtime helper that reads the JIT decimal
-  // accumulator from 'group + slot.offset', applies overflow/precision checks
-  // and writes the result (final flat decimal / partial row) into 'vector'.
-  void emitDecimalSumExtract(
-      llvm::Value* vector,
-      llvm::Value* row,
-      llvm::Value* group,
-      const HashAggrJitSlot& slot,
-      bool partialOutput) const;
-  void emitDecimalAvgExtract(
-      llvm::Value* vector,
-      llvm::Value* row,
-      llvm::Value* group,
-      const HashAggrJitSlot& slot,
-      bool partialOutput) const;
-
-  // Inline i128 accumulate-with-overflow used by decimal sum/avg add+merge.
-  // Loads the i128 sum at 'group + sumOffset' and the i64 overflow counter at
-  // 'group + overflowOffset', computes sum += addend, updates the overflow
-  // counter by the carry direction (mirrors jitHashAggrAddWithOverflow), and
-  // stores both back. Replaces the per-row runtime helper call with pure IR.
-  void emitDecimalAddWithOverflow(
-      llvm::Value* group,
-      int32_t sumOffset,
-      int32_t overflowOffset,
-      llvm::Value* addend) const;
 
  private:
   llvm::Module& module_;

@@ -493,38 +493,41 @@ HashAggrJitCodegen::HashAggrJitCodegen(llvm::Module& module) : module_(module) {
 }
 
 llvm::Type* HashAggrJitCodegen::llvmType(HashAggrJitValueKind kind) const {
-  return ::bytedance::bolt::jit::llvmType(builder(), kind);
+  // Qualified call: the unqualified name would resolve to this member (name
+  // hiding stops lookup at class scope), so qualify to reach the file-local
+  // free function.
+  return bytedance::bolt::jit::llvmType(builder(), kind);
 }
 
 llvm::Value* HashAggrJitCodegen::isInputNull(
     llvm::Value* nulls,
     llvm::Value* row) const {
-  return ::bytedance::bolt::jit::isInputNull(builder(), nulls, row);
+  return bytedance::bolt::jit::isInputNull(builder(), nulls, row);
 }
 
 llvm::Value* HashAggrJitCodegen::isAccumulatorNull(
     llvm::Value* group,
     const HashAggrJitSlot& slot) const {
-  return ::bytedance::bolt::jit::isAccumulatorNull(builder(), group, slot);
+  return bytedance::bolt::jit::isAccumulatorNull(builder(), group, slot);
 }
 
 void HashAggrJitCodegen::clearAccumulatorNull(
     llvm::Value* group,
     const HashAggrJitSlot& slot) const {
-  ::bytedance::bolt::jit::clearAccumulatorNull(builder(), group, slot);
+  bytedance::bolt::jit::clearAccumulatorNull(builder(), group, slot);
 }
 
 void HashAggrJitCodegen::setAccumulatorNull(
     llvm::Value* group,
     const HashAggrJitSlot& slot) const {
-  ::bytedance::bolt::jit::setAccumulatorNull(builder(), group, slot);
+  bytedance::bolt::jit::setAccumulatorNull(builder(), group, slot);
 }
 
 llvm::LoadInst* HashAggrJitCodegen::loadValue(
     llvm::Value* row,
     llvm::Type* type,
     int32_t offset) const {
-  return ::bytedance::bolt::jit::loadValue(builder(), row, type, offset);
+  return bytedance::bolt::jit::loadValue(builder(), row, type, offset);
 }
 
 void HashAggrJitCodegen::storeValue(
@@ -532,18 +535,18 @@ void HashAggrJitCodegen::storeValue(
     llvm::Type* type,
     int32_t offset,
     llvm::Value* value) const {
-  ::bytedance::bolt::jit::storeValue(builder(), row, type, offset, value);
+  bytedance::bolt::jit::storeValue(builder(), row, type, offset, value);
 }
 
 llvm::Value* HashAggrJitCodegen::castValue(
     llvm::Value* value,
     HashAggrJitValueKind from,
     HashAggrJitValueKind to) const {
-  return ::bytedance::bolt::jit::castValue(builder(), value, from, to);
+  return bytedance::bolt::jit::castValue(builder(), value, from, to);
 }
 
 bool HashAggrJitCodegen::isFloatKind(HashAggrJitValueKind kind) const {
-  return ::bytedance::bolt::jit::isFloatKind(kind);
+  return bytedance::bolt::jit::isFloatKind(kind);
 }
 
 ScalarInputAdapterCodegen::ScalarInputAdapterCodegen(
@@ -559,7 +562,7 @@ llvm::StructType* ScalarInputAdapterCodegen::irRowType(
 llvm::Value* ScalarInputAdapterCodegen::read(
     llvm::Value* row,
     HashAggrJitValueKind kind) const {
-  auto* value = ::bytedance::bolt::jit::loadScalarInputValue(
+  auto* value = loadScalarInputValue(
       codegen_.builder(), input_, row, kind);
   // add_dense emits the top-level null guard before invoking aggregate ops.
   // Therefore rows reaching ops are non-null; keep the IRRow contract explicit
@@ -568,7 +571,7 @@ llvm::Value* ScalarInputAdapterCodegen::read(
 }
 
 llvm::Value* ScalarInputAdapterCodegen::loadNulls() const {
-  return ::bytedance::bolt::jit::loadScalarInputNulls(
+  return loadScalarInputNulls(
       codegen_.builder(), input_);
 }
 
@@ -596,7 +599,7 @@ RowInputAdapterCodegen::RowInputAdapterCodegen(
     : codegen_(codegen), input_(input) {}
 
 llvm::Value* RowInputAdapterCodegen::loadChild(int32_t field) const {
-  return ::bytedance::bolt::jit::loadRowInputChild(
+  return loadRowInputChild(
       codegen_.builder(), input_, field);
 }
 
@@ -611,7 +614,7 @@ llvm::Value* RowInputAdapterCodegen::read(llvm::Value*, HashAggrJitValueKind)
 }
 
 llvm::Value* RowInputAdapterCodegen::loadNulls() const {
-  return ::bytedance::bolt::jit::loadRowInputNulls(codegen_.builder(), input_);
+  return loadRowInputNulls(codegen_.builder(), input_);
 }
 
 llvm::Value* RowInputAdapterCodegen::isNull(llvm::Value* row) const {
@@ -623,7 +626,7 @@ llvm::Value* RowInputAdapterCodegen::readRowField(
     int32_t field,
     HashAggrJitValueKind kind) const {
   auto* child = loadChild(field);
-  auto* value = ::bytedance::bolt::jit::loadScalarInputValue(
+  auto* value = loadScalarInputValue(
       codegen_.builder(), child, row, kind);
   return IRRow::pack(codegen_.builder(), value, isRowFieldNull(row, field));
 }
@@ -636,7 +639,7 @@ llvm::Value* RowInputAdapterCodegen::readRowFieldValue(
   // Valid when the field is guaranteed non-null on this path (its null bit is
   // not consumed by the aggregate's merge semantics).
   auto* child = loadChild(field);
-  return ::bytedance::bolt::jit::loadScalarInputValue(
+  return loadScalarInputValue(
       codegen_.builder(), child, row, kind);
 }
 
@@ -645,7 +648,7 @@ llvm::Value* RowInputAdapterCodegen::isRowFieldNull(
     int32_t field) const {
   auto* child = loadChild(field);
   auto* nulls =
-      ::bytedance::bolt::jit::loadScalarInputNulls(codegen_.builder(), child);
+      loadScalarInputNulls(codegen_.builder(), child);
   auto* hasNulls = codegen_.builder().CreateICmpNE(
       nulls,
       llvm::ConstantPointerNull::get(
@@ -659,7 +662,7 @@ llvm::Value* RowInputAdapterCodegen::isRowFieldNull(
   auto* noNullsEnd = codegen_.builder().GetInsertBlock();
 
   codegen_.builder().SetInsertPoint(nullCheckBlock);
-  auto* index = ::bytedance::bolt::jit::loadScalarInputIndex(
+  auto* index = loadScalarInputIndex(
       codegen_.builder(), child, row);
   auto* isNull = codegen_.isInputNull(nulls, index);
   codegen_.builder().CreateBr(doneBlock);
@@ -679,7 +682,7 @@ ScalarOutputAdapterCodegen::ScalarOutputAdapterCodegen(
     : codegen_(codegen), output_(output) {}
 
 llvm::Value* ScalarOutputAdapterCodegen::vector() const {
-  return ::bytedance::bolt::jit::loadScalarOutputVector(
+  return loadScalarOutputVector(
       codegen_.builder(), output_);
 }
 
@@ -697,7 +700,7 @@ void ScalarOutputAdapterCodegen::write(
   auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
   if (supportsRawFlatOutput(kind)) {
     auto* type = codegen_.llvmType(kind);
-    auto* values = ::bytedance::bolt::jit::loadScalarOutputValues(
+    auto* values = loadScalarOutputValues(
         codegen_.builder(), output_);
     auto* typedValues = codegen_.builder().CreatePointerCast(
         values, type->getPointerTo());
@@ -707,9 +710,9 @@ void ScalarOutputAdapterCodegen::write(
         codegen_.builder().CreateZExt(row, codegen_.builder().getInt64Ty()));
     auto* store = codegen_.builder().CreateStore(value, valueAddr);
     store->setAlignment(llvm::Align(1));
-    auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+    auto* nulls = loadScalarOutputNulls(
         codegen_.builder(), output_);
-    ::bytedance::bolt::jit::emitOutputNullBit(
+    emitOutputNullBit(
         codegen_.builder(), nulls, row, isNull);
     return;
   }
@@ -726,9 +729,9 @@ void ScalarOutputAdapterCodegen::writeField(
 void ScalarOutputAdapterCodegen::writeNull(
     llvm::Value* row,
     llvm::Value* isNull) const {
-  auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+  auto* nulls = loadScalarOutputNulls(
       codegen_.builder(), output_);
-  ::bytedance::bolt::jit::emitOutputNullBit(
+  emitOutputNullBit(
       codegen_.builder(), nulls, row, isNull);
 }
 
@@ -738,12 +741,12 @@ RowOutputAdapterCodegen::RowOutputAdapterCodegen(
     : codegen_(codegen), output_(output) {}
 
 llvm::Value* RowOutputAdapterCodegen::loadChild(int32_t field) const {
-  return ::bytedance::bolt::jit::loadRowOutputChild(
+  return loadRowOutputChild(
       codegen_.builder(), output_, field);
 }
 
 llvm::Value* RowOutputAdapterCodegen::vector() const {
-  return ::bytedance::bolt::jit::loadRowOutputVector(codegen_.builder(), output_);
+  return loadRowOutputVector(codegen_.builder(), output_);
 }
 
 void RowOutputAdapterCodegen::resize(llvm::Value* size) const {
@@ -771,7 +774,7 @@ void RowOutputAdapterCodegen::writeField(
   auto* value = IRRow::getValue(codegen_.builder(), irRow);
   auto* isNull = IRRow::getIsNull(codegen_.builder(), irRow);
   auto* type = codegen_.llvmType(kind);
-  auto* values = ::bytedance::bolt::jit::loadScalarOutputValues(
+  auto* values = loadScalarOutputValues(
       codegen_.builder(), child);
   auto* typedValues =
       codegen_.builder().CreatePointerCast(values, type->getPointerTo());
@@ -779,98 +782,19 @@ void RowOutputAdapterCodegen::writeField(
   auto* valueAddr = codegen_.builder().CreateInBoundsGEP(type, typedValues, row64);
   auto* store = codegen_.builder().CreateStore(value, valueAddr);
   store->setAlignment(llvm::Align(1));
-  auto* nulls = ::bytedance::bolt::jit::loadScalarOutputNulls(
+  auto* nulls = loadScalarOutputNulls(
       codegen_.builder(), child);
-  ::bytedance::bolt::jit::emitOutputNullBit(
+  emitOutputNullBit(
       codegen_.builder(), nulls, row, isNull);
 }
 
 void RowOutputAdapterCodegen::writeNull(
     llvm::Value* row,
     llvm::Value* isNull) const {
-  auto* nulls = ::bytedance::bolt::jit::loadRowOutputNulls(
+  auto* nulls = loadRowOutputNulls(
       codegen_.builder(), output_);
-  ::bytedance::bolt::jit::emitOutputNullBit(
+  emitOutputNullBit(
       codegen_.builder(), nulls, row, isNull);
-}
-
-void HashAggrJitCodegen::emitDecimalSumExtract(
-    llvm::Value* output,
-    llvm::Value* row,
-    llvm::Value* group,
-    const HashAggrJitSlot& slot,
-    bool partialOutput) const {
-  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalSum"
-                                 : "jit_HashAggrExtractFinalDecimalSum";
-  auto* longDecimal = builder().getInt8(
-      slot.desc.inputKind == HashAggrJitValueKind::Int128 ? 1 : 0);
-  builder().CreateCall(
-      module_.getFunction(fn),
-      {output,
-       row,
-       group,
-       builder().getInt32(slot.offset),
-       builder().getInt32(slot.desc.precision),
-       builder().getInt32(slot.desc.scale),
-       longDecimal});
-}
-
-void HashAggrJitCodegen::emitDecimalAvgExtract(
-    llvm::Value* output,
-    llvm::Value* row,
-    llvm::Value* group,
-    const HashAggrJitSlot& slot,
-    bool partialOutput) const {
-  const char* fn = partialOutput ? "jit_HashAggrExtractPartialDecimalAvg"
-                                 : "jit_HashAggrExtractFinalDecimalAvg";
-  auto* longDecimal = builder().getInt8(
-      slot.desc.auxPrecision > bytedance::bolt::ShortDecimalType::kMaxPrecision
-          ? 1
-          : 0);
-  builder().CreateCall(
-      module_.getFunction(fn),
-      {output,
-       row,
-       group,
-       builder().getInt32(slot.offset),
-       builder().getInt32(slot.desc.precision),
-       builder().getInt32(slot.desc.scale),
-       builder().getInt32(slot.desc.auxPrecision),
-       builder().getInt32(slot.desc.auxScale),
-       longDecimal});
-}
-
-void HashAggrJitCodegen::emitDecimalAddWithOverflow(
-    llvm::Value* group,
-    int32_t sumOffset,
-    int32_t overflowOffset,
-    llvm::Value* addend) const {
-  auto& b = builder();
-  auto* i128Ty = b.getInt128Ty();
-  auto* i64Ty = b.getInt64Ty();
-  auto* zero128 = llvm::ConstantInt::get(i128Ty, 0);
-
-  auto* oldSum = loadValue(group, i128Ty, sumOffset);
-  auto* newSum = b.CreateAdd(oldSum, addend);
-  storeValue(group, i128Ty, sumOffset, newSum);
-
-  // Mirror jitHashAggrAddWithOverflow:
-  //   +1 if a>0 && b>0 && result<0   (positive overflow)
-  //   -1 if a<0 && b<0 && result>=0  (negative overflow)
-  auto* aPos = b.CreateICmpSGT(oldSum, zero128);
-  auto* bPos = b.CreateICmpSGT(addend, zero128);
-  auto* rNeg = b.CreateICmpSLT(newSum, zero128);
-  auto* posOverflow = b.CreateAnd(b.CreateAnd(aPos, bPos), rNeg);
-
-  auto* aNeg = b.CreateICmpSLT(oldSum, zero128);
-  auto* bNeg = b.CreateICmpSLT(addend, zero128);
-  auto* rNonNeg = b.CreateICmpSGE(newSum, zero128);
-  auto* negOverflow = b.CreateAnd(b.CreateAnd(aNeg, bNeg), rNonNeg);
-
-  auto* carry = b.CreateSub(
-      b.CreateZExt(posOverflow, i64Ty), b.CreateZExt(negOverflow, i64Ty));
-  auto* oldOverflow = loadValue(group, i64Ty, overflowOffset);
-  storeValue(group, i64Ty, overflowOffset, b.CreateAdd(oldOverflow, carry));
 }
 
 namespace {
