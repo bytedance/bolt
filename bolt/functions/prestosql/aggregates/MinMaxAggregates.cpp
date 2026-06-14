@@ -76,16 +76,9 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
     }
     return jit::HashAggrJitDescriptor{
         .kind = jitKind(),
-        .inputKind = *inputKind,
+        .rawInputKind = *inputKind,
         .accumulatorKind = *inputKind,
         .context = context,
-        .decimal = false,
-        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = 0,
-        .scale = 0,
-        .auxPrecision = 0,
-        .auxScale = 0,
         .ops = jit::getMinMaxOps()};
   }
 

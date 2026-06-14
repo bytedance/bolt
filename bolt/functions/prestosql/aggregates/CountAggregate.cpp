@@ -88,16 +88,9 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     }
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::Count,
-        .inputKind = inputKind,
+        .rawInputKind = inputKind,
         .accumulatorKind = jit::HashAggrJitValueKind::Int64,
         .context = context,
-        .decimal = false,
-        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = 0,
-        .scale = 0,
-        .auxPrecision = 0,
-        .auxScale = 0,
         .ops = jit::getCountOps()};
   }
 #endif

@@ -17,6 +17,24 @@
 // file-local in their respective ops files.
 namespace bytedance::bolt::jit {
 
+inline HashAggrJitValueKind hashAggrJitDecimalKindForPrecision(
+    int32_t precision) {
+  return precision > bytedance::bolt::ShortDecimalType::kMaxPrecision
+      ? HashAggrJitValueKind::Int128
+      : HashAggrJitValueKind::Int64;
+}
+
+inline const TypePtr& hashAggrJitDecimalValueType(const TypePtr& type) {
+  return type->isRow() ? type->childAt(0) : type;
+}
+
+inline std::pair<int32_t, int32_t> hashAggrJitDecimalPrecisionScale(
+    const TypePtr& type) {
+  const auto [precision, scale] =
+      getDecimalPrecisionScale(*hashAggrJitDecimalValueType(type));
+  return {precision, scale};
+}
+
 // Inline i128 accumulate-with-overflow used by decimal sum/avg add+merge.
 // Loads the i128 sum at 'group + sumOffset' and the i64 overflow counter at
 // 'group + overflowOffset', computes sum += addend, updates the overflow

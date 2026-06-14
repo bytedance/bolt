@@ -848,11 +848,11 @@ char hashAggrJitRuntimeShapeName(HashAggrJitRuntimeShape shape) {
 }
 
 bool usesRowInputRuntime(const HashAggrJitSlot& slot) {
-  return slot.desc.inputShape == HashAggrJitRuntimeShape::Row;
+  return slot.desc.inputShape() == HashAggrJitRuntimeShape::Row;
 }
 
-bool usesRowOutputRuntime(const HashAggrJitSlot& slot, bool partialOutput) {
-  return partialOutput && slot.desc.outputShape == HashAggrJitRuntimeShape::Row;
+bool usesRowOutputRuntime(const HashAggrJitSlot& slot) {
+  return slot.desc.outputShape() == HashAggrJitRuntimeShape::Row;
 }
 
 bool genAddDenseIR(
@@ -1045,7 +1045,7 @@ bool genExtractIR(
     auto* outputAddr = builder.CreateConstInBoundsGEP1_64(i8PtrTy, resultVectors, i);
     auto* outputRuntime = builder.CreateLoad(i8PtrTy, outputAddr);
     std::unique_ptr<OutputAdapterCodegen> output;
-    if (usesRowOutputRuntime(slot, partialOutput)) {
+    if (usesRowOutputRuntime(slot)) {
       output = std::make_unique<RowOutputAdapterCodegen>(codegen, outputRuntime);
     } else {
       output =
@@ -1082,15 +1082,15 @@ HashAggrJitChunk::HashAggrJitChunk(
   for (const auto& slot : slots_) {
     out << "_" << hashAggrJitKindName(slot.desc.kind) << "_"
         << static_cast<int>(slot.desc.kind)
-        << hashAggrJitValueKindName(slot.desc.inputKind)
+        << hashAggrJitValueKindName(slot.desc.rawInputKind)
         << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o"
         << slot.offset << "n" << slot.nullByte << "m"
         << static_cast<int>(slot.nullMask)
         << (slot.desc.isCountStar() ? "s" : "x")
         << (!slot.desc.isRawInput() ? "g" : "r")
-        << (slot.desc.decimal ? "d" : "n") << "i"
-        << hashAggrJitRuntimeShapeName(slot.desc.inputShape) << "o"
-        << hashAggrJitRuntimeShapeName(slot.desc.outputShape);
+        << (slot.desc.isDecimal() ? "d" : "n") << "i"
+        << hashAggrJitRuntimeShapeName(slot.desc.inputShape()) << "o"
+        << hashAggrJitRuntimeShapeName(slot.desc.outputShape());
   }
   functionName_ = out.str();
   initFunctionName_ = functionName_ + "_init";
@@ -1188,9 +1188,9 @@ std::string HashAggrJitDescriptor::signature() const {
       hashAggrJitValueKindName(inputKind),
       hashAggrJitValueKindName(accumulatorKind),
       !isRawInput(),
-      decimal,
-      hashAggrJitRuntimeShapeName(inputShape),
-      hashAggrJitRuntimeShapeName(outputShape));
+      isDecimal(),
+      hashAggrJitRuntimeShapeName(inputShape()),
+      hashAggrJitRuntimeShapeName(outputShape()));
 }
 */
 

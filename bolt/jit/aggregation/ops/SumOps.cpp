@@ -35,10 +35,10 @@ void compileSumAccumulate(
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
-  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* inputRow = input.read(row, slot.desc.rawInputKind);
   auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
   auto* value = codegen.castValue(
-      rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
+      rawValue, slot.desc.rawInputKind, slot.desc.accumulatorKind);
   auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
   codegen.clearAccumulatorNull(group, slot);
   auto* oldValue = codegen.loadValue(group, accType, slot.offset);

@@ -154,7 +154,7 @@ bool fillHashAggrJitRowInputRuntime(
   // hot merge path; populating its raw pointer lets generated IR load it
   // directly instead of calling the per-row jit_GetDecodedRowField* helper
   // (which rebuilds a field DecodedVector on every call).
-  if (slot.desc.inputShape != jit::HashAggrJitRuntimeShape::Row) {
+  if (slot.desc.inputShape() != jit::HashAggrJitRuntimeShape::Row) {
     return false;
   }
   const auto* base = decoded.base();
@@ -246,13 +246,13 @@ std::string hashAggrJitSlotDebugString(
     out << "]";
   }
   out << " kind=" << static_cast<int>(slot.desc.kind)
-      << " inputKind=" << jit::hashAggrJitValueKindName(slot.desc.inputKind)
+      << " inputKind=" << jit::hashAggrJitValueKindName(slot.desc.rawInputKind)
       << " accKind=" << jit::hashAggrJitValueKindName(slot.desc.accumulatorKind)
       << " offset=" << slot.offset << " nullByte=" << slot.nullByte
       << " nullMask=" << static_cast<int>(slot.nullMask)
       << " countStar=" << slot.desc.isCountStar()
       << " mergeInput=" << !slot.desc.isRawInput()
-      << " decimal=" << slot.desc.decimal
+      << " decimal=" << slot.desc.isDecimal()
       << " kindName=" << jit::hashAggrJitKindName(slot.desc.kind);
   return out.str();
 }
@@ -292,14 +292,12 @@ std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
     inputTypes = {aggregate.intermediateType};
   }
 
-  if (!(isRawInput && inputTypes.empty()) && inputTypes.size() != 1) {
-    return std::nullopt;
-  }
-
   const jit::HashAggrJitPlanContext context{
       .isRawInput = isRawInput,
       .isPartialOutput = isPartialOutput,
-      .inputTypes = std::move(inputTypes)};
+      .inputTypes = std::move(inputTypes),
+      .outputType = isPartialOutput ? aggregate.intermediateType
+                                    : aggregate.function->resultType()};
   if (!aggregate.function->supportsHashAggrJit(context)) {
     return std::nullopt;
   }
@@ -1199,7 +1197,7 @@ void GroupingSet::runHashAggrJitAddChunks(
       hashAggrJitInputVectors_[slotIndex] = arg;
       hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
       const bool usesRowInputRuntime =
-          slot.desc.inputShape == jit::HashAggrJitRuntimeShape::Row;
+          slot.desc.inputShape() == jit::HashAggrJitRuntimeShape::Row;
       if (usesRowInputRuntime) {
         if (!fillHashAggrJitRowInputRuntime(
                 hashAggrJitInputRuntimes_[slotIndex],
@@ -1290,7 +1288,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
       auto& aggregateVector =
           result->childAt(slot.aggregateIndex + aggregateOutputOffset);
       const auto expectedEncoding =
-          slot.desc.outputShape == jit::HashAggrJitRuntimeShape::Row
+          slot.desc.outputShape() == jit::HashAggrJitRuntimeShape::Row
           ? VectorEncoding::Simple::ROW
           : VectorEncoding::Simple::FLAT;
       if (aggregateVector->encoding() != expectedEncoding) {
@@ -1323,7 +1321,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
                 .vector = aggregateVector.get()};
       } else if (
           aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
-          slot.desc.outputShape == jit::HashAggrJitRuntimeShape::Row) {
+          slot.desc.outputShape() == jit::HashAggrJitRuntimeShape::Row) {
         if (!fillHashAggrJitRowOutputRuntime(
                 hashAggrJitOutputRuntimes_[slotIndex],
                 hashAggrJitRowOutputChildren_[slotIndex],

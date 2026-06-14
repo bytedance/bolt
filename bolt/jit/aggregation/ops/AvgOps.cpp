@@ -48,10 +48,10 @@ void compileAvgAddRawInput(
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
-  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* inputRow = input.read(row, slot.desc.rawInputKind);
   auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
-  auto* value =
-      codegen.castValue(rawValue, slot.desc.inputKind, slot.desc.accumulatorKind);
+  auto* value = codegen.castValue(
+      rawValue, slot.desc.rawInputKind, slot.desc.accumulatorKind);
   codegen.clearAccumulatorNull(group, slot);
   auto* oldSum = codegen.loadValue(
       group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);

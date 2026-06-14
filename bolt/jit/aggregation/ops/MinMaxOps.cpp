@@ -33,10 +33,10 @@ void compileMinMaxUpdate(
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
-  auto* inputRow = input.read(row, slot.desc.inputKind);
+  auto* inputRow = input.read(row, slot.desc.rawInputKind);
   auto* value = codegen.castValue(
       IRRow::getValue(codegen.builder(), inputRow),
-      slot.desc.inputKind,
+      slot.desc.rawInputKind,
       slot.desc.accumulatorKind);
   auto* type = codegen.llvmType(slot.desc.accumulatorKind);
   auto* oldValue = codegen.loadValue(group, type, slot.offset);

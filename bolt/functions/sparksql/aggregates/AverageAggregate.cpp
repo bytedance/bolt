@@ -71,18 +71,9 @@ class AverageAggregate
     if (!context.isRawInput) {
       return jit::HashAggrJitDescriptor{
           .kind = jit::HashAggrJitKind::Avg,
-          .inputKind = jit::HashAggrJitValueKind::Double,
+          .rawInputKind = jit::HashAggrJitValueKind::Double,
           .accumulatorKind = jit::HashAggrJitValueKind::Double,
           .context = context,
-          .decimal = false,
-          .inputShape = jit::HashAggrJitRuntimeShape::Row,
-          .outputShape = context.isPartialOutput
-              ? jit::HashAggrJitRuntimeShape::Row
-              : jit::HashAggrJitRuntimeShape::Scalar,
-          .precision = 0,
-          .scale = 0,
-          .auxPrecision = 0,
-          .auxScale = 0,
           .ops = jit::getAvgOps()};
     }
 
@@ -92,18 +83,9 @@ class AverageAggregate
     }
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::Avg,
-        .inputKind = *inputKind,
+        .rawInputKind = *inputKind,
         .accumulatorKind = jit::HashAggrJitValueKind::Double,
         .context = context,
-        .decimal = false,
-        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .outputShape = context.isPartialOutput
-            ? jit::HashAggrJitRuntimeShape::Row
-            : jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = 0,
-        .scale = 0,
-        .auxPrecision = 0,
-        .auxScale = 0,
         .ops = jit::getAvgOps()};
   }
 #endif
@@ -182,28 +164,13 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
     const auto& inputType = context.inputTypes[0];
     const auto& valueType =
         context.isRawInput ? inputType : inputType->childAt(0);
-    const auto [sumPrecision, sumScale] =
-        getDecimalPrecisionScale(*sumType_.get());
-    const auto [resultPrecision, resultScale] = context.isPartialOutput
-        ? std::pair<int32_t, int32_t>{0, 0}
-        : getDecimalPrecisionScale(*this->resultType().get());
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::DecimalAvg,
-        .inputKind = valueType->isShortDecimal()
+        .rawInputKind = valueType->isShortDecimal()
             ? jit::HashAggrJitValueKind::Int64
             : jit::HashAggrJitValueKind::Int128,
         .accumulatorKind = jit::HashAggrJitValueKind::Int128,
         .context = context,
-        .decimal = true,
-        .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
-                                         : jit::HashAggrJitRuntimeShape::Row,
-        .outputShape = context.isPartialOutput
-            ? jit::HashAggrJitRuntimeShape::Row
-            : jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = sumPrecision,
-        .scale = sumScale,
-        .auxPrecision = resultPrecision,
-        .auxScale = resultScale,
         .ops = jit::getDecimalAvgOps()};
   }
 #endif

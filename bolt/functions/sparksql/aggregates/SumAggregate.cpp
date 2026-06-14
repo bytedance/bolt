@@ -76,16 +76,9 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
 
     return jit::HashAggrJitDescriptor{
         .kind = jit::HashAggrJitKind::Sum,
-        .inputKind = *inputKind,
+        .rawInputKind = *inputKind,
         .accumulatorKind = accumulatorKind,
         .context = context,
-        .decimal = false,
-        .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .outputShape = jit::HashAggrJitRuntimeShape::Scalar,
-        .precision = 0,
-        .scale = 0,
-        .auxPrecision = 0,
-        .auxScale = 0,
         .ops = jit::getSumOps()};
   }
 #endif

@@ -57,10 +57,10 @@ void compileCountAddIntermediateResults(
   if (slot.desc.isCountStar()) {
     inc = codegen.builder().getInt64(1);
   } else {
-    auto* inputRow = input.read(row, slot.desc.inputKind);
+    auto* inputRow = input.read(row, slot.desc.rawInputKind);
     inc = codegen.castValue(
         IRRow::getValue(codegen.builder(), inputRow),
-        slot.desc.inputKind,
+        slot.desc.rawInputKind,
         HashAggrJitValueKind::Int64);
   }
   addInc(codegen, group, slot, inc);

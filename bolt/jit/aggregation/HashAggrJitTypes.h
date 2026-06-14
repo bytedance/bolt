@@ -83,6 +83,7 @@ struct HashAggrJitPlanContext {
   bool isRawInput{false};
   bool isPartialOutput{false};
   std::vector<TypePtr> inputTypes;
+  TypePtr outputType;
 
   bool isCountStar() const {
     return isRawInput && inputTypes.empty();
@@ -123,20 +124,9 @@ struct HashAggrJitOps;
 
 struct HashAggrJitDescriptor {
   HashAggrJitKind kind;
-  HashAggrJitValueKind inputKind;
+  HashAggrJitValueKind rawInputKind;
   HashAggrJitValueKind accumulatorKind;
   HashAggrJitPlanContext context;
-  bool decimal{false};
-  HashAggrJitRuntimeShape inputShape{HashAggrJitRuntimeShape::Scalar};
-  HashAggrJitRuntimeShape outputShape{HashAggrJitRuntimeShape::Scalar};
-  // Result decimal precision/scale, used by decimal extract overflow checks.
-  // Only meaningful when decimal == true.
-  int32_t precision{0};
-  int32_t scale{0};
-  // Secondary decimal precision/scale. For decimal avg extract, precision/scale
-  // carry the intermediate sum type and aux* carry the result type.
-  int32_t auxPrecision{0};
-  int32_t auxScale{0};
   const HashAggrJitOps* ops{nullptr};
 
   bool isCountStar() const {
@@ -145,6 +135,24 @@ struct HashAggrJitDescriptor {
 
   bool isRawInput() const {
     return context.isRawInput;
+  }
+
+  bool isDecimal() const {
+    return kind == HashAggrJitKind::DecimalSum ||
+        kind == HashAggrJitKind::DecimalAvg;
+  }
+
+  HashAggrJitRuntimeShape inputShape() const {
+    return context.inputTypes.size() == 1 && context.inputTypes[0] &&
+            context.inputTypes[0]->isRow()
+        ? HashAggrJitRuntimeShape::Row
+        : HashAggrJitRuntimeShape::Scalar;
+  }
+
+  HashAggrJitRuntimeShape outputShape() const {
+    return context.outputType && context.outputType->isRow()
+        ? HashAggrJitRuntimeShape::Row
+        : HashAggrJitRuntimeShape::Scalar;
   }
 
   // std::string signature() const;
