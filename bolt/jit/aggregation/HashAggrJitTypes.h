@@ -163,9 +163,10 @@ struct HashAggrJitSlot {
   int32_t offset;
   int32_t nullByte;
   uint8_t nullMask;
-  // All aggregate-level traits live in the descriptor; IR-side code reads them
-  // through 'desc'. Only the row-layout fields above are slot-specific.
+
   HashAggrJitDescriptor desc;
+
+  std::string getDescription() const;
 };
 
 bool isHashAggrJitSupportedType(TypeKind kind);

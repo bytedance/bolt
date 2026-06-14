@@ -229,50 +229,6 @@ bool fillHashAggrJitRowOutputRuntime(
   return true;
 }
 
-std::string hashAggrJitSlotDebugString(
-    const jit::HashAggrJitSlot& slot,
-    const AggregateInfo* aggregate = nullptr) {
-  std::ostringstream out;
-  out << "agg#" << slot.aggregateIndex;
-  if (aggregate != nullptr) {
-    out << "(" << aggregate->name << ")";
-    out << " inputs=[";
-    for (size_t i = 0; i < aggregate->rawInputTypes.size(); ++i) {
-      if (i > 0) {
-        out << ", ";
-      }
-      out << hashAggrJitTypeName(aggregate->rawInputTypes[i]);
-    }
-    out << "]";
-  }
-  out << " kind=" << static_cast<int>(slot.desc.kind)
-      << " inputKind=" << jit::hashAggrJitValueKindName(slot.desc.rawInputKind)
-      << " accKind=" << jit::hashAggrJitValueKindName(slot.desc.accumulatorKind)
-      << " offset=" << slot.offset << " nullByte=" << slot.nullByte
-      << " nullMask=" << static_cast<int>(slot.nullMask)
-      << " countStar=" << slot.desc.isCountStar()
-      << " mergeInput=" << !slot.desc.isRawInput()
-      << " decimal=" << slot.desc.isDecimal()
-      << " kindName=" << jit::hashAggrJitKindName(slot.desc.kind);
-  return out.str();
-}
-
-std::string hashAggrJitChunkDebugString(
-    const jit::HashAggrJitChunk& chunk,
-    const std::vector<AggregateInfo>& aggregates) {
-  std::ostringstream out;
-  out << chunk.functionName() << " slots=[";
-  for (size_t i = 0; i < chunk.slots().size(); ++i) {
-    if (i > 0) {
-      out << "; ";
-    }
-    const auto& slot = chunk.slots()[i];
-    out << hashAggrJitSlotDebugString(slot, &aggregates[slot.aggregateIndex]);
-  }
-  out << "] canExtract=" << chunk.canExtract()
-      << " codegenReady=" << chunk.isCodegenReady();
-  return out.str();
-}
 #endif
 
 std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
@@ -1057,27 +1013,19 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   auto flushChunk = [&]() {
     if (currentChunkSlots.size() < minChunkWidth) {
       if (!currentChunkSlots.empty()) {
-        std::ostringstream out;
-        for (size_t i = 0; i < currentChunkSlots.size(); ++i) {
-          if (i > 0) {
-            out << "; ";
-          }
-          const auto& slot = currentChunkSlots[i];
-          out << hashAggrJitSlotDebugString(slot, &aggregates_[slot.aggregateIndex]);
-        }
         VLOG(1) << "HashAggrJit discard chunk candidate due to width "
                   << currentChunkSlots.size() << " < " << minChunkWidth
-                  << ": [" << out.str() << "]";
+                  << ".";
       }
       currentChunkSlots.clear();
       return;
     }
-    jit::HashAggrJitChunk chunk(std::move(currentChunkSlots), isPartial_);
+    jit::HashAggrJitChunk chunk(
+        std::move(currentChunkSlots), isRawInput_, isPartial_);
     if (chunk.codegen()) {
       hashAggrJitChunks_.push_back(std::move(chunk));
       VLOG(1) << "HashAggrJit formed chunk: "
-                << hashAggrJitChunkDebugString(
-                       hashAggrJitChunks_.back(), aggregates_);
+                << hashAggrJitChunks_.back().getDescription();
     } else {
       VLOG(1) << "HashAggrJit chunk codegen failed for chunk "
                 << chunk.functionName();
@@ -1090,14 +1038,19 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_, isPartial_);
     if (!slot.has_value()) {
       VLOG(1) << "HashAggrJit aggregate is not JIT-able: agg#" << i << "("
-                << aggregates_[i].name << ") rawInputTypes=["
+                << aggregates_[i].name << ") isRawInput=" << isRawInput_
+                << " isPartialOutput=" << isPartial_ << " inputTypes=["
                 << [&]() {
                      std::ostringstream out;
-                     for (size_t j = 0; j < aggregates_[i].rawInputTypes.size(); ++j) {
-                       if (j > 0) {
-                         out << ", ";
+                     if (isRawInput_) {
+                       for (size_t j = 0; j < aggregates_[i].rawInputTypes.size(); ++j) {
+                         if (j > 0) {
+                           out << ", ";
+                         }
+                         out << hashAggrJitTypeName(aggregates_[i].rawInputTypes[j]);
                        }
-                       out << hashAggrJitTypeName(aggregates_[i].rawInputTypes[j]);
+                     } else {
+                       out << hashAggrJitTypeName(aggregates_[i].intermediateType);
                      }
                      return out.str();
                    }()
@@ -1105,8 +1058,10 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
                 << " mask=" << aggregates_[i].mask.has_value()
                 << " sortingKeys=" << aggregates_[i].sortingKeys.size()
                 << " inputs=" << aggregates_[i].inputs.size()
-                << " intermediateType="
-                << hashAggrJitTypeName(aggregates_[i].intermediateType);
+                << " outputType="
+                << hashAggrJitTypeName(
+                       isPartial_ ? aggregates_[i].intermediateType
+                                  : aggregates_[i].function->resultType());
       flushChunk();
       continue;
     }
@@ -1115,7 +1070,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
       flushChunk();
     }
     VLOG(1) << "HashAggrJit aggregate is JIT-able: "
-              << hashAggrJitSlotDebugString(*slot, &aggregates_[i]);
+              << slot->getDescription();
     currentChunkSlots.push_back(*slot);
   }
 
@@ -1144,7 +1099,7 @@ void GroupingSet::runHashAggrJitAddChunks(
   for (auto& chunk : hashAggrJitChunks_) {
     if (!chunk.isCodegenReady()) {
       VLOG(1) << "HashAggrJit chunk is not codegen-ready, skip add: "
-                << hashAggrJitChunkDebugString(chunk, aggregates_);
+                << chunk.getDescription();
       continue;
     }
 
@@ -1225,8 +1180,7 @@ void GroupingSet::runHashAggrJitAddChunks(
 
     if (!canRunChunk) {
       VLOG(1) << "HashAggrJit chunk cannot run add path, fallback to non-JIT: "
-                << hashAggrJitChunkDebugString(chunk, aggregates_)
-                << " reason=" << skipReason;
+                << chunk.getDescription() << " reason=" << skipReason;
       continue;
     }
 
@@ -1264,11 +1218,6 @@ void GroupingSet::runHashAggrJitExtractChunks(
 
   jitExtracted.assign(aggregates_.size(), 0);
   for (auto& chunk : hashAggrJitChunks_) {
-    if (!chunk.canExtract()) {
-      VLOG(1) << "HashAggrJit chunk cannot extract, fallback to non-JIT extract: "
-                << hashAggrJitChunkDebugString(chunk, aggregates_);
-      continue;
-    }
     const auto numSlots = chunk.slots().size();
     hashAggrJitOutputRuntimes_.assign(numSlots, jit::HashAggrJitOutputRuntime{});
     hashAggrJitRowOutputChildren_.resize(numSlots);
@@ -1337,8 +1286,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
     }
     if (!canRunChunk) {
       VLOG(1) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
-                << hashAggrJitChunkDebugString(chunk, aggregates_)
-                << " reason=" << skipReason;
+                << chunk.getDescription() << " reason=" << skipReason;
       continue;
     }
     chunk.extract(groups.data(), groups.size(), hashAggrJitResultPtrs_.data());

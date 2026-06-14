@@ -14,6 +14,7 @@
 
 #include <fmt/format.h>
 
+#include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/jit/ThrustJITv2.h"
 
@@ -1072,31 +1073,49 @@ bool genExtractIR(
 
 } // namespace
 
+std::string HashAggrJitSlot::getDescription() const {
+  std::ostringstream inputs;
+  inputs << "[";
+  for (size_t i = 0; i < desc.context.inputTypes.size(); ++i) {
+    if (i > 0) {
+      inputs << ",";
+    }
+    inputs << desc.context.inputTypes[i]->toString();
+  }
+  inputs << "]";
+
+  return fmt::format(
+      "{}_raw{}_partial{}({})->{}@{}",
+      hashAggrJitKindName(desc.kind),
+      desc.context.isRawInput,
+      desc.context.isPartialOutput,
+      inputs.str(),
+      desc.context.outputType->toString(),
+      offset);
+}
+
 HashAggrJitChunk::HashAggrJitChunk(
     std::vector<HashAggrJitSlot> slots,
-    bool partialOutput)
-    : slots_(std::move(slots)), partialOutput_(partialOutput) {
+    bool isRawInput,
+    bool isPartialOutput)
+    : slots_(std::move(slots)),
+      isRawInput_(isRawInput),
+      isPartialOutput_(isPartialOutput) {
+  const auto description = getDescription();
+  functionName_ = fmt::format(
+      "jit_hashaggr_v2_raw{}_partial{}_n{}_h{:016x}",
+      isRawInput_,
+      isPartialOutput_,
+      slots_.size(),
+      bits::hashBytes(1, description.data(), description.size()));
+}
+
+std::string HashAggrJitChunk::getDescription() const {
   std::ostringstream out;
-  out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
-      << slots_.size();
   for (const auto& slot : slots_) {
-    out << "_" << hashAggrJitKindName(slot.desc.kind) << "_"
-        << static_cast<int>(slot.desc.kind)
-        << hashAggrJitValueKindName(slot.desc.rawInputKind)
-        << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o"
-        << slot.offset << "n" << slot.nullByte << "m"
-        << static_cast<int>(slot.nullMask)
-        << (slot.desc.isCountStar() ? "s" : "x")
-        << (!slot.desc.isRawInput() ? "g" : "r")
-        << (slot.desc.isDecimal() ? "d" : "n") << "i"
-        << hashAggrJitRuntimeShapeName(slot.desc.inputShape()) << "o"
-        << hashAggrJitRuntimeShapeName(slot.desc.outputShape());
+    out << slot.getDescription() << ";";
   }
-  functionName_ = out.str();
-  initFunctionName_ = functionName_ + "_init";
-  addDenseFunctionName_ = functionName_ + "_add_dense";
-  addDenseNoNullFunctionName_ = functionName_ + "_add_dense_no_null";
-  extractFunctionName_ = functionName_ + "_extract";
+  return out.str();
 }
 
 std::string hashAggrJitKindName(HashAggrJitKind kind) {
@@ -1179,25 +1198,6 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
   }
 }
 
-/*
-std::string HashAggrJitDescriptor::signature() const {
-  return fmt::format(
-      "{}_{}_{}_{}_{}_{}_{}_{}",
-      hashAggrJitKindName(kind),
-      static_cast<int>(kind),
-      hashAggrJitValueKindName(inputKind),
-      hashAggrJitValueKindName(accumulatorKind),
-      !isRawInput(),
-      isDecimal(),
-      hashAggrJitRuntimeShapeName(inputShape()),
-      hashAggrJitRuntimeShapeName(outputShape()));
-}
-*/
-
-bool HashAggrJitChunk::canExtract() const {
-  return extract_ != nullptr;
-}
-
 bool HashAggrJitChunk::codegen() {
   if (addDense_) {
     return true;
@@ -1207,16 +1207,16 @@ bool HashAggrJitChunk::codegen() {
     return false;
   }
   const auto& moduleKey = functionName_;
-  const auto& initFn = initFunctionName_;
-  const auto& addFn = addDenseFunctionName_;
-  const auto& addNoNullFn = addDenseNoNullFunctionName_;
-  const auto& extractFn = extractFunctionName_;
+  const auto initFn = functionName_ + "_init";
+  const auto addFn = functionName_ + "_add_dense";
+  const auto addNoNullFn = functionName_ + "_add_dense_no_null";
+  const auto extractFn = functionName_ + "_extract";
   module_ = jit->CompileModule(
       [&](llvm::Module& module) {
         const bool ok = genInitIR(module, initFn, slots_) &&
             genAddDenseIR(module, addFn, slots_, true) &&
             genAddDenseIR(module, addNoNullFn, slots_, false) &&
-            genExtractIR(module, extractFn, slots_, partialOutput_);
+            genExtractIR(module, extractFn, slots_, isPartialOutput_);
         const bool hasError = !ok;
         logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
         logHashAggrJitFunctionIR(module, moduleKey, addFn, "add_dense", hasError);

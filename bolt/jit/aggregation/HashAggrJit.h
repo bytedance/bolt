@@ -278,15 +278,14 @@ class HashAggrJitChunk {
  public:
   explicit HashAggrJitChunk(
       std::vector<HashAggrJitSlot> slots,
-      bool partialOutput = false);
+      bool isRawInput,
+      bool partialOutput);
 
   bool codegen();
 
   bool isCodegenReady() const {
     return addDense_ != nullptr;
   }
-
-  bool canExtract() const;
 
   void init(char** newGroups, int32_t numNewGroups) const {
     init_(newGroups, numNewGroups);
@@ -312,30 +311,17 @@ class HashAggrJitChunk {
     return slots_;
   }
 
+  std::string getDescription() const;
+
   const std::string& functionName() const {
     return functionName_;
-  }
-  const std::string& initFunctionName() const {
-    return initFunctionName_;
-  }
-  const std::string& addDenseFunctionName() const {
-    return addDenseFunctionName_;
-  }
-  const std::string& addDenseNoNullFunctionName() const {
-    return addDenseNoNullFunctionName_;
-  }
-  const std::string& extractFunctionName() const {
-    return extractFunctionName_;
   }
 
  private:
   std::vector<HashAggrJitSlot> slots_;
-  bool partialOutput_{false};
+  bool isRawInput_{false};
+  bool isPartialOutput_{false};
   std::string functionName_;
-  std::string initFunctionName_;
-  std::string addDenseFunctionName_;
-  std::string addDenseNoNullFunctionName_;
-  std::string extractFunctionName_;
   CompiledModuleSP module_;
   HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};
