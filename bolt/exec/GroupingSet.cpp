@@ -1096,6 +1096,16 @@ void GroupingSet::runHashAggrJitAddChunks(
   }
 
   jitExecuted.assign(aggregates_.size(), 0);
+  std::vector<DecodedVector> decoded;
+  std::vector<jit::HashAggrJitInputRuntime> inputRuntimes;
+  std::vector<std::vector<jit::HashAggrJitScalarInputRuntime>> rowChildren;
+  std::vector<std::vector<const jit::HashAggrJitScalarInputRuntime*>>
+      rowChildPtrs;
+  // Keeps input vectors alive for the DecodedVector buffers referenced by JIT
+  // during addDense.
+  std::vector<VectorPtr> inputVectors;
+  std::vector<char*> inputRuntimePtrs;
+  std::vector<char*> newGroupPtrs;
   for (auto& chunk : hashAggrJitChunks_) {
     if (!chunk.isCodegenReady()) {
       VLOG(1) << "HashAggrJit chunk is not codegen-ready, skip add: "
@@ -1104,12 +1114,12 @@ void GroupingSet::runHashAggrJitAddChunks(
     }
 
     const auto numSlots = chunk.slots().size();
-    hashAggrJitDecoded_.resize(numSlots);
-    hashAggrJitInputRuntimes_.resize(numSlots);
-    hashAggrJitRowChildren_.resize(numSlots);
-    hashAggrJitRowChildPtrs_.resize(numSlots);
-    hashAggrJitInputVectors_.assign(numSlots, nullptr);
-    hashAggrJitInputRuntimePtrs_.assign(numSlots, nullptr);
+    decoded.resize(numSlots);
+    inputRuntimes.resize(numSlots);
+    rowChildren.resize(numSlots);
+    rowChildPtrs.resize(numSlots);
+    inputVectors.assign(numSlots, nullptr);
+    inputRuntimePtrs.assign(numSlots, nullptr);
 
     bool canRunChunk = true;
     std::string skipReason;
@@ -1149,16 +1159,16 @@ void GroupingSet::runHashAggrJitAddChunks(
         skipReason = "lazy input with pushdown enabled";
         break;
       }
-      hashAggrJitInputVectors_[slotIndex] = arg;
-      hashAggrJitDecoded_[slotIndex].decode(*arg, activeRows_);
+      inputVectors[slotIndex] = arg;
+      decoded[slotIndex].decode(*arg, activeRows_);
       const bool usesRowInputRuntime =
           slot.desc.inputShape() == jit::HashAggrJitRuntimeShape::Row;
       if (usesRowInputRuntime) {
         if (!fillHashAggrJitRowInputRuntime(
-                hashAggrJitInputRuntimes_[slotIndex],
-                hashAggrJitRowChildren_[slotIndex],
-                hashAggrJitRowChildPtrs_[slotIndex],
-                hashAggrJitDecoded_[slotIndex],
+                inputRuntimes[slotIndex],
+                rowChildren[slotIndex],
+                rowChildPtrs[slotIndex],
+                decoded[slotIndex],
                 activeRows_,
                 slot)) {
           canRunChunk = false;
@@ -1166,16 +1176,14 @@ void GroupingSet::runHashAggrJitAddChunks(
           break;
         }
       } else {
-        hashAggrJitInputRuntimes_[slotIndex].scalar =
-            jit::HashAggrJitScalarInputRuntime{
-                .values = hashAggrJitDecoded_[slotIndex].dataAsVoid(),
-                .indices = hashAggrJitDecoded_[slotIndex].indices(),
-                .nulls = hashAggrJitDecoded_[slotIndex].nulls(&activeRows_)};
+        inputRuntimes[slotIndex].scalar = jit::HashAggrJitScalarInputRuntime{
+            .values = decoded[slotIndex].dataAsVoid(),
+            .indices = decoded[slotIndex].indices(),
+            .nulls = decoded[slotIndex].nulls(&activeRows_)};
       }
-      inputsMayHaveNulls =
-          inputsMayHaveNulls || hashAggrJitDecoded_[slotIndex].mayHaveNulls();
-      hashAggrJitInputRuntimePtrs_[slotIndex] =
-          reinterpret_cast<char*>(&hashAggrJitInputRuntimes_[slotIndex]);
+      inputsMayHaveNulls = inputsMayHaveNulls || decoded[slotIndex].mayHaveNulls();
+      inputRuntimePtrs[slotIndex] =
+          reinterpret_cast<char*>(&inputRuntimes[slotIndex]);
     }
 
     if (!canRunChunk) {
@@ -1185,17 +1193,17 @@ void GroupingSet::runHashAggrJitAddChunks(
     }
 
     if (!newGroups.empty()) {
-      hashAggrJitNewGroups_.resize(newGroups.size());
+      newGroupPtrs.resize(newGroups.size());
       for (auto i = 0; i < newGroups.size(); ++i) {
-        hashAggrJitNewGroups_[i] = groups[newGroups[i]];
+        newGroupPtrs[i] = groups[newGroups[i]];
       }
-      chunk.init(hashAggrJitNewGroups_.data(), newGroups.size());
+      chunk.init(newGroupPtrs.data(), newGroups.size());
     }
 
     chunk.addDense(
         groups,
         activeRows_.end(),
-        hashAggrJitInputRuntimePtrs_.data(),
+        inputRuntimePtrs.data(),
         inputsMayHaveNulls);
     for (const auto& slot : chunk.slots()) {
       jitExecuted[slot.aggregateIndex] = 1;
@@ -1217,12 +1225,18 @@ void GroupingSet::runHashAggrJitExtractChunks(
   }
 
   jitExtracted.assign(aggregates_.size(), 0);
+  std::vector<jit::HashAggrJitOutputRuntime> outputRuntimes;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime>>
+      rowOutputChildren;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime*>>
+      rowOutputChildPtrs;
+  std::vector<char*> resultPtrs;
   for (auto& chunk : hashAggrJitChunks_) {
     const auto numSlots = chunk.slots().size();
-    hashAggrJitOutputRuntimes_.assign(numSlots, jit::HashAggrJitOutputRuntime{});
-    hashAggrJitRowOutputChildren_.resize(numSlots);
-    hashAggrJitRowOutputChildPtrs_.resize(numSlots);
-    hashAggrJitResultPtrs_.assign(numSlots, nullptr);
+    outputRuntimes.assign(numSlots, jit::HashAggrJitOutputRuntime{});
+    rowOutputChildren.resize(numSlots);
+    rowOutputChildPtrs.resize(numSlots);
+    resultPtrs.assign(numSlots, nullptr);
     bool canRunChunk = true;
     std::string skipReason;
     for (auto slotIndex = 0; slotIndex < numSlots; ++slotIndex) {
@@ -1262,7 +1276,7 @@ void GroupingSet::runHashAggrJitExtractChunks(
           skipReason = "unsupported scalar output value kind";
           break;
         }
-        hashAggrJitOutputRuntimes_[slotIndex].scalar =
+        outputRuntimes[slotIndex].scalar =
             jit::HashAggrJitScalarOutputRuntime{
                 .values = hashAggrJitRawOutputData(
                     aggregateVector.get(), *outputKind),
@@ -1272,24 +1286,23 @@ void GroupingSet::runHashAggrJitExtractChunks(
           aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
           slot.desc.outputShape() == jit::HashAggrJitRuntimeShape::Row) {
         if (!fillHashAggrJitRowOutputRuntime(
-                hashAggrJitOutputRuntimes_[slotIndex],
-                hashAggrJitRowOutputChildren_[slotIndex],
-                hashAggrJitRowOutputChildPtrs_[slotIndex],
+                outputRuntimes[slotIndex],
+                rowOutputChildren[slotIndex],
+                rowOutputChildPtrs[slotIndex],
                 aggregateVector.get())) {
           canRunChunk = false;
           skipReason = "ROW output runtime requires flat scalar row children";
           break;
         }
       }
-      hashAggrJitResultPtrs_[slotIndex] =
-          reinterpret_cast<char*>(&hashAggrJitOutputRuntimes_[slotIndex]);
+      resultPtrs[slotIndex] = reinterpret_cast<char*>(&outputRuntimes[slotIndex]);
     }
     if (!canRunChunk) {
       VLOG(1) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
                 << chunk.getDescription() << " reason=" << skipReason;
       continue;
     }
-    chunk.extract(groups.data(), groups.size(), hashAggrJitResultPtrs_.data());
+    chunk.extract(groups.data(), groups.size(), resultPtrs.data());
     for (const auto& slot : chunk.slots()) {
       jitExtracted[slot.aggregateIndex] = 1;
     }
