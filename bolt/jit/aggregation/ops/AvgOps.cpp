@@ -147,7 +147,6 @@ void compileAvgExtractValues(
 
 const HashAggrJitOps* getAvgOps() {
   static const HashAggrJitOps kOps{
-      "avg",
       &compileAvgInitGroup,
       &compileAvgAddRawInput,
       &compileAvgAddIntermediateResults,

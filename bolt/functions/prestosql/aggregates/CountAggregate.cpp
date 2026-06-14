@@ -57,14 +57,19 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
     if (context.isRawInput) {
-      return context.inputCount == 0 ||
-          (context.inputCount == 1 && context.inputType != nullptr &&
-           !context.inputType->isRow() &&
-           (context.inputType->isDecimal() ||
-            jit::isHashAggrJitSupportedType(context.inputType->kind())));
+      if (context.isCountStar()) {
+        return true;
+      }
+      if (context.inputTypes.size() != 1 || context.inputTypes[0] == nullptr) {
+        return false;
+      }
+      const auto& inputType = context.inputTypes[0];
+      return !inputType->isRow() &&
+          (inputType->isDecimal() ||
+           jit::isHashAggrJitSupportedType(inputType->kind()));
     }
-    return context.inputCount == 1 && context.inputType != nullptr &&
-        context.inputType->kind() == TypeKind::BIGINT;
+    return context.inputTypes.size() == 1 && context.inputTypes[0] != nullptr &&
+        context.inputTypes[0]->kind() == TypeKind::BIGINT;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -74,7 +79,8 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     }
     auto inputKind = jit::HashAggrJitValueKind::Int64;
     if (!context.isCountStar()) {
-      auto maybeInputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+      auto maybeInputKind =
+          jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
       if (!maybeInputKind.has_value()) {
         return std::nullopt;
       }
@@ -84,8 +90,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
         .kind = jit::HashAggrJitKind::Count,
         .inputKind = inputKind,
         .accumulatorKind = jit::HashAggrJitValueKind::Int64,
-        .countStar = context.isCountStar(),
-        .mergeInput = !context.isRawInput,
+        .context = context,
         .decimal = false,
         .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .outputShape = jit::HashAggrJitRuntimeShape::Scalar,

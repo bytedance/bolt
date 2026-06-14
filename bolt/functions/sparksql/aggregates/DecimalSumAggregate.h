@@ -63,17 +63,17 @@ class DecimalSumAggregate : public exec::Aggregate {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputCount != 1 || !context.inputType) {
+    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
       return false;
     }
+    const auto& inputType = context.inputTypes[0];
     if (context.isRawInput) {
-      return context.inputType->isDecimal() &&
-          (context.inputType->isShortDecimal() ||
-           context.inputType->isLongDecimal());
+      return inputType->isDecimal() &&
+          (inputType->isShortDecimal() || inputType->isLongDecimal());
     }
-    return context.inputType->isRow() && context.inputType->size() == 2 &&
-        context.inputType->childAt(0)->isDecimal() &&
-        context.inputType->childAt(1)->kind() == TypeKind::BOOLEAN;
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(0)->isDecimal() &&
+        inputType->childAt(1)->kind() == TypeKind::BOOLEAN;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -81,8 +81,9 @@ class DecimalSumAggregate : public exec::Aggregate {
     if (!supportsHashAggrJit(context)) {
       return std::nullopt;
     }
+    const auto& inputType = context.inputTypes[0];
     const auto& valueType =
-        context.isRawInput ? context.inputType : context.inputType->childAt(0);
+        context.isRawInput ? inputType : inputType->childAt(0);
     // Unified decimal precision/scale convention across decimal aggregates:
     //   precision/scale       -> intermediate (partial) decimal type
     //   auxPrecision/auxScale -> final result decimal type
@@ -91,13 +92,12 @@ class DecimalSumAggregate : public exec::Aggregate {
     const auto [sumPrecision, sumScale] =
         getDecimalPrecisionScale(*sumType_.get());
     return jit::HashAggrJitDescriptor{
-        .kind = jit::HashAggrJitKind::Sum,
+        .kind = jit::HashAggrJitKind::DecimalSum,
         .inputKind = valueType->isShortDecimal()
             ? jit::HashAggrJitValueKind::Int64
             : jit::HashAggrJitValueKind::Int128,
         .accumulatorKind = jit::HashAggrJitValueKind::Int128,
-        .countStar = false,
-        .mergeInput = !context.isRawInput,
+        .context = context,
         .decimal = true,
         .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
                                          : jit::HashAggrJitRuntimeShape::Row,

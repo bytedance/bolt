@@ -108,7 +108,6 @@ void compileMinMaxExtractValues(
 
 const HashAggrJitOps* getMinMaxOps() {
   static const HashAggrJitOps kOps{
-      "minmax",
       &compileMinMaxInitGroup,
       &compileMinMaxUpdate,
       &compileMinMaxUpdate,

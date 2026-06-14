@@ -39,7 +39,6 @@ struct HashAggrJitOps {
       const HashAggrJitSlot&,
       const HashAggrJitExtractTarget&);
 
-  const char* id;
   CreateFn initGroup;
   AddFn addRawInput;
   AddFn addIntermediateResults;

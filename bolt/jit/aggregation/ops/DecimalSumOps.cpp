@@ -82,16 +82,16 @@ void compileDecimalSumAddIntermediateResults(
   auto* function = b.GetInsertBlock()->getParent();
   auto* continueBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(),
-      "sum_decimal_merge_cont",
+      "decimal_sum_merge_cont",
       function,
       nextBlock);
   auto* overflowBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(),
-      "sum_decimal_merge_overflow",
+      "decimal_sum_merge_overflow",
       function,
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
-      codegen.module().getContext(), "sum_decimal_merge", function, continueBlock);
+      codegen.module().getContext(), "decimal_sum_merge", function, continueBlock);
   const auto sumKind = decimalKindForPrecision(slot.desc.precision);
   auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* incomingIsEmpty =
@@ -193,7 +193,6 @@ void compileDecimalSumExtractValues(
 
 const HashAggrJitOps* getDecimalSumOps() {
   static const HashAggrJitOps kOps{
-      "sum_decimal",
       &compileDecimalSumInitGroup,
       &compileDecimalSumAddRawInput,
       &compileDecimalSumAddIntermediateResults,

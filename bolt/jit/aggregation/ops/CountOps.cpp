@@ -54,7 +54,7 @@ void compileCountAddIntermediateResults(
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
   llvm::Value* inc = nullptr;
-  if (slot.desc.countStar) {
+  if (slot.desc.isCountStar()) {
     inc = codegen.builder().getInt64(1);
   } else {
     auto* inputRow = input.read(row, slot.desc.inputKind);
@@ -102,7 +102,6 @@ void compileCountExtractValues(
 
 const HashAggrJitOps* getCountOps() {
   static const HashAggrJitOps kOps{
-      "count",
       &compileCountInitGroup,
       &compileCountAddRawInput,
       &compileCountAddIntermediateResults,

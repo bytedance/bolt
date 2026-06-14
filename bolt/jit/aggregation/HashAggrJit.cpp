@@ -961,7 +961,7 @@ bool genAddDenseIR(
       input =
           std::make_unique<ScalarInputAdapterCodegen>(codegen, inputRuntime);
     }
-    if (checkInputNulls && !slot.desc.countStar) {
+    if (checkInputNulls && !slot.desc.isCountStar()) {
       auto* nulls = input->loadNulls();
       auto* nullCheckBlock =
           llvm::BasicBlock::Create(context, "slot_null_check", func, end);
@@ -981,8 +981,9 @@ bool genAddDenseIR(
     if (slot.desc.ops == nullptr) {
       return false;
     }
-    auto* addFn =
-        slot.desc.mergeInput ? slot.desc.ops->addIntermediateResults : slot.desc.ops->addRawInput;
+    auto* addFn = !slot.desc.isRawInput()
+        ? slot.desc.ops->addIntermediateResults
+        : slot.desc.ops->addRawInput;
     if (addFn == nullptr) {
       return false;
     }
@@ -1079,13 +1080,14 @@ HashAggrJitChunk::HashAggrJitChunk(
   out << "jit_hashaggr_v2_" << (partialOutput_ ? "partial" : "final") << "_n"
       << slots_.size();
   for (const auto& slot : slots_) {
-    out << "_" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "unknown")
-        << "_" << static_cast<int>(slot.desc.kind)
+    out << "_" << hashAggrJitKindName(slot.desc.kind) << "_"
+        << static_cast<int>(slot.desc.kind)
         << hashAggrJitValueKindName(slot.desc.inputKind)
         << hashAggrJitValueKindName(slot.desc.accumulatorKind) << "o"
         << slot.offset << "n" << slot.nullByte << "m"
-        << static_cast<int>(slot.nullMask) << (slot.desc.countStar ? "s" : "x")
-        << (slot.desc.mergeInput ? "g" : "r")
+        << static_cast<int>(slot.nullMask)
+        << (slot.desc.isCountStar() ? "s" : "x")
+        << (!slot.desc.isRawInput() ? "g" : "r")
         << (slot.desc.decimal ? "d" : "n") << "i"
         << hashAggrJitRuntimeShapeName(slot.desc.inputShape) << "o"
         << hashAggrJitRuntimeShapeName(slot.desc.outputShape);
@@ -1095,6 +1097,26 @@ HashAggrJitChunk::HashAggrJitChunk(
   addDenseFunctionName_ = functionName_ + "_add_dense";
   addDenseNoNullFunctionName_ = functionName_ + "_add_dense_no_null";
   extractFunctionName_ = functionName_ + "_extract";
+}
+
+std::string hashAggrJitKindName(HashAggrJitKind kind) {
+  switch (kind) {
+    case HashAggrJitKind::Count:
+      return "count";
+    case HashAggrJitKind::Sum:
+      return "sum";
+    case HashAggrJitKind::DecimalSum:
+      return "decimal_sum";
+    case HashAggrJitKind::Min:
+      return "min";
+    case HashAggrJitKind::Max:
+      return "max";
+    case HashAggrJitKind::Avg:
+      return "avg";
+    case HashAggrJitKind::DecimalAvg:
+      return "decimal_avg";
+  }
+  return "unknown";
 }
 
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind) {
@@ -1161,11 +1183,11 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 std::string HashAggrJitDescriptor::signature() const {
   return fmt::format(
       "{}_{}_{}_{}_{}_{}_{}_{}",
-      ops != nullptr ? ops->id : "unknown",
+      hashAggrJitKindName(kind),
       static_cast<int>(kind),
       hashAggrJitValueKindName(inputKind),
       hashAggrJitValueKindName(accumulatorKind),
-      mergeInput,
+      !isRawInput(),
       decimal,
       hashAggrJitRuntimeShapeName(inputShape),
       hashAggrJitRuntimeShapeName(outputShape));

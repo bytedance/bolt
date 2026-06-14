@@ -85,7 +85,6 @@ void compileSumExtractValues(
 
 const HashAggrJitOps* getSumOps() {
   static const HashAggrJitOps kOps{
-      "sum",
       &compileSumInitGroup,
       &compileSumAccumulate,
       &compileSumAccumulate,

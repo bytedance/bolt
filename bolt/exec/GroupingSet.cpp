@@ -250,9 +250,10 @@ std::string hashAggrJitSlotDebugString(
       << " accKind=" << jit::hashAggrJitValueKindName(slot.desc.accumulatorKind)
       << " offset=" << slot.offset << " nullByte=" << slot.nullByte
       << " nullMask=" << static_cast<int>(slot.nullMask)
-      << " countStar=" << slot.desc.countStar
-      << " mergeInput=" << slot.desc.mergeInput << " decimal=" << slot.desc.decimal
-      << " ops=" << (slot.desc.ops != nullptr ? slot.desc.ops->id : "null");
+      << " countStar=" << slot.desc.isCountStar()
+      << " mergeInput=" << !slot.desc.isRawInput()
+      << " decimal=" << slot.desc.decimal
+      << " kindName=" << jit::hashAggrJitKindName(slot.desc.kind);
   return out.str();
 }
 
@@ -284,20 +285,21 @@ std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
     return std::nullopt;
   }
 
-  const int32_t inputCount = aggregate.inputs.size();
-  if (!(isRawInput && inputCount == 0) && inputCount != 1) {
+  std::vector<TypePtr> inputTypes;
+  if (isRawInput) {
+    inputTypes = aggregate.rawInputTypes;
+  } else {
+    inputTypes = {aggregate.intermediateType};
+  }
+
+  if (!(isRawInput && inputTypes.empty()) && inputTypes.size() != 1) {
     return std::nullopt;
   }
 
-  const auto inputType =
-      inputCount == 0 ? nullptr
-                      : (isRawInput ? aggregate.rawInputTypes[0]
-                                    : aggregate.intermediateType);
   const jit::HashAggrJitPlanContext context{
       .isRawInput = isRawInput,
       .isPartialOutput = isPartialOutput,
-      .inputCount = inputCount,
-      .inputType = inputType};
+      .inputTypes = std::move(inputTypes)};
   if (!aggregate.function->supportsHashAggrJit(context)) {
     return std::nullopt;
   }
@@ -1174,7 +1176,7 @@ void GroupingSet::runHashAggrJitAddChunks(
         skipReason = "selectivity vector is not dense activeRows or has no selections";
         break;
       }
-      if (slot.desc.countStar) {
+      if (slot.desc.isCountStar()) {
         continue;
       }
       if (aggregate.inputs.size() != 1) {

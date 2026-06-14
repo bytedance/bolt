@@ -46,14 +46,15 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputCount != 1 || !context.inputType) {
+    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
       return false;
     }
-    if (context.inputType->isRow() || context.inputType->isDecimal()) {
+    const auto& inputType = context.inputTypes[0];
+    if (inputType->isRow() || inputType->isDecimal()) {
       return false;
     }
-    return jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
-        context.inputType->kind() == TypeKind::HUGEINT;
+    return jit::isHashAggrJitSupportedType(inputType->kind()) ||
+        inputType->kind() == TypeKind::HUGEINT;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -62,7 +63,7 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       return std::nullopt;
     }
 
-    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
     if (!inputKind.has_value()) {
       return std::nullopt;
     }
@@ -77,8 +78,7 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
         .kind = jit::HashAggrJitKind::Sum,
         .inputKind = *inputKind,
         .accumulatorKind = accumulatorKind,
-        .countStar = false,
-        .mergeInput = !context.isRawInput,
+        .context = context,
         .decimal = false,
         .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .outputShape = jit::HashAggrJitRuntimeShape::Scalar,

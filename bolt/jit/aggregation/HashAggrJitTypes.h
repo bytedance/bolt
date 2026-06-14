@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "bolt/type/Type.h"
 
@@ -81,20 +82,21 @@ union HashAggrJitOutputRuntime {
 struct HashAggrJitPlanContext {
   bool isRawInput{false};
   bool isPartialOutput{false};
-  int32_t inputCount{0};
-  TypePtr inputType;
+  std::vector<TypePtr> inputTypes;
 
   bool isCountStar() const {
-    return isRawInput && inputCount == 0;
+    return isRawInput && inputTypes.empty();
   }
 };
 
 enum class HashAggrJitKind : uint8_t {
   Count,
   Sum,
+  DecimalSum,
   Min,
   Max,
   Avg,
+  DecimalAvg,
 };
 
 enum class HashAggrJitValueKind : uint8_t {
@@ -123,8 +125,7 @@ struct HashAggrJitDescriptor {
   HashAggrJitKind kind;
   HashAggrJitValueKind inputKind;
   HashAggrJitValueKind accumulatorKind;
-  bool countStar{false};
-  bool mergeInput{false};
+  HashAggrJitPlanContext context;
   bool decimal{false};
   HashAggrJitRuntimeShape inputShape{HashAggrJitRuntimeShape::Scalar};
   HashAggrJitRuntimeShape outputShape{HashAggrJitRuntimeShape::Scalar};
@@ -137,6 +138,14 @@ struct HashAggrJitDescriptor {
   int32_t auxPrecision{0};
   int32_t auxScale{0};
   const HashAggrJitOps* ops{nullptr};
+
+  bool isCountStar() const {
+    return context.isCountStar();
+  }
+
+  bool isRawInput() const {
+    return context.isRawInput;
+  }
 
   // std::string signature() const;
 };
@@ -153,6 +162,7 @@ struct HashAggrJitSlot {
 
 bool isHashAggrJitSupportedType(TypeKind kind);
 std::optional<HashAggrJitValueKind> hashAggrJitValueKind(TypeKind kind);
+std::string hashAggrJitKindName(HashAggrJitKind kind);
 std::string hashAggrJitValueKindName(HashAggrJitValueKind kind);
 
 // Per-aggregate codegen function tables. The definitions (which reference

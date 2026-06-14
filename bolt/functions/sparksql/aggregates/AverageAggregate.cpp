@@ -46,19 +46,20 @@ class AverageAggregate
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputCount != 1 || !context.inputType) {
+    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
       return false;
     }
+    const auto& inputType = context.inputTypes[0];
     if (context.isRawInput) {
-      if (context.inputType->isDecimal()) {
+      if (inputType->isDecimal()) {
         return false;
       }
-      return jit::isHashAggrJitSupportedType(context.inputType->kind()) ||
-          context.inputType->kind() == TypeKind::HUGEINT;
+      return jit::isHashAggrJitSupportedType(inputType->kind()) ||
+          inputType->kind() == TypeKind::HUGEINT;
     }
-    return context.inputType->isRow() && context.inputType->size() == 2 &&
-        context.inputType->childAt(1)->kind() == TypeKind::BIGINT &&
-        context.inputType->childAt(0)->kind() == TypeKind::DOUBLE;
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(1)->kind() == TypeKind::BIGINT &&
+        inputType->childAt(0)->kind() == TypeKind::DOUBLE;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -72,8 +73,7 @@ class AverageAggregate
           .kind = jit::HashAggrJitKind::Avg,
           .inputKind = jit::HashAggrJitValueKind::Double,
           .accumulatorKind = jit::HashAggrJitValueKind::Double,
-          .countStar = false,
-          .mergeInput = true,
+          .context = context,
           .decimal = false,
           .inputShape = jit::HashAggrJitRuntimeShape::Row,
           .outputShape = context.isPartialOutput
@@ -86,7 +86,7 @@ class AverageAggregate
           .ops = jit::getAvgOps()};
     }
 
-    auto inputKind = jit::hashAggrJitValueKind(context.inputType->kind());
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
     if (!inputKind.has_value()) {
       return std::nullopt;
     }
@@ -94,8 +94,7 @@ class AverageAggregate
         .kind = jit::HashAggrJitKind::Avg,
         .inputKind = *inputKind,
         .accumulatorKind = jit::HashAggrJitValueKind::Double,
-        .countStar = false,
-        .mergeInput = false,
+        .context = context,
         .decimal = false,
         .inputShape = jit::HashAggrJitRuntimeShape::Scalar,
         .outputShape = context.isPartialOutput
@@ -163,17 +162,16 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputCount != 1 || !context.inputType) {
+    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
       return false;
     }
+    const auto& inputType = context.inputTypes[0];
     if (context.isRawInput) {
-      return context.inputType->isDecimal() &&
-          (context.inputType->isShortDecimal() ||
-           context.inputType->isLongDecimal());
+      return inputType->isDecimal();
     }
-    return context.inputType->isRow() && context.inputType->size() == 2 &&
-        context.inputType->childAt(0)->isDecimal() &&
-        context.inputType->childAt(1)->kind() == TypeKind::BIGINT;
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(0)->isDecimal() &&
+        inputType->childAt(1)->kind() == TypeKind::BIGINT;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -181,21 +179,21 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
     if (!supportsHashAggrJit(context)) {
       return std::nullopt;
     }
+    const auto& inputType = context.inputTypes[0];
     const auto& valueType =
-        context.isRawInput ? context.inputType : context.inputType->childAt(0);
+        context.isRawInput ? inputType : inputType->childAt(0);
     const auto [sumPrecision, sumScale] =
         getDecimalPrecisionScale(*sumType_.get());
     const auto [resultPrecision, resultScale] = context.isPartialOutput
         ? std::pair<int32_t, int32_t>{0, 0}
         : getDecimalPrecisionScale(*this->resultType().get());
     return jit::HashAggrJitDescriptor{
-        .kind = jit::HashAggrJitKind::Avg,
+        .kind = jit::HashAggrJitKind::DecimalAvg,
         .inputKind = valueType->isShortDecimal()
             ? jit::HashAggrJitValueKind::Int64
             : jit::HashAggrJitValueKind::Int128,
         .accumulatorKind = jit::HashAggrJitValueKind::Int128,
-        .countStar = false,
-        .mergeInput = !context.isRawInput,
+        .context = context,
         .decimal = true,
         .inputShape = context.isRawInput ? jit::HashAggrJitRuntimeShape::Scalar
                                          : jit::HashAggrJitRuntimeShape::Row,

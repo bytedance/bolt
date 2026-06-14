@@ -84,16 +84,16 @@ void compileDecimalAvgAddIntermediateResults(
   auto* function = b.GetInsertBlock()->getParent();
   auto* continueBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(),
-      "avg_decimal_merge_cont",
+      "decimal_avg_merge_cont",
       function,
       nextBlock);
   auto* overflowBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(),
-      "avg_decimal_merge_overflow",
+      "decimal_avg_merge_overflow",
       function,
       continueBlock);
   auto* mergeBlock = llvm::BasicBlock::Create(
-      codegen.module().getContext(), "avg_decimal_merge", function, continueBlock);
+      codegen.module().getContext(), "decimal_avg_merge", function, continueBlock);
   const auto sumKind = decimalKindForPrecision(slot.desc.precision);
   auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
@@ -192,7 +192,6 @@ void compileDecimalAvgExtractValues(
 
 const HashAggrJitOps* getDecimalAvgOps() {
   static const HashAggrJitOps kOps{
-      "avg_decimal",
       &compileDecimalAvgInitGroup,
       &compileDecimalAvgAddRawInput,
       &compileDecimalAvgAddIntermediateResults,
