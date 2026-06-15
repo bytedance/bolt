@@ -1613,11 +1613,11 @@ class QueryConfig {
   }
 
   bool enableHashAggrJit() const {
-    return get<bool>(kHashAggrJitEnabled, false);
+    return get<bool>(kHashAggrJitEnabled, true);
   }
 
   int32_t hashAggrJitMinFuseWidth() const {
-    return get<int32_t>(kHashAggrJitMinFuseWidth, 4);
+    return get<int32_t>(kHashAggrJitMinFuseWidth, 1);
   }
 
   int32_t hashAggrJitMaxFuseWidth() const {
