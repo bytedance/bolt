@@ -2,6 +2,7 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/bm/BmRowContainer.h"
 
 #include <algorithm>
 
@@ -71,7 +72,8 @@ BmRowLayout::BmRowLayout(
          stored.nullable,
          stored.nullByte,
          stored.nullMask,
-         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY});
+         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY,
+         BmRowContainer::storeFnFor(kind, stored.nullable)});
     if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
       stringColumns_.push_back(
           {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});

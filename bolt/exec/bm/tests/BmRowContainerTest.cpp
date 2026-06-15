@@ -528,6 +528,47 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
 }
 
+TEST_F(BmRowContainerTest, NullableStoreClearsNullBitForNonNullValue) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({std::nullopt, 42}),
+      makeNullableFlatVector<std::string>({std::nullopt, "value"}),
+  });
+  SelectivityVector rows(input->size());
+  DecodedVector bigint;
+  DecodedVector varchar;
+  bigint.decode(*input->childAt(0), rows);
+  varchar.decode(*input->childAt(1), rows);
+
+  auto context = container.appendRow();
+  container.store(context, bigint, 0, 0);
+  container.store(context, varchar, 0, 1);
+  EXPECT_TRUE(context.row()[0] & 0x1);
+  EXPECT_TRUE(context.row()[0] & 0x2);
+
+  container.store(context, bigint, 1, 0);
+  container.store(context, varchar, 1, 1);
+
+  auto* storedRow = context.row();
+  auto bigintResult = BaseVector::create(BIGINT(), 1, pool());
+  container.extractColumnResident(&storedRow, 1, 0, bigintResult);
+  auto bigintFlat = bigintResult->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, bigintFlat);
+  EXPECT_FALSE(bigintFlat->isNullAt(0));
+  EXPECT_EQ(42, bigintFlat->valueAt(0));
+
+  auto varcharResult = BaseVector::create(VARCHAR(), 1, pool());
+  container.extractColumnResident(&storedRow, 1, 1, varcharResult);
+  auto varcharFlat = varcharResult->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, varcharFlat);
+  EXPECT_FALSE(varcharFlat->isNullAt(0));
+  EXPECT_EQ("value", varcharFlat->valueAt(0).str());
+}
+
 TEST_F(BmRowContainerTest, NullableStringNullSurvivesSpillRead) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},

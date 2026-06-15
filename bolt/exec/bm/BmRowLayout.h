@@ -3,12 +3,22 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Type.h"
 #include "bolt/type/StringView.h"
+#include "bolt/vector/TypeAliases.h"
 
 #include <folly/Portability.h>
 
 #include <cstdint>
 #include <cstring>
 #include <vector>
+
+namespace bytedance::bolt {
+class DecodedVector;
+
+namespace exec::bm {
+class BmRowContainer;
+class RowWriteContext;
+}
+} // namespace bytedance::bolt
 
 namespace bytedance::bolt::exec::bm {
 
@@ -39,6 +49,12 @@ struct StringColumnLayout {
 };
 
 struct ColumnStorePlan {
+  using StoreValueFn = void (BmRowContainer::*)(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriteContext& context,
+      const ColumnStorePlan& plan);
+
   TypePtr type;
   TypeKind kind{TypeKind::UNKNOWN};
   uint32_t offset{0};
@@ -47,6 +63,7 @@ struct ColumnStorePlan {
   uint32_t nullByte{0};
   uint8_t nullMask{0};
   bool stringKind{false};
+  StoreValueFn storeFn{nullptr};
 };
 
 // Computes the fixed row layout used by BmRowContainer. This class owns no row
