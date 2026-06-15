@@ -203,28 +203,54 @@ void emitDecimalAddWithOverflow(
   auto* i64Ty = b.getInt64Ty();
   auto* zero128 = llvm::ConstantInt::get(i128Ty, 0);
 
-  auto* oldSum = codegen.loadValue(group, i128Ty, sumOffset);
-  auto* newSum = b.CreateAdd(oldSum, addend);
+  auto* lhs = codegen.loadValue(group, i128Ty, sumOffset);
+  auto* rhs = addend;
+
+  // Mirror DecimalUtil::addWithOverflow + addUnsignedValues exactly (i128 sum
+  // kept as low 127 bits plus a separate overflow counter), instead of a
+  // sign-flip heuristic which diverges once the true i128 magnitude overflows.
+  //
+  //   same sign:
+  //     mag = (|lhs| + |rhs|) & ~(1<<127)        // low 127 bits
+  //     carry = (|lhs| + |rhs|) >> 127           // bit 127
+  //     both negative -> sum = -mag, overflow = -carry
+  //     both positive -> sum =  mag, overflow =  carry
+  //   different sign:
+  //     sum = lhs + rhs, overflow = 0
+  auto* lhsNeg = b.CreateICmpSLT(lhs, zero128);
+  auto* rhsNeg = b.CreateICmpSLT(rhs, zero128);
+  auto* sameSign = b.CreateICmpEQ(lhsNeg, rhsNeg);
+  auto* bothNeg = b.CreateAnd(lhsNeg, rhsNeg);
+
+  // Magnitudes for the same-sign path: negate operands when both negative so
+  // the unsigned addition operates on |lhs|, |rhs| (matches addUnsignedValues).
+  auto* absLhs = b.CreateSelect(bothNeg, b.CreateNeg(lhs), lhs);
+  auto* absRhs = b.CreateSelect(bothNeg, b.CreateNeg(rhs), rhs);
+  auto* unsignedSum = b.CreateAdd(absLhs, absRhs);
+  auto* mask127 =
+      llvm::ConstantInt::get(i128Ty, llvm::APInt::getSignedMinValue(128));
+  // mag = unsignedSum & ~(1<<127)
+  auto* magnitude = b.CreateAnd(unsignedSum, b.CreateNot(mask127));
+  // carry = (unsignedSum >> 127) & 1, as i64
+  auto* carryBit = b.CreateAnd(
+      b.CreateLShr(unsignedSum, llvm::ConstantInt::get(i128Ty, 127)),
+      llvm::ConstantInt::get(i128Ty, 1));
+  auto* carry64 = b.CreateTrunc(carryBit, i64Ty);
+
+  auto* sameSignSum = b.CreateSelect(bothNeg, b.CreateNeg(magnitude), magnitude);
+  auto* sameSignOverflow =
+      b.CreateSelect(bothNeg, b.CreateNeg(carry64), carry64);
+
+  auto* diffSignSum = b.CreateAdd(lhs, rhs);
+
+  auto* newSum = b.CreateSelect(sameSign, sameSignSum, diffSignSum);
+  auto* overflowDelta =
+      b.CreateSelect(sameSign, sameSignOverflow, b.getInt64(0));
+
   codegen.storeValue(group, i128Ty, sumOffset, newSum);
-
-  // Mirror jitHashAggrAddWithOverflow:
-  //   +1 if a>0 && b>0 && result<0   (positive overflow)
-  //   -1 if a<0 && b<0 && result>=0  (negative overflow)
-  auto* aPos = b.CreateICmpSGT(oldSum, zero128);
-  auto* bPos = b.CreateICmpSGT(addend, zero128);
-  auto* rNeg = b.CreateICmpSLT(newSum, zero128);
-  auto* posOverflow = b.CreateAnd(b.CreateAnd(aPos, bPos), rNeg);
-
-  auto* aNeg = b.CreateICmpSLT(oldSum, zero128);
-  auto* bNeg = b.CreateICmpSLT(addend, zero128);
-  auto* rNonNeg = b.CreateICmpSGE(newSum, zero128);
-  auto* negOverflow = b.CreateAnd(b.CreateAnd(aNeg, bNeg), rNonNeg);
-
-  auto* carry = b.CreateSub(
-      b.CreateZExt(posOverflow, i64Ty), b.CreateZExt(negOverflow, i64Ty));
   auto* oldOverflow = codegen.loadValue(group, i64Ty, overflowOffset);
   codegen.storeValue(
-      group, i64Ty, overflowOffset, b.CreateAdd(oldOverflow, carry));
+      group, i64Ty, overflowOffset, b.CreateAdd(oldOverflow, overflowDelta));
 }
 
 } // namespace bytedance::bolt::jit
