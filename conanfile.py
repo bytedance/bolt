@@ -580,6 +580,9 @@ class BoltConan(ConanFile):
         elif os.getenv("BOLT_BUILD_BENCHMARKS_BASIC", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
 
+        if os.getenv("BOLT_ENABLE_FRAME_POINTER", "OFF") == "ON":
+            tc.cache_variables["BOLT_ENABLE_FRAME_POINTER"] = "ON"
+
         tc.generate()
 
         # generate conantoolchain.cmake & xxx-config.cmake
