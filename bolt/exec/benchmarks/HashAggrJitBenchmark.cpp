@@ -28,6 +28,8 @@ namespace {
 
 struct HashAggrJitBenchmarkCase {
   std::shared_ptr<const core::PlanNode> plan;
+  int32_t minFuseWidth{4};
+  int32_t maxFuseWidth{16};
 };
 
 enum class AggregationPlanKind {
@@ -161,6 +163,27 @@ class HashAggrJitBenchmark : public VectorTestBase {
         name + "_merge_count", rows, counts, AggregationPlanKind::PartialFinal);
   }
 
+  void addFixedAggregateCountFuseWidthBenchmark(
+      const std::string& name,
+      int32_t aggregateCount) {
+    auto rows = makeRows(aggregateCount);
+    std::vector<std::string> sums;
+    sums.reserve(aggregateCount);
+    for (auto i = 0; i < aggregateCount; ++i) {
+      sums.push_back(fmt::format("spark_sum(c{})", i + 1));
+    }
+
+    for (const auto fuseWidth : {4, 8, 16, 32}) {
+      addCase(
+          fmt::format("{}_aggs{}_fuse_width{}", name, aggregateCount, fuseWidth),
+          rows,
+          sums,
+          AggregationPlanKind::PartialFinal,
+          fuseWidth,
+          fuseWidth);
+    }
+  }
+
  private:
   std::vector<RowVectorPtr> makeRows(int32_t width) {
     std::vector<std::string> names;
@@ -282,11 +305,19 @@ class HashAggrJitBenchmark : public VectorTestBase {
     return builder.planNode();
   }
 
-  void run(const std::shared_ptr<const core::PlanNode>& plan, bool enableJit) {
+  void run(
+      const std::shared_ptr<const core::PlanNode>& plan,
+      bool enableJit,
+      int32_t minFuseWidth = 4,
+      int32_t maxFuseWidth = 16) {
     exec::test::AssertQueryBuilder(plan)
         .config(core::QueryConfig::kHashAggrJitEnabled, enableJit ? "true" : "false")
-        .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "4")
-        .config(core::QueryConfig::kHashAggrJitMaxFuseWidth, "16")
+        .config(
+            core::QueryConfig::kHashAggrJitMinFuseWidth,
+            std::to_string(minFuseWidth))
+        .config(
+            core::QueryConfig::kHashAggrJitMaxFuseWidth,
+            std::to_string(maxFuseWidth))
         .copyResults(pool_.get());
   }
 
@@ -294,20 +325,32 @@ class HashAggrJitBenchmark : public VectorTestBase {
       const std::string& name,
       const std::vector<RowVectorPtr>& rows,
       const std::vector<std::string>& aggregates,
-      AggregationPlanKind planKind = AggregationPlanKind::Single) {
+      AggregationPlanKind planKind = AggregationPlanKind::Single,
+      int32_t minFuseWidth = 4,
+      int32_t maxFuseWidth = 16) {
     auto testCase = std::make_unique<HashAggrJitBenchmarkCase>();
     testCase->plan = makePlan(rows, aggregates, planKind);
+    testCase->minFuseWidth = minFuseWidth;
+    testCase->maxFuseWidth = maxFuseWidth;
     // Warm up both paths so the benchmark compares steady-state execution and
     // doesn't charge one-time plan setup / JIT compilation to the first sample.
-    run(testCase->plan, false);
-    run(testCase->plan, true);
+    run(testCase->plan, false, minFuseWidth, maxFuseWidth);
+    run(testCase->plan, true, minFuseWidth, maxFuseWidth);
     auto* testCasePtr = testCase.get();
     folly::addBenchmark(__FILE__, name + "_nojit", [this, testCasePtr]() {
-      run(testCasePtr->plan, false);
+      run(
+          testCasePtr->plan,
+          false,
+          testCasePtr->minFuseWidth,
+          testCasePtr->maxFuseWidth);
       return 1;
     });
     folly::addBenchmark(__FILE__, name + "_jit", [this, testCasePtr]() {
-      run(testCasePtr->plan, true);
+      run(
+          testCasePtr->plan,
+          true,
+          testCasePtr->minFuseWidth,
+          testCasePtr->maxFuseWidth);
       return 1;
     });
     folly::addBenchmark(__FILE__, "-", []() { return 0; });
@@ -346,6 +389,9 @@ int main(int argc, char** argv) {
   benchmark.addFloatingPointMinMaxBenchmark("width8", 8);
   benchmark.addFloatingPointMinMaxBenchmark("width16", 16);
   benchmark.addFloatingPointMinMaxBenchmark("width32", 32);
+
+  benchmark.addFixedAggregateCountFuseWidthBenchmark(
+      "fixed_aggregate_count", 256);
 
   // benchmark.addHighCardinalityExtractBenchmark("width4_high_card", 4);
   // benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
