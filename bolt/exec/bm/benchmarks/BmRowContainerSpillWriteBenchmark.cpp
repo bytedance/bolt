@@ -111,6 +111,11 @@ void spillWriteOld(
     DatasetKind dataset,
     SpillCompressionKind compression,
     uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupSpillWriteOld(options(dataset, dataBytes(bytes), compression));
+    suspender.dismiss();
+  }
   OldSpillWriteMetrics metrics;
   BenchmarkOptions printedOpts;
   uint64_t storeNs = 0;
@@ -141,6 +146,11 @@ void spillWriteBm(
     DatasetKind dataset,
     SpillCompressionKind compression,
     uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupSpillWriteBm(options(dataset, dataBytes(bytes), compression));
+    suspender.dismiss();
+  }
   BenchmarkOptions printedOpts;
   uint64_t storeNs = 0;
   uint64_t flushNs = 0;

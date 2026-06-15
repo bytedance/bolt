@@ -237,4 +237,20 @@ std::unique_ptr<RowContainer> readOldSpillIntoNewRowContainer(
     OldSpillReadMetrics* metrics = nullptr,
     std::vector<char*>* restoredRows = nullptr);
 
+void warmupStoreOld(const BenchmarkOptions& options);
+
+void warmupStoreBm(const BenchmarkOptions& options);
+
+void warmupReadOld(const BenchmarkOptions& options);
+
+void warmupReadBm(const BenchmarkOptions& options);
+
+void warmupSpillWriteOld(const BenchmarkOptions& options);
+
+void warmupSpillWriteBm(const BenchmarkOptions& options);
+
+void warmupSpillReadOld(const BenchmarkOptions& options);
+
+void warmupSpillReadBm(const BenchmarkOptions& options);
+
 } // namespace bytedance::bolt::exec::bm::benchmarks

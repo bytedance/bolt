@@ -257,6 +257,11 @@ void spillReadOld(
     DatasetKind dataset,
     SpillCompressionKind compression,
     uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupSpillReadOld(options(dataset, dataBytes(bytes), compression));
+    suspender.dismiss();
+  }
   OldSpillReadMetrics metrics;
   BenchmarkOptions printedOpts;
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -291,6 +296,11 @@ void spillReadBm(
     DatasetKind dataset,
     SpillCompressionKind compression,
     uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupSpillReadBm(options(dataset, dataBytes(bytes), compression));
+    suspender.dismiss();
+  }
   BmSpillReadMetrics metrics;
   BenchmarkOptions printedOpts;
   for (uint32_t i = 0; i < iterations; ++i) {

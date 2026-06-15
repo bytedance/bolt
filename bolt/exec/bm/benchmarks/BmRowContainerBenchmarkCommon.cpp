@@ -38,6 +38,11 @@ DEFINE_uint64(
     128ULL << 20,
     "Logical input bytes to materialize once and repeatedly feed into BM row "
     "container benchmarks. Set to 0 to materialize the full logical input.");
+DEFINE_uint64(
+    bm_row_container_warmup_data_bytes,
+    0,
+    "Logical input bytes processed by a same-process per-case warm-up before "
+    "the measured BM row container benchmark. Set to 0 to disable warm-up.");
 DEFINE_uint32(
     bm_row_container_string_length,
     1024,
@@ -235,6 +240,21 @@ bool shouldPrintSpillMetrics(
   std::lock_guard<std::mutex> l(mutex);
   return printed.insert(key).second;
 }
+
+namespace {
+
+bool shouldWarmupBenchmarks() {
+  return FLAGS_bm_row_container_warmup_data_bytes != 0;
+}
+
+BenchmarkOptions makeWarmupOptions(const BenchmarkOptions& options) {
+  return benchmarks::options(
+      options.dataset,
+      FLAGS_bm_row_container_warmup_data_bytes,
+      options.compression);
+}
+
+} // namespace
 
 BenchmarkContext::BenchmarkContext(
     const std::string& name,
@@ -711,6 +731,109 @@ std::unique_ptr<RowContainer> readOldSpillIntoNewRowContainer(
     }
   }
   return target;
+}
+
+void warmupStoreOld(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-store-old", warmup.dataBytes, 0, warmup.compression);
+  auto container = makeOldRowContainer(warmup.dataset, context.pool.get());
+  storeOldRowsOnly(*container, context.pool.get(), warmup);
+  folly::doNotOptimizeAway(container->numRows());
+}
+
+void warmupStoreBm(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-store-bm", warmup.dataBytes, 0, warmup.compression);
+  auto container = makeBmRowContainer(warmup.dataset, context.bufferManager);
+  storeBmRowsOnly(*container, context.pool.get(), warmup);
+  folly::doNotOptimizeAway(container->numRows());
+}
+
+void warmupReadOld(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-read-old", warmup.dataBytes, 0, warmup.compression);
+  auto stored = storeOldRows(context, warmup, true);
+  extractOldRows(*stored.container, stored.rows, warmup, context.pool.get());
+}
+
+void warmupReadBm(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-read-bm", warmup.dataBytes, 0, warmup.compression);
+  auto stored = storeBmRows(context, warmup, true);
+  extractBmRowsResident(
+      *stored.container, stored.rows, warmup, context.pool.get());
+}
+
+void warmupSpillWriteOld(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  checkOldRowBasedSpillBenchmarkSupported(warmup);
+  BenchmarkContext context(
+      "warmup-spill-write-old", warmup.dataBytes, 0, warmup.compression);
+  auto stored = storeOldRows(context, warmup, false);
+  auto spill = spillOldRows(context, *stored.container, warmup.dataset);
+  folly::doNotOptimizeAway(spill.partition.rowCount());
+}
+
+void warmupSpillWriteBm(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-spill-write-bm", warmup.dataBytes, 0, warmup.compression);
+  auto stored = storeBmRows(context, warmup, false);
+  const auto segment = stored.container->spillActiveSegment();
+  folly::doNotOptimizeAway(segment);
+}
+
+void warmupSpillReadOld(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  checkOldRowBasedSpillBenchmarkSupported(warmup);
+  BenchmarkContext context(
+      "warmup-spill-read-old", warmup.dataBytes, 8, warmup.compression);
+  auto stored = storeOldRows(context, warmup, false);
+  auto spill = spillOldRows(context, *stored.container, warmup.dataset);
+  stored.container.reset();
+  std::vector<char*> restoredRows;
+  restoredRows.reserve(rowCount(warmup));
+  auto restored = readOldSpillIntoNewRowContainer(
+      context, spill, warmup.dataset, nullptr, &restoredRows);
+  folly::doNotOptimizeAway(restored->numRows());
+  folly::doNotOptimizeAway(restoredRows.data());
+  folly::doNotOptimizeAway(restoredRows.size());
+}
+
+void warmupSpillReadBm(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-spill-read-bm", warmup.dataBytes, 0, warmup.compression);
+  auto spill = spillBmRows(context, warmup);
+  readBmSpill(*spill.container, spill.segment, warmup);
 }
 
 } // namespace bytedance::bolt::exec::bm::benchmarks
