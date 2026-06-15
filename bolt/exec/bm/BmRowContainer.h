@@ -108,6 +108,8 @@ class BmRowContainer {
   int64_t numRows() const;
 
  private:
+  friend class BmRowLayout;
+
   int32_t compareNonNull(
       const char* left,
       const char* right,
@@ -117,8 +119,27 @@ class BmRowContainer {
       vector_size_t sourceIndex,
       RowWriteContext& context,
       int32_t column);
+  static ColumnStorePlan::StoreValueFn storeFnFor(
+      TypeKind kind,
+      bool nullable);
   template <TypeKind Kind>
-  void storeValueTyped(
+  static ColumnStorePlan::StoreValueFn storeNoNullsFn();
+  template <TypeKind Kind>
+  static ColumnStorePlan::StoreValueFn storeWithNullsFn();
+  template <TypeKind Kind>
+  void storeNoNullsTyped(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriteContext& context,
+      const ColumnStorePlan& column);
+  template <TypeKind Kind>
+  void storeWithNullsTyped(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriteContext& context,
+      const ColumnStorePlan& column);
+  template <TypeKind Kind>
+  void storeNonNullValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
