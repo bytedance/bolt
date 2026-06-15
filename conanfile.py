@@ -583,6 +583,12 @@ class BoltConan(ConanFile):
         if os.getenv("BOLT_ENABLE_FRAME_POINTER", "OFF") == "ON":
             tc.cache_variables["BOLT_ENABLE_FRAME_POINTER"] = "ON"
 
+        if os.getenv("BOLT_ENABLE_VTUNE_JIT", "OFF") == "ON":
+            tc.cache_variables["BOLT_ENABLE_VTUNE_JIT"] = "ON"
+            vtune_sdk_dir = os.getenv("VTUNE_SDK_DIR")
+            if vtune_sdk_dir:
+                tc.cache_variables["VTUNE_SDK_DIR"] = vtune_sdk_dir
+
         tc.generate()
 
         # generate conantoolchain.cmake & xxx-config.cmake

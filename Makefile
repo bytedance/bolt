@@ -85,6 +85,9 @@ BOLT_BUILD_BENCHMARKS ?= "OFF"
 BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
 # Control whether to keep frame pointers (for perf stack unwinding)
 BOLT_ENABLE_FRAME_POINTER ?= "OFF"
+# Control whether to report JIT symbols to Intel VTune (jitprofiling)
+BOLT_ENABLE_VTUNE_JIT ?= "OFF"
+VTUNE_SDK_DIR ?=
 # -----------------------------------------------------------------
 
 # TODO: remove `BUILD_USER` and `BUILD_CHANNEL`
@@ -213,6 +216,8 @@ conan_build: conan_install
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
 	BOLT_ENABLE_FRAME_POINTER=${BOLT_ENABLE_FRAME_POINTER} \
+	BOLT_ENABLE_VTUNE_JIT=${BOLT_ENABLE_VTUNE_JIT} \
+	VTUNE_SDK_DIR=${VTUNE_SDK_DIR} \
 	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
@@ -319,6 +324,12 @@ benchmarks-build-relwithdebinfo:
 # stacks with the cheap frame-pointer call-graph (no DWARF needed).
 benchmarks-build-spark-profile:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" BOLT_ENABLE_FRAME_POINTER="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+
+# Same as benchmarks-build-spark-profile but also reports JIT symbols to Intel
+# VTune (libjitprofiling). Override the SDK path with VTUNE_SDK_DIR=... if it is
+# not under the default /opt/intel/oneapi/vtune/2023.2.0/sdk.
+benchmarks-build-spark-vtune:
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" BOLT_ENABLE_FRAME_POINTER="ON" BOLT_ENABLE_VTUNE_JIT="ON" VTUNE_SDK_DIR="${VTUNE_SDK_DIR}" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
 unittest_debug: unittest
 unittest: debug_with_test
