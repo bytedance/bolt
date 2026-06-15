@@ -20,7 +20,8 @@ char* BmRowCopier::copyRowToSegment(
     SegmentData& segment,
     const char* source) {
   auto* target = segments().newRowInSegment(segment);
-  auto& chunk = segments().currentChunk(segment);
+  BOLT_DCHECK_NOT_NULL(segment.writeCursor.chunk);
+  auto& chunk = *segment.writeCursor.chunk;
   std::memcpy(target, source, layout().rowSize());
 
   for (int32_t column = 0; column < types().size(); ++column) {

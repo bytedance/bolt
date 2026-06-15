@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -54,6 +53,12 @@ struct ChunkData {
   bool consumed{false};
 };
 
+struct SegmentWriteCursor {
+  ChunkData* chunk{nullptr};
+  char* nextRow{nullptr};
+  char* rowBlockEnd{nullptr};
+};
+
 struct SegmentData {
   // Public lifecycle and block/chunk summary.
   SegmentMeta meta;
@@ -65,6 +70,8 @@ struct SegmentData {
   RowNumber nextRowNumber{0};
   // Active chunk while the segment accepts writes.
   ChunkId currentChunk{kNoBlock};
+  // Hot append cursor for the active chunk.
+  SegmentWriteCursor writeCursor;
 };
 
 // Owns segment/chunk metadata and all BufferManager block handles for one
@@ -134,7 +141,6 @@ class BmSegmentCollection {
   }
 
   char* newRowInSegment(SegmentData& segment);
-  void updateChunkForRow(SegmentData& segment, const RowId& rowId);
   void recordHeapForChunk(ChunkData& chunk, const BlockRef& heap, const char* row);
 
   ChunkData& currentChunk(SegmentData& segment);
@@ -159,7 +165,7 @@ class BmSegmentCollection {
 
   uint64_t segmentBytes(const SegmentData& segment) const;
   FOLLY_ALWAYS_INLINE uint32_t rowStride() const {
-    return layout().rowSize();
+    return rowStride_;
   }
 
  private:
@@ -174,9 +180,7 @@ class BmSegmentCollection {
   FOLLY_ALWAYS_INLINE const ChunkData& chunkForRowUnchecked(
       const SegmentData& segment,
       RowNumber rowNumber) const {
-    const auto rowsPerChunk = rowBlockSize_ / rowStride();
-    BOLT_DCHECK_GT(rowsPerChunk, 0);
-    const auto chunkIndex = rowNumber / rowsPerChunk;
+    const auto chunkIndex = rowNumber / rowsPerChunk_;
     BOLT_DCHECK_LT(chunkIndex, segment.chunks.size());
     const auto& chunk = segment.chunks[chunkIndex];
     BOLT_DCHECK(
@@ -196,12 +200,13 @@ class BmSegmentCollection {
   const BmRowLayout* layout_{nullptr};
   uint32_t rowBlockSize_;
   uint32_t heapBlockSize_;
+  uint32_t rowStride_{0};
+  uint32_t rowsPerChunk_{0};
   SegmentId nextSegmentId_{1};
   BlockId nextBlockId_{1};
-  std::unordered_map<SegmentId, SegmentData> segments_;
-  std::unordered_map<PartitionId, SegmentId> activeSegments_;
-  std::unordered_map<PartitionId, std::vector<SegmentId>> partitionSegments_;
-  static const std::vector<SegmentId> kEmptySegments_;
+  std::vector<std::unique_ptr<SegmentData>> segments_;
+  std::vector<SegmentId> activeSegments_;
+  std::vector<std::vector<SegmentId>> partitionSegments_;
 };
 
 } // namespace bytedance::bolt::exec::bm
