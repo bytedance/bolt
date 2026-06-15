@@ -17,8 +17,7 @@
  * Copyright (c) ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
  *
- * This file has been modified by ByteDance Ltd. and/or its affiliates on
- * 2025-11-11.
+ * This file has been modified by ByteDance Ltd. and/or its affiliates.
  *
  * Original file was released under the Apache License 2.0,
  * with the full license text available at:
@@ -27,25 +26,33 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
+#include "bolt/functions/sparksql/MapFromArrays.h"
 
-#include "bolt/expression/VectorFunction.h"
-#include "bolt/functions/lib/Map.h"
+#include "bolt/core/QueryConfig.h"
 
-namespace bytedance::bolt::functions {
+namespace bytedance::bolt::functions::sparksql {
 
-BOLT_DECLARE_VECTOR_FUNCTION(
-    udf_map,
-    (MapFunction</*AllowDuplicateKeys=*/false, /*DeduplicateKeys=*/false>::
-         signatures()),
-    (std::make_unique<MapFunction<
-         /*AllowDuplicateKeys=*/false,
-         /*DeduplicateKeys=*/false>>()));
+std::shared_ptr<exec::VectorFunction> makeMapFromArrays(
+    const std::string& /*name*/,
+    const std::vector<exec::VectorFunctionArg>& /*inputArgs*/,
+    const core::QueryConfig& config) {
+  if (config.throwExceptionOnDuplicateMapKeys()) {
+    return std::make_shared<
+        MapFunction</*AllowDuplicateKeys=*/false, /*DeduplicateKeys=*/false>>();
+  }
+  return std::make_shared<
+      MapFunction</*AllowDuplicateKeys=*/true, /*DeduplicateKeys=*/true>>();
+}
 
-BOLT_DECLARE_VECTOR_FUNCTION(
-    udf_map_allow_duplicates,
-    (MapFunction</*AllowDuplicateKeys=*/true, /*DeduplicateKeys=*/false>::
-         signatures()),
-    (std::make_unique<MapFunction<
-         /*AllowDuplicateKeys=*/true,
-         /*DeduplicateKeys=*/false>>()));
-} // namespace bytedance::bolt::functions
+std::vector<std::shared_ptr<exec::FunctionSignature>>
+getMapFromArraysSignature() {
+  return MapFunction</*AllowDuplicateKeys=*/false, /*DeduplicateKeys=*/false>::
+      signatures();
+}
+
+void registerMapFromArrays(const std::string& name) {
+  exec::registerStatefulVectorFunction(
+      name, getMapFromArraysSignature(), makeMapFromArrays);
+}
+
+} // namespace bytedance::bolt::functions::sparksql
