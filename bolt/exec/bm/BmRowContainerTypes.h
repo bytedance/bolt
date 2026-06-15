@@ -37,11 +37,10 @@ using PartitionId = uint32_t;
 //
 // BM RowContainer cannot use that layout yet. Its current write API preserves
 // the old RowContainer usage pattern: callers allocate a row with
-// appendRow()/appendBatch(), then store columns later through RowWriteContext.
-// In appendBatch(), all fixed row slots are allocated first and variable-width
-// columns are written afterwards. Therefore the writer does not know the
-// VARCHAR/VARBINARY payload sizes when the row slot and chunk are created, and
-// different string columns can cross heap block boundaries at different rows.
+// appendRow(), then store columns later through RowWriteContext. Therefore the
+// writer does not know the VARCHAR/VARBINARY payload sizes when the row slot
+// and chunk are created, and different string columns can cross heap block
+// boundaries at different rows.
 //
 // Because of that, the current design is intentionally simpler: one chunk is
 // anchored to one row block and owns the heap blocks referenced by rows in that
@@ -114,15 +113,16 @@ struct BulkLoadMetrics {
   uint64_t rowIdRows{0};
 };
 
-struct BmAppendMetrics {
-  uint64_t rowAllocNs{0};
+struct BmStoreMetrics {
+  uint64_t appendRowNs{0};
   uint64_t fixedStoreNs{0};
   uint64_t stringStoreNs{0};
-  uint64_t heapAllocNs{0};
+  uint64_t heapEnsureNs{0};
   uint64_t stringCopyNs{0};
   uint64_t heapRecordNs{0};
   uint64_t rows{0};
-  uint64_t stringRows{0};
+  uint64_t fixedValues{0};
+  uint64_t stringValues{0};
   uint64_t stringBytes{0};
   uint64_t heapAllocations{0};
 };

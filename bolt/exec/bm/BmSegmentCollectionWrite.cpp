@@ -11,8 +11,8 @@ namespace {
 
 void recordHeapBase(ChunkData& chunk, const BlockRef& heap) {
   if (chunk.heapBlocks.empty() || chunk.heapBlocks.back().id != heap.id) {
-    // ensureHeapBlock() only reuses heap blocks from the owning chunk. A miss
-    // here means a write context no longer matches the row being stored.
+    // ensureHeapBlockInChunk() only reuses heap blocks from the owning chunk. A
+    // miss here means a write context no longer matches the row being stored.
     BOLT_DCHECK(
         std::find_if(
             chunk.heapBlocks.begin(),
@@ -111,7 +111,7 @@ char* BmSegmentCollection::newRowInSegment(SegmentData& segment) {
   const auto offset = block.used;
   auto* row = block.ptr + offset;
   block.used += layout().rowSize();
-  std::memset(row, 0, layout().rowSize());
+  layout().initializeRow(row);
 
   RowId rowId;
   rowId.segmentId = segment.meta.id;
@@ -134,22 +134,10 @@ void BmSegmentCollection::updateChunkForRow(
   BOLT_DCHECK_EQ(chunk.rowBlock.id, rowId.rowBlockId);
 }
 
-void BmSegmentCollection::recordHeapForCurrentChunk(
-    SegmentData& segment,
-    const BlockRef& heap) {
-  BOLT_DCHECK(segment.currentChunk != kNoBlock);
-  auto& chunk = currentChunk(segment);
-  recordHeapBase(chunk, heap);
-}
-
 void BmSegmentCollection::recordHeapForChunk(
-    SegmentData& segment,
-    ChunkId chunkId,
+    ChunkData& chunk,
     const BlockRef& heap,
     const char* row) {
-  BOLT_DCHECK_LT(chunkId, segment.chunks.size());
-  auto& chunk = segment.chunks[chunkId];
-
   BOLT_DCHECK([&]() {
     const auto rowAddress = reinterpret_cast<uintptr_t>(row);
     const auto& block = chunk.rowBlock;

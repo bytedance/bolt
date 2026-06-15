@@ -44,12 +44,6 @@ class BmRowContainerTest : public testing::Test,
   }
 
   std::vector<char*> storeAll(BmRowContainer& container, RowVectorPtr input) {
-    return container.appendBatch(input);
-  }
-
-  std::vector<char*> storeAllByRowWriteContext(
-      BmRowContainer& container,
-      RowVectorPtr input) {
     SelectivityVector rows(input->size());
     std::vector<DecodedVector> decoded(input->childrenSize());
     for (auto i = 0; i < input->childrenSize(); ++i) {
@@ -79,7 +73,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
-  auto rows = storeAllByRowWriteContext(container, input);
+  auto rows = storeAll(container, input);
 
   EXPECT_GT(container.compare(rows[0], rows[1], 0), 0);
   EXPECT_LT(container.compare(rows[1], rows[2], 0), 0);
@@ -96,7 +90,7 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_EQ(3, flat->valueAt(3));
 }
 
-TEST_F(BmRowContainerTest, AppendBatchAndStringCompare) {
+TEST_F(BmRowContainerTest, AppendRowsAndStringCompare) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -119,6 +113,77 @@ TEST_F(BmRowContainerTest, AppendBatchAndStringCompare) {
   EXPECT_EQ("prefix_same_a", flat->valueAt(0).str());
   EXPECT_EQ("prefix_same_b", flat->valueAt(1).str());
   EXPECT_EQ("prefix_same_a", flat->valueAt(2).str());
+}
+
+TEST_F(BmRowContainerTest, StoreMetricsSeparateFixedAndStringWrites) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({11}),
+      makeFlatVector<std::string>({std::string(64, 'x')}),
+  });
+
+  SelectivityVector rows(input->size());
+  DecodedVector fixed(*input->childAt(0), rows);
+  DecodedVector string(*input->childAt(1), rows);
+  BmStoreMetrics metrics;
+  auto context = container.appendRow();
+  container.store(context, fixed, 0, 0, &metrics);
+  container.store(context, string, 0, 1, &metrics);
+
+  EXPECT_EQ(1, metrics.fixedValues);
+  EXPECT_EQ(1, metrics.stringValues);
+  EXPECT_EQ(64, metrics.stringBytes);
+  EXPECT_EQ(1, metrics.heapAllocations);
+}
+
+TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto context = container.appendRow();
+
+  ASSERT_NE(nullptr, context.segment());
+  ASSERT_NE(nullptr, context.chunk());
+  EXPECT_EQ(context.segment()->meta.id, context.chunk()->meta.segmentId);
+  EXPECT_EQ(context.row(), context.chunk()->rowBlock.ptr);
+}
+
+TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyRequiredBytes) {
+  {
+    BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 4 << 20);
+    std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
+
+    layout.initializeRow(row.data());
+
+    for (auto byte : row) {
+      EXPECT_EQ(static_cast<char>(0x7f), byte);
+    }
+  }
+
+  {
+    BmRowLayout layout({BIGINT(), VARCHAR()}, {true, false}, 4 << 20);
+    std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
+
+    layout.initializeRow(row.data());
+
+    EXPECT_EQ(0, row[0]);
+    for (uint32_t i = layout.column(0).offset;
+         i < layout.column(0).offset + layout.column(0).width;
+         ++i) {
+      EXPECT_EQ(static_cast<char>(0x7f), row[i]);
+    }
+    for (uint32_t i = layout.column(1).offset;
+         i < layout.column(1).offset + layout.column(1).width;
+         ++i) {
+      EXPECT_EQ(0, row[i]);
+    }
+  }
 }
 
 TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
@@ -380,13 +445,15 @@ TEST_F(BmRowContainerTest, SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) 
       1024);
   auto& segment = segments.createSegment(kDefaultPartition);
 
-  segments.newRowInSegment(segment);
-  auto& firstHeap = segments.ensureHeapBlock(segment, 16);
-  segments.recordHeapForCurrentChunk(segment, firstHeap);
+  auto* firstRow = segments.newRowInSegment(segment);
+  auto& firstChunk = segments.currentChunk(segment);
+  auto& firstHeap = segments.ensureHeapBlockInChunk(firstChunk, 16);
+  segments.recordHeapForChunk(firstChunk, firstHeap, firstRow);
 
-  segments.newRowInSegment(segment);
-  auto& secondHeap = segments.ensureHeapBlock(segment, 16);
-  segments.recordHeapForCurrentChunk(segment, secondHeap);
+  auto* secondRow = segments.newRowInSegment(segment);
+  auto& secondChunk = segments.currentChunk(segment);
+  auto& secondHeap = segments.ensureHeapBlockInChunk(secondChunk, 16);
+  segments.recordHeapForChunk(secondChunk, secondHeap, secondRow);
 
   ASSERT_EQ(2, segment.chunks.size());
   ASSERT_EQ(1, segment.chunks[0].heapBlocks.size());
@@ -406,8 +473,9 @@ TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
       64);
   auto& segment = segments.createSegment(kDefaultPartition);
   segments.newRowInSegment(segment);
+  auto& chunk = segments.currentChunk(segment);
 
-  auto& firstHeap = segments.ensureHeapBlock(segment, 40);
+  auto& firstHeap = segments.ensureHeapBlockInChunk(chunk, 40);
   firstHeap.used = 40;
   auto* const firstHeapPtr = firstHeap.ptr;
   const auto firstHeapUsed = firstHeap.used;
@@ -416,7 +484,7 @@ TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
   std::memset(
       firstHeapPtr + firstHeapUsed, 0x7f, firstHeapSize - firstHeapUsed);
 
-  auto& secondHeap = segments.ensureHeapBlock(segment, 40);
+  auto& secondHeap = segments.ensureHeapBlockInChunk(chunk, 40);
   ASSERT_NE(firstHeapId, secondHeap.id);
 
   for (uint32_t offset = firstHeapUsed; offset < firstHeapSize; ++offset) {
