@@ -115,12 +115,15 @@ void jitHashAggrExtractFinalDecimalSum(
     int32_t row,
     char* group,
     int32_t offset,
-    int32_t precision) {
+    int32_t precision,
+    bool accumulatorIsNull) {
   auto* state =
       reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
   auto* flat = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
                    ->asUnchecked<bytedance::bolt::FlatVector<TResult>>();
-  if (state->isEmpty) {
+  // A null accumulator (e.g. an overflowed intermediate result merged into the
+  // group) produces null, matching the non-JIT `if (isNull(group))` check.
+  if (accumulatorIsNull || state->isEmpty) {
     flat->setNull(row, true);
     return;
   }
@@ -140,7 +143,8 @@ void jitHashAggrExtractPartialDecimalSum(
     int32_t row,
     char* group,
     int32_t offset,
-    int32_t precision) {
+    int32_t precision,
+    bool accumulatorIsNull) {
   auto* state =
       reinterpret_cast<bytedance::bolt::jit::JitDecimalSumState*>(group + offset);
   auto* rowVector = reinterpret_cast<bytedance::bolt::BaseVector*>(vector)
@@ -150,6 +154,14 @@ void jitHashAggrExtractPartialDecimalSum(
   auto* isEmptyVector =
       rowVector->childAt(1)->asUnchecked<bytedance::bolt::FlatVector<bool>>();
   rowVector->setNull(row, false);
+  // A null accumulator (e.g. an overflowed intermediate result merged into the
+  // group) outputs sum=0, isEmpty=true, matching the non-JIT
+  // `if (isNull(group))` branch.
+  if (accumulatorIsNull) {
+    sumVector->set(row, 0);
+    isEmptyVector->set(row, true);
+    return;
+  }
   if (state->isEmpty) {
     sumVector->set(row, 0);
     isEmptyVector->set(row, true);
@@ -233,9 +245,10 @@ jit_HashAggrExtractFinalShortDecimalSum(
     char* group,
     int32_t offset,
     int32_t precision,
-    int32_t /*scale*/) {
+    int32_t /*scale*/,
+    int32_t accumulatorIsNull) {
   jitHashAggrExtractFinalDecimalSum<int64_t>(
-      vector, row, group, offset, precision);
+      vector, row, group, offset, precision, accumulatorIsNull != 0);
 }
 
 __attribute__((__visibility__("default"))) void
@@ -245,9 +258,10 @@ jit_HashAggrExtractFinalLongDecimalSum(
     char* group,
     int32_t offset,
     int32_t precision,
-    int32_t /*scale*/) {
+    int32_t /*scale*/,
+    int32_t accumulatorIsNull) {
   jitHashAggrExtractFinalDecimalSum<bytedance::bolt::int128_t>(
-      vector, row, group, offset, precision);
+      vector, row, group, offset, precision, accumulatorIsNull != 0);
 }
 
 // Partial decimal sum extract: write row(sum:decimal, isEmpty:bool).
@@ -258,9 +272,10 @@ jit_HashAggrExtractPartialShortDecimalSum(
     char* group,
     int32_t offset,
     int32_t precision,
-    int32_t /*scale*/) {
+    int32_t /*scale*/,
+    int32_t accumulatorIsNull) {
   jitHashAggrExtractPartialDecimalSum<int64_t>(
-      vector, row, group, offset, precision);
+      vector, row, group, offset, precision, accumulatorIsNull != 0);
 }
 
 __attribute__((__visibility__("default"))) void
@@ -270,9 +285,10 @@ jit_HashAggrExtractPartialLongDecimalSum(
     char* group,
     int32_t offset,
     int32_t precision,
-    int32_t /*scale*/) {
+    int32_t /*scale*/,
+    int32_t accumulatorIsNull) {
   jitHashAggrExtractPartialDecimalSum<bytedance::bolt::int128_t>(
-      vector, row, group, offset, precision);
+      vector, row, group, offset, precision, accumulatorIsNull != 0);
 }
 
 // Partial decimal avg extract: write row(sum:decimal, count:bigint).

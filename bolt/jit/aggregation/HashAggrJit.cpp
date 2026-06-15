@@ -94,7 +94,8 @@ void jit_HashAggrExtractFinalShortDecimalSum(
     char* group,
     int32_t offset,
     int32_t precision,
-    int32_t scale);
+    int32_t scale,
+    int32_t accumulatorIsNull);
 
 [[maybe_unused]] __attribute__((used)) const void* const
     kHashAggrRuntimeLinkAnchors[] = {
@@ -123,27 +124,27 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
 
   declareFunction(module, "jit_HashAggrResizeVector", voidTy, {i8PtrTy, i32Ty});
   // Decimal extract helpers.
-  // Sum: (vector, row, group, offset, precision, scale).
+  // Sum: (vector, row, group, offset, precision, scale, accumulatorIsNull).
   declareFunction(
       module,
       "jit_HashAggrExtractFinalShortDecimalSum",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty});
   declareFunction(
       module,
       "jit_HashAggrExtractFinalLongDecimalSum",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty});
   declareFunction(
       module,
       "jit_HashAggrExtractPartialShortDecimalSum",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty});
   declareFunction(
       module,
       "jit_HashAggrExtractPartialLongDecimalSum",
       voidTy,
-      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty});
+      {i8PtrTy, i32Ty, i8PtrTy, i32Ty, i32Ty, i32Ty, i32Ty});
 
   // Avg: (vector, row, group, offset, precision, scale, resultPrecision,
   // resultScale).

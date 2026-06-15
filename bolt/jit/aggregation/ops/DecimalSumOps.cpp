@@ -146,6 +146,11 @@ void emitDecimalSumExtract(
                      : "jit_HashAggrExtractPartialShortDecimalSum")
       : (longDecimal ? "jit_HashAggrExtractFinalLongDecimalSum"
                      : "jit_HashAggrExtractFinalShortDecimalSum");
+  // Mirror the non-JIT extract's leading `if (isNull(group))` check: a group
+  // whose accumulator null flag is set (e.g. an overflowed intermediate result
+  // merged in) must produce null, regardless of the sum/isEmpty fields.
+  auto* accumulatorIsNull =
+      b.CreateZExt(codegen.isAccumulatorNull(group, slot), b.getInt32Ty());
   b.CreateCall(
       codegen.module().getFunction(fn),
       {vector,
@@ -153,7 +158,8 @@ void emitDecimalSumExtract(
        group,
        b.getInt32(slot.offset),
        b.getInt32(outPrecision),
-       b.getInt32(outScale)});
+       b.getInt32(outScale),
+       accumulatorIsNull});
 }
 
 void compileDecimalSumExtractAccumulators(

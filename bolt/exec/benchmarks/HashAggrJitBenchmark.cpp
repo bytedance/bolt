@@ -334,8 +334,8 @@ class HashAggrJitBenchmark : public VectorTestBase {
     testCase->maxFuseWidth = maxFuseWidth;
     // Warm up both paths so the benchmark compares steady-state execution and
     // doesn't charge one-time plan setup / JIT compilation to the first sample.
-    // run(testCase->plan, false, minFuseWidth, maxFuseWidth);
-    // run(testCase->plan, true, minFuseWidth, maxFuseWidth);
+    run(testCase->plan, false, minFuseWidth, maxFuseWidth);
+    run(testCase->plan, true, minFuseWidth, maxFuseWidth);
     auto* testCasePtr = testCase.get();
     folly::addBenchmark(__FILE__, name + "_nojit", [this, testCasePtr]() {
       run(
