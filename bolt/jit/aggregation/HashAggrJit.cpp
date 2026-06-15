@@ -1006,8 +1006,7 @@ bool genAddDenseIR(
 bool genExtractIR(
     llvm::Module& module,
     const std::string& fn,
-    const std::vector<HashAggrJitSlot>& slots,
-    bool partialOutput) {
+    const std::vector<HashAggrJitSlot>& slots) {
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
   HashAggrJitCodegen codegen(module);
@@ -1052,8 +1051,9 @@ bool genExtractIR(
       output =
           std::make_unique<ScalarOutputAdapterCodegen>(codegen, outputRuntime);
     }
-    auto* extractFn = partialOutput ? slot.desc.ops->extractAccumulators
-                                    : slot.desc.ops->extractResults;
+    auto* extractFn = slot.desc.context.isPartialOutput
+        ? slot.desc.ops->extractAccumulators
+        : slot.desc.ops->extractResults;
     if (extractFn == nullptr) {
       return false;
     }
@@ -1074,13 +1074,14 @@ bool genExtractIR(
 } // namespace
 
 std::string HashAggrJitSlot::getDescription() const {
+  const auto inputTypes = desc.context.inputTypes();
   std::ostringstream inputs;
   inputs << "[";
-  for (size_t i = 0; i < desc.context.inputTypes.size(); ++i) {
+  for (size_t i = 0; i < inputTypes.size(); ++i) {
     if (i > 0) {
       inputs << ",";
     }
-    inputs << desc.context.inputTypes[i]->toString();
+    inputs << inputTypes[i]->toString();
   }
   inputs << "]";
 
@@ -1090,22 +1091,15 @@ std::string HashAggrJitSlot::getDescription() const {
       desc.context.isRawInput,
       desc.context.isPartialOutput,
       inputs.str(),
-      desc.context.outputType->toString(),
+      desc.context.outputType()->toString(),
       offset);
 }
 
-HashAggrJitChunk::HashAggrJitChunk(
-    std::vector<HashAggrJitSlot> slots,
-    bool isRawInput,
-    bool isPartialOutput)
-    : slots_(std::move(slots)),
-      isRawInput_(isRawInput),
-      isPartialOutput_(isPartialOutput) {
+HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
+    : slots_(std::move(slots)) {
   const auto description = getDescription();
   functionName_ = fmt::format(
-      "jit_hashaggr_v2_raw{}_partial{}_n{}_h{:016x}",
-      isRawInput_,
-      isPartialOutput_,
+      "jit_hashaggr_v2_n{}_h{:016x}",
       slots_.size(),
       bits::hashBytes(1, description.data(), description.size()));
 }
@@ -1216,7 +1210,7 @@ bool HashAggrJitChunk::codegen() {
         const bool ok = genInitIR(module, initFn, slots_) &&
             genAddDenseIR(module, addFn, slots_, true) &&
             genAddDenseIR(module, addNoNullFn, slots_, false) &&
-            genExtractIR(module, extractFn, slots_, isPartialOutput_);
+            genExtractIR(module, extractFn, slots_);
         const bool hasError = !ok;
         logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
         logHashAggrJitFunctionIR(module, moduleKey, addFn, "add_dense", hasError);

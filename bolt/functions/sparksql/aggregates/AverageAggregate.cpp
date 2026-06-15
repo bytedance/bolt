@@ -46,10 +46,11 @@ class AverageAggregate
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
       return false;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto& inputType = inputTypes[0];
     if (context.isRawInput) {
       if (inputType->isDecimal()) {
         return false;
@@ -77,7 +78,7 @@ class AverageAggregate
           .ops = jit::getAvgOps()};
     }
 
-    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
     if (!inputKind.has_value()) {
       return std::nullopt;
     }
@@ -144,10 +145,11 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
       return false;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto& inputType = inputTypes[0];
     if (context.isRawInput) {
       return inputType->isDecimal();
     }
@@ -161,7 +163,8 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
     if (!supportsHashAggrJit(context)) {
       return std::nullopt;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto inputTypes = context.inputTypes();
+    const auto& inputType = inputTypes[0];
     const auto& valueType =
         context.isRawInput ? inputType : inputType->childAt(0);
     return jit::HashAggrJitDescriptor{

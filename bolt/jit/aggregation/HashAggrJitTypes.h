@@ -79,14 +79,40 @@ union HashAggrJitOutputRuntime {
   HashAggrJitRowOutputRuntime row;
 };
 
+// Stage-agnostic, absolute description of an aggregate's types. The three type
+// fields below always hold the same values regardless of which stage
+// (raw/intermediate/partial/final) this context represents; the active stage is
+// selected purely by the isRawInput/isPartialOutput flags. The inputTypes() and
+// outputType() accessors derive the stage-specific view from those flags, so a
+// flag flip (e.g. by a companion function) automatically yields a consistent
+// input/output type without any separate type-rewrite step.
 struct HashAggrJitPlanContext {
   bool isRawInput{false};
   bool isPartialOutput{false};
-  std::vector<TypePtr> inputTypes;
-  TypePtr outputType;
+  // Original (raw) input argument types. Empty for count(*).
+  std::vector<TypePtr> rawInputTypes;
+  // The intermediate accumulator type (i.e. the partial output / merge input).
+  TypePtr intermediateType;
+  // The final aggregate result type.
+  TypePtr resultType;
+
+  // Stage-derived input view: raw inputs when reading raw input, otherwise the
+  // single intermediate accumulator type.
+  std::vector<TypePtr> inputTypes() const {
+    if (isRawInput) {
+      return rawInputTypes;
+    }
+    return {intermediateType};
+  }
+
+  // Stage-derived output view: the intermediate accumulator type for partial
+  // output, otherwise the final result type.
+  TypePtr outputType() const {
+    return isPartialOutput ? intermediateType : resultType;
+  }
 
   bool isCountStar() const {
-    return isRawInput && inputTypes.empty();
+    return isRawInput && rawInputTypes.empty();
   }
 };
 
@@ -143,16 +169,16 @@ struct HashAggrJitDescriptor {
   }
 
   HashAggrJitRuntimeShape inputShape() const {
-    return context.inputTypes.size() == 1 && context.inputTypes[0] &&
-            context.inputTypes[0]->isRow()
+    const auto inputTypes = context.inputTypes();
+    return inputTypes.size() == 1 && inputTypes[0] && inputTypes[0]->isRow()
         ? HashAggrJitRuntimeShape::Row
         : HashAggrJitRuntimeShape::Scalar;
   }
 
   HashAggrJitRuntimeShape outputShape() const {
-    return context.outputType && context.outputType->isRow()
-        ? HashAggrJitRuntimeShape::Row
-        : HashAggrJitRuntimeShape::Scalar;
+    const auto outputType = context.outputType();
+    return outputType && outputType->isRow() ? HashAggrJitRuntimeShape::Row
+                                             : HashAggrJitRuntimeShape::Scalar;
   }
 
   // std::string signature() const;

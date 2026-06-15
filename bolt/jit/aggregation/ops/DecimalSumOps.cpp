@@ -87,7 +87,7 @@ void compileDecimalSumAddIntermediateResults(
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "decimal_sum_merge", function, continueBlock);
   const auto [sumPrecision, _] =
-      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes[0]);
+      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes()[0]);
   const auto sumKind = hashAggrJitDecimalKindForPrecision(sumPrecision);
   auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* incomingIsEmpty =
@@ -138,7 +138,7 @@ void emitDecimalSumExtract(
   // long/short decimal and overflow precision are decided by the actual
   // output decimal type of this aggregation stage.
   const auto [outPrecision, outScale] =
-      hashAggrJitDecimalPrecisionScale(slot.desc.context.outputType);
+      hashAggrJitDecimalPrecisionScale(slot.desc.context.outputType());
   const bool longDecimal = hashAggrJitDecimalKindForPrecision(outPrecision) ==
       HashAggrJitValueKind::Int128;
   const char* fn = partialOutput

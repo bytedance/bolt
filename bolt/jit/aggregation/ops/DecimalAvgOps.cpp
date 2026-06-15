@@ -89,7 +89,7 @@ void compileDecimalAvgAddIntermediateResults(
   auto* mergeBlock = llvm::BasicBlock::Create(
       codegen.module().getContext(), "decimal_avg_merge", function, continueBlock);
   const auto [sumPrecision, _] =
-      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes[0]);
+      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes()[0]);
   const auto sumKind = hashAggrJitDecimalKindForPrecision(sumPrecision);
   auto* sumRow = input.readRowField(row, 0, sumKind);
   auto* countRow = input.readRowField(row, 1, HashAggrJitValueKind::Int64);
@@ -133,9 +133,9 @@ void emitDecimalAvgExtract(
     bool partialOutput) {
   auto& b = codegen.builder();
   const auto [inputPrecision, inputScale] =
-      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes[0]);
+      hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes()[0]);
   const auto [outputPrecision, outputScale] =
-      hashAggrJitDecimalPrecisionScale(slot.desc.context.outputType);
+      hashAggrJitDecimalPrecisionScale(slot.desc.context.outputType());
   const bool longDecimal = hashAggrJitDecimalKindForPrecision(
                                outputPrecision) == HashAggrJitValueKind::Int128;
   const char* fn = partialOutput

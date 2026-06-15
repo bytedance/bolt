@@ -54,6 +54,15 @@ class AggregateCompanionFunctionBase : public Aggregate {
   bool supportsToIntermediate() const override final;
 
 #ifdef ENABLE_BOLT_JIT
+  // Companion functions expose a different aggregation stage than the operator
+  // step implies (e.g. a merge companion runs at the kSingle step but consumes
+  // intermediate state and emits intermediate state). Each companion rewrites
+  // the planning context into the stage it actually represents by flipping the
+  // isRawInput/isPartialOutput flags; the absolute types in the context are
+  // stage-agnostic, so the derived input/output views follow automatically.
+  virtual jit::HashAggrJitPlanContext rewriteHashAggrJitContext(
+      const jit::HashAggrJitPlanContext& context) const = 0;
+
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override;
 
@@ -134,11 +143,15 @@ struct AggregateCompanionAdapter {
         : AggregateCompanionFunctionBase{std::move(fn), resultType} {}
 
 #ifdef ENABLE_BOLT_JIT
-    bool supportsHashAggrJit(
-        const jit::HashAggrJitPlanContext& context) const override;
-
-    std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
-        const jit::HashAggrJitPlanContext& context) const override;
+    // Partial companion: reads raw input and emits intermediate state.
+    jit::HashAggrJitPlanContext rewriteHashAggrJitContext(
+        const jit::HashAggrJitPlanContext& context) const override {
+      auto rewritten = context;
+      rewritten.isRawInput = true;
+      rewritten.isPartialOutput = true;
+      rewritten.resultType = fn_->resultType();
+      return rewritten;
+    }
 #endif
 
     void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
@@ -171,11 +184,15 @@ struct AggregateCompanionAdapter {
         bool mayPushdown) override;
 
 #ifdef ENABLE_BOLT_JIT
-    bool supportsHashAggrJit(
-        const jit::HashAggrJitPlanContext& context) const override;
-
-    std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
-        const jit::HashAggrJitPlanContext& context) const override;
+    // Merge companion: reads intermediate state and emits intermediate state.
+    jit::HashAggrJitPlanContext rewriteHashAggrJitContext(
+        const jit::HashAggrJitPlanContext& context) const override {
+      auto rewritten = context;
+      rewritten.isRawInput = false;
+      rewritten.isPartialOutput = true;
+      rewritten.resultType = fn_->resultType();
+      return rewritten;
+    }
 #endif
 
     void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
@@ -188,6 +205,19 @@ struct AggregateCompanionAdapter {
         std::unique_ptr<Aggregate> fn,
         const TypePtr& resultType)
         : MergeFunction{std::move(fn), resultType} {}
+
+#ifdef ENABLE_BOLT_JIT
+    // Merge-extract companion: reads intermediate state and emits the final
+    // result.
+    jit::HashAggrJitPlanContext rewriteHashAggrJitContext(
+        const jit::HashAggrJitPlanContext& context) const override {
+      auto rewritten = context;
+      rewritten.isRawInput = false;
+      rewritten.isPartialOutput = false;
+      rewritten.resultType = fn_->resultType();
+      return rewritten;
+    }
+#endif
 
     void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
         override;

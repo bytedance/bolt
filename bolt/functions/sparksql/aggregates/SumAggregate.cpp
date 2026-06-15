@@ -46,10 +46,11 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
       return false;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto& inputType = inputTypes[0];
     if (inputType->isRow() || inputType->isDecimal()) {
       return false;
     }
@@ -63,7 +64,7 @@ class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
       return std::nullopt;
     }
 
-    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
     if (!inputKind.has_value()) {
       return std::nullopt;
     }

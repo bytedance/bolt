@@ -38,19 +38,6 @@
 
 namespace bytedance::bolt::exec {
 
-namespace {
-
-#ifdef ENABLE_BOLT_JIT
-jit::HashAggrJitPlanContext toUnderlyingMergeContext(
-    const jit::HashAggrJitPlanContext& context) {
-  auto adapted = context;
-  adapted.isRawInput = false;
-  return adapted;
-}
-#endif
-
-} // namespace
-
 void AggregateCompanionFunctionBase::setOffsetsInternal(
     int32_t offset,
     int32_t nullByte,
@@ -82,14 +69,14 @@ bool AggregateCompanionFunctionBase::supportsToIntermediate() const {
 
 #ifdef ENABLE_BOLT_JIT
 bool AggregateCompanionFunctionBase::supportsHashAggrJit(
-    const jit::HashAggrJitPlanContext& /*context*/) const {
-  return false;
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->supportsHashAggrJit(rewriteHashAggrJitContext(context));
 }
 
 std::optional<jit::HashAggrJitDescriptor>
 AggregateCompanionFunctionBase::createHashAggrJitDescriptor(
-    const jit::HashAggrJitPlanContext& /*context*/) const {
-  return std::nullopt;
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->createHashAggrJitDescriptor(rewriteHashAggrJitContext(context));
 }
 #endif
 
@@ -194,19 +181,6 @@ void AggregateCompanionAdapter::PartialFunction::extractValues(
   fn_->extractAccumulators(groups, numGroups, result);
 }
 
-#ifdef ENABLE_BOLT_JIT
-bool AggregateCompanionAdapter::PartialFunction::supportsHashAggrJit(
-    const jit::HashAggrJitPlanContext& context) const {
-  return fn_->supportsHashAggrJit(context);
-}
-
-std::optional<jit::HashAggrJitDescriptor>
-AggregateCompanionAdapter::PartialFunction::createHashAggrJitDescriptor(
-    const jit::HashAggrJitPlanContext& context) const {
-  return fn_->createHashAggrJitDescriptor(context);
-}
-#endif
-
 void AggregateCompanionAdapter::MergeFunction::addRawInput(
     char** groups,
     const SelectivityVector& rows,
@@ -224,19 +198,6 @@ void AggregateCompanionAdapter::MergeFunction::addSingleGroupRawInput(
   fn_->enableValidateIntermediateInputs();
   fn_->addSingleGroupIntermediateResults(group, rows, args, mayPushdown);
 }
-
-#ifdef ENABLE_BOLT_JIT
-bool AggregateCompanionAdapter::MergeFunction::supportsHashAggrJit(
-    const jit::HashAggrJitPlanContext& context) const {
-  return fn_->supportsHashAggrJit(toUnderlyingMergeContext(context));
-}
-
-std::optional<jit::HashAggrJitDescriptor>
-AggregateCompanionAdapter::MergeFunction::createHashAggrJitDescriptor(
-    const jit::HashAggrJitPlanContext& context) const {
-  return fn_->createHashAggrJitDescriptor(toUnderlyingMergeContext(context));
-}
-#endif
 
 void AggregateCompanionAdapter::MergeFunction::toIntermediate(
     const SelectivityVector& rows,

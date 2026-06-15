@@ -55,10 +55,11 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputTypes.size() != 1 || context.inputTypes[0] == nullptr) {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || inputTypes[0] == nullptr) {
       return false;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto& inputType = inputTypes[0];
     return !inputType->isRow() &&
         (inputType->isDecimal() ||
          jit::isHashAggrJitSupportedType(inputType->kind()) ||
@@ -70,7 +71,7 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
     if (!supportsHashAggrJit(context)) {
       return std::nullopt;
     }
-    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
     if (!inputKind.has_value()) {
       return std::nullopt;
     }

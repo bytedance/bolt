@@ -63,10 +63,11 @@ class DecimalSumAggregate : public exec::Aggregate {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
-    if (context.inputTypes.size() != 1 || !context.inputTypes[0]) {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
       return false;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto& inputType = inputTypes[0];
     if (context.isRawInput) {
       return inputType->isDecimal() &&
           (inputType->isShortDecimal() || inputType->isLongDecimal());
@@ -81,7 +82,8 @@ class DecimalSumAggregate : public exec::Aggregate {
     if (!supportsHashAggrJit(context)) {
       return std::nullopt;
     }
-    const auto& inputType = context.inputTypes[0];
+    const auto inputTypes = context.inputTypes();
+    const auto& inputType = inputTypes[0];
     const auto& valueType =
         context.isRawInput ? inputType : inputType->childAt(0);
     return jit::HashAggrJitDescriptor{

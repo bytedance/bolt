@@ -56,20 +56,21 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
 #ifdef ENABLE_BOLT_JIT
   bool supportsHashAggrJit(
       const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
     if (context.isRawInput) {
       if (context.isCountStar()) {
         return true;
       }
-      if (context.inputTypes.size() != 1 || context.inputTypes[0] == nullptr) {
+      if (inputTypes.size() != 1 || inputTypes[0] == nullptr) {
         return false;
       }
-      const auto& inputType = context.inputTypes[0];
+      const auto& inputType = inputTypes[0];
       return !inputType->isRow() &&
           (inputType->isDecimal() ||
            jit::isHashAggrJitSupportedType(inputType->kind()));
     }
-    return context.inputTypes.size() == 1 && context.inputTypes[0] != nullptr &&
-        context.inputTypes[0]->kind() == TypeKind::BIGINT;
+    return inputTypes.size() == 1 && inputTypes[0] != nullptr &&
+        inputTypes[0]->kind() == TypeKind::BIGINT;
   }
 
   std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
@@ -80,7 +81,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     auto inputKind = jit::HashAggrJitValueKind::Int64;
     if (!context.isCountStar()) {
       auto maybeInputKind =
-          jit::hashAggrJitValueKind(context.inputTypes[0]->kind());
+          jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
       if (!maybeInputKind.has_value()) {
         return std::nullopt;
       }

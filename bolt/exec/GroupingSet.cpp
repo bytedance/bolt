@@ -241,19 +241,16 @@ std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
     return std::nullopt;
   }
 
-  std::vector<TypePtr> inputTypes;
-  if (isRawInput) {
-    inputTypes = aggregate.rawInputTypes;
-  } else {
-    inputTypes = {aggregate.intermediateType};
-  }
-
+  // Fill the stage-agnostic absolute types and let the context derive the
+  // stage-specific input/output view from the flags. Companion functions may
+  // later flip the flags (via rewriteHashAggrJitContext) without needing to
+  // re-pick types here.
   const jit::HashAggrJitPlanContext context{
       .isRawInput = isRawInput,
       .isPartialOutput = isPartialOutput,
-      .inputTypes = std::move(inputTypes),
-      .outputType = isPartialOutput ? aggregate.intermediateType
-                                    : aggregate.function->resultType()};
+      .rawInputTypes = aggregate.rawInputTypes,
+      .intermediateType = aggregate.intermediateType,
+      .resultType = aggregate.function->resultType()};
   if (!aggregate.function->supportsHashAggrJit(context)) {
     return std::nullopt;
   }
@@ -1020,8 +1017,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
       currentChunkSlots.clear();
       return;
     }
-    jit::HashAggrJitChunk chunk(
-        std::move(currentChunkSlots), isRawInput_, isPartial_);
+    jit::HashAggrJitChunk chunk(std::move(currentChunkSlots));
     if (chunk.codegen()) {
       hashAggrJitChunks_.push_back(std::move(chunk));
       VLOG(1) << "HashAggrJit formed chunk: "
