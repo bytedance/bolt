@@ -53,12 +53,14 @@ void collectReadOnlyEvictChunkBlocks(
 
 } // namespace
 
-SegmentId BmRowContainer::spillActiveSegment() {
-  return segments_.spillActiveSegment();
+SegmentId BmRowContainer::spillActiveSegment(BmSegmentSpillMetrics* metrics) {
+  return segments_.spillActiveSegment(metrics);
 }
 
-SegmentId BmRowContainer::spillActivePartitionSegment(PartitionId partition) {
-  return segments_.spillActivePartitionSegment(partition);
+SegmentId BmRowContainer::spillActivePartitionSegment(
+    PartitionId partition,
+    BmSegmentSpillMetrics* metrics) {
+  return segments_.spillActivePartitionSegment(partition, metrics);
 }
 
 void BmRowContainer::releaseSegment(SegmentId segment) {

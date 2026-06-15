@@ -419,8 +419,9 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<char*>* rows) {
-  auto appended = container.appendBatch(batch);
+    std::vector<char*>* rows,
+    BmAppendMetrics* metrics) {
+  auto appended = container.appendBatch(batch, kDefaultPartition, metrics);
   if (rows != nullptr) {
     rows->insert(rows->end(), appended.begin(), appended.end());
   }
@@ -443,12 +444,13 @@ void storeReusableInputBatchesBm(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows) {
+    std::vector<char*>* rows,
+    BmAppendMetrics* metrics) {
   if (rows != nullptr) {
     rows->reserve(rowCount(options));
   }
   storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
-    storeInputBatchBm(container, batch, rows);
+    storeInputBatchBm(container, batch, rows, metrics);
   });
 }
 
@@ -485,12 +487,14 @@ OldStoredRows storeOldRows(
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
-    bool keepRows) {
+    bool keepRows,
+    BmAppendMetrics* metrics) {
   BmStoredRows stored;
   stored.container = makeBmRowContainer(options.dataset, context.bufferManager);
   storeBmRowsOnly(
       *stored.container, context.pool.get(), options,
-      keepRows ? &stored.rows : nullptr);
+      keepRows ? &stored.rows : nullptr,
+      metrics);
   return stored;
 }
 
@@ -507,9 +511,10 @@ void storeBmRowsOnly(
     BmRowContainer& container,
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows) {
+    std::vector<char*>* rows,
+    BmAppendMetrics* metrics) {
   auto input = makeReusableInputBatches(pool, options);
-  storeReusableInputBatchesBm(container, input, options, rows);
+  storeReusableInputBatchesBm(container, input, options, rows, metrics);
 }
 
 void extractOldRows(

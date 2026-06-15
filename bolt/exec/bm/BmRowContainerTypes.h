@@ -114,6 +114,34 @@ struct BulkLoadMetrics {
   uint64_t rowIdRows{0};
 };
 
+struct BmAppendMetrics {
+  uint64_t rowAllocNs{0};
+  uint64_t fixedStoreNs{0};
+  uint64_t stringStoreNs{0};
+  uint64_t heapAllocNs{0};
+  uint64_t stringCopyNs{0};
+  uint64_t heapRecordNs{0};
+  uint64_t rows{0};
+  uint64_t stringRows{0};
+  uint64_t stringBytes{0};
+  uint64_t heapAllocations{0};
+};
+
+struct BmSegmentSpillMetrics {
+  uint64_t zeroHeapTailNs{0};
+  uint64_t collectBlocksNs{0};
+  uint64_t spillBlocksNs{0};
+  uint64_t chunks{0};
+  uint64_t rowBlocks{0};
+  uint64_t heapBlocks{0};
+  uint64_t totalBlocks{0};
+  uint64_t rowBlockBytes{0};
+  uint64_t heapBlockBytes{0};
+  uint64_t usedRowBytes{0};
+  uint64_t usedHeapBytes{0};
+  uint64_t unusedHeapTailBytes{0};
+};
+
 struct HeapBaseRef {
   // Heap block referenced by one chunk.
   BlockId heapBlockId{kNoBlock};

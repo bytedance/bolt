@@ -396,7 +396,7 @@ TEST_F(BmRowContainerTest, SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) 
       segment.chunks[1].heapBlocks[0].id);
 }
 
-TEST_F(BmRowContainerTest, SegmentCollectionZerosHeapTailWhenSwitchingHeapBlocks) {
+TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
   BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
   BmSegmentCollection segments(
       bufferManager_,
@@ -420,7 +420,8 @@ TEST_F(BmRowContainerTest, SegmentCollectionZerosHeapTailWhenSwitchingHeapBlocks
   ASSERT_NE(firstHeapId, secondHeap.id);
 
   for (uint32_t offset = firstHeapUsed; offset < firstHeapSize; ++offset) {
-    EXPECT_EQ(0, firstHeapPtr[offset]) << "offset=" << offset;
+    EXPECT_EQ(static_cast<char>(0x7f), firstHeapPtr[offset])
+        << "offset=" << offset;
   }
 }
 

@@ -98,8 +98,10 @@ class BmSegmentCollection {
       uint32_t rowBlockSize,
       uint32_t heapBlockSize);
 
-  SegmentId spillActiveSegment();
-  SegmentId spillActivePartitionSegment(PartitionId partition);
+  SegmentId spillActiveSegment(BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId spillActivePartitionSegment(
+      PartitionId partition,
+      BmSegmentSpillMetrics* metrics = nullptr);
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   SegmentState segmentState(SegmentId segment) const;
@@ -110,8 +112,12 @@ class BmSegmentCollection {
 
   SegmentData& activeSegment(PartitionId partition);
   SegmentData& createSegment(std::optional<PartitionId> partition);
-  SegmentId finalizeAndFlush(PartitionId partition);
-  SegmentId finalizeAndFlushSegment(SegmentData& segment);
+  SegmentId finalizeAndFlush(
+      PartitionId partition,
+      BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId finalizeAndFlushSegment(
+      SegmentData& segment,
+      BmSegmentSpillMetrics* metrics = nullptr);
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
 

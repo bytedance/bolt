@@ -38,7 +38,8 @@ class BmRowContainer {
 
   std::vector<char*> appendBatch(
       const RowVectorPtr& input,
-      PartitionId partition = kDefaultPartition);
+      PartitionId partition = kDefaultPartition,
+      BmAppendMetrics* metrics = nullptr);
 
   // Allocates one row in the active segment for partition. The caller must fill
   // columns with store() before treating the row as complete.
@@ -68,8 +69,10 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize = false);
 
-  SegmentId spillActiveSegment();
-  SegmentId spillActivePartitionSegment(PartitionId partition);
+  SegmentId spillActiveSegment(BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId spillActivePartitionSegment(
+      PartitionId partition,
+      BmSegmentSpillMetrics* metrics = nullptr);
 
   // Materializes resident rows in the supplied order into a new finalized/flushed
   // segment. The returned SegmentId can be scanned through MergeReadSession.
@@ -116,13 +119,15 @@ class BmRowContainer {
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
-      int32_t column);
+      int32_t column,
+      BmAppendMetrics* metrics = nullptr);
   template <TypeKind Kind>
   void storeValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
-      const ColumnLayout& column);
+      const ColumnLayout& column,
+      BmAppendMetrics* metrics = nullptr);
   template <TypeKind Kind>
   void storeFixedColumnTyped(
       const DecodedVector& decoded,

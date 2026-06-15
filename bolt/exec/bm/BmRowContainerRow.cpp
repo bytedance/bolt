@@ -4,9 +4,19 @@
 
 #include <folly/Portability.h>
 
+#include <chrono>
 #include <cstring>
 
 namespace bytedance::bolt::exec::bm {
+namespace {
+
+uint64_t metricNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
 
 void BmRowContainer::store(
     RowWriteContext& context,
@@ -18,7 +28,8 @@ void BmRowContainer::store(
 
 std::vector<char*> BmRowContainer::appendBatch(
     const RowVectorPtr& input,
-    PartitionId partition) {
+    PartitionId partition,
+    BmAppendMetrics* metrics) {
   BOLT_CHECK_EQ(input->childrenSize(), types_.size());
   auto* inputRow = input->as<RowVector>();
   BOLT_CHECK_NOT_NULL(inputRow);
@@ -30,9 +41,14 @@ std::vector<char*> BmRowContainer::appendBatch(
   // stores instead of keeping one RowWriteContext per row.
   std::vector<RowWriteContext> contexts;
   contexts.reserve(input->size());
+  const auto rowAllocStart = metrics == nullptr ? 0 : metricNowNs();
   for (vector_size_t row = 0; row < input->size(); ++row) {
     contexts.push_back(appendRow(partition));
     rows.push_back(contexts.back().row());
+  }
+  if (metrics != nullptr) {
+    metrics->rowAllocNs += metricNowNs() - rowAllocStart;
+    metrics->rows += input->size();
   }
 
   SelectivityVector allRows(input->size());
@@ -41,10 +57,15 @@ std::vector<char*> BmRowContainer::appendBatch(
     DecodedVector decoded(*inputRow->childAt(column), allRows);
     const auto kind = types_[column]->kind();
     if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+      const auto stringStoreStart = metrics == nullptr ? 0 : metricNowNs();
       for (vector_size_t row = 0; row < input->size(); ++row) {
-        store(contexts[row], decoded, row, column);
+        storeValue(decoded, row, contexts[row], column, metrics);
+      }
+      if (metrics != nullptr) {
+        metrics->stringStoreNs += metricNowNs() - stringStoreStart;
       }
     } else {
+      const auto fixedStoreStart = metrics == nullptr ? 0 : metricNowNs();
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           storeFixedColumnTyped,
           kind,
@@ -52,6 +73,9 @@ std::vector<char*> BmRowContainer::appendBatch(
           input->size(),
           rows.data(),
           column);
+      if (metrics != nullptr) {
+        metrics->fixedStoreNs += metricNowNs() - fixedStoreStart;
+      }
     }
   }
 
@@ -62,7 +86,8 @@ void BmRowContainer::storeValue(
     const DecodedVector& decoded,
     vector_size_t sourceIndex,
     RowWriteContext& context,
-    int32_t column) {
+    int32_t column,
+    BmAppendMetrics* metrics) {
   BOLT_DCHECK_NOT_NULL(context.row_);
   BOLT_DCHECK_LT(column, layout_.columns().size());
   const auto& layout = layout_.column(column);
@@ -77,7 +102,8 @@ void BmRowContainer::storeValue(
         decoded,
         sourceIndex,
         context,
-        layout);
+        layout,
+        metrics);
     return;
   }
 
@@ -93,7 +119,8 @@ void BmRowContainer::storeValue(
       decoded,
       sourceIndex,
       context,
-      layout);
+      layout,
+      metrics);
 }
 
 template <TypeKind Kind>
@@ -101,7 +128,8 @@ void BmRowContainer::storeValueTyped(
     const DecodedVector& decoded,
     vector_size_t sourceIndex,
     RowWriteContext& context,
-    const ColumnLayout& column) {
+    const ColumnLayout& column,
+    BmAppendMetrics* metrics) {
   auto* row = context.row_;
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     auto* target = reinterpret_cast<StringView*>(row + column.offset);
@@ -111,13 +139,30 @@ void BmRowContainer::storeValueTyped(
       return;
     }
     auto& segment = segments_.segmentData(context.segment_);
-    auto& heap =
-        segments_.ensureHeapBlockForChunk(segment, context.chunk_, value.size());
+    auto& chunk = segment.chunks[context.chunk_];
+    const auto heapBlocksBefore = chunk.heapBlocks.size();
+    const auto heapAllocStart = metrics == nullptr ? 0 : metricNowNs();
+    auto& heap = segments_.ensureHeapBlockForChunk(
+        segment, context.chunk_, value.size());
+    if (metrics != nullptr) {
+      metrics->heapAllocNs += metricNowNs() - heapAllocStart;
+      metrics->heapAllocations += chunk.heapBlocks.size() - heapBlocksBefore;
+    }
     auto* stringTarget = heap.ptr + heap.used;
+    const auto copyStart = metrics == nullptr ? 0 : metricNowNs();
     std::memcpy(stringTarget, value.data(), value.size());
+    if (metrics != nullptr) {
+      metrics->stringCopyNs += metricNowNs() - copyStart;
+      ++metrics->stringRows;
+      metrics->stringBytes += value.size();
+    }
     heap.used += value.size();
     *target = StringView(stringTarget, value.size());
+    const auto heapRecordStart = metrics == nullptr ? 0 : metricNowNs();
     segments_.recordHeapForChunk(segment, context.chunk_, heap, row);
+    if (metrics != nullptr) {
+      metrics->heapRecordNs += metricNowNs() - heapRecordStart;
+    }
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       !TypeTraits<Kind>::isFixedWidth) {
