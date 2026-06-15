@@ -5,6 +5,7 @@
 
 #ifdef ENABLE_BOLT_JIT
 
+#include <algorithm>
 #include <cstddef>
 
 #include "bolt/jit/aggregation/HashAggrJit.h"
@@ -129,11 +130,14 @@ void emitDecimalAvgExtract(
     llvm::Value* vector,
     llvm::Value* row,
     llvm::Value* group,
-    const HashAggrJitSlot& slot,
-    bool partialOutput) {
+    const HashAggrJitSlot& slot) {
   auto& b = codegen.builder();
-  const auto [inputPrecision, inputScale] =
+  const bool partialOutput = slot.desc.context.isPartialOutput;
+  auto [inputPrecision, inputScale] =
       hashAggrJitDecimalPrecisionScale(slot.desc.context.inputTypes()[0]);
+  if (slot.desc.isRawInput()) {
+    inputPrecision = std::min(38, inputPrecision + 10);
+  }
   const auto [outputPrecision, outputScale] =
       hashAggrJitDecimalPrecisionScale(slot.desc.context.outputType());
   const bool longDecimal = hashAggrJitDecimalKindForPrecision(
@@ -161,12 +165,7 @@ void compileDecimalAvgExtractAccumulators(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   emitDecimalAvgExtract(
-      codegen,
-      target.output.vector(),
-      target.row,
-      group,
-      slot,
-      /*partialOutput=*/true);
+      codegen, target.output.vector(), target.row, group, slot);
 }
 
 void compileDecimalAvgExtractValues(
@@ -175,12 +174,7 @@ void compileDecimalAvgExtractValues(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   emitDecimalAvgExtract(
-      codegen,
-      target.output.vector(),
-      target.row,
-      group,
-      slot,
-      /*partialOutput=*/false);
+      codegen, target.output.vector(), target.row, group, slot);
 }
 
 } // namespace

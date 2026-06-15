@@ -132,9 +132,9 @@ void emitDecimalSumExtract(
     llvm::Value* vector,
     llvm::Value* row,
     llvm::Value* group,
-    const HashAggrJitSlot& slot,
-    bool partialOutput) {
+    const HashAggrJitSlot& slot) {
   auto& b = codegen.builder();
+  const bool partialOutput = slot.desc.context.isPartialOutput;
   // long/short decimal and overflow precision are decided by the actual
   // output decimal type of this aggregation stage.
   const auto [outPrecision, outScale] =
@@ -168,12 +168,7 @@ void compileDecimalSumExtractAccumulators(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   emitDecimalSumExtract(
-      codegen,
-      target.output.vector(),
-      target.row,
-      group,
-      slot,
-      /*partialOutput=*/true);
+      codegen, target.output.vector(), target.row, group, slot);
 }
 
 void compileDecimalSumExtractValues(
@@ -182,12 +177,7 @@ void compileDecimalSumExtractValues(
     const HashAggrJitSlot& slot,
     const HashAggrJitExtractTarget& target) {
   emitDecimalSumExtract(
-      codegen,
-      target.output.vector(),
-      target.row,
-      group,
-      slot,
-      /*partialOutput=*/false);
+      codegen, target.output.vector(), target.row, group, slot);
 }
 
 } // namespace
