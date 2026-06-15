@@ -7,6 +7,7 @@
 #include <folly/Portability.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace bytedance::bolt::exec::bm {
@@ -37,6 +38,22 @@ struct StringColumnLayout {
   uint8_t nullMask{0};
 };
 
+struct ColumnStorePlan {
+  TypePtr type;
+  TypeKind kind{TypeKind::UNKNOWN};
+  uint32_t offset{0};
+  uint32_t width{0};
+  bool nullable{false};
+  uint32_t nullByte{0};
+  uint8_t nullMask{0};
+  bool stringKind{false};
+};
+
+struct RowInitializationRange {
+  uint32_t offset{0};
+  uint32_t size{0};
+};
+
 // Computes the fixed row layout used by BmRowContainer. This class owns no row
 // memory; it only describes offsets, widths, and null-bit placement.
 class BmRowLayout {
@@ -61,8 +78,26 @@ class BmRowLayout {
     return stringColumns_;
   }
 
+  FOLLY_ALWAYS_INLINE const ColumnStorePlan& storePlan(int32_t column) const {
+    return storePlans_[column];
+  }
+
   FOLLY_ALWAYS_INLINE uint32_t rowSize() const {
     return fixedRowSize_;
+  }
+
+  FOLLY_ALWAYS_INLINE void initializeRow(char* row) const {
+    if (FOLLY_LIKELY(initializationRanges_.empty())) {
+      return;
+    }
+    if (initializationRanges_.size() == 1) {
+      const auto& range = initializationRanges_[0];
+      std::memset(row + range.offset, 0, range.size);
+      return;
+    }
+    for (const auto& range : initializationRanges_) {
+      std::memset(row + range.offset, 0, range.size);
+    }
   }
 
   FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
@@ -107,6 +142,8 @@ class BmRowLayout {
  private:
   std::vector<ColumnLayout> columns_;
   std::vector<StringColumnLayout> stringColumns_;
+  std::vector<ColumnStorePlan> storePlans_;
+  std::vector<RowInitializationRange> initializationRanges_;
   uint32_t nullBytes_{0};
   uint32_t fixedRowSize_{0};
 };

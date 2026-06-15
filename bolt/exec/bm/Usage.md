@@ -37,14 +37,7 @@ BmRowContainer rows(
 
 ## 写入
 
-批量输入优先使用 `appendBatch()`：
-
-```cpp
-std::vector<char*> rowPtrs = rows.appendBatch(input);
-std::vector<char*> partitionRows = rows.appendBatch(input, partitionId);
-```
-
-天然逐行构造的算子使用 `appendRow()` + `store()`：
+使用 `appendRow()` + `store()` 写入一行：
 
 ```cpp
 auto context = rows.appendRow(partitionId);
@@ -191,14 +184,14 @@ rows.releaseSegments(range);
 
 Sort / HashAgg：
 
-1. `appendBatch()` 或 `appendRow()` 写入。
+1. `appendRow()` + `store()` 写入。
 2. resident 阶段保留 row 指针并用 `compareRows()` 排序。
 3. 排序后调用 `finalizeReorderedSegment()`。
 4. 多个有序 segment 用 `beginMergeReadSegments()` 输出。
 
 Hash Build：
 
-1. 按 partition 写入：`appendBatch(input, partition)` 或 `appendRow(partition)`。
+1. 按 partition 写入：`appendRow(partition)` + `store()`。
 2. 每个 partition 可以多次 `spillActivePartitionSegment(partition)`。
 3. probe 或后续处理某个 partition 时，读取 `segmentsForPartition(partition)`。
 4. 能全量加载则 `BulkReadSession::loadRows()`；不能则

@@ -29,7 +29,7 @@ RowWriteContext BmRowContainer::appendRow(PartitionId partition) {
   auto& segment = segments_.activeSegment(partition);
   auto* row = segments_.newRowInSegment(segment);
   auto& chunk = segments_.currentChunk(segment);
-  return RowWriteContext(segment.meta.id, chunk.meta.id, row);
+  return RowWriteContext(&segment, &chunk, row);
 }
 
 } // namespace bytedance::bolt::exec::bm

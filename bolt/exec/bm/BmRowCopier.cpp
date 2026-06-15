@@ -20,6 +20,7 @@ char* BmRowCopier::copyRowToSegment(
     SegmentData& segment,
     const char* source) {
   auto* target = segments().newRowInSegment(segment);
+  auto& chunk = segments().currentChunk(segment);
   std::memcpy(target, source, layout().rowSize());
 
   for (int32_t column = 0; column < types().size(); ++column) {
@@ -33,12 +34,12 @@ char* BmRowCopier::copyRowToSegment(
     if (value->isInline()) {
       continue;
     }
-    auto& heap = segments().ensureHeapBlock(segment, value->size());
+    auto& heap = segments().ensureHeapBlockInChunk(chunk, value->size());
     auto* stringTarget = heap.ptr + heap.used;
     std::memcpy(stringTarget, value->data(), value->size());
     heap.used += value->size();
     *value = StringView(stringTarget, value->size());
-    segments().recordHeapForCurrentChunk(segment, heap);
+    segments().recordHeapForChunk(chunk, heap, target);
   }
   return target;
 }

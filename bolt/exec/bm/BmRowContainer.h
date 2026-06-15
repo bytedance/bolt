@@ -36,20 +36,26 @@ class BmRowContainer {
       uint32_t heapBlockSize = static_cast<uint32_t>(
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)));
 
-  std::vector<char*> appendBatch(
-      const RowVectorPtr& input,
-      PartitionId partition = kDefaultPartition,
-      BmAppendMetrics* metrics = nullptr);
-
   // Allocates one row in the active segment for partition. The caller must fill
   // columns with store() before treating the row as complete.
   RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
 
-  void store(
+  FOLLY_ALWAYS_INLINE void store(
       RowWriteContext& context,
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
-      int32_t column);
+      int32_t column) {
+    storeValue(decoded, sourceIndex, context, column, nullptr);
+  }
+
+  FOLLY_ALWAYS_INLINE void store(
+      RowWriteContext& context,
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      int32_t column,
+      BmStoreMetrics* metrics) {
+    storeValue(decoded, sourceIndex, context, column, metrics);
+  }
 
   int32_t compare(
       const char* left,
@@ -120,20 +126,14 @@ class BmRowContainer {
       vector_size_t sourceIndex,
       RowWriteContext& context,
       int32_t column,
-      BmAppendMetrics* metrics = nullptr);
+      BmStoreMetrics* metrics);
   template <TypeKind Kind>
   void storeValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
-      const ColumnLayout& column,
-      BmAppendMetrics* metrics = nullptr);
-  template <TypeKind Kind>
-  void storeFixedColumnTyped(
-      const DecodedVector& decoded,
-      vector_size_t size,
-      char* const* rows,
-      int32_t column);
+      const ColumnStorePlan& column,
+      BmStoreMetrics* metrics);
   template <TypeKind Kind>
   void extractColumnTyped(
       const char* const* rows,

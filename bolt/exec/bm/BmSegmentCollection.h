@@ -84,11 +84,11 @@ struct SegmentData {
 // blocks. This differs from DuckDB's TupleDataChunk/ChunkPart model where a
 // logical chunk can be split into smaller parts that each describe precise row
 // and heap slices. Bolt keeps the old RowContainer write shape for now:
-// appendRow()/appendBatch() allocate row slots before every variable-width
-// payload size is known, so one-row-block chunks are simpler and keep window
-// read ownership local. The cost is coarser heap pinning/rebasing for variable
-// width data. If callers later switch fully to vector-planned writes, this
-// layer can adopt a finer DuckDB-like part model.
+// appendRow() allocates row slots before every variable-width payload size is
+// known, so one-row-block chunks are simpler and keep window read ownership
+// local. The cost is coarser heap pinning/rebasing for variable width data. If
+// callers later switch to vector-planned writes, this layer can adopt a finer
+// DuckDB-like part model.
 class BmSegmentCollection {
  public:
   BmSegmentCollection(
@@ -121,28 +121,21 @@ class BmSegmentCollection {
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
 
-  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlock(
-      SegmentData& segment,
+  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockInChunk(
+      ChunkData& chunk,
       uint32_t minBytes) {
-    return ensureHeapBlockInChunk(currentChunk(segment), minBytes);
-  }
-
-  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockForChunk(
-      SegmentData& segment,
-      ChunkId chunkId,
-      uint32_t minBytes) {
-    BOLT_DCHECK_LT(chunkId, segment.chunks.size());
-    return ensureHeapBlockInChunk(segment.chunks[chunkId], minBytes);
+    if (FOLLY_LIKELY(
+            !chunk.heapBlocks.empty() &&
+            chunk.heapBlocks.back().used + minBytes <=
+                chunk.heapBlocks.back().size)) {
+      return chunk.heapBlocks.back();
+    }
+    return ensureHeapBlockSlow(chunk, minBytes);
   }
 
   char* newRowInSegment(SegmentData& segment);
   void updateChunkForRow(SegmentData& segment, const RowId& rowId);
-  void recordHeapForCurrentChunk(SegmentData& segment, const BlockRef& heap);
-  void recordHeapForChunk(
-      SegmentData& segment,
-      ChunkId chunk,
-      const BlockRef& heap,
-      const char* row);
+  void recordHeapForChunk(ChunkData& chunk, const BlockRef& heap, const char* row);
 
   ChunkData& currentChunk(SegmentData& segment);
   const ChunkData& currentChunk(const SegmentData& segment) const;
@@ -190,17 +183,6 @@ class BmSegmentCollection {
         rowNumber >= chunk.meta.firstRowNumber &&
         rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount);
     return chunk;
-  }
-  FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockInChunk(
-      ChunkData& chunk,
-      uint32_t minBytes) {
-    if (FOLLY_LIKELY(
-            !chunk.heapBlocks.empty() &&
-            chunk.heapBlocks.back().used + minBytes <=
-                chunk.heapBlocks.back().size)) {
-      return chunk.heapBlocks.back();
-    }
-    return ensureHeapBlockSlow(chunk, minBytes);
   }
   BlockRef& ensureHeapBlockSlow(ChunkData& chunk, uint32_t minBytes);
 
