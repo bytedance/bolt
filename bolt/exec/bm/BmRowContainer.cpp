@@ -28,7 +28,8 @@ BmRowContainer::BmRowContainer(
 RowWriteContext BmRowContainer::appendRow(PartitionId partition) {
   auto& segment = segments_.activeSegment(partition);
   auto* row = segments_.newRowInSegment(segment);
-  auto& chunk = segments_.currentChunk(segment);
+  BOLT_DCHECK_NOT_NULL(segment.writeCursor.chunk);
+  auto& chunk = *segment.writeCursor.chunk;
   return RowWriteContext(&segment, &chunk, row);
 }
 

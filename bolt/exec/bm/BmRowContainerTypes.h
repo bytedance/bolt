@@ -59,7 +59,9 @@ using PartitionId = uint32_t;
 using ChunkId = uint32_t;
 
 constexpr BlockId kNoBlock = std::numeric_limits<BlockId>::max();
+constexpr SegmentId kNoSegment = 0;
 constexpr PartitionId kDefaultPartition = 0;
+constexpr uint32_t kMaxPartitions = 256;
 constexpr uint64_t kUnlimitedBytes = std::numeric_limits<uint64_t>::max();
 
 enum class SegmentState {
@@ -114,17 +116,10 @@ struct BulkLoadMetrics {
 };
 
 struct BmStoreMetrics {
-  uint64_t appendRowNs{0};
-  uint64_t fixedStoreNs{0};
-  uint64_t stringStoreNs{0};
-  uint64_t heapEnsureNs{0};
-  uint64_t stringCopyNs{0};
-  uint64_t heapRecordNs{0};
+  uint64_t appendOnlyNs{0};
+  uint64_t appendFixedNs{0};
+  uint64_t appendFullNs{0};
   uint64_t rows{0};
-  uint64_t fixedValues{0};
-  uint64_t stringValues{0};
-  uint64_t stringBytes{0};
-  uint64_t heapAllocations{0};
 };
 
 struct BmSegmentSpillMetrics {

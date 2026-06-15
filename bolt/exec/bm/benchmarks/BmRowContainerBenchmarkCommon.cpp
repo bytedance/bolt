@@ -439,22 +439,16 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<char*>* rows,
-    BmStoreMetrics* metrics) {
+    std::vector<char*>* rows) {
   std::vector<DecodedVector> decoded;
   decodeBatch(batch, decoded);
   for (vector_size_t row = 0; row < batch->size(); ++row) {
-    const auto appendStart = metrics == nullptr ? 0 : benchmarkNowNs();
     auto context = container.appendRow(kDefaultPartition);
-    if (metrics != nullptr) {
-      metrics->appendRowNs += benchmarkNowNs() - appendStart;
-      ++metrics->rows;
-    }
     if (rows != nullptr) {
       rows->push_back(context.row());
     }
     for (auto column = 0; column < batch->childrenSize(); ++column) {
-      container.store(context, decoded[column], row, column, metrics);
+      container.store(context, decoded[column], row, column);
     }
   }
 }
@@ -476,13 +470,12 @@ void storeReusableInputBatchesBm(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows,
-    BmStoreMetrics* metrics) {
+    std::vector<char*>* rows) {
   if (rows != nullptr) {
     rows->reserve(rowCount(options));
   }
   storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
-    storeInputBatchBm(container, batch, rows, metrics);
+    storeInputBatchBm(container, batch, rows);
   });
 }
 
@@ -519,14 +512,12 @@ OldStoredRows storeOldRows(
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
-    bool keepRows,
-    BmStoreMetrics* metrics) {
+    bool keepRows) {
   BmStoredRows stored;
   stored.container = makeBmRowContainer(options.dataset, context.bufferManager);
   storeBmRowsOnly(
       *stored.container, context.pool.get(), options,
-      keepRows ? &stored.rows : nullptr,
-      metrics);
+      keepRows ? &stored.rows : nullptr);
   return stored;
 }
 
@@ -543,10 +534,9 @@ void storeBmRowsOnly(
     BmRowContainer& container,
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows,
-    BmStoreMetrics* metrics) {
+    std::vector<char*>* rows) {
   auto input = makeReusableInputBatches(pool, options);
-  storeReusableInputBatchesBm(container, input, options, rows, metrics);
+  storeReusableInputBatchesBm(container, input, options, rows);
 }
 
 void extractOldRows(

@@ -16,9 +16,7 @@ ChunkData& BmSegmentCollection::chunkForRow(
 const ChunkData& BmSegmentCollection::chunkForRow(
     const SegmentData& segment,
     RowNumber rowNumber) const {
-  const auto rowsPerChunk = rowBlockSize_ / rowStride();
-  BOLT_DCHECK_GT(rowsPerChunk, 0);
-  const auto chunkIndex = rowNumber / rowsPerChunk;
+  const auto chunkIndex = rowNumber / rowsPerChunk_;
   BOLT_CHECK_LT(
       chunkIndex,
       segment.chunks.size(),

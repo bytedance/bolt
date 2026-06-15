@@ -71,14 +71,6 @@ BlockRef& BmSegmentCollection::ensureHeapBlockSlow(
 }
 
 ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
-  if (FOLLY_LIKELY(segment.currentChunk != kNoBlock)) {
-    auto& chunk = segment.chunks[segment.currentChunk];
-    if (FOLLY_LIKELY(chunk.rowBlock.used + layout().rowSize() <=
-                     chunk.rowBlock.size)) {
-      return chunk;
-    }
-  }
-
   ChunkData chunk;
   chunk.meta.id = segment.chunks.size();
   chunk.meta.segmentId = segment.meta.id;
@@ -88,7 +80,12 @@ ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
 
   segment.currentChunk = chunk.meta.id;
   segment.chunks.push_back(std::move(chunk));
-  return segment.chunks.back();
+  auto& current = segment.chunks.back();
+  segment.writeCursor.chunk = &current;
+  segment.writeCursor.nextRow = current.rowBlock.ptr;
+  segment.writeCursor.rowBlockEnd =
+      current.rowBlock.ptr + rowsPerChunk_ * rowStride_;
+  return current;
 }
 
 ChunkData& BmSegmentCollection::currentChunk(SegmentData& segment) {
@@ -106,32 +103,26 @@ const ChunkData& BmSegmentCollection::currentChunk(
 
 char* BmSegmentCollection::newRowInSegment(SegmentData& segment) {
   BOLT_DCHECK(segment.meta.state == SegmentState::kActiveResident);
-  auto& chunk = ensureWritableChunk(segment);
+  auto& cursor = segment.writeCursor;
+  if (FOLLY_UNLIKELY(
+          cursor.chunk == nullptr || cursor.nextRow == cursor.rowBlockEnd)) {
+    ensureWritableChunk(segment);
+  }
+
+  BOLT_DCHECK_NOT_NULL(cursor.chunk);
+  BOLT_DCHECK_LT(cursor.nextRow, cursor.rowBlockEnd);
+  auto& chunk = *cursor.chunk;
   auto& block = chunk.rowBlock;
-  const auto offset = block.used;
-  auto* row = block.ptr + offset;
-  block.used += layout().rowSize();
-  layout().initializeRow(row);
+  auto* row = cursor.nextRow;
+  cursor.nextRow += rowStride_;
+  block.used += rowStride_;
+  BOLT_DCHECK_LE(block.used, block.size);
+  layout().initializeNulls(row);
 
-  RowId rowId;
-  rowId.segmentId = segment.meta.id;
-  rowId.rowNumber = segment.nextRowNumber++;
-  rowId.rowBlockId = block.id;
-  rowId.rowOffset = offset;
-  ++segment.meta.numRows;
-  updateChunkForRow(segment, rowId);
-  return row;
-}
-
-void BmSegmentCollection::updateChunkForRow(
-    SegmentData& segment,
-    const RowId& rowId) {
-  // Current design keeps a chunk anchored to one row block. This makes window
-  // read easier to reason about: loading a chunk pins one fixed-width row block
-  // and the heap blocks referenced by rows in that block.
-  auto& chunk = currentChunk(segment);
   ++chunk.meta.rowCount;
-  BOLT_DCHECK_EQ(chunk.rowBlock.id, rowId.rowBlockId);
+  ++segment.nextRowNumber;
+  ++segment.meta.numRows;
+  return row;
 }
 
 void BmSegmentCollection::recordHeapForChunk(

@@ -30,9 +30,16 @@ uint64_t metricNowNs() {
       .count();
 }
 
-} // namespace
+void checkPartition(PartitionId partition) {
+  BOLT_CHECK_LT(
+      partition,
+      kMaxPartitions,
+      "BmRowContainer partition {} exceeds max partition count {}",
+      partition,
+      kMaxPartitions);
+}
 
-const std::vector<SegmentId> BmSegmentCollection::kEmptySegments_{};
+} // namespace
 
 BmSegmentCollection::BmSegmentCollection(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
@@ -44,9 +51,15 @@ BmSegmentCollection::BmSegmentCollection(
       tag_(tag),
       layout_(layout),
       rowBlockSize_(rowBlockSize),
-      heapBlockSize_(heapBlockSize) {
+      heapBlockSize_(heapBlockSize),
+      activeSegments_(kMaxPartitions, kNoSegment),
+      partitionSegments_(kMaxPartitions) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
   BOLT_CHECK_NOT_NULL(layout_);
+  rowStride_ = layout_->rowSize();
+  BOLT_CHECK_GT(rowStride_, 0);
+  rowsPerChunk_ = rowBlockSize_ / rowStride_;
+  BOLT_CHECK_GT(rowsPerChunk_, 0);
 }
 
 SegmentId BmSegmentCollection::spillActiveSegment(
@@ -61,25 +74,22 @@ SegmentId BmSegmentCollection::spillActivePartitionSegment(
 }
 
 void BmSegmentCollection::releaseSegment(SegmentId segment) {
-  auto it = segments_.find(segment);
-  if (it == segments_.end()) {
+  if (segment >= segments_.size() || segments_[segment] == nullptr) {
     return;
   }
-  if (it->second.meta.partitionId.has_value()) {
-    const auto partition = *it->second.meta.partitionId;
-    auto activeIt = activeSegments_.find(partition);
-    if (activeIt != activeSegments_.end() && activeIt->second == segment) {
-      activeSegments_.erase(activeIt);
+  auto& data = *segments_[segment];
+  if (data.meta.partitionId.has_value()) {
+    const auto partition = *data.meta.partitionId;
+    checkPartition(partition);
+    if (activeSegments_[partition] == segment) {
+      activeSegments_[partition] = kNoSegment;
     }
-    auto partitionIt = partitionSegments_.find(partition);
-    if (partitionIt != partitionSegments_.end()) {
-      auto& segments = partitionIt->second;
-      segments.erase(
-          std::remove(segments.begin(), segments.end(), segment),
-          segments.end());
-    }
+    auto& segments = partitionSegments_[partition];
+    segments.erase(
+        std::remove(segments.begin(), segments.end(), segment),
+        segments.end());
   }
-  segments_.erase(it);
+  segments_[segment].reset();
 }
 
 void BmSegmentCollection::releaseSegments(
@@ -95,34 +105,36 @@ SegmentState BmSegmentCollection::segmentState(SegmentId segment) const {
 
 const std::vector<SegmentId>& BmSegmentCollection::segmentsForPartition(
     PartitionId partition) const {
-  auto it = partitionSegments_.find(partition);
-  if (it == partitionSegments_.end()) {
-    return kEmptySegments_;
-  }
-  return it->second;
+  checkPartition(partition);
+  return partitionSegments_[partition];
 }
 
 std::vector<SegmentId> BmSegmentCollection::allSegmentIds() const {
   std::vector<SegmentId> ids;
   ids.reserve(segments_.size());
-  for (const auto& [id, _] : segments_) {
-    ids.push_back(id);
+  for (SegmentId id = 1; id < segments_.size(); ++id) {
+    if (segments_[id] != nullptr) {
+      ids.push_back(id);
+    }
   }
   return ids;
 }
 
 int64_t BmSegmentCollection::numRows() const {
   int64_t rows = 0;
-  for (const auto& [_, segment] : segments_) {
-    rows += segment.meta.numRows;
+  for (const auto& segment : segments_) {
+    if (segment != nullptr) {
+      rows += segment->meta.numRows;
+    }
   }
   return rows;
 }
 
 SegmentData& BmSegmentCollection::activeSegment(PartitionId partition) {
-  auto it = activeSegments_.find(partition);
-  if (it != activeSegments_.end()) {
-    return segmentData(it->second);
+  checkPartition(partition);
+  auto id = activeSegments_[partition];
+  if (id != kNoSegment) {
+    return segmentData(id);
   }
 
   auto& segment = createSegment(partition);
@@ -132,24 +144,28 @@ SegmentData& BmSegmentCollection::activeSegment(PartitionId partition) {
 
 SegmentData& BmSegmentCollection::createSegment(
     std::optional<PartitionId> partition) {
-  SegmentData segment;
-  segment.meta.id = nextSegmentId_++;
-  segment.meta.state = SegmentState::kActiveResident;
-  segment.meta.partitionId = std::move(partition);
-  const auto id = segment.meta.id;
-  auto [inserted, _] = segments_.emplace(id, std::move(segment));
-  return inserted->second;
+  auto segment = std::make_unique<SegmentData>();
+  segment->meta.id = nextSegmentId_++;
+  segment->meta.state = SegmentState::kActiveResident;
+  segment->meta.partitionId = std::move(partition);
+  const auto id = segment->meta.id;
+  if (segments_.size() <= id) {
+    segments_.resize(id + 1);
+  }
+  segments_[id] = std::move(segment);
+  return *segments_[id];
 }
 
 SegmentId BmSegmentCollection::finalizeAndFlush(
     PartitionId partition,
     BmSegmentSpillMetrics* metrics) {
-  auto active = activeSegments_.find(partition);
-  BOLT_CHECK(active != activeSegments_.end());
-  auto& segment = segmentData(active->second);
+  checkPartition(partition);
+  auto active = activeSegments_[partition];
+  BOLT_CHECK_NE(active, kNoSegment);
+  auto& segment = segmentData(active);
   const auto id = finalizeAndFlushSegment(segment, metrics);
   partitionSegments_[partition].push_back(id);
-  activeSegments_.erase(active);
+  activeSegments_[partition] = kNoSegment;
   return id;
 }
 
@@ -207,15 +223,19 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(
 }
 
 SegmentData& BmSegmentCollection::segmentData(SegmentId segment) {
-  auto it = segments_.find(segment);
-  BOLT_CHECK(it != segments_.end(), "Unknown segment {}", segment);
-  return it->second;
+  BOLT_CHECK(
+      segment < segments_.size() && segments_[segment] != nullptr,
+      "Unknown segment {}",
+      segment);
+  return *segments_[segment];
 }
 
 const SegmentData& BmSegmentCollection::segmentData(SegmentId segment) const {
-  auto it = segments_.find(segment);
-  BOLT_CHECK(it != segments_.end(), "Unknown segment {}", segment);
-  return it->second;
+  BOLT_CHECK(
+      segment < segments_.size() && segments_[segment] != nullptr,
+      "Unknown segment {}",
+      segment);
+  return *segments_[segment];
 }
 
 } // namespace bytedance::bolt::exec::bm

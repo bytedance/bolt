@@ -115,31 +115,6 @@ TEST_F(BmRowContainerTest, AppendRowsAndStringCompare) {
   EXPECT_EQ("prefix_same_a", flat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, StoreMetricsSeparateFixedAndStringWrites) {
-  BmRowContainer container(
-      {BIGINT(), VARCHAR()},
-      {false, false},
-      bufferManager_,
-      MemoryTag::kTesting);
-  auto input = makeRowVector({
-      makeFlatVector<int64_t>({11}),
-      makeFlatVector<std::string>({std::string(64, 'x')}),
-  });
-
-  SelectivityVector rows(input->size());
-  DecodedVector fixed(*input->childAt(0), rows);
-  DecodedVector string(*input->childAt(1), rows);
-  BmStoreMetrics metrics;
-  auto context = container.appendRow();
-  container.store(context, fixed, 0, 0, &metrics);
-  container.store(context, string, 0, 1, &metrics);
-
-  EXPECT_EQ(1, metrics.fixedValues);
-  EXPECT_EQ(1, metrics.stringValues);
-  EXPECT_EQ(64, metrics.stringBytes);
-  EXPECT_EQ(1, metrics.heapAllocations);
-}
-
 TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -154,12 +129,12 @@ TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
   EXPECT_EQ(context.row(), context.chunk()->rowBlock.ptr);
 }
 
-TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyRequiredBytes) {
+TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
   {
     BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 4 << 20);
     std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
 
-    layout.initializeRow(row.data());
+    layout.initializeNulls(row.data());
 
     for (auto byte : row) {
       EXPECT_EQ(static_cast<char>(0x7f), byte);
@@ -170,7 +145,7 @@ TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyRequiredBytes) {
     BmRowLayout layout({BIGINT(), VARCHAR()}, {true, false}, 4 << 20);
     std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
 
-    layout.initializeRow(row.data());
+    layout.initializeNulls(row.data());
 
     EXPECT_EQ(0, row[0]);
     for (uint32_t i = layout.column(0).offset;
@@ -181,7 +156,7 @@ TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyRequiredBytes) {
     for (uint32_t i = layout.column(1).offset;
          i < layout.column(1).offset + layout.column(1).width;
          ++i) {
-      EXPECT_EQ(0, row[i]);
+      EXPECT_EQ(static_cast<char>(0x7f), row[i]);
     }
   }
 }
@@ -456,6 +431,13 @@ TEST_F(BmRowContainerTest, SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) 
   segments.recordHeapForChunk(secondChunk, secondHeap, secondRow);
 
   ASSERT_EQ(2, segment.chunks.size());
+  EXPECT_EQ(1, segment.chunks[0].meta.rowCount);
+  EXPECT_EQ(layout.rowSize(), segment.chunks[0].rowBlock.used);
+  EXPECT_EQ(1, segment.chunks[1].meta.rowCount);
+  EXPECT_EQ(layout.rowSize(), segment.chunks[1].rowBlock.used);
+  auto secondRowId = segments.rowIdForRowNumber(segment, 1);
+  EXPECT_EQ(segment.chunks[1].rowBlock.id, secondRowId.rowBlockId);
+  EXPECT_EQ(0, secondRowId.rowOffset);
   ASSERT_EQ(1, segment.chunks[0].heapBlocks.size());
   ASSERT_EQ(1, segment.chunks[1].heapBlocks.size());
   EXPECT_NE(
@@ -493,6 +475,28 @@ TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
   }
 }
 
+TEST_F(BmRowContainerTest, SegmentCollectionListsLiveSegmentIdsInIdOrder) {
+  BmRowLayout layout({BIGINT()}, {false}, 64);
+  BmSegmentCollection segments(
+      bufferManager_,
+      MemoryTag::kTesting,
+      &layout,
+      4 << 20,
+      64);
+
+  auto firstId = segments.createSegment(std::nullopt).meta.id;
+  auto secondId = segments.createSegment(std::nullopt).meta.id;
+  auto thirdId = segments.createSegment(std::nullopt).meta.id;
+
+  segments.releaseSegment(secondId);
+  auto fourthId = segments.createSegment(std::nullopt).meta.id;
+
+  EXPECT_THROW((void)segments.segmentData(secondId), BoltRuntimeError);
+  EXPECT_EQ(
+      (std::vector<SegmentId>{firstId, thirdId, fourthId}),
+      segments.allSegmentIds());
+}
+
 TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -522,6 +526,31 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("delta", varcharFlat->valueAt(0).str());
   EXPECT_TRUE(varcharFlat->isNullAt(1));
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
+}
+
+TEST_F(BmRowContainerTest, NullableStringNullSurvivesSpillRead) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, true},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      makeNullableFlatVector<std::string>({"delta", std::nullopt, "alpha"}),
+  });
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  auto rows = session.loadRows();
+
+  auto result = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("delta", flat->valueAt(0).str());
+  EXPECT_TRUE(flat->isNullAt(1));
+  EXPECT_EQ("alpha", flat->valueAt(2).str());
 }
 
 TEST_F(BmRowContainerTest, RejectsUnsupportedComplexTypes) {
@@ -664,6 +693,23 @@ TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
   EXPECT_EQ(
       SegmentState::kFinalizedFlushed, container.segmentState(secondSegment));
   EXPECT_EQ(2, container.segmentsForPartition(7).size());
+}
+
+TEST_F(BmRowContainerTest, PartitionUsesFixedVectorLimit) {
+  BmRowContainer container(
+      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting);
+  auto input = makeRowVector({makeFlatVector<int64_t>({42})});
+  SelectivityVector rows(input->size());
+  DecodedVector decoded;
+  decoded.decode(*input->childAt(0), rows);
+
+  auto context = container.appendRow(255);
+  container.store(context, decoded, 0, 0);
+  auto segment = container.spillActivePartitionSegment(255);
+
+  EXPECT_EQ(1, container.segmentsForPartition(255).size());
+  EXPECT_EQ(segment, container.segmentsForPartition(255)[0]);
+  EXPECT_THROW({ (void)container.appendRow(256); }, BoltRuntimeError);
 }
 
 } // namespace

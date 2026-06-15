@@ -45,16 +45,7 @@ class BmRowContainer {
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       int32_t column) {
-    storeValue(decoded, sourceIndex, context, column, nullptr);
-  }
-
-  FOLLY_ALWAYS_INLINE void store(
-      RowWriteContext& context,
-      const DecodedVector& decoded,
-      vector_size_t sourceIndex,
-      int32_t column,
-      BmStoreMetrics* metrics) {
-    storeValue(decoded, sourceIndex, context, column, metrics);
+    storeValue(decoded, sourceIndex, context, column);
   }
 
   int32_t compare(
@@ -125,15 +116,13 @@ class BmRowContainer {
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
-      int32_t column,
-      BmStoreMetrics* metrics);
+      int32_t column);
   template <TypeKind Kind>
   void storeValueTyped(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
-      const ColumnStorePlan& column,
-      BmStoreMetrics* metrics);
+      const ColumnStorePlan& column);
   template <TypeKind Kind>
   void extractColumnTyped(
       const char* const* rows,

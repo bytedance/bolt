@@ -30,24 +30,6 @@ uint32_t typeWidth(const TypePtr& type) {
       scalarTypeWidth, type->kind(), type);
 }
 
-void appendInitializationRange(
-    std::vector<RowInitializationRange>& ranges,
-    uint32_t offset,
-    uint32_t size) {
-  if (size == 0) {
-    return;
-  }
-  if (!ranges.empty()) {
-    auto& last = ranges.back();
-    const auto lastEnd = last.offset + last.size;
-    if (lastEnd >= offset) {
-      last.size = std::max(lastEnd, offset + size) - last.offset;
-      return;
-    }
-  }
-  ranges.push_back({offset, size});
-}
-
 } // namespace
 
 BmRowLayout::BmRowLayout(
@@ -63,7 +45,6 @@ BmRowLayout::BmRowLayout(
   }
   nullBytes_ = bits::nbytes(nullBits);
   fixedRowSize_ = nullBytes_;
-  appendInitializationRange(initializationRanges_, 0, nullBytes_);
   columns_.reserve(types.size());
   stringColumns_.reserve(types.size());
   storePlans_.reserve(types.size());
@@ -94,8 +75,6 @@ BmRowLayout::BmRowLayout(
     if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
       stringColumns_.push_back(
           {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
-      appendInitializationRange(
-          initializationRanges_, stored.offset, sizeof(StringView));
     }
     fixedRowSize_ += width;
   }

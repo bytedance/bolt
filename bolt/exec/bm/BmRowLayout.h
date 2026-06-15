@@ -49,11 +49,6 @@ struct ColumnStorePlan {
   bool stringKind{false};
 };
 
-struct RowInitializationRange {
-  uint32_t offset{0};
-  uint32_t size{0};
-};
-
 // Computes the fixed row layout used by BmRowContainer. This class owns no row
 // memory; it only describes offsets, widths, and null-bit placement.
 class BmRowLayout {
@@ -86,18 +81,18 @@ class BmRowLayout {
     return fixedRowSize_;
   }
 
-  FOLLY_ALWAYS_INLINE void initializeRow(char* row) const {
-    if (FOLLY_LIKELY(initializationRanges_.empty())) {
+  // BM owns variable-width payloads at chunk/block granularity, so nullable
+  // null cells leave their fixed payload bytes undefined. Readers must check
+  // null bits before reading payload cells.
+  FOLLY_ALWAYS_INLINE void initializeNulls(char* row) const {
+    if (FOLLY_LIKELY(nullBytes_ == 0)) {
       return;
     }
-    if (initializationRanges_.size() == 1) {
-      const auto& range = initializationRanges_[0];
-      std::memset(row + range.offset, 0, range.size);
+    if (FOLLY_LIKELY(nullBytes_ == 1)) {
+      *row = 0;
       return;
     }
-    for (const auto& range : initializationRanges_) {
-      std::memset(row + range.offset, 0, range.size);
-    }
+    std::memset(row, 0, nullBytes_);
   }
 
   FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
@@ -143,7 +138,6 @@ class BmRowLayout {
   std::vector<ColumnLayout> columns_;
   std::vector<StringColumnLayout> stringColumns_;
   std::vector<ColumnStorePlan> storePlans_;
-  std::vector<RowInitializationRange> initializationRanges_;
   uint32_t nullBytes_{0};
   uint32_t fixedRowSize_{0};
 };
