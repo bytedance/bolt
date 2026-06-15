@@ -13,7 +13,7 @@ void BmRowContainer::extractColumnResident(
     int32_t column,
     const VectorPtr& result,
     bool exactSize) {
-  BOLT_CHECK_LT(column, layout_.columns().size());
+  BOLT_DCHECK_LT(column, layout_.columns().size());
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       types_[column]->kind(),
