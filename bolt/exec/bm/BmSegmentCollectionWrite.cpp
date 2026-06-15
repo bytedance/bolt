@@ -9,19 +9,6 @@
 namespace bytedance::bolt::exec::bm {
 namespace {
 
-void zeroUnusedHeapTail(BlockRef& block) {
-  BOLT_DCHECK_LE(block.used, block.size);
-  if (block.ptr != nullptr && block.used < block.size) {
-    std::memset(block.ptr + block.used, 0, block.size - block.used);
-  }
-}
-
-void zeroUnusedHeapTail(ChunkData& chunk) {
-  for (auto& block : chunk.heapBlocks) {
-    zeroUnusedHeapTail(block);
-  }
-}
-
 void recordHeapBase(ChunkData& chunk, const BlockRef& heap) {
   if (chunk.heapBlocks.empty() || chunk.heapBlocks.back().id != heap.id) {
     // ensureHeapBlock() only reuses heap blocks from the owning chunk. A miss
@@ -78,7 +65,6 @@ BlockRef& BmSegmentCollection::ensureHeapBlockSlow(
     ChunkData& chunk,
     uint32_t minBytes) {
   BOLT_DCHECK(!chunk.consumed);
-  zeroUnusedHeapTail(chunk);
   const auto blockSize = std::max(heapBlockSize_, minBytes);
   chunk.heapBlocks.push_back(addBlock(blockSize));
   return chunk.heapBlocks.back();
@@ -91,7 +77,6 @@ ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
                      chunk.rowBlock.size)) {
       return chunk;
     }
-    zeroUnusedHeapTail(chunk);
   }
 
   ChunkData chunk;

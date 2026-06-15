@@ -148,7 +148,8 @@ void storeInputBatchOld(
 void storeInputBatchBm(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<char*>* rows = nullptr);
+    std::vector<char*>* rows = nullptr,
+    BmAppendMetrics* metrics = nullptr);
 
 void storeReusableInputBatchesOld(
     RowContainer& container,
@@ -160,7 +161,8 @@ void storeReusableInputBatchesBm(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows = nullptr);
+    std::vector<char*>* rows = nullptr,
+    BmAppendMetrics* metrics = nullptr);
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
     DatasetKind dataset,
@@ -178,7 +180,8 @@ OldStoredRows storeOldRows(
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
-    bool keepRows);
+    bool keepRows,
+    BmAppendMetrics* metrics = nullptr);
 
 void storeOldRowsOnly(
     RowContainer& container,
@@ -190,7 +193,8 @@ void storeBmRowsOnly(
     BmRowContainer& container,
     memory::MemoryPool* pool,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows = nullptr);
+    std::vector<char*>* rows = nullptr,
+    BmAppendMetrics* metrics = nullptr);
 
 void extractOldRows(
     RowContainer& container,

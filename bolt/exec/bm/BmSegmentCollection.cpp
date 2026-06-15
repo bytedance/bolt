@@ -3,6 +3,7 @@
 #include "bolt/common/base/Exceptions.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <span>
 #include <utility>
@@ -21,6 +22,12 @@ void zeroUnusedHeapTail(ChunkData& chunk) {
   for (auto& block : chunk.heapBlocks) {
     zeroUnusedHeapTail(block);
   }
+}
+
+uint64_t metricNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
 } // namespace
@@ -42,13 +49,15 @@ BmSegmentCollection::BmSegmentCollection(
   BOLT_CHECK_NOT_NULL(layout_);
 }
 
-SegmentId BmSegmentCollection::spillActiveSegment() {
-  return spillActivePartitionSegment(kDefaultPartition);
+SegmentId BmSegmentCollection::spillActiveSegment(
+    BmSegmentSpillMetrics* metrics) {
+  return spillActivePartitionSegment(kDefaultPartition, metrics);
 }
 
 SegmentId BmSegmentCollection::spillActivePartitionSegment(
-    PartitionId partition) {
-  return finalizeAndFlush(partition);
+    PartitionId partition,
+    BmSegmentSpillMetrics* metrics) {
+  return finalizeAndFlush(partition, metrics);
 }
 
 void BmSegmentCollection::releaseSegment(SegmentId segment) {
@@ -132,17 +141,21 @@ SegmentData& BmSegmentCollection::createSegment(
   return inserted->second;
 }
 
-SegmentId BmSegmentCollection::finalizeAndFlush(PartitionId partition) {
+SegmentId BmSegmentCollection::finalizeAndFlush(
+    PartitionId partition,
+    BmSegmentSpillMetrics* metrics) {
   auto active = activeSegments_.find(partition);
   BOLT_CHECK(active != activeSegments_.end());
   auto& segment = segmentData(active->second);
-  const auto id = finalizeAndFlushSegment(segment);
+  const auto id = finalizeAndFlushSegment(segment, metrics);
   partitionSegments_[partition].push_back(id);
   activeSegments_.erase(active);
   return id;
 }
 
-SegmentId BmSegmentCollection::finalizeAndFlushSegment(SegmentData& segment) {
+SegmentId BmSegmentCollection::finalizeAndFlushSegment(
+    SegmentData& segment,
+    BmSegmentSpillMetrics* metrics) {
   BOLT_DCHECK(segment.meta.state == SegmentState::kActiveResident);
   segment.meta.state = SegmentState::kFinalizedResident;
 
@@ -150,19 +163,45 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(SegmentData& segment) {
   for (auto& chunk : segment.chunks) {
     BOLT_DCHECK(!chunk.consumed);
     blocks.reserve(blocks.size() + 1 + chunk.heapBlocks.size());
+    if (metrics != nullptr) {
+      ++metrics->chunks;
+      ++metrics->rowBlocks;
+      ++metrics->totalBlocks;
+      metrics->rowBlockBytes += chunk.rowBlock.size;
+      metrics->usedRowBytes += chunk.rowBlock.used;
+    }
+    const auto zeroStart = metrics == nullptr ? 0 : metricNowNs();
     zeroUnusedHeapTail(chunk);
+    if (metrics != nullptr) {
+      metrics->zeroHeapTailNs += metricNowNs() - zeroStart;
+    }
+    const auto collectStart = metrics == nullptr ? 0 : metricNowNs();
     chunk.rowBlock.handle = memory::bm::BufferHandle{};
     chunk.rowBlock.ptr = nullptr;
     blocks.push_back(chunk.rowBlock.block);
     for (auto& block : chunk.heapBlocks) {
+      if (metrics != nullptr) {
+        ++metrics->heapBlocks;
+        ++metrics->totalBlocks;
+        metrics->heapBlockBytes += block.size;
+        metrics->usedHeapBytes += block.used;
+        metrics->unusedHeapTailBytes += block.size - block.used;
+      }
       block.handle = memory::bm::BufferHandle{};
       block.ptr = nullptr;
       blocks.push_back(block.block);
     }
+    if (metrics != nullptr) {
+      metrics->collectBlocksNs += metricNowNs() - collectStart;
+    }
   }
+  const auto spillStart = metrics == nullptr ? 0 : metricNowNs();
   bufferManager_->SpillBlocks(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
+  if (metrics != nullptr) {
+    metrics->spillBlocksNs += metricNowNs() - spillStart;
+  }
   segment.meta.state = SegmentState::kFinalizedFlushed;
   return segment.meta.id;
 }
