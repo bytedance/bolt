@@ -455,6 +455,19 @@ TEST_F(MapFromEntriesTest, unknownInputs) {
   test("try(map_from_entries(null))");
 }
 
+TEST_F(MapFromEntriesTest, emptyArrayOfUnknown) {
+  // Empty array of unknown type should produce an empty map without error,
+  // even without try().
+  auto result = evaluate(
+      "map_from_entries(array_constructor())",
+      makeRowVector({makeFlatVector<int32_t>(2)}));
+  ASSERT_TRUE(result->type()->equivalent(*MAP(UNKNOWN(), UNKNOWN())));
+  for (vector_size_t i = 0; i < result->size(); ++i) {
+    EXPECT_FALSE(result->isNullAt(i));
+    EXPECT_EQ(result->as<MapVector>()->sizeAt(i), 0);
+  }
+}
+
 TEST_F(MapFromEntriesTest, nullRowEntriesWithSmallerChildren) {
   // Row vector is of size 3, children are of size 2 since row 2 is null.
   auto rowVector = makeRowVector(

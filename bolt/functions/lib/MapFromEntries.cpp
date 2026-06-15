@@ -93,13 +93,19 @@ class MapFromEntriesFunction : public exec::VectorFunction {
     exec::LocalDecodedVector decodedRowVector(context);
     decodedRowVector.get()->decode(*inputValueVector);
     if (inputValueVector->typeKind() == TypeKind::UNKNOWN) {
-      // For presto, if the input array(unknown) then all rows should have
-      // errors.
+      // For Presto, if the input is array(unknown), rows with non-empty
+      // arrays should have errors since all entries would be null. Empty
+      // arrays produce empty maps without error.
       if constexpr (throwOnNull) {
         try {
           BOLT_USER_FAIL(kErrorMessageEntryNotNull);
         } catch (...) {
-          context.setErrors(rows, std::current_exception());
+          auto exceptionPtr = std::current_exception();
+          rows.applyToSelected([&](vector_size_t row) {
+            if (inputArray->sizeAt(row) > 0) {
+              context.setError(row, exceptionPtr);
+            }
+          });
         }
       }
       auto sizes = allocateSizes(rows.end(), context.pool());
