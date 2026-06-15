@@ -15,6 +15,11 @@ uint64_t dataBytes(uint64_t bytes) {
 }
 
 void storeOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupStoreOld(options(dataset, dataBytes(bytes)));
+    suspender.dismiss();
+  }
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
     auto opts = options(dataset, dataBytes(bytes));
@@ -30,6 +35,11 @@ void storeOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
 }
 
 void storeBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    warmupStoreBm(options(dataset, dataBytes(bytes)));
+    suspender.dismiss();
+  }
   BenchmarkOptions printedOpts;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;

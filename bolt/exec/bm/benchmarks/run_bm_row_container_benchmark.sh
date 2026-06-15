@@ -4,13 +4,15 @@ set -uo pipefail
 
 readonly DEFAULT_BINARY="/data00/home/wangxinshuo.db/bolt/_build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_benchmark"
 readonly DEFAULT_DATA_BYTES="26843545600"
+readonly DEFAULT_WARMUP_DATA_BYTES="134217728"
 readonly DEFAULT_PRE_SLEEP_SECONDS="10"
 readonly DEFAULT_POST_SLEEP_SECONDS="10"
 readonly DEFAULT_TIMEOUT_SECONDS="900"
 
 binary="${DEFAULT_BINARY}"
 data_bytes="${DEFAULT_DATA_BYTES}"
-output_dir="/tmp/bolt-bm-row-container-$(date +%Y%m%d-%H%M%S)"
+warmup_data_bytes="${DEFAULT_WARMUP_DATA_BYTES}"
+output_dir="/data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-$(date +%Y%m%d-%H%M%S)"
 pre_sleep_seconds="${DEFAULT_PRE_SLEEP_SECONDS}"
 post_sleep_seconds="${DEFAULT_POST_SLEEP_SECONDS}"
 timeout_seconds="${DEFAULT_TIMEOUT_SECONDS}"
@@ -29,9 +31,12 @@ Options:
   --binary PATH              Benchmark binary to run.
                              Default: _build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_benchmark
   --output-dir DIR           Directory for stdout.txt and stderr.txt.
-                             Default: /tmp/bolt-bm-row-container-YYYYmmdd-HHMMSS
+                             Default: /data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-YYYYmmdd-HHMMSS
   --data-bytes BYTES         Value for --bm_row_container_data_bytes.
                              Default: 26843545600
+  --warmup-data-bytes BYTES  Value for --bm_row_container_warmup_data_bytes.
+                             0 disables same-process per-case warm-up.
+                             Default: 134217728
   --pre-sleep-seconds N      Sleep after dropping cache and before each case.
                              Default: 10
   --post-sleep-seconds N     Sleep after each case's final sync.
@@ -45,8 +50,9 @@ Options:
   --help                     Print this message.
 
 Any arguments after "--" are passed to the benchmark binary.
-Do not pass --bm_regex or --bm_row_container_data_bytes after "--"; use
---include-regex/--exclude-regex and --data-bytes instead.
+Do not pass --bm_regex, --bm_row_container_data_bytes, or
+--bm_row_container_warmup_data_bytes after "--"; use
+--include-regex/--exclude-regex, --data-bytes, and --warmup-data-bytes instead.
 
 Output:
   $output_dir/stdout.txt
@@ -80,6 +86,11 @@ while [[ $# -gt 0 ]]; do
     --data-bytes)
       require_value "$1" "${2:-}"
       data_bytes="$2"
+      shift 2
+      ;;
+    --warmup-data-bytes)
+      require_value "$1" "${2:-}"
+      warmup_data_bytes="$2"
       shift 2
       ;;
     --pre-sleep-seconds)
@@ -135,11 +146,12 @@ done
 [[ "${post_sleep_seconds}" =~ ^[0-9]+$ ]] || die "--post-sleep-seconds must be a non-negative integer"
 [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || die "--timeout-seconds must be a positive integer"
 [[ "${data_bytes}" =~ ^[1-9][0-9]*$ ]] || die "--data-bytes must be a positive integer"
+[[ "${warmup_data_bytes}" =~ ^[0-9]+$ ]] || die "--warmup-data-bytes must be a non-negative integer"
 
 for extra_arg in "${extra_args[@]}"; do
   case "${extra_arg}" in
-    --bm_regex | --bm_regex=* | --bm_row_container_data_bytes | --bm_row_container_data_bytes=*)
-      die "${extra_arg} is owned by this runner; use --include-regex/--exclude-regex or --data-bytes"
+    --bm_regex | --bm_regex=* | --bm_row_container_data_bytes | --bm_row_container_data_bytes=* | --bm_row_container_warmup_data_bytes | --bm_row_container_warmup_data_bytes=*)
+      die "${extra_arg} is owned by this runner; use --include-regex/--exclude-regex, --data-bytes, or --warmup-data-bytes"
       ;;
   esac
 done
@@ -276,6 +288,9 @@ for case_name in "${cases[@]}"; do
     "--bm_regex=${bm_regex}"
     "--bm_row_container_data_bytes=${data_bytes}"
   )
+  if [[ "${warmup_data_bytes}" != "0" ]]; then
+    cmd+=("--bm_row_container_warmup_data_bytes=${warmup_data_bytes}")
+  fi
   cmd+=("${extra_args[@]}")
 
   log_runner "===== CASE ${index}/${total} ${case_name} START $(date -Is) ====="
