@@ -112,6 +112,27 @@ class BmRowLayout {
     std::memset(row, 0, nullBytes_);
   }
 
+  FOLLY_ALWAYS_INLINE void initializeNullsRange(
+      char* rowBegin,
+      vector_size_t count,
+      uint32_t rowStride) const {
+    if (nullBytes_ == 0) {
+      return;
+    }
+    auto* row = rowBegin;
+    if (FOLLY_LIKELY(nullBytes_ == 1)) {
+      for (vector_size_t i = 0; i < count; ++i) {
+        *row = 0;
+        row += rowStride;
+      }
+      return;
+    }
+    for (vector_size_t i = 0; i < count; ++i) {
+      std::memset(row, 0, nullBytes_);
+      row += rowStride;
+    }
+  }
+
   FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
     const auto& layout = columns_[column];
     return layout.nullMask != 0 && (row[layout.nullByte] & layout.nullMask);
