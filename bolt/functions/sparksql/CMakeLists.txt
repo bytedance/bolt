@@ -50,6 +50,7 @@ bolt_add_library(
   # Register.cpp
   # RegisterArithmetic.cpp
   # RegisterCompare.cpp
+  SequenceFunction.cpp
   SplitFunctions.cpp
   String.cpp
   UnscaledValueFunction.cpp

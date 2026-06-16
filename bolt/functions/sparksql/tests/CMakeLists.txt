@@ -80,6 +80,7 @@ add_executable(
   RaiseErrorTest.cpp
   RandTest.cpp
   RegexFunctionsTest.cpp
+  SequenceTest.cpp
   SliceTest.cpp
   SizeTest.cpp
   SortArrayTest.cpp

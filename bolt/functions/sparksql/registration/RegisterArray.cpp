@@ -210,6 +210,8 @@ void registerArrayFunctions(const std::string& prefix) {
 
   registerIntegerSliceFunction(prefix);
 
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_spark_sequence, prefix + "sequence");
+
   // for now, register ArrayRemoveFunctionString that takes String input and
   // output is enough for our use cases. In future, if need to support more
   // input/output types, will register generic ArrayRemoveFunction

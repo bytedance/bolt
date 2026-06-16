@@ -18,7 +18,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * This file has been modified by ByteDance Ltd. and/or its affiliates on
- * 2025-11-11.
+ * 2026-06-16.
  *
  * Original file was released under the Apache License 2.0,
  * with the full license text available at:
@@ -30,12 +30,12 @@
 
 #include "bolt/functions/lib/Sequence.h"
 
-namespace bytedance::bolt::functions {
+namespace bytedance::bolt::functions::sparksql {
 namespace {
 
-std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
-  std::vector<std::shared_ptr<exec::FunctionSignature>> signatures;
-  signatures = {
+std::vector<std::shared_ptr<exec::FunctionSignature>> sequenceSignatures() {
+  // Integer types: 2-arg (start, stop) and 3-arg (start, stop, step).
+  std::vector<std::shared_ptr<exec::FunctionSignature>> signatures = {
       exec::FunctionSignatureBuilder()
           .returnType("array(bigint)")
           .argumentType("bigint")
@@ -59,63 +59,60 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
           .argumentType("integer")
           .build(),
       exec::FunctionSignatureBuilder()
-          .returnType("array(date)")
-          .argumentType("date")
-          .argumentType("date")
+          .returnType("array(smallint)")
+          .argumentType("smallint")
+          .argumentType("smallint")
           .build(),
       exec::FunctionSignatureBuilder()
-          .returnType("array(date)")
-          .argumentType("date")
-          .argumentType("date")
-          .argumentType("interval day to second")
+          .returnType("array(smallint)")
+          .argumentType("smallint")
+          .argumentType("smallint")
+          .argumentType("smallint")
           .build(),
       exec::FunctionSignatureBuilder()
-          .returnType("array(date)")
-          .argumentType("date")
-          .argumentType("date")
-          .argumentType("interval year to month")
+          .returnType("array(tinyint)")
+          .argumentType("tinyint")
+          .argumentType("tinyint")
           .build(),
       exec::FunctionSignatureBuilder()
-          .returnType("array(timestamp)")
-          .argumentType("timestamp")
-          .argumentType("timestamp")
-          .argumentType("interval day to second")
+          .returnType("array(tinyint)")
+          .argumentType("tinyint")
+          .argumentType("tinyint")
+          .argumentType("tinyint")
           .build(),
-      exec::FunctionSignatureBuilder()
-          .returnType("array(timestamp)")
-          .argumentType("timestamp")
-          .argumentType("timestamp")
-          .argumentType("interval year to month")
-          .build()};
+  };
   return signatures;
 }
 
-std::shared_ptr<exec::VectorFunction> create(
+std::shared_ptr<exec::VectorFunction> makeSequence(
     const std::string& /* name */,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
-    const core::QueryConfig& /*config*/) {
-  if (inputArgs[0].type->isDate()) {
-    if (inputArgs.size() > 2 && inputArgs[2].type->isIntervalYearMonth()) {
-      return std::make_shared<SequenceFunction<int32_t, int32_t>>();
-    }
-    return std::make_shared<SequenceFunction<int32_t, int64_t>>();
-  }
-
+    const core::QueryConfig& /* config */) {
   switch (inputArgs[0].type->kind()) {
     case TypeKind::BIGINT:
       return std::make_shared<SequenceFunction<int64_t, int64_t>>();
+    // Use K=int64_t for INTEGER to avoid conflicting with the
+    // add<int32_t, int32_t> specialization used for date year-to-month
+    // intervals. getStep handles reading the step vector as int32_t when
+    // isDate is false.
     case TypeKind::INTEGER:
-      return std::make_shared<SequenceFunction<int32_t, int32_t>>();
-    case TypeKind::TIMESTAMP:
-      if (inputArgs.size() > 2 && inputArgs[2].type->isIntervalYearMonth()) {
-        return std::make_shared<SequenceFunction<Timestamp, int32_t>>();
-      }
-      return std::make_shared<SequenceFunction<Timestamp, int64_t>>();
+      return std::make_shared<SequenceFunction<int32_t, int64_t>>();
+    case TypeKind::SMALLINT:
+      return std::make_shared<SequenceFunction<int16_t, int16_t>>();
+    case TypeKind::TINYINT:
+      return std::make_shared<SequenceFunction<int8_t, int8_t>>();
     default:
-      BOLT_UNREACHABLE();
+      BOLT_UNREACHABLE(
+          "Unexpected type for Spark sequence: {}",
+          inputArgs[0].type->toString());
   }
 }
+
 } // namespace
 
-BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(udf_sequence, signatures(), create);
-} // namespace bytedance::bolt::functions
+BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
+    udf_spark_sequence,
+    sequenceSignatures(),
+    makeSequence);
+
+} // namespace bytedance::bolt::functions::sparksql
