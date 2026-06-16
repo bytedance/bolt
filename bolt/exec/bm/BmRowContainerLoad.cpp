@@ -37,7 +37,8 @@ uint64_t BmRowContainer::unloadedBytes(
   uint64_t bytes = 0;
   for (auto segmentId : segments) {
     const auto& segment = segments_.segmentData(segmentId);
-    for (const auto& chunk : segment.chunks) {
+    for (const auto& chunkPtr : segment.chunks) {
+      const auto& chunk = *chunkPtr;
       bytes += unloadedBytesForChunk(chunk);
     }
   }

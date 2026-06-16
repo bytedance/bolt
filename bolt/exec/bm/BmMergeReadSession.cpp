@@ -69,7 +69,7 @@ bool MergeReadSession::loadCursor(Cursor& cursor) {
   cursor.currentRow = nullptr;
   auto& segment = container_->segments_.segmentData(cursor.segment);
   while (cursor.chunkIndex < segment.chunks.size()) {
-    auto& chunk = segment.chunks[cursor.chunkIndex];
+    auto& chunk = *segment.chunks[cursor.chunkIndex];
     if (chunk.meta.rowCount == 0) {
       ++cursor.chunkIndex;
       continue;
@@ -89,7 +89,7 @@ bool MergeReadSession::loadCursor(Cursor& cursor) {
 
 void MergeReadSession::advanceCursor(Cursor& cursor) {
   auto& segment = container_->segments_.segmentData(cursor.segment);
-  auto& chunk = segment.chunks[cursor.chunkIndex];
+  auto& chunk = *segment.chunks[cursor.chunkIndex];
   ++cursor.rowIndexInChunk;
   if (cursor.rowIndexInChunk < chunk.meta.rowCount) {
     cursor.currentRow += container_->segments_.rowStride();

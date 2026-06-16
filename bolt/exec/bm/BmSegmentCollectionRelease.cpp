@@ -21,7 +21,8 @@ void BmSegmentCollection::releaseChunkBlocks(ChunkData& chunk) {
 
 uint64_t BmSegmentCollection::segmentBytes(const SegmentData& segment) const {
   uint64_t bytes = 0;
-  for (const auto& chunk : segment.chunks) {
+  for (const auto& chunkPtr : segment.chunks) {
+    const auto& chunk = *chunkPtr;
     if (chunk.consumed) {
       continue;
     }

@@ -1,6 +1,7 @@
 bolt_add_library(
   bolt_exec_bm
   BmRowContainer.cpp
+  BmRowContainerBatch.cpp
   BmBulkReadSession.cpp
   BmRowBlockLoader.cpp
   BmRowContainerCompare.cpp

@@ -39,7 +39,8 @@ void BmRowBlockLoader::loadSegments(
   for (const auto segmentId : segments) {
     auto& segment = this->segments().segmentData(segmentId);
     chunks.reserve(chunks.size() + segment.chunks.size());
-    for (auto& chunk : segment.chunks) {
+    for (auto& chunkPtr : segment.chunks) {
+      auto& chunk = *chunkPtr;
       chunks.push_back(&chunk);
     }
   }

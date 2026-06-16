@@ -453,6 +453,19 @@ void storeInputBatchBm(
   }
 }
 
+void storeInputBatchOldBatch(
+    RowContainer& container,
+    const RowVectorPtr& batch) {
+  container.store(batch);
+}
+
+void storeInputBatchBmBatch(
+    BmRowContainer& container,
+    const RowVectorPtr& batch,
+    std::vector<char*>* rows) {
+  container.appendBatch(batch, kDefaultPartition, rows);
+}
+
 void storeReusableInputBatchesOld(
     RowContainer& container,
     const ReusableInputBatches& input,
@@ -476,6 +489,28 @@ void storeReusableInputBatchesBm(
   }
   storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
     storeInputBatchBm(container, batch, rows);
+  });
+}
+
+void storeReusableInputBatchesOldBatch(
+    RowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options) {
+  storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
+    storeInputBatchOldBatch(container, batch);
+  });
+}
+
+void storeReusableInputBatchesBmBatch(
+    BmRowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    std::vector<char*>* rows) {
+  if (rows != nullptr) {
+    rows->reserve(rowCount(options));
+  }
+  storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
+    storeInputBatchBmBatch(container, batch, rows);
   });
 }
 
@@ -756,6 +791,32 @@ void warmupStoreBm(const BenchmarkOptions& options) {
       "warmup-store-bm", warmup.dataBytes, 0, warmup.compression);
   auto container = makeBmRowContainer(warmup.dataset, context.bufferManager);
   storeBmRowsOnly(*container, context.pool.get(), warmup);
+  folly::doNotOptimizeAway(container->numRows());
+}
+
+void warmupStoreBatchOld(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-store-batch-old", warmup.dataBytes, 0, warmup.compression);
+  auto container = makeOldRowContainer(warmup.dataset, context.pool.get());
+  auto input = makeReusableInputBatches(context.pool.get(), warmup);
+  storeReusableInputBatchesOldBatch(*container, input, warmup);
+  folly::doNotOptimizeAway(container->numRows());
+}
+
+void warmupStoreBatchBm(const BenchmarkOptions& options) {
+  if (!shouldWarmupBenchmarks()) {
+    return;
+  }
+  auto warmup = makeWarmupOptions(options);
+  BenchmarkContext context(
+      "warmup-store-batch-bm", warmup.dataBytes, 0, warmup.compression);
+  auto container = makeBmRowContainer(warmup.dataset, context.bufferManager);
+  auto input = makeReusableInputBatches(context.pool.get(), warmup);
+  storeReusableInputBatchesBmBatch(*container, input, warmup);
   folly::doNotOptimizeAway(container->numRows());
 }
 

@@ -76,7 +76,7 @@ void BmRowContainer::releaseSegments(folly::Range<const SegmentId*> segments) {
 void BmRowContainer::releaseChunk(SegmentId segment, ChunkId chunk) {
   auto& segmentData = segments_.segmentData(segment);
   BOLT_CHECK_LT(chunk, segmentData.chunks.size());
-  segments_.releaseChunkBlocks(segmentData.chunks[chunk]);
+  segments_.releaseChunkBlocks(*segmentData.chunks[chunk]);
 }
 
 uint64_t BmRowContainer::evictReadOnlyLoadedChunks(
@@ -100,7 +100,7 @@ uint64_t BmRowContainer::evictReadOnlyLoadedChunks(
         "Cannot evict loaded blocks from active segment {}",
         segment);
     BOLT_CHECK_LT(chunk, segmentData.chunks.size());
-    auto& chunkData = segmentData.chunks[chunk];
+    auto& chunkData = *segmentData.chunks[chunk];
     BOLT_CHECK(
         !chunkData.consumed,
         "Cannot evict consumed chunk {} in segment {}",
