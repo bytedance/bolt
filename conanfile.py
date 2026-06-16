@@ -566,6 +566,8 @@ class BoltConan(ConanFile):
             tc.cache_variables["BOLT_BUILD_BENCHMARKS"] = "ON"
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
             tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
+        elif os.getenv("BOLT_BUILD_BENCHMARKS_BASIC", "OFF") == "ON":
+            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
 
         tc.generate()
 

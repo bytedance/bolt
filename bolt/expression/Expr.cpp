@@ -134,6 +134,11 @@ void checkOrSetEmptyResult(
     result = BaseVector::createNullConstant(type, 0, pool);
   }
 }
+
+bool exprEvalFlatNoNullsEnabled(const EvalCtx& context) {
+  auto* queryCtx = context.execCtx()->queryCtx();
+  return !queryCtx || queryCtx->queryConfig().exprEvalFlatNoNulls();
+}
 } // namespace
 
 Expr::Expr(
@@ -800,7 +805,7 @@ void Expr::eval(
     VectorPtr& result,
     const ExprSet* parentExprSet) {
   if (supportsFlatNoNullsFastPath_ && context.throwOnError() &&
-      context.inputFlatNoNulls() && rows.countSelected() < 1'000) {
+      context.inputFlatNoNulls() && exprEvalFlatNoNullsEnabled(context)) {
     evalFlatNoNulls(rows, context, result, parentExprSet);
     checkResultInternalState(result);
     return;
