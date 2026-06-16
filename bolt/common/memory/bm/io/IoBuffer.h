@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Allocation.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/io/IoBufferOwner.h"
 
@@ -12,6 +13,16 @@
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
+
+struct ContiguousAllocationBufferDeleter {
+  std::shared_ptr<ContiguousAllocation> allocation;
+
+  void operator()(char*) const noexcept {
+    // The payload pointer may be a hugepage-aligned slice inside the original
+    // mmap. Ownership stays with ContiguousAllocation and must not be released
+    // via the payload pointer.
+  }
+};
 
 struct MemoryPoolBufferDeleter {
   MemoryPool* pool{nullptr};
@@ -64,6 +75,34 @@ class IoBuffer {
         size,
         MemoryPoolBufferDeleter{
             pool, static_cast<int64_t>(size), alignment, true});
+  }
+
+  static IoBuffer allocateHugePageAlignedFromPool(
+      MemoryPool* pool,
+      size_t usableSize) {
+    BOLT_CHECK_NOT_NULL(pool);
+    BOLT_CHECK_GT(usableSize, 0);
+
+    auto allocation = std::make_shared<ContiguousAllocation>();
+    const auto usablePages = AllocationTraits::numPages(usableSize);
+    pool->allocateContiguous(
+        usablePages,
+        *allocation,
+        usablePages + AllocationTraits::numPagesInHugePage());
+
+    auto hugePageRange = allocation->hugePageRange();
+    BOLT_CHECK(
+        hugePageRange.has_value() && hugePageRange->size() >= usableSize,
+        "BM hugepage-aligned allocation failed to produce enough usable bytes, "
+        "requested={}, allocation={}",
+        usableSize,
+        allocation->toString());
+    return fromOwned(
+        hugePageRange->data(),
+        usableSize,
+        0,
+        usableSize,
+        ContiguousAllocationBufferDeleter{std::move(allocation)});
   }
 
   static IoBuffer allocateFromMalloc(size_t size) {

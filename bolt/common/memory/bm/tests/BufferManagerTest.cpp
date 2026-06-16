@@ -3,6 +3,7 @@
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -98,6 +99,24 @@ TEST_F(BufferManagerTest, AllocateReturnsPinnedWritablePayload) {
   ASSERT_NE(nullptr, handle.Ptr());
   std::memset(handle.Ptr(), 7, block->size());
   EXPECT_EQ(4096, block->size());
+  EXPECT_EQ(MemoryTag::kTesting, block->tag());
+}
+
+TEST_F(BufferManagerTest, AllocateLargeReturnsHugePageAlignedPayload) {
+  auto bm = makeBufferManager("allocate-large-aligned");
+  constexpr size_t kHugePageSize = 2 * 1024 * 1024;
+  constexpr size_t kLargeBlockSize = 4 * 1024 * 1024;
+  auto handle = bm->Allocate(kLargeBlockSize, MemoryTag::kTesting);
+  auto block = handle.block();
+
+  ASSERT_NE(nullptr, block);
+  ASSERT_NE(nullptr, handle.Ptr());
+  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(handle.Ptr()) % kHugePageSize);
+  handle.Ptr()[0] = 13;
+  handle.Ptr()[kLargeBlockSize - 1] = 31;
+  EXPECT_EQ(13, handle.Ptr()[0]);
+  EXPECT_EQ(31, handle.Ptr()[kLargeBlockSize - 1]);
+  EXPECT_EQ(kLargeBlockSize, block->size());
   EXPECT_EQ(MemoryTag::kTesting, block->tag());
 }
 
