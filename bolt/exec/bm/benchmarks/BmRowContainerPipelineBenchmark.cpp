@@ -1,30 +1,22 @@
 #include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkCommon.h"
 
+#include "bolt/common/base/Exceptions.h"
+
 #include <fmt/core.h>
 #include <folly/Benchmark.h>
-#include <gflags/gflags.h>
 
 DECLARE_uint64(bm_row_container_data_bytes);
+DECLARE_uint64(bm_row_container_warmup_data_bytes);
 DECLARE_bool(bm_row_container_spill_metrics);
-
-DEFINE_uint64(
-    bm_row_container_pipeline_window_rows,
-    65536,
-    "Rows per loadRows() call in BM row container pipeline window benchmark.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
-
-enum class PipelineBmReadMode {
-  kLoadedPointers,
-  kWindowRead,
-};
 
 struct PipelineOldMetrics {
   uint64_t storeNs{0};
   uint64_t spillWriteNs{0};
   uint64_t spillReadNs{0};
-  uint64_t extractNs{0};
+  uint64_t readNs{0};
   uint64_t rows{0};
   OldSpillWriteMetrics spillWrite;
   OldSpillReadMetrics spillRead;
@@ -34,12 +26,8 @@ struct PipelineBmMetrics {
   uint64_t storeNs{0};
   uint64_t spillWriteNs{0};
   uint64_t spillReadNs{0};
-  uint64_t extractNs{0};
+  uint64_t readNs{0};
   uint64_t rows{0};
-  uint64_t rowIds{0};
-  uint64_t windows{0};
-  bool resultPointers{false};
-  BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
 };
 
@@ -47,40 +35,40 @@ uint64_t dataBytes(uint64_t bytes) {
   return bytes == 0 ? FLAGS_bm_row_container_data_bytes : bytes;
 }
 
-const char* bmModeName(PipelineBmReadMode mode) {
-  switch (mode) {
-    case PipelineBmReadMode::kLoadedPointers:
-      return "loaded_pointers";
-    case PipelineBmReadMode::kWindowRead:
-      return "window_read";
-  }
-  BOLT_UNREACHABLE();
+bool shouldWarmup() {
+  return FLAGS_bm_row_container_warmup_data_bytes != 0;
+}
+
+BenchmarkOptions makeOptions(
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
+  return options(dataset, dataBytes(bytes), compression);
+}
+
+BenchmarkOptions makeWarmupOptions(const BenchmarkOptions& opts) {
+  return options(
+      opts.dataset,
+      FLAGS_bm_row_container_warmup_data_bytes,
+      opts.compression);
 }
 
 void accumulateBmStatsDelta(
     memory::bm::BufferManagerStats& total,
     const memory::bm::BufferManagerStats& before,
     const memory::bm::BufferManagerStats& after) {
-  total.batchPinCount += counterDelta(before.batchPinCount, after.batchPinCount);
-  total.pinReadCount += counterDelta(before.pinReadCount, after.pinReadCount);
   total.spillWriteCount +=
       counterDelta(before.spillWriteCount, after.spillWriteCount);
   total.spillWriteBytes +=
       counterDelta(before.spillWriteBytes, after.spillWriteBytes);
   total.spillPhysicalWriteBytes += counterDelta(
       before.spillPhysicalWriteBytes, after.spillPhysicalWriteBytes);
-  total.spillCompressionTimeUs += counterDelta(
-      before.spillCompressionTimeUs, after.spillCompressionTimeUs);
-  total.spillCompressedBlocks += counterDelta(
-      before.spillCompressedBlocks, after.spillCompressedBlocks);
   total.spillReadCount +=
       counterDelta(before.spillReadCount, after.spillReadCount);
   total.spillReadBytes +=
       counterDelta(before.spillReadBytes, after.spillReadBytes);
   total.spillPhysicalReadBytes += counterDelta(
       before.spillPhysicalReadBytes, after.spillPhysicalReadBytes);
-  total.spillDecompressionTimeUs += counterDelta(
-      before.spillDecompressionTimeUs, after.spillDecompressionTimeUs);
 }
 
 void printOldMetrics(
@@ -94,169 +82,189 @@ void printOldMetrics(
   folly::BenchmarkSuspender suspender;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] pipelineOld dataset={} iterations={} "
-      "logical_bytes={} rows={} store_ms={:.3f} spill_write_ms={:.3f} "
-      "spill_read_ms={:.3f} extract_ms={:.3f} total_ms={:.3f} "
-      "serialized_bytes={} batches={} files={} spill_bytes={}\n",
+      "[bm-row-container-metrics] pipelineOld dataset={} compression={} "
+      "iterations={} logical_bytes={} rows={} store_ms={:.3f} "
+      "spill_write_ms={:.3f} spill_read_ms={:.3f} read_ms={:.3f} "
+      "total_ms={:.3f} spill_bytes={} files={} batches={}\n",
       datasetName(dataset),
+      spillCompressionName(opts.compression),
       iterations,
       opts.dataBytes,
       metrics.rows,
       nsToMs(metrics.storeNs),
       nsToMs(metrics.spillWriteNs),
       nsToMs(metrics.spillReadNs),
-      nsToMs(metrics.extractNs),
+      nsToMs(metrics.readNs),
       nsToMs(
           metrics.storeNs + metrics.spillWriteNs + metrics.spillReadNs +
-          metrics.extractNs),
-      metrics.spillRead.serializedBytes,
-      metrics.spillRead.batches,
+          metrics.readNs),
+      metrics.spillWrite.spillBytes,
       metrics.spillWrite.files,
-      metrics.spillWrite.spillBytes);
+      metrics.spillRead.batches);
 }
 
 void printBmMetrics(
     DatasetKind dataset,
     uint32_t iterations,
-    PipelineBmReadMode mode,
     const BenchmarkOptions& opts,
     const PipelineBmMetrics& metrics) {
-  const auto* benchmark = mode == PipelineBmReadMode::kLoadedPointers
-      ? "pipelineBmLoaded"
-      : "pipelineBmWindow";
-  if (!shouldPrintSpillMetrics(benchmark, dataset, opts.compression)) {
+  if (!shouldPrintSpillMetrics("pipelineBm", dataset, opts.compression)) {
     return;
   }
   folly::BenchmarkSuspender suspender;
   const auto& stats = metrics.statsDelta;
-  const auto& bulk = metrics.bulkLoad;
   fmt::print(
       stderr,
-      "[bm-row-container-metrics] {} dataset={} mode={} iterations={} "
-      "logical_bytes={} rows={} row_ids={} windows={} result={} "
-      "store_ms={:.3f} spill_write_ms={:.3f} spill_read_ms={:.3f} "
-      "extract_ms={:.3f} total_ms={:.3f} "
-      "bulk_estimate_ms={:.3f} bulk_reserve_ms={:.3f} "
-      "bulk_collect_blocks_ms={:.3f} bulk_batch_pin_ms={:.3f} "
-      "bulk_update_ptrs_ms={:.3f} bulk_rebase_strings_ms={:.3f} "
-      "bulk_append_ptrs_ms={:.3f} bulk_append_row_ids_ms={:.3f} "
-      "bulk_estimated_bytes={} bulk_pinned_blocks={} "
-      "bulk_pointer_rows={} bulk_row_id_rows={} "
-      "bulk_rebased_string_views={} "
-      "bm_batch_pins={} bm_pin_reads={} "
-      "bm_spill_write_count={} bm_spill_write_bytes={} "
-      "bm_spill_physical_write_bytes={} bm_compress_ms={:.3f} "
-      "bm_compressed_blocks={} bm_spill_read_count={} "
-      "bm_spill_read_bytes={} bm_spill_physical_read_bytes={} "
-      "bm_decompress_ms={:.3f}\n",
-      benchmark,
+      "[bm-row-container-metrics] pipelineBm dataset={} compression={} "
+      "iterations={} logical_bytes={} rows={} store_ms={:.3f} "
+      "spill_write_ms={:.3f} spill_read_ms={:.3f} read_ms={:.3f} "
+      "total_ms={:.3f} spill_write_count={} spill_write_bytes={} "
+      "spill_physical_write_bytes={} spill_read_count={} spill_read_bytes={} "
+      "spill_physical_read_bytes={}\n",
       datasetName(dataset),
-      bmModeName(mode),
+      spillCompressionName(opts.compression),
       iterations,
       opts.dataBytes,
       metrics.rows,
-      metrics.rowIds,
-      metrics.windows,
-      metrics.resultPointers ? "pointers" : "row_ids",
       nsToMs(metrics.storeNs),
       nsToMs(metrics.spillWriteNs),
       nsToMs(metrics.spillReadNs),
-      nsToMs(metrics.extractNs),
+      nsToMs(metrics.readNs),
       nsToMs(
           metrics.storeNs + metrics.spillWriteNs + metrics.spillReadNs +
-          metrics.extractNs),
-      nsToMs(bulk.estimateBytesNs),
-      nsToMs(bulk.reserveNs),
-      nsToMs(bulk.collectBlocksNs),
-      nsToMs(bulk.batchPinNs),
-      nsToMs(bulk.updateBlockPointersNs),
-      nsToMs(bulk.rebaseStringViewsNs),
-      nsToMs(bulk.appendRowPointersNs),
-      nsToMs(bulk.appendRowIdsNs),
-      bulk.estimatedBytes,
-      bulk.pinnedBlocks,
-      bulk.pointerRows,
-      bulk.rowIdRows,
-      bulk.rebasedStringViews,
-      stats.batchPinCount,
-      stats.pinReadCount,
+          metrics.readNs),
       stats.spillWriteCount,
       stats.spillWriteBytes,
       stats.spillPhysicalWriteBytes,
-      static_cast<double>(stats.spillCompressionTimeUs) / 1000.0,
-      stats.spillCompressedBlocks,
       stats.spillReadCount,
       stats.spillReadBytes,
-      stats.spillPhysicalReadBytes,
-      static_cast<double>(stats.spillDecompressionTimeUs) / 1000.0);
+      stats.spillPhysicalReadBytes);
 }
 
-void extractBmWindowRows(
-    BmRowContainer& container,
-    ReadOnlyWindowReadSession& session,
-    const std::vector<RowId>& rowIds,
+void runOldPipelineOnce(
     const BenchmarkOptions& opts,
-    memory::MemoryPool* pool,
-    PipelineBmMetrics& metrics) {
-  const auto windowRows = static_cast<size_t>(
-      std::max<uint64_t>(1, FLAGS_bm_row_container_pipeline_window_rows));
-  for (size_t offset = 0; offset < rowIds.size();) {
-    const auto batchRows = std::min(windowRows, rowIds.size() - offset);
-    const auto spillReadStart = benchmarkNowNs();
-    auto rows = session.loadRows({rowIds.data() + offset, batchRows});
-    metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
-    ++metrics.windows;
+    PipelineOldMetrics* metrics) {
+  checkOldRowBasedSpillBenchmarkSupported(opts);
 
-    const auto extractStart = benchmarkNowNs();
-    extractBmRowsResident(container, rows, opts, pool);
-    metrics.extractNs += benchmarkNowNs() - extractStart;
-    offset += batchRows;
+  folly::BenchmarkSuspender suspender;
+  BenchmarkContext context(
+      "pipeline-old", opts.dataBytes, 8, opts.compression);
+  auto input = makeReusableInputBatches(context.pool.get(), opts);
+  auto container = makeOldRowContainer(opts.dataset, context.pool.get());
+  if (metrics != nullptr) {
+    suspender.dismiss();
+  }
+
+  const auto storeStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  storeReusableInputBatchesOldBatch(*container, input, opts);
+  if (metrics != nullptr) {
+    metrics->storeNs += benchmarkNowNs() - storeStart;
+    metrics->rows += rowCount(opts);
+  }
+
+  const auto spillWriteStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  auto spill = spillOldRows(
+      context,
+      *container,
+      opts.dataset,
+      metrics != nullptr && FLAGS_bm_row_container_spill_metrics
+          ? &metrics->spillWrite
+          : nullptr);
+  if (metrics != nullptr) {
+    metrics->spillWriteNs += benchmarkNowNs() - spillWriteStart;
+  }
+  container.reset();
+
+  std::vector<char*> restoredRows;
+  restoredRows.reserve(rowCount(opts));
+  const auto spillReadStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  auto restored = readOldSpillIntoNewRowContainer(
+      context,
+      spill,
+      opts.dataset,
+      metrics != nullptr && FLAGS_bm_row_container_spill_metrics
+          ? &metrics->spillRead
+          : nullptr,
+      &restoredRows);
+  if (metrics != nullptr) {
+    metrics->spillReadNs += benchmarkNowNs() - spillReadStart;
+  }
+  BOLT_CHECK_EQ(rowCount(opts), restoredRows.size());
+
+  const auto readStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  extractOldRows(*restored, restoredRows, opts, context.pool.get());
+  if (metrics != nullptr) {
+    metrics->readNs += benchmarkNowNs() - readStart;
+  }
+  folly::doNotOptimizeAway(restored->numRows());
+  if (metrics != nullptr) {
+    suspender.rehire();
   }
 }
 
-void pipelineOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
-  PipelineOldMetrics metrics;
-  BenchmarkOptions printedOpts;
-  for (uint32_t i = 0; i < iterations; ++i) {
-    folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
-    checkOldRowBasedSpillBenchmarkSupported(opts);
-    printedOpts = opts;
-    BenchmarkContext context("pipeline-old", opts.dataBytes, 8);
-    auto input = makeReusableInputBatches(context.pool.get(), opts);
-    auto container = makeOldRowContainer(dataset, context.pool.get());
+void runBmPipelineOnce(const BenchmarkOptions& opts, PipelineBmMetrics* metrics) {
+  folly::BenchmarkSuspender suspender;
+  BenchmarkContext context("pipeline-bm", opts.dataBytes, 0, opts.compression);
+  auto input = makeReusableInputBatches(context.pool.get(), opts);
+  auto container = makeBmRowContainer(opts.dataset, context.bufferManager);
+  memory::bm::BufferManagerStats statsBefore;
+  if (metrics != nullptr && FLAGS_bm_row_container_spill_metrics) {
+    statsBefore = context.bufferManager->stats();
+  }
+  if (metrics != nullptr) {
     suspender.dismiss();
+  }
 
-    const auto storeStart = benchmarkNowNs();
-    storeReusableInputBatchesOld(*container, input, opts);
-    metrics.storeNs += benchmarkNowNs() - storeStart;
-    metrics.rows += rowCount(opts);
+  const auto storeStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  storeReusableInputBatchesBmBatch(*container, input, opts);
+  if (metrics != nullptr) {
+    metrics->storeNs += benchmarkNowNs() - storeStart;
+    metrics->rows += rowCount(opts);
+  }
 
-    const auto spillWriteStart = benchmarkNowNs();
-    auto spill = spillOldRows(
-        context,
-        *container,
-        dataset,
-        FLAGS_bm_row_container_spill_metrics ? &metrics.spillWrite : nullptr);
-    metrics.spillWriteNs += benchmarkNowNs() - spillWriteStart;
-    container.reset();
+  const auto spillWriteStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  const auto segment = container->spillActiveSegment();
+  if (metrics != nullptr) {
+    metrics->spillWriteNs += benchmarkNowNs() - spillWriteStart;
+  }
 
-    std::vector<char*> restoredRows;
-    restoredRows.reserve(rowCount(opts));
-    const auto spillReadStart = benchmarkNowNs();
-    auto restored = readOldSpillIntoNewRowContainer(
-        context,
-        spill,
-        dataset,
-        FLAGS_bm_row_container_spill_metrics ? &metrics.spillRead : nullptr,
-        &restoredRows);
-    metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
+  const auto spillReadStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  auto bulk = container->beginBulkReadSegments({&segment, 1});
+  auto rows = bulk.loadRows();
+  if (metrics != nullptr) {
+    metrics->spillReadNs += benchmarkNowNs() - spillReadStart;
+  }
+  BOLT_CHECK_EQ(rowCount(opts), rows.size());
 
-    const auto extractStart = benchmarkNowNs();
-    extractOldRows(*restored, restoredRows, opts, context.pool.get());
-    metrics.extractNs += benchmarkNowNs() - extractStart;
-    folly::doNotOptimizeAway(restored->numRows());
+  const auto readStart = metrics == nullptr ? 0 : benchmarkNowNs();
+  extractBmRowsResident(*container, rows, opts, context.pool.get());
+  if (metrics != nullptr) {
+    metrics->readNs += benchmarkNowNs() - readStart;
+  }
+
+  folly::doNotOptimizeAway(container->numRows());
+  folly::doNotOptimizeAway(rows.data());
+  if (metrics != nullptr) {
     suspender.rehire();
+    if (FLAGS_bm_row_container_spill_metrics) {
+      const auto statsAfter = context.bufferManager->stats();
+      accumulateBmStatsDelta(metrics->statsDelta, statsBefore, statsAfter);
+    }
+  }
+}
+
+void pipelineOld(
+    uint32_t iterations,
+    DatasetKind dataset,
+    SpillCompressionKind compression,
+    uint64_t bytes) {
+  PipelineOldMetrics metrics;
+  const auto printedOpts = makeOptions(dataset, compression, bytes);
+  for (uint32_t i = 0; i < iterations; ++i) {
+    if (shouldWarmup()) {
+      runOldPipelineOnce(makeWarmupOptions(printedOpts), nullptr);
+    }
+    runOldPipelineOnce(printedOpts, &metrics);
   }
   printOldMetrics(dataset, iterations, printedOpts, metrics);
 }
@@ -264,94 +272,91 @@ void pipelineOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
 void pipelineBm(
     uint32_t iterations,
     DatasetKind dataset,
-    PipelineBmReadMode mode,
+    SpillCompressionKind compression,
     uint64_t bytes) {
   PipelineBmMetrics metrics;
-  BenchmarkOptions printedOpts;
+  const auto printedOpts = makeOptions(dataset, compression, bytes);
   for (uint32_t i = 0; i < iterations; ++i) {
-    folly::BenchmarkSuspender suspender;
-    auto opts = options(dataset, dataBytes(bytes));
-    printedOpts = opts;
-    BenchmarkContext context("pipeline-bm", opts.dataBytes);
-    auto input = makeReusableInputBatches(context.pool.get(), opts);
-    auto container = makeBmRowContainer(dataset, context.bufferManager);
-    const auto statsBefore = context.bufferManager->stats();
-    suspender.dismiss();
-
-    const auto storeStart = benchmarkNowNs();
-    storeReusableInputBatchesBm(*container, input, opts);
-    metrics.storeNs += benchmarkNowNs() - storeStart;
-    metrics.rows += rowCount(opts);
-
-    const auto spillWriteStart = benchmarkNowNs();
-    const auto segment = container->spillActiveSegment();
-    metrics.spillWriteNs += benchmarkNowNs() - spillWriteStart;
-
-    std::vector<char*> rows;
-    std::vector<RowId> rowIds;
-    rows.reserve(rowCount(opts));
-    rowIds.reserve(rowCount(opts));
-
-    if (mode == PipelineBmReadMode::kLoadedPointers) {
-      const auto spillReadStart = benchmarkNowNs();
-      auto bulk = container->beginBulkReadSegments({&segment, 1});
-      rows = bulk.loadRows(
-          FLAGS_bm_row_container_spill_metrics ? &metrics.bulkLoad : nullptr);
-      metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
-      metrics.resultPointers = true;
-      BOLT_CHECK(rowIds.empty());
-      const auto extractStart = benchmarkNowNs();
-      extractBmRowsResident(*container, rows, opts, context.pool.get());
-      metrics.extractNs += benchmarkNowNs() - extractStart;
-      folly::doNotOptimizeAway(rows.data());
-    } else {
-      const auto spillReadStart = benchmarkNowNs();
-      auto session = container->beginReadOnlyWindowReadSegments({&segment, 1});
-      rowIds = session.listRowIds();
-      metrics.spillReadNs += benchmarkNowNs() - spillReadStart;
-      metrics.resultPointers = false;
-      BOLT_CHECK(rows.empty());
-      metrics.rowIds += rowIds.size();
-      extractBmWindowRows(
-          *container, session, rowIds, opts, context.pool.get(), metrics);
-      folly::doNotOptimizeAway(rowIds.data());
+    if (shouldWarmup()) {
+      runBmPipelineOnce(makeWarmupOptions(printedOpts), nullptr);
     }
-
-    folly::doNotOptimizeAway(container->numRows());
-    suspender.rehire();
-    if (FLAGS_bm_row_container_spill_metrics) {
-      const auto statsAfter = context.bufferManager->stats();
-      accumulateBmStatsDelta(metrics.statsDelta, statsBefore, statsAfter);
-    }
+    runBmPipelineOnce(printedOpts, &metrics);
   }
-  printBmMetrics(dataset, iterations, mode, printedOpts, metrics);
+  printBmMetrics(dataset, iterations, printedOpts, metrics);
 }
 
-BENCHMARK_NAMED_PARAM(pipelineOld, old_fixed, DatasetKind::kFixed, 0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld,
+    old_raw_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kRaw,
+    0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     pipelineBm,
-    bm_loaded_fixed,
+    bm_raw_fixed,
     DatasetKind::kFixed,
-    PipelineBmReadMode::kLoadedPointers,
+    SpillCompressionKind::kRaw,
     0);
 BENCHMARK_NAMED_PARAM(
-    pipelineBm,
-    bm_window_fixed,
+    pipelineOld,
+    old_lz4_fixed,
     DatasetKind::kFixed,
-    PipelineBmReadMode::kWindowRead,
+    SpillCompressionKind::kLz4,
     0);
-BENCHMARK_NAMED_PARAM(pipelineOld, old_variable, DatasetKind::kVariable, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     pipelineBm,
-    bm_loaded_variable,
-    DatasetKind::kVariable,
-    PipelineBmReadMode::kLoadedPointers,
+    bm_lz4_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kLz4,
     0);
 BENCHMARK_NAMED_PARAM(
+    pipelineOld,
+    old_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
     pipelineBm,
-    bm_window_variable,
+    bm_zstd_fixed,
+    DatasetKind::kFixed,
+    SpillCompressionKind::kZstd,
+    0);
+
+BENCHMARK_NAMED_PARAM(
+    pipelineOld,
+    old_raw_variable,
     DatasetKind::kVariable,
-    PipelineBmReadMode::kWindowRead,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm,
+    bm_raw_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld,
+    old_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm,
+    bm_lz4_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld,
+    old_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm,
+    bm_zstd_variable,
+    DatasetKind::kVariable,
+    SpillCompressionKind::kZstd,
     0);
 BENCHMARK_DRAW_LINE();
 

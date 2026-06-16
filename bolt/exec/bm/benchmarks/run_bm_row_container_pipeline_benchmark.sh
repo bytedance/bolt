@@ -5,7 +5,7 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/run_bm_row_container_benchmark_common.sh"
 
-readonly DEFAULT_BINARY="/data00/home/wangxinshuo.db/bolt/_build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_benchmark"
+readonly DEFAULT_BINARY="/data00/home/wangxinshuo.db/bolt/_build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_pipeline_benchmark"
 readonly DEFAULT_DATA_BYTES="26843545600"
 readonly DEFAULT_WARMUP_DATA_BYTES="134217728"
 readonly DEFAULT_PRE_SLEEP_SECONDS="10"
@@ -15,7 +15,7 @@ readonly DEFAULT_TIMEOUT_SECONDS="900"
 binary="${DEFAULT_BINARY}"
 data_bytes="${DEFAULT_DATA_BYTES}"
 warmup_data_bytes="${DEFAULT_WARMUP_DATA_BYTES}"
-output_dir="/data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-$(date +%Y%m%d-%H%M%S)"
+output_dir="/data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-pipeline-$(date +%Y%m%d-%H%M%S)"
 pre_sleep_seconds="${DEFAULT_PRE_SLEEP_SECONDS}"
 post_sleep_seconds="${DEFAULT_POST_SLEEP_SECONDS}"
 timeout_seconds="${DEFAULT_TIMEOUT_SECONDS}"
@@ -28,13 +28,13 @@ extra_args=()
 usage() {
   cat <<'EOF'
 Usage:
-  run_bm_row_container_benchmark.sh [options] [-- extra benchmark args]
+  run_bm_row_container_pipeline_benchmark.sh [options] [-- extra benchmark args]
 
 Options:
   --binary PATH              Benchmark binary to run.
-                             Default: _build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_benchmark
+                             Default: _build/Release/bolt/exec/bm/benchmarks/bolt_exec_bm_row_container_pipeline_benchmark
   --output-dir DIR           Directory for stdout.txt and stderr.txt.
-                             Default: /data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-YYYYmmdd-HHMMSS
+                             Default: /data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-pipeline-YYYYmmdd-HHMMSS
   --data-bytes BYTES         Value for --bm_row_container_data_bytes.
                              Default: 26843545600
   --warmup-data-bytes BYTES  Value for --bm_row_container_warmup_data_bytes.
