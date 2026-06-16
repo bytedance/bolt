@@ -31,3 +31,8 @@ add_bm_row_container_benchmark(
   bolt_exec_bm_row_container_pipeline_benchmark
   BmRowContainerPipelineBenchmark.cpp
 )
+
+add_bm_row_container_benchmark(
+  bolt_exec_bm_row_container_pipeline_thread_benchmark
+  BmRowContainerPipelineThreadBenchmark.cpp
+)
