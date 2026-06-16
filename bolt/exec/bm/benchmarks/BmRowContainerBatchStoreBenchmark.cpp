@@ -1,15 +1,121 @@
 #include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkCommon.h"
 
+#include "bolt/common/base/SimdUtil.h"
+#include "bolt/common/memory/HashStringAllocator.h"
+
+#include <fmt/core.h>
 #include <folly/Benchmark.h>
 #include <gflags/gflags.h>
 
+#include <cstring>
+
 DECLARE_uint64(bm_row_container_data_bytes);
+DECLARE_uint64(bm_row_container_warmup_data_bytes);
+DECLARE_bool(bm_row_container_store_metrics);
+DEFINE_string(
+    bm_row_container_string_store_mode,
+    "copy",
+    "BM appendBatch string store mode for benchmarks: copy or no_copy. "
+    "no_copy is benchmark-only and stores StringViews that reference input "
+    "vectors.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
 
 uint64_t dataBytes(uint64_t bytes) {
   return bytes == 0 ? FLAGS_bm_row_container_data_bytes : bytes;
+}
+
+template <typename Store>
+void copyReusableInputStrings(
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    Store store) {
+  auto remaining = rowCount(options);
+  size_t nextBatch = 0;
+  while (remaining > 0) {
+    const auto& batch = input.batches[nextBatch];
+    const auto batchRows = static_cast<vector_size_t>(
+        std::min<uint64_t>(batch->size(), remaining));
+    SelectivityVector rows(batchRows);
+    DecodedVector decoded(*batch->childAt(3), rows);
+    for (vector_size_t row = 0; row < batchRows; ++row) {
+      store(decoded.valueAt<StringView>(row));
+    }
+    remaining -= batchRows;
+    nextBatch = (nextBatch + 1) % input.batches.size();
+  }
+}
+
+double nsToPercent(uint64_t ns, uint64_t totalNs) {
+  return totalNs == 0 ? 0 : static_cast<double>(ns) * 100.0 / totalNs;
+}
+
+BmBatchStringStoreMode stringStoreMode() {
+  if (FLAGS_bm_row_container_string_store_mode == "copy") {
+    return BmBatchStringStoreMode::kCopy;
+  }
+  if (FLAGS_bm_row_container_string_store_mode == "no_copy") {
+    return BmBatchStringStoreMode::kReferenceInputStringForBenchmark;
+  }
+  BOLT_FAIL(
+      "Unsupported --bm_row_container_string_store_mode={}",
+      FLAGS_bm_row_container_string_store_mode);
+}
+
+const char* stringStoreModeName(BmBatchStringStoreMode mode) {
+  switch (mode) {
+    case BmBatchStringStoreMode::kCopy:
+      return "copy";
+    case BmBatchStringStoreMode::kReferenceInputStringForBenchmark:
+      return "no_copy";
+  }
+  BOLT_UNREACHABLE();
+}
+
+void printStoreBatchMetrics(
+    DatasetKind dataset,
+    BmBatchStringStoreMode stringStoreMode,
+    const BmBatchAppendMetrics& metrics) {
+  if (!FLAGS_bm_row_container_store_metrics) {
+    return;
+  }
+  fmt::print(
+      stderr,
+      "[bm-row-container-store-metrics] benchmark=storeBatchBm dataset={} "
+      "string_store_mode={} rows={} batches={} fixed_columns={} "
+      "string_columns={} total_ms={:.3f} "
+      "reserve_rows_ms={:.3f} reserve_rows_pct={:.2f} decode_ms={:.3f} "
+      "decode_pct={:.2f} fixed_store_ms={:.3f} fixed_store_pct={:.2f} "
+      "string_store_ms={:.3f} string_store_pct={:.2f} string_rows={} "
+      "string_inline_rows={} string_copied_bytes={} string_referenced_bytes={} "
+      "string_heap_alloc_calls={} string_fast_alloc_hits={} "
+      "string_slow_alloc_hits={} string_heap_block_switches={} "
+      "string_record_heap_calls={}\n",
+      datasetName(dataset),
+      stringStoreModeName(stringStoreMode),
+      metrics.rows,
+      metrics.batches,
+      metrics.fixedColumns,
+      metrics.stringColumns,
+      nsToMs(metrics.totalNs),
+      nsToMs(metrics.reserveRowsNs),
+      nsToPercent(metrics.reserveRowsNs, metrics.totalNs),
+      nsToMs(metrics.decodeNs),
+      nsToPercent(metrics.decodeNs, metrics.totalNs),
+      nsToMs(metrics.fixedStoreNs),
+      nsToPercent(metrics.fixedStoreNs, metrics.totalNs),
+      nsToMs(metrics.stringStoreNs),
+      nsToPercent(metrics.stringStoreNs, metrics.totalNs),
+      metrics.stringRows,
+      metrics.stringInlineRows,
+      metrics.stringCopiedBytes,
+      metrics.stringReferencedBytes,
+      metrics.stringHeapAllocCalls,
+      metrics.stringFastAllocHits,
+      metrics.stringSlowAllocHits,
+      metrics.stringHeapBlockSwitches,
+      metrics.stringRecordHeapCalls);
 }
 
 void storeBatchOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
@@ -44,12 +150,201 @@ void storeBatchBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
     BenchmarkContext context("store-batch-bm", opts.dataBytes);
     auto container = makeBmRowContainer(dataset, context.bufferManager);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
+    BmBatchAppendMetrics metrics;
+    auto* metricsPtr = FLAGS_bm_row_container_store_metrics ? &metrics : nullptr;
+    const auto mode = stringStoreMode();
     suspender.dismiss();
 
-    storeReusableInputBatchesBmBatch(*container, input, opts);
+    storeReusableInputBatchesBmBatch(
+        *container, input, opts, nullptr, metricsPtr, mode);
     folly::doNotOptimizeAway(container->numRows());
     suspender.rehire();
+    if (metricsPtr != nullptr) {
+      printStoreBatchMetrics(dataset, mode, metrics);
+    }
   }
+}
+
+template <bool kUseSimdMemcpy>
+void copyStringsToBmHeap(
+    BenchmarkContext& context,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& opts) {
+  constexpr auto kBlockBytes = static_cast<uint32_t>(
+      4 * 1024 * 1024);
+  std::vector<memory::bm::BufferHandle> blocks;
+  blocks.reserve((opts.dataBytes + kBlockBytes - 1) / kBlockBytes);
+  char* cursor = nullptr;
+  char* limit = nullptr;
+  uint64_t copiedBytes = 0;
+
+  copyReusableInputStrings(input, opts, [&](StringView value) {
+    if (cursor == nullptr || cursor + value.size() > limit) {
+      blocks.push_back(context.bufferManager->Allocate(
+          kBlockBytes, memory::bm::MemoryTag::kHashBuild));
+      cursor = blocks.back().Ptr();
+      limit = cursor + kBlockBytes;
+    }
+    if constexpr (kUseSimdMemcpy) {
+      simd::memcpy(cursor, value.data(), value.size());
+    } else {
+      std::memcpy(cursor, value.data(), value.size());
+    }
+    cursor += value.size();
+    copiedBytes += value.size();
+  });
+  folly::doNotOptimizeAway(blocks.size());
+  folly::doNotOptimizeAway(copiedBytes);
+}
+
+template <bool kUseSimdMemcpy>
+void copyStringsToPreallocatedBmHeap(
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& opts,
+    std::vector<memory::bm::BufferHandle>& blocks) {
+  constexpr auto kBlockBytes = static_cast<uint32_t>(4 * 1024 * 1024);
+  size_t blockIndex = 0;
+  char* cursor = blocks[blockIndex].Ptr();
+  char* limit = cursor + kBlockBytes;
+  uint64_t copiedBytes = 0;
+
+  copyReusableInputStrings(input, opts, [&](StringView value) {
+    if (cursor + value.size() > limit) {
+      ++blockIndex;
+      cursor = blocks[blockIndex].Ptr();
+      limit = cursor + kBlockBytes;
+    }
+    if constexpr (kUseSimdMemcpy) {
+      simd::memcpy(cursor, value.data(), value.size());
+    } else {
+      std::memcpy(cursor, value.data(), value.size());
+    }
+    cursor += value.size();
+    copiedBytes += value.size();
+  });
+  folly::doNotOptimizeAway(blockIndex);
+  folly::doNotOptimizeAway(copiedBytes);
+}
+
+void copyStringsToHashStringAllocator(
+    BenchmarkContext& context,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& opts) {
+  HashStringAllocator allocator(context.pool.get());
+  StringView stored;
+  uint64_t copiedBytes = 0;
+
+  copyReusableInputStrings(input, opts, [&](StringView value) {
+    allocator.copyMultipart(
+        value, reinterpret_cast<char*>(&stored), /*offset=*/0);
+    copiedBytes += value.size();
+  });
+  folly::doNotOptimizeAway(stored);
+  folly::doNotOptimizeAway(copiedBytes);
+}
+
+std::vector<memory::bm::BufferHandle> preallocateBmBlocks(
+    BenchmarkContext& context,
+    const BenchmarkOptions& opts) {
+  constexpr auto kBlockBytes = static_cast<uint32_t>(4 * 1024 * 1024);
+  std::vector<memory::bm::BufferHandle> blocks;
+  blocks.reserve((opts.dataBytes + kBlockBytes - 1) / kBlockBytes);
+  auto bytes = rowCount(opts) * static_cast<uint64_t>(opts.stringLength);
+  while (bytes > 0) {
+    blocks.push_back(context.bufferManager->Allocate(
+        kBlockBytes, memory::bm::MemoryTag::kHashBuild));
+    bytes -= std::min<uint64_t>(bytes, kBlockBytes);
+  }
+  return blocks;
+}
+
+template <bool kUseSimdMemcpy>
+void stringCopyPathBmHeap(uint32_t iterations, uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
+      auto warmup =
+          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      BenchmarkContext context("warmup-string-copy-bm-heap", warmup.dataBytes);
+      auto input = makeReusableInputBatches(context.pool.get(), warmup);
+      copyStringsToBmHeap<kUseSimdMemcpy>(context, input, warmup);
+    }
+    suspender.dismiss();
+  }
+  for (uint32_t i = 0; i < iterations; ++i) {
+    folly::BenchmarkSuspender suspender;
+    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    BenchmarkContext context("string-copy-bm-heap", opts.dataBytes);
+    auto input = makeReusableInputBatches(context.pool.get(), opts);
+    suspender.dismiss();
+    copyStringsToBmHeap<kUseSimdMemcpy>(context, input, opts);
+    suspender.rehire();
+  }
+}
+
+template <bool kUseSimdMemcpy>
+void stringCopyPathBmHeapPreallocated(uint32_t iterations, uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
+      auto warmup =
+          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      BenchmarkContext context(
+          "warmup-string-copy-bm-heap-preallocated", warmup.dataBytes);
+      auto input = makeReusableInputBatches(context.pool.get(), warmup);
+      auto blocks = preallocateBmBlocks(context, warmup);
+      copyStringsToPreallocatedBmHeap<kUseSimdMemcpy>(input, warmup, blocks);
+    }
+    suspender.dismiss();
+  }
+  for (uint32_t i = 0; i < iterations; ++i) {
+    folly::BenchmarkSuspender suspender;
+    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    BenchmarkContext context("string-copy-bm-heap-preallocated", opts.dataBytes);
+    auto input = makeReusableInputBatches(context.pool.get(), opts);
+    auto blocks = preallocateBmBlocks(context, opts);
+    suspender.dismiss();
+    copyStringsToPreallocatedBmHeap<kUseSimdMemcpy>(input, opts, blocks);
+    suspender.rehire();
+  }
+}
+
+void stringCopyPathHashStringAllocator(uint32_t iterations, uint64_t bytes) {
+  {
+    folly::BenchmarkSuspender suspender;
+    if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
+      auto warmup =
+          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      BenchmarkContext context(
+          "warmup-string-copy-hash-allocator", warmup.dataBytes);
+      auto input = makeReusableInputBatches(context.pool.get(), warmup);
+      copyStringsToHashStringAllocator(context, input, warmup);
+    }
+    suspender.dismiss();
+  }
+  for (uint32_t i = 0; i < iterations; ++i) {
+    folly::BenchmarkSuspender suspender;
+    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    BenchmarkContext context("string-copy-hash-allocator", opts.dataBytes);
+    auto input = makeReusableInputBatches(context.pool.get(), opts);
+    suspender.dismiss();
+    copyStringsToHashStringAllocator(context, input, opts);
+    suspender.rehire();
+  }
+}
+
+void stringCopyPathBmHeapSimd(uint32_t iterations, uint64_t bytes) {
+  stringCopyPathBmHeap<true>(iterations, bytes);
+}
+
+void stringCopyPathBmHeapStd(uint32_t iterations, uint64_t bytes) {
+  stringCopyPathBmHeap<false>(iterations, bytes);
+}
+
+void stringCopyPathBmHeapSimdPreallocated(
+    uint32_t iterations,
+    uint64_t bytes) {
+  stringCopyPathBmHeapPreallocated<true>(iterations, bytes);
 }
 
 BENCHMARK_NAMED_PARAM(storeBatchOld, old_fixed, DatasetKind::kFixed, 0);
@@ -68,6 +363,23 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     storeBatchBm,
     bm_variable,
     DatasetKind::kVariable,
+    0);
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(
+    stringCopyPathBmHeapSimd,
+    bm_heap_simd_variable,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    stringCopyPathBmHeapStd,
+    bm_heap_std_variable,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    stringCopyPathBmHeapSimdPreallocated,
+    bm_heap_simd_preallocated_variable,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    stringCopyPathHashStringAllocator,
+    hash_allocator_variable,
     0);
 BENCHMARK_DRAW_LINE();
 

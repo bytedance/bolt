@@ -157,7 +157,9 @@ void storeInputBatchOldBatch(
 void storeInputBatchBmBatch(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<char*>* rows = nullptr);
+    std::vector<char*>* rows = nullptr,
+    BmBatchAppendMetrics* metrics = nullptr,
+    BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
 void storeReusableInputBatchesOld(
     RowContainer& container,
@@ -180,7 +182,9 @@ void storeReusableInputBatchesBmBatch(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows = nullptr);
+    std::vector<char*>* rows = nullptr,
+    BmBatchAppendMetrics* metrics = nullptr,
+    BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
     DatasetKind dataset,
