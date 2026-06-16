@@ -28,8 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/lib/Map.h"
+#include "bolt/expression/VectorFunction.h"
 
 namespace bytedance::bolt::functions {
 
