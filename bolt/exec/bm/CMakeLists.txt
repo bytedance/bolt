@@ -10,6 +10,7 @@ bolt_add_library(
   BmRowCopier.cpp
   BmRowLayout.cpp
   BmSegmentCollection.cpp
+  BmSegmentCollectionBatch.cpp
   BmSegmentCollectionRead.cpp
   BmSegmentCollectionRelease.cpp
   BmSegmentCollectionWrite.cpp

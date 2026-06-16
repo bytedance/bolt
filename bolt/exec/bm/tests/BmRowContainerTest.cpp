@@ -782,6 +782,57 @@ TEST_F(BmRowContainerTest, AppendBatchStoresMultipleNonInlineStringColumns) {
   EXPECT_EQ(std::string(47, 'h'), rightFlat->valueAt(3).str());
 }
 
+TEST_F(BmRowContainerTest, AppendBatchReloadsMultipleStringColumnsAcrossChunks) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR(), VARCHAR()},
+      {false, false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      128,
+      64);
+  constexpr vector_size_t kRows = 12;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row + 100; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return std::string(40 + row, static_cast<char>('a' + row));
+      }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return std::string(48 + row, static_cast<char>('m' + row));
+      }),
+  });
+
+  container.appendBatch(input);
+  auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  auto rowIds = session.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+  auto rows = session.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, rows.size());
+
+  auto bigint = BaseVector::create(BIGINT(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, bigint);
+  auto bigintFlat = bigint->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, bigintFlat);
+  auto left = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, left);
+  auto leftFlat = left->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, leftFlat);
+  auto right = BaseVector::create(VARCHAR(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 2, right);
+  auto rightFlat = right->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, rightFlat);
+
+  for (auto row = 0; row < kRows; ++row) {
+    EXPECT_EQ(row + 100, bigintFlat->valueAt(row));
+    EXPECT_EQ(
+        std::string(40 + row, static_cast<char>('a' + row)),
+        leftFlat->valueAt(row).str());
+    EXPECT_EQ(
+        std::string(48 + row, static_cast<char>('m' + row)),
+        rightFlat->valueAt(row).str());
+  }
+}
+
 TEST_F(BmRowContainerTest, RejectsUnsupportedComplexTypes) {
   EXPECT_THROW(
       BmRowContainer(

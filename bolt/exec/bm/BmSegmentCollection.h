@@ -3,6 +3,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
+#include "bolt/exec/bm/BmBatchAppend.h"
 #include "bolt/exec/bm/BmRowContainerTypes.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 
@@ -143,6 +144,12 @@ class BmSegmentCollection {
   }
 
   char* newRowInSegment(SegmentData& segment);
+  void reserveRowsInBatch(
+      SegmentData& segment,
+      vector_size_t sourceBegin,
+      vector_size_t count,
+      std::vector<BatchAppendRange>& ranges,
+      std::vector<char*>* rows);
   void recordHeapForChunk(ChunkData& chunk, const BlockRef& heap, const char* row);
 
   ChunkData& currentChunk(SegmentData& segment);

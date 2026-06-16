@@ -3,6 +3,7 @@
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
+#include "bolt/exec/bm/BmBatchAppend.h"
 #include "bolt/exec/bm/BmRowBlockLoader.h"
 #include "bolt/exec/bm/BmRowContainerRead.h"
 #include "bolt/exec/bm/BmRowContainerTypes.h"
@@ -40,13 +41,15 @@ class BmRowContainer {
   // columns with store() before treating the row as complete.
   RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
 
-  // Appends all rows from input. Fixed-width columns are stored through a
-  // column-wise batch path; variable-width columns reuse the row-wise store path
-  // so chunk-to-heap dependencies remain identical to appendRow() + store().
+  // Appends all rows from input through a batch-only writer. This path reserves
+  // contiguous row ranges and stores columns by range; appendRow() + store()
+  // keeps its separate row-wise path.
   void appendBatch(
       const RowVectorPtr& input,
       PartitionId partition = kDefaultPartition,
-      std::vector<char*>* rows = nullptr);
+      std::vector<char*>* rows = nullptr,
+      BmBatchAppendMetrics* metrics = nullptr,
+      BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
   FOLLY_ALWAYS_INLINE void store(
       RowWriteContext& context,
@@ -153,17 +156,21 @@ class BmRowContainer {
       RowWriteContext& context,
       const ColumnStorePlan& column);
   template <TypeKind Kind>
-  void storeFixedColumnBatchNoNullsTyped(
+  void storeFixedColumnBatchRangesNoNullsTyped(
       const DecodedVector& decoded,
-      vector_size_t size,
-      char* const* rows,
+      folly::Range<const BatchAppendRange*> ranges,
       const ColumnStorePlan& column);
   template <TypeKind Kind>
-  void storeFixedColumnBatchWithNullsTyped(
+  void storeFixedColumnBatchRangesWithNullsTyped(
       const DecodedVector& decoded,
-      vector_size_t size,
-      char* const* rows,
+      folly::Range<const BatchAppendRange*> ranges,
       const ColumnStorePlan& column);
+  void storeStringColumnBatchRanges(
+      const DecodedVector& decoded,
+      folly::Range<const BatchAppendRange*> ranges,
+      const ColumnStorePlan& column,
+      BmBatchAppendMetrics* metrics,
+      BmBatchStringStoreMode stringStoreMode);
   template <TypeKind Kind>
   void extractColumnTyped(
       const char* const* rows,
