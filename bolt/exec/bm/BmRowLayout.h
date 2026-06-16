@@ -102,11 +102,11 @@ class BmRowLayout {
   // null cells leave their fixed payload bytes undefined. Readers must check
   // null bits before reading payload cells.
   FOLLY_ALWAYS_INLINE void initializeNulls(char* row) const {
-    if (FOLLY_LIKELY(nullBytes_ == 0)) {
-      return;
-    }
     if (FOLLY_LIKELY(nullBytes_ == 1)) {
       *row = 0;
+      return;
+    }
+    if (nullBytes_ == 0) {
       return;
     }
     std::memset(row, 0, nullBytes_);
