@@ -1,6 +1,7 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Allocation.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/BufferManagerReclaimer.h"
@@ -15,6 +16,14 @@
 #include <utility>
 
 namespace bytedance::bolt::memory::bm {
+namespace {
+
+bool shouldAllocateHugePageAligned(size_t size) {
+  return size >= AllocationTraits::kHugePageSize;
+}
+
+} // namespace
+
 std::shared_ptr<BufferManager> BufferManager::Create(
     MemoryPool& parent,
     BufferManagerConfig config) {
@@ -61,7 +70,9 @@ BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
   BOLT_CHECK_GT(size, 0);
   auto memory = std::make_shared<BlockMemory>(nextBlockId_++, size, tag);
   memory->owner = weak_from_this();
-  memory->payload = IoBuffer::allocateFromPool(pool_.get(), size);
+  memory->payload = shouldAllocateHugePageAligned(size)
+      ? IoBuffer::allocateHugePageAlignedFromPool(pool_.get(), size)
+      : IoBuffer::allocateFromPool(pool_.get(), size);
   memory->pinCount = 1;
   accounting_->RecordAllocate(*memory);
   auto handle = std::make_shared<BlockHandle>(std::move(memory));
