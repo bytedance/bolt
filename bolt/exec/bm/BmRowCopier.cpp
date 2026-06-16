@@ -1,8 +1,7 @@
 #include "bolt/exec/bm/BmRowCopier.h"
 
 #include "bolt/common/base/Exceptions.h"
-
-#include <cstring>
+#include "bolt/common/base/SimdUtil.h"
 
 namespace bytedance::bolt::exec::bm {
 
@@ -22,7 +21,7 @@ char* BmRowCopier::copyRowToSegment(
   auto* target = segments().newRowInSegment(segment);
   BOLT_DCHECK_NOT_NULL(segment.writeCursor.chunk);
   auto& chunk = *segment.writeCursor.chunk;
-  std::memcpy(target, source, layout().rowSize());
+  simd::memcpy(target, source, static_cast<int32_t>(layout().rowSize()));
 
   for (int32_t column = 0; column < types().size(); ++column) {
     const auto kind = types()[column]->kind();
@@ -37,7 +36,7 @@ char* BmRowCopier::copyRowToSegment(
     }
     auto& heap = segments().ensureHeapBlockInChunk(chunk, value->size());
     auto* stringTarget = heap.ptr + heap.used;
-    std::memcpy(stringTarget, value->data(), value->size());
+    simd::memcpy(stringTarget, value->data(), value->size());
     heap.used += value->size();
     *value = StringView(stringTarget, value->size());
     segments().recordHeapForChunk(chunk, heap, target);

@@ -95,6 +95,35 @@ TEST_F(CompressionManagerTest, PayloadBelowThresholdBuildsUncompressedRecord) {
   EXPECT_EQ(original, readPayload(decoded, original.size()));
 }
 
+TEST_F(CompressionManagerTest, RawSpillRejectsOversizedSimdCopyInputs) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kNone;
+  CompressionManager manager(config);
+
+  std::vector<char> oneByte(1);
+  const auto oversized =
+      static_cast<size_t>(std::numeric_limits<int32_t>::max()) + 1;
+  EXPECT_THROW(
+      manager.BuildSpillRecord(
+          std::span<const char>(oneByte.data(), oversized)),
+      std::exception);
+
+  SpillRecordHeader header;
+  header.compressionKind = static_cast<uint32_t>(CompressionKind::kNone);
+  header.rawSize = oversized;
+  header.storedSize = oversized;
+  auto encoded = EncodeSpillRecordHeader(header);
+
+  EXPECT_THROW(
+      manager.DecodeSpillRecord(
+          std::span<const char>(
+              encoded.data(), sizeof(SpillRecordHeader) + oversized),
+          oversized,
+          nullptr,
+          nullptr),
+      std::exception);
+}
+
 TEST_F(CompressionManagerTest, Lz4StrategiesWriteStableLz4BlockKind) {
   for (const auto strategy : {
            Lz4Strategy::kDefault,

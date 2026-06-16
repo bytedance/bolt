@@ -1,25 +1,39 @@
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 #include "bolt/common/memory/bm/compress/CompressionContextPool.h"
 #include "bolt/common/memory/bm/compress/CompressionRecord.h"
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 #include "bolt/common/time/Timer.h"
 
-#include <cstring>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm::compress {
 namespace {
 
+int32_t checkedSimdCopyBytes(uint64_t bytes, const char* context) {
+  BOLT_CHECK_LE(
+      bytes,
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+      "BM raw spill {} payload is too large for simd::memcpy, bytes={}, max={}",
+      context,
+      bytes,
+      std::numeric_limits<int32_t>::max());
+  return static_cast<int32_t>(bytes);
+}
+
 CompressionRecordResult makeUncompressedRecord(std::span<const char> payload) {
   const auto rawSize = static_cast<uint64_t>(payload.size());
+  const auto copyBytes = checkedSimdCopyBytes(rawSize, "write");
   auto record = AllocateSpillRecord(payload.size());
   FinalizeSpillRecord(record, CompressionKind::kNone, rawSize, rawSize);
-  if (!payload.empty()) {
-    std::memcpy(SpillRecordBody(record), payload.data(), payload.size());
+  if (copyBytes > 0) {
+    simd::memcpy(SpillRecordBody(record), payload.data(), copyBytes);
   }
 
   CompressionRecordResult result;
@@ -113,7 +127,7 @@ IoBuffer CompressionManager::DecodeSpillRecord(
   const auto storedPayload =
       StoredPayloadSpan(record, header.headerSize, header.storedSize);
 
-  auto rawPayload = AllocateDecodedPayload(outputPool, header.rawSize);
+  std::optional<int32_t> rawCopyBytes;
   if (storedKind == CompressionKind::kNone) {
     if (header.storedSize != header.rawSize) {
       BOLT_FAIL(
@@ -121,8 +135,13 @@ IoBuffer CompressionManager::DecodeSpillRecord(
           header.storedSize,
           header.rawSize);
     }
-    if (header.rawSize > 0) {
-      std::memcpy(rawPayload.data(), storedPayload.data(), header.rawSize);
+    rawCopyBytes = checkedSimdCopyBytes(header.rawSize, "read");
+  }
+
+  auto rawPayload = AllocateDecodedPayload(outputPool, header.rawSize);
+  if (storedKind == CompressionKind::kNone) {
+    if (*rawCopyBytes > 0) {
+      simd::memcpy(rawPayload.data(), storedPayload.data(), *rawCopyBytes);
     }
     return rawPayload;
   }

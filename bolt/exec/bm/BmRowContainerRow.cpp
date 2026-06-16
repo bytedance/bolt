@@ -1,10 +1,9 @@
 #include "bolt/exec/bm/BmRowContainer.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SimdUtil.h"
 
 #include <folly/Portability.h>
-
-#include <cstring>
 
 namespace bytedance::bolt::exec::bm {
 
@@ -89,7 +88,7 @@ void BmRowContainer::storeNonNullValueTyped(
       context.currentHeap_ = heap;
     }
     auto* stringTarget = heap->ptr + heap->used;
-    std::memcpy(stringTarget, value.data(), value.size());
+    simd::memcpy(stringTarget, value.data(), value.size());
     heap->used += value.size();
     *target = StringView(stringTarget, value.size());
     if (context.recordedHeapBlock_ != heap->id) {
