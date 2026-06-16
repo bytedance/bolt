@@ -150,6 +150,15 @@ void storeInputBatchBm(
     const RowVectorPtr& batch,
     std::vector<char*>* rows = nullptr);
 
+void storeInputBatchOldBatch(
+    RowContainer& container,
+    const RowVectorPtr& batch);
+
+void storeInputBatchBmBatch(
+    BmRowContainer& container,
+    const RowVectorPtr& batch,
+    std::vector<char*>* rows = nullptr);
+
 void storeReusableInputBatchesOld(
     RowContainer& container,
     const ReusableInputBatches& input,
@@ -157,6 +166,17 @@ void storeReusableInputBatchesOld(
     std::vector<char*>* rows = nullptr);
 
 void storeReusableInputBatchesBm(
+    BmRowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options,
+    std::vector<char*>* rows = nullptr);
+
+void storeReusableInputBatchesOldBatch(
+    RowContainer& container,
+    const ReusableInputBatches& input,
+    const BenchmarkOptions& options);
+
+void storeReusableInputBatchesBmBatch(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
@@ -236,6 +256,10 @@ std::unique_ptr<RowContainer> readOldSpillIntoNewRowContainer(
 void warmupStoreOld(const BenchmarkOptions& options);
 
 void warmupStoreBm(const BenchmarkOptions& options);
+
+void warmupStoreBatchOld(const BenchmarkOptions& options);
+
+void warmupStoreBatchBm(const BenchmarkOptions& options);
 
 void warmupReadOld(const BenchmarkOptions& options);
 

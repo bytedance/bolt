@@ -93,7 +93,7 @@ uint64_t ReadOnlyWindowReadSession::evictLoadedChunks(uint64_t targetBytes) {
   for (const auto& [segment, chunk] : loadedChunks_) {
     auto& segmentData = container_->segments_.segmentData(segment);
     BOLT_CHECK_LT(chunk, segmentData.chunks.size());
-    if (chunkHasResidentBlocks(segmentData.chunks[chunk])) {
+    if (chunkHasResidentBlocks(*segmentData.chunks[chunk])) {
       stillLoaded.emplace_back(segment, chunk);
       loadedChunkKeys_.insert(chunkKey(segment, chunk));
     }

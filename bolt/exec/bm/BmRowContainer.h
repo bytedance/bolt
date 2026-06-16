@@ -40,6 +40,14 @@ class BmRowContainer {
   // columns with store() before treating the row as complete.
   RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
 
+  // Appends all rows from input. Fixed-width columns are stored through a
+  // column-wise batch path; variable-width columns reuse the row-wise store path
+  // so chunk-to-heap dependencies remain identical to appendRow() + store().
+  void appendBatch(
+      const RowVectorPtr& input,
+      PartitionId partition = kDefaultPartition,
+      std::vector<char*>* rows = nullptr);
+
   FOLLY_ALWAYS_INLINE void store(
       RowWriteContext& context,
       const DecodedVector& decoded,
@@ -143,6 +151,18 @@ class BmRowContainer {
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
+      const ColumnStorePlan& column);
+  template <TypeKind Kind>
+  void storeFixedColumnBatchNoNullsTyped(
+      const DecodedVector& decoded,
+      vector_size_t size,
+      char* const* rows,
+      const ColumnStorePlan& column);
+  template <TypeKind Kind>
+  void storeFixedColumnBatchWithNullsTyped(
+      const DecodedVector& decoded,
+      vector_size_t size,
+      char* const* rows,
       const ColumnStorePlan& column);
   template <TypeKind Kind>
   void extractColumnTyped(

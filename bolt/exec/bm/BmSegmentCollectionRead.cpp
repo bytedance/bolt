@@ -49,7 +49,8 @@ void BmSegmentCollection::appendRowIdsForSegment(
     const SegmentData& segment,
     std::vector<RowId>& rows) const {
   rows.reserve(rows.size() + segment.meta.numRows);
-  for (const auto& chunk : segment.chunks) {
+  for (const auto& chunkPtr : segment.chunks) {
+    const auto& chunk = *chunkPtr;
     BOLT_CHECK(
         !chunk.consumed,
         "Cannot materialize RowIds for consumed chunk {} in segment {}",
@@ -74,7 +75,8 @@ void BmSegmentCollection::appendRowPointersForSegment(
     std::vector<char*>& rows,
     BulkLoadMetrics* metrics) {
   rows.reserve(rows.size() + segment.meta.numRows);
-  for (const auto& chunk : segment.chunks) {
+  for (const auto& chunkPtr : segment.chunks) {
+    const auto& chunk = *chunkPtr;
     BOLT_CHECK(
         !chunk.consumed,
         "Cannot materialize row pointers for consumed chunk {} in segment {}",

@@ -71,16 +71,16 @@ BlockRef& BmSegmentCollection::ensureHeapBlockSlow(
 }
 
 ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
-  ChunkData chunk;
-  chunk.meta.id = segment.chunks.size();
-  chunk.meta.segmentId = segment.meta.id;
-  chunk.meta.firstRowNumber = segment.nextRowNumber;
-  chunk.meta.rowCount = 0;
-  chunk.rowBlock = addBlock(rowBlockSize_);
+  auto chunk = std::make_unique<ChunkData>();
+  chunk->meta.id = segment.chunks.size();
+  chunk->meta.segmentId = segment.meta.id;
+  chunk->meta.firstRowNumber = segment.nextRowNumber;
+  chunk->meta.rowCount = 0;
+  chunk->rowBlock = addBlock(rowBlockSize_);
 
-  segment.currentChunk = chunk.meta.id;
+  segment.currentChunk = chunk->meta.id;
   segment.chunks.push_back(std::move(chunk));
-  auto& current = segment.chunks.back();
+  auto& current = *segment.chunks.back();
   segment.writeCursor.chunk = &current;
   segment.writeCursor.nextRow = current.rowBlock.ptr;
   segment.writeCursor.rowBlockEnd =
@@ -91,14 +91,14 @@ ChunkData& BmSegmentCollection::ensureWritableChunk(SegmentData& segment) {
 ChunkData& BmSegmentCollection::currentChunk(SegmentData& segment) {
   BOLT_DCHECK(segment.currentChunk != kNoBlock);
   BOLT_DCHECK_LT(segment.currentChunk, segment.chunks.size());
-  return segment.chunks[segment.currentChunk];
+  return *segment.chunks[segment.currentChunk];
 }
 
 const ChunkData& BmSegmentCollection::currentChunk(
     const SegmentData& segment) const {
   BOLT_DCHECK(segment.currentChunk != kNoBlock);
   BOLT_DCHECK_LT(segment.currentChunk, segment.chunks.size());
-  return segment.chunks[segment.currentChunk];
+  return *segment.chunks[segment.currentChunk];
 }
 
 char* BmSegmentCollection::newRowInSegment(SegmentData& segment) {

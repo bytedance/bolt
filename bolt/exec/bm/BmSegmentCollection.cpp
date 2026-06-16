@@ -176,7 +176,8 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(
   segment.meta.state = SegmentState::kFinalizedResident;
 
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
-  for (auto& chunk : segment.chunks) {
+  for (auto& chunkPtr : segment.chunks) {
+    auto& chunk = *chunkPtr;
     BOLT_DCHECK(!chunk.consumed);
     blocks.reserve(blocks.size() + 1 + chunk.heapBlocks.size());
     if (metrics != nullptr) {

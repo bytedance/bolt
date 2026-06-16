@@ -65,7 +65,9 @@ struct SegmentData {
   // Chunk data used by bulk/window read. SegmentData deliberately does not keep
   // flat rowBlocks/heapBlocks mirrors; ownership lives in ChunkData so the
   // hierarchy is Segment -> Chunk -> {row block, heap blocks, rebase metadata}.
-  std::vector<ChunkData> chunks;
+  // Keep ChunkData addresses stable because RowWriteContext, read sessions and
+  // block loaders may temporarily hold raw ChunkData* while the chunk list grows.
+  std::vector<std::unique_ptr<ChunkData>> chunks;
   // Next row number to assign inside this segment.
   RowNumber nextRowNumber{0};
   // Active chunk while the segment accepts writes.
@@ -182,7 +184,7 @@ class BmSegmentCollection {
       RowNumber rowNumber) const {
     const auto chunkIndex = rowNumber / rowsPerChunk_;
     BOLT_DCHECK_LT(chunkIndex, segment.chunks.size());
-    const auto& chunk = segment.chunks[chunkIndex];
+    const auto& chunk = *segment.chunks[chunkIndex];
     BOLT_DCHECK(
         rowNumber >= chunk.meta.firstRowNumber &&
         rowNumber < chunk.meta.firstRowNumber + chunk.meta.rowCount);
