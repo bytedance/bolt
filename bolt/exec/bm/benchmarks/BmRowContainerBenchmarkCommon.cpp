@@ -62,6 +62,11 @@ DEFINE_bool(
     true,
     "Print per-call spill read/write phase metrics for BM row container "
     "benchmarks to stderr so metric lines can be redirected separately.");
+DEFINE_bool(
+    bm_row_container_store_metrics,
+    false,
+    "Print coarse BM appendBatch store phase metrics for BM row container "
+    "benchmarks to stderr.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
@@ -462,8 +467,11 @@ void storeInputBatchOldBatch(
 void storeInputBatchBmBatch(
     BmRowContainer& container,
     const RowVectorPtr& batch,
-    std::vector<char*>* rows) {
-  container.appendBatch(batch, kDefaultPartition, rows);
+    std::vector<char*>* rows,
+    BmBatchAppendMetrics* metrics,
+    BmBatchStringStoreMode stringStoreMode) {
+  container.appendBatch(
+      batch, kDefaultPartition, rows, metrics, stringStoreMode);
 }
 
 void storeReusableInputBatchesOld(
@@ -505,12 +513,14 @@ void storeReusableInputBatchesBmBatch(
     BmRowContainer& container,
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
-    std::vector<char*>* rows) {
+    std::vector<char*>* rows,
+    BmBatchAppendMetrics* metrics,
+    BmBatchStringStoreMode stringStoreMode) {
   if (rows != nullptr) {
     rows->reserve(rowCount(options));
   }
   storeReusableInputBatches(input, rowCount(options), [&](const auto& batch) {
-    storeInputBatchBmBatch(container, batch, rows);
+    storeInputBatchBmBatch(container, batch, rows, metrics, stringStoreMode);
   });
 }
 
