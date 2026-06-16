@@ -53,7 +53,8 @@ class AggregateWindowFunction : public exec::WindowFunction {
       bolt::memory::MemoryPool* pool,
       HashStringAllocator* stringAllocator,
       const core::QueryConfig& config)
-      : WindowFunction(resultType, pool, stringAllocator) {
+      : WindowFunction(resultType, pool, stringAllocator),
+        maxBatchSize_(std::max<vector_size_t>(1, config.maxOutputBatchRows())) {
     BOLT_USER_CHECK(
         !ignoreNulls, "Aggregate window functions do not support IGNORE NULLS");
     argTypes_.reserve(args.size());
@@ -128,6 +129,8 @@ class AggregateWindowFunction : public exec::WindowFunction {
     partition_ = partition;
 
     previousFrameMetadata_.reset();
+    cachedSameFrameResult_.reset();
+    cachedSameFrameBounds_.reset();
   }
 
   void resetAggregateGroup() {
@@ -158,7 +161,14 @@ class AggregateWindowFunction : public exec::WindowFunction {
     FrameMetadata frameMetadata =
         analyzeFrameValues(validRows, rawFrameStarts, rawFrameEnds);
 
-    if (frameMetadata.incrementalAggregation) {
+    if (frameMetadata.sameFullPartitionFrame) {
+      sameFrameAggregation(
+          validRows,
+          frameMetadata.firstRow,
+          frameMetadata.lastRow,
+          resultOffset,
+          result);
+    } else if (frameMetadata.incrementalAggregation) {
       vector_size_t startRow;
       if (frameMetadata.usePreviousAggregate) {
         // If incremental aggregation can be resumed from the previous block,
@@ -212,6 +222,11 @@ class AggregateWindowFunction : public exec::WindowFunction {
 
     // Resume incremental aggregation from the prior block.
     bool usePreviousAggregate;
+
+    // True if all rows in this block have the full partition frame. This is
+    // common for UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING. It is handled
+    // separately to avoid loading the whole partition into argument vectors.
+    bool sameFullPartitionFrame;
   };
 
   bool handleAllEmptyFrames(
@@ -244,6 +259,8 @@ class AggregateWindowFunction : public exec::WindowFunction {
     vector_size_t prevFrameEnds = lastRow;
 
     bool incrementalAggregation = true;
+    bool allSameFrame = true;
+    const auto fixedFrameEndRow = lastRow;
     validRows.applyToSelected([&](auto i) {
       firstRow = std::min(firstRow, rawFrameStarts[i]);
       lastRow = std::max(lastRow, rawFrameEnds[i]);
@@ -254,6 +271,9 @@ class AggregateWindowFunction : public exec::WindowFunction {
       incrementalAggregation &= (rawFrameStarts[i] == fixedFrameStartRow);
       incrementalAggregation &= rawFrameEnds[i] >= prevFrameEnds;
       prevFrameEnds = rawFrameEnds[i];
+
+      allSameFrame &= rawFrameStarts[i] == fixedFrameStartRow;
+      allSameFrame &= rawFrameEnds[i] == fixedFrameEndRow;
     });
 
     bool usePreviousAggregate = false;
@@ -270,7 +290,15 @@ class AggregateWindowFunction : public exec::WindowFunction {
       }
     }
 
-    return {firstRow, lastRow, incrementalAggregation, usePreviousAggregate};
+    const bool sameFullPartitionFrame = !partition_->supportRowsStreaming() &&
+        allSameFrame && firstRow == 0 && lastRow == partition_->numRows() - 1;
+
+    return {
+        firstRow,
+        lastRow,
+        incrementalAggregation,
+        usePreviousAggregate,
+        sameFullPartitionFrame};
   }
 
   void fillArgVectors(vector_size_t firstRow, vector_size_t lastRow) {
@@ -305,6 +333,47 @@ class AggregateWindowFunction : public exec::WindowFunction {
     aggregate_->addSingleGroupRawInput(
         rawSingleGroupRow_, rows, argVectors_, false);
     aggregate_->extractValues(&rawSingleGroupRow_, 1, &aggregateResultVector_);
+  }
+
+  void sameFrameAggregation(
+      const SelectivityVector& validRows,
+      vector_size_t firstRow,
+      vector_size_t lastRow,
+      vector_size_t resultOffset,
+      const VectorPtr& result) {
+    if (cachedSameFrameResult_ && cachedSameFrameBounds_.has_value() &&
+        cachedSameFrameBounds_->first == firstRow &&
+        cachedSameFrameBounds_->second == lastRow) {
+      validRows.applyToSelected([&](auto i) {
+        result->copy(cachedSameFrameResult_.get(), resultOffset + i, 0, 1);
+      });
+    } else {
+      resetAggregateGroup();
+
+      for (auto batchStart = firstRow; batchStart <= lastRow;
+           batchStart += maxBatchSize_) {
+        const auto batchEnd =
+            std::min<vector_size_t>(batchStart + maxBatchSize_ - 1, lastRow);
+        fillArgVectors(batchStart, batchEnd);
+
+        SelectivityVector rows(batchEnd - batchStart + 1);
+        aggregate_->addSingleGroupRawInput(
+            rawSingleGroupRow_, rows, argVectors_, false);
+      }
+
+      BaseVector::prepareForReuse(aggregateResultVector_, 1);
+      aggregate_->extractValues(
+          &rawSingleGroupRow_, 1, &aggregateResultVector_);
+
+      validRows.applyToSelected([&](auto i) {
+        result->copy(aggregateResultVector_.get(), resultOffset + i, 0, 1);
+      });
+
+      cachedSameFrameResult_ = aggregateResultVector_;
+      cachedSameFrameBounds_ = {firstRow, lastRow};
+    }
+
+    setEmptyFramesResult(validRows, resultOffset, emptyResult_, result);
   }
 
   void incrementalAggregation(
@@ -442,6 +511,13 @@ class AggregateWindowFunction : public exec::WindowFunction {
   // return the default value of an aggregate (aggregation with no rows) for
   // empty frames. e.g. count for empty frames should return 0 and not null.
   VectorPtr emptyResult_;
+
+  // Maximum number of partition rows to load into argument vectors while
+  // evaluating one full-partition frame.
+  const vector_size_t maxBatchSize_;
+
+  VectorPtr cachedSameFrameResult_;
+  std::optional<std::pair<vector_size_t, vector_size_t>> cachedSameFrameBounds_;
 };
 
 } // namespace
