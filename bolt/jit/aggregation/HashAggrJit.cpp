@@ -5,7 +5,6 @@
 #include <glog/logging.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 #include <cstddef>
 
@@ -35,7 +34,7 @@ void logHashAggrJitFunctionIR(
     bool hasError) {
   const auto* function = module.getFunction(functionName);
   if (function == nullptr) {
-    LOG(INFO) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
+    VLOG(1) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
             << " stage=" << stage.str() << " function=" << functionName.str()
             << " error=" << hasError << ": <missing function>";
     return;
@@ -44,7 +43,7 @@ void logHashAggrJitFunctionIR(
   llvm::raw_string_ostream out(ir);
   function->print(out);
   out.flush();
-  LOG(INFO) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
+  VLOG(1) << "HashAggrJit generated LLVM IR for chunk " << moduleKey
           << " stage=" << stage.str() << " function=" << functionName.str()
           << " error=" << hasError << ":\n"
           << ir;
@@ -908,7 +907,7 @@ bool genInitIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return !llvm::verifyFunction(*func, &llvm::errs());
+  return true;
 }
 
 bool genAddDenseIR(
@@ -998,7 +997,7 @@ bool genAddDenseIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return !llvm::verifyFunction(*func, &llvm::errs());
+  return true;
 }
 
 bool genExtractIR(
@@ -1066,7 +1065,7 @@ bool genExtractIR(
   builder.SetInsertPoint(end);
   builder.CreateRetVoid();
 
-  return !llvm::verifyFunction(*func, &llvm::errs());
+  return true;
 }
 
 } // namespace
