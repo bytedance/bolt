@@ -173,7 +173,7 @@ class SumAggregateBase
       return;
     }
 
-    if (exec::Aggregate::numNulls_) {
+    if (exec::Aggregate::mayHaveNulls()) {
       BaseAggregate::template updateGroups<true, TData, TValue>(
           groups, rows, arg, &updateSingleValue<TData>, false);
     } else {

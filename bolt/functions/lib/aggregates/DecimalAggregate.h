@@ -132,7 +132,7 @@ class DecimalAggregate : public exec::Aggregate {
                 groups[i], TResultType(decodedRaw_.valueAt<TInputType>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], TResultType(data[i]));
@@ -178,7 +178,7 @@ class DecimalAggregate : public exec::Aggregate {
                 group, TResultType(decodedRaw_.valueAt<TInputType>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       const TInputType* data = decodedRaw_.data<TInputType>();
       LongDecimalWithOverflowState accumulator;
       rows.applyToSelected([&](vector_size_t i) {

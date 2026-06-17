@@ -231,7 +231,7 @@ class DecimalSumAggregate : public exec::Aggregate {
                 groups[i], decodedRaw_.valueAt<TInputType>(i), false);
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], data[i], false);
@@ -273,7 +273,7 @@ class DecimalSumAggregate : public exec::Aggregate {
                 group, decodedRaw_.valueAt<TInputType>(i), false);
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       DecimalSum decimalSum;
       rows.applyToSelected([&](vector_size_t i) {

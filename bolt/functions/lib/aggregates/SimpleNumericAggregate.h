@@ -116,7 +116,7 @@ class SimpleNumericAggregate : public exec::Aggregate {
               exec::Aggregate::nullByte_,
               exec::Aggregate::nullMask_,
               groups,
-              &this->exec::Aggregate::numNulls_,
+              this->exec::Aggregate::numNulls_,
               updateSingleValue);
 
       auto indices = decoded.indices();
@@ -236,7 +236,7 @@ class SimpleNumericAggregate : public exec::Aggregate {
         exec::Aggregate::nullByte_,
         exec::Aggregate::nullMask_,
         groups,
-        &this->exec::Aggregate::numNulls_);
+        this->exec::Aggregate::numNulls_);
     // The decoded vector does not really keep the info from the 'rows', except
     // for the 'upper bound' of it. In case not all rows are selected we need to
     // generate proper indices, which we 'indirect' through the ones we got from

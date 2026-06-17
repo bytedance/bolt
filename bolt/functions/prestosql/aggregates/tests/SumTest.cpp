@@ -446,18 +446,19 @@ TEST_F(SumTest, hook) {
   sumRow.sum = 0;
 
   char* row = reinterpret_cast<char*>(&sumRow);
-  uint64_t numNulls = 1;
+  std::optional<uint64_t> numNulls = 1;
   aggregate::SumHook<int64_t, int64_t> hook(
       offsetof(SumRow<int64_t>, sum),
       offsetof(SumRow<int64_t>, nulls),
       1,
       &row,
-      &numNulls);
+      numNulls);
 
   int64_t value = 11;
   hook.addValue(0, &value);
   EXPECT_EQ(0, sumRow.nulls);
-  EXPECT_EQ(0, numNulls);
+  ASSERT_TRUE(numNulls.has_value());
+  EXPECT_EQ(0, *numNulls);
   EXPECT_EQ(value, sumRow.sum);
 }
 

@@ -1202,6 +1202,7 @@ void GroupingSet::runHashAggrJitAddChunks(
         inputRuntimePtrs.data(),
         inputsMayHaveNulls);
     for (const auto& slot : chunk.slots()) {
+      aggregates_[slot.aggregateIndex].function->markNullCountUnknown();
       jitExecuted[slot.aggregateIndex] = 1;
     }
   }

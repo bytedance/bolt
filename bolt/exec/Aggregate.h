@@ -33,6 +33,8 @@
 #include <folly/CPortability.h>
 #include <folly/Synchronized.h>
 
+#include <optional>
+
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/core/QueryConfig.h"
@@ -158,6 +160,10 @@ class Aggregate {
       uint8_t nullMask,
       int32_t rowSizeOffset) {
     setOffsetsInternal(offset, nullByte, nullMask, rowSizeOffset);
+  }
+
+  void markNullCountUnknown() {
+    numNulls_ = std::nullopt;
   }
 
   // Initializes null flags and accumulators for newly encountered groups.  This
@@ -387,7 +393,15 @@ class Aggregate {
   }
 
   bool isNull(char* group) const {
-    return numNulls_ && (group[nullByte_] & nullMask_);
+    return mayHaveNulls() && (group[nullByte_] & nullMask_);
+  }
+
+  bool hasNoNulls() const {
+    return numNulls_.has_value() && *numNulls_ == 0;
+  }
+
+  bool mayHaveNulls() const {
+    return !numNulls_.has_value() || *numNulls_ > 0;
   }
 
   // Sets null flag for all specified groups to true.
@@ -396,7 +410,9 @@ class Aggregate {
     for (auto i : indices) {
       groups[i][nullByte_] |= nullMask_;
     }
-    numNulls_ += indices.size();
+    if (numNulls_.has_value()) {
+      *numNulls_ += indices.size();
+    }
   }
 
   inline bool setNull(char* group) {
@@ -404,18 +420,23 @@ class Aggregate {
       return false;
     }
     group[nullByte_] |= nullMask_;
-    ++numNulls_;
+    if (numNulls_.has_value()) {
+      ++*numNulls_;
+    }
     return true;
   }
 
   inline bool clearNull(char* group) {
-    if (numNulls_) {
-      uint8_t mask = group[nullByte_];
-      if (mask & nullMask_) {
-        group[nullByte_] = mask & ~nullMask_;
-        --numNulls_;
-        return true;
+    if (!mayHaveNulls()) {
+      return false;
+    }
+    uint8_t mask = group[nullByte_];
+    if (mask & nullMask_) {
+      group[nullByte_] = mask & ~nullMask_;
+      if (numNulls_.has_value()) {
+        --*numNulls_;
       }
+      return true;
     }
     return false;
   }
@@ -476,9 +497,11 @@ class Aggregate {
   int32_t rowSizeOffset_ = 0;
 
   // Number of null accumulators in the current state of the aggregation
-  // operator for this aggregate. If 0, clearing the null as part of update
-  // is not needed.
-  uint64_t numNulls_ = 0;
+  // operator for this aggregate.
+  // - 0          => known that no group is null
+  // - N > 0      => known exact null count
+  // - nullopt    => unknown; must rely on per-group null bit
+  std::optional<uint64_t> numNulls_{0};
   HashStringAllocator* allocator_{nullptr};
   memory::MemoryPool* pool_{nullptr};
   std::shared_ptr<core::ExpressionEvaluator> expressionEvaluator_{nullptr};

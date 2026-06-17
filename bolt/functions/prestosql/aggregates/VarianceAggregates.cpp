@@ -252,7 +252,7 @@ class VarianceAggregate : public exec::Aggregate {
             updateNonNullValue(groups[i], decodedRaw_.valueAt<T>(i));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<T>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], data[i]);
@@ -294,7 +294,7 @@ class VarianceAggregate : public exec::Aggregate {
             updateNonNullValue(group, decodedRaw_.valueAt<T>(i));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       const T* data = decodedRaw_.data<T>();
       VarianceAccumulator accData;
       rows.applyToSelected([&](vector_size_t i) { accData.update(data[i]); });

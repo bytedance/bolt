@@ -208,7 +208,7 @@ class AverageAggregateBase : public exec::Aggregate {
                 groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInput>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], data[i]);
@@ -251,7 +251,7 @@ class AverageAggregateBase : public exec::Aggregate {
                 group, TAccumulator(decodedRaw_.valueAt<TInput>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       const TInput* data = decodedRaw_.data<TInput>();
       TAccumulator totalSum(0);
       rows.applyToSelected([&](vector_size_t i) { totalSum += data[i]; });

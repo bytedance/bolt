@@ -116,15 +116,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
       folly::Range<const vector_size_t*> indices) override {
     for (auto i : indices) {
       // result of count is never null
+      groups[i][nullByte_] &= ~nullMask_;
       *value<int64_t>(groups[i]) = (int64_t)0;
     }
   }
 
   FLATTEN void
   extractValues(char** groups, int32_t numGroups, VectorPtr* result) override {
-    BaseAggregate::doExtractValues(groups, numGroups, result, [&](char* group) {
-      return *value<int64_t>(group);
-    });
+    auto* vector = (*result)->as<FlatVector<int64_t>>();
+    BOLT_CHECK(vector);
+    vector->resize(numGroups);
+    vector->clearAllNulls();
+
+    auto* rawValues = vector->mutableRawValues();
+    for (vector_size_t i = 0; i < numGroups; ++i) {
+      rawValues[i] = *value<int64_t>(groups[i]);
+    }
   }
 
   void addRawInput(
