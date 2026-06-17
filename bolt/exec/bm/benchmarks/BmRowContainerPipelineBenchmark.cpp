@@ -5,8 +5,16 @@
 #include <fmt/core.h>
 #include <folly/Benchmark.h>
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+#include <unistd.h>
+
 DECLARE_uint64(bm_row_container_data_bytes);
 DECLARE_uint64(bm_row_container_warmup_data_bytes);
+DECLARE_uint32(bm_row_container_profile_ready_sleep_seconds);
 DECLARE_bool(bm_row_container_spill_metrics);
 
 namespace bytedance::bolt::exec::bm::benchmarks {
@@ -37,6 +45,34 @@ uint64_t dataBytes(uint64_t bytes) {
 
 bool shouldWarmup() {
   return FLAGS_bm_row_container_warmup_data_bytes != 0;
+}
+
+void waitForProfileAttachOnce(
+    const char* benchmark,
+    DatasetKind dataset,
+    SpillCompressionKind compression) {
+  if (FLAGS_bm_row_container_profile_ready_sleep_seconds == 0) {
+    return;
+  }
+
+  static std::atomic_bool readyPrinted{false};
+  if (readyPrinted.exchange(true)) {
+    return;
+  }
+
+  fmt::print(
+      stderr,
+      "[bm-row-container-profile] Ready pid={} benchmark={} dataset={} "
+      "compression={} sleep_seconds={}\n",
+      static_cast<int>(::getpid()),
+      benchmark,
+      datasetName(dataset),
+      spillCompressionName(compression),
+      FLAGS_bm_row_container_profile_ready_sleep_seconds);
+  std::fflush(stderr);
+  std::this_thread::sleep_for(
+      std::chrono::seconds(
+          FLAGS_bm_row_container_profile_ready_sleep_seconds));
 }
 
 BenchmarkOptions makeOptions(
@@ -207,6 +243,9 @@ void runBmPipelineOnce(const BenchmarkOptions& opts, PipelineBmMetrics* metrics)
   BenchmarkContext context("pipeline-bm", opts.dataBytes, 0, opts.compression);
   auto input = makeReusableInputBatches(context.pool.get(), opts);
   auto container = makeBmRowContainer(opts.dataset, context.bufferManager);
+  if (metrics != nullptr) {
+    waitForProfileAttachOnce("pipelineBm", opts.dataset, opts.compression);
+  }
   memory::bm::BufferManagerStats statsBefore;
   if (metrics != nullptr && FLAGS_bm_row_container_spill_metrics) {
     statsBefore = context.bufferManager->stats();
