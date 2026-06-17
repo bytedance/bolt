@@ -59,14 +59,14 @@ template <>
 int8_t add(int8_t value, int8_t step, int32_t sequence) {
   const auto delta =
       static_cast<int128_t>(step) * static_cast<int128_t>(sequence);
-  return value + delta;
+  return static_cast<int8_t>(value + delta);
 }
 
 template <>
 int16_t add(int16_t value, int16_t step, int32_t sequence) {
   const auto delta =
       static_cast<int128_t>(step) * static_cast<int128_t>(sequence);
-  return value + delta;
+  return static_cast<int16_t>(value + delta);
 }
 
 template <>
@@ -75,21 +75,21 @@ int64_t add(int64_t value, int64_t step, int32_t sequence) {
       static_cast<int128_t>(step) * static_cast<int128_t>(sequence);
   // Since step is calculated from start and stop,
   // the sum of 'value' and 'add' is within int64_t.
-  return value + delta;
+  return static_cast<int64_t>(value + delta);
 }
 
 template <>
 int32_t add(int32_t value, int64_t step, int32_t sequence) {
   const auto delta =
       static_cast<int128_t>(step) * static_cast<int128_t>(sequence);
-  return value + delta;
+  return static_cast<int32_t>(value + delta);
 }
 
 template <>
 Timestamp add(Timestamp value, int64_t step, int32_t sequence) {
   const auto delta =
       static_cast<int128_t>(step) * static_cast<int128_t>(sequence);
-  return Timestamp::fromMillis(value.toMillis() + delta);
+  return Timestamp::fromMillis(static_cast<int64_t>(value.toMillis() + delta));
 }
 
 template <>
@@ -148,12 +148,7 @@ void SequenceFunction<T, K>::apply(
   const bool isDate = args[0]->type()->isDate();
   context.applyToSelectedNoThrow(rows, [&](auto row) {
     rawSizes[row] = checkArguments(
-        startVector,
-        stopVector,
-        stepVector,
-        row,
-        isDate,
-        isIntervalYearMonth);
+        startVector, stopVector, stepVector, row, isDate, isIntervalYearMonth);
     numElements += rawSizes[row];
   });
 
