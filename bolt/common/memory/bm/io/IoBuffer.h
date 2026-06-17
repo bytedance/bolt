@@ -110,6 +110,13 @@ class IoBuffer {
     BOLT_CHECK_GT(size, 0);
     const auto allocationSize =
         ((size + kAlignment - 1) / kAlignment) * kAlignment;
+    // TODO: Large malloc-backed IoBuffers are used by spill record and spill
+    // read/write temporary buffers. Freshly allocating and writing them can
+    // still trigger first-touch minor page faults; huge-page hints only reduce
+    // TLB/page-table pressure and did not show a clear win in the spill-read
+    // benchmark. If this path remains hot, prefer reducing the temporary
+    // buffer/copy itself, e.g. vectored raw spill writes, before adding a
+    // memory-retaining buffer pool.
     auto* data = static_cast<char*>(std::malloc(allocationSize));
     if (data == nullptr) {
       BOLT_FAIL("BM IoBuffer malloc failed, size={}", size);
