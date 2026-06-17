@@ -5,21 +5,10 @@
 
 #include <folly/Portability.h>
 
-#include <chrono>
 #include <span>
 #include <unordered_map>
 
 namespace bytedance::bolt::exec::bm {
-namespace {
-
-uint64_t nowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-} // namespace
-
 BmRowBlockLoader::BmRowBlockLoader(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     const BmRowLayout* layout,
@@ -33,8 +22,7 @@ BmRowBlockLoader::BmRowBlockLoader(
 }
 
 void BmRowBlockLoader::loadSegments(
-    folly::Range<const SegmentId*> segments,
-    BulkLoadMetrics* metrics) {
+    folly::Range<const SegmentId*> segments) {
   std::vector<ChunkData*> chunks;
   for (const auto segmentId : segments) {
     auto& segment = this->segments().segmentData(segmentId);
@@ -44,13 +32,11 @@ void BmRowBlockLoader::loadSegments(
       chunks.push_back(&chunk);
     }
   }
-  loadChunks({chunks.data(), chunks.size()}, metrics);
+  loadChunks({chunks.data(), chunks.size()});
 }
 
 void BmRowBlockLoader::loadChunks(
-    folly::Range<ChunkData* const*> chunks,
-    BulkLoadMetrics* metrics) {
-  const auto collectStart = metrics == nullptr ? 0 : nowNs();
+    folly::Range<ChunkData* const*> chunks) {
   const bool mayNeedRebase = !layout().stringColumns().empty();
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   std::vector<BlockRef*> blockRefs;
@@ -101,32 +87,20 @@ void BmRowBlockLoader::loadChunks(
       }
     }
   }
-  if (metrics != nullptr) {
-    metrics->collectBlocksNs += nowNs() - collectStart;
-    metrics->pinnedBlocks += blocks.size();
-  }
   if (blocks.empty()) {
     return;
   }
 
-  const auto batchPinStart = metrics == nullptr ? 0 : nowNs();
   auto pins = bufferManager_->BatchPin(
       std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
           blocks.data(), blocks.size()));
-  if (metrics != nullptr) {
-    metrics->batchPinNs += nowNs() - batchPinStart;
-  }
   BOLT_DCHECK_EQ(pins.size(), blockRefs.size());
 
-  const auto updateStart = metrics == nullptr ? 0 : nowNs();
   if (FOLLY_LIKELY(!mayNeedRebase)) {
     for (size_t i = 0; i < pins.size(); ++i) {
       auto& block = *blockRefs[i];
       block.handle = std::move(pins[i]);
       block.ptr = block.handle.Ptr();
-    }
-    if (metrics != nullptr) {
-      metrics->updateBlockPointersNs += nowNs() - updateStart;
     }
     return;
   }
@@ -145,24 +119,17 @@ void BmRowBlockLoader::loadChunks(
     }
     block.ptr = newPtr;
   }
-  if (metrics != nullptr) {
-    metrics->updateBlockPointersNs += nowNs() - updateStart;
-  }
   if (!heapRebases.empty()) {
-    const auto rebaseStart = metrics == nullptr ? 0 : nowNs();
     for (auto* chunk : touchedChunks) {
       rebaseStringViewsInChunk(
-          *chunk, layout(), segments().rowStride(), heapRebases, metrics);
-    }
-    if (metrics != nullptr) {
-      metrics->rebaseStringViewsNs += nowNs() - rebaseStart;
+          *chunk, layout(), segments().rowStride(), heapRebases);
     }
   }
 }
 
 void BmRowBlockLoader::loadChunk(ChunkData& chunk) {
   ChunkData* chunkPtr = &chunk;
-  loadChunks({&chunkPtr, 1}, nullptr);
+  loadChunks({&chunkPtr, 1});
 }
 
 } // namespace bytedance::bolt::exec::bm

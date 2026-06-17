@@ -1,6 +1,5 @@
 #pragma once
 
-#include "bolt/exec/bm/BmRowContainerMetrics.h"
 #include "bolt/exec/bm/BmRowContainerPublicTypes.h"
 #include "bolt/vector/TypeAliases.h"
 
@@ -21,7 +20,7 @@ class BulkReadSession {
  public:
   BulkReadSession() = default;
 
-  std::vector<char*> loadRows(BulkLoadMetrics* metrics = nullptr);
+  std::vector<char*> loadRows();
 
  private:
   BulkReadSession(BmRowContainer* container, std::vector<SegmentId> segments);

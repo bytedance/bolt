@@ -4,7 +4,6 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/exec/bm/BmBatchAppend.h"
-#include "bolt/exec/bm/BmRowContainerMetrics.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 #include "bolt/exec/bm/BmSegmentTypes.h"
 
@@ -51,10 +50,8 @@ class BmSegmentCollection {
       uint32_t heapBlockSize);
 
   // Segment lifecycle and partition ownership.
-  SegmentId spillActiveSegment(BmSegmentSpillMetrics* metrics = nullptr);
-  SegmentId spillActivePartitionSegment(
-      PartitionId partition,
-      BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId spillActiveSegment();
+  SegmentId spillActivePartitionSegment(PartitionId partition);
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   SegmentState segmentState(SegmentId segment) const;
@@ -66,12 +63,8 @@ class BmSegmentCollection {
   // Segment creation and finalization.
   SegmentData& activeSegment(PartitionId partition);
   SegmentData& createSegment(std::optional<PartitionId> partition);
-  SegmentId finalizeAndFlush(
-      PartitionId partition,
-      BmSegmentSpillMetrics* metrics = nullptr);
-  SegmentId finalizeAndFlushSegment(
-      SegmentData& segment,
-      BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId finalizeAndFlush(PartitionId partition);
+  SegmentId finalizeAndFlushSegment(SegmentData& segment);
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
 
@@ -115,8 +108,7 @@ class BmSegmentCollection {
       std::vector<RowId>& rows) const;
   void appendRowPointersForSegment(
       SegmentData& segment,
-      std::vector<char*>& rows,
-      BulkLoadMetrics* metrics = nullptr);
+      std::vector<char*>& rows);
   char* rowPointer(const RowId& id);
   const char* rowPointer(const RowId& id) const;
 
