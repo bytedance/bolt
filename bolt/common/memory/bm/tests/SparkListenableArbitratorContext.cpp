@@ -5,8 +5,6 @@
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/common/memory/sparksql/MemoryTarget.h"
 
-#include <glog/logging.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -32,11 +30,7 @@ class AutomaticReclaimSpiller final : public sparksql::Spiller {
     if (size <= 0) {
       return 0;
     }
-    VLOG(1) << "BM sort automatic spiller invoked, requested_bytes=" << size;
-    const auto reclaimed = spill_(size);
-    VLOG(1) << "BM sort automatic spiller finished, requested_bytes=" << size
-            << ", returned_bytes=" << reclaimed;
-    return reclaimed;
+    return spill_(size);
   }
 
   const std::set<sparksql::SpillerPhase>& applicablePhases() override {
@@ -98,7 +92,6 @@ void SparkListenableArbitratorContext::installAutomaticReclaimSpill() {
   sparksql::SpillerPtr spiller = std::make_shared<AutomaticReclaimSpiller>(
       [this](int64_t size) { return spillFixedSize(size); });
   holder_->appendSpiller(spiller);
-  VLOG(1) << "BM sort installed automatic reclaim spiller";
 }
 
 SparkListenableArbitratorContextStats SparkListenableArbitratorContext::stats()
@@ -146,8 +139,6 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
   BOLT_CHECK_NOT_NULL(manager);
   auto aggregatePool = manager->getAggregateMemoryPool();
   BOLT_CHECK_NOT_NULL(aggregatePool);
-  VLOG(1) << "BM sort spillFixedSize begin, requested_bytes=" << size
-          << ", aggregate_pool=" << aggregatePool->toString();
   MemoryReclaimer::Stats reclaimStats;
   uint64_t reclaimed = 0;
   {
@@ -161,19 +152,12 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
     std::lock_guard<std::mutex> lock(statsMutex_);
     stats_.automaticSpillReclaimedBytes += reclaimed;
   }
-  VLOG(1) << "BM sort spillFixedSize after local reclaim"
-          << ", requested_bytes=" << size << ", reclaimed_bytes=" << reclaimed
-          << ", aggregate_pool=" << aggregatePool->toString();
   const auto shrunken = manager->shrink(size);
   {
     std::lock_guard<std::mutex> lock(statsMutex_);
     stats_.automaticSpillShrunkenBytes += static_cast<uint64_t>(shrunken);
   }
   const auto remaining = size - shrunken;
-  VLOG(1) << "BM sort spillFixedSize after shrink, requested_bytes=" << size
-          << ", shrunken_bytes=" << shrunken
-          << ", remaining_bytes=" << remaining
-          << ", aggregate_pool=" << aggregatePool->toString();
   if (remaining <= 0) {
     const auto elapsedUs =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -184,8 +168,6 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
       stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
       stats_.automaticSpillTimeUs += elapsedUs;
     }
-    VLOG(1) << "BM sort spillFixedSize end after shrink, returned_bytes="
-            << shrunken;
     return shrunken;
   }
 
@@ -197,10 +179,6 @@ int64_t SparkListenableArbitratorContext::spillFixedSize(int64_t size) {
     stats_.automaticSpillReturnedBytes += static_cast<uint64_t>(shrunken);
     stats_.automaticSpillTimeUs += elapsedUs;
   }
-  VLOG(1) << "BM sort spillFixedSize end after local shrink only"
-          << ", requested_bytes=" << size << ", shrunken_bytes=" << shrunken
-          << ", remaining_bytes=" << remaining
-          << ", aggregate_pool=" << aggregatePool->toString();
   return shrunken;
 }
 
