@@ -67,6 +67,13 @@ DEFINE_bool(
     true,
     "Print per-call spill read/write phase metrics for BM row container "
     "benchmarks to stderr so metric lines can be redirected separately.");
+DEFINE_uint32(
+    bm_row_container_profile_ready_sleep_seconds,
+    0,
+    "If non-zero, selected profile-aware BM row container benchmarks print a "
+    "Ready marker after input materialization and sleep for this many seconds "
+    "before entering the measured path. This lets perf attach after benchmark "
+    "setup is complete.");
 
 namespace bytedance::bolt::exec::bm::benchmarks {
 namespace {
