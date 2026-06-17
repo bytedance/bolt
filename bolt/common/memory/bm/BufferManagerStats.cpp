@@ -1,5 +1,7 @@
 #include "bolt/common/memory/bm/BufferManagerStats.h"
 
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 
@@ -19,18 +21,35 @@ constexpr std::array<MemoryTag, kMemoryTagCount> kMemoryTags{
     MemoryTag::kExchange,
     MemoryTag::kTesting};
 
-void SubtractOrFatal(
+void SubtractOrSaturate(
     uint64_t& value,
     uint64_t delta,
     const char* field,
     const BlockMemory& memory) noexcept {
+#ifndef NDEBUG
+  BOLT_DCHECK_GE(
+      value,
+      delta,
+      "BM observability counter underflow, field={}, value={}, delta={}, block_id={}, tag={}, size={}, state={}, pin_count={}",
+      field,
+      value,
+      delta,
+      memory.id,
+      toString(memory.tag),
+      memory.size,
+      static_cast<int>(memory.state),
+      memory.pinCount);
+#endif
   if (value < delta) {
-    LOG(FATAL) << "BM observability counter underflow, field=" << field
-               << ", value=" << value << ", delta=" << delta
-               << ", block_id=" << memory.id << ", tag=" << toString(memory.tag)
-               << ", size=" << memory.size
-               << ", state=" << static_cast<int>(memory.state)
-               << ", pin_count=" << memory.pinCount;
+    BOLT_MEM_LOG_EVERY_MS(WARNING, 1000)
+        << "[BM] observability counter underflow"
+        << " field=" << field << " value=" << value << " delta=" << delta
+        << " block_id=" << memory.id << " tag=" << toString(memory.tag)
+        << " size=" << memory.size
+        << " state=" << static_cast<int>(memory.state)
+        << " pin_count=" << memory.pinCount;
+    value = 0;
+    return;
   }
   value -= delta;
 }
@@ -200,7 +219,7 @@ void BufferManagerStatsCollector::OnResidentPinned(const BlockMemory& memory) {
   if (memory.pinCount != 0) {
     return;
   }
-  SubtractOrFatal(
+  SubtractOrSaturate(
       stats_.unpinnedResidentBytes,
       memory.size,
       "unpinnedResidentBytes",
@@ -208,7 +227,7 @@ void BufferManagerStatsCollector::OnResidentPinned(const BlockMemory& memory) {
   stats_.pinnedResidentBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.unpinnedResidentBytes,
       memory.size,
       "tag.unpinnedResidentBytes",
@@ -218,12 +237,12 @@ void BufferManagerStatsCollector::OnResidentPinned(const BlockMemory& memory) {
 
 void BufferManagerStatsCollector::OnResidentUnpinned(
     const BlockMemory& memory) noexcept {
-  SubtractOrFatal(
+  SubtractOrSaturate(
       stats_.pinnedResidentBytes, memory.size, "pinnedResidentBytes", memory);
   stats_.unpinnedResidentBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.pinnedResidentBytes,
       memory.size,
       "tag.pinnedResidentBytes",
@@ -238,17 +257,17 @@ void BufferManagerStatsCollector::OnReadSubmitted(const BlockMemory& memory) {
 
 void BufferManagerStatsCollector::OnReadFutureConsumed(
     const BlockMemory& memory) {
-  SubtractOrFatal(
+  SubtractOrSaturate(
       stats_.prefetchingBytes, memory.size, "prefetchingBytes", memory);
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.prefetchingBytes, memory.size, "tag.prefetchingBytes", memory);
 }
 
 void BufferManagerStatsCollector::OnReadCompleted(
     const BlockMemory& memory,
     const SpillReadResult& read) {
-  SubtractOrFatal(stats_.spilledBytes, memory.size, "spilledBytes", memory);
+  SubtractOrSaturate(stats_.spilledBytes, memory.size, "spilledBytes", memory);
   stats_.pinnedResidentBytes += memory.size;
   ++stats_.pinReadCount;
   ++stats_.spillReadCount;
@@ -257,7 +276,7 @@ void BufferManagerStatsCollector::OnReadCompleted(
   stats_.spillDecompressionTimeUs += read.decompressionTimeUs;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.spilledBytes, memory.size, "tag.spilledBytes", memory);
   tagStats.residentBytes += memory.size;
   tagStats.pinnedResidentBytes += memory.size;
@@ -265,7 +284,7 @@ void BufferManagerStatsCollector::OnReadCompleted(
 }
 
 void BufferManagerStatsCollector::OnSpillStarted(const BlockMemory& memory) {
-  SubtractOrFatal(
+  SubtractOrSaturate(
       stats_.unpinnedResidentBytes,
       memory.size,
       "unpinnedResidentBytes",
@@ -273,9 +292,9 @@ void BufferManagerStatsCollector::OnSpillStarted(const BlockMemory& memory) {
   stats_.spillingBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.residentBytes, memory.size, "tag.residentBytes", memory);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.unpinnedResidentBytes,
       memory.size,
       "tag.unpinnedResidentBytes",
@@ -284,11 +303,11 @@ void BufferManagerStatsCollector::OnSpillStarted(const BlockMemory& memory) {
 }
 
 void BufferManagerStatsCollector::OnSpillRolledBack(const BlockMemory& memory) {
-  SubtractOrFatal(stats_.spillingBytes, memory.size, "spillingBytes", memory);
+  SubtractOrSaturate(stats_.spillingBytes, memory.size, "spillingBytes", memory);
   stats_.unpinnedResidentBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.spillingBytes, memory.size, "tag.spillingBytes", memory);
   tagStats.residentBytes += memory.size;
   tagStats.unpinnedResidentBytes += memory.size;
@@ -303,13 +322,13 @@ void BufferManagerStatsCollector::OnSpillCompleted(
     ++stats_.spillCompressedBlocks;
   }
 
-  SubtractOrFatal(stats_.spillingBytes, memory.size, "spillingBytes", memory);
+  SubtractOrSaturate(stats_.spillingBytes, memory.size, "spillingBytes", memory);
   stats_.spilledBytes += memory.size;
   ++stats_.spillWriteCount;
   stats_.spillWriteBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.spillingBytes, memory.size, "tag.spillingBytes", memory);
   tagStats.spilledBytes += memory.size;
   tagStats.reclaimedBytes += memory.size;
@@ -318,7 +337,7 @@ void BufferManagerStatsCollector::OnSpillCompleted(
 
 void BufferManagerStatsCollector::OnCleanResidentDiscarded(
     const BlockMemory& memory) {
-  SubtractOrFatal(
+  SubtractOrSaturate(
       stats_.unpinnedResidentBytes,
       memory.size,
       "unpinnedResidentBytes",
@@ -326,9 +345,9 @@ void BufferManagerStatsCollector::OnCleanResidentDiscarded(
   stats_.spilledBytes += memory.size;
 
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.residentBytes, memory.size, "tag.residentBytes", memory);
-  SubtractOrFatal(
+  SubtractOrSaturate(
       tagStats.unpinnedResidentBytes,
       memory.size,
       "tag.unpinnedResidentBytes",
@@ -339,59 +358,59 @@ void BufferManagerStatsCollector::OnCleanResidentDiscarded(
 
 void BufferManagerStatsCollector::OnBlockMemoryDestroy(
     const BlockMemory& memory) noexcept {
-  SubtractOrFatal(stats_.liveBlocks, 1, "liveBlocks", memory);
+  SubtractOrSaturate(stats_.liveBlocks, 1, "liveBlocks", memory);
   auto& tagStats = MutableTagStats(memory.tag);
-  SubtractOrFatal(tagStats.liveBlocks, 1, "tag.liveBlocks", memory);
+  SubtractOrSaturate(tagStats.liveBlocks, 1, "tag.liveBlocks", memory);
 
   switch (memory.state) {
     case BlockMemoryState::kInMemory:
       if (memory.pinCount == 0) {
-        SubtractOrFatal(
+        SubtractOrSaturate(
             stats_.unpinnedResidentBytes,
             memory.size,
             "unpinnedResidentBytes",
             memory);
-        SubtractOrFatal(
+        SubtractOrSaturate(
             tagStats.unpinnedResidentBytes,
             memory.size,
             "tag.unpinnedResidentBytes",
             memory);
       } else {
-        SubtractOrFatal(
+        SubtractOrSaturate(
             stats_.pinnedResidentBytes,
             memory.size,
             "pinnedResidentBytes",
             memory);
-        SubtractOrFatal(
+        SubtractOrSaturate(
             tagStats.pinnedResidentBytes,
             memory.size,
             "tag.pinnedResidentBytes",
             memory);
       }
-      SubtractOrFatal(
+      SubtractOrSaturate(
           tagStats.residentBytes, memory.size, "tag.residentBytes", memory);
       break;
     case BlockMemoryState::kSpilled:
-      SubtractOrFatal(stats_.spilledBytes, memory.size, "spilledBytes", memory);
-      SubtractOrFatal(
+      SubtractOrSaturate(stats_.spilledBytes, memory.size, "spilledBytes", memory);
+      SubtractOrSaturate(
           tagStats.spilledBytes, memory.size, "tag.spilledBytes", memory);
       break;
     case BlockMemoryState::kPrefetching:
-      SubtractOrFatal(stats_.spilledBytes, memory.size, "spilledBytes", memory);
-      SubtractOrFatal(
+      SubtractOrSaturate(stats_.spilledBytes, memory.size, "spilledBytes", memory);
+      SubtractOrSaturate(
           stats_.prefetchingBytes, memory.size, "prefetchingBytes", memory);
-      SubtractOrFatal(
+      SubtractOrSaturate(
           tagStats.spilledBytes, memory.size, "tag.spilledBytes", memory);
-      SubtractOrFatal(
+      SubtractOrSaturate(
           tagStats.prefetchingBytes,
           memory.size,
           "tag.prefetchingBytes",
           memory);
       break;
     case BlockMemoryState::kSpilling:
-      SubtractOrFatal(
+      SubtractOrSaturate(
           stats_.spillingBytes, memory.size, "spillingBytes", memory);
-      SubtractOrFatal(
+      SubtractOrSaturate(
           tagStats.spillingBytes, memory.size, "tag.spillingBytes", memory);
       break;
   }

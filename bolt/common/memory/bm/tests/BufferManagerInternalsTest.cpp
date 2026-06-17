@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -119,6 +120,20 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
   EXPECT_EQ(4096, sort.residentBytes);
   EXPECT_EQ(4096, sort.pinnedResidentBytes);
   EXPECT_EQ(1, sort.pinCount);
+}
+
+TEST_F(BufferManagerInternalsTest, AccountingUnderflowDoesNotFatalInRelease) {
+  BufferManagerStatsCollector accounting;
+  auto memory = makeBlock(4096, MemoryTag::kSort);
+  memory.pinCount = 0;
+
+  EXPECT_EXIT(
+      {
+        accounting.OnResidentPinned(memory);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0),
+      "");
 }
 
 TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
