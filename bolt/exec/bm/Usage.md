@@ -9,7 +9,6 @@
 - `BmRowContainer.h`
 - `BmRowContainerRead.h`
 - `BmRowContainerPublicTypes.h`
-- `BmRowContainerMetrics.h`
 
 内部存储类型在 `BmSegmentTypes.h`，只供 `bm` 内部实现和白盒 UT 使用。
 
@@ -214,7 +213,12 @@ Hash Build：
 
 重构和新增功能需要保持热路径性能稳定。不要为了隐藏实现细节引入 PImpl、虚调用、额外堆分配
 或新的锁到 `appendRow()`、`store()`、`appendBatch()`、resident compare/extract 等热路径。
-公共头可以保留必要的 hot-path detail，但新代码应尽量依赖更窄的公共类型和 metrics 头。
+公共头可以保留必要的 hot-path detail，但新代码应尽量依赖更窄的公共类型头。
+
+`BmRowContainer` 的正式 API 不暴露细粒度 trace metrics。线上问题定位优先使用
+`BufferManagerStats`、`BufferManagerTagStats` 和 IO scheduler stats 这类大范围统计；
+benchmark 可以在容器外层测量端到端阶段耗时，但不要把逐行、逐 block 或 ns 级阶段计数重新
+放回 `appendRow()`、`store()`、`appendBatch()`、bulk read 等热路径。
 
 UT 按行为域拆分：
 
