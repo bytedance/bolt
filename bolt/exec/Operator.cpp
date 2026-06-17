@@ -833,6 +833,25 @@ void Operator::recordGroupingSetStats(const common::AggregationStats& stats) {
         "aggProbeBypassCount",
         RuntimeCounter{(int64_t)stats.aggProbeBypassCount});
   }
+  if (stats.aggJitCodegenTimeNs) {
+    lockedStats->addRuntimeStat(
+        "aggJitCodegenTimeNs",
+        RuntimeCounter{
+            (int64_t)stats.aggJitCodegenTimeNs, RuntimeCounter::Unit::kNanos});
+  }
+  if (stats.aggFunctionJitTimeNs) {
+    lockedStats->addRuntimeStat(
+        "aggFunctionJitTimeNs",
+        RuntimeCounter{
+            (int64_t)stats.aggFunctionJitTimeNs, RuntimeCounter::Unit::kNanos});
+  }
+  if (stats.aggExtractGroupsJitTimeNs) {
+    lockedStats->addRuntimeStat(
+        "aggExtractGroupsJitTimeNs",
+        RuntimeCounter{
+            (int64_t)stats.aggExtractGroupsJitTimeNs,
+            RuntimeCounter::Unit::kNanos});
+  }
 }
 
 void Operator::recordHashBuildSpillStats(

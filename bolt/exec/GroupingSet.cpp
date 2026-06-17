@@ -985,6 +985,7 @@ const SelectivityVector& GroupingSet::getSelectivityVector(
 
 #ifdef ENABLE_BOLT_JIT
 void GroupingSet::maybeCreateHashAggrJitPlan() {
+  NanosecondTimer codegenTimer(&stats_.aggJitCodegenTimeNs);
   hashAggrJitChunks_.clear();
   if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
     LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
@@ -1193,14 +1194,18 @@ void GroupingSet::runHashAggrJitAddChunks(
       for (auto i = 0; i < newGroups.size(); ++i) {
         newGroupPtrs[i] = groups[newGroups[i]];
       }
+      NanosecondTimer jitTimer(&stats_.aggFunctionJitTimeNs);
       chunk.init(newGroupPtrs.data(), newGroups.size());
     }
 
-    chunk.addDense(
-        groups,
-        activeRows_.end(),
-        inputRuntimePtrs.data(),
-        inputsMayHaveNulls);
+    {
+      NanosecondTimer jitTimer(&stats_.aggFunctionJitTimeNs);
+      chunk.addDense(
+          groups,
+          activeRows_.end(),
+          inputRuntimePtrs.data(),
+          inputsMayHaveNulls);
+    }
     for (const auto& slot : chunk.slots()) {
       aggregates_[slot.aggregateIndex].function->markNullCountUnknown();
       jitExecuted[slot.aggregateIndex] = 1;
@@ -1299,7 +1304,10 @@ void GroupingSet::runHashAggrJitExtractChunks(
                 << chunk.getDescription() << " reason=" << skipReason;
       continue;
     }
-    chunk.extract(groups.data(), groups.size(), resultPtrs.data());
+    {
+      NanosecondTimer jitTimer(&stats_.aggExtractGroupsJitTimeNs);
+      chunk.extract(groups.data(), groups.size(), resultPtrs.data());
+    }
     for (const auto& slot : chunk.slots()) {
       jitExtracted[slot.aggregateIndex] = 1;
     }
