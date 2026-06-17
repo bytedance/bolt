@@ -4,8 +4,9 @@
 #include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/exec/bm/BmBatchAppend.h"
-#include "bolt/exec/bm/BmRowContainerTypes.h"
+#include "bolt/exec/bm/BmRowContainerMetrics.h"
 #include "bolt/exec/bm/BmRowLayout.h"
+#include "bolt/exec/bm/BmSegmentTypes.h"
 
 #include <folly/Range.h>
 #include <folly/Portability.h>
@@ -17,65 +18,6 @@
 #include <vector>
 
 namespace bytedance::bolt::exec::bm {
-
-struct BlockRef {
-  // Container-local block id.
-  BlockId id{kNoBlock};
-  // BufferManager block ownership handle.
-  std::shared_ptr<memory::bm::BlockHandle> block;
-  // Pin handle. When empty, ptr must not be dereferenced.
-  memory::bm::BufferHandle handle;
-  // Raw address for the pinned block.
-  char* ptr{nullptr};
-  // Block capacity in bytes.
-  uint32_t size{0};
-  // Bytes already used by this segment.
-  uint32_t used{0};
-};
-
-struct ChunkData {
-  // Logical row range covered by this chunk.
-  DataChunkMeta meta;
-  // Fixed-width rows for this chunk. Current BM RowContainer deliberately keeps
-  // one chunk anchored to one row block; see BmRowContainerTypes.h for the
-  // DuckDB comparison.
-  BlockRef rowBlock;
-  // Variable-width payload blocks referenced by rows in this chunk. Heap blocks
-  // never cross chunk boundaries: cutting a new row block/chunk also cuts heap
-  // reuse, which keeps chunk ownership and window read pinning local.
-  std::vector<BlockRef> heapBlocks;
-  // Heap base addresses encoded in spilled row-block StringViews. Read-only
-  // window reads keep this as backing metadata, so a chunk's row block and heap
-  // blocks must be evicted together.
-  std::vector<HeapBaseRef> heapBases;
-  // Consuming merge reads can drop blocks after this chunk has been read. The
-  // metadata stays in place so rowNumber/chunk indexing is not disturbed, but
-  // the chunk can no longer be pinned or read.
-  bool consumed{false};
-};
-
-struct SegmentWriteCursor {
-  ChunkData* chunk{nullptr};
-  char* nextRow{nullptr};
-  char* rowBlockEnd{nullptr};
-};
-
-struct SegmentData {
-  // Public lifecycle and block/chunk summary.
-  SegmentMeta meta;
-  // Chunk data used by bulk/window read. SegmentData deliberately does not keep
-  // flat rowBlocks/heapBlocks mirrors; ownership lives in ChunkData so the
-  // hierarchy is Segment -> Chunk -> {row block, heap blocks, rebase metadata}.
-  // Keep ChunkData addresses stable because RowWriteContext, read sessions and
-  // block loaders may temporarily hold raw ChunkData* while the chunk list grows.
-  std::vector<std::unique_ptr<ChunkData>> chunks;
-  // Next row number to assign inside this segment.
-  RowNumber nextRowNumber{0};
-  // Active chunk while the segment accepts writes.
-  ChunkId currentChunk{kNoBlock};
-  // Hot append cursor for the active chunk.
-  SegmentWriteCursor writeCursor;
-};
 
 // Owns segment/chunk metadata and all BufferManager block handles for one
 // BmRowContainer. It does not know column semantics beyond row size; typed
@@ -108,6 +50,7 @@ class BmSegmentCollection {
       uint32_t rowBlockSize,
       uint32_t heapBlockSize);
 
+  // Segment lifecycle and partition ownership.
   SegmentId spillActiveSegment(BmSegmentSpillMetrics* metrics = nullptr);
   SegmentId spillActivePartitionSegment(
       PartitionId partition,
@@ -120,6 +63,7 @@ class BmSegmentCollection {
   std::vector<SegmentId> allSegmentIds() const;
   int64_t numRows() const;
 
+  // Segment creation and finalization.
   SegmentData& activeSegment(PartitionId partition);
   SegmentData& createSegment(std::optional<PartitionId> partition);
   SegmentId finalizeAndFlush(
@@ -131,6 +75,7 @@ class BmSegmentCollection {
   SegmentData& segmentData(SegmentId segment);
   const SegmentData& segmentData(SegmentId segment) const;
 
+  // Write allocation.
   FOLLY_ALWAYS_INLINE BlockRef& ensureHeapBlockInChunk(
       ChunkData& chunk,
       uint32_t minBytes) {
@@ -150,8 +95,12 @@ class BmSegmentCollection {
       vector_size_t count,
       std::vector<BatchAppendRange>& ranges,
       std::vector<char*>* rows);
-  void recordHeapForChunk(ChunkData& chunk, const BlockRef& heap, const char* row);
+  void recordHeapForChunk(
+      ChunkData& chunk,
+      const BlockRef& heap,
+      const char* row);
 
+  // Read addressing.
   ChunkData& currentChunk(SegmentData& segment);
   const ChunkData& currentChunk(const SegmentData& segment) const;
   ChunkData& chunkForRow(SegmentData& segment, RowNumber rowNumber);
@@ -170,8 +119,9 @@ class BmSegmentCollection {
       BulkLoadMetrics* metrics = nullptr);
   char* rowPointer(const RowId& id);
   const char* rowPointer(const RowId& id) const;
-  void releaseChunkBlocks(ChunkData& chunk);
 
+  // Release and accounting.
+  void releaseChunkBlocks(ChunkData& chunk);
   uint64_t segmentBytes(const SegmentData& segment) const;
   FOLLY_ALWAYS_INLINE uint32_t rowStride() const {
     return rowStride_;
