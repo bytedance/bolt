@@ -2,7 +2,13 @@ include(GoogleTest)
 
 add_executable(
   bolt_exec_bm_test
-  BmRowContainerTest.cpp
+  BmMergeReadSessionTest.cpp
+  BmPartitionTest.cpp
+  BmRowContainerBatchTest.cpp
+  BmRowContainerReadTest.cpp
+  BmRowContainerResidentTest.cpp
+  BmSegmentCollectionTest.cpp
+  BmTestMain.cpp
 )
 
 target_compile_features(bolt_exec_bm_test PRIVATE cxx_std_20)
