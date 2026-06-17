@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bolt/exec/bm/BmRowContainerTypes.h"
+#include "bolt/exec/bm/BmRowContainerPublicTypes.h"
 
 #include <folly/Portability.h>
 

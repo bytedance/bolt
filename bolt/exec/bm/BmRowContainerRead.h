@@ -1,9 +1,8 @@
 #pragma once
 
-#include "bolt/common/base/CompareFlags.h"
-#include "bolt/common/memory/bm/BufferHandle.h"
-#include "bolt/exec/bm/BmRowContainerTypes.h"
-#include "bolt/vector/FlatVector.h"
+#include "bolt/exec/bm/BmRowContainerMetrics.h"
+#include "bolt/exec/bm/BmRowContainerPublicTypes.h"
+#include "bolt/vector/TypeAliases.h"
 
 #include <folly/Range.h>
 
