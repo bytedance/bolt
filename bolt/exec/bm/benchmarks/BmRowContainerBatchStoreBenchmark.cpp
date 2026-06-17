@@ -183,7 +183,9 @@ std::vector<memory::bm::BufferHandle> preallocateBmBlocks(
   constexpr auto kBlockBytes = static_cast<uint32_t>(4 * 1024 * 1024);
   std::vector<memory::bm::BufferHandle> blocks;
   blocks.reserve((opts.dataBytes + kBlockBytes - 1) / kBlockBytes);
-  auto bytes = rowCount(opts) * static_cast<uint64_t>(opts.stringLength);
+  auto bytes =
+      rowCount(opts) *
+      estimatedStringBytesPerRow(opts.dataset, opts.stringProfiles);
   while (bytes > 0) {
     blocks.push_back(context.bufferManager->Allocate(
         kBlockBytes, memory::bm::MemoryTag::kHashBuild));
@@ -193,12 +195,14 @@ std::vector<memory::bm::BufferHandle> preallocateBmBlocks(
 }
 
 template <bool kUseSimdMemcpy>
-void stringCopyPathBmHeap(uint32_t iterations, uint64_t bytes) {
+void stringCopyPathBmHeap(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
   {
     folly::BenchmarkSuspender suspender;
     if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
-      auto warmup =
-          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      auto warmup = options(dataset, FLAGS_bm_row_container_warmup_data_bytes);
       BenchmarkContext context("warmup-string-copy-bm-heap", warmup.dataBytes);
       auto input = makeReusableInputBatches(context.pool.get(), warmup);
       copyStringsToBmHeap<kUseSimdMemcpy>(context, input, warmup);
@@ -207,7 +211,7 @@ void stringCopyPathBmHeap(uint32_t iterations, uint64_t bytes) {
   }
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes));
     BenchmarkContext context("string-copy-bm-heap", opts.dataBytes);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
     suspender.dismiss();
@@ -217,12 +221,14 @@ void stringCopyPathBmHeap(uint32_t iterations, uint64_t bytes) {
 }
 
 template <bool kUseSimdMemcpy>
-void stringCopyPathBmHeapPreallocated(uint32_t iterations, uint64_t bytes) {
+void stringCopyPathBmHeapPreallocated(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
   {
     folly::BenchmarkSuspender suspender;
     if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
-      auto warmup =
-          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      auto warmup = options(dataset, FLAGS_bm_row_container_warmup_data_bytes);
       BenchmarkContext context(
           "warmup-string-copy-bm-heap-preallocated", warmup.dataBytes);
       auto input = makeReusableInputBatches(context.pool.get(), warmup);
@@ -233,7 +239,7 @@ void stringCopyPathBmHeapPreallocated(uint32_t iterations, uint64_t bytes) {
   }
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes));
     BenchmarkContext context("string-copy-bm-heap-preallocated", opts.dataBytes);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
     auto blocks = preallocateBmBlocks(context, opts);
@@ -243,12 +249,14 @@ void stringCopyPathBmHeapPreallocated(uint32_t iterations, uint64_t bytes) {
   }
 }
 
-void stringCopyPathHashStringAllocator(uint32_t iterations, uint64_t bytes) {
+void strCopyHashAlloc(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
   {
     folly::BenchmarkSuspender suspender;
     if (FLAGS_bm_row_container_warmup_data_bytes != 0) {
-      auto warmup =
-          options(DatasetKind::kVariable, FLAGS_bm_row_container_warmup_data_bytes);
+      auto warmup = options(dataset, FLAGS_bm_row_container_warmup_data_bytes);
       BenchmarkContext context(
           "warmup-string-copy-hash-allocator", warmup.dataBytes);
       auto input = makeReusableInputBatches(context.pool.get(), warmup);
@@ -258,7 +266,7 @@ void stringCopyPathHashStringAllocator(uint32_t iterations, uint64_t bytes) {
   }
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
-    auto opts = options(DatasetKind::kVariable, dataBytes(bytes));
+    auto opts = options(dataset, dataBytes(bytes));
     BenchmarkContext context("string-copy-hash-allocator", opts.dataBytes);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
     suspender.dismiss();
@@ -267,18 +275,25 @@ void stringCopyPathHashStringAllocator(uint32_t iterations, uint64_t bytes) {
   }
 }
 
-void stringCopyPathBmHeapSimd(uint32_t iterations, uint64_t bytes) {
-  stringCopyPathBmHeap<true>(iterations, bytes);
-}
-
-void stringCopyPathBmHeapStd(uint32_t iterations, uint64_t bytes) {
-  stringCopyPathBmHeap<false>(iterations, bytes);
-}
-
-void stringCopyPathBmHeapSimdPreallocated(
+void strCopyBmHeapSimd(
     uint32_t iterations,
+    DatasetKind dataset,
     uint64_t bytes) {
-  stringCopyPathBmHeapPreallocated<true>(iterations, bytes);
+  stringCopyPathBmHeap<true>(iterations, dataset, bytes);
+}
+
+void strCopyBmHeapStd(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
+  stringCopyPathBmHeap<false>(iterations, dataset, bytes);
+}
+
+void strCopyBmHeapSimdPrealloc(
+    uint32_t iterations,
+    DatasetKind dataset,
+    uint64_t bytes) {
+  stringCopyPathBmHeapPreallocated<true>(iterations, dataset, bytes);
 }
 
 BENCHMARK_NAMED_PARAM(storeBatchOld, old_fixed, DatasetKind::kFixed, 0);
@@ -300,20 +315,55 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     0);
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(
-    stringCopyPathBmHeapSimd,
-    bm_heap_simd_variable,
+    storeBatchOld,
+    old_variable_large,
+    DatasetKind::kVariableLarge,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
-    stringCopyPathBmHeapStd,
-    bm_heap_std_variable,
+    storeBatchBm,
+    bm_variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(
+    strCopyBmHeapSimd,
+    variable,
+    DatasetKind::kVariable,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
-    stringCopyPathBmHeapSimdPreallocated,
-    bm_heap_simd_preallocated_variable,
+    strCopyBmHeapStd,
+    variable,
+    DatasetKind::kVariable,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
-    stringCopyPathHashStringAllocator,
-    hash_allocator_variable,
+    strCopyBmHeapSimdPrealloc,
+    variable,
+    DatasetKind::kVariable,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    strCopyHashAlloc,
+    variable,
+    DatasetKind::kVariable,
+    0);
+BENCHMARK_NAMED_PARAM(
+    strCopyBmHeapSimd,
+    variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    strCopyBmHeapStd,
+    variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    strCopyBmHeapSimdPrealloc,
+    variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    strCopyHashAlloc,
+    variable_large,
+    DatasetKind::kVariableLarge,
     0);
 BENCHMARK_DRAW_LINE();
 

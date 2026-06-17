@@ -616,6 +616,42 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     DatasetKind::kVariable,
     SpillCompressionKind::kZstd,
     0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld4Threads,
+    old4_raw_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm4Threads,
+    bm4_raw_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kRaw,
+    0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld4Threads,
+    old4_lz4_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm4Threads,
+    bm4_lz4_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kLz4,
+    0);
+BENCHMARK_NAMED_PARAM(
+    pipelineOld4Threads,
+    old4_zstd_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kZstd,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    pipelineBm4Threads,
+    bm4_zstd_variable_large,
+    DatasetKind::kVariableLarge,
+    SpillCompressionKind::kZstd,
+    0);
 BENCHMARK_DRAW_LINE();
 
 } // namespace

@@ -44,9 +44,14 @@ DEFINE_uint64(
     "Logical input bytes processed by a same-process per-case warm-up before "
     "the measured BM row container benchmark. Set to 0 to disable warm-up.");
 DEFINE_uint32(
-    bm_row_container_string_length,
+    bm_row_container_variable_max_string_length,
+    64,
+    "Maximum string length for regular variable BM row container benchmarks. "
+    "Rows use deterministic lengths in [1, max].");
+DEFINE_uint32(
+    bm_row_container_large_string_length,
     1024,
-    "Fixed string length for variable BM row container benchmarks.");
+    "Fixed string length for large-variable BM row container benchmarks.");
 DEFINE_uint64(
     bm_row_container_spill_write_buffer_bytes,
     4ULL << 20,
@@ -93,10 +98,8 @@ std::string randomString(uint64_t row, uint32_t length) {
 
 uint64_t logicalRowBytes(const BenchmarkOptions& options) {
   uint64_t bytes = sizeof(int64_t) + sizeof(int32_t) + sizeof(double);
-  if (options.dataset == DatasetKind::kVariable) {
-    bytes += options.stringLength;
-  }
-  return bytes;
+  return bytes + estimatedStringBytesPerRow(
+                     options.dataset, options.stringProfiles);
 }
 
 common::CompressionKind oldCompressionKind(SpillCompressionKind compression) {
@@ -207,10 +210,6 @@ uint64_t counterDelta(uint64_t before, uint64_t after) {
   return after >= before ? after - before : 0;
 }
 
-const char* datasetName(DatasetKind dataset) {
-  return dataset == DatasetKind::kFixed ? "fixed" : "variable";
-}
-
 const char* spillCompressionName(SpillCompressionKind compression) {
   switch (compression) {
     case SpillCompressionKind::kRaw:
@@ -307,12 +306,24 @@ BenchmarkOptions options(
     DatasetKind dataset,
     uint64_t dataBytes,
     SpillCompressionKind compression) {
+  BOLT_CHECK_GT(
+      FLAGS_bm_row_container_variable_max_string_length,
+      0,
+      "--bm_row_container_variable_max_string_length must be greater than 0.");
+  BOLT_CHECK_GT(
+      FLAGS_bm_row_container_large_string_length,
+      0,
+      "--bm_row_container_large_string_length must be greater than 0.");
   return BenchmarkOptions{
       .dataset = dataset,
       .dataBytes = dataBytes,
       .batchRows = static_cast<vector_size_t>(
           FLAGS_bm_row_container_batch_rows),
-      .stringLength = FLAGS_bm_row_container_string_length,
+      .stringProfiles =
+          StringProfileOptions{
+              .variableMaxStringLength =
+                  FLAGS_bm_row_container_variable_max_string_length,
+              .largeStringLength = FLAGS_bm_row_container_large_string_length},
       .compression = compression};
 }
 
@@ -349,7 +360,7 @@ void checkOldRowBasedSpillBenchmarkSupported(
 
 std::vector<TypePtr> columnTypes(DatasetKind dataset) {
   std::vector<TypePtr> types{BIGINT(), INTEGER(), DOUBLE()};
-  if (dataset == DatasetKind::kVariable) {
+  if (hasVariableColumn(dataset)) {
     types.push_back(VARCHAR());
   }
   return types;
@@ -357,7 +368,7 @@ std::vector<TypePtr> columnTypes(DatasetKind dataset) {
 
 RowTypePtr rowType(DatasetKind dataset) {
   std::vector<std::string> names{"c0", "c1", "c2"};
-  if (dataset == DatasetKind::kVariable) {
+  if (hasVariableColumn(dataset)) {
     names.push_back("c3");
   }
   return ROW(std::move(names), columnTypes(dataset));
@@ -383,11 +394,15 @@ RowVectorPtr makeInputBatch(
         return static_cast<double>(splitMix64(startRow + row + 31) % 1000000) /
             7.0;
       }));
-  if (options.dataset == DatasetKind::kVariable) {
+  if (hasVariableColumn(options.dataset)) {
     std::vector<std::string> strings;
     strings.reserve(size);
     for (vector_size_t row = 0; row < size; ++row) {
-      strings.push_back(randomString(startRow + row, options.stringLength));
+      const auto logicalRow = startRow + row;
+      strings.push_back(randomString(
+          logicalRow,
+          stringLengthForRow(
+              options.dataset, logicalRow, options.stringProfiles)));
     }
     children.push_back(maker.flatVector<std::string>(strings, VARCHAR()));
   }

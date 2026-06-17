@@ -4,6 +4,7 @@
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/Spill.h"
 #include "bolt/exec/bm/BmRowContainer.h"
+#include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkProfiles.h"
 #include "bolt/vector/ComplexVector.h"
 
 #include <memory>
@@ -11,11 +12,6 @@
 #include <vector>
 
 namespace bytedance::bolt::exec::bm::benchmarks {
-
-enum class DatasetKind {
-  kFixed,
-  kVariable,
-};
 
 enum class SpillCompressionKind {
   kRaw,
@@ -27,7 +23,7 @@ struct BenchmarkOptions {
   DatasetKind dataset{DatasetKind::kFixed};
   uint64_t dataBytes{0};
   vector_size_t batchRows{0};
-  uint32_t stringLength{0};
+  StringProfileOptions stringProfiles;
   SpillCompressionKind compression{SpillCompressionKind::kZstd};
 };
 
@@ -115,8 +111,6 @@ uint64_t benchmarkNowNs();
 double nsToMs(uint64_t ns);
 
 uint64_t counterDelta(uint64_t before, uint64_t after);
-
-const char* datasetName(DatasetKind dataset);
 
 const char* spillCompressionName(SpillCompressionKind compression);
 
