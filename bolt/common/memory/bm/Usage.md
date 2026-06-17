@@ -382,8 +382,18 @@ std::string debug = manager->debugString();
   `writeIoFailures`：错误计数。
 - `evictionQueueSize`、`evictionQueueStaleEntries`：驱逐队列状态。
 
-调试时可以打开 `--v=1 --logtostderr=1` 查看 BM 的 VLOG，包括 `MaybeReserve`、
-`Reclaim`、`SpillBlocks`、spill candidate、reclaimer 回调等路径。
+这些统计用于大范围定位问题，不应作为逐 block、逐 row 的 trace metric 使用。调用方
+如果需要 operator 级观测，应在 operator 生命周期边界读取 `stats()` / `tagStats()`，
+再接入现有 runtime stats；不要在 BM hot path 上新增细粒度打点。
+
+BM 正常流程不打印日志，包括 reserve、reclaim、主动 spill 和 reclaimer 回调。线上
+定位应依赖 `stats()`、`tagStats()`、`debugString()` 的按需采样结果，以及 IO
+scheduler stats。日志只保留异常或可疑事件，例如生命周期 fatal、IO/file 失败和
+观测计数 underflow。
+
+观测计数内部如果出现 underflow，release 模式会通过 `[MEM][BM]` 低频 warning 并
+饱和修正到 0，避免 metric 自身问题影响主流程；debug 模式仍通过 `BOLT_DCHECK`
+暴露问题。
 
 ## 错误处理
 

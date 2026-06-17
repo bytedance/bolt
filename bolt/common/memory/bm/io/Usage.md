@@ -159,7 +159,6 @@ scheduler 内部使用加权调度。一般 BM 读写请求建议使用 `Medium`
 
 ```cpp
 const auto stats = diskIoScheduler().stats();
-LOG(INFO) << stats.toString();
 ```
 
 常用字段：
@@ -174,7 +173,13 @@ LOG(INFO) << stats.toString();
 - `averageSubmitBatchSize`、`averageCompletionBatchSize`。
 - `depthControl`：当前 depth controller 模式和深度相关统计。
 
-如果显式构造 `DiskIoSchedulerImpl` 并打开 `enableStatsLogging`，scheduler 会定期把 stats 打到日志。业务侧使用的 `diskIoScheduler()` facade 采用默认配置。
+`average*` 字段是从累计值和样本数派生出来的快照值。scheduler 的 record 路径只维护
+计数、累计值和 max/min，`stats()` / `toString()` 阶段再计算平均值，避免 IO worker
+hot path 持续做浮点派生计算。
+
+`DiskIoScheduler` 不主动把 stats 打到日志。调用方需要诊断时，应在低频边界按需读取
+`stats()`，再接入上层 runtime stats 或监控系统；不要在每个请求提交、完成或 future
+fulfill 上打印日志。
 
 ## 注意事项
 
