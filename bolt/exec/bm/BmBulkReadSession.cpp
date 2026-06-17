@@ -11,9 +11,9 @@ BulkReadSession::BulkReadSession(
     std::vector<SegmentId> segments)
     : container_(container), segments_(std::move(segments)) {}
 
-std::vector<char*> BulkReadSession::loadRows(BulkLoadMetrics* metrics) {
+std::vector<char*> BulkReadSession::loadRows() {
   BOLT_CHECK_NOT_NULL(container_);
-  return container_->loadAllRows({segments_.data(), segments_.size()}, metrics);
+  return container_->loadAllRows({segments_.data(), segments_.size()});
 }
 
 } // namespace bytedance::bolt::exec::bm

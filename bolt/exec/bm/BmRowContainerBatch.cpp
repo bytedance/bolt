@@ -3,21 +3,12 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
 
-#include <chrono>
-
 namespace bytedance::bolt::exec::bm {
 namespace {
-
-uint64_t batchMetricNowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 struct BatchHeapWriter {
   BmSegmentCollection* segments{nullptr};
   ChunkData* chunk{nullptr};
-  BmBatchAppendMetrics* metrics{nullptr};
   BlockRef* heap{nullptr};
   char* cursor{nullptr};
   char* limit{nullptr};
@@ -32,35 +23,17 @@ struct BatchHeapWriter {
   char* allocate(uint32_t bytes, const char* row) {
     BOLT_DCHECK_NOT_NULL(segments);
     BOLT_DCHECK_NOT_NULL(chunk);
-    if (metrics != nullptr) {
-      ++metrics->stringHeapAllocCalls;
-    }
     if (FOLLY_LIKELY(cursor != nullptr && cursor + bytes <= limit)) {
-      if (metrics != nullptr) {
-        ++metrics->stringFastAllocHits;
-      }
       auto* target = cursor;
       cursor += bytes;
       return target;
     }
 
-    if (metrics != nullptr) {
-      ++metrics->stringSlowAllocHits;
-    }
     flush();
-    const auto previousHeapId = heap == nullptr ? kNoBlock : heap->id;
-    {
-      heap = &segments->ensureHeapBlockInChunk(*chunk, bytes);
-      cursor = heap->ptr + heap->used;
-      limit = heap->ptr + heap->size;
-    }
-    if (metrics != nullptr && previousHeapId != heap->id) {
-      ++metrics->stringHeapBlockSwitches;
-    }
+    heap = &segments->ensureHeapBlockInChunk(*chunk, bytes);
+    cursor = heap->ptr + heap->used;
+    limit = heap->ptr + heap->size;
     if (recordedHeapBlock != heap->id) {
-      if (metrics != nullptr) {
-        ++metrics->stringRecordHeapCalls;
-      }
       segments->recordHeapForChunk(*chunk, *heap, row);
       recordedHeapBlock = heap->id;
     }
@@ -77,7 +50,6 @@ void BmRowContainer::appendBatch(
     const RowVectorPtr& input,
     PartitionId partition,
     std::vector<char*>* rows,
-    BmBatchAppendMetrics* metrics,
     BmBatchStringStoreMode stringStoreMode) {
   BOLT_CHECK_NOT_NULL(input);
   BOLT_CHECK_EQ(input->childrenSize(), types_.size());
@@ -88,48 +60,28 @@ void BmRowContainer::appendBatch(
     return;
   }
 
-  const auto totalStart = metrics == nullptr ? 0 : batchMetricNowNs();
-  if (metrics != nullptr) {
-    ++metrics->batches;
-    metrics->rows += input->size();
-  }
-
   std::vector<BatchAppendRange> ranges;
   ranges.reserve(input->size());
   if (rows != nullptr) {
     rows->reserve(rows->size() + input->size());
   }
   auto& segment = segments_.activeSegment(partition);
-  const auto reserveStart = metrics == nullptr ? 0 : batchMetricNowNs();
   segments_.reserveRowsInBatch(segment, 0, input->size(), ranges, rows);
-  if (metrics != nullptr) {
-    metrics->reserveRowsNs += batchMetricNowNs() - reserveStart;
-  }
 
   SelectivityVector allRows(input->size());
   for (auto column = 0; column < inputRow->childrenSize(); ++column) {
     const auto& child = inputRow->childAt(column);
     BOLT_CHECK_EQ(child->type(), types_[column]);
-    const auto decodeStart = metrics == nullptr ? 0 : batchMetricNowNs();
     DecodedVector decoded(*child, allRows);
-    if (metrics != nullptr) {
-      metrics->decodeNs += batchMetricNowNs() - decodeStart;
-    }
     const auto& plan = layout_.storePlan(column);
     const folly::Range<const BatchAppendRange*> rangeView(
         ranges.data(), ranges.size());
     if (plan.stringKind) {
-      const auto storeStart = metrics == nullptr ? 0 : batchMetricNowNs();
       storeStringColumnBatchRanges(
-          decoded, rangeView, plan, metrics, stringStoreMode);
-      if (metrics != nullptr) {
-        ++metrics->stringColumns;
-        metrics->stringStoreNs += batchMetricNowNs() - storeStart;
-      }
+          decoded, rangeView, plan, stringStoreMode);
       continue;
     }
 
-    const auto storeStart = metrics == nullptr ? 0 : batchMetricNowNs();
     if (plan.nullable) {
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           storeFixedColumnBatchRangesWithNullsTyped,
@@ -145,14 +97,6 @@ void BmRowContainer::appendBatch(
           rangeView,
           plan);
     }
-    if (metrics != nullptr) {
-      ++metrics->fixedColumns;
-      metrics->fixedStoreNs += batchMetricNowNs() - storeStart;
-    }
-  }
-
-  if (metrics != nullptr) {
-    metrics->totalNs += batchMetricNowNs() - totalStart;
   }
 }
 
@@ -227,7 +171,6 @@ void BmRowContainer::storeStringColumnBatchRanges(
     const DecodedVector& decoded,
     folly::Range<const BatchAppendRange*> ranges,
     const ColumnStorePlan& column,
-    BmBatchAppendMetrics* metrics,
     BmBatchStringStoreMode stringStoreMode) {
   BOLT_DCHECK(column.stringKind);
   const auto rowStride = segments_.rowStride();
@@ -236,7 +179,7 @@ void BmRowContainer::storeStringColumnBatchRanges(
       decoded.isIdentityMapping() && !column.nullable ? decoded.data<StringView>()
                                                       : nullptr;
   for (const auto& range : ranges) {
-    BatchHeapWriter writer{&segments_, range.chunk, metrics};
+    BatchHeapWriter writer{&segments_, range.chunk};
     auto* row = range.rowBegin;
     auto source = range.sourceBegin;
     for (vector_size_t i = 0; i < range.rowCount; ++i) {
@@ -259,25 +202,13 @@ void BmRowContainer::storeStringColumnBatchRanges(
       auto* target = reinterpret_cast<StringView*>(row + column.offset);
       const auto value = values == nullptr ? decoded.valueAt<StringView>(source)
                                            : values[source];
-      if (metrics != nullptr) {
-        ++metrics->stringRows;
-      }
       if (value.isInline()) {
-        if (metrics != nullptr) {
-          ++metrics->stringInlineRows;
-        }
         *target = value;
       } else if (
           stringStoreMode ==
           BmBatchStringStoreMode::kReferenceInputStringForBenchmark) {
-        if (metrics != nullptr) {
-          metrics->stringReferencedBytes += value.size();
-        }
         *target = value;
       } else {
-        if (metrics != nullptr) {
-          metrics->stringCopiedBytes += value.size();
-        }
         auto* stringTarget = writer.allocate(value.size(), row);
         simd::memcpy(stringTarget, value.data(), value.size());
         *target = StringView(stringTarget, value.size());

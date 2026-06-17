@@ -72,8 +72,7 @@ void BmSegmentCollection::appendRowIdsForSegment(
 
 void BmSegmentCollection::appendRowPointersForSegment(
     SegmentData& segment,
-    std::vector<char*>& rows,
-    BulkLoadMetrics* metrics) {
+    std::vector<char*>& rows) {
   rows.reserve(rows.size() + segment.meta.numRows);
   for (const auto& chunkPtr : segment.chunks) {
     const auto& chunk = *chunkPtr;
@@ -84,9 +83,6 @@ void BmSegmentCollection::appendRowPointersForSegment(
         segment.meta.id);
     const auto& rowBlock = chunk.rowBlock;
     BOLT_DCHECK_NOT_NULL(rowBlock.ptr);
-    if (metrics != nullptr) {
-      metrics->pointerRows += chunk.meta.rowCount;
-    }
     auto* row = rowBlock.ptr;
     for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
       rows.push_back(row);

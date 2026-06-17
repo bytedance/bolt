@@ -1,6 +1,5 @@
 #pragma once
 
-#include "bolt/exec/bm/BmRowContainerMetrics.h"
 #include "bolt/vector/TypeAliases.h"
 
 #include <cstdint>

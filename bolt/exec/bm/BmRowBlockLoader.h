@@ -23,13 +23,9 @@ class BmRowBlockLoader {
       const BmRowLayout* layout,
       BmSegmentCollection* segments);
 
-  void loadSegments(
-      folly::Range<const SegmentId*> segments,
-      BulkLoadMetrics* metrics = nullptr);
+  void loadSegments(folly::Range<const SegmentId*> segments);
 
-  void loadChunks(
-      folly::Range<ChunkData* const*> chunks,
-      BulkLoadMetrics* metrics = nullptr);
+  void loadChunks(folly::Range<ChunkData* const*> chunks);
 
   void loadChunk(ChunkData& chunk);
 

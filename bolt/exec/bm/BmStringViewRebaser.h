@@ -51,8 +51,7 @@ FOLLY_ALWAYS_INLINE void rebaseSingleRange(
     ChunkData& chunk,
     const BmRowLayout& layout,
     uint32_t rowStride,
-    const HeapRebaseRange& range,
-    BulkLoadMetrics* metrics) {
+    const HeapRebaseRange& range) {
   const auto oldBase = range.oldBase;
   const auto newBase = range.newBase;
   const auto end = range.end;
@@ -71,9 +70,6 @@ FOLLY_ALWAYS_INLINE void rebaseSingleRange(
         *value = StringView(
             reinterpret_cast<const char*>(newBase + oldAddress - oldBase),
             value->size());
-        if (metrics != nullptr) {
-          ++metrics->rebasedStringViews;
-        }
       }
     }
     row += rowStride;
@@ -84,13 +80,12 @@ FOLLY_ALWAYS_INLINE void rebaseMultipleRanges(
     ChunkData& chunk,
     const BmRowLayout& layout,
     uint32_t rowStride,
-    const std::vector<HeapRebaseRange>& ranges,
-    BulkLoadMetrics* metrics) {
+    const std::vector<HeapRebaseRange>& ranges) {
   // Multi-heap chunks are expected when variable-width payloads cross heap
   // block boundaries. Keep the lookup as a linear scan for now: it is
   // cache-friendly for small vectors and avoids per-chunk index construction.
-  // If metrics show large heapBases vectors in real workloads, add a last-hit
-  // cache or sort ranges by oldBase and use upper_bound for interval lookup.
+  // If large heapBases vectors show up in real workloads, add a last-hit cache
+  // or sort ranges by oldBase and use upper_bound for interval lookup.
   auto* row = chunk.rowBlock.ptr;
   for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
     for (const auto& column : layout.stringColumns()) {
@@ -108,9 +103,6 @@ FOLLY_ALWAYS_INLINE void rebaseMultipleRanges(
               reinterpret_cast<const char*>(
                   range.newBase + oldAddress - range.oldBase),
               value->size());
-          if (metrics != nullptr) {
-            ++metrics->rebasedStringViews;
-          }
           break;
         }
       }
@@ -124,8 +116,7 @@ FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
     const BmRowLayout& layout,
     uint32_t rowStride,
     const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases,
-    BulkLoadMetrics* metrics) {
+        heapRebases) {
   auto ranges = collectRebaseRanges(chunk, heapRebases);
   if (ranges.empty()) {
     return;
@@ -133,9 +124,9 @@ FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
 
   BOLT_DCHECK_NOT_NULL(chunk.rowBlock.ptr);
   if (FOLLY_LIKELY(ranges.size() == 1)) {
-    rebaseSingleRange(chunk, layout, rowStride, ranges[0], metrics);
+    rebaseSingleRange(chunk, layout, rowStride, ranges[0]);
   } else {
-    rebaseMultipleRanges(chunk, layout, rowStride, ranges, metrics);
+    rebaseMultipleRanges(chunk, layout, rowStride, ranges);
   }
 }
 
@@ -150,8 +141,7 @@ void rebaseStringViewsInChunk(
     const BmRowLayout& layout,
     uint32_t rowStride,
     const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases,
-    BulkLoadMetrics* metrics) {
+        heapRebases) {
   if (FOLLY_LIKELY(
           layout.stringColumns().empty() || chunk.heapBases.empty())) {
     return;
@@ -160,7 +150,7 @@ void rebaseStringViewsInChunk(
     return;
   }
   detail::rebaseStringViewsInChunkSlow(
-      chunk, layout, rowStride, heapRebases, metrics);
+      chunk, layout, rowStride, heapRebases);
 }
 
 } // namespace bytedance::bolt::exec::bm

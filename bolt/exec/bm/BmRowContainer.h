@@ -5,7 +5,6 @@
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/exec/bm/BmBatchAppend.h"
 #include "bolt/exec/bm/BmRowBlockLoader.h"
-#include "bolt/exec/bm/BmRowContainerMetrics.h"
 #include "bolt/exec/bm/BmRowContainerPublicTypes.h"
 #include "bolt/exec/bm/BmRowContainerRead.h"
 #include "bolt/exec/bm/BmRowWriteContext.h"
@@ -49,7 +48,6 @@ class BmRowContainer {
       const RowVectorPtr& input,
       PartitionId partition = kDefaultPartition,
       std::vector<char*>* rows = nullptr,
-      BmBatchAppendMetrics* metrics = nullptr,
       BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
   FOLLY_ALWAYS_INLINE void store(
@@ -78,10 +76,8 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize = false);
 
-  SegmentId spillActiveSegment(BmSegmentSpillMetrics* metrics = nullptr);
-  SegmentId spillActivePartitionSegment(
-      PartitionId partition,
-      BmSegmentSpillMetrics* metrics = nullptr);
+  SegmentId spillActiveSegment();
+  SegmentId spillActivePartitionSegment(PartitionId partition);
 
   // Materializes resident rows in the supplied order into a new finalized/flushed
   // segment. The returned SegmentId can be scanned through MergeReadSession.
@@ -170,7 +166,6 @@ class BmRowContainer {
       const DecodedVector& decoded,
       folly::Range<const BatchAppendRange*> ranges,
       const ColumnStorePlan& column,
-      BmBatchAppendMetrics* metrics,
       BmBatchStringStoreMode stringStoreMode);
   template <TypeKind Kind>
   void extractColumnTyped(
@@ -179,16 +174,10 @@ class BmRowContainer {
       const ColumnLayout& column,
       const VectorPtr& result,
       bool exactSize) const;
-  void ensureSegmentsLoaded(
-      folly::Range<const SegmentId*> segments,
-      BulkLoadMetrics* metrics = nullptr);
-  void ensureChunksLoaded(
-      folly::Range<ChunkData* const*> chunks,
-      BulkLoadMetrics* metrics = nullptr);
+  void ensureSegmentsLoaded(folly::Range<const SegmentId*> segments);
+  void ensureChunksLoaded(folly::Range<ChunkData* const*> chunks);
   void ensureChunkLoaded(ChunkData& chunk);
-  std::vector<char*> loadAllRows(
-      folly::Range<const SegmentId*> segments,
-      BulkLoadMetrics* metrics = nullptr);
+  std::vector<char*> loadAllRows(folly::Range<const SegmentId*> segments);
   std::vector<RowId> listRowIdsForSegments(
       folly::Range<const SegmentId*> segments) const;
   uint64_t evictReadOnlyLoadedChunks(
