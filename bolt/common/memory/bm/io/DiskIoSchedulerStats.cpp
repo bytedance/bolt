@@ -13,74 +13,118 @@ std::string formatArray(const std::array<uint64_t, kIoPriorityCount>& values) {
   return out.str();
 }
 
+double average(uint64_t total, uint64_t count) {
+  if (count == 0) {
+    return 0;
+  }
+  return static_cast<double>(total) / static_cast<double>(count);
+}
+
 } // namespace
 
+void DiskIoSchedulerStats::deriveMetrics() {
+  averageDeviceLatencyUs =
+      average(cumulativeDeviceLatencyUs, latencySamples);
+  averageQueueWaitUs = average(cumulativeQueueWaitUs, queueWaitSamples);
+  averageEndToEndLatencyUs =
+      average(cumulativeEndToEndLatencyUs, latencySamples);
+  averageSubmitBatchSize =
+      average(submittedRequestsInBatches, submitBatches);
+  averageCompletionBatchSize =
+      average(completedRequestsInBatches, completionBatches);
+  averageBackendReapUs =
+      average(cumulativeBackendReapUs, backendReapCalls);
+  averageBackendSubmitUs =
+      average(cumulativeBackendSubmitUs, backendSubmitCalls);
+  averageWorkerWaitUs = average(cumulativeWorkerWaitUs, workerWaitCalls);
+  averageFutureFulfillUs =
+      average(cumulativeFutureFulfillUs, futureFulfillBatches);
+  averageFutureFulfillBatchSize =
+      average(fulfilledResults, futureFulfillBatches);
+}
+
 std::string DiskIoSchedulerStats::toString() const {
+  auto derived = *this;
+  derived.deriveMetrics();
+  const auto& stats = derived;
+
   std::ostringstream out;
   out << "bm_disk_io_stats"
-      << " queued_requests=" << formatArray(queuedRequests)
-      << " submitted_requests=" << formatArray(submittedRequests)
+      << " queued_requests=" << formatArray(stats.queuedRequests)
+      << " submitted_requests=" << formatArray(stats.submittedRequests)
       << " completed_requests_by_priority="
-      << formatArray(completedRequestsByPriority)
+      << formatArray(stats.completedRequestsByPriority)
       << " completed_bytes_by_priority="
-      << formatArray(completedBytesByPriority)
+      << formatArray(stats.completedBytesByPriority)
       << " successful_requests_by_priority="
-      << formatArray(successfulRequestsByPriority)
+      << formatArray(stats.successfulRequestsByPriority)
       << " failed_requests_by_priority="
-      << formatArray(failedRequestsByPriority)
-      << " inflight_requests=" << inflightRequests
-      << " accepted_requests=" << acceptedRequests
-      << " rejected_requests=" << rejectedRequests
-      << " shutdown_rejected_requests=" << shutdownRejectedRequests
-      << " completed_requests=" << completedRequests
-      << " completed_bytes=" << completedBytes
-      << " successful_requests=" << successfulRequests
-      << " failed_requests=" << failedRequests
-      << " backend_submit_failed_requests=" << backendSubmitFailedRequests
-      << " backend_io_error_requests=" << backendIoErrorRequests
-      << " max_observed_queue_depth=" << maxObservedQueueDepth
-      << " max_observed_inflight_requests=" << maxObservedInflightRequests
-      << " latency_samples=" << latencySamples
-      << " cumulative_device_latency_us=" << cumulativeDeviceLatencyUs
-      << " average_device_latency_us=" << averageDeviceLatencyUs
-      << " min_latency_us=" << minLatencyUs
-      << " max_latency_us=" << maxLatencyUs
-      << " cumulative_queue_wait_us=" << cumulativeQueueWaitUs
-      << " queue_wait_samples=" << queueWaitSamples
-      << " average_queue_wait_us=" << averageQueueWaitUs
-      << " max_queue_wait_us=" << maxQueueWaitUs
-      << " cumulative_end_to_end_latency_us=" << cumulativeEndToEndLatencyUs
-      << " average_end_to_end_latency_us=" << averageEndToEndLatencyUs
-      << " max_end_to_end_latency_us=" << maxEndToEndLatencyUs
-      << " submit_batches=" << submitBatches
-      << " submitted_requests_in_batches=" << submittedRequestsInBatches
-      << " average_submit_batch_size=" << averageSubmitBatchSize
-      << " max_submit_batch_size=" << maxSubmitBatchSize
-      << " completion_batches=" << completionBatches
-      << " completed_requests_in_batches=" << completedRequestsInBatches
-      << " average_completion_batch_size=" << averageCompletionBatchSize
-      << " max_completion_batch_size=" << maxCompletionBatchSize
-      << " backend_reap_calls=" << backendReapCalls
-      << " cumulative_backend_reap_us=" << cumulativeBackendReapUs
-      << " average_backend_reap_us=" << averageBackendReapUs
-      << " max_backend_reap_us=" << maxBackendReapUs
-      << " backend_submit_calls=" << backendSubmitCalls
-      << " cumulative_backend_submit_us=" << cumulativeBackendSubmitUs
-      << " average_backend_submit_us=" << averageBackendSubmitUs
-      << " max_backend_submit_us=" << maxBackendSubmitUs
-      << " worker_wait_calls=" << workerWaitCalls
-      << " cumulative_worker_wait_us=" << cumulativeWorkerWaitUs
-      << " average_worker_wait_us=" << averageWorkerWaitUs
-      << " max_worker_wait_us=" << maxWorkerWaitUs
-      << " future_fulfill_batches=" << futureFulfillBatches
-      << " fulfilled_results=" << fulfilledResults
-      << " cumulative_future_fulfill_us=" << cumulativeFutureFulfillUs
-      << " average_future_fulfill_us=" << averageFutureFulfillUs
-      << " average_future_fulfill_batch_size=" << averageFutureFulfillBatchSize
-      << " max_future_fulfill_us=" << maxFutureFulfillUs
-      << " max_future_fulfill_batch_size=" << maxFutureFulfillBatchSize;
-  if (depthControl != nullptr) {
-    out << depthControl->toString();
+      << formatArray(stats.failedRequestsByPriority)
+      << " inflight_requests=" << stats.inflightRequests
+      << " accepted_requests=" << stats.acceptedRequests
+      << " rejected_requests=" << stats.rejectedRequests
+      << " shutdown_rejected_requests=" << stats.shutdownRejectedRequests
+      << " completed_requests=" << stats.completedRequests
+      << " completed_bytes=" << stats.completedBytes
+      << " successful_requests=" << stats.successfulRequests
+      << " failed_requests=" << stats.failedRequests
+      << " backend_submit_failed_requests="
+      << stats.backendSubmitFailedRequests
+      << " backend_io_error_requests=" << stats.backendIoErrorRequests
+      << " max_observed_queue_depth=" << stats.maxObservedQueueDepth
+      << " max_observed_inflight_requests="
+      << stats.maxObservedInflightRequests
+      << " latency_samples=" << stats.latencySamples
+      << " cumulative_device_latency_us="
+      << stats.cumulativeDeviceLatencyUs
+      << " average_device_latency_us=" << stats.averageDeviceLatencyUs
+      << " min_latency_us=" << stats.minLatencyUs
+      << " max_latency_us=" << stats.maxLatencyUs
+      << " cumulative_queue_wait_us=" << stats.cumulativeQueueWaitUs
+      << " queue_wait_samples=" << stats.queueWaitSamples
+      << " average_queue_wait_us=" << stats.averageQueueWaitUs
+      << " max_queue_wait_us=" << stats.maxQueueWaitUs
+      << " cumulative_end_to_end_latency_us="
+      << stats.cumulativeEndToEndLatencyUs
+      << " average_end_to_end_latency_us="
+      << stats.averageEndToEndLatencyUs
+      << " max_end_to_end_latency_us=" << stats.maxEndToEndLatencyUs
+      << " submit_batches=" << stats.submitBatches
+      << " submitted_requests_in_batches="
+      << stats.submittedRequestsInBatches
+      << " average_submit_batch_size=" << stats.averageSubmitBatchSize
+      << " max_submit_batch_size=" << stats.maxSubmitBatchSize
+      << " completion_batches=" << stats.completionBatches
+      << " completed_requests_in_batches="
+      << stats.completedRequestsInBatches
+      << " average_completion_batch_size="
+      << stats.averageCompletionBatchSize
+      << " max_completion_batch_size=" << stats.maxCompletionBatchSize
+      << " backend_reap_calls=" << stats.backendReapCalls
+      << " cumulative_backend_reap_us=" << stats.cumulativeBackendReapUs
+      << " average_backend_reap_us=" << stats.averageBackendReapUs
+      << " max_backend_reap_us=" << stats.maxBackendReapUs
+      << " backend_submit_calls=" << stats.backendSubmitCalls
+      << " cumulative_backend_submit_us="
+      << stats.cumulativeBackendSubmitUs
+      << " average_backend_submit_us=" << stats.averageBackendSubmitUs
+      << " max_backend_submit_us=" << stats.maxBackendSubmitUs
+      << " worker_wait_calls=" << stats.workerWaitCalls
+      << " cumulative_worker_wait_us=" << stats.cumulativeWorkerWaitUs
+      << " average_worker_wait_us=" << stats.averageWorkerWaitUs
+      << " max_worker_wait_us=" << stats.maxWorkerWaitUs
+      << " future_fulfill_batches=" << stats.futureFulfillBatches
+      << " fulfilled_results=" << stats.fulfilledResults
+      << " cumulative_future_fulfill_us="
+      << stats.cumulativeFutureFulfillUs
+      << " average_future_fulfill_us=" << stats.averageFutureFulfillUs
+      << " average_future_fulfill_batch_size="
+      << stats.averageFutureFulfillBatchSize
+      << " max_future_fulfill_us=" << stats.maxFutureFulfillUs
+      << " max_future_fulfill_batch_size="
+      << stats.maxFutureFulfillBatchSize;
+  if (stats.depthControl != nullptr) {
+    out << stats.depthControl->toString();
   }
   return out.str();
 }
