@@ -8,7 +8,10 @@
 
 - `BmRowContainer.h`
 - `BmRowContainerRead.h`
-- `BmRowContainerTypes.h`
+- `BmRowContainerPublicTypes.h`
+- `BmRowContainerMetrics.h`
+
+内部存储类型在 `BmSegmentTypes.h`，只供 `bm` 内部实现和白盒 UT 使用。
 
 ## 基本模型
 
@@ -17,7 +20,7 @@
 - 写入阶段优先在内存中追加 row。
 - 上层感知内存压力后调用 spill，把当前 active segment 交给 BufferManager 管理。
 - spill 返回 `SegmentId`。后续读回、释放、partition 管理都以 `SegmentId` 为单位。
-- resident 阶段使用 `char*` row 指针；不能全量 resident 时使用 `RowId`，再交给
+- resident 阶段使用 `char*` row 指针；不能全量 resident 时使用 `RowId` 句柄，再交给
   `ReadOnlyWindowReadSession` 批量转成只读 resident 指针。
 
 ## 创建
@@ -110,7 +113,8 @@ Bulk 读不提供局部 eviction 能力；如果需要按窗口释放 working se
 
 ## Window read
 
-如果不能全量加载，先列出 `RowId`，再按算子自己的访问窗口批量加载。
+如果不能全量加载，先列出 `RowId`，再按算子自己的访问窗口批量加载。`RowId` 是
+container 返回给读 session 的定位句柄，调用方不要解析其中字段。
 
 ```cpp
 auto session = rows.beginReadOnlyWindowReadSegments(range);
@@ -201,7 +205,25 @@ Hash Build：
 ## 使用约束
 
 - spill 后不要继续使用旧 row 指针。
-- `RowId` 不建议由算子自行解析，应交回 `ReadOnlyWindowReadSession`。
+- `RowId` 不应由算子自行解析，应交回 `ReadOnlyWindowReadSession`。
 - `compare()`、`compareRows()`、`extractColumnResident()` 都要求 row 指针 resident。
 - `RowWriteContext` 只用于当前 row 的逐列 store。
 - 当前常规快路径覆盖 fixed-width 类型、`VARCHAR` 和 `VARBINARY`；复杂类型不要作为接入假设。
+
+## 开发和测试约定
+
+重构和新增功能需要保持热路径性能稳定。不要为了隐藏实现细节引入 PImpl、虚调用、额外堆分配
+或新的锁到 `appendRow()`、`store()`、`appendBatch()`、resident compare/extract 等热路径。
+公共头可以保留必要的 hot-path detail，但新代码应尽量依赖更窄的公共类型和 metrics 头。
+
+UT 按行为域拆分：
+
+- `BmRowContainerResidentTest.cpp`：resident 写入、比较、提取、nullable 和基础 layout 行为。
+- `BmRowContainerReadTest.cpp`：bulk/window read、window eviction 和 StringView rebase。
+- `BmRowContainerBatchTest.cpp`：`appendBatch()` fixed/string/null/chunk 跨越行为。
+- `BmMergeReadSessionTest.cpp`：reordered segment 和 merge read 行为。
+- `BmSegmentCollectionTest.cpp`：segment/chunk/block 内部存储行为。
+- `BmPartitionTest.cpp`：partition spill 和 partition 边界。
+
+新增 UT 优先放到对应行为域文件；如果新增一个独立行为域，再新增单独测试文件并更新
+`tests/CMakeLists.txt`。
