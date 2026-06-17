@@ -220,6 +220,22 @@ Hash Build：
 benchmark 可以在容器外层测量端到端阶段耗时，但不要把逐行、逐 block 或 ns 级阶段计数重新
 放回 `appendRow()`、`store()`、`appendBatch()`、bulk read 等热路径。
 
+## Benchmark 数据 profile
+
+`bolt/exec/bm/benchmarks` 里的 RowContainer benchmark 使用三个 dataset profile：
+
+- `fixed`：只包含 `BIGINT`、`INTEGER`、`DOUBLE`，不包含变长列。
+- `variable`：包含一个 `VARCHAR` 列，字符串长度按 row id 确定性分布在 `1..64`，
+  平均约 `32B`。可通过 `--bm_row_container_variable_max_string_length=64` 调整上限。
+- `variable_large`：包含一个 `VARCHAR` 列，字符串固定为 `1024B`，用于保留大字符串
+  copy/spill/compress/IO 压力场景。可通过 `--bm_row_container_large_string_length=1024`
+  调整长度。
+
+两个字符串长度 flag 可以在同一次运行中同时传入，但只分别作用于对应 profile：`variable`
+只读取 `variable_max_string_length`，`variable_large` 只读取 `large_string_length`。
+runner 脚本默认枚举并运行 binary 注册的全部 case，因此会同时跑 `fixed`、`variable` 和
+`variable_large`。
+
 UT 按行为域拆分：
 
 - `BmRowContainerResidentTest.cpp`：resident 写入、比较、提取、nullable 和基础 layout 行为。

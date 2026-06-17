@@ -202,6 +202,16 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     bm_variable,
     DatasetKind::kVariable,
     0);
+BENCHMARK_NAMED_PARAM(
+    storeRowOld,
+    old_variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    storeRowBm,
+    bm_variable_large,
+    DatasetKind::kVariableLarge,
+    0);
 BENCHMARK_DRAW_LINE();
 
 } // namespace

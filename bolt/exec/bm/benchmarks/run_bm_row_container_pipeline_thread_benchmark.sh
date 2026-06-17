@@ -36,7 +36,7 @@ Options:
   --output-dir DIR           Directory for stdout.txt and stderr.txt.
                              Default: /data00/home/wangxinshuo.db/bolt/log/bolt-bm-row-container-pipeline-thread-YYYYmmdd-HHMMSS
   --data-bytes BYTES         Per-thread value for --bm_row_container_data_bytes.
-                             Default: 26843545600
+                             Default: 10737418240
   --warmup-data-bytes BYTES  Per-thread value for --bm_row_container_warmup_data_bytes.
                              0 disables same-process per-case warm-up.
                              Default: 134217728
@@ -53,6 +53,9 @@ Options:
   --help                     Print this message.
 
 Any arguments after "--" are passed to the benchmark binary.
+String profile flags can be passed after "--":
+  --bm_row_container_variable_max_string_length=64 affects variable only.
+  --bm_row_container_large_string_length=1024 affects variable_large only.
 Do not pass --bm_regex, --bm_row_container_data_bytes, or
 --bm_row_container_warmup_data_bytes after "--"; use
 --include-regex/--exclude-regex, --data-bytes, and --warmup-data-bytes instead.

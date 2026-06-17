@@ -3,6 +3,7 @@ function(add_bm_row_container_benchmark TARGET)
     ${TARGET}
     BmRowContainerBenchmarkCommon.cpp
     BmRowContainerBenchmarkMain.cpp
+    BmRowContainerBenchmarkProfiles.cpp
     ${ARGN}
   )
 

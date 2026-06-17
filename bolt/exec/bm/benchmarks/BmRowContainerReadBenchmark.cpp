@@ -51,6 +51,16 @@ BENCHMARK_NAMED_PARAM(readOld, old_fixed, DatasetKind::kFixed, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_fixed, DatasetKind::kFixed, 0);
 BENCHMARK_NAMED_PARAM(readOld, old_variable, DatasetKind::kVariable, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_variable, DatasetKind::kVariable, 0);
+BENCHMARK_NAMED_PARAM(
+    readOld,
+    old_variable_large,
+    DatasetKind::kVariableLarge,
+    0);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    readBm,
+    bm_variable_large,
+    DatasetKind::kVariableLarge,
+    0);
 BENCHMARK_DRAW_LINE();
 
 } // namespace
