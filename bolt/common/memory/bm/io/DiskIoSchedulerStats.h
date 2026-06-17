@@ -69,6 +69,7 @@ struct DiskIoSchedulerStats {
   uint64_t maxFutureFulfillBatchSize{0};
   DepthControlStatsPtr depthControl;
 
+  void deriveMetrics();
   std::string toString() const;
 };
 

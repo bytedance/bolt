@@ -32,14 +32,6 @@ TEST(DiskIoSchedulerConfigValidatorTest, validatesOnlySelectedDepthMode) {
   EXPECT_EQ(IoErrorCode::Ok, validateDiskIoSchedulerConfig(config));
 }
 
-TEST(DiskIoSchedulerConfigValidatorTest, rejectsNonPositiveStatsLogInterval) {
-  DiskIoSchedulerConfig config;
-  config.enableStatsLogging = true;
-  config.statsLogInterval = std::chrono::milliseconds(0);
-
-  EXPECT_EQ(IoErrorCode::InvalidRequest, validateDiskIoSchedulerConfig(config));
-}
-
 TEST(DiskIoSchedulerConfigValidatorTest, rejectsInvalidCommonFields) {
   DiskIoSchedulerConfig config;
   EXPECT_EQ(IoErrorCode::Ok, validateDiskIoSchedulerConfig(config));

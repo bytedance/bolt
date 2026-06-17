@@ -66,8 +66,6 @@ class DiskIoSchedulerImpl {
       std::vector<ReadyResult>& readyResults);
   void failQueuedLocked(std::vector<ReadyResult>& readyResults);
   DiskIoSchedulerStats snapshotStatsLocked() const;
-  void logStatsIfDueLocked(std::chrono::steady_clock::time_point now);
-  int computeWaitTimeoutMsLocked(std::chrono::steady_clock::time_point now);
   uint64_t waitForWorkerEvent(int timeoutMs);
   void notifyWorker() const;
 
@@ -83,7 +81,6 @@ class DiskIoSchedulerImpl {
   IoRequestQueue requestQueue_;
   InflightRegistry inflight_;
   DiskIoSchedulerStats stats_;
-  std::chrono::steady_clock::time_point lastStatsLogTime_;
   std::thread worker_;
   std::mutex joinMutex_;
 };
