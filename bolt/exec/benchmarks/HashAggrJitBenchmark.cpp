@@ -332,10 +332,9 @@ class HashAggrJitBenchmark : public VectorTestBase {
     testCase->plan = makePlan(rows, aggregates, planKind);
     testCase->minFuseWidth = minFuseWidth;
     testCase->maxFuseWidth = maxFuseWidth;
-    // Warm up both paths so the benchmark compares steady-state execution and
-    // doesn't charge one-time plan setup / JIT compilation to the first sample.
-    run(testCase->plan, false, minFuseWidth, maxFuseWidth);
-    run(testCase->plan, true, minFuseWidth, maxFuseWidth);
+    // Warm-up intentionally disabled: we want each sample to include one-time
+    // plan setup / JIT compilation so the async/parallel-compile optimization
+    // (first-batch latency) is reflected in the measurement.
     auto* testCasePtr = testCase.get();
     folly::addBenchmark(__FILE__, name + "_nojit", [this, testCasePtr]() {
       run(

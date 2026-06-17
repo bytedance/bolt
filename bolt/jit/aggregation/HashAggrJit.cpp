@@ -1191,7 +1191,7 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
 }
 
 bool HashAggrJitChunk::codegen() {
-  if (addDense_) {
+  if (ready_.load(std::memory_order_acquire)) {
     return true;
   }
   auto* jit = ThrustJITv2::getInstance();
@@ -1231,8 +1231,14 @@ bool HashAggrJitChunk::codegen() {
   addDenseNoNull_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
       module_->getFuncPtr(addNoNullFn));
   extract_ = reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
-  return init_ != nullptr && addDense_ != nullptr &&
-      addDenseNoNull_ != nullptr && extract_ != nullptr;
+  if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr ||
+      extract_ == nullptr) {
+    return false;
+  }
+  // Publish all function pointers before flipping ready_ so the query thread
+  // observing isCodegenReady()==true also sees fully-initialized pointers.
+  ready_.store(true, std::memory_order_release);
+  return true;
 }
 
 } // namespace bytedance::bolt::jit

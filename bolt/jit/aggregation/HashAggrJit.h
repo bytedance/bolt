@@ -3,6 +3,7 @@
 #ifdef ENABLE_BOLT_JIT
 
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -281,7 +282,7 @@ class HashAggrJitChunk {
   bool codegen();
 
   bool isCodegenReady() const {
-    return addDense_ != nullptr;
+    return ready_.load(std::memory_order_acquire);
   }
 
   void init(char** newGroups, int32_t numNewGroups) const {
@@ -322,6 +323,10 @@ class HashAggrJitChunk {
   HashAggrJitAddDenseFunc addDense_{nullptr};
   HashAggrJitAddDenseFunc addDenseNoNull_{nullptr};
   HashAggrJitExtractFunc extract_{nullptr};
+  // Published last by codegen() (release) and read by isCodegenReady()
+  // (acquire). Lets the query thread fall back to non-JIT while background
+  // compilation is still in progress, then switch to JIT once ready.
+  std::atomic<bool> ready_{false};
 };
 
 } // namespace bytedance::bolt::jit

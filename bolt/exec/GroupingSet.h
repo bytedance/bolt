@@ -40,6 +40,7 @@
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/VectorHasher.h"
 #ifdef ENABLE_BOLT_JIT
+#include <folly/futures/Future.h>
 #include "bolt/jit/aggregation/HashAggrJit.h"
 #endif
 #include "bolt/vector/DecodedVector.h"
@@ -288,6 +289,9 @@ class GroupingSet {
 
 #ifdef ENABLE_BOLT_JIT
   void maybeCreateHashAggrJitPlan();
+  // Blocks until all outstanding background JIT compilation tasks finish, so the
+  // chunks they reference can be safely destroyed or replaced.
+  void waitForHashAggrJitCompilation();
   void runHashAggrJitAddChunks(
       char** groups,
       folly::Range<const vector_size_t*> newGroups,
@@ -462,7 +466,15 @@ class GroupingSet {
   std::vector<std::unique_ptr<DistinctAggregations>> distinctAggregations_;
 
 #ifdef ENABLE_BOLT_JIT
-  std::vector<jit::HashAggrJitChunk> hashAggrJitChunks_;
+  // unique_ptr gives each chunk a stable address so background compilation
+  // tasks can safely hold a raw pointer; HashAggrJitChunk is also non-movable
+  // (holds a std::atomic). Chunks start not-ready and flip ready once their
+  // background codegen completes.
+  std::vector<std::unique_ptr<jit::HashAggrJitChunk>> hashAggrJitChunks_;
+  // Outstanding background JIT compilation tasks for hashAggrJitChunks_. Each
+  // future returns the chunk's codegen time in nanoseconds so it can be
+  // aggregated into stats_.aggJitCodegenTimeNs on the query thread.
+  std::vector<folly::Future<uint64_t>> hashAggrJitCompileFutures_;
 #endif
 
   // True if any aggregate accumulator allocates memory outside RowContainer's

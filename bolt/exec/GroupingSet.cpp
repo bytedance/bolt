@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/GroupingSet.h"
+#include <chrono>
 #include <sstream>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SpillConfig.h"
@@ -38,6 +39,7 @@
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/RowToColumnVector.h"
 #ifdef ENABLE_BOLT_JIT
+#include <folly/executors/GlobalExecutor.h>
 #include "bolt/jit/aggregation/HashAggrJit.h"
 #endif
 #include "bolt/type/Type.h"
@@ -342,6 +344,10 @@ GroupingSet::GroupingSet(
 }
 
 GroupingSet::~GroupingSet() {
+#ifdef ENABLE_BOLT_JIT
+  // Ensure no background compilation task still references our chunks.
+  waitForHashAggrJitCompilation();
+#endif
   if (isGlobal_) {
     destroyGlobalAggregations();
   }
@@ -984,8 +990,19 @@ const SelectivityVector& GroupingSet::getSelectivityVector(
 }
 
 #ifdef ENABLE_BOLT_JIT
+void GroupingSet::waitForHashAggrJitCompilation() {
+  for (auto& future : hashAggrJitCompileFutures_) {
+    if (future.valid()) {
+      stats_.aggJitCodegenTimeNs += std::move(future).get();
+    }
+  }
+  hashAggrJitCompileFutures_.clear();
+}
+
 void GroupingSet::maybeCreateHashAggrJitPlan() {
-  NanosecondTimer codegenTimer(&stats_.aggJitCodegenTimeNs);
+  // Wait for any background compilation tasks from a previous plan before
+  // tearing down the chunks they reference.
+  waitForHashAggrJitCompilation();
   hashAggrJitChunks_.clear();
   if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
     LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
@@ -1018,15 +1035,27 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
       currentChunkSlots.clear();
       return;
     }
-    jit::HashAggrJitChunk chunk(std::move(currentChunkSlots));
-    if (chunk.codegen()) {
-      hashAggrJitChunks_.push_back(std::move(chunk));
-      LOG(INFO) << "HashAggrJit formed chunk: "
-                << hashAggrJitChunks_.back().getDescription();
-    } else {
-      LOG(INFO) << "HashAggrJit chunk codegen failed for chunk "
-                << chunk.functionName();
-    }
+    // Register the chunk as not-ready and compile it in the background. The
+    // query thread falls back to the non-JIT path for slots whose chunk is not
+    // yet ready (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks),
+    // then switches to JIT once compilation completes. Submitting all chunks
+    // up front lets the global CPU executor materialize them in parallel.
+    hashAggrJitChunks_.push_back(
+        std::make_unique<jit::HashAggrJitChunk>(std::move(currentChunkSlots)));
+    auto* chunk = hashAggrJitChunks_.back().get();
+    LOG(INFO) << "HashAggrJit formed chunk (compiling in background): "
+              << chunk->getDescription();
+    hashAggrJitCompileFutures_.push_back(
+        folly::via(folly::getGlobalCPUExecutor().get(), [chunk]() -> uint64_t {
+          const auto start = std::chrono::steady_clock::now();
+          if (!chunk->codegen()) {
+            LOG(INFO) << "HashAggrJit chunk codegen failed for chunk "
+                      << chunk->functionName();
+          }
+          return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - start)
+              .count();
+        }));
     currentChunkSlots.clear();
     currentChunkSlots.reserve(maxFuseWidth);
   };
@@ -1103,7 +1132,8 @@ void GroupingSet::runHashAggrJitAddChunks(
   std::vector<VectorPtr> inputVectors;
   std::vector<char*> inputRuntimePtrs;
   std::vector<char*> newGroupPtrs;
-  for (auto& chunk : hashAggrJitChunks_) {
+  for (auto& chunkPtr : hashAggrJitChunks_) {
+    auto& chunk = *chunkPtr;
     if (!chunk.isCodegenReady()) {
       LOG(INFO) << "HashAggrJit chunk is not codegen-ready, skip add: "
                 << chunk.getDescription();
@@ -1233,7 +1263,15 @@ void GroupingSet::runHashAggrJitExtractChunks(
   std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime*>>
       rowOutputChildPtrs;
   std::vector<char*> resultPtrs;
-  for (auto& chunk : hashAggrJitChunks_) {
+  for (auto& chunkPtr : hashAggrJitChunks_) {
+    auto& chunk = *chunkPtr;
+    if (!chunk.isCodegenReady()) {
+      // Background compilation not finished yet; leave these aggregates for the
+      // non-JIT extract path (jitExtracted stays 0 for their slots).
+      LOG(INFO) << "HashAggrJit chunk is not codegen-ready, skip extract: "
+                << chunk.getDescription();
+      continue;
+    }
     const auto numSlots = chunk.slots().size();
     outputRuntimes.assign(numSlots, jit::HashAggrJitOutputRuntime{});
     rowOutputChildren.resize(numSlots);
