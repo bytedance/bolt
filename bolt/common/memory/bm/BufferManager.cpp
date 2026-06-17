@@ -80,41 +80,11 @@ BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
 }
 
 bool BufferManager::MaybeReserve(size_t size) {
-  VLOG(1) << "BM MaybeReserve begin"
-          << " size=" << size << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
-  const auto ok = pool_->maybeReserve(size);
-  VLOG(1) << "BM MaybeReserve end"
-          << " ok=" << ok << " size=" << size
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
-  return ok;
+  return pool_->maybeReserve(size);
 }
 
 void BufferManager::ReleaseUnusedReservation() {
-  VLOG(1) << "BM ReleaseUnusedReservation begin"
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
   pool_->release();
-  VLOG(1) << "BM ReleaseUnusedReservation end"
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
 }
 
 BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
@@ -168,28 +138,8 @@ void BufferManager::Prefetch(
 
 void BufferManager::SpillBlocks(
     std::span<const std::shared_ptr<BlockHandle>> blocks) {
-  VLOG(1) << "BM SpillBlocks begin"
-          << " requested_blocks=" << blocks.size()
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
-
   auto driver = MakeSpillWriteDriver();
-  const auto reclaimed =
-      driver.Spill(0, MakeBlockHandleSpillCandidateProvider(blocks));
-
-  VLOG(1) << "BM SpillBlocks end"
-          << " requested_blocks=" << blocks.size()
-          << " reclaimed_bytes=" << reclaimed
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
+  driver.Spill(0, MakeBlockHandleSpillCandidateProvider(blocks));
 }
 
 bool BufferManager::HasSpillBacking(
@@ -240,42 +190,11 @@ uint64_t BufferManager::DiscardCleanResidentBlocks(
 
 uint64_t BufferManager::Reclaim(uint64_t targetBytes) {
   accounting_->RecordReclaim();
-  VLOG(1) << "BM Reclaim begin"
-          << " target_bytes=" << targetBytes
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
 
   auto driver = MakeSpillWriteDriver();
-  const auto reclaimed = driver.Spill(targetBytes, [this, targetBytes]() {
-    auto memory = evictionQueue_->PopEvictable();
-    if (!memory) {
-      VLOG(1) << "BM Reclaim no evictable block"
-              << " target_bytes=" << targetBytes << " bm=" << debugString();
-      return memory;
-    }
+  const auto reclaimed = driver.Spill(
+      targetBytes, [this]() { return evictionQueue_->PopEvictable(); });
 
-    VLOG(1) << "BM Reclaim spill candidate"
-            << " block_id=" << memory->id << " tag=" << toString(memory->tag)
-            << " size=" << memory->size
-            << " state=" << static_cast<int>(memory->state)
-            << " pin_count=" << memory->pinCount
-            << " sequence=" << memory->evictionSequence
-            << " target_bytes=" << targetBytes;
-    return memory;
-  });
-
-  VLOG(1) << "BM Reclaim end"
-          << " target_bytes=" << targetBytes << " reclaimed_bytes=" << reclaimed
-          << " pool_used=" << pool_->usedBytes()
-          << " pool_current=" << pool_->currentBytes()
-          << " pool_reserved=" << pool_->reservedBytes()
-          << " pool_available_reservation=" << pool_->availableReservation()
-          << " pool_releasable_reservation=" << pool_->releasableReservation()
-          << " bm=" << debugString();
   return reclaimed;
 }
 
