@@ -23,6 +23,13 @@ enum class StorePhase {
   kAppendFull,
 };
 
+struct StorePhaseTimings {
+  uint64_t rows{0};
+  uint64_t appendOnlyNs{0};
+  uint64_t appendFixedNs{0};
+  uint64_t appendFullNs{0};
+};
+
 uint64_t dataBytes(uint64_t bytes) {
   return bytes == 0 ? FLAGS_bm_row_container_data_bytes : bytes;
 }
@@ -150,21 +157,21 @@ void storeRowBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
           printedOpts.dataBytes,
           FLAGS_bm_row_container_store_metric_data_bytes);
     }
-    BmStoreMetrics metrics;
-    metrics.rows = rowCount(metricOpts);
-    metrics.appendOnlyNs =
+    StorePhaseTimings timings;
+    timings.rows = rowCount(metricOpts);
+    timings.appendOnlyNs =
         measureStorePhaseNs(dataset, metricOpts, StorePhase::kAppendOnly);
-    metrics.appendFixedNs =
+    timings.appendFixedNs =
         measureStorePhaseNs(dataset, metricOpts, StorePhase::kAppendFixed);
-    metrics.appendFullNs =
+    timings.appendFullNs =
         measureStorePhaseNs(dataset, metricOpts, StorePhase::kAppendFull);
     const auto fixedExtraNs =
-        metrics.appendFixedNs > metrics.appendOnlyNs
-        ? metrics.appendFixedNs - metrics.appendOnlyNs
+        timings.appendFixedNs > timings.appendOnlyNs
+        ? timings.appendFixedNs - timings.appendOnlyNs
         : 0;
     const auto variableExtraNs =
-        metrics.appendFullNs > metrics.appendFixedNs
-        ? metrics.appendFullNs - metrics.appendFixedNs
+        timings.appendFullNs > timings.appendFixedNs
+        ? timings.appendFullNs - timings.appendFixedNs
         : 0;
     fmt::print(
         stderr,
@@ -178,10 +185,10 @@ void storeRowBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
         iterations,
         printedOpts.dataBytes,
         metricOpts.dataBytes,
-        metrics.rows,
-        nsToMs(metrics.appendOnlyNs),
-        nsToMs(metrics.appendFixedNs),
-        nsToMs(metrics.appendFullNs),
+        timings.rows,
+        nsToMs(timings.appendOnlyNs),
+        nsToMs(timings.appendFixedNs),
+        nsToMs(timings.appendFullNs),
         nsToMs(fixedExtraNs),
         nsToMs(variableExtraNs));
   }

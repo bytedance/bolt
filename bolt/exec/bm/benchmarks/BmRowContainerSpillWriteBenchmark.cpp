@@ -47,7 +47,6 @@ void printBmWriteMetrics(
     const BenchmarkOptions& opts,
     uint64_t storeNs,
     uint64_t flushNs,
-    const BmSegmentSpillMetrics& segmentMetrics,
     const memory::bm::BufferManagerStats& stats) {
   if (!shouldPrintSpillMetrics("spillWriteBm", dataset, opts.compression)) {
     return;
@@ -59,12 +58,7 @@ void printBmWriteMetrics(
       "iterations={} logical_bytes={} rows={} store_setup_ms={:.3f} "
       "flush_ms={:.3f} bm_spill_write_count={} bm_spill_write_bytes={} "
       "bm_spill_physical_write_bytes={} bm_compress_ms={:.3f} "
-      "bm_compressed_blocks={} flush_zero_heap_tail_ms={:.3f} "
-      "flush_collect_blocks_ms={:.3f} "
-      "flush_spill_blocks_ms={:.3f} flush_chunks={} flush_row_blocks={} "
-      "flush_heap_blocks={} flush_total_blocks={} flush_row_block_bytes={} "
-      "flush_heap_block_bytes={} flush_used_row_bytes={} "
-      "flush_used_heap_bytes={} flush_unused_heap_tail_bytes={}\n",
+      "bm_compressed_blocks={}\n",
       spillCompressionName(opts.compression),
       datasetName(dataset),
       iterations,
@@ -76,19 +70,7 @@ void printBmWriteMetrics(
       stats.spillWriteBytes,
       stats.spillPhysicalWriteBytes,
       static_cast<double>(stats.spillCompressionTimeUs) / 1000.0,
-      stats.spillCompressedBlocks,
-      nsToMs(segmentMetrics.zeroHeapTailNs),
-      nsToMs(segmentMetrics.collectBlocksNs),
-      nsToMs(segmentMetrics.spillBlocksNs),
-      segmentMetrics.chunks,
-      segmentMetrics.rowBlocks,
-      segmentMetrics.heapBlocks,
-      segmentMetrics.totalBlocks,
-      segmentMetrics.rowBlockBytes,
-      segmentMetrics.heapBlockBytes,
-      segmentMetrics.usedRowBytes,
-      segmentMetrics.usedHeapBytes,
-      segmentMetrics.unusedHeapTailBytes);
+      stats.spillCompressedBlocks);
 }
 
 void spillWriteOld(
@@ -139,7 +121,6 @@ void spillWriteBm(
   BenchmarkOptions printedOpts;
   uint64_t storeNs = 0;
   uint64_t flushNs = 0;
-  BmSegmentSpillMetrics segmentMetrics;
   memory::bm::BufferManagerStats stats;
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
@@ -153,8 +134,7 @@ void spillWriteBm(
     const auto statsBefore = context.bufferManager->stats();
     suspender.dismiss();
     const auto flushStart = benchmarkNowNs();
-    const auto segment = stored.container->spillActiveSegment(
-        FLAGS_bm_row_container_spill_metrics ? &segmentMetrics : nullptr);
+    const auto segment = stored.container->spillActiveSegment();
     flushNs += benchmarkNowNs() - flushStart;
     folly::doNotOptimizeAway(segment);
     suspender.rehire();
@@ -181,7 +161,6 @@ void spillWriteBm(
       printedOpts,
       storeNs,
       flushNs,
-      segmentMetrics,
       stats);
 }
 

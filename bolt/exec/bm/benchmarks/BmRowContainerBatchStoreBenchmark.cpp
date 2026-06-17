@@ -3,7 +3,6 @@
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/HashStringAllocator.h"
 
-#include <fmt/core.h>
 #include <folly/Benchmark.h>
 #include <gflags/gflags.h>
 
@@ -11,7 +10,6 @@
 
 DECLARE_uint64(bm_row_container_data_bytes);
 DECLARE_uint64(bm_row_container_warmup_data_bytes);
-DECLARE_bool(bm_row_container_store_metrics);
 DEFINE_string(
     bm_row_container_string_store_mode,
     "copy",
@@ -47,10 +45,6 @@ void copyReusableInputStrings(
   }
 }
 
-double nsToPercent(uint64_t ns, uint64_t totalNs) {
-  return totalNs == 0 ? 0 : static_cast<double>(ns) * 100.0 / totalNs;
-}
-
 BmBatchStringStoreMode stringStoreMode() {
   if (FLAGS_bm_row_container_string_store_mode == "copy") {
     return BmBatchStringStoreMode::kCopy;
@@ -61,61 +55,6 @@ BmBatchStringStoreMode stringStoreMode() {
   BOLT_FAIL(
       "Unsupported --bm_row_container_string_store_mode={}",
       FLAGS_bm_row_container_string_store_mode);
-}
-
-const char* stringStoreModeName(BmBatchStringStoreMode mode) {
-  switch (mode) {
-    case BmBatchStringStoreMode::kCopy:
-      return "copy";
-    case BmBatchStringStoreMode::kReferenceInputStringForBenchmark:
-      return "no_copy";
-  }
-  BOLT_UNREACHABLE();
-}
-
-void printStoreBatchMetrics(
-    DatasetKind dataset,
-    BmBatchStringStoreMode stringStoreMode,
-    const BmBatchAppendMetrics& metrics) {
-  if (!FLAGS_bm_row_container_store_metrics) {
-    return;
-  }
-  fmt::print(
-      stderr,
-      "[bm-row-container-store-metrics] benchmark=storeBatchBm dataset={} "
-      "string_store_mode={} rows={} batches={} fixed_columns={} "
-      "string_columns={} total_ms={:.3f} "
-      "reserve_rows_ms={:.3f} reserve_rows_pct={:.2f} decode_ms={:.3f} "
-      "decode_pct={:.2f} fixed_store_ms={:.3f} fixed_store_pct={:.2f} "
-      "string_store_ms={:.3f} string_store_pct={:.2f} string_rows={} "
-      "string_inline_rows={} string_copied_bytes={} string_referenced_bytes={} "
-      "string_heap_alloc_calls={} string_fast_alloc_hits={} "
-      "string_slow_alloc_hits={} string_heap_block_switches={} "
-      "string_record_heap_calls={}\n",
-      datasetName(dataset),
-      stringStoreModeName(stringStoreMode),
-      metrics.rows,
-      metrics.batches,
-      metrics.fixedColumns,
-      metrics.stringColumns,
-      nsToMs(metrics.totalNs),
-      nsToMs(metrics.reserveRowsNs),
-      nsToPercent(metrics.reserveRowsNs, metrics.totalNs),
-      nsToMs(metrics.decodeNs),
-      nsToPercent(metrics.decodeNs, metrics.totalNs),
-      nsToMs(metrics.fixedStoreNs),
-      nsToPercent(metrics.fixedStoreNs, metrics.totalNs),
-      nsToMs(metrics.stringStoreNs),
-      nsToPercent(metrics.stringStoreNs, metrics.totalNs),
-      metrics.stringRows,
-      metrics.stringInlineRows,
-      metrics.stringCopiedBytes,
-      metrics.stringReferencedBytes,
-      metrics.stringHeapAllocCalls,
-      metrics.stringFastAllocHits,
-      metrics.stringSlowAllocHits,
-      metrics.stringHeapBlockSwitches,
-      metrics.stringRecordHeapCalls);
 }
 
 void storeBatchOld(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
@@ -150,18 +89,13 @@ void storeBatchBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
     BenchmarkContext context("store-batch-bm", opts.dataBytes);
     auto container = makeBmRowContainer(dataset, context.bufferManager);
     auto input = makeReusableInputBatches(context.pool.get(), opts);
-    BmBatchAppendMetrics metrics;
-    auto* metricsPtr = FLAGS_bm_row_container_store_metrics ? &metrics : nullptr;
     const auto mode = stringStoreMode();
     suspender.dismiss();
 
     storeReusableInputBatchesBmBatch(
-        *container, input, opts, nullptr, metricsPtr, mode);
+        *container, input, opts, nullptr, mode);
     folly::doNotOptimizeAway(container->numRows());
     suspender.rehire();
-    if (metricsPtr != nullptr) {
-      printStoreBatchMetrics(dataset, mode, metrics);
-    }
   }
 }
 

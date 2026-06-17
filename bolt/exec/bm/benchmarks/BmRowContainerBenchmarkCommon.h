@@ -96,7 +96,6 @@ struct BmSpillReadMetrics {
   uint64_t rowIds{0};
   uint64_t windows{0};
   bool resultPointers{false};
-  BulkLoadMetrics bulkLoad;
   memory::bm::BufferManagerStats statsDelta;
   memory::bm::DiskIoSchedulerStats ioStatsDelta;
 };
@@ -158,7 +157,6 @@ void storeInputBatchBmBatch(
     BmRowContainer& container,
     const RowVectorPtr& batch,
     std::vector<char*>* rows = nullptr,
-    BmBatchAppendMetrics* metrics = nullptr,
     BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
 void storeReusableInputBatchesOld(
@@ -183,7 +181,6 @@ void storeReusableInputBatchesBmBatch(
     const ReusableInputBatches& input,
     const BenchmarkOptions& options,
     std::vector<char*>* rows = nullptr,
-    BmBatchAppendMetrics* metrics = nullptr,
     BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
 std::unique_ptr<RowContainer> makeOldRowContainer(
