@@ -570,10 +570,19 @@ inline BufferPtr AlignedBuffer::allocate<bool>(
     size_t numElements,
     bolt::memory::MemoryPool* pool,
     const std::optional<bool>& initValue) {
-  return allocate<char>(
-      bits::nbytes(numElements),
-      pool,
-      initValue ? std::optional<char>(*initValue ? -1 : 0) : std::nullopt);
+  std::optional<char> byteInit;
+  if (initValue.has_value()) {
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+    const bool v = initValue.value();
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+    byteInit = v ? static_cast<char>(-1) : static_cast<char>(0);
+  }
+  return allocate<char>(bits::nbytes(numElements), pool, byteInit);
 }
 
 template <>
