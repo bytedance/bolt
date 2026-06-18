@@ -35,6 +35,8 @@
 
 namespace bytedance::bolt::functions::sparksql::test {
 
+using bytedance::bolt::test::assertEqualVectors;
+
 class SequenceTest : public SparkFunctionBaseTest {};
 
 TEST_F(SequenceTest, ascending) {
