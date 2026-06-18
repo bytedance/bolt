@@ -49,8 +49,8 @@ void readBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
 
 BENCHMARK_NAMED_PARAM(readOld, old_fixed, DatasetKind::kFixed, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_NAMED_PARAM(readOld, old_variable, DatasetKind::kVariable, 0);
-BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_variable, DatasetKind::kVariable, 0);
+BENCHMARK_NAMED_PARAM(readOld, old_variable_small, DatasetKind::kVariableSmall, 0);
+BENCHMARK_RELATIVE_NAMED_PARAM(readBm, bm_variable_small, DatasetKind::kVariableSmall, 0);
 BENCHMARK_NAMED_PARAM(
     readOld,
     old_variable_large,

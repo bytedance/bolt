@@ -305,13 +305,13 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(
     storeBatchOld,
-    old_variable,
-    DatasetKind::kVariable,
+    old_variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     storeBatchBm,
-    bm_variable,
-    DatasetKind::kVariable,
+    bm_variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(
@@ -327,23 +327,23 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(
     strCopyBmHeapSimd,
-    variable,
-    DatasetKind::kVariable,
+    variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     strCopyBmHeapStd,
-    variable,
-    DatasetKind::kVariable,
+    variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     strCopyBmHeapSimdPrealloc,
-    variable,
-    DatasetKind::kVariable,
+    variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     strCopyHashAlloc,
-    variable,
-    DatasetKind::kVariable,
+    variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_NAMED_PARAM(
     strCopyBmHeapSimd,

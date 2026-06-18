@@ -18,8 +18,8 @@ const char* datasetName(DatasetKind dataset) {
   switch (dataset) {
     case DatasetKind::kFixed:
       return "fixed";
-    case DatasetKind::kVariable:
-      return "variable";
+    case DatasetKind::kVariableSmall:
+      return "variable_small";
     case DatasetKind::kVariableLarge:
       return "variable_large";
   }
@@ -33,7 +33,7 @@ uint32_t stringLengthForRow(
   switch (dataset) {
     case DatasetKind::kFixed:
       return 0;
-    case DatasetKind::kVariable: {
+    case DatasetKind::kVariableSmall: {
       const auto maxLength = requirePositive(
           options.variableMaxStringLength, "variableMaxStringLength");
       return 1 + static_cast<uint32_t>(row % maxLength);
@@ -50,7 +50,7 @@ uint64_t estimatedStringBytesPerRow(
   switch (dataset) {
     case DatasetKind::kFixed:
       return 0;
-    case DatasetKind::kVariable: {
+    case DatasetKind::kVariableSmall: {
       const auto maxLength = requirePositive(
           options.variableMaxStringLength, "variableMaxStringLength");
       return (static_cast<uint64_t>(maxLength) + 2) / 2;

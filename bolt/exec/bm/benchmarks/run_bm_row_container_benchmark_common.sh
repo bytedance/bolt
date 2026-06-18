@@ -38,9 +38,9 @@ case_to_bm_regex() {
   # This Folly benchmark build uses boost::regex_search for --bm_regex, but
   # anchored literal patterns with escaped parentheses do not match names like
   # readBm(bm_fixed). Replace the parentheses with single-character wildcards
-  # and keep the rest literal-ish; current row-container case names are unique
-  # under this pattern.
-  sed -e 's/[][{}.^$*+?|\\]/\\&/g' -e 's/[()]/./g'
+  # and keep the rest literal-ish. Add anchors because regex_search otherwise
+  # treats prefix case names as matches for longer cases.
+  sed -e 's/[][{}.^$*+?|\\]/\\&/g' -e 's/[()]/./g' -e 's/^/^/' -e 's/$/$/'
 }
 
 benchmark_case_name() {

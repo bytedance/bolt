@@ -7,13 +7,13 @@ namespace {
 
 TEST(BmRowContainerBenchmarkProfileTest, DatasetNamesDescribeProfiles) {
   EXPECT_STREQ("fixed", datasetName(DatasetKind::kFixed));
-  EXPECT_STREQ("variable", datasetName(DatasetKind::kVariable));
+  EXPECT_STREQ("variable_small", datasetName(DatasetKind::kVariableSmall));
   EXPECT_STREQ("variable_large", datasetName(DatasetKind::kVariableLarge));
 }
 
 TEST(BmRowContainerBenchmarkProfileTest, VariableColumnPresence) {
   EXPECT_FALSE(hasVariableColumn(DatasetKind::kFixed));
-  EXPECT_TRUE(hasVariableColumn(DatasetKind::kVariable));
+  EXPECT_TRUE(hasVariableColumn(DatasetKind::kVariableSmall));
   EXPECT_TRUE(hasVariableColumn(DatasetKind::kVariableLarge));
 }
 
@@ -24,14 +24,16 @@ TEST(BmRowContainerBenchmarkProfileTest, VariableProfileCoversOneToMax) {
   uint64_t sum = 0;
   for (uint64_t row = 0; row < 64; ++row) {
     const auto length = stringLengthForRow(
-        DatasetKind::kVariable, row, options);
+        DatasetKind::kVariableSmall, row, options);
     EXPECT_GE(length, 1);
     EXPECT_LE(length, 64);
     sum += length;
   }
 
   EXPECT_EQ(2080, sum);
-  EXPECT_EQ(33, estimatedStringBytesPerRow(DatasetKind::kVariable, options));
+  EXPECT_EQ(
+      33,
+      estimatedStringBytesPerRow(DatasetKind::kVariableSmall, options));
 }
 
 TEST(BmRowContainerBenchmarkProfileTest, VariableLargeProfileUsesFixedLength) {
