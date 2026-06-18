@@ -53,7 +53,7 @@ void HashJoinBridge::addBuilder() {
 }
 
 bool HashJoinBridge::setHashTable(
-    std::unique_ptr<BaseHashTable> table,
+    std::shared_ptr<BaseHashTable> table,
     SpillPartitionSet spillPartitionSet,
     bool hasNullKeys,
     SpillOffsetToBitsSet offsetToJoinBits) {
@@ -95,24 +95,6 @@ bool HashJoinBridge::setHashTable(
   }
   notify(std::move(promises));
   return hasSpillData;
-}
-
-void HashJoinBridge::setHashTable(
-    std::shared_ptr<BaseHashTable> table,
-    bool hasNullKeys) {
-  BOLT_CHECK_NOT_NULL(table, "setHashTable called with null table");
-
-  std::vector<ContinuePromise> promises;
-  {
-    std::lock_guard<std::mutex> l(mutex_);
-    BOLT_CHECK(started_);
-    BOLT_CHECK(!buildResult_.has_value());
-    BOLT_CHECK(restoringSpillShards_.empty());
-
-    buildResult_ = HashBuildResult(std::move(table), hasNullKeys);
-    promises = std::move(promises_);
-  }
-  notify(std::move(promises));
 }
 
 void HashJoinBridge::setAntiJoinHasNullKeys() {

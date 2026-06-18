@@ -97,9 +97,6 @@ class HashBuild final : public Operator {
   }
 
   bool needsInput() const override {
-    if (reusedHashTableAddress_ != nullptr) {
-      return false;
-    }
     return !noMoreInput_;
   }
 
@@ -141,6 +138,10 @@ class HashBuild final : public Operator {
 
   // Invoked to set up hash table to build.
   void setupTable();
+
+  // Reuse the pre-built hash table.
+  void setReusableHashTable(
+      std::shared_ptr<core::OpaqueHashTable> opaqueHashTable);
 
   // Invoked when operator has finished processing the build input and wait for
   // all the other drivers to finish the processing. The last driver that
@@ -469,7 +470,7 @@ class HashBuild final : public Operator {
   int driverId_;
   std::unique_ptr<HybridContainer> hybridData_;
 
-  void* reusedHashTableAddress_;
+  bool reuseHashTable_ = false;
 };
 
 inline std::ostream& operator<<(std::ostream& os, HashBuild::State state) {

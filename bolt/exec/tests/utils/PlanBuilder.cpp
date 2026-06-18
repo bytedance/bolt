@@ -1449,8 +1449,7 @@ PlanBuilder& PlanBuilder::hashJoin(
     const std::string& filter,
     const std::vector<std::string>& outputLayout,
     core::JoinType joinType,
-    bool nullAware,
-    void* reusedHashTableAddress) {
+    bool nullAware) {
   BOLT_CHECK_NOT_NULL(planNode_, "HashJoin cannot be the source node");
   BOLT_CHECK_EQ(leftKeys.size(), rightKeys.size());
 
@@ -1491,8 +1490,7 @@ PlanBuilder& PlanBuilder::hashJoin(
       std::move(filterExpr),
       std::move(planNode_),
       build,
-      outputType,
-      reusedHashTableAddress);
+      outputType);
   return *this;
 }
 

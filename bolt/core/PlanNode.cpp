@@ -1115,10 +1115,6 @@ void HashJoinNode::addDetails(std::stringstream& stream) const {
 }
 
 folly::dynamic HashJoinNode::serialize() const {
-  BOLT_CHECK(
-      reusedHashTableAddress_ == nullptr,
-      "HashJoinNode with reusedHashTableAddress_ cannot be serialized "
-      "across processes or machines");
   auto obj = serializeBase();
   obj["nullAware"] = nullAware_;
   return obj;

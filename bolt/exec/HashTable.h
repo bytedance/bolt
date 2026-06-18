@@ -31,8 +31,6 @@
 #pragma once
 
 #include <vector/TypeAliases.h>
-#include <thread>
-
 #include "bolt/common/base/Portability.h"
 #include "bolt/exec/OneWayStatusFlag.h"
 #include "bolt/exec/RowContainer.h"
@@ -331,12 +329,6 @@ class BaseHashTable {
   /// side. This is used for sizing the internal hash table.
   virtual uint64_t numDistinct() const = 0;
 
-  virtual bool reused() const = 0;
-
-  virtual bool joinHasNullKeys() const = 0;
-
-  virtual void setJoinHasNullKeys() = 0;
-
   virtual float getDistinctRatio() const = 0;
 
   /// Return a number of current stats that can help with debugging and
@@ -559,8 +551,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
-      bool hybridMode = false,
-      bool reused = false);
+      bool hybridMode = false);
 
   HashTable(
       std::vector<std::unique_ptr<VectorHasher>>&& hashers,
@@ -574,8 +565,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
-      bool hybridMode = false,
-      bool reused = false);
+      bool hybridMode = false);
 
   ~HashTable() override = default;
 
@@ -607,8 +597,7 @@ class HashTable : public BaseHashTable {
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
       bool jitRowEqVectors,
-      bool hybridMode = false,
-      bool reused = false) {
+      bool hybridMode = false) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
@@ -621,8 +610,7 @@ class HashTable : public BaseHashTable {
         pool,
         nullptr,
         jitRowEqVectors,
-        hybridMode,
-        reused);
+        hybridMode);
   }
 
   void groupProbe(HashLookup& lookup) override;
@@ -691,18 +679,6 @@ class HashTable : public BaseHashTable {
 
   uint64_t numDistinct() const override {
     return numDistinct_;
-  }
-
-  bool reused() const override {
-    return reused_;
-  }
-
-  bool joinHasNullKeys() const override {
-    return joinHasNullKeys_;
-  }
-
-  void setJoinHasNullKeys() override {
-    joinHasNullKeys_ = true;
   }
 
   float getDistinctRatio() const override {
@@ -1195,17 +1171,8 @@ class HashTable : public BaseHashTable {
 #ifdef ENABLE_BOLT_JIT
   bolt::jit::CompiledModuleSP jitModule_;
   bolt::jit::CompiledModuleSP jitModuleRow_;
+
 #endif
-
-  std::mutex mutex_;
-
-  bool prepared_{false};
-
-  bool reused_{false};
-
-  // True if this is a build side of an anti or left semi project join and has
-  // at least one entry with null join keys.
-  std::atomic<bool> joinHasNullKeys_{false};
 };
 
 } // namespace exec

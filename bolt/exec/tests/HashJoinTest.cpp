@@ -32,6 +32,7 @@
 #include <re2/re2.h>
 
 #include <fmt/format.h>
+#include "Type.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
@@ -8396,100 +8397,6 @@ TEST_F(HashJoinTest, duplicateLazyNotLoadedProbeVector) {
       .run();
 }
 
-TEST_F(HashJoinTest, reuseHashTable) {
-  auto probe = makeRowVector(
-      {"t0"},
-      {
-          makeNullableFlatVector<int64_t>({1, std::nullopt, 2}),
-      });
-  auto build = makeRowVector(
-      {"u0"},
-      {
-          makeNullableFlatVector<int64_t>({1, 2, 3, std::nullopt}),
-      });
-  std::shared_ptr<TempFilePath> probeFile = TempFilePath::create();
-  writeToFile(probeFile->getPath(), {probe});
-
-  std::shared_ptr<TempFilePath> buildFile = TempFilePath::create();
-  writeToFile(buildFile->getPath(), {build});
-
-  createDuckDbTable("t", {probe});
-  createDuckDbTable("u", {build});
-
-  // Build the HashTable for build side data
-  std::vector<std::unique_ptr<VectorHasher>> hashers;
-  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
-
-  auto table = HashTable<false>::createForJoin(
-      std::move(hashers),
-      {}, /*dependentTypes*/
-      true /*allowDuplicates*/,
-      true /*hasProbedFlag*/,
-      BaseHashTable::HashMode::kArray,
-      1 /*minTableSizeForParallelJoinBuild*/,
-      pool(),
-      false /*jitRowEqVectors*/);
-
-  auto rowContainer = table->rows();
-  std::vector<DecodedVector> decodedVectors;
-  for (auto& vector : build->children()) {
-    decodedVectors.emplace_back(*vector);
-  }
-
-  for (auto i = 0; i < build->size(); ++i) {
-    auto* row = rowContainer->newRow();
-
-    for (auto j = 0; j < decodedVectors.size(); ++j) {
-      rowContainer->store(decodedVectors[j], i, row, j);
-    }
-  }
-
-  table->prepareJoinTable(
-      {}, nullptr, false, BaseHashTable::kNoSpillInputStartPartitionBit);
-  if (build->childAt(0)->mayHaveNulls()) {
-    for (auto i = 0; i < build->size(); ++i) {
-      if (build->childAt(0)->isNullAt(i)) {
-        table->setJoinHasNullKeys();
-        break;
-      }
-    }
-  }
-
-  core::PlanNodeId probeScanId;
-  core::PlanNodeId buildScanId;
-  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  auto plan = PlanBuilder(planNodeIdGenerator)
-                  .tableScan(asRowType(probe->type()))
-                  .capturePlanNodeId(probeScanId)
-                  .hashJoin(
-                      {"t0"},
-                      {"u0"},
-                      PlanBuilder(planNodeIdGenerator)
-                          .tableScan(asRowType(build->type()))
-                          .capturePlanNodeId(buildScanId)
-                          .planNode(),
-                      "",
-                      {"u0", "match"},
-                      core::JoinType::kRightSemiProject,
-                      true /*nullAware*/,
-                      table.get())
-                  .planNode();
-
-  SplitInput splitInput = {
-      {probeScanId,
-       {exec::Split(makeHiveConnectorSplit(probeFile->getPath()))}},
-      {buildScanId,
-       {exec::Split(makeHiveConnectorSplit(buildFile->getPath()))}},
-  };
-
-  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
-      .planNode(plan)
-      .inputSplits(splitInput)
-      .checkSpillStats(false)
-      .referenceQuery("SELECT u0, u0 IN (SELECT t0 FROM t) FROM u")
-      .run();
-}
-
 /// a lazy vector can't be wrapped twice, such as when filtering and get output
 TEST_F(HashJoinTest, wrapLazyVectorInFilterAndOutput) {
   // VectorMaker vectorMaker{pool_};
@@ -8555,6 +8462,111 @@ TEST_F(HashJoinTest, wrapLazyVectorInFilterAndOutput) {
           "SELECT t.c0, t.c1, t.c2, u.u_c1 FROM t inner join u on t.c0 = u.u_c0 and t.c1 < u.u_c1 + 1")
       .injectSpill(false)
       .run();
+}
+
+TEST_F(HashJoinTest, reuseHashTable) {
+  // Create build and probe vectors.
+  std::vector<RowVectorPtr> buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeFlatVector<int64_t>(100, [](auto row) { return row % 23; }),
+        });
+  });
+
+  std::vector<RowVectorPtr> probeVectors = makeBatches(5, [&](int32_t) {
+    return makeRowVector(
+        {"t_0"},
+        {
+            makeFlatVector<int64_t>(100, [](auto row) { return row % 23; }),
+        });
+  });
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+
+  auto outputType = ROW({"t_0", "u_0"}, {BIGINT(), BIGINT()});
+
+  // Build the HashTable for build side data
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+
+  std::shared_ptr<bytedance::bolt::exec::BaseHashTable> table =
+      HashTable<false>::createForJoin(
+          std::move(hashers),
+          {}, /*dependentTypes*/
+          true /*allowDuplicates*/,
+          true /*hasProbedFlag*/,
+          BaseHashTable::HashMode::kArray,
+          1 /*minTableSizeForParallelJoinBuild*/,
+          pool(),
+          true);
+
+  auto rowContainer = table->rows();
+  auto nextOffset = rowContainer->nextOffset();
+  uint32_t numColumns = buildVectors[0]->childrenSize();
+  std::vector<DecodedVector> decodedVectors;
+  decodedVectors.reserve(numColumns);
+  for (const auto& rowVector : buildVectors) {
+    if (!rowVector || rowVector->size() == 0)
+      continue;
+
+    decodedVectors.clear();
+    SelectivityVector rows(rowVector->size());
+    for (auto& child : rowVector->children()) {
+      decodedVectors.emplace_back(*child, rows);
+    }
+
+    for (auto i = 0; i < rowVector->size(); ++i) {
+      auto* row = rowContainer->newRow();
+      if (nextOffset) {
+        *reinterpret_cast<char**>(row + nextOffset) = nullptr;
+      }
+      for (auto j = 0; j < numColumns; ++j) {
+        rowContainer->store(decodedVectors[j], i, row, j);
+      }
+    }
+  }
+
+  table->prepareJoinTable(
+      {}, nullptr, false, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto node = PlanBuilder(planNodeIdGenerator, pool_.get())
+                  .values(probeVectors)
+                  .hashJoin(
+                      {"t_0"},
+                      {"u_0"},
+                      PlanBuilder(planNodeIdGenerator, pool_.get())
+                          .values(buildVectors)
+                          .planNode(),
+                      "",
+                      {"t_0", "u_0"},
+                      core::JoinType::kInner)
+                  .planNode();
+  auto joinNode = std::dynamic_pointer_cast<const core::HashJoinNode>(node);
+  joinNode->setReusableHashTable(opaqueSharedHashTable);
+
+#ifndef NDEBUG
+  std::atomic_bool reusedHashTable{false};
+  // NOTE: TestValue hooks are compiled out in release (NDEBUG) builds.
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::HashBuild",
+      std::function<void(HashBuild*)>(
+          [&](HashBuild* /*build*/) { reusedHashTable.store(true); }));
+#endif
+
+  auto task =
+      AssertQueryBuilder(joinNode, duckDbQueryRunner_)
+          .maxDrivers(1)
+          .assertResults("SELECT t.t_0, u.u_0 FROM t, u WHERE t.t_0 = u.u_0");
+#ifndef NDEBUG
+  ASSERT_TRUE(reusedHashTable.load());
+#endif
 }
 
 } // namespace
