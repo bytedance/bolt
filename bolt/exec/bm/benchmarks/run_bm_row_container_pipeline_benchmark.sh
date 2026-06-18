@@ -54,7 +54,7 @@ Options:
 
 Any arguments after "--" are passed to the benchmark binary.
 String profile flags can be passed after "--":
-  --bm_row_container_variable_max_string_length=64 affects variable only.
+  --bm_row_container_variable_max_string_length=64 affects variable_small only.
   --bm_row_container_large_string_length=1024 affects variable_large only.
 Do not pass --bm_regex, --bm_row_container_data_bytes, or
 --bm_row_container_warmup_data_bytes after "--"; use

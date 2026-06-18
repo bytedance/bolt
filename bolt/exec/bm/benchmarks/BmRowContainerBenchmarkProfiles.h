@@ -8,7 +8,7 @@ namespace bytedance::bolt::exec::bm::benchmarks {
 
 enum class DatasetKind {
   kFixed,
-  kVariable,
+  kVariableSmall,
   kVariableLarge,
 };
 

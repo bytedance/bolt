@@ -362,38 +362,38 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     0);
 BENCHMARK_NAMED_PARAM(
     spillReadOld,
-    old_raw_variable,
-    DatasetKind::kVariable,
+    old_raw_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kRaw,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     spillReadBm,
-    bm_raw_variable,
-    DatasetKind::kVariable,
+    bm_raw_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kRaw,
     0);
 BENCHMARK_NAMED_PARAM(
     spillReadOld,
-    old_lz4_variable,
-    DatasetKind::kVariable,
+    old_lz4_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kLz4,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     spillReadBm,
-    bm_lz4_variable,
-    DatasetKind::kVariable,
+    bm_lz4_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kLz4,
     0);
 BENCHMARK_NAMED_PARAM(
     spillReadOld,
-    old_zstd_variable,
-    DatasetKind::kVariable,
+    old_zstd_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kZstd,
     0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     spillReadBm,
-    bm_zstd_variable,
-    DatasetKind::kVariable,
+    bm_zstd_variable_small,
+    DatasetKind::kVariableSmall,
     SpillCompressionKind::kZstd,
     0);
 BENCHMARK_NAMED_PARAM(

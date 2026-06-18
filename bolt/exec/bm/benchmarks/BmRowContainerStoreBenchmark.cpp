@@ -196,11 +196,11 @@ void storeRowBm(uint32_t iterations, DatasetKind dataset, uint64_t bytes) {
 
 BENCHMARK_NAMED_PARAM(storeRowOld, old_fixed, DatasetKind::kFixed, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(storeRowBm, bm_fixed, DatasetKind::kFixed, 0);
-BENCHMARK_NAMED_PARAM(storeRowOld, old_variable, DatasetKind::kVariable, 0);
+BENCHMARK_NAMED_PARAM(storeRowOld, old_variable_small, DatasetKind::kVariableSmall, 0);
 BENCHMARK_RELATIVE_NAMED_PARAM(
     storeRowBm,
-    bm_variable,
-    DatasetKind::kVariable,
+    bm_variable_small,
+    DatasetKind::kVariableSmall,
     0);
 BENCHMARK_NAMED_PARAM(
     storeRowOld,

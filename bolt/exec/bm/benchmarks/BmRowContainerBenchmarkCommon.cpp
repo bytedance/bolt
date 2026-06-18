@@ -46,12 +46,12 @@ DEFINE_uint64(
 DEFINE_uint32(
     bm_row_container_variable_max_string_length,
     64,
-    "Maximum string length for regular variable BM row container benchmarks. "
+    "Maximum string length for regular variable_small BM row container benchmarks. "
     "Rows use deterministic lengths in [1, max].");
 DEFINE_uint32(
     bm_row_container_large_string_length,
     1024,
-    "Fixed string length for large-variable BM row container benchmarks.");
+    "Fixed string length for variable_large BM row container benchmarks.");
 DEFINE_uint64(
     bm_row_container_spill_write_buffer_bytes,
     4ULL << 20,

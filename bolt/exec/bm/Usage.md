@@ -225,15 +225,15 @@ benchmark 可以在容器外层测量端到端阶段耗时，但不要把逐行�
 `bolt/exec/bm/benchmarks` 里的 RowContainer benchmark 使用三个 dataset profile：
 
 - `fixed`：只包含 `BIGINT`、`INTEGER`、`DOUBLE`，不包含变长列。
-- `variable`：包含一个 `VARCHAR` 列，字符串长度按 row id 确定性分布在 `1..64`，
+- `variable_small`：包含一个 `VARCHAR` 列，字符串长度按 row id 确定性分布在 `1..64`，
   平均约 `32B`。可通过 `--bm_row_container_variable_max_string_length=64` 调整上限。
 - `variable_large`：包含一个 `VARCHAR` 列，字符串固定为 `1024B`，用于保留大字符串
   copy/spill/compress/IO 压力场景。可通过 `--bm_row_container_large_string_length=1024`
   调整长度。
 
-两个字符串长度 flag 可以在同一次运行中同时传入，但只分别作用于对应 profile：`variable`
+两个字符串长度 flag 可以在同一次运行中同时传入，但只分别作用于对应 profile：`variable_small`
 只读取 `variable_max_string_length`，`variable_large` 只读取 `large_string_length`。
-runner 脚本默认枚举并运行 binary 注册的全部 case，因此会同时跑 `fixed`、`variable` 和
+runner 脚本默认枚举并运行 binary 注册的全部 case，因此会同时跑 `fixed`、`variable_small` 和
 `variable_large`。
 
 UT 按行为域拆分：
