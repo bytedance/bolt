@@ -51,6 +51,7 @@ add_executable(
   DecimalVectorFunctionsTest.cpp
   ElementAtTest.cpp
   FactorialTest.cpp
+  FormatNumberTest.cpp
   FromJsonTest.cpp
   FromJsonTest.cpp
   FromToJsonRoundTripTest.cpp

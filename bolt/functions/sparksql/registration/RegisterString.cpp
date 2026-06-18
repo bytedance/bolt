@@ -31,6 +31,7 @@
 #include "bolt/functions/lib/Re2Functions.h"
 #include "bolt/functions/prestosql/StringFunctions.h"
 #include "bolt/functions/sparksql/Base64Function.h"
+#include "bolt/functions/sparksql/FormatNumber.h"
 #include "bolt/functions/sparksql/LuhnCheckFunction.h"
 #include "bolt/functions/sparksql/MaskFunction.h"
 #include "bolt/functions/sparksql/String.h"
@@ -68,6 +69,19 @@ void registerStringFunctions(const std::string& prefix) {
 
   registerFunction<ToTitleFunction, Varchar, Varchar>(
       {prefix + "to_title", prefix + "initcap"});
+
+  registerFunction<FormatNumberFunction, Varchar, int8_t, int32_t>(
+      {prefix + "format_number"});
+  registerFunction<FormatNumberFunction, Varchar, int16_t, int32_t>(
+      {prefix + "format_number"});
+  registerFunction<FormatNumberFunction, Varchar, int32_t, int32_t>(
+      {prefix + "format_number"});
+  registerFunction<FormatNumberFunction, Varchar, int64_t, int32_t>(
+      {prefix + "format_number"});
+  registerFunction<FormatNumberFunction, Varchar, float, int32_t>(
+      {prefix + "format_number"});
+  registerFunction<FormatNumberFunction, Varchar, double, int32_t>(
+      {prefix + "format_number"});
 
   registerFunction<TrimSpaceFunction, Varchar, Varchar>({prefix + "trim"});
   registerFunction<TrimFunction, Varchar, Varchar, Varchar>({prefix + "trim"});
