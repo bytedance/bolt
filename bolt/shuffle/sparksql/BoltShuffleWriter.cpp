@@ -420,6 +420,10 @@ void BoltShuffleWriter::ensureVectorLoaded(bytedance::bolt::RowVectorPtr rv) {
   }
 }
 
+std::string BoltShuffleWriter::toString() const {
+  return "BoltShuffleWriter";
+}
+
 arrow::Status BoltShuffleWriter::init() {
 #if defined(__x86_64__)
   supportAvx512_ = __builtin_cpu_supports("avx512bw");

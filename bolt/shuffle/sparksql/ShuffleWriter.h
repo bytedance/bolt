@@ -141,6 +141,8 @@ class ShuffleWriter {
     return metrics_;
   }
 
+  virtual std::string toString() const = 0;
+
  protected:
   ShuffleWriter(
       int32_t numPartitions,

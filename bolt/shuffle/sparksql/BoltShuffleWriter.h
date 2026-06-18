@@ -337,6 +337,8 @@ class BoltShuffleWriter : public ShuffleWriter {
     }
   }
 
+  std::string toString() const override;
+
  protected:
   using FixedColumnCheckFunction = void (BoltShuffleWriter::*)(
       const uint8_t* srcAddrs,

@@ -218,6 +218,10 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
     assembleBufferPool_ = BufferPool(assemblePool_.get());
   }
 
+  std::string toString() const override {
+    return "BoltShuffleWriterV2";
+  }
+
  private:
   void checkLengthBuffer(uint32_t col, uint32_t pid);
 

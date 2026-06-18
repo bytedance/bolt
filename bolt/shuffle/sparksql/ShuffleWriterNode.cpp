@@ -91,7 +91,10 @@ void SparkShuffleWriter::noMoreInput() {
   ShuffleWriterMetrics metrics;
   if (shuffleWriter_) {
     auto status = shuffleWriter_->stop();
-    BOLT_CHECK(status.ok(), "Native shuffle write: ShuffleWriter stop failed");
+    BOLT_CHECK(status.ok(),
+      "Native shuffle write: ShuffleWriter stop failed, status: {}, shuffleWriter: {}",
+          status.ToString(),
+          shuffleWriter_->toString());
     metrics = shuffleWriter_->metrics();
   } else {
     metrics.partitionLengths = std::vector<int64_t>(
