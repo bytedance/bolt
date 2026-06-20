@@ -22,6 +22,7 @@
 #include "bolt/common/base/RandomUtil.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
@@ -480,6 +481,48 @@ TEST_F(PercentileApproxTest, nullPercentile) {
       testAggregations(
           {rows}, {}, {"percentile_approx(c0, c1)"}, "SELECT NULL"),
       "Percentage value must not be null");
+}
+
+// For a decimal input, the intermediate (partial) state of percentile_approx is
+// a ROW whose type-placeholder field carries the input element type. That field
+// must keep the logical decimal type; building it from the C++ native type
+// would make it a physical HUGEINT, leaving a vector whose runtime type
+// disagrees with its declared type. Downstream type-aware consumers (e.g. the
+// shuffle writer) then reject it as an unsupported type.
+TEST_F(PercentileApproxTest, decimalPartialPreservesElementType) {
+  const auto decimalType = DECIMAL(32, 3);
+  auto values =
+      makeFlatVector<int128_t>({1000, 2000, 3000, 4000, 5000}, decimalType);
+  auto rows = makeRowVector({values});
+
+  auto plan = exec::test::PlanBuilder()
+                  .values({rows})
+                  .partialAggregation({}, {"percentile_approx(c0, 0.5)"})
+                  .planNode();
+
+  // Read the raw intermediate output; copyResult would re-materialize children
+  // with the declared row type and hide the mismatch.
+  exec::test::CursorParameters params;
+  params.planNode = plan;
+  params.serialExecution = true;
+  params.copyResult = false;
+  auto cursor = exec::test::TaskCursor::create(params);
+  ASSERT_TRUE(cursor->moveNext());
+  auto output = cursor->current();
+
+  auto intermediate = output->childAt(0)->as<RowVector>();
+  ASSERT_NE(intermediate, nullptr);
+  // Intermediate ROW layout: {percentiles, isArray, accuracy, typePlaceholder,
+  // serialized}; index 3 is the element-type placeholder.
+  constexpr int32_t kTypePlaceholder = 3;
+  auto placeholderType = intermediate->childAt(kTypePlaceholder)->type();
+  EXPECT_TRUE(placeholderType->isDecimal())
+      << "type-placeholder field type is " << placeholderType->toString()
+      << ", expected a decimal";
+  EXPECT_TRUE(placeholderType->equivalent(*decimalType));
+
+  while (cursor->moveNext()) {
+  }
 }
 
 } // namespace

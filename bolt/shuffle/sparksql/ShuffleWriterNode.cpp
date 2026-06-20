@@ -80,7 +80,10 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
           << ", pool reserved: " << pool()->reservedBytes()
           << ", total free: " << freeMem.value();
   auto status = shuffleWriter_->split(input, memLimit);
-  BOLT_CHECK(status.ok(), "Native split: shuffle writer split failed");
+  BOLT_CHECK(
+      status.ok(),
+      "Native split: shuffle writer split failed: {}",
+      status.ToString());
 }
 
 void SparkShuffleWriter::noMoreInput() {
