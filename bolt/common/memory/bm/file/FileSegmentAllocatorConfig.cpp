@@ -10,7 +10,8 @@ FileErrorCode ValidateFileSegmentAllocatorConfig(
     const FileSegmentAllocatorConfig& config) {
   if (config.directory.empty() || config.bucket_sizes.empty() ||
       config.file_size_limit_bytes <= 0 ||
-      config.max_open_files_per_bucket == 0) {
+      config.max_open_files_per_bucket == 0 ||
+      !IsValidFileIoMode(config.ioMode)) {
     return FileErrorCode::kInvalidConfig;
   }
   if (!IsFileSegmentAligned(config.file_size_limit_bytes)) {

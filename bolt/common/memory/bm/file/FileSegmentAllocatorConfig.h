@@ -12,6 +12,7 @@ struct FileSegmentAllocatorConfig {
   std::vector<int64_t> bucket_sizes;
   int64_t file_size_limit_bytes{0};
   uint32_t max_open_files_per_bucket{0};
+  FileIoMode ioMode{FileIoMode::kBuffered};
 };
 
 bool IsFileSegmentAligned(int64_t value);
