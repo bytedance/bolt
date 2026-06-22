@@ -3,7 +3,6 @@
 
 #include <cstring>
 #include <exception>
-#include <cstdint>
 #include <type_traits>
 
 #include <gtest/gtest.h>
@@ -43,23 +42,6 @@ TEST(IoBufferTest, AllocateFromMallocOwnsWritableMemory) {
 
 TEST(IoBufferTest, AllocateFromMallocRejectsZeroSize) {
   EXPECT_THROW((void)IoBuffer::allocateFromMalloc(0), std::exception);
-}
-
-TEST(IoBufferTest, AllocateAlignedFromMallocUsesAlignedAddressAndSize) {
-  auto buffer = IoBuffer::allocateAlignedFromMalloc(123, 4096);
-
-  ASSERT_TRUE(buffer.valid());
-  EXPECT_EQ(4096, buffer.size());
-  EXPECT_EQ(123, buffer.length());
-  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(buffer.ioData()) % 4096);
-  std::memset(buffer.data(), 17, buffer.size());
-  EXPECT_EQ(17, buffer.data()[122]);
-  EXPECT_EQ(17, buffer.data()[4095]);
-}
-
-TEST(IoBufferTest, AllocateAlignedFromMallocRejectsInvalidArguments) {
-  EXPECT_THROW((void)IoBuffer::allocateAlignedFromMalloc(0, 4096), std::exception);
-  EXPECT_THROW((void)IoBuffer::allocateAlignedFromMalloc(128, 3), std::exception);
 }
 
 TEST(IoBufferTest, RunsCustomDeleterOnceAfterMove) {

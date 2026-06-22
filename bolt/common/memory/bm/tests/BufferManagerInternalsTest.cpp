@@ -154,7 +154,6 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   SpillWriteResult write;
   write.rawBytes = memory.size;
   write.physicalBytes = 1024;
-  write.ioBytes = 4096;
   write.compressionTimeUs = 77;
   write.compressed = true;
   accounting.OnSpillCompleted(memory, write);
@@ -165,8 +164,6 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   EXPECT_EQ(1, stats.spillWriteCount);
   EXPECT_EQ(8192, stats.spillWriteBytes);
   EXPECT_EQ(1024, stats.spillPhysicalWriteBytes);
-  EXPECT_EQ(4096, stats.spillIoWriteBytes);
-  EXPECT_EQ(3072, stats.spillIoPaddingWriteBytes);
   EXPECT_EQ(1, stats.spillCompressedBlocks);
   EXPECT_EQ(77, stats.spillCompressionTimeUs);
 
@@ -174,7 +171,6 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   accounting.OnReadFutureConsumed(memory);
   SpillReadResult read;
   read.physicalBytes = 2048;
-  read.ioBytes = 4096;
   read.decompressionTimeUs = 88;
   accounting.OnReadCompleted(memory, read);
 
@@ -185,7 +181,6 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   EXPECT_EQ(1, stats.spillReadCount);
   EXPECT_EQ(8192, stats.spillReadBytes);
   EXPECT_EQ(2048, stats.spillPhysicalReadBytes);
-  EXPECT_EQ(4096, stats.spillIoReadBytes);
   EXPECT_EQ(88, stats.spillDecompressionTimeUs);
 
   const auto& tag = findTag(accounting.tagStats(), MemoryTag::kAggregation);
