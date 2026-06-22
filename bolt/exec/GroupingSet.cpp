@@ -231,6 +231,20 @@ bool fillHashAggrJitRowOutputRuntime(
   return true;
 }
 
+void resetHashAggrJitOutputDataDependentFlags(
+    BaseVector* vector,
+    const jit::HashAggrJitSlot& slot) {
+  vector->resetDataDependentFlags(nullptr);
+  if (slot.desc.outputShape() != jit::HashAggrJitRuntimeShape::Row) {
+    return;
+  }
+
+  auto* rowVector = vector->asUnchecked<RowVector>();
+  for (auto i = 0; i < rowVector->childrenSize(); ++i) {
+    rowVector->childAt(i)->resetDataDependentFlags(nullptr);
+  }
+}
+
 #endif
 
 std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
@@ -1347,6 +1361,9 @@ void GroupingSet::runHashAggrJitExtractChunks(
       chunk.extract(groups.data(), groups.size(), resultPtrs.data());
     }
     for (const auto& slot : chunk.slots()) {
+      resetHashAggrJitOutputDataDependentFlags(
+          result->childAt(slot.aggregateIndex + aggregateOutputOffset).get(),
+          slot);
       jitExtracted[slot.aggregateIndex] = 1;
     }
   }
