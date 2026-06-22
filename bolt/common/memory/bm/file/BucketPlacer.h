@@ -17,18 +17,13 @@ class BucketPlacer {
       std::string directory,
       uint64_t bucket_size,
       uint64_t file_size_limit_bytes,
-      uint32_t max_open_files,
-      FileIoMode ioMode = FileIoMode::kBuffered);
+      uint32_t max_open_files);
   ~BucketPlacer();
 
   BucketPlacer(const BucketPlacer&) = delete;
   BucketPlacer& operator=(const BucketPlacer&) = delete;
 
   FileAllocation Allocate(int64_t requested_size, uint64_t segment_id);
-  FileAllocation Allocate(
-      int64_t requested_size,
-      int64_t placement_size,
-      uint64_t segment_id);
   FileFreeResult Free(const SegmentRecord& record);
 
  private:
@@ -49,7 +44,6 @@ class BucketPlacer {
   const uint64_t bucket_size_;
   const uint64_t file_size_limit_bytes_;
   const uint32_t max_open_files_;
-  const FileIoMode ioMode_;
 
   uint64_t next_file_index_{0};
   std::vector<std::unique_ptr<BucketFile>> files_;

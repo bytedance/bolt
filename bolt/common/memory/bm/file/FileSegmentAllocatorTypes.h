@@ -6,28 +6,6 @@ namespace bytedance::bolt::memory::bm {
 
 constexpr int64_t kFileSegmentAlignment = 4 * 1024;
 
-enum class FileIoMode : uint8_t {
-  kBuffered,
-  kDirect,
-};
-
-inline bool IsValidFileIoMode(FileIoMode mode) {
-  return mode == FileIoMode::kBuffered || mode == FileIoMode::kDirect;
-}
-
-inline uint64_t AlignFileIoSize(uint64_t size) {
-  return ((size + kFileSegmentAlignment - 1) / kFileSegmentAlignment) *
-      kFileSegmentAlignment;
-}
-
-inline bool IsFileIoAligned(uint64_t value) {
-  return value % kFileSegmentAlignment == 0;
-}
-
-inline bool IsFileIoAlignedPtr(const void* ptr) {
-  return reinterpret_cast<uintptr_t>(ptr) % kFileSegmentAlignment == 0;
-}
-
 enum class FileErrorCode : uint8_t {
   kOk,
   kInvalidConfig,

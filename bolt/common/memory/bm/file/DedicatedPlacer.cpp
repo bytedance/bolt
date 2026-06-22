@@ -7,8 +7,8 @@
 
 namespace bytedance::bolt::memory::bm {
 
-DedicatedPlacer::DedicatedPlacer(std::string directory, FileIoMode ioMode)
-    : directory_(std::move(directory)), ioMode_(ioMode) {}
+DedicatedPlacer::DedicatedPlacer(std::string directory)
+    : directory_(std::move(directory)) {}
 
 DedicatedPlacer::~DedicatedPlacer() {
   RemoveAllFiles();
@@ -24,16 +24,9 @@ void DedicatedPlacer::RemoveAllFiles() {
 FileAllocation DedicatedPlacer::Allocate(
     int64_t requested_size,
     uint64_t segment_id) {
-  return Allocate(requested_size, requested_size, segment_id);
-}
-
-FileAllocation DedicatedPlacer::Allocate(
-    int64_t requested_size,
-    int64_t placement_size,
-    uint64_t segment_id) {
   FileAllocation allocation;
   const auto path = MakeDedicatedSegmentFilePath(directory_, segment_id);
-  auto created = CreateExclusiveReadWriteManagedOpenFile(path, ioMode_);
+  auto created = CreateExclusiveReadWriteManagedOpenFile(path);
   if (!created.ok()) {
     allocation.result.error = FileErrorCode::kIoError;
     allocation.result.native_error_code = created.native_error_code;
@@ -44,7 +37,7 @@ FileAllocation DedicatedPlacer::Allocate(
   segment.fd = created.file.fd();
   segment.offset = 0;
   segment.requested_size = static_cast<uint64_t>(requested_size);
-  segment.allocated_size = static_cast<uint64_t>(placement_size);
+  segment.allocated_size = static_cast<uint64_t>(requested_size);
   segment.kind = FileSegmentKind::kDedicated;
   segment.id = segment_id;
 

@@ -53,20 +53,6 @@ TEST(FileSegmentAllocatorImplTest, AllocatesRequestToFirstFittingBucket) {
   EXPECT_GE(result.segment.fd, 0);
 }
 
-TEST(FileSegmentAllocatorImplTest, SeparatesRequestedSizeFromPlacementSize) {
-  const auto directory =
-      UniqueTempDir("bolt-bm-file-allocator-requested-placement");
-  std::filesystem::remove_all(directory);
-  FileSegmentAllocatorImpl allocator(ValidConfigWithDirectory(directory));
-
-  auto result = allocator.Allocate(5 * 1024, 8 * 1024);
-
-  ASSERT_TRUE(result.ok());
-  EXPECT_EQ(5 * 1024, result.segment.requested_size);
-  EXPECT_EQ(8 * 1024, result.segment.allocated_size);
-  EXPECT_EQ(FileSegmentKind::kBucket, result.segment.kind);
-}
-
 TEST(FileSegmentAllocatorImplTest, AllocatesSequentialOffsetsInSameBucket) {
   const auto directory = UniqueTempDir("bolt-bm-file-allocator-sequential");
   std::filesystem::remove_all(directory);
@@ -132,20 +118,6 @@ TEST(FileSegmentAllocatorImplTest, AllocatesDedicatedFileForLargeRequest) {
   EXPECT_EQ(128 * 1024, result.segment.requested_size);
   EXPECT_EQ(128 * 1024, result.segment.allocated_size);
   EXPECT_GE(result.segment.fd, 0);
-}
-
-TEST(FileSegmentAllocatorImplTest, DedicatedAllocationUsesPlacementSize) {
-  const auto directory =
-      UniqueTempDir("bolt-bm-file-allocator-dedicated-placement");
-  std::filesystem::remove_all(directory);
-  FileSegmentAllocatorImpl allocator(ValidConfigWithDirectory(directory));
-
-  auto result = allocator.Allocate(100 * 1024, 128 * 1024);
-
-  ASSERT_TRUE(result.ok());
-  EXPECT_EQ(FileSegmentKind::kDedicated, result.segment.kind);
-  EXPECT_EQ(100 * 1024, result.segment.requested_size);
-  EXPECT_EQ(128 * 1024, result.segment.allocated_size);
 }
 
 TEST(FileSegmentAllocatorImplTest, RejectsInvalidSizesAndUnknownFreeSegments) {

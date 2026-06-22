@@ -15,7 +15,7 @@ FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(
       allocator_id_(bytedance::bolt::makeUuid()),
       directory_(
           (std::filesystem::path(config_.directory) / allocator_id_).string()),
-      dedicated_placer_(directory_, config_.ioMode) {
+      dedicated_placer_(directory_) {
   BOLT_CHECK(
       ValidateFileSegmentAllocatorConfig(config_) == FileErrorCode::kOk,
       "invalid FileSegmentAllocatorConfig");
@@ -28,8 +28,7 @@ FileSegmentAllocatorImpl::FileSegmentAllocatorImpl(
         directory_,
         static_cast<uint64_t>(bucket_size),
         static_cast<uint64_t>(config_.file_size_limit_bytes),
-        config_.max_open_files_per_bucket,
-        config_.ioMode));
+        config_.max_open_files_per_bucket));
   }
 }
 
@@ -41,32 +40,24 @@ FileSegmentAllocatorImpl::~FileSegmentAllocatorImpl() {
 }
 
 FileAllocateResult FileSegmentAllocatorImpl::Allocate(int64_t size) {
-  return Allocate(size, size);
-}
-
-FileAllocateResult FileSegmentAllocatorImpl::Allocate(
-    int64_t requestedSize,
-    int64_t placementSize) {
   if (shutdown_) {
     FileAllocateResult result;
     result.error = FileErrorCode::kShutdown;
     return result;
   }
-  if (requestedSize <= 0 || placementSize <= 0 || placementSize < requestedSize) {
+  if (size <= 0) {
     FileAllocateResult result;
     result.error = FileErrorCode::kInvalidSize;
     return result;
   }
 
   const auto it = std::lower_bound(
-      config_.bucket_sizes.begin(), config_.bucket_sizes.end(), placementSize);
+      config_.bucket_sizes.begin(), config_.bucket_sizes.end(), size);
   if (it == config_.bucket_sizes.end()) {
-    return AllocateDedicated(requestedSize, placementSize);
+    return AllocateDedicated(size);
   }
   return AllocateBucket(
-      requestedSize,
-      placementSize,
-      static_cast<size_t>(it - config_.bucket_sizes.begin()));
+      size, static_cast<size_t>(it - config_.bucket_sizes.begin()));
 }
 
 FileFreeResult FileSegmentAllocatorImpl::Free(const FileSegment& segment) {
@@ -85,12 +76,10 @@ FileFreeResult FileSegmentAllocatorImpl::Free(const FileSegment& segment) {
 }
 
 FileAllocateResult FileSegmentAllocatorImpl::AllocateBucket(
-    int64_t requestedSize,
-    int64_t placementSize,
+    int64_t size,
     size_t bucket_index) {
   const auto segment_id = registry_.NextSegmentId();
-  auto allocation =
-      buckets_[bucket_index]->Allocate(requestedSize, placementSize, segment_id);
+  auto allocation = buckets_[bucket_index]->Allocate(size, segment_id);
   if (!allocation.result.ok()) {
     return allocation.result;
   }
@@ -99,12 +88,9 @@ FileAllocateResult FileSegmentAllocatorImpl::AllocateBucket(
   return allocation.result;
 }
 
-FileAllocateResult FileSegmentAllocatorImpl::AllocateDedicated(
-    int64_t requestedSize,
-    int64_t placementSize) {
+FileAllocateResult FileSegmentAllocatorImpl::AllocateDedicated(int64_t size) {
   const auto segment_id = registry_.NextSegmentId();
-  auto allocation =
-      dedicated_placer_.Allocate(requestedSize, placementSize, segment_id);
+  auto allocation = dedicated_placer_.Allocate(size, segment_id);
   if (!allocation.result.ok()) {
     return allocation.result;
   }

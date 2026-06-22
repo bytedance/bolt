@@ -18,7 +18,6 @@ struct ManagedOpenFileCreateResult {
 };
 
 ManagedOpenFileCreateResult CreateExclusiveReadWriteManagedOpenFile(
-    const std::string& path,
-    FileIoMode ioMode = FileIoMode::kBuffered);
+    const std::string& path);
 
 } // namespace bytedance::bolt::memory::bm

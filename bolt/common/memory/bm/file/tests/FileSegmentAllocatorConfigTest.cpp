@@ -11,17 +11,6 @@ TEST(FileSegmentAllocatorConfigTest, AcceptsValidConfig) {
       FileErrorCode::kOk, ValidateFileSegmentAllocatorConfig(ValidConfig()));
 }
 
-TEST(FileSegmentAllocatorConfigTest, DefaultsToBufferedIoMode) {
-  FileSegmentAllocatorConfig config;
-  EXPECT_EQ(FileIoMode::kBuffered, config.ioMode);
-}
-
-TEST(FileSegmentAllocatorConfigTest, AcceptsDirectIoMode) {
-  auto config = ValidConfig();
-  config.ioMode = FileIoMode::kDirect;
-  EXPECT_EQ(FileErrorCode::kOk, ValidateFileSegmentAllocatorConfig(config));
-}
-
 TEST(FileSegmentAllocatorConfigTest, RejectsEmptyDirectory) {
   auto config = ValidConfig();
   config.directory.clear();
