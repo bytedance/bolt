@@ -696,6 +696,210 @@ TEST_F(ParquetReaderTest, projectNoColumns) {
   ASSERT_FALSE(rowReader->next(kBatchSize, result));
 }
 
+// Validates the per-row size estimate produced by
+// ReaderBase::estimatedRowGroupBytesInMemory(), which is summed over the
+// ScanSpec-projected top-level Parquet column nodes inside
+// ParquetRowReader::estimatedRowSize(). sample.parquet has 20 rows in a
+// single row group with two leaf columns:
+//   a: INT64  (8 bytes / value)
+//   b: DOUBLE (8 bytes / value)
+// so the per-column contribution is 8 * 20 = 160 bytes, and the per-row
+// sum is 8, 8 or 16 depending on which columns are projected.
+TEST_F(ParquetReaderTest, estimatedRowSizeFromColumnNodes) {
+  const std::string sample(getExampleFilePath("sample.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+
+  // Project both columns: per-row bytes = 8 (BIGINT) + 8 (DOUBLE) = 16.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = sampleSchema();
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 16);
+  }
+
+  // Project only the BIGINT column.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({"a"}, {BIGINT()});
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 8);
+  }
+
+  // Project only the DOUBLE column.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({"b"}, {DOUBLE()});
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 8);
+  }
+
+  // No projected columns (count(*)): no nodes are collected, so the
+  // estimate is unavailable.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({}, {});
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    EXPECT_FALSE(rowReader->estimatedRowSize().has_value());
+  }
+}
+
+// Verifies the per-row size estimate over a string + bigint projection.
+// nation.parquet has 25 rows and four leaf columns (nationkey:BIGINT,
+// name:VARCHAR, regionkey:BIGINT, comment:VARCHAR). Each BIGINT column
+// contributes exactly 8 bytes / row. VARCHAR contributes
+// sizeof(StringView) + total_uncompressed_size summed and divided by
+// num_rows; for the "name" column on this file that yields 28 bytes /
+// row.
+TEST_F(ParquetReaderTest, estimatedRowSizeStringAndBigint) {
+  const std::string path = getExampleFilePath("nation.parquet");
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  // BIGINT only.
+  {
+    auto bytes = estimate(ROW({"nationkey"}, {BIGINT()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 8);
+  }
+
+  // Two BIGINT columns.
+  {
+    auto bytes =
+        estimate(ROW({"nationkey", "regionkey"}, {BIGINT(), BIGINT()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 16);
+  }
+
+  // VARCHAR only.
+  {
+    auto bytes = estimate(ROW({"name"}, {VARCHAR()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 28);
+  }
+
+  // BIGINT + VARCHAR: sum of the per-column estimates (8 + 28 = 36).
+  {
+    auto both = estimate(ROW({"nationkey", "name"}, {BIGINT(), VARCHAR()}));
+    ASSERT_TRUE(both.has_value());
+    EXPECT_EQ(*both, 36);
+  }
+}
+
+// Verifies the per-row size estimate over a nested MAP projection.
+// nested_map.parquet has 5 rows with id:BIGINT and
+// data:MAP<VARCHAR, MAP<VARCHAR, BIGINT>>. The MAP subtree contains
+// three leaf Parquet columns (outer key, inner key, inner value); all
+// of them must be summed by estimatedRowGroupBytesInMemory.
+TEST_F(ParquetReaderTest, estimatedRowSizeNestedMap) {
+  const std::string path = getExampleFilePath("nested_map.parquet");
+  const auto mapType = MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()));
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  auto idOnly = estimate(ROW({"id"}, {BIGINT()}));
+  ASSERT_TRUE(idOnly.has_value());
+  EXPECT_EQ(*idOnly, 8);
+
+  auto mapOnly = estimate(ROW({"data"}, {mapType}));
+  ASSERT_TRUE(mapOnly.has_value());
+  EXPECT_EQ(*mapOnly, 106);
+
+  auto both = estimate(ROW({"id", "data"}, {BIGINT(), mapType}));
+  ASSERT_TRUE(both.has_value());
+  EXPECT_EQ(*both, 114);
+}
+
+// Verifies the per-row size estimate over a STRUCT-of-MAP-of-ARRAY
+// projection. row_map_array.parquet has a single row of type
+// ROW(c: ROW(c0: BIGINT, c1: MAP<VARCHAR, ARRAY<INTEGER>>)). Selecting
+// the top-level struct must descend into all leaf columns under it.
+TEST_F(ParquetReaderTest, estimatedRowSizeStructMapArray) {
+  const std::string path = getExampleFilePath("row_map_array.parquet");
+  const auto structType =
+      ROW({"c0", "c1"}, {BIGINT(), MAP(VARCHAR(), ARRAY(INTEGER()))});
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(path, readerOpts);
+  const auto rowType = ROW({"c"}, {structType});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto bytes = reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  ASSERT_TRUE(bytes.has_value());
+  EXPECT_EQ(*bytes, 99);
+}
+
+// Verifies the per-row size estimate over a projection that mixes
+// primitive, ARRAY-of-primitive, STRUCT and ARRAY-of-STRUCT columns.
+// proto-struct-with-array.parquet has six top-level columns and 1 row.
+// Per-column estimates: repeatedPrimitive=4, requiredMessage=4,
+// repeatedMessage=8. The full projection sums to 28 bytes / row.
+TEST_F(ParquetReaderTest, estimatedRowSizeStructAndArray) {
+  const std::string path =
+      getExampleFilePath("proto-struct-with-array.parquet");
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  const auto fullType =
+      ROW({"optionalPrimitive",
+           "requiredPrimitive",
+           "repeatedPrimitive",
+           "optionalMessage",
+           "requiredMessage",
+           "repeatedMessage"},
+          {INTEGER(),
+           INTEGER(),
+           ARRAY(INTEGER()),
+           ROW({"someId"}, {INTEGER()}),
+           ROW({"someId"}, {INTEGER()}),
+           ARRAY(ROW({"someId"}, {INTEGER()}))});
+
+  auto arrayOnly = estimate(ROW({"repeatedPrimitive"}, {ARRAY(INTEGER())}));
+  ASSERT_TRUE(arrayOnly.has_value());
+  EXPECT_EQ(*arrayOnly, 4);
+
+  auto structOnly =
+      estimate(ROW({"requiredMessage"}, {ROW({"someId"}, {INTEGER()})}));
+  ASSERT_TRUE(structOnly.has_value());
+  EXPECT_EQ(*structOnly, 4);
+
+  auto arrayStructOnly =
+      estimate(ROW({"repeatedMessage"}, {ARRAY(ROW({"someId"}, {INTEGER()}))}));
+  ASSERT_TRUE(arrayStructOnly.has_value());
+  EXPECT_EQ(*arrayStructOnly, 8);
+
+  auto full = estimate(fullType);
+  ASSERT_TRUE(full.has_value());
+  EXPECT_EQ(*full, 28);
+}
+
 TEST_F(ParquetReaderTest, parseIntDecimal) {
   // decimal_dict.parquet two columns (a: DECIMAL(7,2), b: DECIMAL(14,2)) and
   // 6 rows.

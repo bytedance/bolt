@@ -1313,6 +1313,7 @@ int32_t parquetTypeToBoltBytes(thrift::Type::type type) {
 }
 } // namespace
 
+// TODO: consider dictionary encoding cases
 int64_t ReaderBase::estimatedRowGroupBytesInMemory(
     int32_t rowGroupIndex,
     const dwio::common::TypeWithId& type) const {
@@ -1481,7 +1482,8 @@ class ParquetRowReader::Impl {
         currentRowGroupPtr_(nullptr),
         rowsInCurrentRowGroup_(0),
         currentRowInGroup_(0),
-        schemaHelper_(readerBase_->thriftFileMetaData().schema) {
+        schemaHelper_(readerBase_->thriftFileMetaData().schema),
+        maxBatchBytes_(options.getMaxBatchBytes()) {
     // Validate the requested type is compatible with what's in the file
     std::function<std::string()> createExceptionContext = [&]() {
       std::string exceptionMessageContext = fmt::format(
@@ -1528,6 +1530,8 @@ class ParquetRowReader::Impl {
         params,
         *options_.getScanSpec(),
         pool_);
+
+    extractRequiredColumnNodes();
 
     // Annotate scan spec with logical type names before filtering row groups.
     if (auto scanSpecPtr = options_.getScanSpec()) {
@@ -1715,6 +1719,32 @@ class ParquetRowReader::Impl {
       return 0;
     }
     BOLT_DCHECK_GT(rowsToRead, 0);
+    // Cap the batch by an in-memory byte budget derived from row-group
+    // metadata. This protects against peak-memory spikes when crossing
+    // into row-groups with very wide BYTE_ARRAY (e.g. large strings)
+    // before the upstream feedback loop in TableScan has a chance to
+    // shrink the batch size after the fact.
+    const auto requestedRows = rowsToRead;
+    if (maxBatchBytes_ > 0 && cachedBytesPerRow_ > 0) {
+      auto rowsByBytes =
+          std::max<int64_t>(1, maxBatchBytes_ / cachedBytesPerRow_);
+      const auto cappedRows = std::min<int64_t>(rowsToRead, rowsByBytes);
+      if (cappedRows < rowsToRead) {
+        VLOG(1) << "ParquetRowReader::next byte-budget cap: requestedSize="
+                << size << ", rowsAfterRowGroupClip=" << requestedRows
+                << ", cachedBytesPerRow=" << cachedBytesPerRow_
+                << ", maxBatchBytes=" << maxBatchBytes_
+                << ", rowsByBytes=" << rowsByBytes
+                << ", finalRowsToRead=" << cappedRows
+                << ", projectedBatchBytes=" << cappedRows * cachedBytesPerRow_;
+      } else {
+        VLOG(1) << "ParquetRowReader::next byte-budget ok: requestedSize="
+                << size << ", finalRowsToRead=" << rowsToRead
+                << ", cachedBytesPerRow=" << cachedBytesPerRow_
+                << ", projectedBatchBytes=" << rowsToRead * cachedBytesPerRow_;
+      }
+      rowsToRead = cappedRows;
+    }
     if (!options_.getAppendRowNumberColumn() &&
         !options_.getRowNumberColumnInfo().has_value()) {
       columnReader_->next(rowsToRead, result, mutation);
@@ -1811,14 +1841,16 @@ class ParquetRowReader::Impl {
   }
 
   std::optional<size_t> estimatedRowSize() const {
+    if (requiredColumnNodes_.empty()) {
+      return std::nullopt;
+    }
     auto index =
         nextRowGroupIdsIdx_ < 1 ? 0 : rowGroupIds_[nextRowGroupIdsIdx_ - 1];
-    return readerBase_->estimatedRowGroupBytesInMemory(
-               index,
-               *dynamic_cast<bytedance::bolt::parquet::StructColumnReader*>(
-                    columnReader_.get())
-                    ->requestedTypeWithId()) /
-        rowGroups_[index].num_rows;
+    int64_t bytes = 0;
+    for (const auto& node : requiredColumnNodes_) {
+      bytes += readerBase_->estimatedRowGroupBytesInMemory(index, *node);
+    }
+    return bytes / rowGroups_[index].num_rows;
   }
 
   void updateRuntimeStats(dwio::common::RuntimeStatistics& stats) const {
@@ -1835,6 +1867,75 @@ class ParquetRowReader::Impl {
   }
 
  private:
+  // Walk the ScanSpec children against schemaWithId() and collect the
+  // matched top-level Parquet subtrees. We deliberately do NOT wrap them
+  // in a synthetic TypeWithId root: the TypeWithId constructor rewrites
+  // each child's parent_ pointer, which would corrupt the original
+  // schema tree (later code such as ParquetTypeWithId::makeLevelInfo()
+  // walks parquetParent() and reinterprets the parent as a
+  // ParquetTypeWithId). Instead we keep the selected ParquetTypeWithId
+  // nodes as-is and let the caller iterate over them.
+  void extractRequiredColumnNodes() {
+    if (!requiredColumnNodes_.empty()) {
+      return;
+    }
+    auto scanSpecPtr = options_.getScanSpec();
+    if (scanSpecPtr == nullptr) {
+      return;
+    }
+    const auto& schemaWithId = readerBase_->schemaWithId();
+    if (schemaWithId == nullptr) {
+      return;
+    }
+    auto fileRoot =
+        std::dynamic_pointer_cast<const ParquetTypeWithId>(schemaWithId);
+    if (fileRoot == nullptr) {
+      return;
+    }
+    for (const auto& childSpec : scanSpecPtr->children()) {
+      if (childSpec == nullptr || !childSpec->readFromFile()) {
+        // Skip constant / partition / missing columns.
+        continue;
+      }
+      auto fileChild = findFileChildByName(*fileRoot, childSpec->fieldName());
+      if (fileChild == nullptr) {
+        continue;
+      }
+      // Keep the matched node as-is, including kNonLeaf subtrees. The
+      // node still belongs to the original schema tree, so its parent_
+      // chain (used by makeLevelInfo()) remains valid.
+      requiredColumnNodes_.push_back(std::move(fileChild));
+    }
+    if (VLOG_IS_ON(1)) {
+      std::string names;
+      for (const auto& node : requiredColumnNodes_) {
+        if (!names.empty()) {
+          names.append(", ");
+        }
+        names.append(node->type()->toString());
+      }
+      VLOG(1) << "row group requiredColumnNodes_ = [" << names << "]";
+    }
+  }
+
+  // Looks up a child node of the given Parquet (file) row by name. The
+  // lookup is case-sensitive; fileColumnNamesReadAsLowerCase has already
+  // been applied when building schemaWithId so ScanSpec field names match
+  // what is stored in ParquetTypeWithId::name_.
+  static std::shared_ptr<const ParquetTypeWithId> findFileChildByName(
+      const ParquetTypeWithId& parent,
+      const std::string& name) {
+    for (uint32_t i = 0; i < parent.size(); ++i) {
+      const auto& childPtr = parent.childAt(i);
+      auto parquetChild =
+          std::static_pointer_cast<const ParquetTypeWithId>(childPtr);
+      if (parquetChild->name_ == name) {
+        return parquetChild;
+      }
+    }
+    return nullptr;
+  }
+
   bool advanceToNextRowGroup() {
     if (nextRowGroupIdsIdx_ == rowGroupIds_.size()) {
       return false;
@@ -1850,6 +1951,37 @@ class ParquetRowReader::Impl {
     currentRowInGroup_ = 0;
     nextRowGroupIdsIdx_++;
     columnReader_->seekToRowGroup(nextRowGroupIndex);
+
+    // Refresh per-row in-memory byte estimate from the row-group metadata
+    // for the projected columns. Used by next() to cap the batch size and
+    // protect against peak-memory spikes (e.g. wide BYTE_ARRAY columns).
+    const auto previousBytesPerRow = cachedBytesPerRow_;
+    cachedBytesPerRow_ = 0;
+    int64_t estimatedRowGroupBytes = 0;
+    if (maxBatchBytes_ > 0 && rowsInCurrentRowGroup_ > 0) {
+      auto* structReader =
+          dynamic_cast<bytedance::bolt::parquet::StructColumnReader*>(
+              columnReader_.get());
+      if (structReader != nullptr && !requiredColumnNodes_.empty()) {
+        for (const auto& node : requiredColumnNodes_) {
+          estimatedRowGroupBytes += readerBase_->estimatedRowGroupBytesInMemory(
+              nextRowGroupIndex, *node);
+        }
+        cachedBytesPerRow_ = std::max<int64_t>(
+            1, estimatedRowGroupBytes / rowsInCurrentRowGroup_);
+      }
+    }
+    VLOG(1) << "ParquetRowReader::advanceToNextRowGroup: rowGroupIndex="
+            << nextRowGroupIndex
+            << ", rowGroupSlot=" << (nextRowGroupIdsIdx_ - 1) << "/"
+            << rowGroupIds_.size() << ", numRows=" << rowsInCurrentRowGroup_
+            << ", estimatedRowGroupBytes=" << estimatedRowGroupBytes
+            << ", prevBytesPerRow=" << previousBytesPerRow
+            << ", newBytesPerRow=" << cachedBytesPerRow_
+            << ", maxBatchBytes=" << maxBatchBytes_ << ", rowsByBytesCap="
+            << (cachedBytesPerRow_ > 0
+                    ? std::max<int64_t>(1, maxBatchBytes_ / cachedBytesPerRow_)
+                    : -1);
     return true;
   }
 
@@ -1874,6 +2006,16 @@ class ParquetRowReader::Impl {
 
   dwio::common::ColumnReaderStatistics columnReaderStats_;
   SchemaHelper schemaHelper_;
+
+  std::vector<std::shared_ptr<const ParquetTypeWithId>> requiredColumnNodes_;
+
+  // Hard upper bound (bytes) for a single batch's in-memory size; 0
+  // disables. Cached from RowReaderOptions at construction time.
+  int64_t maxBatchBytes_{0};
+  // Estimated in-memory bytes per row of the projected schema in the
+  // current row-group. Refreshed by advanceToNextRowGroup() and consumed
+  // by next() to derive a row-cap from maxBatchBytes_.
+  int64_t cachedBytesPerRow_{0};
 };
 
 ParquetRowReader::ParquetRowReader(
