@@ -36,6 +36,9 @@ struct BufferManagerStats {
   uint64_t spillReadBytes{0};
   uint64_t spillPhysicalWriteBytes{0};
   uint64_t spillPhysicalReadBytes{0};
+  uint64_t spillIoWriteBytes{0};
+  uint64_t spillIoReadBytes{0};
+  uint64_t spillIoPaddingWriteBytes{0};
   uint64_t spillCompressedBlocks{0};
   uint64_t spillCompressionTimeUs{0};
   uint64_t spillDecompressionTimeUs{0};

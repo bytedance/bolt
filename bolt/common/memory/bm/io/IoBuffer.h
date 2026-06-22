@@ -125,6 +125,33 @@ class IoBuffer {
         data, allocationSize, 0, size, [](char* p) noexcept { std::free(p); });
   }
 
+  static IoBuffer allocateAlignedFromMalloc(size_t size, size_t alignment) {
+    BOLT_CHECK_GT(size, 0);
+    BOLT_CHECK_GE(alignment, sizeof(void*));
+    BOLT_CHECK_EQ(
+        alignment & (alignment - 1),
+        0,
+        "BM IoBuffer alignment must be a power of two, alignment={}",
+        alignment);
+    const auto allocationSize =
+        ((size + alignment - 1) / alignment) * alignment;
+    void* data = nullptr;
+    const int error = ::posix_memalign(&data, alignment, allocationSize);
+    if (error != 0) {
+      BOLT_FAIL(
+          "BM aligned IoBuffer allocation failed, size={}, alignment={}, error={}",
+          size,
+          alignment,
+          error);
+    }
+    return fromOwned(
+        static_cast<char*>(data),
+        allocationSize,
+        0,
+        size,
+        [](char* p) noexcept { std::free(p); });
+  }
+
   template <typename Deleter>
   static IoBuffer fromOwned(
       char* data,
