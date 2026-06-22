@@ -1131,11 +1131,12 @@ void GroupingSet::runHashAggrJitAddChunks(
 
   if (hasSpilled() || bypassProbeHT_ || supportRowBasedOutput_ ||
       !activeRows_.isAllSelected()) {
-    LOG(INFO) << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
-              << " hasSpilled=" << hasSpilled()
-              << " bypassProbeHT=" << bypassProbeHT_
-              << " supportRowBasedOutput=" << supportRowBasedOutput_
-              << " activeRowsAllSelected=" << activeRows_.isAllSelected();
+    LOG_FIRST_N(INFO, 10)
+        << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
+        << " hasSpilled=" << hasSpilled()
+        << " bypassProbeHT=" << bypassProbeHT_
+        << " supportRowBasedOutput=" << supportRowBasedOutput_
+        << " activeRowsAllSelected=" << activeRows_.isAllSelected();
     return;
   }
 
