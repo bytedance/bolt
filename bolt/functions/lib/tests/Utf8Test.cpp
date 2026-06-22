@@ -29,7 +29,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "bolt/functions/prestosql/Utf8Utils.h"
+#include "bolt/functions/lib/Utf8Utils.h"
 namespace bytedance::bolt::functions {
 namespace {
 

@@ -28,7 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/functions/prestosql/Utf8Utils.h"
+#include "bolt/functions/lib/Utf8Utils.h"
 
 #include <utf8proc.h>
 

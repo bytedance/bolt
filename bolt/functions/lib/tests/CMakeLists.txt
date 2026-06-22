@@ -40,6 +40,7 @@ add_executable(
   Re2FunctionsTest.cpp
   RepeatTest.cpp
   TimeUtilsTest.cpp
+  Utf8Test.cpp
   ZetaDistributionTest.cpp
 )
 

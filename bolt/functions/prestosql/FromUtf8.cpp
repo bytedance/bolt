@@ -31,8 +31,8 @@
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/StringWriter.h"
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/functions/lib/Utf8Utils.h"
 #include "bolt/functions/lib/string/StringImpl.h"
-#include "bolt/functions/prestosql/Utf8Utils.h"
 namespace bytedance::bolt::functions {
 namespace {
 

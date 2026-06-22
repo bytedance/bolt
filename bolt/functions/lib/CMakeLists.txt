@@ -70,6 +70,7 @@ bolt_add_library(
   SimpleComparisonMatcher.cpp
   Size.cpp
   StringEncodingUtils.cpp
+  Utf8Utils.cpp
   StringUtil.cpp
   SubscriptUtil.cpp
   TimeUtils.cpp

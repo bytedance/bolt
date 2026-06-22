@@ -73,7 +73,6 @@ bolt_add_library(
   UdfMapFilterKeys.cpp
   UdfStringToLongArray.cpp
   URLFunctions.cpp
-  Utf8Utils.cpp
   VectorArithmetic.cpp
   WidthBucketArray.cpp
   Zip.cpp

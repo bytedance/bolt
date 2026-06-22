@@ -18,6 +18,7 @@
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/sparksql/ICURegexFunctions.h"
 #include "bolt/functions/sparksql/RegexFunctions.h"
+#include "bolt/functions/sparksql/Split.h"
 namespace bytedance::bolt::functions::sparksql {
 
 void registerRegexpFunctions(const std::string& prefix) {
@@ -46,6 +47,8 @@ void registerRegexpFunctions(const std::string& prefix) {
   exec::registerStatefulVectorFunction(
       prefix + "icu_regexp_like", icuRegexLikeSignatures(), makeICURegexLike);
 
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_regexp_split, prefix + "split");
+  registerFunction<Split, Array<Varchar>, Varchar, Varchar>({prefix + "split"});
+  registerFunction<Split, Array<Varchar>, Varchar, Varchar, int32_t>(
+      {prefix + "split"});
 }
 } // namespace bytedance::bolt::functions::sparksql

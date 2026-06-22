@@ -109,7 +109,6 @@ add_executable(
   TransformValuesTest.cpp
   TrimFunctionsTest.cpp
   URLFunctionsTest.cpp
-  Utf8Test.cpp
   WidthBucketArrayTest.cpp
   ZipTest.cpp
   ZipWithTest.cpp

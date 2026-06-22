@@ -29,8 +29,10 @@
  */
 #pragma once
 
+#include "bolt/functions/Macros.h"
+#include "bolt/functions/lib/Utf8Utils.h"
 #include "bolt/functions/lib/string/StringCore.h"
-#include "bolt/functions/prestosql/Utf8Utils.h"
+#include "bolt/type/Type.h"
 
 namespace bytedance::bolt::functions::sparksql {
 
