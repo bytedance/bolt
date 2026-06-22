@@ -12,12 +12,7 @@ class FileSegmentAllocator {
 
   // Not thread-safe. Callers must serialize Allocate() and Free() on the same
   // allocator instance.
-  virtual FileAllocateResult Allocate(int64_t size) {
-    return Allocate(size, size);
-  }
-  virtual FileAllocateResult Allocate(
-      int64_t requestedSize,
-      int64_t placementSize) = 0;
+  virtual FileAllocateResult Allocate(int64_t size) = 0;
   virtual FileFreeResult Free(const FileSegment& segment) = 0;
 };
 

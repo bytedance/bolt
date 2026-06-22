@@ -20,18 +20,11 @@ class FileSegmentAllocatorImpl : public FileSegmentAllocator {
   FileSegmentAllocatorImpl& operator=(const FileSegmentAllocatorImpl&) = delete;
 
   FileAllocateResult Allocate(int64_t size) override;
-  FileAllocateResult Allocate(int64_t requestedSize, int64_t placementSize)
-      override;
   FileFreeResult Free(const FileSegment& segment) override;
 
  private:
-  FileAllocateResult AllocateBucket(
-      int64_t requestedSize,
-      int64_t placementSize,
-      size_t bucket_index);
-  FileAllocateResult AllocateDedicated(
-      int64_t requestedSize,
-      int64_t placementSize);
+  FileAllocateResult AllocateBucket(int64_t size, size_t bucket_index);
+  FileAllocateResult AllocateDedicated(int64_t size);
   FileFreeResult FreeBucket(const SegmentRecord& record);
   FileFreeResult FreeDedicated(const SegmentRecord& record);
 
