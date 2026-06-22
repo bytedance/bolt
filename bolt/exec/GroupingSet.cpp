@@ -1125,8 +1125,12 @@ void GroupingSet::runHashAggrJitAddChunks(
     const RowVectorPtr& input,
     bool mayPushdown,
     std::vector<uint8_t>& jitExecuted) {
-  if (hashAggrJitChunks_.empty() || hasSpilled() || bypassProbeHT_ ||
-      supportRowBasedOutput_ || !activeRows_.isAllSelected()) {
+  if (hashAggrJitChunks_.empty()) {
+    return;
+  }
+
+  if (hasSpilled() || bypassProbeHT_ || supportRowBasedOutput_ ||
+      !activeRows_.isAllSelected()) {
     LOG(INFO) << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
               << " hasSpilled=" << hasSpilled()
               << " bypassProbeHT=" << bypassProbeHT_
@@ -1262,8 +1266,11 @@ void GroupingSet::runHashAggrJitExtractChunks(
     const RowVectorPtr& result,
     int32_t aggregateOutputOffset,
     std::vector<uint8_t>& jitExtracted) {
-  if (hashAggrJitChunks_.empty() || groups.empty() || hasSpilled() ||
-      supportRowBasedOutput_) {
+  if (hashAggrJitChunks_.empty()) {
+    return;
+  }
+
+  if (groups.empty() || hasSpilled() || supportRowBasedOutput_) {
     LOG(INFO) << "HashAggrJit extract skipped: chunks=" << hashAggrJitChunks_.size()
               << " groups=" << groups.size() << " hasSpilled=" << hasSpilled()
               << " supportRowBasedOutput=" << supportRowBasedOutput_;
