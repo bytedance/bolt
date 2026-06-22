@@ -34,7 +34,8 @@ class BufferManagerTest : public testing::Test {
       const std::string& name,
       compress::CompressionKind compressionKind =
           compress::CompressionKind::kLz4Block,
-      size_t minCompressBytes = 256 * 1024) {
+      size_t minCompressBytes = 256 * 1024,
+      FileIoMode ioMode = FileIoMode::kBuffered) {
     const auto directory =
         test::UniqueTempDir(fmt::format("bolt-bm-buffer-manager-{}", name));
     std::filesystem::remove_all(directory);
@@ -43,6 +44,7 @@ class BufferManagerTest : public testing::Test {
     config.poolName = fmt::format("bm-{}", name);
     config.spillStoreConfig.fileAllocatorConfig =
         test::ValidConfigWithDirectory(directory);
+    config.spillStoreConfig.fileAllocatorConfig.ioMode = ioMode;
     config.spillStoreConfig.compressionConfig.kind = compressionKind;
     config.spillStoreConfig.compressionConfig.minCompressBytes =
         minCompressBytes;
@@ -206,6 +208,45 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   auto repin = bm->Pin(block);
   EXPECT_EQ(9, repin.Ptr()[0]);
   EXPECT_EQ(9, repin.Ptr()[4095]);
+}
+
+TEST_F(BufferManagerTest, DirectIoReclaimPadsRecordAndReadsBackPayload) {
+  auto bm = makeBufferManager(
+      "direct-io-reclaim-pin",
+      compress::CompressionKind::kNone,
+      1,
+      FileIoMode::kDirect);
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
+    std::memset(handle.Ptr(), 19, block->size());
+  }
+
+  try {
+    EXPECT_EQ(4096, bm->Reclaim(4096));
+  } catch (const std::exception& e) {
+    const std::string message = e.what();
+    if (IsIoUringUnavailable(e) ||
+        message.find("native_error=22") != std::string::npos ||
+        message.find("native_error=95") != std::string::npos) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  auto stats = bm->stats();
+  EXPECT_GT(stats.spillIoWriteBytes, stats.spillPhysicalWriteBytes);
+  EXPECT_EQ(
+      stats.spillIoWriteBytes - stats.spillPhysicalWriteBytes,
+      stats.spillIoPaddingWriteBytes);
+
+  auto repin = bm->Pin(block);
+  EXPECT_EQ(19, repin.Ptr()[0]);
+  EXPECT_EQ(19, repin.Ptr()[4095]);
+
+  stats = bm->stats();
+  EXPECT_GT(stats.spillIoReadBytes, stats.spillPhysicalReadBytes);
 }
 
 TEST_F(BufferManagerTest, SpillBlocksSpillsOnlyUnpinnedResidentBlocks) {

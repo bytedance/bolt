@@ -18,6 +18,7 @@ struct SpillWriteResult {
   ManagedFileSegment segment;
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
+  uint64_t ioBytes{0};
   uint64_t compressionTimeUs{0};
   bool compressed{false};
 
@@ -29,6 +30,7 @@ struct SpillWriteResult {
 struct SpillWriteMetadata {
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
+  uint64_t ioBytes{0};
   uint64_t compressionTimeUs{0};
   bool compressed{false};
 };
@@ -53,6 +55,7 @@ struct SpillReadResult {
   IoResult io;
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
+  uint64_t ioBytes{0};
   uint64_t decompressionTimeUs{0};
 
   bool ok() const {
@@ -68,6 +71,12 @@ class SpillReadFuture {
       std::shared_ptr<compress::CompressionManager> compression,
       MemoryPool* pool,
       size_t expectedRawSize);
+  SpillReadFuture(
+      std::future<IoResult> rawFuture,
+      std::shared_ptr<compress::CompressionManager> compression,
+      MemoryPool* pool,
+      size_t recordSize,
+      size_t expectedRawSize);
 
   SpillReadResult get();
 
@@ -75,6 +84,7 @@ class SpillReadFuture {
   std::future<IoResult> rawFuture_;
   std::shared_ptr<compress::CompressionManager> compression_;
   MemoryPool* pool_{nullptr};
+  size_t recordSize_{0};
   size_t expectedRawSize_{0};
 };
 

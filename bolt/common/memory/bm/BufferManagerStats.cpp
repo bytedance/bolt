@@ -97,6 +97,9 @@ std::string toDebugString(
       << ", spill_read_bytes=" << stats.spillReadBytes
       << ", spill_physical_write_bytes=" << stats.spillPhysicalWriteBytes
       << ", spill_physical_read_bytes=" << stats.spillPhysicalReadBytes
+      << ", spill_io_write_bytes=" << stats.spillIoWriteBytes
+      << ", spill_io_read_bytes=" << stats.spillIoReadBytes
+      << ", spill_io_padding_write_bytes=" << stats.spillIoPaddingWriteBytes
       << ", spill_compressed_blocks=" << stats.spillCompressedBlocks
       << ", spill_compression_time_us=" << stats.spillCompressionTimeUs
       << ", spill_decompression_time_us=" << stats.spillDecompressionTimeUs
@@ -273,6 +276,8 @@ void BufferManagerStatsCollector::OnReadCompleted(
   ++stats_.spillReadCount;
   stats_.spillReadBytes += memory.size;
   stats_.spillPhysicalReadBytes += read.physicalBytes;
+  stats_.spillIoReadBytes +=
+      read.ioBytes == 0 ? read.physicalBytes : read.ioBytes;
   stats_.spillDecompressionTimeUs += read.decompressionTimeUs;
 
   auto& tagStats = MutableTagStats(memory.tag);
@@ -316,7 +321,12 @@ void BufferManagerStatsCollector::OnSpillRolledBack(const BlockMemory& memory) {
 void BufferManagerStatsCollector::OnSpillCompleted(
     const BlockMemory& memory,
     const SpillWriteResult& write) {
+  const auto ioBytes = write.ioBytes == 0 ? write.physicalBytes : write.ioBytes;
   stats_.spillPhysicalWriteBytes += write.physicalBytes;
+  stats_.spillIoWriteBytes += ioBytes;
+  if (ioBytes > write.physicalBytes) {
+    stats_.spillIoPaddingWriteBytes += ioBytes - write.physicalBytes;
+  }
   stats_.spillCompressionTimeUs += write.compressionTimeUs;
   if (write.compressed) {
     ++stats_.spillCompressedBlocks;
