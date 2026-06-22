@@ -45,6 +45,7 @@ bolt_add_library(
   LeastGreatest.cpp
   MakeTimestamp.cpp
   Map.cpp
+  MapFromArrays.cpp
   RegexFunctions.cpp
   # Register.cpp
   # RegisterArithmetic.cpp

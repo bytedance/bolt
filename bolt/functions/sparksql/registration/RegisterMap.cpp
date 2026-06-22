@@ -32,6 +32,7 @@
 #include "bolt/functions/lib/MapFromEntries.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/lib/Size.h"
+#include "bolt/functions/sparksql/MapFromArrays.h"
 namespace bytedance::bolt::functions {
 extern void registerElementAtFunction(
     const std::string& name,
@@ -41,8 +42,7 @@ void registerSparkMapFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_map_filter, prefix + "map_filter");
   // Complex types.
 
-  BOLT_REGISTER_VECTOR_FUNCTION(
-      udf_map_allow_duplicates, prefix + "map_from_arrays");
+  sparksql::registerMapFromArrays(prefix + "map_from_arrays");
   registerMapFromEntriesFunction(prefix + "map_from_entries", false);
   registerMapConcatFunction(prefix + "map_concat");
   registerMapConcatEmptyNullsFunction(prefix + "map_concat");
