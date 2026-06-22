@@ -1082,14 +1082,23 @@ std::string HashAggrJitSlot::getDescription() const {
   }
   inputs << "]";
 
+  // NOTE: nullByte/nullMask MUST be part of the description because they are
+  // baked into the generated IR as compile-time constants (see
+  // clearAccumulatorNull/setAccumulatorNull). The description drives the JIT
+  // module cache key (functionName_); omitting them lets two slots that share
+  // the same aggregate semantics and accumulator offset but have a different
+  // null-bit layout reuse the same compiled code, which would read-modify-write
+  // the wrong null bit and corrupt a neighboring grouping key's null flag.
   return fmt::format(
-      "{}_raw{}_partial{}({})->{}@{}",
+      "{}_raw{}_partial{}({})->{}@{}@nb{}@nm{}",
       hashAggrJitKindName(desc.kind),
       desc.context.isRawInput,
       desc.context.isPartialOutput,
       inputs.str(),
       desc.context.outputType()->toString(),
-      offset);
+      offset,
+      nullByte,
+      nullMask);
 }
 
 HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
@@ -1099,6 +1108,18 @@ HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
       "jit_hashaggr_v2_n{}_h{:016x}",
       slots_.size(),
       bits::hashBytes(1, description.data(), description.size()));
+  // TODO(hash_aggr_jit): temporary diagnostics to confirm/rule out JIT module
+  // cache collisions across grouping sets that share the same description but
+  // have different null-bit layouts. Prints the cache key together with each
+  // slot's offset/nullByte/nullMask. Remove once the root cause is confirmed.
+  for (const auto& slot : slots_) {
+    LOG(INFO) << "HashAggrJit slot layout: functionName=" << functionName_
+              << " description=" << description
+              << " aggregateIndex=" << slot.aggregateIndex
+              << " offset=" << slot.offset << " nullByte=" << slot.nullByte
+              << " nullMask=0x" << std::hex << static_cast<int>(slot.nullMask)
+              << std::dec;
+  }
 }
 
 std::string HashAggrJitChunk::getDescription() const {
