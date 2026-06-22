@@ -1108,18 +1108,6 @@ HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
       "jit_hashaggr_v2_n{}_h{:016x}",
       slots_.size(),
       bits::hashBytes(1, description.data(), description.size()));
-  // TODO(hash_aggr_jit): temporary diagnostics to confirm/rule out JIT module
-  // cache collisions across grouping sets that share the same description but
-  // have different null-bit layouts. Prints the cache key together with each
-  // slot's offset/nullByte/nullMask. Remove once the root cause is confirmed.
-  for (const auto& slot : slots_) {
-    LOG(INFO) << "HashAggrJit slot layout: functionName=" << functionName_
-              << " description=" << description
-              << " aggregateIndex=" << slot.aggregateIndex
-              << " offset=" << slot.offset << " nullByte=" << slot.nullByte
-              << " nullMask=0x" << std::hex << static_cast<int>(slot.nullMask)
-              << std::dec;
-  }
 }
 
 std::string HashAggrJitChunk::getDescription() const {
