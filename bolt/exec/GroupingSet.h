@@ -216,6 +216,9 @@ class GroupingSet {
   }
 
   common::AggregationStats getRuntimeStats() {
+#ifdef ENABLE_BOLT_JIT
+    waitForHashAggrJitCompilation();
+#endif
     return stats_;
   }
 
