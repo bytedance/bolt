@@ -19,8 +19,7 @@
 
 #include <array>
 #include <cstdint>
-#include <iomanip>
-#include <iostream>
+#include <cstdio>
 #include <memory>
 #include <optional>
 #include <random>
@@ -71,56 +70,6 @@ DenseSerialized denseSerialize(
       folly::Range<const size_t*>(offs, n));
   return {std::move(buf), std::move(offsetsBuf)};
 }
-
-class DenseSerializeBenchmark {
- public:
-  void serialize(const RowTypePtr& rowType) {
-    folly::BenchmarkSuspender suspender;
-    auto data = makeData(rowType);
-    suspender.dismiss();
-
-    auto serialized = denseSerialize(data, pool());
-    BOLT_CHECK_GE(serialized.buffer->size(), 0);
-  }
-
-  void deserialize(const RowTypePtr& rowType) {
-    folly::BenchmarkSuspender suspender;
-    auto data = makeData(rowType);
-    auto serialized = denseSerialize(data, pool());
-    const auto* bytes = serialized.buffer->as<char>();
-    const auto* offsets = serialized.rowOffsets->as<size_t>();
-    const auto rowCount = data->size();
-    std::vector<std::string_view> rows;
-    rows.reserve(rowCount);
-    for (vector_size_t i = 0; i < rowCount; ++i) {
-      rows.emplace_back(bytes + offsets[i], offsets[i + 1] - offsets[i]);
-    }
-    suspender.dismiss();
-
-    auto copy = DenseRow::deserialize(rows, rowType, pool());
-    BOLT_CHECK_EQ(copy->size(), data->size());
-  }
-
- private:
-  RowVectorPtr makeData(const RowTypePtr& rowType) {
-    VectorFuzzer::Options options;
-    options.vectorSize = 1'000;
-
-    const auto seed = 1;
-    VectorFuzzer fuzzer(options, pool_.get(), seed);
-    // fuzzFlat (not fuzzInputRow) so all inputs are flat — fuzzInputRow may
-    // wrap children in dictionaries, which skews the codec measurement (extra
-    // decode/null-merge cost unrelated to the row serializer).
-    return std::dynamic_pointer_cast<RowVector>(fuzzer.fuzzFlat(rowType));
-  }
-
-  memory::MemoryPool* pool() {
-    return pool_.get();
-  }
-
-  std::shared_ptr<memory::MemoryPool> pool_{
-      memory::memoryManager()->addLeafPool()};
-};
 
 enum class SerdeDataKind {
   kDefault,
@@ -516,65 +465,53 @@ std::vector<std::string_view> serializeCompactRows(
   return serialized;
 }
 
-int serializeUnsafeSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int unsafeSer(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
   auto data = makeSerdeOnlyData(benchmarkCase, pool.get());
-  UnsafeRowFast unsafeRow(data);
-  const auto totalSize =
-      computeUnsafeTotalSize(unsafeRow, benchmarkCase.rowType, data->size());
-  auto buffer = AlignedBuffer::allocate<char>(totalSize, pool.get());
-  auto* rawBuffer = buffer->asMutable<char>();
-  BOLT_CHECK_EQ(
-      serializeUnsafeToBuffer(unsafeRow, data->size(), rawBuffer), totalSize);
   suspender.dismiss();
 
+  // Full Vector -> buffer: build the serializer, size it, allocate, write.
   for (int i = 0; i < nIters; ++i) {
-    folly::doNotOptimizeAway(
-        serializeUnsafeToBuffer(unsafeRow, data->size(), rawBuffer));
+    UnsafeRowFast unsafeRow(data);
+    const auto totalSize =
+        computeUnsafeTotalSize(unsafeRow, benchmarkCase.rowType, data->size());
+    auto buffer = AlignedBuffer::allocate<char>(totalSize, pool.get());
+    folly::doNotOptimizeAway(serializeUnsafeToBuffer(
+        unsafeRow, data->size(), buffer->asMutable<char>()));
   }
   return nIters * data->size();
 }
 
-int serializeCompactSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int compactSer(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
   auto data = makeSerdeOnlyData(benchmarkCase, pool.get());
-  CompactRow compactRow(data);
   const auto numRows = data->size();
-  // Columnar/batch interface (matching DenseRow): precompute absolute per-row
-  // offsets, then time a single batch serialize() — which uses CompactRow's
-  // range path + fixed-width bulk-copy fast path.
-  std::vector<size_t> offsets(numRows);
-  size_t cum = 0;
   const auto fixed = CompactRow::fixedRowSize(benchmarkCase.rowType);
-  for (vector_size_t r = 0; r < numRows; ++r) {
-    offsets[r] = cum;
-    cum += fixed ? *fixed : static_cast<size_t>(compactRow.rowSize(r));
-  }
-  // CompactRow's batch serialize needs the buffer pre-zeroed (null-bit
-  // handling); re-serializing the same data into it is idempotent.
-  auto buffer =
-      AlignedBuffer::allocate<char>(std::max<size_t>(cum, 1u), pool.get(), 0);
-  auto* rawBuffer = buffer->asMutable<char>();
   suspender.dismiss();
 
+  // Full Vector -> buffer: build CompactRow, compute per-row offsets (its size
+  // pass), allocate (pre-zeroed for null-bit handling), batch serialize.
   for (int i = 0; i < nIters; ++i) {
-    compactRow.serialize(0, numRows, offsets.data(), rawBuffer);
-    folly::doNotOptimizeAway(rawBuffer);
+    CompactRow compactRow(data);
+    std::vector<size_t> offsets(numRows);
+    size_t cum = 0;
+    for (vector_size_t r = 0; r < numRows; ++r) {
+      offsets[r] = cum;
+      cum += fixed ? *fixed : static_cast<size_t>(compactRow.rowSize(r));
+    }
+    auto buffer =
+        AlignedBuffer::allocate<char>(std::max<size_t>(cum, 1u), pool.get(), 0);
+    compactRow.serialize(0, numRows, offsets.data(), buffer->asMutable<char>());
+    folly::doNotOptimizeAway(buffer);
   }
   return nIters * numRows;
 }
 
-int deserializeUnsafeSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int unsafeDeser(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
@@ -593,9 +530,7 @@ int deserializeUnsafeSerdeOnly(
   return nIters * data->size();
 }
 
-int deserializeCompactSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int compactDeser(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
@@ -614,69 +549,38 @@ int deserializeCompactSerdeOnly(
   return nIters * data->size();
 }
 
-#define SERDE_ONLY_BENCHMARKS(name, benchmarkCase) \
-  BENCHMARK_NAMED_PARAM_MULTI(                     \
-      serializeUnsafeSerdeOnly,                    \
-      unsafe_serde_only_serialize_##name,          \
-      benchmarkCase);                              \
-                                                   \
-  BENCHMARK_NAMED_PARAM_MULTI(                     \
-      serializeCompactSerdeOnly,                   \
-      compact_serde_only_serialize_##name,         \
-      benchmarkCase);                              \
-                                                   \
-  BENCHMARK_NAMED_PARAM_MULTI(                     \
-      deserializeUnsafeSerdeOnly,                  \
-      unsafe_serde_only_deserialize_##name,        \
-      benchmarkCase);                              \
-                                                   \
-  BENCHMARK_NAMED_PARAM_MULTI(                     \
-      deserializeCompactSerdeOnly,                 \
-      compact_serde_only_deserialize_##name,       \
-      benchmarkCase);
+// Register a serde benchmark (func) for one case, shown as func(label). We use
+// addBenchmark directly (not BENCHMARK_NAMED_PARAM_MULTI) so the lambda can
+// print a one-line progress message to stderr the first time it runs — folly's
+// results table only prints at the very end, so this is how you see which
+// benchmark is running.
+#define SERDE_BENCH(func, label, benchmarkCase)                      \
+  FOLLY_MAYBE_UNUSED static bool FB_ANONYMOUS_VARIABLE(serdeBench) = \
+      (::folly::addBenchmark(                                        \
+           __FILE__,                                                 \
+           #func "(" #label ")",                                     \
+           [](unsigned nIters) -> unsigned {                         \
+             return func(nIters, benchmarkCase);                     \
+           }),                                                       \
+       true)
 
-int serializeDenseSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int denseSer(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
   auto data = makeSerdeOnlyData(benchmarkCase, pool.get());
-  // Build the serializer + offsets + output buffer ONCE outside the timed loop
-  // and time only serialize() into the reused buffer — matching
-  // serializeCompactSerdeOnly / serializeUnsafeSerdeOnly so the comparison is
-  // write-vs-write (not build+alloc-vs-write). DenseRow is marker-less, so
-  // strip any top-level nulls first.
-  RowVectorPtr input = data;
-  if (data->mayHaveNulls()) {
-    input = std::make_shared<RowVector>(
-        pool.get(), data->type(), nullptr, data->size(), data->children());
-  }
-  DenseRow rows(input);
-  const auto n = rows.numRows();
-  auto offsetsBuf = AlignedBuffer::allocate<size_t>(n + 1, pool.get());
-  auto* offs = offsetsBuf->asMutable<size_t>();
-  size_t cum = 0;
-  for (vector_size_t r = 0; r < n; ++r) {
-    offs[r] = cum;
-    cum += rows.rowSizes()[r];
-  }
-  offs[n] = cum;
-  auto buffer =
-      AlignedBuffer::allocate<char>(std::max<size_t>(cum, 1u), pool.get());
-  auto* base = reinterpret_cast<uint8_t*>(buffer->asMutable<char>());
   suspender.dismiss();
 
+  // Full Vector -> buffer: denseSerialize builds the DenseRow (which runs the
+  // size pass — addColumnSizes), computes offsets, allocates, and serializes
+  // (it also strips top-level nulls, since DenseRow is marker-less).
   for (int i = 0; i < nIters; ++i) {
-    rows.serialize(base, folly::Range<const size_t*>(offs, n));
-    folly::doNotOptimizeAway(base);
+    folly::doNotOptimizeAway(denseSerialize(data, pool.get()).buffer);
   }
   return nIters * data->size();
 }
 
-int deserializeDenseSerdeOnly(
-    int nIters,
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
+int denseDeser(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
   auto pool = memory::memoryManager()->addLeafPool();
 
   folly::BenchmarkSuspender suspender;
@@ -699,77 +603,41 @@ int deserializeDenseSerdeOnly(
   return nIters * data->size();
 }
 
-#define DENSE_SERDE_ONLY_BENCHMARKS(name, benchmarkCase) \
-  BENCHMARK_NAMED_PARAM_MULTI(                           \
-      serializeDenseSerdeOnly,                           \
-      dense_serde_only_serialize_##name,                 \
-      benchmarkCase);                                    \
-                                                         \
-  BENCHMARK_NAMED_PARAM_MULTI(                           \
-      deserializeDenseSerdeOnly,                         \
-      dense_serde_only_deserialize_##name,               \
-      benchmarkCase);
+// The dense size pass in isolation: DenseRow construction = decode +
+// addColumnSizes (no buffer write). Lets you see how much of denseSer is the
+// size pass vs the byte writing.
+int denseSizePass(int nIters, const SerdeOnlyBenchmarkCase& benchmarkCase) {
+  auto pool = memory::memoryManager()->addLeafPool();
 
-#define DENSE_BENCHMARKS(name, rowType) \
-  BENCHMARK(dense_serialize_##name) {   \
-    DenseSerializeBenchmark benchmark;  \
-    benchmark.serialize(rowType);       \
-  }                                     \
-                                        \
-  BENCHMARK(dense_deserialize_##name) { \
-    DenseSerializeBenchmark benchmark;  \
-    benchmark.deserialize(rowType);     \
+  folly::BenchmarkSuspender suspender;
+  auto data = makeSerdeOnlyData(benchmarkCase, pool.get());
+  RowVectorPtr input = data;
+  if (data->mayHaveNulls()) {
+    input = std::make_shared<RowVector>(
+        pool.get(), data->type(), nullptr, data->size(), data->children());
   }
+  suspender.dismiss();
 
-DENSE_BENCHMARKS(
-    fixedWidth5,
-    ROW({BIGINT(), DOUBLE(), BOOLEAN(), TINYINT(), REAL()}));
+  for (int i = 0; i < nIters; ++i) {
+    DenseRow rows(input);
+    folly::doNotOptimizeAway(rows.rowSizes()[0]);
+  }
+  return nIters * data->size();
+}
 
-DENSE_BENCHMARKS(
-    fixedWidth10,
-    ROW({
-        BIGINT(),
-        BIGINT(),
-        BIGINT(),
-        BIGINT(),
-        BIGINT(),
-        BIGINT(),
-        DOUBLE(),
-        BIGINT(),
-        BIGINT(),
-        BIGINT(),
-    }));
-
-DENSE_BENCHMARKS(
-    fixedWidth20,
-    ROW({
-        BIGINT(), BIGINT(), BIGINT(), BIGINT(), BIGINT(), BIGINT(), BIGINT(),
-        BIGINT(), BIGINT(), BIGINT(), DOUBLE(), DOUBLE(), DOUBLE(), DOUBLE(),
-        DOUBLE(), DOUBLE(), DOUBLE(), DOUBLE(), BIGINT(), BIGINT(),
-    }));
-
-DENSE_BENCHMARKS(strings1, ROW({BIGINT(), VARCHAR()}));
-
-DENSE_BENCHMARKS(
-    strings5,
-    ROW({
-        BIGINT(),
-        VARCHAR(),
-        VARCHAR(),
-        VARCHAR(),
-        VARCHAR(),
-        VARCHAR(),
-    }));
-
-DENSE_BENCHMARKS(arrays, ROW({BIGINT(), ARRAY(BIGINT())}));
-
-DENSE_BENCHMARKS(nestedArrays, ROW({BIGINT(), ARRAY(ARRAY(BIGINT()))}));
-
-DENSE_BENCHMARKS(maps, ROW({BIGINT(), MAP(BIGINT(), REAL())}));
-
-DENSE_BENCHMARKS(
-    structs,
-    ROW({BIGINT(), ROW({BIGINT(), DOUBLE(), BOOLEAN(), TINYINT(), REAL()})}));
+// Register every format for one case as a single adjacent block, so the
+// results table groups them for comparison: the three serializers, then the
+// dense size pass, then the three deserializers. Cases are invoked in a
+// comparable order below (scalars, then each container type with its
+// value-range variants).
+#define CASE_BENCHMARKS(name, benchmarkCase)       \
+  SERDE_BENCH(unsafeSer, name, benchmarkCase);     \
+  SERDE_BENCH(compactSer, name, benchmarkCase);    \
+  SERDE_BENCH(denseSer, name, benchmarkCase);      \
+  SERDE_BENCH(denseSizePass, name, benchmarkCase); \
+  SERDE_BENCH(unsafeDeser, name, benchmarkCase);   \
+  SERDE_BENCH(compactDeser, name, benchmarkCase);  \
+  SERDE_BENCH(denseDeser, name, benchmarkCase)
 
 constexpr BigintRange kRangeLt2Pow8{-((1LL << 8) - 1), (1LL << 8) - 1};
 constexpr BigintRange kRangeLt2Pow32{-((1LL << 32) - 1), (1LL << 32) - 1};
@@ -878,162 +746,33 @@ const SerdeOnlyBenchmarkCase kMultiScalar10SmallLt2Pow8{
     SerdeDataKind::kMultiScalar10Small,
     kRangeLt2Pow8};
 
-struct NamedSerdeOnlyBenchmarkCase {
-  const char* name;
-  const SerdeOnlyBenchmarkCase* benchmarkCase;
-};
+// --- Scalars: BIGINT swept by value range, then double / strings. ---
+CASE_BENCHMARKS(bigint_lt_2pow8, kBigintLt2Pow8);
+CASE_BENCHMARKS(bigint_lt_2pow32, kBigintLt2Pow32);
+CASE_BENCHMARKS(bigint_random, kBigintRandom);
+CASE_BENCHMARKS(bigint_random_nullable, kBigintRandomNullable);
+CASE_BENCHMARKS(double_random, kDoubleRandom);
+CASE_BENCHMARKS(string_len8, kStringLen8);
+CASE_BENCHMARKS(string_len100, kStringLen100);
 
-const std::array<NamedSerdeOnlyBenchmarkCase, 20> kSerdeOnlyBenchmarkCases{{
-    {"bigint_lt_2pow8", &kBigintLt2Pow8},
-    {"bigint_lt_2pow32", &kBigintLt2Pow32},
-    {"bigint_random", &kBigintRandom},
-    {"bigint_random_nullable", &kBigintRandomNullable},
-    {"double_random", &kDoubleRandom},
-    {"string_len8", &kStringLen8},
-    {"string_len100", &kStringLen100},
-    {"arrays", &kArrays},
-    {"nestedArrays", &kNestedArrays},
-    {"maps", &kMaps},
-    {"arrays_bigint_lt_2pow8", &kArraysBigintLt2Pow8},
-    {"arrays_bigint_lt_2pow32", &kArraysBigintLt2Pow32},
-    {"nestedArrays_bigint_lt_2pow8", &kNestedArraysBigintLt2Pow8},
-    {"nestedArrays_bigint_lt_2pow32", &kNestedArraysBigintLt2Pow32},
-    {"maps_bigint_lt_2pow8", &kMapsBigintLt2Pow8},
-    {"maps_bigint_lt_2pow32", &kMapsBigintLt2Pow32},
-    {"multiScalar5", &kMultiScalar5},
-    {"multiScalar10", &kMultiScalar10},
-    {"multiScalar5_small_lt_2pow8", &kMultiScalar5SmallLt2Pow8},
-    {"multiScalar10_small_lt_2pow8", &kMultiScalar10SmallLt2Pow8},
-}};
+// --- Multi-column flat rows: 5- and 10-column, full vs small-int. ---
+CASE_BENCHMARKS(multiScalar5, kMultiScalar5);
+CASE_BENCHMARKS(multiScalar5_small_lt_2pow8, kMultiScalar5SmallLt2Pow8);
+CASE_BENCHMARKS(multiScalar10, kMultiScalar10);
+CASE_BENCHMARKS(multiScalar10_small_lt_2pow8, kMultiScalar10SmallLt2Pow8);
 
-struct SerdeOnlySerializedSizes {
-  vector_size_t rowCount;
-  size_t unsafeBytes;
-  size_t compactBytes;
-  size_t denseBytes;
-};
-
-SerdeOnlySerializedSizes computeSerdeOnlySerializedSizes(
-    const SerdeOnlyBenchmarkCase& benchmarkCase) {
-  auto pool = memory::memoryManager()->addLeafPool();
-  auto data = makeSerdeOnlyData(benchmarkCase, pool.get());
-
-  UnsafeRowFast unsafeRow(data);
-  const auto unsafeBytes =
-      computeUnsafeTotalSize(unsafeRow, benchmarkCase.rowType, data->size());
-
-  CompactRow compactRow(data);
-  const auto compactBytes =
-      computeCompactTotalSize(compactRow, benchmarkCase.rowType, data->size());
-
-  const auto denseBytes = denseSerialize(data, pool.get()).buffer->size();
-
-  return {
-      data->size(),
-      unsafeBytes,
-      compactBytes,
-      denseBytes,
-  };
-}
-
-SERDE_ONLY_BENCHMARKS(bigint_lt_2pow8, kBigintLt2Pow8);
-
-SERDE_ONLY_BENCHMARKS(bigint_lt_2pow32, kBigintLt2Pow32);
-
-SERDE_ONLY_BENCHMARKS(bigint_random, kBigintRandom);
-
-SERDE_ONLY_BENCHMARKS(bigint_random_nullable, kBigintRandomNullable);
-
-SERDE_ONLY_BENCHMARKS(double_random, kDoubleRandom);
-
-SERDE_ONLY_BENCHMARKS(string_len8, kStringLen8);
-
-SERDE_ONLY_BENCHMARKS(string_len100, kStringLen100);
-
-SERDE_ONLY_BENCHMARKS(arrays, kArrays);
-
-SERDE_ONLY_BENCHMARKS(nestedArrays, kNestedArrays);
-
-SERDE_ONLY_BENCHMARKS(maps, kMaps);
-
-SERDE_ONLY_BENCHMARKS(arrays_bigint_lt_2pow8, kArraysBigintLt2Pow8);
-SERDE_ONLY_BENCHMARKS(arrays_bigint_lt_2pow32, kArraysBigintLt2Pow32);
-SERDE_ONLY_BENCHMARKS(nestedArrays_bigint_lt_2pow8, kNestedArraysBigintLt2Pow8);
-SERDE_ONLY_BENCHMARKS(
-    nestedArrays_bigint_lt_2pow32,
-    kNestedArraysBigintLt2Pow32);
-SERDE_ONLY_BENCHMARKS(maps_bigint_lt_2pow8, kMapsBigintLt2Pow8);
-SERDE_ONLY_BENCHMARKS(maps_bigint_lt_2pow32, kMapsBigintLt2Pow32);
-
-DENSE_SERDE_ONLY_BENCHMARKS(arrays_bigint_lt_2pow8, kArraysBigintLt2Pow8);
-DENSE_SERDE_ONLY_BENCHMARKS(arrays_bigint_lt_2pow32, kArraysBigintLt2Pow32);
-DENSE_SERDE_ONLY_BENCHMARKS(
-    nestedArrays_bigint_lt_2pow8,
-    kNestedArraysBigintLt2Pow8);
-DENSE_SERDE_ONLY_BENCHMARKS(
-    nestedArrays_bigint_lt_2pow32,
-    kNestedArraysBigintLt2Pow32);
-DENSE_SERDE_ONLY_BENCHMARKS(maps_bigint_lt_2pow8, kMapsBigintLt2Pow8);
-DENSE_SERDE_ONLY_BENCHMARKS(maps_bigint_lt_2pow32, kMapsBigintLt2Pow32);
-
-DENSE_SERDE_ONLY_BENCHMARKS(bigint_lt_2pow8, kBigintLt2Pow8);
-
-DENSE_SERDE_ONLY_BENCHMARKS(bigint_lt_2pow32, kBigintLt2Pow32);
-
-DENSE_SERDE_ONLY_BENCHMARKS(bigint_random, kBigintRandom);
-
-DENSE_SERDE_ONLY_BENCHMARKS(bigint_random_nullable, kBigintRandomNullable);
-
-DENSE_SERDE_ONLY_BENCHMARKS(double_random, kDoubleRandom);
-
-DENSE_SERDE_ONLY_BENCHMARKS(string_len8, kStringLen8);
-
-DENSE_SERDE_ONLY_BENCHMARKS(string_len100, kStringLen100);
-
-DENSE_SERDE_ONLY_BENCHMARKS(arrays, kArrays);
-
-DENSE_SERDE_ONLY_BENCHMARKS(nestedArrays, kNestedArrays);
-
-DENSE_SERDE_ONLY_BENCHMARKS(maps, kMaps);
-
-SERDE_ONLY_BENCHMARKS(multiScalar5, kMultiScalar5);
-SERDE_ONLY_BENCHMARKS(multiScalar10, kMultiScalar10);
-DENSE_SERDE_ONLY_BENCHMARKS(multiScalar5, kMultiScalar5);
-DENSE_SERDE_ONLY_BENCHMARKS(multiScalar10, kMultiScalar10);
-
-SERDE_ONLY_BENCHMARKS(multiScalar5_small_lt_2pow8, kMultiScalar5SmallLt2Pow8);
-SERDE_ONLY_BENCHMARKS(multiScalar10_small_lt_2pow8, kMultiScalar10SmallLt2Pow8);
-DENSE_SERDE_ONLY_BENCHMARKS(
-    multiScalar5_small_lt_2pow8,
-    kMultiScalar5SmallLt2Pow8);
-DENSE_SERDE_ONLY_BENCHMARKS(
-    multiScalar10_small_lt_2pow8,
-    kMultiScalar10SmallLt2Pow8);
+// --- Containers: each type next to its value-range variants. ---
+CASE_BENCHMARKS(arrays, kArrays);
+CASE_BENCHMARKS(arrays_bigint_lt_2pow8, kArraysBigintLt2Pow8);
+CASE_BENCHMARKS(arrays_bigint_lt_2pow32, kArraysBigintLt2Pow32);
+CASE_BENCHMARKS(nestedArrays, kNestedArrays);
+CASE_BENCHMARKS(nestedArrays_bigint_lt_2pow8, kNestedArraysBigintLt2Pow8);
+CASE_BENCHMARKS(nestedArrays_bigint_lt_2pow32, kNestedArraysBigintLt2Pow32);
+CASE_BENCHMARKS(maps, kMaps);
+CASE_BENCHMARKS(maps_bigint_lt_2pow8, kMapsBigintLt2Pow8);
+CASE_BENCHMARKS(maps_bigint_lt_2pow32, kMapsBigintLt2Pow32);
 
 } // namespace
-
-void printSerdeOnlySerializedSizes() {
-  std::cout << "SerdeOnly serialized size stats (bytes + bytes/row)\n";
-  std::cout
-      << "case,row_count,unsafe_bytes,compact_bytes,dense_bytes,unsafe_bpr,compact_bpr,dense_bpr\n";
-
-  for (const auto& namedCase : kSerdeOnlyBenchmarkCases) {
-    const auto stats =
-        computeSerdeOnlySerializedSizes(*namedCase.benchmarkCase);
-    const auto toBytesPerRow = [rowCount =
-                                    stats.rowCount](size_t bytes) -> double {
-      return static_cast<double>(bytes) / static_cast<double>(rowCount);
-    };
-
-    std::cout << namedCase.name << ',' << stats.rowCount << ','
-              << stats.unsafeBytes << ',' << stats.compactBytes << ','
-              << stats.denseBytes << ',' << std::fixed << std::setprecision(2)
-              << toBytesPerRow(stats.unsafeBytes) << ','
-              << toBytesPerRow(stats.compactBytes) << ','
-              << toBytesPerRow(stats.denseBytes) << '\n';
-  }
-  std::cout.flush();
-}
 
 // ===========================================================================
 // Size-pass microbenchmark: times the REAL scalar::addColumnSizes on a flat
@@ -1089,20 +828,21 @@ std::unique_ptr<SizeInput> makeDictInput(memory::MemoryPool* pool, int mag) {
   in->decoded.decode(*in->vec);
   return in;
 }
+
 } // namespace size_bench
 
 #define SIZE_BENCH(tag, mag)                                          \
   BENCHMARK(addColumnSizes_##tag) {                                   \
     static auto pool = memory::memoryManager()->addLeafPool();        \
     static auto in = size_bench::makeInput(pool.get(), mag);          \
-    scalar::addColumnSizes(                                           \
+    dense_row::scalar::addColumnSizes(                                \
         *BIGINT(), in->decoded, size_bench::kN, in->rowSizes.data()); \
     folly::doNotOptimizeAway(in->rowSizes[0]);                        \
   }                                                                   \
   BENCHMARK(addColumnSizes_dict_##tag) {                              \
     static auto pool = memory::memoryManager()->addLeafPool();        \
     static auto in = size_bench::makeDictInput(pool.get(), mag);      \
-    scalar::addColumnSizes(                                           \
+    dense_row::scalar::addColumnSizes(                                \
         *BIGINT(), in->decoded, size_bench::kN, in->rowSizes.data()); \
     folly::doNotOptimizeAway(in->rowSizes[0]);                        \
   }
@@ -1111,12 +851,63 @@ SIZE_BENCH(small, 0)
 SIZE_BENCH(medium_i32, 1)
 SIZE_BENCH(large_i64, 2)
 
+// Printed once at the end (after folly's timing table): the serialized size of
+// each case in all three row formats (bytes/row). The benchmark table itself
+// shows only timings.
+void printSerializedSizes() {
+  struct NamedCase {
+    const char* name;
+    const SerdeOnlyBenchmarkCase* benchmarkCase;
+  };
+  static const NamedCase cases[] = {
+      {"bigint_lt_2pow8", &kBigintLt2Pow8},
+      {"bigint_lt_2pow32", &kBigintLt2Pow32},
+      {"bigint_random", &kBigintRandom},
+      {"bigint_random_nullable", &kBigintRandomNullable},
+      {"double_random", &kDoubleRandom},
+      {"string_len8", &kStringLen8},
+      {"string_len100", &kStringLen100},
+      {"multiScalar5", &kMultiScalar5},
+      {"multiScalar5_small_lt_2pow8", &kMultiScalar5SmallLt2Pow8},
+      {"multiScalar10", &kMultiScalar10},
+      {"multiScalar10_small_lt_2pow8", &kMultiScalar10SmallLt2Pow8},
+      {"arrays", &kArrays},
+      {"arrays_bigint_lt_2pow8", &kArraysBigintLt2Pow8},
+      {"arrays_bigint_lt_2pow32", &kArraysBigintLt2Pow32},
+      {"nestedArrays", &kNestedArrays},
+      {"nestedArrays_bigint_lt_2pow8", &kNestedArraysBigintLt2Pow8},
+      {"nestedArrays_bigint_lt_2pow32", &kNestedArraysBigintLt2Pow32},
+      {"maps", &kMaps},
+      {"maps_bigint_lt_2pow8", &kMapsBigintLt2Pow8},
+      {"maps_bigint_lt_2pow32", &kMapsBigintLt2Pow32},
+  };
+
+  std::printf("\n=== serialized size (bytes/row) ===\n");
+  std::printf("%-30s %8s %8s %8s\n", "case", "unsafe", "compact", "dense");
+  auto pool = memory::memoryManager()->addLeafPool();
+  for (const auto& nc : cases) {
+    auto data = makeSerdeOnlyData(*nc.benchmarkCase, pool.get());
+    const auto rows = data->size();
+    UnsafeRowFast unsafeRow(data);
+    CompactRow compactRow(data);
+    const auto u =
+        computeUnsafeTotalSize(unsafeRow, nc.benchmarkCase->rowType, rows) /
+        rows;
+    const auto c =
+        computeCompactTotalSize(compactRow, nc.benchmarkCase->rowType, rows) /
+        rows;
+    const auto d = denseSerialize(data, pool.get()).buffer->size() / rows;
+    std::printf("%-30s %8zu %8zu %8zu\n", nc.name, u, c, d);
+  }
+  std::fflush(stdout);
+}
+
 } // namespace bytedance::bolt::row
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   bytedance::bolt::memory::MemoryManager::initialize({});
-  bytedance::bolt::row::printSerdeOnlySerializedSizes();
   folly::runBenchmarks();
+  bytedance::bolt::row::printSerializedSizes();
   return 0;
 }

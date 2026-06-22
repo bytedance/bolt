@@ -65,7 +65,7 @@
 // column-batch path; a row whose fields are all scalar uses a dedicated
 // fast path that skips the general scaffolding entirely. The codec kernels
 // live in sibling TUs, all declared in DenseRowGeneral.h:
-//   * DenseRowGeneralEncode.cpp   general column-batch encode (Sink-templated)
+//   * DenseRowGeneralEncode.cpp   general column-batch encode
 //   * DenseRowGeneralDecode.cpp   general column-batch decode
 //   * DenseRowScalar.{h,*.cpp}    scalar column fast path
 // This file is the public API layer (the DenseRow class) only.
@@ -73,11 +73,13 @@
 
 #include <limits>
 #include <optional>
+#include <variant>
 #include <vector>
 
 #include "bolt/row/dense/DenseRowGeneral.h"
 #include "bolt/row/dense/DenseRowScalar.h"
 #include "bolt/vector/ComplexVector.h"
+#include "vector/DecodedVector.h"
 
 namespace bytedance::bolt::row {
 
@@ -91,11 +93,10 @@ struct DenseRow::State {
   size_t totalSize{0};
 
   // Routing is per top-level field by type: a scalar field is decoded and
-  // sized/written column-at-a-time (decoded[k]); a complex (ARRAY/MAP/ROW)
-  // field goes through the general column-batch path (plans[k]). Both vectors
+  // sized/written column-at-a-time (DecodecVector); a complex (ARRAY/MAP/ROW)
+  // field goes through the general column-batch path (ColumnPlan). Both vectors
   // are sized to fieldCount; for field k exactly one entry is populated.
-  std::vector<DecodedVector> decoded;
-  std::vector<std::optional<ColumnPlan>> plans;
+  std::vector<std::variant<DecodedVector, ColumnPlan>> decodedOrPlans;
 
   // Top-level slot view ({r, 1} per row) for the complex columns. Only built
   // when the row has a complex field (an all-scalar row leaves it empty). The
@@ -125,33 +126,35 @@ DenseRow::DenseRow(const RowVectorPtr& rowVector)
     // serialize().
     bool anyComplex = false;
     for (size_t k = 0; k < fieldCount; ++k) {
-      if (!scalar::isScalarType(*rowType.childAt(k))) {
+      if (!rowType.childAt(k)->isPrimitiveType()) {
         anyComplex = true;
         break;
       }
     }
 
-    st.decoded.resize(fieldCount);
+    st.decodedOrPlans.resize(fieldCount);
     std::vector<SizeSink> sizeSinks;
     if (anyComplex) {
-      st.plans.resize(fieldCount);
       st.topView = makeTopView(numRows);
       sizeSinks.resize(numRows);
     }
 
     for (size_t k = 0; k < fieldCount; ++k) {
       const auto& childType = rowType.childAt(k);
-      if (scalar::isScalarType(*childType)) {
-        st.decoded[k].decode(*rowVector->childAt(k));
+      if (childType->isPrimitiveType()) {
+        st.decodedOrPlans[k].emplace<DecodedVector>();
+        auto* decoded = std::get_if<DecodedVector>(&st.decodedOrPlans[k]);
+
+        decoded->decode(*rowVector->childAt(k));
         scalar::addColumnSizes(
-            *childType, st.decoded[k], numRows, st.rowSizes.data());
+            *childType, *decoded, numRows, st.rowSizes.data());
       } else {
-        // emplace (move-construct): ColumnPlan is move-constructible but not
-        // move-assignable (DecodedVector has no move-assign).
-        st.plans[k].emplace(buildPlan(childType, rowVector->childAt(k)));
+        st.decodedOrPlans[k].emplace<ColumnPlan>(
+            buildPlan(childType, rowVector->childAt(k)));
+        auto* plan = std::get_if<ColumnPlan>(&st.decodedOrPlans[k]);
         encodeColumnBatch<SizeSink>(
             *childType,
-            *st.plans[k],
+            *plan,
             st.topView.view(),
             folly::Range<SizeSink*>(sizeSinks.data(), numRows),
             /*rowNulls=*/nullptr);
@@ -216,26 +219,33 @@ void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
   std::vector<WriteSink> writeSinks;
   for (size_t k = 0; k < fieldCount; ++k) {
     const auto& childType = rowType.childAt(k);
-    if (scalar::isScalarType(*childType)) {
-      scalar::writeColumn(
-          *childType, state_->decoded[k], numRows, cursors.data());
-    } else {
-      if (writeSinks.empty()) {
-        writeSinks.resize(numRows);
-      }
-      for (vector_size_t r = 0; r < numRows; ++r) {
-        writeSinks[r].out = cursors[r];
-      }
-      encodeColumnBatch<WriteSink>(
-          *childType,
-          *state_->plans[k],
-          state_->topView.view(),
-          folly::Range<WriteSink*>(writeSinks.data(), numRows),
-          /*rowNulls=*/nullptr);
-      for (vector_size_t r = 0; r < numRows; ++r) {
-        cursors[r] = writeSinks[r].out;
-      }
-    }
+    std::visit(
+        [&](auto& decodedOrPlan) {
+          using T = std::decay_t<decltype(decodedOrPlan)>;
+          if constexpr (std::is_same_v<T, DecodedVector>) {
+            BOLT_CHECK(childType->isPrimitiveType());
+            scalar::writeColumn(
+                *childType, decodedOrPlan, numRows, cursors.data());
+          } else {
+            static_assert(std::is_same_v<T, ColumnPlan>);
+            if (writeSinks.empty()) {
+              writeSinks.resize(numRows);
+            }
+            for (vector_size_t r = 0; r < numRows; ++r) {
+              writeSinks[r].out = cursors[r];
+            }
+            encodeColumnBatch<WriteSink>(
+                *childType,
+                decodedOrPlan,
+                state_->topView.view(),
+                folly::Range<WriteSink*>(writeSinks.data(), numRows),
+                /*rowNulls=*/nullptr);
+            for (vector_size_t r = 0; r < numRows; ++r) {
+              cursors[r] = writeSinks[r].out;
+            }
+          }
+        },
+        state_->decodedOrPlans[k]);
   }
 }
 
@@ -263,7 +273,7 @@ RowVectorPtr DenseRow::deserialize(
   const auto fieldCount = rowType->size();
   bool anyComplex = false;
   for (size_t k = 0; k < fieldCount; ++k) {
-    if (!scalar::isScalarType(*rowType->childAt(k))) {
+    if (!rowType->childAt(k)->isPrimitiveType()) {
       anyComplex = true;
       break;
     }
@@ -274,7 +284,7 @@ RowVectorPtr DenseRow::deserialize(
   }
   for (size_t k = 0; k < fieldCount; ++k) {
     const auto& childType = rowType->childAt(k);
-    if (scalar::isScalarType(*childType)) {
+    if (childType->isPrimitiveType()) {
       scalar::readColumn(
           *childType, *rowVec->childAt(k), rowCount, cursorRange);
     } else {

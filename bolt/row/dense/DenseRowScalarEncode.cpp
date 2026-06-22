@@ -25,56 +25,57 @@
 #include "bolt/row/dense/DenseRowGeneral.h"
 #include "bolt/row/dense/IntVarint.h"
 
-namespace bytedance::bolt::row::scalar {
-
-using detail::nullableInt64SerializedSize;
-using detail::varintSize;
-using namespace dense_row;
+namespace bytedance::bolt::row::dense_row::scalar {
 
 template <typename T>
 FOLLY_ALWAYS_INLINE void
 addIntColumnSizes(const DecodedVector& dec, vector_size_t N, size_t* rowSizes) {
-  const bool mayNulls = dec.mayHaveNulls();
-  const bool identity = dec.isIdentityMapping();
   const auto* raw = dec.data<T>();
-  // Fast path (contiguous, no value-nulls): portable xsimd size kernel
-  // scattered per row. int64 directly, int8/int16/int32 via int32.
-  if (identity && !mayNulls) {
-    detail::addNullableIntColumnSizes<T>(raw, rowSizes, static_cast<size_t>(N));
+  if (dec.isIdentityMapping()) {
+    // Flat column. A null rawNulls() means no nulls (mayHaveNulls() is only a
+    // conservative upper bound), so this also covers the "may-null flag set
+    // without a backing bitmap" case. All int widths handled: int64 directly,
+    // int8/int16/int32 via int32.
+    const uint64_t* nulls =
+        dec.mayHaveNulls() ? dec.base()->rawNulls() : nullptr;
+    if (nulls) {
+      // SIMD value sizes + branchless null override via the row-indexed
+      // validity bitmap.
+      detail::addNullableIntColumnSizes(
+          raw, nulls, rowSizes, static_cast<size_t>(N));
+    } else {
+      // Contiguous, no value-nulls: portable xsimd size kernel scattered
+      // per row.
+      detail::addNoNullIntColumnSizes<T>(raw, rowSizes, static_cast<size_t>(N));
+    }
     return;
   }
-  // Flat BIGINT with nulls (the common Spark case that otherwise lands on the
-  // scalar loop below): SIMD value sizes + branchless null override. For
-  // identity, base()->rawNulls() is the row-indexed validity bitmap that
-  // isNullAt reads, and is const (unlike DecodedVector::nulls()). Narrow types
-  // and dictionary/constant inputs keep the scalar path.
-  if constexpr (std::is_same_v<T, int64_t>) {
-    if (identity && mayNulls) {
-      if (const uint64_t* nulls = dec.base()->rawNulls()) {
-        detail::addNullableIntColumnSizes(
-            raw, nulls, rowSizes, static_cast<size_t>(N));
-      } else {
-        detail::addNullableIntColumnSizes<T>(
-            raw, rowSizes, static_cast<size_t>(N));
-      }
-      return;
+  if (dec.isConstantMapping()) {
+    // Every row maps to the same base value (or all rows are null), so the
+    // serialized size is identical — compute it once and splat across rows.
+    const bool isNull = dec.mayHaveNulls() && dec.isNullAt(0);
+    const int64_t v = isNull ? 0 : static_cast<int64_t>(raw[dec.index(0)]);
+    const size_t sz = detail::nullableInt64SerializedSize(v, isNull);
+    for (vector_size_t r = 0; r < N; ++r) {
+      rowSizes[r] += sz;
     }
+    return;
   }
+  // General path: dictionary mappings.
+  const bool mayNulls = dec.mayHaveNulls();
   for (vector_size_t r = 0; r < N; ++r) {
     const bool isNull = mayNulls && dec.isNullAt(r);
-    const int64_t v = isNull
-        ? 0
-        : static_cast<int64_t>(identity ? raw[r] : raw[dec.index(r)]);
-    rowSizes[r] += nullableInt64SerializedSize(v, isNull);
+    const int64_t v = isNull ? 0 : static_cast<int64_t>(raw[dec.index(r)]);
+    rowSizes[r] += detail::nullableInt64SerializedSize(v, isNull);
   }
 }
 
-template <size_t kBytes>
+template <size_t KBYTES>
 FOLLY_ALWAYS_INLINE void addFixedColumnSizes(
     vector_size_t N,
     size_t* rowSizes) {
   for (vector_size_t r = 0; r < N; ++r) {
-    rowSizes[r] += kBytes;
+    rowSizes[r] += KBYTES;
   }
 }
 
@@ -114,7 +115,8 @@ void addColumnSizes(
           ++rowSizes[r];
         } else {
           const auto len = dec.valueAt<StringView>(r).size();
-          rowSizes[r] += varintSize(static_cast<uint64_t>(len) + 1) + len;
+          rowSizes[r] +=
+              detail::varintSize(static_cast<uint64_t>(len) + 1) + len;
         }
       }
       return;
@@ -125,7 +127,7 @@ void addColumnSizes(
         if (mayNulls && dec.isNullAt(r)) {
           ++rowSizes[r];
         } else {
-          rowSizes[r] += nullableInt64SerializedSize(
+          rowSizes[r] += detail::nullableInt64SerializedSize(
               dec.valueAt<Timestamp>(r).toMicros(), false);
         }
       }
@@ -209,8 +211,8 @@ void writeColumn(
         } else {
           const float value = identity ? raw[r] : raw[dec.index(r)];
           std::memcpy(&b, &value, sizeof(b));
-          // Bit-collision with null sentinel: flip one bit so the null
-          // pattern stays reserved (matches slow path encoder behavior).
+          // kNullFloatBits is the canonical quiet NaN. Flipping the low
+          // mantissa bit yields another NaN.
           if (FOLLY_UNLIKELY(b == kNullFloatBits)) {
             b ^= 1u;
           }
@@ -231,6 +233,8 @@ void writeColumn(
         } else {
           const double value = identity ? raw[r] : raw[dec.index(r)];
           std::memcpy(&b, &value, sizeof(b));
+          // kNullDoubleBits is the canonical quiet NaN. Flipping the low
+          // mantissa bit yields another NaN.
           if (FOLLY_UNLIKELY(b == kNullDoubleBits)) {
             b ^= 1ull;
           }
@@ -282,4 +286,4 @@ void writeColumn(
   }
 }
 
-} // namespace bytedance::bolt::row::scalar
+} // namespace bytedance::bolt::row::dense_row::scalar

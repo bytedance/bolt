@@ -39,9 +39,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 
-namespace bytedance::bolt::row::scalar {
-
-using namespace dense_row;
+namespace bytedance::bolt::row::dense_row::scalar {
 
 template <typename T>
 void readIntColumn(
@@ -72,11 +70,6 @@ void readIntColumn(
   }
 }
 
-// Per-row validation runs as BOLT_DCHECK only — the shuffle decode path takes
-// bytes produced by our own serializer, so in release builds the checks compile
-// out of these hot loops (debug builds still catch malformed input).
-// TODO could go further: branch on type kind once / separate functions per type
-// if it helps code layout.
 void readColumn(
     const Type& type,
     BaseVector& dst,
@@ -201,7 +194,7 @@ void readColumn(
           flat->setNull(r, true);
           continue;
         }
-        const size_t len = static_cast<size_t>(lenPlus - 1);
+        const auto len = static_cast<size_t>(lenPlus - 1);
         BOLT_USER_CHECK(
             static_cast<size_t>(c.end - c.cur) >= len,
             "DenseRow: truncated varchar payload at row {}",
@@ -266,4 +259,4 @@ void readColumn(
   }
 }
 
-} // namespace bytedance::bolt::row::scalar
+} // namespace bytedance::bolt::row::dense_row::scalar

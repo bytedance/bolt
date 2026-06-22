@@ -37,8 +37,27 @@ class DenseRowTest : public ::testing::Test, public VectorTestBase {
   struct Bytes {
     std::vector<uint8_t> buffer;
     std::vector<size_t> offsets; // size N + 1
+
+    std::string_view toView(size_t index) const {
+      return std::string_view(
+          reinterpret_cast<const char*>(buffer.data()) + offsets[index],
+          offsets[index + 1] - offsets[index]);
+    }
+
+    std::string toHex(size_t index) const {
+      auto view = toView(index);
+      std::string out;
+      out.reserve(view.size() * 2);
+      static constexpr char kHex[] = "0123456789abcdef";
+      for (unsigned char c : view) {
+        out.push_back(kHex[c >> 4]);
+        out.push_back(kHex[c & 0x0f]);
+      }
+      return out;
+    }
   };
-  Bytes serializeToBytes(const RowVectorPtr& input) {
+
+  static Bytes serializeToBytes(const RowVectorPtr& input) {
     DenseRow rows(input);
     const auto n = rows.numRows();
     Bytes out;
@@ -69,9 +88,7 @@ class DenseRowTest : public ::testing::Test, public VectorTestBase {
     auto bytes = serializeToBytes(input);
     std::vector<std::string_view> data(n);
     for (vector_size_t r = 0; r < n; ++r) {
-      data[r] = std::string_view(
-          reinterpret_cast<const char*>(bytes.buffer.data() + bytes.offsets[r]),
-          bytes.offsets[r + 1] - bytes.offsets[r]);
+      data[r] = bytes.toView(r);
     }
     auto out = DenseRow::deserialize(data, rowType, pool());
     assertEqualVectors(input, out);
@@ -102,6 +119,20 @@ TEST_F(DenseRowTest, dictionaryEncodedInput) {
   auto indices = makeIndicesInReverse(4);
   auto dict = BaseVector::wrapInDictionary(nullptr, indices, 4, base);
   roundTrip(makeRowVector({dict}));
+}
+
+TEST_F(DenseRowTest, constantEncodedInput) {
+  // Constant-wrapped scalars decode via DecodedVector with isConstantMapping();
+  // the scalar encoder sizes them once and splats. Cover a non-null constant,
+  // a null constant, and a constant in a wide row alongside a flat column.
+  roundTrip(makeRowVector({makeConstant<int64_t>(987654321, 16)}));
+  roundTrip(makeRowVector({makeNullConstant(TypeKind::BIGINT, 16)}));
+  roundTrip(makeRowVector({
+      makeConstant<int32_t>(-7, 16),
+      makeConstant<int16_t>(123, 16),
+      makeNullConstant(TypeKind::TINYINT, 16),
+      makeFlatVector<int64_t>(16, [](auto r) { return r * 3 - 5; }),
+  }));
 }
 
 TEST_F(DenseRowTest, rowOfScalars) {
@@ -178,9 +209,7 @@ TEST_F(DenseRowTest, mixWideRow) {
   roundTrip(std::dynamic_pointer_cast<RowVector>(fuzzVector(type, 256, 41)));
 }
 
-// A top-level ROW whose nested-ROW child is dictionary-wrapped: the encode
-// plan must push the outer dict mapping into the nested ROW's children, else
-// the nested INTEGER/VARCHAR fields read from the wrong base position.
+// A top-level ROW whose nested-ROW child is dictionary-wrapped
 TEST_F(DenseRowTest, dictionaryWrappedNestedRow) {
   auto innerInts = makeFlatVector<int32_t>({100, 200, 300, 400});
   auto innerStrs = makeFlatVector<StringView>({"aaa", "bbb", "ccc", "ddd"});
@@ -237,21 +266,6 @@ TEST_F(DenseRowTest, emptyContainers) {
   roundTrip(input);
 }
 
-namespace {
-
-std::string toHex(const uint8_t* data, size_t size) {
-  std::string out;
-  out.reserve(size * 2);
-  static constexpr char kHex[] = "0123456789abcdef";
-  for (size_t i = 0; i < size; ++i) {
-    out.push_back(kHex[data[i] >> 4]);
-    out.push_back(kHex[data[i] & 0x0f]);
-  }
-  return out;
-}
-
-} // namespace
-
 // Golden bytes pin the (marker-less) level-hoisted wire for
 // ARRAY<ARRAY<BIGINT>>. Row 0: [[1,2,3],[4,5,6]]; row 1: [[7],[8,9]].
 TEST_F(DenseRowTest, goldenBytesNestedArrays) {
@@ -260,15 +274,10 @@ TEST_F(DenseRowTest, goldenBytesNestedArrays) {
           {"[[1,2,3],[4,5,6]]", "[[7],[8,9]]"}),
   });
   auto bytes = serializeToBytes(input);
-  const auto* b = bytes.buffer.data();
   // Row 0: 03 (outer=2+1) | 04 04 (inner=3+1,3+1) | 02 04 06 08 0a 0c (zz 1..6)
-  EXPECT_EQ(
-      toHex(b + bytes.offsets[0], bytes.offsets[1] - bytes.offsets[0]),
-      "030404020406080a0c");
+  EXPECT_EQ(bytes.toHex(0), "030404020406080a0c");
   // Row 1: 03 (outer) | 02 03 (inner=1+1,2+1) | 0e 10 12 (zz 7,8,9)
-  EXPECT_EQ(
-      toHex(b + bytes.offsets[1], bytes.offsets[2] - bytes.offsets[1]),
-      "0302030e1012");
+  EXPECT_EQ(bytes.toHex(1), "0302030e1012");
 }
 
 // Golden bytes for MAP<BIGINT, REAL> with hoisted key/value segments.
@@ -280,9 +289,7 @@ TEST_F(DenseRowTest, goldenBytesMapHoistedKV) {
   auto bytes = serializeToBytes(input);
   // 03 (card=2+1) | 02 04 (keys zz 1,2) | 0000c03f 00002040 (1.5f, 2.5f LE)
   EXPECT_EQ(
-      toHex(
-          bytes.buffer.data() + bytes.offsets[0],
-          bytes.offsets[1] - bytes.offsets[0]),
+      bytes.toHex(0),
       "030204"
       "0000c03f"
       "00002040");
@@ -300,18 +307,17 @@ TEST_F(DenseRowTest, goldenBytesScalarRow) {
   auto input = makeRowVector({bigint, integer, varchar, real});
 
   auto bytes = serializeToBytes(input);
-  const auto* b = bytes.buffer.data();
   // Row 0: bigint zz(1)=02, int zz(2)=04, varchar(len=2,"ab")=03 6162,
   // real 1.5f bits 0x3fc00000 LE = 0000c03f.
   EXPECT_EQ(
-      toHex(b + bytes.offsets[0], bytes.offsets[1] - bytes.offsets[0]),
+      bytes.toHex(0),
       "0204"
       "036162"
       "0000c03f");
   // Row 1: bigint zz(adjust(-1))=zz(-2)=3 -> 03, int null=00,
   // varchar(len=0)=01, real null = kNullFloatBits LE = 0000c07f.
   EXPECT_EQ(
-      toHex(b + bytes.offsets[1], bytes.offsets[2] - bytes.offsets[1]),
+      bytes.toHex(1),
       "03"
       "00"
       "01"
@@ -320,9 +326,7 @@ TEST_F(DenseRowTest, goldenBytesScalarRow) {
   // Round-trip restores the original.
   std::vector<std::string_view> rows(2);
   for (vector_size_t r = 0; r < 2; ++r) {
-    rows[r] = std::string_view(
-        reinterpret_cast<const char*>(b + bytes.offsets[r]),
-        bytes.offsets[r + 1] - bytes.offsets[r]);
+    rows[r] = bytes.toView(r);
   }
   assertEqualVectors(input, DenseRow::deserialize(rows, type, pool()));
 }

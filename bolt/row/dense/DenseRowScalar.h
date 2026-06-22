@@ -17,16 +17,12 @@
 #pragma once
 
 #include <cstdint>
-#include <string_view>
-#include <vector>
 
 #include <folly/Range.h>
 
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/DecodedVector.h"
 
-// RowCursor (the per-row decode cursor) is shared with the general decode path;
-// forward-declare it so this header need not pull in DenseRowGeneral.h.
 namespace bytedance::bolt::row::dense_row {
 struct RowCursor;
 }
@@ -37,19 +33,7 @@ struct RowCursor;
 // skipping the SlotView machinery entirely. DenseRow routes each scalar
 // top-level field here and each complex field to the general path
 // (DenseRowGeneral.h).
-namespace bytedance::bolt::row::scalar {
-
-// True iff `type` is a scalar (leaf) type — anything but ARRAY/MAP/ROW.
-inline bool isScalarType(const Type& type) {
-  switch (type.kind()) {
-    case TypeKind::ARRAY:
-    case TypeKind::MAP:
-    case TypeKind::ROW:
-      return false;
-    default:
-      return true;
-  }
-}
+namespace bytedance::bolt::row::dense_row::scalar {
 
 // Column-at-a-time size accumulation: adds field `dec`'s per-row byte counts
 // into rowSizes[0..N).
@@ -75,4 +59,4 @@ void readColumn(
     vector_size_t N,
     folly::Range<dense_row::RowCursor*> cursors);
 
-} // namespace bytedance::bolt::row::scalar
+} // namespace bytedance::bolt::row::dense_row::scalar

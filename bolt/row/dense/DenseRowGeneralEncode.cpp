@@ -61,14 +61,12 @@ ColumnPlan buildPlan(const TypePtr& type, const VectorPtr& vector) {
     case TypeKind::ARRAY: {
       const auto* array = plan.decoded.base()->as<ArrayVector>();
       BOLT_CHECK_NOT_NULL(array, "buildPlan: ARRAY base is not ArrayVector");
-      plan.children.reserve(1);
       plan.children.push_back(buildPlan(type->childAt(0), array->elements()));
       return plan;
     }
     case TypeKind::MAP: {
       const auto* map = plan.decoded.base()->as<MapVector>();
       BOLT_CHECK_NOT_NULL(map, "buildPlan: MAP base is not MapVector");
-      plan.children.reserve(2);
       plan.children.push_back(buildPlan(type->childAt(0), map->mapKeys()));
       plan.children.push_back(buildPlan(type->childAt(1), map->mapValues()));
       return plan;
@@ -486,7 +484,7 @@ void encodeNullColumnBatch(
 // push_back work happens only on the size pass. This roughly halves the
 // per-call slot-tree overhead vs rebuilding on each pass.
 template <typename Sink>
-void encodeArrayLikeChildPass(
+void encodeArrayLikeCardinalities(
     const ColumnPlan& plan,
     const vector_size_t* rawOffsets,
     const vector_size_t* rawSizes,
@@ -579,7 +577,7 @@ void encodeArrayBatch(
     // Upper bound: total non-null parent slots ≤ elements vector size.
     node.slots.reserve(array->elements()->size());
   }
-  encodeArrayLikeChildPass(
+  encodeArrayLikeCardinalities(
       plan, array->rawOffsets(), array->rawSizes(), in, sinks, rowNulls, node);
   SlotView childView{
       {node.slots.data(), node.slots.size()},
@@ -603,7 +601,7 @@ void encodeMapBatch(
   if constexpr (std::is_same_v<Sink, SizeSink>) {
     node.slots.reserve(map->mapKeys()->size());
   }
-  encodeArrayLikeChildPass(
+  encodeArrayLikeCardinalities(
       plan, map->rawOffsets(), map->rawSizes(), in, sinks, rowNulls, node);
   SlotView childView{
       {node.slots.data(), node.slots.size()},

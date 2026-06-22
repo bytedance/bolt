@@ -24,11 +24,15 @@
 #include <type_traits>
 
 #include <folly/CPortability.h>
+#include <folly/Likely.h>
 #include <xsimd/xsimd.hpp>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
+
+#include "bolt/common/base/BitUtil.h"
+#include "bolt/type/HugeInt.h"
 
 // Integer varint codec for the dense row format. Organized bottom-up in five
 // layers; each layer only calls the ones below it:
@@ -67,11 +71,6 @@ FOLLY_ALWAYS_INLINE size_t varintSize(uint64_t value) {
   return static_cast<size_t>((bits + 6) / 7);
 }
 
-FOLLY_ALWAYS_INLINE constexpr bool
-canRead(const uint8_t* ptr, const uint8_t* end, size_t bytes) {
-  return static_cast<size_t>(end - ptr) >= bytes;
-}
-
 FOLLY_ALWAYS_INLINE uint8_t* writeVarintScalar(uint64_t value, uint8_t* out) {
   while (value >= 0x80) {
     *out++ = static_cast<uint8_t>(value) | 0x80;
@@ -81,11 +80,13 @@ FOLLY_ALWAYS_INLINE uint8_t* writeVarintScalar(uint64_t value, uint8_t* out) {
   return out;
 }
 
-FOLLY_ALWAYS_INLINE bool
-readVarintScalar(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
+// No bounds check: reads until the terminator, capped at 10 bytes by the
+// varint structural limit (shift < 64). Over-reads only on malformed input;
+// readVarint's single in <= end check validates the consumed length.
+FOLLY_ALWAYS_INLINE bool readVarintScalar(const uint8_t*& in, uint64_t& value) {
   uint64_t result{0};
   uint32_t shift{0};
-  while (in < end && shift < 64) {
+  while (shift < 64) {
     auto byte = *in++;
     result |= ((byte & kVarintPayloadBits) << shift);
     if (varintIsLastByte(byte)) {
@@ -141,6 +142,11 @@ inline __attribute__((target("bmi2"))) uint8_t* writeVarintBmi2(
 
 inline __attribute__((target("bmi2"))) bool
 readVarintBmi2(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
+  // `end - in >= 8` is a memory-safety guard, NOT a redundant validity check:
+  // the 8-byte bulk load below would read past the buffer for a valid 5-7 byte
+  // varint in the final bytes (buffers are sized exactly, no tail padding).
+  // With < 8 bytes left, fall to the byte-at-a-time scalar reader. Truncation
+  // is caught by readVarint's single in <= end check.
   if (end - in >= 8) {
     uint64_t word;
     std::memcpy(&word, in, sizeof(word));
@@ -158,13 +164,11 @@ readVarintBmi2(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
       return true;
     }
 
-    // Fast path for 9-10 byte varints where the first 8 bytes all continue.
+    // 9-10 byte varint: the first 8 bytes all continue, so a well-formed varint
+    // has its terminator within in[8..9] (in-bounds when end - in >= 9/10). No
+    // per-byte truncation check; readVarint's in <= end catches a short input.
     uint64_t decoded = _pext_u64(word, kVarintPayloadMask64);
     auto* cursor = in + 8;
-    if (cursor >= end) {
-      return false;
-    }
-
     const auto byte8 = *cursor++;
     decoded |= (static_cast<uint64_t>(byte8 & 0x7f) << 56);
     if ((byte8 & 0x80) == 0) {
@@ -173,22 +177,14 @@ readVarintBmi2(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
       return true;
     }
 
-    if (cursor >= end) {
-      return false;
-    }
-
     const auto byte9 = *cursor++;
-    if ((byte9 & 0x80) != 0) {
-      return false;
-    }
-
     decoded |= (static_cast<uint64_t>(byte9 & 0x1) << 63);
     value = decoded;
     in = cursor;
     return true;
   }
 
-  return readVarintScalar(in, end, value);
+  return readVarintScalar(in, value);
 }
 
 #endif
@@ -206,7 +202,10 @@ readVarintBmi2(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
 // and lets the OoO window see much more parallelism across rows.
 //
 // On failure (4+ byte varint or truncated input), caller falls back to
-// BMI2/scalar; both handle truncation correctly.
+// BMI2/scalar. No bounds checks here: a well-formed varint stops at its
+// terminator within the buffer; reads run past `end` only on malformed input,
+// bounded to 4 bytes, and readVarint's single in <= end check validates the
+// consumed length.
 // Each length below reconstructs its whole value inside its own return, so the
 // fall-through path (5+ byte varint) does no value arithmetic and the 1-byte
 // case skips the payload mask — this is why it stays hand-unrolled rather than
@@ -215,13 +214,9 @@ readVarintBmi2(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
 // only their payload (low 7) bits contribute; the terminating byte is whole.
 FOLLY_ALWAYS_INLINE bool readVarintShortFastPath(
     const uint8_t*& in,
-    const uint8_t* end,
     uint64_t& value) {
   constexpr uint64_t kP = kVarintPayloadBits;
 
-  if (FOLLY_UNLIKELY(in >= end)) {
-    return false;
-  }
   const uint8_t b0 = in[0];
   if (FOLLY_LIKELY(varintIsLastByte(b0))) { // 1 byte (< 2^7)
     value = b0;
@@ -229,9 +224,6 @@ FOLLY_ALWAYS_INLINE bool readVarintShortFastPath(
     return true;
   }
 
-  if (FOLLY_UNLIKELY(in + 1 >= end)) {
-    return false;
-  }
   const uint8_t b1 = in[1];
   if (FOLLY_LIKELY(varintIsLastByte(b1))) { // 2 bytes (< 2^14)
     value = (b0 & kP) | (uint64_t{b1} << 7);
@@ -239,9 +231,6 @@ FOLLY_ALWAYS_INLINE bool readVarintShortFastPath(
     return true;
   }
 
-  if (FOLLY_UNLIKELY(in + 2 >= end)) {
-    return false;
-  }
   const uint8_t b2 = in[2];
   if (FOLLY_LIKELY(varintIsLastByte(b2))) { // 3 bytes (< 2^21)
     value = (b0 & kP) | ((b1 & kP) << 7) | (uint64_t{b2} << 14);
@@ -249,9 +238,6 @@ FOLLY_ALWAYS_INLINE bool readVarintShortFastPath(
     return true;
   }
 
-  if (FOLLY_UNLIKELY(in + 3 >= end)) {
-    return false;
-  }
   const uint8_t b3 = in[3];
   if (FOLLY_LIKELY(varintIsLastByte(b3))) { // 4 bytes (< 2^28)
     value =
@@ -276,15 +262,18 @@ FOLLY_ALWAYS_INLINE uint8_t* writeVarint(uint64_t value, uint8_t* out) {
   return writeVarintScalar(value, out);
 }
 
+// Bounds are validated once here: the inner readers parse optimistically (no
+// per-byte end checks) and may run a few bytes past `end` on malformed input;
+// the single in <= end check rejects any read that over-ran the buffer.
 FOLLY_ALWAYS_INLINE bool
 readVarint(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
-  if (readVarintShortFastPath(in, end, value)) {
-    return true;
+  if (FOLLY_LIKELY(readVarintShortFastPath(in, value))) {
+    return in <= end;
   }
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-  return readVarintBmi2(in, end, value);
+  return readVarintBmi2(in, end, value) && in <= end;
 #else
-  return readVarintScalar(in, end, value);
+  return readVarintScalar(in, value) && in <= end;
 #endif
 }
 
@@ -301,16 +290,14 @@ FOLLY_ALWAYS_INLINE constexpr int64_t zigZagDecode64(uint64_t encoded) {
   return static_cast<int64_t>((encoded >> 1) ^ (0 - (encoded & 1)));
 }
 
-FOLLY_ALWAYS_INLINE constexpr unsigned __int128 zigZagEncode128(
-    __int128 value) {
-  return (static_cast<unsigned __int128>(value) << 1) ^
-      static_cast<unsigned __int128>(value >> 127);
+FOLLY_ALWAYS_INLINE constexpr uint128_t zigZagEncode128(int128_t value) {
+  return (static_cast<uint128_t>(value) << 1) ^
+      static_cast<uint128_t>(value >> 127);
 }
 
-FOLLY_ALWAYS_INLINE constexpr __int128 zigZagDecode128(
-    unsigned __int128 encoded) {
-  return static_cast<__int128>(
-      (encoded >> 1) ^ (~static_cast<unsigned __int128>(0) * (encoded & 1)));
+FOLLY_ALWAYS_INLINE constexpr int128_t zigZagDecode128(uint128_t encoded) {
+  return static_cast<int128_t>(
+      (encoded >> 1) ^ (~static_cast<uint128_t>(0) * (encoded & 1)));
 }
 
 // =============================================================================
@@ -325,8 +312,7 @@ FOLLY_ALWAYS_INLINE constexpr __int128 zigZagDecode128(
 //
 // The reserved sentinel keeps null as a single-byte marker while preserving a
 // one-to-one mapping for the full int64 domain.
-constexpr uint8_t kInt64MinSentinelFirstByte{0x80};
-constexpr uint8_t kInt64MinSentinelSecondByte{0x00};
+constexpr std::array<uint8_t, 2> kInt64MinSentinel{0x80, 0x00};
 
 FOLLY_ALWAYS_INLINE constexpr bool needsExtendedInt64Encoding(int64_t value) {
   return value == std::numeric_limits<int64_t>::min();
@@ -356,8 +342,8 @@ nullableInt64SerializedSize(int64_t value, bool isNull) {
   // mapping only moves which 2^(7k-1) bucket the value lands in, which |v|
   // already captures, so we skip the zigzag/adjust and clz |v| directly.
   // INT64_MIN is excluded above, so the unsigned abs is exact.
-  const uint64_t uv = static_cast<uint64_t>(value);
-  const uint64_t sign = static_cast<uint64_t>(value >> 63);
+  const auto uv = static_cast<uint64_t>(value);
+  const auto sign = static_cast<uint64_t>(value >> 63);
   const uint64_t mag = (uv ^ sign) - sign; // |value|, no signed-overflow UB
   const auto bits = 64 - __builtin_clzll(mag | 1ULL);
   return static_cast<size_t>((bits + 7) / 7);
@@ -370,9 +356,9 @@ writeNullableInt64(int64_t value, bool isNull, uint8_t* out) {
     return out;
   }
 
-  if (needsExtendedInt64Encoding(value)) {
-    *out++ = kInt64MinSentinelFirstByte;
-    *out++ = kInt64MinSentinelSecondByte;
+  if (FOLLY_UNLIKELY(needsExtendedInt64Encoding(value))) {
+    *out++ = kInt64MinSentinel[0];
+    *out++ = kInt64MinSentinel[1];
     return out;
   }
 
@@ -385,23 +371,19 @@ FOLLY_ALWAYS_INLINE bool readNullableInt64(
     const uint8_t* end,
     bool& isNull,
     int64_t& value) {
-  if (!canRead(in, end, 1)) {
-    return false;
-  }
-
   if (*in == 0) {
     ++in;
     isNull = true;
     value = 0;
-    return true;
+    return in <= end;
   }
 
-  if (canRead(in, end, 2) && in[0] == kInt64MinSentinelFirstByte &&
-      in[1] == kInt64MinSentinelSecondByte) {
+  if (FOLLY_UNLIKELY(
+          in[0] == kInt64MinSentinel[0] && in[1] == kInt64MinSentinel[1])) {
     in += 2;
     isNull = false;
     value = std::numeric_limits<int64_t>::min();
-    return true;
+    return in <= end;
   }
 
   uint64_t encoded{0};
@@ -409,14 +391,9 @@ FOLLY_ALWAYS_INLINE bool readNullableInt64(
     return false;
   }
 
-  if (encoded == 0) {
-    // Reject non-canonical multi-byte encodings of zero.
-    return false;
-  }
-
   isNull = false;
   value = restoreInt64FromNullableEncoding(zigZagDecode64(encoded));
-  return true;
+  return in <= end;
 }
 
 // Nullable int128 wire mapping (two halves of zigzag128(v), no separate tag):
@@ -430,11 +407,11 @@ FOLLY_ALWAYS_INLINE bool readNullableInt64(
 // The low half is reinterpreted as int64 for the nullable-int64 codec; that
 // round-trips bit-for-bit (it is a bijection over int64 plus null).
 FOLLY_ALWAYS_INLINE size_t
-nullableInt128SerializedSize(__int128 value, bool isNull) {
+nullableInt128SerializedSize(int128_t value, bool isNull) {
   if (isNull) {
     return nullableInt64SerializedSize(0, /*isNull=*/true);
   }
-  const unsigned __int128 zz = zigZagEncode128(value);
+  const uint128_t zz = zigZagEncode128(value);
   return nullableInt64SerializedSize(
              static_cast<int64_t>(static_cast<uint64_t>(zz)),
              /*isNull=*/false) +
@@ -442,11 +419,11 @@ nullableInt128SerializedSize(__int128 value, bool isNull) {
 }
 
 FOLLY_ALWAYS_INLINE uint8_t*
-writeNullableInt128(__int128 value, bool isNull, uint8_t* out) {
+writeNullableInt128(int128_t value, bool isNull, uint8_t* out) {
   if (isNull) {
     return writeNullableInt64(0, /*isNull=*/true, out);
   }
-  const unsigned __int128 zz = zigZagEncode128(value);
+  const uint128_t zz = zigZagEncode128(value);
   out = writeNullableInt64(
       static_cast<int64_t>(static_cast<uint64_t>(zz)), /*isNull=*/false, out);
   return writeVarint(static_cast<uint64_t>(zz >> 64), out);
@@ -456,7 +433,7 @@ FOLLY_ALWAYS_INLINE bool readNullableInt128(
     const uint8_t*& in,
     const uint8_t* end,
     bool& isNull,
-    __int128& value) {
+    int128_t& value) {
   int64_t low{0};
   if (!readNullableInt64(in, end, isNull, low)) {
     return false;
@@ -470,7 +447,7 @@ FOLLY_ALWAYS_INLINE bool readNullableInt128(
     return false;
   }
   value = zigZagDecode128(
-      (static_cast<unsigned __int128>(hi) << 64) | static_cast<uint64_t>(low));
+      (static_cast<uint128_t>(hi) << 64) | static_cast<uint64_t>(low));
   return true;
 }
 
@@ -492,49 +469,29 @@ FOLLY_ALWAYS_INLINE xsimd::batch<uint32_t> nullableInt32SizesBatch(
   const S zero(0);
   const S adj = v - S(v <= zero); // v > 0 ? v : v - 1
   const U zz = xsimd::bitwise_cast<U>((adj << 1) ^ (adj >> 31)); // zigzag
-  U s(1u);
-  s += U(zz > U(static_cast<uint32_t>((1u << 7) - 1)));
-  s += U(zz > U(static_cast<uint32_t>((1u << 14) - 1)));
-  s += U(zz > U(static_cast<uint32_t>((1u << 21) - 1)));
-  s += U(zz > U(static_cast<uint32_t>((1u << 28) - 1)));
+  U s(1);
+  s += U(zz > U(static_cast<uint32_t>((1 << 7) - 1)));
+  s += U(zz > U(static_cast<uint32_t>((1 << 14) - 1)));
+  s += U(zz > U(static_cast<uint32_t>((1 << 21) - 1)));
+  s += U(zz > U(static_cast<uint32_t>((1 << 28) - 1)));
   return xsimd::select(
       xsimd::batch_bool_cast<uint32_t>(
           v == S(std::numeric_limits<int32_t>::min())),
-      U(5u),
+      U(5),
       s);
 }
 
-// int64 via zigzag: 8 signed thresholds + the zigzag>=2^63 (+9) and INT64_MIN
-// (->2) fixups. Branchless; matches the original kernel's algorithm/cost.
-// Prefer this variant when the caller already computes zz (see the small-value
-// fast path in sumNullableIntSizes<int64_t>, which reuses zz for its test).
-FOLLY_ALWAYS_INLINE xsimd::batch<int64_t> nullableInt64SizesBatchViaZigzag(
-    xsimd::batch<int64_t> v) {
-  using B = xsimd::batch<int64_t>;
-  const B zero(0);
-  const B one(1);
-  const B adj = v - B(v <= zero);
-  const B zz = (adj << 1) ^ (adj >> 63);
-  B s = one;
-  s += B(zz > B((1LL << 7) - 1));
-  s += B(zz > B((1LL << 14) - 1));
-  s += B(zz > B((1LL << 21) - 1));
-  s += B(zz > B((1LL << 28) - 1));
-  s += B(zz > B((1LL << 35) - 1));
-  s += B(zz > B((1LL << 42) - 1));
-  s += B(zz > B((1LL << 49) - 1));
-  s += B(zz > B((1LL << 56) - 1));
-  s += xsimd::select(zz < zero, B(9), zero); // zz >= 2^63 -> 10 bytes
-  return xsimd::select(v == B(std::numeric_limits<int64_t>::min()), B(2), s);
-}
-
-// Same result as nullableInt64SizesBatchViaZigzag, computed straight from |v|
-// without zigzag/adjust: size(v) = min k with |v| < 2^(7k-1), i.e. threshold
-// |v| against {2^6, 2^13, ... 2^62}. The >=2^63 (10-byte) case is just the top
-// threshold — no separate zz<0 fixup. INT64_MIN's abs overflows back to a
-// negative value, so all thresholds miss (s=1) and the final select sets it to
-// the 2-byte sentinel. 9 thresholds vs the zigzag kernel's 8 + the zz<0 select.
-FOLLY_ALWAYS_INLINE xsimd::batch<int64_t> nullableInt64SizesBatchViaAbs(
+// int64 size kernel, computed straight from |v| (no zigzag/adjust): size(v) =
+// min k with |v| < 2^(7k-1), i.e. threshold |v| against {2^6, 2^13, ... 2^62}.
+// The >=2^63 (10-byte) case is just the top threshold — no separate sign fixup.
+// INT64_MIN's abs overflows back to a negative value, so all thresholds miss
+// (s=1) and the final select sets it to the 2-byte sentinel. Branchless.
+//
+// This abs form measured ~20% faster than an equivalent zigzag-based kernel (9
+// magnitude thresholds replace zigzag's 8 thresholds + a zz<0 select, and they
+// sit on a shorter dependency chain since |v| is cheaper to derive than the
+// zigzag key), so it is the single int64 size kernel used everywhere.
+FOLLY_ALWAYS_INLINE xsimd::batch<int64_t> nullableInt64SizesBatch(
     xsimd::batch<int64_t> v) {
   using B = xsimd::batch<int64_t>;
   const B sign = v >> 63;
@@ -558,33 +515,13 @@ FOLLY_ALWAYS_INLINE xsimd::batch<int64_t> nullableInt64SizesBatchViaAbs(
 // =============================================================================
 // L5 — Column-level loops: size sums and per-row scatters over whole arrays,
 // built on the L4 kernels with scalar (L3) tails.
+//
+// Narrow int8/int16 inputs widen to the int32 size kernel via xsimd's
+// converting load `batch<int32_t>::load_unaligned(const T*)`, which reads
+// batch<int32_t>::size narrow values and sign-extends each to an int32 lane.
+// It picks the right widening per ISA (AVX2/AVX-512/SSE/NEON) with no
+// target-specific intrinsics; for int32 input it is a plain load.
 // =============================================================================
-
-// Load batch<int32>::size consecutive T (int8/int16/int32) sign-extended to
-// int32. x86 fast path; portable scalar fallback elsewhere.
-template <typename T>
-FOLLY_ALWAYS_INLINE xsimd::batch<int32_t> loadWidenInt32(const T* p) {
-  using S = xsimd::batch<int32_t>;
-  if constexpr (std::is_same_v<T, int32_t>) {
-    return S::load_unaligned(p);
-  } else {
-#if defined(__AVX2__)
-    if constexpr (std::is_same_v<T, int16_t>) {
-      return S(_mm256_cvtepi16_epi32(
-          _mm_loadu_si128(reinterpret_cast<const __m128i*>(p))));
-    } else {
-      return S(_mm256_cvtepi8_epi32(
-          _mm_loadl_epi64(reinterpret_cast<const __m128i*>(p))));
-    }
-#else
-    alignas(64) int32_t tmp[S::size];
-    for (std::size_t k = 0; k < S::size; ++k) {
-      tmp[k] = static_cast<int32_t>(p[k]);
-    }
-    return S::load_aligned(tmp);
-#endif
-  }
-}
 
 // Sum of nullable-int sizes for a contiguous non-null range of any of
 // int8/int16/int32/int64. Narrow types widen to the int32 kernel. int64 gets a
@@ -599,12 +536,12 @@ FOLLY_ALWAYS_INLINE size_t sumNullableIntSizes(const T* raw, size_t count) {
       "sumNullableIntSizes supports int8/int16/int32/int64");
   if constexpr (std::is_same_v<T, int64_t>) {
     using B = xsimd::batch<int64_t>;
-    constexpr std::size_t W = B::size;
+    constexpr std::size_t kBatchSize = B::size;
     const B zero(0);
     const B one(1);
     B acc(0);
     std::size_t j = 0;
-    for (; j + W <= count; j += W) {
+    for (; j + kBatchSize <= count; j += kBatchSize) {
       const B v = B::load_unaligned(raw + j);
       const B adj = v - B(v <= zero);
       const B zz = (adj << 1) ^ (adj >> 63);
@@ -616,23 +553,24 @@ FOLLY_ALWAYS_INLINE size_t sumNullableIntSizes(const T* raw, size_t count) {
         s += B(zz > B((1LL << 28) - 1));
         acc += s;
       } else {
-        acc += nullableInt64SizesBatchViaZigzag(v);
+        acc += nullableInt64SizesBatch(v);
       }
     }
-    size_t total = static_cast<size_t>(xsimd::reduce_add(acc));
+    auto total = static_cast<size_t>(xsimd::reduce_add(acc));
     for (; j < count; ++j) {
       total += nullableInt64SerializedSize(raw[j], false);
     }
     return total;
   } else {
     using U = xsimd::batch<uint32_t>;
-    constexpr std::size_t W = xsimd::batch<int32_t>::size;
-    U acc(0u);
+    constexpr std::size_t kBatchSize = xsimd::batch<int32_t>::size;
+    U acc(0U);
     std::size_t j = 0;
-    for (; j + W <= count; j += W) {
-      acc += nullableInt32SizesBatch(loadWidenInt32<T>(raw + j));
+    for (; j + kBatchSize <= count; j += kBatchSize) {
+      acc += nullableInt32SizesBatch(
+          xsimd::batch<int32_t>::load_unaligned(raw + j));
     }
-    size_t total = static_cast<size_t>(xsimd::reduce_add(acc));
+    auto total = static_cast<size_t>(xsimd::reduce_add(acc));
     for (; j < count; ++j) {
       total += nullableInt64SerializedSize(static_cast<int64_t>(raw[j]), false);
     }
@@ -644,90 +582,99 @@ FOLLY_ALWAYS_INLINE size_t sumNullableIntSizes(const T* raw, size_t count) {
 // rowSizes[r].
 template <typename T>
 FOLLY_ALWAYS_INLINE void
-addNullableIntColumnSizes(const T* raw, size_t* rowSizes, size_t count) {
-  static_assert(sizeof(size_t) == 8);
+addNoNullIntColumnSizes(const T* raw, size_t* rowSizes, size_t count) {
   std::size_t j = 0;
   if constexpr (std::is_same_v<T, int64_t>) {
     // Sizes are int64 already: add the batch straight into rowSizes (portable).
-    // Branchless 8-threshold (no testz fastpath): a per-batch "all small"
-    // branch regresses mixed/full-range BIGINT via misprediction, which
-    // dominates the small-value saving.
+    // Branchless (no testz fastpath): a per-batch "all small" branch regresses
+    // mixed/full-range BIGINT via misprediction, which dominates the
+    // small-value saving.
     using B = xsimd::batch<int64_t>;
-    constexpr std::size_t W = B::size;
+    constexpr std::size_t kWidth = B::size;
     auto* rs = reinterpret_cast<int64_t*>(rowSizes);
-    for (; j + W <= count; j += W) {
-      B sz = nullableInt64SizesBatchViaZigzag(B::load_unaligned(raw + j));
+    for (; j + kWidth <= count; j += kWidth) {
+      B sz = nullableInt64SizesBatch(B::load_unaligned(raw + j));
       (B::load_unaligned(rs + j) + sz).store_unaligned(rs + j);
     }
   } else {
-    constexpr std::size_t W = xsimd::batch<int32_t>::size;
-    alignas(64) uint32_t sz[W];
-    for (; j + W <= count; j += W) {
-      nullableInt32SizesBatch(loadWidenInt32<T>(raw + j)).store_aligned(sz);
-#if defined(__AVX2__)
-      if constexpr (W == 8) {
-        // Widen the 8 uint32 sizes to size_t and add in two vector groups.
-        __m256i s = _mm256_load_si256(reinterpret_cast<const __m256i*>(sz));
-        __m256i lo = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(s));
-        __m256i hi = _mm256_cvtepu32_epi64(_mm256_extracti128_si256(s, 1));
-        auto* p0 = reinterpret_cast<__m256i*>(rowSizes + j);
-        auto* p1 = reinterpret_cast<__m256i*>(rowSizes + j + 4);
-        _mm256_storeu_si256(p0, _mm256_add_epi64(_mm256_loadu_si256(p0), lo));
-        _mm256_storeu_si256(p1, _mm256_add_epi64(_mm256_loadu_si256(p1), hi));
-      } else
-#endif
-      {
-        for (std::size_t k = 0; k < W; ++k) {
-          rowSizes[j + k] += sz[k];
-        }
+    constexpr std::size_t kWidth = xsimd::batch<int32_t>::size;
+    alignas(64) uint32_t sz[kWidth];
+    for (; j + kWidth <= count; j += kWidth) {
+      nullableInt32SizesBatch(xsimd::batch<int32_t>::load_unaligned(raw + j))
+          .store_aligned(sz);
+      for (std::size_t k = 0; k < kWidth; ++k) {
+        rowSizes[j + k] += sz[k];
       }
     }
   }
+  // reset of rows
   for (; j < count; ++j) {
     rowSizes[j] +=
         nullableInt64SerializedSize(static_cast<int64_t>(raw[j]), false);
   }
 }
 
-// Overload for a FLAT int64 column WITH nulls (the common Spark BIGINT case
-// that otherwise falls to the scalar loop). A null row contributes exactly 1
-// byte (the 0x00 marker), independent of the (garbage) value stored at its
-// slot. `nulls` is the row-indexed validity bitmap (bit set = non-null), which
-// the caller guarantees non-null.
+// Overload for a FLAT int column WITH nulls (the common Spark case that
+// otherwise falls to the scalar loop). A null row contributes exactly 1 byte
+// (the 0x00 marker), independent of the (garbage) value stored at its slot.
+// `nulls` is the row-indexed validity bitmap (bit set = non-null), which the
+// caller guarantees non-null. Supports int8/int16/int32/int64; narrow types
+// widen to the int32 size kernel exactly like addNoNullIntColumnSizes.
+template <typename T>
 FOLLY_ALWAYS_INLINE void addNullableIntColumnSizes(
-    const int64_t* raw,
+    const T* raw,
     const uint64_t* nulls,
     size_t* rowSizes,
     size_t count) {
-  static_assert(sizeof(size_t) == 8);
-  using B = xsimd::batch<int64_t>;
-  constexpr std::size_t W = B::size; // 2 (SSE) / 4 (AVX2) / 8 (AVX-512)
-  auto* rs = reinterpret_cast<int64_t*>(rowSizes);
-
-  // Per-lane bit selector {1<<0, 1<<1, ...}, built once.
-  alignas(64) int64_t selArr[W];
-  for (std::size_t i = 0; i < W; ++i) {
-    selArr[i] = static_cast<int64_t>(int64_t{1} << i);
-  }
-  const B laneSel = B::load_aligned(selArr);
-  const B one(1);
-
   std::size_t j = 0;
-  for (; j + W <= count; j += W) {
-    B sz = nullableInt64SizesBatchViaAbs(B::load_unaligned(raw + j));
-    // W validity bits for rows [j, j+W). W divides 64 and j is a multiple of W,
-    // so the W bits never straddle a 64-bit word.
-    const uint64_t word = nulls[j >> 6];
-    const uint64_t bits = (word >> (j & 63)) & ((uint64_t{1} << W) - 1);
-    // lane i valid iff bit i set: (broadcast(bits) & laneSel) == laneSel.
-    const auto isValid = (B(static_cast<int64_t>(bits)) & laneSel) == laneSel;
-    sz = xsimd::select(isValid, sz, one); // null -> 1 byte
-    (B::load_unaligned(rs + j) + sz).store_unaligned(rs + j);
+  if constexpr (std::is_same_v<T, int64_t>) {
+    using B = xsimd::batch<int64_t>;
+    constexpr std::size_t kBatchSize = B::size;
+    // Validity bitmaps are addressed in 64-bit words.
+    constexpr std::size_t kWordBits = 64;
+    auto* rs = reinterpret_cast<int64_t*>(rowSizes);
+
+    // Per-lane bit selector {1<<0, 1<<1, ...}, built once.
+    int64_t selArr[kBatchSize];
+    for (std::size_t i = 0; i < kBatchSize; ++i) {
+      selArr[i] = static_cast<int64_t>(int64_t{1} << i);
+    }
+    const B laneSel = B::load_aligned(selArr);
+    const B one(1);
+
+    for (; j + kBatchSize <= count; j += kBatchSize) {
+      B sz = nullableInt64SizesBatch(B::load_unaligned(raw + j));
+      // kBatchSize validity bits for rows [j, j+kBatchSize). kBatchSize divides
+      // kWordBits and j is a multiple of kBatchSize, so the bits never straddle
+      // a word.
+      const uint64_t word = nulls[j / kWordBits];
+      const uint64_t validBits = (word >> (j % kWordBits)) &
+          bits::lowMask(static_cast<int32_t>(kBatchSize));
+      // lane i valid iff bit i set: (broadcast(validBits) & laneSel) ==
+      // laneSel.
+      const auto isValid =
+          (B(static_cast<int64_t>(validBits)) & laneSel) == laneSel;
+      sz = xsimd::select(isValid, sz, one); // null -> 1 byte
+      (B::load_unaligned(rs + j) + sz).store_unaligned(rs + j);
+    }
+  } else {
+    // Narrow int8/int16/int32: widen to the int32 size kernel, then override
+    // null lanes to 1 byte.
+    constexpr std::size_t kWidth = xsimd::batch<int32_t>::size;
+    uint32_t sz[kWidth];
+    for (; j + kWidth <= count; j += kWidth) {
+      nullableInt32SizesBatch(xsimd::batch<int32_t>::load_unaligned(raw + j))
+          .store_aligned(sz);
+      for (std::size_t k = 0; k < kWidth; ++k) {
+        const bool isNull = !bits::isBitSet(nulls, static_cast<int32_t>(j + k));
+        rowSizes[j + k] += isNull ? 1U : sz[k];
+      }
+    }
   }
   for (; j < count; ++j) {
-    const bool isNull = ((nulls[j >> 6] >> (j & 63)) & 1ull) == 0;
-    rs[j] += static_cast<int64_t>(
-        nullableInt64SerializedSize(isNull ? 0 : raw[j], isNull));
+    const bool isNull = !bits::isBitSet(nulls, static_cast<int32_t>(j));
+    rowSizes[j] += nullableInt64SerializedSize(
+        isNull ? 0 : static_cast<int64_t>(raw[j]), isNull);
   }
 }
 
