@@ -12,11 +12,13 @@ BucketPlacer::BucketPlacer(
     std::string directory,
     uint64_t bucket_size,
     uint64_t file_size_limit_bytes,
-    uint32_t max_open_files)
+    uint32_t max_open_files,
+    FileIoMode ioMode)
     : directory_(std::move(directory)),
       bucket_size_(bucket_size),
       file_size_limit_bytes_(file_size_limit_bytes),
-      max_open_files_(max_open_files) {}
+      max_open_files_(max_open_files),
+      ioMode_(ioMode) {}
 
 BucketPlacer::~BucketPlacer() {
   for (auto& file : files_) {
@@ -28,7 +30,18 @@ BucketPlacer::~BucketPlacer() {
 FileAllocation BucketPlacer::Allocate(
     int64_t requested_size,
     uint64_t segment_id) {
+  return Allocate(requested_size, requested_size, segment_id);
+}
+
+FileAllocation BucketPlacer::Allocate(
+    int64_t requested_size,
+    int64_t placement_size,
+    uint64_t segment_id) {
   FileAllocation allocation;
+  if (placement_size > static_cast<int64_t>(bucket_size_)) {
+    allocation.result.error = FileErrorCode::kInvalidSize;
+    return allocation;
+  }
 
   BucketFile* file = FindReusableFile();
   if (file == nullptr) {
@@ -98,7 +111,7 @@ FileAllocateResult BucketPlacer::CreateFile() {
   const auto file_index = next_file_index_++;
   const auto path =
       MakeBucketSegmentFilePath(directory_, bucket_size_, file_index);
-  auto created = CreateExclusiveReadWriteManagedOpenFile(path);
+  auto created = CreateExclusiveReadWriteManagedOpenFile(path, ioMode_);
   if (!created.ok()) {
     FileAllocateResult result;
     result.error = created.error;

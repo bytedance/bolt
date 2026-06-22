@@ -12,18 +12,25 @@ namespace bytedance::bolt::memory::bm {
 
 class DedicatedPlacer {
  public:
-  explicit DedicatedPlacer(std::string directory);
+  explicit DedicatedPlacer(
+      std::string directory,
+      FileIoMode ioMode = FileIoMode::kBuffered);
   ~DedicatedPlacer();
 
   DedicatedPlacer(const DedicatedPlacer&) = delete;
   DedicatedPlacer& operator=(const DedicatedPlacer&) = delete;
 
   FileAllocation Allocate(int64_t requested_size, uint64_t segment_id);
+  FileAllocation Allocate(
+      int64_t requested_size,
+      int64_t placement_size,
+      uint64_t segment_id);
   FileFreeResult Free(const SegmentRecord& record);
   void RemoveAllFiles();
 
  private:
   const std::string directory_;
+  const FileIoMode ioMode_;
   std::unordered_map<uint64_t, ManagedOpenFile> files_;
 };
 
