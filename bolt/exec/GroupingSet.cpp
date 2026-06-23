@@ -1366,13 +1366,14 @@ void GroupingSet::runHashAggrJitExtractChunks(
     }
     {
       NanosecondTimer jitTimer(&stats_.aggExtractGroupsJitTimeNs);
+
       chunk.extract(groups.data(), groups.size(), resultPtrs.data());
-    }
-    for (const auto& slot : chunk.slots()) {
-      resetHashAggrJitOutputDataDependentFlags(
-          result->childAt(slot.aggregateIndex + aggregateOutputOffset).get(),
-          slot);
-      jitExtracted[slot.aggregateIndex] = 1;
+      for (const auto& slot : chunk.slots()) {
+        resetHashAggrJitOutputDataDependentFlags(
+            result->childAt(slot.aggregateIndex + aggregateOutputOffset).get(),
+            slot);
+        jitExtracted[slot.aggregateIndex] = 1;
+      }
     }
   }
 }
