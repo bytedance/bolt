@@ -31,7 +31,6 @@
 #include "bolt/exec/HashBuild.h"
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -133,23 +132,14 @@ HashBuild::HashBuild(
     } else {
       baseHashTable->prepareJoinTable({});
 
-      std::unique_ptr<
-          exec::BaseHashTable,
-          std::function<void(exec::BaseHashTable*)>>
-          hashTable(nullptr, [](exec::BaseHashTable* ptr) { /* Do nothing */ });
-
-      if (auto* hashTableWithNullKeys =
-              dynamic_cast<exec::HashTable<true>*>(baseHashTable)) {
-        hashTable.reset(hashTableWithNullKeys);
-      } else if (
-          auto* hashTableWithoutNullKeys =
-              dynamic_cast<exec::HashTable<false>*>(baseHashTable)) {
-        hashTable.reset(hashTableWithoutNullKeys);
-      } else {
+      if (dynamic_cast<exec::HashTable<true>*>(baseHashTable) == nullptr &&
+          dynamic_cast<exec::HashTable<false>*>(baseHashTable) == nullptr) {
         BOLT_UNREACHABLE("Unexpected HashTable {}", baseHashTable->toString());
       }
 
-      auto joinHashNullKeys = hashTable->joinHasNullKeys();
+      auto joinHashNullKeys = baseHashTable->joinHasNullKeys();
+      std::shared_ptr<exec::BaseHashTable> hashTable(
+          baseHashTable, [](exec::BaseHashTable*) { /* Do nothing. */ });
       joinBridge_->setHashTable(std::move(hashTable), joinHashNullKeys);
     }
   } else {

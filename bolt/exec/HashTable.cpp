@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <boost/sort/pdqsort/pdqsort.hpp>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -37,6 +36,7 @@
 #include <thread>
 #include <vector>
 
+#include <boost/sort/pdqsort/pdqsort.hpp>
 #include "bolt/common/base/AsyncSource.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Portability.h"

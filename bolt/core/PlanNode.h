@@ -1783,6 +1783,7 @@ class HashJoinNode : public AbstractJoinNode {
 
   const bool nullAware_;
 
+  // Process-local address. Not serialized or transferred across processes.
   void* reusedHashTableAddress_;
 };
 
