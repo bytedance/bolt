@@ -19,6 +19,7 @@ add_executable(
   FlinkCastExprTest.cpp
   FlinkSqlDataTimeFunctionsTest.cpp
   JsonFunctionsTest.cpp
+  RegexFunctionsTest.cpp
   RandTest.cpp
   StringFunctionsTest.cpp
 )

@@ -22,6 +22,7 @@
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/HashCodeFunction.h"
 #include "bolt/functions/flinksql/Rand.h"
+#include "bolt/functions/flinksql/RegexFunctions.h"
 #include "bolt/functions/flinksql/String.h"
 #include "bolt/functions/flinksql/ToTimestampFunction.h"
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
@@ -43,6 +44,8 @@ static void registerStringFunctions(const std::string& prefix) {
   registerFunction<IsAlphaFunction, bool, Varchar>({prefix + "is_alpha"});
   registerFunction<IsDecimalFunction, bool, Varchar>({prefix + "is_decimal"});
   registerFunction<IsDigitFunction, bool, Varchar>({prefix + "is_digit"});
+  exec::registerStatefulVectorFunction(
+      prefix + "rlike", rlikeSignatures(), makeRLike);
   registerFunction<SplitIndex, Varchar, Varchar, Varchar, int64_t>(
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(

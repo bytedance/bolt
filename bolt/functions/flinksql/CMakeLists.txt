@@ -17,6 +17,7 @@ bolt_add_library(
   bolt_functions_flink_impl
   HashCodeFunction.cpp
   JsonFunctions.cpp
+  RegexFunctions.cpp
   ElementAt.cpp
   specialforms/FlinkCastExpr.cpp
 )

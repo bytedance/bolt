@@ -41,6 +41,11 @@
 #include "bolt/vector/BaseVector.h"
 namespace bytedance::bolt::functions {
 
+enum class InvalidRegexPolicy {
+  kThrow,
+  kReturnFalse,
+};
+
 /// Representation of different kinds of patterns.
 enum class PatternKind {
   /// Pattern containing wildcard character '_' only, such as _, __, ____.
@@ -100,6 +105,12 @@ std::shared_ptr<exec::VectorFunction> makeRe2Search(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config);
+
+std::shared_ptr<exec::VectorFunction> makeRe2SearchWithPolicy(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    InvalidRegexPolicy invalidRegexPolicy);
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2SearchSignatures();
 
