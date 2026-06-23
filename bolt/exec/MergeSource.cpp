@@ -32,25 +32,79 @@
 
 #include <boost/circular_buffer.hpp>
 #include "bolt/common/compression/Compression.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/Merge.h"
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/vector/VectorStream.h"
+
+using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
 namespace {
+namespace {
+class ScopedPromiseNotification {
+ public:
+  explicit ScopedPromiseNotification(size_t initSize) {
+    promises_.reserve(initSize);
+  }
+
+  ~ScopedPromiseNotification() {
+    for (auto& promise : promises_) {
+      promise.setValue();
+    }
+  }
+
+  void add(std::vector<ContinuePromise>&& promises) {
+    promises_.reserve(promises_.size() + promises.size());
+    for (auto& promise : promises) {
+      promises_.emplace_back(std::move(promise));
+    }
+    promises.clear();
+  }
+
+  void add(ContinuePromise&& promise) {
+    promises_.emplace_back(std::move(promise));
+  }
+
+ private:
+  std::vector<ContinuePromise> promises_;
+};
+
+void deferNotify(
+    std::optional<ContinuePromise>& deferPromise,
+    ScopedPromiseNotification& promiseNotifier) {
+  if (deferPromise.has_value()) {
+    promiseNotifier.add(std::move(deferPromise.value()));
+    deferPromise.reset();
+  }
+}
+} // namespace
 
 class LocalMergeSource : public MergeSource {
  public:
   explicit LocalMergeSource(int queueSize)
       : queue_(LocalMergeSourceQueue(queueSize)) {}
 
+  void start() override {
+    TestValue::adjust("bytedance::bolt::exec::LocalMergeSource::start", this);
+    ScopedPromiseNotification notification(1);
+    queue_.withWLock([&](auto& queue) { queue.start(notification); });
+  }
+
+  BlockingReason started(ContinueFuture* future) override {
+    return queue_.withWLock([&](auto& queue) { return queue.started(future); });
+  }
+
   BlockingReason next(RowVectorPtr& data, ContinueFuture* future) override {
+    ScopedPromiseNotification notification(1);
     return queue_.withWLock(
-        [&](auto& queue) { return queue.next(data, future); });
+        [&](auto& queue) { return queue.next(data, future, notification); });
   }
 
   BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) override {
-    return queue_.withWLock(
-        [&](auto& queue) { return queue.enqueue(input, future); });
+    ScopedPromiseNotification notification(1);
+    return queue_.withWLock([&](auto& queue) {
+      return queue.enqueue(input, future, notification);
+    });
   }
 
   void close() override {}
@@ -60,7 +114,26 @@ class LocalMergeSource : public MergeSource {
    public:
     explicit LocalMergeSourceQueue(int queueSize) : data_(queueSize) {}
 
-    BlockingReason next(RowVectorPtr& data, ContinueFuture* future) {
+    void start(ScopedPromiseNotification& notification) {
+      BOLT_CHECK(!started_);
+      started_ = true;
+      notifyProducers(notification);
+    }
+
+    BlockingReason started(ContinueFuture* future) {
+      if (started_) {
+        return BlockingReason::kNotBlocked;
+      }
+      producerPromises_.emplace_back("LocalMergeSourceQueue::started");
+      *future = producerPromises_.back().getSemiFuture();
+      return BlockingReason::kWaitForConsumer;
+    }
+
+    BlockingReason next(
+        RowVectorPtr& data,
+        ContinueFuture* future,
+        ScopedPromiseNotification& notification) {
+      BOLT_CHECK(started_);
       data.reset();
 
       if (data_.empty()) {
@@ -77,17 +150,21 @@ class LocalMergeSource : public MergeSource {
       // advance to next batch.
       data_.pop_front();
 
-      notifyProducers();
+      notifyProducers(notification);
 
       return BlockingReason::kNotBlocked;
     }
 
-    BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) {
+    BlockingReason enqueue(
+        RowVectorPtr input,
+        ContinueFuture* future,
+        ScopedPromiseNotification& notification) {
       if (!input) {
         atEnd_ = true;
-        notifyConsumers();
+        notifyConsumers(notification);
         return BlockingReason::kNotBlocked;
       }
+      BOLT_CHECK(started_);
       BOLT_CHECK(!data_.full(), "LocalMergeSourceQueue is full");
 
       for (auto& child : input->children()) {
@@ -95,7 +172,7 @@ class LocalMergeSource : public MergeSource {
       }
 
       data_.push_back(input);
-      notifyConsumers();
+      notifyConsumers(notification);
 
       if (data_.full()) {
         producerPromises_.emplace_back("LocalMergeSourceQueue::enqueue");
@@ -106,20 +183,17 @@ class LocalMergeSource : public MergeSource {
     }
 
    private:
-    void notifyConsumers() {
-      for (auto& promise : consumerPromises_) {
-        promise.setValue();
-      }
-      consumerPromises_.clear();
+    void notifyConsumers(ScopedPromiseNotification& notification) {
+      notification.add(std::move(consumerPromises_));
+      BOLT_CHECK(consumerPromises_.empty());
     }
 
-    void notifyProducers() {
-      for (auto& promise : producerPromises_) {
-        promise.setValue();
-      }
-      producerPromises_.clear();
+    void notifyProducers(ScopedPromiseNotification& notification) {
+      notification.add(std::move(producerPromises_));
+      BOLT_CHECK(producerPromises_.empty());
     }
 
+    bool started_{false};
     bool atEnd_{false};
     boost::circular_buffer<RowVectorPtr> data_;
     std::vector<ContinuePromise> consumerPromises_;
@@ -147,6 +221,12 @@ class MergeExchangeSource : public MergeSource {
             executor)) {
     client_->addRemoteTaskId(taskId);
     client_->noMoreRemoteTasks();
+  }
+
+  void start() override {}
+
+  BlockingReason started(ContinueFuture* /*unused*/) override {
+    BOLT_NYI();
   }
 
   BlockingReason next(RowVectorPtr& data, ContinueFuture* future) override {
@@ -185,6 +265,7 @@ class MergeExchangeSource : public MergeSource {
 
       auto lockedStats = mergeExchange_->stats().wlock();
       lockedStats->addInputVector(data->estimateFlatSize(), data->size());
+      lockedStats->rawInputPositions += data->size();
     }
 
     // Since VectorStreamGroup::read() may cause inputStream to be at end,
@@ -206,23 +287,20 @@ class MergeExchangeSource : public MergeSource {
   }
 
  private:
+  BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) override {
+    BOLT_FAIL();
+  }
   MergeExchange* const mergeExchange_;
   std::shared_ptr<ExchangeClient> client_;
   std::unique_ptr<ByteInputStream> inputStream_;
   std::unique_ptr<SerializedPage> currentPage_;
   bool atEnd_ = false;
-
-  BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) override {
-    BOLT_FAIL();
-  }
 };
 } // namespace
 
-std::shared_ptr<MergeSource> MergeSource::createLocalMergeSource() {
-  // Buffer up to 2 vectors from each source before blocking to wait
-  // for consumers.
-  static const int kDefaultQueueSize = 2;
-  return std::make_shared<LocalMergeSource>(kDefaultQueueSize);
+std::shared_ptr<MergeSource> MergeSource::createLocalMergeSource(
+    int queueSize) {
+  return std::make_shared<LocalMergeSource>(queueSize);
 }
 
 std::shared_ptr<MergeSource> MergeSource::createMergeExchangeSource(
@@ -236,22 +314,14 @@ std::shared_ptr<MergeSource> MergeSource::createMergeExchangeSource(
       mergeExchange, taskId, destination, maxQueuedBytes, pool, executor);
 }
 
-namespace {
-void notify(std::optional<ContinuePromise>& promise) {
-  if (promise) {
-    promise->setValue();
-    promise.reset();
-  }
-}
-} // namespace
-
 BlockingReason MergeJoinSource::next(
     ContinueFuture* future,
     RowVectorPtr* data) {
+  ScopedPromiseNotification notification(1);
   return state_.withWLock([&](auto& state) {
     if (state.data != nullptr) {
       *data = std::move(state.data);
-      notify(producerPromise_);
+      deferNotify(producerPromise_, notification);
       return BlockingReason::kNotBlocked;
     }
 
@@ -269,35 +339,40 @@ BlockingReason MergeJoinSource::next(
 BlockingReason MergeJoinSource::enqueue(
     RowVectorPtr data,
     ContinueFuture* future) {
+  ScopedPromiseNotification notification(1);
   return state_.withWLock([&](auto& state) {
     if (state.atEnd) {
       // This can happen if consumer called close() because it doesn't need any
       // more data.
       // TODO Finish the pipeline early and avoid unnecessary computing.
+      deferNotify(consumerPromise_, notification);
       return BlockingReason::kNotBlocked;
     }
 
     if (data == nullptr) {
       state.atEnd = true;
-      notify(consumerPromise_);
+      deferNotify(consumerPromise_, notification);
       return BlockingReason::kNotBlocked;
     }
 
-    BOLT_CHECK_NULL(state.data);
-    state.data = std::move(data);
-    notify(consumerPromise_);
+    if (state.data != nullptr) {
+      return waitForConsumer(future);
+    }
 
-    producerPromise_ = ContinuePromise("MergeJoinSource::enqueue");
-    *future = producerPromise_->getSemiFuture();
-    return BlockingReason::kWaitForConsumer;
+    state.data = std::move(data);
+    deferNotify(consumerPromise_, notification);
+
+    return waitForConsumer(future);
   });
 }
 
 void MergeJoinSource::close() {
+  ScopedPromiseNotification notification(2);
   state_.withWLock([&](auto& state) {
     state.data = nullptr;
     state.atEnd = true;
-    notify(producerPromise_);
+    deferNotify(producerPromise_, notification);
+    deferNotify(consumerPromise_, notification);
   });
 }
 } // namespace bytedance::bolt::exec

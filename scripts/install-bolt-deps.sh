@@ -19,7 +19,7 @@ CUR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null && pwd)"
 cd "${CUR_DIR}"
 
 CONAN_CENTER_COMMIT_ID="bad5c95b810e859c1c31553b92584246fe436d69"
-CCI_HOME="${CONAN_HOME:-~/.conan2}/conan-center-index"
+CCI_HOME="${CONAN_HOME:-$HOME/.conan2}/conan-center-index"
 
 if ! command -v conan &> /dev/null; then
   echo "❌ Error: 'conan' command not found."

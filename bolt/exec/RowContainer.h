@@ -41,8 +41,8 @@
 #include "bolt/vector/VectorTypeUtils.h"
 
 #ifdef ENABLE_BOLT_JIT
+#include "bolt/jit/CompiledModule.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
-#include "bolt/jit/common.h"
 
 #endif
 namespace bytedance::bolt::exec {
@@ -125,6 +125,9 @@ struct RowContainerIterator {
   char* FOLLY_NULLABLE rowBegin{nullptr};
   // First byte after the end of the range containing 'currentRow'.
   char* FOLLY_NULLABLE endOfRun{nullptr};
+
+  // Cursor used by fast row listing with cached row pointers.
+  int32_t listRowCursor{0};
 
   // Returns the current row, skipping a possible normalized key below the first
   // byte of row.
@@ -224,6 +227,18 @@ class RowContainer {
       memory::MemoryPool* FOLLY_NONNULL pool)
       : RowContainer(
             keyTypes,
+            dependentTypes,
+            false, // useListRowIndex
+            pool) {}
+
+  // Convenience overload to enable fast row listing via cached pointers.
+  RowContainer(
+      const std::vector<TypePtr>& keyTypes,
+      const std::vector<TypePtr>& dependentTypes,
+      bool useListRowIndex,
+      memory::MemoryPool* FOLLY_NONNULL pool)
+      : RowContainer(
+            keyTypes,
             true, // nullableKeys
             std::vector<Accumulator>{},
             dependentTypes,
@@ -231,6 +246,7 @@ class RowContainer {
             false, // isJoinBuild
             false, // hasProbedFlag
             false, // hasNormalizedKey
+            useListRowIndex,
             pool) {}
 
   ~RowContainer();
@@ -265,6 +281,7 @@ class RowContainer {
       bool isJoinBuild,
       bool hasProbedFlag,
       bool hasNormalizedKey,
+      bool useListRowIndex,
       memory::MemoryPool* FOLLY_NONNULL pool,
       std::shared_ptr<HashStringAllocator> stringAllocator = nullptr);
 
@@ -322,6 +339,10 @@ class RowContainer {
   /// Zero out all the fields of the 'row'.
   void initializeFields(char* row) {
     ::memset(row, 0, fixedRowSize_);
+  }
+  // Store a single row id into the row at the reserved offset for hybrid design
+  void storeSingleRowId(uint64_t& value, char* FOLLY_NONNULL row) {
+    *reinterpret_cast<int64_t*>(row + rowIdOffset_) = value;
   }
 
   void store(const RowVectorPtr& input);
@@ -523,6 +544,22 @@ class RowContainer {
   /// There is a barrier but tsan does not know this.
   enum class ProbeType { kAll, kProbed, kNotProbed };
 
+  /// Fast path for `listRows` that returns `rowPointers_` directly. Used by
+  /// `SortBuffer` and `SortInputSpiller`, so it skips checking the free and
+  /// probe flags.
+  int32_t listRowsFast(
+      RowContainerIterator* FOLLY_NONNULL iter,
+      int32_t maxRows,
+      char* FOLLY_NONNULL* FOLLY_NONNULL rows) const {
+    int32_t count = 0;
+    while (count < maxRows &&
+           iter->listRowCursor < static_cast<int32_t>(rowPointers_.size())) {
+      rows[count++] = rowPointers_[iter->listRowCursor];
+      ++iter->listRowCursor;
+    }
+    return count;
+  }
+
   template <ProbeType probeType>
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -610,6 +647,9 @@ class RowContainer {
       RowContainerIterator* FOLLY_NONNULL iter,
       int32_t maxRows,
       char* FOLLY_NONNULL* FOLLY_NONNULL rows) {
+    if (useListRowIndex_) {
+      return listRowsFast(iter, maxRows, rows);
+    }
     return listRows<ProbeType::kAll>(iter, maxRows, kUnlimited, rows);
   }
 
@@ -776,6 +816,10 @@ class RowContainer {
 
 #endif
 
+  const std::vector<char*, StlAllocator<char*>>& testingRowPointers() const {
+    return rowPointers_;
+  }
+
   memory::MemoryPool* FOLLY_NONNULL pool() const {
     return stringAllocator_->pool();
   }
@@ -878,15 +922,14 @@ class RowContainer {
   static std::unique_ptr<ByteInputStream> prepareRead(
       const char* row,
       int32_t offset);
+  /// Returns the size of a string or complex types value stored in the
+  /// specified row and column.
+  int32_t variableSizeAt(const char* row, column_index_t column);
 
  private:
   static constexpr int32_t kNextFreeOffset = 0;
 
   static const std::vector<column_index_t> kEmptySortKeyIndexes;
-
-  /// Returns the size of a string or complex types value stored in the
-  /// specified row and column.
-  int32_t variableSizeAt(const char* row, column_index_t column);
 
   /// Copies a string or complex type value from the specified row and column
   /// @return The number of bytes written to 'destination' including the 4 bytes
@@ -1052,7 +1095,7 @@ class RowContainer {
     BufferPtr& nullBuffer = result->mutableNulls(maxRows);
     auto nulls = nullBuffer->asMutable<uint64_t>();
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
-    auto values = valuesBuffer->asMutableRange<T>();
+    [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
       if constexpr (useRowNumbers) {
@@ -1088,7 +1131,7 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
-    auto values = valuesBuffer->asMutableRange<T>();
+    [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
       const char* row;
       if constexpr (useRowNumbers) {
@@ -1412,6 +1455,8 @@ class RowContainer {
   std::vector<int32_t> nullOffsets_;
   // Position of field or accumulator. Corresponds 1:1 to 'nullOffset_'.
   std::vector<int32_t> offsets_;
+  // Position of row ID field, used in hybrid design.
+  int32_t rowIdOffset_;
   // Offset and null indicator offset of non-aggregate fields as a single word.
   // Corresponds pairwise to 'types_'.
   std::vector<RowColumn> rowColumns_;
@@ -1428,6 +1473,8 @@ class RowContainer {
   int32_t fixedRowSize_;
   // True if normalized keys are enabled in initial state.
   const bool hasNormalizedKeys_;
+  // Whether to use cached row pointers for fast listing.
+  const bool useListRowIndex_;
   // The count of entries that have an extra normalized_key_t before the
   // start.
   int64_t numRowsWithNormalizedKey_ = 0;
@@ -1447,6 +1494,7 @@ class RowContainer {
 
   memory::AllocationPool rows_;
   std::shared_ptr<HashStringAllocator> stringAllocator_;
+  std::vector<char*, StlAllocator<char*>> rowPointers_;
 
   int alignment_ = 1;
 };
@@ -1798,5 +1846,1451 @@ struct RowFormatInfo {
   bool enableCompression;
   bool serialized = false;
 };
+
+/// Hybrid container
+
+struct HybridRowId {
+  uint8_t containerId_;
+  uint64_t rowId_;
+
+  // For scattered mode: decode batchId and rowInBatch from rowId_
+  // Encoding: rowId_ = (batchId << 32) | rowInBatch
+  uint32_t batchId() const {
+    return static_cast<uint32_t>(rowId_ >> 32);
+  }
+  uint32_t rowInBatch() const {
+    return static_cast<uint32_t>(rowId_ & 0xFFFFFFFF);
+  }
+};
+
+class HybridContainer {
+ public:
+  HybridContainer(
+      const std::vector<TypePtr>& keyTypes,
+      const std::vector<TypePtr>& payloadTypes,
+      RowContainer* rows);
+  ~HybridContainer();
+
+  std::optional<int64_t> estimateRowSize() const;
+  int32_t fixedSizeAt(column_index_t column) const;
+  int32_t estimateVariableSizeAt(const char* row, column_index_t column) const;
+  void addPayload(RowVectorPtr input);
+  void clear();
+  std::vector<TypePtr> columnTypes() const;
+
+  void extractNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      int32_t numRows,
+      int32_t columnIndex,
+      const BufferPtr& result,
+      std::vector<HybridRowId>& outputRowIds);
+
+  void extractPayload(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize);
+  // The function to get the stored RowIds from RowContainer to materialize
+  // payload columns Separating it from materialization logic because in many
+  // cases the same set of RowIds will be used to materialize multiple columns.
+  void getRowIds(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      int32_t numRows,
+      std::vector<HybridRowId>& outputRowIds) {
+    getRowIdsInternal<false>(rows, {}, numRows, outputRowIds);
+  }
+  void getRowIds(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      std::vector<HybridRowId>& outputRowIds) {
+    getRowIdsInternal<true>(rows, rowNumbers, rowNumbers.size(), outputRowIds);
+  }
+  void extractColumn(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize = false) {
+    // keys
+    if (isKey(columnIndex)) {
+      keys_->extractColumn(rows, numRows, columnIndex, resultOffset, result);
+    } else {
+      // payloads
+      // getRowIds should be called out of extracting projection columns
+      BOLT_CHECK_EQ(
+          numRows,
+          outputRowIds.size(),
+          "Number of rowIds is not equal to number of rows.");
+      BOLT_CHECK_GT(payloadTypes_.size(), 0, "No payload columns stored.");
+      extractPayload(
+          rows,
+          {},
+          numRows,
+          columnIndex - numKeys_,
+          resultOffset,
+          result,
+          outputRowIds,
+          exactSize);
+    }
+  };
+
+  void extractColumn(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      int32_t numRows,
+      int32_t columnIndex,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize = false) {
+    extractColumn(
+        rows, numRows, columnIndex, 0, result, outputRowIds, exactSize);
+  };
+
+  void extractColumn(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize = false) {
+    // keys
+    if (isKey(columnIndex)) {
+      // exactSize was deprecated
+      keys_->extractColumn(rows, rowNumbers, columnIndex, resultOffset, result);
+    } else {
+      // payloads
+      // getRowIds should be called out of extracting projection columns
+      BOLT_CHECK_EQ(
+          rowNumbers.size(),
+          outputRowIds.size(),
+          "Number of rowIds is not equal to number of rows.");
+      BOLT_CHECK_GT(payloadTypes_.size(), 0, "No payload columns stored.");
+      extractPayload(
+          rows,
+          rowNumbers,
+          rowNumbers.size(),
+          columnIndex - numKeys_,
+          resultOffset,
+          result,
+          outputRowIds,
+          exactSize);
+    }
+  }
+  bool isKey(int32_t columnIndex) const {
+    return columnIndex < numKeys_;
+  }
+  RowContainer* getKeys() const {
+    return keys_;
+  }
+
+  uint32_t getNumRows() const {
+    return totalRows_;
+  }
+
+  uint32_t getNumBatches() const {
+    return totalBatches_;
+  }
+
+  /// Returns the total payload memory bytes that would be needed to coalesce
+  /// all payload batches. This is the sum of estimateFlatSize() for all payload
+  /// columns across all batches. Used by SortBuffer to account for the memory
+  /// required for coalescing when making spill decisions.
+  uint64_t payloadMemoryBytes() const {
+    uint64_t total = 0;
+    for (const auto& bytes : payloadFlatBytesSum_) {
+      total += bytes;
+    }
+    return total;
+  }
+
+  void setId(uint8_t id) {
+    id_ = id;
+  }
+
+  uint8_t getId() {
+    return id_;
+  }
+
+  // Scattered mode: keep payload batches separate (no coalesce)
+  void setScatteredModeEnabled(bool enabled) {
+    scatteredModeEnabled_ = enabled;
+  }
+
+  bool isScatteredModeEnabled() const {
+    return scatteredModeEnabled_;
+  }
+
+  void setAllContainers(
+      std::unordered_map<uint8_t, HybridContainer*>& hybridDataChannel) {
+    allContainers_ = hybridDataChannel;
+    maxContainerId_ = 0;
+    for (const auto& [cid, _] : allContainers_) {
+      maxContainerId_ = std::max<uint8_t>(maxContainerId_, cid);
+    }
+  }
+
+  uint8_t getNumContainers() const {
+    return allContainers_.size();
+  }
+
+  // Fast path check for single container - avoids sorting overhead.
+  // In single container case, all rows come from the same container.
+  bool isSingleContainer() const {
+    return allContainers_.size() == 1;
+  }
+
+  // Controls whether to reorder rows by containerId during extraction.
+  // Can be disabled for testing to get deterministic output order.
+  void setReorderEnabled(bool enabled) {
+    reorderEnabled_ = enabled;
+  }
+
+  bool isReorderEnabled() const {
+    return reorderEnabled_;
+  }
+
+  // Returns whether sorting should be used for extraction.
+  // Sorting is used when: reorder is enabled AND there are multiple containers.
+  bool shouldUseSorting() const {
+    return reorderEnabled_ && !isSingleContainer();
+  }
+
+  // Reorder rows and rowIds by containerId to improve locality for extraction.
+  // Returns reordered rows, rowIds, and optionally rowNumbers when provided.
+  struct SortedRows {
+    std::vector<const char*> rows;
+    std::vector<vector_size_t> rowNumbers;
+    std::vector<HybridRowId> rowIds;
+  };
+
+  SortedRows sortByContainerId(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      const std::vector<HybridRowId>& outputRowIds) {
+    const int size = outputRowIds.size();
+    SortedRows out;
+    out.rows.resize(size);
+    out.rowIds.resize(size);
+    if (!rowNumbers.empty()) {
+      out.rowNumbers.resize(size);
+    }
+
+    // Build permutation by counting sort on containerId.
+    std::vector<int32_t> count(maxContainerId_ + 1, 0);
+    for (const auto& item : outputRowIds) {
+      ++count[item.containerId_];
+    }
+    for (int i = 1; i <= maxContainerId_; ++i) {
+      count[i] += count[i - 1];
+    }
+    std::vector<int32_t> perm(size);
+    for (int i = size - 1; i >= 0; --i) {
+      auto cid = outputRowIds[i].containerId_;
+      auto pos = --count[cid];
+      perm[pos] = i;
+    }
+
+    // Apply permutation.
+    for (int outIdx = 0; outIdx < size; ++outIdx) {
+      const int srcIdx = perm[outIdx];
+      out.rowIds[outIdx] = outputRowIds[srcIdx];
+      if (!out.rowNumbers.empty()) {
+        out.rowNumbers[outIdx] = rowNumbers[srcIdx];
+      }
+      out.rows[outIdx] = rows[srcIdx];
+    }
+
+    return out;
+  }
+
+  // Coalesce all payload batches into a single batch to improve locality.
+  void coalesceBatches() {
+    // Skip if no payload columns defined.
+    if (payloadTypes_.empty()) {
+      return;
+    }
+
+    auto* pool = keys_->pool();
+    const auto numPayloadCols = payloadTypes_.size();
+
+    // Handle empty container: create an empty batch to maintain single-batch
+    // invariant. This ensures getSingleContainerData() works even when no data
+    // was added.
+    if (owningInputs_.empty()) {
+      std::vector<VectorPtr> emptyChildren;
+      emptyChildren.reserve(numPayloadCols);
+      std::vector<std::string> payloadNames;
+      payloadNames.reserve(numPayloadCols);
+      for (int32_t col = 0; col < numPayloadCols; ++col) {
+        payloadNames.push_back(fmt::format("c{}", col));
+        emptyChildren.push_back(
+            BaseVector::create(payloadTypes_[col], 0, pool));
+      }
+      owningInputs_.push_back(std::make_shared<RowVector>(
+          pool,
+          ROW(std::move(payloadNames), std::vector<TypePtr>(payloadTypes_)),
+          BufferPtr(nullptr),
+          0,
+          std::move(emptyChildren)));
+      totalBatches_ = 1;
+      return;
+    }
+
+    const auto totalRows = totalRows_;
+
+    std::vector<VectorPtr> newChildren;
+    newChildren.reserve(numPayloadCols);
+    std::vector<std::string> payloadNames;
+    payloadNames.reserve(numPayloadCols);
+    for (int32_t col = 0; col < numPayloadCols; ++col) {
+      payloadNames.push_back(fmt::format("c{}", col));
+    }
+    // Flatten each payload column into a single FlatVector.
+    for (int32_t col = 0; col < numPayloadCols; ++col) {
+      auto flat = BaseVector::create(payloadTypes_[col], totalRows, pool);
+      vector_size_t offset = 0;
+      for (const auto& batch : owningInputs_) {
+        auto* child = batch->childAt(col).get();
+        const auto batchSize = batch->size();
+        flat->copy(child, offset, 0, batchSize);
+        offset += batchSize;
+      }
+      newChildren.push_back(std::move(flat));
+    }
+
+    // Rebuild owningInputs_ with a single RowVector.
+    owningInputs_.clear();
+    owningInputs_.push_back(std::make_shared<RowVector>(
+        pool,
+        ROW(std::move(payloadNames), std::vector<TypePtr>(payloadTypes_)),
+        BufferPtr(nullptr),
+        totalRows,
+        std::move(newChildren)));
+
+    totalBatches_ = 1;
+  }
+
+ private:
+  // Get the single container's coalesced data (only valid when
+  // isSingleContainer()). Validates that the single container is actually this
+  // container.
+  RowVector* getSingleContainerData() const {
+    BOLT_DCHECK_EQ(allContainers_.size(), 1);
+    BOLT_DCHECK_EQ(owningInputs_.size(), 1);
+    BOLT_DCHECK_NOT_NULL(owningInputs_[0]);
+    auto it = allContainers_.begin();
+    // Validate that the single container is self
+    BOLT_DCHECK_EQ(it->first, id_, "Single container ID mismatch with self ID");
+    BOLT_DCHECK(it->second == this, "Single container is not self");
+    return owningInputs_[0].get();
+  }
+
+  template <TypeKind Kind>
+  void extractPayloadTyped(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize) {
+    if (rowNumbers.size() > 0) {
+      extractPayloadTypedInternal<Kind, true>(
+          rows,
+          rowNumbers,
+          rowNumbers.size(),
+          columnIndex,
+          resultOffset,
+          result,
+          outputRowIds,
+          exactSize);
+    } else {
+      extractPayloadTypedInternal<Kind, false>(
+          rows,
+          rowNumbers,
+          numRows,
+          columnIndex,
+          resultOffset,
+          result,
+          outputRowIds,
+          exactSize);
+    }
+  }
+
+  template <TypeKind Kind, bool useRowNumbers>
+  void extractPayloadTypedInternal(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool exactSize) {
+    result->resize(numRows + resultOffset);
+    BOLT_CHECK_EQ(numRows, outputRowIds.size());
+    if (Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+        Kind == TypeKind::ROW) {
+      extractPayloadComplex(
+          numRows, columnIndex, resultOffset, result, outputRowIds);
+      return;
+    }
+    BOLT_CHECK(Kind != TypeKind::MAP);
+    using T = typename KindToFlatVector<Kind>::HashRowType;
+    auto flatResult = result->as<FlatVector<T>>();
+
+    // Scattered mode path: use DecodedVector for extraction
+    if (scatteredModeEnabled_) {
+      if (isSingleContainer()) {
+        if (isNullable_[columnIndex]) {
+          extractPayloadScatteredWithNulls<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        } else {
+          extractPayloadScatteredNoNulls<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        }
+      } else {
+        // Multi-container scattered mode
+        if (isNullable_[columnIndex]) {
+          extractPayloadScatteredWithNullsMulti<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        } else {
+          extractPayloadScatteredNoNullsMulti<T, useRowNumbers>(
+              rows,
+              rowNumbers,
+              numRows,
+              columnIndex,
+              resultOffset,
+              flatResult,
+              outputRowIds);
+        }
+      }
+      return;
+    }
+
+    // Fast path for single container (spilling, sort) - avoids map lookups
+    if (isSingleContainer()) {
+      if (isNullable_[columnIndex]) {
+        extractPayloadWithNullsSingleContainer<T, useRowNumbers>(
+            rows,
+            rowNumbers,
+            numRows,
+            columnIndex,
+            resultOffset,
+            flatResult,
+            outputRowIds);
+      } else {
+        extractPayloadNoNullsSingleContainer<T, useRowNumbers>(
+            rows,
+            rowNumbers,
+            numRows,
+            columnIndex,
+            resultOffset,
+            flatResult,
+            outputRowIds);
+      }
+      return;
+    }
+
+    // Multi-container path (hash join after table merge)
+    if (isNullable_[columnIndex]) {
+      extractPayloadWithNulls<T, useRowNumbers>(
+          rows,
+          rowNumbers,
+          numRows,
+          columnIndex,
+          resultOffset,
+          flatResult,
+          outputRowIds,
+          exactSize);
+    } else {
+      extractPayloadNoNulls<T, useRowNumbers>(
+          rows,
+          rowNumbers,
+          numRows,
+          columnIndex,
+          resultOffset,
+          flatResult,
+          outputRowIds,
+          exactSize);
+    }
+  }
+
+  void extractPayloadComplex(
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      const VectorPtr& result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    // Cache per-container child pointers; coalesced payload lives in
+    // owningInputs_[0] for each container.
+    std::vector<BaseVector*> sources(maxContainerId_ + 1, nullptr);
+    for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
+      auto* child = entry.second->owningInputs_[0]->childAt(columnIndex).get();
+      BOLT_CHECK_NOT_NULL(child);
+      sources[entry.first] = child;
+    }
+
+    auto* rowIdPtr = outputRowIds.data();
+    for (int i = 0; i < numRows; ++i) {
+      const auto& rec = rowIdPtr[i];
+      auto* source = sources[rec.containerId_];
+      BOLT_DCHECK_NOT_NULL(source);
+      auto resultIndex = resultOffset + i;
+      if (source->isNullAt(rec.rowId_)) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+      result->setNull(resultIndex, false);
+      result->copy(source, resultIndex, rec.rowId_, 1);
+    }
+  }
+
+  // ========== Single-container fast path implementations ==========
+  // These avoid map lookups and container ID checks in hot loops.
+  // Uses 4-way unrolled prefetch for best performance.
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadWithNullsSingleContainer(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Single container - direct access without map lookup
+    auto* flatChild = getSingleContainerData()
+                          ->childAt(columnIndex)
+                          ->template as<FlatVector<T>>();
+    BOLT_CHECK_NOT_NULL(flatChild);
+    const T* rawValues = flatChild->rawValues();
+    const uint64_t* rawNulls = flatChild->rawNulls();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    int32_t i = 0;
+
+    // ---- Main loop: process 4 rows per iteration ----
+    for (; i + 3 < numRows; i += 4) {
+      // ---- Prefetch next 4 records at distance ----
+      const int32_t p = i + kPrefetchDist;
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        __builtin_prefetch(rawValues + rowIdPtr[p].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 1].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 2].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 3].rowId_, 0, 1);
+      }
+
+      // ---- Process 4 rows ----
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        const auto rid = rowIdPtr[idx].rowId_;
+        if (rawNulls != nullptr && bits::isBitNull(rawNulls, rid)) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        bits::setNull(nulls, resultIndex, false);
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, rawValues[rid]);
+        } else {
+          values[resultIndex] = rawValues[rid];
+        }
+      }
+    }
+
+    // ---- Tail loop ----
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto rid = rowIdPtr[i].rowId_;
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, rid)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, rawValues[rid]);
+      } else {
+        values[resultIndex] = rawValues[rid];
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadNoNullsSingleContainer(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Single container - direct access without map lookup
+    auto* flatChild = getSingleContainerData()
+                          ->childAt(columnIndex)
+                          ->template as<FlatVector<T>>();
+    BOLT_CHECK_NOT_NULL(flatChild);
+    const T* rawValues = flatChild->rawValues();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    int32_t i = 0;
+
+    // ---- Main loop: process 4 rows per iteration ----
+    for (; i + 3 < numRows; i += 4) {
+      // ---- Prefetch next 4 records at distance ----
+      const int32_t p = i + kPrefetchDist;
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        __builtin_prefetch(rawValues + rowIdPtr[p].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 1].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 2].rowId_, 0, 1);
+        __builtin_prefetch(rawValues + rowIdPtr[p + 3].rowId_, 0, 1);
+      }
+
+      // ---- Process 4 rows ----
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          result->setNull(resultIndex, true);
+          continue;
+        }
+
+        result->setNull(resultIndex, false);
+        const auto rid = rowIdPtr[idx].rowId_;
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, rawValues[rid]);
+        } else {
+          values[resultIndex] = rawValues[rid];
+        }
+      }
+    }
+
+    // ---- Tail loop ----
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto rid = rowIdPtr[i].rowId_;
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, rawValues[rid]);
+      } else {
+        values[resultIndex] = rawValues[rid];
+      }
+    }
+  }
+
+  // ========== End single-container fast path implementations ==========
+
+  // ========== Scattered mode extraction implementations ==========
+  // These use DecodedVector for extraction from non-coalesced batches.
+  // rowId encodes (batchId, rowInBatch) instead of global row index.
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredNoNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto& rid = rowIdPtr[i];
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      T value = decodedPayloads_[batchIdx][columnIndex]->template valueAt<T>(
+          rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredWithNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto& rid = rowIdPtr[i];
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      auto* decoded = decodedPayloads_[batchIdx][columnIndex].get();
+      if (decoded->isNullAt(rowInBatch)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      T value = decoded->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  // Multi-container scattered mode extraction
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredNoNullsMulti(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Cache current container's decodedPayloads pointer to avoid repeated map
+    // lookups
+    uint8_t currentContainerId = UINT8_MAX;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>*
+        currentDecodedPayloads = nullptr;
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+      const auto& rid = rowIdPtr[i];
+
+      // Switch container if needed
+      if (rid.containerId_ != currentContainerId) {
+        currentContainerId = rid.containerId_;
+        currentDecodedPayloads =
+            &(allContainers_[currentContainerId]->decodedPayloads_);
+      }
+
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      T value =
+          (*currentDecodedPayloads)[batchIdx][columnIndex]->template valueAt<T>(
+              rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadScatteredWithNullsMulti(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    // Cache current container's decodedPayloads pointer to avoid repeated map
+    // lookups
+    uint8_t currentContainerId = UINT8_MAX;
+    std::vector<std::vector<std::unique_ptr<DecodedVector>>>*
+        currentDecodedPayloads = nullptr;
+
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto& rid = rowIdPtr[i];
+
+      // Switch container if needed
+      if (rid.containerId_ != currentContainerId) {
+        currentContainerId = rid.containerId_;
+        currentDecodedPayloads =
+            &(allContainers_[currentContainerId]->decodedPayloads_);
+      }
+
+      const auto batchIdx = rid.batchId();
+      const auto rowInBatch = rid.rowInBatch();
+      auto* decoded = (*currentDecodedPayloads)[batchIdx][columnIndex].get();
+      if (decoded->isNullAt(rowInBatch)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      T value = decoded->template valueAt<T>(rowInBatch);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, value);
+      } else {
+        values[resultIndex] = value;
+      }
+    }
+  }
+
+  // ========== End scattered mode extraction implementations ==========
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadWithNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool /*exactSize*/) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+
+    BufferPtr& nullBuffer = result->mutableNulls(maxRows);
+    auto nulls = nullBuffer->asMutable<uint64_t>();
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+    auto* rowIdPtr = outputRowIds.data();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    std::vector<const T*> rawValuesByContainer(maxContainerId_ + 1, nullptr);
+    std::vector<const uint64_t*> rawNullsByContainer(
+        maxContainerId_ + 1, nullptr);
+    for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
+      auto* flatChild = entry.second->owningInputs_[0]
+                            ->childAt(columnIndex)
+                            ->template as<FlatVector<T>>();
+      BOLT_CHECK_NOT_NULL(flatChild);
+      rawValuesByContainer[entry.first] = flatChild->rawValues();
+      rawNullsByContainer[entry.first] = flatChild->rawNulls();
+    }
+
+    int32_t curCid = -1;
+    const T* curRaw = nullptr;
+    const uint64_t* curNulls = nullptr;
+
+    int32_t pfCid = -1;
+    const T* pfRaw = nullptr;
+
+    if (FOLLY_LIKELY(numRows > 0)) {
+      curCid = rowIdPtr[0].containerId_;
+      curRaw = rawValuesByContainer[curCid];
+      curNulls = rawNullsByContainer[curCid];
+      BOLT_DCHECK_NOT_NULL(curRaw);
+      if (kPrefetchDist < numRows) {
+        pfCid = rowIdPtr[kPrefetchDist].containerId_;
+        pfRaw = rawValuesByContainer[pfCid];
+        BOLT_DCHECK_NOT_NULL(pfRaw);
+      }
+    }
+
+    int32_t i = 0;
+
+    for (; i + 3 < numRows; i += 4) {
+      const int32_t p = i + kPrefetchDist;
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        const auto& r0 = rowIdPtr[p];
+        if (FOLLY_UNLIKELY(r0.containerId_ != pfCid)) {
+          pfCid = r0.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r0.rowId_, 0, 1);
+
+        const auto& r1 = rowIdPtr[p + 1];
+        if (FOLLY_UNLIKELY(r1.containerId_ != pfCid)) {
+          pfCid = r1.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r1.rowId_, 0, 1);
+
+        const auto& r2 = rowIdPtr[p + 2];
+        if (FOLLY_UNLIKELY(r2.containerId_ != pfCid)) {
+          pfCid = r2.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r2.rowId_, 0, 1);
+
+        const auto& r3 = rowIdPtr[p + 3];
+        if (FOLLY_UNLIKELY(r3.containerId_ != pfCid)) {
+          pfCid = r3.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r3.rowId_, 0, 1);
+      }
+
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        const auto& rowIdRec = rowIdPtr[idx];
+        if (FOLLY_UNLIKELY(rowIdRec.containerId_ != curCid)) {
+          curCid = rowIdRec.containerId_;
+          curRaw = rawValuesByContainer[curCid];
+          curNulls = rawNullsByContainer[curCid];
+          BOLT_DCHECK_NOT_NULL(curRaw);
+        }
+
+        const auto rid = rowIdRec.rowId_;
+        if (curNulls != nullptr && bits::isBitNull(curNulls, rid)) {
+          bits::setNull(nulls, resultIndex, true);
+          continue;
+        }
+
+        bits::setNull(nulls, resultIndex, false);
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, curRaw[rid]);
+        } else {
+          values[resultIndex] = curRaw[rid];
+        }
+      }
+    }
+
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      const auto& rowIdRec = rowIdPtr[i];
+      if (FOLLY_UNLIKELY(rowIdRec.containerId_ != curCid)) {
+        curCid = rowIdRec.containerId_;
+        curRaw = rawValuesByContainer[curCid];
+        curNulls = rawNullsByContainer[curCid];
+        BOLT_DCHECK_NOT_NULL(curRaw);
+      }
+
+      const auto rid = rowIdRec.rowId_;
+      if (curNulls != nullptr && bits::isBitNull(curNulls, rid)) {
+        bits::setNull(nulls, resultIndex, true);
+        continue;
+      }
+
+      bits::setNull(nulls, resultIndex, false);
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, curRaw[rid]);
+      } else {
+        values[resultIndex] = curRaw[rid];
+      }
+    }
+  }
+
+  template <typename T, bool useRowNumbers>
+  void extractPayloadNoNulls(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t columnIndex,
+      int32_t resultOffset,
+      FlatVector<T>* FOLLY_NONNULL result,
+      std::vector<HybridRowId>& outputRowIds,
+      bool /*exactSize*/) {
+    auto maxRows = numRows + resultOffset;
+    BOLT_DCHECK_LE(maxRows, result->size());
+    BOLT_DCHECK_LT(columnIndex, payloadTypes_.size());
+
+    BufferPtr valuesBuffer = result->mutableValues(maxRows);
+    auto values = valuesBuffer->asMutableRange<T>();
+
+    auto* rowIdPtr = outputRowIds.data();
+
+    constexpr vector_size_t kPrefetchDist = 16;
+
+    std::vector<const T*> rawValuesByContainer(maxContainerId_ + 1, nullptr);
+    for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
+      auto* flatChild = entry.second->owningInputs_[0]
+                            ->childAt(columnIndex)
+                            ->template as<FlatVector<T>>();
+      BOLT_CHECK_NOT_NULL(flatChild);
+      rawValuesByContainer[entry.first] = flatChild->rawValues();
+    }
+    // cached for load
+    int32_t curCid = -1;
+    const T* curRaw = nullptr;
+
+    // cached for prefetch
+    int32_t pfCid = -1;
+    const T* pfRaw = nullptr;
+
+    if (FOLLY_LIKELY(numRows > 0)) {
+      curCid = rowIdPtr[0].containerId_;
+      curRaw = rawValuesByContainer[curCid];
+      BOLT_DCHECK_NOT_NULL(curRaw);
+      if (kPrefetchDist < numRows) {
+        pfCid = rowIdPtr[kPrefetchDist].containerId_;
+        pfRaw = rawValuesByContainer[pfCid];
+        BOLT_DCHECK_NOT_NULL(pfRaw);
+      }
+    }
+
+    int32_t i = 0;
+
+    // ---- Main loop: process 4 rows per iteration ----
+    for (; i + 3 < numRows; i += 4) {
+      // ---- Prefetch next 4 records at distance ----
+      const int32_t p = i + kPrefetchDist;
+      // Correct bound for prefetching p..p+3:
+      if (FOLLY_LIKELY(p + 3 < numRows)) {
+        // r0
+        const auto& r0 = rowIdPtr[p];
+        if (FOLLY_UNLIKELY(r0.containerId_ != pfCid)) {
+          pfCid = r0.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r0.rowId_, 0, 1);
+
+        // r1
+        const auto& r1 = rowIdPtr[p + 1];
+        if (FOLLY_UNLIKELY(r1.containerId_ != pfCid)) {
+          pfCid = r1.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r1.rowId_, 0, 1);
+
+        // r2
+        const auto& r2 = rowIdPtr[p + 2];
+        if (FOLLY_UNLIKELY(r2.containerId_ != pfCid)) {
+          pfCid = r2.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r2.rowId_, 0, 1);
+
+        // r3
+        const auto& r3 = rowIdPtr[p + 3];
+        if (FOLLY_UNLIKELY(r3.containerId_ != pfCid)) {
+          pfCid = r3.containerId_;
+          pfRaw = rawValuesByContainer[pfCid];
+          BOLT_DCHECK_NOT_NULL(pfRaw);
+        }
+        __builtin_prefetch(pfRaw + r3.rowId_, 0, 1);
+      }
+
+      // ---- Consume 4 rows ----
+      for (int32_t u = 0; u < 4; ++u) {
+        const int32_t idx = i + u;
+
+        const char* row;
+        if constexpr (useRowNumbers) {
+          auto rowNumber = rowNumbers[idx];
+          row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+        } else {
+          row = rows[idx];
+        }
+
+        const auto resultIndex = resultOffset + idx;
+        if (row == nullptr) {
+          result->setNull(resultIndex, true);
+          continue;
+        }
+
+        result->setNull(resultIndex, false);
+
+        const auto& rowIdRec = rowIdPtr[idx];
+
+        // Refresh cached container pointer only when containerId changes.
+        if (FOLLY_UNLIKELY(rowIdRec.containerId_ != curCid)) {
+          curCid = rowIdRec.containerId_;
+          curRaw = rawValuesByContainer[curCid];
+          BOLT_DCHECK_NOT_NULL(curRaw);
+        }
+
+        const auto rid = rowIdRec.rowId_;
+        if constexpr (std::is_same_v<T, StringView>) {
+          result->set(resultIndex, curRaw[rid]);
+        } else {
+          values[resultIndex] = curRaw[rid];
+        }
+      }
+    }
+
+    // ---- Tail loop ----
+    for (; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+
+      const auto resultIndex = resultOffset + i;
+      if (row == nullptr) {
+        result->setNull(resultIndex, true);
+        continue;
+      }
+
+      result->setNull(resultIndex, false);
+
+      const auto& rowIdRec = rowIdPtr[i];
+      if (FOLLY_UNLIKELY(rowIdRec.containerId_ != curCid)) {
+        curCid = rowIdRec.containerId_;
+        curRaw = rawValuesByContainer[curCid];
+        BOLT_DCHECK_NOT_NULL(curRaw);
+      }
+
+      const auto rid = rowIdRec.rowId_;
+      if constexpr (std::is_same_v<T, StringView>) {
+        result->set(resultIndex, curRaw[rid]);
+      } else {
+        values[resultIndex] = curRaw[rid];
+      }
+    }
+  }
+
+  template <bool useRowNumbers>
+  void getRowIdsInternal(
+      const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      uint32_t numRows,
+      std::vector<HybridRowId>& outputRowIds) {
+    BOLT_CHECK_EQ(numRows, outputRowIds.size());
+    // No payload column
+    if (payloadTypes_.size() == 0)
+      return;
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row;
+      if constexpr (useRowNumbers) {
+        auto rowNumber = rowNumbers[i];
+        row = rowNumber >= 0 ? rows[rowNumber] : nullptr;
+      } else {
+        row = rows[i];
+      }
+      if (row == nullptr) {
+        outputRowIds[i] = {0, 0};
+      } else {
+        auto encodedId = keys_->valueAt<uint64_t>(row, rowIdColumnOffset_);
+        uint8_t driverId = encodedId >> 56;
+        uint64_t rowId = encodedId & ((1ULL << 56) - 1);
+        outputRowIds[i] = {driverId, rowId};
+      }
+    }
+  }
+
+  int32_t rowIdColumnOffset_;
+  std::vector<RowVectorPtr> owningInputs_;
+  const std::vector<TypePtr> keyTypes_;
+  const std::vector<TypePtr> payloadTypes_;
+  std::vector<TypePtr> types_;
+  std::vector<uint64_t> payloadFlatBytesSum_;
+
+  const int numKeys_;
+  RowContainer* keys_;
+
+  // null bitmap for each column
+  std::vector<char> isNullable_;
+
+  uint64_t totalRows_{0};
+  uint32_t totalBatches_{0};
+
+  uint8_t id_{0};
+  std::unordered_map<uint8_t, HybridContainer*> allContainers_;
+  uint8_t maxContainerId_{0};
+
+  // Controls whether to reorder rows by containerId during extraction.
+  // Default true for better cache locality. Can be disabled for testing.
+  bool reorderEnabled_{true};
+
+  // Scattered mode: keep payload batches separate (no coalesce).
+  // In scattered mode, rowId encodes (batchId, rowInBatch) instead of global
+  // row index.
+  bool scatteredModeEnabled_{false};
+
+  // Pre-decoded payload vectors for scattered mode extraction.
+  // Indexed by [batchIndex][columnIndex].
+  std::vector<std::vector<std::unique_ptr<DecodedVector>>> decodedPayloads_;
+};
+
+template <>
+inline void HybridContainer::extractPayloadTyped<TypeKind::OPAQUE>(
+    const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+    folly::Range<const vector_size_t*> rowNumbers,
+    int32_t numRows,
+    int32_t columnIndex,
+    int32_t resultOffset,
+    const VectorPtr& result,
+    std::vector<HybridRowId>& outputRowIds,
+    bool exactSize) {
+  BOLT_UNSUPPORTED("HybridContainer doesn't support OPAQUE payload types.");
+}
+
+inline void HybridContainer::extractPayload(
+    const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+    folly::Range<const vector_size_t*> rowNumbers,
+    int32_t numRows,
+    int32_t columnIndex,
+    int32_t resultOffset,
+    const VectorPtr& result,
+    std::vector<HybridRowId>& outputRowIds,
+    bool exactSize) {
+  BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      extractPayloadTyped,
+      result->typeKind(),
+      rows,
+      rowNumbers,
+      numRows,
+      columnIndex,
+      resultOffset,
+      result,
+      outputRowIds,
+      exactSize);
+}
+
+inline void HybridContainer::extractNulls(
+    const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
+    int32_t numRows,
+    int32_t columnIndex,
+    const BufferPtr& result,
+    std::vector<HybridRowId>& outputRowIds) {
+  if (isKey(columnIndex)) {
+    keys_->extractNulls(rows, numRows, columnIndex, result);
+  } else {
+    auto payloadColumnIndex = columnIndex - numKeys_;
+    BOLT_DCHECK(result->size() >= bits::nbytes(numRows));
+    auto* rawResult = result->asMutable<uint64_t>();
+    bits::fillBits(rawResult, 0, numRows, false);
+    if (!isNullable_[payloadColumnIndex]) {
+      return;
+    }
+    std::vector<const uint64_t*> rawNullsByContainer(
+        maxContainerId_ + 1, nullptr);
+    for (const auto& entry : allContainers_) {
+      // Skip containers with no data (e.g., drivers that received no input)
+      if (entry.second->owningInputs_.empty()) {
+        continue;
+      }
+      auto* child =
+          entry.second->owningInputs_[0]->childAt(payloadColumnIndex).get();
+      rawNullsByContainer[entry.first] = child->rawNulls();
+    }
+    auto* rowIdPtr = outputRowIds.data();
+    for (int32_t i = 0; i < numRows; ++i) {
+      const char* row = rows[i];
+      if (row == nullptr) {
+        bits::setBit(rawResult, i, true);
+        continue;
+      }
+      const auto& rec = rowIdPtr[i];
+      const auto* nulls = rawNullsByContainer[rec.containerId_];
+      if (nulls != nullptr && bits::isBitNull(nulls, rec.rowId_)) {
+        bits::setBit(rawResult, i, true);
+      }
+    }
+  }
+}
 
 } // namespace bytedance::bolt::exec

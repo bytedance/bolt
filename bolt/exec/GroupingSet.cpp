@@ -123,6 +123,10 @@ GroupingSet::GroupingSet(
   }
 
   for (auto& aggregate : aggregates_) {
+    if (!hasExternalMemoryAccumulators_ &&
+        aggregate.function->accumulatorUsesExternalMemory()) {
+      hasExternalMemoryAccumulators_ = true;
+    }
     if (aggregate.distinct) {
       BOLT_USER_CHECK(
           !isPartial_,
@@ -1099,12 +1103,13 @@ void GroupingSet::spill() {
     BOLT_DCHECK(pool_.trackUsage());
     BOLT_CHECK_EQ(numDistinctSpilledFiles_, 0);
     BOLT_CHECK_GT(rows->probedFlagOffset(), 0);
+    const auto sortingKeys = SpillState::makeSortingKeys(
+        std::vector<CompareFlags>(rows->keyTypes().size()));
     spiller_ = std::make_unique<Spiller>(
         Spiller::Type::kAggregateInput,
         rows,
         makeSpillType(),
-        rows->keyTypes().size(),
-        std::vector<CompareFlags>(),
+        sortingKeys,
         spillConfig_);
     spiller_->setSpillConfig(spillConfig_);
     BOLT_CHECK_EQ(spiller_->state().maxPartitions(), 1);
@@ -1199,6 +1204,7 @@ bool GroupingSet::getOutputWithSpill(
           false,
           true,
           false,
+          false /*useListRowIndex*/,
           &pool_,
           table_->rows()->stringAllocatorShared());
 
@@ -2035,6 +2041,7 @@ void GroupingSet::abandonPartialAggregation() {
       false,
       true,
       false,
+      false /*useListRowIndex*/,
       &pool_,
       table_->rows()->stringAllocatorShared());
   initializeAggregates(aggregates_, *intermediateRows_, true);
@@ -2147,10 +2154,24 @@ void GroupingSet::toIntermediate(
 }
 
 std::optional<int64_t> GroupingSet::estimateOutputRowSize() const {
-  if (table_ == nullptr) {
+  if (table_ == nullptr || table_->numDistinct() == 0) {
     return std::nullopt;
   }
-  return table_->rows()->estimateRowSize();
+
+  const auto rowSizeFromContainer = table_->rows()->estimateRowSize();
+  if (!hasExternalMemoryAccumulators_) {
+    return rowSizeFromContainer;
+  }
+
+  // RowContainer::estimateRowSize() only accounts for RowContainer's row blocks
+  // and HashStringAllocator (e.g. strings). For aggregates which allocate state
+  // directly from MemoryPool (external memory), incorporate pool usage per
+  // group to avoid under-estimation and too large output batches.
+  const int64_t rowSizeFromPool = std::max<int64_t>(
+      1, static_cast<int64_t>(pool_.currentBytes() / table_->numDistinct()));
+  const int64_t rowSize =
+      std::max<int64_t>(rowSizeFromPool, rowSizeFromContainer.value_or(0));
+  return rowSize;
 }
 
 void GroupingSet::convertCompositeInput(

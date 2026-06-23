@@ -36,11 +36,13 @@ WindowPartition::WindowPartition(
     RowContainer* data,
     const folly::Range<char**>& rows,
     const std::vector<column_index_t>& inputMapping,
-    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,
+    bool enableJit)
     : data_(data),
       partition_(rows),
       inputMapping_(inputMapping),
-      sortKeyInfo_(sortKeyInfo) {
+      sortKeyInfo_(sortKeyInfo),
+      enableJit_(enableJit) {
   for (int i = 0; i < inputMapping_.size(); i++) {
     columns_.emplace_back(data_->columnAt(inputMapping_[i]));
   }
@@ -132,10 +134,8 @@ WindowPartition::extractNulls(
                    : std::nullopt;
 }
 
-bool WindowPartition::compareRowsWithSortKeys(
-    const char* lhs,
-    const char* rhs,
-    RowRowCompare rowCmpRowFunc_) const {
+bool WindowPartition::compareRowsWithSortKeys(const char* lhs, const char* rhs)
+    const {
   if (lhs == rhs) {
     return false;
   }
@@ -157,43 +157,9 @@ std::pair<vector_size_t, vector_size_t> WindowPartition::computePeerBuffers(
     vector_size_t prevPeerStart,
     vector_size_t prevPeerEnd,
     vector_size_t* rawPeerStarts,
-    vector_size_t* rawPeerEnds,
-    bool enableJit) const {
-  RowRowCompare rowCmpRowFunc_ = nullptr;
-
-#ifdef ENABLE_BOLT_JIT
-  if (enableJit) {
-    std::vector<column_index_t> sortKeyIndexs;
-    std::vector<CompareFlags> cmpFlags;
-    std::vector<TypePtr> sortKeyTypes;
-    bytedance::bolt::jit::CompiledModuleSP jitModuleRow_;
-    for (auto& key : sortKeyInfo_) {
-      auto columnIndex = key.first;
-      sortKeyIndexs.push_back(columnIndex);
-      sortKeyTypes.push_back(data_->columnTypes()[columnIndex]);
-      cmpFlags.push_back(CompareFlags{
-          key.second.isNullsFirst(), key.second.isAscending(), false});
-    }
-    if (data_ != nullptr && enableJit && RowContainer::JITable(sortKeyTypes)) {
-      if (cmpFlags.empty()) {
-        cmpFlags.resize(sortKeyTypes.size(), CompareFlags());
-      }
-      auto [jitMod, fn] = data_->codegenCompare(
-          sortKeyTypes,
-          cmpFlags,
-          bytedance::bolt::jit::CmpType::CMP_SPILL,
-          true,
-          sortKeyIndexs);
-      jitModuleRow_ = std::move(jitMod);
-      rowCmpRowFunc_ = (RowRowCompare)jitModuleRow_->getFuncPtr(fn);
-    }
-  }
-#endif
-
+    vector_size_t* rawPeerEnds) const {
   auto peerCompare = [&](const char* lhs, const char* rhs) -> bool {
-    return sortKeyInfo_.size() == 0
-        ? false
-        : compareRowsWithSortKeys(lhs, rhs, rowCmpRowFunc_);
+    return sortKeyInfo_.size() == 0 ? false : compareRowsWithSortKeys(lhs, rhs);
   };
 
   BOLT_CHECK_LE(end, numRows());
@@ -356,8 +322,9 @@ WindowPartitionImpl<T>::WindowPartitionImpl(
     RowContainer* data,
     const folly::Range<char**>& rows,
     const std::vector<column_index_t>& inputMapping,
-    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
-    : WindowPartition(data, rows, inputMapping, sortKeyInfo) {}
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,
+    bool enableJit)
+    : WindowPartition(data, rows, inputMapping, sortKeyInfo, enableJit) {}
 
 template <RowFormat T>
 void WindowPartitionImpl<T>::extractColumn(
@@ -420,8 +387,7 @@ void WindowPartitionImpl<T>::extractColumn(
 template <RowFormat T>
 bool WindowPartitionImpl<T>::compareRowsWithSortKeys(
     const char* lhs,
-    const char* rhs,
-    RowRowCompare rowCmpRowFunc_) const {
+    const char* rhs) const {
   if constexpr (T == RowFormat::kRowContainer) {
     if (lhs == rhs) {
       return false;
@@ -440,10 +406,37 @@ bool WindowPartitionImpl<T>::compareRowsWithSortKeys(
     if (lhs == rhs) {
       return false;
     }
+#ifdef ENABLE_BOLT_JIT
+    if (enableJit_ && rowCmpRowFunc_ == nullptr) {
+      std::vector<column_index_t> sortKeyIndexs;
+      std::vector<CompareFlags> cmpFlags;
+      std::vector<TypePtr> sortKeyTypes;
+      for (auto& key : sortKeyInfo_) {
+        auto columnIndex = key.first;
+        sortKeyIndexs.push_back(columnIndex);
+        sortKeyTypes.push_back(data_->columnTypes()[columnIndex]);
+        cmpFlags.push_back(CompareFlags{
+            key.second.isNullsFirst(), key.second.isAscending(), false});
+      }
+      if (RowContainer::JITable(sortKeyTypes)) {
+        if (cmpFlags.empty()) {
+          cmpFlags.resize(sortKeyTypes.size(), CompareFlags());
+        }
+        auto [jitMod, fn] = data_->codegenCompare(
+            sortKeyTypes,
+            cmpFlags,
+            bytedance::bolt::jit::CmpType::CMP_SPILL,
+            true,
+            sortKeyIndexs);
+        jitModuleRow_ = std::move(jitMod);
+        rowCmpRowFunc_ = (RowRowCompare)jitModuleRow_->getFuncPtr(fn);
+      }
+    }
     if (rowCmpRowFunc_) {
       auto result = rowCmpRowFunc_(lhs, rhs);
       return result < 0;
     }
+#endif
 
     auto types = data_->columnTypes();
     for (auto& key : sortKeyInfo_) {
@@ -648,8 +641,9 @@ SpilledWindowPartition<R>::SpilledWindowPartition(
     const uint64_t numRows,
     const RowTypePtr& outputType,
     const std::vector<column_index_t>* outputChannels,
-    bolt::memory::MemoryPool* pool)
-    : WindowPartitionImpl<R>(data, rows, inputMapping, sortKeyInfo),
+    bolt::memory::MemoryPool* pool,
+    bool enableJit)
+    : WindowPartitionImpl<R>(data, rows, inputMapping, sortKeyInfo, enableJit),
       merge_(std::move(merge)),
       aggregateResults_(std::move(aggregateResults)),
       numRows_(numRows),

@@ -81,7 +81,7 @@ class FirstLastAggregateBase
       std::vector<VectorPtr>& args,
       VectorPtr& result) const override {
     const auto& input = args[0];
-    result->resize(rows.size());
+    result->resize(input->size());
     copyToIntermediate(rows, args, result->as<RowVector>()->childAt(0));
     auto rawNulls = result->mutableRawNulls();
     // set all rows to null

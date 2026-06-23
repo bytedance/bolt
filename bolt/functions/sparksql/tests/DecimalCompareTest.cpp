@@ -983,5 +983,38 @@ TEST_F(DecimalCompareTest, lte) {
           140, [](auto row) { return row % 2 == 0 ? true : false; }));
 }
 
+TEST_F(DecimalCompareTest, mixedScaleNullable) {
+  auto dec1 = makeNullableFlatVector<int64_t>(
+      {124000000L, 341234567L, 391234578L, std::nullopt, 345L}, DECIMAL(18, 7));
+  auto dec2 = makeNullableFlatVector<int64_t>(
+      {1240000, 12845678L, 1298765L, 123L, std::nullopt}, DECIMAL(18, 5));
+
+  testCompareExpr(
+      "decimal_equalto(c0, c1)",
+      {dec1, dec2},
+      makeNullableFlatVector<bool>(
+          {true, false, false, std::nullopt, std::nullopt}));
+  testCompareExpr(
+      "decimal_lessthan(c0, c1)",
+      {dec1, dec2},
+      makeNullableFlatVector<bool>(
+          {false, true, false, std::nullopt, std::nullopt}));
+  testCompareExpr(
+      "decimal_lessthanorequal(c0, c1)",
+      {dec1, dec2},
+      makeNullableFlatVector<bool>(
+          {true, true, false, std::nullopt, std::nullopt}));
+  testCompareExpr(
+      "decimal_greaterthan(c0, c1)",
+      {dec1, dec2},
+      makeNullableFlatVector<bool>(
+          {false, false, true, std::nullopt, std::nullopt}));
+  testCompareExpr(
+      "decimal_greaterthanorequal(c0, c1)",
+      {dec1, dec2},
+      makeNullableFlatVector<bool>(
+          {true, false, true, std::nullopt, std::nullopt}));
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

@@ -988,7 +988,8 @@ TEST(BooleanRle, runsTestWithNull) {
       new SeekableArrayInputStream(buffer, BOLT_ARRAY_SIZE(buffer)));
   std::unique_ptr<ByteRleDecoder> rle = createBooleanDecoder(std::move(stream));
   std::vector<char> data(72);
-  std::vector<uint64_t> nulls(bits::nwords(data.size()), bits::kNotNull64);
+  std::vector<uint64_t> nulls(
+      bits::nwords(static_cast<uint64_t>(data.size())), bits::kNotNull64);
   rle->next(data.data(), data.size(), nulls.data());
   for (size_t i = 0; i < data.size(); ++i) {
     EXPECT_EQ(i % 18 < 9 ? 1 : 0, bits::isBitSet(data.data(), i))

@@ -56,116 +56,52 @@ enum class ConvertStatus : int8_t {
   OTHER_FAILURE
 };
 
-enum class PrimitiveKind : int8_t {
-  BOOLEAN,
-  TINYINT,
-  SMALLINT,
-  INTEGER,
-  BIGINT,
-  REAL,
-  DOUBLE,
-  STRING,
-  BINARY,
-  TIMESTAMP,
-  SHORT_DECIMAL,
-  LONG_DECIMAL,
-  DATE,
-  UNKNOWN
+// Decoration conveys extra type information for types that share the same
+// physical storage (TypeKind) but require different casting behavior.
+enum class Decoration : int8_t { None, ShortDecimal, LongDecimal, Date };
+
+template <TypeKind Storage, Decoration Deco = Decoration::None>
+struct CastKindType {
+  static constexpr TypeKind storage = Storage;
+  static constexpr Decoration deco = Deco;
 };
 
-PrimitiveKind getPrimitiveKind(const TypePtr& type) {
-  if (type->isShortDecimal()) {
-    return PrimitiveKind::SHORT_DECIMAL;
-  } else if (type->isLongDecimal()) {
-    return PrimitiveKind::LONG_DECIMAL;
-  } else if (type->isDate()) {
-    return PrimitiveKind::DATE;
-  }
-  switch (type->kind()) {
-    case TypeKind::BOOLEAN:
-      return PrimitiveKind::BOOLEAN;
-    case TypeKind::TINYINT:
-      return PrimitiveKind::TINYINT;
-    case TypeKind::SMALLINT:
-      return PrimitiveKind::SMALLINT;
-    case TypeKind::INTEGER:
-      return PrimitiveKind::INTEGER;
-    case TypeKind::BIGINT:
-      return PrimitiveKind::BIGINT;
-    case TypeKind::REAL:
-      return PrimitiveKind::REAL;
-    case TypeKind::DOUBLE:
-      return PrimitiveKind::DOUBLE;
-    case TypeKind::VARCHAR:
-      return PrimitiveKind::STRING;
-    case TypeKind::VARBINARY:
-      return PrimitiveKind::BINARY;
-    case TypeKind::TIMESTAMP:
-      return PrimitiveKind::TIMESTAMP;
-    case TypeKind::HUGEINT:
-      return PrimitiveKind::LONG_DECIMAL;
-    case TypeKind::UNKNOWN:
-      return PrimitiveKind::UNKNOWN;
-    default:
-      BOLT_FAIL("Unknown type {}", type->toString());
-  }
-}
+using BooleanKind = CastKindType<TypeKind::BOOLEAN>;
+using TinyintKind = CastKindType<TypeKind::TINYINT>;
+using SmallintKind = CastKindType<TypeKind::SMALLINT>;
+using IntegerKind = CastKindType<TypeKind::INTEGER>;
+using BigintKind = CastKindType<TypeKind::BIGINT>;
+using RealKind = CastKindType<TypeKind::REAL>;
+using DoubleKind = CastKindType<TypeKind::DOUBLE>;
+using StringKind = CastKindType<TypeKind::VARCHAR>;
+using BinaryKind = CastKindType<TypeKind::VARBINARY>;
+using TimestampKind = CastKindType<TypeKind::TIMESTAMP>;
+using ShortDecimalKind =
+    CastKindType<TypeKind::BIGINT, Decoration::ShortDecimal>;
+using LongDecimalKind =
+    CastKindType<TypeKind::HUGEINT, Decoration::LongDecimal>;
+using DateKind = CastKindType<TypeKind::INTEGER, Decoration::Date>;
 
-template <PrimitiveKind type>
-constexpr TypeKind getInnerKind() {
-  switch (type) {
-    case PrimitiveKind::BOOLEAN:
-      return TypeKind::BOOLEAN;
-    case PrimitiveKind::TINYINT:
-      return TypeKind::TINYINT;
-    case PrimitiveKind::SMALLINT:
-      return TypeKind::SMALLINT;
-    case PrimitiveKind::INTEGER:
-      return TypeKind::INTEGER;
-    case PrimitiveKind::BIGINT:
-      return TypeKind::BIGINT;
-    case PrimitiveKind::REAL:
-      return TypeKind::REAL;
-    case PrimitiveKind::DOUBLE:
-      return TypeKind::DOUBLE;
-    case PrimitiveKind::STRING:
-      return TypeKind::VARCHAR;
-    case PrimitiveKind::BINARY:
-      return TypeKind::VARBINARY;
-    case PrimitiveKind::TIMESTAMP:
-      return TypeKind::TIMESTAMP;
-    case PrimitiveKind::SHORT_DECIMAL:
-      return TypeKind::BIGINT;
-    case PrimitiveKind::LONG_DECIMAL:
-      return TypeKind::HUGEINT;
-    case PrimitiveKind::DATE:
-      return TypeKind::INTEGER;
-    default:
-      static_assert("Unsupported type kind");
-  }
-}
+template <typename CK>
+using PrimitiveNativeType = typename TypeTraits<CK::storage>::NativeType;
 
-template <PrimitiveKind type>
-using PrimitiveNativeType =
-    typename TypeTraits<getInnerKind<type>()>::NativeType;
-
-template <PrimitiveKind type>
+template <typename CK>
 constexpr bool isStringLikeKind =
-    (type == PrimitiveKind::STRING || type == PrimitiveKind::BINARY);
+    std::is_same_v<CK, StringKind> || std::is_same_v<CK, BinaryKind>;
 
-template <PrimitiveKind type>
-constexpr bool isBooleanKind = (type == PrimitiveKind::BOOLEAN);
+template <typename CK>
+constexpr bool isBooleanKind = std::is_same_v<CK, BooleanKind>;
 
-template <PrimitiveKind type>
-constexpr bool isOtherKind = !(isStringLikeKind<type> || isBooleanKind<type>);
+template <typename CK>
+constexpr bool isOtherKind = !isStringLikeKind<CK> && !isBooleanKind<CK>;
 
-template <PrimitiveKind type, typename Enable = void>
+template <typename CK, typename Enable = void>
 class OutType;
 
-template <PrimitiveKind type>
-class OutType<type, std::enable_if_t<isOtherKind<type>>> {
+template <typename CK>
+class OutType<CK, std::enable_if_t<isOtherKind<CK>>> {
  public:
-  using ParamType = PrimitiveNativeType<type>;
+  using ParamType = PrimitiveNativeType<CK>;
   using ArrayType = ParamType*;
 
   static ArrayType getOutArray(FlatVector<ParamType>* result) {
@@ -173,10 +109,10 @@ class OutType<type, std::enable_if_t<isOtherKind<type>>> {
   }
 };
 
-template <PrimitiveKind type>
-class OutType<type, std::enable_if_t<isStringLikeKind<type>>> {
+template <typename CK>
+class OutType<CK, std::enable_if_t<isStringLikeKind<CK>>> {
  public:
-  using ParamType = OutType<type>;
+  using ParamType = OutType<CK>;
   using ArrayType = ParamType;
   static ArrayType getOutArray(FlatVector<StringView>* result) {
     return OutType(result);
@@ -223,10 +159,10 @@ class OutType<type, std::enable_if_t<isStringLikeKind<type>>> {
   FlatVector<StringView>* result;
 };
 
-template <PrimitiveKind type>
-class OutType<type, std::enable_if_t<isBooleanKind<type>>> {
+template <typename CK>
+class OutType<CK, std::enable_if_t<isBooleanKind<CK>>> {
  public:
-  using ParamType = OutType<type>;
+  using ParamType = OutType<CK>;
   using ArrayType = ParamType;
 
   static ArrayType getOutArray(FlatVector<bool>* result) {
@@ -296,67 +232,63 @@ std::optional<bool> sparkStringToBoolean(const folly::StringPiece& str) {
  * truncation. It is designed to handle conversions between numeric, string,
  * boolean, decimal, timestamp, and date types.
  *
- * @tparam fromKind The source primitive type (PrimitiveKind).
- * @tparam toKind The target primitive type (PrimitiveKind).
+ * @tparam FromKind The source CastKindType (TypeKind + Decoration).
+ * @tparam ToKind The target CastKindType (TypeKind + Decoration).
  * @tparam legacy A boolean indicating whether to use legacy casting behavior.
  * @tparam truncate A boolean indicating whether to truncate values during
  * conversion.
  */
-template <
-    PrimitiveKind fromKind,
-    PrimitiveKind toKind,
-    bool legacy,
-    bool truncate>
+template <typename FromKind, typename ToKind, bool legacy, bool truncate>
 class Converter {
-  using FromType = PrimitiveNativeType<fromKind>;
-  using ToType = typename OutType<toKind>::ParamType;
+  using FromType = PrimitiveNativeType<FromKind>;
+  using ToType = typename OutType<ToKind>::ParamType;
 
-  template <PrimitiveKind kind>
-  static constexpr bool isInteger =
-      (kind == PrimitiveKind::TINYINT || kind == PrimitiveKind::SMALLINT ||
-       kind == PrimitiveKind::INTEGER || kind == PrimitiveKind::BIGINT);
+  template <typename K>
+  static constexpr bool isIntegral =
+      std::is_same_v<K, TinyintKind> || std::is_same_v<K, SmallintKind> ||
+      std::is_same_v<K, IntegerKind> || std::is_same_v<K, BigintKind>;
 
-  template <PrimitiveKind kind>
+  template <typename K>
   static constexpr bool isFloat =
-      (kind == PrimitiveKind::REAL || kind == PrimitiveKind::DOUBLE);
+      std::is_same_v<K, RealKind> || std::is_same_v<K, DoubleKind>;
 
-  template <PrimitiveKind kind>
+  template <typename K>
   static constexpr bool isDecimal =
-      (kind == PrimitiveKind::SHORT_DECIMAL ||
-       kind == PrimitiveKind::LONG_DECIMAL);
+      std::is_same_v<K, ShortDecimalKind> || std::is_same_v<K, LongDecimalKind>;
 
-  static constexpr bool fromBool = fromKind == PrimitiveKind::BOOLEAN;
-  static constexpr bool fromString = fromKind == PrimitiveKind::STRING;
-  static constexpr bool fromFloat = isFloat<fromKind>;
-  static constexpr bool fromDecimal = isDecimal<fromKind>;
+  static constexpr bool fromBool = std::is_same_v<FromKind, BooleanKind>;
+  static constexpr bool fromString = std::is_same_v<FromKind, StringKind>;
+  static constexpr bool fromFloat = isFloat<FromKind>;
+  static constexpr bool fromDecimal = isDecimal<FromKind>;
 
-  static constexpr bool fromInteger = isInteger<fromKind>;
+  static constexpr bool fromIntegral = isIntegral<FromKind>;
 
-#define TO_KIND(kind)                 \
-  template <PrimitiveKind K = toKind> \
-  FOLLY_ALWAYS_INLINE std::enable_if_t<K == kind, ConvertStatus>
+#define TO_KIND(Kind)             \
+  template <typename CK = ToKind> \
+  FOLLY_ALWAYS_INLINE             \
+      std::enable_if_t<std::is_same_v<CK, Kind>, ConvertStatus>
 
-#define TO_IF(cond)                   \
-  template <PrimitiveKind K = toKind> \
-  FOLLY_ALWAYS_INLINE std::enable_if_t<cond<K>, ConvertStatus>
+#define TO_IF(cond)               \
+  template <typename CK = ToKind> \
+  FOLLY_ALWAYS_INLINE std::enable_if_t<cond<CK>, ConvertStatus>
 
  public:
   Converter(exec::EvalCtx& context, TypePtr fromType, TypePtr toType) {
-    if (fromKind == PrimitiveKind::SHORT_DECIMAL) {
+    if constexpr (std::is_same_v<FromKind, ShortDecimalKind>) {
       fromPrecision_ = fromType->asShortDecimal().precision();
       fromScale_ = fromType->asShortDecimal().scale();
       fromDecimalMaxSize_ = DecimalUtil::stringSize(fromPrecision_, fromScale_);
       canAsInlinedStr_ = StringView::isInline(fromDecimalMaxSize_);
-    } else if (fromKind == PrimitiveKind::LONG_DECIMAL) {
+    } else if constexpr (std::is_same_v<FromKind, LongDecimalKind>) {
       fromPrecision_ = fromType->asLongDecimal().precision();
       fromScale_ = fromType->asLongDecimal().scale();
       fromDecimalMaxSize_ = DecimalUtil::stringSize(fromPrecision_, fromScale_);
       canAsInlinedStr_ = StringView::isInline(fromDecimalMaxSize_);
     }
-    if (toKind == PrimitiveKind::SHORT_DECIMAL) {
+    if constexpr (std::is_same_v<ToKind, ShortDecimalKind>) {
       toPrecision_ = toType->asShortDecimal().precision();
       toScale_ = toType->asShortDecimal().scale();
-    } else if (toKind == PrimitiveKind::LONG_DECIMAL) {
+    } else if constexpr (std::is_same_v<ToKind, LongDecimalKind>) {
       toPrecision_ = toType->asLongDecimal().precision();
       toScale_ = toType->asLongDecimal().scale();
     }
@@ -366,9 +298,10 @@ class Converter {
     if (queryConfig.adjustTimestampToTimezone() && !sessionTzName.empty()) {
       timeZone_ = tz::locateZone(sessionTzName);
     }
+    isFlinkCompatible_ = queryConfig.enableFlinkCompatible();
   }
 
-  TO_KIND(PrimitiveKind::BOOLEAN) convert(const FromType& from, ToType& to) {
+  TO_KIND(BooleanKind) convert(const FromType& from, ToType& to) {
     if constexpr (fromFloat) {
       bool val = false;
       auto status = tryToWithFolly(from, val);
@@ -376,7 +309,7 @@ class Converter {
         to.set(val);
       }
       return status;
-    } else if constexpr (fromInteger) {
+    } else if constexpr (fromIntegral) {
       if constexpr (truncate) {
         to.set(bool(from));
       } else {
@@ -406,12 +339,12 @@ class Converter {
     return ConvertStatus::SUCCESS;
   }
 
-  TO_IF(isInteger) convert(const FromType& from, ToType& to) {
+  TO_IF(isIntegral) convert(const FromType& from, ToType& to) {
     if constexpr (fromString) {
       if constexpr (truncate) {
         bool nullOutput = false;
         bool hasPoint = false;
-        constexpr TypeKind originKind = getInnerKind<toKind>();
+        constexpr TypeKind originKind = ToKind::storage;
         to = bytedance::bolt::util::
             Converter<originKind, void, util::TruncateCastPolicy>::
                 convertStringToInt(
@@ -432,7 +365,7 @@ class Converter {
           to = 0;
           return ConvertStatus::SUCCESS;
         }
-        constexpr TypeKind originKind = getInnerKind<toKind>();
+        constexpr TypeKind originKind = ToKind::storage;
         using LimitType = typename util::
             Converter<originKind, void, util::TruncateCastPolicy>::LimitType;
         if (from > LimitType::maxLimit()) {
@@ -472,26 +405,8 @@ class Converter {
       }
     } else if constexpr (fromBool) {
       return tryToWithFolly(from, to);
-    } else if constexpr (fromKind == PrimitiveKind::TIMESTAMP) {
-      // Timestamp -> integral seconds, rounding away from zero.
-      int64_t secs64 = 0;
-      try {
-        int128_t micros = static_cast<int128_t>(from.toMicros());
-        int128_t secs128 =
-            micros / static_cast<int128_t>(1'000'000); // trunc toward zero
-        int128_t rem = micros % static_cast<int128_t>(1'000'000);
-        // sec128 + 1 when rem != 0 and micros > 0, sec128 - 1 when rem != 0
-        // and micros < 0
-        secs128 += (rem != 0) * ((micros > 0) - (micros < 0));
-        secs64 = std::clamp(
-            secs128,
-            static_cast<int128_t>(std::numeric_limits<int64_t>::min()),
-            static_cast<int128_t>(std::numeric_limits<int64_t>::max()));
-      } catch (...) {
-        return ConvertStatus::OTHER_FAILURE;
-      }
-
-      return tryIntegerToInteger<int64_t, ToType>(secs64, to);
+    } else if constexpr (std::is_same_v<FromKind, TimestampKind>) {
+      return tryIntegerToInteger<int64_t, ToType>(from.getSeconds(), to);
     } else {
       // INTEGER
       return tryIntegerToInteger<FromType, ToType>(from, to);
@@ -500,7 +415,7 @@ class Converter {
   }
 
   TO_IF(isFloat) convert(const FromType& from, ToType& to) {
-    if constexpr (fromInteger) {
+    if constexpr (fromIntegral) {
       // Convert integer to double or float directly, not using folly, as it
       // might throw 'loss of precision' error.
       to = static_cast<ToType>(from);
@@ -529,7 +444,7 @@ class Converter {
     } else if constexpr (fromDecimal) {
       if constexpr (isInSpark) {
         std::optional<ToType> fValue;
-        if constexpr (K == PrimitiveKind::REAL) {
+        if constexpr (std::is_same_v<ToKind, RealKind>) {
           fValue = FloatingDecimal::toFloatFromValue(from, fromScale_);
         } else {
           fValue = FloatingDecimal::toDoubleFromValue(from, fromScale_);
@@ -552,32 +467,82 @@ class Converter {
     return ConvertStatus::SUCCESS;
   }
 
-  TO_KIND(PrimitiveKind::STRING) convert(const FromType& from, ToType& to) {
-    if constexpr (fromKind == PrimitiveKind::BOOLEAN) {
+  TO_KIND(StringKind) convert(const FromType& from, ToType& to) {
+    if constexpr (std::is_same_v<FromKind, BooleanKind>) {
       to.setNoCopy(from ? "true" : "false");
-    } else if constexpr (fromKind == PrimitiveKind::TIMESTAMP) {
+    } else if constexpr (std::is_same_v<FromKind, TimestampKind>) {
       try {
         auto ts = from;
         if (timeZone_) {
-          ts.toTimezone(*(timeZone_));
-        }
-        if (isInSpark) {
-          constexpr TimestampToStringOptions options = {
-              .precision = TimestampToStringOptions::Precision::kMicroseconds,
-              .leadingPositiveSign = true,
-              .skipTrailingZeros = true,
-              .zeroPaddingYear = true,
-              .dateTimeSeparator = ' '};
-          to.set(ts.toString(options));
-        } else {
-          TimestampToStringOptions options;
-          options.precision =
-              TimestampToStringOptions::Precision::kMilliseconds;
-          if constexpr (!legacy) {
+          if (isFlinkCompatible_) {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kNanoseconds;
+            options.skipTrailingZeros = true;
             options.zeroPaddingYear = true;
             options.dateTimeSeparator = ' ';
+            ts.toTimezone(*timeZone_);
+            auto output = ts.toString(options);
+            auto dot = output.find('.');
+            if (dot == std::string::npos) {
+              output.append(".000");
+            } else {
+              const auto fractionalSize = output.size() - dot - 1;
+              if (fractionalSize < 3) {
+                output.append(3 - fractionalSize, '0');
+              }
+            }
+            to.set(output);
+          } else if (isInSpark) {
+            constexpr TimestampToStringOptions options = {
+                .precision = TimestampToStringOptions::Precision::kMicroseconds,
+                .leadingPositiveSign = true,
+                .skipTrailingZeros = true,
+                .zeroPaddingYear = true,
+                .dateTimeSeparator = ' '};
+            ts.toTimezone(*timeZone_);
+            to.set(ts.toString(options));
+          } else {
+            to.set(from.toString(
+                TimestampToStringOptions::Precision::kMilliseconds, timeZone_));
           }
-          to.set(ts.toString(options));
+        } else {
+          if (isFlinkCompatible_) {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kNanoseconds;
+            options.skipTrailingZeros = true;
+            options.zeroPaddingYear = true;
+            options.dateTimeSeparator = ' ';
+            auto output = ts.toString(options);
+            auto dot = output.find('.');
+            if (dot == std::string::npos) {
+              output.append(".000");
+            } else {
+              const auto fractionalSize = output.size() - dot - 1;
+              if (fractionalSize < 3) {
+                output.append(3 - fractionalSize, '0');
+              }
+            }
+            to.set(output);
+          } else if (isInSpark) {
+            constexpr TimestampToStringOptions options = {
+                .precision = TimestampToStringOptions::Precision::kMicroseconds,
+                .leadingPositiveSign = true,
+                .skipTrailingZeros = true,
+                .zeroPaddingYear = true,
+                .dateTimeSeparator = ' '};
+            to.set(ts.toString(options));
+          } else {
+            TimestampToStringOptions options;
+            options.precision =
+                TimestampToStringOptions::Precision::kMilliseconds;
+            if constexpr (!legacy) {
+              options.zeroPaddingYear = true;
+              options.dateTimeSeparator = ' ';
+            }
+            to.set(ts.toString(options));
+          }
         }
       } catch (...) {
         return ConvertStatus::OTHER_FAILURE;
@@ -592,7 +557,7 @@ class Converter {
             util::LegacyCastPolicy>::normalizeStandardNotation(cached_);
         to.set(cached_);
       } else {
-        if constexpr (fromKind == PrimitiveKind::DOUBLE) {
+        if constexpr (std::is_same_v<FromKind, DoubleKind>) {
           // d2s/f2s reserve 25/16 bytes buffer, so 32 bytes is enough
           char buffer[32];
           int size = d2s_buffered_n(from, buffer);
@@ -619,14 +584,14 @@ class Converter {
             from, fromScale_, fromDecimalMaxSize_, cached);
         to.set(std::string_view(cached, strSize));
       }
-    } else if constexpr (fromKind == PrimitiveKind::DATE) {
+    } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       try {
         auto output = DATE()->toString(from);
         to.set(output);
       } catch (const std::exception& e) {
         return ConvertStatus::OTHER_FAILURE;
       }
-    } else if constexpr (fromInteger) {
+    } else if constexpr (fromIntegral) {
       char cached[32];
       auto [position, errorCode] = std::to_chars(cached, cached + 32, from);
       to.set(std::string_view(cached, position - cached));
@@ -639,7 +604,7 @@ class Converter {
   }
 
   TO_IF(isDecimal) convert(const FromType& from, ToType& to) {
-    if constexpr (fromInteger || fromBool) {
+    if constexpr (fromIntegral || fromBool) {
       auto rescaledValue = DecimalUtil::rescaleInt<FromType, ToType>(
           from, toPrecision_, toScale_);
       if (rescaledValue.has_value()) {
@@ -676,8 +641,8 @@ class Converter {
     return ConvertStatus::SUCCESS;
   }
 
-  TO_KIND(PrimitiveKind::TIMESTAMP) convert(const FromType& from, ToType& to) {
-    if constexpr (fromKind == PrimitiveKind::STRING) {
+  TO_KIND(TimestampKind) convert(const FromType& from, ToType& to) {
+    if constexpr (std::is_same_v<FromKind, StringKind>) {
       if (isInSpark) {
         auto resultOpt =
             util::fromTimestampWithTimezoneString(from.data(), from.size());
@@ -712,7 +677,7 @@ class Converter {
         return nullOutput ? ConvertStatus::OTHER_FAILURE
                           : ConvertStatus::SUCCESS;
       }
-    } else if constexpr (fromKind == PrimitiveKind::DATE) {
+    } else if constexpr (std::is_same_v<FromKind, DateKind>) {
       static const int64_t kMillisPerDay{86'400'000};
       to = Timestamp::fromMillis(from * kMillisPerDay);
       bool hasError = false;
@@ -720,26 +685,47 @@ class Converter {
         to.toGMT(*timeZone_, &hasError);
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
-    } else if constexpr (fromInteger) {
+    } else if constexpr (std::is_same_v<FromKind, BooleanKind>) {
+      if constexpr (isInSpark) {
+        // Spark treats boolean as microseconds since epoch when casting to
+        // timestamp: false -> 0us, true -> 1us.
+        to = Timestamp::fromMicrosNoError(from ? 1 : 0);
+        return ConvertStatus::SUCCESS;
+      }
+      return ConvertStatus::OTHER_FAILURE;
+    } else if constexpr (fromIntegral || fromFloat) {
+      if constexpr (fromFloat) {
+        if (FOLLY_UNLIKELY(std::isnan(from) || std::isinf(from))) {
+          return ConvertStatus::OTHER_FAILURE;
+        }
+      }
       // Spark internally use microsecond precision for timestamp.
       // To avoid overflow, we need to check the range of seconds.
       static constexpr int64_t maxSeconds =
           std::numeric_limits<int64_t>::max() /
-          (Timestamp::kMicrosecondsInMillisecond *
-           Timestamp::kMillisecondsInSecond);
+          Timestamp::kMicrosecondsInSecond;
       if (from > maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::max());
       } else if (from < -maxSeconds) {
         to = Timestamp::fromMicrosNoError(std::numeric_limits<int64_t>::min());
       } else {
-        to = Timestamp(from, 0);
+        if constexpr (fromFloat) {
+          // NOTE: `from` can be `float`. Make sure we do the multiplication in
+          // at least double precision, otherwise we lose too much precision at
+          // ~1e15 scale and produce unexpected microseconds.
+          const auto micros = static_cast<long double>(from) *
+              static_cast<long double>(Timestamp::kMicrosecondsInSecond);
+          to = Timestamp::fromMicrosNoError(static_cast<int64_t>(micros));
+        } else {
+          to = Timestamp(from, 0);
+        }
       }
     }
     return ConvertStatus::SUCCESS;
   }
 
-  TO_KIND(PrimitiveKind::DATE) convert(const FromType& from, ToType& to) {
-    if constexpr (fromKind == PrimitiveKind::STRING) {
+  TO_KIND(DateKind) convert(const FromType& from, ToType& to) {
+    if constexpr (std::is_same_v<FromKind, StringKind>) {
       bool isIso8601 = !isInSpark;
       StringView view(from);
       if (isInSpark) {
@@ -753,7 +739,7 @@ class Converter {
       } else {
         return ConvertStatus::OTHER_FAILURE;
       }
-    } else if constexpr (fromKind == PrimitiveKind::TIMESTAMP) {
+    } else if constexpr (std::is_same_v<FromKind, TimestampKind>) {
       static const int32_t kSecsPerDay{86'400};
       auto ts = from;
       if (timeZone_) {
@@ -772,10 +758,10 @@ class Converter {
     return ConvertStatus::SUCCESS;
   }
 
-  TO_KIND(PrimitiveKind::BINARY) convert(const FromType& from, ToType& to) {
-    if constexpr (fromKind == PrimitiveKind::STRING) {
+  TO_KIND(BinaryKind) convert(const FromType& from, ToType& to) {
+    if constexpr (std::is_same_v<FromKind, StringKind>) {
       to.set(from);
-    } else if constexpr (fromInteger) {
+    } else if constexpr (fromIntegral) {
       // Convert integer to binary string with big-endian representation using
       // bswap
       FromType value = from;
@@ -802,6 +788,7 @@ class Converter {
   int toPrecision_ = 0;
   int toScale_ = 0;
   const tz::TimeZone* timeZone_ = nullptr;
+  bool isFlinkCompatible_ = false;
 
   bool canAsInlinedStr_ = false;
 };
@@ -837,10 +824,39 @@ FOLLY_ALWAYS_INLINE std::exception_ptr makeBadCastException(
       false));
 }
 
-template <PrimitiveKind fromKind, PrimitiveKind toKind>
+template <typename FromKind, typename ToKind>
 class VectorConverter : public ConverterBase {
  public:
   virtual ~VectorConverter() = default;
+
+ private:
+  template <typename K>
+  static constexpr bool isIntegral =
+      std::is_same_v<K, TinyintKind> || std::is_same_v<K, SmallintKind> ||
+      std::is_same_v<K, IntegerKind> || std::is_same_v<K, BigintKind>;
+
+  template <typename K>
+  static constexpr bool isFloatKind =
+      std::is_same_v<K, RealKind> || std::is_same_v<K, DoubleKind>;
+
+  template <typename K>
+  static constexpr bool isDecimalKind =
+      std::is_same_v<K, ShortDecimalKind> || std::is_same_v<K, LongDecimalKind>;
+
+  static constexpr bool kLegacySensitive = std::is_same_v<ToKind, StringKind> &&
+      (std::is_same_v<FromKind, TimestampKind> || isFloatKind<FromKind>);
+
+  static constexpr bool kTruncateSensitive =
+      // integer -> boolean
+      (std::is_same_v<ToKind, BooleanKind> && isIntegral<FromKind>) ||
+      // string/float/decimal -> integer
+      (isIntegral<ToKind> &&
+       (std::is_same_v<FromKind, StringKind> || isFloatKind<FromKind> ||
+        isDecimalKind<FromKind>)) ||
+      // float -> float
+      (isFloatKind<ToKind> && isFloatKind<FromKind>);
+
+ public:
   template <bool legacy, bool truncate>
   FLATTEN void convertWithPolicy(
       const SelectivityVector& rows,
@@ -848,14 +864,14 @@ class VectorConverter : public ConverterBase {
       exec::EvalCtx& context,
       VectorPtr& result,
       CastErrorPolicy errorPolicy) {
-    using FromType = PrimitiveNativeType<fromKind>;
-    using ToType = PrimitiveNativeType<toKind>;
+    using FromType = PrimitiveNativeType<FromKind>;
+    using ToType = PrimitiveNativeType<ToKind>;
 
     auto sourceVector = input.as<SimpleVector<FromType>>();
     auto resultFlatVector = result->asUnchecked<FlatVector<ToType>>();
-    Converter<fromKind, toKind, legacy, truncate> converter(
+    Converter<FromKind, ToKind, legacy, truncate> converter(
         context, input.type(), result->type());
-    auto outArray = OutType<toKind>::getOutArray(resultFlatVector);
+    auto outArray = OutType<ToKind>::getOutArray(resultFlatVector);
     if (FOLLY_LIKELY(errorPolicy == CastErrorPolicy::NullOnFailure)) {
       rows.applyToSelected([&](auto row) INLINE_LAMBDA {
         if (converter.convert(sourceVector->valueAt(row), outArray[row]) !=
@@ -898,20 +914,44 @@ class VectorConverter : public ConverterBase {
       convertWithPolicy<legacy, truncate>(
           rows, input, context, result, errorPolicy);
     } else {
-      bool legacy = context.execCtx()->queryCtx()->queryConfig().isLegacyCast();
-      bool truncate =
-          context.execCtx()->queryCtx()->queryConfig().isCastToIntByTruncate();
-      if (legacy && truncate) {
-        convertWithPolicy<true, true>(
-            rows, input, context, result, errorPolicy);
-      } else if (legacy && !truncate) {
-        convertWithPolicy<true, false>(
-            rows, input, context, result, errorPolicy);
-      } else if (!legacy && truncate) {
-        convertWithPolicy<false, true>(
-            rows, input, context, result, errorPolicy);
+      const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+
+      if constexpr (kLegacySensitive && kTruncateSensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (legacy && truncate) {
+          convertWithPolicy<true, true>(
+              rows, input, context, result, errorPolicy);
+        } else if (legacy && !truncate) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else if (!legacy && truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          // !legacy && !truncate
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kLegacySensitive) {
+        bool legacy = queryConfig.isLegacyCast();
+        if (legacy) {
+          convertWithPolicy<true, false>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
+      } else if constexpr (kTruncateSensitive) {
+        bool truncate = queryConfig.isCastToIntByTruncate();
+        if (truncate) {
+          convertWithPolicy<false, true>(
+              rows, input, context, result, errorPolicy);
+        } else {
+          convertWithPolicy<false, false>(
+              rows, input, context, result, errorPolicy);
+        }
       } else {
-        // !legacy && !truncate
         convertWithPolicy<false, false>(
             rows, input, context, result, errorPolicy);
       }
@@ -919,103 +959,114 @@ class VectorConverter : public ConverterBase {
   }
 };
 
-std::
-    map<std::pair<PrimitiveKind, PrimitiveKind>, std::shared_ptr<ConverterBase>>
-        converters;
+// Runtime map key. Lookup happens once per doCast() call (outside the
+// per-row loop).
+struct CastKindKey {
+  TypeKind storage;
+  Decoration deco;
+  bool operator==(const CastKindKey& o) const {
+    return storage == o.storage && deco == o.deco;
+  }
 
-template <typename T, size_t N>
-constexpr T get_last(const std::array<T, N>& arr) {
-  static_assert(N > 0, "Array cannot be empty");
-  return arr[N - 1];
+  bool operator<(const CastKindKey& o) const {
+    return std::tie(storage, deco) < std::tie(o.storage, o.deco);
+  }
+};
+
+CastKindKey getCastKind(const TypePtr& type) {
+  if (type->isShortDecimal()) {
+    return {TypeKind::BIGINT, Decoration::ShortDecimal};
+  }
+  if (type->isLongDecimal()) {
+    return {TypeKind::HUGEINT, Decoration::LongDecimal};
+  }
+  if (type->isDate()) {
+    return {TypeKind::INTEGER, Decoration::Date};
+  }
+  auto kind = type->kind();
+
+  switch (kind) {
+    case TypeKind::BOOLEAN:
+    case TypeKind::TINYINT:
+    case TypeKind::SMALLINT:
+    case TypeKind::INTEGER:
+    case TypeKind::BIGINT:
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+    case TypeKind::TIMESTAMP:
+    case TypeKind::UNKNOWN:
+      return {kind, Decoration::None};
+
+    case TypeKind::HUGEINT:
+      return {kind, Decoration::LongDecimal};
+
+    default:
+      BOLT_FAIL("Unsupported type kind: {}", type->toString());
+  }
 }
 
-template <typename T, size_t N, size_t... Indices>
-constexpr auto get_front_impl(
-    const std::array<T, N>& arr,
-    std::index_sequence<Indices...>) {
-  return std::array<T, sizeof...(Indices)>{arr[Indices]...};
+std::map<std::pair<CastKindKey, CastKindKey>, std::shared_ptr<ConverterBase>>
+    converters;
+
+template <typename... Kinds>
+struct KindList {};
+
+template <typename FromKind, typename ToKind>
+void registerOne() {
+  // Skip same plain types (identity handled by copy fast-path in doCast).
+  // Allow same-type-with-decoration (e.g., ShortDecimal→ShortDecimal).
+  if constexpr (!(std::is_same_v<FromKind, ToKind> &&
+                  FromKind::deco == Decoration::None)) {
+    converters[{
+        CastKindKey{FromKind::storage, FromKind::deco},
+        CastKindKey{ToKind::storage, ToKind::deco}}] =
+        std::make_shared<VectorConverter<FromKind, ToKind>>();
+  }
 }
 
-template <typename T, size_t N>
-constexpr auto get_front(const std::array<T, N>& arr) {
-  static_assert(N > 0, "Array cannot be empty");
-  return get_front_impl(arr, std::make_index_sequence<N - 1>{});
+template <typename FromKind, typename... ToKinds>
+void registerForOneFrom() {
+  (registerOne<FromKind, ToKinds>(), ...);
 }
 
-template <const auto& fromArray, const auto& toArray>
-struct ConverterRegister {
-  static void registerConverter() {
-    if constexpr (fromArray.size() == 0 || toArray.size() == 0) {
-      return;
-    } else {
-      static constexpr auto fromKind = get_last(fromArray);
-      static constexpr auto toKind = get_last(toArray);
-      if constexpr (fromKind != toKind) {
-        converters[std::make_pair(fromKind, toKind)] =
-            std::make_shared<VectorConverter<fromKind, toKind>>();
-      }
+template <typename FromList, typename ToList>
+struct RegisterAllPairs;
 
-      static constexpr auto fromArrayFront = get_front(fromArray);
-      static constexpr std::array fromArrayLast = {fromKind};
-      static constexpr auto toArrayFront = get_front(toArray);
-      static constexpr std::array toArrayLast = {toKind};
-
-      ConverterRegister<fromArrayFront, toArrayFront>::registerConverter();
-      ConverterRegister<fromArrayFront, toArrayLast>::registerConverter();
-      ConverterRegister<fromArrayLast, toArrayFront>::registerConverter();
-    }
+template <typename... FromKinds, typename... ToKinds>
+struct RegisterAllPairs<KindList<FromKinds...>, KindList<ToKinds...>> {
+  static void apply() {
+    (registerForOneFrom<FromKinds, ToKinds...>(), ...);
   }
 };
 
 void registerConverter() {
-  static constexpr std::array numericStringType = {
-      PrimitiveKind::BOOLEAN,
-      PrimitiveKind::TINYINT,
-      PrimitiveKind::SMALLINT,
-      PrimitiveKind::INTEGER,
-      PrimitiveKind::BIGINT,
-      PrimitiveKind::REAL,
-      PrimitiveKind::DOUBLE,
-      PrimitiveKind::SHORT_DECIMAL,
-      PrimitiveKind::LONG_DECIMAL,
-      PrimitiveKind::STRING};
+  using NumStrType = KindList<
+      BooleanKind,
+      TinyintKind,
+      SmallintKind,
+      IntegerKind,
+      BigintKind,
+      RealKind,
+      DoubleKind,
+      ShortDecimalKind,
+      LongDecimalKind,
+      StringKind>;
+  using DateStrType = KindList<DateKind, TimestampKind, StringKind>;
 
-  static constexpr std::array dateStringType = {
-      PrimitiveKind::DATE, PrimitiveKind::TIMESTAMP, PrimitiveKind::STRING};
-
-  // numeric and string type conversion
-  ConverterRegister<numericStringType, numericStringType>::registerConverter();
-
-  // date and string type conversion
-  ConverterRegister<dateStringType, dateStringType>::registerConverter();
-
-  // decimal type can be converted with same decimal type
-  converters[std::make_pair(
-      PrimitiveKind::SHORT_DECIMAL, PrimitiveKind::SHORT_DECIMAL)] =
-      std::make_shared<VectorConverter<
-          PrimitiveKind::SHORT_DECIMAL,
-          PrimitiveKind::SHORT_DECIMAL>>();
-
-  converters[std::make_pair(
-      PrimitiveKind::LONG_DECIMAL, PrimitiveKind::LONG_DECIMAL)] =
-      std::make_shared<VectorConverter<
-          PrimitiveKind::LONG_DECIMAL,
-          PrimitiveKind::LONG_DECIMAL>>();
+  RegisterAllPairs<NumStrType, NumStrType>::apply();
+  RegisterAllPairs<DateStrType, DateStrType>::apply();
 
 #ifdef SPARK_COMPATIBLE
-  static constexpr std::array integerType = {
-      PrimitiveKind::TINYINT,
-      PrimitiveKind::SMALLINT,
-      PrimitiveKind::INTEGER,
-      PrimitiveKind::BIGINT};
-  static constexpr std::array timestampType = {PrimitiveKind::TIMESTAMP};
-  static constexpr std::array binaryType = {PrimitiveKind::BINARY};
-  // integer to timestamp type conversion
-  ConverterRegister<integerType, timestampType>::registerConverter();
-  // integer to binary type conversion
-  ConverterRegister<integerType, binaryType>::registerConverter();
-  // timestamp to integer type conversion
-  ConverterRegister<timestampType, integerType>::registerConverter();
+  using IntegerKinds =
+      KindList<TinyintKind, SmallintKind, IntegerKind, BigintKind>;
+  RegisterAllPairs<IntegerKinds, KindList<TimestampKind>>::apply();
+  RegisterAllPairs<KindList<RealKind, DoubleKind>, KindList<TimestampKind>>::
+      apply();
+  RegisterAllPairs<KindList<BooleanKind>, KindList<TimestampKind>>::apply();
+  RegisterAllPairs<IntegerKinds, KindList<BinaryKind>>::apply();
+  RegisterAllPairs<KindList<TimestampKind>, IntegerKinds>::apply();
 #endif
 }
 
@@ -1070,6 +1121,36 @@ void doCastArrayToVarchar(
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
   const bool legacyComplex = isInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
+  if (queryConfig.enableFlinkCompatible() &&
+      arrayElements->type()->isTimestamp()) {
+    auto flatElements = resultElements->as<FlatVector<StringView>>();
+    nestedRows.applyToSelected([&](auto row) INLINE_LAMBDA {
+      if (flatElements->isNullAt(row)) {
+        return;
+      }
+      auto value = flatElements->valueAt(row);
+      int32_t dot = -1;
+      for (int32_t i = 0; i < value.size(); ++i) {
+        if (value.data()[i] == '.') {
+          dot = i;
+          break;
+        }
+      }
+      if (dot == -1) {
+        return;
+      }
+      bool allZeros = true;
+      for (int32_t i = dot + 1; i < value.size(); ++i) {
+        if (value.data()[i] != '0') {
+          allZeros = false;
+          break;
+        }
+      }
+      if (allZeros) {
+        flatElements->set(row, StringView(value.data(), dot));
+      }
+    });
+  }
 
   auto rawElements = resultElements->as<FlatVector<StringView>>()->rawValues();
   rows.applyToSelected([&](auto row) INLINE_LAMBDA {
@@ -1334,9 +1415,9 @@ void doCast(
       result->copy(&input, rows, nullptr, context.isFinalSelection());
       return;
     }
-    auto fromKind = getPrimitiveKind(fromType);
-    auto toKind = getPrimitiveKind(toType);
-    auto it = converters.find(std::make_pair(fromKind, toKind));
+    auto fromKey = getCastKind(fromType);
+    auto toKey = getCastKind(toType);
+    auto it = converters.find(std::make_pair(fromKey, toKey));
     if (it != converters.end()) {
       it->second->convert(rows, input, context, result, errorPolicy);
     } else {

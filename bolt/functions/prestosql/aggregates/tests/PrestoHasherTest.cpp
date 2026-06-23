@@ -413,8 +413,8 @@ TEST_F(PrestoHasherTest, timestampWithTimezone) {
         std::vector<std::optional<int64_t>> timestamps;
         std::vector<std::optional<int16_t>> timeZoneIds;
         auto size = timestampWithTimeZones.size();
-        BufferPtr nulls =
-            AlignedBuffer::allocate<uint64_t>(bits::nwords(size), pool());
+        BufferPtr nulls = AlignedBuffer::allocate<uint64_t>(
+            bits::nwords(static_cast<uint64_t>(size)), pool());
         auto rawNulls = nulls->asMutable<uint64_t>();
         timestamps.reserve(size);
         timeZoneIds.reserve(size);

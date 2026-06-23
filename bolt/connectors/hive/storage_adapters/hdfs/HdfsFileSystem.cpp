@@ -31,6 +31,7 @@
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsFileSystem.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsReadFile.h"
+#include "bolt/connectors/hive/storage_adapters/hdfs/HdfsUtil.h"
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsWriteFile.h"
 #include "bolt/external/hdfs/ArrowHdfsInternal.h"
 namespace bytedance::bolt::filesystems {
@@ -123,7 +124,7 @@ std::string HdfsFileSystem::name() const {
 
 std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
     std::string_view path,
-    const FileOptions& /*unused*/) {
+    const FileOptions& options) {
   // Only remove the scheme for hdfs path.
   if (path.find(kScheme) == 0) {
     path.remove_prefix(kScheme.length());
@@ -131,15 +132,23 @@ std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
       path.remove_prefix(index);
     }
   }
+  const auto bufferSize =
+      parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBufferSize);
   return std::make_unique<HdfsReadFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path);
+      impl_->hdfsShim(), impl_->hdfsClient(), path, bufferSize);
 }
 
 std::unique_ptr<WriteFile> HdfsFileSystem::openFileForWrite(
     std::string_view path,
-    const FileOptions& /*unused*/) {
+    const FileOptions& options) {
+  const auto hdfsOptions = getHdfsOpenFileOptions(options);
   return std::make_unique<HdfsWriteFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path);
+      impl_->hdfsShim(),
+      impl_->hdfsClient(),
+      path,
+      hdfsOptions.bufferSize,
+      hdfsOptions.replication,
+      hdfsOptions.blockSize);
 }
 
 void HdfsFileSystem::close() {
@@ -312,6 +321,32 @@ void HdfsFileSystem::rmdir(std::string_view path) {
       "Cannot remove directory {} recursively in HDFS, error is : {}",
       path,
       impl_->hdfsShim()->GetLastExceptionRootCause());
+}
+
+HdfsFileSystem::HdfsFileInfo HdfsFileSystem::stat(std::string_view path) const {
+  // Only remove the scheme for hdfs path.
+  if (path.find(kScheme) == 0) {
+    path.remove_prefix(kScheme.length());
+    if (auto index = path.find('/')) {
+      path.remove_prefix(index);
+    }
+  }
+
+  auto* fileInfo =
+      impl_->hdfsShim()->GetPathInfo(impl_->hdfsClient(), path.data());
+  BOLT_CHECK_NOT_NULL(
+      fileInfo,
+      "Unable to stat path {}. got error: {}",
+      path,
+      impl_->hdfsShim()->GetLastExceptionRootCause());
+
+  HdfsFileInfo info;
+  info.isDir = fileInfo->mKind == kObjectKindDirectory;
+  info.size = static_cast<uint64_t>(fileInfo->mSize);
+  // libhdfs mLastMod is seconds since epoch.
+  info.modificationTimeMs = static_cast<int64_t>(fileInfo->mLastMod) * 1000;
+  impl_->hdfsShim()->FreeFileInfo(fileInfo, 1);
+  return info;
 }
 
 } // namespace bytedance::bolt::filesystems

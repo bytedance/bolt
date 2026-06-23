@@ -33,6 +33,7 @@
 #include <folly/Executor.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include <initializer_list>
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -216,6 +217,13 @@ class VectorTestBase {
   template <typename T>
   FlatVectorPtr<EvalType<T>> makeFlatVector(
       const std::vector<T>& data,
+      const TypePtr& type = CppToType<T>::create()) {
+    return vectorMaker_.flatVector<T>(data, type);
+  }
+
+  template <typename T>
+  FlatVectorPtr<EvalType<T>> makeFlatVector(
+      std::initializer_list<T> data,
       const TypePtr& type = CppToType<T>::create()) {
     return vectorMaker_.flatVector<T>(data, type);
   }
@@ -1053,6 +1061,9 @@ class VectorTestBase {
   std::shared_ptr<memory::MemoryPool> pool_{rootPool_->addLeafChild("leaf")};
   bolt::test::VectorMaker vectorMaker_{pool_.get()};
   std::shared_ptr<folly::Executor> executor_{
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::thread::hardware_concurrency())};
+  std::shared_ptr<folly::Executor> spillExecutor_{
       std::make_shared<folly::CPUThreadPoolExecutor>(
           std::thread::hardware_concurrency())};
 };

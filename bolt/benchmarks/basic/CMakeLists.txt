@@ -86,6 +86,11 @@ target_link_libraries(
 add_executable(bolt_cast_benchmark CastBenchmark.cpp)
 target_link_libraries(bolt_cast_benchmark ${BOLT_BENCHMARK_DEPS} bolt_vector_test_lib)
 
+add_executable(bolt_benchmark_expr_flat_no_nulls ExprFlatNoNullsBenchmark.cpp)
+target_link_libraries(
+  bolt_benchmark_expr_flat_no_nulls ${BOLT_BENCHMARK_DEPS} bolt_functions_prestosql
+)
+
 add_executable(bolt_format_datetime_benchmark FormatDateTimeBenchmark.cpp)
 target_link_libraries(
   bolt_format_datetime_benchmark ${BOLT_BENCHMARK_DEPS} bolt_vector_test_lib bolt_functions_spark

@@ -34,6 +34,7 @@
 #include <cmath>
 #include <type_traits>
 #include "bolt/type/BigDecimal.h"
+#include "bolt/type/DecimalUtil.h"
 #include "bolt/type/FloatingPointUtil.h"
 #include "folly/CPortability.h"
 namespace bytedance::bolt::functions {
@@ -48,8 +49,32 @@ round(const TNum& number, const TDecimals& decimals = 0) {
 
   if constexpr (std::is_integral_v<TNum>) {
     if constexpr (alwaysRoundNegDec) {
-      if (decimals >= 0)
+      if (decimals >= 0) {
         return number;
+      }
+      // Fixed integral rounding in round when alwaysRoundNegDec is true and
+      // decimals are negative by rounding to the
+      //  nearest power of ten, preventing fall-through and matching Spark
+      //  expectations. Without this, there will be compilation error when
+      //  alwaysRoundNegDec is true
+      constexpr auto kMaxScale = sizeof(DecimalUtil::kPowersOfTen) /
+          sizeof(DecimalUtil::kPowersOfTen[0]);
+      const auto scale = static_cast<uint64_t>(-decimals);
+      if (scale >= kMaxScale) {
+        return static_cast<TNum>(0);
+      }
+
+      const auto scalingFactor = DecimalUtil::kPowersOfTen[scale];
+      int128_t value = static_cast<int128_t>(number);
+      int128_t quotient = value / scalingFactor;
+      int128_t remainder = value % scalingFactor;
+      if (value >= 0 && remainder >= scalingFactor / 2) {
+        ++quotient;
+      } else if (remainder <= -scalingFactor / 2) {
+        --quotient;
+      }
+      int128_t rounded = quotient * scalingFactor;
+      return static_cast<TNum>(rounded);
     } else {
       return number;
     }

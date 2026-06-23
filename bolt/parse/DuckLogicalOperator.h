@@ -57,6 +57,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
 #include <duckdb.hpp> // @manual
+#include <duckdb/common/insertion_order_preserving_map.hpp> // @manual
 
 namespace duckdb {
 
@@ -106,24 +107,29 @@ class LogicalGet : public LogicalOperator {
   vector<LogicalType> returned_types;
   //! The names of ALL columns that can be returned by the table function
   vector<string> names;
-  //! Bound column IDs
-  vector<column_t> column_ids;
+  //! Columns that are used outside the scan
+  vector<idx_t> projection_ids;
   //! Filters pushed down for table scan
   TableFilterSet table_filters;
-
+  //! The set of input parameters for the table function
+  vector<Value> parameters;
   string GetName() const override;
-  string ParamsToString() const override;
+  InsertionOrderPreservingMap<string> ParamsToString() const override;
   //! Returns the underlying table that is being scanned, or nullptr if there is
   //! none
-  TableCatalogEntry* GetTable() const;
+  optional_ptr<TableCatalogEntry> GetTable() const;
 
  public:
+  const vector<column_t>& GetColumnIds() const;
   vector<ColumnBinding> GetColumnBindings() override;
 
   idx_t EstimateCardinality(ClientContext& context) override;
 
  protected:
   void ResolveTypes() override;
+
+ private:
+  LogicalGet();
 };
 
 //! LogicalFilter represents a filter operation (e.g. WHERE or HAVING clause)
@@ -133,8 +139,6 @@ class LogicalFilter : public LogicalOperator {
   LogicalFilter();
 
   vector<idx_t> projection_map;
-
- public:
   vector<ColumnBinding> GetColumnBindings() override;
 
   bool SplitPredicates() {
@@ -191,7 +195,7 @@ class LogicalAggregate : public LogicalOperator {
   vector<unique_ptr<BaseStatistics>> group_stats;
 
  public:
-  string ParamsToString() const override;
+  InsertionOrderPreservingMap<string> ParamsToString() const override;
 
   vector<ColumnBinding> GetColumnBindings() override;
 

@@ -31,7 +31,7 @@
 #include "bolt/python/PlanNode.h"
 #include "bolt/python/Utils.h"
 
-using namespace facebook::bolt;
+using namespace bytedance::bolt;
 
 namespace bolt::python {
 PythonNode::PythonNode(

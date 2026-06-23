@@ -31,6 +31,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/functions/lib/window/tests/WindowTestBase.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 using namespace bytedance::bolt::exec::test;
@@ -538,6 +539,88 @@ TEST_P(LeadLagTest, emptyFrames) {
 BOLT_INSTANTIATE_TEST_SUITE_P(LagTest, LeadLagTest, ::testing::Values("lag"));
 
 BOLT_INSTANTIATE_TEST_SUITE_P(LeadTest, LeadLagTest, ::testing::Values("lead"));
+
+// Regression test for O(N^2) slowdown in `lag(varchar, k, default_varchar)`
+// over many small partitions: without prepareForReuse(), defaultValues_'s
+// stringBuffers_ grew by one entry per partition, and result->copy walked
+// the whole list each time via acquireSharedStringBuffers.
+TEST_F(LeadLagTest, manySingleRowVarcharPartitions) {
+  constexpr vector_size_t kSize = 50'000;
+
+  // StringView(std::string&&) is deleted, so the strings must outlive the
+  // vectors built from them.
+  std::vector<std::string> valueStrings(kSize);
+  std::vector<std::string> defaultStrings(kSize);
+  for (vector_size_t row = 0; row < kSize; ++row) {
+    // >12 chars so values don't fit StringView's inline storage and must
+    // live in an external buffer.
+    valueStrings[row] = fmt::format(
+        "2026-01-01 {:02d}:{:02d}:{:02d}",
+        (row / 3600) % 24,
+        (row / 60) % 60,
+        row % 60);
+    defaultStrings[row] = fmt::format(
+        "2026-12-31 {:02d}:{:02d}:{:02d}",
+        (row / 3600) % 24,
+        (row / 60) % 60,
+        row % 60);
+  }
+
+  // c2 is a per-row default so setDefaultValue takes the defaultValueIndex_
+  // branch (where the bug lives), not the constant-default branch.
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+      makeFlatVector<StringView>(
+          kSize, [&](auto row) { return StringView(valueStrings[row]); }),
+      makeFlatVector<StringView>(
+          kSize, [&](auto row) { return StringView(defaultStrings[row]); }),
+  });
+
+  auto queryInfo = buildWindowQuery(
+      {data}, "lag(c1, 1, c2)", "partition by c0 order by c1 desc", "");
+
+  // copyResult=false hands us the operator's raw FlatVector; otherwise the
+  // queue-side copy re-chunks buffers and hides the per-batch count.
+  exec::test::CursorParameters params;
+  params.planNode = queryInfo.planNode;
+  params.copyResult = false;
+  auto cursor = exec::test::TaskCursor::create(params);
+
+  auto start = std::chrono::steady_clock::now();
+  size_t totalRows = 0;
+  size_t maxBatchBuffers = 0;
+  size_t numBatches = 0;
+  while (cursor->moveNext()) {
+    auto batch = cursor->current();
+    auto* lagColumn = batch->childAt(batch->childrenSize() - 1)
+                          ->asUnchecked<FlatVector<StringView>>();
+    maxBatchBuffers =
+        std::max(maxBatchBuffers, lagColumn->stringBuffers().size());
+
+    for (vector_size_t i = 0; i < batch->size(); ++i) {
+      ASSERT_FALSE(lagColumn->isNullAt(i));
+      ASSERT_EQ(
+          lagColumn->valueAt(i), StringView(defaultStrings[totalRows + i]));
+    }
+    totalRows += batch->size();
+    ++numBatches;
+  }
+  auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+
+  ASSERT_EQ(totalRows, kSize);
+  std::cout << "[manySingleRowVarcharPartitions] rows=" << kSize
+            << " batches=" << numBatches
+            << " maxBatchBuffers=" << maxBatchBuffers
+            << " elapsed=" << elapsedMs << "ms" << std::endl;
+
+  // Broken: maxBatchBuffers ~ kSize (50000). Fixed: ~rows-per-batch (~1024).
+  EXPECT_LT(maxBatchBuffers, static_cast<size_t>(kSize / 10))
+      << "defaultValues_->stringBuffers_ is accumulating across partitions; "
+      << "check that setDefaultValue / setConstantTargetValue call "
+      << "defaultValues_->prepareForReuse() before extractColumn.";
+}
 
 // DuckDB has errors in IGNORE NULLS logic for empty
 // frames (tested above). So using non-empty frames.

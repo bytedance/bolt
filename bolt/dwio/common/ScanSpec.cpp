@@ -30,6 +30,7 @@
 
 #include "bolt/dwio/common/ScanSpec.h"
 #include "bolt/dwio/common/Statistics.h"
+#include "bolt/type/Type.h"
 namespace bytedance::bolt::common {
 
 ScanSpec& ScanSpec::operator=(const ScanSpec& other) {
@@ -610,6 +611,14 @@ void ScanSpec::addAllChildFields(const Type& type) {
     case TypeKind::ARRAY:
       addArrayElementFieldRecursively(*type.childAt(0));
       break;
+    case TypeKind::VARIANT: {
+      const auto& variantType = static_cast<const VariantType&>(type);
+      for (auto i = 0; i < type.size(); ++i) {
+        addFieldRecursively(
+            variantType.nameOf(i), *type.childAt(i), ScanSpec::kNoChannel);
+      }
+      break;
+    }
     default:
       break;
   }

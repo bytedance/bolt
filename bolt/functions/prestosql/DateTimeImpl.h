@@ -36,6 +36,7 @@
 
 #include "bolt/common/base/Doubles.h"
 #include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/functions/lib/TimeDiffUtils.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/type/TimestampConversion.h"
@@ -192,113 +193,4 @@ FOLLY_ALWAYS_INLINE Timestamp addToTimestamp(
           timestamp.getNanos() % kNanosecondsInMillisecond);
 }
 
-FOLLY_ALWAYS_INLINE int64_t diffTimestamp(
-    const DateTimeUnit unit,
-    const Timestamp& fromTimestamp,
-    const Timestamp& toTimestamp) {
-  if (fromTimestamp == toTimestamp) {
-    return 0;
-  }
-
-  const int8_t sign = fromTimestamp < toTimestamp ? 1 : -1;
-
-  const auto& low = sign == 1 ? fromTimestamp : toTimestamp;
-  const auto& high = sign == 1 ? toTimestamp : fromTimestamp;
-  const int64_t fromMillis = low.toMillis();
-  const int64_t toMillis = high.toMillis();
-  const int64_t deltaMillis = toMillis - fromMillis;
-
-  // Millisecond, second, minute, hour and day have fixed conversion ratio
-  switch (unit) {
-    case DateTimeUnit::kMillisecond: {
-      return sign * deltaMillis;
-    }
-    case DateTimeUnit::kSecond: {
-      return sign * (deltaMillis / kMillisInSecond);
-    }
-    case DateTimeUnit::kMinute: {
-      return sign * (deltaMillis / kMillisInMinute);
-    }
-    case DateTimeUnit::kHour: {
-      return sign * (deltaMillis / kMillisInHour);
-    }
-    case DateTimeUnit::kDay: {
-      return sign * (deltaMillis / kMillisInDay);
-    }
-    case DateTimeUnit::kWeek: {
-      return sign * (deltaMillis / kMillisInWeek);
-    }
-    default:
-      break;
-  }
-
-  // Month, quarter and year do not have fixed conversion ratio. Ex. a month can
-  // have 28, 29, 30 or 31 days. A year can have 365 or 366 days.
-  const auto fromCalDate =
-      util::toCivilDateTime(low, /*allowOverflow*/ false, /*isPrecision*/ true);
-  const auto toCalDate = util::toCivilDateTime(
-      high, /*allowOverflow*/ false, /*isPrecision*/ true);
-
-  auto dayMillis = [](const util::CivilDateTime& civil) -> int64_t {
-    return static_cast<int64_t>(civil.time.nanosecond / 1'000'000) +
-        int64_t(
-            civil.time.second + civil.time.minute * 60 +
-            civil.time.hour * 3'600) *
-        1'000;
-  };
-  const int64_t fromDayMillis = dayMillis(fromCalDate);
-  const int64_t toDayMillis = dayMillis(toCalDate);
-
-  const int32_t fromDay = fromCalDate.date.day;
-  const int32_t fromMonth = fromCalDate.date.month;
-  const int32_t toDay = toCalDate.date.day;
-  const int32_t toMonth = toCalDate.date.month;
-  const int32_t toLastYearMonthDay =
-      util::getMaxDayOfMonth(toCalDate.date.year, toCalDate.date.month);
-
-  if (unit == DateTimeUnit::kMonth || unit == DateTimeUnit::kQuarter) {
-    int64_t diff =
-        (int64_t(toCalDate.date.year) - int64_t(fromCalDate.date.year)) * 12 +
-        int64_t(toMonth) - int64_t(fromMonth);
-
-    if ((toDay != toLastYearMonthDay && fromDay > toDay) ||
-        (fromDay == toDay && fromDayMillis > toDayMillis)) {
-      diff--;
-    }
-
-    diff = (unit == DateTimeUnit::kMonth) ? diff : diff / 3;
-    return sign * diff;
-  }
-
-  if (unit == DateTimeUnit::kYear) {
-    int64_t diff =
-        int64_t(toCalDate.date.year) - int64_t(fromCalDate.date.year);
-
-    if (fromMonth > toMonth ||
-        (fromMonth == toMonth && fromDay > toDay &&
-         toDay != toLastYearMonthDay) ||
-        (fromMonth == toMonth && fromDay == toDay &&
-         fromDayMillis > toDayMillis)) {
-      diff--;
-    }
-    return sign * diff;
-  }
-
-  BOLT_UNREACHABLE("Unsupported datetime unit");
-}
-
-FOLLY_ALWAYS_INLINE
-int64_t diffDate(
-    const DateTimeUnit unit,
-    const int32_t fromDate,
-    const int32_t toDate) {
-  if (fromDate == toDate) {
-    return 0;
-  }
-  return diffTimestamp(
-      unit,
-      // prevent overflow
-      Timestamp((int64_t)fromDate * util::kSecsPerDay, 0),
-      Timestamp((int64_t)toDate * util::kSecsPerDay, 0));
-}
 } // namespace bytedance::bolt::functions

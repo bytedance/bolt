@@ -56,8 +56,10 @@ class Spiller {
     kOrderByInput = 4,
     // Used for order by output processing stage.
     kOrderByOutput = 5,
+    // Used for local merge input processing stage.
+    kLocalMergeInput = 6,
     // Number of spiller types.
-    kNumTypes = 6,
+    kNumTypes = 7,
     // Used for hash probe match flags
     kHashJoinProbeMatchFlag = 7,
   };
@@ -79,8 +81,7 @@ class Spiller {
       Type type,
       RowContainer* container,
       RowTypePtr rowType,
-      int32_t numSortingKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       const common::SpillConfig* spillConfig);
 
   /// type == Type::kAggregateOutput || type == Type::kOrderByOutput
@@ -105,6 +106,14 @@ class Spiller {
       HashBitRange bits,
       const common::SpillConfig* spillConfig,
       uint64_t targetFileSize);
+
+  /// type == Type::kLocalMergeInput
+  Spiller(
+      Type type,
+      RowTypePtr rowType,
+      HashBitRange bits,
+      const std::vector<SpillSortKey>& sortingKeys,
+      const common::SpillConfig* spillConfig);
 
   /// type == Type::kHashJoinBuild
   Spiller(
@@ -168,6 +177,15 @@ class Spiller {
       RowVectorPtr& spillVector,
       size_t& nextBatchIndex);
 
+  /// Hybrid mode extraction: extracts from both RowContainer (keys) and
+  /// HybridContainer (payloads)
+  int64_t extractSpillVectorHybrid(
+      SpillRows& rows,
+      int32_t maxRows,
+      int64_t maxBytes,
+      RowVectorPtr& spillVector,
+      size_t& nextBatchIndex);
+
   /// Finishes spilling and accumulate the spilled partition metadata in
   /// 'partitionSet' indexed by spill partition id.
   void finishSpill(SpillPartitionSet& partitionSet);
@@ -216,7 +234,8 @@ class Spiller {
   void setPartitionsSpilled(const SpillPartitionNumSet& partitions) {
     BOLT_CHECK(
         type_ == Spiller::Type::kHashJoinProbe ||
-            type_ == Spiller::Type::kHashJoinProbeMatchFlag,
+            type_ == Spiller::Type::kHashJoinProbeMatchFlag ||
+            type_ == Spiller::Type::kLocalMergeInput,
         "Unexpected spiller type: ",
         typeName(type_));
     for (const auto& partition : partitions) {
@@ -244,6 +263,11 @@ class Spiller {
 
   void setSortAlgo(SortAlgo algo) {
     sorter_ = HybridSorter{algo};
+  }
+
+  void setHybridMode(bool enabled, HybridContainer* hybridContainer) {
+    hybridSortEnabled_ = enabled;
+    hybridContainer_ = hybridContainer;
   }
 
   const RowContainer* container() const {
@@ -277,8 +301,7 @@ class Spiller {
       RowContainer* container,
       RowTypePtr rowType,
       HashBitRange bits,
-      int32_t numSortingKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
+      const std::vector<SpillSortKey>& sortingKeys,
       const common::SpillConfig::SpillIOConfig& ioConfig,
       uint64_t targetFileSize,
       folly::Executor* executor,
@@ -293,6 +316,10 @@ class Spiller {
   // Creates '*results' in spillPool() if nullptr. Used from Spiller and
   // RowContainerSpillMergeStream.
   void extractSpill(folly::Range<char**> rows, RowVectorPtr& result);
+
+  // Hybrid mode extraction: extracts keys from RowContainer and payloads from
+  // HybridContainer for 'rows' into '*result'.
+  void extractSpillHybrid(folly::Range<char**> rows, RowVectorPtr& result);
 
   // Returns a mergeable stream that goes over unspilled in-memory
   // rows for the spill partition  'partition'. finishSpill()
@@ -364,7 +391,9 @@ class Spiller {
   // If 'startRowIter' is not null, we prepare runs starting from the offset
   // pointed by 'startRowIter'.
   // The function returns true if it is the last spill run.
-  bool fillSpillRuns(RowContainerIterator* startRowIter = nullptr);
+  bool fillSpillRuns(
+      RowContainerIterator* startRowIter = nullptr,
+      uint64_t maxRowsPerPartition = 0);
 
   // Prepares spill run of a single partition for the spillable data from the
   // rows.
@@ -408,6 +437,8 @@ class Spiller {
   const RowTypePtr rowType_;
   const uint64_t maxSpillRunRows_;
 
+  const std::vector<CompareFlags> compareFlags_;
+
   // True if all rows of spilling partitions are in 'spillRuns_', so
   // that one can start reading these back. This means that the rows
   // that are not written out and deleted will be captured by
@@ -425,11 +456,16 @@ class Spiller {
 
   common::SpillConfig* spillConfig_{nullptr};
 
+  // Hybrid mode support: when true, extraction uses both RowContainer (keys)
+  // and HybridContainer (payloads)
+  bool hybridSortEnabled_{false};
+  HybridContainer* hybridContainer_{nullptr};
+
   HybridSorter sorter_;
 
   bool supportSkewPartition_{false};
   bool rangePartitioningApplicable_{false};
-  int32_t skewedVictim_{-1};
+  std::optional<uint32_t> skewedVictim_;
   uint32_t maxRowsPerFile_{0};
   int64_t memoryUsedWhenTriggered_{0};
   int32_t skewFileSizeRatioThreshold_ = 10;
@@ -444,6 +480,24 @@ class Spiller {
 #endif
   RowRowCompare cmp_{nullptr};
 };
+
+class MergeSpiller final : public Spiller {
+ public:
+  MergeSpiller(
+      RowTypePtr rowType,
+      std::optional<SpillPartitionId> parentId,
+      HashBitRange bits,
+      const std::vector<SpillSortKey>& sortingKeys,
+      const common::SpillConfig* spillConfig,
+      folly::Synchronized<common::SpillStats>* spillStats = nullptr)
+      : Spiller(
+            Type::kLocalMergeInput,
+            std::move(rowType),
+            bits,
+            sortingKeys,
+            spillConfig) {}
+};
+
 } // namespace bytedance::bolt::exec
 
 template <>

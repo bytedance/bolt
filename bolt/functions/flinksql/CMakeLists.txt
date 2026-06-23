@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-bolt_add_library(bolt_functions_flink_impl JsonFunctions.cpp)
+bolt_add_library(
+  bolt_functions_flink_impl
+  HashCodeFunction.cpp
+  JsonFunctions.cpp
+  ElementAt.cpp
+  specialforms/FlinkCastExpr.cpp
+)
 
 target_link_libraries(
   bolt_functions_flink_impl

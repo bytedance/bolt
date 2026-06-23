@@ -36,6 +36,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/IgnoreCorruptFile.h"
@@ -75,6 +76,8 @@ HiveDataSource::HiveDataSource(
       fsSessionConfig_.values[key] = value.value();
     }
   }
+  filesystems::copyOpenFileOptionsFromConfig(
+      connectorQueryCtx_->sessionProperties(), fsSessionConfig_);
   fsSessionConfig_.bufferSize = static_cast<size_t>(hiveConfig_->loadQuantum());
   native_cache_enabled = queryConfig.isNativeCacheEnabled();
   IgnoreCorruptFileHelper::globalInitialize(
@@ -87,6 +90,7 @@ HiveDataSource::HiveDataSource(
       queryConfig.isDataRetentionShuffleBased();
 
   // Column handled keyed on the column alias, the name used in the query.
+  folly::F14FastSet<std::string> rowIndexColumnNames;
   for (const auto& [canonicalizedName, columnHandle] : columnHandles) {
     auto handle = std::dynamic_pointer_cast<HiveColumnHandle>(columnHandle);
     BOLT_CHECK_NOT_NULL(
@@ -100,6 +104,10 @@ HiveDataSource::HiveDataSource(
 
     if (handle->columnType() == HiveColumnHandle::ColumnType::kSynthesized) {
       infoColumns_.emplace(handle->name(), handle);
+    }
+
+    if (handle->columnType() == HiveColumnHandle::ColumnType::kRowIndex) {
+      rowIndexColumnNames.insert(handle->name());
     }
   }
 
@@ -189,7 +197,9 @@ HiveDataSource::HiveDataSource(
   std::vector<std::tuple<size_t, std::optional<std::string>>> rowIndexColumns;
   for (int i = 0; i < names.size(); ++i) {
     const auto& name = names[i];
-    if (paimon::kColumnNameRowIndex == name) {
+    if (rowIndexColumnNames.contains(name)) {
+      rowIndexColumns.emplace_back(i, std::nullopt);
+    } else if (paimon::kColumnNameRowIndex == name) {
       rowIndexColumns.emplace_back(i, std::nullopt);
     } else if (
         (!readColumnsAsLowercase && paimon::kColumnNameRowID == name) ||
@@ -220,6 +230,8 @@ HiveDataSource::HiveDataSource(
   }
 
   recalculateRepDefConf(readerOutputType_, queryConfig);
+  parquetMaxBatchBytes_ =
+      static_cast<int64_t>(queryConfig.preferredOutputBatchBytes());
   ioStats_ = std::make_shared<io::IoStatistics>();
 }
 
@@ -366,6 +378,7 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
       decodeRepDefPageCount_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
+  splitReader->rowReaderOptions().setMaxBatchBytes(parquetMaxBatchBytes_);
 
   TRY_WITH_IGNORE(
       connectorQueryCtx_->taskId(),

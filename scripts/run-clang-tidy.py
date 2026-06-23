@@ -318,7 +318,9 @@ def process_gha_output(stdout):
 
 
 def tidy(args):
-    extensions = (".cc", ".cpp", ".cxx", ".c", ".h", ".hpp", ".hxx")
+    source_extensions = (".cc", ".cpp", ".cxx", ".c")
+    header_extensions = (".h", ".hpp", ".hxx")
+    extensions = source_extensions + header_extensions
     candidate_files = []
     # get file list to check
     if args.directory:
@@ -460,13 +462,37 @@ def tidy(args):
         if exclude_re is not None:
             files_to_process = [f for f in files_to_process if not exclude_re.search(f)]
 
+        # Only analyze .cpp files — header files (.h, -inl.h) are not standalone
+        # translation units and cause false errors in clang-tidy when analyzed
+        # independently. Header diagnostics are still checked transitively when
+        # clang-tidy processes .cpp files that include them.
+        before_filter = len(files_to_process)
+        files_to_process = [f for f in files_to_process if f.endswith(".cpp")]
+        header_excluded = before_filter - len(files_to_process)
+        if header_excluded > 0:
+            print(
+                f"Excluded {header_excluded} header file(s) (analyzed transitively via .cpp)."
+            )
+
         if not files_to_process:
             print("No changed C/C++ lines detected for clang-tidy.")
             return 0
 
+        # Keep headers in --line-filter so diagnostics can be reported there,
+        # but run clang-tidy only on translation units that have compile DB entries.
+        all_changed_for_filter = list(files_to_process)
+        files_to_process = [
+            f for f in files_to_process if f.endswith(source_extensions)
+        ]
+        if not files_to_process:
+            print(
+                "Only header changes detected; no source files to run clang-tidy on in this mode."
+            )
+            return 0
+
         # Use absolute paths in --line-filter for better compatibility with compile DBs.
         final_map_abs = {}  # type: Dict[str, List[List[int]]]
-        for f in files_to_process:
+        for f in all_changed_for_filter:
             abs_f = to_repo_abs(f, git_root)
             final_map_abs[abs_f] = changed_lines[f]
         line_filter_json = json.dumps(
@@ -503,8 +529,8 @@ def tidy(args):
         cmd_base.append(f"--line-filter={line_filter_json}")
 
     cmd_base.append("--extra-arg=-Wno-unknown-warning-option")
-
-    jobs = args.jobs if args.jobs else max(1, multiprocessing.cpu_count() // 2)
+    max_cpus = int(os.environ.get("CI_NUM_THREADS", multiprocessing.cpu_count() // 2))
+    jobs = args.jobs if args.jobs else max(1, max_cpus)
     chunk_size = 1
     file_chunks = [
         files_to_process[i : i + chunk_size]
@@ -591,7 +617,7 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude",
-        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$",
+        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
         help="Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
     )
     parser.add_argument(

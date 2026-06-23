@@ -199,8 +199,7 @@ uint64_t SpillWriteFile::write(std::string_view buf) {
 
 SpillWriter::SpillWriter(
     const RowTypePtr& type,
-    const uint32_t numSortKeys,
-    const std::vector<CompareFlags>& sortCompareFlags,
+    const std::vector<SpillSortKey>& sortingKeys,
     const std::string& pathPrefix,
     uint64_t targetFileSize,
     const common::SpillConfig::SpillIOConfig& ioConfig,
@@ -209,8 +208,7 @@ SpillWriter::SpillWriter(
     uint32_t maxBatchRows,
     std::optional<RowFormatInfo> rowInfo)
     : type_(type),
-      numSortKeys_(numSortKeys),
-      sortCompareFlags_(sortCompareFlags),
+      sortingKeys_(sortingKeys),
       compressionKind_(ioConfig.compressionKind),
       pathPrefix_(pathPrefix),
       targetFileSize_(targetFileSize),
@@ -226,10 +224,6 @@ SpillWriter::SpillWriter(
   if (ioConfig.spillSerdeKind) {
     serde_ = getNamedVectorSerde(*ioConfig.spillSerdeKind);
   }
-  // NOTE: if the associated spilling operator has specified the sort
-  // comparison flags, then it must match the number of sorting keys.
-  BOLT_CHECK(
-      sortCompareFlags_.empty() || sortCompareFlags_.size() == numSortKeys_);
 }
 
 SpillWriteFile* SpillWriter::ensureFile() {
@@ -258,8 +252,7 @@ void SpillWriter::closeFile() {
       .path = currentFile_->path(),
       .size = currentFile_->size(),
       .rowCount = rowsInCurrentFile_,
-      .numSortKeys = numSortKeys_,
-      .sortFlags = sortCompareFlags_,
+      .sortingKeys = sortingKeys_,
       .compressionKind = compressionKind_,
       .serdeKind = spillSerdeKind_,
       .rowInfo = rowInfo_});
@@ -326,7 +319,7 @@ uint64_t SpillWriter::write(
     }
     unflushedRows_ += writeRowSize;
     batch_->append(rows, indices);
-    if ((numSortKeys_ > 0) && (writeRowSize > 0)) {
+    if ((!sortingKeys_.empty()) && (writeRowSize > 0)) {
       // only sort spill should limit batch memory size to avoid merge OOM
       unflushedSizeInRowVector_ +=
           rows->estimateFlatSize() / writeRowSize * rows->size();
@@ -603,8 +596,7 @@ SpillReadFileBase::SpillReadFileBase(
       path_(fileInfo.path),
       size_(fileInfo.size),
       type_(fileInfo.type),
-      numSortKeys_(fileInfo.numSortKeys),
-      sortCompareFlags_(fileInfo.sortFlags),
+      sortingKeys_(fileInfo.sortingKeys),
       compressionKind_(fileInfo.compressionKind),
       readOptions_{kDefaultUseLosslessTimestamp, compressionKind_},
       serdeKind_(fileInfo.serdeKind),

@@ -48,10 +48,7 @@ arrow::Status BoltRowBasedSortShuffleWriter::init() {
   ARROW_ASSIGN_OR_RAISE(
       partitioner_,
       Partitioner::make(
-          options_.partitioning,
-          numPartitions_,
-          options_.startPartitionId,
-          options_.sort_before_repartition));
+          options_.partitioning, numPartitions_, options_.startPartitionId));
   partition2RowCount_.resize(numPartitions_);
   partitionWriter_->setRowFormat(true);
   return arrow::Status::OK();
@@ -169,6 +166,8 @@ arrow::Status BoltRowBasedSortShuffleWriter::initFromRowVector(
 }
 
 arrow::Status BoltRowBasedSortShuffleWriter::tryEvict(int64_t) {
+  // add EvictGuard to avoid recursive evict
+  EvictGuard evictGuard{evictState_};
   BOLT_DCHECK(vectorLayout_ != RowVectorLayout::kInvalid);
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     RETURN_NOT_OK(partitionWriter_->evict(sortedRows_, partitionBytes_, false));

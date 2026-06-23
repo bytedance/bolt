@@ -40,7 +40,16 @@ class MergeSource {
   static constexpr int32_t kMaxQueuedBytesUpperLimit = 32 << 20; // 32 MB.
   static constexpr int32_t kMaxQueuedBytesLowerLimit = 1 << 20; // 1 MB.
 
-  virtual ~MergeSource() {}
+  virtual ~MergeSource() = default;
+
+  /// Called by the consumer to signal the producer the start of the source
+  /// processing. This is used to implement lazy local source start mechanism to
+  /// cap the source memory usage.
+  virtual void start() = 0;
+
+  /// Called by the producer to wait for the start signal of source processing
+  /// from the consumer.
+  virtual BlockingReason started(ContinueFuture* future) = 0;
 
   virtual BlockingReason next(RowVectorPtr& data, ContinueFuture* future) = 0;
 
@@ -51,7 +60,7 @@ class MergeSource {
   virtual void close() = 0;
 
   // Factory methods to create MergeSources.
-  static std::shared_ptr<MergeSource> createLocalMergeSource();
+  static std::shared_ptr<MergeSource> createLocalMergeSource(int queueSize);
 
   static std::shared_ptr<MergeSource> createMergeExchangeSource(
       MergeExchange* mergeExchange,
@@ -78,6 +87,13 @@ class MergeJoinSource {
   void close();
 
  private:
+  // Wait consumer to fetch next batch of data.
+  BlockingReason waitForConsumer(ContinueFuture* future) {
+    producerPromise_ = ContinuePromise("MergeJoinSource::waitForConsumer");
+    *future = producerPromise_->getSemiFuture();
+    return BlockingReason::kWaitForConsumer;
+  }
+
   struct State {
     bool atEnd;
     RowVectorPtr data;

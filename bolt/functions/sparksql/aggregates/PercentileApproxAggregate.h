@@ -192,6 +192,12 @@ class PercentileApproxAggregate : public exec::Aggregate {
     auto rowResult = (*result)->as<RowVector>();
     BOLT_USER_CHECK(rowResult);
     auto pool = rowResult->pool();
+    // Carry the declared element type (e.g. DECIMAL) for the type-placeholder
+    // field. CppToType<T> would yield the physical native type (e.g. HUGEINT)
+    // and drop decimal precision/scale, producing a vector whose runtime type
+    // disagrees with the intermediate schema.
+    const auto& placeholderType =
+        rowResult->type()->asRow().childAt(kTypePalceHolder);
 
     // percentiles_ can be uninitialized during an intermediate aggregation step
     // when all input intermediate states are nulls. Result should be nulls in
@@ -206,8 +212,8 @@ class PercentileApproxAggregate : public exec::Aggregate {
           BaseVector::createNullConstant(BOOLEAN(), numGroups, pool);
       rowResult->childAt(kAccuracy) =
           BaseVector::createNullConstant(INTEGER(), numGroups, pool);
-      rowResult->childAt(kTypePalceHolder) = BaseVector::createNullConstant(
-          CppToType<T>::create(), numGroups, pool);
+      rowResult->childAt(kTypePalceHolder) =
+          BaseVector::createNullConstant(placeholderType, numGroups, pool);
       auto rawNulls = rowResult->mutableRawNulls();
       bits::fillBits(rawNulls, 0, rowResult->size(), bits::kNull);
       return;
@@ -233,7 +239,7 @@ class PercentileApproxAggregate : public exec::Aggregate {
     rowResult->childAt(kAccuracy) = std::make_shared<ConstantVector<int32_t>>(
         pool, numGroups, accuracy_ <= 0, INTEGER(), int32_t(accuracy_));
     rowResult->childAt(kTypePalceHolder) = std::make_shared<ConstantVector<T>>(
-        pool, numGroups, false, CppToType<T>::create(), T());
+        pool, numGroups, false, placeholderType, T());
     auto serializedSummary =
         rowResult->childAt(kSerialized)->asFlatVector<StringView>();
 

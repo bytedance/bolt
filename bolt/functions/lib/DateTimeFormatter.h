@@ -351,7 +351,8 @@ class DateTimeFormatter {
       char* result,
       bool allowOverflow = false,
       TimePolicy timePolicy = TimePolicy::CORRECTED,
-      bool isPrecision = true) const;
+      bool isPrecision = true,
+      const std::optional<std::string>& zeroOffsetText = std::nullopt) const;
 
  private:
   std::unique_ptr<char[]> literalBuf_;

@@ -42,8 +42,7 @@ class Partitioner {
   static arrow::Result<std::shared_ptr<Partitioner>> make(
       Partitioning partitioning,
       int32_t numPartitions,
-      int32_t startPartitionId,
-      bool sortBeforeRepartition);
+      int32_t startPartitionId);
 
   // Whether the first column is partition key.
   bool hasPid() const {

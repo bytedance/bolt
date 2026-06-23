@@ -37,8 +37,8 @@ using namespace bytedance::bolt::duckdb;
 
 namespace {
 std::shared_ptr<const core::IExpr> parseExpr(const std::string& exprString) {
-  ParseOptions options;
-  return parseExpr(exprString, options);
+  duckdb::ParseOptions options;
+  return duckdb::parseExpr(exprString, options);
 }
 } // namespace
 
@@ -297,30 +297,33 @@ TEST(DuckParserTest, between) {
 
 TEST(DuckParserTest, interval) {
   auto parseInterval = [](const std::string& sql) {
-    auto expr =
-        std::dynamic_pointer_cast<const core::ConstantExpr>(parseExpr(sql));
-    BOLT_CHECK_NOT_NULL(expr);
-
-    auto value =
-        INTERVAL_DAY_TIME()->valueToString(expr->value().value<int64_t>());
-    if (expr->alias()) {
-      return fmt::format("{} AS {}", value, expr->alias().value());
-    }
-
-    return value;
+    auto parsed = parseExpr(sql);
+    return parsed->toString();
   };
 
-  EXPECT_EQ("0 05:00:00.000", parseInterval("INTERVAL 5 HOURS"));
-  EXPECT_EQ("0 00:36:00.000", parseInterval("INTERVAL 36 MINUTES"));
-  EXPECT_EQ("0 00:00:07.000", parseInterval("INTERVAL 7 SECONDS"));
-  EXPECT_EQ("0 00:00:00.123", parseInterval("INTERVAL 123 MILLISECONDS"));
-
-  EXPECT_EQ("0 00:00:12.345", parseInterval("INTERVAL 12345 MILLISECONDS"));
-  EXPECT_EQ("0 03:25:45.678", parseInterval("INTERVAL 12345678 MILLISECONDS"));
-  EXPECT_EQ("1 03:48:20.100", parseInterval("INTERVAL 100100100 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_hours(cast(trunc(cast(5, DOUBLE)), BIGINT))",
+      parseInterval("INTERVAL 5 HOURS"));
+  EXPECT_EQ(
+      "to_minutes(cast(trunc(cast(36, DOUBLE)), BIGINT))",
+      parseInterval("INTERVAL 36 MINUTES"));
+  EXPECT_EQ("to_seconds(cast(7, DOUBLE))", parseInterval("INTERVAL 7 SECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(123, DOUBLE))",
+      parseInterval("INTERVAL 123 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(12345, DOUBLE))",
+      parseInterval("INTERVAL 12345 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(12345678, DOUBLE))",
+      parseInterval("INTERVAL 12345678 MILLISECONDS"));
+  EXPECT_EQ(
+      "to_milliseconds(cast(100100100, DOUBLE))",
+      parseInterval("INTERVAL 100100100 MILLISECONDS"));
 
   EXPECT_EQ(
-      "0 00:00:00.011 AS x", parseInterval("INTERVAL 11 MILLISECONDS AS x"));
+      "to_milliseconds(cast(11, DOUBLE)) AS x",
+      parseInterval("INTERVAL 11 MILLISECONDS AS x"));
 }
 
 TEST(DuckParserTest, cast) {

@@ -74,10 +74,9 @@ SparkShuffleReader::SparkShuffleReader(
     }
   }
 
-  // must be same as BoltRuntime::decideBoltShuffleWriterType
-  isRowBased_ = (!partitioningShortName_.compare("hash") ||
-                 !partitioningShortName_.compare("rr") ||
-                 !partitioningShortName_.compare("range")) &&
+  // must be same as BoltShuffleWriter::decideBoltShuffleWriterType
+  auto partitioning = toPartitioning(partitioningShortName_);
+  isRowBased_ = supportAdaptiveShuffleWriter(partitioning) &&
       ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
         numPartitions_ >= rowBasePartitionThreshold &&
         outputType_->size() >= rowBaseColumnNumThreshold) ||

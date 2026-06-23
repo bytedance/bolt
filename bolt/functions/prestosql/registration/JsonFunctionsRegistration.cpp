@@ -42,6 +42,11 @@ void registerJsonFunctions(const std::string& prefix) {
   registerFunction<WrapperIsJsonScalarFunction, bool, Varchar>(
       {prefix + "is_json_scalar"});
 
+  registerFunction<WrapperIsJsonObjectFunction, bool, Json>(
+      {prefix + "is_json_object"});
+  registerFunction<WrapperIsJsonObjectFunction, bool, Varchar>(
+      {prefix + "is_json_object"});
+
   registerFunction<WrapperJsonExtractScalarFunction, Varchar, Json, Varchar>(
       {prefix + "json_extract_scalar"});
   registerFunction<WrapperJsonExtractScalarFunction, Varchar, Varchar, Varchar>(

@@ -33,10 +33,16 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/MemoryPool.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+
+#include <folly/Range.h>
 namespace bytedance::bolt {
 namespace config {
 class ConfigBase;
@@ -73,6 +79,13 @@ struct FileOptions {
   bool shouldThrowOnFileAlreadyExists{true};
 };
 
+inline constexpr std::string_view kOpenFileOptionConfigPrefix{"bolt."};
+
+void copyOpenFileOptionsFromConfig(
+    const config::ConfigBase* config,
+    FileOptions& options,
+    std::string_view prefix = kOpenFileOptionConfigPrefix);
+
 /// Defines directory options
 struct DirectoryOptions : FileOptions {
   /// Whether to throw an error if the directory already exists.
@@ -84,6 +97,13 @@ struct DirectoryOptions : FileOptions {
   /// This is similar to kFileCreateConfig
   static constexpr folly::StringPiece kMakeDirectoryConfig{
       "make-directory-config"};
+};
+
+struct FileSystemOptions {
+  /// As for now, only local file system respects this option. It implements
+  /// async read by using a background cpu executor. Some filesystem might has
+  /// native async read-ahead support.
+  bool readAheadEnabled{false};
 };
 
 /// An abstract FileSystem
@@ -183,5 +203,6 @@ void registerFileSystem(
         std::string_view)> fileSystemGenerator);
 
 /// Register the local filesystem.
-void registerLocalFileSystem();
+void registerLocalFileSystem(
+    const FileSystemOptions& options = FileSystemOptions());
 } // namespace bytedance::bolt::filesystems

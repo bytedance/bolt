@@ -66,6 +66,8 @@ bolt_add_library(
   MapUpdate.cpp
   Re2Functions.cpp
   Repeat.cpp
+  Sequence.cpp
+  Slice.cpp
   SimpleComparisonMatcher.cpp
   Size.cpp
   StringEncodingUtils.cpp
@@ -84,6 +86,7 @@ target_link_libraries(
   gfx::timsort
   utf8proc::utf8proc
   date::date
+  bolt_type_tz
 )
 
 add_subdirectory(aggregates)

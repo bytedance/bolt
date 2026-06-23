@@ -48,7 +48,7 @@
 #ifdef ENABLE_BOLT_JIT
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 #include "bolt/jit/RowContainer/RowEqVectorsCodeGenerator.h"
-#include "bolt/jit/ThrustJIT.h"
+#include "bolt/jit/ThrustJITv2.h"
 #endif
 
 #include <bit>
@@ -205,6 +205,7 @@ RowContainer::RowContainer(
     bool isJoinBuild,
     bool hasProbedFlag,
     bool hasNormalizedKeys,
+    bool useListRowIndex,
     memory::MemoryPool* pool,
     std::shared_ptr<HashStringAllocator> stringAllocator)
     : keyTypes_(keyTypes),
@@ -212,10 +213,12 @@ RowContainer::RowContainer(
       isJoinBuild_(isJoinBuild),
       accumulators_(accumulators),
       hasNormalizedKeys_(hasNormalizedKeys),
+      useListRowIndex_(useListRowIndex),
       rows_(pool),
       stringAllocator_(
           stringAllocator ? stringAllocator
-                          : std::make_shared<HashStringAllocator>(pool)) {
+                          : std::make_shared<HashStringAllocator>(pool)),
+      rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable
   // width data is referenced, this is done with StringView(for VARCHAR) and
@@ -297,6 +300,9 @@ RowContainer::RowContainer(
     offsets_.push_back(offset);
     offset += accumulator.fixedWidthSize();
   }
+  // Fast access of rowId offset for hybrid layout design
+  // In hybrid layout, we store a rowId as first (and only) dependent column
+  rowIdOffset_ = offset;
   for (auto& type : dependentTypes) {
     offsets_.push_back(offset);
     offset += typeKindSize(type->kind());
@@ -352,6 +358,9 @@ char* RowContainer::newRow() {
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;
+    }
+    if (useListRowIndex_) {
+      rowPointers_.push_back(row);
     }
   }
   return initializeRow(row, false /* reuse */);
@@ -1052,6 +1061,8 @@ void RowContainer::clear() {
     }
   }
   rows_.clear();
+  rowPointers_.clear();
+  rowPointers_.shrink_to_fit();
   if (!sharedStringAllocator) {
     if (checkFree_) {
       stringAllocator_->checkEmpty();
@@ -1115,7 +1126,8 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   }
   int64_t freeBytes = rows_.freeBytes() + fixedRowSize_ * numFreeRows_;
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
-      stringAllocator_->retainedSize() - stringAllocator_->freeSpace();
+      stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
+      rowPointers_.capacity() * sizeof(char*);
   int64_t rowSize = usedSize / numRows_;
   BOLT_CHECK_GT(
       rowSize, 0, "Estimated row size of the RowContainer must be positive.");
@@ -1475,6 +1487,111 @@ bool RowComparator::operator()(
     }
   }
   return false;
+}
+
+HybridContainer::HybridContainer(
+    const std::vector<TypePtr>& keyTypes,
+    const std::vector<TypePtr>& payloadTypes,
+    RowContainer* rows)
+    : keyTypes_(keyTypes),
+      payloadTypes_(payloadTypes),
+      numKeys_(keyTypes_.size()),
+      keys_(rows) {
+  BOLT_CHECK(!payloadTypes_.empty());
+  rowIdColumnOffset_ = keys_->columnAt(keyTypes.size()).offset();
+  isNullable_.resize(payloadTypes_.size(), false);
+  types_.reserve(keyTypes_.size() + payloadTypes_.size());
+  for (const auto& type : keyTypes_)
+    types_.push_back(type);
+  for (const auto& type : payloadTypes_)
+    types_.push_back(type);
+  payloadFlatBytesSum_.resize(payloadTypes_.size(), 0);
+}
+HybridContainer::~HybridContainer() {
+  clear();
+}
+
+void HybridContainer::addPayload(RowVectorPtr input) {
+  BOLT_CHECK_EQ(input->childrenSize(), payloadTypes_.size());
+  totalRows_ += input->size();
+  totalBatches_++;
+
+  for (int32_t i = 0; i < payloadTypes_.size(); ++i) {
+    isNullable_[i] |= input->childAt(i)->mayHaveNulls();
+    payloadFlatBytesSum_[i] += input->childAt(i)->estimateFlatSize();
+  }
+
+  // In scattered mode, decode payload columns upfront for efficient extraction.
+  // DecodedVector handles lazy loading and any encoding (dictionary, constant,
+  // etc.) and provides efficient valueAt<T>() access.
+  if (scatteredModeEnabled_) {
+    std::vector<std::unique_ptr<DecodedVector>> decodedCols;
+    decodedCols.reserve(payloadTypes_.size());
+    for (int32_t i = 0; i < payloadTypes_.size(); ++i) {
+      auto decoded = std::make_unique<DecodedVector>();
+      // decode() loads lazy vectors and handles dictionary/constant encodings
+      decoded->decode(*input->childAt(i));
+      decodedCols.push_back(std::move(decoded));
+    }
+    decodedPayloads_.push_back(std::move(decodedCols));
+  }
+
+  // Keep the input to maintain lifecycle of underlying data
+  owningInputs_.emplace_back(std::move(input));
+}
+
+void HybridContainer::clear() {
+  owningInputs_.clear();
+  decodedPayloads_.clear();
+  std::fill(isNullable_.begin(), isNullable_.end(), false);
+  totalRows_ = 0;
+  totalBatches_ = 0;
+  std::fill(payloadFlatBytesSum_.begin(), payloadFlatBytesSum_.end(), 0);
+  // Clear key
+  keys_->clear();
+}
+
+std::optional<int64_t> HybridContainer::estimateRowSize() const {
+  if (totalRows_ == 0) {
+    return std::nullopt;
+  }
+
+  const auto keyRowSize = keys_->estimateRowSize();
+  if (!keyRowSize.has_value()) {
+    return std::nullopt;
+  }
+
+  int64_t estimatedSize = keyRowSize.value();
+
+  // Estimate payload size per row
+  int64_t totalPayloadBytes = 0;
+  for (const auto& payloadColumnBytes : payloadFlatBytesSum_) {
+    totalPayloadBytes += payloadColumnBytes;
+  }
+
+  if (totalPayloadBytes > 0) {
+    estimatedSize += totalPayloadBytes / totalRows_;
+  }
+
+  return estimatedSize;
+}
+
+int32_t HybridContainer::estimateVariableSizeAt(
+    const char* row,
+    column_index_t column) const {
+  if (column < numKeys_)
+    return keys_->variableSizeAt(row, column);
+  int32_t estimateSize =
+      payloadFlatBytesSum_[column - numKeys_] / totalRows_ + 1;
+  return estimateSize;
+}
+
+std::vector<TypePtr> HybridContainer::columnTypes() const {
+  return types_;
+}
+
+int32_t HybridContainer::fixedSizeAt(column_index_t column) const {
+  return typeKindSize(types_[column]->kind());
 }
 
 } // namespace bytedance::bolt::exec

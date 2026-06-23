@@ -45,8 +45,10 @@ bolt_add_library(
   BloomFilterAggAggregate.cpp
   CentralMomentsAggregate.cpp
   CollectListAggregate.cpp
+  CovarianceAggregate.cpp
   FirstLastAggregate.cpp
   MinMaxByAggregate.cpp
+  ModeAggregate.cpp
   PercentileApproxAggregate.cpp
   Register.cpp
   RegrReplacementAggregate.cpp

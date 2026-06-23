@@ -2,3 +2,4 @@ conan==2.22.2
 pydot==2.0.0
 pre-commit==4.5.0
 clang-format==14.0.6
+pypaimon @ git+https://github.com/apache/paimon@release-1.4.1-rc2#subdirectory=paimon-python

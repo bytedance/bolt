@@ -26,6 +26,8 @@
 #pragma once
 
 #include <gfx/timsort.hpp>
+#include <cmath>
+#include <type_traits>
 #include <vector>
 
 #include "bolt/common/memory/MemoryPool.h"
@@ -164,6 +166,9 @@ class GKQuantileSummaries {
     BOLT_CHECK(
         headSampled_.empty(),
         "Cannot operate on an uncompressed summary, call compress() first");
+    if (size == 0) {
+      return;
+    }
     BOLT_CHECK(percentiles, "percentiles must not be null")
     BOLT_CHECK(result, "result must not be null");
 
@@ -264,6 +269,14 @@ class GKQuantileSummaries {
     doCompress(2 * relativeError_ * count_);
   }
 
+  void reset() {
+    sampled_.clear();
+    backupSampled_.clear();
+    headSampled_.clear();
+    count_ = 0;
+    compressed_ = true;
+  }
+
   void merge(const GKQuantileSummaries<T>& other) {
     if (other.count_ == 0) {
       return;
@@ -294,19 +307,55 @@ class GKQuantileSummaries {
     BOLT_CHECK(
         other.headSampled_.empty(),
         "Other buffer needs to be compressed before merge");
-    double mergeThreshold = 2 * relativeError_ * count_;
-    // merge this sampled_ with other.sampled_ and then sort
-    sampled_.reserve(sampled_.size() + other.sampled_.size());
-    sampled_.insert(
-        sampled_.end(), other.sampled_.begin(), other.sampled_.end());
-    gfx::timsort(
-        sampled_.begin(), sampled_.end(), [](const Stats& a, const Stats& b) {
-          return a.value < b.value;
-        });
-    doCompress(mergeThreshold);
+    const auto mergedRelativeError =
+        std::max(relativeError_, other.relativeError_);
+    const auto mergedCount = count_ + other.count_;
+    const auto additionalSelfDelta = static_cast<int64_t>(
+        std::floor(2 * other.relativeError_ * other.count_));
+    const auto additionalOtherDelta =
+        static_cast<int64_t>(std::floor(2 * relativeError_ * count_));
+
+    backupSampled_.clear();
+    backupSampled_.reserve(sampled_.size() + other.sampled_.size());
+
+    size_t selfIdx = 0;
+    size_t otherIdx = 0;
+    while (selfIdx < sampled_.size() && otherIdx < other.sampled_.size()) {
+      const auto& selfSample = sampled_[selfIdx];
+      const auto& otherSample = other.sampled_[otherIdx];
+
+      if (selfSample.value < otherSample.value) {
+        auto nextSample = selfSample;
+        if (otherIdx > 0) {
+          nextSample.delta += additionalSelfDelta;
+        }
+        backupSampled_.emplace_back(nextSample);
+        ++selfIdx;
+      } else {
+        auto nextSample = otherSample;
+        if (selfIdx > 0) {
+          nextSample.delta += additionalOtherDelta;
+        }
+        backupSampled_.emplace_back(nextSample);
+        ++otherIdx;
+      }
+    }
+
+    while (selfIdx < sampled_.size()) {
+      backupSampled_.emplace_back(sampled_[selfIdx]);
+      ++selfIdx;
+    }
+    while (otherIdx < other.sampled_.size()) {
+      backupSampled_.emplace_back(other.sampled_[otherIdx]);
+      ++otherIdx;
+    }
+
+    std::swap(sampled_, backupSampled_);
+    backupSampled_.clear();
+    relativeError_ = mergedRelativeError;
+    count_ = mergedCount;
+    doCompress(2 * mergedRelativeError * mergedCount);
     compressThreshold_ = other.compressThreshold_;
-    relativeError_ = other.relativeError_;
-    count_ += other.count_;
   }
   size_t count() const {
     return count_;
@@ -365,46 +414,77 @@ class GKQuantileSummaries {
   void deserialize(const char* FOLLY_NONNULL data, size_t expectedSize) {
     BOLT_CHECK(data, "can not deserialize data from nullptr.");
     const char* start = data;
-    memcpy(&compressThreshold_, data, sizeof(compressThreshold_));
-    data += sizeof(compressThreshold_);
-    memcpy(&relativeError_, data, sizeof(relativeError_));
-    data += sizeof(relativeError_);
-    memcpy(&count_, data, sizeof(count_));
-    data += sizeof(count_);
+    auto consumedBytes = [&]() { return static_cast<size_t>(data - start); };
+    auto remainingBytes = [&]() {
+      const auto consumed = consumedBytes();
+      BOLT_USER_CHECK_LE(
+          consumed,
+          expectedSize,
+          "Invalid size of deserialized data, expectedSize:{}, consumed:{}",
+          expectedSize,
+          consumed);
+      return expectedSize - consumed;
+    };
+    auto readBytes = [&](void* FOLLY_NONNULL out, size_t bytes) {
+      BOLT_USER_CHECK_LE(
+          bytes,
+          remainingBytes(),
+          "Invalid size of deserialized data, expectedSize:{}, consumed:{}, requested:{}",
+          expectedSize,
+          consumedBytes(),
+          bytes);
+      memcpy(out, data, bytes);
+      data += bytes;
+    };
+
+    sampled_.clear();
+    backupSampled_.clear();
+    headSampled_.clear();
+    compressed_ = false;
+
+    readBytes(&compressThreshold_, sizeof(compressThreshold_));
+    readBytes(&relativeError_, sizeof(relativeError_));
+    readBytes(&count_, sizeof(count_));
     size_t sampledSize = 0;
-    memcpy(&sampledSize, data, sizeof(sampledSize));
-    data += sizeof(sampledSize);
+    readBytes(&sampledSize, sizeof(sampledSize));
     if (sampledSize > 0) {
+      constexpr size_t kSerializedStatsSize =
+          sizeof(T) + sizeof(int64_t) + sizeof(int64_t);
+      BOLT_USER_CHECK_LE(
+          sampledSize,
+          remainingBytes() / kSerializedStatsSize,
+          "Invalid size of deserialized data, sampled size:{}",
+          sampledSize);
       sampled_.resize(sampledSize);
       for (size_t i = 0; i < sampledSize; ++i) {
-        memcpy(&sampled_[i].value, data, sizeof(sampled_[i].value));
-        data += sizeof(sampled_[i].value);
-        memcpy(&sampled_[i].g, data, sizeof(sampled_[i].g));
-        data += sizeof(sampled_[i].g);
-        memcpy(&sampled_[i].delta, data, sizeof(sampled_[i].delta));
-        data += sizeof(sampled_[i].delta);
+        readBytes(&sampled_[i].value, sizeof(sampled_[i].value));
+        readBytes(&sampled_[i].g, sizeof(sampled_[i].g));
+        readBytes(&sampled_[i].delta, sizeof(sampled_[i].delta));
       }
     }
     size_t headSize = 0;
-    memcpy(&headSize, data, sizeof(headSize));
-    data += sizeof(headSize);
+    readBytes(&headSize, sizeof(headSize));
     if (headSize > 0) {
+      BOLT_USER_CHECK_LE(
+          headSize,
+          remainingBytes() / sizeof(T),
+          "Invalid size of deserialized data, head size:{}",
+          headSize);
       headSampled_.resize(headSize);
       for (size_t i = 0; i < headSize; ++i) {
-        memcpy(&headSampled_[i], data, sizeof(headSampled_[i]));
-        data += sizeof(headSampled_[i]);
+        readBytes(&headSampled_[i], sizeof(headSampled_[i]));
       }
       compress();
     }
     compressed_ = true;
-    size_t acrtualSize = data - start;
+    const auto actualSize = consumedBytes();
 
     BOLT_USER_CHECK_EQ(
-        acrtualSize,
-        data - start,
-        "Invalid size of deserialized data, expectedSize:{}, data - start:{}",
+        actualSize,
         expectedSize,
-        acrtualSize);
+        "Invalid size of deserialized data, actual:{}, expected:{}",
+        actualSize,
+        expectedSize);
   }
 
   bool empty() const {
@@ -412,6 +492,21 @@ class GKQuantileSummaries {
   }
 
  private:
+  static bool sparkSortLessThan(T lhs, T rhs) {
+    if constexpr (std::is_floating_point_v<T>) {
+      if (std::isnan(lhs)) {
+        return false;
+      }
+      if (std::isnan(rhs)) {
+        return true;
+      }
+      if (lhs == rhs && lhs == 0) {
+        return std::signbit(lhs) && !std::signbit(rhs);
+      }
+    }
+    return lhs < rhs;
+  }
+
   QueryResult findApproxQuantile(
       size_t index,
       int64_t minRankAtIndex,
@@ -442,7 +537,7 @@ class GKQuantileSummaries {
       return;
     }
     compressed_ = false;
-    gfx::timsort(headSampled_.begin(), headSampled_.end(), std::less<>());
+    gfx::timsort(headSampled_.begin(), headSampled_.end(), sparkSortLessThan);
 
     backupSampled_.clear();
     backupSampled_.reserve(sampled_.size() + headSampled_.size());
@@ -497,7 +592,7 @@ class GKQuantileSummaries {
     // The head contains the current new head, that may be merged with the
     // current element.
     Stats head = sampled_.back();
-    ssize_t i = sampled_.size() - 2;
+    ssize_t i = static_cast<ssize_t>(sampled_.size()) - 2;
 
     // Do not compress the last element
     while (i >= 1) {

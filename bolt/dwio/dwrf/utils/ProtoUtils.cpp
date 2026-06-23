@@ -57,6 +57,7 @@ CREATE_TYPE_TRAIT(TIMESTAMP, TIMESTAMP)
 CREATE_TYPE_TRAIT(ARRAY, LIST)
 CREATE_TYPE_TRAIT(MAP, MAP)
 CREATE_TYPE_TRAIT(ROW, STRUCT)
+CREATE_TYPE_TRAIT(VARIANT, STRUCT)
 
 #undef CREATE_TYPE_TRAIT
 
@@ -88,6 +89,13 @@ void ProtoUtils::writeType(
       auto& map = type.asMap();
       writeType(*map.keyType(), footer, self);
       writeType(*map.valueType(), footer, self);
+      break;
+    }
+    case TypeKind::VARIANT: {
+      self->add_fieldnames("value");
+      writeType(*VARBINARY(), footer, self);
+      self->add_fieldnames("metadata");
+      writeType(*VARBINARY(), footer, self);
       break;
     }
     default:
@@ -136,6 +144,12 @@ std::shared_ptr<const Type> ProtoUtils::fromFooter(
       // NOTE: There are empty dwrf files in data warehouse that has empty
       // struct as the root type. So the assumption that struct has at least one
       // child doesn't hold.
+      //
+      // VARIANT promotion is NOT done automatically here because the heuristic
+      // (STRUCT<value VARBINARY, metadata VARBINARY>) can false-positive on
+      // legitimate structs.  Callers that know a column is VARIANT should set
+      // the requested type in reader options; the VariantColumnReader will
+      // handle the promotion during reading.
       return ROW(std::move(names), std::move(tl));
     }
     default:

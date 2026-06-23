@@ -178,6 +178,12 @@ void FlatVector<T>::copyValuesAndNulls(
     mutableRawValues();
   }
 
+  // Used to track string stats for StringView in non-flat source paths.
+  // Flat source path skips stats computation (best-effort: nullopt is fine).
+  uint64_t stringStatsTotal = 0;
+  uint64_t stringStatsMax = 0;
+  const bool kAllSelected = rows.countSelected() == BaseVector::length_;
+
   if (source->isFlatEncoding()) {
     auto* flatSource = source->asUnchecked<FlatVector<T>>();
     if (flatSource->values() == nullptr) {
@@ -211,7 +217,18 @@ void FlatVector<T>::copyValuesAndNulls(
         rows.applyToSelected([&](auto row) {
           auto sourceRow = toSourceRow[row];
           BOLT_DCHECK_GT(source->size(), sourceRow);
-          rawValues_[row] = sourceValues[sourceRow];
+          auto& value = sourceValues[sourceRow];
+          rawValues_[row] = value;
+          if constexpr (std::is_same_v<T, StringView>) {
+            if (kAllSelected) {
+              if (!value.isInline()) {
+                // Only count non-inline strings.
+                stringStatsTotal += value.size();
+              }
+              stringStatsMax =
+                  std::max(stringStatsMax, static_cast<uint64_t>(value.size()));
+            }
+          }
         });
       } else {
         if constexpr (copyAll) {
@@ -252,6 +269,7 @@ void FlatVector<T>::copyValuesAndNulls(
         }
       }
     }
+
   } else if (source->isConstantEncoding()) {
     if (source->isNullAt(0)) {
       BaseVector::addNulls(rows);
@@ -270,6 +288,15 @@ void FlatVector<T>::copyValuesAndNulls(
       }
     } else {
       rows.applyToSelected([&](int32_t row) { rawValues_[row] = value; });
+    }
+    if constexpr (std::is_same_v<T, StringView>) {
+      if (kAllSelected) {
+        if (!value.isInline()) {
+          // Only count non-inline strings.
+          stringStatsTotal = rows.countSelected() * value.size();
+        }
+        stringStatsMax = value.size();
+      }
     }
 
     rows.clearNulls(rawNulls);
@@ -294,7 +321,18 @@ void FlatVector<T>::copyValuesAndNulls(
               auto* rawValues = reinterpret_cast<uint64_t*>(rawValues_);
               bits::setBit(rawValues, row, decoded.valueAt<bool>(row));
             } else {
-              rawValues_[row] = decoded.valueAt<T>(row);
+              auto val = decoded.valueAt<T>(row);
+              rawValues_[row] = val;
+              if constexpr (std::is_same_v<T, StringView>) {
+                if (kAllSelected) {
+                  if (!val.isInline()) {
+                    // Only count non-inline strings.
+                    stringStatsTotal += val.size();
+                  }
+                  stringStatsMax = std::max(
+                      stringStatsMax, static_cast<uint64_t>(val.size()));
+                }
+              }
             }
           },
           nulls);
@@ -315,6 +353,17 @@ void FlatVector<T>::copyValuesAndNulls(
             bits::setBit(rawValues, row, sourceVector->valueAt(sourceRow));
           } else {
             rawValues_[row] = sourceVector->valueAt(sourceRow);
+            if constexpr (std::is_same_v<T, StringView>) {
+              if (kAllSelected) {
+                if (!rawValues_[row].isInline()) {
+                  // Only count non-inline strings.
+                  stringStatsTotal += rawValues_[row].size();
+                }
+                stringStatsMax = std::max(
+                    stringStatsMax,
+                    static_cast<uint64_t>(rawValues_[row].size()));
+              }
+            }
           }
 
           if (rawNulls) {
@@ -324,6 +373,27 @@ void FlatVector<T>::copyValuesAndNulls(
           bits::setNull(rawNulls, row);
         }
       });
+    }
+  }
+
+  if constexpr (std::is_same_v<T, StringView>) {
+    // Always reset first: the target may be reused across multiple copy()
+    // calls, and stale stats from a previous source must not survive.
+    this->stringStats_.reset();
+    if (kAllSelected && stringStatsMax > 0) {
+      // Per-element stats were computed above. Apply them.
+      this->setStringViewStats(
+          StringViewStats{stringStatsTotal, stringStatsMax});
+    } else if (kAllSelected && !toSourceRow && source->isFlatEncoding()) {
+      // Flat-to-flat identity copy (memcpy path) does not iterate elements,
+      // so stringStatsMax is 0. Reuse the source's stats when available.
+      // Only safe for identity copies; remapped copies (toSourceRow != null)
+      // select a subset, so source stats would over-count.
+      const auto& srcStats =
+          source->asUnchecked<FlatVector<StringView>>()->stringStats();
+      if (srcStats.has_value()) {
+        this->setStringViewStats(srcStats.value());
+      }
     }
   }
 }
@@ -394,7 +464,7 @@ void FlatVector<T>::copyRanges(
           ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
             auto bound =
                 flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
-            auto boundedCount = std::min(count, bound);
+            size_t boundedCount = std::min(count, bound);
             if (Buffer::is_pod_like_v<T>) {
               simd::memcpy(
                   &rawValues_[targetIndex],

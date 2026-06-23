@@ -47,10 +47,11 @@ struct HdfsFile {
   void open(
       filesystems::arrow::io::internal::LibHdfsShim* driver,
       hdfsFS client,
-      const std::string& path) {
+      const std::string& path,
+      int bufferSize) {
     driver_ = driver;
     client_ = client;
-    handle_ = driver->OpenFile(client, path.data(), O_RDONLY, 0, 0, 0);
+    handle_ = driver->OpenFile(client, path.data(), O_RDONLY, bufferSize, 0, 0);
     BOLT_CHECK_NOT_NULL(
         handle_,
         "Unable to open file {}. got error: {}",
@@ -78,8 +79,12 @@ class HdfsReadFile::Impl {
   Impl(
       filesystems::arrow::io::internal::LibHdfsShim* driver,
       hdfsFS hdfs,
-      const std::string_view path)
-      : driver_(driver), hdfsClient_(hdfs), filePath_(path) {
+      const std::string_view path,
+      int bufferSize)
+      : driver_(driver),
+        hdfsClient_(hdfs),
+        filePath_(path),
+        bufferSize_(bufferSize) {
     fileInfo_ = driver_->GetPathInfo(hdfsClient_, filePath_.data());
     if (fileInfo_ == nullptr) {
       auto error = fmt::format(
@@ -105,7 +110,7 @@ class HdfsReadFile::Impl {
   void preadInternal(uint64_t offset, uint64_t length, char* pos) const {
     checkFileReadParameters(offset, length);
     if (!file_->handle_) {
-      file_->open(driver_, hdfsClient_, filePath_);
+      file_->open(driver_, hdfsClient_, filePath_, bufferSize_);
     }
     file_->seek(offset);
     uint64_t totalBytesRead = 0;
@@ -160,6 +165,7 @@ class HdfsReadFile::Impl {
   filesystems::arrow::io::internal::LibHdfsShim* driver_;
   hdfsFS hdfsClient_;
   std::string filePath_;
+  int bufferSize_;
   hdfsFileInfo* fileInfo_;
   folly::ThreadLocal<HdfsFile> file_;
 };
@@ -167,8 +173,9 @@ class HdfsReadFile::Impl {
 HdfsReadFile::HdfsReadFile(
     filesystems::arrow::io::internal::LibHdfsShim* driver,
     hdfsFS hdfs,
-    const std::string_view path)
-    : pImpl(std::make_unique<Impl>(driver, hdfs, path)) {}
+    const std::string_view path,
+    int bufferSize)
+    : pImpl(std::make_unique<Impl>(driver, hdfs, path, bufferSize)) {}
 
 HdfsReadFile::~HdfsReadFile() = default;
 

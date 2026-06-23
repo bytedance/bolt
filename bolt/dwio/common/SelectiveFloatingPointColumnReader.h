@@ -48,9 +48,11 @@ class SelectiveFloatingPointColumnReader : public SelectiveColumnReader {
             params,
             scanSpec) {}
 
-  // Offers fast path only if data and result widths match.
+  // Offers a fast path only if data and result widths match.
+  static constexpr bool kHasBulkPath = std::is_same_v<TData, TRequested>;
+
   bool hasBulkPath() const override {
-    return true;
+    return kHasBulkPath;
   }
 
   template <typename Reader>
@@ -92,7 +94,12 @@ void SelectiveFloatingPointColumnReader<TData, TRequested>::readHelper(
     ExtractValues extractValues) {
   reinterpret_cast<Reader*>(this)->readWithVisitor(
       rows,
-      ColumnVisitor<TData, TFilter, ExtractValues, isDense>(
+      ColumnVisitor<
+          TData,
+          TFilter,
+          ExtractValues,
+          isDense,
+          Reader::kHasBulkPath>(
           *reinterpret_cast<TFilter*>(filter), this, rows, extractValues));
 }
 
@@ -121,7 +128,7 @@ void SelectiveFloatingPointColumnReader<TData, TRequested>::processFilter(
       break;
     case bolt::common::FilterKind::kDoubleRange:
     case bolt::common::FilterKind::kFloatRange:
-      readHelper<Reader, bolt::common::FloatingPointRange<TData>, isDense>(
+      readHelper<Reader, bolt::common::FloatingPointRange<TRequested>, isDense>(
           filter, rows, extractValues);
       break;
     default:

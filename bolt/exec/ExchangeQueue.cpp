@@ -29,6 +29,10 @@
  */
 
 #include "bolt/exec/ExchangeQueue.h"
+
+#include "bolt/common/testutil/TestValue.h"
+
+using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
 
 SerializedPage::SerializedPage(
@@ -112,6 +116,8 @@ std::vector<std::unique_ptr<SerializedPage>> ExchangeQueue::dequeueLocked(
     bool* atEnd,
     ContinueFuture* future) {
   BOLT_CHECK_NOT_NULL(future);
+  TestValue::adjust(
+      "bytedance::bolt::exec::ExchangeQueue::dequeueLocked", this);
   if (!error_.empty()) {
     *atEnd = true;
     BOLT_FAIL(error_);

@@ -47,6 +47,7 @@ extern void registerRegexpFunctions(const std::string& prefix);
 extern void registerSpecialFormGeneralFunctions(const std::string& prefix);
 extern void registerStringFunctions(const std::string& prefix);
 extern void registerUrlFunctions(const std::string& prefix);
+extern void registerVariantFunctions(const std::string& prefix);
 
 void registerFunctions(const std::string& prefix) {
   registerTimestampWithTimeZoneType();
@@ -63,6 +64,7 @@ void registerFunctions(const std::string& prefix) {
   registerSpecialFormGeneralFunctions(prefix);
   registerStringFunctions(prefix);
   registerUrlFunctions(prefix);
+  registerVariantFunctions(prefix);
 }
 
 } // namespace bytedance::bolt::functions::sparksql

@@ -36,12 +36,36 @@
 #include "bolt/expression/EvalCtx.h"
 #include "bolt/expression/PeeledEncoding.h"
 #include "bolt/expression/StringWriter.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/RowsTranslationUtil.h"
+#include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/json/JsonUtil.h"
+#include "bolt/functions/sparksql/VariantEncoding.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt {
 
 namespace {
+
+/// Convert a VariantValue to its JSON string representation.
+/// Shared between the isMapKey and non-isMapKey branches of generateJsonTyped.
+inline void appendVariantAsJson(
+    const VariantValue& value,
+    std::string& result) {
+  if (!value.metadata.empty()) {
+    auto decoded = functions::sparksql::variant::SparkVariantReader::decode(
+        value.value, value.metadata);
+    if (decoded.has_value()) {
+      result.append(*decoded);
+    } else {
+      result.append("null");
+    }
+  } else if (simdjson::validate_utf8(value.value.data(), value.value.size())) {
+    result.append(value.value);
+  } else {
+    folly::json::serialization_opts opts;
+    folly::json::escapeString(value.value, result, opts);
+  }
+}
 
 template <typename T, bool isMapKey = false>
 void generateJsonTyped(
@@ -49,7 +73,8 @@ void generateJsonTyped(
     int row,
     std::string& result,
     const TypePtr& type,
-    const bool isToJson) {
+    const bool isToJson,
+    const core::QueryConfig* config = nullptr) {
   auto value = input.valueAt(row);
 
   if constexpr (std::is_same_v<T, StringView>) {
@@ -147,6 +172,39 @@ void generateJsonTyped(
               "Casting {} to JSON is not supported in to_json function.",
               type->toString()));
         }
+      } else if constexpr (std::is_same_v<T, Timestamp>) {
+        result.append("\"");
+        static const auto formatter =
+            bytedance::bolt::functions::buildJodaDateTimeFormatter(
+                "yyyy-MM-dd'T'HH:mm:ss.SSSZZ");
+        const tz::TimeZone* timeZone = nullptr;
+        bytedance::bolt::functions::TimePolicy timePolicy =
+            bytedance::bolt::functions::TimePolicy::CORRECTED;
+        if (config != nullptr) {
+          const auto& sessionTzName = config->sessionTimezone();
+          if (!sessionTzName.empty()) {
+            timeZone = tz::locateZone(sessionTzName);
+          }
+          timePolicy = bytedance::bolt::functions::parseTimePolicy(
+              config->timeParserPolicy());
+        }
+
+        const auto maxSize = formatter->maxResultSize(
+            timeZone ? timeZone : tz::locateZone("UTC"));
+        char buffer[maxSize];
+        auto size = formatter->format(
+            value,
+            timeZone ? timeZone : tz::locateZone("UTC"),
+            maxSize,
+            buffer,
+            false,
+            timePolicy,
+            true,
+            "Z");
+        result.append(buffer, size);
+        result.append("\"");
+      } else if constexpr (std::is_same_v<T, VariantValue>) {
+        appendVariantAsJson(value, result);
       } else {
         // No other physical types are currently supported
         BOLT_FAIL(fmt::format(
@@ -158,12 +216,14 @@ void generateJsonTyped(
         result.append(value ? "true" : "false");
       } else if constexpr (std::is_same_v<T, Timestamp>) {
         result.append(std::to_string(value));
+      } else if constexpr (std::is_same_v<T, VariantValue>) {
+        appendVariantAsJson(value, result);
       } else if (type->isDate()) {
         result.append(DATE()->toString(value));
       } else if (type->isDecimal()) {
         result.append(DecimalUtil::toString(value, type));
       } else {
-        folly::toAppend<std::string, T>(value, &result);
+        folly::toAppend(value, &result);
       }
     }
 
@@ -190,6 +250,8 @@ void castToJson(
   // input is guaranteed to be in flat or constant encodings when passed in.
   auto inputVector = input.as<SimpleVector<T>>();
 
+  const auto& config = context.execCtx()->queryCtx()->queryConfig();
+
   std::string result;
   if (!isMapKey) {
     context.applyToSelectedNoThrow(rows, [&](auto row) {
@@ -197,7 +259,8 @@ void castToJson(
         flatResult.set(row, "null");
       } else {
         result.clear();
-        generateJsonTyped(*inputVector, row, result, input.type(), isToJson);
+        generateJsonTyped(
+            *inputVector, row, result, input.type(), isToJson, &config);
 
         flatResult.set(row, StringView{result});
       }
@@ -209,7 +272,7 @@ void castToJson(
       } else {
         result.clear();
         generateJsonTyped<T, true>(
-            *inputVector, row, result, input.type(), isToJson);
+            *inputVector, row, result, input.type(), isToJson, &config);
 
         flatResult.set(row, StringView{result});
       }
@@ -785,6 +848,13 @@ simdjson::error_code appendMapKey<TypeKind::VARBINARY>(
 
 template <>
 simdjson::error_code appendMapKey<TypeKind::TIMESTAMP>(
+    const std::string_view& /*value*/,
+    exec::GenericWriter& /*writer*/) {
+  return simdjson::INCORRECT_TYPE;
+}
+
+template <>
+simdjson::error_code appendMapKey<TypeKind::VARIANT>(
     const std::string_view& /*value*/,
     exec::GenericWriter& /*writer*/) {
   return simdjson::INCORRECT_TYPE;

@@ -77,6 +77,7 @@ repos:
         entry: go run -C .github/license_check check_license.go
         language: golang
         pass_filenames: true
+        require_serial: true
       - id: clang-tidy
         name: Lint C++ files
         description: >-

@@ -29,6 +29,7 @@
  */
 
 #include <folly/init/Init.h>
+#include <simdjson.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -38,6 +39,8 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/functions/sparksql/VariantEncoding.h"
+#include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/type/tests/SubfieldFiltersBuilder.h"
 
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -47,12 +50,75 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::parquet;
 
+namespace {
+
+std::pair<std::string, std::string> encodeVariantJson(std::string_view json) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element doc;
+  auto error = parser.parse(json.data(), json.size()).get(doc);
+  BOLT_CHECK(!error, "Failed to parse JSON for VARIANT test data: {}", json);
+
+  functions::sparksql::variant::StringDictionary dict;
+  functions::sparksql::variant::SparkVariantEncoder::collectKeys(doc, dict);
+  dict.finalize();
+
+  std::string value;
+  functions::sparksql::variant::SparkVariantEncoder::encode(doc, dict, value);
+  return {std::move(value), dict.serialize()};
+}
+
+RowVectorPtr makeVariantParquetBatch(
+    memory::MemoryPool* pool,
+    const std::vector<int64_t>& groups,
+    const std::vector<std::string>& jsons) {
+  BOLT_CHECK_EQ(groups.size(), jsons.size());
+
+  auto groupVector = BaseVector::create(BIGINT(), groups.size(), pool);
+  auto valueVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto metadataVector = BaseVector::create(VARBINARY(), jsons.size(), pool);
+  auto* flatGroupVector = groupVector->asUnchecked<FlatVector<int64_t>>();
+  auto* flatValueVector = valueVector->asUnchecked<FlatVector<StringView>>();
+  auto* flatMetadataVector =
+      metadataVector->asUnchecked<FlatVector<StringView>>();
+
+  std::vector<std::pair<std::string, std::string>> encoded;
+  encoded.reserve(jsons.size());
+  for (const auto& json : jsons) {
+    encoded.push_back(encodeVariantJson(json));
+  }
+
+  for (auto i = 0; i < groups.size(); ++i) {
+    flatGroupVector->set(i, groups[i]);
+    flatValueVector->set(i, StringView(encoded[i].first));
+    flatMetadataVector->set(i, StringView(encoded[i].second));
+  }
+
+  auto variantStorageType =
+      ROW({"value", "metadata"}, {VARBINARY(), VARBINARY()});
+  auto variantStorageVector = std::make_shared<RowVector>(
+      pool,
+      variantStorageType,
+      nullptr,
+      jsons.size(),
+      std::vector<VectorPtr>{valueVector, metadataVector});
+
+  return std::make_shared<RowVector>(
+      pool,
+      ROW({"g", "v"}, {BIGINT(), variantStorageType}),
+      nullptr,
+      groups.size(),
+      std::vector<VectorPtr>{groupVector, variantStorageVector});
+}
+
+} // namespace
+
 class ParquetTableScanTest : public HiveConnectorTestBase {
  protected:
   using OperatorTestBase::assertQuery;
 
   void SetUp() {
     registerParquetReaderFactory();
+    functions::sparksql::registerFunctions("");
 
     auto hiveConnector =
         connector::getConnectorFactory(connector::kHiveConnectorName)
@@ -128,6 +194,19 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     assertQuery(plan, splits_, sql);
   }
 
+  void assertSelectWithAssignments(
+      std::vector<std::string>&& outputColumnNames,
+      const std::unordered_map<
+          std::string,
+          std::shared_ptr<connector::ColumnHandle>>& assignments,
+      const std::string& sql) {
+    auto rowType = getRowType(std::move(outputColumnNames));
+    auto tableHandle = makeTableHandle({}, nullptr, "hive_table", rowType);
+    auto plan =
+        PlanBuilder().tableScan(rowType, tableHandle, assignments).planNode();
+    assertQuery(plan, splits_, sql);
+  }
+
   void assertSelectWithAgg(
       std::vector<std::string>&& outputColumnNames,
       const std::vector<std::string>& aggregates,
@@ -159,9 +238,16 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     assertQuery(plan, splits_, sql);
   }
 
-  void
-  loadData(const std::string& filePath, RowTypePtr rowType, RowVectorPtr data) {
-    splits_ = {makeSplit(filePath)};
+  void loadData(
+      const std::string& filePath,
+      RowTypePtr rowType,
+      RowVectorPtr data,
+      const std::optional<
+          std::unordered_map<std::string, std::optional<std::string>>>&
+          partitionKeys = std::nullopt,
+      const std::optional<std::unordered_map<std::string, std::string>>&
+          infoColumns = std::nullopt) {
+    splits_ = {makeSplit(filePath, partitionKeys, infoColumns)};
     rowType_ = rowType;
     createDuckDbTable({data});
   }
@@ -184,9 +270,18 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
   }
 
   std::shared_ptr<connector::hive::HiveConnectorSplit> makeSplit(
-      const std::string& filePath) {
+      const std::string& filePath,
+      const std::optional<
+          std::unordered_map<std::string, std::optional<std::string>>>&
+          partitionKeys = std::nullopt,
+      const std::optional<std::unordered_map<std::string, std::string>>&
+          infoColumns = std::nullopt) {
     return makeHiveConnectorSplits(
-        filePath, 1, dwio::common::FileFormat::PARQUET)[0];
+        filePath,
+        1,
+        dwio::common::FileFormat::PARQUET,
+        partitionKeys,
+        infoColumns)[0];
   }
 
   const std::vector<std::shared_ptr<connector::ConnectorSplit>>& splits()
@@ -374,6 +469,43 @@ TEST_F(ParquetTableScanTest, basic) {
       "SELECT max(b), a FROM tmp WHERE a < 3 GROUP BY a");
 }
 
+TEST_F(ParquetTableScanTest, aggregatePushdownToSmallPages) {
+  const std::vector<std::string> columnNames = {"a", "b", "c"};
+  const auto expectedRowVector = makeRowVector(
+      {makeFlatVector<int16_t>({1, 2, 4}),
+       makeFlatVector<int64_t>({7, 9, 13})});
+  const auto outputType =
+      ROW(std::vector<std::string>(columnNames),
+          {SMALLINT(), SMALLINT(), VARCHAR()});
+  std::vector<RowVectorPtr> data;
+  for (auto row = 0; row < 10; ++row) {
+    data.emplace_back(makeRowVector(
+        columnNames,
+        {
+            makeFlatVector<int16_t>(
+                std::vector<int16_t>{static_cast<int16_t>(row % 5)}),
+            makeFlatVector<int16_t>(
+                std::vector<int16_t>{static_cast<int16_t>(row)}),
+            makeFlatVector<std::string>({std::to_string(row)}),
+        }));
+  }
+  const auto filePath = TempFilePath::create();
+  WriterOptions options;
+  options.dataPageSize = 1;
+  writeToParquetFile(filePath->getPath(), data, options);
+  const auto plan =
+      PlanBuilder(pool())
+          .tableScan(
+              outputType,
+              {},
+              "c <> '' AND a in (1::smallint, 2::smallint, 4::smallint)")
+          .singleAggregation({"a"}, {"sum(b) as s"})
+          .planNode();
+  AssertQueryBuilder(plan)
+      .split(makeSplit(filePath->getPath()))
+      .assertResults(expectedRowVector);
+}
+
 TEST_F(ParquetTableScanTest, countStar) {
   // sample.parquet holds two columns (a: BIGINT, b: DOUBLE) and
   // 20 rows.
@@ -446,6 +578,35 @@ TEST_F(ParquetTableScanTest, map) {
           }));
 
   assertSelectWithFilter({"map"}, {}, "", "SELECT map FROM tmp");
+}
+
+TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
+  auto file = TempFilePath::create();
+  WriterOptions writerOptions;
+  auto data = makeVariantParquetBatch(
+      pool(),
+      {1, 1, 2},
+      {R"({"a":1,"name":"x"})",
+       R"({"a":2,"name":"y"})",
+       R"({"a":3,"name":"z"})"});
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  auto logicalRowType = ROW({"g", "v"}, {BIGINT(), VARIANT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(logicalRowType)
+                  .project({"g", "cast(variant_get(v, '$.a') as bigint) AS a"})
+                  .singleAggregation({"g"}, {"sum(a) AS sum_a"})
+                  .orderBy({"g"}, false)
+                  .planNode();
+
+  auto results = AssertQueryBuilder(plan)
+                     .split(makeSplit(file->getPath()))
+                     .copyResults(pool());
+
+  auto expected = makeRowVector(
+      {"g", "sum_a"},
+      {makeFlatVector<int64_t>({1, 2}), makeFlatVector<int64_t>({3, 3})});
+  ASSERT_TRUE(assertEqualResults({expected}, {results}));
 }
 
 TEST_F(ParquetTableScanTest, nullMap) {
@@ -628,6 +789,81 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
   ASSERT_TRUE(waitForTaskCompletion(result.first->task().get()));
   assertEqualResults(
       result.second, {makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 1})})});
+}
+
+TEST_F(ParquetTableScanTest, rowIndex) {
+  static const char* kPath = "file_path";
+  // case 1: file not have `_tmp_metadata_row_index`, scan generate it for user.
+  auto filePath = getExampleFilePath("sample.parquet");
+  loadData(
+      filePath,
+      ROW({"a", "b", "_tmp_metadata_row_index", kPath},
+          {BIGINT(), DOUBLE(), BIGINT(), VARCHAR()}),
+      makeRowVector(
+          {"a", "b", "_tmp_metadata_row_index", kPath},
+          {
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<double>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(20, [](auto row) { return row; }),
+              makeFlatVector<std::string>(
+                  20, [filePath](auto /*row*/) { return filePath; }),
+          }),
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{{kPath, filePath}});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignments;
+  assignments["a"] = std::make_shared<connector::hive::HiveColumnHandle>(
+      "a",
+      connector::hive::HiveColumnHandle::ColumnType::kRegular,
+      BIGINT(),
+      BIGINT());
+  assignments["b"] = std::make_shared<connector::hive::HiveColumnHandle>(
+      "b",
+      connector::hive::HiveColumnHandle::ColumnType::kRegular,
+      DOUBLE(),
+      DOUBLE());
+  assignments[kPath] = synthesizedColumn(kPath, VARCHAR());
+  assignments["_tmp_metadata_row_index"] =
+      std::make_shared<connector::hive::HiveColumnHandle>(
+          "_tmp_metadata_row_index",
+          connector::hive::HiveColumnHandle::ColumnType::kRowIndex,
+          BIGINT(),
+          BIGINT());
+
+  assertSelectWithAssignments({"a"}, assignments, "SELECT a FROM tmp");
+  assertSelectWithAssignments(
+      {"a", "_tmp_metadata_row_index"},
+      assignments,
+      "SELECT a, _tmp_metadata_row_index FROM tmp");
+  assertSelectWithAssignments(
+      {"_tmp_metadata_row_index", "a"},
+      assignments,
+      "SELECT _tmp_metadata_row_index, a FROM tmp");
+  assertSelectWithAssignments(
+      {kPath, "_tmp_metadata_row_index"},
+      assignments,
+      fmt::format("SELECT {}, _tmp_metadata_row_index FROM tmp", kPath));
+
+  // case 2: file has `_tmp_metadata_row_index` column, then use user data
+  // insteads of generating it.
+  loadData(
+      getExampleFilePath("sample_with_rowindex.parquet"),
+      ROW({"a", "b", "_tmp_metadata_row_index"},
+          {BIGINT(), DOUBLE(), BIGINT()}),
+      makeRowVector(
+          {"a", "b", "_tmp_metadata_row_index"},
+          {
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<double>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+          }));
+
+  assignments.erase(kPath);
+  assertSelectWithAssignments({"a"}, assignments, "SELECT a FROM tmp");
+  assertSelectWithAssignments(
+      {"a", "_tmp_metadata_row_index"},
+      assignments,
+      "SELECT a, _tmp_metadata_row_index FROM tmp");
 }
 
 TEST_F(ParquetTableScanTest, DISABLED_structSelection) {
@@ -1050,6 +1286,319 @@ TEST_F(ParquetTableScanTest, dcMapContainsDifferentDynamicColumns) {
   EXPECT_EQ(1, actual[0]);
   EXPECT_EQ(0, actual[1]);
   EXPECT_EQ(1, actual[2]);
+}
+
+TEST_F(ParquetTableScanTest, deltaByteArray) {
+  auto a = makeFlatVector<StringView>({"axis", "axle", "babble", "babyhood"});
+  auto expected = makeRowVector({"a"}, {a});
+  createDuckDbTable("expected", {expected});
+
+  auto vector = makeFlatVector<StringView>({{}});
+  loadData(
+      getExampleFilePath("delta_byte_array.parquet"),
+      ROW({"a"}, {VARCHAR()}),
+      makeRowVector({"a"}, {vector}));
+  assertSelect({"a"}, "SELECT a from expected");
+}
+
+// Plan-level matrix coverage for the strict convertType policy.
+//
+// Each case writes a 3-row parquet file using `fileType`, then runs a
+// TableScan plan declaring `declaredType` (propagated to HiveConnector
+// via dataColumns, which becomes ReaderOptions::fileSchema). We assert:
+//   - shouldThrow=true: AssertQueryBuilder.copyResults raises an error
+//     whose message contains Case::errMsg (defaults to the BoltUserError
+//     from convertType; non-Spark builds also see matchType rejections).
+//   - shouldThrow=false: copyResults returns 3 rows of declaredType
+//     and (when `expectedValues` is supplied) the values match.
+TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
+  struct Case {
+    const char* name;
+    TypePtr fileType;
+    TypePtr declaredType;
+    bool shouldThrow;
+    // Substring to match against the thrown error. Defaults to the
+    // BoltUserError raised by ReaderBase::convertType via
+    // BOLT_SCHEMA_MISMATCH_ERROR (same error code as DWRF/ORC, same
+    // "Schema mismatch, ..., From Kind: X, To Kind: Y" layout).
+    // Override when a case is rejected by a later layer with a
+    // different message (e.g. ParquetColumnReader::matchType in
+    // non-Spark builds).
+    const char* errMsg = "Schema mismatch";
+  };
+
+  // clang-format off
+  const std::vector<Case> cases = {
+    // ---- Reject: structural mismatch (the original SIGSEGV bug) ----
+    {"array_declared_vs_varchar_file", VARCHAR(),       ARRAY(VARCHAR()),   true},
+    {"array_declared_vs_bigint_file",  BIGINT(),        ARRAY(BIGINT()),    true},
+
+    // ---- Reject: INT64 narrowing (both flavours; Spark INT64 reader
+    //               also rejects Byte/Short/Integer requests). ----
+    {"bigint_to_integer",              BIGINT(),        INTEGER(),          true},
+    {"bigint_to_smallint",             BIGINT(),        SMALLINT(),         true},
+    {"bigint_to_tinyint",              BIGINT(),        TINYINT(),          true},
+
+    // ---- Accept: INT32 narrowing. File INT32 -> requested Byte/Short
+    //      is silently truncated at read time by IntegerColumnReader,
+    //      matching Spark's vectorized reader (ByteUpdater/ShortUpdater)
+    //      and covering HIVE-14294 / SPARK-16632 where Hive 1.x writes
+    //      TINYINT/SMALLINT as unannotated INT32. See the
+    //      integer-narrowing block in convertTypePolicyValueChecks
+    //      for end-to-end values. ----
+    {"integer_to_smallint",            INTEGER(),       SMALLINT(),         false},
+    {"integer_to_tinyint",             INTEGER(),       TINYINT(),          false},
+
+    // ---- Reject: cross-family with no column-reader auto-cast ----
+    {"integer_to_double",              INTEGER(),       DOUBLE(),           true},
+    {"bigint_to_double",               BIGINT(),        DOUBLE(),           true},
+    {"integer_to_real",                INTEGER(),       REAL(),             true},
+
+    // ---- Reject: float narrowing ----
+    {"double_to_real",                 DOUBLE(),        REAL(),             true},
+
+    // ---- Reject: BOOLEAN cross-family ----
+    {"boolean_to_integer",             BOOLEAN(),       INTEGER(),          true},
+    {"boolean_to_varchar",             BOOLEAN(),       VARCHAR(),          true},
+
+    // ---- Reject: DECIMAL widening violations ----
+    {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
+    {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
+    {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
+
+    // ---- Reject: DECIMAL cross-family ----
+    {"decimal_to_bigint",              DECIMAL(10, 2),  BIGINT(),           true},
+    {"decimal_to_varchar",             DECIMAL(10, 2),  VARCHAR(),          true},
+
+    // ---- Accept: identity ----
+    {"bigint_to_bigint",   BIGINT(),  BIGINT(),   false},
+    {"varchar_to_varchar", VARCHAR(), VARCHAR(),  false},
+    {"double_to_double",   DOUBLE(),  DOUBLE(),   false},
+    {"boolean_to_boolean", BOOLEAN(), BOOLEAN(),  false},
+
+    // ---- Accept: integer widening within int family ----
+    {"tinyint_to_smallint", TINYINT(), SMALLINT(), false},
+    {"tinyint_to_integer",  TINYINT(), INTEGER(),  false},
+    {"tinyint_to_bigint",   TINYINT(), BIGINT(),   false},
+    {"smallint_to_integer", SMALLINT(),INTEGER(),  false},
+    {"smallint_to_bigint",  SMALLINT(),BIGINT(),   false},
+    {"integer_to_bigint",   INTEGER(), BIGINT(),   false},
+
+    // ---- Accept: float widening (REAL -> DOUBLE, lossless) ----
+    {"real_to_double",      REAL(),    DOUBLE(),   false},
+
+    // ---- Accept: DECIMAL widening ----
+    {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
+    {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
+    {"decimal_widen_both",            DECIMAL(10, 2),  DECIMAL(20, 5),     false},
+    {"decimal_widen_to_long_decimal", DECIMAL(10, 2),  DECIMAL(28, 5),     false},
+
+    // ---- Accept: column-reader auto-cast int family -> VARCHAR ----
+    //  (IntegerColumnReader::makeCastExpr; the cast path compiles in
+    //  both build flavours and matchType() lets INT fileType fall
+    //  through to its default branch, so this works in non-Spark too.)
+    {"tinyint_to_varchar", TINYINT(), VARCHAR(), false},
+    {"smallint_to_varchar",SMALLINT(),VARCHAR(), false},
+    {"integer_to_varchar", INTEGER(), VARCHAR(), false},
+    {"bigint_to_varchar",  BIGINT(),  VARCHAR(), false},
+
+    // ---- Column-reader auto-cast VARCHAR -> int family ----
+    //  StringColumnReader::makeCastExpr handles the cast in both build
+    //  flavours; convertType accepts the pair. In non-Spark builds an
+    //  extra matchType() check at ParquetColumnReader.cpp:95 then
+    //  rejects VARCHAR-file -> INT-requested with its own message, so
+    //  the case expectation flips per flavour.
+#ifdef SPARK_COMPATIBLE
+    {"varchar_to_tinyint", VARCHAR(), TINYINT(), false},
+    {"varchar_to_smallint",VARCHAR(), SMALLINT(),false},
+    {"varchar_to_integer", VARCHAR(), INTEGER(), false},
+    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  false},
+#else
+    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  true, "file schema type"},
+#endif
+  };
+  // clang-format on
+
+  // 3-row sample data builder. DECIMAL is INT64-backed and gets the
+  // type override; the rest use their native C++ types.
+  auto makeSampleData = [&](const TypePtr& fileType) -> RowVectorPtr {
+    if (fileType->isDecimal()) {
+      return makeRowVector(
+          {"c0"}, {makeFlatVector<int64_t>({100, 200, 300}, fileType)});
+    }
+    switch (fileType->kind()) {
+      case TypeKind::TINYINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
+      case TypeKind::SMALLINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
+      case TypeKind::INTEGER:
+        return makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+      case TypeKind::BIGINT:
+        return makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
+      case TypeKind::REAL:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<float>({1.0f, 2.0f, 3.0f})});
+      case TypeKind::DOUBLE:
+        return makeRowVector({"c0"}, {makeFlatVector<double>({1.0, 2.0, 3.0})});
+      case TypeKind::BOOLEAN:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<bool>({true, false, true})});
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        return makeRowVector(
+            {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
+      default:
+        BOLT_FAIL("unsupported test fileType: {}", fileType->toString());
+    }
+  };
+
+  for (const auto& c : cases) {
+    SCOPED_TRACE(c.name);
+
+    auto data = makeSampleData(c.fileType);
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    auto declaredRowType = ROW({"c0"}, {c.declaredType});
+    auto plan = PlanBuilder(pool())
+                    .tableScan(declaredRowType, {}, "", declaredRowType)
+                    .planNode();
+
+    if (c.shouldThrow) {
+      BOLT_ASSERT_THROW(
+          AssertQueryBuilder(plan)
+              .split(makeSplit(file->getPath()))
+              .copyResults(pool()),
+          c.errMsg);
+    } else {
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      ASSERT_NE(result, nullptr);
+      EXPECT_EQ(result->size(), 3) << "expected 3 rows, got " << result->size();
+      EXPECT_TRUE(result->type()->equivalent(*declaredRowType))
+          << "expected " << declaredRowType->toString() << ", got "
+          << result->type()->toString();
+    }
+  }
+}
+
+// Targeted value-validation companion for the matrix above. The cases
+// here exercise the data path (not just convertType), so we explicitly
+// check the column-reader-level cast and the integer-widening path
+// produce the right values.
+TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
+  // 1. INT widening: file INT32 [1,2,3] read as BIGINT -> [1,2,3].
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BIGINT()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // 2. Float widening: REAL [1.5, 2.5, 3.5] read as DOUBLE.
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<float>({1.5f, 2.5f, 3.5f})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {DOUBLE()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<double>({1.5, 2.5, 3.5})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+#ifdef SPARK_COMPATIBLE
+  // 3. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
+  //    Skipped in non-Spark builds because matchType() at
+  //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
+  //    before the column-reader cast can run.
+  {
+    auto data = makeRowVector(
+        {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BIGINT()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<int64_t>({100, 200, 300})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+#endif
+
+  // 3a/3b. INT32 narrowing: file INT32 read back as TINYINT and SMALLINT.
+  //        Models HIVE-14294 / SPARK-16632 where Hive 1.x writes TINYINT/
+  //        SMALLINT as unannotated INT32. The matching matrix cases only
+  //        assert no-throw; these check the data path actually narrows
+  //        correctly instead of returning garbage. IntegerColumnReader
+  //        does the silent truncation, matching Spark / Trino / parquet-mr.
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    {
+      auto declared = ROW({"c0"}, {TINYINT()});
+      auto plan =
+          PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      auto expected =
+          makeRowVector({"c0"}, {makeFlatVector<int8_t>({1, 2, 3})});
+      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    }
+    {
+      auto declared = ROW({"c0"}, {SMALLINT()});
+      auto plan =
+          PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      auto expected =
+          makeRowVector({"c0"}, {makeFlatVector<int16_t>({1, 2, 3})});
+      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    }
+  }
+
+  // 4. Auto-cast INTEGER -> VARCHAR: [1,2,3] -> ["1","2","3"].
+  //    Works in both build flavours: matchType() lets INT fileType fall
+  //    through, and IntegerColumnReader::makeCastExpr handles the cast.
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {VARCHAR()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
 }
 
 int main(int argc, char** argv) {

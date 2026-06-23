@@ -110,10 +110,14 @@ class HiveConnectorFactory : public ConnectorFactory {
   /// writers and FileSystems.
   void initialize() override;
 
+  /// Create and register HiveObjectFactory for the given connector id.
+  void registerObjectFactory(const std::string& connectorId) const override;
+
   std::shared_ptr<Connector> newConnector(
       const std::string& id,
       std::shared_ptr<const config::ConfigBase> config,
       folly::Executor* executor = nullptr) override {
+    registerObjectFactory(id);
     return std::make_shared<HiveConnector>(id, config, executor);
   }
 
@@ -121,6 +125,7 @@ class HiveConnectorFactory : public ConnectorFactory {
       const std::string& id,
       std::shared_ptr<const Config> config,
       folly::Executor* executor = nullptr) override {
+    registerObjectFactory(id);
     std::shared_ptr<const config::ConfigBase> convertedConfig;
     convertedConfig = config == nullptr
         ? nullptr

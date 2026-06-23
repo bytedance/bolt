@@ -287,6 +287,8 @@ std::ostream& operator<<(std::ostream& out, const StopReason& reason) {
   return out << stopReasonString(reason);
 }
 Driver::Driver() = default;
+
+Driver::~Driver() = default;
 // static
 void Driver::enqueue(std::shared_ptr<Driver> driver) {
   process::ScopedThreadDebugInfo scopedInfo(
@@ -785,8 +787,13 @@ StopReason Driver::runInternal(
                     nextOp,
                     curOperatorId_ + 1,
                     kOpMethodNoMoreInput);
+                auto* nextOpPool = nextOp->pool();
                 LOG_SPARK(INFO)
-                    << "Operator " << nextOp->name() << " no more input.";
+                    << "Operator " << nextOp->name() << " no more input. "
+                    << nextOpPool->name() << "["
+                    << succinctBytes(nextOpPool->currentBytes()) << ", "
+                    << succinctBytes(nextOpPool->reservedBytes()) << ", "
+                    << succinctBytes(nextOpPool->capacity()) << "]";
                 break;
               }
             }

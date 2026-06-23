@@ -369,6 +369,10 @@ class Driver : public std::enable_shared_from_this<Driver> {
  public:
   static void enqueue(std::shared_ptr<Driver> instance);
 
+  // Declare out-of-line destructor to ensure std::unique_ptr<Operator> is
+  // destroyed in a TU where Operator is a complete type.
+  ~Driver();
+
   /// Run the pipeline until it produces a batch of data or gets blocked.
   /// Return the data produced or nullptr if pipeline finished processing and
   /// will not produce more data. Return nullptr and set 'blockingState' if
@@ -589,7 +593,7 @@ struct DriverFactory {
   std::vector<std::shared_ptr<const core::PlanNode>> planNodes;
   /// Function that will generate the final operator of a driver being
   /// constructed.
-  OperatorSupplier consumerSupplier;
+  OperatorSupplier operatorSupplier;
   /// Maximum number of drivers that can be run concurrently in this pipeline.
   uint32_t maxDrivers;
   /// Number of drivers that will be run concurrently in this pipeline for one

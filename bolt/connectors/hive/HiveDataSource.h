@@ -227,6 +227,7 @@ class HiveDataSource : public DataSource {
 
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
   int32_t decodeRepDefPageCount_{10};
+  int64_t parquetMaxBatchBytes_{0};
 };
 
 } // namespace bytedance::bolt::connector::hive

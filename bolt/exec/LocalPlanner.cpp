@@ -105,7 +105,7 @@ bool isIndexLookupJoin(core::PlanNodePtr planNode) {
   return indexLookupJoin != nullptr;
 }
 
-OperatorSupplier makeConsumerSupplier(ConsumerSupplier consumerSupplier) {
+OperatorSupplier makeOperatorSupplier(ConsumerSupplier consumerSupplier) {
   if (consumerSupplier) {
     return [consumerSupplier](int32_t operatorId, DriverCtx* ctx) {
       return std::make_unique<CallbackSink>(
@@ -115,21 +115,28 @@ OperatorSupplier makeConsumerSupplier(ConsumerSupplier consumerSupplier) {
   return nullptr;
 }
 
-OperatorSupplier makeConsumerSupplier(
+OperatorSupplier makeOperatorSupplier(
     const std::shared_ptr<const core::PlanNode>& planNode) {
   if (auto localMerge =
           std::dynamic_pointer_cast<const core::LocalMergeNode>(planNode)) {
     return [localMerge](int32_t operatorId, DriverCtx* ctx) {
       auto mergeSource = ctx->task->addLocalMergeSource(
-          ctx->splitGroupId, localMerge->id(), localMerge->outputType());
+          ctx->splitGroupId,
+          localMerge->id(),
+          localMerge->outputType(),
+          ctx->queryConfig().localMergeSourceQueueSize());
 
-      auto consumer = [mergeSource](
-                          RowVectorPtr input,
-                          ContinueFuture* future,
-                          uint32_t partitionId) {
+      auto consumerCb = [mergeSource](
+                            RowVectorPtr input,
+                            ContinueFuture* future,
+                            uint32_t partitionId) {
         return mergeSource->enqueue(input, future);
       };
-      return std::make_unique<CallbackSink>(operatorId, ctx, consumer);
+      auto startCb = [mergeSource](ContinueFuture* future) {
+        return mergeSource->started(future);
+      };
+      return std::make_unique<CallbackSink>(
+          operatorId, ctx, std::move(consumerCb), std::move(startCb));
     };
   }
 
@@ -185,13 +192,13 @@ void plan(
     const std::shared_ptr<const core::PlanNode>& planNode,
     std::vector<std::shared_ptr<const core::PlanNode>>* currentPlanNodes,
     const std::shared_ptr<const core::PlanNode>& consumerNode,
-    OperatorSupplier consumerSupplier,
+    OperatorSupplier operatorSupplier,
     std::vector<std::unique_ptr<DriverFactory>>* driverFactories,
     const bool morselDriven) {
   if (!currentPlanNodes) {
     driverFactories->push_back(std::make_unique<DriverFactory>());
     currentPlanNodes = &driverFactories->back()->planNodes;
-    driverFactories->back()->consumerSupplier = consumerSupplier;
+    driverFactories->back()->operatorSupplier = std::move(operatorSupplier);
     driverFactories->back()->consumerNode = consumerNode;
     // [morsel-driven] Pass the "morsel driven enabled" switch to driver factory
     if (morselDriven) {
@@ -236,7 +243,7 @@ void plan(
             localPartitionNodeAdded,
             mustStartNewPipeline(planNode, 0) ? nullptr : currentPlanNodes,
             planNode,
-            makeConsumerSupplier(planNode),
+            makeOperatorSupplier(planNode),
             driverFactories,
             morselDriven);
       } else {
@@ -244,7 +251,7 @@ void plan(
             sources[i],
             mustStartNewPipeline(planNode, i) ? nullptr : currentPlanNodes,
             planNode,
-            makeConsumerSupplier(planNode),
+            makeOperatorSupplier(planNode),
             driverFactories,
             morselDriven);
       }
@@ -414,7 +421,7 @@ void LocalPlanner::plan(
       planFragment.planNode,
       nullptr,
       nullptr,
-      detail::makeConsumerSupplier(consumerSupplier),
+      detail::makeOperatorSupplier(consumerSupplier),
       driverFactories,
       morselDriven);
 
@@ -432,7 +439,7 @@ void LocalPlanner::plan(
           planFragment.planNode,
           nullptr,
           nullptr,
-          detail::makeConsumerSupplier(consumerSupplier),
+          detail::makeOperatorSupplier(consumerSupplier),
           driverFactories,
           false);
     }
@@ -936,8 +943,8 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
       operators.push_back(std::move(extended));
     }
   }
-  if (consumerSupplier) {
-    operators.push_back(consumerSupplier(operators.size(), ctx.get()));
+  if (operatorSupplier) {
+    operators.push_back(operatorSupplier(operators.size(), ctx.get()));
   }
 
   driver->init(std::move(ctx), std::move(operators));

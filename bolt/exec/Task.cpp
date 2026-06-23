@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <string>
 #include <thread>
 
 #include "bolt/common/base/Counters.h"
@@ -312,6 +311,7 @@ Task::Task(
     std::function<void(std::exception_ptr)> onError)
     : uuid_{makeUuid()},
       taskId_(taskId),
+      sparkTaskAttemptId_(memorypressure::extractSparkTaskAttemptId(taskId)),
       destination_(destination),
       mode_(mode),
       memoryArbitrationPriority_(memoryArbitrationPriority),
@@ -328,6 +328,20 @@ Task::Task(
   VLOG(1) << "Task initialize: " << taskId_ << ", plan: "
           << folly::json::serialize(planFragment_.planNode->serialize(), opts);
   maybeInitTrace();
+}
+
+Task::MemoryPressureSnapshot Task::memoryPressureSnapshot() const {
+  return memorypressure::snapshot(
+      memoryPressureWatermarkBytes(), sparkTaskAttemptId_);
+}
+
+std::optional<Task::ScopedMemoryExpansionGuard>
+Task::maybeScopedDisableMemoryExpansion() const {
+  return memorypressure::maybeScopedDisableMemoryExpansion(sparkTaskAttemptId_);
+}
+
+std::string Task::memoryPressureDetails() const {
+  return memorypressure::details();
 }
 
 Task::~Task() {
@@ -1034,6 +1048,7 @@ void Task::resume(std::shared_ptr<Task> self) {
 
   // Get the stats and free the resources of Drivers that were not on thread.
   for (auto& driver : offThreadDrivers) {
+    self->driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
   }
 }
@@ -1354,8 +1369,8 @@ void Task::removeDriver(std::shared_ptr<Task> self, Driver* driver) {
     if (self->numFinishedDrivers_ == self->numTotalDrivers_) {
       LOG(INFO) << "All drivers (" << self->numFinishedDrivers_
                 << ") finished for task " << self->taskId()
-                << " after running for " << self->timeSinceStartMsLocked()
-                << " ms.";
+                << " after running for "
+                << succinctMillis(self->timeSinceStartMsLocked());
     }
   }
   stateChangeNotifier.notify();
@@ -2063,7 +2078,7 @@ ContinueFuture Task::terminate(TaskState terminalState) {
 
     LOG(INFO) << "Terminating task " << taskId() << " with state "
               << taskStateString(state_) << " after running for "
-              << timeSinceStartMsLocked() << " ms.";
+              << succinctMillis(timeSinceStartMsLocked());
 
     taskCompletionNotifier.activate(
         std::move(taskCompletionPromises_), [&]() { onTaskCompletion(); });
@@ -2097,6 +2112,7 @@ ContinueFuture Task::terminate(TaskState terminalState) {
   // Get the stats and free the resources of Drivers that were not on
   // thread.
   for (auto& driver : offThreadDrivers) {
+    driversClosedByTask_.emplace_back(driver);
     driver->closeByTask();
   }
 
@@ -2502,10 +2518,29 @@ std::string Task::toString() const {
   }
 
   if (numRemainingDrivers > 0) {
-    out << "drivers:\n";
+    bool addedCaption{false};
     for (auto& driver : drivers_) {
       if (driver) {
+        if (!addedCaption) {
+          out << "drivers:\n";
+          addedCaption = true;
+        }
         out << driver->toString() << std::endl;
+      }
+    }
+  }
+
+  if (!driversClosedByTask_.empty()) {
+    bool addedCaption{false};
+    for (auto& driver : driversClosedByTask_) {
+      auto zombieDriver = driver.lock();
+      if (zombieDriver) {
+        if (!addedCaption) {
+          out << "zombie drivers:\n";
+          addedCaption = true;
+        }
+        out << zombieDriver->toString()
+            << ", refcount: " << zombieDriver.use_count() - 1 << std::endl;
       }
     }
   }
@@ -2579,8 +2614,9 @@ folly::dynamic Task::toJson() const {
 std::shared_ptr<MergeSource> Task::addLocalMergeSource(
     uint32_t splitGroupId,
     const core::PlanNodeId& planNodeId,
-    const RowTypePtr& rowType) {
-  auto source = MergeSource::createLocalMergeSource();
+    const RowTypePtr& rowType,
+    int queueSize) {
+  auto source = MergeSource::createLocalMergeSource(queueSize);
   splitGroupStates_[splitGroupId].localMergeSources[planNodeId].push_back(
       source);
   return source;
@@ -3204,6 +3240,8 @@ uint64_t Task::MemoryReclaimer::reclaimTask(
   if (task->isCancelled()) {
     return 0;
   }
+
+  task->recordMemoryPressureWatermarkBytes(task->pool()->currentBytes());
 
   uint64_t reclaimedBytes{0};
   reclaimedBytes = memory::MemoryReclaimer::reclaim(

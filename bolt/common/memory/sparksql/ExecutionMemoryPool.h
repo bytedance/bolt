@@ -18,11 +18,15 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
+
+#include <folly/ScopeGuard.h>
 
 #include "bolt/common/memory/sparksql/DynamicMemoryQuotaManager.h"
 namespace bytedance::bolt::memory::sparksql {
@@ -37,6 +41,9 @@ using ExecutionMemoryPoolWeakPtr = std::weak_ptr<ExecutionMemoryPool>;
 class ExecutionMemoryPool final
     : public std::enable_shared_from_this<ExecutionMemoryPool> {
  public:
+  using ScopedDisableDynamicMemoryQuotaManager =
+      decltype(folly::makeGuard(std::function<void()>{}));
+
   explicit ExecutionMemoryPool(
       int32_t maxTaskNumber = 1,
       const DynamicMemoryQuotaManagerOption& option = {});
@@ -48,6 +55,10 @@ class ExecutionMemoryPool final
   int64_t memoryUsed();
 
   int64_t poolSize();
+
+  // The configured pool size (ExecutionMemoryPool::poolSize_) excluding dynamic
+  // extension from RSS.
+  int64_t configuredPoolSize() const;
 
   int64_t memoryFree();
 
@@ -61,11 +72,25 @@ class ExecutionMemoryPool final
 
   int64_t numActiveTasks() const;
 
+  struct TaskExecutionMemoryUsage {
+    int64_t taskAttemptId{0};
+    int64_t usedBytes{0};
+  };
+
+  std::vector<TaskExecutionMemoryUsage> snapshotTaskMemoryUsage() const;
+
   int64_t maxTaskNumber() const {
     return maxTaskNumber_;
   }
 
   int64_t getOveragedMemoryForTask(int64_t taskAttemptId);
+
+  ScopedDisableDynamicMemoryQuotaManager
+  scopedDisableDynamicMemoryQuotaManagerForTask(int64_t taskAttemptId);
+
+  static std::optional<ScopedDisableDynamicMemoryQuotaManager>
+  maybeScopedDisableDynamicMemoryQuotaManagerForTask(
+      const std::optional<int64_t>& taskAttemptId);
 
   friend std::ostream& operator<<(
       std::ostream& os,
@@ -76,6 +101,8 @@ class ExecutionMemoryPool final
       const ExecutionMemoryPool* pool);
 
   std::string toString() const;
+
+  static std::string debugString();
 
   static void init(
       bool enable,
@@ -108,10 +135,18 @@ class ExecutionMemoryPool final
     return inited() ? instance()->poolExtendSize_.has_value() : false;
   }
 
+  static uint64_t borrowFromRssWatermarkBytes(int64_t taskAttemptId);
+
+  static uint64_t getConfiguredMemoryPerTask();
+
   // For testing only, reset pool size to test new cases with new pool size
   static void testingResetPoolSize(int64_t newSize);
 
  private:
+  void disableDynamicMemoryQuotaManagerForTask(int64_t taskAttemptId);
+
+  void enableDynamicMemoryQuotaManagerForTask(int64_t taskAttemptId);
+
   int64_t internalMemoryUsed() const;
 
   int64_t internalPoolSize() const;
@@ -120,7 +155,7 @@ class ExecutionMemoryPool final
 
   bool triggerDynamicMemoryQuotaManager(bool notEnough, bool reachThreshold);
 
-  MemoryMutex lock_;
+  mutable MemoryMutex lock_;
   std::condition_variable cv_;
   std::unordered_map<int64_t, int64_t> memoryForTask_;
   std::optional<int64_t> poolSize_{};
@@ -134,6 +169,8 @@ class ExecutionMemoryPool final
   const DynamicMemoryQuotaManagerOption option_;
   int64_t memIncreaseSize_{0};
   std::optional<int64_t> poolExtendSize_;
+  std::unordered_map<int64_t, uint32_t> dynamicMemoryQuotaManagerDisableCounts_;
+  std::unordered_map<int64_t, int64_t> borrowFromRssWatermarkBytes_;
   DynamicMemoryQuotaManagerStatistics statistics_;
 };
 

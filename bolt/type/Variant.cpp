@@ -165,6 +165,17 @@ struct VariantEquality<TypeKind::MAP> {
   }
 };
 
+template <>
+struct VariantEquality<TypeKind::VARIANT> {
+  template <bool NullEqualsNull>
+  static bool equals(const variant& a, const variant& b) {
+    if (a.isNull() || b.isNull()) {
+      return evaluateNullEquality<NullEqualsNull>(a, b);
+    }
+    return a.value<TypeKind::VARIANT>() == b.value<TypeKind::VARIANT>();
+  }
+};
+
 bool dispatchDynamicVariantEquality(
     const variant& a,
     const variant& b,
@@ -322,6 +333,13 @@ std::string variant::toJson(const TypePtr& type) const {
       auto& timestamp = value<TypeKind::TIMESTAMP>();
       return '"' + timestamp.toString() + '"';
     }
+    case TypeKind::VARIANT: {
+      auto& v = value<TypeKind::VARIANT>();
+      return fmt::format(
+          "VARIANT(value: {}, metadata: {})",
+          encoding::Base64::encode(v.value),
+          encoding::Base64::encode(v.metadata));
+    }
     case TypeKind::OPAQUE: {
       // Although this is not used for deserialization, we need to include the
       // real data because commonExpressionEliminationRules uses
@@ -449,6 +467,13 @@ std::string variant::toJsonUnsafe(const TypePtr& type) const {
       auto& timestamp = value<TypeKind::TIMESTAMP>();
       return '"' + timestamp.toString() + '"';
     }
+    case TypeKind::VARIANT: {
+      auto& v = value<TypeKind::VARIANT>();
+      return fmt::format(
+          "VARIANT(value: {}, metadata: {})",
+          encoding::Base64::encode(v.value),
+          encoding::Base64::encode(v.metadata));
+    }
     case TypeKind::OPAQUE: {
       // Although this is not used for deserialization, we need to include the
       // real data because commonExpressionEliminationRules uses
@@ -573,6 +598,14 @@ folly::dynamic variant::serialize() const {
       variantObj["nanos"] = ts.getNanos();
       break;
     }
+    case TypeKind::VARIANT: {
+      auto& v = value<TypeKind::VARIANT>();
+      folly::dynamic obj = folly::dynamic::object;
+      obj["value"] = encoding::Base64::encode(v.value);
+      obj["metadata"] = encoding::Base64::encode(v.metadata);
+      objValue = std::move(obj);
+      break;
+    }
     case TypeKind::INVALID:
       BOLT_NYI();
 
@@ -673,6 +706,11 @@ variant variant::create(const folly::dynamic& variantobj) {
     case TypeKind::TIMESTAMP: {
       return variant::create<TypeKind::TIMESTAMP>(Timestamp(
           variantobj["seconds"].asInt(), variantobj["nanos"].asInt()));
+    }
+    case TypeKind::VARIANT: {
+      return variant::create<TypeKind::VARIANT>(OwnedVariantValue{
+          encoding::Base64::decode(obj["value"].asString()),
+          encoding::Base64::decode(obj["metadata"].asString())});
     }
     case TypeKind::INVALID:
       BOLT_NYI();
@@ -780,6 +818,10 @@ uint64_t variant::hash() const {
       auto timestampValue = value<TypeKind::TIMESTAMP>();
       return folly::Hash{}(
           timestampValue.getSeconds(), timestampValue.getNanos());
+    }
+    case TypeKind::VARIANT: {
+      auto& v = value<TypeKind::VARIANT>();
+      return folly::Hash{}(v.value, v.metadata);
     }
     case TypeKind::MAP: {
       auto hasher = folly::Hash{};

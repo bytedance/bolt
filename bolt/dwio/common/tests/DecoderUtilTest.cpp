@@ -110,7 +110,8 @@ class DecoderUtilTest : public testing::Test {
   void testNonNullFromSparse(uint64_t* nulls, RowSet rows) {
     raw_vector<int32_t> referenceInner;
     raw_vector<int32_t> referenceOuter;
-    std::vector<uint64_t> referenceNulls(bits::nwords(rows.size()), ~0ULL);
+    std::vector<uint64_t> referenceNulls(
+        bits::nwords(static_cast<uint64_t>(rows.size())), ~0ULL);
     int32_t referenceSkip;
     auto referenceAnyNull =
         nonNullRowsFromSparseReference<isFilter, outputNulls>(
@@ -122,7 +123,8 @@ class DecoderUtilTest : public testing::Test {
             referenceSkip);
     raw_vector<int32_t> testInner;
     raw_vector<int32_t> testOuter;
-    std::vector<uint64_t> testNulls(bits::nwords(rows.size()), ~0ULL);
+    std::vector<uint64_t> testNulls(
+        bits::nwords(static_cast<uint64_t>(rows.size())), ~0ULL);
     int32_t testSkip;
     auto testAnyNull = nonNullRowsFromSparse<isFilter, outputNulls>(
         nulls, rows, testInner, testOuter, testNulls.data(), testSkip);

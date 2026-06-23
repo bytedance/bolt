@@ -34,7 +34,6 @@
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/row/CompactRow.h"
-#include "bolt/row/UnsafeRowDeserializers.h"
 #include "bolt/row/UnsafeRowFast.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::row {
@@ -63,7 +62,7 @@ class SerializeBenchmark {
     auto serialized = serialize(fast, data->size(), buffer);
     suspender.dismiss();
 
-    auto copy = UnsafeRowDeserializer::deserialize(serialized, rowType, pool());
+    auto copy = UnsafeRowFast::deserialize(serialized, rowType, pool());
     BOLT_CHECK_EQ(copy->size(), data->size());
   }
 
@@ -72,20 +71,29 @@ class SerializeBenchmark {
     auto data = makeData(rowType);
     suspender.dismiss();
 
+    const auto numRows = data->size();
+    std::vector<size_t> rowSize(numRows);
+    std::vector<size_t> offsets(numRows);
+
     CompactRow compact(data);
-    auto totalSize = computeTotalSize(compact, rowType, data->size());
-    auto buffer = AlignedBuffer::allocate<char>(totalSize, pool());
-    auto serialized = serialize(compact, data->size(), buffer);
-    BOLT_CHECK_EQ(serialized.size(), data->size());
+    auto totalSize =
+        computeTotalSize(compact, rowType, numRows, rowSize, offsets);
+    auto buffer = AlignedBuffer::allocate<char>(totalSize, pool(), 0);
+    auto serialized = serialize(compact, numRows, buffer, rowSize, offsets);
+    BOLT_CHECK_EQ(serialized.size(), numRows);
   }
 
   void deserializeCompact(const RowTypePtr& rowType) {
     folly::BenchmarkSuspender suspender;
     auto data = makeData(rowType);
+    const auto numRows = data->size();
+    std::vector<size_t> rowSize(numRows);
+    std::vector<size_t> offsets(numRows);
     CompactRow compact(data);
-    auto totalSize = computeTotalSize(compact, rowType, data->size());
-    auto buffer = AlignedBuffer::allocate<char>(totalSize, pool());
-    auto serialized = serialize(compact, data->size(), buffer);
+    auto totalSize =
+        computeTotalSize(compact, rowType, numRows, rowSize, offsets);
+    auto buffer = AlignedBuffer::allocate<char>(totalSize, pool(), 0);
+    auto serialized = serialize(compact, numRows, buffer, rowSize, offsets);
     suspender.dismiss();
 
     auto copy = CompactRow::deserialize(serialized, rowType, pool());
@@ -148,17 +156,17 @@ class SerializeBenchmark {
     return totalSize;
   }
 
-  std::vector<std::optional<std::string_view>> serialize(
+  std::vector<char*> serialize(
       UnsafeRowFast& unsafeRow,
       vector_size_t numRows,
       BufferPtr& buffer) {
-    std::vector<std::optional<std::string_view>> serialized;
+    std::vector<char*> serialized;
     auto rawBuffer = buffer->asMutable<char>();
 
     size_t offset = 0;
     for (auto i = 0; i < numRows; ++i) {
       auto rowSize = unsafeRow.serialize(i, rawBuffer + offset);
-      serialized.push_back(std::string_view(rawBuffer + offset, rowSize));
+      serialized.push_back(rawBuffer + offset);
       offset += rowSize;
     }
 
@@ -169,32 +177,41 @@ class SerializeBenchmark {
   size_t computeTotalSize(
       CompactRow& compactRow,
       const RowTypePtr& rowType,
-      vector_size_t numRows) {
+      vector_size_t numRows,
+      std::vector<size_t>& rowSize,
+      std::vector<size_t>& offsets) {
     size_t totalSize = 0;
     if (auto fixedRowSize = CompactRow::fixedRowSize(rowType)) {
-      totalSize += fixedRowSize.value() * numRows;
+      totalSize = fixedRowSize.value() * numRows;
+      for (auto i = 0; i < numRows; ++i) {
+        rowSize[i] = fixedRowSize.value();
+        offsets[i] = fixedRowSize.value() * i;
+      }
     } else {
       for (auto i = 0; i < numRows; ++i) {
-        auto rowSize = compactRow.rowSize(i);
-        totalSize += rowSize;
+        rowSize[i] = compactRow.rowSize(i);
+        offsets[i] = totalSize;
+        totalSize += rowSize[i];
       }
     }
     return totalSize;
   }
 
-  std::vector<std::string_view>
-  serialize(CompactRow& compactRow, vector_size_t numRows, BufferPtr& buffer) {
-    std::vector<std::string_view> serialized;
+  std::vector<std::string_view> serialize(
+      CompactRow& compactRow,
+      vector_size_t numRows,
+      BufferPtr& buffer,
+      const std::vector<size_t>& rowSize,
+      const std::vector<size_t>& offsets) {
     auto rawBuffer = buffer->asMutable<char>();
+    compactRow.serialize(0, numRows, offsets.data(), rawBuffer);
 
-    size_t offset = 0;
+    std::vector<std::string_view> serialized;
     for (auto i = 0; i < numRows; ++i) {
-      auto rowSize = compactRow.serialize(i, rawBuffer + offset);
-      serialized.push_back(std::string_view(rawBuffer + offset, rowSize));
-      offset += rowSize;
+      serialized.push_back(
+          std::string_view(rawBuffer + offsets[i], rowSize[i]));
     }
 
-    BOLT_CHECK_EQ(buffer->size(), offset);
     return serialized;
   }
 

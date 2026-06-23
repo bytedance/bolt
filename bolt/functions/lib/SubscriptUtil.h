@@ -187,16 +187,23 @@ class MapSubscript {
 /// - allowOutOfBound: if allowed, returns NULL for out of bound accesses; if
 ///   false, throws an exception.
 /// - indexStartsAtOne: whether indices start at zero or one.
+/// - nullOnNonConstantInvalidIndex: when true, any index < 1 (in 1-based mode)
+///   is treated as invalid. For constant indices this triggers an exception;
+///   for non-constant indices it returns NULL silently instead of throwing.
 template <
     bool allowNegativeIndices,
     bool nullOnNegativeIndices,
     bool allowOutOfBound,
     bool indexStartsAtOne,
-    bool isElementAt>
+    bool isElementAt,
+    bool nullOnNonConstantInvalidIndex = false>
 class SubscriptImpl : public exec::Subscript {
  public:
-  explicit SubscriptImpl(bool allowCaching)
-      : mapSubscript_(MapSubscript(allowCaching)) {}
+  explicit SubscriptImpl(
+      bool allowCaching,
+      bool constantIndexInvalidThrows = false)
+      : mapSubscript_(MapSubscript(allowCaching)),
+        constantIndexInvalidThrows_(constantIndexInvalidThrows) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -309,19 +316,32 @@ class SubscriptImpl : public exec::Subscript {
           isZeroSubscriptError,
           zeroBasedArrayIndex);
       if (isZeroSubscriptError) {
-        context.setErrors(rows, zeroSubscriptError());
-        allFailed = true;
+        if constexpr (nullOnNonConstantInvalidIndex) {
+          if (constantIndexInvalidThrows_) {
+            std::rethrow_exception(zeroSubscriptError());
+          }
+          return BaseVector::createNullConstant(
+              baseArray->elements()->type(), rows.end(), context.pool());
+        } else {
+          context.setErrors(rows, zeroSubscriptError());
+          allFailed = true;
+        }
       }
 
       if (!allFailed) {
         rows.applyToSelected([&](auto row) {
           const auto elementIndex = getIndex(
               adjustedIndex, row, rawSizes, rawOffsets, arrayIndices, context);
-          rawIndices[row] = elementIndex;
           if (elementIndex == -1) {
             nullsBuilder.setNull(row);
+            rawIndices[row] = 0;
+          } else {
+            rawIndices[row] = elementIndex;
           }
         });
+      } else {
+        return BaseVector::createNullConstant(
+            baseArray->elements()->type(), rows.end(), context.pool());
       }
     } else {
       rows.applyToSelected([&](auto row) {
@@ -330,14 +350,22 @@ class SubscriptImpl : public exec::Subscript {
         const auto adjustedIndex = adjustIndex(
             originalIndex, isZeroSubscriptError, zeroBasedArrayIndex);
         if (isZeroSubscriptError) {
-          context.setBoltExceptionError(row, zeroSubscriptError());
+          if constexpr (nullOnNonConstantInvalidIndex) {
+            // Flink: non-constant invalid index returns NULL silently.
+            nullsBuilder.setNull(row);
+            rawIndices[row] = 0;
+          } else {
+            context.setBoltExceptionError(row, zeroSubscriptError());
+          }
           return;
         }
         const auto elementIndex = getIndex(
             adjustedIndex, row, rawSizes, rawOffsets, arrayIndices, context);
-        rawIndices[row] = elementIndex;
         if (elementIndex == -1) {
           nullsBuilder.setNull(row);
+          rawIndices[row] = 0;
+        } else {
+          rawIndices[row] = elementIndex;
         }
       });
     }
@@ -373,9 +401,19 @@ class SubscriptImpl : public exec::Subscript {
 
     // If array indices start at 1.
     if constexpr (indexStartsAtOne) {
-      if (UNLIKELY(index == 0)) {
-        isZeroSubscriptError = true;
-        return 0;
+      if constexpr (nullOnNonConstantInvalidIndex) {
+        // Flink: any index < 1 (including 0 and negative) is invalid.
+        // For constant indices this triggers an exception; for non-constant
+        // indices applyArrayTyped will return NULL instead.
+        if (UNLIKELY(index <= 0)) {
+          isZeroSubscriptError = true;
+          return 0;
+        }
+      } else {
+        if (UNLIKELY(index == 0)) {
+          isZeroSubscriptError = true;
+          return 0;
+        }
       }
 
       // If larger than zero, adjust it.
@@ -409,6 +447,9 @@ class SubscriptImpl : public exec::Subscript {
           index += arraySize;
         }
       } else {
+        if constexpr (nullOnNonConstantInvalidIndex) {
+          return -1;
+        }
         context.setBoltExceptionError(row, negativeSubscriptError());
         return -1;
       }
@@ -432,6 +473,7 @@ class SubscriptImpl : public exec::Subscript {
 
  private:
   MapSubscript mapSubscript_;
+  const bool constantIndexInvalidThrows_;
 };
 
 } // namespace bytedance::bolt::functions

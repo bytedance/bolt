@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "bolt/common/memory/MemoryArbitrator.h"
+#include "bolt/common/memory/sparksql/ConfigurationResolver.h"
 #include "bolt/common/memory/sparksql/NativeMemoryManagerFactory.h"
 #include "bolt/common/memory/sparksql/Spiller.h"
 
@@ -43,6 +45,42 @@ class TestSpiller final : public memory::sparksql::Spiller {
   std::weak_ptr<BoltMemoryManager> memoryManager_;
 };
 
+// A spiller that actually reclaims Bolt operators
+// spiller gluten registers in production. When the task memory pool can't
+// grant memory, TaskMemoryManager::acquireExecutionMemory invokes the
+// consumer's spill which (in the kSpill phase) calls this; it reclaims the
+// aggregate memory pool, which pauses the task and walks operator reclaimers
+// (Task/Operator::MemoryReclaimer -> e.g. SparkShuffleWriter::reclaim).
+class OperatorReclaimSpiller final : public memory::sparksql::Spiller {
+ public:
+  explicit OperatorReclaimSpiller(const BoltMemoryManagerPtr& memoryManager)
+      : memoryManager_(memoryManager) {}
+
+  int64_t spill(MemoryTargetWeakPtr self, int64_t size) override {
+    auto manager = memoryManager_.lock();
+    if (!manager) {
+      return 0;
+    }
+    auto pool = manager->getAggregateMemoryPool();
+    // Reclaim must run under a memory-arbitration context (same as
+    // ListenableArbitrator::shrinkCapacity). It
+    // walks the operator reclaimers (Task/Operator::MemoryReclaimer), pausing
+    // the task as needed.
+    bytedance::bolt::memory::ScopedMemoryArbitrationContext arbitrationCtx{
+        pool.get()};
+    bytedance::bolt::memory::MemoryReclaimer::Stats stats;
+    return static_cast<int64_t>(
+        pool->reclaim(static_cast<uint64_t>(size), 0, stats));
+  }
+
+  const std::set<SpillerPhase>& applicablePhases() override {
+    return SpillerHelper::phaseSetSpillOnly();
+  }
+
+ private:
+  std::weak_ptr<BoltMemoryManager> memoryManager_;
+};
+
 // A helper to create MemoryManager for tests, hard memory limit is set to
 // memoryLimit. Note: there should be only one TestMemoryManagerHolder in
 // certain scope.
@@ -55,7 +93,8 @@ class TestSpiller final : public memory::sparksql::Spiller {
 class TestMemoryManagerHolder {
  public:
   static std::shared_ptr<TestMemoryManagerHolder> create(
-      int64_t memoryLimit = memory::kMaxMemory) {
+      int64_t memoryLimit = memory::kMaxMemory,
+      bool withOperatorReclaim = false) {
     if (!ExecutionMemoryPool::inited()) {
       ExecutionMemoryPool::init(true, memoryLimit, 1, {}, 10000);
     } else {
@@ -80,6 +119,13 @@ class TestMemoryManagerHolder {
     auto genericSpiller =
         std::static_pointer_cast<memory::sparksql::Spiller>(spiller);
     instance->appendSpiller(genericSpiller);
+    if (withOperatorReclaim) {
+      std::shared_ptr<OperatorReclaimSpiller> reclaimSpiller =
+          std::make_shared<OperatorReclaimSpiller>(instance->getManager());
+      auto genericReclaimSpiller =
+          std::static_pointer_cast<memory::sparksql::Spiller>(reclaimSpiller);
+      instance->appendSpiller(genericReclaimSpiller);
+    }
     return std::shared_ptr<TestMemoryManagerHolder>(
         new TestMemoryManagerHolder(instance, tmm, memoryLimit));
   }

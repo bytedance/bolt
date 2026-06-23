@@ -57,7 +57,11 @@ class SortBuffer {
       tsan_atomic<bool>* nonReclaimableSection,
       const common::SpillConfig* spillConfig = nullptr,
       uint64_t spillMemoryThreshold = 0,
-      OperatorCtx* operatorCtx = nullptr);
+      OperatorCtx* operatorCtx = nullptr,
+      bool hybridSortEnabled = false,
+      bool scatteredModeEnabled = false);
+
+  ~SortBuffer();
 
   void addInput(const VectorPtr& input);
 
@@ -68,7 +72,7 @@ class SortBuffer {
   void noMoreInput();
 
   /// Returns the sorted output rows in batch.
-  RowVectorPtr getOutput(uint32_t maxOutputRows);
+  RowVectorPtr getOutput(vector_size_t maxOutputRows);
 
   /// Indicates if this sort buffer can spill or not.
   bool canSpill() const {
@@ -147,9 +151,12 @@ class SortBuffer {
  private:
   // Ensures there is sufficient memory reserved to process 'input'.
   void ensureInputFits(const VectorPtr& input);
+  // Reserves memory for output processing. If reservation cannot be increased,
+  // spills enough to make output fit.
+  void ensureOutputFits(vector_size_t outputBatchSize);
   void updateEstimatedOutputRowSize();
   // Invoked to initialize or reset the reusable output buffer to get output.
-  void prepareOutput(uint32_t maxOutputRows);
+  void prepareOutput(vector_size_t outputBatchSize);
   void getOutputWithoutSpill();
   void getOutputWithSpill();
   // Spill during input stage.
@@ -219,6 +226,16 @@ class SortBuffer {
   uint64_t sortOutputTimeUs_{0};
   uint64_t sortColToRowTimeUs_{0};
   uint64_t sortInSortTimeUs_{0};
+
+  // For hybrid design
+  bool hybridSortEnabled_{false};
+  bool scatteredMode_{
+      false}; // Use scattered (non-coalesced) mode for hybrid sort
+  std::unique_ptr<HybridContainer> hybridData_{nullptr};
+  std::vector<IdentityProjection> keyColumnMap_;
+  std::vector<IdentityProjection> payloadColumnMap_;
+  std::vector<column_index_t> payloadChannels_;
+  RowTypePtr payloadTypes_;
 };
 
 } // namespace bytedance::bolt::exec

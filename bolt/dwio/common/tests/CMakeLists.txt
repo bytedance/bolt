@@ -44,6 +44,7 @@ add_executable(
   ReaderTest.cpp
   ReadFileInputStreamTests.cpp
   RetryTests.cpp
+  RowIndexScanSpecTest.cpp
   ScanSpecTest.cpp
   TestBufferedInput.cpp
   TypeTests.cpp

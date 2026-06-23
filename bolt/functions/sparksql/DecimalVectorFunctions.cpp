@@ -234,7 +234,9 @@ roundUpAndDown(R& r, const A& a, const B& b, bool noRoundUp, uint8_t aRescale) {
   B unsignedDivisor(b);
   bool roundUpSign = ((noRoundUp && a > 0) || (!noRoundUp && a < 0));
   R quotient = unsignedDividendRescaled / unsignedDivisor;
-  R remainder = unsignedDividendRescaled % unsignedDivisor;
+  // Keep the remainder as wide as the divisor: long decimal inputs can have
+  // fractional remainders that overflow short decimal result storage.
+  B remainder = unsignedDividendRescaled % unsignedDivisor;
   if (roundUpSign && static_cast<const B>(remainder) > 0) {
     ++quotient;
   }
@@ -380,7 +382,8 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> decimalUnarySignature() {
   return {exec::FunctionSignatureBuilder()
               .integerVariable("a_precision")
               .integerVariable("a_scale")
-              .integerVariable("r_precision", "min(38,a_precision-a_scale+1)")
+              .integerVariable(
+                  "r_precision", "min(38,a_precision-a_scale+min(1,a_scale))")
               .integerVariable("r_scale", "0")
               .returnType("DECIMAL(r_precision, r_scale)")
               .argumentType("DECIMAL(a_precision, a_scale)")

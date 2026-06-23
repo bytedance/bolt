@@ -79,6 +79,9 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
+  auto hybridSortEnabled = driverCtx->queryConfig().hybridSortEnabled();
+  auto scatteredModeEnabled =
+      driverCtx->queryConfig().hybridSortScatteredModeEnabled();
   sortBuffer_ = std::make_unique<SortBuffer>(
       outputType_,
       sortColumnIndices,
@@ -87,7 +90,9 @@ OrderBy::OrderBy(
       &nonReclaimableSection_,
       spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr,
       operatorCtx_->driverCtx()->queryConfig().orderBySpillMemoryThreshold(),
-      operatorCtx_.get());
+      operatorCtx_.get(),
+      hybridSortEnabled,
+      scatteredModeEnabled);
 
   this->setRuntimeMetric(
       OperatorMetricKey::kCanUsedToEstimateHashBuildPartitionNum, "true");

@@ -58,7 +58,7 @@ std::vector<int64_t> decodeRLEv2(
     size_t remaining = count - i;
     size_t nread = std::min(n, remaining);
     if (nulls) {
-      remainingNulls.reserve(bits::nwords(nread));
+      remainingNulls.reserve(bits::nwords(static_cast<uint64_t>(nread)));
       for (int32_t j = 0; j < nread; j++) {
         bits::setNull(
             remainingNulls.data(), j, bits::isBitNull(nulls, j + totalRead));

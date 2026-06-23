@@ -60,7 +60,6 @@ bolt_add_library(
   Reverse.cpp
   RowFunction.cpp
   Sequence.cpp
-  Slice.cpp
   Split.cpp
   StringFunctions.cpp
   StringToMap.cpp

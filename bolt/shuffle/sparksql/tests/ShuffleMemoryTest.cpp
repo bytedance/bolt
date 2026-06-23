@@ -15,12 +15,24 @@
  */
 
 #include <vector/ComplexVector.h>
+#include <filesystem>
+#include "bolt/common/caching/AsyncDataCache.h"
+#include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/core/PlanNode.h"
+#include "bolt/exec/tests/utils/Cursor.h"
+#include "bolt/exec/tests/utils/MemoryHogOperator.h"
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
+#include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
 using namespace bytedance::bolt::common::testutil;
+using namespace bytedance::bolt::memory::sparksql::test;
 
 namespace bytedance::bolt::shuffle::sparksql::test {
+
+using bytedance::bolt::exec::test::MemoryHogNode;
 
 // A test suite for shuffle memory related tests
 class ShuffleMemoryTest : public ShuffleTestBase {
@@ -191,6 +203,85 @@ TEST_F(ShuffleMemoryTest, testCompositeRowEvictBeforeInit) {
   // expect OOM for composite row vector large than memory limit rather than
   // coredump
   EXPECT_THROW(executeTestWithCustomInput(param, inputData), BoltRuntimeError);
+}
+
+TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
+  using namespace bytedance::bolt::exec::test;
+
+  constexpr int32_t kNumPartitions = 4;
+  constexpr int32_t kRowCount = 1024;
+  std::string str(8 * 1024, 'x');
+
+  // Batches with pid as the first column (required by the writer). Feed enough
+  // batches before the trigger so the writer buffers a sizable, reclaimable
+  // amount (so reclaiming it frees enough for the hog's allocation to then
+  // fit).
+  constexpr int32_t kNumBatches = 8;
+  constexpr int32_t kTriggerAt = 6;
+  auto rowType = ROW({"pid", "c0"}, {INTEGER(), VARCHAR()});
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < kNumBatches; ++b) {
+    auto pidVector = makeFlatVector<int32_t>(
+        kRowCount, [](auto row) { return row % kNumPartitions; });
+    auto dataVector = makeFlatVector<StringView>(
+        kRowCount, [&](auto /*row*/) { return StringView(str); });
+    batches.push_back(makeRowVector({"pid", "c0"}, {pidVector, dataVector}));
+  }
+
+  // Enable the operator reclaim spiller (gluten's kSpill spiller analog) on the
+  // test memory manager.
+  const int64_t memoryLimit = 128 * 1024 * 1024;
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(
+      memoryLimit, /*withOperatorReclaim=*/true);
+
+  auto tempDir = TempDirectoryPath::create();
+  std::string localDir = tempDir->path + "/local_dir";
+  std::filesystem::create_directories(localDir);
+
+  ShuffleWriterOptions writerOptions;
+  writerOptions.partitioning = Partitioning::kHash;
+  writerOptions.forceShuffleWriterType = 3; // RowBased
+  writerOptions.partitionWriterOptions.numPartitions = kNumPartitions;
+  writerOptions.partitionWriterOptions.partitionWriterType =
+      PartitionWriterType::kLocal;
+  writerOptions.partitionWriterOptions.dataFile =
+      tempDir->path + "/shuffle_data.bin";
+  writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+  writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+
+  // MemoryHog -> SparkShuffleWriter. Before emitting batch kTriggerAt (after
+  // the writer has buffered the earlier batches and returned to kInit), the hog
+  // allocates allocBytes. That exceeds the free capacity and forces a spill,
+  // but is < the limit so it fits once the idle writer is reclaimed.
+  auto sourceNode = std::make_shared<MemoryHogNode>(
+      "source",
+      rowType,
+      batches,
+      kTriggerAt,
+      /*allocBytes=*/100 * 1024 * 1024);
+  core::PlanNodeId writerId("writer");
+  ShuffleWriterMetrics metrics;
+  auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
+  auto writerNode = std::make_shared<SparkShuffleWriterNode>(
+      writerId, writerOptions, reportCallback, sourceNode);
+
+  CursorParameters params;
+  params.planNode = writerNode;
+  params.serialExecution = true;
+  params.queryCtx = core::QueryCtx::create(
+      nullptr,
+      core::QueryConfig{{}},
+      {},
+      cache::AsyncDataCache::getInstance(),
+      memoryManagerHolder->rootPool());
+
+  auto cursor = TaskCursor::create(params);
+  // Should not throw when the shuffle writer is reclaimed.
+  EXPECT_NO_THROW({
+    while (cursor->moveNext()) {
+    }
+  });
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

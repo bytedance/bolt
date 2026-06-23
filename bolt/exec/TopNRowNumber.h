@@ -183,6 +183,11 @@ class TopNRowNumber : public Operator {
   // Called in noMoreInput() and spill().
   void updateEstimatedOutputRowSize();
 
+  // Tries to reserve output admission memory before transitioning to output. If
+  // memory is under pressure, this can trigger arbitration while this operator
+  // is still reclaimable.
+  void ensureOutputFits();
+
   // Sorts, spills and clears all of 'data_'. Clears 'table_'.
   void spill();
 

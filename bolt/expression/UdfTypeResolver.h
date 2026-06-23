@@ -31,6 +31,7 @@
 #pragma once
 
 #include "bolt/type/Type.h"
+#include "bolt/type/Variant.h"
 namespace bytedance::bolt::exec {
 
 template <bool reuseInput>
@@ -85,6 +86,8 @@ class GenericView;
 
 class GenericWriter;
 
+class VariantWriter;
+
 namespace detail {
 template <typename T>
 struct resolver {
@@ -126,6 +129,13 @@ struct resolver<Varbinary> {
   using in_type = StringView;
   using null_free_in_type = in_type;
   using out_type = StringWriter<false>;
+};
+
+template <>
+struct resolver<Variant> {
+  using in_type = VariantValue;
+  using null_free_in_type = in_type;
+  using out_type = VariantWriter;
 };
 
 template <>

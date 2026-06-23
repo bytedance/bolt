@@ -14,7 +14,8 @@
 # limitations under the License.
 
 bolt_add_library(
-  bolt_thrustjit ThrustJIT.cpp
+  bolt_thrustjit CompiledModule.cpp
+                 ThrustJITv2.cpp
                  RowContainer/RowContainerCodeGenerator.cpp
                  RowContainer/RowEqVectorsCodeGenerator.cpp
 )
