@@ -227,3 +227,23 @@ LIMIT 10;
 SET spark.gluten.enabled;
 SET spark.plugins;
 SET spark.shuffle.manager;
+
+-- =========================================================================
+-- 21. first()/last() with empty partitions (200 partitions, ~198 empty after
+--     the filter). Constant value makes it deterministic: expect '20260531',
+--     not NULL. NULL means an empty partition's partial polluted the merge.
+-- =========================================================================
+SELECT first(v) AS first_v,
+       last(v)  AS last_v,
+       first(v, true) AS first_v_ignore_nulls,
+       count(*) AS n
+FROM (SELECT id, id % 100 AS k, '20260531' AS v FROM range(0, 200, 1, 200))
+WHERE k = 7;
+EXPLAIN
+SELECT first(v) FROM (SELECT id, id % 100 AS k, '20260531' AS v
+                      FROM range(0, 200, 1, 200))
+WHERE k = 7;
+
+-- A genuinely-recorded NULL must still return NULL (expect NULL).
+SELECT first(c) AS genuine_null
+FROM (SELECT CAST(NULL AS INT) AS c FROM range(0, 100, 1, 8));

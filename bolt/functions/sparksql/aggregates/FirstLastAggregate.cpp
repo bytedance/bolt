@@ -83,14 +83,18 @@ class FirstLastAggregateBase
     const auto& input = args[0];
     result->resize(rows.size());
     copyToIntermediate(rows, args, result->as<RowVector>()->childAt(0));
-    auto rawNulls = result->mutableRawNulls();
-    // set all rows to null
-    bits::setAllNull(rawNulls, input->size());
-    rows.applyToSelected([&](vector_size_t i) {
-      if (!input->isNullAt(i)) {
-        bits::clearNull(rawNulls, i);
-      }
-    });
+    // Keep the struct non-null and mark recorded rows via 'valueSet' (same
+    // invariant as extractAccumulators), so the (value, valueSet) intermediate
+    // survives the split/shuffle/rebuild. (was: null struct, valueSet unset.)
+    bits::clearAllNull(result->mutableRawNulls(), input->size());
+    auto* valueSet = result->as<RowVector>()->childAt(1)->asFlatVector<bool>();
+    valueSet->resize(input->size());
+    for (vector_size_t i = 0; i < input->size(); ++i) {
+      valueSet->set(i, false);
+    }
+    if constexpr (!ignoreNull) {
+      rows.applyToSelected([&](vector_size_t i) { valueSet->set(i, true); });
+    }
   }
 
   FLATTEN void initializeNewGroups(
@@ -145,17 +149,16 @@ class FirstLastAggregateBase
     ignoreNullVector->resize(numGroups);
 
     extractValues(groups, numGroups, &(rowVector->childAt(0)));
+    // Keep every struct non-null; 'valueSet' is the sole "has a value"
+    // indicator -- a null struct does not survive the shuffle round-trip.
+    bits::clearAllNull(rowVector->mutableRawNulls(), numGroups);
     for (auto i = 0; i < numGroups; i++) {
       if constexpr (ignoreNull) {
         ignoreNullVector->set(i, false);
         continue;
       }
-      if (Aggregate::value<TAccumulator>(groups[i])->has_value()) {
-        rowVector->setNull(i, false);
-        ignoreNullVector->set(i, true);
-      } else {
-        ignoreNullVector->set(i, false);
-      }
+      ignoreNullVector->set(
+          i, Aggregate::value<TAccumulator>(groups[i])->has_value());
     }
   }
 
