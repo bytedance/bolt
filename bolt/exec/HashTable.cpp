@@ -28,13 +28,15 @@
  * --------------------------------------------------------------------------
  */
 
+#include <boost/sort/pdqsort/pdqsort.hpp>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <vector>
 
-#include <boost/sort/pdqsort/pdqsort.hpp>
 #include "bolt/common/base/AsyncSource.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Portability.h"
@@ -77,13 +79,15 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJit,
-    bool hybridMode)
+    bool hybridMode,
+    bool reused)
     : BaseHashTable(std::move(hashers)),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
       isJoinBuild_(isJoinBuild),
       joinBuildNoDuplicates_(!allowDuplicates),
       hashMode_(mode),
-      enableJit_(enableJit) {
+      enableJit_(enableJit),
+      reused_(reused) {
   std::vector<TypePtr> keys;
   for (auto& hasher : hashers_) {
     keys.push_back(hasher->type());
@@ -148,7 +152,8 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJitRowEqVectors,
-    bool hybridMode)
+    bool hybridMode,
+    bool reused)
     : HashTable<ignoreNullKeys>(
           std::move(hashers),
           accumulators,
@@ -161,7 +166,8 @@ HashTable<ignoreNullKeys>::HashTable(
           pool,
           stringArena,
           enableJitRowEqVectors,
-          hybridMode) {}
+          hybridMode,
+          reused) {}
 
 int32_t ProbeState::row() const {
   return row_;
@@ -1820,87 +1826,92 @@ void HashTable<ignoreNullKeys>::prepareJoinTable(
     folly::Executor* executor,
     bool dropDuplicates,
     int8_t spillInputStartPartitionBit) {
-  buildExecutor_ = executor;
-  if (dropDuplicates) {
-    if (table_ != nullptr) {
-      // Set table_ to nullptr to trigger rehash.
-      rows_->pool()->freeContiguous(tableAllocation_);
-      table_ = nullptr;
-      capacity_ = 0;
-      numDistinct_ = rows()->numRows();
+  std::lock_guard<std::mutex> l(mutex_);
+  if (!prepared_) {
+    buildExecutor_ = executor;
+    if (dropDuplicates) {
+      if (table_ != nullptr) {
+        // Set table_ to nullptr to trigger rehash.
+        rows_->pool()->freeContiguous(tableAllocation_);
+        table_ = nullptr;
+        capacity_ = 0;
+        numDistinct_ = rows()->numRows();
+      }
+      // Call analyze to insert all unique values in row container to the
+      // table hashers' uniqueValues_;
+      bool analyzeValue = !analyze();
+      if (analyzeValue) {
+        if (hashMode_ != HashMode::kHash) {
+          setHashMode(HashMode::kHash, 0);
+        } else {
+          checkSize(0, true);
+        }
+      }
     }
-    // Call analyze to insert all unique values in row container to the
-    // table hashers' uniqueValues_;
-    bool analyzeValue = !analyze();
-    if (analyzeValue) {
+
+    otherTables_.reserve(tables.size());
+    for (auto& table : tables) {
+      otherTables_.emplace_back(std::unique_ptr<HashTable<ignoreNullKeys>>(
+          dynamic_cast<HashTable<ignoreNullKeys>*>(table.release())));
+    }
+
+    // For hybrid mode
+    if (hybridData_) {
+      std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
+      hybridDataChannel[hybridData_->getId()] = hybridData_.get();
+      for (auto& table : otherTables_)
+        hybridDataChannel[table->hybridData()->getId()] = table->hybridData();
+      hybridData_->setAllContainers(hybridDataChannel);
+    }
+
+    bool useValueIds = mayUseValueIds(*this);
+    if (useValueIds) {
+      for (auto& other : otherTables_) {
+        if (!mayUseValueIds(*other)) {
+          useValueIds = false;
+          break;
+        }
+      }
+      if (useValueIds) {
+        for (auto& other : otherTables_) {
+          if (dropDuplicates) {
+            // Before merging with the current hashers, all values in the row
+            // containers of other table need to be inserted into uniqueValues_.
+            if (!other->analyze()) {
+              other->setHashMode(HashMode::kHash, 0);
+              useValueIds = false;
+              break;
+            }
+          }
+          for (auto i = 0; i < hashers_.size(); ++i) {
+            hashers_[i]->merge(*other->hashers_[i]);
+            if (!hashers_[i]->mayUseValueIds()) {
+              useValueIds = false;
+              break;
+            }
+          }
+          if (!useValueIds) {
+            break;
+          }
+        }
+      }
+    }
+    numDistinct_ = rows()->numRows();
+
+    for (const auto& other : otherTables_) {
+      numDistinct_ += other->rows()->numRows();
+    }
+    if (!useValueIds) {
       if (hashMode_ != HashMode::kHash) {
         setHashMode(HashMode::kHash, 0);
       } else {
         checkSize(0, true);
       }
-    }
-  }
-
-  otherTables_.reserve(tables.size());
-  for (auto& table : tables) {
-    otherTables_.emplace_back(std::unique_ptr<HashTable<ignoreNullKeys>>(
-        dynamic_cast<HashTable<ignoreNullKeys>*>(table.release())));
-  }
-
-  // For hybrid mode
-  if (hybridData_) {
-    std::unordered_map<uint8_t, HybridContainer*> hybridDataChannel;
-    hybridDataChannel[hybridData_->getId()] = hybridData_.get();
-    for (auto& table : otherTables_)
-      hybridDataChannel[table->hybridData()->getId()] = table->hybridData();
-    hybridData_->setAllContainers(hybridDataChannel);
-  }
-
-  bool useValueIds = mayUseValueIds(*this);
-  if (useValueIds) {
-    for (auto& other : otherTables_) {
-      if (!mayUseValueIds(*other)) {
-        useValueIds = false;
-        break;
-      }
-    }
-    if (useValueIds) {
-      for (auto& other : otherTables_) {
-        if (dropDuplicates) {
-          // Before merging with the current hashers, all values in the row
-          // containers of other table need to be inserted into uniqueValues_.
-          if (!other->analyze()) {
-            other->setHashMode(HashMode::kHash, 0);
-            useValueIds = false;
-            break;
-          }
-        }
-        for (auto i = 0; i < hashers_.size(); ++i) {
-          hashers_[i]->merge(*other->hashers_[i]);
-          if (!hashers_[i]->mayUseValueIds()) {
-            useValueIds = false;
-            break;
-          }
-        }
-        if (!useValueIds) {
-          break;
-        }
-      }
-    }
-  }
-  numDistinct_ = rows()->numRows();
-
-  for (const auto& other : otherTables_) {
-    numDistinct_ += other->rows()->numRows();
-  }
-  if (!useValueIds) {
-    if (hashMode_ != HashMode::kHash) {
-      setHashMode(HashMode::kHash, 0);
     } else {
-      checkSize(0, true);
+      decideHashMode(0);
     }
-  } else {
-    decideHashMode(0);
+
+    prepared_ = true;
   }
   checkHashBitsOverlap(spillInputStartPartitionBit);
   LOG(INFO) << __FUNCTION__ << ": capacity_ = " << capacity_

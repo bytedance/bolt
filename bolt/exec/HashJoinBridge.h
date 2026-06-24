@@ -60,6 +60,8 @@ class HashJoinBridge : public JoinBridge {
       bool hasNullKeys,
       SpillOffsetToBitsSet offsetToJoinBits = nullptr);
 
+  void setHashTable(std::shared_ptr<BaseHashTable> table, bool hasNullKeys);
+
   void setAntiJoinHasNullKeys();
 
   /// Represents the result of HashBuild operators: a hash table, an optional
@@ -82,6 +84,9 @@ class HashJoinBridge : public JoinBridge {
           offsetToJoinBits(_offsetToJoinBits) {}
 
     HashBuildResult() : hasNullKeys(true) {}
+
+    HashBuildResult(std::shared_ptr<BaseHashTable> _table, bool _hasNullKeys)
+        : hasNullKeys(_hasNullKeys), table(std::move(_table)) {}
 
     bool hasNullKeys;
     std::shared_ptr<BaseHashTable> table;

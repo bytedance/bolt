@@ -502,6 +502,8 @@ void HashProbe::prepareForSpillRestore() {
 
   // Reset the internal states which are relevant to the previous probe run.
   noMoreSpillInput_ = false;
+  // bolt current doesn't have HashProbe Spill function
+  // https://github.com/facebookincubator/velox/commit/2ea66c6204d8f1b27f7682111b335bd4de8ef6fc#diff-9a2573a9b3648b92c3e9342bfcb69ab4748e85e1bb18eea7cd08513e9911b532
   table_.reset();
   spiller_.reset();
   if (!reuseSpillReader_) {

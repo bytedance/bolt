@@ -97,6 +97,9 @@ class HashBuild final : public Operator {
   }
 
   bool needsInput() const override {
+    if (reusedHashTableAddress_ != nullptr) {
+      return false;
+    }
     return !noMoreInput_;
   }
 
@@ -465,6 +468,8 @@ class HashBuild final : public Operator {
   bool scatteredMode_{false}; // Use scattered (non-coalesced) mode
   int driverId_;
   std::unique_ptr<HybridContainer> hybridData_;
+
+  void* reusedHashTableAddress_;
 };
 
 inline std::ostream& operator<<(std::ostream& os, HashBuild::State state) {

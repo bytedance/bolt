@@ -97,6 +97,24 @@ bool HashJoinBridge::setHashTable(
   return hasSpillData;
 }
 
+void HashJoinBridge::setHashTable(
+    std::shared_ptr<BaseHashTable> table,
+    bool hasNullKeys) {
+  BOLT_CHECK_NOT_NULL(table, "setHashTable called with null table");
+
+  std::vector<ContinuePromise> promises;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    BOLT_CHECK(started_);
+    BOLT_CHECK(!buildResult_.has_value());
+    BOLT_CHECK(restoringSpillShards_.empty());
+
+    buildResult_ = HashBuildResult(std::move(table), hasNullKeys);
+    promises = std::move(promises_);
+  }
+  notify(std::move(promises));
+}
+
 void HashJoinBridge::setAntiJoinHasNullKeys() {
   std::vector<ContinuePromise> promises;
   SpillPartitionSet spillPartitions;

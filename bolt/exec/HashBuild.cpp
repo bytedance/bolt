@@ -104,7 +104,8 @@ HashBuild::HashBuild(
           driverCtx->queryConfig().skewRowCountRatioThreshold()),
       isDREnabled_(operatorCtx_->driverCtx()
                        ->queryConfig()
-                       .isDataRetentionUpdateEnabled()) {
+                       .isDataRetentionUpdateEnabled()),
+      reusedHashTableAddress_(joinNode_->reusedHashTableAddress()) {
   BOLT_CHECK(pool()->trackUsage());
   BOLT_CHECK_NOT_NULL(joinBridge_);
 
@@ -118,6 +119,40 @@ HashBuild::HashBuild(
   }
   joinBridge_->addBuilder();
 
+  if (reusedHashTableAddress_ != nullptr) {
+    auto baseHashTable =
+        reinterpret_cast<exec::BaseHashTable*>(reusedHashTableAddress_);
+
+    BOLT_CHECK_NOT_NULL(joinBridge_);
+    joinBridge_->start();
+
+    if (baseHashTable->joinHasNullKeys() && isAntiJoin(joinType_) &&
+        nullAware_ && !joinNode_->filter()) {
+      joinBridge_->setAntiJoinHasNullKeys();
+    } else {
+      baseHashTable->prepareJoinTable({});
+
+      BOLT_CHECK_NOT_NULL(joinBridge_);
+      std::unique_ptr<
+          exec::BaseHashTable,
+          std::function<void(exec::BaseHashTable*)>>
+          hashTable(nullptr, [](exec::BaseHashTable* ptr) { /* Do nothing */ });
+
+      if (auto hasheTableWithNullKeys =
+              dynamic_cast<exec::HashTable<true>*>(baseHashTable)) {
+        hashTable.reset(hasheTableWithNullKeys);
+      } else if (
+          auto hasheTableWithoutNullKeys =
+              dynamic_cast<exec::HashTable<false>*>(baseHashTable)) {
+        hashTable.reset(hasheTableWithoutNullKeys);
+      } else {
+        BOLT_UNREACHABLE("Unexpected HashTable {}", baseHashTable->toString());
+      }
+
+      auto joinHashNullKeys = hashTable->joinHasNullKeys();
+      joinBridge_->setHashTable(std::move(hashTable), joinHashNullKeys);
+    }
+  } else {
   auto inputType = joinNode_->sources()[1]->outputType();
 
   const auto numKeys = joinNode_->rightKeys().size();
@@ -1012,6 +1047,10 @@ void HashBuild::addAndClearSpillTarget(uint64_t& numRows, uint64_t& numBytes) {
 }
 
 void HashBuild::noMoreInput() {
+  if (reusedHashTableAddress_ != nullptr) {
+    return;
+  }
+
   checkRunning();
 
   if (noMoreInput_) {
@@ -1552,6 +1591,9 @@ BlockingReason HashBuild::isBlocked(ContinueFuture* future) {
 }
 
 bool HashBuild::isFinished() {
+  if (reusedHashTableAddress_ != nullptr) {
+    return true;
+  }
   return state_ == State::kFinish;
 }
 
