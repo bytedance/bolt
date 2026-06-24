@@ -159,6 +159,15 @@ class BaseHashTable {
   /// Specifies the hash mode of a table.
   enum class HashMode { kHash, kArray, kNormalizedKey };
 
+  /// Layout for normalized-key group-by probe (aggregation only).
+  enum class NormalizedKeyMode { kNativeBolt, kScalar, kSve };
+
+  /// 16-byte slot for {@link NormalizedKeyMode::kScalar}: key + row pointer.
+  struct NormalizedKeySlot {
+    uint64_t key;
+    char* value;
+  };
+
   static constexpr int8_t kNoSpillInputStartPartitionBit = -1;
 
   /// Returns the string of the given 'mode'.
@@ -551,6 +560,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
+      bool sveNormalizedKeyProbeEnabled = false,
       bool hybridMode = false);
 
   HashTable(
@@ -565,6 +575,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
+      bool sveNormalizedKeyProbeEnabled = false,
       bool hybridMode = false);
 
   ~HashTable() override = default;
@@ -574,7 +585,8 @@ class HashTable : public BaseHashTable {
       const std::vector<Accumulator>& accumulators,
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-      bool jitRowEqVectors) {
+      bool jitRowEqVectors,
+      bool sveNormalizedKeyProbeEnabled = false) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         accumulators,
@@ -585,7 +597,8 @@ class HashTable : public BaseHashTable {
         0, // minTableSizeForParallelJoinBuild
         pool,
         stringArena,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        sveNormalizedKeyProbeEnabled);
   }
 
   static std::unique_ptr<HashTable> createForJoin(
@@ -610,6 +623,7 @@ class HashTable : public BaseHashTable {
         pool,
         nullptr,
         jitRowEqVectors,
+        false, // sveNormalizedKeyProbeEnabled
         hybridMode);
   }
 
@@ -976,6 +990,11 @@ class HashTable : public BaseHashTable {
 
   char* insertEntry(HashLookup& lookup, uint64_t index, vector_size_t row);
 
+  char* insertEntryforSVE(
+      HashLookup& lookup,
+      uint64_t index,
+      vector_size_t row);
+
   bool compareKeys(const char* group, HashLookup& lookup, vector_size_t row);
 
   bool compareKeys(const char* group, const char* inserted);
@@ -985,6 +1004,20 @@ class HashTable : public BaseHashTable {
 
   // Shortcut path for group by with normalized keys.
   void groupNormalizedKeyProbe(HashLookup& lookup);
+
+  void groupNormalizedKeyProbeScalar(HashLookup& lookup);
+
+  void groupNormalizedKeyProbeSVE(HashLookup& lookup);
+
+  void insertForGroupBySve(char** groups, uint64_t* hashes, int32_t numGroups);
+
+  uint64_t* getKeyPtr();
+
+  char** getValuePtr();
+
+  uint8_t* getTagPtr();
+
+  void updateNormalizedKeyModeForAggregation();
 
   // Array probe with SIMD.
   void arrayJoinProbe(HashLookup& lookup);
@@ -1126,6 +1159,8 @@ class HashTable : public BaseHashTable {
   // Counts the number of rehash() calls.
   int64_t numRehashes_{0};
   HashMode hashMode_ = HashMode::kArray;
+  NormalizedKeyMode normalizedKeyMode_ = NormalizedKeyMode::kNativeBolt;
+  bool sveNormalizedKeyProbeRequested_{false};
   // Owns the memory of multiple build side hash join tables that are
   // combined into a single probe hash table.
   std::vector<std::unique_ptr<HashTable<ignoreNullKeys>>> otherTables_;

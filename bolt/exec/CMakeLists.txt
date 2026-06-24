@@ -25,6 +25,15 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+set(BOLT_HASH_AGG_NORMALIZED_KEY_PROBE_SVE "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*)")
+  list(APPEND BOLT_HASH_AGG_NORMALIZED_KEY_PROBE_SVE
+       HashTableNormalizedKeyProbeSve.cpp)
+else()
+  list(APPEND BOLT_HASH_AGG_NORMALIZED_KEY_PROBE_SVE
+       HashTableNormalizedKeyProbeStubs.cpp)
+endif()
+
 bolt_add_library(
   bolt_exec
   $<$<BOOL:${ENABLE_META_SORT}>:meta/MetaRowSorter.cpp>
@@ -59,6 +68,7 @@ bolt_add_library(
   HashPartitionFunction.cpp
   HashProbe.cpp
   HashTable.cpp
+  ${BOLT_HASH_AGG_NORMALIZED_KEY_PROBE_SVE}
   IndexLookupJoin.cpp
   JoinBridge.cpp
   Limit.cpp
@@ -123,6 +133,12 @@ bolt_add_library(
 )
 
 target_compile_features(bolt_exec PRIVATE cxx_std_20)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*)")
+  set_source_files_properties(
+    HashTableNormalizedKeyProbeSve.cpp
+    PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve")
+endif()
 
 set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)
 

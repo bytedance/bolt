@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/GroupingSet.h"
+#include "bolt/exec/HashTableSveRuntime.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -399,23 +400,30 @@ std::vector<Accumulator> GroupingSet::accumulators(bool excludeToIntermediate) {
   return accumulators;
 }
 
-void GroupingSet::createHashTable() {
-  bool jitRowEqVectors = queryConfig_.enableJitRowEqVectors();
+std::unique_ptr<BaseHashTable> GroupingSet::createAggregationHashTable() {
+  const bool jitRowEqVectors = queryConfig_.enableJitRowEqVectors();
+  const bool sveNormalizedKeyProbe =
+      boltHashAggSveNormalizedKeyProbeEnabledFromEnv();
   if (ignoreNullKeys_) {
-    table_ = HashTable<true>::createForAggregation(
+    return HashTable<true>::createForAggregation(
         std::move(hashers_),
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
-  } else {
-    table_ = HashTable<false>::createForAggregation(
-        std::move(hashers_),
-        accumulators(false),
-        &pool_,
-        nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        sveNormalizedKeyProbe);
   }
+  return HashTable<false>::createForAggregation(
+      std::move(hashers_),
+      accumulators(false),
+      &pool_,
+      nullptr,
+      jitRowEqVectors,
+      sveNormalizedKeyProbe);
+}
+
+void GroupingSet::createHashTable() {
+  table_ = createAggregationHashTable();
 
   RowContainer& rows = *table_->rows();
   initializeAggregates(aggregates_, rows, false);
@@ -449,6 +457,7 @@ void GroupingSet::createHashTable() {
     }
   }
 
+  const bool jitRowEqVectors = queryConfig_.enableJitRowEqVectors();
   lookup_ = std::make_unique<HashLookup>(table_->hashers(), jitRowEqVectors);
   if (!isAdaptive_ && table_->hashMode() != BaseHashTable::HashMode::kHash) {
     table_->forceGenericHashMode();

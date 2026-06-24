@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/HashTable.h"
+#include "bolt/exec/HashTableSveRuntime.h"
 #include "bolt/common/base/SelectivityInfo.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -42,6 +43,9 @@
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
 #include <memory>
+#ifndef _WIN32
+#include <cstdlib>
+#endif
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
@@ -80,6 +84,14 @@ class HashTableTestHelper {
 
   void setHashMode(BaseHashTable::HashMode mode, int32_t numNew) {
     table_->setHashMode(mode, numNew);
+  }
+
+  void setNormalizedKeyMode(BaseHashTable::NormalizedKeyMode mode) {
+    table_->normalizedKeyMode_ = mode;
+  }
+
+  void setSveNormalizedKeyProbeRequested(bool requested) {
+    table_->sveNormalizedKeyProbeRequested_ = requested;
   }
 
  private:
@@ -1187,6 +1199,69 @@ TEST_P(HashTableTest, toStringMultipleKeys) {
 
   ASSERT_NO_THROW(table->toString());
 }
+
+TEST(HashTableTest, boltHashAggSveNormalizedKeyProbeEnv) {
+#ifndef _WIN32
+  const char* const kEnv = "BOLT_HASH_AGG_SVE_NORMALIZED_KEY_PROBE";
+  unsetenv(kEnv);
+  EXPECT_FALSE(boltHashAggSveNormalizedKeyProbeEnabledFromEnv());
+  ASSERT_EQ(setenv(kEnv, "1", 1), 0);
+  EXPECT_TRUE(boltHashAggSveNormalizedKeyProbeEnabledFromEnv());
+  ASSERT_EQ(setenv(kEnv, "0", 1), 0);
+  EXPECT_FALSE(boltHashAggSveNormalizedKeyProbeEnabledFromEnv());
+  unsetenv(kEnv);
+#else
+  GTEST_SKIP() << "setenv/unsetenv not used on Windows";
+#endif
+}
+
+#if defined(__aarch64__) && defined(__linux__)
+TEST_P(HashTableTest, normalizedKeySveMatchesScalar) {
+  auto type = ROW({"k1"}, {BIGINT()});
+  const int32_t numRows = 512;
+  keySpacing_ = 7;
+
+  auto makeTable = [&](BaseHashTable::NormalizedKeyMode mode) {
+    std::vector<std::unique_ptr<VectorHasher>> keyHashers;
+    keyHashers.emplace_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+    auto table = HashTable<false>::createForAggregation(
+        std::move(keyHashers),
+        std::vector<Accumulator>{},
+        pool(),
+        nullptr,
+        GetParam().jitRowEqVectors,
+        true);
+    auto helper = HashTableTestHelper<false>::create(table.get());
+    helper.setSveNormalizedKeyProbeRequested(true);
+    helper.setHashMode(BaseHashTable::HashMode::kNormalizedKey, numRows);
+    helper.setNormalizedKeyMode(mode);
+    return table;
+  };
+
+  auto runProbe = [&](HashTable<false>& table) {
+    std::vector<RowVectorPtr> batches;
+    makeRows(numRows, 1, 0, type, batches);
+    auto lookup = std::make_unique<HashLookup>(
+        table.hashers(), GetParam().jitRowEqVectors);
+    insertGroups(*batches.back(), *lookup, table);
+    return lookup->hits;
+  };
+
+  auto scalarTable = makeTable(BaseHashTable::NormalizedKeyMode::kScalar);
+  const auto scalarHits = runProbe(*scalarTable);
+
+  if (!linuxAarch64RuntimeHasSve()) {
+    GTEST_SKIP() << "No SVE at runtime";
+  }
+  auto sveTable = makeTable(BaseHashTable::NormalizedKeyMode::kSve);
+  const auto sveHits = runProbe(*sveTable);
+
+  ASSERT_EQ(scalarHits.size(), sveHits.size());
+  for (vector_size_t i = 0; i < scalarHits.size(); ++i) {
+    ASSERT_EQ(scalarHits[i], sveHits[i]) << "at row " << i;
+  }
+}
+#endif
 
 TEST(HashTableTest, tableInsertPartitionInfo) {
   std::vector<char*> overflows;

@@ -64,6 +64,23 @@ class HashAggregation : public Operator {
 
   void close() override;
 
+ protected:
+  /// Default constructs {@link GroupingSet}. Override together with
+  /// {@link GroupingSet::createAggregationHashTable()} for custom hash tables.
+  virtual std::unique_ptr<GroupingSet> createGroupingSetForHashAggregation(
+      const RowTypePtr& inputType,
+      std::vector<std::unique_ptr<VectorHasher>>&& hashers,
+      std::vector<column_index_t>&& preGroupedKeys,
+      std::vector<AggregateInfo>&& aggregates,
+      bool ignoreNullKeys,
+      bool isPartial,
+      bool isRawInput,
+      const std::vector<vector_size_t>& globalGroupingSets,
+      const std::optional<column_index_t>& groupIdChannel,
+      const common::SpillConfig* spillConfig,
+      tsan_atomic<bool>* nonReclaimableSection,
+      OperatorCtx* operatorCtx);
+
  private:
   void updateRuntimeStats();
 

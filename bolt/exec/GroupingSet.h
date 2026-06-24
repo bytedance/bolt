@@ -57,7 +57,7 @@ class GroupingSet {
       tsan_atomic<bool>* nonReclaimableSection,
       OperatorCtx* operatorCtx);
 
-  ~GroupingSet();
+  virtual ~GroupingSet();
 
   // Used by MarkDistinct operator to identify rows with unique values.
   static std::unique_ptr<GroupingSet> createForMarkDistinct(
@@ -274,6 +274,11 @@ class GroupingSet {
   }
 
   void createHashTable();
+
+  /// Builds the aggregation-side hash table. Override to supply a custom
+  /// {@link BaseHashTable} (e.g. when {@code BOLT_HASH_AGG_SVE_NORMALIZED_KEY_PROBE}
+  /// is set, or for plugin-specific table types).
+  virtual std::unique_ptr<BaseHashTable> createAggregationHashTable();
 
   void populateTempVectors(int32_t aggregateIndex, const RowVectorPtr& input);
 

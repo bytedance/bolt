@@ -186,7 +186,7 @@ void HashAggregation::initialize() {
   addRuntimeStat(
       "aggregationOutputCompositeVector",
       RuntimeCounter(supportRowBasedOutput_));
-  groupingSet_ = std::make_unique<GroupingSet>(
+  groupingSet_ = createGroupingSetForHashAggregation(
       inputType,
       std::move(hashers),
       std::move(preGroupedChannels),
@@ -818,5 +818,33 @@ void HashAggregation::updateEstimatedOutputRowSize() {
   } else if (rowSize > estimatedOutputRowSize_.value()) {
     estimatedOutputRowSize_ = rowSize;
   }
+}
+
+std::unique_ptr<GroupingSet> HashAggregation::createGroupingSetForHashAggregation(
+    const RowTypePtr& inputType,
+    std::vector<std::unique_ptr<VectorHasher>>&& hashers,
+    std::vector<column_index_t>&& preGroupedKeys,
+    std::vector<AggregateInfo>&& aggregates,
+    bool ignoreNullKeys,
+    bool isPartial,
+    bool isRawInput,
+    const std::vector<vector_size_t>& globalGroupingSets,
+    const std::optional<column_index_t>& groupIdChannel,
+    const common::SpillConfig* spillConfig,
+    tsan_atomic<bool>* nonReclaimableSection,
+    OperatorCtx* operatorCtx) {
+  return std::make_unique<GroupingSet>(
+      inputType,
+      std::move(hashers),
+      std::move(preGroupedKeys),
+      std::move(aggregates),
+      ignoreNullKeys,
+      isPartial,
+      isRawInput,
+      globalGroupingSets,
+      groupIdChannel,
+      spillConfig,
+      nonReclaimableSection,
+      operatorCtx);
 }
 } // namespace bytedance::bolt::exec

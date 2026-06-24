@@ -42,6 +42,8 @@
 #include "bolt/common/process/ProcessBase.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/HashTable.h"
+
+#include "bolt/exec/HashTableSveRuntime.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
@@ -77,12 +79,14 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJit,
+    bool sveNormalizedKeyProbeEnabled,
     bool hybridMode)
     : BaseHashTable(std::move(hashers)),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
       isJoinBuild_(isJoinBuild),
       joinBuildNoDuplicates_(!allowDuplicates),
       hashMode_(mode),
+      sveNormalizedKeyProbeRequested_(sveNormalizedKeyProbeEnabled),
       enableJit_(enableJit) {
   std::vector<TypePtr> keys;
   for (auto& hasher : hashers_) {
@@ -148,6 +152,7 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJitRowEqVectors,
+    bool sveNormalizedKeyProbeEnabled,
     bool hybridMode)
     : HashTable<ignoreNullKeys>(
           std::move(hashers),
@@ -161,6 +166,7 @@ HashTable<ignoreNullKeys>::HashTable(
           pool,
           stringArena,
           enableJitRowEqVectors,
+          sveNormalizedKeyProbeEnabled,
           hybridMode) {}
 
 int32_t ProbeState::row() const {
@@ -358,6 +364,14 @@ void HashTable<ignoreNullKeys>::storeRowPointer(
     reinterpret_cast<char**>(table_)[index] = row;
     return;
   }
+  if (hashMode_ == HashMode::kNormalizedKey &&
+      normalizedKeyMode_ == NormalizedKeyMode::kScalar && !isJoinBuild_) {
+    auto* table = reinterpret_cast<NormalizedKeySlot*>(table_);
+    table[index].key =
+        reinterpret_cast<normalized_key_t*>(row)[-1]; // NOLINT
+    table[index].value = row;
+    return;
+  }
   const int64_t offset = bucketOffset(index);
   auto* bucket = bucketAt(offset);
   const auto slotIndex = index & (sizeof(TagVector) - 1);
@@ -370,16 +384,17 @@ char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
     vector_size_t row) {
+  if (hashMode_ == HashMode::kNormalizedKey &&
+      normalizedKeyMode_ == NormalizedKeyMode::kSve) {
+    return insertEntryforSVE(lookup, index, row);
+  }
   char* group = rows_->newRow();
   lookup.hits[row] = group; // NOLINT
   storeKeys(lookup, row);
-  storeRowPointer(index, lookup.hashes[row], group);
   if (hashMode_ == HashMode::kNormalizedKey) {
-    // We store the unique digest of key values (normalized key) in
-    // the word below the row. Space was reserved in the allocation
-    // unless we have given up on normalized keys.
     RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
   }
+  storeRowPointer(index, lookup.hashes[row], group);
   ++numDistinct_;
   lookup.newGroups.push_back(row);
   return group;
@@ -630,7 +645,51 @@ void HashTable<ignoreNullKeys>::groupProbe(HashLookup& lookup) {
 }
 
 template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::groupNormalizedKeyProbeScalar(
+    HashLookup& lookup) {
+  BOLT_DCHECK(!lookup.hashes.empty());
+  BOLT_DCHECK(!lookup.hits.empty());
+
+  int32_t numProbes = lookup.rows.size();
+  const vector_size_t* rows = lookup.rows.data();
+  auto hashes = lookup.hashes.data();
+  auto groups = lookup.hits.data();
+
+  auto* table = reinterpret_cast<NormalizedKeySlot*>(table_);
+  for (int32_t i = 0; i < numProbes; ++i) {
+    auto row = rows[i];
+    uint64_t index = hashes[row] & (capacity_ - 1);
+    uint64_t start = index;
+    while (true) {
+      char* group = table[index].value;
+      if (UNLIKELY(!table[index].value)) {
+        group = insertEntry(lookup, index, row);
+        groups[row] = group;
+        break;
+      }
+      if (table[index].key == lookup.normalizedKeys[row]) {
+        groups[row] = group;
+        break;
+      }
+      index = (index + 1) & (capacity_ - 1);
+      if (index == start) {
+        BOLT_FAIL(
+            "Have looped through all the buckets in table: {}", toString());
+      }
+    }
+  }
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::groupNormalizedKeyProbe(HashLookup& lookup) {
+  if (normalizedKeyMode_ == NormalizedKeyMode::kScalar) {
+    groupNormalizedKeyProbeScalar(lookup);
+    return;
+  }
+  if (normalizedKeyMode_ == NormalizedKeyMode::kSve) {
+    groupNormalizedKeyProbeSVE(lookup);
+    return;
+  }
   ProbeState state1;
   ProbeState state2;
   ProbeState state3;
@@ -839,21 +898,28 @@ void HashTable<ignoreNullKeys>::allocateTables(uint64_t size) {
   BOLT_CHECK(bits::isPowerOfTwo(size), "Size is not a power of two: {}", size);
   BOLT_CHECK_GT(size, 0);
   capacity_ = size;
-  const uint64_t byteSize = capacity_ * tableSlotSize();
+  size_t slotSize;
+  if (hashMode_ == HashMode::kNormalizedKey &&
+      normalizedKeyMode_ == NormalizedKeyMode::kScalar && !isJoinBuild_) {
+    slotSize = 16;
+  } else if (
+      hashMode_ == HashMode::kNormalizedKey &&
+      normalizedKeyMode_ == NormalizedKeyMode::kSve && !isJoinBuild_) {
+    slotSize = 17;
+  } else {
+    slotSize = tableSlotSize();
+  }
+  const uint64_t byteSize = capacity_ * slotSize;
   BOLT_CHECK_EQ(byteSize % kBucketSize, 0);
   numTombstones_ = 0;
   sizeMask_ = byteSize - 1;
   numBuckets_ = byteSize / kBucketSize;
   sizeBits_ = __builtin_popcountll(sizeMask_);
   bucketOffsetMask_ = sizeMask_ & ~(kBucketSize - 1);
-  // The total size is 8 bytes per slot, in groups of 16 slots with 16 bytes of
-  // tags and 16 * 6 bytes of pointers and a padding of 16 bytes to round up the
-  // cache line.
-  const auto numPages =
-      memory::AllocationTraits::numPages(size * tableSlotSize());
+  const auto numPages = memory::AllocationTraits::numPages(size * slotSize);
   rows_->pool()->allocateContiguous(numPages, tableAllocation_);
   table_ = tableAllocation_.data<char*>();
-  memset(table_, 0, capacity_ * sizeof(char*));
+  memset(table_, 0, capacity_ * slotSize);
 }
 
 template <bool ignoreNullKeys>
@@ -868,8 +934,16 @@ void HashTable<ignoreNullKeys>::clear() {
     }
   }
   if (table_) {
-    // All modes have 8 bytes per slot.
-    memset(table_, 0, capacity_ * sizeof(char*));
+    if (hashMode_ == HashMode::kNormalizedKey &&
+        normalizedKeyMode_ == NormalizedKeyMode::kScalar && !isJoinBuild_) {
+      memset(table_, 0, capacity_ * 16);
+    } else if (
+        hashMode_ == HashMode::kNormalizedKey &&
+        normalizedKeyMode_ == NormalizedKeyMode::kSve && !isJoinBuild_) {
+      memset(table_, 0, capacity_ * 17);
+    } else {
+      memset(table_, 0, capacity_ * sizeof(char*));
+    }
   }
   numDistinct_ = 0;
   numTombstones_ = 0;
@@ -1214,6 +1288,10 @@ void HashTable<ignoreNullKeys>::insertForGroupBy(
       BOLT_CHECK_NULL(table_[index]);
       table_[index] = groups[i];
     }
+  } else if (
+      hashMode_ == HashMode::kNormalizedKey &&
+      normalizedKeyMode_ == NormalizedKeyMode::kSve) {
+    insertForGroupBySve(groups, hashes, numGroups);
   } else {
     constexpr int32_t kPrefetchDistance = 10;
     for (int32_t i = 0; i < numGroups; ++i) {
@@ -1449,10 +1527,55 @@ void HashTable<ignoreNullKeys>::setHashMode(HashMode mode, int32_t numNew) {
     checkSize(numNew, true);
   } else if (mode == HashMode::kNormalizedKey) {
     hashMode_ = HashMode::kNormalizedKey;
+    updateNormalizedKeyModeForAggregation();
     capacity_ = 0;
     // Makes tables of the right size and rehashes.
     checkSize(numNew, true);
   }
+}
+
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::updateNormalizedKeyModeForAggregation() {
+  if (isJoinBuild_ || !sveNormalizedKeyProbeRequested_) {
+    normalizedKeyMode_ = NormalizedKeyMode::kNativeBolt;
+    return;
+  }
+  if (linuxAarch64RuntimeHasSve()) {
+    normalizedKeyMode_ = NormalizedKeyMode::kSve;
+  } else {
+    normalizedKeyMode_ = NormalizedKeyMode::kScalar;
+  }
+}
+
+template <bool ignoreNullKeys>
+uint64_t* HashTable<ignoreNullKeys>::getKeyPtr() {
+  return reinterpret_cast<uint64_t*>(table_);
+}
+
+template <bool ignoreNullKeys>
+char** HashTable<ignoreNullKeys>::getValuePtr() {
+  return reinterpret_cast<char**>(table_ + capacity_);
+}
+
+template <bool ignoreNullKeys>
+uint8_t* HashTable<ignoreNullKeys>::getTagPtr() {
+  return reinterpret_cast<uint8_t*>(table_ + 2 * capacity_);
+}
+
+template <bool ignoreNullKeys>
+char* HashTable<ignoreNullKeys>::insertEntryforSVE(
+    HashLookup& lookup,
+    uint64_t index,
+    vector_size_t row) {
+  char* group = rows_->newRow();
+  lookup.hits[row] = group; // NOLINT
+  storeKeys(lookup, row);
+  if (hashMode_ == HashMode::kNormalizedKey) {
+    RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
+  }
+  ++numDistinct_;
+  lookup.newGroups.push_back(row);
+  return group;
 }
 
 template <bool ignoreNullKeys>
