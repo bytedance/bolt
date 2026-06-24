@@ -120,121 +120,114 @@ HashBuild::HashBuild(
   joinBridge_->addBuilder();
 
   if (reusedHashTableAddress_ != nullptr) {
-    auto baseHashTable =
+    auto* baseHashTable =
         reinterpret_cast<exec::BaseHashTable*>(reusedHashTableAddress_);
 
     BOLT_CHECK_NOT_NULL(joinBridge_);
     joinBridge_->start();
 
-    if (baseHashTable->joinHasNullKeys() && isAntiJoin(joinType_) &&
-        nullAware_ && !joinNode_->filter()) {
+    baseHashTable->prepareJoinTable({});
+
+    const bool hasNullKeys = baseHashTable->joinHasNullKeys();
+
+    if (hasNullKeys && isAntiJoin(joinType_) && nullAware_ &&
+        !joinNode_->filter()) {
       joinBridge_->setAntiJoinHasNullKeys();
     } else {
-      baseHashTable->prepareJoinTable({});
-
-      BOLT_CHECK_NOT_NULL(joinBridge_);
-      std::unique_ptr<
-          exec::BaseHashTable,
-          std::function<void(exec::BaseHashTable*)>>
-          hashTable(nullptr, [](exec::BaseHashTable* ptr) { /* Do nothing */ });
-
-      if (auto hasheTableWithNullKeys =
-              dynamic_cast<exec::HashTable<true>*>(baseHashTable)) {
-        hashTable.reset(hasheTableWithNullKeys);
-      } else if (
-          auto hasheTableWithoutNullKeys =
-              dynamic_cast<exec::HashTable<false>*>(baseHashTable)) {
-        hashTable.reset(hasheTableWithoutNullKeys);
-      } else {
-        BOLT_UNREACHABLE("Unexpected HashTable {}", baseHashTable->toString());
-      }
-
-      auto joinHashNullKeys = hashTable->joinHasNullKeys();
-      joinBridge_->setHashTable(std::move(hashTable), joinHashNullKeys);
+      joinBridge_->setHashTable(
+          std::shared_ptr<exec::BaseHashTable>(
+              baseHashTable, [](exec::BaseHashTable*) {}),
+          hasNullKeys);
     }
   } else {
-  auto inputType = joinNode_->sources()[1]->outputType();
+    auto inputType = joinNode_->sources()[1]->outputType();
 
-  const auto numKeys = joinNode_->rightKeys().size();
-  keyChannels_.reserve(numKeys);
-  std::vector<std::string> names;
-  names.reserve(inputType->size());
-  std::vector<TypePtr> types;
-  types.reserve(inputType->size());
+    const auto numKeys = joinNode_->rightKeys().size();
+    keyChannels_.reserve(numKeys);
+    std::vector<std::string> names;
+    names.reserve(inputType->size());
+    std::vector<TypePtr> types;
+    types.reserve(inputType->size());
 
-  for (int i = 0; i < numKeys; ++i) {
-    auto& key = joinNode_->rightKeys()[i];
-    auto channel = exprToChannel(key.get(), inputType);
-    keyChannelMap_[channel] = i;
-    keyChannels_.emplace_back(channel);
-    names.emplace_back(inputType->nameOf(channel));
-    types.emplace_back(inputType->childAt(channel));
-  }
+    for (int i = 0; i < numKeys; ++i) {
+      auto& key = joinNode_->rightKeys()[i];
+      auto channel = exprToChannel(key.get(), inputType);
+      keyChannelMap_[channel] = i;
+      keyChannels_.emplace_back(channel);
+      names.emplace_back(inputType->nameOf(channel));
+      types.emplace_back(inputType->childAt(channel));
+    }
 
-  maxHashTableBucketCount_ =
-      operatorCtx_->driverCtx()->queryConfig().maxHashTableSize();
-  BOLT_CHECK(maxHashTableBucketCount_ > 1);
+    maxHashTableBucketCount_ =
+        operatorCtx_->driverCtx()->queryConfig().maxHashTableSize();
+    BOLT_CHECK(maxHashTableBucketCount_ > 1);
 
-  dropDuplicates_ = canDropDuplicates(joinNode_);
-  addRuntimeStat(
-      "triggerDeduplicateInHashBuild", RuntimeCounter(dropDuplicates_ ? 1 : 0));
+    dropDuplicates_ = canDropDuplicates(joinNode_);
+    addRuntimeStat(
+        "triggerDeduplicateInHashBuild",
+        RuntimeCounter(dropDuplicates_ ? 1 : 0));
 
-  // Identify the non-key build side columns and make a decoder for each.
-  const int32_t numDependents = inputType->size() - numKeys;
-  std::vector<std::string> dependentNames;
-  std::vector<TypePtr> dependentTypes;
+    // Identify the non-key build side columns and make a decoder for each.
+    const int32_t numDependents = inputType->size() - numKeys;
+    std::vector<std::string> dependentNames;
+    std::vector<TypePtr> dependentTypes;
 
-  hybridJoin_ = operatorCtx_->driverCtx()->queryConfig().hybridJoinEnabled() &&
-      numDependents > 0 && !joinNode_->isLeftSemiFilterJoin() &&
-      !joinNode_->isLeftSemiProjectJoin() && !joinNode_->isAntiJoin();
-  scatteredMode_ = hybridJoin_ &&
-      operatorCtx_->driverCtx()->queryConfig().hybridJoinScatteredModeEnabled();
+    hybridJoin_ =
+        operatorCtx_->driverCtx()->queryConfig().hybridJoinEnabled() &&
+        numDependents > 0 && !joinNode_->isLeftSemiFilterJoin() &&
+        !joinNode_->isLeftSemiProjectJoin() && !joinNode_->isAntiJoin();
+    scatteredMode_ = hybridJoin_ &&
+        operatorCtx_->driverCtx()
+            ->queryConfig()
+            .hybridJoinScatteredModeEnabled();
 
-  if (!dropDuplicates_ && numDependents > 0) {
-    // Number of join keys (numKeys) may be less then number of input columns
-    // (inputType->size()). In this case numDependents is negative and cannot be
-    // used to call 'reserve'. This happens when we join different probe side
-    // keys with the same build side key: SELECT * FROM t LEFT JOIN u ON t.k1 =
-    // u.k AND t.k2 = u.k.
-    dependentChannels_.reserve(numDependents);
-    decoders_.reserve(numDependents);
-    dependentNames.reserve(numDependents);
-    dependentTypes.reserve(numDependents);
-  }
-  if (!dropDuplicates_) {
-    // For left semi and anti join with no extra filter, hash table does not
-    // store dependent columns.
-    for (auto i = 0; i < inputType->size(); ++i) {
-      if (keyChannelMap_.find(i) == keyChannelMap_.end()) {
-        dependentChannels_.emplace_back(i);
-        decoders_.emplace_back(std::make_unique<DecodedVector>());
-        names.emplace_back(inputType->nameOf(i));
-        types.emplace_back(inputType->childAt(i));
-        dependentNames.emplace_back(inputType->nameOf(i));
-        dependentTypes.emplace_back(inputType->childAt(i));
+    if (!dropDuplicates_ && numDependents > 0) {
+      // Number of join keys (numKeys) may be less then number of input columns
+      // (inputType->size()). In this case numDependents is negative and cannot
+      // be used to call 'reserve'. This happens when we join different probe
+      // side keys with the same build side key: SELECT * FROM t LEFT JOIN u ON
+      // t.k1 = u.k AND t.k2 = u.k.
+      dependentChannels_.reserve(numDependents);
+      decoders_.reserve(numDependents);
+      dependentNames.reserve(numDependents);
+      dependentTypes.reserve(numDependents);
+    }
+    if (!dropDuplicates_) {
+      // For left semi and anti join with no extra filter, hash table does not
+      // store dependent columns.
+      for (auto i = 0; i < inputType->size(); ++i) {
+        if (keyChannelMap_.find(i) == keyChannelMap_.end()) {
+          dependentChannels_.emplace_back(i);
+          decoders_.emplace_back(std::make_unique<DecodedVector>());
+          names.emplace_back(inputType->nameOf(i));
+          types.emplace_back(inputType->childAt(i));
+          dependentNames.emplace_back(inputType->nameOf(i));
+          dependentTypes.emplace_back(inputType->childAt(i));
+        }
       }
     }
-  }
 
-  tableType_ = ROW(std::move(names), std::move(types));
-  dependentTypes_ = ROW(std::move(dependentNames), std::move(dependentTypes));
-  driverId_ = driverCtx->driverId;
-  if (hybridJoin_) {
-    BOLT_CHECK_LE(
-        driverId_,
-        255,
-        "driverId {} exceeds maximum 255 for hybrid join mode",
-        driverId_);
-  }
-  setupTable();
-  setupSpiller();
-  intermediateStateCleared_ = false;
+    tableType_ = ROW(std::move(names), std::move(types));
+    dependentTypes_ = ROW(std::move(dependentNames), std::move(dependentTypes));
+    driverId_ = driverCtx->driverId;
+    if (hybridJoin_) {
+      BOLT_CHECK_LE(
+          driverId_,
+          255,
+          "driverId {} exceeds maximum 255 for hybrid join mode",
+          driverId_);
+    }
+    setupTable();
+    setupSpiller();
+    intermediateStateCleared_ = false;
 
-  LOG(INFO) << name() << " HashBuild created for " << operatorCtx_->toString()
-            << ", spill enabled: " << spillEnabled()
-            << ", maxHashTableSize = " << maxHashTableBucketCount_
-            << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disabled")
-            << ", scattered mode " << (scatteredMode_ ? "enabled" : "disabled");
+    LOG(INFO) << name() << " HashBuild created for " << operatorCtx_->toString()
+              << ", spill enabled: " << spillEnabled()
+              << ", maxHashTableSize = " << maxHashTableBucketCount_
+              << ", hybrid mode " << (hybridJoin_ ? "enabled" : "disabled")
+              << ", scattered mode "
+              << (scatteredMode_ ? "enabled" : "disabled");
+  }
 }
 
 void HashBuild::initialize() {

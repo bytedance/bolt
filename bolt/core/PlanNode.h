@@ -1783,6 +1783,8 @@ class HashJoinNode : public AbstractJoinNode {
 
   const bool nullAware_;
 
+  // Process-local pointer used only for hash table reuse. It must not be
+  // serialized or used across processes or machines.
   void* reusedHashTableAddress_;
 };
 

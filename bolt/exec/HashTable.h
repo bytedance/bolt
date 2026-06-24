@@ -1205,7 +1205,7 @@ class HashTable : public BaseHashTable {
 
   // True if this is a build side of an anti or left semi project join and has
   // at least one entry with null join keys.
-  bool joinHasNullKeys_{false};
+  std::atomic<bool> joinHasNullKeys_{false};
 };
 
 } // namespace exec
