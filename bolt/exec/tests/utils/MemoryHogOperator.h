@@ -23,10 +23,13 @@ namespace bytedance::bolt::exec::test {
 
 /// A leaf source operator that emits a fixed list of batches and, right before
 /// emitting the batch at 'triggerAt', allocates 'allocBytes' from its own
-/// operator memory pool and frees it again. The allocation creates real memory
-/// pressure on the task, which can be used to drive a spill or a cross-operator
-/// memory reclaim (e.g. to reclaim a downstream operator that is idle between
-/// batches).
+/// operator memory pool. The allocation creates real memory pressure on the
+/// task, which can be used to drive a spill or a cross-operator memory reclaim
+/// (e.g. to reclaim a downstream operator that is idle between batches).
+///
+/// By default the allocation is freed immediately. When 'holdAllocation' is
+/// true it is held (and reclaimable on demand) until destruction, modeling an
+/// upstream operator that keeps most of the task memory for the whole run.
 ///
 /// The translator is registered automatically at static-init time (see
 /// MemoryHogOperator.cpp), so callers only need to add a MemoryHogNode to their
@@ -41,7 +44,8 @@ class MemoryHogNode : public core::PlanNode {
       RowTypePtr outputType,
       std::vector<RowVectorPtr> batches,
       int32_t triggerAt,
-      int64_t allocBytes);
+      int64_t allocBytes,
+      bool holdAllocation = false);
 
   const RowTypePtr& outputType() const override {
     return outputType_;
@@ -68,6 +72,10 @@ class MemoryHogNode : public core::PlanNode {
     return allocBytes_;
   }
 
+  bool holdAllocation() const {
+    return holdAllocation_;
+  }
+
   folly::dynamic serialize() const override {
     return PlanNode::serialize();
   }
@@ -81,6 +89,7 @@ class MemoryHogNode : public core::PlanNode {
   const std::vector<RowVectorPtr> batches_;
   const int32_t triggerAt_;
   const int64_t allocBytes_;
+  const bool holdAllocation_;
 };
 
 class MemoryHogOperator : public SourceOperator {
@@ -97,7 +106,15 @@ class MemoryHogOperator : public SourceOperator {
             "MemoryHog"),
         batches_(node->batches()),
         triggerAt_(node->triggerAt()),
-        allocBytes_(node->allocBytes()) {}
+        allocBytes_(node->allocBytes()),
+        holdAllocation_(node->holdAllocation()) {}
+
+  ~MemoryHogOperator() override {
+    if (heldBuffer_ != nullptr) {
+      pool()->free(heldBuffer_, allocBytes_);
+      heldBuffer_ = nullptr;
+    }
+  }
 
   RowVectorPtr getOutput() override {
     if (current_ >= static_cast<int32_t>(batches_.size())) {
@@ -105,9 +122,14 @@ class MemoryHogOperator : public SourceOperator {
     }
     if (current_ == triggerAt_) {
       // Allocate from this operator's pool to create memory pressure on the
-      // task, then free it. This drives the task's spill / reclaim path.
+      // task. This drives the task's spill / reclaim path.
       void* buffer = pool()->allocate(allocBytes_);
-      pool()->free(buffer, allocBytes_);
+      if (holdAllocation_) {
+        // Hold it for the rest of the run (reclaimable on demand).
+        heldBuffer_ = buffer;
+      } else {
+        pool()->free(buffer, allocBytes_);
+      }
     }
     return batches_[current_++];
   }
@@ -120,10 +142,30 @@ class MemoryHogOperator : public SourceOperator {
     return current_ >= static_cast<int32_t>(batches_.size());
   }
 
+  // A held allocation is reclaimable on demand.
+  bool canReclaim() const override {
+    return holdAllocation_;
+  }
+
+  bool reclaimableBytes(uint64_t& reclaimableBytes) const override {
+    reclaimableBytes = heldBuffer_ != nullptr ? allocBytes_ : 0;
+    return canReclaim();
+  }
+
+  void reclaim(uint64_t /*targetBytes*/, memory::MemoryReclaimer::Stats&)
+      override {
+    if (heldBuffer_ != nullptr) {
+      pool()->free(heldBuffer_, allocBytes_);
+      heldBuffer_ = nullptr;
+    }
+  }
+
  private:
   const std::vector<RowVectorPtr> batches_;
   const int32_t triggerAt_;
   const int64_t allocBytes_;
+  const bool holdAllocation_;
+  void* heldBuffer_ = nullptr;
   int32_t current_ = 0;
 };
 

@@ -29,11 +29,13 @@ MemoryHogNode::MemoryHogNode(
     RowTypePtr outputType,
     std::vector<RowVectorPtr> batches,
     int32_t triggerAt,
-    int64_t allocBytes)
+    int64_t allocBytes,
+    bool holdAllocation)
     : PlanNode(id),
       outputType_(std::move(outputType)),
       batches_(std::move(batches)),
       triggerAt_(triggerAt),
-      allocBytes_(allocBytes) {}
+      allocBytes_(allocBytes),
+      holdAllocation_(holdAllocation) {}
 
 } // namespace bytedance::bolt::exec::test

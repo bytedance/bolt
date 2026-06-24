@@ -119,7 +119,10 @@ TEST_F(ShuffleMemoryTest, testMinMemLimit) {
   param.dataTypeGroup = DataTypeGroup::kString;
   param.numPartitions = 10;
   param.numMappers = 1;
-  param.memoryLimit = 100 * 1024 * 1024; // 100MB
+  // kMinMemLimit (the writer's minimum budget) is 128MB, so the task needs
+  // enough headroom to hold it; with only ~100MB the writer would OOM before
+  // it could reach the minimum.
+  param.memoryLimit = 512 * 1024 * 1024; // 512MB
   param.shuffleBufferSize = 40 * 1024 * 1024; // 40MB
 
   ShuffleInputData inputData;
@@ -282,6 +285,116 @@ TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
     while (cursor->moveNext()) {
     }
   });
+}
+
+// Issue #662: an upstream operator holding most of the memory leaves writer V2
+// a tiny budget, so it spills every batch into small splits that compress
+// poorly and bloat the shuffle output. Enforcing a minimum budget
+// (kMinMemLimit) reclaims the upstream and yields large, well-compressed
+// splits.
+TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
+  using namespace bytedance::bolt::exec::test;
+
+  constexpr int32_t kNumPartitions = 256;
+  constexpr int32_t kRowCount = 256; // one row per partition per batch
+  constexpr int32_t kNumBatches = 40;
+  constexpr size_t kStrLen = 32 * 1024; // ~8MB per batch (256 rows * 32KB)
+
+  // One distinct incompressible string per partition, identical across its
+  // rows: a large split dedups the repeats, but fragmenting it across many
+  // small splits re-stores the string each time, so compressed size grows with
+  // spill count.
+  std::vector<std::string> perPartition(kNumPartitions);
+  for (int p = 0; p < kNumPartitions; ++p) {
+    std::string s(kStrLen, '\0');
+    uint32_t x = static_cast<uint32_t>(p) * 2654435761u + 12345u;
+    for (auto& c : s) {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      c = static_cast<char>(x);
+    }
+    perPartition[p] = std::move(s);
+  }
+
+  auto rowType = ROW({"pid", "c0"}, {INTEGER(), VARCHAR()});
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < kNumBatches; ++b) {
+    auto pidVector = makeFlatVector<int32_t>(
+        kRowCount, [](auto row) { return row % kNumPartitions; });
+    auto dataVector = makeFlatVector<StringView>(kRowCount, [&](auto row) {
+      return StringView(perPartition[row % kNumPartitions]);
+    });
+    batches.push_back(makeRowVector({"pid", "c0"}, {pidVector, dataVector}));
+  }
+
+  // 1GB task; the hog holds 979MB, leaving the writer ~45MB free (far below
+  // kMinMemLimit). Demanding that minimum reclaims the held memory.
+  const int64_t memoryLimit = 1024LL * 1024 * 1024;
+  const int64_t kHeldBytes = 979LL * 1024 * 1024;
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(
+      memoryLimit, /*withOperatorReclaim=*/true);
+
+  auto tempDir = TempDirectoryPath::create();
+  std::string localDir = tempDir->path + "/local_dir";
+  std::filesystem::create_directories(localDir);
+
+  ShuffleWriterOptions writerOptions;
+  writerOptions.partitioning = Partitioning::kHash;
+  writerOptions.forceShuffleWriterType =
+      static_cast<int32_t>(ShuffleWriterType::V2);
+  writerOptions.partitionWriterOptions.numPartitions = kNumPartitions;
+  writerOptions.partitionWriterOptions.partitionWriterType =
+      PartitionWriterType::kLocal;
+  writerOptions.partitionWriterOptions.dataFile =
+      tempDir->path + "/shuffle_data.bin";
+  writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+  writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+
+  // MemoryHog -> SparkShuffleWriter: the hog holds kHeldBytes (reclaimable).
+  auto sourceNode = std::make_shared<MemoryHogNode>(
+      "source",
+      rowType,
+      batches,
+      /*triggerAt=*/0,
+      /*allocBytes=*/kHeldBytes,
+      /*holdAllocation=*/true);
+  core::PlanNodeId writerId("writer");
+  ShuffleWriterMetrics metrics;
+  auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
+  auto writerNode = std::make_shared<SparkShuffleWriterNode>(
+      writerId, writerOptions, reportCallback, sourceNode);
+
+  CursorParameters params;
+  params.planNode = writerNode;
+  params.serialExecution = true;
+  params.queryCtx = core::QueryCtx::create(
+      nullptr,
+      core::QueryConfig{{}},
+      {},
+      cache::AsyncDataCache::getInstance(),
+      memoryManagerHolder->rootPool());
+
+  auto cursor = TaskCursor::create(params);
+  EXPECT_NO_THROW({
+    while (cursor->moveNext()) {
+    }
+  });
+
+  int64_t rawTotal = 0;
+  for (auto length : metrics.rawPartitionLengths) {
+    rawTotal += length;
+  }
+  ASSERT_GT(metrics.totalBytesWritten, 0);
+  ASSERT_GT(rawTotal, 0);
+  // Small splits compress poorly (no cross-row dedup): ~34:1 with the fix vs
+  // ~2:1 without it.
+  EXPECT_LT(metrics.totalBytesWritten * 10, rawTotal)
+      << "compressed shuffle output " << metrics.totalBytesWritten
+      << " for raw " << rawTotal << " (ratio "
+      << (rawTotal / metrics.totalBytesWritten)
+      << ":1); splits are too small, hurting compression (issue #662)";
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
