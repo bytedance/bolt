@@ -39,10 +39,10 @@ void collectReadOnlyEvictChunkBlocks(
     std::vector<std::shared_ptr<memory::bm::BlockHandle>>& spillBlocks) {
   discardBlocks.reserve(discardBlocks.size() + 1 + chunk.heapBlocks.size());
   spillBlocks.reserve(spillBlocks.size() + 1 + chunk.heapBlocks.size());
-  // Keep ReadOnlyWindow eviction chunk-granular. StringView values inside the
-  // row block are rebased to resident heap addresses, while heapBases continues
-  // to describe the spill backing. Evicting only row or only heap blocks would
-  // mix resident and backing address spaces and break the next reload.
+  // Keep ReadOnlyWindow eviction chunk-granular. Rebased StringView pointers
+  // make the row block dirty, so dirty row blocks are written back with heapBases
+  // tracking the same heap address space. Clean blocks with existing backing can
+  // still be discarded.
   collectReadOnlyEvictBlock(
       chunk.rowBlock, selectedBytes, bufferManager, discardBlocks, spillBlocks);
   for (auto& block : chunk.heapBlocks) {

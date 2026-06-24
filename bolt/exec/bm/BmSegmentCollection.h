@@ -29,7 +29,7 @@ namespace bytedance::bolt::exec::bm {
 //       ChunkData
 //         rowBlock      fixed-width rows for one row block
 //         heapBlocks    variable-width payload blocks referenced by those rows
-//         heapBases     spill-backing heap base metadata for StringView rebasing
+//         heapBases     current heap base metadata for StringView rebasing
 //
 // A chunk is deliberately anchored to one row block and may own several heap
 // blocks. This differs from DuckDB's TupleDataChunk/ChunkPart model where a

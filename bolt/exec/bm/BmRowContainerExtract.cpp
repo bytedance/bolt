@@ -24,6 +24,28 @@ void BmRowContainer::extractColumnResident(
       exactSize);
 }
 
+void BmRowContainer::extractNullsResident(
+    const char* const* rows,
+    int32_t numRows,
+    int32_t column,
+    const BufferPtr& result) {
+  BOLT_DCHECK_LT(column, layout_.columns().size());
+  BOLT_DCHECK(result->size() >= bits::nbytes(numRows));
+  auto* rawNulls = result->asMutable<uint64_t>();
+  bits::fillBits(rawNulls, 0, numRows, false);
+  const auto& columnLayout = layout_.column(column);
+  if (!columnLayout.nullable) {
+    return;
+  }
+
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    bits::setBit(
+        rawNulls,
+        i,
+        rows[i][columnLayout.nullByte] & columnLayout.nullMask);
+  }
+}
+
 template <TypeKind Kind>
 void BmRowContainer::extractColumnTyped(
     const char* const* rows,

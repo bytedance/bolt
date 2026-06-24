@@ -76,6 +76,12 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize = false);
 
+  void extractNullsResident(
+      const char* const* rows,
+      int32_t numRows,
+      int32_t column,
+      const BufferPtr& result);
+
   SegmentId spillActiveSegment();
   SegmentId spillActivePartitionSegment(PartitionId partition);
 
@@ -89,9 +95,12 @@ class BmRowContainer {
   // segmented materialization that flushes smaller ordered pieces incrementally.
   SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
-  // Fast estimate for whether all blocks in segments can be bulk loaded now.
-  // This is a hint only: BulkReadSession::loadRows() still performs the actual
-  // reservation and may throw if memory changes.
+  // Conservative estimate for whether all blocks in segments can be bulk
+  // loaded now. Only blocks with active BufferHandle are treated as loaded;
+  // unpinned resident blocks are counted as reloadable because MaybeReserve()
+  // may reclaim them while probing capacity. This is a hint only:
+  // BulkReadSession::loadRows() still performs the actual reservation and may
+  // throw if memory changes.
   bool canBulkRead(folly::Range<const SegmentId*> segments) const;
 
   BulkReadSession beginBulkReadSegments(

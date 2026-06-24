@@ -1,5 +1,7 @@
 #include "bolt/exec/bm/tests/BmRowContainerTestBase.h"
 
+#include "bolt/common/memory/MemoryArbitrator.h"
+
 #include <fmt/format.h>
 
 #include <string>
@@ -104,7 +106,8 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
   ASSERT_EQ(kRows, loaded.size());
   const auto writesBeforeEvict = bufferManager_->stats().spillWriteCount;
   EXPECT_GT(window.evictLoadedChunks(), 0);
-  EXPECT_EQ(writesBeforeEvict, bufferManager_->stats().spillWriteCount);
+  // StringView rebase mutates the row block, so eviction must write it back.
+  EXPECT_GT(bufferManager_->stats().spillWriteCount, writesBeforeEvict);
 
   auto reloaded = window.loadRows({rowIds.data(), rowIds.size()});
   ASSERT_EQ(kRows, reloaded.size());
@@ -147,6 +150,144 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictDoesNotRewriteCleanBlocks) {
   ASSERT_EQ(kRows, loaded.size());
   EXPECT_GT(window.evictLoadedChunks(), 0);
   EXPECT_EQ(writesAfterFirstEvict, bufferManager_->stats().spillWriteCount);
+}
+
+TEST_F(BmRowContainerTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      256 << 10);
+  constexpr vector_size_t kRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("release-string-value-{}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  auto rowIds = window.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+
+  auto loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  const auto statsBeforeRelease = bufferManager_->stats();
+  EXPECT_GT(statsBeforeRelease.spillReadCount, 0);
+
+  const auto released = window.releaseLoadedChunks();
+  EXPECT_GT(released, 0);
+  const auto statsAfterRelease = bufferManager_->stats();
+  EXPECT_EQ(
+      statsBeforeRelease.spillWriteCount, statsAfterRelease.spillWriteCount);
+  EXPECT_EQ(
+      statsBeforeRelease.spillWriteBytes, statsAfterRelease.spillWriteBytes);
+  EXPECT_GT(statsAfterRelease.unpinnedResidentBytes, 0);
+  EXPECT_GT(statsAfterRelease.evictionQueueSize, 0);
+
+  loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  const auto statsAfterReload = bufferManager_->stats();
+  EXPECT_EQ(statsAfterRelease.spillReadCount, statsAfterReload.spillReadCount);
+
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(loaded.data(), loaded.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("release-string-value-0", flat->valueAt(0).str());
+  EXPECT_EQ("release-string-value-1024", flat->valueAt(1024).str());
+  EXPECT_EQ("release-string-value-4095", flat->valueAt(4095).str());
+}
+
+TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      256 << 10);
+  constexpr vector_size_t kRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("can-bulk-read-string-value-{}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  auto rowIds = window.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+
+  auto loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  ASSERT_GT(window.releaseLoadedChunks(), 0);
+  ASSERT_GT(bufferManager_->stats().unpinnedResidentBytes, 0);
+
+  memory::MemoryPool* bmPool = nullptr;
+  root_->visitChildren([&](memory::MemoryPool* child) {
+    bmPool = child;
+    return false;
+  });
+  ASSERT_NE(nullptr, bmPool);
+
+  const auto reservesBefore = bmPool->stats().numReserves;
+  EXPECT_TRUE(container.canBulkRead({&segment, 1}));
+  EXPECT_EQ(reservesBefore + 1, bmPool->stats().numReserves);
+}
+
+TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      256 << 10);
+  constexpr vector_size_t kRows = 4096;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(kRows, [](auto row) {
+        return fmt::format("reclaim-string-value-{}", row);
+      }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  auto rowIds = window.listRowIds();
+  ASSERT_EQ(kRows, rowIds.size());
+
+  auto loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  ASSERT_GT(window.releaseLoadedChunks(), 0);
+  ASSERT_GT(bufferManager_->reclaimableBytes(), 0);
+
+  const auto statsBeforeReclaim = bufferManager_->stats();
+  memory::MemoryReclaimer::Stats reclaimStats;
+  memory::ScopedMemoryArbitrationContext arbitrationContext(root_.get());
+  const auto reclaimed =
+      root_->reclaim(bufferManager_->reclaimableBytes(), 0, reclaimStats);
+  EXPECT_GT(reclaimed, 0);
+  const auto statsAfterReclaim = bufferManager_->stats();
+  EXPECT_GT(statsAfterReclaim.reclaimCount, statsBeforeReclaim.reclaimCount);
+  EXPECT_GT(statsAfterReclaim.reclaimedBytes, statsBeforeReclaim.reclaimedBytes);
+
+  loaded = window.loadRows({rowIds.data(), rowIds.size()});
+  ASSERT_EQ(kRows, loaded.size());
+  const auto statsAfterReload = bufferManager_->stats();
+  EXPECT_GT(statsAfterReload.spillReadCount, statsAfterReclaim.spillReadCount);
+
+  auto result = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(loaded.data(), loaded.size(), 1, result);
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("reclaim-string-value-0", flat->valueAt(0).str());
+  EXPECT_EQ("reclaim-string-value-1024", flat->valueAt(1024).str());
+  EXPECT_EQ("reclaim-string-value-4095", flat->valueAt(4095).str());
 }
 
 TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanLimitTargetBytes) {

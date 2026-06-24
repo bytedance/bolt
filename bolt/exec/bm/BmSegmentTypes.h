@@ -10,8 +10,9 @@
 
 namespace bytedance::bolt::exec::bm {
 
-// Heap block base metadata used to rebase spilled StringView payload pointers
-// after BufferManager pins blocks at new addresses.
+// Heap block base metadata used to rebase StringView payload pointers after
+// BufferManager pins heap blocks at new addresses. baseAddress tracks the heap
+// base currently referenced by the row block's StringViews.
 struct HeapBaseRef {
   BlockId heapBlockId{kNoBlock};
   uintptr_t baseAddress{0};

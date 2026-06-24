@@ -6,7 +6,6 @@
 
 #include <cstdint>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace bytedance::bolt::exec::bm {
@@ -21,27 +20,26 @@ struct HeapRebaseRange {
 
 FOLLY_ALWAYS_INLINE std::vector<HeapRebaseRange> collectRebaseRanges(
     ChunkData& chunk,
-    const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases) {
+    const std::unordered_map<BlockId, uintptr_t>& heapBases) {
   std::vector<HeapRebaseRange> ranges;
   ranges.reserve(chunk.heapBases.size());
   for (auto& heapBase : chunk.heapBases) {
-    const auto rebase = heapRebases.find(heapBase.heapBlockId);
-    if (rebase == heapRebases.end()) {
+    const auto currentBase = heapBases.find(heapBase.heapBlockId);
+    if (currentBase == heapBases.end()) {
       continue;
     }
     const auto oldBase = heapBase.baseAddress;
     BOLT_CHECK_NE(
         oldBase,
         0,
-        "StringView rebase requires a recorded spill-backing heap base");
-    if (oldBase == rebase->second.second) {
+        "StringView rebase requires a recorded heap base");
+    if (oldBase == currentBase->second) {
       continue;
     }
     ranges.push_back(
         {&heapBase,
          oldBase,
-         rebase->second.second,
+         currentBase->second,
          oldBase + heapBase.capacity});
   }
   return ranges;
@@ -111,15 +109,14 @@ FOLLY_ALWAYS_INLINE void rebaseMultipleRanges(
   }
 }
 
-FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
+FOLLY_ALWAYS_INLINE bool rebaseStringViewsInChunkSlow(
     ChunkData& chunk,
     const BmRowLayout& layout,
     uint32_t rowStride,
-    const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases) {
-  auto ranges = collectRebaseRanges(chunk, heapRebases);
+    const std::unordered_map<BlockId, uintptr_t>& heapBases) {
+  auto ranges = collectRebaseRanges(chunk, heapBases);
   if (ranges.empty()) {
-    return;
+    return false;
   }
 
   BOLT_DCHECK_NOT_NULL(chunk.rowBlock.ptr);
@@ -128,29 +125,31 @@ FOLLY_ALWAYS_INLINE void rebaseStringViewsInChunkSlow(
   } else {
     rebaseMultipleRanges(chunk, layout, rowStride, ranges);
   }
+  for (const auto& range : ranges) {
+    range.heapBase->baseAddress = range.newBase;
+  }
+  return true;
 }
 
 } // namespace detail
 
 // Rewrites non-inline StringView payload pointers after BufferManager pins heap
-// blocks at new virtual addresses. heapBases deliberately stays at the spill
-// backing base, not the resident base. ReadOnlyWindow eviction must therefore
-// evict the row block and all heap blocks of a chunk together.
-void rebaseStringViewsInChunk(
+// blocks at new virtual addresses. heapBases tracks the heap base currently
+// referenced by row-block StringViews, so successful rebase updates heapBases.
+FOLLY_ALWAYS_INLINE bool rebaseStringViewsInChunk(
     ChunkData& chunk,
     const BmRowLayout& layout,
     uint32_t rowStride,
-    const std::unordered_map<BlockId, std::pair<uintptr_t, uintptr_t>>&
-        heapRebases) {
+    const std::unordered_map<BlockId, uintptr_t>& heapBases) {
   if (FOLLY_LIKELY(
           layout.stringColumns().empty() || chunk.heapBases.empty())) {
-    return;
+    return false;
   }
-  if (FOLLY_UNLIKELY(heapRebases.empty())) {
-    return;
+  if (FOLLY_UNLIKELY(heapBases.empty())) {
+    return false;
   }
-  detail::rebaseStringViewsInChunkSlow(
-      chunk, layout, rowStride, heapRebases);
+  return detail::rebaseStringViewsInChunkSlow(
+      chunk, layout, rowStride, heapBases);
 }
 
 } // namespace bytedance::bolt::exec::bm

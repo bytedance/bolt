@@ -32,11 +32,13 @@ class BulkReadSession {
 };
 
 // RowId-driven read-only reader for working sets that should not be fully kept
-// resident. Each load pins required chunks through the owning BmRowContainer.
-// evictLoadedChunks() releases resident memory for chunks loaded by this
-// session without destroying the underlying data. Eviction is intentionally
-// chunk-granular: a chunk's row block and heap blocks must be evicted together
-// so StringView rebase metadata can continue to describe the spill backing.
+// pinned. Each load pins required chunks through the owning BmRowContainer.
+// releaseLoadedChunks() drops the session's pins so BufferManager can reclaim
+// the chunks later under memory pressure. evictLoadedChunks() remains available
+// for explicit reclaim paths that want to release resident memory immediately.
+// Both operations are intentionally chunk-granular: a chunk's row block and heap
+// blocks move together so StringView rebase metadata can stay synchronized with
+// the heap base currently referenced by row-block StringViews.
 class ReadOnlyWindowReadSession {
  public:
   ReadOnlyWindowReadSession() = default;
@@ -46,6 +48,8 @@ class ReadOnlyWindowReadSession {
   std::vector<const char*> loadRows(folly::Range<const RowId*> rows);
 
   const char* loadRow(const RowId& row);
+
+  uint64_t releaseLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);
 
   uint64_t evictLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);
 
