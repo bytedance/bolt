@@ -165,9 +165,42 @@ TEST_F(JsonToMapTest, unescapedControlChars) {
   }
 
   {
+    // Backspace/form-feed and a generic control char (no named escape) are all
+    // accepted and preserved verbatim.
+    StringView json = StringView("{\"k\":\"\b\f\x01\x1f\"}");
+    testJsonToMap({json}, {{"k", StringView("\b\f\x01\x1f")}});
+  }
+
+  {
     // A raw control char in the key is also accepted.
     StringView json = StringView("{\"key\nname\":\"v\"}");
     testJsonToMap({json}, {{StringView("key\nname"), "v"}});
+  }
+}
+
+TEST_F(JsonToMapTest, numericValuesPreserveOriginalText) {
+  // Numeric values must be returned as their original JSON token, matching the
+  // Hive reference UDF (com.jsoniter). They must NOT be round-tripped through a
+  // double (which loses precision and reformats) nor rejected when the value is
+  // out of double range.
+  {
+    // Large integer that does not fit in a double: must keep all digits.
+    testJsonToMap(
+        {R"({"v":6222000000000000000001125652734})"},
+        {{"v", "6222000000000000000001125652734"}});
+  }
+  {
+    // High-precision decimal: must not be rounded to the nearest double.
+    testJsonToMap(
+        {R"({"v":221.5222225222225222})"}, {{"v", "221.5222225222225222"}});
+  }
+  {
+    // Exponent form must be preserved, not expanded.
+    testJsonToMap({R"({"v":1e10})"}, {{"v", "1e10"}});
+  }
+  {
+    // Out-of-double-range exponent must not fail the whole parse.
+    testJsonToMap({R"({"v":1e400})"}, {{"v", "1e400"}});
   }
 }
 
