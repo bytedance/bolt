@@ -103,8 +103,10 @@ if (rows.canBulkRead(range)) {
 }
 ```
 
-`canBulkRead()` 只是快速判断。`BulkReadSession::loadRows()` 会真正 reserve 和 pin；如果期间内存状态
-变化，仍可能抛异常。
+`canBulkRead()` 是保守判断：只有当前仍持有 `BufferHandle` 的 block 才算已加载，
+已经 unpin 但仍 resident 的 block 会按可能重新加载计入 reserve 预算。这样可以避免
+`MaybeReserve()` 探测过程中 reclaim 改变 resident 状态导致低估。`BulkReadSession::loadRows()`
+会真正 reserve 和 pin；如果期间内存状态变化，仍可能抛异常。
 
 `BulkReadSession::loadRows()` 返回的 `char*` 由 container 持有的 resident block 支撑。
 Bulk 读不提供局部 eviction 能力；如果需要按窗口释放 working set，使用
@@ -130,11 +132,12 @@ std::vector<const char*> rowPtrs = session.loadRows(
 const char* row = session.loadRow(rowId);
 ```
 
-`ReadOnlyWindowReadSession` 只返回 `const char*`。读阶段如果需要释放当前窗口的 resident
-内存但未来还要继续使用这些数据，调用 `session.evictLoadedChunks(targetBytes)`。eviction
-以 chunk 为粒度：一个 chunk 的 row block 和 heap blocks 会一起释放。已经有 spill backing
-且 clean 的 block 会直接丢弃；没有 backing 或被标记 dirty 的 block 会先写回。如果数据已经
-完全消费，调用 release 接口。
+`ReadOnlyWindowReadSession` 只返回 `const char*`。读阶段如果当前 batch 的 row 指针不再
+使用，调用 `session.releaseLoadedChunks(targetBytes)` 释放 session 持有的 pin；block 仍由
+BufferManager 管理，后续是否真正回收或 spill 由上层内存仲裁触发。释放以 chunk 为粒度：
+一个 chunk 的 row block 和 heap blocks 会一起 unpin。需要立即回收 resident block 时，
+再显式调用 `session.evictLoadedChunks(targetBytes)`；clean block 可直接丢弃，dirty row
+block 会写回 spill backing。
 
 ## Reordered Segment 和 Merge Read
 
@@ -168,9 +171,15 @@ merge read 默认是消费型读取：读完的 chunk 会在安全时机释放�
 auto merge = rows.beginMergeReadSegments(range, false);
 ```
 
-## 释放和 Window Evict
+## Window Release 和显式 Evict
 
-数据未来还可能再用，但当前需要释放 resident 内存：
+当前 batch 的指针不再使用，但数据未来还可能再读：
+
+```cpp
+session.releaseLoadedChunks(targetBytes);
+```
+
+需要立即尝试回收 resident block：
 
 ```cpp
 session.evictLoadedChunks(targetBytes);

@@ -5,7 +5,7 @@
 namespace bytedance::bolt::exec::bm {
 namespace {
 
-bool isLoaded(const BlockRef& block) {
+bool isPinnedLoaded(const BlockRef& block) {
   return block.handle.valid();
 }
 
@@ -13,9 +13,9 @@ uint64_t unloadedBytesForChunk(const ChunkData& chunk) {
   if (chunk.consumed) {
     return 0;
   }
-  uint64_t bytes = isLoaded(chunk.rowBlock) ? 0 : chunk.rowBlock.size;
+  uint64_t bytes = isPinnedLoaded(chunk.rowBlock) ? 0 : chunk.rowBlock.size;
   for (const auto& block : chunk.heapBlocks) {
-    if (!isLoaded(block)) {
+    if (!isPinnedLoaded(block)) {
       bytes += block.size;
     }
   }

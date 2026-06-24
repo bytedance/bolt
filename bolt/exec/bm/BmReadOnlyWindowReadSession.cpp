@@ -12,7 +12,7 @@ uint64_t chunkKey(SegmentId segment, ChunkId chunk) {
   return (static_cast<uint64_t>(segment) << 32) | chunk;
 }
 
-bool chunkHasResidentBlocks(const ChunkData& chunkData) {
+bool chunkHasPinnedBlocks(const ChunkData& chunkData) {
   if (chunkData.rowBlock.handle.valid()) {
     return true;
   }
@@ -22,6 +22,25 @@ bool chunkHasResidentBlocks(const ChunkData& chunkData) {
     }
   }
   return false;
+}
+
+uint64_t releaseLoadedBlock(BlockRef& block) {
+  if (!block.handle.valid()) {
+    return 0;
+  }
+
+  const auto bytes = block.size;
+  block.handle = memory::bm::BufferHandle{};
+  block.ptr = nullptr;
+  return bytes;
+}
+
+uint64_t releaseLoadedChunk(ChunkData& chunkData) {
+  uint64_t bytes = releaseLoadedBlock(chunkData.rowBlock);
+  for (auto& block : chunkData.heapBlocks) {
+    bytes += releaseLoadedBlock(block);
+  }
+  return bytes;
 }
 
 } // namespace
@@ -78,6 +97,47 @@ const char* ReadOnlyWindowReadSession::loadRow(const RowId& row) {
   return rows[0];
 }
 
+uint64_t ReadOnlyWindowReadSession::releaseLoadedChunks(uint64_t targetBytes) {
+  BOLT_CHECK_NOT_NULL(container_);
+  if (loadedChunks_.empty() || targetBytes == 0) {
+    return 0;
+  }
+
+  uint64_t released = 0;
+  for (const auto& [segment, chunk] : loadedChunks_) {
+    if (released >= targetBytes) {
+      break;
+    }
+    auto& segmentData = container_->segments_.segmentData(segment);
+    BOLT_CHECK(
+        segmentData.meta.state != SegmentState::kActiveResident,
+        "Cannot release loaded blocks from active segment {}",
+        segment);
+    BOLT_CHECK_LT(chunk, segmentData.chunks.size());
+    auto& chunkData = *segmentData.chunks[chunk];
+    BOLT_CHECK(
+        !chunkData.consumed,
+        "Cannot release consumed chunk {} in segment {}",
+        chunk,
+        segment);
+    released += releaseLoadedChunk(chunkData);
+  }
+
+  std::vector<std::pair<SegmentId, ChunkId>> stillLoaded;
+  stillLoaded.reserve(loadedChunks_.size());
+  loadedChunkKeys_.clear();
+  for (const auto& [segment, chunk] : loadedChunks_) {
+    auto& segmentData = container_->segments_.segmentData(segment);
+    BOLT_CHECK_LT(chunk, segmentData.chunks.size());
+    if (chunkHasPinnedBlocks(*segmentData.chunks[chunk])) {
+      stillLoaded.emplace_back(segment, chunk);
+      loadedChunkKeys_.insert(chunkKey(segment, chunk));
+    }
+  }
+  loadedChunks_ = std::move(stillLoaded);
+  return released;
+}
+
 uint64_t ReadOnlyWindowReadSession::evictLoadedChunks(uint64_t targetBytes) {
   BOLT_CHECK_NOT_NULL(container_);
   if (loadedChunks_.empty() || targetBytes == 0) {
@@ -93,7 +153,7 @@ uint64_t ReadOnlyWindowReadSession::evictLoadedChunks(uint64_t targetBytes) {
   for (const auto& [segment, chunk] : loadedChunks_) {
     auto& segmentData = container_->segments_.segmentData(segment);
     BOLT_CHECK_LT(chunk, segmentData.chunks.size());
-    if (chunkHasResidentBlocks(*segmentData.chunks[chunk])) {
+    if (chunkHasPinnedBlocks(*segmentData.chunks[chunk])) {
       stillLoaded.emplace_back(segment, chunk);
       loadedChunkKeys_.insert(chunkKey(segment, chunk));
     }
