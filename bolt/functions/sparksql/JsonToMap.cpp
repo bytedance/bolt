@@ -24,6 +24,70 @@
 #include "sonic/dom/parser.h"
 namespace bytedance::bolt::functions::sparksql {
 namespace {
+// Escape raw (unescaped) control chars (\x00 ~ \x1f) that appear *inside*
+// string literals (keys or values), producing strictly valid JSON whose
+// decoded contents are unchanged. Control chars outside strings are valid
+// JSON whitespace and are left untouched. Both parser backends fall back to
+// this so they accept the same inputs as the reference Hive UDF
+// (com.jsoniter), which tolerates raw control chars and keeps them verbatim.
+std::string escapeUnescapedControlChars(std::string_view in) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(in.size());
+  bool inString = false;
+  bool escaped = false;
+  for (unsigned char c : in) {
+    if (!inString) {
+      if (c == '"') {
+        inString = true;
+      }
+      out.push_back(c);
+      continue;
+    }
+    if (escaped) {
+      out.push_back(c);
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      out.push_back(c);
+      escaped = true;
+      continue;
+    }
+    if (c == '"') {
+      out.push_back(c);
+      inString = false;
+      continue;
+    }
+    if (c < 0x20) {
+      switch (c) {
+        case '\n':
+          out += "\\n";
+          break;
+        case '\r':
+          out += "\\r";
+          break;
+        case '\t':
+          out += "\\t";
+          break;
+        case '\b':
+          out += "\\b";
+          break;
+        case '\f':
+          out += "\\f";
+          break;
+        default:
+          out += "\\u00";
+          out.push_back(kHex[(c >> 4) & 0xf]);
+          out.push_back(kHex[c & 0xf]);
+      }
+      continue;
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
 class JsonToMapFunction : public exec::VectorFunction {
  public:
   bool isDefaultNullBehavior() const override {
@@ -70,41 +134,65 @@ class JsonToMapFunction : public exec::VectorFunction {
         folly::F14FastMap<std::string_view, std::string_view> keyValues;
         auto sv = input->valueAt<StringView>(row);
         const std::string_view current = std::string_view(sv.data(), sv.size());
-        padded_data = current;
-        if (padded_data.capacity() < sv.size() + simdjson::SIMDJSON_PADDING) {
-          padded_data.reserve(std::max(
-              sv.size() + simdjson::SIMDJSON_PADDING,
-              padded_data.capacity() + padded_data.capacity() / 2));
-        }
-        try {
-          simdjson::ondemand::document doc = parser.iterate(padded_data);
-          simdjson::ondemand::value val = doc;
-          if (val.type() != simdjson::ondemand::json_type::object) {
-            // hiveudf returns empty map for valid non-object JSON
-            // (null, number, boolean, string, array), not SQL NULL.
-            resultWriter.commit();
-            return;
+
+        // Parse the given buffer into keyValues. Returns true on success
+        // (including valid non-object JSON, which yields an empty map);
+        // returns false if the JSON could not be parsed. The string_views
+        // stored in keyValues remain valid as long as `buffer` and `parser`
+        // are not mutated/reused, so the caller writes them out before any
+        // subsequent parse attempt.
+        auto parseInto = [&](std::string& buffer) -> bool {
+          keyValues.clear();
+          if (buffer.capacity() < buffer.size() + simdjson::SIMDJSON_PADDING) {
+            buffer.reserve(std::max(
+                buffer.size() + simdjson::SIMDJSON_PADDING,
+                buffer.capacity() + buffer.capacity() / 2));
           }
-          for (auto field : val.get_object()) {
-            std::string_view key = field.unescaped_key(true);
-            simdjson::ondemand::value value = field.value();
-            std::string_view view;
-            if (value.type() == simdjson::ondemand::json_type::string) {
-              view = value.get_string(true);
-            } else {
-              view = simdjson::to_json_string(value);
+          try {
+            simdjson::ondemand::document doc = parser.iterate(buffer);
+            simdjson::ondemand::value val = doc;
+            if (val.type() != simdjson::ondemand::json_type::object) {
+              // hiveudf returns empty map for valid non-object JSON
+              // (null, number, boolean, string, array), not SQL NULL.
+              return true;
             }
-            keyValues.insert_or_assign(key, view);
+            for (auto field : val.get_object()) {
+              std::string_view key = field.unescaped_key(true);
+              simdjson::ondemand::value value = field.value();
+              std::string_view view;
+              if (value.type() == simdjson::ondemand::json_type::string) {
+                view = value.get_string(true);
+              } else {
+                view = simdjson::to_json_string(value);
+              }
+              keyValues.insert_or_assign(key, view);
+            }
+            return true;
+          } catch (std::exception& e) {
+            return false;
           }
-          for (const auto& [key, value] : keyValues) {
-            auto [keyWriter, valueWriter] = mapWriter.add_item();
-            keyWriter.append(StringView(key));
-            valueWriter.append(StringView(value));
-          }
-          resultWriter.commit();
-        } catch (std::exception& e) {
-          resultWriter.commitNull();
+        };
+
+        padded_data = current;
+        bool ok = parseInto(padded_data);
+        if (!ok) {
+          // simdjson, unlike the reference Hive UDF (com.jsoniter), rejects
+          // raw control chars inside strings. Escape them and retry so both
+          // backends behave identically; this only runs on the (rare) failure
+          // path, so valid JSON pays no extra cost.
+          padded_data = escapeUnescapedControlChars(current);
+          ok = parseInto(padded_data);
         }
+        if (!ok) {
+          resultWriter.commitNull();
+          return;
+        }
+        for (const auto& [key, value] : keyValues) {
+          auto [keyWriter, valueWriter] = mapWriter.add_item();
+          keyWriter.append(StringView(key));
+          valueWriter.append(StringView(value));
+        }
+        resultWriter.commit();
       }
     });
     resultWriter.finish();
@@ -132,6 +220,16 @@ class JsonToMapFunction : public exec::VectorFunction {
         const std::string_view current = std::string_view(sv.data(), sv.size());
         sonic_json::Document doc;
         doc.Parse(current);
+        std::string escaped;
+        if (doc.HasParseError()) {
+          // The reference Hive UDF (com.jsoniter) accepts raw (unescaped)
+          // control chars inside keys/values, while strict parsers reject
+          // them. Escape such chars and retry so both behave the same and the
+          // control chars are preserved in the result; `escaped` must outlive
+          // the member iteration below.
+          escaped = escapeUnescapedControlChars(current);
+          doc.Parse(escaped);
+        }
         if (doc.HasParseError()) {
           resultWriter.commitNull();
           return;
