@@ -47,8 +47,7 @@ arrow::Status BoltShuffleWriterV2::split(
   updateInputMetrics(rv);
   BOLT_DCHECK(options_.partitioning != Partitioning::kSingle);
   // Floor the budget so a tiny memLimit (e.g. an upstream operator holding most
-  // of the memory) doesn't fragment into small, poorly-compressed splits
-  // (#662); the reclaimable upstream is reclaimed to meet the demand.
+  // of the memory) doesn't fragment into small, poorly-compressed splits.
   memLimit = std::max(memLimit, kMinMemLimit);
   if (bytedance::bolt::RowVector::isComposite(rv)) {
     if (vectorLayout_ == RowVectorLayout::kColumnar) {
