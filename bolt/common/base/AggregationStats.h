@@ -29,7 +29,8 @@ struct AggregationStats {
   uint64_t aggProbeBypassTimeNs{0};
   uint64_t aggProbeBypassCount{0};
   // Hash aggregation JIT fine-grained timing.
-  // One-time codegen (LLVM compile) time for the JIT plan.
+  // One-time codegen (LLVM compile) time for the JIT plan, excluding cache-hit
+  // waits and follower waits on an in-flight compile of the same function.
   uint64_t aggJitCodegenTimeNs{0};
   // JIT-executed part of the agg function update time.
   uint64_t aggFunctionJitTimeNs{0};

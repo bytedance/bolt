@@ -1198,7 +1198,10 @@ bool isHashAggrJitSupportedType(TypeKind kind) {
   }
 }
 
-bool HashAggrJitChunk::codegen() {
+bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
+  if (codegenTimeNs != nullptr) {
+    *codegenTimeNs = 0;
+  }
   if (ready_.load(std::memory_order_acquire)) {
     return true;
   }
@@ -1230,7 +1233,8 @@ bool HashAggrJitChunk::codegen() {
             module, moduleKey, extractFn, "extract", hasError);
         return hasError;
       },
-      moduleKey);
+      moduleKey,
+      codegenTimeNs);
   if (!module_) {
     return false;
   }

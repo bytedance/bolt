@@ -475,8 +475,9 @@ class GroupingSet {
   // background codegen completes.
   std::vector<std::unique_ptr<jit::HashAggrJitChunk>> hashAggrJitChunks_;
   // Outstanding background JIT compilation tasks for hashAggrJitChunks_. Each
-  // future returns the chunk's codegen time in nanoseconds so it can be
-  // aggregated into stats_.aggJitCodegenTimeNs on the query thread.
+  // future returns the chunk's actual codegen CPU-wall time in nanoseconds,
+  // excluding cache-hit waits and follower waits on a same-key compile, so it
+  // can be aggregated into stats_.aggJitCodegenTimeNs on the query thread.
   std::vector<folly::Future<uint64_t>> hashAggrJitCompileFutures_;
 #endif
 

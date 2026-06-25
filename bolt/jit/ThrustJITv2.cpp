@@ -27,6 +27,7 @@
 #include "llvm/Support/TargetSelect.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -225,7 +226,11 @@ ThrustJITv2* ThrustJITv2::getInstance() {
 
 CompiledModuleSP ThrustJITv2::CompileModule(
     std::function<bool(llvm::Module&)> irGenerator,
-    const std::string& funcName) {
+    const std::string& funcName,
+    uint64_t* compileTimeNs) {
+  if (compileTimeNs != nullptr) {
+    *compileTimeNs = 0;
+  }
   {
     std::unique_lock lock(mutex_);
     if (auto cached = compiledModuleCache_.get(funcName); cached != nullptr) {
@@ -240,6 +245,8 @@ CompiledModuleSP ThrustJITv2::CompileModule(
 
     compilingFunctions_.insert(funcName);
   }
+
+  const auto compileStart = std::chrono::steady_clock::now();
 
   auto clearCompilingFlag = [this, &funcName]() {
     std::lock_guard lock(mutex_);
@@ -336,6 +343,12 @@ CompiledModuleSP ThrustJITv2::CompileModule(
     compilingFunctions_.erase(funcName);
   }
   compilingCv_.notify_all();
+
+  if (compileTimeNs != nullptr) {
+    *compileTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now() - compileStart)
+                         .count();
+  }
 
   return compiledModule;
 }

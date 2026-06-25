@@ -1061,14 +1061,12 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
               << chunk->getDescription();
     hashAggrJitCompileFutures_.push_back(
         folly::via(folly::getGlobalCPUExecutor().get(), [chunk]() -> uint64_t {
-          const auto start = std::chrono::steady_clock::now();
-          if (!chunk->codegen()) {
+          uint64_t codegenTimeNs = 0;
+          if (!chunk->codegen(&codegenTimeNs)) {
             LOG(INFO) << "HashAggrJit chunk codegen failed for chunk "
                       << chunk->functionName();
           }
-          return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now() - start)
-              .count();
+          return codegenTimeNs;
         }));
     currentChunkSlots.clear();
     currentChunkSlots.reserve(maxFuseWidth);

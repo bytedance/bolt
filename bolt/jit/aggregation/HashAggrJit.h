@@ -279,7 +279,7 @@ class HashAggrJitChunk {
  public:
   explicit HashAggrJitChunk(std::vector<HashAggrJitSlot> slots);
 
-  bool codegen();
+  bool codegen(uint64_t* codegenTimeNs = nullptr);
 
   bool isCodegenReady() const {
     return ready_.load(std::memory_order_acquire);
