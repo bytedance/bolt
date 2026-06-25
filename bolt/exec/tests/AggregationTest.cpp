@@ -4902,6 +4902,76 @@ TEST_P(AggregationTest, rowBasedSpillNull) {
   }
 }
 
+TEST_F(AggregationTest, rowBasedSpillJoinAggregationOrderByWithJit) {
+  constexpr vector_size_t kSize = 100;
+  std::vector<RowVectorPtr> tmp1;
+  std::vector<RowVectorPtr> tmp2;
+  std::vector<RowVectorPtr> duckTmp2;
+  for (auto batch = 0; batch < 5; ++batch) {
+    tmp1.push_back(makeRowVector(
+        {"id"}, {makeFlatVector<int32_t>(kSize, [batch](auto row) {
+          return (batch * kSize + row) % 16;
+        })}));
+    tmp2.push_back(makeRowVector(
+        {"build_id", "amount"},
+        {makeFlatVector<int32_t>(
+             kSize, [batch](auto row) { return (batch * kSize + row) % 16; }),
+         makeFlatVector<int32_t>(
+             kSize, [batch](auto row) { return batch * kSize + row; })}));
+    duckTmp2.push_back(makeRowVector(
+        {"id", "amount"},
+        {makeFlatVector<int32_t>(
+             kSize, [batch](auto row) { return (batch * kSize + row) % 16; }),
+         makeFlatVector<int32_t>(
+             kSize, [batch](auto row) { return batch * kSize + row; })}));
+  }
+
+  createDuckDbTable("tmp1", tmp1);
+  createDuckDbTable("tmp2", duckTmp2);
+
+  core::PlanNodeId aggrNodeId;
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator, pool_.get())
+                  .values(tmp1)
+                  .hashJoin(
+                      {"id"},
+                      {"build_id"},
+                      PlanBuilder(planNodeIdGenerator).values(tmp2).planNode(),
+                      "",
+                      {"id", "amount"})
+                  .singleAggregation({"id"}, {"sum(amount) AS amount_sum"}, {})
+                  .capturePlanNodeId(aggrNodeId)
+                  .orderBy({"id", "amount_sum DESC"}, false)
+                  .planNode();
+
+  const auto* const sql = R"(
+      SELECT id, amount_sum FROM
+       (
+        SELECT id, sum(amount) as amount_sum FROM
+          (SELECT tmp1.id, tmp2.amount FROM
+            tmp1 join tmp2 on tmp1.id = tmp2.id
+          )
+        GROUP BY id
+       )
+       ORDER BY id, amount_sum DESC)";
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
+                  .spillDirectory(spillDirectory->path)
+                  .config(QueryConfig::kTestingSpillPct, "100")
+                  .config(QueryConfig::kSpillEnabled, "true")
+                  .config(QueryConfig::kAggregationSpillEnabled, "true")
+                  .config(QueryConfig::kRowBasedSpillMode, "compression")
+                  .config(QueryConfig::kJitLevel, "-1")
+                  .assertResults(sql);
+
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  auto& stats = taskStats.at(aggrNodeId);
+  checkSpillStats(stats, true);
+  checkRowBasedSpillStats(stats, true);
+  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}
+
 INSTANTIATE_GPU_TEST_SUITE_P(AggregationTestOnCPUOrGPU, AggregationTest);
 
 } // namespace bytedance::bolt::exec::test
