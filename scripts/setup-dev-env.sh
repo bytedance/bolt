@@ -199,6 +199,9 @@ function check_conan() {
     echo "➕ Adding ${SETTING_KEY}=${CPP_STANDARD} to ${PROFILE_FILE}..."
     echo "${SETTING_KEY}=${CPP_STANDARD}" >> "${PROFILE_FILE}"
   fi
+
+  # as a conan extension, add (libc, version) as conan settings.
+  python ${CUR_DIR}/configure-conan-libc-settings.py
 }
 
 function install_git_hooks() {
