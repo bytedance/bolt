@@ -73,6 +73,14 @@ TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
   EXPECT_EQ(context.row(), context.chunk()->rowBlock.ptr);
 }
 
+TEST_F(BmRowContainerTest, RowLayoutMatchesOldRowContainerPacking) {
+  BmRowLayout layout({BIGINT(), INTEGER()}, {true, false}, 4 << 20);
+
+  EXPECT_EQ(1, layout.column(0).offset);
+  EXPECT_EQ(9, layout.column(1).offset);
+  EXPECT_EQ(13, layout.rowSize());
+}
+
 TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
   {
     BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 4 << 20);

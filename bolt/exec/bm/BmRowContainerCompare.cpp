@@ -1,6 +1,7 @@
 #include "bolt/exec/bm/BmRowContainer.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
 
@@ -71,6 +72,10 @@ int32_t compareScalarValue(
     const auto leftValue = *reinterpret_cast<const StringView*>(left);
     const auto rightValue = *reinterpret_cast<const StringView*>(right);
     return compareStringViewsAsc(leftValue, rightValue);
+  } else if constexpr (Kind == TypeKind::HUGEINT) {
+    const auto leftValue = HugeInt::deserialize(left);
+    const auto rightValue = HugeInt::deserialize(right);
+    return leftValue < rightValue ? -1 : (leftValue > rightValue ? 1 : 0);
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       !TypeTraits<Kind>::isFixedWidth) {

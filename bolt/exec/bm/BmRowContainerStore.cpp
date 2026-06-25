@@ -2,6 +2,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
+#include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
 
@@ -99,6 +100,9 @@ void BmRowContainer::storeNonNullValueTyped(
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("Unsupported store type {}", column.type->toString());
+  } else if constexpr (Kind == TypeKind::HUGEINT) {
+    HugeInt::serialize(
+        decoded.valueAt<int128_t>(sourceIndex), row + column.offset);
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
     *reinterpret_cast<T*>(row + column.offset) =
