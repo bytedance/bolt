@@ -72,6 +72,11 @@ std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
         row.segmentId);
     auto& segment = container_->segments_.segmentData(row.segmentId);
     auto& chunk = container_->segments_.chunkForRow(segment, row.rowNumber);
+    BOLT_CHECK(
+        !chunk.consumed,
+        "Cannot load consumed chunk {} in segment {}",
+        chunk.meta.id,
+        row.segmentId);
     const auto key = chunkKey(row.segmentId, chunk.meta.id);
     if (seenChunks.insert(key).second) {
       chunks.push_back(&chunk);
@@ -89,6 +94,37 @@ std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
     result.push_back(container_->segments_.rowPointer(row));
   }
   return result;
+}
+
+std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
+    folly::Range<const SegmentRowRange*> ranges) {
+  BOLT_CHECK_NOT_NULL(container_);
+
+  std::vector<RowId> rows;
+  for (const auto& range : ranges) {
+    BOLT_CHECK(
+        segments_.count(range.segment) != 0,
+        "Range segment {} is not covered by this read session",
+        range.segment);
+    if (range.count == 0) {
+      continue;
+    }
+    auto& segment = container_->segments_.segmentData(range.segment);
+    BOLT_CHECK_LE(
+        static_cast<uint64_t>(range.begin) + range.count,
+        segment.nextRowNumber,
+        "Row range [{}, {}) exceeds segment {} row count {}",
+        range.begin,
+        range.begin + range.count,
+        range.segment,
+        segment.nextRowNumber);
+    rows.reserve(rows.size() + range.count);
+    for (RowNumber offset = 0; offset < range.count; ++offset) {
+      rows.push_back(container_->segments_.rowIdForRowNumber(
+          segment, range.begin + offset));
+    }
+  }
+  return loadRows({rows.data(), rows.size()});
 }
 
 const char* ReadOnlyWindowReadSession::loadRow(const RowId& row) {
@@ -109,10 +145,9 @@ uint64_t ReadOnlyWindowReadSession::releaseLoadedChunks(uint64_t targetBytes) {
       break;
     }
     auto& segmentData = container_->segments_.segmentData(segment);
-    BOLT_CHECK(
-        segmentData.meta.state != SegmentState::kActiveResident,
-        "Cannot release loaded blocks from active segment {}",
-        segment);
+    if (segmentData.meta.state == SegmentState::kActiveResident) {
+      continue;
+    }
     BOLT_CHECK_LT(chunk, segmentData.chunks.size());
     auto& chunkData = *segmentData.chunks[chunk];
     BOLT_CHECK(

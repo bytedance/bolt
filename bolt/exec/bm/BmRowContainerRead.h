@@ -46,6 +46,8 @@ class ReadOnlyWindowReadSession {
   std::vector<RowId> listRowIds() const;
 
   std::vector<const char*> loadRows(folly::Range<const RowId*> rows);
+  std::vector<const char*> loadRows(
+      folly::Range<const SegmentRowRange*> ranges);
 
   const char* loadRow(const RowId& row);
 

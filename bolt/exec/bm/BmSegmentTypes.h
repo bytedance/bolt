@@ -30,6 +30,10 @@ struct SegmentMeta {
   SegmentId id{0};
   SegmentState state{SegmentState::kActiveResident};
   std::optional<PartitionId> partitionId;
+  // Global append ordinal of row 0 in this segment. It is used only for FIFO
+  // prefix release; segment-local row numbers remain the public addressing
+  // scheme.
+  uint64_t firstGlobalRow{0};
   uint64_t numRows{0};
   // True when rows are physically materialized in merge order. MergeReadSession
   // requires this because it only merges already-ordered segments.

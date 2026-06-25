@@ -122,6 +122,7 @@ char* BmSegmentCollection::newRowInSegment(SegmentData& segment) {
   ++chunk.meta.rowCount;
   ++segment.nextRowNumber;
   ++segment.meta.numRows;
+  ++nextGlobalRow_;
   return row;
 }
 

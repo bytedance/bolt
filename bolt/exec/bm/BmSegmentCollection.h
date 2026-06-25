@@ -59,6 +59,8 @@ class BmSegmentCollection {
       PartitionId partition) const;
   std::vector<SegmentId> allSegmentIds() const;
   int64_t numRows() const;
+  SegmentId activeSegmentId(PartitionId partition) const;
+  RowNumber activeSegmentNextRowNumber(PartitionId partition) const;
 
   // Segment creation and finalization.
   SegmentData& activeSegment(PartitionId partition);
@@ -114,6 +116,7 @@ class BmSegmentCollection {
 
   // Release and accounting.
   void releaseChunkBlocks(ChunkData& chunk);
+  void popFrontRows(uint64_t rowCount);
   uint64_t segmentBytes(const SegmentData& segment) const;
   FOLLY_ALWAYS_INLINE uint32_t rowStride() const {
     return rowStride_;
@@ -155,6 +158,8 @@ class BmSegmentCollection {
   uint32_t rowsPerChunk_{0};
   SegmentId nextSegmentId_{1};
   BlockId nextBlockId_{1};
+  uint64_t nextGlobalRow_{0};
+  uint64_t frontRowsPopped_{0};
   std::vector<std::unique_ptr<SegmentData>> segments_;
   std::vector<SegmentId> activeSegments_;
   std::vector<std::vector<SegmentId>> partitionSegments_;
