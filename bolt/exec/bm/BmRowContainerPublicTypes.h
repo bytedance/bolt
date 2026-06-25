@@ -56,4 +56,13 @@ struct RowId {
   RowOffset rowOffset{0};
 };
 
+struct SegmentRowRange {
+  // Segment containing this physical row range.
+  SegmentId segment{0};
+  // First row ordinal inside the segment.
+  RowNumber begin{0};
+  // Number of rows in [begin, begin + count).
+  RowNumber count{0};
+};
+
 } // namespace bytedance::bolt::exec::bm

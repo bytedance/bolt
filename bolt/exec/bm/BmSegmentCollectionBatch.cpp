@@ -49,6 +49,7 @@ void BmSegmentCollection::reserveRowsInBatch(
     chunk.meta.rowCount += rowsToAppend;
     segment.nextRowNumber += rowsToAppend;
     segment.meta.numRows += rowsToAppend;
+    nextGlobalRow_ += rowsToAppend;
 
     remaining -= rowsToAppend;
     currentSource += rowsToAppend;

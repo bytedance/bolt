@@ -121,6 +121,21 @@ int64_t BmSegmentCollection::numRows() const {
   return rows;
 }
 
+SegmentId BmSegmentCollection::activeSegmentId(PartitionId partition) const {
+  checkPartition(partition);
+  return activeSegments_[partition];
+}
+
+RowNumber BmSegmentCollection::activeSegmentNextRowNumber(
+    PartitionId partition) const {
+  checkPartition(partition);
+  const auto id = activeSegments_[partition];
+  if (id == kNoSegment) {
+    return 0;
+  }
+  return segmentData(id).nextRowNumber;
+}
+
 SegmentData& BmSegmentCollection::activeSegment(PartitionId partition) {
   checkPartition(partition);
   auto id = activeSegments_[partition];
@@ -139,6 +154,7 @@ SegmentData& BmSegmentCollection::createSegment(
   segment->meta.id = nextSegmentId_++;
   segment->meta.state = SegmentState::kActiveResident;
   segment->meta.partitionId = std::move(partition);
+  segment->meta.firstGlobalRow = nextGlobalRow_;
   const auto id = segment->meta.id;
   if (segments_.size() <= id) {
     segments_.resize(id + 1);
@@ -166,7 +182,9 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   for (auto& chunkPtr : segment.chunks) {
     auto& chunk = *chunkPtr;
-    BOLT_DCHECK(!chunk.consumed);
+    if (chunk.consumed) {
+      continue;
+    }
     blocks.reserve(blocks.size() + 1 + chunk.heapBlocks.size());
     zeroUnusedHeapTail(chunk);
     chunk.rowBlock.handle = memory::bm::BufferHandle{};
@@ -178,9 +196,11 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(
       blocks.push_back(block.block);
     }
   }
-  bufferManager_->SpillBlocks(
-      std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
-          blocks.data(), blocks.size()));
+  if (!blocks.empty()) {
+    bufferManager_->SpillBlocks(
+        std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
+            blocks.data(), blocks.size()));
+  }
   segment.meta.state = SegmentState::kFinalizedFlushed;
   return segment.meta.id;
 }

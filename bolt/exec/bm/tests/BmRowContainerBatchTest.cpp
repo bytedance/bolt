@@ -77,6 +77,41 @@ TEST_F(BmRowContainerTest, AppendBatchPreservesNulls) {
   EXPECT_EQ("charlie", varcharFlat->valueAt(2).str());
 }
 
+TEST_F(BmRowContainerTest, AppendBatchStoresDecimalRows) {
+  auto shortDecimalType = DECIMAL(10, 2);
+  auto longDecimalType = DECIMAL(30, 4);
+  BmRowContainer container(
+      {shortDecimalType, longDecimalType},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({100, -250, 375}, shortDecimalType),
+      makeFlatVector<int128_t>({1000, -2500, 3750}, longDecimalType),
+  });
+
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+
+  ASSERT_EQ(3, rows.size());
+
+  auto shortResult = BaseVector::create(shortDecimalType, rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, shortResult);
+  auto shortFlat = shortResult->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, shortFlat);
+  EXPECT_EQ(100, shortFlat->valueAt(0));
+  EXPECT_EQ(-250, shortFlat->valueAt(1));
+  EXPECT_EQ(375, shortFlat->valueAt(2));
+
+  auto longResult = BaseVector::create(longDecimalType, rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, longResult);
+  auto longFlat = longResult->asFlatVector<int128_t>();
+  ASSERT_NE(nullptr, longFlat);
+  EXPECT_EQ(1000, longFlat->valueAt(0));
+  EXPECT_EQ(-2500, longFlat->valueAt(1));
+  EXPECT_EQ(3750, longFlat->valueAt(2));
+}
+
 TEST_F(BmRowContainerTest, AppendBatchCanCrossChunks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},

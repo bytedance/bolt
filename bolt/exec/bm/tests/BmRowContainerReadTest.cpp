@@ -81,6 +81,65 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
 }
 
+TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeInput();
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  std::vector<SegmentRowRange> ranges{
+      {segment, 1, 2},
+      {segment, 3, 1},
+  };
+  auto inputRows = session.loadRows({ranges.data(), ranges.size()});
+  ASSERT_EQ(3, inputRows.size());
+
+  auto result = BaseVector::create(VARCHAR(), inputRows.size(), pool());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("alpha", flat->valueAt(0).str());
+  EXPECT_EQ("charlie", flat->valueAt(1).str());
+  EXPECT_EQ("bravo", flat->valueAt(2).str());
+}
+
+TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
+  BmRowContainer container(
+      {BIGINT()},
+      {false},
+      bufferManager_,
+      MemoryTag::kTesting,
+      64 << 10);
+  constexpr vector_size_t kRows = 9000;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.activeSegmentId();
+  container.popFrontRows(8192);
+
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  std::vector<SegmentRowRange> ranges{{segment, 8192, 3}};
+  auto inputRows = session.loadRows({ranges.data(), ranges.size()});
+  ASSERT_EQ(3, inputRows.size());
+
+  auto result = BaseVector::create(BIGINT(), inputRows.size(), pool());
+  container.extractColumnResident(inputRows.data(), inputRows.size(), 0, result);
+
+  auto flat = result->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ(8192, flat->valueAt(0));
+  EXPECT_EQ(8193, flat->valueAt(1));
+  EXPECT_EQ(8194, flat->valueAt(2));
+}
+
 TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},

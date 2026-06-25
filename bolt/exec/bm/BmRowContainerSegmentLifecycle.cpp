@@ -2,6 +2,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <cstring>
 #include <span>
 #include <vector>
 
@@ -77,6 +78,10 @@ void BmRowContainer::releaseChunk(SegmentId segment, ChunkId chunk) {
   segments_.releaseChunkBlocks(*segmentData.chunks[chunk]);
 }
 
+void BmRowContainer::popFrontRows(uint64_t rowCount) {
+  segments_.popFrontRows(rowCount);
+}
+
 uint64_t BmRowContainer::evictReadOnlyLoadedChunks(
     folly::Range<const std::pair<SegmentId, ChunkId>*> chunks,
     uint64_t targetBytes) {
@@ -137,6 +142,68 @@ SegmentState BmRowContainer::segmentState(SegmentId segment) const {
 const std::vector<SegmentId>& BmRowContainer::segmentsForPartition(
     PartitionId partition) const {
   return segments_.segmentsForPartition(partition);
+}
+
+SegmentId BmRowContainer::activeSegmentId(PartitionId partition) const {
+  return segments_.activeSegmentId(partition);
+}
+
+RowNumber BmRowContainer::activeSegmentNextRowNumber(
+    PartitionId partition) const {
+  return segments_.activeSegmentNextRowNumber(partition);
+}
+
+uint32_t BmRowContainer::rowSize() const {
+  return layout_.rowSize();
+}
+
+void BmRowContainer::copyRowWithDeepColumns(
+    const char* row,
+    folly::Range<const int32_t*> columns,
+    std::vector<char>& rowCopy,
+    std::vector<char>& variableCopy) const {
+  BOLT_CHECK_NOT_NULL(row);
+  rowCopy.resize(layout_.rowSize());
+  std::memcpy(rowCopy.data(), row, rowCopy.size());
+
+  uint64_t variableBytes = 0;
+  for (auto columnIndex : columns) {
+    const auto& column = layout_.column(columnIndex);
+    const auto kind = column.type->kind();
+    if (kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) {
+      continue;
+    }
+    if (layout_.isNull(row, columnIndex)) {
+      continue;
+    }
+    const auto& value =
+        *reinterpret_cast<const StringView*>(row + column.offset);
+    if (!value.isInline()) {
+      variableBytes += value.size();
+    }
+  }
+
+  variableCopy.resize(variableBytes);
+  auto* variable = variableCopy.data();
+  for (auto columnIndex : columns) {
+    const auto& column = layout_.column(columnIndex);
+    const auto kind = column.type->kind();
+    if (kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) {
+      continue;
+    }
+    if (layout_.isNull(row, columnIndex)) {
+      continue;
+    }
+    auto* target =
+        reinterpret_cast<StringView*>(rowCopy.data() + column.offset);
+    if (target->isInline()) {
+      continue;
+    }
+    const auto size = target->size();
+    std::memcpy(variable, target->data(), size);
+    *target = StringView(variable, size);
+    variable += size;
+  }
 }
 
 int64_t BmRowContainer::numRows() const {

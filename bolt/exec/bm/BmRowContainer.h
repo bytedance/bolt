@@ -118,10 +118,20 @@ class BmRowContainer {
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   void releaseChunk(SegmentId segment, ChunkId chunk);
+  void popFrontRows(uint64_t rowCount);
 
   SegmentState segmentState(SegmentId segment) const;
   const std::vector<SegmentId>& segmentsForPartition(PartitionId partition)
       const;
+  SegmentId activeSegmentId(PartitionId partition = kDefaultPartition) const;
+  RowNumber activeSegmentNextRowNumber(
+      PartitionId partition = kDefaultPartition) const;
+  uint32_t rowSize() const;
+  void copyRowWithDeepColumns(
+      const char* row,
+      folly::Range<const int32_t*> columns,
+      std::vector<char>& rowCopy,
+      std::vector<char>& variableCopy) const;
   int64_t numRows() const;
 
  private:
