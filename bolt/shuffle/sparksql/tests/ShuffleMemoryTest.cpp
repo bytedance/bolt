@@ -44,6 +44,29 @@ class ShuffleMemoryTest : public ShuffleTestBase {
   static void TearDownTestCase() {
     ShuffleTestBase::TearDownTestCase();
   }
+
+  // Runs a reclaimable MemoryHog (holding most of the task memory) feeding a
+  // shuffle writer of 'writerType', over batches whose rows are identical
+  // within a partition but incompressible across partitions. A writer that
+  // makes large splits lets the per-partition repeats deduplicate (small
+  // compressed output); one that fragments into tiny splits re-stores them.
+  ShuffleWriterMetrics runReclaimableHogScenario(int32_t writerType);
+
+  // Asserts the shuffle output compressed far below the raw size, i.e. the
+  // writer made splits large enough for the per-partition repeats to dedup.
+  static void expectWellCompressed(const ShuffleWriterMetrics& metrics) {
+    int64_t rawTotal = 0;
+    for (auto length : metrics.rawPartitionLengths) {
+      rawTotal += length;
+    }
+    ASSERT_GT(metrics.totalBytesWritten, 0);
+    ASSERT_GT(rawTotal, 0);
+    EXPECT_LT(metrics.totalBytesWritten * 10, rawTotal)
+        << "compressed shuffle output " << metrics.totalBytesWritten
+        << " for raw " << rawTotal << " (ratio "
+        << (rawTotal / metrics.totalBytesWritten)
+        << ":1); splits are too small, hurting compression (issue #662)";
+  }
 };
 
 TEST_F(ShuffleMemoryTest, testRowBasedShuffleEstimateLowerThanActual) {
@@ -287,12 +310,8 @@ TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
   });
 }
 
-// Issue #662: an upstream operator holding most of the memory leaves writer V2
-// a tiny budget, so it spills every batch into small splits that compress
-// poorly and bloat the shuffle output. Enforcing a minimum budget
-// (kMinMemLimit) reclaims the upstream and yields large, well-compressed
-// splits.
-TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
+ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
+    int32_t writerType) {
   using namespace bytedance::bolt::exec::test;
 
   constexpr int32_t kNumPartitions = 256;
@@ -300,10 +319,6 @@ TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
   constexpr int32_t kNumBatches = 40;
   constexpr size_t kStrLen = 32 * 1024; // ~8MB per batch (256 rows * 32KB)
 
-  // One distinct incompressible string per partition, identical across its
-  // rows: a large split dedups the repeats, but fragmenting it across many
-  // small splits re-stores the string each time, so compressed size grows with
-  // spill count.
   std::vector<std::string> perPartition(kNumPartitions);
   for (int p = 0; p < kNumPartitions; ++p) {
     std::string s(kStrLen, '\0');
@@ -341,8 +356,7 @@ TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
 
   ShuffleWriterOptions writerOptions;
   writerOptions.partitioning = Partitioning::kHash;
-  writerOptions.forceShuffleWriterType =
-      static_cast<int32_t>(ShuffleWriterType::V2);
+  writerOptions.forceShuffleWriterType = writerType;
   writerOptions.partitionWriterOptions.numPartitions = kNumPartitions;
   writerOptions.partitionWriterOptions.partitionWriterType =
       PartitionWriterType::kLocal;
@@ -381,20 +395,26 @@ TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
     while (cursor->moveNext()) {
     }
   });
+  return metrics;
+}
 
-  int64_t rawTotal = 0;
-  for (auto length : metrics.rawPartitionLengths) {
-    rawTotal += length;
-  }
-  ASSERT_GT(metrics.totalBytesWritten, 0);
-  ASSERT_GT(rawTotal, 0);
-  // Small splits compress poorly (no cross-row dedup): ~34:1 with the fix vs
-  // ~2:1 without it.
-  EXPECT_LT(metrics.totalBytesWritten * 10, rawTotal)
-      << "compressed shuffle output " << metrics.totalBytesWritten
-      << " for raw " << rawTotal << " (ratio "
-      << (rawTotal / metrics.totalBytesWritten)
-      << ":1); splits are too small, hurting compression (issue #662)";
+// Issue #662: an upstream operator holding most of the memory leaves writer V2
+// a tiny budget, so it spills every batch into small splits that compress
+// poorly and bloat the shuffle output. Enforcing a minimum budget
+// (kMinMemLimit) reclaims the upstream and yields large, well-compressed
+// splits.
+TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
+  expectWellCompressed(
+      runReclaimableHogScenario(static_cast<int32_t>(ShuffleWriterType::V2)));
+}
+
+// The row-based writer spills via pool reservation failure (which triggers
+// arbitration), so under the same pressure it reclaims the upstream instead of
+// fragmenting into tiny splits. This guards that it keeps making large,
+// well-compressed splits.
+TEST_F(ShuffleMemoryTest, testRowBasedKeepsLargeSplitsUnderMemoryPressure) {
+  expectWellCompressed(runReclaimableHogScenario(
+      static_cast<int32_t>(ShuffleWriterType::RowBased)));
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
