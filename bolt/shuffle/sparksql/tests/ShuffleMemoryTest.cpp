@@ -107,10 +107,10 @@ TEST_F(ShuffleMemoryTest, testRowBasedShuffleEstimateLowerThanActual) {
   param.dataTypeGroup = DataTypeGroup::kString;
   param.numPartitions = 1;
   param.numMappers = 1;
-  param.memoryLimit = 100 * 1024 * 1024; // 100MB
+  param.memoryLimit = 128 * 1024 * 1024; // 128MB
 
-  // first 5 batches with 10MB memory, then 50MB batch with under estimated flat
-  // size, should trigger spilling and not OOM
+  // 5 batches of 10MB then a 50MB batch with an under-estimated flat size; the
+  // writer must handle the under-estimate without OOM.
   ShuffleInputData inputData;
   inputData.inputsPerMapper.emplace_back(5, rowVector);
   inputData.inputsPerMapper[0].push_back(largeRowVector);

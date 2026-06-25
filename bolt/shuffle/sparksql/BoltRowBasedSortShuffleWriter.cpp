@@ -131,8 +131,10 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
     }
     auto rowVectorWithStats = rowConverter_->getWithStats(strippedRv);
     if (!boltPool_->maybeReserve(rowVectorWithStats.getTotalMemorySize())) {
-      RETURN_NOT_OK(tryEvict());
-      requestSpill_ = false;
+      if (boltPool_->reservedBytes() >= kMinMemLimit) {
+        RETURN_NOT_OK(tryEvict());
+        requestSpill_ = false;
+      }
     }
     // RowVector->UnsafeRow
     {
