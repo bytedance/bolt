@@ -4,14 +4,8 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/bm/BmRowContainer.h"
 
-#include <algorithm>
-
 namespace bytedance::bolt::exec::bm {
 namespace {
-
-uint32_t alignUp(uint32_t value, uint32_t alignment) {
-  return (value + alignment - 1) & ~(alignment - 1);
-}
 
 template <TypeKind Kind>
 uint32_t scalarTypeWidth(const TypePtr& type) {
@@ -54,8 +48,13 @@ BmRowLayout::BmRowLayout(
     const auto& type = types[i];
     const auto width = typeWidth(type);
     const auto kind = type->kind();
-    const auto alignment = std::min<uint32_t>(width, 8);
-    fixedRowSize_ = alignUp(fixedRowSize_, std::max<uint32_t>(alignment, 1));
+    // Match RowContainer's packed fixed-width layout: key/dependent cells are
+    // laid out by width without per-type alignment padding. This can place
+    // fixed-width cells at non-natural alignment. Like RowContainer, most cell
+    // accesses still use typed pointer dereference and rely on the current
+    // target tolerating unaligned scalar/StringView access. Wide scalars such
+    // as HUGEINT must use HugeInt::serialize/deserialize to avoid alignment
+    // faults.
     ColumnLayout column{type, fixedRowSize_, width, nullable[i], 0, 0};
     if (nullable[i]) {
       column.nullByte = nullOffset / 8;

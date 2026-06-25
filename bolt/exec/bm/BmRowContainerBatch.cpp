@@ -2,6 +2,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
+#include "bolt/type/HugeInt.h"
 
 namespace bytedance::bolt::exec::bm {
 namespace {
@@ -124,8 +125,13 @@ void BmRowContainer::storeFixedColumnBatchRangesNoNullsTyped(
             !decoded.isNullAt(source),
             "Column {} is not nullable",
             column.type->toString());
-        *reinterpret_cast<T*>(row + column.offset) =
+        const auto value =
             values == nullptr ? decoded.valueAt<T>(source) : values[source];
+        if constexpr (Kind == TypeKind::HUGEINT) {
+          HugeInt::serialize(value, row + column.offset);
+        } else {
+          *reinterpret_cast<T*>(row + column.offset) = value;
+        }
         row += rowStride;
         ++source;
       }
@@ -157,8 +163,13 @@ void BmRowContainer::storeFixedColumnBatchRangesWithNullsTyped(
           nullByte |= nullMask;
         } else {
           nullByte &= ~nullMask;
-          *reinterpret_cast<T*>(row + column.offset) =
-              decoded.valueAt<T>(source);
+          if constexpr (Kind == TypeKind::HUGEINT) {
+            HugeInt::serialize(
+                decoded.valueAt<int128_t>(source), row + column.offset);
+          } else {
+            *reinterpret_cast<T*>(row + column.offset) =
+                decoded.valueAt<T>(source);
+          }
         }
         row += rowStride;
         ++source;

@@ -2,6 +2,7 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
 
@@ -74,6 +75,8 @@ void BmRowContainer::extractColumnTyped(
           flatResult->set(
               i, *reinterpret_cast<const StringView*>(
                      rows[i] + column.offset));
+        } else if constexpr (Kind == TypeKind::HUGEINT) {
+          values[i] = HugeInt::deserialize(rows[i] + column.offset);
         } else {
           values[i] = *reinterpret_cast<const T*>(rows[i] + column.offset);
         }
@@ -95,6 +98,8 @@ void BmRowContainer::extractColumnTyped(
         flatResult->set(
             i,
             *reinterpret_cast<const StringView*>(row + column.offset));
+      } else if constexpr (Kind == TypeKind::HUGEINT) {
+        values[i] = HugeInt::deserialize(row + column.offset);
       } else {
         values[i] = *reinterpret_cast<const T*>(row + column.offset);
       }
