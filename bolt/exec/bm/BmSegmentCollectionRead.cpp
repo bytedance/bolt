@@ -9,6 +9,8 @@ namespace bytedance::bolt::exec::bm {
 ChunkData& BmSegmentCollection::chunkForRow(
     SegmentData& segment,
     RowNumber rowNumber) {
+  // Reuse the const overload for bounds/range validation, then return a mutable
+  // reference through the unchecked helper to keep validation logic single-sourced.
   (void)std::as_const(*this).chunkForRow(segment, rowNumber);
   return chunkForRowUnchecked(segment, rowNumber);
 }

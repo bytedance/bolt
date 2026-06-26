@@ -7,9 +7,9 @@
 #include "bolt/exec/bm/BmRowBlockLoader.h"
 #include "bolt/exec/bm/BmRowContainerPublicTypes.h"
 #include "bolt/exec/bm/BmRowContainerRead.h"
-#include "bolt/exec/bm/BmRowWriteContext.h"
 #include "bolt/exec/bm/BmRowCopier.h"
 #include "bolt/exec/bm/BmRowLayout.h"
+#include "bolt/exec/bm/BmRowWriteContext.h"
 #include "bolt/exec/bm/BmSegmentCollection.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
@@ -74,6 +74,16 @@ class BmRowContainer {
       int32_t numRows,
       int32_t column,
       const VectorPtr& result,
+      bool exactSize = false) {
+    extractColumnResident(rows, numRows, column, 0, result, exactSize);
+  }
+
+  void extractColumnResident(
+      const char* const* rows,
+      int32_t numRows,
+      int32_t column,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
       bool exactSize = false);
 
   void extractNullsResident(
@@ -85,22 +95,24 @@ class BmRowContainer {
   SegmentId spillActiveSegment();
   SegmentId spillActivePartitionSegment(PartitionId partition);
 
-  // Materializes resident rows in the supplied order into a new finalized/flushed
-  // segment. The returned SegmentId can be scanned through MergeReadSession.
+  // Materializes resident rows in the supplied order into a new
+  // finalized/flushed segment. The returned SegmentId can be scanned through
+  // MergeReadSession.
   //
   // This implementation copies all rows into a second segment before flushing.
   // It gives merge readers sequential scan locality, but it can temporarily
   // double memory for the reordered rows. Use it only while the caller can
   // tolerate that peak; large memory-pressure paths should eventually switch to
-  // segmented materialization that flushes smaller ordered pieces incrementally.
+  // segmented materialization that flushes smaller ordered pieces
+  // incrementally.
   SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
   // Conservative estimate for whether all blocks in segments can be bulk
   // loaded now. Only blocks with active BufferHandle are treated as loaded;
   // unpinned resident blocks are counted as reloadable because MaybeReserve()
   // may reclaim them while probing capacity. This is a hint only:
-  // BulkReadSession::loadRows() still performs the actual reservation and may
-  // throw if memory changes.
+  // BulkReadSession::load() still performs the actual reservation and may throw
+  // if memory changes.
   bool canBulkRead(folly::Range<const SegmentId*> segments) const;
 
   BulkReadSession beginBulkReadSegments(
@@ -110,7 +122,8 @@ class BmRowContainer {
       folly::Range<const SegmentId*> segments);
 
   // Creates a session for scanning/comparing physically ordered segments. If
-  // releaseAfterRead is true, each cursor drops chunk blocks after passing them.
+  // releaseAfterRead is true, each cursor drops chunk blocks after passing
+  // them.
   MergeReadSession beginMergeReadSegments(
       folly::Range<const SegmentId*> segments,
       bool releaseAfterRead = true);
@@ -121,8 +134,8 @@ class BmRowContainer {
   void popFrontRows(uint64_t rowCount);
 
   SegmentState segmentState(SegmentId segment) const;
-  const std::vector<SegmentId>& segmentsForPartition(PartitionId partition)
-      const;
+  const std::vector<SegmentId>& segmentsForPartition(
+      PartitionId partition) const;
   SegmentId activeSegmentId(PartitionId partition = kDefaultPartition) const;
   RowNumber activeSegmentNextRowNumber(
       PartitionId partition = kDefaultPartition) const;
@@ -137,18 +150,14 @@ class BmRowContainer {
  private:
   friend class BmRowLayout;
 
-  int32_t compareNonNull(
-      const char* left,
-      const char* right,
-      int32_t column) const;
+  int32_t compareNonNull(const char* left, const char* right, int32_t column)
+      const;
   void storeValue(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
       RowWriteContext& context,
       int32_t column);
-  static ColumnStorePlan::StoreValueFn storeFnFor(
-      TypeKind kind,
-      bool nullable);
+  static ColumnStorePlan::StoreValueFn storeFnFor(TypeKind kind, bool nullable);
   template <TypeKind Kind>
   static ColumnStorePlan::StoreValueFn storeNoNullsFn();
   template <TypeKind Kind>
@@ -191,6 +200,7 @@ class BmRowContainer {
       const char* const* rows,
       int32_t numRows,
       const ColumnLayout& column,
+      vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize) const;
   void ensureSegmentsLoaded(folly::Range<const SegmentId*> segments);
