@@ -119,6 +119,10 @@ bolt_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  bm/BmAggregateWindow.cpp
+  bm/BmRangeFrameBounds.cpp
+  bm/BmStreamingWindowBuild.cpp
+  bm/BmWindowPartition.cpp
 )
 
 target_compile_features(bolt_exec PRIVATE cxx_std_20)

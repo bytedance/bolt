@@ -35,6 +35,8 @@
 #include "bolt/exec/SpillableWindowBuild.h"
 #include "bolt/exec/StreamingWindowBuild.h"
 #include "bolt/exec/Task.h"
+#include "bolt/exec/bm/BmAggregateWindow.h"
+#include "bolt/exec/bm/BmStreamingWindowBuild.h"
 namespace bytedance::bolt::exec {
 
 tsan_atomic<WindowBuildType>& getWindowBuildType() {
@@ -50,6 +52,37 @@ TestWindowInjection::TestWindowInjection(WindowBuildType WindowBuildType) {
 TestWindowInjection::~TestWindowInjection() {
   getWindowBuildType() = WindowBuildType::kUnspecified;
 }
+
+namespace {
+
+template <TypeKind Kind>
+bool isBmRowContainerSupportedTypeKind(const TypePtr& /*type*/) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    return true;
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+bool isBmRowContainerSupportedType(const TypePtr& type) {
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      isBmRowContainerSupportedTypeKind, type->kind(), type);
+}
+
+bool isBmStreamingWindowBuildSupportedInput(const RowTypePtr& inputType) {
+  for (const auto& type : inputType->children()) {
+    if (!isBmRowContainerSupportedType(type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
 
 Window::Window(
     int32_t operatorId,
@@ -178,6 +211,33 @@ void Window::setSpillableWindowBuild(
   windowBuild_->setIfAggWindowFunc(isAggWindowFunc_);
 }
 
+void Window::setBmStreamingWindowBuild(
+    bool ignorePeer,
+    const common::SpillConfig* spillConfig,
+    int64_t spillThreshold) {
+  BOLT_CHECK(
+      !needSort_, "BmStreamingWindowBuild requires pre-sorted window input");
+  BOLT_USER_CHECK(
+      isBmStreamingWindowBuildSupportedInput(windowNode_->inputType()),
+      "BmStreamingWindowBuild does not support input type {}",
+      windowNode_->inputType()->toString());
+  auto bufferManager = operatorCtx_->driverCtx()->bufferManager();
+  BOLT_CHECK_NOT_NULL(
+      bufferManager,
+      "BmStreamingWindowBuild requires QueryConfig::kBufferManagerEnabled");
+  LOG(INFO) << "BmStreamingWindowBuild";
+  windowBuild_ = std::make_unique<window::BmStreamingWindowBuild>(
+      windowNode_,
+      pool(),
+      spillConfig,
+      &nonReclaimableSection_,
+      spillThreshold,
+      enableJit_,
+      std::move(bufferManager));
+  windowBuild_->setIgnorePeer(ignorePeer);
+  isBmStreamingWindowBuild_ = true;
+}
+
 void Window::setWindowBuild(
     WindowBuildType windowBuildType,
     const common::SpillConfig* spillConfig,
@@ -191,6 +251,20 @@ void Window::setWindowBuild(
         LOG(INFO) << "sort+SortWindowBuild for follwedTopNum > 0 ";
         windowBuild_ = SORT_WINDOW_BUILD_CTR();
         return;
+      }
+
+      if (!needSort_ &&
+          operatorCtx_->driverCtx()
+              ->queryConfig()
+              .bmStreamingWindowBuildEnabled()) {
+        if (isBmStreamingWindowBuildSupportedInput(windowNode_->inputType())) {
+          setBmStreamingWindowBuild(ignorePeer, spillConfig, spillThreshold);
+          return;
+        }
+        LOG(INFO) << "BmStreamingWindowBuild is enabled but input type "
+                  << windowNode_->inputType()->toString()
+                  << " is not supported by BmRowContainer. Falling back to "
+                     "existing WindowBuild selection.";
       }
 
       if (supportRowsStreaming()) {
@@ -218,6 +292,9 @@ void Window::setWindowBuild(
       BOLT_CHECK_GT(isSpillableWindowBuild(), 0);
       setSpillableWindowBuild(
           maxBatchRows, preferredBatchBytes, spillConfig, spillThreshold);
+      return;
+    case WindowBuildType::kBmStreamingWindowBuild:
+      setBmStreamingWindowBuild(ignorePeer, spillConfig, spillThreshold);
       return;
   }
 } // namespace bytedance::bolt::exec
@@ -355,14 +432,32 @@ void Window::createWindowFunctions() {
       }
     }
 
-    windowFunctions_.push_back(WindowFunction::create(
-        windowNodeFunction.functionCall->name(),
-        functionArgs,
-        windowNodeFunction.functionCall->type(),
-        windowNodeFunction.ignoreNulls,
-        operatorCtx_->pool(),
-        &stringAllocator_,
-        operatorCtx_->driverCtx()->queryConfig()));
+    bool createdWindowFunction = false;
+    if (isBmStreamingWindowBuild_) {
+      auto bmAggregateWindowFunction = window::createBmAggregateWindowFunction(
+          windowNodeFunction.functionCall->name(),
+          functionArgs,
+          windowNodeFunction.functionCall->type(),
+          windowNodeFunction.ignoreNulls,
+          operatorCtx_->pool(),
+          &stringAllocator_,
+          operatorCtx_->driverCtx()->queryConfig());
+      if (bmAggregateWindowFunction) {
+        windowFunctions_.push_back(std::move(bmAggregateWindowFunction));
+        createdWindowFunction = true;
+      }
+    }
+
+    if (!createdWindowFunction) {
+      windowFunctions_.push_back(WindowFunction::create(
+          windowNodeFunction.functionCall->name(),
+          functionArgs,
+          windowNodeFunction.functionCall->type(),
+          windowNodeFunction.ignoreNulls,
+          operatorCtx_->pool(),
+          &stringAllocator_,
+          operatorCtx_->driverCtx()->queryConfig()));
+    }
 
     windowFrames_.push_back(
         createWindowFrame(windowNode_, windowNodeFunction.frame, inputType));
@@ -464,7 +559,7 @@ void Window::reclaim(
   BOLT_CHECK(canReclaim());
   BOLT_CHECK(!nonReclaimableSection_);
 
-  if (!needSort_ && noMoreInput_) {
+  if (!needSort_ && noMoreInput_ && !isBmStreamingWindowBuild_) {
     ++stats.numNonReclaimableAttempts;
     // TODO Add support for spilling after noMoreInput().
     LOG(WARNING)
