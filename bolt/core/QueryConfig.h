@@ -242,6 +242,10 @@ class QueryConfig {
   static constexpr const char* kBufferManagerEnabled =
       "buffer-manager-enabled";
 
+  /// Enables BufferManager-backed streaming Window build for pre-sorted input.
+  static constexpr const char* kBmStreamingWindowBuildEnabled =
+      "bm_streaming_window_build_enabled";
+
   /// Aggregation spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kAggregationSpillEnabled =
       "aggregation_spill_enabled";
@@ -1060,6 +1064,10 @@ class QueryConfig {
 
   bool bufferManagerEnabled() const {
     return get<bool>(kBufferManagerEnabled, false);
+  }
+
+  bool bmStreamingWindowBuildEnabled() const {
+    return get<bool>(kBmStreamingWindowBuildEnabled, false);
   }
 
   config::AB_MODE spillUringEnabled() const {

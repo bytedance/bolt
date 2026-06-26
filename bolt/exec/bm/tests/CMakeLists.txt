@@ -9,6 +9,9 @@ add_executable(
   BmRowContainerBatchTest.cpp
   BmRowContainerReadTest.cpp
   BmRowContainerResidentTest.cpp
+  BmStreamingWindowBuildTest.cpp
+  BmWindowSemanticCoverageTest.cpp
+  BmWindowPartitionTest.cpp
   BmSegmentCollectionTest.cpp
   BmTestMain.cpp
 )

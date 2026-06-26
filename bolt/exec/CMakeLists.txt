@@ -120,6 +120,10 @@ bolt_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  bm/BmAggregateWindow.cpp
+  bm/BmRangeFrameBounds.cpp
+  bm/BmStreamingWindowBuild.cpp
+  bm/BmWindowPartition.cpp
 )
 
 set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)

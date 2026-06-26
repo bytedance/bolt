@@ -48,6 +48,14 @@ WindowPartition::WindowPartition(
   }
 }
 
+WindowPartition::WindowPartition(
+    const std::vector<column_index_t>& inputMapping,
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    : data_(nullptr),
+      partition_(),
+      inputMapping_(inputMapping),
+      sortKeyInfo_(sortKeyInfo) {}
+
 void WindowPartition::extractColumn(
     int32_t columnIndex,
     folly::Range<const vector_size_t*> rowNumbers,

@@ -43,7 +43,8 @@ enum class WindowBuildType {
   kUnspecified = 0, // no window build is specified
   kSortWindowBuild = 1, // sort window build
   kRowStreamingWindowBuild = 2, // row streaming window build
-  kSpillableWindowBuild = 3 // spillable window build
+  kSpillableWindowBuild = 3, // spillable window build
+  kBmStreamingWindowBuild = 4 // BufferManager-backed streaming window build
 };
 
 class TestWindowInjection {
@@ -98,8 +99,7 @@ class Window : public Operator {
   }
 
   bool canReclaim() const override {
-    // TODO Add support for spilling after noMoreInput().
-    return Operator::canReclaim() && !noMoreInput_;
+    return Operator::canReclaim() && (!noMoreInput_ || isBmStreamingWindowBuild_);
   }
 
   void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
@@ -243,6 +243,11 @@ class Window : public Operator {
       const common::SpillConfig* spillConfig,
       int64_t spillThreshold);
 
+  void setBmStreamingWindowBuild(
+      bool ignorePeer,
+      const common::SpillConfig* spillConfig,
+      int64_t spillThreshold);
+
   // decide if (1) current window function is supported for spill
   // (2) if window function is aggregated (sum, max, min, count..) or not
   // (lead, lag)
@@ -337,6 +342,8 @@ class Window : public Operator {
   vector_size_t peerEndRow_ = 0;
 
   bool isSpillableWindowBuild_ = false;
+
+  bool isBmStreamingWindowBuild_ = false;
   bool isAggWindowFunc_ = false;
   std::vector<TypePtr> windowResultTypes_;
 
