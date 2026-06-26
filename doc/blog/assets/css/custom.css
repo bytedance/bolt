@@ -1,0 +1,276 @@
+.site-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 1.05rem;
+  font-weight: 700;
+  user-select: none;
+}
+
+.bolt-site-logo {
+  width: 2rem;
+  height: 2rem;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.bolt-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-left: auto;
+  border-radius: 999px;
+  color: #6f7785;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.bolt-sidebar-toggle:hover {
+  background: #ecebfd;
+  color: #4f46e5;
+}
+
+@media (min-width: 50rem) {
+  body .side-bar {
+    left: 0 !important;
+    width: 16.5rem !important;
+    min-width: 16.5rem !important;
+  }
+
+  body .main {
+    margin-left: 16.5rem !important;
+    width: calc(100% - 16.5rem) !important;
+    max-width: none !important;
+  }
+
+  body .main-content-wrap {
+    width: 100% !important;
+    max-width: none !important;
+    justify-content: flex-start !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+
+  body .main-content {
+    width: 100% !important;
+    max-width: none !important;
+    box-sizing: border-box;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 1.5rem;
+    padding-right: 3rem;
+  }
+
+  .side-bar,
+  .main {
+    transition: width 0.2s ease, margin-left 0.2s ease;
+  }
+
+  .bolt-sidebar-collapsed .side-bar {
+    width: 4.5rem !important;
+    min-width: 4.5rem !important;
+  }
+
+  .bolt-sidebar-collapsed .main {
+    margin-left: 4.5rem !important;
+    width: calc(100% - 4.5rem) !important;
+  }
+
+  .bolt-sidebar-collapsed .site-title {
+    position: relative;
+    justify-content: center;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    font-size: 0;
+    gap: 0.25rem;
+    overflow: visible;
+  }
+
+  .bolt-sidebar-collapsed .bolt-sidebar-toggle {
+    position: absolute;
+    top: 50%;
+    right: -0.85rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    margin-left: 0;
+    background: #5c5ce6;
+    box-shadow: 0 0.25rem 0.75rem rgba(76, 76, 180, 0.28);
+    color: #ffffff;
+    font-size: 1.25rem;
+    transform: translateY(-50%);
+    z-index: 20;
+  }
+
+  .bolt-sidebar-collapsed .bolt-sidebar-toggle:hover {
+    background: #4646c8;
+    color: #ffffff;
+  }
+
+  .bolt-sidebar-collapsed .site-nav,
+  .bolt-sidebar-collapsed .site-footer {
+    display: none !important;
+  }
+}
+
+.bolt-hero-logo {
+  display: block;
+  width: min(30rem, 82%);
+  height: auto;
+  object-fit: contain;
+  margin: 0 auto 1.75rem;
+}
+
+.bolt-overview-lead {
+  max-width: none;
+  margin: 0 0 2rem;
+  padding: 1.25rem 1.5rem;
+  border-left: 0.25rem solid #5c5ce6;
+  border-radius: 0.5rem;
+  background: linear-gradient(90deg, rgba(92, 92, 230, 0.08), rgba(92, 92, 230, 0.02));
+}
+
+.bolt-overview-lead p {
+  margin: 0;
+  color: #3f4654;
+  font-size: 1.05rem;
+  line-height: 1.75;
+}
+
+.bolt-overview-lead p + p {
+  margin-top: 0.85rem;
+}
+
+.site-nav,
+.nav-list,
+.blog-post-links {
+  scrollbar-width: thin;
+}
+
+.side-bar {
+  overflow-y: auto;
+}
+
+.site-nav {
+  max-height: calc(100vh - 7.5rem);
+  overflow-y: auto;
+  padding-bottom: 1rem;
+}
+
+body .site-nav > .nav-list > .nav-list-item > .nav-list-link {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.45rem;
+  padding-top: 0.45rem;
+  padding-bottom: 0.45rem;
+}
+
+.blog-nav-item {
+  position: relative;
+}
+
+.blog-nav-item > .nav-list-link {
+  padding-right: 2rem;
+}
+
+.blog-toggle-button {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.35rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #6f7785;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1.5rem;
+  transition: transform 0.18s ease, background-color 0.18s ease;
+}
+
+.blog-toggle-button:hover {
+  background: #ecebfd;
+}
+
+.blog-posts-collapsed .blog-toggle-button {
+  transform: rotate(-90deg);
+}
+
+.blog-post-links {
+  display: block !important;
+  max-height: 9.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 0.25rem;
+  padding-left: 0.75rem;
+  border-left: 1px solid #e6e6ef;
+}
+
+.blog-posts-collapsed .blog-post-links {
+  display: none !important;
+}
+
+.blog-post-links .nav-list-link {
+  font-size: 0.88rem;
+  line-height: 1.25rem;
+}
+
+.post-meta {
+  color: #6f7785;
+  font-size: 0.9rem;
+  margin-top: -0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.post-list {
+  padding-left: 1.25rem;
+}
+
+/* Darken blog post content so body text and key details remain prominent. */
+body .main-content {
+  color: #1f2937;
+}
+
+body .main-content h1,
+body .main-content h2,
+body .main-content h3 {
+  color: #111827;
+}
+
+body .main-content strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+body .main-content code {
+  color: #3730a3;
+}
+
+body .main-content table th {
+  background: #f3f4f6;
+  color: #111827;
+  font-weight: 600;
+}
+
+body .main-content .note {
+  border-left: 0.3rem solid #4f46e5;
+}
+
+@media (max-width: 50rem) {
+  .site-nav {
+    max-height: calc(100vh - 5rem);
+  }
+
+  .blog-post-links {
+    max-height: 8rem;
+  }
+
+  .bolt-hero-logo {
+    width: min(24rem, 92%);
+  }
+}

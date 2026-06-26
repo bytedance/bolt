@@ -1,0 +1,46 @@
+name: Blog Markdown Check
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "doc/blog/**"
+      - "scripts/normalize_blog_posts.py"
+      - ".markdownlint-cli2.yaml"
+      - ".github/workflows/blog-check.yml"
+  pull_request:
+    paths:
+      - "doc/blog/**"
+      - "scripts/normalize_blog_posts.py"
+      - ".markdownlint-cli2.yaml"
+      - ".github/workflows/blog-check.yml"
+
+jobs:
+  blog-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+          working-directory: ./doc/blog
+
+      - name: Check blog post front matter
+        run: python3 scripts/normalize_blog_posts.py --check
+
+      - name: Lint Markdown
+        run: npx markdownlint-cli2@0.17.2 "doc/blog/**/*.md" "#doc/blog/vendor/**"
+
+      - name: Build Blog
+        working-directory: ./doc/blog
+        run: bundle exec jekyll build --strict_front_matter --destination ../../_site/blog

@@ -72,6 +72,17 @@ repos:
         args: ["-w", "-i", "2", "-bn", "-ci", "-sr"]
   - repo: local
     hooks:
+      - id: normalize-blog-posts
+        name: Normalize blog posts
+        entry: python3 scripts/normalize_blog_posts.py
+        language: system
+        files: ^doc/blog/_posts/.*\.md$
+      - id: markdownlint-blog
+        name: Lint and fix blog Markdown
+        entry: npx markdownlint-cli2@0.17.2 --fix "#doc/blog/vendor/**"
+        language: system
+        files: ^doc/blog/.*\.md$
+        exclude: ^doc/blog/vendor/
       - id: license-header-check
         name: Check for license headers
         entry: go run -C .github/license_check check_license.go
