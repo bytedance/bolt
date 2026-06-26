@@ -29,6 +29,9 @@ void BmRowBlockLoader::loadSegments(
     chunks.reserve(chunks.size() + segment.chunks.size());
     for (auto& chunkPtr : segment.chunks) {
       auto& chunk = *chunkPtr;
+      if (chunk.consumed) {
+        continue;
+      }
       chunks.push_back(&chunk);
     }
   }

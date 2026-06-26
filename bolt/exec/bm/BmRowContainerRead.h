@@ -13,20 +13,29 @@ namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer;
 
-// Full segment reader. It materializes all rows in the bound segments and does
-// not provide loaded-block eviction. Use ReadOnlyWindowReadSession when the
-// working set should be released between windows.
+// Full segment reader. It keeps all bound segments loaded and does not provide
+// loaded-block eviction. Use ReadOnlyWindowReadSession when the working set
+// should be released between windows.
 class BulkReadSession {
  public:
   BulkReadSession() = default;
 
+  // Loads all live chunks in the bound segments without materializing a row
+  // pointer vector. Consumed chunks are ignored because their rows are no
+  // longer readable by callers.
+  void load();
+
   std::vector<char*> loadRows();
+  std::vector<const char*> loadRows(
+      folly::Range<const SegmentRowRange*> ranges);
 
  private:
   BulkReadSession(BmRowContainer* container, std::vector<SegmentId> segments);
 
   BmRowContainer* container_{nullptr};
-  std::vector<SegmentId> segments_;
+  std::vector<SegmentId> segmentOrder_;
+  std::unordered_set<SegmentId> segments_;
+  bool loaded_{false};
 
   friend class BmRowContainer;
 };

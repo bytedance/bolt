@@ -12,6 +12,7 @@ void BmRowContainer::extractColumnResident(
     const char* const* rows,
     int32_t numRows,
     int32_t column,
+    vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) {
   BOLT_DCHECK_LT(column, layout_.columns().size());
@@ -21,6 +22,7 @@ void BmRowContainer::extractColumnResident(
       rows,
       numRows,
       layout_.column(column),
+      resultOffset,
       result,
       exactSize);
 }
@@ -41,9 +43,7 @@ void BmRowContainer::extractNullsResident(
 
   for (vector_size_t i = 0; i < numRows; ++i) {
     bits::setBit(
-        rawNulls,
-        i,
-        rows[i][columnLayout.nullByte] & columnLayout.nullMask);
+        rawNulls, i, rows[i][columnLayout.nullByte] & columnLayout.nullMask);
   }
 }
 
@@ -52,6 +52,7 @@ void BmRowContainer::extractColumnTyped(
     const char* const* rows,
     int32_t numRows,
     const ColumnLayout& column,
+    vector_size_t resultOffset,
     const VectorPtr& result,
     bool /*exactSize*/) const {
   if constexpr (
@@ -64,44 +65,49 @@ void BmRowContainer::extractColumnTyped(
     using T = typename TypeTraits<Kind>::NativeType;
     auto* flatResult = result->asFlatVector<T>();
     BOLT_CHECK_NOT_NULL(flatResult);
-    result->resize(numRows);
+    const auto resultSize = resultOffset + numRows;
+    result->resize(resultSize);
 
     if (FOLLY_LIKELY(!column.nullable)) {
-      result->clearNulls(0, numRows);
+      result->clearNulls(resultOffset, resultSize);
       auto values =
-          flatResult->mutableValues(numRows)->template asMutableRange<T>();
+          flatResult->mutableValues(resultSize)->template asMutableRange<T>();
       for (vector_size_t i = 0; i < numRows; ++i) {
-        if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+        const auto resultRow = resultOffset + i;
+        if constexpr (
+            Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
           flatResult->set(
-              i, *reinterpret_cast<const StringView*>(
-                     rows[i] + column.offset));
+              resultRow,
+              *reinterpret_cast<const StringView*>(rows[i] + column.offset));
         } else if constexpr (Kind == TypeKind::HUGEINT) {
-          values[i] = HugeInt::deserialize(rows[i] + column.offset);
+          values[resultRow] = HugeInt::deserialize(rows[i] + column.offset);
         } else {
-          values[i] = *reinterpret_cast<const T*>(rows[i] + column.offset);
+          values[resultRow] =
+              *reinterpret_cast<const T*>(rows[i] + column.offset);
         }
       }
       return;
     }
 
-    auto* nulls = result->mutableNulls(numRows)->asMutable<uint64_t>();
+    auto* nulls = result->mutableRawNulls();
     auto values =
-        flatResult->mutableValues(numRows)->template asMutableRange<T>();
+        flatResult->mutableValues(resultSize)->template asMutableRange<T>();
     for (vector_size_t i = 0; i < numRows; ++i) {
       const auto* row = rows[i];
+      const auto resultRow = resultOffset + i;
       if (FOLLY_UNLIKELY(row[column.nullByte] & column.nullMask)) {
-        bits::setNull(nulls, i, true);
+        bits::setNull(nulls, resultRow, true);
         continue;
       }
-      bits::setNull(nulls, i, false);
+      bits::setNull(nulls, resultRow, false);
       if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
         flatResult->set(
-            i,
+            resultRow,
             *reinterpret_cast<const StringView*>(row + column.offset));
       } else if constexpr (Kind == TypeKind::HUGEINT) {
-        values[i] = HugeInt::deserialize(row + column.offset);
+        values[resultRow] = HugeInt::deserialize(row + column.offset);
       } else {
-        values[i] = *reinterpret_cast<const T*>(row + column.offset);
+        values[resultRow] = *reinterpret_cast<const T*>(row + column.offset);
       }
     }
   }

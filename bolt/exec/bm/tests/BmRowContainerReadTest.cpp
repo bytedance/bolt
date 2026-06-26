@@ -44,6 +44,95 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
   EXPECT_EQ("bravo", flat->valueAt(3).str());
 }
 
+TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()}, {true, true}, bufferManager_, MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30}),
+      makeNullableFlatVector<std::string>({"alpha", std::nullopt, "charlie"}),
+  });
+  auto rows = storeAll(container, input);
+
+  auto numbers = makeNullableFlatVector<int64_t>({-1, -2, -3, -4, -5});
+  container.extractColumnResident(rows.data(), rows.size(), 0, 2, numbers);
+  ASSERT_EQ(5, numbers->size());
+  EXPECT_EQ(-1, numbers->valueAt(0));
+  EXPECT_EQ(-2, numbers->valueAt(1));
+  EXPECT_EQ(10, numbers->valueAt(2));
+  EXPECT_TRUE(numbers->isNullAt(3));
+  EXPECT_EQ(30, numbers->valueAt(4));
+
+  auto strings = makeNullableFlatVector<std::string>(
+      {"prefix", std::nullopt, "old-0", "old-1", "old-2"});
+  container.extractColumnResident(rows.data(), rows.size(), 1, 2, strings);
+  ASSERT_EQ(5, strings->size());
+  EXPECT_EQ("prefix", strings->valueAt(0).str());
+  EXPECT_TRUE(strings->isNullAt(1));
+  EXPECT_EQ("alpha", strings->valueAt(2).str());
+  EXPECT_TRUE(strings->isNullAt(3));
+  EXPECT_EQ("charlie", strings->valueAt(4).str());
+}
+
+TEST_F(BmRowContainerTest, BulkReadSessionLoadSkipsConsumedChunks) {
+  BmRowContainer container(
+      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 64 << 10);
+  constexpr vector_size_t kRows = 9000;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+  });
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  container.popFrontRows(8192);
+
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  EXPECT_NO_THROW(session.load());
+
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  std::vector<SegmentRowRange> ranges{{segment, 8192, 3}};
+  auto rows = window.loadRows({ranges.data(), ranges.size()});
+  ASSERT_EQ(3, rows.size());
+
+  auto result = BaseVector::create(BIGINT(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, result);
+  auto flat = result->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ(8192, flat->valueAt(0));
+  EXPECT_EQ(8193, flat->valueAt(1));
+  EXPECT_EQ(8194, flat->valueAt(2));
+}
+
+TEST_F(BmRowContainerTest, BulkReadSessionLoadsSegmentRowRanges) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto input = makeInput();
+  storeAll(container, input);
+
+  auto segment = container.spillActiveSegment();
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  session.load();
+
+  std::vector<SegmentRowRange> ranges{
+      {segment, 1, 2},
+      {segment, 3, 1},
+  };
+  auto inputRows = session.loadRows({ranges.data(), ranges.size()});
+  ASSERT_EQ(3, inputRows.size());
+
+  auto result = BaseVector::create(VARCHAR(), inputRows.size(), pool());
+  container.extractColumnResident(
+      inputRows.data(), inputRows.size(), 1, result);
+
+  auto flat = result->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, flat);
+  EXPECT_EQ("alpha", flat->valueAt(0).str());
+  EXPECT_EQ("charlie", flat->valueAt(1).str());
+  EXPECT_EQ("bravo", flat->valueAt(2).str());
+}
+
 TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -65,7 +154,8 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   ASSERT_EQ(reordered.size(), inputRows.size());
 
   auto result = BaseVector::create(VARCHAR(), reordered.size(), pool());
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+  container.extractColumnResident(
+      inputRows.data(), inputRows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
@@ -100,7 +190,8 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
   ASSERT_EQ(3, inputRows.size());
 
   auto result = BaseVector::create(VARCHAR(), inputRows.size(), pool());
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+  container.extractColumnResident(
+      inputRows.data(), inputRows.size(), 1, result);
 
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
@@ -111,11 +202,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
 
 TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
   BmRowContainer container(
-      {BIGINT()},
-      {false},
-      bufferManager_,
-      MemoryTag::kTesting,
-      64 << 10);
+      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 64 << 10);
   constexpr vector_size_t kRows = 9000;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
@@ -131,7 +218,8 @@ TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
   ASSERT_EQ(3, inputRows.size());
 
   auto result = BaseVector::create(BIGINT(), inputRows.size(), pool());
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 0, result);
+  container.extractColumnResident(
+      inputRows.data(), inputRows.size(), 0, result);
 
   auto flat = result->asFlatVector<int64_t>();
   ASSERT_NE(nullptr, flat);
@@ -150,9 +238,9 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
   constexpr vector_size_t kRows = 4096;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("reload-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) { return fmt::format("reload-string-value-{}", row); }),
   });
   storeAll(container, input);
 
@@ -221,9 +309,9 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
   constexpr vector_size_t kRows = 4096;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("release-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) { return fmt::format("release-string-value-{}", row); }),
   });
   storeAll(container, input);
 
@@ -271,9 +359,11 @@ TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   constexpr vector_size_t kRows = 4096;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("can-bulk-read-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("can-bulk-read-string-value-{}", row);
+          }),
   });
   storeAll(container, input);
 
@@ -309,9 +399,9 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   constexpr vector_size_t kRows = 4096;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("reclaim-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) { return fmt::format("reclaim-string-value-{}", row); }),
   });
   storeAll(container, input);
 
@@ -333,7 +423,8 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   EXPECT_GT(reclaimed, 0);
   const auto statsAfterReclaim = bufferManager_->stats();
   EXPECT_GT(statsAfterReclaim.reclaimCount, statsBeforeReclaim.reclaimCount);
-  EXPECT_GT(statsAfterReclaim.reclaimedBytes, statsBeforeReclaim.reclaimedBytes);
+  EXPECT_GT(
+      statsAfterReclaim.reclaimedBytes, statsBeforeReclaim.reclaimedBytes);
 
   loaded = window.loadRows({rowIds.data(), rowIds.size()});
   ASSERT_EQ(kRows, loaded.size());
@@ -360,9 +451,11 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanLimitTargetBytes) {
   constexpr vector_size_t kRows = 4096;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("limited-evict-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("limited-evict-string-value-{}", row);
+          }),
   });
   storeAll(container, input);
 
@@ -390,9 +483,11 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   constexpr vector_size_t kRows = 30000;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("window-read-string-value-{}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("window-read-string-value-{}", row);
+          }),
   });
   storeAll(container, input);
 
@@ -404,7 +499,8 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   auto inputRows = session.loadRows({rowIds.data(), rowIds.size()});
   ASSERT_EQ(kRows, inputRows.size());
   auto result = BaseVector::create(VARCHAR(), kRows, pool());
-  container.extractColumnResident(inputRows.data(), inputRows.size(), 1, result);
+  container.extractColumnResident(
+      inputRows.data(), inputRows.size(), 1, result);
   auto flat = result->asFlatVector<StringView>();
   ASSERT_NE(nullptr, flat);
   EXPECT_EQ("window-read-string-value-0", flat->valueAt(0).str());
@@ -424,12 +520,14 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
   constexpr vector_size_t kRows = 32;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("left-string-value-{:04}", row);
-      }),
-      makeFlatVector<std::string>(kRows, [](auto row) {
-        return fmt::format("right-string-value-{:04}", row);
-      }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) { return fmt::format("left-string-value-{:04}", row); }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("right-string-value-{:04}", row);
+          }),
   });
   storeAll(container, input);
 
