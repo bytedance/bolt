@@ -150,3 +150,32 @@
     blogItem.appendChild(postList);
   });
 </script>
+
+<script>
+  // Dark/light theme toggle: defaults to light, remembers user choice.
+  (function () {
+    var KEY = 'bolt-theme';
+    function applyTheme(isDark) {
+      document.body.classList.toggle('bolt-dark', isDark);
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+      var saved = null;
+      try { saved = window.localStorage.getItem(KEY); } catch (e) {}
+      var isDark = saved === 'dark';
+      applyTheme(isDark);
+
+      var btn = document.createElement('button');
+      btn.className = 'bolt-theme-toggle';
+      btn.type = 'button';
+      btn.setAttribute('aria-label', 'Toggle dark mode');
+      btn.textContent = isDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+      btn.addEventListener('click', function () {
+        var nowDark = !document.body.classList.contains('bolt-dark');
+        applyTheme(nowDark);
+        btn.textContent = nowDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+        try { window.localStorage.setItem(KEY, nowDark ? 'dark' : 'light'); } catch (e) {}
+      });
+      document.body.appendChild(btn);
+    });
+  })();
+</script>

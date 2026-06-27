@@ -10,6 +10,21 @@ nav_order: 1
   <p>Instead of targeting a single engine, Bolt focuses on the physical execution layer of analytical workloads. Its goal is to provide a common native foundation for building high-performance, production-ready data processing systems.</p>
 </div>
 
+<div class="bolt-cards">
+  <div class="card">
+    <h3>🔌 Any Framework, Any Hardware</h3>
+    <p>Pluggable into any framework on any hardware to consume any data source — validated on Spark, Flink, Presto and ElasticSearch.</p>
+  </div>
+  <div class="card">
+    <h3>✅ Enterprise-Grade</h3>
+    <p>Enterprise-grade performance, result consistency and feature parity with minimal code changes.</p>
+  </div>
+  <div class="card">
+    <h3>🌐 Open Source-First</h3>
+    <p>Open governance and public CI — the repo is the source of truth, in the "Community over Code" spirit.</p>
+  </div>
+</div>
+
 ---
 
 ## Why Bolt

@@ -31,8 +31,8 @@
 }
 
 .bolt-sidebar-toggle:hover {
-  background: #ecebfd;
-  color: #4f46e5;
+  background: #e8f1ff;
+  color: #1a6dff;
 }
 
 @media (min-width: 50rem) {
@@ -98,8 +98,8 @@
     width: 1.8rem;
     height: 1.8rem;
     margin-left: 0;
-    background: #5c5ce6;
-    box-shadow: 0 0.25rem 0.75rem rgba(76, 76, 180, 0.28);
+    background: #1a6dff;
+    box-shadow: 0 0.25rem 0.75rem rgba(26, 109, 255, 0.28);
     color: #ffffff;
     font-size: 1.25rem;
     transform: translateY(-50%);
@@ -107,7 +107,7 @@
   }
 
   .bolt-sidebar-collapsed .bolt-sidebar-toggle:hover {
-    background: #4646c8;
+    background: #1555cc;
     color: #ffffff;
   }
 
@@ -129,9 +129,9 @@
   max-width: none;
   margin: 0 0 2rem;
   padding: 1.25rem 1.5rem;
-  border-left: 0.25rem solid #5c5ce6;
+  border-left: 0.25rem solid #1a6dff;
   border-radius: 0.5rem;
-  background: linear-gradient(90deg, rgba(92, 92, 230, 0.08), rgba(92, 92, 230, 0.02));
+  background: linear-gradient(90deg, rgba(26, 109, 255, 0.08), rgba(26, 109, 255, 0.02));
 }
 
 .bolt-overview-lead p {
@@ -194,7 +194,7 @@ body .site-nav > .nav-list > .nav-list-item > .nav-list-link {
 }
 
 .blog-toggle-button:hover {
-  background: #ecebfd;
+  background: #e8f1ff;
 }
 
 .blog-posts-collapsed .blog-toggle-button {
@@ -248,7 +248,7 @@ body .main-content strong {
 }
 
 body .main-content code {
-  color: #3730a3;
+  color: #1850b8;
 }
 
 body .main-content table th {
@@ -258,7 +258,7 @@ body .main-content table th {
 }
 
 body .main-content .note {
-  border-left: 0.3rem solid #4f46e5;
+  border-left: 0.3rem solid #1a6dff;
 }
 
 @media (max-width: 50rem) {
@@ -272,5 +272,180 @@ body .main-content .note {
 
   .bolt-hero-logo {
     width: min(24rem, 92%);
+  }
+}
+
+/* ============================================================
+   Feature cards (added on home page below the hero lead)
+   ============================================================ */
+.bolt-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 0 0 2rem;
+}
+
+.bolt-cards .card {
+  border: 1px solid #e6e6ef;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  height: 100%;
+  background: #ffffff;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bolt-cards .card:hover {
+  transform: translateY(-3px);
+  border-color: #1a6dff;
+  box-shadow: 0 0.75rem 1.75rem rgba(26, 109, 255, 0.12);
+}
+
+.bolt-cards .card h3 {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.bolt-cards .card p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5rem;
+  color: #4b5563;
+}
+
+@media (max-width: 50rem) {
+  .bolt-cards { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Dark mode (toggled by .bolt-dark on <body>, see head_custom.html)
+   ============================================================ */
+body.bolt-dark {
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+body.bolt-dark .side-bar,
+body.bolt-dark .main-content-wrap {
+  background: #0d1117;
+}
+
+body.bolt-dark .side-bar {
+  border-right: 1px solid #21262d;
+}
+
+body.bolt-dark .site-title,
+body.bolt-dark .main-content {
+  color: #c9d1d9;
+}
+
+body.bolt-dark .main-content h1,
+body.bolt-dark .main-content h2,
+body.bolt-dark .main-content h3,
+body.bolt-dark .main-content h4 {
+  color: #e6edf3;
+}
+
+body.bolt-dark .main-content strong { color: #e6edf3; }
+body.bolt-dark .main-content a { color: #58a6ff; }
+body.bolt-dark .main-content code { color: #79c0ff; background: #161b22; }
+
+body.bolt-dark .site-nav .nav-list-link { color: #c9d1d9; }
+body.bolt-dark .site-nav .nav-list-link:hover { background: #161b22; }
+body.bolt-dark .nav-list-item .nav-list-link.active { color: #58a6ff; }
+
+body.bolt-dark .search-input {
+  background: #161b22;
+  color: #c9d1d9;
+  border-color: #21262d;
+}
+
+body.bolt-dark .bolt-overview-lead {
+  border-left-color: #58a6ff;
+  background: linear-gradient(90deg, rgba(56, 139, 253, 0.12), rgba(56, 139, 253, 0.03));
+}
+body.bolt-dark .bolt-overview-lead p { color: #c9d1d9; }
+
+body.bolt-dark .bolt-cards .card {
+  background: #161b22;
+  border-color: #21262d;
+}
+body.bolt-dark .bolt-cards .card p { color: #9da7b3; }
+body.bolt-dark .bolt-cards .card:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0.75rem 1.75rem rgba(56, 139, 253, 0.18);
+}
+
+body.bolt-dark .bolt-sidebar-toggle { color: #8b949e; }
+body.bolt-dark .bolt-sidebar-toggle:hover { background: #161b22; color: #58a6ff; }
+body.bolt-dark .blog-toggle-button { color: #8b949e; }
+body.bolt-dark .blog-toggle-button:hover { background: #161b22; }
+body.bolt-dark .blog-post-links { border-left-color: #21262d; }
+body.bolt-dark .main-content table th { background: #161b22; color: #e6edf3; }
+
+/* Theme toggle button (top-right) */
+.bolt-theme-toggle {
+  position: fixed;
+  top: 0.6rem;
+  right: 1rem;
+  z-index: 1000;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid #e6e6ef;
+  background: #ffffff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+}
+.bolt-theme-toggle:hover { border-color: #1a6dff; }
+body.bolt-dark .bolt-theme-toggle {
+  background: #161b22;
+  border-color: #21262d;
+}
+
+/* Dark mode: fix leftover light areas (top aux nav bar, header) */
+body.bolt-dark .main-header,
+body.bolt-dark .aux-nav,
+body.bolt-dark .aux-nav-list,
+body.bolt-dark .search {
+  background: #0d1117;
+}
+body.bolt-dark .main-header { border-bottom: 1px solid #21262d; }
+body.bolt-dark .aux-nav-list-item a,
+body.bolt-dark .site-button { color: #c9d1d9; }
+body.bolt-dark .search-input::placeholder { color: #6e7681; }
+body.bolt-dark .search-input { background: #161b22 !important; color: #c9d1d9 !important; }
+body.bolt-dark .search-results { background: #161b22; border-color: #21262d; }
+/* Soften hero logo white background in dark mode */
+body.bolt-dark .bolt-hero-logo {
+  background: #ffffff;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+/* Dark mode: active nav item highlight */
+body.bolt-dark .site-nav .nav-list-item > .nav-list-link.active {
+  background: #161b22;
+  color: #58a6ff;
+}
+body.bolt-dark .nav-list-link.active::before { background: #58a6ff; }
+
+/* ============================================================
+   Readable line length: cap main content width, left-aligned.
+   Container stays full-width; text is constrained for readability.
+   ============================================================ */
+@media (min-width: 50rem) {
+  body .main-content {
+    max-width: 72rem !important;   /* widened */
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+  /* Feature cards may span wider than the text column */
+  body .main-content .bolt-cards {
+    max-width: 64rem;
   }
 }
