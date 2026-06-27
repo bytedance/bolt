@@ -1018,10 +1018,17 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   // tearing down the chunks they reference.
   waitForHashAggrJitCompilation();
   hashAggrJitChunks_.clear();
-  if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
+  // supportRowBasedOutput_ is fixed at operator construction time and never
+  // flips afterwards. When it is true the JIT add/extract paths are skipped
+  // entirely (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks), so
+  // any compiled chunk would never run. Gate it out here to avoid the wasted
+  // background codegen.
+  if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_ ||
+      supportRowBasedOutput_) {
     LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
               << queryConfig_.enableHashAggrJit() << " isGlobal=" << isGlobal_
-              << " ignoreNullKeys=" << ignoreNullKeys_;
+              << " ignoreNullKeys=" << ignoreNullKeys_
+              << " supportRowBasedOutput=" << supportRowBasedOutput_;
     return;
   }
 
