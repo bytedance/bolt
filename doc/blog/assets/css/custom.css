@@ -1,0 +1,455 @@
+.site-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 1.05rem;
+  font-weight: 700;
+  user-select: none;
+}
+
+.bolt-site-logo {
+  width: 2rem;
+  height: 2rem;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.bolt-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-left: auto;
+  border-radius: 999px;
+  color: #6f7785;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.bolt-sidebar-toggle:hover {
+  background: #e8f1ff;
+  color: #1a6dff;
+}
+
+@media (min-width: 50rem) {
+  body .side-bar {
+    left: 0 !important;
+    width: 16.5rem !important;
+    min-width: 16.5rem !important;
+  }
+
+  body .main {
+    margin-left: 16.5rem !important;
+    width: calc(100% - 16.5rem) !important;
+    max-width: none !important;
+  }
+
+  body .main-content-wrap {
+    width: 100% !important;
+    max-width: none !important;
+    justify-content: flex-start !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+
+  body .main-content {
+    width: 100% !important;
+    max-width: none !important;
+    box-sizing: border-box;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 1.5rem;
+    padding-right: 3rem;
+  }
+
+  .side-bar,
+  .main {
+    transition: width 0.2s ease, margin-left 0.2s ease;
+  }
+
+  .bolt-sidebar-collapsed .side-bar {
+    width: 4.5rem !important;
+    min-width: 4.5rem !important;
+  }
+
+  .bolt-sidebar-collapsed .main {
+    margin-left: 4.5rem !important;
+    width: calc(100% - 4.5rem) !important;
+  }
+
+  .bolt-sidebar-collapsed .site-title {
+    position: relative;
+    justify-content: center;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    font-size: 0;
+    gap: 0.25rem;
+    overflow: visible;
+  }
+
+  .bolt-sidebar-collapsed .bolt-sidebar-toggle {
+    position: absolute;
+    top: 50%;
+    right: -0.85rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    margin-left: 0;
+    background: #1a6dff;
+    box-shadow: 0 0.25rem 0.75rem rgba(26, 109, 255, 0.28);
+    color: #ffffff;
+    font-size: 1.25rem;
+    transform: translateY(-50%);
+    z-index: 20;
+  }
+
+  .bolt-sidebar-collapsed .bolt-sidebar-toggle:hover {
+    background: #1555cc;
+    color: #ffffff;
+  }
+
+  .bolt-sidebar-collapsed .site-nav,
+  .bolt-sidebar-collapsed .site-footer {
+    display: none !important;
+  }
+}
+
+.bolt-hero-logo {
+  display: block;
+  width: min(30rem, 82%);
+  height: auto;
+  object-fit: contain;
+  margin: 0 auto 1.75rem;
+}
+
+.bolt-overview-lead {
+  max-width: none;
+  margin: 0 0 2rem;
+  padding: 1.25rem 1.5rem;
+  border-left: 0.25rem solid #1a6dff;
+  border-radius: 0.5rem;
+  background: linear-gradient(90deg, rgba(26, 109, 255, 0.08), rgba(26, 109, 255, 0.02));
+}
+
+.bolt-overview-lead p {
+  margin: 0;
+  color: #3f4654;
+  font-size: 1.05rem;
+  line-height: 1.75;
+}
+
+.bolt-overview-lead p + p {
+  margin-top: 0.85rem;
+}
+
+.site-nav,
+.nav-list,
+.blog-post-links {
+  scrollbar-width: thin;
+}
+
+.side-bar {
+  overflow-y: auto;
+}
+
+.site-nav {
+  max-height: calc(100vh - 7.5rem);
+  overflow-y: auto;
+  padding-bottom: 1rem;
+}
+
+body .site-nav > .nav-list > .nav-list-item > .nav-list-link {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.45rem;
+  padding-top: 0.45rem;
+  padding-bottom: 0.45rem;
+}
+
+.blog-nav-item {
+  position: relative;
+}
+
+.blog-nav-item > .nav-list-link {
+  padding-right: 2rem;
+}
+
+.blog-toggle-button {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.35rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #6f7785;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1.5rem;
+  transition: transform 0.18s ease, background-color 0.18s ease;
+}
+
+.blog-toggle-button:hover {
+  background: #e8f1ff;
+}
+
+.blog-posts-collapsed .blog-toggle-button {
+  transform: rotate(-90deg);
+}
+
+.blog-post-links {
+  display: block !important;
+  max-height: 9.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 0.25rem;
+  padding-left: 0.75rem;
+  border-left: 1px solid #e6e6ef;
+}
+
+.blog-posts-collapsed .blog-post-links {
+  display: none !important;
+}
+
+.blog-post-links .nav-list-link {
+  font-size: 0.88rem;
+  line-height: 1.25rem;
+}
+
+.post-meta {
+  color: #6f7785;
+  font-size: 0.9rem;
+  margin-top: -0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.post-list {
+  padding-left: 1.25rem;
+}
+
+/* Darken blog post content so body text and key details remain prominent. */
+body .main-content {
+  color: #1f2937;
+}
+
+body .main-content h1,
+body .main-content h2,
+body .main-content h3 {
+  color: #111827;
+}
+
+body .main-content strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+body .main-content code {
+  color: #1850b8;
+}
+
+body .main-content table th {
+  background: #f3f4f6;
+  color: #111827;
+  font-weight: 600;
+}
+
+body .main-content .note {
+  border-left: 0.3rem solid #1a6dff;
+}
+
+@media (max-width: 50rem) {
+  .site-nav {
+    max-height: calc(100vh - 5rem);
+  }
+
+  .blog-post-links {
+    max-height: 8rem;
+  }
+
+  .bolt-hero-logo {
+    width: min(24rem, 92%);
+  }
+}
+
+/* ============================================================
+   Feature cards (added on home page below the hero lead)
+   ============================================================ */
+.bolt-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 0 0 2rem;
+}
+
+.bolt-cards .card {
+  border: 1px solid #e6e6ef;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  height: 100%;
+  background: #ffffff;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bolt-cards .card:hover {
+  transform: translateY(-3px);
+  border-color: #1a6dff;
+  box-shadow: 0 0.75rem 1.75rem rgba(26, 109, 255, 0.12);
+}
+
+.bolt-cards .card h3 {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.bolt-cards .card p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5rem;
+  color: #4b5563;
+}
+
+@media (max-width: 50rem) {
+  .bolt-cards { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Dark mode (toggled by .bolt-dark on <body>, see head_custom.html)
+   ============================================================ */
+body.bolt-dark {
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+body.bolt-dark .side-bar,
+body.bolt-dark .main-content-wrap {
+  background: #0d1117;
+}
+
+body.bolt-dark .side-bar {
+  border-right: 1px solid #21262d;
+}
+
+body.bolt-dark .site-title,
+body.bolt-dark .main-content {
+  color: #c9d1d9;
+}
+
+body.bolt-dark .main-content h1,
+body.bolt-dark .main-content h2,
+body.bolt-dark .main-content h3,
+body.bolt-dark .main-content h4 {
+  color: #e6edf3;
+}
+
+body.bolt-dark .main-content strong { color: #e6edf3; }
+body.bolt-dark .main-content a { color: #58a6ff; }
+body.bolt-dark .main-content code { color: #79c0ff; background: #161b22; }
+
+body.bolt-dark .site-nav .nav-list-link { color: #c9d1d9; }
+body.bolt-dark .site-nav .nav-list-link:hover { background: #161b22; }
+body.bolt-dark .nav-list-item .nav-list-link.active { color: #58a6ff; }
+
+body.bolt-dark .search-input {
+  background: #161b22;
+  color: #c9d1d9;
+  border-color: #21262d;
+}
+
+body.bolt-dark .bolt-overview-lead {
+  border-left-color: #58a6ff;
+  background: linear-gradient(90deg, rgba(56, 139, 253, 0.12), rgba(56, 139, 253, 0.03));
+}
+body.bolt-dark .bolt-overview-lead p { color: #c9d1d9; }
+
+body.bolt-dark .bolt-cards .card {
+  background: #161b22;
+  border-color: #21262d;
+}
+body.bolt-dark .bolt-cards .card p { color: #9da7b3; }
+body.bolt-dark .bolt-cards .card:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0.75rem 1.75rem rgba(56, 139, 253, 0.18);
+}
+
+body.bolt-dark .bolt-sidebar-toggle { color: #8b949e; }
+body.bolt-dark .bolt-sidebar-toggle:hover { background: #161b22; color: #58a6ff; }
+body.bolt-dark .blog-toggle-button { color: #8b949e; }
+body.bolt-dark .blog-toggle-button:hover { background: #161b22; }
+body.bolt-dark .blog-post-links { border-left-color: #21262d; }
+body.bolt-dark .main-content table th { background: #161b22; color: #e6edf3; }
+
+/* Theme toggle button (far right of the top aux-nav toolbar) */
+.aux-nav .aux-nav-list { align-items: stretch; }
+.aux-nav .aux-nav-list-item.bolt-theme-toggle-item {
+  display: flex !important;
+  align-items: center !important;
+  height: 100% !important;
+  padding-right: 1rem;
+}
+.bolt-theme-toggle {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid #e6e6ef;
+  background: #ffffff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0;
+}
+.bolt-theme-toggle:hover { border-color: #1a6dff; }
+body.bolt-dark .bolt-theme-toggle {
+  background: #161b22;
+  border-color: #21262d;
+}
+
+/* Dark mode: fix leftover light areas (top aux nav bar, header) */
+body.bolt-dark .main-header,
+body.bolt-dark .aux-nav,
+body.bolt-dark .aux-nav-list,
+body.bolt-dark .search {
+  background: #0d1117;
+}
+body.bolt-dark .main-header { border-bottom: 1px solid #21262d; }
+body.bolt-dark .aux-nav-list-item a,
+body.bolt-dark .site-button { color: #c9d1d9; }
+body.bolt-dark .search-input::placeholder { color: #6e7681; }
+body.bolt-dark .search-input { background: #161b22 !important; color: #c9d1d9 !important; }
+body.bolt-dark .search-results { background: #161b22; border-color: #21262d; }
+/* Soften hero logo white background in dark mode */
+body.bolt-dark .bolt-hero-logo {
+  background: #ffffff;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+/* Dark mode: active nav item highlight */
+body.bolt-dark .site-nav .nav-list-item > .nav-list-link.active {
+  background: #161b22;
+  color: #58a6ff;
+}
+body.bolt-dark .nav-list-link.active::before { background: #58a6ff; }
+
+/* ============================================================
+   Readable line length: cap main content width, left-aligned.
+   Container stays full-width; text is constrained for readability.
+   ============================================================ */
+@media (min-width: 50rem) {
+  body .main-content {
+    max-width: 72rem !important;   /* widened */
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+  /* Feature cards may span wider than the text column */
+  body .main-content .bolt-cards {
+    max-width: 64rem;
+  }
+}

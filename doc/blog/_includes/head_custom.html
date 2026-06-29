@@ -1,0 +1,197 @@
+<link rel="stylesheet" href="{{ '/assets/css/custom.css' | relative_url }}">
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var siteNav = document.querySelector('.site-nav');
+    var siteTitle = document.querySelector('.site-title');
+
+    if (siteTitle && !siteTitle.querySelector('.bolt-site-logo')) {
+      var logo = document.createElement('img');
+      logo.className = 'bolt-site-logo';
+      logo.src = '{{ "/assets/images/bolt-nav-logo.png" | relative_url }}';
+      logo.alt = 'Bolt logo';
+      siteTitle.prepend(logo);
+    }
+
+    if (siteTitle && !siteTitle.querySelector('.bolt-sidebar-toggle')) {
+      siteTitle.setAttribute('role', 'button');
+      siteTitle.setAttribute('aria-controls', 'site-nav');
+      siteTitle.setAttribute('aria-expanded', 'true');
+
+      var sidebarToggleIcon = document.createElement('span');
+      sidebarToggleIcon.className = 'bolt-sidebar-toggle';
+      sidebarToggleIcon.setAttribute('aria-hidden', 'true');
+      sidebarToggleIcon.textContent = '‹';
+      siteTitle.appendChild(sidebarToggleIcon);
+
+      var setSidebarCollapsed = function (collapsed) {
+        document.body.classList.toggle('bolt-sidebar-collapsed', collapsed);
+        siteTitle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        sidebarToggleIcon.textContent = collapsed ? '›' : '‹';
+        sidebarToggleIcon.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+        try {
+          window.localStorage.setItem('bolt-sidebar-collapsed', collapsed ? 'true' : 'false');
+        } catch (error) {}
+      };
+
+      try {
+        setSidebarCollapsed(window.localStorage.getItem('bolt-sidebar-collapsed') === 'true');
+      } catch (error) {
+        setSidebarCollapsed(false);
+      }
+
+      siteTitle.addEventListener('click', function (event) {
+        event.preventDefault();
+        setSidebarCollapsed(!document.body.classList.contains('bolt-sidebar-collapsed'));
+      });
+
+      siteTitle.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          setSidebarCollapsed(!document.body.classList.contains('bolt-sidebar-collapsed'));
+        }
+      });
+    }
+
+    if (!siteNav || siteNav.querySelector('.blog-post-links')) {
+      return;
+    }
+
+    var posts = [
+      {% for post in site.posts %}
+      {
+        title: {{ post.title | jsonify }},
+        url: {{ post.url | relative_url | jsonify }}
+      }{% unless forloop.last %},{% endunless %}
+      {% endfor %}
+    ];
+
+    if (posts.length === 0) {
+      return;
+    }
+
+    var blogLink = Array.from(siteNav.querySelectorAll('a')).find(function (link) {
+      return link.textContent.trim() === 'Blog' || /\/blog\.html$/.test(link.pathname);
+    });
+
+    var blogItem = blogLink ? blogLink.closest('li') : null;
+    if (!blogItem) {
+      var rootList = siteNav.querySelector('.nav-list');
+      if (!rootList) {
+        return;
+      }
+
+      blogItem = document.createElement('li');
+      blogItem.className = 'nav-list-item';
+      blogItem.innerHTML = '<a class="nav-list-link" href="{{ "/blog.html" | relative_url }}">Blog</a>';
+      rootList.appendChild(blogItem);
+      blogLink = blogItem.querySelector('a');
+    }
+
+    blogItem.classList.add('blog-nav-item');
+
+    var existingTitles = Array.from(blogItem.querySelectorAll('a')).map(function (link) {
+      return link.textContent.trim();
+    });
+    var alreadyRenderedByTheme = posts.some(function (post) {
+      return existingTitles.indexOf(post.title) !== -1;
+    });
+    if (alreadyRenderedByTheme) {
+      return;
+    }
+
+    if (blogLink && !blogItem.querySelector('.blog-toggle-button')) {
+      var blogToggle = document.createElement('button');
+      blogToggle.className = 'blog-toggle-button';
+      blogToggle.type = 'button';
+      blogToggle.setAttribute('aria-label', 'Toggle blog posts');
+      blogToggle.setAttribute('aria-expanded', 'true');
+      blogToggle.textContent = '▾';
+      blogLink.insertAdjacentElement('afterend', blogToggle);
+
+      var setBlogCollapsed = function (collapsed) {
+        blogItem.classList.toggle('blog-posts-collapsed', collapsed);
+        blogToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        try {
+          window.localStorage.setItem('bolt-blog-posts-collapsed', collapsed ? 'true' : 'false');
+        } catch (error) {}
+      };
+
+      try {
+        setBlogCollapsed(window.localStorage.getItem('bolt-blog-posts-collapsed') === 'true');
+      } catch (error) {
+        setBlogCollapsed(false);
+      }
+
+      blogToggle.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        setBlogCollapsed(!blogItem.classList.contains('blog-posts-collapsed'));
+      });
+    }
+
+    var postList = document.createElement('ul');
+    postList.className = 'nav-list blog-post-links';
+    postList.setAttribute('aria-label', 'Blog posts');
+
+    posts.forEach(function (post) {
+      var item = document.createElement('li');
+      item.className = 'nav-list-item';
+
+      var link = document.createElement('a');
+      link.className = 'nav-list-link';
+      link.href = post.url;
+      link.textContent = post.title;
+
+      item.appendChild(link);
+      postList.appendChild(item);
+    });
+
+    blogItem.appendChild(postList);
+  });
+</script>
+
+<script>
+  // Dark/light theme toggle: defaults to light, remembers user choice.
+  (function () {
+    var KEY = 'bolt-theme';
+    function applyTheme(isDark) {
+      document.body.classList.toggle('bolt-dark', isDark);
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+      var saved = null;
+      try { saved = window.localStorage.getItem(KEY); } catch (e) {}
+      var isDark = saved === 'dark';
+      applyTheme(isDark);
+
+      var btn = document.createElement('button');
+      btn.className = 'bolt-theme-toggle';
+      btn.type = 'button';
+      btn.setAttribute('aria-label', 'Toggle dark mode');
+      btn.textContent = isDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+      btn.addEventListener('click', function () {
+        var nowDark = !document.body.classList.contains('bolt-dark');
+        applyTheme(nowDark);
+        btn.textContent = nowDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+        try { window.localStorage.setItem(KEY, nowDark ? 'dark' : 'light'); } catch (e) {}
+      });
+
+      // Place the toggle at the far right of the top aux-nav toolbar,
+      // so "Bolt on GitHub" sits to its left and nothing overlaps.
+      var auxNav = document.querySelector('.aux-nav .aux-nav-list')
+        || document.querySelector('.aux-nav');
+      if (auxNav) {
+        if (auxNav.classList.contains('aux-nav-list')) {
+          var li = document.createElement('li');
+          li.className = 'aux-nav-list-item bolt-theme-toggle-item';
+          li.appendChild(btn);
+          auxNav.appendChild(li);
+        } else {
+          auxNav.appendChild(btn);
+        }
+      } else {
+        document.body.appendChild(btn);
+      }
+    });
+  })();
+</script>
