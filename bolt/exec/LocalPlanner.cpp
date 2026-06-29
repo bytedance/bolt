@@ -379,11 +379,6 @@ uint32_t maxDrivers(
     // single-threaded for now. This assumption might not hold in the future.
     else if (node->name() == "SparkShuffleReader") {
       return 1;
-    }
-    // multi-threaded spark: SparkShuffleWriter is designed to be
-    // single-threaded for now. This assumption might not hold in the future.
-    else if (node->name() == "SparkShuffleWriter") {
-      return 1;
     } else {
       auto result = Operator::maxDrivers(node);
       if (result) {

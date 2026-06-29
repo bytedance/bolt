@@ -26,11 +26,16 @@ std::unique_ptr<PartitionWriter> PartitionWriter::create(
     PartitionWriterOptions options,
     arrow::MemoryPool* pool) {
   if (options.partitionWriterType == PartitionWriterType::kLocal) {
+    std::stringstream fileName;
+    fileName << options.dataFile;
+    if (options.part >= 0) {
+      fileName << ".part_" << options.part;
+    }
     return std::make_unique<LocalPartitionWriter>(
         options.numPartitions,
         options,
         pool,
-        options.dataFile,
+        fileName.str(),
         options.configuredDirs);
   } else if (options.partitionWriterType == PartitionWriterType::kCeleborn) {
     return std::make_unique<CelebornPartitionWriter>(

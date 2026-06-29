@@ -14,6 +14,16 @@
  * limitations under the License.
  */
 
+#include <arrow/buffer.h>
+#include <arrow/io/api.h>
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/partition_writer/LocalPartitionWriter.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
@@ -150,6 +160,51 @@ TEST_F(ShuffleMiscTest, SkewedDictionaryStringEstimateFlatSize) {
   ShuffleInputData inputData;
   inputData.inputsPerMapper.push_back({inputWithPid});
   executeTestWithCustomInput(param, inputData);
+}
+
+TEST_F(ShuffleMiscTest, MergeTruncatesExistingTargetFile) {
+  auto tempDir = exec::test::TempDirectoryPath::create();
+  const auto file1 = tempDir->path + "/shuffle_data_0.bin";
+  const auto file2 = tempDir->path + "/shuffle_data_1.bin";
+  const auto targetFile = tempDir->path + "/merged.bin";
+
+  auto writeFile = [](const std::string& path, const std::string& data) {
+    auto outputStreamResult = arrow::io::FileOutputStream::Open(path, false);
+    ASSERT_TRUE(outputStreamResult.ok())
+        << outputStreamResult.status().ToString();
+    auto outputStream = outputStreamResult.ValueOrDie();
+
+    auto buffer = arrow::Buffer::FromString(data);
+
+    ASSERT_TRUE(outputStream->Write(buffer).ok());
+    ASSERT_TRUE(outputStream->Close().ok());
+  };
+
+  writeFile(file1, "ac");
+  writeFile(file2, "bd");
+  writeFile(targetFile, "stale-bytes");
+
+  const auto status =
+      LocalPartitionWriter::merge({file1, file2}, {{1, 1}, {1, 1}}, targetFile);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  auto mergedInputResult = arrow::io::ReadableFile::Open(targetFile);
+  ASSERT_TRUE(mergedInputResult.ok()) << mergedInputResult.status().ToString();
+  auto mergedInput = mergedInputResult.ValueOrDie();
+
+  auto sizeResult = mergedInput->GetSize();
+  ASSERT_TRUE(sizeResult.ok()) << sizeResult.status().ToString();
+  auto mergedSize = sizeResult.ValueOrDie();
+  EXPECT_EQ(mergedSize, 4);
+
+  auto readResult = mergedInput->Read(mergedSize);
+  ASSERT_TRUE(readResult.ok()) << readResult.status().ToString();
+  auto mergedBuffer = readResult.ValueOrDie();
+  ASSERT_TRUE(mergedInput->Close().ok());
+
+  EXPECT_EQ(mergedBuffer->ToString(), "abcd");
+  EXPECT_FALSE(std::filesystem::exists(file1));
+  EXPECT_FALSE(std::filesystem::exists(file2));
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

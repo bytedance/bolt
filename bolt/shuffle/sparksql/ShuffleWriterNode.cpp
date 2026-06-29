@@ -15,11 +15,14 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
+#include <folly/ScopeGuard.h>
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
+#include "bolt/exec/Task.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltRowBasedSortShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
+#include "bolt/shuffle/sparksql/partition_writer/LocalPartitionWriter.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -40,7 +43,9 @@ SparkShuffleWriter::SparkShuffleWriter(
       minMemLimit_(
           shuffleWriterOptions_.partitionWriterOptions.shuffleBufferSize),
       reportShuffleStatusCallback_(
-          shuffleWriterNode->getReportShuffleStatusCallback()) {}
+          shuffleWriterNode->getReportShuffleStatusCallback()) {
+  shuffleWriterOptions_.partitionWriterOptions.part = driverCtx->driverId;
+}
 
 void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
   arrowPool_ = std::make_unique<BoltArrowMemoryPool>(pool());
@@ -88,18 +93,106 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
 
 void SparkShuffleWriter::noMoreInput() {
   Operator::noMoreInput();
-  ShuffleWriterMetrics metrics;
-  if (shuffleWriter_) {
+  const bool isLocalPartitionWriter =
+      shuffleWriterOptions_.partitionWriterOptions.partitionWriterType ==
+      PartitionWriterType::kLocal;
+
+  if (shuffleWriter_ && isLocalPartitionWriter) {
     auto status = shuffleWriter_->stop();
     BOLT_CHECK(status.ok(), "Native shuffle write: ShuffleWriter stop failed");
-    metrics = shuffleWriter_->metrics();
-  } else {
-    metrics.partitionLengths = std::vector<int64_t>(
-        shuffleWriterOptions_.partitionWriterOptions.numPartitions, 0);
-    metrics.rawPartitionLengths = std::vector<int64_t>(
-        shuffleWriterOptions_.partitionWriterOptions.numPartitions, 0);
+  }
 
-    LOG(INFO) << "ShuffleWriter is null";
+  std::vector<ContinuePromise> promises;
+  std::vector<std::shared_ptr<Driver>> peers;
+  if (!operatorCtx_->task()->allPeersFinished(
+          planNodeId(), operatorCtx_->driver(), &future_, promises, peers)) {
+    BOLT_CHECK(future_.valid());
+    LOG(INFO) << "SparkShuffleWriter finished but not the last one.";
+    return;
+  }
+
+  LOG(INFO) << "Last SparkShuffleWriter finished.";
+  if (shuffleWriter_ && !isLocalPartitionWriter) {
+    auto status = shuffleWriter_->stop();
+    BOLT_CHECK(status.ok(), "Native shuffle write: ShuffleWriter stop failed");
+  }
+
+  std::vector<std::vector<int64_t>> peerPartitionLengths;
+  std::vector<std::string> peerDataFiles;
+  ShuffleWriterMetrics metrics;
+  {
+    auto promisesGuard = folly::makeGuard([&]() {
+      peers.clear();
+      for (auto& promise : promises) {
+        promise.setValue();
+      }
+    });
+
+    for (auto& peer : peers) {
+      auto* op = peer->findOperator(planNodeId());
+      auto* writer = dynamic_cast<SparkShuffleWriter*>(op);
+      BOLT_CHECK_NOT_NULL(writer);
+      if (writer->shuffleWriter_) {
+        if (!isLocalPartitionWriter) {
+          auto status = writer->shuffleWriter_->localStop();
+          BOLT_CHECK(
+              status.ok(), "Native shuffle write: ShuffleWriter stop failed");
+        }
+        peerDataFiles.push_back(writer->shuffleWriter_->metrics().dataFile);
+        peerPartitionLengths.push_back(
+            writer->shuffleWriter_->metrics().partitionLengths);
+        metrics += writer->shuffleWriter_->metrics();
+      }
+    }
+  }
+
+  if (shuffleWriter_) {
+    peerDataFiles.push_back(shuffleWriter_->metrics().dataFile);
+    peerPartitionLengths.push_back(shuffleWriter_->metrics().partitionLengths);
+    metrics += shuffleWriter_->metrics();
+  }
+
+  const auto numPartitions =
+      shuffleWriterOptions_.partitionWriterOptions.numPartitions;
+  for (const auto& partitionLengths : peerPartitionLengths) {
+    BOLT_CHECK_EQ(
+        partitionLengths.size(),
+        numPartitions,
+        "partitionLengths size={} not equal to numPartitions={}",
+        partitionLengths.size(),
+        numPartitions);
+  }
+
+  if (!peerDataFiles.empty() && isLocalPartitionWriter) {
+    if (peerDataFiles.size() == 1) {
+      const auto& srcFileName = peerDataFiles[0];
+      LOG(INFO) << "SparkShuffleWriter: rename shuffle file " << srcFileName
+                << " -> "
+                << shuffleWriterOptions_.partitionWriterOptions.dataFile;
+      auto localFs = std::make_shared<arrow::fs::LocalFileSystem>();
+      auto status = localFs->Move(
+          srcFileName, shuffleWriterOptions_.partitionWriterOptions.dataFile);
+      BOLT_CHECK(
+          status.ok(),
+          "SparkShuffleWriter: rename shuffle file {} -> {} failed",
+          srcFileName,
+          shuffleWriterOptions_.partitionWriterOptions.dataFile);
+    } else {
+      LOG(INFO) << "SparkShuffleWriter merge [" << peerDataFiles.size()
+                << "] shuffle files -> "
+                << shuffleWriterOptions_.partitionWriterOptions.dataFile;
+      auto status = LocalPartitionWriter::merge(
+          peerDataFiles,
+          peerPartitionLengths,
+          shuffleWriterOptions_.partitionWriterOptions.dataFile);
+      BOLT_CHECK(status.ok(), "Merge shuffle files failed");
+    }
+  }
+
+  if (peerPartitionLengths.empty()) {
+    metrics.partitionLengths = std::vector<int64_t>(numPartitions, 0);
+    metrics.rawPartitionLengths = std::vector<int64_t>(numPartitions, 0);
+    LOG(INFO) << "No SparkShuffleWriter generates shuffle data";
   }
 
   reportShuffleStatusCallback_(metrics);

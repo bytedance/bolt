@@ -1224,6 +1224,8 @@ std::string blockingReasonToString(BlockingReason reason) {
       return "kWaitForScanScaleUp";
     case BlockingReason::kWaitForIndexLookup:
       return "kWaitForIndexLookup";
+    case BlockingReason::kWaitForShuffle:
+      return "kWaitForShuffle";
     default:
       BOLT_UNREACHABLE(
           fmt::format("Unknown blocking reason {}", static_cast<int>(reason)));

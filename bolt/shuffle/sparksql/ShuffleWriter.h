@@ -55,6 +55,8 @@ class ShuffleWriter {
 
   virtual arrow::Status stop() = 0;
 
+  virtual arrow::Status localStop() = 0;
+
   int32_t numPartitions() const {
     return numPartitions_;
   }

@@ -61,6 +61,8 @@ class CelebornPartitionWriter final : public RemotePartitionWriter {
 
   arrow::Status stop(ShuffleWriterMetrics* metrics) override;
 
+  arrow::Status populateMetrics(ShuffleWriterMetrics* metrics) override;
+
   // for BoltRowBasedSortShuffleWriter
   arrow::Status evict(
       std::vector<std::vector<uint8_t*>>& rows,

@@ -43,6 +43,8 @@ class BoltRowBasedSortShuffleWriter final : public BoltShuffleWriter {
 
   arrow::Status stop() override;
 
+  arrow::Status localStop() override;
+
   arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
 
   BoltRowBasedSortShuffleWriter(
@@ -52,6 +54,8 @@ class BoltRowBasedSortShuffleWriter final : public BoltShuffleWriter {
       : BoltShuffleWriter(std::move(options), boltPool, pool) {}
 
  private:
+  arrow::Status stopInternal(bool stopPartitionWriter);
+
   arrow::Status init() override;
 
   arrow::Status initFromRowVector(

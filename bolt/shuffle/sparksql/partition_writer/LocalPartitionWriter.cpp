@@ -834,6 +834,7 @@ arrow::Status LocalPartitionWriter::populateMetrics(
   metrics->totalBytesWritten += totalBytesWritten_;
   metrics->partitionLengths = std::move(partitionLengths_);
   metrics->rawPartitionLengths = std::move(rawPartitionLengths_);
+  metrics->dataFile = dataFile_;
   return arrow::Status::OK();
 }
 
@@ -1013,6 +1014,70 @@ arrow::Status LocalPartitionWriter::mergeRowSpills(uint32_t partitionId) {
     }
     ++spillIter;
   }
+  return arrow::Status::OK();
+}
+
+arrow::Status LocalPartitionWriter::merge(
+    std::vector<std::string> dataFiles,
+    std::vector<std::vector<int64_t>> partitionLengths,
+    const std::string& targetFileName) {
+  constexpr int64_t kMergeChunkBytes = 8 << 20;
+
+  BOLT_CHECK_EQ(
+      dataFiles.size(),
+      partitionLengths.size(),
+      "size dataFiles({}) != size of partitionLengths({})",
+      dataFiles.size(),
+      partitionLengths.size());
+  BOLT_CHECK(
+      !targetFileName.empty(),
+      "LocalPartitionWriter::merge targetFileName is empty");
+  BOLT_CHECK_GT(dataFiles.size(), 0);
+
+  std::vector<std::shared_ptr<arrow::io::ReadableFile>> fileHandles;
+  fileHandles.reserve(dataFiles.size());
+  const auto numPartitions = partitionLengths[0].size();
+
+  for (const auto& file : dataFiles) {
+    BOLT_CHECK(
+        !file.empty(), "LocalPartitionWriter cannot merge an empty file");
+    ARROW_ASSIGN_OR_RAISE(auto handle, arrow::io::ReadableFile::Open(file));
+    fileHandles.push_back(std::move(handle));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto finalOs, arrow::io::FileOutputStream::Open(targetFileName, false));
+
+  for (size_t pid = 0; pid < numPartitions; ++pid) {
+    for (size_t fid = 0; fid < dataFiles.size(); ++fid) {
+      BOLT_CHECK_EQ(partitionLengths[fid].size(), numPartitions);
+      int64_t remainingBytes = partitionLengths[fid][pid];
+      while (remainingBytes > 0) {
+        const auto chunkBytes = std::min(kMergeChunkBytes, remainingBytes);
+        ARROW_ASSIGN_OR_RAISE(auto buffer, fileHandles[fid]->Read(chunkBytes));
+        BOLT_CHECK_EQ(
+            buffer->size(),
+            chunkBytes,
+            "Unexpected EOF while merging shuffle file {}, expected {} bytes, got {} bytes",
+            dataFiles[fid],
+            chunkBytes,
+            buffer->size());
+        ARROW_CHECK_OK(finalOs->Write(buffer));
+        remainingBytes -= chunkBytes;
+      }
+    }
+  }
+
+  ARROW_CHECK_OK(finalOs->Close());
+  for (auto& handle : fileHandles) {
+    ARROW_CHECK_OK(handle->Close());
+  }
+
+  auto localFs = std::make_shared<arrow::fs::LocalFileSystem>();
+  for (const auto& file : dataFiles) {
+    ARROW_CHECK_OK(localFs->DeleteFile(file));
+  }
+
   return arrow::Status::OK();
 }
 

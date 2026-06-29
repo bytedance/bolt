@@ -686,6 +686,14 @@ arrow::Status BoltShuffleWriter::split(
 }
 
 arrow::Status BoltShuffleWriter::stop() {
+  return stopInternal(true);
+}
+
+arrow::Status BoltShuffleWriter::localStop() {
+  return stopInternal(false);
+}
+
+arrow::Status BoltShuffleWriter::stopInternal(bool stopPartitionWriter) {
   bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   if (vectorLayout_ != RowVectorLayout::kComposite) {
     partitionWriter_->setRowFormat(false);
@@ -722,9 +730,15 @@ arrow::Status BoltShuffleWriter::stop() {
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
       setSplitState(SplitState::kStop);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      if (stopPartitionWriter) {
+        RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      } else {
+        RETURN_NOT_OK(partitionWriter_->populateMetrics(&metrics_));
+      }
       metrics_.avgPreallocSize =
           (preallocCount_ == 0) ? 0 : totalPreallocSize_ / preallocCount_;
+      metrics_.totalPreallocSize = totalPreallocSize_;
+      metrics_.totalPreallocCount = preallocCount_;
       partitionBuffers_.clear();
     }
 
@@ -734,7 +748,11 @@ arrow::Status BoltShuffleWriter::stop() {
     RETURN_NOT_OK(tryEvict());
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      if (stopPartitionWriter) {
+        RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      } else {
+        RETURN_NOT_OK(partitionWriter_->populateMetrics(&metrics_));
+      }
     }
   }
   metrics_.useV2 = 0;

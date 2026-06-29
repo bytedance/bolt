@@ -220,6 +220,9 @@ enum class BlockingReason {
   /// Used by IndexLookupJoin operator, indicating that it was blocked by the
   /// async index lookup.
   kWaitForIndexLookup,
+  /// Used by SparkShuffleWriter to wait for peer SparkShuffleWriter operators
+  /// in the same pipeline to finish finalization.
+  kWaitForShuffle,
 };
 
 std::string blockingReasonToString(BlockingReason reason);

@@ -213,11 +213,24 @@ arrow::Status BoltRowBasedSortShuffleWriter::reclaimFixedSize(
 }
 
 arrow::Status BoltRowBasedSortShuffleWriter::stop() {
+  return stopInternal(true);
+}
+
+arrow::Status BoltRowBasedSortShuffleWriter::localStop() {
+  return stopInternal(false);
+}
+
+arrow::Status BoltRowBasedSortShuffleWriter::stopInternal(
+    bool stopPartitionWriter) {
   bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   setSplitState(SplitState::kStop);
   RETURN_NOT_OK(tryEvict());
   {
-    RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+    if (stopPartitionWriter) {
+      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+    } else {
+      RETURN_NOT_OK(partitionWriter_->populateMetrics(&metrics_));
+    }
     metrics_.useRowBased = 1;
     combinedVectorNumber_ = combineVectorTimes_ > 0
         ? (combinedVectorNumber_ / combineVectorTimes_)

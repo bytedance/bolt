@@ -33,6 +33,7 @@
 
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
+#include <arrow/util/logging.h>
 
 #include "bolt/shuffle/sparksql/partition_writer/PartitionWriter.h"
 namespace bytedance::bolt::shuffle::sparksql {
@@ -114,6 +115,13 @@ class LocalPartitionWriter : public PartitionWriter {
 
   class PartitionRowWriter;
 
+  static arrow::Status merge(
+      std::vector<std::string> dataFiles,
+      std::vector<std::vector<int64_t>> partitionLengths,
+      const std::string& targetFileName);
+
+  arrow::Status populateMetrics(ShuffleWriterMetrics* metrics) override;
+
  private:
   void init();
 
@@ -128,8 +136,6 @@ class LocalPartitionWriter : public PartitionWriter {
   arrow::Status mergeSpills(uint32_t partitionId);
 
   arrow::Status clearResource();
-
-  arrow::Status populateMetrics(ShuffleWriterMetrics* metrics);
 
   std::string dataFile_;
   std::vector<std::string> localDirs_;
