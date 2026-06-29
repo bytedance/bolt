@@ -1,0 +1,56 @@
+{
+  "query_id": "clickbench_q7_demo",
+  "sql": "SELECT URL, COUNT(*) AS cnt FROM hits WHERE EventDate >= DATE '2024-01-01' GROUP BY URL ORDER BY cnt DESC LIMIT 10",
+  "query_config": {
+    "task.max-drivers-per-task": "8",
+    "spill.enabled": "true"
+  },
+  "connector_properties": {
+    "hive.s3.endpoint": "https://s3.us-west-2.amazonaws.com",
+    "hive.s3.secret": "demo-only-secret"
+  },
+  "splits": {
+    "1": {
+      "partition_index": 0,
+      "paths": [
+        "hits/part-000.parquet"
+      ],
+      "starts": [
+        0
+      ],
+      "lengths": [
+        268435456
+      ]
+    }
+  },
+  "operators": [
+    {
+      "plan_node_id": "1",
+      "operator_type": "TableScan",
+      "raw_input_rows": 250000000,
+      "selectivity": 0.96,
+      "row_width_bytes": 96,
+      "parallelism": 8
+    },
+    {
+      "plan_node_id": "2",
+      "operator_type": "HashAggregation",
+      "raw_input_rows": 240000000,
+      "selectivity": 0.35,
+      "distinct_ratio": 0.45,
+      "row_width_bytes": 96,
+      "partition_count": 1,
+      "parallelism": 1,
+      "mode": "single_phase",
+      "requires_shuffle": true
+    },
+    {
+      "plan_node_id": "3",
+      "operator_type": "Project",
+      "raw_input_rows": 19200000,
+      "selectivity": 1.0,
+      "row_width_bytes": 48,
+      "parallelism": 2
+    }
+  ]
+}

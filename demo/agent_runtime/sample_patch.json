@@ -1,0 +1,9 @@
+{
+  "patch": {
+    "op": "retune_aggregation",
+    "target_plan_node_id": "2",
+    "mode": "two_phase",
+    "partition_count": 16,
+    "parallelism": 16
+  }
+}

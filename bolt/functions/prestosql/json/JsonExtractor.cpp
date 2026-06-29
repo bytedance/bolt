@@ -45,6 +45,8 @@
 #include "bolt/functions/prestosql/json/JsonEscape.h"
 #include "bolt/functions/prestosql/json/JsonPathTokenizer.h"
 #include "bolt/functions/prestosql/json/JsonUtil.h"
+#include "sonic/dom/json_pointer.h"
+#include "sonic/dom/parser.h"
 #include "sonic/error.h"
 #include "sonic/sonic.h"
 namespace bytedance::bolt::functions {
@@ -61,6 +63,23 @@ namespace {
 
 using JsonVector = std::vector<const folly::dynamic*>;
 using SimdJsonVector = std::vector<simdjson::ondemand::value>;
+
+folly::Optional<sonic_json::JsonPointer> makeSonicJsonPointer(
+    const std::vector<std::string>& tokens) {
+  sonic_json::JsonPointer pointer;
+  for (const auto& token : tokens) {
+    if (token == "*") {
+      return folly::none;
+    }
+    auto index = folly::tryTo<int64_t>(token);
+    if (index.hasValue()) {
+      pointer /= index.value();
+    } else {
+      pointer /= token;
+    }
+  }
+  return pointer;
+}
 
 bool isScalarType(const folly::Optional<folly::dynamic>& json) {
   return json.has_value() && !json->isObject() && !json->isArray() &&
@@ -170,32 +189,22 @@ class JsonExtractor {
         !useDOMParserInGetJsonObject && getJsonObjectEscapeEmoji &&
         useSonicJson;
     if (actuallyUseSonic) {
-      std::tuple<std::string, sonic_json::SonicError> result{};
-      result = sonic_json::GetByJsonPathOnDemand(json.toString(), this->path_);
-      const auto sonic_status = std::get<1>(result);
-      // If no error and no match, return none.
-      if (sonic_json::kErrorNoneNoMatch == sonic_status) {
-        return folly::none;
+      if (auto sonicPath = makeSonicJsonPointer(tokens_);
+          sonicPath.hasValue()) {
+        sonic_json::StringView target;
+        const auto parseResult =
+            sonic_json::GetOnDemand(json, sonicPath.value(), target);
+        const auto sonicStatus = parseResult.Error();
+        if (sonicStatus == sonic_json::kErrorNone) {
+          ans_.assign(target.data(), target.size());
+          return std::string_view{ans_};
+        }
+        if (sonicStatus == sonic_json::kParseErrorUnknownObjKey ||
+            sonicStatus == sonic_json::kParseErrorArrIndexOutOfRange ||
+            sonicStatus == sonic_json::kParseErrorMismatchType) {
+          return folly::none;
+        }
       }
-      // No error and has result
-      if (sonic_json::kErrorNone == sonic_status) {
-        auto answer = std::get<0>(result);
-        ans_.clear();
-        ans_.append(answer);
-        return std::string_view{ans_};
-      }
-      // There was an error (likely parse invalid json), there may or may
-      // not be partial result in buffer.
-      auto answer = std::get<0>(result);
-      // If no partial result in buffer, return none.
-      // Otherwise, return whatever is in buffer to match spark
-      // behavior
-      if (answer.empty()) {
-        return folly::none;
-      }
-      ans_.clear();
-      ans_.append(answer);
-      return std::string_view{ans_};
     }
 
     simdJsonPaddingJson(buffer_, json);
@@ -676,23 +685,7 @@ std::vector<folly::Optional<std::string>> jsonExtractTupleSonic(
     folly::StringPiece json,
     std::vector<folly::Optional<folly::StringPiece>> paths,
     bool legacy) {
-  std::vector<std::string_view> paths_string_view{};
-  std::vector<size_t> non_null_index{};
-  for (int i = 0; i < paths.size(); i++) {
-    if (paths[i].has_value()) {
-      non_null_index.push_back(i);
-      paths_string_view.push_back(paths[i].value());
-    }
-  }
-  auto result =
-      sonic_json::JsonTupleWithCodeGen(json, paths_string_view, legacy);
-  std::vector<folly::Optional<std::string>> ret(paths.size(), folly::none);
-  for (int i = 0; i < paths_string_view.size(); i++) {
-    if (result[i].has_value()) {
-      ret[non_null_index[i]] = std::move(result[i].value());
-    }
-  }
-  return ret;
+  return jsonExtractTuple(json, std::move(paths), legacy, false);
 }
 
 std::vector<folly::Optional<std::string>> jsonExtractTuple(

@@ -1,0 +1,64 @@
+{
+  "query_id": "group_by_demo",
+  "goal": "minimize_latency",
+  "repeat_times": 50000,
+  "max_drivers": 1,
+  "input": {
+    "schema": [
+      {
+        "name": "category",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "value",
+        "type": "BIGINT"
+      }
+    ],
+    "rows": [
+      [
+        "a",
+        10
+      ],
+      [
+        "a",
+        20
+      ],
+      [
+        "b",
+        5
+      ],
+      [
+        "c",
+        7
+      ],
+      [
+        "c",
+        8
+      ],
+      [
+        "d",
+        1
+      ]
+    ]
+  },
+  "plan": {
+    "filter": "value >= 5",
+    "aggregation": {
+      "group_by": [
+        "category"
+      ],
+      "aggregates": [
+        "sum(value) AS total_value",
+        "count(*) AS row_count"
+      ],
+      "strategy": "single"
+    },
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": {
+      "offset": 0,
+      "count": 10
+    }
+  }
+}
