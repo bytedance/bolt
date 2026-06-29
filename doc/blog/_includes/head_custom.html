@@ -175,7 +175,23 @@
         btn.textContent = nowDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
         try { window.localStorage.setItem(KEY, nowDark ? 'dark' : 'light'); } catch (e) {}
       });
-      document.body.appendChild(btn);
+
+      // Place the toggle at the far right of the top aux-nav toolbar,
+      // so "Bolt on GitHub" sits to its left and nothing overlaps.
+      var auxNav = document.querySelector('.aux-nav .aux-nav-list')
+        || document.querySelector('.aux-nav');
+      if (auxNav) {
+        if (auxNav.classList.contains('aux-nav-list')) {
+          var li = document.createElement('li');
+          li.className = 'aux-nav-list-item bolt-theme-toggle-item';
+          li.appendChild(btn);
+          auxNav.appendChild(li);
+        } else {
+          auxNav.appendChild(btn);
+        }
+      } else {
+        document.body.appendChild(btn);
+      }
     });
   })();
 </script>

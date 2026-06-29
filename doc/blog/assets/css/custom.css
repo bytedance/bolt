@@ -383,23 +383,27 @@ body.bolt-dark .blog-toggle-button:hover { background: #161b22; }
 body.bolt-dark .blog-post-links { border-left-color: #21262d; }
 body.bolt-dark .main-content table th { background: #161b22; color: #e6edf3; }
 
-/* Theme toggle button (top-right) */
+/* Theme toggle button (far right of the top aux-nav toolbar) */
+.aux-nav .aux-nav-list { align-items: stretch; }
+.aux-nav .aux-nav-list-item.bolt-theme-toggle-item {
+  display: flex !important;
+  align-items: center !important;
+  height: 100% !important;
+  padding-right: 1rem;
+}
 .bolt-theme-toggle {
-  position: fixed;
-  top: 0.6rem;
-  right: 1rem;
-  z-index: 1000;
-  width: 2.25rem;
-  height: 2.25rem;
-  border-radius: 0.5rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.375rem;
   border: 1px solid #e6e6ef;
   background: #ffffff;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1rem;
+  font-size: 0.85rem;
   line-height: 1;
+  padding: 0;
 }
 .bolt-theme-toggle:hover { border-color: #1a6dff; }
 body.bolt-dark .bolt-theme-toggle {
