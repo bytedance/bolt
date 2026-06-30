@@ -267,6 +267,9 @@ FOLLY_ALWAYS_INLINE uint8_t* writeVarint(uint64_t value, uint8_t* out) {
 // the single in <= end check rejects any read that over-ran the buffer.
 FOLLY_ALWAYS_INLINE bool
 readVarint(const uint8_t*& in, const uint8_t* end, uint64_t& value) {
+  if (FOLLY_UNLIKELY(in >= end)) {
+    return false;
+  }
   if (FOLLY_LIKELY(readVarintShortFastPath(in, value))) {
     return in <= end;
   }
@@ -371,6 +374,9 @@ FOLLY_ALWAYS_INLINE bool readNullableInt64(
     const uint8_t* end,
     bool& isNull,
     int64_t& value) {
+  if (FOLLY_UNLIKELY(in >= end)) {
+    return false;
+  }
   if (*in == 0) {
     ++in;
     isNull = true;

@@ -247,6 +247,18 @@ void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
         },
         state_->decodedOrPlans[k]);
   }
+
+  for (vector_size_t r = 0; r < numRows; ++r) {
+    const auto* rowStart = base + offsets[r];
+    const auto actualSize = static_cast<size_t>(cursors[r] - rowStart);
+    const auto expectedSize = state_->rowSizes[r];
+    BOLT_CHECK_EQ(
+        actualSize,
+        expectedSize,
+        "DenseRow::serialize row size mismatch at row {}, offset {}",
+        r,
+        offsets[r]);
+  }
 }
 
 RowVectorPtr DenseRow::deserialize(
