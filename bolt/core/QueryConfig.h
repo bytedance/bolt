@@ -744,6 +744,10 @@ class QueryConfig {
 
   static constexpr const char* kEnableSonicJsonToMap = "sonic.json_to_map";
 
+  /// Whether json_to_map escapes raw control chars and retries parse.
+  static constexpr const char* kJsonToMapEscapeControlChars =
+      "json_to_map_escape_control_chars";
+
   static constexpr const char* kEnableSonicIsJsonScalar =
       "sonic.is_json_scalar";
 
@@ -1681,6 +1685,10 @@ class QueryConfig {
 
   bool enableSonicJsonToMap() const {
     return get<bool>(kEnableSonicJsonToMap, true);
+  }
+
+  bool jsonToMapEscapeControlChars() const {
+    return get<bool>(kJsonToMapEscapeControlChars, true);
   }
 
   bool enableSonicIsJsonScalar() const {
