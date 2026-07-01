@@ -173,26 +173,14 @@ class JsonExtractor {
       std::tuple<std::string, sonic_json::SonicError> result{};
       result = sonic_json::GetByJsonPathOnDemand(json.toString(), this->path_);
       const auto sonic_status = std::get<1>(result);
-      // If no error and no match, return none.
-      if (sonic_json::kErrorNoneNoMatch == sonic_status) {
+      // Treat no-match and parse errors as no result. Sonic may return a
+      // partial result together with a parse error, but Spark's get_json_object
+      // returns NULL for malformed JSON.
+      if (sonic_json::kErrorNone != sonic_status) {
         return folly::none;
       }
-      // No error and has result
-      if (sonic_json::kErrorNone == sonic_status) {
-        auto answer = std::get<0>(result);
-        ans_.clear();
-        ans_.append(answer);
-        return std::string_view{ans_};
-      }
-      // There was an error (likely parse invalid json), there may or may
-      // not be partial result in buffer.
-      auto answer = std::get<0>(result);
-      // If no partial result in buffer, return none.
-      // Otherwise, return whatever is in buffer to match spark
-      // behavior
-      if (answer.empty()) {
-        return folly::none;
-      }
+
+      const auto& answer = std::get<0>(result);
       ans_.clear();
       ans_.append(answer);
       return std::string_view{ans_};
