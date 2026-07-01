@@ -32,7 +32,6 @@
 
 #include <boost/random/uniform_int_distribution.hpp>
 
-#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 
 #include "bolt/exec/tests/utils/PlanBuilder.h"

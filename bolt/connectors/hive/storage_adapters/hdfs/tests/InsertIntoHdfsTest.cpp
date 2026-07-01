@@ -34,7 +34,7 @@
 #include "bolt/connectors/hive/storage_adapters/hdfs/tests/HdfsMiniCluster.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
@@ -42,14 +42,15 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::connector;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::test;
 
-class InsertIntoHdfsTest : public HiveConnectorTestBase {
+namespace {
+
+class InsertIntoHdfsTest : public ConnectorTestBase {
  public:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     if (miniCluster == nullptr) {
       miniCluster = std::make_shared<filesystems::test::HdfsMiniCluster>();
       miniCluster->start();
@@ -61,7 +62,7 @@ class InsertIntoHdfsTest : public HiveConnectorTestBase {
          bytedance::bolt::filesystems::registeredFilesystems) {
       filesystem->close();
     }
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
     miniCluster->stop();
   }
 
@@ -121,10 +122,12 @@ TEST_F(InsertIntoHdfsTest, DISABLED_insertIntoHdfsTest) {
   // Read from 'writeFileName' and verify the data matches the original.
   plan = PlanBuilder().tableScan(rowType_).planNode();
 
-  auto splits = HiveConnectorTestBase::makeHiveConnectorSplits(
+  auto splits = makeConnectorSplits(
       fmt::format("{}/{}", outputDirectory, writeFileName),
       1,
       dwio::common::FileFormat::DWRF);
   auto copy = AssertQueryBuilder(plan).split(splits[0]).copyResults(pool());
   assertEqualResults({input}, {copy});
 }
+
+} // namespace

@@ -21,7 +21,7 @@
 
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/Window.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 #include "bolt/type/Type.h"
@@ -147,7 +147,7 @@ struct SortWindowBenchmarkResult {
   }
 };
 
-class SortWindowBenchmark : public HiveConnectorTestBase {
+class SortWindowBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::SetUpTestCase();
@@ -159,7 +159,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
   }
 
   SortWindowBenchmark(RowTypePtr inputType) : inputType_(inputType) {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     if (FLAGS_enable_log) {
       std::cout << "inputType_->names():"
                 << folly::join(",", inputType_->names()) << std::endl;
@@ -218,7 +218,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
   }
 
   ~SortWindowBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -259,7 +259,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
     }
 
     auto task = makeTask(param, plan);
-    // task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    // task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     // task->noMoreSplits("0");
 
     suspender.dismiss();
@@ -369,7 +369,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
         "t", std::move(plan), 0, queryCtx, exec::Task::ExecutionMode::kSerial);
     task->setSpillDirectory("/tmp/" + task->uuid(), false);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     task->noMoreSplits("0");
 
     return task;

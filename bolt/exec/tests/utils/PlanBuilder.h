@@ -39,7 +39,10 @@
 #include <bolt/core/PlanFragment.h>
 #include <bolt/core/PlanNode.h>
 #include "bolt/common/memory/Memory.h"
-#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/Connector.h"
+#include "bolt/connectors/ConnectorNames.h"
+#include "bolt/connectors/ConnectorObjectFactory.h"
+#include "bolt/dwio/common/Options.h"
 #include "bolt/parse/ExpressionsParser.h"
 #include "bolt/parse/PlanNodeIdGenerator.h"
 namespace bytedance::bolt::core {
@@ -127,6 +130,14 @@ class PlanBuilder {
   static constexpr const std::string_view kHiveDefaultConnectorId{"test-hive"};
   static constexpr const std::string_view kTpchDefaultConnectorId{"test-tpch"};
 
+  /// Selects the connector used by default tableScan() and tableWrite()
+  /// helpers. Existing tests use the Hive defaults.
+  PlanBuilder& connector(std::string connectorName, std::string connectorId) {
+    connectorName_ = std::move(connectorName);
+    connectorId_ = std::move(connectorId);
+    return *this;
+  }
+
   /// Add a TableScanNode to scan a Hive table.
   ///
   /// @param outputType List of column names and types to read from the table.
@@ -204,7 +215,10 @@ class PlanBuilder {
   /// parse options.
   class TableScanBuilder {
    public:
-    TableScanBuilder(PlanBuilder& builder) : planBuilder_(builder) {}
+    TableScanBuilder(PlanBuilder& builder)
+        : planBuilder_(builder),
+          connectorName_(builder.connectorName_),
+          connectorId_(builder.connectorId_) {}
 
     /// @param tableName The name of the table to scan.
     TableScanBuilder& tableName(std::string tableName) {
@@ -225,6 +239,13 @@ class PlanBuilder {
     /// @param connectorId The id of the connector to scan.
     TableScanBuilder& connectorId(std::string connectorId) {
       connectorId_ = std::move(connectorId);
+      return *this;
+    }
+
+    /// @param connectorName The connector type name to use for handle
+    /// creation.
+    TableScanBuilder& connectorName(std::string connectorName) {
+      connectorName_ = std::move(connectorName);
       return *this;
     }
 
@@ -323,9 +344,15 @@ class PlanBuilder {
     /// Build the plan node TableScanNode.
     core::PlanNodePtr build(core::PlanNodeId id);
 
+    std::shared_ptr<connector::ConnectorTableHandle> makeTableHandle(
+        const connector::ConnectorObjectFactory& connectorObjectFactory,
+        const common::SubfieldFilters& filters,
+        const core::TypedExprPtr& remainingFilterExpr) const;
+
     PlanBuilder& planBuilder_;
     std::string tableName_{"hive_table"};
-    std::string connectorId_{"test-hive"};
+    std::string connectorName_;
+    std::string connectorId_;
     RowTypePtr outputType_;
     std::vector<std::string> subfieldFilters_;
     std::string remainingFilter_;
@@ -489,51 +516,6 @@ class PlanBuilder {
       const dwio::common::FileFormat fileFormat =
           dwio::common::FileFormat::DWRF,
       const std::vector<std::string>& aggregates = {});
-
-  /// Adds a TableWriteNode to write all input columns into a non-sorted
-  /// bucketed Hive table without compression.
-  ///
-  /// @param outputDirectoryPath Path to a directory to write data to.
-  /// @param partitionBy Specifies the partition key columns.
-  /// @param bucketCount Specifies the bucket count.
-  /// @param bucketedBy Specifies the bucket by columns.
-  /// @param fileFormat File format to use for the written data.
-  /// @param aggregates Aggregations for column statistics collection during
-  /// write.
-  PlanBuilder& tableWrite(
-      const std::string& outputDirectoryPath,
-      const std::vector<std::string>& partitionBy,
-      int32_t bucketCount,
-      const std::vector<std::string>& bucketedBy,
-      const dwio::common::FileFormat fileFormat =
-          dwio::common::FileFormat::DWRF,
-      const std::vector<std::string>& aggregates = {});
-
-  /// Adds a TableWriteNode to write all input columns into a sorted bucket Hive
-  /// table without compression.
-  ///
-  /// @param outputDirectoryPath Path to a directory to write data to.
-  /// @param partitionBy Specifies the partition key columns.
-  /// @param bucketCount Specifies the bucket count.
-  /// @param bucketedBy Specifies the bucket by columns.
-  /// @param sortBy Specifies the sort by columns.
-  /// @param fileFormat File format to use for the written data.
-  /// @param aggregates Aggregations for column statistics collection during
-  /// write.
-  /// @param outputFileName Optional file name of the output. If specified
-  /// (non-empty), use it instead of generating the file name in Bolt. Should
-  /// only be specified in non-bucketing write.
-  PlanBuilder& tableWrite(
-      const std::string& outputDirectoryPath,
-      const std::vector<std::string>& partitionBy,
-      int32_t bucketCount,
-      const std::vector<std::string>& bucketedBy,
-      const std::vector<std::string>& sortBy,
-      const dwio::common::FileFormat fileFormat =
-          dwio::common::FileFormat::DWRF,
-      const std::vector<std::string>& aggregates = {},
-      const std::string& connectorId = "test-hive",
-      const std::string& outputFileName = "");
 
   /// Add a TableWriteMergeNode.
   PlanBuilder& tableWriteMerge(
@@ -892,12 +874,6 @@ class PlanBuilder {
   /// current plan node).
   PlanBuilder& localPartition(const std::vector<std::string>& keys);
 
-  /// A convenience method to add a LocalPartitionNode with a single source (the
-  /// current plan node) and hive bucket property.
-  PlanBuilder& localPartitionByBucket(
-      const std::shared_ptr<connector::hive::HiveBucketProperty>&
-          bucketProperty);
-
   /// Add a LocalPartitionNode to partition the input using batch-level
   /// round-robin. Number of partitions is determined at runtime based on
   /// parallelism of the downstream pipeline.
@@ -1176,6 +1152,9 @@ class PlanBuilder {
     return pool_;
   }
 
+  std::shared_ptr<connector::ConnectorObjectFactory> connectorObjectFactory()
+      const;
+
  private:
   std::shared_ptr<const core::FieldAccessTypedExpr> field(column_index_t index);
 
@@ -1249,6 +1228,8 @@ class PlanBuilder {
  private:
   std::shared_ptr<core::PlanNodeIdGenerator> planNodeIdGenerator_;
   memory::MemoryPool* pool_;
+  std::string connectorName_{connector::kHiveConnectorName};
+  std::string connectorId_{kHiveDefaultConnectorId};
   bool filtersAsNode_{false};
 };
 } // namespace bytedance::bolt::exec::test

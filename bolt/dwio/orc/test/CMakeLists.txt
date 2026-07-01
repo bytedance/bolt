@@ -50,6 +50,7 @@ add_test(
 )
 target_link_libraries(
   bolt_dwio_orc_tpch_test
+  bolt_exec_connector_test_lib
   bolt_testutils
   ${TEST_LINK_LIBS}
 )

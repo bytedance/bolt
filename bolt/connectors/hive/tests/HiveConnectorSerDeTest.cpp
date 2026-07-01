@@ -28,16 +28,19 @@
  * --------------------------------------------------------------------------
  */
 
+#include <folly/dynamic.h>
 #include <gtest/gtest.h>
-#include "bolt/connectors/Connector.h"
-#include "bolt/connectors/hive/HiveConnector.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+
+#include "bolt/connectors/hive/tests/HiveConnectorTestBase.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/type/tests/SubfieldFiltersBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::connector::hive;
 
-class HiveConnectorSerDeTest : public exec::test::HiveConnectorTestBase {
+namespace {
+
+class HiveConnectorSerDeTest : public HiveConnectorTestBase {
  protected:
   HiveConnectorSerDeTest() {
     Type::registerSerDe();
@@ -103,17 +106,14 @@ TEST_F(HiveConnectorSerDeTest, hiveColumnHandle) {
        {"c0c1",
         ARRAY(MAP(
             VARCHAR(), ROW({{"c0c1c0", BIGINT()}, {"c0c1c1", BIGINT()}})))}});
-  auto columnHandle = exec::test::HiveConnectorTestBase::makeColumnHandle(
+  auto columnHandle = makeColumnHandle(
       "columnHandle", columnType, {"c0.c0c1[3][\"foo\"].c0c1c0"});
-
   testSerde(*columnHandle);
 }
 
 TEST_F(HiveConnectorSerDeTest, locationHandle) {
-  auto locationHandle = exec::test::HiveConnectorTestBase::makeLocationHandle(
-      "targetDirectory",
-      std::optional("writeDirectory"),
-      LocationHandle::TableType::kNew);
+  auto locationHandle = makeLocationHandle(
+      "targetDirectory", "writeDirectory", LocationHandle::TableType::kNew);
   testSerde(*locationHandle);
 }
 
@@ -132,12 +132,15 @@ TEST_F(HiveConnectorSerDeTest, hiveInsertTableHandle) {
   tableColumnTypes.emplace_back(rowType);
   tableColumnTypes.emplace_back(arrType);
   tableColumnTypes.emplace_back(varcharType);
-  auto locationHandle = exec::test::HiveConnectorTestBase::makeLocationHandle(
+
+  auto locationHandle = makeLocationHandle(
       "targetDirectory",
       std::optional("writeDirectory"),
       LocationHandle::TableType::kNew);
-  auto hiveInsertTableHandle =
-      exec::test::HiveConnectorTestBase::makeHiveInsertTableHandle(
-          tableColumnNames, tableColumnTypes, {"loc"}, locationHandle);
+  auto hiveInsertTableHandle = makeHiveInsertTableHandle(
+      tableColumnNames, tableColumnTypes, {"loc"}, locationHandle);
+
   testSerde(*hiveInsertTableHandle);
 }
+
+} // namespace

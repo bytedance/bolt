@@ -211,35 +211,68 @@ set(BOLT_EXEC_TEST_DEPENDENCIES
     GTest::gmock
 )
 
-target_link_libraries(bolt_exec_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+set(BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES
+    bolt_exec_connector_test_lib
+)
 
 target_link_libraries(
-  bolt_exec_infra_test bolt_presto_serializer bolt_fuzzer_util ${BOLT_EXEC_TEST_DEPENDENCIES}
+  bolt_exec_test
+  bolt_aggregates
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
+
+target_link_libraries(
+  bolt_exec_infra_test
+  bolt_presto_serializer
+  bolt_fuzzer_util
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
 )
 
 target_link_libraries(row_based_spill_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 
 target_link_libraries(bolt_exec_aggregation_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_hash_join_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(
+  bolt_exec_hash_join_test
+  bolt_aggregates
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
 
 if(KERNEL_SUPPORTS_IO_URING)
   target_link_libraries(iouring_spill_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 endif()
 
-target_link_libraries(bolt_exec_scan_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(
+  bolt_exec_scan_test
+  bolt_aggregates
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
 
-target_link_libraries(bolt_exec_merge_join_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(
+  bolt_exec_merge_join_test
+  bolt_aggregates
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
 
 target_link_libraries(bolt_exec_unested_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_table_writer_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(
+  bolt_exec_table_writer_test
+  bolt_aggregates
+  ${BOLT_EXEC_CONNECTOR_TEST_DEPENDENCIES}
+  ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
 
 add_executable(bolt_in_10_min_demo BoltIn10MinDemo.cpp)
 
 target_link_libraries(
   bolt_in_10_min_demo
-  bolt_tpch_connector
+  bolt_exec_connector_test_lib
   bolt_testutils
 )
 
@@ -249,7 +282,12 @@ target_link_libraries(
 add_library(bolt_join_fuzzer OBJECT JoinFuzzer.cpp)
 
 target_link_libraries(
-  bolt_join_fuzzer bolt_type bolt_vector_fuzzer bolt_exec_test_lib bolt_expression_test_utility
+  bolt_join_fuzzer
+  bolt_type
+  bolt_vector_fuzzer
+  bolt_exec_test_lib
+  bolt_exec_connector_test_lib
+  bolt_expression_test_utility
 )
 
 add_executable(bolt_join_fuzzer_test JoinFuzzerTest.cpp)

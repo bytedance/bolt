@@ -28,17 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/process/ThreadDebugInfo.h"
+#include "bolt/connectors/hive/HiveConnector.h"
 
-#include <folly/init/Init.h>
-#include <gtest/gtest.h>
+namespace bytedance::bolt::connector::hive {
 
-// This main is needed for some tests on linux.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // Signal handler required for ThreadDebugInfoTest
-  bytedance::bolt::process::addDefaultFatalSignalHandler();
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
+void registerHiveConnectorFactories() {
+  if (!connector::hasConnectorFactory(kHiveConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<HiveConnectorFactory>());
+  }
+  if (!connector::hasConnectorFactory(kHiveHadoop2ConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<HiveHadoop2ConnectorFactory>());
+  }
+  if (!connector::hasConnectorFactory(kTosConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<TosConnectorFactory>());
+  }
 }
+
+} // namespace bytedance::bolt::connector::hive

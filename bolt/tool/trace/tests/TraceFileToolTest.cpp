@@ -37,6 +37,9 @@
 
 #include "bolt/common/hyperloglog/SparseHll.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"
@@ -45,7 +48,7 @@
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -63,11 +66,11 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::common::hll;
 namespace bytedance::bolt::tool::trace::test {
-class TraceFileToolTest : public HiveConnectorTestBase {
+class TraceFileToolTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
@@ -87,7 +90,7 @@ class TraceFileToolTest : public HiveConnectorTestBase {
   void TearDown() override {
     probeInput_.clear();
     buildInput_.clear();
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   struct PlanWithSplits {
@@ -123,7 +126,7 @@ class TraceFileToolTest : public HiveConnectorTestBase {
 
   std::vector<RowVectorPtr>
   makeVectors(int32_t count, int32_t rowsPerVector, const RowTypePtr& rowType) {
-    return HiveConnectorTestBase::makeVectors(rowType, count, rowsPerVector);
+    return ConnectorTestBase::makeVectors(rowType, count, rowsPerVector);
   }
 
   std::vector<Split> makeSplits(
@@ -134,7 +137,7 @@ class TraceFileToolTest : public HiveConnectorTestBase {
     for (auto i = 0; i < 4; ++i) {
       const std::string filePath = fmt::format("{}/{}", path, i);
       writeToFile(filePath, inputs);
-      splits.emplace_back(makeHiveConnectorSplit(filePath));
+      splits.emplace_back(makeConnectorSplit(filePath));
     }
 
     return splits;

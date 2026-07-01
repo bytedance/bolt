@@ -51,6 +51,7 @@ target_link_libraries(
   bolt_dwio_parquet_tpch_test
   bolt_dwio_parquet_reader
   bolt_exec_test_lib
+  bolt_exec_connector_test_lib
   bolt_exec
   bolt_hive_connector
   bolt_tpch_connector

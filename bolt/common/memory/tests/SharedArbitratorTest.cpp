@@ -49,7 +49,7 @@
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/Values.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/SumNonPODAggregate.h"
 #include "folly/experimental/EventCount.h"
 
@@ -249,18 +249,18 @@ struct TestParam {
 } // namespace
 
 class SharedArbitrationTest : public testing::WithParamInterface<TestParam>,
-                              public exec::test::HiveConnectorTestBase {
+                              public exec::test::ConnectorTestBase {
  public:
  protected:
   static void SetUpTestCase() {
-    exec::test::HiveConnectorTestBase::SetUpTestCase();
+    exec::test::ConnectorTestBase::SetUpTestCase();
     auto fakeOperatorFactory = std::make_unique<FakeMemoryOperatorFactory>();
     fakeOperatorFactory_ = fakeOperatorFactory.get();
     Operator::registerOperator(std::move(fakeOperatorFactory));
   }
 
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     registerSumNonPODAggregate("sumnonpod", 64);
     fakeOperatorFactory_->setCanReclaim(true);
 
@@ -287,7 +287,7 @@ class SharedArbitrationTest : public testing::WithParamInterface<TestParam>,
 
   void TearDown() override {
     vector_.reset();
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void setupMemory(
@@ -1123,11 +1123,11 @@ DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, runtimeStats) {
             // Set stripe size to extreme large to avoid writer internal
             // triggered flush.
             .connectorSessionProperty(
-                kHiveConnectorId,
+                std::string(kHiveConnectorId),
                 connector::hive::HiveConfig::kOrcWriterMaxStripeSizeSession,
                 "1GB")
             .connectorSessionProperty(
-                kHiveConnectorId,
+                std::string(kHiveConnectorId),
                 connector::hive::HiveConfig::
                     kOrcWriterMaxDictionaryMemorySession,
                 "1GB")
@@ -1271,7 +1271,7 @@ TEST_P(
                                        isSerialExecutionMode_,
                                        numDrivers,
                                        pool(),
-                                       kHiveConnectorId,
+                                       std::string(kHiveConnectorId),
                                        false)
                                        .data;
   const auto expectedJoinResult =
@@ -1335,7 +1335,7 @@ TEST_P(
                        isSerialExecutionMode_,
                        numDrivers,
                        pool(),
-                       kHiveConnectorId,
+                       std::string(kHiveConnectorId),
                        true,
                        expectedWriteResult)
                        .task;

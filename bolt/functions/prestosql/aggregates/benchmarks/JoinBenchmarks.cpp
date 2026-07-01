@@ -25,7 +25,7 @@
 
 #include "bolt/exec/Task.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
@@ -37,7 +37,6 @@ DEFINE_string(temp_file_path, "", "file path of input file");
 DEFINE_int64(iterations, 1, "run count of each benchmark");
 DEFINE_int32(jit_level, 0, "jit level");
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::common::testutil;
 
@@ -46,7 +45,7 @@ static constexpr int32_t kRowsPerVector = 1024;
 
 namespace {
 
-class VariousAggregatesBenchmark : public HiveConnectorTestBase {
+class VariousAggregatesBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::setMemoryLimit(1ULL << 34);
@@ -59,7 +58,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
   }
 
   explicit VariousAggregatesBenchmark() {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
 
     // inputType_ = ROW(
     //     {{"bool", BOOLEAN()},
@@ -252,7 +251,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
   }
 
   ~VariousAggregatesBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -330,8 +329,8 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit(leftScanId, exec::Split(makeHiveConnectorSplit(filePath_)));
-    task->addSplit(rightScanId, exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit(leftScanId, exec::Split(makeConnectorSplit(filePath_)));
+    task->addSplit(rightScanId, exec::Split(makeConnectorSplit(filePath_)));
 
     task->noMoreSplits(leftScanId);
     task->noMoreSplits(rightScanId);
@@ -372,8 +371,8 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit(leftScanId, exec::Split(makeHiveConnectorSplit(filePath_)));
-    task->addSplit(rightScanId, exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit(leftScanId, exec::Split(makeConnectorSplit(filePath_)));
+    task->addSplit(rightScanId, exec::Split(makeConnectorSplit(filePath_)));
 
     task->noMoreSplits(leftScanId);
     task->noMoreSplits(rightScanId);

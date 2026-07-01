@@ -47,8 +47,7 @@
 
 #include <folly/init/Init.h>
 #include <algorithm>
-using namespace bytedance::bolt;
-// using exec::test::HiveConnectorTestBase;
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;

@@ -31,7 +31,7 @@
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/NestedLoopJoinBuild.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/VectorTestUtil.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
@@ -41,7 +41,7 @@ namespace {
 
 using bytedance::bolt::test::assertEqualVectors;
 
-class NestedLoopJoinTest : public HiveConnectorTestBase {
+class NestedLoopJoinTest : public ConnectorTestBase {
  protected:
   void setProbeType(const RowTypePtr& probeType) {
     probeType_ = probeType;

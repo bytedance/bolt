@@ -18,7 +18,7 @@
 #include <type/Type.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/dwio/txt/tests/TxtTestBase.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"

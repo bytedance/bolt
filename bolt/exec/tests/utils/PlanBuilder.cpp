@@ -29,10 +29,7 @@
  */
 
 #include "bolt/exec/tests/utils/PlanBuilder.h"
-#include "bolt/connectors/arrow/ArrowMemoryConnector.h"
-#include "bolt/connectors/hive/HiveConnector.h"
-#include "bolt/connectors/hive/TableHandle.h"
-#include "bolt/connectors/tpch/TpchConnector.h"
+#include "bolt/connectors/ConnectorNames.h"
 #include "bolt/duckdb/conversion/DuckParser.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/HashPartitionFunction.h"
@@ -46,6 +43,9 @@
 #include "bolt/expression/SignatureBinder.h"
 #include "bolt/parse/Expressions.h"
 #include "bolt/parse/TypeResolver.h"
+
+#include <unordered_set>
+
 #if defined BOLT_HAS_TORCH && BOLT_HAS_TORCH == 1
 #include "bolt/torch/PlanNode.h"
 #endif
@@ -55,8 +55,6 @@
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector;
-using namespace bytedance::bolt::connector::hive;
-using bytedance::bolt::connector::tpch::kBoltTpchConnectorId;
 namespace bytedance::bolt::exec::test {
 
 namespace {
@@ -70,36 +68,17 @@ core::TypedExprPtr parseExpr(
   return core::Expressions::inferTypes(untyped, rowType, pool);
 }
 
-std::shared_ptr<HiveBucketProperty> buildHiveBucketProperty(
-    const RowTypePtr rowType,
-    int32_t bucketCount,
-    const std::vector<std::string>& bucketColumns,
-    const std::vector<std::string>& sortByColumns) {
-  std::vector<TypePtr> bucketTypes;
-  bucketTypes.reserve(bucketColumns.size());
-  for (const auto& bucketColumn : bucketColumns) {
-    bucketTypes.push_back(rowType->childAt(rowType->getChildIdx(bucketColumn)));
-  }
-  std::vector<std::shared_ptr<const HiveSortingColumn>> sortedBy;
-  sortedBy.reserve(sortByColumns.size());
-  for (const auto& sortByColumn : sortByColumns) {
-    sortedBy.push_back(std::make_shared<const HiveSortingColumn>(
-        sortByColumn, core::SortOrder{false, false}));
-  }
-  return std::make_shared<HiveBucketProperty>(
-      HiveBucketProperty::Kind::kHiveCompatible,
-      bucketCount,
-      bucketColumns,
-      bucketTypes,
-      sortedBy);
-}
-
 template <TypeKind FromKind, TypeKind ToKind>
 typename TypeTraits<ToKind>::NativeType cast(const variant& v) {
   return util::Converter<ToKind, void, util::DefaultCastPolicy>::cast(
       v.value<FromKind>(), nullptr);
 }
 } // namespace
+
+std::shared_ptr<connector::ConnectorObjectFactory>
+PlanBuilder::connectorObjectFactory() const {
+  return connector::getConnectorObjectFactory(connectorName_);
+}
 
 PlanBuilder& PlanBuilder::tableScan(
     const RowTypePtr& outputType,
@@ -146,35 +125,6 @@ PlanBuilder& PlanBuilder::tableScan(
   return *this;
 }
 
-PlanBuilder& PlanBuilder::tpchTableScan(
-    tpch::Table table,
-    std::vector<std::string>&& columnNames,
-    double scaleFactor,
-    const std::string& connectorId) {
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      assignmentsMap;
-  std::vector<TypePtr> outputTypes;
-
-  assignmentsMap.reserve(columnNames.size());
-  outputTypes.reserve(columnNames.size());
-
-  for (const auto& columnName : columnNames) {
-    assignmentsMap.emplace(
-        columnName,
-        std::make_shared<connector::tpch::TpchColumnHandle>(columnName));
-    outputTypes.emplace_back(resolveTpchColumn(
-        table, columnName, connectorId == kBoltTpchConnectorId));
-  }
-  auto rowType = ROW(std::move(columnNames), std::move(outputTypes));
-  return TableScanBuilder(*this)
-      .filtersAsNode(filtersAsNode_ ? planNodeIdGenerator_ : nullptr)
-      .outputType(rowType)
-      .tableHandle(std::make_shared<connector::tpch::TpchTableHandle>(
-          connectorId, table, scaleFactor))
-      .assignments(assignmentsMap)
-      .endTableScan();
-}
-
 namespace {
 void addConjunct(
     const core::TypedExprPtr& conjunct,
@@ -188,9 +138,101 @@ void addConjunct(
         "and");
   }
 }
+
+void appendColumnsInPreferredOrder(
+    const RowTypePtr& preferredType,
+    const std::unordered_map<
+        std::string,
+        std::shared_ptr<connector::ColumnHandle>>& assignments,
+    std::vector<std::shared_ptr<const connector::ColumnHandle>>& ordered,
+    std::unordered_set<const connector::ColumnHandle*>& seen) {
+  if (!preferredType) {
+    return;
+  }
+
+  for (auto i = 0; i < preferredType->size(); ++i) {
+    const auto& preferredName = preferredType->nameOf(i);
+    for (const auto& [assignmentName, handle] : assignments) {
+      if (seen.find(handle.get()) != seen.end()) {
+        continue;
+      }
+      if (assignmentName == preferredName || handle->name() == preferredName) {
+        ordered.push_back(handle);
+        seen.insert(handle.get());
+        break;
+      }
+    }
+  }
+}
 } // namespace
 
+std::shared_ptr<connector::ConnectorTableHandle>
+PlanBuilder::TableScanBuilder::makeTableHandle(
+    const connector::ConnectorObjectFactory& connectorObjectFactory,
+    const common::SubfieldFilters& filters,
+    const core::TypedExprPtr& remainingFilterExpr) const {
+  std::vector<std::shared_ptr<const connector::ColumnHandle>> columnHandles;
+  columnHandles.reserve(assignments_.size());
+  std::unordered_set<const connector::ColumnHandle*> seen;
+  seen.reserve(assignments_.size());
+
+  appendColumnsInPreferredOrder(
+      dataColumns_, assignments_, columnHandles, seen);
+  appendColumnsInPreferredOrder(outputType_, assignments_, columnHandles, seen);
+
+  for (const auto& entry : assignments_) {
+    const auto& columnHandle = entry.second;
+    if (seen.find(columnHandle.get()) == seen.end()) {
+      columnHandles.push_back(columnHandle);
+    }
+  }
+
+  auto tableDataColumns = dataColumns_;
+  if (!tableDataColumns) {
+    std::vector<std::string> names;
+    std::vector<TypePtr> types;
+    names.reserve(outputType_->size());
+    types.reserve(outputType_->size());
+    for (auto i = 0; i < outputType_->size(); ++i) {
+      const auto& outputName = outputType_->nameOf(i);
+      auto alias = columnAliases_.find(outputName);
+      names.push_back(
+          alias == columnAliases_.end() ? outputName : alias->second);
+      types.push_back(outputType_->childAt(i));
+    }
+    tableDataColumns = ROW(std::move(names), std::move(types));
+  }
+
+  auto options = connector::makeOptions(
+      {{"filterPushdownEnabled", isFilterPushdownEnabled_}});
+  options.options["dataColumns"] = ISerializable::serialize(tableDataColumns);
+  if (!filters.empty()) {
+    folly::dynamic serializedFilters = folly::dynamic::object;
+    for (const auto& [subfield, filter] : filters) {
+      serializedFilters[subfield.toString()] =
+          ISerializable::serialize(*filter);
+    }
+    options.options["subfieldFilters"] = std::move(serializedFilters);
+  }
+  if (remainingFilterExpr) {
+    options.options["remainingFilter"] =
+        ISerializable::serialize(remainingFilterExpr);
+  }
+  if (!parameters_.empty()) {
+    folly::dynamic tableParameters = folly::dynamic::object;
+    for (const auto& [key, value] : parameters_) {
+      tableParameters[key] = value;
+    }
+    options.options["tableParameters"] = std::move(tableParameters);
+  }
+
+  return connectorObjectFactory.makeTableHandle(
+      tableName_, columnHandles, options);
+}
+
 core::PlanNodePtr PlanBuilder::TableScanBuilder::build(core::PlanNodeId id) {
+  auto connectorObjectFactory =
+      connector::getConnectorObjectFactory(connectorName_);
   std::unordered_map<std::string, core::TypedExprPtr> typedMapping;
   bool hasAssignments = !(assignments_.empty());
   for (uint32_t i = 0; i < outputType_->size(); ++i) {
@@ -209,17 +251,17 @@ core::PlanNodePtr PlanBuilder::TableScanBuilder::build(core::PlanNodeId id) {
     if (!hasAssignments) {
       assignments_.insert(
           {name,
-           std::make_shared<HiveColumnHandle>(
+           connectorObjectFactory->makeColumnHandle(
                hiveColumnName,
-               HiveColumnHandle::ColumnType::kRegular,
                type,
-               type)});
+               connector::makeOptions(
+                   {{"columnType", 1}, {"hiveType", type->serialize()}}))});
     }
   }
 
   const RowTypePtr& parseType = dataColumns_ ? dataColumns_ : outputType_;
   core::TypedExprPtr filterNodeExpr;
-  SubfieldFilters filters;
+  common::SubfieldFilters filters;
   filters.reserve(subfieldFilters_.size());
   auto queryCtx = core::QueryCtx::create();
   exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), planBuilder_.pool_);
@@ -263,14 +305,8 @@ core::PlanNodePtr PlanBuilder::TableScanBuilder::build(core::PlanNodeId id) {
   }
 
   if (!tableHandle_) {
-    tableHandle_ = std::make_shared<HiveTableHandle>(
-        connectorId_,
-        tableName_,
-        isFilterPushdownEnabled_,
-        std::move(filters),
-        remainingFilterExpr,
-        dataColumns_,
-        parameters_);
+    tableHandle_ =
+        makeTableHandle(*connectorObjectFactory, filters, remainingFilterExpr);
   }
   core::PlanNodePtr result = std::make_shared<core::TableScanNode>(
       id, outputType_, tableHandle_, assignments_);
@@ -429,92 +465,101 @@ PlanBuilder& PlanBuilder::tableWrite(
     const dwio::common::FileFormat fileFormat,
     const std::vector<std::string>& aggregates,
     const std::string& outputFileName) {
-  return tableWrite(
-      outputDirectoryPath,
-      {},
-      0,
-      {},
-      {},
-      fileFormat,
-      aggregates,
-      "test-hive",
-      outputFileName);
-}
-
-PlanBuilder& PlanBuilder::tableWrite(
-    const std::string& outputDirectoryPath,
-    const std::vector<std::string>& partitionBy,
-    const dwio::common::FileFormat fileFormat,
-    const std::vector<std::string>& aggregates) {
-  return tableWrite(
-      outputDirectoryPath, partitionBy, 0, {}, {}, fileFormat, aggregates);
-}
-
-PlanBuilder& PlanBuilder::tableWrite(
-    const std::string& outputDirectoryPath,
-    const std::vector<std::string>& partitionBy,
-    int32_t bucketCount,
-    const std::vector<std::string>& bucketedBy,
-    const dwio::common::FileFormat fileFormat,
-    const std::vector<std::string>& aggregates) {
-  return tableWrite(
-      outputDirectoryPath,
-      partitionBy,
-      bucketCount,
-      bucketedBy,
-      {},
-      fileFormat,
-      aggregates);
-}
-
-PlanBuilder& PlanBuilder::tableWrite(
-    const std::string& outputDirectoryPath,
-    const std::vector<std::string>& partitionBy,
-    int32_t bucketCount,
-    const std::vector<std::string>& bucketedBy,
-    const std::vector<std::string>& sortBy,
-    const dwio::common::FileFormat fileFormat,
-    const std::vector<std::string>& aggregates,
-    const std::string& connectorId,
-    const std::string& outputFileName) {
   BOLT_CHECK_NOT_NULL(planNode_, "TableWrite cannot be the source node");
   auto rowType = planNode_->outputType();
+  auto connectorObjectFactory = this->connectorObjectFactory();
 
-  std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
-      columnHandles;
+  std::vector<std::shared_ptr<const connector::ColumnHandle>> columnHandles;
   for (auto i = 0; i < rowType->size(); ++i) {
     const auto column = rowType->nameOf(i);
-    const bool isPartitionKey =
-        std::find(partitionBy.begin(), partitionBy.end(), column) !=
-        partitionBy.end();
-    columnHandles.push_back(std::make_shared<connector::hive::HiveColumnHandle>(
+    columnHandles.push_back(connectorObjectFactory->makeColumnHandle(
         column,
-        isPartitionKey
-            ? connector::hive::HiveColumnHandle::ColumnType::kPartitionKey
-            : connector::hive::HiveColumnHandle::ColumnType::kRegular,
         rowType->childAt(i),
-        rowType->childAt(i)));
+        connector::makeOptions(
+            {{"columnType", 1},
+             {"hiveType", rowType->childAt(i)->serialize()}})));
   }
 
-  auto locationHandle = std::make_shared<connector::hive::LocationHandle>(
-      outputDirectoryPath,
-      outputDirectoryPath,
-      connector::hive::LocationHandle::TableType::kNew,
-      outputFileName);
-  std::shared_ptr<HiveBucketProperty> bucketProperty;
-  if (!partitionBy.empty() && bucketCount != 0) {
-    bucketProperty =
-        buildHiveBucketProperty(rowType, bucketCount, bucketedBy, sortBy);
+  auto locationOptions = connector::makeOptions(
+      {{"targetPath", outputDirectoryPath},
+       {"writePath", outputDirectoryPath}});
+  if (!outputFileName.empty()) {
+    locationOptions.options["targetFileName"] = outputFileName;
   }
-  auto hiveHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
-      columnHandles,
-      locationHandle,
-      fileFormat,
-      bucketProperty,
-      common::CompressionKind_NONE);
+  auto locationHandle = connectorObjectFactory->makeLocationHandle(
+      connector::ConnectorLocationHandle::TableType::kNew, locationOptions);
 
-  auto insertHandle =
-      std::make_shared<core::InsertTableHandle>(connectorId, hiveHandle);
+  auto insertOptions =
+      connector::makeOptions({{"storageFormat", static_cast<int>(fileFormat)}});
+  auto insertHandle = std::make_shared<core::InsertTableHandle>(
+      connectorId_,
+      connectorObjectFactory->makeInsertTableHandle(
+          columnHandles, locationHandle, insertOptions));
+
+  std::shared_ptr<core::AggregationNode> aggregationNode;
+  if (!aggregates.empty()) {
+    auto aggregatesAndNames = createAggregateExpressionsAndNames(
+        aggregates, {}, core::AggregationNode::Step::kPartial);
+    aggregationNode = std::make_shared<core::AggregationNode>(
+        nextPlanNodeId(),
+        core::AggregationNode::Step::kPartial,
+        std::vector<core::FieldAccessTypedExprPtr>{},
+        std::vector<core::FieldAccessTypedExprPtr>{},
+        aggregatesAndNames.names,
+        aggregatesAndNames.aggregates,
+        false,
+        planNode_);
+  }
+
+  planNode_ = std::make_shared<core::TableWriteNode>(
+      nextPlanNodeId(),
+      rowType,
+      rowType->names(),
+      aggregationNode,
+      insertHandle,
+      false,
+      TableWriteTraits::outputType(aggregationNode),
+      connector::CommitStrategy::kNoCommit,
+      planNode_);
+  return *this;
+}
+
+PlanBuilder& PlanBuilder::tableWrite(
+    const std::string& outputDirectoryPath,
+    const std::vector<std::string>& partitionBy,
+    const dwio::common::FileFormat fileFormat,
+    const std::vector<std::string>& aggregates) {
+  BOLT_CHECK_NOT_NULL(planNode_, "TableWrite cannot be the source node");
+  auto rowType = planNode_->outputType();
+  auto connectorObjectFactory = this->connectorObjectFactory();
+
+  std::vector<std::shared_ptr<const connector::ColumnHandle>> columnHandles;
+  for (auto i = 0; i < rowType->size(); ++i) {
+    const auto column = rowType->nameOf(i);
+    columnHandles.push_back(connectorObjectFactory->makeColumnHandle(
+        column,
+        rowType->childAt(i),
+        connector::makeOptions(
+            {{"columnType",
+              std::find(partitionBy.begin(), partitionBy.end(), column) !=
+                      partitionBy.end()
+                  ? 0
+                  : 1},
+             {"hiveType", rowType->childAt(i)->serialize()}})));
+  }
+
+  auto locationOptions = connector::makeOptions(
+      {{"targetPath", outputDirectoryPath},
+       {"writePath", outputDirectoryPath}});
+  auto locationHandle = connectorObjectFactory->makeLocationHandle(
+      connector::ConnectorLocationHandle::TableType::kNew, locationOptions);
+
+  auto insertOptions =
+      connector::makeOptions({{"storageFormat", static_cast<int>(fileFormat)}});
+  auto insertHandle = std::make_shared<core::InsertTableHandle>(
+      connectorId_,
+      connectorObjectFactory->makeInsertTableHandle(
+          columnHandles, locationHandle, insertOptions));
 
   std::shared_ptr<core::AggregationNode> aggregationNode;
   if (!aggregates.empty()) {
@@ -1335,28 +1380,6 @@ PlanBuilder& PlanBuilder::localPartition(const std::vector<std::string>& keys) {
       exprs(keys, planNode_->outputType()),
       {planNode_},
       pool_);
-  return *this;
-}
-
-PlanBuilder& PlanBuilder::localPartitionByBucket(
-    const std::shared_ptr<connector::hive::HiveBucketProperty>&
-        bucketProperty) {
-  BOLT_CHECK_NOT_NULL(planNode_, "LocalPartition cannot be the source node");
-  std::vector<column_index_t> bucketChannels;
-  for (const auto& bucketColumn : bucketProperty->bucketedBy()) {
-    bucketChannels.push_back(
-        planNode_->outputType()->getChildIdx(bucketColumn));
-  }
-  auto hivePartitionFunctionFactory =
-      std::make_shared<HivePartitionFunctionSpec>(
-          bucketProperty->bucketCount(),
-          bucketChannels,
-          std::vector<VectorPtr>{});
-  planNode_ = std::make_shared<core::LocalPartitionNode>(
-      nextPlanNodeId(),
-      core::LocalPartitionNode::Type::kRepartition,
-      std::move(hivePartitionFunctionFactory),
-      std::vector<core::PlanNodePtr>{planNode_});
   return *this;
 }
 

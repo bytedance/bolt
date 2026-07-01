@@ -28,17 +28,15 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/process/ThreadDebugInfo.h"
+#include "bolt/connectors/tpch/TpchConnector.h"
 
-#include <folly/init/Init.h>
-#include <gtest/gtest.h>
+namespace bytedance::bolt::connector::tpch {
 
-// This main is needed for some tests on linux.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // Signal handler required for ThreadDebugInfoTest
-  bytedance::bolt::process::addDefaultFatalSignalHandler();
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
+void registerTpchConnectorFactories() {
+  if (!connector::hasConnectorFactory(kTpchConnectorName)) {
+    connector::registerConnectorFactory(
+        std::make_shared<TpchConnectorFactory>());
+  }
 }
+
+} // namespace bytedance::bolt::connector::tpch

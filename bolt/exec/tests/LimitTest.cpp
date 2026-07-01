@@ -29,12 +29,12 @@
  */
 
 #include "bolt/exec/OutputBufferManager.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 
-class LimitTest : public HiveConnectorTestBase {};
+class LimitTest : public ConnectorTestBase {};
 
 TEST_F(LimitTest, basic) {
   vector_size_t batchSize = 1'000;
@@ -97,7 +97,7 @@ TEST_F(LimitTest, limitOverLocalExchange) {
 
   auto cursor = TaskCursor::create(params);
   cursor->task()->addSplit(
-      scanNodeId, exec::Split(makeHiveConnectorSplit(file->path)));
+      scanNodeId, exec::Split(makeConnectorSplit(file->path)));
 
   int32_t numRead = 0;
   while (cursor->moveNext()) {

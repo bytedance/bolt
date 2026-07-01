@@ -29,12 +29,17 @@
  */
 
 #include <gtest/gtest.h>
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/Exchange.h"
 #include "bolt/exec/Split.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 namespace bytedance::bolt::exec {
+namespace {
 
-TEST(SplitToStringTest, remoteSplit) {
+class SplitToStringTest : public test::ConnectorTestBase {};
+
+} // namespace
+
+TEST_F(SplitToStringTest, remoteSplit) {
   Split split{std::make_shared<RemoteConnectorSplit>("test")};
   ASSERT_EQ("Split: [Remote: test] -1", split.toString());
 
@@ -42,13 +47,14 @@ TEST(SplitToStringTest, remoteSplit) {
   ASSERT_EQ("Split: [Remote: test] 7", split.toString());
 }
 
-TEST(SplitToStringTest, hiveSplit) {
-  Split split{std::make_shared<connector::hive::HiveConnectorSplit>(
-      "hive",
+TEST_F(SplitToStringTest, hiveSplit) {
+  Split split{makeConnectorSplit(
       "path/to/file.parquet",
-      dwio::common::FileFormat::PARQUET,
       7,
-      100)};
+      100,
+      connector::makeOptions(
+          {{"fileFormat",
+            static_cast<int>(dwio::common::FileFormat::PARQUET)}}))};
   ASSERT_EQ("Split: [Hive: path/to/file.parquet 7 - 100] -1", split.toString());
 
   split.groupId = 7;

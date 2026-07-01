@@ -34,10 +34,13 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/TraceUtil.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -50,7 +53,7 @@ using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 namespace bytedance::bolt::tool::trace::test {
 class PartitionedOutputReplayerTest
-    : public HiveConnectorTestBase,
+    : public ConnectorTestBase,
       public testing::WithParamInterface<VectorSerde::Kind> {
  public:
   static std::vector<VectorSerde::Kind> getTestParams() {
@@ -60,7 +63,7 @@ class PartitionedOutputReplayerTest
 
  protected:
   static void SetUpTestCase() {
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();

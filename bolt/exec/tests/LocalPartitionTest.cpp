@@ -30,16 +30,16 @@
 
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 
-class LocalPartitionTest : public HiveConnectorTestBase {
+class LocalPartitionTest : public ConnectorTestBase {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
   }
 
   template <typename T>
@@ -153,8 +153,7 @@ TEST_F(LocalPartitionTest, gather) {
 
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
 
   task = queryBuilder.assertResults("SELECT 300, -71, 152");
@@ -199,8 +198,7 @@ TEST_F(LocalPartitionTest, partition) {
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   queryBuilder.maxDrivers(2);
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
 
   auto task =
@@ -281,7 +279,7 @@ TEST_F(LocalPartitionTest, maxBufferSizePartition) {
     queryBuilder.maxDrivers(2);
     for (auto i = 0; i < filePaths.size(); ++i) {
       queryBuilder.split(
-          scanNodeIds[i % 3], makeHiveConnectorSplit(filePaths[i]->path));
+          scanNodeIds[i % 3], makeConnectorSplit(filePaths[i]->path));
     }
     queryBuilder.config(
         core::QueryConfig::kMaxLocalExchangeBufferSize, bufferSize);
@@ -329,8 +327,7 @@ TEST_F(LocalPartitionTest, indicesBufferCapacity) {
   auto cursor = TaskCursor::create(params);
   for (auto i = 0; i < filePaths.size(); ++i) {
     auto id = scanNodeIds[i % 3];
-    cursor->task()->addSplit(
-        id, Split(makeHiveConnectorSplit(filePaths[i]->path)));
+    cursor->task()->addSplit(id, Split(makeConnectorSplit(filePaths[i]->path)));
     cursor->task()->noMoreSplits(id);
   }
   int numRows = 0;
@@ -473,8 +470,7 @@ TEST_F(LocalPartitionTest, multipleExchanges) {
 
   AssertQueryBuilder queryBuilder(op, duckDbQueryRunner_);
   for (auto i = 0; i < filePaths.size(); ++i) {
-    queryBuilder.split(
-        scanNodeIds[i], makeHiveConnectorSplit(filePaths[i]->path));
+    queryBuilder.split(scanNodeIds[i], makeConnectorSplit(filePaths[i]->path));
   }
 
   queryBuilder.maxDrivers(2).assertResults(

@@ -30,6 +30,8 @@
 
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
 
+#include "bolt/connectors/hive/HiveConnector.h"
+
 DEFINE_string(data_format, "parquet", "Data format");
 
 DEFINE_validator(
@@ -201,10 +203,11 @@ void QueryBenchmarkBase::initialize() {
     connector::registerConnectorFactory(
         std::make_shared<connector::hive::HiveConnectorFactory>());
   }
-  if (!connector::isConnectorRegistered(kHiveConnectorId)) {
+  const std::string connectorId{kHiveConnectorId};
+  if (!connector::isConnectorRegistered(connectorId)) {
     auto hiveConnector =
         connector::getConnectorFactory(connector::kHiveConnectorName)
-            ->newConnector(kHiveConnectorId, properties, ioExecutor_.get());
+            ->newConnector(connectorId, properties, ioExecutor_.get());
     connector::registerConnector(hiveConnector);
   }
   parquet::registerParquetReaderFactory();
@@ -217,8 +220,11 @@ QueryBenchmarkBase::listSplits(
     int32_t numSplitsPerFile,
     const exec::test::TpchPlan& plan) {
   std::vector<std::shared_ptr<connector::ConnectorSplit>> result;
-  auto temp = HiveConnectorTestBase::makeHiveConnectorSplits(
-      path, numSplitsPerFile, plan.dataFileFormat);
+  auto temp = ConnectorTestBase::makeConnectorSplits(
+      connector::kHiveConnectorName,
+      path,
+      numSplitsPerFile,
+      plan.dataFileFormat);
   for (auto& i : temp) {
     result.push_back(i);
   }

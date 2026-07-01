@@ -21,7 +21,7 @@
 #include <folly/init/Init.h>
 #include <string>
 
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
@@ -35,7 +35,6 @@ DEFINE_string(agg_key, "i8", "aggregation keys");
 DEFINE_int64(iterations, 1, "run count of each benchmark");
 DEFINE_bool(jit_row_eq_vectors, false, "enable jit row_eq_vectors");
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kNumVectors = 4000;
@@ -43,7 +42,7 @@ static constexpr int32_t kRowsPerVector = 1024;
 
 namespace {
 
-class VariousAggregatesBenchmark : public HiveConnectorTestBase {
+class VariousAggregatesBenchmark : public ConnectorTestBase {
  public:
   static void SetUpTestCase() {
     OperatorTestBase::setMemoryLimit(1ULL << 34);
@@ -56,7 +55,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
   }
 
   explicit VariousAggregatesBenchmark() {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
 
     inputType_ = ROW(
         {{"bool", BOOLEAN()},
@@ -243,7 +242,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
   }
 
   ~VariousAggregatesBenchmark() override {
-    HiveConnectorTestBase::TearDown();
+    ConnectorTestBase::TearDown();
   }
 
   void TestBody() override {}
@@ -310,7 +309,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     task->noMoreSplits("0");
 
     suspender.dismiss();
@@ -339,7 +338,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
 
-    task->addSplit("0", exec::Split(makeHiveConnectorSplit(filePath_)));
+    task->addSplit("0", exec::Split(makeConnectorSplit(filePath_)));
     task->noMoreSplits("0");
 
     suspender.dismiss();

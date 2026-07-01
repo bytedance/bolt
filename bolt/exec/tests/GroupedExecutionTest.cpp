@@ -32,23 +32,22 @@
 
 #include <bolt/type/Timestamp.h>
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/TableScan.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::exec::test {
 
-class GroupedExecutionTest : public virtual HiveConnectorTestBase {
+class GroupedExecutionTest : public virtual ConnectorTestBase {
  protected:
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
   }
 
   static void SetUpTestCase() {
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
   }
 
   std::vector<RowVectorPtr> makeVectors(
@@ -56,15 +55,15 @@ class GroupedExecutionTest : public virtual HiveConnectorTestBase {
       int32_t rowsPerVector,
       const RowTypePtr& rowType = nullptr) {
     auto inputs = rowType ? rowType : rowType_;
-    return HiveConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
+    return ConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
   }
 
   exec::Split makeHiveSplitWithGroup(std::string path, int32_t group) {
-    return exec::Split(makeHiveConnectorSplit(std::move(path)), group);
+    return exec::Split(makeConnectorSplit(std::move(path)), group);
   }
 
   exec::Split makeHiveSplit(std::string path) {
-    return exec::Split(makeHiveConnectorSplit(std::move(path)));
+    return exec::Split(makeConnectorSplit(std::move(path)));
   }
 
   static core::PlanNodePtr tableScanNode(const RowTypePtr& outputType) {

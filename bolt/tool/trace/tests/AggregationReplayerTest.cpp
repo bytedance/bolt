@@ -38,13 +38,16 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/hyperloglog/SparseHll.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/hive/HiveConnectorSplit.h"
+#include "bolt/connectors/hive/HiveDataSink.h"
+#include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
@@ -67,11 +70,11 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::common::hll;
 namespace bytedance::bolt::tool::trace::test {
-class AggregationReplayerTest : public HiveConnectorTestBase {
+class AggregationReplayerTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
@@ -221,7 +224,7 @@ TEST_F(AggregationReplayerTest, test) {
               .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
               .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
               .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-              .split(makeHiveConnectorSplit(sourceFilePath->getPath()))
+              .split(makeConnectorSplit(sourceFilePath->getPath()))
               .copyResults(pool(), task);
 
       const auto replayingResult = AggregationReplayer(

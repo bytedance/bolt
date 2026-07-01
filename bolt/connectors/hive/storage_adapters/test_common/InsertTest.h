@@ -37,7 +37,7 @@
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -113,13 +113,13 @@ class InsertTest : public bolt::test::VectorTestBase {
     plan = exec::test::PlanBuilder().tableScan(rowType).planNode();
 
     auto filePath = fmt::format("{}{}", outputDirectory, writeFileName);
-    const int64_t fileSize = fileWriteInfos[0]["fileSize"].asInt();
-    auto split = exec::test::HiveConnectorSplitBuilder(filePath)
-                     .fileFormat(dwio::common::FileFormat::PARQUET)
-                     .length(fileSize)
-                     .build();
+    auto splits = exec::test::ConnectorTestBase::makeConnectorSplits(
+        connector::kHiveConnectorName,
+        filePath,
+        1,
+        dwio::common::FileFormat::PARQUET);
     auto copy =
-        exec::test::AssertQueryBuilder(plan).split(split).copyResults(pool);
+        exec::test::AssertQueryBuilder(plan).split(splits[0]).copyResults(pool);
     exec::test::assertEqualResults({input}, {copy});
   }
 };

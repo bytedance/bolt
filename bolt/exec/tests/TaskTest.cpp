@@ -32,14 +32,12 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/future/BoltPromise.h"
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/connectors/hive/HiveConnector.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Values.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -468,7 +466,7 @@ class TestBadMemoryTranslator : public exec::Operator::PlanNodeTranslator {
   }
 };
 } // namespace
-class TaskTest : public HiveConnectorTestBase {
+class TaskTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
@@ -494,7 +492,12 @@ class TaskTest : public HiveConnectorTestBase {
 
     for (const auto& [nodeId, paths] : filePaths) {
       for (const auto& path : paths) {
-        task->addSplit(nodeId, exec::Split(makeHiveConnectorSplit(path)));
+        auto splits = makeConnectorSplits(
+            connector::kHiveConnectorName,
+            path,
+            1,
+            bytedance::bolt::dwio::common::FileFormat::DWRF);
+        task->addSplit(nodeId, exec::Split(std::move(splits[0])));
       }
       task->noMoreSplits(nodeId);
     }
@@ -575,12 +578,7 @@ TEST_F(TaskTest, memoryPressureSnapshot) {
 }
 
 TEST_F(TaskTest, wrongPlanNodeForSplit) {
-  auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
-      "test",
-      "file:/tmp/abc",
-      bytedance::bolt::dwio::common::FileFormat::DWRF,
-      0,
-      100);
+  auto connectorSplit = makeConnectorSplit("file:/tmp/abc", 0, 100);
 
   auto plan = PlanBuilder()
                   .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))

@@ -35,7 +35,6 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/OperatorTraceReader.h"
 #include "bolt/exec/OperatorTraceWriter.h"
 #include "bolt/exec/PartitionFunction.h"
@@ -46,35 +45,30 @@
 #include "bolt/exec/TraceUtil.h"
 #include "bolt/exec/tests/utils/ArbitratorTestUtil.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/serializers/PrestoSerializer.h"
 using namespace bytedance::bolt::exec::test;
 namespace bytedance::bolt::exec::trace::test {
-class OperatorTraceTest : public HiveConnectorTestBase {
+class OperatorTraceTest : public ConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    HiveConnectorTestBase::SetUpTestCase();
+    ConnectorTestBase::SetUpTestCase();
     filesystems::registerLocalFileSystem();
     if (!isRegisteredVectorSerde()) {
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
     }
     Type::registerSerDe();
     common::Filter::registerSerDe();
-    connector::hive::HiveTableHandle::registerSerDe();
-    connector::hive::LocationHandle::registerSerDe();
-    connector::hive::HiveColumnHandle::registerSerDe();
-    connector::hive::HiveInsertTableHandle::registerSerDe();
-    connector::hive::HiveConnectorSplit::registerSerDe();
     core::PlanNode::registerSerDe();
     core::ITypedExpr::registerSerDe();
     registerPartitionFunctionSerDe();
   }
 
   void SetUp() override {
-    HiveConnectorTestBase::SetUp();
+    ConnectorTestBase::SetUp();
     dataType_ = ROW({"a", "b", "c"}, {BIGINT(), BIGINT(), BIGINT()});
   }
 
@@ -97,7 +91,7 @@ class OperatorTraceTest : public HiveConnectorTestBase {
       int32_t rowsPerVector,
       const RowTypePtr& rowType = nullptr) {
     auto inputs = rowType ? rowType : dataType_;
-    return HiveConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
+    return ConnectorTestBase::makeVectors(inputs, count, rowsPerVector);
   }
 
   bool isSamePlan(
@@ -758,7 +752,7 @@ TEST_F(OperatorTraceTest, traceSplitRoundTrip) {
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
-  auto splits = makeHiveConnectorSplits(splitFiles);
+  auto splits = makeConnectorSplits(splitFiles);
   std::sort(splits.begin(), splits.end());
 
   auto traceDirPath = TempDirectoryPath::create();
@@ -802,9 +796,9 @@ TEST_F(OperatorTraceTest, traceSplitRoundTrip) {
   ASSERT_EQ(actualSplits.size(), splits.size());
   for (int i = 0; i < numSplits; ++i) {
     folly::dynamic splitInfoObj = folly::parseJson(actualSplits[i]);
-    const auto actualSplit = exec::Split{
-        std::const_pointer_cast<connector::hive::HiveConnectorSplit>(
-            ISerializable::deserialize<connector::hive::HiveConnectorSplit>(
+    const auto actualSplit =
+        exec::Split{std::const_pointer_cast<connector::ConnectorSplit>(
+            ISerializable::deserialize<connector::ConnectorSplit>(
                 splitInfoObj))};
     ASSERT_FALSE(actualSplit.hasGroup());
     ASSERT_TRUE(actualSplit.hasConnectorSplit());
@@ -825,7 +819,7 @@ TEST_F(OperatorTraceTest, traceSplitPartial) {
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
-  auto splits = makeHiveConnectorSplits(splitFiles);
+  auto splits = makeConnectorSplits(splitFiles);
 
   auto traceDirPath = TempDirectoryPath::create();
   auto plan = PlanBuilder().tableScan(dataType_).planNode();
@@ -891,9 +885,9 @@ TEST_F(OperatorTraceTest, traceSplitPartial) {
   ASSERT_EQ(actualSplits.size(), splits.size());
   for (int i = 0; i < numSplits; ++i) {
     folly::dynamic splitInfoObj = folly::parseJson(actualSplits[i]);
-    const auto actualSplit = exec::Split{
-        std::const_pointer_cast<connector::hive::HiveConnectorSplit>(
-            ISerializable::deserialize<connector::hive::HiveConnectorSplit>(
+    const auto actualSplit =
+        exec::Split{std::const_pointer_cast<connector::ConnectorSplit>(
+            ISerializable::deserialize<connector::ConnectorSplit>(
                 splitInfoObj))};
     ASSERT_FALSE(actualSplit.hasGroup());
     ASSERT_TRUE(actualSplit.hasConnectorSplit());
@@ -914,7 +908,7 @@ TEST_F(OperatorTraceTest, traceSplitCorrupted) {
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
-  auto splits = makeHiveConnectorSplits(splitFiles);
+  auto splits = makeConnectorSplits(splitFiles);
 
   auto traceDirPath = TempDirectoryPath::create();
   auto plan = PlanBuilder().tableScan(dataType_).planNode();
@@ -981,9 +975,9 @@ TEST_F(OperatorTraceTest, traceSplitCorrupted) {
   ASSERT_EQ(actualSplits.size(), splits.size());
   for (int i = 0; i < numSplits; ++i) {
     folly::dynamic splitInfoObj = folly::parseJson(actualSplits[i]);
-    const auto actualSplit = exec::Split{
-        std::const_pointer_cast<connector::hive::HiveConnectorSplit>(
-            ISerializable::deserialize<connector::hive::HiveConnectorSplit>(
+    const auto actualSplit =
+        exec::Split{std::const_pointer_cast<connector::ConnectorSplit>(
+            ISerializable::deserialize<connector::ConnectorSplit>(
                 splitInfoObj))};
     ASSERT_FALSE(actualSplit.hasGroup());
     ASSERT_TRUE(actualSplit.hasConnectorSplit());
@@ -1170,7 +1164,7 @@ TEST_F(OperatorTraceTest, hiveConnectorId) {
     writeToFile(filePath->getPath(), vectors);
     splitFiles.push_back(std::move(filePath));
   }
-  auto splits = makeHiveConnectorSplits(splitFiles);
+  auto splits = makeConnectorSplits(splitFiles);
   auto traceDirPath = TempDirectoryPath::create();
   core::PlanNodeId scanNodeId;
   auto plan = PlanBuilder()

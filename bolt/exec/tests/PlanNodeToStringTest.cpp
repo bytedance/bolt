@@ -28,9 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/WindowFunction.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/exec/tests/utils/ConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
@@ -38,7 +37,6 @@
 
 #include <gtest/gtest.h>
 using namespace bytedance::bolt;
-using namespace bytedance::bolt::common::test;
 
 using bytedance::bolt::exec::test::PlanBuilder;
 
@@ -644,21 +642,6 @@ TEST_F(PlanNodeToStringTest, partitionedOutput) {
   ASSERT_EQ("-- PartitionedOutput[1]\n", plan->toString(false, false, true));
   ASSERT_EQ(
       "-- PartitionedOutput[1][partitionFunction: HASH(c1, c2) with 5 partitions replicate nulls and any] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
-      plan->toString(true, false, true));
-
-  auto hiveSpec = std::make_shared<connector::hive::HivePartitionFunctionSpec>(
-      4,
-      std::vector<int>{0, 1, 0, 1},
-      std::vector<column_index_t>{1, 2},
-      std::vector<VectorPtr>{});
-
-  plan = PlanBuilder()
-             .values({data_})
-             .partitionedOutput({"c1", "c2"}, 2, false, hiveSpec)
-             .planNode();
-  ASSERT_EQ("-- PartitionedOutput[1]\n", plan->toString(false, false, true));
-  ASSERT_EQ(
-      "-- PartitionedOutput[1][partitionFunction: HIVE((1, 2) buckets: 4) with 2 partitions] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
       plan->toString(true, false, true));
 }
 

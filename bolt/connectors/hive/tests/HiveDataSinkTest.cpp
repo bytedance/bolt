@@ -29,7 +29,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/connectors/hive/tests/HiveConnectorTestBase.h"
 
 #include <folly/init/Init.h>
 #include <re2/re2.h>
@@ -49,7 +49,7 @@ using namespace bytedance::bolt::common::testutil;
 
 constexpr const char* kHiveConnectorId = "test-hive";
 
-class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
+class HiveDataSinkTest : public HiveConnectorTestBase {
  protected:
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
@@ -207,9 +207,9 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
     ASSERT_EQ(filePaths.size(), numFiles);
     std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
     std::for_each(filePaths.begin(), filePaths.end(), [&](auto filePath) {
-      splits.push_back(makeHiveConnectorSplit(filePath));
+      splits.push_back(makeConnectorSplit(filePath));
     });
-    HiveConnectorTestBase::assertQuery(
+    ConnectorTestBase::assertQuery(
         PlanBuilder().tableScan(rowType_).planNode(),
         splits,
         fmt::format("SELECT * FROM tmp"));

@@ -38,8 +38,7 @@
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include <folly/init/Init.h>
-using namespace bytedance::bolt;
-// using exec::test::HiveConnectorTestBase;
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector;
 using namespace bytedance::bolt::connector::hive;

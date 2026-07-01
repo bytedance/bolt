@@ -31,11 +31,17 @@
 #include "bolt/connectors/hive/TableHandle.h"
 
 #include "bolt/common/base/tests/GTestUtils.h"
-#include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
+#include "bolt/connectors/hive/tests/HiveConnectorTestBase.h"
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
 
-TEST(FileHandleTest, hiveColumnHandle) {
+namespace {
+
+class TableHandleTest : public connector::hive::HiveConnectorTestBase {};
+
+} // namespace
+
+TEST_F(TableHandleTest, hiveColumnHandle) {
   Type::registerSerDe();
   connector::hive::HiveColumnHandle::registerSerDe();
   auto columnType = ROW(
@@ -43,7 +49,7 @@ TEST(FileHandleTest, hiveColumnHandle) {
        {"c0c1",
         ARRAY(MAP(
             VARCHAR(), ROW({{"c0c1c0", BIGINT()}, {"c0c1c1", BIGINT()}})))}});
-  auto columnHandle = exec::test::HiveConnectorTestBase::makeColumnHandle(
+  auto columnHandle = makeColumnHandle(
       "columnHandle", columnType, columnType, {"c0.c0c1[3][\"foo\"].c0c1c0"});
   ASSERT_EQ(columnHandle->name(), "columnHandle");
   ASSERT_EQ(
@@ -61,7 +67,7 @@ TEST(FileHandleTest, hiveColumnHandle) {
 
   auto incompatibleHiveType = ROW({{"c0c0", BIGINT()}, {"c0c1", BIGINT()}});
   BOLT_ASSERT_THROW(
-      exec::test::HiveConnectorTestBase::makeColumnHandle(
+      makeColumnHandle(
           "columnHandle",
           columnType,
           incompatibleHiveType,
