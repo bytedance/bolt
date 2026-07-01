@@ -35,7 +35,7 @@ namespace bytedance::bolt::shuffle::sparksql {
 arrow::Status
 BoltArrowMemoryPool::Allocate(int64_t size, int64_t alignment, uint8_t** out) {
   *out = static_cast<uint8_t*>(pool_->allocate(size, alignment));
-  bytesAllocated_ += size;
+  bytesAllocated_.fetch_add(size, std::memory_order_relaxed);
   return arrow::Status::OK();
 }
 
@@ -46,7 +46,7 @@ arrow::Status BoltArrowMemoryPool::Reallocate(
     uint8_t** ptr) {
   *ptr = static_cast<uint8_t*>(
       pool_->reallocate(static_cast<void*>(*ptr), oldSize, newSize, alignment));
-  bytesAllocated_ += (newSize - oldSize);
+  bytesAllocated_.fetch_add(newSize - oldSize, std::memory_order_relaxed);
   return arrow::Status::OK();
 }
 
@@ -55,11 +55,11 @@ void BoltArrowMemoryPool::Free(
     int64_t size,
     int64_t alignment) {
   pool_->free(static_cast<void*>(buffer), size, alignment);
-  bytesAllocated_ -= size;
+  bytesAllocated_.fetch_sub(size, std::memory_order_relaxed);
 }
 
 int64_t BoltArrowMemoryPool::bytes_allocated() const {
-  return bytesAllocated_;
+  return bytesAllocated_.load(std::memory_order_relaxed);
 }
 
 int64_t BoltArrowMemoryPool::total_bytes_allocated() const {

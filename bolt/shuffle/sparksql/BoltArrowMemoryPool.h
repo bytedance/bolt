@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include "arrow/memory_pool.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -68,8 +69,9 @@ class BoltArrowMemoryPool final
 
  private:
   bytedance::bolt::memory::MemoryPool* pool_;
-  int64_t bytesAllocated_ = 0; // Track bytes allocated by this pool, not the
-                               // total bytes allocated by bolt pool.
+  // Track bytes allocated by this pool, not the total bytes allocated by bolt
+  // pool.
+  std::atomic<int64_t> bytesAllocated_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql
