@@ -8569,4 +8569,83 @@ TEST_F(HashJoinTest, reuseHashTable) {
 #endif
 }
 
+DEBUG_ONLY_TEST_F(HashJoinTest, reusedHashBuildDoesNotNeedInput) {
+  auto probeVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"t_0"},
+        {
+            makeFlatVector<int64_t>({1, 2, 3}),
+        });
+  });
+  auto buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeNullableFlatVector<int64_t>({std::nullopt}),
+        });
+  });
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+  std::shared_ptr<BaseHashTable> table = HashTable<false>::createForJoin(
+      std::move(hashers),
+      {}, /*dependentTypes*/
+      true /*allowDuplicates*/,
+      true /*hasProbedFlag*/,
+      BaseHashTable::HashMode::kArray,
+      1 /*minTableSizeForParallelJoinBuild*/,
+      pool(),
+      true);
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto probeNode = PlanBuilder(planNodeIdGenerator, pool_.get())
+                       .values(probeVectors)
+                       .planNode();
+  auto buildNode = PlanBuilder(planNodeIdGenerator, pool_.get())
+                       .values(buildVectors)
+                       .planNode();
+  auto joinNode = std::make_shared<core::HashJoinNode>(
+      "reused_hash_build_lifecycle_join",
+      core::JoinType::kAnti,
+      true /*nullAware*/,
+      std::vector<core::FieldAccessTypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "t_0")},
+      std::vector<core::FieldAccessTypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "u_0")},
+      nullptr /*filter*/,
+      probeNode,
+      buildNode,
+      ROW({"t_0"}, {BIGINT()}),
+      true /*useHashTableCache*/,
+      true /*joinHasNullKeys*/,
+      opaqueSharedHashTable);
+
+  std::atomic<HashBuild*> capturedHashBuild{nullptr};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::HashBuild",
+      std::function<void(HashBuild*)>(
+          [&](HashBuild* hashBuild) { capturedHashBuild.store(hashBuild); }));
+
+  std::atomic_bool checked{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Driver::runInternal",
+      std::function<void(Driver*)>([&](Driver*) {
+        auto* hashBuild = capturedHashBuild.load();
+        if (hashBuild == nullptr) {
+          return;
+        }
+        if (checked.exchange(true)) {
+          return;
+        }
+        EXPECT_TRUE(hashBuild->isFinished());
+        EXPECT_FALSE(hashBuild->needsInput());
+        EXPECT_NO_THROW(hashBuild->noMoreInput());
+      }));
+
+  AssertQueryBuilder(joinNode).serialExecution(true).assertEmptyResults();
+  ASSERT_TRUE(checked.load());
+}
+
 } // namespace

@@ -97,7 +97,7 @@ class HashBuild final : public Operator {
   }
 
   bool needsInput() const override {
-    return !noMoreInput_;
+    return !reuseHashTable_ && !noMoreInput_;
   }
 
   void noMoreInput() override;

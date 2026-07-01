@@ -308,6 +308,7 @@ void HashBuild::setupTable() {
 void HashBuild::setReusableHashTable(
     std::shared_ptr<core::OpaqueHashTable> opaqueHashTable) {
   LOG(INFO) << "Enter setReusableHashTable!";
+  reuseHashTable_ = true;
   joinBridge_->start();
   setState(State::kFinish);
 
@@ -322,7 +323,6 @@ void HashBuild::setReusableHashTable(
 
   joinBridge_->setHashTable(
       std::move(reusableHashTable), {}, joinNode_->joinHasNullKeys(), nullptr);
-  reuseHashTable_ = true;
   LOG(INFO) << "setReusableHashTable success!";
 }
 
@@ -1042,6 +1042,10 @@ void HashBuild::addAndClearSpillTarget(uint64_t& numRows, uint64_t& numBytes) {
 }
 
 void HashBuild::noMoreInput() {
+  if (reuseHashTable_) {
+    return;
+  }
+
   checkRunning();
 
   if (noMoreInput_) {
