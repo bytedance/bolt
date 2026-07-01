@@ -308,6 +308,12 @@ void HashBuild::setupTable() {
 void HashBuild::setReusableHashTable(
     std::shared_ptr<core::OpaqueHashTable> opaqueHashTable) {
   LOG(INFO) << "Enter setReusableHashTable!";
+  BOLT_USER_CHECK(
+      !joinNode_->isRightJoin() && !joinNode_->isFullJoin() &&
+          !joinNode_->isRightSemiFilterJoin() &&
+          !joinNode_->isRightSemiProjectJoin(),
+      "Reusable hash table is not supported for join types that require "
+      "build-side probed flags");
   reuseHashTable_ = true;
   joinBridge_->start();
   setState(State::kFinish);

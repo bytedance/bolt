@@ -8569,6 +8569,73 @@ TEST_F(HashJoinTest, reuseHashTable) {
 #endif
 }
 
+TEST_F(HashJoinTest, reuseHashTableRightSemiProjectNotSupported) {
+  auto buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeFlatVector<int64_t>({1, 2, 3}),
+        });
+  });
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+
+  std::shared_ptr<BaseHashTable> table = HashTable<false>::createForJoin(
+      std::move(hashers),
+      {}, /*dependentTypes*/
+      true /*allowDuplicates*/,
+      true /*hasProbedFlag*/,
+      BaseHashTable::HashMode::kArray,
+      1 /*minTableSizeForParallelJoinBuild*/,
+      pool(),
+      true);
+
+  auto rowContainer = table->rows();
+  const auto nextOffset = rowContainer->nextOffset();
+  SelectivityVector rows(buildVectors[0]->size());
+  DecodedVector decoded(*buildVectors[0]->childAt(0), rows);
+  for (auto i = 0; i < buildVectors[0]->size(); ++i) {
+    auto* row = rowContainer->newRow();
+    if (nextOffset) {
+      *reinterpret_cast<char**>(row + nextOffset) = nullptr;
+    }
+    rowContainer->store(decoded, i, row, 0);
+  }
+  table->prepareJoinTable(
+      {}, nullptr, false, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto makePlan = [&](std::vector<RowVectorPtr> probeVectors) {
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto node = PlanBuilder(planNodeIdGenerator, pool_.get())
+                    .values(probeVectors)
+                    .hashJoin(
+                        {"t_0"},
+                        {"u_0"},
+                        PlanBuilder(planNodeIdGenerator, pool_.get())
+                            .values(buildVectors)
+                            .planNode(),
+                        "",
+                        {"u_0", "match"},
+                        core::JoinType::kRightSemiProject)
+                    .planNode();
+    auto joinNode = std::dynamic_pointer_cast<const core::HashJoinNode>(node);
+    joinNode->setReusableHashTable(opaqueSharedHashTable);
+    return joinNode;
+  };
+
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(
+          makePlan({makeRowVector({"t_0"}, {makeFlatVector<int64_t>({1})})}))
+          .maxDrivers(1)
+          .copyResults(pool()),
+      "Reusable hash table is not supported for join types that require "
+      "build-side probed flags");
+}
+
 DEBUG_ONLY_TEST_F(HashJoinTest, reusedHashBuildDoesNotNeedInput) {
   auto probeVectors = makeBatches(1, [&](int32_t) {
     return makeRowVector(
