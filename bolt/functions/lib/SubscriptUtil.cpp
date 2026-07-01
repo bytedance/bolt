@@ -78,8 +78,6 @@ VectorPtr applyMapTyped(
     }
   }
 
-  auto& typedLookupTable = cachedLookupTablePtr->typedTable<kind>();
-
   auto* pool = context.pool();
   BufferPtr indices = allocateIndices(rows.end(), pool);
   auto rawIndices = indices->asMutable<vector_size_t>();
@@ -117,6 +115,8 @@ VectorPtr applyMapTyped(
     bool found = false;
 
     if (triggeCaching && size >= kMinCachedMapSize) {
+      BOLT_DCHECK_NOT_NULL(cachedLookupTablePtr);
+      auto& typedLookupTable = cachedLookupTablePtr->typedTable<kind>();
       // Create map for mapIndex if not created.
       if (!typedLookupTable.containsMapAtIndex(mapIndex)) {
         typedLookupTable.ensureMapAtIndex(mapIndex);
