@@ -2416,10 +2416,12 @@ arrow::MemoryPool* BoltShuffleWriter::getSpillArrowPool(
     arrow::MemoryPool* pool) {
   if (dynamic_cast<BoltArrowMemoryPool*>(pool) != nullptr) {
     // If the pool is BoltArrowMemoryPool, shuffle is offload as bolt operator
-    static std::shared_ptr<arrow::MemoryPool> spillPool =
+    // Keep the shared_ptr alive for process lifetime to avoid shutdown-time
+    // UAF.
+    static auto* spillPool = new std::shared_ptr<arrow::MemoryPool>(
         std::make_shared<BoltArrowMemoryPool>(
-            bytedance::bolt::memory::spillMemoryPool());
-    return spillPool.get();
+            bytedance::bolt::memory::spillMemoryPool()));
+    return spillPool->get();
   } else {
     return pool;
   }
