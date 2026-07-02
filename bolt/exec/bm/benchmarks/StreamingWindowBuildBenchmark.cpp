@@ -66,6 +66,12 @@ enum class PayloadProfile : uint8_t {
   kLargeString,
 };
 
+enum class SortProfile : uint8_t {
+  kAscSingle,
+  kAscNullsFirstMultiKey,
+  kDescNullsLastMultiKey,
+};
+
 const char* payloadProfileName(PayloadProfile profile) {
   switch (profile) {
     case PayloadProfile::kFixed:
@@ -78,14 +84,31 @@ const char* payloadProfileName(PayloadProfile profile) {
   BOLT_UNREACHABLE();
 }
 
+const char* sortProfileName(SortProfile profile) {
+  switch (profile) {
+    case SortProfile::kAscSingle:
+      return "asc_single";
+    case SortProfile::kAscNullsFirstMultiKey:
+      return "asc_nulls_first_multi_key";
+    case SortProfile::kDescNullsLastMultiKey:
+      return "desc_nulls_last_multi_key";
+  }
+  BOLT_UNREACHABLE();
+}
+
 struct InputProfile {
   int32_t partitionRows{4096};
   int32_t peerGroupRows{1};
   PayloadProfile payload{PayloadProfile::kFixed};
+  SortProfile sort{SortProfile::kAscSingle};
 
   std::string key() const {
     return fmt::format(
-        "{}:{}:{}", partitionRows, peerGroupRows, payloadProfileName(payload));
+        "{}:{}:{}:{}",
+        partitionRows,
+        peerGroupRows,
+        payloadProfileName(payload),
+        sortProfileName(sort));
   }
 };
 
@@ -275,6 +298,56 @@ class StreamingWindowBuildBenchmark : public VectorTestBase {
         ? FLAGS_window_benchmark_string_bytes
         : 16;
     const auto nullable = profile.payload == PayloadProfile::kNullable;
+    const auto nullSortRows =
+        std::min(std::max(1, profile.peerGroupRows), profile.partitionRows);
+    auto rowInPartition = [partitionRows =
+                               profile.partitionRows](int64_t ordinal) {
+      return static_cast<int32_t>(ordinal % partitionRows);
+    };
+    auto rowInSortGroup = [peerGroupRows =
+                               profile.peerGroupRows](int32_t partitionRow) {
+      return partitionRow % peerGroupRows;
+    };
+    auto sortKeyIsNull = [&](int32_t partitionRow) {
+      switch (profile.sort) {
+        case SortProfile::kAscSingle:
+          return false;
+        case SortProfile::kAscNullsFirstMultiKey:
+          return partitionRow < nullSortRows;
+        case SortProfile::kDescNullsLastMultiKey:
+          return partitionRow >= profile.partitionRows - nullSortRows;
+      }
+      BOLT_UNREACHABLE();
+    };
+    auto sortKeyValue = [&](int32_t partitionRow) {
+      switch (profile.sort) {
+        case SortProfile::kAscSingle:
+          return static_cast<int64_t>(partitionRow / profile.peerGroupRows);
+        case SortProfile::kAscNullsFirstMultiKey:
+          return static_cast<int64_t>(
+              std::max(0, partitionRow - nullSortRows) / profile.peerGroupRows);
+        case SortProfile::kDescNullsLastMultiKey: {
+          const auto nonNullRows = profile.partitionRows - nullSortRows;
+          return static_cast<int64_t>(
+              std::max(0, nonNullRows - 1 - partitionRow) /
+              profile.peerGroupRows);
+        }
+      }
+      BOLT_UNREACHABLE();
+    };
+    auto payloadD = [&](int64_t ordinal) {
+      const auto partitionRow = rowInPartition(ordinal);
+      switch (profile.sort) {
+        case SortProfile::kAscNullsFirstMultiKey:
+          return static_cast<int64_t>(
+              profile.peerGroupRows - 1 - rowInSortGroup(partitionRow));
+        case SortProfile::kDescNullsLastMultiKey:
+          return static_cast<int64_t>(rowInSortGroup(partitionRow));
+        case SortProfile::kAscSingle:
+          return static_cast<int64_t>(ordinal % 17);
+      }
+      BOLT_UNREACHABLE();
+    };
     std::string scratch;
     for (auto vector = 0; vector < FLAGS_window_benchmark_num_vectors;
          ++vector) {
@@ -284,9 +357,7 @@ class StreamingWindowBuildBenchmark : public VectorTestBase {
           {
               makeFlatVector<int64_t>(
                   FLAGS_window_benchmark_rows_per_vector,
-                  [base](auto row) {
-                    return static_cast<int64_t>((base + row) % 17);
-                  },
+                  [base, &payloadD](auto row) { return payloadD(base + row); },
                   [base, nullable](auto row) {
                     return nullable && (base + row) % 7 == 0;
                   }),
@@ -314,11 +385,11 @@ class StreamingWindowBuildBenchmark : public VectorTestBase {
                   }),
               makeFlatVector<int64_t>(
                   FLAGS_window_benchmark_rows_per_vector,
-                  [base,
-                   partitionRows = profile.partitionRows,
-                   peerGroupRows = profile.peerGroupRows](auto row) {
-                    const auto rowInPartition = (base + row) % partitionRows;
-                    return static_cast<int64_t>(rowInPartition / peerGroupRows);
+                  [base, &rowInPartition, &sortKeyValue](auto row) {
+                    return sortKeyValue(rowInPartition(base + row));
+                  },
+                  [base, &rowInPartition, &sortKeyIsNull](auto row) {
+                    return sortKeyIsNull(rowInPartition(base + row));
                   }),
               makeFlatVector<int64_t>(
                   FLAGS_window_benchmark_rows_per_vector,
@@ -374,6 +445,21 @@ int main(int argc, char** argv) {
       defaultPartitionRows, 1, PayloadProfile::kNullable};
   const InputProfile largeString{
       defaultPartitionRows, 1, PayloadProfile::kLargeString};
+  const InputProfile ascNullsFirstMultiKey{
+      defaultPartitionRows,
+      widePeerRows,
+      PayloadProfile::kFixed,
+      SortProfile::kAscNullsFirstMultiKey};
+  const InputProfile descNullsLastMultiKey{
+      defaultPartitionRows,
+      widePeerRows,
+      PayloadProfile::kFixed,
+      SortProfile::kDescNullsLastMultiKey};
+
+  const std::string ascNullsFirstMultiKeyOver =
+      "partition by p order by s asc nulls first, d desc nulls last";
+  const std::string descNullsLastMultiKeyOver =
+      "partition by p order by s desc nulls last, d asc nulls first";
 
   std::vector<BenchmarkCase> cases{
       {"row_number_default",
@@ -402,6 +488,74 @@ int main(int argc, char** argv) {
       {"bounded_range_col_sum",
        {"sum(d) over (partition by p order by s range between off preceding and off following)"},
        defaultFixed},
+      {"extended_ranking_peer",
+       {"dense_rank() over (partition by p order by s)",
+        "percent_rank() over (partition by p order by s)",
+        "cume_dist() over (partition by p order by s)",
+        "ntile(8) over (partition by p order by s)"},
+       widePeer},
+      {"whole_partition_agg_no_order",
+       {"sum(d) over (partition by p)",
+        "count(v) over (partition by p)",
+        "min(d) over (partition by p)",
+        "max(d) over (partition by p)",
+        "avg(x) over (partition by p)"},
+       defaultFixed},
+      {"global_whole_agg_no_order",
+       {"sum(d) over ()", "count(v) over ()", "avg(x) over ()"},
+       singleLarge},
+      {"implicit_ordered_agg",
+       {"sum(d) over (partition by p order by s)",
+        "count(v) over (partition by p order by s)",
+        "min(d) over (partition by p order by s)",
+        "max(d) over (partition by p order by s)",
+        "avg(x) over (partition by p order by s)"},
+       defaultFixed},
+      {"plain_value_functions",
+       {"first_value(d) over (partition by p order by s rows between 2 preceding and 2 following)",
+        "last_value(d) over (partition by p order by s rows between unbounded preceding and unbounded following)",
+        "nth_value(d, off) over (partition by p order by s rows between unbounded preceding and unbounded following)"},
+       nullable},
+      {"collection_agg_full_frame",
+       {"collect_list(d) over (partition by p order by s rows between unbounded preceding and unbounded following)",
+        "collect_set(d) over (partition by p order by s rows between unbounded preceding and unbounded following)"},
+       manyTiny},
+      {"by_extreme_other_agg_no_order",
+       {"max_by(v, d) over (partition by p)",
+        "min_by(v, d) over (partition by p)",
+        "percentile(d, 0.5) over (partition by p)"},
+       manyTiny},
+      {"explicit_common_frames",
+       {"sum(d) over (partition by p order by s rows between 64 preceding and current row)",
+        "sum(d) over (partition by p order by s rows between 64 preceding and 64 preceding)",
+        "avg(x) over (partition by p order by s range between off preceding and current row)",
+        "max(d) over (partition by p order by s range between off preceding and off preceding)"},
+       defaultFixed},
+      {"desc_null_multi_key_ranking",
+       {fmt::format("row_number() over ({})", descNullsLastMultiKeyOver),
+        fmt::format("rank() over ({})", descNullsLastMultiKeyOver),
+        fmt::format("dense_rank() over ({})", descNullsLastMultiKeyOver),
+        fmt::format("percent_rank() over ({})", descNullsLastMultiKeyOver),
+        fmt::format("cume_dist() over ({})", descNullsLastMultiKeyOver),
+        fmt::format("ntile(8) over ({})", descNullsLastMultiKeyOver)},
+       descNullsLastMultiKey},
+      {"desc_null_multi_key_agg",
+       {fmt::format("sum(d) over ({})", descNullsLastMultiKeyOver),
+        fmt::format("count(v) over ({})", descNullsLastMultiKeyOver),
+        fmt::format("max(d) over ({})", descNullsLastMultiKeyOver),
+        fmt::format("min(d) over ({})", descNullsLastMultiKeyOver)},
+       descNullsLastMultiKey},
+      {"asc_null_first_multi_key_value",
+       {fmt::format(
+            "first_value(d) over ({} rows between unbounded preceding and current row)",
+            ascNullsFirstMultiKeyOver),
+        fmt::format(
+            "last_value(d) over ({} rows between current row and unbounded following)",
+            ascNullsFirstMultiKeyOver),
+        fmt::format(
+            "nth_value(d, off) over ({} rows between unbounded preceding and unbounded following)",
+            ascNullsFirstMultiKeyOver)},
+       ascNullsFirstMultiKey},
       {"lead_lag_nullable",
        {"lead(d, off, def) over (partition by p order by s)",
         "lag(d, off, def) over (partition by p order by s)"},
