@@ -13,6 +13,8 @@ namespace bytedance::bolt::exec::window {
 namespace {
 
 constexpr vector_size_t kExtractNullsBatchRows = 4096;
+constexpr vector_size_t kDirectRowNumberRunRows = 8;
+constexpr vector_size_t kCachedNullsMinRows = 1024;
 
 folly::Synchronized<BmWindowPartitionTestStats>& testStats() {
   static folly::Synchronized<BmWindowPartitionTestStats> stats;
@@ -109,6 +111,7 @@ BmWindowPartition::BmWindowPartition(
       rangeRows,
       numRows_);
   initializePhysicalTypes();
+  nullsCache_.resize(physicalTypes_.size());
 }
 
 bool BmWindowPartition::canBulkReadPartition() const {
@@ -181,6 +184,13 @@ std::vector<const char*> BmWindowPartition::loadResidentRows(
     rows.push_back(residentRows_[partitionOffset + i]);
   }
   return rows;
+}
+
+const char* const* BmWindowPartition::residentRowsData(
+    vector_size_t partitionOffset) const {
+  BOLT_CHECK_LE(partitionOffset, numRows());
+  return reinterpret_cast<const char* const*>(
+      residentRows_.data() + partitionOffset);
 }
 
 std::vector<exec::bm::SegmentRowRange> BmWindowPartition::getSegmentRanges(
@@ -290,18 +300,29 @@ void BmWindowPartition::extractRowsToVector(
     vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) const {
-  if (rows.empty()) {
-    result->resize(resultOffset);
-    return;
-  }
-
-  data_->extractColumnResident(
+  extractRowsToVector(
       rows.data(),
       rows.size(),
       physicalColumn,
       resultOffset,
       result,
       exactSize);
+}
+
+void BmWindowPartition::extractRowsToVector(
+    const char* const* rows,
+    vector_size_t numRows,
+    int32_t physicalColumn,
+    vector_size_t resultOffset,
+    const VectorPtr& result,
+    bool exactSize) const {
+  if (numRows == 0) {
+    result->resize(resultOffset);
+    return;
+  }
+
+  data_->extractColumnResident(
+      rows, numRows, physicalColumn, resultOffset, result, exactSize);
 }
 
 void BmWindowPartition::extractColumn(
@@ -311,6 +332,17 @@ void BmWindowPartition::extractColumn(
     vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) const {
+  if (ensureAccessMode() == RowAccessMode::kResidentRows) {
+    extractRowsToVector(
+        residentRowsData(partitionOffset),
+        numRows,
+        inputMapping_[columnIndex],
+        resultOffset,
+        result,
+        exactSize);
+    return;
+  }
+
   auto rows = loadRows(partitionOffset, numRows);
   extractRowsToVector(
       rows, inputMapping_[columnIndex], resultOffset, result, exactSize);
@@ -322,7 +354,8 @@ void BmWindowPartition::extractColumn(
     vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) const {
-  result->resize(resultOffset + rowNumbers.size());
+  const auto resultSize = resultOffset + rowNumbers.size();
+  result->resize(resultSize);
 
   std::vector<const char*> selectedRows;
   std::vector<vector_size_t> selectedPositions;
@@ -336,20 +369,71 @@ void BmWindowPartition::extractColumn(
     selectedRanges.reserve(rowNumbers.size());
   }
 
-  for (auto i = 0; i < rowNumbers.size(); ++i) {
-    const auto rowNumber = rowNumbers[i];
-    if (rowNumber < 0) {
-      result->setNull(resultOffset + i, true);
-      continue;
+  VectorPtr repeatedValue;
+  auto copyRepeatedRow = [&](vector_size_t position,
+                             vector_size_t rowNumber,
+                             vector_size_t runRows) {
+    if (!repeatedValue) {
+      repeatedValue = BaseVector::create(logicalTypes_[columnIndex], 1, pool_);
+    } else {
+      BaseVector::prepareForReuse(repeatedValue, 1);
     }
-    BOLT_CHECK_LT(rowNumber, this->numRows());
-    selectedPositions.push_back(i);
+    extractColumn(columnIndex, rowNumber, 1, 0, repeatedValue, false);
+    for (auto offset = 0; offset < runRows; ++offset) {
+      result->copy(repeatedValue.get(), resultOffset + position + offset, 0, 1);
+    }
+  };
+
+  auto addFallbackRow = [&](vector_size_t position, vector_size_t rowNumber) {
+    selectedPositions.push_back(position);
     if (mode == RowAccessMode::kResidentRows) {
       selectedRows.push_back(residentRows_[rowNumber]);
     } else {
       auto ranges = getSegmentRanges(rowNumber, 1);
       selectedRanges.insert(selectedRanges.end(), ranges.begin(), ranges.end());
     }
+  };
+
+  for (auto i = 0; i < rowNumbers.size();) {
+    const auto rowNumber = rowNumbers[i];
+    if (rowNumber < 0) {
+      result->setNull(resultOffset + i, true);
+      ++i;
+      continue;
+    }
+    BOLT_CHECK_LT(rowNumber, this->numRows());
+
+    vector_size_t repeatRows = 1;
+    while (i + repeatRows < rowNumbers.size() &&
+           rowNumbers[i + repeatRows] == rowNumber) {
+      ++repeatRows;
+    }
+    if (repeatRows >= kDirectRowNumberRunRows) {
+      copyRepeatedRow(i, rowNumber, repeatRows);
+      i += repeatRows;
+      continue;
+    }
+
+    vector_size_t runRows = 1;
+    while (i + runRows < rowNumbers.size()) {
+      const auto nextRowNumber = rowNumbers[i + runRows];
+      if (nextRowNumber < 0 || nextRowNumber != rowNumber + runRows) {
+        break;
+      }
+      BOLT_CHECK_LT(nextRowNumber, this->numRows());
+      ++runRows;
+    }
+
+    if (runRows >= kDirectRowNumberRunRows) {
+      extractColumn(
+          columnIndex, rowNumber, runRows, resultOffset + i, result, false);
+      result->resize(resultSize, false);
+    } else {
+      for (auto offset = 0; offset < runRows; ++offset) {
+        addFallbackRow(i + offset, rowNumber + offset);
+      }
+    }
+    i += runRows;
   }
 
   if (mode == RowAccessMode::kBulkRead && !selectedRanges.empty()) {
@@ -376,6 +460,52 @@ void BmWindowPartition::extractColumn(
       result->copy(temp.get(), resultOffset + selectedPositions[i], i, 1);
     }
   }
+  result->resize(resultSize, false);
+}
+
+bool BmWindowPartition::copyCachedNulls(
+    int32_t physicalColumn,
+    vector_size_t partitionOffset,
+    vector_size_t numRows,
+    const BufferPtr& nullsBuffer) const {
+  if (physicalColumn >= nullsCache_.size()) {
+    return false;
+  }
+  const auto& cache = nullsCache_[physicalColumn];
+  if (!cache.valid || cache.partitionOffset != partitionOffset ||
+      cache.numRows != numRows) {
+    return false;
+  }
+
+  bits::copyBits(
+      cache.nulls->as<uint64_t>(),
+      0,
+      nullsBuffer->asMutable<uint64_t>(),
+      0,
+      numRows);
+  return true;
+}
+
+void BmWindowPartition::cacheNulls(
+    int32_t physicalColumn,
+    vector_size_t partitionOffset,
+    vector_size_t numRows,
+    const BufferPtr& nullsBuffer) const {
+  if (numRows < kCachedNullsMinRows || physicalColumn >= nullsCache_.size()) {
+    return;
+  }
+
+  auto& cache = nullsCache_[physicalColumn];
+  cache.valid = true;
+  cache.partitionOffset = partitionOffset;
+  cache.numRows = numRows;
+  cache.nulls = AlignedBuffer::allocate<bool>(numRows, pool_);
+  bits::copyBits(
+      nullsBuffer->as<uint64_t>(),
+      0,
+      cache.nulls->asMutable<uint64_t>(),
+      0,
+      numRows);
 }
 
 void BmWindowPartition::extractNulls(
@@ -384,9 +514,48 @@ void BmWindowPartition::extractNulls(
     vector_size_t numRows,
     const BufferPtr& nullsBuffer) const {
   BOLT_DCHECK(nullsBuffer->size() >= bits::nbytes(numRows));
+  const auto physicalColumn = inputMapping_[columnIndex];
+  if (copyCachedNulls(physicalColumn, partitionOffset, numRows, nullsBuffer)) {
+    return;
+  }
+
   auto* rawNulls = nullsBuffer->asMutable<uint64_t>();
   bits::fillBits(rawNulls, 0, numRows, false);
   if (numRows == 0) {
+    return;
+  }
+
+  if (ensureAccessMode() == RowAccessMode::kResidentRows) {
+    BufferPtr batchNulls;
+    vector_size_t offset = 0;
+    while (offset < numRows) {
+      const auto batchRows =
+          std::min<vector_size_t>(kExtractNullsBatchRows, numRows - offset);
+      recordExtractNullBatch(batchRows);
+
+      if (offset == 0 && batchRows == numRows) {
+        data_->extractNullsResident(
+            residentRowsData(partitionOffset),
+            batchRows,
+            physicalColumn,
+            nullsBuffer);
+      } else {
+        if (!batchNulls) {
+          batchNulls =
+              AlignedBuffer::allocate<bool>(kExtractNullsBatchRows, pool_);
+        }
+        data_->extractNullsResident(
+            residentRowsData(partitionOffset + offset),
+            batchRows,
+            physicalColumn,
+            batchNulls);
+        bits::copyBits(
+            batchNulls->as<uint64_t>(), 0, rawNulls, offset, batchRows);
+      }
+
+      offset += batchRows;
+    }
+    cacheNulls(physicalColumn, partitionOffset, numRows, nullsBuffer);
     return;
   }
 
@@ -400,20 +569,21 @@ void BmWindowPartition::extractNulls(
 
     if (offset == 0 && batchRows == numRows) {
       data_->extractNullsResident(
-          rows.data(), rows.size(), inputMapping_[columnIndex], nullsBuffer);
+          rows.data(), rows.size(), physicalColumn, nullsBuffer);
     } else {
       if (!batchNulls) {
         batchNulls =
             AlignedBuffer::allocate<bool>(kExtractNullsBatchRows, pool_);
       }
       data_->extractNullsResident(
-          rows.data(), rows.size(), inputMapping_[columnIndex], batchNulls);
+          rows.data(), rows.size(), physicalColumn, batchNulls);
       bits::copyBits(
           batchNulls->as<uint64_t>(), 0, rawNulls, offset, batchRows);
     }
 
     offset += batchRows;
   }
+  cacheNulls(physicalColumn, partitionOffset, numRows, nullsBuffer);
 }
 
 void BmWindowPartition::extractColumns(
@@ -423,6 +593,20 @@ void BmWindowPartition::extractColumns(
     folly::Range<const VectorPtr*> results,
     bool exactSize) const {
   BOLT_CHECK_EQ(columnIndices.size(), results.size());
+  if (ensureAccessMode() == RowAccessMode::kResidentRows) {
+    const auto* rows = residentRowsData(partitionOffset);
+    for (auto i = 0; i < columnIndices.size(); ++i) {
+      extractRowsToVector(
+          rows,
+          numRows,
+          inputMapping_[columnIndices[i]],
+          0,
+          results[i],
+          exactSize);
+    }
+    return;
+  }
+
   auto rows = loadRows(partitionOffset, numRows);
   for (auto i = 0; i < columnIndices.size(); ++i) {
     extractRowsToVector(

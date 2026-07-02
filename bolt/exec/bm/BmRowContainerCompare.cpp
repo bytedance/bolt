@@ -39,8 +39,7 @@ int32_t compareStringViewsAsc(StringView left, StringView right) {
       StringView::kPrefixSize;
   if (suffixSize <= 0) {
     return normalizeCompare(
-        static_cast<int32_t>(left.size()) -
-        static_cast<int32_t>(right.size()));
+        static_cast<int32_t>(left.size()) - static_cast<int32_t>(right.size()));
   }
 
   if (left.isInline() && right.isInline()) {
@@ -54,8 +53,7 @@ int32_t compareStringViewsAsc(StringView left, StringView right) {
       return leftInlined < rightInlined ? -1 : 1;
     }
     return normalizeCompare(
-        static_cast<int32_t>(left.size()) -
-        static_cast<int32_t>(right.size()));
+        static_cast<int32_t>(left.size()) - static_cast<int32_t>(right.size()));
   }
 
   return normalizeCompare(
@@ -64,10 +62,8 @@ int32_t compareStringViewsAsc(StringView left, StringView right) {
 }
 
 template <TypeKind Kind>
-int32_t compareScalarValue(
-    const char* left,
-    const char* right,
-    const TypePtr& type) {
+int32_t
+compareScalarValue(const char* left, const char* right, const TypePtr& type) {
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     const auto leftValue = *reinterpret_cast<const StringView*>(left);
     const auto rightValue = *reinterpret_cast<const StringView*>(right);
@@ -93,15 +89,32 @@ int32_t BmRowContainer::compare(
     const char* right,
     int32_t column,
     CompareFlags flags) {
-  BOLT_DCHECK_LT(column, layout_.columns().size());
-  const auto& layout = layout_.column(column);
-  if (FOLLY_LIKELY(!layout.nullable)) {
-    auto result = compareNonNull(left, right, column);
+  return compare(left, right, column, column, flags);
+}
+
+int32_t BmRowContainer::compare(
+    const char* left,
+    const char* right,
+    int32_t leftColumn,
+    int32_t rightColumn,
+    CompareFlags flags) {
+  BOLT_DCHECK_LT(leftColumn, layout_.columns().size());
+  BOLT_DCHECK_LT(rightColumn, layout_.columns().size());
+  BOLT_DCHECK_EQ(
+      types_[leftColumn]->kind(),
+      types_[rightColumn]->kind(),
+      "Cannot compare BM columns with different physical kinds: {} vs {}",
+      types_[leftColumn]->toString(),
+      types_[rightColumn]->toString());
+  const auto& leftLayout = layout_.column(leftColumn);
+  const auto& rightLayout = layout_.column(rightColumn);
+  if (FOLLY_LIKELY(!leftLayout.nullable && !rightLayout.nullable)) {
+    auto result = compareNonNull(left, right, leftColumn, rightColumn);
     return flags.ascending ? result : -result;
   }
 
-  const auto leftNull = layout_.isNull(left, column);
-  const auto rightNull = layout_.isNull(right, column);
+  const auto leftNull = layout_.isNull(left, leftColumn);
+  const auto rightNull = layout_.isNull(right, rightColumn);
   if (FOLLY_UNLIKELY(leftNull || rightNull)) {
     if (leftNull && rightNull) {
       return 0;
@@ -110,7 +123,7 @@ int32_t BmRowContainer::compare(
     return flags.nullsFirst ? result : -result;
   }
 
-  auto result = compareNonNull(left, right, column);
+  auto result = compareNonNull(left, right, leftColumn, rightColumn);
   if (!flags.ascending) {
     result = -result;
   }
@@ -135,11 +148,12 @@ int32_t BmRowContainer::compareRows(
 int32_t BmRowContainer::compareNonNull(
     const char* left,
     const char* right,
-    int32_t column) const {
-  const auto* l = layout_.valueAddress(left, column);
-  const auto* r = layout_.valueAddress(right, column);
+    int32_t leftColumn,
+    int32_t rightColumn) const {
+  const auto* l = layout_.valueAddress(left, leftColumn);
+  const auto* r = layout_.valueAddress(right, rightColumn);
   return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      compareScalarValue, types_[column]->kind(), l, r, types_[column]);
+      compareScalarValue, types_[leftColumn]->kind(), l, r, types_[leftColumn]);
 }
 
 } // namespace bytedance::bolt::exec::bm

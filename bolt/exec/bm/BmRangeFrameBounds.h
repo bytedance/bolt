@@ -32,8 +32,8 @@ class BmRangeFrameBounds {
       const SearchParams<BoundTest>& params,
       vector_size_t start,
       column_index_t orderByPhysicalColumn,
-      const VectorPtr& frameValues,
-      vector_size_t frameValueRow);
+      column_index_t framePhysicalColumn,
+      const char* frameRow);
 
   template <typename BoundTest>
   static void updateKRangeFrameBounds(

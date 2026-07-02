@@ -232,7 +232,8 @@ class StreamingWindowBuildBenchmark : public VectorTestBase {
   BenchmarkResult run(
       const BenchmarkCase& benchmarkCase,
       WindowBuildType buildType,
-      const std::string& buildName) {
+      const std::string& buildName,
+      folly::BenchmarkSuspender* suspender = nullptr) {
     const auto& data = inputForProfile(benchmarkCase.input);
     core::PlanNodeId windowId;
     auto plan = PlanBuilder()
@@ -257,9 +258,15 @@ class StreamingWindowBuildBenchmark : public VectorTestBase {
     }
 
     std::shared_ptr<Task> task;
+    if (suspender != nullptr) {
+      suspender->dismiss();
+    }
     const auto startUs = getCurrentTimeMicro();
     const auto outputRows = query.runWithoutResults(task);
     const auto wallUs = getCurrentTimeMicro() - startUs;
+    if (suspender != nullptr) {
+      suspender->rehire();
+    }
 
     const auto planStats = toPlanStats(task->taskStats());
     const auto& stats = planStats.at(windowId);
@@ -590,12 +597,14 @@ int main(int argc, char** argv) {
         benchmarkCase.name + "_streaming",
         [&benchmark, &benchmarkCase, &results](unsigned int iters) {
           for (auto i = 0U; i < iters; ++i) {
+            folly::BenchmarkSuspender suspender;
             recordResult(
                 results,
                 benchmark.run(
                     benchmarkCase,
                     WindowBuildType::kSortWindowBuild,
-                    "StreamingWindowBuild"));
+                    "StreamingWindowBuild",
+                    &suspender));
           }
           return iters;
         });
@@ -604,12 +613,14 @@ int main(int argc, char** argv) {
         benchmarkCase.name + "_bm_streaming",
         [&benchmark, &benchmarkCase, &results](unsigned int iters) {
           for (auto i = 0U; i < iters; ++i) {
+            folly::BenchmarkSuspender suspender;
             recordResult(
                 results,
                 benchmark.run(
                     benchmarkCase,
                     WindowBuildType::kBmStreamingWindowBuild,
-                    "BmStreamingWindowBuild"));
+                    "BmStreamingWindowBuild",
+                    &suspender));
           }
           return iters;
         });

@@ -19,8 +19,8 @@ vector_size_t BmRangeFrameBounds::searchFrameValue(
     const SearchParams<BoundTest>& params,
     vector_size_t start,
     column_index_t orderByPhysicalColumn,
-    const VectorPtr& frameValues,
-    vector_size_t frameValueRow) {
+    column_index_t framePhysicalColumn,
+    const char* frameRow) {
   const auto order = partition.sortKeyInfo()[0].second;
   const CompareFlags flags{
       .nullsFirst = order.isNullsFirst(),
@@ -28,12 +28,10 @@ vector_size_t BmRangeFrameBounds::searchFrameValue(
       .equalsOnly = false};
 
   auto checkRow =
-      [&](const VectorPtr& orderValues,
-          vector_size_t row,
+      [&](const char* orderRow,
           vector_size_t logicalRow) -> std::optional<vector_size_t> {
-    const auto compareResult =
-        orderValues->compare(frameValues.get(), row, frameValueRow, flags)
-            .value();
+    const auto compareResult = partition.data_->compare(
+        orderRow, frameRow, orderByPhysicalColumn, framePhysicalColumn, flags);
 
     if (compareResult == 0 && params.firstMatch) {
       return logicalRow;
@@ -53,11 +51,17 @@ vector_size_t BmRangeFrameBounds::searchFrameValue(
           scan == start ? kRangeSearchInitialBatchRows : kWindowReadBatchRows;
       const auto batchRows =
           std::min<vector_size_t>(batchLimit, partition.numRows() - scan);
-      auto rows = partition.loadRows(scan, batchRows);
-      auto orderValues =
-          partition.extractColumnFromRows(rows, orderByPhysicalColumn);
+      std::vector<const char*> loadedRows;
+      const char* const* rows;
+      if (partition.ensureAccessMode() ==
+          BmWindowPartition::RowAccessMode::kResidentRows) {
+        rows = partition.residentRowsData(scan);
+      } else {
+        loadedRows = partition.loadRows(scan, batchRows);
+        rows = loadedRows.data();
+      }
       for (auto i = 0; i < batchRows; ++i) {
-        if (auto bound = checkRow(orderValues, i, scan + i)) {
+        if (auto bound = checkRow(rows[i], scan + i)) {
           return *bound;
         }
       }
@@ -71,12 +75,18 @@ vector_size_t BmRangeFrameBounds::searchFrameValue(
           : kWindowReadBatchRows;
       const auto scanBegin = scanEnd > batchLimit ? scanEnd - batchLimit : 0;
       const auto batchRows = scanEnd - scanBegin;
-      auto rows = partition.loadRows(scanBegin, batchRows);
-      auto orderValues =
-          partition.extractColumnFromRows(rows, orderByPhysicalColumn);
+      std::vector<const char*> loadedRows;
+      const char* const* rows;
+      if (partition.ensureAccessMode() ==
+          BmWindowPartition::RowAccessMode::kResidentRows) {
+        rows = partition.residentRowsData(scanBegin);
+      } else {
+        loadedRows = partition.loadRows(scanBegin, batchRows);
+        rows = loadedRows.data();
+      }
       for (int32_t i = batchRows - 1; i >= 0; --i) {
         const auto logicalRow = scanBegin + i;
-        if (auto bound = checkRow(orderValues, i, logicalRow)) {
+        if (auto bound = checkRow(rows[i], logicalRow)) {
           return *bound;
         }
       }
@@ -97,17 +107,29 @@ void BmRangeFrameBounds::updateKRangeFrameBounds(
     const vector_size_t* rawPeerBounds,
     vector_size_t* rawFrameBounds) {
   const auto orderByPhysicalColumn = partition.sortKeyInfo()[0].first;
-  auto frameValues = BaseVector::create(
-      partition.logicalTypes_[frameColumn], numRows, partition.pool_);
-  partition.extractColumn(frameColumn, startRow, numRows, 0, frameValues);
+  const auto framePhysicalColumn = partition.inputMapping_[frameColumn];
+  std::vector<const char*> loadedFrameRows;
+  const char* const* frameRows;
+  if (partition.ensureAccessMode() ==
+      BmWindowPartition::RowAccessMode::kResidentRows) {
+    frameRows = partition.residentRowsData(startRow);
+  } else {
+    loadedFrameRows = partition.loadRows(startRow, numRows);
+    frameRows = loadedFrameRows.data();
+  }
 
   for (auto i = 0; i < numRows; ++i) {
     const auto currentRow = startRow + i;
-    if (frameValues->isNullAt(i)) {
+    if (partition.data_->isNull(frameRows[i], framePhysicalColumn)) {
       rawFrameBounds[i] = rawPeerBounds[i];
     } else {
       rawFrameBounds[i] = searchFrameValue(
-          partition, params, currentRow, orderByPhysicalColumn, frameValues, i);
+          partition,
+          params,
+          currentRow,
+          orderByPhysicalColumn,
+          framePhysicalColumn,
+          frameRows[i]);
     }
   }
 }
