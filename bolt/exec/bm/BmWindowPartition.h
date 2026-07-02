@@ -3,6 +3,7 @@
 #include "bolt/exec/WindowPartition.h"
 #include "bolt/exec/bm/BmRowContainer.h"
 
+#include <memory>
 #include <optional>
 
 namespace bytedance::bolt::exec::window {
@@ -39,6 +40,15 @@ void resetBmWindowPartitionTestStats();
 
 BmWindowPartitionTestStats bmWindowPartitionTestStats();
 
+struct BmWindowPartitionSchema {
+  std::vector<TypePtr> logicalTypes;
+  std::vector<TypePtr> physicalTypes;
+};
+
+std::shared_ptr<const BmWindowPartitionSchema> makeBmWindowPartitionSchema(
+    std::vector<TypePtr> logicalTypes,
+    const std::vector<column_index_t>& inputMapping);
+
 class BmWindowPartition : public exec::WindowPartition {
  private:
   enum class RowAccessMode {
@@ -53,6 +63,15 @@ class BmWindowPartition : public exec::WindowPartition {
       exec::bm::BmRowContainer* data,
       memory::MemoryPool* pool,
       std::vector<TypePtr> logicalTypes,
+      BmWindowPartitionDescriptor descriptor,
+      const std::vector<column_index_t>& inputMapping,
+      const std::vector<std::pair<column_index_t, core::SortOrder>>&
+          sortKeyInfo);
+
+  BmWindowPartition(
+      exec::bm::BmRowContainer* data,
+      memory::MemoryPool* pool,
+      std::shared_ptr<const BmWindowPartitionSchema> schema,
       BmWindowPartitionDescriptor descriptor,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
@@ -115,14 +134,6 @@ class BmWindowPartition : public exec::WindowPartition {
 
  private:
   friend class BmRangeFrameBounds;
-
-  FOLLY_ALWAYS_INLINE void initializePhysicalTypes() {
-    physicalTypes_.resize(logicalTypes_.size());
-    for (auto logical = 0; logical < inputMapping_.size(); ++logical) {
-      BOLT_CHECK_LT(inputMapping_[logical], physicalTypes_.size());
-      physicalTypes_[inputMapping_[logical]] = logicalTypes_[logical];
-    }
-  }
 
   bool canBulkReadPartition() const;
 
@@ -191,8 +202,7 @@ class BmWindowPartition : public exec::WindowPartition {
 
   exec::bm::BmRowContainer* data_;
   memory::MemoryPool* pool_;
-  std::vector<TypePtr> logicalTypes_;
-  std::vector<TypePtr> physicalTypes_;
+  std::shared_ptr<const BmWindowPartitionSchema> schema_;
   mutable std::vector<CachedNulls> nullsCache_;
   mutable std::vector<char*> residentRows_;
   std::vector<exec::bm::SegmentRowRange> rowRanges_;

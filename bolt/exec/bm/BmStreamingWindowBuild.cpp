@@ -12,6 +12,8 @@ namespace bytedance::bolt::exec::window {
 
 namespace {
 
+constexpr vector_size_t kMinRowsPerFrontPop = 4096;
+
 std::vector<bool> makeNullableColumns(size_t size) {
   return std::vector<bool>(size, true);
 }
@@ -39,7 +41,9 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
           makeNullableColumns(inputType_->size()),
           bufferManager_,
           memory::bm::MemoryTag::kWindow)),
-      logicalTypes_(windowNode->inputType()->children()) {
+      partitionSchema_(makeBmWindowPartitionSchema(
+          windowNode->inputType()->children(),
+          inversedInputChannels_)) {
   boundaryKeyColumns_.reserve(partitionKeyInfo_.size() + sortKeyInfo_.size());
   auto addBoundaryKeyColumn = [&](int32_t column) {
     if (std::find(
@@ -328,6 +332,7 @@ void BmStreamingWindowBuild::spillActiveRows() {
     return;
   }
 
+  flushReleasedRows(true);
   copyPreviousRowBeforeSpill();
   markAllDescriptorsSpilled();
   clearAllResidentRowPointers();
@@ -352,17 +357,28 @@ void BmStreamingWindowBuild::spillActiveRows() {
   activeRows_ = 0;
 }
 
-void BmStreamingWindowBuild::releasePartitionIfConsumed() {
-  if (returnedPartitionRows_ == 0 || !returnedPartition_.expired()) {
+void BmStreamingWindowBuild::flushReleasedRows(bool force) {
+  if (releasedRowsPendingPop_ == 0) {
     return;
   }
+  if (!force && releasedRowsPendingPop_ < kMinRowsPerFrontPop) {
+    return;
+  }
+  bmData_->popFrontRows(releasedRowsPendingPop_);
+  releasedRowsPendingPop_ = 0;
+}
 
-  bmData_->popFrontRows(returnedPartitionRows_);
-  activeRows_ = returnedActiveRows_ >= activeRows_
-      ? 0
-      : (activeRows_ - returnedActiveRows_);
-  returnedPartitionRows_ = 0;
-  returnedActiveRows_ = 0;
+void BmStreamingWindowBuild::releasePartitionIfConsumed(bool force) {
+  if (returnedPartitionRows_ != 0 && returnedPartition_.expired()) {
+    releasedRowsPendingPop_ += returnedPartitionRows_;
+    activeRows_ = returnedActiveRows_ >= activeRows_
+        ? 0
+        : (activeRows_ - returnedActiveRows_);
+    returnedPartitionRows_ = 0;
+    returnedActiveRows_ = 0;
+  }
+
+  flushReleasedRows(force);
 }
 
 void BmStreamingWindowBuild::addInput(RowVectorPtr input) {
@@ -398,7 +414,7 @@ void BmStreamingWindowBuild::addInput(RowVectorPtr input) {
 }
 
 void BmStreamingWindowBuild::spill() {
-  releasePartitionIfConsumed();
+  releasePartitionIfConsumed(true);
   if (returnedPartitionRows_ != 0) {
     if (auto partition = returnedPartition_.lock()) {
       if (auto bmPartition =
@@ -450,7 +466,7 @@ std::shared_ptr<exec::WindowPartition> BmStreamingWindowBuild::nextPartition() {
   auto partition = std::make_shared<BmWindowPartition>(
       bmData_.get(),
       pool_,
-      logicalTypes_,
+      partitionSchema_,
       std::move(descriptor),
       inversedInputChannels_,
       sortKeyInfo_);
@@ -464,6 +480,7 @@ void BmStreamingWindowBuild::finish() {
   returnedPartition_.reset();
   returnedPartitionRows_ = 0;
   returnedActiveRows_ = 0;
+  releasedRowsPendingPop_ = 0;
   previousRow_ = PreviousRow{};
   inputFinished_ = false;
   activeRows_ = 0;

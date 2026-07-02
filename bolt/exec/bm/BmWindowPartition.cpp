@@ -90,6 +90,20 @@ BmWindowPartitionTestStats bmWindowPartitionTestStats() {
   return testStats().copy();
 }
 
+std::shared_ptr<const BmWindowPartitionSchema> makeBmWindowPartitionSchema(
+    std::vector<TypePtr> logicalTypes,
+    const std::vector<column_index_t>& inputMapping) {
+  auto schema = std::make_shared<BmWindowPartitionSchema>();
+  schema->logicalTypes = std::move(logicalTypes);
+  schema->physicalTypes.resize(schema->logicalTypes.size());
+  for (auto logical = 0; logical < inputMapping.size(); ++logical) {
+    BOLT_CHECK_LT(inputMapping[logical], schema->physicalTypes.size());
+    schema->physicalTypes[inputMapping[logical]] =
+        schema->logicalTypes[logical];
+  }
+  return schema;
+}
+
 BmWindowPartition::BmWindowPartition(
     exec::bm::BmRowContainer* data,
     memory::MemoryPool* pool,
@@ -97,10 +111,25 @@ BmWindowPartition::BmWindowPartition(
     BmWindowPartitionDescriptor descriptor,
     const std::vector<column_index_t>& inputMapping,
     const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    : BmWindowPartition(
+          data,
+          pool,
+          makeBmWindowPartitionSchema(std::move(logicalTypes), inputMapping),
+          std::move(descriptor),
+          inputMapping,
+          sortKeyInfo) {}
+
+BmWindowPartition::BmWindowPartition(
+    exec::bm::BmRowContainer* data,
+    memory::MemoryPool* pool,
+    std::shared_ptr<const BmWindowPartitionSchema> schema,
+    BmWindowPartitionDescriptor descriptor,
+    const std::vector<column_index_t>& inputMapping,
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
     : WindowPartition(inputMapping, sortKeyInfo),
       data_(data),
       pool_(pool),
-      logicalTypes_(std::move(logicalTypes)),
+      schema_(std::move(schema)),
       residentRows_(std::move(descriptor.residentRows)),
       rowRanges_(std::move(descriptor.ranges)),
       segmentIds_(
@@ -111,7 +140,8 @@ BmWindowPartition::BmWindowPartition(
       peerBoundaryMode_(descriptor.peerBoundaryMode) {
   BOLT_CHECK_NOT_NULL(data_);
   BOLT_CHECK_NOT_NULL(pool_);
-  BOLT_CHECK_EQ(logicalTypes_.size(), inputMapping_.size());
+  BOLT_CHECK_NOT_NULL(schema_);
+  BOLT_CHECK_EQ(schema_->logicalTypes.size(), inputMapping_.size());
   if (!residentRows_.empty()) {
     BOLT_CHECK_EQ(
         residentRows_.size(),
@@ -132,7 +162,6 @@ BmWindowPartition::BmWindowPartition(
       "Range row count {} must match partition row count {}",
       rangeRows,
       numRows_);
-  initializePhysicalTypes();
 }
 
 bool BmWindowPartition::canBulkReadPartition() const {
@@ -270,7 +299,8 @@ VectorPtr BmWindowPartition::extractColumnFromRows(
     const std::vector<const char*>& rows,
     int32_t physicalColumn) const {
   auto result =
-      BaseVector::create(physicalTypes_[physicalColumn], rows.size(), pool_);
+      BaseVector::create(
+          schema_->physicalTypes[physicalColumn], rows.size(), pool_);
   if (!rows.empty()) {
     data_->extractColumnResident(
         rows.data(), rows.size(), physicalColumn, result);
@@ -407,7 +437,8 @@ void BmWindowPartition::extractColumn(
                              vector_size_t rowNumber,
                              vector_size_t runRows) {
     if (!repeatedValue) {
-      repeatedValue = BaseVector::create(logicalTypes_[columnIndex], 1, pool_);
+      repeatedValue =
+          BaseVector::create(schema_->logicalTypes[columnIndex], 1, pool_);
     } else {
       BaseVector::prepareForReuse(repeatedValue, 1);
     }
@@ -482,7 +513,9 @@ void BmWindowPartition::extractColumn(
 
   if (!selectedRows.empty()) {
     auto temp = BaseVector::create(
-        logicalTypes_[columnIndex], selectedRows.size(), result->pool());
+        schema_->logicalTypes[columnIndex],
+        selectedRows.size(),
+        result->pool());
     data_->extractColumnResident(
         selectedRows.data(),
         selectedRows.size(),
@@ -524,11 +557,12 @@ void BmWindowPartition::cacheNulls(
     vector_size_t partitionOffset,
     vector_size_t numRows,
     const BufferPtr& nullsBuffer) const {
-  if (numRows < kCachedNullsMinRows || physicalColumn >= physicalTypes_.size()) {
+  if (numRows < kCachedNullsMinRows ||
+      physicalColumn >= schema_->physicalTypes.size()) {
     return;
   }
   if (nullsCache_.empty()) {
-    nullsCache_.resize(physicalTypes_.size());
+    nullsCache_.resize(schema_->physicalTypes.size());
   }
 
   auto& cache = nullsCache_[physicalColumn];
