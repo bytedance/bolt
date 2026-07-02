@@ -36,6 +36,7 @@
 #include <stdexcept>
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/simd.h"
 #include "bolt/type/HugeInt.h"
@@ -2412,18 +2413,13 @@ arrow::Status BoltShuffleWriter::tryEvictComposite() {
   return arrow::Status::OK();
 }
 
-arrow::MemoryPool* BoltShuffleWriter::getSpillArrowPool(
+std::shared_ptr<arrow::MemoryPool> BoltShuffleWriter::getSpillArrowPool(
     arrow::MemoryPool* pool) {
   if (dynamic_cast<BoltArrowMemoryPool*>(pool) != nullptr) {
-    // If the pool is BoltArrowMemoryPool, shuffle is offload as bolt operator
-    // Keep the shared_ptr alive for process lifetime to avoid shutdown-time
-    // UAF.
-    static auto* spillPool = new std::shared_ptr<arrow::MemoryPool>(
-        std::make_shared<BoltArrowMemoryPool>(
-            bytedance::bolt::memory::spillMemoryPool()));
-    return spillPool->get();
+    return std::make_shared<BoltArrowMemoryPool>(
+        bytedance::bolt::memory::spillMemoryPool());
   } else {
-    return pool;
+    return std::shared_ptr<arrow::MemoryPool>(pool, [](arrow::MemoryPool*) {});
   }
 }
 

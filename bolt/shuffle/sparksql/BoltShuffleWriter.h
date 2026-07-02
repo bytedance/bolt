@@ -153,6 +153,28 @@ class BoltShuffleWriter : public ShuffleWriter {
     kBinaryLengthBufferIndex = kFixedWidthValueBufferIndex
   };
 
+  BoltShuffleWriter(
+      ShuffleWriterOptions options,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* pool,
+      std::shared_ptr<arrow::MemoryPool> spillPool)
+      : ShuffleWriter(
+            options.partitionWriterOptions.numPartitions,
+            PartitionWriter::create(
+                options.partitionWriterOptions,
+                spillPool.get()),
+            options,
+            pool,
+            spillPool),
+        boltPool_(std::move(boltPool)),
+        spillArrowPool_(spillPool.get()),
+        shuffleCheckDistribution_(
+            std::clamp(options.shuffleCheckRatio, 0.0, 1.0)) {
+    arenas_.resize(options.partitionWriterOptions.numPartitions);
+    variableMemoryUsage_.resize(
+        options.partitionWriterOptions.numPartitions, 0);
+  }
+
  public:
   struct BinaryBuf {
     BinaryBuf(
@@ -272,27 +294,18 @@ class BoltShuffleWriter : public ShuffleWriter {
   // Returns a shared_ptr to the Arrow memory pool used for spilling.
   // If shuffle offload is enabled, it returns a wrapper of spillMemoryPool(),
   // otherwise it returns the original Arrow memory pool.
-  static arrow::MemoryPool* getSpillArrowPool(arrow::MemoryPool* pool);
+  static std::shared_ptr<arrow::MemoryPool> getSpillArrowPool(
+      arrow::MemoryPool* pool);
 
   BoltShuffleWriter(
       ShuffleWriterOptions options,
       bytedance::bolt::memory::MemoryPool* boltPool,
       arrow::MemoryPool* pool)
-      : ShuffleWriter(
-            options.partitionWriterOptions.numPartitions,
-            PartitionWriter::create(
-                options.partitionWriterOptions,
-                getSpillArrowPool(pool)),
-            options,
-            pool),
-        boltPool_(std::move(boltPool)),
-        spillArrowPool_(getSpillArrowPool(pool)),
-        shuffleCheckDistribution_(
-            std::clamp(options.shuffleCheckRatio, 0.0, 1.0)) {
-    arenas_.resize(options.partitionWriterOptions.numPartitions);
-    variableMemoryUsage_.resize(
-        options.partitionWriterOptions.numPartitions, 0);
-  }
+      : BoltShuffleWriter(
+            std::move(options),
+            boltPool,
+            pool,
+            getSpillArrowPool(pool)) {}
 
   bytedance::bolt::memory::MemoryPool* boltPool() const {
     return boltPool_;
