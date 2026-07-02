@@ -31,6 +31,8 @@ struct BmWindowPartitionTestStats {
   uint64_t loadedRows{0};
   uint64_t maxLoadedRows{0};
   uint64_t reclaimReadChunksCalls{0};
+  uint64_t rowNumberResidentExtractCalls{0};
+  uint64_t rowNumberResidentExtractRows{0};
 };
 
 void resetBmWindowPartitionTestStats();

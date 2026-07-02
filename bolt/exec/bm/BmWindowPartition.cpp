@@ -42,17 +42,37 @@ void recordReclaimReadChunks() {
   testStats().withWLock([&](auto& stats) { ++stats.reclaimReadChunksCalls; });
 }
 
+void recordRowNumberResidentExtract(vector_size_t numRows) {
+  testStats().withWLock([&](auto& stats) {
+    ++stats.rowNumberResidentExtractCalls;
+    stats.rowNumberResidentExtractRows += numRows;
+  });
+}
+
 std::vector<exec::bm::SegmentId> collectSegmentIds(
     const std::vector<exec::bm::SegmentRowRange>& ranges) {
   std::vector<exec::bm::SegmentId> segments;
-  std::unordered_set<exec::bm::SegmentId> seen;
   segments.reserve(ranges.size());
-  seen.reserve(ranges.size());
+  if (ranges.size() > 8) {
+    std::unordered_set<exec::bm::SegmentId> seen;
+    seen.reserve(ranges.size());
+    for (const auto& range : ranges) {
+      if (range.count == 0) {
+        continue;
+      }
+      if (seen.insert(range.segment).second) {
+        segments.push_back(range.segment);
+      }
+    }
+    return segments;
+  }
+
   for (const auto& range : ranges) {
     if (range.count == 0) {
       continue;
     }
-    if (seen.insert(range.segment).second) {
+    if (std::find(segments.begin(), segments.end(), range.segment) ==
+        segments.end()) {
       segments.push_back(range.segment);
     }
   }
@@ -83,7 +103,9 @@ BmWindowPartition::BmWindowPartition(
       logicalTypes_(std::move(logicalTypes)),
       residentRows_(std::move(descriptor.residentRows)),
       rowRanges_(std::move(descriptor.ranges)),
-      segmentIds_(collectSegmentIds(rowRanges_)),
+      segmentIds_(
+          residentRows_.empty() ? collectSegmentIds(rowRanges_)
+                                : std::vector<exec::bm::SegmentId>{}),
       peerStartBits_(std::move(descriptor.peerStartBits)),
       numRows_(descriptor.numRows),
       peerBoundaryMode_(descriptor.peerBoundaryMode) {
@@ -111,7 +133,6 @@ BmWindowPartition::BmWindowPartition(
       rangeRows,
       numRows_);
   initializePhysicalTypes();
-  nullsCache_.resize(physicalTypes_.size());
 }
 
 bool BmWindowPartition::canBulkReadPartition() const {
@@ -364,6 +385,18 @@ void BmWindowPartition::extractColumn(
 
   std::vector<exec::bm::SegmentRowRange> selectedRanges;
   const auto mode = ensureAccessMode();
+  if (mode == RowAccessMode::kResidentRows) {
+    recordRowNumberResidentExtract(rowNumbers.size());
+    data_->extractColumnResident(
+        residentRowsData(0),
+        rowNumbers,
+        inputMapping_[columnIndex],
+        resultOffset,
+        result,
+        exactSize);
+    return;
+  }
+
   if (mode != RowAccessMode::kResidentRows) {
     BOLT_CHECK(!rowRanges_.empty());
     selectedRanges.reserve(rowNumbers.size());
@@ -491,8 +524,11 @@ void BmWindowPartition::cacheNulls(
     vector_size_t partitionOffset,
     vector_size_t numRows,
     const BufferPtr& nullsBuffer) const {
-  if (numRows < kCachedNullsMinRows || physicalColumn >= nullsCache_.size()) {
+  if (numRows < kCachedNullsMinRows || physicalColumn >= physicalTypes_.size()) {
     return;
+  }
+  if (nullsCache_.empty()) {
+    nullsCache_.resize(physicalTypes_.size());
   }
 
   auto& cache = nullsCache_[physicalColumn];
