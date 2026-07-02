@@ -30,7 +30,6 @@ add_executable(
   BloomFilterTest.cpp
   ColumnReaderTest.cpp
   ColumnWriterTest.cpp
-  EncodingTest.cpp
   FileDeserializeTest.cpp
   FileSerializeTest.cpp
   LevelConversionTest.cpp

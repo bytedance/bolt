@@ -591,6 +591,22 @@ class FileWriterImpl : public FileWriter {
     return 0;
   }
 
+  WriterMemoryStats memoryStats() const override {
+    WriterMemoryStats stats;
+    if (row_group_writer_ != nullptr) {
+      stats = row_group_writer_->memory_stats();
+    }
+    stats.writeContextScratchAllocatedBytes =
+        column_write_context_.scratch_allocated_bytes();
+    for (const auto& ctx : parallel_column_write_contexts_) {
+      stats.writeContextScratchAllocatedBytes += ctx.scratch_allocated_bytes();
+    }
+    stats.trackedWriterMemoryBytes = stats.bufferedPageActualMemoryBytes +
+        stats.encoderCurrentBytes + stats.columnScratchAllocatedBytes +
+        stats.writeContextScratchAllocatedBytes;
+    return stats;
+  }
+
  private:
   friend class FileWriter;
 
@@ -714,7 +730,8 @@ Result<std::unique_ptr<FileWriter>> FileWriter::Open(
           std::move(sink),
           schema_node,
           std::move(properties),
-          std::move(metadata)));
+          std::move(metadata),
+          !arrow_properties->use_threads()));
 
   std::unique_ptr<FileWriter> writer;
   auto schema_ptr = std::make_shared<::arrow::Schema>(schema);

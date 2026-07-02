@@ -30,15 +30,20 @@
 
 // Adapted from Apache Arrow.
 
+#include <numeric>
+#include <utility>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "arrow/api.h"
 #include "arrow/testing/gtest_compat.h"
 
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
 #include "bolt/dwio/parquet/arrow/FileWriter.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
+#include "bolt/dwio/parquet/arrow/Writer.h"
 #include "bolt/dwio/parquet/arrow/tests/ColumnReader.h"
 #include "bolt/dwio/parquet/arrow/tests/FileReader.h"
 #include "bolt/dwio/parquet/arrow/tests/TestUtil.h"
@@ -50,6 +55,59 @@ using schema::PrimitiveNode;
 using ::testing::ElementsAre;
 
 namespace test {
+
+// PageBufferArena only accounts for dict/data page buffers, while
+// parquet_block_size also needs to leave room for encoder-side memory.
+constexpr int64_t GetExpectedPageBufferArenaSize(int64_t parquet_block_size) {
+  return parquet_block_size > 0 ? parquet_block_size * 4 / 5 : 0;
+}
+
+std::pair<int64_t, int64_t> MeasureBufferedSharedScratchAfterClosingColumns(
+    ParquetDataPageVersion page_version) {
+  constexpr int64_t kNumRows = 4096;
+  constexpr int64_t kArenaSize = 1 << 20;
+
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .disable_dictionary()
+                          ->compression(Compression::SNAPPY)
+                          ->data_page_version(page_version)
+                          ->data_pagesize(1024)
+                          ->set_parquet_block_size(kArenaSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col0", Repetition::REQUIRED, Type::INT32),
+       PrimitiveNode::Make("col1", Repetition::REQUIRED, Type::INT32)}));
+
+  std::vector<int32_t> values(kNumRows);
+  std::iota(values.begin(), values.end(), 0);
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values.data());
+  row_group_writer->column(0)->Close();
+  const int64_t scratch_after_first_column =
+      row_group_writer->memory_stats().columnScratchAllocatedBytes;
+
+  static_cast<Int32Writer*>(row_group_writer->column(1))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values.data());
+  row_group_writer->column(1)->Close();
+  const int64_t scratch_after_second_column =
+      row_group_writer->memory_stats().columnScratchAllocatedBytes;
+
+  row_group_writer->Close();
+  file_writer->Close();
+
+  return {
+      scratch_after_first_column,
+      scratch_after_second_column,
+  };
+}
 
 template <typename TestType>
 class TestSerialize : public PrimitiveTypedTest<TestType> {
@@ -484,6 +542,534 @@ TEST(TestBufferedRowGroupWriter, MultiPageDisabledDictionary) {
     }
     ASSERT_EQ(kValueCount, total_values_read);
     ASSERT_EQ(values_in, values_out);
+  }
+}
+
+TEST(TestPageBufferArenaIntegration, BufferedAndNonBufferedRowGroupRoundTrip) {
+  constexpr int kNumRows = 2048;
+  constexpr int kPageSize = 512;
+
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .disable_dictionary()
+                          ->data_pagesize(kPageSize)
+                          ->set_parquet_block_size(4096)
+                          ->build();
+  schema::NodeVector fields;
+  fields.push_back(
+      PrimitiveNode::Make("col0", Repetition::REQUIRED, Type::INT32));
+  fields.push_back(
+      PrimitiveNode::Make("col1", Repetition::REQUIRED, Type::INT32));
+  auto schema = std::static_pointer_cast<GroupNode>(
+      GroupNode::Make("schema", Repetition::REQUIRED, fields));
+
+  std::vector<int32_t> values0(kNumRows);
+  std::vector<int32_t> values1(kNumRows);
+  std::iota(values0.begin(), values0.end(), 0);
+  std::iota(values1.begin(), values1.end(), 10'000);
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+
+  auto row_group_writer = file_writer->AppendRowGroup();
+  static_cast<Int32Writer*>(row_group_writer->NextColumn())
+      ->WriteBatch(kNumRows, nullptr, nullptr, values0.data());
+  static_cast<Int32Writer*>(row_group_writer->NextColumn())
+      ->WriteBatch(kNumRows, nullptr, nullptr, values1.data());
+  row_group_writer->Close();
+
+  row_group_writer = file_writer->AppendBufferedRowGroup();
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values0.data());
+  static_cast<Int32Writer*>(row_group_writer->column(1))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values1.data());
+  row_group_writer->Close();
+
+  file_writer->Close();
+  PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
+
+  auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+  auto file_reader = ParquetFileReader::Open(source);
+  ASSERT_EQ(2, file_reader->metadata()->num_row_groups());
+
+  for (int row_group = 0; row_group < 2; ++row_group) {
+    auto rg_reader = file_reader->RowGroup(row_group);
+    for (int col = 0; col < 2; ++col) {
+      std::vector<int32_t> values_out(kNumRows, -1);
+      auto reader =
+          std::static_pointer_cast<Int32Reader>(rg_reader->Column(col));
+      int64_t total_values_read = 0;
+      int64_t remaining = kNumRows;
+      int32_t* out = values_out.data();
+      while (reader->HasNext()) {
+        int64_t values_read = 0;
+        reader->ReadBatch(remaining, nullptr, nullptr, out, &values_read);
+        total_values_read += values_read;
+        remaining -= values_read;
+        out += values_read;
+      }
+      ASSERT_EQ(kNumRows, total_values_read);
+      ASSERT_EQ(col == 0 ? values0 : values1, values_out);
+    }
+  }
+}
+
+TEST(TestPageBufferArenaIntegration, BufferedRowGroupLazilyAllocatesArena) {
+  constexpr int64_t kArenaSize = 1 << 20;
+  constexpr int64_t kExpectedArenaSize =
+      GetExpectedPageBufferArenaSize(kArenaSize);
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->disable_dictionary()
+                          ->set_parquet_block_size(kArenaSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+  EXPECT_LT(pool.max_memory(), kExpectedArenaSize);
+
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+  EXPECT_GE(pool.max_memory(), kExpectedArenaSize);
+  EXPECT_LT(pool.max_memory(), kArenaSize);
+
+  int32_t value = 7;
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(1, nullptr, nullptr, &value);
+  row_group_writer->Close();
+  file_writer->Close();
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    LowLevelBufferedRowGroupDefaultDoesNotAllocateArena) {
+  constexpr int64_t kArenaSize = 1 << 20;
+  constexpr int64_t kExpectedArenaSize =
+      GetExpectedPageBufferArenaSize(kArenaSize);
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->disable_dictionary()
+                          ->set_parquet_block_size(kArenaSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+  auto file_writer = ParquetFileWriter::Open(sink, schema, writer_props);
+  EXPECT_LT(pool.max_memory(), kExpectedArenaSize);
+
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+  EXPECT_LT(pool.max_memory(), kExpectedArenaSize);
+
+  int32_t value = 7;
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(1, nullptr, nullptr, &value);
+  row_group_writer->Close();
+  file_writer->Close();
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    BufferedRowGroupSeriallyReusesSharedUncompressedScratchAcrossColumns) {
+  if (!util::Codec::IsAvailable(Compression::SNAPPY)) {
+    GTEST_SKIP() << "Snappy codec unavailable";
+  }
+
+  const auto [scratch_after_first_column, scratch_after_second_column] =
+      MeasureBufferedSharedScratchAfterClosingColumns(
+          ParquetDataPageVersion::V1);
+
+  EXPECT_GT(scratch_after_first_column, 0);
+  EXPECT_EQ(scratch_after_first_column, scratch_after_second_column);
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    BufferedRowGroupSeriallyReusesSharedCompressedScratchAcrossColumns) {
+  if (!util::Codec::IsAvailable(Compression::SNAPPY)) {
+    GTEST_SKIP() << "Snappy codec unavailable";
+  }
+
+  const auto [scratch_after_first_column, scratch_after_second_column] =
+      MeasureBufferedSharedScratchAfterClosingColumns(
+          ParquetDataPageVersion::V2);
+
+  EXPECT_GT(scratch_after_first_column, 0);
+  EXPECT_EQ(scratch_after_first_column, scratch_after_second_column);
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    NonBufferedAndThreadedWritesDoNotAllocateArena) {
+  constexpr int64_t kArenaSize = 1 << 20;
+
+  {
+    ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+    auto sink = CreateOutputStream();
+    auto writer_props = WriterProperties::Builder()
+                            .memory_pool(&pool)
+                            ->disable_dictionary()
+                            ->set_parquet_block_size(kArenaSize)
+                            ->build();
+    auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+        "schema",
+        Repetition::REQUIRED,
+        {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+    auto file_writer =
+        ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+    auto row_group_writer = file_writer->AppendRowGroup();
+    int32_t value = 11;
+    static_cast<Int32Writer*>(row_group_writer->NextColumn())
+        ->WriteBatch(1, nullptr, nullptr, &value);
+    row_group_writer->Close();
+    file_writer->Close();
+
+    EXPECT_LT(pool.max_memory(), kArenaSize);
+  }
+
+  {
+    ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+    auto sink = CreateOutputStream();
+    auto writer_props = WriterProperties::Builder()
+                            .memory_pool(&pool)
+                            ->disable_dictionary()
+                            ->data_pagesize(512)
+                            ->set_parquet_block_size(kArenaSize)
+                            ->build();
+    auto arrow_writer_props =
+        ArrowWriterProperties::Builder().set_use_threads(true)->build();
+    auto schema = ::arrow::schema(
+        {::arrow::field("col0", ::arrow::int32()),
+         ::arrow::field("col1", ::arrow::int32())});
+
+    ::arrow::Int32Builder builder0;
+    ::arrow::Int32Builder builder1;
+    for (int i = 0; i < 32; ++i) {
+      ASSERT_TRUE(builder0.Append(i).ok());
+      ASSERT_TRUE(builder1.Append(10'000 + i).ok());
+    }
+
+    std::shared_ptr<::arrow::Array> array0;
+    std::shared_ptr<::arrow::Array> array1;
+    ASSERT_TRUE(builder0.Finish(&array0).ok());
+    ASSERT_TRUE(builder1.Finish(&array1).ok());
+
+    auto maybe_writer =
+        bytedance::bolt::parquet::arrow::arrow::FileWriter::Open(
+            *schema, &pool, sink, writer_props, arrow_writer_props);
+    ASSERT_TRUE(maybe_writer.ok());
+    auto writer = std::move(maybe_writer).ValueOrDie();
+    auto batch = ::arrow::RecordBatch::Make(
+        schema, 32, {std::move(array0), std::move(array1)});
+
+    ASSERT_TRUE(writer->WriteRecordBatch(*batch).ok());
+    const auto stats = writer->memoryStats();
+    EXPECT_EQ(0, stats.pageBufferArenaCapacityBytes);
+    EXPECT_EQ(0, stats.pageBufferArenaReservedBytes);
+    ASSERT_TRUE(writer->Close().ok());
+
+    EXPECT_LT(pool.max_memory(), kArenaSize);
+  }
+}
+
+TEST(TestPageBufferArenaIntegration, ArrowSerialBufferedWriteEnablesArena) {
+  constexpr int64_t kArenaSize = 1 << 20;
+  constexpr int64_t kExpectedArenaSize =
+      GetExpectedPageBufferArenaSize(kArenaSize);
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->disable_dictionary()
+                          ->data_pagesize(512)
+                          ->set_parquet_block_size(kArenaSize)
+                          ->build();
+  auto arrow_writer_props =
+      ArrowWriterProperties::Builder().set_use_threads(false)->build();
+  auto schema = ::arrow::schema(
+      {::arrow::field("col0", ::arrow::int32()),
+       ::arrow::field("col1", ::arrow::int32())});
+
+  ::arrow::Int32Builder builder0;
+  ::arrow::Int32Builder builder1;
+  for (int i = 0; i < 32; ++i) {
+    ASSERT_TRUE(builder0.Append(i).ok());
+    ASSERT_TRUE(builder1.Append(10'000 + i).ok());
+  }
+
+  std::shared_ptr<::arrow::Array> array0;
+  std::shared_ptr<::arrow::Array> array1;
+  ASSERT_TRUE(builder0.Finish(&array0).ok());
+  ASSERT_TRUE(builder1.Finish(&array1).ok());
+
+  auto maybe_writer = bytedance::bolt::parquet::arrow::arrow::FileWriter::Open(
+      *schema, &pool, sink, writer_props, arrow_writer_props);
+  ASSERT_TRUE(maybe_writer.ok());
+  auto writer = std::move(maybe_writer).ValueOrDie();
+  auto batch = ::arrow::RecordBatch::Make(
+      schema, 32, {std::move(array0), std::move(array1)});
+
+  ASSERT_TRUE(writer->WriteRecordBatch(*batch).ok());
+  const auto stats = writer->memoryStats();
+  EXPECT_GE(stats.pageBufferArenaCapacityBytes, kExpectedArenaSize);
+  ASSERT_TRUE(writer->Close().ok());
+}
+
+TEST(TestPageBufferArenaIntegration, DictionaryPageUsesArenaOnBufferedClose) {
+  constexpr int64_t kNumRows = 32 * 1024;
+  constexpr int64_t kArenaSize = 1 << 20;
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->enable_dictionary()
+                          ->disable_statistics()
+                          ->dictionary_pagesize_limit(kArenaSize)
+                          ->data_pagesize(1024)
+                          ->set_parquet_block_size(kArenaSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+  std::vector<int32_t> values(kNumRows);
+  std::iota(values.begin(), values.end(), 0);
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values.data());
+
+  const int64_t peak_before_close = pool.max_memory();
+  row_group_writer->Close();
+  const int64_t peak_after_close = pool.max_memory();
+
+  EXPECT_LT(peak_after_close - peak_before_close, 64 * 1024);
+
+  file_writer->Close();
+  PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
+  auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+  auto file_reader = ParquetFileReader::Open(source);
+  ASSERT_EQ(1, file_reader->metadata()->num_row_groups());
+  ASSERT_TRUE(file_reader->RowGroup(0)
+                  ->metadata()
+                  ->ColumnChunk(0)
+                  ->has_dictionary_page());
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    BufferedCompressedV1PageUsesActualCompressedSizeForArenaAllocation) {
+  if (!util::Codec::IsAvailable(Compression::SNAPPY)) {
+    GTEST_SKIP() << "Snappy codec unavailable";
+  }
+
+  constexpr int64_t kNumRows = 32 * 1024;
+  constexpr int64_t kParquetBlockSize = 128 * 1024;
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->disable_dictionary()
+                          ->compression(Compression::SNAPPY)
+                          ->data_page_version(ParquetDataPageVersion::V1)
+                          ->data_pagesize(1 << 20)
+                          ->set_parquet_block_size(kParquetBlockSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+  std::vector<int32_t> values(kNumRows, 7);
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values.data());
+  row_group_writer->column(0)->Close();
+
+  const auto memoryStats = row_group_writer->memory_stats();
+  EXPECT_EQ(0, memoryStats.bufferedPageFallbackAllocatedBytes);
+  EXPECT_GT(memoryStats.bufferedPageWriterDataPageCount, 0);
+  EXPECT_GT(memoryStats.pageBufferArenaReservedBytes, 0);
+  EXPECT_LE(
+      memoryStats.pageBufferArenaReservedBytes,
+      memoryStats.pageBufferArenaCapacityBytes);
+
+  row_group_writer->Close();
+  file_writer->Close();
+
+  PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
+  auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+  auto file_reader = ParquetFileReader::Open(source);
+  ASSERT_EQ(1, file_reader->metadata()->num_row_groups());
+
+  std::vector<int32_t> values_out(kNumRows, -1);
+  auto reader = std::static_pointer_cast<Int32Reader>(
+      file_reader->RowGroup(0)->Column(0));
+  int64_t total_values_read = 0;
+  while (reader->HasNext()) {
+    int64_t values_read = 0;
+    reader->ReadBatch(
+        kNumRows - total_values_read,
+        nullptr,
+        nullptr,
+        values_out.data() + total_values_read,
+        &values_read);
+    total_values_read += values_read;
+  }
+  ASSERT_EQ(kNumRows, total_values_read);
+  ASSERT_EQ(values, values_out);
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    BufferedCompressedV2PageRetainsExactSizedArenaBehavior) {
+  if (!util::Codec::IsAvailable(Compression::SNAPPY)) {
+    GTEST_SKIP() << "Snappy codec unavailable";
+  }
+
+  constexpr int64_t kNumRows = 32 * 1024;
+  constexpr int64_t kParquetBlockSize = 128 * 1024;
+
+  ::arrow::ProxyMemoryPool pool(::arrow::default_memory_pool());
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .memory_pool(&pool)
+                          ->disable_dictionary()
+                          ->compression(Compression::SNAPPY)
+                          ->data_page_version(ParquetDataPageVersion::V2)
+                          ->data_pagesize(1 << 20)
+                          ->set_parquet_block_size(kParquetBlockSize)
+                          ->build();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {PrimitiveNode::Make("col", Repetition::REQUIRED, Type::INT32)}));
+
+  std::vector<int32_t> values(kNumRows, 7);
+
+  auto file_writer =
+      ParquetFileWriter::Open(sink, schema, writer_props, NULLPTR, true);
+  auto row_group_writer = file_writer->AppendBufferedRowGroup();
+  static_cast<Int32Writer*>(row_group_writer->column(0))
+      ->WriteBatch(kNumRows, nullptr, nullptr, values.data());
+  row_group_writer->column(0)->Close();
+
+  const auto memoryStats = row_group_writer->memory_stats();
+  EXPECT_EQ(0, memoryStats.bufferedPageFallbackAllocatedBytes);
+  EXPECT_GT(memoryStats.bufferedPageWriterDataPageCount, 0);
+
+  row_group_writer->Close();
+  file_writer->Close();
+
+  PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
+  auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+  auto file_reader = ParquetFileReader::Open(source);
+  ASSERT_EQ(1, file_reader->metadata()->num_row_groups());
+
+  std::vector<int32_t> values_out(kNumRows, -1);
+  auto reader = std::static_pointer_cast<Int32Reader>(
+      file_reader->RowGroup(0)->Column(0));
+  int64_t total_values_read = 0;
+  while (reader->HasNext()) {
+    int64_t values_read = 0;
+    reader->ReadBatch(
+        kNumRows - total_values_read,
+        nullptr,
+        nullptr,
+        values_out.data() + total_values_read,
+        &values_read);
+    total_values_read += values_read;
+  }
+  ASSERT_EQ(kNumRows, total_values_read);
+  ASSERT_EQ(values, values_out);
+}
+
+TEST(
+    TestPageBufferArenaIntegration,
+    ParallelBufferedWriteRecordBatchRoundTrip) {
+  constexpr int kNumRows = 2048;
+
+  ::arrow::Int32Builder builder0;
+  ::arrow::Int32Builder builder1;
+  for (int i = 0; i < kNumRows; ++i) {
+    ASSERT_TRUE(builder0.Append(i).ok());
+    ASSERT_TRUE(builder1.Append(10'000 + i).ok());
+  }
+
+  std::shared_ptr<::arrow::Array> array0;
+  std::shared_ptr<::arrow::Array> array1;
+  ASSERT_TRUE(builder0.Finish(&array0).ok());
+  ASSERT_TRUE(builder1.Finish(&array1).ok());
+
+  auto schema = ::arrow::schema(
+      {::arrow::field("col0", ::arrow::int32()),
+       ::arrow::field("col1", ::arrow::int32())});
+  auto batch = ::arrow::RecordBatch::Make(schema, kNumRows, {array0, array1});
+
+  auto sink = CreateOutputStream();
+  auto writer_props = WriterProperties::Builder()
+                          .disable_dictionary()
+                          ->data_pagesize(512)
+                          ->set_parquet_block_size(4096)
+                          ->build();
+  auto arrow_writer_props =
+      ArrowWriterProperties::Builder().set_use_threads(true)->build();
+
+  auto maybe_writer = bytedance::bolt::parquet::arrow::arrow::FileWriter::Open(
+      *schema,
+      ::arrow::default_memory_pool(),
+      sink,
+      writer_props,
+      arrow_writer_props);
+  ASSERT_TRUE(maybe_writer.ok());
+  auto writer = std::move(maybe_writer).ValueOrDie();
+  ASSERT_TRUE(writer->WriteRecordBatch(*batch).ok());
+  ASSERT_TRUE(writer->Close().ok());
+
+  PARQUET_ASSIGN_OR_THROW(auto buffer, sink->Finish());
+  auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+  auto file_reader = ParquetFileReader::Open(source);
+  ASSERT_EQ(1, file_reader->metadata()->num_row_groups());
+
+  auto rg_reader = file_reader->RowGroup(0);
+  for (int col = 0; col < 2; ++col) {
+    std::vector<int32_t> values_out(kNumRows, -1);
+    int64_t total_values_read = 0;
+    int64_t remaining = kNumRows;
+    int32_t* out = values_out.data();
+    auto reader = std::static_pointer_cast<Int32Reader>(rg_reader->Column(col));
+    while (reader->HasNext()) {
+      int64_t values_read = 0;
+      reader->ReadBatch(remaining, nullptr, nullptr, out, &values_read);
+      total_values_read += values_read;
+      remaining -= values_read;
+      out += values_read;
+    }
+
+    ASSERT_EQ(kNumRows, total_values_read);
+    for (int i = 0; i < kNumRows; ++i) {
+      ASSERT_EQ(col == 0 ? i : 10'000 + i, values_out[i]);
+    }
   }
 }
 

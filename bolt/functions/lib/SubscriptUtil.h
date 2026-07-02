@@ -139,9 +139,11 @@ class MapSubscript {
       return false;
     }
 
-    if (!mapArg->type()->childAt(0)->isPrimitiveType() &&
-        !!mapArg->type()->childAt(0)->isBoolean()) {
-      // Disable caching if the key type is not primitive or is boolean.
+    const auto& keyType = mapArg->type()->childAt(0);
+    if (!keyType->isPrimitiveType() || keyType->isBoolean() ||
+        keyType->isUseStringView()) {
+      // Disable caching if the key type is not primitive, is boolean, or uses
+      // StringView.
       allowCaching_ = false;
       return false;
     }

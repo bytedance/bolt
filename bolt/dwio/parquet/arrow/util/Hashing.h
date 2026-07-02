@@ -252,7 +252,8 @@ template <typename Payload>
 class HashTable {
  public:
   static constexpr hash_t kSentinel = 0ULL;
-  static constexpr int64_t kLoadFactor = 2UL;
+  static constexpr uint64_t kMaxLoadNumerator = 3;
+  static constexpr uint64_t kMaxLoadDenominator = 4;
 
   struct Entry {
     hash_t h;
@@ -301,7 +302,7 @@ class HashTable {
 
     if (ARROW_PREDICT_FALSE(NeedUpsizing())) {
       // Resize less frequently since it is expensive
-      return Upsize(capacity_ * kLoadFactor * 2);
+      return Upsize(capacity_ * 2);
     }
     return Status::OK();
   }
@@ -372,8 +373,8 @@ class HashTable {
   }
 
   bool NeedUpsizing() const {
-    // Keep the load factor <= 1/2
-    return size_ * kLoadFactor >= capacity_;
+    // Keep load factor <= 3/4.
+    return size_ * kMaxLoadDenominator >= capacity_ * kMaxLoadNumerator;
   }
 
   Status UpsizeBuffer(uint64_t capacity) {

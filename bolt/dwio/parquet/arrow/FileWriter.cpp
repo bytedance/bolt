@@ -44,6 +44,7 @@
 #include "bolt/dwio/parquet/arrow/EncryptionInternal.h"
 #include "bolt/dwio/parquet/arrow/Exception.h"
 #include "bolt/dwio/parquet/arrow/FileEncryptorInternal.h"
+#include "bolt/dwio/parquet/arrow/PageBufferArena.h"
 #include "bolt/dwio/parquet/arrow/PageIndex.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Schema.h"
@@ -53,6 +54,22 @@ using arrow::MemoryPool;
 namespace bytedance::bolt::parquet::arrow {
 
 using schema::GroupNode;
+
+namespace {
+
+// `parquet_block_size` is the target Parquet row group size. In buffered row
+// group mode, PageBufferArena reserves one reusable contiguous allocation for
+// page and dictionary page buffers, reducing per-page heap allocations while
+// columns are written serially. Size the arena to most, but not all, of the row
+// group target: page payloads dominate the memory footprint, while the
+// remaining 20% leaves headroom for encoder state, compression scratch buffers,
+// metadata, and page buffers that still need to fall back to regular
+// allocation.
+int64_t GetPageBufferArenaSize(int64_t parquet_block_size) {
+  return parquet_block_size > 0 ? parquet_block_size * 4 / 5 : 0;
+}
+
+} // namespace
 
 // ----------------------------------------------------------------------
 // RowGroupWriter public API
@@ -90,6 +107,10 @@ int64_t RowGroupWriter::total_compressed_bytes_all() const {
   return contents_->total_compressed_bytes_all();
 }
 
+WriterMemoryStats RowGroupWriter::memory_stats() const {
+  return contents_->memory_stats();
+}
+
 bool RowGroupWriter::buffered() const {
   return contents_->buffered();
 }
@@ -124,12 +145,14 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
       RowGroupMetaDataBuilder* metadata,
       int16_t row_group_ordinal,
       const WriterProperties* properties,
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources,
       bool buffered_row_group = false,
       InternalFileEncryptor* file_encryptor = nullptr,
       PageIndexBuilder* page_index_builder = nullptr)
       : sink_(std::move(sink)),
         metadata_(metadata),
         properties_(properties),
+        buffered_resources_(std::move(buffered_resources)),
         total_bytes_written_(0),
         total_compressed_bytes_written_(0),
         closed_(false),
@@ -173,6 +196,9 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
       total_bytes_written_ += column_writers_[0]->Close();
       total_compressed_bytes_written_ +=
           column_writers_[0]->total_compressed_bytes_written();
+      if (buffered_resources_ != nullptr) {
+        buffered_resources_->ResetPageBufferArena();
+      }
     }
 
     const int32_t column_ordinal = next_column_index_++;
@@ -211,7 +237,10 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
           properties_->page_checksum_enabled(),
           ci_builder,
           oi_builder,
-          CodecOptions());
+          CodecOptions(),
+          buffered_resources_ != nullptr
+              ? buffered_resources_->page_buffer_arena()
+              : nullptr);
     } else {
       pager = PageWriter::Open(
           sink_,
@@ -226,10 +255,13 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
           properties_->page_checksum_enabled(),
           ci_builder,
           oi_builder,
-          *codec_options);
+          *codec_options,
+          buffered_resources_ != nullptr
+              ? buffered_resources_->page_buffer_arena()
+              : nullptr);
     }
-    column_writers_[0] =
-        ColumnWriter::Make(col_meta, std::move(pager), properties_);
+    column_writers_[0] = ColumnWriter::Make(
+        col_meta, std::move(pager), properties_, buffered_resources_);
     return column_writers_[0].get();
   }
 
@@ -303,6 +335,33 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
     return total_compressed_bytes_all;
   }
 
+  WriterMemoryStats memory_stats() const override {
+    WriterMemoryStats stats;
+    if (!closed_) {
+      for (const auto& column_writer : column_writers_) {
+        if (column_writer) {
+          AddWriterMemoryStats(stats, column_writer->memory_stats());
+        }
+      }
+    }
+    if (buffered_resources_ != nullptr) {
+      stats.sharedColumnScratchAllocatedBytes =
+          buffered_resources_->shared_scratch_allocated_bytes();
+      stats.columnScratchAllocatedBytes +=
+          stats.sharedColumnScratchAllocatedBytes;
+
+      if (buffered_resources_->page_buffer_arena() != nullptr) {
+        stats.pageBufferArenaCapacityBytes =
+            buffered_resources_->page_buffer_arena()->capacity();
+        stats.pageBufferArenaReservedBytes =
+            buffered_resources_->page_buffer_arena()->bytes_reserved();
+      }
+    }
+    stats.bufferedPageActualMemoryBytes = stats.pageBufferArenaCapacityBytes +
+        stats.bufferedPageFallbackAllocatedBytes;
+    return stats;
+  }
+
   bool buffered() const override {
     return buffered_row_group_;
   }
@@ -321,6 +380,9 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
               column_writers[i]->total_compressed_bytes_written();
         }
       }
+      if (buffered_resources_ != nullptr) {
+        buffered_resources_->ResetPageBufferArena();
+      }
 
       // Ensures all columns have been written
       metadata_->set_num_rows(num_rows_);
@@ -332,6 +394,7 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
   std::shared_ptr<ArrowOutputStream> sink_;
   mutable RowGroupMetaDataBuilder* metadata_;
   const WriterProperties* properties_;
+  std::shared_ptr<BufferedColumnWriterResources> buffered_resources_;
   int64_t total_bytes_written_;
   int64_t total_compressed_bytes_written_;
   bool closed_;
@@ -408,7 +471,10 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
             properties_->page_checksum_enabled(),
             ci_builder,
             oi_builder,
-            CodecOptions());
+            CodecOptions(),
+            buffered_resources_ != nullptr
+                ? buffered_resources_->page_buffer_arena()
+                : nullptr);
       } else {
         pager = PageWriter::Open(
             sink_,
@@ -423,10 +489,13 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
             properties_->page_checksum_enabled(),
             ci_builder,
             oi_builder,
-            *codec_options);
+            *codec_options,
+            buffered_resources_ != nullptr
+                ? buffered_resources_->page_buffer_arena()
+                : nullptr);
       }
-      column_writers_.push_back(
-          ColumnWriter::Make(col_meta, std::move(pager), properties_));
+      column_writers_.push_back(ColumnWriter::Make(
+          col_meta, std::move(pager), properties_, buffered_resources_));
     }
   }
 
@@ -445,12 +514,14 @@ class FileSerializer : public ParquetFileWriter::Contents {
       std::shared_ptr<ArrowOutputStream> sink,
       std::shared_ptr<GroupNode> schema,
       std::shared_ptr<WriterProperties> properties,
-      std::shared_ptr<const KeyValueMetadata> key_value_metadata) {
+      std::shared_ptr<const KeyValueMetadata> key_value_metadata,
+      bool enable_page_buffer_arena) {
     std::unique_ptr<ParquetFileWriter::Contents> result(new FileSerializer(
         std::move(sink),
         std::move(schema),
         std::move(properties),
-        std::move(key_value_metadata)));
+        std::move(key_value_metadata),
+        enable_page_buffer_arena));
 
     return result;
   }
@@ -511,6 +582,7 @@ class FileSerializer : public ParquetFileWriter::Contents {
         rg_metadata,
         static_cast<int16_t>(num_row_groups_ - 1),
         properties_.get(),
+        GetBufferedColumnWriterResources(buffered_row_group),
         buffered_row_group,
         file_encryptor_.get(),
         page_index_builder_.get()));
@@ -547,13 +619,15 @@ class FileSerializer : public ParquetFileWriter::Contents {
       std::shared_ptr<ArrowOutputStream> sink,
       std::shared_ptr<GroupNode> schema,
       std::shared_ptr<WriterProperties> properties,
-      std::shared_ptr<const KeyValueMetadata> key_value_metadata)
+      std::shared_ptr<const KeyValueMetadata> key_value_metadata,
+      bool enable_page_buffer_arena)
       : ParquetFileWriter::Contents(
             std::move(schema),
             std::move(key_value_metadata)),
         sink_(std::move(sink)),
         is_open_(true),
         properties_(std::move(properties)),
+        page_buffer_arena_enabled_(enable_page_buffer_arena),
         num_row_groups_(0),
         num_rows_(0),
         metadata_(FileMetaDataBuilder::Make(&schema_, properties_)) {
@@ -616,6 +690,8 @@ class FileSerializer : public ParquetFileWriter::Contents {
   std::shared_ptr<ArrowOutputStream> sink_;
   bool is_open_;
   const std::shared_ptr<WriterProperties> properties_;
+  const bool page_buffer_arena_enabled_;
+  std::shared_ptr<BufferedColumnWriterResources> buffered_column_resources_;
   int num_row_groups_;
   int64_t num_rows_;
   std::unique_ptr<FileMetaDataBuilder> metadata_;
@@ -623,6 +699,23 @@ class FileSerializer : public ParquetFileWriter::Contents {
   std::unique_ptr<RowGroupWriter> row_group_writer_;
   std::unique_ptr<PageIndexBuilder> page_index_builder_;
   std::unique_ptr<InternalFileEncryptor> file_encryptor_;
+
+  std::shared_ptr<BufferedColumnWriterResources>
+  GetBufferedColumnWriterResources(bool buffered_row_group) {
+    const int64_t arena_size =
+        GetPageBufferArenaSize(properties_->parquet_block_size());
+    if (!buffered_row_group || !page_buffer_arena_enabled_ || arena_size <= 0) {
+      return nullptr;
+    }
+    if (buffered_column_resources_ == nullptr) {
+      buffered_column_resources_ =
+          std::make_shared<BufferedColumnWriterResources>(
+              properties_->memory_pool(),
+              std::make_shared<PageBufferArena>(
+                  properties_->memory_pool(), arena_size));
+    }
+    return buffered_column_resources_;
+  }
 
   void StartFile() {
     auto file_encryption_properties = properties_->file_encryption_properties();
@@ -685,12 +778,14 @@ std::unique_ptr<ParquetFileWriter> ParquetFileWriter::Open(
     std::shared_ptr<::arrow::io::OutputStream> sink,
     std::shared_ptr<GroupNode> schema,
     std::shared_ptr<WriterProperties> properties,
-    std::shared_ptr<const KeyValueMetadata> key_value_metadata) {
+    std::shared_ptr<const KeyValueMetadata> key_value_metadata,
+    bool enable_page_buffer_arena) {
   auto contents = FileSerializer::Open(
       std::move(sink),
       std::move(schema),
       std::move(properties),
-      std::move(key_value_metadata));
+      std::move(key_value_metadata),
+      enable_page_buffer_arena);
   std::unique_ptr<ParquetFileWriter> result(new ParquetFileWriter());
   result->Open(std::move(contents));
   return result;
