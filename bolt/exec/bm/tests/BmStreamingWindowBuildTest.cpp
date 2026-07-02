@@ -835,6 +835,42 @@ TEST_F(BmStreamingWindowBuildTest, aggregateReusesMaterializedChunks) {
   EXPECT_EQ(size, stats.maxMaterializedRows);
 }
 
+TEST_F(BmStreamingWindowBuildTest, aggregateUsesReverseIncrementalForSuffix) {
+  const vector_size_t size = 512;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return row % 17; },
+              [](auto row) { return row % 23 == 0; }),
+          makeFlatVector<int16_t>(size, [](auto /*row*/) { return 0; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  auto suffixSum =
+      "sum(d) over (partition by p order by s rows between current row and unbounded following)";
+  auto plan = PlanBuilder()
+                  .values(split(data, 8))
+                  .streamingWindow({suffixSum})
+                  .planNode();
+
+  window::resetBmAggregateWindowTestStats();
+  auto spillDirectory = TempDirectoryPath::create();
+  runBmStreamingWindow(
+      plan,
+      fmt::format("SELECT *, {} FROM tmp", suffixSum),
+      duckDbQueryRunner_,
+      spillDirectory->path);
+
+  const auto stats = window::bmAggregateWindowTestStats();
+  EXPECT_GT(stats.reverseIncrementalCalls, 0);
+  EXPECT_EQ(size, stats.reverseIncrementalRows);
+  EXPECT_EQ(size, stats.materializedRows);
+}
+
 TEST_F(BmStreamingWindowBuildTest, aggregateWindowRequiresBmPartition) {
   HashStringAllocator stringAllocator(pool());
   std::vector<WindowFunctionArg> args{{BIGINT(), nullptr, column_index_t{0}}};
@@ -846,6 +882,20 @@ TEST_F(BmStreamingWindowBuildTest, aggregateWindowRequiresBmPartition) {
 
   PlainWindowPartition partition;
   EXPECT_THROW(function->resetPartition(&partition), BoltRuntimeError);
+}
+
+TEST_F(BmStreamingWindowBuildTest, complexAggregatesUseGenericWindowFunction) {
+  HashStringAllocator stringAllocator(pool());
+  const core::QueryConfig config{
+      std::unordered_map<std::string, std::string>{}};
+  std::vector<WindowFunctionArg> args{{BIGINT(), nullptr, column_index_t{0}}};
+
+  for (const auto* name :
+       {"collect_list", "collect_set", "max_by", "min_by", "percentile"}) {
+    auto function = window::createBmAggregateWindowFunction(
+        name, args, BIGINT(), false, pool(), &stringAllocator, config);
+    EXPECT_EQ(nullptr, function) << name;
+  }
 }
 
 TEST_F(BmStreamingWindowBuildTest, featureFlagFallsBackForUnsupportedTypes) {

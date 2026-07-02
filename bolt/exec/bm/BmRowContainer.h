@@ -97,6 +97,14 @@ class BmRowContainer {
       const VectorPtr& result,
       bool exactSize = false);
 
+  void extractColumnResident(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t column,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
+      bool exactSize = false);
+
   void extractNullsResident(
       const char* const* rows,
       int32_t numRows,
@@ -213,6 +221,14 @@ class BmRowContainer {
   void extractColumnTyped(
       const char* const* rows,
       int32_t numRows,
+      const ColumnLayout& column,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
+      bool exactSize) const;
+  template <TypeKind Kind>
+  void extractColumnByRowNumbersTyped(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
       const ColumnLayout& column,
       vector_size_t resultOffset,
       const VectorPtr& result,

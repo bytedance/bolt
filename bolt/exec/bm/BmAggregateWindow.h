@@ -8,6 +8,8 @@ struct BmAggregateWindowTestStats {
   uint64_t materializeCalls{0};
   uint64_t materializedRows{0};
   uint64_t maxMaterializedRows{0};
+  uint64_t reverseIncrementalCalls{0};
+  uint64_t reverseIncrementalRows{0};
 };
 
 void resetBmAggregateWindowTestStats();

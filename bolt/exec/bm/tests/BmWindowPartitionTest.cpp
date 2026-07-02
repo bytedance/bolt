@@ -83,11 +83,15 @@ TEST_F(BmRowContainerTest, BmWindowPartitionExtractsFromResidentPointers) {
 
   std::vector<vector_size_t> rowNumbers{3, WindowFunction::kNullRow, 0};
   auto names = BaseVector::create(VARCHAR(), 0, pool());
+  bytedance::bolt::exec::window::resetBmWindowPartitionTestStats();
   partition.extractColumn(1, {rowNumbers.data(), rowNumbers.size()}, 0, names);
   ASSERT_EQ(3, names->size());
   EXPECT_EQ("delta", names->asFlatVector<StringView>()->valueAt(0).str());
   EXPECT_TRUE(names->isNullAt(1));
   EXPECT_EQ("alpha", names->asFlatVector<StringView>()->valueAt(2).str());
+  auto stats = bytedance::bolt::exec::window::bmWindowPartitionTestStats();
+  EXPECT_EQ(1, stats.rowNumberResidentExtractCalls);
+  EXPECT_EQ(rowNumbers.size(), stats.rowNumberResidentExtractRows);
 
   auto nulls = AlignedBuffer::allocate<bool>(input->size(), pool());
   partition.extractNulls(0, 0, input->size(), nulls);

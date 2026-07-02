@@ -30,6 +30,18 @@ void recordMaterializedRows(vector_size_t numRows) {
   });
 }
 
+void recordReverseIncrementalRows(vector_size_t numRows) {
+  testStats().withWLock([&](auto& stats) {
+    ++stats.reverseIncrementalCalls;
+    stats.reverseIncrementalRows += numRows;
+  });
+}
+
+bool supportsReverseIncrementalAggregation(const std::string& name) {
+  return name == "sum" || name == "count" || name == "min" ||
+      name == "max" || name == "avg";
+}
+
 class BmWindowFrameReader {
  public:
   BmWindowFrameReader(
@@ -163,7 +175,9 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       memory::MemoryPool* pool,
       HashStringAllocator* stringAllocator,
       const core::QueryConfig& config)
-      : WindowFunction(resultType, pool, stringAllocator) {
+      : WindowFunction(resultType, pool, stringAllocator),
+        supportsReverseIncremental_(
+            supportsReverseIncrementalAggregation(name)) {
     BOLT_USER_CHECK(
         !ignoreNulls, "Aggregate window functions do not support IGNORE NULLS");
     argTypes_.reserve(args.size());
@@ -252,8 +266,18 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
         nextRowToAdd = frameMetadata.firstRow;
         resetAggregateGroup();
       }
-      incrementalAggregation(
-          validRows, nextRowToAdd, rawFrameEnds, resultOffset, result);
+      if (frameMetadata.allFramesEqual) {
+        if (frameMetadata.lastRow >= nextRowToAdd) {
+          addFrameRows(nextRowToAdd, frameMetadata.lastRow);
+        }
+        copyAggregateResultToRows(validRows, resultOffset, result);
+      } else {
+        incrementalAggregation(
+            validRows, nextRowToAdd, rawFrameEnds, resultOffset, result);
+      }
+    } else if (frameMetadata.reverseIncrementalAggregation) {
+      reverseIncrementalAggregation(
+          validRows, rawFrameStarts, rawFrameEnds, resultOffset, result);
     } else {
       simpleAggregation(
           validRows, rawFrameStarts, rawFrameEnds, resultOffset, result);
@@ -266,6 +290,8 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     vector_size_t firstRow;
     vector_size_t lastRow;
     bool incrementalAggregation;
+    bool reverseIncrementalAggregation;
+    bool allFramesEqual;
     bool usePreviousAggregate;
   };
 
@@ -291,14 +317,23 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     vector_size_t fixedFrameStartRow = firstRow;
     vector_size_t lastRow = rawFrameEnds[firstValidRow];
     vector_size_t prevFrameEnd = lastRow;
+    vector_size_t fixedFrameEndRow = lastRow;
+    vector_size_t prevFrameStart = firstRow;
 
     bool incrementalAggregation = true;
+    bool reverseIncrementalAggregation = supportsReverseIncremental_;
+    bool allFramesEqual = true;
     validRows.applyToSelected([&](auto i) {
       firstRow = std::min(firstRow, rawFrameStarts[i]);
       lastRow = std::max(lastRow, rawFrameEnds[i]);
+      allFramesEqual &= rawFrameStarts[i] == fixedFrameStartRow;
+      allFramesEqual &= rawFrameEnds[i] == fixedFrameEndRow;
       incrementalAggregation &= rawFrameStarts[i] == fixedFrameStartRow;
       incrementalAggregation &= rawFrameEnds[i] >= prevFrameEnd;
       prevFrameEnd = rawFrameEnds[i];
+      reverseIncrementalAggregation &= rawFrameEnds[i] == fixedFrameEndRow;
+      reverseIncrementalAggregation &= rawFrameStarts[i] >= prevFrameStart;
+      prevFrameStart = rawFrameStarts[i];
     });
 
     bool usePreviousAggregate = false;
@@ -311,7 +346,13 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       }
     }
 
-    return {firstRow, lastRow, incrementalAggregation, usePreviousAggregate};
+    return {
+        firstRow,
+        lastRow,
+        incrementalAggregation,
+        reverseIncrementalAggregation,
+        allFramesEqual,
+        usePreviousAggregate};
   }
 
   void resetAggregateGroup() {
@@ -360,6 +401,30 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     result->copy(aggregateResultVector_.get(), row, 0, 1);
   }
 
+  void copyAggregateResultToRows(
+      const SelectivityVector& validRows,
+      vector_size_t resultOffset,
+      const VectorPtr& result) {
+    if (extractedStateVersion_ != aggregateStateVersion_) {
+      BaseVector::prepareForReuse(aggregateResultVector_, 1);
+      aggregate_->extractValues(
+          &rawSingleGroupRow_, 1, &aggregateResultVector_);
+      extractedStateVersion_ = aggregateStateVersion_;
+    }
+
+    if (validRows.isAllSelected()) {
+      auto repeated =
+          BaseVector::wrapInConstant(validRows.size(), 0, aggregateResultVector_);
+      result->copy(repeated.get(), resultOffset, 0, validRows.size());
+      return;
+    }
+
+    validRows.applyToSelected([&](auto row) {
+      result->copy(aggregateResultVector_.get(), resultOffset + row, 0, 1);
+    });
+    setEmptyFramesResult(validRows, resultOffset, emptyResult_, result);
+  }
+
   void selectAggregateRows(
       vector_size_t numRows,
       vector_size_t localStart,
@@ -406,6 +471,31 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     setEmptyFramesResult(validRows, resultOffset, emptyResult_, result);
   }
 
+  void reverseIncrementalAggregation(
+      const SelectivityVector& validRows,
+      const vector_size_t* rawFrameStarts,
+      const vector_size_t* rawFrameEnds,
+      vector_size_t resultOffset,
+      const VectorPtr& result) {
+    recordReverseIncrementalRows(validRows.countSelected());
+    resetAggregateGroup();
+
+    vector_size_t firstAddedRow = rawFrameEnds[validRows.end() - 1] + 1;
+    for (auto row = validRows.end(); row > validRows.begin();) {
+      --row;
+      if (!validRows.isValid(row)) {
+        continue;
+      }
+      if (rawFrameStarts[row] < firstAddedRow) {
+        addFrameRows(rawFrameStarts[row], firstAddedRow - 1);
+        firstAddedRow = rawFrameStarts[row];
+      }
+      extractAggregateResult(result, resultOffset + row);
+    }
+
+    setEmptyFramesResult(validRows, resultOffset, emptyResult_, result);
+  }
+
   void simpleAggregation(
       const SelectivityVector& validRows,
       const vector_size_t* rawFrameStarts,
@@ -436,6 +526,7 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   std::vector<column_index_t> argIndices_;
   std::vector<VectorPtr> argVectors_;
   std::unique_ptr<BmWindowFrameReader> frameReader_;
+  bool supportsReverseIncremental_{false};
   SelectivityVector aggregateRows_;
   vector_size_t selectedAggregateRowsStart_{0};
   vector_size_t selectedAggregateRowsEnd_{0};
@@ -474,7 +565,8 @@ std::unique_ptr<exec::WindowFunction> createBmAggregateWindowFunction(
   if (!exec::getAggregateFunctionSignatures(name).has_value()) {
     return nullptr;
   }
-  if (name == "percentile") {
+  if (name == "collect_list" || name == "collect_set" || name == "max_by" ||
+      name == "min_by" || name == "percentile") {
     return nullptr;
   }
 
