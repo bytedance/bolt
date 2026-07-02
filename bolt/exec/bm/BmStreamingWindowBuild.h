@@ -126,20 +126,23 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
 
   void spillActiveRows();
 
-  void releasePartitionIfConsumed();
+  void flushReleasedRows(bool force);
+
+  void releasePartitionIfConsumed(bool force = false);
 
   vector_size_t activeRowsInDescriptor(
       const BmWindowPartitionDescriptor& descriptor) const;
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   std::unique_ptr<exec::bm::BmRowContainer> bmData_;
-  std::vector<TypePtr> logicalTypes_;
+  std::shared_ptr<const BmWindowPartitionSchema> partitionSchema_;
   std::vector<int32_t> boundaryKeyColumns_;
   std::optional<BmWindowPartitionDescriptor> openPartition_;
   std::deque<BmWindowPartitionDescriptor> readyPartitions_;
   std::weak_ptr<exec::WindowPartition> returnedPartition_;
   vector_size_t returnedPartitionRows_{0};
   vector_size_t returnedActiveRows_{0};
+  vector_size_t releasedRowsPendingPop_{0};
   common::SpillStats spillStats_;
 
   PreviousRow previousRow_;

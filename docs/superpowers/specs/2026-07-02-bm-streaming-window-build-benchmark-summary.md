@@ -1,6 +1,12 @@
 # BM StreamingWindowBuild Benchmark 总结
 
-本文记录 `bolt/exec/bm/benchmarks/StreamingWindowBuildBenchmark.cpp` 在 2026-07-02 的默认 benchmark 结果。
+本文记录 `bolt/exec/bm/benchmarks/StreamingWindowBuildBenchmark.cpp` 在 2026-07-02 的最新 benchmark 和 perf 结果。
+
+本轮结果基于当前工作区实现，包括 `43cc59aee3 perf: reduce BM streaming window overheads` 之后尚未提交的增量优化：
+
+- `BmWindowPartition` 共享 schema，避免大量小 partition 反复复制 logical/physical type 元数据。
+- `BmStreamingWindowBuild` 批量释放已消费行，降低 many tiny partition 下的 `popFrontRows` 固定开销。
+- `BmAggregateWindow` 将 aggregate argument materialize batch 从 4096 调整为 1024，降低 ordered/running aggregate 的 SelectivityVector/DecodedVector 处理范围。
 
 ## Benchmark 范围
 
@@ -15,10 +21,6 @@
 - `peerGroupRows`：peer group 大小。
 - `PayloadProfile`：fixed、nullable、large varchar。
 - `SortProfile`：默认升序单排序键、`ASC NULLS FIRST` 多排序键、`DESC NULLS LAST` 多排序键。
-
-每个 `BenchmarkCase` 可以包含多个 window functions，用于覆盖同一个 Window operator 内多个函数共享 partition/order 的场景。
-
-## 覆盖场景
 
 默认 26 个 case 覆盖：
 
@@ -40,21 +42,22 @@
 构建命令：
 
 ```bash
-PATH=/data00/home/wangxinshuo.db/tools/miniconda3/bin:/data00/home/wangxinshuo.db/tools/cmake/bin:$PATH \
-  cmake --build --preset conan-release --target bolt_streaming_window_build_benchmark
+PATH=/data00/home/wangxinshuo.db/tools/cmake/bin:/data00/home/wangxinshuo.db/tools/miniconda3/bin:$PATH \
+  cmake --build --preset conan-release --target bolt_streaming_window_build_benchmark --parallel 16
 ```
 
-运行命令：
+全量 benchmark 命令：
 
 ```bash
-timeout 600s _build/Release/bolt/exec/bm/benchmarks/bolt_streaming_window_build_benchmark
+timeout 600s _build/Release/bolt/exec/bm/benchmarks/bolt_streaming_window_build_benchmark \
+  --bm_min_iters=3 --bm_max_trials=8 --bm_max_secs=2
 ```
 
 完整输出：
 
 ```text
-/tmp/bolt_streaming_window_build_benchmark_20260702.out
-/tmp/bolt_streaming_window_build_benchmark_20260702.err
+/tmp/bolt_streaming_window_build_benchmark_20260702_after_opt.out
+/tmp/bolt_streaming_window_build_benchmark_20260702_after_opt.err
 ```
 
 运行结果：
@@ -78,241 +81,252 @@ cases=26
 include_bm_slow=false
 ```
 
-本 benchmark 是纯内存对比。BM 路径启用了 spill 相关配置，但默认运行没有触发内存压力，所有 case 的 `spilledBytes=0`、`spilledRows=0`。BM spill/reclaim slow path 需要单独 benchmark。
+本 benchmark 是默认内存对比。BM 路径启用了 spill 相关配置，但本轮没有触发内存压力，所有 case 的 `spilledBytes=0`、`spilledRows=0`。BM spill/reclaim slow path 仍需要独立 benchmark。
+
+## 时间口径
+
+本轮保留两组时间数据：
+
+- folly `time/iter`：folly benchmark 框架自己的统计。
+- benchmark 内部 `avg_wall_us`：在 `query.runWithoutResults(task)` 周围计时，并通过 `folly::BenchmarkSuspender` 排除数据准备和 result 记录等外层开销。
+
+下方主结果表使用内部 `avg_wall_us`。folly `time/iter` 用于交叉验证。两者整体趋势一致，但在短耗时/边界 case 上仍有噪声差异。
+
+精确到原始 `avg_wall_us` 时，本轮是 25/26 个 case 正向，`by_extreme_other_agg_no_order` 四舍五入显示 `1.00x`，但原始值是 Streaming `14647us`、BM `14660us`，BM 慢 `13us`，约 `0.09%`。因此如果要求“严格每个 case 都正向”，当前仍有这一个边界点需要继续处理。
+
+folly `time/iter` 中需要注意的边界项：
+
+| case | Streaming time/iter | BM time/iter | 备注 |
+| --- | ---: | ---: | --- |
+| `collection_agg_full_frame` | `6.94ms` | `7.33ms` | folly 口径 BM 略慢，内部 wall 为 `1.11x` |
+| `by_extreme_other_agg_no_order` | `14.22ms` | `14.53ms` | folly 口径 BM 略慢，内部 wall 为 `1.00x` |
+| `ignore_nulls_values` | `2.14ms` | `2.08ms` | 两组口径均小幅正向 |
 
 ## 结果摘要
 
-`BM 耗时对比` 是 StreamingWindowBuild avg wall / BmStreamingWindowBuild avg wall。大于 1 表示 BM 更快，小于 1 表示 BM 更慢。
+`BM 耗时对比` 是 StreamingWindowBuild `avg_wall_us` / BmStreamingWindowBuild `avg_wall_us`。大于 1 表示 BM 更快，小于 1 表示 BM 更慢。
 
-`Streaming peak / BM peak` 是 StreamingWindowBuild peak memory / BmStreamingWindowBuild peak memory。大于 1 表示 BM peak memory 更低，小于 1 表示 BM peak memory 更高。
+`Streaming peak / BM peak` 是 StreamingWindowBuild peak memory / BmStreamingWindowBuild peak memory。大于 1 表示 BM peak memory 更低。
 
-| case | BM 耗时对比 | Streaming peak / BM peak | BM avg wall us | BM peak bytes |
-| --- | ---: | ---: | ---: | ---: |
-| `row_number_default` | `1.42x` | `15.20x` | `1591` | `179968` |
-| `rank_unique_peer` | `1.19x` | `15.20x` | `1862` | `179968` |
-| `rank_128_peer` | `1.27x` | `15.20x` | `1768` | `179968` |
-| `rank_full_peer` | `1.39x` | `15.20x` | `1588` | `179968` |
-| `many_tiny_row_number` | `0.89x` | `2.09x` | `4309` | `180160` |
-| `unaligned_running_sum` | `0.56x` | `14.56x` | `6246` | `180736` |
-| `single_part_running_sum` | `0.52x` | `15.21x` | `5665` | `180736` |
-| `reverse_running_sum` | `0.55x` | `12.09x` | `99893` | `230400` |
-| `bounded_rows_64_sum` | `0.59x` | `15.02x` | `11160` | `183040` |
-| `bounded_range_col_sum` | `6.09x` | `10.73x` | `343279` | `262656` |
-| `extended_ranking_peer` | `1.23x` | `11.07x` | `1877` | `253696` |
-| `whole_partition_agg_no_order` | `0.95x` | `4.77x` | `3459` | `677760` |
-| `global_whole_agg_no_order` | `1.00x` | `6.31x` | `2729` | `527744` |
-| `implicit_ordered_agg` | `0.30x` | `9.24x` | `22824` | `331136` |
-| `plain_value_functions` | `0.92x` | `10.96x` | `2747` | `255360` |
-| `collection_agg_full_frame` | `0.76x` | `1.49x` | `12589` | `403584` |
-| `by_extreme_other_agg_no_order` | `0.42x` | `0.25x` | `40309` | `100690560` |
-| `explicit_common_frames` | `7.96x` | `8.60x` | `784008` | `339456` |
-| `desc_null_multi_key_ranking` | `1.15x` | `9.44x` | `2163` | `302848` |
-| `desc_null_multi_key_agg` | `0.31x` | `9.88x` | `18928` | `305792` |
-| `asc_null_first_multi_key_value` | `0.87x` | `10.96x` | `2749` | `255360` |
-| `lead_lag_nullable` | `0.95x` | `11.45x` | `2580` | `243456` |
-| `ignore_nulls_values` | `0.74x` | `8.63x` | `3754` | `333568` |
-| `multi_function_mix` | `0.53x` | `6.22x` | `6813` | `489984` |
-| `multi_agg_types` | `0.40x` | `8.25x` | `10613` | `356096` |
-| `count_large_varchar_full` | `0.93x` | `2.95x` | `6518` | `5636992` |
+| case | BM 耗时对比 | Streaming peak / BM peak | Streaming avg wall us | BM avg wall us | BM compute ms | BM peak bytes | BM extract ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `row_number_default` | `1.64x` | `15.20x` | `2006` | `1220` | `0.284` | `179968` | `0.001` |
+| `rank_unique_peer` | `1.09x` | `15.20x` | `1619` | `1486` | `0.349` | `179968` | `0.001` |
+| `rank_128_peer` | `1.17x` | `15.20x` | `1630` | `1397` | `0.287` | `179968` | `0.001` |
+| `rank_full_peer` | `1.37x` | `15.20x` | `1649` | `1204` | `0.282` | `179968` | `0.001` |
+| `many_tiny_row_number` | `1.57x` | `2.09x` | `4416` | `2815` | `1.540` | `180160` | `0.003` |
+| `unaligned_running_sum` | `1.17x` | `13.61x` | `2847` | `2434` | `1.114` | `193280` | `0.001` |
+| `single_part_running_sum` | `1.25x` | `13.36x` | `2397` | `1914` | `0.976` | `205696` | `0.002` |
+| `reverse_running_sum` | `16.24x` | `13.55x` | `32049` | `1974` | `1.028` | `205696` | `0.001` |
+| `bounded_rows_64_sum` | `1.17x` | `13.36x` | `4064` | `3468` | `2.525` | `205696` | `0.001` |
+| `bounded_range_col_sum` | `11.50x` | `13.69x` | `2075419` | `180469` | `179.156` | `205952` | `0.003` |
+| `extended_ranking_peer` | `1.14x` | `11.07x` | `1761` | `1548` | `0.348` | `253696` | `0.001` |
+| `whole_partition_agg_no_order` | `1.53x` | `6.11x` | `2555` | `1665` | `0.623` | `529664` | `0.001` |
+| `global_whole_agg_no_order` | `1.29x` | `7.77x` | `1974` | `1531` | `0.518` | `429056` | `0.002` |
+| `implicit_ordered_agg` | `1.15x` | `5.78x` | `5870` | `5089` | `3.834` | `529664` | `0.002` |
+| `plain_value_functions` | `1.17x` | `11.53x` | `1982` | `1693` | `0.444` | `242816` | `0.001` |
+| `collection_agg_full_frame` | `1.11x` | `1.49x` | `8227` | `7384` | `5.673` | `403584` | `0.003` |
+| `by_extreme_other_agg_no_order` | `1.00x` | `1.00x` | `14647` | `14660` | `9.160` | `25488000` | `0.003` |
+| `explicit_common_frames` | `15.87x` | `8.46x` | `6118677` | `385567` | `383.887` | `345344` | `0.004` |
+| `desc_null_multi_key_ranking` | `1.17x` | `9.44x` | `2088` | `1780` | `0.458` | `302848` | `0.002` |
+| `desc_null_multi_key_agg` | `1.13x` | `6.30x` | `5060` | `4476` | `3.170` | `479360` | `0.002` |
+| `asc_null_first_multi_key_value` | `1.16x` | `11.53x` | `1988` | `1709` | `0.428` | `242816` | `0.001` |
+| `lead_lag_nullable` | `1.08x` | `12.07x` | `1828` | `1691` | `0.484` | `230912` | `0.001` |
+| `ignore_nulls_values` | `1.03x` | `8.94x` | `2154` | `2090` | `0.825` | `321792` | `0.020` |
+| `multi_function_mix` | `1.14x` | `6.72x` | `2814` | `2479` | `1.251` | `453120` | `0.002` |
+| `multi_agg_types` | `1.18x` | `8.23x` | `3540` | `3010` | `1.798` | `356608` | `0.001` |
+| `count_large_varchar_full` | `1.18x` | `4.86x` | `7349` | `6240` | `2.008` | `3425024` | `0.004` |
 
 ## 主要观察
 
-BM 更快的 case：
+内部 `avg_wall_us` 口径下，BM 在 25/26 个 case 中正向，剩余 `by_extreme_other_agg_no_order` 四舍五入为 `1.00x` 但原始值微负。多数 case 有明显优势。
 
-- `row_number_default`：`1.42x`
-- `rank_unique_peer`：`1.19x`
-- `rank_128_peer`：`1.27x`
-- `rank_full_peer`：`1.39x`
-- `extended_ranking_peer`：`1.23x`
-- `desc_null_multi_key_ranking`：`1.15x`
-- `bounded_range_col_sum`：`6.09x`
-- `explicit_common_frames`：`7.96x`
+优势最大的 case：
 
-接近持平的 case：
+- `reverse_running_sum`：`16.24x`
+- `explicit_common_frames`：`15.87x`
+- `bounded_range_col_sum`：`11.50x`
+- `row_number_default`：`1.64x`
+- `many_tiny_row_number`：`1.57x`
+- `whole_partition_agg_no_order`：`1.53x`
 
-- `global_whole_agg_no_order`：`1.00x`
-- `whole_partition_agg_no_order`：`0.95x`
-- `lead_lag_nullable`：`0.95x`
-- `plain_value_functions`：`0.92x`
-- `count_large_varchar_full`：`0.93x`
+边界 case：
 
-BM 明显更慢的 case：
+- `by_extreme_other_agg_no_order`：内部 wall 四舍五入为 `1.00x`，原始值 BM 慢 `13us`，folly `time/iter` 也小幅负向，属于当前唯一未严格正向的边界 case。
+- `ignore_nulls_values`：`1.03x`，收益很小。
+- `lead_lag_nullable`：`1.08x`，收益小但稳定正向。
+- `rank_unique_peer`：`1.09x`，ranking 中收益最小。
 
-- `implicit_ordered_agg`：`0.30x`
-- `desc_null_multi_key_agg`：`0.31x`
-- `multi_agg_types`：`0.40x`
-- `by_extreme_other_agg_no_order`：`0.42x`
-- `multi_function_mix`：`0.53x`
-- `single_part_running_sum`：`0.52x`
-- `reverse_running_sum`：`0.55x`
-- `unaligned_running_sum`：`0.56x`
-- `bounded_rows_64_sum`：`0.59x`
+内存方面，本轮 BM peak memory 全部不高于 StreamingWindowBuild。`by_extreme_other_agg_no_order` 从旧结果中的明显内存劣势变为基本持平：Streaming `25586304` bytes，BM `25488000` bytes。
 
-内存方面，除 `by_extreme_other_agg_no_order` 外，BM peak memory 都低于 StreamingWindowBuild。`by_extreme_other_agg_no_order` 的 `Streaming peak / BM peak = 0.25x`，即 BM peak memory 更高。
+aggregate 相关 case 相比旧结果已经整体转正：
+
+- `implicit_ordered_agg`：`1.15x`
+- `desc_null_multi_key_agg`：`1.13x`
+- `multi_agg_types`：`1.18x`
+- `whole_partition_agg_no_order`：`1.53x`
+- `global_whole_agg_no_order`：`1.29x`
 
 ## Perf 热点分析
 
 ### 分析方法和限制
 
-在默认 benchmark 之外，对 5 个代表性 BM case 额外运行 `perf record -F 99 -g`，再用 `perf report --stdio --no-children --sort=symbol` 汇总符号级热点：
+在全量 benchmark 之外，对 8 个代表性 BM case 运行：
+
+```bash
+perf stat -e task-clock,context-switches,cpu-migrations,page-faults \
+  _build/Release/bolt/exec/bm/benchmarks/bolt_streaming_window_build_benchmark \
+  --bm_regex='<case>_bm_streaming$' --bm_min_iters=5 --bm_max_trials=16 --bm_max_secs=2
+
+perf record -F 99 -g \
+  _build/Release/bolt/exec/bm/benchmarks/bolt_streaming_window_build_benchmark \
+  --bm_regex='<case>_bm_streaming$' --bm_min_iters=5 --bm_max_trials=16 --bm_max_secs=2
+
+perf report --stdio --no-children --sort=symbol
+```
+
+产物目录：
+
+```text
+/tmp/bolt-window-build-perf-20260702-after-opt
+```
+
+采样数：
 
 | case | 选择原因 | samples |
 | --- | --- | ---: |
-| `implicit_ordered_agg_bm_streaming` | ordered implicit aggregate 是 BM 明显慢点 | `898` |
-| `explicit_common_frames_bm_streaming` | dynamic RANGE / explicit frame 是最大绝对耗时 case | `1113` |
-| `by_extreme_other_agg_no_order_bm_streaming` | 同时存在耗时和 peak memory 劣势 | `830` |
-| `extended_ranking_peer_bm_streaming` | ranking 快路径代表 | `131` |
-| `ignore_nulls_values_bm_streaming` | value / offset nullable 逻辑代表 | `100` |
+| `implicit_ordered_agg` | 旧版 ordered aggregate 慢点，验证 batch 粒度优化后热点 | `4` |
+| `desc_null_multi_key_agg` | 多排序键 ordered aggregate | `3` |
+| `explicit_common_frames` | dynamic RANGE / explicit frame 绝对耗时最高 | `377` |
+| `bounded_range_col_sum` | 单 dynamic RANGE aggregate | `260` |
+| `collection_agg_full_frame` | 当前边界 aggregate case | `3` |
+| `by_extreme_other_agg_no_order` | 当前 wall 持平、folly 小幅负向 case | `82` |
+| `many_tiny_row_number` | 小 partition 固定开销代表 | `4` |
+| `ignore_nulls_values` | value / offset nullable 逻辑代表 | `5` |
 
-采样产物保存在：
-
-```text
-/tmp/bolt-window-implicit-ordered-agg.perf.report
-/tmp/bolt-window-explicit-common-frames.perf.report
-/tmp/bolt-window-by-extreme.perf.report
-/tmp/bolt-window-extended-ranking.perf.report
-/tmp/bolt-window-ignore-nulls.perf.report
-```
-
-当前运行环境不支持 `cycles`、`instructions`、`cache-misses`、`branches`、`branch-misses` 等硬件事件，因此没有使用 IPC 或 cache miss 推断。可用的软件事件显示这几个 case 基本都是单 CPU 计算型负载，`by_extreme_other_agg_no_order` 额外有更明显的系统态和 page fault 压力：
+当前机器仍未使用硬件事件，所以没有 IPC/cache miss 结论。`perf stat` 软件事件如下：
 
 | case | task-clock | CPUs utilized | page faults | user time | sys time |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `implicit_ordered_agg` | `5322.43 ms` | `1.005` | `40046` | `5.149646 s` | `0.187241 s` |
-| `explicit_common_frames` | `8112.27 ms` | `0.999` | `5987` | `8.079595 s` | `0.033989 s` |
-| `by_extreme_other_agg_no_order` | `5715.16 ms` | `1.051` | `41497` | `5.082562 s` | `0.785744 s` |
+| `bounded_range_col_sum` | `2756.68 ms` | `0.998` | `5554` | `2.736974 s` | `0.020992 s` |
+| `explicit_common_frames` | `3857.73 ms` | `0.997` | `5197` | `3.842680 s` | `0.016007 s` |
+| `by_extreme_other_agg_no_order` | `1263.70 ms` | `1.034` | `17346` | `1.131077 s` | `0.156783 s` |
+| `collection_agg_full_frame` | `659.24 ms` | `1.003` | `14597` | `0.599437 s` | `0.063576 s` |
+| `implicit_ordered_agg` | `492.82 ms` | `0.992` | `15844` | `0.413001 s` | `0.083414 s` |
+| `desc_null_multi_key_agg` | `448.01 ms` | `0.999` | `14902` | `0.392618 s` | `0.059040 s` |
+| `many_tiny_row_number` | `307.77 ms` | `0.983` | `13406` | `0.244290 s` | `0.066999 s` |
+| `ignore_nulls_values` | `257.64 ms` | `0.980` | `16481` | `0.195560 s` | `0.065528 s` |
 
-### `explicit_common_frames`：RANGE 边界搜索和 order key 比较
+### RANGE path：仍然是主要绝对热点
 
-`explicit_common_frames` 的 BM 单次 wall time 为 `785808 us`，其中 `compute_ms=783.679`，耗时几乎全部在 compute phase。
+`bounded_range_col_sum` 和 `explicit_common_frames` 有足够样本，perf 结论稳定。两者热点都集中在 `BmRangeFrameBounds` 的 row-to-row compare / frame boundary search 上。
 
-`perf report` 的主要符号：
-
-| symbol | overhead |
-| --- | ---: |
-| `bytedance::bolt::FlatVector<long>::compare` | `49.51%` |
-| `bytedance::bolt::exec::window::BmRangeFrameBounds::searchFrameValue<bool (*)(int)>` | `14.29%` |
-| `bytedance::bolt::exec::bm::BmRowContainer::extractColumnResident` | `11.50%` |
-| `bytedance::bolt::exec::window::BmWindowPartition::loadResidentRows` | `7.91%` |
-| `bytedance::bolt::exec::window::BmRangeFrameBounds::compute(...)::{lambda(int)#1}::_FUN` | `2.43%` |
-
-这说明 dynamic RANGE 的主要热点在 `BmRangeFrameBounds::searchFrameValue`。该路径反复 `loadRows`、`extractColumnFromRows`，再对 order key 做 `FlatVector::compare`。即使 `explicit_common_frames` 相比 StreamingWindowBuild 仍有 `7.96x` 收益，它也是 BM 路径绝对耗时最高的 case，优化优先级很高。
-
-可细化的优化方向：
-
-- 缓存或复用 frame boundary search 过程中读取过的 order key batch，降低 `extractColumnResident` 次数。
-- 减少 `loadResidentRows` 为边界搜索重复构造 row pointer batch 的成本。
-- 对 fixed-width 单排序键 RANGE path 增加专门比较路径，减少通用 `FlatVector::compare` 调用开销。
-
-### `implicit_ordered_agg`：聚合推进和内存分配混合热点
-
-`implicit_ordered_agg` 的 BM 单次 wall time 为 `22889 us`，其中 `compute_ms=21.079`，`add_ms=0.751`，`extract_ms=0.005`。瓶颈集中在 aggregate compute path。
-
-`perf report` 的主要符号：
+`bounded_range_col_sum` top symbols：
 
 | symbol | overhead |
 | --- | ---: |
-| `bytedance::bolt::exec::window::(anonymous namespace)::BmAggregateWindowFunction::addFrameRows` | `14.37%` |
-| `_int_free` | `9.13%` |
-| `__pthread_mutex_unlock_usercnt` | `8.35%` |
-| `_int_malloc` | `6.01%` |
-| `__pthread_mutex_lock` | `5.90%` |
-| `bytedance::bolt::AlignedBuffer::allocate<char>` | `3.79%` |
-| `bytedance::bolt::Buffer::release` | `3.34%` |
-| `bytedance::bolt::memory::MemoryPoolImpl::allocate` | `3.01%` |
-| `bytedance::bolt::exec::window::(anonymous namespace)::BmAggregateWindowFunction::apply` | `1.78%` |
+| `BmRowContainer::compareNonNull` | `28.85%` |
+| `BmRowContainer::compare` | `23.46%` |
+| `BmRangeFrameBounds::searchFrameValue` | `12.69%` |
+| `SumAggregateBase<long, long, long>::addSingleGroupRawInput` | `12.69%` |
+| `BmRowContainer::extractColumnResident` | `11.54%` |
 
-`addFrameRows` 下面还能看到 aggregate update 符号，例如 `SimpleNumericAggregate<...>::updateOneGroup...` 和 `SumAggregateBase<...>::addSingleGroupRawInput`。因此 slow aggregate 不是单纯的 row extraction 问题，而是 `BmAggregateWindowFunction::apply/addFrameRows` 的 frame batch 读取、aggregate update、临时 vector/buffer 生命周期共同构成热点。
-
-这个结论也可以解释 `desc_null_multi_key_agg`、`multi_agg_types`、`running_sum`、`bounded_rows_64_sum` 等 aggregate case 的 BM 慢点：它们都主要消耗在 compute phase，而不是 input add 或 output extract。
-
-可细化的优化方向：
-
-- running / ordered implicit frame 优先做累计状态复用，避免每行重复推进相同 frame。
-- `BmAggregateWindowFunction::addFrameRows` 复用参数列 vector、SelectivityVector 和 reader batch，减少 `AlignedBuffer::allocate`、`Buffer::release`、`MemoryPoolImpl::allocate/free`。
-- 多 aggregate function 共享 frame 参数读取，避免同一 frame 对同一输入列重复 materialize。
-- 对 fixed-width numeric aggregate 增加更直接的 batch update path，减少通用 vector/aggregate 接口层开销。
-
-### `by_extreme_other_agg_no_order`：字符串和 allocator 压力
-
-`by_extreme_other_agg_no_order` 的 BM 单次 wall time 为 `37905 us`，其中 `compute_ms=21.652`，`add_ms=0.905`，`extract_ms=0.014`。默认 benchmark 中它的 `BM 耗时对比=0.42x`，`Streaming peak / BM peak=0.25x`，是唯一同时存在耗时和 peak memory 劣势的 case。
-
-`perf report` 的主要符号：
+`explicit_common_frames` top symbols：
 
 | symbol | overhead |
 | --- | ---: |
-| `_int_free` | `9.76%` |
-| `malloc_consolidate` | `8.92%` |
-| `_int_malloc` | `5.66%` |
-| `__pthread_mutex_unlock_usercnt` | `5.54%` |
-| `__pthread_mutex_lock` | `3.98%` |
-| `bytedance::bolt::Buffer::release` | `3.13%` |
-| `bytedance::bolt::SimpleVector<StringView>::resetDataDependentFlags` | `2.05%` |
-| `bytedance::bolt::FlatVector<StringView>::getBufferWithSpace` | `1.69%` |
-| `bytedance::bolt::memory::MemoryPoolImpl::allocate` | `1.57%` |
-| `bytedance::bolt::exec::bm::BmRowContainer::extractColumnResident` | `1.33%` |
-| `bytedance::bolt::HashStringAllocator::allocateFromFreeLists` | `1.08%` |
-| `bytedance::bolt::HashStringAllocator::free` | `0.96%` |
+| `BmRowContainer::compareNonNull` | `37.14%` |
+| `BmRowContainer::compare` | `31.03%` |
+| `BmRangeFrameBounds::searchFrameValue` | `14.59%` |
+| `BmRangeFrameBounds::compute(...)::{lambda(int)#1}::_FUN` | `5.84%` |
+| `BmRowContainer::extractColumnResident` | `5.31%` |
+| `AverageAggregateBase<double, double, double>::addSingleGroupRawInput` | `2.65%` |
 
-软件 `perf stat` 里该 case 有 `41497` page faults 和 `0.785744 s` sys time，明显高于 `explicit_common_frames` 的 `5987` page faults 和 `0.033989 s` sys time。结合 `100690560` bytes peak memory，可以判断这里的主要问题是 aggregate state / result vector / string buffer 生命周期造成的 allocator 和 page fault 压力，而不只是 compute 算法本身。
+结论：
 
-可细化的优化方向：
+- RANGE 相关 case 虽然相对 StreamingWindowBuild 已经有 `11.50x` / `15.87x`，但仍然是 BM 路径最大的绝对耗时来源。
+- 当前热点已经不再是旧版文档中的 `FlatVector::compare`，而是 BM resident row 的 `compare/compareNonNull` 和 `searchFrameValue` 本身。
+- 下一步如果继续追求更高上限，应该优化 `BmRangeFrameBounds` 的边界搜索和 compare 调用次数，而不是先动 aggregate path。
 
-- 拆分 `max_by`、`min_by`、`percentile` 的单独 case，确认 peak memory 主要来自哪类 accumulator。
-- 检查 `StringView` result vector 和 `HashStringAllocator` 的复用策略，避免每轮 compute 大量 allocate/free。
-- 对 no-order whole-partition by-extreme aggregate 尽量一次性构建 partition 级 state，减少按 output row 重建状态。
+### Aggregate path：旧慢点已转正，但边界 case 仍需关注
 
-### fast case：perf 采样被 benchmark 框架噪声稀释
+`implicit_ordered_agg` 和 `desc_null_multi_key_agg` 因为单次 perf record 运行很短，samples 只有 `4` 和 `3`，top symbol 已被框架/setup 噪声稀释，不能据此判断具体函数热点。
 
-`extended_ranking_peer` 的 BM 单次 wall time 为 `2025 us`，`compute_ms=0.488`；`ignore_nulls_values` 的 BM 单次 wall time 为 `3975 us`，`compute_ms=2.266`。这两个 case 绝对耗时较低，`perf report` 的 top symbol 被 `folly::runBenchmarkGetNSPerIteration`、DuckDB parser、allocator、task/window 构造等 benchmark 框架和 setup 成本稀释。
+更可靠的结论来自 benchmark 阶段耗时：
 
-因此对 ranking 和 value / offset 快路径，不应只根据当前 `perf report` top symbol 判断热点。更可靠的判断来自 benchmark 阶段耗时：
+- `implicit_ordered_agg`：BM compute `3.834ms`，Streaming compute `4.544ms`，wall `1.15x`。
+- `desc_null_multi_key_agg`：BM compute `3.170ms`，Streaming compute `3.825ms`，wall `1.13x`。
+- `multi_agg_types`：BM compute `1.798ms`，Streaming compute `2.305ms`，wall `1.18x`。
 
-- ranking path 的 compute 成本已经很低，当前不是优先优化对象。
-- `IGNORE NULLS` 的 compute 成本高于普通 value functions，但需要更长运行时间或更窄的微基准，才能把 null 跳转逻辑从 framework/setup 噪声里分离出来。
+`BmAggregateWindow` 的 1024-row argument batch 调整有效降低了 ordered aggregate 的 compute cost。继续深入 perf 需要更长运行时间或更窄 micro benchmark，否则 `perf record` 样本不足。
+
+### by-extreme / collection：allocator 压力仍存在
+
+`by_extreme_other_agg_no_order` 本轮内部 wall 接近持平：Streaming `14647us`，BM `14660us`。folly `time/iter` 仍显示 BM 略慢：Streaming `14.22ms`，BM `14.53ms`。该 case 已没有 peak memory 劣势，但仍不是强优势。
+
+`by_extreme_other_agg_no_order` perf top symbols：
+
+| symbol | overhead |
+| --- | ---: |
+| `_int_malloc` | `8.54%` |
+| `_int_free` | `6.10%` |
+| `BmRowContainer::extractColumnResident` | `4.88%` |
+| `BaseVector::ensureNullsCapacity` | `3.66%` |
+| `FlatVector<StringView>::getBufferWithSpace` | `3.66%` |
+| `HashStringAllocator::free` | `3.66%` |
+| `MinMaxByAggregateBase<StringView, long, true, ...>::addSingleGroupRawInput` | `2.44%` |
+| `MinMaxByAggregateBase<StringView, long, true, ...>::initializeNewGroups` | `2.44%` |
+
+`collection_agg_full_frame` samples 只有 `3`，不能解读 top symbol。benchmark 指标显示它当前 wall `1.11x`，但 folly `time/iter` 仍略负。它和 by-extreme 都属于 allocator/string-heavy case，短运行下波动较大。
+
+### fast case：perf record 样本不足
+
+`many_tiny_row_number`、`ignore_nulls_values`、`implicit_ordered_agg`、`desc_null_multi_key_agg` 的 perf record 样本都只有 `3-5` 个。原因是这些 case 优化后单次运行很短，`perf record -F 99` 的统计窗口不足。
+
+这些 case 的可靠判断应以内部 benchmark 指标为主：
+
+- `many_tiny_row_number`：`1.57x`，批量 `popFrontRows` 和 schema 共享有效降低固定成本。
+- `ignore_nulls_values`：`1.03x`，仍是边界正向。
+- `implicit_ordered_agg`：`1.15x`。
+- `desc_null_multi_key_agg`：`1.13x`。
+
+如果要继续对这些 fast case 做 perf，需要把输入规模或 benchmark max seconds 单独放大。
 
 ## 结论
 
-BM 在 ranking 类场景表现稳定，包含普通 ranking、peer-heavy ranking、extended ranking、多排序键 ranking，均快于 `StreamingWindowBuild`，并显著降低 peak memory。
+按内部 `avg_wall_us` 口径，本轮 `BmStreamingWindowBuild` 相对 `StreamingWindowBuild` 在默认 26 个 case 上达到 25 个正向、1 个四舍五入持平但原始值微负，多数 case 明显更快。若成功标准是严格“每个 case 原始 wall 都正向”，当前还差 `by_extreme_other_agg_no_order` 这一项。
 
-BM 对 dynamic RANGE 和 explicit common frame 的收益最大。`bounded_range_col_sum` 和 `explicit_common_frames` 的耗时对比分别为 `6.09x` 和 `7.96x`。
+最重要的改善：
 
-whole-partition no-order aggregate 基本接近持平，同时保持明显内存收益。global no-order aggregate 耗时持平，peak memory 降低 `6.31x`。
+- aggregate compute path 不再是整体短板。running、reverse-running、bounded ROWS、ordered implicit aggregate、多 aggregate、多排序键 aggregate 均已转正。
+- `many_tiny_row_number` 从旧版劣势转为 `1.57x`，说明 tiny partition 固定开销优化有效。
+- `by_extreme_other_agg_no_order` 从旧版耗时和内存双劣势转为基本持平，但还不是严格正向。
+- value / offset 相关 case 都转为正向，但 `IGNORE NULLS` 仍然只是小幅优势。
 
-BM 的主要性能短板集中在 aggregate compute path。running、reverse-running、bounded ROWS、ordered implicit aggregate、多 aggregate、多排序键 aggregate 都明显慢于 StreamingWindowBuild。慢点主要体现在 `compute_ms`，不是 add input 或 extract column。`perf` 进一步指向 `BmAggregateWindowFunction::apply/addFrameRows`、aggregate update 以及临时 vector/buffer 分配释放。
+仍需谨慎的点：
 
-value / offset 函数整体接近，但仍略慢。`IGNORE NULLS` value functions 慢于普通 value functions。
-
-collection 和 by-extreme / percentile 场景需要继续拆分分析。`collection_agg_full_frame` 慢于 StreamingWindowBuild 但仍降低内存；`by_extreme_other_agg_no_order` 同时存在耗时和 peak memory 劣势，`perf` 指向 allocator、`StringView` vector 和 `HashStringAllocator` 压力。
+- `by_extreme_other_agg_no_order` 内部 wall 原始值仍微负，folly `time/iter` 也小幅负向。
+- `collection_agg_full_frame` 内部 wall 正向，但 folly `time/iter` 小幅负向。
+- `ignore_nulls_values` 只有 `1.03x`，安全边际很小。
+- RANGE path 虽然相对优势巨大，但仍是 BM 绝对耗时最大来源。
 
 ## 后续优化方向
 
-优先关注 dynamic RANGE frame boundary search：
+优先级最高：RANGE frame boundary search。
 
-- `BmRangeFrameBounds::searchFrameValue` 减少重复 `loadResidentRows` 和 `extractColumnResident`。
-- fixed-width 单排序键走专门比较路径，降低 `FlatVector::compare` 开销。
-- 复用边界搜索中的 order key batch，减少重复 materialize。
+- 减少 `BmRangeFrameBounds::searchFrameValue` 中的 compare 调用次数。
+- 对 fixed-width 单排序键 RANGE path 继续做专用 compare/search kernel。
+- 尝试复用边界搜索过程中的 row/order-key 读取结果，降低 `extractColumnResident` 和 repeated compare 成本。
 
-继续优化 aggregate window compute path：
+第二优先级：allocator/string-heavy aggregate。
 
-- running / reverse-running frame 减少重复扫描。
-- bounded ROWS frame 降低每行 frame materialize 和 aggregate 初始化成本。
-- ordered implicit aggregate frame 复用累计聚合状态。
-- 多 aggregate function 减少重复读取相同 frame 参数列。
-- 多排序键 aggregate 分析 peer/frame 边界查找成本。
-- `BmAggregateWindowFunction::addFrameRows` 复用参数列 vector、reader batch 和临时 buffer。
+- 拆分 `max_by`、`min_by`、`percentile` 的单独 benchmark，定位 by-extreme case 的边界来源。
+- 检查 `StringView` result vector、null buffer、`HashStringAllocator` 的复用策略。
+- 对 no-order full-frame complex aggregate 继续减少 repeated group initialization 和 string buffer allocate/free。
 
-单独分析内存异常 case：
+第三优先级：fast case 稳定性。
 
-- `by_extreme_other_agg_no_order` 的 accumulator/state 内存。
-- `percentile` 在 BM 分块 materialize 下的内存增长。
-- `max_by/min_by` 的 result/value state 持有策略。
-- `StringView` result vector 和 `HashStringAllocator` 的 allocate/free 频率。
+- 为 `ignore_nulls_values`、`collection_agg_full_frame`、`by_extreme_other_agg_no_order` 增加更长运行时间或更大输入规模的定向 benchmark，降低 folly/wall 口径差异。
+- 如果目标是严格让 folly `time/iter` 也全正，需要优先处理 collection/by-extreme 两个边界 case。
 
-继续优化 value / offset path：
-
-- `IGNORE NULLS` 的 null 定位和跳转逻辑。
-- 普通 value functions 的 frame 边界访问成本。
-- 为 fast case 增加更窄的微基准或更长采样时间，降低 benchmark framework/setup 噪声。
-
-spill/reclaim 场景不放入这个 benchmark，需要独立 benchmark 覆盖。
+spill/reclaim 场景仍不放入这个默认 benchmark，需要独立 benchmark 覆盖。

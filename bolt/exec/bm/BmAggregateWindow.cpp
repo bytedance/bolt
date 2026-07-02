@@ -14,7 +14,7 @@ namespace bytedance::bolt::exec::window {
 
 namespace {
 
-constexpr vector_size_t kAggregateInputBatchRows = 4096;
+constexpr vector_size_t kAggregateInputBatchRows = 1024;
 
 folly::Synchronized<BmAggregateWindowTestStats>& testStats() {
   static folly::Synchronized<BmAggregateWindowTestStats> stats;
