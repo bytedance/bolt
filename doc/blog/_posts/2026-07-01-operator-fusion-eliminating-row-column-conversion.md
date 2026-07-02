@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "Operator Fusion: Reducing Data Layout Conversion Across Operators"
+title: "Operator Fusion: Reducing Data Layout Conversions"
 date: 2026-07-01
 author: "Haiyan Gu, Jinyuan Zhang"
 parent: Blog
