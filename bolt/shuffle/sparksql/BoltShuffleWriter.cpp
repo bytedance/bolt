@@ -36,7 +36,6 @@
 #include <stdexcept>
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/Nulls.h"
-#include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/simd.h"
 #include "bolt/type/HugeInt.h"

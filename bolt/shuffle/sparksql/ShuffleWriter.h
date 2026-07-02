@@ -33,7 +33,6 @@
 
 #include <arrow/ipc/writer.h>
 #include <cstdint>
-#include <memory>
 #include <numeric>
 #include <utility>
 
