@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#include "bolt/exec/bm/BmAggregateWindow.h"
 #include "bolt/exec/bm/BmStreamingWindowBuild.h"
+#include "bolt/exec/bm/BmAggregateWindow.h"
 #include "bolt/exec/bm/BmWindowPartition.h"
 
 #include "bolt/common/base/SpillConfig.h"
@@ -109,10 +109,9 @@ class AutoSpillTestContext {
   AutoSpillTestContext(std::string name, int64_t memoryLimitBytes)
       : memoryLimitBytes_(memoryLimitBytes) {
     initializeExecutionMemoryPool(memoryLimitBytes_);
-    taskMemoryManager_ =
-        std::make_shared<memory::sparksql::TaskMemoryManager>(
-            memory::sparksql::ExecutionMemoryPool::instance(),
-            nextAutoSpillTaskAttemptId());
+    taskMemoryManager_ = std::make_shared<memory::sparksql::TaskMemoryManager>(
+        memory::sparksql::ExecutionMemoryPool::instance(),
+        nextAutoSpillTaskAttemptId());
 
     std::unordered_map<std::string, std::string> sessionConf;
     sessionConf.emplace(
@@ -125,13 +124,12 @@ class AutoSpillTestContext {
         .overAcquiredRatio = 0,
         .taskMemoryManager = taskMemoryManager_,
         .sessionConf = std::move(sessionConf)};
-    holder_ = memory::sparksql::NativeMemoryManagerFactory::contextInstance(
-        param);
+    holder_ =
+        memory::sparksql::NativeMemoryManagerFactory::contextInstance(param);
     BOLT_CHECK_NOT_NULL(holder_);
 
-    memory::sparksql::SpillerPtr spiller =
-        std::make_shared<AutoReclaimSpiller>(
-            [this](int64_t size) { return spillFixedSize(size); });
+    memory::sparksql::SpillerPtr spiller = std::make_shared<AutoReclaimSpiller>(
+        [this](int64_t size) { return spillFixedSize(size); });
     holder_->appendSpiller(spiller);
   }
 
@@ -328,11 +326,11 @@ TEST_F(
           makeFlatVector<int16_t>({0, 0, 1, 1, 2, 2}),
           makeFlatVector<int32_t>({0, 1, 0, 1, 0, 1}),
       });
-  auto plan = PlanBuilder(pool())
-                  .values({data})
-                  .streamingWindow(
-                      {"row_number() over (partition by p order by s)"})
-                  .planNode();
+  auto plan =
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .planNode();
   auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(plan);
   ASSERT_NE(nullptr, windowNode);
 
@@ -387,11 +385,11 @@ TEST_F(BmStreamingWindowBuildTest, acceptsIgnorePeerFlag) {
           makeFlatVector<int16_t>({0, 0, 0}),
           makeFlatVector<int32_t>({0, 1, 2}),
       });
-  auto plan = PlanBuilder(pool())
-                  .values({data})
-                  .streamingWindow(
-                      {"row_number() over (partition by p order by s)"})
-                  .planNode();
+  auto plan =
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .planNode();
   auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(plan);
   ASSERT_NE(nullptr, windowNode);
 
@@ -422,7 +420,8 @@ TEST_F(BmStreamingWindowBuildTest, nonAggregateFunctions) {
       {
           makeFlatVector<int64_t>(size, [](auto row) { return row; }),
           makeFlatVector<int16_t>(size, [](auto row) { return row / 24; }),
-          makeFlatVector<int32_t>(size, [](auto row) { return (row % 24) / 3; }),
+          makeFlatVector<int32_t>(
+              size, [](auto row) { return (row % 24) / 3; }),
       });
 
   createDuckDbTable({data});
@@ -449,8 +448,8 @@ TEST_F(BmStreamingWindowBuildTest, nonAggregateFunctions) {
       .config(core::QueryConfig::kSpillEnabled, "true")
       .config(core::QueryConfig::kWindowSpillEnabled, "true")
       .spillDirectory(spillDirectory->path)
-      .assertResults(fmt::format(
-          "SELECT *, {} FROM tmp", folly::join(", ", functions)));
+      .assertResults(
+          fmt::format("SELECT *, {} FROM tmp", folly::join(", ", functions)));
 }
 
 TEST_F(BmStreamingWindowBuildTest, ignoreNullsValueFunctions) {
@@ -459,9 +458,9 @@ TEST_F(BmStreamingWindowBuildTest, ignoreNullsValueFunctions) {
       {"d", "p", "s"},
       {
           makeFlatVector<int64_t>(
-              size, [](auto row) { return row; }, [](auto row) {
-                return row % 5 == 0 || row % 11 == 0;
-              }),
+              size,
+              [](auto row) { return row; },
+              [](auto row) { return row % 5 == 0 || row % 11 == 0; }),
           makeFlatVector<int16_t>(size, [](auto row) { return row / 12; }),
           makeFlatVector<int32_t>(size, [](auto row) { return row % 12; }),
       });
@@ -486,8 +485,8 @@ TEST_F(BmStreamingWindowBuildTest, ignoreNullsValueFunctions) {
       .config(core::QueryConfig::kSpillEnabled, "true")
       .config(core::QueryConfig::kWindowSpillEnabled, "true")
       .spillDirectory(spillDirectory->path)
-      .assertResults(fmt::format(
-          "SELECT *, {} FROM tmp", folly::join(", ", functions)));
+      .assertResults(
+          fmt::format("SELECT *, {} FROM tmp", folly::join(", ", functions)));
 }
 
 TEST_F(BmStreamingWindowBuildTest, aggregate) {
@@ -717,18 +716,18 @@ TEST_F(BmStreamingWindowBuildTest, rangeFrameAscDescMatrix) {
               size,
               [](auto row) { return (row * 17) % 101; },
               [](auto row) { return row % 11 == 0; }),
-          makeFlatVector<int64_t>(size, [](auto row) {
-            return static_cast<int64_t>(row % 30) - 2;
-          }),
-          makeFlatVector<int64_t>(size, [](auto row) {
-            return static_cast<int64_t>(row % 30) + 3;
-          }),
-          makeFlatVector<int64_t>(size, [](auto row) {
-            return static_cast<int64_t>(row % 30) + 2;
-          }),
-          makeFlatVector<int64_t>(size, [](auto row) {
-            return static_cast<int64_t>(row % 30) - 3;
-          }),
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return static_cast<int64_t>(row % 30) - 2; }),
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return static_cast<int64_t>(row % 30) + 3; }),
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return static_cast<int64_t>(row % 30) + 2; }),
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return static_cast<int64_t>(row % 30) - 3; }),
       });
 
   createDuckDbTable({data});
@@ -799,6 +798,43 @@ TEST_F(BmStreamingWindowBuildTest, canBeSelectedByQueryConfig) {
   EXPECT_GT(window::bmAggregateWindowTestStats().materializeCalls, 0);
 }
 
+TEST_F(BmStreamingWindowBuildTest, aggregateReusesMaterializedChunks) {
+  const vector_size_t size = 512;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row % 17; }),
+          makeFlatVector<int16_t>(size, [](auto /*row*/) { return 0; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  auto runningSum =
+      "sum(d) over (partition by p order by s rows between unbounded preceding and current row)";
+  auto boundedSum =
+      "sum(d) over (partition by p order by s rows between 64 preceding and 64 following)";
+  auto plan = PlanBuilder()
+                  .values(split(data, 8))
+                  .streamingWindow({runningSum, boundedSum})
+                  .planNode();
+
+  window::resetBmAggregateWindowTestStats();
+  auto spillDirectory = TempDirectoryPath::create();
+  runBmStreamingWindow(
+      plan,
+      fmt::format("SELECT *, {}, {} FROM tmp", runningSum, boundedSum),
+      duckDbQueryRunner_,
+      spillDirectory->path);
+
+  const auto stats = window::bmAggregateWindowTestStats();
+  EXPECT_LE(stats.materializeCalls, 4)
+      << "Sliding aggregate frames should reuse chunk materialization instead "
+         "of rematerializing for each output row.";
+  EXPECT_EQ(size * 2, stats.materializedRows);
+  EXPECT_EQ(size, stats.maxMaterializedRows);
+}
+
 TEST_F(BmStreamingWindowBuildTest, aggregateWindowRequiresBmPartition) {
   HashStringAllocator stringAllocator(pool());
   std::vector<WindowFunctionArg> args{{BIGINT(), nullptr, column_index_t{0}}};
@@ -830,15 +866,14 @@ TEST_F(BmStreamingWindowBuildTest, featureFlagFallsBackForUnsupportedTypes) {
           .planNode();
 
   auto spillDirectory = TempDirectoryPath::create();
-  ASSERT_NO_THROW(AssertQueryBuilder(plan)
-                      .config(core::QueryConfig::kBufferManagerEnabled, "true")
-                      .config(
-                          core::QueryConfig::kBmStreamingWindowBuildEnabled,
-                          "true")
-                      .config(core::QueryConfig::kSpillEnabled, "true")
-                      .config(core::QueryConfig::kWindowSpillEnabled, "true")
-                      .spillDirectory(spillDirectory->path)
-                      .copyResults(pool()));
+  ASSERT_NO_THROW(
+      AssertQueryBuilder(plan)
+          .config(core::QueryConfig::kBufferManagerEnabled, "true")
+          .config(core::QueryConfig::kBmStreamingWindowBuildEnabled, "true")
+          .config(core::QueryConfig::kSpillEnabled, "true")
+          .config(core::QueryConfig::kWindowSpillEnabled, "true")
+          .spillDirectory(spillDirectory->path)
+          .copyResults(pool()));
 }
 
 TEST_F(BmStreamingWindowBuildTest, doesNotSpillDuringStoreWithoutReclaim) {
@@ -891,9 +926,11 @@ TEST_F(BmStreamingWindowBuildTest, windowReclaimSpillsDuringStore) {
       {"d", "payload", "p", "s"},
       {
           makeFlatVector<int64_t>(size, [](auto row) { return row % 13; }),
-          makeFlatVector<std::string>(size, [](auto row) {
-            return std::string(payloadBytes, 'a' + row % 26);
-          }),
+          makeFlatVector<std::string>(
+              size,
+              [](auto row) {
+                return std::string(payloadBytes, 'a' + row % 26);
+              }),
           makeFlatVector<int16_t>(size, [](auto /*row*/) { return 0; }),
           makeFlatVector<int32_t>(size, [](auto row) { return row; }),
       });
@@ -969,11 +1006,11 @@ TEST_F(
           makeFlatVector<int32_t>({3, 4, 5}),
       });
 
-  auto plan = PlanBuilder(pool())
-                  .values({firstBatch, secondBatch})
-                  .streamingWindow(
-                      {"row_number() over (partition by p order by s)"})
-                  .planNode();
+  auto plan =
+      PlanBuilder(pool())
+          .values({firstBatch, secondBatch})
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .planNode();
   auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(plan);
   ASSERT_NE(nullptr, windowNode);
 
@@ -1003,8 +1040,8 @@ TEST_F(
   build.noMoreInput();
 
   ASSERT_TRUE(build.hasNextPartition());
-  auto partition =
-      std::dynamic_pointer_cast<window::BmWindowPartition>(build.nextPartition());
+  auto partition = std::dynamic_pointer_cast<window::BmWindowPartition>(
+      build.nextPartition());
   ASSERT_NE(nullptr, partition);
   EXPECT_FALSE(partition->hasResidentRows());
   ASSERT_TRUE(build.windowSpilledStats().has_value());
@@ -1059,21 +1096,15 @@ TEST_F(
   build.addInput(secondBatch);
   build.noMoreInput();
 
-  auto partition =
-      std::dynamic_pointer_cast<window::BmWindowPartition>(build.nextPartition());
+  auto partition = std::dynamic_pointer_cast<window::BmWindowPartition>(
+      build.nextPartition());
   ASSERT_NE(nullptr, partition);
   ASSERT_FALSE(partition->hasResidentRows());
 
   std::vector<vector_size_t> peerStarts(6);
   std::vector<vector_size_t> peerEnds(6);
   window::resetBmWindowPartitionTestStats();
-  partition->computePeerBuffers(
-      0,
-      6,
-      0,
-      0,
-      peerStarts.data(),
-      peerEnds.data());
+  partition->computePeerBuffers(0, 6, 0, 0, peerStarts.data(), peerEnds.data());
 
   EXPECT_EQ((std::vector<vector_size_t>{0, 0, 2, 2, 4, 4}), peerStarts);
   EXPECT_EQ((std::vector<vector_size_t>{1, 1, 3, 3, 5, 5}), peerEnds);
@@ -1092,11 +1123,11 @@ TEST_F(BmStreamingWindowBuildTest, canReclaimThroughWindowDuringBmOutputStage) {
           makeFlatVector<int32_t>({0, 1, 2, 3}),
       });
 
-  auto plan = PlanBuilder(pool())
-                  .values({data})
-                  .streamingWindow(
-                      {"row_number() over (partition by p order by s)"})
-                  .planNode();
+  auto plan =
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .planNode();
   auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(plan);
   ASSERT_NE(nullptr, windowNode);
 
@@ -1202,11 +1233,10 @@ TEST_F(BmStreamingWindowBuildTest, rangeSumReadsSpilledSinglePartition) {
     for (auto row = 0; row < output->size(); ++row) {
       const auto inputRow = static_cast<int64_t>(outputRows + row);
       const auto first = std::max<int64_t>(0, inputRow - framePreceding);
-      const auto last =
-          std::min<int64_t>(size - 1, inputRow + frameFollowing);
+      const auto last = std::min<int64_t>(size - 1, inputRow + frameFollowing);
       ASSERT_FALSE(sums->isNullAt(row));
-      ASSERT_EQ(expectedSum(first, last), sums->valueAt(row)) << "row "
-                                                              << inputRow;
+      ASSERT_EQ(expectedSum(first, last), sums->valueAt(row))
+          << "row " << inputRow;
     }
     outputRows += output->size();
   }

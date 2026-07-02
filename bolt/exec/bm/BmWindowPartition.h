@@ -134,6 +134,8 @@ class BmWindowPartition : public exec::WindowPartition {
       vector_size_t partitionOffset,
       vector_size_t numRows) const;
 
+  const char* const* residentRowsData(vector_size_t partitionOffset) const;
+
   std::vector<exec::bm::SegmentRowRange> getSegmentRanges(
       vector_size_t partitionOffset,
       vector_size_t numRows) const;
@@ -158,10 +160,38 @@ class BmWindowPartition : public exec::WindowPartition {
       const VectorPtr& result,
       bool exactSize) const;
 
+  void extractRowsToVector(
+      const char* const* rows,
+      vector_size_t numRows,
+      int32_t physicalColumn,
+      vector_size_t resultOffset,
+      const VectorPtr& result,
+      bool exactSize) const;
+
+  bool copyCachedNulls(
+      int32_t physicalColumn,
+      vector_size_t partitionOffset,
+      vector_size_t numRows,
+      const BufferPtr& nullsBuffer) const;
+
+  void cacheNulls(
+      int32_t physicalColumn,
+      vector_size_t partitionOffset,
+      vector_size_t numRows,
+      const BufferPtr& nullsBuffer) const;
+
+  struct CachedNulls {
+    bool valid{false};
+    vector_size_t partitionOffset{0};
+    vector_size_t numRows{0};
+    BufferPtr nulls;
+  };
+
   exec::bm::BmRowContainer* data_;
   memory::MemoryPool* pool_;
   std::vector<TypePtr> logicalTypes_;
   std::vector<TypePtr> physicalTypes_;
+  mutable std::vector<CachedNulls> nullsCache_;
   mutable std::vector<char*> residentRows_;
   std::vector<exec::bm::SegmentRowRange> rowRanges_;
   std::vector<exec::bm::SegmentId> segmentIds_;

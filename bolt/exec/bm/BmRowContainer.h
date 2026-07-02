@@ -64,10 +64,21 @@ class BmRowContainer {
       int32_t column,
       CompareFlags flags = {});
 
+  int32_t compare(
+      const char* left,
+      const char* right,
+      int32_t leftColumn,
+      int32_t rightColumn,
+      CompareFlags flags = {});
+
   int32_t compareRows(
       const char* left,
       const char* right,
       const std::vector<CompareFlags>& flags = {});
+
+  FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
+    return layout_.isNull(row, column);
+  }
 
   void extractColumnResident(
       const char* const* rows,
@@ -150,8 +161,11 @@ class BmRowContainer {
  private:
   friend class BmRowLayout;
 
-  int32_t compareNonNull(const char* left, const char* right, int32_t column)
-      const;
+  int32_t compareNonNull(
+      const char* left,
+      const char* right,
+      int32_t leftColumn,
+      int32_t rightColumn) const;
   void storeValue(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,

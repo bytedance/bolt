@@ -131,6 +131,49 @@ TEST_F(BmRowContainerTest, BmWindowPartitionCanUseResidentRowsFromDescriptor) {
   EXPECT_EQ("delta", names->asFlatVector<StringView>()->valueAt(3).str());
 }
 
+TEST_F(BmRowContainerTest, BmRowContainerComparesDifferentResidentColumns) {
+  BmRowContainer container(
+      {BIGINT(), BIGINT()}, {true, true}, bufferManager_, MemoryTag::kTesting);
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, 20, std::nullopt}),
+      makeNullableFlatVector<int64_t>({15, 20, 30}),
+  });
+  auto stored = storeRows(container, input);
+
+  EXPECT_LT(
+      container.compare(
+          stored.rowPointers[0],
+          stored.rowPointers[0],
+          0,
+          1,
+          CompareFlags{.nullsFirst = true, .ascending = true}),
+      0);
+  EXPECT_EQ(
+      container.compare(
+          stored.rowPointers[1],
+          stored.rowPointers[1],
+          0,
+          1,
+          CompareFlags{.nullsFirst = true, .ascending = true}),
+      0);
+  EXPECT_LT(
+      container.compare(
+          stored.rowPointers[2],
+          stored.rowPointers[2],
+          0,
+          1,
+          CompareFlags{.nullsFirst = true, .ascending = true}),
+      0);
+  EXPECT_GT(
+      container.compare(
+          stored.rowPointers[2],
+          stored.rowPointers[2],
+          0,
+          1,
+          CompareFlags{.nullsFirst = false, .ascending = true}),
+      0);
+}
+
 TEST_F(BmRowContainerTest, BmWindowPartitionExtractNullsUsesBatches) {
   constexpr vector_size_t size = 9'000;
   BmRowContainer container(

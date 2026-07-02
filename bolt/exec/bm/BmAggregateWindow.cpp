@@ -6,6 +6,10 @@
 
 #include <folly/Synchronized.h>
 
+#include <algorithm>
+#include <array>
+#include <limits>
+
 namespace bytedance::bolt::exec::window {
 
 namespace {
@@ -29,11 +33,30 @@ void recordMaterializedRows(vector_size_t numRows) {
 class BmWindowFrameReader {
  public:
   BmWindowFrameReader(
-      const BmWindowPartition* partition,
       const std::vector<column_index_t>& argIndices,
+      const std::vector<TypePtr>& argTypes,
       std::vector<VectorPtr>& argVectors)
-      : partition_(partition), argIndices_(argIndices), argVectors_(argVectors) {
-    BOLT_CHECK_NOT_NULL(partition_);
+      : argIndices_(argIndices), argTypes_(argTypes), argVectors_(argVectors) {
+    for (auto& batch : batches_) {
+      batch.argVectors.reserve(argIndices_.size());
+      for (auto i = 0; i < argIndices_.size(); ++i) {
+        batch.argVectors.push_back(
+            argIndices_[i] == kConstantChannel
+                ? argVectors_[i]
+                : BaseVector::create(argTypes_[i], 0, argVectors_[i]->pool()));
+      }
+      batch.columns.reserve(argIndices_.size());
+      batch.results.reserve(argIndices_.size());
+    }
+  }
+
+  void resetPartition(const BmWindowPartition* partition) {
+    BOLT_CHECK_NOT_NULL(partition);
+    partition_ = partition;
+    for (auto& batch : batches_) {
+      batch.valid = false;
+      batch.numRows = 0;
+    }
   }
 
   template <typename Callback>
@@ -44,49 +67,90 @@ class BmWindowFrameReader {
     if (lastRow < firstRow) {
       return;
     }
+    BOLT_CHECK_NOT_NULL(partition_);
 
     auto nextRow = firstRow;
     while (nextRow <= lastRow) {
-      const auto numRows = std::min<vector_size_t>(
-          kAggregateInputBatchRows, lastRow - nextRow + 1);
-      materializeArgVectors(nextRow, numRows);
-      callback(numRows);
-      nextRow += numRows;
+      const auto batchStart =
+          (nextRow / kAggregateInputBatchRows) * kAggregateInputBatchRows;
+      const auto batchRows = std::min<vector_size_t>(
+          kAggregateInputBatchRows, partition_->numRows() - batchStart);
+      auto& batch = materializeBatch(batchStart, batchRows);
+
+      const auto localStart = nextRow - batchStart;
+      const auto localEnd =
+          std::min<vector_size_t>(batchRows, lastRow + 1 - batchStart);
+      callback(batch.argVectors, batchRows, localStart, localEnd);
+      nextRow = batchStart + localEnd;
     }
   }
 
  private:
-  void materializeArgVectors(vector_size_t firstRow, vector_size_t numRows) {
+  struct CachedBatch {
+    bool valid{false};
+    vector_size_t firstRow{0};
+    vector_size_t numRows{0};
+    uint64_t lastUsed{0};
+    std::vector<VectorPtr> argVectors;
     std::vector<column_index_t> columns;
     std::vector<VectorPtr> results;
-    columns.reserve(argIndices_.size());
-    results.reserve(argIndices_.size());
+  };
+
+  CachedBatch& materializeBatch(vector_size_t firstRow, vector_size_t numRows) {
+    for (auto& batch : batches_) {
+      if (batch.valid && batch.firstRow == firstRow &&
+          batch.numRows == numRows) {
+        batch.lastUsed = ++useClock_;
+        return batch;
+      }
+    }
+
+    auto* batchToUse = &batches_[0];
+    for (auto& batch : batches_) {
+      if (!batch.valid) {
+        batchToUse = &batch;
+        break;
+      }
+      if (batch.lastUsed < batchToUse->lastUsed) {
+        batchToUse = &batch;
+      }
+    }
+
+    auto& batch = *batchToUse;
+    batch.valid = true;
+    batch.firstRow = firstRow;
+    batch.numRows = numRows;
+    batch.lastUsed = ++useClock_;
+    batch.columns.clear();
+    batch.results.clear();
 
     for (auto i = 0; i < argIndices_.size(); ++i) {
       if (argIndices_[i] == kConstantChannel) {
         continue;
       }
-      BaseVector::prepareForReuse(argVectors_[i], numRows);
-      columns.push_back(argIndices_[i]);
-      results.push_back(argVectors_[i]);
+      BaseVector::prepareForReuse(batch.argVectors[i], numRows);
+      batch.columns.push_back(argIndices_[i]);
+      batch.results.push_back(batch.argVectors[i]);
     }
 
-    if (columns.empty()) {
-      return;
+    if (!batch.columns.empty()) {
+      recordMaterializedRows(numRows);
+
+      partition_->extractColumns(
+          {batch.columns.data(), batch.columns.size()},
+          firstRow,
+          numRows,
+          {batch.results.data(), batch.results.size()});
     }
-
-    recordMaterializedRows(numRows);
-
-    partition_->extractColumns(
-        {columns.data(), columns.size()},
-        firstRow,
-        numRows,
-        {results.data(), results.size()});
+    return batch;
   }
 
-  const BmWindowPartition* partition_;
+  const BmWindowPartition* partition_{nullptr};
   const std::vector<column_index_t>& argIndices_;
+  const std::vector<TypePtr>& argTypes_;
   std::vector<VectorPtr>& argVectors_;
+  std::array<CachedBatch, 2> batches_;
+  uint64_t useClock_{0};
 };
 
 class BmAggregateWindowFunction : public exec::WindowFunction {
@@ -116,6 +180,8 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
         argVectors_.push_back(BaseVector::create(arg.type, 0, pool_));
       }
     }
+    frameReader_ = std::make_unique<BmWindowFrameReader>(
+        argIndices_, argTypes_, argVectors_);
 
     aggregate_ = exec::Aggregate::create(
         name,
@@ -157,6 +223,8 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     BOLT_CHECK_NOT_NULL(
         partition_, "BmAggregateWindowFunction requires BmWindowPartition");
     previousFrameMetadata_.reset();
+    frameReader_->resetPartition(partition_);
+    invalidateAggregateResultCache();
   }
 
   void apply(
@@ -252,8 +320,11 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       aggregate_->destroy(folly::Range(&rawSingleGroupRow_, 1));
     }
     aggregate_->initializeNewGroups(
-        &rawSingleGroupRow_, std::vector<vector_size_t>{0});
+        &rawSingleGroupRow_,
+        folly::Range<const vector_size_t*>(
+            singleGroupIndex_.data(), singleGroupIndex_.size()));
     aggregateInitialized_ = true;
+    markAggregateStateChanged();
   }
 
   void addFrameRows(vector_size_t firstRow, vector_size_t lastRow) {
@@ -261,18 +332,61 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       return;
     }
 
-    BmWindowFrameReader frameReader(partition_, argIndices_, argVectors_);
-    frameReader.forEachArgBatch(firstRow, lastRow, [&](vector_size_t numRows) {
-      SelectivityVector rows(numRows);
-      aggregate_->addSingleGroupRawInput(
-          rawSingleGroupRow_, rows, argVectors_, false);
-    });
+    bool addedRows = false;
+    frameReader_->forEachArgBatch(
+        firstRow,
+        lastRow,
+        [&](const std::vector<VectorPtr>& argVectors,
+            vector_size_t numRows,
+            vector_size_t localStart,
+            vector_size_t localEnd) {
+          selectAggregateRows(numRows, localStart, localEnd);
+          aggregate_->addSingleGroupRawInput(
+              rawSingleGroupRow_, aggregateRows_, argVectors, false);
+          addedRows = true;
+        });
+    if (addedRows) {
+      markAggregateStateChanged();
+    }
   }
 
   void extractAggregateResult(const VectorPtr& result, vector_size_t row) {
-    BaseVector::prepareForReuse(aggregateResultVector_, 1);
-    aggregate_->extractValues(&rawSingleGroupRow_, 1, &aggregateResultVector_);
+    if (extractedStateVersion_ != aggregateStateVersion_) {
+      BaseVector::prepareForReuse(aggregateResultVector_, 1);
+      aggregate_->extractValues(
+          &rawSingleGroupRow_, 1, &aggregateResultVector_);
+      extractedStateVersion_ = aggregateStateVersion_;
+    }
     result->copy(aggregateResultVector_.get(), row, 0, 1);
+  }
+
+  void selectAggregateRows(
+      vector_size_t numRows,
+      vector_size_t localStart,
+      vector_size_t localEnd) {
+    if (aggregateRows_.size() != numRows) {
+      aggregateRows_.resizeFill(numRows, false);
+      selectedAggregateRowsValid_ = false;
+    } else if (selectedAggregateRowsValid_) {
+      aggregateRows_.setValidRange(
+          selectedAggregateRowsStart_, selectedAggregateRowsEnd_, false);
+    } else {
+      aggregateRows_.clearAll();
+    }
+
+    aggregateRows_.setValidRange(localStart, localEnd, true);
+    aggregateRows_.updateBounds();
+    selectedAggregateRowsStart_ = localStart;
+    selectedAggregateRowsEnd_ = localEnd;
+    selectedAggregateRowsValid_ = true;
+  }
+
+  void markAggregateStateChanged() {
+    ++aggregateStateVersion_;
+  }
+
+  void invalidateAggregateResultCache() {
+    extractedStateVersion_ = std::numeric_limits<uint64_t>::max();
   }
 
   void incrementalAggregation(
@@ -321,11 +435,19 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   std::vector<TypePtr> argTypes_;
   std::vector<column_index_t> argIndices_;
   std::vector<VectorPtr> argVectors_;
+  std::unique_ptr<BmWindowFrameReader> frameReader_;
+  SelectivityVector aggregateRows_;
+  vector_size_t selectedAggregateRowsStart_{0};
+  vector_size_t selectedAggregateRowsEnd_{0};
+  bool selectedAggregateRowsValid_{false};
 
   BufferPtr singleGroupRowBufferPtr_;
   char* rawSingleGroupRow_;
   vector_size_t singleGroupRowSize_;
+  std::array<vector_size_t, 1> singleGroupIndex_{{0}};
   VectorPtr aggregateResultVector_;
+  uint64_t aggregateStateVersion_{0};
+  uint64_t extractedStateVersion_{std::numeric_limits<uint64_t>::max()};
   std::optional<FrameMetadata> previousFrameMetadata_;
   VectorPtr emptyResult_;
 };
