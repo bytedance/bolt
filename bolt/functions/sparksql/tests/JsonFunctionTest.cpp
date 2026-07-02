@@ -583,6 +583,10 @@ TEST_F(JsonFucntionTest, malformedJsonDoesNotReturnPartialResult) {
   EXPECT_EQ(
       testGetJsonObjectOnce(malformedBooleanJson + "}", "$.is_target_flag"),
       "true");
+
+  EXPECT_EQ(testGetJsonObjectOnce(R"({"a":"he"llo"})", "$.a"), std::nullopt);
+  EXPECT_EQ(
+      testGetJsonObjectOnce(R"({"a":"ok","b":"he"llo"})", "$.a"), std::nullopt);
 }
 
 } // namespace
