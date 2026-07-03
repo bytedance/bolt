@@ -22,7 +22,7 @@ computation was very time-consuming: 65.71 hours in one job and 154.61 hours in
 another. It even cost more time than shuffle split, which took 27.03 hours and
 133.16 hours. That was extremely abnormal.
 
-![Spark shuffle hash profile]({{ '/assets/images/hivehash-refactor/image-18.png' | relative_url }})
+![Spark shuffle hash profile]({{ '/assets/images/hivehash-refactor/spark-shuffle-hash-profile.png' | relative_url }})
 
 The key observation was:
 
@@ -38,7 +38,7 @@ and string values.
 We then ran benchmark tests. The result showed that, compared with hashing
 `i32`, hashing `i64` cost about 4x more.
 
-![Initial HiveHash benchmark]({{ '/assets/images/hivehash-refactor/image-1.png' | relative_url }})
+![Initial HiveHash benchmark]({{ '/assets/images/hivehash-refactor/initial-hivehash-benchmark.png' | relative_url }})
 
 ## Bigint, Decimal64, and Double
 
@@ -111,7 +111,7 @@ switch (type->kind()) {
 
 After this change, the numeric benchmark looked like this:
 
-![Numeric benchmark after avoiding dynamic casts]({{ '/assets/images/hivehash-refactor/image-4.png' | relative_url }})
+![Numeric benchmark after avoiding dynamic casts]({{ '/assets/images/hivehash-refactor/numeric-after-dynamic-cast-removal.png' | relative_url }})
 
 `HiveHash##i64` and `HiveHash##f64` became much faster, moving from more than
 400 ms to about 60 ms.
@@ -119,7 +119,7 @@ After this change, the numeric benchmark looked like this:
 If we use `perf` on `HiveHash##i64`, we can see that hashing is done with
 simple shift and subtract instructions, without SIMD instructions.
 
-![HiveHash i64 perf after dynamic-cast removal]({{ '/assets/images/hivehash-refactor/image-9.png' | relative_url }})
+![HiveHash i64 perf after dynamic-cast removal]({{ '/assets/images/hivehash-refactor/hivehash-i64-perf-after-dispatch.png' | relative_url }})
 
 The benchmark input had no nulls. If we special-case no-null flat vectors, the
 compiler may generate SIMD instructions for hash computation:
@@ -153,19 +153,19 @@ if (input->isFlatEncoding()) {
 
 After this change, the benchmark result became:
 
-![Flat vector no-null benchmark]({{ '/assets/images/hivehash-refactor/image-14.png' | relative_url }})
+![Flat vector no-null benchmark]({{ '/assets/images/hivehash-refactor/flat-vector-no-null-benchmark.png' | relative_url }})
 
 Case time went from more than 60 ms to about 20 ms. Looking at the perf result,
 the HiveHash computation was generated with good SIMD instructions.
 
-![SIMD perf result 1]({{ '/assets/images/hivehash-refactor/image-21.png' | relative_url }})
+![SIMD perf result 1]({{ '/assets/images/hivehash-refactor/simd-hash-perf-instructions-1.png' | relative_url }})
 
-![SIMD perf result 2]({{ '/assets/images/hivehash-refactor/image-17.png' | relative_url }})
+![SIMD perf result 2]({{ '/assets/images/hivehash-refactor/simd-hash-perf-instructions-2.png' | relative_url }})
 
 However, from the perf result above, the top time-consuming function became
 `HashFunctionEvaluator::apply`. Looking at the detailed instructions:
 
-![HashFunctionEvaluator apply perf]({{ '/assets/images/hivehash-refactor/image-15.png' | relative_url }})
+![HashFunctionEvaluator apply perf]({{ '/assets/images/hivehash-refactor/hash-function-evaluator-apply-perf.png' | relative_url }})
 
 We can locate the corresponding C++ code. After the HiveHash result is
 returned, Bolt clears the signed bit of all results.
@@ -247,13 +247,13 @@ const vector_size_t end = end_;
 
 After this change, the benchmark result became:
 
-![Benchmark after applyToSelected loop-end fix]({{ '/assets/images/hivehash-refactor/image-20.png' | relative_url }})
+![Benchmark after applyToSelected loop-end fix]({{ '/assets/images/hivehash-refactor/apply-to-selected-loop-end-benchmark.png' | relative_url }})
 
 The corresponding instructions are shown below. The `and` operator was done
 with SIMD instructions, so one instruction can apply the `and` operation to
 eight `int32_t` values.
 
-![Vectorized and instruction]({{ '/assets/images/hivehash-refactor/image-8.png' | relative_url }})
+![Vectorized and instruction]({{ '/assets/images/hivehash-refactor/vectorized-and-instruction.png' | relative_url }})
 
 The simple numeric optimization results are:
 
@@ -283,12 +283,12 @@ For decimal type, hash computation is more complex than simple numeric type, so
 it is not easy for the compiler to generate SIMD instructions. The benchmark
 result for Hive decimal was:
 
-![Decimal benchmark baseline]({{ '/assets/images/hivehash-refactor/image-19.png' | relative_url }})
+![Decimal benchmark baseline]({{ '/assets/images/hivehash-refactor/decimal-baseline-benchmark.png' | relative_url }})
 
 It was abnormal that `DECIMAL128` hashing cost about 8x more than `DECIMAL64`,
 so we ran `perf` on the test case.
 
-![Decimal128 perf]({{ '/assets/images/hivehash-refactor/image-2.png' | relative_url }})
+![Decimal128 perf]({{ '/assets/images/hivehash-refactor/decimal128-perf-div-mod.png' | relative_url }})
 
 `__modti3` and `__divti3` cost about 50% of the total CPU time. The
 corresponding C++ code was:
@@ -355,7 +355,7 @@ num / 10 = -(num / 10)
 Now we can convert `int128_t` division into `int64_t` arithmetic. The benchmark
 result showed that `HiveHash##d128` cost was reduced from 441 ms to 144 ms.
 
-![Decimal128 benchmark after division optimization]({{ '/assets/images/hivehash-refactor/image-6.png' | relative_url }})
+![Decimal128 benchmark after division optimization]({{ '/assets/images/hivehash-refactor/decimal128-after-division-optimization.png' | relative_url }})
 
 ## String
 
@@ -585,7 +585,7 @@ for (int i = 0; i < 4; i++) {
 After optimization, the string hash case time was reduced from 569 ms to about
 200 ms.
 
-![String benchmark after optimization]({{ '/assets/images/hivehash-refactor/image-12.png' | relative_url }})
+![String benchmark after optimization]({{ '/assets/images/hivehash-refactor/string-after-simd-optimization.png' | relative_url }})
 
 ## Complex Type
 
@@ -632,7 +632,7 @@ Suppose we think of each nested array value as a tree. Each array value is an
 internal node, and primitive values are leaf nodes. The hash of a nested array
 value can then be seen as a traversal order of a tree.
 
-![Complex type traversal order]({{ '/assets/images/hivehash-refactor/image.png' | relative_url }})
+![Complex type traversal order]({{ '/assets/images/hivehash-refactor/complex-type-traversal-order.png' | relative_url }})
 
 Before the refactor, we hashed nested array data using postorder traversal. We
 first computed the element hash value of one array, then computed that array
@@ -699,7 +699,7 @@ value of all columns, then combine the hash value of all struct rows at a time.
 
 After all optimizations were applied, we got the final benchmark result:
 
-![Final benchmark result]({{ '/assets/images/hivehash-refactor/image-16.png' | relative_url }})
+![Final benchmark result]({{ '/assets/images/hivehash-refactor/final-hivehash-benchmark.png' | relative_url }})
 
 Detailed benchmark comparison before and after the refactor:
 
@@ -726,4 +726,4 @@ For the Spark SQL jobs mentioned at the beginning, HiveHash total time was
 reduced from 65.71 hours to 1.30 hours, and from 154.51 hours to 11.96 hours.
 Performance improved by 49.5x and 12.9x respectively.
 
-![Spark workload after HiveHash refactor]({{ '/assets/images/hivehash-refactor/image-7.png' | relative_url }})
+![Spark workload after HiveHash refactor]({{ '/assets/images/hivehash-refactor/spark-workload-after-refactor.png' | relative_url }})
