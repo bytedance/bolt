@@ -194,7 +194,7 @@ static void apply(
 }
 ```
 
-Highlighted line:
+Key line from the original screenshot:
 
 ```cpp
 rows.applyToSelected([&](int row) { rawValues[row] &= 0x7FFFFFFF; });
@@ -239,7 +239,7 @@ inline void SelectivityVector::applyToSelected(Callable func) const {
 }
 ```
 
-Highlighted change:
+Key change:
 
 ```cpp
 const vector_size_t end = end_;
@@ -311,7 +311,7 @@ inline static void stripTrailingZeros(InputType& input, uint8_t& scale) {
 }
 ```
 
-Highlighted operations:
+Key operations from the original screenshot:
 
 ```cpp
 input % 10;
@@ -321,7 +321,10 @@ input /= 10;
 Notice that we only divide by 10 here, so we can use a simpler way to get the
 dividend and remainder of `int128_t / 10`.
 
-```text
+The following block is algebra-style C++ pseudocode used to explain the
+division-by-10 transformation:
+
+```cpp
 // Suppose lower and upper are the lower and upper bits of uint128_t num.
 uint64_t upper = 10 * a + b
 uint64_t lower = 10 * c + d
