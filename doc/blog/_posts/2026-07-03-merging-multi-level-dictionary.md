@@ -4,7 +4,7 @@ title: "Merging Multi-Level Dictionary Encoding"
 date: 2026-07-03
 author: "Zhuhe Fang"
 parent: Blog
-nav_order: 11
+nav_order: 10
 ---
 
 Bolt often evaluates many expressions on vectors that carry
