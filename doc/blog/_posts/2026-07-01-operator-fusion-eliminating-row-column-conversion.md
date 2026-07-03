@@ -181,7 +181,6 @@ already provide sorted input. `Window` reads one planner flag to choose the path
 needSort_ = !(windowNode->inputsSorted());
 ```
 
-
 If `inputsSorted()` returns true, `Window` keeps the streaming-style path. If it
 returns false, `Window` routes input through a shared sort preparation path before
 the selected build implementation handles partition loading and output:
@@ -212,7 +211,6 @@ The same fused path supports `SortWindowBuild`, `RowsStreamingWindowBuild`, and
 `SpillableWindowBuild`. The common `WindowBuild` path owns the sorted row input;
 each concrete build still controls how it loads partitions and produces output.
 The rest of the engine still sees normal `Window` output.
-
 
 The fused operator also keeps the sort cost visible. Operator stats report sort
 output, column-to-row time, in-sort time, window input, partition loading, window
