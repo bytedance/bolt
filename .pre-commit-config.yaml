@@ -79,10 +79,12 @@ repos:
         files: ^doc/blog/_posts/.*\.md$
       - id: markdownlint-blog
         name: Lint and fix blog Markdown
-        entry: npx markdownlint-cli2@0.17.2 --fix "#doc/blog/vendor/**"
+        entry: npx markdownlint-cli2@0.17.2 --fix "doc/blog/**/*.md" "#doc/blog/vendor/**"
         language: system
         files: ^doc/blog/.*\.md$
         exclude: ^doc/blog/vendor/
+        pass_filenames: false
+        require_serial: true
       - id: license-header-check
         name: Check for license headers
         entry: go run -C .github/license_check check_license.go
