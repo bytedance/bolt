@@ -158,9 +158,9 @@ After this change, the benchmark result became:
 Case time went from more than 60 ms to about 20 ms. Looking at the perf result,
 the HiveHash computation was generated with good SIMD instructions.
 
-![SIMD perf result 1]({{ '/assets/images/hivehash-refactor/simd-hash-perf-instructions-1.png' | relative_url }})
+![hiveHashMultiple integer perf hotspot]({{ '/assets/images/hivehash-refactor/hivehash-multiple-integer-perf-hotspot.png' | relative_url }})
 
-![SIMD perf result 2]({{ '/assets/images/hivehash-refactor/simd-hash-perf-instructions-2.png' | relative_url }})
+![hiveHashMultiple integer SIMD instructions]({{ '/assets/images/hivehash-refactor/hivehash-multiple-integer-simd-instructions.png' | relative_url }})
 
 However, from the perf result above, the top time-consuming function became
 `HashFunctionEvaluator::apply`. Looking at the detailed instructions:
