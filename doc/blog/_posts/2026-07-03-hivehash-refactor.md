@@ -807,17 +807,34 @@ value can then be seen as a traversal order of a tree.
 ```text
 Traversal order for nested arrays:
 
-Before:
-  Postorder-like hashing per nested value:
-    hash child elements of one array
-    combine them into that array's hash
-    move to the next nested array
+Example value:
 
-After:
-  Level-order batch hashing:
-    hash all primitive leaf values at the deepest level
-    combine all arrays at the next level
-    repeat upward until the top-level array hashes are produced
+             A
+          /     \
+         B       C
+       /  \     / \
+     v1   v2   D   v5
+             /  \
+            v3  v4
+
+Before: postorder-like hashing per nested value
+
+  1. hash(v1)
+  2. hash(v2)
+  3. hash(B)
+  4. hash(v3)
+  5. hash(v4)
+  6. hash(D)
+  7. hash(v5)
+  8. hash(C)
+  9. hash(A)
+
+After: level-order batch hashing
+
+  deepest primitive level:  hash(v1), hash(v2), hash(v3), hash(v4), hash(v5)
+  next array level:         hash(B), hash(D)
+  next array level:         hash(C)
+  top array level:          hash(A)
 ```
 
 Before the refactor, we hashed nested array data using postorder traversal. We
