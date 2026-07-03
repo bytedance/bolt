@@ -232,7 +232,7 @@ Event count (approx.): 1412250000
 
 Overhead  Command         Shared Object                   Symbol
 43.16%    velox_sparksql  velox_sparksql_benchmarks_hash  HashFunctionEvaluator<...>
-24.85%    velox_sparksql  velox_sparksql_benchmarks_hash  std::Function_handler<...>
+24.85%    velox_sparksql  velox_sparksql_benchmarks_hash  std::_Function_handler<...>
 15.52%    velox_sparksql  velox_sparksql_benchmarks_hash  hiveHashMultiple<TypeKind::INTEGER>
  1.17%    velox_sparksql  velox_sparksql_benchmarks_hash  exec::Expr::eval
 ```
@@ -443,7 +443,7 @@ Event count (approx.): 1730000000
 Overhead  Command         Shared Object                   Symbol
 36.56%    velox_sparksql  libgcc_s.so.1                   __modti3
 29.19%    velox_sparksql  velox_sparksql_benchmarks_hash  hiveHashMultiple<TypeKind::HUGEINT>
-20.04%    velox_sparksql  velox_sparksql_benchmarks_hash  std::Function_handler<...>
+20.04%    velox_sparksql  velox_sparksql_benchmarks_hash  std::_Function_handler<...>
  9.51%    velox_sparksql  libgcc_s.so.1                   __divti3
  0.65%    velox_sparksql  velox_sparksql_benchmarks_hash  __modti3@plt
 
@@ -842,8 +842,8 @@ first computed the element hash value of one array, then computed that array
 data's hash. Then we computed the next array element's hash value, and then the
 next array's hash value.
 
-A better compute order is shown on the right side of the figure. We compute the
-nested array data with level-order traversal. First, compute every primitive
+A better compute order is the level-order batch hashing shown above. We compute
+the nested array data with level-order traversal. First, compute every primitive
 value's hash at the deepest level of the nested array data. Then compute every
 array hash value at the next level. This method saves a lot of type dispatch
 and function calls when hashing nested array types.
