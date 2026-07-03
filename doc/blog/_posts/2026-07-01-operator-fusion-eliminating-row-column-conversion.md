@@ -119,9 +119,21 @@ representation.
 
 ## 3. Sort + Window
 
-Window functions have a different pattern. They are order-sensitive: `partition by` and `order by` define the input order required by the Window operator. In a conventional plan, sorting and window evaluation may be separated by an operator boundary. The sort operator first converts input into rows, sorts those rows in a row-oriented structure, and then converts the sorted result back into a columnar output batch before passing it to the next Window operator. Window then converts the data back into rows again for evaluation. The intermediate `RowVector` is therefore materialized only to satisfy the columnar representation expected at operator boundaries.
+Window functions have a different pattern. They are order-sensitive: `partition
+by` and `order by` define the input order required by the Window operator. In a
+conventional plan, sorting and window evaluation may be separated by an operator
+boundary. The sort operator first converts input into rows, sorts those rows in a
+row-oriented structure, and then converts the sorted result back into a columnar
+output batch before passing it to the next Window operator. Window then converts
+the data back into rows again for evaluation. The intermediate `RowVector` is
+therefore materialized only to satisfy the columnar representation expected at
+operator boundaries.
 
-This is where Sort + Window fusion applies. Instead of converting sorted rows back into a normal columnar batch just to cross an operator boundary, sort and window evaluation can be fused into a single Window operator. Both ordering and window computation then happen inside that operator, avoiding the intermediate `RowVector` materialization and improving execution efficiency.
+This is where Sort + Window fusion applies. Instead of converting sorted rows
+back into a normal columnar batch just to cross an operator boundary, sort and
+window evaluation can be fused into a single Window operator. Both ordering and
+window computation then happen inside that operator, avoiding the intermediate
+`RowVector` materialization and improving execution efficiency.
 
 ### 3.1 Motivation
 
@@ -232,11 +244,15 @@ increase is within an acceptable range.
 We benchmarked Sort + Window with window query shapes observed in production,
 comparing the old `OrderBy -> Window` shape with the fused `sortWindow`
 shape under the same partition keys, sort keys, spill setting, and window
-function. The benchmark results showed consistent improvement, with an average of about 20% and the best cases reaching roughly 50%. These results match the optimization target: once Window can consume row-oriented sorted data directly, Bolt avoids the extra rows -> RowVector -> rows round trip between standalone sort and window evaluation.
+function. The benchmark results showed consistent improvement, with an average
+of about 20% and the best cases reaching roughly 50%. These results match the
+optimization target: once Window can consume row-oriented sorted data directly,
+Bolt avoids the extra rows -> RowVector -> rows round trip between standalone
+sort and window evaluation.
 
-The production results showed the same trend. Across 62 real online tasks, the
-median performance improvement was about 17.95%, P90 improvement was about
-28.11%, and the best task improved by about 40.35%. 
+The production results showed the same trend. Across a broad set of real online
+tasks, the median performance improvement was about 17.95%, P90 improvement was
+about 28.11%, and the best task improved by about 40.35%.
 
 Overall, Sort + Window fusion significantly improves both the performance and
 stability of workloads where sorting and window evaluation appear together.
