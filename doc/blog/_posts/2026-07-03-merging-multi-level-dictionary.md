@@ -73,7 +73,6 @@ decode, the producer flattens the shared multi-layer dictionary while it is
 wrapping. Downstream `decode` calls then see a single-layer dictionary and
 skip `combine` entirely.
 
-
 ### 4.1 Where to Flatten
 
 The change applies differently to each producer:
