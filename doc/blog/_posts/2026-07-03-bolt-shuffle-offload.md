@@ -130,7 +130,7 @@ Moving shuffle into Bolt also changes how Spark task cancellation reaches native
 
 After shuffle offload, the most expensive part of the task can run inside a Bolt `Task`. This is especially visible on the writer side: once `SparkShuffleWriterNode` is appended to the plan, Spark/Gluten triggers the native task and then waits for the Bolt writer operator to finish. In parallel writer mode, Bolt starts native drivers and `WholeStageResultIterator` waits on the Bolt task completion future. During that time there may be no regular batch returned to Spark and no per-batch JNI writer call where Spark's iterator cancellation can be checked.
 
-This is why the Bolt backend needs an additional `TaskStatusListener` on the native side. The listener keeps a weak reference to the running Bolt task and a global reference to the corresponding Spark `TaskContext`. A background listener thread periodically calls `TaskContext.getKillReason()`. If Spark has killed the task, the listener calls `task->requestCancel()` on the Bolt task and tracks the returned cancellation future until the native task has stopped.
+This is why the Bolt backend needs a native-side bridge such as `TaskStatusListener`. The listener keeps a weak reference to the running Bolt task and a global reference to the corresponding Spark `TaskContext`. A background listener thread periodically calls `TaskContext.getKillReason()`. If Spark has killed the task, the listener can call `task->requestCancel()` on the Bolt task and track the returned cancellation future until the native task has stopped.
 
 The purpose of this listener is not to change Spark's cancellation semantics. It bridges an existing Spark task state into a native execution context that no longer returns to Spark at every batch boundary. Without this bridge, a killed Spark task could leave the Bolt task running until the native operator chain naturally finishes or the iterator is destroyed, wasting CPU, memory, spill, and shuffle I/O resources.
 
@@ -139,7 +139,7 @@ The purpose of this listener is not to change Spark's cancellation semantics. It
 The inside-Bolt path is controlled by `spark.gluten.shuffle.inside.bolt`:
 
 ```text
-spark.gluten.shuffle.inside.bolt=true
+set spark.gluten.shuffle.inside.bolt=true;
 ```
 
 ## When Offload Does Not Apply
