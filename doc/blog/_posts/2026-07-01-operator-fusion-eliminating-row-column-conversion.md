@@ -7,13 +7,15 @@ parent: Blog
 nav_order: 2
 ---
 
-Bolt's operator fusion work removes data reorganization that exists only because
-two physical operators meet at a boundary. Aggregation + Shuffle reduces the
+Bolt's operator fusion optimizations reduce the format-conversion and
+intermediate-materialization overhead introduced at physical operator
+boundaries. Aggregation + Shuffle fusion avoids the
 `RowContainer -> RowVector -> CompactRow` round trip before row-based shuffle
-write. Sort + Window keeps sorting inside Window when the input is not already
-sorted. On representative production-style double-run tests, Aggregation +
-Shuffle fusion reduced the overall agg + shuffle stage time by roughly 18% to
-25%, with shuffle size ranging from roughly unchanged to about 6% larger.
+write. Sort + Window fusion keeps sorting inside the Window operator when the
+input is not already ordered. In representative production-style double-run
+tests, Aggregation + Shuffle fusion reduced the overall agg + shuffle stage
+time by roughly 18% to 25%, while shuffle size ranged from roughly unchanged to
+about 6% larger.
 {: .note }
 
 ## 1. Background
