@@ -44,7 +44,25 @@ We then ran benchmark tests. The result showed that, compared with hashing
 
 The HiveHash `i64` implementation was:
 
-![HiveHash i64 code]({{ '/assets/images/hivehash-refactor/image-5.png' | relative_url }})
+```cpp
+ReturnType hashInt64(int64_t input, SeedType seed, const TypePtr& inputType) {
+  if (const auto& shortDecimal =
+          std::dynamic_pointer_cast<const ShortDecimalType>(inputType)) {
+    if (input == 0) {
+      return genSeed(seed);
+    }
+    uint8_t newScale = normalizeDecimal(input, shortDecimal->scale());
+    return genSeed(seed) + decimalHashCode(input, newScale);
+  } else {
+    return genSeed(seed) +
+        (input ^ static_cast<uint32_t>(static_cast<uint64_t>(input) >> 32));
+  }
+}
+```
+
+The important detail is the `std::dynamic_pointer_cast` inside the hash path.
+For non-decimal `BIGINT`, this type check still happened during hash
+computation.
 
 The performance issue in `hive_hash` for `BIGINT` came from `dynamic_cast`
 during hash computation.
@@ -152,18 +170,80 @@ However, from the perf result above, the top time-consuming function became
 We can locate the corresponding C++ code. After the HiveHash result is
 returned, Bolt clears the signed bit of all results.
 
-![Clear signed bit code]({{ '/assets/images/hivehash-refactor/image-13.png' | relative_url }})
+```cpp
+static void apply(
+    const SelectivityVector& rows,
+    const std::vector<VectorPtr>& args,
+    std::optional<typename HashClassBase::SeedType> seed,
+    exec::EvalCtx& context,
+    VectorPtr& resultRef) {
+  size_t hashIdx = seed ? 1 : 0;
+  auto hashSeed = seed ? *seed : HashClassBase::kDefaultSeed;
+
+  auto& result = *resultRef->as<FlatVector<ResultType>>();
+  auto rawValues = result.mutableRawValues();
+  result.clearNulls(rows);
+  rows.applyToSelected([&](int row) { rawValues[row] = hashSeed; });
+
+  for (auto i = hashIdx; i < args.size(); i++) {
+    SWITCH_TYPE_HASH(args[i]->type(), hashOneColumn, rows, args[i], result);
+  }
+  if constexpr (std::is_same_v<HashClassBase, HiveHashBase>) {
+    rows.applyToSelected([&](int row) { rawValues[row] &= 0x7FFFFFFF; });
+  }
+}
+```
+
+Highlighted line:
+
+```cpp
+rows.applyToSelected([&](int row) { rawValues[row] &= 0x7FFFFFFF; });
+```
 
 Why was this not done with SIMD instructions? Inspecting `applyToSelected`, we
 found that it has a separate path for all selected rows. The loop end used a
 member variable, `end_`, so the compiler had to call `func` one by one in case
 `end_` was reassigned.
 
-![applyToSelected before loop-end fix]({{ '/assets/images/hivehash-refactor/image-3.png' | relative_url }})
+Before the fix:
+
+```cpp
+template <typename Callable>
+inline void SelectivityVector::applyToSelected(Callable func) const {
+  if (isAllSelected()) {
+    for (vector_size_t row = begin_; row < end_; ++row) {
+      func(row);
+    }
+  } else {
+    bits::forEachSetBit(bits_.data(), begin_, end_, func);
+  }
+}
+```
+
+The loop condition reads `end_` directly.
 
 To fix this, we simply assigned `end_` to a local `const` variable:
 
-![applyToSelected after loop-end fix]({{ '/assets/images/hivehash-refactor/image-11.png' | relative_url }})
+```cpp
+template <typename Callable>
+inline void SelectivityVector::applyToSelected(Callable func) const {
+  if (isAllSelected()) {
+    // Use a const variable to help the compiler generate more effective code.
+    const vector_size_t end = end_;
+    for (vector_size_t row = begin_; row < end; ++row) {
+      func(row);
+    }
+  } else {
+    bits::forEachSetBit(bits_.data(), begin_, end_, func);
+  }
+}
+```
+
+Highlighted change:
+
+```cpp
+const vector_size_t end = end_;
+```
 
 After this change, the benchmark result became:
 
@@ -213,15 +293,38 @@ so we ran `perf` on the test case.
 `__modti3` and `__divti3` cost about 50% of the total CPU time. The
 corresponding C++ code was:
 
-![Decimal normalization code]({{ '/assets/images/hivehash-refactor/image-10.png' | relative_url }})
+```cpp
+template <typename InputType>
+inline static void stripTrailingZeros(InputType& input, uint8_t& scale) {
+  while (std::abs(input) >= 10L && scale > 0) {
+    if (bits::isBitSet(&input, 0)) { // odd
+      break;
+    }
+    if (input % 10) { // to be optimized
+      break;
+    }
+    input /= 10;
+    // TODO: checkScale
+    scale -= 1;
+  }
+  return;
+}
+```
+
+Highlighted operations:
+
+```cpp
+input % 10;
+input /= 10;
+```
 
 Notice that we only divide by 10 here, so we can use a simpler way to get the
 dividend and remainder of `int128_t / 10`.
 
-```cpp
+```text
 // Suppose lower and upper are the lower and upper bits of uint128_t num.
-uint64_t upper = 10 * a + b;
-uint64_t lower = 10 * c + d;
+uint64_t upper = 10 * a + b
+uint64_t lower = 10 * c + d
 
 // If num > 0:
 uint128_t num = upper * 2^64 + lower
