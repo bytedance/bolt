@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
+#include <atomic>
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/exec/Aggregate.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Window.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -27,6 +30,107 @@ using namespace bytedance::bolt::exec::test;
 namespace bytedance::bolt::exec {
 
 namespace {
+
+std::atomic<int64_t> windowBatchProbeMaxRows{0};
+
+void updateWindowBatchProbeMaxRows(vector_size_t rows) {
+  auto current = windowBatchProbeMaxRows.load();
+  while (rows > current &&
+         !windowBatchProbeMaxRows.compare_exchange_weak(current, rows)) {
+  }
+}
+
+class WindowBatchProbeAggregate : public Aggregate {
+ public:
+  explicit WindowBatchProbeAggregate(TypePtr resultType)
+      : Aggregate(std::move(resultType)) {}
+
+  int32_t accumulatorFixedWidthSize() const override {
+    return sizeof(int64_t);
+  }
+
+  void initializeNewGroups(
+      char** groups,
+      folly::Range<const vector_size_t*> indices) override {
+    for (auto i : indices) {
+      groups[i][nullByte_] &= ~nullMask_;
+      *value<int64_t>(groups[i]) = 0;
+    }
+  }
+
+  void addRawInput(
+      char** groups,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool mayPushdown) override {
+    addSingleGroupRawInput(groups[0], rows, args, mayPushdown);
+  }
+
+  void addIntermediateResults(
+      char** groups,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool mayPushdown) override {
+    addRawInput(groups, rows, args, mayPushdown);
+  }
+
+  void addSingleGroupRawInput(
+      char* group,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& /*args*/,
+      bool /*mayPushdown*/) override {
+    updateWindowBatchProbeMaxRows(rows.countSelected());
+    *value<int64_t>(group) += rows.countSelected();
+  }
+
+  void addSingleGroupIntermediateResults(
+      char* group,
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      bool mayPushdown) override {
+    addSingleGroupRawInput(group, rows, args, mayPushdown);
+  }
+
+  void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
+      override {
+    BaseVector::ensureWritable(
+        SelectivityVector(numGroups), BIGINT(), pool_, *result);
+    auto flatResult = (*result)->as<FlatVector<int64_t>>();
+    auto rawValues = flatResult->mutableRawValues();
+    auto rawNulls = getRawNulls(flatResult);
+    for (auto i = 0; i < numGroups; ++i) {
+      clearNull(rawNulls, i);
+      rawValues[i] = *value<int64_t>(groups[i]);
+    }
+  }
+
+  void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
+      override {
+    extractValues(groups, numGroups, result);
+  }
+
+  static std::vector<std::shared_ptr<AggregateFunctionSignature>> signatures() {
+    return {AggregateFunctionSignatureBuilder()
+                .returnType("bigint")
+                .intermediateType("bigint")
+                .argumentType("bigint")
+                .build()};
+  }
+};
+
+void registerWindowBatchProbeAggregate() {
+  registerAggregateFunction(
+      "window_batch_probe",
+      WindowBatchProbeAggregate::signatures(),
+      [](core::AggregationNode::Step /*step*/,
+         const std::vector<TypePtr>& /*argTypes*/,
+         const TypePtr& resultType,
+         const core::QueryConfig& /*config*/) -> std::unique_ptr<Aggregate> {
+        return std::make_unique<WindowBatchProbeAggregate>(resultType);
+      },
+      false,
+      true);
+}
 
 class SpillableWindowTest : public OperatorTestBase {
  public:
@@ -390,6 +494,89 @@ TEST_F(SpillableWindowTest, noneSpillable) {
       ASSERT_EQ(stats.spilledPartitions, 0);
     }
   }
+}
+
+TEST_F(SpillableWindowTest, nonSpillableLastAggUnboundedFrame) {
+  const vector_size_t size = 2'048;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<std::string>(
+              size,
+              [](auto row) {
+                return fmt::format("{}{}", row, std::string(8 * 1024, 'a'));
+              }),
+          makeFlatVector<int16_t>(size, [](auto row) { return row / 512; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  auto windowExpr =
+      "last(d) over (partition by p order by s ROWS BETWEEN UNBOUNDED "
+      "PRECEDING and UNBOUNDED FOLLOWING)";
+  core::PlanNodeId windowId;
+  auto plan = PlanBuilder()
+                  .values(split(data, 10))
+                  .window({windowExpr})
+                  .capturePlanNodeId(windowId)
+                  .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(core::QueryConfig::kPreferredOutputBatchBytes, "256")
+          .config(core::QueryConfig::kPreferredOutputBatchRows, "50")
+          .config(core::QueryConfig::kMaxOutputBatchRows, "50")
+          .config(core::QueryConfig::kSpillEnabled, "true")
+          .config(core::QueryConfig::kWindowSpillEnabled, "true")
+          .config(core::QueryConfig::kTestingSpillPct, "100")
+          .spillDirectory(spillDirectory->path)
+          .assertResults(fmt::format("SELECT *, {} FROM tmp", windowExpr));
+
+  const auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(windowId);
+
+  ASSERT_EQ(stats.spilledBytes, 0);
+  ASSERT_EQ(stats.spilledRows, 0);
+  ASSERT_EQ(stats.spilledFiles, 0);
+  ASSERT_EQ(stats.spilledPartitions, 0);
+}
+
+TEST_F(SpillableWindowTest, nonSpillableSameFrameAggregationBatchesInput) {
+  registerWindowBatchProbeAggregate();
+  windowBatchProbeMaxRows = 0;
+
+  const vector_size_t size = 1'024;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int16_t>(size, [](auto row) { return row / 512; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  auto windowExpr =
+      "window_batch_probe(d) over (partition by p order by s ROWS BETWEEN "
+      "UNBOUNDED PRECEDING and UNBOUNDED FOLLOWING)";
+  auto plan =
+      PlanBuilder().values(split(data, 8)).window({windowExpr}).planNode();
+
+  auto expected = makeRowVector(
+      {"d", "p", "s", "w"},
+      {
+          data->childAt(0),
+          data->childAt(1),
+          data->childAt(2),
+          makeFlatVector<int64_t>(size, [](auto /*row*/) { return 512; }),
+      });
+
+  AssertQueryBuilder(plan)
+      .config(core::QueryConfig::kPreferredOutputBatchRows, "50")
+      .config(core::QueryConfig::kMaxOutputBatchRows, "50")
+      .assertResults(expected);
+
+  ASSERT_EQ(windowBatchProbeMaxRows.load(), 50);
 }
 
 TEST_F(SpillableWindowTest, basic) {
