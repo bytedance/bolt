@@ -124,6 +124,16 @@ Bolt downstream operator
 
 Finally, Bolt closes the reader and reports metrics back. After the Bolt reader finishes, metrics such as output rows, batch count, decompression time, and deserialization time are written back to Spark SQL metrics through `updateMetrics()`. The path keeps the Spark shuffle protocol boundary, while moving the CPU-heavy decompression and deserialization work into the Bolt reader operator.
 
+## Task Cancellation
+
+Moving shuffle into Bolt also changes how Spark task cancellation reaches native execution. In the regular Gluten iterator path, Spark cancellation is usually observed at iterator boundaries: Spark wraps the input with `InterruptibleIterator`, and each `hasNext` / `next` call has a chance to notice that the task has been killed. That works reasonably well when Spark or Gluten is still pulling one batch at a time.
+
+After shuffle offload, the most expensive part of the task can run inside a Bolt `Task`. This is especially visible on the writer side: once `SparkShuffleWriterNode` is appended to the plan, Spark/Gluten triggers the native task and then waits for the Bolt writer operator to finish. In parallel writer mode, Bolt starts native drivers and `WholeStageResultIterator` waits on the Bolt task completion future. During that time there may be no regular batch returned to Spark and no per-batch JNI writer call where Spark's iterator cancellation can be checked.
+
+This is why the Bolt backend needs an additional `TaskStatusListener` on the native side. The listener keeps a weak reference to the running Bolt task and a global reference to the corresponding Spark `TaskContext`. A background listener thread periodically calls `TaskContext.getKillReason()`. If Spark has killed the task, the listener calls `task->requestCancel()` on the Bolt task and tracks the returned cancellation future until the native task has stopped.
+
+The purpose of this listener is not to change Spark's cancellation semantics. It bridges an existing Spark task state into a native execution context that no longer returns to Spark at every batch boundary. Without this bridge, a killed Spark task could leave the Bolt task running until the native operator chain naturally finishes or the iterator is destroyed, wasting CPU, memory, spill, and shuffle I/O resources.
+
 ## How to Enable
 
 The inside-Bolt path is controlled by `spark.gluten.shuffle.inside.bolt`:
