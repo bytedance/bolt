@@ -4,7 +4,7 @@ title: "Operator Fusion: Reducing Data Layout Conversions"
 date: 2026-07-01
 author: "Haiyan Gu, Jinyuan Zhang"
 parent: Blog
-nav_order: 2
+nav_order: 4
 ---
 
 Bolt's operator fusion optimizations reduce the format-conversion and
