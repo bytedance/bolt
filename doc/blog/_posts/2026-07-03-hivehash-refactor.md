@@ -194,7 +194,7 @@ static void apply(
 }
 ```
 
-Key line from the original screenshot:
+The hot line is the final mask applied to every HiveHash result:
 
 ```cpp
 rows.applyToSelected([&](int row) { rawValues[row] &= 0x7FFFFFFF; });
@@ -239,7 +239,7 @@ inline void SelectivityVector::applyToSelected(Callable func) const {
 }
 ```
 
-Key change:
+The key change is caching `end_` in a local constant:
 
 ```cpp
 const vector_size_t end = end_;
@@ -311,7 +311,7 @@ inline static void stripTrailingZeros(InputType& input, uint8_t& scale) {
 }
 ```
 
-Key operations from the original screenshot:
+The expensive operations are the modulo and division by 10:
 
 ```cpp
 input % 10;
