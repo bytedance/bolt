@@ -119,40 +119,97 @@ representation.
 
 ## 3. Sort + Window
 
-Window functions have a different pattern. They are sensitive to ordering:
-`partition by` and `order by` define the input order required by the window
-operator. In a conventional plan, sorting and window evaluation may be separated
-by an operator boundary. The sort operator materializes ordered intermediate
-data, and the window operator consumes it later.
+Window functions have a different pattern. They are order-sensitive: `partition by` and `order by` define the input order required by the Window operator. In a conventional plan, sorting and window evaluation may be separated by an operator boundary. The sort operator first converts input into rows, sorts those rows in a row-oriented structure, and then converts the sorted result back into a columnar output batch before passing it to the next Window operator. Window then converts the data back into rows again for evaluation. The intermediate `RowVector` is therefore materialized only to satisfy the columnar representation expected at operator boundaries.
 
-Bolt fuses this boundary by making sorting an internal capability of the Window
-operator when the input is not already sorted.
+This is where Sort + Window fusion applies. Instead of converting sorted rows back into a normal columnar batch just to cross an operator boundary, sort and window evaluation can be fused into a single Window operator. Both ordering and window computation then happen inside that operator, avoiding the intermediate `RowVector` materialization and improving execution efficiency.
 
-At runtime, Window checks whether the plan marks its input as already sorted:
+### 3.1 Motivation
+
+Consider a running total:
+
+```sql
+SELECT
+  user_id,
+  event_time,
+  SUM(amount) OVER (
+    PARTITION BY user_id
+    ORDER BY event_time
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS running_amount
+FROM events;
+```
+
+The query needs all rows for the same `user_id` to stay together, and it needs
+rows inside each user partition to follow `event_time`. A conventional plan often
+builds that order with a standalone sort:
+
+```text
+TableScan -> OrderBy(user_id, event_time) -> Window
+```
+
+That plan gives `OrderBy` and `Window` a clean contract, but it also creates this
+data-shape path:
+
+```text
+RowVector input -> OrderBy row storage -> RowVector output -> Window row storage
+```
+
+`OrderBy` needs row-oriented storage to sort. After sorting, it emits a normal
+columnar `RowVector` because operator boundaries are columnar. `Window` then
+builds row-oriented state again to find user boundaries, peer groups, and frame
+ranges. The SQL semantics do not require this `rows -> columns -> rows` middle
+step; the physical boundary does.
+
+### 3.2 Fused Execution Path
+
+Sort + Window fusion moves the ordering work into `Window` when the plan does not
+already provide sorted input. `Window` reads one planner flag to choose the path:
 
 ```cpp
 needSort_ = !(windowNode->inputsSorted());
 ```
 
-If the input already satisfies the ordering requirement, Window uses a streaming
-path and evaluates window functions directly. Otherwise, sorting is performed
-inside the Window operator through the sort-window build path, and the sorted
-rows are consumed by the same operator to compute window results.
+
+If `inputsSorted()` returns true, `Window` keeps the streaming-style path. If it
+returns false, `Window` routes input through a shared sort preparation path before
+the selected build implementation handles partition loading and output:
+
+```cpp
+if (needSort_) {
+  windowBuild_->addInputCommon(input);
+}
+windowBuild_->addInput(input);
+
+if (needSort_) {
+  windowBuild_->noMoreInputCommon();
+}
+windowBuild_->noMoreInput();
+```
+
+`addInputCommon()` decodes the incoming columnar batches once into
+`WindowBuild`'s `RowContainer`. The constructor reorders channels as partition
+keys, sort keys, then payload columns. On `noMoreInput()`,
+`noMoreInputCommon()` sorts row pointers in memory or finishes sort spill and
+creates an ordered spill reader. After that step, equal partition keys form
+contiguous ranges, and the order keys inside each range drive peer and frame
+computation.
 
 ![Sort and Window fusion]({{ site.baseurl }}/assets/images/operator-fusion-sort-window.svg)
 
-This is also operator fusion, but it is different from Aggregation + Shuffle
-fusion. It does not rely on `CompositeRowVector`, and it is not controlled by
-the composite aggregation configuration. Its goal is to avoid a separate
-Sort-to-Window boundary and keep sorting, buffering, and window evaluation
-within one physical operator when sorting is required.
+The same fused path supports `SortWindowBuild`, `RowsStreamingWindowBuild`, and
+`SpillableWindowBuild`. The common `WindowBuild` path owns the sorted row input;
+each concrete build still controls how it loads partitions and produces output.
+The rest of the engine still sees normal `Window` output.
 
-The benefit is that ordered data does not need to be handed off through an
-additional materialized boundary before window evaluation. For large partitions
-or complex window functions, reducing that boundary can lower memory movement
-and simplify the execution path.
+
+The fused operator also keeps the sort cost visible. Operator stats report sort
+output, column-to-row time, in-sort time, window input, partition loading, window
+function computation, output, and spill work. `SortWindowBenchmark` compares
+`OrderBy -> streamingWindow` with `sortWindow` under the same workload.
 
 ## 4. Performance Results
+
+### 4.1 Aggregation + Shuffle
 
 In representative production-style double-run tests, Aggregation + Shuffle
 fusion showed stable improvement on the overall agg + shuffle stage. End-to-end
@@ -169,6 +226,20 @@ The main cost is reflected in shuffle size. In the tests, shuffle size ranged
 from roughly unchanged to about 6% larger, mainly due to differences in
 row-payload layout. Compared with the reduction in stage time, this size
 increase is within an acceptable range.
+
+### 4.2 Sort + Window
+
+We benchmarked Sort + Window with window query shapes observed in production,
+comparing the old `OrderBy -> Window` shape with the fused `sortWindow`
+shape under the same partition keys, sort keys, spill setting, and window
+function. The benchmark results showed consistent improvement, with an average of about 20% and the best cases reaching roughly 50%. These results match the optimization target: once Window can consume row-oriented sorted data directly, Bolt avoids the extra rows -> RowVector -> rows round trip between standalone sort and window evaluation.
+
+The production results showed the same trend. Across 62 real online tasks, the
+median performance improvement was about 17.95%, P90 improvement was about
+28.11%, and the best task improved by about 40.35%. 
+
+Overall, Sort + Window fusion significantly improves both the performance and
+stability of workloads where sorting and window evaluation appear together.
 
 ## 5. Configuration and Observability
 
