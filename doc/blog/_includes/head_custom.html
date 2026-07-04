@@ -134,7 +134,10 @@
     postList.className = 'nav-list blog-post-links';
     postList.setAttribute('aria-label', 'Blog posts');
 
-    posts.forEach(function (post) {
+    var MAX_SIDEBAR_POSTS = 8;
+    var recentPosts = posts.slice(0, MAX_SIDEBAR_POSTS);
+
+    recentPosts.forEach(function (post) {
       var item = document.createElement('li');
       item.className = 'nav-list-item';
 
@@ -146,6 +149,19 @@
       item.appendChild(link);
       postList.appendChild(item);
     });
+
+    if (posts.length > MAX_SIDEBAR_POSTS) {
+      var moreItem = document.createElement('li');
+      moreItem.className = 'nav-list-item blog-view-all-item';
+
+      var moreLink = document.createElement('a');
+      moreLink.className = 'nav-list-link blog-view-all-link';
+      moreLink.href = blogLink ? blogLink.getAttribute('href') : '{{ "/blog.html" | relative_url }}';
+      moreLink.textContent = 'View all ' + posts.length + ' posts \u2192';
+
+      moreItem.appendChild(moreLink);
+      postList.appendChild(moreItem);
+    }
 
     blogItem.appendChild(postList);
   });

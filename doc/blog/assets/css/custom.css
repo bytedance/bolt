@@ -203,12 +203,22 @@ body .site-nav > .nav-list > .nav-list-item > .nav-list-link {
 
 .blog-post-links {
   display: block !important;
-  max-height: 9.5rem;
-  overflow-y: auto;
+  overflow: visible;
   overscroll-behavior: contain;
   margin-top: 0.25rem;
   padding-left: 0.75rem;
   border-left: 1px solid #e6e6ef;
+}
+
+.blog-view-all-link {
+  font-weight: 600 !important;
+  color: #1a6dff !important;
+}
+.blog-view-all-item {
+  margin-top: 0.15rem;
+}
+body.bolt-dark .blog-view-all-link {
+  color: #58a6ff !important;
 }
 
 .blog-posts-collapsed .blog-post-links {
@@ -218,6 +228,10 @@ body .site-nav > .nav-list > .nav-list-item > .nav-list-link {
 .blog-post-links .nav-list-link {
   font-size: 0.88rem;
   line-height: 1.25rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
 }
 
 .post-meta {
@@ -264,10 +278,6 @@ body .main-content .note {
 @media (max-width: 50rem) {
   .site-nav {
     max-height: calc(100vh - 5rem);
-  }
-
-  .blog-post-links {
-    max-height: 8rem;
   }
 
   .bolt-hero-logo {
@@ -584,6 +594,11 @@ body.bolt-dark .main-content :not(pre, figure) > code {
   }
   /* Let long nav labels use the extra width on a single line */
   body.bolt-resizable-ready .site-nav .nav-list-link { white-space: nowrap; }
+  /* But let blog post titles wrap so they are never truncated */
+  body.bolt-resizable-ready .blog-post-links .nav-list-link {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   /* Drag handle sits on the sidebar's right edge */
   .bolt-sidebar-resizer {
     position: fixed;
