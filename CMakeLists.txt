@@ -438,8 +438,12 @@ endif()
 # Required so bolt code can be used in a dynamic library
 set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 23)
+  set(CMAKE_CXX_EXTENSIONS ON)
+  set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
+endif()
 
 # execute_process( COMMAND bash -c "( source
 # ${CMAKE_CURRENT_SOURCE_DIR}/scripts/setup-helper-functions.sh && echo -n $(get_cxx_flags

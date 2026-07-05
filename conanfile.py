@@ -17,9 +17,11 @@ import os
 import platform
 import re
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools import files, scm
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
+from conan.tools.scm import Version
 
 # Now, set options of third parties
 postfix = "/*"
@@ -306,6 +308,37 @@ class BoltConan(ConanFile):
 
     # Set default options of third parties here
     def configure(self):
+        # Dynamically set C++ standard based on compiler version
+        compiler = str(self.settings.compiler)
+        compiler_version = Version(str(self.settings.compiler.version))
+        desired_cppstd = None
+
+        if compiler == "gcc":
+            if str(self.settings.arch).startswith("arm") and compiler_version < "12":
+                raise ConanInvalidConfiguration(
+                    f"ARM builds require GCC >= 12 to support SVE, got GCC {compiler_version}."
+                )
+            if compiler_version >= "12":
+                desired_cppstd = "gnu23"
+            elif compiler_version >= "10":
+                desired_cppstd = "gnu20"
+            else:
+                raise ConanInvalidConfiguration(
+                    f"GCC {compiler_version} is not supported. Need GCC >= 10"
+                )
+
+        elif compiler == "clang" or compiler == "apple-clang":
+            if compiler_version >= "19":
+                desired_cppstd = "gnu23"
+            else:
+                desired_cppstd = "gnu20"
+
+        if desired_cppstd:
+            self.settings.compiler.cppstd = desired_cppstd
+            self.output.info(
+                f"Dynamic compiler.cppstd configured to: {desired_cppstd} for {compiler} {compiler_version}"
+            )
+
         self.options[glog].with_unwind = False
         if self.options.get_safe("es_build"):
             self.options[glog].shared = True
