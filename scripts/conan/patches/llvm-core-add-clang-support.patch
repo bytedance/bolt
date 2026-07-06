@@ -62,7 +62,7 @@ index e8290099..fb18c9dd 100644
              # LLVM >=15 split up several components in its release, including cmake
              get(self, **sources["llvm"], destination='llvm-main', strip_root=True)
              get(self, **sources["cmake"], destination='cmake', strip_root=True)
-+            if "clang" in sources:
++            if self.options.with_clang and "clang" in sources:
 +                get(self, **sources["clang"], destination='clang', strip_root=True)
 
      def _apply_resource_limits(self, cmake_definitions):
