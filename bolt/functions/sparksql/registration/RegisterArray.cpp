@@ -206,7 +206,7 @@ void registerArrayFunctions(const std::string& prefix) {
   exec::registerStatefulVectorFunction(
       prefix + "array_repeat",
       repeatSignatures(),
-      makeRepeatAllowNegativeCount);
+      makeRepeatAllowNegativeCountNoLimit);
 
   registerIntegerSliceFunction(prefix);
 

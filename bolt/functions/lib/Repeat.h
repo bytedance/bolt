@@ -48,4 +48,10 @@ std::shared_ptr<exec::VectorFunction> makeRepeatAllowNegativeCount(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config);
+
+// Allows negative count and doesn't enforce a hard per-row count limit.
+std::shared_ptr<exec::VectorFunction> makeRepeatAllowNegativeCountNoLimit(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config);
 } // namespace bytedance::bolt::functions
