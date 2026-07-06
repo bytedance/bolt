@@ -1074,3 +1074,73 @@ TEST_F(ElementAtTest, testCachingOptimzation) {
     test::assertEqualVectors(result, result1);
   }
 }
+
+TEST_F(ElementAtTest, varcharMapCacheWithReusedMapVector) {
+  constexpr int32_t kLargeMapSize = 128;
+  const std::string kNeedle = "needle_key_long_enough";
+  const std::string kExpectedValue = "expected_value_long_enough";
+
+  auto makeEntries = [&](const std::string& prefix,
+                         bool includeNeedle,
+                         std::vector<std::string>& storage) {
+    storage.clear();
+    storage.reserve(kLargeMapSize * 2 + 2);
+
+    std::vector<std::pair<StringView, std::optional<StringView>>> entries;
+    entries.reserve(kLargeMapSize);
+    for (int32_t i = 0; i < kLargeMapSize; ++i) {
+      storage.push_back(fmt::format("{}key{:03d}", prefix, i));
+      storage.push_back(fmt::format("{}val{:03d}", prefix, i));
+      entries.push_back(
+          {StringView(storage[storage.size() - 2]),
+           StringView(storage[storage.size() - 1])});
+    }
+
+    if (includeNeedle) {
+      storage.push_back(kNeedle);
+      storage.push_back(kExpectedValue);
+      entries[kLargeMapSize / 2] = {
+          StringView(storage[storage.size() - 2]),
+          StringView(storage[storage.size() - 1])};
+    }
+    return entries;
+  };
+
+  std::vector<std::string> oldStorage;
+  std::vector<std::string> newStorage;
+  auto oldEntries = makeEntries("old", false, oldStorage);
+  auto newEntries = makeEntries("new", true, newStorage);
+
+  auto reusedMap = makeMapVector<StringView, StringView>({oldEntries});
+  auto lookupKeys = makeFlatVector<StringView>({StringView(kNeedle)});
+  std::vector<VectorPtr> args = {reusedMap, lookupKeys};
+
+  exec::ExprSet exprSet({}, &execCtx_);
+  auto inputs = makeRowVector({});
+  exec::EvalCtx evalCtx(&execCtx_, &exprSet, inputs.get());
+  SelectivityVector rows(1);
+
+  bytedance::bolt::functions::MapSubscript mapSubscriptWithCaching(true);
+
+  auto oldResult1 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  auto oldResult2 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  auto expectedOld = makeNullableFlatVector<StringView>({std::nullopt});
+  test::assertEqualVectors(expectedOld, oldResult1);
+  test::assertEqualVectors(expectedOld, oldResult2);
+
+  auto replacementMap = makeMapVector<StringView, StringView>({newEntries});
+  reusedMap->setOffsetAndSize(
+      0, replacementMap->offsetAt(0), replacementMap->sizeAt(0));
+  reusedMap->setKeysAndValues(
+      replacementMap->mapKeys(), replacementMap->mapValues());
+
+  auto expectedNew = makeFlatVector<StringView>({StringView(kExpectedValue)});
+
+  bytedance::bolt::functions::MapSubscript mapSubscriptWithoutCaching(false);
+  auto uncachedResult =
+      mapSubscriptWithoutCaching.applyMap(rows, args, evalCtx);
+  test::assertEqualVectors(expectedNew, uncachedResult);
+
+  auto cachedResult = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  test::assertEqualVectors(expectedNew, cachedResult);
+}

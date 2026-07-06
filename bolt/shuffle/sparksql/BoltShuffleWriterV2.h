@@ -218,6 +218,10 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
     assembleBufferPool_ = BufferPool(assemblePool_.get());
   }
 
+  std::string toString() const override {
+    return "BoltShuffleWriterV2";
+  }
+
  private:
   void checkLengthBuffer(uint32_t col, uint32_t pid);
 
@@ -341,9 +345,8 @@ class BoltShuffleWriterV2 final : public BoltShuffleWriter {
   std::vector<std::vector<std::unique_ptr<arrow::ResizableBuffer>>>
       partitionBooleanValueBuffers_;
   std::map<uint32_t, bool> fullBatch_;
-  std::vector<uint16_t> fixedColValueSize_;
   std::vector<uint8_t> needAlignmentBitmap_;
-  std::vector<uint32_t> partitionBytesPerBatch_;
+  std::vector<uint64_t> partitionBytesPerBatch_;
   std::vector<bool> isValidityBufferRowVectorMode_;
   int64_t rowVectorModeCompress_{0};
 

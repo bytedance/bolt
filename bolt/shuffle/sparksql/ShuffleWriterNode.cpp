@@ -80,7 +80,10 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
           << ", pool reserved: " << pool()->reservedBytes()
           << ", total free: " << freeMem.value();
   auto status = shuffleWriter_->split(input, memLimit);
-  BOLT_CHECK(status.ok(), "Native split: shuffle writer split failed");
+  BOLT_CHECK(
+      status.ok(),
+      "Native split: shuffle writer split failed: {}",
+      status.ToString());
 }
 
 void SparkShuffleWriter::noMoreInput() {
@@ -88,7 +91,11 @@ void SparkShuffleWriter::noMoreInput() {
   ShuffleWriterMetrics metrics;
   if (shuffleWriter_) {
     auto status = shuffleWriter_->stop();
-    BOLT_CHECK(status.ok(), "Native shuffle write: ShuffleWriter stop failed");
+    BOLT_CHECK(
+        status.ok(),
+        "Native shuffle write: ShuffleWriter stop failed, status: {}, shuffleWriter: {}",
+        status.ToString(),
+        shuffleWriter_->toString());
     metrics = shuffleWriter_->metrics();
   } else {
     metrics.partitionLengths = std::vector<int64_t>(

@@ -67,6 +67,7 @@ bolt_add_library(
   LocalShuffle.cpp
   MarkDistinct.cpp
   MemoryReclaimer.cpp
+  MemoryPressureUtils.cpp
   Merge.cpp
   MergeJoin.cpp
   MergeSource.cpp
@@ -120,8 +121,6 @@ bolt_add_library(
   WindowFunction.cpp
   WindowPartition.cpp
 )
-
-target_compile_features(bolt_exec PRIVATE cxx_std_20)
 
 set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)
 

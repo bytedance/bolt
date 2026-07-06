@@ -30,19 +30,26 @@
 
 // Adapted from Apache Arrow.
 
+#include <algorithm>
+#include <array>
+#include <numeric>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "arrow/buffer.h"
 #include "arrow/io/buffered.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_builders.h"
 
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
+#include "bolt/dwio/parquet/arrow/Encoding.h"
+#include "bolt/dwio/parquet/arrow/EncodingInternal.h"
 #include "bolt/dwio/parquet/arrow/FileWriter.h"
 #include "bolt/dwio/parquet/arrow/Metadata.h"
+#include "bolt/dwio/parquet/arrow/PageBufferArena.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Statistics.h"
@@ -1042,6 +1049,81 @@ void EncodeLevels(
   ASSERT_EQ(num_levels, levels_count);
 }
 
+std::vector<uint8_t> EncodeLevelsReferenceRle(
+    int16_t max_level,
+    const std::vector<int16_t>& input_levels,
+    bool include_length_prefix) {
+  const int prefix_size =
+      include_length_prefix ? static_cast<int>(sizeof(int32_t)) : 0;
+  const int encoded_capacity = LevelEncoder::MaxBufferSize(
+      Encoding::RLE, max_level, static_cast<int>(input_levels.size()));
+  std::vector<uint8_t> bytes(prefix_size + encoded_capacity);
+
+  LevelEncoder encoder;
+  encoder.Init(
+      Encoding::RLE,
+      max_level,
+      static_cast<int>(input_levels.size()),
+      bytes.data() + prefix_size,
+      encoded_capacity);
+  const int encoded_levels = encoder.Encode(
+      static_cast<int>(input_levels.size()), input_levels.data());
+  DCHECK_EQ(input_levels.size(), encoded_levels);
+
+  const int32_t encoded_length = encoder.len();
+  if (include_length_prefix) {
+    const auto little_endian_length = bit_util::ToLittleEndian(encoded_length);
+    std::memcpy(bytes.data(), &little_endian_length, sizeof(encoded_length));
+  }
+  bytes.resize(prefix_size + encoded_length);
+  return bytes;
+}
+
+std::vector<uint8_t> EncodeLevelsIncrementally(
+    int16_t max_level,
+    const std::vector<int16_t>& input_levels,
+    const std::vector<int64_t>& batch_sizes,
+    bool include_length_prefix) {
+  const int prefix_size =
+      include_length_prefix ? static_cast<int>(sizeof(int32_t)) : 0;
+  PARQUET_ASSIGN_OR_THROW(auto buffer, ::arrow::AllocateResizableBuffer(0));
+  IncrementalLevelRleEncoder encoder(buffer.get());
+  encoder.Reset(max_level, prefix_size);
+
+  int64_t offset = 0;
+  for (auto batch_size : batch_sizes) {
+    DCHECK_GE(batch_size, 0);
+    DCHECK_LE(offset + batch_size, input_levels.size());
+    encoder.Put(input_levels.data() + offset, batch_size);
+    offset += batch_size;
+  }
+  DCHECK_EQ(input_levels.size(), offset);
+
+  const int32_t bytes_written = encoder.Flush();
+  return std::vector<uint8_t>(
+      buffer->data(), buffer->data() + static_cast<size_t>(bytes_written));
+}
+
+void AssertIncrementalLevelRleEncodingMatchesReference(
+    int16_t max_level,
+    const std::vector<int16_t>& input_levels,
+    const std::vector<int64_t>& batch_sizes) {
+  DCHECK_EQ(
+      input_levels.size(),
+      std::accumulate(batch_sizes.begin(), batch_sizes.end(), int64_t{0}));
+
+  for (bool include_length_prefix : {false, true}) {
+    SCOPED_TRACE(
+        testing::Message() << "include_length_prefix="
+                           << include_length_prefix);
+    const auto expected = EncodeLevelsReferenceRle(
+        max_level, input_levels, include_length_prefix);
+    const auto actual = EncodeLevelsIncrementally(
+        max_level, input_levels, batch_sizes, include_length_prefix);
+    EXPECT_EQ(expected, actual);
+  }
+}
+
 void VerifyDecodingLevels(
     Encoding::type encoding,
     int16_t max_level,
@@ -1249,6 +1331,47 @@ TEST(TestLevelEncoder, MinimumBufferSize2) {
 
     ASSERT_EQ(kNumToEncode, encode_count);
   }
+}
+
+TEST(TestIncrementalLevelRleEncoder, MatchesReferenceForTypicalSequence) {
+  const std::vector<int16_t> levels = {0, 1, 2, 1, 0, 2, 1, 3, 3, 3, 3, 3, 3,
+                                       3, 3, 3, 1, 0, 2, 3, 1, 2, 0, 1, 2, 2,
+                                       2, 2, 2, 2, 2, 2, 2, 0, 1, 2, 3, 0, 1,
+                                       2, 0, 1, 2, 3, 1, 0, 2, 3, 3, 3, 3};
+
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/3, levels, {5, 4, 7, 3, 8, 6, 5, 4, 9});
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/3,
+      levels,
+      {1, 2, 1, 5, 3, 1, 4, 2, 6, 7, 4, 3, 5, 2, 3, 2});
+}
+
+TEST(
+    TestIncrementalLevelRleEncoder,
+    MatchesReferenceWhenRepeatedRunCrossesBatchBoundary) {
+  const std::vector<int16_t> levels = {2, 2, 2, 2, 2, 2, 2, 2, 2, 1,
+                                       0, 1, 0, 3, 3, 3, 3, 3, 3, 3,
+                                       3, 3, 0, 1, 2, 3, 0, 1};
+
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/3, levels, {7, 2, 4, 7, 2, 6});
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/3, levels, {3, 4, 1, 1, 4, 5, 4, 6});
+}
+
+TEST(
+    TestIncrementalLevelRleEncoder,
+    MatchesReferenceForLiteralRunBoundaryConditions) {
+  std::vector<int16_t> levels(517);
+  for (int i = 0; i < static_cast<int>(levels.size()); ++i) {
+    levels[i] = static_cast<int16_t>(i % 7);
+  }
+
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/7, levels, {503, 1, 8, 5});
+  AssertIncrementalLevelRleEncodingMatchesReference(
+      /*max_level=*/7, levels, {17, 31, 64, 129, 211, 65});
 }
 
 TEST(TestColumnWriter, WriteDataPageV2Header) {
@@ -1580,6 +1703,68 @@ class ColumnWriterTestSizeEstimated : public ::testing::Test {
   std::unique_ptr<ColumnChunkMetaDataBuilder> metadata_;
 };
 
+class ColumnWriterLevelStreamingTest : public ::testing::Test {
+ public:
+  std::shared_ptr<Int32Writer> BuildWriter(
+      Repetition::type repetition,
+      int64_t data_pagesize,
+      ParquetDataPageVersion page_version = ParquetDataPageVersion::V1,
+      bool buffered = false,
+      Compression::type compression = Compression::UNCOMPRESSED,
+      int64_t parquet_block_size = -1) {
+    sink_ = CreateOutputStream();
+    node_ = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+        "schema", Repetition::REQUIRED, {schema::Int32("levels", repetition)}));
+    schema_descriptor_ = std::make_unique<SchemaDescriptor>();
+    schema_descriptor_->Init(node_);
+
+    auto builder = WriterProperties::Builder();
+    builder.disable_dictionary()
+        ->data_pagesize(data_pagesize)
+        ->data_page_version(page_version)
+        ->compression(compression)
+        ->set_parquet_block_size(parquet_block_size);
+    writer_properties_ = builder.build();
+    compression_ = compression;
+    metadata_ = ColumnChunkMetaDataBuilder::Make(
+        writer_properties_, schema_descriptor_->Column(0));
+
+    std::unique_ptr<PageWriter> pager = PageWriter::Open(
+        sink_,
+        compression,
+        Codec::UseDefaultCompressionLevel(),
+        metadata_.get(),
+        /*row_group_ordinal=*/-1,
+        /*column_chunk_ordinal=*/-1,
+        ::arrow::default_memory_pool(),
+        /*buffered_row_group=*/buffered,
+        /*header_encryptor=*/NULLPTR,
+        /*data_encryptor=*/NULLPTR,
+        /*enable_checksum=*/false);
+    return std::static_pointer_cast<Int32Writer>(ColumnWriter::Make(
+        metadata_.get(), std::move(pager), writer_properties_.get()));
+  }
+
+  std::shared_ptr<TypedColumnReader<Int32Type>> BuildReader(int64_t num_rows) {
+    EXPECT_OK_AND_ASSIGN(auto buffer, sink_->Finish());
+    auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
+    ReaderProperties reader_properties;
+    std::unique_ptr<PageReader> page_reader = PageReader::Open(
+        std::move(source), num_rows, compression_, reader_properties);
+    return std::static_pointer_cast<TypedColumnReader<Int32Type>>(
+        ColumnReader::Make(
+            schema_descriptor_->Column(0), std::move(page_reader)));
+  }
+
+ private:
+  std::shared_ptr<::arrow::io::BufferOutputStream> sink_;
+  std::shared_ptr<GroupNode> node_;
+  std::unique_ptr<SchemaDescriptor> schema_descriptor_;
+  std::shared_ptr<WriterProperties> writer_properties_;
+  std::unique_ptr<ColumnChunkMetaDataBuilder> metadata_;
+  Compression::type compression_{Compression::UNCOMPRESSED};
+};
+
 TEST_F(ColumnWriterTestSizeEstimated, NonBuffered) {
   auto required_writer =
       this->BuildWriter(Compression::UNCOMPRESSED, /* buffered*/ false);
@@ -1693,6 +1878,285 @@ TEST_F(ColumnWriterTestSizeEstimated, BufferedCompression) {
   EXPECT_EQ(0, required_writer->total_compressed_bytes());
   EXPECT_EQ(written_size, required_writer->total_bytes_written());
   EXPECT_GT(written_size, required_writer->total_compressed_bytes_written());
+}
+
+TEST_F(
+    ColumnWriterLevelStreamingTest,
+    OptionalLevelsRemainCorrectAcrossWriteBatchBoundariesV1) {
+  auto writer = BuildWriter(
+      Repetition::OPTIONAL,
+      /*data_pagesize=*/1 << 20,
+      ParquetDataPageVersion::V1);
+
+  const std::vector<int16_t> def_levels = {
+      1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1};
+  std::vector<int32_t> values;
+  for (int32_t i = 0; i < def_levels.size(); ++i) {
+    if (def_levels[i] == 1) {
+      values.push_back(100 + i);
+    }
+  }
+
+  const std::array<int64_t, 5> batch_sizes = {3, 5, 4, 2, 3};
+  int64_t level_offset = 0;
+  int64_t value_offset = 0;
+  for (auto batch_size : batch_sizes) {
+    writer->WriteBatch(
+        batch_size,
+        def_levels.data() + level_offset,
+        nullptr,
+        values.data() + value_offset);
+    value_offset += std::count(
+        def_levels.begin() + level_offset,
+        def_levels.begin() + level_offset + batch_size,
+        1);
+    level_offset += batch_size;
+  }
+  writer->Close();
+
+  auto reader = BuildReader(def_levels.size());
+  std::vector<int16_t> def_levels_out(def_levels.size(), -1);
+  std::vector<int32_t> values_out(values.size(), -1);
+  int64_t values_read = 0;
+  const int64_t levels_read = reader->ReadBatch(
+      def_levels.size(),
+      def_levels_out.data(),
+      nullptr,
+      values_out.data(),
+      &values_read);
+
+  EXPECT_EQ(def_levels.size(), levels_read);
+  EXPECT_EQ(values.size(), values_read);
+  EXPECT_TRUE(vector_equal(def_levels, def_levels_out));
+  EXPECT_TRUE(vector_equal(values, values_out));
+}
+
+TEST_F(
+    ColumnWriterLevelStreamingTest,
+    RepetitionLevelsRemainCorrectAcrossWriteBatchBoundariesV2) {
+  auto writer = BuildWriter(
+      Repetition::REPEATED,
+      /*data_pagesize=*/1 << 20,
+      ParquetDataPageVersion::V2);
+
+  const std::vector<int16_t> def_levels = {
+      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  const std::vector<int16_t> rep_levels = {
+      0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0};
+  std::vector<int32_t> values(def_levels.size());
+  std::iota(values.begin(), values.end(), 1000);
+
+  const std::array<int64_t, 5> batch_sizes = {2, 3, 1, 4, 7};
+  int64_t level_offset = 0;
+  int64_t value_offset = 0;
+  for (auto batch_size : batch_sizes) {
+    writer->WriteBatch(
+        batch_size,
+        def_levels.data() + level_offset,
+        rep_levels.data() + level_offset,
+        values.data() + value_offset);
+    level_offset += batch_size;
+    value_offset += batch_size;
+  }
+  writer->Close();
+
+  const int64_t num_rows =
+      std::count(rep_levels.begin(), rep_levels.end(), static_cast<int16_t>(0));
+  auto reader = BuildReader(num_rows);
+  std::vector<int16_t> def_levels_out(def_levels.size(), -1);
+  std::vector<int16_t> rep_levels_out(rep_levels.size(), -1);
+  std::vector<int32_t> values_out(values.size(), -1);
+  int64_t values_read = 0;
+  const int64_t levels_read = reader->ReadBatch(
+      def_levels.size(),
+      def_levels_out.data(),
+      rep_levels_out.data(),
+      values_out.data(),
+      &values_read);
+
+  EXPECT_EQ(def_levels.size(), levels_read);
+  EXPECT_EQ(values.size(), values_read);
+  EXPECT_TRUE(vector_equal(def_levels, def_levels_out));
+  EXPECT_TRUE(vector_equal(rep_levels, rep_levels_out));
+  EXPECT_TRUE(vector_equal(values, values_out));
+}
+
+TEST_F(
+    ColumnWriterLevelStreamingTest,
+    ScratchMemoryDoesNotScaleWithRawRepeatedLevels) {
+  constexpr int64_t num_levels = 1'100'000;
+  auto writer = BuildWriter(
+      Repetition::REPEATED,
+      /*data_pagesize=*/num_levels * static_cast<int64_t>(sizeof(int32_t)) +
+          1024,
+      ParquetDataPageVersion::V1);
+
+  const std::vector<int16_t> def_levels(num_levels, 1);
+  const std::vector<int16_t> rep_levels(num_levels, 0);
+  const std::vector<int32_t> values(num_levels, 7);
+
+  writer->WriteBatch(
+      num_levels, def_levels.data(), rep_levels.data(), values.data());
+
+  EXPECT_LT(writer->memory_stats().columnScratchAllocatedBytes, 1 << 20);
+  writer->Close();
+}
+
+TEST(PageBufferArenaTest, FixedCapacityAllocationAndReset) {
+  PageBufferArena arena(::arrow::default_memory_pool(), 192);
+  ASSERT_TRUE(arena.enabled());
+  EXPECT_EQ(192, arena.capacity());
+
+  auto first = arena.TryAllocate(/*size=*/32, /*capacity=*/64);
+  ASSERT_NE(nullptr, first);
+  EXPECT_EQ(32, first->size());
+  EXPECT_EQ(64, first->capacity());
+  EXPECT_TRUE(first->Reserve(64).ok());
+  EXPECT_TRUE(first->Resize(64, /*shrink_to_fit=*/false).ok());
+  EXPECT_FALSE(first->Resize(65, /*shrink_to_fit=*/false).ok());
+
+  auto second = arena.TryAllocate(/*size=*/16, /*capacity=*/64);
+  ASSERT_NE(nullptr, second);
+  EXPECT_EQ(128, arena.bytes_reserved());
+  EXPECT_EQ(nullptr, arena.TryAllocate(/*size=*/1, /*capacity=*/65));
+
+  auto first_data = first->mutable_data();
+  arena.Reset();
+  EXPECT_EQ(0, arena.bytes_reserved());
+
+  auto third = arena.TryAllocate(/*size=*/64);
+  ASSERT_NE(nullptr, third);
+  EXPECT_EQ(first_data, third->mutable_data());
+}
+
+TEST(PageBufferArenaTest, CommitLastAllocationShrinksReservedBytes) {
+  PageBufferArena arena(::arrow::default_memory_pool(), 256);
+  ASSERT_TRUE(arena.enabled());
+
+  auto first = arena.TryAllocate(/*size=*/0, /*capacity=*/128);
+  ASSERT_NE(nullptr, first);
+  EXPECT_EQ(128, first->capacity());
+  EXPECT_EQ(128, arena.bytes_reserved());
+  EXPECT_EQ(128, arena.available_bytes());
+
+  ASSERT_TRUE(first->Resize(48, /*shrink_to_fit=*/false).ok());
+  ASSERT_TRUE(arena.CommitLastAllocation(first).ok());
+  EXPECT_EQ(48, first->size());
+  EXPECT_EQ(48, first->capacity());
+  EXPECT_EQ(48, arena.bytes_reserved());
+  EXPECT_EQ(192, arena.available_bytes());
+
+  const auto* first_data = first->data();
+  auto second = arena.TryAllocate(/*size=*/32, /*capacity=*/64);
+  ASSERT_NE(nullptr, second);
+  EXPECT_EQ(first_data + 64, second->data());
+  EXPECT_EQ(128, arena.bytes_reserved());
+}
+
+TEST_F(ColumnWriterLevelStreamingTest, PageArenaRoundTripV1Uncompressed) {
+  constexpr int64_t num_values = 4096;
+  auto writer = BuildWriter(
+      Repetition::REQUIRED,
+      /*data_pagesize=*/512,
+      ParquetDataPageVersion::V1,
+      /*buffered=*/false,
+      Compression::UNCOMPRESSED,
+      /*parquet_block_size=*/1 << 20);
+
+  std::vector<int32_t> values(num_values);
+  std::iota(values.begin(), values.end(), 0);
+
+  writer->WriteBatch(num_values, nullptr, nullptr, values.data());
+  writer->Close();
+
+  auto reader = BuildReader(num_values);
+  std::vector<int32_t> values_out(num_values, -1);
+  int64_t total_values_read = 0;
+  int64_t total_levels_read = 0;
+  int64_t remaining = num_values;
+  int32_t* out = values_out.data();
+  while (reader->HasNext()) {
+    int64_t values_read = 0;
+    total_levels_read +=
+        reader->ReadBatch(remaining, nullptr, nullptr, out, &values_read);
+    total_values_read += values_read;
+    remaining -= values_read;
+    out += values_read;
+  }
+
+  EXPECT_EQ(num_values, total_levels_read);
+  EXPECT_EQ(num_values, total_values_read);
+  EXPECT_TRUE(vector_equal(values, values_out));
+}
+
+TEST_F(ColumnWriterLevelStreamingTest, PageArenaRoundTripV1Compressed) {
+  constexpr int64_t num_values = 4096;
+  auto writer = BuildWriter(
+      Repetition::REQUIRED,
+      /*data_pagesize=*/512,
+      ParquetDataPageVersion::V1,
+      /*buffered=*/false,
+      Compression::SNAPPY,
+      /*parquet_block_size=*/1 << 20);
+
+  std::vector<int32_t> values(num_values, 7);
+  writer->WriteBatch(num_values, nullptr, nullptr, values.data());
+  writer->Close();
+
+  auto reader = BuildReader(num_values);
+  std::vector<int32_t> values_out(num_values, -1);
+  int64_t total_values_read = 0;
+  int64_t total_levels_read = 0;
+  int64_t remaining = num_values;
+  int32_t* out = values_out.data();
+  while (reader->HasNext()) {
+    int64_t values_read = 0;
+    total_levels_read +=
+        reader->ReadBatch(remaining, nullptr, nullptr, out, &values_read);
+    total_values_read += values_read;
+    remaining -= values_read;
+    out += values_read;
+  }
+
+  EXPECT_EQ(num_values, total_levels_read);
+  EXPECT_EQ(num_values, total_values_read);
+  EXPECT_TRUE(vector_equal(values, values_out));
+}
+
+TEST_F(ColumnWriterLevelStreamingTest, PageArenaFallbackRoundTripV2Buffered) {
+  constexpr int64_t num_values = 4096;
+  auto writer = BuildWriter(
+      Repetition::REQUIRED,
+      /*data_pagesize=*/512,
+      ParquetDataPageVersion::V2,
+      /*buffered=*/true,
+      Compression::SNAPPY,
+      /*parquet_block_size=*/128);
+
+  std::vector<int32_t> values(num_values);
+  std::iota(values.begin(), values.end(), 1000);
+
+  writer->WriteBatch(num_values, nullptr, nullptr, values.data());
+  writer->Close();
+
+  auto reader = BuildReader(num_values);
+  std::vector<int32_t> values_out(num_values, -1);
+  int64_t total_values_read = 0;
+  int64_t total_levels_read = 0;
+  int64_t remaining = num_values;
+  int32_t* out = values_out.data();
+  while (reader->HasNext()) {
+    int64_t values_read = 0;
+    total_levels_read +=
+        reader->ReadBatch(remaining, nullptr, nullptr, out, &values_read);
+    total_values_read += values_read;
+    remaining -= values_read;
+    out += values_read;
+  }
+
+  EXPECT_EQ(num_values, total_levels_read);
+  EXPECT_EQ(num_values, total_values_read);
+  EXPECT_TRUE(vector_equal(values, values_out));
 }
 
 TEST(TestColumnWriter, WriteDataPageV2HeaderNullCount) {

@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include "bolt/core/QueryCtx.h"
+#include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/tests/utils/TempFilePath.h"
@@ -693,6 +694,210 @@ TEST_F(ParquetReaderTest, projectNoColumns) {
   ASSERT_TRUE(rowReader->next(kBatchSize, result));
   EXPECT_EQ(result->size(), 10);
   ASSERT_FALSE(rowReader->next(kBatchSize, result));
+}
+
+// Validates the per-row size estimate produced by
+// ReaderBase::estimatedRowGroupBytesInMemory(), which is summed over the
+// ScanSpec-projected top-level Parquet column nodes inside
+// ParquetRowReader::estimatedRowSize(). sample.parquet has 20 rows in a
+// single row group with two leaf columns:
+//   a: INT64  (8 bytes / value)
+//   b: DOUBLE (8 bytes / value)
+// so the per-column contribution is 8 * 20 = 160 bytes, and the per-row
+// sum is 8, 8 or 16 depending on which columns are projected.
+TEST_F(ParquetReaderTest, estimatedRowSizeFromColumnNodes) {
+  const std::string sample(getExampleFilePath("sample.parquet"));
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+
+  // Project both columns: per-row bytes = 8 (BIGINT) + 8 (DOUBLE) = 16.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = sampleSchema();
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 16);
+  }
+
+  // Project only the BIGINT column.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({"a"}, {BIGINT()});
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 8);
+  }
+
+  // Project only the DOUBLE column.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({"b"}, {DOUBLE()});
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    auto estimated = rowReader->estimatedRowSize();
+    ASSERT_TRUE(estimated.has_value());
+    EXPECT_EQ(*estimated, 8);
+  }
+
+  // No projected columns (count(*)): no nodes are collected, so the
+  // estimate is unavailable.
+  {
+    auto reader = createReader(sample, readerOpts);
+    auto rowType = ROW({}, {});
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    EXPECT_FALSE(rowReader->estimatedRowSize().has_value());
+  }
+}
+
+// Verifies the per-row size estimate over a string + bigint projection.
+// nation.parquet has 25 rows and four leaf columns (nationkey:BIGINT,
+// name:VARCHAR, regionkey:BIGINT, comment:VARCHAR). Each BIGINT column
+// contributes exactly 8 bytes / row. VARCHAR contributes
+// sizeof(StringView) + total_uncompressed_size summed and divided by
+// num_rows; for the "name" column on this file that yields 28 bytes /
+// row.
+TEST_F(ParquetReaderTest, estimatedRowSizeStringAndBigint) {
+  const std::string path = getExampleFilePath("nation.parquet");
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  // BIGINT only.
+  {
+    auto bytes = estimate(ROW({"nationkey"}, {BIGINT()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 8);
+  }
+
+  // Two BIGINT columns.
+  {
+    auto bytes =
+        estimate(ROW({"nationkey", "regionkey"}, {BIGINT(), BIGINT()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 16);
+  }
+
+  // VARCHAR only.
+  {
+    auto bytes = estimate(ROW({"name"}, {VARCHAR()}));
+    ASSERT_TRUE(bytes.has_value());
+    EXPECT_EQ(*bytes, 28);
+  }
+
+  // BIGINT + VARCHAR: sum of the per-column estimates (8 + 28 = 36).
+  {
+    auto both = estimate(ROW({"nationkey", "name"}, {BIGINT(), VARCHAR()}));
+    ASSERT_TRUE(both.has_value());
+    EXPECT_EQ(*both, 36);
+  }
+}
+
+// Verifies the per-row size estimate over a nested MAP projection.
+// nested_map.parquet has 5 rows with id:BIGINT and
+// data:MAP<VARCHAR, MAP<VARCHAR, BIGINT>>. The MAP subtree contains
+// three leaf Parquet columns (outer key, inner key, inner value); all
+// of them must be summed by estimatedRowGroupBytesInMemory.
+TEST_F(ParquetReaderTest, estimatedRowSizeNestedMap) {
+  const std::string path = getExampleFilePath("nested_map.parquet");
+  const auto mapType = MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()));
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  auto idOnly = estimate(ROW({"id"}, {BIGINT()}));
+  ASSERT_TRUE(idOnly.has_value());
+  EXPECT_EQ(*idOnly, 8);
+
+  auto mapOnly = estimate(ROW({"data"}, {mapType}));
+  ASSERT_TRUE(mapOnly.has_value());
+  EXPECT_EQ(*mapOnly, 106);
+
+  auto both = estimate(ROW({"id", "data"}, {BIGINT(), mapType}));
+  ASSERT_TRUE(both.has_value());
+  EXPECT_EQ(*both, 114);
+}
+
+// Verifies the per-row size estimate over a STRUCT-of-MAP-of-ARRAY
+// projection. row_map_array.parquet has a single row of type
+// ROW(c: ROW(c0: BIGINT, c1: MAP<VARCHAR, ARRAY<INTEGER>>)). Selecting
+// the top-level struct must descend into all leaf columns under it.
+TEST_F(ParquetReaderTest, estimatedRowSizeStructMapArray) {
+  const std::string path = getExampleFilePath("row_map_array.parquet");
+  const auto structType =
+      ROW({"c0", "c1"}, {BIGINT(), MAP(VARCHAR(), ARRAY(INTEGER()))});
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(path, readerOpts);
+  const auto rowType = ROW({"c"}, {structType});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto bytes = reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  ASSERT_TRUE(bytes.has_value());
+  EXPECT_EQ(*bytes, 99);
+}
+
+// Verifies the per-row size estimate over a projection that mixes
+// primitive, ARRAY-of-primitive, STRUCT and ARRAY-of-STRUCT columns.
+// proto-struct-with-array.parquet has six top-level columns and 1 row.
+// Per-column estimates: repeatedPrimitive=4, requiredMessage=4,
+// repeatedMessage=8. The full projection sums to 28 bytes / row.
+TEST_F(ParquetReaderTest, estimatedRowSizeStructAndArray) {
+  const std::string path =
+      getExampleFilePath("proto-struct-with-array.parquet");
+  auto estimate = [&](const RowTypePtr& rowType) {
+    bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto reader = createReader(path, readerOpts);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts)->estimatedRowSize();
+  };
+
+  const auto fullType =
+      ROW({"optionalPrimitive",
+           "requiredPrimitive",
+           "repeatedPrimitive",
+           "optionalMessage",
+           "requiredMessage",
+           "repeatedMessage"},
+          {INTEGER(),
+           INTEGER(),
+           ARRAY(INTEGER()),
+           ROW({"someId"}, {INTEGER()}),
+           ROW({"someId"}, {INTEGER()}),
+           ARRAY(ROW({"someId"}, {INTEGER()}))});
+
+  auto arrayOnly = estimate(ROW({"repeatedPrimitive"}, {ARRAY(INTEGER())}));
+  ASSERT_TRUE(arrayOnly.has_value());
+  EXPECT_EQ(*arrayOnly, 4);
+
+  auto structOnly =
+      estimate(ROW({"requiredMessage"}, {ROW({"someId"}, {INTEGER()})}));
+  ASSERT_TRUE(structOnly.has_value());
+  EXPECT_EQ(*structOnly, 4);
+
+  auto arrayStructOnly =
+      estimate(ROW({"repeatedMessage"}, {ARRAY(ROW({"someId"}, {INTEGER()}))}));
+  ASSERT_TRUE(arrayStructOnly.has_value());
+  EXPECT_EQ(*arrayStructOnly, 8);
+
+  auto full = estimate(fullType);
+  ASSERT_TRUE(full.has_value());
+  EXPECT_EQ(*full, 28);
 }
 
 TEST_F(ParquetReaderTest, parseIntDecimal) {
@@ -2379,6 +2584,213 @@ TEST_F(ParquetReaderTest, dcMapContainsMap) {
   assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
 }
 
+TEST_F(ParquetReaderTest, readNestedMap) {
+  // Verifies reading a parquet file with a nested
+  // MAP<VARCHAR, MAP<VARCHAR, BIGINT>> column.
+  //
+  // nested_map.parquet schema (one row group, 5 rows):
+  //   message schema {
+  //     optional int64 id;
+  //     optional group data (MAP) {
+  //       repeated group key_value {
+  //         required binary key (STRING);
+  //         optional group value (MAP) {
+  //           repeated group key_value {
+  //             required binary key (STRING);
+  //             optional int64 value;
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  // Row contents:
+  //   id=10, data={"a":{"x":1,"y":2}, "b":{"z":3}}
+  //   id=20, data=null
+  //   id=30, data={"k":{}, "m":{"q":7}}
+  //   id=40, data={"only":{"w":100,"x":101,"y":102}}
+  //   id=50, data={}
+  const std::string sample(getExampleFilePath("nested_map.parquet"));
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(sample, readerOptions);
+  EXPECT_EQ(reader->numberOfRows(), 5ULL);
+
+  auto fileRowType = reader->rowType();
+  ASSERT_EQ(fileRowType->size(), 2ULL);
+  EXPECT_TRUE(fileRowType->containsChild("id"));
+  EXPECT_TRUE(fileRowType->containsChild("data"));
+  auto nestedMapType = fileRowType->findChild("data");
+  ASSERT_EQ(nestedMapType->kind(), TypeKind::MAP);
+  EXPECT_EQ(nestedMapType->asMap().keyType()->kind(), TypeKind::VARCHAR);
+  ASSERT_EQ(nestedMapType->asMap().valueType()->kind(), TypeKind::MAP);
+  EXPECT_EQ(
+      nestedMapType->asMap().valueType()->asMap().keyType()->kind(),
+      TypeKind::VARCHAR);
+  EXPECT_EQ(
+      nestedMapType->asMap().valueType()->asMap().valueType()->kind(),
+      TypeKind::BIGINT);
+
+  auto rowType =
+      ROW({"id", "data"}, {BIGINT(), MAP(VARCHAR(), MAP(VARCHAR(), BIGINT()))});
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  auto rowsRead = rowReader->next(100, result);
+  ASSERT_EQ(rowsRead, 5);
+  ASSERT_EQ(result->size(), 5);
+
+  auto row = result->as<RowVector>();
+  ASSERT_NE(row, nullptr);
+
+  // Validate the BIGINT id column.
+  auto idVec = row->childAt(0)->loadedVector()->as<SimpleVector<int64_t>>();
+  ASSERT_NE(idVec, nullptr);
+  EXPECT_EQ(idVec->valueAt(0), 10);
+  EXPECT_EQ(idVec->valueAt(1), 20);
+  EXPECT_EQ(idVec->valueAt(2), 30);
+  EXPECT_EQ(idVec->valueAt(3), 40);
+  EXPECT_EQ(idVec->valueAt(4), 50);
+
+  // Validate the outer MAP<VARCHAR, MAP<VARCHAR, BIGINT>> structure.
+  auto outerMap = row->childAt(1)->loadedVector()->as<MapVector>();
+  ASSERT_NE(outerMap, nullptr);
+  ASSERT_EQ(outerMap->size(), 5);
+  EXPECT_EQ(outerMap->mapKeys()->typeKind(), TypeKind::VARCHAR);
+  auto innerMap = outerMap->mapValues()->loadedVector()->as<MapVector>();
+  ASSERT_NE(innerMap, nullptr);
+  EXPECT_EQ(innerMap->mapKeys()->typeKind(), TypeKind::VARCHAR);
+  EXPECT_EQ(innerMap->mapValues()->typeKind(), TypeKind::BIGINT);
+
+  auto outerKeys = outerMap->mapKeys()->as<SimpleVector<StringView>>();
+  auto innerKeys = innerMap->mapKeys()->as<SimpleVector<StringView>>();
+  auto innerValues = innerMap->mapValues()->as<SimpleVector<int64_t>>();
+  ASSERT_NE(outerKeys, nullptr);
+  ASSERT_NE(innerKeys, nullptr);
+  ASSERT_NE(innerValues, nullptr);
+
+  // Helper: collect outer entries of a row as (key, [(innerKey, innerValue)]).
+  auto collectOuter = [&](vector_size_t rowIdx) {
+    std::vector<
+        std::pair<std::string, std::vector<std::pair<std::string, int64_t>>>>
+        out;
+    auto offset = outerMap->offsetAt(rowIdx);
+    auto size = outerMap->sizeAt(rowIdx);
+    for (vector_size_t i = 0; i < size; ++i) {
+      auto outerIdx = offset + i;
+      std::string outerKey(outerKeys->valueAt(outerIdx));
+      std::vector<std::pair<std::string, int64_t>> innerEntries;
+      auto innerOffset = innerMap->offsetAt(outerIdx);
+      auto innerSize = innerMap->sizeAt(outerIdx);
+      for (vector_size_t j = 0; j < innerSize; ++j) {
+        auto innerIdx = innerOffset + j;
+        innerEntries.emplace_back(
+            std::string(innerKeys->valueAt(innerIdx)),
+            innerValues->valueAt(innerIdx));
+      }
+      out.emplace_back(std::move(outerKey), std::move(innerEntries));
+    }
+    return out;
+  };
+
+  // Row 0: {"a":{"x":1,"y":2}, "b":{"z":3}}
+  EXPECT_FALSE(outerMap->isNullAt(0));
+  {
+    auto entries = collectOuter(0);
+    ASSERT_EQ(entries.size(), 2);
+    EXPECT_EQ(entries[0].first, "a");
+    EXPECT_EQ(
+        entries[0].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"x", 1}, {"y", 2}}));
+    EXPECT_EQ(entries[1].first, "b");
+    EXPECT_EQ(
+        entries[1].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"z", 3}}));
+  }
+
+  // Row 1: null outer map.
+  EXPECT_TRUE(outerMap->isNullAt(1));
+
+  // Row 2: {"k":{}, "m":{"q":7}}
+  EXPECT_FALSE(outerMap->isNullAt(2));
+  {
+    auto entries = collectOuter(2);
+    ASSERT_EQ(entries.size(), 2);
+    EXPECT_EQ(entries[0].first, "k");
+    EXPECT_TRUE(entries[0].second.empty());
+    EXPECT_EQ(entries[1].first, "m");
+    EXPECT_EQ(
+        entries[1].second,
+        (std::vector<std::pair<std::string, int64_t>>{{"q", 7}}));
+  }
+
+  // Row 3: {"only":{"w":100,"x":101,"y":102}}
+  EXPECT_FALSE(outerMap->isNullAt(3));
+  {
+    auto entries = collectOuter(3);
+    ASSERT_EQ(entries.size(), 1);
+    EXPECT_EQ(entries[0].first, "only");
+    EXPECT_EQ(
+        entries[0].second,
+        (std::vector<std::pair<std::string, int64_t>>{
+            {"w", 100}, {"x", 101}, {"y", 102}}));
+  }
+
+  // Row 4: empty outer map.
+  EXPECT_FALSE(outerMap->isNullAt(4));
+  EXPECT_EQ(outerMap->sizeAt(4), 0);
+
+  EXPECT_FALSE(rowReader->next(100, result));
+}
+
+// Regression test for the parquet writer-defect tolerance fix in
+// RepeatedLengths::readLengths. When the underlying lengths buffer holds
+// fewer entries than the parent reader requests (which can happen if a
+// nested column's rep/def stream is shorter than its parent expects),
+// readLengths must pad the missing tail with zero-length entries instead
+// of failing the BOLT_CHECK_LE assertion.
+TEST_F(ParquetReaderTest, repeatedLengthsTolerateShortBuffer) {
+  bytedance::bolt::parquet::RepeatedLengths repeatedLengths;
+  // Underlying buffer has only 3 lengths.
+  auto lengthsBuffer = AlignedBuffer::allocate<int32_t>(3, leafPool_.get());
+  auto* rawLengths = lengthsBuffer->asMutable<int32_t>();
+  rawLengths[0] = 11;
+  rawLengths[1] = 22;
+  rawLengths[2] = 33;
+  lengthsBuffer->setSize(3 * sizeof(int32_t));
+  repeatedLengths.setLengths(lengthsBuffer);
+
+  // Case 1: request fewer than available (normal path).
+  std::array<int32_t, 5> out{};
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 2);
+  EXPECT_EQ(out[0], 11);
+  EXPECT_EQ(out[1], 22);
+  EXPECT_EQ(out[2], -1);
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 2);
+
+  // Case 2: request more than remaining (defect-tolerance path). Only 1
+  // entry remains in the buffer; the trailing 3 positions must be zeroed.
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 4);
+  EXPECT_EQ(out[0], 33);
+  EXPECT_EQ(out[1], 0);
+  EXPECT_EQ(out[2], 0);
+  EXPECT_EQ(out[3], 0);
+  EXPECT_EQ(out[4], -1);
+  // Index advances only by the available count, not the requested count.
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 3);
+
+  // Case 3: request from already-exhausted buffer; all positions zeroed.
+  out.fill(-1);
+  repeatedLengths.readLengths(out.data(), 2);
+  EXPECT_EQ(out[0], 0);
+  EXPECT_EQ(out[1], 0);
+  EXPECT_EQ(out[2], -1);
+  EXPECT_EQ(repeatedLengths.nextLengthIndex(), 3);
+}
+
 // Comprehensive test matrix covering all combinations:
 // - Nulls: No nulls, With nulls
 // - Dictionary: Enabled, Disabled
@@ -2696,3 +3108,61 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<FloatToDoubleTestParam>& info) {
       return info.param.toString();
     });
+
+TEST_F(ParquetReaderTest, lazyRepDefSanitizedCustomTagRepro) {
+  const std::string kFilePath =
+      getExampleFilePath("bolt_lazy_repdef_sanitized_custom_tag.parquet");
+  constexpr int32_t kBatchRows = 4096;
+
+  if (!std::filesystem::exists(kFilePath)) {
+    GTEST_SKIP() << "Sanitized repro parquet file is not available: "
+                 << kFilePath;
+  }
+
+  auto rowType =
+      ROW({"filter_col", "map_col"}, {INTEGER(), MAP(VARCHAR(), VARCHAR())});
+
+  auto scanSpec = makeScanSpec(rowType);
+  scanSpec->getOrCreateChild("filter_col")->setFilter(exec::between(3, 4));
+
+  auto* mapSpec = scanSpec->getOrCreateChild("map_col");
+  mapSpec->setExtractValues(true);
+  for (auto& child : mapSpec->children()) {
+    child->setExtractValues(true);
+  }
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(kFilePath, readerOpts);
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReaderOpts.setDecodeRepDefPageCount(10);
+  rowReaderOpts.setParquetRepDefMemoryLimit(16UL << 20);
+
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  uint64_t totalRows = 0;
+  uint64_t totalCustomTagEntries = 0;
+  for (;;) {
+    const auto got = rowReader->next(kBatchRows, result);
+    if (got == 0) {
+      break;
+    }
+
+    auto* row = result->as<RowVector>();
+    ASSERT_NE(row, nullptr);
+    ASSERT_EQ(row->childrenSize(), 2);
+    auto customTag = row->childAt(1)->loadedVector();
+    ASSERT_NE(customTag, nullptr);
+    auto* map = customTag->as<MapVector>();
+    ASSERT_NE(map, nullptr);
+    for (vector_size_t i = 0; i < map->size(); ++i) {
+      if (!map->isNullAt(i)) {
+        totalCustomTagEntries += map->sizeAt(i);
+      }
+    }
+    totalRows += result->size();
+  }
+
+  EXPECT_GT(totalRows, 0);
+  EXPECT_GT(totalCustomTagEntries, 0);
+}

@@ -106,7 +106,8 @@ VectorPtr RowReader::projectColumns(
   std::vector<std::string> names(numColumns);
   std::vector<TypePtr> types(numColumns);
   std::vector<VectorPtr> children(numColumns);
-  std::vector<uint64_t> passed(bits::nwords(input->size()), -1);
+  std::vector<uint64_t> passed(
+      bits::nwords(static_cast<uint64_t>(input->size())), -1);
   for (auto& childSpec : spec.children()) {
     VectorPtr child;
     if (childSpec->isConstant()) {

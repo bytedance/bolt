@@ -34,7 +34,6 @@
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/row/CompactRow.h"
-#include "bolt/row/UnsafeRowDeserializers.h"
 #include "bolt/row/UnsafeRowFast.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::row {
@@ -63,7 +62,7 @@ class SerializeBenchmark {
     auto serialized = serialize(fast, data->size(), buffer);
     suspender.dismiss();
 
-    auto copy = UnsafeRowDeserializer::deserialize(serialized, rowType, pool());
+    auto copy = UnsafeRowFast::deserialize(serialized, rowType, pool());
     BOLT_CHECK_EQ(copy->size(), data->size());
   }
 
@@ -157,17 +156,17 @@ class SerializeBenchmark {
     return totalSize;
   }
 
-  std::vector<std::optional<std::string_view>> serialize(
+  std::vector<char*> serialize(
       UnsafeRowFast& unsafeRow,
       vector_size_t numRows,
       BufferPtr& buffer) {
-    std::vector<std::optional<std::string_view>> serialized;
+    std::vector<char*> serialized;
     auto rawBuffer = buffer->asMutable<char>();
 
     size_t offset = 0;
     for (auto i = 0; i < numRows; ++i) {
       auto rowSize = unsafeRow.serialize(i, rawBuffer + offset);
-      serialized.push_back(std::string_view(rawBuffer + offset, rowSize));
+      serialized.push_back(rawBuffer + offset);
       offset += rowSize;
     }
 

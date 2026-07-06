@@ -48,7 +48,7 @@ class SelectiveStringDictionaryColumnReader
   void seekToRowGroup(int64_t index) override {
     SelectiveColumnReader::seekToRowGroup(index);
     auto positionsProvider = formatData_->as<DwrfData>().seekToRowGroup(index);
-    if (strideDictStream_) {
+    if (strideDictStream_ && strideDictLengthDecoder_) {
       strideDictStream_->seekToPosition(positionsProvider);
       strideDictLengthDecoder_->seekToRowGroup(positionsProvider);
       // skip row group dictionary size

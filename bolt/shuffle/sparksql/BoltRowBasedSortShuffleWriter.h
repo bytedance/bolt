@@ -51,6 +51,10 @@ class BoltRowBasedSortShuffleWriter final : public BoltShuffleWriter {
       arrow::MemoryPool* pool)
       : BoltShuffleWriter(std::move(options), boltPool, pool) {}
 
+  std::string toString() const override {
+    return "BoltRowBasedSortShuffleWriter";
+  }
+
  private:
   arrow::Status init() override;
 

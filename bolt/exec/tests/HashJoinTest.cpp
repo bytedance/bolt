@@ -32,6 +32,7 @@
 #include <re2/re2.h>
 
 #include <fmt/format.h>
+#include "Type.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
@@ -1124,6 +1125,50 @@ TEST_P(MultiThreadedHashJoinTest, emptyProbeWithSpillMemoryThreshold) {
       .injectSpill(false)
       .spillMemoryThreshold(1)
       .maxSpillLevel(0)
+      .referenceQuery(
+          "SELECT t_k0, t_data, u_k0, u_data FROM t, u WHERE t_k0 = u_k0")
+      .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
+        const auto statsPair = taskSpilledStats(*task);
+        ASSERT_GT(statsPair.first.spilledRows, 0);
+        ASSERT_GT(statsPair.first.spilledBytes, 0);
+        ASSERT_GT(statsPair.first.spilledPartitions, 0);
+        ASSERT_GT(statsPair.first.spilledFiles, 0);
+        ASSERT_EQ(statsPair.second.spilledRows, 0);
+        ASSERT_EQ(statsPair.second.spilledBytes, 0);
+        ASSERT_GT(statsPair.second.spilledPartitions, 0);
+        ASSERT_EQ(statsPair.second.spilledFiles, 0);
+      })
+      .run();
+}
+
+TEST_P(MultiThreadedHashJoinTest, emptyProbeWithReclaimWatermark) {
+  if (numDrivers_ != 1) {
+    GTEST_SKIP() << "Covers single-driver finishHashBuild admission path only";
+  }
+
+  std::atomic<bool> injectOnce{true};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::finishHashBuild",
+      std::function<void(HashBuild*)>([&](HashBuild* buildOp) {
+        if (!injectOnce.exchange(false)) {
+          return;
+        }
+        auto task = buildOp->testingOperatorCtx()->task();
+        task->recordMemoryPressureWatermarkBytes(1);
+      }));
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto queryPool = memory::memoryManager()->addRootPool(
+      "", 8 << 20, memory::MemoryReclaimer::create());
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(numDrivers_)
+      .keyTypes({BIGINT()})
+      .probeVectors(0, 5)
+      .buildVectors(1500, 5)
+      .queryPool(std::move(queryPool))
+      .spillDirectory(spillDirectory->path)
+      .injectSpill(false)
+      .checkSpillStats(false)
       .referenceQuery(
           "SELECT t_k0, t_data, u_k0, u_data FROM t, u WHERE t_k0 = u_k0")
       .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
@@ -8417,6 +8462,257 @@ TEST_F(HashJoinTest, wrapLazyVectorInFilterAndOutput) {
           "SELECT t.c0, t.c1, t.c2, u.u_c1 FROM t inner join u on t.c0 = u.u_c0 and t.c1 < u.u_c1 + 1")
       .injectSpill(false)
       .run();
+}
+
+TEST_F(HashJoinTest, reuseHashTable) {
+  // Create build and probe vectors.
+  std::vector<RowVectorPtr> buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeFlatVector<int64_t>(100, [](auto row) { return row % 23; }),
+        });
+  });
+
+  std::vector<RowVectorPtr> probeVectors = makeBatches(5, [&](int32_t) {
+    return makeRowVector(
+        {"t_0"},
+        {
+            makeFlatVector<int64_t>(100, [](auto row) { return row % 23; }),
+        });
+  });
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+
+  auto outputType = ROW({"t_0", "u_0"}, {BIGINT(), BIGINT()});
+
+  // Build the HashTable for build side data
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+
+  std::shared_ptr<bytedance::bolt::exec::BaseHashTable> table =
+      HashTable<false>::createForJoin(
+          std::move(hashers),
+          {}, /*dependentTypes*/
+          true /*allowDuplicates*/,
+          true /*hasProbedFlag*/,
+          BaseHashTable::HashMode::kArray,
+          1 /*minTableSizeForParallelJoinBuild*/,
+          pool(),
+          true);
+
+  auto rowContainer = table->rows();
+  auto nextOffset = rowContainer->nextOffset();
+  uint32_t numColumns = buildVectors[0]->childrenSize();
+  std::vector<DecodedVector> decodedVectors;
+  decodedVectors.reserve(numColumns);
+  for (const auto& rowVector : buildVectors) {
+    if (!rowVector || rowVector->size() == 0)
+      continue;
+
+    decodedVectors.clear();
+    SelectivityVector rows(rowVector->size());
+    for (auto& child : rowVector->children()) {
+      decodedVectors.emplace_back(*child, rows);
+    }
+
+    for (auto i = 0; i < rowVector->size(); ++i) {
+      auto* row = rowContainer->newRow();
+      if (nextOffset) {
+        *reinterpret_cast<char**>(row + nextOffset) = nullptr;
+      }
+      for (auto j = 0; j < numColumns; ++j) {
+        rowContainer->store(decodedVectors[j], i, row, j);
+      }
+    }
+  }
+
+  table->prepareJoinTable(
+      {}, nullptr, false, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto node = PlanBuilder(planNodeIdGenerator, pool_.get())
+                  .values(probeVectors)
+                  .hashJoin(
+                      {"t_0"},
+                      {"u_0"},
+                      PlanBuilder(planNodeIdGenerator, pool_.get())
+                          .values(buildVectors)
+                          .planNode(),
+                      "",
+                      {"t_0", "u_0"},
+                      core::JoinType::kInner)
+                  .planNode();
+  auto joinNode = std::dynamic_pointer_cast<const core::HashJoinNode>(node);
+  joinNode->setReusableHashTable(opaqueSharedHashTable);
+
+#ifndef NDEBUG
+  std::atomic_bool reusedHashTable{false};
+  // NOTE: TestValue hooks are compiled out in release (NDEBUG) builds.
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::HashBuild",
+      std::function<void(HashBuild*)>(
+          [&](HashBuild* /*build*/) { reusedHashTable.store(true); }));
+#endif
+
+  auto task =
+      AssertQueryBuilder(joinNode, duckDbQueryRunner_)
+          .maxDrivers(1)
+          .assertResults("SELECT t.t_0, u.u_0 FROM t, u WHERE t.t_0 = u.u_0");
+#ifndef NDEBUG
+  ASSERT_TRUE(reusedHashTable.load());
+#endif
+}
+
+TEST_F(HashJoinTest, reuseHashTableRightSemiProjectNotSupported) {
+  auto buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeFlatVector<int64_t>({1, 2, 3}),
+        });
+  });
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+
+  std::shared_ptr<BaseHashTable> table = HashTable<false>::createForJoin(
+      std::move(hashers),
+      {}, /*dependentTypes*/
+      true /*allowDuplicates*/,
+      true /*hasProbedFlag*/,
+      BaseHashTable::HashMode::kArray,
+      1 /*minTableSizeForParallelJoinBuild*/,
+      pool(),
+      true);
+
+  auto rowContainer = table->rows();
+  const auto nextOffset = rowContainer->nextOffset();
+  SelectivityVector rows(buildVectors[0]->size());
+  DecodedVector decoded(*buildVectors[0]->childAt(0), rows);
+  for (auto i = 0; i < buildVectors[0]->size(); ++i) {
+    auto* row = rowContainer->newRow();
+    if (nextOffset) {
+      *reinterpret_cast<char**>(row + nextOffset) = nullptr;
+    }
+    rowContainer->store(decoded, i, row, 0);
+  }
+  table->prepareJoinTable(
+      {}, nullptr, false, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto makePlan = [&](std::vector<RowVectorPtr> probeVectors) {
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto node = PlanBuilder(planNodeIdGenerator, pool_.get())
+                    .values(probeVectors)
+                    .hashJoin(
+                        {"t_0"},
+                        {"u_0"},
+                        PlanBuilder(planNodeIdGenerator, pool_.get())
+                            .values(buildVectors)
+                            .planNode(),
+                        "",
+                        {"u_0", "match"},
+                        core::JoinType::kRightSemiProject)
+                    .planNode();
+    auto joinNode = std::dynamic_pointer_cast<const core::HashJoinNode>(node);
+    joinNode->setReusableHashTable(opaqueSharedHashTable);
+    return joinNode;
+  };
+
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(
+          makePlan({makeRowVector({"t_0"}, {makeFlatVector<int64_t>({1})})}))
+          .maxDrivers(1)
+          .copyResults(pool()),
+      "Reusable hash table is not supported for join types that require "
+      "build-side probed flags");
+}
+
+DEBUG_ONLY_TEST_F(HashJoinTest, reusedHashBuildDoesNotNeedInput) {
+  auto probeVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"t_0"},
+        {
+            makeFlatVector<int64_t>({1, 2, 3}),
+        });
+  });
+  auto buildVectors = makeBatches(1, [&](int32_t) {
+    return makeRowVector(
+        {"u_0"},
+        {
+            makeNullableFlatVector<int64_t>({std::nullopt}),
+        });
+  });
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(BIGINT(), 0));
+  std::shared_ptr<BaseHashTable> table = HashTable<false>::createForJoin(
+      std::move(hashers),
+      {}, /*dependentTypes*/
+      true /*allowDuplicates*/,
+      true /*hasProbedFlag*/,
+      BaseHashTable::HashMode::kArray,
+      1 /*minTableSizeForParallelJoinBuild*/,
+      pool(),
+      true);
+  auto opaqueSharedHashTable = std::shared_ptr<core::OpaqueHashTable>(
+      table, reinterpret_cast<core::OpaqueHashTable*>(table.get()));
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto probeNode = PlanBuilder(planNodeIdGenerator, pool_.get())
+                       .values(probeVectors)
+                       .planNode();
+  auto buildNode = PlanBuilder(planNodeIdGenerator, pool_.get())
+                       .values(buildVectors)
+                       .planNode();
+  auto joinNode = std::make_shared<core::HashJoinNode>(
+      "reused_hash_build_lifecycle_join",
+      core::JoinType::kAnti,
+      true /*nullAware*/,
+      std::vector<core::FieldAccessTypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "t_0")},
+      std::vector<core::FieldAccessTypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "u_0")},
+      nullptr /*filter*/,
+      probeNode,
+      buildNode,
+      ROW({"t_0"}, {BIGINT()}),
+      true /*useHashTableCache*/,
+      true /*joinHasNullKeys*/,
+      opaqueSharedHashTable);
+
+  std::atomic<HashBuild*> capturedHashBuild{nullptr};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::HashBuild::HashBuild",
+      std::function<void(HashBuild*)>(
+          [&](HashBuild* hashBuild) { capturedHashBuild.store(hashBuild); }));
+
+  std::atomic_bool checked{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Driver::runInternal",
+      std::function<void(Driver*)>([&](Driver*) {
+        auto* hashBuild = capturedHashBuild.load();
+        if (hashBuild == nullptr) {
+          return;
+        }
+        if (checked.exchange(true)) {
+          return;
+        }
+        EXPECT_TRUE(hashBuild->isFinished());
+        EXPECT_FALSE(hashBuild->needsInput());
+        EXPECT_NO_THROW(hashBuild->noMoreInput());
+      }));
+
+  AssertQueryBuilder(joinNode).serialExecution(true).assertEmptyResults();
+  ASSERT_TRUE(checked.load());
 }
 
 } // namespace

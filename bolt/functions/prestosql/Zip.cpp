@@ -38,16 +38,20 @@ namespace bytedance::bolt::functions {
 namespace {
 
 class ZipFunction : public exec::VectorFunction {
-  static const auto kMinArity = 2;
-  static const auto kMaxArity = 7;
+  // Hard ceiling used purely to bound the type-variable string buffer.
+  // Per-engine min/max arity is provided to signatures() at registration time.
+  static constexpr int kMaxArityCeiling = 32;
 
  public:
-  /// This class implements the zip function.
+  /// This class implements the zip / arrays_zip function.
   ///
   /// DEFINITION:
   /// zip(ARRAY[T], ARRAY[U]) -> ARRAY(ROW[T,U])
   /// where we create a ROW[Ti, Ui] for every ith element in ARRAY[T], ARRAY[U].
   /// The smaller array is padded with nulls.
+  /// Row-level NULL semantics (any-arg-null-on-row -> null-result-on-row) are
+  /// handled by the framework's default null-behavior; this function only
+  /// runs on rows where every arg is non-null.
   ///
   /// IMPLEMENTATION:
   ///  1. The general idea is to create a new dictionary vector for each input
@@ -62,7 +66,8 @@ class ZipFunction : public exec::VectorFunction {
   ///  Note:
   ///   - We make no copy's of any constituent elements and are agnostic to
   ///   types.
-  ///   - For compatibility with Presto a maximum arity of 7 is enforced.
+  ///   - Presto `zip` is registered for arity [2, 7]; Spark `arrays_zip`
+  ///     is registered for arity [1, kMaxArityCeiling].
 
   void apply(
       const SelectivityVector& rows,
@@ -243,24 +248,30 @@ class ZipFunction : public exec::VectorFunction {
     context.moveOrCopyResult(arrayVector, rows, result);
   }
 
-  static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
-    static const auto kAritySize = (kMaxArity - kMinArity) + 1;
+  static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures(
+      int minArity,
+      int maxArity) {
+    BOLT_CHECK_GE(minArity, 1, "ZipFunction arity must be >= 1");
+    BOLT_CHECK_LE(
+        maxArity,
+        kMaxArityCeiling,
+        "ZipFunction maxArity exceeds compiled-in ceiling");
+    BOLT_CHECK_LE(minArity, maxArity, "minArity must be <= maxArity");
+
     std::vector<std::shared_ptr<exec::FunctionSignature>> signatures;
-    signatures.reserve(kAritySize);
+    signatures.reserve(maxArity - minArity + 1);
 
-    std::vector<std::string> elementTypeNames(kAritySize);
-
-    for (int i = 0; i < kAritySize; i++) {
+    std::vector<std::string> elementTypeNames(maxArity);
+    for (int i = 0; i < maxArity; i++) {
       elementTypeNames[i] = fmt::format("E{:02d}", i);
     }
 
-    // Build all signatures from kMinArity to kMaxArity.
-    for (int i = 1; i < kAritySize; i++) {
+    // Build all signatures with arity in [minArity, maxArity].
+    for (int arity = minArity; arity <= maxArity; ++arity) {
       auto builder = exec::FunctionSignatureBuilder();
       std::vector<std::string> allTypeVars;
-      allTypeVars.reserve(i + 1);
-
-      for (int j = 0; j < i + 1; j++) {
+      allTypeVars.reserve(arity);
+      for (int j = 0; j < arity; ++j) {
         allTypeVars.emplace_back(elementTypeNames[j]);
         builder.typeVariable(elementTypeNames[j]);
         builder.argumentType(fmt::format("array({})", elementTypeNames[j]));
@@ -272,12 +283,34 @@ class ZipFunction : public exec::VectorFunction {
 
     return signatures;
   }
+
+  // Presto `zip`: per PrestoDB docs, arity is fixed in [2, 7].
+  static std::vector<std::shared_ptr<exec::FunctionSignature>>
+  prestoSignatures() {
+    return signatures(/*minArity=*/2, /*maxArity=*/7);
+  }
+
+  // Spark `arrays_zip`: variadic; arity 0 is constant-folded by Catalyst and
+  // never reaches the native evaluator, so only arity >= 1 is registered.
+  // Upper bound is the compiled-in ceiling.
+  static std::vector<std::shared_ptr<exec::FunctionSignature>>
+  sparkSignatures() {
+    return signatures(/*minArity=*/1, /*maxArity=*/kMaxArityCeiling);
+  }
 };
 
 } // namespace
 
+// Presto `zip(...)`: arity in [2, 7] to match PrestoDB documented signatures.
 BOLT_DECLARE_VECTOR_FUNCTION(
-    udf_zip,
-    ZipFunction::signatures(),
+    udf_zip_presto,
+    ZipFunction::prestoSignatures(),
+    std::make_unique<ZipFunction>());
+
+// Spark `arrays_zip(...)`: arity in [1, kMaxArityCeiling] to match Spark
+// `ArraysZip`, whose only hard limit is the schema's struct width.
+BOLT_DECLARE_VECTOR_FUNCTION(
+    udf_zip_spark,
+    ZipFunction::sparkSignatures(),
     std::make_unique<ZipFunction>());
 } // namespace bytedance::bolt::functions

@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/exec/Aggregate.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -180,6 +182,88 @@ class FirstAggregateTest : public AggregationTestBase {
     }
   }
 };
+
+// A group that recorded no value (e.g. an empty partition) must extract to a
+// non-null struct {value=null, valueSet=false}. The 'valueSet' flag, not the
+// struct's null-ness, signals "no value" -- a null struct would not survive a
+// shuffle and would be mis-merged as a recorded null.
+TEST_F(FirstAggregateTest, extractAccumulatorsKeepsEmptyGroupNonNull) {
+  HashStringAllocator allocator(pool());
+  std::vector<TypePtr> argTypes{VARCHAR()};
+  std::unordered_map<std::string, std::string> emptyConfig;
+  auto func = exec::Aggregate::create(
+      "spark_first",
+      core::AggregationNode::Step::kSingle,
+      argTypes,
+      VARCHAR(),
+      core::QueryConfig{emptyConfig});
+  func->setAllocator(&allocator);
+  func->setOffsets(
+      /*offset*/ 16, /*nullByte*/ 0, /*nullMask*/ 1, /*rowSizeOffset*/ 8);
+
+  // Initialize one group but add no input rows (an empty partition).
+  std::vector<char> group(16 + func->accumulatorFixedWidthSize());
+  std::vector<char*> groups{group.data()};
+  std::vector<vector_size_t> indices{0};
+  func->initializeNewGroups(groups.data(), indices);
+
+  auto intermediateType = func->intermediateType("spark_first", argTypes);
+  auto result = BaseVector::create(intermediateType, 1, pool());
+  func->extractAccumulators(groups.data(), 1, &result);
+
+  auto* row = result->as<RowVector>();
+  // The struct must be non-null so valueSet survives the split/shuffle/rebuild.
+  ASSERT_FALSE(row->isNullAt(0));
+  // No value recorded -> value is null and valueSet is false (merge skips it).
+  ASSERT_TRUE(row->childAt(0)->isNullAt(0));
+  ASSERT_FALSE(row->childAt(1)->asFlatVector<bool>()->valueAt(0));
+
+  func->destroy(folly::Range(groups.data(), 1));
+}
+
+// toIntermediate() is the abandon-partial-aggregation fast path: it maps each
+// raw input row directly to the (value, valueSet) intermediate without
+// accumulating. Every selected row is a recorded value -- even a null one -- so
+// each must extract to a non-null struct with valueSet=true. (A null struct or
+// an unset valueSet would be misread as "no value" once the intermediate is
+// split, shuffled, and rebuilt for the global merge.) This mirrors the
+// non-null-struct + valueSet invariant that extractAccumulators establishes.
+TEST_F(FirstAggregateTest, toIntermediateMarksEveryRowAsValueSet) {
+  HashStringAllocator allocator(pool());
+  std::vector<TypePtr> argTypes{BIGINT()};
+  std::unordered_map<std::string, std::string> emptyConfig;
+  auto func = exec::Aggregate::create(
+      "spark_first",
+      core::AggregationNode::Step::kSingle,
+      argTypes,
+      BIGINT(),
+      core::QueryConfig{emptyConfig});
+  func->setAllocator(&allocator);
+  func->setOffsets(
+      /*offset*/ 16, /*nullByte*/ 0, /*nullMask*/ 1, /*rowSizeOffset*/ 8);
+
+  // Two input rows, one non-null and one null; both are "recorded values".
+  auto input =
+      makeRowVector({makeNullableFlatVector<int64_t>({42, std::nullopt})});
+  std::vector<VectorPtr> args{input->childAt(0)};
+
+  auto intermediateType = func->intermediateType("spark_first", argTypes);
+  auto result = BaseVector::create(intermediateType, 2, pool());
+
+  SelectivityVector rows(2);
+  func->toIntermediate(rows, args, result);
+
+  auto* row = result->as<RowVector>();
+  auto* valueSet = row->childAt(1)->asFlatVector<bool>();
+  for (vector_size_t i = 0; i < 2; ++i) {
+    // Struct non-null and the row marked as a recorded value.
+    ASSERT_FALSE(row->isNullAt(i));
+    ASSERT_TRUE(valueSet->valueAt(i));
+  }
+  // The recorded values round-trip, including the null one.
+  ASSERT_EQ(42, row->childAt(0)->asFlatVector<int64_t>()->valueAt(0));
+  ASSERT_TRUE(row->childAt(0)->isNullAt(1));
+}
 
 TEST_F(FirstAggregateTest, boolean) {
   testAggregate<bool>();

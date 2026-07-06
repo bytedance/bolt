@@ -20,7 +20,6 @@ if(${ENABLE_BOLT_JIT})
     ThrustJITv2Test.cpp
     PrebuiltIRTest.cpp
   )
-  target_compile_features(bolt_thrustjit_test PUBLIC cxx_std_20)
   target_link_libraries(
     bolt_thrustjit_test PRIVATE
     bolt_testutils

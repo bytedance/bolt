@@ -33,8 +33,6 @@ class ElementAtTest : public FlinkFunctionBaseTest {};
 /// 4. Index out of bounds (constant or non-constant) → returns NULL.
 /// 5. Valid index → returns the corresponding element.
 
-// ── Constant index: valid accesses ──────────────────────────────────────────
-
 TEST_F(ElementAtTest, constantValidIndex) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}});
   EXPECT_EQ(
@@ -49,8 +47,6 @@ TEST_F(ElementAtTest, constantValidIndex) {
       30);
 }
 
-// ── Constant index: index == 0 → throws ─────────────────────────────────────
-
 TEST_F(ElementAtTest, constantZeroIndexThrows) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}});
   BOLT_ASSERT_THROW(
@@ -59,7 +55,17 @@ TEST_F(ElementAtTest, constantZeroIndexThrows) {
       "SQL array indices start at 1");
 }
 
-// ── Constant index: negative index → throws ──────────────────────────────────
+TEST_F(ElementAtTest, constantZeroIndexThrowsForAllRows) {
+  auto arrayVector = makeArrayVector<int64_t>({
+      {10, 20, 30},
+      {40, 50, 60},
+      {70, 80, 90},
+  });
+  BOLT_ASSERT_THROW(
+      evaluate<SimpleVector<int64_t>>(
+          "element_at(C0, 0)", makeRowVector({arrayVector})),
+      "SQL array indices start at 1");
+}
 
 TEST_F(ElementAtTest, constantNegativeIndexThrows) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}});
@@ -69,16 +75,12 @@ TEST_F(ElementAtTest, constantNegativeIndexThrows) {
       "SQL array indices start at 1");
 }
 
-// ── Constant index: out-of-bounds → returns NULL ─────────────────────────────
-
 TEST_F(ElementAtTest, constantOutOfBoundsReturnsNull) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}});
   auto result = evaluate<SimpleVector<int64_t>>(
       "element_at(C0, 99)", makeRowVector({arrayVector}));
   EXPECT_TRUE(result->isNullAt(0));
 }
-
-// ── Non-constant index: zero → returns NULL ──────────────────────────────────
 
 TEST_F(ElementAtTest, nonConstantZeroIndexReturnsNull) {
   // Build a flat array column and an index column where index = 0 at runtime.
@@ -90,7 +92,17 @@ TEST_F(ElementAtTest, nonConstantZeroIndexReturnsNull) {
   EXPECT_TRUE(result->isNullAt(1));
 }
 
-// ── Non-constant index: negative → returns NULL ──────────────────────────────
+TEST_F(ElementAtTest, runtimeConstantZeroIndexReturnsNull) {
+  auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}, {40, 50}});
+  auto zeroIndexBase = makeFlatVector<int64_t>({0});
+  auto indexVector = BaseVector::wrapInConstant(2, 0, zeroIndexBase);
+
+  auto result = evaluate<SimpleVector<int64_t>>(
+      "element_at(C0, C1)", makeRowVector({arrayVector, indexVector}));
+
+  EXPECT_TRUE(result->isNullAt(0));
+  EXPECT_TRUE(result->isNullAt(1));
+}
 
 TEST_F(ElementAtTest, nonConstantNegativeIndexReturnsNull) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}, {40, 50}});
@@ -101,8 +113,6 @@ TEST_F(ElementAtTest, nonConstantNegativeIndexReturnsNull) {
   EXPECT_TRUE(result->isNullAt(1));
 }
 
-// ── Non-constant index: out-of-bounds → returns NULL ─────────────────────────
-
 TEST_F(ElementAtTest, nonConstantOutOfBoundsReturnsNull) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}});
   auto indexVector = makeFlatVector<int64_t>({99});
@@ -110,8 +120,6 @@ TEST_F(ElementAtTest, nonConstantOutOfBoundsReturnsNull) {
       "element_at(C0, C1)", makeRowVector({arrayVector, indexVector}));
   EXPECT_TRUE(result->isNullAt(0));
 }
-
-// ── Non-constant index: mixed valid / invalid rows ───────────────────────────
 
 TEST_F(ElementAtTest, nonConstantMixedRows) {
   auto arrayVector = makeArrayVector<int64_t>({{10, 20, 30}, {40, 50}, {60}});

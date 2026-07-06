@@ -1445,6 +1445,17 @@ struct ArrowWriteContext {
     return ::arrow::Status::OK();
   }
 
+  int64_t scratch_allocated_bytes() const {
+    int64_t total_bytes = 0;
+    if (data_buffer != nullptr) {
+      total_bytes += data_buffer->capacity();
+    }
+    if (def_levels_buffer != nullptr) {
+      total_bytes += def_levels_buffer->capacity();
+    }
+    return total_bytes;
+  }
+
   MemoryPool* memory_pool;
   const ArrowWriterProperties* properties;
 

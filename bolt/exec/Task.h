@@ -29,11 +29,17 @@
  */
 
 #pragma once
+
+#include <atomic>
+#include <memory>
+#include <optional>
+
 #include "bolt/core/PlanFragment.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/exec/Driver.h"
 #include "bolt/exec/ExecutorTaskScheduler.h"
 #include "bolt/exec/LocalPartition.h"
+#include "bolt/exec/MemoryPressureUtils.h"
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/MergeSource.h"
 #include "bolt/exec/PushBasedEvent.h"
@@ -50,6 +56,9 @@ class HashJoinBridge;
 class NestedLoopJoinBridge;
 class Task : public std::enable_shared_from_this<Task> {
  public:
+  using ScopedMemoryExpansionGuard = memorypressure::ScopedMemoryExpansionGuard;
+  using MemoryPressureSnapshot = memorypressure::MemoryPressureSnapshot;
+
   /// Threading mode the task is executed.
   enum class ExecutionMode {
     /// Mode that executes the query serially (single-threaded) on the calling
@@ -302,6 +311,46 @@ class Task : public std::enable_shared_from_this<Task> {
   /// structure.
   TaskStats taskStats() const;
 
+  std::optional<int64_t> sparkTaskAttemptId() const {
+    return sparkTaskAttemptId_;
+  }
+
+  void recordMemoryPressureWatermarkBytes(uint64_t bytes) {
+    if (bytes == 0) {
+      return;
+    }
+    auto current =
+        memoryPressureWatermarkBytes_.load(std::memory_order_relaxed);
+    while (current < bytes) {
+      if (memoryPressureWatermarkBytes_.compare_exchange_weak(
+              current, bytes, std::memory_order_relaxed)) {
+        LOG(INFO) << "Task " << taskId_
+                  << " memory pressure watermark updated to " << bytes
+                  << " bytes";
+        return;
+      }
+    }
+  }
+
+  void recordMemoryReclaimWatermarkBytes(uint64_t bytes) {
+    recordMemoryPressureWatermarkBytes(bytes);
+  }
+
+  MemoryPressureSnapshot memoryPressureSnapshot() const;
+
+  std::optional<ScopedMemoryExpansionGuard> maybeScopedDisableMemoryExpansion()
+      const;
+
+  std::string memoryPressureDetails() const;
+
+  uint64_t memoryPressureWatermarkBytes() const {
+    return memoryPressureWatermarkBytes_.load(std::memory_order_relaxed);
+  }
+
+  uint64_t memoryReclaimWatermarkBytes() const {
+    return memoryPressureWatermarkBytes();
+  }
+
   /// Information about an operator call that helps debugging stuck calls.
   struct OpCallInfo {
     size_t durationMs;
@@ -437,7 +486,8 @@ class Task : public std::enable_shared_from_this<Task> {
   std::shared_ptr<MergeSource> addLocalMergeSource(
       uint32_t splitGroupId,
       const core::PlanNodeId& planNodeId,
-      const RowTypePtr& rowType);
+      const RowTypePtr& rowType,
+      int queueSize);
 
   /// Returns all MergeSource's for the specified splitGroupId and planNodeId.
   const std::vector<std::shared_ptr<MergeSource>>& getLocalMergeSources(
@@ -1105,6 +1155,7 @@ class Task : public std::enable_shared_from_this<Task> {
   // Application specific task ID specified at construction time. May not be
   // unique or universally unique.
   const std::string taskId_;
+  const std::optional<int64_t> sparkTaskAttemptId_;
   const int destination_;
 
   // The execution mode of the task. It is enforced that a task can only be
@@ -1114,6 +1165,8 @@ class Task : public std::enable_shared_from_this<Task> {
   // In a multi-task system, it is used to make cross task decisions by memory
   // arbitration to determine which task to reclaim first.
   const int32_t memoryArbitrationPriority_{0};
+
+  std::atomic<uint64_t> memoryPressureWatermarkBytes_{0};
 
   std::shared_ptr<core::QueryCtx> queryCtx_;
 

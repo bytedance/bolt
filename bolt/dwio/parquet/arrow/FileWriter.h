@@ -40,6 +40,8 @@
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Schema.h"
+#include "bolt/dwio/parquet/arrow/WriterMemoryStats.h"
+
 namespace bytedance::bolt::parquet::arrow {
 
 class ColumnWriter;
@@ -74,6 +76,7 @@ class PARQUET_EXPORT RowGroupWriter {
     virtual int64_t total_compressed_bytes_written() const = 0;
 
     virtual int64_t total_compressed_bytes_all() const = 0;
+    virtual WriterMemoryStats memory_stats() const = 0;
 
     virtual bool buffered() const = 0;
   };
@@ -116,6 +119,7 @@ class PARQUET_EXPORT RowGroupWriter {
   /// \brief total compressed bytes written by the page writer
   int64_t total_compressed_bytes_written() const;
   int64_t total_compressed_bytes_all() const;
+  WriterMemoryStats memory_stats() const;
 
   /// Returns whether the current RowGroupWriter is in the buffered mode and is
   /// created by calling ParquetFileWriter::AppendBufferedRowGroup.
@@ -210,12 +214,16 @@ class PARQUET_EXPORT ParquetFileWriter {
   ParquetFileWriter();
   ~ParquetFileWriter();
 
+  // The page buffer arena is disabled by default. It is only safe for serial
+  // buffered column writes through AppendBufferedRowGroup(); callers that write
+  // columns concurrently through column(i) must leave it disabled.
   static std::unique_ptr<ParquetFileWriter> Open(
       std::shared_ptr<::arrow::io::OutputStream> sink,
       std::shared_ptr<schema::GroupNode> schema,
       std::shared_ptr<WriterProperties> properties =
           default_writer_properties(),
-      std::shared_ptr<const KeyValueMetadata> key_value_metadata = NULLPTR);
+      std::shared_ptr<const KeyValueMetadata> key_value_metadata = NULLPTR,
+      bool enable_page_buffer_arena = false);
 
   void Open(std::unique_ptr<Contents> contents);
   void Close();

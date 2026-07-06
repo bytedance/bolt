@@ -321,7 +321,7 @@ class UnsafeRow {
    * @return the null set length in bytes
    */
   static const size_t getNullLength(size_t elementCount) {
-    return bits::nwords(elementCount) * kFieldWidthBytes;
+    return bits::nwords(static_cast<uint64_t>(elementCount)) * kFieldWidthBytes;
   }
 
   /**

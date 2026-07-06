@@ -1,0 +1,87 @@
+title: Bolt
+description: >-
+  Bolt is a C++ acceleration library providing a composable, extensible,
+  and high-performance data processing toolkit for analytical systems.
+
+url: https://bytedance.github.io
+baseurl: /bolt/blog
+repository: bytedance/bolt
+
+lang: en-US
+timezone: Asia/Shanghai
+
+# Theme
+theme: just-the-docs
+color_scheme: light
+
+# Markdown
+markdown: kramdown
+highlighter: rouge
+permalink: /:year/:month/:day/:title/
+
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+
+# Plugins
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# just-the-docs options
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "Bolt on GitHub":
+    - "https://github.com/bytedance/bolt"
+
+nav_external_links:
+  - title: GitHub
+    url: https://github.com/bytedance/bolt
+    hide_icon: false
+
+callouts:
+  note:
+    title: Note
+    color: blue
+  warning:
+    title: Warning
+    color: yellow
+  important:
+    title: Important
+    color: purple
+
+footer_content: "Bolt is licensed under the Apache License 2.0."
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+      type: "posts"
+    values:
+      layout: post
+      parent: Blog
+      author: Bolt Community
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Collections for future documentation pages
+collections:
+  guides:
+    output: true
+    permalink: /guides/:path/
+  integrations:
+    output: true
+    permalink: /integrations/:path/
+
+# Exclude files from site build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - README.md

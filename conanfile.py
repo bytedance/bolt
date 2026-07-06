@@ -32,6 +32,7 @@ icu = f"icu{postfix}"
 gperftools = f"gperftools{postfix}"
 liburing = f"liburing{postfix}"
 llvm_core = f"llvm-core{postfix}"
+paimon_cpp = f"paimon-cpp{postfix}"
 
 
 class TorchOption:
@@ -82,6 +83,7 @@ class BoltConan(ConanFile):
         "enable_parquet": [True, False],
         "enable_orc": [True, False],
         "enable_txt": [True, False],
+        "enable_paimon": [True, False],
         # file system options
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
@@ -105,10 +107,11 @@ class BoltConan(ConanFile):
         "python_bind": False,
         "enable_asan": False,
         # presto cpp worker needs bolt's testutil for ut
-        "enable_testutil": True,
+        "enable_testutil": False,
         "enable_parquet": True,
         "enable_orc": True,
         "enable_txt": True,
+        "enable_paimon": True,
         # file system options
         "enable_hdfs": True,
         "enable_s3": False,
@@ -229,7 +232,8 @@ class BoltConan(ConanFile):
             "fmt/9.0.0", transitive_headers=True, transitive_libs=True, force=True
         )
         self.requires("ryu/2.0.1", transitive_headers=True, transitive_libs=True)
-        self.requires("cpr/1.10.5")
+        if self.options.get_safe("enable_testutil"):
+            self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
         self.requires("zstd/1.5.7", override=True)
         self.requires(
@@ -260,8 +264,7 @@ class BoltConan(ConanFile):
             self.requires("pybind11/2.13.1")
         if self.options.get_safe("enable_colocate"):
             self.requires("grpc/1.50.0")
-        # upgrade libcurl from 8.11.1 to 8.12.1 to avoid SIGABRT issue in https://github.com/curl/curl/issues/15725
-        self.requires("libcurl/8.12.1", override=True)
+
         if (
             self.options.enable_torch is not None
             and self.options.enable_torch.value is not None
@@ -272,17 +275,17 @@ class BoltConan(ConanFile):
         if self.settings.os in ["Linux", "FreeBSD"]:
             if self.options.get_safe("enable_perf"):
                 self.requires("gperftools/2.16")
-                self.requires("libunwind/1.8.0", override=True)
-            else:
-                self.requires("libunwind/1.8.0")
+            self.requires("libunwind/1.8.3", force=True)
         self.requires("utf8proc/2.11.0", transitive_headers=True, transitive_libs=True)
         self.requires("date/3.0.4-bolt", transitive_headers=True, transitive_libs=True)
         self.requires("libbacktrace/cci.20210118")
         if self.options.get_safe("spark_compatible"):
             self.requires("celeborn-cpp-client/main-20251212")
+        if self.options.get_safe("enable_paimon"):
+            self.requires("paimon-cpp/0.0.4-bolt")
         if self.options.get_safe("enable_testutil"):
             self.requires("gtest/1.17.0", force=True)
-            self.requires("duckdb/0.8.1")
+            self.requires("duckdb/1.1.3")
 
     def build_requirements(self):
         self.tool_requires("m4/1.4.19")
@@ -315,12 +318,17 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_s3"):
             s3_opt = self.options["aws-sdk-cpp/*"]
             setattr(s3_opt, "text-to-speech", False)
+        self.options[paimon_cpp].shared = False
+        self.options[paimon_cpp].with_avro = True
 
         arrow_simd_level = "default"
+        llvm_targets = None
         if str(self.settings.arch) in ["x86", "x86_64"]:
             arrow_simd_level = "avx2"
+            llvm_targets = "X86"
         elif str(self.settings.arch) in ["armv8", "arm", "armv9"]:
             arrow_simd_level = "neon"
+            llvm_targets = "AArch64"
         self.options[arrow].parquet = True
         self.options[arrow].filesystem_layer = True
         self.options[arrow].simd_level = arrow_simd_level
@@ -353,6 +361,9 @@ class BoltConan(ConanFile):
             self.options[llvm_core].with_zstd = False
             self.options[llvm_core].with_ffi = False
             self.options[llvm_core].with_clang = True
+            if llvm_targets is None:
+                raise RuntimeError("Unsupported target for JIT feature")
+            self.options[llvm_core].targets = llvm_targets
 
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"
@@ -448,6 +459,9 @@ class BoltConan(ConanFile):
         tc.cache_variables["BOLT_ENABLE_TXT"] = (
             "ON" if self.options.enable_txt else "OFF"
         )
+        tc.cache_variables["BOLT_ENABLE_PAIMON"] = (
+            "ON" if self.options.enable_paimon else "OFF"
+        )
         if self.options.get_safe("enable_jit"):
             tc.cache_variables["ENABLE_BOLT_JIT"] = "ON"
             tc.preprocessor_definitions["ENABLE_BOLT_JIT"] = 1
@@ -503,6 +517,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_testutil"):
             tc.cache_variables["BOLT_ENABLE_DUCKDB"] = "ON"
             tc.cache_variables["BOLT_BUILD_TEST_UTILS"] = "ON"
+            tc.cache_variables["BOLT_ENABLE_PARSE"] = "ON"
 
         # hdfs file system, arrow implement as default
         if self.options.get_safe("enable_hdfs"):
@@ -550,6 +565,8 @@ class BoltConan(ConanFile):
         if os.getenv("BOLT_BUILD_BENCHMARKS", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_BENCHMARKS"] = "ON"
             tc.cache_variables["BOLT_BUILD_TESTING"] = "ON"
+            tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
+        elif os.getenv("BOLT_BUILD_BENCHMARKS_BASIC", "OFF") == "ON":
             tc.cache_variables["BOLT_BUILD_BENCHMARKS_BASIC"] = "ON"
 
         tc.generate()
@@ -618,7 +635,6 @@ class BoltConan(ConanFile):
                 "xxhash::xxhash",
                 "fmt::fmt",
                 "ryu::ryu",
-                "cpr::cpr",
                 "timsort::timsort",
                 "utf8proc::utf8proc",
                 "date::date",
@@ -634,6 +650,14 @@ class BoltConan(ConanFile):
                 "libbacktrace::libbacktrace",
             ]
         )
+        if self.options.get_safe("enable_testutil"):
+            self.cpp_info.components["bolt_engine"].requires.extend(
+                [
+                    "gtest::gtest",
+                    "cpr::cpr",
+                    "duckdb::duckdb",
+                ]
+            )
         if self.options.get_safe("enable_jit"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "llvm-core::llvm-core"
@@ -653,6 +677,16 @@ class BoltConan(ConanFile):
         if self.options.get_safe("spark_compatible"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "celeborn-cpp-client::celeborn-cpp-client"
+            )
+        if self.options.get_safe("enable_paimon"):
+            self.cpp_info.components["bolt_engine"].requires.extend(
+                [
+                    "paimon-cpp::core",
+                    "paimon-cpp::format_avro",
+                    "paimon-cpp::avro",
+                    "paimon-cpp::fs_local",
+                    "paimon-cpp::tbb",
+                ]
             )
 
         if self.options.get_safe("enable_testutil"):

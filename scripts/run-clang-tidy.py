@@ -318,7 +318,9 @@ def process_gha_output(stdout):
 
 
 def tidy(args):
-    extensions = (".cc", ".cpp", ".cxx", ".c", ".h", ".hpp", ".hxx")
+    source_extensions = (".cc", ".cpp", ".cxx", ".c")
+    header_extensions = (".h", ".hpp", ".hxx")
+    extensions = source_extensions + header_extensions
     candidate_files = []
     # get file list to check
     if args.directory:
@@ -476,9 +478,21 @@ def tidy(args):
             print("No changed C/C++ lines detected for clang-tidy.")
             return 0
 
+        # Keep headers in --line-filter so diagnostics can be reported there,
+        # but run clang-tidy only on translation units that have compile DB entries.
+        all_changed_for_filter = list(files_to_process)
+        files_to_process = [
+            f for f in files_to_process if f.endswith(source_extensions)
+        ]
+        if not files_to_process:
+            print(
+                "Only header changes detected; no source files to run clang-tidy on in this mode."
+            )
+            return 0
+
         # Use absolute paths in --line-filter for better compatibility with compile DBs.
         final_map_abs = {}  # type: Dict[str, List[List[int]]]
-        for f in files_to_process:
+        for f in all_changed_for_filter:
             abs_f = to_repo_abs(f, git_root)
             final_map_abs[abs_f] = changed_lines[f]
         line_filter_json = json.dumps(

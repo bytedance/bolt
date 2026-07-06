@@ -42,12 +42,13 @@ arrow::Status FallbackRangePartitioner::compute(
   std::fill(std::begin(partition2RowCount), std::end(partition2RowCount), 0);
   for (auto i = 0; i < numRows; ++i) {
     auto pid = pidArr[i];
-    if (pid >= numPartitions_) {
+    if (pid >= numPartitions_ || pid < 0) {
       return arrow::Status::Invalid(
           "Partition id ",
           std::to_string(pid),
-          " is equal or greater than ",
-          std::to_string(numPartitions_));
+          " is not in range [0, ",
+          std::to_string(numPartitions_),
+          ")");
     }
     row2Partition[i] = pid;
     partition2RowCount[pid]++;
@@ -65,12 +66,13 @@ arrow::Status FallbackRangePartitioner::precompute(
   }
   for (auto i = 0; i < numRows; ++i) {
     auto pid = pidArr[i];
-    if (pid >= numPartitions_) {
+    if (pid >= numPartitions_ || pid < 0) {
       return arrow::Status::Invalid(
           "Partition id ",
           std::to_string(pid),
-          " is equal or greater than ",
-          std::to_string(numPartitions_));
+          " is not in range [0, ",
+          std::to_string(numPartitions_),
+          ")");
     }
     partition2RowCount[pid]++;
   }

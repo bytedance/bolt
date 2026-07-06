@@ -385,6 +385,8 @@ std::unique_ptr<BatchStream> ConcatFilesSpillBatchStream::create(
 }
 
 bool ConcatFilesSpillBatchStream::nextBatch(RowVectorPtr& batch) {
+  TestValue::adjust(
+      "bytedance::bolt::exec::ConcatFilesSpillBatchStream::nextBatch", nullptr);
   BOLT_CHECK_NULL(batch);
   BOLT_CHECK(!atEnd_);
   for (; fileIndex_ < spillFiles_.size(); ++fileIndex_) {

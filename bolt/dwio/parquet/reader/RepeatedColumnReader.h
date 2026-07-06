@@ -54,13 +54,20 @@ class RepeatedLengths {
 
   void readLengths(int32_t* FOLLY_NONNULL lengths, int32_t numLengths) {
     BOLT_CHECK_NOT_NULL(lengths_);
-    BOLT_CHECK_LE(
-        nextLengthIndex_ + numLengths, lengths_->size() / sizeof(int32_t));
-    memcpy(
-        lengths,
-        lengths_->as<int32_t>() + nextLengthIndex_,
-        numLengths * sizeof(int32_t));
-    nextLengthIndex_ += numLengths;
+    const int32_t available =
+        static_cast<int32_t>(lengths_->size() / sizeof(int32_t)) -
+        nextLengthIndex_;
+    const int32_t toCopy = std::min(numLengths, available);
+    if (toCopy > 0) {
+      memcpy(
+          lengths,
+          lengths_->as<int32_t>() + nextLengthIndex_,
+          toCopy * sizeof(int32_t));
+    }
+    if (toCopy < numLengths) {
+      std::memset(lengths + toCopy, 0, (numLengths - toCopy) * sizeof(int32_t));
+    }
+    nextLengthIndex_ += toCopy;
   }
 
  private:

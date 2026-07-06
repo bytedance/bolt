@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 370" font-family="'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+  <defs><marker id="ag" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker><marker id="ab" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker></defs>
+  <rect width="960" height="370" fill="#fff"/>
+  <style>.title{font-size:16px;font-weight:600;fill:#334155}.nt{font-size:12.5px;font-weight:600;text-anchor:middle}.ns{font-size:10.5px;text-anchor:middle}.op{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.2}.rm{fill:#fdf2f2;stroke:#d99a9a;stroke-width:1.2}.ok{fill:#eef4ff;stroke:#2563eb;stroke-width:1.2}.keep{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}.dark{fill:#1f2937}.sub{fill:#64748b}.red{fill:#9b2c2c}.blue{fill:#1d4ed8}.gray{fill:#475569}</style>
+  <text x="30" y="38" class="title">Before fusion · redundant row / column conversion before row-based shuffle</text>
+  <g transform="translate(30,62)">
+    <rect class="op" x="0" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="62.5" y="26">Partial Agg</text><text class="ns sub" x="62.5" y="45">RowContainer</text>
+    <rect class="rm" x="145" y="0" width="125" height="62" rx="8"/><text class="nt red" x="207.5" y="25">row → column</text><text class="ns red" x="207.5" y="43">emit RowVector</text>
+    <rect class="rm" x="290" y="0" width="125" height="62" rx="8"/><text class="nt red" x="352.5" y="25">column → row</text><text class="ns red" x="352.5" y="43">write CompactRow</text>
+    <rect class="op" x="435" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="497.5" y="26">Shuffle</text><text class="ns sub" x="497.5" y="45">row format</text>
+    <rect class="keep" x="580" y="0" width="125" height="62" rx="8"/><text class="nt gray" x="642.5" y="25">row → column</text><text class="ns sub" x="642.5" y="43">reader output</text>
+    <rect class="op" x="725" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="787.5" y="26">Final Agg</text><text class="ns sub" x="787.5" y="45">columnar batch</text>
+    <g stroke="#94a3b8" stroke-width="1.3" fill="none"><line x1="125" y1="31" x2="143" y2="31" marker-end="url(#ag)"/><line x1="270" y1="31" x2="288" y2="31" marker-end="url(#ag)"/><line x1="415" y1="31" x2="433" y2="31" marker-end="url(#ag)"/><line x1="560" y1="31" x2="578" y2="31" marker-end="url(#ag)"/><line x1="705" y1="31" x2="723" y2="31" marker-end="url(#ag)"/></g>
+  </g>
+  <text x="455" y="154" font-size="11.5" fill="#64748b" text-anchor="middle">Red nodes are the redundant conversions primarily removed by fusion; reader output after shuffle remains columnar.</text>
+  <line x1="30" y1="188" x2="930" y2="188" stroke="#e5e7eb"/>
+  <text x="30" y="232" class="title">After fusion · keep row payload until shuffle write</text>
+  <g transform="translate(30,256)">
+    <rect class="ok" x="0" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="62.5" y="24">Partial Agg</text><text class="ns blue" x="62.5" y="42">CompositeRowVector</text>
+    <rect class="ok" x="145" y="0" width="125" height="62" rx="8"/><text class="nt blue" x="207.5" y="24">keep row</text><text class="ns blue" x="207.5" y="42">accumulator payload</text>
+    <rect class="ok" x="290" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="352.5" y="24">Project</text><text class="ns sub" x="352.5" y="42">key columns only</text>
+    <rect class="ok" x="435" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="497.5" y="24">Shuffle</text><text class="ns blue" x="497.5" y="42">memcpy</text>
+    <rect class="keep" x="580" y="0" width="125" height="62" rx="8"/><text class="nt gray" x="642.5" y="25">row → column</text><text class="ns sub" x="642.5" y="43">reader output</text>
+    <rect class="op" x="725" y="0" width="125" height="62" rx="8"/><text class="nt dark" x="787.5" y="26">Final Agg</text><text class="ns sub" x="787.5" y="45">columnar batch</text>
+    <g stroke="#2563eb" stroke-width="1.4" fill="none"><line x1="125" y1="31" x2="143" y2="31" marker-end="url(#ab)"/><line x1="270" y1="31" x2="288" y2="31" marker-end="url(#ab)"/><line x1="415" y1="31" x2="433" y2="31" marker-end="url(#ab)"/><line x1="560" y1="31" x2="578" y2="31" marker-end="url(#ab)"/><line x1="705" y1="31" x2="723" y2="31" marker-end="url(#ab)"/></g>
+  </g>
+  <text x="455" y="348" font-size="11.5" fill="#64748b" text-anchor="middle">The row-to-column output between Shuffle and Final Agg remains; fusion removes the round trip before shuffle write.</text>
+</svg>

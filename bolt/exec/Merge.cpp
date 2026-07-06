@@ -29,8 +29,9 @@
  */
 
 #include "bolt/exec/Merge.h"
+#include <folly/Traits.h>
+#include <exception>
 #include "bolt/common/testutil/TestValue.h"
-#include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/Task.h"
 
 using bytedance::bolt::common::testutil::TestValue;
@@ -53,7 +54,9 @@ Merge::Merge(
           planNodeId,
           operatorType,
           spillConfig),
-      outputBatchSize_{outputBatchRows()},
+      maxOutputBatchRows_{outputBatchRows()},
+      maxOutputBatchBytes_{
+          driverCtx->queryConfig().preferredOutputBatchBytes()},
       sortingKeys_([&]() {
         auto numKeys = sortingKeys.size();
         std::vector<SpillSortKey> keys;
@@ -73,6 +76,12 @@ Merge::Merge(
         }
         return keys;
       }()) {}
+
+void Merge::initialize() {
+  Operator::initialize();
+  BOLT_CHECK_EQ(mergeStats_.streamingSourceReadStartTimeUs, 0);
+  mergeStats_.streamingSourceReadStartTimeUs = getCurrentTimeMicro();
+}
 
 BlockingReason Merge::isBlocked(ContinueFuture* future) {
   BOLT_TEST_ADJUST("bytedance::bolt::exec::Merge::isBlocked", this);
@@ -178,8 +187,10 @@ void Merge::setupSpillMerger() {
   spillMerger_ = std::make_shared<SpillMerger>(
       sortingKeys_,
       outputType_,
-      outputBatchSize_,
       std::move(spillReadFilesGroups),
+      maxOutputBatchRows_,
+      maxOutputBatchBytes_,
+      operatorCtx_->driverCtx()->queryConfig().localMergeSourceQueueSize(),
       &spillConfig_.value(),
       nullptr,
       pool());
@@ -203,12 +214,19 @@ void Merge::maybeStartNextMergeSourceGroup() {
   std::vector<std::unique_ptr<SourceStream>> cursors;
   cursors.reserve(sources.size());
   for (auto* source : sources) {
-    cursors.push_back(
-        std::make_unique<SourceStream>(source, sortingKeys_, outputBatchSize_));
+    cursors.push_back(std::make_unique<SourceStream>(
+        source, sortingKeys_, maxOutputBatchRows_));
   }
 
+  // TODO: consider to provide a config other than the regular operator batch
+  // size to tune the batch size of the streaming source merge output as the
+  // merge operator is single threaded.
   sourceMerger_ = std::make_unique<SourceMerger>(
-      outputType_, outputBatchSize_, std::move(cursors), pool());
+      outputType_,
+      std::move(cursors),
+      maxOutputBatchRows_,
+      maxOutputBatchBytes_,
+      pool());
   // Start sources.
   for (const auto& source : sources) {
     source->start();
@@ -224,6 +242,8 @@ RowVectorPtr Merge::getOutputFromSpill() {
       return;
     }
     finished_ = true;
+    BOLT_CHECK_EQ(mergeStats_.spilledSourceReadEndTimeUs, 0);
+    mergeStats_.spilledSourceReadEndTimeUs = getCurrentTimeMicro();
   };
   return std::move(output_);
 }
@@ -244,13 +264,16 @@ RowVectorPtr Merge::getOutputFromSource() {
   finishMergeSourceGroup();
   if (numStartedSources_ < sources_.size()) {
     BOLT_CHECK_NULL(output_);
-    return std::move(output_);
+    return nullptr;
   }
+
+  BOLT_CHECK_EQ(mergeStats_.streamingSourceReadEndTimeUs, 0);
+  mergeStats_.streamingSourceReadEndTimeUs = getCurrentTimeMicro();
 
   if (numSpilledRows_ > 0) {
     setupSpillMerger();
     BOLT_CHECK_NULL(output_);
-    return std::move(output_);
+    return nullptr;
   }
 
   finished_ = true;
@@ -271,19 +294,53 @@ RowVectorPtr Merge::getOutput() {
 }
 
 void Merge::close() {
+  recordMergeStats();
   for (auto& source : sources_) {
     source->close();
   }
   Operator::close();
 }
 
+void Merge::recordMergeStats() {
+  auto lockedStats = stats_.wlock();
+  if (mergeStats_.streamingSourceReadEndTimeUs > 0) {
+    BOLT_CHECK_GT(mergeStats_.streamingSourceReadStartTimeUs, 0);
+    BOLT_CHECK_GE(
+        mergeStats_.streamingSourceReadEndTimeUs,
+        mergeStats_.streamingSourceReadStartTimeUs);
+    lockedStats->addRuntimeStat(
+        kStreamingSourceReadWallNanos,
+        RuntimeCounter(
+            (mergeStats_.streamingSourceReadEndTimeUs -
+             mergeStats_.streamingSourceReadStartTimeUs) *
+                1'000,
+            RuntimeCounter::Unit::kNanos));
+  }
+  if (mergeStats_.spilledSourceReadEndTimeUs > 0) {
+    BOLT_CHECK_GT(mergeStats_.streamingSourceReadEndTimeUs, 0);
+    BOLT_CHECK_GE(
+        mergeStats_.spilledSourceReadEndTimeUs,
+        mergeStats_.streamingSourceReadEndTimeUs);
+    BOLT_CHECK_GT(numSpilledRows_, 0);
+    lockedStats->addRuntimeStat(
+        kSpilledSourceReadWallNanos,
+        RuntimeCounter(
+            (mergeStats_.spilledSourceReadEndTimeUs -
+             mergeStats_.streamingSourceReadEndTimeUs) *
+                1'000,
+            RuntimeCounter::Unit::kNanos));
+  }
+}
+
 SourceMerger::SourceMerger(
     const RowTypePtr& type,
-    vector_size_t outputBatchSize,
     std::vector<std::unique_ptr<SourceStream>> sourceStreams,
+    vector_size_t maxOutputBatchRows,
+    uint64_t maxOutputBatchBytes,
     bolt::memory::MemoryPool* pool)
     : type_(type),
-      outputBatchSize_(outputBatchSize),
+      maxOutputBatchRows_(maxOutputBatchRows),
+      maxOutputBatchBytes_(maxOutputBatchBytes),
       streams_([&sourceStreams]() {
         std::vector<SourceStream*> streams;
         for (auto& cursor : sourceStreams) {
@@ -304,15 +361,43 @@ void SourceMerger::isBlocked(
   }
 }
 
+void SourceMerger::setOutputBatchSize() {
+  if (outputBatchRows_ != 0) {
+    return;
+  }
+  size_t numEstimations{0};
+  int64_t estimateRowSizeSum{0};
+  for (auto* stream : streams_) {
+    const auto estimateRowSize = stream->estimateRowSize();
+    if (estimateRowSize.has_value()) {
+      ++numEstimations;
+      estimateRowSizeSum += estimateRowSize.value();
+    }
+  }
+
+  if (numEstimations == 0) {
+    outputBatchRows_ = maxOutputBatchRows_;
+    return;
+  }
+
+  const auto estimateRowSize =
+      std::max<vector_size_t>(1, estimateRowSizeSum / numEstimations);
+  outputBatchRows_ = std::min<vector_size_t>(
+      std::max<vector_size_t>(1, maxOutputBatchBytes_ / estimateRowSize),
+      maxOutputBatchRows_);
+}
+
 RowVectorPtr SourceMerger::getOutput(
     std::vector<ContinueFuture>& sourceBlockingFutures,
     bool& atEnd) {
   BOLT_CHECK_NOT_NULL(merger_);
   atEnd = false;
+  setOutputBatchSize();
+  BOLT_CHECK_GT(outputBatchRows_, 0);
   if (!output_) {
-    output_ = BaseVector::create<RowVector>(type_, outputBatchSize_, pool_);
+    output_ = BaseVector::create<RowVector>(type_, outputBatchRows_, pool_);
     for (auto& child : output_->children()) {
-      child->resize(outputBatchSize_);
+      child->resize(outputBatchRows_);
     }
   }
 
@@ -322,15 +407,15 @@ RowVectorPtr SourceMerger::getOutput(
       atEnd = true;
 
       // Return nullptr if there is no data.
-      if (outputSize_ == 0) {
+      if (outputRows_ == 0) {
         return nullptr;
       }
 
-      output_->resize(outputSize_);
+      output_->resize(outputRows_);
       return std::move(output_);
     }
 
-    if (stream->setOutputRow(outputSize_)) {
+    if (stream->setOutputRow(outputRows_)) {
       // The stream is at end of input batch. Need to copy out the rows
       // before fetching next batch in 'pop'.
       stream->copyToOutput(output_);
@@ -339,17 +424,17 @@ RowVectorPtr SourceMerger::getOutput(
           &sourceBlockingFutures);
     }
 
-    ++outputSize_;
+    ++outputRows_;
 
     // Advance the stream.
     stream->pop(sourceBlockingFutures);
 
-    if (outputSize_ == outputBatchSize_) {
+    if (outputRows_ == outputBatchRows_) {
       // Copy out data from all sources.
       for (const auto& s : streams_) {
         s->copyToOutput(output_);
       }
-      outputSize_ = 0;
+      outputRows_ = 0;
       return std::move(output_);
     }
 
@@ -441,22 +526,29 @@ bool SourceStream::fetchMoreData(std::vector<ContinueFuture>& futures) {
 SpillMerger::SpillMerger(
     const std::vector<SpillSortKey>& sortingKeys,
     const RowTypePtr& type,
-    vector_size_t outputBatchSize,
     std::vector<std::vector<std::unique_ptr<SpillReadFile>>>
         spillReadFilesGroup,
+    vector_size_t maxOutputBatchRows,
+    uint64_t maxOutputBatchBytes,
+    int mergeSourceQueueSize,
     const common::SpillConfig* spillConfig,
     const std::shared_ptr<folly::Synchronized<common::SpillStats>>& spillStats,
     bolt::memory::MemoryPool* pool)
     : executor_(spillConfig->executor),
       spillStats_(spillStats),
       pool_(pool->shared_from_this()),
-      sources_(createMergeSources(spillReadFilesGroup.size())),
+      sources_(
+          createMergeSources(spillReadFilesGroup.size(), mergeSourceQueueSize)),
       batchStreams_(createBatchStreams(std::move(spillReadFilesGroup))),
+      // TODO: consider to provide a config other than the regular operator
+      // batch size to tune the batch size of the spilled source merge output as
+      // the merge operator is single threaded.
       sourceMerger_(createSourceMerger(
           sortingKeys,
           type,
-          outputBatchSize,
           sources_,
+          maxOutputBatchRows,
+          maxOutputBatchBytes,
           pool)) {}
 
 SpillMerger::~SpillMerger() {
@@ -474,22 +566,31 @@ void SpillMerger::start() {
 
 RowVectorPtr SpillMerger::getOutput(
     std::vector<ContinueFuture>& sourceBlockingFutures,
-    bool& atEnd) const {
+    bool& atEnd) {
   TestValue::adjust(
       "bytedance::bolt::exec::SpillMerger::getOutput", &sourceBlockingFutures);
   sourceMerger_->isBlocked(sourceBlockingFutures);
   if (!sourceBlockingFutures.empty()) {
     return nullptr;
   }
-  return sourceMerger_->getOutput(sourceBlockingFutures, atEnd);
+  // SpillMerger::getOutput waits for all readers to finish, reaches EOF,
+  // and rethrows any captured error. Centralizing error propagation here
+  // helps prevent potential resource leaks.
+  auto output = sourceMerger_->getOutput(sourceBlockingFutures, atEnd);
+
+  if (atEnd) {
+    checkError();
+  }
+  return output;
 }
 
 std::vector<std::shared_ptr<MergeSource>> SpillMerger::createMergeSources(
-    size_t numSpillSources) {
+    size_t numSpillSources,
+    int queueSize) {
   std::vector<std::shared_ptr<MergeSource>> sources;
   sources.reserve(numSpillSources);
   for (auto i = 0; i < numSpillSources; ++i) {
-    sources.push_back(MergeSource::createLocalMergeSource());
+    sources.push_back(MergeSource::createLocalMergeSource(queueSize));
   }
   for (const auto& source : sources) {
     source->start();
@@ -513,56 +614,111 @@ std::vector<std::unique_ptr<BatchStream>> SpillMerger::createBatchStreams(
 std::unique_ptr<SourceMerger> SpillMerger::createSourceMerger(
     const std::vector<SpillSortKey>& sortingKeys,
     const RowTypePtr& type,
-    vector_size_t outputBatchSize,
     const std::vector<std::shared_ptr<MergeSource>>& sources,
+    vector_size_t maxOutputBatchRows,
+    uint64_t maxOutputBatchBytes,
     bolt::memory::MemoryPool* pool) {
   std::vector<std::unique_ptr<SourceStream>> streams;
   streams.reserve(sources.size());
   for (const auto& source : sources) {
     streams.push_back(std::make_unique<SourceStream>(
-        source.get(), sortingKeys, outputBatchSize));
+        source.get(), sortingKeys, maxOutputBatchRows));
   }
   return std::make_unique<SourceMerger>(
-      type, outputBatchSize, std::move(streams), pool);
+      type, std::move(streams), maxOutputBatchRows, maxOutputBatchBytes, pool);
 }
 
-void SpillMerger::readFromSpillFileStream(size_t streamIdx) {
-  RowVectorPtr vector;
-  ContinueFuture future;
-  if (!batchStreams_[streamIdx]->nextBatch(vector)) {
-    BOLT_CHECK_NULL(vector);
-    sources_[streamIdx]->enqueue(nullptr, &future);
+void SpillMerger::finishSource(size_t streamIdx) const {
+  ContinueFuture future{ContinueFuture::makeEmpty()};
+  sources_[streamIdx]->enqueue(nullptr, &future);
+  BOLT_CHECK(!future.valid());
+}
+
+void SpillMerger::readFromSpillFileStream(
+    const std::weak_ptr<SpillMerger>& mergeHolder,
+    size_t streamIdx) {
+  TestValue::adjust(
+      "bytedance::bolt::exec::SpillMerger::readFromSpillFileStream",
+      static_cast<void*>(0));
+  const auto merger = mergeHolder.lock();
+  if (merger == nullptr) {
+    LOG(ERROR) << "SpillMerger is destroyed, abandon reading from batch stream";
     return;
   }
+  try {
+    if (hasError()) {
+      finishSource(streamIdx);
+      return;
+    }
 
-  sources_[streamIdx]->enqueue(std::move(vector), &future);
-  std::move(future)
-      .via(executor_)
-      .thenValue([mergeHolder = std::weak_ptr(shared_from_this()),
-                  streamIdx](folly::Unit) {
-        TestValue::adjust(
-            "bytedance::bolt::exec::SpillMerger::readFromSpillFileStream",
-            static_cast<void*>(0));
-        const auto self = mergeHolder.lock();
-        if (self == nullptr) {
-          LOG(ERROR)
-              << "SpillMerger is destroyed, abandon reading from batch stream";
-          return;
-        }
-        self->readFromSpillFileStream(streamIdx);
-      })
-      .thenError(
-          folly::tag_t<std::exception>{}, [streamIdx](const std::exception& e) {
-            LOG(ERROR) << "Stop the " << streamIdx
-                       << "th batch stream producer on error: " << e.what();
-          });
+    RowVectorPtr vector;
+    if (!batchStreams_[streamIdx]->nextBatch(vector)) {
+      BOLT_CHECK_NULL(vector);
+      finishSource(streamIdx);
+      return;
+    }
+
+    ContinueFuture future{ContinueFuture::makeEmpty()};
+    const auto blockingReason =
+        sources_[streamIdx]->enqueue(std::move(vector), &future);
+    if (blockingReason == BlockingReason::kNotBlocked) {
+      BOLT_CHECK(!future.valid());
+      readFromSpillFileStream(mergeHolder, streamIdx);
+    } else {
+      BOLT_CHECK(future.valid());
+      std::move(future)
+          .via(executor_)
+          .thenValue([this, mergeHolder, streamIdx](auto&&) {
+            readFromSpillFileStream(mergeHolder, streamIdx);
+          })
+          .thenError(
+              folly::tag_t<std::exception>{},
+              [this, mergeHolder, streamIdx](const std::exception& e) {
+                const auto merger = mergeHolder.lock();
+                if (merger != nullptr) {
+                  LOG(ERROR) << "Stop the " << streamIdx
+                             << " th source on error: " << e.what();
+                  setError(std::make_exception_ptr(e));
+                  finishSource(streamIdx);
+                }
+              });
+    }
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "The " << streamIdx
+               << " spill stream failed with error: " << e.what();
+    setError(std::current_exception());
+    finishSource(streamIdx);
+  }
 }
 
 void SpillMerger::scheduleAsyncSpillFileStreamReads() {
   BOLT_CHECK_EQ(batchStreams_.size(), sources_.size());
   for (auto i = 0; i < batchStreams_.size(); ++i) {
-    executor_->add(
-        [&, streamIdx = i]() { readFromSpillFileStream(streamIdx); });
+    executor_->add([&, streamIdx = i]() {
+      readFromSpillFileStream(std::weak_ptr(shared_from_this()), streamIdx);
+    });
+  }
+}
+
+void SpillMerger::setError(const std::exception_ptr& exception) {
+  std::lock_guard l(mutex_);
+  if (exception_ != nullptr) {
+    return;
+  }
+  exception_ = exception;
+}
+
+bool SpillMerger::hasError() const {
+  std::lock_guard l(mutex_);
+  return exception_ != nullptr;
+}
+
+void SpillMerger::checkError() {
+  if (hasError()) {
+    sourceMerger_.reset();
+    batchStreams_.clear();
+    sources_.clear();
+    std::rethrow_exception(exception_);
   }
 }
 

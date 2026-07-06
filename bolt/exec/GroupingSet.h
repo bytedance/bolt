@@ -442,6 +442,12 @@ class GroupingSet {
   std::unique_ptr<SortedAggregations> sortedAggregations_;
   std::vector<std::unique_ptr<DistinctAggregations>> distinctAggregations_;
 
+  // True if any aggregate accumulator allocates memory outside RowContainer's
+  // HashStringAllocator (e.g. directly from MemoryPool). In that case,
+  // RowContainer::estimateRowSize() can under-estimate the actual per-group
+  // footprint.
+  bool hasExternalMemoryAccumulators_{false};
+
   const bool ignoreNullKeys_;
 
   uint64_t numInputRows_ = 0;

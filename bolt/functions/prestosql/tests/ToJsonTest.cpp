@@ -45,6 +45,13 @@ class ToJsonTest : public SparkFunctionBaseTest {
     }
   }
 
+  void setQueryTimeZone(const std::string& timeZone) {
+    queryCtx_->testingOverrideConfigUnsafe({
+        {core::QueryConfig::kSessionTimezone, timeZone},
+        {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+    });
+  }
+
   // Makes a row vector whose children vectors are wrapped in a dictionary
   // that reverses all elements and elements at the first row are null.
   template <typename T>
@@ -636,7 +643,16 @@ TEST_F(ToJsonTest, fromSpark) {
     // to_json with timestamp
     auto rowChild = makeNullableFlatVector<Timestamp>({Timestamp(1, 1)});
     auto rowVector = makeRowVector({rowChild});
-    toJsonSimple("to_json(c0)", {rowVector}, nullptr, /*expectThrow=*/true);
+    auto expectedVector = makeNullableFlatVector<StringView>(
+        {R"({"c0":"1970-01-01T00:00:01.000Z"})"}, VARCHAR());
+    toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
+
+    setQueryTimeZone("Asia/Shanghai");
+    rowChild = makeNullableFlatVector<Timestamp>({Timestamp(1, 1)});
+    rowVector = makeRowVector({rowChild});
+    expectedVector = makeNullableFlatVector<StringView>(
+        {R"({"c0":"1970-01-01T08:00:01.000+08:00"})"}, VARCHAR());
+    toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
   }
   {
     // SPARK-21513: to_json support map[string, struct] to json

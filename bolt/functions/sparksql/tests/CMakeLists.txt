@@ -38,6 +38,7 @@ add_executable(
   ArrayShuffleTest.cpp
   ArraySliceSumTest.cpp
   ArrayUnionTest.cpp
+  ArraysZipTest.cpp
   AtLeastNNonNullsTest.cpp
   Base64Test.cpp
   BitwiseTest.cpp
@@ -47,8 +48,10 @@ add_executable(
   DecimalCompareTest.cpp
   DecimalRoundTest.cpp
   DecimalUtilTest.cpp
+  DecimalVectorFunctionsTest.cpp
   ElementAtTest.cpp
   FactorialTest.cpp
+  FormatNumberTest.cpp
   FromJsonTest.cpp
   FromJsonTest.cpp
   FromToJsonRoundTripTest.cpp
@@ -69,6 +72,7 @@ add_executable(
   MakeDecimalTest.cpp
   MakeTimestampTest.cpp
   MapConcatTest.cpp
+  MapFromArraysTest.cpp
   MapTest.cpp
   MaskTest.cpp
   MightContainTest.cpp
@@ -76,6 +80,7 @@ add_executable(
   RaiseErrorTest.cpp
   RandTest.cpp
   RegexFunctionsTest.cpp
+  SequenceTest.cpp
   SliceTest.cpp
   SizeTest.cpp
   SortArrayTest.cpp
@@ -85,6 +90,7 @@ add_executable(
   SparkRoundTest.cpp
   SparkSqlDateTimeFunctionsTest.cpp
   SplitFunctionsTest.cpp
+  StringSplitSQLTest.cpp
   StringTest.cpp
   ToJsonTest.cpp
   UdfMapArrayCombineTest.cpp

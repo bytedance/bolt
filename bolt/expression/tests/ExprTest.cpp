@@ -3165,6 +3165,43 @@ TEST_P(ParameterizedExprTest, flatNoNullsFastPath) {
   ASSERT_FALSE(exprSet->exprs()[0]->supportsFlatNoNullsFastPath());
 }
 
+TEST_P(ParameterizedExprTest, flatNoNullsFastPathDisabledByConfig) {
+  auto data = makeRowVector(
+      {"a", "b"},
+      {
+          makeFlatVector<int32_t>({1, 2, 3}),
+          makeFlatVector<int32_t>({10, 20, 30}),
+      });
+
+  auto expected = makeFlatVector<int32_t>({11, 22, 33});
+  auto result = evaluate("a + b", data);
+  assertEqualVectors(expected, result);
+
+  std::unordered_map<std::string, std::string> configData(
+      {{core::QueryConfig::kExprEvalFlatNoNulls, "false"}});
+  auto queryCtx = bolt::core::QueryCtx::create(
+      nullptr, core::QueryConfig(std::move(configData)));
+  auto execCtx = std::make_unique<core::ExecCtx>(pool_.get(), queryCtx.get());
+
+  result = evaluateMultiple({"a + b"}, data, std::nullopt, execCtx.get())[0];
+  assertEqualVectors(expected, result);
+}
+
+TEST_P(ParameterizedExprTest, flatNoNullsFastPathDefaultForCommonBatchSize) {
+  constexpr vector_size_t size = 1'024;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row * 2; }),
+      });
+
+  auto expected =
+      makeFlatVector<int32_t>(size, [](auto row) { return row * 3; });
+  auto result = evaluate("a + b", data);
+  assertEqualVectors(expected, result);
+}
+
 TEST_P(ParameterizedExprTest, commonSubExpressionWithEncodedInput) {
   // This test case does a sanity check of the code path that reuses
   // precomputed results for common sub-expressions.

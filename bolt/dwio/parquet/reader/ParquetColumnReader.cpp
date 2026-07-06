@@ -57,15 +57,9 @@ namespace bytedance::bolt::parquet {
 bool matchType(TypeKind schemaType, TypeKind requestType) {
   switch (schemaType) {
     case TypeKind::REAL:
-      if (requestType == TypeKind::REAL || requestType == TypeKind::DOUBLE) {
-        return true;
-      }
-      return false;
+      return requestType == TypeKind::REAL || requestType == TypeKind::DOUBLE;
     case TypeKind::DOUBLE:
-      if (requestType == TypeKind::DOUBLE) {
-        return true;
-      }
-      return false;
+      return requestType == TypeKind::DOUBLE;
     case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
       if (requestType == TypeKind::VARCHAR ||
@@ -74,10 +68,7 @@ bool matchType(TypeKind schemaType, TypeKind requestType) {
       }
       return false;
     case TypeKind::TIMESTAMP:
-      if (requestType == TypeKind::TIMESTAMP) {
-        return true;
-      }
-      return false;
+      return requestType == TypeKind::TIMESTAMP;
     default:
       break;
   }

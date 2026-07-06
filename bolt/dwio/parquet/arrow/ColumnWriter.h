@@ -39,11 +39,14 @@
 #include "bolt/dwio/parquet/arrow/Exception.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
+#include "bolt/dwio/parquet/arrow/WriterMemoryStats.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
 
 namespace arrow {
 
 class Array;
+class MemoryPool;
+class ResizableBuffer;
 
 namespace bit_util {
 class BitWriter;
@@ -68,9 +71,41 @@ class DataPage;
 class DictionaryPage;
 class Encryptor;
 class OffsetIndexBuilder;
+class PageBufferArena;
 class WriterProperties;
 
 using ArrowOutputStream = ::arrow::io::OutputStream;
+
+// Shared resources for ColumnWriter instances in buffered row groups when
+// thread-parallel column writes are disabled. The page buffer arena and the
+// scratch buffers are reused serially across columns and row groups.
+// PageBufferArena pre-allocates one large buffer for fixed-size dictionary page
+// and data page allocations, reducing allocation count and fragmentation. It
+// also lets BuildDataPageV1 write compressed data directly into the arena when
+// enough capacity is available, avoiding one copy from a compression scratch
+// buffer into the final page buffer.
+class PARQUET_EXPORT BufferedColumnWriterResources {
+ public:
+  BufferedColumnWriterResources(
+      ::arrow::MemoryPool* allocator,
+      std::shared_ptr<PageBufferArena> page_buffer_arena);
+
+  const std::shared_ptr<PageBufferArena>& page_buffer_arena() const;
+
+  void ResetPageBufferArena();
+
+  std::shared_ptr<::arrow::ResizableBuffer> GetUncompressedDataBuffer();
+
+  std::shared_ptr<::arrow::ResizableBuffer> GetCompressorTempBuffer();
+
+  int64_t shared_scratch_allocated_bytes() const;
+
+ private:
+  ::arrow::MemoryPool* allocator_;
+  std::shared_ptr<PageBufferArena> page_buffer_arena_;
+  std::shared_ptr<::arrow::ResizableBuffer> uncompressed_data_;
+  std::shared_ptr<::arrow::ResizableBuffer> compressor_temp_buffer_;
+};
 
 class PARQUET_EXPORT LevelEncoder {
  public:
@@ -128,7 +163,8 @@ class PARQUET_EXPORT PageWriter {
       ColumnIndexBuilder* column_index_builder = NULLPTR,
       // offset_index_builder MUST outlive the PageWriter
       OffsetIndexBuilder* offset_index_builder = NULLPTR,
-      const util::CodecOptions& codec_options = util::CodecOptions{});
+      const util::CodecOptions& codec_options = util::CodecOptions{},
+      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr);
 
   // TODO: remove this and port to new signature.
   // ARROW_DEPRECATED(
@@ -148,7 +184,8 @@ class PARQUET_EXPORT PageWriter {
       // column_index_builder MUST outlive the PageWriter
       ColumnIndexBuilder* column_index_builder = NULLPTR,
       // offset_index_builder MUST outlive the PageWriter
-      OffsetIndexBuilder* offset_index_builder = NULLPTR);
+      OffsetIndexBuilder* offset_index_builder = NULLPTR,
+      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr);
 
   // The Column Writer decides if dictionary encoding is used if set and
   // if the dictionary encoding has fallen back to default encoding on reaching
@@ -173,6 +210,8 @@ class PARQUET_EXPORT PageWriter {
   virtual void Compress(
       const ::arrow::Buffer& src_buffer,
       ::arrow::ResizableBuffer* dest_buffer) = 0;
+
+  virtual int64_t MaxCompressedLen(const ::arrow::Buffer& src_buffer) const = 0;
 };
 
 class PARQUET_EXPORT ColumnWriter {
@@ -182,7 +221,9 @@ class PARQUET_EXPORT ColumnWriter {
   static std::shared_ptr<ColumnWriter> Make(
       ColumnChunkMetaDataBuilder*,
       std::unique_ptr<PageWriter>,
-      const WriterProperties* properties);
+      const WriterProperties* properties,
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources =
+          nullptr);
 
   /// \brief Closes the ColumnWriter, commits any buffered values to pages.
   /// \return Total size of the column in bytes
@@ -217,6 +258,9 @@ class PARQUET_EXPORT ColumnWriter {
   /// \brief The total number of bytes written, buffered
   /// and in encoder.
   virtual int64_t total_compressed_bytes_all() const = 0;
+
+  /// \brief Memory retained by this column writer, in bytes.
+  virtual WriterMemoryStats memory_stats() const = 0;
 
   /// \brief The file-level writer properties
   virtual const WriterProperties* properties() = 0;

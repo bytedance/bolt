@@ -178,6 +178,12 @@ class RowReaderOptions {
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
   bool useColumnNamesForColumnMapping_{false};
 
+  // Hard upper bound on the in-memory bytes a single batch is allowed to
+  // produce. The reader uses metadata (e.g. parquet row-group stats) to
+  // shrink the per-call read size so that bytesPerRow * rows <=
+  // maxBatchBytes_. 0 means unlimited.
+  int64_t maxBatchBytes_{0};
+
  public:
   RowReaderOptions() noexcept
       : dataStart(0),
@@ -494,6 +500,17 @@ class RowReaderOptions {
     return useColumnNamesForColumnMapping_;
   }
 
+  /// Sets a hard upper bound (bytes) for the in-memory size of a single
+  /// batch produced by the reader. Used together with metadata-derived
+  /// bytes-per-row to cap rows-to-read; 0 disables the cap.
+  void setMaxBatchBytes(int64_t maxBatchBytes) {
+    maxBatchBytes_ = maxBatchBytes;
+  }
+
+  int64_t getMaxBatchBytes() const {
+    return maxBatchBytes_;
+  }
+
   std::string toString() const {
     std::stringstream ss;
     ss << "dataStart=" << dataStart << ", ";
@@ -542,6 +559,7 @@ class RowReaderOptions {
     ss << "enableDictionaryFilter_=" << enableDictionaryFilter_;
     ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
+    ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";
     ss << "useColumnNamesForColumnMapping_="
        << (useColumnNamesForColumnMapping_ ? "true" : "false");
 

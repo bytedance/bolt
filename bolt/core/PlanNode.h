@@ -43,6 +43,12 @@
 #endif
 namespace bytedance::bolt::core {
 
+/// Direct access to HashTable from HashJoinNode would introduce a dependency
+/// cycle. We resolved this by defining an OpaqueHashTable interface,
+/// effectively decoupling the node logic from the specific table
+/// implementation.
+struct OpaqueHashTable;
+
 typedef std::string PlanNodeId;
 
 /**
@@ -1699,7 +1705,10 @@ class HashJoinNode : public AbstractJoinNode {
       TypedExprPtr filter,
       PlanNodePtr left,
       PlanNodePtr right,
-      RowTypePtr outputType)
+      RowTypePtr outputType,
+      bool useHashTableCache = false,
+      bool joinHasNullKeys = false,
+      std::shared_ptr<OpaqueHashTable> reusableHashTable = nullptr)
       : AbstractJoinNode(
             id,
             joinType,
@@ -1709,7 +1718,10 @@ class HashJoinNode : public AbstractJoinNode {
             std::move(left),
             std::move(right),
             std::move(outputType)),
-        nullAware_{nullAware} {
+        nullAware_{nullAware},
+        useHashTableCache_{useHashTableCache},
+        joinHasNullKeys_{joinHasNullKeys},
+        reusableHashTable_(std::move(reusableHashTable)) {
     if (nullAware) {
       BOLT_USER_CHECK(
           isNullAwareSupported(joinType),
@@ -1768,6 +1780,27 @@ class HashJoinNode : public AbstractJoinNode {
     return nullAware_;
   }
 
+  /// Returns whether hash table caching is enabled for broadcast joins.
+  /// Only used by Presto-on-Spark.
+  bool useHashTableCache() const {
+    return useHashTableCache_;
+  }
+
+  bool joinHasNullKeys() const {
+    return joinHasNullKeys_;
+  }
+
+  std::shared_ptr<OpaqueHashTable> reusableHashTable() const {
+    return reusableHashTable_;
+  }
+
+  /// For tests only.
+  void setReusableHashTable(
+      std::shared_ptr<OpaqueHashTable> reusableHashTable) const {
+    reusableHashTable_ = std::move(reusableHashTable);
+    useHashTableCache_ = true;
+  }
+
   folly::dynamic serialize() const override;
 
   static PlanNodePtr create(const folly::dynamic& obj, void* context);
@@ -1776,6 +1809,9 @@ class HashJoinNode : public AbstractJoinNode {
   void addDetails(std::stringstream& stream) const override;
 
   const bool nullAware_;
+  mutable bool useHashTableCache_;
+  const bool joinHasNullKeys_;
+  mutable std::shared_ptr<OpaqueHashTable> reusableHashTable_;
 };
 
 /// Represents inner/outer/semi/anti merge joins. Translates to an

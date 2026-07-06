@@ -14,8 +14,14 @@
 # limitations under the License.
 
 add_executable(
-  bolt_functions_flink_test ElementAtTest.cpp FlinkSqlDataTimeFunctionsTest.cpp
-                            JsonFunctionsTest.cpp RandTest.cpp StringFunctionsTest.cpp
+  bolt_functions_flink_test
+  ElementAtTest.cpp
+  FlinkCastExprTest.cpp
+  FlinkSqlDataTimeFunctionsTest.cpp
+  JsonFunctionsTest.cpp
+  RegexFunctionsTest.cpp
+  RandTest.cpp
+  StringFunctionsTest.cpp
 )
 
 add_test(

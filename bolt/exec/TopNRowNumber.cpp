@@ -293,16 +293,21 @@ void TopNRowNumber::processInputRow(vector_size_t index, TopRows& partition) {
 }
 
 void TopNRowNumber::noMoreInput() {
-  Operator::noMoreInput();
-
   updateEstimatedOutputRowSize();
+
+  if (spiller_ == nullptr) {
+    ensureOutputFits();
+  }
+
+  Operator::noMoreInput();
 
   outputBatchSize_ = outputBatchRows(estimatedOutputRowSize_);
   if (spiller_ != nullptr) {
-    // Spill remaining data to avoid running out of memory while sort-merging
-    // spilled data.
-    spill();
-
+    if (data_->numRows() > 0) {
+      // Spill remaining data to avoid running out of memory while sort-merging
+      // spilled data.
+      spill();
+    }
     BOLT_CHECK_NULL(merge_);
     auto spillPartition = spiller_->finishSpill();
     merge_ = spillPartition.createOrderedReader(pool());
@@ -310,6 +315,59 @@ void TopNRowNumber::noMoreInput() {
   } else {
     outputRows_.resize(outputBatchSize_);
   }
+}
+
+void TopNRowNumber::ensureOutputFits() {
+  if (abandonedPartial_ || !spillEnabled() || table_ == nullptr ||
+      data_->numRows() == 0) {
+    return;
+  }
+
+  const auto currentBytes = pool()->currentBytes();
+  const auto* task = operatorCtx_->task().get();
+  const auto pressure = task->memoryPressureSnapshot();
+  const auto pressureWatermarkBytes = pressure.admissionWatermarkBytes();
+  const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
+  const uint64_t outputAdmissionLimit =
+      queryConfig.preferredOutputBatchBytes() *
+      queryConfig.outputBatchMemoryReservationMultiple();
+  const auto admissionReservationBytes =
+      (pressureWatermarkBytes != 0 &&
+       currentBytes >
+           pressureWatermarkBytes * queryConfig.memoryPressureWatermarkRatio())
+      ? pressureWatermarkBytes
+      : std::min<uint64_t>(currentBytes / 2, outputAdmissionLimit);
+
+  if (admissionReservationBytes == 0) {
+    return;
+  }
+
+  {
+    Operator::ReclaimableSectionGuard guard(this);
+    const auto scopedDisableMemoryExpansion =
+        task->maybeScopedDisableMemoryExpansion();
+    LOG(INFO) << name() << " ensureOutputFits: try to reserve "
+              << succinctBytes(admissionReservationBytes)
+              << " for output admission, " << pool()->name() << "["
+              << succinctBytes(pool()->currentBytes()) << ", "
+              << succinctBytes(pool()->reservedBytes()) << ", "
+              << succinctBytes(pool()->capacity()) << "]"
+              << ", pressureWatermarkBytes="
+              << succinctBytes(pressureWatermarkBytes)
+              << ", outputAdmissionLimit="
+              << succinctBytes(outputAdmissionLimit)
+              << ", memoryPressure=" << task->memoryPressureDetails();
+    if (pool()->maybeReserve(admissionReservationBytes)) {
+      pool()->release();
+      return;
+    }
+  }
+
+  LOG(WARNING) << name() << " Failed to reserve "
+               << succinctBytes(admissionReservationBytes)
+               << " before producing output for memory pool " << pool()->name()
+               << ", usage: " << succinctBytes(pool()->currentBytes())
+               << ", reservation: " << succinctBytes(pool()->reservedBytes());
 }
 
 void TopNRowNumber::updateEstimatedOutputRowSize() {

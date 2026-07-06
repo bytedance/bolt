@@ -37,6 +37,7 @@
 
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
+#include "bolt/dwio/parquet/arrow/WriterMemoryStats.h"
 
 namespace arrow {
 
@@ -178,6 +179,8 @@ class PARQUET_EXPORT FileWriter {
   virtual const int64_t getWrittenBytesPerRow() const = 0;
 
   virtual const int64_t totalCompressedBytesAll() const = 0;
+
+  virtual WriterMemoryStats memoryStats() const = 0;
 };
 
 /// \brief Write Parquet file metadata only to indicated Arrow OutputStream

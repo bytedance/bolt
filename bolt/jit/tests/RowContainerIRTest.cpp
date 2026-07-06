@@ -24,14 +24,34 @@
 #include "bolt/jit/ThrustJITv2.h"
 #include "bolt/jit/tests/JitTestBase.h"
 
+#include <atomic>
+#include <barrier>
 #include <cmath>
 #include <limits>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 
 using int128_t = __int128;
 
 namespace bytedance::bolt::jit::test {
+
+namespace {
+
+class TestRowContainerCodeGenerator : public RowContainerCodeGenerator {
+ public:
+  explicit TestRowContainerCodeGenerator(std::string funcName)
+      : funcName_(std::move(funcName)) {}
+
+  std::string GetCmpFuncName() override {
+    return funcName_;
+  }
+
+ private:
+  std::string funcName_;
+};
+
+} // namespace
 
 template <typename T>
 concept TupleLike = requires(T a) {
@@ -500,6 +520,45 @@ TEST_F(RowContainerJitTest, stringview) {
     free(r);
   }
   rows.clear();
+}
+
+TEST_F(RowContainerJitTest, complex_types_cache_in_user_data) {
+  jit->ClearCacheForTest();
+
+  auto bigintType = BIGINT();
+  auto arrayType = ARRAY(INTEGER());
+  auto mapType = MAP(INTEGER(), VARCHAR());
+  auto rowType = ROW({{"nested", BIGINT()}});
+
+  auto codegenModule = [&]() {
+    TestRowContainerCodeGenerator gen("row_container_user_data_complex_types");
+    gen.setOpType(CmpType::EQUAL)
+        .setHasNullKeys(false)
+        .setKeyTypes({bigintType, arrayType, mapType, rowType})
+        .setKeyOffsets({0, 8, 16, 24});
+    return gen.codegen();
+  };
+
+  constexpr size_t kConcurrentCodegenCount = 32;
+  std::barrier syncPoint(kConcurrentCodegenCount);
+  std::vector<CompiledModuleSP> modules(kConcurrentCodegenCount);
+  std::vector<std::thread> threads;
+  threads.reserve(kConcurrentCodegenCount);
+  for (size_t i = 0; i < kConcurrentCodegenCount; ++i) {
+    threads.emplace_back([&, i]() {
+      syncPoint.arrive_and_wait();
+      modules[i] = codegenModule();
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  auto module = modules.front();
+  ASSERT_NE(module, nullptr);
+  for (const auto& concurrentModule : modules) {
+    ASSERT_EQ(concurrentModule.get(), module.get());
+  }
 }
 
 } // namespace bytedance::bolt::jit::test

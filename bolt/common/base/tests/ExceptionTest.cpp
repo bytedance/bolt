@@ -1066,3 +1066,26 @@ TEST(ExceptionTest, boltFailWithNullPtr) {
         << "Expected 'error message: (nullptr)' in message, got: " << e.what();
   }
 }
+
+// test char* without const
+TEST(ExceptionTest, boltFailWithNullCharPtr) {
+  char* nullPtr = nullptr;
+
+  try {
+    BOLT_FAIL(nullPtr);
+    FAIL() << "Expected an exception to be thrown";
+  } catch (const BoltRuntimeError& e) {
+    EXPECT_NE(std::string(e.what()).find("(nullptr)"), std::string::npos)
+        << "Expected '(nullptr)' in message, got: " << e.what();
+  }
+
+  try {
+    BOLT_FAIL("error message: {}", nullPtr);
+    FAIL() << "Expected an exception to be thrown";
+  } catch (const BoltRuntimeError& e) {
+    EXPECT_NE(
+        std::string(e.what()).find("error message: (nullptr)"),
+        std::string::npos)
+        << "Expected 'error message: (nullptr)' in message, got: " << e.what();
+  }
+}

@@ -1,0 +1,44 @@
+{
+    "name": "Bolt Clang Development Container",
+    "build": {
+        "dockerfile": "Dockerfile.clang",
+        "context": "../../.github/runners",
+        "args": {
+            "DEB_REGION": "",
+            "https_proxy": "",
+            "no_proxy": ""
+        }
+    },
+    "containerEnv": {
+        "https_proxy": "",
+        "no_proxy": "",
+        "SHELL": "/bin/bash"
+    },
+    "remoteUser": "code",
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    "forwardPorts": [],
+    // Use 'portsAttributes' to set default properties for specific forwarded ports.
+    "portsAttributes": {},
+    // Use 'remoteEnv' to set environment variables that are only available inside the container.
+    "remoteEnv": {},
+    // Use 'mounts' to make files or directories from your local machine available inside the container.
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+        "source=conan-cache,target=/home/code/.conan2/p",
+        "source=ccache-cache,target=/home/code/.ccache"
+    ],
+    "runArgs": [
+        "--security-opt",
+        "label=disable"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "llvm-vs-code-extensions.vscode-clangd"
+            ]
+        }
+    },
+    // Configure tool-specific properties.
+    "features": {},
+    "postCreateCommand": ".devcontainer/post_create_command.sh"
+}

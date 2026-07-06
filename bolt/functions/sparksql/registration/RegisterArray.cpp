@@ -60,7 +60,7 @@ void registerSparkArrayFunctions(const std::string& prefix) {
       udf_array_slice_sum, prefix + "array_slice_sum");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_any_match, prefix + "exists");
 
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_zip, prefix + "arrays_zip");
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_zip_spark, prefix + "arrays_zip");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_zip_with, prefix + "zip_with");
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_all_match, prefix + "forall")
@@ -209,6 +209,8 @@ void registerArrayFunctions(const std::string& prefix) {
       makeRepeatAllowNegativeCount);
 
   registerIntegerSliceFunction(prefix);
+
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_spark_sequence, prefix + "sequence");
 
   // for now, register ArrayRemoveFunctionString that takes String input and
   // output is enough for our use cases. In future, if need to support more

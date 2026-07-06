@@ -158,6 +158,10 @@ inline const char* errorMessage(const char* s) {
   return s ? s : "(nullptr)";
 }
 
+inline const char* errorMessage(char* s) {
+  return s ? s : "(nullptr)";
+}
+
 inline std::string errorMessage(const std::string& str) {
   return str;
 }
@@ -170,6 +174,10 @@ decltype(auto) sanitizeArg(const T& arg) {
 // Replaces null const char* with "(nullptr)" so fmt::vformat won't throw
 // "string pointer is null" when argument is nullptr.
 inline const char* sanitizeArg(const char* arg) {
+  return arg ? arg : "(nullptr)";
+}
+
+inline const char* sanitizeArg(char* arg) {
   return arg ? arg : "(nullptr)";
 }
 

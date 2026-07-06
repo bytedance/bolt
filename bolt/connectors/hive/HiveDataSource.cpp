@@ -36,6 +36,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/IgnoreCorruptFile.h"
@@ -75,6 +76,8 @@ HiveDataSource::HiveDataSource(
       fsSessionConfig_.values[key] = value.value();
     }
   }
+  filesystems::copyOpenFileOptionsFromConfig(
+      connectorQueryCtx_->sessionProperties(), fsSessionConfig_);
   fsSessionConfig_.bufferSize = static_cast<size_t>(hiveConfig_->loadQuantum());
   native_cache_enabled = queryConfig.isNativeCacheEnabled();
   IgnoreCorruptFileHelper::globalInitialize(
@@ -227,6 +230,8 @@ HiveDataSource::HiveDataSource(
   }
 
   recalculateRepDefConf(readerOutputType_, queryConfig);
+  parquetMaxBatchBytes_ =
+      static_cast<int64_t>(queryConfig.preferredOutputBatchBytes());
   ioStats_ = std::make_shared<io::IoStatistics>();
 }
 
@@ -373,6 +378,7 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
       decodeRepDefPageCount_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
+  splitReader->rowReaderOptions().setMaxBatchBytes(parquetMaxBatchBytes_);
 
   TRY_WITH_IGNORE(
       connectorQueryCtx_->taskId(),

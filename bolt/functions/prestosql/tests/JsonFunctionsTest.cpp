@@ -104,6 +104,16 @@ class JsonFunctionsTest : public functions::test::FunctionBaseTest {
     return jsonResult;
   }
 
+  std::optional<bool> isJsonObject(std::optional<std::string> json) {
+    auto [jsonVector, varcharVector] = makeVectors(json);
+    auto jsonResult =
+        evaluateOnce<bool>("is_json_object(c0)", makeRowVector({jsonVector}));
+    auto varcharResult = evaluateOnce<bool>(
+        "is_json_object(c0)", makeRowVector({varcharVector}));
+    EXPECT_EQ(jsonResult, varcharResult);
+    return jsonResult;
+  }
+
   std::optional<int64_t> jsonArrayLength(std::optional<std::string> json) {
     auto [jsonVector, varcharVector] = makeVectors(json);
     auto jsonResult = evaluateOnce<int64_t>(
@@ -314,6 +324,13 @@ TEST_F(JsonFunctionsTest, isJsonScalarSignatures) {
   ASSERT_EQ(1, signatures.count("(varchar) -> boolean"));
 }
 
+TEST_F(JsonFunctionsTest, isJsonObjectSignatures) {
+  auto signatures = getSignatureStrings("is_json_object");
+  ASSERT_EQ(2, signatures.size());
+  ASSERT_EQ(1, signatures.count("(json) -> boolean"));
+  ASSERT_EQ(1, signatures.count("(varchar) -> boolean"));
+}
+
 TEST_F(JsonFunctionsTest, jsonArrayLengthSignatures) {
   auto signatures = getSignatureStrings("json_array_length");
   ASSERT_EQ(2, signatures.size());
@@ -368,6 +385,21 @@ TEST_F(JsonFunctionsTest, isJsonScalar) {
   EXPECT_EQ(isJsonScalar(R"({"k1":"v1"})"), false);
   EXPECT_EQ(isJsonScalar(R"({"k1":[0,1,2]})"), false);
   EXPECT_EQ(isJsonScalar(R"({"k1":""})"), false);
+}
+
+TEST_F(JsonFunctionsTest, isJsonObject) {
+  EXPECT_EQ(isJsonObject(R"({"k1":"v1"})"), true);
+  EXPECT_EQ(isJsonObject(R"({"k1":[0,1,2]})"), true);
+  EXPECT_EQ(isJsonObject(R"({})"), true);
+
+  EXPECT_EQ(isJsonObject(R"(1)"), false);
+  EXPECT_EQ(isJsonObject(R"("hello")"), false);
+  EXPECT_EQ(isJsonObject(R"(true)"), false);
+  EXPECT_EQ(isJsonObject(R"(null)"), false);
+  EXPECT_EQ(isJsonObject(R"([1,2])"), false);
+
+  EXPECT_EQ(isJsonObject(R"(not_json)"), false);
+  EXPECT_EQ(isJsonObject(R"()"), false);
 }
 
 TEST_F(JsonFunctionsTest, jsonArrayLength) {

@@ -45,6 +45,7 @@
 #include "arrow/buffer_builder.h"
 #include "arrow/compute/api.h"
 #include "arrow/io/memory.h"
+#include "arrow/memory_pool.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
@@ -59,11 +60,13 @@
 
 #include "bolt/dwio/parquet/arrow/ColumnPage.h"
 #include "bolt/dwio/parquet/arrow/Encoding.h"
+#include "bolt/dwio/parquet/arrow/EncodingInternal.h"
 #include "bolt/dwio/parquet/arrow/Encryption.h"
 #include "bolt/dwio/parquet/arrow/EncryptionInternal.h"
 #include "bolt/dwio/parquet/arrow/FileEncryptorInternal.h"
 #include "bolt/dwio/parquet/arrow/LevelConversion.h"
 #include "bolt/dwio/parquet/arrow/Metadata.h"
+#include "bolt/dwio/parquet/arrow/PageBufferArena.h"
 #include "bolt/dwio/parquet/arrow/PageIndex.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
@@ -92,6 +95,41 @@ namespace bytedance::bolt::parquet::arrow {
 using util::CodecOptions;
 
 namespace {
+
+int64_t bufferAllocatedBytes(const std::shared_ptr<Buffer>& buffer) {
+  return buffer != nullptr ? buffer->capacity() : 0;
+}
+
+int64_t resizableBufferAllocatedBytes(
+    const std::shared_ptr<ResizableBuffer>& buffer) {
+  return buffer != nullptr ? buffer->capacity() : 0;
+}
+
+template <typename PagePtr>
+int64_t pageBufferAllocatedBytes(const PagePtr& page) {
+  if (page == nullptr) {
+    return 0;
+  }
+  return bufferAllocatedBytes(page->buffer());
+}
+
+template <typename PagePtr>
+int64_t pageBufferFallbackAllocatedBytes(
+    const PagePtr& page,
+    const std::shared_ptr<PageBufferArena>& page_buffer_arena) {
+  if (page == nullptr) {
+    return 0;
+  }
+  const auto& buffer = page->buffer();
+  if (buffer == nullptr) {
+    return 0;
+  }
+  if (page_buffer_arena != nullptr &&
+      page_buffer_arena->Contains(buffer.get())) {
+    return 0;
+  }
+  return bufferAllocatedBytes(buffer);
+}
 
 // Visitor that extracts the value buffer from a FlatArray at a given offset.
 struct ValueBufferSlicer {
@@ -205,6 +243,45 @@ inline const T* AddIfNotNull(const T* base, int64_t offset) {
 }
 
 } // namespace
+
+BufferedColumnWriterResources::BufferedColumnWriterResources(
+    MemoryPool* allocator,
+    std::shared_ptr<PageBufferArena> page_buffer_arena)
+    : allocator_(allocator), page_buffer_arena_(std::move(page_buffer_arena)) {}
+
+const std::shared_ptr<PageBufferArena>&
+BufferedColumnWriterResources::page_buffer_arena() const {
+  return page_buffer_arena_;
+}
+
+void BufferedColumnWriterResources::ResetPageBufferArena() {
+  if (page_buffer_arena_ != nullptr) {
+    page_buffer_arena_->Reset();
+  }
+}
+
+std::shared_ptr<ResizableBuffer>
+BufferedColumnWriterResources::GetUncompressedDataBuffer() {
+  if (uncompressed_data_ == nullptr) {
+    uncompressed_data_ = std::static_pointer_cast<ResizableBuffer>(
+        AllocateBuffer(allocator_, 0));
+  }
+  return uncompressed_data_;
+}
+
+std::shared_ptr<ResizableBuffer>
+BufferedColumnWriterResources::GetCompressorTempBuffer() {
+  if (compressor_temp_buffer_ == nullptr) {
+    compressor_temp_buffer_ = std::static_pointer_cast<ResizableBuffer>(
+        AllocateBuffer(allocator_, 0));
+  }
+  return compressor_temp_buffer_;
+}
+
+int64_t BufferedColumnWriterResources::shared_scratch_allocated_bytes() const {
+  return resizableBufferAllocatedBytes(uncompressed_data_) +
+      resizableBufferAllocatedBytes(compressor_temp_buffer_);
+}
 
 LevelEncoder::LevelEncoder() {}
 LevelEncoder::~LevelEncoder() {}
@@ -429,8 +506,7 @@ class SerializedPageWriter : public PageWriter {
     DCHECK(compressor_ != nullptr);
 
     // Compress the data
-    int64_t max_compressed_size =
-        compressor_->MaxCompressedLen(src_buffer.size(), src_buffer.data());
+    const int64_t max_compressed_size = MaxCompressedLen(src_buffer);
 
     // Use Arrow::Buffer::shrink_to_fit = false
     // underlying buffer only keeps growing. Resize to a smaller size does not
@@ -445,6 +521,11 @@ class SerializedPageWriter : public PageWriter {
             max_compressed_size,
             dest_buffer->mutable_data()));
     PARQUET_THROW_NOT_OK(dest_buffer->Resize(compressed_size, false));
+  }
+
+  int64_t MaxCompressedLen(const Buffer& src_buffer) const override {
+    DCHECK(compressor_ != nullptr);
+    return compressor_->MaxCompressedLen(src_buffer.size(), src_buffer.data());
   }
 
   int64_t WriteDataPage(std::unique_ptr<DataPage> pagePtr) override {
@@ -734,6 +815,7 @@ class BufferedPageWriter : public PageWriter {
       int16_t current_column_ordinal,
       bool use_page_checksum_verification,
       MemoryPool* pool = ::arrow::default_memory_pool(),
+      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr,
       std::shared_ptr<Encryptor> meta_encryptor = nullptr,
       std::shared_ptr<Encryptor> data_encryptor = nullptr,
       ColumnIndexBuilder* column_index_builder = nullptr,
@@ -741,7 +823,8 @@ class BufferedPageWriter : public PageWriter {
       const CodecOptions& codec_options = CodecOptions{})
       : final_sink_(std::move(sink)),
         metadata_(metadata),
-        has_dictionary_pages_(false) {
+        has_dictionary_pages_(false),
+        page_buffer_arena_(std::move(page_buffer_arena)) {
     pager_ = std::make_unique<SerializedPageWriter>(
         final_sink_,
         codec,
@@ -814,9 +897,48 @@ class BufferedPageWriter : public PageWriter {
     return data_pages_.back()->uncompressed_size() + sizeof(format::PageHeader);
   }
 
+  int64_t buffered_data_page_allocated_bytes() const {
+    int64_t total_buffered_data_page_allocated_bytes = 0;
+    for (const auto& page : data_pages_) {
+      total_buffered_data_page_allocated_bytes +=
+          pageBufferAllocatedBytes(page);
+    }
+    return total_buffered_data_page_allocated_bytes;
+  }
+
+  int64_t buffered_data_page_fallback_allocated_bytes() const {
+    int64_t total_buffered_data_page_fallback_allocated_bytes = 0;
+    for (const auto& page : data_pages_) {
+      total_buffered_data_page_fallback_allocated_bytes +=
+          pageBufferFallbackAllocatedBytes(page, page_buffer_arena_);
+    }
+    return total_buffered_data_page_fallback_allocated_bytes;
+  }
+
+  int64_t buffered_data_page_count() const {
+    return data_pages_.size();
+  }
+
+  int64_t buffered_dictionary_page_allocated_bytes() const {
+    return pageBufferAllocatedBytes(dictionary_page_);
+  }
+
+  int64_t buffered_dictionary_page_fallback_allocated_bytes() const {
+    return pageBufferFallbackAllocatedBytes(
+        dictionary_page_, page_buffer_arena_);
+  }
+
+  int64_t buffered_dictionary_page_count() const {
+    return dictionary_page_ != nullptr ? 1 : 0;
+  }
+
   void Compress(const Buffer& src_buffer, ResizableBuffer* dest_buffer)
       override {
     pager_->Compress(src_buffer, dest_buffer);
+  }
+
+  int64_t MaxCompressedLen(const Buffer& src_buffer) const override {
+    return pager_->MaxCompressedLen(src_buffer);
   }
 
   bool has_compressor() override {
@@ -832,6 +954,7 @@ class BufferedPageWriter : public PageWriter {
   ColumnChunkMetaDataBuilder* metadata_;
   std::unique_ptr<SerializedPageWriter> pager_;
   bool has_dictionary_pages_;
+  std::shared_ptr<PageBufferArena> page_buffer_arena_;
   std::unique_ptr<DictionaryPage> dictionary_page_;
   std::vector<std::unique_ptr<DataPage>> data_pages_;
   int64_t total_compressed_bytes_written_{0};
@@ -850,7 +973,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
     bool page_write_checksum_enabled,
     ColumnIndexBuilder* column_index_builder,
     OffsetIndexBuilder* offset_index_builder,
-    const CodecOptions& codec_options) {
+    const CodecOptions& codec_options,
+    std::shared_ptr<PageBufferArena> page_buffer_arena) {
   if (buffered_row_group) {
     return std::unique_ptr<PageWriter>(new BufferedPageWriter(
         std::move(sink),
@@ -860,6 +984,7 @@ std::unique_ptr<PageWriter> PageWriter::Open(
         column_chunk_ordinal,
         page_write_checksum_enabled,
         pool,
+        std::move(page_buffer_arena),
         std::move(meta_encryptor),
         std::move(data_encryptor),
         column_index_builder,
@@ -895,7 +1020,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
     std::shared_ptr<Encryptor> data_encryptor,
     bool page_write_checksum_enabled,
     ColumnIndexBuilder* column_index_builder,
-    OffsetIndexBuilder* offset_index_builder) {
+    OffsetIndexBuilder* offset_index_builder,
+    std::shared_ptr<PageBufferArena> page_buffer_arena) {
   return PageWriter::Open(
       sink,
       codec,
@@ -909,7 +1035,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
       page_write_checksum_enabled,
       column_index_builder,
       offset_index_builder,
-      CodecOptions{compression_level});
+      CodecOptions{compression_level},
+      std::move(page_buffer_arena));
 }
 // ----------------------------------------------------------------------
 // ColumnWriter
@@ -927,7 +1054,8 @@ class ColumnWriterImpl {
       std::unique_ptr<PageWriter> pager,
       const bool use_dictionary,
       Encoding::type encoding,
-      const WriterProperties* properties)
+      const WriterProperties* properties,
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources)
       : metadata_(metadata),
         descr_(metadata->descr()),
         level_info_(ComputeLevelInfo(metadata->descr())),
@@ -935,6 +1063,10 @@ class ColumnWriterImpl {
         has_dictionary_(use_dictionary),
         encoding_(encoding),
         properties_(properties),
+        page_buffer_arena_(
+            buffered_resources != nullptr
+                ? buffered_resources->page_buffer_arena()
+                : nullptr),
         allocator_(properties->memory_pool()),
         dictionary_pagesize_limit_(
             properties->dictionary_pagesize_limit(descr_->path())),
@@ -948,19 +1080,34 @@ class ColumnWriterImpl {
         total_compressed_bytes_(0),
         closed_(false),
         fallback_(false),
-        definition_levels_sink_(allocator_),
-        repetition_levels_sink_(allocator_) {
+        definition_levels_encoder_(nullptr),
+        repetition_levels_encoder_(nullptr) {
     definition_levels_rle_ = std::static_pointer_cast<ResizableBuffer>(
         AllocateBuffer(allocator_, 0));
     repetition_levels_rle_ = std::static_pointer_cast<ResizableBuffer>(
         AllocateBuffer(allocator_, 0));
-    uncompressed_data_ = std::static_pointer_cast<ResizableBuffer>(
-        AllocateBuffer(allocator_, 0));
-
-    if (pager_->has_compressor()) {
-      compressor_temp_buffer_ = std::static_pointer_cast<ResizableBuffer>(
+    if (buffered_resources != nullptr) {
+      uncompressed_data_ = buffered_resources->GetUncompressedDataBuffer();
+      uses_shared_uncompressed_data_ = true;
+    } else {
+      uncompressed_data_ = std::static_pointer_cast<ResizableBuffer>(
           AllocateBuffer(allocator_, 0));
     }
+    definition_levels_encoder_ =
+        IncrementalLevelRleEncoder(definition_levels_rle_.get());
+    repetition_levels_encoder_ =
+        IncrementalLevelRleEncoder(repetition_levels_rle_.get());
+
+    if (pager_->has_compressor()) {
+      if (buffered_resources != nullptr) {
+        compressor_temp_buffer_ = buffered_resources->GetCompressorTempBuffer();
+        uses_shared_compressor_temp_buffer_ = true;
+      } else {
+        compressor_temp_buffer_ = std::static_pointer_cast<ResizableBuffer>(
+            AllocateBuffer(allocator_, 0));
+      }
+    }
+    InitSinks();
   }
 
   virtual ~ColumnWriterImpl() = default;
@@ -981,6 +1128,12 @@ class ColumnWriterImpl {
 
   // Merges page statistics into chunk statistics, then resets the values
   virtual void ResetPageStatistics() = 0;
+
+  virtual int64_t EncoderMemoryBytes() const = 0;
+
+  virtual int64_t EncoderPeakMemoryBytes() const = 0;
+
+  virtual int64_t EncoderEstimatedDataEncodedSize() const = 0;
 
   // Adds Data Pages to an in memory buffer in dictionary encoding mode
   // Serializes the Data Pages in other encoding modes
@@ -1006,23 +1159,14 @@ class ColumnWriterImpl {
   // Write multiple definition levels
   void WriteDefinitionLevels(int64_t num_levels, const int16_t* levels) {
     DCHECK(!closed_);
-    PARQUET_THROW_NOT_OK(
-        definition_levels_sink_.Append(levels, sizeof(int16_t) * num_levels));
+    definition_levels_encoder_.Put(levels, num_levels);
   }
 
   // Write multiple repetition levels
   void WriteRepetitionLevels(int64_t num_levels, const int16_t* levels) {
     DCHECK(!closed_);
-    PARQUET_THROW_NOT_OK(
-        repetition_levels_sink_.Append(levels, sizeof(int16_t) * num_levels));
+    repetition_levels_encoder_.Put(levels, num_levels);
   }
-
-  // RLE encode the src_buffer into dest_buffer and return the encoded size
-  int64_t RleEncodeLevels(
-      const void* src_buffer,
-      ResizableBuffer* dest_buffer,
-      int16_t max_level,
-      bool include_length_prefix = true);
 
   // Serialize the buffered Data Pages
   void FlushBufferedDataPages();
@@ -1038,8 +1182,7 @@ class ColumnWriterImpl {
   bool has_dictionary_;
   Encoding::type encoding_;
   const WriterProperties* properties_;
-
-  LevelEncoder level_encoder_;
+  std::shared_ptr<PageBufferArena> page_buffer_arena_;
 
   MemoryPool* allocator_;
 
@@ -1081,21 +1224,92 @@ class ColumnWriterImpl {
   // Flag to infer if dictionary encoding has fallen back to PLAIN
   bool fallback_;
 
-  ::arrow::BufferBuilder definition_levels_sink_;
-  ::arrow::BufferBuilder repetition_levels_sink_;
-
   std::shared_ptr<ResizableBuffer> definition_levels_rle_;
   std::shared_ptr<ResizableBuffer> repetition_levels_rle_;
+  IncrementalLevelRleEncoder definition_levels_encoder_;
+  IncrementalLevelRleEncoder repetition_levels_encoder_;
 
   std::shared_ptr<ResizableBuffer> uncompressed_data_;
   std::shared_ptr<ResizableBuffer> compressor_temp_buffer_;
+  bool uses_shared_uncompressed_data_{false};
+  bool uses_shared_compressor_temp_buffer_{false};
 
   std::vector<std::unique_ptr<DataPage>> data_pages_;
 
+ protected:
+  std::shared_ptr<ResizableBuffer> AllocateArenaOrFallbackBuffer(
+      int64_t size,
+      int64_t capacity) {
+    if (page_buffer_arena_ != nullptr) {
+      auto buffer = page_buffer_arena_->TryAllocate(size, capacity);
+      if (buffer != nullptr) {
+        return buffer;
+      }
+    }
+    return AllocateBuffer(allocator_, size);
+  }
+
  private:
+  std::shared_ptr<ResizableBuffer> AllocatePageBuffer(int64_t size) {
+    return AllocateArenaOrFallbackBuffer(size, size);
+  }
+
+  std::shared_ptr<Buffer> CopyToPageBuffer(
+      const std::shared_ptr<Buffer>& source_buffer) {
+    auto page_buffer = AllocatePageBuffer(source_buffer->size());
+    if (source_buffer->size() > 0) {
+      memcpy(
+          page_buffer->mutable_data(),
+          source_buffer->data(),
+          source_buffer->size());
+    }
+    return page_buffer;
+  }
+
+  // Choose the smallest practical page buffer for compressed output:
+  // compress directly into the arena when it can hold MaxCompressedLen(),
+  // otherwise compress into shared scratch and copy into an exact-sized page
+  // buffer so fallback allocations track the real compressed size.
+  std::shared_ptr<Buffer> CompressToPageBuffer(
+      const Buffer& uncompressed_buffer) {
+    const int64_t max_compressed_size =
+        pager_->MaxCompressedLen(uncompressed_buffer);
+    if (page_buffer_arena_ != nullptr &&
+        page_buffer_arena_->available_bytes() >= max_compressed_size) {
+      auto compressed_buffer =
+          page_buffer_arena_->TryAllocate(/*size=*/0, max_compressed_size);
+      DCHECK_NE(compressed_buffer, nullptr);
+      pager_->Compress(uncompressed_buffer, compressed_buffer.get());
+      PARQUET_THROW_NOT_OK(
+          page_buffer_arena_->CommitLastAllocation(compressed_buffer));
+      return compressed_buffer;
+    }
+    DCHECK(compressor_temp_buffer_ != nullptr);
+    pager_->Compress(uncompressed_buffer, compressor_temp_buffer_.get());
+    return CopyToPageBuffer(compressor_temp_buffer_);
+  }
+
   void InitSinks() {
-    definition_levels_sink_.Rewind(0);
-    repetition_levels_sink_.Rewind(0);
+    const int prefix_size =
+        properties_->data_page_version() == ParquetDataPageVersion::V1
+        ? static_cast<int>(sizeof(int32_t))
+        : 0;
+
+    if (descr_->max_definition_level() > 0) {
+      definition_levels_encoder_.Reset(
+          descr_->max_definition_level(), prefix_size);
+    } else {
+      PARQUET_THROW_NOT_OK(
+          definition_levels_rle_->Resize(0, /*shrink_to_fit=*/false));
+    }
+
+    if (descr_->max_repetition_level() > 0) {
+      repetition_levels_encoder_.Reset(
+          descr_->max_repetition_level(), prefix_size);
+    } else {
+      PARQUET_THROW_NOT_OK(
+          repetition_levels_rle_->Resize(0, /*shrink_to_fit=*/false));
+    }
   }
 
   // Concatenate the encoded levels and values into one buffer
@@ -1114,45 +1328,6 @@ class ColumnWriterImpl {
   }
 };
 
-// return the size of the encoded buffer
-int64_t ColumnWriterImpl::RleEncodeLevels(
-    const void* src_buffer,
-    ResizableBuffer* dest_buffer,
-    int16_t max_level,
-    bool include_length_prefix) {
-  // V1 DataPage includes the length of the RLE level as a prefix.
-  int32_t prefix_size = include_length_prefix ? sizeof(int32_t) : 0;
-
-  // TODO: This only works with due to some RLE specifics
-  int64_t rle_size =
-      LevelEncoder::MaxBufferSize(
-          Encoding::RLE, max_level, static_cast<int>(num_buffered_values_)) +
-      prefix_size;
-
-  // Use Arrow::Buffer::shrink_to_fit = false
-  // underlying buffer only keeps growing. Resize to a smaller size does not
-  // reallocate.
-  PARQUET_THROW_NOT_OK(dest_buffer->Resize(rle_size, false));
-
-  level_encoder_.Init(
-      Encoding::RLE,
-      max_level,
-      static_cast<int>(num_buffered_values_),
-      dest_buffer->mutable_data() + prefix_size,
-      static_cast<int>(dest_buffer->size() - prefix_size));
-  int encoded = level_encoder_.Encode(
-      static_cast<int>(num_buffered_values_),
-      reinterpret_cast<const int16_t*>(src_buffer));
-  DCHECK_EQ(encoded, num_buffered_values_);
-
-  if (include_length_prefix) {
-    reinterpret_cast<int32_t*>(dest_buffer->mutable_data())[0] =
-        level_encoder_.len();
-  }
-
-  return level_encoder_.len() + prefix_size;
-}
-
 void ColumnWriterImpl::AddDataPage() {
   int64_t definition_levels_rle_size = 0;
   int64_t repetition_levels_rle_size = 0;
@@ -1162,19 +1337,11 @@ void ColumnWriterImpl::AddDataPage() {
       properties_->data_page_version() == ParquetDataPageVersion::V1;
 
   if (descr_->max_definition_level() > 0) {
-    definition_levels_rle_size = RleEncodeLevels(
-        definition_levels_sink_.data(),
-        definition_levels_rle_.get(),
-        descr_->max_definition_level(),
-        /*include_length_prefix=*/is_v1_data_page);
+    definition_levels_rle_size = definition_levels_encoder_.Flush();
   }
 
   if (descr_->max_repetition_level() > 0) {
-    repetition_levels_rle_size = RleEncodeLevels(
-        repetition_levels_sink_.data(),
-        repetition_levels_rle_.get(),
-        descr_->max_repetition_level(),
-        /*include_length_prefix=*/is_v1_data_page);
+    repetition_levels_rle_size = repetition_levels_encoder_.Flush();
   }
 
   int64_t uncompressed_size =
@@ -1224,13 +1391,10 @@ void ColumnWriterImpl::BuildDataPageV1(
         repetition_levels_rle_size,
         values,
         uncompressed_data_->mutable_data());
-    std::shared_ptr<ResizableBuffer> compressed_buffer =
-        AllocateBuffer(allocator_);
-    pager_->Compress(*(uncompressed_data_.get()), compressed_buffer.get());
-    compressed_data = compressed_buffer;
+    compressed_data = CompressToPageBuffer(*uncompressed_data_);
   } else {
     std::shared_ptr<ResizableBuffer> combined =
-        AllocateBuffer(allocator_, uncompressed_size);
+        AllocatePageBuffer(uncompressed_size);
     ConcatenateBuffers(
         definition_levels_rle_size,
         repetition_levels_rle_size,
@@ -1290,8 +1454,7 @@ void ColumnWriterImpl::BuildDataPageV2(
   // Concatenate uncompressed levels and the possibly compressed values
   int64_t combined_size = definition_levels_rle_size +
       repetition_levels_rle_size + compressed_values->size();
-  std::shared_ptr<ResizableBuffer> combined =
-      AllocateBuffer(allocator_, combined_size);
+  std::shared_ptr<ResizableBuffer> combined = AllocatePageBuffer(combined_size);
 
   ConcatenateBuffers(
       definition_levels_rle_size,
@@ -1501,19 +1664,19 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       std::unique_ptr<PageWriter> pager,
       const bool use_dictionary,
       Encoding::type encoding,
-      const WriterProperties* properties)
+      const WriterProperties* properties,
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources)
       : ColumnWriterImpl(
             metadata,
             std::move(pager),
             use_dictionary,
             encoding,
-            properties) {
+            properties,
+            std::move(buffered_resources)),
+        encoder_pool_(std::make_unique<::arrow::ProxyMemoryPool>(
+            properties->memory_pool())) {
     current_encoder_ = MakeEncoder(
-        DType::type_num,
-        encoding,
-        use_dictionary,
-        descr_,
-        properties->memory_pool());
+        DType::type_num, encoding, use_dictionary, descr_, encoder_pool_.get());
 
     // We have to dynamic_cast as some compilers don't want to static_cast
     // through virtual inheritance.
@@ -1716,8 +1879,9 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
 
   void WriteDictionaryPage() override {
     DCHECK(current_dict_encoder_);
-    std::shared_ptr<ResizableBuffer> buffer = AllocateBuffer(
-        properties_->memory_pool(), current_dict_encoder_->dict_encoded_size());
+    const auto dict_encoded_size = current_dict_encoder_->dict_encoded_size();
+    std::shared_ptr<ResizableBuffer> buffer =
+        AllocateArenaOrFallbackBuffer(dict_encoded_size, dict_encoded_size);
     current_dict_encoder_->WriteDict(buffer->mutable_data());
 
     auto page = std::make_unique<DictionaryPage>(
@@ -1783,8 +1947,69 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
     return total_bytes;
   }
 
+  WriterMemoryStats memory_stats() const override {
+    WriterMemoryStats stats;
+    stats.encoderCurrentBytes = EncoderMemoryBytes();
+    stats.encoderEstimatedDataEncodedBytes = EncoderEstimatedDataEncodedSize();
+    if (current_dict_encoder_) {
+      stats.dictEncoderCurrentBytes = EncoderMemoryBytes();
+      stats.dictEncoderEstimatedDataEncodedBytes =
+          current_dict_encoder_->dict_encoded_size();
+    }
+    for (const auto& page : data_pages_) {
+      stats.bufferedPageAllocatedBytes += pageBufferAllocatedBytes(page);
+      stats.bufferedPageFallbackAllocatedBytes +=
+          pageBufferFallbackAllocatedBytes(page, page_buffer_arena_);
+    }
+    const auto* buffered_pager =
+        dynamic_cast<const BufferedPageWriter*>(pager_.get());
+    if (buffered_pager != nullptr) {
+      stats.bufferedPageWriterDataPageAllocatedBytes =
+          buffered_pager->buffered_data_page_allocated_bytes();
+      stats.bufferedPageWriterDataPageFallbackAllocatedBytes =
+          buffered_pager->buffered_data_page_fallback_allocated_bytes();
+      stats.bufferedPageWriterDataPageCount =
+          buffered_pager->buffered_data_page_count();
+      stats.bufferedPageWriterDictionaryPageAllocatedBytes =
+          buffered_pager->buffered_dictionary_page_allocated_bytes();
+      stats.bufferedPageWriterDictionaryPageFallbackAllocatedBytes =
+          buffered_pager->buffered_dictionary_page_fallback_allocated_bytes();
+      stats.bufferedPageWriterDictionaryPageCount =
+          buffered_pager->buffered_dictionary_page_count();
+      stats.bufferedPageAllocatedBytes +=
+          stats.bufferedPageWriterDataPageAllocatedBytes +
+          stats.bufferedPageWriterDictionaryPageAllocatedBytes;
+      stats.bufferedPageFallbackAllocatedBytes +=
+          stats.bufferedPageWriterDataPageFallbackAllocatedBytes +
+          stats.bufferedPageWriterDictionaryPageFallbackAllocatedBytes;
+    }
+    stats.columnScratchAllocatedBytes =
+        resizableBufferAllocatedBytes(bits_buffer_) +
+        resizableBufferAllocatedBytes(definition_levels_rle_) +
+        resizableBufferAllocatedBytes(repetition_levels_rle_) +
+        (uses_shared_uncompressed_data_
+             ? 0
+             : resizableBufferAllocatedBytes(uncompressed_data_)) +
+        (uses_shared_compressor_temp_buffer_
+             ? 0
+             : resizableBufferAllocatedBytes(compressor_temp_buffer_));
+    return stats;
+  }
+
   const WriterProperties* properties() override {
     return properties_;
+  }
+
+  int64_t EncoderMemoryBytes() const override {
+    return encoder_pool_->bytes_allocated();
+  }
+
+  int64_t EncoderPeakMemoryBytes() const override {
+    return encoder_pool_->max_memory();
+  }
+
+  int64_t EncoderEstimatedDataEncodedSize() const override {
+    return current_encoder_->EstimatedDataEncodedSize();
   }
 
   bool pages_change_on_record_boundaries() const {
@@ -1794,6 +2019,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
  private:
   using ValueEncoderType = typename EncodingTraits<DType>::Encoder;
   using TypedStats = TypedStatistics<DType>;
+  std::unique_ptr<::arrow::MemoryPool> encoder_pool_;
   std::unique_ptr<Encoder> current_encoder_;
   // Downcasted observers of current_encoder_.
   // The downcast is performed once as opposed to at every use since
@@ -1969,11 +2195,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       fallback_ = true;
       // Only PLAIN encoding is supported for fallback in V1
       current_encoder_ = MakeEncoder(
-          DType::type_num,
-          Encoding::PLAIN,
-          false,
-          descr_,
-          properties_->memory_pool());
+          DType::type_num, Encoding::PLAIN, false, descr_, encoder_pool_.get());
       current_value_encoder_ =
           dynamic_cast<ValueEncoderType*>(current_encoder_.get());
       current_dict_encoder_ = nullptr; // not using dict
@@ -2934,7 +3156,8 @@ Status TypedColumnWriterImpl<FLBAType>::WriteArrowDense(
 std::shared_ptr<ColumnWriter> ColumnWriter::Make(
     ColumnChunkMetaDataBuilder* metadata,
     std::unique_ptr<PageWriter> pager,
-    const WriterProperties* properties) {
+    const WriterProperties* properties,
+    std::shared_ptr<BufferedColumnWriterResources> buffered_resources) {
   const ColumnDescriptor* descr = metadata->descr();
   const bool use_dictionary = properties->dictionary_enabled(descr->path()) &&
       descr->physical_type() != Type::BOOLEAN;
@@ -2956,28 +3179,68 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
   switch (descr->physical_type()) {
     case Type::BOOLEAN:
       return std::make_shared<TypedColumnWriterImpl<BooleanType>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::INT32:
       return std::make_shared<TypedColumnWriterImpl<Int32Type>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::INT64:
       return std::make_shared<TypedColumnWriterImpl<Int64Type>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::INT96:
       return std::make_shared<TypedColumnWriterImpl<Int96Type>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::FLOAT:
       return std::make_shared<TypedColumnWriterImpl<FloatType>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::DOUBLE:
       return std::make_shared<TypedColumnWriterImpl<DoubleType>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::BYTE_ARRAY:
       return std::make_shared<TypedColumnWriterImpl<ByteArrayType>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     case Type::FIXED_LEN_BYTE_ARRAY:
       return std::make_shared<TypedColumnWriterImpl<FLBAType>>(
-          metadata, std::move(pager), use_dictionary, encoding, properties);
+          metadata,
+          std::move(pager),
+          use_dictionary,
+          encoding,
+          properties,
+          std::move(buffered_resources));
     default:
       ParquetException::NYI("type reader not implemented");
   }

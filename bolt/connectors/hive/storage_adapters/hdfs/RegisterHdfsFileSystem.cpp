@@ -43,7 +43,6 @@ namespace bytedance::bolt::filesystems {
 folly::ConcurrentHashMap<std::string, std::shared_ptr<HdfsFileSystem>>
     registeredFilesystems;
 
-namespace {
 std::function<std::shared_ptr<
     FileSystem>(std::shared_ptr<const config::ConfigBase>, std::string_view)>
 hdfsFileSystemGenerator() {
@@ -68,7 +67,6 @@ hdfsFileSystemGenerator() {
       };
   return filesystemGenerator;
 }
-} // namespace
 
 std::function<std::unique_ptr<bolt::dwio::common::FileSink>(
     const std::string&,
@@ -82,8 +80,11 @@ hdfsWriteFileSinkGenerator() {
               getHdfsPath(fileURI, HdfsFileSystem::kScheme);
           auto fileSystem =
               filesystems::getFileSystem(fileURI, options.connectorProperties);
+          const auto fileOptions = options.fileOptions == nullptr
+              ? FileOptions{}
+              : *options.fileOptions;
           return std::make_unique<dwio::common::WriteFileSink>(
-              fileSystem->openFileForWrite(pathSuffix),
+              fileSystem->openFileForWrite(pathSuffix, fileOptions),
               fileURI,
               options.metricLogger,
               options.stats);

@@ -234,7 +234,9 @@ roundUpAndDown(R& r, const A& a, const B& b, bool noRoundUp, uint8_t aRescale) {
   B unsignedDivisor(b);
   bool roundUpSign = ((noRoundUp && a > 0) || (!noRoundUp && a < 0));
   R quotient = unsignedDividendRescaled / unsignedDivisor;
-  R remainder = unsignedDividendRescaled % unsignedDivisor;
+  // Keep the remainder as wide as the divisor: long decimal inputs can have
+  // fractional remainders that overflow short decimal result storage.
+  B remainder = unsignedDividendRescaled % unsignedDivisor;
   if (roundUpSign && static_cast<const B>(remainder) > 0) {
     ++quotient;
   }

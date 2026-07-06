@@ -152,7 +152,7 @@ void registerArrayFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_except, prefix + "array_except");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_arrays_overlap, prefix + "arrays_overlap");
   registerBigintSliceFunction(prefix);
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_zip, prefix + "zip");
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_zip_presto, prefix + "zip");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_zip_with, prefix + "zip_with");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_position, prefix + "array_position");
 

@@ -86,6 +86,13 @@ TEST_F(DecimalRoundTest, round) {
       makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 3)),
       3,
       makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(4, 3)));
+  // The result can be obtained by Spark spark-shell CLI.
+  // scala> spark.sql("select round(cast(0.123 as decimal(3,3)), 30)")
+  // decimal(4,3)
+  testDecimalRound(
+      makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 3)),
+      30,
+      makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(4, 3)));
 
   // Round to 'scale - 1'.
   testDecimalRound(

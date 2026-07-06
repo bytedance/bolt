@@ -35,6 +35,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <optional>
+#include <type_traits>
 #include <vector>
 #include "bolt/common/memory/Memory.h"
 #include "bolt/dwio/common/IntDecoder.h"
@@ -47,6 +48,7 @@
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/DictionaryVector.h"
+#include "bolt/vector/SelectivityVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
 using namespace ::testing;
@@ -57,6 +59,30 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::memory;
 using folly::Random;
 namespace bytedance::bolt::dwrf {
+
+template <typename T>
+struct IsArrayType : std::false_type {};
+
+template <typename ELEMENT>
+struct IsArrayType<Array<ELEMENT>> : std::true_type {};
+
+template <typename T>
+struct IsMapType : std::false_type {};
+
+template <typename K, typename V>
+struct IsMapType<Map<K, V>> : std::true_type {};
+
+template <typename T>
+struct IsRowType : std::false_type {};
+
+template <typename... T>
+struct IsRowType<Row<T...>> : std::true_type {};
+
+template <typename T>
+struct IsComplexType
+    : std::bool_constant<
+          IsArrayType<T>::value || IsMapType<T>::value || IsRowType<T>::value> {
+};
 
 class MockStrideIndexProvider : public StrideIndexProvider {
  public:
@@ -868,10 +894,16 @@ void mapToStruct(
     // initialize children of batch size filled with nulls
     VectorMaker maker{&pool};
     for (auto column = 0; column < uniqueKeys.size(); column++) {
-      childrenVectors[column] =
-          maker.allNullFlatVector<TVALUE>(origBatch->size());
-      // only flat for scalar types
-      // create function to handle nested complex types
+      if constexpr (IsComplexType<TVALUE>::value) {
+        auto valueType = CppToType<TVALUE>::create();
+        auto child = BaseVector::create(valueType, origBatch->size(), &pool);
+        SelectivityVector nullRows(origBatch->size(), true);
+        child->addNulls(nullRows);
+        childrenVectors[column] = child;
+      } else {
+        childrenVectors[column] =
+            maker.allNullFlatVector<TVALUE>(origBatch->size());
+      }
     }
     batches[i] = maker.rowVector(childrenVectors);
     auto batchStruct = std::dynamic_pointer_cast<RowVector>(batches[i]);
@@ -883,26 +915,47 @@ void mapToStruct(
     auto flatKeys = std::dynamic_pointer_cast<FlatVector<TKEY>>(keys);
     ASSERT_TRUE(flatKeys);
     auto values = mapBatch->mapValues();
-    auto flatValues = std::dynamic_pointer_cast<FlatVector<TVALUE>>(values);
-    ASSERT_TRUE(flatValues);
+    if constexpr (IsComplexType<TVALUE>::value) {
+      auto offsets = mapBatch->offsets()->as<vector_size_t>();
+      auto sizes = mapBatch->sizes()->as<vector_size_t>();
 
-    auto offsets = mapBatch->offsets()->as<vector_size_t>();
-    auto sizes = mapBatch->sizes()->as<vector_size_t>();
+      // for each row in current batch
+      for (vector_size_t row = 0; row < mapBatch->size(); row++) {
+        // for each key in row (single map)
+        for (vector_size_t index = offsets[row],
+                           endOffset = offsets[row] + sizes[row];
+             index < endOffset;
+             index++) {
+          ASSERT_FALSE(flatKeys->isNullAt(index));
+          // set value in correct row
+          auto key = flatKeys->valueAt(index);
+          auto element = batchStruct->childAt(keyColIndex[key]);
+          ASSERT_TRUE(element);
+          element->copy(values.get(), row, index, 1);
+        }
+      }
+    } else {
+      auto flatValues = std::dynamic_pointer_cast<FlatVector<TVALUE>>(values);
+      ASSERT_TRUE(flatValues);
 
-    // for each row in current batch
-    for (vector_size_t row = 0; row < mapBatch->size(); row++) {
-      // for each key in row (single map)
-      for (vector_size_t index = offsets[row],
-                         endOffset = offsets[row] + sizes[row];
-           index < endOffset;
-           index++) {
-        ASSERT_FALSE(flatKeys->isNullAt(index));
-        // set value in correct row
-        auto key = flatKeys->valueAt(index);
-        auto element = std::dynamic_pointer_cast<FlatVector<TVALUE>>(
-            batchStruct->childAt(keyColIndex[key]));
-        ASSERT_TRUE(element);
-        element->set(row, flatValues->valueAt(index));
+      auto offsets = mapBatch->offsets()->as<vector_size_t>();
+      auto sizes = mapBatch->sizes()->as<vector_size_t>();
+
+      // for each row in current batch
+      for (vector_size_t row = 0; row < mapBatch->size(); row++) {
+        // for each key in row (single map)
+        for (vector_size_t index = offsets[row],
+                           endOffset = offsets[row] + sizes[row];
+             index < endOffset;
+             index++) {
+          ASSERT_FALSE(flatKeys->isNullAt(index));
+          // set value in correct row
+          auto key = flatKeys->valueAt(index);
+          auto element = std::dynamic_pointer_cast<FlatVector<TVALUE>>(
+              batchStruct->childAt(keyColIndex[key]));
+          ASSERT_TRUE(element);
+          element->set(row, flatValues->valueAt(index));
+        }
       }
     }
   }
@@ -4405,10 +4458,12 @@ struct DictColumnWriterTestCase {
     VectorPtr dictionaryVector;
 
     VectorPtr flatVector;
-    if (complexRowType == nullptr) {
-      flatVector = makeFlatVector(size, valueAt, isNullAt);
-    } else {
+    if constexpr (IsComplexType<T>::value) {
+      BOLT_CHECK_NOT_NULL(
+          complexRowType, "Expected complex row type for complex vectors");
       flatVector = makeComplexVectors(complexRowType, size, isNullAt);
+    } else {
+      flatVector = makeFlatVector(size, valueAt, isNullAt);
     }
 
     auto wrappedVector = BaseVector::wrapInDictionary(
@@ -4428,11 +4483,8 @@ struct DictColumnWriterTestCase {
     context.initBuffer();
 
     // complexVectorType will be nullptr if the vector is not complex.
-    bool isComplexType = std::dynamic_pointer_cast<const RowType>(type_) ||
-        std::dynamic_pointer_cast<const MapType>(type_) ||
-        std::dynamic_pointer_cast<const ArrayType>(type_);
-
-    auto complexVectorType = isComplexType ? rowType : nullptr;
+    auto complexVectorType =
+        IsComplexType<T>::value ? rowType : std::shared_ptr<const RowType>();
     auto batch =
         createDictionaryBatch(size_, valueAt, isNullAt, complexVectorType);
 

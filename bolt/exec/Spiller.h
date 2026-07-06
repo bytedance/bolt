@@ -391,7 +391,9 @@ class Spiller {
   // If 'startRowIter' is not null, we prepare runs starting from the offset
   // pointed by 'startRowIter'.
   // The function returns true if it is the last spill run.
-  bool fillSpillRuns(RowContainerIterator* startRowIter = nullptr);
+  bool fillSpillRuns(
+      RowContainerIterator* startRowIter = nullptr,
+      uint64_t maxRowsPerPartition = 0);
 
   // Prepares spill run of a single partition for the spillable data from the
   // rows.
@@ -463,7 +465,7 @@ class Spiller {
 
   bool supportSkewPartition_{false};
   bool rangePartitioningApplicable_{false};
-  int32_t skewedVictim_{-1};
+  std::optional<uint32_t> skewedVictim_;
   uint32_t maxRowsPerFile_{0};
   int64_t memoryUsedWhenTriggered_{0};
   int32_t skewFileSizeRatioThreshold_ = 10;

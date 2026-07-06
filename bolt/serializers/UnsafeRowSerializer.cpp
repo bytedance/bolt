@@ -30,7 +30,6 @@
 
 #include "bolt/serializers/UnsafeRowSerializer.h"
 #include <folly/lang/Bits.h>
-#include "bolt/row/UnsafeRowDeserializers.h"
 #include "bolt/row/UnsafeRowFast.h"
 #include "bolt/serializers/RowSerializer.h"
 
@@ -59,10 +58,10 @@ void UnsafeRowVectorSerde::deserialize(
     RowTypePtr type,
     RowVectorPtr* result,
     const Options* /* options */) {
-  std::vector<std::optional<std::string_view>> serializedRows;
+  std::vector<char*> serializedRows;
   std::vector<std::string> serializedBuffers;
 
-  RowDeserializer<std::optional<std::string_view>>::deserialize(
+  RowDeserializer<char*>::deserialize(
       source, serializedRows, serializedBuffers);
 
   if (serializedRows.empty()) {
@@ -71,8 +70,7 @@ void UnsafeRowVectorSerde::deserialize(
   }
 
   *result = std::dynamic_pointer_cast<RowVector>(
-      bolt::row::UnsafeRowDeserializer::deserialize(
-          serializedRows, type, pool));
+      bolt::row::UnsafeRowFast::deserialize(serializedRows, type, pool));
 }
 
 // static

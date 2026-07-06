@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
           {"min_by", nullptr},
           {"skewness", nullptr},
           {"kurtosis", nullptr},
+          {"mode", nullptr},
           {"collect_list", makeArrayVerifier()},
           {"collect_set", makeArrayVerifier()},
           // Nested nulls are handled as values in Spark. But nested nulls

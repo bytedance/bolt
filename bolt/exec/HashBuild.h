@@ -97,7 +97,7 @@ class HashBuild final : public Operator {
   }
 
   bool needsInput() const override {
-    return !noMoreInput_;
+    return !reuseHashTable_ && !noMoreInput_;
   }
 
   void noMoreInput() override;
@@ -139,6 +139,10 @@ class HashBuild final : public Operator {
   // Invoked to set up hash table to build.
   void setupTable();
 
+  // Reuse the pre-built hash table.
+  void setReusableHashTable(
+      std::shared_ptr<core::OpaqueHashTable> opaqueHashTable);
+
   // Invoked when operator has finished processing the build input and wait for
   // all the other drivers to finish the processing. The last driver that
   // reaches to the hash build barrier, is responsible to build the hash table
@@ -146,6 +150,15 @@ class HashBuild final : public Operator {
   // last driver will also restart 'spillGroup_' and add a new hash build
   // barrier for the next round of hash table build operation if it needs.
   bool finishHashBuild();
+
+  // Invoked before the final merged join table is built to estimate the extra
+  // reservation needed to admit the table into probe. Normally this returns an
+  // incremental reservation derived from the current HashBuild memory
+  // footprint and the preferred output batch budget. If the current HashBuild
+  // footprint has already exceeded the task pressure watermark, it returns that
+  // watermark directly to make ensureTableFits() apply stronger admission
+  // pressure before publishing the table to probe.
+  uint64_t probeAdmissionExtraReservationBytes(uint64_t numRows) const;
 
   // [Morsel-driven] same as HashProbe::skipProbeOnEmptyBuild
   bool skipProbeOnEmptyBuild() const {
@@ -210,9 +223,11 @@ class HashBuild final : public Operator {
   bool ensureInputFits(RowVectorPtr& input, SpilledRows spilledRows);
 
   // Invoked to ensure there is sufficient memory to build the join table with
-  // the specified 'numRows' if spilling is enabled. The function throws to fail
-  // the query if the memory reservation fails.
-  void ensureTableFits(uint64_t numRows);
+  // the specified 'numRows' if spilling is enabled. 'extraReservationBytes'
+  // captures any additional pre-probe headroom requirement. If the merged join
+  // table cannot satisfy the reservation or the pre-probe admission threshold,
+  // the function triggers an inline build spill before probe starts.
+  void ensureTableFits(uint64_t numRows, uint64_t extraReservationBytes);
 
   // Invoked to reserve memory for 'input' if disk spilling is enabled. The
   // function returns true on success, otherwise false.
@@ -454,6 +469,8 @@ class HashBuild final : public Operator {
   bool scatteredMode_{false}; // Use scattered (non-coalesced) mode
   int driverId_;
   std::unique_ptr<HybridContainer> hybridData_;
+
+  bool reuseHashTable_ = false;
 };
 
 inline std::ostream& operator<<(std::ostream& os, HashBuild::State state) {

@@ -464,7 +464,7 @@ void FlatVector<T>::copyRanges(
           ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
             auto bound =
                 flatSourceSize < sourceIndex ? 0 : flatSourceSize - sourceIndex;
-            auto boundedCount = std::min(count, bound);
+            size_t boundedCount = std::min(count, bound);
             if (Buffer::is_pod_like_v<T>) {
               simd::memcpy(
                   &rawValues_[targetIndex],

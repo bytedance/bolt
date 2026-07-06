@@ -30,6 +30,8 @@
 
 #include "bolt/serializers/PrestoSerializer.h"
 #include <folly/compression/Zstd.h>
+
+#include <limits>
 #include "bolt/common/base/Crc.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
@@ -2112,7 +2114,8 @@ int32_t rowsToRanges(
   ScratchPtr<vector_size_t, 64> innerRowsHolder(scratch);
   if (rawNulls) {
     ScratchPtr<uint64_t, 4> nullsHolder(scratch);
-    auto* nulls = nullsHolder.get(bits::nwords(rows.size()));
+    auto* nulls =
+        nullsHolder.get(bits::nwords(static_cast<uint64_t>(rows.size())));
     simd::gatherBits(rawNulls, rows, nulls);
     auto* mutableNonNullRows = nonNullHolder.get(numRows);
     auto* mutableInnerRows = innerRowsHolder.get(numRows);
@@ -2349,7 +2352,8 @@ void serializeFlatVector(
   }
 
   ScratchPtr<uint64_t, 4> nullsHolder(scratch);
-  uint64_t* nulls = nullsHolder.get(bits::nwords(rows.size()));
+  uint64_t* nulls =
+      nullsHolder.get(bits::nwords(static_cast<uint64_t>(rows.size())));
   simd::gatherBits(vector->rawNulls(), rows, nulls);
   if (std::is_same_v<T, Timestamp>) {
     appendTimestamps(
@@ -2391,12 +2395,14 @@ void serializeFlatVector<TypeKind::BOOLEAN>(
   int32_t numValueBits;
   if (!flatVector->mayHaveNulls()) {
     stream->appendNonNull(rows.size());
-    valueBits = bitsHolder.get(bits::nwords(rows.size()));
+    valueBits =
+        bitsHolder.get(bits::nwords(static_cast<uint64_t>(rows.size())));
     simd::gatherBits(
         reinterpret_cast<const uint64_t*>(rawValues), rows, valueBits);
     numValueBits = rows.size();
   } else {
-    uint64_t* nulls = bitsHolder.get(bits::nwords(rows.size()));
+    uint64_t* nulls =
+        bitsHolder.get(bits::nwords(static_cast<uint64_t>(rows.size())));
     simd::gatherBits(vector->rawNulls(), rows, nulls);
     ScratchPtr<vector_size_t, 64> nonNullsHolder(scratch);
     auto* nonNulls = nonNullsHolder.get(rows.size());
@@ -2531,7 +2537,8 @@ void serializeRowVector(
   auto innerRows = rows.data();
   auto numInnerRows = rows.size();
   if (auto rawNulls = vector->rawNulls()) {
-    auto nulls = nullsHolder.get(bits::nwords(rows.size()));
+    auto nulls =
+        nullsHolder.get(bits::nwords(static_cast<uint64_t>(rows.size())));
     simd::gatherBits(rawNulls, rows, nulls);
     auto* mutableInnerRows = innerRowsHolder.get(rows.size());
     numInnerRows =
@@ -2971,7 +2978,7 @@ void estimateFlatSerializedSize(
     auto rawNulls = vector->rawNulls();
     ScratchPtr<uint64_t, 4> nullsHolder(scratch);
     ScratchPtr<int32_t, 64> nonNullsHolder(scratch);
-    auto nulls = nullsHolder.get(bits::nwords(numRows));
+    auto nulls = nullsHolder.get(bits::nwords(static_cast<uint64_t>(numRows)));
     simd::gatherBits(rawNulls, rows, nulls);
     auto nonNulls = nonNullsHolder.get(numRows);
     const auto numNonNull = simd::indicesOfSetBits(nulls, 0, numRows, nonNulls);
@@ -2999,7 +3006,7 @@ void estimateFlatSerializedSizeVarcharOrVarbinary(
   } else {
     ScratchPtr<uint64_t, 4> nullsHolder(scratch);
     ScratchPtr<int32_t, 64> nonNullsHolder(scratch);
-    auto nulls = nullsHolder.get(bits::nwords(numRows));
+    auto nulls = nullsHolder.get(bits::nwords(static_cast<uint64_t>(numRows)));
     simd::gatherBits(rawNulls, rows, nulls);
     auto* nonNulls = nonNullsHolder.get(numRows);
     auto numNonNull = simd::indicesOfSetBits(nulls, 0, numRows, nonNulls);
@@ -3156,7 +3163,8 @@ void estimateSerializedSizeInt(
       const auto numRows = rows.size();
       int32_t numInner = numRows;
       if (vector->mayHaveNulls()) {
-        auto nulls = nullsHolder.get(bits::nwords(numRows));
+        auto nulls =
+            nullsHolder.get(bits::nwords(static_cast<uint64_t>(numRows)));
         simd::gatherBits(vector->rawNulls(), rows, nulls);
         auto mutableInnerRows = innerRowsHolder.get(numRows);
         numInner = simd::indicesOfSetBits(nulls, 0, numRows, mutableInnerRows);
@@ -3249,7 +3257,7 @@ void flushUncompressed(
     int32_t numRows,
     OutputStream* out,
     PrestoOutputStreamListener* listener) {
-  int32_t offset = out->tellp();
+  const auto offset = out->tellp();
 
   char codecMask = 0;
 #ifdef BOLT_ENABLE_CRC
@@ -3291,13 +3299,23 @@ void flushUncompressed(
 #endif
 
   // Fill in uncompressedSizeInBytes & sizeInBytes
-  int32_t size = (int32_t)out->tellp() - offset;
+  const auto endOffset = out->tellp();
+  const auto size = static_cast<int64_t>(endOffset - offset);
   BOLT_CHECK(
-      size > 0,
-      "uncompressed size {} should be positive, numRows {}",
+      size > kHeaderSize,
+      "serialized page size {} should exceed header size {}, numRows {}",
       size,
+      kHeaderSize,
       numRows);
-  int32_t uncompressedSize = size - kHeaderSize;
+
+  const int64_t uncompressedSize64 = size - kHeaderSize;
+  BOLT_CHECK(
+      uncompressedSize64 <= std::numeric_limits<int32_t>::max(),
+      "uncompressed size {} exceeds INT32_MAX, numRows {}",
+      uncompressedSize64,
+      numRows);
+  const auto uncompressedSize = static_cast<int32_t>(uncompressedSize64);
+
 #ifdef BOLT_ENABLE_CRC
   int64_t crc = 0;
   if (listener) {
@@ -3305,13 +3323,13 @@ void flushUncompressed(
   }
 #endif
 
-  out->seekp(offset + kSizeInBytesOffset);
+  out->seekp(offset + static_cast<std::streampos>(kSizeInBytesOffset));
   writeInt32(out, uncompressedSize);
   writeInt32(out, uncompressedSize);
 #ifdef BOLT_ENABLE_CRC
   writeInt64(out, crc);
 #endif
-  out->seekp(offset + size);
+  out->seekp(endOffset);
 }
 
 void flushSerialization(
@@ -3342,7 +3360,7 @@ void flushSerialization(
   if (listener) {
     listener->pause();
   }
-  const int32_t endSize = output->tellp();
+  const auto endSize = output->tellp();
   // Fill in crc
   int64_t crc = 0;
   if (listener) {
@@ -3382,12 +3400,18 @@ void flushCompressed(
     stream->flush(&out);
   }
 
-  const int32_t uncompressedSize = out.tellp();
+  const auto uncompressedSize64 = out.tellp();
   BOLT_CHECK(
-      uncompressedSize > 0,
+      uncompressedSize64 > 0,
       "uncompressedSize {} should be positive, numRows {}",
-      uncompressedSize,
+      uncompressedSize64,
       numRows);
+  BOLT_CHECK(
+      uncompressedSize64 <= std::numeric_limits<int32_t>::max(),
+      "uncompressedSize {} exceeds INT32_MAX, numRows {}",
+      uncompressedSize64,
+      numRows);
+  const auto uncompressedSize = static_cast<int32_t>(uncompressedSize64);
   auto iobuf = out.getIOBuf();
 
   // compress

@@ -139,9 +139,12 @@ struct UnixTimestampFunctionBase {
 
   // calculate china/shanghai unix-timestamp
   Timestamp calculateCnUnixTimestamp(Timestamp& timestamp) {
+    constexpr int64_t kLastDstEndUtc = 694195200; // 1992-01-01 local
+    constexpr int64_t kMidCenturyStartUtc = -631180800; // 1950-01-01 local
+    constexpr int64_t kMidCenturyEndUtc = 504892800; // 1986-01-01 local
     // between 1986 and 1991, china/shanghai use dst time
-    if (timestamp.getSeconds() > 504892800 &&
-        timestamp.getSeconds() < 694195200) {
+    if (timestamp.getSeconds() > kMidCenturyEndUtc &&
+        timestamp.getSeconds() < kLastDstEndUtc) {
       if (sessionTzID_.has_value()) {
         timestamp.toGMT(sessionTzID_.value());
         return timestamp;
@@ -149,6 +152,42 @@ struct UnixTimestampFunctionBase {
         timestamp.toGMT(*sessionTimeZone_);
         return timestamp;
       }
+    }
+    // STDOFF fast paths for pure-CST windows (no DST, no LMT):
+    //   post-1991   (>= 1992-01-01 local)
+    //   mid-century (1950-01-01 .. 1985-12-31 local)
+    // Other eras fall through to tzdata + correct_nonexistent_time.
+    const int64_t utcSeconds =
+        timestamp.getSeconds() - sessionTzOffsetInSeconds_;
+    if (utcSeconds >= kLastDstEndUtc) {
+      return Timestamp(utcSeconds, timestamp.getNanos());
+    }
+    if (utcSeconds >= kMidCenturyStartUtc && utcSeconds < kMidCenturyEndUtc) {
+      return Timestamp(utcSeconds, timestamp.getNanos());
+    }
+
+    // Route through tzdata for every Shanghai regime (LMT, CST, and DST in
+    // 1919/1940-1949/1986-1991). Forward-shift gap local times to match
+    // Spark/JVM's ZonedDateTime.ofLocal semantics.
+    if (sessionTimeZone_ != nullptr) {
+      const auto adjusted = sessionTimeZone_->correct_nonexistent_time(
+          std::chrono::seconds(timestamp.getSeconds()));
+      timestamp = Timestamp(adjusted.count(), timestamp.getNanos());
+      timestamp.toGMT(*sessionTimeZone_);
+      return timestamp;
+    }
+    if (sessionTzID_.has_value()) {
+      const auto* zone = tz::locateZone(
+          static_cast<int16_t>(sessionTzID_.value()), /*failOnError=*/false);
+      if (zone != nullptr) {
+        const auto adjusted = zone->correct_nonexistent_time(
+            std::chrono::seconds(timestamp.getSeconds()));
+        timestamp = Timestamp(adjusted.count(), timestamp.getNanos());
+        timestamp.toGMT(*zone);
+      } else {
+        timestamp.toGMT(sessionTzID_.value());
+      }
+      return timestamp;
     }
 
     if (timestamp.getSeconds() - sessionTzOffsetInSeconds_ < kShseparator) {
@@ -170,12 +209,11 @@ struct UnixTimestampFunctionBase {
       // Use parsed timezone
       dtr.timestamp.toGMT(dtr.timezoneId);
       result = dtr.timestamp.getSeconds();
+    } else if (this->isShanghai) {
+      return calculateCnUnixTimestamp(dtr.timestamp).getSeconds();
     } else if (sessionTimeZone_ != nullptr) {
       dtr.timestamp.toGMT(*sessionTimeZone_);
       result = dtr.timestamp.getSeconds();
-    } else if (this->isShanghai) {
-      return calculateCnUnixTimestamp(dtr.timestamp).getSeconds();
-
     } else {
       result = dtr.timestamp.getSeconds() - sessionTzOffsetInSeconds_;
     }
@@ -190,10 +228,10 @@ struct UnixTimestampFunctionBase {
     if (dtr.timezoneId != -1) {
       // Use parsed timezone
       dtr.timestamp.toGMT(dtr.timezoneId);
-    } else if (sessionTimeZone_ != nullptr) {
-      dtr.timestamp.toGMT(*sessionTimeZone_);
     } else if (this->isShanghai) {
       return calculateCnUnixTimestamp(dtr.timestamp);
+    } else if (sessionTimeZone_ != nullptr) {
+      dtr.timestamp.toGMT(*sessionTimeZone_);
     } else {
       return Timestamp(
           dtr.timestamp.getSeconds() - sessionTzOffsetInSeconds_,
@@ -616,6 +654,9 @@ struct ToUtcTimestampFunction {
     auto fromTimezone = timezone_
         ? timezone_
         : tz::locateZone(std::string_view(timezone.data(), timezone.size()));
+    const auto adjusted = fromTimezone->correct_nonexistent_time(
+        std::chrono::seconds(result.getSeconds()));
+    result = Timestamp(adjusted.count(), result.getNanos());
     result.toGMT(*fromTimezone);
   }
 

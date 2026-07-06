@@ -120,6 +120,8 @@ class BoltColumnarBatchDeserializer {
  private:
   bytedance::bolt::RowVectorPtr nextFromRows();
   FLATTEN bool isCompositeRowVectorLayout(int64_t& bytes);
+  // merge the saved payloads into a single InMemoryPayload and clear saved.
+  std::unique_ptr<InMemoryPayload> drainSaved();
 
   std::shared_ptr<arrow::io::BufferedInputStream> in_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -135,7 +137,18 @@ class BoltColumnarBatchDeserializer {
   uint64_t& deserializeTime_;
   uint64_t& decompressTime_;
 
-  std::unique_ptr<InMemoryPayload> merged_{nullptr};
+  struct SavedPayload {
+    uint64_t size{0};
+    uint64_t rowCount{0};
+    std::vector<std::unique_ptr<InMemoryPayload>> payloads;
+
+    void save(std::unique_ptr<InMemoryPayload> payload) {
+      size += payload->getBufferSize();
+      rowCount += payload->numRows();
+      payloads.emplace_back(std::move(payload));
+    }
+  } savedPayloads_;
+
   bool reachEos_{false};
 
   // for row format shuffle read

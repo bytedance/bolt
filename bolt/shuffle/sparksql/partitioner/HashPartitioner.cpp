@@ -42,19 +42,9 @@ arrow::Status HashPartitioner::compute(
 
   for (auto i = 0; i < numRows; ++i) {
     auto pid = pidArr[i] % numPartitions_;
-#if defined(__x86_64__)
-    // force to generate ASM
-    __asm__(
-        "lea (%[num_partitions],%[pid],1),%[tmp]\n"
-        "test %[pid],%[pid]\n"
-        "cmovs %[tmp],%[pid]\n"
-        : [pid] "+r"(pid)
-        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
-#else
     if (pid < 0) {
       pid += numPartitions_;
     }
-#endif
     row2partition[i] = pid;
   }
 
@@ -76,19 +66,9 @@ arrow::Status HashPartitioner::precompute(
 
   for (auto i = 0; i < numRows; ++i) {
     auto pid = pidArr[i] % numPartitions_;
-#if defined(__x86_64__)
-    // force to generate ASM
-    __asm__(
-        "lea (%[num_partitions],%[pid],1),%[tmp]\n"
-        "test %[pid],%[pid]\n"
-        "cmovs %[tmp],%[pid]\n"
-        : [pid] "+r"(pid)
-        : [num_partitions] "r"(numPartitions_), [tmp] "r"(0));
-#else
     if (pid < 0) {
       pid += numPartitions_;
     }
-#endif
     pidArr[i] = pid;
     partition2RowCount[pid]++;
   }

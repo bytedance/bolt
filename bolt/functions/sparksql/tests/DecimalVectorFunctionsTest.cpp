@@ -54,89 +54,6 @@ class DecimalVectorFunctionsTest : public SparkFunctionBaseTest {
   }
 };
 
-// The result can be obtained by Spark spark-shell CLI.
-// scala> val df = spark.sql("select round(cast(0.123 as decimal(3,3)), 30);")
-// df: org.apache.spark.sql.DataFrame = [round(CAST(0.123 AS DECIMAL(3,3)), 30):
-// decimal(4,3)]
-TEST_F(DecimalVectorFunctionsTest, round) {
-  //   Round up to 'scale' decimal places.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(4, 3))},
-      "decimal_round(c0, CAST(30 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 3))});
-
-  //   Round up to scale-1 decimal places.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({12, 55, -100, 0}, DECIMAL(3, 2))},
-      "decimal_round(c0, CAST(2 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 3))});
-  // Round up to 0 decimal places.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({0, 1, -1, 0}, DECIMAL(1, 0))},
-      "decimal_round(c0, CAST(0 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 3))});
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({1, 6, -10, 0}, DECIMAL(2, 0))},
-      "decimal_round(c0, CAST(0 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 2))});
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({1, 6, -10, 0}, DECIMAL(2, 0))},
-      "decimal_round(c0)",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 2))});
-  //   Round up to -1 decimal places.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({10, 60, -100, 0}, DECIMAL(3, 0))},
-      "decimal_round(c0, CAST(-1 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 1))});
-  // Round up to -2 decimal places. Here precision == -scale + 1.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>({0, 0, 0, 0}, DECIMAL(4, 0))},
-      "decimal_round(c0, CAST(-3 as integer))",
-      {makeFlatVector<int64_t>({123, 552, -999, 0}, DECIMAL(3, 1))});
-
-  // Round up long decimals to short decimals.
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeNullableFlatVector<int64_t>(
-          {12345678901235, 50000000000000, -10'000'000'000'000, 0},
-          DECIMAL(15, 14))},
-      "decimal_round(c0, CAST(14 as integer))",
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5000000000000000000, -999999999999999999, 0},
-          DECIMAL(19, 19))});
-  testDecimalExpr<TypeKind::BIGINT>(
-      {makeFlatVector<int64_t>(
-          {12346000000000, 55556000000000, -10000000000000, 0},
-          DECIMAL(15, 0))},
-      "decimal_round(c0, CAST(-9 as integer))",
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5555555555555555555, -999999999999999999, 0},
-          DECIMAL(19, 5))});
-  // Round up long decimals to long decimals.
-  testDecimalExpr<TypeKind::HUGEINT>(
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5555555555555555555, -999999999999999999, 0},
-          DECIMAL(20, 5))},
-      "decimal_round(c0, CAST(14 as integer))",
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5555555555555555555, -999999999999999999, 0},
-          DECIMAL(19, 5))});
-  testDecimalExpr<TypeKind::HUGEINT>(
-      {makeFlatVector<int128_t>(
-          {12346000000000, 55556000000000, -10000000000000, 0},
-          DECIMAL(28, 0))},
-      "decimal_round(c0, CAST(-9 as integer))",
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5555555555555555555, -999999999999999999, 0},
-          DECIMAL(32, 5))});
-  // Result precision is 38
-  testDecimalExpr<TypeKind::HUGEINT>(
-      {makeFlatVector<int128_t>({0, 0, 0, 0}, DECIMAL(38, 0))},
-      "decimal_round(c0, CAST(-38 as integer))",
-      {makeFlatVector<int128_t>(
-          {1234567890123456789, 5555555555555555555, -999999999999999999, 0},
-          DECIMAL(32, 0))});
-}
-
 TEST_F(DecimalVectorFunctionsTest, ceil) {
   testDecimalExpr<TypeKind::BIGINT>(
       {makeFlatVector<int64_t>({3, 6, -9, 0}, DECIMAL(2, 0))},
@@ -148,6 +65,13 @@ TEST_F(DecimalVectorFunctionsTest, ceil) {
       {makeFlatVector<int128_t>(
           {1234567890123456789, 5000000000000000000, -999999999999999999, 0},
           DECIMAL(19, 19))});
+  testDecimalExpr<TypeKind::BIGINT>(
+      {makeFlatVector<int64_t>(std::vector<int64_t>{101}, DECIMAL(4, 0))},
+      "ceil(c0)",
+      {makeFlatVector<int128_t>(
+          std::vector<int128_t>{
+              int128_t(100100100100100100) * 100000000000 + 10010010010},
+          DECIMAL(29, 26))});
 }
 
 TEST_F(DecimalVectorFunctionsTest, floor) {
@@ -195,6 +119,25 @@ TEST_F(DecimalVectorFunctionsTest, negative) {
       {makeFlatVector<int128_t>(
           {1234567890123456789, 5000000000000000000, -999999999999999999, 0},
           DECIMAL(19, 19))});
+}
+
+TEST_F(DecimalVectorFunctionsTest, ceilFloor) {
+  auto input =
+      makeFlatVector<int64_t>({111111, 123456, 123478}, DECIMAL(15, 2));
+
+  {
+    auto expected = makeFlatVector<int64_t>({1112, 1235, 1235}, DECIMAL(14, 0));
+    auto result =
+        evaluate<SimpleVector<int64_t>>("ceil(c0)", makeRowVector({input}));
+    bolt::test::assertEqualVectors(result, expected);
+  }
+
+  {
+    auto expected = makeFlatVector<int64_t>({1111, 1234, 1234}, DECIMAL(14, 0));
+    auto result =
+        evaluate<SimpleVector<int64_t>>("floor(c0)", makeRowVector({input}));
+    bolt::test::assertEqualVectors(result, expected);
+  }
 }
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

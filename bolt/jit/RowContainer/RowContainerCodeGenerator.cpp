@@ -137,14 +137,19 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
           break;
       }
     }
-    if (cacheTypes->size() > 0 && module->getUserData() == nullptr) {
-      module->setUserData(static_cast<void*>(cacheTypes.release()));
-      module->appendCleanCallback([mod = module.get()] {
-        auto* cacheTypes = static_cast<std::vector<bytedance::bolt::TypePtr>*>(
-            mod->getUserData());
-        delete cacheTypes;
-        mod->setUserData(nullptr);
-      });
+
+    if (cacheTypes->size() > 0) {
+      auto* userData = static_cast<void*>(cacheTypes.get());
+      if (module->compareExchangeUserData(nullptr, userData)) {
+        cacheTypes.release();
+        module->appendCleanCallback([mod = module.get()] {
+          auto* raw = mod->getUserData();
+          mod->compareExchangeUserData(raw, nullptr);
+          auto* cacheTypes =
+              static_cast<std::vector<bytedance::bolt::TypePtr>*>(raw);
+          delete cacheTypes;
+        });
+      }
     }
   }
   return module;
@@ -152,9 +157,21 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
 
 /// util functions
 std::string RowContainerCodeGenerator::GetCmpFuncName() {
-  std::string fn = isEqualOp() ? "jit_rr_eq"
-      : isCmp()                ? "jit_rr_cmp"
-                               : "jit_rr_less";
+  std::string fn = "jit_rr_";
+  switch (cmpType) {
+    case CmpType::SORT_LESS:
+      fn.append("sort_less");
+      break;
+    case CmpType::EQUAL:
+      fn.append("eq");
+      break;
+    case CmpType::CMP:
+      fn.append("cmp");
+      break;
+    case CmpType::CMP_SPILL:
+      fn.append("cmp_spill");
+      break;
+  }
   fn.append(hasNullKeys ? "N" : "");
   for (auto i = 0; i < keysTypes.size(); ++i) {
     fn.append(keysTypes[i]->jitName());

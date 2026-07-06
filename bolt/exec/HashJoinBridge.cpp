@@ -53,7 +53,7 @@ void HashJoinBridge::addBuilder() {
 }
 
 bool HashJoinBridge::setHashTable(
-    std::unique_ptr<BaseHashTable> table,
+    std::shared_ptr<BaseHashTable> table,
     SpillPartitionSet spillPartitionSet,
     bool hasNullKeys,
     SpillOffsetToBitsSet offsetToJoinBits) {

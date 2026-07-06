@@ -47,5 +47,7 @@ void registerRegexpFunctions(const std::string& prefix) {
       prefix + "icu_regexp_like", icuRegexLikeSignatures(), makeICURegexLike);
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_regexp_split, prefix + "split");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      udf_string_split_sql, prefix + "string_split_sql");
 }
 } // namespace bytedance::bolt::functions::sparksql

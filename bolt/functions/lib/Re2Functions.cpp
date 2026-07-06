@@ -33,6 +33,7 @@
 #include "folly/container/EvictingCacheMap.h"
 
 #include <re2/re2.h>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -105,6 +106,21 @@ bool re2FullMatch(StringView str, const RE2& re) {
 
 bool re2PartialMatch(StringView str, const RE2& re) {
   return RE2::PartialMatch(toStringPiece(str), re);
+}
+
+bool handleInvalidRegex(
+    const RE2& re,
+    InvalidRegexPolicy invalidRegexPolicy,
+    std::function<void()> returnFalse) {
+  if (LIKELY(re.ok())) {
+    return true;
+  }
+  if (invalidRegexPolicy == InvalidRegexPolicy::kReturnFalse) {
+    returnFalse();
+    return false;
+  }
+  BOLT_USER_FAIL("invalid regular expression: {}", re.error());
+  return false;
 }
 
 bool re2Extract(
@@ -197,8 +213,11 @@ std::string likePatternToRe2(
 template <bool (*Fn)(StringView, const RE2&)>
 class Re2MatchConstantPattern final : public VectorFunction {
  public:
-  explicit Re2MatchConstantPattern(StringView pattern)
-      : re_(toStringPiece(pattern), RE2::Quiet) {}
+  explicit Re2MatchConstantPattern(
+      StringView pattern,
+      InvalidRegexPolicy invalidRegexPolicy)
+      : re_(toStringPiece(pattern), RE2::Quiet),
+        invalidRegexPolicy_(invalidRegexPolicy) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -210,7 +229,17 @@ class Re2MatchConstantPattern final : public VectorFunction {
     FlatVector<bool>& result = ensureWritableBool(rows, context, resultRef);
     exec::LocalDecodedVector toSearch(context, *args[0], rows);
     try {
-      checkForBadPattern(re_);
+      if (!handleInvalidRegex(re_, invalidRegexPolicy_, [&]() {
+            context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
+              if (UNLIKELY(toSearch->isNullAt(i))) {
+                result.setNull(i, true);
+              } else {
+                result.set(i, false);
+              }
+            });
+          })) {
+        return;
+      }
     } catch (const std::exception& e) {
       context.setErrors(rows, std::current_exception());
       return;
@@ -223,12 +252,15 @@ class Re2MatchConstantPattern final : public VectorFunction {
 
  private:
   RE2 re_;
+  const InvalidRegexPolicy invalidRegexPolicy_;
 };
 
 template <bool (*Fn)(StringView, const RE2&)>
 class Re2Match final : public VectorFunction {
  public:
-  Re2Match() : compiledRegularExpressions_(kMaxCompiledRegexes) {}
+  explicit Re2Match(InvalidRegexPolicy invalidRegexPolicy)
+      : compiledRegularExpressions_(kMaxCompiledRegexes),
+        invalidRegexPolicy_(invalidRegexPolicy) {}
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
@@ -238,8 +270,8 @@ class Re2Match final : public VectorFunction {
     BOLT_CHECK_EQ(args.size(), 2);
 
     if (auto pattern = getIfConstant<StringView>(*args[1])) {
-      Re2MatchConstantPattern<Fn>(*pattern).apply(
-          rows, args, outputType, context, resultRef);
+      Re2MatchConstantPattern<Fn>(*pattern, invalidRegexPolicy_)
+          .apply(rows, args, outputType, context, resultRef);
       return;
     }
     // General case.
@@ -260,7 +292,8 @@ class Re2Match final : public VectorFunction {
           } else {
             auto regex =
                 std::make_shared<RE2>(toStringPiece(pattern), RE2::Quiet);
-            if (UNLIKELY(!regex->ok())) {
+            if (UNLIKELY(!regex->ok()) &&
+                invalidRegexPolicy_ == InvalidRegexPolicy::kThrow) {
               BOLT_USER_FAIL("invalid regular expression: {}", regex->error());
             }
             auto regexResult =
@@ -270,6 +303,13 @@ class Re2Match final : public VectorFunction {
           }
         }
         BOLT_CHECK_NOT_NULL(impl);
+        if (UNLIKELY(!impl->ok())) {
+          if (invalidRegexPolicy_ == InvalidRegexPolicy::kReturnFalse) {
+            result.set(row, false);
+            return;
+          }
+          BOLT_USER_FAIL("invalid regular expression: {}", impl->error());
+        }
         result.set(row, Fn(toSearch->valueAt<StringView>(row), *impl));
       }
     });
@@ -280,6 +320,7 @@ class Re2Match final : public VectorFunction {
   mutable folly::EvictingCacheMap<std::string, std::shared_ptr<RE2>>
       compiledRegularExpressions_;
   mutable std::mutex mutex_;
+  const InvalidRegexPolicy invalidRegexPolicy_;
 }; // namespace
 
 void checkForBadGroupId(int64_t groupId, const RE2& re) {
@@ -950,7 +991,8 @@ class Re2ExtractAll final : public VectorFunction {
 template <bool (*Fn)(StringView, const RE2&)>
 std::shared_ptr<VectorFunction> makeRe2MatchImpl(
     const std::string& name,
-    const std::vector<VectorFunctionArg>& inputArgs) {
+    const std::vector<VectorFunctionArg>& inputArgs,
+    InvalidRegexPolicy invalidRegexPolicy) {
   if (inputArgs.size() != 2 || !inputArgs[0].type->isVarchar() ||
       !inputArgs[1].type->isVarchar()) {
     BOLT_UNSUPPORTED(
@@ -963,11 +1005,10 @@ std::shared_ptr<VectorFunction> makeRe2MatchImpl(
 
   if (constantPattern != nullptr && !constantPattern->isNullAt(0)) {
     return std::make_shared<Re2MatchConstantPattern<Fn>>(
-        constantPattern->as<ConstantVector<StringView>>()->valueAt(0));
+        constantPattern->as<ConstantVector<StringView>>()->valueAt(0),
+        invalidRegexPolicy);
   }
-  static std::shared_ptr<Re2Match<Fn>> kMatchExpr =
-      std::make_shared<Re2Match<Fn>>();
-  return kMatchExpr;
+  return std::make_shared<Re2Match<Fn>>(invalidRegexPolicy);
 }
 
 } // namespace
@@ -976,7 +1017,8 @@ std::shared_ptr<VectorFunction> makeRe2Match(
     const std::string& name,
     const std::vector<VectorFunctionArg>& inputArgs,
     const core::QueryConfig& /*config*/) {
-  return makeRe2MatchImpl<re2FullMatch>(name, inputArgs);
+  return makeRe2MatchImpl<re2FullMatch>(
+      name, inputArgs, InvalidRegexPolicy::kThrow);
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2MatchSignatures() {
@@ -991,8 +1033,17 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> re2MatchSignatures() {
 std::shared_ptr<VectorFunction> makeRe2Search(
     const std::string& name,
     const std::vector<VectorFunctionArg>& inputArgs,
-    const core::QueryConfig& /*config*/) {
-  return makeRe2MatchImpl<re2PartialMatch>(name, inputArgs);
+    const core::QueryConfig& config) {
+  return makeRe2SearchWithPolicy(
+      name, inputArgs, config, InvalidRegexPolicy::kThrow);
+}
+
+std::shared_ptr<VectorFunction> makeRe2SearchWithPolicy(
+    const std::string& name,
+    const std::vector<VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& /*config*/,
+    InvalidRegexPolicy invalidRegexPolicy) {
+  return makeRe2MatchImpl<re2PartialMatch>(name, inputArgs, invalidRegexPolicy);
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2SearchSignatures() {

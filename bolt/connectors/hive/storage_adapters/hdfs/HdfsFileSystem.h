@@ -61,6 +61,13 @@ struct HdfsServiceEndpoint {
  */
 class HdfsFileSystem : public FileSystem {
  public:
+  struct HdfsFileInfo {
+    bool isDir{false};
+    uint64_t size{0};
+    // Milliseconds since unix epoch.
+    int64_t modificationTimeMs{0};
+  };
+
   explicit HdfsFileSystem(
       const std::shared_ptr<const config::ConfigBase>& config,
       const HdfsServiceEndpoint& endpoint);
@@ -93,6 +100,11 @@ class HdfsFileSystem : public FileSystem {
   void mkdir(std::string_view path) override;
 
   void rmdir(std::string_view path) override;
+
+  // Returns metadata for the given HDFS path
+  //
+  // Throws a bolt exception on error.
+  HdfsFileInfo stat(std::string_view path) const;
 
   static bool isHdfsFile(std::string_view filename);
 

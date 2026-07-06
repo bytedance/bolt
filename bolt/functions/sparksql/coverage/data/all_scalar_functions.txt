@@ -274,6 +274,7 @@ soundex
 space
 spark_partition_id
 split
+string_split_sql
 sqrt
 stack
 std

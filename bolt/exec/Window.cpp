@@ -769,13 +769,7 @@ void Window::computePeerAndFrameBuffers(
   }
 
   std::tie(peerStartRow_, peerEndRow_) = currentPartition_->computePeerBuffers(
-      startRow,
-      endRow,
-      peerStartRow_,
-      peerEndRow_,
-      rawPeerStarts,
-      rawPeerEnds,
-      enableJit);
+      startRow, endRow, peerStartRow_, peerEndRow_, rawPeerStarts, rawPeerEnds);
   for (auto i = 0; i < numFuncs; i++) {
     const auto& windowFrame = windowFrames_[i];
     // Default all rows to have validFrames. The invalidity of frames is only

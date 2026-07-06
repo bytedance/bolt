@@ -55,7 +55,7 @@ class HashJoinBridge : public JoinBridge {
   /// after HashProbe operators process 'table', otherwise false. This only
   /// applies if the disk spilling is enabled.
   bool setHashTable(
-      std::unique_ptr<BaseHashTable> table,
+      std::shared_ptr<BaseHashTable> table,
       SpillPartitionSet spillPartitionSet,
       bool hasNullKeys,
       SpillOffsetToBitsSet offsetToJoinBits = nullptr);

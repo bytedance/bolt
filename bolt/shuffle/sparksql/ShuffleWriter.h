@@ -141,15 +141,19 @@ class ShuffleWriter {
     return metrics_;
   }
 
+  virtual std::string toString() const = 0;
+
  protected:
   ShuffleWriter(
       int32_t numPartitions,
       std::unique_ptr<PartitionWriter> partitionWriter,
       ShuffleWriterOptions options,
-      arrow::MemoryPool* pool)
+      arrow::MemoryPool* pool,
+      std::shared_ptr<arrow::MemoryPool> spillPool = nullptr)
       : numPartitions_(numPartitions),
         options_(std::move(options)),
         pool_(pool),
+        spillPool_(std::move(spillPool)),
         partitionBufferPool_(std::make_unique<ShuffleMemoryPool>(pool)),
         partitionWriter_(std::move(partitionWriter)) {}
 
@@ -160,6 +164,8 @@ class ShuffleWriter {
   ShuffleWriterOptions options_;
 
   arrow::MemoryPool* pool_;
+  // Must outlive partition buffers and writers that may allocate from it.
+  std::shared_ptr<arrow::MemoryPool> spillPool_;
   // Memory Pool used to track memory usage of partition buffers.
   // The actual allocation is delegated to options_.memoryPool.
   std::unique_ptr<ShuffleMemoryPool> partitionBufferPool_;

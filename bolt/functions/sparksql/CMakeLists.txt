@@ -35,6 +35,7 @@ bolt_add_library(
   DecimalArithmetic.cpp
   DecimalCompare.cpp
   DecimalVectorFunctions.cpp
+  FormatNumber.cpp
   Hash.cpp
   ICURegexFunctions.cpp
   In.cpp
@@ -44,11 +45,14 @@ bolt_add_library(
   LeastGreatest.cpp
   MakeTimestamp.cpp
   Map.cpp
+  MapFromArrays.cpp
   RegexFunctions.cpp
   # Register.cpp
   # RegisterArithmetic.cpp
   # RegisterCompare.cpp
+  SequenceFunction.cpp
   SplitFunctions.cpp
+  StringSplitSQL.cpp
   String.cpp
   UnscaledValueFunction.cpp
   VariantEncoding.cpp

@@ -203,6 +203,10 @@ class InMemoryPayload final : public Payload {
   arrow::Result<std::shared_ptr<arrow::Buffer>> readBufferAt(
       uint32_t index) override;
 
+  int64_t bufferSizeAt(uint32_t index) const {
+    return buffers_[index] ? buffers_[index]->size() : 0;
+  }
+
   arrow::Result<std::unique_ptr<BlockPayload>> toBlockPayload(
       Payload::Type payloadType,
       arrow::MemoryPool* pool,

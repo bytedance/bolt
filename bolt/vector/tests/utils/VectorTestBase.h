@@ -33,6 +33,7 @@
 #include <folly/Executor.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include <initializer_list>
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -216,6 +217,13 @@ class VectorTestBase {
   template <typename T>
   FlatVectorPtr<EvalType<T>> makeFlatVector(
       const std::vector<T>& data,
+      const TypePtr& type = CppToType<T>::create()) {
+    return vectorMaker_.flatVector<T>(data, type);
+  }
+
+  template <typename T>
+  FlatVectorPtr<EvalType<T>> makeFlatVector(
+      std::initializer_list<T> data,
       const TypePtr& type = CppToType<T>::create()) {
     return vectorMaker_.flatVector<T>(data, type);
   }

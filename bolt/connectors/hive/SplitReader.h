@@ -126,17 +126,18 @@ class SplitReader : public HiveSplitReaderBase {
 
   virtual uint64_t next(int64_t size, VectorPtr& output);
 
-  void resetFilterCaches();
+  void resetFilterCaches() override;
 
-  bool emptySplit() const;
+  bool emptySplit() const override;
 
-  void resetSplit();
+  void resetSplit() override;
 
-  int64_t estimatedRowSize() const;
+  int64_t estimatedRowSize() const override;
 
-  void updateRuntimeStats(dwio::common::RuntimeStatistics& stats) const;
+  void updateRuntimeStats(
+      dwio::common::RuntimeStatistics& stats) const override;
 
-  bool allPrefetchIssued() const;
+  bool allPrefetchIssued() const override;
 
   std::string toString() const;
 

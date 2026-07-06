@@ -982,7 +982,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonPartitionColumn) {
       std::vector<VectorPtr>{
           vectorMaker_.flatVector<int32_t>({101}),
           vectorMaker_.constantRow(
-              partitionFieldType, variant::row({103, 101}), 1),
+              partitionFieldType, variant::row({101, 103}), 1),
       });
 
   assertOutput(
@@ -1008,7 +1008,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonPartitionColumn) {
       1,
       std::vector<VectorPtr>{
           vectorMaker_.constantRow(
-              partitionFieldType, variant::row({103, 101}), 1),
+              partitionFieldType, variant::row({101, 103}), 1),
           vectorMaker_.flatVector<int32_t>({101}),
       });
   assertOutput(
@@ -1037,6 +1037,53 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonPartitionColumn) {
           vectorMaker_.flatVector<int32_t>({101, 102})});
   assertOutput(
       readType, fileRowType, tempDir, tableParameters, assignments, expected);
+}
+
+TEST_F(
+    PaimonReaderMetadataFieldTest,
+    testPaimonPartitionColumnPreservesDeclaredSchemaOrder) {
+  auto tempDir = exec::test::TempDirectoryPath::create();
+  auto rowType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
+  auto fileRowType = createPaimonFile(
+      vectorMaker_,
+      leafPool_.get(),
+      tempDir->getPath(),
+      executor_,
+      {0},
+      rowType,
+      {vectorMaker_.flatVector<int32_t>({101}),
+       vectorMaker_.flatVector<int32_t>({103})},
+      {4},
+      {int8_t(PaimonRowKind::INSERT)});
+
+  std::unordered_map<std::string, std::string> tableParameters{
+      {connector::paimon::kMergeEngine,
+       connector::paimon::kDeduplicateMergeEngine},
+      {connector::paimon::kPrimaryKey, "a"},
+      {connector::paimon::kIgnoreDelete, "true"}};
+
+  const auto partitionFieldType = ROW({{"a", INTEGER()}, {"b", INTEGER()}});
+  const auto readType = ROW({{kColumnNamePartition, partitionFieldType}});
+  const auto assignments =
+      getIdentityAssignment(readType, {{"a", INTEGER()}, {"b", INTEGER()}});
+  const auto expected = std::make_shared<RowVector>(
+      leafPool_.get(),
+      readType,
+      BufferPtr(nullptr),
+      1,
+      std::vector<VectorPtr>{vectorMaker_.constantRow(
+          partitionFieldType, variant::row({101, 103}), 1)});
+
+  assertOutput(
+      readType,
+      fileRowType,
+      tempDir,
+      tableParameters,
+      assignments,
+      expected,
+      std::nullopt,
+      std::unordered_map<std::string, std::optional<std::string>>{
+          {"a", "101"}, {"b", "103"}});
 }
 
 TEST_F(PaimonReaderMetadataFieldTest, testPaimonRowIdColumnWithoutRowIdInFile) {

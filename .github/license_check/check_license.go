@@ -99,5 +99,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	for file := range result.Failure {
+		header.Fix(result.Failure[file], licenseHeaderConfig, &result)
+	}
+
+	if result.HasFailure() {
+		fmt.Printf("[ERROR] the following files don't have a valid license header:\n")
+		for _, f := range result.Failure {
+			fmt.Printf("  %s\n", f)
+		}
+		os.Exit(1)
+	}
+
 	fmt.Printf("[INFO] License check passed successfully\n")
+	os.Exit(0)
 }

@@ -60,7 +60,7 @@ class ParquetRowReader : public dwio::common::RowReader {
   ParquetRowReader(
       const std::shared_ptr<ReaderBase>& readerBase,
       const dwio::common::RowReaderOptions& options);
-  ~ParquetRowReader() override = default;
+  ~ParquetRowReader() override;
 
   int64_t nextRowNumber() override;
 
