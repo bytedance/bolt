@@ -31,6 +31,7 @@ env:
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
   CI_NUM_THREADS: "16"
+  CONAN_VERBOSITY: "-vtrace"
   IN_CI: '1'
 
 jobs:
