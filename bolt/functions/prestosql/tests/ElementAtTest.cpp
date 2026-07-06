@@ -1075,6 +1075,97 @@ TEST_F(ElementAtTest, testCachingOptimzation) {
   }
 }
 
+TEST_F(ElementAtTest, varcharMapCacheAcrossApplies) {
+  constexpr int32_t kLargeMapSize = 128;
+
+  std::vector<std::string> storage;
+  storage.reserve(kLargeMapSize * 2);
+
+  std::vector<std::pair<StringView, std::optional<StringView>>> entries;
+  entries.reserve(kLargeMapSize);
+  for (int32_t i = 0; i < kLargeMapSize; ++i) {
+    storage.push_back(fmt::format("cache_key_{:03d}_long_enough", i));
+    storage.push_back(fmt::format("cache_value_{:03d}_long_enough", i));
+    entries.push_back(
+        {StringView(storage[storage.size() - 2]),
+         StringView(storage[storage.size() - 1])});
+  }
+
+  auto inputMap = makeMapVector<StringView, StringView>({entries});
+  auto lookupKeys = makeFlatVector<StringView>({StringView(storage[0])});
+  std::vector<VectorPtr> args = {inputMap, lookupKeys};
+
+  exec::ExprSet exprSet({}, &execCtx_);
+  auto inputs = makeRowVector({});
+  exec::EvalCtx evalCtx(&execCtx_, &exprSet, inputs.get());
+  SelectivityVector rows(1);
+
+  bytedance::bolt::functions::MapSubscript mapSubscriptWithCaching(true);
+  auto expected = makeFlatVector<StringView>({StringView(storage[1])});
+
+  auto result1 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  EXPECT_EQ(nullptr, mapSubscriptWithCaching.lookupTable());
+  test::assertEqualVectors(expected, result1);
+
+  auto result2 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  auto cachedLookupTable = mapSubscriptWithCaching.lookupTable();
+  EXPECT_NE(nullptr, cachedLookupTable);
+  test::assertEqualVectors(expected, result2);
+
+  auto result3 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  EXPECT_EQ(cachedLookupTable, mapSubscriptWithCaching.lookupTable());
+  test::assertEqualVectors(expected, result3);
+}
+
+TEST_F(ElementAtTest, bigintMapCacheWithReusedMapVector) {
+  constexpr int32_t kLargeMapSize = 128;
+  constexpr int64_t kNeedle = 424242;
+  constexpr int64_t kExpectedValue = 9001;
+
+  auto makeEntries = [&](int64_t keyBase, bool includeNeedle) {
+    std::vector<std::pair<int64_t, std::optional<int64_t>>> entries;
+    entries.reserve(kLargeMapSize);
+    for (int32_t i = 0; i < kLargeMapSize; ++i) {
+      entries.push_back({keyBase + i, keyBase * 10 + i});
+    }
+    if (includeNeedle) {
+      entries[kLargeMapSize / 2] = {kNeedle, kExpectedValue};
+    }
+    return entries;
+  };
+
+  auto reusedMap = makeMapVector<int64_t, int64_t>({makeEntries(1000, false)});
+  reusedMap->setMayChangeContentUnderSameAddress(true);
+  auto lookupKeys = makeFlatVector<int64_t>({kNeedle});
+  std::vector<VectorPtr> args = {reusedMap, lookupKeys};
+
+  exec::ExprSet exprSet({}, &execCtx_);
+  auto inputs = makeRowVector({});
+  exec::EvalCtx evalCtx(&execCtx_, &exprSet, inputs.get());
+  SelectivityVector rows(1);
+
+  bytedance::bolt::functions::MapSubscript mapSubscriptWithCaching(true);
+
+  auto oldResult1 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  auto oldResult2 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  EXPECT_EQ(nullptr, mapSubscriptWithCaching.lookupTable());
+  auto expectedOld = makeNullableFlatVector<int64_t>({std::nullopt});
+  test::assertEqualVectors(expectedOld, oldResult1);
+  test::assertEqualVectors(expectedOld, oldResult2);
+
+  auto replacementMap =
+      makeMapVector<int64_t, int64_t>({makeEntries(2000, true)});
+  reusedMap->setOffsetAndSize(
+      0, replacementMap->offsetAt(0), replacementMap->sizeAt(0));
+  reusedMap->setKeysAndValues(
+      replacementMap->mapKeys(), replacementMap->mapValues());
+
+  auto expectedNew = makeFlatVector<int64_t>({kExpectedValue});
+  auto cachedResult = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  EXPECT_EQ(nullptr, mapSubscriptWithCaching.lookupTable());
+  test::assertEqualVectors(expectedNew, cachedResult);
+}
+
 TEST_F(ElementAtTest, varcharMapCacheWithReusedMapVector) {
   constexpr int32_t kLargeMapSize = 128;
   const std::string kNeedle = "needle_key_long_enough";
@@ -1112,6 +1203,7 @@ TEST_F(ElementAtTest, varcharMapCacheWithReusedMapVector) {
   auto newEntries = makeEntries("new", true, newStorage);
 
   auto reusedMap = makeMapVector<StringView, StringView>({oldEntries});
+  reusedMap->setMayChangeContentUnderSameAddress(true);
   auto lookupKeys = makeFlatVector<StringView>({StringView(kNeedle)});
   std::vector<VectorPtr> args = {reusedMap, lookupKeys};
 
@@ -1125,6 +1217,7 @@ TEST_F(ElementAtTest, varcharMapCacheWithReusedMapVector) {
   auto oldResult1 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
   auto oldResult2 = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
   auto expectedOld = makeNullableFlatVector<StringView>({std::nullopt});
+  EXPECT_EQ(nullptr, mapSubscriptWithCaching.lookupTable());
   test::assertEqualVectors(expectedOld, oldResult1);
   test::assertEqualVectors(expectedOld, oldResult2);
 
@@ -1142,5 +1235,6 @@ TEST_F(ElementAtTest, varcharMapCacheWithReusedMapVector) {
   test::assertEqualVectors(expectedNew, uncachedResult);
 
   auto cachedResult = mapSubscriptWithCaching.applyMap(rows, args, evalCtx);
+  EXPECT_EQ(nullptr, mapSubscriptWithCaching.lookupTable());
   test::assertEqualVectors(expectedNew, cachedResult);
 }

@@ -62,7 +62,7 @@ struct SimpleType<TypeKind::VARCHAR> {
 /// map value vector. This allows us to ensure that element_at is zero-copy.
 template <TypeKind kind>
 VectorPtr applyMapTyped(
-    bool triggeCaching,
+    bool useLookupTable,
     std::shared_ptr<LookupTableBase>& cachedLookupTablePtr,
     const SelectivityVector& rows,
     const VectorPtr& mapArg,
@@ -70,13 +70,6 @@ VectorPtr applyMapTyped(
     exec::EvalCtx& context) {
   static constexpr vector_size_t kMinCachedMapSize = 100;
   using TKey = typename TypeTraits<kind>::NativeType;
-
-  if (triggeCaching) {
-    if (!cachedLookupTablePtr) {
-      cachedLookupTablePtr =
-          std::make_shared<LookupTable<kind>>(*context.pool());
-    }
-  }
 
   auto* pool = context.pool();
   BufferPtr indices = allocateIndices(rows.end(), pool);
@@ -114,7 +107,11 @@ VectorPtr applyMapTyped(
     size_t offsetEnd = offsetStart + size;
     bool found = false;
 
-    if (triggeCaching && size >= kMinCachedMapSize) {
+    if (useLookupTable && size >= kMinCachedMapSize) {
+      if (!cachedLookupTablePtr) {
+        cachedLookupTablePtr =
+            std::make_shared<LookupTable<kind>>(*context.pool());
+      }
       BOLT_DCHECK_NOT_NULL(cachedLookupTablePtr);
       auto& typedLookupTable = cachedLookupTablePtr->typedTable<kind>();
       // Create map for mapIndex if not created.
@@ -327,13 +324,28 @@ VectorPtr MapSubscript::applyMap(
   BOLT_CHECK(mapArg->type()->childAt(0)->equivalent(*indexArg->type()));
 
   if (indexArg->type()->isPrimitiveType()) {
-    bool triggerCaching = shouldTriggerCaching(mapArg);
+    auto* baseVector = mapArg->wrappedVector();
+    BOLT_DCHECK_NOT_NULL(baseVector);
+    std::shared_ptr<LookupTableBase> localLookupTable;
+    auto* lookupTable = &lookupTable_;
+    bool useLookupTable = false;
+    if (!baseVector->mayChangeContentUnderSameAddress()) {
+      useLookupTable = shouldUsePersistentLookupCache(mapArg);
+    } else {
+      useLookupTable = supportsLookupTableForKeyType(mapArg);
+      if (useLookupTable) {
+        clearPersistentLookupCacheState();
+      } else {
+        disablePersistentLookupCache();
+      }
+      lookupTable = &localLookupTable;
+    }
 
     return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
         applyMapTyped,
         indexArg->typeKind(),
-        triggerCaching,
-        const_cast<std::shared_ptr<LookupTableBase>&>(lookupTable_),
+        useLookupTable,
+        *lookupTable,
         rows,
         mapArg,
         indexArg,
