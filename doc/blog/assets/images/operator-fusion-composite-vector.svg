@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" font-family="'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+  <rect width="900" height="360" fill="#fff"/>
+  <style>.title{font-size:18px;font-weight:600;fill:#334155}.label{font-size:13px;font-weight:600;fill:#1f2937}.small{font-size:11px;fill:#64748b}.box{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}.key{fill:#eef4ff;stroke:#2563eb;stroke-width:1.2}.payload{fill:#fff7ed;stroke:#ea580c;stroke-width:1.2}.note{font-size:12px;fill:#475569}</style>
+  <text x="32" y="42" class="title">CompositeRowVector layout</text>
+  <text x="32" y="66" class="small">Grouping keys remain column-accessible; accumulator state is kept as row payload.</text>
+  <rect x="70" y="105" width="760" height="190" rx="12" class="box"/>
+  <text x="450" y="130" class="label" text-anchor="middle">CompositeRowVector</text>
+  <g transform="translate(110,158)">
+    <rect class="key" x="0" y="0" width="150" height="82" rx="8"/><text class="label" x="75" y="32" text-anchor="middle">Key column 1</text><text class="small" x="75" y="54" text-anchor="middle">partition / hash</text>
+    <rect class="key" x="175" y="0" width="150" height="82" rx="8"/><text class="label" x="250" y="32" text-anchor="middle">Key column 2</text><text class="small" x="250" y="54" text-anchor="middle">projectable</text>
+    <rect class="payload" x="365" y="0" width="340" height="82" rx="8"/><text class="label" x="535" y="30" text-anchor="middle">Accumulator row payload</text><text class="small" x="535" y="54" text-anchor="middle">serialized state from RowContainer</text>
+  </g>
+  <line x1="450" y1="247" x2="450" y2="275" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="450" y="320" class="note" text-anchor="middle">Project and partitioning read key columns; row-based shuffle writer copies the payload without rebuilding it.</text>
+</svg>
