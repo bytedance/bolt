@@ -360,7 +360,7 @@ class BoltConan(ConanFile):
             self.options[llvm_core].with_z3 = False
             self.options[llvm_core].with_zstd = False
             self.options[llvm_core].with_ffi = False
-            self.options[llvm_core].with_clang = False
+            self.options[llvm_core].with_clang = True
             if llvm_targets is None:
                 raise RuntimeError("Unsupported target for JIT feature")
             self.options[llvm_core].targets = llvm_targets
@@ -466,14 +466,14 @@ class BoltConan(ConanFile):
             tc.cache_variables["ENABLE_BOLT_JIT"] = "ON"
             tc.preprocessor_definitions["ENABLE_BOLT_JIT"] = 1
 
-            if self.options[llvm_core].with_clang:
-                llvm_dep = self.dependencies["llvm-core"]
-                clang_path = os.path.join(str(llvm_dep.package_folder), "bin", "clang")
-                if not os.path.exists(clang_path):
-                    raise Exception(
-                        f"clang not found at {clang_path}. "
-                        "Ensure llvm-core is built with -o llvm-core/*:with_clang=True"
-                    )
+            # Verify clang exists in llvm-core package.
+            llvm_dep = self.dependencies["llvm-core"]
+            clang_path = os.path.join(str(llvm_dep.package_folder), "bin", "clang")
+            if not os.path.exists(clang_path):
+                raise Exception(
+                    f"clang not found at {clang_path}. "
+                    "Ensure llvm-core is built with -o llvm-core/*:with_clang=True"
+                )
 
             # TODO: Refactor the IR codegen of expression evaluation
             # Disable it right now
