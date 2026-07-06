@@ -79,8 +79,9 @@ repos:
         files: ^doc/blog/_posts/.*\.md$
       - id: markdownlint-blog
         name: Lint and fix blog Markdown
-        entry: npx markdownlint-cli2@0.17.2 --fix "#doc/blog/vendor/**"
-        language: system
+        entry: markdownlint-cli2 --fix "#doc/blog/vendor/**"
+        language: node
+        additional_dependencies: [markdownlint-cli2@0.17.2]
         files: ^doc/blog/.*\.md$
         exclude: ^doc/blog/vendor/
       - id: license-header-check

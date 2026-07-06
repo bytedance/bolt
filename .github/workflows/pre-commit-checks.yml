@@ -60,6 +60,11 @@ jobs:
       - name: Generate Compile Database
         run: |
           make compile_db_all
+      - name: Clear npm cache
+        run: |
+          rm -rf "${{ runner.temp }}/npm-cache"
       - name: Run pre-commit hooks
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-cache
         run: |
           pre-commit run --all-files

@@ -38,8 +38,11 @@ jobs:
       - name: Check blog post front matter
         run: python3 scripts/normalize_blog_posts.py --check
 
+      - name: Clear npm cache
+        run: rm -rf "${{ runner.temp }}/npm-cache"
+
       - name: Lint Markdown
-        run: npx markdownlint-cli2@0.17.2 "doc/blog/**/*.md" "#doc/blog/vendor/**"
+        run: npx --cache "${{ runner.temp }}/npm-cache" markdownlint-cli2@0.17.2 "doc/blog/**/*.md" "#doc/blog/vendor/**"
 
       - name: Build Blog
         working-directory: ./doc/blog
