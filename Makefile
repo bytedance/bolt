@@ -70,9 +70,6 @@ CONAN_OPTIONS ?=
 # for passing skip_test
 CONAN_CONFIG ?=
 
-# for passing conan verbosity, e.g. -vtrace when diagnosing CI cache locks
-CONAN_VERBOSITY ?=
-
 # for passing high priority options.
 # options in CONAN_OVERRIDE will override the options in CONAN_OPTIONS
 CONAN_OVERRIDE ?=
@@ -192,9 +189,9 @@ conan_install:
 	mv new_conan.options conan.options && \
 	echo ${BUILD_TYPE} > ../.build_type && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan graph info ${CONAN_VERBOSITY} ../.. $${ALL_CONAN_OPTIONS} --format=html > bolt.conan.graph.html  && \
+	conan graph info ../.. $${ALL_CONAN_OPTIONS} --format=html > bolt.conan.graph.html  && \
 	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
-	conan install ${CONAN_VERBOSITY} ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	conan install ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
@@ -207,7 +204,7 @@ conan_build: conan_install
 	NUM_THREADS=$(NUM_THREADS) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
-	conan build ${CONAN_VERBOSITY} ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
@@ -220,7 +217,7 @@ _compile_db: conan_install
 	NUM_THREADS=$(NUM_THREADS) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_CONAN_CONFIGURE_ONLY=1 \
-	conan build ${CONAN_VERBOSITY} ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
 	   -s "&:build_type=${BUILD_TYPE}" \
 	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
@@ -241,7 +238,7 @@ compile_db_all:
 export_base:
 	cd _build/${BUILD_TYPE} && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan export-pkg ${CONAN_VERBOSITY} --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	conan export-pkg --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	 $${ALL_CONAN_OPTIONS} \
 	 -s llvm-core/*:build_type=Release \
 	 -s "&:build_type=${BUILD_TYPE}" \
