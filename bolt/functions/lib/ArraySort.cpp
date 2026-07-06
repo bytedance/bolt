@@ -133,9 +133,10 @@ inline void swapWithNull(
     vector_size_t index,
     vector_size_t nullIndex) {
   // Values are already present in vector stringBuffers. Don't create additional
-  // copy.
+  // copy. Moving StringViews within the same vector keeps StringViewStats
+  // valid because total bytes and max length do not change.
   if constexpr (std::is_same_v<T, StringView>) {
-    vector->setNoCopy(nullIndex, vector->valueAt(index));
+    vector->setNoCopyUnsafe(nullIndex, vector->valueAt(index));
   } else {
     vector->set(nullIndex, vector->valueAt(index));
   }

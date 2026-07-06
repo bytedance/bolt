@@ -432,6 +432,35 @@ TEST_F(ArraySortTest, dictionaryEncodedElements) {
           {{4, std::nullopt}, {1, std::nullopt, std::nullopt}}));
 }
 
+TEST_F(ArraySortTest, varcharElementsWithStringStats) {
+  auto inputPool = rootPool_->addLeafChild("array-sort-varchar-input");
+  VectorMaker inputVectorMaker(inputPool.get());
+  auto elementVector = inputVectorMaker.flatVectorNullable<std::string>({
+      "banana",
+      std::nullopt,
+      "apple",
+      "kiwi fruit with enough characters",
+      "grape",
+  });
+
+  auto arrayVector = makeArrayVector({0}, elementVector);
+  auto result = evaluate("array_sort(c0)", makeRowVector({arrayVector}));
+
+  auto expected = makeNullableArrayVector<std::string>({
+      {"apple",
+       "banana",
+       "grape",
+       "kiwi fruit with enough characters",
+       std::nullopt},
+  });
+  assertEqualVectors(expected, result);
+
+  auto resultElements = result->asUnchecked<ArrayVector>()
+                            ->elements()
+                            ->asFlatVector<StringView>();
+  ASSERT_TRUE(resultElements->stringStats().has_value());
+}
+
 // Test arrays with dictionary-encoded elements of complex type.
 TEST_P(ArraySortTest, encodedElements) {
   // Base vector: [0, 10, 20, 30, 40, 50].
