@@ -195,3 +195,86 @@
     });
   })();
 </script>
+
+<script>
+  // Resizable sidebar: drag the right edge to change the sidebar width.
+  (function () {
+    var KEY = 'bolt-sidebar-width';
+    var MIN = 180;   // px
+    var MAX = 520;   // px
+    var root = document.documentElement;
+
+    function clamp(px) { return Math.max(MIN, Math.min(MAX, px)); }
+    function applyWidth(px) {
+      root.style.setProperty('--bolt-sidebar-width', px + 'px');
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      var sideBar = document.querySelector('.side-bar');
+      if (!sideBar) { return; }
+
+      // Only enable on desktop layout where the sidebar is fixed on the left.
+      if (!window.matchMedia('(min-width: 50rem)').matches) { return; }
+
+      document.body.classList.add('bolt-resizable-ready');
+
+      // Restore saved width (fallback to current rendered width).
+      var saved = null;
+      try { saved = window.localStorage.getItem(KEY); } catch (e) {}
+      if (saved && !isNaN(parseInt(saved, 10))) {
+        applyWidth(clamp(parseInt(saved, 10)));
+      } else {
+        applyWidth(clamp(sideBar.getBoundingClientRect().width));
+      }
+
+      var resizer = document.createElement('div');
+      resizer.className = 'bolt-sidebar-resizer';
+      resizer.setAttribute('role', 'separator');
+      resizer.setAttribute('aria-orientation', 'vertical');
+      resizer.setAttribute('aria-label', 'Resize sidebar');
+      document.body.appendChild(resizer);
+
+      var dragging = false;
+
+      function onMove(clientX) {
+        var px = clamp(clientX);
+        applyWidth(px);
+      }
+      function onMouseMove(e) { if (dragging) { onMove(e.clientX); } }
+      function onTouchMove(e) {
+        if (dragging && e.touches && e.touches[0]) { onMove(e.touches[0].clientX); }
+      }
+      function stop() {
+        if (!dragging) { return; }
+        dragging = false;
+        resizer.classList.remove('bolt-dragging');
+        document.body.classList.remove('bolt-resizing');
+        var cur = parseInt(getComputedStyle(root).getPropertyValue('--bolt-sidebar-width'), 10);
+        if (!isNaN(cur)) {
+          try { window.localStorage.setItem(KEY, String(cur)); } catch (e) {}
+        }
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', stop);
+        document.removeEventListener('touchmove', onTouchMove);
+        document.removeEventListener('touchend', stop);
+      }
+      function start() {
+        dragging = true;
+        resizer.classList.add('bolt-dragging');
+        document.body.classList.add('bolt-resizing');
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', stop);
+        document.addEventListener('touchmove', onTouchMove, { passive: false });
+        document.addEventListener('touchend', stop);
+      }
+
+      resizer.addEventListener('mousedown', function (e) { e.preventDefault(); start(); });
+      resizer.addEventListener('touchstart', function (e) { e.preventDefault(); start(); }, { passive: false });
+      // Double-click resets to the default width.
+      resizer.addEventListener('dblclick', function () {
+        applyWidth(264);
+        try { window.localStorage.setItem(KEY, '264'); } catch (e) {}
+      });
+    });
+  })();
+</script>

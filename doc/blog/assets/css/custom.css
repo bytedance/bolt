@@ -453,3 +453,163 @@ body.bolt-dark .nav-list-link.active::before { background: #58a6ff; }
     max-width: 64rem;
   }
 }
+
+/* ============================================================
+   Dark mode: brighten sidebar text for readability (high priority).
+   Overrides theme defaults that dim nav/footer/search text.
+   ============================================================ */
+body.bolt-dark .side-bar { background: #0d1117; }
+body.bolt-dark .site-nav .nav-list .nav-list-item .nav-list-link {
+  color: #e6edf3 !important;
+}
+body.bolt-dark .site-nav .nav-list .nav-list-item .nav-list-link:hover {
+  background: #21262d !important;
+  color: #ffffff !important;
+}
+body.bolt-dark .site-nav .nav-list .nav-list-item .nav-list-link.active {
+  color: #79c0ff !important;
+  background: #161b22 !important;
+}
+/* Blog sub-post links a touch softer but still clearly readable */
+body.bolt-dark .blog-post-links .nav-list-link { color: #c9d1d9 !important; }
+/* Sidebar footer ("This site uses Just the Docs...") */
+body.bolt-dark .site-footer,
+body.bolt-dark .site-footer a { color: #8b949e !important; }
+/* Search input + placeholder */
+body.bolt-dark .search-input { color: #e6edf3 !important; }
+body.bolt-dark .search-input::placeholder { color: #9da7b3 !important; }
+/* Nav icons (e.g. external link/github chevrons) inherit brighter color */
+body.bolt-dark .site-nav svg { fill: #e6edf3 !important; }
+
+/* ============================================================
+   Dark mode: code blocks (fix white strips on dark pages).
+   Give fenced code a dark surface + light syntax tokens.
+   ============================================================ */
+body.bolt-dark div.highlighter-rouge,
+body.bolt-dark div.listingblock > div.content,
+body.bolt-dark figure.highlight {
+  background-color: #161b22 !important;
+}
+body.bolt-dark div.highlighter-rouge div.highlight {
+  border-color: #30363d !important;
+  background-color: #161b22 !important;
+}
+body.bolt-dark div.highlighter-rouge pre.highlight,
+body.bolt-dark div.highlighter-rouge code,
+body.bolt-dark figure.highlight pre,
+body.bolt-dark pre.highlight {
+  background-color: #161b22 !important;
+  color: #e6edf3 !important;
+}
+/* Copy button glyph visible on dark */
+body.bolt-dark div.highlighter-rouge > button,
+body.bolt-dark figure.highlight > button { color: #8b949e !important; }
+body.bolt-dark div.highlighter-rouge > button svg,
+body.bolt-dark figure.highlight > button svg { fill: #8b949e !important; }
+/* Syntax token colors (GitHub dark palette) */
+body.bolt-dark .highlight .c,
+body.bolt-dark .highlight .c1,
+body.bolt-dark .highlight .cm,
+body.bolt-dark .highlight .cs { color: #8b949e !important; }
+body.bolt-dark .highlight .k,
+body.bolt-dark .highlight .kd,
+body.bolt-dark .highlight .kn,
+body.bolt-dark .highlight .kt { color: #ff7b72 !important; }
+body.bolt-dark .highlight .s,
+body.bolt-dark .highlight .s1,
+body.bolt-dark .highlight .s2,
+body.bolt-dark .highlight .sb { color: #a5d6ff !important; }
+body.bolt-dark .highlight .n,
+body.bolt-dark .highlight .nv,
+body.bolt-dark .highlight .nn { color: #e6edf3 !important; }
+body.bolt-dark .highlight .nf,
+body.bolt-dark .highlight .nt { color: #d2a8ff !important; }
+body.bolt-dark .highlight .mi,
+body.bolt-dark .highlight .mf,
+body.bolt-dark .highlight .m { color: #79c0ff !important; }
+body.bolt-dark .highlight .o,
+body.bolt-dark .highlight .p { color: #e6edf3 !important; }
+
+/* ============================================================
+   Dark mode: tables + standalone inline code white backgrounds.
+   ============================================================ */
+body.bolt-dark .main-content th,
+body.bolt-dark .main-content td {
+  background-color: #0d1117 !important;
+  color: #e6edf3 !important;
+  border-bottom: 1px solid #30363d !important;
+  border-left: 1px solid #30363d !important;
+}
+body.bolt-dark .main-content thead th {
+  background-color: #161b22 !important;
+  border-bottom: 1px solid #30363d !important;
+}
+/* Inline code chips outside pre/figure */
+body.bolt-dark .main-content :not(pre, figure) > code {
+  background-color: #161b22 !important;
+  border: 1px solid #30363d !important;
+  color: #79c0ff !important;
+}
+
+/* ============================================================
+   Resizable sidebar: drag the right edge to change width.
+   A CSS var drives both the sidebar width and the main margin.
+   Desktop only (>= 50rem); mobile keeps the theme's full-width nav.
+   ============================================================ */
+:root { --bolt-sidebar-width: 16.5rem; }
+@media (min-width: 50rem) {
+  body.bolt-resizable-ready .side-bar {
+    width: var(--bolt-sidebar-width) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+  body.bolt-resizable-ready .side-bar + .main {
+    margin-left: var(--bolt-sidebar-width) !important;
+    width: calc(100vw - var(--bolt-sidebar-width)) !important;
+    max-width: calc(100vw - var(--bolt-sidebar-width)) !important;
+    box-sizing: border-box;
+  }
+  /* Content shrinks with the main area and stays centered (cap 72rem) */
+  body.bolt-resizable-ready .main-content,
+  body.bolt-resizable-ready .main-content-wrap { min-width: 0 !important; }
+
+  /* Sidebar inner panels fill the (resized) sidebar width and left-align,
+     so a wider sidebar actually gives nav text more room on one line
+     instead of just adding empty space on the left. */
+  body.bolt-resizable-ready .side-bar { align-items: stretch !important; }
+  body.bolt-resizable-ready .site-nav,
+  body.bolt-resizable-ready .site-header,
+  body.bolt-resizable-ready .site-footer {
+    width: 100% !important;
+  }
+  /* Let long nav labels use the extra width on a single line */
+  body.bolt-resizable-ready .site-nav .nav-list-link { white-space: nowrap; }
+  /* Drag handle sits on the sidebar's right edge */
+  .bolt-sidebar-resizer {
+    position: fixed;
+    top: 0;
+    left: calc(var(--bolt-sidebar-width) - 3px);
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 1100;
+    background: transparent;
+    transition: background-color 0.15s ease;
+  }
+  .bolt-sidebar-resizer:hover,
+  .bolt-sidebar-resizer.bolt-dragging {
+    background: rgba(26, 109, 255, 0.35);
+  }
+  body.bolt-dark .bolt-sidebar-resizer:hover,
+  body.bolt-dark .bolt-sidebar-resizer.bolt-dragging {
+    background: rgba(88, 166, 255, 0.4);
+  }
+  /* While dragging, kill text selection + iframe capture */
+  body.bolt-resizing { user-select: none; cursor: col-resize; }
+  body.bolt-resizing * { pointer-events: none; }
+  body.bolt-resizing .bolt-sidebar-resizer { pointer-events: auto; }
+}
+/* Hide the resizer on mobile where sidebar is full-width */
+@media (max-width: 49.99rem) {
+  .bolt-sidebar-resizer { display: none !important; }
+}
