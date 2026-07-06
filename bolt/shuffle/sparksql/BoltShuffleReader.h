@@ -37,6 +37,8 @@
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
+class ReaderStreamIterator;
+
 class RowBufferPool final {
  public:
   RowBufferPool(arrow::MemoryPool* pool) : pool_(pool) {}
@@ -104,6 +106,29 @@ class BoltColumnarBatchDeserializer {
       const bytedance::bolt::RowTypePtr& rowType,
       int32_t batchSize,
       int32_t shuffleBatchByteSize,
+      int32_t shuffleBufferSize,
+      arrow::MemoryPool* memoryPool,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      std::vector<bool>* isValidityBuffer,
+      bool hasComplexType,
+      uint64_t& deserializeTime,
+      uint64_t& decompressTime,
+      bool isRowFormat = false,
+      AdaptiveParallelZstdCodec* zstdCodec = nullptr,
+      RowBufferPool* rowBufferPool = nullptr,
+      ShuffleRowToColumnarConverter* row2ColConverter = nullptr);
+
+  // Variant that chains all streams produced by the iterator into a single
+  // continuous input, so that one BufferedInputStream is reused across streams.
+  BoltColumnarBatchDeserializer(
+      std::shared_ptr<ReaderStreamIterator> iterator,
+      arrow::MemoryPool* streamPool,
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<Codec>& codec,
+      const bytedance::bolt::RowTypePtr& rowType,
+      int32_t batchSize,
+      int32_t shuffleBatchByteSize,
+      int32_t shuffleBufferSize,
       arrow::MemoryPool* memoryPool,
       bytedance::bolt::memory::MemoryPool* boltPool,
       std::vector<bool>* isValidityBuffer,
@@ -217,12 +242,17 @@ class BoltColumnarBatchDeserializerFactory {
     partitioningShortName_ = name;
   }
 
+  void setShuffleBufferSize(int32_t shuffleBufferSize) {
+    shuffleBufferSize_ = shuffleBufferSize;
+  }
+
  private:
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<Codec> codec_;
   bytedance::bolt::RowTypePtr rowType_;
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
+  int32_t shuffleBufferSize_;
   int32_t numPartitions_{0};
   ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
   std::string partitioningShortName_;

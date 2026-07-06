@@ -39,6 +39,7 @@ SparkShuffleReader::SparkShuffleReader(
               shuffleReaderOptions_.checksumEnabled})),
       batchSize_(shuffleReaderOptions_.batchSize),
       shuffleBatchByteSize_(shuffleReaderOptions_.shuffleBatchByteSize),
+      shuffleBufferSize_(shuffleReaderOptions_.shuffleBufferSize),
       numPartitions_(shuffleReaderOptions_.numPartitions),
       shuffleWriterType_(static_cast<ShuffleWriterType>(
           shuffleReaderOptions_.forceShuffleWriterType)),
@@ -81,6 +82,7 @@ SparkShuffleReader::SparkShuffleReader(
         numPartitions_ >= rowBasePartitionThreshold &&
         outputType_->size() >= rowBaseColumnNumThreshold) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
+  reuseBufferedInputStream_ = shuffleReaderOptions_.reuseBufferedInputStream;
 }
 
 void SparkShuffleReader::init() {
@@ -93,6 +95,44 @@ void SparkShuffleReader::init() {
 
 bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
+  if (finished_) {
+    return nullptr;
+  }
+
+  if (reuseBufferedInputStream_) {
+    // Reuse a single BufferedInputStream by chaining all reader streams into
+    // one continuous stream behind a single deserializer.
+    if (!columnarBatchDeserializer_) {
+      columnarBatchDeserializer_ =
+          std::make_unique<BoltColumnarBatchDeserializer>(
+              readerStreamIterator_,
+              arrowPool_.get(),
+              schema_,
+              codec_,
+              outputType_,
+              batchSize_,
+              shuffleBatchByteSize_,
+              shuffleBufferSize_,
+              arrowPool_.get(),
+              pool(),
+              &isValidityBuffer_,
+              hasComplexType_,
+              deserializeTime_,
+              decompressTime_,
+              isRowBased_,
+              zstdCodec_.get(),
+              rowBufferPool_.get(),
+              row2ColConverter_.get());
+    }
+
+    auto output = columnarBatchDeserializer_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
+  }
+
+  // Legacy path: create a new deserializer (and BufferedInputStream) per stream.
   while (true) {
     if (!columnarBatchDeserializer_) {
       auto in = readerStreamIterator_->nextStream(arrowPool_.get());
@@ -105,6 +145,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
                 outputType_,
                 batchSize_,
                 shuffleBatchByteSize_,
+                shuffleBufferSize_,
                 arrowPool_.get(),
                 pool(),
                 &isValidityBuffer_,

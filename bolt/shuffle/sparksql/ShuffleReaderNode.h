@@ -120,6 +120,7 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
 
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
+  int32_t shuffleBufferSize_;
   int32_t numPartitions_{0};
   ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
   std::string partitioningShortName_;
@@ -138,6 +139,8 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   std::unique_ptr<BoltColumnarBatchDeserializer> columnarBatchDeserializer_;
 
   bool isRowBased_ = false;
+
+  bool reuseBufferedInputStream_ = false;
 
   bool finished_ = false;
 };

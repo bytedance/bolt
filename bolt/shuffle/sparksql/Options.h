@@ -43,6 +43,7 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 static constexpr int16_t kDefaultBatchSize = 4096;
 static constexpr int32_t kDefaultShuffleBatchByteSize = 41943040;
+static constexpr int32_t kDefaultShuffleBufferSize = 40 * 1024 * 1024;
 static constexpr int16_t kDefaultShuffleWriterBufferSize = 4096;
 static constexpr int64_t kDefaultMergeBufferBytesThreshold = 40 * 1024 * 1024;
 static constexpr int32_t kDefaultNumSubDirs = 64;
@@ -66,6 +67,11 @@ static constexpr int32_t kDefaultShuffleCheckMaxColumns =
 
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
+
+// Whether to reuse a single BufferedInputStream across all reader streams by
+// chaining them into one continuous stream, instead of creating a new
+// BufferedInputStream (and deserializer) per stream.
+static constexpr bool kDefaultReuseBufferedInputStream = false;
 
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
@@ -98,12 +104,17 @@ struct ShuffleReaderOptions {
   std::string codecBackend = "none";
   int32_t batchSize = kDefaultBatchSize;
   int32_t shuffleBatchByteSize = kDefaultShuffleBatchByteSize;
+  int32_t shuffleBufferSize = kDefaultShuffleBufferSize;
   int32_t numPartitions = -1;
   std::string partitionShortName = "";
   int32_t forceShuffleWriterType = -1;
 
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
+
+  // Reuse a single BufferedInputStream across all reader streams to avoid the
+  // overhead of repeatedly creating/destroying one per stream.
+  bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 };
 
 struct PartitionWriterOptions {

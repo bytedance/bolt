@@ -40,6 +40,7 @@
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/Payload.h"
+#include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
@@ -55,6 +56,97 @@ using namespace bytedance::bolt;
 namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
+
+// Chains the streams produced by a ReaderStreamIterator into a single logically
+// continuous InputStream. When the current sub-stream reaches EOF, it
+// transparently advances to the next one, so that a single BufferedInputStream
+// (and BoltColumnarBatchDeserializer) can be reused across all streams instead
+// of being recreated per stream.
+
+class ChainedReaderStream final : public arrow::io::InputStream {
+ public:
+  ChainedReaderStream(
+      std::shared_ptr<ReaderStreamIterator> iterator,
+      arrow::MemoryPool* pool)
+      : iterator_(std::move(iterator)), pool_(pool) {}
+
+  arrow::Status Close() override {
+    if (closed_) {
+      return arrow::Status::OK();
+    }
+    closed_ = true;
+    eos_ = true;
+    if (current_) {
+      auto status = current_->Close();
+      current_.reset();
+      return status;
+    }
+    return arrow::Status::OK();
+  }
+
+  bool closed() const override {
+    return closed_;
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    return position_;
+  }
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    if (closed_) {
+      return arrow::Status::IOError("ChainedReaderStream is closed");
+    }
+    if (nbytes < 0) {
+      return arrow::Status::Invalid("Read length must be non-negative");
+    }
+    if (nbytes == 0 || eos_) {
+      return 0;
+    }
+    auto* outBytes = reinterpret_cast<uint8_t*>(out);
+    int64_t total = 0;
+    while (total < nbytes) {
+      if (!current_ && !advance()) {
+        break;
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          auto bytesRead, current_->Read(nbytes - total, outBytes + total));
+      if (bytesRead == 0) {
+        // Current sub-stream is exhausted, move to the next one.
+        current_.reset();
+        continue;
+      }
+      total += bytesRead;
+    }
+    position_ += total;
+    return total;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(
+        auto buffer, arrow::AllocateResizableBuffer(nbytes, pool_));
+    ARROW_ASSIGN_OR_RAISE(auto bytesRead, Read(nbytes, buffer->mutable_data()));
+    RETURN_NOT_OK(buffer->Resize(bytesRead, /*shrink_to_fit=*/true));
+    return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+  }
+
+ private:
+  // Fetches the next sub-stream. Returns false when no more streams remain.
+  bool advance() {
+    current_ = iterator_->nextStream(pool_);
+    if (!current_) {
+      eos_ = true;
+      return false;
+    }
+    return true;
+  }
+
+  std::shared_ptr<ReaderStreamIterator> iterator_;
+  arrow::MemoryPool* pool_{nullptr};
+  std::shared_ptr<arrow::io::InputStream> current_;
+  int64_t position_{0};
+  bool eos_{false};
+  bool closed_{false};
+};
 
 struct BufferViewReleaser {
   BufferViewReleaser() : BufferViewReleaser(nullptr, nullptr) {}
@@ -422,6 +514,7 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
     const bytedance::bolt::RowTypePtr& rowType,
     int32_t batchSize,
     int32_t shuffleBatchByteSize,
+    int32_t shuffleBufferSize,
     arrow::MemoryPool* memoryPool,
     bytedance::bolt::memory::MemoryPool* boltPool,
     std::vector<bool>* isValidityBuffer,
@@ -448,12 +541,52 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
       rowBufferPool_(rowBufferPool),
       row2ColConverter_(row2ColConverter) {
   auto result = arrow::io::BufferedInputStream::Create(
-      shuffleBatchByteSize, memoryPool, std::move(in));
+      shuffleBufferSize, memoryPool, std::move(in));
   BOLT_CHECK(
       result.ok(),
       "Failed to create BufferedInputStream: " + result.status().message());
   in_ = result.ValueUnsafe();
 }
+
+BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
+    std::shared_ptr<ReaderStreamIterator> iterator,
+    arrow::MemoryPool* streamPool,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<Codec>& codec,
+    const bytedance::bolt::RowTypePtr& rowType,
+    int32_t batchSize,
+    int32_t shuffleBatchByteSize,
+    int32_t shuffleBufferSize,
+    arrow::MemoryPool* memoryPool,
+    bytedance::bolt::memory::MemoryPool* boltPool,
+    std::vector<bool>* isValidityBuffer,
+    bool hasComplexType,
+    uint64_t& deserializeTime,
+    uint64_t& decompressTime,
+    bool isRowFormat,
+    AdaptiveParallelZstdCodec* zstdCodec,
+    RowBufferPool* rowBufferPool,
+    ShuffleRowToColumnarConverter* row2ColConverter)
+    : BoltColumnarBatchDeserializer(
+          std::make_shared<ChainedReaderStream>(
+              std::move(iterator),
+              streamPool),
+          schema,
+          codec,
+          rowType,
+          batchSize,
+          shuffleBatchByteSize,
+          shuffleBufferSize,
+          memoryPool,
+          boltPool,
+          isValidityBuffer,
+          hasComplexType,
+          deserializeTime,
+          decompressTime,
+          isRowFormat,
+          zstdCodec,
+          rowBufferPool,
+          row2ColConverter) {}
 
 RowVectorPtr BoltColumnarBatchDeserializer::next() {
   if (isRowFormat_) {
@@ -773,6 +906,7 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
       rowType_,
       batchSize_,
       shuffleBatchByteSize_,
+      shuffleBufferSize_,
       memoryPool_,
       boltPool_,
       &isValidityBuffer_,
@@ -867,6 +1001,7 @@ BoltShuffleReader::BoltShuffleReader(
   factory_->setNumPartitions(options.numPartitions);
   factory_->setShuffleWriterType(options.forceShuffleWriterType);
   factory_->setpartitioningShortName(options.partitionShortName);
+  factory_->setShuffleBufferSize(options.shuffleBufferSize);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql
