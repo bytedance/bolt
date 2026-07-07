@@ -252,7 +252,7 @@ class BoltColumnarBatchDeserializerFactory {
   bytedance::bolt::RowTypePtr rowType_;
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
-  int32_t shuffleBufferSize_;
+  int32_t shuffleBufferSize_{kDefaultShuffleBufferSize};
   int32_t numPartitions_{0};
   ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
   std::string partitioningShortName_;
