@@ -103,10 +103,11 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
     // Reuse a single BufferedInputStream by chaining all reader streams into
     // one continuous stream behind a single deserializer.
     if (!columnarBatchDeserializer_) {
+      auto chainedStream = std::make_shared<ChainedReaderStream>(
+          readerStreamIterator_, arrowPool_.get());
       columnarBatchDeserializer_ =
           std::make_unique<BoltColumnarBatchDeserializer>(
-              readerStreamIterator_,
-              arrowPool_.get(),
+              std::move(chainedStream),
               schema_,
               codec_,
               outputType_,
