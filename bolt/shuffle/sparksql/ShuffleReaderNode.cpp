@@ -133,7 +133,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
     return output;
   }
 
-  // Legacy path: create a new deserializer (and BufferedInputStream) per stream.
+  // Legacy path: create a new deserializer (and BufferedInputStream) per
+  // stream.
   while (true) {
     if (!columnarBatchDeserializer_) {
       auto in = readerStreamIterator_->nextStream(arrowPool_.get());
