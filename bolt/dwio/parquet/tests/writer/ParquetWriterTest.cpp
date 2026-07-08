@@ -41,10 +41,12 @@
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/dwio/parquet/arrow/Encoding.h"
+#include "bolt/dwio/parquet/arrow/tests/FileReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/arrow/Bridge.h"
+#include "bolt/version/version.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::dwio::common;
@@ -285,6 +287,34 @@ TEST_F(ParquetWriterTest, compression) {
   auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
   assertReadWithReaderAndExpected(schema, *rowReader, data, *leafPool_);
 };
+
+TEST_F(ParquetWriterTest, defaultCreatedBy) {
+  auto schema = ROW({"c0"}, {INTEGER()});
+  const int64_t kRows = 10;
+  const auto data = makeRowVector(
+      {makeFlatVector<int32_t>(kRows, [](auto row) { return row; })});
+
+  std::string parquetPath = tempPath_->path + "/defaultCreatedBy.parquet";
+  vp::WriterOptions writerOptions{};
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  auto fileReader =
+      bytedance::bolt::parquet::arrow::ParquetFileReader::OpenFile(
+          parquetPath, false);
+  const auto& createdBy = fileReader->metadata()->created_by();
+
+  ASSERT_EQ(
+      std::string("parquet-cpp-bolt version ") +
+          BOLT_PARQUET_CREATED_BY_VERSION + " (build " +
+          ::bytedance::bolt::BuildInfo::shortHash + ")",
+      createdBy);
+
+  bytedance::bolt::parquet::arrow::ApplicationVersion version(createdBy);
+  EXPECT_EQ("parquet-cpp-bolt", version.application_);
+  EXPECT_EQ(::bytedance::bolt::BuildInfo::shortHash, version.build_);
+}
 
 TEST_F(ParquetWriterTest, lz4Hadoop) {
   const int64_t kRows = 10'000'000;
