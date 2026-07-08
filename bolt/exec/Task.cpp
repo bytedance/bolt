@@ -369,6 +369,10 @@ Task::~Task() {
 #define CLEAR(_action_)   \
   clearStage = #_action_; \
   _action_;
+#ifdef SPARK_COMPATIBLE
+  CLEAR(shuffleReaderClients_.clear());
+  CLEAR(shuffleReaderClientByPlanNode_.clear());
+#endif
   CLEAR(threadFinishPromises_.clear());
   CLEAR(splitGroupStates_.clear());
   CLEAR(taskStats_ = TaskStats());
@@ -415,6 +419,11 @@ void Task::init(std::optional<common::SpillDiskOptions>&& spillDiskOpts) {
       1,
       queryCtx_->queryConfig().isMultiDriverEnabled());
   exchangeClients_.resize(driverFactories_.size());
+#ifdef SPARK_COMPATIBLE
+  shuffleReaderClients_.resize(driverFactories_.size());
+  shuffleReaderClientsInitFlags_ =
+      std::vector<std::mutex>(driverFactories_.size());
+#endif
 
   // In Task::next() we always assume ungrouped execution.
   for (const auto& factory : driverFactories_) {
@@ -833,6 +842,12 @@ void Task::createDriverFactoriesLocked(uint32_t maxDrivers) {
       maxDrivers,
       queryCtx_->queryConfig().isMultiDriverEnabled(),
       queryCtx_->queryConfig().morselDrivenEnabled());
+
+#ifdef SPARK_COMPATIBLE
+  shuffleReaderClients_.resize(driverFactories_.size());
+  shuffleReaderClientsInitFlags_ =
+      std::vector<std::mutex>(driverFactories_.size());
+#endif
 
   // Keep one exchange client per pipeline (NULL if not used).
   const uint32_t numPipelines = driverFactories_.size();

@@ -32,12 +32,15 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include "bolt/exec/Driver.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 namespace bytedance::bolt::shuffle::sparksql {
+
+class BoltShuffleReaderClient;
 
 class SparkShuffleReaderNode : public bytedance::bolt::core::PlanNode {
  public:
@@ -107,9 +110,23 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
 
   void close() override;
 
-  void init();
+ private:
+  bool finished_ = false;
+  std::shared_ptr<BoltShuffleReaderClient> shuffleReaderClient_;
+};
+
+class BoltShuffleReaderClient {
+ public:
+  BoltShuffleReaderClient(
+      std::shared_ptr<const SparkShuffleReaderNode> shuffleReaderNode,
+      memory::MemoryPool* pool);
+  ~BoltShuffleReaderClient();
+
+  RowVectorPtr next();
 
  private:
+  void init();
+
   std::once_flag initFlag_;
   ShuffleReaderOptions shuffleReaderOptions_;
   std::shared_ptr<ReaderStreamIterator> readerStreamIterator_;
@@ -129,6 +146,9 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
 
   uint64_t deserializeTime_{0};
   uint64_t decompressTime_{0};
+  uint64_t totalReadTime_{0};
+  int64_t numBatches_{0};
+  int64_t numRows_{0};
 
   // for rowbased shuffle
   std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_{nullptr};
@@ -138,8 +158,11 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   std::unique_ptr<BoltColumnarBatchDeserializer> columnarBatchDeserializer_;
 
   bool isRowBased_ = false;
+  const RowTypePtr outputType_;
 
-  bool finished_ = false;
+  memory::MemoryPool* const pool_;
+
+  std::mutex mutex_;
 };
 
 class SparkShuffleReaderTranslator
