@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-labelledby="title desc">
+  <title id="title">Bolt Paimon read path boundaries</title>
+  <desc id="desc">Comparison of the Hive connector read path and the direct Paimon connector read path through paimon-cpp.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#43566a"/>
+    </marker>
+    <style>
+      .bg { fill: #f7fafc; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .bolt { fill: #e8f1ff; stroke: #3776d6; stroke-width: 1.4; }
+      .paimon { fill: #e9f7ef; stroke: #2f8f58; stroke-width: 1.4; }
+      .hive { fill: #fff4df; stroke: #c98214; stroke-width: 1.4; }
+      .file { fill: #f4edf9; stroke: #8b5bb3; stroke-width: 1.4; }
+      .label { fill: #1f2937; font-family: Inter, Arial, sans-serif; font-size: 18px; font-weight: 700; }
+      .text { fill: #334155; font-family: Inter, Arial, sans-serif; font-size: 15px; }
+      .small { fill: #475569; font-family: Inter, Arial, sans-serif; font-size: 13px; }
+      .line { stroke: #43566a; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .note { fill: #0f172a; font-family: Inter, Arial, sans-serif; font-size: 16px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="960" height="520" rx="0"/>
+  <text class="label" x="48" y="48">Paimon read boundaries in Bolt</text>
+  <text class="text" x="48" y="76">Issue #14 points the integration direction toward the Paimon C++ SDK.</text>
+  <text class="text" x="48" y="100">Keep table semantics in Paimon, and keep vector execution in Bolt.</text>
+
+  <rect class="panel" x="48" y="126" width="864" height="152" rx="8"/>
+  <text class="note" x="76" y="160">Hive connector path</text>
+  <text class="small" x="76" y="184">Bolt owns file reads plus Paimon-aware merge logic.</text>
+  <rect class="file" x="76" y="204" width="145" height="48" rx="8"/>
+  <text class="text" x="108" y="233">Paimon files</text>
+  <line class="line" x1="226" y1="228" x2="281" y2="228"/>
+  <rect class="hive" x="286" y="204" width="170" height="48" rx="8"/>
+  <text class="text" x="316" y="223">Hive reader</text>
+  <text class="small" x="313" y="242">DWIO and filesystem</text>
+  <line class="line" x1="461" y1="228" x2="516" y2="228"/>
+  <rect class="bolt" x="522" y="196" width="174" height="64" rx="8"/>
+  <text class="text" x="552" y="222">Bolt merge</text>
+  <text class="small" x="550" y="242">PK and value kind</text>
+  <line class="line" x1="701" y1="228" x2="756" y2="228"/>
+  <rect class="bolt" x="762" y="204" width="122" height="48" rx="8"/>
+  <text class="text" x="789" y="233">RowVector</text>
+
+  <rect class="panel" x="48" y="314" width="864" height="166" rx="8"/>
+  <text class="note" x="76" y="350">Direct Paimon connector path</text>
+  <text class="small" x="76" y="374">paimon-cpp owns table semantics. Bolt owns memory, vector import, and execution.</text>
+  <rect class="file" x="76" y="400" width="145" height="48" rx="8"/>
+  <text class="text" x="101" y="429">Paimon split</text>
+  <line class="line" x1="226" y1="424" x2="281" y2="424"/>
+  <rect class="paimon" x="286" y="392" width="218" height="64" rx="8"/>
+  <text class="text" x="344" y="418">paimon-cpp</text>
+  <text class="small" x="326" y="438">TableRead and BatchReader</text>
+  <line class="line" x1="509" y1="424" x2="564" y2="424"/>
+  <rect class="paimon" x="570" y="400" width="128" height="48" rx="8"/>
+  <text class="text" x="594" y="429">Arrow batch</text>
+  <line class="line" x1="703" y1="424" x2="758" y2="424"/>
+  <rect class="bolt" x="764" y="392" width="120" height="64" rx="8"/>
+  <text class="text" x="786" y="418">Bolt</text>
+  <text class="small" x="790" y="438">RowVector</text>
+</svg>

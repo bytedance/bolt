@@ -18,16 +18,23 @@
 
 #include <paimon/memory/memory_pool.h>
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/core/ExpressionEvaluator.h"
 
 namespace bytedance::bolt::connector::paimon {
 
 class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
  public:
-  explicit BoltPaimonMemoryPool(memory::MemoryPool* const pool)
-      : pool_(std::move(pool)) {}
+  explicit BoltPaimonMemoryPool(
+      memory::MemoryPool* const pool,
+      core::ExpressionEvaluator* const expressionEvaluator = nullptr)
+      : pool_(pool), expressionEvaluator_(expressionEvaluator) {}
 
   memory::MemoryPool* getBoltPool() const {
     return pool_;
+  }
+
+  core::ExpressionEvaluator* getExpressionEvaluator() const {
+    return expressionEvaluator_;
   }
 
   void* Malloc(uint64_t size, uint64_t alignment) override {
@@ -71,6 +78,7 @@ class BoltPaimonMemoryPool : public ::paimon::MemoryPool {
 
  private:
   memory::MemoryPool* const pool_;
+  core::ExpressionEvaluator* const expressionEvaluator_;
 };
 
 } // namespace bytedance::bolt::connector::paimon

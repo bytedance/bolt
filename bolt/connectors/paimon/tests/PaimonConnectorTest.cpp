@@ -30,6 +30,7 @@
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
+#include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -886,6 +887,123 @@ TEST_F(PaimonConnectorTest, FilterPushdownIntEquality) {
 
   auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
   assertQuery(plan, connectorSplits, "SELECT c0 FROM tmp WHERE c0 = 2");
+}
+
+TEST_F(PaimonConnectorTest, UnsupportedFilterIsAppliedAsRemainingFilter) {
+  // Table "basic": id = [1, 2, 3]
+  // Filter: id + 1 = 3 cannot be translated into a paimon Predicate, but it
+  // must still be evaluated by the scan as a remaining filter.
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
+  auto filterExpr = parseExpr("id + 1 = 3", rowType);
+  EXPECT_FALSE(PaimonFilterTranslator::translate(filterExpr, rowType).ok());
+
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>(),
+      filterExpr);
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  auto allRows = mk.rowVector({mk.flatVector<int64_t>({1, 2, 3})});
+  createDuckDbTable("tmp", {allRows});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  assertQuery(plan, connectorSplits, "SELECT c0 FROM tmp WHERE c0 + 1 = 3");
+}
+
+TEST_F(
+    PaimonConnectorTest,
+    UnsupportedFilterCanReadNonOutputColumnAsRemainingFilter) {
+  // Table "partial_update": ids [1, 2, 3], names [Alice, Bob, Charlie].
+  // The scan outputs only name, while the remaining filter references id.
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto filterRowType = ROW({"id", "name"}, {BIGINT(), VARCHAR()});
+  auto outputType = ROW({"name"}, {VARCHAR()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["name"] =
+      std::make_shared<PaimonColumnHandle>("name", VARCHAR());
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath =
+      "file:" + tempDir_->path + "/test_db.db/partial_update";
+  auto filterExpr = parseExpr("id + 1 = 3", filterRowType);
+  EXPECT_FALSE(
+      PaimonFilterTranslator::translate(filterExpr, filterRowType).ok());
+
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>(),
+      filterExpr);
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(outputType, tableHandle, columnHandles)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  auto allRows = mk.rowVector(
+      {mk.flatVector<int64_t>({1, 2, 3}),
+       mk.flatVector<std::string>({"Alice", "Bob", "Charlie"})});
+  createDuckDbTable("tmp", {allRows});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  assertQuery(plan, connectorSplits, "SELECT c1 FROM tmp WHERE c0 + 1 = 3");
+}
+
+TEST_F(PaimonConnectorTest, PartiallyTranslatableFilterKeepsRemainingFilter) {
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
+  auto filterExpr = parseExpr("id > 1 AND id + 1 = 3", rowType);
+  EXPECT_FALSE(PaimonFilterTranslator::translate(filterExpr, rowType).ok());
+  EXPECT_TRUE(
+      PaimonFilterTranslator::translate(parseExpr("id > 1", rowType), rowType)
+          .ok());
+
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>(),
+      filterExpr);
+
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  auto allRows = mk.rowVector({mk.flatVector<int64_t>({1, 2, 3})});
+  createDuckDbTable("tmp", {allRows});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  assertQuery(
+      plan, connectorSplits, "SELECT c0 FROM tmp WHERE c0 > 1 AND c0 + 1 = 3");
 }
 
 TEST_F(PaimonConnectorTest, FilterPushdownIntGreaterThan) {

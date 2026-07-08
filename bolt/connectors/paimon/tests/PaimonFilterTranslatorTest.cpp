@@ -27,6 +27,11 @@
 #include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/core/Expressions.h"
+#include "bolt/core/QueryCtx.h"
+#include "bolt/expression/Expr.h"
+#include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
+#include "bolt/type/Subfield.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -42,6 +47,7 @@ class PaimonFilterTranslatorTest
       public bytedance::bolt::test::VectorTestBase {
  protected:
   static void SetUpTestSuite() {
+    functions::prestosql::registerAllScalarFunctions();
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 
@@ -58,6 +64,11 @@ class PaimonFilterTranslatorTest
   /// status, email, a, b, y, z, i, col).
   ToPaimonPredicateResult translate(const core::TypedExprPtr& expr) {
     return PaimonFilterTranslator::translate(expr, rowType_);
+  }
+
+  ToPaimonPredicateResult translateWithEvaluator(
+      const core::TypedExprPtr& expr) {
+    return PaimonFilterTranslator::translate(expr, rowType_, &evaluator_);
   }
 
   const RowTypePtr rowType_{ROW({
@@ -96,6 +107,10 @@ class PaimonFilterTranslatorTest
 
   static TypedExprPtr strConst(const std::string& value) {
     return std::make_shared<ConstantTypedExpr>(VARCHAR(), variant(value));
+  }
+
+  static TypedExprPtr binaryConst(const std::string& value) {
+    return std::make_shared<ConstantTypedExpr>(VARBINARY(), variant(value));
   }
 
   static TypedExprPtr floatConst(float value) {
@@ -170,6 +185,15 @@ class PaimonFilterTranslatorTest
         BOOLEAN(), std::vector<TypedExprPtr>{lhs, rhs}, "eq");
   }
 
+  static TypedExprPtr plus(const TypedExprPtr& lhs, const TypedExprPtr& rhs) {
+    return std::make_shared<CallTypedExpr>(
+        BIGINT(), std::vector<TypedExprPtr>{lhs, rhs}, "plus");
+  }
+
+  static TypedExprPtr concat(const std::vector<TypedExprPtr>& inputs) {
+    return std::make_shared<CallTypedExpr>(VARCHAR(), inputs, "concat");
+  }
+
   static TypedExprPtr neq(const TypedExprPtr& lhs, const TypedExprPtr& rhs) {
     return std::make_shared<CallTypedExpr>(
         BOOLEAN(), std::vector<TypedExprPtr>{lhs, rhs}, "neq");
@@ -227,6 +251,13 @@ class PaimonFilterTranslatorTest
         BOOLEAN(), std::vector<TypedExprPtr>{col}, "is_not_null");
   }
 
+  static TypedExprPtr likeExpr(
+      const TypedExprPtr& col,
+      const TypedExprPtr& pattern) {
+    return std::make_shared<CallTypedExpr>(
+        BOOLEAN(), std::vector<TypedExprPtr>{col, pattern}, "like");
+  }
+
   static TypedExprPtr notExpr(const TypedExprPtr& inner) {
     return std::make_shared<CallTypedExpr>(
         BOOLEAN(), std::vector<TypedExprPtr>{inner}, "not");
@@ -245,6 +276,9 @@ class PaimonFilterTranslatorTest
     return std::make_shared<CallTypedExpr>(
         BOOLEAN(), std::vector<TypedExprPtr>{left, right}, "or");
   }
+
+  std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
+  exec::SimpleExpressionEvaluator evaluator_{queryCtx_.get(), pool_.get()};
 };
 
 // ---------------------------------------------------------------------------
@@ -266,6 +300,20 @@ TEST_F(PaimonFilterTranslatorTest, BareConstantReturnsNull) {
   auto expr = intConst(42);
   auto result = translate(expr);
   EXPECT_FALSE(result.ok()) << result.reason;
+}
+
+TEST_F(PaimonFilterTranslatorTest, FlattenTopLevelConjunctsKeepsLeafOrder) {
+  auto first = eq(field(BIGINT(), "id"), intConst(1));
+  auto second = gt(field(BIGINT(), "age"), intConst(10));
+  auto third = isNotNull(field(VARCHAR(), "name"));
+  auto expr = andExpr(andExpr(first, second), third);
+
+  auto conjuncts = exec::flattenTopLevelConjuncts(expr);
+
+  ASSERT_EQ(conjuncts.size(), 3);
+  EXPECT_EQ(conjuncts[0].get(), first.get());
+  EXPECT_EQ(conjuncts[1].get(), second.get());
+  EXPECT_EQ(conjuncts[2].get(), third.get());
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +341,162 @@ TEST_F(PaimonFilterTranslatorTest, StringEquality) {
   ASSERT_TRUE(pred.ok()) << pred.reason;
   EXPECT_NE(pred.value->ToString().find("name"), std::string::npos);
   EXPECT_NE(pred.value->ToString().find("alice"), std::string::npos);
+}
+
+TEST_F(PaimonFilterTranslatorTest, EvaluatesConstantRhsExpression) {
+  auto expr = eq(field(BIGINT(), "id"), plus(intConst(1), intConst(1)));
+
+  auto withoutEvaluator = translate(expr);
+  EXPECT_FALSE(withoutEvaluator.ok()) << withoutEvaluator.reason;
+
+  auto pred = translateWithEvaluator(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::EQUAL);
+  EXPECT_EQ(leaf->FieldName(), "id");
+  ASSERT_EQ(leaf->Literals().size(), 1);
+  EXPECT_EQ(leaf->Literals()[0].GetValue<int64_t>(), 2);
+}
+
+TEST_F(PaimonFilterTranslatorTest, StringLike) {
+  auto expr = likeExpr(field(VARCHAR(), "name"), strConst("ali%"));
+  auto pred = translate(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::LIKE);
+  EXPECT_EQ(leaf->FieldName(), "name");
+  ASSERT_EQ(leaf->Literals().size(), 1);
+  EXPECT_EQ(leaf->Literals()[0].GetValue<std::string>(), "ali%");
+}
+
+TEST_F(PaimonFilterTranslatorTest, StringLikeEvaluatesConstantPattern) {
+  auto expr = likeExpr(
+      field(VARCHAR(), "name"), concat({strConst("ali"), strConst("%")}));
+
+  auto withoutEvaluator = translate(expr);
+  EXPECT_FALSE(withoutEvaluator.ok()) << withoutEvaluator.reason;
+
+  auto pred = translateWithEvaluator(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(leaf->GetFunction().GetType(), ::paimon::Function::Type::LIKE);
+  ASSERT_EQ(leaf->Literals().size(), 1);
+  EXPECT_EQ(leaf->Literals()[0].GetValue<std::string>(), "ali%");
+}
+
+TEST_F(PaimonFilterTranslatorTest, StringLikeWithEscapeStaysRemaining) {
+  auto expr = std::make_shared<CallTypedExpr>(
+      BOOLEAN(),
+      std::vector<TypedExprPtr>{
+          field(VARCHAR(), "name"), strConst("ali\\_%"), strConst("\\")},
+      "like");
+
+  auto pred = translateWithEvaluator(expr);
+  EXPECT_FALSE(pred.ok()) << pred.reason;
+}
+
+TEST_F(PaimonFilterTranslatorTest, EvaluatesConstantRhsRangeExpression) {
+  auto expr = gte(field(BIGINT(), "id"), plus(intConst(10), intConst(5)));
+
+  auto pred = translateWithEvaluator(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+  const auto* leaf =
+      dynamic_cast<const ::paimon::LeafPredicate*>(pred.value.get());
+  ASSERT_NE(leaf, nullptr);
+  EXPECT_EQ(
+      leaf->GetFunction().GetType(),
+      ::paimon::Function::Type::GREATER_OR_EQUAL);
+  EXPECT_EQ(leaf->FieldName(), "id");
+  ASSERT_EQ(leaf->Literals().size(), 1);
+  EXPECT_EQ(leaf->Literals()[0].GetValue<int64_t>(), 15);
+}
+
+TEST_F(PaimonFilterTranslatorTest, EvaluatesConstantRhsBetweenExpressions) {
+  auto expr = between(
+      field(BIGINT(), "val"),
+      plus(intConst(1), intConst(2)),
+      plus(intConst(10), intConst(5)));
+
+  auto pred = translateWithEvaluator(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+  const auto typed =
+      PaimonFilterTranslator::toTypedExpr(pred.value, pool_.get());
+  ASSERT_TRUE(typed.ok()) << typed.reason;
+
+  auto filters = PaimonFilterTranslator::toSubfieldFilters(typed.value);
+  ASSERT_EQ(filters.size(), 1);
+  auto it = filters.find(common::Subfield("val"));
+  ASSERT_NE(it, filters.end());
+  EXPECT_TRUE(it->second->testInt64(3));
+  EXPECT_TRUE(it->second->testInt64(15));
+  EXPECT_FALSE(it->second->testInt64(2));
+  EXPECT_FALSE(it->second->testInt64(16));
+}
+
+TEST_F(PaimonFilterTranslatorTest, NonConstantRhsExpressionIsNotPushedDown) {
+  auto expr =
+      eq(field(BIGINT(), "id"), plus(field(BIGINT(), "a"), intConst(1)));
+
+  auto pred = translateWithEvaluator(expr);
+  EXPECT_FALSE(pred.ok()) << pred.reason;
+}
+
+TEST_F(
+    PaimonFilterTranslatorTest,
+    EvaluatedConstantRhsRoundTripsToSubfieldFilter) {
+  auto expr = eq(field(BIGINT(), "id"), plus(intConst(1), intConst(1)));
+  auto pred = translateWithEvaluator(expr);
+  ASSERT_TRUE(pred.ok()) << pred.reason;
+
+  auto typed = PaimonFilterTranslator::toTypedExpr(pred.value, pool_.get());
+  ASSERT_TRUE(typed.ok()) << typed.reason;
+  const auto* call =
+      dynamic_cast<const core::CallTypedExpr*>(typed.value.get());
+  ASSERT_NE(call, nullptr);
+  const auto* constant =
+      dynamic_cast<const core::ConstantTypedExpr*>(call->inputs()[1].get());
+  ASSERT_NE(constant, nullptr);
+  EXPECT_EQ(constant->value().value<int64_t>(), 2);
+
+  auto filters = PaimonFilterTranslator::toSubfieldFilters(typed.value);
+  ASSERT_EQ(filters.size(), 1);
+  auto it = filters.find(common::Subfield("id"));
+  ASSERT_NE(it, filters.end());
+  EXPECT_TRUE(it->second->testInt64(2));
+  EXPECT_FALSE(it->second->testInt64(1));
+}
+
+TEST_F(PaimonFilterTranslatorTest, SubfieldFiltersUseEvaluatorForConstantRhs) {
+  auto expr = eq(field(BIGINT(), "id"), plus(intConst(1), intConst(1)));
+
+  EXPECT_TRUE(PaimonFilterTranslator::toSubfieldFilters(expr).empty());
+
+  auto filters = PaimonFilterTranslator::toSubfieldFilters(expr, &evaluator_);
+  ASSERT_EQ(filters.size(), 1);
+  auto it = filters.find(common::Subfield("id"));
+  ASSERT_NE(it, filters.end());
+  EXPECT_TRUE(it->second->testInt64(2));
+  EXPECT_FALSE(it->second->testInt64(1));
+}
+
+TEST_F(
+    PaimonFilterTranslatorTest,
+    SubfieldFiltersFallbackWhenEvaluatorParserDoesNotSupportType) {
+  auto expr = eq(field(VARBINARY(), "payload"), binaryConst("abc"));
+
+  auto filters = PaimonFilterTranslator::toSubfieldFilters(expr, &evaluator_);
+  ASSERT_EQ(filters.size(), 1);
+  auto it = filters.find(common::Subfield("payload"));
+  ASSERT_NE(it, filters.end());
+  EXPECT_TRUE(it->second->testBytes("abc", 3));
+  EXPECT_FALSE(it->second->testBytes("bcd", 3));
 }
 
 // ---------------------------------------------------------------------------

@@ -18,17 +18,22 @@
 #include <folly/detail/ThreadLocalDetail.h>
 #include <folly/json.h>
 #include <paimon/defs.h>
+#include <paimon/predicate/predicate_builder.h>
 #include <paimon/read_context.h>
 #include <paimon/table/source/data_split.h>
 #include <paimon/table/source/split.h>
 #include <paimon/table/source/table_read.h>
 #include <paimon/type_fwd.h>
 #include <algorithm>
+#include <unordered_set>
+#include <utility>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
+#include "bolt/expression/Expr.h"
+#include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
@@ -38,6 +43,130 @@
 #include "bolt/vector/arrow/Bridge.h"
 
 namespace bytedance::bolt::connector::paimon {
+namespace {
+
+std::shared_ptr<PaimonColumnHandle> paimonColumnHandle(
+    const std::shared_ptr<ColumnHandle>& columnHandle,
+    const std::string& outputName) {
+  auto handle = std::dynamic_pointer_cast<PaimonColumnHandle>(columnHandle);
+  BOLT_CHECK_NOT_NULL(
+      handle,
+      "ColumnHandle must be an instance of PaimonColumnHandle for {}",
+      outputName);
+  return handle;
+}
+
+std::shared_ptr<PaimonColumnHandle> findPaimonColumnHandle(
+    const std::unordered_map<std::string, std::shared_ptr<ColumnHandle>>&
+        columnHandles,
+    const std::string& fieldName) {
+  auto it = columnHandles.find(fieldName);
+  if (it != columnHandles.end()) {
+    return paimonColumnHandle(it->second, fieldName);
+  }
+
+  for (const auto& [outputName, columnHandle] : columnHandles) {
+    auto handle = paimonColumnHandle(columnHandle, outputName);
+    if (handle->name() == fieldName) {
+      return handle;
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+namespace {
+
+core::TypedExprPtr combineConjuncts(std::vector<core::TypedExprPtr> conjuncts) {
+  if (conjuncts.empty()) {
+    return nullptr;
+  }
+  if (conjuncts.size() == 1) {
+    return std::move(conjuncts.front());
+  }
+  return std::make_shared<core::CallTypedExpr>(
+      BOOLEAN(), std::move(conjuncts), "and");
+}
+
+void collectFieldNames(
+    const core::TypedExprPtr& expression,
+    std::vector<std::string>& fieldNames,
+    std::unordered_set<std::string>& seen) {
+  std::vector<core::TypedExprPtr> pending;
+  if (expression) {
+    pending.push_back(expression);
+  }
+
+  while (!pending.empty()) {
+    auto current = std::move(pending.back());
+    pending.pop_back();
+    if (!current) {
+      continue;
+    }
+
+    const auto* field =
+        dynamic_cast<const core::FieldAccessTypedExpr*>(current.get());
+    if (field != nullptr &&
+        (field->inputs().empty() ||
+         dynamic_cast<const core::InputTypedExpr*>(
+             field->inputs().front().get()) != nullptr) &&
+        seen.insert(field->name()).second) {
+      fieldNames.push_back(field->name());
+    }
+
+    const auto& inputs = current->inputs();
+    for (size_t i = inputs.size(); i > 0; --i) {
+      pending.push_back(inputs[i - 1]);
+    }
+  }
+}
+
+std::vector<std::string> collectFieldNames(
+    const core::TypedExprPtr& expression) {
+  std::vector<std::string> fieldNames;
+  std::unordered_set<std::string> seen;
+  collectFieldNames(expression, fieldNames, seen);
+  return fieldNames;
+}
+
+std::pair<std::shared_ptr<::paimon::Predicate>, core::TypedExprPtr> planFilter(
+    const core::TypedExprPtr& expression,
+    const RowTypePtr& rowType,
+    core::ExpressionEvaluator* evaluator) {
+  std::vector<core::TypedExprPtr> conjuncts;
+  exec::flattenTopLevelConjuncts(expression, conjuncts);
+
+  std::vector<std::shared_ptr<::paimon::Predicate>> predicates;
+  std::vector<core::TypedExprPtr> remainingConjuncts;
+  for (const auto& conjunct : conjuncts) {
+    auto result =
+        PaimonFilterTranslator::translate(conjunct, rowType, evaluator);
+    if (result.ok()) {
+      predicates.push_back(std::move(result.value));
+    } else {
+      VLOG(1) << "PaimonDataSource: Keeping filter conjunct "
+              << conjunct->toString()
+              << " as remaining filter: " << result.reason;
+      remainingConjuncts.push_back(conjunct);
+    }
+  }
+
+  std::shared_ptr<::paimon::Predicate> predicate;
+  if (predicates.size() == 1) {
+    predicate = std::move(predicates.front());
+  } else if (!predicates.empty()) {
+    auto result = ::paimon::PredicateBuilder::And(predicates);
+    BOLT_CHECK(
+        result.ok(), "PredicateBuilder::And failed for translated conjuncts");
+    predicate = std::move(result).value();
+  }
+
+  return {
+      std::move(predicate), combineConjuncts(std::move(remainingConjuncts))};
+}
+
+} // namespace
 
 PaimonDataSource::PaimonDataSource(
     const std::shared_ptr<const RowType>& outputType,
@@ -49,21 +178,47 @@ PaimonDataSource::PaimonDataSource(
     const std::shared_ptr<PaimonConfig>& paimonConfig)
     : outputType_(outputType),
       tableHandle_(std::dynamic_pointer_cast<PaimonTableHandle>(tableHandle)),
+      expressionEvaluator_(queryCtx->expressionEvaluator()),
       pool_(queryCtx->memoryPool()) {
   // Wrap the query-context pool for Paimon's native memory management.
-  paimonPool_ = std::make_shared<BoltPaimonMemoryPool>(pool_);
+  paimonPool_ =
+      std::make_shared<BoltPaimonMemoryPool>(pool_, expressionEvaluator_);
 
   ::paimon::ReadContextBuilder ctxBuilder(tableHandle_->tablePath());
   std::vector<std::string> columns;
   columns.reserve(outputType_->size());
+  std::vector<TypePtr> filterTypes;
+  filterTypes.reserve(outputType_->size());
+  std::unordered_set<std::string> readColumnNames;
   for (const auto& outName : outputType_->names()) {
     auto it = columnHandles.find(outName);
     BOLT_CHECK(
         it != columnHandles.end(),
         "Could not find column handle with name: {}",
         outName);
-    columns.push_back(it->second->name());
+    const auto& columnName = paimonColumnHandle(it->second, outName)->name();
+    columns.push_back(columnName);
+    readColumnNames.insert(columnName);
   }
+  for (const auto& type : outputType_->children()) {
+    filterTypes.push_back(type);
+  }
+
+  if (tableHandle_->filter()) {
+    for (const auto& fieldName : collectFieldNames(tableHandle_->filter())) {
+      auto columnHandle = findPaimonColumnHandle(columnHandles, fieldName);
+      BOLT_CHECK_NOT_NULL(
+          columnHandle,
+          "Could not find column handle for filter field: {}",
+          fieldName);
+      if (readColumnNames.insert(columnHandle->name()).second) {
+        columns.push_back(columnHandle->name());
+        filterTypes.push_back(columnHandle->type());
+      }
+    }
+  }
+  auto filterNames = columns;
+  filterRowType_ = ROW(std::move(filterNames), std::move(filterTypes));
   VLOG(1) << "PaimonDataSource::PaimonDataSource(): Read schema: "
           << folly::join(", ", columns);
   ctxBuilder.SetReadSchema(columns);
@@ -126,44 +281,17 @@ PaimonDataSource::PaimonDataSource(
     ctxBuilder.SetPrefetchMaxParallelNum(paimonConfig->prefetchMaxParallel());
   }
 
-  // Translate the filter expression from PaimonTableHandle into a
-  // paimon-native Predicate for pushdown into the parquet reader.
-  //
-  // The filter expression references columns by their *real* paimon schema
-  // names (e.g., "id", "name") as set by the SparkSQL/gluten planner, but
-  // outputType_ carries internal alias names (e.g., "n0_0", "n0_1").
-  // We must build a RowType whose names match the filter's field references
-  // so that extractFieldInfo can resolve field indices correctly.
   if (tableHandle_->filter()) {
-    std::vector<std::string> realNames;
-    std::vector<TypePtr> realTypes;
-    realNames.reserve(outputType_->size());
-    realTypes.reserve(outputType_->size());
-    for (size_t i = 0; i < outputType_->size(); ++i) {
-      const auto& outName = outputType_->nameOf(i);
-      auto it = columnHandles.find(outName);
-      BOLT_CHECK(
-          it != columnHandles.end(),
-          "Could not find column handle with name: {}",
-          outName);
-      realNames.push_back(it->second->name()); // real paimon name
-      realTypes.push_back(outputType_->childAt(i)); // preserve type
-    }
-    auto filterRowType = ROW(std::move(realNames), std::move(realTypes));
-
-    auto result = PaimonFilterTranslator::translate(
-        tableHandle_->filter(), filterRowType);
-    if (result.ok()) {
+    auto filterPlan = planFilter(
+        tableHandle_->filter(), filterRowType_, expressionEvaluator_);
+    if (filterPlan.first) {
       VLOG(1) << "PaimonDataSource: Translated filter to paimon Predicate: "
-              << result.value->ToString();
-      ctxBuilder.SetPredicate(result.value);
-    } else {
-      LOG(WARNING)
-          << "PaimonDataSource: Could not fully translate filter expression "
-          << tableHandle_->filter()->toString()
-          << " to paimon Predicate: " << result.reason
-          << "; filter pushdown will not be applied";
-      ctxBuilder.SetPredicate(nullptr);
+              << filterPlan.first->ToString();
+    }
+    ctxBuilder.SetPredicate(filterPlan.first);
+    if (filterPlan.second) {
+      remainingFilterExprSet_ =
+          expressionEvaluator_->compile(filterPlan.second);
     }
   } else {
     ctxBuilder.SetPredicate(nullptr);
@@ -275,25 +403,17 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
   }
 
   ArrowOptions opts;
-  auto vec = bytedance::bolt::importFromArrowAsOwner(sch, arr, opts, pool_);
-
-  const auto& row = std::dynamic_pointer_cast<RowVector>(vec);
+  auto row = std::dynamic_pointer_cast<RowVector>(
+      bytedance::bolt::importFromArrowAsOwner(sch, arr, opts, pool_));
   BOLT_CHECK(row != nullptr, "Imported vector is not a RowVector");
   const auto& rowType = row->type()->asRow();
 
   VLOG(1) << "Imported RowVector size: " << row->size()
           << ", number of fields: " << rowType.size();
 
-  // If we have _VALUE_KIND as the first field, drop it - but only if the
-  // original Parquet reader actually exported it. Check if the data actually
-  // exists in the child vector before proceeding.
-  auto firstChild = row->childAt(0);
-  VLOG(1) << "First child vector type: " << firstChild->type()->toString()
-          << ", elements: " << firstChild->size();
   if (rowType.nameOf(0) == "_VALUE_KIND" && rowType.size() > 1) {
     VLOG(1) << "Dropping _VALUE_KIND field";
 
-    // Create a new row vector without the _VALUE_KIND field
     std::vector<VectorPtr> newChildren;
     for (int i = 1; i < rowType.size(); ++i) {
       newChildren.push_back(row->childAt(i));
@@ -306,60 +426,46 @@ std::optional<RowVectorPtr> PaimonDataSource::next(
       newTypes.push_back(rowType.childAt(i));
     }
 
-    const auto& newRowType = ROW(std::move(newNames), std::move(newTypes));
-    auto newRowVec = std::make_shared<RowVector>(
-        pool_, newRowType, nullptr, row->size(), newChildren);
-
-    // Copy null information
-    newRowVec->setNulls(row->nulls());
-
-    VLOG(1) << "New RowVector size: " << newRowVec->size()
-            << ", number of fields: " << newRowType->size();
-    // VLOG(1) << newRowVec->toPrettyString();
-    completedRows_ += newRowVec->size();
-
-    // Re-wrap with outputType_ to ensure internal alias names match upstream
-    // operators' expectations (same as the non-_VALUE_KIND path below).
-    std::vector<VectorPtr> outputColumns;
-    outputColumns.reserve(outputType_->size());
-    for (size_t i = 0; i < outputType_->size(); ++i) {
-      outputColumns.push_back(newRowVec->childAt(i));
-    }
-    return std::make_shared<RowVector>(
+    row = std::make_shared<RowVector>(
         pool_,
-        outputType_,
-        nullptr,
-        newRowVec->size(),
-        std::move(outputColumns));
-  }
-
-  if (VLOG_IS_ON(1)) {
-    auto idColumn = row->childAt(0);
-    auto* idFlat = idColumn->asFlatVector<int64_t>();
-    for (int i = 0; i < row->size(); ++i) {
-      if (idColumn->isNullAt(i)) {
-        VLOG(1) << "Row " << i << ": id = NULL";
-      } else {
-        VLOG(1) << "Row " << i << ": id = " << idFlat->valueAt(i);
-      }
-    }
+        ROW(std::move(newNames), std::move(newTypes)),
+        row->nulls(),
+        row->size(),
+        std::move(newChildren));
   }
 
   completedRows_ += row->size();
-  VLOG(1) << "Returning row vector of size " << row->size();
+  auto rowsRemaining = row->size();
+  BufferPtr remainingIndices;
+  if (remainingFilterExprSet_) {
+    auto filterInput = std::make_shared<RowVector>(
+        pool_, filterRowType_, row->nulls(), row->size(), row->children());
+    rowsRemaining = evaluateRemainingFilter(filterInput);
+    if (rowsRemaining == 0) {
+      return RowVector::createEmpty(outputType_, pool_);
+    }
+    if (rowsRemaining < row->size()) {
+      remainingIndices = filterEvalCtx_.selectedIndices;
+    }
+  }
 
-  // Wrap the imported vector in a new RowVector that uses outputType_ as its
-  // type. The raw Arrow import carries real column names (e.g. "id", "name")
-  // from the Paimon schema, but upstream operators (FilterProject, ProjectNode)
-  // expect internal alias names (e.g. "n0_0", "n0_1") from outputType_. Re-wrap
-  // by index position to preserve the correct naming contract.
   std::vector<VectorPtr> outputColumns;
   outputColumns.reserve(outputType_->size());
   for (size_t i = 0; i < outputType_->size(); ++i) {
-    outputColumns.push_back(row->childAt(i));
+    outputColumns.push_back(
+        exec::wrapChild(rowsRemaining, remainingIndices, row->childAt(i)));
   }
   return std::make_shared<RowVector>(
-      pool_, outputType_, nullptr, row->size(), std::move(outputColumns));
+      pool_, outputType_, nullptr, rowsRemaining, std::move(outputColumns));
+}
+
+vector_size_t PaimonDataSource::evaluateRemainingFilter(
+    RowVectorPtr& rowVector) {
+  filterRows_.resizeFill(rowVector->size());
+  expressionEvaluator_->evaluate(
+      remainingFilterExprSet_.get(), filterRows_, *rowVector, filterResult_);
+  return exec::processFilterResults(
+      filterResult_, filterRows_, filterEvalCtx_, pool_);
 }
 
 } // namespace bytedance::bolt::connector::paimon
