@@ -440,12 +440,15 @@ class BoltConan(ConanFile):
             tc.cache_variables["BOLT_ENABLE_TORCH"] = "OFF"
 
         if self.options.enable_asan:
-            tc.cache_variables["CMAKE_CXX_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
-            tc.cache_variables["CMAKE_C_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
+            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fsanitize=address "
+            tc.cache_variables["CMAKE_C_FLAGS"] += " -fsanitize=address"
+
+        if (
+            str(self.settings.build_type) == "RelWithDebInfo"
+            or self.options.enable_asan
+        ):
+            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fno-omit-frame-pointer "
+            tc.cache_variables["CMAKE_C_FLAGS"] += " -fno-omit-frame-pointer "
 
         tc.cache_variables["TREAT_WARNINGS_AS_ERRORS"] = "OFF"
         tc.cache_variables["ENABLE_ALL_WARNINGS"] = "ON"
