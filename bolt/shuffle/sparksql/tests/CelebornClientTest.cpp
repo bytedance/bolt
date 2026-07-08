@@ -405,7 +405,7 @@ TEST(CelebornReaderStreamIteratorTest, appendsMultiplePushesPerMap) {
 TEST(CelebornReaderStreamIteratorTest, updateMetricsNoop) {
   auto client = std::make_shared<FakeShuffleClient>();
   CelebornReaderStreamIterator iterator(client, 1, {1}, 0, 0, 0, false);
-  EXPECT_NO_THROW(iterator.updateMetrics(0, 0, 0, 0, 0));
+  EXPECT_NO_THROW(iterator.updateMetrics(0, 0, 0, 0, 0, 0, 0, 0));
 }
 
 TEST(CelebornE2ESmokeTest, nativeClientPushAndReadBack) {

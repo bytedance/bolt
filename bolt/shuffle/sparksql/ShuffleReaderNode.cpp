@@ -15,6 +15,8 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
+#include "bolt/common/base/RuntimeMetrics.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
 
@@ -94,6 +96,7 @@ void SparkShuffleReader::init() {
 }
 
 bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
+  NanosecondTimer timerRead(&totalReadTime_);
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
@@ -103,6 +106,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
     // Reuse a single BufferedInputStream by chaining all reader streams into
     // one continuous stream behind a single deserializer.
     if (!columnarBatchDeserializer_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
       auto chainedStream = std::make_shared<ChainedReaderStream>(
           readerStreamIterator_, arrowPool_.get());
       columnarBatchDeserializer_ =
@@ -120,6 +124,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
               hasComplexType_,
               deserializeTime_,
               decompressTime_,
+              mergeTime_,
               isRowBased_,
               zstdCodec_.get(),
               rowBufferPool_.get(),
@@ -139,6 +144,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
     if (!columnarBatchDeserializer_) {
       auto in = readerStreamIterator_->nextStream(arrowPool_.get());
       if (in) {
+        NanosecondTimer timer(&deserializerCreateTime_);
         columnarBatchDeserializer_ =
             std::make_unique<BoltColumnarBatchDeserializer>(
                 std::move(in),
@@ -154,6 +160,7 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
                 hasComplexType_,
                 deserializeTime_,
                 decompressTime_,
+                mergeTime_,
                 isRowBased_,
                 zstdCodec_.get(),
                 rowBufferPool_.get(),
@@ -168,19 +175,33 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
     if (output) {
       return output;
     } else {
+      NanosecondTimer timer(&deserializerDestroyTime_);
       columnarBatchDeserializer_ = nullptr;
     }
   }
 }
 
 void SparkShuffleReader::close() {
-  auto stats = this->stats().rlock();
-  readerStreamIterator_->updateMetrics(
-      stats->outputPositions,
-      stats->outputVectors,
-      decompressTime_,
-      deserializeTime_,
-      stats->getOutputTiming.wallNanos);
+  // Account for the destroy overhead of the last deserializer that is still
+  // alive (e.g. the single reused deserializer in the reuse path).
+  if (columnarBatchDeserializer_) {
+    NanosecondTimer timer(&deserializerDestroyTime_);
+    columnarBatchDeserializer_ = nullptr;
+  }
+
+  {
+    auto stats = this->stats().rlock();
+    readerStreamIterator_->updateMetrics(
+        stats->outputPositions,
+        stats->outputVectors,
+        decompressTime_,
+        deserializeTime_,
+        deserializerCreateTime_,
+        deserializerDestroyTime_,
+        mergeTime_,
+        totalReadTime_);
+  }
+
   if (readerStreamIterator_) {
     readerStreamIterator_->close();
     readerStreamIterator_ = nullptr;

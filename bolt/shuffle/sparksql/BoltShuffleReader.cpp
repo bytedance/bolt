@@ -401,7 +401,7 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
 
   auto payload = std::make_unique<InMemoryPayload>(
       0, isValidityBuffer_, std::move(arrowBuffers));
-
+  NanosecondTimer timer(&mergeTime_);
   for (auto& savedPayload : savedPayloads_.payloads) {
     auto result = InMemoryPayload::merge(
         std::move(payload),
@@ -430,6 +430,7 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
     bool hasComplexType,
     uint64_t& deserializeTime,
     uint64_t& decompressTime,
+    uint64_t& mergeTime,
     bool isRowFormat,
     AdaptiveParallelZstdCodec* zstdCodec,
     RowBufferPool* rowBufferPool,
@@ -445,6 +446,7 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
       hasComplexType_(hasComplexType),
       deserializeTime_(deserializeTime),
       decompressTime_(decompressTime),
+      mergeTime_(mergeTime),
       isRowFormat_(isRowFormat),
       zstdCodec_(zstdCodec),
       rowBufferPool_(rowBufferPool),
@@ -782,6 +784,7 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
       hasComplexType_,
       deserializeTime_,
       decompressTime_,
+      mergeTime_,
       isRowBased,
       zstdCodec_.get(),
       rowBufferPool_.get(),
@@ -798,6 +801,10 @@ int64_t BoltColumnarBatchDeserializerFactory::getDecompressTime() {
 
 int64_t BoltColumnarBatchDeserializerFactory::getDeserializeTime() {
   return deserializeTime_;
+}
+
+int64_t BoltColumnarBatchDeserializerFactory::getMergeTime() {
+  return mergeTime_;
 }
 
 void BoltColumnarBatchDeserializerFactory::initFromSchema() {

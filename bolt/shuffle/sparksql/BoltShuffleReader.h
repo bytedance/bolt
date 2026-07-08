@@ -202,6 +202,7 @@ class BoltColumnarBatchDeserializer {
       bool hasComplexType,
       uint64_t& deserializeTime,
       uint64_t& decompressTime,
+      uint64_t& mergeTime,
       bool isRowFormat = false,
       AdaptiveParallelZstdCodec* zstdCodec = nullptr,
       RowBufferPool* rowBufferPool = nullptr,
@@ -228,6 +229,7 @@ class BoltColumnarBatchDeserializer {
 
   uint64_t& deserializeTime_;
   uint64_t& decompressTime_;
+  uint64_t& mergeTime_;
 
   struct SavedPayload {
     uint64_t size{0};
@@ -278,6 +280,8 @@ class BoltColumnarBatchDeserializerFactory {
   int64_t getDecompressTime();
 
   int64_t getDeserializeTime();
+
+  int64_t getMergeTime();
 
   void setNumPartitions(int32_t numPartitions) {
     numPartitions_ = numPartitions;
@@ -331,6 +335,7 @@ class BoltColumnarBatchDeserializerFactory {
 
   uint64_t deserializeTime_{0};
   uint64_t decompressTime_{0};
+  uint64_t mergeTime_{0};
 
   void initFromSchema();
   // for rowbased shuffle
@@ -370,6 +375,10 @@ class BoltShuffleReader {
 
   int64_t getDeserializeTime() const {
     return factory_->getDeserializeTime();
+  }
+
+  int64_t getMergeTime() const {
+    return factory_->getMergeTime();
   }
 
   arrow::MemoryPool* getPool() const {
