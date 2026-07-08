@@ -389,6 +389,7 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
       bufferSizes[i] += payload->bufferSizeAt(i);
     }
   }
+  NanosecondTimer timer(&mergeTime_);
   std::vector<std::shared_ptr<arrow::Buffer>> arrowBuffers;
   for (int i = 0; i < numBuffers; ++i) {
     auto buffer = arrow::AllocateResizableBuffer(bufferSizes[i], memoryPool_);
@@ -401,7 +402,6 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
 
   auto payload = std::make_unique<InMemoryPayload>(
       0, isValidityBuffer_, std::move(arrowBuffers));
-  NanosecondTimer timer(&mergeTime_);
   for (auto& savedPayload : savedPayloads_.payloads) {
     auto result = InMemoryPayload::merge(
         std::move(payload),
