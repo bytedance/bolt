@@ -402,6 +402,7 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
 
   auto payload = std::make_unique<InMemoryPayload>(
       0, isValidityBuffer_, std::move(arrowBuffers));
+
   for (auto& savedPayload : savedPayloads_.payloads) {
     auto result = InMemoryPayload::merge(
         std::move(payload),

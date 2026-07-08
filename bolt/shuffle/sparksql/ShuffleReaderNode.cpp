@@ -15,7 +15,6 @@
  */
 
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
-#include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 using namespace bytedance::bolt::shuffle::sparksql;
