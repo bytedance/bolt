@@ -19,8 +19,8 @@ on:
         default: ''
 
 env:
-  GLUTEN_REPO: ${{ inputs.gluten_repo || 'zhangxffff/gluten' }}
-  GLUTEN_REF: ${{ inputs.gluten_ref || 'chore/run_gluten_ut' }}
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'taiyang-li/incubator-gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'add_bolt_backend_new' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
@@ -91,7 +91,7 @@ jobs:
           STAMP=$ARROW_DIR/.gluten-15.0.0.stamp
           KEY=$(sha256sum ep/build-velox/src/modify_arrow*.patch \
                           ep/build-velox/src/cmake-compatibility.patch \
-                          dev/build_arrow.sh 2>/dev/null \
+                          dev/build_bolt_arrow.sh 2>/dev/null \
                 | sha256sum | cut -d' ' -f1)
           mkdir -p "$ARROW_DIR"
           (
@@ -100,7 +100,7 @@ jobs:
                && ls $ARROW_DIR/arrow-dataset/15.0.0-gluten/*.jar > /dev/null 2>&1; then
               echo "arrow jars match stamp $KEY — skip rebuild"
             else
-              bash dev/build_arrow.sh
+              bash dev/build_bolt_arrow.sh
               echo "$KEY" > "$STAMP"
             fi
           ) 200> "$ARROW_DIR/.lock"
