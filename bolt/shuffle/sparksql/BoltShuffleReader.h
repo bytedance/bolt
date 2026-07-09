@@ -315,88 +315,90 @@ class BoltColumnarBatchDeserializerFactory {
 
   void setShuffleBufferSize(int32_t shuffleBufferSize) {
     shuffleBufferSize_ = shuffleBufferSize;
-    void setRowFormat(bytedance::bolt::row::RowFormat rowFormat) {
-      rowFormat_ = rowFormat;
-    }
+  }
 
-   private:
-    std::shared_ptr<arrow::Schema> schema_;
-    std::shared_ptr<Codec> codec_;
-    bytedance::bolt::RowTypePtr rowType_;
-    int32_t batchSize_;
-    int32_t shuffleBatchByteSize_;
-    int32_t shuffleBufferSize_{kDefaultShuffleBufferSize};
-    int32_t numPartitions_{0};
-    ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
-    std::string partitioningShortName_;
-    bytedance::bolt::row::RowFormat rowFormat_{
-        bytedance::bolt::row::RowFormat::Dense};
-    arrow::MemoryPool* memoryPool_;
-    bytedance::bolt::memory::MemoryPool* boltPool_;
+  void setRowFormat(bytedance::bolt::row::RowFormat rowFormat) {
+    rowFormat_ = rowFormat;
+  }
 
-    std::vector<bool> isValidityBuffer_;
-    bool hasComplexType_{false};
+ private:
+  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<Codec> codec_;
+  bytedance::bolt::RowTypePtr rowType_;
+  int32_t batchSize_;
+  int32_t shuffleBatchByteSize_;
+  int32_t shuffleBufferSize_{kDefaultShuffleBufferSize};
+  int32_t numPartitions_{0};
+  ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
+  std::string partitioningShortName_;
+  bytedance::bolt::row::RowFormat rowFormat_{
+      bytedance::bolt::row::RowFormat::DENSE};
+  arrow::MemoryPool* memoryPool_;
+  bytedance::bolt::memory::MemoryPool* boltPool_;
 
-    uint64_t deserializeTime_{0};
-    uint64_t decompressTime_{0};
-    uint64_t mergeTime_{0};
+  std::vector<bool> isValidityBuffer_;
+  bool hasComplexType_{false};
 
-    void initFromSchema();
-    // for rowbased shuffle
-    std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_{nullptr};
-    std::shared_ptr<RowBufferPool> rowBufferPool_{nullptr};
-    std::shared_ptr<ShuffleRowToColumnarConverter> row2ColConverter_{nullptr};
-    bool checksumEnabled_{true};
-  };
+  uint64_t deserializeTime_{0};
+  uint64_t decompressTime_{0};
+  uint64_t mergeTime_{0};
 
-  class BoltShuffleReader {
-   public:
-    BoltShuffleReader(
-        std::shared_ptr<arrow::Schema> schema,
-        ShuffleReaderOptions options,
-        arrow::MemoryPool* pool,
-        bytedance::bolt::memory::MemoryPool* boltPool);
+  void initFromSchema();
+  // for rowbased shuffle
+  std::shared_ptr<AdaptiveParallelZstdCodec> zstdCodec_{nullptr};
+  std::shared_ptr<RowBufferPool> rowBufferPool_{nullptr};
+  std::shared_ptr<ShuffleRowToColumnarConverter> row2ColConverter_{nullptr};
+  bool checksumEnabled_{true};
+};
 
-    ~BoltShuffleReader() {}
+class BoltShuffleReader {
+ public:
+  BoltShuffleReader(
+      std::shared_ptr<arrow::Schema> schema,
+      ShuffleReaderOptions options,
+      arrow::MemoryPool* pool,
+      bytedance::bolt::memory::MemoryPool* boltPool);
 
-    // FIXME iterator should be unique_ptr or un-copyable singleton
-    std::unique_ptr<BoltColumnarBatchDeserializer> readStream(
-        std::shared_ptr<arrow::io::InputStream> in) {
-      return factory_->createDeserializer(in);
-    }
+  ~BoltShuffleReader() {}
 
-    arrow::Status close() {
-      return arrow::Status::OK();
-    }
+  // FIXME iterator should be unique_ptr or un-copyable singleton
+  std::unique_ptr<BoltColumnarBatchDeserializer> readStream(
+      std::shared_ptr<arrow::io::InputStream> in) {
+    return factory_->createDeserializer(in);
+  }
 
-    int64_t getDecompressTime() const {
-      return factory_->getDecompressTime();
-    }
+  arrow::Status close() {
+    return arrow::Status::OK();
+  }
 
-    int64_t getIpcTime() const {
-      return ipcTime_;
-    }
+  int64_t getDecompressTime() const {
+    return factory_->getDecompressTime();
+  }
 
-    int64_t getDeserializeTime() const {
-      return factory_->getDeserializeTime();
-    }
+  int64_t getIpcTime() const {
+    return ipcTime_;
+  }
 
-    int64_t getMergeTime() const {
-      return factory_->getMergeTime();
-    }
+  int64_t getDeserializeTime() const {
+    return factory_->getDeserializeTime();
+  }
 
-    arrow::MemoryPool* getPool() const {
-      return factory_->getPool();
-    }
+  int64_t getMergeTime() const {
+    return factory_->getMergeTime();
+  }
 
-   private:
-    arrow::MemoryPool* pool_;
-    int64_t decompressTime_ = 0;
-    int64_t ipcTime_ = 0;
-    int64_t deserializeTime_ = 0;
+  arrow::MemoryPool* getPool() const {
+    return factory_->getPool();
+  }
 
-    std::shared_ptr<arrow::Schema> schema_;
-    std::unique_ptr<BoltColumnarBatchDeserializerFactory> factory_;
-  };
+ private:
+  arrow::MemoryPool* pool_;
+  int64_t decompressTime_ = 0;
+  int64_t ipcTime_ = 0;
+  int64_t deserializeTime_ = 0;
+
+  std::shared_ptr<arrow::Schema> schema_;
+  std::unique_ptr<BoltColumnarBatchDeserializerFactory> factory_;
+};
 
 } // namespace bytedance::bolt::shuffle::sparksql

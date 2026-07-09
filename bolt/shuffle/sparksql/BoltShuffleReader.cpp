@@ -568,9 +568,8 @@ RowVectorPtr BoltColumnarBatchDeserializer::next() {
         "Failed to deserialize BlockPayload: " + result.status().message());
     arrowBuffers = std::move(result.ValueUnsafe());
     if (savedPayloads_.payloads.empty()) {
-      savedPayloads_.save(
-          std::make_unique<InMemoryPayload>(
-              numRows, isValidityBuffer_, std::move(arrowBuffers)));
+      savedPayloads_.save(std::make_unique<InMemoryPayload>(
+          numRows, isValidityBuffer_, std::move(arrowBuffers)));
       arrowBuffers.clear();
       continue;
     }
@@ -596,9 +595,8 @@ RowVectorPtr BoltColumnarBatchDeserializer::next() {
 
   // Save remaining rows.
   if (!arrowBuffers.empty()) {
-    savedPayloads_.save(
-        std::make_unique<InMemoryPayload>(
-            numRows, isValidityBuffer_, std::move(arrowBuffers)));
+    savedPayloads_.save(std::make_unique<InMemoryPayload>(
+        numRows, isValidityBuffer_, std::move(arrowBuffers)));
   }
   return columnarBatch;
 }
@@ -863,21 +861,20 @@ BoltShuffleReader::BoltShuffleReader(
     ShuffleReaderOptions options,
     arrow::MemoryPool* pool,
     bytedance::bolt::memory::MemoryPool* boltPool)
-    : factory_(
-          std::make_unique<BoltColumnarBatchDeserializerFactory>(
-              schema,
-              createCodec(
-                  options.compressionType,
-                  CodecOptions{
-                      getCodecBackend(options.codecBackend),
-                      kDefaultCompressionLevel,
-                      options.checksumEnabled}),
-              bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
-              options.batchSize,
-              options.shuffleBatchByteSize,
-              pool,
-              boltPool,
-              options.checksumEnabled)) {
+    : factory_(std::make_unique<BoltColumnarBatchDeserializerFactory>(
+          schema,
+          createCodec(
+              options.compressionType,
+              CodecOptions{
+                  getCodecBackend(options.codecBackend),
+                  kDefaultCompressionLevel,
+                  options.checksumEnabled}),
+          bytedance::bolt::asRowType(fromBoltTypeToArrowSchema(schema)),
+          options.batchSize,
+          options.shuffleBatchByteSize,
+          pool,
+          boltPool,
+          options.checksumEnabled)) {
   factory_->setNumPartitions(options.numPartitions);
   factory_->setShuffleWriterType(options.forceShuffleWriterType);
   factory_->setpartitioningShortName(options.partitionShortName);
