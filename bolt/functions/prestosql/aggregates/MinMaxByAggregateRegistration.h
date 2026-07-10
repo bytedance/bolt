@@ -33,6 +33,97 @@ inline std::string toString(const std::vector<TypePtr>& types) {
   return out.str();
 }
 
+template <bool IsMaxFunc, typename V>
+struct MinMaxByAggregateFactory {
+  static std::unique_ptr<exec::Aggregate> create(
+      TypePtr resultType,
+      TypePtr compareType,
+      const std::string& errorMessage);
+};
+
+extern template struct MinMaxByAggregateFactory<true, bool>;
+extern template struct MinMaxByAggregateFactory<true, int8_t>;
+extern template struct MinMaxByAggregateFactory<true, int16_t>;
+extern template struct MinMaxByAggregateFactory<true, int32_t>;
+extern template struct MinMaxByAggregateFactory<true, int64_t>;
+extern template struct MinMaxByAggregateFactory<true, int128_t>;
+extern template struct MinMaxByAggregateFactory<true, float>;
+extern template struct MinMaxByAggregateFactory<true, double>;
+extern template struct MinMaxByAggregateFactory<true, StringView>;
+extern template struct MinMaxByAggregateFactory<true, Timestamp>;
+extern template struct MinMaxByAggregateFactory<true, ComplexType>;
+extern template struct MinMaxByAggregateFactory<false, bool>;
+extern template struct MinMaxByAggregateFactory<false, int8_t>;
+extern template struct MinMaxByAggregateFactory<false, int16_t>;
+extern template struct MinMaxByAggregateFactory<false, int32_t>;
+extern template struct MinMaxByAggregateFactory<false, int64_t>;
+extern template struct MinMaxByAggregateFactory<false, int128_t>;
+extern template struct MinMaxByAggregateFactory<false, float>;
+extern template struct MinMaxByAggregateFactory<false, double>;
+extern template struct MinMaxByAggregateFactory<false, StringView>;
+extern template struct MinMaxByAggregateFactory<false, Timestamp>;
+extern template struct MinMaxByAggregateFactory<false, ComplexType>;
+
+template <bool IsMaxFunc, typename V>
+std::unique_ptr<exec::Aggregate> createMinMaxByAggregateForValueType(
+    TypePtr resultType,
+    TypePtr compareType,
+    const std::string& errorMessage) {
+  return MinMaxByAggregateFactory<IsMaxFunc, V>::create(
+      resultType, compareType, errorMessage);
+}
+
+template <bool IsMaxFunc>
+std::unique_ptr<exec::Aggregate> createMinMaxByAggregate(
+    TypePtr resultType,
+    TypePtr valueType,
+    TypePtr compareType,
+    const std::string& errorMessage) {
+  switch (valueType->kind()) {
+    case TypeKind::BOOLEAN:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, bool>(
+          resultType, compareType, errorMessage);
+    case TypeKind::TINYINT:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, int8_t>(
+          resultType, compareType, errorMessage);
+    case TypeKind::SMALLINT:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, int16_t>(
+          resultType, compareType, errorMessage);
+    case TypeKind::INTEGER:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, int32_t>(
+          resultType, compareType, errorMessage);
+    case TypeKind::BIGINT:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, int64_t>(
+          resultType, compareType, errorMessage);
+    case TypeKind::HUGEINT:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, int128_t>(
+          resultType, compareType, errorMessage);
+    case TypeKind::REAL:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, float>(
+          resultType, compareType, errorMessage);
+    case TypeKind::DOUBLE:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, double>(
+          resultType, compareType, errorMessage);
+    case TypeKind::VARCHAR:
+      [[fallthrough]];
+    case TypeKind::VARBINARY:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, StringView>(
+          resultType, compareType, errorMessage);
+    case TypeKind::TIMESTAMP:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, Timestamp>(
+          resultType, compareType, errorMessage);
+    case TypeKind::ARRAY:
+      [[fallthrough]];
+    case TypeKind::MAP:
+      [[fallthrough]];
+    case TypeKind::ROW:
+      return createMinMaxByAggregateForValueType<IsMaxFunc, ComplexType>(
+          resultType, compareType, errorMessage);
+    default:
+      BOLT_FAIL(errorMessage);
+  }
+}
+
 template <
     template <
         typename U,
@@ -100,8 +191,8 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
           return createNArg<NAggregate>(
               resultType, argTypes[0], argTypes[1], errorMessage);
         }
-        return functions::aggregate::create<Aggregate, Comparator, IsMaxFunc>(
-            resultType, argTypes[0], argTypes[1], errorMessage, true);
+        return createMinMaxByAggregate<IsMaxFunc>(
+            resultType, argTypes[0], argTypes[1], errorMessage);
       });
 }
 

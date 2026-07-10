@@ -52,7 +52,7 @@ add_executable(bolt_parquet_filter_test
   ParquetRowGroupFilterTest.cpp
 )
 
-add_test(bolt_parquet_filter_test bolt_parquet_filter_test)
+bolt_add_sharded_gtest(bolt_parquet_filter_test 4)
 target_link_libraries(
   bolt_parquet_filter_test
   bolt_e2e_filter_test_base

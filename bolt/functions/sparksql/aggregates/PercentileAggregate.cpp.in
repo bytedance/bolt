@@ -14,9 +14,20 @@
  * limitations under the License.
  */
 
-#include "bolt/functions/prestosql/aggregates/MinMaxByAggregates.h"
+#include "bolt/functions/sparksql/aggregates/PercentileAggregate.h"
 
-namespace bytedance::bolt::aggregate::prestosql {
-template std::unique_ptr<exec::Aggregate>
-createNArg<MaxByNAggregate, @type@>(TypePtr, TypePtr, const std::string&);
-} // namespace bytedance::bolt::aggregate::prestosql
+namespace bytedance::bolt::functions::aggregate::sparksql::detail {
+
+template <TypeKind Kind>
+std::unique_ptr<exec::Aggregate> PercentileAggregateFactory<Kind>::create(
+    const TypeKind& weightType,
+    bool hasWeight,
+    const TypePtr& resultType,
+    int128_t powerOfScale) {
+  return getPercentileFuncPtr<Kind>(
+      weightType, hasWeight, resultType, powerOfScale);
+}
+
+template struct PercentileAggregateFactory<@type@>;
+
+} // namespace bytedance::bolt::functions::aggregate::sparksql::detail

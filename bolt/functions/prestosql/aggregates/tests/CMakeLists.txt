@@ -49,6 +49,7 @@ set(AGGREGATES_TEST_SRC
     Main.cpp
     MapAccumulatorTest.cpp
     MapSumAggregateTest.cpp
+    MinMaxByAggregationTest.cpp
     MinMaxTest.cpp
     MultiMapAggTest.cpp
     PrestoHasherTest.cpp
@@ -75,19 +76,7 @@ endif()
 
 add_executable(bolt_aggregates_test ${AGGREGATES_TEST_SRC})
 
-add_executable(bolt_minmaxby_aggregates_test Main.cpp MinMaxByAggregationTest.cpp)
-
-add_test(
-  NAME bolt_aggregates_test
-  COMMAND bolt_aggregates_test
-  WORKING_DIRECTORY .
-)
-
-add_test(
-  NAME bolt_minmaxby_aggregates_test
-  COMMAND bolt_minmaxby_aggregates_test
-  WORKING_DIRECTORY .
-)
+bolt_add_sharded_gtest(bolt_aggregates_test 6)
 
 set(BOLT_AGGREGATES_TEST_DEPENDENCIES
     bolt_aggregates
@@ -112,5 +101,3 @@ set(BOLT_AGGREGATES_TEST_DEPENDENCIES
 )
 
 target_link_libraries(bolt_aggregates_test ${BOLT_AGGREGATES_TEST_DEPENDENCIES})
-
-target_link_libraries(bolt_minmaxby_aggregates_test ${BOLT_AGGREGATES_TEST_DEPENDENCIES})

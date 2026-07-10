@@ -14,19 +14,30 @@
  * limitations under the License.
  */
 
-#include "bolt/functions/sparksql/aggregates/PercentileApproxAggregate.h"
+#include "bolt/functions/sparksql/aggregates/MinMaxByAggregateInternal.h"
 
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
-template <typename T>
+template <typename ValueType>
 std::unique_ptr<exec::Aggregate>
-PercentileApproxAggregateFactory<T>::create(
-    bool hasAccuracy,
-    const TypePtr& resultType) {
-  return std::make_unique<PercentileApproxAggregate<T>>(
-      hasAccuracy, resultType);
+MinMaxByAggregateFactory<ValueType>::createMax(
+    TypePtr resultType,
+    TypePtr compareType,
+    const std::string& errorMessage) {
+  return create<MinMaxByAggregateBase, true, SparkComparator, ValueType>(
+      resultType, compareType, errorMessage);
 }
 
-template struct PercentileApproxAggregateFactory<@type@>;
+template <typename ValueType>
+std::unique_ptr<exec::Aggregate>
+MinMaxByAggregateFactory<ValueType>::createMin(
+    TypePtr resultType,
+    TypePtr compareType,
+    const std::string& errorMessage) {
+  return create<MinMaxByAggregateBase, false, SparkComparator, ValueType>(
+      resultType, compareType, errorMessage);
+}
+
+template struct MinMaxByAggregateFactory<@type@>;
 
 } // namespace bytedance::bolt::functions::aggregate::sparksql

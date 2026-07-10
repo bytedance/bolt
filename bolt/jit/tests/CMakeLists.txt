@@ -37,7 +37,7 @@ if(${ENABLE_BOLT_JIT})
     GTest::gtest_main
     Folly::follybenchmark
   )
-  add_test(bolt_row_row_cmp_test bolt_row_row_cmp_test)
+  bolt_add_sharded_gtest(bolt_row_row_cmp_test 3)
 
   add_executable(bolt_row_vec_cmp_test
     RowEqVectorsIRTest.cpp
