@@ -30,6 +30,7 @@
 
 #include "bolt/functions/sparksql/aggregates/CollectListAggregate.h"
 
+#include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/SimpleAggregateAdapter.h"
 #include "bolt/functions/lib/aggregates/ValueList.h"
 using namespace bytedance::bolt::aggregate;
@@ -116,6 +117,101 @@ class CollectListAggregate {
   };
 };
 
+template <typename T>
+class TypedCollectListAggregate {
+ public:
+  using InputType = Row<T>;
+
+  using IntermediateType = Array<T>;
+
+  using OutputType = Array<T>;
+
+  static constexpr bool default_null_behavior_ = false;
+
+  static bool toIntermediate(
+      exec::out_type<Array<T>>& out,
+      exec::optional_arg_type<T> in) {
+    if (in.has_value()) {
+      out.push_back(in.value());
+      return true;
+    }
+    return false;
+  }
+
+  struct AccumulatorType {
+    using Values = std::vector<T, StlAllocator<T>>;
+
+    Values elements_;
+
+    explicit AccumulatorType(
+        HashStringAllocator* allocator,
+        TypedCollectListAggregate* /*fn*/)
+        : elements_{StlAllocator<T>(allocator)} {}
+
+    static constexpr bool is_fixed_size_ = false;
+
+    bool addInput(
+        HashStringAllocator* /*allocator*/,
+        exec::optional_arg_type<T> data) {
+      if (data.has_value()) {
+        elements_.push_back(data.value());
+        return true;
+      }
+      return false;
+    }
+
+    bool combine(
+        HashStringAllocator* /*allocator*/,
+        exec::optional_arg_type<IntermediateType> other) {
+      if (!other.has_value()) {
+        return false;
+      }
+      const auto values = other.value();
+      elements_.reserve(elements_.size() + values.size());
+      for (auto element : values.skipNulls()) {
+        elements_.push_back(element);
+      }
+      return true;
+    }
+
+    bool writeIntermediateResult(
+        bool /*nonNullGroup*/,
+        exec::out_type<IntermediateType>& out) {
+      copyToArrayWriter(out);
+      return true;
+    }
+
+    bool writeFinalResult(
+        bool /*nonNullGroup*/,
+        exec::out_type<OutputType>& out) {
+      copyToArrayWriter(out);
+      return true;
+    }
+
+   private:
+    template <typename TArrayWriter>
+    void copyToArrayWriter(TArrayWriter& out) {
+      out.resetLength();
+      if (elements_.empty()) {
+        return;
+      }
+      out.reserve(elements_.size());
+      for (const auto& value : elements_) {
+        out.push_back(value);
+      }
+    }
+  };
+};
+
+template <typename T>
+std::unique_ptr<exec::Aggregate> createTypedCollectListAggregate(
+    core::AggregationNode::Step step,
+    const std::vector<TypePtr>& argTypes,
+    const TypePtr& resultType) {
+  return std::make_unique<SimpleAggregateAdapter<TypedCollectListAggregate<T>>>(
+      step, argTypes, resultType);
+}
+
 AggregateRegistrationResult registerCollectList(
     const std::string& name,
     bool withCompanionFunctions,
@@ -138,6 +234,31 @@ AggregateRegistrationResult registerCollectList(
           /*config*/) -> std::unique_ptr<exec::Aggregate> {
         BOLT_CHECK_EQ(
             argTypes.size(), 1, "{} takes at most one argument", name);
+        const bool isRawInput = exec::isRawInput(step);
+        const TypePtr& inputType =
+            isRawInput ? argTypes[0] : argTypes[0]->childAt(0);
+        switch (inputType->kind()) {
+          case TypeKind::TINYINT:
+            return createTypedCollectListAggregate<int8_t>(
+                step, argTypes, resultType);
+          case TypeKind::SMALLINT:
+            return createTypedCollectListAggregate<int16_t>(
+                step, argTypes, resultType);
+          case TypeKind::INTEGER:
+            return createTypedCollectListAggregate<int32_t>(
+                step, argTypes, resultType);
+          case TypeKind::BIGINT:
+            return createTypedCollectListAggregate<int64_t>(
+                step, argTypes, resultType);
+          case TypeKind::REAL:
+            return createTypedCollectListAggregate<float>(
+                step, argTypes, resultType);
+          case TypeKind::DOUBLE:
+            return createTypedCollectListAggregate<double>(
+                step, argTypes, resultType);
+          default:
+            break;
+        }
         return std::make_unique<SimpleAggregateAdapter<CollectListAggregate>>(
             step, argTypes, resultType);
       },
