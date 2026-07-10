@@ -480,7 +480,7 @@ class AsyncThreadCtx {
     explicit Guard(AsyncThreadCtx* ctx, int64_t bytes = 0)
         : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        if (!ctx_->in(bytes_)) {
+        if (!ctx_->in(bytes_) || !isAsyncPreloadThread()) {
           ctx_ = nullptr;
         }
       }
