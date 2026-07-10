@@ -416,9 +416,17 @@ class BoltConan(ConanFile):
 
         num_link_job = os.getenv("NUM_LINK_JOB", "4")
 
+        # e.g. `BOLT_LINKER=mold make release`
+        bolt_linker = os.getenv("BOLT_LINKER")
+
         tc = CMakeToolchain(self, generator="Ninja")
 
         tc.cache_variables["MAX_LINK_JOBS"] = num_link_job
+        if bolt_linker:
+            use_ld = f"-fuse-ld={bolt_linker}"
+            tc.cache_variables["CMAKE_EXE_LINKER_FLAGS"] = use_ld
+            tc.cache_variables["CMAKE_SHARED_LINKER_FLAGS"] = use_ld
+            tc.cache_variables["CMAKE_MODULE_LINKER_FLAGS"] = use_ld
 
         if str(self.settings.arch) in ["x86", "x86_64"]:
             flags = (
