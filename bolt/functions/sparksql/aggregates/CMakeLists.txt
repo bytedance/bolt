@@ -61,20 +61,6 @@ target_link_libraries(
   fmt::fmt
 )
 
-if(${BOLT_BUILD_BENCHMARKS})
-  add_executable(
-    bolt_collect_list_aggregate_bm
-    CollectListAggregateBenchmark.cpp
-  )
-
-  target_link_libraries(
-    bolt_collect_list_aggregate_bm
-    bolt_engine
-    bolt_functions_spark_aggregates
-    ${FOLLY_BENCHMARK}
-  )
-endif()
-
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
