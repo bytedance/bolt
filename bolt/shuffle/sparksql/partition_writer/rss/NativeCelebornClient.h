@@ -40,6 +40,9 @@ class NativeCelebornClient : public RssClient {
   int32_t pushPartitionData(int32_t partitionId, char* bytes, int64_t size)
       override;
 
+  int32_t mergePartitionData(int32_t partitionId, char* bytes, int64_t size)
+      override;
+
   void stop() override;
 
  private:

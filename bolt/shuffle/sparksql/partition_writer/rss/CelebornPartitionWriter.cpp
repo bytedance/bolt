@@ -92,12 +92,18 @@ arrow::Status CelebornPartitionWriter::evict(
   RETURN_NOT_OK(payload->serialize(celebornBufferOs.get()));
   payload = nullptr; // Invalidate payload immediately.
 
-  // Push.
+  // Push. Small payloads go through mergeData so Celeborn coalesces them
+  // per worker before hitting the wire; large payloads bypass the merge
+  // buffer and push directly. Matches Gluten's Java client behavior.
   ARROW_ASSIGN_OR_RAISE(auto buffer, celebornBufferOs->Finish());
-  bytesEvicted_[partitionId] += celebornClient_->pushPartitionData(
-      partitionId,
-      reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data())),
-      buffer->size());
+  auto* bufBytes =
+      reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data()));
+  const int64_t bufSize = buffer->size();
+  const bool useMerge =
+      options_.celebornMergeEnabled && bufSize <= options_.pushBufferMaxSize;
+  bytesEvicted_[partitionId] += useMerge
+      ? celebornClient_->mergePartitionData(partitionId, bufBytes, bufSize)
+      : celebornClient_->pushPartitionData(partitionId, bufBytes, bufSize);
   return arrow::Status::OK();
 }
 
@@ -166,10 +172,14 @@ arrow::Status CelebornPartitionWriter::evict(
         payload = nullptr; // Invalidate payload immediately.
 
         ARROW_ASSIGN_OR_RAISE(auto buffer, celebornBufferOs->Finish());
-        bytesEvicted_[pid] += celebornClient_->pushPartitionData(
-            pid,
-            reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data())),
-            buffer->size());
+        auto* bufBytes =
+            reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data()));
+        const int64_t bufSize = buffer->size();
+        const bool useMerge = options_.celebornMergeEnabled &&
+            bufSize <= options_.pushBufferMaxSize;
+        bytesEvicted_[pid] += useMerge
+            ? celebornClient_->mergePartitionData(pid, bufBytes, bufSize)
+            : celebornClient_->pushPartitionData(pid, bufBytes, bufSize);
         startIndex += slicedNumRows;
       } while (startIndex < totalRowCount);
       BOLT_CHECK(startIndex == totalRowCount);

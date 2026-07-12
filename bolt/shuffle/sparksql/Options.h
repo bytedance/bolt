@@ -134,6 +134,12 @@ struct PartitionWriterOptions {
 
   int32_t pushBufferMaxSize = kDefaultShuffleWriterBufferSize;
 
+  // When true, CelebornPartitionWriter routes payloads <= pushBufferMaxSize
+  // through RssClient::mergePartitionData (Celeborn-side batching) and
+  // larger payloads through pushPartitionData. When false, every payload
+  // goes through pushPartitionData (legacy behavior).
+  bool celebornMergeEnabled = true;
+
   int32_t shuffleBufferSize = kDefaultShuffleBatchByteSize;
 
   int64_t rowvectorModeCompressionMinColumns =

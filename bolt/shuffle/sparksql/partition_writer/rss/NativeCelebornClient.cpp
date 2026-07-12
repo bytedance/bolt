@@ -60,6 +60,28 @@ int32_t NativeCelebornClient::pushPartitionData(
       numPartitions_);
 }
 
+int32_t NativeCelebornClient::mergePartitionData(
+    int32_t partitionId,
+    char* bytes,
+    int64_t size) {
+  BOLT_CHECK(
+      !stopped_,
+      "Cannot merge data after NativeCelebornClient has been stopped");
+  // Celeborn's mergeData buffers per worker-address-pair and auto-flushes
+  // when the accumulator exceeds celeborn.client.push.buffer.max.size.
+  // Any remaining batches are drained by mapperEnd() in stop().
+  return shuffleClient_->mergeData(
+      shuffleId_,
+      mapId_,
+      attemptId_,
+      partitionId,
+      reinterpret_cast<const uint8_t*>(bytes),
+      0,
+      size,
+      numMappers_,
+      numPartitions_);
+}
+
 void NativeCelebornClient::stop() {
   BOLT_CHECK(
       !stopped_,

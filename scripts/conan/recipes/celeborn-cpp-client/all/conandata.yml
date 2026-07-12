@@ -13,7 +13,7 @@
 # limitations under the License.
 
 patches:
-  "main-20251212":
+  "main-20260514":
       - patch_file: "patches/cmake.patch"
         patch_description: "changes in CMakeLists.txt"
         patch_type: "conan"

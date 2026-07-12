@@ -15,8 +15,8 @@ inside the development container.
 
 ## Environment variables
 
-- `BOLT_CELEBORN_GIT_REPO` (default `https://github.com/apache/celeborn.git`)
-- `BOLT_CELEBORN_GIT_REF` (default `81d89f3`, aligned with cpp-client recipe)
+- `BOLT_CELEBORN_GIT_REPO` (default `https://github.com/afterincomparableyum/celeborn.git`)
+- `BOLT_CELEBORN_GIT_REF` (default `2e13df97aba3e25d80f5562fd4c0c8a3b34beb43`, aligned with cpp-client recipe)
 - `BOLT_CELEBORN_MASTER_HOST` (default `127.0.0.1`)
 - `BOLT_CELEBORN_MASTER_PORT` (default `19097`)
 - `BOLT_CELEBORN_NUM_WORKERS` (default `$(nproc)`, number of worker instances on localhost)

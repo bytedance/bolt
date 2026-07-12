@@ -40,6 +40,14 @@ class RssClient {
   virtual int32_t
   pushPartitionData(int32_t partitionId, char* bytes, int64_t size) = 0;
 
+  // Buffer the payload client-side; the underlying client coalesces and
+  // flushes via pushMergedData / mapperEnd. Default delegates to
+  // pushPartitionData so backends without merge support keep working.
+  virtual int32_t
+  mergePartitionData(int32_t partitionId, char* bytes, int64_t size) {
+    return pushPartitionData(partitionId, bytes, size);
+  }
+
   virtual void stop() = 0;
 };
 

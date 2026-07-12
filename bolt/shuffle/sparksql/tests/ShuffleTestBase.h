@@ -67,6 +67,7 @@ struct ShuffleTestParam {
   int32_t numBatches = 4;
   int32_t shuffleBufferSize = kDefaultShuffleWriterBufferSize;
   bool verifyOutput = true;
+  bool celebornMergeEnabled = true;
 
   std::string toString() const;
 

@@ -29,21 +29,32 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
   const std::vector<PartitionWriterType> writerTypes = {
       PartitionWriterType::kLocal, PartitionWriterType::kCeleborn};
 
+  // Only Celeborn honors celebornMergeEnabled; sweeping both values for
+  // kLocal would just duplicate test cases.
+  const std::vector<bool> celebornMergeOptions = {true, false};
+
   for (auto partitioning : partitionings) {
     for (auto shuffleMode : shuffleModes) {
       for (auto writerType : writerTypes) {
         for (auto dataTypeGroup : dataGroups) {
           for (auto numPartitions : partitionNumbers) {
             for (auto numMappers : mapperNumbers) {
-              auto param = ShuffleTestParam{
-                  partitioning,
-                  shuffleMode,
-                  writerType,
-                  dataTypeGroup,
-                  numPartitions,
-                  numMappers};
-              if (param.isSupported()) {
-                params.push_back(param);
+              const auto mergeFlags =
+                  writerType == PartitionWriterType::kCeleborn
+                  ? celebornMergeOptions
+                  : std::vector<bool>{true};
+              for (auto mergeEnabled : mergeFlags) {
+                auto param = ShuffleTestParam{
+                    partitioning,
+                    shuffleMode,
+                    writerType,
+                    dataTypeGroup,
+                    numPartitions,
+                    numMappers};
+                param.celebornMergeEnabled = mergeEnabled;
+                if (param.isSupported()) {
+                  params.push_back(param);
+                }
               }
             }
           }

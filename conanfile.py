@@ -280,7 +280,7 @@ class BoltConan(ConanFile):
         self.requires("date/3.0.4-bolt", transitive_headers=True, transitive_libs=True)
         self.requires("libbacktrace/cci.20210118")
         if self.options.get_safe("spark_compatible"):
-            self.requires("celeborn-cpp-client/main-20251212")
+            self.requires("celeborn-cpp-client/main-20260514")
         if self.options.get_safe("enable_paimon"):
             self.requires("paimon-cpp/0.0.4-bolt")
         if self.options.get_safe("enable_testutil"):

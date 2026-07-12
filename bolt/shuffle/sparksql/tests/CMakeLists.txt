@@ -23,7 +23,6 @@ target_link_libraries(
         bolt_testutils
         glog::glog
         GTest::gtest
-        GTest::gtest_main
 )
 
 add_test(

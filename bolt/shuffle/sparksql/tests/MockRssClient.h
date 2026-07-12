@@ -27,10 +27,17 @@ class MockRssClient : public RssClient {
   // Simple implementation to store data
   int32_t pushPartitionData(int32_t partitionId, char* bytes, int64_t size)
       override {
-    if (data_.find(partitionId) == data_.end()) {
-      data_[partitionId] = std::vector<char>();
-    }
-    data_[partitionId].insert(data_[partitionId].end(), bytes, bytes + size);
+    pushCalls_++;
+    pushBytes_ += size;
+    appendData(partitionId, bytes, size);
+    return size;
+  }
+
+  int32_t mergePartitionData(int32_t partitionId, char* bytes, int64_t size)
+      override {
+    mergeCalls_++;
+    mergeBytes_ += size;
+    appendData(partitionId, bytes, size);
     return size;
   }
 
@@ -40,9 +47,35 @@ class MockRssClient : public RssClient {
     return data_;
   }
 
+  int64_t pushCalls() const {
+    return pushCalls_;
+  }
+  int64_t mergeCalls() const {
+    return mergeCalls_;
+  }
+  int64_t pushBytes() const {
+    return pushBytes_;
+  }
+  int64_t mergeBytes() const {
+    return mergeBytes_;
+  }
+
  public:
   // Helper to store data for verification or reading
   std::map<int32_t, std::vector<char>> data_;
+
+ private:
+  void appendData(int32_t partitionId, char* bytes, int64_t size) {
+    if (data_.find(partitionId) == data_.end()) {
+      data_[partitionId] = std::vector<char>();
+    }
+    data_[partitionId].insert(data_[partitionId].end(), bytes, bytes + size);
+  }
+
+  int64_t pushCalls_{0};
+  int64_t mergeCalls_{0};
+  int64_t pushBytes_{0};
+  int64_t mergeBytes_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

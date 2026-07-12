@@ -161,14 +161,15 @@ std::string ShuffleTestParam::toString() const {
   auto memStr = fmt::format("{}{}", v, units[u]);
 
   return fmt::format(
-      "{}_{}_{}_{}_M{}_P{}_{}",
+      "{}_{}_{}_{}_M{}_P{}_{}_merge{}",
       partitioning,
       shuffleModeToString(shuffleMode),
       writerTypeToString(writerType),
       dataTypeGroupToString(dataTypeGroup),
       numMappers,
       numPartitions,
-      memStr);
+      memStr,
+      celebornMergeEnabled ? "On" : "Off");
 }
 
 bool ShuffleTestParam::isSupported() const {
@@ -514,6 +515,8 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
     writerOptions.forceShuffleWriterType = param.shuffleMode;
     writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;
+    writerOptions.partitionWriterOptions.celebornMergeEnabled =
+        param.celebornMergeEnabled;
     writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
     writerOptions.partitionWriterOptions.shuffleBufferSize =
         param.shuffleBufferSize;

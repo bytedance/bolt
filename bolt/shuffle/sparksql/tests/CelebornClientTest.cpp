@@ -17,6 +17,7 @@
 #include <arrow/buffer.h>
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
+#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
 #include <celeborn/client/ShuffleClient.h>
@@ -206,6 +207,43 @@ class FakeShuffleClient final : public celeborn::client::ShuffleClient {
     return 0;
   }
 
+  // Records merged batches in the same payload map as pushData so reader-side
+  // tests don't have to distinguish; bumps a separate counter callers can
+  // inspect to verify dispatch.
+  int mergeData(
+      int shuffleId,
+      int mapId,
+      int attemptId,
+      int partitionId,
+      const uint8_t* data,
+      size_t offset,
+      size_t length,
+      int numMappers,
+      int numPartitions) override {
+    mergeCallCount_++;
+    return pushData(
+        shuffleId,
+        mapId,
+        attemptId,
+        partitionId,
+        data,
+        offset,
+        length,
+        numMappers,
+        numPartitions);
+  }
+
+  void pushMergedData(int, int, int) override {
+    pushMergedDataCallCount_++;
+  }
+
+  int64_t mergeCallCount() const {
+    return mergeCallCount_;
+  }
+  int64_t pushMergedDataCallCount() const {
+    return pushMergedDataCallCount_;
+  }
+
   void mapperEnd(int, int, int, int) override {}
 
   void cleanup(int, int, int) override {}
@@ -248,6 +286,9 @@ class FakeShuffleClient final : public celeborn::client::ShuffleClient {
   bool cleanupShuffle(int) override {
     return true;
   }
+
+  void excludeFailedFetchLocation(const std::string&, const std::exception&)
+      override {}
 
   void shutdown() override {}
 
@@ -294,7 +335,10 @@ class FakeShuffleClient final : public celeborn::client::ShuffleClient {
         attemptNumber,
         startMapIndex,
         endMapIndex,
-        needCompression);
+        needCompression,
+        std::make_shared<
+            celeborn::client::CelebornInputStream::FetchExcludedWorkers>(),
+        this);
   }
 
   std::shared_ptr<celeborn::conf::CelebornConf> conf_;
@@ -302,6 +346,8 @@ class FakeShuffleClient final : public celeborn::client::ShuffleClient {
   int knownNumMappers_{0};
   int knownNumPartitions_{0};
   std::map<MapKey, std::vector<std::vector<uint8_t>>> payloadByMapKey_;
+  int64_t mergeCallCount_{0};
+  int64_t pushMergedDataCallCount_{0};
 };
 // Verifies iterator returns nullptr when no partitions or after close.
 TEST(CelebornReaderStreamIteratorTest, ReturnsNullWhenEmptyOrClosed) {
@@ -536,4 +582,55 @@ TEST(NativeCelebornClientTest, testStopTriggeredTwice) {
       bytedance::bolt::BoltRuntimeError);
 }
 
+// Verifies NativeCelebornClient::mergePartitionData routes to ShuffleClient::
+// mergeData (not pushData), and that mergeData calls after stop are rejected.
+TEST(NativeCelebornClientTest, mergePartitionDataRoutesToMergeData) {
+  auto client = std::make_shared<FakeShuffleClient>();
+  constexpr int kShuffleId = 16;
+  constexpr int32_t kPartitionId = 0;
+  constexpr int kMapId = 0;
+  constexpr int kAttemptId = 0;
+  constexpr int kNumMappers = 1;
+  constexpr int kNumPartitions = 1;
+
+  NativeCelebornClient nativeClient(
+      client, kShuffleId, kMapId, kAttemptId, kNumMappers, kNumPartitions);
+
+  std::string payload = "small-merged-batch";
+  nativeClient.mergePartitionData(
+      kPartitionId, payload.data(), static_cast<int64_t>(payload.size()));
+
+  EXPECT_EQ(client->mergeCallCount(), 1);
+
+  nativeClient.stop();
+  EXPECT_THROW(
+      nativeClient.mergePartitionData(kPartitionId, payload.data(), 1),
+      bytedance::bolt::BoltRuntimeError);
+}
+
+// Verifies RssClient's default mergePartitionData delegates to
+// pushPartitionData so backends that don't override it keep working unchanged.
+TEST(RssClientTest, defaultMergeDelegatesToPush) {
+  struct PushOnlyClient : public RssClient {
+    int32_t pushPartitionData(int32_t, char*, int64_t size) override {
+      pushBytes += size;
+      return static_cast<int32_t>(size);
+    }
+    void stop() override {}
+    int64_t pushBytes{0};
+  };
+
+  PushOnlyClient client;
+  char buf[8] = {0};
+  EXPECT_EQ(client.mergePartitionData(0, buf, sizeof(buf)), 8);
+  EXPECT_EQ(client.pushBytes, 8);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  // todo: use folly::Init init after upgrade folly lib
+  folly::init(&argc, &argv, false);
+  return RUN_ALL_TESTS();
+}

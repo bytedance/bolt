@@ -20,8 +20,8 @@
 # Build directory is resolved as _build/<build-type>.
 #
 # Environment variables (all optional):
-#   BOLT_CELEBORN_GIT_REPO             - Celeborn git repo URL (default: https://github.com/apache/celeborn.git)
-#   BOLT_CELEBORN_GIT_REF              - git ref to build (default: 81d89f3)
+#   BOLT_CELEBORN_GIT_REPO             - Celeborn git repo URL (default: https://github.com/afterincomparableyum/celeborn.git)
+#   BOLT_CELEBORN_GIT_REF              - git ref to build (default: 2e13df97aba3e25d80f5562fd4c0c8a3b34beb43)
 #   BOLT_CELEBORN_MASTER_HOST           - master bind host (default: 127.0.0.1)
 #   BOLT_CELEBORN_MASTER_PORT           - master bind port (default: 19097)
 #   BOLT_CELEBORN_NUM_WORKERS          - number of worker instances (default: $(nproc))
@@ -42,8 +42,8 @@ PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)
 RUNTIME_DIR="/tmp/bolt-celeborn-runtime-${USER:-unknown}"
 CELEBORN_HOME="${RUNTIME_DIR}/celeborn-bin"
 CELEBORN_SOURCE_HOME="${RUNTIME_DIR}/celeborn-src"
-CELEBORN_GIT_REPO=${BOLT_CELEBORN_GIT_REPO:-"https://github.com/apache/celeborn.git"}
-CELEBORN_GIT_REF=${BOLT_CELEBORN_GIT_REF:-"81d89f3"}
+CELEBORN_GIT_REPO=${BOLT_CELEBORN_GIT_REPO:-"https://github.com/afterincomparableyum/celeborn.git"}
+CELEBORN_GIT_REF=${BOLT_CELEBORN_GIT_REF:-"2e13df97aba3e25d80f5562fd4c0c8a3b34beb43"}
 
 MASTER_HOST=${BOLT_CELEBORN_MASTER_HOST:-"127.0.0.1"}
 MASTER_PORT=${BOLT_CELEBORN_MASTER_PORT:-19097}
