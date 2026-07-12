@@ -67,6 +67,8 @@ class ValueList {
       vector_size_t size,
       HashStringAllocator* allocator);
 
+  void appendStringView(StringView value, HashStringAllocator* allocator);
+
   int32_t size() const {
     return size_;
   }
@@ -159,6 +161,8 @@ class ValueListReader {
   explicit ValueListReader(ValueList& values);
 
   bool next(BaseVector& output, vector_size_t outputIndex);
+
+  bool nextStringView(BaseVector& output, vector_size_t outputIndex);
 
  private:
   const vector_size_t size_;
