@@ -47,14 +47,21 @@
 #include "bolt/dwio/parquet/arrow/Schema.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
+#include "bolt/version/version.h"
 
-// Define the parquet created by version.
+// Define the parquet created_by value. Keep this compatible with parquet-mr's
+// VersionParser because Java readers use it to validate binary statistics.
 
 #ifdef CREATED_BY_VERSION
 #undef CREATED_BY_VERSION
 #endif
 
-#define CREATED_BY_VERSION "parquet-cpp-bolt"
+#ifndef BOLT_PARQUET_CREATED_BY_VERSION
+#define BOLT_PARQUET_CREATED_BY_VERSION "1.0.0"
+#endif
+
+#define CREATED_BY_VERSION \
+  "parquet-cpp-bolt version " BOLT_PARQUET_CREATED_BY_VERSION
 namespace bytedance::bolt::parquet::arrow {
 
 using bytedance::bolt::parquet::arrow::util::CodecOptions;
@@ -239,7 +246,10 @@ static constexpr int64_t DEFAULT_MAX_ROW_GROUP_LENGTH = 1024 * 1024;
 static constexpr bool DEFAULT_ARE_STATISTICS_ENABLED = true;
 static constexpr int64_t DEFAULT_MAX_STATISTICS_SIZE = 4096;
 static constexpr Encoding::type DEFAULT_ENCODING = Encoding::UNKNOWN;
-static const char DEFAULT_CREATED_BY[] = CREATED_BY_VERSION;
+static const std::string CREATED_BY_BUILD =
+    std::string(" (build ") + ::bytedance::bolt::BuildInfo::shortHash + ")";
+static const std::string DEFAULT_CREATED_BY =
+    std::string(CREATED_BY_VERSION) + CREATED_BY_BUILD;
 static constexpr Compression::type DEFAULT_COMPRESSION_TYPE =
     Compression::UNCOMPRESSED;
 static constexpr bool DEFAULT_IS_PAGE_INDEX_ENABLED = false;
