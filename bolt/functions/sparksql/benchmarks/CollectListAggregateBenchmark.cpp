@@ -75,8 +75,8 @@ class CollectListAggregateBenchmark {
     std::vector<RowVectorPtr> batches;
     batches.reserve(kPlanVectors);
     for (int32_t batch = 0; batch < kPlanVectors; ++batch) {
-      auto keys = BaseVector::create<FlatVector<int64_t>>(
-          BIGINT(), kRows, pool_.get());
+      auto keys =
+          BaseVector::create<FlatVector<int64_t>>(BIGINT(), kRows, pool_.get());
       auto values =
           BaseVector::create<FlatVector<TValue>>(valueType, kRows, pool_.get());
       auto* rawKeys = keys->mutableRawValues();
@@ -96,8 +96,7 @@ class CollectListAggregateBenchmark {
   }
 
   std::vector<RowVectorPtr> makeBigintPlanInput() {
-    return makePlanInput<int64_t>(
-        BIGINT(), [](int64_t seed) { return seed; });
+    return makePlanInput<int64_t>(BIGINT(), [](int64_t seed) { return seed; });
   }
 
   std::vector<RowVectorPtr> makeStringPlanInput() {
