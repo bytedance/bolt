@@ -129,7 +129,10 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
           pidArr, rv->size(), row2Partition_, partition2RowCount_));
       strippedRv = getStrippedRowVectorWrapper(*rv);
     }
-    auto rowVectorWithStats = rowConverter_->getWithStats(strippedRv);
+    auto rowVectorWithStats = [&]() {
+      bytedance::bolt::NanosecondTimer timer(&convertTime_);
+      return rowConverter_->getWithStats(strippedRv);
+    }();
     if (!boltPool_->maybeReserve(rowVectorWithStats.getTotalMemorySize())) {
       if (boltPool_->reservedBytes() >= kMinMemLimit) {
         RETURN_NOT_OK(tryEvict());
@@ -160,8 +163,8 @@ arrow::Status BoltRowBasedSortShuffleWriter::initFromRowVector(
     const bytedance::bolt::RowVector& rv) {
   // rv is not stripped
   auto&& rowType = getStrippedRowVectorType(rv);
-  rowConverter_ =
-      std::make_unique<ShuffleColumnarToRowConverter>(rowType, boltPool_);
+  rowConverter_ = std::make_unique<ShuffleColumnarToRowConverter>(
+      rowType, boltPool_, options_.rowFormat);
   sortedRows_.resize(numPartitions_);
   partitionBytes_.resize(numPartitions_, 0);
   return arrow::Status::OK();

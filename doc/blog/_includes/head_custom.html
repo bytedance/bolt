@@ -71,7 +71,7 @@
     }
 
     var blogLink = Array.from(siteNav.querySelectorAll('a')).find(function (link) {
-      return link.textContent.trim() === 'Blog' || /\/blog\.html$/.test(link.pathname);
+      return link.textContent.trim() === 'Blog' || /\/blog\.html$/.test(link.pathname) || /\/blog\/?$/.test(link.pathname);
     });
 
     var blogItem = blogLink ? blogLink.closest('li') : null;
@@ -83,7 +83,7 @@
 
       blogItem = document.createElement('li');
       blogItem.className = 'nav-list-item';
-      blogItem.innerHTML = '<a class="nav-list-link" href="{{ "/blog.html" | relative_url }}">Blog</a>';
+      blogItem.innerHTML = '<a class="nav-list-link" href="{{ "/blog/" | relative_url }}">Blog</a>';
       rootList.appendChild(blogItem);
       blogLink = blogItem.querySelector('a');
     }
@@ -156,7 +156,7 @@
 
       var moreLink = document.createElement('a');
       moreLink.className = 'nav-list-link blog-view-all-link';
-      moreLink.href = blogLink ? blogLink.getAttribute('href') : '{{ "/blog.html" | relative_url }}';
+      moreLink.href = '{{ "/blog/" | relative_url }}';
       moreLink.textContent = 'View all ' + posts.length + ' posts \u2192';
 
       moreItem.appendChild(moreLink);

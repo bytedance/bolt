@@ -25,7 +25,15 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-bolt_add_library(bolt_row_fast CompactRow.cpp UnsafeRowFast.cpp)
+bolt_add_library(
+  bolt_row_fast
+  CompactRow.cpp
+  UnsafeRowFast.cpp
+  dense/DenseRow.cpp
+  dense/DenseRowGeneralEncode.cpp
+  dense/DenseRowGeneralDecode.cpp
+  dense/DenseRowScalarEncode.cpp
+  dense/DenseRowScalarDecode.cpp)
 
 target_link_libraries(bolt_row_fast PUBLIC bolt_vector)
 

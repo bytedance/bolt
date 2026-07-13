@@ -31,36 +31,46 @@
 
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include <bolt/common/base/SuccinctPrinter.h>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 
 #include "bolt/row/CompactRow.h"
+#include "bolt/row/dense/DenseRow.h"
 using namespace bytedance;
 namespace bytedance::bolt::shuffle::sparksql {
 
 void ShuffleColumnarToRowConverter::init(
     const bytedance::bolt::RowTypePtr& rowType) {
-  if (auto fixedRowSize = bolt::row::CompactRow::fixedRowSize(rowType)) {
-    fixedRowSize_ = fixedRowSize.value();
+  if (rowFormat_ == row::RowFormat::COMPACT) {
+    if (auto fixedRowSize = bolt::row::CompactRow::fixedRowSize(rowType)) {
+      fixedRowSize_ = fixedRowSize.value();
+    }
   }
 }
-
 ShuffleColumnarToRowConverter::RowVectorWithStats
 ShuffleColumnarToRowConverter::getWithStats(
     const bytedance::bolt::RowVectorPtr& rowVector) {
   RowVectorWithStats stats;
-  stats.compactRow = std::make_shared<bolt::row::CompactRow>(rowVector);
   stats.numRows = rowVector->size();
   stats.totalMemorySize = 0;
   auto numRows = rowVector->size();
-  if (fixedRowSize_) {
-    stats.totalMemorySize = fixedRowSize_ * numRows;
-  } else {
-    for (auto i = 0; i < numRows; ++i) {
-      stats.totalMemorySize += stats.compactRow->rowSize(i);
+  if (rowFormat_ == row::RowFormat::COMPACT) {
+    stats.compactRow = std::make_unique<row::CompactRow>(rowVector);
+    if (fixedRowSize_) {
+      stats.totalMemorySize = fixedRowSize_ * numRows;
+    } else {
+      for (auto i = 0; i < numRows; ++i) {
+        stats.totalMemorySize += stats.compactRow->rowSize(i);
+      }
     }
+  } else {
+    stats.denseRow = std::make_unique<row::DenseRow>(rowVector);
+    stats.totalMemorySize = static_cast<int64_t>(stats.denseRow->totalSize());
   }
-  // layout : rowSize | unsafeRow
+  // layout : rowSize | rowData
   stats.totalMemorySize += numRows * kSizeOfRowHeader;
   return stats;
 }
@@ -70,13 +80,33 @@ void ShuffleColumnarToRowConverter::convert(
     const std::vector<uint32_t>& indexes,
     std::vector<std::vector<uint8_t*>>& sortedRows,
     std::vector<int64_t>& partitionBytes) {
-  auto numRows = rowVector.numRows;
+  const auto numRows = rowVector.numRows;
   totalBufferSize_ += rowVector.totalMemorySize;
   boltBuffers_.emplace_back(
       RowInternalBuffer::allocate(rowVector.totalMemorySize, boltPool_));
   bufferAddress_ = boltBuffers_.back()->mutable_data();
-  memset(bufferAddress_, 0, sizeof(int8_t) * rowVector.totalMemorySize);
   averageRowSize_ = numRows ? (rowVector.totalMemorySize / numRows) : 0;
+
+  if (rowFormat_ == row::RowFormat::DENSE) {
+    const std::vector<size_t>& rowSizesVec = rowVector.denseRow->rowSizes();
+    std::vector<size_t> bodyOffsets(numRows);
+    uint32_t cursor = 0;
+    for (int64_t r = 0; r < numRows; ++r) {
+      const auto rowSize = static_cast<int32_t>(rowSizesVec[r]);
+      *reinterpret_cast<int32_t*>(bufferAddress_ + cursor) = rowSize;
+      bodyOffsets[r] = cursor + kSizeOfRowHeader;
+      sortedRows[indexes[r]].push_back(bufferAddress_ + cursor);
+      partitionBytes[indexes[r]] += rowSize + kSizeOfRowHeader;
+      cursor += static_cast<uint32_t>(rowSize) + kSizeOfRowHeader;
+    }
+
+    rowVector.denseRow->serialize(
+        bufferAddress_,
+        folly::Range<const size_t*>(bodyOffsets.data(), bodyOffsets.size()));
+    return;
+  }
+
+  std::memset(bufferAddress_, 0, rowVector.totalMemorySize);
   size_t offset = kSizeOfRowHeader;
   for (auto i = 0; i < numRows; ++i) {
     auto rowSize =

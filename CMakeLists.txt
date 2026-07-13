@@ -625,6 +625,7 @@ find_package(roaring REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/bolt)
+include_directories(${CMAKE_BINARY_DIR}/gen_cpp)
 
 if(NOT BOLT_DISABLE_GOOGLETEST)
   find_package(GTest CONFIG REQUIRED)

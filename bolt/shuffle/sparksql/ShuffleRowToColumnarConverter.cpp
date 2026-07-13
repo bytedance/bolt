@@ -31,18 +31,22 @@
 
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/row/CompactRow.h"
+#include "bolt/row/dense/DenseRow.h"
 #include "bolt/vector/arrow/Bridge.h"
 using namespace bytedance::bolt;
 namespace bytedance::bolt::shuffle::sparksql {
 ShuffleRowToColumnarConverter::ShuffleRowToColumnarConverter(
     const bytedance::bolt::RowTypePtr& rowType,
-    memory::MemoryPool* memoryPool)
-    : rowType_(rowType), pool_(memoryPool) {}
+    memory::MemoryPool* memoryPool,
+    bytedance::bolt::row::RowFormat rowFormat)
+    : rowType_(rowType), pool_(memoryPool), rowFormat_(rowFormat) {}
 
 RowVectorPtr ShuffleRowToColumnarConverter::convert(
     std::vector<std::string_view>& rows) {
-  auto vp = row::CompactRow::deserialize(rows, rowType_, pool_);
-  return std::dynamic_pointer_cast<RowVector>(vp);
+  if (rowFormat_ == row::RowFormat::COMPACT) {
+    return row::CompactRow::deserialize(rows, rowType_, pool_);
+  }
+  return row::DenseRow::deserialize(rows, rowType_, pool_);
 }
 
 RowVectorPtr ShuffleRowToColumnarConverter::convertToComposite(
