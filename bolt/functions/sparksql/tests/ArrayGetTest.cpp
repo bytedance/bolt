@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <limits>
 #include <optional>
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 
@@ -48,6 +49,15 @@ class ArrayGetTest : public SparkFunctionBaseTest {
         makeRowVector({arrayVector, makeConstant(index, arrayVector->size())});
     return evaluateOnce<T>("get(c0, c1)", input);
   }
+
+  template <typename T>
+  std::optional<T> arrayGetBigint(
+      const ArrayVectorPtr& arrayVector,
+      const std::optional<int64_t>& index) {
+    auto input =
+        makeRowVector({arrayVector, makeConstant(index, arrayVector->size())});
+    return evaluateOnce<T>("get(c0, c1)", input);
+  }
 };
 
 TEST_F(ArrayGetTest, basic) {
@@ -58,6 +68,38 @@ TEST_F(ArrayGetTest, basic) {
   EXPECT_EQ(arrayGet<int32_t>(arrayVector, 2), std::nullopt);
   EXPECT_EQ(arrayGet<int32_t>(arrayVector, 3), std::nullopt);
   EXPECT_EQ(arrayGet<int32_t>(arrayVector, std::nullopt), std::nullopt);
+}
+
+TEST_F(ArrayGetTest, bigintIndex) {
+  auto arrayVector = makeNullableArrayVector<int32_t>({{1, 2, std::nullopt}});
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, -1), std::nullopt);
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, 0), 1);
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, 1), 2);
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, 2), std::nullopt);
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, 3), std::nullopt);
+  EXPECT_EQ(
+      arrayGetBigint<int32_t>(
+          arrayVector, int64_t{std::numeric_limits<int32_t>::max()} + 1),
+      std::nullopt);
+  EXPECT_EQ(arrayGetBigint<int32_t>(arrayVector, std::nullopt), std::nullopt);
+}
+
+TEST_F(ArrayGetTest, bigintIndexVector) {
+  auto arrayVector = makeNullableArrayVector<int32_t>({
+      {1, 2, 3},
+      {4, 5},
+      {std::nullopt},
+      {6},
+  });
+  auto input = makeRowVector({
+      arrayVector,
+      makeFlatVector<int64_t>(
+          {0, 1, 0, int64_t{std::numeric_limits<int32_t>::max()} + 1}),
+  });
+  auto expected =
+      makeNullableFlatVector<int32_t>({1, 5, std::nullopt, std::nullopt});
+  auto result = evaluate("get(c0, c1)", input);
+  assertEqualVectors(expected, result);
 }
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test
