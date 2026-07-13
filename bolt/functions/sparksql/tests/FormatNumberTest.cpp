@@ -17,6 +17,7 @@
 #include <limits>
 
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
+#include "bolt/type/HugeInt.h"
 
 namespace bytedance::bolt::functions::sparksql::test {
 
@@ -44,6 +45,26 @@ class FormatNumberTest : public SparkFunctionBaseTest {
 
   std::optional<std::string> formatFloat(float value, int32_t d) {
     return formatNumber<float>(value, d);
+  }
+
+  std::optional<std::string> formatShortDecimal(
+      int64_t unscaledValue,
+      const TypePtr& type,
+      int32_t decimalPlaces) {
+    return evaluateOnce<std::string>(
+        "format_number(c0, c1)",
+        makeRowVector({makeFlatVector<int64_t>({unscaledValue}, type),
+                       makeFlatVector<int32_t>({decimalPlaces})}));
+  }
+
+  std::optional<std::string> formatLongDecimal(
+      int128_t unscaledValue,
+      const TypePtr& type,
+      int32_t decimalPlaces) {
+    return evaluateOnce<std::string>(
+        "format_number(c0, c1)",
+        makeRowVector({makeFlatVector<int128_t>({unscaledValue}, type),
+                       makeFlatVector<int32_t>({decimalPlaces})}));
   }
 };
 
@@ -117,6 +138,38 @@ TEST_F(FormatNumberTest, binaryTieRounding) {
   EXPECT_EQ(formatDouble(-2.675, 2), "-2.67");
 }
 
+TEST_F(FormatNumberTest, decimals) {
+  EXPECT_EQ(formatShortDecimal(1234567, DECIMAL(10, 2), 2), "12,345.67");
+  EXPECT_EQ(formatShortDecimal(1234567, DECIMAL(10, 2), 1), "12,345.7");
+  EXPECT_EQ(formatShortDecimal(1234567, DECIMAL(10, 2), 0), "12,346");
+  EXPECT_EQ(formatShortDecimal(-1234567, DECIMAL(10, 2), 3), "-12,345.670");
+  EXPECT_EQ(
+      formatShortDecimal(123456789012345678LL, DECIMAL(18, 4), 4),
+      "12,345,678,901,234.5678");
+
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("12345678901234567890123456789012345678"),
+          DECIMAL(38, 4),
+          4),
+      "1,234,567,890,123,456,789,012,345,678,901,234.5678");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("12345678901234567890123456789012345678"),
+          DECIMAL(38, 20),
+          2),
+      "123,456,789,012,345,678.90");
+}
+
+TEST_F(FormatNumberTest, decimalHalfEvenRounding) {
+  EXPECT_EQ(formatShortDecimal(125, DECIMAL(4, 2), 1), "1.2");
+  EXPECT_EQ(formatShortDecimal(135, DECIMAL(4, 2), 1), "1.4");
+  EXPECT_EQ(formatShortDecimal(250, DECIMAL(4, 2), 0), "2");
+  EXPECT_EQ(formatShortDecimal(350, DECIMAL(4, 2), 0), "4");
+  EXPECT_EQ(formatShortDecimal(-250, DECIMAL(4, 2), 0), "-2");
+  EXPECT_EQ(formatShortDecimal(-350, DECIMAL(4, 2), 0), "-4");
+}
+
 TEST_F(FormatNumberTest, negativeDecimalPlaces) {
   // d < 0 returns null per Spark semantics.
   EXPECT_EQ(
@@ -127,6 +180,7 @@ TEST_F(FormatNumberTest, negativeDecimalPlaces) {
       (evaluateOnce<std::string, double, int32_t>(
           "format_number(c0, c1)", 12345.6, -2)),
       std::nullopt);
+  EXPECT_EQ(formatShortDecimal(12345, DECIMAL(10, 2), -1), std::nullopt);
 }
 
 TEST_F(FormatNumberTest, boundaryValues) {

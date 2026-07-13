@@ -70,6 +70,7 @@ void registerStringFunctions(const std::string& prefix) {
   registerFunction<ToTitleFunction, Varchar, Varchar>(
       {prefix + "to_title", prefix + "initcap"});
 
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_format_number, prefix + "format_number");
   registerFunction<FormatNumberFunction, Varchar, int8_t, int32_t>(
       {prefix + "format_number"});
   registerFunction<FormatNumberFunction, Varchar, int16_t, int32_t>(
