@@ -16,15 +16,15 @@
 
 #include "bolt/functions/sparksql/FormatNumber.h"
 
-#include "bolt/expression/DecodedArgs.h"
-#include "bolt/expression/VectorFunction.h"
-#include "bolt/type/HugeInt.h"
 #include <fmt/format.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <locale>
-#include <sstream>
+#include "bolt/expression/DecodedArgs.h"
+#include "bolt/expression/VectorFunction.h"
+#include "bolt/type/DecimalUtil.h"
 
 namespace bytedance::bolt::functions::sparksql::detail {
 
@@ -53,6 +53,11 @@ const std::locale& usLocale() {
   return loc;
 }
 
+std::string_view zeroPadding(int32_t zeroCount) {
+  static const std::string kZeros(kMaxFractionDigits, '0');
+  return std::string_view(kZeros.data(), zeroCount);
+}
+
 void appendGroupedIntegerDigits(
     std::string_view digits,
     exec::StringWriter<false>& out) {
@@ -72,65 +77,46 @@ void appendGroupedIntegerDigits(
 }
 
 template <typename T>
-std::string toUnsignedDigits(T value) {
-  std::ostringstream out;
-  if constexpr (sizeof(T) < sizeof(int128_t)) {
-    const int128_t widened = value;
-    out << (widened < 0 ? -widened : widened);
-  } else {
-    out << (value < 0 ? -value : value);
+T roundDecimalHalfEven(T value, int32_t fromScale, int32_t toScale) {
+  if (toScale >= fromScale) {
+    return value;
   }
-  return out.str();
+
+  const auto scaleFactor =
+      DecimalUtil::getPowersOfTen(static_cast<uint8_t>(fromScale - toScale));
+  int128_t roundedValue = value;
+  int128_t remainder = roundedValue % scaleFactor;
+  roundedValue /= scaleFactor;
+
+  const int128_t absRemainder = remainder < 0 ? -remainder : remainder;
+  const int128_t twiceRemainder = absRemainder * 2;
+  if (twiceRemainder > scaleFactor) {
+    roundedValue += value >= 0 ? 1 : -1;
+  } else if (
+      twiceRemainder == scaleFactor &&
+      ((roundedValue < 0 ? -roundedValue : roundedValue) % 2 == 1)) {
+    roundedValue += value >= 0 ? 1 : -1;
+  }
+
+  return static_cast<T>(roundedValue);
 }
 
-bool shouldRoundHalfEven(
-    std::string_view keptDigits,
-    std::string_view discardedDigits) {
-  if (discardedDigits.empty()) {
-    return false;
+template <typename T>
+size_t estimateFormattedDecimalSize(
+    T value,
+    int32_t inputPrecision,
+    int32_t inputScale,
+    int32_t decimalPlaces) {
+  if (decimalPlaces < 0) {
+    return 0;
   }
 
-  if (discardedDigits[0] > '5') {
-    return true;
-  }
-  if (discardedDigits[0] < '5') {
-    return false;
-  }
-  if (discardedDigits.find_first_not_of('0', 1) != std::string_view::npos) {
-    return true;
-  }
-
-  const char lastKeptDigit = keptDigits.empty() ? '0' : keptDigits.back();
-  return ((lastKeptDigit - '0') % 2) == 1;
-}
-
-void incrementDigits(std::string& digits) {
-  for (auto it = digits.rbegin(); it != digits.rend(); ++it) {
-    if (*it != '9') {
-      ++(*it);
-      return;
-    }
-    *it = '0';
-  }
-  digits.insert(digits.begin(), '1');
-}
-
-std::pair<std::string, std::string> splitDecimalDigits(
-    std::string_view digits,
-    int32_t scale) {
-  if (scale == 0) {
-    return {std::string(digits), ""};
-  }
-
-  if (digits.size() <= scale) {
-    return {
-        "0",
-        std::string(scale - digits.size(), '0').append(digits.begin(), digits.end())};
-  }
-
-  return {
-      std::string(digits.substr(0, digits.size() - scale)),
-      std::string(digits.substr(digits.size() - scale))};
+  const int32_t cappedPlaces = std::min(decimalPlaces, kMaxFractionDigits);
+  const int32_t outputScale = std::min(cappedPlaces, inputScale);
+  const int32_t integerDigits = std::max(inputPrecision - outputScale, 1);
+  const int32_t groupingSeparators = (integerDigits - 1) / 3;
+  return (value < 0 ? 1 : 0) + integerDigits + groupingSeparators +
+      (cappedPlaces > 0 ? 1 + cappedPlaces : 0);
 }
 
 template <typename T>
@@ -140,39 +126,39 @@ void formatDecimal(
     int32_t decimalPlaces,
     exec::StringWriter<false>& out) {
   const int32_t cappedPlaces = std::min(decimalPlaces, kMaxFractionDigits);
+  const int32_t outputScale = std::min(cappedPlaces, inputScale);
+  const T roundedValue = roundDecimalHalfEven(value, inputScale, outputScale);
   const bool negative = value < 0;
-  const std::string digits = toUnsignedDigits(value);
 
-  std::string roundedDigits;
-  if (cappedPlaces >= inputScale) {
-    roundedDigits = digits;
-  } else {
-    const int32_t discardedCount = inputScale - cappedPlaces;
-    const size_t split = digits.size() > discardedCount
-        ? digits.size() - discardedCount
-        : 0;
-
-    roundedDigits = split == 0 ? "0" : std::string(digits.substr(0, split));
-    const std::string_view discardedDigits(digits.data() + split, digits.size() - split);
-    if (shouldRoundHalfEven(roundedDigits, discardedDigits)) {
-      incrementDigits(roundedDigits);
+  std::array<char, 64> plainBuffer;
+  const auto plainSize = DecimalUtil::convertToPlainString<T>(
+      roundedValue, outputScale, plainBuffer.size(), plainBuffer.data());
+  const std::string_view plainNumber(plainBuffer.data(), plainSize);
+  size_t start = 0;
+  if (negative) {
+    out.append(std::string_view("-"));
+    if (!plainNumber.empty() && plainNumber.front() == '-') {
+      start = 1;
     }
   }
 
-  auto [integerDigits, fractionDigits] = splitDecimalDigits(
-      roundedDigits, cappedPlaces < inputScale ? cappedPlaces : inputScale);
+  const auto decimalPoint = plainNumber.find('.', start);
+  appendGroupedIntegerDigits(
+      decimalPoint == std::string_view::npos
+          ? plainNumber.substr(start)
+          : plainNumber.substr(start, decimalPoint - start),
+      out);
 
-  if (cappedPlaces > inputScale) {
-    fractionDigits.append(cappedPlaces - inputScale, '0');
+  if (decimalPoint != std::string_view::npos) {
+    out.append(plainNumber.substr(decimalPoint));
   }
 
-  if (negative) {
-    out.append(std::string_view("-"));
-  }
-  appendGroupedIntegerDigits(integerDigits, out);
-  if (cappedPlaces > 0) {
-    out.append(std::string_view("."));
-    out.append(fractionDigits);
+  const auto trailingZeros = cappedPlaces - outputScale;
+  if (trailingZeros > 0) {
+    if (decimalPoint == std::string_view::npos) {
+      out.append(std::string_view("."));
+    }
+    out.append(zeroPadding(trailingZeros));
   }
 }
 
@@ -232,8 +218,8 @@ namespace {
 template <typename T>
 class DecimalFormatNumberFunction final : public exec::VectorFunction {
  public:
-  explicit DecimalFormatNumberFunction(int32_t inputScale)
-      : inputScale_(inputScale) {}
+  DecimalFormatNumberFunction(int32_t inputPrecision, int32_t inputScale)
+      : inputPrecision_(inputPrecision), inputScale_(inputScale) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -248,7 +234,18 @@ class DecimalFormatNumberFunction final : public exec::VectorFunction {
     context.ensureWritable(rows, outputType, result);
     result->clearNulls(rows);
     auto* flatResult = result->asFlatVector<StringView>();
-    flatResult->getBufferWithSpace(rows.countSelected() * 392);
+
+    size_t estimatedBufferSize = 0;
+    rows.applyToSelected([&](vector_size_t row) {
+      estimatedBufferSize += estimateFormattedDecimalSize(
+          decimalValues->valueAt<T>(row),
+          inputPrecision_,
+          inputScale_,
+          decimalPlaces->valueAt<int32_t>(row));
+    });
+    if (estimatedBufferSize > 0) {
+      flatResult->getBufferWithSpace(estimatedBufferSize, true);
+    }
 
     context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
       const auto places = decimalPlaces->valueAt<int32_t>(row);
@@ -258,15 +255,13 @@ class DecimalFormatNumberFunction final : public exec::VectorFunction {
       }
       exec::StringWriter<false> writer(flatResult, row);
       formatDecimal(
-          decimalValues->valueAt<T>(row),
-          inputScale_,
-          places,
-          writer);
+          decimalValues->valueAt<T>(row), inputScale_, places, writer);
       writer.finalize();
     });
   }
 
  private:
+  const int32_t inputPrecision_;
   const int32_t inputScale_;
 };
 
@@ -289,10 +284,12 @@ std::shared_ptr<exec::VectorFunction> createDecimalFormatNumberFunction(
   const auto& decimalType = inputArgs[0].type;
   if (decimalType->isShortDecimal()) {
     return std::make_shared<DecimalFormatNumberFunction<int64_t>>(
+        decimalType->asShortDecimal().precision(),
         decimalType->asShortDecimal().scale());
   }
   BOLT_USER_CHECK(decimalType->isLongDecimal(), "Expect decimal input type.");
   return std::make_shared<DecimalFormatNumberFunction<int128_t>>(
+      decimalType->asLongDecimal().precision(),
       decimalType->asLongDecimal().scale());
 }
 

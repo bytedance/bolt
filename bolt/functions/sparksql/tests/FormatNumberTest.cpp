@@ -53,8 +53,9 @@ class FormatNumberTest : public SparkFunctionBaseTest {
       int32_t decimalPlaces) {
     return evaluateOnce<std::string>(
         "format_number(c0, c1)",
-        makeRowVector({makeFlatVector<int64_t>({unscaledValue}, type),
-                       makeFlatVector<int32_t>({decimalPlaces})}));
+        makeRowVector(
+            {makeFlatVector<int64_t>({unscaledValue}, type),
+             makeFlatVector<int32_t>({decimalPlaces})}));
   }
 
   std::optional<std::string> formatLongDecimal(
@@ -63,8 +64,9 @@ class FormatNumberTest : public SparkFunctionBaseTest {
       int32_t decimalPlaces) {
     return evaluateOnce<std::string>(
         "format_number(c0, c1)",
-        makeRowVector({makeFlatVector<int128_t>({unscaledValue}, type),
-                       makeFlatVector<int32_t>({decimalPlaces})}));
+        makeRowVector(
+            {makeFlatVector<int128_t>({unscaledValue}, type),
+             makeFlatVector<int32_t>({decimalPlaces})}));
   }
 };
 
@@ -168,6 +170,9 @@ TEST_F(FormatNumberTest, decimalHalfEvenRounding) {
   EXPECT_EQ(formatShortDecimal(350, DECIMAL(4, 2), 0), "4");
   EXPECT_EQ(formatShortDecimal(-250, DECIMAL(4, 2), 0), "-2");
   EXPECT_EQ(formatShortDecimal(-350, DECIMAL(4, 2), 0), "-4");
+  EXPECT_EQ(formatShortDecimal(-40, DECIMAL(4, 2), 0), "-0");
+  EXPECT_EQ(formatShortDecimal(-50, DECIMAL(4, 2), 0), "-0");
+  EXPECT_EQ(formatShortDecimal(-40, DECIMAL(4, 2), 2), "-0.40");
 }
 
 TEST_F(FormatNumberTest, negativeDecimalPlaces) {
