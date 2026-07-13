@@ -50,12 +50,18 @@ static inline BufferPtr copyToBuffer(
       size.value());
   int32_t numValues = size.has_value() ? size.value() : values.size();
   if (numValues != 0) {
-    BufferPtr buffer = AlignedBuffer::allocate<Value>(numValues, pool);
+    BufferPtr buffer = AlignedBuffer::
+        allocate<Value, AlignedBuffer::AllocationStrategy::kConservative>(
+            numValues, pool);
     auto data = buffer->asMutable<Value>();
     memcpy(data, &values[0], buffer->size());
     return buffer;
   }
-  return returnsNullptr ? nullptr : AlignedBuffer::allocate<Value>(0, pool);
+  return returnsNullptr
+      ? nullptr
+      : AlignedBuffer::
+            allocate<Value, AlignedBuffer::AllocationStrategy::kConservative>(
+                0, pool);
 }
 
 } // namespace bolt

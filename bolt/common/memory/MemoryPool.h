@@ -185,6 +185,9 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
     /// the memory pool's default function.
     std::function<size_t(size_t)> getPreferredSize{nullptr};
 
+    /// If true, enables the aligned buffer allocation strategy.
+    bool enableAlignedBufAllocStrategy{true};
+
     /// If non-empty, enables debug mode for the created memory pool.
     std::optional<DebugOptions> debugOptions{std::nullopt};
 
@@ -240,6 +243,11 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   /// leaf memory pool with memory usage tracking enabled.
   virtual bool threadSafe() const {
     return threadSafe_;
+  }
+
+  /// Returns true if the aligned buffer allocation strategy is enabled.
+  bool enableAlignedBufAllocStrategy() const {
+    return enableAlignedBufAllocStrategy_;
   }
 
   /// Invoked to visit the memory pool's direct children, and calls 'visitor' on
@@ -611,6 +619,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   const std::optional<DebugOptions> debugOptions_;
   const bool coreOnAllocationFailureEnabled_;
   std::function<size_t(size_t)> getPreferredSize_;
+  const bool enableAlignedBufAllocStrategy_;
 
   /// Indicates if the memory pool has been aborted by the memory arbitrator or
   /// not.

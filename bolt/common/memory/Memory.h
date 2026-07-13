@@ -198,6 +198,10 @@ class MemoryManager {
     /// function.
     std::function<size_t(size_t)> getPreferredSize{nullptr};
 
+    /// If true, enables the aligned buffer allocation strategy for memory
+    /// pools created by this memory manager.
+    bool enableAlignedBufAllocStrategy{true};
+
     /// It is used to control the threshold of printing the allocation stack
     /// when
     /// memory is allocated. When the threshold is 0, it means turning off the
@@ -333,6 +337,7 @@ class MemoryManager {
   const bool coreOnAllocationFailureEnabled_;
   const bool disableMemoryPoolTracking_;
   const std::function<size_t(size_t)> getPreferredSize_;
+  const bool enableAlignedBufAllocStrategy_;
 
   // Used to print stack when allocate memory
   std::string poolRegex_;

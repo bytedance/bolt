@@ -773,6 +773,25 @@ TEST(MemoryPoolTest, GetAlignment) {
   }
 }
 
+TEST(MemoryPoolTest, EnableAlignedBufAllocStrategy) {
+  {
+    MemoryManager manager;
+    auto root = manager.addRootPool();
+    EXPECT_TRUE(root->enableAlignedBufAllocStrategy());
+    EXPECT_TRUE(
+        root->addLeafChild("default-enabled")->enableAlignedBufAllocStrategy());
+  }
+  {
+    MemoryManager::Options options;
+    options.enableAlignedBufAllocStrategy = false;
+    MemoryManager manager{options};
+    auto root = manager.addRootPool();
+    EXPECT_FALSE(root->enableAlignedBufAllocStrategy());
+    EXPECT_FALSE(
+        root->addLeafChild("disabled")->enableAlignedBufAllocStrategy());
+  }
+}
+
 TEST_P(MemoryPoolTest, MemoryManagerGlobalCap) {
   MemoryManager::Options options;
   options.allocatorCapacity = 32L * MB;

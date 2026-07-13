@@ -194,8 +194,9 @@ VectorPtr readFlatVectorStringView(
   const auto* rawLength = lengthBuffer->as<BinaryArrayLengthBufferType>();
 
   std::vector<BufferPtr> stringBuffers;
-  auto values =
-      AlignedBuffer::allocate<char>(sizeof(StringView) * length, pool);
+  auto values = AlignedBuffer::
+      allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+          sizeof(StringView) * length, pool);
   auto rawValues = values->asMutable<StringView>();
   auto rawChars = valueBuffer->as<char>();
   uint64_t offset = 0;

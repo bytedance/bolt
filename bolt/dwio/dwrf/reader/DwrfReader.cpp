@@ -367,7 +367,9 @@ void DwrfRowReader::readWithRowNumber(
         BIGINT(),
         nullptr,
         result->size(),
-        AlignedBuffer::allocate<int64_t>(result->size(), result->pool()),
+        AlignedBuffer::
+            allocate<int64_t, AlignedBuffer::AllocationStrategy::kConservative>(
+                result->size(), result->pool()),
         std::vector<BufferPtr>());
     flatRowNum = rowNumVector->asUnchecked<FlatVector<int64_t>>();
   }

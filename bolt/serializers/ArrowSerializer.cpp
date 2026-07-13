@@ -295,7 +295,10 @@ class ArrowVectorSerializer : public VectorSerializer {
         useVec = vector->slice(rg.begin, rg.size);
       }
     } else {
-      auto idx = AlignedBuffer::allocate<vector_size_t>(total, vector->pool());
+      auto idx = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(
+          total, vector->pool());
       auto* raw = idx->asMutable<vector_size_t>();
       size_t p = 0;
       for (const auto& rg : ranges) {
@@ -398,7 +401,9 @@ class ArrowVectorSerializer : public VectorSerializer {
     }
 
     if (!identity) {
-      auto idx = AlignedBuffer::allocate<vector_size_t>(n, vector->pool());
+      auto idx = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(n, vector->pool());
       auto* raw = idx->asMutable<vector_size_t>();
       memcpy(raw, rows.begin(), sizeof(vector_size_t) * n);
       useVec = BaseVector::wrapInDictionary(nullptr, idx, n, vector);

@@ -517,10 +517,14 @@ void SelectiveStructColumnReaderBase::getValues(
         }
       }
 
-      auto offsets =
-          AlignedBuffer::allocate<vector_size_t>(numRows, &memoryPool_);
-      auto sizes =
-          AlignedBuffer::allocate<vector_size_t>(numRows, &memoryPool_);
+      auto offsets = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(
+          numRows, &memoryPool_);
+      auto sizes = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(
+          numRows, &memoryPool_);
       auto* rawOffsets = offsets->asMutable<vector_size_t>();
       auto* rawSizes = sizes->asMutable<vector_size_t>();
 

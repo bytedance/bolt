@@ -87,8 +87,10 @@ ColumnPlan buildPlan(const TypePtr& type, const VectorPtr& vector) {
             vector->wrapInfo()->as<vector_size_t>() == plan.decoded.indices()) {
           outerIndices = vector->wrapInfo();
         } else {
-          outerIndices =
-              AlignedBuffer::allocate<vector_size_t>(outerSize, vector->pool());
+          outerIndices = AlignedBuffer::allocate<
+              vector_size_t,
+              AlignedBuffer::AllocationStrategy::kConservative>(
+              outerSize, vector->pool());
           std::memcpy(
               outerIndices->asMutable<vector_size_t>(),
               plan.decoded.indices(),

@@ -77,7 +77,9 @@ class RowSerializer : public VectorSerializer {
       return;
     }
 
-    BufferPtr buffer = AlignedBuffer::allocate<char>(totalSize, pool_, 0);
+    BufferPtr buffer = AlignedBuffer::
+        allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+            totalSize, pool_, 0);
     auto* rawBuffer = buffer->asMutable<char>();
     buffers_.push_back(std::move(buffer));
 
@@ -96,7 +98,9 @@ class RowSerializer : public VectorSerializer {
       return;
     }
 
-    BufferPtr buffer = AlignedBuffer::allocate<char>(totalSize, pool_, 0);
+    BufferPtr buffer = AlignedBuffer::
+        allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+            totalSize, pool_, 0);
     auto* rawBuffer = buffer->asMutable<char>();
     buffers_.push_back(std::move(buffer));
 
