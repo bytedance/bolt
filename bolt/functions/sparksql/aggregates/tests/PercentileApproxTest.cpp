@@ -365,6 +365,23 @@ TEST_F(PercentileApproxTest, finalAggregateAccuracy) {
   assertQuery(op, "SELECT 4");
 }
 
+TEST_F(PercentileApproxTest, accuracyOutOfRange) {
+  constexpr int64_t kAccuracy = (1LL << 32) + 1;
+  auto rows = makeRowVector({
+      makeFlatVector<int32_t>({1, 2, 3}),
+      makeConstant<int64_t>(kAccuracy, 3),
+  });
+  auto plan = PlanBuilder()
+                  .values({rows})
+                  .singleAggregation({}, {"percentile_approx(c0, 0.5, c1)"})
+                  .planNode();
+  AssertQueryBuilder query(plan);
+  BOLT_ASSERT_THROW(
+      query.copyResults(pool()),
+      "The accuracy provided must be a literal between (0, 2147483647] "
+      "(current value = 4294967297)");
+}
+
 TEST_F(PercentileApproxTest, invalidEncoding) {
   auto indices = AlignedBuffer::allocate<vector_size_t>(3, pool());
   auto rawIndices = indices->asMutable<vector_size_t>();

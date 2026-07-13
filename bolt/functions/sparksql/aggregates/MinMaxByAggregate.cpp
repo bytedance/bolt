@@ -28,57 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/functions/lib/aggregates/MinMaxByAggregatesBase.h"
+#include "bolt/functions/sparksql/aggregates/MinMaxByAggregateInternal.h"
+
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
-
-/// Returns compare result align with Spark's specific behavior,
-/// which returns true if the value in 'index' row of 'newComparisons' is
-/// greater than/equal or less than/equal the value in the 'accumulator'.
-template <bool sparkGreaterThan, typename T, typename TAccumulator>
-struct SparkComparator {
-  static bool compare(
-      TAccumulator* accumulator,
-      const DecodedVector& newComparisons,
-      vector_size_t index,
-      bool isFirstValue) {
-    if constexpr (isNumeric<T>()) {
-      if (isFirstValue) {
-        return true;
-      }
-      if constexpr (sparkGreaterThan) {
-        return SimpleVector<T>::comparePrimitiveAsc(
-                   newComparisons.valueAt<T>(index), *accumulator) >= 0;
-      } else {
-        return SimpleVector<T>::comparePrimitiveAsc(
-                   newComparisons.valueAt<T>(index), *accumulator) <= 0;
-      }
-    } else {
-      if constexpr (sparkGreaterThan) {
-        return !accumulator->hasValue() ||
-            compare(accumulator, newComparisons, index) <= 0;
-      } else {
-        return !accumulator->hasValue() ||
-            compare(accumulator, newComparisons, index) >= 0;
-      }
-    }
-  }
-
-  FOLLY_ALWAYS_INLINE static int32_t compare(
-      const SingleValueAccumulator* accumulator,
-      const DecodedVector& decoded,
-      vector_size_t index) {
-    static const CompareFlags kCompareFlags{
-        true, // nullsFirst
-        true, // ascending
-        false, // equalsOnly
-        CompareFlags::NullHandlingMode::kNullAsValue};
-    auto result = accumulator->compare(decoded, index, kCompareFlags);
-    return result.value();
-  }
-};
 
 std::string toString(const std::vector<TypePtr>& types) {
   std::ostringstream out;
@@ -91,15 +46,7 @@ std::string toString(const std::vector<TypePtr>& types) {
   return out.str();
 }
 
-template <
-    template <
-        typename U,
-        typename V,
-        bool B1,
-        template <bool B2, typename C1, typename C2>
-        class C>
-    class Aggregate,
-    bool isMaxFunc>
+template <bool isMaxFunc>
 exec::AggregateRegistrationResult registerMinMaxBy(
     const std::string& name,
     bool withCompanionFunctions,
@@ -133,14 +80,14 @@ exec::AggregateRegistrationResult registerMinMaxBy(
 
         if (isRawInput) {
           // Input is: V, C.
-          return create<Aggregate, SparkComparator, isMaxFunc>(
+          return createMinMaxByAggregate<isMaxFunc>(
               resultType, argTypes[0], argTypes[1], errorMessage);
         } else {
           // Input is: ROW(V, C).
           const auto& rowType = argTypes[0];
           const auto& valueType = rowType->childAt(0);
           const auto& compareType = rowType->childAt(1);
-          return create<Aggregate, SparkComparator, isMaxFunc>(
+          return createMinMaxByAggregate<isMaxFunc>(
               resultType, valueType, compareType, errorMessage);
         }
       },
@@ -154,10 +101,8 @@ void registerMinMaxByAggregates(
     const std::string& prefix,
     bool withCompanionFunctions,
     bool overwrite) {
-  registerMinMaxBy<MinMaxByAggregateBase, true>(
-      prefix + "max_by", withCompanionFunctions, overwrite);
-  registerMinMaxBy<MinMaxByAggregateBase, false>(
-      prefix + "min_by", withCompanionFunctions, overwrite);
+  registerMinMaxBy<true>(prefix + "max_by", withCompanionFunctions, overwrite);
+  registerMinMaxBy<false>(prefix + "min_by", withCompanionFunctions, overwrite);
 }
 
 } // namespace bytedance::bolt::functions::aggregate::sparksql
