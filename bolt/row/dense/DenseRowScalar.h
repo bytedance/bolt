@@ -51,6 +51,13 @@ void writeColumn(
     vector_size_t N,
     uint8_t** rowCursors);
 
+void writeColumn(
+    const Type& type,
+    const DecodedVector& dec,
+    vector_size_t offset,
+    vector_size_t N,
+    uint8_t** rowCursors);
+
 // Column-at-a-time read: decodes one scalar value per row from cursors[0..N)
 // into `dst`, advancing each cursor. Inverse of writeColumn
 void readColumn(

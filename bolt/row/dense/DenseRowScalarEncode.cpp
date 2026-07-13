@@ -152,16 +152,16 @@ void addColumnSizes(
 template <typename T>
 FOLLY_ALWAYS_INLINE void writeIntColumn(
     const DecodedVector& dec,
+    vector_size_t offset,
     vector_size_t N,
     uint8_t** rowCursors) {
   const bool mayNulls = dec.mayHaveNulls();
-  const bool identity = dec.isIdentityMapping();
   const auto* raw = dec.data<T>();
   for (vector_size_t r = 0; r < N; ++r) {
-    const bool isNull = mayNulls && dec.isNullAt(r);
-    const int64_t v = isNull
-        ? 0
-        : static_cast<int64_t>(identity ? raw[r] : raw[dec.index(r)]);
+    const auto sourceRow = offset + r;
+    const bool isNull = mayNulls && dec.isNullAt(sourceRow);
+    const int64_t v =
+        isNull ? 0 : static_cast<int64_t>(raw[dec.index(sourceRow)]);
     rowCursors[r] = writeNullableInt64(v, isNull, rowCursors[r]);
   }
 }
@@ -171,14 +171,25 @@ void writeColumn(
     const DecodedVector& dec,
     vector_size_t N,
     uint8_t** rowCursors) {
+  writeColumn(type, dec, 0, N, rowCursors);
+}
+
+void writeColumn(
+    const Type& type,
+    const DecodedVector& dec,
+    vector_size_t offset,
+    vector_size_t N,
+    uint8_t** rowCursors) {
   switch (type.kind()) {
     case TypeKind::BOOLEAN: {
       const bool mayNulls = dec.mayHaveNulls();
       for (vector_size_t r = 0; r < N; ++r) {
-        if (mayNulls && dec.isNullAt(r)) {
+        const auto sourceRow = offset + r;
+        if (mayNulls && dec.isNullAt(sourceRow)) {
           *rowCursors[r]++ = uint8_t{0};
         } else {
-          *rowCursors[r]++ = dec.valueAt<bool>(r) ? uint8_t{2} : uint8_t{1};
+          *rowCursors[r]++ =
+              dec.valueAt<bool>(sourceRow) ? uint8_t{2} : uint8_t{1};
         }
       }
       return;
@@ -189,27 +200,29 @@ void writeColumn(
       }
       return;
     case TypeKind::TINYINT:
-      writeIntColumn<int8_t>(dec, N, rowCursors);
+      writeIntColumn<int8_t>(dec, offset, N, rowCursors);
       return;
     case TypeKind::SMALLINT:
-      writeIntColumn<int16_t>(dec, N, rowCursors);
+      writeIntColumn<int16_t>(dec, offset, N, rowCursors);
       return;
     case TypeKind::INTEGER:
-      writeIntColumn<int32_t>(dec, N, rowCursors);
+      writeIntColumn<int32_t>(dec, offset, N, rowCursors);
       return;
     case TypeKind::BIGINT:
-      writeIntColumn<int64_t>(dec, N, rowCursors);
+      writeIntColumn<int64_t>(dec, offset, N, rowCursors);
       return;
     case TypeKind::REAL: {
       const bool mayNulls = dec.mayHaveNulls();
       const bool identity = dec.isIdentityMapping();
       const auto* raw = dec.data<float>();
       for (vector_size_t r = 0; r < N; ++r) {
+        const auto sourceRow = offset + r;
         uint32_t b;
-        if (mayNulls && dec.isNullAt(r)) {
+        if (mayNulls && dec.isNullAt(sourceRow)) {
           b = kNullFloatBits;
         } else {
-          const float value = identity ? raw[r] : raw[dec.index(r)];
+          const float value =
+              identity ? raw[sourceRow] : raw[dec.index(sourceRow)];
           std::memcpy(&b, &value, sizeof(b));
           // kNullFloatBits is the canonical quiet NaN. Flipping the low
           // mantissa bit yields another NaN.
@@ -227,11 +240,13 @@ void writeColumn(
       const bool identity = dec.isIdentityMapping();
       const auto* raw = dec.data<double>();
       for (vector_size_t r = 0; r < N; ++r) {
+        const auto sourceRow = offset + r;
         uint64_t b;
-        if (mayNulls && dec.isNullAt(r)) {
+        if (mayNulls && dec.isNullAt(sourceRow)) {
           b = kNullDoubleBits;
         } else {
-          const double value = identity ? raw[r] : raw[dec.index(r)];
+          const double value =
+              identity ? raw[sourceRow] : raw[dec.index(sourceRow)];
           std::memcpy(&b, &value, sizeof(b));
           // kNullDoubleBits is the canonical quiet NaN. Flipping the low
           // mantissa bit yields another NaN.
@@ -248,11 +263,12 @@ void writeColumn(
     case TypeKind::VARBINARY: {
       const bool mayNulls = dec.mayHaveNulls();
       for (vector_size_t r = 0; r < N; ++r) {
+        const auto sourceRow = offset + r;
         uint8_t* out = rowCursors[r];
-        if (mayNulls && dec.isNullAt(r)) {
+        if (mayNulls && dec.isNullAt(sourceRow)) {
           out = writeVarint(0, out);
         } else {
-          const auto sv = dec.valueAt<StringView>(r);
+          const auto sv = dec.valueAt<StringView>(sourceRow);
           out = writeVarint(static_cast<uint64_t>(sv.size()) + 1, out);
           std::memcpy(out, sv.data(), sv.size());
           out += sv.size();
@@ -264,8 +280,10 @@ void writeColumn(
     case TypeKind::TIMESTAMP: {
       const bool mayNulls = dec.mayHaveNulls();
       for (vector_size_t r = 0; r < N; ++r) {
-        const bool isNull = mayNulls && dec.isNullAt(r);
-        const int64_t v = isNull ? 0 : dec.valueAt<Timestamp>(r).toMicros();
+        const auto sourceRow = offset + r;
+        const bool isNull = mayNulls && dec.isNullAt(sourceRow);
+        const int64_t v =
+            isNull ? 0 : dec.valueAt<Timestamp>(sourceRow).toMicros();
         rowCursors[r] = writeNullableInt64(v, isNull, rowCursors[r]);
       }
       return;
@@ -273,9 +291,10 @@ void writeColumn(
     case TypeKind::HUGEINT: {
       const bool mayNulls = dec.mayHaveNulls();
       for (vector_size_t r = 0; r < N; ++r) {
-        const bool isNull = mayNulls && dec.isNullAt(r);
+        const auto sourceRow = offset + r;
+        const bool isNull = mayNulls && dec.isNullAt(sourceRow);
         rowCursors[r] = writeNullableInt128(
-            isNull ? int128_t{0} : dec.valueAt<int128_t>(r),
+            isNull ? int128_t{0} : dec.valueAt<int128_t>(sourceRow),
             isNull,
             rowCursors[r]);
       }

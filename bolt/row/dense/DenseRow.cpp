@@ -196,12 +196,23 @@ size_t DenseRow::totalSize() const {
 
 void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
     const {
+  serialize(0, state_->numRows, base, offsets);
+}
+
+void DenseRow::serialize(
+    vector_size_t offset,
+    vector_size_t size,
+    uint8_t* base,
+    folly::Range<const size_t*> offsets) const {
   const auto numRows = state_->numRows;
+  BOLT_USER_CHECK_LE(offset, numRows, "DenseRow::serialize offset overflow");
+  BOLT_USER_CHECK_LE(
+      size, numRows - offset, "DenseRow::serialize size overflow");
   BOLT_USER_CHECK_EQ(
       offsets.size(),
-      static_cast<size_t>(numRows),
+      static_cast<size_t>(size),
       "DenseRow::serialize offsets size mismatch");
-  if (numRows == 0) {
+  if (size == 0) {
     return;
   }
   const auto& rowType = state_->rowVector->type()->asRow();
@@ -212,11 +223,12 @@ void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
   // complex fields run the general WriteSink pass (replaying the cached slot
   // tree), syncing the cursor across the call. writeSinks is allocated only if
   // a complex field is present (an all-scalar row never touches it).
-  std::vector<uint8_t*> cursors(numRows);
-  for (vector_size_t r = 0; r < numRows; ++r) {
+  std::vector<uint8_t*> cursors(size);
+  for (vector_size_t r = 0; r < size; ++r) {
     cursors[r] = base + offsets[r];
   }
   std::vector<WriteSink> writeSinks;
+  std::optional<TopSlotView> slicedTopView;
   for (size_t k = 0; k < fieldCount; ++k) {
     const auto& childType = rowType.childAt(k);
     std::visit(
@@ -225,22 +237,31 @@ void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
           if constexpr (std::is_same_v<T, DecodedVector>) {
             BOLT_CHECK(childType->isPrimitiveType());
             scalar::writeColumn(
-                *childType, decodedOrPlan, numRows, cursors.data());
+                *childType, decodedOrPlan, offset, size, cursors.data());
           } else {
             static_assert(std::is_same_v<T, ColumnPlan>);
             if (writeSinks.empty()) {
-              writeSinks.resize(numRows);
+              writeSinks.resize(size);
             }
-            for (vector_size_t r = 0; r < numRows; ++r) {
+            for (vector_size_t r = 0; r < size; ++r) {
               writeSinks[r].out = cursors[r];
             }
+            const auto topView = [&]() {
+              if (offset == 0 && size == numRows) {
+                return state_->topView.view();
+              }
+              if (!slicedTopView.has_value()) {
+                slicedTopView.emplace(makeTopView(size, offset));
+              }
+              return slicedTopView->view();
+            }();
             encodeColumnBatch<WriteSink>(
                 *childType,
                 decodedOrPlan,
-                state_->topView.view(),
-                folly::Range<WriteSink*>(writeSinks.data(), numRows),
+                topView,
+                folly::Range<WriteSink*>(writeSinks.data(), size),
                 /*rowNulls=*/nullptr);
-            for (vector_size_t r = 0; r < numRows; ++r) {
+            for (vector_size_t r = 0; r < size; ++r) {
               cursors[r] = writeSinks[r].out;
             }
           }
@@ -248,15 +269,15 @@ void DenseRow::serialize(uint8_t* base, folly::Range<const size_t*> offsets)
         state_->decodedOrPlans[k]);
   }
 
-  for (vector_size_t r = 0; r < numRows; ++r) {
+  for (vector_size_t r = 0; r < size; ++r) {
     const auto* rowStart = base + offsets[r];
     const auto actualSize = static_cast<size_t>(cursors[r] - rowStart);
-    const auto expectedSize = state_->rowSizes[r];
+    const auto expectedSize = state_->rowSizes[offset + r];
     BOLT_CHECK_EQ(
         actualSize,
         expectedSize,
         "DenseRow::serialize row size mismatch at row {}, offset {}",
-        r,
+        offset + r,
         offsets[r]);
   }
 }
