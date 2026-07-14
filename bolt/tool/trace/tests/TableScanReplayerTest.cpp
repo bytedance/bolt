@@ -328,9 +328,9 @@ TEST_F(TableScanReplayerTest, subfieldPrunning) {
                         .endTableScan()
                         .capturePlanNodeId(traceNodeId_)
                         .planNode();
-  const auto split = makeHiveConnectorSplit(filePath->getPath());
-  const auto results =
-      AssertQueryBuilder(plan).split(split).copyResults(pool());
+  const auto results = AssertQueryBuilder(plan)
+                           .split(makeHiveConnectorSplit(filePath->getPath()))
+                           .copyResults(pool());
 
   const auto testDir = TempDirectoryPath::create();
   const auto traceRoot = fmt::format("{}/{}", testDir->getPath(), "traceRoot");
@@ -342,7 +342,7 @@ TEST_F(TableScanReplayerTest, subfieldPrunning) {
           .config(core::QueryConfig::kQueryTraceMaxBytes, 100UL << 30)
           .config(core::QueryConfig::kQueryTraceTaskRegExp, ".*")
           .config(core::QueryConfig::kQueryTraceNodeIds, traceNodeId_)
-          .split(split)
+          .split(makeHiveConnectorSplit(filePath->getPath()))
           .copyResults(pool(), task);
 
   assertEqualResults({results}, {traceResult});
