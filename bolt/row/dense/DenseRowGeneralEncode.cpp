@@ -576,8 +576,10 @@ void encodeArrayBatch(
   }
   encodeArrayLikeCardinalities(
       plan, array->rawOffsets(), array->rawSizes(), in, sinks, rowNulls, node);
-  const auto rowOffset =
-      std::is_same_v<Sink, SizeSink> ? 0 : in.sourceRowOffset;
+  if constexpr (std::is_same_v<Sink, SizeSink>) {
+    BOLT_CHECK_EQ(in.sourceRowOffset, 0);
+  }
+  const auto rowOffset = in.sourceRowOffset;
   // Boundaries can be sliced, but slots must remain full because boundary
   // values are absolute indexes into node.slots.
   SlotView childView{
@@ -605,8 +607,10 @@ void encodeMapBatch(
   }
   encodeArrayLikeCardinalities(
       plan, map->rawOffsets(), map->rawSizes(), in, sinks, rowNulls, node);
-  const auto rowOffset =
-      std::is_same_v<Sink, SizeSink> ? 0 : in.sourceRowOffset;
+  if constexpr (std::is_same_v<Sink, SizeSink>) {
+    BOLT_CHECK_EQ(in.sourceRowOffset, 0);
+  }
+  const auto rowOffset = in.sourceRowOffset;
   // Boundaries can be sliced, but slots must remain full because boundary
   // values are absolute indexes into node.slots.
   SlotView childView{

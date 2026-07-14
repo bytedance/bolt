@@ -122,8 +122,6 @@ class ShuffleColumnarToRowConverter {
     vector_size_t rowOffset{0};
     vector_size_t numRows{0};
     int64_t totalMemorySize{0};
-    bytedance::bolt::row::RowFormat rowFormat{
-        bytedance::bolt::row::RowFormat::COMPACT};
     std::vector<size_t> rowSizes_;
     std::vector<Range> ranges_;
   };

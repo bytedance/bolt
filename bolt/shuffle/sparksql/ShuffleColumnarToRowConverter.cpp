@@ -58,7 +58,6 @@ ShuffleColumnarToRowConverter::getWithStats(
   RowVectorWithStats stats;
   stats.rowVectorHolder_ = rowVector;
   stats.numRows = rowVector->size();
-  stats.rowFormat = rowFormat_;
   auto numRows = rowVector->size();
 
   if (rowFormat_ == row::RowFormat::COMPACT) {
@@ -127,7 +126,6 @@ ShuffleColumnarToRowConverter::sliceStats(
     const RowVectorWithStats::Range& range) {
   RowVectorWithStats sliced;
   sliced.rowVectorHolder_ = stats.rowVectorHolder_;
-  sliced.rowFormat = stats.rowFormat;
   sliced.compactRow = stats.compactRow;
   sliced.denseRow = stats.denseRow;
   sliced.rowOffset = stats.rowOffset + range.offset;
