@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" font-family="'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+  <defs><marker id="a" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#64748b"/></marker><marker id="b" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#b45309"/></marker></defs>
+  <rect width="960" height="240" fill="#fff"/>
+  <style>.title{font-size:16px;font-weight:600;fill:#334155}.box{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}.act{fill:#eef4ff;stroke:#2563eb;stroke-width:1.2}.rev{fill:#fff7ed;stroke:#ea580c;stroke-width:1.2}.done{fill:#ecfdf5;stroke:#059669;stroke-width:1.2}.label{font-size:13px;font-weight:600;fill:#1f2937;text-anchor:middle}.small{font-size:11px;fill:#64748b;text-anchor:middle}.edge{font-size:11px;fill:#475569;text-anchor:middle}</style>
+  <text x="480" y="38" class="title" text-anchor="middle">ExecutorTaskScheduler state machine</text>
+  <g transform="translate(30,72)">
+    <rect class="box" x="0" y="0" width="170" height="70" rx="10"/><text class="label" x="85" y="30">kInit</text><text class="small" x="85" y="50">process-scope singleton</text>
+    <rect class="act" x="230" y="0" width="200" height="70" rx="10"/><text class="label" x="330" y="30">kSampling</text><text class="small" x="330" y="50">collect runtime stats per task</text>
+    <rect class="rev" x="460" y="0" width="220" height="70" rx="10"/><text class="label" x="570" y="30">kRevising</text><text class="small" x="570" y="50">observe throughput after change</text>
+    <rect class="done" x="710" y="0" width="220" height="70" rx="10"/><text class="label" x="820" y="30">kCompleted</text><text class="small" x="820" y="50">stage concurrency locked</text>
+    <g stroke="#64748b" stroke-width="1.3" fill="none">
+      <line x1="170" y1="35" x2="228" y2="35" marker-end="url(#a)"/>
+      <line x1="430" y1="35" x2="458" y2="35" marker-end="url(#a)"/>
+      <line x1="680" y1="35" x2="708" y2="35" marker-end="url(#a)"/>
+    </g>
+    <text class="edge" x="199" y="27">new stage</text>
+    <text class="edge" x="444" y="27">decide</text>
+    <text class="edge" x="694" y="27">stable</text>
+    <path d="M570 70 C 525 120, 360 126, 265 90" fill="none" stroke="#b45309" stroke-width="1.4" marker-end="url(#b)"/>
+    <text class="edge" x="420" y="154" fill="#b45309">regression or memory reclaim · fallback to default concurrency</text>
+  </g>
+</svg>

@@ -1999,7 +1999,7 @@ TEST_F(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
 }
 
 TEST_F(MultiFragmentTest, taskTerminateWithProblematicRemainingRemoteSplits) {
-  // Start the task with 2 drivers.
+  // Start the task with one driver.
   auto probeData =
       makeRowVector({"p_c0"}, {makeFlatVector<int64_t>({1, 2, 3})});
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
@@ -2019,32 +2019,66 @@ TEST_F(MultiFragmentTest, taskTerminateWithProblematicRemainingRemoteSplits) {
                   .planNode();
   auto taskId = makeTaskId("final", 0);
   auto task = makeTask(taskId, plan, 0);
-  task->start(2);
 
-  // Wait for all drivers to be blocked, so that the promises will be made.
-  bool allDriversBlocked = false;
-  while (!allDriversBlocked) {
-    allDriversBlocked = true;
-    task->testingVisitDrivers([&](Driver* driver) {
-      if (driver->isOnThread() ||
-          (driver->blockingReason() != BlockingReason::kWaitForSplit &&
-           driver->blockingReason() != BlockingReason::kWaitForProducer &&
-           driver->blockingReason() != BlockingReason::kWaitForJoinBuild)) {
-        allDriversBlocked = false;
-      }
-    });
+  struct BadSplitFactoryState {
+    std::atomic_bool firstSplitEntered{false};
+    std::atomic_bool releaseFirstSplit{false};
+    std::atomic_int secondSplitAttempts{0};
+    folly::EventCount firstSplitBarrier;
+  };
+
+  const auto firstBadTaskId = makeBadTaskId("leaf", 0);
+  const auto secondBadTaskId = makeBadTaskId("leaf", 1);
+  auto factoryState = std::make_shared<BadSplitFactoryState>();
+  auto& exchangeSourceFactories = ExchangeSource::factories();
+  exchangeSourceFactories.insert(
+      exchangeSourceFactories.begin(),
+      [factoryState, firstBadTaskId, secondBadTaskId](
+          const std::string& remoteTaskId,
+          int /*destination*/,
+          std::shared_ptr<ExchangeQueue> /*queue*/,
+          memory::MemoryPool* /*pool*/) -> std::shared_ptr<ExchangeSource> {
+        if (remoteTaskId == firstBadTaskId) {
+          factoryState->firstSplitEntered = true;
+          factoryState->firstSplitBarrier.notifyAll();
+          factoryState->firstSplitBarrier.await(
+              [&]() { return factoryState->releaseFirstSplit.load(); });
+          throw std::runtime_error("Testing error");
+        }
+        if (remoteTaskId == secondBadTaskId) {
+          ++factoryState->secondSplitAttempts;
+          throw std::runtime_error("Testing error");
+        }
+        return nullptr;
+      });
+  auto cleanup = folly::makeGuard([&]() {
+    factoryState->releaseFirstSplit = true;
+    factoryState->firstSplitBarrier.notifyAll();
+    task->requestAbort().wait();
+    exchangeSourceFactories.erase(exchangeSourceFactories.begin());
+  });
+  task->start(1);
+
+  // Block the only driver while it creates the first bad ExchangeSource.
+  task->addSplit(exchangeNodeId, remoteSplit(firstBadTaskId));
+  const auto waitDeadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!factoryState->firstSplitEntered.load() &&
+         std::chrono::steady_clock::now() < waitDeadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  ASSERT_TRUE(factoryState->firstSplitEntered.load());
 
-  // Add one bad remote split and trigger Task::terminate.
-  task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 0)));
-
-  // Add one more bad split, making sure `remainingRemoteSplits` is not empty
-  // and processing it would cause an exception.
-  task->addSplit(exchangeNodeId, remoteSplit(makeBadTaskId("leaf", 1)));
+  // With the only driver blocked, this split remains queued and must be
+  // processed by Task::terminate after the first factory attempt fails.
+  task->addSplit(exchangeNodeId, remoteSplit(secondBadTaskId));
+  factoryState->releaseFirstSplit = true;
+  factoryState->firstSplitBarrier.notifyAll();
 
   // Wait for the task to fail, and make sure the task has been deleted instead
   // of hanging as a zombie task.
   ASSERT_TRUE(waitForTaskFailure(task.get(), 30'000'000)) << task->taskId();
+  EXPECT_EQ(factoryState->secondSplitAttempts.load(), 1);
 }
 
 TEST_F(

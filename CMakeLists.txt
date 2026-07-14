@@ -625,6 +625,7 @@ find_package(roaring REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/bolt)
+include_directories(${CMAKE_BINARY_DIR}/gen_cpp)
 
 if(NOT BOLT_DISABLE_GOOGLETEST)
   find_package(GTest CONFIG REQUIRED)
@@ -640,6 +641,27 @@ find_package(utf8proc REQUIRED)
 find_package(date REQUIRED)
 
 include(CTest) # include after project() but before add_subdirectory()
+
+function(bolt_add_sharded_gtest TEST_TARGET NUM_SHARDS)
+  math(EXPR LAST_SHARD "${NUM_SHARDS} - 1")
+  foreach(SHARD_INDEX RANGE ${LAST_SHARD})
+    set(TEST_NAME "${TEST_TARGET}_shard_${SHARD_INDEX}")
+    add_test(
+      NAME ${TEST_NAME}
+      COMMAND ${TEST_TARGET}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(
+      ${TEST_NAME}
+      PROPERTIES COST 1
+                 ENVIRONMENT
+                 "GTEST_TOTAL_SHARDS=${NUM_SHARDS};GTEST_SHARD_INDEX=${SHARD_INDEX}"
+    )
+    if(ARGC GREATER 2)
+      set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT ${ARGV2})
+    endif()
+  endforeach()
+endfunction()
 
 # Adding this down here prevents warnings in dependencies from stopping the build
 if("${TREAT_WARNINGS_AS_ERRORS}")

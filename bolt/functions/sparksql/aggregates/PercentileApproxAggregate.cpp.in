@@ -15,6 +15,18 @@
  */
 
 #include "bolt/functions/sparksql/aggregates/PercentileApproxAggregate.h"
+
 namespace bytedance::bolt::functions::aggregate::sparksql {
-template class PercentileApproxAggregate<@type@>;
+
+template <typename T>
+std::unique_ptr<exec::Aggregate>
+PercentileApproxAggregateFactory<T>::create(
+    bool hasAccuracy,
+    const TypePtr& resultType) {
+  return std::make_unique<PercentileApproxAggregate<T>>(
+      hasAccuracy, resultType);
+}
+
+template struct PercentileApproxAggregateFactory<@type@>;
+
 } // namespace bytedance::bolt::functions::aggregate::sparksql

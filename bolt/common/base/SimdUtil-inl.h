@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <numeric>
 
 #if XSIMD_WITH_NEON
@@ -38,6 +39,14 @@ XSIMD_DECLARE_SIMD_REGISTER(
     detail::neon_vector_type<unsigned char>);
 } // namespace xsimd::types
 #endif
+
+#if XSIMD_WITH_SVE
+#include <arm_sve.h>
+namespace xsimd::types {
+XSIMD_DECLARE_SIMD_REGISTER(bool, sve, detail::sve_vector_type<unsigned char>);
+}
+#endif
+
 namespace bytedance::bolt::simd {
 
 namespace detail {
@@ -106,6 +115,10 @@ struct BitMask<T, A, 1> {
     return (vaddv_u8(vget_high_u8(vmask)) << 8) | vaddv_u8(vget_low_u8(vmask));
   }
 #endif
+
+  static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::generic&) {
+    return genericToBitMask(mask);
+  }
 };
 
 template <typename T, typename A>
@@ -143,6 +156,16 @@ struct BitMask<T, A, 2> {
         (vaddv_u8(vget_high_u8(vmask)) << 8) | vaddv_u8(vget_low_u8(vmask));
 
     return bits::extractBits<uint32_t>(tmp, 0xAAAA);
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::sve&) {
+    svuint16_t onc = svdup_u16(1);
+    svuint16_t inv = svindex_u16(0, 1);
+    svuint16_t pow = svlsl_m(svptrue_b16(), onc, inv);
+    uint32_t nullsres = svaddv(mask, pow);
+    return nullsres;
   }
 #endif
 
@@ -185,6 +208,16 @@ struct BitMask<T, A, 4> {
   }
 #endif
 
+#if XSIMD_WITH_SVE
+  static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::sve&) {
+    svuint32_t onc = svdup_u32(1);
+    svuint32_t inv = svindex_u32(0, 1);
+    svuint32_t pow = svlsl_m(svptrue_b32(), onc, inv);
+    uint8_t nullsres = svaddv(mask, pow);
+    return nullsres;
+  }
+#endif
+
   static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::generic&) {
     return genericToBitMask(mask);
   }
@@ -221,6 +254,16 @@ struct BitMask<T, A, 8> {
     uint64x2_t high_bits = vshrq_n_u64(input, 63);
     return (
         int)(vgetq_lane_u64(high_bits, 0) | (vgetq_lane_u64(high_bits, 1) << 1));
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::sve&) {
+    svuint64_t onc = svdup_u64(1);
+    svuint64_t inv = svindex_u64(0, 1);
+    svuint64_t pow = svlsl_m(svptrue_b64(), onc, inv);
+    uint32_t nullsres = svaddv(mask, pow);
+    return nullsres;
   }
 #endif
 
@@ -352,9 +395,21 @@ template <>
 inline xsimd::batch_bool<float, xsimd::default_arch> leadingMask(
     int i,
     const xsimd::default_arch&) {
+  /*
+  With GCC builds, compiler throws an error "invalid cast" on reintepreting to
+  the same data type, in SVE 256's case, svbool_t
+  __attribute__((arm_sve_vector_bits(256))).
+  So this is a workaround for now. Can be updated once the bug in GCC is
+  resolved in future GCC versions.
+  */
+
+#if XSIMD_WITH_SVE && defined(__GNUC__) && !defined(__clang__)
+  return xsimd::batch_bool<float, xsimd::default_arch>(leadingMask32[i].data);
+#else
   return reinterpret_cast<
       xsimd::batch_bool<float, xsimd::default_arch>::register_type>(
       leadingMask32[i].data);
+#endif
 }
 
 template <>
@@ -368,9 +423,21 @@ template <>
 inline xsimd::batch_bool<double, xsimd::default_arch> leadingMask(
     int i,
     const xsimd::default_arch&) {
+  /*
+  With GCC builds, compiler throws an error "invalid cast" on reintepreting to
+  the same data type, in SVE 256's case, svbool_t
+  __attribute__((arm_sve_vector_bits(256))).
+  So this is a workaround for now. Can be updated once the bug in GCC is
+  resolved in future GCC versions.
+  */
+
+#if XSIMD_WITH_SVE && defined(__GNUC__) && !defined(__clang__)
+  return xsimd::batch_bool<double, xsimd::default_arch>(leadingMask64[i].data);
+#else
   return reinterpret_cast<
       xsimd::batch_bool<double, xsimd::default_arch>::register_type>(
       leadingMask64[i].data);
+#endif
 }
 
 } // namespace detail
@@ -424,7 +491,7 @@ inline void memcpy(void* to, const void* from, size_t bytes, const A& arch) {
       return;
     }
   }
-  while (bytes >= sizeof(int64_t)) {
+  while (bytes >= static_cast<int64_t>(sizeof(int64_t))) {
     if (!detail::copyNextWord<int64_t, A>(to, from, bytes)) {
       return;
     }
@@ -479,7 +546,7 @@ void memset(void* to, char data, size_t bytes, const A& arch) {
     }
   }
   int64_t data64 = *reinterpret_cast<int64_t*>(&v);
-  while (bytes >= sizeof(int64_t)) {
+  while (bytes >= static_cast<int64_t>(sizeof(int64_t))) {
     if (!detail::setNextWord<int64_t>(to, data64, bytes, arch)) {
       return;
     }
@@ -553,6 +620,17 @@ struct Gather<T, int32_t, A, 4> {
     return apply<kScale>(base, loadIndices(indices, arch), arch);
   }
 
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, const int32_t* indices, const xsimd::sve& arch) {
+    svint32_t hashes_vec = svld1_s32(svptrue_b32(), indices);
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svld1_gather_s32index_s32(
+            svptrue_b32(), reinterpret_cast<const int32_t*>(base), hashes_vec));
+  }
+#endif
+
   template <int kScale>
   static xsimd::batch<T, A>
   apply(const T* base, const int32_t* indices, const xsimd::generic&) {
@@ -566,6 +644,17 @@ struct Gather<T, int32_t, A, 4> {
     return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
         _mm256_i32gather_epi32(
             reinterpret_cast<const int32_t*>(base), vindex, kScale));
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, VIndexType vindex, const xsimd::sve&) {
+    alignas(A::alignment()) int32_t indices[vindex.size];
+    vindex.store_aligned(indices);
+    svint32_t hashes_vec = svld1_s32(svptrue_b32(), indices);
+    return genericGather<T, A, kScale>(base, indices);
   }
 #endif
 
@@ -586,6 +675,21 @@ struct Gather<T, int32_t, A, 4> {
       const xsimd::avx2& arch) {
     return maskApply<kScale>(src, mask, base, loadIndices(indices, arch), arch);
   }
+
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A> maskApply(
+      xsimd::batch<T, A> src,
+      xsimd::batch_bool<T, A> mask,
+      const T* base,
+      const int32_t* indices,
+      const xsimd::sve& arch) {
+    svint32_t result = svld1_gather_s32index_s32(
+        mask, reinterpret_cast<const int32_t*>(base), svld1_s32(mask, indices));
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svsel_s32(mask, result, src));
+  }
+#endif
 
   template <int kScale>
   static xsimd::batch<T, A> maskApply(
@@ -650,6 +754,23 @@ struct Gather<T, int32_t, A, 8> {
     return Batch64<int32_t>::load_unaligned(indices);
   }
 
+#if (XSIMD_WITH_SVE && SVE_BITS == 128)
+
+  static Batch64<int32_t> loadIndices(
+      const int32_t* indices,
+      const xsimd::sve&) {
+    return Batch64<int32_t>::load_unaligned(indices);
+  }
+#endif
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 256)
+  static Batch128<int32_t> loadIndices(
+      const int32_t* indices,
+      const xsimd::sve&) {
+    return Batch128<int32_t>::load_unaligned(indices);
+  }
+#endif
+
 #if XSIMD_WITH_AVX2
   template <int kScale>
   static xsimd::batch<T, A>
@@ -663,6 +784,46 @@ struct Gather<T, int32_t, A, 8> {
   apply(const T* base, const int32_t* indices, const xsimd::generic&) {
     return genericGather<T, A, kScale>(base, indices);
   }
+
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, const int32_t* indices, const xsimd::sve& arch) {
+    svint32_t hashes_vec = svld1_s32(svptrue_b32(), indices);
+    svint64_t idx64_lo = svunpklo_s64(hashes_vec);
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svld1_gather_s64index_s64(
+            svptrue_b64(), reinterpret_cast<const int64_t*>(base), idx64_lo));
+  }
+#endif
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 256)
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, Batch128<int32_t> vindex, const xsimd::sve&) {
+    alignas(A::alignment()) int32_t indices[vindex.size];
+    vindex.store_unaligned(indices);
+    svint32_t hashes_vec = svld1_s32(svptrue_b32(), indices);
+    svint64_t idx64_lo = svunpklo_s64(hashes_vec);
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svld1_gather_s64index_s64(
+            svptrue_b64(), reinterpret_cast<const int64_t*>(base), idx64_lo));
+  }
+#endif
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 128)
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, Batch64<int32_t> vindex, const xsimd::sve&) {
+    constexpr int N = xsimd::batch<T, A>::size;
+    alignas(A::alignment()) T dst[N];
+    auto bytes = reinterpret_cast<const char*>(base);
+    for (int i = 0; i < N; ++i) {
+      dst[i] = *reinterpret_cast<const T*>(bytes + vindex.data[i] * kScale);
+    }
+    return xsimd::load_aligned(dst);
+  }
+#endif
 
 #if XSIMD_WITH_AVX2
   template <int kScale>
@@ -685,6 +846,41 @@ struct Gather<T, int32_t, A, 8> {
       const xsimd::generic&) {
     return genericMaskGather<T, A, kScale>(src, mask, base, indices);
   }
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 128)
+  template <int kScale>
+  static xsimd::batch<T, A> maskApply(
+      xsimd::batch<T, A> src,
+      xsimd::batch_bool<T, A> mask,
+      const T* base,
+      Batch64<int32_t> vindex,
+      const xsimd::sve& arch) {
+    constexpr int N = Batch64<int32_t>::size;
+    alignas(A::alignment()) int32_t indices[N];
+    vindex.store_unaligned(indices);
+    return maskApply<kScale>(src, mask, base, indices, arch);
+  }
+#endif
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 256)
+  template <int kScale>
+  static xsimd::batch<T, A> maskApply(
+      xsimd::batch<T, A> src,
+      xsimd::batch_bool<T, A> mask,
+      const T* base,
+      Batch128<int32_t> vindex,
+      const xsimd::sve& arch) {
+    constexpr int N = Batch128<int32_t>::size;
+    alignas(A::alignment()) int32_t indices[N];
+    vindex.store_unaligned(indices);
+    svint32_t hashes_vec = svld1_s32(svptrue_b32(), indices);
+    svint64_t idx64_lo = svunpklo_s64(hashes_vec);
+    svint64_t result = svld1_gather_s64index_s64(
+        mask, reinterpret_cast<const int64_t*>(base), idx64_lo);
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svsel_s64(mask, result, src));
+  }
+#endif
 
 #if XSIMD_WITH_AVX2
   template <int kScale>
@@ -743,6 +939,17 @@ struct Gather<T, int64_t, A, 8> {
   }
 #endif
 
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A>
+  apply(const T* base, const int64_t* indices, const xsimd::sve& arch) {
+    svint64_t hashes_vec = svld1_s64(svptrue_b64(), indices);
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svld1_gather_s64index_s64(
+            svptrue_b64(), reinterpret_cast<const int64_t*>(base), hashes_vec));
+  }
+#endif
+
   template <int kScale>
   static xsimd::batch<T, A>
   apply(const T* base, const int64_t* indices, const xsimd::generic&) {
@@ -759,6 +966,21 @@ struct Gather<T, int64_t, A, 8> {
     return maskApply<kScale>(src, mask, base, loadIndices(indices, arch), arch);
   }
 
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A> maskApply(
+      xsimd::batch<T, A> src,
+      xsimd::batch_bool<T, A> mask,
+      const T* base,
+      const int64_t* indices,
+      const xsimd::sve& arch) {
+    svint64_t result = svld1_gather_s64index_s64(
+        mask, reinterpret_cast<const int64_t*>(base), svld1_s64(mask, indices));
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svsel_s64(mask, result, src));
+  }
+#endif
+
 #if XSIMD_WITH_AVX2
   template <int kScale>
   static xsimd::batch<T, A> maskApply(
@@ -774,6 +996,23 @@ struct Gather<T, int64_t, A, 8> {
             vindex,
             mask,
             kScale));
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  template <int kScale>
+  static xsimd::batch<T, A> maskApply(
+      xsimd::batch<T, A> src,
+      xsimd::batch_bool<T, A> mask,
+      const T* base,
+      VIndexType vindex,
+      const xsimd::sve&) {
+    alignas(A::alignment()) int64_t indices[vindex.size];
+    vindex.store_aligned(indices);
+    svint64_t result = svld1_gather_s64index_s64(
+        mask, reinterpret_cast<const int64_t*>(base), svld1_s64(mask, indices));
+    return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
+        svsel_s64(mask, result, src));
   }
 #endif
 
@@ -818,6 +1057,36 @@ xsimd::batch<int16_t, A> pack32(
 }
 #endif
 
+#if XSIMD_WITH_SVE
+template <typename A>
+xsimd::batch<int16_t, A> pack32(
+    xsimd::batch<int32_t, A> x,
+    xsimd::batch<int32_t, A> y,
+    const xsimd::sve&) {
+  return svuzp1_s16(svreinterpret_s16_s32(x), svreinterpret_s16_s32(y));
+}
+#endif
+
+template <typename A>
+xsimd::batch<int16_t, A> pack32(
+    xsimd::batch<int32_t, A> x,
+    xsimd::batch<int32_t, A> y,
+    const xsimd::generic&) {
+  constexpr std::size_t size = xsimd::batch<int32_t, A>::size;
+  alignas(A) int32_t xArr[size];
+  alignas(A) int32_t yArr[size];
+  alignas(A) int16_t resultArr[2 * size];
+
+  x.store_unaligned(xArr);
+  y.store_unaligned(yArr);
+
+  for (std::size_t i = 0; i < size; ++i) {
+    resultArr[i] = static_cast<int16_t>(xArr[i]);
+    resultArr[i + size] = static_cast<int16_t>(yArr[i]);
+  }
+  return xsimd::batch<int16_t, A>::load_unaligned(resultArr);
+}
+
 #if XSIMD_WITH_AVX2
 template <typename A>
 xsimd::batch<int16_t, A> pack32(
@@ -857,6 +1126,16 @@ template <typename T>
 Batch64<T> genericPermute(Batch64<T> data, Batch64<int32_t> idx) {
   static_assert(data.size >= idx.size);
   Batch64<T> ans;
+  for (size_t i = 0; i < idx.size; ++i) {
+    ans.data[i] = data.data[idx.data[i]];
+  }
+  return ans;
+}
+
+template <typename T>
+Batch128<T> genericPermute(Batch128<T> data, Batch128<int32_t> idx) {
+  static_assert(data.size >= idx.size);
+  Batch128<T> ans;
   for (int i = 0; i < idx.size; ++i) {
     ans.data[i] = data.data[idx.data[i]];
   }
@@ -889,6 +1168,21 @@ struct Permute<T, A, 4> {
       const xsimd::avx2&) {
     return reinterpret_cast<typename xsimd::batch<T, A>::register_type>(
         _mm256_permutevar8x32_epi32(reinterpret_cast<__m256i>(data.data), idx));
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  static xsimd::batch<T, A> apply(
+      xsimd::batch<T, A> data,
+      xsimd::batch<int32_t, A> idx,
+      const xsimd::sve&) {
+    if constexpr (std::is_same_v<T, float>) {
+      svfloat32_t result = svtbl_f32(data.data, svreinterpret_u32(idx.data));
+      return reinterpret_cast<decltype(data.data)>(result);
+    } else {
+      svint32_t result = svtbl_s32(data.data, svreinterpret_u32(idx.data));
+      return reinterpret_cast<decltype(data.data)>(result);
+    }
   }
 #endif
 
@@ -927,7 +1221,8 @@ xsimd::batch<int16_t, A> gather(
   } else {
     second = xsimd::batch<int32_t, A>::broadcast(0);
   }
-  return detail::pack32(first, second, arch);
+  auto packed = detail::pack32(first, second, arch);
+  return packed;
 }
 
 namespace detail {
@@ -1050,6 +1345,25 @@ struct GetHalf<int64_t, int32_t, A> {
   }
 #endif
 
+  template <bool kSecond>
+  static xsimd::batch<int64_t, A> apply(
+      xsimd::batch<int32_t, A> data,
+      const xsimd::generic&) {
+    constexpr std::size_t input_size = xsimd::batch<int32_t, A>::size;
+    constexpr std::size_t half_size = input_size / 2;
+
+    alignas(A::alignment()) std::array<int32_t, input_size> input_buffer;
+    data.store_aligned(input_buffer.data());
+
+    alignas(A::alignment()) std::array<int64_t, half_size> output_buffer;
+    for (std::size_t i = 0; i < half_size; ++i) {
+      output_buffer[i] = static_cast<int64_t>(
+          kSecond ? input_buffer[i + half_size] : input_buffer[i]);
+    }
+
+    return xsimd::load_aligned(output_buffer.data());
+  }
+
 #if XSIMD_WITH_NEON
   template <bool kSecond>
   static xsimd::batch<int64_t, A> apply(
@@ -1101,6 +1415,23 @@ struct GetHalf<uint64_t, int32_t, A> {
     return vmovl_u32(vreinterpret_u32_s32(half));
   }
 #endif
+
+  template <bool kSecond>
+  static xsimd::batch<uint64_t, A> apply(
+      xsimd::batch<int32_t, A> data,
+      const xsimd::generic&) {
+    constexpr std::size_t input_size = xsimd::batch<int32_t, A>::size;
+    constexpr std::size_t half_size = input_size / 2;
+    alignas(A::alignment()) std::array<int32_t, input_size> input_buffer;
+    data.store_aligned(input_buffer.data());
+    alignas(A::alignment()) std::array<uint64_t, half_size> output_buffer;
+    for (std::size_t i = 0; i < half_size; ++i) {
+      output_buffer[i] = static_cast<uint64_t>(
+          kSecond ? static_cast<uint32_t>(input_buffer[i + half_size])
+                  : static_cast<uint32_t>(input_buffer[i]));
+    }
+    return xsimd::load_aligned(output_buffer.data());
+  }
 };
 
 } // namespace detail
@@ -1144,6 +1475,21 @@ struct Filter<T, A, 2> {
     return ans;
   }
 #endif
+
+#if XSIMD_WITH_SVE
+  static xsimd::batch<T, A>
+  apply(xsimd::batch<T, A> data, int mask, const xsimd::sve& arch) {
+    int lane_count = svcntb() / sizeof(T);
+    T compressed[lane_count];
+    int idx = 0;
+    for (int i = 0; i < lane_count; i++) {
+      if (mask & (1 << i)) {
+        compressed[idx++] = data.get(i);
+      }
+    }
+    return xsimd::load_unaligned(compressed);
+  }
+#endif
 };
 
 template <typename T, typename A>
@@ -1177,6 +1523,20 @@ struct Filter<T, A, 8> {
             reinterpret_cast<__m256i>(data.data), vindex));
   }
 #endif
+
+#if XSIMD_WITH_SVE
+  static xsimd::batch<T, A>
+  apply(xsimd::batch<T, A> data, int mask, const xsimd::sve&) {
+    auto vindex = xsimd::batch<int64_t, A>::load_aligned(byteSetBits[mask]);
+    if constexpr (std::is_same_v<T, double>) {
+      svfloat64_t result = svtbl_f64(data.data, svreinterpret_u64(vindex.data));
+      return reinterpret_cast<decltype(data.data)>(result);
+    } else {
+      svint64_t result = svtbl_s64(data.data, svreinterpret_u64(vindex.data));
+      return reinterpret_cast<decltype(data.data)>(result);
+    }
+  }
+#endif
 };
 
 template <typename A>
@@ -1191,6 +1551,15 @@ struct Crc32<uint64_t, A> {
 #if XSIMD_WITH_AVX
   static uint32_t apply(uint32_t checksum, uint64_t value, const xsimd::avx&) {
     return apply(checksum, value, xsimd::sse4_2{});
+  }
+#endif
+
+#if XSIMD_WITH_SVE
+  static uint32_t apply(uint32_t checksum, uint64_t value, const xsimd::sve&) {
+    __asm__("crc32cx %w[c], %w[c], %x[v]"
+            : [c] "+r"(checksum)
+            : [v] "r"(value));
+    return checksum;
   }
 #endif
 
@@ -1218,6 +1587,20 @@ xsimd::batch<T, A> iota(const A&) {
 }
 
 namespace detail {
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 256)
+template <typename T, typename A>
+struct HalfBatchImpl<T, A, std::enable_if_t<std::is_base_of_v<xsimd::sve, A>>> {
+  using Type = Batch128<T>;
+};
+#endif
+
+#if (XSIMD_WITH_SVE && SVE_BITS == 128)
+template <typename T, typename A>
+struct HalfBatchImpl<T, A, std::enable_if_t<std::is_base_of_v<xsimd::sve, A>>> {
+  using Type = Batch64<T>;
+};
+#endif
 
 template <typename T, typename A>
 struct HalfBatchImpl<T, A, std::enable_if_t<std::is_base_of_v<xsimd::avx, A>>> {
@@ -1256,10 +1639,18 @@ struct ReinterpretBatch<T, T, A> {
   }
 };
 
-#if XSIMD_WITH_NEON || XSIMD_WITH_NEON64
+#if XSIMD_WITH_NEON || XSIMD_WITH_NEON64 || XSIMD_WITH_SVE
 
 template <typename A>
 struct ReinterpretBatch<uint8_t, int8_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint8_t, A> apply(
+      xsimd::batch<int8_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u8_s8(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint8_t, A> apply(
       xsimd::batch<int8_t, A> data,
@@ -1279,6 +1670,14 @@ struct ReinterpretBatch<uint8_t, int8_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<int8_t, uint8_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<int8_t, A> apply(
+      xsimd::batch<uint8_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_s8_u8(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<int8_t, A> apply(
       xsimd::batch<uint8_t, A> data,
@@ -1298,6 +1697,14 @@ struct ReinterpretBatch<int8_t, uint8_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint16_t, int16_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint16_t, A> apply(
+      xsimd::batch<int16_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u16_s16(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint16_t, A> apply(
       xsimd::batch<int16_t, A> data,
@@ -1317,6 +1724,14 @@ struct ReinterpretBatch<uint16_t, int16_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<int16_t, uint16_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<int16_t, A> apply(
+      xsimd::batch<uint16_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_s16_u16(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<int16_t, A> apply(
       xsimd::batch<uint16_t, A> data,
@@ -1336,6 +1751,14 @@ struct ReinterpretBatch<int16_t, uint16_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint32_t, int32_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint32_t, A> apply(
+      xsimd::batch<int32_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u32_s32(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint32_t, A> apply(
       xsimd::batch<int32_t, A> data,
@@ -1355,6 +1778,14 @@ struct ReinterpretBatch<uint32_t, int32_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<int32_t, uint32_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<int32_t, A> apply(
+      xsimd::batch<uint32_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_s32_u32(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<int32_t, A> apply(
       xsimd::batch<uint32_t, A> data,
@@ -1374,6 +1805,14 @@ struct ReinterpretBatch<int32_t, uint32_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint64_t, uint32_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint64_t, A> apply(
+      xsimd::batch<uint32_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u64_u32(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint64_t, A> apply(
       xsimd::batch<uint32_t, A> data,
@@ -1393,6 +1832,14 @@ struct ReinterpretBatch<uint64_t, uint32_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint64_t, int64_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint64_t, A> apply(
+      xsimd::batch<int64_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u64_s64(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint64_t, A> apply(
       xsimd::batch<int64_t, A> data,
@@ -1412,6 +1859,14 @@ struct ReinterpretBatch<uint64_t, int64_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint32_t, int64_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint32_t, A> apply(
+      xsimd::batch<int64_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u32_s64(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint32_t, A> apply(
       xsimd::batch<int64_t, A> data,
@@ -1431,6 +1886,14 @@ struct ReinterpretBatch<uint32_t, int64_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<int64_t, uint64_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<int64_t, A> apply(
+      xsimd::batch<uint64_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_s64_u64(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<int64_t, A> apply(
       xsimd::batch<uint64_t, A> data,
@@ -1450,6 +1913,14 @@ struct ReinterpretBatch<int64_t, uint64_t, A> {
 
 template <typename A>
 struct ReinterpretBatch<uint32_t, uint64_t, A> {
+#if XSIMD_WITH_SVE
+  static xsimd::batch<uint32_t, A> apply(
+      xsimd::batch<uint64_t, A> data,
+      const xsimd::sve&) {
+    return svreinterpret_u32_u64(data.data);
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   static xsimd::batch<uint32_t, A> apply(
       xsimd::batch<uint64_t, A> data,

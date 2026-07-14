@@ -114,7 +114,8 @@ class LookupTable : public LookupTableBase {
 
 class MapSubscript {
  public:
-  explicit MapSubscript(bool allowCaching) : allowCaching_(allowCaching) {}
+  explicit MapSubscript(bool allowCaching)
+      : allowPersistentLookupCache_(allowCaching) {}
 
   VectorPtr applyMap(
       const SelectivityVector& rows,
@@ -122,7 +123,7 @@ class MapSubscript {
       exec::EvalCtx& context) const;
 
   bool cachingEnabled() const {
-    return allowCaching_;
+    return allowPersistentLookupCache_;
   }
 
   auto& lookupTable() const {
@@ -134,17 +135,28 @@ class MapSubscript {
   }
 
  private:
-  bool shouldTriggerCaching(const VectorPtr& mapArg) const {
-    if (!allowCaching_) {
+  bool supportsLookupTableForKeyType(const VectorPtr& mapArg) const {
+    const auto& keyType = mapArg->type()->childAt(0);
+    return keyType->isPrimitiveType() && !keyType->isBoolean();
+  }
+
+  void clearPersistentLookupCacheState() const {
+    lookupTable_.reset();
+    firstSeenMap_.reset();
+  }
+
+  void disablePersistentLookupCache() const {
+    allowPersistentLookupCache_ = false;
+    clearPersistentLookupCacheState();
+  }
+
+  bool shouldUsePersistentLookupCache(const VectorPtr& mapArg) const {
+    if (!allowPersistentLookupCache_) {
       return false;
     }
 
-    const auto& keyType = mapArg->type()->childAt(0);
-    if (!keyType->isPrimitiveType() || keyType->isBoolean() ||
-        keyType->isUseStringView()) {
-      // Disable caching if the key type is not primitive, is boolean, or uses
-      // StringView.
-      allowCaching_ = false;
+    if (!supportsLookupTableForKeyType(mapArg)) {
+      disablePersistentLookupCache();
       return false;
     }
 
@@ -158,19 +170,15 @@ class MapSubscript {
     }
 
     // Disable caching forever.
-    allowCaching_ = false;
-    lookupTable_.reset();
-    firstSeenMap_.reset();
+    disablePersistentLookupCache();
     return false;
   }
 
   // When true the function is allowed to cache a materialized version of the
-  // processed map.
-  mutable bool allowCaching_;
+  // processed map across multiple applyMap() calls.
+  mutable bool allowPersistentLookupCache_;
 
-  // This is used to check if the same base map is being passed over and over
-  // in the function. A shared_ptr is used to guarantee that if the map is
-  // seen again then it was not modified.
+  // Used to check if the same base map is being passed over and over.
   mutable VectorPtr firstSeenMap_;
 
   // Materialized cached version of firstSeenMap_ used to optimize the lookup.

@@ -1332,7 +1332,7 @@ void MapVector::prepareForReuse() {
 }
 
 VectorPtr MapVector::slice(vector_size_t offset, vector_size_t length) const {
-  return std::make_shared<MapVector>(
+  auto sliced = std::make_shared<MapVector>(
       pool_,
       type_,
       sliceNulls(offset, length),
@@ -1343,6 +1343,9 @@ VectorPtr MapVector::slice(vector_size_t offset, vector_size_t length) const {
              : sizes_,
       keys_,
       values_);
+  sliced->setMayChangeContentUnderSameAddress(
+      mayChangeContentUnderSameAddress());
+  return sliced;
 }
 
 void MapVector::validate(const VectorValidateOptions& options) const {

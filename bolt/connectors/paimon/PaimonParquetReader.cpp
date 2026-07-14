@@ -65,10 +65,12 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
       std::unique_ptr<parquet::ParquetReader> reader,
       int32_t batch_size,
       memory::MemoryPool* const pool,
+      core::ExpressionEvaluator* expressionEvaluator,
       uint8_t timestampPrecision)
       : reader_(std::move(reader)),
         batch_size_(batch_size),
         pool_(pool),
+        expressionEvaluator_(expressionEvaluator),
         timestampPrecision_(timestampPrecision),
         readType_(reader_->rowType()) {
     // LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() =
@@ -131,7 +133,8 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
             result.ok(),
             "expression {} not supported for filter pushdown by paimon connector",
             predicate->ToString());
-        auto filters = PaimonFilterTranslator::toSubfieldFilters(result.value);
+        auto filters = PaimonFilterTranslator::toSubfieldFilters(
+            result.value, expressionEvaluator_);
         if (filters.empty()) {
           LOG(INFO) << "[FilterPushdown] predicate translated successfully but "
                        "produced zero subfield filters — filter will not be "
@@ -249,6 +252,7 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   std::unique_ptr<dwio::common::RowReader> rowReader_;
   int32_t batch_size_;
   memory::MemoryPool* const pool_;
+  core::ExpressionEvaluator* const expressionEvaluator_;
   uint8_t timestampPrecision_;
   RowTypePtr readType_;
   uint64_t previousBatchFirstRowNumber_{0};
@@ -293,6 +297,7 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
           std::move(reader),
           batch_size_,
           paimonPool_->getBoltPool(),
+          paimonPool_->getExpressionEvaluator(),
           timestampPrecision_);
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
@@ -320,6 +325,7 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
           std::move(reader),
           batch_size_,
           paimonPool_->getBoltPool(),
+          paimonPool_->getExpressionEvaluator(),
           timestampPrecision_);
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(

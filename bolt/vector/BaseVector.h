@@ -854,6 +854,14 @@ class BaseVector {
     memoDisabled_ = true;
   }
 
+  bool mayChangeContentUnderSameAddress() const {
+    return mayChangeContentUnderSameAddress_;
+  }
+
+  void setMayChangeContentUnderSameAddress(bool mayChange) {
+    mayChangeContentUnderSameAddress_ = mayChange;
+  }
+
   /// Used to check internal state of a vector like sizes of the buffers,
   /// enclosed child vectors, values in indices. Currently, its only used in
   /// debug builds to check the result of expressions and some interim results.
@@ -977,6 +985,10 @@ class BaseVector {
   // values are not going to be reused (e.g. result of filtering), so that we
   // don't need to reallocate the result for every batch.
   bool memoDisabled_{false};
+
+  // Whether this vector may be reused with different logical content while
+  // keeping the same object address.
+  bool mayChangeContentUnderSameAddress_{false};
 };
 
 /// Loops over rows in 'ranges' and invokes 'func' for each row.

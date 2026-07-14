@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 290" font-family="'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+  <defs><marker id="a" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#64748b"/></marker><marker id="b" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker></defs>
+  <rect width="960" height="290" fill="#fff"/>
+  <style>.title{font-size:16px;font-weight:600;fill:#334155}.box{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}.act{fill:#eef4ff;stroke:#2563eb;stroke-width:1.2}.label{font-size:13px;font-weight:600;fill:#1f2937;text-anchor:middle}.small{font-size:11px;fill:#64748b;text-anchor:middle}.note{font-size:12px;fill:#475569}.edge{font-size:11px;fill:#475569}</style>
+  <text x="480" y="38" class="title" text-anchor="middle">Bolt decides concurrency, Spark schedules tasks</text>
+  <g transform="translate(30,66)">
+    <rect class="box" x="0" y="0" width="200" height="72" rx="10"/><text class="label" x="100" y="30">Spark Driver</text><text class="small" x="100" y="50">dispatches tasks at default</text><text class="small" x="100" y="64">concurrency to executors</text>
+    <rect class="act" x="260" y="0" width="360" height="72" rx="10"/><text class="label" x="440" y="28">Bolt Executor · ExecutorTaskScheduler</text><text class="small" x="440" y="48">collect runtime stats per task</text><text class="small" x="440" y="62">decideConcurrencyLocked on Task::terminate</text>
+    <rect class="box" x="650" y="0" width="280" height="72" rx="10"/><text class="label" x="790" y="28">Source operator runtime stats</text><text class="small" x="790" y="48">dynamicConcurrency</text><text class="small" x="790" y="62">version-tagged for each adjustment</text>
+    <g stroke="#64748b" stroke-width="1.3" fill="none"><line x1="200" y1="36" x2="258" y2="36" marker-end="url(#a)"/><line x1="620" y1="36" x2="648" y2="36" marker-end="url(#a)"/></g>
+  </g>
+  <g transform="translate(30,180)">
+    <rect class="act" x="70" y="0" width="820" height="80" rx="10"/>
+    <text class="label" x="480" y="28">Feedback loop</text>
+    <text class="small" x="480" y="50">Task metrics carry current concurrency and a monotonic version back to Spark Driver;</text>
+    <text class="small" x="480" y="66">Driver adjusts per-executor task dispatch to match the reported value on subsequent tasks.</text>
+    <line x1="760" y1="-40" x2="760" y2="-2" stroke="#2563eb" stroke-width="1.4" marker-end="url(#b)"/>
+    <line x1="100" y1="0" x2="100" y2="-40" stroke="#2563eb" stroke-width="1.4" marker-end="url(#b)"/>
+    <text class="edge" x="748" y="-14" text-anchor="end">metrics</text>
+    <text class="edge" x="112" y="-14" text-anchor="start">adjust</text>
+  </g>
+</svg>

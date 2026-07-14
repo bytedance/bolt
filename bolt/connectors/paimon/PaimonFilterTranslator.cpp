@@ -28,6 +28,8 @@
 #include <limits>
 #include <optional>
 #include "bolt/core/Expressions.h"
+#include "bolt/expression/Expr.h"
+#include "bolt/expression/ExprToSubfieldFilter.h"
 #include "bolt/type/Subfield.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/type/filter/FilterBase.h"
@@ -188,6 +190,131 @@ core::TypedExprPtr makeArrayConstant(
   return std::make_shared<core::ConstantTypedExpr>(wrapped);
 }
 
+VectorPtr evaluateConstantExpression(
+    const core::TypedExprPtr& expr,
+    core::ExpressionEvaluator* evaluator) {
+  if (!evaluator) {
+    return nullptr;
+  }
+  auto exprSet = evaluator->compile(expr);
+  if (exprSet->size() != 1 || !exprSet->exprs()[0]->isConstant()) {
+    return nullptr;
+  }
+
+  RowVector input(
+      evaluator->pool(), ROW({}, {}), nullptr, 1, std::vector<VectorPtr>{});
+  SelectivityVector rows(1);
+  VectorPtr result;
+  try {
+    evaluator->evaluate(exprSet.get(), rows, input, result);
+  } catch (const BoltUserError&) {
+    return nullptr;
+  }
+  return result;
+}
+
+std::optional<int64_t> integerValueAt(const VectorPtr& vector) {
+  switch (vector->typeKind()) {
+    case TypeKind::TINYINT:
+      return vector->as<SimpleVector<int8_t>>()->valueAt(0);
+    case TypeKind::SMALLINT:
+      return vector->as<SimpleVector<int16_t>>()->valueAt(0);
+    case TypeKind::INTEGER:
+      return vector->as<SimpleVector<int32_t>>()->valueAt(0);
+    case TypeKind::BIGINT:
+      return vector->as<SimpleVector<int64_t>>()->valueAt(0);
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<::paimon::Literal> literalFromVector(
+    const VectorPtr& vector,
+    ::paimon::FieldType fieldType) {
+  if (!vector || vector->size() == 0) {
+    return std::nullopt;
+  }
+  if (vector->isNullAt(0)) {
+    return ::paimon::Literal(fieldType);
+  }
+
+  switch (fieldType) {
+    case ::paimon::FieldType::BOOLEAN:
+      if (vector->typeKind() != TypeKind::BOOLEAN) {
+        return std::nullopt;
+      }
+      return ::paimon::Literal(vector->as<SimpleVector<bool>>()->valueAt(0));
+    case ::paimon::FieldType::TINYINT:
+    case ::paimon::FieldType::SMALLINT:
+    case ::paimon::FieldType::INT:
+    case ::paimon::FieldType::BIGINT: {
+      auto v = integerValueAt(vector);
+      if (!v) {
+        return std::nullopt;
+      }
+      if (fieldType == ::paimon::FieldType::TINYINT) {
+        return ::paimon::Literal(static_cast<int8_t>(*v));
+      }
+      if (fieldType == ::paimon::FieldType::SMALLINT) {
+        return ::paimon::Literal(static_cast<int16_t>(*v));
+      }
+      if (fieldType == ::paimon::FieldType::INT) {
+        return ::paimon::Literal(static_cast<int32_t>(*v));
+      }
+      return ::paimon::Literal(*v);
+    }
+    case ::paimon::FieldType::FLOAT: {
+      if (vector->typeKind() == TypeKind::REAL) {
+        return ::paimon::Literal(vector->as<SimpleVector<float>>()->valueAt(0));
+      }
+      if (vector->typeKind() == TypeKind::DOUBLE) {
+        return ::paimon::Literal(
+            static_cast<float>(vector->as<SimpleVector<double>>()->valueAt(0)));
+      }
+      if (auto v = integerValueAt(vector)) {
+        return ::paimon::Literal(static_cast<float>(*v));
+      }
+      return std::nullopt;
+    }
+    case ::paimon::FieldType::DOUBLE: {
+      if (vector->typeKind() == TypeKind::REAL) {
+        return ::paimon::Literal(
+            static_cast<double>(vector->as<SimpleVector<float>>()->valueAt(0)));
+      }
+      if (vector->typeKind() == TypeKind::DOUBLE) {
+        return ::paimon::Literal(
+            vector->as<SimpleVector<double>>()->valueAt(0));
+      }
+      if (auto v = integerValueAt(vector)) {
+        return ::paimon::Literal(static_cast<double>(*v));
+      }
+      return std::nullopt;
+    }
+    case ::paimon::FieldType::STRING:
+    case ::paimon::FieldType::BINARY: {
+      if (vector->typeKind() != TypeKind::VARCHAR &&
+          vector->typeKind() != TypeKind::VARBINARY) {
+        return std::nullopt;
+      }
+      auto sv = vector->as<SimpleVector<StringView>>()->valueAt(0);
+      return ::paimon::Literal(
+          ::paimon::FieldType::STRING, sv.data(), sv.size());
+    }
+    case ::paimon::FieldType::TIMESTAMP: {
+      if (vector->typeKind() != TypeKind::TIMESTAMP) {
+        return std::nullopt;
+      }
+      auto ts = vector->as<SimpleVector<Timestamp>>()->valueAt(0);
+      int64_t totalNanos = (ts.getSeconds() * 1'000'000'000LL) + ts.getNanos();
+      int64_t millis = totalNanos / 1'000'000;
+      auto nanoOfMillis = static_cast<int32_t>(totalNanos % 1'000'000);
+      return ::paimon::Literal(::paimon::Timestamp(millis, nanoOfMillis));
+    }
+    default:
+      return std::nullopt;
+  }
+}
+
 } // namespace
 
 // ===========================================================================
@@ -224,7 +351,8 @@ std::string PaimonFilterTranslator::normalizeOpName(const std::string& opName) {
 
 ToPaimonPredicateResult PaimonFilterTranslator::translate(
     const core::TypedExprPtr& expr,
-    const RowTypePtr& rowType) {
+    const RowTypePtr& rowType,
+    core::ExpressionEvaluator* evaluator) {
   auto fail = [](std::string reason) -> ToPaimonPredicateResult {
     LOG(WARNING) << "translate (with rowType): " << reason;
     return {nullptr, std::move(reason)};
@@ -239,12 +367,13 @@ ToPaimonPredicateResult PaimonFilterTranslator::translate(
     return fail("expr is not a CallTypedExpr");
   }
 
-  return translateCall(*call, rowType);
+  return translateCall(*call, rowType, evaluator);
 }
 
 ToPaimonPredicateResult PaimonFilterTranslator::translateCall(
     const core::CallTypedExpr& call,
-    const RowTypePtr& rowType) {
+    const RowTypePtr& rowType,
+    core::ExpressionEvaluator* evaluator) {
   auto fail = [](std::string reason) -> ToPaimonPredicateResult {
     LOG(WARNING) << "translateCall (with rowType): " << reason;
     return {nullptr, std::move(reason)};
@@ -254,218 +383,292 @@ ToPaimonPredicateResult PaimonFilterTranslator::translateCall(
     return {std::move(pred), ""};
   };
 
-  const auto& opName = normalizeOpName(call.name());
-  const auto& inputs = call.inputs();
+  auto translateLeafCall =
+      [&](const core::CallTypedExpr& leafCall) -> ToPaimonPredicateResult {
+    const auto opName = normalizeOpName(leafCall.name());
+    const auto& inputs = leafCall.inputs();
 
-  // Handle AND: recursively translate all children.
-  if (opName == "and") {
-    std::vector<std::shared_ptr<::paimon::Predicate>> children;
-    children.reserve(inputs.size());
-    for (const auto& input : inputs) {
-      auto child = translate(input, rowType);
-      if (!child.ok()) {
-        return fail(fmt::format("AND child failed: {}", child.reason));
-      }
-      children.push_back(std::move(child.value));
-    }
-    auto result = ::paimon::PredicateBuilder::And(children);
-    if (!result.ok()) {
-      return fail("PredicateBuilder::And failed");
-    }
-    return ok(std::move(result).value());
-  }
-
-  // Handle OR: recursively translate all children.
-  if (opName == "or") {
-    std::vector<std::shared_ptr<::paimon::Predicate>> children;
-    children.reserve(inputs.size());
-    for (const auto& input : inputs) {
-      auto child = translate(input, rowType);
-      if (!child.ok()) {
-        return fail("OR child failed");
-      }
-      children.push_back(std::move(child.value));
-    }
-    auto result = ::paimon::PredicateBuilder::Or(children);
-    if (!result.ok()) {
-      return fail("PredicateBuilder::Or failed");
-    }
-    return ok(std::move(result).value());
-  }
-
-  // Handle NOT: translate inner with negation applied per-operator.
-  if (opName == "not") {
+    // Leaf predicates require at least one operand (the field).
     if (inputs.empty()) {
-      return fail("NOT has no inputs");
+      return fail("leaf op has no inputs");
     }
-    const auto* innerCall =
-        dynamic_cast<const core::CallTypedExpr*>(inputs[0].get());
-    if (!innerCall) {
-      return fail("NOT inner is not a CallTypedExpr");
+
+    auto fieldInfo = extractFieldInfo(inputs[0], rowType);
+    if (!fieldInfo) {
+      return fail(fmt::format(
+          "could not extract field info for op {}, input[0]={}",
+          opName,
+          inputs[0]->toString()));
     }
-    auto negatedOp = applyNegation(normalizeOpName(innerCall->name()));
-    if (negatedOp.has_value()) {
-      core::CallTypedExpr negatedCall(
-          innerCall->type(), innerCall->inputs(), negatedOp.value());
-      return translateCall(negatedCall, rowType);
-    }
-    if (normalizeOpName(innerCall->name()) == "is_null") {
-      auto fieldInfo = extractFieldInfo(innerCall->inputs()[0], rowType);
-      if (!fieldInfo) {
-        return fail("NOT is_null: could not extract field info");
+
+    const auto& fieldName = fieldInfo->name;
+    const auto fieldIndex = fieldInfo->index;
+    const auto& fieldType = fieldInfo->fieldType;
+
+    // Equality: eq(field, constant)
+    if (opName == "eq") {
+      if (inputs.size() < 2) {
+        return fail("eq requires 2 inputs");
       }
-      return ok(::paimon::PredicateBuilder::IsNotNull(
-          fieldInfo->index, fieldInfo->name, fieldInfo->fieldType));
-    }
-    if (normalizeOpName(innerCall->name()) == "is_not_null") {
-      auto fieldInfo = extractFieldInfo(innerCall->inputs()[0], rowType);
-      if (!fieldInfo) {
-        return fail("NOT is_not_null: could not extract field info");
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("eq: could not extract literal");
       }
-      return ok(::paimon::PredicateBuilder::IsNull(
-          fieldInfo->index, fieldInfo->name, fieldInfo->fieldType));
+      return ok(::paimon::PredicateBuilder::Equal(
+          fieldIndex, fieldName, fieldType, *lit));
     }
-    return fail("unsupported negation target");
-  }
 
-  // Leaf predicates require at least one operand (the field).
-  if (inputs.empty()) {
-    return fail("leaf op has no inputs");
-  }
+    // Not equal: neq(field, constant)
+    if (opName == "neq") {
+      if (inputs.size() < 2) {
+        return fail("neq requires 2 inputs");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("neq: could not extract literal");
+      }
+      return ok(::paimon::PredicateBuilder::NotEqual(
+          fieldIndex, fieldName, fieldType, *lit));
+    }
 
-  auto fieldInfo = extractFieldInfo(inputs[0], rowType);
-  if (!fieldInfo) {
-    return fail(fmt::format(
-        "could not extract field info for op {}, input[0]={}",
-        opName,
-        inputs[0]->toString()));
-  }
+    // Less than: lt(field, constant)
+    if (opName == "lt") {
+      if (inputs.size() < 2) {
+        return fail("lt requires 2 inputs");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("lt: could not extract literal");
+      }
+      return ok(::paimon::PredicateBuilder::LessThan(
+          fieldIndex, fieldName, fieldType, *lit));
+    }
 
-  const auto& fieldName = fieldInfo->name;
-  const auto fieldIndex = fieldInfo->index;
-  const auto& fieldType = fieldInfo->fieldType;
+    // Less or equal: lte(field, constant)
+    if (opName == "lte") {
+      if (inputs.size() < 2) {
+        return fail("lte requires 2 inputs");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("lte: could not extract literal");
+      }
+      return ok(::paimon::PredicateBuilder::LessOrEqual(
+          fieldIndex, fieldName, fieldType, *lit));
+    }
 
-  // Equality: eq(field, constant)
-  if (opName == "eq") {
-    if (inputs.size() < 2) {
-      return fail("eq requires 2 inputs");
+    // Greater than: gt(field, constant)
+    if (opName == "gt") {
+      if (inputs.size() < 2) {
+        return fail("gt requires 2 inputs");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("gt: could not extract literal");
+      }
+      return ok(::paimon::PredicateBuilder::GreaterThan(
+          fieldIndex, fieldName, fieldType, *lit));
     }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("eq: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::Equal(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
 
-  // Not equal: neq(field, constant)
-  if (opName == "neq") {
-    if (inputs.size() < 2) {
-      return fail("neq requires 2 inputs");
+    // Greater or equal: gte(field, constant)
+    if (opName == "gte") {
+      if (inputs.size() < 2) {
+        return fail("gte requires 2 inputs");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("gte: could not extract literal");
+      }
+      return ok(::paimon::PredicateBuilder::GreaterOrEqual(
+          fieldIndex, fieldName, fieldType, *lit));
     }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("neq: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::NotEqual(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
 
-  // Less than: lt(field, constant)
-  if (opName == "lt") {
-    if (inputs.size() < 2) {
-      return fail("lt requires 2 inputs");
+    // Between: between(field, lower, upper)
+    if (opName == "between") {
+      if (inputs.size() < 3) {
+        return fail("between requires 3 inputs");
+      }
+      auto low = extractLiteral(inputs[1], fieldType, evaluator);
+      auto high = extractLiteral(inputs[2], fieldType, evaluator);
+      if (!low || !high) {
+        return fail("between: could not extract literals");
+      }
+      return ok(::paimon::PredicateBuilder::Between(
+          fieldIndex, fieldName, fieldType, *low, *high));
     }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("lt: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::LessThan(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
 
-  // Less or equal: lte(field, constant)
-  if (opName == "lte") {
-    if (inputs.size() < 2) {
-      return fail("lte requires 2 inputs");
-    }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("lte: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::LessOrEqual(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
-
-  // Greater than: gt(field, constant)
-  if (opName == "gt") {
-    if (inputs.size() < 2) {
-      return fail("gt requires 2 inputs");
-    }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("gt: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::GreaterThan(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
-
-  // Greater or equal: gte(field, constant)
-  if (opName == "gte") {
-    if (inputs.size() < 2) {
-      return fail("gte requires 2 inputs");
-    }
-    auto lit = extractLiteral(inputs[1], fieldType);
-    if (!lit) {
-      return fail("gte: could not extract literal");
-    }
-    return ok(::paimon::PredicateBuilder::GreaterOrEqual(
-        fieldIndex, fieldName, fieldType, *lit));
-  }
-
-  // Between: between(field, lower, upper)
-  if (opName == "between") {
-    if (inputs.size() < 3) {
-      return fail("between requires 3 inputs");
-    }
-    auto low = extractLiteral(inputs[1], fieldType);
-    auto high = extractLiteral(inputs[2], fieldType);
-    if (!low || !high) {
-      return fail("between: could not extract literals");
-    }
-    return ok(::paimon::PredicateBuilder::Between(
-        fieldIndex, fieldName, fieldType, *low, *high));
-  }
-
-  // In: in(field, array_constant) / not_in(field, array_constant)
-  if (opName == "in" || opName == "not_in") {
-    bool negated = (opName == "not_in");
-    auto result = extractInListLiterals(inputs[1], fieldType);
-    if (!result.has_value()) {
-      return fail("in/not_in: could not extract IN-list literals");
-    }
-    auto literals = std::move(result.value());
-    if (negated) {
-      return ok(::paimon::PredicateBuilder::NotIn(
+    // In: in(field, array_constant) / not_in(field, array_constant)
+    if (opName == "in" || opName == "not_in") {
+      if (inputs.size() < 2) {
+        return fail("in/not_in requires 2 inputs");
+      }
+      bool negated = (opName == "not_in");
+      auto result = extractInListLiterals(inputs[1], fieldType);
+      if (!result.has_value()) {
+        return fail("in/not_in: could not extract IN-list literals");
+      }
+      auto literals = std::move(result.value());
+      if (negated) {
+        return ok(::paimon::PredicateBuilder::NotIn(
+            fieldIndex, fieldName, fieldType, literals));
+      }
+      return ok(::paimon::PredicateBuilder::In(
           fieldIndex, fieldName, fieldType, literals));
     }
-    return ok(::paimon::PredicateBuilder::In(
-        fieldIndex, fieldName, fieldType, literals));
+
+    // Like: like(string_field, pattern). Three-arg LIKE with an explicit escape
+    // character is kept as a remaining filter to avoid changing escape
+    // semantics.
+    if (opName == "like") {
+      if (inputs.size() != 2) {
+        return fail("like requires 2 inputs");
+      }
+      if (fieldType != ::paimon::FieldType::STRING &&
+          fieldType != ::paimon::FieldType::BINARY) {
+        return fail("like only supports string/binary fields");
+      }
+      auto lit = extractLiteral(inputs[1], fieldType, evaluator);
+      if (!lit) {
+        return fail("like: could not extract pattern literal");
+      }
+      auto result = ::paimon::PredicateBuilder::Like(
+          fieldIndex, fieldName, fieldType, *lit);
+      if (!result.ok()) {
+        return fail("like: " + result.status().ToString());
+      }
+      return ok(std::move(result).value());
+    }
+
+    // Is null: is_null(field)
+    if (opName == "is_null") {
+      return ok(
+          ::paimon::PredicateBuilder::IsNull(fieldIndex, fieldName, fieldType));
+    }
+
+    // Is not null: is_not_null(field)
+    if (opName == "is_not_null") {
+      return ok(::paimon::PredicateBuilder::IsNotNull(
+          fieldIndex, fieldName, fieldType));
+    }
+
+    return fail(fmt::format("unsupported opName={}", opName));
+  };
+
+  auto translateNonCompoundCall =
+      [&](const core::CallTypedExpr& node) -> ToPaimonPredicateResult {
+    const auto opName = normalizeOpName(node.name());
+    const auto& inputs = node.inputs();
+
+    // Handle NOT: translate inner with negation applied per-operator.
+    if (opName == "not") {
+      if (inputs.empty()) {
+        return fail("NOT has no inputs");
+      }
+      const auto* innerCall =
+          dynamic_cast<const core::CallTypedExpr*>(inputs[0].get());
+      if (!innerCall) {
+        return fail("NOT inner is not a CallTypedExpr");
+      }
+      auto negatedOp = applyNegation(normalizeOpName(innerCall->name()));
+      if (negatedOp.has_value()) {
+        core::CallTypedExpr negatedCall(
+            innerCall->type(), innerCall->inputs(), negatedOp.value());
+        return translateLeafCall(negatedCall);
+      }
+      if (normalizeOpName(innerCall->name()) == "is_null") {
+        if (innerCall->inputs().empty()) {
+          return fail("NOT is_null has no inputs");
+        }
+        auto fieldInfo = extractFieldInfo(innerCall->inputs()[0], rowType);
+        if (!fieldInfo) {
+          return fail("NOT is_null: could not extract field info");
+        }
+        return ok(::paimon::PredicateBuilder::IsNotNull(
+            fieldInfo->index, fieldInfo->name, fieldInfo->fieldType));
+      }
+      if (normalizeOpName(innerCall->name()) == "is_not_null") {
+        if (innerCall->inputs().empty()) {
+          return fail("NOT is_not_null has no inputs");
+        }
+        auto fieldInfo = extractFieldInfo(innerCall->inputs()[0], rowType);
+        if (!fieldInfo) {
+          return fail("NOT is_not_null: could not extract field info");
+        }
+        return ok(::paimon::PredicateBuilder::IsNull(
+            fieldInfo->index, fieldInfo->name, fieldInfo->fieldType));
+      }
+      return fail("unsupported negation target");
+    }
+
+    return translateLeafCall(node);
+  };
+
+  struct Frame {
+    const core::CallTypedExpr* node;
+    bool combine;
+  };
+
+  std::vector<Frame> pending{{&call, false}};
+  std::vector<std::shared_ptr<::paimon::Predicate>> results;
+
+  while (!pending.empty()) {
+    auto frame = pending.back();
+    pending.pop_back();
+
+    const auto opName = normalizeOpName(frame.node->name());
+    const auto& inputs = frame.node->inputs();
+    const bool isCompound = opName == "and" || opName == "or";
+
+    if (!isCompound) {
+      auto leaf = translateNonCompoundCall(*frame.node);
+      if (!leaf.ok()) {
+        return leaf;
+      }
+      results.push_back(std::move(leaf.value));
+      continue;
+    }
+
+    if (!frame.combine) {
+      pending.push_back({frame.node, true});
+      for (size_t i = inputs.size(); i > 0; --i) {
+        const auto& input = inputs[i - 1];
+        const auto* childCall =
+            dynamic_cast<const core::CallTypedExpr*>(input.get());
+        if (!childCall) {
+          return fail(fmt::format(
+              "{} child failed: expr is not a CallTypedExpr",
+              opName == "and" ? "AND" : "OR"));
+        }
+        pending.push_back({childCall, false});
+      }
+      continue;
+    }
+
+    if (results.size() < inputs.size()) {
+      return fail("compound predicate result stack underflow");
+    }
+    const auto firstChild = results.size() - inputs.size();
+    std::vector<std::shared_ptr<::paimon::Predicate>> children;
+    children.reserve(inputs.size());
+    for (size_t i = firstChild; i < results.size(); ++i) {
+      children.push_back(std::move(results[i]));
+    }
+    results.resize(firstChild);
+
+    auto result = opName == "and" ? ::paimon::PredicateBuilder::And(children)
+                                  : ::paimon::PredicateBuilder::Or(children);
+    if (!result.ok()) {
+      return fail(
+          opName == "and" ? "PredicateBuilder::And failed"
+                          : "PredicateBuilder::Or failed");
+    }
+    results.push_back(std::move(result).value());
   }
 
-  // Is null: is_null(field)
-  if (opName == "is_null") {
-    return ok(
-        ::paimon::PredicateBuilder::IsNull(fieldIndex, fieldName, fieldType));
+  if (results.size() != 1) {
+    return fail("predicate translation produced an invalid result stack");
   }
-
-  // Is not null: is_not_null(field)
-  if (opName == "is_not_null") {
-    return ok(::paimon::PredicateBuilder::IsNotNull(
-        fieldIndex, fieldName, fieldType));
-  }
-
-  return fail(fmt::format("unsupported opName={}", opName));
+  return ok(std::move(results.front()));
 }
 
 std::optional<std::vector<::paimon::Literal>>
@@ -684,7 +887,8 @@ PaimonFilterTranslator::extractFieldInfo(
 
 std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
     const core::TypedExprPtr& expr,
-    ::paimon::FieldType fieldType) {
+    ::paimon::FieldType fieldType,
+    core::ExpressionEvaluator* evaluator) {
   // Unwrap CastTypedExpr — query planners often wrap constants in casts.
   auto unwrapped = expr;
   while (const auto* cast =
@@ -695,7 +899,8 @@ std::optional<::paimon::Literal> PaimonFilterTranslator::extractLiteral(
   const auto* constant =
       dynamic_cast<const core::ConstantTypedExpr*>(unwrapped.get());
   if (!constant || constant->hasValueVector()) {
-    return std::nullopt;
+    return literalFromVector(
+        evaluateConstantExpression(unwrapped, evaluator), fieldType);
   }
 
   const auto& value = constant->value();
@@ -945,6 +1150,8 @@ std::optional<std::string> PaimonFilterTranslator::functionToOpName(
       return std::string("in");
     case ::paimon::Function::Type::NOT_IN:
       return std::string("not_in");
+    case ::paimon::Function::Type::LIKE:
+      return std::string("like");
     default:
       return std::nullopt;
   }
@@ -1557,157 +1764,188 @@ PaimonFilterTranslator::FilterBuildResult buildFilterFromCall(
   return fail(fmt::format("unsupported operator '{}'", op));
 }
 
+void addSubfieldFilter(
+    common::SubfieldFilters& filters,
+    common::Subfield subfield,
+    std::unique_ptr<common::Filter> filter) {
+  if (!filter) {
+    return;
+  }
+  const auto fieldName = subfield.toString();
+  auto [it, inserted] =
+      filters.try_emplace(std::move(subfield), std::move(filter));
+  if (!inserted && it->second && filter) {
+    try {
+      it->second = it->second->mergeWith(filter.get());
+    } catch (const BoltException& e) {
+      // Some filter types (e.g. HugeintRange) don't support mergeWith.
+      // Skip pushdown for this subfield rather than failing.
+      LOG(WARNING) << "toSubfieldFilters: cannot merge filters on '"
+                   << fieldName << "': " << e.message();
+      filters.erase(it);
+    }
+  }
+}
+
+bool extractSubfieldFilter(
+    const core::TypedExprPtr& expr,
+    common::SubfieldFilters& filters) {
+  const auto* call = dynamic_cast<const core::CallTypedExpr*>(expr.get());
+  if (!call) {
+    return false;
+  }
+
+  const auto& op = call->name();
+
+  // OR: only push down when ALL direct children are EQUAL predicates
+  // on the same column (produces a Values filter). Cross-column or mixed
+  // ORs cannot be pushed into ScanSpec.
+  if (op == "or") {
+    std::optional<std::string> columnName;
+    std::vector<int64_t> intValues;
+    std::vector<int128_t> hugeintValues;
+    std::vector<std::string> stringValues;
+    bool allEqual = true;
+
+    std::vector<const core::CallTypedExpr*> orStack;
+    for (const auto& child : call->inputs()) {
+      const auto* childCall =
+          dynamic_cast<const core::CallTypedExpr*>(child.get());
+      if (childCall) {
+        orStack.push_back(childCall);
+      } else {
+        allEqual = false;
+        break;
+      }
+    }
+    while (!orStack.empty() && allEqual) {
+      const auto* current = orStack.back();
+      orStack.pop_back();
+      if (!current || current->name() != "eq") {
+        allEqual = false;
+        break;
+      }
+      auto name = extractFieldName(current->inputs()[0]);
+      if (!name) {
+        allEqual = false;
+        break;
+      }
+      if (!columnName.has_value()) {
+        columnName = name;
+      } else if (*columnName != *name) {
+        allEqual = false;
+        break;
+      }
+      auto val = extractConstant(current->inputs()[1]);
+      if (!val) {
+        allEqual = false;
+        break;
+      }
+      auto kind = current->inputs()[1]->type()->kind();
+      if (kind == TypeKind::TINYINT || kind == TypeKind::SMALLINT ||
+          kind == TypeKind::INTEGER || kind == TypeKind::BIGINT) {
+        // literalToConstantExpr promotes all integral types < BIGINT to
+        // int64_t in the variant, so always read as int64_t.
+        intValues.push_back(val->value<int64_t>());
+      } else if (kind == TypeKind::HUGEINT) {
+        hugeintValues.push_back(val->value<int128_t>());
+      } else if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+        stringValues.push_back(val->value<std::string>());
+      } else {
+        allEqual = false;
+        break;
+      }
+    }
+
+    if (!allEqual) {
+      LOG(INFO)
+          << "[FilterPushdown] OR predicate cannot be pushed down: "
+             "not all children are equality predicates on the same column";
+      return false;
+    }
+    if (!columnName.has_value()) {
+      return false;
+    }
+
+    std::unique_ptr<common::Filter> filter;
+    if (!intValues.empty()) {
+      filter = common::createBigintValues(intValues, false);
+    } else if (!hugeintValues.empty()) {
+      auto [minIt, maxIt] =
+          std::minmax_element(hugeintValues.begin(), hugeintValues.end());
+      filter = std::make_unique<common::HugeintValuesUsingHashTable>(
+          *minIt, *maxIt, hugeintValues, false);
+    } else if (!stringValues.empty()) {
+      filter = common::createBytesValues(stringValues, false);
+    }
+    if (!filter) {
+      return false;
+    }
+    addSubfieldFilter(
+        filters, common::Subfield(columnName.value()), std::move(filter));
+    return true;
+  }
+
+  // Leaf predicate — try to build a filter directly.
+  auto result = buildFilterFromCall(*call);
+  if (!result) {
+    LOG(INFO) << "[FilterPushdown] skipping leaf predicate '" << call->name()
+              << "': " << result.reason;
+    return false;
+  }
+
+  auto fieldName = extractFieldName(call->inputs()[0]);
+  if (!fieldName) {
+    return false;
+  }
+
+  addSubfieldFilter(
+      filters, common::Subfield(*fieldName), std::move(result.value));
+  return true;
+}
+
+bool extractSubfieldFiltersWithEvaluator(
+    const core::TypedExprPtr& expr,
+    core::ExpressionEvaluator* evaluator,
+    common::SubfieldFilters& filters) {
+  const auto* call = dynamic_cast<const core::CallTypedExpr*>(expr.get());
+  if (!call) {
+    return false;
+  }
+
+  try {
+    auto subfieldFilter = exec::toSubfieldFilter(expr, evaluator);
+    addSubfieldFilter(
+        filters,
+        std::move(subfieldFilter.first),
+        std::move(subfieldFilter.second));
+    return true;
+  } catch (const BoltException& e) {
+    LOG(INFO) << "[FilterPushdown] ExprToSubfieldFilterParser skipped '"
+              << call->name() << "': " << e.message();
+  } catch (const std::exception& e) {
+    LOG(INFO) << "[FilterPushdown] ExprToSubfieldFilterParser skipped '"
+              << call->name() << "': " << e.what();
+  }
+
+  return false;
+}
+
 } // namespace
 
 common::SubfieldFilters PaimonFilterTranslator::toSubfieldFilters(
-    const core::TypedExprPtr& expr) {
+    const core::TypedExprPtr& expr,
+    core::ExpressionEvaluator* evaluator) {
   common::SubfieldFilters filters;
+  for (const auto& conjunct : exec::flattenTopLevelConjuncts(expr)) {
+    if (evaluator &&
+        extractSubfieldFiltersWithEvaluator(conjunct, evaluator, filters)) {
+      continue;
+    }
 
-  if (!expr) {
-    return filters;
+    // Fallback to direct subfield filter extraction (no evaluator).
+    extractSubfieldFilter(conjunct, filters);
   }
-
-  // Iterative traversal to satisfy clang-tidy misc-no-recursion.
-  std::vector<core::TypedExprPtr> stack;
-  stack.push_back(expr);
-
-  while (!stack.empty()) {
-    auto current = std::move(stack.back());
-    stack.pop_back();
-    if (!current) {
-      continue;
-    }
-
-    const auto* call = dynamic_cast<const core::CallTypedExpr*>(current.get());
-    if (!call) {
-      continue;
-    }
-
-    const auto& op = call->name();
-
-    // Flatten AND by pushing children onto the stack.
-    if (op == "and") {
-      for (const auto& child : call->inputs()) {
-        stack.push_back(child);
-      }
-      continue;
-    }
-
-    // OR: only push down when ALL direct children are EQUAL predicates
-    // on the same column (produces a Values filter). Cross-column or mixed
-    // ORs cannot be pushed into ScanSpec.
-    if (op == "or") {
-      std::optional<std::string> columnName;
-      std::vector<int64_t> intValues;
-      std::vector<int128_t> hugeintValues;
-      std::vector<std::string> stringValues;
-      bool allEqual = true;
-
-      std::vector<const core::CallTypedExpr*> orStack;
-      for (const auto& child : call->inputs()) {
-        const auto* childCall =
-            dynamic_cast<const core::CallTypedExpr*>(child.get());
-        if (childCall) {
-          orStack.push_back(childCall);
-        } else {
-          allEqual = false;
-          break;
-        }
-      }
-      while (!orStack.empty() && allEqual) {
-        const auto* current = orStack.back();
-        orStack.pop_back();
-        if (!current || current->name() != "eq") {
-          allEqual = false;
-          break;
-        }
-        auto name = extractFieldName(current->inputs()[0]);
-        if (!name) {
-          allEqual = false;
-          break;
-        }
-        if (!columnName.has_value()) {
-          columnName = name;
-        } else if (*columnName != *name) {
-          allEqual = false;
-          break;
-        }
-        auto val = extractConstant(current->inputs()[1]);
-        if (!val) {
-          allEqual = false;
-          break;
-        }
-        auto kind = current->inputs()[1]->type()->kind();
-        if (kind == TypeKind::TINYINT || kind == TypeKind::SMALLINT ||
-            kind == TypeKind::INTEGER || kind == TypeKind::BIGINT) {
-          // literalToConstantExpr promotes all integral types < BIGINT to
-          // int64_t in the variant, so always read as int64_t.
-          intValues.push_back(val->value<int64_t>());
-        } else if (kind == TypeKind::HUGEINT) {
-          hugeintValues.push_back(val->value<int128_t>());
-        } else if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
-          stringValues.push_back(val->value<std::string>());
-        } else {
-          allEqual = false;
-          break;
-        }
-      }
-
-      if (!allEqual) {
-        LOG(INFO)
-            << "[FilterPushdown] OR predicate cannot be pushed down: "
-               "not all children are equality predicates on the same column";
-      }
-      if (allEqual && columnName.has_value()) {
-        std::unique_ptr<common::Filter> filter;
-        if (!intValues.empty()) {
-          filter = common::createBigintValues(intValues, false);
-        } else if (!hugeintValues.empty()) {
-          auto [minIt, maxIt] =
-              std::minmax_element(hugeintValues.begin(), hugeintValues.end());
-          filter = std::make_unique<common::HugeintValuesUsingHashTable>(
-              *minIt, *maxIt, hugeintValues, false);
-        } else if (!stringValues.empty()) {
-          filter = common::createBytesValues(stringValues, false);
-        }
-        if (filter) {
-          common::Subfield subfield(columnName.value());
-          filters.insert_or_assign(std::move(subfield), std::move(filter));
-        }
-      }
-      continue;
-    }
-
-    // Leaf predicate — try to build a filter directly.
-    auto result = buildFilterFromCall(*call);
-    if (!result) {
-      LOG(INFO) << "[FilterPushdown] skipping leaf predicate '" << call->name()
-                << "': " << result.reason;
-      continue;
-    }
-    auto filter = std::move(result.value);
-
-    auto fieldName = extractFieldName(call->inputs()[0]);
-    if (!fieldName) {
-      continue;
-    }
-
-    common::Subfield subfield(*fieldName);
-    auto [it, inserted] =
-        filters.try_emplace(std::move(subfield), std::move(filter));
-    if (!inserted && it->second && filter) {
-      try {
-        it->second = it->second->mergeWith(filter.get());
-      } catch (const BoltException& e) {
-        // Some filter types (e.g. HugeintRange) don't support mergeWith.
-        // Skip pushdown for this subfield rather than failing.
-        LOG(WARNING) << "toSubfieldFilters: cannot merge filters on '"
-                     << *fieldName << "': " << e.message();
-        filters.erase(it);
-      }
-    }
-  }
-
   return filters;
 }
 

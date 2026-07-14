@@ -32,10 +32,101 @@
 #pragma once
 
 #include "bolt/shuffle/sparksql/Payload.h"
+#include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::shuffle::sparksql {
+
+// Chains the streams produced by a ReaderStreamIterator into a single logically
+// continuous InputStream. When the current sub-stream reaches EOF, it
+// transparently advances to the next one, so that a single BufferedInputStream
+// (and BoltColumnarBatchDeserializer) can be reused across all streams instead
+// of being recreated per stream.
+class ChainedReaderStream final : public arrow::io::InputStream {
+ public:
+  ChainedReaderStream(
+      std::shared_ptr<ReaderStreamIterator> iterator,
+      arrow::MemoryPool* pool)
+      : iterator_(std::move(iterator)), pool_(pool) {}
+
+  arrow::Status Close() override {
+    if (closed_) {
+      return arrow::Status::OK();
+    }
+    closed_ = true;
+    eos_ = true;
+    if (current_) {
+      auto status = current_->Close();
+      current_.reset();
+      return status;
+    }
+    return arrow::Status::OK();
+  }
+
+  bool closed() const override {
+    return closed_;
+  }
+
+  arrow::Result<int64_t> Tell() const override {
+    return position_;
+  }
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    if (closed_) {
+      return arrow::Status::IOError("ChainedReaderStream is closed");
+    }
+    if (nbytes < 0) {
+      return arrow::Status::Invalid("Read length must be non-negative");
+    }
+    if (nbytes == 0 || eos_) {
+      return 0;
+    }
+    auto* outBytes = reinterpret_cast<uint8_t*>(out);
+    int64_t total = 0;
+    while (total < nbytes) {
+      if (!current_ && !advance()) {
+        break;
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          auto bytesRead, current_->Read(nbytes - total, outBytes + total));
+      if (bytesRead == 0) {
+        // Current sub-stream is exhausted, move to the next one.
+        current_.reset();
+        continue;
+      }
+      total += bytesRead;
+    }
+    position_ += total;
+    return total;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(
+        auto buffer, arrow::AllocateResizableBuffer(nbytes, pool_));
+    ARROW_ASSIGN_OR_RAISE(auto bytesRead, Read(nbytes, buffer->mutable_data()));
+    RETURN_NOT_OK(buffer->Resize(bytesRead, /*shrink_to_fit=*/true));
+    return std::shared_ptr<arrow::Buffer>(std::move(buffer));
+  }
+
+ private:
+  // Fetches the next sub-stream. Returns false when no more streams remain.
+  bool advance() {
+    current_ = iterator_->nextStream(pool_);
+    if (!current_) {
+      eos_ = true;
+      return false;
+    }
+    return true;
+  }
+
+  std::shared_ptr<ReaderStreamIterator> iterator_;
+  arrow::MemoryPool* pool_{nullptr};
+  std::shared_ptr<arrow::io::InputStream> current_;
+  int64_t position_{0};
+  bool eos_{false};
+  bool closed_{false};
+};
 
 class RowBufferPool final {
  public:
@@ -104,12 +195,14 @@ class BoltColumnarBatchDeserializer {
       const bytedance::bolt::RowTypePtr& rowType,
       int32_t batchSize,
       int32_t shuffleBatchByteSize,
+      int32_t shuffleBufferSize,
       arrow::MemoryPool* memoryPool,
       bytedance::bolt::memory::MemoryPool* boltPool,
       std::vector<bool>* isValidityBuffer,
       bool hasComplexType,
       uint64_t& deserializeTime,
       uint64_t& decompressTime,
+      uint64_t& mergeTime,
       bool isRowFormat = false,
       AdaptiveParallelZstdCodec* zstdCodec = nullptr,
       RowBufferPool* rowBufferPool = nullptr,
@@ -136,6 +229,7 @@ class BoltColumnarBatchDeserializer {
 
   uint64_t& deserializeTime_;
   uint64_t& decompressTime_;
+  uint64_t& mergeTime_;
 
   struct SavedPayload {
     uint64_t size{0};
@@ -187,6 +281,8 @@ class BoltColumnarBatchDeserializerFactory {
 
   int64_t getDeserializeTime();
 
+  int64_t getMergeTime();
+
   void setNumPartitions(int32_t numPartitions) {
     numPartitions_ = numPartitions;
   }
@@ -217,15 +313,26 @@ class BoltColumnarBatchDeserializerFactory {
     partitioningShortName_ = name;
   }
 
+  void setShuffleBufferSize(int32_t shuffleBufferSize) {
+    shuffleBufferSize_ = shuffleBufferSize;
+  }
+
+  void setRowFormat(bytedance::bolt::row::RowFormat rowFormat) {
+    rowFormat_ = rowFormat;
+  }
+
  private:
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<Codec> codec_;
   bytedance::bolt::RowTypePtr rowType_;
   int32_t batchSize_;
   int32_t shuffleBatchByteSize_;
+  int32_t shuffleBufferSize_{kDefaultShuffleBufferSize};
   int32_t numPartitions_{0};
   ShuffleWriterType shuffleWriterType_{ShuffleWriterType::V1};
   std::string partitioningShortName_;
+  bytedance::bolt::row::RowFormat rowFormat_{
+      bytedance::bolt::row::RowFormat::DENSE};
   arrow::MemoryPool* memoryPool_;
   bytedance::bolt::memory::MemoryPool* boltPool_;
 
@@ -234,6 +341,7 @@ class BoltColumnarBatchDeserializerFactory {
 
   uint64_t deserializeTime_{0};
   uint64_t decompressTime_{0};
+  uint64_t mergeTime_{0};
 
   void initFromSchema();
   // for rowbased shuffle
@@ -273,6 +381,10 @@ class BoltShuffleReader {
 
   int64_t getDeserializeTime() const {
     return factory_->getDeserializeTime();
+  }
+
+  int64_t getMergeTime() const {
+    return factory_->getMergeTime();
   }
 
   arrow::MemoryPool* getPool() const {

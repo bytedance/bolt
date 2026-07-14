@@ -47,6 +47,9 @@ class ReaderStreamIterator {
       int64_t numBatches,
       int64_t decompressTime,
       int64_t deserializeTime,
+      int64_t deserializerCreateTime,
+      int64_t deserializerDestroyTime,
+      int64_t mergeTime,
       int64_t totalReadTime) = 0;
 };
 

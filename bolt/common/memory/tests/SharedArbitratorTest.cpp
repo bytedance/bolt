@@ -292,10 +292,11 @@ class SharedArbitrationTest : public testing::WithParamInterface<TestParam>,
 
   void setupMemory(
       int64_t memoryCapacity = 0,
-      uint64_t memoryPoolInitCapacity = kMemoryPoolInitCapacity) {
+      uint64_t memoryPoolInitCapacity = kMemoryPoolInitCapacity,
+      uint64_t maxArbitrationTimeMs = 5 * 60 * 1'000) {
     memoryCapacity = (memoryCapacity != 0) ? memoryCapacity : kMemoryCapacity;
-    memoryManager_ =
-        createMemoryManager(memoryCapacity, memoryPoolInitCapacity);
+    memoryManager_ = createMemoryManager(
+        memoryCapacity, memoryPoolInitCapacity, maxArbitrationTimeMs);
     ASSERT_EQ(memoryManager_->arbitrator()->kind(), "SHARED");
     arbitrator_ = static_cast<SharedArbitrator*>(memoryManager_->arbitrator());
   }
@@ -1308,7 +1309,7 @@ TEST_P(
     SCOPED_TRACE(testData.debugString());
     const auto totalCapacity = testData.totalCapacity;
     const auto queryCapacity = testData.queryCapacity;
-    setupMemory(totalCapacity);
+    setupMemory(totalCapacity, kMemoryPoolInitCapacity, 10'000);
 
     std::mutex mutex;
     std::vector<std::shared_ptr<core::QueryCtx>> queries;

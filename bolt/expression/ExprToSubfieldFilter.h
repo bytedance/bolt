@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <vector>
 #include "bolt/core/ExpressionEvaluator.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/ITypedExpr.h"
@@ -421,6 +422,17 @@ inline std::unique_ptr<common::TimestampRange> greaterThanOrEqual(
 std::pair<common::Subfield, std::unique_ptr<common::Filter>> toSubfieldFilter(
     const core::TypedExprPtr& expr,
     core::ExpressionEvaluator* evaluator);
+
+/// Flattens top-level AND expressions into a list of conjuncts.
+///
+/// This only expands AND calls. Other expressions, including OR and NOT, are
+/// returned as leaf conjuncts.
+std::vector<core::TypedExprPtr> flattenTopLevelConjuncts(
+    const core::TypedExprPtr& expr);
+
+void flattenTopLevelConjuncts(
+    const core::TypedExprPtr& expr,
+    std::vector<core::TypedExprPtr>& conjuncts);
 
 /// Language-specific translator of generic expressions into subfield filters.
 /// Default language is Presto. A different language can be supported by

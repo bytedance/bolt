@@ -95,11 +95,55 @@ enum IntermediateTypeChildIndex {
   kSerialized = 4,
 };
 
+class PercentileApproxAggregateBase : public exec::Aggregate {
+ public:
+  PercentileApproxAggregateBase(bool hasAccuracy, const TypePtr& resultType);
+
+ protected:
+  struct Percentiles {
+    std::vector<double> values;
+    bool isArray;
+  };
+
+  void decodePercentileAndAccuracy(
+      const SelectivityVector& rows,
+      const std::vector<VectorPtr>& args,
+      size_t& argIndex);
+
+  static void extractPercentiles(
+      const ArrayVector* arrays,
+      vector_size_t indexInBaseVector,
+      const double*& data,
+      vector_size_t& len,
+      std::vector<bool>& isNull);
+
+  void checkSetPercentile(const SelectivityVector& rows, const BaseVector& vec);
+
+  void checkSetPercentile(
+      bool isArray,
+      const double* data,
+      vector_size_t len,
+      const std::vector<bool>& isNull);
+
+  void checkSetAccuracy();
+
+  void checkSetAccuracy(int64_t accuracy);
+
+  const bool hasAccuracy_;
+  std::optional<Percentiles> percentiles_;
+  int32_t accuracy_{kDefaultAccuracy};
+
+ private:
+  DecodedVector decodedAccuracy_;
+};
+
 template <typename T>
-class PercentileApproxAggregate : public exec::Aggregate {
+class PercentileApproxAggregate : public PercentileApproxAggregateBase {
  public:
   PercentileApproxAggregate(bool hasAccuracy, const TypePtr& resultType)
-      : exec::Aggregate(resultType), hasAccuracy_(hasAccuracy) {}
+      : PercentileApproxAggregateBase(hasAccuracy, resultType) {}
+
+  ~PercentileApproxAggregate() override = default;
 
   int32_t accumulatorFixedWidthSize() const override {
     return sizeof(GKAccumulator<T>);
@@ -390,134 +434,8 @@ class PercentileApproxAggregate : public exec::Aggregate {
       const std::vector<VectorPtr>& args) {
     size_t argIndex = 0;
     decodedValue_.decode(*args[argIndex++], rows, true);
-    checkSetPercentile(rows, *args[argIndex++]);
-    if (hasAccuracy_) {
-      decodedAccuracy_.decode(*args[argIndex++], rows, true);
-      checkSetAccuracy();
-    }
+    decodePercentileAndAccuracy(rows, args, argIndex);
     BOLT_USER_CHECK_EQ(argIndex, args.size());
-  }
-
-  /// Extract percentile info: the raw data, the length and the null-ness from
-  /// top-level ArrayVector.
-  static void extractPercentiles(
-      const ArrayVector* arrays,
-      vector_size_t indexInBaseVector,
-      const double*& data,
-      vector_size_t& len,
-      std::vector<bool>& isNull) {
-    auto elements = arrays->elements()->asFlatVector<double>();
-    auto offset = arrays->offsetAt(indexInBaseVector);
-    data = elements->rawValues() + offset;
-    len = arrays->sizeAt(indexInBaseVector);
-    isNull.resize(len);
-    for (auto index = offset; index < offset + len; index++) {
-      isNull[index - offset] = elements->isNullAt(index);
-    }
-  }
-
-  void checkSetPercentile(
-      const SelectivityVector& rows,
-      const BaseVector& vec) {
-    DecodedVector decoded(vec, rows);
-    BOLT_USER_CHECK(
-        decoded.isConstantMapping(),
-        "Percentile argument must be constant for all input rows");
-    bool isArray;
-    const double* data;
-    vector_size_t len;
-    std::vector<bool> isNull;
-    auto indexInBaseVector = decoded.index(0);
-    if (decoded.base()->typeKind() == TypeKind::DOUBLE) {
-      isArray = false;
-      auto baseVector = decoded.base();
-      data = baseVector->asUnchecked<ConstantVector<double>>()->rawValues() +
-          indexInBaseVector;
-      len = 1;
-      isNull = {baseVector->isNullAt(indexInBaseVector)};
-    } else if (decoded.base()->typeKind() == TypeKind::ARRAY) {
-      isArray = true;
-      auto arrays = decoded.base()->asUnchecked<ArrayVector>();
-      BOLT_USER_CHECK(
-          arrays->elements()->isFlatEncoding(),
-          "Only flat encoding is allowed for percentile array elements");
-      extractPercentiles(arrays, indexInBaseVector, data, len, isNull);
-    } else {
-      BOLT_USER_FAIL(
-          "Incorrect type for percentile: {}", decoded.base()->typeKind());
-    }
-    checkSetPercentile(isArray, data, len, isNull);
-  }
-
-  void checkSetPercentile(
-      bool isArray,
-      const double* data,
-      vector_size_t len,
-      const std::vector<bool>& isNull) {
-    if (!percentiles_) {
-      BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
-      percentiles_ = {
-          .values = std::vector<double>(len),
-          .isArray = isArray,
-      };
-      for (vector_size_t i = 0; i < len; ++i) {
-        BOLT_USER_CHECK(!isNull[i], "Percentage value must not be null");
-        BOLT_USER_CHECK(
-            data[i] >= 0.0 && data[i] <= 1.0,
-            "All percentage values must be between 0.0 and 1.0 (current = {})",
-            data[i]);
-        percentiles_->values[i] = data[i];
-      }
-    } else {
-      BOLT_USER_CHECK_EQ(
-          isArray,
-          percentiles_->isArray,
-          "The percentage provided must be a constant literal");
-      BOLT_USER_CHECK_EQ(
-          len,
-          percentiles_->values.size(),
-          "Percentile argument must be constant for all input rows");
-      for (vector_size_t i = 0; i < len; ++i) {
-        BOLT_USER_CHECK_EQ(
-            data[i],
-            percentiles_->values[i],
-            "Percentile argument must be constant for all input rows");
-      }
-    }
-  }
-
-  void checkSetAccuracy() {
-    if (!hasAccuracy_) {
-      return;
-    }
-    BOLT_USER_CHECK(
-        decodedAccuracy_.isConstantMapping(),
-        "The accuracy provided must be a constant literal");
-    TypeKind accuracyType = decodedAccuracy_.base()->type()->kind();
-    BOLT_USER_CHECK(
-        accuracyType == TypeKind::BIGINT || accuracyType == TypeKind::INTEGER,
-        "The accuracy provided must be a literal of integer or bigint (current value = {})",
-        decodedAccuracy_.base()->type()->toString());
-    if (accuracyType == TypeKind::INTEGER) {
-      checkSetAccuracy(decodedAccuracy_.valueAt<int32_t>(0));
-    } else {
-      checkSetAccuracy(decodedAccuracy_.valueAt<int64_t>(0));
-    }
-  }
-
-  void checkSetAccuracy(int32_t accuracy) {
-    BOLT_USER_CHECK(
-        accuracy > 0 && accuracy <= 2147483647,
-        "The accuracy provided must be a literal between (0, 2147483647] (current value = {}})",
-        accuracy);
-    if (accuracy_ == kDefaultAccuracy) {
-      accuracy_ = accuracy;
-    } else {
-      BOLT_USER_CHECK_EQ(
-          accuracy,
-          accuracy_,
-          "Accuracy argument must be constant for all input rows");
-    }
   }
 
   GKAccumulator<T>* initRawAccumulator(char* group) {
@@ -538,17 +456,7 @@ class PercentileApproxAggregate : public exec::Aggregate {
     addIntermediateImpl<kSingleGroup, false>(group, rows, args);
   }
 
-  struct Percentiles {
-    std::vector<double> values;
-    bool isArray;
-  };
-
-  const bool hasAccuracy_;
-  std::optional<Percentiles> percentiles_;
-  int32_t accuracy_{kDefaultAccuracy};
   DecodedVector decodedValue_;
-  DecodedVector decodedAccuracy_;
-  DecodedVector decodedDigest_;
 
  private:
   template <bool kSingleGroup, bool checkIntermediateInputs>
@@ -662,12 +570,20 @@ class PercentileApproxAggregate : public exec::Aggregate {
   }
 };
 
-extern template class PercentileApproxAggregate<int8_t>;
-extern template class PercentileApproxAggregate<int16_t>;
-extern template class PercentileApproxAggregate<int32_t>;
-extern template class PercentileApproxAggregate<int64_t>;
-extern template class PercentileApproxAggregate<int128_t>;
-extern template class PercentileApproxAggregate<float>;
-extern template class PercentileApproxAggregate<double>;
-extern template class PercentileApproxAggregate<Timestamp>;
+template <typename T>
+struct PercentileApproxAggregateFactory {
+  static std::unique_ptr<exec::Aggregate> create(
+      bool hasAccuracy,
+      const TypePtr& resultType);
+};
+
+extern template struct PercentileApproxAggregateFactory<int8_t>;
+extern template struct PercentileApproxAggregateFactory<int16_t>;
+extern template struct PercentileApproxAggregateFactory<int32_t>;
+extern template struct PercentileApproxAggregateFactory<int64_t>;
+extern template struct PercentileApproxAggregateFactory<int128_t>;
+extern template struct PercentileApproxAggregateFactory<float>;
+extern template struct PercentileApproxAggregateFactory<double>;
+extern template struct PercentileApproxAggregateFactory<Timestamp>;
+
 } // namespace bytedance::bolt::functions::aggregate::sparksql

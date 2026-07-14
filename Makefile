@@ -75,7 +75,7 @@ CONAN_CONFIG ?=
 CONAN_OVERRIDE ?=
 
 BUILD_VERSION ?= main
-PROFILE=default
+PROFILE ?= default
 BUILD_TYPE=Release
 
 # Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,

@@ -34,8 +34,14 @@
 #include <arrow/memory_pool.h>
 #include <arrow/type.h>
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 #include "bolt/buffer/Buffer.h"
 #include "bolt/row/CompactRow.h"
+#include "bolt/row/RowFormat.h"
+#include "bolt/row/dense/DenseRow.h"
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::shuffle::sparksql {
 static const uint32_t kSizeOfRowHeader = sizeof(int32_t);
@@ -82,8 +88,10 @@ class ShuffleColumnarToRowConverter {
  public:
   explicit ShuffleColumnarToRowConverter(
       const bytedance::bolt::RowTypePtr& rowType,
-      bytedance::bolt::memory::MemoryPool* boltPool)
-      : boltPool_(boltPool) {
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      bytedance::bolt::row::RowFormat rowFormat =
+          bytedance::bolt::row::RowFormat::COMPACT)
+      : boltPool_(boltPool), rowFormat_(rowFormat) {
     init(rowType);
   }
 
@@ -96,9 +104,10 @@ class ShuffleColumnarToRowConverter {
     }
 
    private:
-    std::shared_ptr<bytedance::bolt::row::CompactRow> compactRow;
-    int64_t numRows;
-    int64_t totalMemorySize;
+    std::unique_ptr<row::CompactRow> compactRow;
+    std::unique_ptr<row::DenseRow> denseRow;
+    int64_t numRows{0};
+    int64_t totalMemorySize{0};
   };
 
   RowVectorWithStats getWithStats(
@@ -125,12 +134,12 @@ class ShuffleColumnarToRowConverter {
 
  private:
   void init(const bytedance::bolt::RowTypePtr& rowType);
-
   int32_t fixedRowSize_ = 0;
   uint8_t* bufferAddress_;
   int64_t totalBufferSize_{0};
   size_t averageRowSize_{0};
   bytedance::bolt::memory::MemoryPool* boltPool_;
+  bytedance::bolt::row::RowFormat rowFormat_;
   std::vector<RowInternalBufferPtr> boltBuffers_;
 };
 
