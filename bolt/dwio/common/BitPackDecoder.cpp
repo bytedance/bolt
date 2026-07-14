@@ -29,6 +29,9 @@
  */
 
 #include "bolt/dwio/common/BitPackDecoder.h"
+#if defined(__ARM_FEATURE_SVE) && defined(aarch64)
+#include <arm_sve.h>
+#endif
 namespace bytedance::bolt::dwio::common {
 
 using int128_t = __int128_t;
@@ -191,6 +194,185 @@ int32_t decode1To24(
 
 #endif
 
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__) && SVE_BITS == 256
+
+namespace {
+
+template <typename T>
+inline T* addBytes(T* pointer, int32_t offset) {
+  return reinterpret_cast<T*>(reinterpret_cast<uint64_t>(pointer) + offset);
+}
+
+template <typename T>
+void store8Ints_sve(svint32_t eightInts_sve, int32_t i, T* result) {
+  if constexpr (sizeof(T) == 2) {
+    svint16_t eightInts_s16 = svqxtnb_s32(eightInts_sve);
+    svst1_s16(svwhilelt_b16(0, 8), &result[i], eightInts_s16);
+  } else if constexpr (sizeof(T) == 4) {
+    svst1_s32(svwhilelt_b32(0, 8), &result[i], eightInts_sve);
+  } else if constexpr (sizeof(T) == 8) {
+    svint64_t eightInts_s64_lo = svunpklo_s64(eightInts_sve);
+    svint64_t eightInts_s64_hi = svunpkhi_s64(eightInts_sve);
+    svst1_s64(svwhilelt_b64(0, 4), &result[i], eightInts_s64_lo);
+    svst1_s64(svwhilelt_b64(0, 4), &result[i + 4], eightInts_s64_hi);
+  }
+}
+
+template <uint8_t width>
+void gather8Sparse_sve(
+    const uint64_t* bits,
+    int32_t bitOffset,
+    const int32_t* rows,
+    int32_t i,
+    uint32_t eightInts[8]) {
+  svbool_t pg = svwhilelt_b32(i, i + 8);
+  svbool_t pg8 = svwhilelt_b32(0, 8);
+
+  svuint32_t row_vec = svreinterpret_u32_s32(svld1_s32(pg, rows + i));
+  svuint32_t indices = svmla_u32_z(
+      pg8,
+      svdup_u32(static_cast<uint32_t>(bitOffset)),
+      row_vec,
+      svdup_n_u32(width));
+  svuint32_t byte_indices =
+      svlsr_u32_z(pg8, indices, svdup_n_u32(static_cast<uint32_t>(3)));
+
+  svuint32_t data = svld1_gather_u32offset_u32(
+      pg8, reinterpret_cast<const uint32_t*>(bits), byte_indices);
+
+  if constexpr (width % 8 != 0) {
+    constexpr static uint32_t kMultipliers_arr[8] = {
+        256, 128, 64, 32, 16, 8, 4, 2};
+    svuint32_t kMultipliers_vec = svld1_u32(pg8, kMultipliers_arr);
+    svuint32_t bit_in_byte =
+        svand_u32_z(pg8, indices, svdup_n_u32(static_cast<uint32_t>(7)));
+    svuint32_t multipliers = svtbl_u32(kMultipliers_vec, bit_in_byte);
+    data = svlsr_n_u32_z(pg8, svmul_u32_z(pg8, data, multipliers), 8);
+  }
+
+  uint32_t mask_val = (width == 0) ? 0 : (1U << width) - 1;
+  svuint32_t result_vec = svand_n_u32_z(pg8, data, mask_val);
+  svst1_u32(pg8, eightInts, result_vec);
+}
+
+template <uint8_t width, typename T>
+int32_t decode1To24_sve(
+    const uint64_t* bits,
+    int32_t bitOffset,
+    const int* rows,
+    int32_t numRows,
+    T* result) {
+  constexpr uint64_t kMask = bits::lowMask(width);
+  constexpr uint64_t kMask2 = kMask | (kMask << 8);
+  constexpr uint64_t kMask4 = kMask2 | (kMask2 << 16);
+  constexpr uint64_t kDepMask8 = kMask4 | (kMask4 << 32);
+  constexpr uint64_t kMask16 = kMask | (kMask << 16);
+  constexpr uint64_t kDepMask16 = kMask16 | (kMask16 << 32);
+  svuint64_t kBdepMask8 = svdup_u64(kDepMask8);
+  svuint64_t kBdepMask16 = svdup_u64(kDepMask16);
+  svbool_t pg1 = svwhilelt_b64(0, 1);
+  svbool_t pg8 = svwhilelt_b32(0, 8);
+  uint64_t mask = bits::lowMask(width);
+  int32_t i = 0;
+
+  for (; i + 8 <= numRows; i += 8) {
+    auto row = rows[i];
+    auto endRow = rows[i + 7];
+    uint32_t eightInts[8];
+    if (width <= 16 && endRow - row == 7) {
+      // Special cases for 8 contiguous values with <= 16 bits.
+      if constexpr (width <= 8) {
+        uint64_t eightBytes;
+        if (width == 8) {
+          if (!bitOffset) {
+            eightBytes = *addBytes(bits, row);
+          } else {
+            eightBytes =
+                bits::detail::loadBits<uint64_t>(bits, bitOffset + 8 * row, 64);
+          }
+        } else {
+          auto bit = row * width + bitOffset;
+          auto byte = bit >> 3;
+          auto shift = bit & 7;
+          uint64_t word = *addBytes(bits, byte) >> shift;
+          svuint64_t word_vec = svdup_u64(word);
+          svuint64_t result_vec = svbdep_u64(word_vec, kBdepMask8);
+          eightBytes = svlastb_u64(pg1, result_vec);
+        }
+        svst1_u32(
+            pg8,
+            eightInts,
+            svld1ub_u32(svwhilelt_b32(0, 8), (uint8_t*)&eightBytes));
+      } else {
+        // Use pdep to shift 2 words of bit packed data with width
+        // 9-16. For widts <= 14 four bit packed fields can always be
+        // loaded with a single uint64_t load. For 15 and 16 bits this
+        // depends on the start bit position. For either case we fill
+        // an array of 2x64 bits and widen that to a 8x32 word.
+        uint64_t words[2];
+        if constexpr (width <= 14) {
+          auto bit = row * width + bitOffset;
+          auto byte = bit >> 3;
+          auto shift = bit & 7;
+          uint64_t word = *addBytes(bits, byte) >> shift;
+          svuint64_t word_vec = svdup_u64(word);
+          svuint64_t result_vec = svbdep_u64(word_vec, kBdepMask16);
+          words[0] = svlastb_u64(pg1, result_vec);
+          bit += 4 * width;
+          byte = bit >> 3;
+          shift = bit & 7;
+          word = *addBytes(bits, byte) >> shift;
+          word_vec = svdup_u64(word);
+          result_vec = svbdep_u64(word_vec, kBdepMask16);
+          words[1] = svlastb_u64(pg1, result_vec);
+        } else {
+          words[0] = bits::detail::loadBits<uint64_t>(
+              bits, bitOffset + width * row, 64);
+          words[1] = bits::detail::loadBits<uint64_t>(
+              bits, bitOffset + width * (row + 4), 64);
+          if constexpr (width == 15) {
+            svuint64_t word_vec = svdup_u64(words[0]);
+            svuint64_t result_vec = svbdep_u64(word_vec, kBdepMask16);
+            words[0] = svlastb_u64(pg1, result_vec);
+            word_vec = svdup_u64(words[1]);
+            result_vec = svbdep_u64(word_vec, kBdepMask16);
+            words[1] = svlastb_u64(pg1, result_vec);
+          }
+        }
+        eightInts[0] = (words[0] >> 0) & 0xFFFF;
+        eightInts[1] = (words[0] >> 16) & 0xFFFF;
+        eightInts[2] = (words[0] >> 32) & 0xFFFF;
+        eightInts[3] = (words[0] >> 48) & 0xFFFF;
+        eightInts[4] = (words[1] >> 0) & 0xFFFF;
+        eightInts[5] = (words[1] >> 16) & 0xFFFF;
+        eightInts[6] = (words[1] >> 32) & 0xFFFF;
+        eightInts[7] = (words[1] >> 48) & 0xFFFF;
+      }
+    } else {
+      gather8Sparse_sve<width>(bits, bitOffset, rows, i, eightInts);
+    }
+    svint32_t eightInts_sve = svreinterpret_s32_u32(svld1_u32(pg8, eightInts));
+    if constexpr (sizeof(T) <= 8) {
+      store8Ints_sve(eightInts_sve, i, result);
+    } else {
+      for (int j = 0; j < 8; ++j) {
+        result[i + j] = static_cast<T>(eightInts[j]);
+      }
+    }
+  }
+  return i;
+}
+
+#define WIDTH_CASE_SVE(width)                               \
+  case width:                                               \
+    i = decode1To24_sve<width>(                             \
+        bits, bitOffset, rows.data(), numSafeRows, result); \
+    break;
+
+} // namespace
+
+#endif
+
 template <typename T>
 void unpack(
     const uint64_t* bits,
@@ -277,6 +459,38 @@ void unpack(
     WIDTH_CASE(22);
     WIDTH_CASE(23);
     WIDTH_CASE(24);
+    default:
+      break;
+  }
+#endif
+
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__) && SVE_BITS == 256
+  // Use SVE for specific widths.
+  switch (bitWidth) {
+    WIDTH_CASE_SVE(1);
+    WIDTH_CASE_SVE(2);
+    WIDTH_CASE_SVE(3);
+    WIDTH_CASE_SVE(4);
+    WIDTH_CASE_SVE(5);
+    WIDTH_CASE_SVE(6);
+    WIDTH_CASE_SVE(7);
+    WIDTH_CASE_SVE(8);
+    WIDTH_CASE_SVE(9);
+    WIDTH_CASE_SVE(10);
+    WIDTH_CASE_SVE(11);
+    WIDTH_CASE_SVE(12);
+    WIDTH_CASE_SVE(13);
+    WIDTH_CASE_SVE(14);
+    WIDTH_CASE_SVE(15);
+    WIDTH_CASE_SVE(16);
+    WIDTH_CASE_SVE(17);
+    WIDTH_CASE_SVE(18);
+    WIDTH_CASE_SVE(19);
+    WIDTH_CASE_SVE(20);
+    WIDTH_CASE_SVE(21);
+    WIDTH_CASE_SVE(22);
+    WIDTH_CASE_SVE(23);
+    WIDTH_CASE_SVE(24);
     default:
       break;
   }
