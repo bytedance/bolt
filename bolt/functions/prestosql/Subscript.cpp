@@ -45,7 +45,7 @@ class SubscriptFunction : public SubscriptImpl<
                               /* indexStartsAtOne */ true,
                               /* isElementAt */ false> {
  public:
-  explicit SubscriptFunction(bool allowcaching) : SubscriptImpl(allowcaching) {}
+  explicit SubscriptFunction(bool allowCaching) : SubscriptImpl(allowCaching) {}
 
   bool canPushdown() const override {
     return true;

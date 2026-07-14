@@ -153,12 +153,18 @@ void CelebornReaderStreamIterator::updateMetrics(
     int64_t numBatches,
     int64_t decompressTime,
     int64_t deserializeTime,
+    int64_t deserializerCreateTime,
+    int64_t deserializerDestroyTime,
+    int64_t mergeTime,
     int64_t totalReadTime) {
   // TODO: align Celeborn read metrics reporting with Gluten implementation.
   (void)numRows;
   (void)numBatches;
   (void)decompressTime;
   (void)deserializeTime;
+  (void)deserializerCreateTime;
+  (void)deserializerDestroyTime;
+  (void)mergeTime;
   (void)totalReadTime;
 }
 

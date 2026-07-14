@@ -621,6 +621,18 @@ TEST(ApplicationVersion, Basics) {
       Type::BYTE_ARRAY, stats_int, SortOrder::UNSIGNED));
 }
 
+TEST(ApplicationVersion, DefaultCreatedBy) {
+  ApplicationVersion version(DEFAULT_CREATED_BY);
+
+  ASSERT_EQ(
+      std::string("parquet-cpp-bolt version ") +
+          BOLT_PARQUET_CREATED_BY_VERSION + " (build " +
+          ::bytedance::bolt::BuildInfo::shortHash + ")",
+      DEFAULT_CREATED_BY);
+  ASSERT_EQ("parquet-cpp-bolt", version.application_);
+  ASSERT_EQ(::bytedance::bolt::BuildInfo::shortHash, version.build_);
+}
+
 TEST(ApplicationVersion, Empty) {
   ApplicationVersion version("");
 

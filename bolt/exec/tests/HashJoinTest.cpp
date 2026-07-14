@@ -1141,11 +1141,7 @@ TEST_P(MultiThreadedHashJoinTest, emptyProbeWithSpillMemoryThreshold) {
       .run();
 }
 
-TEST_P(MultiThreadedHashJoinTest, emptyProbeWithReclaimWatermark) {
-  if (numDrivers_ != 1) {
-    GTEST_SKIP() << "Covers single-driver finishHashBuild admission path only";
-  }
-
+TEST_F(HashJoinTest, emptyProbeWithReclaimWatermark) {
   std::atomic<bool> injectOnce{true};
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::exec::HashBuild::finishHashBuild",
@@ -1161,7 +1157,7 @@ TEST_P(MultiThreadedHashJoinTest, emptyProbeWithReclaimWatermark) {
   auto queryPool = memory::memoryManager()->addRootPool(
       "", 8 << 20, memory::MemoryReclaimer::create());
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
-      .numDrivers(numDrivers_)
+      .numDrivers(1)
       .keyTypes({BIGINT()})
       .probeVectors(0, 5)
       .buildVectors(1500, 5)
@@ -1271,7 +1267,7 @@ TEST_P(MultiThreadedHashJoinTest, normalizedKey) {
       .run();
 }
 
-TEST_P(MultiThreadedHashJoinTest, normalizedKeyOverflow) {
+TEST_F(HashJoinTest, normalizedKeyOverflow) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .keyTypes({BIGINT(), VARCHAR(), BIGINT(), BIGINT(), BIGINT(), BIGINT()})
       .probeVectors(1600, 5)
@@ -1341,7 +1337,7 @@ DEBUG_ONLY_TEST_P(
       "Aborted for external error");
 }
 
-TEST_P(MultiThreadedHashJoinTest, allTypes) {
+TEST_F(HashJoinTest, allTypes) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .keyTypes(
           {BIGINT(),
@@ -1944,7 +1940,7 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithExtraFilter) {
   }
 }
 
-TEST_P(MultiThreadedHashJoinTest, semiFilterOverLazyVectors) {
+TEST_F(HashJoinTest, semiFilterOverLazyVectors) {
   auto probeVectors = makeBatches(1, [&](auto /*unused*/) {
     return makeRowVector(
         {"t0", "t1"},
@@ -3414,7 +3410,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithNoMatch) {
       .run();
 }
 
-TEST_P(MultiThreadedHashJoinTest, fullJoinWithNoMatchRangePartition) {
+TEST_F(HashJoinTest, fullJoinWithNoMatchRangePartition) {
   // Left side keys are [0, 1, 2,..10].
   std::vector<RowVectorPtr> probeVectors = mergeBatches(
       makeBatches(

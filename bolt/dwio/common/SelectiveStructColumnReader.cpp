@@ -493,8 +493,7 @@ void SelectiveStructColumnReaderBase::getValues(
           const auto size = oldMap->sizeAt(rowIdx);
           for (vector_size_t i = 0; i < size; ++i) {
             const auto elementIndex = offset + i;
-            if (!oldMapKeys->isNullAt(elementIndex) &&
-                !oldMapValues->isNullAt(elementIndex)) {
+            if (!oldMapKeys->isNullAt(elementIndex)) {
               ++entryCounts[rowIdx];
             }
           }
@@ -569,13 +568,16 @@ void SelectiveStructColumnReaderBase::getValues(
           const auto size = oldMap->sizeAt(rowIdx);
           for (vector_size_t i = 0; i < size; ++i) {
             const auto elementIndex = offset + i;
-            if (!oldMapKeys->isNullAt(elementIndex) &&
-                !oldMapValues->isNullAt(elementIndex)) {
+            if (!oldMapKeys->isNullAt(elementIndex)) {
               const auto outIndex = cursor[rowIdx]++;
               combinedKeys->setNoCopy(
                   outIndex, oldMapKeys->valueAt(elementIndex));
-              combinedValues->setNoCopy(
-                  outIndex, oldMapValues->valueAt(elementIndex));
+              if (oldMapValues->isNullAt(elementIndex)) {
+                combinedValues->setNull(outIndex, true);
+              } else {
+                combinedValues->setNoCopy(
+                    outIndex, oldMapValues->valueAt(elementIndex));
+              }
             }
           }
         }

@@ -33,6 +33,7 @@
 
 #include <arrow/c/abi.h>
 #include "bolt/common/memory/Memory.h"
+#include "bolt/row/RowFormat.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::shuffle::sparksql {
@@ -41,7 +42,9 @@ class ShuffleRowToColumnarConverter {
  public:
   ShuffleRowToColumnarConverter(
       const bytedance::bolt::RowTypePtr& rowType,
-      bytedance::bolt::memory::MemoryPool* memoryPool);
+      bytedance::bolt::memory::MemoryPool* memoryPool,
+      bytedance::bolt::row::RowFormat rowFormat =
+          bytedance::bolt::row::RowFormat::COMPACT);
 
   bytedance::bolt::RowVectorPtr convert(std::vector<std::string_view>& rows);
 
@@ -52,6 +55,7 @@ class ShuffleRowToColumnarConverter {
  protected:
   bytedance::bolt::RowTypePtr rowType_;
   bytedance::bolt::memory::MemoryPool* pool_;
+  bytedance::bolt::row::RowFormat rowFormat_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql

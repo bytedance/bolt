@@ -39,7 +39,6 @@
 #include "bolt/functions/sparksql/aggregates/CollectListAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CovarianceAggregate.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
-#include "bolt/functions/sparksql/aggregates/PercentileAggregate.h"
 #include "bolt/functions/sparksql/aggregates/RegrReplacementAggregate.h"
 #include "bolt/functions/sparksql/aggregates/SumAggregate.h"
 namespace bytedance::bolt::aggregate::prestosql {
@@ -66,6 +65,7 @@ extern void registerModeAggregate(
     const std::string& prefix,
     bool withCompanionFunctions,
     bool overwrite);
+void registerPercentileAggregate(const std::string& prefix);
 
 void registerAggregateFunctions(
     const std::string& prefix,

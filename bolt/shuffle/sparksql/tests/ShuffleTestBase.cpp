@@ -161,14 +161,16 @@ std::string ShuffleTestParam::toString() const {
   auto memStr = fmt::format("{}{}", v, units[u]);
 
   return fmt::format(
-      "{}_{}_{}_{}_M{}_P{}_{}",
+      "{}_{}_{}_{}_M{}_P{}_{}_{}",
       partitioning,
       shuffleModeToString(shuffleMode),
       writerTypeToString(writerType),
       dataTypeGroupToString(dataTypeGroup),
       numMappers,
       numPartitions,
-      memStr);
+      memStr,
+      rowFormat == bytedance::bolt::row::RowFormat::COMPACT ? "Compact"
+                                                            : "Dense");
 }
 
 bool ShuffleTestParam::isSupported() const {
@@ -513,6 +515,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     writerOptions.partitioning = toPartitioning(param.partitioning);
     writerOptions.partitionWriterOptions.numPartitions = param.numPartitions;
     writerOptions.forceShuffleWriterType = param.shuffleMode;
+    writerOptions.rowFormat = param.rowFormat;
     writerOptions.partitionWriterOptions.partitionWriterType = param.writerType;
     writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
     writerOptions.partitionWriterOptions.shuffleBufferSize =
@@ -640,6 +643,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     ShuffleReaderOptions readerOptions;
     readerOptions.numPartitions = param.numPartitions;
     readerOptions.forceShuffleWriterType = param.shuffleMode;
+    readerOptions.rowFormat = param.rowFormat;
     readerOptions.partitionShortName = param.partitioning;
     readerOptions.shuffleBatchByteSize = 1024 * 1024; // 1MB
 

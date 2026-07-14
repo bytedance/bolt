@@ -2584,6 +2584,33 @@ TEST_F(ParquetReaderTest, dcMapContainsMap) {
   assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
 }
 
+TEST_F(ParquetReaderTest, dcMapStaticNullValuesKeepKeys) {
+  // dcmapNullValues.parquet stores null-valued entries in the key_value MAP
+  // part of DCMAP. map_keys should still expose these keys.
+  const std::string sample(getExampleFilePath("dcmapNullValues.parquet"));
+  auto rowType = ROW({"accounts"}, {MAP(VARCHAR(), VARCHAR())});
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(sample, readerOpts);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  std::vector<std::optional<
+      std::vector<std::pair<std::string, std::optional<std::string>>>>>
+      maps = {
+          std::vector<std::pair<std::string, std::optional<std::string>>>{
+              {"null_key", std::nullopt}, {"value_key", "v1"}},
+          std::vector<std::pair<std::string, std::optional<std::string>>>{
+              {"cold_key", std::nullopt}},
+      };
+  auto expected = makeRowVector({
+      makeNullableMapVector<std::string, std::string>(maps),
+  });
+
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}
+
 TEST_F(ParquetReaderTest, readNestedMap) {
   // Verifies reading a parquet file with a nested
   // MAP<VARCHAR, MAP<VARCHAR, BIGINT>> column.

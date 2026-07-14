@@ -547,6 +547,9 @@ bool MergeJoin::prepareOutput(
         child->as<ArrayVector>()->prepareForReuse();
       } else if (child->typeKind() == TypeKind::MAP) {
         child->as<MapVector>()->prepareForReuse();
+        // The filter input is scratch space that is repopulated in place for
+        // each output batch. Do not reuse map lookup state across batches.
+        child->setMayChangeContentUnderSameAddress(true);
       }
     }
   }

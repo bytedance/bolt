@@ -605,6 +605,7 @@ void BaseVector::ensureWritable(const SelectivityVector& rows) {
   }
 
   this->resize(newSize);
+  this->setMayChangeContentUnderSameAddress(true);
   this->resetDataDependentFlags(&rows);
 }
 
@@ -620,6 +621,7 @@ void BaseVector::ensureWritable(
     } else {
       result = BaseVector::create(type, rows.end(), pool);
     }
+    result->setMayChangeContentUnderSameAddress(true);
     return;
   }
   const auto& resultType = result->type();
@@ -659,6 +661,7 @@ void BaseVector::ensureWritable(
     copy->copy(result.get(), copyRows, nullptr, true);
   }
   result = std::move(copy);
+  result->setMayChangeContentUnderSameAddress(true);
 }
 
 template <TypeKind kind>
@@ -917,6 +920,7 @@ void BaseVector::reuseNulls() {
 
 void BaseVector::prepareForReuse() {
   reuseNulls();
+  mayChangeContentUnderSameAddress_ = false;
   this->resetDataDependentFlags(nullptr);
 }
 

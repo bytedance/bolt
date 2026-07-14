@@ -51,6 +51,7 @@ TEST_F(EnsureWritableVectorTest, flat) {
   ASSERT_EQ(rows.size(), result->size());
   ASSERT_EQ(TypeKind::BIGINT, result->typeKind());
   ASSERT_EQ(VectorEncoding::Simple::FLAT, result->encoding());
+  ASSERT_TRUE(result->mayChangeContentUnderSameAddress());
 
   auto* flatResult = result->asFlatVector<int64_t>();
   for (vector_size_t i = 0; i < rows.size(); i++) {
@@ -98,6 +99,7 @@ TEST_F(EnsureWritableVectorTest, flat) {
 
   BaseVector::ensureWritable(rows, BIGINT(), pool(), result);
   ASSERT_NE(flatResult, result.get());
+  ASSERT_TRUE(result->mayChangeContentUnderSameAddress());
   flatResult = result->asFlatVector<int64_t>();
   ASSERT_NE(rawNulls, flatResult->nulls().get());
   ASSERT_NE(rawValues, flatResult->values().get());
@@ -607,6 +609,8 @@ TEST_F(EnsureWritableVectorTest, map) {
         /*keyAt*/ [](vector_size_t row) { return row * 2; },
         /*valueAt*/ [](vector_size_t row) { return row * 2 - 10; },
         /*isNullAt*/ test::VectorMaker::nullEvery(11));
+    ASSERT_FALSE(a->mayChangeContentUnderSameAddress());
+    ASSERT_FALSE(b->mayChangeContentUnderSameAddress());
 
     SelectivityVector rows(size);
     VectorPtr result;
@@ -614,6 +618,7 @@ TEST_F(EnsureWritableVectorTest, map) {
     ASSERT_EQ(size, result->size());
     ASSERT_TRUE(MAP(INTEGER(), INTEGER())->kindEquals(result->type()));
     ASSERT_EQ(VectorEncoding::Simple::MAP, result->encoding());
+    ASSERT_TRUE(result->mayChangeContentUnderSameAddress());
 
     result->copy(a.get(), rows, nullptr, canCopyAll);
 
@@ -625,6 +630,7 @@ TEST_F(EnsureWritableVectorTest, map) {
     BaseVector::ensureWritable(oddRows, result->type(), pool(), result);
     ASSERT_TRUE(result.use_count() == 1);
     ASSERT_NE(resultCopy.get(), result.get());
+    ASSERT_TRUE(result->mayChangeContentUnderSameAddress());
 
     // Verify that even rows were copied over
     for (vector_size_t i = 0; i < size; i += 2) {
@@ -747,6 +753,22 @@ TEST_F(EnsureWritableVectorTest, map) {
 
     assertEqualOffsetsOrSizes(a->sizes(), sizesCopy, a->size(), isNullAt(a));
   }
+}
+
+TEST_F(
+    EnsureWritableVectorTest,
+    instanceEnsureWritableMarksMayChangeContentUnderSameAddress) {
+  auto rows = SelectivityVector(2);
+
+  auto flat = makeFlatVector<int64_t>({1, 2});
+  ASSERT_FALSE(flat->mayChangeContentUnderSameAddress());
+  flat->ensureWritable(rows);
+  ASSERT_TRUE(flat->mayChangeContentUnderSameAddress());
+
+  auto map = makeMapVector<int32_t, int32_t>({{{1, 10}}, {{2, 20}}});
+  ASSERT_FALSE(map->mayChangeContentUnderSameAddress());
+  map->ensureWritable(rows);
+  ASSERT_TRUE(map->mayChangeContentUnderSameAddress());
 }
 
 TEST_F(EnsureWritableVectorTest, allNullArray) {

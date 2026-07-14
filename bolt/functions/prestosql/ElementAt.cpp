@@ -49,7 +49,7 @@ class ElementAtFunction : public SubscriptImpl<
                               /* indexStartsAtOne */ true,
                               /* isElementAt */ true> {
  public:
-  explicit ElementAtFunction(bool allowcaching) : SubscriptImpl(allowcaching) {}
+  explicit ElementAtFunction(bool allowCaching) : SubscriptImpl(allowCaching) {}
 };
 } // namespace
 
