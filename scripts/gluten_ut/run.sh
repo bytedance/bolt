@@ -251,12 +251,12 @@ run_one_suite() {
   local cases
   cases=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" \
     | grep -oE 'Total number of tests run: [0-9]+' | tail -1 \
-    | grep -oE '[0-9]+')
+    | grep -oE '[0-9]+' || true)
   # Trailing marker line for summary: distinguishes "mvn died before scalatest"
   # (rc != 0, no FAILED / ABORTED markers in the log) from "scalatest ran and
   # the suite passed" (rc == 0 because -Dmaven.test.failure.ignore=true; case
   # failures still show up as `*** FAILED ***` lines).
-  echo "GLUTEN_UT_MVN_RC=$rc" >> "$log"
+  printf '\nGLUTEN_UT_MVN_RC=%s\n' "$rc" >> "$log"
   # FD 3 = the parent's original stdout (terminal); see `exec 3>&1` below.
   printf '  done [%4ds, %4s cases] %s\n' "$secs" "${cases:-?}" "$suite" >&3
   printf 'finished\t%s\n' "$suite"
@@ -311,15 +311,15 @@ while IFS=$'\t' read -r _module suite; do
   # mvn-failed (rc != 0 → mvn died before scalatest could run) bypasses the
   # blacklist: it always counts as unexpected, since blacklisting infra
   # failures would mask real regressions across PRs.
-  rc=$(grep -m1 '^GLUTEN_UT_MVN_RC=' "$log" | cut -d= -f2)
-  if [[ -n "$rc" && "$rc" != "0" ]]; then
+  rc=$(sed -nE 's/.*GLUTEN_UT_MVN_RC=([0-9]+).*/\1/p' "$log" | tail -1)
+  if [[ -z "$rc" || "$rc" != "0" ]]; then
     unexpected=$((unexpected + 1))
     echo "  ! $suite#(mvn-failed)"
     continue
   fi
   clean=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")
   keys=$(echo "$clean" | sed -nE 's/^- (.*) \*\*\* FAILED \*\*\*$/'"$suite"'#\1/p')
-  echo "$clean" | grep -q '\*\*\* ABORTED \*\*\*' && keys+=$'\n'"$suite#(aborted)"
+  [[ "$clean" == *"*** ABORTED ***"* ]] && keys+=$'\n'"$suite#(aborted)"
   while IFS= read -r key; do
     [[ -z "$key" ]] && continue
     if grep -Fxq -- "$key" "$BLACKLIST_FILE"; then
