@@ -42,6 +42,7 @@ add_executable(
   AtLeastNNonNullsTest.cpp
   Base64Test.cpp
   BitwiseTest.cpp
+  CharVarcharTest.cpp
   ComparisonsTest.cpp
   DecimalArithmeticFuncTest.cpp
   DecimalArithmeticTest.cpp

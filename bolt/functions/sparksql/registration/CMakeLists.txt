@@ -33,6 +33,7 @@ bolt_add_library(
   RegisterArray.cpp
   RegisterBinary.cpp
   RegisterBitwise.cpp
+  RegisterCharVarchar.cpp
   RegisterComparison.cpp
   RegisterDatetime.cpp
   RegisterJson.cpp

@@ -37,6 +37,7 @@ namespace bytedance::bolt::functions::sparksql {
 extern void registerArrayFunctions(const std::string& prefix);
 extern void registerBinaryFunctions(const std::string& prefix);
 extern void registerBitwiseFunctions(const std::string& prefix);
+extern void registerCharVarcharFunctions(const std::string& prefix);
 extern void registerCompareFunctions(const std::string& prefix);
 extern void registerDatetimeFunctions(const std::string& prefix);
 extern void registerJsonFunctions(const std::string& prefix);
@@ -54,6 +55,7 @@ void registerFunctions(const std::string& prefix) {
   registerArrayFunctions(prefix);
   registerBinaryFunctions(prefix);
   registerBitwiseFunctions(prefix);
+  registerCharVarcharFunctions(prefix);
   registerCompareFunctions(prefix);
   registerDatetimeFunctions(prefix);
   registerJsonFunctions(prefix);
