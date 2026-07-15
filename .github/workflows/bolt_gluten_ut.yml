@@ -36,7 +36,7 @@ jobs:
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root --init
+      options: --user root --init --privileged
       volumes:
         - /data/ccache-data:/data/ccache-data
         - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
@@ -66,6 +66,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends openjdk-17-jdk bubblewrap
           bwrap --version
+          bwrap --dev-bind / / --tmpfs /tmp true
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
       - name: Set up bolt build environment (conan)
