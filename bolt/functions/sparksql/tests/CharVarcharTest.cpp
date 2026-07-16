@@ -88,9 +88,10 @@ TEST_F(CharVarcharTest, charTypeWriteSideCheck) {
   EXPECT_EQ("abcd ", charWrite("abcd  ", 5).value());
 
   BOLT_ASSERT_USER_THROW(
-      charWrite("abcdef", 5), "Exceeds allowed length limitation: 5");
+      charWrite("abcdef", 5), "Exceeds char/varchar type length limitation: 5");
   BOLT_ASSERT_USER_THROW(
-      charWrite("abcdef ", 5), "Exceeds allowed length limitation: 5");
+      charWrite("abcdef ", 5),
+      "Exceeds char/varchar type length limitation: 5");
 }
 
 TEST_F(CharVarcharTest, varcharTypeWriteSideCheck) {
@@ -100,9 +101,11 @@ TEST_F(CharVarcharTest, varcharTypeWriteSideCheck) {
   EXPECT_EQ("abcd ", varcharWrite("abcd  ", 5).value());
 
   BOLT_ASSERT_USER_THROW(
-      varcharWrite("abcdef", 5), "Exceeds allowed length limitation: 5");
+      varcharWrite("abcdef", 5),
+      "Exceeds char/varchar type length limitation: 5");
   BOLT_ASSERT_USER_THROW(
-      varcharWrite("abcdef ", 5), "Exceeds allowed length limitation: 5");
+      varcharWrite("abcdef ", 5),
+      "Exceeds char/varchar type length limitation: 5");
 }
 
 TEST_F(CharVarcharTest, readSidePadding) {
@@ -127,10 +130,11 @@ TEST_F(CharVarcharTest, unicodeCharactersCountByCodePoint) {
   EXPECT_EQ(pound + "ab", varcharWrite(pound + "ab ", 3).value());
 
   BOLT_ASSERT_USER_THROW(
-      charWrite(hello + "x", 2), "Exceeds allowed length limitation: 2");
+      charWrite(hello + "x", 2),
+      "Exceeds char/varchar type length limitation: 2");
   BOLT_ASSERT_USER_THROW(
       varcharWrite(hello + ideographicSpace, 2),
-      "Exceeds allowed length limitation: 2");
+      "Exceeds char/varchar type length limitation: 2");
 }
 
 TEST_F(CharVarcharTest, nullInput) {

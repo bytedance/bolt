@@ -80,7 +80,7 @@ writeSideCheck(TOutString& output, const TInString& input, int32_t limit) {
     }
 
     if (numChars - numSpacesTrimmed > limit) {
-      BOLT_USER_FAIL("Exceeds allowed length limitation: {}", limit);
+      BOLT_USER_FAIL("Exceeds char/varchar type length limitation: {}", limit);
     }
     output.setNoCopy(StringView(input.data(), static_cast<size_t>(endIdx + 1)));
   }
