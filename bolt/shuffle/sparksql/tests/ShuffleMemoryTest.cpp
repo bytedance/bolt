@@ -343,8 +343,9 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
     batches.push_back(makeRowVector({"pid", "c0"}, {pidVector, dataVector}));
   }
 
-  // 1GB task; the hog holds 979MB, leaving the writer ~45MB free (far below
-  // kMinMemLimit). Demanding that minimum reclaims the held memory.
+  // 1GB task; the hog holds 979MB, leaving the writer ~45MB free. Configure a
+  // larger spill threshold so the writer still reclaims the held memory and
+  // makes large splits.
   const int64_t memoryLimit = 1024LL * 1024 * 1024;
   const int64_t kHeldBytes = 979LL * 1024 * 1024;
   auto memoryManagerHolder = TestMemoryManagerHolder::create(
@@ -364,6 +365,7 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
       tempDir->path + "/shuffle_data.bin";
   writerOptions.partitionWriterOptions.configuredDirs = {localDir};
   writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.shuffleBatchSize = 128 * 1024 * 1024;
   writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
 
   // MemoryHog -> SparkShuffleWriter: the hog holds kHeldBytes (reclaimable).
@@ -400,9 +402,8 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
 
 // Issue #662: an upstream operator holding most of the memory leaves writer V2
 // a tiny budget, so it spills every batch into small splits that compress
-// poorly and bloat the shuffle output. Enforcing a minimum budget
-// (kMinMemLimit) reclaims the upstream and yields large, well-compressed
-// splits.
+// poorly and bloat the shuffle output. A configured large spill threshold
+// reclaims the upstream and yields large, well-compressed splits.
 TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
   expectWellCompressed(
       runReclaimableHogScenario(static_cast<int32_t>(ShuffleWriterType::V2)));

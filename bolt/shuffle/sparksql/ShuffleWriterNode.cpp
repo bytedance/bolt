@@ -37,8 +37,7 @@ SparkShuffleWriter::SparkShuffleWriter(
           std::string(shuffleWriterNode->name())),
       shuffleWriterOptions_(shuffleWriterNode->getShuffleWriterOptions()),
       // shuffle writer memory limit should at least hold one max shuffle batch
-      minMemLimit_(
-          shuffleWriterOptions_.partitionWriterOptions.shuffleBufferSize),
+      minMemLimit_(shuffleWriterOptions_.shuffleBatchSize),
       reportShuffleStatusCallback_(
           shuffleWriterNode->getReportShuffleStatusCallback()) {}
 
