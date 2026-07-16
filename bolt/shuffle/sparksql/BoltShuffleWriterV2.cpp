@@ -46,9 +46,6 @@ arrow::Status BoltShuffleWriterV2::split(
   bytedance::bolt::NanosecondTimer splitTimer(&totalSplitTime_);
   updateInputMetrics(rv);
   BOLT_DCHECK(options_.partitioning != Partitioning::kSingle);
-  // Floor the budget so a tiny memLimit (e.g. an upstream operator holding most
-  // of the memory) doesn't fragment into small, poorly-compressed splits.
-  memLimit = std::max(memLimit, kMinMemLimit);
   if (bytedance::bolt::RowVector::isComposite(rv)) {
     if (vectorLayout_ == RowVectorLayout::kColumnar) {
       RETURN_NOT_OK(tryEvict());
@@ -71,7 +68,7 @@ arrow::Status BoltShuffleWriterV2::split(
     // computed during flatten for accurate string size estimation.
     auto flatSize = rv->estimateFlatSize();
     // try evict before split if current batch size is larger than memLimit
-    if (flatSize > memLimit) {
+    if (flatSize > memLimit && hasEnoughMemoryUsageToSpill()) {
       requestSpill_ = true;
     }
     RETURN_NOT_OK(tryEvict(memLimit));
@@ -137,8 +134,9 @@ arrow::Status BoltShuffleWriterV2::splitExtremelyLargeBatch(
   int32_t offset = 0;
   do {
     auto length = std::min(splitedBatchSize, numRows);
-    batches_.push_back(std::dynamic_pointer_cast<bytedance::bolt::RowVector>(
-        rv->slice(offset, length)));
+    batches_.push_back(
+        std::dynamic_pointer_cast<bytedance::bolt::RowVector>(
+            rv->slice(offset, length)));
     LOG(INFO) << __FUNCTION__
               << ": splitExtremelyLargeBatch offset = " << offset
               << ", numRows = " << length;
@@ -832,11 +830,12 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthColumnCount_ + binaryIdx]
                                    [partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
-                                       [partitionId],
-              0,
-              validityBytes));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
+                                           [partitionId],
+                  0,
+                  validityBytes));
         } else {
           allBuffers.push_back(nullptr);
         }
@@ -901,20 +900,22 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
       default: {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthIdx][partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              partitionValidityBuffers_[fixedWidthIdx][partitionId],
-              0,
-              validityBytes));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  partitionValidityBuffers_[fixedWidthIdx][partitionId],
+                  0,
+                  validityBytes));
         } else {
           allBuffers.push_back(nullptr);
         }
 
         // value buffer
         if (arrowColumnTypes_[i]->id() == arrow::BooleanType::type_id) {
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
-                                                  [0],
-              validityBytes));
+          allBuffers.push_back(
+              std::make_shared<arrow::Buffer>(
+                  partitionFixedWidthValueAddrsVector_[fixedWidthIdx]
+                                                      [partitionId][0],
+                  validityBytes));
         } else {
           uint64_t fixedLen = fixedColValueSize_[fixedWidthIdx];
           const auto& fixedValues =
@@ -1000,11 +1001,12 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthColumnCount_ + binaryIdx]
                                    [partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
-                                       [partitionId],
-              0,
-              validityBytes));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
+                                           [partitionId],
+                  0,
+                  validityBytes));
         } else {
           allBuffers.push_back(nullptr);
         }
@@ -1013,13 +1015,15 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
             partitionBinaryAddrsVector_[binaryIdx][partitionId];
         if (binaryBufs.size() == 1) {
           // length buffer
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              binaryBufs[0].lengthPtr, lengthBytes));
+          allBuffers.push_back(
+              std::make_shared<arrow::Buffer>(
+                  binaryBufs[0].lengthPtr, lengthBytes));
 
           // value buffer
           if (binaryBufs[0].valueOffset > 0) {
-            allBuffers.push_back(std::make_shared<arrow::Buffer>(
-                binaryBufs[0].valuePtr, binaryBufs[0].valueOffset));
+            allBuffers.push_back(
+                std::make_shared<arrow::Buffer>(
+                    binaryBufs[0].valuePtr, binaryBufs[0].valueOffset));
           } else {
             allBuffers.push_back(zeroLengthNullBuffer());
           }
@@ -1083,26 +1087,29 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
       default: {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthIdx][partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              partitionValidityBuffers_[fixedWidthIdx][partitionId],
-              0,
-              validityBytes));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  partitionValidityBuffers_[fixedWidthIdx][partitionId],
+                  0,
+                  validityBytes));
         } else {
           allBuffers.push_back(nullptr);
         }
 
         // value buffer
         if (arrowColumnTypes_[i]->id() == arrow::BooleanType::type_id) {
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
-                                                  [0],
-              validityBytes));
+          allBuffers.push_back(
+              std::make_shared<arrow::Buffer>(
+                  partitionFixedWidthValueAddrsVector_[fixedWidthIdx]
+                                                      [partitionId][0],
+                  validityBytes));
         } else {
           auto fixedLen = fixedColValueSize_[fixedWidthIdx];
           const auto& fixedValues =
               partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId];
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              fixedValues[0], fixedLen * numRows));
+          allBuffers.push_back(
+              std::make_shared<arrow::Buffer>(
+                  fixedValues[0], fixedLen * numRows));
           partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
               .clear();
         }
@@ -1399,6 +1406,10 @@ arrow::Status BoltShuffleWriterV2::reclaimFixedSize(
       splitState_ == SplitState::kStop ||
       (vectorLayout_ == RowVectorLayout::kComposite &&
        !isCompositeInitialized_)) {
+    *actual = 0;
+    return arrow::Status::OK();
+  }
+  if (!hasEnoughMemoryUsageToSpill()) {
     *actual = 0;
     return arrow::Status::OK();
   }

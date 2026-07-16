@@ -51,6 +51,7 @@
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
+#include "common/memory/sparksql/ExecutionMemoryPool.h"
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -1671,13 +1672,15 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
-                buffers[kValidityBufferIndex],
-                0,
-                arrow::bit_util::BytesForBits(numRows)));
+            allBuffers.push_back(
+                arrow::SliceBuffer(
+                    buffers[kValidityBufferIndex],
+                    0,
+                    arrow::bit_util::BytesForBits(numRows)));
           } else {
-            RETURN_NOT_OK(buffers[kValidityBufferIndex]->Resize(
-                validityBufferSize, true));
+            RETURN_NOT_OK(
+                buffers[kValidityBufferIndex]->Resize(
+                    validityBufferSize, true));
             allBuffers.push_back(std::move(buffers[kValidityBufferIndex]));
           }
         } else {
@@ -1689,11 +1692,13 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryLengthBufferIndex],
             arrow::Status::Invalid("Offset buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
         } else {
-          RETURN_NOT_OK(buffers[kBinaryLengthBufferIndex]->Resize(
-              lengthBufferSize, true));
+          RETURN_NOT_OK(
+              buffers[kBinaryLengthBufferIndex]->Resize(
+                  lengthBufferSize, true));
           allBuffers.push_back(std::move(buffers[kBinaryLengthBufferIndex]));
         }
 
@@ -1703,8 +1708,9 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryValueBufferIndex],
             arrow::Status::Invalid("Value buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
-              buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
+          allBuffers.push_back(
+              arrow::SliceBuffer(
+                  buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
         } else if (valueBufferSize > 0) {
           RETURN_NOT_OK(
               buffers[kBinaryValueBufferIndex]->Resize(valueBufferSize, true));
@@ -1734,13 +1740,15 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
-                buffers[kValidityBufferIndex],
-                0,
-                arrow::bit_util::BytesForBits(numRows)));
+            allBuffers.push_back(
+                arrow::SliceBuffer(
+                    buffers[kValidityBufferIndex],
+                    0,
+                    arrow::bit_util::BytesForBits(numRows)));
           } else {
-            RETURN_NOT_OK(buffers[kValidityBufferIndex]->Resize(
-                validityBufferSize, true));
+            RETURN_NOT_OK(
+                buffers[kValidityBufferIndex]->Resize(
+                    validityBufferSize, true));
             allBuffers.push_back(std::move(buffers[kValidityBufferIndex]));
           }
         } else {
@@ -1773,8 +1781,9 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
               arrow::SliceBuffer(valueBuffer, 0, valueBufferSize);
           allBuffers.push_back(std::move(slicedValueBuffer));
         } else {
-          RETURN_NOT_OK(buffers[kFixedWidthValueBufferIndex]->Resize(
-              valueBufferSize, true));
+          RETURN_NOT_OK(
+              buffers[kFixedWidthValueBufferIndex]->Resize(
+                  valueBufferSize, true));
           allBuffers.push_back(std::move(buffers[kFixedWidthValueBufferIndex]));
         }
         fixedWidthIdx++;
@@ -1819,6 +1828,11 @@ arrow::Status BoltShuffleWriter::reclaimFixedSize(
       *actual = 0;
       return arrow::Status::OK();
     }
+  }
+
+  if (!hasEnoughMemoryUsageToSpill()) {
+    *actual = 0;
+    return arrow::Status::OK();
   }
 
   EvictGuard evictGuard{evictState_};
@@ -2639,6 +2653,22 @@ arrow::Status BoltShuffleWriter::checkFixedColumnCopyValue(
         funcLine);
   }
   return arrow::Status::OK();
+}
+
+bool BoltShuffleWriter::hasEnoughMemoryUsageToSpill() {
+  int64_t minMemoryUsageThreshold = options_.shuffleBatchSize;
+  int64_t totalUsedMemory = boltPool_->reservedBytes();
+  if (dynamic_cast<BoltArrowMemoryPool*>(pool_) == nullptr) {
+    totalUsedMemory += pool_->bytes_allocated();
+  }
+  if (memory::sparksql::ExecutionMemoryPool::instance() != nullptr) {
+    int64_t taskAverageMemory =
+        memory::sparksql::ExecutionMemoryPool::instance()->poolSize() /
+        memory::sparksql::ExecutionMemoryPool::instance()->maxTaskNumber();
+    minMemoryUsageThreshold =
+        std::min(minMemoryUsageThreshold, taskAverageMemory / 10);
+  }
+  return totalUsedMemory > minMemoryUsageThreshold;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

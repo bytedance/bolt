@@ -173,6 +173,7 @@ struct ShuffleWriterOptions {
   int32_t accumulateBatchMaxColumns = kDefaultAccumulateBatchMaxColumns;
   int32_t accumulateBatchMaxBatches = kDefaultAccumulateBatchMaxBatches;
   int32_t recommendedColumn2RowSize = 0;
+  int32_t shuffleBatchSize = kDefaultShuffleBatchByteSize;
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;

@@ -105,11 +105,10 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
       RETURN_NOT_OK(partitioner_->compute(
           pidArr, batch->size(), row2Partition_, partition2RowCount_));
     }
-    if (!boltPool_->maybeReserve(stats.getTotalMemorySize())) {
-      if (boltPool_->reservedBytes() >= kMinMemLimit) {
-        RETURN_NOT_OK(tryEvict());
-        requestSpill_ = false;
-      }
+    if (!boltPool_->maybeReserve(stats.getTotalMemorySize()) &&
+        hasEnoughMemoryUsageToSpill()) {
+      RETURN_NOT_OK(tryEvict());
+      requestSpill_ = false;
     }
     // RowVector->UnsafeRow
     {
@@ -187,6 +186,10 @@ arrow::Status BoltRowBasedSortShuffleWriter::reclaimFixedSize(
       (vectorLayout_ == RowVectorLayout::kComposite &&
        !isCompositeInitialized_) ||
       vectorLayout_ == RowVectorLayout::kInvalid) {
+    *actual = 0;
+    return arrow::Status::OK();
+  }
+  if (!hasEnoughMemoryUsageToSpill()) {
     *actual = 0;
     return arrow::Status::OK();
   }

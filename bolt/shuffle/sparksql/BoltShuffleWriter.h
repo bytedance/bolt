@@ -612,6 +612,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   virtual arrow::Status reclaimFixedSizeInCompositeLayout(int64_t* actual);
   virtual arrow::Status tryEvictComposite();
 
+  bool hasEnoughMemoryUsageToSpill();
+
   SplitState splitState_{kInit};
 
   EvictState evictState_{kEvictable};
