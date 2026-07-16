@@ -67,6 +67,14 @@ class DenseRow {
   // numRows(); row r writes exactly rowSizes()[r] bytes.
   void serialize(uint8_t* base, folly::Range<const size_t*> offsets) const;
 
+  // Serialize rows in [offset, offset + size) into `base + offsets[r -
+  // offset]`. This reuses the size/write plan built by the constructor.
+  void serialize(
+      vector_size_t offset,
+      vector_size_t size,
+      uint8_t* base,
+      folly::Range<const size_t*> offsets) const;
+
   // Reconstruct a flat RowVector of `rowType` from pre-split per-row byte
   // ranges (one entry per row). Inverse of serialize().
   static RowVectorPtr deserialize(

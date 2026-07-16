@@ -127,6 +127,25 @@ void ensureRepDefs(
   }
 }
 
+constexpr int64_t kRepDefSkipChunkRows = 4096;
+
+void skipRepDefsInChunks(
+    dwio::common::SelectiveColumnReader& reader,
+    int64_t numRows) {
+  auto& fileType =
+      *reinterpret_cast<const ParquetTypeWithId*>(&reader.fileType());
+  if (!(fileType.parent() && !fileType.parent()->parent())) {
+    return;
+  }
+  while (numRows > 0) {
+    auto chunk =
+        static_cast<int32_t>(std::min<int64_t>(numRows, kRepDefSkipChunkRows));
+    ensureRepDefs(reader, chunk);
+    reader.skip(chunk);
+    numRows -= chunk;
+  }
+}
+
 MapColumnReader::MapColumnReader(
     const dwio::common::ColumnReaderOptions& columnReaderOptions,
     const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
@@ -216,15 +235,12 @@ void MapColumnReader::read(
     int64_t offset,
     const RowSet& rows,
     const uint64_t* incomingNulls) {
-  // The topmost list reader reads the repdefs for the left subtree.
-  ensureRepDefs(*this, offset + rows.back() + 1 - readOffset_);
   if (offset > readOffset_) {
-    // There is no page reader on this level so cannot call skipNullsOnly on it.
-    if (fileType().parent() && !fileType().parent()->parent()) {
-      skip(offset - readOffset_);
-    }
+    skipRepDefsInChunks(*this, offset - readOffset_);
     readOffset_ = offset;
   }
+  // The topmost list reader reads the repdefs for the left subtree.
+  ensureRepDefs(*this, rows.back() + 1);
   SelectiveMapColumnReader::read(offset, rows, incomingNulls);
 
   // The child should be at the end of the range provided to this
@@ -329,15 +345,12 @@ void ListColumnReader::read(
     int64_t offset,
     const RowSet& rows,
     const uint64_t* incomingNulls) {
-  // The topmost list reader reads the repdefs for the left subtree.
-  ensureRepDefs(*this, offset + rows.back() + 1 - readOffset_);
   if (offset > readOffset_) {
-    // There is no page reader on this level so cannot call skipNullsOnly on it.
-    if (fileType().parent() && !fileType().parent()->parent()) {
-      skip(offset - readOffset_);
-    }
+    skipRepDefsInChunks(*this, offset - readOffset_);
     readOffset_ = offset;
   }
+  // The topmost list reader reads the repdefs for the left subtree.
+  ensureRepDefs(*this, rows.back() + 1);
   SelectiveListColumnReader::read(offset, rows, incomingNulls);
 
   // The child should be at the end of the range provided to this

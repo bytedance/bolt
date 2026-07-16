@@ -32,9 +32,6 @@
 
 namespace bytedance::bolt::row::dense_row {
 
-using detail::nullableInt64SerializedSize;
-using detail::varintSize;
-
 template <typename Sink>
 void encodeColumnBatch(
     const Type& type,
@@ -579,10 +576,17 @@ void encodeArrayBatch(
   }
   encodeArrayLikeCardinalities(
       plan, array->rawOffsets(), array->rawSizes(), in, sinks, rowNulls, node);
+  if constexpr (std::is_same_v<Sink, SizeSink>) {
+    BOLT_CHECK_EQ(in.sourceRowOffset, 0);
+  }
+  const auto rowOffset = in.sourceRowOffset;
+  // Boundaries can be sliced, but slots must remain full because boundary
+  // values are absolute indexes into node.slots.
   SlotView childView{
       {node.slots.data(), node.slots.size()},
-      {node.boundaries.data(), node.boundaries.size()},
-      nullptr};
+      {node.boundaries.data() + rowOffset, sinks.size() + 1},
+      nullptr,
+      in.sourceRowOffset};
   encodeColumnBatch(
       *type.childAt(0), plan.children[0], childView, sinks, rowNulls);
 }
@@ -603,10 +607,17 @@ void encodeMapBatch(
   }
   encodeArrayLikeCardinalities(
       plan, map->rawOffsets(), map->rawSizes(), in, sinks, rowNulls, node);
+  if constexpr (std::is_same_v<Sink, SizeSink>) {
+    BOLT_CHECK_EQ(in.sourceRowOffset, 0);
+  }
+  const auto rowOffset = in.sourceRowOffset;
+  // Boundaries can be sliced, but slots must remain full because boundary
+  // values are absolute indexes into node.slots.
   SlotView childView{
       {node.slots.data(), node.slots.size()},
-      {node.boundaries.data(), node.boundaries.size()},
-      nullptr};
+      {node.boundaries.data() + rowOffset, sinks.size() + 1},
+      nullptr,
+      in.sourceRowOffset};
   encodeColumnBatch(
       *type.childAt(0), plan.children[0], childView, sinks, rowNulls);
   encodeColumnBatch(
@@ -678,7 +689,8 @@ void encodeRowBatch(
         }
       }
     }
-    SlotView childView{in.slots, in.rowBoundaries, childParentNulls};
+    SlotView childView{
+        in.slots, in.rowBoundaries, childParentNulls, in.sourceRowOffset};
     const auto fieldCount = type.size();
     for (size_t f = 0; f < fieldCount; ++f) {
       encodeColumnBatch(
@@ -718,7 +730,8 @@ void encodeRowBatch(
     }
   }
 
-  SlotView childView{in.slots, in.rowBoundaries, childParentNulls};
+  SlotView childView{
+      in.slots, in.rowBoundaries, childParentNulls, in.sourceRowOffset};
   const auto fieldCount = type.size();
   for (size_t f = 0; f < fieldCount; ++f) {
     encodeColumnBatch(

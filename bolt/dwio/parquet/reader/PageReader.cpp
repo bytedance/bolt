@@ -52,6 +52,12 @@ using thrift::PageHeader;
 void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
   defineDecoder_.reset();
   repeatDecoder_.reset();
+  if (row != kRepDefOnly) {
+    if (currentPageNumValues_ == 0 && FOLLY_LIKELY(statis_ != nullptr)) {
+      ++statis_->filteredOutPages;
+    }
+    currentPageNumValues_ = -1;
+  }
   // 'rowOfPage_' is the row number of the first row of the next page.
   rowOfPage_ += numRowsInPage_;
   for (;;) {
@@ -112,8 +118,19 @@ void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
       default:
         break; // ignore INDEX page type and any other custom extensions
     }
-    if (row == kRepDefOnly || row < rowOfPage_ + numRowsInPage_) {
+    if (row == kRepDefOnly) {
       break;
+    }
+    if (row < rowOfPage_ + numRowsInPage_) {
+      if (FOLLY_LIKELY(statis_ != nullptr) && numRowsInPage_ > 0) {
+        ++statis_->totalPages;
+      }
+      currentPageNumValues_ = 0;
+      break;
+    }
+    if (FOLLY_LIKELY(statis_ != nullptr) && numRowsInPage_ > 0) {
+      ++statis_->totalPages;
+      ++statis_->filteredOutPages;
     }
     updateRowInfoAfterPageSkipped();
   }

@@ -147,6 +147,8 @@ class ExecutionMemoryPool final
 
   void enableDynamicMemoryQuotaManagerForTask(int64_t taskAttemptId);
 
+  std::string toStringLocked() const;
+
   int64_t internalMemoryUsed() const;
 
   int64_t internalPoolSize() const;

@@ -99,19 +99,40 @@ class ShuffleColumnarToRowConverter {
     friend class ShuffleColumnarToRowConverter;
 
    public:
-    int64_t getTotalMemorySize() {
+    struct Range {
+      vector_size_t offset;
+      vector_size_t length;
+      int64_t bytes;
+    };
+
+    int64_t getTotalMemorySize() const {
       return totalMemorySize;
     }
 
+    const std::vector<Range>& ranges() const {
+      return ranges_;
+    }
+
    private:
-    std::unique_ptr<row::CompactRow> compactRow;
-    std::unique_ptr<row::DenseRow> denseRow;
-    int64_t numRows{0};
+    // CompactRow/DecodedVector keeps raw vector pointers, so keep the input
+    // vector alive while stats are used by convert().
+    bytedance::bolt::RowVectorPtr rowVectorHolder_;
+    std::shared_ptr<bytedance::bolt::row::CompactRow> compactRow;
+    std::shared_ptr<bytedance::bolt::row::DenseRow> denseRow;
+    vector_size_t rowOffset{0};
+    vector_size_t numRows{0};
     int64_t totalMemorySize{0};
+    std::vector<size_t> rowSizes_;
+    std::vector<Range> ranges_;
   };
 
   RowVectorWithStats getWithStats(
-      const bytedance::bolt::RowVectorPtr& rowVector);
+      const bytedance::bolt::RowVectorPtr& rowVector,
+      int64_t maxBatchSize);
+
+  static RowVectorWithStats sliceStats(
+      const RowVectorWithStats& stats,
+      const RowVectorWithStats::Range& range);
 
   void convert(
       const RowVectorWithStats& rowVector,

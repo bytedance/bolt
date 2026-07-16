@@ -428,4 +428,110 @@ TEST_F(
   EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 1);
 }
 
+TEST_F(MemoryConsumerTest, toStringRacesWithConcurrentMemoryUpdates) {
+  constexpr int64_t kCapacity = 1 << 20;
+  constexpr int64_t kWorkerThreads = 8;
+  constexpr int64_t kWriterIterations = 20'000;
+  constexpr int64_t kStringifierThreads = 4;
+  constexpr int64_t kStringifyIterations = 20'000;
+
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>();
+  memoryPool->setPoolSize(kCapacity);
+
+  std::vector<TaskMemoryManagerPtr> managers(kWorkerThreads);
+  std::vector<std::shared_ptr<TestMemoryConsumer>> consumers(kWorkerThreads);
+  for (int64_t i = 0; i < kWorkerThreads; ++i) {
+    managers[i] = std::make_shared<TaskMemoryManager>(memoryPool, i);
+    consumers[i] = std::make_shared<TestMemoryConsumer>(managers[i]);
+  }
+
+  std::atomic_bool start{false};
+  std::atomic_bool stop{false};
+  std::atomic<int64_t> stringifyCalls{0};
+  std::exception_ptr backgroundFailure{nullptr};
+  std::mutex failureLock;
+
+  auto recordFailure = [&](std::exception_ptr error) {
+    std::lock_guard<std::mutex> guard(failureLock);
+    if (backgroundFailure == nullptr) {
+      backgroundFailure = error;
+    }
+    stop.store(true, std::memory_order_release);
+  };
+
+  std::vector<std::thread> writers;
+  writers.reserve(kWorkerThreads);
+  for (int64_t i = 0; i < kWorkerThreads; ++i) {
+    writers.emplace_back([&, i]() {
+      try {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+
+        auto& consumer = consumers[i];
+        for (int64_t iter = 0;
+             iter < kWriterIterations && !stop.load(std::memory_order_acquire);
+             ++iter) {
+          const auto request = 1 + ((iter + i * 17) % 127);
+          if ((iter & 1) == 0) {
+            consumer->acquireMemory(request);
+          } else {
+            const auto toFree = std::min<int64_t>(consumer->getUsed(), request);
+            if (toFree > 0) {
+              consumer->freeMemory(toFree);
+            }
+          }
+        }
+
+        const auto remaining = consumer->getUsed();
+        if (remaining > 0) {
+          consumer->freeMemory(remaining);
+        }
+      } catch (...) {
+        recordFailure(std::current_exception());
+      }
+    });
+  }
+
+  std::vector<std::thread> stringifiers;
+  stringifiers.reserve(kStringifierThreads);
+  for (int64_t i = 0; i < kStringifierThreads; ++i) {
+    stringifiers.emplace_back([&]() {
+      try {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+
+        for (int64_t iter = 0; iter < kStringifyIterations &&
+             !stop.load(std::memory_order_acquire);
+             ++iter) {
+          const auto detail = memoryPool->toString();
+          if (detail.empty()) {
+            throw std::runtime_error(
+                "ExecutionMemoryPool::toString returned empty");
+          }
+          stringifyCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+      } catch (...) {
+        recordFailure(std::current_exception());
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+
+  for (auto& writer : writers) {
+    writer.join();
+  }
+  stop.store(true, std::memory_order_release);
+  for (auto& stringifier : stringifiers) {
+    stringifier.join();
+  }
+
+  if (backgroundFailure != nullptr) {
+    std::rethrow_exception(backgroundFailure);
+  }
+
+  EXPECT_GT(stringifyCalls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(memoryPool->memoryUsed(), 0);
+}
+
 } // namespace bytedance::bolt::memory::sparksql

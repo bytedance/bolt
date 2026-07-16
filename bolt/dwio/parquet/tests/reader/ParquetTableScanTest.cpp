@@ -238,6 +238,93 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     assertQuery(plan, splits_, sql);
   }
 
+  std::shared_ptr<Task> runSelectWithFilter(
+      std::vector<std::string>&& outputColumnNames,
+      const std::vector<std::string>& subfieldFilters,
+      const std::string& remainingFilter,
+      const std::string& sql) {
+    auto rowType = getRowType(std::move(outputColumnNames));
+    parse::ParseOptions options;
+    options.parseDecimalAsDouble = false;
+
+    auto plan =
+        PlanBuilder(pool_.get())
+            .setParseOptions(options)
+            .tableScan(rowType, subfieldFilters, remainingFilter, rowType_)
+            .planNode();
+
+    return assertQuery(plan, splits_, sql);
+  }
+
+  static std::unordered_map<std::string, RuntimeMetric>
+  getTableScanRuntimeStats(const std::shared_ptr<Task>& task) {
+    return task->taskStats().pipelineStats[0].operatorStats[0].runtimeStats;
+  }
+
+  static int64_t getRuntimeStat(
+      const std::shared_ptr<Task>& task,
+      const std::string& name) {
+    return getTableScanRuntimeStats(task).at(name).sum;
+  }
+
+  void loadColumnIndexTestData(const RowTypePtr& rowType, RowVectorPtr data) {
+    loadData(getExampleFilePath("column_index.parquet"), rowType, data);
+  }
+
+  void loadColumnIndexSingleBigintColumn() {
+    loadColumnIndexTestData(
+        ROW({"_1"}, {BIGINT()}),
+        makeRowVector({"_1"}, {makeFlatVector<int64_t>(2000, [](auto row) {
+                        return row;
+                      })}));
+  }
+
+  void loadColumnIndexTwoBigintColumns() {
+    loadColumnIndexTestData(
+        ROW({"_1", "_5"}, {BIGINT(), BIGINT()}),
+        makeRowVector(
+            {"_1", "_5"},
+            {
+                makeFlatVector<int64_t>(2000, [](auto row) { return row; }),
+                makeFlatVector<int64_t>(2000, [](auto row) { return row; }),
+            }));
+  }
+
+  void loadColumnIndexThreeProjectedColumns() {
+    loadColumnIndexTestData(
+        ROW({"_1", "_2", "_5"}, {BIGINT(), VARCHAR(), BIGINT()}),
+        makeRowVector(
+            {"_1", "_2", "_5"},
+            {
+                makeFlatVector<int64_t>(2000, [](auto row) { return row; }),
+                makeFlatVector<std::string>(
+                    2000, [](auto row) { return fmt::format("{}", row); }),
+                makeFlatVector<int64_t>(2000, [](auto row) { return row; }),
+            }));
+  }
+
+  void assertFilteredOutPagesMetrics(
+      std::vector<std::string>&& outputColumnNames,
+      const std::vector<std::string>& subfieldFilters,
+      const std::string& remainingFilter,
+      const std::string& sql,
+      int64_t expectedTotalPages,
+      int64_t expectedFilteredOutPages) {
+    std::shared_ptr<Task> task;
+    if (subfieldFilters.empty() && remainingFilter.empty()) {
+      auto rowType = getRowType(std::move(outputColumnNames));
+      task = assertQuery(
+          PlanBuilder(pool_.get()).tableScan(rowType).planNode(), splits_, sql);
+    } else {
+      task = runSelectWithFilter(
+          std::move(outputColumnNames), subfieldFilters, remainingFilter, sql);
+    }
+
+    EXPECT_EQ(getRuntimeStat(task, "totalPages"), expectedTotalPages);
+    EXPECT_EQ(
+        getRuntimeStat(task, "filteredOutPages"), expectedFilteredOutPages);
+  }
+
   void loadData(
       const std::string& filePath,
       RowTypePtr rowType,
@@ -1299,6 +1386,71 @@ TEST_F(ParquetTableScanTest, deltaByteArray) {
       ROW({"a"}, {VARCHAR()}),
       makeRowVector({"a"}, {vector}));
   assertSelect({"a"}, "SELECT a from expected");
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsNoFilter) {
+  loadColumnIndexSingleBigintColumn();
+  assertFilteredOutPagesMetrics({"_1"}, {}, "", "SELECT _1 FROM tmp", 21, 0);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsSingleFilterColumn) {
+  loadColumnIndexSingleBigintColumn();
+  assertFilteredOutPagesMetrics(
+      {"_1"}, {"_1 < 20"}, "", "SELECT _1 FROM tmp WHERE _1 < 20", 19, 18);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsMultipleOutputColumns) {
+  loadColumnIndexTwoBigintColumns();
+  assertFilteredOutPagesMetrics(
+      {"_1", "_5"},
+      {"_1 < 20"},
+      "",
+      "SELECT _1, _5 FROM tmp WHERE _1 < 20",
+      20,
+      18);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsAllPagesFilteredOut) {
+  loadColumnIndexSingleBigintColumn();
+  assertFilteredOutPagesMetrics(
+      {"_1"}, {"_1 < 0"}, "", "SELECT _1 FROM tmp WHERE _1 < 0", 0, 0);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsSingleTailPageHit) {
+  loadColumnIndexSingleBigintColumn();
+  assertFilteredOutPagesMetrics(
+      {"_1"}, {"_1 > 1900"}, "", "SELECT _1 FROM tmp WHERE _1 > 1900", 2, 0);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsFilterKeepsAllPages) {
+  loadColumnIndexSingleBigintColumn();
+  assertFilteredOutPagesMetrics(
+      {"_1"}, {"_1 >= 0"}, "", "SELECT _1 FROM tmp WHERE _1 >= 0", 21, 0);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsFilterOnUnprojectedColumn) {
+  loadColumnIndexTwoBigintColumns();
+  assertFilteredOutPagesMetrics(
+      {"_5"}, {"_1 < 20"}, "", "SELECT _5 FROM tmp WHERE _1 < 20", 20, 18);
+}
+
+TEST_F(
+    ParquetTableScanTest,
+    filteredOutPagesMetricsNoFilterThreeProjectedColumns) {
+  loadColumnIndexThreeProjectedColumns();
+  assertFilteredOutPagesMetrics(
+      {"_1", "_2", "_5"}, {}, "", "SELECT _1, _2, _5 FROM tmp", 63, 0);
+}
+
+TEST_F(ParquetTableScanTest, filteredOutPagesMetricsThreeProjectedColumns) {
+  loadColumnIndexThreeProjectedColumns();
+  assertFilteredOutPagesMetrics(
+      {"_1", "_2", "_5"},
+      {"_1 < 20"},
+      "",
+      "SELECT _1, _2, _5 FROM tmp WHERE _1 < 20",
+      21,
+      18);
 }
 
 // Plan-level matrix coverage for the strict convertType policy.

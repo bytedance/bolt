@@ -37,6 +37,7 @@
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/ComplexVector.h"
+
 namespace bytedance::bolt::shuffle::sparksql {
 
 arrow::Status BoltRowBasedSortShuffleWriter::init() {
@@ -59,9 +60,6 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
     int64_t memLimit) {
   bytedance::bolt::NanosecondTimer splitTimer(&totalSplitTime_);
   updateInputMetrics(rv);
-  bytedance::bolt::RowVectorPtr strippedRv;
-  uint32_t slicedBatchSize = 0;
-  std::vector<bytedance::bolt::RowVectorPtr> slicedBatches;
   if (bytedance::bolt::RowVector::isComposite(rv)) {
     // from columnar to composite, flush all previous batches
     if (vectorLayout_ == RowVectorLayout::kColumnar) {
@@ -78,9 +76,9 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
   }
 
   vectorLayout_ = RowVectorLayout::kColumnar;
+  ShuffleColumnarToRowConverter::RowVectorWithStats fullStats;
   {
     bytedance::bolt::NanosecondTimer timer(&flattenTime_);
-    constexpr uint32_t minBatchSize = 512;
 
     ensurePartialFlatten(rv, {0});
     ensureVectorLoaded(rv);
@@ -92,48 +90,22 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
       RETURN_NOT_OK(initFromRowVector(*rv));
       isInitialized_ = true;
     }
-
-    // estimate batchSize based on UnsafeRowSize
-    slicedBatchSize = rowConverter_->averageRowSize()
-        ? (options_.recommendedColumn2RowSize / rowConverter_->averageRowSize())
-        : 0;
-
-    if (slicedBatchSize > minBatchSize) {
-      uint32_t numRows = rv->size();
-      uint32_t numBatches = numRows / slicedBatchSize;
-      slicedBatchSize = (numRows - slicedBatchSize * numBatches < 0.2 * numRows)
-          ? (numRows + numBatches - 1) / numBatches
-          : slicedBatchSize;
-      if (numRows > slicedBatchSize) {
-        for (auto i = 0; i < numRows; i += slicedBatchSize) {
-          slicedBatches.emplace_back(
-              std::dynamic_pointer_cast<bytedance::bolt::RowVector>(
-                  rv->slice(i, std::min(slicedBatchSize, numRows - i))));
-        }
-      } else {
-        slicedBatches.push_back(std::move(rv));
-      }
-      // variables' name not accurate, just for reuse
-      combinedVectorNumber_ += slicedBatchSize;
-      ++combineVectorTimes_;
-    } else {
-      slicedBatches.push_back(std::move(rv));
-    }
+    fullStats = rowConverter_->getWithStats(
+        getStrippedRowVectorWrapper(*rv), maxBatchBytes_);
   }
 
-  for (const auto& rv : slicedBatches) {
+  const auto& ranges = fullStats.ranges();
+  auto processBatch =
+      [&](const bytedance::bolt::RowVectorPtr& batch,
+          const ShuffleColumnarToRowConverter::RowVectorWithStats& stats)
+      -> arrow::Status {
     {
       bytedance::bolt::NanosecondTimer timer(&computePidTime_);
-      auto pidArr = getFirstColumnWrapper(*rv);
+      const auto* pidArr = getFirstColumnWrapper(*batch);
       RETURN_NOT_OK(partitioner_->compute(
-          pidArr, rv->size(), row2Partition_, partition2RowCount_));
-      strippedRv = getStrippedRowVectorWrapper(*rv);
+          pidArr, batch->size(), row2Partition_, partition2RowCount_));
     }
-    auto rowVectorWithStats = [&]() {
-      bytedance::bolt::NanosecondTimer timer(&convertTime_);
-      return rowConverter_->getWithStats(strippedRv);
-    }();
-    if (!boltPool_->maybeReserve(rowVectorWithStats.getTotalMemorySize())) {
+    if (!boltPool_->maybeReserve(stats.getTotalMemorySize())) {
       if (boltPool_->reservedBytes() >= kMinMemLimit) {
         RETURN_NOT_OK(tryEvict());
         requestSpill_ = false;
@@ -144,8 +116,28 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
       setSplitState(SplitState::kSplit);
       bytedance::bolt::NanosecondTimer timer(&convertTime_);
       rowConverter_->convert(
-          rowVectorWithStats, row2Partition_, sortedRows_, partitionBytes_);
+          stats, row2Partition_, sortedRows_, partitionBytes_);
     }
+    return arrow::Status::OK();
+  };
+
+  if (ranges.size() == 1) {
+    RETURN_NOT_OK(processBatch(rv, fullStats));
+  } else {
+    LOG(INFO) << "BoltRowBasedSortShuffleWriter slice columnar batch: numRows="
+              << rv->size() << ", totalBytes=" << fullStats.getTotalMemorySize()
+              << ", maxBatchBytes=" << maxBatchBytes_
+              << ", numSlices=" << ranges.size();
+    for (const auto& range : ranges) {
+      auto slicedRv = std::dynamic_pointer_cast<bytedance::bolt::RowVector>(
+          rv->slice(range.offset, range.length));
+      auto slicedStats = rowConverter_->sliceStats(fullStats, range);
+      RETURN_NOT_OK(processBatch(slicedRv, slicedStats));
+    }
+  }
+  if (ranges.size() > 1) {
+    combinedVectorNumber_ += rv->size() / ranges.size();
+    ++combineVectorTimes_;
   }
 
   // under memory pressure

@@ -91,6 +91,9 @@ struct SlotView {
   // Per-position null bitmap inherited from ancestor ROWs. Indexed by the
   // current level's vector positions. nullptr means no filter.
   const uint64_t* parentNulls = nullptr;
+  // Original top-level row offset for this view. Cached child slot trees are
+  // grouped by top-level row, so sliced writes use this to address them.
+  vector_size_t sourceRowOffset = 0;
 };
 
 struct RowCursor {
@@ -134,22 +137,27 @@ FOLLY_ALWAYS_INLINE void forEachLivePos(SlotView v, vector_size_t r, F f) {
 struct TopSlotView {
   std::vector<SlotRange> slots;
   std::vector<uint32_t> boundaries;
+  vector_size_t sourceRowOffset{0};
 
-  SlotView view() {
+  SlotView view() const {
     return SlotView{
         {slots.data(), slots.size()},
         {boundaries.data(), boundaries.size()},
-        nullptr};
+        nullptr,
+        sourceRowOffset};
   }
 };
 
 // TODO delete TopSlotView
-inline TopSlotView makeTopView(vector_size_t rowCount) {
+inline TopSlotView makeTopView(
+    vector_size_t rowCount,
+    vector_size_t sourceRowOffset = 0) {
   TopSlotView tv;
+  tv.sourceRowOffset = sourceRowOffset;
   tv.slots.resize(rowCount);
   tv.boundaries.resize(rowCount + 1);
   for (vector_size_t r = 0; r < rowCount; ++r) {
-    tv.slots[r] = {static_cast<uint32_t>(r), 1u};
+    tv.slots[r] = {static_cast<uint32_t>(sourceRowOffset + r), 1u};
     tv.boundaries[r] = static_cast<uint32_t>(r);
   }
   tv.boundaries[rowCount] = static_cast<uint32_t>(rowCount);
