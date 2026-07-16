@@ -636,7 +636,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
     DCHECK(buffered_indices_.empty());
   }
 
-  int dict_encoded_size() const override {
+  int64_t dict_encoded_size() const override {
     return dict_encoded_size_;
   }
 
@@ -803,7 +803,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
         throw ParquetException(
             "Parquet cannot store strings with size 2GB or more");
       }
-      dict_encoded_size_ += static_cast<int>(v.size() + sizeof(uint32_t));
+      dict_encoded_size_ += static_cast<int64_t>(v.size()) + sizeof(uint32_t);
       int32_t unused_memo_index;
       PARQUET_THROW_NOT_OK(memo_table_.GetOrInsert(
           v.data(), static_cast<int32_t>(v.size()), &unused_memo_index));
@@ -811,7 +811,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
   }
 
   /// The number of bytes needed to encode the dictionary.
-  int dict_encoded_size_;
+  int64_t dict_encoded_size_;
 
   MemoTableType memo_table_;
 };
@@ -850,7 +850,7 @@ inline void DictEncoderImpl<DType>::Put(const T& v) {
   // Put() implementation for primitive types
   auto on_found = [](int32_t memo_index) {};
   auto on_not_found = [this](int32_t memo_index) {
-    dict_encoded_size_ += static_cast<int>(sizeof(T));
+    dict_encoded_size_ += sizeof(T);
   };
 
   int32_t memo_index;
@@ -874,7 +874,7 @@ inline void DictEncoderImpl<ByteArrayType>::PutByteArray(
 
   auto on_found = [](int32_t memo_index) {};
   auto on_not_found = [&](int32_t memo_index) {
-    dict_encoded_size_ += static_cast<int>(length + sizeof(uint32_t));
+    dict_encoded_size_ += static_cast<int64_t>(length) + sizeof(uint32_t);
   };
 
   DCHECK(ptr != nullptr || length == 0);
@@ -989,7 +989,7 @@ void DictEncoderImpl<DType>::PutDictionary(const ::arrow::Array& values) {
   const auto& data = checked_cast<const ArrayType&>(values);
 
   dict_encoded_size_ +=
-      static_cast<int>(sizeof(typename DType::c_type) * data.length());
+      static_cast<int64_t>(sizeof(typename DType::c_type)) * data.length();
   for (int64_t i = 0; i < data.length(); i++) {
     int32_t unused_memo_index;
     PARQUET_THROW_NOT_OK(
@@ -1004,7 +1004,7 @@ void DictEncoderImpl<FLBAType>::PutDictionary(const ::arrow::Array& values) {
 
   const auto& data = checked_cast<const ::arrow::FixedSizeBinaryArray&>(values);
 
-  dict_encoded_size_ += static_cast<int>(type_length_ * data.length());
+  dict_encoded_size_ += static_cast<int64_t>(type_length_) * data.length();
   for (int64_t i = 0; i < data.length(); i++) {
     int32_t unused_memo_index;
     PARQUET_THROW_NOT_OK(memo_table_.GetOrInsert(

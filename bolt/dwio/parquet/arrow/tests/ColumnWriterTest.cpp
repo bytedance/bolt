@@ -32,7 +32,9 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <numeric>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -991,6 +993,83 @@ TEST(TestColumnWriter, RepeatedListsUpdateSpacedBug) {
       0,
       values_data);
   writer->Close();
+}
+
+class PageWriterSizeGuardTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    node_ = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+        "schema",
+        Repetition::REQUIRED,
+        {schema::ByteArray("value", Repetition::REQUIRED)}));
+    schemaDescriptor_.Init(node_);
+    properties_ = WriterProperties::Builder().disable_dictionary()->build();
+    metadata_ = ColumnChunkMetaDataBuilder::Make(
+        properties_, schemaDescriptor_.Column(0));
+    sink_ = CreateOutputStream();
+    pageWriter_ = PageWriter::Open(
+        sink_,
+        Compression::UNCOMPRESSED,
+        Codec::UseDefaultCompressionLevel(),
+        metadata_.get());
+  }
+
+  template <typename Callback>
+  void expectSizeError(Callback&& callback, const std::string& expectedText) {
+    try {
+      callback();
+      FAIL() << "Expected ParquetException containing: " << expectedText;
+    } catch (const ParquetException& error) {
+      EXPECT_NE(std::string(error.what()).find(expectedText), std::string::npos)
+          << error.what();
+    }
+  }
+
+  std::shared_ptr<GroupNode> node_;
+  SchemaDescriptor schemaDescriptor_;
+  std::shared_ptr<WriterProperties> properties_;
+  std::unique_ptr<ColumnChunkMetaDataBuilder> metadata_;
+  std::shared_ptr<::arrow::io::BufferOutputStream> sink_;
+  std::unique_ptr<PageWriter> pageWriter_;
+};
+
+TEST_F(PageWriterSizeGuardTest, rejectsUncompressedDataPageSizeOverflow) {
+  static const uint8_t kDummyData = 0;
+  auto buffer = std::make_shared<::arrow::Buffer>(&kDummyData, 1);
+  constexpr int64_t kTooLarge =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  auto page = std::make_unique<DataPageV1>(
+      buffer, 1, Encoding::PLAIN, Encoding::RLE, Encoding::RLE, kTooLarge);
+
+  expectSizeError(
+      [&]() { pageWriter_->WriteDataPage(std::move(page)); },
+      "Uncompressed data page size");
+}
+
+TEST_F(PageWriterSizeGuardTest, rejectsCompressedDataPageSizeOverflow) {
+  static const uint8_t kDummyData = 0;
+  constexpr int64_t kTooLarge =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  auto buffer = std::make_shared<::arrow::Buffer>(&kDummyData, kTooLarge);
+  auto page = std::make_unique<DataPageV1>(
+      buffer, 1, Encoding::PLAIN, Encoding::RLE, Encoding::RLE, 1);
+
+  expectSizeError(
+      [&]() { pageWriter_->WriteDataPage(std::move(page)); },
+      "Compressed data page size");
+}
+
+TEST_F(PageWriterSizeGuardTest, rejectsDictionaryPageSizeBeforeNarrowing) {
+  static const uint8_t kDummyData = 0;
+  constexpr int64_t kTooLarge =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  auto buffer = std::make_shared<::arrow::Buffer>(&kDummyData, kTooLarge);
+  auto page =
+      std::make_unique<DictionaryPage>(buffer, 1, Encoding::PLAIN, false);
+
+  expectSizeError(
+      [&]() { pageWriter_->WriteDictionaryPage(std::move(page)); },
+      "Uncompressed dictionary page size");
 }
 
 void GenerateLevels(

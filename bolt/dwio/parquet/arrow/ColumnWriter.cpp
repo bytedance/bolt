@@ -36,8 +36,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -95,6 +98,19 @@ namespace bytedance::bolt::parquet::arrow {
 using util::CodecOptions;
 
 namespace {
+
+constexpr int64_t kMaxPageHeaderSize = std::numeric_limits<int32_t>::max();
+
+int32_t checkPageHeaderSize(std::string_view size_name, int64_t size) {
+  if (size < 0 || size > kMaxPageHeaderSize) {
+    throw ParquetException(
+        std::string(size_name),
+        " page size cannot be represented in a Parquet PageHeader int32 "
+        "field: ",
+        size);
+  }
+  return static_cast<int32_t>(size);
+}
 
 int64_t bufferAllocatedBytes(const std::shared_ptr<Buffer>& buffer) {
   return buffer != nullptr ? buffer->capacity() : 0;
@@ -410,7 +426,9 @@ class SerializedPageWriter : public PageWriter {
   int64_t WriteDictionaryPage(
       std::unique_ptr<DictionaryPage> pagePtr) override {
     const auto& page = *pagePtr;
-    int64_t uncompressed_size = page.size();
+    const int64_t uncompressed_size = page.buffer()->size();
+    const int32_t uncompressed_page_size =
+        checkPageHeaderSize("Uncompressed dictionary", uncompressed_size);
     std::shared_ptr<Buffer> compressed_data;
     if (has_compressor()) {
       auto buffer = std::static_pointer_cast<ResizableBuffer>(
@@ -427,25 +445,28 @@ class SerializedPageWriter : public PageWriter {
     dict_page_header.__set_is_sorted(page.is_sorted());
 
     const uint8_t* output_data_buffer = compressed_data->data();
-    int32_t output_data_len = static_cast<int32_t>(compressed_data->size());
+    int64_t output_data_len = compressed_data->size();
+    int32_t compressed_page_size =
+        checkPageHeaderSize("Compressed dictionary", output_data_len);
 
     if (data_encryptor_.get()) {
       UpdateEncryption(encryption::kDictionaryPage);
       PARQUET_THROW_NOT_OK(encryption_buffer_->Resize(
-          data_encryptor_->CiphertextSizeDelta() + output_data_len, false));
+          data_encryptor_->CiphertextSizeDelta() + compressed_page_size,
+          false));
       output_data_len = data_encryptor_->Encrypt(
           compressed_data->data(),
-          output_data_len,
+          compressed_page_size,
           encryption_buffer_->mutable_data());
       output_data_buffer = encryption_buffer_->data();
+      compressed_page_size =
+          checkPageHeaderSize("Encrypted dictionary", output_data_len);
     }
 
     format::PageHeader page_header;
     page_header.__set_type(format::PageType::DICTIONARY_PAGE);
-    page_header.__set_uncompressed_page_size(
-        static_cast<int32_t>(uncompressed_size));
-    page_header.__set_compressed_page_size(
-        static_cast<int32_t>(output_data_len));
+    page_header.__set_uncompressed_page_size(uncompressed_page_size);
+    page_header.__set_compressed_page_size(compressed_page_size);
     page_header.__set_dictionary_page_header(dict_page_header);
     if (page_checksum_verification_) {
       uint32_t crc32 =
@@ -531,26 +552,31 @@ class SerializedPageWriter : public PageWriter {
   int64_t WriteDataPage(std::unique_ptr<DataPage> pagePtr) override {
     const DataPage& page = *pagePtr;
     const int64_t uncompressed_size = page.uncompressed_size();
+    const int32_t uncompressed_page_size =
+        checkPageHeaderSize("Uncompressed data", uncompressed_size);
     std::shared_ptr<Buffer> compressed_data = page.buffer();
     const uint8_t* output_data_buffer = compressed_data->data();
-    int32_t output_data_len = static_cast<int32_t>(compressed_data->size());
+    int64_t output_data_len = compressed_data->size();
+    int32_t compressed_page_size =
+        checkPageHeaderSize("Compressed data", output_data_len);
 
     if (data_encryptor_.get()) {
       PARQUET_THROW_NOT_OK(encryption_buffer_->Resize(
-          data_encryptor_->CiphertextSizeDelta() + output_data_len, false));
+          data_encryptor_->CiphertextSizeDelta() + compressed_page_size,
+          false));
       UpdateEncryption(encryption::kDataPage);
       output_data_len = data_encryptor_->Encrypt(
           compressed_data->data(),
-          output_data_len,
+          compressed_page_size,
           encryption_buffer_->mutable_data());
       output_data_buffer = encryption_buffer_->data();
+      compressed_page_size =
+          checkPageHeaderSize("Encrypted data", output_data_len);
     }
 
     format::PageHeader page_header;
-    page_header.__set_uncompressed_page_size(
-        static_cast<int32_t>(uncompressed_size));
-    page_header.__set_compressed_page_size(
-        static_cast<int32_t>(output_data_len));
+    page_header.__set_uncompressed_page_size(uncompressed_page_size);
+    page_header.__set_compressed_page_size(compressed_page_size);
 
     if (page_checksum_verification_) {
       uint32_t crc32 =
@@ -2216,8 +2242,10 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       return;
     }
 
+    const int64_t dictionary_page_byte_limit =
+        std::clamp<int64_t>(dictionary_pagesize_limit_, 0, kMaxPageHeaderSize);
     if (current_dict_encoder_->dict_encoded_size() >=
-        dictionary_pagesize_limit_) {
+        dictionary_page_byte_limit) {
       FallbackToPlainEncoding();
     }
   }
@@ -2976,18 +3004,109 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
     ARROW_UNSUPPORTED();
   }
 
-  int64_t value_offset = 0;
-  auto WriteChunk = [&](int64_t offset, int64_t batch_size, bool check_page) {
-    int64_t batch_num_values = 0;
-    int64_t batch_num_spaced_values = 0;
-    int64_t null_count = 0;
+  // The configured page sizes are soft flush targets. PageHeader fields are
+  // the hard format boundary, so cap byte-budget arithmetic at INT32_MAX and
+  // leave the final encoded/compressed size checks to PageWriter.
+  auto PageByteLimit = [](int64_t configured_limit) {
+    return std::clamp<int64_t>(configured_limit, 0, kMaxPageHeaderSize);
+  };
+  const int64_t data_page_byte_limit = PageByteLimit(data_pagesize_);
+  const int64_t dictionary_page_byte_limit =
+      PageByteLimit(dictionary_pagesize_limit_);
 
-    MaybeCalculateValidityBits(
-        AddIfNotNull(def_levels, offset),
-        batch_size,
-        &batch_num_values,
-        &batch_num_spaced_values,
-        &null_count);
+  // We only need to know whether an encoded byte count fits in a given budget.
+  // Saturating at limit + 1 avoids overflowing int64_t for malformed or
+  // exceptionally large LargeBinary offsets.
+  auto CappedPageBytes = [](int64_t first, int64_t second, int64_t limit) {
+    if (first < 0 || second < 0) {
+      throw ParquetException("Invalid negative BYTE_ARRAY encoded size");
+    }
+    if (first > limit || second > limit - first) {
+      return limit + 1;
+    }
+    return first + second;
+  };
+
+  auto ValueLength = [&](int64_t index) {
+    if (::arrow::is_binary_like(array.type_id())) {
+      return static_cast<int64_t>(
+          checked_cast<const ::arrow::BinaryArray&>(array).value_length(index));
+    }
+    DCHECK(::arrow::is_large_binary_like(array.type_id()));
+    return static_cast<int64_t>(
+        checked_cast<const ::arrow::LargeBinaryArray&>(array).value_length(
+            index));
+  };
+
+  auto ValueRangeByteLength = [&](int64_t start, int64_t count) {
+    if (::arrow::is_binary_like(array.type_id())) {
+      const auto& binary_array =
+          checked_cast<const ::arrow::BinaryArray&>(array);
+      return static_cast<int64_t>(
+          binary_array.value_offset(start + count) -
+          binary_array.value_offset(start));
+    }
+    DCHECK(::arrow::is_large_binary_like(array.type_id()));
+    const auto& large_binary_array =
+        checked_cast<const ::arrow::LargeBinaryArray&>(array);
+    return static_cast<int64_t>(
+        large_binary_array.value_offset(start + count) -
+        large_binary_array.value_offset(start));
+  };
+
+  auto HasSpacedValue = [&](int64_t level_index) {
+    if (def_levels == nullptr || level_info_.def_level == 0) {
+      return true;
+    }
+    return def_levels[level_index] >= level_info_.repeated_ancestor_def_level;
+  };
+
+  auto HasNonNullValue = [&](int64_t level_index, int64_t value_index) {
+    if (def_levels != nullptr &&
+        def_levels[level_index] != level_info_.def_level) {
+      return false;
+    }
+    return array.IsValid(value_index);
+  };
+
+  auto PlainEncodedRangeSize = [&](int64_t start,
+                                   int64_t spaced_values,
+                                   int64_t non_null_values,
+                                   int64_t byte_limit) {
+    const int64_t length_prefix_bytes =
+        non_null_values > byte_limit / sizeof(uint32_t)
+        ? byte_limit + 1
+        : non_null_values * static_cast<int64_t>(sizeof(uint32_t));
+    return CappedPageBytes(
+        ValueRangeByteLength(start, spaced_values),
+        length_prefix_bytes,
+        byte_limit);
+  };
+
+  auto IsCurrentDictionaryEncoding = [&]() {
+    return IsDictionaryEncoding(current_encoder_->encoding());
+  };
+
+  auto CurrentPageByteLimit = [&]() {
+    return IsCurrentDictionaryEncoding() ? dictionary_page_byte_limit
+                                         : data_page_byte_limit;
+  };
+
+  auto CurrentPageBytes = [&]() {
+    if (IsCurrentDictionaryEncoding()) {
+      DCHECK_NE(current_dict_encoder_, nullptr);
+      return current_dict_encoder_->dict_encoded_size();
+    }
+    return current_encoder_->EstimatedDataEncodedSize();
+  };
+
+  int64_t value_offset = 0;
+  auto WritePreparedChunk = [&](int64_t offset,
+                                int64_t batch_size,
+                                int64_t batch_num_values,
+                                int64_t batch_num_spaced_values,
+                                int64_t null_count,
+                                bool check_page) {
     WriteLevelsSpaced(
         batch_size,
         AddIfNotNull(def_levels, offset),
@@ -3010,6 +3129,167 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
         batch_size, batch_num_values, batch_size - non_null, check_page);
     CheckDictionarySizeLimit();
     value_offset += batch_num_spaced_values;
+  };
+
+  auto PrepareAndWriteChunk =
+      [&](int64_t offset, int64_t batch_size, bool check_page) {
+        int64_t batch_num_values = 0;
+        int64_t batch_num_spaced_values = 0;
+        int64_t null_count = 0;
+        MaybeCalculateValidityBits(
+            AddIfNotNull(def_levels, offset),
+            batch_size,
+            &batch_num_values,
+            &batch_num_spaced_values,
+            &null_count);
+        WritePreparedChunk(
+            offset,
+            batch_size,
+            batch_num_values,
+            batch_num_spaced_values,
+            null_count,
+            check_page);
+      };
+
+  auto WriteChunk = [&](int64_t offset, int64_t batch_size, bool check_page) {
+    // Calculate the metadata that the old write path needs before deciding
+    // whether this chunk requires splitting. This makes the no-split path use
+    // the same single level scan as before, including for nullable and nested
+    // columns.
+    int64_t batch_num_values = 0;
+    int64_t batch_num_spaced_values = 0;
+    int64_t null_count = 0;
+    MaybeCalculateValidityBits(
+        AddIfNotNull(def_levels, offset),
+        batch_size,
+        &batch_num_values,
+        &batch_num_spaced_values,
+        &null_count);
+
+    // For PLAIN encoding this is the data-page value size. During dictionary
+    // encoding it is a conservative upper bound on dictionary growth: duplicate
+    // values consume no additional dictionary bytes, but treating them as new
+    // entries keeps a single write batch from causing a large peak allocation.
+    // The offset range is exact for canonical Arrow binary arrays and a
+    // conservative upper bound if a null slot retains bytes.
+    const int64_t page_byte_limit = CurrentPageByteLimit();
+    const int64_t batch_encoded_bytes = PlainEncodedRangeSize(
+        value_offset,
+        batch_num_spaced_values,
+        batch_num_values,
+        page_byte_limit);
+    if (CappedPageBytes(
+            CurrentPageBytes(), batch_encoded_bytes, page_byte_limit) <=
+        page_byte_limit) {
+      WritePreparedChunk(
+          offset,
+          batch_size,
+          batch_num_values,
+          batch_num_spaced_values,
+          null_count,
+          check_page);
+      return;
+    }
+
+    const bool dictionary_encoding = IsCurrentDictionaryEncoding();
+
+    // A false check_page means this chunk is the final, potentially partial
+    // nested record. It cannot be split or flushed after writing, but its
+    // beginning is a known record boundary, so flush an existing page before
+    // appending an oversized record to it.
+    if (!dictionary_encoding && !check_page) {
+      if (num_buffered_values_ > 0) {
+        AddDataPage();
+      }
+      WritePreparedChunk(
+          offset,
+          batch_size,
+          batch_num_values,
+          batch_num_spaced_values,
+          null_count,
+          check_page);
+      return;
+    }
+
+    // Prefer starting a new page over scanning levels merely to fill the
+    // remainder of the current page. If the whole chunk fits on an empty page,
+    // this preserves the old one-pass path for nullable and nested columns.
+    if (!dictionary_encoding && num_buffered_values_ > 0 &&
+        batch_encoded_bytes <= data_page_byte_limit) {
+      AddDataPage();
+      WritePreparedChunk(
+          offset,
+          batch_size,
+          batch_num_values,
+          batch_num_spaced_values,
+          null_count,
+          check_page);
+      return;
+    }
+
+    // The chunk itself is larger than a page. Only this actual split path
+    // inspects individual levels. The PrepareAndWriteChunk lambda recalculates
+    // validity for each output segment because bits_buffer_ must start at that
+    // segment's offset.
+    int64_t local_offset = offset;
+    int64_t remaining = batch_size;
+    while (remaining > 0) {
+      const bool current_dictionary_encoding = IsCurrentDictionaryEncoding();
+      const int64_t current_page_byte_limit = CurrentPageByteLimit();
+      int64_t current_page_bytes = CurrentPageBytes();
+      int64_t subchunk_levels = 0;
+      int64_t subchunk_spaced_values = 0;
+      int64_t subchunk_encoded_bytes = 0;
+
+      while (subchunk_levels < remaining) {
+        const int64_t level_index = local_offset + subchunk_levels;
+        const bool can_break_before_level =
+            !pages_change_on_record_boundaries() || rep_levels == nullptr ||
+            rep_levels[level_index] == 0;
+        int64_t value_bytes = 0;
+        if (HasSpacedValue(level_index)) {
+          const int64_t value_index = value_offset + subchunk_spaced_values;
+          if (HasNonNullValue(level_index, value_index)) {
+            value_bytes = CappedPageBytes(
+                static_cast<int64_t>(sizeof(uint32_t)),
+                ValueLength(value_index),
+                current_page_byte_limit);
+          }
+        }
+
+        if (can_break_before_level &&
+            CappedPageBytes(
+                CappedPageBytes(
+                    current_page_bytes,
+                    subchunk_encoded_bytes,
+                    current_page_byte_limit),
+                value_bytes,
+                current_page_byte_limit) > current_page_byte_limit) {
+          if (subchunk_levels == 0) {
+            if (!current_dictionary_encoding && num_buffered_values_ > 0) {
+              AddDataPage();
+              current_page_bytes = 0;
+            }
+          } else {
+            break;
+          }
+        }
+
+        if (HasSpacedValue(level_index)) {
+          ++subchunk_spaced_values;
+        }
+        subchunk_encoded_bytes = CappedPageBytes(
+            subchunk_encoded_bytes, value_bytes, current_page_byte_limit);
+        ++subchunk_levels;
+      }
+
+      if (subchunk_levels == 0) {
+        throw ParquetException("Unable to split BYTE_ARRAY write chunk");
+      }
+      PrepareAndWriteChunk(local_offset, subchunk_levels, check_page);
+      local_offset += subchunk_levels;
+      remaining -= subchunk_levels;
+    }
   };
 
   PARQUET_CATCH_NOT_OK(DoInBatches(
