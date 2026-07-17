@@ -1672,15 +1672,13 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(
-                arrow::SliceBuffer(
-                    buffers[kValidityBufferIndex],
-                    0,
-                    arrow::bit_util::BytesForBits(numRows)));
+            allBuffers.push_back(arrow::SliceBuffer(
+                buffers[kValidityBufferIndex],
+                0,
+                arrow::bit_util::BytesForBits(numRows)));
           } else {
-            RETURN_NOT_OK(
-                buffers[kValidityBufferIndex]->Resize(
-                    validityBufferSize, true));
+            RETURN_NOT_OK(buffers[kValidityBufferIndex]->Resize(
+                validityBufferSize, true));
             allBuffers.push_back(std::move(buffers[kValidityBufferIndex]));
           }
         } else {
@@ -1692,13 +1690,11 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryLengthBufferIndex],
             arrow::Status::Invalid("Offset buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(
-              arrow::SliceBuffer(
-                  buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
+          allBuffers.push_back(arrow::SliceBuffer(
+              buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
         } else {
-          RETURN_NOT_OK(
-              buffers[kBinaryLengthBufferIndex]->Resize(
-                  lengthBufferSize, true));
+          RETURN_NOT_OK(buffers[kBinaryLengthBufferIndex]->Resize(
+              lengthBufferSize, true));
           allBuffers.push_back(std::move(buffers[kBinaryLengthBufferIndex]));
         }
 
@@ -1708,9 +1704,8 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryValueBufferIndex],
             arrow::Status::Invalid("Value buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(
-              arrow::SliceBuffer(
-                  buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
+          allBuffers.push_back(arrow::SliceBuffer(
+              buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
         } else if (valueBufferSize > 0) {
           RETURN_NOT_OK(
               buffers[kBinaryValueBufferIndex]->Resize(valueBufferSize, true));
@@ -1740,15 +1735,13 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(
-                arrow::SliceBuffer(
-                    buffers[kValidityBufferIndex],
-                    0,
-                    arrow::bit_util::BytesForBits(numRows)));
+            allBuffers.push_back(arrow::SliceBuffer(
+                buffers[kValidityBufferIndex],
+                0,
+                arrow::bit_util::BytesForBits(numRows)));
           } else {
-            RETURN_NOT_OK(
-                buffers[kValidityBufferIndex]->Resize(
-                    validityBufferSize, true));
+            RETURN_NOT_OK(buffers[kValidityBufferIndex]->Resize(
+                validityBufferSize, true));
             allBuffers.push_back(std::move(buffers[kValidityBufferIndex]));
           }
         } else {
@@ -1781,9 +1774,8 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
               arrow::SliceBuffer(valueBuffer, 0, valueBufferSize);
           allBuffers.push_back(std::move(slicedValueBuffer));
         } else {
-          RETURN_NOT_OK(
-              buffers[kFixedWidthValueBufferIndex]->Resize(
-                  valueBufferSize, true));
+          RETURN_NOT_OK(buffers[kFixedWidthValueBufferIndex]->Resize(
+              valueBufferSize, true));
           allBuffers.push_back(std::move(buffers[kFixedWidthValueBufferIndex]));
         }
         fixedWidthIdx++;
