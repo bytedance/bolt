@@ -203,6 +203,7 @@ vector_size_t SequenceFunction<T, K>::checkArguments(
   auto step = getStep(
       toInt64(start), toInt64(stop), stepVector, row, isDate, isYearMonth);
 #ifdef SPARK_COMPATIBLE
+  // Unlike Presto, Spark permits a zero step when both bounds are equal.
   if (step == 0 && start == stop) {
     return 1;
   }
