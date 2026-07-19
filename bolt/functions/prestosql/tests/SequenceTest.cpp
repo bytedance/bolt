@@ -161,6 +161,18 @@ TEST_F(SequenceTest, invalidStep) {
       expected);
 }
 
+#ifndef SPARK_COMPATIBLE
+TEST_F(SequenceTest, equalBoundsWithZeroStep) {
+  const auto startVector = makeFlatVector<int64_t>({1});
+  const auto stopVector = makeFlatVector<int64_t>({1});
+  const auto stepVector = makeFlatVector<int64_t>({0});
+  testExpressionWithError(
+      "sequence(C0, C1, C2)",
+      {startVector, stopVector, stepVector},
+      "(0 vs. 0) step must not be zero");
+}
+#endif
+
 TEST_F(SequenceTest, dateArguments) {
   const auto startVector = makeFlatVector<int32_t>({1991, 1992, 1992}, DATE());
   const auto stopVector = makeFlatVector<int32_t>({1996, 1988, 1992}, DATE());
