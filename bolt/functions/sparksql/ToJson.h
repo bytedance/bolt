@@ -413,8 +413,6 @@ inline void toJson<TypeKind::ARRAY>(
     bool isMapKey) {
   auto arrayView = input.castTo<Array<Any>>();
   result.append("[");
-  // Determine the array element kind once to guide null rendering.
-  const auto elementKind = input.type()->childAt(0)->kind();
   for (int i = 0; i < arrayView.size(); i++) {
     if (i > 0) {
       result.append(",");
@@ -424,15 +422,7 @@ inline void toJson<TypeKind::ARRAY>(
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           detail::toJson, element.kind(), element, result, options, isMapKey);
     } else {
-      // Spark semantics: an array element of ROW type with all-null fields
-      // renders as an empty object `{}` rather than `null` when serializing
-      // to JSON (with ignoreNullFields=true). Tests expect `[{}]` for a
-      // single empty ROW element.
-      if (!isMapKey && elementKind == TypeKind::ROW) {
-        result.append("{}");
-      } else {
-        result.append("null");
-      }
+      result.append("null");
     }
   }
   result.append("]");
