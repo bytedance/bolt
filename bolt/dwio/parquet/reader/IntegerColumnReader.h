@@ -80,9 +80,24 @@ class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
     bool needConvertion = (castExprSet_ && castExprSet_->size() != 0);
     auto& requestedType = needConvertion ? fileType_->type() : requestedType_;
     auto& fileType = static_cast<const ParquetTypeWithId&>(*fileType_);
-    auto logicalType = fileType.logicalType_;
-    if (logicalType.has_value() && logicalType.value().__isset.INTEGER &&
-        !logicalType.value().INTEGER.isSigned) {
+    bool isUnsigned = false;
+    if (fileType.logicalType_.has_value() &&
+        fileType.logicalType_.value().__isset.INTEGER) {
+      isUnsigned = !fileType.logicalType_.value().INTEGER.isSigned;
+    }
+#ifdef SPARK_COMPATIBLE
+    if (!fileType.logicalType_.has_value() &&
+        fileType.convertedType_ == thrift::ConvertedType::UINT_64) {
+      // Legacy Parquet files may carry only the UINT_64 converted type. In
+      // particular, convertType accepts these files as DECIMAL(20, 0). Without
+      // this fallback, getIntValues() would use its HUGEINT path and interpret
+      // each 8-byte physical UINT64 as a 16-byte int128_t. Use the unsigned
+      // path to preserve the UINT64 bits and widen each value correctly.
+      isUnsigned = true;
+    }
+#endif
+
+    if (isUnsigned) {
       getUnsignedIntValues(rows, requestedType, result);
     } else {
       getIntValues(rows, requestedType, result);

@@ -33,6 +33,9 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#ifdef SPARK_COMPATIBLE
+#include "bolt/common/base/tests/GTestUtils.h"
+#endif
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
@@ -597,8 +600,38 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
            {18446744073709551615ULL,
             2000000000000000000ULL,
             3000000000000000000ULL})});
+
+#ifdef SPARK_COMPATIBLE
+  const std::string sample(getExampleFilePath("uint.parquet"));
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFileSchema(rowType);
+  auto reader = createReader(sample, readerOptions);
+
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *pool_);
+#else
   assertReadWithExpected("uint.parquet", rowType, expected);
+#endif
 }
+
+#ifdef SPARK_COMPATIBLE
+TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
+  const std::vector<TypePtr> unsupportedTypes = {
+      DECIMAL(18, 0), DECIMAL(19, 0), DECIMAL(20, 1), DECIMAL(21, 0)};
+  const std::string sample(getExampleFilePath("uint.parquet"));
+
+  for (const auto& uint64Type : unsupportedTypes) {
+    auto rowType =
+        ROW({"uint8", "uint16", "uint32", "uint64"},
+            {SMALLINT(), INTEGER(), INTEGER(), uint64Type});
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    readerOptions.setFileSchema(rowType);
+    BOLT_ASSERT_THROW(createReader(sample, readerOptions), "Schema mismatch");
+  }
+}
+#endif
 
 TEST_F(ParquetReaderTest, parseUnsignedInt5) {
   auto rowType =
