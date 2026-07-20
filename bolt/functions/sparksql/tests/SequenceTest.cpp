@@ -84,6 +84,7 @@ TEST_F(SequenceTest, singleElement) {
   assertEqualVectors(expected, result);
 }
 
+#ifdef SPARK_COMPATIBLE
 TEST_F(SequenceTest, singleElementWithZeroStep) {
   auto bigintResult = evaluate(
       "sequence(c0, c1, c2)",
@@ -103,6 +104,7 @@ TEST_F(SequenceTest, singleElementWithZeroStep) {
       }));
   assertEqualVectors(makeArrayVector<int32_t>({{1}}), integerResult);
 }
+#endif
 
 TEST_F(SequenceTest, integerType) {
   auto result = evaluate(
