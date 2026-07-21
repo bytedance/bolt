@@ -22,6 +22,7 @@ add_executable(
   RegexFunctionsTest.cpp
   RandTest.cpp
   StringFunctionsTest.cpp
+  URLFunctionsTest.cpp
 )
 
 add_test(
