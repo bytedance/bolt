@@ -35,7 +35,7 @@ namespace {
 struct BitmapAccumulator {
   uint8_t bitmap_[kBitmapNumBytes] = {};
 
-  void setPosition(int64_t position) {
+  FOLLY_ALWAYS_INLINE void setPosition(int64_t position) {
     BOLT_USER_CHECK(
         position >= 0 && position < kBitmapNumBits,
         "Invalid bitmap position: {} (valid range: [0, {}))",
