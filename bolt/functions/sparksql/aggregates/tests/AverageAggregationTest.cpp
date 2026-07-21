@@ -30,6 +30,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 using namespace bytedance::bolt::exec::test;
@@ -300,6 +301,78 @@ TEST_F(AverageAggregationTest, rowBasedSpillDecimalAvg) {
       {},
       /*testWithTableScan*/ false);
   disallowInputShuffle();
+}
+
+TEST_F(AverageAggregationTest, rowBasedSpillDecimalAvgPartialOutputType) {
+  std::vector<RowVectorPtr> vectors;
+  for (int i = 0; i < 4; ++i) {
+    constexpr vector_size_t rowCount = 1024;
+    vectors.emplace_back(makeRowVector(
+        {makeFlatVector<int32_t>(
+             rowCount, [&](auto row) { return i * rowCount + row; }),
+         makeFlatVector<int128_t>(
+             rowCount,
+             [](auto row) { return HugeInt::build(0, row + 1); },
+             nullptr,
+             DECIMAL(32, 12))}));
+  }
+
+  auto source = PlanBuilder().values(vectors).planNode();
+  auto key =
+      std::make_shared<const core::FieldAccessTypedExpr>(INTEGER(), "c0");
+  auto input =
+      std::make_shared<const core::FieldAccessTypedExpr>(DECIMAL(32, 12), "c1");
+  auto outputType = ROW({DECIMAL(38, 12), BIGINT()});
+  // Match Substrait plans where Spark partial avg exposes an expanded decimal
+  // sum buffer. The companion signature must resolve the same intermediate
+  // type.
+  core::AggregationNode::Aggregate aggregate{
+      std::make_shared<const core::CallTypedExpr>(
+          outputType,
+          std::vector<core::TypedExprPtr>{input},
+          "spark_avg_partial"),
+      {DECIMAL(32, 12)},
+      nullptr,
+      {},
+      {}};
+  auto plan = std::make_shared<core::AggregationNode>(
+      "partial_avg_decimal_repro",
+      core::AggregationNode::Step::kPartial,
+      std::vector<core::FieldAccessTypedExprPtr>{key},
+      std::vector<core::FieldAccessTypedExprPtr>{},
+      std::vector<std::string>{"avg"},
+      std::vector<core::AggregationNode::Aggregate>{aggregate},
+      false,
+      source);
+
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .spillDirectory(spillDirectory->path)
+          .config(core::QueryConfig::kSpillEnabled, true)
+          .config(core::QueryConfig::kAggregationSpillEnabled, true)
+          .config(core::QueryConfig::kTestingSpillPct, "100")
+          .config(core::QueryConfig::kRowBasedSpillMode, "compression")
+          .config(core::QueryConfig::kPartialAggregationSpillMaxPct, "100")
+          .config(
+              core::QueryConfig::kAbandonPartialAggregationMinFinalPct, "100")
+          .config(core::QueryConfig::kAbandonPartialAggregationMinPct, "100")
+          .config(core::QueryConfig::kAggregationSpillMemoryThreshold, "1")
+          .config(core::QueryConfig::kAbandonPartialAggregationMinRows, "50")
+          .copyResults(pool(), task);
+
+  ASSERT_EQ(result->size(), 4 * 1024);
+  ASSERT_TRUE(
+      result->type()->equivalent(*ROW({"c0", "avg"}, {INTEGER(), outputType})));
+
+  int64_t spilledBytes = 0;
+  for (const auto& pipeline : task->taskStats().pipelineStats) {
+    for (const auto& op : pipeline.operatorStats) {
+      spilledBytes += op.spilledBytes;
+    }
+  }
+  ASSERT_GT(spilledBytes, 0);
 }
 
 } // namespace

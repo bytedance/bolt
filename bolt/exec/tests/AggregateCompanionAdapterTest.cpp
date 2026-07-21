@@ -427,8 +427,10 @@ TEST_F(
 TEST_F(
     AggregateCompanionRegistryTest,
     resultTypeNotResolvableFromIntermediateType) {
-  // We only register companion functions for original signatures whose result
-  // type can be resolved from its intermediate type.
+  // Partial and merge companion functions only produce intermediate results, so
+  // they do not need the final result type to be resolvable from the
+  // intermediate type. Extract and merge-extract still need a concrete final
+  // result type and are not registered for this signature.
   std::vector<std::shared_ptr<AggregateFunctionSignature>> signatures{
       AggregateFunctionSignatureBuilder()
           .typeVariable("T")
@@ -438,9 +440,15 @@ TEST_F(
           .build()};
   registerDummyAggregateFunction("aggregateFunc6", signatures);
 
-  checkAggregateSignaturesCount("aggregateFunc6_partial", 0);
+  checkAggregateSignaturesCount("aggregateFunc6_partial", 1);
+  checkAggregateTypeResolution(
+      "aggregateFunc6_partial", {BIGINT()}, VARBINARY(), VARBINARY());
+  checkAggregateTypeResolution(
+      "aggregateFunc6_partial", {DOUBLE()}, VARBINARY(), VARBINARY());
 
-  checkAggregateSignaturesCount("aggregateFunc6_merge", 0);
+  checkAggregateSignaturesCount("aggregateFunc6_merge", 1);
+  checkAggregateTypeResolution(
+      "aggregateFunc6_merge", {VARBINARY()}, VARBINARY(), VARBINARY());
 
   checkAggregateSignaturesCount("aggregateFunc6_merge_extract", 0);
 
