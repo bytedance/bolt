@@ -250,7 +250,8 @@ class StringValueListCollectListAggregate {
       if (!other.has_value()) {
         return false;
       }
-      for (auto element : other.value().skipNulls()) {
+      const auto values = other.value();
+      for (auto element : values.skipNulls()) {
         elements_.appendStringView(element, allocator);
       }
       return true;
