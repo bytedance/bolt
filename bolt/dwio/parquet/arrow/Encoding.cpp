@@ -3150,13 +3150,12 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
             Encoding::DELTA_LENGTH_BYTE_ARRAY,
             pool = ::arrow::default_memory_pool()),
         sink_(pool),
-        length_encoder_(nullptr, pool),
-        encoded_size_{0} {}
+        length_encoder_(nullptr, pool) {}
 
   std::shared_ptr<::arrow::Buffer> FlushValues() override;
 
   int64_t EstimatedDataEncodedSize() override {
-    return encoded_size_ + length_encoder_.EstimatedDataEncodedSize();
+    return sink_.length() + length_encoder_.EstimatedDataEncodedSize();
   }
 
   using TypedEncoder<ByteArrayType>::Put;
@@ -3182,6 +3181,13 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
                 return Status::Invalid(
                     "Parquet cannot store strings with size 2GB or more");
               }
+              if (ARROW_PREDICT_FALSE(
+                      view.size() + sink_.length() >
+                      static_cast<size_t>(
+                          std::numeric_limits<int32_t>::max()))) {
+                return Status::Invalid(
+                    "excess expansion in DELTA_LENGTH_BYTE_ARRAY");
+              }
               length_encoder_.Put({static_cast<int32_t>(view.length())}, 1);
               PARQUET_THROW_NOT_OK(sink_.Append(view.data(), view.length()));
               return Status::OK();
@@ -3191,7 +3197,6 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
 
   ::arrow::BufferBuilder sink_;
   DeltaBitPackEncoder<Int32Type> length_encoder_;
-  uint32_t encoded_size_;
 };
 
 template <typename DType>
@@ -3225,7 +3230,9 @@ void DeltaLengthByteArrayEncoder<DType>::Put(const T* src, int num_values) {
     length_encoder_.Put(lengths.data(), batch_size);
   }
 
-  if (AddWithOverflow(encoded_size_, total_increment_size, &encoded_size_)) {
+  if (ARROW_PREDICT_FALSE(
+          sink_.length() + total_increment_size >
+          std::numeric_limits<int32_t>::max())) {
     throw ParquetException("excess expansion in DELTA_LENGTH_BYTE_ARRAY");
   }
   PARQUET_THROW_NOT_OK(sink_.Reserve(total_increment_size));
@@ -3267,7 +3274,6 @@ DeltaLengthByteArrayEncoder<DType>::FlushValues() {
   PARQUET_THROW_NOT_OK(sink_.Append(data->data(), data->size()));
 
   std::shared_ptr<Buffer> buffer = FinishSink<::arrow::BufferBuilder>(sink_);
-  encoded_size_ = 0;
   return buffer;
 }
 

@@ -451,9 +451,12 @@ class SerializedPageWriter : public PageWriter {
 
     if (data_encryptor_.get()) {
       UpdateEncryption(encryption::kDictionaryPage);
-      PARQUET_THROW_NOT_OK(encryption_buffer_->Resize(
-          data_encryptor_->CiphertextSizeDelta() + compressed_page_size,
-          false));
+      const int32_t encrypted_buffer_size = checkPageHeaderSize(
+          "Encrypted dictionary",
+          static_cast<int64_t>(data_encryptor_->CiphertextSizeDelta()) +
+              compressed_page_size);
+      PARQUET_THROW_NOT_OK(
+          encryption_buffer_->Resize(encrypted_buffer_size, false));
       output_data_len = data_encryptor_->Encrypt(
           compressed_data->data(),
           compressed_page_size,
@@ -561,9 +564,12 @@ class SerializedPageWriter : public PageWriter {
         checkPageHeaderSize("Compressed data", output_data_len);
 
     if (data_encryptor_.get()) {
-      PARQUET_THROW_NOT_OK(encryption_buffer_->Resize(
-          data_encryptor_->CiphertextSizeDelta() + compressed_page_size,
-          false));
+      const int32_t encrypted_buffer_size = checkPageHeaderSize(
+          "Encrypted data",
+          static_cast<int64_t>(data_encryptor_->CiphertextSizeDelta()) +
+              compressed_page_size);
+      PARQUET_THROW_NOT_OK(
+          encryption_buffer_->Resize(encrypted_buffer_size, false));
       UpdateEncryption(encryption::kDataPage);
       output_data_len = data_encryptor_->Encrypt(
           compressed_data->data(),
@@ -1081,7 +1087,8 @@ class ColumnWriterImpl {
       const bool use_dictionary,
       Encoding::type encoding,
       const WriterProperties* properties,
-      std::shared_ptr<BufferedColumnWriterResources> buffered_resources)
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources,
+      int64_t byte_array_page_size_limit)
       : metadata_(metadata),
         descr_(metadata->descr()),
         level_info_(ComputeLevelInfo(metadata->descr())),
@@ -1097,6 +1104,10 @@ class ColumnWriterImpl {
         dictionary_pagesize_limit_(
             properties->dictionary_pagesize_limit(descr_->path())),
         data_pagesize_(properties->data_pagesize(descr_->path())),
+        byte_array_page_size_limit_(std::clamp<int64_t>(
+            byte_array_page_size_limit,
+            0,
+            kMaxPageHeaderSize)),
         num_buffered_values_(0),
         num_buffered_encoded_values_(0),
         num_buffered_nulls_(0),
@@ -1215,6 +1226,8 @@ class ColumnWriterImpl {
   const int64_t dictionary_pagesize_limit_;
 
   const int64_t data_pagesize_;
+
+  const int64_t byte_array_page_size_limit_;
 
   // The total number of values stored in the data page. This is the maximum of
   // the number of encoded definition levels or encoded values. For
@@ -1691,14 +1704,16 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       const bool use_dictionary,
       Encoding::type encoding,
       const WriterProperties* properties,
-      std::shared_ptr<BufferedColumnWriterResources> buffered_resources)
+      std::shared_ptr<BufferedColumnWriterResources> buffered_resources,
+      int64_t byte_array_page_size_limit)
       : ColumnWriterImpl(
             metadata,
             std::move(pager),
             use_dictionary,
             encoding,
             properties,
-            std::move(buffered_resources)),
+            std::move(buffered_resources),
+            byte_array_page_size_limit),
         encoder_pool_(std::make_unique<::arrow::ProxyMemoryPool>(
             properties->memory_pool())) {
     current_encoder_ = MakeEncoder(
@@ -2242,8 +2257,8 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       return;
     }
 
-    const int64_t dictionary_page_byte_limit =
-        std::clamp<int64_t>(dictionary_pagesize_limit_, 0, kMaxPageHeaderSize);
+    const int64_t dictionary_page_byte_limit = std::clamp<int64_t>(
+        dictionary_pagesize_limit_, 0, byte_array_page_size_limit_);
     if (current_dict_encoder_->dict_encoded_size() >=
         dictionary_page_byte_limit) {
       FallbackToPlainEncoding();
@@ -3007,8 +3022,9 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
   // The configured page sizes are soft flush targets. PageHeader fields are
   // the hard format boundary, so cap byte-budget arithmetic at INT32_MAX and
   // leave the final encoded/compressed size checks to PageWriter.
-  auto PageByteLimit = [](int64_t configured_limit) {
-    return std::clamp<int64_t>(configured_limit, 0, kMaxPageHeaderSize);
+  auto PageByteLimit = [&](int64_t configured_limit) {
+    return std::clamp<int64_t>(
+        configured_limit, 0, byte_array_page_size_limit_);
   };
   const int64_t data_page_byte_limit = PageByteLimit(data_pagesize_);
   const int64_t dictionary_page_byte_limit =
@@ -3166,21 +3182,25 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
         &batch_num_spaced_values,
         &null_count);
 
-    // For PLAIN encoding this is the data-page value size. During dictionary
-    // encoding it is a conservative upper bound on dictionary growth: duplicate
-    // values consume no additional dictionary bytes, but treating them as new
-    // entries keeps a single write batch from causing a large peak allocation.
-    // The offset range is exact for canonical Arrow binary arrays and a
-    // conservative upper bound if a null slot retains bytes.
+    // For PLAIN encoding this is the data-page value size. For dictionary and
+    // DELTA encodings it bounds the raw bytes passed to one encoder Put().
     const int64_t page_byte_limit = CurrentPageByteLimit();
-    const int64_t batch_encoded_bytes = PlainEncodedRangeSize(
+    const int64_t batch_plain_bytes = PlainEncodedRangeSize(
         value_offset,
         batch_num_spaced_values,
         batch_num_values,
         page_byte_limit);
-    if (CappedPageBytes(
-            CurrentPageBytes(), batch_encoded_bytes, page_byte_limit) <=
-        page_byte_limit) {
+
+    const bool dictionary_encoding = IsCurrentDictionaryEncoding();
+    const bool plain_encoding = current_encoder_->encoding() == Encoding::PLAIN;
+
+    // The final nested chunk may end inside a record. Flush before writing it
+    // when the conservative bound cannot fit because it cannot be split later.
+    if (!dictionary_encoding && !check_page && num_buffered_values_ > 0 &&
+        CappedPageBytes(
+            CurrentPageBytes(), batch_plain_bytes, page_byte_limit) >
+            page_byte_limit) {
+      AddDataPage();
       WritePreparedChunk(
           offset,
           batch_size,
@@ -3191,7 +3211,23 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
       return;
     }
 
-    const bool dictionary_encoding = IsCurrentDictionaryEncoding();
+    // PLAIN uses the exact remaining page budget, and dictionary uses a
+    // conservative remaining budget. DELTA raw bytes only bound one Put().
+    const bool batch_fits = dictionary_encoding || plain_encoding
+        ? CappedPageBytes(
+              CurrentPageBytes(), batch_plain_bytes, page_byte_limit) <=
+            page_byte_limit
+        : batch_plain_bytes <= page_byte_limit;
+    if (batch_fits) {
+      WritePreparedChunk(
+          offset,
+          batch_size,
+          batch_num_values,
+          batch_num_spaced_values,
+          null_count,
+          check_page);
+      return;
+    }
 
     // A false check_page means this chunk is the final, potentially partial
     // nested record. It cannot be split or flushed after writing, but its
@@ -3214,8 +3250,8 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
     // Prefer starting a new page over scanning levels merely to fill the
     // remainder of the current page. If the whole chunk fits on an empty page,
     // this preserves the old one-pass path for nullable and nested columns.
-    if (!dictionary_encoding && num_buffered_values_ > 0 &&
-        batch_encoded_bytes <= data_page_byte_limit) {
+    if (plain_encoding && num_buffered_values_ > 0 &&
+        batch_plain_bytes <= data_page_byte_limit) {
       AddDataPage();
       WritePreparedChunk(
           offset,
@@ -3235,11 +3271,16 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
     int64_t remaining = batch_size;
     while (remaining > 0) {
       const bool current_dictionary_encoding = IsCurrentDictionaryEncoding();
+      const bool current_plain_encoding =
+          current_encoder_->encoding() == Encoding::PLAIN;
       const int64_t current_page_byte_limit = CurrentPageByteLimit();
-      int64_t current_page_bytes = CurrentPageBytes();
+      const bool use_current_page_bytes =
+          current_dictionary_encoding || current_plain_encoding;
+      int64_t current_page_bytes =
+          use_current_page_bytes ? CurrentPageBytes() : 0;
       int64_t subchunk_levels = 0;
       int64_t subchunk_spaced_values = 0;
-      int64_t subchunk_encoded_bytes = 0;
+      int64_t subchunk_plain_bytes = 0;
 
       while (subchunk_levels < remaining) {
         const int64_t level_index = local_offset + subchunk_levels;
@@ -3261,12 +3302,12 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
             CappedPageBytes(
                 CappedPageBytes(
                     current_page_bytes,
-                    subchunk_encoded_bytes,
+                    subchunk_plain_bytes,
                     current_page_byte_limit),
                 value_bytes,
                 current_page_byte_limit) > current_page_byte_limit) {
           if (subchunk_levels == 0) {
-            if (!current_dictionary_encoding && num_buffered_values_ > 0) {
+            if (current_plain_encoding && num_buffered_values_ > 0) {
               AddDataPage();
               current_page_bytes = 0;
             }
@@ -3278,8 +3319,8 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
         if (HasSpacedValue(level_index)) {
           ++subchunk_spaced_values;
         }
-        subchunk_encoded_bytes = CappedPageBytes(
-            subchunk_encoded_bytes, value_bytes, current_page_byte_limit);
+        subchunk_plain_bytes = CappedPageBytes(
+            subchunk_plain_bytes, value_bytes, current_page_byte_limit);
         ++subchunk_levels;
       }
 
@@ -3433,11 +3474,14 @@ Status TypedColumnWriterImpl<FLBAType>::WriteArrowDense(
 // ----------------------------------------------------------------------
 // Dynamic column writer constructor
 
-std::shared_ptr<ColumnWriter> ColumnWriter::Make(
+namespace {
+
+std::shared_ptr<ColumnWriter> MakeColumnWriter(
     ColumnChunkMetaDataBuilder* metadata,
     std::unique_ptr<PageWriter> pager,
     const WriterProperties* properties,
-    std::shared_ptr<BufferedColumnWriterResources> buffered_resources) {
+    std::shared_ptr<BufferedColumnWriterResources> buffered_resources,
+    int64_t byte_array_page_size_limit) {
   const ColumnDescriptor* descr = metadata->descr();
   const bool use_dictionary = properties->dictionary_enabled(descr->path()) &&
       descr->physical_type() != Type::BOOLEAN;
@@ -3464,7 +3508,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::INT32:
       return std::make_shared<TypedColumnWriterImpl<Int32Type>>(
           metadata,
@@ -3472,7 +3517,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::INT64:
       return std::make_shared<TypedColumnWriterImpl<Int64Type>>(
           metadata,
@@ -3480,7 +3526,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::INT96:
       return std::make_shared<TypedColumnWriterImpl<Int96Type>>(
           metadata,
@@ -3488,7 +3535,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::FLOAT:
       return std::make_shared<TypedColumnWriterImpl<FloatType>>(
           metadata,
@@ -3496,7 +3544,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::DOUBLE:
       return std::make_shared<TypedColumnWriterImpl<DoubleType>>(
           metadata,
@@ -3504,7 +3553,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::BYTE_ARRAY:
       return std::make_shared<TypedColumnWriterImpl<ByteArrayType>>(
           metadata,
@@ -3512,7 +3562,8 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     case Type::FIXED_LEN_BYTE_ARRAY:
       return std::make_shared<TypedColumnWriterImpl<FLBAType>>(
           metadata,
@@ -3520,12 +3571,41 @@ std::shared_ptr<ColumnWriter> ColumnWriter::Make(
           use_dictionary,
           encoding,
           properties,
-          std::move(buffered_resources));
+          std::move(buffered_resources),
+          byte_array_page_size_limit);
     default:
       ParquetException::NYI("type reader not implemented");
   }
   // Unreachable code, but suppress compiler warning
   return std::shared_ptr<ColumnWriter>(nullptr);
+}
+
+} // namespace
+
+std::shared_ptr<ColumnWriter> ColumnWriter::Make(
+    ColumnChunkMetaDataBuilder* metadata,
+    std::unique_ptr<PageWriter> pager,
+    const WriterProperties* properties,
+    std::shared_ptr<BufferedColumnWriterResources> buffered_resources) {
+  return MakeColumnWriter(
+      metadata,
+      std::move(pager),
+      properties,
+      std::move(buffered_resources),
+      kMaxPageHeaderSize);
+}
+
+std::shared_ptr<ColumnWriter> ColumnWriter::MakeForTest(
+    ColumnChunkMetaDataBuilder* metadata,
+    std::unique_ptr<PageWriter> pager,
+    const WriterProperties* properties,
+    int64_t byte_array_page_size_limit) {
+  return MakeColumnWriter(
+      metadata,
+      std::move(pager),
+      properties,
+      nullptr,
+      byte_array_page_size_limit);
 }
 
 } // namespace bytedance::bolt::parquet::arrow

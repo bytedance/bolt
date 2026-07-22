@@ -225,6 +225,12 @@ class PARQUET_EXPORT ColumnWriter {
       std::shared_ptr<BufferedColumnWriterResources> buffered_resources =
           nullptr);
 
+  static std::shared_ptr<ColumnWriter> MakeForTest(
+      ColumnChunkMetaDataBuilder*,
+      std::unique_ptr<PageWriter>,
+      const WriterProperties* properties,
+      int64_t byte_array_page_size_limit);
+
   /// \brief Closes the ColumnWriter, commits any buffered values to pages.
   /// \return Total size of the column in bytes
   virtual int64_t Close() = 0;
