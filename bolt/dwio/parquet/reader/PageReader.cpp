@@ -1090,17 +1090,13 @@ int32_t PageReader::getLengthsAndNulls(
           definitionLevels_.data() + begin, end - begin, info, &bits);
       break;
     case LevelMode::kList: {
-      arrow::DefRepLevelsToList(
+      arrow::DefRepLevelsToListLengths(
           definitionLevels_.data() + begin,
           repetitionLevels_.data() + begin,
           end - begin,
           info,
           &bits,
           lengths);
-      // Convert offsets to lengths.
-      for (auto i = 0; i < bits.values_read; ++i) {
-        lengths[i] = lengths[i + 1] - lengths[i];
-      }
       break;
     }
     case LevelMode::kStructOverLists: {

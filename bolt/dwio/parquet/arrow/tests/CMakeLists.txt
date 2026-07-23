@@ -50,6 +50,19 @@ target_link_libraries(
   GTest::gtest_main
 )
 
+add_executable(
+  bolt_dwio_parquet_level_conversion_benchmark
+  LevelConversionBenchmark.cpp
+  ../LevelComparison.cpp
+  ../LevelComparisonAvx2.cpp
+  ../LevelConversion.cpp
+)
+target_link_libraries(
+  bolt_dwio_parquet_level_conversion_benchmark
+  PRIVATE arrow::arrow
+  ${FOLLY_BENCHMARK}
+)
+
 bolt_add_library(
   bolt_dwio_parquet_arrow_test_lib
   BloomFilter.cpp

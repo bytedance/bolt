@@ -53,14 +53,103 @@ using ::arrow::internal::CpuInfo;
 using ::std::optional;
 
 template <typename OffsetType>
+class OffsetListOutput {
+ public:
+  explicit OffsetListOutput(OffsetType* offsets)
+      : offsets_(offsets), orig_(offsets) {}
+
+  void OnContinuationRun(int64_t run) {
+    if (offsets_ == nullptr) {
+      return;
+    }
+    if (ARROW_PREDICT_FALSE(
+            *offsets_ > std::numeric_limits<OffsetType>::max() -
+                static_cast<OffsetType>(run))) {
+      throw ParquetException("List index overflow.");
+    }
+    *offsets_ += static_cast<OffsetType>(run);
+  }
+
+  void OnNewList(int16_t def_level, const LevelInfo& level_info) {
+    if (offsets_ == nullptr) {
+      return;
+    }
+    ++offsets_;
+    *offsets_ = *(offsets_ - 1);
+    if (def_level >= level_info.def_level) {
+      if (ARROW_PREDICT_FALSE(
+              *offsets_ == std::numeric_limits<OffsetType>::max())) {
+        throw ParquetException("List index overflow.");
+      }
+      ++*offsets_;
+    }
+  }
+
+  void Finish() {}
+
+  int64_t valuesRead() const {
+    return offsets_ == nullptr ? 0 : offsets_ - orig_;
+  }
+
+  bool hasValuesRead() const {
+    return offsets_ != nullptr;
+  }
+
+ private:
+  OffsetType* offsets_;
+  OffsetType* orig_;
+};
+
+class LengthListOutput {
+ public:
+  explicit LengthListOutput(int32_t* lengths) : lengths_(lengths) {}
+
+  void OnContinuationRun(int64_t run) {
+    if (ARROW_PREDICT_FALSE(
+            currentLength_ >
+            std::numeric_limits<int32_t>::max() - static_cast<int32_t>(run))) {
+      throw ParquetException("List index overflow.");
+    }
+    currentLength_ += static_cast<int32_t>(run);
+  }
+
+  void OnNewList(int16_t def_level, const LevelInfo& level_info) {
+    Finish();
+    haveCurrentList_ = true;
+    currentLength_ = def_level >= level_info.def_level ? 1 : 0;
+  }
+
+  void Finish() {
+    if (haveCurrentList_) {
+      lengths_[valuesRead_++] = currentLength_;
+      currentLength_ = 0;
+      haveCurrentList_ = false;
+    }
+  }
+
+  int64_t valuesRead() const {
+    return valuesRead_;
+  }
+
+  bool hasValuesRead() const {
+    return true;
+  }
+
+ private:
+  int32_t* lengths_;
+  int64_t valuesRead_{0};
+  int32_t currentLength_{0};
+  bool haveCurrentList_{false};
+};
+
+template <typename ListOutput>
 void DefRepLevelsToListInfo(
     const int16_t* def_levels,
     const int16_t* rep_levels,
     int64_t num_def_levels,
     LevelInfo level_info,
     ValidityBitmapInputOutput* output,
-    OffsetType* offsets) {
-  OffsetType* orig_pos = offsets;
+    ListOutput& list_output) {
   optional<::arrow::internal::FirstTimeBitmapWriter> valid_bits_writer;
   if (output->valid_bits) {
     valid_bits_writer.emplace(
@@ -68,7 +157,7 @@ void DefRepLevelsToListInfo(
         output->valid_bits_offset,
         output->values_read_upper_bound);
   }
-  for (int x = 0; x < num_def_levels; x++) {
+  for (int64_t x = 0; x < num_def_levels; ++x) {
     // Skip items that belong to empty or null ancestor lists and further nested
     // lists.
     if (def_levels[x] < level_info.repeated_ancestor_def_level ||
@@ -80,19 +169,20 @@ void DefRepLevelsToListInfo(
       // A continuation of an existing list.
       // offsets can be null for structs with repeated children (we don't need
       // to know offsets until we get to the children).
-      if (offsets != nullptr) {
-        if (ARROW_PREDICT_FALSE(
-                *offsets == std::numeric_limits<OffsetType>::max())) {
-          throw ParquetException("List index overflow.");
-        }
-        *offsets += 1;
+      int64_t run = 1;
+      while (x + run < num_def_levels &&
+             rep_levels[x + run] == level_info.rep_level &&
+             def_levels[x + run] >= level_info.repeated_ancestor_def_level) {
+        ++run;
       }
+      list_output.OnContinuationRun(run);
+      x += run - 1;
     } else {
       if (ARROW_PREDICT_FALSE(
               (valid_bits_writer.has_value() &&
                valid_bits_writer->position() >=
                    output->values_read_upper_bound) ||
-              (offsets - orig_pos) >= output->values_read_upper_bound)) {
+              list_output.valuesRead() >= output->values_read_upper_bound)) {
         std::stringstream ss;
         ss << "Definition levels exceeded upper bound: "
            << output->values_read_upper_bound;
@@ -102,20 +192,7 @@ void DefRepLevelsToListInfo(
       // current_rep < list rep_level i.e. start of a list (ancestor empty lists
       // are filtered out above). offsets can be null for structs with repeated
       // children (we don't need to know offsets until we get to the children).
-      if (offsets != nullptr) {
-        ++offsets;
-        // Use cumulative offsets because variable size lists are more common
-        // than fixed size lists so it should be cheaper to make these
-        // cumulative and subtract when validating fixed size lists.
-        *offsets = *(offsets - 1);
-        if (def_levels[x] >= level_info.def_level) {
-          if (ARROW_PREDICT_FALSE(
-                  *offsets == std::numeric_limits<OffsetType>::max())) {
-            throw ParquetException("List index overflow.");
-          }
-          *offsets += 1;
-        }
-      }
+      list_output.OnNewList(def_levels[x], level_info);
 
       if (valid_bits_writer.has_value()) {
         // the level_info def level for lists reflects element present level.
@@ -130,11 +207,12 @@ void DefRepLevelsToListInfo(
       }
     }
   }
+  list_output.Finish();
   if (valid_bits_writer.has_value()) {
     valid_bits_writer->Finish();
   }
-  if (offsets != nullptr) {
-    output->values_read = offsets - orig_pos;
+  if (list_output.hasValuesRead()) {
+    output->values_read = list_output.valuesRead();
   } else if (valid_bits_writer.has_value()) {
     output->values_read = valid_bits_writer->position();
   }
@@ -189,8 +267,9 @@ void DefRepLevelsToList(
     LevelInfo level_info,
     ValidityBitmapInputOutput* output,
     int32_t* offsets) {
-  DefRepLevelsToListInfo<int32_t>(
-      def_levels, rep_levels, num_def_levels, level_info, output, offsets);
+  OffsetListOutput<int32_t> listOutput(offsets);
+  DefRepLevelsToListInfo(
+      def_levels, rep_levels, num_def_levels, level_info, output, listOutput);
 }
 
 void DefRepLevelsToList(
@@ -200,8 +279,21 @@ void DefRepLevelsToList(
     LevelInfo level_info,
     ValidityBitmapInputOutput* output,
     int64_t* offsets) {
-  DefRepLevelsToListInfo<int64_t>(
-      def_levels, rep_levels, num_def_levels, level_info, output, offsets);
+  OffsetListOutput<int64_t> listOutput(offsets);
+  DefRepLevelsToListInfo(
+      def_levels, rep_levels, num_def_levels, level_info, output, listOutput);
+}
+
+void DefRepLevelsToListLengths(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    ValidityBitmapInputOutput* output,
+    int32_t* lengths) {
+  LengthListOutput listOutput(lengths);
+  DefRepLevelsToListInfo(
+      def_levels, rep_levels, num_def_levels, level_info, output, listOutput);
 }
 
 void DefRepLevelsToBitmap(
@@ -214,13 +306,9 @@ void DefRepLevelsToBitmap(
   // method is for parent structs, so we need to bump def and ref level.
   level_info.rep_level += 1;
   level_info.def_level += 1;
-  DefRepLevelsToListInfo<int32_t>(
-      def_levels,
-      rep_levels,
-      num_def_levels,
-      level_info,
-      output,
-      /*offsets=*/nullptr);
+  OffsetListOutput<int32_t> listOutput(nullptr);
+  DefRepLevelsToListInfo(
+      def_levels, rep_levels, num_def_levels, level_info, output, listOutput);
 }
 
 } // namespace bytedance::bolt::parquet::arrow

@@ -214,6 +214,17 @@ void PARQUET_EXPORT DefRepLevelsToList(
     ValidityBitmapInputOutput* output,
     int64_t* offsets);
 
+// Reconstructs a validity bitmap and list lengths directly. This is equivalent
+// to calling DefRepLevelsToList with int32 offsets and converting adjacent
+// offsets to lengths, but avoids one extra pass over the output.
+void PARQUET_EXPORT DefRepLevelsToListLengths(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    ValidityBitmapInputOutput* output,
+    int32_t* lengths);
+
 // Reconstructs a validity bitmap for a struct every member is a list or has
 // a list descendant.  See documentation on DefLevelsToBitmap for when more
 // details on this method compared to the other ones defined above.
