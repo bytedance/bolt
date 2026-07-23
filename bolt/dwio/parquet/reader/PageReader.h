@@ -93,6 +93,7 @@ class PageReader {
         definitionLevels_(&pool_),
         repetitionLevels_(&pool_),
         nullConcatenation_(pool_),
+        windowRepDefPageData_(&pool_),
         statis_(statis) {
     type_->makeLevelInfo(leafInfo_);
     pageOrdinal_ = 0;
@@ -113,7 +114,8 @@ class PageReader {
         chunkSize_(chunkSize),
         definitionLevels_(&pool_),
         repetitionLevels_(&pool_),
-        nullConcatenation_(pool_) {
+        nullConcatenation_(pool_),
+        windowRepDefPageData_(&pool_) {
     pageOrdinal_ = 0;
   }
 
@@ -473,6 +475,13 @@ class PageReader {
 
   void preloadPageRepDefs(const bool keepRepDefRawData);
   void loadMoreRepDefs();
+  void preloadRepDefsRawOnly();
+  int32_t countLeavesInRepDefPage(const raw_vector<char>& repDefData);
+  void compactConsumedLeafNulls();
+  void compactWindowRepDefs();
+  void loadWindowRepDefs(int32_t targetTopLevelRows);
+  bool loadNextWindowRepDefPage();
+  int32_t countTopLevelRepDefs(int32_t begin, int32_t end) const;
   void decodeRepDefsFromBuffer();
 
   memory::MemoryPool& pool_;
@@ -630,6 +639,10 @@ class PageReader {
 
   // preload undecoded RepDefs
   std::list<raw_vector<char>> preloadedRepDefs_;
+  raw_vector<char> windowRepDefPageData_;
+  std::unique_ptr<::arrow::util::RleDecoder> windowRepeatDecoder_;
+  std::unique_ptr<::arrow::util::RleDecoder> windowDefineDecoder_;
+  int32_t windowRepDefsRemaining_{0};
   int32_t repDefMemoryLimit_{16L << 20};
   int64_t totalRefDefBytes_{0};
   int32_t decodeRepDefPageCount_{10};
