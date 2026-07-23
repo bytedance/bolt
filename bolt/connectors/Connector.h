@@ -480,6 +480,7 @@ class AsyncThreadCtx {
       if (ctx_) {
         if (!isAsyncPreloadThread() || !ctx_->in(bytes_)) { // be in order
           ctx_ = nullptr;
+          bytes_ = 0;
         }
       }
     }
