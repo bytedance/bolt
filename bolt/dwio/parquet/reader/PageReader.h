@@ -247,6 +247,10 @@ class PageReader {
     decodeRepDefPageCount_ = count;
   }
 
+  void setParquetRepDefPreloadWindowCount(int32_t count) {
+    repDefPreloadWindowCount_ = count < 0 ? 0 : count;
+  }
+
   void setParquetRepDefMemoryLimit(int32_t memlimit) {
     repDefMemoryLimit_ = memlimit;
   }
@@ -629,6 +633,7 @@ class PageReader {
   int32_t repDefMemoryLimit_{16L << 20};
   int64_t totalRefDefBytes_{0};
   int32_t decodeRepDefPageCount_{10};
+  int32_t repDefPreloadWindowCount_{0};
 
   dwio::common::RuntimeStatistics* statis_{nullptr};
   // Tracks output count for the current physical page. -1 means there is no

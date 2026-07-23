@@ -175,6 +175,7 @@ class RowReaderOptions {
   bool enableDictionaryFilter_ = false;
 
   int32_t decodeRepDefPageCount_{10};
+  int32_t parquetRepDefPreloadWindowCount_{0};
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
   bool useColumnNamesForColumnMapping_{false};
 
@@ -483,6 +484,14 @@ class RowReaderOptions {
     return decodeRepDefPageCount_;
   }
 
+  void setParquetRepDefPreloadWindowCount(int32_t windowCount) {
+    parquetRepDefPreloadWindowCount_ = windowCount < 0 ? 0 : windowCount;
+  }
+
+  int32_t getParquetRepDefPreloadWindowCount() const {
+    return parquetRepDefPreloadWindowCount_;
+  }
+
   void setParquetRepDefMemoryLimit(int32_t memlimit) {
     parquetRepDefMemoryLimit_ = memlimit;
   }
@@ -556,8 +565,10 @@ class RowReaderOptions {
        << ", ";
     ss << "fileName_=" << fileName_ << ", ";
     ss << "fileId_=" << fileId_ << ", ";
-    ss << "enableDictionaryFilter_=" << enableDictionaryFilter_;
-    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
+    ss << "enableDictionaryFilter_=" << enableDictionaryFilter_ << ", ";
+    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_ << ", ";
+    ss << "parquetRepDefPreloadWindowCount_="
+       << parquetRepDefPreloadWindowCount_ << ", ";
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
     ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";
     ss << "useColumnNamesForColumnMapping_="
