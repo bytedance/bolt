@@ -19,11 +19,10 @@
 #include <string>
 
 #include "bolt/exec/AggregateUtil.h"
-#include "bolt/functions/sparksql/aggregates/BitmapUtil.h"
 
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
-exec::AggregateRegistrationResult registerBitmapConstructAggAggregate(
+exec::AggregateRegistrationResult registerBitmapOrAggAggregate(
     const std::string& name,
     bool withCompanionFunctions,
     bool overwrite);

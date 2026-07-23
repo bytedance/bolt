@@ -34,6 +34,7 @@
 #include "bolt/functions/lib/aggregates/CollectSetAggregate.h"
 #include "bolt/functions/sparksql/aggregates/AverageAggregate.h"
 #include "bolt/functions/sparksql/aggregates/BitmapConstructAggAggregate.h"
+#include "bolt/functions/sparksql/aggregates/BitmapOrAggAggregate.h"
 #include "bolt/functions/sparksql/aggregates/BitwiseXorAggregate.h"
 #include "bolt/functions/sparksql/aggregates/BloomFilterAggAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CentralMomentsAggregate.h"
@@ -76,6 +77,8 @@ void registerAggregateFunctions(
   registerMinMaxByAggregates(prefix, withCompanionFunctions, overwrite);
   registerBitmapConstructAggAggregate(
       prefix + "bitmap_construct_agg", withCompanionFunctions, overwrite);
+  registerBitmapOrAggAggregate(
+      prefix + "bitmap_or_agg", withCompanionFunctions, overwrite);
   registerBitDaysOrAggregate(
       prefix + "bit_days_or", withCompanionFunctions, overwrite);
   registerBitwiseXorAggregate(prefix, withCompanionFunctions, overwrite);

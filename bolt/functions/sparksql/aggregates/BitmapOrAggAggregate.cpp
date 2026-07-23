@@ -14,47 +14,56 @@
  * limitations under the License.
  */
 
-#include "bolt/functions/sparksql/aggregates/BitmapConstructAggAggregate.h"
+#include "bolt/functions/sparksql/aggregates/BitmapOrAggAggregate.h"
 
 #include <cstring>
 
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
+#include "bolt/functions/sparksql/aggregates/BitmapUtil.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
 
-// Shared raw-input decoding for single-group and multi-group paths.
+// Shared varbinary-input decoding for single-group and multi-group paths.
 template <typename GetAccumulator>
-FOLLY_ALWAYS_INLINE void processRawInput(
+FOLLY_ALWAYS_INLINE void processBinaryInput(
     const DecodedVector& decoded,
     const SelectivityVector& rows,
     GetAccumulator&& getAccumulator) {
   if (decoded.isConstantMapping()) {
     if (!decoded.isNullAt(0)) {
-      int64_t pos = decoded.valueAt<int64_t>(0);
+      auto sv = decoded.valueAt<StringView>(0);
+      BOLT_CHECK_EQ(
+          sv.size(), kBitmapNumBytes, "Input bitmap must be 4096 bytes");
       rows.applyToSelected(
-          [&](vector_size_t i) { getAccumulator(i)->setPosition(pos); });
+          [&](vector_size_t i) { getAccumulator(i)->mergeWith(sv.data()); });
     }
   } else if (decoded.mayHaveNulls()) {
     rows.applyToSelected([&](vector_size_t row) {
       if (decoded.isNullAt(row)) {
         return;
       }
-      getAccumulator(row)->setPosition(decoded.valueAt<int64_t>(row));
+      auto sv = decoded.valueAt<StringView>(row);
+      BOLT_CHECK_EQ(
+          sv.size(), kBitmapNumBytes, "Input bitmap must be 4096 bytes");
+      getAccumulator(row)->mergeWith(sv.data());
     });
   } else {
     rows.applyToSelected([&](vector_size_t i) {
-      getAccumulator(i)->setPosition(decoded.valueAt<int64_t>(i));
+      auto sv = decoded.valueAt<StringView>(i);
+      BOLT_CHECK_EQ(
+          sv.size(), kBitmapNumBytes, "Input bitmap must be 4096 bytes");
+      getAccumulator(i)->mergeWith(sv.data());
     });
   }
 }
 
-class BitmapConstructAggAggregate : public exec::Aggregate {
+class BitmapOrAggAggregate : public exec::Aggregate {
  public:
-  explicit BitmapConstructAggAggregate(TypePtr resultType)
+  explicit BitmapOrAggAggregate(TypePtr resultType)
       : Aggregate(std::move(resultType)) {}
 
   int32_t accumulatorFixedWidthSize() const override {
@@ -73,7 +82,7 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
     }
   }
 
-  // ---- Raw input (BIGINT bit position) ----
+  // ---- Raw input (VARBINARY = 4096-byte bitmap) ----
 
   void addRawInput(
       char** groups,
@@ -82,7 +91,7 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
       bool /*mayPushdown*/) override {
     BOLT_CHECK_EQ(args.size(), 1);
     DecodedVector decoded(*args[0], rows);
-    processRawInput(decoded, rows, [&](vector_size_t i) {
+    processBinaryInput(decoded, rows, [&](vector_size_t i) {
       return value<BitmapAccumulator>(groups[i]);
     });
   }
@@ -95,12 +104,12 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
     BOLT_CHECK_EQ(args.size(), 1);
     DecodedVector decoded(*args[0], rows);
     auto* accumulator = value<BitmapAccumulator>(group);
-    processRawInput(decoded, rows, [accumulator](vector_size_t /*i*/) {
+    processBinaryInput(decoded, rows, [accumulator](vector_size_t /*i*/) {
       return accumulator;
     });
   }
 
-  // ---- Intermediate results (VARBINARY = serialized 4096-byte bitmap) ----
+  // ---- Intermediate results (same as raw input: VARBINARY → mergeWith) ----
 
   void addIntermediateResults(
       char** groups,
@@ -109,15 +118,8 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
       bool /*mayPushdown*/) override {
     BOLT_CHECK_EQ(args.size(), 1);
     DecodedVector decoded(*args[0], rows);
-
-    rows.applyToSelected([&](vector_size_t row) {
-      if (decoded.isNullAt(row)) {
-        return;
-      }
-      auto sv = decoded.valueAt<StringView>(row);
-      BOLT_CHECK_EQ(
-          sv.size(), kBitmapNumBytes, "Intermediate bitmap must be 4096 bytes");
-      value<BitmapAccumulator>(groups[row])->mergeWith(sv.data());
+    processBinaryInput(decoded, rows, [&](vector_size_t i) {
+      return value<BitmapAccumulator>(groups[i]);
     });
   }
 
@@ -129,15 +131,8 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
     BOLT_CHECK_EQ(args.size(), 1);
     DecodedVector decoded(*args[0], rows);
     auto* accumulator = value<BitmapAccumulator>(group);
-
-    rows.applyToSelected([&](vector_size_t row) {
-      if (decoded.isNullAt(row)) {
-        return;
-      }
-      auto sv = decoded.valueAt<StringView>(row);
-      BOLT_CHECK_EQ(
-          sv.size(), kBitmapNumBytes, "Intermediate bitmap must be 4096 bytes");
-      accumulator->mergeWith(sv.data());
+    processBinaryInput(decoded, rows, [accumulator](vector_size_t /*i*/) {
+      return accumulator;
     });
   }
 
@@ -160,7 +155,6 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
     }
   }
 
-  // Identical to extractValues: accumulator format = final result format.
   void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
       override {
     extractValues(groups, numGroups, result);
@@ -169,13 +163,13 @@ class BitmapConstructAggAggregate : public exec::Aggregate {
 
 } // namespace
 
-exec::AggregateRegistrationResult registerBitmapConstructAggAggregate(
+exec::AggregateRegistrationResult registerBitmapOrAggAggregate(
     const std::string& name,
     bool withCompanionFunctions,
     bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
-          .argumentType("bigint")
+          .argumentType("varbinary")
           .intermediateType("varbinary")
           .returnType("varbinary")
           .build()};
@@ -189,7 +183,7 @@ exec::AggregateRegistrationResult registerBitmapConstructAggAggregate(
           const TypePtr& resultType,
           const core::QueryConfig& /*config*/)
           -> std::unique_ptr<exec::Aggregate> {
-        return std::make_unique<BitmapConstructAggAggregate>(resultType);
+        return std::make_unique<BitmapOrAggAggregate>(resultType);
       },
       withCompanionFunctions,
       overwrite);
