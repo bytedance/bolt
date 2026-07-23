@@ -2961,11 +2961,9 @@ TEST_F(CastExprTest, complexTypeToString) {
         {std::nullopt, std::nullopt, std::nullopt, std::nullopt},
         2,
         ARRAY(UNKNOWN()));
-    BOLT_ASSERT_THROW(
-        testCast(
-            unknownArray,
-            makeFlatVector<StringView>({"[null, null]", "[null, null]"})),
-        "");
+    testCast(
+        unknownArray,
+        makeFlatVector<StringView>({"[null, null]", "[null, null]"}));
 
     // map(bigint, array(bigint))
     auto mapOfArray = createMapOfArraysVector<int64_t, int64_t>(

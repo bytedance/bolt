@@ -1107,14 +1107,16 @@ void doCastArrayToVarchar(
   }
 
   context.ensureWritable(nestedRows, VARCHAR(), resultElements);
-  doCast(
-      *remainingRows,
-      *arrayElements,
-      context,
-      arrayElements->type(),
-      VARCHAR(),
-      resultElements,
-      errorPolicy);
+  if (remainingRows->hasSelections()) {
+    doCast(
+        *remainingRows,
+        *arrayElements,
+        context,
+        arrayElements->type(),
+        VARCHAR(),
+        resultElements,
+        errorPolicy);
+  }
 
   resultElements->addNulls(remainingRows->asRange().bits(), nestedRows);
 
