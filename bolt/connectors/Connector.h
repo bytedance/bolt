@@ -478,7 +478,7 @@ class AsyncThreadCtx {
     explicit Guard(AsyncThreadCtx* ctx, int64_t bytes = 0)
         : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        if (!ctx_->in(bytes_) || !isAsyncPreloadThread()) {
+        if (!isAsyncPreloadThread() || !ctx_->in(bytes_)) { // be in order
           ctx_ = nullptr;
         }
       }
