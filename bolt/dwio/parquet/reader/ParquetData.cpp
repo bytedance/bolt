@@ -374,8 +374,7 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
       metadata.total_compressed_size,
       statis_);
   reader_->setDecodeRepDefPageCount(decodeRepDefPageCount_);
-  reader_->setParquetRepDefPreloadWindowCount(
-      parquetRepDefPreloadWindowCount_);
+  reader_->setParquetRepDefPreloadWindowCount(parquetRepDefPreloadWindowCount_);
   reader_->setParquetRepDefMemoryLimit(parquetRepDefMemoryLimit_);
 
   if (columnChunkMeta.__isset.crypto_metadata) {
