@@ -367,19 +367,37 @@ class RowBasedSpillMergeStream : public MergeStream {
 class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
  public:
   static std::unique_ptr<RowBasedSpillMergeStream> create(
-      std::unique_ptr<RowBasedSpillReadFile> spillFile,
-      RowRowCompare cmp) {
-    auto* spillStream =
-        new RowBasedFileSpillMergeStream(std::move(spillFile), cmp);
+      std::unique_ptr<RowBasedSpillReadFile> spillFile
+#ifdef ENABLE_BOLT_JIT
+      ,
+      bolt::jit::CompiledModuleSP jitModule
+#endif
+  ) {
+    auto* spillStream = new RowBasedFileSpillMergeStream(
+        std::move(spillFile)
+#ifdef ENABLE_BOLT_JIT
+            ,
+        std::move(jitModule)
+#endif
+    );
     spillStream->nextBatch();
     return std::unique_ptr<RowBasedSpillMergeStream>(spillStream);
   }
 
   static std::unique_ptr<RowBasedSpillMergeStream> createWithLength(
-      std::unique_ptr<RowBasedSpillReadFile> spillFile,
-      RowRowCompare cmp) {
-    auto* spillStream =
-        new RowBasedFileSpillMergeStream(std::move(spillFile), cmp);
+      std::unique_ptr<RowBasedSpillReadFile> spillFile
+#ifdef ENABLE_BOLT_JIT
+      ,
+      bolt::jit::CompiledModuleSP jitModule
+#endif
+  ) {
+    auto* spillStream = new RowBasedFileSpillMergeStream(
+        std::move(spillFile)
+#ifdef ENABLE_BOLT_JIT
+            ,
+        std::move(jitModule)
+#endif
+    );
     spillStream->nextBatchWithLengths();
     return std::unique_ptr<RowBasedSpillMergeStream>(spillStream);
   }
@@ -434,9 +452,22 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
 
  private:
   explicit RowBasedFileSpillMergeStream(
-      std::unique_ptr<RowBasedSpillReadFile> spillFile,
-      RowRowCompare cmp)
-      : spillFile_(std::move(spillFile)), cmp_(cmp) {
+      std::unique_ptr<RowBasedSpillReadFile> spillFile
+#ifdef ENABLE_BOLT_JIT
+      ,
+      bolt::jit::CompiledModuleSP jitModule
+#endif
+      )
+      : spillFile_(std::move(spillFile))
+#ifdef ENABLE_BOLT_JIT
+        ,
+        jitModule_(std::move(jitModule)),
+        cmp_(
+            jitModule_ ? reinterpret_cast<RowRowCompare>(
+                             jitModule_->getFuncPtr(jitModule_->getKey()))
+                       : nullptr)
+#endif
+  {
     BOLT_CHECK_NOT_NULL(spillFile_);
   }
 
@@ -792,10 +823,6 @@ class SpillPartition {
   uint64_t size_{0};
   // Total row count from this spilled partition.
   uint64_t rowCount_{0};
-  RowRowCompare rowCmpRowFunc_{nullptr};
-#ifdef ENABLE_BOLT_JIT
-  bolt::jit::CompiledModuleSP jitModuleRow_;
-#endif
 };
 
 using SpillPartitionSet =
