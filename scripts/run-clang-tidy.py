@@ -617,7 +617,7 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude",
-        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
+        default="_build/|tests/|test_package/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
         help="Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
     )
     parser.add_argument(

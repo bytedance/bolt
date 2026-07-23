@@ -50,7 +50,7 @@ index ed8cb79fd..a25132990 100644
      - patch_file: "patches/11.0.0-0001-fix-cmake.patch"
        patch_description: "use cci package"
 diff --git a/recipes/arrow/all/conanfile.py b/recipes/arrow/all/conanfile.py
-index 24a7af89b..27655cdf4 100644
+index 24a7af89b..8fc7a0ccf 100644
 --- a/recipes/arrow/all/conanfile.py
 +++ b/recipes/arrow/all/conanfile.py
 @@ -1,15 +1,16 @@
@@ -449,7 +449,7 @@ index 24a7af89b..27655cdf4 100644
  
          if self.options.get_safe("skyhook", False):
              raise ConanInvalidConfiguration("CCI has no librados recipe (yet)")
-@@ -248,16 +388,13 @@ class ArrowConan(ConanFile):
+@@ -248,17 +388,14 @@ class ArrowConan(ConanFile):
              if self.dependencies["jemalloc"].options.enable_cxx:
                  raise ConanInvalidConfiguration("jemmalloc.enable_cxx of a static jemalloc must be disabled")
  
@@ -471,7 +471,8 @@ index 24a7af89b..27655cdf4 100644
 +            self.tool_requires("protobuf/<host_version>")
  
      def source(self):
-@@ -292,7 +427,7 @@ class ArrowConan(ConanFile):
+         get(self, **self.conan_data["sources"][self.version],
+@@ -292,7 +429,7 @@ class ArrowConan(ConanFile):
          tc.variables["ARROW_NO_DEPRECATED_API"] = not bool(self.options.deprecated)
          tc.variables["ARROW_FLIGHT"] = self.options.with_flight_rpc
          tc.variables["ARROW_FLIGHT_SQL"] = bool(self.options.get_safe("with_flight_sql", False))
@@ -480,7 +481,7 @@ index 24a7af89b..27655cdf4 100644
          tc.variables["ARROW_CSV"] = bool(self.options.with_csv)
          tc.variables["ARROW_CUDA"] = bool(self.options.with_cuda)
          tc.variables["ARROW_JEMALLOC"] = self.options.with_jemalloc
-@@ -313,7 +448,6 @@ class ArrowConan(ConanFile):
+@@ -313,7 +450,6 @@ class ArrowConan(ConanFile):
          tc.variables["GLOG_SOURCE"] = "SYSTEM"
          tc.variables["ARROW_WITH_BACKTRACE"] = bool(self.options.with_backtrace)
          tc.variables["ARROW_WITH_BROTLI"] = bool(self.options.with_brotli)
@@ -488,7 +489,7 @@ index 24a7af89b..27655cdf4 100644
          tc.variables["brotli_SOURCE"] = "SYSTEM"
          if self.options.with_brotli:
              tc.variables["ARROW_BROTLI_USE_SHARED"] = bool(self.dependencies["brotli"].options.shared)
-@@ -338,18 +472,19 @@ class ArrowConan(ConanFile):
+@@ -338,18 +474,19 @@ class ArrowConan(ConanFile):
          tc.variables["ZLIB_SOURCE"] = "SYSTEM"
          tc.variables["xsimd_SOURCE"] = "SYSTEM"
          tc.variables["ARROW_WITH_ZSTD"] = bool(self.options.with_zstd)
@@ -513,7 +514,7 @@ index 24a7af89b..27655cdf4 100644
              tc.variables["THRIFT_VERSION"] = bool(self.dependencies["thrift"].ref.version) # a recent thrift does not require boost
              tc.variables["ARROW_THRIFT_USE_SHARED"] = bool(self.dependencies["thrift"].options.shared)
          tc.variables["ARROW_USE_OPENSSL"] = self.options.with_openssl
-@@ -379,26 +514,47 @@ class ArrowConan(ConanFile):
+@@ -379,26 +516,49 @@ class ArrowConan(ConanFile):
              tc.variables["ARROW_USE_STATIC_CRT"] = is_msvc_static_runtime(self)
          if self.options.with_llvm:
              tc.variables["LLVM_DIR"] = self.dependencies["llvm-core"].package_folder.replace("\\", "/")
@@ -527,6 +528,8 @@ index 24a7af89b..27655cdf4 100644
  
          deps = CMakeDeps(self)
 -        deps.set_property("mimalloc", "cmake_target_name", "mimalloc::mimalloc")
++        if self._requires_rapidjson():
++            deps.set_property("rapidjson", "system_package_version", "1.1.0")
          deps.generate()
  
      def _patch_sources(self):
@@ -564,7 +567,7 @@ index 24a7af89b..27655cdf4 100644
          cmake.install()
  
          rmdir(self, os.path.join(self.package_folder, "lib", "cmake"))
-@@ -411,10 +567,8 @@ class ArrowConan(ConanFile):
+@@ -411,10 +571,8 @@ class ArrowConan(ConanFile):
          self.cpp_info.set_property("cmake_file_name", "Arrow")
  
          suffix = "_static" if is_msvc(self) and not self.options.shared else ""
@@ -575,7 +578,7 @@ index 24a7af89b..27655cdf4 100644
          self.cpp_info.components["libarrow"].libs = [f"arrow{suffix}"]
          if not self.options.shared:
              self.cpp_info.components["libarrow"].defines = ["ARROW_STATIC"]
-@@ -423,7 +577,6 @@ class ArrowConan(ConanFile):
+@@ -423,7 +581,6 @@ class ArrowConan(ConanFile):
  
          if self.options.parquet:
              self.cpp_info.components["libparquet"].set_property("pkg_config_name", "parquet")
@@ -583,7 +586,7 @@ index 24a7af89b..27655cdf4 100644
              self.cpp_info.components["libparquet"].libs = [f"parquet{suffix}"]
              self.cpp_info.components["libparquet"].requires = ["libarrow"]
              if not self.options.shared:
-@@ -431,7 +584,6 @@ class ArrowConan(ConanFile):
+@@ -431,7 +588,6 @@ class ArrowConan(ConanFile):
  
          if self.options.get_safe("substrait"):
              self.cpp_info.components["libarrow_substrait"].set_property("pkg_config_name", "arrow_substrait")
@@ -591,7 +594,7 @@ index 24a7af89b..27655cdf4 100644
              self.cpp_info.components["libarrow_substrait"].libs = [f"arrow_substrait{suffix}"]
              self.cpp_info.components["libarrow_substrait"].requires = ["libparquet", "dataset"]
  
-@@ -439,26 +591,14 @@ class ArrowConan(ConanFile):
+@@ -439,26 +595,14 @@ class ArrowConan(ConanFile):
          del self.options.plasma
  
          if self.options.acero:
@@ -618,7 +621,7 @@ index 24a7af89b..27655cdf4 100644
              self.cpp_info.components["libgandiva"].libs = [f"gandiva{suffix}"]
              self.cpp_info.components["libgandiva"].requires = ["libarrow"]
              if not self.options.shared:
-@@ -466,16 +606,11 @@ class ArrowConan(ConanFile):
+@@ -466,16 +610,11 @@ class ArrowConan(ConanFile):
  
          if self.options.with_flight_rpc:
              self.cpp_info.components["libarrow_flight"].set_property("pkg_config_name", "flight_rpc")
@@ -635,7 +638,7 @@ index 24a7af89b..27655cdf4 100644
              self.cpp_info.components["libarrow_flight_sql"].libs = [f"arrow_flight_sql{suffix}"]
              self.cpp_info.components["libarrow_flight_sql"].requires = ["libarrow", "libarrow_flight"]
  
-@@ -483,8 +618,6 @@ class ArrowConan(ConanFile):
+@@ -483,8 +622,6 @@ class ArrowConan(ConanFile):
              self.cpp_info.components["dataset"].libs = ["arrow_dataset"]
              if self.options.parquet:
                  self.cpp_info.components["dataset"].requires = ["libparquet"]
@@ -644,7 +647,7 @@ index 24a7af89b..27655cdf4 100644
  
          if self.options.cli and (self.options.with_cuda or self.options.with_flight_rpc or self.options.parquet):
              binpath = os.path.join(self.package_folder, "bin")
-@@ -497,8 +630,9 @@ class ArrowConan(ConanFile):
+@@ -497,8 +634,9 @@ class ArrowConan(ConanFile):
                  self.cpp_info.components["libgandiva"].requires.append("boost::boost")
              if self.options.parquet and self.settings.compiler == "gcc" and self.settings.compiler.version < Version("4.9"):
                  self.cpp_info.components["libparquet"].requires.append("boost::boost")
@@ -656,7 +659,7 @@ index 24a7af89b..27655cdf4 100644
          if self.options.with_openssl:
              self.cpp_info.components["libarrow"].requires.append("openssl::openssl")
          if self.options.with_gflags:
-@@ -530,8 +664,7 @@ class ArrowConan(ConanFile):
+@@ -530,8 +668,7 @@ class ArrowConan(ConanFile):
          if self._requires_rapidjson():
              self.cpp_info.components["libarrow"].requires.append("rapidjson::rapidjson")
          if self.options.with_s3:
@@ -666,7 +669,7 @@ index 24a7af89b..27655cdf4 100644
          if self.options.get_safe("with_gcs"):
              self.cpp_info.components["libarrow"].requires.append("google-cloud-cpp::storage")
          if self.options.with_orc:
-@@ -552,7 +685,37 @@ class ArrowConan(ConanFile):
+@@ -552,7 +689,37 @@ class ArrowConan(ConanFile):
              self.cpp_info.components["libarrow"].requires.append("zlib::zlib")
          if self.options.with_zstd:
              self.cpp_info.components["libarrow"].requires.append("zstd::zstd")
@@ -706,10 +709,10 @@ index 24a7af89b..27655cdf4 100644
 +            self.env_info.PATH.append(os.path.join(self.package_folder, "bin"))
 diff --git a/recipes/arrow/all/patches/15.0.0-0001-fix-cmake.patch b/recipes/arrow/all/patches/15.0.0-0001-fix-cmake.patch
 new file mode 100644
-index 000000000..6f24d5ed6
+index 000000000..fdb2c51dd
 --- /dev/null
 +++ b/recipes/arrow/all/patches/15.0.0-0001-fix-cmake.patch
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,26 @@
 +diff --git a/cpp/src/parquet/CMakeLists.txt b/cpp/src/parquet/CMakeLists.txt
 +index 04028431b..fcf8f0f5f 100644
 +--- a/cpp/src/parquet/CMakeLists.txt
@@ -723,6 +726,19 @@ index 000000000..6f24d5ed6
 +   set(PARQUET_SRCS ${PARQUET_SRCS} encryption/encryption_internal.cc
 +                    encryption/openssl_internal.cc)
 +   # Encryption key management
++diff --git a/cpp/cmake_modules/FindSnappyAlt.cmake b/cpp/cmake_modules/FindSnappyAlt.cmake
++index 4d3134006..f5d58b240 100644
++--- a/cpp/cmake_modules/FindSnappyAlt.cmake
+++++ b/cpp/cmake_modules/FindSnappyAlt.cmake
++@@ -42,7 +42,7 @@ if(Snappy_FOUND)
++     else()
++       # The Conan's Snappy package always uses Snappy::snappy and it's
++       # an INTERFACE_LIBRARY.
++-      get_target_property(Snappy Snappy::snappy TYPE)
+++      get_target_property(Snappy_TYPE Snappy::snappy TYPE)
++       if(Snappy_TYPE STREQUAL "STATIC_LIBRARY" OR Snappy_TYPE STREQUAL
++                                                   "INTERFACE_LIBRARY")
++         set(Snappy_TARGET Snappy::snappy)
 diff --git a/recipes/arrow/all/patches/15.0.0-0001-include-assert.patch b/recipes/arrow/all/patches/15.0.0-0001-include-assert.patch
 new file mode 100644
 index 000000000..1a93f8c58

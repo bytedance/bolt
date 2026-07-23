@@ -50,7 +50,6 @@ target_link_libraries(
   bolt_testutils
   GTest::gtest
   GTest::gtest_main
-  ${FILESYSTEM}
 )
 
 if(${BOLT_ENABLE_TORCH})
