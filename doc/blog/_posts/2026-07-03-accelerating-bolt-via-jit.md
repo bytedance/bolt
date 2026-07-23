@@ -151,6 +151,26 @@ This generated IR offers several performance improvements over the generic C++ i
 - **Inlined comparisons:** Function calls for comparing primitive types are eliminated.
 - **Simplified branching:** `if` branch checks for runtime flags (e.g., `nulls_first`, descending order) are resolved at compile time.
 
+## An example for developers
+
+Bolt generates a comparison function specifically for sorting. It passes metadata—such as data types, null ordering, and sort direction—to `RowContainerCodeGenerator`, which returns a `shared_ptr<CompiledModule>`. The `CompiledModule` owns the compiled machine code and provides access to the comparison function. The sorting algorithm then uses this generated function to compare rows.
+
+```cpp
+auto [jitMod, rowRowCmpfn] = data_->codegenCompare(
+    data_->keyTypes(),
+    sortCompareFlags_,
+    bytedance::bolt::jit::CmpType::SORT_LESS,
+    true);
+jitModule_ = std::move(jitMod);
+cmp_ = (RowRowCompare)jitModule_->getFuncPtr(rowRowCmpfn);
+// ...
+if (cmp_) {
+  sorter_.sort(sortedRows_.begin(), sortedRows_.end(), cmp_);
+}
+```
+
+> **Note:** Keep the `shared_ptr<CompiledModule>` alive for as long as the generated function may be called. When the `shared_ptr` is destroyed, the module is moved to the LRU cache and its generated code may later be evicted to reclaim memory. Therefore, retaining only a raw function pointer is unsafe; retain the `shared_ptr<CompiledModule>` as well.
+
 ## Benchmarks
 
 We benchmarked the Sort operator on a development machine, yielding the following results:
