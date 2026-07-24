@@ -66,6 +66,13 @@ target_link_libraries(
   ${FOLLY_BENCHMARK}
 )
 
+add_executable(bolt_dwio_parquet_page_reader_preload_benchmark ParquetPageReaderPreloadBenchmark.cpp)
+target_link_libraries(
+  bolt_dwio_parquet_page_reader_preload_benchmark
+  PRIVATE bolt_testutils
+  ${FOLLY_BENCHMARK}
+)
+
 add_executable(bolt_dwio_parquet_structure_decoder_benchmark NestedStructureDecoderBenchmark.cpp)
 target_link_libraries(
   bolt_dwio_parquet_structure_decoder_benchmark PRIVATE
