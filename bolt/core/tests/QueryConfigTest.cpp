@@ -116,6 +116,16 @@ TEST_F(QueryConfigTest, parquetRepDefStreamingWindowSize) {
   EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 0);
 }
 
+TEST_F(QueryConfigTest, useMonoAlloc) {
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+  ASSERT_TRUE(queryCtx->queryConfig().useMonoAlloc());
+
+  std::unordered_map<std::string, std::string> configData(
+      {{QueryConfig::kUseMonoAlloc, "false"}});
+  queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  ASSERT_FALSE(queryCtx->queryConfig().useMonoAlloc());
+}
+
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {
   auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
   ASSERT_TRUE(queryCtx->queryConfig()

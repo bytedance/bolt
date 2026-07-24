@@ -301,6 +301,7 @@ void* MallocAllocator::allocateBytesWithoutRetry(
   void* result = (alignment > kMinAlignment) ? ::aligned_alloc(alignment, bytes)
                                              : ::malloc(bytes);
   if (FOLLY_UNLIKELY(result == nullptr)) {
+    decrementUsage(bytes);
     BOLT_MEM_LOG(ERROR) << "Failed to allocateBytes " << succinctBytes(bytes)
                         << " with " << alignment << " alignment";
   }

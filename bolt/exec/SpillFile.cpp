@@ -39,6 +39,7 @@
 #include <vector>
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/exec/ContainerRow2RowSerde.h"
 namespace bytedance::bolt::exec {
 namespace {
@@ -624,7 +625,7 @@ uint64_t SpillWriter::writeAndFlush(
 }
 
 uint64_t SpillWriter::write(
-    const std::vector<char*, memory::StlAllocator<char*>>& rows,
+    const std::vector<char*, memory::SlabAllocator<char*>>& rows,
     const RowFormatInfo& info) {
   checkNotFinished();
   static constexpr size_t kBufferSize =

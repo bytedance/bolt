@@ -33,6 +33,7 @@
 #include <boost/sort/pdqsort/pdqsort.hpp>
 #include <folly/container/F14Set.h>
 #include "bolt/common/base/GTestMacros.h"
+#include "bolt/common/memory/MemoryResource.h"
 #include "bolt/dwio/common/DataBuffer.h"
 #include "bolt/dwio/dwrf/common/IntEncoder.h"
 #include "bolt/dwio/dwrf/writer/DictionaryEncodingUtils.h"
@@ -119,17 +120,18 @@ class IntegerDictionaryEncoder : public AbstractIntegerDictionaryEncoder {
   using LookupType =
       typename std::conditional<sizeof(Integer) < 4, int32_t, Integer>::type;
 
+  // The shared resource must outlive this encoder.
   explicit IntegerDictionaryEncoder(
       memory::MemoryPool& dictionaryDataPool,
-      memory::MemoryPool& generalPool,
+      memory::SlabMemoryResource& generalResource,
       bool sort = false,
       std::unique_ptr<IntEncoder<true>> dictDataWriter = nullptr)
-      : generalPool_{generalPool},
+      : generalPool_{*generalResource.pool()},
         keyIndex_{
             17,
             folly::transparent<DictIntegerHash<Integer>>(*this),
             folly::transparent<DictIntegerEquality<Integer>>(*this),
-            memory::StlAllocator<DictIntegerId<Integer>>{generalPool_}},
+            memory::SlabAllocator<DictIntegerId<Integer>>{&generalResource}},
         keys_{dictionaryDataPool},
         counts_{dictionaryDataPool},
         totalCount_{0},
@@ -318,7 +320,7 @@ class IntegerDictionaryEncoder : public AbstractIntegerDictionaryEncoder {
       DictIntegerId<Integer>,
       folly::transparent<DictIntegerHash<Integer>>,
       folly::transparent<DictIntegerEquality<Integer>>,
-      memory::StlAllocator<DictIntegerId<Integer>>>
+      memory::SlabAllocator<DictIntegerId<Integer>>>
       keyIndex_;
   // key index -> key.
   dwio::common::DataBuffer<Integer> keys_;

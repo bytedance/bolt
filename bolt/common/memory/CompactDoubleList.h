@@ -47,7 +47,7 @@ class CompactDoubleList {
 
   CompactDoubleList(const CompactDoubleList& other) = delete;
   CompactDoubleList(CompactDoubleList&& other) = delete;
-  void operator=(const CompactDoubleList& other) = delete;
+  CompactDoubleList& operator=(const CompactDoubleList& other) = default;
   void operator=(CompactDoubleList&& other) = delete;
 
   // Return true if 'this' is the only element.

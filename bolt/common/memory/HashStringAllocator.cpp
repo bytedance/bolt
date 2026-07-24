@@ -330,7 +330,7 @@ StringView HashStringAllocator::contiguousString(
     return view;
   }
   auto header = headerOf(view.data());
-  if (view.size() <= header->size()) {
+  if (view.size() <= header->usableSize()) {
     return view;
   }
 
@@ -598,7 +598,8 @@ inline bool HashStringAllocator::storeStringFast(
           Header(header->size() - spaceTaken);
       freeHeader->setFree();
       header->clearFree();
-      memcpy(freeHeader->begin(), header->begin(), sizeof(CompactDoubleList));
+      *reinterpret_cast<CompactDoubleList*>(freeHeader->begin()) =
+          *reinterpret_cast<CompactDoubleList*>(header->begin());
       freeList.nextMoved(
           reinterpret_cast<CompactDoubleList*>(freeHeader->begin()));
       header->setSize(roundedBytes);
@@ -613,7 +614,7 @@ inline bool HashStringAllocator::storeStringFast(
     }
   }
   simd::memcpy(header->begin(), bytes, numBytes);
-  *reinterpret_cast<StringView*>(destination) =
+  new (destination)
       StringView(reinterpret_cast<char*>(header->begin()), numBytes);
   return true;
 }
@@ -634,7 +635,7 @@ void HashStringAllocator::copyMultipartNoInline(
 
   // The stringView has a pointer to the first byte and the total
   // size. Read with contiguousString().
-  *reinterpret_cast<StringView*>(group + offset) =
+  new (group + offset)
       StringView(reinterpret_cast<char*>(position.position), numBytes);
 }
 

@@ -215,8 +215,7 @@ class IntegerColumnWriter : public BaseColumnWriter {
             EncodingKey{
                 type.id(),
                 context.shareFlatMapDictionaries() ? 0 : sequence},
-            getMemoryPool(MemoryUsageCategory::DICTIONARY),
-            getMemoryPool(MemoryUsageCategory::GENERAL))},
+            getMemoryPool(MemoryUsageCategory::DICTIONARY))},
         rows_{getMemoryPool(MemoryUsageCategory::GENERAL)},
         dictionaryKeySizeThreshold_{
             getConfig(Config::DICTIONARY_NUMERIC_KEY_SIZE_THRESHOLD)},
@@ -917,7 +916,7 @@ class StringColumnWriter : public BaseColumnWriter {
         strideDictionaryDataLength_{nullptr},
         dictEncoder_{
             getMemoryPool(MemoryUsageCategory::DICTIONARY),
-            getMemoryPool(MemoryUsageCategory::GENERAL)},
+            context.slabResource()},
         rows_{getMemoryPool(MemoryUsageCategory::GENERAL)},
         encodingSelector_{
             getMemoryPool(MemoryUsageCategory::GENERAL),

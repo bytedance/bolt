@@ -89,7 +89,8 @@ class EntropyEncodingSelectorTest {
 
   void runTest() const {
     auto pool = memoryManager()->addLeafPool();
-    StringDictionaryEncoder stringDictEncoder{*pool, *pool};
+    memory::SlabMemoryResource dictionaryResource{*pool};
+    StringDictionaryEncoder stringDictEncoder{*pool, dictionaryResource};
     dwio::common::DataBuffer<uint32_t> rows{*pool};
     rows.reserve(size_);
     for (size_t i = 0; i != size_; ++i) {

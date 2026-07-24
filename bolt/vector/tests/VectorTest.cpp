@@ -1075,6 +1075,26 @@ TEST_F(VectorTest, getOrCreateEmpty) {
   EXPECT_EQ(empty->type(), VARCHAR());
 }
 
+TEST_F(VectorTest, compositeRowPointerMemory) {
+  const auto baseline = pool()->usedBytes();
+  {
+    std::vector<std::shared_ptr<CompositeRowVector>> batches;
+    for (int i = 0; i < 100; ++i) {
+      batches.push_back(
+          CompositeRowVector::create(ROW({BIGINT()}), 128, pool(), nullptr));
+    }
+    // Each batch needs 1 KiB of row pointers, not a 1 MiB slab reservation.
+    EXPECT_LT(pool()->usedBytes() - baseline, 1 << 20);
+    auto destination =
+        CompositeRowVector::create(ROW({BIGINT()}), 128, pool(), nullptr);
+    batches.front()->moveto(destination);
+    EXPECT_EQ(destination->rows().size(), 128);
+    destination->resize(256);
+    EXPECT_EQ(destination->rows().size(), 256);
+  }
+  EXPECT_EQ(pool()->usedBytes(), baseline);
+}
+
 TEST_F(VectorTest, row) {
   auto baseRow = createRow(vectorSize_, false);
   testCopy(baseRow, numIterations_);
