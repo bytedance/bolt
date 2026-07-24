@@ -326,6 +326,8 @@ class MemoryAllocator : public std::enable_shared_from_this<MemoryAllocator> {
   virtual void*
   reallocateBytes(void* p, uint64_t bytes, uint16_t alignment) = 0;
 
+  virtual bool incrementUsageBytes(uint64_t size) noexcept = 0;
+
   virtual void decrementUsageBytes(uint64_t size) noexcept = 0;
 
   /// Frees contiguous memory allocated by allocateBytes, allocateZeroFilled,

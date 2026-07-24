@@ -34,8 +34,9 @@ void ContainerRow2RowSerde::serialize(
       const StringView& sv =
           *reinterpret_cast<StringView*>(row + rowColumn.offset());
       if (!sv.isInline()) {
-        if (reinterpret_cast<const HashStringAllocator::Header*>(sv.data())[-1]
-                .size() >= sv.size()) {
+        if (info.stringViewsAreContiguous ||
+            reinterpret_cast<const HashStringAllocator::Header*>(sv.data())[-1]
+                    .size() >= sv.size()) {
           simd::memcpy(current, sv.data(), sv.size());
         } else {
           auto stream = HashStringAllocator::prepareRead(

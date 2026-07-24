@@ -122,7 +122,7 @@ std::function<bool(llvm::Module&)> makeBasicIRGenerator(
     auto* func = llvm::Function::Create(
         funcType, llvm::Function::ExternalLinkage, funcName, llvmModule);
 
-    auto args = func->args().begin();
+    auto* args = func->args().begin();
     args->setName("a");
     (++args)->setName("b");
 

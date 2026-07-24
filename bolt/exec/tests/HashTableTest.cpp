@@ -858,6 +858,29 @@ TEST_P(HashTableTest, regularHashingTableSize) {
   }
 }
 
+TEST_P(HashTableTest, joinMonotonicStringAllocation) {
+  auto makeTable = [&](bool hybridMode, bool useMonoAlloc) {
+    std::vector<std::unique_ptr<VectorHasher>> keyHashers;
+    keyHashers.emplace_back(std::make_unique<VectorHasher>(VARCHAR(), 0));
+    return HashTable<true>::createForJoin(
+        std::move(keyHashers),
+        std::vector<TypePtr>{VARCHAR()},
+        true,
+        false,
+        BaseHashTable::HashMode::kHash,
+        1'000,
+        pool(),
+        GetParam().jitRowEqVectors,
+        hybridMode,
+        useMonoAlloc);
+  };
+
+  EXPECT_TRUE(makeTable(false, true)->rows()->useMonotonicStringAllocation());
+  EXPECT_TRUE(makeTable(true, true)->rows()->useMonotonicStringAllocation());
+  EXPECT_FALSE(makeTable(false, false)->rows()->useMonotonicStringAllocation());
+  EXPECT_FALSE(makeTable(true, false)->rows()->useMonotonicStringAllocation());
+}
+
 TEST_P(HashTableTest, groupBySpill) {
   auto type = ROW({"k1"}, {BIGINT()});
   testGroupBySpill(5'000'000, type, 1, 1000, 1000);

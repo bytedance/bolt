@@ -128,6 +128,8 @@ class MmapAllocator : public MemoryAllocator {
 
   MachinePageCount unmap(MachinePageCount targetPages) override;
 
+  bool incrementUsageBytes(uint64_t bytes) noexcept override;
+
   void decrementUsageBytes(uint64_t bytes) noexcept override;
 
   void freeBytes(void* p, uint64_t bytes) noexcept override;

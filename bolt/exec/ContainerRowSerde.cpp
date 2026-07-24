@@ -30,7 +30,6 @@
 
 #include "bolt/exec/ContainerRowSerde.h"
 
-#include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -145,9 +144,9 @@ void serializeMany(
       auto* constantVector = vector.asUnchecked<ConstantVector<T>>();
       if (!constantVector->isNullAt(0)) {
         if constexpr (std::is_same_v<T, __int128>) {
-          HashStringAllocator hashStringAllocator(vector.pool());
-          AlignedStlAllocator<T, sizeof(T)> allocator(&hashStringAllocator);
-          std::vector<T, AlignedStlAllocator<T, sizeof(T)>> values(
+          memory::SlabMemoryResource resource(vector.pool());
+          memory::SlabAllocator<T, sizeof(T)> allocator(&resource);
+          std::vector<T, memory::SlabAllocator<T, sizeof(T)>> values(
               size, constantVector->valueAt(0), allocator);
           stream.append<T>(values);
         } else {

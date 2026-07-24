@@ -1708,6 +1708,80 @@ TEST_F(RowContainerTest, partialWriteComplexTypedRow) {
   rowContainer->eraseRows(folly::Range<char**>(&row, 1));
 }
 
+TEST_F(RowContainerTest, ownsAndResetsMonotonicMemoryResource) {
+  RowContainer::RowContainerParam params;
+  params.useMonotonicStringAllocation = true;
+  auto makeContainer = [&]() {
+    return std::make_unique<RowContainer>(
+        std::vector<TypePtr>{VARCHAR()},
+        false,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool_.get(),
+        params);
+  };
+  auto first = makeContainer();
+  auto second = makeContainer();
+
+  ASSERT_NE(nullptr, first->monotonicMemoryResource());
+  ASSERT_NE(nullptr, second->monotonicMemoryResource());
+  EXPECT_NE(
+      first->monotonicMemoryResource(), second->monotonicMemoryResource());
+
+  auto values = makeFlatVector<std::string>({"a non-inline string"});
+  DecodedVector decoded(*values);
+  auto* row = first->newRow();
+  first->store(decoded, 0, row, 0);
+  EXPECT_GT(first->monotonicMemoryResource()->usedBytes(), 0);
+
+  first->clear();
+  EXPECT_EQ(first->monotonicMemoryResource()->usedBytes(), 0);
+
+  row = first->newRow();
+  first->store(decoded, 0, row, 0);
+  EXPECT_GT(first->monotonicMemoryResource()->usedBytes(), 0);
+}
+
+TEST_F(RowContainerTest, extractStringsByAllocationMode) {
+  auto values = makeFlatVector<std::string>(
+      {"", "inline", std::string(HashStringAllocator::kMaxAlloc + 1, 'a')});
+  DecodedVector decoded(*values);
+
+  for (const bool useMonotonicStringAllocation : {false, true}) {
+    for (const bool nullableKeys : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "useMonotonicStringAllocation: {}, nullableKeys: {}",
+          useMonotonicStringAllocation,
+          nullableKeys));
+
+      RowContainer::RowContainerParam params;
+      params.useMonotonicStringAllocation = useMonotonicStringAllocation;
+      RowContainer container(
+          {VARCHAR()},
+          nullableKeys,
+          {},
+          {},
+          false,
+          false,
+          false,
+          false,
+          false,
+          pool_.get(),
+          params);
+
+      auto rows = store(container, decoded, values->size());
+      auto result = BaseVector::create(VARCHAR(), values->size(), pool_.get());
+      container.extractColumn(rows.data(), rows.size(), 0, result);
+      assertEqualVectors(values, result);
+    }
+  }
+}
+
 TEST_F(RowContainerTest, extractSerializedRow) {
   VectorFuzzer fuzzer(
       {
