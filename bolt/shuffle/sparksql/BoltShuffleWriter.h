@@ -586,12 +586,11 @@ class BoltShuffleWriter : public ShuffleWriter {
     metrics_.combinedVectorNumber = combinedVectorNumber_;
     metrics_.combineVectorTimes = combineVectorTimes_;
     metrics_.combineVectorCost = combineVectorCost_;
-    metrics_.shuffleWriteTime = stopTime_ + totalSplitTime_;
-
-    metrics_.splitTime = totalSplitTime_ -
-        (metrics_.totalEvictTime + metrics_.totalWriteTime +
-         metrics_.totalCompressTime + metrics_.flattenTime +
-         metrics_.computePidTime + metrics_.convertTime);
+    // splitTime is now measured directly around doSplit() instead of being
+    // derived by subtracting the other sub-phases from the whole split().
+    // shuffleWriteTime is measured at the operator level (SparkShuffleWriter),
+    // so it also covers init/reclaim, and is populated there.
+    metrics_.splitTime = splitTime_;
 
     metrics_.dataSize = std::accumulate(
         metrics_.rawPartitionLengths.begin(),
@@ -826,8 +825,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   // detailed time
   uint64_t flattenTime_{0};
   uint64_t computePidTime_{0};
-  uint64_t totalSplitTime_{0};
-  uint64_t stopTime_{0};
+  // Time spent inside doSplit() (buildPartition2Row + preAlloc + splitRowVector).
+  uint64_t splitTime_{0};
   uint64_t shuffleCheckTimeNanos_{0};
   uint64_t shuffleCheckCount_{0};
   std::mt19937 shuffleCheckRandomEngine_{std::random_device{}()};
