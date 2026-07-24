@@ -185,6 +185,13 @@ int64_t ExecutionMemoryPool::acquireMemory(
         std::min(numBytes, std::max<int64_t>(0L, maxMemoryPerTask - curMem));
     int64_t toGrant = std::min(maxToGrant, freeMemory);
 
+    if (isAsyncPreloadThread() && toGrant < numBytes) {
+      // if async threads unreserve non-enough memory, there may be a dead lock
+      // with the growing memory process of the main thread. so we directly
+      // return 0 to avoid calling unreserve(bytes).
+      return 0;
+    }
+
     if (toGrant < numBytes && curMem + toGrant < minMemoryPerTask) {
       LOG(INFO) << "TID " << taskAttemptId
                 << " waiting for at least 1/2N to be free. "
