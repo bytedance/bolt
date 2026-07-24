@@ -825,7 +825,8 @@ class BoltShuffleWriter : public ShuffleWriter {
   // detailed time
   uint64_t flattenTime_{0};
   uint64_t computePidTime_{0};
-  // Time spent inside doSplit() (buildPartition2Row + preAlloc + splitRowVector).
+  // Time spent inside doSplit() (buildPartition2Row + preAlloc +
+  // splitRowVector).
   uint64_t splitTime_{0};
   uint64_t shuffleCheckTimeNanos_{0};
   uint64_t shuffleCheckCount_{0};

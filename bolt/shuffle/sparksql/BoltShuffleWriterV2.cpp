@@ -370,8 +370,8 @@ arrow::Status BoltShuffleWriterV2::doSplit(
       RETURN_NOT_OK(updateInputHasNull(rv));
       START_TIMING(cpuWallTimingList_[CpuWallTimingIteratePartitions]);
       setSplitState(SplitState::kPreAlloc);
-      // Calculate buffer size based on available offheap memory, history average
-      // bytes per row and options_.buffer_size.
+      // Calculate buffer size based on available offheap memory, history
+      // average bytes per row and options_.buffer_size.
       RETURN_NOT_OK(
           preAllocPartitionBuffers(partition2RowCount_, partitionUsed_));
       END_TIMING();
