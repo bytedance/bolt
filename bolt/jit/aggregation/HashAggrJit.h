@@ -13,6 +13,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 
+#include "bolt/common/base/Exceptions.h"
 #include "bolt/jit/CompiledModule.h"
 #include "bolt/jit/aggregation/HashAggrJitTypes.h"
 #include "bolt/type/Type.h"
@@ -295,6 +296,7 @@ class HashAggrJitChunk {
       char** inputRuntimes,
       bool inputsMayHaveNulls) const {
     if (!inputsMayHaveNulls && addDenseNoNull_ != nullptr) {
+      checkNoRuntimeNulls(inputRuntimes);
       addDenseNoNull_(groups, numRows, inputRuntimes);
       return;
     }
@@ -316,6 +318,25 @@ class HashAggrJitChunk {
   }
 
  private:
+  void checkNoRuntimeNulls(char** inputRuntimes) const {
+    for (auto i = 0; i < slots_.size(); ++i) {
+      const auto& slot = slots_[i];
+      if (slot.desc.isCountStar()) {
+        continue;
+      }
+      auto* input =
+          reinterpret_cast<const HashAggrJitInputRuntime*>(inputRuntimes[i]);
+      const auto* nulls = slot.desc.inputShape() == HashAggrJitRuntimeShape::Row
+          ? input->row.nulls
+          : input->scalar.nulls;
+      BOLT_CHECK(
+          nulls == nullptr,
+          "HashAggrJit no-null add path received runtime nulls: slot={}, chunk={}",
+          slot.getDescription(),
+          getDescription());
+    }
+  }
+
   std::vector<HashAggrJitSlot> slots_;
   std::string functionName_;
   CompiledModuleSP module_;
