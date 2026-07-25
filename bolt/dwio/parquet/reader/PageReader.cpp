@@ -1642,7 +1642,7 @@ bool PageReader::rowsForPage(
     rows = folly::Range<const vector_size_t*>(
         rowsCopy_->data(), rowsCopy_->size());
   }
-  reader.prepareNulls(rows, nulls != nullptr, currentVisitorRow_);
+  reader.prepareOutputNulls(rows, nulls != nullptr, currentVisitorRow_);
   currentVisitorRow_ += numToVisit;
   firstUnvisited_ = visitBase_ + visitorRows_[currentVisitorRow_ - 1] + 1;
   return true;

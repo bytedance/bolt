@@ -35,6 +35,8 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <folly/init/Init.h>
+#include <limits>
+#include <utility>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::dwio::common;
@@ -98,6 +100,59 @@ class E2EFilterTest : public E2EFilterTestBase, public test::VectorTestBase {
       const dwio::common::ReaderOptions& opts,
       std::unique_ptr<dwio::common::BufferedInput> input) override {
     return std::make_unique<ParquetReader>(std::move(input), opts);
+  }
+
+  std::pair<VectorPtr, uint64_t> readWithSpec(
+      const RowVectorPtr& data,
+      const std::shared_ptr<common::ScanSpec>& spec,
+      uint64_t size,
+      const RowTypePtr& outputType = nullptr) {
+    writeToMemory(data->type(), {data}, false);
+
+    dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    dwio::common::RowReaderOptions rowReaderOpts;
+    rowReaderOpts.setScanSpec(spec);
+    std::string_view serializedData(sinkPtr_->data(), sinkPtr_->size());
+    auto input = std::make_unique<BufferedInput>(
+        std::make_shared<InMemoryReadFile>(serializedData),
+        readerOpts.getMemoryPool());
+    auto reader = makeReader(readerOpts, std::move(input));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+
+    auto result = BaseVector::create(
+        outputType ? outputType : data->type(), 0, leafPool_.get());
+    auto rowsScanned = rowReader->next(size, result);
+    return {result, rowsScanned};
+  }
+
+  std::unique_ptr<RowReader> makeRowReader(
+      const RowVectorPtr& data,
+      const std::shared_ptr<common::ScanSpec>& spec) {
+    writeToMemory(data->type(), {data}, false);
+
+    dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    dwio::common::RowReaderOptions rowReaderOpts;
+    rowReaderOpts.setScanSpec(spec);
+    std::string_view serializedData(sinkPtr_->data(), sinkPtr_->size());
+    auto input = std::make_unique<BufferedInput>(
+        std::make_shared<InMemoryReadFile>(serializedData),
+        readerOpts.getMemoryPool());
+    auto reader = makeReader(readerOpts, std::move(input));
+    return reader->createRowReader(rowReaderOpts);
+  }
+
+  void assertNoNullBuffer(const VectorPtr& vector) {
+    ASSERT_FALSE(vector->isLazy());
+    EXPECT_EQ(nullptr, vector->nulls().get());
+    EXPECT_EQ(nullptr, vector->rawNulls());
+    EXPECT_FALSE(vector->mayHaveNulls());
+  }
+
+  void assertHasNullBuffer(const VectorPtr& vector) {
+    ASSERT_FALSE(vector->isLazy());
+    EXPECT_NE(nullptr, vector->nulls().get());
+    EXPECT_NE(nullptr, vector->rawNulls());
+    EXPECT_TRUE(vector->mayHaveNulls());
   }
 
   std::unique_ptr<bytedance::bolt::parquet::Writer> writer_;
@@ -652,6 +707,467 @@ TEST_F(E2EFilterTest, largeMetadata) {
       std::make_shared<InMemoryReadFile>(data), readerOpts.getMemoryPool());
   auto reader = makeReader(readerOpts, std::move(input));
   EXPECT_EQ(1000, reader->numberOfRows());
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsAfterCompaction) {
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeNullableFlatVector<int64_t>(
+           {10, std::nullopt, 30, 40, std::nullopt, 60}),
+       makeFlatVector<int64_t>({5, 7, 12, 3, 8, 20})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1)->setFilter(std::make_unique<common::BigintRange>(
+      std::numeric_limits<int64_t>::min(), 9, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 6);
+  EXPECT_EQ(6, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(2, row->size());
+  test::assertEqualVectors(
+      makeRowVector(
+          {"a", "b"},
+          {makeFlatVector<int64_t>({10, 40}), makeFlatVector<int64_t>({5, 3})}),
+      result);
+
+  assertNoNullBuffer(row->childAt(0));
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputOnlyElidesProvenNonNullColumn) {
+  auto data = makeRowVector(
+      {"a", "b", "guard"},
+      {makeNullableFlatVector<int64_t>(
+           {10, std::nullopt, 30, 40, 50, std::nullopt}),
+       makeNullableFlatVector<int64_t>(
+           {std::nullopt, 21, 22, std::nullopt, 24, 25}),
+       makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1);
+  spec->addField("guard", 2)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 4, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 6);
+  EXPECT_EQ(6, rowsScanned);
+  test::assertEqualVectors(
+      makeRowVector(
+          {"a", "b", "guard"},
+          {makeFlatVector<int64_t>({10, 30, 40, 50}),
+           makeNullableFlatVector<int64_t>(
+               {std::nullopt, 22, std::nullopt, 24}),
+           makeFlatVector<int64_t>({0, 2, 3, 4})}),
+      result);
+
+  auto row = result->asUnchecked<RowVector>();
+  assertNoNullBuffer(row->childAt(0));
+  assertHasNullBuffer(row->childAt(1));
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsAfterDictionaryFallback) {
+  options_.dictionaryPageSizeLimit = 128;
+
+  constexpr vector_size_t kSize = 2048;
+  auto data = makeRowVector(
+      {"s", "guard"},
+      {makeFlatVector<std::string>(
+           kSize,
+           [](auto row) { return fmt::format("value_{}", row); },
+           [](auto row) { return row % 7 == 0; }),
+       makeFlatVector<int64_t>(kSize, [](auto row) { return row % 13; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("s", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 1)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 5, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, kSize);
+  EXPECT_EQ(kSize, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  auto s = row->childAt(0)->asUnchecked<FlatVector<StringView>>();
+  auto guard = row->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+  assertNoNullBuffer(row->childAt(0));
+  for (auto i = 0; i < row->size(); ++i) {
+    auto sourceRow = std::stoll(s->valueAt(i).getString().substr(6));
+    EXPECT_NE(0, sourceRow % 7);
+    EXPECT_LT(guard->valueAt(i), 6);
+  }
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHandlesAllRowsFiltered) {
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeNullableFlatVector<int64_t>({std::nullopt, std::nullopt, 3}),
+       makeFlatVector<int64_t>({10, 11, 12})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1)->setFilter(
+      std::make_unique<common::BigintRange>(0, 1, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 3);
+  (void)rowsScanned;
+  EXPECT_EQ(0, result->size());
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsWithResultReuse) {
+  constexpr vector_size_t kSize = 32;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeFlatVector<int64_t>(
+           kSize,
+           [](auto row) { return row; },
+           [](auto row) { return row % 4 == 0; }),
+       makeFlatVector<int64_t>(kSize, [](auto row) { return row % 3; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1)->setFilter(
+      std::make_unique<common::BigintRange>(0, 1, false));
+
+  auto rowReader = makeRowReader(data, spec);
+  auto result = BaseVector::create(data->type(), 0, leafPool_.get());
+  uint64_t totalScanned = 0;
+  for (;;) {
+    auto scanned = rowReader->next(7, result);
+    if (!scanned) {
+      break;
+    }
+    totalScanned += scanned;
+    if (!result->size()) {
+      continue;
+    }
+    auto row = result->asUnchecked<RowVector>();
+    assertNoNullBuffer(row->childAt(0));
+    auto a = row->childAt(0)->asUnchecked<FlatVector<int64_t>>();
+    auto b = row->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+    for (auto i = 0; i < row->size(); ++i) {
+      EXPECT_NE(0, a->valueAt(i) % 4);
+      EXPECT_LT(b->valueAt(i), 2);
+    }
+  }
+  EXPECT_EQ(kSize, totalScanned);
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHandlesEmptyBatchReuse) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"a", "guard"},
+      {makeFlatVector<int64_t>(
+           kSize,
+           [](auto row) { return row; },
+           [](auto row) { return row == 1 || row == 9; }),
+       makeFlatVector<int64_t>(
+           kSize, [](auto row) { return row >= 4 && row < 8 ? 9 : 0; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 1)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 0, false));
+
+  auto rowReader = makeRowReader(data, spec);
+  auto result = BaseVector::create(data->type(), 0, leafPool_.get());
+
+  ASSERT_EQ(4, rowReader->next(4, result));
+  test::assertEqualVectors(
+      makeRowVector(
+          {"a", "guard"},
+          {makeFlatVector<int64_t>({0, 2, 3}),
+           makeFlatVector<int64_t>({0, 0, 0})}),
+      result);
+  assertNoNullBuffer(result->asUnchecked<RowVector>()->childAt(0));
+
+  ASSERT_EQ(4, rowReader->next(4, result));
+  EXPECT_EQ(0, result->size());
+
+  ASSERT_EQ(4, rowReader->next(4, result));
+  test::assertEqualVectors(
+      makeRowVector(
+          {"a", "guard"},
+          {makeFlatVector<int64_t>({8, 10, 11}),
+           makeFlatVector<int64_t>({0, 0, 0})}),
+      result);
+  assertNoNullBuffer(result->asUnchecked<RowVector>()->childAt(0));
+  ASSERT_FALSE(rowReader->next(4, result));
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsAcrossPages) {
+  options_.enableDictionary = false;
+  options_.dataPageSize = 128;
+
+  constexpr vector_size_t kSize = 4096;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeFlatVector<int64_t>(
+           kSize,
+           [](auto row) { return row; },
+           [](auto row) { return row % 5 == 0; }),
+       makeFlatVector<int64_t>(kSize, [](auto row) { return row % 11; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1)->setFilter(
+      std::make_unique<common::BigintRange>(0, 4, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, kSize);
+  EXPECT_EQ(kSize, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  auto a = row->childAt(0)->asUnchecked<FlatVector<int64_t>>();
+  auto b = row->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+  ASSERT_EQ(a->size(), b->size());
+  assertNoNullBuffer(row->childAt(0));
+  for (auto i = 0; i < row->size(); ++i) {
+    EXPECT_NE(0, a->valueAt(i) % 5);
+    EXPECT_LT(b->valueAt(i), 5);
+  }
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsAcrossRowGroups) {
+  rowsInRowGroup_ = 4;
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeFlatVector<int64_t>(
+           kSize,
+           [](auto row) { return row; },
+           [](auto row) { return row < 4 || row == 8; }),
+       makeFlatVector<int64_t>(kSize, [](auto row) { return row % 5; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("b", 1)->setFilter(
+      std::make_unique<common::BigintRange>(0, 3, false));
+
+  auto rowReader = makeRowReader(data, spec);
+  auto result = BaseVector::create(data->type(), 0, leafPool_.get());
+  std::vector<int64_t> values;
+  for (;;) {
+    auto scanned = rowReader->next(4, result);
+    if (!scanned) {
+      break;
+    }
+    if (!result->size()) {
+      continue;
+    }
+    auto row = result->asUnchecked<RowVector>();
+    auto a = row->childAt(0)->asUnchecked<FlatVector<int64_t>>();
+    auto b = row->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+    assertNoNullBuffer(row->childAt(0));
+    for (auto i = 0; i < row->size(); ++i) {
+      EXPECT_FALSE(a->valueAt(i) < 4 || a->valueAt(i) == 8);
+      EXPECT_LT(b->valueAt(i), 4);
+      values.push_back(a->valueAt(i));
+    }
+  }
+  EXPECT_EQ((std::vector<int64_t>{5, 6, 7, 10, 11}), values);
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsForScalarTypes) {
+  auto data = makeRowVector(
+      {"s", "vb", "d", "guard"},
+      {makeNullableFlatVector<std::string>(
+           {"apple", std::nullopt, "banana", "cherry", std::nullopt, "date"}),
+       makeNullableFlatVector<std::string>(
+           {"aa", "bb", std::nullopt, "cc", "dd", std::nullopt}, VARBINARY()),
+       makeFlatVector<double>(
+           6,
+           [](auto row) { return row + 0.5; },
+           [](auto row) { return row == 4; }),
+       makeFlatVector<int64_t>({1, 2, 3, 4, 5, 6})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("s", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("vb", 1)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("d", 2)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 3)
+      ->setFilter(std::make_unique<common::BigintRange>(2, 4, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 6);
+  EXPECT_EQ(6, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(1, row->size());
+  test::assertEqualVectors(
+      makeRowVector(
+          {"s", "vb", "d", "guard"},
+          {makeFlatVector<std::string>({"cherry"}),
+           makeFlatVector<std::string>({"cc"}, VARBINARY()),
+           makeFlatVector<double>({3.5}),
+           makeFlatVector<int64_t>({4})}),
+      result);
+  assertNoNullBuffer(row->childAt(0));
+  assertNoNullBuffer(row->childAt(1));
+  assertNoNullBuffer(row->childAt(2));
+}
+
+TEST_F(E2EFilterTest, isNotNullOutputHasNoNullsForAdditionalScalarTypes) {
+  auto data = makeRowVector(
+      {"flag", "ts", "dec", "guard"},
+      {makeFlatVector<bool>(
+           6,
+           [](auto row) { return row % 2 == 0; },
+           [](auto row) { return row == 1; }),
+       makeFlatVector<Timestamp>(
+           6,
+           [](auto row) { return Timestamp(row, row * 1000); },
+           [](auto row) { return row == 2; }),
+       makeNullableFlatVector<int64_t>(
+           {100, std::nullopt, 300, 400, std::nullopt, 600}, DECIMAL(10, 2)),
+       makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("flag", 0)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("ts", 1)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("dec", 2)->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 3)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 4, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 6);
+  EXPECT_EQ(6, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(2, row->size());
+  test::assertEqualVectors(
+      makeRowVector(
+          {"flag", "ts", "dec", "guard"},
+          {makeFlatVector<bool>({true, false}),
+           makeFlatVector<Timestamp>({Timestamp(0, 0), Timestamp(3, 0)}),
+           makeFlatVector<int64_t>({100, 400}, DECIMAL(10, 2)),
+           makeFlatVector<int64_t>({0, 3})}),
+      result);
+  assertNoNullBuffer(row->childAt(0));
+  assertNoNullBuffer(row->childAt(1));
+  assertNoNullBuffer(row->childAt(2));
+}
+
+TEST_F(E2EFilterTest, complexIsNotNullOutputKeepsCorrectNulls) {
+  auto data = makeRowVector(
+      {"arr", "guard"},
+      {makeArrayVector<int64_t>(
+           5,
+           [](auto) { return 2; },
+           [](auto row, auto index) { return row * 10 + index; },
+           [](auto row) { return row == 1 || row == 4; }),
+       makeFlatVector<int64_t>({0, 1, 2, 3, 4})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addFieldRecursively("arr", *ARRAY(BIGINT()), 0)
+      ->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 1)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 3, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 5);
+  EXPECT_EQ(5, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(3, row->size());
+  auto arr = row->childAt(0)->asUnchecked<ArrayVector>();
+  ASSERT_FALSE(arr->isNullAt(0));
+  ASSERT_FALSE(arr->isNullAt(1));
+  ASSERT_FALSE(arr->isNullAt(2));
+  EXPECT_EQ(2, arr->sizeAt(0));
+  EXPECT_EQ(2, arr->sizeAt(1));
+  EXPECT_EQ(2, arr->sizeAt(2));
+  test::assertEqualVectors(
+      makeRowVector(
+          {"arr", "guard"},
+          {makeArrayVector<int64_t>({{0, 1}, {20, 21}, {30, 31}}),
+           makeFlatVector<int64_t>({0, 2, 3})}),
+      result);
+}
+
+TEST_F(E2EFilterTest, mapIsNotNullOutputKeepsCorrectNulls) {
+  auto data = makeRowVector(
+      {"m", "guard"},
+      {makeNullableMapVector<int64_t, int64_t>(
+           {std::vector<std::pair<int64_t, std::optional<int64_t>>>{
+                {1, 10}, {2, std::nullopt}},
+            std::nullopt,
+            std::vector<std::pair<int64_t, std::optional<int64_t>>>{
+                {4, 40}, {5, 50}},
+            std::vector<std::pair<int64_t, std::optional<int64_t>>>{{6, 60}},
+            std::nullopt},
+           MAP(BIGINT(), BIGINT())),
+       makeFlatVector<int64_t>({0, 1, 2, 3, 4})});
+
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addFieldRecursively("m", *MAP(BIGINT(), BIGINT()), 0)
+      ->setFilter(std::make_unique<common::IsNotNull>());
+  spec->addField("guard", 1)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 3, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 5);
+  EXPECT_EQ(5, rowsScanned);
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(3, row->size());
+  auto map = row->childAt(0)->asUnchecked<MapVector>();
+  ASSERT_FALSE(map->isNullAt(0));
+  ASSERT_FALSE(map->isNullAt(1));
+  ASSERT_FALSE(map->isNullAt(2));
+  EXPECT_EQ(2, map->sizeAt(0));
+  EXPECT_EQ(2, map->sizeAt(1));
+  EXPECT_EQ(1, map->sizeAt(2));
+}
+
+TEST_F(E2EFilterTest, siblingFilterPreservesNullableOutputAcrossPages) {
+  options_.enableDictionary = false;
+  options_.dataPageSize = 128;
+
+  constexpr vector_size_t kSize = 4096;
+  auto data = makeRowVector(
+      {"a", "guard"},
+      {makeFlatVector<int64_t>(
+           kSize,
+           [](auto row) { return row; },
+           [](auto row) { return row < 64; }),
+       makeFlatVector<int64_t>(kSize, [](auto row) { return row % 5; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0);
+  spec->addField("guard", 1)
+      ->setFilter(std::make_unique<common::BigintRange>(0, 3, false));
+
+  std::vector<std::optional<int64_t>> expectedA;
+  std::vector<int64_t> expectedGuard;
+  for (auto row = 0; row < kSize; ++row) {
+    const auto guard = row % 5;
+    if (guard > 3) {
+      continue;
+    }
+    expectedA.push_back(row < 64 ? std::nullopt : std::make_optional(row));
+    expectedGuard.push_back(guard);
+  }
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, kSize);
+  EXPECT_EQ(kSize, rowsScanned);
+  test::assertEqualVectors(
+      makeRowVector(
+          {"a", "guard"},
+          {makeNullableFlatVector<int64_t>(expectedA),
+           makeFlatVector<int64_t>(expectedGuard)}),
+      result);
+
+  auto row = result->asUnchecked<RowVector>();
+  assertHasNullBuffer(row->childAt(0));
+}
+
+TEST_F(E2EFilterTest, isNotNullFilterOnlyFiltersRows) {
+  auto data = makeRowVector(
+      {"a", "b"},
+      {makeNullableFlatVector<int64_t>({1, std::nullopt, 3, 4}),
+       makeFlatVector<int64_t>({10, 20, 30, 40})});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  auto* aSpec = spec->getOrCreateChild("a");
+  aSpec->setFilter(std::make_unique<common::IsNotNull>());
+  aSpec->setProjectOut(false);
+  spec->addField("b", 0);
+
+  auto [result, rowsScanned] =
+      readWithSpec(data, spec, 4, ROW({"b"}, {BIGINT()}));
+  EXPECT_EQ(4, rowsScanned);
+  test::assertEqualVectors(
+      makeRowVector({"b"}, {makeFlatVector<int64_t>({10, 30, 40})}), result);
+}
+
+TEST_F(E2EFilterTest, nonIsNotNullFilterDoesNotUseOutputElision) {
+  auto data = makeRowVector(
+      {"a"},
+      {makeFlatVector<int64_t>(
+          6, [](auto row) { return row; }, [](auto row) { return row == 4; })});
+  auto spec = std::make_shared<common::ScanSpec>("<root>");
+  spec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(0, 3, false));
+
+  auto [result, rowsScanned] = readWithSpec(data, spec, 6);
+  EXPECT_EQ(6, rowsScanned);
+  test::assertEqualVectors(
+      makeRowVector({"a"}, {makeFlatVector<int64_t>({0, 1, 2, 3})}), result);
 }
 
 TEST_F(E2EFilterTest, DISABLED_date) {

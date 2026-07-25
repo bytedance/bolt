@@ -119,6 +119,9 @@ void SelectiveColumnReader::prepareNulls(
     int32_t extraRows) {
   if (!hasNulls) {
     anyNulls_ = false;
+    resultNulls_ = nullptr;
+    rawResultNulls_ = nullptr;
+    returnReaderNulls_ = false;
     return;
   }
   auto numRows = rows.size() + extraRows;
@@ -151,6 +154,32 @@ void SelectiveColumnReader::prepareNulls(
       numRows + (simd::kPadding * 8), &memoryPool_);
   rawResultNulls_ = resultNulls_->asMutable<uint64_t>();
   simd::memset(rawResultNulls_, bits::kNotNullByte, resultNulls_->capacity());
+}
+
+void SelectiveColumnReader::prepareOutputNulls(
+    const RowSet& rows,
+    bool inputHasNulls,
+    int32_t extraRows) {
+  prepareNulls(
+      rows, inputHasNulls && !filterGuaranteesRawOutputNonNull(), extraRows);
+}
+
+bool SelectiveColumnReader::filterGuaranteesRawOutputNonNull() const {
+  auto* filter = scanSpec_->filter();
+  if (!filter || filter->kind() != bolt::common::FilterKind::kIsNotNull) {
+    return false;
+  }
+  if (!scanSpec_->keepValues() || scanSpec_->valueHook()) {
+    return false;
+  }
+  // IS NOT NULL only proves that the input value passed the filter. A cast can
+  // still produce a nullable result, so only elide result nulls when the raw
+  // read type is also the requested output type.
+  if (!requestedType_->equivalent(*fileType_->type())) {
+    return false;
+  }
+  const auto& type = fileType_->type();
+  return type->isPrimitiveType() || type->isVarchar() || type->isVarbinary();
 }
 
 const uint64_t* SelectiveColumnReader::shouldMoveNulls(RowSet rows) {
