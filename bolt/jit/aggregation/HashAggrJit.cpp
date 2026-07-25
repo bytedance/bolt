@@ -1101,8 +1101,10 @@ std::string HashAggrJitSlot::getDescription() const {
       nullMask);
 }
 
-HashAggrJitChunk::HashAggrJitChunk(std::vector<HashAggrJitSlot> slots)
-    : slots_(std::move(slots)) {
+HashAggrJitChunk::HashAggrJitChunk(
+    std::vector<HashAggrJitSlot> slots,
+    bool compileExtract)
+    : slots_(std::move(slots)), compileExtract_(compileExtract) {
   const auto description = getDescription();
   functionName_ = fmt::format(
       "jit_hashaggr_v2_n{}_h{:016x}",
@@ -1216,12 +1218,14 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
   const auto addFn = functionName_ + "_add_dense";
   const auto addNoNullFn = functionName_ + "_add_dense_no_null";
   const auto extractFn = functionName_ + "_extract";
+  LOG(INFO) << "HashAggrJit codegen starts: function=" << functionName_
+            << " compileExtract=" << compileExtract_;
   module_ = jit->CompileModule(
       [&](llvm::Module& module) {
         const bool ok = genInitIR(module, initFn, slots_) &&
             genAddDenseIR(module, addFn, slots_, true) &&
             genAddDenseIR(module, addNoNullFn, slots_, false) &&
-            genExtractIR(module, extractFn, slots_);
+            (!compileExtract_ || genExtractIR(module, extractFn, slots_));
         const bool hasError = !ok;
         logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
         logHashAggrJitFunctionIR(module, moduleKey, addFn, "add_dense", hasError);
@@ -1231,8 +1235,10 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
             addNoNullFn,
             "add_dense_no_null",
             hasError);
-        logHashAggrJitFunctionIR(
-            module, moduleKey, extractFn, "extract", hasError);
+        if (compileExtract_) {
+          logHashAggrJitFunctionIR(
+              module, moduleKey, extractFn, "extract", hasError);
+        }
         return hasError;
       },
       moduleKey,
@@ -1244,9 +1250,12 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
   addDense_ = reinterpret_cast<HashAggrJitAddDenseFunc>(module_->getFuncPtr(addFn));
   addDenseNoNull_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
       module_->getFuncPtr(addNoNullFn));
-  extract_ = reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
+  if (compileExtract_) {
+    extract_ =
+        reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
+  }
   if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr ||
-      extract_ == nullptr) {
+      (compileExtract_ && extract_ == nullptr)) {
     return false;
   }
   // Publish all function pointers before flipping ready_ so the query thread

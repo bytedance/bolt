@@ -278,7 +278,9 @@ using HashAggrJitExtractFunc = void (*)(char** groups, int32_t numGroups, char**
 
 class HashAggrJitChunk {
  public:
-  explicit HashAggrJitChunk(std::vector<HashAggrJitSlot> slots);
+  explicit HashAggrJitChunk(
+      std::vector<HashAggrJitSlot> slots,
+      bool compileExtract = true);
 
   bool codegen(uint64_t* codegenTimeNs = nullptr);
 
@@ -304,6 +306,7 @@ class HashAggrJitChunk {
   }
 
   void extract(char** groups, int32_t numGroups, char** resultVectors) const {
+    BOLT_CHECK_NOT_NULL(extract_);
     extract_(groups, numGroups, resultVectors);
   }
 
@@ -338,6 +341,7 @@ class HashAggrJitChunk {
   }
 
   std::vector<HashAggrJitSlot> slots_;
+  bool compileExtract_{true};
   std::string functionName_;
   CompiledModuleSP module_;
   HashAggrJitInitFunc init_{nullptr};

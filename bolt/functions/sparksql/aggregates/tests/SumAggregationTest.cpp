@@ -31,6 +31,7 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
+#include "bolt/exec/PlanNodeStats.h"
 #include "bolt/functions/lib/aggregates/tests/SumTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 
@@ -213,6 +214,69 @@ TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
                  .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
                  .copyResults(pool());
   assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitAddWithRowBasedPartialOutput) {
+  auto input = makeRowVector(
+      {makeFlatVector<int64_t>(2048, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row % 7; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 3; })});
+  std::vector<RowVectorPtr> inputs(16, input);
+
+  core::PlanNodeId partialAggId;
+  auto plan = PlanBuilder(pool())
+                  .values(inputs)
+                  .partialAggregation(
+                      {"c0", "c1"}, {"spark_sum(c2)", "spark_avg(c3)"})
+                  .capturePlanNodeId(partialAggId)
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .config(
+                       core::QueryConfig::kHashAggregationCompositeOutputEnabled,
+                       "true")
+                   .config(
+                       core::QueryConfig::
+                           kHashAggregationCompositeOutputAccumulatorRatio,
+                       "1")
+                   .copyResults(pool());
+  AssertQueryBuilder(plan)
+      .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+      .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+      .config(
+          core::QueryConfig::kHashAggregationCompositeOutputEnabled, "true")
+      .config(
+          core::QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio,
+          "1")
+      .copyResults(pool());
+  std::shared_ptr<exec::Task> task;
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(
+                     core::QueryConfig::kHashAggregationCompositeOutputEnabled,
+                     "true")
+                 .config(
+                     core::QueryConfig::
+                         kHashAggregationCompositeOutputAccumulatorRatio,
+                     "1")
+                 .copyResults(pool(), task);
+  assertEqualResults({noJit}, {jit});
+
+  const auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(partialAggId);
+  const auto compositeOutput =
+      stats.customStats.find("aggregationOutputCompositeVector");
+  ASSERT_NE(compositeOutput, stats.customStats.end());
+  ASSERT_EQ(compositeOutput->second.count, 1);
+
+  const auto jitAddTime = stats.customStats.find("aggFunctionJitTimeNs");
+  ASSERT_NE(jitAddTime, stats.customStats.end());
+  ASSERT_GT(jitAddTime->second.sum, 0);
+  ASSERT_EQ(stats.customStats.count("aggExtractGroupsJitTimeNs"), 0);
 }
 
 TEST_F(SumAggregationTest, hashAggrJitAllNullGroup) {

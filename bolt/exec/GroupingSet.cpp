@@ -1018,13 +1018,10 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   // tearing down the chunks they reference.
   waitForHashAggrJitCompilation();
   hashAggrJitChunks_.clear();
-  // supportRowBasedOutput_ is fixed at operator construction time and never
-  // flips afterwards. When it is true the JIT add/extract paths are skipped
-  // entirely (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks), so
-  // any compiled chunk would never run. Gate it out here to avoid the wasted
-  // background codegen.
-  if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_ ||
-      supportRowBasedOutput_) {
+  // Row-based output only changes partial extraction. The add path still
+  // updates the same group accumulator rows, so keep planning JIT chunks and
+  // let runHashAggrJitExtractChunks gate unsupported row-format extraction.
+  if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
     LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
               << queryConfig_.enableHashAggrJit() << " isGlobal=" << isGlobal_
               << " ignoreNullKeys=" << ignoreNullKeys_
@@ -1061,8 +1058,9 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     // yet ready (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks),
     // then switches to JIT once compilation completes. Submitting all chunks
     // up front lets the global CPU executor materialize them in parallel.
-    hashAggrJitChunks_.push_back(
-        std::make_unique<jit::HashAggrJitChunk>(std::move(currentChunkSlots)));
+    hashAggrJitChunks_.push_back(std::make_unique<jit::HashAggrJitChunk>(
+        std::move(currentChunkSlots),
+        /*compileExtract*/ !supportRowBasedOutput_));
     auto* chunk = hashAggrJitChunks_.back().get();
     LOG(INFO) << "HashAggrJit formed chunk (compiling in background): "
               << chunk->getDescription();
@@ -1134,8 +1132,7 @@ void GroupingSet::runHashAggrJitAddChunks(
     return;
   }
 
-  if (hasSpilled() || bypassProbeHT_ || supportRowBasedOutput_ ||
-      !activeRows_.isAllSelected()) {
+  if (hasSpilled() || bypassProbeHT_ || !activeRows_.isAllSelected()) {
     LOG_FIRST_N(INFO, 10)
         << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
         << " hasSpilled=" << hasSpilled()
