@@ -1134,6 +1134,8 @@ std::string hashAggrJitKindName(HashAggrJitKind kind) {
       return "avg";
     case HashAggrJitKind::DecimalAvg:
       return "decimal_avg";
+    case HashAggrJitKind::StddevPop:
+      return "stddev_pop";
   }
   return "unknown";
 }

@@ -322,5 +322,38 @@ TEST_F(VarianceAggregationTest, varianceMergeEmpty) {
   AssertQueryBuilder(node).assertResults(expected);
 }
 
+TEST_F(VarianceAggregationTest, hashAggrJitStddevPop) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(
+           512,
+           [](auto row) { return (row % 97) - 48; },
+           [](auto row) { return row % 11 == 0; }),
+       makeFlatVector<double>(
+           512,
+           [](auto row) { return (row % 31) * 0.25 - 3.0; },
+           [](auto row) { return row % 13 == 0; })});
+
+  for (const auto& plan :
+       {PlanBuilder(pool())
+            .values({input})
+            .singleAggregation({"c0"}, {"stddev_pop(c1)", "stddev_pop(c2)"})
+            .planNode(),
+        PlanBuilder(pool())
+            .values({input})
+            .partialAggregation({"c0"}, {"stddev_pop(c1)", "stddev_pop(c2)"})
+            .finalAggregation()
+            .planNode()}) {
+    auto noJit = AssertQueryBuilder(plan)
+                     .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                     .copyResults(pool());
+    auto jit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                   .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                   .copyResults(pool());
+    assertEqualResults({noJit}, {jit});
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt::aggregate::test

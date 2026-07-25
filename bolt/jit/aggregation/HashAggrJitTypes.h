@@ -124,6 +124,7 @@ enum class HashAggrJitKind : uint8_t {
   Max,
   Avg,
   DecimalAvg,
+  StddevPop,
 };
 
 enum class HashAggrJitValueKind : uint8_t {
@@ -210,6 +211,7 @@ const HashAggrJitOps* getSumOps();
 const HashAggrJitOps* getAvgOps();
 const HashAggrJitOps* getDecimalSumOps();
 const HashAggrJitOps* getDecimalAvgOps();
+const HashAggrJitOps* getStddevPopOps();
 
 } // namespace bytedance::bolt::jit
 

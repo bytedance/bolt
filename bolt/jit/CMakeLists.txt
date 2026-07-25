@@ -21,6 +21,7 @@ bolt_add_library(
                  aggregation/ops/MinMaxOps.cpp
                  aggregation/ops/SumOps.cpp
                  aggregation/ops/AvgOps.cpp
+                 aggregation/ops/StddevPopOps.cpp
                  aggregation/ops/DecimalSumOps.cpp
                  aggregation/ops/DecimalAvgOps.cpp
                  RowContainer/RowContainerCodeGenerator.cpp

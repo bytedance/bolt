@@ -31,6 +31,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/functions/prestosql/aggregates/AggregateNames.h"
+#include "bolt/functions/prestosql/aggregates/VarianceAccumulator.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -42,62 +43,6 @@ namespace {
 constexpr int32_t kCountIdx{0};
 constexpr int32_t kMeanIdx{1};
 constexpr int32_t kM2Idx{2};
-
-// Structure storing necessary data to calculate variance-based aggregations.
-struct VarianceAccumulator {
-  // Default (empty) ctor
-  VarianceAccumulator() = default;
-
-  // Fast construct from repetitive values.
-  VarianceAccumulator(int64_t count, double value)
-      : count_(count), mean_(value), m2_(0.0) {}
-
-  int64_t count() const {
-    return count_;
-  }
-
-  double mean() const {
-    return mean_;
-  }
-
-  double m2() const {
-    return m2_;
-  }
-
-  void update(double value) {
-    count_ += 1;
-    double delta = value - mean();
-    mean_ += delta / count();
-    m2_ += delta * (value - mean());
-  }
-
-  inline void merge(const VarianceAccumulator& other) {
-    merge(other.count(), other.mean(), other.m2());
-  }
-
-  void merge(int64_t countOther, double meanOther, double m2Other) {
-    if (countOther == 0) {
-      return;
-    }
-    if (count_ == 0) {
-      count_ = countOther;
-      mean_ = meanOther;
-      m2_ = m2Other;
-      return;
-    }
-    int64_t newCount = countOther + count();
-    double delta = meanOther - mean();
-    double newMean = mean() + delta / newCount * countOther;
-    m2_ += m2Other + delta * delta * countOther * count() / (double)newCount;
-    count_ = newCount;
-    mean_ = newMean;
-  }
-
- private:
-  int64_t count_{0};
-  double mean_{0};
-  double m2_{0};
-};
 
 // 'Population standard deviation' result accessor for the Variance Accumulator.
 template <bool nullOnDivideByZero>
@@ -499,6 +444,47 @@ class StdDevPopAggregate
   explicit StdDevPopAggregate(TypePtr resultType)
       : VarianceAggregate<T, StdDevPopResultAccessor<nullOnDivideByZero>>(
             resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || inputTypes[0] == nullptr) {
+      return false;
+    }
+    const auto& inputType = inputTypes[0];
+    if (context.isRawInput) {
+      return !inputType->isRow() &&
+          jit::isHashAggrJitSupportedType(inputType->kind());
+    }
+    return inputType->isRow() && inputType->size() == 3 &&
+        inputType->childAt(kCountIdx)->kind() == TypeKind::BIGINT &&
+        inputType->childAt(kMeanIdx)->kind() == TypeKind::DOUBLE &&
+        inputType->childAt(kM2Idx)->kind() == TypeKind::DOUBLE;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    auto inputKind = jit::HashAggrJitValueKind::Double;
+    if (context.isRawInput) {
+      auto maybeInputKind =
+          jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
+      if (!maybeInputKind.has_value()) {
+        return std::nullopt;
+      }
+      inputKind = *maybeInputKind;
+    }
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::StddevPop,
+        .rawInputKind = inputKind,
+        .accumulatorKind = jit::HashAggrJitValueKind::Double,
+        .context = context,
+        .ops = jit::getStddevPopOps()};
+  }
+#endif
 };
 
 // Implements 'Sample Standard Deviation' aggregate.
