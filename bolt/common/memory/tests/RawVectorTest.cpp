@@ -134,10 +134,15 @@ TEST_P(RawVectorTest, iota) {
   raw_vector<int32_t> storage(pool_.get());
   // Small sizes are preallocated.
   EXPECT_EQ(11, iota(12, storage)[11]);
+  EXPECT_EQ(10, iota(12, storage, 10)[0]);
+  EXPECT_EQ(21, iota(12, storage, 10)[11]);
   EXPECT_TRUE(storage.empty());
   EXPECT_EQ(110000, iota(110001, storage)[110000]);
   // Larger sizes are allocated in 'storage'.
   EXPECT_FALSE(storage.empty());
+  EXPECT_EQ(20000, iota(3, storage, 20000)[0]);
+  EXPECT_EQ(20002, iota(3, storage, 20000)[2]);
+  EXPECT_EQ(3, storage.size());
 }
 
 TEST_P(RawVectorTest, iterator) {

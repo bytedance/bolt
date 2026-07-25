@@ -474,14 +474,17 @@ class PageReader {
   // Returns the number of passed rows/values gathered by
   // 'reader'. Only numRows() is set for a filter-only case, only
   // numValues() is set for a non-filtered case.
-  template <bool hasFilter>
-  static int32_t numRowsInReader(
-      const dwio::common::SelectiveColumnReader& reader) {
+  template <bool hasFilter, bool hasHook>
+  static int32_t numValuesRead(
+      const dwio::common::SelectiveColumnReader& reader,
+      int32_t numPageRowsRead) {
+    if (hasHook) {
+      return numPageRowsRead;
+    }
     if (hasFilter) {
       return reader.numRows();
-    } else {
-      return reader.numValues();
     }
+    return reader.numValues();
   }
 
   void preloadPageRepDefs(const bool keepRepDefRawData);
@@ -679,6 +682,9 @@ void PageReader::readWithVisitor(Visitor& visitor) {
       !std::is_same_v<typename Visitor::FilterType, common::AlwaysTrue>;
   constexpr bool filterOnly =
       std::is_same_v<typename Visitor::Extract, dwio::common::DropValues>;
+  constexpr bool hasHook = Visitor::kHasHook;
+  static_assert(
+      !(hasFilter && hasHook), "hasFilter and hasHook cannot both be true");
   bool mayProduceNulls = !filterOnly && visitor.allowNulls();
   auto rows = visitor.rows();
   auto numRows = visitor.numRows();
@@ -686,11 +692,13 @@ void PageReader::readWithVisitor(Visitor& visitor) {
   startVisit(folly::Range<const vector_size_t*>(rows, numRows));
   rowsCopy_ = &visitor.rowsCopy();
   folly::Range<const vector_size_t*> pageRows;
+  int32_t numPageRowsRead = 0;
   const uint64_t* nulls = nullptr;
   bool isMultiPage = false;
   while (rowsForPage(reader, hasFilter, mayProduceNulls, pageRows, nulls)) {
     bool nullsFromFastPath = false;
-    int32_t numValuesBeforePage = numRowsInReader<hasFilter>(reader);
+    const int32_t numValuesBeforePage =
+        numValuesRead<hasFilter, hasHook>(reader, numPageRowsRead);
     visitor.setNumValuesBias(numValuesBeforePage);
     visitor.setRows(pageRows);
     {
@@ -699,9 +707,12 @@ void PageReader::readWithVisitor(Visitor& visitor) {
       callDecoder(nulls, nullsFromFastPath, visitor);
     }
     const auto numValuesFromPage =
-        numRowsInReader<hasFilter>(reader) - numValuesBeforePage;
+        numValuesRead<hasFilter, hasHook>(reader, numPageRowsRead) -
+        numValuesBeforePage;
+    const auto processedPageValues =
+        hasHook ? static_cast<int32_t>(pageRows.size()) : numValuesFromPage;
     if (currentPageNumValues_ >= 0) {
-      currentPageNumValues_ += numValuesFromPage;
+      currentPageNumValues_ += processedPageValues;
     }
     if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED &&
         deltaBpDecoder_->validValuesCount() == 0) {
@@ -747,6 +758,7 @@ void PageReader::readWithVisitor(Visitor& visitor) {
     if (hasFilter && rowNumberBias_) {
       reader.offsetOutputRows(numValuesBeforePage, rowNumberBias_);
     }
+    numPageRowsRead += pageRows.size();
     if (currentPageNumValues_ >= 0 &&
         firstUnvisited_ == rowOfPage_ + numRowsInPage_) {
       if (currentPageNumValues_ == 0 && FOLLY_LIKELY(statis_ != nullptr)) {

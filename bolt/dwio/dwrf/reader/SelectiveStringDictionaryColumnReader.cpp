@@ -262,14 +262,12 @@ void SelectiveStringDictionaryColumnReader::read(
         readHelper<common::AlwaysTrue, true>(
             &alwaysTrue(),
             rows,
-            ExtractStringDictionaryToGenericHook(
-                scanSpec_->valueHook(), rows, scanState_.rawState));
+            dwio::common::ExtractToGenericHook(scanSpec_->valueHook()));
       } else {
         readHelper<common::AlwaysTrue, false>(
             &alwaysTrue(),
             rows,
-            ExtractStringDictionaryToGenericHook(
-                scanSpec_->valueHook(), rows, scanState_.rawState));
+            dwio::common::ExtractToGenericHook(scanSpec_->valueHook()));
       }
     } else {
       if (isDense) {

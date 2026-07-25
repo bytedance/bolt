@@ -1624,6 +1624,7 @@ class ParquetRowReader::Impl {
         params,
         *options_.getScanSpec(),
         pool_);
+    columnReader_->setIsTopLevel();
 
     extractRequiredColumnNodes();
 

@@ -137,9 +137,7 @@ void StringColumnReader::read(
             rows,
             dwio::common::ExtractToGenericHook(scanSpec_->valueHook()));
       }
-      return;
-    }
-    if (isDense) {
+    } else if (isDense) {
       processFilter<true>(
           scanSpec_->filter(), rows, dwio::common::ExtractToReader(this));
     } else {

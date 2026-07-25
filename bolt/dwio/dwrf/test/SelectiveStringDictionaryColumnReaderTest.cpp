@@ -63,6 +63,24 @@ class SelectiveStringDictionaryColumnReaderTest : public ::testing::Test {
   }
 };
 
+class CollectStringHook : public ValueHook {
+ public:
+  void addValue(vector_size_t row, const void* value) override {
+    if (row >= values_.size()) {
+      values_.resize(row + 1);
+    }
+    values_[row] =
+        std::string(*reinterpret_cast<const folly::StringPiece*>(value));
+  }
+
+  const std::vector<std::string>& values() const {
+    return values_;
+  }
+
+ private:
+  std::vector<std::string> values_;
+};
+
 // Helper to build a TypeWithId for a single string column "myString".
 std::shared_ptr<const dwio::common::TypeWithId> makeFileType() {
   auto rowType = HiveTypeParser().parse("struct<myString:string>");
@@ -81,6 +99,76 @@ std::unique_ptr<SelectiveStringDictionaryColumnReader> makeReader(
 }
 
 } // namespace
+
+TEST_F(
+    SelectiveStringDictionaryColumnReaderTest,
+    ValueHookReceivesDecodedDictionaryStrings) {
+  MockStripeStreams streams;
+  memory::AllocationPool pool{&streams.getMemoryPool()};
+  StreamLabels labels{pool};
+  ColumnReaderStatistics columnStats;
+  DwrfParams params(streams, labels, columnStats);
+
+  proto::ColumnEncoding dictEncoding;
+  dictEncoding.set_kind(proto::ColumnEncoding_Kind_DICTIONARY);
+  dictEncoding.set_dictionarysize(3);
+  EXPECT_CALL(streams, getEncodingProxy(_))
+      .WillRepeatedly(Return(&dictEncoding));
+
+  EXPECT_CALL(streams, getStreamProxy(_, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(streams, getStreamProxy(_, proto::Stream_Kind_ROW_INDEX, false))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(
+      streams, getStreamProxy(1, proto::Stream_Kind_IN_DICTIONARY, false))
+      .WillRepeatedly(Return(nullptr));
+
+  char data[16];
+  size_t dataLen = 1;
+  data[0] = 0x9c; // -100 literal run.
+  const std::vector<uint64_t> indices = {0, 1, 2, 1};
+  for (auto index : indices) {
+    dataLen = writeVuLong(data, dataLen, index);
+  }
+  EXPECT_CALL(streams, getStreamProxy(1, proto::Stream_Kind_DATA, true))
+      .WillRepeatedly(Return(new SeekableArrayInputStream(data, dataLen)));
+
+  const std::string dict = "alphabetagamma";
+  EXPECT_CALL(
+      streams, getStreamProxy(1, proto::Stream_Kind_DICTIONARY_DATA, false))
+      .WillRepeatedly(
+          Return(new SeekableArrayInputStream(dict.data(), dict.size())));
+
+  char lengths[16];
+  size_t lengthsLen = 1;
+  lengths[0] = 0xfd; // -3 literal run.
+  for (auto length : {5, 4, 5}) {
+    lengthsLen = writeVuLong(lengths, lengthsLen, length);
+  }
+  EXPECT_CALL(streams, getStreamProxy(1, proto::Stream_Kind_LENGTH, false))
+      .WillRepeatedly(
+          Return(new SeekableArrayInputStream(lengths, lengthsLen)));
+
+  StaticStrideIndexProvider provider(0);
+  EXPECT_CALL(streams, getStrideIndexProviderProxy())
+      .WillRepeatedly(Return(&provider));
+
+  auto fileType = makeFileType();
+  common::ScanSpec scanSpec("myString");
+  scanSpec.setProjectOut(true);
+  scanSpec.setExtractValues(true);
+  CollectStringHook hook;
+  scanSpec.setValueHook(&hook);
+
+  auto reader = makeReader(fileType, params, scanSpec);
+  std::vector<vector_size_t> rowNumbers(indices.size());
+  std::iota(rowNumbers.begin(), rowNumbers.end(), 0);
+  RowSet rowSet(rowNumbers.data(), rowNumbers.data() + rowNumbers.size());
+
+  reader->read(0, rowSet, nullptr);
+
+  EXPECT_THAT(hook.values(), ElementsAre("alpha", "beta", "gamma", "beta"));
+}
 
 // 1) Happy path: stride dictionary streams (data + length) are present and
 // loadStrideDictionary populates scanState_.dictionary2.
