@@ -182,7 +182,8 @@ bool fillHashAggrJitRowInputRuntime(
     children[field] = jit::HashAggrJitScalarInputRuntime{
         .values = hashAggrJitRawInputData(childVector.get(), *kind),
         .indices = decoded.indices(),
-        .nulls = childVector->rawNulls()};
+        .nulls = childVector->rawNulls(),
+        .isIdentityMapping = decoded.isIdentityMapping()};
     childPtrs[field] = &children[field];
   }
   input.row = jit::HashAggrJitRowInputRuntime{
@@ -1120,6 +1121,9 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   flushChunk();
   LOG(INFO) << "HashAggrJit planning finished: totalChunks="
             << hashAggrJitChunks_.size();
+  if (queryConfig_.hashAggrJitSyncCodegen()) {
+    waitForHashAggrJitCompilation();
+  }
 }
 
 void GroupingSet::runHashAggrJitAddChunks(
@@ -1227,7 +1231,8 @@ void GroupingSet::runHashAggrJitAddChunks(
         inputRuntimes[slotIndex].scalar = jit::HashAggrJitScalarInputRuntime{
             .values = decoded[slotIndex].dataAsVoid(),
             .indices = decoded[slotIndex].indices(),
-            .nulls = decoded[slotIndex].nulls(&activeRows_)};
+            .nulls = decoded[slotIndex].nulls(&activeRows_),
+            .isIdentityMapping = decoded[slotIndex].isIdentityMapping()};
       }
       inputsMayHaveNulls = inputsMayHaveNulls || decoded[slotIndex].mayHaveNulls();
       inputRuntimePtrs[slotIndex] =

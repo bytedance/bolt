@@ -8,8 +8,11 @@
 #include <llvm/Support/raw_ostream.h>
 #include <cstddef>
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -315,9 +318,11 @@ llvm::Value* loadScalarInputValue(
     llvm::IRBuilder<>& builder,
     llvm::Value* input,
     llvm::Value* row,
-    HashAggrJitValueKind kind) {
+    HashAggrJitValueKind kind,
+    bool useIdentityMapping = false) {
   auto* values = loadScalarInputValues(builder, input);
-  auto* index = loadScalarInputIndex(builder, input, row);
+  auto* index =
+      useIdentityMapping ? row : loadScalarInputIndex(builder, input, row);
 
   if (kind == HashAggrJitValueKind::Bool) {
     auto* wordTy = builder.getInt64Ty();
@@ -571,6 +576,14 @@ void HashAggrJitCodegen::clearAccumulatorNull(
   bytedance::bolt::jit::clearAccumulatorNull(builder(), group, slot);
 }
 
+void HashAggrJitCodegen::clearAccumulatorNullIfNeeded(
+    llvm::Value* group,
+    const HashAggrJitSlot& slot) const {
+  if (!skipAccumulatorNullClear_) {
+    clearAccumulatorNull(group, slot);
+  }
+}
+
 void HashAggrJitCodegen::setAccumulatorNull(
     llvm::Value* group,
     const HashAggrJitSlot& slot) const {
@@ -606,7 +619,15 @@ bool HashAggrJitCodegen::isFloatKind(HashAggrJitValueKind kind) const {
 ScalarInputAdapterCodegen::ScalarInputAdapterCodegen(
     HashAggrJitCodegen& codegen,
     llvm::Value* input)
-    : codegen_(codegen), input_(input) {}
+    : ScalarInputAdapterCodegen(codegen, input, false) {}
+
+ScalarInputAdapterCodegen::ScalarInputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* input,
+    bool useIdentityMapping)
+    : codegen_(codegen),
+      input_(input),
+      useIdentityMapping_(useIdentityMapping) {}
 
 llvm::StructType* ScalarInputAdapterCodegen::irRowType(
     HashAggrJitValueKind kind) const {
@@ -617,7 +638,7 @@ llvm::Value* ScalarInputAdapterCodegen::read(
     llvm::Value* row,
     HashAggrJitValueKind kind) const {
   auto* value = loadScalarInputValue(
-      codegen_.builder(), input_, row, kind);
+      codegen_.builder(), input_, row, kind, useIdentityMapping_);
   // add_dense emits the top-level null guard before invoking aggregate ops.
   // Therefore rows reaching ops are non-null; keep the IRRow contract explicit
   // without duplicating the null bitmap check in every aggregate.
@@ -650,7 +671,15 @@ llvm::Value* ScalarInputAdapterCodegen::readRowFieldValue(
 RowInputAdapterCodegen::RowInputAdapterCodegen(
     HashAggrJitCodegen& codegen,
     llvm::Value* input)
-    : codegen_(codegen), input_(input) {}
+    : RowInputAdapterCodegen(codegen, input, false) {}
+
+RowInputAdapterCodegen::RowInputAdapterCodegen(
+    HashAggrJitCodegen& codegen,
+    llvm::Value* input,
+    bool useIdentityMapping)
+    : codegen_(codegen),
+      input_(input),
+      useIdentityMapping_(useIdentityMapping) {}
 
 llvm::Value* RowInputAdapterCodegen::loadChild(int32_t field) const {
   return loadRowInputChild(
@@ -681,7 +710,7 @@ llvm::Value* RowInputAdapterCodegen::readRowField(
     HashAggrJitValueKind kind) const {
   auto* child = loadChild(field);
   auto* value = loadScalarInputValue(
-      codegen_.builder(), child, row, kind);
+      codegen_.builder(), child, row, kind, useIdentityMapping_);
   return IRRow::pack(codegen_.builder(), value, isRowFieldNull(row, field));
 }
 
@@ -694,7 +723,7 @@ llvm::Value* RowInputAdapterCodegen::readRowFieldValue(
   // not consumed by the aggregate's merge semantics).
   auto* child = loadChild(field);
   return loadScalarInputValue(
-      codegen_.builder(), child, row, kind);
+      codegen_.builder(), child, row, kind, useIdentityMapping_);
 }
 
 llvm::Value* RowInputAdapterCodegen::isRowFieldNull(
@@ -853,11 +882,37 @@ bool usesRowOutputRuntime(const HashAggrJitSlot& slot) {
   return slot.desc.outputShape() == HashAggrJitRuntimeShape::Row;
 }
 
+bool shouldPreClearAccumulatorNull(const HashAggrJitSlot& slot) {
+  return slot.desc.kind == HashAggrJitKind::Sum ||
+      slot.desc.kind == HashAggrJitKind::Avg;
+}
+
+std::vector<std::pair<int32_t, uint8_t>> sumAvgNullMasksByByte(
+    const std::vector<HashAggrJitSlot>& slots) {
+  std::vector<std::pair<int32_t, uint8_t>> masks;
+  for (const auto& slot : slots) {
+    if (!shouldPreClearAccumulatorNull(slot)) {
+      continue;
+    }
+    auto it = std::find_if(
+        masks.begin(), masks.end(), [&](const auto& entry) {
+          return entry.first == slot.nullByte;
+        });
+    if (it == masks.end()) {
+      masks.emplace_back(slot.nullByte, slot.nullMask);
+    } else {
+      it->second |= slot.nullMask;
+    }
+  }
+  return masks;
+}
+
 bool genAddDenseIR(
     llvm::Module& module,
     const std::string& fn,
     const std::vector<HashAggrJitSlot>& slots,
-    bool checkInputNulls);
+    bool checkInputNulls,
+    bool useIdentityMapping = false);
 
 bool genInitIR(
     llvm::Module& module,
@@ -914,11 +969,16 @@ bool genAddDenseIR(
     llvm::Module& module,
     const std::string& fn,
     const std::vector<HashAggrJitSlot>& slots,
-    bool checkInputNulls) {
+    bool checkInputNulls,
+    bool useIdentityMapping) {
   auto& context = module.getContext();
   llvm::IRBuilder<> builder(context);
   HashAggrJitCodegen codegen(module);
   codegen.setBuilder(&builder);
+  codegen.setSkipAccumulatorNullClear(!checkInputNulls);
+  const auto preClearMasks =
+      checkInputNulls ? std::vector<std::pair<int32_t, uint8_t>>{}
+                      : sumAvgNullMasksByByte(slots);
   auto* voidTy = builder.getVoidTy();
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
   auto* i8PtrPtrTy = i8PtrTy->getPointerTo();
@@ -945,6 +1005,13 @@ bool genAddDenseIR(
   auto* groupAddr = builder.CreateInBoundsGEP(i8PtrTy, groups, row);
   auto* group = builder.CreateLoad(i8PtrTy, groupAddr);
 
+  for (const auto& [nullByte, nullMask] : preClearMasks) {
+    auto* byte = codegen.loadValue(group, builder.getInt8Ty(), nullByte);
+    auto* mask = builder.getInt8(static_cast<uint8_t>(~nullMask));
+    codegen.storeValue(
+        group, builder.getInt8Ty(), nullByte, builder.CreateAnd(byte, mask));
+  }
+
   for (auto i = 0; i < slots.size(); ++i) {
     const auto& slot = slots[i];
     auto* updateBlock = llvm::BasicBlock::Create(context, "slot_update", func, end);
@@ -954,10 +1021,11 @@ bool genAddDenseIR(
     auto* inputRuntime = builder.CreateLoad(i8PtrTy, inputAddr);
     std::unique_ptr<InputAdapterCodegen> input;
     if (usesRowInputRuntime(slot)) {
-      input = std::make_unique<RowInputAdapterCodegen>(codegen, inputRuntime);
+      input = std::make_unique<RowInputAdapterCodegen>(
+          codegen, inputRuntime, useIdentityMapping);
     } else {
-      input =
-          std::make_unique<ScalarInputAdapterCodegen>(codegen, inputRuntime);
+      input = std::make_unique<ScalarInputAdapterCodegen>(
+          codegen, inputRuntime, useIdentityMapping);
     }
     if (checkInputNulls && !slot.desc.isCountStar()) {
       auto* nulls = input->loadNulls();
@@ -1217,6 +1285,7 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
   const auto initFn = functionName_ + "_init";
   const auto addFn = functionName_ + "_add_dense";
   const auto addNoNullFn = functionName_ + "_add_dense_no_null";
+  const auto addNoNullIdentityFn = functionName_ + "_add_dense_no_null_identity";
   const auto extractFn = functionName_ + "_extract";
   LOG(INFO) << "HashAggrJit codegen starts: function=" << functionName_
             << " compileExtract=" << compileExtract_;
@@ -1225,6 +1294,7 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
         const bool ok = genInitIR(module, initFn, slots_) &&
             genAddDenseIR(module, addFn, slots_, true) &&
             genAddDenseIR(module, addNoNullFn, slots_, false) &&
+            genAddDenseIR(module, addNoNullIdentityFn, slots_, false, true) &&
             (!compileExtract_ || genExtractIR(module, extractFn, slots_));
         const bool hasError = !ok;
         logHashAggrJitFunctionIR(module, moduleKey, initFn, "init", hasError);
@@ -1234,6 +1304,12 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
             moduleKey,
             addNoNullFn,
             "add_dense_no_null",
+            hasError);
+        logHashAggrJitFunctionIR(
+            module,
+            moduleKey,
+            addNoNullIdentityFn,
+            "add_dense_no_null_identity",
             hasError);
         if (compileExtract_) {
           logHashAggrJitFunctionIR(
@@ -1250,11 +1326,14 @@ bool HashAggrJitChunk::codegen(uint64_t* codegenTimeNs) {
   addDense_ = reinterpret_cast<HashAggrJitAddDenseFunc>(module_->getFuncPtr(addFn));
   addDenseNoNull_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
       module_->getFuncPtr(addNoNullFn));
+  addDenseNoNullIdentity_ = reinterpret_cast<HashAggrJitAddDenseFunc>(
+      module_->getFuncPtr(addNoNullIdentityFn));
   if (compileExtract_) {
     extract_ =
         reinterpret_cast<HashAggrJitExtractFunc>(module_->getFuncPtr(extractFn));
   }
   if (init_ == nullptr || addDense_ == nullptr || addDenseNoNull_ == nullptr ||
+      addDenseNoNullIdentity_ == nullptr ||
       (compileExtract_ && extract_ == nullptr)) {
     return false;
   }

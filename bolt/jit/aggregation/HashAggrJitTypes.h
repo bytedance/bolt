@@ -27,6 +27,7 @@ struct HashAggrJitScalarInputRuntime {
   const void* values{nullptr};
   const int32_t* indices{nullptr};
   const uint64_t* nulls{nullptr};
+  bool isIdentityMapping{false};
 };
 
 // Runtime ROW input. ROW itself has no value/indices wrapping in the generated

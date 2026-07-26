@@ -40,7 +40,7 @@ void compileSumAccumulate(
   auto* value = codegen.castValue(
       rawValue, slot.desc.rawInputKind, slot.desc.accumulatorKind);
   auto* accType = codegen.llvmType(slot.desc.accumulatorKind);
-  codegen.clearAccumulatorNull(group, slot);
+  codegen.clearAccumulatorNullIfNeeded(group, slot);
   auto* oldValue = codegen.loadValue(group, accType, slot.offset);
   auto* newValue = codegen.isFloatKind(slot.desc.accumulatorKind)
       ? codegen.builder().CreateFAdd(oldValue, value)

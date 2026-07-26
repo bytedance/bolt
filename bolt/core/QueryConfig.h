@@ -657,6 +657,8 @@ class QueryConfig {
       "hashaggr.jit.min_fuse_width";
   static constexpr const char* kHashAggrJitMaxFuseWidth =
       "hashaggr.jit.max_fuse_width";
+  static constexpr const char* kHashAggrJitSyncCodegen =
+      "hashaggr.jit.sync_codegen";
 
   // expired, to deleted later
   static constexpr const char* kBoltJitEnabled = "bolt.jit.enabled";
@@ -1622,6 +1624,10 @@ class QueryConfig {
 
   int32_t hashAggrJitMaxFuseWidth() const {
     return get<int32_t>(kHashAggrJitMaxFuseWidth, 16);
+  }
+
+  bool hashAggrJitSyncCodegen() const {
+    return get<bool>(kHashAggrJitSyncCodegen, true);
   }
 
   int exceptionTraceLevel() const {

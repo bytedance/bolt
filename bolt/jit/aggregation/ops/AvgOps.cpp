@@ -52,7 +52,7 @@ void compileAvgAddRawInput(
   auto* rawValue = IRRow::getValue(codegen.builder(), inputRow);
   auto* value = codegen.castValue(
       rawValue, slot.desc.rawInputKind, slot.desc.accumulatorKind);
-  codegen.clearAccumulatorNull(group, slot);
+  codegen.clearAccumulatorNullIfNeeded(group, slot);
   auto* oldSum = codegen.loadValue(
       group, codegen.llvmType(slot.desc.accumulatorKind), slot.offset);
   codegen.storeValue(
@@ -78,7 +78,7 @@ void compileAvgAddIntermediateResults(
     llvm::Value* row,
     const HashAggrJitSlot& slot,
     llvm::BasicBlock*) {
-  codegen.clearAccumulatorNull(group, slot);
+  codegen.clearAccumulatorNullIfNeeded(group, slot);
   auto* sum = input.readRowFieldValue(row, 0, HashAggrJitValueKind::Double);
   auto* count = input.readRowFieldValue(row, 1, HashAggrJitValueKind::Int64);
   auto* oldSum =

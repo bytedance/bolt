@@ -23,6 +23,10 @@ using namespace bytedance::bolt::test;
 DEFINE_int32(hashaggr_jit_benchmark_batches, 20, "Number of input batches.");
 DEFINE_int32(hashaggr_jit_benchmark_batch_size, 10000, "Rows per input batch.");
 DEFINE_int32(hashaggr_jit_benchmark_groups, 10000, "Number of distinct groups.");
+DEFINE_bool(
+    hashaggr_jit_benchmark_sync_codegen,
+    true,
+    "Whether HashAggrJit benchmark waits synchronously for chunk codegen.");
 
 namespace {
 
@@ -318,6 +322,9 @@ class HashAggrJitBenchmark : public VectorTestBase {
         .config(
             core::QueryConfig::kHashAggrJitMaxFuseWidth,
             std::to_string(maxFuseWidth))
+        .config(
+            core::QueryConfig::kHashAggrJitSyncCodegen,
+            FLAGS_hashaggr_jit_benchmark_sync_codegen ? "true" : "false")
         .copyResults(pool_.get());
   }
 

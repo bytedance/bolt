@@ -130,6 +130,10 @@ class InputAdapterCodegen {
 class ScalarInputAdapterCodegen final : public InputAdapterCodegen {
  public:
   ScalarInputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* input);
+  ScalarInputAdapterCodegen(
+      HashAggrJitCodegen& codegen,
+      llvm::Value* input,
+      bool useIdentityMapping);
 
   llvm::StructType* irRowType(HashAggrJitValueKind kind) const override;
   llvm::Value* read(llvm::Value* row, HashAggrJitValueKind kind) const override;
@@ -143,11 +147,16 @@ class ScalarInputAdapterCodegen final : public InputAdapterCodegen {
  private:
   HashAggrJitCodegen& codegen_;
   llvm::Value* input_;
+  bool useIdentityMapping_{false};
 };
 
 class RowInputAdapterCodegen final : public InputAdapterCodegen {
  public:
   RowInputAdapterCodegen(HashAggrJitCodegen& codegen, llvm::Value* input);
+  RowInputAdapterCodegen(
+      HashAggrJitCodegen& codegen,
+      llvm::Value* input,
+      bool useIdentityMapping);
 
   llvm::StructType* irRowType(HashAggrJitValueKind kind) const override;
   llvm::Value* read(llvm::Value*, HashAggrJitValueKind) const override;
@@ -168,6 +177,7 @@ class RowInputAdapterCodegen final : public InputAdapterCodegen {
 
   HashAggrJitCodegen& codegen_;
   llvm::Value* input_;
+  bool useIdentityMapping_{false};
 };
 
 class OutputAdapterCodegen {
@@ -251,8 +261,17 @@ class HashAggrJitCodegen {
       const HashAggrJitSlot& slot) const;
   void clearAccumulatorNull(llvm::Value* group, const HashAggrJitSlot& slot)
       const;
+  void clearAccumulatorNullIfNeeded(
+      llvm::Value* group,
+      const HashAggrJitSlot& slot) const;
   void setAccumulatorNull(llvm::Value* group, const HashAggrJitSlot& slot)
       const;
+  bool skipAccumulatorNullClear() const {
+    return skipAccumulatorNullClear_;
+  }
+  void setSkipAccumulatorNullClear(bool skip) {
+    skipAccumulatorNullClear_ = skip;
+  }
   llvm::LoadInst* loadValue(llvm::Value* row, llvm::Type* type, int32_t offset)
       const;
   void storeValue(
@@ -269,6 +288,7 @@ class HashAggrJitCodegen {
  private:
   llvm::Module& module_;
   llvm::IRBuilder<>* builder_{nullptr};
+  bool skipAccumulatorNullClear_{false};
 };
 
 using HashAggrJitAddDenseFunc =
@@ -299,6 +319,11 @@ class HashAggrJitChunk {
       bool inputsMayHaveNulls) const {
     if (!inputsMayHaveNulls && addDenseNoNull_ != nullptr) {
       checkNoRuntimeNulls(inputRuntimes);
+      if (addDenseNoNullIdentity_ != nullptr &&
+          allInputsUseIdentityMapping(inputRuntimes)) {
+        addDenseNoNullIdentity_(groups, numRows, inputRuntimes);
+        return;
+      }
       addDenseNoNull_(groups, numRows, inputRuntimes);
       return;
     }
@@ -329,15 +354,41 @@ class HashAggrJitChunk {
       }
       auto* input =
           reinterpret_cast<const HashAggrJitInputRuntime*>(inputRuntimes[i]);
-      const auto* nulls = slot.desc.inputShape() == HashAggrJitRuntimeShape::Row
-          ? input->row.nulls
-          : input->scalar.nulls;
-      BOLT_CHECK(
-          nulls == nullptr,
-          "HashAggrJit no-null add path received runtime nulls: slot={}, chunk={}",
-          slot.getDescription(),
-          getDescription());
+      if (slot.desc.inputShape() == HashAggrJitRuntimeShape::Row) {
+        BOLT_CHECK(
+            input->row.nulls == nullptr,
+            "HashAggrJit no-null add path received runtime nulls: slot={}, chunk={}",
+            slot.getDescription(),
+            getDescription());
+      } else {
+        BOLT_CHECK(
+            input->scalar.nulls == nullptr,
+            "HashAggrJit no-null add path received runtime nulls: slot={}, chunk={}",
+            slot.getDescription(),
+            getDescription());
+      }
     }
+  }
+
+  bool allInputsUseIdentityMapping(char** inputRuntimes) const {
+    for (auto i = 0; i < slots_.size(); ++i) {
+      const auto& slot = slots_[i];
+      if (slot.desc.isCountStar()) {
+        continue;
+      }
+      auto* input =
+          reinterpret_cast<const HashAggrJitInputRuntime*>(inputRuntimes[i]);
+      if (slot.desc.inputShape() == HashAggrJitRuntimeShape::Row) {
+        for (auto child = 0; child < input->row.numChildren; ++child) {
+          if (!input->row.children[child]->isIdentityMapping) {
+            return false;
+          }
+        }
+      } else if (!input->scalar.isIdentityMapping) {
+        return false;
+      }
+    }
+    return true;
   }
 
   std::vector<HashAggrJitSlot> slots_;
@@ -347,6 +398,7 @@ class HashAggrJitChunk {
   HashAggrJitInitFunc init_{nullptr};
   HashAggrJitAddDenseFunc addDense_{nullptr};
   HashAggrJitAddDenseFunc addDenseNoNull_{nullptr};
+  HashAggrJitAddDenseFunc addDenseNoNullIdentity_{nullptr};
   HashAggrJitExtractFunc extract_{nullptr};
   // Published last by codegen() (release) and read by isCodegenReady()
   // (acquire). Lets the query thread fall back to non-JIT while background
