@@ -882,16 +882,19 @@ bool usesRowOutputRuntime(const HashAggrJitSlot& slot) {
   return slot.desc.outputShape() == HashAggrJitRuntimeShape::Row;
 }
 
-bool shouldPreClearAccumulatorNull(const HashAggrJitSlot& slot) {
+bool shouldPreClearAccumulatorNullInNoNullAdd(const HashAggrJitSlot& slot) {
   return slot.desc.kind == HashAggrJitKind::Sum ||
-      slot.desc.kind == HashAggrJitKind::Avg;
+      slot.desc.kind == HashAggrJitKind::Avg ||
+      (slot.desc.kind == HashAggrJitKind::StddevPop &&
+       slot.desc.isRawInput());
 }
 
-std::vector<std::pair<int32_t, uint8_t>> sumAvgNullMasksByByte(
+std::vector<std::pair<int32_t, uint8_t>>
+preClearedAccumulatorNullMasksForNoNullAdd(
     const std::vector<HashAggrJitSlot>& slots) {
   std::vector<std::pair<int32_t, uint8_t>> masks;
   for (const auto& slot : slots) {
-    if (!shouldPreClearAccumulatorNull(slot)) {
+    if (!shouldPreClearAccumulatorNullInNoNullAdd(slot)) {
       continue;
     }
     auto it = std::find_if(
@@ -978,7 +981,7 @@ bool genAddDenseIR(
   codegen.setSkipAccumulatorNullClear(!checkInputNulls);
   const auto preClearMasks =
       checkInputNulls ? std::vector<std::pair<int32_t, uint8_t>>{}
-                      : sumAvgNullMasksByByte(slots);
+                      : preClearedAccumulatorNullMasksForNoNullAdd(slots);
   auto* voidTy = builder.getVoidTy();
   auto* i8PtrTy = llvm::PointerType::get(context, 0);
   auto* i8PtrPtrTy = i8PtrTy->getPointerTo();

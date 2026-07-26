@@ -361,7 +361,9 @@ GroupingSet::GroupingSet(
 GroupingSet::~GroupingSet() {
 #ifdef ENABLE_BOLT_JIT
   // Ensure no background compilation task still references our chunks.
-  waitForHashAggrJitCompilation();
+  if (!queryConfig_.hashAggrJitSyncCodegen()) {
+    waitForHashAggrJitCompilation();
+  }
 #endif
   if (isGlobal_) {
     destroyGlobalAggregations();
@@ -1017,7 +1019,9 @@ void GroupingSet::waitForHashAggrJitCompilation() {
 void GroupingSet::maybeCreateHashAggrJitPlan() {
   // Wait for any background compilation tasks from a previous plan before
   // tearing down the chunks they reference.
-  waitForHashAggrJitCompilation();
+  if (!queryConfig_.hashAggrJitSyncCodegen()) {
+    waitForHashAggrJitCompilation();
+  }
   hashAggrJitChunks_.clear();
   // Row-based output only changes partial extraction. The add path still
   // updates the same group accumulator rows, so keep planning JIT chunks and

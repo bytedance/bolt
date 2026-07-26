@@ -62,7 +62,7 @@ void compileStddevPopAddRawInput(
   auto* value = codegen.castValue(
       rawValue, slot.desc.rawInputKind, HashAggrJitValueKind::Double);
 
-  codegen.clearAccumulatorNull(group, slot);
+  codegen.clearAccumulatorNullIfNeeded(group, slot);
   auto* oldCount = codegen.loadValue(
       group, builder.getInt64Ty(), slot.offset + kCountOffset);
   auto* oldMean = codegen.loadValue(
