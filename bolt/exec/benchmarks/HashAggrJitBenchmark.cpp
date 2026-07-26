@@ -188,6 +188,26 @@ class HashAggrJitBenchmark : public VectorTestBase {
     }
   }
 
+  void addOnlinePatternBenchmark(const std::string& name, int32_t width) {
+    auto rows = makeOnlinePatternRows(width);
+    std::vector<std::string> aggregates;
+    aggregates.reserve(1 + width * 2 + width / 2);
+    aggregates.push_back("count(1)");
+    for (auto i = 0; i < width; ++i) {
+      aggregates.push_back(fmt::format("spark_avg(c{})", i + 1));
+      aggregates.push_back(fmt::format("stddev_pop(c{})", i + 1));
+    }
+    for (auto i = 0; i + 1 < width; i += 2) {
+      aggregates.push_back(fmt::format("spark_sum(p{})", i / 2));
+    }
+
+    addCase(
+        name + "_metrics" + std::to_string(width),
+        rows,
+        aggregates,
+        AggregationPlanKind::PartialFinal);
+  }
+
  private:
   std::vector<RowVectorPtr> makeRows(int32_t width) {
     std::vector<std::string> names;
@@ -254,6 +274,46 @@ class HashAggrJitBenchmark : public VectorTestBase {
               return std::numeric_limits<double>::quiet_NaN();
             }
             return static_cast<double>((row + 17 * column) & 0xffff);
+          }));
+    }
+    auto batch = makeRowVector(names, children);
+    return std::vector<RowVectorPtr>(FLAGS_hashaggr_jit_benchmark_batches, batch);
+  }
+
+  std::vector<RowVectorPtr> makeOnlinePatternRows(int32_t width) {
+    std::vector<std::string> names;
+    std::vector<VectorPtr> children;
+    const auto productWidth = width / 2;
+    names.reserve(width + productWidth + 1);
+    children.reserve(width + productWidth + 1);
+    names.push_back("c0");
+    children.push_back(makeFlatVector<int64_t>(
+        FLAGS_hashaggr_jit_benchmark_batch_size,
+        [](vector_size_t row) {
+          return row % FLAGS_hashaggr_jit_benchmark_groups;
+        }));
+    for (auto column = 0; column < width; ++column) {
+      names.push_back(fmt::format("c{}", column + 1));
+      children.push_back(makeFlatVector<double>(
+          FLAGS_hashaggr_jit_benchmark_batch_size,
+          [column](vector_size_t row) {
+            return static_cast<double>((row * 13 + column * 17) & 0xffff) /
+                100.0;
+          }));
+    }
+    for (auto column = 0; column < productWidth; ++column) {
+      names.push_back(fmt::format("p{}", column));
+      children.push_back(makeFlatVector<double>(
+          FLAGS_hashaggr_jit_benchmark_batch_size,
+          [column](vector_size_t row) {
+            const double lhs =
+                static_cast<double>((row * 13 + (2 * column) * 17) & 0xffff) /
+                100.0;
+            const double rhs = static_cast<double>(
+                                   (row * 13 + (2 * column + 1) * 17) &
+                                   0xffff) /
+                100.0;
+            return lhs * rhs;
           }));
     }
     auto batch = makeRowVector(names, children);
@@ -398,6 +458,7 @@ int main(int argc, char** argv) {
 
   benchmark.addFixedAggregateCountFuseWidthBenchmark(
       "fixed_aggregate_count", 256);
+  benchmark.addOnlinePatternBenchmark("online_pattern", 32);
 
   // benchmark.addHighCardinalityExtractBenchmark("width4_high_card", 4);
   // benchmark.addHighCardinalityExtractBenchmark("width8_high_card", 8);
