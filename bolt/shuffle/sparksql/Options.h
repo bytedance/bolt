@@ -53,6 +53,7 @@ static constexpr int32_t kDefaultBufferAlignment = 64;
 static constexpr double kDefaultBufferReallocThreshold = 0.25;
 static constexpr double kDefaultMergeBufferThreshold = 0.25;
 static constexpr bool kEnableBufferedWrite = true;
+static constexpr bool kEnableBufferedSpillWrite = false;
 static constexpr int32_t kDefaultForceShuffleWriterType = 0;
 static constexpr int32_t kDefaultUseV2PreallocSizeThreshold = 0;
 static constexpr int32_t kDefaultRowVectorModeCompressionMinColumns = 20;
@@ -133,6 +134,8 @@ struct PartitionWriterOptions {
   std::string compressionMode = "buffer";
 
   bool bufferedWrite = kEnableBufferedWrite;
+
+  bool bufferedSpillWrite = kEnableBufferedSpillWrite;
 
   int32_t numSubDirs = kDefaultNumSubDirs;
 
