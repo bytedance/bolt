@@ -34,6 +34,14 @@ struct AggregationStats {
   uint64_t aggJitCodegenTimeNs{0};
   // JIT-executed part of the agg function update time.
   uint64_t aggFunctionJitTimeNs{0};
+  // Wall time spent synchronously waiting for hash aggregation JIT compilation.
+  uint64_t aggJitSyncWaitTimeNs{0};
+  // Number of JIT chunks in the planned hash aggregation JIT plan.
+  uint64_t aggJitPlanChunks{0};
+  // Number of rows processed by JIT add chunks, counted per executed chunk.
+  uint64_t aggFunctionJitRows{0};
+  uint64_t aggFunctionJitNoNullRows{0};
+  uint64_t aggFunctionJitNoNullIdentityRows{0};
   // JIT-executed part of the extracting groups time.
   uint64_t aggExtractGroupsJitTimeNs{0};
 };

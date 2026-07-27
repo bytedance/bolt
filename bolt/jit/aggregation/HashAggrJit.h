@@ -296,6 +296,12 @@ using HashAggrJitAddDenseFunc =
 using HashAggrJitInitFunc = void (*)(char** newGroups, int32_t numNewGroups);
 using HashAggrJitExtractFunc = void (*)(char** groups, int32_t numGroups, char** resultVectors);
 
+enum class HashAggrJitAddMode {
+  Dense,
+  DenseNoNull,
+  DenseNoNullIdentity,
+};
+
 class HashAggrJitChunk {
  public:
   explicit HashAggrJitChunk(
@@ -312,7 +318,7 @@ class HashAggrJitChunk {
     init_(newGroups, numNewGroups);
   }
 
-  void addDense(
+  HashAggrJitAddMode addDense(
       char** groups,
       int32_t numRows,
       char** inputRuntimes,
@@ -322,12 +328,13 @@ class HashAggrJitChunk {
       if (addDenseNoNullIdentity_ != nullptr &&
           allInputsUseIdentityMapping(inputRuntimes)) {
         addDenseNoNullIdentity_(groups, numRows, inputRuntimes);
-        return;
+        return HashAggrJitAddMode::DenseNoNullIdentity;
       }
       addDenseNoNull_(groups, numRows, inputRuntimes);
-      return;
+      return HashAggrJitAddMode::DenseNoNull;
     }
     addDense_(groups, numRows, inputRuntimes);
+    return HashAggrJitAddMode::Dense;
   }
 
   void extract(char** groups, int32_t numGroups, char** resultVectors) const {

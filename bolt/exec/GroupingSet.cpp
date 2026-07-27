@@ -361,9 +361,7 @@ GroupingSet::GroupingSet(
 GroupingSet::~GroupingSet() {
 #ifdef ENABLE_BOLT_JIT
   // Ensure no background compilation task still references our chunks.
-  if (!queryConfig_.hashAggrJitSyncCodegen()) {
-    waitForHashAggrJitCompilation();
-  }
+  waitForHashAggrJitCompilation();
 #endif
   if (isGlobal_) {
     destroyGlobalAggregations();
@@ -1007,21 +1005,26 @@ const SelectivityVector& GroupingSet::getSelectivityVector(
 }
 
 #ifdef ENABLE_BOLT_JIT
-void GroupingSet::waitForHashAggrJitCompilation() {
+uint64_t GroupingSet::waitForHashAggrJitCompilation() {
+  const auto waitStart = std::chrono::steady_clock::now();
   for (auto& future : hashAggrJitCompileFutures_) {
     if (future.valid()) {
       stats_.aggJitCodegenTimeNs += std::move(future).get();
     }
   }
+  const auto waitTimeNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - waitStart)
+          .count();
   hashAggrJitCompileFutures_.clear();
+  return waitTimeNs;
 }
 
 void GroupingSet::maybeCreateHashAggrJitPlan() {
+  const auto planStart = std::chrono::steady_clock::now();
   // Wait for any background compilation tasks from a previous plan before
   // tearing down the chunks they reference.
-  if (!queryConfig_.hashAggrJitSyncCodegen()) {
-    waitForHashAggrJitCompilation();
-  }
+  waitForHashAggrJitCompilation();
   hashAggrJitChunks_.clear();
   // Row-based output only changes partial extraction. The add path still
   // updates the same group accumulator rows, so keep planning JIT chunks and
@@ -1047,6 +1050,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
             << " minChunkWidth=" << minChunkWidth;
   std::vector<jit::HashAggrJitSlot> currentChunkSlots;
   currentChunkSlots.reserve(maxFuseWidth);
+  int32_t jitExecutableAggregates = 0;
 
   auto flushChunk = [&]() {
     if (currentChunkSlots.size() < minChunkWidth) {
@@ -1063,6 +1067,7 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
     // yet ready (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks),
     // then switches to JIT once compilation completes. Submitting all chunks
     // up front lets the global CPU executor materialize them in parallel.
+    jitExecutableAggregates += currentChunkSlots.size();
     hashAggrJitChunks_.push_back(std::make_unique<jit::HashAggrJitChunk>(
         std::move(currentChunkSlots),
         /*compileExtract*/ !supportRowBasedOutput_));
@@ -1123,11 +1128,15 @@ void GroupingSet::maybeCreateHashAggrJitPlan() {
   }
 
   flushChunk();
+  stats_.aggJitPlanChunks += hashAggrJitChunks_.size();
+  const auto totalTimeNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - planStart)
+          .count();
   LOG(INFO) << "HashAggrJit planning finished: totalChunks="
-            << hashAggrJitChunks_.size();
-  if (queryConfig_.hashAggrJitSyncCodegen()) {
-    waitForHashAggrJitCompilation();
-  }
+            << hashAggrJitChunks_.size() << " totalAggregates="
+            << aggregates_.size() << " jitExecutableAggregates="
+            << jitExecutableAggregates << " totalTimeNs=" << totalTimeNs;
 }
 
 void GroupingSet::runHashAggrJitAddChunks(
@@ -1148,6 +1157,15 @@ void GroupingSet::runHashAggrJitAddChunks(
         << " supportRowBasedOutput=" << supportRowBasedOutput_
         << " activeRowsAllSelected=" << activeRows_.isAllSelected();
     return;
+  }
+
+  if (queryConfig_.hashAggrJitSyncCodegen() &&
+      !hashAggrJitCompileFutures_.empty()) {
+    const auto syncWaitTimeNs = waitForHashAggrJitCompilation();
+    stats_.aggJitSyncWaitTimeNs += syncWaitTimeNs;
+    LOG(INFO) << "HashAggrJit sync codegen wait before add: chunks="
+              << hashAggrJitChunks_.size()
+              << " syncWaitTimeNs=" << syncWaitTimeNs;
   }
 
   jitExecuted.assign(aggregates_.size(), 0);
@@ -1260,12 +1278,23 @@ void GroupingSet::runHashAggrJitAddChunks(
 
     {
       NanosecondTimer jitTimer(&stats_.aggFunctionJitTimeNs);
-      chunk.addDense(
+      const auto addMode = chunk.addDense(
           groups,
           activeRows_.end(),
           inputRuntimePtrs.data(),
           inputsMayHaveNulls);
+      switch (addMode) {
+        case jit::HashAggrJitAddMode::DenseNoNull:
+          stats_.aggFunctionJitNoNullRows += activeRows_.end();
+          break;
+        case jit::HashAggrJitAddMode::DenseNoNullIdentity:
+          stats_.aggFunctionJitNoNullIdentityRows += activeRows_.end();
+          break;
+        case jit::HashAggrJitAddMode::Dense:
+          break;
+      }
     }
+    stats_.aggFunctionJitRows += activeRows_.end();
     for (const auto& slot : chunk.slots()) {
       aggregates_[slot.aggregateIndex].function->markNullCountUnknown();
       jitExecuted[slot.aggregateIndex] = 1;

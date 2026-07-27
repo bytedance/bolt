@@ -845,6 +845,34 @@ void Operator::recordGroupingSetStats(const common::AggregationStats& stats) {
         RuntimeCounter{
             (int64_t)stats.aggFunctionJitTimeNs, RuntimeCounter::Unit::kNanos});
   }
+  if (stats.aggJitSyncWaitTimeNs) {
+    lockedStats->addRuntimeStat(
+        "aggJitSyncWaitTimeNs",
+        RuntimeCounter{
+            (int64_t)stats.aggJitSyncWaitTimeNs,
+            RuntimeCounter::Unit::kNanos});
+  }
+  if (stats.aggFunctionJitRows) {
+    lockedStats->addRuntimeStat(
+        "aggFunctionJitRows",
+        RuntimeCounter{
+            (int64_t)(stats.aggFunctionJitRows /
+                      std::max<uint64_t>(1, stats.aggJitPlanChunks))});
+  }
+  if (stats.aggFunctionJitNoNullRows) {
+    lockedStats->addRuntimeStat(
+        "aggFunctionJitNoNullRows",
+        RuntimeCounter{
+            (int64_t)(stats.aggFunctionJitNoNullRows /
+                      std::max<uint64_t>(1, stats.aggJitPlanChunks))});
+  }
+  if (stats.aggFunctionJitNoNullIdentityRows) {
+    lockedStats->addRuntimeStat(
+        "aggFunctionJitNoNullIdentityRows",
+        RuntimeCounter{
+            (int64_t)(stats.aggFunctionJitNoNullIdentityRows /
+                      std::max<uint64_t>(1, stats.aggJitPlanChunks))});
+  }
   if (stats.aggExtractGroupsJitTimeNs) {
     lockedStats->addRuntimeStat(
         "aggExtractGroupsJitTimeNs",

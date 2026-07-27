@@ -294,7 +294,7 @@ class GroupingSet {
   void maybeCreateHashAggrJitPlan();
   // Blocks until all outstanding background JIT compilation tasks finish, so the
   // chunks they reference can be safely destroyed or replaced.
-  void waitForHashAggrJitCompilation();
+  uint64_t waitForHashAggrJitCompilation();
   void runHashAggrJitAddChunks(
       char** groups,
       folly::Range<const vector_size_t*> newGroups,
