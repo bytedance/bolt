@@ -371,6 +371,16 @@ TEST_F(CompactRowTest, unknown) {
   testRoundTrip(data);
 }
 
+TEST_F(CompactRowTest, arrayOfUnknownFollowedByFields) {
+  auto data = makeRowVector({
+      makeArrayVector({0, 1, 3, 3}, makeAllNullFlatVector<UnknownValue>(4)),
+      makeArrayVector<int64_t>({{10}, {20, 30}, {}, {40}}),
+      makeFlatVector<std::string>({"a", "bb", "ccc", "dddd"}),
+  });
+
+  testRoundTrip(data);
+}
+
 TEST_F(CompactRowTest, mix) {
   auto data = makeRowVector({
       makeFlatVector<std::string>({"a", "Abc", "", "Longer test string"}),

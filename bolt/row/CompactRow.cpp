@@ -897,6 +897,11 @@ VectorPtr deserializeUnknownArrays(
   auto* rawSizes = sizes->as<vector_size_t>();
   const auto total = totalSize(rawSizes, numRows);
 
+  // UNKNOWN elements have no payload, but their null bitmap is still present.
+  for (auto i = 0; i < numRows; ++i) {
+    offsets[i] += bits::nbytes(rawSizes[i]);
+  }
+
   return BaseVector::createNullConstant(UNKNOWN(), total, pool);
 }
 
