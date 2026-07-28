@@ -287,8 +287,6 @@ std::vector<VectorPtr> wrapChildren(
   std::vector<VectorPtr> wrappedChildren(children.size());
   std::unordered_map<BufferPtr, BufferPtr> old2newMappings;
   auto curIndex = mapping->as<vector_size_t>();
-  // if children[i]->valueVector()->containingLazyAndWrapped() is true, it means
-  // the valueVector is isLazyNotLoaded().
   for (int i = 0; i < children.size(); ++i) {
     auto uniqueIter = uniqueDict.find(children[i]);
     if (uniqueIter != uniqueDict.end()) {
@@ -297,12 +295,13 @@ std::vector<VectorPtr> wrapChildren(
     }
     if (nulls == nullptr &&
         children[i]->encoding() == VectorEncoding::Simple::DICTIONARY &&
-        children[i]->rawNulls() == nullptr &&
-        !children[i]->valueVector()->containingLazyAndWrapped()) {
+        children[i]->rawNulls() == nullptr) {
+      auto baseValues = children[i]->valueVector();
+      baseValues->clearContainingLazyAndWrapped();
       auto newMapping = old2newMappings.find(children[i]->wrapInfo());
       if (newMapping != old2newMappings.end()) {
-        wrappedChildren[i] = wrapChild(
-            size, newMapping->second, children[i]->valueVector(), nullptr);
+        wrappedChildren[i] =
+            wrapChild(size, newMapping->second, baseValues, nullptr);
       } else {
         // generate new mapping and wrap child.value
         auto newBuffer =
@@ -312,8 +311,7 @@ std::vector<VectorPtr> wrapChildren(
         for (auto j = 0; j < size; ++j) {
           newIndex[j] = childIndex[curIndex[j]];
         }
-        wrappedChildren[i] =
-            wrapChild(size, newBuffer, children[i]->valueVector(), nullptr);
+        wrappedChildren[i] = wrapChild(size, newBuffer, baseValues, nullptr);
         old2newMappings[children[i]->wrapInfo()] = newBuffer;
       }
     } else {

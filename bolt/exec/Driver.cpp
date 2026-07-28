@@ -776,8 +776,8 @@ StopReason Driver::runInternal(
                                 << " finished. nextOp: " << nextOp->name();
                 auto timer = createDeltaCpuWallTimer(
                     [nextOp, this](const CpuWallTiming& timing) {
-                      processLazyTiming(*nextOp, timing);
-                      nextOp->stats().wlock()->finishTiming.add(timing);
+                      auto selfDelta = processLazyTiming(*nextOp, timing);
+                      nextOp->stats().wlock()->finishTiming.add(selfDelta);
                     });
                 BOLT_TEST_ADJUST(
                     "bytedance::bolt::exec::Driver::runInternal::noMoreInput",

@@ -115,13 +115,14 @@ class ParquetTestBase : public testing::Test, public test::VectorTestBase {
       const VectorPtr& expected,
       const VectorPtr& actual,
       vector_size_t offset) {
-    ASSERT_GE(expected->size(), actual->size() + offset);
-    ASSERT_EQ(expected->typeKind(), actual->typeKind());
-    for (vector_size_t i = 0; i < actual->size(); i++) {
-      ASSERT_TRUE(expected->equalValueAt(actual.get(), i + offset, i))
+    const auto& loadedActual = BaseVector::loadedVectorShared(actual);
+    ASSERT_GE(expected->size(), loadedActual->size() + offset);
+    ASSERT_EQ(expected->typeKind(), loadedActual->typeKind());
+    for (vector_size_t i = 0; i < loadedActual->size(); i++) {
+      ASSERT_TRUE(expected->equalValueAt(loadedActual.get(), i + offset, i))
           << "at " << (i + offset) << ": expected "
           << expected->toString(i + offset) << ", but got "
-          << actual->toString(i);
+          << loadedActual->toString(i);
     }
   }
 

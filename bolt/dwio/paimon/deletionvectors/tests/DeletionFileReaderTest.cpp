@@ -78,6 +78,7 @@ class DeleteionFileReaderTest : public parquet::ParquetTestBase {
     while (true) {
       auto part = rowReader->next(1024, output);
       if (part > 0) {
+        output->loadedVector();
         data.emplace_back(output);
       } else {
         break;
@@ -121,6 +122,7 @@ class DeleteionFileReaderTest : public parquet::ParquetTestBase {
       mutation.deletedRows = deletionVector->as<uint64_t>();
       auto part = reader->next(batchSize, result, &mutation);
       if (part > 0) {
+        result->loadedVector();
         assertEqualVectorPart(expected, result, total);
         total += result->size();
       } else {

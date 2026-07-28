@@ -2177,6 +2177,11 @@ void exportToArrow(
     ArrowArray& arrowArray,
     memory::MemoryPool* pool,
     const ArrowOptions& options) {
+  if (vector->encoding() == VectorEncoding::Simple::LAZY) {
+    exportToArrow(
+        BaseVector::loadedVectorShared(vector), arrowArray, pool, options);
+    return;
+  }
   if (vector->encoding() == VectorEncoding::Simple::CONSTANT &&
       options.flattenConstant && vector->valueVector() != nullptr &&
       !vector->wrappedVector()->isFlatEncoding()) {
@@ -2196,6 +2201,16 @@ void exportToArrow(
     const ArrowOptions& options,
     const std::vector<std::string>& fieldNames,
     memory::MemoryPool* pool) {
+  if (vec->encoding() == VectorEncoding::Simple::LAZY) {
+    exportToArrow(
+        BaseVector::loadedVectorShared(vec),
+        arrowSchema,
+        options,
+        fieldNames,
+        pool);
+    return;
+  }
+
   auto& type = vec->type();
 
   arrowSchema.name = nullptr;

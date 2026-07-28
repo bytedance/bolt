@@ -104,6 +104,8 @@ OrderBy::OrderBy(
 }
 
 void OrderBy::addInput(RowVectorPtr input) {
+  ReclaimableSectionGuard guard(this);
+  input->loadedVector();
   sortBuffer_->addInput(input);
 }
 

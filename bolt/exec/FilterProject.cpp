@@ -54,6 +54,21 @@ bool checkAddIdentityProjection(
   return false;
 }
 
+void loadReusedLazyVectors(
+    const RowVectorPtr& input,
+    const std::vector<column_index_t>& reusedInputChannels) {
+  if (!input || reusedInputChannels.empty()) {
+    return;
+  }
+
+  auto& children = input->children();
+  for (auto inputChannel : reusedInputChannels) {
+    if (isLazyNotLoaded(*children[inputChannel])) {
+      children[inputChannel]->loadedVector();
+    }
+  }
+}
+
 // Split stats to attrbitute cardinality reduction to the Filter node.
 std::vector<OperatorStats> splitStats(
     const OperatorStats& combinedStats,
@@ -142,6 +157,17 @@ void FilterProject::initialize() {
     }
     isIdentityProjection_ = true;
   }
+  {
+    std::unordered_map<column_index_t, size_t> inputChannelCounts;
+    for (const auto& projection : identityProjections_) {
+      ++inputChannelCounts[projection.inputChannel];
+    }
+    for (const auto& [inputChannel, count] : inputChannelCounts) {
+      if (count > 1) {
+        reusedInputChannels_.push_back(inputChannel);
+      }
+    }
+  }
   numExprs_ = allExprs.size();
   exprs_ = makeExprSetFromFlag(std::move(allExprs), operatorCtx_->execCtx());
 
@@ -169,7 +195,7 @@ void FilterProject::addInput(RowVectorPtr input) {
   if (!skipForCompositeInput_ || !RowVector::isComposite(input_)) {
     for (auto& childVec : input_->children()) {
       if ((acceptCompositeInput_ && childVec == nullptr) ||
-          childVec->isLazy() ||
+          childVec->isLazy() || isLazyNotLoaded(*childVec) ||
           childVec->encoding() != VectorEncoding::Simple::DICTIONARY) {
         continue;
       }
@@ -240,6 +266,7 @@ RowVectorPtr FilterProject::getOutput() {
     if (isCompositeInput) {
       return fillCompositeOutput(size, results);
     } else {
+      loadReusedLazyVectors(input_, reusedInputChannels_);
       return fillOutput(size, nullptr, results);
     }
   }
@@ -264,6 +291,7 @@ RowVectorPtr FilterProject::getOutput() {
     results = project(*rows, evalCtx);
   }
 
+  loadReusedLazyVectors(input_, reusedInputChannels_);
   return fillOutput(
       numOut,
       allRowsSelected ? nullptr : filterEvalCtx_.selectedIndices,

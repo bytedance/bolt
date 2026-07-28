@@ -157,6 +157,10 @@ class SelectiveStructColumnReaderBase : public SelectiveColumnReader {
 
   bool isChildMissing(const bolt::common::ScanSpec& childSpec) const;
 
+  virtual bool shouldReadChildrenEagerly() const {
+    return false;
+  }
+
   const dwio::common::ColumnReaderOptions columnReaderOptions_;
   const std::shared_ptr<const dwio::common::TypeWithId> requestedType_;
 

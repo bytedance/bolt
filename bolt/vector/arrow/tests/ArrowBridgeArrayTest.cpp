@@ -40,6 +40,7 @@
 #include "bolt/vector/arrow/Bridge.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
+
 namespace bytedance::bolt::test {
 namespace {
 
@@ -619,6 +620,51 @@ TEST_F(ArrowBridgeArrayExportTest, rowVector) {
   arrowArray.release(&arrowArray);
   EXPECT_EQ(nullptr, arrowArray.release);
   EXPECT_EQ(nullptr, arrowArray.private_data);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, rowVectorWithLazyStringChild) {
+  constexpr vector_size_t kSize = 4;
+  auto lazyString = std::make_shared<LazyVector>(
+      pool_.get(),
+      VARCHAR(),
+      kSize,
+      std::make_unique<SimpleVectorLoader>([&](RowSet /*rows*/) {
+        return BaseVector::wrapInDictionary(
+            nullptr,
+            makeIndices(
+                kSize,
+                [](vector_size_t row) {
+                  static constexpr vector_size_t kIndices[] = {0, 1, 0, 2};
+                  return kIndices[row];
+                },
+                pool_.get()),
+            kSize,
+            vectorMaker_.flatVector<std::string>(
+                {"alpha", "long string value", "gamma"}));
+      }));
+  auto vector = vectorMaker_.rowVector({lazyString});
+
+  ArrowSchema arrowSchema;
+  ArrowArray arrowArray;
+  bolt::exportToArrow(vector, arrowSchema, options_);
+  bolt::exportToArrow(vector, arrowArray, pool_.get(), options_);
+
+  ASSERT_EQ(1, arrowSchema.n_children);
+  ASSERT_EQ(1, arrowArray.n_children);
+  ASSERT_NE(nullptr, arrowSchema.children[0]);
+  ASSERT_NE(nullptr, arrowArray.children[0]);
+  EXPECT_STREQ("i", arrowSchema.children[0]->format);
+  ASSERT_NE(nullptr, arrowSchema.children[0]->dictionary);
+  ASSERT_NE(nullptr, arrowArray.children[0]->dictionary);
+  EXPECT_STREQ("u", arrowSchema.children[0]->dictionary->format);
+  EXPECT_EQ(2, arrowArray.children[0]->n_buffers);
+  EXPECT_EQ(3, arrowArray.children[0]->dictionary->n_buffers);
+
+  auto imported = bolt::importFromArrowAsOwner(
+      arrowSchema, arrowArray, options_, pool_.get());
+  test::assertEqualVectors(BaseVector::loadedVectorShared(vector), imported);
+  EXPECT_EQ(nullptr, arrowSchema.release);
+  EXPECT_EQ(nullptr, arrowArray.release);
 }
 
 // Test a rowVector containing null entries (in the parent RowVector).

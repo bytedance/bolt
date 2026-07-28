@@ -49,12 +49,52 @@
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/exec/tests/utils/WithGPUParamInterface.h"
 #include "bolt/serializers/ArrowSerializer.h"
+#include "bolt/vector/LazyVector.h"
 #include "folly/experimental/EventCount.h"
 namespace bytedance::bolt::exec::test {
 
 using bytedance::bolt::test::BatchMaker;
 using core::QueryConfig;
 using namespace common::testutil;
+
+namespace {
+template <typename T>
+class HookOnlyLazyLoader : public VectorLoader {
+ public:
+  HookOnlyLazyLoader(
+      memory::MemoryPool* pool,
+      std::function<T(vector_size_t)> valueAt,
+      vector_size_t size)
+      : pool_(pool), valueAt_(std::move(valueAt)), size_(size) {}
+
+ private:
+  void loadInternal(
+      RowSet rows,
+      ValueHook* hook,
+      vector_size_t resultSize,
+      VectorPtr* result) override {
+    if (hook != nullptr) {
+      for (auto row : rows) {
+        auto value = valueAt_(row);
+        hook->addValue(row, &value);
+      }
+      return;
+    }
+
+    BaseVector::ensureWritable(
+        SelectivityVector::empty(), CppToType<T>::create(), pool_, *result);
+    auto* flat = (*result)->template asFlatVector<T>();
+    flat->resize(std::max<vector_size_t>(resultSize, size_));
+    for (auto row : rows) {
+      flat->set(row, valueAt_(row));
+    }
+  }
+
+  memory::MemoryPool* const pool_;
+  const std::function<T(vector_size_t)> valueAt_;
+  const vector_size_t size_;
+};
+} // namespace
 
 /// No-op implementation of Aggregate. Provides public access to following
 /// base class methods: setNull, clearNull and isNull.
@@ -2936,6 +2976,55 @@ TEST_P(AggregationTest, preGroupedAggregationWithSpilling) {
   ASSERT_EQ(toPlanStats(task->taskStats()).at(aggrNodeId).spilledInputBytes, 0);
   ASSERT_EQ(toPlanStats(task->taskStats()).at(aggrNodeId).spilledBytes, 0);
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}
+
+TEST_P(AggregationTest, preGroupedSplitWithHookOnlyLazyChild) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation is not used by this lazy hook test\n";
+  }
+
+  constexpr vector_size_t kSize = 1'024;
+  auto k1 = makeFlatVector<int64_t>(kSize, [](auto row) { return row / 256; });
+  auto k2 = makeFlatVector<int64_t>(kSize, [](auto row) { return row % 8; });
+  auto valueLazy = std::make_shared<LazyVector>(
+      pool(),
+      BIGINT(),
+      kSize,
+      std::make_unique<HookOnlyLazyLoader<int64_t>>(
+          pool(),
+          [](vector_size_t row) { return static_cast<int64_t>(row); },
+          kSize));
+  auto input = makeRowVector({"k1", "k2", "v"}, {k1, k2, valueLazy});
+
+  auto plan = PlanBuilder()
+                  .values({input})
+                  .aggregation(
+                      {"k1", "k2"},
+                      {"k1"},
+                      {"min(v)", "bitwise_or_agg(v)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
+                  .planNode();
+
+  std::vector<int64_t> expectedK1(32);
+  std::vector<int64_t> expectedK2(32);
+  std::vector<int64_t> expectedMin(32);
+  std::vector<int64_t> expectedOr(32);
+  for (vector_size_t group = 0; group < 32; ++group) {
+    expectedK1[group] = group / 8;
+    expectedK2[group] = group % 8;
+    expectedMin[group] = expectedK1[group] * 256 + expectedK2[group];
+    expectedOr[group] = (expectedK1[group] << 8) | 248 | expectedK2[group];
+  }
+  auto expected = makeRowVector(
+      {"k1", "k2", "m", "o"},
+      {makeFlatVector<int64_t>(expectedK1),
+       makeFlatVector<int64_t>(expectedK2),
+       makeFlatVector<int64_t>(expectedMin),
+       makeFlatVector<int64_t>(expectedOr)});
+
+  AssertQueryBuilder(plan).assertResults(expected);
 }
 
 TEST_P(AggregationTest, adaptiveOutputBatchRows) {

@@ -113,6 +113,7 @@ PaimonRowIteratorPtr PaimonSplitReader::getIterator(SplitReader* rowReader) {
 
   if (rowReader->next(paimon::kMAX_BATCH_SIZE, result)) {
     RowVectorPtr resultAsRowVect = std::static_pointer_cast<RowVector>(result);
+    resultAsRowVect->loadedVector();
     auto primaryKeys = projectVector(resultAsRowVect, primaryKeyIndices_);
 
     auto sequenceFields =

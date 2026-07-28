@@ -339,6 +339,29 @@ TEST_F(FilterProjectTest, projectAndIdentityOverLazy) {
   assertQuery(plan, "SELECT c0 < 10 AND c1 < 10, c1 FROM tmp");
 }
 
+TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazy) {
+  vector_size_t size = 100;
+  auto valueAt = [](auto row) -> int32_t { return row; };
+  auto lazyVectors = makeRowVector({
+      makeFlatVector<int32_t>(size, valueAt),
+      vectorMaker_.lazyFlatVector<int32_t>(size, valueAt),
+  });
+
+  auto vectors = makeRowVector({
+      makeFlatVector<int32_t>(size, valueAt),
+      makeFlatVector<int32_t>(size, valueAt),
+  });
+
+  createDuckDbTable({vectors});
+
+  auto plan = PlanBuilder()
+                  .values({lazyVectors})
+                  .filter("c0 % 2 = 0")
+                  .project({"c1", "c1"})
+                  .planNode();
+  assertQuery(plan, "SELECT c1, c1 FROM tmp WHERE c0 % 2 = 0");
+}
+
 // Verify that nulls on nested parent are propagated to child without copying
 // the child.  Note that null on top level columns are handled separately in
 // Expr::evalWithNulls; this happens only once per expression tree so we are not

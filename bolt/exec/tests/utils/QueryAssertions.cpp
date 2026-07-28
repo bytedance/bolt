@@ -899,13 +899,19 @@ std::vector<MaterializedRow> materialize(const RowVectorPtr& vector) {
   rows.reserve(size);
 
   auto rowType = vector->type()->as<TypeKind::ROW>();
+  std::vector<VectorPtr> loadedChildren;
+  loadedChildren.reserve(rowType.size());
+  for (size_t i = 0; i < rowType.size(); ++i) {
+    loadedChildren.push_back(
+        BaseVector::loadedVectorShared(vector->childAt(i)));
+  }
 
   for (size_t i = 0; i < size; ++i) {
     auto numColumns = rowType.size();
     MaterializedRow row;
     row.reserve(numColumns);
     for (size_t j = 0; j < numColumns; ++j) {
-      row.push_back(variantAt(vector->childAt(j), i));
+      row.push_back(variantAt(loadedChildren[j], i));
     }
     rows.push_back(row);
   }
@@ -1418,7 +1424,9 @@ std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>> readCursor(
   addSplits(task);
 
   while (cursor->moveNext()) {
-    result.push_back(cursor->current());
+    auto vector = cursor->current();
+    vector->loadedVector();
+    result.push_back(std::move(vector));
     addSplits(task);
   }
 

@@ -503,6 +503,47 @@ TEST_F(OperatorUtilsTest, projectDuplicateChildren) {
   }
 }
 
+TEST_F(OperatorUtilsTest, projectDictionaryOverLazyCombinesWrappers) {
+  auto flatVector =
+      makeFlatVector<int64_t>(5, [](vector_size_t row) { return 10 + row; });
+  const auto size = flatVector->size();
+  auto lazyVector = std::make_shared<LazyVector>(
+      pool(),
+      BIGINT(),
+      size,
+      std::make_unique<SimpleVectorLoader>(
+          [&](RowSet /*rows*/) { return flatVector; }));
+
+  auto innerMapping = makeIndices(size, [](vector_size_t row) {
+    return static_cast<vector_size_t>(4 - row);
+  });
+  auto dictionaryOverLazy =
+      BaseVector::wrapInDictionary(nullptr, innerMapping, size, lazyVector);
+  auto rowVector = makeRowVector({dictionaryOverLazy});
+
+  auto outerMapping = makeIndices(size, [](vector_size_t row) {
+    return static_cast<vector_size_t>((row + 1) % 5);
+  });
+  std::vector<VectorPtr> projectedChildren(1);
+  projectChildren(
+      projectedChildren,
+      rowVector,
+      std::vector<IdentityProjection>{{0, 0}},
+      size,
+      outerMapping);
+
+  ASSERT_EQ(
+      projectedChildren[0]->encoding(), VectorEncoding::Simple::DICTIONARY);
+  ASSERT_EQ(projectedChildren[0]->valueVector().get(), lazyVector.get());
+
+  auto expected = makeFlatVector<int64_t>(size, [&](vector_size_t row) {
+    auto outer = outerMapping->as<vector_size_t>()[row];
+    auto inner = innerMapping->as<vector_size_t>()[outer];
+    return flatVector->valueAt(inner);
+  });
+  bytedance::bolt::test::assertEqualVectors(expected, projectedChildren[0]);
+}
+
 TEST_F(OperatorUtilsTest, reclaimableSectionGuard) {
   RowTypePtr rowType = ROW({"c0"}, {INTEGER()});
 

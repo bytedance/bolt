@@ -149,5 +149,10 @@ class FilterProject : public Operator {
   // will load c1 only for rows where f(c0) is true. However, c1 identity
   // projection needs all rows.
   std::vector<column_index_t> multiplyReferencedFieldIndices_;
+
+  // Input channels that map to more than one output channel via identity
+  // projections. These lazy vectors must be loaded before fillOutput to avoid
+  // sharing unloaded lazy vectors across multiple output fields.
+  std::vector<column_index_t> reusedInputChannels_;
 };
 } // namespace bytedance::bolt::exec

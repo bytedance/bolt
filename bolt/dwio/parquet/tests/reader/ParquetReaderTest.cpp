@@ -34,9 +34,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <random>
-#ifdef SPARK_COMPATIBLE
 #include "bolt/common/base/tests/GTestUtils.h"
-#endif
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
@@ -127,6 +125,15 @@ class CollectValueHook : public ValueHook {
   std::vector<T> values_;
   std::vector<bool> present_;
 };
+
+BaseVector* loadedChildAt(RowVector* row, vector_size_t index) {
+  return row->childAt(index)->loadedVector();
+}
+
+template <typename T>
+FlatVector<T>* loadedFlatChildAt(RowVector* row, vector_size_t index) {
+  return loadedChildAt(row, index)->asFlatVector<T>();
+}
 } // namespace
 
 namespace bytedance::bolt::parquet {
@@ -331,7 +338,7 @@ TEST_F(ParquetReaderTest, parseDecimal) {
   auto result = BaseVector::create(schema, 1, leafPool_.get());
   rowReader->next(6, result);
   auto decimals = result->as<RowVector>();
-  auto a = decimals->childAt(0)->asFlatVector<int128_t>()->rawValues();
+  auto a = loadedFlatChildAt<int128_t>(decimals, 0)->rawValues();
   EXPECT_EQ(a[0], 64830000);
 }
 
@@ -1441,8 +1448,8 @@ TEST_F(ParquetReaderTest, parseIntDecimal) {
   rowReader->next(6, result);
   EXPECT_EQ(result->size(), 6ULL);
   auto decimals = result->as<RowVector>();
-  auto a = decimals->childAt(0)->asFlatVector<int64_t>()->rawValues();
-  auto b = decimals->childAt(1)->asFlatVector<int64_t>()->rawValues();
+  auto a = loadedFlatChildAt<int64_t>(decimals, 0)->rawValues();
+  auto b = loadedFlatChildAt<int64_t>(decimals, 1)->rawValues();
   for (int i = 0; i < 3; i++) {
     int index = 2 * i;
     EXPECT_EQ(a[index], expectValues[i]);
@@ -1545,7 +1552,8 @@ TEST_F(ParquetReaderTest, parseRowArrayTest) {
 
   ASSERT_TRUE(rowReader->next(1, result));
   // data: 10, 9, <empty>, null, {9}, 2 elements starting at 0 {{9}, {10}}}
-  auto structArray = result->as<RowVector>()->childAt(5)->as<ArrayVector>();
+  auto structArray =
+      loadedChildAt(result->as<RowVector>(), 5)->as<ArrayVector>();
   auto structEle = structArray->elements()
                        ->as<RowVector>()
                        ->childAt(0)
@@ -2226,7 +2234,7 @@ TEST_F(ParquetReaderTest, readEncryptedParquet) {
   EXPECT_EQ(rowsRead, 3);
   EXPECT_EQ(result->size(), 3);
 
-  auto ids = result->as<RowVector>()->childAt(0)->asFlatVector<int64_t>();
+  auto ids = loadedFlatChildAt<int64_t>(result->as<RowVector>(), 0);
   EXPECT_EQ(ids->valueAt(0), 1);
 }
 
@@ -2335,8 +2343,7 @@ TEST_F(ParquetReaderTest, readBinaryAsStringFromNation) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(1)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 1)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, readComplexType) {
@@ -2410,8 +2417,7 @@ TEST_F(ParquetReaderTest, readFixedLenBinaryAsStringFromUuid) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(0)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 0)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, skip) {
@@ -2486,8 +2492,7 @@ TEST_F(ParquetReaderTest, readVarbinaryFromFLBA) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(0)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 0)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, arrayOfMapOfIntKeyArrayValue) {
@@ -2770,7 +2775,7 @@ TEST_F(ParquetReaderTest, integerToVarcharSchemaMismatchCast) {
   ASSERT_EQ(numRows, 5);
 
   auto rowResult = result->as<RowVector>();
-  auto colResult = rowResult->childAt(0)->asFlatVector<StringView>();
+  auto colResult = loadedFlatChildAt<StringView>(rowResult, 0);
   ASSERT_NE(colResult, nullptr);
   EXPECT_EQ(colResult->valueAt(0).str(), "1");
   EXPECT_EQ(colResult->valueAt(1).str(), "2");
@@ -2936,13 +2941,13 @@ TEST_F(ParquetReaderTest, readVariantParquet) {
   EXPECT_EQ(result->size(), 4);
 
   auto row = result->as<RowVector>();
-  auto ids = row->childAt(0)->asFlatVector<int32_t>();
+  auto ids = loadedFlatChildAt<int32_t>(row, 0);
   EXPECT_EQ(ids->valueAt(0), 1);
   EXPECT_EQ(ids->valueAt(1), 2);
   EXPECT_EQ(ids->valueAt(2), 3);
   EXPECT_EQ(ids->valueAt(3), 4);
 
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
   std::vector<std::string> expectedJson = {
       "{\"a\":1,\"b\":[true,\"x\"],\"c\":{\"d\":3.14}}",
       "[1,2,3]",
@@ -3041,7 +3046,7 @@ TEST_F(ParquetReaderTest, readVariantParquetScanSpecOrderMismatch) {
   EXPECT_EQ(rowsRead, 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   auto variantGet = [&](const VariantValue& value, const StringView& path) {
     auto out = makeFlatVector<StringView>(1);
@@ -3080,8 +3085,8 @@ TEST_F(ParquetReaderTest, readVariantParquetPrimitivesSpark) {
   EXPECT_EQ(rowsRead, 12);
 
   auto row = result->as<RowVector>();
-  auto ids = row->childAt(0)->asFlatVector<int32_t>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto ids = loadedFlatChildAt<int32_t>(row, 0);
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   auto decodeValue = [&](const VariantValue& value) -> std::string {
     if (value.value.empty()) {
@@ -3184,9 +3189,9 @@ TEST_F(ParquetReaderTest, readVariantParquetNestedSpark) {
   EXPECT_EQ(rowsRead, 2);
 
   auto row = result->as<RowVector>();
-  auto arr = row->childAt(1)->as<ArrayVector>();
-  auto map = row->childAt(2)->as<MapVector>();
-  auto st = row->childAt(3)->as<RowVector>();
+  auto arr = loadedChildAt(row, 1)->as<ArrayVector>();
+  auto map = loadedChildAt(row, 2)->as<MapVector>();
+  auto st = loadedChildAt(row, 3)->as<RowVector>();
 
   auto variantGet = [&](const VariantValue& value, const StringView& path) {
     auto out = makeFlatVector<StringView>(1);
@@ -3225,8 +3230,8 @@ TEST_F(ParquetReaderTest, readVariantParquetNestedSpark) {
   EXPECT_EQ(gotK2, "s");
 
   // STRUCT<VARIANT, VARIANT>
-  auto v1 = st->childAt(0)->as<VariantVector>()->valueAt(0);
-  auto v2 = st->childAt(1)->as<VariantVector>()->valueAt(0);
+  auto v1 = loadedChildAt(st, 0)->as<VariantVector>()->valueAt(0);
+  auto v2 = loadedChildAt(st, 1)->as<VariantVector>()->valueAt(0);
   auto [okA, a] = variantGet(v1, "$.a");
   EXPECT_TRUE(okA);
   EXPECT_EQ(a, "1");
@@ -3252,7 +3257,7 @@ TEST_F(ParquetReaderTest, readVariantParquetRawJsonStruct) {
   EXPECT_EQ(rowsRead, 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   // Raw JSON payloads are expected to have empty metadata.
   EXPECT_TRUE(variants->valueAt(0).metadata.empty());
@@ -3302,7 +3307,7 @@ TEST_F(ParquetReaderTest, readVariantParquetRawParts) {
   EXPECT_EQ(result->size(), 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   for (int i = 0; i < 4; ++i) {
     if (variants->isNullAt(i)) {

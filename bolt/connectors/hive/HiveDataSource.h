@@ -45,6 +45,8 @@
 #include "bolt/dwio/common/Statistics.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/expression/Expr.h"
+#include "bolt/vector/DecodedVector.h"
+#include "bolt/vector/LazyVector.h"
 namespace bytedance::bolt::connector::hive {
 
 class HiveConfig;
@@ -212,9 +214,15 @@ class HiveDataSource : public DataSource {
   std::atomic<uint64_t> totalRemainingFilterTime_{0};
   uint64_t completedRows_ = 0;
 
+  // Field indices referenced in both remaining filter and output type. These
+  // columns need to be materialized eagerly to avoid missing values in output.
+  std::vector<column_index_t> multiReferencedFields_;
+
   // Reusable memory for remaining filter evaluation.
   VectorPtr filterResult_;
   SelectivityVector filterRows_;
+  DecodedVector filterLazyDecoded_;
+  SelectivityVector filterLazyBaseRows_;
   exec::FilterEvalCtx filterEvalCtx_;
 
   RowVectorPtr emptyResult_;
