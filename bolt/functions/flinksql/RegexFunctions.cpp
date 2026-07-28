@@ -32,4 +32,27 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> rlikeSignatures() {
   return re2SearchSignatures();
 }
 
+std::shared_ptr<exec::VectorFunction> makeRegexpExtract(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config) {
+  Re2ExtractOptions options;
+  options.invalidRegexPolicy = Re2ExtractErrorPolicy::kReturnNull;
+  options.invalidGroupPolicy = Re2ExtractErrorPolicy::kReturnNull;
+  options.unmatchedGroupPolicy = Re2ExtractResultPolicy::kReturnNull;
+
+  auto result = makeRe2ExtractWithOptions(name, inputArgs, config, options);
+  BOLT_USER_CHECK(
+      inputArgs[1].constantValue != nullptr &&
+          inputArgs[1].constantValue->isConstantEncoding(),
+      "{} requires a constant pattern.",
+      name);
+  return result;
+}
+
+std::vector<std::shared_ptr<exec::FunctionSignature>>
+regexpExtractSignatures() {
+  return re2ExtractSignatures();
+}
+
 } // namespace bytedance::bolt::functions::flinksql
