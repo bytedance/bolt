@@ -46,7 +46,10 @@ class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
             scanSpec,
             std::move(fileType)) {
     switch (requestedType->type()->kind()) {
-      case TypeKind::VARCHAR:
+      case TypeKind::VARCHAR: {
+        makeCastExpr(fileType_->type()->isDate() ? INTEGER() : nullptr);
+        break;
+      }
       case TypeKind::VARBINARY: {
         makeCastExpr();
         break;
@@ -78,7 +81,7 @@ class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
 
   void getValues(const RowSet& rows, VectorPtr* result) override {
     bool needConvertion = (castExprSet_ && castExprSet_->size() != 0);
-    auto& requestedType = needConvertion ? fileType_->type() : requestedType_;
+    auto& requestedType = needConvertion ? castSourceType_ : requestedType_;
     auto& fileType = static_cast<const ParquetTypeWithId&>(*fileType_);
     bool isUnsigned = false;
     if (fileType.logicalType_.has_value() &&

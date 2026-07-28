@@ -30,12 +30,17 @@
 
 #include <folly/init/Init.h>
 #include <simdjson.h>
+#include <thrift/protocol/TCompactProtocol.h> //@manual
+#include <thrift/transport/TBufferTransports.h>
+#include <fstream>
+#include <iterator>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -108,6 +113,73 @@ RowVectorPtr makeVariantParquetBatch(
       nullptr,
       groups.size(),
       std::vector<VectorPtr>{groupVector, variantStorageVector});
+}
+
+uint32_t readUint32LE(const char* data) {
+  return static_cast<uint8_t>(data[0]) | (static_cast<uint8_t>(data[1]) << 8) |
+      (static_cast<uint8_t>(data[2]) << 16) |
+      (static_cast<uint8_t>(data[3]) << 24);
+}
+
+void appendUint32LE(std::string& out, uint32_t value) {
+  out.push_back(static_cast<char>(value & 0xff));
+  out.push_back(static_cast<char>((value >> 8) & 0xff));
+  out.push_back(static_cast<char>((value >> 16) & 0xff));
+  out.push_back(static_cast<char>((value >> 24) & 0xff));
+}
+
+void rewriteDateConvertedTypeToLogicalTypeOnly(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  BOLT_CHECK(in.good(), "Failed to open Parquet file for read: {}", path);
+  std::string file(
+      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  BOLT_CHECK_GE(file.size(), 12);
+  BOLT_CHECK_EQ(file.substr(file.size() - 4), "PAR1");
+
+  const auto footerLength = readUint32LE(file.data() + file.size() - 8);
+  BOLT_CHECK_LE(footerLength + 8, file.size());
+  const auto footerOffset = file.size() - 8 - footerLength;
+
+  thrift::FileMetaData metadata;
+  auto inputBuffer = std::make_shared<apache::thrift::transport::TMemoryBuffer>(
+      reinterpret_cast<uint8_t*>(file.data() + footerOffset),
+      footerLength,
+      apache::thrift::transport::TMemoryBuffer::OBSERVE);
+  apache::thrift::protocol::TCompactProtocol inputProtocol(inputBuffer);
+  metadata.read(&inputProtocol);
+
+  bool removedDateConvertedType = false;
+  for (auto& schemaElement : metadata.schema) {
+    if (schemaElement.__isset.converted_type &&
+        schemaElement.converted_type == thrift::ConvertedType::DATE &&
+        schemaElement.__isset.logicalType &&
+        schemaElement.logicalType.__isset.DATE) {
+      schemaElement.__isset.converted_type = false;
+      removedDateConvertedType = true;
+    }
+  }
+  BOLT_CHECK(
+      removedDateConvertedType,
+      "Failed to find DATE converted_type in Parquet footer: {}",
+      path);
+
+  auto outputBuffer =
+      std::make_shared<apache::thrift::transport::TMemoryBuffer>();
+  apache::thrift::protocol::TCompactProtocol outputProtocol(outputBuffer);
+  metadata.write(&outputProtocol);
+  uint8_t* serializedFooter{nullptr};
+  uint32_t serializedFooterLength{0};
+  outputBuffer->getBuffer(&serializedFooter, &serializedFooterLength);
+
+  file.resize(footerOffset);
+  file.append(
+      reinterpret_cast<const char*>(serializedFooter), serializedFooterLength);
+  appendUint32LE(file, serializedFooterLength);
+  file.append("PAR1", 4);
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  BOLT_CHECK(out.good(), "Failed to open Parquet file for write: {}", path);
+  out.write(file.data(), file.size());
 }
 
 } // namespace
@@ -1501,9 +1573,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"integer_to_smallint",            INTEGER(),       SMALLINT(),         false},
     {"integer_to_tinyint",             INTEGER(),       TINYINT(),          false},
 
-    // ---- Accept: INT32 -> DOUBLE. INT32 is exactly representable as DOUBLE,
-    //      and Hive tables can have historical INT32 Parquet partitions after
-    //      the metastore column is widened to DOUBLE. ----
+    // ---- Accept: INT32 -> DOUBLE. INT32 is exactly representable as DOUBLE. ----
     {"integer_to_double",              INTEGER(),       DOUBLE(),           false},
 
     // ---- Reject: cross-family with no safe column-reader auto-cast ----
@@ -1512,6 +1582,14 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
 
     // ---- Accept: INT32 -> BOOLEAN for Spark/Hive compatibility. ----
     {"integer_to_boolean",             INTEGER(),       BOOLEAN(),          false},
+
+    // ---- Accept: DATE annotation read as raw epoch-day INT or VARCHAR. ----
+    {"date_to_integer",                DATE(),          INTEGER(),          false},
+    {"date_to_varchar",                DATE(),          VARCHAR(),          false},
+
+    // ---- Reject: DATE annotation should not be treated as wider int family. ----
+    {"date_to_bigint",                 DATE(),          BIGINT(),           true,
+     "From Kind: INT32(DATE), To Kind: BIGINT"},
 
     // ---- Reject: float narrowing ----
     {"double_to_real",                 DOUBLE(),        REAL(),             true},
@@ -1584,6 +1662,10 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     if (fileType->isDecimal()) {
       return makeRowVector(
           {"c0"}, {makeFlatVector<int64_t>({100, 200, 300}, fileType)});
+    }
+    if (fileType->isDate()) {
+      return makeRowVector(
+          {"c0"}, {makeFlatVector<int32_t>({1, 2, 3}, DATE())});
     }
     switch (fileType->kind()) {
       case TypeKind::TINYINT:
@@ -1758,6 +1840,79 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 #endif
+
+  // DATE annotation read as INTEGER: file INT32(DATE) [1,2,3]
+  // returns raw epoch-day integers when the Hive/Spark schema says INT.
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3}, DATE())});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {INTEGER()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // Same behavior for files that carry only the newer logicalType.DATE
+  // annotation without the deprecated converted_type field.
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3}, DATE())});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+    rewriteDateConvertedTypeToLogicalTypeOnly(file->getPath());
+
+    auto declared = ROW({"c0"}, {INTEGER()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3}, DATE())});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+    rewriteDateConvertedTypeToLogicalTypeOnly(file->getPath());
+
+    auto declared = ROW({"c0"}, {BIGINT()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    BOLT_ASSERT_THROW(
+        AssertQueryBuilder(plan)
+            .split(makeSplit(file->getPath()))
+            .copyResults(pool()),
+        "From Kind: INT32(DATE), To Kind: BIGINT");
+  }
+
+  // DATE annotation read as VARCHAR: match Spark's INT32 physical read path
+  // and stringify the raw epoch-day integer, not the formatted DATE value.
+  {
+    auto data =
+        makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3}, DATE())});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {VARCHAR()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
 
   // 3a/3b. INT32 narrowing: file INT32 read back as TINYINT and SMALLINT.
   //        Models HIVE-14294 / SPARK-16632 where Hive 1.x writes TINYINT/

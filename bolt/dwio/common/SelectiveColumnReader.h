@@ -475,7 +475,7 @@ class SelectiveColumnReader {
   // 'extraSpace' bits worth of space in the nulls buffer.
   void prepareNulls(const RowSet& rows, bool hasNulls, int32_t extraRows = 0);
 
-  void makeCastExpr();
+  void makeCastExpr(TypePtr castSourceType = nullptr);
 
   void doCastEvaluate(VectorPtr* result);
 
@@ -681,6 +681,7 @@ class SelectiveColumnReader {
   ScanState scanState_;
 
   std::unique_ptr<exec::ExprSet> castExprSet_;
+  TypePtr castSourceType_;
 
   const std::string dummyColumnName = "__innerc0__";
 };

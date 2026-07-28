@@ -75,17 +75,35 @@ namespace {
 constexpr const char* kTypeMappingErrorFmtStr =
     "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
 
-// Predicates for the cross-family implicit cast that the column reader
-// layer performs at read time (Spark/Hive STRING<->INT compatibility):
-//   - StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file ->
-//     int family requested type
-//   - IntegerColumnReader::makeCastExpr handles int family file ->
-//     VARCHAR/VARBINARY requested type
-// Both makeCastExpr paths compile unconditionally so convertType keeps
-// these schema pairs uniform across build flavours. Non-Spark builds
-// still get the strict check at ParquetColumnReader.cpp:95 via
-// matchType() for the VARCHAR-file -> INT-requested direction, which
-// fires after convertType and throws with its existing error message.
+std::string parquetSourceTypeName(const thrift::SchemaElement& schemaElement) {
+  if (schemaElement.__isset.converted_type) {
+    return fmt::format(
+        "{}({})", schemaElement.type, schemaElement.converted_type);
+  }
+  if (schemaElement.__isset.logicalType) {
+    const auto& logicalType = schemaElement.logicalType;
+    if (logicalType.__isset.DATE) {
+      return fmt::format("{}(DATE)", schemaElement.type);
+    }
+    if (logicalType.__isset.INTEGER) {
+      return fmt::format("{}(INTEGER)", schemaElement.type);
+    }
+    if (logicalType.__isset.DECIMAL) {
+      return fmt::format("{}(DECIMAL)", schemaElement.type);
+    }
+    if (logicalType.__isset.STRING) {
+      return fmt::format("{}(STRING)", schemaElement.type);
+    }
+    if (logicalType.__isset.TIMESTAMP) {
+      return fmt::format("{}(TIMESTAMP)", schemaElement.type);
+    }
+    if (logicalType.__isset.TIME) {
+      return fmt::format("{}(TIME)", schemaElement.type);
+    }
+  }
+  return fmt::format("{}", schemaElement.type);
+}
+
 // Cross-family implicit cast for VARCHAR/VARBINARY file columns:
 // StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file -> int
 // family requested type. Non-Spark builds also get a strict check at
@@ -102,8 +120,13 @@ bool acceptsIntFileForReaderCast(const bytedance::bolt::TypePtr& t) {
       t->kind() == bytedance::bolt::TypeKind::VARBINARY;
 }
 
+bool acceptsDateFile(const bytedance::bolt::TypePtr& t) {
+  return t->isDate() || t->kind() == bytedance::bolt::TypeKind::INTEGER ||
+      t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
 // Compatibility predicate for Parquet INT32-physical source columns
-// (INT_8 / INT_16 / INT_32 / UINT_* annotated, plus unannotated INT32).
+// (INT_8 / INT_16 / INT_32 annotated, plus unannotated INT32).
 // Accepts:
 //   - Any int-family target. Narrowing (file INT32 -> requested ByteType /
 //     ShortType) is silently truncated at read time, matching Spark's
@@ -1045,7 +1068,7 @@ TypePtr ReaderBase::convertType(
           BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
               kTypeMappingErrorFmtStr,
               schemaElement.name,
-              schemaElement.type,
+              parquetSourceTypeName(schemaElement),
               mapTypeKindToName(requestedType->kind())));
         }
         if (unannotatedArrayMatch) {
@@ -1127,7 +1150,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "DATE converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) { return t->isDate(); });
+        checkRequested([](const TypePtr& t) { return acceptsDateFile(t); });
         return DATE();
 
       case thrift::ConvertedType::TIMESTAMP_MICROS:
@@ -1204,6 +1227,11 @@ TypePtr ReaderBase::convertType(
             [](const TypePtr& t) { return t->kind() == TypeKind::BOOLEAN; });
         return BOOLEAN();
       case thrift::Type::type::INT32:
+        if (schemaElement.__isset.logicalType &&
+            schemaElement.logicalType.__isset.DATE) {
+          checkRequested([](const TypePtr& t) { return acceptsDateFile(t); });
+          return DATE();
+        }
         checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return INTEGER();
       case thrift::Type::type::INT64:

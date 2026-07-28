@@ -541,9 +541,10 @@ void SelectiveColumnReader::addSkippedParentNulls(
   parentNullsRecordedTo_ = to;
 }
 
-void SelectiveColumnReader::makeCastExpr() {
+void SelectiveColumnReader::makeCastExpr(TypePtr castSourceType) {
+  castSourceType_ = castSourceType ? castSourceType : fileType_->type();
   auto inputField = std::make_shared<const core::FieldAccessTypedExpr>(
-      fileType_->type(), dummyColumnName);
+      castSourceType_, dummyColumnName);
   auto castExpr = std::make_shared<const core::CastTypedExpr>(
       requestedType_, inputField, false);
   castExprSet_ = scanSpec_->getExpressionEvaluator()->compile(castExpr);
@@ -552,7 +553,7 @@ void SelectiveColumnReader::makeCastExpr() {
 void SelectiveColumnReader::doCastEvaluate(VectorPtr* result) {
   SelectivityVector dummySelectivity((*result)->size(), true);
   VectorPtr convertedResult;
-  auto rowType = ROW({dummyColumnName}, {fileType_->type()});
+  auto rowType = ROW({dummyColumnName}, {castSourceType_});
   auto rowVector = std::make_shared<RowVector>(
       (*result)->pool(),
       rowType,
