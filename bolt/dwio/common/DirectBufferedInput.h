@@ -31,9 +31,11 @@
 #pragma once
 
 #include <folly/Executor.h>
+#include <folly/Range.h>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/caching/FileGroupStats.h"
@@ -198,6 +200,12 @@ class DirectBufferedInput : public BufferedInput {
     return false;
   }
 
+  void preload();
+
+  bool preloaded() const {
+    return preloadData_.has_value();
+  }
+
   void load(const LogType /*unused*/) override;
 
   bool isBuffered(uint64_t offset, uint64_t length) const override;
@@ -231,6 +239,12 @@ class DirectBufferedInput : public BufferedInput {
   memory::MemoryPool* pool() {
     return &pool_;
   }
+
+  /// Returns a contiguous byte range from preloaded whole-file data. The
+  /// returned range can be shorter than 'length' if it reaches an allocation
+  /// run boundary.
+  folly::Range<const char*> preloadedData(uint64_t offset, uint64_t length)
+      const;
 
   /// Returns the CoalescedLoad that contains the correlated loads for
   /// 'stream' or nullptr if none. Returns nullptr on all but first
@@ -383,6 +397,14 @@ class DirectBufferedInput : public BufferedInput {
   folly::Executor* const executor_;
   const uint64_t fileSize_;
 
+  struct PreloadData {
+    explicit PreloadData(uint64_t size) : size(size) {}
+
+    memory::Allocation data;
+    std::string tinyData;
+    uint64_t size{0};
+  };
+
   // Regions that are candidates for loading.
   std::vector<LoadRequest> requests_;
 
@@ -397,6 +419,7 @@ class DirectBufferedInput : public BufferedInput {
 
   io::ReaderOptions options_;
   std::shared_ptr<connector::AsyncThreadCtx> asyncThreadCtx_ = nullptr;
+  std::optional<PreloadData> preloadData_;
 };
 
 } // namespace bytedance::bolt::dwio::common

@@ -75,6 +75,7 @@ bolt_add_library(
   ${MIN_MAX_BY_GENERATED_FILES}
   AverageAggregate.cpp
   BitmapConstructAggAggregate.cpp
+  BitmapOrAggAggregate.cpp
   BitwiseXorAggregate.cpp
   BloomFilterAggAggregate.cpp
   CentralMomentsAggregate.cpp

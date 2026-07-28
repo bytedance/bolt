@@ -130,7 +130,7 @@ bool re2Extract(
     const exec::LocalDecodedVector& strs,
     std::vector<re2::StringPiece>& groups,
     int32_t groupId,
-    bool emptyNoMatch) {
+    const Re2ExtractOptions& options) {
   const StringView str = strs->valueAt<StringView>(row);
   DCHECK_GT(groups.size(), groupId);
   if (!re.Match(
@@ -140,15 +140,20 @@ bool re2Extract(
           RE2::UNANCHORED, // Full match not required.
           groups.data(),
           groupId + 1)) {
-    if (emptyNoMatch) {
+    if (options.noMatchPolicy == Re2ExtractResultPolicy::kReturnEmptyString) {
       result.setNoCopy(row, StringView(nullptr, 0));
-      return true;
+      return false;
     } else {
       result.setNull(row, true);
       return false;
     }
   } else {
     const re2::StringPiece extracted = groups[groupId];
+    if (groupId > 0 && extracted.data() == nullptr &&
+        options.unmatchedGroupPolicy == Re2ExtractResultPolicy::kReturnNull) {
+      result.setNull(row, true);
+      return false;
+    }
     result.setNoCopy(row, StringView(extracted.data(), extracted.size()));
     return !StringView::isInline(extracted.size());
   }
@@ -329,13 +334,44 @@ void checkForBadGroupId(int64_t groupId, const RE2& re) {
   }
 }
 
+bool validatePatternForExtract(const RE2& re, Re2ExtractErrorPolicy policy) {
+  if (LIKELY(re.ok())) {
+    return true;
+  }
+  if (policy == Re2ExtractErrorPolicy::kReturnNull) {
+    return false;
+  }
+  checkForBadPattern(re);
+  return false;
+}
+
+bool validateGroupIdForExtract(
+    int64_t groupId,
+    const RE2& re,
+    Re2ExtractErrorPolicy policy) {
+  if (LIKELY(groupId >= 0 && groupId <= re.NumberOfCapturingGroups())) {
+    return true;
+  }
+  if (policy == Re2ExtractErrorPolicy::kReturnNull) {
+    return false;
+  }
+  checkForBadGroupId(groupId, re);
+  return false;
+}
+
+void setNullForRows(
+    const SelectivityVector& rows,
+    FlatVector<StringView>& result) {
+  rows.applyToSelected([&](vector_size_t row) { result.setNull(row, true); });
+}
+
 template <typename T>
 class Re2SearchAndExtractConstantPattern final : public VectorFunction {
  public:
   explicit Re2SearchAndExtractConstantPattern(
       StringView pattern,
-      bool emptyNoMatch)
-      : re_(toStringPiece(pattern), RE2::Quiet), emptyNoMatch_(emptyNoMatch) {}
+      const Re2ExtractOptions& options)
+      : re_(toStringPiece(pattern), RE2::Quiet), options_(options) {}
 
   void apply(
       const SelectivityVector& rows,
@@ -350,8 +386,11 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
 
     // apply() will not be invoked if the selection is empty.
     try {
-      checkForBadPattern(re_);
-    } catch (const std::exception& e) {
+      if (!validatePatternForExtract(re_, options_.invalidRegexPolicy)) {
+        setNullForRows(rows, result);
+        return;
+      }
+    } catch (const std::exception& /* e */) {
       context.setErrors(rows, std::current_exception());
       return;
     }
@@ -364,7 +403,7 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
       groups.resize(1);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
         mustRefSourceStrings |=
-            re2Extract(result, i, re_, toSearch, groups, 0, emptyNoMatch_);
+            re2Extract(result, i, re_, toSearch, groups, 0, options_);
       });
       if (mustRefSourceStrings) {
         result.acquireSharedStringBuffers(toSearch->base());
@@ -374,16 +413,20 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
 
     if (const auto groupId = getIfConstant<T>(*args[2])) {
       try {
-        checkForBadGroupId(*groupId, re_);
-      } catch (const std::exception& e) {
+        if (!validateGroupIdForExtract(
+                *groupId, re_, options_.invalidGroupPolicy)) {
+          setNullForRows(rows, result);
+          return;
+        }
+      } catch (const std::exception& /* e */) {
         context.setErrors(rows, std::current_exception());
         return;
       }
 
       groups.resize(*groupId + 1);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
-        mustRefSourceStrings |= re2Extract(
-            result, i, re_, toSearch, groups, *groupId, emptyNoMatch_);
+        mustRefSourceStrings |=
+            re2Extract(result, i, re_, toSearch, groups, *groupId, options_);
       });
       if (mustRefSourceStrings) {
         result.acquireSharedStringBuffers(toSearch->base());
@@ -398,9 +441,12 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
     groups.resize(re_.NumberOfCapturingGroups() + 1);
     context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
       T group = groupIds->valueAt<T>(i);
-      checkForBadGroupId(group, re_);
+      if (!validateGroupIdForExtract(group, re_, options_.invalidGroupPolicy)) {
+        result.setNull(i, true);
+        return;
+      }
       mustRefSourceStrings |=
-          re2Extract(result, i, re_, toSearch, groups, group, emptyNoMatch_);
+          re2Extract(result, i, re_, toSearch, groups, group, options_);
     });
     if (mustRefSourceStrings) {
       result.acquireSharedStringBuffers(toSearch->base());
@@ -409,7 +455,7 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
 
  private:
   RE2 re_;
-  const bool emptyNoMatch_;
+  const Re2ExtractOptions options_;
 }; // namespace
 
 // The factory function we provide returns a unique instance for each call, so
@@ -417,8 +463,8 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
 template <typename T>
 class Re2SearchAndExtract final : public VectorFunction {
  public:
-  explicit Re2SearchAndExtract(bool emptyNoMatch)
-      : emptyNoMatch_(emptyNoMatch) {}
+  explicit Re2SearchAndExtract(const Re2ExtractOptions& options)
+      : options_(options) {}
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
@@ -428,7 +474,7 @@ class Re2SearchAndExtract final : public VectorFunction {
     BOLT_CHECK(args.size() == 2 || args.size() == 3);
     // Handle the common case of a constant pattern.
     if (auto pattern = getIfConstant<StringView>(*args[1])) {
-      Re2SearchAndExtractConstantPattern<T>(*pattern, emptyNoMatch_)
+      Re2SearchAndExtractConstantPattern<T>(*pattern, options_)
           .apply(rows, args, outputType, context, resultRef);
       return;
     }
@@ -445,20 +491,27 @@ class Re2SearchAndExtract final : public VectorFunction {
       groups.resize(1);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
         RE2 re(toStringPiece(pattern->valueAt<StringView>(i)), RE2::Quiet);
-        checkForBadPattern(re);
+        if (!validatePatternForExtract(re, options_.invalidRegexPolicy)) {
+          result.setNull(i, true);
+          return;
+        }
         mustRefSourceStrings |=
-            re2Extract(result, i, re, toSearch, groups, 0, emptyNoMatch_);
+            re2Extract(result, i, re, toSearch, groups, 0, options_);
       });
     } else {
       exec::LocalDecodedVector groupIds(context, *args[2], rows);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
         const auto groupId = groupIds->valueAt<T>(i);
         RE2 re(toStringPiece(pattern->valueAt<StringView>(i)), RE2::Quiet);
-        checkForBadPattern(re);
-        checkForBadGroupId(groupId, re);
+        if (!validatePatternForExtract(re, options_.invalidRegexPolicy) ||
+            !validateGroupIdForExtract(
+                groupId, re, options_.invalidGroupPolicy)) {
+          result.setNull(i, true);
+          return;
+        }
         groups.resize(groupId + 1);
         mustRefSourceStrings |=
-            re2Extract(result, i, re, toSearch, groups, groupId, emptyNoMatch_);
+            re2Extract(result, i, re, toSearch, groups, groupId, options_);
       });
     }
     if (mustRefSourceStrings) {
@@ -467,7 +520,7 @@ class Re2SearchAndExtract final : public VectorFunction {
   }
 
  private:
-  const bool emptyNoMatch_;
+  const Re2ExtractOptions options_;
 };
 
 // Match string 'input' with a fixed pattern (with no wildcard characters).
@@ -1058,8 +1111,20 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> re2SearchSignatures() {
 std::shared_ptr<VectorFunction> makeRe2Extract(
     const std::string& name,
     const std::vector<VectorFunctionArg>& inputArgs,
-    const core::QueryConfig& /*config*/,
+    const core::QueryConfig& config,
     const bool emptyNoMatch) {
+  Re2ExtractOptions options;
+  options.noMatchPolicy = emptyNoMatch
+      ? Re2ExtractResultPolicy::kReturnEmptyString
+      : Re2ExtractResultPolicy::kReturnNull;
+  return makeRe2ExtractWithOptions(name, inputArgs, config, options);
+}
+
+std::shared_ptr<VectorFunction> makeRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& /*config*/,
+    const Re2ExtractOptions& options) {
   auto numArgs = inputArgs.size();
   BOLT_USER_CHECK(
       numArgs == 2 || numArgs == 3,
@@ -1098,10 +1163,10 @@ std::shared_ptr<VectorFunction> makeRe2Extract(
     switch (groupIdTypeKind) {
       case TypeKind::INTEGER:
         return std::make_shared<Re2SearchAndExtractConstantPattern<int32_t>>(
-            pattern, emptyNoMatch);
+            pattern, options);
       case TypeKind::BIGINT:
         return std::make_shared<Re2SearchAndExtractConstantPattern<int64_t>>(
-            pattern, emptyNoMatch);
+            pattern, options);
       default:
         BOLT_UNREACHABLE();
     }
@@ -1109,9 +1174,9 @@ std::shared_ptr<VectorFunction> makeRe2Extract(
 
   switch (groupIdTypeKind) {
     case TypeKind::INTEGER:
-      return std::make_shared<Re2SearchAndExtract<int32_t>>(emptyNoMatch);
+      return std::make_shared<Re2SearchAndExtract<int32_t>>(options);
     case TypeKind::BIGINT:
-      return std::make_shared<Re2SearchAndExtract<int64_t>>(emptyNoMatch);
+      return std::make_shared<Re2SearchAndExtract<int64_t>>(options);
     default:
       BOLT_UNREACHABLE();
   }

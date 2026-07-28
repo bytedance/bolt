@@ -21,10 +21,12 @@
 #include "bolt/functions/flinksql/DateTimeDiff.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/HashCodeFunction.h"
+#include "bolt/functions/flinksql/ICURegexFunctions.h"
 #include "bolt/functions/flinksql/Rand.h"
 #include "bolt/functions/flinksql/RegexFunctions.h"
 #include "bolt/functions/flinksql/String.h"
 #include "bolt/functions/flinksql/ToTimestampFunction.h"
+#include "bolt/functions/flinksql/URLFunctions.h"
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 
 namespace bytedance::bolt::functions {
@@ -46,10 +48,20 @@ static void registerStringFunctions(const std::string& prefix) {
   registerFunction<IsDigitFunction, bool, Varchar>({prefix + "is_digit"});
   exec::registerStatefulVectorFunction(
       prefix + "rlike", rlikeSignatures(), makeRLike);
+  exec::registerStatefulVectorFunction(
+      prefix + "regexp_extract", regexpExtractSignatures(), makeRegexpExtract);
+  exec::registerStatefulVectorFunction(
+      prefix + "icu_regexp_extract",
+      icuRegexExtractSignatures(),
+      makeICURegexExtract);
   registerFunction<SplitIndex, Varchar, Varchar, Varchar, int64_t>(
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(
       {prefix + "split_index"});
+  registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar>(
+      {prefix + "flink_parse_url"});
+  registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar, Varchar>(
+      {prefix + "flink_parse_url"});
 }
 
 static void registerDatetimeFunctions(const std::string& prefix) {

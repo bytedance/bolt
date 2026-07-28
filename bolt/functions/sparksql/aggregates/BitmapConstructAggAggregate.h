@@ -16,16 +16,12 @@
 
 #pragma once
 
-#include <cstdint>
 #include <string>
 
 #include "bolt/exec/AggregateUtil.h"
+#include "bolt/functions/sparksql/aggregates/BitmapUtil.h"
 
 namespace bytedance::bolt::functions::aggregate::sparksql {
-
-// Matching Spark's BitmapExpressionUtils.NUM_BYTES (4 KiB, 32768 bits).
-inline constexpr int32_t kBitmapNumBytes = 4096;
-inline constexpr int32_t kBitmapNumBits = kBitmapNumBytes * 8;
 
 exec::AggregateRegistrationResult registerBitmapConstructAggAggregate(
     const std::string& name,

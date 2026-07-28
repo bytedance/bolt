@@ -1,0 +1,72 @@
+diff --git a/recipes/autoconf/all/conandata.yml b/recipes/autoconf/all/conandata.yml
+--- a/recipes/autoconf/all/conandata.yml
++++ b/recipes/autoconf/all/conandata.yml
+@@ -6,6 +6,7 @@ sources:
+     sha256: "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
+   "2.71":
+     url:
++      - "https://mirrors.kernel.org/gnu/autoconf/autoconf-2.71.tar.xz"
+       - "https://ftpmirror.gnu.org/autoconf/autoconf-2.71.tar.xz"
+       - "https://ftp.gnu.org/gnu/autoconf/autoconf-2.71.tar.xz"
+     sha256: "f14c83cfebcc9427f2c3cea7258bd90df972d92eb26752da4ddad81c87a0faa4"
+diff --git a/recipes/automake/all/conandata.yml b/recipes/automake/all/conandata.yml
+--- a/recipes/automake/all/conandata.yml
++++ b/recipes/automake/all/conandata.yml
+@@ -1,6 +1,8 @@
+ sources:
+   "1.16.5":
+-    url: "https://ftp.gnu.org/gnu/automake/automake-1.16.5.tar.gz"
++    url:
++      - "https://mirrors.kernel.org/gnu/automake/automake-1.16.5.tar.gz"
++      - "https://ftp.gnu.org/gnu/automake/automake-1.16.5.tar.gz"
+     sha256: "07bd24ad08a64bc17250ce09ec56e921d6343903943e99ccf63bbf0705e34605"
+   "1.16.4":
+     url: "https://ftp.gnu.org/gnu/automake/automake-1.16.4.tar.gz"
+diff --git a/recipes/bison/all/conandata.yml b/recipes/bison/all/conandata.yml
+--- a/recipes/bison/all/conandata.yml
++++ b/recipes/bison/all/conandata.yml
+@@ -1,6 +1,8 @@
+ sources:
+   "3.8.2":
+-    url: "https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz"
++    url:
++      - "https://mirrors.kernel.org/gnu/bison/bison-3.8.2.tar.gz"
++      - "https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz"
+     sha256: "06c9e13bdf7eb24d4ceb6b59205a4f67c2c7e7213119644430fe82fbd14a0abb"
+   "3.7.6":
+     url: "https://ftp.gnu.org/gnu/bison/bison-3.7.6.tar.gz"
+diff --git a/recipes/libiberty/all/conandata.yml b/recipes/libiberty/all/conandata.yml
+--- a/recipes/libiberty/all/conandata.yml
++++ b/recipes/libiberty/all/conandata.yml
+@@ -1,4 +1,6 @@
+ sources:
+   "9.1.0":
+-    url: "https://ftp.gnu.org/pub/gnu/gcc/gcc-9.1.0/gcc-9.1.0.tar.gz"
++    url:
++      - "https://mirrors.kernel.org/gnu/gcc/gcc-9.1.0/gcc-9.1.0.tar.gz"
++      - "https://ftp.gnu.org/pub/gnu/gcc/gcc-9.1.0/gcc-9.1.0.tar.gz"
+     sha256: "be303f7a8292982a35381489f5a9178603cbe9a4715ee4fa4a815d6bcd2b658d"
+diff --git a/recipes/libtool/all/conandata.yml b/recipes/libtool/all/conandata.yml
+--- a/recipes/libtool/all/conandata.yml
++++ b/recipes/libtool/all/conandata.yml
+@@ -1,6 +1,8 @@
+ sources:
+   "2.4.7":
+-    url: "https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.gz"
++    url:
++      - "https://mirrors.kernel.org/gnu/libtool/libtool-2.4.7.tar.gz"
++      - "https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.gz"
+     sha256: "04e96c2404ea70c590c546eba4202a4e12722c640016c12b9b2f1ce3d481e9a8"
+   "2.4.6":
+     url: "https://ftp.gnu.org/gnu/libtool/libtool-2.4.6.tar.gz"
+diff --git a/recipes/m4/all/conandata.yml b/recipes/m4/all/conandata.yml
+--- a/recipes/m4/all/conandata.yml
++++ b/recipes/m4/all/conandata.yml
+@@ -1,6 +1,7 @@
+ sources:
+   "1.4.19":
+     url:
++      - "https://mirrors.kernel.org/gnu/m4/m4-1.4.19.tar.xz"
+       - "https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.xz"
+       - "https://ftpmirror.gnu.org/gnu/m4/m4-1.4.19.tar.xz"
+     sha256: "63aede5c6d33b6d9b13511cd0be2cac046f2e70fd0a07aa9573a04a82783af96"

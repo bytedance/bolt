@@ -29,6 +29,7 @@ add_executable(
   bolt_functions_spark_aggregates_test
   AverageAggregationTest.cpp
   BitmapConstructAggAggregateTest.cpp
+  BitmapOrAggAggregateTest.cpp
   BitwiseXorAggregationTest.cpp
   BloomFilterAggAggregateTest.cpp
   CentralMomentsAggregationTest.cpp

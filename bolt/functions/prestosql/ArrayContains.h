@@ -16,8 +16,17 @@
 
 #pragma once
 
+#include <memory>
+#include <vector>
 #include "bolt/core/Expressions.h"
+#include "bolt/expression/FunctionSignature.h"
+#include "bolt/expression/VectorFunction.h"
 namespace bytedance::bolt::functions {
+
+std::vector<std::shared_ptr<exec::FunctionSignature>> arrayContainsSignatures();
+
+std::unique_ptr<exec::VectorFunction> createArrayContainsFunction(
+    bool throwOnNestedNull);
 
 /// array_contains(array, element) -> boolean => element in array if array is a
 /// constant

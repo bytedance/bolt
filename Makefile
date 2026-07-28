@@ -177,7 +177,8 @@ conan_install:
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
 	echo " \
-	-pr ${PROFILE} -pr ../../scripts/conan/bolt.profile \
+	-pr:h ${PROFILE} \
+	-pr:h ../../scripts/conan/bolt.profile \
 	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
@@ -189,7 +190,12 @@ conan_install:
 	mv new_conan.options conan.options && \
 	echo ${BUILD_TYPE} > ../.build_type && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan graph info ../.. $${ALL_CONAN_OPTIONS} --format=html > bolt.conan.graph.html  && \
+	conan graph info ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	   -s llvm-core/*:build_type=Release \
+	   -s "&:build_type=${BUILD_TYPE}" \
+	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	   $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing \
+	   --format=html > bolt.conan.graph.html && \
 	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
 	conan install ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \

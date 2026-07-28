@@ -52,7 +52,8 @@ void registerSparkArrayFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_reduce, prefix + "aggregate");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_filter, prefix + "filter");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_constructor, prefix + "array");
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_array_contains, prefix + "array_contains");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      udf_spark_array_contains, prefix + "array_contains");
   BOLT_REGISTER_VECTOR_FUNCTION(
       udf_array_intersect, prefix + "array_intersect");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_array_except, prefix + "array_except");

@@ -46,6 +46,24 @@ enum class InvalidRegexPolicy {
   kReturnFalse,
 };
 
+enum class Re2ExtractResultPolicy {
+  kReturnNull,
+  kReturnEmptyString,
+};
+
+enum class Re2ExtractErrorPolicy {
+  kThrow,
+  kReturnNull,
+};
+
+struct Re2ExtractOptions {
+  Re2ExtractResultPolicy noMatchPolicy{Re2ExtractResultPolicy::kReturnNull};
+  Re2ExtractErrorPolicy invalidRegexPolicy{Re2ExtractErrorPolicy::kThrow};
+  Re2ExtractErrorPolicy invalidGroupPolicy{Re2ExtractErrorPolicy::kThrow};
+  Re2ExtractResultPolicy unmatchedGroupPolicy{
+      Re2ExtractResultPolicy::kReturnEmptyString};
+};
+
 /// Representation of different kinds of patterns.
 enum class PatternKind {
   /// Pattern containing wildcard character '_' only, such as _, __, ____.
@@ -136,6 +154,12 @@ std::shared_ptr<exec::VectorFunction> makeRe2Extract(
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config,
     const bool emptyNoMatch);
+
+std::shared_ptr<exec::VectorFunction> makeRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    const Re2ExtractOptions& options);
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2ExtractSignatures();
 

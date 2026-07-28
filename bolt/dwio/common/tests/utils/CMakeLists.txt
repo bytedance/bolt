@@ -40,8 +40,3 @@ target_link_libraries(
   bolt_type_fbhive
   bolt_vector
 )
-
-# older versions of GCC need it to allow std::filesystem
-if(CMAKE_COMPILER_IS_GNUCC AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
-  target_link_libraries(bolt_dwio_common_test_utils stdc++fs)
-endif()

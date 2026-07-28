@@ -18,9 +18,6 @@
 
 #include <cstring>
 
-#include <xsimd/xsimd.hpp>
-
-#include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
 #include "bolt/vector/FlatVector.h"
@@ -28,45 +25,6 @@
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
-
-// 4096-byte inline bitmap. uint8_t ensures portable unsigned bitwise
-// semantics. Trivially constructible/destructible — safe for Bolt's group
-// reuse where placement-new may be called on previously freed memory.
-struct BitmapAccumulator {
-  uint8_t bitmap_[kBitmapNumBytes] = {};
-
-  FOLLY_ALWAYS_INLINE void setPosition(int64_t position) {
-    BOLT_USER_CHECK(
-        position >= 0 && position < kBitmapNumBits,
-        "Invalid bitmap position: {} (valid range: [0, {}))",
-        position,
-        static_cast<int64_t>(kBitmapNumBits));
-    int32_t byteIdx = static_cast<int32_t>(position / 8);
-    int32_t bitIdx = static_cast<int32_t>(position % 8);
-    bitmap_[byteIdx] |= static_cast<uint8_t>(1 << bitIdx);
-  }
-
-  // Byte-wise bitwise OR. xsimd vectorizes across 16 (NEON) or 32 (AVX2)
-  // bytes per iteration.
-  void mergeWith(const char* other) {
-    const auto* otherBytes = reinterpret_cast<const uint8_t*>(other);
-    using Batch = xsimd::batch<uint8_t>;
-    static constexpr int32_t kBatchSize = Batch::size;
-    int32_t i = 0;
-    for (; i + kBatchSize <= kBitmapNumBytes; i += kBatchSize) {
-      auto a = Batch::load_unaligned(bitmap_ + i);
-      auto b = Batch::load_unaligned(otherBytes + i);
-      (a | b).store_unaligned(bitmap_ + i);
-    }
-    for (; i < kBitmapNumBytes; ++i) {
-      bitmap_[i] |= otherBytes[i];
-    }
-  }
-};
-
-static_assert(
-    sizeof(BitmapAccumulator) == kBitmapNumBytes,
-    "BitmapAccumulator size must be exactly 4096 bytes");
 
 // Shared raw-input decoding for single-group and multi-group paths.
 template <typename GetAccumulator>

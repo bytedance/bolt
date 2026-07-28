@@ -23,7 +23,6 @@ set(TXT_TEST_LINK_LIBS
     GTest::gmock
     gflags::gflags
     ${GLOG}
-    ${FILESYSTEM}
 )
 
 add_subdirectory(reader)
