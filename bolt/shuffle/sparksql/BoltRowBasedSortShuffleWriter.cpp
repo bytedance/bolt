@@ -58,7 +58,6 @@ arrow::Status BoltRowBasedSortShuffleWriter::init() {
 arrow::Status BoltRowBasedSortShuffleWriter::split(
     bytedance::bolt::RowVectorPtr rv,
     int64_t memLimit) {
-  bytedance::bolt::NanosecondTimer splitTimer(&totalSplitTime_);
   updateInputMetrics(rv);
   if (bytedance::bolt::RowVector::isComposite(rv)) {
     // from columnar to composite, flush all previous batches
@@ -78,10 +77,11 @@ arrow::Status BoltRowBasedSortShuffleWriter::split(
   vectorLayout_ = RowVectorLayout::kColumnar;
   ShuffleColumnarToRowConverter::RowVectorWithStats fullStats;
   {
-    bytedance::bolt::NanosecondTimer timer(&flattenTime_);
-
-    ensurePartialFlatten(rv, {0});
-    ensureVectorLoaded(rv);
+    {
+      bytedance::bolt::NanosecondTimer timer(&flattenTime_);
+      ensurePartialFlatten(rv, {0});
+      ensureVectorLoaded(rv);
+    }
     BOLT_CHECK(
         rv != nullptr && (options_.partitioning != Partitioning::kSingle) &&
         partitioner_->hasPid());
@@ -211,7 +211,6 @@ arrow::Status BoltRowBasedSortShuffleWriter::reclaimFixedSize(
 }
 
 arrow::Status BoltRowBasedSortShuffleWriter::stop() {
-  bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   setSplitState(SplitState::kStop);
   RETURN_NOT_OK(tryEvict());
   {

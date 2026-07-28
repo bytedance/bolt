@@ -42,7 +42,6 @@ set(TEST_LINK_LIBS
     GTest::gtest_main
     GTest::gmock
     glog::glog
-    ${FILESYSTEM}
 )
 
 include_directories("${CMAKE_BINARY_DIR}")

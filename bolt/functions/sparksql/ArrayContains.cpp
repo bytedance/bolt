@@ -1,5 +1,5 @@
 /*
- * Copyright (c) ByteDance Ltd. and/or its affiliates
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,16 @@
  * limitations under the License.
  */
 
-#pragma once
+#include "bolt/functions/prestosql/ArrayContains.h"
+#include "bolt/expression/VectorFunction.h"
 
-#include <string>
+namespace bytedance::bolt::functions {
 
-#include "bolt/exec/AggregateUtil.h"
-#include "bolt/functions/sparksql/aggregates/BitmapUtil.h"
+// Spark array_contains uses null-safe equality for complex elements, e.g.
+// row(1, null) matches row(1, null) and does not match row(1, 2).
+BOLT_DECLARE_VECTOR_FUNCTION(
+    udf_spark_array_contains,
+    arrayContainsSignatures(),
+    createArrayContainsFunction(false));
 
-namespace bytedance::bolt::functions::aggregate::sparksql {
-
-exec::AggregateRegistrationResult registerBitmapConstructAggAggregate(
-    const std::string& name,
-    bool withCompanionFunctions,
-    bool overwrite);
-
-} // namespace bytedance::bolt::functions::aggregate::sparksql
+} // namespace bytedance::bolt::functions

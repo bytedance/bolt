@@ -37,6 +37,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #endif
 #include "bolt/core/QueryCtx.h"
+#include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -1354,6 +1355,51 @@ TEST_F(ParquetReaderTest, preloadSmallFile) {
     // Check no duplicate reads.
     ASSERT_EQ(file->bytesRead(), 0);
   }
+}
+
+TEST_F(ParquetReaderTest, directPreloadMultiRowGroupFileReusesPreload) {
+  auto rowType = ROW({"id"}, {BIGINT()});
+  const std::string sample(getExampleFilePath("multiple_row_groups.parquet"));
+
+  auto file = std::make_shared<LocalReadFile>(sample);
+  const auto fileSize = file->size();
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFilePreloadThreshold(fileSize);
+  auto ioStats = std::make_shared<io::IoStatistics>();
+  auto input = std::make_unique<DirectBufferedInput>(
+      file,
+      MetricsLog::voidLog(),
+      0,
+      nullptr,
+      0,
+      ioStats,
+      nullptr,
+      readerOptions,
+      nullptr);
+  auto reader =
+      std::make_unique<ParquetReader>(std::move(input), readerOptions);
+
+  EXPECT_EQ(reader->fileMetaData().numRowGroups(), 4);
+  const auto rawBytesAfterPreload = ioStats->rawBytesRead();
+  const auto readBytesAfterPreload = ioStats->read().sum();
+  EXPECT_EQ(rawBytesAfterPreload, fileSize);
+  EXPECT_EQ(readBytesAfterPreload, fileSize);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  constexpr int kBatchSize = 1000;
+  auto result = BaseVector::create(rowType, kBatchSize, pool_.get());
+  uint64_t totalRows = 0;
+  while (auto rows = rowReader->next(kBatchSize, result)) {
+    totalRows += rows;
+  }
+
+  EXPECT_EQ(totalRows, reader->numberOfRows().value());
+  EXPECT_EQ(ioStats->rawBytesRead(), rawBytesAfterPreload);
+  EXPECT_EQ(ioStats->read().sum(), readBytesAfterPreload);
 }
 
 TEST_F(ParquetReaderTest, prefetchRowGroups) {

@@ -29,6 +29,7 @@ add_executable(
   bolt_functions_spark_test
   ArithmeticTest.cpp
   ArrayAppendTest.cpp
+  ArrayContainsTest.cpp
   ArrayFlattenTest.cpp
   ArrayGetTest.cpp
   ArrayInsertTest.cpp

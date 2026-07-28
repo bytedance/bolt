@@ -1,5 +1,4 @@
-#
-# Copyright (c) ByteDance Ltd. and/or its affiliates
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,17 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set(TXT_TEST_LINK_LIBS
-    bolt_dwio_common_test_utils
-    bolt_vector_test_lib
-    bolt_exec_test_lib
-    bolt_temp_path
-    GTest::gtest
-    GTest::gtest_main
-    GTest::gmock
-    gflags::gflags
-    ${GLOG}
-)
+cmake_minimum_required(VERSION 3.15)
+project(test_package LANGUAGES CXX)
 
-add_subdirectory(reader)
-add_subdirectory(writer)
+find_package(tos_client REQUIRED CONFIG)
+
+add_executable(${PROJECT_NAME} test_package.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE tos_client::tos_client)

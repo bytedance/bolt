@@ -25,6 +25,7 @@
 #include "bolt/functions/flinksql/RegexFunctions.h"
 #include "bolt/functions/flinksql/String.h"
 #include "bolt/functions/flinksql/ToTimestampFunction.h"
+#include "bolt/functions/flinksql/URLFunctions.h"
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 
 namespace bytedance::bolt::functions {
@@ -50,6 +51,10 @@ static void registerStringFunctions(const std::string& prefix) {
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(
       {prefix + "split_index"});
+  registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar>(
+      {prefix + "flink_parse_url"});
+  registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar, Varchar>(
+      {prefix + "flink_parse_url"});
 }
 
 static void registerDatetimeFunctions(const std::string& prefix) {

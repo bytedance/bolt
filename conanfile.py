@@ -344,8 +344,7 @@ class BoltConan(ConanFile):
         self.options[arrow].substrait = True
         # substrait depends on protobuf
         self.options[arrow].with_protobuf = True
-        self.options[arrow].arrow_acero = True
-        self.options[arrow].arrow_bundled_dependencies = True
+        self.options[arrow].acero = True
         if self.options.get_safe("enable_colocate"):
             self.options[arrow].with_boost = True
             self.options[arrow].with_gflags = True
@@ -368,7 +367,8 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"
         ):
-            self.options[arrow].with_hdfs = True
+            # This is the legacy spelling exposed by the pinned Arrow recipe.
+            self.options[arrow].hdfs_bridgs = True
 
         if self.options.get_safe("es_build"):
             self.options[arrow].with_pyarrow = False

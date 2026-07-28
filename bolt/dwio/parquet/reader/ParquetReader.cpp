@@ -34,6 +34,7 @@
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 #include <cstdint>
 #include "bolt/dwio/common/CachedBufferedInput.h"
+#include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/encryption/KmsClient.h"
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
@@ -335,7 +336,13 @@ void ReaderBase::loadFileMetaData() {
 
   std::unique_ptr<dwio::common::SeekableInputStream> stream;
   if (preloadFile) {
-    stream = input_->loadCompleteFile();
+    if (auto* directInput =
+            dynamic_cast<dwio::common::DirectBufferedInput*>(input_.get())) {
+      directInput->preload();
+      stream = input_->read(0, fileLength_, dwio::common::LogType::FILE);
+    } else {
+      stream = input_->loadCompleteFile();
+    }
   } else {
     stream = input_->read(
         fileLength_ - readSize, readSize, dwio::common::LogType::FOOTER);

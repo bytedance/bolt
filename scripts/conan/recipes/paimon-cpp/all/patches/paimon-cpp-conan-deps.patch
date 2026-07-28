@@ -149,7 +149,7 @@ index 0000000..e9318f6
 +    find_package(ZLIB QUIET)
 +    find_package(zstd QUIET CONFIG)
 +    find_package(lz4 QUIET CONFIG)
-+    find_package(snappy QUIET CONFIG)
++    find_package(Snappy QUIET CONFIG)
 +    find_package(Protobuf QUIET CONFIG)
 +
 +    # --- Helper: get the config suffix from the active build type ---
@@ -274,8 +274,8 @@ index 0000000..e9318f6
 +
 +    if(NOT TARGET snappy)
 +        add_library(snappy INTERFACE IMPORTED)
-+        if(TARGET snappy::snappy)
-+            target_link_libraries(snappy INTERFACE snappy::snappy)
++        if(TARGET Snappy::snappy)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
 +            target_include_directories(snappy INTERFACE ${SNAPPY_INCLUDE_DIR})
 +        endif()
 +    endif()
@@ -344,10 +344,10 @@ index 9e3c47d..ba7695c 100644
 +    # Ensure required compression/utility targets exist; use Conan packages if
 +    # available, otherwise build from source.
 +    if(NOT TARGET snappy)
-+        find_package(snappy QUIET CONFIG)
-+        if(TARGET snappy::snappy)
++        find_package(Snappy QUIET CONFIG)
++        if(TARGET Snappy::snappy)
 +            add_library(snappy INTERFACE IMPORTED)
-+            target_link_libraries(snappy INTERFACE snappy::snappy)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
 +        else()
 +            build_snappy()
 +        endif()
@@ -392,7 +392,27 @@ index 9e3c47d..ba7695c 100644
      set(AVRO_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/avro_ep-install")
      set(AVRO_INCLUDE_DIR "${AVRO_PREFIX}/include")
      set(AVRO_STATIC_LIB_NAME avrocpp_s)
-@@ -1006,11 +1062,74 @@ macro(build_avro)
+@@ -989,7 +1045,19 @@ macro(build_avro)
+         "-DZLIB_ROOT=${AVRO_ZLIB_ROOT}"
+         "-Dfmt_ROOT=${AVRO_FMT_ROOT}"
+         "-Dzstd_ROOT=${AVRO_ZSTD_ROOT}"
+         "-DSnappy_ROOT=${AVRO_SNAPPY_ROOT}")
++    if(PAIMON_USE_CONAN_DEPS)
++        # The Avro ExternalProject starts a separate CMake configure. Point it
++        # at the parent's CMakeDeps configs explicitly so sysroot-only
++        # toolchains don't re-root the Conan package paths.
++        get_filename_component(AVRO_CONAN_GENERATORS_DIR
++                               "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
++        list(APPEND AVRO_CMAKE_ARGS
++             "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
++             "-DZLIB_DIR=${AVRO_CONAN_GENERATORS_DIR}"
++             "-DSnappy_DIR=${AVRO_CONAN_GENERATORS_DIR}"
++             "-Dzstd_DIR=${AVRO_CONAN_GENERATORS_DIR}")
++    endif()
+     externalproject_add(avro_ep
+                         URL ${AVRO_SOURCE_URL}
+                         URL_HASH "SHA256=${PAIMON_AVRO_BUILD_SHA256_CHECKSUM}"
+@@ -1006,11 +1074,74 @@ macro(build_avro)
      target_include_directories(avro INTERFACE ${AVRO_INCLUDE_DIR})
      target_link_libraries(avro INTERFACE zlib zstd snappy)
      add_dependencies(avro avro_ep)
@@ -413,10 +433,10 @@ index 9e3c47d..ba7695c 100644
 
 +    # Ensure required compression targets exist; if not, build them from source.
 +    if(NOT TARGET snappy)
-+        find_package(snappy QUIET CONFIG)
-+        if(TARGET snappy::snappy)
++        find_package(Snappy QUIET CONFIG)
++        if(TARGET Snappy::snappy)
 +            add_library(snappy INTERFACE IMPORTED)
-+            target_link_libraries(snappy INTERFACE snappy::snappy)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
 +        else()
 +            build_snappy()
 +        endif()
@@ -467,7 +487,7 @@ index 9e3c47d..ba7695c 100644
      get_target_property(ORC_SNAPPY_INCLUDE_DIR snappy INTERFACE_INCLUDE_DIRECTORIES)
      get_filename_component(ORC_SNAPPY_ROOT "${ORC_SNAPPY_INCLUDE_DIR}" DIRECTORY)
 
-@@ -1070,7 +1189,8 @@ macro(build_orc)
+@@ -1070,7 +1201,8 @@ macro(build_orc)
          -DBUILD_TOOLS=OFF
          -DBUILD_CPP_ENABLE_METRICS=ON)
 
@@ -477,7 +497,7 @@ index 9e3c47d..ba7695c 100644
      externalproject_add(orc_ep
                          URL ${ORC_SOURCE_URL}
                          URL_HASH "SHA256=${PAIMON_ORC_BUILD_SHA256_CHECKSUM}"
-@@ -1193,7 +1313,8 @@ macro(build_arrow)
+@@ -1193,7 +1325,8 @@ macro(build_arrow)
          -DBUILD_WARNING_LEVEL=PRODUCTION) # ignore warnings under gcc8
 
      set(ARROW_CONFIGURE SOURCE_SUBDIR "cpp" CMAKE_ARGS ${ARROW_CMAKE_ARGS})
@@ -487,7 +507,7 @@ index 9e3c47d..ba7695c 100644
      externalproject_add(arrow_ep
                          URL ${ARROW_SOURCE_URL}
                          URL_HASH "SHA256=${PAIMON_ARROW_BUILD_SHA256_CHECKSUM}"
-@@ -1438,30 +1559,32 @@ macro(build_glog)
+@@ -1438,30 +1571,32 @@ macro(build_glog)
      endif()
  endmacro()
 

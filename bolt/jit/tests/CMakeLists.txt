@@ -89,7 +89,6 @@ if(${ENABLE_BOLT_EXPR_JIT})
     bolt_process
     glog::glog
     ${FMT}
-    ${FILESYSTEM}
   )
 
 endif() # ENABLE_BOLT_EXPR_JIT
