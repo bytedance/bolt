@@ -30,6 +30,9 @@
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
+
+#include <limits>
+
 namespace bytedance::bolt::functions {
 namespace {
 // See documentation at https://prestodb.io/docs/current/functions/array.html
@@ -37,8 +40,11 @@ class RepeatFunction : public exec::VectorFunction {
  public:
   // @param allowNegativeCount If true, negative 'count' is allowed
   // and treated the same as zero (Spark's behavior).
-  explicit RepeatFunction(bool allowNegativeCount)
-      : allowNegativeCount_(allowNegativeCount) {}
+  // @param enforceMaxResultEntries If true, enforce Presto's 10,000 entries
+  // limit per row. Spark's array_repeat doesn't have this limit.
+  explicit RepeatFunction(bool allowNegativeCount, bool enforceMaxResultEntries)
+      : allowNegativeCount_(allowNegativeCount),
+        enforceMaxResultEntries_(enforceMaxResultEntries) {}
 
   static constexpr int32_t kMaxResultEntries = 10'000;
 
@@ -67,7 +73,10 @@ class RepeatFunction : public exec::VectorFunction {
 
  private:
   // Check count to make sure it is in valid range.
-  static int32_t checkCount(int32_t count, bool allowNegativeCount) {
+  static int32_t checkCount(
+      int32_t count,
+      bool allowNegativeCount,
+      bool enforceMaxResultEntries) {
     if (count < 0) {
       if (allowNegativeCount) {
         return 0;
@@ -77,11 +86,21 @@ class RepeatFunction : public exec::VectorFunction {
           count,
           0);
     }
-    BOLT_USER_CHECK_LE(
-        count,
-        kMaxResultEntries,
-        "Count argument of repeat function must be less than or equal to 10000");
+    if (enforceMaxResultEntries) {
+      BOLT_USER_CHECK_LE(
+          count,
+          kMaxResultEntries,
+          "Count argument of repeat function must be less than or equal to 10000");
+    }
     return count;
+  }
+
+  static vector_size_t checkTotalCount(int64_t totalCount) {
+    BOLT_USER_CHECK_LE(
+        totalCount,
+        std::numeric_limits<vector_size_t>::max(),
+        "Total entries of repeat result exceed the maximum vector size");
+    return static_cast<vector_size_t>(totalCount);
   }
 
   VectorPtr applyConstantCount(
@@ -99,13 +118,14 @@ class RepeatFunction : public exec::VectorFunction {
     }
 
     auto count = constantCount->valueAt(0);
+    vector_size_t totalCount;
     try {
-      count = checkCount(count, allowNegativeCount_);
+      count = checkCount(count, allowNegativeCount_, enforceMaxResultEntries_);
+      totalCount = checkTotalCount(static_cast<int64_t>(count) * numRows);
     } catch (const BoltUserError&) {
       context.setErrors(rows, std::current_exception());
       return nullptr;
     }
-    const auto totalCount = count * numRows;
 
     // Allocate new vectors for indices, lengths and offsets.
     BufferPtr indices = allocateIndices(totalCount, pool);
@@ -140,13 +160,14 @@ class RepeatFunction : public exec::VectorFunction {
       exec::EvalCtx& context) const {
     exec::DecodedArgs decodedArgs(rows, args, context);
     auto countDecoded = decodedArgs.at(1);
-    int32_t totalCount = 0;
+    int64_t totalCount = 0;
     context.applyToSelectedNoThrow(rows, [&](auto row) {
       auto count =
           countDecoded->isNullAt(row) ? 0 : countDecoded->valueAt<int32_t>(row);
-      count = checkCount(count, allowNegativeCount_);
+      count = checkCount(count, allowNegativeCount_, enforceMaxResultEntries_);
       totalCount += count;
     });
+    const auto totalEntries = checkTotalCount(totalCount);
 
     const auto numRows = rows.end();
     auto pool = context.pool();
@@ -160,7 +181,7 @@ class RepeatFunction : public exec::VectorFunction {
     }
 
     // Allocate new vectors for indices, lengths and offsets.
-    BufferPtr indices = allocateIndices(totalCount, pool);
+    BufferPtr indices = allocateIndices(totalEntries, pool);
     BufferPtr sizes = allocateSizes(numRows, pool);
     BufferPtr offsets = allocateOffsets(numRows, pool);
     auto rawIndices = indices->asMutable<vector_size_t>();
@@ -196,10 +217,11 @@ class RepeatFunction : public exec::VectorFunction {
         numRows,
         offsets,
         sizes,
-        BaseVector::wrapInDictionary(nullptr, indices, totalCount, args[0]));
+        BaseVector::wrapInDictionary(nullptr, indices, totalEntries, args[0]));
   }
 
   const bool allowNegativeCount_;
+  const bool enforceMaxResultEntries_;
 };
 } // namespace
 
@@ -217,14 +239,14 @@ std::shared_ptr<exec::VectorFunction> makeRepeat(
     const std::string& /* name */,
     const std::vector<exec::VectorFunctionArg>& /* inputArgs */,
     const core::QueryConfig& /*config*/) {
-  return std::make_unique<RepeatFunction>(false);
+  return std::make_unique<RepeatFunction>(false, true);
 }
 
 std::shared_ptr<exec::VectorFunction> makeRepeatAllowNegativeCount(
     const std::string& /* name */,
     const std::vector<exec::VectorFunctionArg>& /* inputArgs */,
     const core::QueryConfig& /*config*/) {
-  return std::make_unique<RepeatFunction>(true);
+  return std::make_unique<RepeatFunction>(true, false);
 }
 
 } // namespace bytedance::bolt::functions

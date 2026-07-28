@@ -174,5 +174,22 @@ TEST_F(RepeatTest, repeatAllowNegativeCount) {
       {elementVector, countVector},
       expected);
 }
+
+TEST_F(RepeatTest, repeatAllowNegativeCountAbovePrestoLimit) {
+  constexpr int32_t repeatCount = 10'452;
+  const auto elementVector = makeFlatVector<int32_t>({repeatCount});
+  const auto countVector = makeFlatVector<int32_t>({repeatCount});
+  const auto expected = makeArrayVector<int32_t>(
+      {std::vector<int32_t>(repeatCount, repeatCount)});
+
+  testExpression(
+      "repeat_allow_negative_count(C0, C1)",
+      {elementVector, countVector},
+      expected);
+  testExpression(
+      "repeat_allow_negative_count(C0, '10452'::INTEGER)",
+      {elementVector},
+      expected);
+}
 } // namespace
 } // namespace bytedance::bolt::functions
