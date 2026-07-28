@@ -20,6 +20,7 @@
 #include <sstream>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/GlobalParameters.h"
 #include "bolt/common/base/SuccinctPrinter.h"
 #include "bolt/common/memory/MemoryUtils.h"
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
