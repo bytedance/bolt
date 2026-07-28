@@ -1501,10 +1501,17 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"integer_to_smallint",            INTEGER(),       SMALLINT(),         false},
     {"integer_to_tinyint",             INTEGER(),       TINYINT(),          false},
 
-    // ---- Reject: cross-family with no column-reader auto-cast ----
-    {"integer_to_double",              INTEGER(),       DOUBLE(),           true},
+    // ---- Accept: INT32 -> DOUBLE. INT32 is exactly representable as DOUBLE,
+    //      and Hive tables can have historical INT32 Parquet partitions after
+    //      the metastore column is widened to DOUBLE. ----
+    {"integer_to_double",              INTEGER(),       DOUBLE(),           false},
+
+    // ---- Reject: cross-family with no safe column-reader auto-cast ----
     {"bigint_to_double",               BIGINT(),        DOUBLE(),           true},
     {"integer_to_real",                INTEGER(),       REAL(),             true},
+
+    // ---- Accept: INT32 -> BOOLEAN for Spark/Hive compatibility. ----
+    {"integer_to_boolean",             INTEGER(),       BOOLEAN(),          false},
 
     // ---- Reject: float narrowing ----
     {"double_to_real",                 DOUBLE(),        REAL(),             true},
@@ -1657,7 +1664,61 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 
-  // 2. Float widening: REAL [1.5, 2.5, 3.5] read as DOUBLE.
+  // 2. INT32 -> DOUBLE widening: file INT32 [1,2,3] read as DOUBLE.
+  {
+    auto data = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {DOUBLE()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected =
+        makeRowVector({"c0"}, {makeFlatVector<double>({1.0, 2.0, 3.0})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // 3. INT32 -> BOOLEAN compatibility: zero maps to false, non-zero maps to
+  //    true, and nulls are preserved.
+  {
+    auto data = makeRowVector(
+        {"c0"}, {makeNullableFlatVector<int32_t>({0, 1, -7, std::nullopt})});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BOOLEAN()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector(
+        {"c0"},
+        {makeNullableFlatVector<bool>({false, true, true, std::nullopt})});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // INT32 -> BOOLEAN with all-null input uses the same null-only result shape
+  // as the generic fixed-width path.
+  {
+    auto data = makeRowVector({"c0"}, {makeAllNullFlatVector<int32_t>(3)});
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto declared = ROW({"c0"}, {BOOLEAN()});
+    auto plan =
+        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool());
+    auto expected = makeRowVector({"c0"}, {makeAllNullFlatVector<bool>(3)});
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // 4. Float widening: REAL [1.5, 2.5, 3.5] read as DOUBLE.
   {
     auto data =
         makeRowVector({"c0"}, {makeFlatVector<float>({1.5f, 2.5f, 3.5f})});
@@ -1676,7 +1737,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   }
 
 #ifdef SPARK_COMPATIBLE
-  // 3. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
+  // 4. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
   //    Skipped in non-Spark builds because matchType() at
   //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
   //    before the column-reader cast can run.

@@ -34,6 +34,13 @@ namespace bytedance::bolt::dwio::common {
 
 using dwio::common::TypeWithId;
 
+template <>
+void SelectiveColumnReader::getFlatValues<int32_t, bool>(
+    RowSet rows,
+    VectorPtr* result,
+    const TypePtr& type,
+    bool isFinal);
+
 bolt::common::AlwaysTrue& alwaysTrue() {
   static bolt::common::AlwaysTrue alwaysTrue;
   return alwaysTrue;
@@ -234,6 +241,26 @@ void SelectiveColumnReader::getIntValues(
           BOLT_FAIL("Unsupported value size: {}", valueSize_);
       }
       break;
+    case TypeKind::DOUBLE:
+      // Only Parquet INT32 widens to DOUBLE. INT64 -> DOUBLE is rejected in
+      // convertType due to precision loss.
+      switch (valueSize_) {
+        case 4:
+          getFlatValues<int32_t, double>(rows, result, requestedType);
+          break;
+        default:
+          BOLT_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    case TypeKind::BOOLEAN:
+      switch (valueSize_) {
+        case 4:
+          getFlatValues<int32_t, bool>(rows, result, requestedType);
+          break;
+        default:
+          BOLT_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
     case TypeKind::TIMESTAMP:
       getFlatValues<Timestamp, Timestamp>(rows, result, requestedType);
       break;
@@ -310,6 +337,41 @@ void SelectiveColumnReader::getUnsignedIntValues(
           "Not a valid type for unsigned integer reader: {}",
           requestedType->toString());
   }
+}
+
+template <>
+void SelectiveColumnReader::getFlatValues<int32_t, bool>(
+    RowSet rows,
+    VectorPtr* result,
+    const TypePtr& type,
+    bool isFinal) {
+  BOLT_CHECK_EQ(valueSize_, sizeof(int32_t));
+  if (allNull_) {
+    *result = std::make_shared<ConstantVector<bool>>(
+        &memoryPool_,
+        rows.size(),
+        true,
+        type,
+        false,
+        SimpleVectorStats<bool>{},
+        sizeof(bool) * rows.size());
+    return;
+  }
+  compactScalarValues<int32_t, int32_t>(rows, isFinal);
+  auto boolValues =
+      AlignedBuffer::allocate<bool>(numValues_, &memoryPool_, false);
+  auto rawInts = values_->as<int32_t>();
+  auto rawBits = boolValues->asMutable<uint64_t>();
+  for (auto i = 0; i < numValues_; ++i) {
+    bits::setBit(rawBits, i, rawInts[i] != 0);
+  }
+  *result = std::make_shared<FlatVector<bool>>(
+      &memoryPool_,
+      type,
+      resultNulls(),
+      numValues_,
+      std::move(boolValues),
+      std::move(stringBuffers_));
 }
 
 template <>
