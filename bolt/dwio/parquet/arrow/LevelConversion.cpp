@@ -166,9 +166,8 @@ void DefRepLevelsToListInfo(
     }
 
     if (rep_levels[x] == level_info.rep_level) {
-      // A continuation of an existing list.
-      // offsets can be null for structs with repeated children (we don't need
-      // to know offsets until we get to the children).
+      // A continuation of an existing list. The list output handles whether
+      // this extends cumulative offsets or the current list length.
       int64_t run = 1;
       while (x + run < num_def_levels &&
              rep_levels[x + run] == level_info.rep_level &&
@@ -190,8 +189,8 @@ void DefRepLevelsToListInfo(
       }
 
       // current_rep < list rep_level i.e. start of a list (ancestor empty lists
-      // are filtered out above). offsets can be null for structs with repeated
-      // children (we don't need to know offsets until we get to the children).
+      // are filtered out above). The list output records the new list either as
+      // cumulative offsets or as a finalized length for the previous list.
       list_output.OnNewList(def_levels[x], level_info);
 
       if (valid_bits_writer.has_value()) {

@@ -174,8 +174,8 @@ struct PARQUET_EXPORT ValidityBitmapInputOutput {
   int64_t values_read = 0;
   // Input/Output. The number of nulls encountered.
   int64_t null_count = 0;
-  // Output only. The validity bitmap to populate. Maybe be null only
-  // for DefRepLevelsToListInfo (if all that is needed is list offsets).
+  // Output only. The validity bitmap to populate. May be null when callers only
+  // need list offsets or list lengths, and do not need list validity.
   uint8_t* valid_bits = NULLPTR;
   // Input only, offset into valid_bits to start at.
   int64_t valid_bits_offset = 0;
@@ -217,6 +217,8 @@ void PARQUET_EXPORT DefRepLevelsToList(
 // Reconstructs a validity bitmap and list lengths directly. This is equivalent
 // to calling DefRepLevelsToList with int32 offsets and converting adjacent
 // offsets to lengths, but avoids one extra pass over the output.
+//
+// Lengths must be sized to values_read_upper_bound.
 void PARQUET_EXPORT DefRepLevelsToListLengths(
     const int16_t* def_levels,
     const int16_t* rep_levels,
