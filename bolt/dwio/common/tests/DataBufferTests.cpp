@@ -33,6 +33,7 @@
 #include <gtest/gtest.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/common/DataBuffer.h"
 namespace bytedance {
 namespace bolt {
@@ -187,6 +188,28 @@ TEST_F(DataBufferTest, Move) {
     ASSERT_EQ(usedBytes, pool_->currentBytes());
   }
   ASSERT_EQ(0, pool_->currentBytes());
+}
+
+TEST_F(DataBufferTest, EnsureCapacityReleasesOldBufferBeforeAllocatingNewOne) {
+  constexpr size_t kInitialSize = 4 << 20;
+  const auto oldAllocationBytes =
+      pool_->preferredSize(kInitialSize + AlignedBuffer::kPaddedSize);
+  const auto oldCapacity = oldAllocationBytes - AlignedBuffer::kPaddedSize;
+  const auto requestedCapacity = oldCapacity + 1;
+  const auto newAllocationBytes =
+      pool_->preferredSize(requestedCapacity + AlignedBuffer::kPaddedSize);
+
+  auto rootPool = memoryManager()->addRootPool(
+      "ensureCapacityReleaseBeforeAlloc", newAllocationBytes);
+  auto leafPool = rootPool->addLeafChild("leaf");
+  BufferPtr buffer =
+      AlignedBuffer::allocate<char>(kInitialSize, leafPool.get());
+  ASSERT_EQ(buffer->capacity(), oldCapacity);
+
+  dwio::common::ensureCapacity<char>(buffer, requestedCapacity, leafPool.get());
+
+  EXPECT_GE(buffer->capacity(), requestedCapacity);
+  EXPECT_LE(leafPool->currentBytes(), newAllocationBytes);
 }
 } // namespace common
 } // namespace dwio
