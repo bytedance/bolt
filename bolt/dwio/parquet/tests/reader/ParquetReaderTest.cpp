@@ -1459,6 +1459,91 @@ TEST_F(ParquetReaderTest, prefetchRowGroups) {
   }
 }
 
+TEST_F(ParquetReaderTest, releasesRowGroupReaderStateBeforeLoadingNextWindow) {
+  constexpr int32_t kRowsPerGroup = 128;
+  constexpr int32_t kNumRowGroups = 4;
+  constexpr int32_t kStringBytes = 256 * 1024;
+  auto rowType = ROW({"payload"}, {VARCHAR()});
+
+  auto dataPool = rootPool_->addLeafChild("rowGroupReaderReleaseTestData");
+  BufferPtr values =
+      AlignedBuffer::allocate<StringView>(kRowsPerGroup, dataPool.get());
+  BufferPtr stringBuffer =
+      AlignedBuffer::allocate<char>(kStringBytes, dataPool.get());
+  auto rawString = stringBuffer->asMutable<char>();
+  for (int32_t i = 0; i < kStringBytes; ++i) {
+    rawString[i] = static_cast<char>('a' + (i % 26));
+  }
+  stringBuffer->setSize(kStringBytes);
+  auto rawValues = values->asMutable<StringView>();
+  for (int32_t i = 0; i < kRowsPerGroup; ++i) {
+    rawValues[i] = StringView(rawString, kStringBytes);
+  }
+  auto batch = std::make_shared<RowVector>(
+      dataPool.get(),
+      rowType,
+      nullptr,
+      kRowsPerGroup,
+      std::vector<VectorPtr>{std::make_shared<FlatVector<StringView>>(
+          dataPool.get(),
+          VARCHAR(),
+          nullptr,
+          kRowsPerGroup,
+          values,
+          std::vector<BufferPtr>{stringBuffer})});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  {
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.dictionaryPageSizeLimit = kStringBytes * 2;
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), writerOptions, rowType);
+    for (int32_t i = 0; i < kNumRowGroups; ++i) {
+      writer->write(batch);
+      if (i + 1 < kNumRowGroups) {
+        writer->flush();
+      }
+    }
+    writer->close();
+  }
+
+  constexpr int64_t kReadMemoryLimit = 2 << 20;
+  auto readRootPool = memory::memoryManager()->addRootPool(
+      "rowGroupReaderReleaseRead", kReadMemoryLimit);
+  auto readPool = readRootPool->addLeafChild("leaf");
+
+  dwio::common::ReaderOptions readerOptions{readPool.get()};
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setPrefetchRowGroups(1);
+  auto reader = createReader(tempFile->getPath(), readerOptions);
+  ASSERT_EQ(reader->fileMetaData().numRowGroups(), kNumRowGroups);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto parquetRowReader = dynamic_cast<ParquetRowReader*>(rowReader.get());
+  ASSERT_NE(parquetRowReader, nullptr);
+
+  VectorPtr result = BaseVector::create(rowType, 0, readPool.get());
+  uint64_t totalRows = 0;
+  for (;;) {
+    auto rows = parquetRowReader->next(kRowsPerGroup, result);
+    if (rows == 0) {
+      break;
+    }
+    totalRows += rows;
+    parquetRowReader->nextRowNumber();
+  }
+
+  EXPECT_EQ(totalRows, kRowsPerGroup * kNumRowGroups);
+  EXPECT_LT(readPool->peakBytes(), kReadMemoryLimit);
+}
+
 TEST_F(ParquetReaderTest, testEmptyRowGroups) {
   // empty_row_groups.parquet contains empty row groups
   const std::string sample(getExampleFilePath("empty_row_groups.parquet"));

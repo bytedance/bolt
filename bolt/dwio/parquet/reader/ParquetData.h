@@ -147,6 +147,8 @@ class ParquetData : public dwio::common::FormatData {
   /// Other formats may use it.
   dwio::common::PositionProvider seekToRowGroup(int64_t index) override;
 
+  void releaseRowGroupReader();
+
   void filterRowGroups(
       const common::ScanSpec& scanSpec,
       uint64_t rowsPerRowGroup,

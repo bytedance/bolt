@@ -1370,6 +1370,7 @@ void ReaderBase::scheduleRowGroups(
   // clear old RowGroup
   if (currentGroup >= 1) {
     inputs_.erase(rowGroupIds[currentGroup - 1]);
+    reader.releaseRowGroupReader();
   }
   // load current RowGroup and prefetch new RowGroup
   auto numRowGroupsToLoad = std::min(

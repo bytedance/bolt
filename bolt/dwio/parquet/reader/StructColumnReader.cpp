@@ -172,6 +172,23 @@ StructColumnReader::findBestLeaf() {
   return best;
 }
 
+namespace {
+void releaseRowGroupReaderRecursive(
+    dwio::common::SelectiveColumnReader* reader) {
+  reader->scanState().clear();
+  reader->formatData().as<ParquetData>().releaseRowGroupReader();
+  for (auto* child : reader->children()) {
+    if (child != nullptr) {
+      releaseRowGroupReaderRecursive(child);
+    }
+  }
+}
+} // namespace
+
+void StructColumnReader::releaseRowGroupReader() {
+  releaseRowGroupReaderRecursive(this);
+}
+
 void StructColumnReader::read(
     int64_t offset,
     const RowSet& rows,

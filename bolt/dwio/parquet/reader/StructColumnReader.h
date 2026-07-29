@@ -57,6 +57,8 @@ class StructColumnReader : public dwio::common::SelectiveStructColumnReader {
 
   void seekToRowGroup(int64_t index) override;
 
+  void releaseRowGroupReader();
+
   /// Creates the streams for 'rowGroup'. Checks whether row 'rowGroup'
   /// has been buffered in 'input'. If true, return the input. Or else creates
   /// the streams in a new input and loads.
