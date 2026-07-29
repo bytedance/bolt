@@ -1081,11 +1081,18 @@ void exportStrings(
       bufSize += vec.valueAtFast(i).size();
     }
   });
+  if constexpr (std::is_same_v<T, int32_t>) {
+    BOLT_CHECK_LT(
+        bufSize,
+        std::numeric_limits<int32_t>::max(),
+        "Cannot export VARCHAR/VARBINARY to Arrow with int32 offsets: "
+        "rows={}, vectorSize={}, bufSize={}",
+        rows.count(),
+        vec.size(),
+        bufSize);
+  }
   holder.setBuffer(2, AlignedBuffer::allocate<char>(bufSize, pool));
   char* rawBuffer = holder.getBufferAs<char>(2);
-  if constexpr (std::is_same_v<T, int32_t>) {
-    BOLT_CHECK_LT(bufSize, std::numeric_limits<int32_t>::max());
-  }
   auto offsetLen = checkedPlus<size_t>(out.length, 1);
   holder.setBuffer(1, AlignedBuffer::allocate<T>(offsetLen, pool));
   auto* rawOffsets = holder.getBufferAs<T>(1);
