@@ -43,17 +43,32 @@
 #include "bolt/shuffle/sparksql/partition_writer/LocalPartitionWriter.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> openSpillFile(
+    const std::string& file,
+    bool bufferWrite,
+    arrow::MemoryPool* pool) {
+  std::shared_ptr<arrow::io::OutputStream> out;
+  ARROW_ASSIGN_OR_RAISE(out, arrow::io::FileOutputStream::Open(file, true));
+  if (bufferWrite) {
+    ARROW_ASSIGN_OR_RAISE(
+        out, arrow::io::BufferedOutputStream::Create(16384, pool, out));
+  }
+  return out;
+}
+
 class LocalPartitionWriter::LocalSpiller {
  public:
   LocalSpiller(
       uint32_t numPartitions,
       const std::string& spillFile,
       uint32_t compressionThreshold,
+      bool bufferWrite,
       arrow::MemoryPool* pool,
       Codec* codec)
       : numPartitions_(numPartitions),
         spillFile_(spillFile),
         compressionThreshold_(compressionThreshold),
+        bufferWrite_(bufferWrite),
         pool_(pool),
         codec_(codec) {}
 
@@ -69,8 +84,7 @@ class LocalPartitionWriter::LocalSpiller {
 
     if (!opened_) {
       opened_ = true;
-      ARROW_ASSIGN_OR_RAISE(
-          os_, arrow::io::FileOutputStream::Open(spillFile_, true));
+      ARROW_ASSIGN_OR_RAISE(os_, openSpillFile(spillFile_, bufferWrite_, pool_))
       diskSpill_ = std::make_unique<Spill>(
           Spill::SpillType::kSequentialSpill, numPartitions_, spillFile_);
     }
@@ -110,6 +124,7 @@ class LocalPartitionWriter::LocalSpiller {
       return arrow::Status::Invalid("SpillEvictor has no data spilled.");
     }
     RETURN_NOT_OK(os_->Close());
+    os_.reset();
     return std::move(diskSpill_);
   }
 
@@ -125,13 +140,14 @@ class LocalPartitionWriter::LocalSpiller {
   uint32_t numPartitions_;
   std::string spillFile_;
   uint32_t compressionThreshold_;
+  bool bufferWrite_;
   arrow::MemoryPool* pool_;
   Codec* codec_;
 
   bool opened_{false};
   bool finished_{false};
   std::shared_ptr<Spill> diskSpill_{nullptr};
-  std::shared_ptr<arrow::io::FileOutputStream> os_;
+  std::shared_ptr<arrow::io::OutputStream> os_;
   int64_t spillTime_{0};
 };
 
@@ -348,7 +364,8 @@ class LocalPartitionWriter::PayloadMerger {
 
 class LocalPartitionWriter::PayloadCache {
  public:
-  PayloadCache(uint32_t numPartitions) : numPartitions_(numPartitions) {}
+  PayloadCache(uint32_t numPartitions, bool bufferedWrite)
+      : numPartitions_(numPartitions), bufferedWrite_(bufferedWrite) {}
 
   arrow::Status cache(
       uint32_t partitionId,
@@ -396,7 +413,7 @@ class LocalPartitionWriter::PayloadCache {
   spill(const std::string& spillFile, arrow::MemoryPool* pool, Codec* codec) {
     std::shared_ptr<Spill> diskSpill = nullptr;
     ARROW_ASSIGN_OR_RAISE(
-        auto os, arrow::io::FileOutputStream::Open(spillFile, true));
+        auto os, openSpillFile(spillFile, bufferedWrite_, pool));
     ARROW_ASSIGN_OR_RAISE(auto start, os->Tell());
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
       if (hasCachedPayloads(pid)) {
@@ -430,6 +447,7 @@ class LocalPartitionWriter::PayloadCache {
       }
     }
     RETURN_NOT_OK(os->Close());
+    os.reset();
     return diskSpill;
   }
 
@@ -444,6 +462,7 @@ class LocalPartitionWriter::PayloadCache {
 
   arrow::Result<std::shared_ptr<Spill>> stopSpill() {
     RETURN_NOT_OK(os_->Close());
+    os_.reset();
     os_ = nullptr;
     return std::move(diskSpill_);
   }
@@ -494,30 +513,33 @@ class LocalPartitionWriter::PayloadCache {
   int64_t compressTime_{0};
   int64_t spillTime_{0};
   int64_t writeTime_{0};
+  bool bufferedWrite_;
   std::unordered_map<uint32_t, std::list<std::unique_ptr<BlockPayload>>>
       partitionCachedPayload_;
   // for V2
   std::shared_ptr<Spill> diskSpill_;
-  std::shared_ptr<arrow::io::FileOutputStream> os_;
+  std::shared_ptr<arrow::io::OutputStream> os_;
 };
 
 // class for BoltRowBasedSortShuffleWriter
 class LocalPartitionWriter::PartitionRowWriter {
  public:
-  PartitionRowWriter() = default;
+  explicit PartitionRowWriter(bool bufferedWrite)
+      : bufferedWrite_(bufferedWrite) {}
 
   arrow::Status startSpill(
       uint32_t numPartitions,
-      const std::string& spillFile) {
+      const std::string& spillFile,
+      arrow::MemoryPool* pool) {
     diskSpill_ = std::make_shared<Spill>(
         Spill::SpillType::kBatchedSpill, numPartitions, spillFile);
-    ARROW_ASSIGN_OR_RAISE(
-        os_, arrow::io::FileOutputStream::Open(spillFile, true));
+    ARROW_ASSIGN_OR_RAISE(os_, openSpillFile(spillFile, bufferedWrite_, pool));
     return arrow::Status::OK();
   }
 
   arrow::Result<std::shared_ptr<Spill>> stopSpill() {
     RETURN_NOT_OK(os_->Close());
+    os_.reset();
     os_ = nullptr;
     return std::move(diskSpill_);
   }
@@ -544,7 +566,8 @@ class LocalPartitionWriter::PartitionRowWriter {
 
  private:
   std::shared_ptr<Spill> diskSpill_;
-  std::shared_ptr<arrow::io::FileOutputStream> os_;
+  std::shared_ptr<arrow::io::OutputStream> os_;
+  bool bufferedWrite_;
 };
 
 LocalPartitionWriter::LocalPartitionWriter(
@@ -702,6 +725,7 @@ arrow::Status LocalPartitionWriter::requestSpill() {
         numPartitions_,
         spillFile,
         options_.compressionThreshold,
+        options_.bufferedSpillWrite,
         payloadPool_.get(),
         codec_.get());
   }
@@ -749,7 +773,8 @@ arrow::Status LocalPartitionWriter::evict(
             codec_.get(),
             hasComplexType));
     if (UNLIKELY(!payloadCache_)) {
-      payloadCache_ = std::make_shared<PayloadCache>(numPartitions_);
+      payloadCache_ = std::make_shared<PayloadCache>(
+          numPartitions_, options_.bufferedSpillWrite);
     }
     RETURN_NOT_OK(payloadCache_->cache(partitionId, std::move(payload)));
     return arrow::Status::OK();
@@ -767,7 +792,8 @@ arrow::Status LocalPartitionWriter::evict(
       merger_->merge(partitionId, std::move(inMemoryPayload), reuseBuffers));
   if (!merged.empty()) {
     if (UNLIKELY(!payloadCache_)) {
-      payloadCache_ = std::make_shared<PayloadCache>(numPartitions_);
+      payloadCache_ = std::make_shared<PayloadCache>(
+          numPartitions_, options_.bufferedSpillWrite);
     }
     for (auto& payload : merged) {
       RETURN_NOT_OK(payloadCache_->cache(partitionId, std::move(payload)));
@@ -886,7 +912,8 @@ arrow::Status LocalPartitionWriter::startClearPayLoadCacheSequential() {
   ARROW_ASSIGN_OR_RAISE(
       auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
   if (UNLIKELY(!payloadCache_)) {
-    payloadCache_ = std::make_shared<PayloadCache>(numPartitions_);
+    payloadCache_ = std::make_shared<PayloadCache>(
+        numPartitions_, options_.bufferedSpillWrite);
   }
   RETURN_NOT_OK(payloadCache_->startSpill(spillFile));
   return arrow::Status::OK();
@@ -919,7 +946,8 @@ arrow::Status LocalPartitionWriter::evict(
         true,
         payloadPool_.get(),
         options_.checksumEnabled);
-    partitionRowWriter_ = std::make_shared<PartitionRowWriter>();
+    partitionRowWriter_ =
+        std::make_shared<PartitionRowWriter>(options_.bufferedSpillWrite);
   }
   RowVectorLayout layout = isCompositeVector ? RowVectorLayout::kComposite
                                              : RowVectorLayout::kColumnar;
@@ -962,7 +990,8 @@ arrow::Status LocalPartitionWriter::evict(
 arrow::Status LocalPartitionWriter::startEvictRowsSequential() {
   ARROW_ASSIGN_OR_RAISE(
       auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
-  RETURN_NOT_OK(partitionRowWriter_->startSpill(numPartitions_, spillFile));
+  RETURN_NOT_OK(
+      partitionRowWriter_->startSpill(numPartitions_, spillFile, pool_));
   return arrow::Status::OK();
 }
 

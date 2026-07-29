@@ -245,6 +245,7 @@ TEST_F(RegexFunctionsTest, regexMatchRegistration) {
           "regexp_extract('a', c0)", std::optional<std::string>("a*")),
       BoltUserError);
   EXPECT_EQ(regexp_extract("abc", "a."), "ab");
+  EXPECT_EQ(regexp_extract("abc", "\\d+"), "");
   EXPECT_THROW(regexp_extract("[]", "[a[b]]"), BoltUserError);
 }
 

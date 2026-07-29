@@ -20,28 +20,15 @@
 #include <vector>
 
 #include "bolt/expression/Expr.h"
-#include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::functions::flinksql {
 
-// Flink rlike reuses the shared RE2 vector-function implementation in
-// lib/Re2Functions.h, but chooses an invalid-regex policy that returns false
-// instead of failing the task.
-std::shared_ptr<exec::VectorFunction> makeRLike(
+std::shared_ptr<exec::VectorFunction> makeICURegexExtract(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config);
 
-std::vector<std::shared_ptr<exec::FunctionSignature>> rlikeSignatures();
-
-// Flink 1.11 regexp_extract returns null for invalid regular expressions,
-// invalid group IDs, unmatched groups and inputs without a match. Native
-// Engine V2 only supports constant patterns.
-std::shared_ptr<exec::VectorFunction> makeRegexpExtract(
-    const std::string& name,
-    const std::vector<exec::VectorFunctionArg>& inputArgs,
-    const core::QueryConfig& config);
-
-std::vector<std::shared_ptr<exec::FunctionSignature>> regexpExtractSignatures();
+std::vector<std::shared_ptr<exec::FunctionSignature>>
+icuRegexExtractSignatures();
 
 } // namespace bytedance::bolt::functions::flinksql
