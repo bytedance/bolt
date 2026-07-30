@@ -478,11 +478,11 @@ TEST(NestedListTest, DirectLengthsUpperBound) {
   level_info.def_level = 2;
   level_info.repeated_ancestor_def_level = 0;
 
-  std::vector<int16_t> def_levels = {2, 2, 2};
-  std::vector<int16_t> rep_levels = {0, 0, 0};
+  std::vector<int16_t> def_levels = {2, 2};
+  std::vector<int16_t> rep_levels = {0, 0};
   ValidityBitmapInputOutput io;
   io.values_read_upper_bound = 1;
-  std::vector<int32_t> lengths(1, 0);
+  std::vector<int32_t> lengths(2, -1);
 
   ASSERT_THROW(
       DefRepLevelsToListLengths(
@@ -493,6 +493,31 @@ TEST(NestedListTest, DirectLengthsUpperBound) {
           &io,
           lengths.data()),
       ParquetException);
+  EXPECT_EQ(lengths[1], -1);
+}
+
+TEST(NestedListTest, DirectLengthsExactUpperBound) {
+  LevelInfo level_info;
+  level_info.rep_level = 1;
+  level_info.def_level = 2;
+  level_info.repeated_ancestor_def_level = 0;
+
+  std::vector<int16_t> def_levels = {2, 2};
+  std::vector<int16_t> rep_levels = {0, 0};
+  ValidityBitmapInputOutput io;
+  io.values_read_upper_bound = 2;
+  std::vector<int32_t> lengths(2, -1);
+
+  DefRepLevelsToListLengths(
+      def_levels.data(),
+      rep_levels.data(),
+      def_levels.size(),
+      level_info,
+      &io,
+      lengths.data());
+
+  EXPECT_EQ(io.values_read, 2);
+  EXPECT_THAT(lengths, testing::ElementsAre(1, 1));
 }
 
 TEST(TestOnlyExtractBitsSoftware, BasicTest) {

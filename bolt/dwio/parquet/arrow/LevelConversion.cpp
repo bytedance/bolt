@@ -63,8 +63,9 @@ class OffsetListOutput {
       return;
     }
     if (ARROW_PREDICT_FALSE(
+            run > std::numeric_limits<OffsetType>::max() ||
             *offsets_ > std::numeric_limits<OffsetType>::max() -
-                static_cast<OffsetType>(run))) {
+                    static_cast<OffsetType>(run))) {
       throw ParquetException("List index overflow.");
     }
     *offsets_ += static_cast<OffsetType>(run);
@@ -91,6 +92,10 @@ class OffsetListOutput {
     return offsets_ == nullptr ? 0 : offsets_ - orig_;
   }
 
+  int64_t valuesReadForBounds() const {
+    return valuesRead();
+  }
+
   bool hasValuesRead() const {
     return offsets_ != nullptr;
   }
@@ -106,8 +111,8 @@ class LengthListOutput {
 
   void OnContinuationRun(int64_t run) {
     if (ARROW_PREDICT_FALSE(
-            currentLength_ >
-            std::numeric_limits<int32_t>::max() - static_cast<int32_t>(run))) {
+            run > std::numeric_limits<int32_t>::max() ||
+            currentLength_ > std::numeric_limits<int32_t>::max() - run)) {
       throw ParquetException("List index overflow.");
     }
     currentLength_ += static_cast<int32_t>(run);
@@ -129,6 +134,10 @@ class LengthListOutput {
 
   int64_t valuesRead() const {
     return valuesRead_;
+  }
+
+  int64_t valuesReadForBounds() const {
+    return valuesRead_ + (haveCurrentList_ ? 1 : 0);
   }
 
   bool hasValuesRead() const {
@@ -181,7 +190,8 @@ void DefRepLevelsToListInfo(
               (valid_bits_writer.has_value() &&
                valid_bits_writer->position() >=
                    output->values_read_upper_bound) ||
-              list_output.valuesRead() >= output->values_read_upper_bound)) {
+              list_output.valuesReadForBounds() >=
+                  output->values_read_upper_bound)) {
         std::stringstream ss;
         ss << "Definition levels exceeded upper bound: "
            << output->values_read_upper_bound;
