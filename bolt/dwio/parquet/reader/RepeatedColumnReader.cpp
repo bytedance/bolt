@@ -161,6 +161,18 @@ MapColumnReader::MapColumnReader(
   DWIO_ENSURE_EQ(fileType_->id(), fileType->id(), "working on the same node");
   auto& keyChildType = requestedType->childAt(0);
   auto& elementChildType = requestedType->childAt(1);
+  if (params.disableFloatingPointToVarcharMetadataFilter()) {
+    const auto hasMismatch = [&](int childIndex) {
+      const auto& fileChildType = fileType_->childAt(childIndex)->type();
+      const auto& requestedChildType =
+          requestedType->childAt(childIndex)->type();
+      return (fileChildType->isReal() || fileChildType->isDouble()) &&
+          requestedChildType->isVarchar();
+    };
+    if (hasMismatch(0) || hasMismatch(1)) {
+      formatData_->as<ParquetData>().disableTypeDependentMetadataFilters();
+    }
+  }
   keyReader_ = ParquetColumnReader::build(
       columnReaderOptions,
       keyChildType,
