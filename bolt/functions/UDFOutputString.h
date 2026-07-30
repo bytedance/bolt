@@ -30,8 +30,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstring>
 #include <string_view>
+#include <type_traits>
+
 namespace bytedance {
 namespace bolt {
 

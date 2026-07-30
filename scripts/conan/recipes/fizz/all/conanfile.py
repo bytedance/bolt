@@ -14,7 +14,7 @@
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import get
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 from conan.tools.env import VirtualBuildEnv
 import os
 
@@ -73,6 +73,10 @@ class FizzConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
+        apply_conandata_patches(self)
+
+    def export_sources(self):
+        export_conandata_patches(self)
 
     def generate(self):
         env = VirtualBuildEnv(self)

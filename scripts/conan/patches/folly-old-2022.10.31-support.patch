@@ -2,7 +2,7 @@ diff --git a/recipes/folly/all/conandata.yml b/recipes/folly/all/conandata.yml
 index a21030554..05545cd00 100644
 --- a/recipes/folly/all/conandata.yml
 +++ b/recipes/folly/all/conandata.yml
-@@ -2,3 +2,27 @@ sources:
+@@ -2,3 +2,30 @@ sources:
    "2024.08.12.00":
      url: "https://github.com/facebook/folly/releases/download/v2024.08.12.00/folly-v2024.08.12.00.tar.gz"
      sha256: "18d7be721721db547cb9c5dd5cc50df05cd88b0a8e683e3126ec6f9ce2c41c4d"
@@ -29,6 +29,12 @@ index a21030554..05545cd00 100644
 +    - patch_file: "patches/0031-fix-unistd-include.patch"
 +      patch_description: "symbolizer: Fix missing unistd.h include. (#2245)"
 +      patch_type: "conan"
++    - patch_file: "patches/0032-fix-libcpp19-range.patch"
++      patch_description: "Fix Range with libc++ 19 and later"
++      patch_type: "backport"
++    - patch_file: "patches/0033-fix-cxx23-aligned-storage.patch"
++      patch_description: "Avoid deprecated std::aligned_storage in public headers"
++      patch_type: "backport"
 +
 diff --git a/recipes/folly/all/conanfile.py b/recipes/folly/all/conanfile.py
 index 8e3f12f1c..727526a7c 100755
@@ -406,6 +412,155 @@ index 000000000..769c3b174
 + 
 + #if FOLLY_HAVE_ELF
 + 
+diff --git a/recipes/folly/all/patches/0032-fix-libcpp19-range.patch b/recipes/folly/all/patches/0032-fix-libcpp19-range.patch
+new file mode 100644
+index 000000000..e577e6fd2
+--- /dev/null
++++ b/recipes/folly/all/patches/0032-fix-libcpp19-range.patch
+@@ -0,0 +1,121 @@
++--- a/folly/Range.h
+++++ b/folly/Range.h
++@@ -69,3 +69,4 @@
++ #include <folly/detail/RangeSse42.h>
++-
+++#include <folly/lang/Byte.h>
+++
++ // Ignore shadowing warnings within this file, so includers can use -Wshadow.
++@@ -165,3 +166,70 @@
++ };
++-
+++
+++void range_is_char_type_f_(char const*);
+++void range_is_char_type_f_(wchar_t const*);
+++#if (defined(__cpp_char8_t) && __cpp_char8_t >= 201811L) || \
+++    FOLLY_CPLUSPLUS >= 202002
+++void range_is_char_type_f_(char8_t const*);
+++#endif
+++void range_is_char_type_f_(char16_t const*);
+++void range_is_char_type_f_(char32_t const*);
+++template <typename Iter>
+++using range_is_char_type_d_ =
+++    decltype(folly::detail::range_is_char_type_f_(FOLLY_DECLVAL(Iter)));
+++template <typename Iter>
+++constexpr bool range_is_char_type_v_ =
+++    is_detected_v<range_is_char_type_d_, Iter>;
+++
+++void range_is_byte_type_f_(unsigned char const*);
+++void range_is_byte_type_f_(signed char const*);
+++void range_is_byte_type_f_(byte const*);
+++template <typename Iter>
+++using range_is_byte_type_d_ =
+++    decltype(folly::detail::range_is_byte_type_f_(FOLLY_DECLVAL(Iter)));
+++template <typename Iter>
+++constexpr bool range_is_byte_type_v_ =
+++    is_detected_v<range_is_byte_type_d_, Iter>;
+++
+++struct range_traits_char_ {
+++  template <typename Value>
+++  using apply = std::char_traits<Value>;
+++};
+++struct range_traits_byte_ {
+++  template <typename Value>
+++  struct apply {
+++    FOLLY_ERASE static constexpr int compare(
+++        Value const* a, Value const* b, std::size_t c) {
+++      return !c ? 0 : std::memcmp(a, b, c);
+++    }
+++  };
+++};
+++struct range_traits_fbck_ {
+++  template <typename Value>
+++  struct apply {
+++    FOLLY_ERASE static constexpr int compare(
+++        Value const* a, Value const* b, std::size_t c) {
+++      while (c--) {
+++        auto&& ai = *a++;
+++        auto&& bi = *b++;
+++        if (ai < bi) {
+++          return -1;
+++        }
+++        if (bi < ai) {
+++          return +1;
+++        }
+++      }
+++      return 0;
+++    }
+++  };
+++};
+++template <typename Iter>
+++using range_traits_c_ = conditional_t<
+++    range_is_char_type_v_<Iter>,
+++    range_traits_char_,
+++    conditional_t<
+++        range_is_byte_type_v_<Iter>, range_traits_byte_, range_traits_fbck_>>;
+++template <typename Iter, typename Value>
+++using range_traits_t_ =
+++    typename range_traits_c_<Iter>::template apply<Value>;
+++
++ } // namespace detail
++@@ -194,6 +262,7 @@
++       Range<Iter>>::type;
++-
++-  using traits_type =
++-      std::char_traits<typename std::remove_const<value_type>::type>;
++-
+++
+++  using traits_type = detail::range_traits_t_<
+++      Iter,
+++      typename std::remove_const<value_type>::type>;
+++
++   static const size_type npos;
++@@ -560,9 +629,22 @@
++   struct NotStringView {};
+++  struct StringViewTypeChar {
+++    template <typename ValueType>
+++    using apply =
+++        std::basic_string_view<typename std::remove_const<ValueType>::type>;
+++  };
+++  struct StringViewTypeNone {
+++    template <typename>
+++    using apply = NotStringView;
+++  };
+++  template <typename ValueType>
+++  using StringViewTypeFunc = typename std::conditional<
+++      detail::range_is_char_type_v_<Iter>,
+++      StringViewTypeChar,
+++      StringViewTypeNone>::type;
++   template <typename ValueType>
++-  struct StringViewType
++-      : std::conditional<
++-            std::is_trivial<std::remove_const_t<ValueType>>::value,
++-            std::basic_string_view<std::remove_const_t<ValueType>>,
++-            NotStringView> {};
+++  struct StringViewType {
+++    using type =
+++        typename StringViewTypeFunc<ValueType>::template apply<ValueType>;
+++  };
++-
+++
++   template <typename Target>
+diff --git a/recipes/folly/all/patches/0033-fix-cxx23-aligned-storage.patch b/recipes/folly/all/patches/0033-fix-cxx23-aligned-storage.patch
+new file mode 100644
+index 000000000..4b26370f1
+--- /dev/null
++++ b/recipes/folly/all/patches/0033-fix-cxx23-aligned-storage.patch
+@@ -0,0 +1,16 @@
++--- a/folly/Traits.h
+++++ b/folly/Traits.h
++@@ -391,3 +391,12 @@
+++namespace detail {
+++template <std::size_t Len, std::size_t Align>
+++struct aligned_storage {
+++  struct type {
+++    alignas(Align) unsigned char data[Len];
+++  };
+++};
+++} // namespace detail
+++
++ template <typename T>
++ using aligned_storage_for_t =
++-    typename std::aligned_storage<sizeof(T), alignof(T)>::type;
+++    typename detail::aligned_storage<sizeof(T), alignof(T)>::type;
 diff --git a/recipes/folly/config.yml b/recipes/folly/config.yml
 index e799fbeee..407214371 100644
 --- a/recipes/folly/config.yml

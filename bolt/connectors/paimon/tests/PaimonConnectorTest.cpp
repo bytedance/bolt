@@ -15,7 +15,7 @@
  */
 
 #include "bolt/connectors/paimon/PaimonConnector.h"
-#include <fmt/format.h>
+#include <folly/Subprocess.h>
 #include <folly/init/Init.h>
 #include <folly/json.h>
 #include <gtest/gtest.h>
@@ -24,6 +24,7 @@
 #include <paimon/table/source/data_split.h>
 #include <paimon/table/source/plan.h>
 #include <paimon/table/source/table_scan.h>
+#include <cstdlib>
 #include "bolt/common/config/Config.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
@@ -41,6 +42,15 @@
 
 namespace bytedance::bolt::connector::paimon {
 
+namespace {
+
+std::string pythonExecutableForTests() {
+  const char* python = std::getenv("PAIMON_TEST_PYTHON");
+  return python != nullptr && python[0] != '\0' ? python : "python3";
+}
+
+} // namespace
+
 class PaimonConnectorTest
     : public bytedance::bolt::exec::test::OperatorTestBase {
  protected:
@@ -50,8 +60,9 @@ class PaimonConnectorTest
     LOG(INFO) << "Test using temporary directory: " << tempDir_->path;
 
     // Run create_test_tables.py with the temporary directory.
-    // PAIMON_TEST_SCRIPT_DIR is set by ctest via the test's ENVIRONMENT
-    // property; fall back to relative path when running binary directly.
+    // PAIMON_TEST_SCRIPT_DIR and PAIMON_TEST_PYTHON are set by ctest via the
+    // test's ENVIRONMENT property. Fall back to paths suitable for running the
+    // binary directly from the repository root.
     std::string scriptPath;
     const char* envDir = std::getenv("PAIMON_TEST_SCRIPT_DIR");
     if (envDir && envDir[0] != '\0') {
@@ -59,9 +70,12 @@ class PaimonConnectorTest
     } else {
       scriptPath = "./bolt/connectors/paimon/tests/create_test_tables.py";
     }
-    std::string command = scriptPath + " --base-path " + tempDir_->path;
-    int exitCode = system(command.c_str());
-    CHECK_EQ(exitCode, 0) << "Failed to create test tables";
+    folly::Subprocess process(
+        {pythonExecutableForTests(), scriptPath, "--base-path", tempDir_->path},
+        folly::Subprocess::Options().usePath());
+    const auto status = process.wait();
+    CHECK(status.exited() && status.exitStatus() == 0)
+        << "Failed to create test tables: " << status.str();
     exec::test::OperatorTestBase::SetUpTestCase();
   }
 
