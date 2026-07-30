@@ -738,6 +738,7 @@ void PageReader::prepareDataPageV2(
 }
 
 void PageReader::prepareDictionary(const PageHeader& pageHeader) {
+  pageData_ = nullptr;
   dictionary_.numValues = pageHeader.dictionary_page_header.num_values;
   dictionaryEncoding_ = pageHeader.dictionary_page_header.encoding;
   dictionary_.sorted = pageHeader.dictionary_page_header.__isset.is_sorted &&
@@ -749,13 +750,18 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
   cryptoCtx_.startDecryptWithDictionaryPage = false;
   int32_t compressedLen = pageHeader.compressed_page_size;
   int32_t uncompressedLen = pageHeader.uncompressed_page_size;
+  bool decryptedPage = false;
   if (codec_ != thrift::CompressionCodec::UNCOMPRESSED) {
     pageData_ = readBytes(compressedLen, pageBuffer_);
     if (cryptoCtx_.dataDecryptor != nullptr) {
       decryptPageData(compressedLen);
+      decryptedPage = true;
     }
     pageData_ = decompressData(
         pageData_, compressedLen, pageHeader.uncompressed_page_size);
+    if (decryptedPage) {
+      decryptionBuffer_.reset();
+    }
   } else {
     if (cryptoCtx_.dataDecryptor != nullptr) {
       pageData_ = readBytes(uncompressedLen, pageBuffer_);
@@ -859,14 +865,19 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
           AlignedBuffer::allocate<StringView>(dictionary_.numValues, &pool_);
       auto numBytes = uncompressedLen;
       auto values = dictionary_.values->asMutable<StringView>();
-      dictionary_.strings = AlignedBuffer::allocate<char>(numBytes, &pool_);
-      auto strings = dictionary_.strings->asMutable<char>();
-      if (pageData_) {
-        memcpy(strings, pageData_, numBytes);
+      if (auto ownedPageBuffer = takeOwnedPageBuffer(pageData_, numBytes)) {
+        dictionary_.strings = std::move(ownedPageBuffer);
       } else {
-        dwio::common::readBytes(
-            numBytes, inputStream_.get(), strings, bufferStart_, bufferEnd_);
+        dictionary_.strings = AlignedBuffer::allocate<char>(numBytes, &pool_);
+        auto strings = dictionary_.strings->asMutable<char>();
+        if (pageData_) {
+          memcpy(strings, pageData_, numBytes);
+        } else {
+          dwio::common::readBytes(
+              numBytes, inputStream_.get(), strings, bufferStart_, bufferEnd_);
+        }
       }
+      auto strings = dictionary_.strings->asMutable<char>();
       auto header = strings;
       for (auto i = 0; i < dictionary_.numValues; ++i) {
         auto length = *reinterpret_cast<const int32_t*>(header);
@@ -948,6 +959,27 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
       BOLT_UNSUPPORTED(
           "Parquet type {} not supported for dictionary", parquetType);
   }
+  pageData_ = nullptr;
+  pageBuffer_.reset();
+  decompressedData_.reset();
+  decryptionBuffer_.reset();
+}
+
+BufferPtr PageReader::takeOwnedPageBuffer(
+    const char* FOLLY_NULLABLE data,
+    size_t size) {
+  if (data == nullptr) {
+    return nullptr;
+  }
+  if (decompressedData_ && data == decompressedData_->as<char>()) {
+    decompressedData_->setSize(size);
+    return std::move(decompressedData_);
+  }
+  if (decryptionBuffer_ && data == decryptionBuffer_->as<char>()) {
+    decryptionBuffer_->setSize(size);
+    return std::move(decryptionBuffer_);
+  }
+  return nullptr;
 }
 
 void PageReader::makeFilterCache(dwio::common::ScanState& state) {
@@ -1773,6 +1805,9 @@ void PageReader::decryptPageData(int32_t& compressedLen) {
       compressedLen,
       const_cast<uint8_t*>(decryptionBuffer_->as<uint8_t>()),
       decryptionBuffer_->size());
+  if (pageBuffer_ && pageData_ == pageBuffer_->as<char>()) {
+    pageBuffer_.reset();
+  }
   pageData_ = decryptionBuffer_->as<char>();
 }
 

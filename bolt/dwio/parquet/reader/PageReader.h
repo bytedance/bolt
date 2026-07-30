@@ -49,6 +49,7 @@
 namespace bytedance::bolt::parquet {
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+struct PageReaderTestPeer;
 
 struct CryptoContext {
   CryptoContext(
@@ -306,6 +307,7 @@ class PageReader {
       int64_t row,
       const bool keepRepDefRawData);
   void makeDecoder();
+  BufferPtr takeOwnedPageBuffer(const char* FOLLY_NULLABLE data, size_t size);
 
   // For a non-top level leaf, reads the defs and sets 'leafNulls_' and
   // 'numRowsInPage_' accordingly. This is used for non-top level leaves when
@@ -638,6 +640,8 @@ class PageReader {
   // Tracks output count for the current physical page. -1 means there is no
   // active page being accounted.
   int32_t currentPageNumValues_{-1};
+
+  friend struct PageReaderTestPeer;
 };
 
 FOLLY_ALWAYS_INLINE dwio::common::compression::CompressionOptions
