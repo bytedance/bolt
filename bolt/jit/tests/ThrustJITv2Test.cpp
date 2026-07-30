@@ -27,6 +27,7 @@
 #include <array>
 #include <limits>
 #include <thread>
+#include <utility>
 
 extern "C" int64_t extern_test_sum(int64_t a, int64_t b) {
   return a + b;
@@ -36,6 +37,45 @@ extern "C" int jit_StringViewCompareWrapper(char* l, char* r);
 namespace bytedance::bolt::jit::test {
 
 namespace {
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+using JoiningThread = std::jthread;
+#else
+class JoiningThread {
+ public:
+  template <typename Function, typename... Args>
+  explicit JoiningThread(Function&& function, Args&&... args)
+      : thread_(std::forward<Function>(function), std::forward<Args>(args)...) {
+  }
+
+  JoiningThread(const JoiningThread&) = delete;
+  JoiningThread& operator=(const JoiningThread&) = delete;
+  JoiningThread(JoiningThread&&) noexcept = default;
+
+  JoiningThread& operator=(JoiningThread&& other) noexcept {
+    if (this != &other) {
+      if (thread_.joinable()) {
+        thread_.join();
+      }
+      thread_ = std::move(other.thread_);
+    }
+    return *this;
+  }
+
+  ~JoiningThread() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  void join() {
+    thread_.join();
+  }
+
+ private:
+  std::thread thread_;
+};
+#endif
 
 std::function<bool(llvm::Module&)> makeExternSumIRGenerator(
     const std::string& funcName) {
@@ -135,7 +175,7 @@ TEST(ThrustJITv2Test, compileAndCacheWithExternSymbol) {
   constexpr size_t kNumThreads = 16;
   std::array<CompiledModuleSP, kNumThreads> modules;
 
-  std::vector<std::jthread> threads;
+  std::vector<JoiningThread> threads;
   threads.reserve(kNumThreads);
   for (size_t i = 0; i < kNumThreads; ++i) {
     threads.emplace_back([&, i]() {
@@ -175,7 +215,7 @@ TEST(ThrustJITv2Test, compileConcurrently) {
   std::array<CompiledModuleSP, kNumThreadsPerFunction> modulesA;
   std::array<CompiledModuleSP, kNumThreadsPerFunction> modulesB;
 
-  std::vector<std::jthread> threads;
+  std::vector<JoiningThread> threads;
   threads.reserve(kNumThreadsPerFunction * 2);
   for (size_t i = 0; i < kNumThreadsPerFunction; ++i) {
     threads.emplace_back([&, i]() {

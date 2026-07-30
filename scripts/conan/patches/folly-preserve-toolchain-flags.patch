@@ -1,0 +1,35 @@
+diff --git a/recipes/folly/all/conanfile.py b/recipes/folly/all/conanfile.py
+--- a/recipes/folly/all/conanfile.py
++++ b/recipes/folly/all/conanfile.py
+@@ -178,23 +178,23 @@
+         if str(self.settings.arch) in ['armv8'] and not is_msvc(self):
+             # Includes by default: ‘armv8-a’, ‘+crc’, ‘+lse’, ‘+rdma’
+             # This will enable Folly's F14IntrinsicsMode::SimdAndCrc
+-            tc.variables["CMAKE_C_FLAGS"] = "-march=armv8.3-a"  
+-            tc.variables["CMAKE_CXX_FLAGS"] = "-march=armv8.3-a"
++            tc.extra_cflags.append("-march=armv8.3-a")
++            tc.extra_cxxflags.append("-march=armv8.3-a")
+         elif str(self.settings.arch) in ['armv9'] and not is_msvc(self):
+             # gcc 12+ https://www.phoronix.com/news/GCC-12-ARMv9-march-armv9-a
+-            tc.variables["CMAKE_C_FLAGS"] = "-march=armv9-a"
+-            tc.variables["CMAKE_CXX_FLAGS"] = "-march=armv9-a"
++            tc.extra_cflags.append("-march=armv9-a")
++            tc.extra_cxxflags.append("-march=armv9-a")
+ 
+         # To enable Folly's FOLLY_F14_CRC_INTRINSIC_AVAILABLE
+         if str(self.settings.arch) in ['x86', 'x86_64']:
+             tc.preprocessor_definitions["FOLLY_SSE"] = "4"
+             tc.preprocessor_definitions["FOLLY_SSE_MINOR"] = "2"
+             if not is_msvc(self):
+-                tc.variables["CMAKE_C_FLAGS"] = "-mfma -mavx2"
+-                tc.variables["CMAKE_CXX_FLAGS"] = "-mfma -mavx2"
++                tc.extra_cflags.extend(["-mfma", "-mavx2"])
++                tc.extra_cxxflags.extend(["-mfma", "-mavx2"])
+             else:
+-                tc.variables["CMAKE_C_FLAGS"] = "/arch:FMA /arch:AVX2"
+-                tc.variables["CMAKE_CXX_FLAGS"] = "/arch:FMA /arch:AVX2"
++                tc.extra_cflags.extend(["/arch:FMA", "/arch:AVX2"])
++                tc.extra_cxxflags.extend(["/arch:FMA", "/arch:AVX2"])
+ 
+         tc.cache_variables["FOLLY_HAVE_INT128_T"] = True
+         tc.cache_variables["FOLLY_NO_EXCEPTION_TRACER"] = self.options.no_exception_tracer

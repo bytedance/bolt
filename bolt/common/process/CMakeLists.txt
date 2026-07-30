@@ -40,7 +40,11 @@ find_package(libbacktrace REQUIRED CONFIG)
 
 bolt_add_library(bolt_process_crash_report CrashReport.cpp)
 
-target_link_libraries(bolt_process_crash_report libbacktrace::libbacktrace)
+target_link_libraries(
+  bolt_process_crash_report
+  libbacktrace::libbacktrace
+  ${CMAKE_DL_LIBS}
+)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
   find_package(libunwind REQUIRED CONFIG)

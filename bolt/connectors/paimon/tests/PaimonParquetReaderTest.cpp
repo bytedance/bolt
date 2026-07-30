@@ -26,6 +26,7 @@
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/arrow/Abi.h"
@@ -53,11 +54,11 @@ class PaimonParquetReaderTest : public ::testing::Test,
     dwio::common::LocalFileSink::registerFactory();
     pool_ = memory::memoryManager()->addRootPool("PaimonParquetReaderTest");
     leafPool_ = pool_->addLeafChild("leaf");
-    tempDir_ = std::filesystem::temp_directory_path();
+    tempDir_ = exec::test::TempDirectoryPath::create();
   }
 
   std::string tempPath(const std::string& filename) const {
-    return (tempDir_ / filename).string();
+    return (std::filesystem::path(tempDir_->getPath()) / filename).string();
   }
 
   std::unique_ptr<parquet::Writer> createWriter(
@@ -164,7 +165,7 @@ class PaimonParquetReaderTest : public ::testing::Test,
 
   std::shared_ptr<memory::MemoryPool> pool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::filesystem::path tempDir_;
+  std::shared_ptr<exec::test::TempDirectoryPath> tempDir_;
 };
 
 // ---- Existing tests
