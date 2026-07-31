@@ -33,6 +33,13 @@
 #include <zstd.h>
 #include <zstd_errors.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+
+#include "bolt/common/base/RuntimeMetrics.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/common/ColumnVisitors.h"
 #include "bolt/dwio/parquet/reader/Decompression.h"
@@ -48,6 +55,34 @@ namespace bytedance::bolt::parquet {
 
 using thrift::Encoding;
 using thrift::PageHeader;
+
+namespace {
+
+uint64_t configuredRepDefPreloadWindowCount() {
+  const char* configured =
+      std::getenv("BOLT_PARQUET_REPDEF_PRELOAD_WINDOW_COUNT");
+  if (configured == nullptr || *configured == '\0') {
+    return 0;
+  }
+
+  char* end = nullptr;
+  const auto parsed = std::strtoull(configured, &end, 10);
+  if (end == configured) {
+    return 0;
+  }
+  return parsed;
+}
+
+void addPageReaderStat(const std::string& name, int64_t value) {
+  addThreadLocalRuntimeStat(name, RuntimeCounter(value));
+}
+
+void addPageReaderNanos(const std::string& name, uint64_t value) {
+  addThreadLocalRuntimeStat(
+      name, RuntimeCounter(value, RuntimeCounter::Unit::kNanos));
+}
+
+} // namespace
 
 void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
   defineDecoder_.reset();
@@ -68,21 +103,17 @@ void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
       numRowsInPage_ = 0;
       break;
     }
-    // For nested (non top level) columns, 'preloadRepDefs' only fully
-    // decodes the first 'decodeRepDefPageCount_' pages and keeps the
-    // remaining pages as raw rep/def bytes inside 'preloadedRepDefs_'.
-    // When a leaf-level filter pushdown triggers a skip()/seekToPage()
-    // that walks past the sampled boundary, the consumer side
-    // ('setPageRowInfo' inside 'prepareDataPageV1') indexes
-    // 'numLeavesInPage_[pageIndex_]' and would go out of bounds.
-    //
-    // Materialise just enough preloaded rep/def bytes BEFORE entering
-    // the next page so that 'setPageRowInfo' remains a pure lookup.
-    // The loop only fires when we are about to cross the sampled
-    // boundary and there is something left to decode, mirroring (and
-    // complementing) the "ahead by one page" invariant established at
-    // the exit of 'decodeRepDefs'.
-    if (hasChunkRepDefs_ && !isTopLevel_ && maxRepeat_ > 0) {
+    if (row != kRepDefOnly && windowRepDefMode_ && hasChunkRepDefs_ &&
+        !isTopLevel_ && maxRepeat_ > 0) {
+      while (pageIndex_ + 1 >= static_cast<int32_t>(numLeavesInPage_.size()) &&
+             (!preloadedRepDefs_.empty() || windowRepDefsRemaining_ > 0)) {
+        ensureNumLeavesInPage(pageIndex_ + 1);
+      }
+    } else if (
+        row != kRepDefOnly && hasChunkRepDefs_ && !isTopLevel_ &&
+        maxRepeat_ > 0) {
+      // In non-window mode we still need the existing sampled-preload guard
+      // to materialize leaf counts before crossing the sampling boundary.
       while (pageIndex_ + 1 >= static_cast<int32_t>(numLeavesInPage_.size()) &&
              !preloadedRepDefs_.empty()) {
         loadMoreRepDefs();
@@ -771,6 +802,7 @@ int32_t parquetTypeBytes(thrift::Type::type type) {
 } // namespace
 
 void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
+  const auto startNs = getCurrentTimeNano();
   seekToPage(kRepDefOnly, keepRepDefRawData);
   if (!keepRepDefRawData) {
     BOLT_CHECK_GE(
@@ -807,11 +839,26 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
     leafNullsSize_ += numLeaves;
     numLeavesInPage_.push_back(numLeaves);
   }
+  addPageReaderStat("pageReaderPreloadPageRepDefsCount", 1);
+  addPageReaderStat("pageReaderPreloadPageRepDefsLevels", numRepDefsInPage_);
+  if (keepRepDefRawData) {
+    addPageReaderStat("pageReaderPreloadPageRepDefsKeepRawCount", 1);
+  }
+  addPageReaderNanos(
+      "pageReaderPreloadPageRepDefsTimeNs", getCurrentTimeNano() - startNs);
   return;
 }
 
 void PageReader::preloadRepDefs() {
+  const auto startNs = getCurrentTimeNano();
   hasChunkRepDefs_ = true;
+  windowRepDefMode_ = false;
+  windowTopLevelOffsets_.clear();
+  windowRepDefPageData_.clear();
+  windowRepDefsRemaining_ = 0;
+  windowCurrentPageLeafCount_ = 0;
+  windowDecodedPageCount_ = 0;
+  windowTopLevelOffsetBase_ = 0;
   bool startWithDictinoaryPage = cryptoCtx_.startDecryptWithDictionaryPage;
   if (maxRepeat_ > 0 && maxDefine_ > 0) {
     const int32_t samplePages = decodeRepDefPageCount_;
@@ -830,13 +877,13 @@ void PageReader::preloadRepDefs() {
           1;
       auto avgRefDefBytes = totalRefDefBytes_ / samplePages + 1;
       auto avgPageLen = pageStart_ / samplePages + 1;
-      LOG(INFO) << __FUNCTION__ << "[" << this
-                << "] : def/rep levels = " << definitionLevels_.size()
-                << ", avgPageLen = " << avgPageLen
-                << ", chunkSize = " << chunkSize_
-                << ", pagesCntPerBatch = " << pageCntPerBatch
-                << ", samplePages = " << samplePages << ", repDefMemoryLimit_ "
-                << repDefMemoryLimit_;
+      VLOG(1) << __FUNCTION__ << "[" << this
+              << "] : def/rep levels = " << definitionLevels_.size()
+              << ", avgPageLen = " << avgPageLen
+              << ", chunkSize = " << chunkSize_
+              << ", pagesCntPerBatch = " << pageCntPerBatch
+              << ", samplePages = " << samplePages << ", repDefMemoryLimit_ "
+              << repDefMemoryLimit_;
       pageCnt = 0;
       do {
         while (pageStart_ < chunkSize_ && ++pageCnt <= pageCntPerBatch) {
@@ -871,52 +918,523 @@ void PageReader::preloadRepDefs() {
   totalRefDefBytes_ = 0;
   pageOrdinal_ = 0;
   cryptoCtx_.startDecryptWithDictionaryPage = startWithDictinoaryPage;
+  addPageReaderStat("pageReaderPreloadRepDefsCount", 1);
+  addPageReaderNanos(
+      "pageReaderPreloadRepDefsTimeNs", getCurrentTimeNano() - startNs);
+}
+
+void PageReader::preloadRepDefsRawOnly() {
+  const auto startNs = getCurrentTimeNano();
+  hasChunkRepDefs_ = true;
+  windowRepDefMode_ = true;
+  const bool startWithDictionaryPage =
+      cryptoCtx_.startDecryptWithDictionaryPage;
+  totalRefDefBytes_ = 0;
+  numLeavesInPage_.clear();
+  windowRepeatDecoder_.reset();
+  windowDefineDecoder_.reset();
+  windowRepDefsRemaining_ = 0;
+  windowCurrentPageLeafCount_ = 0;
+  windowDecodedPageCount_ = 0;
+  windowRepDefPageData_.clear();
+  windowTopLevelOffsets_.clear();
+  windowTopLevelOffsetBase_ = 0;
+
+  while (pageStart_ < chunkSize_) {
+    preloadedRepDefs_.emplace_back(raw_vector<char>(&pool_));
+    preloadPageRepDefs(true);
+    if (preloadedRepDefs_.back().empty()) {
+      preloadedRepDefs_.pop_back();
+    }
+  }
+
+  std::vector<uint64_t> rewind = {0};
+  pageStart_ = 0;
+  dwio::common::PositionProvider position(rewind);
+  inputStream_->seekToPosition(position);
+  bufferStart_ = bufferEnd_ = nullptr;
+  rowOfPage_ = 0;
+  numRowsInPage_ = 0;
+  pageData_ = nullptr;
+  totalRefDefBytes_ = 0;
+  pageOrdinal_ = 0;
+  cryptoCtx_.startDecryptWithDictionaryPage = startWithDictionaryPage;
+  addPageReaderStat("pageReaderPreloadRepDefsRawOnlyCount", 1);
+  addPageReaderNanos(
+      "pageReaderPreloadRepDefsRawOnlyTimeNs", getCurrentTimeNano() - startNs);
+}
+
+int32_t PageReader::countLeavesInRepDefPage(
+    const raw_vector<char>& repDefData) {
+  if (repDefData.empty()) {
+    return 0;
+  }
+
+  const char* rawData = repDefData.data();
+  const char* pageEnd = repDefData.data() + repDefData.size();
+  const auto numRepDefsInPage = readField<int32_t>(rawData);
+  if (numRepDefsInPage <= 0) {
+    return 0;
+  }
+
+  const auto repeatLength = readField<int32_t>(rawData);
+  BOLT_CHECK_GE(repeatLength, 0);
+  BOLT_CHECK_LE(rawData + repeatLength, pageEnd);
+  rawData += repeatLength;
+
+  const auto defineLength = readField<uint32_t>(rawData);
+  BOLT_CHECK_LE(rawData + defineLength, pageEnd);
+  if (leafInfo_.rep_level == 0) {
+    return numRepDefsInPage;
+  }
+
+  auto bitReader = ::arrow::bit_util::BitReader(
+      reinterpret_cast<const uint8_t*>(rawData), defineLength);
+  const auto bitWidth = ::arrow::bit_util::NumRequiredBits(maxDefine_);
+  const auto presentLevel = leafInfo_.repeated_ancestor_def_level;
+  auto remaining = numRepDefsInPage;
+  int32_t numLeaves = 0;
+
+  while (remaining > 0) {
+    uint32_t indicator = 0;
+    BOLT_CHECK(bitReader.GetVlqInt(&indicator), "Invalid definition RLE run");
+    const bool isLiteral = indicator & 1;
+    const uint32_t count = indicator >> 1;
+
+    if (isLiteral) {
+      BOLT_CHECK_GT(count, 0);
+      BOLT_CHECK_LE(count, static_cast<uint32_t>(INT32_MAX) / 8);
+      const auto literalCount =
+          std::min<int32_t>(remaining, static_cast<int32_t>(count * 8));
+      for (auto i = 0; i < literalCount; ++i) {
+        uint64_t value = 0;
+        BOLT_CHECK(
+            bitReader.GetValue(bitWidth, &value),
+            "Invalid definition literal run");
+        numLeaves += value >= presentLevel ? 1 : 0;
+      }
+      remaining -= literalCount;
+    } else {
+      BOLT_CHECK_GT(count, 0);
+      BOLT_CHECK_LE(count, static_cast<uint32_t>(INT32_MAX));
+      uint64_t value = 0;
+      BOLT_CHECK(
+          bitReader.GetAligned(
+              static_cast<int>(::arrow::bit_util::CeilDiv(bitWidth, 8)),
+              &value),
+          "Invalid definition repeated run");
+      const auto repeatCount =
+          std::min<int32_t>(remaining, static_cast<int32_t>(count));
+      if (value >= presentLevel) {
+        numLeaves += repeatCount;
+      }
+      remaining -= repeatCount;
+    }
+  }
+  return numLeaves;
+}
+
+void PageReader::compactConsumedLeafNulls() {
+  constexpr int32_t WordBits = 64;
+  int64_t erasedBits = erasedLeafNullWords_ * WordBits;
+  BOLT_CHECK_LE(numLeafNullsConsumed_, leafNullsSize_ + erasedBits);
+  if (numLeafNullsConsumed_ - erasedBits <= WordBits) {
+    return;
+  }
+
+  auto consumedWords = bits::nwords(numLeafNullsConsumed_ - erasedBits) - 1;
+  auto totalNullWords = bits::nwords(leafNullsSize_);
+  auto unConsumedNullWords = totalNullWords - consumedWords;
+  if (unConsumedNullWords > 0) {
+    uint64_t* rawData = leafNulls_.data();
+    size_t copyBytes = unConsumedNullWords * sizeof(uint64_t);
+
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GLIBC__) && \
+    (__GLIBC__ * 100 + __GLIBC_MINOR__ < 233)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wrestrict"
+#endif
+    if (unConsumedNullWords < consumedWords) {
+      memcpy(rawData, rawData + consumedWords, copyBytes);
+    } else {
+      raw_vector<uint64_t> tmpBuffer;
+      tmpBuffer.resize(unConsumedNullWords);
+      uint64_t* tmpDest = tmpBuffer.data();
+      memcpy(tmpDest, rawData + consumedWords, copyBytes);
+      memcpy(rawData, tmpDest, copyBytes);
+    }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#else
+    memmove(rawData, rawData + consumedWords, copyBytes);
+#endif
+  }
+  leafNulls_.resize(unConsumedNullWords);
+  leafNullsSize_ -= consumedWords * WordBits;
+  erasedLeafNullWords_ += consumedWords;
+  BOLT_CHECK_EQ(leafNulls_.size(), bits::nwords(leafNullsSize_));
+}
+
+void PageReader::compactWindowRepDefs() {
+  if (repDefEnd_ == 0) {
+    return;
+  }
+
+  BOLT_CHECK_LE(repDefEnd_, definitionLevels_.size());
+  BOLT_CHECK_EQ(definitionLevels_.size(), repetitionLevels_.size());
+  const auto keptLevels =
+      static_cast<int32_t>(definitionLevels_.size()) - repDefEnd_;
+  if (keptLevels > 0) {
+    const auto copySize = keptLevels * sizeof(int16_t);
+    memmove(
+        definitionLevels_.data(),
+        definitionLevels_.data() + repDefEnd_,
+        copySize);
+    memmove(
+        repetitionLevels_.data(),
+        repetitionLevels_.data() + repDefEnd_,
+        copySize);
+  }
+  definitionLevels_.resize(keptLevels);
+  repetitionLevels_.resize(keptLevels);
+  compactWindowTopLevelOffsets(repDefEnd_);
+  repDefBegin_ = 0;
+  repDefEnd_ = 0;
+}
+
+void PageReader::compactWindowTopLevelOffsets(int32_t consumedLevels) {
+  if (consumedLevels == 0 || windowTopLevelOffsets_.empty()) {
+    return;
+  }
+
+  windowTopLevelOffsetBase_ += consumedLevels;
+  auto firstKept = std::lower_bound(
+      windowTopLevelOffsets_.begin(),
+      windowTopLevelOffsets_.end(),
+      windowTopLevelOffsetBase_);
+  const auto kept = windowTopLevelOffsets_.end() - firstKept;
+  if (kept > 0 && firstKept != windowTopLevelOffsets_.begin()) {
+    memmove(
+        windowTopLevelOffsets_.data(),
+        &*firstKept,
+        kept * sizeof(windowTopLevelOffsets_[0]));
+  }
+  windowTopLevelOffsets_.resize(kept);
+}
+
+int32_t PageReader::appendWindowTopLevelOffsets(int32_t begin, int32_t end) {
+  if (maxRepeat_ == 0) {
+    return std::max(end - begin, 0);
+  }
+
+  int32_t added = 0;
+  for (int32_t i = begin; i < end; ++i) {
+    if (repetitionLevels_[i] == 0) {
+      windowTopLevelOffsets_.push_back(windowTopLevelOffsetBase_ + i);
+      ++added;
+    }
+  }
+  return added;
+}
+
+int32_t PageReader::decodeWindowRepDefsBatch(int32_t batchSize) {
+  if (batchSize <= 0) {
+    return 0;
+  }
+
+  const auto begin = static_cast<int32_t>(definitionLevels_.size());
+  const auto end = begin + batchSize;
+  repetitionLevels_.resize(end);
+  BOLT_CHECK_NOT_NULL(
+      windowRepeatDecoder_, "Missing incremental repetition decoder");
+  windowRepeatDecoder_->GetBatch(repetitionLevels_.data() + begin, batchSize);
+
+  definitionLevels_.resize(end);
+  BOLT_CHECK_NOT_NULL(
+      windowDefineDecoder_, "Missing incremental definition decoder");
+  windowDefineDecoder_->GetBatch(definitionLevels_.data() + begin, batchSize);
+
+  windowRepDefsRemaining_ -= batchSize;
+  leafNulls_.resize(bits::nwords(leafNullsSize_ + batchSize));
+  const auto numLeaves = getLengthsAndNulls(
+      LevelMode::kNulls,
+      leafInfo_,
+      begin,
+      end,
+      batchSize,
+      nullptr,
+      leafNulls_.data(),
+      leafNullsSize_);
+  leafNullsSize_ += numLeaves;
+  windowCurrentPageLeafCount_ += numLeaves;
+  appendWindowTopLevelOffsets(begin, end);
+  finishCurrentWindowRepDefPage();
+  return numLeaves;
+}
+
+void PageReader::finishCurrentWindowRepDefPage() {
+  if (windowRepDefsRemaining_ == 0 && !windowRepDefPageData_.empty()) {
+    if (windowDecodedPageCount_ == numLeavesInPage_.size()) {
+      numLeavesInPage_.push_back(windowCurrentPageLeafCount_);
+    } else {
+      BOLT_CHECK_LT(windowDecodedPageCount_, numLeavesInPage_.size());
+      BOLT_DCHECK_EQ(
+          numLeavesInPage_[windowDecodedPageCount_],
+          windowCurrentPageLeafCount_);
+    }
+    ++windowDecodedPageCount_;
+    windowCurrentPageLeafCount_ = 0;
+    windowRepDefPageData_.clear();
+  }
+}
+
+void PageReader::ensureNumLeavesInPage(int32_t targetPageIndex) {
+  if (windowRepDefMode_) {
+    if (targetPageIndex < static_cast<int32_t>(numLeavesInPage_.size())) {
+      return;
+    }
+
+    auto nextPageToCount = static_cast<int32_t>(numLeavesInPage_.size());
+    if (!windowRepDefPageData_.empty() &&
+        windowDecodedPageCount_ == nextPageToCount) {
+      numLeavesInPage_.push_back(
+          countLeavesInRepDefPage(windowRepDefPageData_));
+      nextPageToCount = static_cast<int32_t>(numLeavesInPage_.size());
+      if (targetPageIndex < static_cast<int32_t>(numLeavesInPage_.size())) {
+        return;
+      }
+    }
+
+    const auto firstPreloadedPageIndex =
+        windowDecodedPageCount_ + (windowRepDefPageData_.empty() ? 0 : 1);
+    auto pagesToSkip = nextPageToCount - firstPreloadedPageIndex;
+    BOLT_CHECK_GE(pagesToSkip, 0);
+    for (const auto& repDefData : preloadedRepDefs_) {
+      if (repDefData.empty()) {
+        continue;
+      }
+      if (pagesToSkip > 0) {
+        --pagesToSkip;
+        continue;
+      }
+      numLeavesInPage_.push_back(countLeavesInRepDefPage(repDefData));
+      if (targetPageIndex < static_cast<int32_t>(numLeavesInPage_.size())) {
+        break;
+      }
+    }
+    return;
+  }
+
+  while (targetPageIndex >= static_cast<int32_t>(numLeavesInPage_.size()) &&
+         !preloadedRepDefs_.empty()) {
+    loadMoreRepDefs();
+  }
+}
+
+bool PageReader::loadNextWindowRepDefPage() {
+  if (windowRepDefsRemaining_ > 0) {
+    return true;
+  }
+
+  finishCurrentWindowRepDefPage();
+  windowRepeatDecoder_.reset();
+  windowDefineDecoder_.reset();
+  while (!preloadedRepDefs_.empty()) {
+    windowRepDefPageData_ = std::move(preloadedRepDefs_.front());
+    preloadedRepDefs_.pop_front();
+    if (windowRepDefPageData_.empty()) {
+      continue;
+    }
+
+    const char* rawData = windowRepDefPageData_.data();
+    const char* pageEnd =
+        windowRepDefPageData_.data() + windowRepDefPageData_.size();
+    windowRepDefsRemaining_ = readField<int32_t>(rawData);
+    if (windowRepDefsRemaining_ <= 0) {
+      finishCurrentWindowRepDefPage();
+      continue;
+    }
+    windowCurrentPageLeafCount_ = 0;
+
+    const auto repeatLength = readField<int32_t>(rawData);
+    BOLT_CHECK_GE(repeatLength, 0);
+    BOLT_CHECK_LE(rawData + repeatLength, pageEnd);
+    windowRepeatDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
+        reinterpret_cast<const uint8_t*>(rawData),
+        repeatLength,
+        ::arrow::bit_util::NumRequiredBits(maxRepeat_));
+    rawData += repeatLength;
+
+    const auto defineLength = readField<uint32_t>(rawData);
+    BOLT_CHECK_LE(rawData + defineLength, pageEnd);
+    windowDefineDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
+        reinterpret_cast<const uint8_t*>(rawData),
+        defineLength,
+        ::arrow::bit_util::NumRequiredBits(maxDefine_));
+    return true;
+  }
+  return false;
+}
+
+void PageReader::loadWindowRepDefs(int32_t targetTopLevelRows) {
+  const auto startNs = getCurrentTimeNano();
+  if (targetTopLevelRows <= 0) {
+    return;
+  }
+
+  constexpr int32_t kMaxRepDefDecodeBatch = 64 * 1024;
+  compactConsumedLeafNulls();
+  compactWindowTopLevelOffsets(repDefBegin_);
+  auto topLevelRows = static_cast<int32_t>(windowTopLevelOffsets_.size());
+  int32_t decodeBatchCount = 0;
+  while (topLevelRows < targetTopLevelRows && loadNextWindowRepDefPage()) {
+    const auto batchSize =
+        std::min(windowRepDefsRemaining_, kMaxRepDefDecodeBatch);
+    if (batchSize <= 0) {
+      continue;
+    }
+    const auto topLevelCountBefore =
+        static_cast<int32_t>(windowTopLevelOffsets_.size());
+    decodeWindowRepDefsBatch(batchSize);
+    topLevelRows += static_cast<int32_t>(windowTopLevelOffsets_.size()) -
+        topLevelCountBefore;
+    ++decodeBatchCount;
+  }
+  addPageReaderStat("pageReaderLoadWindowRepDefsCount", 1);
+  addPageReaderStat("pageReaderLoadWindowRepDefsBatches", decodeBatchCount);
+  addPageReaderNanos(
+      "pageReaderLoadWindowRepDefsTimeNs", getCurrentTimeNano() - startNs);
 }
 
 void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
-  if (definitionLevels_.empty() && maxDefine_ > 0) {
-    preloadRepDefs();
+  const auto startNs = getCurrentTimeNano();
+  uint64_t preloadTimeNs = 0;
+  uint64_t findTopLevelTimeNs = 0;
+  uint64_t loadMoreTimeNs = 0;
+  int64_t findTopLevelLevels = 0;
+  const auto preloadWindowCount = repDefPreloadWindowCount_ > 0
+      ? static_cast<uint64_t>(repDefPreloadWindowCount_)
+      : configuredRepDefPreloadWindowCount();
+  const bool windowPreload =
+      preloadWindowCount > 0 && maxRepeat_ > 0 && maxDefine_ > 0;
+  if (windowPreload) {
+    compactWindowRepDefs();
+  }
+  if (!hasChunkRepDefs_ && maxDefine_ > 0) {
+    const auto preloadStartNs = getCurrentTimeNano();
+    if (windowPreload) {
+      preloadRepDefsRawOnly();
+    } else {
+      preloadRepDefs();
+    }
+    preloadTimeNs += getCurrentTimeNano() - preloadStartNs;
   }
   repDefBegin_ = repDefEnd_;
+  const auto requiredTopLevelRows = numTopLevelRows + 1;
+  const auto targetTopLevelRows = windowPreload
+      ? std::max<int32_t>(
+            requiredTopLevelRows,
+            static_cast<int32_t>(std::min<uint64_t>(
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+                static_cast<uint64_t>(numTopLevelRows) * preloadWindowCount +
+                    1)))
+      : requiredTopLevelRows;
+  if (windowPreload) {
+    const auto loadMoreStartNs = getCurrentTimeNano();
+    loadWindowRepDefs(targetTopLevelRows);
+    loadMoreTimeNs += getCurrentTimeNano() - loadMoreStartNs;
+  }
   int32_t numLevels = definitionLevels_.size();
   int32_t topFound = 0;
-  int32_t i = repDefBegin_;
-
-  auto foundTopLevel = [&]() {
-    for (; i < numLevels; ++i) {
-      if (repetitionLevels_[i] == 0) {
-        ++topFound;
-        if (topFound == numTopLevelRows + 1) {
-          break;
-        }
-      }
-    }
-    repDefEnd_ = i;
-  };
+  int32_t loadMoreCount = 0;
 
   if (maxRepeat_ > 0) {
-    foundTopLevel();
+    if (windowPreload) {
+      const auto findStartNs = getCurrentTimeNano();
+      compactWindowTopLevelOffsets(repDefBegin_);
+      topFound = std::min<int32_t>(
+          numTopLevelRows + 1,
+          static_cast<int32_t>(windowTopLevelOffsets_.size()));
+      if (topFound == numTopLevelRows + 1) {
+        repDefEnd_ =
+            windowTopLevelOffsets_[numTopLevelRows] - windowTopLevelOffsetBase_;
+      } else {
+        repDefEnd_ = numLevels;
+      }
+      findTopLevelLevels =
+          repDefEnd_ > repDefBegin_ ? repDefEnd_ - repDefBegin_ : 0;
+      findTopLevelTimeNs += getCurrentTimeNano() - findStartNs;
+    } else {
+      int32_t i = repDefBegin_;
+      auto foundTopLevel = [&]() {
+        const auto scanBegin = i;
+        for (; i < numLevels; ++i) {
+          if (repetitionLevels_[i] == 0) {
+            ++topFound;
+            if (topFound == numTopLevelRows + 1) {
+              break;
+            }
+          }
+        }
+        auto scannedLevels = i - scanBegin;
+        if (i < numLevels && topFound == numTopLevelRows + 1) {
+          ++scannedLevels;
+        }
+        repDefEnd_ = i;
+        return scannedLevels;
+      };
+      const auto findStartNs = getCurrentTimeNano();
+      findTopLevelLevels += foundTopLevel();
+      findTopLevelTimeNs += getCurrentTimeNano() - findStartNs;
+      while (repDefEnd_ == numLevels && topFound < numTopLevelRows + 1 &&
+             (!preloadedRepDefs_.empty() || windowRepDefsRemaining_ > 0)) {
+        const auto loadMoreStartNs = getCurrentTimeNano();
+        loadMoreRepDefs();
+        ++loadMoreCount;
+        numLevels = definitionLevels_.size();
+        i = repDefEnd_;
+        findTopLevelLevels += foundTopLevel();
+        loadMoreTimeNs += getCurrentTimeNano() - loadMoreStartNs;
+        BOLT_CHECK(topFound == numTopLevelRows + 1 || repDefEnd_ == numLevels);
+      }
+    }
   } else {
-    repDefEnd_ = i + numTopLevelRows;
+    repDefEnd_ = repDefBegin_ + numTopLevelRows;
   }
   if (maxRepeat_ > 0 && maxDefine_ > 0) {
-    // definitionLevels_ has been consumed, decode more if any
-    while (repDefEnd_ == numLevels && topFound < numTopLevelRows + 1 &&
-           !preloadedRepDefs_.empty()) {
-      loadMoreRepDefs();
-      numLevels = definitionLevels_.size();
-      i = repDefEnd_;
-      foundTopLevel();
-      BOLT_CHECK(topFound == numTopLevelRows + 1 || repDefEnd_ == numLevels);
-    }
     // after topFound done, left decoded rep/def is less than 1 page, decode
     // more
-    if (!numLeavesInPage_.empty() &&
+    if (!windowPreload && !numLeavesInPage_.empty() &&
         numLevels - repDefEnd_ < numLeavesInPage_.back() &&
         topFound == numTopLevelRows + 1 && !preloadedRepDefs_.empty()) {
+      const auto loadMoreStartNs = getCurrentTimeNano();
       loadMoreRepDefs();
+      ++loadMoreCount;
+      loadMoreTimeNs += getCurrentTimeNano() - loadMoreStartNs;
     }
   }
+  const auto elapsedNs = getCurrentTimeNano() - startNs;
+  addPageReaderStat("pageReaderDecodeRepDefsRows", numTopLevelRows);
+  addPageReaderStat("pageReaderDecodeRepDefsLevels", repDefEnd_ - repDefBegin_);
+  addPageReaderStat("pageReaderDecodeRepDefsLoadMoreCount", loadMoreCount);
+  addPageReaderStat(
+      "pageReaderDecodeRepDefsFindTopLevelLevels", findTopLevelLevels);
+  addPageReaderNanos("pageReaderDecodeRepDefsTotalTimeNs", elapsedNs);
+  addPageReaderNanos("pageReaderDecodeRepDefsPreloadTimeNs", preloadTimeNs);
+  addPageReaderNanos(
+      "pageReaderDecodeRepDefsFindTopLevelTimeNs", findTopLevelTimeNs);
+  addPageReaderNanos("pageReaderDecodeRepDefsLoadMoreTimeNs", loadMoreTimeNs);
+  // Keep the legacy aggregate for compatibility while final reporting moves to
+  // the non-overlapping breakdown above.
+  addPageReaderNanos("pageReaderDecodeRepDefsTimeNs", elapsedNs);
 }
 
 void PageReader::loadMoreRepDefs() {
@@ -1066,6 +1584,7 @@ void PageReader::decodeRepDefsFromBuffer() {
     numLeavesInPage_.push_back(numLeaves);
   }
   preloadedRepDefs_.pop_front();
+  windowRepDefMode_ = false;
 }
 
 int32_t PageReader::getLengthsAndNulls(

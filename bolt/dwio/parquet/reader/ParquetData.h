@@ -61,6 +61,7 @@ class ParquetParams : public dwio::common::FormatParams {
       const SchemaHelper& schemaHelper,
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
+      int32_t parquetRepDefPreloadWindowCount,
       int32_t parquetRepDefMemoryLimit)
       : FormatParams(pool, stats),
         metaData_(metaData),
@@ -69,6 +70,7 @@ class ParquetParams : public dwio::common::FormatParams {
         schemaHelper_(schemaHelper),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
+        parquetRepDefPreloadWindowCount_(parquetRepDefPreloadWindowCount),
         parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {}
 
   std::unique_ptr<dwio::common::FormatData> toFormatData(
@@ -90,6 +92,7 @@ class ParquetParams : public dwio::common::FormatParams {
   const SchemaHelper& schemaHelper_;
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
+  const int32_t parquetRepDefPreloadWindowCount_;
   const int32_t parquetRepDefMemoryLimit_;
 };
 
@@ -105,6 +108,7 @@ class ParquetData : public dwio::common::FormatData {
       const SchemaHelper& schemaHelper,
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
+      int32_t parquetRepDefPreloadWindowCount,
       int32_t parquetRepDefMemoryLimit)
       : pool_(pool),
         type_(std::static_pointer_cast<const ParquetTypeWithId>(type)),
@@ -117,6 +121,7 @@ class ParquetData : public dwio::common::FormatData {
         schemaHelper_(schemaHelper),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
+        parquetRepDefPreloadWindowCount_(parquetRepDefPreloadWindowCount),
         parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {
     rowGroupOffsets_ = std::vector<int64_t>(rowGroups_.size());
     rowGroupOffsets_[0] = 0;
@@ -331,6 +336,7 @@ class ParquetData : public dwio::common::FormatData {
   const SchemaHelper& schemaHelper_;
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
+  const int32_t parquetRepDefPreloadWindowCount_;
   const int32_t parquetRepDefMemoryLimit_;
 };
 

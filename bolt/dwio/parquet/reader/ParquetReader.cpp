@@ -1587,6 +1587,7 @@ class ParquetRowReader::Impl {
         schemaHelper_,
         options_.isDictionaryFilterEnabled(),
         options_.getDecodeRepDefPageCount(),
+        options_.getParquetRepDefPreloadWindowCount(),
         options_.getParquetRepDefMemoryLimit());
 
     if (auto selector = options_.getSelector()) {
