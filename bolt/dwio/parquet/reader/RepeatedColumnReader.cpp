@@ -37,10 +37,82 @@ namespace bytedance::bolt::parquet {
 class ParquetTypeWithId;
 
 namespace {
+arrow::ValidityBitmapInputOutput prepareRepeatedNulls(
+    BufferPtr& nulls,
+    int32_t maxItems,
+    memory::MemoryPool& memoryPool) {
+  dwio::common::ensureCapacity<uint64_t>(
+      nulls, bits::nwords(maxItems), &memoryPool);
+  arrow::ValidityBitmapInputOutput output;
+  output.values_read_upper_bound = maxItems;
+  output.values_read = 0;
+  output.null_count = 0;
+  output.valid_bits = reinterpret_cast<uint8_t*>(nulls->asMutable<uint64_t>());
+  output.valid_bits_offset = 0;
+  return output;
+}
+
+bool isArrayOrMap(const dwio::common::SelectiveColumnReader& reader) {
+  const auto kind = reader.fileType().type()->kind();
+  return kind == TypeKind::ARRAY || kind == TypeKind::MAP;
+}
+
+void setRepeatedRepDefsFromLeaf(
+    dwio::common::SelectiveColumnReader& reader,
+    PageReader& pageReader) {
+  if (auto* list = dynamic_cast<ListColumnReader*>(&reader)) {
+    list->setLengthsFromRepDefs(pageReader);
+  } else {
+    auto* map = dynamic_cast<MapColumnReader*>(&reader);
+    BOLT_CHECK_NOT_NULL(map);
+    map->setLengthsFromRepDefs(pageReader);
+  }
+}
+
+template <typename RepeatedReader>
+bool trySetFusedStructAndRepeatedRepDefs(
+    PageReader& pageReader,
+    StructColumnReader& structReader,
+    RepeatedReader& repeatedReader) {
+  const auto repDefRange = pageReader.repDefRange();
+  const int32_t numRepDefs = repDefRange.second - repDefRange.first;
+  auto lengths = repeatedReader.prepareRepDefLengths(numRepDefs);
+  auto repeatedBits = repeatedReader.prepareRepDefNulls(numRepDefs);
+  auto structBits = structReader.prepareRepDefNulls(numRepDefs);
+  if (!pageReader.getListLengthsAndStructNulls(
+          repeatedReader.levelInfo(),
+          structReader.levelInfo(),
+          repDefRange.first,
+          repDefRange.second,
+          &repeatedBits,
+          lengths->template asMutable<int32_t>(),
+          &structBits)) {
+    return false;
+  }
+
+  repeatedReader.setLengthsFromRepDefOutput(std::move(lengths), repeatedBits);
+  structReader.setNullsFromRepDefOutput(structBits);
+  return true;
+}
+
+bool trySetFusedStructAndRepeatedRepDefs(
+    PageReader& pageReader,
+    StructColumnReader& structReader,
+    dwio::common::SelectiveColumnReader& repDefChild) {
+  if (auto* list = dynamic_cast<ListColumnReader*>(&repDefChild)) {
+    return trySetFusedStructAndRepeatedRepDefs(pageReader, structReader, *list);
+  }
+
+  auto* map = dynamic_cast<MapColumnReader*>(&repDefChild);
+  BOLT_CHECK_NOT_NULL(map);
+  return trySetFusedStructAndRepeatedRepDefs(pageReader, structReader, *map);
+}
+
 PageReader* FOLLY_NULLABLE readLeafRepDefs(
     dwio::common::SelectiveColumnReader* FOLLY_NONNULL reader,
     int32_t numTop,
-    bool mustRead) {
+    bool mustRead,
+    bool setRepeatedRepDefs = true) {
   auto children = reader->children();
   if (children.empty()) {
     if (!mustRead) {
@@ -57,26 +129,46 @@ PageReader* FOLLY_NULLABLE readLeafRepDefs(
   auto& type = *reinterpret_cast<const ParquetTypeWithId*>(&reader->fileType());
   if (type.type()->kind() == TypeKind::ARRAY) {
     pageReader = readLeafRepDefs(children[0], numTop, true);
-    auto list = dynamic_cast<ListColumnReader*>(reader);
-    assert(list);
-    list->setLengthsFromRepDefs(*pageReader);
+    if (setRepeatedRepDefs) {
+      setRepeatedRepDefsFromLeaf(*reader, *pageReader);
+    }
     return pageReader;
   }
   if (type.type()->kind() == TypeKind::MAP) {
     pageReader = readLeafRepDefs(children[0], numTop, true);
     readLeafRepDefs(children[1], numTop, false);
-    auto map = dynamic_cast<MapColumnReader*>(reader);
-    assert(map);
-    map->setLengthsFromRepDefs(*pageReader);
+    if (setRepeatedRepDefs) {
+      setRepeatedRepDefsFromLeaf(*reader, *pageReader);
+    }
     return pageReader;
   }
   if (auto structReader = dynamic_cast<StructColumnReader*>(reader)) {
-    pageReader = readLeafRepDefs(structReader->childForRepDefs(), numTop, true);
+    auto repDefChild = structReader->childForRepDefs();
+    if (repDefChild == nullptr) {
+      return nullptr;
+    }
+    const bool fuseStructAndRepeated = isArrayOrMap(*repDefChild);
+    pageReader =
+        readLeafRepDefs(repDefChild, numTop, true, !fuseStructAndRepeated);
     assert(pageReader);
+    if (fuseStructAndRepeated &&
+        trySetFusedStructAndRepeatedRepDefs(
+            *pageReader, *structReader, *repDefChild)) {
+      for (auto i = 0; i < children.size(); ++i) {
+        auto child = children[i];
+        if (child != repDefChild) {
+          readLeafRepDefs(child, numTop, false);
+        }
+      }
+      return pageReader;
+    }
+    if (fuseStructAndRepeated) {
+      setRepeatedRepDefsFromLeaf(*repDefChild, *pageReader);
+    }
     structReader->setNullsFromRepDefs(*pageReader);
     for (auto i = 0; i < children.size(); ++i) {
       auto child = children[i];
-      if (child != structReader->childForRepDefs()) {
+      if (child != repDefChild) {
         readLeafRepDefs(child, numTop, false);
       }
     }
@@ -218,6 +310,26 @@ void MapColumnReader::skipUnreadLengths() {
   }
 }
 
+BufferPtr MapColumnReader::prepareRepDefLengths(int32_t maxItems) {
+  BufferPtr lengths = std::move(lengths_.lengths());
+  dwio::common::ensureCapacity<int32_t>(lengths, maxItems + 1, &memoryPool_);
+  return lengths;
+}
+
+arrow::ValidityBitmapInputOutput MapColumnReader::prepareRepDefNulls(
+    int32_t maxItems) {
+  return prepareRepeatedNulls(nullsInReadRange_, maxItems, memoryPool_);
+}
+
+void MapColumnReader::setLengthsFromRepDefOutput(
+    BufferPtr lengths,
+    const arrow::ValidityBitmapInputOutput& bits) {
+  lengths->setSize(bits.values_read * sizeof(int32_t));
+  formatData_->as<ParquetData>().setNulls(
+      nullsInReadRange(), static_cast<int32_t>(bits.values_read));
+  setLengths(std::move(lengths));
+}
+
 void MapColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   auto repDefRange = pageReader.repDefRange();
   int32_t numRepDefs = repDefRange.second - repDefRange.first;
@@ -327,6 +439,26 @@ void ListColumnReader::skipUnreadLengths() {
       skip(numPreviousLengths);
     }
   }
+}
+
+BufferPtr ListColumnReader::prepareRepDefLengths(int32_t maxItems) {
+  BufferPtr lengths = std::move(lengths_.lengths());
+  dwio::common::ensureCapacity<int32_t>(lengths, maxItems + 1, &memoryPool_);
+  return lengths;
+}
+
+arrow::ValidityBitmapInputOutput ListColumnReader::prepareRepDefNulls(
+    int32_t maxItems) {
+  return prepareRepeatedNulls(nullsInReadRange_, maxItems, memoryPool_);
+}
+
+void ListColumnReader::setLengthsFromRepDefOutput(
+    BufferPtr lengths,
+    const arrow::ValidityBitmapInputOutput& bits) {
+  lengths->setSize(bits.values_read * sizeof(int32_t));
+  formatData_->as<ParquetData>().setNulls(
+      nullsInReadRange(), static_cast<int32_t>(bits.values_read));
+  setLengths(std::move(lengths));
 }
 
 void ListColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {

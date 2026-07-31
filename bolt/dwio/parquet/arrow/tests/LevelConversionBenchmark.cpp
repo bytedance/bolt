@@ -33,6 +33,9 @@
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
+#include <algorithm>
+#include <map>
+#include <memory>
 #include <random>
 
 using namespace bytedance::bolt::parquet::arrow;
@@ -165,6 +168,167 @@ class LevelConversionBenchmark {
   ValidityBitmapInputOutput io_;
 };
 
+enum class FusedListShape {
+  kSingleElement,
+  kMixed,
+  kLong,
+};
+
+Levels makeFusedLevels(int32_t numLists, FusedListShape shape) {
+  std::mt19937 rng(kSeed);
+  std::uniform_int_distribution<int32_t> mixedLengthDist(0, 12);
+  std::uniform_int_distribution<int32_t> longLengthDist(32, 128);
+  std::uniform_int_distribution<int32_t> pct(0, 99);
+
+  Levels levels;
+  for (int32_t list = 0; list < numLists; ++list) {
+    if (list % 19 == 0) {
+      // Null struct and therefore null list.
+      levels.definitions.push_back(0);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+    if (list % 17 == 0) {
+      // Present struct, empty list.
+      levels.definitions.push_back(2);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+
+    int32_t length = 1;
+    if (shape == FusedListShape::kMixed) {
+      length = mixedLengthDist(rng);
+    } else if (shape == FusedListShape::kLong) {
+      length = longLengthDist(rng);
+    }
+    if (length == 0) {
+      levels.definitions.push_back(2);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+
+    for (int32_t index = 0; index < length; ++index) {
+      levels.definitions.push_back(pct(rng) < 10 ? 3 : 4);
+      levels.repetitions.push_back(index == 0 ? 0 : 1);
+    }
+  }
+  return levels;
+}
+
+LevelInfo fusedListLevelInfo() {
+  LevelInfo info;
+  info.rep_level = 1;
+  info.def_level = 3;
+  return info;
+}
+
+LevelInfo fusedStructLevelInfo() {
+  LevelInfo info;
+  info.rep_level = 0;
+  info.def_level = 1;
+  return info;
+}
+
+LevelInfo unsupportedFusedStructLevelInfo() {
+  LevelInfo info = fusedStructLevelInfo();
+  info.rep_level = 1;
+  return info;
+}
+
+class FusedLevelConversionBenchmark {
+ public:
+  FusedLevelConversionBenchmark(int32_t numLists, FusedListShape shape)
+      : numLists_(numLists), levels_(makeFusedLevels(numLists, shape)) {
+    lengths_.resize(numLists);
+    listValidity_.resize(numLists);
+    structValidity_.resize(numLists);
+  }
+
+  int64_t separate() {
+    auto listOutput = makeOutput(listValidity_);
+    DefRepLevelsToListLengths(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        &listOutput,
+        lengths_.data());
+
+    auto structOutput = makeOutput(structValidity_);
+    DefRepLevelsToBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedStructLevelInfo(),
+        &structOutput);
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+  int64_t fused() {
+    auto listOutput = makeOutput(listValidity_);
+    auto structOutput = makeOutput(structValidity_);
+    const auto converted = DefRepLevelsToListLengthsAndStructBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        fusedStructLevelInfo(),
+        &listOutput,
+        lengths_.data(),
+        &structOutput);
+    folly::doNotOptimizeAway(converted);
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+  int64_t fallback() {
+    auto listOutput = makeOutput(listValidity_);
+    auto structOutput = makeOutput(structValidity_);
+    const auto converted = DefRepLevelsToListLengthsAndStructBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        unsupportedFusedStructLevelInfo(),
+        &listOutput,
+        lengths_.data(),
+        &structOutput);
+    folly::doNotOptimizeAway(converted);
+    if (!converted) {
+      DefRepLevelsToListLengths(
+          levels_.definitions.data(),
+          levels_.repetitions.data(),
+          levels_.definitions.size(),
+          fusedListLevelInfo(),
+          &listOutput,
+          lengths_.data());
+
+      structOutput = makeOutput(structValidity_);
+      DefRepLevelsToBitmap(
+          levels_.definitions.data(),
+          levels_.repetitions.data(),
+          levels_.definitions.size(),
+          fusedStructLevelInfo(),
+          &structOutput);
+    }
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+ private:
+  ValidityBitmapInputOutput makeOutput(std::vector<uint8_t>& validity) {
+    std::fill(validity.begin(), validity.end(), 0);
+    ValidityBitmapInputOutput output;
+    output.valid_bits = validity.data();
+    output.values_read_upper_bound = numLists_;
+    return output;
+  }
+
+  int32_t numLists_;
+  Levels levels_;
+  std::vector<int32_t> lengths_;
+  std::vector<uint8_t> listValidity_;
+  std::vector<uint8_t> structValidity_;
+};
+
 LevelConversionBenchmark& benchmark(ListShape shape) {
   static LevelConversionBenchmark singleElement(ListShape::kSingleElement);
   static LevelConversionBenchmark mixed(ListShape::kMixed);
@@ -178,6 +342,20 @@ LevelConversionBenchmark& benchmark(ListShape shape) {
       return longLists;
   }
   return singleElement;
+}
+
+FusedLevelConversionBenchmark& fusedBenchmark(
+    int32_t numLists,
+    FusedListShape shape) {
+  using Key = std::pair<int32_t, FusedListShape>;
+  static std::map<Key, std::unique_ptr<FusedLevelConversionBenchmark>>
+      benchmarks;
+  const Key key{numLists, shape};
+  auto& instance = benchmarks[key];
+  if (!instance) {
+    instance = std::make_unique<FusedLevelConversionBenchmark>(numLists, shape);
+  }
+  return *instance;
 }
 
 void runOffsetsThenLengths(uint32_t iters, ListShape shape) {
@@ -195,6 +373,23 @@ void runDirectLengths(uint32_t iters, ListShape shape) {
   suspender.dismiss();
   while (iters--) {
     folly::doNotOptimizeAway(instance.directLengths());
+  }
+}
+
+void runFusedLevelConversion(
+    uint32_t iters,
+    int32_t numLists,
+    FusedListShape shape,
+    bool fused,
+    bool fallback = false) {
+  folly::BenchmarkSuspender suspender;
+  auto& instance = fusedBenchmark(numLists, shape);
+  suspender.dismiss();
+  while (iters--) {
+    folly::doNotOptimizeAway(
+        fallback    ? instance.fallback()
+            : fused ? instance.fused()
+                    : instance.separate());
   }
 }
 
@@ -227,6 +422,30 @@ BENCHMARK(offsetsThenLengths_long, iters) {
 BENCHMARK_RELATIVE(directLengths_long, iters) {
   runDirectLengths(iters, ListShape::kLong);
 }
+
+BENCHMARK_DRAW_LINE();
+
+#define FUSED_LEVEL_CONVERSION_BENCHMARK(size, shape, name)                   \
+  BENCHMARK(separateStructAndList_##name##_##size, iters) {                   \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, false);       \
+  }                                                                           \
+  BENCHMARK_RELATIVE(fusedStructAndList_##name##_##size, iters) {             \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, true);        \
+  }                                                                           \
+  BENCHMARK_RELATIVE(fallbackStructAndList_##name##_##size, iters) {          \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, false, true); \
+  }                                                                           \
+  BENCHMARK_DRAW_LINE()
+
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kLong, long);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kLong, long);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kLong, long);
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);

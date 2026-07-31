@@ -1356,6 +1356,25 @@ int32_t PageReader::getLengthsAndNulls(
   return static_cast<int32_t>(bits.values_read);
 }
 
+bool PageReader::getListLengthsAndStructNulls(
+    const arrow::LevelInfo& listInfo,
+    const arrow::LevelInfo& structInfo,
+    int32_t begin,
+    int32_t end,
+    arrow::ValidityBitmapInputOutput* listBits,
+    int32_t* lengths,
+    arrow::ValidityBitmapInputOutput* structBits) const {
+  return arrow::DefRepLevelsToListLengthsAndStructBitmap(
+      definitionLevels_.data() + begin,
+      repetitionLevels_.data() + begin,
+      end - begin,
+      listInfo,
+      structInfo,
+      listBits,
+      lengths,
+      structBits);
+}
+
 void PageReader::makeDecoder() {
   auto parquetType = type_->parquetType_.value();
   switch (encoding_) {

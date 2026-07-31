@@ -73,6 +73,11 @@ class StructColumnReader : public dwio::common::SelectiveStructColumnReader {
       int64_t /*offset*/) override {}
 
   void setNullsFromRepDefs(PageReader& pageReader);
+  const arrow::LevelInfo& levelInfo() const {
+    return levelInfo_;
+  }
+  arrow::ValidityBitmapInputOutput prepareRepDefNulls(int32_t maxItems);
+  void setNullsFromRepDefOutput(const arrow::ValidityBitmapInputOutput& bits);
 
   dwio::common::SelectiveColumnReader* FOLLY_NULLABLE childForRepDefs() const {
     return childForRepDefs_;
