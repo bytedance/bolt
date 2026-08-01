@@ -368,7 +368,7 @@ class Converter {
         constexpr TypeKind originKind = ToKind::storage;
         using LimitType = typename util::
             Converter<originKind, void, util::TruncateCastPolicy>::LimitType;
-        if (from > LimitType::maxLimit()) {
+        if (LimitType::isPositiveOverflow(from)) {
           to = LimitType::max();
           return ConvertStatus::INTEGER_OVERFLOW;
         }
