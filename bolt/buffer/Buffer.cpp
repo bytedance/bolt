@@ -76,7 +76,7 @@ BufferPtr Buffer::slice<bool>(
     memory::MemoryPool* pool) {
   BOLT_CHECK_NOT_NULL(buffer, "Buffer must not be null.");
 
-  if (offset % 8 == 0) {
+  if (offset % (sizeof(uint64_t) * 8) == 0) {
     return sliceBufferZeroCopy(
         1, true, buffer, bits::nbytes(offset), bits::nbytes(length));
   }

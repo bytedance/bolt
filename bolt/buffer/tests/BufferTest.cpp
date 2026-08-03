@@ -30,6 +30,10 @@
 
 #include "bolt/buffer/Buffer.h"
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 #include <glog/logging.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -372,23 +376,64 @@ TEST_F(BufferTest, sliceBigintBuffer) {
 }
 
 TEST_F(BufferTest, sliceBooleanBuffer) {
-  auto bufferPtr = AlignedBuffer::allocate<bool>(16, pool_.get());
+  auto bufferPtr = AlignedBuffer::allocate<bool>(80, pool_.get());
   auto data = bufferPtr->asMutableRange<bool>();
-  for (int i = 0; i < 16; ++i) {
+  for (int i = 0; i < 80; ++i) {
     data[i] = (i % 2 != 0);
   }
-  auto sliceBufferPtr = Buffer::slice<bool>(bufferPtr, 8, 8, pool_.get());
+  auto sliceBufferPtr = Buffer::slice<bool>(bufferPtr, 64, 8, pool_.get());
   ASSERT_TRUE(sliceBufferPtr->isView());
-  ASSERT_EQ(sliceBufferPtr->as<bool>(), bufferPtr->as<bool>() + 1);
+  ASSERT_EQ(sliceBufferPtr->as<bool>(), bufferPtr->as<bool>() + 8);
+
+  sliceBufferPtr = Buffer::slice<bool>(bufferPtr, 8, 8, pool_.get());
+  ASSERT_FALSE(sliceBufferPtr->isView());
+  auto sliceData = sliceBufferPtr->asRange<bool>();
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_EQ(sliceData[i], i % 2 != 0);
+  }
 
   sliceBufferPtr = Buffer::slice<bool>(bufferPtr, 5, 5, pool_.get());
   ASSERT_FALSE(sliceBufferPtr->isView());
-  auto sliceData = sliceBufferPtr->asRange<bool>();
+  sliceData = sliceBufferPtr->asRange<bool>();
   for (int i = 0; i < 5; ++i) {
     ASSERT_EQ(sliceData[i], i % 2 == 0);
   }
   BOLT_ASSERT_THROW(
       Buffer::slice<bool>(bufferPtr, 5, 6, nullptr), "Pool must not be null.");
+}
+
+TEST_F(BufferTest, sliceBooleanBufferWordUnalignedCoredumpRepro) {
+#if !defined(__SSE2__)
+  GTEST_SKIP() << "SSE2 is required to reproduce the original SIGSEGV.";
+#else
+  // This reproduces the original crash scenario described in
+  // https://meego.larkoffice.com/spark_on_bolt/issue/detail/7359777330:
+  // offset=10920 bits -> bits::nbytes(offset)=1365 bytes (byte-aligned but not
+  // uint64_t-word-aligned). In the buggy implementation this would create a
+  // zero-copy view with a misaligned bitmap pointer.
+  constexpr size_t kSliceStart = 10920;
+  constexpr size_t kSliceLength = 256;
+  constexpr size_t kPadding = 64;
+  constexpr size_t kBufferSize = kSliceStart + kSliceLength + kPadding;
+
+  auto bufferPtr = AlignedBuffer::allocate<bool>(kBufferSize, pool_.get());
+  auto data = bufferPtr->asMutableRange<bool>();
+  for (size_t i = 0; i < kBufferSize; ++i) {
+    data[i] = true;
+  }
+
+  auto sliceBufferPtr =
+      Buffer::slice<bool>(bufferPtr, kSliceStart, kSliceLength, pool_.get());
+
+  // Force a 16-byte aligned load from the bitmap pointer. With the old buggy
+  // zero-copy condition (byte alignment only), this triggers SIGSEGV.
+  const auto* bitmap = reinterpret_cast<const __m128i*>(
+      sliceBufferPtr->as<uint64_t>()); // NOLINT
+  const __m128i loaded = _mm_load_si128(bitmap);
+  EXPECT_EQ(_mm_movemask_epi8(loaded), 0xFFFF);
+
+  EXPECT_FALSE(sliceBufferPtr->isView());
+#endif
 }
 
 } // namespace bolt
