@@ -57,6 +57,18 @@ bool isArrayOrMap(const dwio::common::SelectiveColumnReader& reader) {
   return kind == TypeKind::ARRAY || kind == TypeKind::MAP;
 }
 
+bool isSupportedFusedStructAndRepeated(
+    const arrow::LevelInfo& repeated,
+    const arrow::LevelInfo& structure) {
+  // Required structs do not need a struct null conversion, so fusing would only
+  // add an all-valid bitmap that the old path never produced.
+  return structure.def_level > 0 &&
+      structure.rep_level + 1 == repeated.rep_level &&
+      structure.def_level + 2 == repeated.def_level &&
+      structure.repeated_ancestor_def_level ==
+      repeated.repeated_ancestor_def_level;
+}
+
 void setRepeatedRepDefsFromLeaf(
     dwio::common::SelectiveColumnReader& reader,
     PageReader& pageReader) {
@@ -74,6 +86,11 @@ bool trySetFusedStructAndRepeatedRepDefs(
     PageReader& pageReader,
     StructColumnReader& structReader,
     RepeatedReader& repeatedReader) {
+  if (!isSupportedFusedStructAndRepeated(
+          repeatedReader.levelInfo(), structReader.levelInfo())) {
+    return false;
+  }
+
   const auto repDefRange = pageReader.repDefRange();
   const int32_t numRepDefs = repDefRange.second - repDefRange.first;
   auto lengths = repeatedReader.prepareRepDefLengths(numRepDefs);
