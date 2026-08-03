@@ -620,6 +620,15 @@ vector_size_t getLength(std::shared_ptr<ConnectorSplit>& split) {
   BOLT_FAIL("Unsupported split type for getting length");
 }
 
+void HiveDataSource::prepareReaderOutputForNextRead() {
+  if (!output_ || *output_->type() != *readerOutputType_) {
+    output_ = BaseVector::create(readerOutputType_, 0, pool_);
+    return;
+  }
+
+  BaseVector::prepareForReuse(output_, 0);
+}
+
 std::optional<RowVectorPtr> HiveDataSource::next(
     uint64_t size,
     bolt::ContinueFuture& /*future*/) {
@@ -639,9 +648,7 @@ std::optional<RowVectorPtr> HiveDataSource::next(
     return nullptr;
   }
 
-  if (!output_) {
-    output_ = BaseVector::create(readerOutputType_, 0, pool_);
-  }
+  prepareReaderOutputForNextRead();
 
   // TODO Check if remaining filter has a conjunct that doesn't depend on
   // any column, e.g. rand() < 0.1. Evaluate that conjunct first, then scan
