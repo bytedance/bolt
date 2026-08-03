@@ -33,6 +33,7 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #ifdef SPARK_COMPATIBLE
 #include "bolt/common/base/tests/GTestUtils.h"
 #endif
