@@ -3592,5 +3592,93 @@ TEST_F(CastExprTest, skipCastEvaluation) {
     assertEqualVectors(result, expected);
   }
 }
+
+// Regression test for casting a complex type to VARCHAR when a nested complex
+// child arrives wrapped in a dictionary encoding. Top-level encodings are
+// peeled by CastExpr::apply, and casting an outer ARRAY to VARCHAR recurses
+// (via doCastArrayToVarchar) into its element vector while it is still
+// dictionary-encoded. Before the fix, doCast() dereferenced
+// input.as<RowVector>()/MapVector/ArrayVector unconditionally, which returned
+// nullptr for a dictionary-encoded child and crashed. Results are compared
+// against a deeply-flattened copy of the same logical input so the assertions
+// do not depend on the (build-specific) string format.
+TEST_F(CastExprTest, complexTypeToStringWrappedNestedInput) {
+  auto castWrappedAndFlat = [&](const VectorPtr& elements,
+                                const std::vector<vector_size_t>& offsets,
+                                const std::vector<vector_size_t>& nullArrays) {
+    // Wrap the nested element vector (the child of the outer array) in a
+    // reversing dictionary so it is dictionary-encoded when doCast() recurses
+    // into it while casting the outer array to VARCHAR.
+    auto indices = test::makeIndicesInReverse(elements->size(), pool());
+    auto wrappedElements = BaseVector::wrapInDictionary(
+        nullptr, indices, elements->size(), elements);
+    auto wrappedArray = makeArrayVector(offsets, wrappedElements, nullArrays);
+
+    // Build the logically-equivalent flat input by deep-flattening a copy of
+    // the same reversed elements.
+    VectorPtr flatElements = wrappedElements;
+    BaseVector::flattenVector(flatElements);
+    auto flatArray = makeArrayVector(offsets, flatElements, nullArrays);
+
+    auto wrappedResult =
+        evaluate("cast(c0 as VARCHAR)", makeRowVector({wrappedArray}));
+    auto flatResult =
+        evaluate("cast(c0 as VARCHAR)", makeRowVector({flatArray}));
+    assertEqualVectors(flatResult, wrappedResult);
+  };
+
+  // ARRAY<ROW<...>> where the ROW child is dictionary-encoded.
+  {
+    auto rows = makeRowVector({
+        makeNullableFlatVector<int64_t>({1, std::nullopt, 3, 4, 5}),
+        makeNullableFlatVector<StringView>(
+            {"a", "b", std::nullopt, "d", "e"}),
+    });
+    castWrappedAndFlat(rows, {0, 2, 2, 5}, {1});
+  }
+
+  // ARRAY<MAP<...>> where the MAP child is dictionary-encoded.
+  {
+    auto maps = makeNullableMapVector<int32_t, double>(
+        {{{{1, 1.25}, {2, std::nullopt}}},
+         std::nullopt,
+         {{{3, 4.5}}},
+         {{}},
+         {{{5, 13.25}, {6, 1e7}}}},
+        MAP(INTEGER(), DOUBLE()));
+    castWrappedAndFlat(maps, {0, 2, 3, 5}, {});
+  }
+
+  // ARRAY<ARRAY<...>> where the inner ARRAY child is dictionary-encoded.
+  {
+    auto inner = makeNullableArrayVector<int32_t>(
+        {{{0, 1}}, {{}}, {{2, std::nullopt, 3}}, std::nullopt, {{4}}});
+    castWrappedAndFlat(inner, {0, 2, 5, 5}, {2});
+  }
+}
+
+// Regression test for casting a complex type to VARCHAR when a nested complex
+// child is constant-encoded (all outer array elements reference the same inner
+// complex element). Exercises the constant-mapping branch of
+// doCastWrappedComplexToVarchar.
+TEST_F(CastExprTest, complexTypeToStringConstantNestedInput) {
+  auto rowElement = makeRowVector({
+      makeNullableFlatVector<int64_t>({7, std::nullopt, 9}),
+      makeFlatVector<StringView>({"x", "y", "z"}),
+  });
+  // Constant-encode the ROW child so all outer array elements point to row 1.
+  auto constElements = BaseVector::wrapInConstant(3, 1, rowElement);
+  auto wrappedArray = makeArrayVector({0, 2, 3}, constElements);
+
+  VectorPtr flatElements = constElements;
+  BaseVector::flattenVector(flatElements);
+  auto flatArray = makeArrayVector({0, 2, 3}, flatElements);
+
+  auto wrappedResult =
+      evaluate("cast(c0 as VARCHAR)", makeRowVector({wrappedArray}));
+  auto flatResult =
+      evaluate("cast(c0 as VARCHAR)", makeRowVector({flatArray}));
+  assertEqualVectors(flatResult, wrappedResult);
+}
 } // namespace
 } // namespace bytedance::bolt::test
