@@ -1349,13 +1349,7 @@ class QueryConfig {
   // Spark kMaxNumBits is 67'108'864.
   int64_t sparkBloomFilterMaxNumBits() const {
     constexpr int64_t kDefault = 64 * 1024 * 1024;
-    auto value = get<int64_t>(kSparkBloomFilterMaxNumBits, kDefault);
-    BOLT_USER_CHECK_LE(
-        value,
-        kDefault,
-        "{} cannot exceed the default value",
-        kSparkBloomFilterMaxNumBits);
-    return value;
+    return get<int64_t>(kSparkBloomFilterMaxNumBits, kDefault);
   }
 
   std::string sparkMapKeyDedupPolicy() const {
