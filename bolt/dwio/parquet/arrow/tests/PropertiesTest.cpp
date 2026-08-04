@@ -94,10 +94,17 @@ TEST(TestWriterProperties, MaxRowsPerPage) {
   auto props = WriterProperties::Builder().max_rows_per_page(123)->build();
   ASSERT_EQ(123, props->max_rows_per_page());
 
+  props =
+      WriterProperties::Builder().max_rows_per_page(kMaxRowsPerPage)->build();
+  ASSERT_EQ(kMaxRowsPerPage, props->max_rows_per_page());
+
   EXPECT_THROW(
       WriterProperties::Builder().max_rows_per_page(0), ParquetException);
   EXPECT_THROW(
       WriterProperties::Builder().max_rows_per_page(-1), ParquetException);
+  EXPECT_THROW(
+      WriterProperties::Builder().max_rows_per_page(kMaxRowsPerPage + 1),
+      ParquetException);
 }
 
 TEST(TestWriterProperties, WriteBatchSizeMustBePositive) {

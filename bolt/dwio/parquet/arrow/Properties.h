@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -238,7 +240,12 @@ class PARQUET_EXPORT ReaderProperties {
 ReaderProperties PARQUET_EXPORT default_reader_properties();
 
 static constexpr int64_t kDefaultDataPageSize = 1024 * 1024;
-static constexpr int64_t kDefaultMaxRowsPerPage = 20'000;
+// Keep enough headroom for encoded level counts while minimizing changes to
+// existing page layouts. Page count fields are signed int32 in the Parquet
+// format, and RLE run headers encode the count shifted left by one bit.
+static constexpr int64_t kMaxRowsPerPage =
+    std::numeric_limits<int32_t>::max() / 2;
+static constexpr int64_t kDefaultMaxRowsPerPage = kMaxRowsPerPage;
 static constexpr bool DEFAULT_IS_DICTIONARY_ENABLED = true;
 static constexpr int64_t DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT =
     kDefaultDataPageSize;
@@ -496,11 +503,14 @@ class PARQUET_EXPORT WriterProperties {
     }
 
     /// Specify the maximum number of rows per data page.
-    /// Default 20K rows.
+    /// Default INT32_MAX / 2 rows.
     Builder* max_rows_per_page(int64_t max_rows) {
-      if (max_rows <= 0) {
+      if (max_rows <= 0 || max_rows > kMaxRowsPerPage) {
         throw ParquetException(
-            "Maximum rows per data page must be positive: ", max_rows);
+            "Maximum rows per data page must be in range [1, ",
+            kMaxRowsPerPage,
+            "]: ",
+            max_rows);
       }
       max_rows_per_page_ = max_rows;
       return this;

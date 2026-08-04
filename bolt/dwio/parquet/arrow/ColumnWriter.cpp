@@ -100,6 +100,8 @@ using util::CodecOptions;
 namespace {
 
 constexpr int64_t kMaxPageHeaderSize = std::numeric_limits<int32_t>::max();
+constexpr int64_t kDataPageValueCountFlushThreshold =
+    std::numeric_limits<int32_t>::max() / 2;
 
 int32_t checkPageHeaderSize(std::string_view size_name, int64_t size) {
   if (size < 0 || size > kMaxPageHeaderSize) {
@@ -2154,6 +2156,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       int64_t num_values,
       const int16_t* def_levels,
       const int16_t* rep_levels) {
+    CheckPageValueCountCanBeBuffered(num_values);
     int64_t values_to_write = 0;
     // If the field is required and non-repeated, there are no definition levels
     if (descr_->max_definition_level() > 0) {
@@ -2263,6 +2266,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       int64_t num_levels,
       const int16_t* def_levels,
       const int16_t* rep_levels) {
+    CheckPageValueCountCanBeBuffered(num_levels);
     // If the field is required and non-repeated, there are no definition levels
     if (descr_->max_definition_level() > 0) {
       WriteDefinitionLevels(num_levels, def_levels);
@@ -2296,8 +2300,21 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
 
     if (num_buffered_values_ > 0 && check_page_limit &&
         (current_encoder_->EstimatedDataEncodedSize() >= data_pagesize_ ||
-         num_buffered_rows_ >= properties_->max_rows_per_page())) {
+         num_buffered_rows_ >= properties_->max_rows_per_page() ||
+         num_buffered_values_ >= kDataPageValueCountFlushThreshold)) {
       AddDataPage();
+    }
+  }
+
+  void CheckPageValueCountCanBeBuffered(int64_t num_levels) const {
+    if (num_levels < 0 ||
+        num_levels > kMaxPageHeaderSize - num_buffered_values_) {
+      throw ParquetException(
+          "DataPage num_values cannot be represented in a Parquet page "
+          "header int32 field: buffered ",
+          num_buffered_values_,
+          ", incoming ",
+          num_levels);
     }
   }
 
