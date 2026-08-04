@@ -22,12 +22,13 @@
 #include <xsimd/xsimd.hpp>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/functions/sparksql/BitmapUtil.h"
 
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
-// Matching Spark's BitmapExpressionUtils.NUM_BYTES (4 KiB, 32768 bits).
-inline constexpr int32_t kBitmapNumBytes = 4096;
-inline constexpr int32_t kBitmapNumBits = kBitmapNumBytes * 8;
+// Re-export shared wire-format constants.
+using ::bytedance::bolt::functions::sparksql::kBitmapNumBits;
+using ::bytedance::bolt::functions::sparksql::kBitmapNumBytes;
 
 // Inline 4096-byte bitmap accumulator. Trivially constructible/destructible so
 // Bolt's RowContainer group reuse is safe. uint8_t ensures portable unsigned
