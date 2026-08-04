@@ -191,6 +191,15 @@ void PARQUET_EXPORT DefLevelsToBitmap(
     LevelInfo level_info,
     ValidityBitmapInputOutput* output);
 
+// Computes values_read and whether all produced values are valid using the
+// same semantics as DefLevelsToBitmap, without writing a validity bitmap.
+bool PARQUET_EXPORT DefLevelsAreAllValid(
+    const int16_t* def_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    int64_t values_read_upper_bound,
+    int64_t* values_read);
+
 // Reconstructs a validity bitmap and list offsets for a list arrays based on
 // def/rep levels. The first element of offsets will not be modified if
 // rep_levels starts with a new list.  The first element of offsets will be used
