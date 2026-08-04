@@ -31,6 +31,7 @@ bolt_add_library(
   bolt_functions_spark
   Register.cpp
   RegisterArray.cpp
+  RegisterBitmap.cpp
   RegisterBinary.cpp
   RegisterBitwise.cpp
   RegisterCharVarchar.cpp
