@@ -66,13 +66,18 @@ std::vector<uint8_t> encryptGcm(
   return ciphertext;
 }
 
+class InternalFileDecryptorTest : public testing::Test {
+ protected:
+  memory::MemoryManager memoryManager_;
+  std::shared_ptr<memory::MemoryPool> pool_{
+      memoryManager_.addLeafPool("bolt_dwio_parquet_encryption_test")};
+};
+
 } // namespace
 
-TEST(InternalFileDecryptorTest, FooterDecryptorDecryptsAndCaches) {
+TEST_F(InternalFileDecryptorTest, FooterDecryptorDecryptsAndCaches) {
   const std::string footerKey(16, 'k');
   const std::string fileAad(8, 'f');
-  auto pool = memory::deprecatedAddDefaultLeafMemoryPool(
-      "bolt_dwio_parquet_encryption_test");
 
   auto properties = ::parquet::FileDecryptionProperties::Builder()
                         .footer_key(footerKey)
@@ -83,7 +88,7 @@ TEST(InternalFileDecryptorTest, FooterDecryptorDecryptsAndCaches) {
       fileAad,
       bytedance::bolt::parquet::ParquetCipher::AES_GCM_V1,
       "",
-      pool.get());
+      pool_.get());
 
   auto decryptor1 = fileDecryptor.GetFooterDecryptor();
   ASSERT_NE(decryptor1, nullptr);
@@ -106,13 +111,10 @@ TEST(InternalFileDecryptorTest, FooterDecryptorDecryptsAndCaches) {
   EXPECT_EQ(decrypted, plaintext);
 }
 
-TEST(InternalFileDecryptorTest, ColumnMetaDecryptorCachesAndUpdatesAad) {
+TEST_F(InternalFileDecryptorTest, ColumnMetaDecryptorCachesAndUpdatesAad) {
   const std::string footerKey(16, 'k');
   const std::string columnKey(16, 'c');
   const std::string fileAad(8, 'f');
-  auto pool = memory::deprecatedAddDefaultLeafMemoryPool(
-      "bolt_dwio_parquet_encryption_test");
-
   ::parquet::ColumnPathToDecryptionPropertiesMap columnKeys;
   columnKeys["col"] = ::parquet::ColumnDecryptionProperties::Builder("col")
                           .key(columnKey)
@@ -128,7 +130,7 @@ TEST(InternalFileDecryptorTest, ColumnMetaDecryptorCachesAndUpdatesAad) {
       fileAad,
       bytedance::bolt::parquet::ParquetCipher::AES_GCM_V1,
       "",
-      pool.get());
+      pool_.get());
 
   const std::string aad1 = parquet_encryption::createFooterAad(fileAad);
   const std::string aad2 = aad1 + "x";
@@ -162,12 +164,9 @@ TEST(InternalFileDecryptorTest, ColumnMetaDecryptorCachesAndUpdatesAad) {
       BoltRuntimeError);
 }
 
-TEST(InternalFileDecryptorTest, MissingColumnKeyThrows) {
+TEST_F(InternalFileDecryptorTest, MissingColumnKeyThrows) {
   const std::string footerKey(16, 'k');
   const std::string fileAad(8, 'f');
-  auto pool = memory::deprecatedAddDefaultLeafMemoryPool(
-      "bolt_dwio_parquet_encryption_test");
-
   auto properties = ::parquet::FileDecryptionProperties::Builder()
                         .footer_key(footerKey)
                         ->build();
@@ -177,7 +176,7 @@ TEST(InternalFileDecryptorTest, MissingColumnKeyThrows) {
       fileAad,
       bytedance::bolt::parquet::ParquetCipher::AES_GCM_V1,
       "",
-      pool.get());
+      pool_.get());
 
   EXPECT_THROW(
       fileDecryptor.GetColumnDataDecryptor("missing", "", "aad"),

@@ -38,10 +38,11 @@ void mockSchemaRelease(ArrowSchema*) {}
 void mockArrayRelease(ArrowArray*) {}
 
 const int ITERATION_TIMES = 100000;
+memory::MemoryManager benchmarkMemoryManager;
+auto schemaPool = benchmarkMemoryManager.addLeafPool();
 
 void exportToArrow(const TypePtr& type, ArrowSchema& out) {
-  auto pool = &bytedance::bolt::memory::deprecatedSharedLeafPool();
-  exportToArrow(BaseVector::create(type, 0, pool), out, {});
+  exportToArrow(BaseVector::create(type, 0, schemaPool.get()), out, {});
 }
 
 class ArrowBridgeArrayImportBenchmark {
@@ -91,7 +92,7 @@ class ArrowBridgeArrayImportBenchmark {
   // Boiler plate structures required by vectorMaker.
   std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
   std::shared_ptr<memory::MemoryPool> pool_{
-      memory::deprecatedAddDefaultLeafMemoryPool()};
+      benchmarkMemoryManager.addLeafPool()};
   core::ExecCtx execCtx_{pool_.get(), queryCtx_.get()};
   bytedance::bolt::test::VectorMaker vectorMaker_{execCtx_.pool()};
 

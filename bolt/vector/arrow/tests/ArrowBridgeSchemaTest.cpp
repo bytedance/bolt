@@ -718,7 +718,7 @@ TEST_F(ArrowBridgeSchemaImportTest, dictionaryTypeTest) {
 }
 
 TEST_F(ArrowBridgeSchemaTest, exportToArrowWithConstantEncoding) {
-  auto* pool = &memory::deprecatedSharedLeafPool();
+  auto* pool = pool_.get();
 
   auto elementType = INTEGER();
   auto arrayType = ARRAY(elementType);
