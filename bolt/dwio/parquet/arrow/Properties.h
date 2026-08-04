@@ -458,6 +458,10 @@ class PARQUET_EXPORT WriterProperties {
     /// Specify the write batch size while writing batches of Arrow values into
     /// Parquet. Default 1024.
     Builder* write_batch_size(int64_t write_batch_size) {
+      if (write_batch_size <= 0) {
+        throw ParquetException(
+            "Write batch size must be positive: ", write_batch_size);
+      }
       write_batch_size_ = write_batch_size;
       return this;
     }

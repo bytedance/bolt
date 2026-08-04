@@ -100,6 +100,16 @@ TEST(TestWriterProperties, MaxRowsPerPage) {
       WriterProperties::Builder().max_rows_per_page(-1), ParquetException);
 }
 
+TEST(TestWriterProperties, WriteBatchSizeMustBePositive) {
+  auto props = WriterProperties::Builder().write_batch_size(1)->build();
+  ASSERT_EQ(1, props->write_batch_size());
+
+  EXPECT_THROW(
+      WriterProperties::Builder().write_batch_size(0), ParquetException);
+  EXPECT_THROW(
+      WriterProperties::Builder().write_batch_size(-1), ParquetException);
+}
+
 TEST(TestReaderProperties, GetStreamInsufficientData) {
   // ARROW-6058
   std::string data = "shorter than expected";

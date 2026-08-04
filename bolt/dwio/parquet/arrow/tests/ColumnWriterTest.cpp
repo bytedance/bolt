@@ -55,6 +55,7 @@
 #include "bolt/dwio/parquet/arrow/FileWriter.h"
 #include "bolt/dwio/parquet/arrow/Metadata.h"
 #include "bolt/dwio/parquet/arrow/PageBufferArena.h"
+#include "bolt/dwio/parquet/arrow/PageIndex.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Statistics.h"
@@ -2550,6 +2551,114 @@ TEST(
     EXPECT_EQ(1, dictionary_page_count);
     EXPECT_EQ(page_value_counts, (std::vector<int64_t>{3, 3, 3, 1}));
   }
+}
+
+TEST(
+    TestColumnWriter,
+    RepeatedDictionaryColumnDoesNotWriteEmptyPageWithPageIndex) {
+  auto sink = CreateOutputStream();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {schema::Int32("repeated", Repetition::REPEATED)}));
+  auto properties = WriterProperties::Builder()
+                        .enable_dictionary()
+                        ->enable_write_page_index()
+                        ->data_page_version(ParquetDataPageVersion::V1)
+                        ->data_pagesize(1)
+                        ->build();
+  auto file_writer = ParquetFileWriter::Open(sink, schema, properties);
+  auto row_group_writer = file_writer->AppendRowGroup();
+  auto column_writer =
+      static_cast<Int32Writer*>(row_group_writer->NextColumn());
+
+  const int16_t definition_level = 1;
+  const int16_t repetition_level = 0;
+  for (const int32_t value : {7, 8}) {
+    column_writer->WriteBatch(1, &definition_level, &repetition_level, &value);
+  }
+  ASSERT_NO_THROW(file_writer->Close());
+
+  ASSERT_OK_AND_ASSIGN(auto buffer, sink->Finish());
+  auto file_reader = ParquetFileReader::Open(
+      std::make_shared<::arrow::io::BufferReader>(buffer),
+      default_reader_properties());
+  auto row_group_reader = file_reader->RowGroup(0);
+
+  int64_t dictionary_page_count = 0;
+  std::vector<int64_t> data_page_value_counts;
+  auto page_reader = row_group_reader->GetColumnPageReader(0);
+  while (auto page = page_reader->NextPage()) {
+    if (page->type() == PageType::DICTIONARY_PAGE) {
+      ++dictionary_page_count;
+      continue;
+    }
+    auto data_page = std::static_pointer_cast<DataPage>(page);
+    data_page_value_counts.push_back(data_page->num_values());
+    EXPECT_GT(data_page->num_values(), 0);
+  }
+  EXPECT_EQ(1, dictionary_page_count);
+  EXPECT_EQ(data_page_value_counts, (std::vector<int64_t>{1, 1}));
+
+  auto page_index_reader = file_reader->GetPageIndexReader();
+  ASSERT_NE(nullptr, page_index_reader);
+  auto row_group_page_index = page_index_reader->RowGroup(0);
+  ASSERT_NE(nullptr, row_group_page_index);
+  auto offset_index = row_group_page_index->GetOffsetIndex(0);
+  ASSERT_NE(nullptr, offset_index);
+  const auto& page_locations = offset_index->page_locations();
+  ASSERT_EQ(data_page_value_counts.size(), page_locations.size());
+  for (size_t i = 1; i < page_locations.size(); ++i) {
+    EXPECT_LT(
+        page_locations[i - 1].first_row_index,
+        page_locations[i].first_row_index);
+  }
+}
+
+TEST(
+    TestColumnWriter,
+    DataPageV1RepeatedColumnCountsRowsInsteadOfLevelsWithoutPageIndex) {
+  auto sink = CreateOutputStream();
+  auto schema = std::static_pointer_cast<GroupNode>(GroupNode::Make(
+      "schema",
+      Repetition::REQUIRED,
+      {schema::Int32("repeated", Repetition::REPEATED)}));
+  auto properties = WriterProperties::Builder()
+                        .disable_dictionary()
+                        ->disable_write_page_index()
+                        ->data_page_version(ParquetDataPageVersion::V1)
+                        ->data_pagesize(1 << 20)
+                        ->max_rows_per_page(1)
+                        ->build();
+  auto file_writer = ParquetFileWriter::Open(sink, schema, properties);
+  auto row_group_writer = file_writer->AppendRowGroup();
+  auto column_writer =
+      static_cast<Int32Writer*>(row_group_writer->NextColumn());
+
+  const std::vector<int16_t> definition_levels(8, 1);
+  const std::vector<int16_t> repetition_levels = {0, 1, 1, 1, 1, 0, 1, 1};
+  const std::vector<int32_t> values = {0, 1, 2, 3, 4, 5, 6, 7};
+  column_writer->WriteBatch(
+      values.size(),
+      definition_levels.data(),
+      repetition_levels.data(),
+      values.data());
+  ASSERT_NO_THROW(file_writer->Close());
+
+  ASSERT_OK_AND_ASSIGN(auto buffer, sink->Finish());
+  auto file_reader = ParquetFileReader::Open(
+      std::make_shared<::arrow::io::BufferReader>(buffer),
+      default_reader_properties());
+  auto page_reader = file_reader->RowGroup(0)->GetColumnPageReader(0);
+
+  std::vector<int64_t> data_page_value_counts;
+  while (auto page = page_reader->NextPage()) {
+    ASSERT_EQ(PageType::DATA_PAGE, page->type());
+    auto data_page = std::static_pointer_cast<DataPage>(page);
+    data_page_value_counts.push_back(data_page->num_values());
+    EXPECT_GT(data_page->num_values(), 0);
+  }
+  EXPECT_EQ(data_page_value_counts, (std::vector<int64_t>{5, 3}));
 }
 
 TEST(PageBufferArenaTest, FixedCapacityAllocationAndReset) {

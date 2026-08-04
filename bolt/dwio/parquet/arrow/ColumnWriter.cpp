@@ -1623,6 +1623,15 @@ inline void DoInBatchesNonRepeated(
     int64_t max_batch_size = std::min(batch_size, num_levels - offset);
     max_batch_size =
         std::min(max_batch_size, max_rows_per_page - page_buffered_rows);
+    if (max_batch_size <= 0) {
+      throw ParquetException(
+          "Non-repeated column batching cannot make progress: batch size ",
+          batch_size,
+          ", buffered rows ",
+          page_buffered_rows,
+          ", maximum rows per page ",
+          max_rows_per_page);
+    }
     const int64_t end_offset = offset + max_batch_size;
 
     DCHECK_LE(offset, end_offset);
@@ -1645,6 +1654,11 @@ inline void DoInBatchesRepeated(
   int64_t offset = 0;
   while (offset < num_levels) {
     const int64_t max_batch_size = std::min(batch_size, num_levels - offset);
+    if (max_batch_size <= 0) {
+      throw ParquetException(
+          "Repeated column batching cannot make progress: batch size ",
+          batch_size);
+    }
     int64_t end_offset = num_levels;
     int64_t check_page_limit_end_offset = -1;
     int64_t page_buffered_rows = current_page_buffered_rows();
@@ -1696,7 +1710,7 @@ inline void DoInBatches(
     bool pages_change_on_record_boundaries,
     Action&& action,
     GetBufferedRows&& current_page_buffered_rows) {
-  if (rep_levels == nullptr || !pages_change_on_record_boundaries) {
+  if (rep_levels == nullptr) {
     DoInBatchesNonRepeated(
         num_levels,
         batch_size,
@@ -2280,7 +2294,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
     num_buffered_encoded_values_ += num_values;
     num_buffered_nulls_ += num_nulls;
 
-    if (check_page_limit &&
+    if (num_buffered_values_ > 0 && check_page_limit &&
         (current_encoder_->EstimatedDataEncodedSize() >= data_pagesize_ ||
          num_buffered_rows_ >= properties_->max_rows_per_page())) {
       AddDataPage();
