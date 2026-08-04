@@ -72,7 +72,11 @@ template <typename T>
 void appendDecimal(const T& value, const Type& type, std::string& result) {
   auto [precision, scale] = getDecimalPrecisionScale(type);
   const size_t maxSize = DecimalUtil::stringSize(precision, scale);
-  char buffer[maxSize];
+  // stringSize() adds at most seven characters for the sign, decimal point,
+  // scientific exponent and leading zero.
+  constexpr size_t kMaxDecimalStringSize =
+      LongDecimalType::kMaxPrecision + 7;
+  char buffer[kMaxDecimalStringSize];
   size_t len = DecimalUtil::convertToString<T>(value, scale, maxSize, buffer);
   result.append(buffer, len);
 }
