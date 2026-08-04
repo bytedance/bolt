@@ -74,6 +74,32 @@ TEST_F(DecimalUtilTest, minLeadingZeros) {
   ASSERT_EQ(result, 0);
 }
 
+TEST_F(DecimalUtilTest, stripTrailingZeros) {
+  int64_t shortDecimal = -12000;
+  uint8_t shortScale = 5;
+  DecimalUtil::stripTrailingZeros(shortDecimal, shortScale);
+  EXPECT_EQ(shortDecimal, -12);
+  EXPECT_EQ(shortScale, 2);
+
+  int128_t longDecimal = 12000;
+  uint8_t longScale = 5;
+  DecimalUtil::stripTrailingZeros(longDecimal, longScale);
+  EXPECT_EQ(longDecimal, 12);
+  EXPECT_EQ(longScale, 2);
+
+  shortDecimal = std::numeric_limits<int64_t>::min();
+  shortScale = 5;
+  DecimalUtil::stripTrailingZeros(shortDecimal, shortScale);
+  EXPECT_EQ(shortDecimal, std::numeric_limits<int64_t>::min());
+  EXPECT_EQ(shortScale, 5);
+
+  longDecimal = std::numeric_limits<int128_t>::min();
+  longScale = 5;
+  DecimalUtil::stripTrailingZeros(longDecimal, longScale);
+  EXPECT_EQ(longDecimal, std::numeric_limits<int128_t>::min());
+  EXPECT_EQ(longScale, 5);
+}
+
 TEST_F(DecimalUtilTest, bounded) {
   // Both precision and scale below 38 should stay the same
   auto result = DecimalUtil::bounded(10, 5);

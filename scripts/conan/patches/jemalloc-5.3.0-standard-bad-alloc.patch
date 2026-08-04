@@ -1,0 +1,27 @@
+diff --git a/recipes/jemalloc/all/conandata.yml b/recipes/jemalloc/all/conandata.yml
+--- a/recipes/jemalloc/all/conandata.yml
++++ b/recipes/jemalloc/all/conandata.yml
+@@ -20,3 +20,7 @@ patches:
+       patch_description: "Add the missing compiler flags for MSVC on Windows."
+       patch_type: "backport"
+       patch_source: "https://github.com/jemalloc/jemalloc/issues/2283"
++    - patch_file: "patches/0004-use-standard-bad-alloc.patch"
++      patch_description: "Use standard bad_alloc instead of a private libstdc++ helper."
++      patch_type: "portability"
++      patch_source: "https://github.com/jemalloc/jemalloc/blob/dev/src/jemalloc_cpp.cpp"
+diff --git a/recipes/jemalloc/all/patches/0004-use-standard-bad-alloc.patch b/recipes/jemalloc/all/patches/0004-use-standard-bad-alloc.patch
+new file mode 100644
+--- /dev/null
++++ b/recipes/jemalloc/all/patches/0004-use-standard-bad-alloc.patch
+@@ -0,0 +1,11 @@
++diff --git a/src/jemalloc_cpp.cpp b/src/jemalloc_cpp.cpp
++--- a/src/jemalloc_cpp.cpp
+++++ b/src/jemalloc_cpp.cpp
++@@ -87,6 +87,6 @@ handleOOM(std::size_t size, bool nothrow) {
++ 	}
++ 
++ 	if (ptr == nullptr && !nothrow)
++-		std::__throw_bad_alloc();
+++		throw std::bad_alloc();
++ 	return ptr;
++ }
