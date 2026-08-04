@@ -31,7 +31,7 @@
 
 # --- 2. Development Tools & Setup ---
 # Includes code formatting, Conan dependency installation/build, and compilation DB generation
-.PHONY: clang-format-check _conan_prepare conan_install conan_build _compile_db compile_db_all
+.PHONY: clang-format-check cmake_check _conan_prepare conan_install conan_build _compile_db compile_db_all
 
 # --- 3. Conan Package Export ---
 # Export the built package to the local Conan cache
@@ -219,7 +219,15 @@ clang-format-check:
 	if grep -q 'warning' log.txt; then false; fi
 	@rm -f files.txt log.txt
 
-_conan_prepare:
+cmake_check:			#: Build cmake to break dependency cycle if building from scratch.
+	@if conan list "cmake/3.31.10:*" --format=compact 2>/dev/null | grep -Eq '^[[:space:]]+cmake/3\.31\.10#[^:]+:'; then \
+		echo "cmake/3.31.10 is available in the local Conan cache"; \
+	else \
+		echo "cmake/3.31.10 is not available locally; fetching its recipe and building it"; \
+		conan install --tool-requires=cmake/3.31.10 --build=cmake/3.31.10 --build=missing; \
+	fi
+
+_conan_prepare: cmake_check
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \
 	fi; \

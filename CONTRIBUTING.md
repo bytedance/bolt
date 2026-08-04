@@ -331,6 +331,11 @@ Before submitting a complex PR, it is highly recommended to run tests with Addre
 ENABLE_ASAN=True make unittest_release
 ```
 
+### Bumpup conan recipes
+If you need to upgrade or modify a Conan recipe for a Bolt dependency, submit a pull request to https://github.com/bytedance/conan-center-index.git to update the corresponding Conan recipes.
+The `script/install-bolt-deps.sh` script downloads the Conan recipes for the current Bolt version from bytedance/conan-center-index.git and configures them as a local Conan remote.
+
+
 ## Copyright and Licensing
 
 - **License**: Apache 2.0 (see `LICENSE` and `NOTICE.txt`).
