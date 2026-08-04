@@ -32,6 +32,7 @@
 #include "bolt/common/base/Crc.h"
 #include "bolt/type/HugeInt.h"
 
+#include <limits>
 #include <unordered_set>
 
 #include <boost/crc.hpp>
@@ -229,6 +230,9 @@ TEST_F(BitUtilTest, nwords) {
   EXPECT_EQ(nwords(64), 1);
   EXPECT_EQ(nwords(65), 2);
   EXPECT_EQ(nwords(uint32_t{65}), 2);
+  EXPECT_EQ(nwords(std::numeric_limits<uint32_t>::max()), 67'108'864);
+  EXPECT_EQ(
+      nwords(std::numeric_limits<uint64_t>::max()), 288'230'376'151'711'744);
 }
 
 TEST_F(BitUtilTest, setBits) {
