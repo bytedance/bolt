@@ -180,6 +180,21 @@ add_test(
     COMMAND bolt_shuffle_reader_test
 )
 
+add_executable(bolt_shuffle_payload_test PayloadTest.cpp)
+
+target_link_libraries(
+    bolt_shuffle_payload_test
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        GTest::gtest
+)
+
+add_test(
+    NAME bolt_shuffle_payload_test
+    COMMAND bolt_shuffle_payload_test
+)
+
 add_executable(
     bolt_shuffle_local_partition_writer_test
     LocalPartitionWriterTest.cpp

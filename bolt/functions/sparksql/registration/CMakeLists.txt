@@ -32,6 +32,7 @@ bolt_add_library(
   Register.cpp
   RegisterArray.cpp
   RegisterBinary.cpp
+  RegisterBitmap.cpp
   RegisterBitwise.cpp
   RegisterCharVarchar.cpp
   RegisterComparison.cpp

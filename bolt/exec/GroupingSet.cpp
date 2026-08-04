@@ -791,8 +791,23 @@ bool GroupingSet::getOutput(
   }
   BOLT_CHECK(!isDistinct());
 
+  // Keep this performance-sensitive scratch buffer on the stack. GCC and
+  // Clang support VLAs as an extension; suppress only the portability warning
+  // for this declaration to preserve the existing runtime behavior.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wvla-cxx-extension"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvla"
+#endif
   // @lint-ignore CLANGTIDY
   char* groups[maxOutputRows];
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
   const int32_t numGroups = table_
       ? table_->rows()->listRows(
             &iterator, maxOutputRows, maxOutputBytes, groups)
