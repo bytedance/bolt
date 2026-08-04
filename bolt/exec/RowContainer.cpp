@@ -1061,8 +1061,11 @@ void RowContainer::clear() {
     }
   }
   rows_.clear();
-  rowPointers_.clear();
-  rowPointers_.shrink_to_fit();
+  {
+    std::vector<char*, StlAllocator<char*>> emptyRowPointers{
+        rowPointers_.get_allocator()};
+    rowPointers_.swap(emptyRowPointers);
+  }
   if (!sharedStringAllocator) {
     if (checkFree_) {
       stringAllocator_->checkEmpty();
