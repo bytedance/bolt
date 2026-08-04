@@ -3631,8 +3631,7 @@ TEST_F(CastExprTest, complexTypeToStringWrappedNestedInput) {
   {
     auto rows = makeRowVector({
         makeNullableFlatVector<int64_t>({1, std::nullopt, 3, 4, 5}),
-        makeNullableFlatVector<StringView>(
-            {"a", "b", std::nullopt, "d", "e"}),
+        makeNullableFlatVector<StringView>({"a", "b", std::nullopt, "d", "e"}),
     });
     castWrappedAndFlat(rows, {0, 2, 2, 5}, {1});
   }
@@ -3676,8 +3675,7 @@ TEST_F(CastExprTest, complexTypeToStringConstantNestedInput) {
 
   auto wrappedResult =
       evaluate("cast(c0 as VARCHAR)", makeRowVector({wrappedArray}));
-  auto flatResult =
-      evaluate("cast(c0 as VARCHAR)", makeRowVector({flatArray}));
+  auto flatResult = evaluate("cast(c0 as VARCHAR)", makeRowVector({flatArray}));
   assertEqualVectors(flatResult, wrappedResult);
 }
 } // namespace
