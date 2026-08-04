@@ -422,6 +422,10 @@ class QueryConfig {
   static constexpr const char* kSparkBloomFilterMaxNumBits =
       "spark.bloom_filter.max_num_bits";
 
+  /// The max number of items to use for the bloom filter.
+  static constexpr const char* kSparkBloomFilterMaxNumItems =
+      "spark.bloom_filter.max_num_items";
+
   // The policy to deduplicate map keys in builtin function: CreateMap,
   // MapFromArrays, MapFromEntries, StringToMap, MapConcat and TransformKeys.
   // When EXCEPTION, the query fails if duplicated map keys are detected. When
@@ -1350,6 +1354,11 @@ class QueryConfig {
   int64_t sparkBloomFilterMaxNumBits() const {
     constexpr int64_t kDefault = 64 * 1024 * 1024;
     return get<int64_t>(kSparkBloomFilterMaxNumBits, kDefault);
+  }
+
+  int64_t sparkBloomFilterMaxNumItems() const {
+    constexpr int64_t kDefault = 4'000'000L;
+    return get<int64_t>(kSparkBloomFilterMaxNumItems, kDefault);
   }
 
   std::string sparkMapKeyDedupPolicy() const {
