@@ -89,11 +89,11 @@ T roundDecimalHalfEven(T value, int32_t fromScale, int32_t toScale) {
   roundedValue /= scaleFactor;
 
   const int128_t absRemainder = remainder < 0 ? -remainder : remainder;
-  const int128_t twiceRemainder = absRemainder * 2;
-  if (twiceRemainder > scaleFactor) {
+  const int128_t halfScaleFactor = scaleFactor / 2;
+  if (absRemainder > halfScaleFactor) {
     roundedValue += value >= 0 ? 1 : -1;
   } else if (
-      twiceRemainder == scaleFactor &&
+      absRemainder == halfScaleFactor &&
       ((roundedValue < 0 ? -roundedValue : roundedValue) % 2 == 1)) {
     roundedValue += value >= 0 ? 1 : -1;
   }

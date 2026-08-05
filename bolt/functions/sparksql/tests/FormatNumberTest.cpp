@@ -173,6 +173,56 @@ TEST_F(FormatNumberTest, decimalHalfEvenRounding) {
   EXPECT_EQ(formatShortDecimal(-40, DECIMAL(4, 2), 0), "-0");
   EXPECT_EQ(formatShortDecimal(-50, DECIMAL(4, 2), 0), "-0");
   EXPECT_EQ(formatShortDecimal(-40, DECIMAL(4, 2), 2), "-0.40");
+
+  const auto decimal38 = DECIMAL(38, 38);
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("49999999999999999999999999999999999999"),
+          decimal38,
+          0),
+      "0");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("50000000000000000000000000000000000000"),
+          decimal38,
+          0),
+      "0");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("50000000000000000000000000000000000001"),
+          decimal38,
+          0),
+      "1");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("99999999999999999999999999999999999999"),
+          decimal38,
+          0),
+      "1");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("-49999999999999999999999999999999999999"),
+          decimal38,
+          0),
+      "-0");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("-50000000000000000000000000000000000000"),
+          decimal38,
+          0),
+      "-0");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("-50000000000000000000000000000000000001"),
+          decimal38,
+          0),
+      "-1");
+  EXPECT_EQ(
+      formatLongDecimal(
+          HugeInt::parse("-99999999999999999999999999999999999999"),
+          decimal38,
+          0),
+      "-1");
 }
 
 TEST_F(FormatNumberTest, negativeDecimalPlaces) {
