@@ -20,6 +20,7 @@
 #include <unordered_set>
 
 #include "bolt/exec/fuzzer/DuckQueryRunner.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/fuzzer/WindowFuzzerRunner.h"
 #include "bolt/functions/prestosql/fuzzer/ApproxDistinctInputGenerator.h"
 #include "bolt/functions/prestosql/fuzzer/ApproxDistinctResultVerifier.h"
@@ -29,25 +30,6 @@
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/functions/sparksql/window/WindowFunctionsRegistration.h"
 
-DEFINE_int64(
-    seed,
-    0,
-    "Initial seed for random number generator used to reproduce previous "
-    "results (0 means start with random seed).");
-
-DEFINE_string(
-    only,
-    "",
-    "If specified, Fuzzer will only choose functions from "
-    "this comma separated list of function names "
-    "(e.g: --only \"min\" or --only \"sum,avg\").");
-
-DEFINE_string(
-    presto_url,
-    "",
-    "Presto coordinator URI along with port. If set, we use Presto "
-    "source of truth. Otherwise, use DuckDB. Example: "
-    "--presto_url=http://127.0.0.1:8080");
 namespace bytedance::bolt::exec::test {
 namespace {
 
@@ -82,7 +64,8 @@ int main(int argc, char** argv) {
   // experience, and initialize glog and gflags.
   folly::Init init(&argc, &argv);
 
-  size_t initialSeed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
+  size_t initialSeed =
+      FLAGS_bolt_fuzzer_seed == 0 ? std::time(nullptr) : FLAGS_bolt_fuzzer_seed;
 
   // List of functions that have known bugs that cause crashes or failures.
   static const std::unordered_set<std::string> skipFunctions = {
@@ -152,7 +135,7 @@ int main(int argc, char** argv) {
   using bytedance::bolt::exec::test::setupReferenceQueryRunner;
 
   Options options;
-  options.onlyFunctions = FLAGS_only;
+  options.onlyFunctions = FLAGS_bolt_fuzzer_only;
   options.skipFunctions = skipFunctions;
   options.customVerificationFunctions = customVerificationFunctions;
   options.customInputGenerators =
@@ -162,6 +145,6 @@ int main(int argc, char** argv) {
       bytedance::bolt::VectorFuzzer::Options::TimestampPrecision::kMilliSeconds;
   return Runner::run(
       initialSeed,
-      setupReferenceQueryRunner(FLAGS_presto_url, "window_fuzzer"),
+      setupReferenceQueryRunner(FLAGS_bolt_fuzzer_presto_url, "window_fuzzer"),
       options);
 }

@@ -34,6 +34,7 @@
 
 #include <folly/container/F14Map.h>
 
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/time/CpuWallTimer.h"
 #include "bolt/core/ExpressionEvaluator.h"
 #include "bolt/core/Expressions.h"
@@ -43,19 +44,6 @@
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/type/Subfield.h"
 #include "bolt/vector/SimpleVector.h"
-
-/// GFlag used to enable saving input vector and expression SQL on disk in case
-/// of any (user or system) error during expression evaluation. The value
-/// specifies a path to a directory where the vectors will be saved. That
-/// directory must exist and be writable.
-DECLARE_string(bolt_save_input_on_expression_any_failure_path);
-
-/// GFlag used to enable saving input vector and expression SQL on disk in case
-/// of a system error during expression evaluation. The value specifies a path
-/// to a directory where the vectors will be saved. That directory must exist
-/// and be writable. This flag is ignored if
-/// bolt_save_input_on_expression_any_failure_path flag is set.
-DECLARE_string(bolt_save_input_on_expression_system_failure_path);
 
 #ifdef ENABLE_BOLT_EXPR_JIT
 namespace bytedance::bolt {

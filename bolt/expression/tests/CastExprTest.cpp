@@ -500,7 +500,7 @@ TEST_F(CastExprTest, basics) {
        std::numeric_limits<float>::quiet_NaN()});
 
   gflags::FlagSaver flagSaver;
-  FLAGS_experimental_enable_legacy_cast = true;
+  FLAGS_bolt_experimental_enable_legacy_cast = true;
   testCast<double, std::string>(
       "string",
       {1.888, 2.5, 3.6, 100.44, -100.101, 1.0, -2.0},

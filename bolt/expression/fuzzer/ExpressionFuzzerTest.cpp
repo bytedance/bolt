@@ -32,14 +32,9 @@
 #include <gtest/gtest.h>
 #include <unordered_set>
 
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/expression/fuzzer/FuzzerRunner.h"
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
-
-DEFINE_int64(
-    seed,
-    0,
-    "Initial seed for random number generator used to reproduce previous "
-    "results (0 means start with random seed).");
 
 using bytedance::bolt::fuzzer::FuzzerRunner;
 
@@ -93,6 +88,7 @@ int main(int argc, char** argv) {
       "bytedance_from_unixtime",
       "aeolus_from_unixtime",
   };
-  size_t initialSeed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
+  size_t initialSeed =
+      FLAGS_bolt_fuzzer_seed == 0 ? std::time(nullptr) : FLAGS_bolt_fuzzer_seed;
   return FuzzerRunner::run(initialSeed, skipFunctions, {{}});
 }

@@ -29,6 +29,7 @@
  */
 
 #include "bolt/buffer/Buffer.h"
+#include "bolt/common/flags/BoltFlags.h"
 
 #if defined(__SSE2__)
 #include <emmintrin.h>
@@ -41,7 +42,6 @@
 #include "bolt/type/StringView.h"
 #include "folly/Range.h"
 
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 namespace bytedance {
 namespace bolt {
 

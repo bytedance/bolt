@@ -32,6 +32,7 @@
 #include <cstddef>
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/SharedArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -50,12 +51,6 @@
 #include "bolt/serializers/UnsafeRowSerializer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
-DEFINE_bool(
-    bolt_testing_enable_arbitration,
-    false,
-    "Enable to turn on arbitration for tests by default");
 using namespace bytedance::bolt::common::testutil;
 using namespace bytedance::bolt::memory;
 namespace bytedance::bolt::exec::test {

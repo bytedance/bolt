@@ -47,7 +47,7 @@ using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::connector::hive;
 
 DEFINE_string(
-    data_path,
+    bolt_benchmark_data_path,
     "",
     "Root path of paimon data. All the files under the path will be merged as reading. Example layout for '-data_path=~/bolt/benchmark_data'\n");
 
@@ -57,19 +57,19 @@ static bool notEmpty(const char* /*flagName*/, const std::string& value) {
 }
 
 std::string benchmarkDataPath(const std::string& subdir) {
-  if (FLAGS_data_path.empty()) {
+  if (FLAGS_bolt_benchmark_data_path.empty()) {
     return subdir;
   }
 
-  if (FLAGS_data_path.back() == '/') {
-    return FLAGS_data_path + subdir;
+  if (FLAGS_bolt_benchmark_data_path.back() == '/') {
+    return FLAGS_bolt_benchmark_data_path + subdir;
   }
 
-  return FLAGS_data_path + "/" + subdir;
+  return FLAGS_bolt_benchmark_data_path + "/" + subdir;
 }
 } // namespace
 
-DEFINE_validator(data_path, &notEmpty);
+DEFINE_validator(bolt_benchmark_data_path, &notEmpty);
 
 class PaimonBenchmark : public QueryBenchmarkBase {
   std::shared_ptr<memory::MemoryPool> rootPool_;

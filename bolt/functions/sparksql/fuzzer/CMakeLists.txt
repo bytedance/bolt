@@ -30,7 +30,6 @@ add_executable(spark_aggregation_fuzzer_test SparkAggregationFuzzerTest.cpp)
 target_link_libraries(
   spark_aggregation_fuzzer_test
   bolt_aggregation_fuzzer
-  bolt_aggregation_fuzzer_base
   bolt_functions_spark_aggregates
   bolt_fuzzer_util
   bolt_testutils

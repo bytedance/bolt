@@ -38,13 +38,10 @@
 #include <folly/CpuId.h>
 #include <folly/FileUtil.h>
 #include <folly/String.h>
-#include <gflags/gflags.h>
+#include "bolt/common/flags/BoltFlags.h"
 
 constexpr const char* kProcSelfCmdline = "/proc/self/cmdline";
 
-DECLARE_bool(avx2); // Enables use of AVX2 when available NOLINT
-
-DECLARE_bool(bmi2); // Enables use of BMI2 when available NOLINT
 namespace bytedance {
 namespace bolt {
 namespace process {
@@ -123,7 +120,7 @@ bool avx2CpuFlag = folly::CpuId().avx2();
 
 bool hasAvx2() {
 #ifdef __AVX2__
-  return avx2CpuFlag && FLAGS_avx2;
+  return avx2CpuFlag && FLAGS_bolt_enable_avx2;
 #else
   return false;
 #endif
@@ -131,7 +128,7 @@ bool hasAvx2() {
 
 bool hasBmi2() {
 #ifdef __BMI2__
-  return bmi2CpuFlag && FLAGS_bmi2;
+  return bmi2CpuFlag && FLAGS_bolt_enable_bmi2;
 #else
   return false;
 #endif

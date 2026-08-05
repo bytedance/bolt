@@ -38,13 +38,19 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_bool(enable_spill, false, "enable hash agg spill");
-DEFINE_string(row_based_spill_mode, "", "row based spill mode");
-DEFINE_string(temp_file_path, "", "file path of input file");
-DEFINE_int64(aggregate_count, 1, "aggregate count of each benchmark");
-DEFINE_int64(key_count, 1, "aggregate count of each benchmark");
-DEFINE_int64(k_array_size, 17, "group number of k_array");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_bool(bolt_benchmark_enable_spill, false, "enable hash agg spill");
+DEFINE_string(bolt_benchmark_row_based_spill_mode, "", "row based spill mode");
+DEFINE_string(bolt_benchmark_temp_file_path, "", "file path of input file");
+DEFINE_int64(
+    bolt_benchmark_aggregate_count,
+    1,
+    "aggregate count of each benchmark");
+DEFINE_int64(bolt_benchmark_key_count, 1, "aggregate count of each benchmark");
+DEFINE_int64(bolt_benchmark_k_array_size, 17, "group number of k_array");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
@@ -82,11 +88,11 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
          {"str", VARCHAR()},
          {"str_inline", VARCHAR()}});
 
-    if (FLAGS_temp_file_path.empty()) {
+    if (FLAGS_bolt_benchmark_temp_file_path.empty()) {
       VectorFuzzer::Options opts;
       opts.vectorSize = kRowsPerVector;
       opts.nullRatio = 0;
-      VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+      VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
       std::vector<RowVectorPtr> vectors;
       for (auto i = 0; i < kNumVectors; ++i) {
@@ -94,9 +100,10 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
 
         // Generate key with a small number of unique values from a small range
         // (0-16).
-        children.emplace_back(makeFlatVector<int32_t>(
-            kRowsPerVector,
-            [](auto row) { return rand() % FLAGS_k_array_size; }));
+        children.emplace_back(
+            makeFlatVector<int32_t>(kRowsPerVector, [](auto row) {
+              return rand() % FLAGS_bolt_benchmark_k_array_size;
+            }));
 
         // Generate key with a small number of unique values from a large range
         // (300 total values).
@@ -149,7 +156,7 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
       writeToFile(filePath_, vectors);
       std::cout << filePath_ << std::endl;
     } else {
-      filePath_ = FLAGS_temp_file_path;
+      filePath_ = FLAGS_bolt_benchmark_temp_file_path;
     }
   }
 
@@ -181,9 +188,10 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
   void run(const std::string& key, const std::string& aggregate) {
     folly::BenchmarkSuspender suspender;
 
-    std::vector<std::string> keys(FLAGS_key_count, key), aggregates;
+    std::vector<std::string> keys(FLAGS_bolt_benchmark_key_count, key),
+        aggregates;
     if (!aggregate.empty()) {
-      aggregates.resize(FLAGS_aggregate_count, aggregate);
+      aggregates.resize(FLAGS_bolt_benchmark_aggregate_count, aggregate);
     }
 
     auto plan = PlanBuilder()
@@ -210,17 +218,17 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
   void runStream(const std::string& key, const std::string& aggregate) {
     folly::BenchmarkSuspender suspender;
 
-    auto plan =
-        PlanBuilder()
-            .tableScan(inputType_)
-            .orderBy({key}, false)
-            .streamingAggregation(
-                {key},
-                std::vector<std::string>(FLAGS_aggregate_count, aggregate),
-                {},
-                core::AggregationNode::Step::kSingle,
-                false)
-            .planFragment();
+    auto plan = PlanBuilder()
+                    .tableScan(inputType_)
+                    .orderBy({key}, false)
+                    .streamingAggregation(
+                        {key},
+                        std::vector<std::string>(
+                            FLAGS_bolt_benchmark_aggregate_count, aggregate),
+                        {},
+                        core::AggregationNode::Step::kSingle,
+                        false)
+                    .planFragment();
 
     vector_size_t numResultRows = 0;
     auto task = makeTask(plan);
@@ -240,12 +248,12 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
   std::shared_ptr<exec::Task> makeTask(core::PlanFragment plan) {
     auto queryCtx = core::QueryCtx::create(executor_.get());
     std::unordered_map<std::string, std::string> configs;
-    if (FLAGS_enable_spill) {
+    if (FLAGS_bolt_benchmark_enable_spill) {
       configs[core::QueryConfig::kSpillEnabled] = "true";
       configs[core::QueryConfig::kAggregationSpillEnabled] = "true";
       configs[core::QueryConfig::kAggregationSpillMemoryThreshold] = "10000000";
       configs[core::QueryConfig::kRowBasedSpillMode] =
-          FLAGS_row_based_spill_mode;
+          FLAGS_bolt_benchmark_row_based_spill_mode;
     }
     queryCtx->testingOverrideConfigUnsafe(std::move(configs));
     auto task = exec::Task::create(

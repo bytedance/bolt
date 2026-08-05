@@ -21,6 +21,7 @@ SOURCE_ARTIFACT_PREFIX = "bolt-ci-source-v1"
 GATE_CHECK_NAME = "merge-queue-gate"
 GATE_WORKFLOW_PATH = ".github/workflows/merge-queue-gate.yml"
 REQUIRED_WORKFLOWS = ("build-test.yml", "pre-commit-checks.yml")
+CLA_CONTEXT = "license/cla"
 REUSABLE_EVENTS = {"pull_request", "merge_group"}
 ACTIVE_RUN_STATUSES = (
     "queued",
@@ -333,6 +334,47 @@ def correlated_ci_runs(
     return correlated
 
 
+def cla_status(api, repository, source_run):
+    head_sha = validate_sha(source_run.get("head_sha"), "CLA head SHA")
+    if source_run.get("event") == "merge_group":
+        match = re.search(r"/pr-([1-9][0-9]*)-", source_run.get("head_branch", ""))
+        if not match:
+            raise ValueError(
+                "Cannot identify PR from merge queue branch: "
+                f"{source_run.get('head_branch')!r}"
+            )
+        pull_request = api.request(f"/repos/{repository}/pulls/{int(match.group(1))}")
+        head_sha = validate_sha(
+            (pull_request.get("head") or {}).get("sha"),
+            "PR head SHA",
+        )
+
+    response = api.request(f"/repos/{repository}/commits/{head_sha}/status")
+    current = next(
+        (
+            status
+            for status in response.get("statuses", [])
+            if status.get("context") == CLA_CONTEXT
+        ),
+        None,
+    )
+    state = (current or {}).get("state")
+    if state == "success":
+        status, conclusion = "completed", "success"
+    elif state in {"failure", "error"}:
+        status, conclusion = "completed", "failure"
+    else:
+        status, conclusion = "in_progress", None
+    return {
+        "id": None,
+        "status": status,
+        "conclusion": conclusion,
+        "html_url": (current or {}).get(
+            "target_url", f"https://github.com/{repository}/commit/{head_sha}"
+        ),
+    }
+
+
 def check_state(runs):
     present = [run for run in runs.values() if run]
     if any(
@@ -515,7 +557,8 @@ def reconcile_gate(
     if workflow_filename(source_run.get("path")) not in REQUIRED_WORKFLOWS:
         raise ValueError(f"Run {source_run_id} is not from a required CI workflow")
     runs = correlated_ci_runs(api, repository, source_run)
-    status, conclusion = check_state(runs)
+    requirements = {**runs, CLA_CONTEXT: cla_status(api, repository, source_run)}
+    status, conclusion = check_state(requirements)
     head_sha = validate_sha(source_run.get("head_sha"), "head SHA")
     event = source_run.get("event")
     result = None
@@ -535,7 +578,7 @@ def reconcile_gate(
         repository,
         head_sha,
         event,
-        runs,
+        requirements,
         status,
         conclusion,
         validation_error,
@@ -569,7 +612,7 @@ def reconcile_gate(
                             "conclusion": run.get("conclusion"),
                         }
                     )
-                    for workflow, run in runs.items()
+                    for workflow, run in requirements.items()
                 },
             },
             sort_keys=True,

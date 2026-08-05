@@ -31,13 +31,12 @@
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/future/BoltPromise.h"
 #include "bolt/common/memory/MemoryUsageTracker.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "folly/Random.h"
 #include "folly/futures/Barrier.h"
-
-DECLARE_bool(bolt_memory_leak_check_enabled);
 
 using namespace ::testing;
 using namespace ::bytedance::bolt::memory;

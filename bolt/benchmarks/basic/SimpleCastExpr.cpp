@@ -36,7 +36,10 @@
 #include "bolt/functions/lib/benchmarks/FunctionBenchmarkBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
@@ -52,7 +55,8 @@ class SimpleCastBenchmark : public functions::test::FunctionBenchmarkBase {
     VectorFuzzer::Options opts;
     opts.vectorSize = size;
     opts.nullRatio = 0;
-    VectorFuzzer fuzzer(std::move(opts), pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(
+        std::move(opts), pool(), FLAGS_bolt_benchmark_fuzzer_seed);
     VectorPtr input = fuzzer.fuzzFlat(type); // Col a
     return vectorMaker_.rowVector(
         std::vector<std::string>{std::string(kColName)},

@@ -37,7 +37,10 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
@@ -69,7 +72,7 @@ class ReduceAggBenchmark : public HiveConnectorTestBase {
     VectorFuzzer::Options opts;
     opts.vectorSize = kRowsPerVector;
     opts.nullRatio = 0.1;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
     std::vector<RowVectorPtr> vectors;
     for (auto i = 0; i < kNumVectors; ++i) {

@@ -37,7 +37,10 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 using connector::hive::HivePartitionFunction;
@@ -64,7 +67,7 @@ class HivePartitionFunctionBenchmark
     VectorFuzzer::Options opts;
     opts.vectorSize = vectorSize;
     opts.stringLength = 20;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
     VectorMaker vm{pool_.get()};
     auto addRowVector = [&](const TypePtr& type) {
       auto flatVector = fuzzer.fuzzFlat(type);

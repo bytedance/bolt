@@ -33,6 +33,7 @@
 
 #include <limits>
 #include "bolt/common/base/Crc.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -43,7 +44,6 @@
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
-DECLARE_int32(shuffle_zstd_compression_level);
 namespace bytedance::bolt::serializer::presto {
 namespace {
 constexpr int8_t kCompressedBitMask = 1;
@@ -3526,8 +3526,8 @@ class PrestoVectorSerializer : public VectorSerializer {
         codec_(
             compressionKind == common::CompressionKind::CompressionKind_ZSTD
                 ? folly::io::zstd::getCodec(folly::io::zstd::Options(
-                      FLAGS_shuffle_zstd_compression_level
-                          ? FLAGS_shuffle_zstd_compression_level
+                      FLAGS_bolt_shuffle_zstd_compression_level
+                          ? FLAGS_bolt_shuffle_zstd_compression_level
                           : 3))
                 : common::compressionKindToCodec(compressionKind)) {
     const auto types = rowType->children();

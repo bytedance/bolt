@@ -31,7 +31,10 @@ target_link_libraries(
   bolt_fuzzer_util bolt_core bolt_exec_test_lib cpr::cpr bolt_type_parser Folly::folly
 )
 
-bolt_add_library(bolt_aggregation_fuzzer_base AggregationFuzzerBase.cpp)
+add_library(bolt_fuzzer_flags STATIC FuzzerFlags.cpp)
+target_link_libraries(bolt_fuzzer_flags PRIVATE gflags::gflags)
+
+add_library(bolt_aggregation_fuzzer_base STATIC AggregationFuzzerBase.cpp)
 
 target_link_libraries(
   bolt_aggregation_fuzzer_base
@@ -48,9 +51,10 @@ target_link_libraries(
   bolt_expression_test_utility
   bolt_vector
   bolt_core
+  bolt_fuzzer_flags
 )
 
-bolt_add_library(bolt_aggregation_fuzzer AggregationFuzzer.cpp)
+add_library(bolt_aggregation_fuzzer STATIC AggregationFuzzer.cpp)
 
 target_link_libraries(
   bolt_aggregation_fuzzer
@@ -62,7 +66,7 @@ target_link_libraries(
   bolt_fuzzer_util
 )
 
-bolt_add_library(bolt_window_fuzzer WindowFuzzer.cpp)
+add_library(bolt_window_fuzzer STATIC WindowFuzzer.cpp)
 
 target_link_libraries(
   bolt_window_fuzzer

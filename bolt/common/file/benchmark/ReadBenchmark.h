@@ -47,16 +47,16 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/time/Timer.h"
 
-DECLARE_string(path);
-DECLARE_int64(file_size_gb);
-DECLARE_int32(num_threads);
-DECLARE_int32(seed);
-DECLARE_bool(odirect);
-DECLARE_int32(bytes);
-DECLARE_int32(gap);
-DECLARE_int32(num_in_run);
+DECLARE_string(bolt_benchmark_path);
+DECLARE_int64(bolt_benchmark_file_size_gb);
+DECLARE_int32(bolt_benchmark_num_threads);
+DECLARE_int32(bolt_benchmark_seed);
+DECLARE_bool(bolt_benchmark_odirect);
+DECLARE_int32(bolt_benchmark_bytes);
+DECLARE_int32(bolt_benchmark_gap);
+DECLARE_int32(bolt_benchmark_num_in_run);
 
-DECLARE_int32(measurement_size);
+DECLARE_int32(bolt_benchmark_measurement_size);
 namespace bytedance::bolt {
 
 enum class Mode { Pread = 0, Preadv = 1, Multiple = 2 };
@@ -77,9 +77,9 @@ class ReadBenchmark {
 
   // Initialize a LocalReadFile instance for the specified 'path'.
   virtual void initialize() {
-    executor_ =
-        std::make_unique<folly::IOThreadPoolExecutor>(FLAGS_num_threads);
-    if (FLAGS_odirect) {
+    executor_ = std::make_unique<folly::IOThreadPoolExecutor>(
+        FLAGS_bolt_benchmark_num_threads);
+    if (FLAGS_bolt_benchmark_odirect) {
       int32_t o_direct =
 #ifdef linux
           O_DIRECT;
@@ -87,32 +87,34 @@ class ReadBenchmark {
           0;
 #endif
       fd_ = open(
-          FLAGS_path.c_str(),
-          O_CREAT | O_RDWR | (FLAGS_odirect ? o_direct : 0),
+          FLAGS_bolt_benchmark_path.c_str(),
+          O_CREAT | O_RDWR | (FLAGS_bolt_benchmark_odirect ? o_direct : 0),
           S_IRUSR | S_IWUSR);
       if (fd_ < 0) {
-        LOG(ERROR) << "Could not open " << FLAGS_path;
+        LOG(ERROR) << "Could not open " << FLAGS_bolt_benchmark_path;
         exit(1);
       }
       readFile_ = std::make_unique<LocalReadFile>(fd_);
 
     } else {
       filesystems::registerLocalFileSystem();
-      auto lfs = filesystems::getFileSystem(FLAGS_path, nullptr);
-      readFile_ = lfs->openFileForRead(FLAGS_path);
+      auto lfs = filesystems::getFileSystem(FLAGS_bolt_benchmark_path, nullptr);
+      readFile_ = lfs->openFileForRead(FLAGS_bolt_benchmark_path);
     }
     fileSize_ = readFile_->size();
-    if (FLAGS_file_size_gb) {
-      fileSize_ = std::min<uint64_t>(FLAGS_file_size_gb << 30, fileSize_);
+    if (FLAGS_bolt_benchmark_file_size_gb) {
+      fileSize_ = std::min<uint64_t>(
+          FLAGS_bolt_benchmark_file_size_gb << 30, fileSize_);
     }
 
-    if (fileSize_ <= FLAGS_measurement_size) {
+    if (fileSize_ <= FLAGS_bolt_benchmark_measurement_size) {
       LOG(ERROR) << "File size " << fileSize_
-                 << " is <= then --measurement_size " << FLAGS_measurement_size;
+                 << " is <= then --bolt_benchmark_measurement_size "
+                 << FLAGS_bolt_benchmark_measurement_size;
       exit(1);
     }
-    if (FLAGS_seed) {
-      rng_.seed(FLAGS_seed);
+    if (FLAGS_bolt_benchmark_seed) {
+      rng_.seed(FLAGS_bolt_benchmark_seed);
     }
   }
 
@@ -287,8 +289,8 @@ class ReadBenchmark {
   }
 
   void modes(int32_t size, int32_t gap, int32_t count) {
-    int repeats =
-        std::max<int32_t>(3, (FLAGS_measurement_size) / (size * count));
+    int repeats = std::max<int32_t>(
+        3, (FLAGS_bolt_benchmark_measurement_size) / (size * count));
     std::cout << fmt::format(
                      "Run: {} Gap: {} Count: {} Repeats: {}",
                      size,

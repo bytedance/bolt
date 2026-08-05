@@ -35,9 +35,12 @@
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
 
-DEFINE_bool(all, false, "Generate coverage map for all Presto functions");
 DEFINE_bool(
-    most_used,
+    bolt_presto_coverage_all,
+    false,
+    "Generate coverage map for all Presto functions");
+DEFINE_bool(
+    bolt_presto_coverage_most_used,
     false,
     "Generate coverage map for a subset of most-used Presto functions");
 using namespace bytedance::bolt;
@@ -54,9 +57,9 @@ int main(int argc, char** argv) {
   // Register Presto window functions.
   window::prestosql::registerAllWindowFunctions();
 
-  if (FLAGS_all) {
+  if (FLAGS_bolt_presto_coverage_all) {
     functions::printCoverageMapForAll();
-  } else if (FLAGS_most_used) {
+  } else if (FLAGS_bolt_presto_coverage_most_used) {
     functions::printCoverageMapForMostUsed();
   } else {
     const std::unordered_set<std::string> linkBlockList = {

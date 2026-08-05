@@ -35,11 +35,11 @@
 #include "bolt/benchmarks/ExpressionBenchmarkBuilder.h"
 
 DEFINE_bool(
-    enable_cast_optimize,
+    bolt_benchmark_enable_cast_optimize,
     true,
     "Enable cast optimization in the benchmark");
 
-DEFINE_bool(primitive, true, "benchmark all primitive case");
+DEFINE_bool(bolt_benchmark_primitive, true, "benchmark all primitive case");
 using namespace bytedance;
 using namespace bytedance::bolt;
 
@@ -81,7 +81,7 @@ void benchmarkAll(
   ExpressionBenchmarkBuilder benchmarkBuilder;
   benchmarkBuilder.setConfig(
       {{core::QueryConfig::kEnableOptimizedCast,
-        FLAGS_enable_cast_optimize ? "true" : "false"}});
+        FLAGS_bolt_benchmark_enable_cast_optimize ? "true" : "false"}});
   const vector_size_t vectorSize = 1024 * 32;
   auto vectorMaker = benchmarkBuilder.vectorMaker();
   std::map<std::string, VectorPtr> cols;
@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   memory::MemoryManager::initialize(memory::MemoryManager::Options{});
 
-  if (FLAGS_primitive) {
+  if (FLAGS_bolt_benchmark_primitive) {
     std::vector<std::string> types = {
         "bool",
         "tinyint",
@@ -251,7 +251,7 @@ int main(int argc, char** argv) {
     ExpressionBenchmarkBuilder benchmarkBuilder;
     benchmarkBuilder.setConfig(
         {{core::QueryConfig::kEnableOptimizedCast,
-          FLAGS_enable_cast_optimize ? "true" : "false"}});
+          FLAGS_bolt_benchmark_enable_cast_optimize ? "true" : "false"}});
     const vector_size_t vectorSize = 1024 * 32;
     auto vectorMaker = benchmarkBuilder.vectorMaker();
     auto invalidInput =

@@ -36,7 +36,7 @@ using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::dwio::common;
 
 DEFINE_string(
-    data_path,
+    bolt_benchmark_data_path,
     "",
     "Root path of TPC-H data. Data layout must follow Hive-style partitioning. "
     "Example layout for '-data_path=/data/tpch10'\n"
@@ -58,14 +58,14 @@ static bool notEmpty(const char* /*flagName*/, const std::string& value) {
 }
 } // namespace
 
-DEFINE_validator(data_path, &notEmpty);
+DEFINE_validator(bolt_benchmark_data_path, &notEmpty);
 
 DEFINE_int32(
-    run_query_verbose,
+    bolt_benchmark_run_query_verbose,
     -1,
     "Run a given query and print execution statistics");
 DEFINE_int32(
-    io_meter_column_pct,
+    bolt_benchmark_io_meter_column_pct,
     0,
     "Percentage of lineitem columns to "
     "include in IO meter query. The columns are sorted by name and the n% first "
@@ -77,12 +77,14 @@ class TpchBenchmark : public QueryBenchmarkBase {
  public:
   void runMain(std::ostream& out, RunStats& runStats) override {
     BoltProfilerStart("tpch.prof");
-    if (FLAGS_run_query_verbose == -1 && FLAGS_io_meter_column_pct == 0) {
+    if (FLAGS_bolt_benchmark_run_query_verbose == -1 &&
+        FLAGS_bolt_benchmark_io_meter_column_pct == 0) {
       folly::runBenchmarks();
     } else {
-      const auto queryPlan = FLAGS_io_meter_column_pct > 0
-          ? queryBuilder->getIoMeterPlan(FLAGS_io_meter_column_pct)
-          : queryBuilder->getQueryPlan(FLAGS_run_query_verbose);
+      const auto queryPlan = FLAGS_bolt_benchmark_io_meter_column_pct > 0
+          ? queryBuilder->getIoMeterPlan(
+                FLAGS_bolt_benchmark_io_meter_column_pct)
+          : queryBuilder->getQueryPlan(FLAGS_bolt_benchmark_run_query_verbose);
       auto [cursor, actualResults] = run(queryPlan);
       if (!cursor) {
         LOG(ERROR) << "Query terminated with error. Exiting";
@@ -90,7 +92,7 @@ class TpchBenchmark : public QueryBenchmarkBase {
       }
       auto task = cursor->task();
       ensureTaskCompletion(task.get());
-      if (FLAGS_include_results) {
+      if (FLAGS_bolt_benchmark_include_results) {
         printResults(actualResults, out);
         out << std::endl;
       }
@@ -114,7 +116,10 @@ class TpchBenchmark : public QueryBenchmarkBase {
                  stats.numFinishedSplits)
           << std::endl;
       out << printPlanWithStats(
-                 *queryPlan.plan, stats, FLAGS_include_custom_stats, true)
+                 *queryPlan.plan,
+                 stats,
+                 FLAGS_bolt_benchmark_include_custom_stats,
+                 true)
           << std::endl;
     }
     BoltProfilerStop();
@@ -235,10 +240,10 @@ BENCHMARK(q22) {
 
 int tpchBenchmarkMain() {
   benchmark.initialize();
-  queryBuilder =
-      std::make_shared<TpchQueryBuilder>(toFileFormat(FLAGS_data_format));
-  queryBuilder->initialize(FLAGS_data_path);
-  if (FLAGS_test_flags_file.empty()) {
+  queryBuilder = std::make_shared<TpchQueryBuilder>(
+      toFileFormat(FLAGS_bolt_benchmark_data_format));
+  queryBuilder->initialize(FLAGS_bolt_benchmark_data_path);
+  if (FLAGS_bolt_benchmark_test_flags_file.empty()) {
     RunStats ignore;
     benchmark.runMain(std::cout, ignore);
   } else {

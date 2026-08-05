@@ -27,7 +27,7 @@
 
 bolt_add_library(bolt_exception BoltException.cpp Exceptions.cpp Exceptions.h)
 target_link_libraries(
-  bolt_exception PUBLIC bolt_flag_definitions bolt_process Folly::folly fmt::fmt gflags::gflags
+  bolt_exception PUBLIC bolt_common_flags bolt_process Folly::folly fmt::fmt gflags::gflags
                         glog::glog
 )
 
@@ -81,7 +81,7 @@ bolt_add_library(bolt_id_map BigintIdMap.cpp)
 target_link_libraries(
   bolt_id_map
   bolt_memory
-  bolt_flag_definitions
+  bolt_common_flags
   bolt_process
   glog::glog
   Folly::folly

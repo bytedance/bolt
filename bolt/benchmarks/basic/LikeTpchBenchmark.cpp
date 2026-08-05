@@ -42,9 +42,9 @@ using namespace bytedance::bolt::functions;
 using namespace bytedance::bolt::functions::test;
 using namespace bytedance::bolt::memory;
 
-DEFINE_int32(vector_size, 10000, "Vector size");
-DEFINE_int32(num_runs, 100, "Number of runs");
-DEFINE_int32(num_rows, 10000, "Number of rows");
+DEFINE_int32(bolt_benchmark_vector_size, 10000, "Vector size");
+DEFINE_int32(bolt_benchmark_num_runs, 100, "Number of runs");
+DEFINE_int32(bolt_benchmark_num_rows, 10000, "Number of rows");
 
 namespace {
 
@@ -74,7 +74,7 @@ class LikeFunctionsBenchmark : public FunctionBaseTest,
     exec::registerStatefulVectorFunction("like", likeSignatures(), makeLike);
 
     VectorFuzzer::Options opts;
-    opts.vectorSize = FLAGS_vector_size;
+    opts.vectorSize = FLAGS_bolt_benchmark_vector_size;
     VectorFuzzer fuzzer(opts, FunctionBenchmarkBase::pool());
     inputFuzzer_ = fuzzer.fuzzFlat(VARCHAR());
   }
@@ -123,20 +123,22 @@ class LikeFunctionsBenchmark : public FunctionBaseTest,
       case TpchBenchmarkCase::TpchQuery2:
       case TpchBenchmarkCase::TpchQuery14:
       case TpchBenchmarkCase::TpchQuery16Part: {
-        auto tpchPart = genTpchPart(pool_.get(), FLAGS_num_rows);
+        auto tpchPart = genTpchPart(pool_.get(), FLAGS_bolt_benchmark_num_rows);
         return tpchPart->childAt(4);
       }
       case TpchBenchmarkCase::TpchQuery9:
       case TpchBenchmarkCase::TpchQuery20: {
-        auto tpchPart = genTpchPart(pool_.get(), FLAGS_num_rows);
+        auto tpchPart = genTpchPart(pool_.get(), FLAGS_bolt_benchmark_num_rows);
         return tpchPart->childAt(1);
       }
       case TpchBenchmarkCase::TpchQuery13: {
-        auto tpchOrders = genTpchOrders(pool_.get(), FLAGS_num_rows);
+        auto tpchOrders =
+            genTpchOrders(pool_.get(), FLAGS_bolt_benchmark_num_rows);
         return tpchOrders->childAt(8);
       }
       case TpchBenchmarkCase::TpchQuery16Supplier: {
-        auto tpchSupplier = genTpchSupplier(pool_.get(), FLAGS_num_rows);
+        auto tpchSupplier =
+            genTpchSupplier(pool_.get(), FLAGS_bolt_benchmark_num_rows);
         return tpchSupplier->childAt(6);
       }
       default:
@@ -156,7 +158,7 @@ class LikeFunctionsBenchmark : public FunctionBaseTest,
     kSuspender.dismiss();
 
     size_t cnt = 0;
-    for (auto i = 0; i < FLAGS_num_runs; i++) {
+    for (auto i = 0; i < FLAGS_bolt_benchmark_num_runs; i++) {
       auto result = FunctionBenchmarkBase::evaluate(exprSet, data);
       cnt += result->size();
     }
@@ -169,7 +171,8 @@ class LikeFunctionsBenchmark : public FunctionBaseTest,
     folly::BenchmarkSuspender kSuspender;
     const auto input = inputFuzzer_->values()->as<StringView>();
     auto patternString = generatePattern(patternKind, input[0].str());
-    std::vector<std::string> patternVector(FLAGS_vector_size, patternString);
+    std::vector<std::string> patternVector(
+        FLAGS_bolt_benchmark_vector_size, patternString);
     const auto data = makeRowVector({inputFuzzer_});
     auto likeExpression = fmt::format("like(c0, '{}')", patternString);
     auto rowType = std::dynamic_pointer_cast<const RowType>(data->type());
@@ -178,7 +181,7 @@ class LikeFunctionsBenchmark : public FunctionBaseTest,
     kSuspender.dismiss();
 
     size_t cnt = 0;
-    for (auto i = 0; i < FLAGS_num_runs; i++) {
+    for (auto i = 0; i < FLAGS_bolt_benchmark_num_runs; i++) {
       auto result = FunctionBenchmarkBase::evaluate(exprSet, data);
       cnt += result->size();
     }

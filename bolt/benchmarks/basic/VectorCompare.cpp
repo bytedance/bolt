@@ -36,7 +36,10 @@
 #include "bolt/functions/lib/benchmarks/FunctionBenchmarkBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
@@ -51,7 +54,7 @@ class VectorCompareBenchmark : public functions::test::FunctionBenchmarkBase {
     opts.vectorSize = vectorSize_;
     opts.nullRatio = 0;
     opts.containerVariableLength = 1000;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
     flatVector_ = fuzzer.fuzzFlat(BIGINT());
 

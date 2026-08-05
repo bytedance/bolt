@@ -32,6 +32,7 @@
 #include <cstdint>
 
 #include "bolt/common/caching/CacheTTLController.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
@@ -374,12 +375,8 @@ void SplitReader::prepareSplit(
   baseReader_ = dwio::common::getReaderFactory(baseReaderOpts_.getFileFormat())
                     ->createReader(std::move(baseFileInput), baseReaderOpts_);
 
-  // only for testing
-  if (UNLIKELY(
-          !FLAGS_testing_only_set_scan_exception_mesg_for_prepare.empty())) {
-    throw std::runtime_error(
-        FLAGS_testing_only_set_scan_exception_mesg_for_prepare);
-  }
+  BOLT_TEST_ADJUST(
+      "bytedance::bolt::connector::hive::SplitReader::prepareSplit", this);
 
   validateReaderCastFilter();
   baseRowReaderOpts_.setDisableFloatingPointToVarcharMetadataFilter(
@@ -628,11 +625,7 @@ uint64_t SplitReader::next(int64_t size, VectorPtr& output) {
   }
   populatePaimonMetadataColumns(output);
 
-  // only for testing
-  if (UNLIKELY(!FLAGS_testing_only_set_scan_exception_mesg_for_next.empty())) {
-    throw std::runtime_error(
-        FLAGS_testing_only_set_scan_exception_mesg_for_next);
-  }
+  BOLT_TEST_ADJUST("bytedance::bolt::connector::hive::SplitReader::next", this);
 
   return rows;
 }

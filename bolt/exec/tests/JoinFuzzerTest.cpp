@@ -33,15 +33,11 @@
 #include <gtest/gtest.h>
 #include <unordered_set>
 
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/tests/JoinFuzzerRunner.h"
 
-DEFINE_int64(
-    seed,
-    0,
-    "Initial seed for random number generator used to reproduce previous "
-    "results (0 means start with random seed).");
-
 int main(int argc, char** argv) {
+  bytedance::bolt::fuzzer::setJoinFuzzerFlagDefaults();
   ::testing::InitGoogleTest(&argc, argv);
 
   // Calls common init functions in the necessary order, initializing
@@ -50,6 +46,7 @@ int main(int argc, char** argv) {
   // todo: use folly::Init init after upgrade folly lib
   folly::init(&argc, &argv);
 
-  size_t initialSeed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
+  size_t initialSeed =
+      FLAGS_bolt_fuzzer_seed == 0 ? std::time(nullptr) : FLAGS_bolt_fuzzer_seed;
   return JoinFuzzerRunner::run(initialSeed);
 }

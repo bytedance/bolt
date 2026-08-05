@@ -20,8 +20,8 @@
 #include "bolt/benchmarks/ExpressionBenchmarkBuilder.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 
-DEFINE_int32(string_length, 50, "string length");
-DEFINE_double(null_ratio, 0.0, "null ratio");
+DEFINE_int32(bolt_benchmark_string_length, 50, "string length");
+DEFINE_double(bolt_benchmark_null_ratio, 0.0, "null ratio");
 using namespace bytedance;
 using namespace bytedance::bolt;
 
@@ -68,8 +68,8 @@ int main(int argc, char** argv) {
                MAP(VARCHAR(), VARCHAR())}))
       .withFuzzerOptions(
           {.vectorSize = 1000,
-           .nullRatio = FLAGS_null_ratio,
-           .stringLength = (size_t)FLAGS_string_length})
+           .nullRatio = FLAGS_bolt_benchmark_null_ratio,
+           .stringLength = (size_t)FLAGS_bolt_benchmark_string_length})
       .addExpression("i32", "hive_hash(i32)")
       .addExpression("i64", "hive_hash(i64)")
       .addExpression("f32", "hive_hash(f32)")

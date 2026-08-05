@@ -30,9 +30,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/dwio/dwrf/writer/IntegerDictionaryEncoder.h"
-
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 
 using namespace testing;
 using namespace bytedance::bolt::memory;

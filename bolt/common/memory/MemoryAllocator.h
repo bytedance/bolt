@@ -38,13 +38,12 @@
 #include <unordered_set>
 
 #include <fmt/format.h>
-#include <gflags/gflags.h>
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/time/Timer.h"
 
-DECLARE_bool(bolt_time_allocations);
 namespace bytedance::bolt::memory {
 
 struct SizeClassStats {

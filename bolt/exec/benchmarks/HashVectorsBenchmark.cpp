@@ -34,9 +34,11 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_int64(iterations, 1, "run count of each benchmark");
-DEFINE_string(keys, "", "keys to compare equal");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_int64(bolt_benchmark_iterations, 1, "run count of each benchmark");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::exec;
@@ -124,7 +126,7 @@ class HashVectorsBenchmark : public OperatorTestBase {
     VectorFuzzer::Options opts;
     opts.vectorSize = kRowsPerVector;
     opts.nullRatio = 0;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
     auto getDictVector = [&](TypePtr type) {
       int dictCount = rand() % kRowsPerVector;
@@ -271,12 +273,11 @@ class HashVectorsBenchmark : public OperatorTestBase {
 std::unique_ptr<HashVectorsBenchmark> benchmark;
 
 void doRun(uint32_t it, const std::string& keys) {
-  for (int i = 0; i < FLAGS_iterations; i++) {
+  for (int i = 0; i < FLAGS_bolt_benchmark_iterations; i++) {
     benchmark->run(keys);
   }
 }
 
-// BENCHMARK_NAMED_PARAM(doRun, hashVectorsBench, FLAGS_keys);
 BENCHMARK_NAMED_PARAM(doRun, hashVectorsBench_i8, "i8");
 BENCHMARK_NAMED_PARAM(doRun, hashVectorsBench_i16, "i16");
 BENCHMARK_NAMED_PARAM(doRun, hashVectorsBench_i32, "i32");

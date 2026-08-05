@@ -26,12 +26,15 @@
 #include "bolt/cudf/benchmarks/OrderBy.h"
 #include "bolt/tpch/gen/TpchGen.h"
 
-DEFINE_double(scaleFactor, 1, "The scale factor for an input data set");
+DEFINE_double(
+    bolt_benchmark_scale_factor,
+    1,
+    "The scale factor for an input data set");
 DEFINE_string(
-    opType,
+    bolt_benchmark_op_type,
     "",
     "The type of operation to run (available: orderby, aggregation)");
-DEFINE_int32(batchSize, 0, "Use batches for input data");
+DEFINE_int32(bolt_benchmark_batch_size, 0, "Use batches for input data");
 
 namespace bolt::cudf::benchmark {
 using CpuBenchmarkPtr = std::unique_ptr<BenchmarkBase<false>>;
@@ -89,16 +92,17 @@ int main(int argc, char** argv) {
   size_t totalUsedSize = 0;
   std::vector<bytedance::bolt::RowVectorPtr> batches;
   const bytedance::bolt::vector_size_t maxInputSize =
-      6'000'000 * FLAGS_scaleFactor;
+      6'000'000 * FLAGS_bolt_benchmark_scale_factor;
   const bytedance::bolt::vector_size_t batchSize =
-      FLAGS_batchSize == 0 ? maxInputSize : FLAGS_batchSize;
+      FLAGS_bolt_benchmark_batch_size == 0 ? maxInputSize
+                                           : FLAGS_bolt_benchmark_batch_size;
   for (auto offset = 0; offset < maxInputSize + batchSize;
        offset += batchSize) {
     auto batch = bytedance::bolt::tpch::genTpchLineItem(
         pool.get(),
         std::min(batchSize, maxInputSize - offset),
         offset,
-        FLAGS_scaleFactor,
+        FLAGS_bolt_benchmark_scale_factor,
         true);
     totalUsedSize += batch->usedSize();
     batches.emplace_back(std::move(batch));
@@ -109,14 +113,14 @@ int main(int argc, char** argv) {
             << std::endl;
 
   auto [cpuBenchmark, gpuBenchmark] = bolt::cudf::benchmark::createBenchmarks(
-      FLAGS_opType,
+      FLAGS_bolt_benchmark_op_type,
       std::make_shared<std::vector<bytedance::bolt::RowVectorPtr>>(batches));
 
   if (!cpuBenchmark || !gpuBenchmark) {
     fmt::print(
         stderr,
         "Error: Unsupported opType '{}'. Available types: orderby, aggregation.\n",
-        FLAGS_opType);
+        FLAGS_bolt_benchmark_op_type);
     return 1;
   }
 

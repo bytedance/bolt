@@ -29,11 +29,3 @@
  */
 
 #include "bolt/type/Conversions.h"
-
-DEFINE_bool(
-    experimental_enable_legacy_cast,
-    false,
-    "Experimental feature flag for backward compatibility with previous output"
-    " format of type conversions used for casting. This is a temporary solution"
-    " that aims to facilitate a seamless transition for users who rely on the"
-    " legacy behavior and hence can change in the future.");

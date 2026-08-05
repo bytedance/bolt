@@ -33,14 +33,16 @@
 
 #include <gflags/gflags.h>
 
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
-
-DEFINE_int64(fuzzer_seed, 1, "Seed for random input dataset generator");
-DEFINE_int32(slice_size, 512, "Slice size");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    1,
+    "Seed for random input dataset generator");
+DEFINE_int32(bolt_benchmark_slice_size, 512, "Slice size");
 DEFINE_bool(
-    use_thread_safe_memory_usage_track,
+    bolt_benchmark_use_thread_safe_memory_usage_track,
     false,
     "If true, use thread safe memory usage tracking");
 namespace bytedance::bolt {
@@ -52,11 +54,11 @@ struct BenchmarkData {
   BenchmarkData()
       : pool_(memory::memoryManager()->addLeafPool(
             "BenchmarkData",
-            FLAGS_use_thread_safe_memory_usage_track)) {
+            FLAGS_bolt_benchmark_use_thread_safe_memory_usage_track)) {
     VectorFuzzer::Options opts;
     opts.nullRatio = 0.01;
     opts.vectorSize = kVectorSize;
-    VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_bolt_benchmark_fuzzer_seed);
     flatVector = fuzzer.fuzzFlat(BIGINT());
     arrayVector = fuzzer.fuzzFlat(ARRAY(BIGINT()));
     mapVector = fuzzer.fuzzFlat(MAP(BIGINT(), BIGINT()));
@@ -83,9 +85,9 @@ std::unique_ptr<BenchmarkData> data;
 
 int runSlice(const BaseVector& vec, vector_size_t offset) {
   int count = 0;
-  for (int i = offset; i + FLAGS_slice_size < vec.size();
-       i += FLAGS_slice_size) {
-    auto slice = vec.slice(i, FLAGS_slice_size);
+  for (int i = offset; i + FLAGS_bolt_benchmark_slice_size < vec.size();
+       i += FLAGS_bolt_benchmark_slice_size) {
+    auto slice = vec.slice(i, FLAGS_bolt_benchmark_slice_size);
     folly::doNotOptimizeAway(slice);
     ++count;
   }
@@ -94,9 +96,11 @@ int runSlice(const BaseVector& vec, vector_size_t offset) {
 
 int runCopy(const BaseVector& vec) {
   int count = 0;
-  for (int i = 0; i + FLAGS_slice_size < vec.size(); i += FLAGS_slice_size) {
-    auto copy = BaseVector::create(vec.type(), FLAGS_slice_size, vec.pool());
-    copy->copy(&vec, 0, i, FLAGS_slice_size);
+  for (int i = 0; i + FLAGS_bolt_benchmark_slice_size < vec.size();
+       i += FLAGS_bolt_benchmark_slice_size) {
+    auto copy = BaseVector::create(
+        vec.type(), FLAGS_bolt_benchmark_slice_size, vec.pool());
+    copy->copy(&vec, 0, i, FLAGS_bolt_benchmark_slice_size);
     folly::doNotOptimizeAway(copy);
     ++count;
   }
@@ -127,7 +131,7 @@ int main(int argc, char* argv[]) {
   folly::init(&argc, &argv);
   using namespace bytedance::bolt;
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  BOLT_CHECK_LE(FLAGS_slice_size, kVectorSize);
+  BOLT_CHECK_LE(FLAGS_bolt_benchmark_slice_size, kVectorSize);
   memory::MemoryManager::initialize(memory::MemoryManager::Options{});
   data = std::make_unique<BenchmarkData>();
   folly::runBenchmarks();

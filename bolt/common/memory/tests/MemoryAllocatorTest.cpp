@@ -31,6 +31,7 @@
 #include "bolt/common/memory/MemoryAllocator.h"
 #include <thread>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/AllocationPool.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/MmapAllocator.h"
@@ -46,7 +47,6 @@
 #include <gtest/gtest.h>
 #include <fstream>
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
 using namespace bytedance::bolt::common::testutil;
 namespace bytedance::bolt::memory {
 namespace {

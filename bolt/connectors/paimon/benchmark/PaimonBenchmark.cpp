@@ -64,20 +64,26 @@ using bytedance::bolt::connector::paimon::PaimonConnectorFactory;
 using bytedance::bolt::connector::paimon::PaimonConnectorSplit;
 using bytedance::bolt::connector::paimon::PaimonTableHandle;
 
-DEFINE_string(data_path, "", "Path to the benchmark warehouse directory");
 DEFINE_string(
-    benchmark_tables,
+    bolt_benchmark_data_path,
+    "",
+    "Path to the benchmark warehouse directory");
+DEFINE_string(
+    bolt_benchmark_tables,
     "append_only,aggregate,partial_update,deduplicate",
     "Comma separated list of tables to benchmark");
 DEFINE_double(
-    scale_factor,
+    bolt_benchmark_scale_factor,
     1.0,
     "Scale factor used to pick benchmark database name (sfX)");
 DEFINE_string(
-    db_name,
+    bolt_benchmark_db_name,
     "",
     "Override benchmark database name (defaults to benchmark_db_sf{scale_factor})");
-DEFINE_int32(num_runs, 10, "Number of runs per benchmark iteration");
+DEFINE_int32(
+    bolt_benchmark_num_runs,
+    10,
+    "Number of runs per benchmark iteration");
 
 namespace {
 
@@ -111,10 +117,10 @@ class PaimonBenchmark : public QueryBenchmarkBase {
       const std::string& connectorName) {
     folly::BenchmarkSuspender suspender;
     auto databaseBaseName = [&]() {
-      if (!FLAGS_db_name.empty()) {
-        return FLAGS_db_name;
+      if (!FLAGS_bolt_benchmark_db_name.empty()) {
+        return FLAGS_bolt_benchmark_db_name;
       }
-      auto sf = FLAGS_scale_factor;
+      auto sf = FLAGS_bolt_benchmark_scale_factor;
       // Build "benchmark_db_sf{sf}"
       std::string suffix;
       if (static_cast<double>(static_cast<int64_t>(sf)) == sf) {
@@ -129,7 +135,7 @@ class PaimonBenchmark : public QueryBenchmarkBase {
       return std::string("benchmark_db_sf") + suffix;
     }();
 
-    auto dbPath = std::filesystem::path(FLAGS_data_path) /
+    auto dbPath = std::filesystem::path(FLAGS_bolt_benchmark_data_path) /
         (databaseBaseName + ".db") / tableName;
     std::string tablePath = "file:" + dbPath.string();
 
@@ -313,15 +319,15 @@ class PaimonBenchmark : public QueryBenchmarkBase {
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
 
-  if (FLAGS_data_path.empty()) {
-    LOG(FATAL) << "--data_path is required";
+  if (FLAGS_bolt_benchmark_data_path.empty()) {
+    LOG(FATAL) << "--bolt_benchmark_data_path is required";
   }
 
   PaimonBenchmark benchmark;
   benchmark.initialize();
 
   std::vector<std::string> tables;
-  std::stringstream ss(FLAGS_benchmark_tables);
+  std::stringstream ss(FLAGS_bolt_benchmark_tables);
   std::string table;
   while (std::getline(ss, table, ',')) {
     tables.push_back(table);
@@ -330,7 +336,7 @@ int main(int argc, char** argv) {
   for (const auto& t : tables) {
     folly::addBenchmark(__FILE__, "hive_" + t, [&benchmark, t]() {
       size_t total = 0;
-      for (int i = 0; i < FLAGS_num_runs; ++i) {
+      for (int i = 0; i < FLAGS_bolt_benchmark_num_runs; ++i) {
         total += PaimonBenchmark::runBenchmark(t, "hive");
       }
       // Return total rows processed so folly accounts for work
@@ -338,7 +344,7 @@ int main(int argc, char** argv) {
     });
     folly::addBenchmark(__FILE__, "paimon_" + t, [&benchmark, t]() {
       size_t total = 0;
-      for (int i = 0; i < FLAGS_num_runs; ++i) {
+      for (int i = 0; i < FLAGS_bolt_benchmark_num_runs; ++i) {
         total += PaimonBenchmark::runBenchmark(t, "paimon");
       }
       return total;

@@ -37,16 +37,11 @@
 #include <folly/FixedString.h>
 #include <folly/String.h>
 #include <folly/synchronization/CallOnce.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/process/StackTrace.h"
 
-DECLARE_bool(bolt_exception_user_stacktrace_enabled);
-DECLARE_bool(bolt_exception_system_stacktrace_enabled);
-
-DECLARE_int32(bolt_exception_user_stacktrace_rate_limit_ms);
-DECLARE_int32(bolt_exception_system_stacktrace_rate_limit_ms);
 namespace bytedance {
 namespace bolt {
 
