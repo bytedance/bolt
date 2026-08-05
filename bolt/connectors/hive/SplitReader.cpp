@@ -41,6 +41,7 @@
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
 #include "bolt/type/Conversions.h"
+#include "bolt/type/filter/MapSubscriptFilter.h"
 
 namespace bytedance::bolt::connector::hive {
 
@@ -104,6 +105,91 @@ bool applyPartitionFilter(
     default:
       BOLT_FAIL("Bad type {} for partition value: {}", kind, partitionValue);
       break;
+  }
+}
+
+void checkFloatingPointToVarcharFilterCompatibility(
+    const TypePtr& fileType,
+    const TypePtr& requestedType,
+    const common::Filter* filter,
+    const std::string& path) {
+  if ((fileType->isReal() || fileType->isDouble()) &&
+      requestedType->isVarchar()) {
+    if (filter && !filter->isValueIndependent()) {
+      BOLT_USER_FAIL(
+          "Cannot apply VARCHAR filter to physical {} Parquet column {}",
+          fileType->kindName(),
+          path);
+    }
+  }
+}
+
+void checkFloatingPointToVarcharFilter(
+    const TypePtr& fileType,
+    const TypePtr& requestedType,
+    const common::ScanSpec& scanSpec,
+    const std::string& path) {
+  auto* filter = scanSpec.filter();
+  checkFloatingPointToVarcharFilterCompatibility(
+      fileType, requestedType, filter, path);
+  if ((fileType->isReal() || fileType->isDouble()) &&
+      requestedType->isVarchar()) {
+    return;
+  }
+  if (fileType->kind() != requestedType->kind()) {
+    return;
+  }
+
+  if (fileType->isMap() && filter &&
+      filter->kind() == common::FilterKind::kMapSubscript) {
+    const auto* mapFilter =
+        dynamic_cast<const common::MapSubscriptFilter*>(filter);
+    BOLT_CHECK_NOT_NULL(mapFilter);
+    const auto keyPath = path.empty()
+        ? common::ScanSpec::kMapKeysFieldName
+        : path + "." + common::ScanSpec::kMapKeysFieldName;
+    checkFloatingPointToVarcharFilterCompatibility(
+        fileType->childAt(0),
+        requestedType->childAt(0),
+        mapFilter->keyFilter(),
+        keyPath);
+    const auto valuePath = path.empty()
+        ? common::ScanSpec::kMapValuesFieldName
+        : path + "." + common::ScanSpec::kMapValuesFieldName;
+    checkFloatingPointToVarcharFilterCompatibility(
+        fileType->childAt(1),
+        requestedType->childAt(1),
+        mapFilter->valueFilter(),
+        valuePath);
+  }
+
+  for (const auto& child : scanSpec.children()) {
+    std::optional<uint32_t> fileChildIndex;
+    std::optional<uint32_t> requestedChildIndex;
+    if (fileType->isRow()) {
+      fileChildIndex =
+          fileType->asRow().getChildIdxIfExists(child->fieldName());
+      requestedChildIndex =
+          requestedType->asRow().getChildIdxIfExists(child->fieldName());
+      if (!fileChildIndex || !requestedChildIndex) {
+        continue;
+      }
+    } else if (fileType->isArray()) {
+      fileChildIndex = requestedChildIndex = 0;
+    } else if (fileType->isMap()) {
+      fileChildIndex = requestedChildIndex =
+          child->fieldName() == common::ScanSpec::kMapKeysFieldName ? 0 : 1;
+    } else {
+      continue;
+    }
+
+    const auto childPath =
+        path.empty() ? child->fieldName() : path + "." + child->fieldName();
+    checkFloatingPointToVarcharFilter(
+        fileType->childAt(*fileChildIndex),
+        requestedType->childAt(*requestedChildIndex),
+        *child,
+        childPath);
   }
 }
 
@@ -295,6 +381,10 @@ void SplitReader::prepareSplit(
     throw std::runtime_error(
         FLAGS_testing_only_set_scan_exception_mesg_for_prepare);
   }
+
+  validateFloatingPointToVarcharFilters();
+  baseRowReaderOpts_.setDisableFloatingPointToVarcharMetadataFilter(
+      !isPartOfPaimonSplit_);
 
   // Note that this doesn't apply to Hudi tables.
   emptySplit_ = false;
@@ -562,9 +652,22 @@ void SplitReader::populatePaimonMetadataColumns(VectorPtr& output) {
 }
 
 void SplitReader::resetFilterCaches() {
+  validateFloatingPointToVarcharFilters();
   if (baseRowReader_) {
     baseRowReader_->resetFilterCaches();
   }
+}
+
+void SplitReader::validateFloatingPointToVarcharFilters() const {
+  if (isPartOfPaimonSplit_ || !baseReader_ ||
+      baseReaderOpts_.getFileFormat() != dwio::common::FileFormat::PARQUET) {
+    return;
+  }
+  const auto requestedType = hiveTableHandle_->dataColumns()
+      ? hiveTableHandle_->dataColumns()
+      : readerOutputType_;
+  checkFloatingPointToVarcharFilter(
+      baseReader_->rowType(), requestedType, *scanSpec_, "");
 }
 
 bool SplitReader::emptySplit() const {

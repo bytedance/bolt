@@ -297,6 +297,10 @@ class PageReader {
       const thrift::PageHeader& pageHeader,
       int64_t row,
       const bool keepRepDefRawData);
+  bool tryPrepareDataPageV1RepDefOnly(
+      const thrift::PageHeader& pageHeader,
+      int32_t compressedLen,
+      const bool keepRepDefRawData);
   void prepareDataPageV2(
       const thrift::PageHeader& pageHeader,
       int64_t row,

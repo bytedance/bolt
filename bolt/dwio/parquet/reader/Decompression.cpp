@@ -25,6 +25,7 @@
 #include "bolt/dwio/parquet/reader/ParquetReaderUtil.h"
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
 
+#include <folly/ScopeGuard.h>
 #include <lz4.h>
 #include <zstd.h>
 
@@ -33,6 +34,120 @@ namespace bytedance::bolt::parquet {
 static inline std::uint32_t reverse_bytes(std::uint32_t i) {
   return (i & 0xff000000u) >> 24 | (i & 0x00ff0000u) >> 8 |
       (i & 0x0000ff00u) << 8 | (i & 0x000000ffu) << 24;
+}
+
+char* FOLLY_NONNULL ensurePrefixOutputCapacity(
+    BufferPtr& buffer,
+    uint32_t required,
+    uint32_t uncompressedSize,
+    uint32_t& outputSize) {
+  if (required > outputSize) {
+    auto nextSize = std::min<uint32_t>(
+        uncompressedSize,
+        std::max<uint32_t>(required, std::max<uint32_t>(outputSize * 2, 4096)));
+    AlignedBuffer::reallocate<char>(&buffer, nextSize);
+    outputSize = buffer->capacity();
+  }
+  return buffer->asMutable<char>();
+}
+
+bool tryDecompressZstdFramePrefix(
+    const char* compressedData,
+    BufferPtr& decompressedData,
+    uint32_t compressedSize,
+    uint32_t uncompressedSize,
+    uint32_t outputQuantum,
+    uint32_t& outputSize,
+    const std::function<bool(const char*, uint32_t)>& isPrefixReady,
+    const char*& prefixData) {
+  ZSTD_DStream* stream = ZSTD_createDStream();
+  if (stream == nullptr) {
+    return false;
+  }
+  auto streamGuard = folly::makeGuard([&]() { ZSTD_freeDStream(stream); });
+  auto ret = ZSTD_initDStream(stream);
+  if (ZSTD_isError(ret)) {
+    return false;
+  }
+
+  auto* output = decompressedData->asMutable<char>();
+  uint32_t produced = 0;
+  ZSTD_inBuffer input{compressedData, static_cast<size_t>(compressedSize), 0};
+  while (input.pos < input.size) {
+    const auto nextOutputEnd =
+        std::min<uint32_t>(uncompressedSize, produced + outputQuantum);
+    output = ensurePrefixOutputCapacity(
+        decompressedData, nextOutputEnd, uncompressedSize, outputSize);
+    ZSTD_outBuffer out{
+        output + produced, static_cast<size_t>(nextOutputEnd - produced), 0};
+    ret = ZSTD_decompressStream(stream, &out, &input);
+    if (ZSTD_isError(ret)) {
+      return false;
+    }
+    produced += out.pos;
+    if (isPrefixReady(output, produced)) {
+      prefixData = output;
+      return true;
+    }
+    if (produced >= uncompressedSize || out.pos == 0) {
+      break;
+    }
+  }
+  return false;
+}
+
+bool tryDecompressZstdBlockPrefix(
+    const char* compressedData,
+    BufferPtr& decompressedData,
+    uint32_t compressedSize,
+    uint32_t uncompressedSize,
+    uint32_t& outputSize,
+    const std::function<bool(const char*, uint32_t)>& isPrefixReady,
+    const char*& prefixData) {
+  auto* output = decompressedData->asMutable<char>();
+  uint32_t produced = 0;
+  uint32_t inputOffset = 0;
+  uint32_t cumulativeUncompressedBlockLength = 0;
+  while (produced < uncompressedSize) {
+    if (produced == cumulativeUncompressedBlockLength) {
+      if (inputOffset + sizeof(uint32_t) > compressedSize) {
+        return false;
+      }
+      cumulativeUncompressedBlockLength += folly::Endian::big(
+          folly::loadUnaligned<uint32_t>(compressedData + inputOffset));
+      inputOffset += sizeof(uint32_t);
+    }
+    if (inputOffset + sizeof(uint32_t) > compressedSize) {
+      return false;
+    }
+    const auto compressedChunkLength = folly::Endian::big(
+        folly::loadUnaligned<uint32_t>(compressedData + inputOffset));
+    inputOffset += sizeof(uint32_t);
+    if (inputOffset + compressedChunkLength > compressedSize) {
+      return false;
+    }
+
+    output = ensurePrefixOutputCapacity(
+        decompressedData,
+        cumulativeUncompressedBlockLength,
+        uncompressedSize,
+        outputSize);
+    const auto decompressedSize = ZSTD_decompress(
+        output + produced,
+        outputSize - produced,
+        compressedData + inputOffset,
+        compressedChunkLength);
+    if (ZSTD_isError(decompressedSize)) {
+      return false;
+    }
+    produced += decompressedSize;
+    inputOffset += compressedChunkLength;
+    if (isPrefixReady(output, produced)) {
+      prefixData = output;
+      return true;
+    }
+  }
+  return false;
 }
 
 const char* FOLLY_NONNULL decompressLz4AndLzo(
@@ -219,5 +334,45 @@ const char* FOLLY_NONNULL bdZstdDecompression(
     BOLT_CHECK_EQ(outputOffset, uncompressedSize);
   }
   return decompressedData->as<char>();
+}
+
+bool tryDecompressZstdPrefix(
+    const char* compressedData,
+    BufferPtr& decompressedData,
+    uint32_t compressedSize,
+    uint32_t uncompressedSize,
+    uint32_t outputQuantum,
+    memory::MemoryPool& pool,
+    const std::function<bool(const char* data, uint32_t availableSize)>&
+        isPrefixReady,
+    const char*& prefixData) {
+  BOLT_CHECK_GT(compressedSize, 4, "Not enough input bytes");
+  dwio::common::ensureCapacity<char>(
+      decompressedData,
+      std::min<uint32_t>(uncompressedSize, outputQuantum),
+      &pool);
+  auto outputSize = static_cast<uint32_t>(decompressedData->capacity());
+
+  // Handle both regular ZSTD frames and the Hadoop-style block framing used by
+  // some Parquet writers.
+  if (folly::loadUnaligned<uint32_t>(compressedData) == ZSTD_MAGICNUMBER) {
+    return tryDecompressZstdFramePrefix(
+        compressedData,
+        decompressedData,
+        compressedSize,
+        uncompressedSize,
+        outputQuantum,
+        outputSize,
+        isPrefixReady,
+        prefixData);
+  }
+  return tryDecompressZstdBlockPrefix(
+      compressedData,
+      decompressedData,
+      compressedSize,
+      uncompressedSize,
+      outputSize,
+      isPrefixReady,
+      prefixData);
 }
 } // namespace bytedance::bolt::parquet

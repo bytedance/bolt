@@ -49,17 +49,19 @@
 namespace bytedance::bolt::parquet {
 
 /* type matching restriction, only allow following type convert
- * real -> real/double
- * double -> double
+ * real -> real/double/varchar
+ * double -> double/varchar
  * varchar/varbinary -> varchar/varbinary
  * timestamp -> timestamp
  */
 bool matchType(TypeKind schemaType, TypeKind requestType) {
   switch (schemaType) {
     case TypeKind::REAL:
-      return requestType == TypeKind::REAL || requestType == TypeKind::DOUBLE;
+      return requestType == TypeKind::REAL || requestType == TypeKind::DOUBLE ||
+          requestType == TypeKind::VARCHAR;
     case TypeKind::DOUBLE:
-      return requestType == TypeKind::DOUBLE;
+      return requestType == TypeKind::DOUBLE ||
+          requestType == TypeKind::VARCHAR;
     case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
       if (requestType == TypeKind::VARCHAR ||
@@ -110,7 +112,10 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::REAL:
-      if (requestedType->type()->kind() == TypeKind::REAL) {
+      if (requestedType->type()->kind() == TypeKind::VARCHAR) {
+        return std::make_unique<FloatingPointColumnReader<float, float>>(
+            requestedType->type(), fileType, params, scanSpec, REAL());
+      } else if (requestedType->type()->kind() == TypeKind::REAL) {
         return std::make_unique<FloatingPointColumnReader<float, float>>(
             requestedType->type(), fileType, params, scanSpec);
       } else {
@@ -118,6 +123,10 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
             requestedType->type(), fileType, params, scanSpec);
       }
     case TypeKind::DOUBLE:
+      if (requestedType->type()->kind() == TypeKind::VARCHAR) {
+        return std::make_unique<FloatingPointColumnReader<double, double>>(
+            requestedType->type(), fileType, params, scanSpec, DOUBLE());
+      }
       return std::make_unique<FloatingPointColumnReader<double, double>>(
           requestedType->type(), fileType, params, scanSpec);
 

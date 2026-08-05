@@ -28,11 +28,13 @@
  * --------------------------------------------------------------------------
  */
 
+#include <folly/lang/Bits.h>
 #include <lz4.h>
 #include <thrift/protocol/TCompactProtocol.h> // @manual
-#include <zstd.h>
-#include <zstd_errors.h>
+#include <algorithm>
 
+#include "bolt/common/base/SimdUtil.h"
+#include "bolt/common/time/Timer.h"
 #include "bolt/dwio/common/BufferUtil.h"
 #include "bolt/dwio/common/ColumnVisitors.h"
 #include "bolt/dwio/parquet/reader/Decompression.h"
@@ -48,6 +50,163 @@ namespace bytedance::bolt::parquet {
 
 using thrift::Encoding;
 using thrift::PageHeader;
+
+namespace {
+constexpr uint32_t kRepDefPrefixOutputQuantum = 4096;
+
+struct DataPageV1RepDefs {
+  const char* FOLLY_NONNULL data;
+  uint32_t size;
+  const char* FOLLY_NULLABLE repeatData{nullptr};
+  uint32_t repeatSize{0};
+  const char* FOLLY_NULLABLE defineData{nullptr};
+  uint32_t defineSize{0};
+};
+
+uint32_t readUint32(const char* FOLLY_NONNULL& data) {
+  const auto value = folly::loadUnaligned<uint32_t>(data);
+  data += sizeof(uint32_t);
+  return value;
+}
+
+bool tryReadDataPageV1Level(
+    const char* FOLLY_NONNULL start,
+    uint32_t availableSize,
+    uint32_t pageBodySize,
+    const char* FOLLY_NONNULL& data,
+    const char* FOLLY_NULLABLE& levelData,
+    uint32_t& levelSize) {
+  if (availableSize < data - start + sizeof(uint32_t)) {
+    return false;
+  }
+  levelSize = readUint32(data);
+  BOLT_CHECK_LE(
+      data - start,
+      pageBodySize,
+      "Parquet V1 rep/def level length header exceeds page body size {}",
+      pageBodySize);
+  BOLT_CHECK_LE(
+      levelSize,
+      pageBodySize - static_cast<uint32_t>(data - start),
+      "Parquet V1 rep/def level length {} exceeds page body size {} at offset {}",
+      levelSize,
+      pageBodySize,
+      data - start);
+  if (availableSize < data - start + levelSize) {
+    return false;
+  }
+  levelData = data;
+  data += levelSize;
+  return true;
+}
+
+bool tryReadDataPageV1RepDefs(
+    const char* FOLLY_NONNULL data,
+    uint32_t availableSize,
+    uint32_t pageBodySize,
+    int32_t maxRepeat,
+    int32_t maxDefine,
+    DataPageV1RepDefs& repDefs) {
+  const char* start = data;
+  if (maxRepeat > 0) {
+    if (!tryReadDataPageV1Level(
+            start,
+            availableSize,
+            pageBodySize,
+            data,
+            repDefs.repeatData,
+            repDefs.repeatSize)) {
+      return false;
+    }
+  }
+  if (maxDefine > 0) {
+    if (!tryReadDataPageV1Level(
+            start,
+            availableSize,
+            pageBodySize,
+            data,
+            repDefs.defineData,
+            repDefs.defineSize)) {
+      return false;
+    }
+  }
+  repDefs.data = start;
+  repDefs.size = static_cast<uint32_t>(data - start);
+  return true;
+}
+
+bool hasDataPageV1RepDefPrefix(
+    const char* FOLLY_NONNULL data,
+    uint32_t availableSize,
+    uint32_t pageBodySize,
+    int32_t maxRepeat,
+    int32_t maxDefine,
+    DataPageV1RepDefs& repDefs) {
+  // Used while streaming partial output: returns true only after the full V1
+  // rep/def prefix is available. Required/top-level pages may have no rep/def
+  // prefix, but those cannot use this fast path.
+  return tryReadDataPageV1RepDefs(
+             data,
+             availableSize,
+             pageBodySize,
+             maxRepeat,
+             maxDefine,
+             repDefs) &&
+      repDefs.size > 0;
+}
+
+DataPageV1RepDefs readDataPageV1RepDefs(
+    const char* FOLLY_NONNULL& data,
+    uint32_t availableSize,
+    int32_t maxRepeat,
+    int32_t maxDefine) {
+  DataPageV1RepDefs repDefs;
+  BOLT_CHECK(tryReadDataPageV1RepDefs(
+      data, availableSize, availableSize, maxRepeat, maxDefine, repDefs));
+  data += repDefs.size;
+  return repDefs;
+}
+
+void copyRawDataPageV1RepDefs(
+    int32_t numRepDefsInPage,
+    DataPageV1RepDefs repDefs,
+    raw_vector<char>& output) {
+  constexpr int32_t kLenSize = sizeof(int32_t);
+  auto offset = output.size();
+  output.resize(offset + repDefs.size + kLenSize);
+  BOLT_CHECK_GT(repDefs.size, 0);
+  *(reinterpret_cast<int32_t*>(output.data() + offset)) = numRepDefsInPage;
+  simd::memcpy(output.data() + offset + kLenSize, repDefs.data, repDefs.size);
+}
+
+void makeDataPageV1RepDefDecoders(
+    DataPageV1RepDefs repDefs,
+    int32_t maxRepeat,
+    int32_t maxDefine,
+    std::unique_ptr<::arrow::util::RleDecoder>& repeatDecoder,
+    std::unique_ptr<RleBpDecoder>& defineDecoder,
+    std::unique_ptr<::arrow::util::RleDecoder>& wideDefineDecoder) {
+  if (maxRepeat > 0) {
+    repeatDecoder = std::make_unique<::arrow::util::RleDecoder>(
+        reinterpret_cast<const uint8_t*>(repDefs.repeatData),
+        repDefs.repeatSize,
+        ::arrow::bit_util::NumRequiredBits(maxRepeat));
+  }
+
+  if (maxDefine > 0) {
+    if (maxDefine == 1) {
+      defineDecoder = std::make_unique<RleBpDecoder>(
+          repDefs.defineData,
+          repDefs.defineData + repDefs.defineSize,
+          ::arrow::bit_util::NumRequiredBits(maxDefine));
+    }
+    wideDefineDecoder = std::make_unique<::arrow::util::RleDecoder>(
+        reinterpret_cast<const uint8_t*>(repDefs.defineData),
+        repDefs.defineSize,
+        ::arrow::bit_util::NumRequiredBits(maxDefine));
+  }
+}
+} // namespace
 
 void PageReader::seekToPage(int64_t row, bool keepRepDefRawData) {
   defineDecoder_.reset();
@@ -365,62 +524,29 @@ void PageReader::prepareDataPageV1(
   if (cryptoCtx_.dataDecryptor != nullptr) {
     decryptPageData(compressedLen);
   }
+  if (row == kRepDefOnly &&
+      tryPrepareDataPageV1RepDefOnly(
+          pageHeader, compressedLen, keepRepDefRawData)) {
+    return;
+  }
   pageData_ = decompressData(
       pageData_, compressedLen, pageHeader.uncompressed_page_size);
   auto pageEnd = pageData_ + pageHeader.uncompressed_page_size;
 
-  // copy rep/def to preloadedRepDefs_, do not decode
+  const auto repDefs = readDataPageV1RepDefs(
+      pageData_, pageHeader.uncompressed_page_size, maxRepeat_, maxDefine_);
+  totalRefDefBytes_ += repDefs.size;
   if (row == kRepDefOnly && keepRepDefRawData) {
-    constexpr int32_t kLenSize = sizeof(int32_t);
-    auto repDefStart = pageData_;
-    auto startBytes = totalRefDefBytes_;
-    if (maxRepeat_ > 0) {
-      uint32_t repeatLength = readField<int32_t>(pageData_);
-      pageData_ += repeatLength;
-      totalRefDefBytes_ += repeatLength + kLenSize;
-    }
-    if (maxDefine_ > 0) {
-      auto defineLength = readField<uint32_t>(pageData_);
-      pageData_ += defineLength;
-      totalRefDefBytes_ += defineLength + kLenSize;
-    }
-    auto repDefLen = totalRefDefBytes_ - startBytes;
-    auto& refDefData = preloadedRepDefs_.back();
-    auto offset = refDefData.size();
-    // 4 more bytes for numRepDefsInPage_
-    auto totalSize = offset + repDefLen + kLenSize;
-    refDefData.resize(totalSize);
-    BOLT_CHECK(repDefLen > 0);
-    *(reinterpret_cast<int32_t*>(refDefData.data() + offset)) =
-        numRepDefsInPage_;
-    simd::memcpy(refDefData.data() + offset + kLenSize, repDefStart, repDefLen);
+    copyRawDataPageV1RepDefs(
+        numRepDefsInPage_, repDefs, preloadedRepDefs_.back());
   } else {
-    if (maxRepeat_ > 0) {
-      uint32_t repeatLength = readField<int32_t>(pageData_);
-      repeatDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
-          reinterpret_cast<const uint8_t*>(pageData_),
-          repeatLength,
-          ::arrow::bit_util::NumRequiredBits(maxRepeat_));
-
-      pageData_ += repeatLength;
-      totalRefDefBytes_ += repeatLength + sizeof(int32_t);
-    }
-
-    if (maxDefine_ > 0) {
-      auto defineLength = readField<uint32_t>(pageData_);
-      if (maxDefine_ == 1) {
-        defineDecoder_ = std::make_unique<RleBpDecoder>(
-            pageData_,
-            pageData_ + defineLength,
-            ::arrow::bit_util::NumRequiredBits(maxDefine_));
-      }
-      wideDefineDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
-          reinterpret_cast<const uint8_t*>(pageData_),
-          defineLength,
-          ::arrow::bit_util::NumRequiredBits(maxDefine_));
-      pageData_ += defineLength;
-      totalRefDefBytes_ += defineLength + sizeof(uint32_t);
-    }
+    makeDataPageV1RepDefDecoders(
+        repDefs,
+        maxRepeat_,
+        maxDefine_,
+        repeatDecoder_,
+        defineDecoder_,
+        wideDefineDecoder_);
   }
   encodedDataSize_ = pageEnd - pageData_;
 
@@ -432,6 +558,87 @@ void PageReader::prepareDataPageV1(
   if (row != kRepDefOnly) {
     makeDecoder();
   }
+}
+
+bool PageReader::tryPrepareDataPageV1RepDefOnly(
+    const PageHeader& pageHeader,
+    int32_t compressedLen,
+    const bool keepRepDefRawData) {
+  const char* compressedData = pageData_;
+  const auto uncompressedSize =
+      static_cast<uint32_t>(pageHeader.uncompressed_page_size);
+  DataPageV1RepDefs repDefPrefix;
+
+  if (codec_ == thrift::CompressionCodec::UNCOMPRESSED) {
+    if (!hasDataPageV1RepDefPrefix(
+            compressedData,
+            compressedLen,
+            uncompressedSize,
+            maxRepeat_,
+            maxDefine_,
+            repDefPrefix)) {
+      return false;
+    }
+    pageData_ = compressedData;
+  } else {
+    // Only ZSTD supports stopping after the rep/def prefix. Other codecs fall
+    // back to the normal full-page decompression path.
+    if (codec_ != thrift::CompressionCodec::ZSTD || compressedLen <= 4) {
+      return false;
+    }
+
+    const auto startNs =
+        FOLLY_LIKELY(statis_ != nullptr) ? getCurrentTimeNano() : 0;
+    if (!tryDecompressZstdPrefix(
+            compressedData,
+            decompressedData_,
+            compressedLen,
+            uncompressedSize,
+            kRepDefPrefixOutputQuantum,
+            pool_,
+            [&](const char* data, uint32_t availableSize) {
+              return hasDataPageV1RepDefPrefix(
+                  data,
+                  availableSize,
+                  uncompressedSize,
+                  maxRepeat_,
+                  maxDefine_,
+                  repDefPrefix);
+            },
+            pageData_)) {
+      return false;
+    }
+    if (FOLLY_LIKELY(statis_ != nullptr)) {
+      statis_->decompressDataTimeNs += getCurrentTimeNano() - startNs;
+    }
+  }
+
+  const auto repDefs = readDataPageV1RepDefs(
+      pageData_, uncompressedSize, maxRepeat_, maxDefine_);
+  totalRefDefBytes_ += repDefs.size;
+  if (keepRepDefRawData) {
+    copyRawDataPageV1RepDefs(
+        numRepDefsInPage_, repDefs, preloadedRepDefs_.back());
+  } else {
+    makeDataPageV1RepDefDecoders(
+        repDefs,
+        maxRepeat_,
+        maxDefine_,
+        repeatDecoder_,
+        defineDecoder_,
+        wideDefineDecoder_);
+  }
+  encodedDataSize_ = pageHeader.uncompressed_page_size - repDefPrefix.size;
+  encoding_ = pageHeader.data_page_header.encoding;
+
+  BOLT_CHECK_EQ(repDefs.size, repDefPrefix.size);
+  if (!keepRepDefRawData) {
+    if (!hasChunkRepDefs_ &&
+        (numRowsInPage_ == kRowsUnknown || maxDefine_ > 1)) {
+      readPageDefLevels();
+    }
+  }
+  return true;
 }
 
 void PageReader::prepareDataPageV2(

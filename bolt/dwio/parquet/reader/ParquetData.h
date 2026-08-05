@@ -59,6 +59,8 @@ class ParquetParams : public dwio::common::FormatParams {
       TimestampPrecision timestampPrecision,
       const std::shared_ptr<InternalFileDecryptor>& fileDecryptor,
       const SchemaHelper& schemaHelper,
+      bool enableMetadataFilter,
+      bool disableFloatingPointToVarcharMetadataFilter,
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
       int32_t parquetRepDefMemoryLimit)
@@ -67,6 +69,9 @@ class ParquetParams : public dwio::common::FormatParams {
         timestampPrecision_(timestampPrecision),
         fileDecryptor_(fileDecryptor),
         schemaHelper_(schemaHelper),
+        enableMetadataFilter_(enableMetadataFilter),
+        disableFloatingPointToVarcharMetadataFilter_(
+            disableFloatingPointToVarcharMetadataFilter),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
         parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {}
@@ -83,11 +88,17 @@ class ParquetParams : public dwio::common::FormatParams {
     return enableDictionaryFilter_;
   }
 
+  bool disableFloatingPointToVarcharMetadataFilter() const {
+    return disableFloatingPointToVarcharMetadataFilter_;
+  }
+
  private:
   const thrift::FileMetaData& metaData_;
   const TimestampPrecision timestampPrecision_;
   const std::shared_ptr<InternalFileDecryptor>& fileDecryptor_;
   const SchemaHelper& schemaHelper_;
+  const bool enableMetadataFilter_;
+  const bool disableFloatingPointToVarcharMetadataFilter_;
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
   const int32_t parquetRepDefMemoryLimit_;
@@ -103,6 +114,7 @@ class ParquetData : public dwio::common::FormatData {
       const std::shared_ptr<InternalFileDecryptor>& fileDecryptor,
       dwio::common::RuntimeStatistics* statis,
       const SchemaHelper& schemaHelper,
+      bool enableMetadataFilter,
       bool enableDictionaryFilter,
       int32_t decodeRepDefPageCount,
       int32_t parquetRepDefMemoryLimit)
@@ -115,6 +127,7 @@ class ParquetData : public dwio::common::FormatData {
         fileDecryptor_(fileDecryptor),
         statis_(statis),
         schemaHelper_(schemaHelper),
+        enableMetadataFilter_(enableMetadataFilter),
         enableDictionaryFilter_(enableDictionaryFilter),
         decodeRepDefPageCount_(decodeRepDefPageCount),
         parquetRepDefMemoryLimit_(parquetRepDefMemoryLimit) {
@@ -140,6 +153,10 @@ class ParquetData : public dwio::common::FormatData {
       const dwio::common::StatsContext& writerContext,
       FilterRowGroupsResult&,
       dwio::common::BufferedInput& input) override;
+
+  void disableTypeDependentMetadataFilters() {
+    typeDependentMetadataFiltersEnabled_ = false;
+  }
 
   PageReader* FOLLY_NONNULL reader() const {
     return reader_.get();
@@ -329,6 +346,8 @@ class ParquetData : public dwio::common::FormatData {
 
   dwio::common::RuntimeStatistics* statis_{nullptr};
   const SchemaHelper& schemaHelper_;
+  const bool enableMetadataFilter_;
+  bool typeDependentMetadataFiltersEnabled_{true};
   const bool enableDictionaryFilter_;
   const int32_t decodeRepDefPageCount_;
   const int32_t parquetRepDefMemoryLimit_;
