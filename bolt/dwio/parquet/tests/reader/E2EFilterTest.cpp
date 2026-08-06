@@ -107,18 +107,7 @@ class E2EFilterTest : public E2EFilterTestBase, public test::VectorTestBase {
       const std::shared_ptr<common::ScanSpec>& spec,
       uint64_t size,
       const RowTypePtr& outputType = nullptr) {
-    writeToMemory(data->type(), {data}, false);
-
-    dwio::common::ReaderOptions readerOpts{leafPool_.get()};
-    dwio::common::RowReaderOptions rowReaderOpts;
-    rowReaderOpts.setScanSpec(spec);
-    std::string_view serializedData(sinkPtr_->data(), sinkPtr_->size());
-    auto input = std::make_unique<BufferedInput>(
-        std::make_shared<InMemoryReadFile>(serializedData),
-        readerOpts.getMemoryPool());
-    auto reader = makeReader(readerOpts, std::move(input));
-    auto rowReader = reader->createRowReader(rowReaderOpts);
-
+    auto rowReader = makeRowReader(data, spec);
     auto result = BaseVector::create(
         outputType ? outputType : data->type(), 0, leafPool_.get());
     auto rowsScanned = rowReader->next(size, result);
