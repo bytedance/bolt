@@ -713,6 +713,28 @@ TEST_F(ArrowBridgeArrayExportTest, arraySimple) {
   testArrayVector(data3);
 }
 
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    slicedArrayStringExportsOnlyReferencedElements) {
+  auto elements = vectorMaker_.flatVector<StringView>(
+      {"unused-prefix", "a", "b", "c", "d", "unused-suffix"});
+  auto offsets = makeBuffer<vector_size_t>({0, 1, 3, 4});
+  auto sizes = makeBuffer<vector_size_t>({1, 2, 1, 2});
+  auto vector = std::make_shared<ArrayVector>(
+      pool_.get(), ARRAY(VARCHAR()), nullptr, 4, offsets, sizes, elements);
+  auto sliced = vector->slice(1, 2);
+
+  ArrowArray arrowArray;
+  bolt::exportToArrow(sliced, arrowArray, pool_.get(), options_);
+
+  TArrayContainer<StringView> expected = {{{"a", "b"}}, {{"c"}}};
+  validateListArray(expected, arrowArray);
+
+  arrowArray.release(&arrowArray);
+  EXPECT_EQ(nullptr, arrowArray.release);
+  EXPECT_EQ(nullptr, arrowArray.private_data);
+}
+
 TEST_F(ArrowBridgeArrayExportTest, arrayCrossValidate) {
   auto vec = vectorMaker_.arrayVector<int64_t>({{1, 2, 3}, {4, 5}});
   auto array = toArrow(vec, options_, pool_.get());
