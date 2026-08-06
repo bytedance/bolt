@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for merge-queue CI reuse and stale-run reconciliation."""
+"""Helpers for merge-queue CI reuse, gating, and stale-run cleanup."""
 
 import argparse
 import datetime as dt
@@ -9,7 +9,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,10 +16,21 @@ from pathlib import Path
 
 
 API_VERSION = "2022-11-28"
-ARTIFACT_PREFIX = "bolt-ci-result-v1"
+RESULT_ARTIFACT_PREFIX = "bolt-ci-result-v2"
+SOURCE_ARTIFACT_PREFIX = "bolt-ci-source-v1"
+GATE_CHECK_NAME = "merge-queue-gate"
+GATE_WORKFLOW_PATH = ".github/workflows/merge-queue-gate.yml"
+REQUIRED_WORKFLOWS = ("build-test.yml", "pre-commit-checks.yml")
 REUSABLE_EVENTS = {"pull_request", "merge_group"}
-ACTIVE_RUN_STATUSES = ("queued", "in_progress")
+ACTIVE_RUN_STATUSES = (
+    "queued",
+    "in_progress",
+    "waiting",
+    "pending",
+    "requested",
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
+CONFIG_HASH_RE = re.compile(r"^[0-9a-f]{20}$")
 
 
 class GitHubApiError(RuntimeError):
@@ -59,7 +69,8 @@ class GitHubApi:
             body = error.read().decode("utf-8", errors="replace")
             raise GitHubApiError(
                 error.code,
-                f"GitHub API {method} {path} failed with HTTP {error.code}: {body[:500]}",
+                f"GitHub API {method} {path} failed with HTTP {error.code}: "
+                f"{body[:500]}",
             ) from error
         except urllib.error.URLError as error:
             raise GitHubApiError(
@@ -72,6 +83,11 @@ class GitHubApi:
 
 def parse_github_time(value):
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def github_time(value=None):
+    value = value or dt.datetime.now(dt.timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def utc_now():
@@ -88,9 +104,15 @@ def validate_repository(repository):
     return repository
 
 
-def validate_sha(value):
-    if not SHA_RE.fullmatch(value):
-        raise ValueError(f"Invalid Git SHA: {value!r}")
+def validate_sha(value, field="Git SHA"):
+    if not SHA_RE.fullmatch(value or ""):
+        raise ValueError(f"Invalid {field}: {value!r}")
+    return value
+
+
+def validate_config_hash(value):
+    if not CONFIG_HASH_RE.fullmatch(value or ""):
+        raise ValueError(f"Invalid CI configuration hash: {value!r}")
     return value
 
 
@@ -102,6 +124,16 @@ def append_github_output(path, values):
             output.write(f"{key}={value}\n")
 
 
+def write_json(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def git_tree_sha():
     result = subprocess.run(
         ["git", "rev-parse", "HEAD^{tree}"],
@@ -109,23 +141,50 @@ def git_tree_sha():
         capture_output=True,
         text=True,
     )
-    return validate_sha(result.stdout.strip())
+    return validate_sha(result.stdout.strip(), "tree SHA")
 
 
-def make_fingerprint(tree_sha, salt):
-    tree_sha = validate_sha(tree_sha)
-    config_hash = hashlib.sha256(
-        f"{ARTIFACT_PREFIX}\0{salt}".encode("utf-8")
+def config_hash(salt):
+    return hashlib.sha256(
+        f"{RESULT_ARTIFACT_PREFIX}\0{salt}".encode("utf-8")
     ).hexdigest()[:20]
+
+
+def make_fingerprint(tree_sha, base_sha, salt):
+    tree_sha = validate_sha(tree_sha, "tree SHA")
+    base_sha = validate_sha(base_sha, "base SHA")
+    config = config_hash(salt)
     return {
         "tree_sha": tree_sha,
-        "config_hash": config_hash,
-        "artifact_name": f"{ARTIFACT_PREFIX}-{tree_sha}-{config_hash}",
+        "base_sha": base_sha,
+        "config_hash": config,
+        "artifact_name": (f"{RESULT_ARTIFACT_PREFIX}-{tree_sha}-{base_sha}-{config}"),
     }
 
 
 def normalize_workflow_path(value):
     return (value or "").split("@", 1)[0]
+
+
+def workflow_filename(value):
+    return normalize_workflow_path(value).rsplit("/", 1)[-1]
+
+
+def workflow_key(value):
+    filename = workflow_filename(value)
+    if filename == "build-test.yml":
+        return "build-test"
+    if filename == "pre-commit-checks.yml":
+        return "pre-commit"
+    raise ValueError(f"Unsupported CI workflow: {value!r}")
+
+
+def source_artifact_name(workflow, run_id, run_attempt, merge_sha, config):
+    return (
+        f"{SOURCE_ARTIFACT_PREFIX}-{workflow_key(workflow)}-{run_id}-"
+        f"{run_attempt}-{validate_sha(merge_sha, 'merge SHA')}-"
+        f"{validate_config_hash(config)}"
+    )
 
 
 def list_named_artifacts(api, repository, artifact_name):
@@ -135,6 +194,20 @@ def list_named_artifacts(api, repository, artifact_name):
         response = api.request(
             f"/repos/{repository}/actions/artifacts"
             f"?name={encoded_name}&per_page=100&page={page}"
+        )
+        batch = response.get("artifacts", [])
+        artifacts.extend(batch)
+        if len(batch) < 100:
+            break
+    return artifacts
+
+
+def list_run_artifacts(api, repository, run_id):
+    artifacts = []
+    for page in range(1, 101):
+        response = api.request(
+            f"/repos/{repository}/actions/runs/{run_id}/artifacts"
+            f"?per_page=100&page={page}"
         )
         batch = response.get("artifacts", [])
         artifacts.extend(batch)
@@ -162,7 +235,7 @@ def find_reusable_result(
     )
 
     for artifact in artifacts:
-        if artifact.get("expired"):
+        if artifact.get("expired") or artifact.get("name") != artifact_name:
             continue
         created_at = parse_github_time(artifact["created_at"])
         if created_at < cutoff:
@@ -175,7 +248,7 @@ def find_reusable_result(
         run = api.request(f"/repos/{repository}/actions/runs/{run_id}")
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             continue
-        if run.get("event") not in REUSABLE_EVENTS:
+        if run.get("event") != "workflow_run":
             continue
         if normalize_workflow_path(run.get("path")) != normalize_workflow_path(
             workflow_path
@@ -217,9 +290,9 @@ def list_workflow_runs(api, repository, workflow, head_sha, event):
     return response.get("workflow_runs", [])
 
 
-def select_event_run(runs, gate_created_at, window_seconds):
-    lower_bound = gate_created_at - dt.timedelta(seconds=window_seconds)
-    upper_bound = gate_created_at + dt.timedelta(seconds=window_seconds)
+def select_event_run(runs, source_created_at, window_seconds):
+    lower_bound = source_created_at - dt.timedelta(seconds=window_seconds)
+    upper_bound = source_created_at + dt.timedelta(seconds=window_seconds)
     candidates = [
         run
         for run in runs
@@ -237,61 +310,272 @@ def select_event_run(runs, gate_created_at, window_seconds):
     )
 
 
-def wait_for_workflows(
+def correlated_ci_runs(
     api,
     repository,
-    workflows,
+    source_run,
+    workflows=REQUIRED_WORKFLOWS,
+    window_seconds=900,
+):
+    head_sha = validate_sha(source_run.get("head_sha"), "head SHA")
+    event = source_run.get("event")
+    if event not in REUSABLE_EVENTS:
+        raise ValueError(f"Unsupported source event: {event!r}")
+    source_created_at = parse_github_time(source_run["created_at"])
+    correlated = {}
+    for workflow in workflows:
+        runs = list_workflow_runs(api, repository, workflow, head_sha, event)
+        correlated[workflow] = select_event_run(
+            runs,
+            source_created_at,
+            window_seconds,
+        )
+    return correlated
+
+
+def check_state(runs):
+    present = [run for run in runs.values() if run]
+    if any(
+        run.get("status") == "completed" and run.get("conclusion") != "success"
+        for run in present
+    ):
+        return "completed", "failure"
+    if len(present) == len(runs) and all(
+        run.get("status") == "completed" and run.get("conclusion") == "success"
+        for run in present
+    ):
+        return "completed", "success"
+    return "in_progress", None
+
+
+def check_summary(runs, validation_error=None):
+    lines = []
+    for workflow, run in runs.items():
+        if not run:
+            lines.append(f"- `{workflow}`: missing")
+            continue
+        state = run.get("conclusion") or run.get("status") or "unknown"
+        url = run.get("html_url", "")
+        lines.append(f"- [`{workflow}`]({url}): {state}")
+    if validation_error:
+        lines.extend(("", f"CI evidence rejected: `{validation_error}`"))
+    return "\n".join(lines)
+
+
+def upsert_gate_check(
+    api,
+    repository,
     head_sha,
     event,
-    gate_run_id,
-    timeout_seconds,
-    poll_seconds,
-    run_window_seconds,
-    sleep=time.sleep,
+    runs,
+    status,
+    conclusion,
+    validation_error=None,
+):
+    external_id = f"bolt-merge-queue-gate:{event}:{head_sha}"
+    query = urllib.parse.urlencode({"check_name": GATE_CHECK_NAME, "per_page": 100})
+    response = api.request(f"/repos/{repository}/commits/{head_sha}/check-runs?{query}")
+    existing = next(
+        (
+            check
+            for check in response.get("check_runs", [])
+            if check.get("external_id") == external_id
+        ),
+        None,
+    )
+    details_url = next(
+        (
+            run.get("html_url", "")
+            for run in runs.values()
+            if run and run.get("html_url")
+        ),
+        "",
+    )
+    payload = {
+        "name": GATE_CHECK_NAME,
+        "status": status,
+        "external_id": external_id,
+        "details_url": details_url,
+        "output": {
+            "title": (
+                "CI evidence rejected"
+                if validation_error
+                else "Required CI passed"
+                if conclusion == "success"
+                else "Required CI failed"
+                if conclusion == "failure"
+                else "Waiting for required CI"
+            ),
+            "summary": check_summary(runs, validation_error),
+        },
+    }
+    if status == "completed":
+        payload["conclusion"] = conclusion
+        payload["completed_at"] = github_time()
+
+    if existing:
+        return api.request(
+            f"/repos/{repository}/check-runs/{existing['id']}",
+            method="PATCH",
+            payload=payload,
+        )
+
+    payload["head_sha"] = head_sha
+    if status == "in_progress":
+        payload["started_at"] = github_time()
+    return api.request(
+        f"/repos/{repository}/check-runs",
+        method="POST",
+        payload=payload,
+    )
+
+
+def find_source_evidence(api, repository, run, expected_config):
+    workflow = workflow_filename(run.get("path"))
+    prefix = (
+        f"{SOURCE_ARTIFACT_PREFIX}-{workflow_key(workflow)}-{run['id']}-"
+        f"{run.get('run_attempt', 1)}-"
+    )
+    matches = [
+        artifact
+        for artifact in list_run_artifacts(api, repository, run["id"])
+        if not artifact.get("expired") and artifact.get("name", "").startswith(prefix)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected one source evidence artifact for run {run['id']}, "
+            f"found {len(matches)}"
+        )
+    suffix = matches[0]["name"][len(prefix) :]
+    try:
+        merge_sha, evidence_config = suffix.split("-", 1)
+    except ValueError as error:
+        raise RuntimeError(
+            f"Malformed source evidence artifact: {matches[0]['name']}"
+        ) from error
+    validate_sha(merge_sha, "merge SHA")
+    if evidence_config != expected_config:
+        raise RuntimeError(
+            f"CI configuration mismatch for run {run['id']}: "
+            f"{evidence_config} != {expected_config}"
+        )
+    validate_config_hash(evidence_config)
+    return {
+        "artifact_id": matches[0]["id"],
+        "merge_sha": merge_sha,
+        "config_hash": evidence_config,
+    }
+
+
+def reusable_pr_result(api, repository, runs, salt):
+    expected_config = config_hash(salt)
+    evidences = {
+        workflow: find_source_evidence(api, repository, run, expected_config)
+        for workflow, run in runs.items()
+    }
+    merge_shas = {evidence["merge_sha"] for evidence in evidences.values()}
+    if len(merge_shas) != 1:
+        raise RuntimeError(f"CI workflows tested different merge commits: {merge_shas}")
+    merge_sha = merge_shas.pop()
+    commit = api.request(f"/repos/{repository}/git/commits/{merge_sha}")
+    parents = [parent["sha"] for parent in commit.get("parents", [])]
+    head_shas = {run.get("head_sha") for run in runs.values()}
+    if len(head_shas) != 1:
+        raise RuntimeError(f"CI workflows have different head SHAs: {head_shas}")
+    head_sha = validate_sha(head_shas.pop(), "head SHA")
+    if len(parents) != 2 or parents[1] != head_sha:
+        raise RuntimeError(
+            f"Merge commit {merge_sha} does not have expected PR head {head_sha}"
+        )
+    base_sha = validate_sha(parents[0], "base SHA")
+    tree_sha = validate_sha((commit.get("tree") or {}).get("sha"), "tree SHA")
+    result = make_fingerprint(tree_sha, base_sha, salt)
+    result.update(
+        {
+            "event": "pull_request",
+            "head_sha": head_sha,
+            "merge_sha": merge_sha,
+            "source_runs": {workflow: run["id"] for workflow, run in runs.items()},
+            "created_at": github_time(),
+        }
+    )
+    return result
+
+
+def reconcile_gate(
+    api,
+    repository,
+    source_run_id,
+    salt,
+    output,
+    github_output=None,
 ):
     repository = validate_repository(repository)
-    validate_sha(head_sha)
-    gate_run = api.request(f"/repos/{repository}/actions/runs/{gate_run_id}")
-    gate_created_at = parse_github_time(gate_run["created_at"])
-    deadline = time.monotonic() + timeout_seconds
-    last_state = None
+    source_run = api.request(f"/repos/{repository}/actions/runs/{source_run_id}")
+    if workflow_filename(source_run.get("path")) not in REQUIRED_WORKFLOWS:
+        raise ValueError(f"Run {source_run_id} is not from a required CI workflow")
+    runs = correlated_ci_runs(api, repository, source_run)
+    status, conclusion = check_state(runs)
+    head_sha = validate_sha(source_run.get("head_sha"), "head SHA")
+    event = source_run.get("event")
+    result = None
+    validation_error = None
+    if conclusion == "success" and event == "pull_request":
+        try:
+            result = reusable_pr_result(api, repository, runs, salt)
+        except GitHubApiError:
+            raise
+        except (KeyError, RuntimeError, TypeError, ValueError) as error:
+            status = "completed"
+            conclusion = "failure"
+            validation_error = str(error)
 
-    while True:
-        states = {}
-        for workflow in workflows:
-            runs = list_workflow_runs(api, repository, workflow, head_sha, event)
-            selected = select_event_run(runs, gate_created_at, run_window_seconds)
-            if selected is None:
-                states[workflow] = ("missing", None)
-            else:
-                states[workflow] = (
-                    selected.get("status", "unknown"),
-                    selected.get("conclusion"),
-                )
+    check = upsert_gate_check(
+        api,
+        repository,
+        head_sha,
+        event,
+        runs,
+        status,
+        conclusion,
+        validation_error,
+    )
 
-        if states != last_state:
-            print(json.dumps({"workflow_states": states}, sort_keys=True))
-            last_state = states
+    values = {
+        "status": status,
+        "conclusion": conclusion or "",
+        "reusable": "false",
+        "artifact_name": "",
+        "check_url": check.get("html_url", ""),
+    }
+    if result:
+        path = write_json(output, result)
+        values["reusable"] = "true"
+        values["artifact_name"] = result["artifact_name"]
+        values["result_path"] = str(path)
 
-        failures = {
-            workflow: conclusion
-            for workflow, (status, conclusion) in states.items()
-            if status == "completed" and conclusion != "success"
-        }
-        if failures:
-            raise RuntimeError(f"Required CI workflow failed: {failures}")
-
-        if all(
-            status == "completed" and conclusion == "success"
-            for status, conclusion in states.values()
-        ):
-            return states
-
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"Timed out waiting for CI workflows after {timeout_seconds}s: {states}"
-            )
-        sleep(poll_seconds)
+    append_github_output(github_output, values)
+    print(
+        json.dumps(
+            {
+                "gate": values,
+                "workflow_states": {
+                    workflow: (
+                        None
+                        if run is None
+                        else {
+                            "id": run["id"],
+                            "status": run.get("status"),
+                            "conclusion": run.get("conclusion"),
+                        }
+                    )
+                    for workflow, run in runs.items()
+                },
+            },
+            sort_keys=True,
+        )
+    )
+    return values
 
 
 def list_live_merge_queue_shas(api, repository, base_branch):
@@ -411,7 +695,7 @@ def write_step_summary(path, summary):
 
 
 def command_fingerprint(args):
-    result = make_fingerprint(git_tree_sha(), args.salt)
+    result = make_fingerprint(git_tree_sha(), args.base_sha, args.salt)
     append_github_output(args.github_output, result)
     print(json.dumps(result, sort_keys=True))
     return 0
@@ -429,16 +713,24 @@ def command_find_reuse(args):
         return 0
 
     try:
+        fingerprint = make_fingerprint(args.tree_sha, args.base_sha, args.salt)
         api = GitHubApi(args.token)
         result = find_reusable_result(
             api,
             validate_repository(args.repository),
-            args.artifact_name,
+            fingerprint["artifact_name"],
             args.workflow_path,
             args.max_age_hours,
             current_run_id=args.current_run_id,
         )
-    except (GitHubApiError, KeyError, OSError, TypeError, ValueError) as error:
+    except (
+        GitHubApiError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
         print(
             f"::warning::CI reuse lookup failed; running full CI instead: {error}",
             file=sys.stderr,
@@ -455,39 +747,45 @@ def command_find_reuse(args):
     return 0
 
 
-def command_wait(args):
-    api = GitHubApi(args.token)
-    states = wait_for_workflows(
-        api,
-        validate_repository(args.repository),
+def command_record_source(args):
+    payload = {
+        "schema_version": 1,
+        "workflow": workflow_filename(args.workflow),
+        "event": args.event,
+        "source_run_id": args.run_id,
+        "source_run_attempt": args.run_attempt,
+        "merge_sha": validate_sha(args.merge_sha, "merge SHA"),
+        "tree_sha": validate_sha(args.tree_sha, "tree SHA"),
+        "base_sha": validate_sha(args.base_sha, "base SHA"),
+        "config_hash": validate_config_hash(args.config_hash),
+        "created_at": github_time(),
+    }
+    artifact_name = source_artifact_name(
         args.workflow,
-        validate_sha(args.head_sha),
-        args.event,
-        args.gate_run_id,
-        args.timeout_seconds,
-        args.poll_seconds,
-        args.run_window_seconds,
+        args.run_id,
+        args.run_attempt,
+        args.merge_sha,
+        args.config_hash,
     )
-    print(json.dumps({"completed": states}, sort_keys=True))
+    path = write_json(args.output, payload)
+    append_github_output(
+        args.github_output,
+        {"artifact_name": artifact_name, "result_path": str(path)},
+    )
+    print(json.dumps({"artifact_name": artifact_name, **payload}, sort_keys=True))
     return 0
 
 
-def command_record(args):
-    payload = {
-        "artifact_name": args.artifact_name,
-        "tree_sha": validate_sha(args.tree_sha),
-        "config_hash": args.config_hash,
-        "run_id": args.run_id,
-        "run_url": args.run_url,
-        "created_at": utc_now().isoformat(),
-    }
-    path = Path(args.output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+def command_reconcile_gate(args):
+    api = GitHubApi(args.token)
+    reconcile_gate(
+        api,
+        validate_repository(args.repository),
+        args.source_run_id,
+        args.salt,
+        args.output,
+        github_output=args.github_output,
     )
-    print(path)
     return 0
 
 
@@ -511,6 +809,7 @@ def build_parser():
 
     fingerprint = subparsers.add_parser("fingerprint")
     fingerprint.add_argument("--salt", required=True)
+    fingerprint.add_argument("--base-sha", required=True)
     fingerprint.add_argument("--github-output")
     fingerprint.set_defaults(func=command_fingerprint)
 
@@ -518,35 +817,36 @@ def build_parser():
     reuse.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     reuse.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     reuse.add_argument("--event", required=True)
-    reuse.add_argument("--artifact-name", required=True)
-    reuse.add_argument(
-        "--workflow-path", default=".github/workflows/merge-queue-gate.yml"
-    )
+    reuse.add_argument("--tree-sha", required=True)
+    reuse.add_argument("--base-sha", required=True)
+    reuse.add_argument("--salt", required=True)
+    reuse.add_argument("--workflow-path", default=GATE_WORKFLOW_PATH)
     reuse.add_argument("--max-age-hours", type=int, default=24)
     reuse.add_argument("--current-run-id", default=os.environ.get("GITHUB_RUN_ID"))
     reuse.add_argument("--github-output")
     reuse.set_defaults(func=command_find_reuse)
 
-    wait = subparsers.add_parser("wait-for-workflows")
-    wait.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
-    wait.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
-    wait.add_argument("--workflow", action="append", required=True)
-    wait.add_argument("--head-sha", required=True)
-    wait.add_argument("--event", required=True)
-    wait.add_argument("--gate-run-id", default=os.environ.get("GITHUB_RUN_ID"))
-    wait.add_argument("--timeout-seconds", type=int, default=5100)
-    wait.add_argument("--poll-seconds", type=int, default=15)
-    wait.add_argument("--run-window-seconds", type=int, default=900)
-    wait.set_defaults(func=command_wait)
+    source = subparsers.add_parser("record-source")
+    source.add_argument("--workflow", required=True)
+    source.add_argument("--event", required=True, choices=sorted(REUSABLE_EVENTS))
+    source.add_argument("--run-id", required=True)
+    source.add_argument("--run-attempt", required=True, type=int)
+    source.add_argument("--merge-sha", required=True)
+    source.add_argument("--tree-sha", required=True)
+    source.add_argument("--base-sha", required=True)
+    source.add_argument("--config-hash", required=True)
+    source.add_argument("--output", required=True)
+    source.add_argument("--github-output")
+    source.set_defaults(func=command_record_source)
 
-    record = subparsers.add_parser("record")
-    record.add_argument("--artifact-name", required=True)
-    record.add_argument("--tree-sha", required=True)
-    record.add_argument("--config-hash", required=True)
-    record.add_argument("--run-id", required=True)
-    record.add_argument("--run-url", required=True)
-    record.add_argument("--output", required=True)
-    record.set_defaults(func=command_record)
+    gate = subparsers.add_parser("reconcile-gate")
+    gate.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
+    gate.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
+    gate.add_argument("--source-run-id", required=True)
+    gate.add_argument("--salt", required=True)
+    gate.add_argument("--output", required=True)
+    gate.add_argument("--github-output")
+    gate.set_defaults(func=command_reconcile_gate)
 
     cleanup = subparsers.add_parser("cleanup")
     cleanup.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
@@ -566,7 +866,14 @@ def main():
     args = build_parser().parse_args()
     try:
         return args.func(args)
-    except (GitHubApiError, RuntimeError, TimeoutError, ValueError) as error:
+    except (
+        GitHubApiError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
 

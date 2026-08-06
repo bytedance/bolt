@@ -46,7 +46,11 @@ jobs:
       - name: Reconcile stale merge-group runs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CLEANUP_MODE: ${{ github.event_name == 'schedule' && 'cancel' || inputs.mode }}
+          # Scheduled cleanup is report-only until the repository variable is
+          # explicitly changed to "cancel" after observing dry-run results.
+          CLEANUP_MODE: >-
+            ${{ github.event_name == 'schedule' &&
+                (vars.MERGE_QUEUE_CLEANUP_MODE || 'report') || inputs.mode }}
         run: |
           python3 .github/scripts/merge_queue_ci.py cleanup \
             --base-branch main \

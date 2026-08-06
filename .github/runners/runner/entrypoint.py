@@ -6,6 +6,9 @@ from pathlib import Path
 
 
 HOST_HOSTNAME_PATH = Path("/etc/host-hostname")
+RUNNER_CONFIG_PATH = Path("/actions-runner/.runner")
+RUNNER_CREDENTIALS_PATH = Path("/actions-runner/.credentials")
+RUNNER_RSA_PATH = Path("/actions-runner/.credentials_rsaparams")
 
 
 def normalize_hostname(value, source):
@@ -91,12 +94,26 @@ def create_registration_token(token, org_name, repo_name):
     return response.json()["token"]
 
 
+def runner_is_configured(
+    config_path=RUNNER_CONFIG_PATH,
+    credentials_path=RUNNER_CREDENTIALS_PATH,
+    rsa_path=RUNNER_RSA_PATH,
+):
+    configuration_files = (config_path, credentials_path, rsa_path)
+    configured_files = [path for path in configuration_files if path.is_file()]
+    if configured_files and len(configured_files) != len(configuration_files):
+        raise RuntimeError(
+            "Runner configuration is incomplete; recreate the container to register "
+            "it again"
+        )
+    return len(configured_files) == len(configuration_files)
+
+
 def main():
     # ensure all variables are set, error message should include unset variables
     unset_vars = [
         var
         for var in [
-            "GITHUB_RUNNER_TOKEN",
             "ORGANIZATION_NAME",
             "REPOSITORY_NAME",
             "RUNNER_LABELS",
@@ -110,7 +127,6 @@ def main():
     runner_hostname = runner_instance_hostname()
     host_hostname = resolve_host_hostname()
 
-    gh_auth_token = os.environ["GITHUB_RUNNER_TOKEN"]
     runner_name = f"{host_hostname}-{runner_hostname}"
     org_name = os.environ["ORGANIZATION_NAME"]
     repo_name = os.environ["REPOSITORY_NAME"]
@@ -126,25 +142,34 @@ def main():
     ensure_docker_storage(docker_data_dir, runner_hostname)
     subprocess.run(["service", "docker", "start"], check=True)
 
-    # create a registration token for the runner
-    registration_token = create_registration_token(gh_auth_token, org_name, repo_name)
-    print(f"Configuring the runner with name {runner_name}")
-    subprocess.run(
-        [
-            "/actions-runner/config.sh",
-            "--url",
-            f"https://github.com/{org_name}/{repo_name}",
-            "--token",
-            registration_token,
-            "--name",
-            runner_name,
-            "--replace",
-            "--labels",
-            runner_labels,
-            "--unattended",
-        ],
-        check=True,
-    )
+    if runner_is_configured():
+        print(f"Runner {runner_name} is already configured; reusing its credentials")
+    else:
+        gh_auth_token = os.environ.get("GITHUB_RUNNER_TOKEN")
+        if not gh_auth_token:
+            raise ValueError("GITHUB_RUNNER_TOKEN must be set for initial registration")
+        registration_token = create_registration_token(
+            gh_auth_token,
+            org_name,
+            repo_name,
+        )
+        print(f"Configuring the runner with name {runner_name}")
+        subprocess.run(
+            [
+                "/actions-runner/config.sh",
+                "--url",
+                f"https://github.com/{org_name}/{repo_name}",
+                "--token",
+                registration_token,
+                "--name",
+                runner_name,
+                "--replace",
+                "--labels",
+                runner_labels,
+                "--unattended",
+            ],
+            check=True,
+        )
 
     print("Starting the runner...")
     os.execv("/bin/bash", ["/bin/bash", "/actions-runner/run.sh"])
