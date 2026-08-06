@@ -137,6 +137,45 @@ ParquetTypeWithIdPtr makeNestedInt64Type() {
 
 class ParquetPageReaderTest : public ParquetTestBase {};
 
+TEST_F(ParquetPageReaderTest, decodeLargeDefinitionLevelsInWindows) {
+  constexpr int32_t kNumLevels = 4 * kMaxRepDefDecodeBatch + 123;
+  constexpr int32_t kMaxDefine = 4;
+  const auto bitWidth = ::arrow::bit_util::NumRequiredBits(kMaxDefine);
+  std::vector<int16_t> expectedLevels(kNumLevels);
+  const auto encodedSize =
+      ::arrow::util::RleEncoder::MaxBufferSize(bitWidth, kNumLevels) +
+      ::arrow::util::RleEncoder::MinBufferSize(bitWidth);
+  std::vector<uint8_t> encodedLevels(encodedSize);
+  ::arrow::util::RleEncoder encoder(
+      encodedLevels.data(), encodedLevels.size(), bitWidth);
+  for (auto i = 0; i < kNumLevels; ++i) {
+    expectedLevels[i] = i % 17 == 0 ? kMaxDefine - 1 : kMaxDefine;
+    ASSERT_TRUE(encoder.Put(expectedLevels[i]));
+  }
+  encoder.Flush();
+
+  ::arrow::util::RleDecoder decoder(
+      encodedLevels.data(), encoder.len(), bitWidth);
+  arrow::LevelInfo levelInfo;
+  levelInfo.def_level = kMaxDefine;
+  levelInfo.rep_level = 1;
+  levelInfo.repeated_ancestor_def_level = 1;
+  raw_vector<int16_t> definitionLevels(leafPool_.get());
+  raw_vector<uint64_t> leafNulls(leafPool_.get());
+
+  EXPECT_EQ(
+      decodeDefinitionLevelsToBitmap(
+          decoder, kNumLevels, levelInfo, definitionLevels, leafNulls),
+      kNumLevels);
+  EXPECT_EQ(definitionLevels.size(), kMaxRepDefDecodeBatch);
+  EXPECT_LT(definitionLevels.capacity(), kNumLevels);
+  for (auto i = 0; i < kNumLevels; ++i) {
+    EXPECT_EQ(
+        bits::isBitSet(leafNulls.data(), i), expectedLevels[i] == kMaxDefine)
+        << "at " << i;
+  }
+}
+
 TEST_F(ParquetPageReaderTest, smallPage) {
   auto readFile =
       std::make_shared<LocalReadFile>(getExampleFilePath("small_page_header"));

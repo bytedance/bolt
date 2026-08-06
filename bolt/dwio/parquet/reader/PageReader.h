@@ -49,6 +49,14 @@
 namespace bytedance::bolt::parquet {
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+constexpr int32_t kMaxRepDefDecodeBatch = 64 * 1024;
+
+int32_t decodeDefinitionLevelsToBitmap(
+    ::arrow::util::RleDecoder& decoder,
+    int32_t numDefinitionLevels,
+    const arrow::LevelInfo& levelInfo,
+    raw_vector<int16_t>& definitionLevels,
+    raw_vector<uint64_t>& leafNulls);
 
 struct CryptoContext {
   CryptoContext(
