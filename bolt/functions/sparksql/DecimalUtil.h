@@ -301,7 +301,7 @@ class DecimalUtil {
 
   template <typename InputType>
   inline static void stripTrailingZeros(InputType& input, uint8_t& scale) {
-    while (std::abs<int64_t>(input) >= 10L && scale > 0) {
+    while (scale > 0 && (input <= -10 || input >= 10)) {
       if (bits::isBitSet(&input, 0)) { // odd
         break;
       }

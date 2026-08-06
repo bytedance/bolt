@@ -142,6 +142,18 @@ class Filter : public bolt::ISerializable {
     return kind_;
   }
 
+  bool isValueIndependent() const {
+    switch (kind_) {
+      case FilterKind::kIsNull:
+      case FilterKind::kIsNotNull:
+      case FilterKind::kAlwaysTrue:
+      case FilterKind::kAlwaysFalse:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   bool nullAllowed() const {
     return nullAllowed_;
   }

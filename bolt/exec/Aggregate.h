@@ -406,7 +406,7 @@ class Aggregate {
   void destroyAccumulator(char* group) const {
     auto accumulator = value<T>(group);
     std::destroy_at(accumulator);
-    memset(accumulator, 0, sizeof(T));
+    ::memset(static_cast<void*>(accumulator), 0, sizeof(T));
   }
 
   template <typename T>

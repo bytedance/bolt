@@ -28,7 +28,7 @@ class PaimonColumnHandle : public ColumnHandle {
   PaimonColumnHandle(const std::string& name, TypePtr type)
       : name_(name), type_(std::move(type)) {}
 
-  const std::string& name() const {
+  const std::string& name() const override {
     return name_;
   }
 

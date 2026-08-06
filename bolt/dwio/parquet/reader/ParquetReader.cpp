@@ -125,6 +125,10 @@ bool acceptsDateFile(const bytedance::bolt::TypePtr& t) {
       t->kind() == bytedance::bolt::TypeKind::VARCHAR;
 }
 
+bool acceptsFloatingPointFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+  return t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
 // Compatibility predicate for Parquet INT32-physical source columns
 // (INT_8 / INT_16 / INT_32 annotated, plus unannotated INT32).
 // Accepts:
@@ -1274,12 +1278,15 @@ TypePtr ReaderBase::convertType(
         return TIMESTAMP(); // INT96 only maps to a timestamp
       case thrift::Type::type::FLOAT:
         checkRequested([](const TypePtr& t) {
-          return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE;
+          return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE ||
+              acceptsFloatingPointFileForReaderCast(t);
         });
         return REAL();
       case thrift::Type::type::DOUBLE:
-        checkRequested(
-            [](const TypePtr& t) { return t->kind() == TypeKind::DOUBLE; });
+        checkRequested([](const TypePtr& t) {
+          return t->kind() == TypeKind::DOUBLE ||
+              acceptsFloatingPointFileForReaderCast(t);
+        });
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:
       case thrift::Type::type::FIXED_LEN_BYTE_ARRAY:
@@ -1585,6 +1592,8 @@ class ParquetRowReader::Impl {
         options_.timestampPrecision(),
         readerBase->fileDecryptor(),
         schemaHelper_,
+        options_.getMetadataFilter() != nullptr,
+        options_.disableFloatingPointToVarcharMetadataFilter(),
         options_.isDictionaryFilterEnabled(),
         options_.getDecodeRepDefPageCount(),
         options_.getParquetRepDefMemoryLimit());
