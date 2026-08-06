@@ -1,0 +1,104 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Merge Queue Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # Keep this in sync with the two CI workflows.
+  CI_REUSE_SALT: >-
+    bolt-ci:20260114|conan-server:latest|build-test-v1
+
+jobs:
+  reuse_check:
+    name: Find reusable CI result
+    runs-on: ubuntu-latest
+    outputs:
+      hit: ${{ steps.reuse.outputs.hit }}
+      source_run_url: ${{ steps.reuse.outputs.source_run_url }}
+      artifact_name: ${{ steps.fingerprint.outputs.artifact_name }}
+      tree_sha: ${{ steps.fingerprint.outputs.tree_sha }}
+      config_hash: ${{ steps.fingerprint.outputs.config_hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Compute CI fingerprint
+        id: fingerprint
+        run: |
+          python3 .github/scripts/merge_queue_ci.py fingerprint \
+            --salt "${CI_REUSE_SALT}" \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Find reusable CI result
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py find-reuse \
+            --event "${{ github.event_name }}" \
+            --artifact-name "${{ steps.fingerprint.outputs.artifact_name }}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+  merge_queue_gate:
+    name: merge-queue-gate
+    needs: reuse_check
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Reuse passed CI result
+        if: ${{ needs.reuse_check.outputs.hit == 'true' }}
+        run: |
+          echo "Reusing CI result from ${{ needs.reuse_check.outputs.source_run_url }}"
+      - name: Checkout code
+        if: ${{ needs.reuse_check.outputs.hit != 'true' }}
+        uses: actions/checkout@v6
+      - name: Wait for current tree CI
+        if: ${{ needs.reuse_check.outputs.hit != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py wait-for-workflows \
+            --workflow build-test.yml \
+            --workflow pre-commit-checks.yml \
+            --head-sha "${GITHUB_SHA}" \
+            --event "${{ github.event_name }}"
+      - name: Write result metadata
+        if: ${{ needs.reuse_check.outputs.hit != 'true' }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py record \
+            --artifact-name "${{ needs.reuse_check.outputs.artifact_name }}" \
+            --tree-sha "${{ needs.reuse_check.outputs.tree_sha }}" \
+            --config-hash "${{ needs.reuse_check.outputs.config_hash }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --output ci-result/result.json
+      - name: Upload passed CI result
+        if: ${{ needs.reuse_check.outputs.hit != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.reuse_check.outputs.artifact_name }}
+          path: ci-result/result.json
+          if-no-files-found: error
+          retention-days: 7

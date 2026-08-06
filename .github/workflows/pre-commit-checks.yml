@@ -23,6 +23,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+
 env:
   PRE_COMMIT_HOME: /data/pre-commit-cache
   CCACHE_DIR: /data/ccache-data
@@ -32,9 +36,37 @@ env:
   GOMAXPROCS: 8
   GOMODCACHE: /data/pre-commit-cache/gomodcache
   GOCACHE: /data/pre-commit-cache/gocache
+  # Bump this when external CI images/tooling change without a tree change.
+  CI_REUSE_SALT: >-
+    bolt-ci:20260114|conan-server:latest|build-test-v1
 
 jobs:
+  reuse-check:
+    runs-on: ubuntu-latest
+    outputs:
+      hit: ${{ steps.reuse.outputs.hit }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Compute CI fingerprint
+        id: fingerprint
+        run: |
+          python3 .github/scripts/merge_queue_ci.py fingerprint \
+            --salt "${CI_REUSE_SALT}" \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Find reusable CI result
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py find-reuse \
+            --event "${{ github.event_name }}" \
+            --artifact-name "${{ steps.fingerprint.outputs.artifact_name }}" \
+            --github-output "${GITHUB_OUTPUT}"
+
   lint:
+    needs: reuse-check
+    if: ${{ needs.reuse-check.outputs.hit != 'true' }}
     runs-on: ['self-hosted', 'medium']
     container:
       image: bolt-registry:5000/bolt-ci:20260114

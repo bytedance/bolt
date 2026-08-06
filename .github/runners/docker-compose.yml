@@ -10,6 +10,7 @@ services:
       context: .
       dockerfile: Dockerfile.conanserver
     image: localhost:5000/conan-server:latest
+    restart: unless-stopped
     env_file:
       - variables.env
     ports:
@@ -19,6 +20,7 @@ services:
     command: ["/usr/local/bin/start-conan-server.sh"]
   bolt-registry:
     image: registry:2
+    restart: unless-stopped
     ports:
       - '5000:5000'
     volumes:
