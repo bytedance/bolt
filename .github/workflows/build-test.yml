@@ -33,6 +33,7 @@ permissions:
   pull-requests: read
 
 env:
+  PRE_COMMIT_HOME: /data/pre-commit-cache
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
   CI_NUM_THREADS: "16"
@@ -106,6 +107,7 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
+        - pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
     services:
       conanserver:
@@ -122,6 +124,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
@@ -134,6 +138,11 @@ jobs:
     - name: Bolt build
       run: |
         make ${{ matrix.build_target }}
+
+    - name: Run clang-tidy
+      if: ${{ matrix.build_type == 'release_spark' }}
+      run: |
+        CLANG_TIDY_SKIP_MISSING=1 pre-commit run clang-tidy --all-files
 
     - name: Run tests
       run: |
