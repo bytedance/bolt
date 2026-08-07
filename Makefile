@@ -51,6 +51,7 @@
 
 # --- 6. Test Execution & Coverage ---
 # Targets for running CTest and generating code coverage reports
+.PHONY: ctest_debug ctest_release
 .PHONY: unittest unittest_debug unittest_release
 .PHONY: unittest_release_spark unittest_debug_spark unittest_coverage
 
@@ -312,18 +313,24 @@ benchmarks-build-spark:
 benchmarks-build-relwithdebinfo:
 	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
+ctest_debug:
+	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
+ctest_release:
+	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
 unittest_debug: unittest
 unittest: debug_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_debug
 
 unittest_release: release_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_release
 
 unittest_release_spark: release_spark_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_release
 
 unittest_debug_spark: debug_spark_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_debug
 
 unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/Debug && \

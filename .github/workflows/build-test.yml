@@ -96,6 +96,7 @@ jobs:
               - 'scripts/**'
               - '.github/workflows/**'
   build-test:
+    name: build-test (${{ matrix.build_type }})
     needs: [reuse-check, changes]
     if: >-
       ${{ needs.reuse-check.outputs.hit != 'true' &&
@@ -113,7 +114,11 @@ jobs:
           - /data/conan-server-data:/var/conan/data
     strategy:
       matrix:
-        build_type: [ release, release_spark ]
+        include:
+          - build_type: release
+            build_target: benchmarks-build
+          - build_type: release_spark
+            build_target: release_spark_with_test
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -121,13 +126,18 @@ jobs:
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
+    - name: Configure Conan profile for benchmarks
+      if: ${{ matrix.build_type == 'release' }}
+      run: |
+        echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
+
     - name: Bolt build
       run: |
-        make ${{ matrix.build_type }}_with_test
+        make ${{ matrix.build_target }}
 
     - name: Run tests
       run: |
-        make unittest_${{ matrix.build_type }}
+        make ctest_release
 
   build-only:
       needs: [reuse-check, changes]
@@ -147,7 +157,7 @@ jobs:
             - /data/conan-server-data:/var/conan/data
       strategy:
         matrix:
-          build_target: [ benchmarks-build, debug_spark_with_test ]
+          build_target: [ debug_spark_with_test ]
       steps:
       - name: Checkout code
         uses: actions/checkout@v6
