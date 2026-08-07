@@ -51,6 +51,33 @@ namespace bytedance::bolt::parquet {
 using thrift::Encoding;
 using thrift::PageHeader;
 
+int32_t decodeDefinitionLevelsToBitmap(
+    ::arrow::util::RleDecoder& decoder,
+    int32_t numDefinitionLevels,
+    const arrow::LevelInfo& levelInfo,
+    raw_vector<int16_t>& definitionLevels,
+    raw_vector<uint64_t>& leafNulls) {
+  definitionLevels.resize(std::min(numDefinitionLevels, kMaxRepDefDecodeBatch));
+  leafNulls.resize(bits::nwords(numDefinitionLevels));
+  int32_t decodedLevels = 0;
+  int32_t decodedLeaves = 0;
+  while (decodedLevels < numDefinitionLevels) {
+    const auto batchSize =
+        std::min(numDefinitionLevels - decodedLevels, kMaxRepDefDecodeBatch);
+    decoder.GetBatch(definitionLevels.data(), batchSize);
+    arrow::ValidityBitmapInputOutput bits;
+    bits.values_read_upper_bound = batchSize;
+    bits.values_read = 0;
+    bits.null_count = 0;
+    bits.valid_bits = reinterpret_cast<uint8_t*>(leafNulls.data());
+    bits.valid_bits_offset = decodedLeaves;
+    DefLevelsToBitmap(definitionLevels.data(), batchSize, levelInfo, &bits);
+    decodedLevels += batchSize;
+    decodedLeaves += bits.values_read;
+  }
+  return decodedLeaves;
+}
+
 namespace {
 constexpr uint32_t kRepDefPrefixOutputQuantum = 4096;
 
@@ -472,21 +499,15 @@ void PageReader::setPageRowInfo(bool forRepDef) {
 
 void PageReader::readPageDefLevels() {
   BOLT_CHECK(kRowsUnknown == numRowsInPage_ || maxDefine_ > 1);
-  definitionLevels_.resize(numRepDefsInPage_);
   BOLT_CHECK_NOT_NULL(
       wideDefineDecoder_, "parquet read error with maxDefine = {}", maxDefine_);
-  wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
-  leafNulls_.resize(bits::nwords(numRepDefsInPage_));
-  numRowsInPage_ = getLengthsAndNulls(
-      LevelMode::kNulls,
+  leafNullsSize_ = decodeDefinitionLevelsToBitmap(
+      *wideDefineDecoder_,
+      numRepDefsInPage_,
       leafInfo_,
-      0,
-      numRepDefsInPage_,
-      numRepDefsInPage_,
-      nullptr,
-      leafNulls_.data(),
-      0);
-  leafNullsSize_ = numRowsInPage_;
+      definitionLevels_,
+      leafNulls_);
+  numRowsInPage_ = leafNullsSize_;
   numLeafNullsConsumed_ = 0;
 }
 
