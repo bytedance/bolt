@@ -673,7 +673,9 @@ TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
             {SMALLINT(), INTEGER(), INTEGER(), uint64Type});
     dwio::common::ReaderOptions readerOptions{leafPool_.get()};
     readerOptions.setFileSchema(rowType);
-    BOLT_ASSERT_THROW(createReader(sample, readerOptions), "Schema mismatch");
+    BOLT_ASSERT_THROW(
+        createReader(sample, readerOptions),
+        "ParquetReader::convertType() cannot convert column.");
   }
 }
 #endif

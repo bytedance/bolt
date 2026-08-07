@@ -73,7 +73,8 @@ namespace {
 
 // Schema-mismatch checks for ReaderBase::convertType.
 constexpr const char* kTypeMappingErrorFmtStr =
-    "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
+    "ParquetReader::convertType() cannot convert column. "
+    "Column: [{}], From Kind: {}, To Kind: {}";
 
 std::string parquetSourceTypeName(const thrift::SchemaElement& schemaElement) {
   if (schemaElement.__isset.converted_type) {
