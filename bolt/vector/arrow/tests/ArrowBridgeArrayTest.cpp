@@ -735,6 +735,30 @@ TEST_F(
   EXPECT_EQ(nullptr, arrowArray.private_data);
 }
 
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    slicedArrayWithNullParentExportsOnlyReferencedElements) {
+  auto elements = vectorMaker_.flatVector<int64_t>({0, 1, 2, 3, 4, 5, 6});
+  auto offsets = makeBuffer<vector_size_t>({0, 1, 3, 5});
+  auto sizes = makeBuffer<vector_size_t>({1, 2, 2, 2});
+  BufferPtr nulls =
+      AlignedBuffer::allocate<bool>(4, pool_.get(), bits::kNotNull);
+  bits::setNull(nulls->asMutable<uint64_t>(), 2, true);
+  auto vector = std::make_shared<ArrayVector>(
+      pool_.get(), ARRAY(BIGINT()), nulls, 4, offsets, sizes, elements, 1);
+  auto sliced = vector->slice(1, 2);
+
+  ArrowArray arrowArray;
+  bolt::exportToArrow(sliced, arrowArray, pool_.get(), options_);
+
+  TArrayContainer<int64_t> expected = {{{1, 2}}, std::nullopt};
+  validateListArray(expected, arrowArray);
+
+  arrowArray.release(&arrowArray);
+  EXPECT_EQ(nullptr, arrowArray.release);
+  EXPECT_EQ(nullptr, arrowArray.private_data);
+}
+
 TEST_F(ArrowBridgeArrayExportTest, arrayCrossValidate) {
   auto vec = vectorMaker_.arrayVector<int64_t>({{1, 2, 3}, {4, 5}});
   auto array = toArrow(vec, options_, pool_.get());
@@ -867,6 +891,46 @@ TEST_F(ArrowBridgeArrayExportTest, mapSimple) {
   ASSERT_EQ(items.length(), 2);
   EXPECT_EQ(items.Value(0), 1);
   EXPECT_EQ(items.Value(1), 1);
+}
+
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    slicedMapWithNullParentExportsOnlyReferencedElements) {
+  auto keys = vectorMaker_.flatVector<int32_t>({0, 10, 11, 20, 21, 30, 31});
+  auto values =
+      vectorMaker_.flatVector<int64_t>({0, 100, 110, 200, 210, 300, 310});
+  auto offsets = makeBuffer<vector_size_t>({0, 1, 3, 5});
+  auto sizes = makeBuffer<vector_size_t>({1, 2, 2, 2});
+  BufferPtr nulls =
+      AlignedBuffer::allocate<bool>(4, pool_.get(), bits::kNotNull);
+  bits::setNull(nulls->asMutable<uint64_t>(), 2, true);
+  auto vector = std::make_shared<MapVector>(
+      pool_.get(),
+      MAP(INTEGER(), BIGINT()),
+      nulls,
+      4,
+      offsets,
+      sizes,
+      keys,
+      values,
+      1);
+  auto sliced = vector->slice(1, 2);
+
+  auto array = toArrow(sliced, options_, pool_.get());
+  ASSERT_OK(array->ValidateFull());
+  EXPECT_EQ(array->null_count(), 1);
+  ASSERT_EQ(*array->type(), *arrow::map(arrow::int32(), arrow::int64()));
+  auto& mapArray = static_cast<const arrow::MapArray&>(*array);
+  validateOffsets(mapArray, {0, 2, 2});
+  auto& exportedKeys = static_cast<const arrow::Int32Array&>(*mapArray.keys());
+  ASSERT_EQ(exportedKeys.length(), 2);
+  EXPECT_EQ(exportedKeys.Value(0), 10);
+  EXPECT_EQ(exportedKeys.Value(1), 11);
+  auto& exportedItems =
+      static_cast<const arrow::Int64Array&>(*mapArray.items());
+  ASSERT_EQ(exportedItems.length(), 2);
+  EXPECT_EQ(exportedItems.Value(0), 100);
+  EXPECT_EQ(exportedItems.Value(1), 110);
 }
 
 TEST_F(ArrowBridgeArrayExportTest, mapNested) {
