@@ -124,7 +124,52 @@ class DateTimeFormatterTest : public testing::Test {
     result.resize(resultSize);
     return result;
   }
+
+#ifdef SPARK_COMPATIBLE
+  std::string formatLegacySparkDateTime(
+      const std::string& format,
+      const Timestamp& timestamp) const {
+    auto formatter = buildLegacySparkDateTimeFormatter(format);
+    const auto maxSize = formatter->maxResultSize(nullptr);
+    std::string result(maxSize, '\0');
+    const auto resultSize = formatter->format(
+        timestamp, nullptr, maxSize, result.data(), false, TimePolicy::LEGACY);
+    result.resize(resultSize);
+    return result;
+  }
+
+  Timestamp timestampFromDate(int32_t year, int32_t month, int32_t day) const {
+    return util::fromDatetime(
+        util::daysSinceEpochFromDate(year, month, day), 0);
+  }
+#endif
 };
+
+#ifdef SPARK_COMPATIBLE
+TEST_F(DateTimeFormatterTest, legacySparkWeekYearWithCalendarFields) {
+  EXPECT_EQ(
+      "2019-12-30",
+      formatLegacySparkDateTime("YYYY-MM-dd", timestampFromDate(2018, 12, 30)));
+
+  auto formatter = buildLegacySparkDateTimeFormatter("YYYY-MM-dd");
+  EXPECT_EQ(
+      timestampFromDate(1969, 12, 28),
+      formatter->parse("1970-01-01", TimePolicy::LEGACY).value().timestamp);
+
+  EXPECT_EQ(
+      timestampFromDate(2001, 6, 15),
+      buildLegacySparkDateTimeFormatter("YYYY-yyyy-MM-dd")
+          ->parse("1970-2001-06-15", TimePolicy::LEGACY)
+          .value()
+          .timestamp);
+  EXPECT_EQ(
+      timestampFromDate(1969, 12, 28),
+      buildLegacySparkDateTimeFormatter("yyyy-YYYY-MM-dd")
+          ->parse("2001-1970-06-15", TimePolicy::LEGACY)
+          .value()
+          .timestamp);
+}
+#endif
 
 TEST_F(DateTimeFormatterTest, fixedLengthTokenBuilder) {
   DateTimeFormatterBuilder builder(100);

@@ -286,14 +286,18 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetimeSignatures) {
   ASSERT_EQ(
       1, signatures.count("(varchar,varchar) -> timestamp with time zone"));
 }
-TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
+TEST_F(PrestoSqlDateTimeFunctionsTest, fromUnixtimeWeekYearWithMonth) {
   const auto fromUnixTime = [&](const std::optional<std::string>& unixTime,
                                 const std::optional<std::string>& timeFormat) {
     return evaluateOnce<std::string>(
         "from_unixtime(try_cast(c0 as bigint), c1)", unixTime, timeFormat);
   };
 
+#ifdef SPARK_COMPATIBLE
+  EXPECT_EQ("2021-12-28", fromUnixTime("1609167953", "YYYY-MM-dd").value());
+#else
   EXPECT_THROW(fromUnixTime("1609167953", "YYYY-MM-dd"), BoltUserError);
+#endif
 
   const auto fromUnixTimeWithTimezone = [&](const std::optional<std::string>&
                                                 unixTime,
@@ -308,9 +312,16 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
         timezone);
   };
 
+#ifdef SPARK_COMPATIBLE
+  EXPECT_EQ(
+      "2021-12-28",
+      fromUnixTimeWithTimezone("1609167953", "YYYY-MM-dd", "Asia/Shanghai")
+          .value());
+#else
   EXPECT_THROW(
       fromUnixTimeWithTimezone("1609167953", "YYYY-MM-dd", "Asia/Shanghai"),
       BoltUserError);
+#endif
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, civilDateTimeMillisecondRange) {
@@ -368,7 +379,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesPrestoParity) {
   }
 }
 
-TEST_F(PrestoSqlDateTimeFunctionsTest, DateFormatYYYYThrowError) {
+TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormatWeekYearWithMonth) {
   using util::fromTimestampString;
 
   const auto dateFormat = [&](std::optional<Timestamp> timestamp,
@@ -380,9 +391,15 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, DateFormatYYYYThrowError) {
              makeNullableFlatVector<std::string>({format})}));
     return resultVector->as<SimpleVector<StringView>>()->valueAt(0);
   };
+#ifdef SPARK_COMPATIBLE
+  EXPECT_EQ(
+      "2019-12-30",
+      dateFormat(fromTimestampString("2018-12-30", nullptr), "YYYY-MM-dd"));
+#else
   EXPECT_THROW(
       dateFormat(fromTimestampString("1970-01-01", nullptr), "YYYY-MM-dd"),
       BoltUserError);
+#endif
 }
 TEST_F(PrestoSqlDateTimeFunctionsTest, dayOfXxxSignatures) {
   for (const auto& name :

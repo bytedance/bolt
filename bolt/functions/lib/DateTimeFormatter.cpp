@@ -66,6 +66,8 @@ struct Date {
   int32_t week = 1;
   int32_t dayOfWeek = 1;
   bool weekDateFormat = false;
+  bool hasWeekYear = false;
+  bool hasDayOfWeek = false;
 
   int32_t dayOfYear = 1;
   bool dayOfYearFormat = false;
@@ -762,6 +764,7 @@ ErrorCode parseFromPattern(
     }
     cur += size;
     date.weekDateFormat = true;
+    date.hasDayOfWeek = type == DateTimeFormatterType::LEGACY_SPARK;
     date.dayOfYearFormat = false;
     if (!date.hasYear) {
       date.hasYear = true;
@@ -928,6 +931,12 @@ ErrorCode parseFromPattern(
       case DateTimeFormatSpecifier::YEAR:
       case DateTimeFormatSpecifier::YEAR_OF_ERA:
         date.centuryFormat = false;
+        if (type == DateTimeFormatterType::LEGACY_SPARK && date.hasWeekYear) {
+          date.weekDateFormat = false;
+        }
+        if (type == DateTimeFormatterType::LEGACY_SPARK) {
+          date.hasWeekYear = false;
+        }
         date.isYearOfEra =
             (curPattern.specifier == DateTimeFormatSpecifier::YEAR_OF_ERA);
         // Enforce Joda's year range if year was specified as "year of era".
@@ -1051,6 +1060,7 @@ ErrorCode parseFromPattern(
         }
         date.year = number;
         date.weekDateFormat = true;
+        date.hasWeekYear = type == DateTimeFormatterType::LEGACY_SPARK;
         date.dayOfYearFormat = false;
         date.centuryFormat = false;
         date.hasYear = true;
@@ -1094,6 +1104,7 @@ ErrorCode parseFromPattern(
           return ErrorCode::DAY_OUT_OF_RANGE;
         }
         date.dayOfWeek = number;
+        date.hasDayOfWeek = type == DateTimeFormatterType::LEGACY_SPARK;
         date.weekDateFormat = true;
         date.dayOfYearFormat = false;
         if (!date.hasYear) {
@@ -1795,6 +1806,15 @@ DateTimeResult DateTimeFormatter::parse(
     }
   }
 
+  if (isLegacy && type_ == DateTimeFormatterType::LEGACY_SPARK &&
+      date.hasWeekYear) {
+    date.weekDateFormat = true;
+    date.dayOfYearFormat = false;
+    if (!date.hasDayOfWeek) {
+      date.dayOfWeek = 7;
+    }
+  }
+
   auto isJulianSpecialYear = [](int32_t year) {
     return (year >= util::kMinYear) && (year < util::kJulianEndYear) &&
         (year % 100 == 0) && (year % 400 != 0);
@@ -2332,7 +2352,6 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
     BOLT_USER_FAIL("Invalid pattern specification");
   }
 
-  bool hasWeekBasedYear = false, hasMonth = false;
   DateTimeFormatterBuilder builder(format.size());
   const char* cur = format.data();
   const char* end = cur + format.size();
@@ -2376,7 +2395,6 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendCenturyOfEra(count);
           break;
         case 'Y':
-          hasWeekBasedYear = true;
           builder.appendWeekYear(count);
           break;
         case 'w':
@@ -2395,7 +2413,6 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendDayOfYear(count);
           break;
         case 'M':
-          hasMonth = true;
           if (count <= 2) {
             builder.appendMonthOfYear(count);
           } else {
@@ -2463,9 +2480,6 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
     }
   }
 
-  BOLT_USER_CHECK(
-      !(hasWeekBasedYear && hasMonth),
-      "Cannot have both week-based year[YYYY] and month[MM] in the pattern for legacy formatter");
   return builder.setType(DateTimeFormatterType::LEGACY_SPARK).build();
 }
 
