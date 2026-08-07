@@ -303,8 +303,10 @@ ShuffleWriterType decideBoltShuffleWriterType(
   ShuffleWriterType type = ShuffleWriterType::V1;
   if (supportAdaptive) {
     // for large partition number with multiple columns
-    if (numPartitions >= rowBasePartitionThreshold &&
-        numColumnsExludePid >= rowBaseColumnNumThreshold) {
+    if ((numPartitions >= rowBasePartitionThreshold &&
+         numColumnsExludePid >= rowBaseColumnNumThreshold) ||
+        static_cast<int64_t>(numPartitions) * numColumnsExludePid >
+            options.rowBasedShuffleThreshold) {
       type = ShuffleWriterType::RowBased;
       LOG(INFO) << __FUNCTION__ << ": forceShuffleWriterType = "
                 << options.forceShuffleWriterType
