@@ -99,7 +99,7 @@ repos:
           PR base / merge queue base
         stages: [pre-commit]
         entry: ./scripts/run-clang-tidy.py
-        args: [--diff, auto]
+        args: [--diff, auto, --exclude, "bolt/jit/kernels/"]
         language: python
         pass_filenames: false
         always_run: true

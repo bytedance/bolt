@@ -18,6 +18,7 @@ if(${ENABLE_BOLT_JIT})
   add_executable(bolt_thrustjit_test
     RowContainerIRTest.cpp
     ThrustJITv2Test.cpp
+    PrebuiltIRTest.cpp
   )
   target_link_libraries(
     bolt_thrustjit_test PRIVATE
@@ -50,6 +51,7 @@ if(${ENABLE_BOLT_JIT})
     Folly::follybenchmark
   )
   add_test(bolt_row_vec_cmp_test bolt_row_vec_cmp_test)
+
 endif()
 
 # TODO: refactor expression codegen

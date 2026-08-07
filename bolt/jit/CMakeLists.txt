@@ -13,12 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+add_subdirectory(kernels)
+
 bolt_add_library(
   bolt_thrustjit CompiledModule.cpp
                  ThrustJITv2.cpp
+                 PrebuiltIR.cpp
                  RowContainer/RowContainerCodeGenerator.cpp
                  RowContainer/RowEqVectorsCodeGenerator.cpp
 )
+
+add_dependencies(bolt_thrustjit jit_kernels_bc)
+
+target_include_directories(bolt_thrustjit PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kernels)
 
 target_link_libraries(bolt_thrustjit PUBLIC llvm-core::llvm-core date::date fmt::fmt Folly::folly)
 
