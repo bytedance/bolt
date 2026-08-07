@@ -121,3 +121,12 @@ if(${BOLT_ENABLE_ARROW})
   )
 
 endif()
+
+if(${BOLT_BUILD_BENCHMARKS})
+  add_executable(bolt_dwio_parquet_reader_skip_benchmark ParquetReaderSkipBenchmark.cpp)
+  target_link_libraries(
+    bolt_dwio_parquet_reader_skip_benchmark
+    PRIVATE bolt_testutils
+    ${FOLLY_BENCHMARK}
+  )
+endif()

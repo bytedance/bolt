@@ -1786,15 +1786,48 @@ class ParquetRowReader::Impl {
   }
 
   uint64_t skip(uint64_t skipSize) {
-    auto rowsToSkip = nextReadSize(skipSize);
-    if (rowsToSkip == kAtEnd) {
-      return 0;
+    uint64_t totalSkipped = 0;
+
+    // First, consume rows remaining in the currently loaded row group, if any.
+    if (skipSize > 0 && currentRowInGroup_ < rowsInCurrentRowGroup_) {
+      const auto rowsToSkip = std::min<uint64_t>(
+          skipSize, rowsInCurrentRowGroup_ - currentRowInGroup_);
+      columnReader_->setReadOffset(columnReader_->readOffset() + rowsToSkip);
+      currentRowInGroup_ += rowsToSkip;
+      totalSkipped += rowsToSkip;
+      skipSize -= rowsToSkip;
     }
 
-    BOLT_DCHECK_GT(rowsToSkip, 0);
-    columnReader_->setReadOffset(columnReader_->readOffset() + rowsToSkip);
-    currentRowInGroup_ += rowsToSkip;
-    return rowsToSkip;
+    // Then, skip over whole row groups purely using footer metadata without
+    // loading them. When a row group can be fully skipped, just advance the
+    // index instead of scheduling/loading it. When skip lands inside a row
+    // group, advance to it (which schedules/loads it) and adjust the in-group
+    // read offset.
+    while (skipSize > 0 && nextRowGroupIdsIdx_ < rowGroupIds_.size()) {
+      const auto nextRowGroupIndex = rowGroupIds_[nextRowGroupIdsIdx_];
+      const auto rowsInNextGroup = rowGroups_[nextRowGroupIndex].num_rows;
+
+      if (skipSize >= rowsInNextGroup) {
+        // Skip the whole row group by advancing the index; do not schedule or
+        // load it.
+        skipSize -= rowsInNextGroup;
+        totalSkipped += rowsInNextGroup;
+        ++nextRowGroupIdsIdx_;
+        continue;
+      }
+
+      // Landing inside this row group: load it now and seek to the in-group
+      // offset.
+      if (!advanceToNextRowGroup()) {
+        break;
+      }
+      columnReader_->setReadOffset(columnReader_->readOffset() + skipSize);
+      currentRowInGroup_ = skipSize;
+      totalSkipped += skipSize;
+      skipSize = 0;
+      break;
+    }
+    return totalSkipped;
   }
 
   uint64_t next(

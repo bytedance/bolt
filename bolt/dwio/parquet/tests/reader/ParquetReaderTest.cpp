@@ -1459,6 +1459,183 @@ TEST_F(ParquetReaderTest, prefetchRowGroups) {
   }
 }
 
+// Tests for ParquetRowReader::skip across row-group boundaries. Uses
+// multiple_row_groups.parquet which has 4 row groups with sizes
+// {127, 127, 127, 118} and a single BIGINT column "id" holding values 1..499
+// in order.
+TEST_F(ParquetReaderTest, skipAcrossRowGroups) {
+  auto rowType = ROW({"id"}, {BIGINT()});
+  const std::string sample(getExampleFilePath("multiple_row_groups.parquet"));
+
+  // Row-group row counts and cumulative start offsets (0-based row index).
+  // rg0: rows [0,   127), ids [1,   127]
+  // rg1: rows [127, 254), ids [128, 254]
+  // rg2: rows [254, 381), ids [255, 381]
+  // rg3: rows [381, 499), ids [382, 499]
+
+  auto makeReader = [&]() {
+    bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    auto reader = createReader(sample, readerOptions);
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    return reader->createRowReader(rowReaderOpts);
+  };
+
+  auto expectNextIds =
+      [&](dwio::common::RowReader& rowReader, int64_t firstId, int64_t count) {
+        VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+        int64_t remaining = count;
+        int64_t nextExpected = firstId;
+        while (remaining > 0) {
+          auto n = rowReader.next(remaining, result);
+          ASSERT_GT(n, 0);
+          ASSERT_EQ(result->size(), n);
+          auto* rowVec = result->asUnchecked<RowVector>();
+          auto* idVec = rowVec->childAt(0)->asFlatVector<int64_t>();
+          ASSERT_NE(idVec, nullptr);
+          for (vector_size_t i = 0; i < n; ++i) {
+            ASSERT_FALSE(idVec->isNullAt(i));
+            EXPECT_EQ(idVec->valueAt(i), nextExpected);
+            ++nextExpected;
+          }
+          remaining -= n;
+        }
+      };
+
+  // 1) Skip inside the first row group only (skip 0 whole row groups).
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(10), 10);
+    // Next id should be 11 (1-based), i.e. the 11th row.
+    expectNextIds(*rowReader, /*firstId=*/11, /*count=*/5);
+  }
+
+  // 2) Skip exactly 1 whole row group. Skip 127 rows -> land at start of rg1
+  //    whose first id is 128.
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(127), 127);
+    expectNextIds(*rowReader, /*firstId=*/128, /*count=*/10);
+  }
+
+  // 3) Skip 3 whole row groups. Skip 127*3=381 rows -> land at start of rg3,
+  //    whose first id is 382.
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(381), 381);
+    expectNextIds(*rowReader, /*firstId=*/382, /*count=*/10);
+  }
+
+  // 4) Skip landing at different positions inside a new row group.
+  //    a) Landing at the very start of rg2 (skip = 254).
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(254), 254);
+    expectNextIds(*rowReader, /*firstId=*/255, /*count=*/5);
+  }
+  //    b) Landing in the middle of rg2 (skip = 254 + 60 = 314).
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(314), 314);
+    // 315th row -> id 315.
+    expectNextIds(*rowReader, /*firstId=*/315, /*count=*/5);
+  }
+  //    c) Landing at the last row of rg2 (skip = 254 + 126 = 380).
+  //       Next read should yield id 381 (1 row), then cross into rg3.
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(380), 380);
+    expectNextIds(*rowReader, /*firstId=*/381, /*count=*/1);
+    // Now we should be at start of rg3.
+    expectNextIds(*rowReader, /*firstId=*/382, /*count=*/5);
+  }
+
+  // 5) Skip size larger than total remaining rows: reader should skip all
+  //    available rows, return the actual skipped count, and subsequent
+  //    next() should return 0.
+  {
+    auto rowReader = makeReader();
+    EXPECT_EQ(rowReader->skip(1000), 499);
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    EXPECT_EQ(rowReader->next(100, result), 0);
+  }
+
+  // 5b) Partial consumption, then skip past end.
+  {
+    auto rowReader = makeReader();
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    // Read 50 rows from rg0.
+    auto n = rowReader->next(50, result);
+    EXPECT_EQ(n, 50);
+    // Only 449 rows remain; requesting to skip 10000 should skip exactly 449.
+    EXPECT_EQ(rowReader->skip(10000), 449);
+    EXPECT_EQ(rowReader->next(100, result), 0);
+  }
+}
+
+// Verifies that skipping entire row groups does not trigger I/O for those
+// row groups, while a subsequent next() only reads the single landing row
+// group.
+TEST_F(ParquetReaderTest, skipAvoidsRowGroupIo) {
+  auto rowType = ROW({"id"}, {BIGINT()});
+  const std::string sample(getExampleFilePath("multiple_row_groups.parquet"));
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  // Ensure we only prefetch the current row group, so each advance triggers
+  // at most one row-group load.
+  readerOptions.setPrefetchRowGroups(0);
+  // Disable preload of the whole file so we can observe per-row-group I/O.
+  // Also shrink the footer estimate so that opening the file only reads the
+  // footer instead of the whole file.
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setFooterEstimatedSize(16);
+
+  auto ioStats = std::make_shared<IoStatistics>();
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<bytedance::bolt::LocalReadFile>(sample),
+      readerOptions.getMemoryPool(),
+      dwio::common::MetricsLog::voidLog(),
+      ioStats.get());
+  auto reader = std::make_unique<bytedance::bolt::parquet::ParquetReader>(
+      std::move(input), readerOptions);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  // After ParquetRowReader construction, the first row group (rg0) gets
+  // scheduled and loaded. Record the I/O cost as the per-row-group baseline.
+  const uint64_t bytesAfterOpen = ioStats->rawBytesRead();
+  EXPECT_GT(bytesAfterOpen, 0);
+
+  // Skip the remainder of rg0 (127 rows) + entire rg1 (127 rows) = 254 rows.
+  // Since rg0 is already loaded, the in-group skip just advances the read
+  // offset, and rg1 is fully skipped without being scheduled for I/O. As a
+  // result, rawBytesRead must not change.
+  EXPECT_EQ(rowReader->skip(254), 254);
+  EXPECT_EQ(ioStats->rawBytesRead(), bytesAfterOpen)
+      << "skip() must not issue I/O for row groups that are fully skipped";
+
+  // next() should trigger loading of exactly one row group (rg2).
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  auto n = rowReader->next(10, result);
+  EXPECT_EQ(n, 10);
+  auto* rowVec = result->asUnchecked<RowVector>();
+  auto* idVec = rowVec->childAt(0)->asFlatVector<int64_t>();
+  ASSERT_NE(idVec, nullptr);
+  EXPECT_EQ(idVec->valueAt(0), 255);
+
+  const uint64_t bytesAfterNext = ioStats->rawBytesRead();
+  const uint64_t deltaForLanding = bytesAfterNext - bytesAfterOpen;
+  EXPECT_GT(deltaForLanding, 0);
+  // next() after skip should only load the single landing row group (rg2).
+  // rg2 has the same size as rg0 (both 127 rows with the same schema), so
+  // the delta should be roughly the size of one row group. Guard against
+  // accidentally loading more than one additional row group.
+  EXPECT_LT(deltaForLanding, bytesAfterOpen)
+      << "next() after skip should only load the single landing row group";
+}
+
 TEST_F(ParquetReaderTest, testEmptyRowGroups) {
   // empty_row_groups.parquet contains empty row groups
   const std::string sample(getExampleFilePath("empty_row_groups.parquet"));
