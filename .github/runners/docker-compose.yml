@@ -25,8 +25,12 @@ services:
       test:
         - CMD-SHELL
         - >-
-          wget -q --spider http://localhost:5000/v2/bolt-ci/manifests/20260114 &&
-          wget -q --spider http://localhost:5000/v2/conan-server/manifests/latest
+          wget -q --spider
+          --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+          http://localhost:5000/v2/bolt-ci/manifests/20260114 &&
+          wget -q --spider
+          --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+          http://localhost:5000/v2/conan-server/manifests/latest
       interval: 5s
       timeout: 3s
       retries: 12
