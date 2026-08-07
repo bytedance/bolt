@@ -30,6 +30,7 @@
 
 #include "bolt/common/caching/FileIds.h"
 #include "bolt/common/caching/SsdCache.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
@@ -56,13 +57,14 @@ class SsdFileTest : public testing::Test {
   static constexpr int64_t kMB = 1 << 20;
 
   static void SetUpTestCase() {
+    filesystems::registerLocalFileSystem();
     memory::MemoryManager::testingSetInstance(
         {memory::MemoryManager::Options{}});
   }
 
   void TearDown() override {
     if (ssdFile_) {
-      ssdFile_->deleteFile();
+      ssdFile_->testingDeleteFile();
     }
     if (cache_) {
       cache_->shutdown();

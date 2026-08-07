@@ -284,7 +284,12 @@ LocalWriteFile::LocalWriteFile(
       }
     }
   }
-  auto* file = fopen(buf.get(), "ab");
+  // Open in read/write binary mode, create if doesn't exist
+  auto* file = fopen(buf.get(), "r+b");
+  if (file == nullptr) {
+    // If file doesn't exist, create it
+    file = fopen(buf.get(), "w+b");
+  }
   BOLT_CHECK_NOT_NULL(
       file,
       "fopen failure in LocalWriteFile constructor, {} {}.",
@@ -343,16 +348,30 @@ void LocalWriteFile::append(std::unique_ptr<folly::IOBuf> data) {
 void LocalWriteFile::truncate(int64_t newSize) {
   checkNotClosed(closed_);
   BOLT_CHECK_GE(newSize, 0, "New size cannot be negative.");
-  auto fd_ = fileno(file_);
-  const auto ret = ::ftruncate(fd_, newSize);
+  auto fd = fileno(file_);
+  const auto ret = ::ftruncate(fd, newSize);
   BOLT_CHECK_EQ(
       ret,
       0,
       "ftruncate failed in LocalWriteFile::truncate: {}.",
       folly::errnoStr(errno));
   // Reposition the file offset to the end of the file for append().
-  ::lseek(fd_, newSize, SEEK_SET);
+  ::lseek(fd, newSize, SEEK_SET);
   size_ = newSize;
+}
+
+void LocalWriteFile::write(
+    const std::vector<iovec>& iovecs,
+    int64_t offset,
+    int64_t length) {
+  checkNotClosed(closed_);
+  auto fd = fileno(file_);
+  const auto ret = folly::pwritev(fd, iovecs.data(), iovecs.size(), offset);
+  BOLT_CHECK_EQ(
+      ret,
+      length,
+      "pwritev failed in LocalWriteFile::write: {}.",
+      folly::errnoStr(errno));
 }
 
 void LocalWriteFile::flush() {
@@ -719,6 +738,22 @@ uint64_t AsyncLocalWriteFile::size() const {
   if (uringEnabled_)
     return offset_;
   return ftell(file_);
+}
+
+void AsyncLocalWriteFile::write(
+    const std::vector<iovec>& iovecs,
+    int64_t offset,
+    int64_t length) {
+  checkNotClosed(closed_);
+  // For async write file, if uring is enabled, we might want to use io_uring,
+  // but for now, let's use pwritev for simplicity.
+  auto fd = fileno(file_);
+  const auto ret = folly::pwritev(fd, iovecs.data(), iovecs.size(), offset);
+  BOLT_CHECK_EQ(
+      ret,
+      length,
+      "pwritev failed in AsyncLocalWriteFile::write: {}.",
+      folly::errnoStr(errno));
 }
 #endif
 } // namespace bytedance::bolt

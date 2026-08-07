@@ -75,13 +75,13 @@ class CacheTest : public testing::Test {
   }
 
   void TearDown() override {
-    executor_->join();
-    auto ssdCache = cache_->ssdCache();
-    if (ssdCache) {
-      ssdCache->testingDeleteFiles();
-    }
     if (cache_) {
       cache_->shutdown();
+    }
+    executor_->join();
+    auto* ssdCache = cache_->ssdCache();
+    if (ssdCache) {
+      ssdCache->testingDeleteFiles();
     }
   }
 
@@ -691,7 +691,8 @@ TEST_F(CacheTest, readAhead) {
             const void* buffer;
             int32_t size;
             if (!files[i]->next(buffer, size)) {
-              // End of file. Check that a multiple of file size has been read.
+              // End of file. Check that a multiple of file size has been
+              // read.
               EXPECT_EQ(0, totalRead[i] % FileWithReadAhead::kFileSize);
               if (totalRead[i] >= 3 * FileWithReadAhead::kFileSize) {
                 files[i] = nullptr;

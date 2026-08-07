@@ -33,6 +33,7 @@
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/caching/SsdFileTracker.h"
 #include "bolt/common/file/File.h"
+#include "bolt/common/file/FileSystems.h"
 
 #include <gflags/gflags.h>
 
@@ -146,6 +147,7 @@ struct SsdCacheStats {
     bytesRead = tsanAtomicValue(other.bytesRead);
     entriesCached = tsanAtomicValue(other.entriesCached);
     regionsCached = tsanAtomicValue(other.regionsCached);
+    regionsEvicted = tsanAtomicValue(other.regionsEvicted);
     bytesCached = tsanAtomicValue(other.bytesCached);
     entriesAgedOut = tsanAtomicValue(other.entriesAgedOut);
     regionsAgedOut = tsanAtomicValue(other.regionsAgedOut);
@@ -168,6 +170,7 @@ struct SsdCacheStats {
   tsan_atomic<uint64_t> bytesRead{0};
   tsan_atomic<uint64_t> entriesCached{0};
   tsan_atomic<uint64_t> regionsCached{0};
+  tsan_atomic<uint64_t> regionsEvicted{0};
   tsan_atomic<uint64_t> bytesCached{0};
   tsan_atomic<uint64_t> entriesAgedOut{0};
   tsan_atomic<uint64_t> regionsAgedOut{0};
@@ -202,11 +205,11 @@ class SsdFile {
       const std::string& filename,
       int32_t shardId,
       int32_t maxRegions,
-      int64_t checkpointInternalBytes = 0,
+      int64_t checkpointIntervalBytes = 0,
       bool disableFileCow = false,
       folly::Executor* executor = nullptr);
 
-  // Adds entries of  'pins'  to this file. 'pins' must be in read mode and
+  // Adds entries of  'pins' to this file. 'pins' must be in read mode and
   // those pins that are successfully added to SSD are marked as being on SSD.
   // The file of the entries must be a file that is backed by 'this'.
   void write(std::vector<CachePin>& pins);
@@ -258,12 +261,6 @@ class SsdFile {
   // Adds 'stats_' to 'stats'.
   void updateStats(SsdCacheStats& stats) const;
 
-  // Resets this' to a post-construction empty state. See SsdCache::clear().
-  void clear();
-
-  // Deletes the backing file. Used in testing.
-  void deleteFile();
-
   /// Remove cached entries of files in the fileNum set 'filesToRemove'. If
   /// successful, return true, and 'filesRetained' contains entries that should
   /// not be removed, ex., from pinned regions. Otherwise, return false and
@@ -278,8 +275,32 @@ class SsdFile {
   // written since last checkpoint and silently returns if not.
   void checkpoint(bool force = false);
 
+  /// Returns the SSD file path.
+  const std::string& fileName() const {
+    return fileName_;
+  }
+
+  /// Returns the eviction log file path.
+  std::string getEvictLogFilePath() const {
+    return fileName_ + kLogExtension;
+  }
+
+  /// Deletes the backing file. Used in testing.
+  void testingDeleteFile();
+
+  /// Resets this' to a post-construction empty state. See SsdCache::clear().
+  void testingClear();
+
   /// Returns true if copy on write is disabled for this file. Used in testing.
   bool testingIsCowDisabled() const;
+
+  std::vector<uint64_t> testingCopyScores() {
+    return tracker_.copyScores();
+  }
+
+  int32_t testingNumWritableRegions() const {
+    return writableRegions_.size();
+  }
 
  private:
   // 4 first bytes of a checkpoint file. Allows distinguishing between format
@@ -318,8 +339,16 @@ class SsdFile {
   // Reads the backing file with ReadFile::preadv().
   void read(uint64_t offset, const std::vector<folly::Range<char*>>& buffers);
 
+  // Writes 'iovecs' to the SSD file at the 'offset'. Returns true if the write
+  // succeeds; otherwise, log the error and return false.
+  bool write(int64_t offset, int64_t length, const std::vector<iovec>& iovecs);
+
   // Verifies that 'entry' has the data at 'run'.
   void verifyWrite(AsyncDataCacheEntry& entry, SsdRun run);
+
+  // Disable 'copy on write'. Will throw if failed for any reason, including
+  // file system not supporting cow feature.
+  void disableFileCow();
 
   // Deletes checkpoint files. If 'keepLog' is true, truncates and syncs the
   // eviction log and leaves this open.
@@ -341,9 +370,27 @@ class SsdFile {
   // the files for making new checkpoints.
   void initializeCheckpoint();
 
-  // Synchronously logs that 'regions' are no longer valid in a possibly xisting
-  // checkpoint.
+  // Synchronously logs that 'regions' are no longer valid in a possibly
+  // existing checkpoint.
   void logEviction(const std::vector<int32_t>& regions);
+
+  // Returns true if checkpoint has been enabled.
+  bool checkpointEnabled() const {
+    return checkpointIntervalBytes_ > 0;
+  }
+
+  // Returns true if checkpoint is needed.
+  bool needCheckpoint(bool force) const {
+    if (!checkpointEnabled()) {
+      return false;
+    }
+    return force || (bytesAfterCheckpoint_ >= checkpointIntervalBytes_);
+  }
+
+  // Returns the checkpoint file path.
+  std::string getCheckpointFilePath() const {
+    return fileName_ + kCheckpointExtension;
+  }
 
   static constexpr const char* kLogExtension = ".log";
   static constexpr const char* kCheckpointExtension = ".cpt";
@@ -387,14 +434,17 @@ class SsdFile {
   // Map of file number and offset to location in file.
   folly::F14FastMap<FileCacheKey, SsdRun> entries_;
 
-  // File descriptor. 0 (stdin) means file not open.
-  int32_t fd_{0};
+  // File system.
+  std::shared_ptr<filesystems::FileSystem> fs_;
 
   // Size of the backing file in bytes. Must be multiple of kRegionSize.
   uint64_t fileSize_{0};
 
-  // ReadFile made from 'fd_'.
+  // ReadFile for cache data file.
   std::unique_ptr<ReadFile> readFile_;
+
+  // WriteFile for cache data file.
+  std::unique_ptr<WriteFile> writeFile_;
 
   // Counters.
   SsdCacheStats stats_;

@@ -199,6 +199,14 @@ class WriteFile {
     BOLT_NYI("IOBuf appending is not implemented");
   }
 
+  // Writes data to the file at the specified offset.
+  virtual void write(
+      const std::vector<iovec>& /* iovecs */,
+      int64_t /* offset */,
+      int64_t /* length */) {
+    BOLT_NYI("{} is not implemented", __FUNCTION__);
+  }
+
   /// Truncates file to a new size.
   ///
   /// NOTE: this is only supported on local file system and used by SSD cache
@@ -355,10 +363,16 @@ class LocalWriteFile final : public WriteFile {
   void append(std::string_view data) final;
   void append(std::unique_ptr<folly::IOBuf> data) final;
   void truncate(int64_t newSize) final;
+  void write(const std::vector<iovec>& iovecs, int64_t offset, int64_t length)
+      final;
 
   void flush() final;
   void close() final;
   uint64_t size() const final;
+
+  int fd() const {
+    return fileno(file_);
+  }
 
  private:
   FILE* FOLLY_NONNULL file_;
@@ -449,6 +463,9 @@ class AsyncLocalWriteFile final : public WriteFile {
   void append(std::unique_ptr<folly::IOBuf> data) final;
 
   void append(std::string_view data) override;
+
+  void write(const std::vector<iovec>& iovecs, int64_t offset, int64_t length)
+      final;
 
   void flush() final {
     BOLT_UNREACHABLE();
