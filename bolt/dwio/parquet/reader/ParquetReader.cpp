@@ -125,8 +125,17 @@ bool acceptsDateFile(const bytedance::bolt::TypePtr& t) {
       t->kind() == bytedance::bolt::TypeKind::VARCHAR;
 }
 
-bool acceptsFloatingPointFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+bool acceptsRealFileForReaderCast(const bytedance::bolt::TypePtr& t) {
   return t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
+bool acceptsDoubleFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+#ifdef SPARK_COMPATIBLE
+  return t->kind() == bytedance::bolt::TypeKind::BIGINT ||
+      acceptsRealFileForReaderCast(t);
+#else
+  return acceptsRealFileForReaderCast(t);
+#endif
 }
 
 // Compatibility predicate for Parquet INT32-physical source columns
@@ -1279,13 +1288,13 @@ TypePtr ReaderBase::convertType(
       case thrift::Type::type::FLOAT:
         checkRequested([](const TypePtr& t) {
           return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE ||
-              acceptsFloatingPointFileForReaderCast(t);
+              acceptsRealFileForReaderCast(t);
         });
         return REAL();
       case thrift::Type::type::DOUBLE:
         checkRequested([](const TypePtr& t) {
           return t->kind() == TypeKind::DOUBLE ||
-              acceptsFloatingPointFileForReaderCast(t);
+              acceptsDoubleFileForReaderCast(t);
         });
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:

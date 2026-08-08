@@ -31,6 +31,7 @@
 #pragma once
 
 #include "bolt/dwio/common/SelectiveIntegerColumnReader.h"
+#include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 namespace bytedance::bolt::parquet {
 
 class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
@@ -56,6 +57,10 @@ class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
       }
       default:
         break;
+    }
+    if (params.disableFloatingPointToVarcharMetadataFilter() &&
+        isReaderCastFilterMismatch(fileType_->type(), requestedType->type())) {
+      formatData_->as<ParquetData>().disableTypeDependentMetadataFilters();
     }
   }
 

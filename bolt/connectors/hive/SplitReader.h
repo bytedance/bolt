@@ -201,7 +201,7 @@ class SplitReader : public HiveSplitReaderBase {
       metadataColumns_{};
 
  private:
-  void validateFloatingPointToVarcharFilters() const;
+  void validateReaderCastFilter() const;
 
   bool emptySplit_;
   bool isPartOfPaimonSplit_;

@@ -30,6 +30,7 @@
 
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
+#include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 namespace bytedance::bolt::parquet {
 
@@ -162,14 +163,10 @@ MapColumnReader::MapColumnReader(
   auto& keyChildType = requestedType->childAt(0);
   auto& elementChildType = requestedType->childAt(1);
   if (params.disableFloatingPointToVarcharMetadataFilter()) {
-    const auto hasMismatch = [&](int childIndex) {
-      const auto& fileChildType = fileType_->childAt(childIndex)->type();
-      const auto& requestedChildType =
-          requestedType->childAt(childIndex)->type();
-      return (fileChildType->isReal() || fileChildType->isDouble()) &&
-          requestedChildType->isVarchar();
-    };
-    if (hasMismatch(0) || hasMismatch(1)) {
+    if (isReaderCastFilterMismatch(
+            fileType_->childAt(0)->type(), requestedType->childAt(0)->type()) ||
+        isReaderCastFilterMismatch(
+            fileType_->childAt(1)->type(), requestedType->childAt(1)->type())) {
       formatData_->as<ParquetData>().disableTypeDependentMetadataFilters();
     }
   }
