@@ -474,6 +474,18 @@ BENCHMARK_RELATIVE_NAMED_PARAM(
     true);
 BENCHMARK_DRAW_LINE();
 
+BENCHMARK_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_noJIT_str_str_dict,
+    "str:str_dict",
+    false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_str_str_dict,
+    "str:str_dict",
+    true);
+BENCHMARK_DRAW_LINE();
+
 // bool_dict
 BENCHMARK_NAMED_PARAM(
     doRun,
