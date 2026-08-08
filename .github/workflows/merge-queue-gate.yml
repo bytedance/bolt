@@ -1,0 +1,62 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Merge Queue Gate
+
+on:
+  workflow_run:
+    workflows: [Build and Test, pre-commit checks]
+    types: [completed]
+
+concurrency:
+  group: merge-queue-gate-${{ github.event.workflow_run.event }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  checks: write
+  contents: read
+
+env:
+  # Keep this in sync with the two source CI workflows.
+  CI_REUSE_SALT: >-
+    bolt-ci:20260114|conan-server:latest|build-test-v2
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # workflow_run executes this workflow from the default branch. Never
+      # checkout or execute code from the triggering pull request here.
+      - name: Checkout trusted gate code
+        uses: actions/checkout@v6
+      - name: Reconcile required CI
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py reconcile-gate \
+            --source-run-id "${{ github.event.workflow_run.id }}" \
+            --salt "${CI_REUSE_SALT}" \
+            --output ci-result/result.json \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Upload trusted reusable result
+        if: ${{ steps.gate.outputs.reusable == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.gate.outputs.artifact_name }}
+          path: ${{ steps.gate.outputs.result_path }}
+          if-no-files-found: error
+          retention-days: 7
