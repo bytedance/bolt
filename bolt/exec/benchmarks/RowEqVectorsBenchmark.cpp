@@ -266,9 +266,20 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
     int32_t equalNum = 0;
     int32_t vectorSize = decodedVectors[0]->size();
     int32_t keysNum = decodedVectors.size();
-    std::vector<char*> vectors;
-    for (auto& decoded : decodedVectors) {
-      vectors.emplace_back((char*)(decoded.get()));
+    std::vector<exec::RowEqVectorRuntime> vectorRuntimes(decodedVectors.size());
+    std::vector<char*> vectors(decodedVectors.size());
+    for (auto key = 0; key < decodedVectors.size(); ++key) {
+      auto& decoded = *decodedVectors[key];
+      vectorRuntimes[key] = {
+          decoded.dataAsVoid(),
+          decoded.indices(),
+          decoded.nulls(),
+          &decoded,
+          decoded.constantIndex(),
+          decoded.isIdentityMapping(),
+          decoded.isConstantMapping(),
+          decoded.nullsUseTopLevelIndex()};
+      vectors[key] = reinterpret_cast<char*>(&vectorRuntimes[key]);
     }
 
     for (auto& row : rows) {
@@ -376,7 +387,9 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
       auto [jitMod, funcName] =
           rowContainer_->codegenRowEqVectors(types_, hasNulls_);
       jitModule_ = std::move(jitMod);
-      eqFunc_ = (exec::RowEqVectors)jitModule_->getFuncPtr(funcName);
+      if (jitModule_ != nullptr) {
+        eqFunc_ = (exec::RowEqVectors)jitModule_->getFuncPtr(funcName);
+      }
     }
 #endif
 
