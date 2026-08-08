@@ -35,13 +35,16 @@ DEFINE_bool(enable_log, false, "enable log");
 DEFINE_int32(window_injection_type, 1, "Type of injections for window");
 DEFINE_bool(input_fuzz, true, "input fuzz");
 DEFINE_int32(warmup_rounds, 0, "nums of warmup rounds");
+DEFINE_int32(jit_level, -1, "jit.level config for the benchmark task");
+DEFINE_int32(num_vectors, 2000, "Number of input vectors");
+DEFINE_int32(rows_per_vector, 1000, "Rows per input vector");
 // DEFINE_bool(merge_sort_window, false, "enable merge sort window");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
 
-int32_t kNumVectors = 2000;
-int32_t kRowsPerVector = 1000;
+int32_t kNumVectors = FLAGS_num_vectors;
+int32_t kRowsPerVector = FLAGS_rows_per_vector;
 int32_t kNumWarmupRounds = FLAGS_warmup_rounds;
 
 namespace {
@@ -355,13 +358,14 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
       const core::PlanFragment& plan) {
     auto queryCtx = core::QueryCtx::create(executor_.get());
     std::unordered_map<std::string, std::string> configs;
+    configs[core::QueryConfig::kJitLevel] = std::to_string(FLAGS_jit_level);
     if (param.enableWindowSpill) {
       configs[core::QueryConfig::kSpillEnabled] = "true";
       configs[core::QueryConfig::kWindowSpillEnabled] = "true";
       configs[core::QueryConfig::kRowBasedSpillMode] = "compression";
-      configs[core::QueryConfig::kJitLevel] = "-1";
-      // configs[core::QueryConfig::kPreferredOutputBatchBytes] = "256";
-      // configs[core::QueryConfig::kMaxOutputBatchRows] = "3";
+      configs[core::QueryConfig::kPreferredOutputBatchBytes] = "1024";
+      configs[core::QueryConfig::kPreferredOutputBatchRows] = "1024";
+      configs[core::QueryConfig::kMaxOutputBatchRows] = "1024";
       configs[core::QueryConfig::kTestingSpillPct] = "100";
     }
     queryCtx->testingOverrideConfigUnsafe(std::move(configs));
@@ -384,6 +388,9 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
+  kNumVectors = FLAGS_num_vectors;
+  kRowsPerVector = FLAGS_rows_per_vector;
+  kNumWarmupRounds = FLAGS_warmup_rounds;
   SortWindowBenchmark::SetUpTestCase();
   std::unique_ptr<SortWindowBenchmark> benchmark;
   std::vector<SortWindowBenchmarkParam> params;

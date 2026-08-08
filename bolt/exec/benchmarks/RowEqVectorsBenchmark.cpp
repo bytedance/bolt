@@ -229,6 +229,13 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
   }
 
   ~rowEqvectorsBenchmark() override {
+    rows_.clear();
+    decodedVectors_.clear();
+    inputVector_.reset();
+    rowContainer_.reset();
+#ifdef ENABLE_BOLT_JIT
+    jitModule_.reset();
+#endif
     OperatorTestBase::TearDown();
   }
 
@@ -421,8 +428,10 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
 std::unique_ptr<rowEqvectorsBenchmark> benchmark;
 
 void doRun(uint32_t it, const std::string& keys, const bool useJit) {
-  benchmark->setUseJit(useJit);
-  benchmark->prepare(keys);
+  BENCHMARK_SUSPEND {
+    benchmark->setUseJit(useJit);
+    benchmark->prepare(keys);
+  }
   for (int i = 0; i < FLAGS_iterations; i++) {
     benchmark->run();
   }
@@ -430,6 +439,26 @@ void doRun(uint32_t it, const std::string& keys, const bool useJit) {
 
 BENCHMARK_NAMED_PARAM(doRun, rowEQvecBenchmark_noJIT, FLAGS_keys, false);
 BENCHMARK_RELATIVE_NAMED_PARAM(doRun, rowEQvecBenchmark_JIT, FLAGS_keys, true);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(doRun, rowEQvecBenchmark_noJIT_i64_i32, "i64:i32", false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_i64_i32,
+    "i64:i32",
+    true);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_noJIT_i64_i32_str_inline,
+    "i64:i32:str_inline",
+    false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_i64_i32_str_inline,
+    "i64:i32:str_inline",
+    true);
 BENCHMARK_DRAW_LINE();
 
 // bool_dict
