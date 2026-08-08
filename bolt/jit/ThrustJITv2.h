@@ -65,7 +65,8 @@ class ThrustJITv2 {
 
   CompiledModuleSP CompileModule(
       std::function<bool(llvm::Module&)> irGenerator,
-      const std::string& funcName);
+      const std::string& funcName,
+      uint64_t* compileTimeNs = nullptr);
 
   CompiledModuleSP LookupSymbolsInCache(const std::string& funcName);
 

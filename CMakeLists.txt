@@ -506,6 +506,16 @@ if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char")
 endif()
 
+# Keep frame pointers and avoid sibling-call optimization so perf can fully
+# unwind stacks with the cheap frame-pointer call-graph (no DWARF needed).
+# Off by default; enable with -DBOLT_ENABLE_FRAME_POINTER=ON when profiling.
+option(BOLT_ENABLE_FRAME_POINTER
+  "Preserve frame pointers for perf stack unwinding" OFF)
+if(BOLT_ENABLE_FRAME_POINTER)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fno-optimize-sibling-calls")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fno-optimize-sibling-calls")
+endif()
+
 # Under Ninja, we are able to designate certain targets large enough to require restricted
 # parallelism.
 if("${MAX_HIGH_MEM_JOBS}")

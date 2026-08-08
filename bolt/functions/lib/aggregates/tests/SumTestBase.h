@@ -53,13 +53,13 @@ void testHookLimits(bool expectOverflow = false) {
     sumRow.sum = 0;
     ResultType expected = 0;
     char* row = reinterpret_cast<char*>(&sumRow);
-    uint64_t numNulls = 0;
+    std::optional<uint64_t> numNulls = 0;
     bytedance::bolt::aggregate::SumHook<InputType, ResultType, Overflow> hook(
         offsetof(SumRow<ResultType>, sum),
         offsetof(SumRow<ResultType>, nulls),
         0,
         &row,
-        &numNulls);
+        numNulls);
 
     // Adding limit should not overflow.
     ASSERT_NO_THROW(hook.addValue(0, &limit));

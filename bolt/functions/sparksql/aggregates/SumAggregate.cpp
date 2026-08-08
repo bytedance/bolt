@@ -32,12 +32,58 @@
 
 #include "bolt/functions/lib/aggregates/SumAggregateBase.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
+
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
 template <typename TInput, typename TAccumulator, typename ResultType>
-using SumAggregate = SumAggregateBase<TInput, TAccumulator, ResultType>;
+class SumAggregate : public SumAggregateBase<TInput, TAccumulator, ResultType> {
+ public:
+  explicit SumAggregate(TypePtr resultType)
+      : SumAggregateBase<TInput, TAccumulator, ResultType>(resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
+      return false;
+    }
+    const auto& inputType = inputTypes[0];
+    if (inputType->isRow() || inputType->isDecimal()) {
+      return false;
+    }
+    return jit::isHashAggrJitSupportedType(inputType->kind()) ||
+        inputType->kind() == TypeKind::HUGEINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+
+    const auto accumulatorKind =
+        (*inputKind == jit::HashAggrJitValueKind::Float ||
+         *inputKind == jit::HashAggrJitValueKind::Double)
+        ? jit::HashAggrJitValueKind::Double
+        : jit::HashAggrJitValueKind::Int64;
+
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::Sum,
+        .rawInputKind = *inputKind,
+        .accumulatorKind = accumulatorKind,
+        .context = context,
+        .ops = jit::getSumOps()};
+  }
+#endif
+};
 
 TypePtr getDecimalSumType(
     const TypePtr& resultType,

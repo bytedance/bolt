@@ -33,6 +33,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/functions/lib/aggregates/AggregateToIntermediate.h"
 #include "bolt/functions/lib/aggregates/DecimalAggregate.h"
+#include "bolt/functions/lib/aggregates/SumCount.h"
 #include "bolt/type/DecimalUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
@@ -76,12 +77,6 @@ const SelectivityVector* getBaseRows(
   }
   return baseRows;
 }
-
-template <typename TSum>
-struct SumCount {
-  TSum sum{0};
-  int64_t count{0};
-};
 
 } // namespace
 
@@ -213,7 +208,7 @@ class AverageAggregateBase : public exec::Aggregate {
                 groups[i], TAccumulator(decodedRaw_.valueAt<TInput>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInput>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], data[i]);
@@ -256,7 +251,7 @@ class AverageAggregateBase : public exec::Aggregate {
                 group, TAccumulator(decodedRaw_.valueAt<TInput>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       const TInput* data = decodedRaw_.data<TInput>();
       TAccumulator totalSum(0);
       rows.applyToSelected([&](vector_size_t i) { totalSum += data[i]; });

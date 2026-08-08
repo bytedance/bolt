@@ -53,6 +53,49 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
     return true;
   }
 
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (context.isRawInput) {
+      if (context.isCountStar()) {
+        return true;
+      }
+      if (inputTypes.size() != 1 || inputTypes[0] == nullptr) {
+        return false;
+      }
+      const auto& inputType = inputTypes[0];
+      return !inputType->isRow() &&
+          (inputType->isDecimal() ||
+           jit::isHashAggrJitSupportedType(inputType->kind()));
+    }
+    return inputTypes.size() == 1 && inputTypes[0] != nullptr &&
+        inputTypes[0]->kind() == TypeKind::BIGINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    auto inputKind = jit::HashAggrJitValueKind::Int64;
+    if (!context.isCountStar()) {
+      auto maybeInputKind =
+          jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
+      if (!maybeInputKind.has_value()) {
+        return std::nullopt;
+      }
+      inputKind = *maybeInputKind;
+    }
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::Count,
+        .rawInputKind = inputKind,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int64,
+        .context = context,
+        .ops = jit::getCountOps()};
+  }
+#endif
+
   void toIntermediate(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
@@ -73,15 +116,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
       folly::Range<const vector_size_t*> indices) override {
     for (auto i : indices) {
       // result of count is never null
+      groups[i][nullByte_] &= ~nullMask_;
       *value<int64_t>(groups[i]) = (int64_t)0;
     }
   }
 
   FLATTEN void
   extractValues(char** groups, int32_t numGroups, VectorPtr* result) override {
-    BaseAggregate::doExtractValues(groups, numGroups, result, [&](char* group) {
-      return *value<int64_t>(group);
-    });
+    auto* vector = (*result)->as<FlatVector<int64_t>>();
+    BOLT_CHECK(vector);
+    vector->resize(numGroups);
+    vector->clearAllNulls();
+
+    auto* rawValues = vector->mutableRawValues();
+    for (vector_size_t i = 0; i < numGroups; ++i) {
+      rawValues[i] = *value<int64_t>(groups[i]);
+    }
   }
 
   void addRawInput(

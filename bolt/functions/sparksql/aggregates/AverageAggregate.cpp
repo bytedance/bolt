@@ -31,6 +31,7 @@
 #include "bolt/functions/sparksql/aggregates/AverageAggregate.h"
 #include "bolt/functions/lib/aggregates/AverageAggregateBase.h"
 #include "bolt/functions/sparksql/DecimalUtil.h"
+
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::functions::aggregate::sparksql {
 namespace {
@@ -41,6 +42,54 @@ class AverageAggregate
  public:
   explicit AverageAggregate(TypePtr resultType)
       : AverageAggregateBase<TInput, TAccumulator, TResult>(resultType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
+      return false;
+    }
+    const auto& inputType = inputTypes[0];
+    if (context.isRawInput) {
+      if (inputType->isDecimal()) {
+        return false;
+      }
+      return jit::isHashAggrJitSupportedType(inputType->kind()) ||
+          inputType->kind() == TypeKind::HUGEINT;
+    }
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(1)->kind() == TypeKind::BIGINT &&
+        inputType->childAt(0)->kind() == TypeKind::DOUBLE;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+
+    if (!context.isRawInput) {
+      return jit::HashAggrJitDescriptor{
+          .kind = jit::HashAggrJitKind::Avg,
+          .rawInputKind = jit::HashAggrJitValueKind::Double,
+          .accumulatorKind = jit::HashAggrJitValueKind::Double,
+          .context = context,
+          .ops = jit::getAvgOps()};
+    }
+
+    auto inputKind = jit::hashAggrJitValueKind(context.inputTypes()[0]->kind());
+    if (!inputKind.has_value()) {
+      return std::nullopt;
+    }
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::Avg,
+        .rawInputKind = *inputKind,
+        .accumulatorKind = jit::HashAggrJitValueKind::Double,
+        .context = context,
+        .ops = jit::getAvgOps()};
+  }
+#endif
 
   void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
       override {
@@ -92,6 +141,42 @@ class DecimalAverageAggregate : public DecimalAggregate<TInputType> {
  public:
   explicit DecimalAverageAggregate(TypePtr resultType, TypePtr sumType)
       : DecimalAggregate<TInputType>(resultType), sumType_(sumType) {}
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
+      return false;
+    }
+    const auto& inputType = inputTypes[0];
+    if (context.isRawInput) {
+      return inputType->isDecimal();
+    }
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(0)->isDecimal() &&
+        inputType->childAt(1)->kind() == TypeKind::BIGINT;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    const auto inputTypes = context.inputTypes();
+    const auto& inputType = inputTypes[0];
+    const auto& valueType =
+        context.isRawInput ? inputType : inputType->childAt(0);
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::DecimalAvg,
+        .rawInputKind = valueType->isShortDecimal()
+            ? jit::HashAggrJitValueKind::Int64
+            : jit::HashAggrJitValueKind::Int128,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int128,
+        .context = context,
+        .ops = jit::getDecimalAvgOps()};
+  }
+#endif
 
   void addIntermediateResults(
       char** groups,

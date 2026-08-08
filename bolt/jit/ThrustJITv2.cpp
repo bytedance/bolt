@@ -21,15 +21,137 @@
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/Object/SymbolSize.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <mutex>
+#include <string>
 #include <vector>
 
+#ifdef BOLT_ENABLE_VTUNE_JIT
+#include <jitprofiling.h>
+#endif
+
 namespace bytedance::bolt::jit {
+
+namespace {
+
+// Returns whether perf-map emission is enabled. The conan LLVM package is built
+// without LLVM_USE_PERF, so llvm::JITEventListener::createPerfJITEventListener()
+// is a no-op stub that returns nullptr. We therefore emit the perf map file
+// ourselves. Controlled by the BOLT_JIT_PERF env var to avoid file IO overhead
+// in normal runs.
+bool perfMapEnabled() {
+  static const bool enabled = std::getenv("BOLT_JIT_PERF") != nullptr;
+  return enabled;
+}
+
+// Appends symbols of a freshly loaded JIT object to /tmp/perf-<PID>.map so that
+// `perf report` can resolve JIT-generated machine code to function names.
+// Format per line: "<hex start addr> <hex size> <symbol name>".
+void appendPerfMap(
+    const llvm::object::ObjectFile& obj,
+    const llvm::RuntimeDyld::LoadedObjectInfo& loadedInfo) {
+  // Use the relocated/loaded object so symbol addresses are the runtime ones.
+  auto debugObjOwner = loadedInfo.getObjectForDebug(obj);
+  const llvm::object::ObjectFile& debugObj = *debugObjOwner.getBinary();
+
+  static std::mutex perfMapMutex;
+  std::lock_guard<std::mutex> guard(perfMapMutex);
+
+  std::string path =
+      "/tmp/perf-" + std::to_string(llvm::sys::Process::getProcessId()) +
+      ".map";
+  std::FILE* file = std::fopen(path.c_str(), "a");
+  if (file == nullptr) {
+    return;
+  }
+
+  for (const auto& [symbol, size] :
+       llvm::object::computeSymbolSizes(debugObj)) {
+    auto typeOr = symbol.getType();
+    if (!typeOr || *typeOr != llvm::object::SymbolRef::ST_Function) {
+      continue;
+    }
+    auto addrOr = symbol.getAddress();
+    auto nameOr = symbol.getName();
+    if (!addrOr || !nameOr || size == 0) {
+      llvm::consumeError(addrOr.takeError());
+      llvm::consumeError(nameOr.takeError());
+      continue;
+    }
+    std::fprintf(
+        file,
+        "%llx %llx %.*s\n",
+        static_cast<unsigned long long>(*addrOr),
+        static_cast<unsigned long long>(size),
+        static_cast<int>(nameOr->size()),
+        nameOr->data());
+  }
+  std::fclose(file);
+}
+
+#ifdef BOLT_ENABLE_VTUNE_JIT
+// Returns whether VTune JIT symbol reporting is enabled. Unlike perf's
+// /tmp/perf-<pid>.map (which VTune does not read), VTune resolves JIT code only
+// when the process actively reports each function via the Intel JIT Profiling
+// API (iJIT_NotifyEvent). Controlled by the BOLT_JIT_VTUNE env var to avoid the
+// reporting overhead in normal runs.
+bool vtuneJitEnabled() {
+  static const bool enabled = std::getenv("BOLT_JIT_VTUNE") != nullptr;
+  return enabled;
+}
+
+// Reports symbols of a freshly loaded JIT object to VTune through the Intel JIT
+// Profiling API so that VTune can attribute samples in JIT-generated machine
+// code to function names instead of "outside any known module".
+void notifyVTune(
+    const llvm::object::ObjectFile& obj,
+    const llvm::RuntimeDyld::LoadedObjectInfo& loadedInfo) {
+  // Use the relocated/loaded object so symbol addresses are the runtime ones.
+  auto debugObjOwner = loadedInfo.getObjectForDebug(obj);
+  const llvm::object::ObjectFile& debugObj = *debugObjOwner.getBinary();
+
+  static std::mutex vtuneMutex;
+  std::lock_guard<std::mutex> guard(vtuneMutex);
+
+  for (const auto& [symbol, size] :
+       llvm::object::computeSymbolSizes(debugObj)) {
+    auto typeOr = symbol.getType();
+    if (!typeOr || *typeOr != llvm::object::SymbolRef::ST_Function) {
+      continue;
+    }
+    auto addrOr = symbol.getAddress();
+    auto nameOr = symbol.getName();
+    if (!addrOr || !nameOr || size == 0) {
+      llvm::consumeError(addrOr.takeError());
+      llvm::consumeError(nameOr.takeError());
+      continue;
+    }
+    // iJIT_Method_Load.method_name is a non-const char*; keep a stable owning
+    // copy for the duration of the iJIT_NotifyEvent call.
+    std::string name = nameOr->str();
+    iJIT_Method_Load jit_method = {};
+    jit_method.method_id = iJIT_GetNewMethodID();
+    jit_method.method_name = name.data();
+    jit_method.method_load_address = reinterpret_cast<void*>(*addrOr);
+    jit_method.method_size = static_cast<unsigned int>(size);
+    iJIT_NotifyEvent(
+        iJVM_EVENT_TYPE_METHOD_LOAD_FINISHED, static_cast<void*>(&jit_method));
+  }
+}
+#endif // BOLT_ENABLE_VTUNE_JIT
+
+} // namespace
 
 llvm::Expected<std::unique_ptr<ThrustJITv2>> ThrustJITv2::Create() {
   static std::once_flag llvmTargetInitialized;
@@ -59,7 +181,16 @@ llvm::Expected<std::unique_ptr<ThrustJITv2>> ThrustJITv2::Create() {
                     [tracker](
                         llvm::orc::MaterializationResponsibility& mr,
                         const llvm::object::ObjectFile& obj,
-                        const llvm::RuntimeDyld::LoadedObjectInfo&) {
+                        const llvm::RuntimeDyld::LoadedObjectInfo&
+                            loadedInfo) {
+                      if (perfMapEnabled()) {
+                        appendPerfMap(obj, loadedInfo);
+                      }
+#ifdef BOLT_ENABLE_VTUNE_JIT
+                      if (vtuneJitEnabled()) {
+                        notifyVTune(obj, loadedInfo);
+                      }
+#endif
                       llvm::orc::ResourceKey resourceKey = 0;
                       if (auto err = mr.withResourceKeyDo(
                               [&](llvm::orc::ResourceKey key) {
@@ -95,7 +226,11 @@ ThrustJITv2* ThrustJITv2::getInstance() {
 
 CompiledModuleSP ThrustJITv2::CompileModule(
     std::function<bool(llvm::Module&)> irGenerator,
-    const std::string& funcName) {
+    const std::string& funcName,
+    uint64_t* compileTimeNs) {
+  if (compileTimeNs != nullptr) {
+    *compileTimeNs = 0;
+  }
   {
     std::unique_lock lock(mutex_);
     if (auto cached = compiledModuleCache_.get(funcName); cached != nullptr) {
@@ -110,6 +245,8 @@ CompiledModuleSP ThrustJITv2::CompileModule(
 
     compilingFunctions_.insert(funcName);
   }
+
+  const auto compileStart = std::chrono::steady_clock::now();
 
   auto clearCompilingFlag = [this, &funcName]() {
     std::lock_guard lock(mutex_);
@@ -206,6 +343,12 @@ CompiledModuleSP ThrustJITv2::CompileModule(
     compilingFunctions_.erase(funcName);
   }
   compilingCv_.notify_all();
+
+  if (compileTimeNs != nullptr) {
+    *compileTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now() - compileStart)
+                         .count();
+  }
 
   return compiledModule;
 }

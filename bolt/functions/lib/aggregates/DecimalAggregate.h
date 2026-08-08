@@ -32,6 +32,7 @@
 
 #include "bolt/common/base/IOUtils.h"
 #include "bolt/exec/Aggregate.h"
+#include "bolt/functions/lib/aggregates/DecimalAccumulatorLayout.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/vector/FlatVector.h"
 namespace bytedance::bolt::functions::aggregate {
@@ -42,7 +43,7 @@ namespace bytedance::bolt::functions::aggregate {
  *    COUNT: Total number of rows so far.
  *    OVERFLOW: Total count of net overflow or underflow so far.
  */
-struct LongDecimalWithOverflowState {
+struct LongDecimalWithOverflowState : LongDecimalWithOverflowLayout {
  public:
   void mergeWith(const StringView& serializedData) {
     BOLT_CHECK_EQ(serializedData.size(), serializedSize());
@@ -75,11 +76,9 @@ struct LongDecimalWithOverflowState {
   static constexpr size_t serializedSize() {
     return sizeof(int64_t) * 4;
   }
-
-  int128_t sum{0};
-  int64_t count{0};
-  int64_t overflow{0};
 };
+
+static_assert(std::is_standard_layout_v<LongDecimalWithOverflowState>);
 
 template <typename TResultType, typename TInputType = TResultType>
 class DecimalAggregate : public exec::Aggregate {
@@ -133,7 +132,7 @@ class DecimalAggregate : public exec::Aggregate {
                 groups[i], TResultType(decodedRaw_.valueAt<TInputType>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], TResultType(data[i]));
@@ -179,7 +178,7 @@ class DecimalAggregate : public exec::Aggregate {
                 group, TResultType(decodedRaw_.valueAt<TInputType>(i)));
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       const TInputType* data = decodedRaw_.data<TInputType>();
       LongDecimalWithOverflowState accumulator;
       rows.applyToSelected([&](vector_size_t i) {

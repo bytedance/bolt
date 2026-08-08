@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Range.h"
 #include "bolt/vector/LazyVector.h"
@@ -60,7 +62,7 @@ class AggregationHook : public ValueHook {
       int32_t nullByte,
       uint8_t nullMask,
       char** groups,
-      uint64_t* numNulls)
+      std::optional<uint64_t>& numNulls)
       : offset_(offset),
         nullByte_(nullByte),
         nullMask_(nullMask),
@@ -91,11 +93,13 @@ class AggregationHook : public ValueHook {
   }
 
   inline bool clearNull(char* group) {
-    if (*numNulls_) {
+    if (!numNulls_.has_value() || *numNulls_ > 0) {
       uint8_t mask = group[nullByte_];
       if (mask & nullMask_) {
         group[nullByte_] = mask & clearNullMask_;
-        --*numNulls_;
+        if (numNulls_.has_value()) {
+          --*numNulls_;
+        }
         return true;
       }
     }
@@ -108,7 +112,7 @@ class AggregationHook : public ValueHook {
   const uint8_t nullMask_;
   const uint8_t clearNullMask_;
   char* const* const groups_;
-  uint64_t* numNulls_;
+  std::optional<uint64_t>& numNulls_;
 };
 
 namespace {
@@ -132,7 +136,7 @@ class SumHook final : public AggregationHook {
       int32_t nullByte,
       uint8_t nullMask,
       char** groups,
-      uint64_t* numNulls)
+      std::optional<uint64_t>& numNulls)
       : AggregationHook(offset, nullByte, nullMask, groups, numNulls) {}
 
   Kind kind() const override {
@@ -174,7 +178,7 @@ class SimpleCallableHook final : public AggregationHook {
       int32_t nullByte,
       uint8_t nullMask,
       char** groups,
-      uint64_t* numNulls,
+      std::optional<uint64_t>& numNulls,
       UpdateSingleValue updateSingleValue)
       : AggregationHook(offset, nullByte, nullMask, groups, numNulls),
         updateSingleValue_(updateSingleValue) {}
@@ -203,7 +207,7 @@ class MinMaxHook final : public AggregationHook {
       int32_t nullByte,
       uint8_t nullMask,
       char** groups,
-      uint64_t* numNulls)
+      std::optional<uint64_t>& numNulls)
       : AggregationHook(offset, nullByte, nullMask, groups, numNulls) {}
 
   Kind kind() const override {

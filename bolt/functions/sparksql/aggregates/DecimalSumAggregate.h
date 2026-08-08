@@ -31,14 +31,11 @@
 #pragma once
 #include "bolt/exec/Aggregate.h"
 #include "bolt/expression/FunctionSignature.h"
+#include "bolt/functions/lib/aggregates/DecimalAccumulatorLayout.h"
 #include "bolt/vector/FlatVector.h"
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
-struct DecimalSum {
-  int128_t sum{0};
-  int64_t overflow{0};
-  bool isEmpty{true};
-
+struct DecimalSum : DecimalSumAccumulatorLayout {
   void mergeWith(const DecimalSum& other) {
     this->overflow += other.overflow;
     this->overflow +=
@@ -46,6 +43,8 @@ struct DecimalSum {
     this->isEmpty &= other.isEmpty;
   }
 };
+
+static_assert(std::is_standard_layout_v<DecimalSum>);
 
 template <typename TInputType, typename TResultType>
 class DecimalSumAggregate : public exec::Aggregate {
@@ -60,6 +59,43 @@ class DecimalSumAggregate : public exec::Aggregate {
   int32_t accumulatorAlignmentSize() const override {
     return alignof(DecimalSum);
   }
+
+#ifdef ENABLE_BOLT_JIT
+  bool supportsHashAggrJit(
+      const jit::HashAggrJitPlanContext& context) const override {
+    const auto inputTypes = context.inputTypes();
+    if (inputTypes.size() != 1 || !inputTypes[0]) {
+      return false;
+    }
+    const auto& inputType = inputTypes[0];
+    if (context.isRawInput) {
+      return inputType->isDecimal() &&
+          (inputType->isShortDecimal() || inputType->isLongDecimal());
+    }
+    return inputType->isRow() && inputType->size() == 2 &&
+        inputType->childAt(0)->isDecimal() &&
+        inputType->childAt(1)->kind() == TypeKind::BOOLEAN;
+  }
+
+  std::optional<jit::HashAggrJitDescriptor> createHashAggrJitDescriptor(
+      const jit::HashAggrJitPlanContext& context) const override {
+    if (!supportsHashAggrJit(context)) {
+      return std::nullopt;
+    }
+    const auto inputTypes = context.inputTypes();
+    const auto& inputType = inputTypes[0];
+    const auto& valueType =
+        context.isRawInput ? inputType : inputType->childAt(0);
+    return jit::HashAggrJitDescriptor{
+        .kind = jit::HashAggrJitKind::DecimalSum,
+        .rawInputKind = valueType->isShortDecimal()
+            ? jit::HashAggrJitValueKind::Int64
+            : jit::HashAggrJitValueKind::Int128,
+        .accumulatorKind = jit::HashAggrJitValueKind::Int128,
+        .context = context,
+        .ops = jit::getDecimalSumOps()};
+  }
+#endif
 
   void initializeNewGroups(
       char** groups,
@@ -195,7 +231,7 @@ class DecimalSumAggregate : public exec::Aggregate {
                 groups[i], decodedRaw_.valueAt<TInputType>(i), false);
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       rows.applyToSelected([&](vector_size_t i) {
         updateNonNullValue<false>(groups[i], data[i], false);
@@ -237,7 +273,7 @@ class DecimalSumAggregate : public exec::Aggregate {
                 group, decodedRaw_.valueAt<TInputType>(i), false);
           },
           nulls);
-    } else if (!exec::Aggregate::numNulls_ && decodedRaw_.isIdentityMapping()) {
+    } else if (exec::Aggregate::hasNoNulls() && decodedRaw_.isIdentityMapping()) {
       auto data = decodedRaw_.data<TInputType>();
       DecimalSum decimalSum;
       rows.applyToSelected([&](vector_size_t i) {

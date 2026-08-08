@@ -35,6 +35,7 @@
 #include "bolt/exec/RowContainer.h"
 #include "bolt/expression/SignatureBinder.h"
 #include "bolt/functions/lib/aggregates/AggregateToIntermediate.h"
+
 namespace bytedance::bolt::exec {
 
 void AggregateCompanionFunctionBase::setOffsetsInternal(
@@ -42,6 +43,7 @@ void AggregateCompanionFunctionBase::setOffsetsInternal(
     int32_t nullByte,
     uint8_t nullMask,
     int32_t rowSizeOffset) {
+  Aggregate::setOffsetsInternal(offset, nullByte, nullMask, rowSizeOffset);
   fn_->setOffsets(offset, nullByte, nullMask, rowSizeOffset);
 }
 
@@ -64,6 +66,19 @@ bool AggregateCompanionFunctionBase::isFixedSize() const {
 bool AggregateCompanionFunctionBase::supportsToIntermediate() const {
   return fn_->supportsToIntermediate();
 }
+
+#ifdef ENABLE_BOLT_JIT
+bool AggregateCompanionFunctionBase::supportsHashAggrJit(
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->supportsHashAggrJit(rewriteHashAggrJitContext(context));
+}
+
+std::optional<jit::HashAggrJitDescriptor>
+AggregateCompanionFunctionBase::createHashAggrJitDescriptor(
+    const jit::HashAggrJitPlanContext& context) const {
+  return fn_->createHashAggrJitDescriptor(rewriteHashAggrJitContext(context));
+}
+#endif
 
 bool AggregateCompanionFunctionBase::supportAccumulatorSerde() const {
   return fn_->supportAccumulatorSerde();

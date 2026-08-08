@@ -70,6 +70,15 @@ target_link_libraries(
     GTest::gtest_main
 )
 
+add_executable(bolt_hashaggr_jit_benchmark HashAggrJitBenchmark.cpp)
+
+target_link_libraries(
+  bolt_hashaggr_jit_benchmark PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
 add_executable(bolt_sort_random_data_benchmark SortRandomDataBenchmark.cpp)
 
 add_executable(bolt_sort_window_benchmark SortWindowBenchmark.cpp)

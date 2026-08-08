@@ -29,6 +29,8 @@
  */
 
 #include "bolt/exec/GroupingSet.h"
+#include <chrono>
+#include <sstream>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -36,8 +38,13 @@
 #include "bolt/exec/ContainerRow2RowSerde.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/RowToColumnVector.h"
+#ifdef ENABLE_BOLT_JIT
+#include <folly/executors/GlobalExecutor.h>
+#include "bolt/jit/aggregation/HashAggrJit.h"
+#endif
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
+#include "bolt/vector/FlatVector.h"
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
@@ -57,6 +64,218 @@ bool areAllLazyNotLoaded(const std::vector<VectorPtr>& vectors) {
   return std::all_of(vectors.begin(), vectors.end(), [](const auto& vector) {
     return isLazyNotLoaded(*vector);
   });
+}
+
+#ifdef ENABLE_BOLT_JIT
+std::string hashAggrJitTypeName(const TypePtr& type) {
+  return type == nullptr ? "null" : type->toString();
+}
+
+std::optional<jit::HashAggrJitValueKind> hashAggrJitOutputValueKind(
+    const BaseVector* vector) {
+  const auto& type = vector->type();
+  if (type->isShortDecimal()) {
+    return jit::HashAggrJitValueKind::Int64;
+  }
+  if (type->isLongDecimal()) {
+    return jit::HashAggrJitValueKind::Int128;
+  }
+  return jit::hashAggrJitValueKind(type->kind());
+}
+
+void* hashAggrJitRawOutputData(
+    BaseVector* vector,
+    jit::HashAggrJitValueKind kind) {
+  switch (kind) {
+    case jit::HashAggrJitValueKind::Bool:
+      return const_cast<void*>(vector->valuesAsVoid());
+    case jit::HashAggrJitValueKind::Int8:
+      return vector->asUnchecked<FlatVector<int8_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int16:
+      return vector->asUnchecked<FlatVector<int16_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int32:
+      return vector->asUnchecked<FlatVector<int32_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int64:
+      return vector->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Float:
+      return vector->asUnchecked<FlatVector<float>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Double:
+      return vector->asUnchecked<FlatVector<double>>()->mutableRawValues();
+    case jit::HashAggrJitValueKind::Int128:
+      return vector->asUnchecked<FlatVector<int128_t>>()->mutableRawValues();
+  }
+  return nullptr;
+}
+
+std::optional<jit::HashAggrJitValueKind> hashAggrJitInputValueKind(
+    const BaseVector* vector) {
+  const auto& type = vector->type();
+  if (type->isShortDecimal()) {
+    return jit::HashAggrJitValueKind::Int64;
+  }
+  if (type->isLongDecimal()) {
+    return jit::HashAggrJitValueKind::Int128;
+  }
+  return jit::hashAggrJitValueKind(type->kind());
+}
+
+const void* hashAggrJitRawInputData(
+    const BaseVector* vector,
+    jit::HashAggrJitValueKind kind) {
+  switch (kind) {
+    case jit::HashAggrJitValueKind::Bool:
+      return vector->valuesAsVoid();
+    case jit::HashAggrJitValueKind::Int8:
+      return vector->asUnchecked<FlatVector<int8_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int16:
+      return vector->asUnchecked<FlatVector<int16_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int32:
+      return vector->asUnchecked<FlatVector<int32_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int64:
+      return vector->asUnchecked<FlatVector<int64_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Int128:
+      return vector->asUnchecked<FlatVector<int128_t>>()->rawValues();
+    case jit::HashAggrJitValueKind::Float:
+      return vector->asUnchecked<FlatVector<float>>()->rawValues();
+    case jit::HashAggrJitValueKind::Double:
+      return vector->asUnchecked<FlatVector<double>>()->rawValues();
+  }
+  return nullptr;
+}
+
+bool fillHashAggrJitRowInputRuntime(
+    jit::HashAggrJitInputRuntime& input,
+    std::vector<jit::HashAggrJitScalarInputRuntime>& children,
+    std::vector<const jit::HashAggrJitScalarInputRuntime*>& childPtrs,
+    DecodedVector& decoded,
+    const SelectivityVector& rows,
+    const jit::HashAggrJitSlot& slot) {
+  // The raw row-field fast path applies to merge inputs whose intermediate
+  // representation is ROW(field0, field1): avg's ROW(sum, count) and decimal
+  // sum's ROW(sum, isEmpty). For both, field0 is the running sum read on the
+  // hot merge path; populating its raw pointer lets generated IR load it
+  // directly instead of calling the per-row jit_GetDecodedRowField* helper
+  // (which rebuilds a field DecodedVector on every call).
+  if (slot.desc.inputShape() != jit::HashAggrJitRuntimeShape::Row) {
+    return false;
+  }
+  const auto* base = decoded.base();
+  if (base == nullptr || base->encoding() != VectorEncoding::Simple::ROW) {
+    return false;
+  }
+  const auto* rowVector = base->asUnchecked<RowVector>();
+  if (rowVector->childrenSize() == 0) {
+    return false;
+  }
+  const auto numChildren = rowVector->childrenSize();
+  children.resize(numChildren);
+  childPtrs.resize(numChildren);
+  for (auto field = 0; field < numChildren; ++field) {
+    const auto& childVector = rowVector->childAt(field);
+    if (childVector->encoding() != VectorEncoding::Simple::FLAT) {
+      return false;
+    }
+    const auto kind = hashAggrJitInputValueKind(childVector.get());
+    if (!kind.has_value()) {
+      return false;
+    }
+    children[field] = jit::HashAggrJitScalarInputRuntime{
+        .values = hashAggrJitRawInputData(childVector.get(), *kind),
+        .indices = decoded.indices(),
+        .nulls = childVector->rawNulls(),
+        .isIdentityMapping = decoded.isIdentityMapping()};
+    childPtrs[field] = &children[field];
+  }
+  input.row = jit::HashAggrJitRowInputRuntime{
+      .nulls = decoded.nulls(&rows),
+      .children = childPtrs.data(),
+      .numChildren = static_cast<int32_t>(numChildren)};
+  return true;
+}
+
+// Fills the raw child pointers for a ROW output runtime. Returns false when any
+// ROW child is not FLAT (e.g. dictionary/constant wrapped), in which case the
+// JIT fast path is not applicable and the caller must fall back to the non-JIT
+// extract path.
+bool fillHashAggrJitRowOutputRuntime(
+    jit::HashAggrJitOutputRuntime& output,
+    std::vector<jit::HashAggrJitScalarOutputRuntime>& children,
+    std::vector<jit::HashAggrJitScalarOutputRuntime*>& childPtrs,
+    BaseVector* vector) {
+  auto* rowVector = vector->asUnchecked<RowVector>();
+  if (rowVector->childrenSize() == 0) {
+    return false;
+  }
+  const auto numChildren = rowVector->childrenSize();
+  children.resize(numChildren);
+  childPtrs.resize(numChildren);
+  for (auto field = 0; field < numChildren; ++field) {
+    auto& childVector = rowVector->childAt(field);
+    if (childVector->encoding() != VectorEncoding::Simple::FLAT) {
+      return false;
+    }
+    const auto kind = hashAggrJitOutputValueKind(childVector.get());
+    if (!kind.has_value()) {
+      return false;
+    }
+    children[field] = jit::HashAggrJitScalarOutputRuntime{
+        .values = hashAggrJitRawOutputData(childVector.get(), *kind),
+        .nulls = childVector->mutableRawNulls(),
+        .vector = childVector.get()};
+    childPtrs[field] = &children[field];
+  }
+  output.row = jit::HashAggrJitRowOutputRuntime{
+      .nulls = vector->mutableRawNulls(),
+      .children = childPtrs.data(),
+      .numChildren = static_cast<int32_t>(numChildren),
+      .vector = vector};
+  return true;
+}
+
+void resetHashAggrJitOutputDataDependentFlags(
+    BaseVector* vector,
+    const jit::HashAggrJitSlot& slot) {
+  vector->resetDataDependentFlags(nullptr);
+  if (slot.desc.outputShape() != jit::HashAggrJitRuntimeShape::Row) {
+    return;
+  }
+
+  auto* rowVector = vector->asUnchecked<RowVector>();
+  for (auto i = 0; i < rowVector->childrenSize(); ++i) {
+    rowVector->childAt(i)->resetDataDependentFlags(nullptr);
+  }
+}
+
+#endif
+
+std::optional<jit::HashAggrJitSlot> makeHashAggrJitSlot(
+    int32_t aggregateIndex,
+    const AggregateInfo& aggregate,
+    bool isRawInput,
+    bool isPartialOutput) {
+  if (aggregate.distinct || aggregate.mask.has_value() ||
+      !aggregate.sortingKeys.empty()) {
+    return std::nullopt;
+  }
+
+  // Fill the stage-agnostic absolute types and let the context derive the
+  // stage-specific input/output view from the flags. Companion functions may
+  // later flip the flags (via rewriteHashAggrJitContext) without needing to
+  // re-pick types here.
+  const jit::HashAggrJitPlanContext context{
+      .isRawInput = isRawInput,
+      .isPartialOutput = isPartialOutput,
+      .rawInputTypes = aggregate.rawInputTypes,
+      .intermediateType = aggregate.intermediateType,
+      .resultType = aggregate.function->resultType()};
+  if (!aggregate.function->supportsHashAggrJit(context)) {
+    return std::nullopt;
+  }
+  auto descriptor = aggregate.function->createHashAggrJitDescriptor(context);
+  if (!descriptor.has_value() || descriptor->ops == nullptr) {
+    return std::nullopt;
+  }
+  return aggregate.function->createHashAggrJitSlot(aggregateIndex, *descriptor);
 }
 
 } // namespace
@@ -140,6 +359,10 @@ GroupingSet::GroupingSet(
 }
 
 GroupingSet::~GroupingSet() {
+#ifdef ENABLE_BOLT_JIT
+  // Ensure no background compilation task still references our chunks.
+  waitForHashAggrJitCompilation();
+#endif
   if (isGlobal_) {
     destroyGlobalAggregations();
   }
@@ -289,7 +512,14 @@ void GroupingSet::addInputForActiveRows(
     NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
     auto* groups = lookup_->hits.data();
     auto& newGroups = lookup_->newGroups;
+    std::vector<uint8_t> jitExecuted;
+#ifdef ENABLE_BOLT_JIT
+    runHashAggrJitAddChunks(groups, newGroups, input, mayPushdown, jitExecuted);
+#endif
     for (auto i = 0; i < aggregates_.size(); ++i) {
+      if (!jitExecuted.empty() && jitExecuted[i]) {
+        continue;
+      }
       if (!aggregates_[i].sortingKeys.empty()) {
         continue;
       }
@@ -419,6 +649,9 @@ void GroupingSet::createHashTable() {
 
   RowContainer& rows = *table_->rows();
   initializeAggregates(aggregates_, rows, false);
+#ifdef ENABLE_BOLT_JIT
+  maybeCreateHashAggrJitPlan();
+#endif
 
   auto numColumns = rows.keyTypes().size() + aggregates_.size();
 
@@ -771,6 +1004,421 @@ const SelectivityVector& GroupingSet::getSelectivityVector(
   return *rows;
 }
 
+#ifdef ENABLE_BOLT_JIT
+uint64_t GroupingSet::waitForHashAggrJitCompilation() {
+  const auto waitStart = std::chrono::steady_clock::now();
+  for (auto& future : hashAggrJitCompileFutures_) {
+    if (future.valid()) {
+      stats_.aggJitCodegenTimeNs += std::move(future).get();
+    }
+  }
+  const auto waitTimeNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - waitStart)
+          .count();
+  hashAggrJitCompileFutures_.clear();
+  return waitTimeNs;
+}
+
+void GroupingSet::maybeCreateHashAggrJitPlan() {
+  const auto planStart = std::chrono::steady_clock::now();
+  // Wait for any background compilation tasks from a previous plan before
+  // tearing down the chunks they reference.
+  waitForHashAggrJitCompilation();
+  hashAggrJitChunks_.clear();
+  // Row-based output only changes partial extraction. The add path still
+  // updates the same group accumulator rows, so keep planning JIT chunks and
+  // let runHashAggrJitExtractChunks gate unsupported row-format extraction.
+  if (!queryConfig_.enableHashAggrJit() || isGlobal_ || ignoreNullKeys_) {
+    LOG(INFO) << "HashAggrJit plan disabled: enableHashAggrJit="
+              << queryConfig_.enableHashAggrJit() << " isGlobal=" << isGlobal_
+              << " ignoreNullKeys=" << ignoreNullKeys_
+              << " supportRowBasedOutput=" << supportRowBasedOutput_;
+    return;
+  }
+
+  const auto minFuseWidth =
+      std::max<int32_t>(1, queryConfig_.hashAggrJitMinFuseWidth());
+  const auto maxFuseWidth =
+      std::max<int32_t>(1, queryConfig_.hashAggrJitMaxFuseWidth());
+  const auto minChunkWidth = minFuseWidth;
+  LOG(INFO) << "HashAggrJit planning starts: isRawInput=" << isRawInput_
+            << " isPartial=" << isPartial_
+            << " aggregates=" << aggregates_.size()
+            << " minFuseWidth=" << minFuseWidth
+            << " maxFuseWidth=" << maxFuseWidth
+            << " minChunkWidth=" << minChunkWidth;
+  std::vector<jit::HashAggrJitSlot> currentChunkSlots;
+  currentChunkSlots.reserve(maxFuseWidth);
+  int32_t jitExecutableAggregates = 0;
+
+  auto flushChunk = [&]() {
+    if (currentChunkSlots.size() < minChunkWidth) {
+      if (!currentChunkSlots.empty()) {
+        LOG(INFO) << "HashAggrJit discard chunk candidate due to width "
+                  << currentChunkSlots.size() << " < " << minChunkWidth
+                  << ".";
+      }
+      currentChunkSlots.clear();
+      return;
+    }
+    // Register the chunk as not-ready and compile it in the background. The
+    // query thread falls back to the non-JIT path for slots whose chunk is not
+    // yet ready (see runHashAggrJitAddChunks / runHashAggrJitExtractChunks),
+    // then switches to JIT once compilation completes. Submitting all chunks
+    // up front lets the global CPU executor materialize them in parallel.
+    jitExecutableAggregates += currentChunkSlots.size();
+    hashAggrJitChunks_.push_back(std::make_unique<jit::HashAggrJitChunk>(
+        std::move(currentChunkSlots),
+        /*compileExtract*/ !supportRowBasedOutput_));
+    auto* chunk = hashAggrJitChunks_.back().get();
+    LOG(INFO) << "HashAggrJit formed chunk (compiling in background): "
+              << chunk->getDescription();
+    hashAggrJitCompileFutures_.push_back(
+        folly::via(folly::getGlobalCPUExecutor().get(), [chunk]() -> uint64_t {
+          uint64_t codegenTimeNs = 0;
+          if (!chunk->codegen(&codegenTimeNs)) {
+            LOG(INFO) << "HashAggrJit chunk codegen failed for chunk "
+                      << chunk->functionName();
+          }
+          return codegenTimeNs;
+        }));
+    currentChunkSlots.clear();
+    currentChunkSlots.reserve(maxFuseWidth);
+  };
+
+  for (auto i = 0; i < aggregates_.size(); ++i) {
+    auto slot = makeHashAggrJitSlot(i, aggregates_[i], isRawInput_, isPartial_);
+    if (!slot.has_value()) {
+      LOG(INFO) << "HashAggrJit aggregate is not JIT-able: agg#" << i << "("
+                << aggregates_[i].name << ") isRawInput=" << isRawInput_
+                << " isPartialOutput=" << isPartial_ << " inputTypes=["
+                << [&]() {
+                     std::ostringstream out;
+                     if (isRawInput_) {
+                       for (size_t j = 0; j < aggregates_[i].rawInputTypes.size(); ++j) {
+                         if (j > 0) {
+                           out << ", ";
+                         }
+                         out << hashAggrJitTypeName(aggregates_[i].rawInputTypes[j]);
+                       }
+                     } else {
+                       out << hashAggrJitTypeName(aggregates_[i].intermediateType);
+                     }
+                     return out.str();
+                   }()
+                << "] distinct=" << aggregates_[i].distinct
+                << " mask=" << aggregates_[i].mask.has_value()
+                << " sortingKeys=" << aggregates_[i].sortingKeys.size()
+                << " inputs=" << aggregates_[i].inputs.size()
+                << " outputType="
+                << hashAggrJitTypeName(
+                       isPartial_ ? aggregates_[i].intermediateType
+                                  : aggregates_[i].function->resultType());
+      flushChunk();
+      continue;
+    }
+
+    if (currentChunkSlots.size() >= maxFuseWidth) {
+      flushChunk();
+    }
+    VLOG(1) << "HashAggrJit aggregate is JIT-able: "
+              << slot->getDescription();
+    currentChunkSlots.push_back(*slot);
+  }
+
+  flushChunk();
+  stats_.aggJitPlanChunks += hashAggrJitChunks_.size();
+  const auto totalTimeNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - planStart)
+          .count();
+  LOG(INFO) << "HashAggrJit planning finished: totalChunks="
+            << hashAggrJitChunks_.size() << " totalAggregates="
+            << aggregates_.size() << " jitExecutableAggregates="
+            << jitExecutableAggregates << " totalTimeNs=" << totalTimeNs;
+}
+
+void GroupingSet::runHashAggrJitAddChunks(
+    char** groups,
+    folly::Range<const vector_size_t*> newGroups,
+    const RowVectorPtr& input,
+    bool mayPushdown,
+    std::vector<uint8_t>& jitExecuted) {
+  if (hashAggrJitChunks_.empty()) {
+    return;
+  }
+
+  if (hasSpilled() || bypassProbeHT_ || !activeRows_.isAllSelected()) {
+    LOG_FIRST_N(INFO, 10)
+        << "HashAggrJit add skipped: chunks=" << hashAggrJitChunks_.size()
+        << " hasSpilled=" << hasSpilled()
+        << " bypassProbeHT=" << bypassProbeHT_
+        << " supportRowBasedOutput=" << supportRowBasedOutput_
+        << " activeRowsAllSelected=" << activeRows_.isAllSelected();
+    return;
+  }
+
+  if (queryConfig_.hashAggrJitSyncCodegen() &&
+      !hashAggrJitCompileFutures_.empty()) {
+    const auto syncWaitTimeNs = waitForHashAggrJitCompilation();
+    stats_.aggJitSyncWaitTimeNs += syncWaitTimeNs;
+    LOG(INFO) << "HashAggrJit sync codegen wait before add: chunks="
+              << hashAggrJitChunks_.size()
+              << " syncWaitTimeNs=" << syncWaitTimeNs;
+  }
+
+  jitExecuted.assign(aggregates_.size(), 0);
+  std::vector<DecodedVector> decoded;
+  std::vector<jit::HashAggrJitInputRuntime> inputRuntimes;
+  std::vector<std::vector<jit::HashAggrJitScalarInputRuntime>> rowChildren;
+  std::vector<std::vector<const jit::HashAggrJitScalarInputRuntime*>>
+      rowChildPtrs;
+  // Keeps input vectors alive for the DecodedVector buffers referenced by JIT
+  // during addDense.
+  std::vector<VectorPtr> inputVectors;
+  std::vector<char*> inputRuntimePtrs;
+  std::vector<char*> newGroupPtrs;
+  for (auto& chunkPtr : hashAggrJitChunks_) {
+    auto& chunk = *chunkPtr;
+    if (!chunk.isCodegenReady()) {
+      LOG(INFO) << "HashAggrJit chunk is not codegen-ready, skip add: "
+                << chunk.getDescription();
+      continue;
+    }
+
+    const auto numSlots = chunk.slots().size();
+    decoded.resize(numSlots);
+    inputRuntimes.resize(numSlots);
+    rowChildren.resize(numSlots);
+    rowChildPtrs.resize(numSlots);
+    inputVectors.assign(numSlots, nullptr);
+    inputRuntimePtrs.assign(numSlots, nullptr);
+
+    bool canRunChunk = true;
+    std::string skipReason;
+    bool inputsMayHaveNulls = false;
+    for (auto slotIndex = 0; slotIndex < numSlots; ++slotIndex) {
+      const auto& slot = chunk.slots()[slotIndex];
+      const auto& aggregate = aggregates_[slot.aggregateIndex];
+      if (aggregate.mask.has_value() || aggregate.distinct ||
+          !aggregate.sortingKeys.empty()) {
+        canRunChunk = false;
+        skipReason = "mask/distinct/sortingKeys not supported";
+        break;
+      }
+      const auto& rows = getSelectivityVector(slot.aggregateIndex);
+      if (&rows != &activeRows_ || !rows.hasSelections()) {
+        canRunChunk = false;
+        skipReason = "selectivity vector is not dense activeRows or has no selections";
+        break;
+      }
+      if (slot.desc.isCountStar()) {
+        continue;
+      }
+      if (aggregate.inputs.size() != 1) {
+        canRunChunk = false;
+        skipReason = "input count is not 1 for non-count(*) slot";
+        break;
+      }
+
+      VectorPtr arg;
+      if (aggregate.inputs[0] == kConstantChannel) {
+        arg = BaseVector::wrapInConstant(input->size(), 0, aggregate.constantInputs[0]);
+      } else {
+        arg = input->childAt(aggregate.inputs[0]);
+      }
+      if (mayPushdown && mayPushdown_[slot.aggregateIndex] && isLazyNotLoaded(*arg)) {
+        canRunChunk = false;
+        skipReason = "lazy input with pushdown enabled";
+        break;
+      }
+      inputVectors[slotIndex] = arg;
+      decoded[slotIndex].decode(*arg, activeRows_);
+      const bool usesRowInputRuntime =
+          slot.desc.inputShape() == jit::HashAggrJitRuntimeShape::Row;
+      if (usesRowInputRuntime) {
+        if (!fillHashAggrJitRowInputRuntime(
+                inputRuntimes[slotIndex],
+                rowChildren[slotIndex],
+                rowChildPtrs[slotIndex],
+                decoded[slotIndex],
+                activeRows_,
+                slot)) {
+          canRunChunk = false;
+          skipReason = "ROW input runtime requires flat scalar row children";
+          break;
+        }
+      } else {
+        inputRuntimes[slotIndex].scalar = jit::HashAggrJitScalarInputRuntime{
+            .values = decoded[slotIndex].dataAsVoid(),
+            .indices = decoded[slotIndex].indices(),
+            .nulls = decoded[slotIndex].nulls(&activeRows_),
+            .isIdentityMapping = decoded[slotIndex].isIdentityMapping()};
+      }
+      inputsMayHaveNulls = inputsMayHaveNulls || decoded[slotIndex].mayHaveNulls();
+      inputRuntimePtrs[slotIndex] =
+          reinterpret_cast<char*>(&inputRuntimes[slotIndex]);
+    }
+
+    if (!canRunChunk) {
+      LOG(INFO) << "HashAggrJit chunk cannot run add path, fallback to non-JIT: "
+                << chunk.getDescription() << " reason=" << skipReason;
+      continue;
+    }
+
+    if (!newGroups.empty()) {
+      newGroupPtrs.resize(newGroups.size());
+      for (auto i = 0; i < newGroups.size(); ++i) {
+        newGroupPtrs[i] = groups[newGroups[i]];
+      }
+      NanosecondTimer jitTimer(&stats_.aggFunctionJitTimeNs);
+      chunk.init(newGroupPtrs.data(), newGroups.size());
+    }
+
+    {
+      NanosecondTimer jitTimer(&stats_.aggFunctionJitTimeNs);
+      const auto addMode = chunk.addDense(
+          groups,
+          activeRows_.end(),
+          inputRuntimePtrs.data(),
+          inputsMayHaveNulls);
+      switch (addMode) {
+        case jit::HashAggrJitAddMode::DenseNoNull:
+          stats_.aggFunctionJitNoNullRows += activeRows_.end();
+          break;
+        case jit::HashAggrJitAddMode::DenseNoNullIdentity:
+          stats_.aggFunctionJitNoNullIdentityRows += activeRows_.end();
+          break;
+        case jit::HashAggrJitAddMode::Dense:
+          break;
+      }
+    }
+    stats_.aggFunctionJitRows += activeRows_.end();
+    for (const auto& slot : chunk.slots()) {
+      aggregates_[slot.aggregateIndex].function->markNullCountUnknown();
+      jitExecuted[slot.aggregateIndex] = 1;
+    }
+  }
+}
+
+void GroupingSet::runHashAggrJitExtractChunks(
+    folly::Range<char**> groups,
+    const RowVectorPtr& result,
+    int32_t aggregateOutputOffset,
+    std::vector<uint8_t>& jitExtracted) {
+  if (hashAggrJitChunks_.empty()) {
+    return;
+  }
+
+  if (groups.empty() || hasSpilled() || supportRowBasedOutput_) {
+    LOG(INFO) << "HashAggrJit extract skipped: chunks=" << hashAggrJitChunks_.size()
+              << " groups=" << groups.size() << " hasSpilled=" << hasSpilled()
+              << " supportRowBasedOutput=" << supportRowBasedOutput_;
+    return;
+  }
+
+  jitExtracted.assign(aggregates_.size(), 0);
+  std::vector<jit::HashAggrJitOutputRuntime> outputRuntimes;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime>>
+      rowOutputChildren;
+  std::vector<std::vector<jit::HashAggrJitScalarOutputRuntime*>>
+      rowOutputChildPtrs;
+  std::vector<char*> resultPtrs;
+  for (auto& chunkPtr : hashAggrJitChunks_) {
+    auto& chunk = *chunkPtr;
+    if (!chunk.isCodegenReady()) {
+      // Background compilation not finished yet; leave these aggregates for the
+      // non-JIT extract path (jitExtracted stays 0 for their slots).
+      LOG(INFO) << "HashAggrJit chunk is not codegen-ready, skip extract: "
+                << chunk.getDescription();
+      continue;
+    }
+    const auto numSlots = chunk.slots().size();
+    outputRuntimes.assign(numSlots, jit::HashAggrJitOutputRuntime{});
+    rowOutputChildren.resize(numSlots);
+    rowOutputChildPtrs.resize(numSlots);
+    resultPtrs.assign(numSlots, nullptr);
+    bool canRunChunk = true;
+    std::string skipReason;
+    for (auto slotIndex = 0; slotIndex < numSlots; ++slotIndex) {
+      const auto& slot = chunk.slots()[slotIndex];
+      const auto& aggregate = aggregates_[slot.aggregateIndex];
+      if (aggregate.distinct || aggregate.mask.has_value() ||
+          !aggregate.sortingKeys.empty()) {
+        canRunChunk = false;
+        skipReason = "distinct/mask/sortingKeys not supported";
+        break;
+      }
+      auto& aggregateVector =
+          result->childAt(slot.aggregateIndex + aggregateOutputOffset);
+      const auto expectedEncoding =
+          slot.desc.outputShape() == jit::HashAggrJitRuntimeShape::Row
+          ? VectorEncoding::Simple::ROW
+          : VectorEncoding::Simple::FLAT;
+      if (aggregateVector->encoding() != expectedEncoding) {
+        canRunChunk = false;
+        skipReason = "unexpected result vector encoding";
+        break;
+      }
+      // Prepare stable raw output pointers after resizing. The JIT extract
+      // function still receives char** for ABI compatibility, but each element
+      // now points to HashAggrJitOutputRuntime rather than BaseVector directly.
+      aggregateVector->resize(groups.size());
+      if (aggregateVector->encoding() == VectorEncoding::Simple::FLAT) {
+        // Derive the raw values kind from the output vector's actual storage
+        // type rather than slot.desc.accumulatorKind. They can differ: e.g.
+        // decimal avg's accumulatorKind is Int128 while its final result is a
+        // short decimal (FlatVector<int64_t>). Using accumulatorKind here would
+        // reinterpret an int64 buffer as int128 and corrupt the heap.
+        const auto outputKind =
+            hashAggrJitOutputValueKind(aggregateVector.get());
+        if (!outputKind.has_value()) {
+          canRunChunk = false;
+          skipReason = "unsupported scalar output value kind";
+          break;
+        }
+        outputRuntimes[slotIndex].scalar =
+            jit::HashAggrJitScalarOutputRuntime{
+                .values = hashAggrJitRawOutputData(
+                    aggregateVector.get(), *outputKind),
+                .nulls = aggregateVector->mutableRawNulls(),
+                .vector = aggregateVector.get()};
+      } else if (
+          aggregateVector->encoding() == VectorEncoding::Simple::ROW &&
+          slot.desc.outputShape() == jit::HashAggrJitRuntimeShape::Row) {
+        if (!fillHashAggrJitRowOutputRuntime(
+                outputRuntimes[slotIndex],
+                rowOutputChildren[slotIndex],
+                rowOutputChildPtrs[slotIndex],
+                aggregateVector.get())) {
+          canRunChunk = false;
+          skipReason = "ROW output runtime requires flat scalar row children";
+          break;
+        }
+      }
+      resultPtrs[slotIndex] = reinterpret_cast<char*>(&outputRuntimes[slotIndex]);
+    }
+    if (!canRunChunk) {
+      LOG(INFO) << "HashAggrJit chunk cannot run extract path, fallback to non-JIT: "
+                << chunk.getDescription() << " reason=" << skipReason;
+      continue;
+    }
+    {
+      NanosecondTimer jitTimer(&stats_.aggExtractGroupsJitTimeNs);
+
+      chunk.extract(groups.data(), groups.size(), resultPtrs.data());
+      for (const auto& slot : chunk.slots()) {
+        resetHashAggrJitOutputDataDependentFlags(
+            result->childAt(slot.aggregateIndex + aggregateOutputOffset).get(),
+            slot);
+        jitExtracted[slot.aggregateIndex] = 1;
+      }
+    }
+  }
+}
+#endif
+
 bool GroupingSet::getOutput(
     int32_t maxOutputRows,
     int32_t maxOutputBytes,
@@ -896,7 +1544,14 @@ void GroupingSet::extractGroups(
       rows.extractColumn(groups.data(), groups.size(), i, keyVector);
     }
   }
+  std::vector<uint8_t> jitExtracted;
+#ifdef ENABLE_BOLT_JIT
+  runHashAggrJitExtractChunks(groups, result, totalKeys, jitExtracted);
+#endif
   for (int32_t i = 0; i < aggregates_.size(); ++i) {
+    if (!jitExtracted.empty() && jitExtracted[i]) {
+      continue;
+    }
     if (!aggregates_[i].sortingKeys.empty()) {
       continue;
     }

@@ -39,6 +39,11 @@
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/VectorHasher.h"
+#ifdef ENABLE_BOLT_JIT
+#include <folly/futures/Future.h>
+#include "bolt/jit/aggregation/HashAggrJit.h"
+#endif
+#include "bolt/vector/DecodedVector.h"
 namespace bytedance::bolt::exec {
 
 class GroupingSet {
@@ -211,6 +216,9 @@ class GroupingSet {
   }
 
   common::AggregationStats getRuntimeStats() {
+#ifdef ENABLE_BOLT_JIT
+    waitForHashAggrJitCompilation();
+#endif
     return stats_;
   }
 
@@ -281,6 +289,24 @@ class GroupingSet {
   // selectivity vector from the maskedActiveRows_ (based on the mask channel
   // index for this aggregation), otherwise it returns reference to activeRows_.
   const SelectivityVector& getSelectivityVector(size_t aggregateIndex) const;
+
+#ifdef ENABLE_BOLT_JIT
+  void maybeCreateHashAggrJitPlan();
+  // Blocks until all outstanding background JIT compilation tasks finish, so the
+  // chunks they reference can be safely destroyed or replaced.
+  uint64_t waitForHashAggrJitCompilation();
+  void runHashAggrJitAddChunks(
+      char** groups,
+      folly::Range<const vector_size_t*> newGroups,
+      const RowVectorPtr& input,
+      bool mayPushdown,
+      std::vector<uint8_t>& jitExecuted);
+  void runHashAggrJitExtractChunks(
+      folly::Range<char**> groups,
+      const RowVectorPtr& result,
+      int32_t aggregateOutputOffset,
+      std::vector<uint8_t>& jitExtracted);
+#endif
 
   // Checks if input will fit in the existing memory and increases reservation
   // if not. If reservation cannot be increased, spills enough to make 'input'
@@ -441,6 +467,19 @@ class GroupingSet {
   AggregationMasks masks_;
   std::unique_ptr<SortedAggregations> sortedAggregations_;
   std::vector<std::unique_ptr<DistinctAggregations>> distinctAggregations_;
+
+#ifdef ENABLE_BOLT_JIT
+  // unique_ptr gives each chunk a stable address so background compilation
+  // tasks can safely hold a raw pointer; HashAggrJitChunk is also non-movable
+  // (holds a std::atomic). Chunks start not-ready and flip ready once their
+  // background codegen completes.
+  std::vector<std::unique_ptr<jit::HashAggrJitChunk>> hashAggrJitChunks_;
+  // Outstanding background JIT compilation tasks for hashAggrJitChunks_. Each
+  // future returns the chunk's actual codegen CPU-wall time in nanoseconds,
+  // excluding cache-hit waits and follower waits on a same-key compile, so it
+  // can be aggregated into stats_.aggJitCodegenTimeNs on the query thread.
+  std::vector<folly::Future<uint64_t>> hashAggrJitCompileFutures_;
+#endif
 
   // True if any aggregate accumulator allocates memory outside RowContainer's
   // HashStringAllocator (e.g. directly from MemoryPool). In that case,

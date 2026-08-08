@@ -87,6 +87,8 @@ bolt_add_library(
   ProbeOperatorState.cpp
   PushBasedEvent.cpp
   RowContainer.cpp
+  ../jit/aggregation/runtime/HashAggrRuntime.cpp
+  ../jit/aggregation/runtime/HashAggrDecimalRuntime.cpp
   RowNumber.cpp
   RowsStreamingWindowBuild.cpp
   RowsStreamingWindowPartition.cpp

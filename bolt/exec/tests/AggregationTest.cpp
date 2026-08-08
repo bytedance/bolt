@@ -814,6 +814,24 @@ TEST_P(AggregationTest, setNull) {
   EXPECT_TRUE(aggregate.isNullTest(&group));
 }
 
+TEST_P(AggregationTest, isNullUsesBitWhenNullCountUnknown) {
+  AggregateFunc aggregate(BIGINT());
+  int32_t nullOffset = 0;
+  aggregate.setOffsets(
+      0,
+      RowContainer::nullByte(nullOffset),
+      RowContainer::nullMask(nullOffset),
+      0);
+
+  char group{0};
+  EXPECT_TRUE(aggregate.setNullTest(&group));
+  aggregate.markNullCountUnknown();
+
+  EXPECT_TRUE(aggregate.isNullTest(&group));
+  EXPECT_TRUE(aggregate.clearNullTest(&group));
+  EXPECT_FALSE(aggregate.isNullTest(&group));
+}
+
 TEST_P(AggregationTest, hashmodes) {
   rng_.seed(1);
   auto rowType =

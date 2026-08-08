@@ -30,8 +30,12 @@
 
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/exec/tests/utils/QueryAssertions.h"
+#include "bolt/exec/PlanNodeStats.h"
 #include "bolt/functions/lib/aggregates/tests/SumTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
+
+#include <limits>
 
 using bytedance::bolt::exec::test::PlanBuilder;
 using namespace bytedance::bolt::exec::test;
@@ -129,6 +133,219 @@ TEST_F(SumAggregationTest, overflow) {
 
 TEST_F(SumAggregationTest, hookLimits) {
   testHookLimits<int64_t, int64_t, true>();
+}
+
+TEST_F(SumAggregationTest, hashAggrJitDecimalSumAndFloatingMinMax) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(256, [](auto row) { return row % 8; }),
+       makeFlatVector<int64_t>(
+           256, [](auto row) { return row * 100; }, nullptr, DECIMAL(12, 2)),
+       makeFlatVector<double>(256, [](auto row) {
+         return row % 31 == 0 ? std::numeric_limits<double>::quiet_NaN()
+                              : static_cast<double>(row);
+       }),
+       makeFlatVector<double>(256, [](auto row) {
+         return row % 37 == 0 ? std::numeric_limits<double>::quiet_NaN()
+                              : static_cast<double>(1000 - row);
+       })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .singleAggregation(
+                      {"c0"},
+                      {"spark_sum(c1)", "min(c2)", "max(c3)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitMergeAndExtract) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return 1000 - row; }),
+       makeFlatVector<int64_t>(
+           512,
+           [](auto row) { return row; },
+           [](auto row) { return row % 7 == 0; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation(
+                      {"c0"},
+                      {"spark_sum(c1)", "spark_avg(c1)", "min(c2)", "count(c3)"})
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitPartialAvgExtractAccumulators) {
+  auto input = makeRowVector(
+      {makeFlatVector<int64_t>(2048, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 3; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 7; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation(
+                      {"c0"}, {"spark_avg(c1)", "spark_avg(c2)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitAddWithRowBasedPartialOutput) {
+  auto input = makeRowVector(
+      {makeFlatVector<int64_t>(2048, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row % 7; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(2048, [](auto row) { return row * 3; })});
+  std::vector<RowVectorPtr> inputs(16, input);
+
+  core::PlanNodeId partialAggId;
+  auto plan = PlanBuilder(pool())
+                  .values(inputs)
+                  .partialAggregation(
+                      {"c0", "c1"}, {"spark_sum(c2)", "spark_avg(c3)"})
+                  .capturePlanNodeId(partialAggId)
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .config(
+                       core::QueryConfig::kHashAggregationCompositeOutputEnabled,
+                       "true")
+                   .config(
+                       core::QueryConfig::
+                           kHashAggregationCompositeOutputAccumulatorRatio,
+                       "1")
+                   .copyResults(pool());
+  AssertQueryBuilder(plan)
+      .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+      .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+      .config(
+          core::QueryConfig::kHashAggregationCompositeOutputEnabled, "true")
+      .config(
+          core::QueryConfig::kHashAggregationCompositeOutputAccumulatorRatio,
+          "1")
+      .copyResults(pool());
+  std::shared_ptr<exec::Task> task;
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(
+                     core::QueryConfig::kHashAggregationCompositeOutputEnabled,
+                     "true")
+                 .config(
+                     core::QueryConfig::
+                         kHashAggregationCompositeOutputAccumulatorRatio,
+                     "1")
+                 .copyResults(pool(), task);
+  assertEqualResults({noJit}, {jit});
+
+  const auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& stats = taskStats.at(partialAggId);
+  const auto compositeOutput =
+      stats.customStats.find("aggregationOutputCompositeVector");
+  ASSERT_NE(compositeOutput, stats.customStats.end());
+  ASSERT_EQ(compositeOutput->second.count, 1);
+
+  const auto jitAddTime = stats.customStats.find("aggFunctionJitTimeNs");
+  ASSERT_NE(jitAddTime, stats.customStats.end());
+  ASSERT_GT(jitAddTime->second.sum, 0);
+  ASSERT_EQ(stats.customStats.count("aggExtractGroupsJitTimeNs"), 0);
+}
+
+TEST_F(SumAggregationTest, hashAggrJitAllNullGroup) {
+  // Repro: one group (c0 == 1) has all-null sum input. Spark sum over an
+  // all-null group must yield null, not 0. Partial+final two-stage plan.
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(8, [](auto row) { return row % 2; }),
+       makeFlatVector<double>(
+           8,
+           [](auto row) { return static_cast<double>(row); },
+           // c0 == 1 rows (odd rows) are all null.
+           [](auto row) { return row % 2 == 1; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .partialAggregation({"c0"}, {"spark_sum(c1)"})
+                  .finalAggregation()
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
+}
+
+TEST_F(SumAggregationTest, hashAggrJitSplitsContiguousSegments) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>(512, [](auto row) { return row % 16; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 2; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return 1000 - row; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 5; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 7; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 11; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row * 13; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row % 9; }),
+       makeFlatVector<int64_t>(512, [](auto row) { return row % 17; })});
+
+  auto plan = PlanBuilder(pool())
+                  .values({input})
+                  .singleAggregation(
+                      {"c0"},
+                      {"min(c1)",
+                       "max(c2)",
+                       "spark_sum(c3)",
+                       "spark_avg(c4)",
+                       "min(c5)",
+                       "max(c6)",
+                       "spark_sum(c7)",
+                       "spark_avg(c8)",
+                       "spark_collect_list(c1)",
+                       "spark_collect_list(c2)",
+                       "min(c9)",
+                       "max(c9)"})
+                  .planNode();
+
+  auto noJit = AssertQueryBuilder(plan)
+                   .config(core::QueryConfig::kHashAggrJitEnabled, "false")
+                   .copyResults(pool());
+  auto jit = AssertQueryBuilder(plan)
+                 .config(core::QueryConfig::kHashAggrJitEnabled, "true")
+                 .config(core::QueryConfig::kHashAggrJitMinFuseWidth, "1")
+                 .config(core::QueryConfig::kHashAggrJitMaxFuseWidth, "4")
+                 .copyResults(pool());
+  assertEqualResults({noJit}, {jit});
 }
 
 TEST_F(SumAggregationTest, decimalSum) {
