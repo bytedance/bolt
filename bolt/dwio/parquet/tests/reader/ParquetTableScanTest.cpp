@@ -735,6 +735,37 @@ TEST_F(ParquetTableScanTest, countStar) {
   assertQuery(plan, {split}, "SELECT 20");
 }
 
+TEST_F(ParquetTableScanTest, scanAggregationWithFilePreload) {
+  const vector_size_t kSize = 256 * 1024;
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+  });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto queryCtx = core::QueryCtx::create(executor_.get());
+  queryCtx->setConnectorSessionOverridesUnsafe(
+      kHiveConnectorId,
+      {{connector::hive::HiveConfig::kFilePreloadThreshold, "32MB"}});
+
+  auto plan = PlanBuilder(pool())
+                  .tableScan(asRowType(data->type()))
+                  .singleAggregation({}, {"sum(c0)"})
+                  .planNode();
+
+  std::shared_ptr<Task> task;
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .queryCtx(queryCtx)
+                    .copyResults(pool(), task);
+
+  const auto expectedSum = static_cast<int64_t>(kSize - 1) * kSize / 2;
+  assertEqualResults(
+      {makeRowVector({makeFlatVector<int64_t>({expectedSum})})}, {result});
+  ASSERT_TRUE(task->isFinished());
+  EXPECT_GT(getRuntimeStat(task, "storageReadBytes"), 0);
+}
+
 TEST_F(ParquetTableScanTest, decimalSubfieldFilter) {
   // decimal.parquet holds two columns (a: DECIMAL(5, 2), b: DECIMAL(20, 5)) and
   // 20 rows (10 rows per group). Data is in plain uncompressed format:
