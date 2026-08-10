@@ -331,6 +331,13 @@ class DataSource {
     return kUnknownRowSize;
   }
 
+  // Releases memory retained by the final completed split after no-more-splits
+  // has been received. This is narrower than close(): it must not wait for
+  // unrelated asynchronous preload work or otherwise terminate the data source.
+  // Readers still needed by pending lazy output must remain valid until
+  // close().
+  virtual void releaseFinalSplitResources() {}
+
   virtual void close() {}
 };
 

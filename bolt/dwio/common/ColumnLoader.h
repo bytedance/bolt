@@ -38,10 +38,12 @@ class ColumnLoader : public bolt::VectorLoader {
   ColumnLoader(
       SelectiveStructColumnReaderBase* structReader,
       SelectiveColumnReader* fieldReader,
-      uint64_t version)
+      uint64_t version,
+      std::shared_ptr<LazyLoadToken> token = nullptr)
       : structReader_(structReader),
         fieldReader_(fieldReader),
-        version_(version) {}
+        version_(version),
+        token_(std::move(token)) {}
 
  protected:
   void loadInternal(
@@ -57,6 +59,7 @@ class ColumnLoader : public bolt::VectorLoader {
   // these differ, 'structReader' has been advanced since the creation
   // of 'this' and 'this' is no longer loadable.
   const uint64_t version_;
+  std::shared_ptr<LazyLoadToken> token_;
 };
 
 } // namespace bytedance::bolt::dwio::common
