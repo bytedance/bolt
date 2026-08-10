@@ -99,6 +99,18 @@ target_link_libraries(
   bolt_testutils
 )
 
+# This binary is intended for manual real-file memory baselines and therefore
+# is not registered as a default ctest case.
+add_executable(bolt_dwio_parquet_memory_test ParquetReaderMemoryTest.cpp)
+target_link_libraries(
+  bolt_dwio_parquet_memory_test PRIVATE
+  bolt_testutils
+  GTest::gtest
+)
+if(BOLT_ENABLE_HDFS)
+  target_link_libraries(bolt_dwio_parquet_memory_test PRIVATE bolt_hdfs)
+endif()
+
 if(${BOLT_ENABLE_ARROW})
 
   add_executable(bolt_dwio_parquet_rlebp_decoder_test RleBpDecoderTest.cpp)

@@ -129,7 +129,127 @@ class ParquetReaderTest : public ParquetTestBase {
     assertReadWithReaderAndFilters(
         std::move(reader), fileName, fileSchema, std::move(filters), expected);
   }
+
+  RowVectorPtr makeRepDefWindowData(vector_size_t size = 512) {
+    auto items = makeArrayVector<int32_t>(
+        size,
+        [](vector_size_t row) { return row % 7; },
+        [](vector_size_t index) {
+          return static_cast<int32_t>((index * 13) % 997);
+        },
+        [](vector_size_t row) { return row % 17 == 0; },
+        [](vector_size_t index) { return index % 11 == 3; });
+    return makeRowVector({"items"}, {items});
+  }
+
+  std::string writeRepDefWindowData(const RowVectorPtr& data) {
+    auto sink = std::make_unique<MemorySink>(
+        1024 * 1024, dwio::common::FileSink::Options{.pool = leafPool_.get()});
+    auto* sinkPtr = sink.get();
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.enableDictionary = false;
+    writerOptions.dataPageSize = 128;
+
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink),
+        writerOptions,
+        std::static_pointer_cast<const RowType>(data->type()));
+    writer->write(data);
+    writer->close();
+    return std::string(sinkPtr->data(), sinkPtr->size());
+  }
+
+  std::unique_ptr<ParquetReader> createMemoryReader(
+      const std::string& fileData,
+      const RowTypePtr& rowType) {
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    readerOptions.setFileSchema(rowType);
+    auto file = std::make_shared<InMemoryReadFile>(std::string(fileData));
+    return std::make_unique<ParquetReader>(
+        std::make_unique<dwio::common::BufferedInput>(file, *leafPool_),
+        readerOptions);
+  }
+
+  std::unique_ptr<dwio::common::RowReader> createMemoryRowReader(
+      const std::string& fileData,
+      const RowTypePtr& rowType,
+      int32_t repDefPreloadWindowCount) {
+    auto reader = createMemoryReader(fileData, rowType);
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    rowReaderOpts.setParquetRepDefPreloadWindowCount(repDefPreloadWindowCount);
+    return reader->createRowReader(rowReaderOpts);
+  }
+
+  void assertHasMultipleDataPages(
+      const std::string& fileData,
+      const RowTypePtr& rowType) {
+    auto reader = createMemoryReader(fileData, rowType);
+    const auto& stats =
+        reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats();
+    int32_t dataPages = 0;
+    for (const auto& stat : stats) {
+      if (stat.page_type == thrift::PageType::DATA_PAGE ||
+          stat.page_type == thrift::PageType::DATA_PAGE_V2) {
+        dataPages += stat.count;
+      }
+    }
+    ASSERT_GT(dataPages, 1);
+  }
+
+  void assertReadInBatches(
+      const std::string& fileData,
+      const RowTypePtr& rowType,
+      const RowVectorPtr& expected,
+      int32_t repDefPreloadWindowCount) {
+    auto rowReader =
+        createMemoryRowReader(fileData, rowType, repDefPreloadWindowCount);
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    const std::vector<vector_size_t> batches{1, 2, 3, 5, 8, 13, 21, 34};
+    vector_size_t total = 0;
+    auto batchIndex = 0;
+    while (total < expected->size()) {
+      const auto batch = batches[batchIndex++ % batches.size()];
+      const auto read = rowReader->next(batch, result);
+      ASSERT_GT(read, 0);
+      ASSERT_EQ(result->size(), read);
+      assertEqualVectorPart(expected, result, total);
+      total += read;
+    }
+    EXPECT_EQ(total, expected->size());
+    EXPECT_EQ(rowReader->next(1000, result), 0);
+  }
 };
+
+TEST_F(ParquetReaderTest, repDefPreloadWindowMatchesDefaultAcrossPages) {
+  auto expected = makeRepDefWindowData();
+  auto rowType = std::static_pointer_cast<const RowType>(expected->type());
+  const auto fileData = writeRepDefWindowData(expected);
+
+  assertHasMultipleDataPages(fileData, rowType);
+  assertReadInBatches(fileData, rowType, expected, 0);
+  assertReadInBatches(fileData, rowType, expected, 1);
+}
+
+TEST_F(ParquetReaderTest, repDefPreloadWindowSkipAfterPartialDecode) {
+  auto expected = makeRepDefWindowData();
+  auto rowType = std::static_pointer_cast<const RowType>(expected->type());
+  const auto fileData = writeRepDefWindowData(expected);
+  auto rowReader = createMemoryRowReader(fileData, rowType, 1);
+
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_EQ(rowReader->next(3, result), 3);
+  assertEqualVectorPart(expected, result, 0);
+
+  rowReader->skip(5);
+  ASSERT_EQ(rowReader->next(4, result), 4);
+  assertEqualVectorPart(expected, result, 8);
+
+  rowReader->skip(11);
+  ASSERT_EQ(rowReader->next(7, result), 7);
+  assertEqualVectorPart(expected, result, 23);
+}
 
 TEST_F(ParquetReaderTest, parseDecimal) {
   // decimal_int96.parquet holds one column (s: Decimal(28, 10))

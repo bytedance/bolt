@@ -93,8 +93,7 @@ class PageReader {
         definitionLevels_(&pool_),
         repetitionLevels_(&pool_),
         nullConcatenation_(pool_),
-        windowRepDefPageData_(&pool_),
-        windowTopLevelOffsets_(&pool_),
+        windowRepDef_(&pool_),
         statis_(statis) {
     type_->makeLevelInfo(leafInfo_);
     pageOrdinal_ = 0;
@@ -116,8 +115,7 @@ class PageReader {
         definitionLevels_(&pool_),
         repetitionLevels_(&pool_),
         nullConcatenation_(pool_),
-        windowRepDefPageData_(&pool_),
-        windowTopLevelOffsets_(&pool_) {
+        windowRepDef_(&pool_) {
     pageOrdinal_ = 0;
   }
 
@@ -490,6 +488,33 @@ class PageReader {
   bool loadNextWindowRepDefPage();
   void decodeRepDefsFromBuffer();
 
+  struct WindowRepDefState {
+    explicit WindowRepDefState(memory::MemoryPool* pool = nullptr)
+        : pageData(pool), topLevelOffsets(pool) {}
+
+    void reset(bool newEnabled = false) {
+      enabled = newEnabled;
+      pageData.clear();
+      topLevelOffsets.clear();
+      topLevelOffsetBase = 0;
+      repeatDecoder.reset();
+      defineDecoder.reset();
+      repDefsRemaining = 0;
+      currentPageLeafCount = 0;
+      decodedPageCount = 0;
+    }
+
+    bool enabled{false};
+    raw_vector<char> pageData;
+    raw_vector<int32_t> topLevelOffsets;
+    int32_t topLevelOffsetBase{0};
+    std::unique_ptr<::arrow::util::RleDecoder> repeatDecoder;
+    std::unique_ptr<::arrow::util::RleDecoder> defineDecoder;
+    int32_t repDefsRemaining{0};
+    int32_t currentPageLeafCount{0};
+    int32_t decodedPageCount{0};
+  };
+
   memory::MemoryPool& pool_;
 
   std::unique_ptr<dwio::common::SeekableInputStream> inputStream_;
@@ -645,15 +670,7 @@ class PageReader {
 
   // preload undecoded RepDefs
   std::list<raw_vector<char>> preloadedRepDefs_;
-  bool windowRepDefMode_{false};
-  raw_vector<char> windowRepDefPageData_;
-  raw_vector<int32_t> windowTopLevelOffsets_;
-  int32_t windowTopLevelOffsetBase_{0};
-  std::unique_ptr<::arrow::util::RleDecoder> windowRepeatDecoder_;
-  std::unique_ptr<::arrow::util::RleDecoder> windowDefineDecoder_;
-  int32_t windowRepDefsRemaining_{0};
-  int32_t windowCurrentPageLeafCount_{0};
-  int32_t windowDecodedPageCount_{0};
+  WindowRepDefState windowRepDef_;
   int32_t repDefMemoryLimit_{16L << 20};
   int64_t totalRefDefBytes_{0};
   int32_t decodeRepDefPageCount_{10};
