@@ -58,6 +58,8 @@ using thrift::PageHeader;
 
 namespace {
 
+constexpr uint64_t kMinRepDefPreloadRows = 512;
+
 uint64_t configuredRepDefPreloadWindowCount() {
   const char* configured =
       std::getenv("BOLT_PARQUET_REPDEF_PRELOAD_WINDOW_COUNT");
@@ -1322,9 +1324,6 @@ void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
       : configuredRepDefPreloadWindowCount();
   const bool windowPreload =
       preloadWindowCount > 0 && maxRepeat_ > 0 && maxDefine_ > 0;
-  if (windowPreload) {
-    compactWindowRepDefs();
-  }
   if (!hasChunkRepDefs_ && maxDefine_ > 0) {
     const auto preloadStartNs = getCurrentTimeNano();
     if (windowPreload) {
@@ -1336,18 +1335,36 @@ void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
   }
   repDefBegin_ = repDefEnd_;
   const auto requiredTopLevelRows = numTopLevelRows + 1;
-  const auto targetTopLevelRows = windowPreload
-      ? std::max<int32_t>(
-            requiredTopLevelRows,
-            static_cast<int32_t>(std::min<uint64_t>(
-                static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
-                static_cast<uint64_t>(numTopLevelRows) * preloadWindowCount +
-                    1)))
-      : requiredTopLevelRows;
+  const auto maxTargetTopLevelRows =
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+  uint64_t targetTopLevelRows64 = requiredTopLevelRows;
   if (windowPreload) {
-    const auto loadMoreStartNs = getCurrentTimeNano();
-    loadWindowRepDefs(targetTopLevelRows);
-    loadMoreTimeNs += getCurrentTimeNano() - loadMoreStartNs;
+    const auto requestedTopLevelRows = static_cast<uint64_t>(numTopLevelRows) >
+            (maxTargetTopLevelRows - 1) / preloadWindowCount
+        ? maxTargetTopLevelRows
+        : static_cast<uint64_t>(numTopLevelRows) * preloadWindowCount + 1;
+    targetTopLevelRows64 = std::max<uint64_t>(
+        std::max<uint64_t>(
+            static_cast<uint64_t>(requiredTopLevelRows), requestedTopLevelRows),
+        kMinRepDefPreloadRows + 1);
+  }
+  const auto targetTopLevelRows = static_cast<int32_t>(
+      std::min<uint64_t>(maxTargetTopLevelRows, targetTopLevelRows64));
+  if (windowPreload) {
+    const auto firstNeededTopLevelOffset =
+        windowRepDef_.topLevelOffsetBase + repDefBegin_;
+    const auto firstCachedTopLevelOffset = std::lower_bound(
+        windowRepDef_.topLevelOffsets.begin(),
+        windowRepDef_.topLevelOffsets.end(),
+        firstNeededTopLevelOffset);
+    const auto cachedTopLevelRows =
+        windowRepDef_.topLevelOffsets.end() - firstCachedTopLevelOffset;
+    if (cachedTopLevelRows < requiredTopLevelRows) {
+      const auto loadMoreStartNs = getCurrentTimeNano();
+      compactWindowRepDefs();
+      loadWindowRepDefs(targetTopLevelRows);
+      loadMoreTimeNs += getCurrentTimeNano() - loadMoreStartNs;
+    }
   }
   int32_t numLevels = definitionLevels_.size();
   int32_t topFound = 0;
@@ -1356,12 +1373,17 @@ void PageReader::decodeRepDefs(int32_t numTopLevelRows) {
   if (maxRepeat_ > 0) {
     if (windowPreload) {
       const auto findStartNs = getCurrentTimeNano();
-      compactWindowTopLevelOffsets(repDefBegin_);
-      topFound = std::min<int32_t>(
-          requiredTopLevelRows,
-          static_cast<int32_t>(windowRepDef_.topLevelOffsets.size()));
+      const auto firstNeededTopLevelOffset =
+          windowRepDef_.topLevelOffsetBase + repDefBegin_;
+      const auto firstCachedTopLevelOffset = std::lower_bound(
+          windowRepDef_.topLevelOffsets.begin(),
+          windowRepDef_.topLevelOffsets.end(),
+          firstNeededTopLevelOffset);
+      const auto cachedTopLevelRows = static_cast<int32_t>(
+          windowRepDef_.topLevelOffsets.end() - firstCachedTopLevelOffset);
+      topFound = std::min<int32_t>(requiredTopLevelRows, cachedTopLevelRows);
       if (topFound == requiredTopLevelRows) {
-        repDefEnd_ = windowRepDef_.topLevelOffsets[numTopLevelRows] -
+        repDefEnd_ = firstCachedTopLevelOffset[numTopLevelRows] -
             windowRepDef_.topLevelOffsetBase;
       } else {
         repDefEnd_ = numLevels;
