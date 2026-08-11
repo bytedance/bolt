@@ -119,6 +119,8 @@ struct RowContainerIterator {
   // Number of unvisited entries that are prefixed by an uint64_t for
   // normalized key. Set in listRows() on first call.
   int64_t normalizedKeysLeft = 0;
+  // Snapshot used to account for normalized rows appended between listings.
+  int64_t numNormalizedKeys = 0;
   int normalizedKeySize = 0;
 
   // Ordinal position of 'currentRow' in RowContainer.
@@ -669,11 +671,19 @@ class RowContainer {
     if (iter->allocationIndex == 0 && iter->rowOffset == 0) {
       iter->normalizedKeysLeft = numRowsWithNormalizedKey_;
       iter->normalizedKeySize = originalNormalizedKeySize_;
+    } else if (numRowsWithNormalizedKey_ > iter->numNormalizedKeys) {
+      iter->normalizedKeysLeft +=
+          numRowsWithNormalizedKey_ - iter->numNormalizedKeys;
     }
+    iter->numNormalizedKeys = numRowsWithNormalizedKey_;
     int32_t rowSize = fixedRowSize_ +
         (iter->normalizedKeysLeft > 0 ? originalNormalizedKeySize_ : 0);
     for (auto i = iter->allocationIndex; i < numAllocations; ++i) {
       auto range = rows_.rangeAt(i);
+      if (range.empty()) {
+        iter->rowOffset = 0;
+        continue;
+      }
       auto* data =
           range.data() + memory::alignmentPadding(range.data(), alignment_);
       auto limit = range.size() -
@@ -715,6 +725,12 @@ class RowContainer {
           iter->allocationIndex = i;
           return count;
         }
+      }
+      // Keep the last allocation appendable until input has finished.
+      if (i + 1 == numAllocations) {
+        iter->rowOffset = row;
+        iter->allocationIndex = i;
+        return count;
       }
       iter->rowOffset = 0;
     }
@@ -847,6 +863,17 @@ class RowContainer {
         (monotonicMemoryResource_ ? monotonicMemoryResource_->reservedBytes()
                                   : 0);
   }
+
+  bool supportsOutputRangeRelease() const {
+    // External state is cleaned before retiring rows. Private arenas can be
+    // cleared in bulk after their row pointers have been released.
+    return numFreeRows_ == 0 && !checkFree_ && !useListRowIndex_ &&
+        (rowSizeOffset_ == 0 || stringAllocator_.use_count() == 1);
+  }
+
+  /// Releases complete ranges after final output has been copied. Pointers
+  /// into released ranges must not be used again; clear() precedes more input.
+  uint64_t releaseOutputRangesBefore(const RowContainerIterator& iterator);
 
   uint64_t usedBytes() const {
     return rows_.allocatedBytes() - rows_.freeBytes() +
@@ -1626,6 +1653,10 @@ class RowContainer {
   // complex-typed field in 'rows'.
   void freeVariableWidthFields(folly::Range<char**> rows);
 
+  // Moves the row cleanup required by external accumulators ahead of retiring
+  // their fixed-width storage. Each retired row is cleaned exactly once.
+  void cleanupOutputRows(char* firstRow, int64_t numRows, int32_t rowSize);
+
   // Free any aggregates associated with the 'rows'.
   void freeAggregates(folly::Range<char**> rows);
 
@@ -1701,6 +1732,11 @@ class RowContainer {
   uint64_t numFreeRows_ = 0;
 
   memory::AllocationPool rows_;
+  // Progress through complete ranges during final output.
+  int32_t numReleasedOutputRanges_{0};
+  // Average row size before releasing output ranges. Retained arena bytes can
+  // include retired rows until clear(), so recomputing would inflate it.
+  std::optional<int64_t> outputRowSizeEstimate_;
   std::unique_ptr<memory::MonotonicMemoryResource> monotonicMemoryResource_;
   std::optional<memory::MonotonicAllocator<char>> monotonicAllocator_;
   std::shared_ptr<HashStringAllocator> stringAllocator_;

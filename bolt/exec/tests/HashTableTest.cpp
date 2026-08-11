@@ -701,6 +701,67 @@ TEST_P(HashTableTest, clear) {
   ASSERT_NO_THROW(table->clear());
 }
 
+TEST_P(HashTableTest, releaseLookupTable) {
+  constexpr int32_t kNumRows = 256;
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row; }),
+  });
+  for (const auto mode :
+       {BaseHashTable::HashMode::kArray,
+        BaseHashTable::HashMode::kNormalizedKey,
+        BaseHashTable::HashMode::kHash}) {
+    for (const bool useSimd : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "mode {}, simd {}", BaseHashTable::modeString(mode), useSimd));
+      auto table = createHashTableForAggregation(
+          input->type(), 1, GetParam().jitRowEqVectors);
+      table->setSimdEnabled(useSimd);
+      EXPECT_EQ(0, table->releaseTable());
+      HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+      SelectivityVector selectedRows(kNumRows);
+      table->prepareForGroupProbe(
+          lookup,
+          input,
+          selectedRows,
+          /*ignoreNullKeys=*/false,
+          /*spillInputStartPartitionBit=*/64);
+      table->groupProbe(lookup);
+      ASSERT_EQ(BaseHashTable::HashMode::kArray, table->hashMode());
+      if (mode != BaseHashTable::HashMode::kArray) {
+        HashTableTestHelper<false>::create(table.get()).setHashMode(mode, 0);
+      }
+      ASSERT_EQ(mode, table->hashMode());
+      table->checkConsistency();
+      const auto bytesBefore = pool()->currentBytes();
+      const auto releasedBytes = table->releaseTable();
+      ASSERT_GT(releasedBytes, 0);
+      EXPECT_EQ(bytesBefore - releasedBytes, pool()->currentBytes());
+      EXPECT_EQ(0, table->capacity());
+      EXPECT_EQ(kNumRows, table->rows()->numRows());
+      EXPECT_EQ(kNumRows, table->numDistinct());
+      EXPECT_NO_THROW(table->checkConsistency());
+      EXPECT_EQ(0, table->releaseTable());
+      auto output = BaseVector::create(BIGINT(), kNumRows, pool());
+      table->rows()->extractColumn(lookup.hits.data(), kNumRows, 0, output);
+      assertEqualVectors(input->childAt(0), output);
+      table->clear();
+      EXPECT_EQ(0, table->rows()->numRows());
+      EXPECT_EQ(0, table->numDistinct());
+      table->prepareForGroupProbe(
+          lookup,
+          input,
+          selectedRows,
+          /*ignoreNullKeys=*/false,
+          /*spillInputStartPartitionBit=*/64);
+      table->groupProbe(lookup);
+      EXPECT_EQ(kNumRows, table->numDistinct());
+      table->checkConsistency();
+      EXPECT_GT(table->releaseTable(), 0);
+      EXPECT_EQ(0, table->releaseTable());
+    }
+  }
+}
+
 // Test a specific code path in HashTable::decodeHashMode where
 // rangesWithReserve overflows, distinctsWithReserve fits and bestWithReserve =
 // rangesWithReserve.

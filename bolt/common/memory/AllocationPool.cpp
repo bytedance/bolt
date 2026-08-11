@@ -36,6 +36,9 @@ namespace bytedance::bolt::memory {
 
 folly::Range<char*> AllocationPool::rangeAt(int32_t index) const {
   if (index < allocations_.size()) {
+    if (allocations_[index].empty()) {
+      return folly::Range<char*>(static_cast<char*>(nullptr), size_t{0});
+    }
     auto run = allocations_[index].runAt(0);
     return folly::Range<char*>(
         run.data<char>(),
@@ -43,6 +46,9 @@ folly::Range<char*> AllocationPool::rangeAt(int32_t index) const {
   }
   const auto largeIndex = index - allocations_.size();
   if (largeIndex < largeAllocations_.size()) {
+    if (largeAllocations_[largeIndex].empty()) {
+      return folly::Range<char*>(static_cast<char*>(nullptr), size_t{0});
+    }
     auto range = largeAllocations_[largeIndex].hugePageRange().value();
     if (range.data() == startOfRun_) {
       return folly::Range<char*>(range.data(), currentOffset_);
@@ -95,6 +101,33 @@ char* AllocationPool::allocateFixed(uint64_t bytes, int32_t alignment) {
   return result;
 }
 
+uint64_t AllocationPool::releaseRange(int32_t index) {
+  BOLT_CHECK_GE(index, 0);
+  BOLT_CHECK_LT(index, numRanges());
+  uint64_t releasedBytes = 0;
+  const auto numSmallRanges = static_cast<int32_t>(allocations_.size());
+  if (index < numSmallRanges) {
+    auto& allocation = allocations_[index];
+    releasedBytes = allocation.byteSize();
+    if (!allocation.empty()) {
+      pool_->freeNonContiguous(allocation);
+    }
+  } else {
+    auto& allocation = largeAllocations_[index - numSmallRanges];
+    releasedBytes = allocation.size();
+    if (!allocation.empty()) {
+      pool_->freeContiguous(allocation);
+    }
+  }
+  usedBytes_ -= releasedBytes;
+  if (index == numRanges() - 1) {
+    startOfRun_ = nullptr;
+    bytesInRun_ = 0;
+    currentOffset_ = 0;
+  }
+  return releasedBytes;
+}
+
 void AllocationPool::growLastAllocation() {
   BOLT_CHECK_GT(bytesInRun_, AllocationTraits::kHugePageSize);
   const auto bytesToReserve = bits::roundUp(
@@ -104,7 +137,7 @@ void AllocationPool::growLastAllocation() {
 }
 
 void AllocationPool::newRunImpl(MachinePageCount numPages) {
-  if (usedBytes_ >= hugePageThreshold_ ||
+  if (!largeAllocations_.empty() || usedBytes_ >= hugePageThreshold_ ||
       numPages > pool_->sizeClasses().back()) {
     // At least 16 huge pages, no more than kMaxMmapBytes. The next is
     // double the previous. Because the previous is a hair under the

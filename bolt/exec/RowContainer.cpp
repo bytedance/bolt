@@ -494,6 +494,106 @@ int32_t RowContainer::findRows(folly::Range<char**> rows, char** result) {
   return numRows;
 }
 
+void RowContainer::cleanupOutputRows(
+    char* firstRow,
+    int64_t numRows,
+    int32_t rowSize) {
+  constexpr int32_t kBatch = 1000;
+  char* rows[kBatch];
+  while (numRows > 0) {
+    const auto count = std::min<int64_t>(numRows, kBatch);
+    for (int32_t i = 0; i < count; ++i) {
+      rows[i] = firstRow;
+      firstRow += rowSize;
+    }
+    folly::Range<char**> batch(rows, count);
+    freeVariableWidthFields(batch);
+    freeAggregates(batch);
+    numRows -= count;
+  }
+}
+
+uint64_t RowContainer::releaseOutputRangesBefore(
+    const RowContainerIterator& iterator) {
+  if (!supportsOutputRangeRelease()) {
+    return 0;
+  }
+  const auto numRanges = rows_.numRanges();
+  auto rangeEnd = std::min(iterator.allocationIndex, numRanges);
+  if (rangeEnd < numRanges) {
+    const auto range = rows_.rangeAt(rangeEnd);
+    const auto nextRowSize = fixedRowSize_ +
+        (iterator.normalizedKeysLeft > 0 ? originalNormalizedKeySize_ : 0);
+    // listRows keeps its position in the last allocation in case more input
+    // is appended. Only final output may release this fully consumed range.
+    if (!range.empty() && iterator.rowOffset > 0 &&
+        iterator.rowOffset + nextRowSize >
+            range.size() - memory::alignmentPadding(range.data(), alignment_)) {
+      ++rangeEnd;
+    }
+  }
+  if (rangeEnd <= numReleasedOutputRanges_) {
+    return 0;
+  }
+  if (rangeEnd == numRanges && stringAllocator_.use_count() == 1) {
+    // All remaining output was copied. clear() cleans retained external state
+    // and releases private arenas; already retired ranges are empty.
+    const auto releasedBytes = allocatedBytes();
+    clear();
+    return releasedBytes;
+  }
+  if (rowSizeOffset_ != 0 && numReleasedOutputRanges_ == 0) {
+    outputRowSizeEstimate_ = estimateRowSize();
+  }
+  int64_t normalizedRowsLeft = numRowsWithNormalizedKey_;
+  int64_t releasedRows = 0;
+  uint64_t releasedBytes = 0;
+  const auto payloadBytesBefore =
+      usesExternalMemory_ ? stringAllocator_->retainedSize() : 0;
+  const auto normalizedRowSize = fixedRowSize_ + originalNormalizedKeySize_;
+  // Count row slots once per released range instead of on every allocation.
+  // Variable-width payloads live separately; the row slots have a fixed size.
+  for (; numReleasedOutputRanges_ < rangeEnd; ++numReleasedOutputRanges_) {
+    const auto range = rows_.rangeAt(numReleasedOutputRanges_);
+    const auto padding = memory::alignmentPadding(range.data(), alignment_);
+    auto* firstRow = range.data() + padding;
+    auto bytes = range.size() - padding;
+    if (normalizedRowsLeft > 0) {
+      const auto normalizedRows =
+          std::min<int64_t>(normalizedRowsLeft, bytes / normalizedRowSize);
+      if (usesExternalMemory_ && normalizedRows > 0) {
+        cleanupOutputRows(
+            firstRow + originalNormalizedKeySize_,
+            normalizedRows,
+            normalizedRowSize);
+      }
+      normalizedRowsLeft -= normalizedRows;
+      bytes -= normalizedRows * normalizedRowSize;
+      firstRow += normalizedRows * normalizedRowSize;
+      releasedRows += normalizedRows;
+    }
+    // While normalized rows remain, the tail is padding rather than space
+    // occupied by ordinary rows.
+    if (normalizedRowsLeft == 0) {
+      const auto ordinaryRows = bytes / fixedRowSize_;
+      if (usesExternalMemory_ && ordinaryRows > 0) {
+        cleanupOutputRows(firstRow, ordinaryRows, fixedRowSize_);
+      }
+      releasedRows += ordinaryRows;
+    }
+    // External cleanup already ran for these rows. clear() skips retired
+    // ranges and cleans only the rows that remain; plain arenas stay retained.
+    releasedBytes += rows_.releaseRange(numReleasedOutputRanges_);
+  }
+  BOLT_CHECK_LE(releasedRows, numRows_);
+  numRows_ -= releasedRows;
+  numRowsWithNormalizedKey_ = normalizedRowsLeft;
+  if (usesExternalMemory_) {
+    releasedBytes += payloadBytesBefore - stringAllocator_->retainedSize();
+  }
+  return releasedBytes;
+}
+
 void RowContainer::eraseRowsSkippingKeys(folly::Range<char**> rows) {
   for (auto i = 0; i < types_.size(); ++i) {
     if (i < keyTypes_.size()) {
@@ -1134,7 +1234,8 @@ void RowContainer::clear() {
             << ", free space: " << stringAllocator_->freeSpace();
 #endif
   const bool sharedStringAllocator = (stringAllocator_.use_count() != 1);
-  if (checkFree_ || sharedStringAllocator || usesExternalMemory_) {
+  if (numRows_ > 0 &&
+      (checkFree_ || sharedStringAllocator || usesExternalMemory_)) {
     constexpr int32_t kBatch = 1000;
     std::vector<char*> rows(kBatch);
     RowContainerIterator iter;
@@ -1143,6 +1244,8 @@ void RowContainer::clear() {
     }
   }
   rows_.clear();
+  numReleasedOutputRanges_ = 0;
+  outputRowSizeEstimate_.reset();
   {
     std::vector<char*, StlAllocator<char*>> emptyRowPointers{
         rowPointers_.get_allocator()};
@@ -1212,6 +1315,9 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   if (numRows_ == 0) {
     return std::nullopt;
   }
+  if (outputRowSizeEstimate_) {
+    return outputRowSizeEstimate_;
+  }
   int64_t freeBytes = rows_.freeBytes() + fixedRowSize_ * numFreeRows_;
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
       stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
@@ -1248,6 +1354,7 @@ void RowContainer::skip(RowContainerIterator& iter, int32_t numRows) {
     BOLT_DCHECK_EQ(0, iter.rowNumber);
     BOLT_DCHECK_EQ(0, iter.allocationIndex);
     iter.normalizedKeysLeft = numRowsWithNormalizedKey_;
+    iter.numNormalizedKeys = numRowsWithNormalizedKey_;
     iter.normalizedKeySize = originalNormalizedKeySize_;
     auto range = rows_.rangeAt(0);
     iter.rowBegin = range.data();
