@@ -730,9 +730,18 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
     std::unique_ptr<InMemoryPayload> append,
     arrow::MemoryPool* pool,
     int64_t rowvectorModeCompressionMinColumns,
-    int64_t rowvectorModeCompressionMaxBufferSize) {
+    int64_t rowvectorModeCompressionMaxBufferSize,
+    bool sourceBuffersResizable) {
   auto mergedRows = source->numRows() + append->numRows();
   auto isValidityBuffer = source->isValidityBuffer();
+
+  auto asResizable =
+      [sourceBuffersResizable](const std::shared_ptr<arrow::Buffer>& buffer) {
+        if (sourceBuffersResizable) {
+          return std::static_pointer_cast<arrow::ResizableBuffer>(buffer);
+        }
+        return std::dynamic_pointer_cast<arrow::ResizableBuffer>(buffer);
+      };
 
   auto numBuffers = append->numBuffers();
   ARROW_RETURN_IF(
@@ -768,8 +777,7 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
         // Because sourceBuffer can be resized, need to save buffer size in
         // advance.
         auto sourceBufferSize = sourceBuffer->size();
-        auto resizable =
-            std::dynamic_pointer_cast<arrow::ResizableBuffer>(sourceBuffer);
+        auto resizable = asResizable(sourceBuffer);
         auto mergedBytes = arrow::bit_util::BytesForBits(mergedRows);
         if (resizable) {
           // If source is resizable, resize and reuse source.
@@ -807,8 +815,7 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
         // advance.
         auto sourceBufferSize = sourceBuffer->size();
         auto mergedSize = sourceBufferSize + appendBuffer->size();
-        auto resizable =
-            std::dynamic_pointer_cast<arrow::ResizableBuffer>(sourceBuffer);
+        auto resizable = asResizable(sourceBuffer);
         if (resizable) {
           // If source is resizable, resize and reuse source.
           RETURN_NOT_OK(resizable->Resize(mergedSize + simd::kPadding));
