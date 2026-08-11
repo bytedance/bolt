@@ -69,6 +69,7 @@ void Spill::insertPayload(
     uint64_t rawSize,
     arrow::MemoryPool* pool,
     Codec* codec) {
+  bytesWritten_ += rawSize;
   // TODO: Add compression threshold.
   switch (payloadType) {
     case Payload::Type::kUncompressed:
@@ -100,6 +101,7 @@ void Spill::insertPayload(
     uint32_t partitionId,
     uint32_t numRows,
     uint64_t rawSize) {
+  bytesWritten_ += rawSize;
   partitionPayloads_.push_back(
       {partitionId,
        std::make_unique<CompressedDiskRowBlockPayload>(
@@ -122,5 +124,9 @@ Spill::SpillType Spill::type() const {
 
 const std::string& Spill::spillFile() const {
   return spillFile_;
+}
+
+uint64_t Spill::bytesWritten() const {
+  return bytesWritten_;
 }
 } // namespace bytedance::bolt::shuffle::sparksql

@@ -30,6 +30,7 @@
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/Payload.h"
+#include "bolt/shuffle/sparksql/Spill.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 namespace {
@@ -249,6 +250,21 @@ class PayloadTest : public testing::Test {
 
   std::shared_ptr<bytedance::bolt::memory::MemoryPool> pool_;
 };
+
+TEST_F(PayloadTest, SpillTracksBytesWritten) {
+  Spill spill(Spill::kSequentialSpill, 2, "");
+  spill.insertPayload(
+      0,
+      Payload::Type::kCompressed,
+      1,
+      nullptr,
+      123,
+      arrow::default_memory_pool(),
+      nullptr);
+  spill.insertPayload(1, 1, 456);
+
+  EXPECT_EQ(spill.bytesWritten(), 579);
+}
 
 TEST_F(PayloadTest, CheckingMemoryPoolTracksEveryAllocation) {
   CheckingMemoryPool checkingPool(pool_);

@@ -616,6 +616,7 @@ arrow::Status LocalPartitionWriter::clearResource() {
   auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
   arrow::Status status;
   for (auto& spill : spills_) {
+    totalBytesEvicted_ += static_cast<int64_t>(spill->bytesWritten());
     auto spillFile = spill->spillFile();
     spill.reset();
     arrow::Status status(fs->DeleteFile(spillFile));
