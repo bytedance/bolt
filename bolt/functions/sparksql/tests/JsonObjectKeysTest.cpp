@@ -51,10 +51,29 @@ TEST_F(JsonObjectKeysTest, basic) {
   expected = makeArrayVectorFromJson<std::string>({"[]"});
   assertEqualVectors(jsonObjectKeys(R"({})"), expected);
 
+  expected = makeArrayVectorFromJson<std::string>({"[\"f1\",\"f2\"]"});
+  assertEqualVectors(
+      jsonObjectKeys(R"({"f1":"abc","f2":{"f3":"a", "f4":"b"}})"), expected);
+
+  expected = makeArrayVectorFromJson<std::string>({"[\"key\"]"});
+  assertEqualVectors(jsonObjectKeys(R"({"key": "value"})"), expected);
+  assertEqualVectors(jsonObjectKeys(R"({"\u006bey": 1})"), expected);
+
   expected = makeNullableArrayVector<std::string>({std::nullopt});
   assertEqualVectors(jsonObjectKeys(R"(1)"), expected);
   assertEqualVectors(jsonObjectKeys(R"("hello")"), expected);
   assertEqualVectors(jsonObjectKeys(R"("")"), expected);
+  assertEqualVectors(jsonObjectKeys(R"([])"), expected);
+  assertEqualVectors(jsonObjectKeys(R"(invalid json)"), expected);
+  assertEqualVectors(
+      jsonObjectKeys(R"({"key": 45, "random_string"})"), expected);
+  assertEqualVectors(
+      jsonObjectKeys(R"({[1, 2, {"Key": "Invalid JSON"}]})"), expected);
+  assertEqualVectors(jsonObjectKeys(R"({"key: 45})"), expected);
+  assertEqualVectors(
+      jsonObjectKeys(R"({"pie": true, "cherry": [1, 2, 3 })"), expected);
+  assertEqualVectors(jsonObjectKeys(R"({"key": 1} trailing })"), expected);
+  assertEqualVectors(jsonObjectKeys(R"({"\x": 1})"), expected);
 }
 
 } // namespace
