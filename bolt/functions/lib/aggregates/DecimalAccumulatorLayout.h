@@ -17,6 +17,13 @@
  * Copyright (c) ByteDance Ltd. and/or its affiliates.
  * SPDX-License-Identifier: Apache-2.0
  *
+ * This file has been modified by ByteDance Ltd. and/or its affiliates on
+ * 2026-08-11.
+ *
+ * Original file was released under the Apache License 2.0,
+ * with the full license text available at:
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
