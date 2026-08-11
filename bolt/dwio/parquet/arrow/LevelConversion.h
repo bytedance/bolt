@@ -227,6 +227,20 @@ void PARQUET_EXPORT DefRepLevelsToListLengths(
     ValidityBitmapInputOutput* output,
     int32_t* lengths);
 
+// Reconstructs list lengths/list validity and the validity bitmap of a direct
+// nullable struct parent in one pass over the same def/rep levels. Returns
+// false if the two LevelInfo values do not describe a supported direct
+// struct -> list relationship.
+bool PARQUET_EXPORT DefRepLevelsToListLengthsAndStructBitmap(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_def_levels,
+    LevelInfo list_level_info,
+    LevelInfo struct_level_info,
+    ValidityBitmapInputOutput* list_output,
+    int32_t* lengths,
+    ValidityBitmapInputOutput* struct_output);
+
 // Reconstructs a validity bitmap for a struct every member is a list or has
 // a list descendant.  See documentation on DefLevelsToBitmap for when more
 // details on this method compared to the other ones defined above.

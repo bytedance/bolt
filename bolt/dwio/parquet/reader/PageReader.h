@@ -141,6 +141,15 @@ class PageReader {
       uint64_t* FOLLY_NULLABLE nulls,
       int64_t nullsStartIndex) const;
 
+  bool getListLengthsAndStructNulls(
+      const arrow::LevelInfo& listInfo,
+      const arrow::LevelInfo& structInfo,
+      int32_t begin,
+      int32_t end,
+      arrow::ValidityBitmapInputOutput* listBits,
+      int32_t* FOLLY_NONNULL lengths,
+      arrow::ValidityBitmapInputOutput* structBits) const;
+
   /// Applies 'visitor' to values in the ColumnChunk of 'this'. The
   /// operation to perform and The operand rows are given by
   /// 'visitor'. The rows are relative to the current position. The

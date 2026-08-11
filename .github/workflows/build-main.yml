@@ -24,7 +24,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CCACHE_DIR: /data/ccache-data
@@ -33,7 +33,31 @@ env:
   IN_CI: '1'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      source_code: ${{ steps.filter.outputs.source_code }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            source_code:
+              - 'bolt/**'
+              - '!bolt/**/*.md'
+              - 'Makefile'
+              - 'conanfile.py'
+              - 'CMakeLists.txt'
+              - 'scripts/conan/**'
+              - 'scripts/install-bolt-deps.sh'
+              - '.github/actions/bolt-build-base/**'
+              - '.github/workflows/build-main.yml'
+
   build-only:
+      needs: changes
+      if: ${{ needs.changes.outputs.source_code == 'true' }}
       runs-on: [ self-hosted, medium ]
       container:
         image: bolt-registry:5000/bolt-ci:20260114

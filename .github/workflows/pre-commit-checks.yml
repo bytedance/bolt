@@ -83,15 +83,12 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
-        - pre-commit-cache:/data/pre-commit-cache
+        - /data/pre-commit-cache:/data/pre-commit-cache
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install pre-commit
-        run: |
-          pip install -r requirements.txt
       - name: Run pre-commit hooks
         env:
           SKIP: clang-tidy
