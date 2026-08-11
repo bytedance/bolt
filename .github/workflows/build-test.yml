@@ -87,15 +87,21 @@ jobs:
         id: filter
         with:
           filters: |
+            # Keep the workflow itself unfiltered so required checks are always
+            # reported; only gate the self-hosted compilation jobs here.
             source_code:
               - 'bolt/**'
               - '!bolt/**/*.md'
               - 'Makefile'
               - 'conanfile.py'
               - 'CMakeLists.txt'
-              - 'bolt/**/CMakeLists.txt'
-              - 'scripts/**'
-              - '.github/workflows/**'
+              - 'scripts/conan/**'
+              - 'scripts/install-bolt-deps.sh'
+              - 'scripts/run-clang-tidy.py'
+              - '.clang-tidy'
+              - '.pre-commit-config.yaml'
+              - '.github/actions/bolt-build-base/**'
+              - '.github/workflows/build-test.yml'
   build-test:
     name: build-test (${{ matrix.build_type }})
     needs: [reuse-check, changes]
@@ -107,7 +113,7 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
-        - pre-commit-cache:/data/pre-commit-cache
+        - /data/pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
     services:
       conanserver:

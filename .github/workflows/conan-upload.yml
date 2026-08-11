@@ -23,11 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: Build type to use for Conan install/export
+        description: Dependency build type to prewarm
         required: true
         type: choice
-        options: [Release, Debug]
-        default: Release
+        options: [All, Release, Debug]
+        default: All
 
 env:
   CCACHE_DIR: /data/ccache-data
@@ -35,12 +35,21 @@ env:
   CI_NUM_THREADS: "16"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   upload:
-    runs-on: [ self-hosted, medium ]
+    name: upload (${{ matrix.runner_host }}, ${{ inputs.build_type }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_host:
+          - bolt-ci-amd64
+          - bolt-ci-amd64-2
+          - bolt-ci-amd64-3
+    runs-on: [ self-hosted, medium, "${{ matrix.runner_host }}" ]
+    timeout-minutes: 720
     container:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
@@ -54,14 +63,6 @@ jobs:
           CONAN_ADMIN_PASSWORD: ${{ secrets.CONAN_ADMIN_PASSWORD }}
         volumes:
           - /data/conan-server-data:/var/conan/data
-    strategy:
-      matrix:
-        build_options:
-          - ""
-          - "-o '*:spark_compatible=True'"
-          - "-o '*:enable_s3=True'"
-          - "-o '*:enable_gcs=True'"
-          - "-o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -69,11 +70,32 @@ jobs:
       - id: env-setup
         uses: ./.github/actions/bolt-build-base
 
-      - name: Conan install
+      - name: Install complete CI dependency graph
+        shell: bash
         run: |
-          conan install ${{ matrix.build_options }} -s llvm-core/*:build_type=Release -s build_type=${{ inputs.build_type }} --build=missing
+          if [[ "${{ inputs.build_type }}" == "All" ]]; then
+            build_types=(Release Debug)
+          else
+            build_types=("${{ inputs.build_type }}")
+          fi
+
+          # Conan does not build the Bolt consumer during install, so a single
+          # feature-superset graph covers the dependency variants used by CI.
+          for build_type in "${build_types[@]}"; do
+            conan install . \
+              -s "llvm-core/*:build_type=Release" \
+              -s "build_type=${build_type}" \
+              -c "bolt/*:tools.build:skip_test=False" \
+              -o "bolt/*:spark_compatible=True" \
+              -o "bolt/*:enable_s3=True" \
+              -o "bolt/*:enable_gcs=True" \
+              -o "bolt/*:enable_testutil=True" \
+              -o "bolt/*:enable_perf=True" \
+              --build=missing
+          done
 
       - name: Upload packages to conan remote
+        if: ${{ always() }}
         env:
           CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_ADMIN_USERNAME }}
           CONAN_PASSWORD: ${{ secrets.CONAN_ADMIN_PASSWORD }}
