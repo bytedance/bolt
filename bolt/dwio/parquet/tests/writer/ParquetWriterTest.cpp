@@ -28,8 +28,10 @@
  * --------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
+#include <utility>
 
 #include "arrow/c/abi.h"
 #include "arrow/c/bridge.h"
@@ -40,11 +42,15 @@
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
+#include "bolt/dwio/parquet/arrow/ColumnPage.h"
 #include "bolt/dwio/parquet/arrow/Encoding.h"
+#include "bolt/dwio/parquet/arrow/tests/ColumnReader.h"
+#include "bolt/dwio/parquet/arrow/tests/FileReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/arrow/Bridge.h"
+#include "bolt/version/version.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::dwio::common;
@@ -120,6 +126,24 @@ class ParquetWriterTest : public ParquetTestBase {
             std::make_shared<LocalReadFile>(parquetPath),
             readerOptions.getMemoryPool()),
         readerOptions);
+  }
+
+  template <typename Callback>
+  int64_t forEachDataPage(
+      const std::string& parquetPath,
+      int columnIndex,
+      Callback&& callback) {
+    auto fileReader = vp::arrow::ParquetFileReader::OpenFile(parquetPath);
+    auto pageReader = fileReader->RowGroup(0)->GetColumnPageReader(columnIndex);
+    int64_t dataPageCount = 0;
+    while (auto page = pageReader->NextPage()) {
+      if (page->type() == vp::arrow::PageType::DATA_PAGE ||
+          page->type() == vp::arrow::PageType::DATA_PAGE_V2) {
+        callback(page);
+        ++dataPageCount;
+      }
+    }
+    return dataPageCount;
   }
 
   ::arrow::MemoryPool* getArrowMemoryPool() {
@@ -285,6 +309,34 @@ TEST_F(ParquetWriterTest, compression) {
   auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
   assertReadWithReaderAndExpected(schema, *rowReader, data, *leafPool_);
 };
+
+TEST_F(ParquetWriterTest, defaultCreatedBy) {
+  auto schema = ROW({"c0"}, {INTEGER()});
+  const int64_t kRows = 10;
+  const auto data = makeRowVector(
+      {makeFlatVector<int32_t>(kRows, [](auto row) { return row; })});
+
+  std::string parquetPath = tempPath_->path + "/defaultCreatedBy.parquet";
+  vp::WriterOptions writerOptions{};
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  auto fileReader =
+      bytedance::bolt::parquet::arrow::ParquetFileReader::OpenFile(
+          parquetPath, false);
+  const auto& createdBy = fileReader->metadata()->created_by();
+
+  ASSERT_EQ(
+      std::string("parquet-cpp-bolt version ") +
+          BOLT_PARQUET_CREATED_BY_VERSION + " (build " +
+          ::bytedance::bolt::BuildInfo::shortHash + ")",
+      createdBy);
+
+  bytedance::bolt::parquet::arrow::ApplicationVersion version(createdBy);
+  EXPECT_EQ("parquet-cpp-bolt", version.application_);
+  EXPECT_EQ(::bytedance::bolt::BuildInfo::shortHash, version.build_);
+}
 
 TEST_F(ParquetWriterTest, lz4Hadoop) {
   const int64_t kRows = 10'000'000;
@@ -512,6 +564,8 @@ TEST_F(ParquetWriterTest, allNulls) {
   auto sinkPtr = sink.get();
   vp::WriterOptions writerOptions;
   writerOptions.memoryPool = leafPool_.get();
+  writerOptions.enableDictionary = false;
+  writerOptions.maxRowsPerDataPage = 1'000;
 
   auto writer = std::make_unique<vp::Writer>(
       std::move(sink),
@@ -526,6 +580,15 @@ TEST_F(ParquetWriterTest, allNulls) {
   auto reader = createReaderInMemory(*sinkPtr, readerOptions);
   ASSERT_EQ(reader->numberOfRows(), kRows);
   ASSERT_EQ(*reader->rowType(), *schema);
+  int32_t dataPageCount = 0;
+  for (const auto& stats :
+       reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats()) {
+    if (stats.page_type == thrift::PageType::DATA_PAGE ||
+        stats.page_type == thrift::PageType::DATA_PAGE_V2) {
+      dataPageCount += stats.count;
+    }
+  }
+  ASSERT_EQ(dataPageCount, 5);
 
   auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
   assertReadWithReaderAndExpected(schema, *rowReader, data, *leafPool_);
@@ -673,6 +736,399 @@ TEST_F(ParquetWriterTest, columnPageSize) {
   auto chunk2PageEncodingStats = rg.columnChunk(2).pageEncodingStats();
   ASSERT_EQ(1, chunk2PageEncodingStats.size());
   ASSERT_EQ(4, chunk2PageEncodingStats[0].count); // data page num
+}
+
+TEST_F(ParquetWriterTest, byteArrayPlainEncodingRespectsDataPageSize) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARCHAR()});
+  const int64_t kRows = 1024;
+  const int64_t kValueSize = 256;
+  const int64_t kDataPageSize = 1024;
+  const int64_t kMaxValuesPerPage =
+      kDataPageSize / (kValueSize + sizeof(uint32_t));
+  std::string parquetPath = tempPath_->path + "/byteArrayPageSize.parquet";
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.columnDataPageSizeMap[c0] = kDataPageSize;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  auto data = makeRowVector({makeFlatVector<std::string>(kRows, [&](auto row) {
+    return std::string(kValueSize, 'a' + row % 26);
+  })});
+
+  writer->write(data);
+  writer->close();
+  assertRead(parquetPath, kRows, schema, data);
+
+  int64_t totalValues = 0;
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        ASSERT_EQ(vp::arrow::PageType::DATA_PAGE, page->type());
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPage>(page);
+        ASSERT_EQ(vp::arrow::Encoding::PLAIN, dataPage->encoding());
+        // All values are non-null and have the same length, so this directly
+        // bounds the PLAIN value bytes in each page without counting level
+        // encoding overhead.
+        EXPECT_LE(dataPage->num_values(), kMaxValuesPerPage);
+        totalValues += dataPage->num_values();
+      });
+  EXPECT_EQ(kRows, totalValues);
+  EXPECT_GT(dataPageCount, 1);
+}
+
+TEST_F(ParquetWriterTest, nullableByteArrayPlainEncodingSplitsPages) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARBINARY()});
+  const int64_t kRows = 1024;
+  const int64_t kValueSize = 128;
+  const int64_t kDataPageSize = 1024;
+  std::string parquetPath = tempPath_->path + "/nullableVarbinaryPages.parquet";
+
+  auto data = makeRowVector({makeFlatVector<std::string>(
+      kRows,
+      [&](auto row) { return std::string(kValueSize, 'a' + row % 26); },
+      [](auto row) { return row % 5 == 0; },
+      VARBINARY())});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  writerOptions.columnDataPageSizeMap[c0] = kDataPageSize;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  int64_t totalValues = 0;
+  int64_t totalNulls = 0;
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        ASSERT_EQ(vp::arrow::PageType::DATA_PAGE_V2, page->type());
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPageV2>(page);
+        ASSERT_EQ(vp::arrow::Encoding::PLAIN, dataPage->encoding());
+        const int64_t nonNullValues =
+            dataPage->num_values() - dataPage->num_nulls();
+        EXPECT_LE(
+            nonNullValues * (kValueSize + sizeof(uint32_t)), kDataPageSize);
+        totalValues += dataPage->num_values();
+        totalNulls += dataPage->num_nulls();
+      });
+  EXPECT_EQ(kRows, totalValues);
+  EXPECT_EQ((kRows + 4) / 5, totalNulls);
+  EXPECT_GT(dataPageCount, 1);
+}
+
+TEST_F(ParquetWriterTest, nestedByteArrayPlainEncodingSplitsAtRecords) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {ARRAY(VARCHAR())});
+  const vector_size_t kRows = 32;
+  const vector_size_t kElementsPerRow = 32;
+  const int64_t kValueSize = 64;
+  const int64_t kDataPageSize = 1024;
+  const int64_t kNullArrayCount = (kRows + 10) / 11;
+  const int64_t kExpectedLevels =
+      (kRows - kNullArrayCount) * kElementsPerRow + kNullArrayCount;
+  std::string parquetPath = tempPath_->path + "/nestedVarcharPages.parquet";
+
+  auto data = makeRowVector({makeArrayVector<std::string>(
+      kRows,
+      [&](auto /*row*/) { return kElementsPerRow; },
+      [&](auto index) { return std::string(kValueSize, 'a' + index % 26); },
+      [](auto row) { return row % 11 == 0; },
+      [](auto index) { return index % 13 == 0; })});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  writerOptions.columnDataPageSizeMap["c0.list.element"] = kDataPageSize;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  int64_t totalRows = 0;
+  int64_t totalLevels = 0;
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        ASSERT_EQ(vp::arrow::PageType::DATA_PAGE_V2, page->type());
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPageV2>(page);
+        ASSERT_EQ(vp::arrow::Encoding::PLAIN, dataPage->encoding());
+        // Every non-null array is larger than the page target and therefore
+        // must occupy its own page. A neighboring null array may share that
+        // page, but no page may contain two non-null array records.
+        EXPECT_GT(dataPage->num_rows(), 0);
+        EXPECT_LE(dataPage->num_rows(), 2);
+        EXPECT_LE(
+            dataPage->num_values() - dataPage->num_nulls(), kElementsPerRow);
+        totalRows += dataPage->num_rows();
+        totalLevels += dataPage->num_values();
+      });
+  EXPECT_EQ(kRows, totalRows);
+  EXPECT_EQ(kExpectedLevels, totalLevels);
+  EXPECT_GT(dataPageCount, 2);
+}
+
+TEST_F(ParquetWriterTest, nestedFinalOversizedRecordStartsNewPage) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {ARRAY(VARCHAR())});
+  const vector_size_t kRows = 2;
+  const vector_size_t kElementsPerRow = 32;
+  const int64_t kValueSize = 64;
+  std::string parquetPath =
+      tempPath_->path + "/nestedFinalOversizedRecord.parquet";
+
+  auto data = makeRowVector({makeArrayVector<std::string>(
+      kRows,
+      [&](auto row) { return row == 0 ? 1 : kElementsPerRow; },
+      [&](auto index) { return std::string(kValueSize, 'a' + index % 26); })});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  writerOptions.columnDataPageSizeMap["c0.list.element"] = 1024;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  int64_t totalRows = 0;
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        ASSERT_EQ(vp::arrow::PageType::DATA_PAGE_V2, page->type());
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPageV2>(page);
+        EXPECT_EQ(1, dataPage->num_rows());
+        totalRows += dataPage->num_rows();
+      });
+  EXPECT_EQ(2, dataPageCount);
+  EXPECT_EQ(kRows, totalRows);
+}
+
+TEST_F(ParquetWriterTest, byteArrayDictionaryFallbackSplitsPlainPages) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARCHAR()});
+  const int64_t kRows = 2048;
+  const int64_t kValuePayloadSize = 128;
+  const int64_t kDataPageSize = 1024;
+  const int64_t kMinEncodedValueSize = kValuePayloadSize + 1 + sizeof(uint32_t);
+  const int64_t kMaxPlainValuesPerPage = kDataPageSize / kMinEncodedValueSize;
+  std::string parquetPath =
+      tempPath_->path + "/dictionaryFallbackPages.parquet";
+
+  auto data = makeRowVector({makeFlatVector<std::string>(kRows, [&](auto row) {
+    return std::to_string(row) + std::string(kValuePayloadSize, 'a' + row % 26);
+  })});
+  vp::WriterOptions writerOptions{};
+  writerOptions.dictionaryPageSizeLimit = 512;
+  writerOptions.columnDataPageSizeMap[c0] = kDataPageSize;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  auto reader = createLocalParquetReader(parquetPath);
+  auto pageEncodingStats =
+      reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats();
+  ASSERT_EQ(3, pageEncodingStats.size());
+
+  auto findPageStats = [&](thrift::PageType::type pageType,
+                           thrift::Encoding::type encoding) {
+    return std::find_if(
+        pageEncodingStats.begin(),
+        pageEncodingStats.end(),
+        [&](const auto& stats) {
+          return stats.page_type == pageType && stats.encoding == encoding;
+        });
+  };
+  const auto dictionaryPage =
+      findPageStats(thrift::PageType::DICTIONARY_PAGE, thrift::Encoding::PLAIN);
+  const auto dictionaryDataPage = findPageStats(
+      thrift::PageType::DATA_PAGE, thrift::Encoding::RLE_DICTIONARY);
+  const auto plainDataPage =
+      findPageStats(thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN);
+
+  ASSERT_NE(dictionaryPage, pageEncodingStats.end());
+  ASSERT_NE(dictionaryDataPage, pageEncodingStats.end());
+  ASSERT_NE(plainDataPage, pageEncodingStats.end());
+
+  int64_t totalValues = 0;
+  int64_t observedPlainDataPages = 0;
+  forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPage>(page);
+        totalValues += dataPage->num_values();
+        if (dataPage->encoding() == vp::arrow::Encoding::PLAIN) {
+          ++observedPlainDataPages;
+          EXPECT_LE(dataPage->num_values(), kMaxPlainValuesPerPage);
+        }
+      });
+  EXPECT_EQ(kRows, totalValues);
+  EXPECT_EQ(plainDataPage->count, observedPlainDataPages);
+  EXPECT_GT(observedPlainDataPages, 1);
+}
+
+TEST_F(ParquetWriterTest, byteArrayDictionaryPageUsesByteBudgetBeforeFallback) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARBINARY()});
+  const int64_t kRows = 1024;
+  const int64_t kValueSize = 256;
+  const int64_t kDictionaryPageSize = 1024;
+  const int64_t kEncodedValueSize = kValueSize + sizeof(uint32_t);
+  std::string parquetPath =
+      tempPath_->path + "/dictionaryPageByteBudget.parquet";
+
+  auto data = makeRowVector({makeFlatVector<std::string>(
+      kRows,
+      [&](auto row) {
+        std::string value = std::to_string(row);
+        value.resize(kValueSize, 'a' + row % 26);
+        return value;
+      },
+      [](auto row) { return row % 7 == 0; },
+      VARBINARY())});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = true;
+  writerOptions.dictionaryPageSizeLimit = kDictionaryPageSize;
+  writerOptions.columnDataPageSizeMap[c0] = kDictionaryPageSize;
+  writerOptions.compression = CompressionKind::CompressionKind_NONE;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+
+  auto fileReader = vp::arrow::ParquetFileReader::OpenFile(parquetPath);
+  auto pageReader = fileReader->RowGroup(0)->GetColumnPageReader(0);
+  bool sawDictionaryPage = false;
+  bool sawPlainDataPage = false;
+  while (auto page = pageReader->NextPage()) {
+    if (page->type() == vp::arrow::PageType::DICTIONARY_PAGE) {
+      sawDictionaryPage = true;
+      const auto dictionaryPage =
+          std::static_pointer_cast<vp::arrow::DictionaryPage>(page);
+      // The soft limit may be crossed by one boundary value, but not by the
+      // entire writer batch. This bounds dictionary peak memory before
+      // fallback in the same way as the plain data-page path.
+      EXPECT_LE(
+          dictionaryPage->size(), kDictionaryPageSize + kEncodedValueSize);
+    } else if (
+        page->type() == vp::arrow::PageType::DATA_PAGE ||
+        page->type() == vp::arrow::PageType::DATA_PAGE_V2) {
+      const auto dataPage = std::static_pointer_cast<vp::arrow::DataPage>(page);
+      sawPlainDataPage |= dataPage->encoding() == vp::arrow::Encoding::PLAIN;
+    }
+  }
+  EXPECT_TRUE(sawDictionaryPage);
+  EXPECT_TRUE(sawPlainDataPage);
+}
+
+TEST_F(ParquetWriterTest, repeatedByteArrayValuesDoNotForceDictionaryFallback) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARCHAR()});
+  const int64_t kRows = 64;
+  const int64_t kValueSize = 256;
+  const int64_t kDictionaryPageSize = 1024;
+  std::string parquetPath =
+      tempPath_->path + "/repeatedDictionaryValues.parquet";
+
+  auto data = makeRowVector({makeFlatVector<std::string>(
+      kRows, [&](auto /*row*/) { return std::string(kValueSize, 'a'); })});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = true;
+  writerOptions.dictionaryPageSizeLimit = kDictionaryPageSize;
+  writerOptions.columnDataPageSizeMap[c0] = kDictionaryPageSize;
+  writerOptions.compression = CompressionKind::CompressionKind_NONE;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+
+  auto reader = createLocalParquetReader(parquetPath);
+  const auto pageEncodingStats =
+      reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats();
+  const auto plainDataPage = std::find_if(
+      pageEncodingStats.begin(),
+      pageEncodingStats.end(),
+      [](const auto& stats) {
+        return stats.page_type == thrift::PageType::DATA_PAGE &&
+            stats.encoding == thrift::Encoding::PLAIN;
+      });
+  EXPECT_EQ(plainDataPage, pageEncodingStats.end());
+}
+
+TEST_F(ParquetWriterTest, nullableByteArrayWholeChunkStartsNewPage) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARBINARY()});
+  const vector_size_t kRowsPerChunk = 5;
+  const int64_t kValueSize = 128;
+  const int64_t kDataPageSize = 1024;
+  std::string parquetPath =
+      tempPath_->path + "/nullableWholeChunkPages.parquet";
+
+  auto makeChunk = [&](char value) {
+    return makeRowVector({makeFlatVector<std::string>(
+        kRowsPerChunk,
+        [&](auto /*row*/) { return std::string(kValueSize, value); },
+        [](auto row) { return row == 0; },
+        VARBINARY())});
+  };
+  auto first = makeChunk('a');
+  auto second = makeChunk('b');
+  auto expected = BaseVector::create(schema, 2 * kRowsPerChunk, pool_.get());
+  expected->copy(first.get(), 0, 0, first->size());
+  expected->copy(second.get(), kRowsPerChunk, 0, second->size());
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  writerOptions.columnDataPageSizeMap[c0] = kDataPageSize;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(first);
+  writer->write(second);
+  writer->close();
+
+  assertRead(parquetPath, 2 * kRowsPerChunk, schema, expected);
+  int64_t totalValues = 0;
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        ASSERT_EQ(vp::arrow::PageType::DATA_PAGE_V2, page->type());
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPageV2>(page);
+        EXPECT_EQ(kRowsPerChunk, dataPage->num_values());
+        EXPECT_EQ(1, dataPage->num_nulls());
+        totalValues += dataPage->num_values();
+      });
+  EXPECT_EQ(2, dataPageCount);
+  EXPECT_EQ(2 * kRowsPerChunk, totalValues);
+}
+
+TEST_F(ParquetWriterTest, singleOversizedByteArrayValueMakesProgress) {
+  std::string c0{"c0"};
+  auto schema = ROW({c0}, {VARCHAR()});
+  const int64_t kValueSize = 2048;
+  std::string parquetPath =
+      tempPath_->path + "/singleOversizedByteArray.parquet";
+
+  auto data = makeRowVector(
+      {makeFlatVector<std::string>({std::string(kValueSize, 'a')})});
+  vp::WriterOptions writerOptions{};
+  writerOptions.enableDictionary = false;
+  writerOptions.columnDataPageSizeMap[c0] = 1024;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, 1, schema, data);
+  const auto dataPageCount = forEachDataPage(
+      parquetPath, 0, [&](const std::shared_ptr<vp::arrow::Page>& page) {
+        const auto dataPage =
+            std::static_pointer_cast<vp::arrow::DataPage>(page);
+        EXPECT_EQ(vp::arrow::Encoding::PLAIN, dataPage->encoding());
+        EXPECT_EQ(1, dataPage->num_values());
+      });
+  EXPECT_EQ(1, dataPageCount);
 }
 
 TEST_F(ParquetWriterTest, arrowPool) {

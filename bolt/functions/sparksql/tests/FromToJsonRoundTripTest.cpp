@@ -69,6 +69,13 @@ TEST_F(FromToJsonRoundTripTest, basicArray) {
   testFromToJsonRoundTrip(input, rowType);
 }
 
+TEST_F(FromToJsonRoundTripTest, arrayOfRows) {
+  auto input = makeNullableFlatVector<std::string>(
+      {R"([{"a":1}])", R"([{}])", R"([null])", R"([])", std::nullopt});
+  auto rowType = ARRAY(ROW({"a"}, {INTEGER()}));
+  testFromToJsonRoundTrip(input, rowType);
+}
+
 TEST_F(FromToJsonRoundTripTest, basicMap) {
   auto input = makeFlatVector<std::string>(
       {R"({"a":1})", R"({"b":2})", R"({"c":3})", R"({"3":3})"});

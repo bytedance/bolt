@@ -71,7 +71,6 @@ std::unique_ptr<SeekableInputStream> DirectBufferedInput::enqueue(
     id = TrackingId(sid->getId());
   }
   BOLT_CHECK_LE(region.offset + region.length, fileSize_);
-  requests_.emplace_back(region, id);
   if (tracker_) {
     tracker_->recordReference(id, region.length, fileNum_, groupId_);
   }
@@ -85,13 +84,16 @@ std::unique_ptr<SeekableInputStream> DirectBufferedInput::enqueue(
       id,
       groupId_,
       options_.loadQuantum());
-  requests_.back().stream = stream.get();
+  if (!preloaded()) {
+    requests_.emplace_back(region, id);
+    requests_.back().stream = stream.get();
+  }
   return stream;
 }
 
 bool DirectBufferedInput::isBuffered(uint64_t /*offset*/, uint64_t /*length*/)
     const {
-  return false;
+  return preloaded();
 }
 
 bool DirectBufferedInput::shouldPreload(int32_t numPages) {
@@ -107,6 +109,28 @@ bool isPrefetchablePct(int32_t pct) {
 
 bool lessThan(const LoadRequest* left, const LoadRequest* right) {
   return *left < *right;
+}
+
+void appendRanges(
+    memory::Allocation& allocation,
+    size_t length,
+    std::vector<folly::Range<char*>>& buffers) {
+  BOLT_CHECK_LE(
+      length,
+      memory::AllocationTraits::pageBytes(allocation.numPages()),
+      "Length exceeds allocation size");
+  uint64_t offsetInRuns = 0;
+  for (int i = 0; i < allocation.numRuns(); ++i) {
+    BOLT_CHECK_GE(length, offsetInRuns);
+    auto run = allocation.runAt(i);
+    const uint64_t bytes = memory::AllocationTraits::pageBytes(run.numPages());
+    const uint64_t readSize = std::min(bytes, length - offsetInRuns);
+    buffers.emplace_back(run.data<char>(), readSize);
+    offsetInRuns += readSize;
+    if (offsetInRuns >= length) {
+      break;
+    }
+  }
 }
 
 } // namespace
@@ -285,6 +309,58 @@ std::shared_ptr<DirectCoalescedLoad> DirectBufferedInput::coalescedLoad(
       });
 }
 
+void DirectBufferedInput::preload() {
+  BOLT_CHECK(!preloadData_.has_value(), "preload() called more than once");
+  BOLT_CHECK(requests_.empty(), "preload() must be called before enqueue()");
+
+  preloadData_.emplace(fileSize_);
+
+  std::vector<folly::Range<char*>> buffers;
+  if (fileSize_ <= kTinySize) {
+    preloadData_->tinyData.resize(fileSize_);
+    buffers.emplace_back(preloadData_->tinyData.data(), fileSize_);
+  } else {
+    const auto numPages = memory::AllocationTraits::numPages(fileSize_);
+    pool_.allocateNonContiguous(numPages, preloadData_->data);
+    appendRanges(preloadData_->data, fileSize_, buffers);
+  }
+
+  uint64_t usecs = 0;
+  {
+    MicrosecondTimer timer(&usecs);
+    input_->read(buffers, 0, LogType::FILE);
+  }
+  if (ioStats_) {
+    ioStats_->read().increment(fileSize_);
+    ioStats_->incRawBytesRead(fileSize_);
+    ioStats_->queryThreadIoLatencySync().increment(usecs);
+    ioStats_->queryThreadIoLatency().increment(usecs);
+    ioStats_->incTotalScanTime(usecs * 1'000);
+  }
+}
+
+folly::Range<const char*> DirectBufferedInput::preloadedData(
+    uint64_t offset,
+    uint64_t length) const {
+  BOLT_CHECK(
+      preloadData_.has_value(), "preloadedData() called without preload");
+  BOLT_CHECK_LT(offset, preloadData_->size, "Offset exceeds preloaded size");
+  const auto available =
+      std::min<uint64_t>(length, preloadData_->size - offset);
+  if (preloadData_->data.numPages() == 0) {
+    return {preloadData_->tinyData.data() + offset, available};
+  }
+
+  int32_t runIndex;
+  int32_t offsetInRun;
+  preloadData_->data.findRun(offset, &runIndex, &offsetInRun);
+  auto run = preloadData_->data.runAt(runIndex);
+  const auto runBytes = memory::AllocationTraits::pageBytes(run.numPages());
+  const auto contiguousBytes =
+      std::min<uint64_t>(available, runBytes - offsetInRun);
+  return {run.data<const char>() + offsetInRun, contiguousBytes};
+}
+
 std::unique_ptr<SeekableInputStream> DirectBufferedInput::read(
     uint64_t offset,
     uint64_t length,
@@ -301,22 +377,6 @@ std::unique_ptr<SeekableInputStream> DirectBufferedInput::read(
       0,
       options_.loadQuantum());
 }
-
-namespace {
-void appendRanges(
-    memory::Allocation& allocation,
-    size_t length,
-    std::vector<folly::Range<char*>>& buffers) {
-  uint64_t offsetInRuns = 0;
-  for (int i = 0; i < allocation.numRuns(); ++i) {
-    auto run = allocation.runAt(i);
-    const uint64_t bytes = memory::AllocationTraits::pageBytes(run.numPages());
-    const uint64_t readSize = std::min(bytes, length - offsetInRuns);
-    buffers.push_back(folly::Range<char*>(run.data<char>(), readSize));
-    offsetInRuns += readSize;
-  }
-}
-} // namespace
 
 std::vector<cache::CachePin> DirectCoalescedLoad::loadData(bool isPrefetch) {
   std::vector<folly::Range<char*>> buffers;

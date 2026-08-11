@@ -1,0 +1,46 @@
+diff --git a/recipes/duckdb/all/conandata.yml b/recipes/duckdb/all/conandata.yml
+index 8b2ec0fe..8198f3d1 100644
+--- a/recipes/duckdb/all/conandata.yml
++++ b/recipes/duckdb/all/conandata.yml
+@@ -31,6 +31,9 @@ patches:
+     - patch_file: "patches/1.1.1-0002-msvc-bicobj.patch"
+       patch_description: "add /bigobj flag"
+       patch_type: "portability"
++    - patch_file: "patches/1.1.3-0003-clang19-cxx23-incomplete-type.patch"
++      patch_description: "move SelectStatement constructor out of line for Clang 19 with C++23"
++      patch_type: "portability"
+   "1.1.2":
+     - patch_file: "patches/1.1.1-0001-fix-cmake.patch"
+       patch_description: "install static of shared library, add installation for odbc extention"
+diff --git a/recipes/duckdb/all/patches/1.1.3-0003-clang19-cxx23-incomplete-type.patch b/recipes/duckdb/all/patches/1.1.3-0003-clang19-cxx23-incomplete-type.patch
+new file mode 100644
+index 00000000..e27e93d8
+--- /dev/null
++++ b/recipes/duckdb/all/patches/1.1.3-0003-clang19-cxx23-incomplete-type.patch
+@@ -0,0 +1,26 @@
++diff --git a/src/include/duckdb/parser/statement/select_statement.hpp b/src/include/duckdb/parser/statement/select_statement.hpp
++--- a/src/include/duckdb/parser/statement/select_statement.hpp
+++++ b/src/include/duckdb/parser/statement/select_statement.hpp
++@@ -26,8 +26,7 @@ public:
++ 	static constexpr const StatementType TYPE = StatementType::SELECT_STATEMENT;
++ 
++ public:
++-	SelectStatement() : SQLStatement(StatementType::SELECT_STATEMENT) {
++-	}
+++	SelectStatement();
++ 
++ 	//! The main query node
++ 	unique_ptr<QueryNode> node;
++diff --git a/src/parser/statement/select_statement.cpp b/src/parser/statement/select_statement.cpp
++--- a/src/parser/statement/select_statement.cpp
+++++ b/src/parser/statement/select_statement.cpp
++@@ -5,6 +5,9 @@
++ 
++ namespace duckdb {
++ 
+++SelectStatement::SelectStatement() : SQLStatement(StatementType::SELECT_STATEMENT) {
+++}
+++
++ SelectStatement::SelectStatement(const SelectStatement &other) : SQLStatement(other), node(other.node->Copy()) {
++ }
++ 

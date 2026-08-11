@@ -60,7 +60,8 @@ add_executable(bolt_paimon_connector_test ${PAIMON_CONNECTOR_TEST_SOURCES})
 
 add_test(bolt_paimon_connector_test bolt_paimon_connector_test)
 set_tests_properties(bolt_paimon_connector_test PROPERTIES
-  ENVIRONMENT "PAIMON_TEST_SCRIPT_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+  ENVIRONMENT
+    "PAIMON_TEST_SCRIPT_DIR=${CMAKE_CURRENT_SOURCE_DIR};PAIMON_TEST_PYTHON=${Python3_EXECUTABLE}"
 )
 
 target_link_libraries(bolt_paimon_connector_test

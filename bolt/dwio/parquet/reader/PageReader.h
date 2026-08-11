@@ -49,6 +49,7 @@
 namespace bytedance::bolt::parquet {
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+struct PageReaderTestPeer;
 
 struct CryptoContext {
   CryptoContext(
@@ -297,11 +298,16 @@ class PageReader {
       const thrift::PageHeader& pageHeader,
       int64_t row,
       const bool keepRepDefRawData);
+  bool tryPrepareDataPageV1RepDefOnly(
+      const thrift::PageHeader& pageHeader,
+      int32_t compressedLen,
+      const bool keepRepDefRawData);
   void prepareDataPageV2(
       const thrift::PageHeader& pageHeader,
       int64_t row,
       const bool keepRepDefRawData);
   void makeDecoder();
+  BufferPtr takeOwnedPageBuffer(const char* FOLLY_NULLABLE data, size_t size);
 
   // For a non-top level leaf, reads the defs and sets 'leafNulls_' and
   // 'numRowsInPage_' accordingly. This is used for non-top level leaves when
@@ -631,6 +637,11 @@ class PageReader {
   int32_t decodeRepDefPageCount_{10};
 
   dwio::common::RuntimeStatistics* statis_{nullptr};
+  // Tracks output count for the current physical page. -1 means there is no
+  // active page being accounted.
+  int32_t currentPageNumValues_{-1};
+
+  friend struct PageReaderTestPeer;
 };
 
 FOLLY_ALWAYS_INLINE dwio::common::compression::CompressionOptions
@@ -674,6 +685,11 @@ void PageReader::readWithVisitor(Visitor& visitor) {
           FOLLY_LIKELY(statis_ != nullptr) ? &statis_->decodeTimeNs : nullptr);
       callDecoder(nulls, nullsFromFastPath, visitor);
     }
+    const auto numValuesFromPage =
+        numRowsInReader<hasFilter>(reader) - numValuesBeforePage;
+    if (currentPageNumValues_ >= 0) {
+      currentPageNumValues_ += numValuesFromPage;
+    }
     if (encoding_ == thrift::Encoding::DELTA_BINARY_PACKED &&
         deltaBpDecoder_->validValuesCount() == 0) {
       BOLT_DCHECK(
@@ -692,22 +708,20 @@ void PageReader::readWithVisitor(Visitor& visitor) {
           nullConcatenation_.reset(multiPageNulls_);
         }
         if (!nulls) {
-          nullConcatenation_.appendOnes(
-              numRowsInReader<hasFilter>(reader) - numValuesBeforePage);
+          nullConcatenation_.appendOnes(numValuesFromPage);
         } else if (reader.returnReaderNulls()) {
           // Nulls from decoding go directly to result.
           nullConcatenation_.append(
               reader.nullsInReadRange()->template as<uint64_t>(),
               0,
-              numRowsInReader<hasFilter>(reader) - numValuesBeforePage);
+              numValuesFromPage);
         } else {
           // Add the nulls produced from the decoder to the result.
           auto firstNullIndex = nullsFromFastPath ? 0 : numValuesBeforePage;
           nullConcatenation_.append(
               reader.mutableNulls(0),
               firstNullIndex,
-              firstNullIndex + numRowsInReader<hasFilter>(reader) -
-                  numValuesBeforePage);
+              firstNullIndex + numValuesFromPage);
         }
       }
       isMultiPage = true;
@@ -719,6 +733,13 @@ void PageReader::readWithVisitor(Visitor& visitor) {
     // visit.
     if (hasFilter && rowNumberBias_) {
       reader.offsetOutputRows(numValuesBeforePage, rowNumberBias_);
+    }
+    if (currentPageNumValues_ >= 0 &&
+        firstUnvisited_ == rowOfPage_ + numRowsInPage_) {
+      if (currentPageNumValues_ == 0 && FOLLY_LIKELY(statis_ != nullptr)) {
+        ++statis_->filteredOutPages;
+      }
+      currentPageNumValues_ = -1;
     }
   }
   if (isMultiPage) {

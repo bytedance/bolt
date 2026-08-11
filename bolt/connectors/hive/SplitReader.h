@@ -124,7 +124,7 @@ class SplitReader : public HiveSplitReaderBase {
       std::vector<int>& columnCacheBlackList,
       const HiveConnectorSplitCacheLimit* hiveConnectorSplitCacheLimit);
 
-  virtual uint64_t next(int64_t size, VectorPtr& output);
+  uint64_t next(int64_t size, VectorPtr& output) override;
 
   void resetFilterCaches() override;
 
@@ -201,6 +201,8 @@ class SplitReader : public HiveSplitReaderBase {
       metadataColumns_{};
 
  private:
+  void validateReaderCastFilter() const;
+
   bool emptySplit_;
   bool isPartOfPaimonSplit_;
 };

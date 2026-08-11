@@ -37,8 +37,7 @@ SparkShuffleWriter::SparkShuffleWriter(
           std::string(shuffleWriterNode->name())),
       shuffleWriterOptions_(shuffleWriterNode->getShuffleWriterOptions()),
       // shuffle writer memory limit should at least hold one max shuffle batch
-      minMemLimit_(
-          shuffleWriterOptions_.partitionWriterOptions.shuffleBufferSize),
+      minMemLimit_(shuffleWriterOptions_.shuffleBatchSize),
       reportShuffleStatusCallback_(
           shuffleWriterNode->getReportShuffleStatusCallback()) {}
 
@@ -60,6 +59,7 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
 }
 
 void SparkShuffleWriter::addInput(RowVectorPtr input) {
+  bytedance::bolt::NanosecondTimer shuffleWriteTimer(&shuffleWriteTime_);
   Operator::ReclaimableSectionGuard guard(this);
   std::call_once(initOnceFlag_, [this, &input]() { this->init(input); });
   auto freeMem = ExecutionMemoryPool::getMinimumFreeMemoryForTask(
@@ -90,7 +90,11 @@ void SparkShuffleWriter::noMoreInput() {
   Operator::noMoreInput();
   ShuffleWriterMetrics metrics;
   if (shuffleWriter_) {
-    auto status = shuffleWriter_->stop();
+    arrow::Status status;
+    {
+      bytedance::bolt::NanosecondTimer shuffleWriteTimer(&shuffleWriteTime_);
+      status = shuffleWriter_->stop();
+    }
     BOLT_CHECK(
         status.ok(),
         "Native shuffle write: ShuffleWriter stop failed, status: {}, shuffleWriter: {}",
@@ -105,6 +109,8 @@ void SparkShuffleWriter::noMoreInput() {
 
     LOG(INFO) << "ShuffleWriter is null";
   }
+
+  metrics.shuffleWriteTime = shuffleWriteTime_;
 
   reportShuffleStatusCallback_(metrics);
 }
@@ -121,6 +127,7 @@ void SparkShuffleWriter::reclaim(
     memory::MemoryReclaimer::Stats& stats) {
   int64_t evictedSize;
   if (shuffleWriter_) {
+    bytedance::bolt::NanosecondTimer shuffleWriteTimer(&shuffleWriteTime_);
     auto status = shuffleWriter_->reclaimFixedSize(targetBytes, &evictedSize);
     BOLT_CHECK(status.ok(), "(shuffle) nativeEvict: evict failed");
   } else {

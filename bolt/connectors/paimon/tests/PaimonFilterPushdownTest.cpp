@@ -33,6 +33,7 @@
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
+#include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/vector/BaseVector.h"
@@ -61,7 +62,7 @@ class PaimonFilterPushdownTest : public testing::Test,
     rootPool_ =
         memory::memoryManager()->addRootPool("PaimonFilterPushdownTest");
     leafPool_ = rootPool_->addLeafChild("leaf");
-    tempDir_ = std::filesystem::temp_directory_path();
+    tempDir_ = exec::test::TempDirectoryPath::create();
 
     buildData();
 
@@ -69,7 +70,8 @@ class PaimonFilterPushdownTest : public testing::Test,
         testing::UnitTest::GetInstance()->current_test_info();
     auto filename =
         std::string("paimon_filter_pushdown_") + testInfo->name() + ".parquet";
-    parquetPath_ = (tempDir_ / filename).string();
+    parquetPath_ =
+        (std::filesystem::path(tempDir_->getPath()) / filename).string();
 
     writeParquet();
   }
@@ -321,7 +323,8 @@ class PaimonFilterPushdownTest : public testing::Test,
     const auto* testInfo =
         testing::UnitTest::GetInstance()->current_test_info();
     auto filename = std::string("pushdown_") + testInfo->name() + ".parquet";
-    auto path = (tempDir_ / filename).string();
+    auto path =
+        (std::filesystem::path(tempDir_->getPath()) / filename).string();
     writeParquet(data, rowType, path);
 
     // 2. Verify filter translation.
@@ -398,7 +401,7 @@ class PaimonFilterPushdownTest : public testing::Test,
 
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::filesystem::path tempDir_;
+  std::shared_ptr<exec::test::TempDirectoryPath> tempDir_;
   std::string parquetPath_;
 
   RowTypePtr rowType_;

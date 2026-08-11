@@ -173,6 +173,7 @@ class RowReaderOptions {
   /// against query filters. This can significantly improve performance for
   /// selective queries. Defaults to true.
   bool enableDictionaryFilter_ = false;
+  bool disableFloatingPointToVarcharMetadataFilter_{false};
 
   int32_t decodeRepDefPageCount_{10};
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
@@ -475,6 +476,14 @@ class RowReaderOptions {
     return enableDictionaryFilter_;
   }
 
+  void setDisableFloatingPointToVarcharMetadataFilter(bool disable) {
+    disableFloatingPointToVarcharMetadataFilter_ = disable;
+  }
+
+  bool disableFloatingPointToVarcharMetadataFilter() const {
+    return disableFloatingPointToVarcharMetadataFilter_;
+  }
+
   void setDecodeRepDefPageCount(int32_t pageCount) {
     decodeRepDefPageCount_ = pageCount;
   }
@@ -556,7 +565,9 @@ class RowReaderOptions {
        << ", ";
     ss << "fileName_=" << fileName_ << ", ";
     ss << "fileId_=" << fileId_ << ", ";
-    ss << "enableDictionaryFilter_=" << enableDictionaryFilter_;
+    ss << "enableDictionaryFilter_=" << enableDictionaryFilter_ << ", ";
+    ss << "disableFloatingPointToVarcharMetadataFilter_="
+       << disableFloatingPointToVarcharMetadataFilter_ << ", ";
     ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
     ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";

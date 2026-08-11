@@ -56,6 +56,7 @@ TEST(TestWriterProperties, Basics) {
   std::shared_ptr<WriterProperties> props = WriterProperties::Builder().build();
 
   ASSERT_EQ(kDefaultDataPageSize, props->data_pagesize());
+  ASSERT_EQ(kDefaultMaxRowsPerPage, props->max_rows_per_page());
   ASSERT_EQ(
       DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, props->dictionary_pagesize_limit());
   ASSERT_EQ(ParquetVersion::PARQUET_2_6, props->version());
@@ -87,6 +88,33 @@ TEST(TestWriterProperties, AdvancedHandling) {
       Encoding::DELTA_LENGTH_BYTE_ARRAY,
       props->encoding(ColumnPath::FromDotString("delta-length")));
   ASSERT_EQ(ParquetDataPageVersion::V2, props->data_page_version());
+}
+
+TEST(TestWriterProperties, MaxRowsPerPage) {
+  auto props = WriterProperties::Builder().max_rows_per_page(123)->build();
+  ASSERT_EQ(123, props->max_rows_per_page());
+
+  props =
+      WriterProperties::Builder().max_rows_per_page(kMaxRowsPerPage)->build();
+  ASSERT_EQ(kMaxRowsPerPage, props->max_rows_per_page());
+
+  EXPECT_THROW(
+      WriterProperties::Builder().max_rows_per_page(0), ParquetException);
+  EXPECT_THROW(
+      WriterProperties::Builder().max_rows_per_page(-1), ParquetException);
+  EXPECT_THROW(
+      WriterProperties::Builder().max_rows_per_page(kMaxRowsPerPage + 1),
+      ParquetException);
+}
+
+TEST(TestWriterProperties, WriteBatchSizeMustBePositive) {
+  auto props = WriterProperties::Builder().write_batch_size(1)->build();
+  ASSERT_EQ(1, props->write_batch_size());
+
+  EXPECT_THROW(
+      WriterProperties::Builder().write_batch_size(0), ParquetException);
+  EXPECT_THROW(
+      WriterProperties::Builder().write_batch_size(-1), ParquetException);
 }
 
 TEST(TestReaderProperties, GetStreamInsufficientData) {

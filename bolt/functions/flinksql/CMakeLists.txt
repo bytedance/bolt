@@ -16,6 +16,7 @@
 bolt_add_library(
   bolt_functions_flink_impl
   HashCodeFunction.cpp
+  ICURegexFunctions.cpp
   JsonFunctions.cpp
   RegexFunctions.cpp
   ElementAt.cpp

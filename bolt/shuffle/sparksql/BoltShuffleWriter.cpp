@@ -51,6 +51,7 @@
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
+#include "common/memory/sparksql/ExecutionMemoryPool.h"
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -527,7 +528,6 @@ BoltShuffleWriter::generateComplexTypeBuffers(
 arrow::Status BoltShuffleWriter::split(
     bytedance::bolt::RowVectorPtr rv,
     int64_t memLimit) {
-  bytedance::bolt::NanosecondTimer splitTimer(&totalSplitTime_);
   updateInputMetrics(rv);
   if (options_.partitioning == Partitioning::kSingle) {
     if (bytedance::bolt::RowVector::isComposite(rv)) {
@@ -690,7 +690,6 @@ arrow::Status BoltShuffleWriter::split(
 }
 
 arrow::Status BoltShuffleWriter::stop() {
-  bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   if (vectorLayout_ != RowVectorLayout::kComposite) {
     partitionWriter_->setRowFormat(false);
     if (accumulateDataset_ != nullptr) {
@@ -810,25 +809,28 @@ void BoltShuffleWriter::setSplitState(SplitState state) {
 arrow::Status BoltShuffleWriter::doSplit(
     const bytedance::bolt::RowVector& rv,
     int64_t memLimit) {
-  auto rowNum = rv.size();
-  RETURN_NOT_OK(buildPartition2Row(rowNum));
-  RETURN_NOT_OK(updateInputHasNull(rv));
+  {
+    bytedance::bolt::NanosecondTimer splitTimer(&splitTime_);
+    auto rowNum = rv.size();
+    RETURN_NOT_OK(buildPartition2Row(rowNum));
+    RETURN_NOT_OK(updateInputHasNull(rv));
 
-  START_TIMING(cpuWallTimingList_[CpuWallTimingIteratePartitions]);
+    START_TIMING(cpuWallTimingList_[CpuWallTimingIteratePartitions]);
 
-  setSplitState(SplitState::kPreAlloc);
-  // Calculate buffer size based on available offheap memory, history average
-  // bytes per row and options_.bufferSize.
-  auto preAllocBufferSize = calculatePartitionBufferSize(rv, memLimit);
-  ++preallocCount_;
-  totalPreallocSize_ += preAllocBufferSize;
-  RETURN_NOT_OK(preAllocPartitionBuffers(preAllocBufferSize));
-  END_TIMING();
+    setSplitState(SplitState::kPreAlloc);
+    // Calculate buffer size based on available offheap memory, history average
+    // bytes per row and options_.bufferSize.
+    auto preAllocBufferSize = calculatePartitionBufferSize(rv, memLimit);
+    ++preallocCount_;
+    totalPreallocSize_ += preAllocBufferSize;
+    RETURN_NOT_OK(preAllocPartitionBuffers(preAllocBufferSize));
+    END_TIMING();
 
-  printPartitionBuffer();
+    printPartitionBuffer();
 
-  setSplitState(SplitState::kSplit);
-  RETURN_NOT_OK(splitRowVector(rv));
+    setSplitState(SplitState::kSplit);
+    RETURN_NOT_OK(splitRowVector(rv));
+  }
 
   printPartitionBuffer();
 
@@ -1821,6 +1823,11 @@ arrow::Status BoltShuffleWriter::reclaimFixedSize(
     }
   }
 
+  if (!hasEnoughMemoryUsageToSpill()) {
+    *actual = 0;
+    return arrow::Status::OK();
+  }
+
   EvictGuard evictGuard{evictState_};
 
   if (vectorLayout_ == RowVectorLayout::kComposite) {
@@ -2347,10 +2354,12 @@ arrow::Status BoltShuffleWriter::splitCompositeVector(
   bytedance::bolt::CompositeRowVectorPtr rv;
   vectorLayout_ = RowVectorLayout::kComposite;
   {
-    bytedance::bolt::NanosecondTimer timer(&flattenTime_);
-    ensurePartialFlatten(rowVector, {0});
-    rv = std::dynamic_pointer_cast<bytedance::bolt::CompositeRowVector>(
-        rowVector);
+    {
+      bytedance::bolt::NanosecondTimer timer(&flattenTime_);
+      ensurePartialFlatten(rowVector, {0});
+      rv = std::dynamic_pointer_cast<bytedance::bolt::CompositeRowVector>(
+          rowVector);
+    }
     BOLT_CHECK(
         rv != nullptr && partitioner_->hasPid(),
         "Failed to cast rowVector to CompositeRowVector or partitioner missing PID. "
@@ -2639,6 +2648,22 @@ arrow::Status BoltShuffleWriter::checkFixedColumnCopyValue(
         funcLine);
   }
   return arrow::Status::OK();
+}
+
+bool BoltShuffleWriter::hasEnoughMemoryUsageToSpill() {
+  int64_t minMemoryUsageThreshold = options_.shuffleBatchSize;
+  int64_t totalUsedMemory = boltPool_->reservedBytes();
+  if (dynamic_cast<BoltArrowMemoryPool*>(pool_) == nullptr) {
+    totalUsedMemory += pool_->bytes_allocated();
+  }
+  if (memory::sparksql::ExecutionMemoryPool::instance() != nullptr) {
+    int64_t taskAverageMemory =
+        memory::sparksql::ExecutionMemoryPool::instance()->poolSize() /
+        memory::sparksql::ExecutionMemoryPool::instance()->maxTaskNumber();
+    minMemoryUsageThreshold =
+        std::min(minMemoryUsageThreshold, taskAverageMemory / 10);
+  }
+  return totalUsedMemory > minMemoryUsageThreshold;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

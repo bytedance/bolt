@@ -42,7 +42,16 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
                   dataTypeGroup,
                   numPartitions,
                   numMappers};
-              if (param.isSupported()) {
+              if (!param.isSupported()) {
+                continue;
+              }
+              if (shuffleMode == 3) {
+                // RowBased: round-trip both on-wire row formats.
+                param.rowFormat = bytedance::bolt::row::RowFormat::DENSE;
+                params.push_back(param);
+                param.rowFormat = bytedance::bolt::row::RowFormat::COMPACT;
+                params.push_back(param);
+              } else {
                 params.push_back(param);
               }
             }

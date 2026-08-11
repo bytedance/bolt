@@ -19,6 +19,9 @@
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
+
+#include <functional>
+
 namespace bytedance::bolt::parquet {
 
 // Decompress function for all bolt supported codec type,
@@ -48,4 +51,15 @@ const char* decompressLz4AndLzo(
     uint32_t uncompressedSize,
     memory::MemoryPool& pool,
     const thrift::CompressionCodec::type codec);
+
+bool tryDecompressZstdPrefix(
+    const char* compressedData,
+    BufferPtr& decompressedData,
+    uint32_t compressedSize,
+    uint32_t uncompressedSize,
+    uint32_t outputQuantum,
+    memory::MemoryPool& pool,
+    const std::function<bool(const char* data, uint32_t availableSize)>&
+        isPrefixReady,
+    const char*& prefixData);
 } // namespace bytedance::bolt::parquet

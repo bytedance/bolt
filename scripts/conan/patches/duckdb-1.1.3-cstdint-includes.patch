@@ -1,0 +1,40 @@
+diff --git a/recipes/duckdb/all/conandata.yml b/recipes/duckdb/all/conandata.yml
+--- a/recipes/duckdb/all/conandata.yml
++++ b/recipes/duckdb/all/conandata.yml
+@@ -34,6 +34,9 @@ patches:
+     - patch_file: "patches/1.1.3-0003-clang19-cxx23-incomplete-type.patch"
+       patch_description: "move SelectStatement constructor out of line for Clang 19 with C++23"
+       patch_type: "portability"
++    - patch_file: "patches/1.1.3-0004-cstdint-includes.patch"
++      patch_description: "include cstdint where fixed-width integer types are used"
++      patch_type: "portability"
+   "1.1.2":
+     - patch_file: "patches/1.1.1-0001-fix-cmake.patch"
+       patch_description: "install static of shared library, add installation for odbc extention"
+diff --git a/recipes/duckdb/all/patches/1.1.3-0004-cstdint-includes.patch b/recipes/duckdb/all/patches/1.1.3-0004-cstdint-includes.patch
+new file mode 100644
+--- /dev/null
++++ b/recipes/duckdb/all/patches/1.1.3-0004-cstdint-includes.patch
+@@ -0,0 +1,22 @@
++diff --git a/third_party/fsst/libfsst.hpp b/third_party/fsst/libfsst.hpp
++--- a/third_party/fsst/libfsst.hpp
+++++ b/third_party/fsst/libfsst.hpp
++@@ -17,6 +17,7 @@
++ // You can contact the authors via the FSST source repository : https://github.com/cwida/fsst 
++ #include <algorithm>
++ #include <cassert>
+++#include <cstdint>
++ #include <cstring>
++ #include <fstream>
++ #include <iostream>
++diff --git a/third_party/thrift/thrift/transport/TTransport.h b/third_party/thrift/thrift/transport/TTransport.h
++--- a/third_party/thrift/thrift/transport/TTransport.h
+++++ b/third_party/thrift/thrift/transport/TTransport.h
++@@ -23,6 +23,7 @@
++ #include "thrift/Thrift.h"
++ #include "thrift/transport/TTransportException.h"
++ #include <memory>
+++#include <cstdint>
++ #include <string>
++ 
++ namespace duckdb_apache {

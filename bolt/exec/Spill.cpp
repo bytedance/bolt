@@ -452,6 +452,7 @@ SpillPartition::createRowBasedOrderedReader(
     bool canJit,
     bool spillUringEnabled) {
 #ifdef ENABLE_BOLT_JIT
+  bolt::jit::CompiledModuleSP jitModule;
   if (rows != nullptr && canJit && RowContainer::JITable(rows->keyTypes())) {
     // Extract compare flags from sorting keys
     std::vector<CompareFlags> cmpFlags;
@@ -462,13 +463,11 @@ SpillPartition::createRowBasedOrderedReader(
     if (cmpFlags.empty()) {
       cmpFlags.resize(rows->keyTypes().size(), CompareFlags());
     }
-    auto [jitMod, fn] = rows->codegenCompare(
+    jitModule = std::get<0>(rows->codegenCompare(
         rows->keyTypes(),
         cmpFlags,
         bytedance::bolt::jit::CmpType::CMP_SPILL,
-        true);
-    jitModuleRow_ = std::move(jitMod);
-    rowCmpRowFunc_ = (RowRowCompare)jitModuleRow_->getFuncPtr(fn);
+        true));
     LOG(INFO) << "JIT enabled for row based spill ordered reader!";
   }
 #endif
@@ -478,8 +477,12 @@ SpillPartition::createRowBasedOrderedReader(
   for (auto& fileInfo : files_) {
     BOLT_CHECK(fileInfo.rowInfo.has_value());
     streams.push_back(RowBasedFileSpillMergeStream::create(
-        RowBasedSpillReadFile::create(fileInfo, pool, spillUringEnabled),
-        rowCmpRowFunc_));
+        RowBasedSpillReadFile::create(fileInfo, pool, spillUringEnabled)
+#ifdef ENABLE_BOLT_JIT
+            ,
+        jitModule
+#endif
+        ));
   }
   files_.clear();
   // Check if the partition is empty or not.
@@ -497,6 +500,7 @@ SpillPartition::createRowBasedOrderedReaderWithLength(
     bool canJit,
     bool spillUringEnabled) {
 #ifdef ENABLE_BOLT_JIT
+  bolt::jit::CompiledModuleSP jitModule;
   if (rows != nullptr && canJit && RowContainer::JITable(rows->keyTypes())) {
     // Extract compare flags from sorting keys
     std::vector<CompareFlags> cmpFlags;
@@ -507,13 +511,11 @@ SpillPartition::createRowBasedOrderedReaderWithLength(
     if (cmpFlags.empty()) {
       cmpFlags.resize(rows->keyTypes().size(), CompareFlags());
     }
-    auto [jitMod, fn] = rows->codegenCompare(
+    jitModule = std::get<0>(rows->codegenCompare(
         rows->keyTypes(),
         cmpFlags,
         bytedance::bolt::jit::CmpType::CMP_SPILL,
-        true);
-    jitModuleRow_ = std::move(jitMod);
-    rowCmpRowFunc_ = (RowRowCompare)jitModuleRow_->getFuncPtr(fn);
+        true));
     LOG(INFO) << "JIT enabled for row based spill ordered reader!";
   }
 #endif
@@ -523,8 +525,12 @@ SpillPartition::createRowBasedOrderedReaderWithLength(
   for (auto& fileInfo : files_) {
     BOLT_CHECK(fileInfo.rowInfo.has_value());
     streams.push_back(RowBasedFileSpillMergeStream::createWithLength(
-        RowBasedSpillReadFile::create(fileInfo, pool, spillUringEnabled),
-        rowCmpRowFunc_));
+        RowBasedSpillReadFile::create(fileInfo, pool, spillUringEnabled)
+#ifdef ENABLE_BOLT_JIT
+            ,
+        jitModule
+#endif
+        ));
   }
   files_.clear();
   // Check if the partition is empty or not.

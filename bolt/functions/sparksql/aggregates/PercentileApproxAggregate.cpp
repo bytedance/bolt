@@ -17,6 +17,143 @@
 #include "bolt/functions/sparksql/aggregates/PercentileApproxAggregate.h"
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
+PercentileApproxAggregateBase::PercentileApproxAggregateBase(
+    bool hasAccuracy,
+    const TypePtr& resultType)
+    : exec::Aggregate(resultType), hasAccuracy_(hasAccuracy) {}
+
+void PercentileApproxAggregateBase::decodePercentileAndAccuracy(
+    const SelectivityVector& rows,
+    const std::vector<VectorPtr>& args,
+    size_t& argIndex) {
+  checkSetPercentile(rows, *args[argIndex++]);
+  if (hasAccuracy_) {
+    decodedAccuracy_.decode(*args[argIndex++], rows, true);
+    checkSetAccuracy();
+  }
+}
+
+void PercentileApproxAggregateBase::extractPercentiles(
+    const ArrayVector* arrays,
+    vector_size_t indexInBaseVector,
+    const double*& data,
+    vector_size_t& len,
+    std::vector<bool>& isNull) {
+  auto elements = arrays->elements()->asFlatVector<double>();
+  auto offset = arrays->offsetAt(indexInBaseVector);
+  data = elements->rawValues() + offset;
+  len = arrays->sizeAt(indexInBaseVector);
+  isNull.resize(len);
+  for (auto index = offset; index < offset + len; index++) {
+    isNull[index - offset] = elements->isNullAt(index);
+  }
+}
+
+void PercentileApproxAggregateBase::checkSetPercentile(
+    const SelectivityVector& rows,
+    const BaseVector& vec) {
+  DecodedVector decoded(vec, rows);
+  BOLT_USER_CHECK(
+      decoded.isConstantMapping(),
+      "Percentile argument must be constant for all input rows");
+  bool isArray;
+  const double* data;
+  vector_size_t len;
+  std::vector<bool> isNull;
+  auto indexInBaseVector = decoded.index(0);
+  if (decoded.base()->typeKind() == TypeKind::DOUBLE) {
+    isArray = false;
+    auto baseVector = decoded.base();
+    data = baseVector->asUnchecked<ConstantVector<double>>()->rawValues() +
+        indexInBaseVector;
+    len = 1;
+    isNull = {baseVector->isNullAt(indexInBaseVector)};
+  } else if (decoded.base()->typeKind() == TypeKind::ARRAY) {
+    isArray = true;
+    auto arrays = decoded.base()->asUnchecked<ArrayVector>();
+    BOLT_USER_CHECK(
+        arrays->elements()->isFlatEncoding(),
+        "Only flat encoding is allowed for percentile array elements");
+    extractPercentiles(arrays, indexInBaseVector, data, len, isNull);
+  } else {
+    BOLT_USER_FAIL(
+        "Incorrect type for percentile: {}", decoded.base()->typeKind());
+  }
+  checkSetPercentile(isArray, data, len, isNull);
+}
+
+void PercentileApproxAggregateBase::checkSetPercentile(
+    bool isArray,
+    const double* data,
+    vector_size_t len,
+    const std::vector<bool>& isNull) {
+  if (!percentiles_) {
+    BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
+    percentiles_ = {
+        .values = std::vector<double>(len),
+        .isArray = isArray,
+    };
+    for (vector_size_t i = 0; i < len; ++i) {
+      BOLT_USER_CHECK(!isNull[i], "Percentage value must not be null");
+      BOLT_USER_CHECK(
+          data[i] >= 0.0 && data[i] <= 1.0,
+          "All percentage values must be between 0.0 and 1.0 (current = {})",
+          data[i]);
+      percentiles_->values[i] = data[i];
+    }
+  } else {
+    BOLT_USER_CHECK_EQ(
+        isArray,
+        percentiles_->isArray,
+        "The percentage provided must be a constant literal");
+    BOLT_USER_CHECK_EQ(
+        len,
+        percentiles_->values.size(),
+        "Percentile argument must be constant for all input rows");
+    for (vector_size_t i = 0; i < len; ++i) {
+      BOLT_USER_CHECK_EQ(
+          data[i],
+          percentiles_->values[i],
+          "Percentile argument must be constant for all input rows");
+    }
+  }
+}
+
+void PercentileApproxAggregateBase::checkSetAccuracy() {
+  if (!hasAccuracy_) {
+    return;
+  }
+  BOLT_USER_CHECK(
+      decodedAccuracy_.isConstantMapping(),
+      "The accuracy provided must be a constant literal");
+  TypeKind accuracyType = decodedAccuracy_.base()->type()->kind();
+  BOLT_USER_CHECK(
+      accuracyType == TypeKind::BIGINT || accuracyType == TypeKind::INTEGER,
+      "The accuracy provided must be a literal of integer or bigint (current value = {})",
+      decodedAccuracy_.base()->type()->toString());
+  if (accuracyType == TypeKind::INTEGER) {
+    checkSetAccuracy(decodedAccuracy_.valueAt<int32_t>(0));
+  } else {
+    checkSetAccuracy(decodedAccuracy_.valueAt<int64_t>(0));
+  }
+}
+
+void PercentileApproxAggregateBase::checkSetAccuracy(int64_t accuracy) {
+  BOLT_USER_CHECK(
+      accuracy > 0 && accuracy <= 2147483647,
+      "The accuracy provided must be a literal between (0, 2147483647] (current value = {})",
+      accuracy);
+  const auto checkedAccuracy = static_cast<int32_t>(accuracy);
+  if (accuracy_ == kDefaultAccuracy) {
+    accuracy_ = checkedAccuracy;
+  } else {
+    BOLT_USER_CHECK_EQ(
+        checkedAccuracy,
+        accuracy_,
+        "Accuracy argument must be constant for all input rows");
+  }
+}
+
 bool validPercentileType(const Type& type) {
   if (type.kind() == TypeKind::DOUBLE) {
     return true;
@@ -196,37 +333,34 @@ void registerPercentileApproxAggregate(
         }
         switch (type->kind()) {
           case TypeKind::TINYINT:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::TINYINT>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<
+                TypeTraits<TypeKind::TINYINT>::NativeType>::
+                create(hasAccuracy, resultType);
           case TypeKind::SMALLINT:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::SMALLINT>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<
+                TypeTraits<TypeKind::SMALLINT>::NativeType>::
+                create(hasAccuracy, resultType);
           case TypeKind::INTEGER:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::INTEGER>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<
+                TypeTraits<TypeKind::INTEGER>::NativeType>::
+                create(hasAccuracy, resultType);
           case TypeKind::BIGINT:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::BIGINT>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<TypeTraits<
+                TypeKind::BIGINT>::NativeType>::create(hasAccuracy, resultType);
           case TypeKind::HUGEINT:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::HUGEINT>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<
+                TypeTraits<TypeKind::HUGEINT>::NativeType>::
+                create(hasAccuracy, resultType);
           case TypeKind::REAL:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::REAL>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<TypeTraits<
+                TypeKind::REAL>::NativeType>::create(hasAccuracy, resultType);
           case TypeKind::DOUBLE:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::DOUBLE>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<TypeTraits<
+                TypeKind::DOUBLE>::NativeType>::create(hasAccuracy, resultType);
           case TypeKind::TIMESTAMP:
-            return std::make_unique<PercentileApproxAggregate<
-                TypeTraits<TypeKind::TIMESTAMP>::NativeType>>(
-                hasAccuracy, resultType);
+            return PercentileApproxAggregateFactory<
+                TypeTraits<TypeKind::TIMESTAMP>::NativeType>::
+                create(hasAccuracy, resultType);
           default:
             BOLT_USER_FAIL(
                 "Unsupported input type for {} aggregation {}, isRawInput: {}, setp: {}, result type: {}",

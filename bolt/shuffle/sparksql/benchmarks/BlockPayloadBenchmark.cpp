@@ -458,10 +458,10 @@ void runDeserializeBenchmark(bool checksumEnabled, size_t iterations) {
     }
   }
 
-  std::shared_ptr<Codec> sharedCodec = std::move(Codec::create(
+  std::shared_ptr<Codec> sharedCodec = Codec::create(
       config.codec,
       CodecOptions{
-          CodecBackend::NONE, kDefaultCompressionLevel, checksumEnabled}));
+          CodecBackend::NONE, kDefaultCompressionLevel, checksumEnabled});
 
   suspender.dismiss();
 

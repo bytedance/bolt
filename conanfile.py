@@ -344,8 +344,7 @@ class BoltConan(ConanFile):
         self.options[arrow].substrait = True
         # substrait depends on protobuf
         self.options[arrow].with_protobuf = True
-        self.options[arrow].arrow_acero = True
-        self.options[arrow].arrow_bundled_dependencies = True
+        self.options[arrow].acero = True
         if self.options.get_safe("enable_colocate"):
             self.options[arrow].with_boost = True
             self.options[arrow].with_gflags = True
@@ -368,7 +367,8 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_hdfs") and self.options.get_safe(
             "use_arrow_hdfs"
         ):
-            self.options[arrow].with_hdfs = True
+            # This is the legacy spelling exposed by the pinned Arrow recipe.
+            self.options[arrow].hdfs_bridgs = True
 
         if self.options.get_safe("es_build"):
             self.options[arrow].with_pyarrow = False
@@ -416,9 +416,17 @@ class BoltConan(ConanFile):
 
         num_link_job = os.getenv("NUM_LINK_JOB", "4")
 
+        # e.g. `BOLT_LINKER=mold make release`
+        bolt_linker = os.getenv("BOLT_LINKER")
+
         tc = CMakeToolchain(self, generator="Ninja")
 
         tc.cache_variables["MAX_LINK_JOBS"] = num_link_job
+        if bolt_linker:
+            use_ld = f"-fuse-ld={bolt_linker}"
+            tc.cache_variables["CMAKE_EXE_LINKER_FLAGS"] = use_ld
+            tc.cache_variables["CMAKE_SHARED_LINKER_FLAGS"] = use_ld
+            tc.cache_variables["CMAKE_MODULE_LINKER_FLAGS"] = use_ld
 
         if str(self.settings.arch) in ["x86", "x86_64"]:
             flags = (
@@ -440,12 +448,15 @@ class BoltConan(ConanFile):
             tc.cache_variables["BOLT_ENABLE_TORCH"] = "OFF"
 
         if self.options.enable_asan:
-            tc.cache_variables["CMAKE_CXX_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
-            tc.cache_variables["CMAKE_C_FLAGS"] += (
-                " -fsanitize=address -fno-omit-frame-pointer "
-            )
+            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fsanitize=address "
+            tc.cache_variables["CMAKE_C_FLAGS"] += " -fsanitize=address"
+
+        if (
+            str(self.settings.build_type) == "RelWithDebInfo"
+            or self.options.enable_asan
+        ):
+            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fno-omit-frame-pointer "
+            tc.cache_variables["CMAKE_C_FLAGS"] += " -fno-omit-frame-pointer "
 
         tc.cache_variables["TREAT_WARNINGS_AS_ERRORS"] = "OFF"
         tc.cache_variables["ENABLE_ALL_WARNINGS"] = "ON"
@@ -734,6 +745,7 @@ class BoltConan(ConanFile):
                     0xD49: "neoverse-n2",  # AWS Graviton3
                     0xD40: "neoverse-v1",  # Neoverse V1
                     0xD4F: "neoverse-v2",  # AWS Graviton4, NVIDIA Grace
+                    0xD06: "neoverse-n2",
                 }
 
                 if part_num in cpu_flags_map:
@@ -745,6 +757,11 @@ class BoltConan(ConanFile):
                         mcpu_flag += "+crypto+sha3+sm4+sve2-aes+sve2-sha3+sve2-sm4"
                         self.output.info(
                             f"Detected NVIDIA Grace CPU, using {mcpu_flag}"
+                        )
+                    elif part_num == 0xD06 and implementer == 0x48:
+                        mcpu_flag += " -march=armv9-a+sve2-bitperm -msve-vector-bits=256 -DSVE_BITS=256"
+                        self.output.info(
+                            f"Detected ARM {cpu_name} with extra features, using {mcpu_flag}"
                         )
                     else:
                         self.output.info(f"Detected ARM {cpu_name}, using {mcpu_flag}")

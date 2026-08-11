@@ -131,6 +131,9 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   std::once_flag initOnceFlag_;
   ShuffleWriterOptions shuffleWriterOptions_;
   uint64_t minMemLimit_;
+  // Total wall time spent inside the shuffle write operator, covering init,
+  // addInput (split), reclaim (spill) and stop.
+  uint64_t shuffleWriteTime_{0};
   std::unique_ptr<BoltArrowMemoryPool> arrowPool_;
   std::shared_ptr<BoltShuffleWriter> shuffleWriter_;
   bool finished_ = false;

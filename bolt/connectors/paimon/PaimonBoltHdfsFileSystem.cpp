@@ -297,9 +297,8 @@ PaimonBoltHdfsFileSystem::~PaimonBoltHdfsFileSystem() = default;
 
 ::paimon::Result<std::unique_ptr<::paimon::InputStream>>
 PaimonBoltHdfsFileSystem::Open(const std::string& path) const {
-  // Construct an HDFS filesystem instance using the same generator as Hive.
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     auto file = fs->openFileForRead(path, {});
     auto shared = std::shared_ptr<bytedance::bolt::ReadFile>(std::move(file));
@@ -312,8 +311,8 @@ PaimonBoltHdfsFileSystem::Open(const std::string& path) const {
 ::paimon::Result<std::unique_ptr<::paimon::OutputStream>>
 PaimonBoltHdfsFileSystem::Create(const std::string& path, bool overwrite)
     const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     if (fs->exists(path)) {
       if (!overwrite) {
@@ -337,8 +336,8 @@ PaimonBoltHdfsFileSystem::Create(const std::string& path, bool overwrite)
 
 ::paimon::Status PaimonBoltHdfsFileSystem::Mkdirs(
     const std::string& path) const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     fs->mkdir(path);
     return ::paimon::Status::OK();
@@ -357,8 +356,8 @@ PaimonBoltHdfsFileSystem::Create(const std::string& path, bool overwrite)
         "Rename across different HDFS authorities is not supported");
   }
 
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, src);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(src, connectorProperties_);
   try {
     fs->rename(src, dst, /*overwrite=*/false);
     return ::paimon::Status::OK();
@@ -370,8 +369,8 @@ PaimonBoltHdfsFileSystem::Create(const std::string& path, bool overwrite)
 ::paimon::Status PaimonBoltHdfsFileSystem::Delete(
     const std::string& path,
     bool recursive) const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     auto* hdfsFs =
         dynamic_cast<bytedance::bolt::filesystems::HdfsFileSystem*>(fs.get());
@@ -397,8 +396,8 @@ PaimonBoltHdfsFileSystem::Create(const std::string& path, bool overwrite)
 
 ::paimon::Result<std::unique_ptr<::paimon::FileStatus>>
 PaimonBoltHdfsFileSystem::GetFileStatus(const std::string& path) const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     auto* hdfsFs =
         dynamic_cast<bytedance::bolt::filesystems::HdfsFileSystem*>(fs.get());
@@ -419,8 +418,8 @@ PaimonBoltHdfsFileSystem::GetFileStatus(const std::string& path) const {
     const std::string& directory,
     std::vector<std::unique_ptr<::paimon::BasicFileStatus>>* file_status_list)
     const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, directory);
+  auto fs = bytedance::bolt::filesystems::getFileSystem(
+      directory, connectorProperties_);
   try {
     if (!fs->exists(directory)) {
       return ::paimon::Status::OK();
@@ -456,8 +455,8 @@ PaimonBoltHdfsFileSystem::GetFileStatus(const std::string& path) const {
     const std::string& path,
     std::vector<std::unique_ptr<::paimon::FileStatus>>* file_status_list)
     const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     if (!fs->exists(path)) {
       return ::paimon::Status::OK();
@@ -494,8 +493,8 @@ PaimonBoltHdfsFileSystem::GetFileStatus(const std::string& path) const {
 
 ::paimon::Result<bool> PaimonBoltHdfsFileSystem::Exists(
     const std::string& path) const {
-  auto fs = bytedance::bolt::filesystems::hdfsFileSystemGenerator()(
-      connectorProperties_, path);
+  auto fs =
+      bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
   try {
     return fs->exists(path);
   } catch (const std::exception& e) {

@@ -69,7 +69,7 @@ DwioFuzzer::Options getDwioFuzzerOptions() {
 
 // static
 int ParquetFuzzerRunner::run() {
-  memory::MemoryManager::deprecatedGetInstance({});
+  memory::MemoryManager::initialize({});
   size_t seed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
   DwioFuzzer(seed, getDwioFuzzerOptions(), common::FileFormat::PARQUET).go();
   return RUN_ALL_TESTS();

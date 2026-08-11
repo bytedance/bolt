@@ -1079,6 +1079,61 @@ void doCast(
     VectorPtr& result,
     CastErrorPolicy errorPolicy);
 
+// Casts a complex (ARRAY/MAP/ROW) vector to VARCHAR when the input arrives
+// wrapped in a dictionary/constant encoding, so `input.as<ArrayVector>()` (and
+// the map/row equivalents) return nullptr. Decodes the input down to its flat
+// complex base vector, casts the base, then copies the results back through the
+// decoded indices while re-applying nulls introduced by the wrapper layers.
+void doCastWrappedComplexToVarchar(
+    const SelectivityVector& rows,
+    const BaseVector& input,
+    exec::EvalCtx& context,
+    const TypePtr& fromType,
+    VectorPtr& result,
+    CastErrorPolicy errorPolicy) {
+  LocalDecodedVector decodedHolder(context, input, rows);
+  auto* decoded = decodedHolder.get();
+  auto* base = decoded->base();
+  BOLT_CHECK_NOT_NULL(
+      base, "Decoded vector for {} has no base vector.", fromType->toString());
+  BOLT_CHECK(
+      (fromType->isArray() && base->as<ArrayVector>() != nullptr) ||
+          (fromType->isMap() && base->as<MapVector>() != nullptr) ||
+          (fromType->isRow() && base->as<RowVector>() != nullptr),
+      "Decoded vector for {} has unexpected base encoding {}.",
+      fromType->toString(),
+      VectorEncoding::mapSimpleToName(base->encoding()));
+
+  LocalSelectivityVector nonNullRows(context, rows);
+  auto* rawNulls = decoded->nulls(nonNullRows.get());
+  if (rawNulls) {
+    nonNullRows->deselectNulls(
+        rawNulls, nonNullRows->begin(), nonNullRows->end());
+  }
+
+  context.ensureWritable(rows, VARCHAR(), result);
+  result->clearNulls(rows);
+
+  if (!nonNullRows->hasSelections()) {
+    result->addNulls(rows);
+    return;
+  }
+
+  SelectivityVector baseRows(base->size(), false);
+  nonNullRows->applyToSelected(
+      [&](auto row) { baseRows.setValid(decoded->index(row), true); });
+  baseRows.updateBounds();
+
+  VectorPtr baseResult;
+  doCast(
+      baseRows, *base, context, fromType, VARCHAR(), baseResult, errorPolicy);
+
+  result->copy(baseResult.get(), *nonNullRows, decoded->indices(), false);
+  if (rawNulls) {
+    result->addNulls(rawNulls, rows);
+  }
+}
+
 void doCastArrayToVarchar(
     const SelectivityVector& rows,
     const ArrayVector& input,
@@ -1107,14 +1162,16 @@ void doCastArrayToVarchar(
   }
 
   context.ensureWritable(nestedRows, VARCHAR(), resultElements);
-  doCast(
-      *remainingRows,
-      *arrayElements,
-      context,
-      arrayElements->type(),
-      VARCHAR(),
-      resultElements,
-      errorPolicy);
+  if (remainingRows->hasSelections()) {
+    doCast(
+        *remainingRows,
+        *arrayElements,
+        context,
+        arrayElements->type(),
+        VARCHAR(),
+        resultElements,
+        errorPolicy);
+  }
 
   resultElements->addNulls(remainingRows->asRange().bits(), nestedRows);
 
@@ -1429,19 +1486,32 @@ void doCast(
   } else if (
       !fromType->isPrimitiveType() && toType->kind() == TypeKind::VARCHAR) {
     if (fromType->isArray()) {
-      doCastArrayToVarchar(
-          rows,
-          *input.as<ArrayVector>(),
-          context,
-          fromType,
-          result,
-          errorPolicy);
+      auto* arrayVector = input.as<ArrayVector>();
+      if (arrayVector == nullptr) {
+        doCastWrappedComplexToVarchar(
+            rows, input, context, fromType, result, errorPolicy);
+      } else {
+        doCastArrayToVarchar(
+            rows, *arrayVector, context, fromType, result, errorPolicy);
+      }
     } else if (fromType->isMap()) {
-      doCastMapToVarchar(
-          rows, *input.as<MapVector>(), context, fromType, result, errorPolicy);
+      auto* mapVector = input.as<MapVector>();
+      if (mapVector == nullptr) {
+        doCastWrappedComplexToVarchar(
+            rows, input, context, fromType, result, errorPolicy);
+      } else {
+        doCastMapToVarchar(
+            rows, *mapVector, context, fromType, result, errorPolicy);
+      }
     } else if (fromType->isRow()) {
-      doCastRowToVarchar(
-          rows, *input.as<RowVector>(), context, fromType, result, errorPolicy);
+      auto* rowVector = input.as<RowVector>();
+      if (rowVector == nullptr) {
+        doCastWrappedComplexToVarchar(
+            rows, input, context, fromType, result, errorPolicy);
+      } else {
+        doCastRowToVarchar(
+            rows, *rowVector, context, fromType, result, errorPolicy);
+      }
     }
   } else {
     BOLT_FAIL(

@@ -34,6 +34,7 @@
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 #include <cstdint>
 #include "bolt/dwio/common/CachedBufferedInput.h"
+#include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/encryption/KmsClient.h"
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
@@ -74,17 +75,35 @@ namespace {
 constexpr const char* kTypeMappingErrorFmtStr =
     "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
 
-// Predicates for the cross-family implicit cast that the column reader
-// layer performs at read time (Spark/Hive STRING<->INT compatibility):
-//   - StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file ->
-//     int family requested type
-//   - IntegerColumnReader::makeCastExpr handles int family file ->
-//     VARCHAR/VARBINARY requested type
-// Both makeCastExpr paths compile unconditionally so convertType keeps
-// these schema pairs uniform across build flavours. Non-Spark builds
-// still get the strict check at ParquetColumnReader.cpp:95 via
-// matchType() for the VARCHAR-file -> INT-requested direction, which
-// fires after convertType and throws with its existing error message.
+std::string parquetSourceTypeName(const thrift::SchemaElement& schemaElement) {
+  if (schemaElement.__isset.converted_type) {
+    return fmt::format(
+        "{}({})", schemaElement.type, schemaElement.converted_type);
+  }
+  if (schemaElement.__isset.logicalType) {
+    const auto& logicalType = schemaElement.logicalType;
+    if (logicalType.__isset.DATE) {
+      return fmt::format("{}(DATE)", schemaElement.type);
+    }
+    if (logicalType.__isset.INTEGER) {
+      return fmt::format("{}(INTEGER)", schemaElement.type);
+    }
+    if (logicalType.__isset.DECIMAL) {
+      return fmt::format("{}(DECIMAL)", schemaElement.type);
+    }
+    if (logicalType.__isset.STRING) {
+      return fmt::format("{}(STRING)", schemaElement.type);
+    }
+    if (logicalType.__isset.TIMESTAMP) {
+      return fmt::format("{}(TIMESTAMP)", schemaElement.type);
+    }
+    if (logicalType.__isset.TIME) {
+      return fmt::format("{}(TIME)", schemaElement.type);
+    }
+  }
+  return fmt::format("{}", schemaElement.type);
+}
+
 // Cross-family implicit cast for VARCHAR/VARBINARY file columns:
 // StringColumnReader::makeCastExpr handles VARCHAR/VARBINARY file -> int
 // family requested type. Non-Spark builds also get a strict check at
@@ -101,20 +120,54 @@ bool acceptsIntFileForReaderCast(const bytedance::bolt::TypePtr& t) {
       t->kind() == bytedance::bolt::TypeKind::VARBINARY;
 }
 
+bool acceptsDateFile(const bytedance::bolt::TypePtr& t) {
+  return t->isDate() || t->kind() == bytedance::bolt::TypeKind::INTEGER ||
+      t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
+bool acceptsRealFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+  return t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
+bool acceptsDoubleFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+#ifdef SPARK_COMPATIBLE
+  return t->kind() == bytedance::bolt::TypeKind::BIGINT ||
+      acceptsRealFileForReaderCast(t);
+#else
+  return acceptsRealFileForReaderCast(t);
+#endif
+}
+
 // Compatibility predicate for Parquet INT32-physical source columns
-// (INT_8 / INT_16 / INT_32 / UINT_* annotated, plus unannotated INT32).
+// (INT_8 / INT_16 / INT_32 annotated, plus unannotated INT32).
 // Accepts:
 //   - Any int-family target. Narrowing (file INT32 -> requested ByteType /
 //     ShortType) is silently truncated at read time, matching Spark's
 //     vectorized reader. Covers HIVE-14294 where Hive 1.x writes
 //     TINYINT/SMALLINT as unannotated INT32 (SPARK-16632).
+//   - DOUBLE target. INT32 values are exactly representable as DOUBLE and
+//     SelectiveColumnReader::getIntValues performs the widening at read time.
+//     This covers Hive tables whose historical partitions were written as
+//     INT32 before the metastore type was widened to DOUBLE.
+//   - BOOLEAN target, using Spark SQL cast semantics for compatibility with
+//     tables that store boolean-like flags as unannotated INT32.
 //   - VARCHAR / VARBINARY target via IntegerColumnReader::makeCastExpr,
 //     which performs the int-to-string cast at read time.
 bool isInt32Compatible(const bytedance::bolt::TypePtr& type) {
   using TK = bytedance::bolt::TypeKind;
   const auto k = type->kind();
   return k == TK::TINYINT || k == TK::SMALLINT || k == TK::INTEGER ||
-      k == TK::BIGINT || acceptsIntFileForReaderCast(type);
+      k == TK::BIGINT || k == TK::DOUBLE || k == TK::BOOLEAN ||
+      acceptsIntFileForReaderCast(type);
+}
+
+// Compatibility predicate for UINT_* annotations. Keep this aligned with
+// SelectiveColumnReader::getUnsignedIntValues.
+bool isUInt32Compatible(const bytedance::bolt::TypePtr& type) {
+  using TK = bytedance::bolt::TypeKind;
+  const auto k = type->kind();
+  return k == TK::TINYINT || k == TK::SMALLINT || k == TK::INTEGER ||
+      k == TK::BIGINT || k == TK::HUGEINT || acceptsIntFileForReaderCast(type);
 }
 
 // Compatibility predicate for Parquet INT64-physical source columns.
@@ -123,6 +176,20 @@ bool isInt32Compatible(const bytedance::bolt::TypePtr& type) {
 bool isInt64Compatible(const bytedance::bolt::TypePtr& type) {
   using TK = bytedance::bolt::TypeKind;
   return type->kind() == TK::BIGINT || acceptsIntFileForReaderCast(type);
+}
+
+bool isUInt64Compatible(const bytedance::bolt::TypePtr& type) {
+#ifdef SPARK_COMPATIBLE
+  if (type->isDecimal()) {
+    // Spark maps Parquet UINT64 to DECIMAL(20, 0) because it has no unsigned
+    // 64-bit type. Keep this as a dedicated Spark representation mapping, not
+    // general integer-to-Decimal schema evolution. The unsigned integer reader
+    // already widens the 8-byte value to 128 bits without rescaling.
+    const auto [precision, scale] = getDecimalPrecisionScale(*type);
+    return precision == 20 && scale == 0;
+  }
+#endif
+  return isInt64Compatible(type);
 }
 
 } // namespace
@@ -321,7 +388,13 @@ void ReaderBase::loadFileMetaData() {
 
   std::unique_ptr<dwio::common::SeekableInputStream> stream;
   if (preloadFile) {
-    stream = input_->loadCompleteFile();
+    if (auto* directInput =
+            dynamic_cast<dwio::common::DirectBufferedInput*>(input_.get())) {
+      directInput->preload();
+      stream = input_->read(0, fileLength_, dwio::common::LogType::FILE);
+    } else {
+      stream = input_->loadCompleteFile();
+    }
   } else {
     stream = input_->read(
         fileLength_ - readSize, readSize, dwio::common::LogType::FOOTER);
@@ -1008,7 +1081,7 @@ TypePtr ReaderBase::convertType(
           BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
               kTypeMappingErrorFmtStr,
               schemaElement.name,
-              schemaElement.type,
+              parquetSourceTypeName(schemaElement),
               mapTypeKindToName(requestedType->kind())));
         }
         if (unannotatedArrayMatch) {
@@ -1058,7 +1131,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_8 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
+        checkRequested([](const TypePtr& t) { return isUInt32Compatible(t); });
         return TINYINT();
 
       case thrift::ConvertedType::UINT_16:
@@ -1066,7 +1139,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_16 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
+        checkRequested([](const TypePtr& t) { return isUInt32Compatible(t); });
         return SMALLINT();
 
       case thrift::ConvertedType::UINT_32:
@@ -1074,7 +1147,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "UINT_32 converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
+        checkRequested([](const TypePtr& t) { return isUInt32Compatible(t); });
         return INTEGER();
 
       case thrift::ConvertedType::UINT_64:
@@ -1082,7 +1155,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "UINT_64 converted type can only be set for value of thrift::Type::INT64");
-        checkRequested([](const TypePtr& t) { return isInt64Compatible(t); });
+        checkRequested([](const TypePtr& t) { return isUInt64Compatible(t); });
         return BIGINT();
 
       case thrift::ConvertedType::DATE:
@@ -1090,7 +1163,7 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "DATE converted type can only be set for value of thrift::Type::INT32");
-        checkRequested([](const TypePtr& t) { return t->isDate(); });
+        checkRequested([](const TypePtr& t) { return acceptsDateFile(t); });
         return DATE();
 
       case thrift::ConvertedType::TIMESTAMP_MICROS:
@@ -1167,6 +1240,11 @@ TypePtr ReaderBase::convertType(
             [](const TypePtr& t) { return t->kind() == TypeKind::BOOLEAN; });
         return BOOLEAN();
       case thrift::Type::type::INT32:
+        if (schemaElement.__isset.logicalType &&
+            schemaElement.logicalType.__isset.DATE) {
+          checkRequested([](const TypePtr& t) { return acceptsDateFile(t); });
+          return DATE();
+        }
         checkRequested([](const TypePtr& t) { return isInt32Compatible(t); });
         return INTEGER();
       case thrift::Type::type::INT64:
@@ -1178,6 +1256,19 @@ TypePtr ReaderBase::convertType(
           });
           return TIMESTAMP();
         }
+#ifdef SPARK_COMPATIBLE
+        if (schemaElement.__isset.logicalType &&
+            schemaElement.logicalType.__isset.INTEGER &&
+            !schemaElement.logicalType.INTEGER.isSigned) {
+          BOLT_CHECK_EQ(
+              schemaElement.logicalType.INTEGER.bitWidth,
+              64,
+              "Unsigned INTEGER logical type on INT64 must have bit width 64");
+          checkRequested(
+              [](const TypePtr& t) { return isUInt64Compatible(t); });
+          return BIGINT();
+        }
+#endif
         if (schemaElement.__isset.converted_type &&
             (schemaElement.converted_type ==
                  thrift::ConvertedType::TIMESTAMP_MILLIS ||
@@ -1196,12 +1287,15 @@ TypePtr ReaderBase::convertType(
         return TIMESTAMP(); // INT96 only maps to a timestamp
       case thrift::Type::type::FLOAT:
         checkRequested([](const TypePtr& t) {
-          return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE;
+          return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE ||
+              acceptsRealFileForReaderCast(t);
         });
         return REAL();
       case thrift::Type::type::DOUBLE:
-        checkRequested(
-            [](const TypePtr& t) { return t->kind() == TypeKind::DOUBLE; });
+        checkRequested([](const TypePtr& t) {
+          return t->kind() == TypeKind::DOUBLE ||
+              acceptsDoubleFileForReaderCast(t);
+        });
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:
       case thrift::Type::type::FIXED_LEN_BYTE_ARRAY:
@@ -1276,6 +1370,7 @@ void ReaderBase::scheduleRowGroups(
   // clear old RowGroup
   if (currentGroup >= 1) {
     inputs_.erase(rowGroupIds[currentGroup - 1]);
+    reader.releaseRowGroupReader();
   }
   // load current RowGroup and prefetch new RowGroup
   auto numRowGroupsToLoad = std::min(
@@ -1507,6 +1602,8 @@ class ParquetRowReader::Impl {
         options_.timestampPrecision(),
         readerBase->fileDecryptor(),
         schemaHelper_,
+        options_.getMetadataFilter() != nullptr,
+        options_.disableFloatingPointToVarcharMetadataFilter(),
         options_.isDictionaryFilterEnabled(),
         options_.getDecodeRepDefPageCount(),
         options_.getParquetRepDefMemoryLimit());
@@ -2023,6 +2120,8 @@ ParquetRowReader::ParquetRowReader(
     const dwio::common::RowReaderOptions& options) {
   impl_ = std::make_unique<ParquetRowReader::Impl>(readerBase, options);
 }
+
+ParquetRowReader::~ParquetRowReader() = default;
 
 void ParquetRowReader::filterRowGroups() {
   impl_->filterRowGroups();

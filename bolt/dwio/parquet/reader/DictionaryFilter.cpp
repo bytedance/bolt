@@ -76,15 +76,7 @@ DictionaryFilter::MatchResult DictionaryFilter::tryMatch() {
 }
 
 bool DictionaryFilter::isDictionaryFriendly() const {
-  switch (filter_->kind()) {
-    case bolt::common::FilterKind::kIsNull:
-    case bolt::common::FilterKind::kIsNotNull:
-    case bolt::common::FilterKind::kAlwaysFalse:
-    case bolt::common::FilterKind::kAlwaysTrue:
-      return false;
-    default:
-      return true;
-  }
+  return !filter_->isValueIndependent();
 }
 
 template <typename T, typename U>

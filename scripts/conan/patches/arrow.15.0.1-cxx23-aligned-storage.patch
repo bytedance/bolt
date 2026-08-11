@@ -1,0 +1,75 @@
+diff --git a/recipes/arrow/all/conandata.yml b/recipes/arrow/all/conandata.yml
+--- a/recipes/arrow/all/conandata.yml
++++ b/recipes/arrow/all/conandata.yml
+@@ -93,6 +93,10 @@ patches:
+     - patch_file: "patches/15.0.0-0004-dataset_cmakelists.patch"
+       patch_description: "dataset CMakeLists.txt change"
+       patch_type: "conan"
++    - patch_file: "patches/15.0.1-0005-cxx23-aligned-storage.patch"
++      patch_description: "replace deprecated std::aligned_storage for C++23 compatibility"
++      patch_type: "backport"
++      patch_source: "https://github.com/apache/arrow/commit/51d380cfe6546bc656935047b6b17b4f5d190448"
+   "15.0.0":
+     - patch_file: "patches/11.0.0-0001-fix-cmake.patch"
+       patch_description: "use cci package"
+diff --git a/recipes/arrow/all/patches/15.0.1-0005-cxx23-aligned-storage.patch b/recipes/arrow/all/patches/15.0.1-0005-cxx23-aligned-storage.patch
+new file mode 100644
+--- /dev/null
++++ b/recipes/arrow/all/patches/15.0.1-0005-cxx23-aligned-storage.patch
+@@ -0,0 +1,56 @@
++diff --git a/cpp/cmake_modules/SetupCxxFlags.cmake b/cpp/cmake_modules/SetupCxxFlags.cmake
++--- a/cpp/cmake_modules/SetupCxxFlags.cmake
+++++ b/cpp/cmake_modules/SetupCxxFlags.cmake
++@@ -161,21 +161,6 @@ if(WIN32)
++   # insecure, like std::getenv
++   add_definitions(-D_CRT_SECURE_NO_WARNINGS)
++ 
++-  # Disable static assertion in Microsoft C++ standard library.
++-  #
++-  # """[...]\include\type_traits(1271): error C2338:
++-  # You've instantiated std::aligned_storage<Len, Align> with an extended
++-  # alignment (in other words, Align > alignof(max_align_t)).
++-  # Before VS 2017 15.8, the member type would non-conformingly have an
++-  # alignment of only alignof(max_align_t). VS 2017 15.8 was fixed to handle
++-  # this correctly, but the fix inherently changes layout and breaks binary
++-  # compatibility (*only* for uses of aligned_storage with extended alignments).
++-  # Please define either (1) _ENABLE_EXTENDED_ALIGNED_STORAGE to acknowledge
++-  # that you understand this message and that you actually want a type with
++-  # an extended alignment, or (2) _DISABLE_EXTENDED_ALIGNED_STORAGE to silence
++-  # this message and get the old non-conformant behavior."""
++-  add_definitions(-D_ENABLE_EXTENDED_ALIGNED_STORAGE)
++-
++   if(MSVC)
++     # ARROW-1931 See https://github.com/google/googletest/issues/1318
++     #
++diff --git a/cpp/src/arrow/util/aligned_storage.h b/cpp/src/arrow/util/aligned_storage.h
++--- a/cpp/src/arrow/util/aligned_storage.h
+++++ b/cpp/src/arrow/util/aligned_storage.h
++@@ -119,26 +119,7 @@ class AlignedStorage {
++   }
++ 
++  private:
++-#if !defined(__clang__) && defined(__GNUC__) && defined(__i386__)
++-  // Workaround for GCC bug on i386:
++-  //   alignof(int64 | float64) can give different results depending on the
++-  //   compilation context, leading to internal ABI mismatch manifesting
++-  //   in incorrect propagation of Result<int64 | float64> between
++-  //   compilation units.
++-  // (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88115)
++-  static constexpr size_t alignment() {
++-    if (std::is_integral_v<T> && sizeof(T) == 8) {
++-      return 4;
++-    } else if (std::is_floating_point_v<T> && sizeof(T) == 8) {
++-      return 4;
++-    }
++-    return alignof(T);
++-  }
++-
++-  typename std::aligned_storage<sizeof(T), alignment()>::type data_;
++-#else
++-  typename std::aligned_storage<sizeof(T), alignof(T)>::type data_;
++-#endif
+++  alignas(T) std::byte data_[sizeof(T)];
++ };
++ 
++ }  // namespace internal

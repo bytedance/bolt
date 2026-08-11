@@ -105,7 +105,7 @@ class ArbitratorFactoryRegister final {
  public:
   explicit ArbitratorFactoryRegister(AllocationListenerPtr& listener);
 
-  virtual ~ArbitratorFactoryRegister();
+  ~ArbitratorFactoryRegister();
 
   const std::string& getKind() const;
 

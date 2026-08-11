@@ -198,4 +198,8 @@ class ListColumnReader : public dwio::common::SelectiveListColumnReader {
 /// all its children.
 void ensureRepDefs(dwio::common::SelectiveColumnReader& reader, int32_t numTop);
 
+void skipRepDefsInChunks(
+    dwio::common::SelectiveColumnReader& reader,
+    int64_t num);
+
 } // namespace bytedance::bolt::parquet

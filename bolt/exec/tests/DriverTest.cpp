@@ -35,6 +35,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
+#include "bolt/exec/LocalPlanner.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/Values.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -617,6 +618,60 @@ TEST_F(DriverTest, pause) {
   EXPECT_EQ(operators[0].outputPositions, 10000000);
   EXPECT_EQ(operators[1].inputPositions, 10000000);
   EXPECT_EQ(operators[1].outputPositions, 10 * hits);
+}
+
+TEST_F(DriverTest, skipCompositeProjectRequiresAdjacentPartialAggregation) {
+  auto data = makeRowVector(
+      {"c0", "c1"},
+      {makeFlatVector<int64_t>({1, 2, 3}), makeFlatVector<int64_t>({4, 5, 6})});
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  PlanBuilder builder(planNodeIdGenerator);
+  auto partialAgg =
+      builder.values({data}).partialAggregation({"c0"}, {"sum(c1)"}).planNode();
+  auto limit = std::make_shared<core::LimitNode>(
+      planNodeIdGenerator->next(), 0, 100, true, partialAgg);
+  auto hashProject = std::make_shared<core::ProjectNode>(
+      planNodeIdGenerator->next(),
+      std::vector<std::string>{"hash"},
+      std::vector<core::TypedExprPtr>{std::make_shared<core::CallTypedExpr>(
+          BIGINT(),
+          std::vector<core::TypedExprPtr>{
+              std::make_shared<core::FieldAccessTypedExpr>(
+                  limit->outputType()->childAt(0),
+                  limit->outputType()->nameOf(0))},
+          "hive_hash")},
+      limit);
+
+  std::vector<std::unique_ptr<DriverFactory>> factories;
+  LocalPlanner::plan(
+      core::PlanFragment{hashProject},
+      ConsumerSupplier{},
+      &factories,
+      core::QueryConfig{{}},
+      1,
+      false);
+  ASSERT_EQ(factories.size(), 1);
+
+  auto task = Task::create(
+      "skipCompositeProjectRequiresAdjacentPartialAggregation",
+      core::PlanFragment{hashProject},
+      0,
+      core::QueryCtx::create(driverExecutor_.get()),
+      Task::ExecutionMode::kParallel,
+      ConsumerSupplier{});
+  auto driver = factories[0]->createDriver(
+      std::make_unique<DriverCtx>(task, 0, 0, 0, 0),
+      nullptr,
+      [](int /*pipelineId*/) { return 1; });
+
+  std::vector<std::string> operatorTypes;
+  for (const auto* op : driver->operators()) {
+    operatorTypes.push_back(op->operatorType());
+  }
+  EXPECT_EQ(
+      operatorTypes,
+      (std::vector<std::string>{
+          "Values", "PartialAggregation", "Limit", "FilterProject"}));
 }
 
 TEST_F(DriverTest, yield) {

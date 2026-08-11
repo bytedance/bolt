@@ -72,7 +72,10 @@ template <typename T>
 void appendDecimal(const T& value, const Type& type, std::string& result) {
   auto [precision, scale] = getDecimalPrecisionScale(type);
   const size_t maxSize = DecimalUtil::stringSize(precision, scale);
-  char buffer[maxSize];
+  // stringSize() adds at most seven characters for the sign, decimal point,
+  // scientific exponent and leading zero.
+  constexpr size_t kMaxDecimalStringSize = LongDecimalType::kMaxPrecision + 7;
+  char buffer[kMaxDecimalStringSize];
   size_t len = DecimalUtil::convertToString<T>(value, scale, maxSize, buffer);
   result.append(buffer, len);
 }
@@ -413,8 +416,6 @@ inline void toJson<TypeKind::ARRAY>(
     bool isMapKey) {
   auto arrayView = input.castTo<Array<Any>>();
   result.append("[");
-  // Determine the array element kind once to guide null rendering.
-  const auto elementKind = input.type()->childAt(0)->kind();
   for (int i = 0; i < arrayView.size(); i++) {
     if (i > 0) {
       result.append(",");
@@ -424,15 +425,7 @@ inline void toJson<TypeKind::ARRAY>(
       BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
           detail::toJson, element.kind(), element, result, options, isMapKey);
     } else {
-      // Spark semantics: an array element of ROW type with all-null fields
-      // renders as an empty object `{}` rather than `null` when serializing
-      // to JSON (with ignoreNullFields=true). Tests expect `[{}]` for a
-      // single empty ROW element.
-      if (!isMapKey && elementKind == TypeKind::ROW) {
-        result.append("{}");
-      } else {
-        result.append("null");
-      }
+      result.append("null");
     }
   }
   result.append("]");

@@ -52,7 +52,7 @@ add_executable(bolt_parquet_filter_test
   ParquetRowGroupFilterTest.cpp
 )
 
-add_test(bolt_parquet_filter_test bolt_parquet_filter_test)
+bolt_add_sharded_gtest(bolt_parquet_filter_test 4)
 target_link_libraries(
   bolt_parquet_filter_test
   bolt_e2e_filter_test_base
@@ -62,6 +62,13 @@ target_link_libraries(
 add_executable(bolt_dwio_parquet_reader_benchmark ParquetReaderBenchmark.cpp)
 target_link_libraries(
   bolt_dwio_parquet_reader_benchmark
+  PRIVATE bolt_testutils
+  ${FOLLY_BENCHMARK}
+)
+
+add_executable(bolt_dwio_parquet_page_reader_preload_benchmark ParquetPageReaderPreloadBenchmark.cpp)
+target_link_libraries(
+  bolt_dwio_parquet_page_reader_preload_benchmark
   PRIVATE bolt_testutils
   ${FOLLY_BENCHMARK}
 )

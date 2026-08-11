@@ -43,12 +43,8 @@ namespace bytedance::bolt::shuffle::sparksql {
 arrow::Status BoltShuffleWriterV2::split(
     bytedance::bolt::RowVectorPtr rv,
     int64_t memLimit) {
-  bytedance::bolt::NanosecondTimer splitTimer(&totalSplitTime_);
   updateInputMetrics(rv);
   BOLT_DCHECK(options_.partitioning != Partitioning::kSingle);
-  // Floor the budget so a tiny memLimit (e.g. an upstream operator holding most
-  // of the memory) doesn't fragment into small, poorly-compressed splits.
-  memLimit = std::max(memLimit, kMinMemLimit);
   if (bytedance::bolt::RowVector::isComposite(rv)) {
     if (vectorLayout_ == RowVectorLayout::kColumnar) {
       RETURN_NOT_OK(tryEvict());
@@ -67,38 +63,38 @@ arrow::Status BoltShuffleWriterV2::split(
     bytedance::bolt::NanosecondTimer timer(&flattenTime_);
     ensureLoaded(rv);
     ensureFlatten(rv);
-    // Use post-flatten estimateFlatSize which leverages StringStats
-    // computed during flatten for accurate string size estimation.
-    auto flatSize = rv->estimateFlatSize();
-    // try evict before split if current batch size is larger than memLimit
-    if (flatSize > memLimit) {
-      requestSpill_ = true;
-    }
-    RETURN_NOT_OK(tryEvict(memLimit));
-    // tryEvict may release memory to boltPool
-    memLimit = std::max(memLimit, (int64_t)boltPool_->freeBytes());
+  }
+  // Use post-flatten estimateFlatSize which leverages StringStats
+  // computed during flatten for accurate string size estimation.
+  auto flatSize = rv->estimateFlatSize();
+  // try evict before split if current batch size is larger than memLimit
+  if (flatSize > memLimit && hasEnoughMemoryUsageToSpill()) {
+    requestSpill_ = true;
+  }
+  RETURN_NOT_OK(tryEvict(memLimit));
+  // tryEvict may release memory to boltPool
+  memLimit = std::max(memLimit, (int64_t)boltPool_->freeBytes());
 
-    auto maxBatchBytes = std::min(
-        maxBatchBytes_, (uint64_t)std::max(memLimit, kMinMemLimit) / 2);
-    maxBatchBytes = hasComplexType_
-        ? std::min(maxBatchBytes, (uint64_t)maxCombinedBytesWithComplexType_)
-        : maxBatchBytes;
-    if (flatSize > maxBatchBytes) {
-      return splitExtremelyLargeBatch(rv, memLimit, flatSize, maxBatchBytes);
-    }
-    numRowsInBatches_ += rv->size();
-    numBytesInBatches_ += flatSize;
-    batches_.emplace_back(rv);
-    // when BoltMemoryManager is enabled, memLimit is lower than what we got in
-    // Java, so we make threshold lower to store more batches.
-    double ratio = memory::sparksql::ExecutionMemoryPool::inited() ? 0.5 : 0.25;
-    if (options_.enableVectorCombination &&
-        (!hasComplexType_ ||
-         numBytesInBatches_ < maxCombinedBytesWithComplexType_) &&
-        numRowsInBatches_ < options_.bufferSize &&
-        numBytesInBatches_ < memLimit * ratio && !boltColumnTypes_.empty()) {
-      return arrow::Status::OK();
-    }
+  auto maxBatchBytes =
+      std::min(maxBatchBytes_, (uint64_t)std::max(memLimit, kMinMemLimit) / 2);
+  maxBatchBytes = hasComplexType_
+      ? std::min(maxBatchBytes, (uint64_t)maxCombinedBytesWithComplexType_)
+      : maxBatchBytes;
+  if (flatSize > maxBatchBytes) {
+    return splitExtremelyLargeBatch(rv, memLimit, flatSize, maxBatchBytes);
+  }
+  numRowsInBatches_ += rv->size();
+  numBytesInBatches_ += flatSize;
+  batches_.emplace_back(rv);
+  // when BoltMemoryManager is enabled, memLimit is lower than what we got in
+  // Java, so we make threshold lower to store more batches.
+  double ratio = memory::sparksql::ExecutionMemoryPool::inited() ? 0.5 : 0.25;
+  if (options_.enableVectorCombination &&
+      (!hasComplexType_ ||
+       numBytesInBatches_ < maxCombinedBytesWithComplexType_) &&
+      numRowsInBatches_ < options_.bufferSize &&
+      numBytesInBatches_ < memLimit * ratio && !boltColumnTypes_.empty()) {
+    return arrow::Status::OK();
   }
   BOLT_CHECK(partitioner_->hasPid());
   if (batches_.size() == 1) {
@@ -262,7 +258,6 @@ arrow::Status BoltShuffleWriterV2::initPartitions() {
 }
 
 arrow::Status BoltShuffleWriterV2::stop() {
-  bytedance::bolt::NanosecondTimer stopTimer(&stopTime_);
   if (vectorLayout_ == RowVectorLayout::kColumnar) {
     partitionWriter_->setRowFormat(false);
     if (batches_.size()) {
@@ -366,22 +361,25 @@ arrow::Status BoltShuffleWriterV2::doSplit(
     bool doAlloc,
     bool doEvict,
     int64_t memLimit) {
-  auto rowNum = rv.size();
-  RETURN_NOT_OK(buildPartition2Row(rowNum));
+  {
+    bytedance::bolt::NanosecondTimer splitTimer(&splitTime_);
+    auto rowNum = rv.size();
+    RETURN_NOT_OK(buildPartition2Row(rowNum));
 
-  if (doAlloc) {
-    RETURN_NOT_OK(updateInputHasNull(rv));
-    START_TIMING(cpuWallTimingList_[CpuWallTimingIteratePartitions]);
-    setSplitState(SplitState::kPreAlloc);
-    // Calculate buffer size based on available offheap memory, history average
-    // bytes per row and options_.buffer_size.
-    RETURN_NOT_OK(
-        preAllocPartitionBuffers(partition2RowCount_, partitionUsed_));
-    END_TIMING();
+    if (doAlloc) {
+      RETURN_NOT_OK(updateInputHasNull(rv));
+      START_TIMING(cpuWallTimingList_[CpuWallTimingIteratePartitions]);
+      setSplitState(SplitState::kPreAlloc);
+      // Calculate buffer size based on available offheap memory, history
+      // average bytes per row and options_.buffer_size.
+      RETURN_NOT_OK(
+          preAllocPartitionBuffers(partition2RowCount_, partitionUsed_));
+      END_TIMING();
+    }
+
+    setSplitState(SplitState::kSplit);
+    RETURN_NOT_OK(splitRowVector(rv));
   }
-
-  setSplitState(SplitState::kSplit);
-  RETURN_NOT_OK(splitRowVector(rv));
 
   if (doEvict) {
     RETURN_NOT_OK(tryEvict(memLimit));
@@ -1399,6 +1397,10 @@ arrow::Status BoltShuffleWriterV2::reclaimFixedSize(
       splitState_ == SplitState::kStop ||
       (vectorLayout_ == RowVectorLayout::kComposite &&
        !isCompositeInitialized_)) {
+    *actual = 0;
+    return arrow::Status::OK();
+  }
+  if (!hasEnoughMemoryUsageToSpill()) {
     *actual = 0;
     return arrow::Status::OK();
   }

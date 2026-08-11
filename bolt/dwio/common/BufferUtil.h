@@ -40,6 +40,7 @@ inline void ensureCapacity(
     bolt::memory::MemoryPool* pool) {
   if (!data || !data->isMutable() ||
       data->capacity() < BaseVector::byteSize<T>(capacity)) {
+    data.reset();
     data = AlignedBuffer::allocate<T>(capacity, pool);
   }
 }

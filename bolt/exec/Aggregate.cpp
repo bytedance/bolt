@@ -160,6 +160,9 @@ std::vector<CompanionSignatureEntry> getCompanionSignatures(
     std::string&& name,
     std::vector<AggregateFunctionSignaturePtr>&& signatures) {
   std::vector<CompanionSignatureEntry> entries;
+  if (signatures.empty()) {
+    return entries;
+  }
   entries.push_back(
       {std::move(name),
        std::vector<FunctionSignaturePtr>{
@@ -171,6 +174,9 @@ std::vector<CompanionSignatureEntry> getCompanionSignatures(
     std::string&& name,
     std::vector<FunctionSignaturePtr>&& signatures) {
   std::vector<CompanionSignatureEntry> entries;
+  if (signatures.empty()) {
+    return entries;
+  }
   entries.push_back({std::move(name), std::move(signatures)});
   return entries;
 }

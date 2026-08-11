@@ -756,13 +756,23 @@ TEST_F(ToJsonTest, fromSparkParity) {
     testToJson(input, expected);
   }
   {
-    // Array with single empty ROW.
+    // Distinguish a non-null ROW with null fields from a null ROW element.
     auto rowType = ROW({"a", "b"}, {INTEGER(), VARCHAR()});
-    std::vector<std::vector<std::optional<std::tuple<int32_t, std::string>>>>
-        data{{{std::nullopt}}, {{std::nullopt}}, {{std::nullopt}}};
-    auto input = makeArrayOfRowVector(data, rowType);
-    auto expected =
-        makeNullableFlatVector<std::string>({R"([{}])", R"([{}])", R"([{}])"});
+    const variant nullInt(TypeKind::INTEGER);
+    const variant nullString(TypeKind::VARCHAR);
+    const variant nullRow(TypeKind::ROW);
+    std::vector<std::vector<variant>> data{
+        {variant::row({nullInt, nullString})},
+        {nullRow},
+        {variant::row({1, nullString})}};
+    auto input = makeArrayOfRowVector(rowType, data);
+    auto expected = makeNullableFlatVector<std::string>(
+        {R"([{}])", R"([null])", R"([{"a":1}])"});
+    testToJson(input, expected);
+
+    disableJsonIgnoreNullFields();
+    expected = makeNullableFlatVector<std::string>(
+        {R"([{"a":null,"b":null}])", R"([null])", R"([{"a":1,"b":null}])"});
     testToJson(input, expected);
   }
   {

@@ -96,26 +96,6 @@ class PrestoVectorSerde : public VectorSerde {
       memory::MemoryPool* pool,
       const Options* options) override;
 
-  /// Serializes a single RowVector with possibly encoded children, preserving
-  /// their encodings. Encodings are preserved recursively for any RowVector
-  /// children, but not for children of other nested vectors such as Array, Map,
-  /// and Dictionary.
-  ///
-  /// PrestoPage does not support serialization of Dictionaries with nulls;
-  /// in case dictionaries contain null they are serialized as flat buffers.
-  ///
-  /// In order to override the encodings of top-level columns in the RowVector,
-  /// you can specify the encodings using PrestoOptions.encodings
-  ///
-  /// DEPRECATED: Use createBatchSerializer and the BatchVectorSerializer's
-  /// serialize function instead.
-  [[deprecated("Use BatchVectorSerializer instead.")]] void
-  deprecatedSerializeEncoded(
-      const RowVectorPtr& vector,
-      StreamArena* streamArena,
-      const Options* options,
-      OutputStream* out);
-
   bool supportsAppendInDeserialize() const override {
     return true;
   }

@@ -29,19 +29,23 @@ add_executable(
   bolt_functions_spark_test
   ArithmeticTest.cpp
   ArrayAppendTest.cpp
+  ArrayContainsTest.cpp
   ArrayFlattenTest.cpp
   ArrayGetTest.cpp
   ArrayInsertTest.cpp
   ArrayMaxTest.cpp
   ArrayMinTest.cpp
   ArrayPrependTest.cpp
+  ArrayRepeatTest.cpp
   ArrayShuffleTest.cpp
   ArraySliceSumTest.cpp
   ArrayUnionTest.cpp
   ArraysZipTest.cpp
   AtLeastNNonNullsTest.cpp
   Base64Test.cpp
+  BitmapCountTest.cpp
   BitwiseTest.cpp
+  CharVarcharTest.cpp
   ComparisonsTest.cpp
   DecimalArithmeticFuncTest.cpp
   DecimalArithmeticTest.cpp

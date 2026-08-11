@@ -61,6 +61,7 @@ jobs:
           - "-o '*:spark_compatible=True'"
           - "-o '*:enable_s3=True'"
           - "-o '*:enable_gcs=True'"
+          - "-o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
     steps:
       - name: Checkout
         uses: actions/checkout@v6

@@ -15,8 +15,10 @@
  */
 
 #include <folly/Random.h>
+#include <folly/system/ThreadName.h>
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -27,6 +29,7 @@
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/GlobalParameters.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/common/memory/sparksql/MemoryConsumer.h"
@@ -426,6 +429,245 @@ TEST_F(
   }
 
   EXPECT_EQ(memoryPool->acquireMemory(1, kTaskAttemptId), 1);
+}
+
+TEST_F(MemoryConsumerTest, toStringRacesWithConcurrentMemoryUpdates) {
+  constexpr int64_t kCapacity = 1 << 20;
+  constexpr int64_t kWorkerThreads = 8;
+  constexpr int64_t kWriterIterations = 20'000;
+  constexpr int64_t kStringifierThreads = 4;
+  constexpr int64_t kStringifyIterations = 20'000;
+
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>();
+  memoryPool->setPoolSize(kCapacity);
+
+  std::vector<TaskMemoryManagerPtr> managers(kWorkerThreads);
+  std::vector<std::shared_ptr<TestMemoryConsumer>> consumers(kWorkerThreads);
+  for (int64_t i = 0; i < kWorkerThreads; ++i) {
+    managers[i] = std::make_shared<TaskMemoryManager>(memoryPool, i);
+    consumers[i] = std::make_shared<TestMemoryConsumer>(managers[i]);
+  }
+
+  std::atomic_bool start{false};
+  std::atomic_bool stop{false};
+  std::atomic<int64_t> stringifyCalls{0};
+  std::exception_ptr backgroundFailure{nullptr};
+  std::mutex failureLock;
+
+  auto recordFailure = [&](std::exception_ptr error) {
+    std::lock_guard<std::mutex> guard(failureLock);
+    if (backgroundFailure == nullptr) {
+      backgroundFailure = error;
+    }
+    stop.store(true, std::memory_order_release);
+  };
+
+  std::vector<std::thread> writers;
+  writers.reserve(kWorkerThreads);
+  for (int64_t i = 0; i < kWorkerThreads; ++i) {
+    writers.emplace_back([&, i]() {
+      try {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+
+        auto& consumer = consumers[i];
+        for (int64_t iter = 0;
+             iter < kWriterIterations && !stop.load(std::memory_order_acquire);
+             ++iter) {
+          const auto request = 1 + ((iter + i * 17) % 127);
+          if ((iter & 1) == 0) {
+            consumer->acquireMemory(request);
+          } else {
+            const auto toFree = std::min<int64_t>(consumer->getUsed(), request);
+            if (toFree > 0) {
+              consumer->freeMemory(toFree);
+            }
+          }
+        }
+
+        const auto remaining = consumer->getUsed();
+        if (remaining > 0) {
+          consumer->freeMemory(remaining);
+        }
+      } catch (...) {
+        recordFailure(std::current_exception());
+      }
+    });
+  }
+
+  std::vector<std::thread> stringifiers;
+  stringifiers.reserve(kStringifierThreads);
+  for (int64_t i = 0; i < kStringifierThreads; ++i) {
+    stringifiers.emplace_back([&]() {
+      try {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+
+        for (int64_t iter = 0; iter < kStringifyIterations &&
+             !stop.load(std::memory_order_acquire);
+             ++iter) {
+          const auto detail = memoryPool->toString();
+          if (detail.empty()) {
+            throw std::runtime_error(
+                "ExecutionMemoryPool::toString returned empty");
+          }
+          stringifyCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+      } catch (...) {
+        recordFailure(std::current_exception());
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+
+  for (auto& writer : writers) {
+    writer.join();
+  }
+  stop.store(true, std::memory_order_release);
+  for (auto& stringifier : stringifiers) {
+    stringifier.join();
+  }
+
+  if (backgroundFailure != nullptr) {
+    std::rethrow_exception(backgroundFailure);
+  }
+
+  EXPECT_GT(stringifyCalls.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(memoryPool->memoryUsed(), 0);
+}
+
+// Regression test for the deadlock guard at
+// ExecutionMemoryPool::acquireMemory (see comment "if async threads unreserve
+// non-enough memory, there may be a dead lock ..."). Reproduces the scenario
+// described in https://github.com/bytedance/bolt/issues/781:
+//
+// 1. Main task holds most of the pool. It calls acquireMemory for more bytes
+//    than are free and, per Spark's 1/2N rule, blocks inside cv_.wait_for
+//    while still holding a share of the pool.
+// 2. An async preload thread (thread name starts with "AsyncLoadThr") also
+//    calls acquireMemory. Without the guard, it would see the same
+//    "toGrant < numBytes && curMem + toGrant < minMemoryPerTask" condition
+//    and enter cv_.wait_for too. Both threads then wait for the other side
+//    to release memory that nobody is going to release, so both hang until
+//    minMemoryMaxWaitMs_ expires (300s in prod) -> effectively a deadlock.
+// 3. With the guard, the async thread returns 0 immediately so its caller
+//    can skip the unreserve(bytes) path and let the main thread progress.
+TEST_F(MemoryConsumerTest, asyncPreloadThreadDoesNotDeadlockOnPartialGrant) {
+  constexpr int64_t kCapacity = 1024;
+  constexpr int64_t kMainTaskAttemptId = 1;
+  constexpr int64_t kAsyncTaskAttemptId = 2;
+
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>();
+  memoryPool->setPoolSize(kCapacity);
+
+  // Step 1: register the main task and grab almost everything so any further
+  // request is guaranteed to be a partial grant.
+  ASSERT_EQ(
+      memoryPool->acquireMemory(kCapacity - 1, kMainTaskAttemptId),
+      kCapacity - 1);
+
+  std::atomic_bool mainEnteredWait{false};
+  std::atomic_bool mainDone{false};
+  std::atomic_bool asyncDone{false};
+  int64_t asyncGranted = -1;
+
+  // Step 2: main task now asks for the full pool. Only 1 byte is free, and
+  // the 1/2N floor (1024 / (2 * 1) = 512) is not met, so the main thread
+  // blocks inside cv_.wait_for holding its share of the pool.
+  std::thread mainThread([&]() {
+    mainEnteredWait.store(true, std::memory_order_release);
+    // Blocks until the async thread creates the second task and then
+    // releases its memory below.
+    int64_t got = memoryPool->acquireMemory(kCapacity, kMainTaskAttemptId);
+    // Note: after the async task appears, numActiveTasks == 2, so the
+    // 1/2N floor drops to 256 and the main task can be served with the
+    // remaining free budget (>= 256) once the cv fires.
+    EXPECT_GT(got, 0);
+    memoryPool->releaseMemory(got, kMainTaskAttemptId);
+    mainDone.store(true, std::memory_order_release);
+  });
+
+  // Wait until the main thread has entered acquireMemory. A short sleep is
+  // enough because the second acquireMemory call blocks on cv_.wait_for.
+  while (!mainEnteredWait.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Step 3: async preload thread requests memory. The guard must make it
+  // return 0 promptly instead of waiting on cv_.
+  std::thread asyncThread([&]() {
+    folly::setThreadName(std::string(kAsyncPreloadThreadName) + "1");
+    ASSERT_TRUE(isAsyncPreloadThread());
+    const auto start = std::chrono::steady_clock::now();
+    asyncGranted = memoryPool->acquireMemory(kCapacity, kAsyncTaskAttemptId);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    // The whole point of the guard: don't wait on cv_.
+    EXPECT_LT(
+        std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 5);
+    asyncDone.store(true, std::memory_order_release);
+  });
+
+  asyncThread.join();
+  EXPECT_TRUE(asyncDone.load(std::memory_order_acquire));
+  EXPECT_EQ(asyncGranted, 0);
+
+  // Registering the async task made numActiveTasks == 2, which lowered the
+  // 1/2N floor and notified cv_. The main thread should now be able to
+  // finish. Give it a bounded window; a real deadlock would exceed it.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!mainDone.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(mainDone.load(std::memory_order_acquire))
+      << "main thread appears to be deadlocked with the async preload thread";
+
+  mainThread.join();
+  memoryPool->releaseMemory(kCapacity - 1, kMainTaskAttemptId);
+  EXPECT_EQ(memoryPool->memoryUsed(), 0);
+}
+
+// Sanity check: a regular (non-preload) thread must still take the cv_.wait_for
+// path on a partial grant, so we don't accidentally regress the Spark
+// semantics for main-execution threads.
+TEST_F(MemoryConsumerTest, nonAsyncPreloadThreadStillWaitsOnPartialGrant) {
+  constexpr int64_t kCapacity = 1024;
+  constexpr int64_t kTaskAOwnerId = 1;
+  constexpr int64_t kTaskBOwnerId = 2;
+
+  auto memoryPool = std::make_shared<ExecutionMemoryPool>();
+  memoryPool->setPoolSize(kCapacity);
+
+  // Task A holds most of the pool.
+  ASSERT_EQ(
+      memoryPool->acquireMemory(kCapacity - 1, kTaskAOwnerId), kCapacity - 1);
+
+  std::atomic_bool started{false};
+  int64_t granted = -1;
+
+  std::thread waiter([&]() {
+    // Ensure this thread is NOT recognised as an async preload thread.
+    ASSERT_FALSE(isAsyncPreloadThread());
+    started.store(true, std::memory_order_release);
+    granted = memoryPool->acquireMemory(kCapacity, kTaskBOwnerId);
+  });
+
+  while (!started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Freeing memory now should unblock the waiter and let it get a full
+  // grant (proving it really was waiting on cv_ rather than returning 0).
+  memoryPool->releaseMemory(kCapacity - 1, kTaskAOwnerId);
+  waiter.join();
+
+  EXPECT_EQ(granted, kCapacity);
+  memoryPool->releaseMemory(granted, kTaskBOwnerId);
+  EXPECT_EQ(memoryPool->memoryUsed(), 0);
 }
 
 } // namespace bytedance::bolt::memory::sparksql

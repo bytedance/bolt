@@ -85,13 +85,13 @@ SelectiveStringDictionaryColumnReader::SelectiveStringDictionaryColumnReader(
         encodingKey.forKind(proto::Stream_Kind_STRIDE_DICTIONARY),
         params.streamLabels().label(),
         true);
+    const auto strideDictLenId =
+        encodingKey.forKind(proto::Stream_Kind_STRIDE_DICTIONARY_LENGTH);
+    auto strideDictLenStream =
+        stripe.getStream(strideDictLenId, params.streamLabels().label(), true);
     if (strideDictStream_) {
       inDictionaryReader_ =
           createBooleanRleDecoder(std::move(inDictStream), encodingKey);
-      const auto strideDictLenId =
-          encodingKey.forKind(proto::Stream_Kind_STRIDE_DICTIONARY_LENGTH);
-      auto strideDictLenStream = stripe.getStream(
-          strideDictLenId, params.streamLabels().label(), true);
 
       // Either both stride dictionary streams should be present or both absent.
       DWIO_ENSURE_NOT_NULL(
@@ -104,6 +104,8 @@ SelectiveStringDictionaryColumnReader::SelectiveStringDictionaryColumnReader(
           strideLenVInt,
           dwio::common::INT_BYTE_SIZE);
     } else {
+      DWIO_ENSURE(
+          !strideDictLenStream, "stride dictionary data stream is missing");
       scanState_.dictionary2.numValues = 0;
       LOG(WARNING) << "stride dictionary is missing";
     }

@@ -220,3 +220,66 @@ TEST_F(DirectBufferedInputTest, coalesedPrefetchOverlap) {
   testLoads({{100, 100}, {201, 1, false}, {201, 2, false}, {203, 100}}, 2);
   testLoads({{100, 100}, {201, 1, true}, {201, 2, true}, {203, 100}}, 2);
 }
+
+TEST_F(DirectBufferedInputTest, preload) {
+  struct TestParam {
+    uint64_t fileSize;
+    int32_t offset;
+    int32_t length;
+  };
+  std::vector<TestParam> testSettings = {
+      {DirectBufferedInput::kTinySize - 100, 10, 100},
+      {DirectBufferedInput::kTinySize + 1000, 1000, 1200},
+  };
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.fileSize);
+    file_ = std::make_shared<TestReadFile>(11, testData.fileSize, fileIoStats_);
+    auto input = makeInput();
+
+    EXPECT_FALSE(input->preloaded());
+    EXPECT_FALSE(input->isBuffered(testData.offset, testData.length));
+    const auto iosBeforePreload = file_->numIos();
+    const auto rawBytesBeforePreload = ioStats_->rawBytesRead();
+    const auto readBytesBeforePreload = ioStats_->read().sum();
+
+    input->preload();
+
+    EXPECT_TRUE(input->preloaded());
+    EXPECT_TRUE(input->isBuffered(testData.offset, testData.length));
+    EXPECT_EQ(file_->numIos() - iosBeforePreload, 1);
+    EXPECT_EQ(
+        ioStats_->rawBytesRead() - rawBytesBeforePreload, testData.fileSize);
+    EXPECT_EQ(
+        ioStats_->read().sum() - readBytesBeforePreload, testData.fileSize);
+
+    auto fullFileStream = input->read(0, testData.fileSize, LogType::FILE);
+    checkRead(
+        fullFileStream.get(), {0, static_cast<int32_t>(testData.fileSize)});
+    EXPECT_EQ(file_->numIos() - iosBeforePreload, 1);
+
+    auto stream = input->enqueue(
+        {static_cast<uint64_t>(testData.offset),
+         static_cast<uint64_t>(testData.length)},
+        nullptr);
+    checkRead(stream.get(), {testData.offset, testData.length});
+    EXPECT_EQ(file_->numIos() - iosBeforePreload, 1);
+  }
+}
+
+TEST_F(DirectBufferedInputTest, preloadCalledTwice) {
+  file_ = std::make_shared<TestReadFile>(11, 1024, fileIoStats_);
+  auto input = makeInput();
+
+  input->preload();
+  ASSERT_TRUE(input->preloaded());
+  EXPECT_THROW(input->preload(), BoltException);
+}
+
+TEST_F(DirectBufferedInputTest, preloadAfterEnqueue) {
+  file_ = std::make_shared<TestReadFile>(11, 1024, fileIoStats_);
+  auto input = makeInput();
+
+  input->enqueue({0, 100}, nullptr);
+  EXPECT_THROW(input->preload(), BoltException);
+}

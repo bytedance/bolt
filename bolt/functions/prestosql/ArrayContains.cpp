@@ -308,6 +308,16 @@ core::TypedExprPtr rewriteArrayContains2In(
   return nullptr;
 }
 
+std::vector<std::shared_ptr<exec::FunctionSignature>>
+arrayContainsSignatures() {
+  return ArrayContainsFunction::signatures();
+}
+
+std::unique_ptr<exec::VectorFunction> createArrayContainsFunction(
+    bool throwOnNestedNull) {
+  return std::make_unique<ArrayContainsFunction>(throwOnNestedNull);
+}
+
 BOLT_DECLARE_VECTOR_FUNCTION(
     udf_array_contains,
     ArrayContainsFunction::signatures(),

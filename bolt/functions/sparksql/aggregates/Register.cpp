@@ -33,13 +33,14 @@
 #include "bolt/functions/lib/aggregates/BitDaysOrAggregate.h"
 #include "bolt/functions/lib/aggregates/CollectSetAggregate.h"
 #include "bolt/functions/sparksql/aggregates/AverageAggregate.h"
+#include "bolt/functions/sparksql/aggregates/BitmapConstructAggAggregate.h"
+#include "bolt/functions/sparksql/aggregates/BitmapOrAggAggregate.h"
 #include "bolt/functions/sparksql/aggregates/BitwiseXorAggregate.h"
 #include "bolt/functions/sparksql/aggregates/BloomFilterAggAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CentralMomentsAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CollectListAggregate.h"
 #include "bolt/functions/sparksql/aggregates/CovarianceAggregate.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
-#include "bolt/functions/sparksql/aggregates/PercentileAggregate.h"
 #include "bolt/functions/sparksql/aggregates/RegrReplacementAggregate.h"
 #include "bolt/functions/sparksql/aggregates/SumAggregate.h"
 namespace bytedance::bolt::aggregate::prestosql {
@@ -66,6 +67,7 @@ extern void registerModeAggregate(
     const std::string& prefix,
     bool withCompanionFunctions,
     bool overwrite);
+void registerPercentileAggregate(const std::string& prefix);
 
 void registerAggregateFunctions(
     const std::string& prefix,
@@ -73,6 +75,10 @@ void registerAggregateFunctions(
     bool overwrite) {
   registerFirstLastAggregates(prefix, withCompanionFunctions, overwrite);
   registerMinMaxByAggregates(prefix, withCompanionFunctions, overwrite);
+  registerBitmapConstructAggAggregate(
+      prefix + "bitmap_construct_agg", withCompanionFunctions, overwrite);
+  registerBitmapOrAggAggregate(
+      prefix + "bitmap_or_agg", withCompanionFunctions, overwrite);
   registerBitDaysOrAggregate(
       prefix + "bit_days_or", withCompanionFunctions, overwrite);
   registerBitwiseXorAggregate(prefix, withCompanionFunctions, overwrite);

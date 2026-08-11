@@ -33,7 +33,11 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#ifdef SPARK_COMPATIBLE
+#include "bolt/common/base/tests/GTestUtils.h"
+#endif
 #include "bolt/core/QueryCtx.h"
+#include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -46,6 +50,8 @@
 #include "bolt/functions/sparksql/VariantEncoding.h"
 #include "bolt/functions/sparksql/VariantFunctions.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/DictionaryVector.h"
+#include "bolt/vector/LazyVector.h"
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -87,6 +93,48 @@ std::string getVariantFixturePath(const std::string& fileName) {
       sourceDir.string());
 }
 } // namespace
+
+namespace bytedance::bolt::parquet {
+struct PageReaderTestPeer {
+  static BufferPtr setAndTakeDecompressedBuffer(
+      PageReader& reader,
+      const std::string& payload) {
+    setBuffer<char>(reader.decompressedData_, reader, payload);
+    return reader.takeOwnedPageBuffer(
+        reader.decompressedData_->as<char>(), payload.size());
+  }
+
+  static BufferPtr setAndTakeDecryptionBuffer(
+      PageReader& reader,
+      const std::string& payload) {
+    setBuffer<uint8_t>(reader.decryptionBuffer_, reader, payload);
+    return reader.takeOwnedPageBuffer(
+        reader.decryptionBuffer_->as<char>(), payload.size());
+  }
+
+  static bool hasDecompressedBuffer(const PageReader& reader) {
+    return reader.decompressedData_ != nullptr;
+  }
+
+  static bool hasDecryptionBuffer(const PageReader& reader) {
+    return reader.decryptionBuffer_ != nullptr;
+  }
+
+  static BufferPtr
+  takeOwnedPageBuffer(PageReader& reader, const char* data, size_t size) {
+    return reader.takeOwnedPageBuffer(data, size);
+  }
+
+ private:
+  template <typename T>
+  static void
+  setBuffer(BufferPtr& buffer, PageReader& reader, const std::string& payload) {
+    buffer = AlignedBuffer::allocate<T>(payload.size(), &reader.pool_);
+    memcpy(buffer->asMutable<char>(), payload.data(), payload.size());
+    buffer->setSize(payload.size());
+  }
+};
+} // namespace bytedance::bolt::parquet
 
 class ParquetReaderTest : public ParquetTestBase {
  public:
@@ -597,8 +645,38 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
            {18446744073709551615ULL,
             2000000000000000000ULL,
             3000000000000000000ULL})});
+
+#ifdef SPARK_COMPATIBLE
+  const std::string sample(getExampleFilePath("uint.parquet"));
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFileSchema(rowType);
+  auto reader = createReader(sample, readerOptions);
+
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *pool_);
+#else
   assertReadWithExpected("uint.parquet", rowType, expected);
+#endif
 }
+
+#ifdef SPARK_COMPATIBLE
+TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
+  const std::vector<TypePtr> unsupportedTypes = {
+      DECIMAL(18, 0), DECIMAL(19, 0), DECIMAL(20, 1), DECIMAL(21, 0)};
+  const std::string sample(getExampleFilePath("uint.parquet"));
+
+  for (const auto& uint64Type : unsupportedTypes) {
+    auto rowType =
+        ROW({"uint8", "uint16", "uint32", "uint64"},
+            {SMALLINT(), INTEGER(), INTEGER(), uint64Type});
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    readerOptions.setFileSchema(rowType);
+    BOLT_ASSERT_THROW(createReader(sample, readerOptions), "Schema mismatch");
+  }
+}
+#endif
 
 TEST_F(ParquetReaderTest, parseUnsignedInt5) {
   auto rowType =
@@ -1323,6 +1401,51 @@ TEST_F(ParquetReaderTest, preloadSmallFile) {
   }
 }
 
+TEST_F(ParquetReaderTest, directPreloadMultiRowGroupFileReusesPreload) {
+  auto rowType = ROW({"id"}, {BIGINT()});
+  const std::string sample(getExampleFilePath("multiple_row_groups.parquet"));
+
+  auto file = std::make_shared<LocalReadFile>(sample);
+  const auto fileSize = file->size();
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFilePreloadThreshold(fileSize);
+  auto ioStats = std::make_shared<io::IoStatistics>();
+  auto input = std::make_unique<DirectBufferedInput>(
+      file,
+      MetricsLog::voidLog(),
+      0,
+      nullptr,
+      0,
+      ioStats,
+      nullptr,
+      readerOptions,
+      nullptr);
+  auto reader =
+      std::make_unique<ParquetReader>(std::move(input), readerOptions);
+
+  EXPECT_EQ(reader->fileMetaData().numRowGroups(), 4);
+  const auto rawBytesAfterPreload = ioStats->rawBytesRead();
+  const auto readBytesAfterPreload = ioStats->read().sum();
+  EXPECT_EQ(rawBytesAfterPreload, fileSize);
+  EXPECT_EQ(readBytesAfterPreload, fileSize);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  constexpr int kBatchSize = 1000;
+  auto result = BaseVector::create(rowType, kBatchSize, pool_.get());
+  uint64_t totalRows = 0;
+  while (auto rows = rowReader->next(kBatchSize, result)) {
+    totalRows += rows;
+  }
+
+  EXPECT_EQ(totalRows, reader->numberOfRows().value());
+  EXPECT_EQ(ioStats->rawBytesRead(), rawBytesAfterPreload);
+  EXPECT_EQ(ioStats->read().sum(), readBytesAfterPreload);
+}
+
 TEST_F(ParquetReaderTest, prefetchRowGroups) {
   auto rowType = ROW({"id"}, {BIGINT()});
   const std::string sample(getExampleFilePath("multiple_row_groups.parquet"));
@@ -1378,6 +1501,206 @@ TEST_F(ParquetReaderTest, prefetchRowGroups) {
       parquetRowReader->nextRowNumber();
     }
   }
+}
+
+TEST_F(ParquetReaderTest, releasesRowGroupReaderStateBeforeLoadingNextWindow) {
+  constexpr int32_t kRowsPerGroup = 128;
+  constexpr int32_t kNumRowGroups = 4;
+  constexpr int32_t kStringBytes = 256 * 1024;
+  auto rowType = ROW({"payload"}, {VARCHAR()});
+
+  auto dataPool = rootPool_->addLeafChild("rowGroupReaderReleaseTestData");
+  BufferPtr values =
+      AlignedBuffer::allocate<StringView>(kRowsPerGroup, dataPool.get());
+  BufferPtr stringBuffer =
+      AlignedBuffer::allocate<char>(kStringBytes, dataPool.get());
+  auto rawString = stringBuffer->asMutable<char>();
+  for (int32_t i = 0; i < kStringBytes; ++i) {
+    rawString[i] = static_cast<char>('a' + (i % 26));
+  }
+  stringBuffer->setSize(kStringBytes);
+  auto rawValues = values->asMutable<StringView>();
+  for (int32_t i = 0; i < kRowsPerGroup; ++i) {
+    rawValues[i] = StringView(rawString, kStringBytes);
+  }
+  auto batch = std::make_shared<RowVector>(
+      dataPool.get(),
+      rowType,
+      nullptr,
+      kRowsPerGroup,
+      std::vector<VectorPtr>{std::make_shared<FlatVector<StringView>>(
+          dataPool.get(),
+          VARCHAR(),
+          nullptr,
+          kRowsPerGroup,
+          values,
+          std::vector<BufferPtr>{stringBuffer})});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  {
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.dictionaryPageSizeLimit = kStringBytes * 2;
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), writerOptions, rowType);
+    for (int32_t i = 0; i < kNumRowGroups; ++i) {
+      writer->write(batch);
+      if (i + 1 < kNumRowGroups) {
+        writer->flush();
+      }
+    }
+    writer->close();
+  }
+
+  constexpr int64_t kReadMemoryLimit = 2 << 20;
+  auto readRootPool = memory::memoryManager()->addRootPool(
+      "rowGroupReaderReleaseRead", kReadMemoryLimit);
+  auto readPool = readRootPool->addLeafChild("leaf");
+
+  dwio::common::ReaderOptions readerOptions{readPool.get()};
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setPrefetchRowGroups(1);
+  auto reader = createReader(tempFile->getPath(), readerOptions);
+  ASSERT_EQ(reader->fileMetaData().numRowGroups(), kNumRowGroups);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto parquetRowReader = dynamic_cast<ParquetRowReader*>(rowReader.get());
+  ASSERT_NE(parquetRowReader, nullptr);
+
+  VectorPtr result = BaseVector::create(rowType, 0, readPool.get());
+  uint64_t totalRows = 0;
+  for (;;) {
+    auto rows = parquetRowReader->next(kRowsPerGroup, result);
+    if (rows == 0) {
+      break;
+    }
+    totalRows += rows;
+    parquetRowReader->nextRowNumber();
+  }
+
+  EXPECT_EQ(totalRows, kRowsPerGroup * kNumRowGroups);
+  EXPECT_LT(readPool->peakBytes(), kReadMemoryLimit);
+}
+
+TEST_F(ParquetReaderTest, stringDictionaryTakesOwnedPageBuffers) {
+  auto reader = PageReader(
+      nullptr, *leafPool_, thrift::CompressionCodec::UNCOMPRESSED, 0);
+
+  auto assertBufferContent = [](const BufferPtr& buffer,
+                                const std::string& expected) {
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_EQ(buffer->size(), expected.size());
+    ASSERT_EQ(std::string(buffer->as<char>(), buffer->size()), expected);
+  };
+
+  const std::string decompressedPayload{
+      "\x03\x00\x00\x00one\x03\x00\x00\x00two", 2 * sizeof(int32_t) + 6};
+  auto decompressed = PageReaderTestPeer::setAndTakeDecompressedBuffer(
+      reader, decompressedPayload);
+  assertBufferContent(decompressed, decompressedPayload);
+  ASSERT_FALSE(PageReaderTestPeer::hasDecompressedBuffer(reader));
+
+  const std::string decryptedPayload{
+      "\x05\x00\x00\x00three", sizeof(int32_t) + 5};
+  auto decrypted =
+      PageReaderTestPeer::setAndTakeDecryptionBuffer(reader, decryptedPayload);
+  assertBufferContent(decrypted, decryptedPayload);
+  ASSERT_FALSE(PageReaderTestPeer::hasDecryptionBuffer(reader));
+
+  auto external =
+      AlignedBuffer::allocate<char>(decryptedPayload.size(), leafPool_.get());
+  EXPECT_EQ(
+      PageReaderTestPeer::takeOwnedPageBuffer(
+          reader, external->as<char>(), external->size()),
+      nullptr);
+}
+
+TEST_F(
+    ParquetReaderTest,
+    compressedStringDictionaryDoesNotKeepDuplicatePageCopy) {
+  constexpr int32_t kRows = 512;
+  constexpr int32_t kDictionaryValues = 40;
+  constexpr int32_t kStringBytes = 256 * 1024;
+  constexpr int64_t kReadMemoryLimit = 18 << 20;
+  constexpr int64_t kDictionaryPageBytes =
+      int64_t{kDictionaryValues} * (kStringBytes + sizeof(int32_t));
+  auto rowType = ROW({"payload"}, {VARCHAR()});
+
+  auto dataPool = rootPool_->addLeafChild("dictionaryReuseData");
+  std::vector<BufferPtr> stringBuffers;
+  stringBuffers.reserve(kDictionaryValues);
+  std::vector<StringView> dictionary;
+  dictionary.reserve(kDictionaryValues);
+  for (int32_t i = 0; i < kDictionaryValues; ++i) {
+    auto buffer = AlignedBuffer::allocate<char>(kStringBytes, dataPool.get());
+    auto* raw = buffer->asMutable<char>();
+    memset(raw, static_cast<int>('a' + (i % 26)), kStringBytes);
+    raw[kStringBytes - 1] = static_cast<char>('A' + (i % 26));
+    buffer->setSize(kStringBytes);
+    dictionary.emplace_back(raw, kStringBytes);
+    stringBuffers.push_back(std::move(buffer));
+  }
+
+  auto values = AlignedBuffer::allocate<StringView>(kRows, dataPool.get());
+  auto* rawValues = values->asMutable<StringView>();
+  for (int32_t i = 0; i < kRows; ++i) {
+    rawValues[i] = dictionary[i % dictionary.size()];
+  }
+  auto input = std::make_shared<RowVector>(
+      dataPool.get(),
+      rowType,
+      nullptr,
+      kRows,
+      std::vector<VectorPtr>{std::make_shared<FlatVector<StringView>>(
+          dataPool.get(),
+          VARCHAR(),
+          nullptr,
+          kRows,
+          values,
+          std::move(stringBuffers))});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  {
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.enableDictionary = true;
+    writerOptions.dictionaryPageSizeLimit = kDictionaryPageBytes * 2;
+    writerOptions.dataPageSize = 1 << 20;
+    writerOptions.compression = common::CompressionKind_SNAPPY;
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), writerOptions, rowType);
+    writer->write(input);
+    writer->close();
+  }
+
+  auto readRootPool = memory::memoryManager()->addRootPool(
+      "compressedDictionaryReuseRead", kReadMemoryLimit);
+  auto readPool = readRootPool->addLeafChild("leaf");
+  dwio::common::ReaderOptions readerOptions{readPool.get()};
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setPrefetchRowGroups(0);
+
+  auto reader = createReader(tempFile->getPath(), readerOptions);
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr result = BaseVector::create(rowType, 0, readPool.get());
+
+  ASSERT_EQ(rowReader->next(kRows, result), kRows);
+  LazyVector::ensureLoadedRows(result, SelectivityVector(kRows));
+  test::assertEqualVectors(input, result);
+  EXPECT_EQ(rowReader->next(kRows, result), 0);
+  EXPECT_LT(readPool->peakBytes(), kReadMemoryLimit);
 }
 
 TEST_F(ParquetReaderTest, testEmptyRowGroups) {
@@ -2579,6 +2902,33 @@ TEST_F(ParquetReaderTest, dcMapContainsMap) {
            {"tencent", "2011-02-03"}},
           {{"toutiao", "2013-02-04"}, {"baidu", "2015-01-01"}},
       }),
+  });
+
+  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);
+}
+
+TEST_F(ParquetReaderTest, dcMapStaticNullValuesKeepKeys) {
+  // dcmapNullValues.parquet stores null-valued entries in the key_value MAP
+  // part of DCMAP. map_keys should still expose these keys.
+  const std::string sample(getExampleFilePath("dcmapNullValues.parquet"));
+  auto rowType = ROW({"accounts"}, {MAP(VARCHAR(), VARCHAR())});
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(sample, readerOpts);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  std::vector<std::optional<
+      std::vector<std::pair<std::string, std::optional<std::string>>>>>
+      maps = {
+          std::vector<std::pair<std::string, std::optional<std::string>>>{
+              {"null_key", std::nullopt}, {"value_key", "v1"}},
+          std::vector<std::pair<std::string, std::optional<std::string>>>{
+              {"cold_key", std::nullopt}},
+      };
+  auto expected = makeRowVector({
+      makeNullableMapVector<std::string, std::string>(maps),
   });
 
   assertReadWithReaderAndExpected(rowType, *rowReader, expected, *leafPool_);

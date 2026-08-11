@@ -1,0 +1,11 @@
+diff --git a/cpp/celeborn/client/compress/Decompressor.h b/cpp/celeborn/client/compress/Decompressor.h
+--- a/cpp/celeborn/client/compress/Decompressor.h
++++ b/cpp/celeborn/client/compress/Decompressor.h
+@@ -17,6 +17,7 @@
+ 
+ #pragma once
+ 
++#include <cstdint>
+ #include <memory>
+ 
+ #include "celeborn/protocol/CompressionCodec.h"

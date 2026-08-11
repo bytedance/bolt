@@ -20,6 +20,7 @@
 #include <sstream>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/GlobalParameters.h"
 #include "bolt/common/base/SuccinctPrinter.h"
 #include "bolt/common/memory/MemoryUtils.h"
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
@@ -185,6 +186,13 @@ int64_t ExecutionMemoryPool::acquireMemory(
         std::min(numBytes, std::max<int64_t>(0L, maxMemoryPerTask - curMem));
     int64_t toGrant = std::min(maxToGrant, freeMemory);
 
+    if (isAsyncPreloadThread() && toGrant < numBytes) {
+      // if async threads unreserve non-enough memory, there may be a dead lock
+      // with the growing memory process of the main thread. so we directly
+      // return 0 to avoid calling unreserve(bytes).
+      return 0;
+    }
+
     if (toGrant < numBytes && curMem + toGrant < minMemoryPerTask) {
       LOG(INFO) << "TID " << taskAttemptId
                 << " waiting for at least 1/2N to be free. "
@@ -204,7 +212,7 @@ int64_t ExecutionMemoryPool::acquireMemory(
                 << ")"
                 << ", internalMemoryUsed=" << internalMemoryUsed()
                 << ", internalMemoryFree=" << internalMemoryFree()
-                << ", ExecutionPool detail is: " << this;
+                << ", ExecutionPool detail is: " << toStringLocked();
       // In Spark's implementation, there is no timeout, but in Gluten's
       // practice, we found that some deadlock issues occurred, so we added a
       // timeout here. deadlock scenario:
@@ -423,19 +431,7 @@ uint64_t ExecutionMemoryPool::getConfiguredMemoryPerTask() {
 }
 
 std::ostream& operator<<(std::ostream& os, const ExecutionMemoryPool& pool) {
-  os << "ExecutionMemoryPool(poolSize=" << pool.poolSize_.value_or(0)
-     << ", poolExtendSize=" << pool.poolExtendSize_.value_or(0)
-     << ", memIncreaseSize=" << pool.memIncreaseSize_ << " memoryForTask={";
-  for (const auto& pair : pool.memoryForTask_) {
-    os << "[taskAttemptId=" << pair.first << ", memoryUsed=" << pair.second
-       << "]";
-  }
-  if (pool.statistics_.extendCount > 0) {
-    os << ", DynamicMemoryQuotaManagerStatistics="
-       << pool.statistics_.toString();
-  }
-  os << ", DynamicMemoryQuotaManagerOption=" << pool.option_.toString();
-  return os << "}";
+  return os << pool.toString();
 }
 
 std::ostream& operator<<(std::ostream& os, const ExecutionMemoryPool* pool) {
@@ -447,8 +443,23 @@ std::ostream& operator<<(std::ostream& os, const ExecutionMemoryPool* pool) {
 }
 
 std::string ExecutionMemoryPool::toString() const {
+  MemoryMutexGuard guard(lock_);
+  return toStringLocked();
+}
+
+std::string ExecutionMemoryPool::toStringLocked() const {
   std::stringstream ss;
-  ss << this;
+  ss << "ExecutionMemoryPool(poolSize=" << poolSize_.value_or(0)
+     << ", poolExtendSize=" << poolExtendSize_.value_or(0)
+     << ", memIncreaseSize=" << memIncreaseSize_ << " memoryForTask={";
+  for (const auto& pair : memoryForTask_) {
+    ss << "[taskAttemptId=" << pair.first << ", memoryUsed=" << pair.second
+       << "]";
+  }
+  if (statistics_.extendCount > 0) {
+    ss << ", DynamicMemoryQuotaManagerStatistics=" << statistics_.toString();
+  }
+  ss << ", DynamicMemoryQuotaManagerOption=" << option_.toString() << "}";
   return ss.str();
 }
 
@@ -533,7 +544,7 @@ bool ExecutionMemoryPool::triggerDynamicMemoryQuotaManager(
                     << ", reachThreshold="
                     << (reachThreshold ? "true" : "false") << ", statistics is "
                     << statistics_.toString() << ", pool details is "
-                    << this->toString();
+                    << toStringLocked();
         }
       }
       return true;

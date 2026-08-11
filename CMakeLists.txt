@@ -153,6 +153,17 @@ option(BOLT_ENABLE_TXT "Enable TXT read support" OFF)
 option(BOLT_ENABLE_ARROW "Enable Arrow support" OFF)
 option(BOLT_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
 option(BOLT_ENABLE_CCACHE "Use ccache if installed." ON)
+option(BOLT_ENABLE_FILE_PREFIX_MAP
+       "Hide absolute source and build paths embedded by the compiler." ON
+)
+set(BOLT_MAPPED_SOURCE_PREFIX
+    "."
+    CACHE STRING "Path used instead of the absolute Bolt source directory."
+)
+set(BOLT_MAPPED_BINARY_PREFIX
+    "./_build"
+    CACHE STRING "Path used instead of the absolute Bolt build directory."
+)
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
 option(BOLT_BUILD_PYTHON_PACKAGE "Builds Bolt Python bindings" OFF)
@@ -441,6 +452,43 @@ set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+if(BOLT_ENABLE_FILE_PREFIX_MAP)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(BOLT_FILE_PREFIX_MAP_OPTIONS
+        "-ffile-prefix-map=${CMAKE_BINARY_DIR}=${BOLT_MAPPED_BINARY_PREFIX}"
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=${BOLT_MAPPED_SOURCE_PREFIX}"
+    )
+
+    # GCC's -ffile-prefix-map covers all individual -f*-prefix-map options.
+    # Clang uses a separate option for coverage metadata.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      list(
+        APPEND
+        BOLT_FILE_PREFIX_MAP_OPTIONS
+        "-fcoverage-prefix-map=${CMAKE_BINARY_DIR}=${BOLT_MAPPED_BINARY_PREFIX}"
+        "-fcoverage-prefix-map=${CMAKE_SOURCE_DIR}=${BOLT_MAPPED_SOURCE_PREFIX}"
+      )
+    endif()
+
+    foreach(BOLT_FILE_PREFIX_MAP_OPTION IN LISTS BOLT_FILE_PREFIX_MAP_OPTIONS)
+      add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX>:${BOLT_FILE_PREFIX_MAP_OPTION}>"
+      )
+    endforeach()
+    message(
+      STATUS
+        "Mapping Bolt source path to '${BOLT_MAPPED_SOURCE_PREFIX}' "
+        "and build path to '${BOLT_MAPPED_BINARY_PREFIX}'"
+    )
+  else()
+    message(
+      WARNING
+        "BOLT_ENABLE_FILE_PREFIX_MAP is enabled, but "
+        "${CMAKE_CXX_COMPILER_ID} does not support the configured path mapping"
+    )
+  endif()
+endif()
+
 # execute_process( COMMAND bash -c "( source
 # ${CMAKE_CURRENT_SOURCE_DIR}/scripts/setup-helper-functions.sh && echo -n $(get_cxx_flags
 # $ENV{CPU_TARGET}))" OUTPUT_VARIABLE SCRIPT_CXX_FLAGS RESULT_VARIABLE COMMAND_STATUS)
@@ -585,19 +633,14 @@ endif()
 
 find_package(Protobuf CONFIG REQUIRED)
 
-# GCC needs to link a library to enable std::filesystem.
-if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
-  set(FILESYSTEM "stdc++fs")
-
-  # Ensure we have gcc at least 9+.
-  if(CMAKE_CXX_COMPILER_VERSION LESS 10.0)
-    message(FATAL_ERROR "BOLT requires gcc > 10. Found ${CMAKE_CXX_COMPILER_VERSION}")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # Ensure we have GCC 10 or newer.
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10.0)
+    message(FATAL_ERROR "BOLT requires GCC >= 10. Found ${CMAKE_CXX_COMPILER_VERSION}")
   endif()
 
   # Find Threads library
   find_package(Threads REQUIRED)
-else()
-  set(FILESYSTEM "")
 endif()
 
 set(BOLT_DISABLE_GOOGLETEST OFF)
@@ -625,6 +668,7 @@ find_package(roaring REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/bolt)
+include_directories(${CMAKE_BINARY_DIR}/gen_cpp)
 
 if(NOT BOLT_DISABLE_GOOGLETEST)
   find_package(GTest CONFIG REQUIRED)
@@ -640,6 +684,27 @@ find_package(utf8proc REQUIRED)
 find_package(date REQUIRED)
 
 include(CTest) # include after project() but before add_subdirectory()
+
+function(bolt_add_sharded_gtest TEST_TARGET NUM_SHARDS)
+  math(EXPR LAST_SHARD "${NUM_SHARDS} - 1")
+  foreach(SHARD_INDEX RANGE ${LAST_SHARD})
+    set(TEST_NAME "${TEST_TARGET}_shard_${SHARD_INDEX}")
+    add_test(
+      NAME ${TEST_NAME}
+      COMMAND ${TEST_TARGET}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(
+      ${TEST_NAME}
+      PROPERTIES COST 1
+                 ENVIRONMENT
+                 "GTEST_TOTAL_SHARDS=${NUM_SHARDS};GTEST_SHARD_INDEX=${SHARD_INDEX}"
+    )
+    if(ARGC GREATER 2)
+      set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT ${ARGV2})
+    endif()
+  endforeach()
+endfunction()
 
 # Adding this down here prevents warnings in dependencies from stopping the build
 if("${TREAT_WARNINGS_AS_ERRORS}")

@@ -665,7 +665,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
             std::dynamic_pointer_cast<const core::ProjectNode>(planNode)) {
 #ifdef SPARK_COMPATIBLE
       // partialagg + project + project
-      if (markSkipProject && (i = markSkipProjectAggIndex + 1)) {
+      if (markSkipProject && (i == markSkipProjectAggIndex + 1)) {
         auto nextProject = std::dynamic_pointer_cast<const core::ProjectNode>(
             planNodes[markSkipProjectAggIndex + 2]);
         if (nextProject && nextProject->projections().size() > 0) {

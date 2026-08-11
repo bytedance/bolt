@@ -209,7 +209,7 @@ class ExpressionFuzzerVerifier {
   std::shared_ptr<core::QueryCtx> queryCtx_;
 
   std::shared_ptr<memory::MemoryPool> pool_{
-      memory::deprecatedAddDefaultLeafMemoryPool()};
+      memory::memoryManager()->addLeafPool()};
 
   core::ExecCtx execCtx_;
 

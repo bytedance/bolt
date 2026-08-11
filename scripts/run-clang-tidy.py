@@ -27,14 +27,14 @@
 # --------------------------------------------------------------------------
 
 import argparse
-import multiprocessing
 import json
-import re
-import sys
+import multiprocessing
 import os
+import re
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List
+from typing import List, Optional
 
 
 class Multimap(dict):
@@ -509,6 +509,35 @@ def tidy(args):
         files_to_process = [to_repo_abs(f, git_root) for f in candidate_files]
         line_filter_json = ""
 
+    if _truthy_env("CLANG_TIDY_SKIP_MISSING"):
+        database_path = os.path.join(build_path, "compile_commands.json")
+        try:
+            with open(database_path, encoding="utf-8") as database_file:
+                database_files = {
+                    os.path.realpath(os.path.join(entry["directory"], entry["file"]))
+                    for entry in json.load(database_file)
+                }
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            print(f"Error reading '{database_path}': {error}", file=sys.stderr)
+            return 1
+
+        covered_files = [
+            file_path
+            for file_path in files_to_process
+            if os.path.realpath(file_path) in database_files
+        ]
+        missing_files = sorted(set(files_to_process) - set(covered_files))
+        if missing_files:
+            print(
+                "Warning: skipping files not covered by the compilation database:\n  "
+                + "\n  ".join(missing_files),
+                file=sys.stderr,
+            )
+        files_to_process = covered_files
+        if not files_to_process:
+            print("No changed source files are covered; skipping clang-tidy.")
+            return 0
+
     clang_tidy_bin = args.clang_tidy_binary
 
     cmd_base = [clang_tidy_bin]
@@ -617,7 +646,7 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude",
-        default="_build/|tests/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
+        default="_build/|tests/|test_package/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
         help="Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
     )
     parser.add_argument(
@@ -631,7 +660,7 @@ def parse_args():
         "-j",
         "--jobs",
         type=int,
-        default=multiprocessing.cpu_count(),
+        default=None,
         help="Parallel jobs",
     )
 

@@ -198,6 +198,30 @@ TEST_F(AggregateCompanionSignaturesTest, templateSignature) {
   assertEqual(*companionSignatures, expected);
 }
 
+TEST_F(
+    AggregateCompanionSignaturesTest,
+    resultTypeNotResolvableFromIntermediateType) {
+  std::vector<AggregateFunctionSignaturePtr> signatures{
+      AggregateFunctionSignatureBuilder()
+          .typeVariable("T")
+          .returnType("array(T)")
+          .intermediateType("varbinary")
+          .argumentType("T")
+          .build()};
+  registerDummyAggregateFunction("aggregateFunc4", signatures);
+  auto companionSignatures = getCompanionFunctionSignatures("aggregateFunc4");
+  EXPECT_TRUE(companionSignatures.has_value());
+
+  assertEqual(
+      companionSignatures->partial,
+      {{"aggregateFunc4_partial", {"(T) -> varbinary -> varbinary"}}});
+  assertEqual(
+      companionSignatures->merge,
+      {{"aggregateFunc4_merge", {"(varbinary) -> varbinary -> varbinary"}}});
+  EXPECT_TRUE(companionSignatures->extract.empty());
+  EXPECT_TRUE(companionSignatures->mergeExtract.empty());
+}
+
 } // namespace
 
 } // namespace bytedance::bolt::exec::test

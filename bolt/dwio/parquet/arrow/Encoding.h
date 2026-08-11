@@ -245,7 +245,7 @@ class DictEncoder : virtual public TypedEncoder<DType> {
   /// bytes. Use EstimatedDataEncodedSize() to size buffer.
   virtual int WriteIndices(uint8_t* buffer, int buffer_len) = 0;
 
-  virtual int dict_encoded_size() const = 0;
+  virtual int64_t dict_encoded_size() const = 0;
 
   virtual int bit_width() const = 0;
 

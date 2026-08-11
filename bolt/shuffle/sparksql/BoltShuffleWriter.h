@@ -228,6 +228,14 @@ class BoltShuffleWriter : public ShuffleWriter {
 
   const uint64_t cachedPayloadSize() const override;
 
+  int64_t peakBytesAllocated() const {
+    auto peakBytes = boltPool_->peakBytes();
+    if (dynamic_cast<BoltArrowMemoryPool*>(pool_) == nullptr) {
+      peakBytes += pool_->max_memory();
+    }
+    return peakBytes;
+  }
+
   arrow::Status evictPartitionBuffers(uint32_t partitionId, bool reuseBuffers);
 
   int64_t rawPartitionBytes() const;
@@ -586,17 +594,17 @@ class BoltShuffleWriter : public ShuffleWriter {
     metrics_.combinedVectorNumber = combinedVectorNumber_;
     metrics_.combineVectorTimes = combineVectorTimes_;
     metrics_.combineVectorCost = combineVectorCost_;
-    metrics_.shuffleWriteTime = stopTime_ + totalSplitTime_;
-
-    metrics_.splitTime = totalSplitTime_ -
-        (metrics_.totalEvictTime + metrics_.totalWriteTime +
-         metrics_.totalCompressTime + metrics_.flattenTime +
-         metrics_.computePidTime + metrics_.convertTime);
+    // splitTime is now measured directly around doSplit() instead of being
+    // derived by subtracting the other sub-phases from the whole split().
+    // shuffleWriteTime is measured at the operator level (SparkShuffleWriter),
+    // so it also covers init/reclaim, and is populated there.
+    metrics_.splitTime = splitTime_;
 
     metrics_.dataSize = std::accumulate(
         metrics_.rawPartitionLengths.begin(),
         metrics_.rawPartitionLengths.end(),
         0LL);
+    metrics_.peakBytes = peakBytesAllocated();
   }
 
   void logShuffleCheckStats(const char* writerType) const;
@@ -611,6 +619,8 @@ class BoltShuffleWriter : public ShuffleWriter {
       int64_t memLimit);
   virtual arrow::Status reclaimFixedSizeInCompositeLayout(int64_t* actual);
   virtual arrow::Status tryEvictComposite();
+
+  bool hasEnoughMemoryUsageToSpill();
 
   SplitState splitState_{kInit};
 
@@ -824,8 +834,9 @@ class BoltShuffleWriter : public ShuffleWriter {
   // detailed time
   uint64_t flattenTime_{0};
   uint64_t computePidTime_{0};
-  uint64_t totalSplitTime_{0};
-  uint64_t stopTime_{0};
+  // Time spent inside doSplit() (buildPartition2Row + preAlloc +
+  // splitRowVector).
+  uint64_t splitTime_{0};
   uint64_t shuffleCheckTimeNanos_{0};
   uint64_t shuffleCheckCount_{0};
   std::mt19937 shuffleCheckRandomEngine_{std::random_device{}()};

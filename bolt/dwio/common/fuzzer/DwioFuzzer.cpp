@@ -132,8 +132,7 @@ DwioFuzzer::DwioFuzzer(
     : tempPath_(exec::test::TempDirectoryPath::create()),
       options_(options),
       fileFormat_{fileFormat},
-      aggregatePool_(
-          memory::MemoryManager::deprecatedGetInstance().addRootPool()),
+      aggregatePool_(memory::memoryManager()->addRootPool()),
       pool_(aggregatePool_->addLeafChild("leaf")),
       vectorFuzzer_(std::make_shared<VectorFuzzer>(
           options_.vectorFuzzerOptions,

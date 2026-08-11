@@ -51,6 +51,7 @@
 
 # --- 6. Test Execution & Coverage ---
 # Targets for running CTest and generating code coverage reports
+.PHONY: ctest_debug ctest_release
 .PHONY: unittest unittest_debug unittest_release
 .PHONY: unittest_release_spark unittest_debug_spark unittest_coverage
 
@@ -75,7 +76,7 @@ CONAN_CONFIG ?=
 CONAN_OVERRIDE ?=
 
 BUILD_VERSION ?= main
-PROFILE=default
+PROFILE ?= default
 BUILD_TYPE=Release
 
 # Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
@@ -177,7 +178,8 @@ conan_install:
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
 	echo " \
-	-pr ${PROFILE} -pr ../../scripts/conan/bolt.profile \
+	-pr:h ${PROFILE} \
+	-pr:h ../../scripts/conan/bolt.profile \
 	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
@@ -189,7 +191,12 @@ conan_install:
 	mv new_conan.options conan.options && \
 	echo ${BUILD_TYPE} > ../.build_type && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan graph info ../.. $${ALL_CONAN_OPTIONS} --format=html > bolt.conan.graph.html  && \
+	conan graph info ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	   -s llvm-core/*:build_type=Release \
+	   -s "&:build_type=${BUILD_TYPE}" \
+	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	   $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing \
+	   --format=html > bolt.conan.graph.html && \
 	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
 	conan install ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	   -s llvm-core/*:build_type=Release \
@@ -306,18 +313,24 @@ benchmarks-build-spark:
 benchmarks-build-relwithdebinfo:
 	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
 
+ctest_debug:
+	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
+ctest_release:
+	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+
 unittest_debug: unittest
 unittest: debug_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_debug
 
 unittest_release: release_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_release
 
 unittest_release_spark: release_spark_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Release --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_release
 
 unittest_debug_spark: debug_spark_with_test
-	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
+	$(MAKE) ctest_debug
 
 unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/Debug && \

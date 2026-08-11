@@ -405,9 +405,7 @@ class IndexSource {
 class AsyncThreadCtx {
  public:
   explicit AsyncThreadCtx(int64_t memLimit, bool adaptive)
-      : preloadBytesLimit_(memLimit), adaptive_(adaptive) {
-    BOLT_CHECK_GT(preloadBytesLimit_, 0);
-  }
+      : preloadBytesLimit_(memLimit), adaptive_(adaptive) {}
 
   enum class State { kActive, kClosed };
 
@@ -468,7 +466,7 @@ class AsyncThreadCtx {
   }
 
   bool allowPreload() {
-    if (adaptive_ && allowPreload_.load()) {
+    if (adaptive_ && allowPreload_.load() && preloadBytesLimit_ > 0) {
       std::scoped_lock lock(mutex_);
       return inPreloadingBytes_ < preloadBytesLimit_;
     }
@@ -480,8 +478,9 @@ class AsyncThreadCtx {
     explicit Guard(AsyncThreadCtx* ctx, int64_t bytes = 0)
         : ctx_(ctx), bytes_(bytes) {
       if (ctx_) {
-        if (!ctx_->in(bytes_)) {
+        if (!isAsyncPreloadThread() || !ctx_->in(bytes_)) { // be in order
           ctx_ = nullptr;
+          bytes_ = 0;
         }
       }
     }

@@ -99,6 +99,24 @@ class SparkSqlDateTimeFunctionsTest : public SparkFunctionBaseTest {
     result.resize(view.size());
     return result;
   }
+
+  template <typename T>
+  void assertSimpleVector(
+      const std::shared_ptr<SimpleVector<T>>& result,
+      const std::vector<std::optional<T>>& expected) {
+    ASSERT_EQ(expected.size(), result->size());
+    for (auto i = 0; i < expected.size(); ++i) {
+      if (expected[i].has_value()) {
+        if (result->isNullAt(i)) {
+          ADD_FAILURE() << "Unexpected null at " << i;
+          continue;
+        }
+        EXPECT_EQ(expected[i].value(), result->valueAt(i)) << "at " << i;
+      } else {
+        EXPECT_TRUE(result->isNullAt(i)) << "at " << i;
+      }
+    }
+  }
 };
 
 TEST_F(SparkSqlDateTimeFunctionsTest, year) {
@@ -599,6 +617,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormat) {
   };
 
   EXPECT_EQ(0, unixTimestamp("1970-01-01", "yyyy-MM-dd"));
+  EXPECT_EQ(0, unixTimestamp("-1970-01-01", "'-'yyyy-MM-dd"));
+  EXPECT_EQ(std::nullopt, unixTimestamp("-0001-01-01", "yyyy-MM-dd"));
   EXPECT_EQ(0, unixTimestamp(" 1970-01-01 00:00:00", " yyyy-MM-dd HH:mm:ss"));
   EXPECT_EQ(
       std::nullopt,
@@ -637,6 +657,296 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormat) {
   EXPECT_EQ(
       std::nullopt,
       unixTimestamp("2022-12-12 asd 07:45:31", "yyyy-MM-dd 'asd HH:mm:ss"));
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampInDstGapReturnsNull) {
+  setQueryTimeZone("Asia/Shanghai");
+
+  auto result = evaluate<SimpleVector<int64_t>>(
+      "unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss')",
+      makeRowVector({makeFlatVector<std::string>({
+          "1991-04-14 01:59:59",
+          "1991-04-14 02:00:00",
+          "1991-04-14 02:30:00",
+          "1991-04-14 03:00:00",
+      })}));
+
+  ASSERT_EQ(4, result->size());
+  EXPECT_FALSE(result->isNullAt(0));
+  EXPECT_EQ(671565599, result->valueAt(0));
+  EXPECT_TRUE(result->isNullAt(1));
+  EXPECT_TRUE(result->isNullAt(2));
+  EXPECT_FALSE(result->isNullAt(3));
+  EXPECT_EQ(671565600, result->valueAt(3));
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDefaultFormatDstGap) {
+  const auto unixTimestamp = [&](const std::vector<std::string>& inputs) {
+    return evaluate<SimpleVector<int64_t>>(
+        "unix_timestamp(c0)",
+        makeRowVector({makeFlatVector<std::string>(inputs)}));
+  };
+
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
+  assertSimpleVector<int64_t>(
+      unixTimestamp({
+          "1991-04-14 01:59:59",
+          "1991-04-14 02:30:00",
+          "1991-04-14 03:00:00",
+          "-0001-01-01 00:00:00",
+      }),
+      {
+          671565599,
+          std::nullopt,
+          671565600,
+          std::nullopt,
+      });
+
+  setPolicyAndTimeZone("corrected", "America/Los_Angeles");
+  assertSimpleVector<int64_t>(
+      unixTimestamp({
+          "2015-03-08 02:30:00",
+          "2015-11-01 01:30:00",
+      }),
+      {
+          1425810600,
+          1446366600,
+      });
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampNamedTimeZoneDstGap) {
+  const auto unixTimestamp = [&](const std::vector<std::string>& inputs) {
+    return evaluate<SimpleVector<int64_t>>(
+        "unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss')",
+        makeRowVector({makeFlatVector<std::string>(inputs)}));
+  };
+
+  setPolicyAndTimeZone("corrected", "America/Los_Angeles");
+  assertSimpleVector<int64_t>(
+      unixTimestamp({
+          "2015-03-08 01:59:59",
+          "2015-03-08 02:00:00",
+          "2015-03-08 02:30:00",
+          "2015-03-08 03:00:00",
+          "2015-11-01 01:30:00",
+      }),
+      {
+          1425808799,
+          1425808800,
+          1425810600,
+          1425808800,
+          1446366600,
+      });
+
+  setPolicyAndTimeZone("corrected", "Europe/Berlin");
+  assertSimpleVector<int64_t>(
+      unixTimestamp({
+          "2021-03-28 01:59:59",
+          "2021-03-28 02:00:00",
+          "2021-03-28 02:30:00",
+          "2021-03-28 03:00:00",
+          "2021-10-31 02:30:00",
+      }),
+      {
+          1616893199,
+          1616893200,
+          1616895000,
+          1616893200,
+          1635640200,
+      });
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampWithExplicitOffset) {
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
+
+  auto result = evaluate<SimpleVector<int64_t>>(
+      "unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss Z')",
+      makeRowVector({makeFlatVector<std::string>({
+          "2015-03-08 03:30:00 -0700",
+          "2015-03-08 02:30:00 -0800",
+          "1970-01-01 08:00:00 +0800",
+          "1991-04-14 02:30:00 +0800",
+          "1970-01-01 00:00:00 +0000",
+      })}));
+
+  assertSimpleVector<int64_t>(
+      result,
+      {
+          1425810600,
+          1425810600,
+          0,
+          671567400,
+          0,
+      });
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampSparkMicrosOverflow) {
+  const auto unixTimestamp = [&](std::optional<StringView> dateStr,
+                                 std::optional<StringView> formatStr) {
+    return evaluateOnce<int64_t>("unix_timestamp(c0, c1)", dateStr, formatStr);
+  };
+  const auto getTimestamp = [&](std::optional<StringView> dateStr,
+                                std::optional<StringView> formatStr) {
+    return evaluateOnce<Timestamp>("get_timestamp(c0, c1)", dateStr, formatStr);
+  };
+
+  setPolicyAndTimeZone("corrected", "UTC");
+  EXPECT_EQ(
+      9223372036854,
+      unixTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
+  EXPECT_EQ(
+      9223372008054,
+      unixTimestamp("294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
+  BOLT_ASSERT_THROW(
+      unixTimestamp("294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
+      "long overflow");
+
+  EXPECT_EQ(
+      Timestamp(9223372036854, 0),
+      getTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
+  EXPECT_EQ(
+      Timestamp(9223372008054, 0),
+      getTimestamp("294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
+  BOLT_ASSERT_THROW(
+      getTimestamp("294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
+      "long overflow");
+
+  setPolicyAndTimeZone("corrected", "America/Los_Angeles");
+  BOLT_ASSERT_THROW(
+      unixTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
+      "long overflow");
+  BOLT_ASSERT_THROW(
+      getTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
+      "long overflow");
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampOutOfRangeYears) {
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
+
+  auto result = evaluate<SimpleVector<int64_t>>(
+      "unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss')",
+      makeRowVector({makeFlatVector<std::string>({
+          "0001-01-01 00:00:00",
+          "9999-12-31 23:59:59",
+          "10000-01-01 00:00:00",
+          "40000-01-01 00:00:00",
+          "-0001-01-01 00:00:00",
+          "-40000-01-01 00:00:00",
+      })}));
+
+  assertSimpleVector<int64_t>(
+      result,
+      {
+          -62135625943,
+          253402271999,
+          253402272000,
+          1200110832000,
+          std::nullopt,
+          std::nullopt,
+      });
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
+  const auto getTimestamp = [&](const std::vector<std::string>& inputs,
+                                const std::string& format) {
+    return evaluate<SimpleVector<Timestamp>>(
+        fmt::format("get_timestamp(c0, '{}')", format),
+        makeRowVector({makeFlatVector<std::string>(inputs)}));
+  };
+
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
+  assertSimpleVector<Timestamp>(
+      getTimestamp(
+          {
+              "1991-04-14 01:59:59",
+              "1991-04-14 02:00:00",
+              "1991-04-14 02:30:00",
+              "1991-04-14 03:00:00",
+          },
+          "yyyy-MM-dd HH:mm:ss"),
+      {
+          Timestamp(671565599, 0),
+          std::nullopt,
+          std::nullopt,
+          Timestamp(671565600, 0),
+      });
+
+  setPolicyAndTimeZone("corrected", "America/Los_Angeles");
+  assertSimpleVector<Timestamp>(
+      getTimestamp(
+          {
+              "2015-03-08 01:59:59",
+              "2015-03-08 02:00:00",
+              "2015-03-08 02:30:00",
+              "2015-03-08 03:00:00",
+              "2015-11-01 01:30:00",
+          },
+          "yyyy-MM-dd HH:mm:ss"),
+      {
+          Timestamp(1425808799, 0),
+          Timestamp(1425808800, 0),
+          Timestamp(1425810600, 0),
+          Timestamp(1425808800, 0),
+          Timestamp(1446366600, 0),
+      });
+
+  setPolicyAndTimeZone("corrected", "Europe/Berlin");
+  assertSimpleVector<Timestamp>(
+      getTimestamp(
+          {
+              "2021-03-28 01:59:59",
+              "2021-03-28 02:00:00",
+              "2021-03-28 02:30:00",
+              "2021-03-28 03:00:00",
+              "2021-10-31 02:30:00",
+          },
+          "yyyy-MM-dd HH:mm:ss"),
+      {
+          Timestamp(1616893199, 0),
+          Timestamp(1616893200, 0),
+          Timestamp(1616895000, 0),
+          Timestamp(1616893200, 0),
+          Timestamp(1635640200, 0),
+      });
+
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
+  assertSimpleVector<Timestamp>(
+      getTimestamp(
+          {
+              "2015-03-08 03:30:00 -0700",
+              "2015-03-08 02:30:00 -0800",
+              "1970-01-01 08:00:00 +0800",
+              "1991-04-14 02:30:00 +0800",
+              "1970-01-01 00:00:00 +0000",
+          },
+          "yyyy-MM-dd HH:mm:ss Z"),
+      {
+          Timestamp(1425810600, 0),
+          Timestamp(1425810600, 0),
+          Timestamp(0, 0),
+          Timestamp(671567400, 0),
+          Timestamp(0, 0),
+      });
+
+  assertSimpleVector<Timestamp>(
+      getTimestamp(
+          {
+              "0001-01-01 00:00:00",
+              "9999-12-31 23:59:59",
+              "10000-01-01 00:00:00",
+              "40000-01-01 00:00:00",
+              "-0001-01-01 00:00:00",
+              "-40000-01-01 00:00:00",
+          },
+          "yyyy-MM-dd HH:mm:ss"),
+      {
+          Timestamp(-62135625943, 0),
+          Timestamp(253402271999, 0),
+          Timestamp(253402272000, 0),
+          Timestamp(1200110832000, 0),
+          std::nullopt,
+          std::nullopt,
+      });
 }
 
 TEST_F(
@@ -1349,8 +1659,16 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
         auto ts = getTimestamp(dateString, format);
         return ts.has_value() ? ts.value().toString() : "null";
       };
+  const auto getTimestampWithFormat = [&](std::optional<StringView> dateString,
+                                          std::optional<StringView> formatStr) {
+    return evaluateOnce<Timestamp>(
+        "get_timestamp(c0, c1)", dateString, formatStr);
+  };
 
   EXPECT_EQ(getTimestamp("1970-01-01", "yyyy-MM-dd"), Timestamp(0, 0));
+  EXPECT_EQ(
+      Timestamp(0, 0), getTimestampWithFormat("-1970-01-01", "'-'yyyy-MM-dd"));
+  EXPECT_EQ(std::nullopt, getTimestampWithFormat("-0001-01-01", "yyyy-MM-dd"));
   EXPECT_EQ(Timestamp(-31536000, 0), getTimestamp("1969", "yyyy"));
   EXPECT_EQ(Timestamp(86400, 0), getTimestamp("1970-01-02", "yyyy-MM-dd"));
   EXPECT_EQ(

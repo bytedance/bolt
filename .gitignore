@@ -314,6 +314,7 @@ bolt/docs/sphinx/source/README_generated_*
 bolt/docs/bindings/python/_generate/*
 
 # conan / cmake
+.conan2/
 CMakeUserPresets.json
 CMakePresets.json
 conan.lock

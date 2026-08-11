@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "bolt/common/file/FileSystems.h"
 #include "folly/concurrency/ConcurrentHashMap.h"
 
 namespace bytedance::bolt::filesystems {
@@ -42,9 +41,5 @@ extern folly::ConcurrentHashMap<std::string, std::shared_ptr<HdfsFileSystem>>
 
 // Register the HDFS.
 void registerHdfsFileSystem();
-
-std::function<std::shared_ptr<
-    FileSystem>(std::shared_ptr<const config::ConfigBase>, std::string_view)>
-hdfsFileSystemGenerator();
 
 } // namespace bytedance::bolt::filesystems

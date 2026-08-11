@@ -47,6 +47,7 @@ std::unique_ptr<dwio::common::FormatData> ParquetParams::toFormatData(
       fileDecryptor_,
       scanSpec.getRuntimeStatistics(),
       schemaHelper_,
+      enableMetadataFilter_,
       enableDictionaryFilter_,
       decodeRepDefPageCount_,
       parquetRepDefMemoryLimit_);
@@ -64,10 +65,29 @@ void ParquetData::filterRowGroups(
     result.filterResult.resize(nwords);
   }
   auto metadataFiltersStartIndex = result.metadataFilterResults.size();
-  for (int i = 0; i < scanSpec.numMetadataFilters(); ++i) {
-    result.metadataFilterResults.emplace_back(
-        scanSpec.metadataFilterNodeAt(i), std::vector<uint64_t>(nwords));
+  const auto numScanSpecMetadataFilters =
+      enableMetadataFilter_ ? scanSpec.numMetadataFilters() : 0;
+  std::vector<int> metadataFilterIndices;
+  if (typeDependentMetadataFiltersEnabled_) {
+    for (int i = 0; i < numScanSpecMetadataFilters; ++i) {
+      result.metadataFilterResults.emplace_back(
+          scanSpec.metadataFilterNodeAt(i), std::vector<uint64_t>(nwords));
+    }
+  } else {
+    metadataFilterIndices.reserve(numScanSpecMetadataFilters);
+    for (int i = 0; i < numScanSpecMetadataFilters; ++i) {
+      auto* filter = scanSpec.metadataFilterAt(i);
+      if (!filter->isValueIndependent()) {
+        continue;
+      }
+      metadataFilterIndices.push_back(i);
+      result.metadataFilterResults.emplace_back(
+          scanSpec.metadataFilterNodeAt(i), std::vector<uint64_t>(nwords));
+    }
   }
+  const auto numMetadataFilters = typeDependentMetadataFiltersEnabled_
+      ? numScanSpecMetadataFilters
+      : metadataFilterIndices.size();
   auto isVarchar = type_->type()->isVarchar();
   auto lt = scanSpec.logicalTypeName();
   auto ct = scanSpec.convertedTypeName();
@@ -76,15 +96,17 @@ void ParquetData::filterRowGroups(
         << "Skipping row group filter for VARCHAR column without logical type";
     return;
   }
-  if (scanSpec.filter() || scanSpec.numMetadataFilters() > 0) {
+  if (scanSpec.filter() || numMetadataFilters > 0) {
     for (auto i = 0; i < rowGroups_.size(); ++i) {
       if (scanSpec.filter() && !rowGroupMatches(i, scanSpec.filter(), input)) {
         bits::setBit(result.filterResult.data(), i);
         continue;
       }
-      for (int j = 0; j < scanSpec.numMetadataFilters(); ++j) {
-        auto* metadataFilter = scanSpec.metadataFilterAt(j);
-        if (!rowGroupMatches(i, metadataFilter, input)) {
+      for (int j = 0; j < numMetadataFilters; ++j) {
+        const auto filterIndex =
+            typeDependentMetadataFiltersEnabled_ ? j : metadataFilterIndices[j];
+        if (!rowGroupMatches(
+                i, scanSpec.metadataFilterAt(filterIndex), input)) {
           bits::setBit(
               result.metadataFilterResults[metadataFiltersStartIndex + j]
                   .second.data(),
@@ -413,6 +435,10 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
   }
 
   return dwio::common::PositionProvider(empty);
+}
+
+void ParquetData::releaseRowGroupReader() {
+  reader_.reset();
 }
 
 std::pair<int64_t, int64_t> ParquetData::getRowGroupRegion(

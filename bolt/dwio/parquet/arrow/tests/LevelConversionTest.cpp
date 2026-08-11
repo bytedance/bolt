@@ -409,6 +409,117 @@ TYPED_TEST(NestedListTest, TestOverflow) {
   this->Run(test_data, level_info);
 }
 
+TEST(NestedListTest, DirectLengthsMatchesOffsets) {
+  auto check = [](const MultiLevelTestData& test_data,
+                  LevelInfo level_info,
+                  int32_t expectedValuesRead) {
+    std::vector<uint8_t> offsetsValidity(expectedValuesRead, 0);
+    ValidityBitmapInputOutput offsetsIo;
+    offsetsIo.valid_bits = offsetsValidity.data();
+    offsetsIo.values_read_upper_bound = expectedValuesRead;
+    std::vector<int32_t> offsets(expectedValuesRead + 1, 0);
+    DefRepLevelsToList(
+        test_data.def_levels.data(),
+        test_data.rep_levels.data(),
+        test_data.def_levels.size(),
+        level_info,
+        &offsetsIo,
+        offsets.data());
+
+    std::vector<uint8_t> lengthsValidity(expectedValuesRead, 0);
+    ValidityBitmapInputOutput lengthsIo;
+    lengthsIo.valid_bits = lengthsValidity.data();
+    lengthsIo.values_read_upper_bound = expectedValuesRead;
+    std::vector<int32_t> lengths(expectedValuesRead, -1);
+    DefRepLevelsToListLengths(
+        test_data.def_levels.data(),
+        test_data.rep_levels.data(),
+        test_data.def_levels.size(),
+        level_info,
+        &lengthsIo,
+        lengths.data());
+
+    ASSERT_EQ(lengthsIo.values_read, offsetsIo.values_read);
+    ASSERT_EQ(lengthsIo.null_count, offsetsIo.null_count);
+    ASSERT_EQ(
+        BitmapToString(lengthsValidity, expectedValuesRead),
+        BitmapToString(offsetsValidity, expectedValuesRead));
+    for (auto i = 0; i < offsetsIo.values_read; ++i) {
+      EXPECT_EQ(lengths[i], offsets[i + 1] - offsets[i]) << "index=" << i;
+    }
+  };
+
+  LevelInfo outer;
+  outer.rep_level = 1;
+  outer.def_level = 2;
+  check(TriplyNestedList(), outer, 4);
+
+  LevelInfo middle;
+  middle.rep_level = 2;
+  middle.def_level = 4;
+  middle.repeated_ancestor_def_level = 2;
+  check(TriplyNestedList(), middle, 7);
+
+  LevelInfo inner;
+  inner.rep_level = 3;
+  inner.def_level = 6;
+  inner.repeated_ancestor_def_level = 4;
+  check(TriplyNestedList(), inner, 6);
+
+  MultiLevelTestData nullableElements;
+  nullableElements.def_levels = std::vector<int16_t>{2, 1, 2, 0, 1, 1};
+  nullableElements.rep_levels = std::vector<int16_t>{0, 1, 1, 0, 0, 1};
+  check(nullableElements, outer, 3);
+}
+
+TEST(NestedListTest, DirectLengthsUpperBound) {
+  LevelInfo level_info;
+  level_info.rep_level = 1;
+  level_info.def_level = 2;
+  level_info.repeated_ancestor_def_level = 0;
+
+  std::vector<int16_t> def_levels = {2, 2};
+  std::vector<int16_t> rep_levels = {0, 0};
+  ValidityBitmapInputOutput io;
+  io.values_read_upper_bound = 1;
+  std::vector<int32_t> lengths(2, -1);
+
+  ASSERT_THROW(
+      DefRepLevelsToListLengths(
+          def_levels.data(),
+          rep_levels.data(),
+          def_levels.size(),
+          level_info,
+          &io,
+          lengths.data()),
+      ParquetException);
+  EXPECT_EQ(lengths[1], -1);
+}
+
+TEST(NestedListTest, DirectLengthsExactUpperBound) {
+  LevelInfo level_info;
+  level_info.rep_level = 1;
+  level_info.def_level = 2;
+  level_info.repeated_ancestor_def_level = 0;
+
+  std::vector<int16_t> def_levels = {2, 2};
+  std::vector<int16_t> rep_levels = {0, 0};
+  ValidityBitmapInputOutput io;
+  io.values_read_upper_bound = 2;
+  std::vector<int32_t> lengths(2, -1);
+
+  DefRepLevelsToListLengths(
+      def_levels.data(),
+      rep_levels.data(),
+      def_levels.size(),
+      level_info,
+      &io,
+      lengths.data());
+
+  EXPECT_EQ(io.values_read, 2);
+  EXPECT_THAT(lengths, testing::ElementsAre(1, 1));
+}
+
 TEST(TestOnlyExtractBitsSoftware, BasicTest) {
   auto check =
       [](uint64_t bitmap, uint64_t selection, uint64_t expected) -> void {

@@ -84,6 +84,28 @@ TEST_F(SequenceTest, singleElement) {
   assertEqualVectors(expected, result);
 }
 
+#ifdef SPARK_COMPATIBLE
+TEST_F(SequenceTest, singleElementWithZeroStep) {
+  auto bigintResult = evaluate(
+      "sequence(c0, c1, c2)",
+      makeRowVector({
+          makeFlatVector<int64_t>({1}),
+          makeFlatVector<int64_t>({1}),
+          makeFlatVector<int64_t>({0}),
+      }));
+  assertEqualVectors(makeArrayVector<int64_t>({{1}}), bigintResult);
+
+  auto integerResult = evaluate(
+      "sequence(c0, c1, c2)",
+      makeRowVector({
+          makeFlatVector<int32_t>({1}),
+          makeFlatVector<int32_t>({1}),
+          makeFlatVector<int32_t>({0}),
+      }));
+  assertEqualVectors(makeArrayVector<int32_t>({{1}}), integerResult);
+}
+#endif
+
 TEST_F(SequenceTest, integerType) {
   auto result = evaluate(
       "sequence(c0, c1)",

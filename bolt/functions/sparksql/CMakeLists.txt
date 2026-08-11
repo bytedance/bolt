@@ -28,6 +28,7 @@
 add_subdirectory(specialforms)
 bolt_add_library(
   bolt_functions_spark_impl
+  ArrayContains.cpp
   ArrayGetFunction.cpp
   ArraySliceSum.cpp
   ArraySort.cpp

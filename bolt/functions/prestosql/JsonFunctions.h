@@ -50,9 +50,8 @@ struct IsJsonScalarFunction {
 
 // jsonExtractScalar(json, json_path) -> varchar
 // Current implementation support UTF-8 in json, but not in json_path.
-// Like jsonExtract(), but returns the result value as a string (as opposed
-// to being encoded as JSON). The value referenced by json_path must be a scalar
-// (boolean, number or string)
+// Returns the result value as a string rather than JSON-encoded text. The value
+// referenced by json_path must be a scalar (boolean, number or string).
 template <typename T>
 struct JsonExtractScalarFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
@@ -135,30 +134,6 @@ struct JsonExtractScalarFunctionWithDetected {
         return false;
       }
     }
-  }
-};
-
-template <typename T>
-struct JsonExtractFunction {
-  BOLT_DEFINE_FUNCTION_TYPES(T);
-
-  FOLLY_ALWAYS_INLINE bool call(
-      out_type<Json>& result,
-      const arg_type<Json>& json,
-      const arg_type<Varchar>& jsonPath) {
-    auto extractResult =
-        jsonExtract(folly::StringPiece(json), folly::StringPiece(jsonPath));
-    if (!extractResult.hasValue() || extractResult.value().isNull()) {
-      return false;
-    }
-
-    folly::json::serialization_opts opts;
-    opts.sort_keys = true;
-    folly::json::serialize(*extractResult, opts);
-
-    UDFOutputString::assign(
-        result, folly::json::serialize(*extractResult, opts));
-    return true;
   }
 };
 

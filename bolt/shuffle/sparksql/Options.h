@@ -36,6 +36,7 @@
 #include <bolt/common/base/Exceptions.h>
 #include <fmt/format.h>
 #include <cstdint>
+#include "bolt/row/RowFormat.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
@@ -43,6 +44,7 @@ namespace bytedance::bolt::shuffle::sparksql {
 
 static constexpr int16_t kDefaultBatchSize = 4096;
 static constexpr int32_t kDefaultShuffleBatchByteSize = 41943040;
+static constexpr int32_t kDefaultShuffleBufferSize = 40 * 1024 * 1024;
 static constexpr int16_t kDefaultShuffleWriterBufferSize = 4096;
 static constexpr int64_t kDefaultMergeBufferBytesThreshold = 40 * 1024 * 1024;
 static constexpr int32_t kDefaultNumSubDirs = 64;
@@ -51,6 +53,7 @@ static constexpr int32_t kDefaultBufferAlignment = 64;
 static constexpr double kDefaultBufferReallocThreshold = 0.25;
 static constexpr double kDefaultMergeBufferThreshold = 0.25;
 static constexpr bool kEnableBufferedWrite = true;
+static constexpr bool kEnableBufferedSpillWrite = false;
 static constexpr int32_t kDefaultForceShuffleWriterType = 0;
 static constexpr int32_t kDefaultUseV2PreallocSizeThreshold = 0;
 static constexpr int32_t kDefaultRowVectorModeCompressionMinColumns = 20;
@@ -66,6 +69,11 @@ static constexpr int32_t kDefaultShuffleCheckMaxColumns =
 
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
+
+// Whether to reuse a single BufferedInputStream across all reader streams by
+// chaining them into one continuous stream, instead of creating a new
+// BufferedInputStream (and deserializer) per stream.
+static constexpr bool kDefaultReuseBufferedInputStream = false;
 
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
@@ -98,12 +106,20 @@ struct ShuffleReaderOptions {
   std::string codecBackend = "none";
   int32_t batchSize = kDefaultBatchSize;
   int32_t shuffleBatchByteSize = kDefaultShuffleBatchByteSize;
+  int32_t shuffleBufferSize = kDefaultShuffleBufferSize;
   int32_t numPartitions = -1;
   std::string partitionShortName = "";
   int32_t forceShuffleWriterType = -1;
 
+  // On-wire row format for the row-based shuffle. Must match the writer side.
+  row::RowFormat rowFormat = row::RowFormat::COMPACT;
+
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
+
+  // Reuse a single BufferedInputStream across all reader streams to avoid the
+  // overhead of repeatedly creating/destroying one per stream.
+  bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 };
 
 struct PartitionWriterOptions {
@@ -118,6 +134,8 @@ struct PartitionWriterOptions {
   std::string compressionMode = "buffer";
 
   bool bufferedWrite = kEnableBufferedWrite;
+
+  bool bufferedSpillWrite = kEnableBufferedSpillWrite;
 
   int32_t numSubDirs = kDefaultNumSubDirs;
 
@@ -158,8 +176,10 @@ struct ShuffleWriterOptions {
   int32_t accumulateBatchMaxColumns = kDefaultAccumulateBatchMaxColumns;
   int32_t accumulateBatchMaxBatches = kDefaultAccumulateBatchMaxBatches;
   int32_t recommendedColumn2RowSize = 0;
+  int32_t shuffleBatchSize = kDefaultShuffleBatchByteSize;
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
+  row::RowFormat rowFormat = row::RowFormat::COMPACT;
   PartitionWriterOptions partitionWriterOptions{};
 };
 
@@ -186,6 +206,7 @@ struct ShuffleWriterMetrics {
   // total time for shuffle write, including split, evict, write, compress
   int64_t shuffleWriteTime{0};
   int64_t dataSize{0};
+  int64_t peakBytes{0};
   std::vector<int64_t> partitionLengths{};
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
 };

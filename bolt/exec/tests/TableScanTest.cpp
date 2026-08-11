@@ -1573,6 +1573,63 @@ TEST_F(TableScanTest, batchSize) {
   }
 }
 
+TEST_F(TableScanTest, readsAfterReaderOutputReuse) {
+  const vector_size_t size = 10;
+  auto c0 = makeFlatVector<int64_t>(size, folly::identity);
+  auto c1 = makeFlatVector<std::string>(
+      size, [](auto row) { return fmt::format("value-{}", row); });
+  auto c2 = makeRowVector({
+      makeFlatVector<int32_t>(size, [](auto row) { return row * 3; }),
+  });
+  auto offsets = [&]() {
+    std::vector<vector_size_t> values(size);
+    std::iota(values.begin(), values.end(), 0);
+    return values;
+  };
+  auto keys = makeFlatVector<int32_t>(size, folly::identity);
+  auto ints = makeFlatVector<int64_t>(size, [](auto row) { return row * 11; });
+  auto nestedRows = makeRowVector({
+      makeFlatVector<int64_t>(size, [](auto row) { return row * 7; }),
+  });
+  auto arrayInts = makeArrayVector(offsets(), ints);
+  auto mapInts = makeMapVector(offsets(), keys, ints);
+  auto arrayRows = makeArrayVector(offsets(), nestedRows);
+  auto mapRows = makeMapVector(offsets(), keys, nestedRows);
+  auto arrayArrayInts = makeArrayVector(offsets(), arrayInts);
+  auto mapArrayInts = makeMapVector(offsets(), keys, arrayInts);
+  auto arrayMapRows = makeArrayVector(offsets(), mapRows);
+  auto mapArrayRows = makeMapVector(offsets(), keys, arrayRows);
+  auto mapArrayMapRows = makeMapVector(offsets(), keys, arrayMapRows);
+  auto arrayMapArrayRows = makeArrayVector(offsets(), mapArrayRows);
+  auto data = makeRowVector(std::vector<VectorPtr>{
+      c0,
+      c1,
+      c2,
+      arrayInts,
+      mapInts,
+      arrayRows,
+      mapRows,
+      arrayArrayInts,
+      mapArrayInts,
+      arrayMapRows,
+      mapArrayRows,
+      mapArrayMapRows,
+      arrayMapArrayRows,
+  });
+
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->path, data);
+
+  auto plan = tableScanNode(asRowType(data->type()));
+  auto task = AssertQueryBuilder(plan)
+                  .splits(makeHiveConnectorSplits({filePath}))
+                  .config(QueryConfig::kMaxOutputBatchRows, "3")
+                  .assertResults(data);
+
+  const auto opStats = task->taskStats().pipelineStats[0].operatorStats[0];
+  EXPECT_GT(opStats.outputVectors, 1);
+}
+
 // Test that adding the same split with the same sequence id does not cause
 // double read and the 2nd split is ignored.
 TEST_F(TableScanTest, sequentialSplitNoDoubleRead) {

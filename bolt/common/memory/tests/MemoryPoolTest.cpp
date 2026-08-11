@@ -44,7 +44,6 @@
 
 DECLARE_bool(bolt_memory_leak_check_enabled);
 DECLARE_bool(bolt_memory_pool_debug_enabled);
-DECLARE_int32(bolt_memory_num_shared_leaf_pools);
 
 using namespace ::testing;
 using namespace bytedance::bolt::cache;
@@ -2381,37 +2380,6 @@ TEST_P(MemoryPoolTest, concurrentUpdatesToTheSamePool) {
   childPools.clear();
   ASSERT_LE(root->stats().peakBytes, root->stats().cumulativeBytes);
   ASSERT_EQ(root->stats().currentBytes, 0);
-}
-
-TEST_P(MemoryPoolTest, DISABLED_concurrentUpdateToSharedPools) {
-  // under some conditions bug.
-  constexpr int64_t kMaxMemory = 10 * GB;
-  MemoryManager& manager = *getMemoryManager();
-  const int32_t kNumThreads = FLAGS_bolt_memory_num_shared_leaf_pools;
-
-  folly::Random::DefaultGenerator rng;
-  rng.seed(1234);
-
-  const int32_t kNumOpsPerThread = 200;
-  std::vector<std::thread> threads;
-  threads.reserve(kNumThreads);
-  for (size_t i = 0; i < kNumThreads; ++i) {
-    threads.emplace_back([&, i]() {
-      auto& sharedPool = manager.deprecatedSharedLeafPool();
-      MemoryPoolTester tester(i, kMaxMemory, sharedPool);
-      for (int32_t iter = 0; iter < kNumOpsPerThread; ++iter) {
-        tester.run();
-      }
-    });
-  }
-
-  for (auto& th : threads) {
-    th.join();
-  }
-
-  for (auto pool : manager.testingSharedLeafPools()) {
-    EXPECT_EQ(pool->currentBytes(), 0);
-  }
 }
 
 TEST_P(MemoryPoolTest, concurrentPoolStructureAccess) {

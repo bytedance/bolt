@@ -34,4 +34,14 @@ std::shared_ptr<exec::VectorFunction> makeRLike(
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> rlikeSignatures();
 
+// Flink 1.11 regexp_extract returns null for invalid regular expressions,
+// invalid group IDs, unmatched groups and inputs without a match. Native
+// Engine V2 only supports constant patterns.
+std::shared_ptr<exec::VectorFunction> makeRegexpExtract(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config);
+
+std::vector<std::shared_ptr<exec::FunctionSignature>> regexpExtractSignatures();
+
 } // namespace bytedance::bolt::functions::flinksql

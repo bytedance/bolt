@@ -14,7 +14,7 @@
 
 from conan import ConanFile
 from conan.tools.files import apply_conandata_patches, export_conandata_patches
-from conan.tools.scm import Git
+from conan.tools.scm import Git, Version
 import os
 
 from conan.tools.cmake import CMake, CMakeToolchain, CMakeDeps, cmake_layout
@@ -110,7 +110,12 @@ class PaimonCppConan(ConanFile):
         tc = CMakeToolchain(self)
 
         flags = "-Wno-error=uninitialized -Wno-error=maybe-uninitialized"
-        tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
+        cxx_flags = flags
+        if str(self.settings.compiler) == "gcc" and Version(
+            str(self.settings.compiler.version)
+        ) >= Version("16"):
+            cxx_flags += " -Wno-error=array-bounds"
+        tc.cache_variables["CMAKE_CXX_FLAGS"] = cxx_flags
         tc.cache_variables["CMAKE_C_FLAGS"] = flags
 
         tc.variables["PAIMON_BUILD_TESTS"] = False

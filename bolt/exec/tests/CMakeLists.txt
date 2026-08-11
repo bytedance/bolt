@@ -69,7 +69,6 @@ add_executable(
   MergeTest.cpp
   MergerTest.cpp
   MorselDrivenTest.cpp
-  MultiFragmentTest.cpp
   OneWayStatusFlagTest.cpp
   OperatorTraceTest.cpp
   OrderByTest.cpp
@@ -86,8 +85,6 @@ add_executable(
   SortAndWindowTest.cpp
   SortBufferTest.cpp
   SortWindowTest.cpp
-  SpillableWindowTest.cpp
-  SpillerTest.cpp
   SpillOperatorGroupTest.cpp
   SpillTest.cpp
   SplitToStringTest.cpp
@@ -111,6 +108,12 @@ if(KERNEL_SUPPORTS_IO_URING)
 endif()
 
 add_executable(bolt_exec_aggregation_test AggregationTest.cpp Main.cpp)
+
+add_executable(bolt_exec_spiller_test Main.cpp SpillerTest.cpp)
+
+add_executable(
+  bolt_exec_multifragment_window_test Main.cpp MultiFragmentTest.cpp SpillableWindowTest.cpp
+)
 
 add_executable(
   bolt_exec_hash_join_test HashBitRangeTest.cpp HashJoinBridgeTest.cpp HashJoinTest.cpp
@@ -145,6 +148,7 @@ add_test(
   COMMAND bolt_exec_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+set_tests_properties(bolt_exec_test PROPERTIES COST 1 TIMEOUT 3000)
 
 add_test(
   NAME row_based_spill_test
@@ -158,9 +162,8 @@ if(KERNEL_SUPPORTS_IO_URING)
     COMMAND iouring_spill_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
+  set_tests_properties(iouring_spill_test PROPERTIES COST 1)
 endif()
-
-set_tests_properties(bolt_exec_test PROPERTIES TIMEOUT 3000)
 
 add_test(
   NAME bolt_exec_infra_test
@@ -175,16 +178,24 @@ add_test(
 )
 
 add_test(
-  NAME bolt_exec_hash_join_test
-  COMMAND bolt_exec_hash_join_test
+  NAME bolt_exec_spiller_test
+  COMMAND bolt_exec_spiller_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+set_tests_properties(bolt_exec_spiller_test PROPERTIES COST 1 TIMEOUT 3000)
 
 add_test(
-  NAME bolt_exec_scan_test
-  COMMAND bolt_exec_scan_test
+  NAME bolt_exec_multifragment_window_test
+  COMMAND bolt_exec_multifragment_window_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+set_tests_properties(
+  bolt_exec_multifragment_window_test PROPERTIES COST 1 TIMEOUT 3000
+)
+
+bolt_add_sharded_gtest(bolt_exec_hash_join_test 5)
+
+bolt_add_sharded_gtest(bolt_exec_scan_test 4)
 
 add_test(
   NAME bolt_exec_merge_join_test
@@ -220,6 +231,12 @@ target_link_libraries(
 target_link_libraries(row_based_spill_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 
 target_link_libraries(bolt_exec_aggregation_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+
+target_link_libraries(bolt_exec_spiller_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+
+target_link_libraries(
+  bolt_exec_multifragment_window_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES}
+)
 
 target_link_libraries(bolt_exec_hash_join_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
 

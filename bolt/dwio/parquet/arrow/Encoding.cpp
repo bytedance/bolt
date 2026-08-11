@@ -636,7 +636,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
     DCHECK(buffered_indices_.empty());
   }
 
-  int dict_encoded_size() const override {
+  int64_t dict_encoded_size() const override {
     return dict_encoded_size_;
   }
 
@@ -803,7 +803,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
         throw ParquetException(
             "Parquet cannot store strings with size 2GB or more");
       }
-      dict_encoded_size_ += static_cast<int>(v.size() + sizeof(uint32_t));
+      dict_encoded_size_ += static_cast<int64_t>(v.size()) + sizeof(uint32_t);
       int32_t unused_memo_index;
       PARQUET_THROW_NOT_OK(memo_table_.GetOrInsert(
           v.data(), static_cast<int32_t>(v.size()), &unused_memo_index));
@@ -811,7 +811,7 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
   }
 
   /// The number of bytes needed to encode the dictionary.
-  int dict_encoded_size_;
+  int64_t dict_encoded_size_;
 
   MemoTableType memo_table_;
 };
@@ -850,7 +850,7 @@ inline void DictEncoderImpl<DType>::Put(const T& v) {
   // Put() implementation for primitive types
   auto on_found = [](int32_t memo_index) {};
   auto on_not_found = [this](int32_t memo_index) {
-    dict_encoded_size_ += static_cast<int>(sizeof(T));
+    dict_encoded_size_ += sizeof(T);
   };
 
   int32_t memo_index;
@@ -874,7 +874,7 @@ inline void DictEncoderImpl<ByteArrayType>::PutByteArray(
 
   auto on_found = [](int32_t memo_index) {};
   auto on_not_found = [&](int32_t memo_index) {
-    dict_encoded_size_ += static_cast<int>(length + sizeof(uint32_t));
+    dict_encoded_size_ += static_cast<int64_t>(length) + sizeof(uint32_t);
   };
 
   DCHECK(ptr != nullptr || length == 0);
@@ -989,7 +989,7 @@ void DictEncoderImpl<DType>::PutDictionary(const ::arrow::Array& values) {
   const auto& data = checked_cast<const ArrayType&>(values);
 
   dict_encoded_size_ +=
-      static_cast<int>(sizeof(typename DType::c_type) * data.length());
+      static_cast<int64_t>(sizeof(typename DType::c_type)) * data.length();
   for (int64_t i = 0; i < data.length(); i++) {
     int32_t unused_memo_index;
     PARQUET_THROW_NOT_OK(
@@ -1004,7 +1004,7 @@ void DictEncoderImpl<FLBAType>::PutDictionary(const ::arrow::Array& values) {
 
   const auto& data = checked_cast<const ::arrow::FixedSizeBinaryArray&>(values);
 
-  dict_encoded_size_ += static_cast<int>(type_length_ * data.length());
+  dict_encoded_size_ += static_cast<int64_t>(type_length_) * data.length();
   for (int64_t i = 0; i < data.length(); i++) {
     int32_t unused_memo_index;
     PARQUET_THROW_NOT_OK(memo_table_.GetOrInsert(
@@ -3150,13 +3150,12 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
             Encoding::DELTA_LENGTH_BYTE_ARRAY,
             pool = ::arrow::default_memory_pool()),
         sink_(pool),
-        length_encoder_(nullptr, pool),
-        encoded_size_{0} {}
+        length_encoder_(nullptr, pool) {}
 
   std::shared_ptr<::arrow::Buffer> FlushValues() override;
 
   int64_t EstimatedDataEncodedSize() override {
-    return encoded_size_ + length_encoder_.EstimatedDataEncodedSize();
+    return sink_.length() + length_encoder_.EstimatedDataEncodedSize();
   }
 
   using TypedEncoder<ByteArrayType>::Put;
@@ -3182,6 +3181,13 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
                 return Status::Invalid(
                     "Parquet cannot store strings with size 2GB or more");
               }
+              if (ARROW_PREDICT_FALSE(
+                      view.size() + sink_.length() >
+                      static_cast<size_t>(
+                          std::numeric_limits<int32_t>::max()))) {
+                return Status::Invalid(
+                    "excess expansion in DELTA_LENGTH_BYTE_ARRAY");
+              }
               length_encoder_.Put({static_cast<int32_t>(view.length())}, 1);
               PARQUET_THROW_NOT_OK(sink_.Append(view.data(), view.length()));
               return Status::OK();
@@ -3191,7 +3197,6 @@ class DeltaLengthByteArrayEncoder : public EncoderImpl,
 
   ::arrow::BufferBuilder sink_;
   DeltaBitPackEncoder<Int32Type> length_encoder_;
-  uint32_t encoded_size_;
 };
 
 template <typename DType>
@@ -3225,7 +3230,9 @@ void DeltaLengthByteArrayEncoder<DType>::Put(const T* src, int num_values) {
     length_encoder_.Put(lengths.data(), batch_size);
   }
 
-  if (AddWithOverflow(encoded_size_, total_increment_size, &encoded_size_)) {
+  if (ARROW_PREDICT_FALSE(
+          sink_.length() + total_increment_size >
+          std::numeric_limits<int32_t>::max())) {
     throw ParquetException("excess expansion in DELTA_LENGTH_BYTE_ARRAY");
   }
   PARQUET_THROW_NOT_OK(sink_.Reserve(total_increment_size));
@@ -3267,7 +3274,6 @@ DeltaLengthByteArrayEncoder<DType>::FlushValues() {
   PARQUET_THROW_NOT_OK(sink_.Append(data->data(), data->size()));
 
   std::shared_ptr<Buffer> buffer = FinishSink<::arrow::BufferBuilder>(sink_);
-  encoded_size_ = 0;
   return buffer;
 }
 
@@ -4371,8 +4377,8 @@ class IncrementalLevelRleEncoder::Impl {
   void FlushRepeatedRun() {
     DCHECK_GT(repeat_count_, 0);
     bool result = true;
-    int32_t indicator_value = repeat_count_ << 1;
-    result &= bit_writer_.PutVlqInt(static_cast<uint32_t>(indicator_value));
+    const uint32_t indicator_value = static_cast<uint32_t>(repeat_count_) << 1;
+    result &= bit_writer_.PutVlqInt(indicator_value);
     result &= bit_writer_.PutAligned(
         current_value_, static_cast<int>(bit_util::CeilDiv(bit_width_, 8)));
     DCHECK(result);

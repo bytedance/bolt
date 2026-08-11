@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "bolt/core/ExpressionEvaluator.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/ITypedExpr.h"
 #include "bolt/type/filter/FilterBase.h"
@@ -62,7 +63,7 @@ struct ToPaimonPredicateResult {
 /// 2. **Predicate → TypedExpr** (`toTypedExpr`):
 ///    Converts a paimon Predicate back into a bolt TypedExpr expression tree.
 /// Supported expression patterns:
-///   - Comparisons: eq, neq, lt, lte, gt, gte, between, in, not_in
+///   - Comparisons: eq, neq, lt, lte, gt, gte, between, in, not_in, like
 ///   - Null checks: is_null, is_not_null
 ///   - Logical: and, or (fully translatable only when all children are)
 ///   - Negation: not (applied per-operator where supported)
@@ -78,10 +79,13 @@ class PaimonFilterTranslator {
   /// @param expr    The filter expression tree (typically from TableHandle).
   /// @param rowType The output row type used to resolve column names to field
   ///                indices required by Paimon's predicate validation.
+  /// @param evaluator Optional evaluator used to fold constant expressions on
+  ///                  the literal side of leaf predicates.
   /// @return A ToPaimonPredicateResult with the predicate or failure reason.
   static ToPaimonPredicateResult translate(
       const core::TypedExprPtr& expr,
-      const RowTypePtr& rowType);
+      const RowTypePtr& rowType,
+      core::ExpressionEvaluator* evaluator = nullptr);
 
   // -----------------------------------------------------------------------
   // Direction 2a: paimon::Predicate → TypedExprPtr
@@ -117,7 +121,7 @@ class PaimonFilterTranslator {
       memory::MemoryPool* pool = nullptr);
 
   // -----------------------------------------------------------------------
-  // Direction 2b: TypedExpr → SubfieldFilters (constant-only, no evaluator)
+  // Direction 2b: TypedExpr → SubfieldFilters
   // -----------------------------------------------------------------------
 
   /// Result of building a DWIO Filter from a CallTypedExpr.
@@ -135,14 +139,18 @@ class PaimonFilterTranslator {
 
   /// Convert a TypedExpr into SubfieldFilters for DWIO scan spec pushdown.
   ///
-  /// Designed for TypedExpr trees produced by toTypedExpr(), where all
-  /// literals are ConstantTypedExpr nodes. Does not require an
-  /// ExpressionEvaluator — values are read directly from constants.
+  /// When an evaluator is provided, leaf predicates are converted by
+  /// exec::ExprToSubfieldFilterParser and literal-side constant expressions can
+  /// be evaluated before building filters. Without an evaluator, this falls
+  /// back to direct ConstantTypedExpr extraction for TypedExpr trees produced
+  /// by toTypedExpr().
   ///
-  /// Handles AND-flattening. OR is only converted when all children are
-  /// EQUAL predicates on the same column (produces a Values filter).
+  /// Handles AND-flattening. With an evaluator, OR is converted when the
+  /// common parser can merge both sides on the same subfield. Without an
+  /// evaluator, OR falls back to the existing same-column equality handling.
   static common::SubfieldFilters toSubfieldFilters(
-      const core::TypedExprPtr& expr);
+      const core::TypedExprPtr& expr,
+      core::ExpressionEvaluator* evaluator = nullptr);
 
  private:
   struct FieldInfo {
@@ -160,7 +168,8 @@ class PaimonFilterTranslator {
   /// Translate a CallTypedExpr node with row type for field index resolution.
   static ToPaimonPredicateResult translateCall(
       const core::CallTypedExpr& call,
-      const RowTypePtr& rowType);
+      const RowTypePtr& rowType,
+      core::ExpressionEvaluator* evaluator);
 
   /// Try to extract field reference info, resolving the index from rowType.
   static std::optional<FieldInfo> extractFieldInfo(
@@ -174,7 +183,8 @@ class PaimonFilterTranslator {
   /// Extract a constant value as a paimon Literal.
   static std::optional<::paimon::Literal> extractLiteral(
       const core::TypedExprPtr& expr,
-      ::paimon::FieldType fieldType);
+      ::paimon::FieldType fieldType,
+      core::ExpressionEvaluator* evaluator = nullptr);
 
   /// Extract IN-list literal values from an array ConstantTypedExpr.
   /// Follows Hive's makeInFilter pattern: uses ArrayVector's

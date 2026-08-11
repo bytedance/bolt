@@ -76,7 +76,7 @@ class TxtRowReader : public dwio::common::RowReader {
   TxtRowReader(
       const std::shared_ptr<ReaderBase>& readerBase,
       const dwio::common::RowReaderOptions& options);
-  ~TxtRowReader() override = default;
+  ~TxtRowReader() override;
 
   int64_t nextRowNumber() override;
 

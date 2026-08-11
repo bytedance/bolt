@@ -24,6 +24,14 @@ enum class StackTraceEngine {
 /**
  * Install a crash report signal handler that prints a stack trace
  * when the program terminates due to a fatal signal (e.g. SIGSEGV).
+ * All stack trace engines use the same frame format. Frame addresses include a
+ * cached module path and an `elf=` address when available. The latter can be
+ * passed directly to an offline symbolizer with the matching unstripped binary
+ * or debug file. When entries remain unresolved, the report includes a fallback
+ * shell filter that reads the complete report, resolves only `in ??` entries,
+ * and writes the complete report back with all other lines unchanged. Module
+ * mappings are snapshotted during installation; frames from modules loaded
+ * later remain raw rather than consulting the dynamic loader after a crash.
  *
  * @param runInJvm   Whether to check if the current process is running inside a
  *                     JVM.
@@ -32,16 +40,14 @@ enum class StackTraceEngine {
  *                     preloaded (via LD_PRELOAD). If it has not, the handler
  *                     will not be installed to avoid interfering with JVM
  *                     behavior.
- * @param demangle   Whether to demangle C++ symbol names in the stack trace.
- *                   - Demangling uses abi::__cxa_demangle, which is NOT
- *                     async-signal-safe.
- *                   - Should only be enabled in development or debugging
- *                     builds, never in production.
- * @param engine    The stack trace engine to use.
- *                   - kLibUnwind: Uses libunwind to collect the stack trace.
- *                   - kBacktrace: Uses libbacktrace to collect the stack trace.
- *                   - kLibBacktrace: Uses libbacktrace to collect the stack
- *                     trace.
+ * @param demangle   Whether the offline report filter demangles C++ symbols.
+ *                   No demangling runs in the signal handler.
+ * @param engine     The stack trace engine to use.
+ *                   All engines collect raw program counters only.
+ *                   - kLibUnwind: Uses libunwind register/step operations.
+ *                   - kBacktrace: Uses execinfo backtrace address collection.
+ *                   - kLibBacktrace: Uses backtrace_simple without loading
+ *                     symbol or source information.
  */
 void installCrashReportHandler(
     bool runInJvm = false,

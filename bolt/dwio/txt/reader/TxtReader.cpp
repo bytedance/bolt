@@ -401,6 +401,8 @@ TxtRowReader::TxtRowReader(
   impl_ = std::make_unique<TxtRowReader::Impl>(readerBase, options);
 }
 
+TxtRowReader::~TxtRowReader() = default;
+
 int64_t TxtRowReader::nextRowNumber() {
   return impl_->nextRowNumber();
 }
