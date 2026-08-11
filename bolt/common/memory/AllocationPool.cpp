@@ -36,6 +36,9 @@ namespace bytedance::bolt::memory {
 
 folly::Range<char*> AllocationPool::rangeAt(int32_t index) const {
   if (index < allocations_.size()) {
+    if (allocationStates_[index].released) {
+      return folly::Range<char*>(static_cast<char*>(nullptr), size_t{0});
+    }
     auto run = allocations_[index].runAt(0);
     return folly::Range<char*>(
         run.data<char>(),
@@ -43,6 +46,9 @@ folly::Range<char*> AllocationPool::rangeAt(int32_t index) const {
   }
   const auto largeIndex = index - allocations_.size();
   if (largeIndex < largeAllocations_.size()) {
+    if (largeAllocationStates_[largeIndex].released) {
+      return folly::Range<char*>(static_cast<char*>(nullptr), size_t{0});
+    }
     auto range = largeAllocations_[largeIndex].hugePageRange().value();
     if (range.data() == startOfRun_) {
       return folly::Range<char*>(range.data(), currentOffset_);
@@ -55,10 +61,14 @@ folly::Range<char*> AllocationPool::rangeAt(int32_t index) const {
 void AllocationPool::clear() {
   allocations_.clear();
   largeAllocations_.clear();
+  allocationStates_.clear();
+  largeAllocationStates_.clear();
   startOfRun_ = nullptr;
   bytesInRun_ = 0;
   currentOffset_ = 0;
   usedBytes_ = 0;
+  currentRunIsLarge_ = false;
+  largeRunsStarted_ = false;
 }
 
 char* AllocationPool::allocateFixed(uint64_t bytes, int32_t alignment) {
@@ -69,6 +79,7 @@ char* AllocationPool::allocateFixed(uint64_t bytes, int32_t alignment) {
     if (currentOffset_ > endOfReservedRun()) {
       growLastAllocation();
     }
+    recordAllocation();
     return result;
   }
   BOLT_CHECK_EQ(
@@ -92,7 +103,44 @@ char* AllocationPool::allocateFixed(uint64_t bytes, int32_t alignment) {
   if (currentOffset_ > endOfReservedRun()) {
     growLastAllocation();
   }
+  recordAllocation();
   return result;
+}
+
+AllocationPool::ReleasedRangeStats AllocationPool::releaseRangesBefore(
+    int32_t rangeIndex) {
+  rangeIndex = std::min(rangeIndex, numRanges());
+  ReleasedRangeStats stats;
+  const auto numSmallRanges = static_cast<int32_t>(allocations_.size());
+  for (auto i = 0; i < std::min(rangeIndex, numSmallRanges); ++i) {
+    if (allocationStates_[i].released) {
+      continue;
+    }
+    stats.bytes += allocations_[i].byteSize();
+    stats.allocations += allocationStates_[i].allocations;
+    pool_->freeNonContiguous(allocations_[i]);
+    allocationStates_[i].released = true;
+  }
+
+  const auto largeEnd = std::max<int32_t>(0, rangeIndex - numSmallRanges);
+  const auto numLargeRanges = static_cast<int32_t>(largeAllocations_.size());
+  for (auto i = 0; i < std::min(largeEnd, numLargeRanges); ++i) {
+    if (largeAllocationStates_[i].released) {
+      continue;
+    }
+    stats.bytes += largeAllocations_[i].size();
+    stats.allocations += largeAllocationStates_[i].allocations;
+    pool_->freeContiguous(largeAllocations_[i]);
+    largeAllocationStates_[i].released = true;
+  }
+  usedBytes_ -= stats.bytes;
+  if (rangeIndex == numRanges()) {
+    startOfRun_ = nullptr;
+    bytesInRun_ = 0;
+    currentOffset_ = 0;
+    currentRunIsLarge_ = false;
+  }
+  return stats;
 }
 
 void AllocationPool::growLastAllocation() {
@@ -104,7 +152,7 @@ void AllocationPool::growLastAllocation() {
 }
 
 void AllocationPool::newRunImpl(MachinePageCount numPages) {
-  if (usedBytes_ >= hugePageThreshold_ ||
+  if (largeRunsStarted_ || usedBytes_ >= hugePageThreshold_ ||
       numPages > pool_->sizeClasses().back()) {
     // At least 16 huge pages, no more than kMaxMmapBytes. The next is
     // double the previous. Because the previous is a hair under the
@@ -138,7 +186,10 @@ void AllocationPool::newRunImpl(MachinePageCount numPages) {
     startOfRun_ = range.data();
     bytesInRun_ = range.size();
     largeAllocations_.emplace_back(std::move(largeAlloc));
+    largeAllocationStates_.emplace_back();
     currentOffset_ = 0;
+    currentRunIsLarge_ = true;
+    largeRunsStarted_ = true;
     usedBytes_ += AllocationTraits::pageBytes(pagesToAlloc);
     return;
   }
@@ -150,12 +201,22 @@ void AllocationPool::newRunImpl(MachinePageCount numPages) {
   startOfRun_ = allocation.runAt(0).data<char>();
   bytesInRun_ = allocation.runAt(0).numBytes();
   currentOffset_ = 0;
+  currentRunIsLarge_ = false;
   allocations_.push_back(std::move(allocation));
+  allocationStates_.emplace_back();
   usedBytes_ += bytesInRun_;
 }
 
 void AllocationPool::newRun(int64_t preferredSize) {
   newRunImpl(AllocationTraits::numPages(preferredSize));
+}
+
+void AllocationPool::recordAllocation() {
+  if (currentRunIsLarge_) {
+    ++largeAllocationStates_.back().allocations;
+  } else {
+    ++allocationStates_.back().allocations;
+  }
 }
 
 } // namespace bytedance::bolt::memory

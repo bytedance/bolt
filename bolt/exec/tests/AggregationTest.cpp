@@ -1523,6 +1523,66 @@ TEST_P(AggregationTest, partialAggregationMaybeReservationReleaseCheck) {
   EXPECT_GT(kMaxPartialMemoryUsage, task->pool()->currentBytes());
 }
 
+TEST_P(AggregationTest, releasesOutputRangesBeforeDownstreamSort) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support statistics yet\n";
+  }
+
+  constexpr vector_size_t kNumRows = 200000;
+  constexpr int32_t kNumKeys = 8;
+  constexpr int32_t kNumValues = 24;
+  constexpr int32_t kNumColumns = kNumKeys + kNumValues;
+  std::vector<VectorPtr> columns;
+  columns.reserve(kNumColumns);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    columns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row * kNumKeys + column; }));
+  }
+  for (auto column = 0; column < kNumValues; ++column) {
+    columns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row + column; }));
+  }
+  auto data = makeRowVector(std::move(columns));
+
+  std::vector<std::string> groupingKeys;
+  groupingKeys.reserve(kNumKeys);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    groupingKeys.push_back(fmt::format("c{}", column));
+  }
+  std::vector<std::string> aggregates;
+  aggregates.reserve(kNumValues);
+  for (auto column = 0; column < kNumValues; ++column) {
+    aggregates.push_back(fmt::format("sum(c{})", kNumKeys + column));
+  }
+
+  core::PlanNodeId aggregationId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation(groupingKeys, aggregates)
+                  .capturePlanNodeId(aggregationId)
+                  .orderBy({"c0"}, false)
+                  .planNode();
+
+  std::vector<VectorPtr> expectedColumns;
+  expectedColumns.reserve(kNumColumns);
+  for (auto column = 0; column < kNumKeys; ++column) {
+    expectedColumns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row * kNumKeys + column; }));
+  }
+  for (auto column = 0; column < kNumValues; ++column) {
+    expectedColumns.push_back(makeFlatVector<int64_t>(
+        kNumRows, [column](auto row) { return row + column; }));
+  }
+  auto expected = makeRowVector(std::move(expectedColumns));
+
+  auto task = AssertQueryBuilder(plan)
+                  .config(QueryConfig::kPreferredOutputBatchRows, "1024")
+                  .assertResults({expected});
+  const auto stats = toPlanStats(task->taskStats());
+  const auto& aggStats = stats.at(aggregationId).customStats;
+  ASSERT_GT(aggStats.at("aggOutputReleasedBytes").sum, 0);
+}
+
 TEST_P(AggregationTest, spillWithMemoryLimit) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not support spilling\n";
