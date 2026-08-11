@@ -34,6 +34,7 @@
 #include <folly/init/Init.h>
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <random>
@@ -315,7 +316,25 @@ class FusedLevelConversionBenchmark {
     return listOutput.values_read + structOutput.values_read;
   }
 
-  int64_t fused() {
+  int64_t directLengths(bool clearLengths) {
+    if (clearLengths) {
+      std::memset(lengths_.data(), 0, lengths_.size() * sizeof(lengths_[0]));
+    }
+    auto listOutput = makeOutput(listValidity_);
+    DefRepLevelsToListLengths(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        &listOutput,
+        lengths_.data());
+    return listOutput.values_read;
+  }
+
+  int64_t fused(bool clearLengths = false) {
+    if (clearLengths) {
+      std::memset(lengths_.data(), 0, lengths_.size() * sizeof(lengths_[0]));
+    }
     auto listOutput = makeOutput(listValidity_);
     auto structOutput = makeOutput(structValidity_);
     const auto converted = DefRepLevelsToListLengthsAndStructBitmap(
@@ -545,6 +564,22 @@ void runLeafNulls(
   }
 }
 
+void runLengthsBufferClear(
+    uint32_t iters,
+    int32_t numLists,
+    FusedListShape shape,
+    bool fused,
+    bool clearLengths) {
+  folly::BenchmarkSuspender suspender;
+  auto& instance = fusedBenchmark(numLists, shape);
+  suspender.dismiss();
+  while (iters--) {
+    folly::doNotOptimizeAway(
+        fused ? instance.fused(clearLengths)
+              : instance.directLengths(clearLengths));
+  }
+}
+
 } // namespace
 
 BENCHMARK(offsetsThenLengths_single, iters) {
@@ -620,6 +655,28 @@ LEAF_NULLS_BENCHMARK(1048576, kAllValidRepeated, allValidRepeated);
 LEAF_NULLS_BENCHMARK(4096, kMiddleNullRepeated, middleNullRepeated);
 LEAF_NULLS_BENCHMARK(65536, kMiddleNullRepeated, middleNullRepeated);
 LEAF_NULLS_BENCHMARK(1048576, kMiddleNullRepeated, middleNullRepeated);
+
+#define LENGTHS_BUFFER_CLEAR_BENCHMARK(size, shape, name)                    \
+  BENCHMARK(lengthsWithClear_##name##_##size, iters) {                       \
+    runLengthsBufferClear(iters, size, FusedListShape::shape, false, true);  \
+  }                                                                          \
+  BENCHMARK_RELATIVE(lengthsWithoutClear_##name##_##size, iters) {           \
+    runLengthsBufferClear(iters, size, FusedListShape::shape, false, false); \
+  }                                                                          \
+  BENCHMARK(fusedLengthsWithClear_##name##_##size, iters) {                  \
+    runLengthsBufferClear(iters, size, FusedListShape::shape, true, true);   \
+  }                                                                          \
+  BENCHMARK_RELATIVE(fusedLengthsWithoutClear_##name##_##size, iters) {      \
+    runLengthsBufferClear(iters, size, FusedListShape::shape, true, false);  \
+  }                                                                          \
+  BENCHMARK_DRAW_LINE()
+
+LENGTHS_BUFFER_CLEAR_BENCHMARK(4096, kSingleElement, single);
+LENGTHS_BUFFER_CLEAR_BENCHMARK(65536, kSingleElement, single);
+LENGTHS_BUFFER_CLEAR_BENCHMARK(4096, kMixed, mixed);
+LENGTHS_BUFFER_CLEAR_BENCHMARK(65536, kMixed, mixed);
+LENGTHS_BUFFER_CLEAR_BENCHMARK(4096, kLong, long);
+LENGTHS_BUFFER_CLEAR_BENCHMARK(65536, kLong, long);
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);

@@ -2910,6 +2910,70 @@ TEST_F(ParquetReaderTest, fusedLevelConversionTopLevelFilter) {
   EXPECT_EQ(totalRows, 2'000);
 }
 
+TEST_F(ParquetReaderTest, repDefLengthsExposeOnlyConvertedValues) {
+  constexpr int32_t kPoison = 0x5a5a5a5a;
+  const std::vector<int16_t> definitions = {0, 1, 2, 3, 4, 4, 2, 0};
+  const std::vector<int16_t> repetitions = {0, 0, 0, 0, 0, 1, 0, 0};
+  const std::vector<int32_t> expectedLengths = {0, 0, 0, 1, 2, 0, 0};
+
+  bytedance::bolt::parquet::arrow::LevelInfo listInfo;
+  listInfo.rep_level = 1;
+  listInfo.def_level = 3;
+  bytedance::bolt::parquet::arrow::LevelInfo structInfo;
+  structInfo.rep_level = 0;
+  structInfo.def_level = 1;
+
+  for (const bool fused : {false, true}) {
+    auto lengths = AlignedBuffer::allocate<int32_t>(
+        definitions.size() + 1, leafPool_.get());
+    std::fill_n(lengths->asMutable<int32_t>(), definitions.size() + 1, kPoison);
+
+    bytedance::bolt::parquet::arrow::ValidityBitmapInputOutput listOutput;
+    listOutput.values_read_upper_bound = definitions.size();
+    if (fused) {
+      bytedance::bolt::parquet::arrow::ValidityBitmapInputOutput structOutput;
+      structOutput.values_read_upper_bound = definitions.size();
+      ASSERT_TRUE(bytedance::bolt::parquet::arrow::
+                      DefRepLevelsToListLengthsAndStructBitmap(
+                          definitions.data(),
+                          repetitions.data(),
+                          definitions.size(),
+                          listInfo,
+                          structInfo,
+                          &listOutput,
+                          lengths->asMutable<int32_t>(),
+                          &structOutput));
+    } else {
+      bytedance::bolt::parquet::arrow::DefRepLevelsToListLengths(
+          definitions.data(),
+          repetitions.data(),
+          definitions.size(),
+          listInfo,
+          &listOutput,
+          lengths->asMutable<int32_t>());
+    }
+
+    ASSERT_EQ(listOutput.values_read, expectedLengths.size());
+    EXPECT_EQ(
+        std::vector<int32_t>(
+            lengths->as<int32_t>(),
+            lengths->as<int32_t>() + listOutput.values_read),
+        expectedLengths);
+    for (auto i = listOutput.values_read;
+         i < static_cast<int64_t>(definitions.size() + 1);
+         ++i) {
+      EXPECT_EQ(lengths->as<int32_t>()[i], kPoison);
+    }
+
+    lengths->setSize(listOutput.values_read * sizeof(int32_t));
+    RepeatedLengths repeatedLengths;
+    repeatedLengths.setLengths(std::move(lengths));
+    std::vector<int32_t> consumed(definitions.size() + 1, kPoison);
+    repeatedLengths.readLengths(consumed.data(), consumed.size());
+    EXPECT_EQ(consumed, std::vector<int32_t>({0, 0, 0, 1, 2, 0, 0, 0, 0}));
+  }
+}
+
 TEST_F(ParquetReaderTest, readVariantParquet) {
   const std::string sample(getVariantFixturePath("variant_sample.parquet"));
 
