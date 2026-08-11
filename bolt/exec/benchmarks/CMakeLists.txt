@@ -124,6 +124,14 @@ target_link_libraries(
     GTest::gtest_main
 )
 
+add_executable(bolt_row_row_compare_benchmark RowRowCompareBenchmark.cpp)
+target_link_libraries(
+  bolt_row_row_compare_benchmark PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
 add_executable(hash_vectors_bench HashVectorsBenchmark.cpp)
 target_link_libraries(
   hash_vectors_bench PRIVATE

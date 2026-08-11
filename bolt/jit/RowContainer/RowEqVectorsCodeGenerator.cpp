@@ -36,6 +36,221 @@ std::string RowEqVectorsCodeGenerator::GetCmpFuncName() {
   return fn;
 }
 
+llvm::Value* RowEqVectorsCodeGenerator::loadMappedIndex(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row) {
+  auto* func = builder.GetInsertBlock()->getParent();
+  auto* i32Ty = builder.getInt32Ty();
+  auto* i8Ty = builder.getInt8Ty();
+  auto* i32PtrTy = i32Ty->getPointerTo();
+
+  auto* isIdentity =
+      getValueByPtr(builder, runtime, i8Ty, kRuntimeIsIdentityMappingOffset);
+
+  auto* identityBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "mapped_index_identity", func);
+  auto* nonIdentityBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "mapped_index_non_identity", func);
+  auto* doneBlk =
+      llvm::BasicBlock::Create(builder.getContext(), "mapped_index_done", func);
+  builder.CreateCondBr(
+      builder.CreateICmpNE(isIdentity, builder.getInt8(0)),
+      identityBlk,
+      nonIdentityBlk);
+
+  builder.SetInsertPoint(identityBlk);
+  builder.CreateBr(doneBlk);
+  identityBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(nonIdentityBlk);
+  auto* isConstant =
+      getValueByPtr(builder, runtime, i8Ty, kRuntimeIsConstantMappingOffset);
+  auto* constantBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "mapped_index_constant", func);
+  auto* dictionaryBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "mapped_index_dictionary", func);
+  builder.CreateCondBr(
+      builder.CreateICmpNE(isConstant, builder.getInt8(0)),
+      constantBlk,
+      dictionaryBlk);
+
+  builder.SetInsertPoint(constantBlk);
+  auto* constantIndex =
+      getValueByPtr(builder, runtime, i32Ty, kRuntimeConstantIndexOffset);
+  builder.CreateBr(doneBlk);
+  constantBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(dictionaryBlk);
+  auto* indicesAddr =
+      getValueByPtr(builder, runtime, i32PtrTy, kRuntimeIndicesOffset);
+  auto* indexAddr = builder.CreateGEP(i32Ty, indicesAddr, row);
+  auto* indexedIndex = builder.CreateLoad(i32Ty, indexAddr);
+  builder.CreateBr(doneBlk);
+  dictionaryBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(doneBlk);
+  auto* phi = builder.CreatePHI(i32Ty, 3);
+  phi->addIncoming(row, identityBlk);
+  phi->addIncoming(constantIndex, constantBlk);
+  phi->addIncoming(indexedIndex, dictionaryBlk);
+  return phi;
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadRightValue(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row,
+    llvm::Type* dataTy) {
+  auto* valuesAddr = getValueByPtr(
+      builder, runtime, dataTy->getPointerTo(), kRuntimeValuesOffset);
+  auto* index = loadMappedIndex(builder, runtime, row);
+  if (dataTy->isIntegerTy(128)) {
+    auto* i8Values = builder.CreatePointerCast(
+        valuesAddr, builder.getInt8Ty()->getPointerTo());
+    auto* valueAddr = builder.CreateGEP(
+        builder.getInt8Ty(),
+        i8Values,
+        builder.CreateMul(index, builder.getInt32(sizeof(int128_t))));
+    auto* lower64 = builder.CreateLoad(
+        builder.getInt64Ty(),
+        builder.CreatePointerCast(
+            valueAddr, builder.getInt64Ty()->getPointerTo()));
+    auto* upperAddr = builder.CreateConstInBoundsGEP1_64(
+        builder.getInt8Ty(), valueAddr, sizeof(int64_t));
+    auto* upper64 = builder.CreateLoad(
+        builder.getInt64Ty(),
+        builder.CreatePointerCast(
+            upperAddr, builder.getInt64Ty()->getPointerTo()));
+    auto* lower128 = builder.CreateZExt(lower64, builder.getInt128Ty());
+    auto* upper128 = builder.CreateZExt(upper64, builder.getInt128Ty());
+    return builder.CreateOr(builder.CreateShl(upper128, 64), lower128);
+  }
+  return builder.CreateLoad(
+      dataTy, builder.CreateGEP(dataTy, valuesAddr, index));
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadRightBool(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row) {
+  auto* i64Ty = builder.getInt64Ty();
+  auto* valuesAddr = getValueByPtr(
+      builder, runtime, i64Ty->getPointerTo(), kRuntimeValuesOffset);
+  auto* index = loadMappedIndex(builder, runtime, row);
+  auto* wordIndex = builder.CreateLShr(index, builder.getInt32(6));
+  auto* bitIndex = builder.CreateAnd(index, builder.getInt32(63));
+  auto* word = builder.CreateLoad(
+      i64Ty, builder.CreateGEP(i64Ty, valuesAddr, wordIndex));
+  auto* bit = builder.CreateAnd(
+      builder.CreateLShr(word, builder.CreateZExt(bitIndex, i64Ty)),
+      builder.getInt64(1));
+  return castToI8(builder, builder.CreateICmpNE(bit, builder.getInt64(0)));
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadRightStringViewAddr(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row) {
+  return loadRightValueAddr(builder, runtime, row, sizeof(StringView));
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadRightValueAddr(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row,
+    int32_t valueSize) {
+  auto* valueTy = builder.getInt8Ty();
+  auto* valuesAddr = getValueByPtr(
+      builder, runtime, valueTy->getPointerTo(), kRuntimeValuesOffset);
+  auto* index = loadMappedIndex(builder, runtime, row);
+  return builder.CreateGEP(
+      valueTy,
+      valuesAddr,
+      builder.CreateMul(index, builder.getInt32(valueSize)));
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadRightNull(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime,
+    llvm::Value* row) {
+  auto* func = builder.GetInsertBlock()->getParent();
+  auto* i8Ty = builder.getInt8Ty();
+  auto* i64Ty = builder.getInt64Ty();
+  auto* nullsAddr = getValueByPtr(
+      builder, runtime, i64Ty->getPointerTo(), kRuntimeNullsOffset);
+  auto* noNullBlk =
+      llvm::BasicBlock::Create(builder.getContext(), "decoded_no_nulls", func);
+  auto* hasNullBlk =
+      llvm::BasicBlock::Create(builder.getContext(), "decoded_has_nulls", func);
+  auto* doneBlk =
+      llvm::BasicBlock::Create(builder.getContext(), "decoded_null_done", func);
+  builder.CreateCondBr(
+      builder.CreateICmpEQ(
+          nullsAddr, llvm::ConstantPointerNull::get(i64Ty->getPointerTo())),
+      noNullBlk,
+      hasNullBlk);
+
+  builder.SetInsertPoint(noNullBlk);
+  builder.CreateBr(doneBlk);
+  noNullBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(hasNullBlk);
+  auto* nullsUseTopLevelIndex = getValueByPtr(
+      builder, runtime, i8Ty, kRuntimeNullsUseTopLevelIndexOffset);
+  auto* topLevelNullIndexBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "decoded_null_top_level_index", func);
+  auto* mappedNullIndexBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "decoded_null_mapped_index", func);
+  auto* nullIndexDoneBlk = llvm::BasicBlock::Create(
+      builder.getContext(), "decoded_null_index_done", func);
+  builder.CreateCondBr(
+      builder.CreateICmpNE(nullsUseTopLevelIndex, builder.getInt8(0)),
+      topLevelNullIndexBlk,
+      mappedNullIndexBlk);
+
+  builder.SetInsertPoint(topLevelNullIndexBlk);
+  builder.CreateBr(nullIndexDoneBlk);
+  topLevelNullIndexBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(mappedNullIndexBlk);
+  auto* mappedNullIndex = loadMappedIndex(builder, runtime, row);
+  builder.CreateBr(nullIndexDoneBlk);
+  mappedNullIndexBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(nullIndexDoneBlk);
+  auto* nullIndex = builder.CreatePHI(builder.getInt32Ty(), 2);
+  nullIndex->addIncoming(row, topLevelNullIndexBlk);
+  nullIndex->addIncoming(mappedNullIndex, mappedNullIndexBlk);
+  auto* wordIndex = builder.CreateLShr(nullIndex, builder.getInt32(6));
+  auto* bitIndex = builder.CreateAnd(nullIndex, builder.getInt32(63));
+  auto* word =
+      builder.CreateLoad(i64Ty, builder.CreateGEP(i64Ty, nullsAddr, wordIndex));
+  auto* bit = builder.CreateAnd(
+      builder.CreateLShr(word, builder.CreateZExt(bitIndex, i64Ty)),
+      builder.getInt64(1));
+  auto* isNull =
+      castToI8(builder, builder.CreateICmpEQ(bit, builder.getInt64(0)));
+  builder.CreateBr(doneBlk);
+  hasNullBlk = builder.GetInsertBlock();
+
+  builder.SetInsertPoint(doneBlk);
+  auto* phi = builder.CreatePHI(i8Ty, 2);
+  phi->addIncoming(builder.getInt8(0), noNullBlk);
+  phi->addIncoming(isNull, hasNullBlk);
+  return phi;
+}
+
+llvm::Value* RowEqVectorsCodeGenerator::loadDecodedVector(
+    llvm::IRBuilder<>& builder,
+    llvm::Value* runtime) {
+  return getValueByPtr(
+      builder,
+      runtime,
+      builder.getInt8Ty()->getPointerTo(),
+      kRuntimeDecodedVectorOffset);
+}
+
 llvm::BasicBlock* RowEqVectorsCodeGenerator::genNullBitCmpIR(
     const llvm::SmallVector<llvm::Value*>& values,
     const size_t idx,
@@ -75,9 +290,8 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genNullBitCmpIR(
       builder.CreateICmpNE(
           builder.CreateAnd(leftValUnmask, constMask), builder.getInt8(0)));
 
-  // get right value from call
-  auto rightVal =
-      createCall(builder, GetDecodedIsNull, {values[2 + idx], values[1]});
+  auto rightVal = loadRightNull(builder, values[2 + idx], values[1]);
+  currBlk = builder.GetInsertBlock();
 
   auto nilNe = builder.CreateICmpNE(leftVal, rightVal);
   auto nilNeBlk = llvm::BasicBlock::Create(
@@ -148,26 +362,19 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
 
   auto rowTy = builder.getInt8Ty();
   llvm::Type* dataTy = nullptr;
-  std::string rightValCall = GetDecodedValueI32;
   if (kind == bytedance::bolt::TypeKind::BOOLEAN) {
     // Just follow Clang. Clang chose i8 over i1 for a boolean field
     dataTy = builder.getInt8Ty();
-    rightValCall = GetDecodedValueBool;
   } else if (kind == bytedance::bolt::TypeKind::TINYINT) {
     dataTy = builder.getInt8Ty();
-    rightValCall = GetDecodedValueI8;
   } else if (kind == bytedance::bolt::TypeKind::SMALLINT) {
     dataTy = builder.getInt16Ty();
-    rightValCall = GetDecodedValueI16;
   } else if (kind == bytedance::bolt::TypeKind::INTEGER) {
     dataTy = builder.getInt32Ty();
-    rightValCall = GetDecodedValueI32;
   } else if (kind == bytedance::bolt::TypeKind::BIGINT) {
     dataTy = builder.getInt64Ty();
-    rightValCall = GetDecodedValueI64;
   } else if (kind == bytedance::bolt::TypeKind::HUGEINT) {
     dataTy = builder.getInt128Ty();
-    rightValCall = GetDecodedValueI128;
   } else {
     BOLT_UNREACHABLE();
   }
@@ -189,9 +396,10 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genIntegerCmpIR(
   } else {
     leftVal = getValueByPtr(builder, values[0], dataTy, keyOffsets[idx]);
   }
-  // right value from createCall
-  auto rightVal =
-      createCall(builder, rightValCall, {values[2 + idx], values[1]});
+  auto rightVal = kind == bytedance::bolt::TypeKind::BOOLEAN
+      ? loadRightBool(builder, values[2 + idx], values[1])
+      : loadRightValue(builder, values[2 + idx], values[1], dataTy);
+  currBlk = builder.GetInsertBlock();
 
   auto keyEq = builder.CreateICmpEQ(leftVal, rightVal);
 
@@ -237,13 +445,21 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genTimestampCmpIR(
   // Generate value comparison IR
   builder.SetInsertPoint(currBlk);
 
-  auto keyEq = createCall(
+  auto* int64Ty = builder.getInt64Ty();
+  auto leftAddr = builder.CreateConstInBoundsGEP1_64(
+      builder.getInt8Ty(), values[0], keyOffsets[idx]);
+  auto rightAddr = loadRightValueAddr(
+      builder, values[2 + idx], values[1], sizeof(Timestamp));
+  currBlk = builder.GetInsertBlock();
+  auto leftSeconds = getValueByPtr(builder, leftAddr, int64Ty, 0);
+  auto rightSeconds = getValueByPtr(builder, rightAddr, int64Ty, 0);
+  auto leftNanos = getValueByPtr(builder, leftAddr, int64Ty, sizeof(int64_t));
+  auto rightNanos = getValueByPtr(builder, rightAddr, int64Ty, sizeof(int64_t));
+  auto keyEq = castToI8(
       builder,
-      CmpRowVecTimestamp,
-      {values[2 + idx],
-       values[1],
-       builder.CreateConstInBoundsGEP1_64(
-           builder.getInt8Ty(), values[0], keyOffsets[idx])});
+      builder.CreateAnd(
+          builder.CreateICmpEQ(leftSeconds, rightSeconds),
+          builder.CreateICmpEQ(leftNanos, rightNanos)));
 
   // If it the last key, generate the fast logic
   if (idx == keysTypes.size() - 1) {
@@ -279,10 +495,6 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
   bool isDouble = kind == bytedance::bolt::TypeKind::DOUBLE;
 
   auto dataTy = isDouble ? builder.getDoubleTy() : builder.getFloatTy();
-  std::string rightValCall =
-      isDouble ? GetDecodedValueDouble : GetDecodedValueFloat;
-  llvm::PointerType* dataPtrTy = dataTy->getPointerTo();
-
   // Block for next key.
   auto nextBlk =
       llvm::BasicBlock::Create(llvm_context, getLabel(idx + 1), func, phiBlk);
@@ -294,9 +506,9 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genFloatPointCmpIR(
   builder.SetInsertPoint(currBlk);
 
   auto leftValRaw = getValueByPtr(builder, values[0], dataTy, keyOffsets[idx]);
-  // right value from createCall
   auto rightValRaw =
-      createCall(builder, rightValCall, {values[2 + idx], values[1]});
+      loadRightValue(builder, values[2 + idx], values[1], dataTy);
+  currBlk = builder.GetInsertBlock();
 
   auto constFloat0 = isDouble ? llvm::ConstantFP::get(dataTy, (double)0.0)
                               : llvm::ConstantFP::get(dataTy, (float)0.0);
@@ -451,9 +663,8 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genStringViewCmpIR(
   auto leftAddr = builder.CreateConstInBoundsGEP1_64(
       builder.getInt8Ty(), values[0], keyOffsets[idx]);
 
-  // get right value from createCall
-  auto rightAddr = createCall(
-      builder, GetDecodedValueStringView, {values[2 + idx], values[1]});
+  auto rightAddr = loadRightStringViewAddr(builder, values[2 + idx], values[1]);
+  currBlk = builder.GetInsertBlock();
   // Check Prefix + length (8 chars)
   {
     auto int64Ty = builder.getInt64Ty();
@@ -577,7 +788,7 @@ llvm::BasicBlock* RowEqVectorsCodeGenerator::genComplexCmpIR(
       ComplexTypeRowEqVectors,
       {values[0],
        builder.getInt32(keyOffsets[idx]),
-       values[2 + idx],
+       loadDecodedVector(builder, values[2 + idx]),
        values[1]});
 
   if (idx == keysTypes.size() - 1) {
@@ -722,7 +933,7 @@ bool RowEqVectorsCodeGenerator::GenCmpIR() {
     }
     builder.CreateRet(cmpPhi);
   }
-  auto err = llvm::verifyFunction(*func);
+  auto err = llvm::verifyFunction(*func, &llvm::errs());
   return err;
 }
 

@@ -151,6 +151,10 @@ class DecodedVector {
     return reinterpret_cast<const T*>(data_);
   }
 
+  const void* dataAsVoid() const {
+    return data_;
+  }
+
   /// Returns the raw nulls buffer for the base vector combined with nulls found
   /// in dictionary wrappings. May return nullptr if there are no nulls. Use
   /// top-level row numbers to access individual null flags, e.g.
@@ -241,6 +245,14 @@ class DecodedVector {
   /// Returns true if the decoded vector was constant.
   bool isConstantMapping() const {
     return isConstantMapping_;
+  }
+
+  bool nullsUseTopLevelIndex() const {
+    return isIdentityMapping_ || hasExtraNulls_;
+  }
+
+  vector_size_t constantIndex() const {
+    return constantIndex_;
   }
 
   /////////////////////////////////////////////////////////////////

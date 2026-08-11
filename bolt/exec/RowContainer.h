@@ -34,6 +34,7 @@
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/ContainerRowSerde.h"
+#include "bolt/exec/RowEqVectorRuntime.h"
 #include "bolt/functions/InlineFlatten.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 #include "bolt/vector/DecodedVector.h"

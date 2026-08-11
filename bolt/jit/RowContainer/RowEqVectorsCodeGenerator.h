@@ -18,6 +18,9 @@
 
 #ifdef ENABLE_BOLT_JIT
 
+#include <cstddef>
+
+#include "bolt/exec/RowEqVectorRuntime.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
 
 namespace bytedance::bolt::jit {
@@ -84,6 +87,60 @@ class RowEqVectorsCodeGenerator : public RowContainerCodeGenerator {
       PhiNodeInputs& phiInputs,
       llvm::BasicBlock* currBlk,
       llvm::BasicBlock* phiBlk) override;
+
+ private:
+  static constexpr int32_t kRuntimeValuesOffset =
+      offsetof(exec::RowEqVectorRuntime, values);
+  static constexpr int32_t kRuntimeIndicesOffset =
+      offsetof(exec::RowEqVectorRuntime, indices);
+  static constexpr int32_t kRuntimeNullsOffset =
+      offsetof(exec::RowEqVectorRuntime, nulls);
+  static constexpr int32_t kRuntimeDecodedVectorOffset =
+      offsetof(exec::RowEqVectorRuntime, decodedVector);
+  static constexpr int32_t kRuntimeConstantIndexOffset =
+      offsetof(exec::RowEqVectorRuntime, constantIndex);
+  static constexpr int32_t kRuntimeIsIdentityMappingOffset =
+      offsetof(exec::RowEqVectorRuntime, isIdentityMapping);
+  static constexpr int32_t kRuntimeIsConstantMappingOffset =
+      offsetof(exec::RowEqVectorRuntime, isConstantMapping);
+  static constexpr int32_t kRuntimeNullsUseTopLevelIndexOffset =
+      offsetof(exec::RowEqVectorRuntime, nullsUseTopLevelIndex);
+
+  llvm::Value* loadMappedIndex(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row);
+
+  llvm::Value* loadRightValue(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row,
+      llvm::Type* dataTy);
+
+  llvm::Value* loadRightBool(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row);
+
+  llvm::Value* loadRightStringViewAddr(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row);
+
+  llvm::Value* loadRightValueAddr(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row,
+      int32_t valueSize);
+
+  llvm::Value* loadRightNull(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime,
+      llvm::Value* row);
+
+  llvm::Value* loadDecodedVector(
+      llvm::IRBuilder<>& builder,
+      llvm::Value* runtime);
 };
 
 } // namespace bytedance::bolt::jit

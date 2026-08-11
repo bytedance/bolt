@@ -84,19 +84,33 @@ struct HashLookup {
     hits.resize(size);
     newGroups.clear();
     if (jitRowEqVectors) {
-      decodedVectors.clear();
-      for (auto& hasher : hashers) {
-        decodedVectors.emplace_back((char*)(&hasher->decodedVector()));
+      rowEqVectorRuntimes.resize(hashers.size());
+      decodedVectorRuntimePtrs.resize(hashers.size());
+      for (auto key = 0; key < hashers.size(); ++key) {
+        auto& hasher = hashers[key];
+        auto& decoded = hasher->decodedVector();
+        rowEqVectorRuntimes[key] = {
+            decoded.dataAsVoid(),
+            decoded.indices(),
+            decoded.nulls(),
+            &decoded,
+            decoded.constantIndex(),
+            decoded.isIdentityMapping(),
+            decoded.isConstantMapping(),
+            decoded.nullsUseTopLevelIndex()};
+        decodedVectorRuntimePtrs[key] =
+            reinterpret_cast<char*>(&rowEqVectorRuntimes[key]);
       }
     }
   }
 
   char** getDecodedVectors() {
-    BOLT_CHECK(!decodedVectors.empty());
-    return decodedVectors.data();
+    BOLT_CHECK(!decodedVectorRuntimePtrs.empty());
+    return decodedVectorRuntimePtrs.data();
   }
 
-  std::vector<char*> decodedVectors;
+  std::vector<RowEqVectorRuntime> rowEqVectorRuntimes;
+  std::vector<char*> decodedVectorRuntimePtrs;
 
   /// One entry per group-by or join key.
   const std::vector<std::unique_ptr<VectorHasher>>& hashers;

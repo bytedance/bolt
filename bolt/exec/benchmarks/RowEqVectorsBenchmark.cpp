@@ -229,6 +229,13 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
   }
 
   ~rowEqvectorsBenchmark() override {
+    rows_.clear();
+    decodedVectors_.clear();
+    inputVector_.reset();
+    rowContainer_.reset();
+#ifdef ENABLE_BOLT_JIT
+    jitModule_.reset();
+#endif
     OperatorTestBase::TearDown();
   }
 
@@ -259,9 +266,20 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
     int32_t equalNum = 0;
     int32_t vectorSize = decodedVectors[0]->size();
     int32_t keysNum = decodedVectors.size();
-    std::vector<char*> vectors;
-    for (auto& decoded : decodedVectors) {
-      vectors.emplace_back((char*)(decoded.get()));
+    std::vector<exec::RowEqVectorRuntime> vectorRuntimes(decodedVectors.size());
+    std::vector<char*> vectors(decodedVectors.size());
+    for (auto key = 0; key < decodedVectors.size(); ++key) {
+      auto& decoded = *decodedVectors[key];
+      vectorRuntimes[key] = {
+          decoded.dataAsVoid(),
+          decoded.indices(),
+          decoded.nulls(),
+          &decoded,
+          decoded.constantIndex(),
+          decoded.isIdentityMapping(),
+          decoded.isConstantMapping(),
+          decoded.nullsUseTopLevelIndex()};
+      vectors[key] = reinterpret_cast<char*>(&vectorRuntimes[key]);
     }
 
     for (auto& row : rows) {
@@ -369,7 +387,9 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
       auto [jitMod, funcName] =
           rowContainer_->codegenRowEqVectors(types_, hasNulls_);
       jitModule_ = std::move(jitMod);
-      eqFunc_ = (exec::RowEqVectors)jitModule_->getFuncPtr(funcName);
+      if (jitModule_ != nullptr) {
+        eqFunc_ = (exec::RowEqVectors)jitModule_->getFuncPtr(funcName);
+      }
     }
 #endif
 
@@ -421,8 +441,10 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
 std::unique_ptr<rowEqvectorsBenchmark> benchmark;
 
 void doRun(uint32_t it, const std::string& keys, const bool useJit) {
-  benchmark->setUseJit(useJit);
-  benchmark->prepare(keys);
+  BENCHMARK_SUSPEND {
+    benchmark->setUseJit(useJit);
+    benchmark->prepare(keys);
+  }
   for (int i = 0; i < FLAGS_iterations; i++) {
     benchmark->run();
   }
@@ -430,6 +452,38 @@ void doRun(uint32_t it, const std::string& keys, const bool useJit) {
 
 BENCHMARK_NAMED_PARAM(doRun, rowEQvecBenchmark_noJIT, FLAGS_keys, false);
 BENCHMARK_RELATIVE_NAMED_PARAM(doRun, rowEQvecBenchmark_JIT, FLAGS_keys, true);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(doRun, rowEQvecBenchmark_noJIT_i64_i32, "i64:i32", false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_i64_i32,
+    "i64:i32",
+    true);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_noJIT_i64_i32_str_inline,
+    "i64:i32:str_inline",
+    false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_i64_i32_str_inline,
+    "i64:i32:str_inline",
+    true);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_noJIT_str_str_dict,
+    "str:str_dict",
+    false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT_str_str_dict,
+    "str:str_dict",
+    true);
 BENCHMARK_DRAW_LINE();
 
 // bool_dict
