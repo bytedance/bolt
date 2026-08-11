@@ -38,11 +38,9 @@
 #include "bolt/common/memory/MemoryPoolForGluten.h"
 #include "bolt/common/memory/MmapAllocator.h"
 
-DECLARE_int32(bolt_memory_num_shared_leaf_pools);
 namespace bytedance::bolt::memory {
 namespace {
 constexpr std::string_view kSysRootName{"__sys_root__"};
-constexpr std::string_view kSysSharedLeafNamePrefix{"__sys_shared_leaf__"};
 
 struct SingletonState {
   ~SingletonState() {
@@ -86,20 +84,6 @@ std::unique_ptr<MemoryArbitrator> createArbitrator(
            std::min(options.arbitratorCapacity, options.allocatorCapacity),
        .arbitrationStateCheckCb = options.arbitrationStateCheckCb,
        .extraConfigs = options.extraArbitratorConfigs});
-}
-
-std::vector<std::shared_ptr<MemoryPool>> createSharedLeafMemoryPools(
-    MemoryPool& sysPool) {
-  BOLT_CHECK_EQ(sysPool.name(), kSysRootName);
-  std::vector<std::shared_ptr<MemoryPool>> leafPools;
-  const size_t numSharedPools =
-      std::max(1, FLAGS_bolt_memory_num_shared_leaf_pools);
-  leafPools.reserve(numSharedPools);
-  for (size_t i = 0; i < numSharedPools; ++i) {
-    leafPools.emplace_back(
-        sysPool.addLeafChild(fmt::format("{}{}", kSysSharedLeafNamePrefix, i)));
-  }
-  return leafPools;
 }
 
 // Used by sys root memory pool for use case that expect a memory reclaimer to
@@ -211,8 +195,7 @@ MemoryManager::MemoryManager(const MemoryManager::Options& options)
                             options.enableDynamicMemoryQuotaManager})},
       spillPool_{addLeafPool("__sys_spilling__")},
       cachePool_{addLeafPool("__sys_caching__")},
-      tracePool_{addLeafPool("__sys_tracing__")},
-      sharedLeafPools_(createSharedLeafMemoryPools(*sysRoot_)) {
+      tracePool_{addLeafPool("__sys_tracing__")} {
   sysRoot_->setReclaimer(SysMemoryReclaimer::create());
   BOLT_CHECK_NOT_NULL(allocator_);
   BOLT_CHECK_NOT_NULL(arbitrator_);
@@ -225,9 +208,6 @@ MemoryManager::MemoryManager(const MemoryManager::Options& options)
       "Failed to set max capacity {} for {}",
       succinctBytes(sysRoot_->maxCapacity()),
       sysRoot_->name());
-  BOLT_CHECK_EQ(
-      sharedLeafPools_.size(),
-      std::max(1, FLAGS_bolt_memory_num_shared_leaf_pools));
 }
 
 MemoryManager::~MemoryManager() {
@@ -246,24 +226,6 @@ MemoryManager::~MemoryManager() {
       LOG(ERROR) << errMsg;
     }
   }
-}
-
-// static
-MemoryManager& MemoryManager::deprecatedGetInstance(
-    const MemoryManager::Options& options) {
-  auto& state = singletonState();
-  if (auto* instance = state.instance.load(std::memory_order_acquire)) {
-    return *instance;
-  }
-
-  std::lock_guard<std::mutex> l(state.mutex);
-  auto* instance = state.instance.load(std::memory_order_acquire);
-  if (instance != nullptr) {
-    return *instance;
-  }
-  instance = new MemoryManager(options);
-  state.instance.store(instance, std::memory_order_release);
-  return *instance;
 }
 
 // static
@@ -420,12 +382,6 @@ void MemoryManager::dropPool(MemoryPool* pool) {
   pools_.erase(it);
 }
 
-MemoryPool& MemoryManager::deprecatedSharedLeafPool() {
-  const auto idx = std::hash<std::thread::id>{}(std::this_thread::get_id());
-  std::shared_lock guard{mutex_};
-  return *sharedLeafPools_.at(idx % sharedLeafPools_.size());
-}
-
 int64_t MemoryManager::getTotalBytes() const {
   return allocator_->totalUsedBytes();
 }
@@ -434,7 +390,7 @@ size_t MemoryManager::numPools() const {
   size_t numPools = sysRoot_->getChildCount();
   {
     std::shared_lock guard{mutex_};
-    numPools += pools_.size() - sharedLeafPools_.size();
+    numPools += pools_.size();
   }
   return numPools;
 }
@@ -508,25 +464,6 @@ void initializeMemoryManager(const MemoryManager::Options& options) {
 
 MemoryManager* memoryManager() {
   return MemoryManager::getInstance();
-}
-
-MemoryManager& deprecatedDefaultMemoryManager() {
-  return MemoryManager::deprecatedGetInstance();
-}
-
-std::shared_ptr<MemoryPool> deprecatedAddDefaultLeafMemoryPool(
-    const std::string& name,
-    bool threadSafe) {
-  auto& memoryManager = deprecatedDefaultMemoryManager();
-  return memoryManager.addLeafPool(name, threadSafe);
-}
-
-MemoryPool& deprecatedSharedLeafPool() {
-  return deprecatedDefaultMemoryManager().deprecatedSharedLeafPool();
-}
-
-MemoryPool& deprecatedRootPool() {
-  return deprecatedDefaultMemoryManager().deprecatedSysRootPool();
 }
 
 memory::MemoryPool* spillMemoryPool() {

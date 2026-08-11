@@ -30,10 +30,13 @@
 
 #include "bolt/dwio/common/Reader.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/dwio/common/FormatData.h"
+#include "bolt/dwio/common/SelectiveColumnReader.h"
 #include "bolt/type/Subfield.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <gtest/gtest.h>
+#include <array>
 namespace bytedance::bolt::dwio::common {
 namespace {
 using namespace bytedance::bolt::common;
@@ -44,6 +47,341 @@ class ReaderTest : public testing::Test, public test::VectorTestBase {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 };
+
+class TestFormatData : public FormatData {
+ public:
+  void readNulls(
+      vector_size_t /*numValues*/,
+      const uint64_t* FOLLY_NULLABLE /*incomingNulls*/,
+      BufferPtr& nulls,
+      bool /*nullsOnly*/ = false) override {
+    nulls = nullptr;
+  }
+
+  uint64_t skipNulls(uint64_t numValues, bool /*nullsOnly*/ = false) override {
+    return numValues;
+  }
+
+  uint64_t skip(uint64_t numValues) override {
+    return numValues;
+  }
+
+  bool hasNulls() const override {
+    return true;
+  }
+
+  PositionProvider seekToRowGroup(int64_t /*index*/) override {
+    return PositionProvider(emptyPositions_);
+  }
+
+  void filterRowGroups(
+      const common::ScanSpec& /*scanSpec*/,
+      uint64_t /*rowsPerRowGroup*/,
+      const StatsContext& /*writerContext*/,
+      FilterRowGroupsResult& /*result*/,
+      BufferedInput& /*input*/) override {}
+
+ private:
+  std::vector<uint64_t> emptyPositions_;
+};
+
+class TestFormatParams : public FormatParams {
+ public:
+  explicit TestFormatParams(
+      memory::MemoryPool& pool,
+      ColumnReaderStatistics& stats)
+      : FormatParams(pool, stats) {}
+
+  std::unique_ptr<FormatData> toFormatData(
+      const std::shared_ptr<const TypeWithId>& /*type*/,
+      const common::ScanSpec& /*scanSpec*/) override {
+    return std::make_unique<TestFormatData>();
+  }
+};
+
+class TestSelectiveColumnReader : public SelectiveColumnReader {
+ public:
+  TestSelectiveColumnReader(
+      const TypePtr& requestedType,
+      const std::shared_ptr<const TypeWithId>& fileType,
+      FormatParams& params,
+      common::ScanSpec& scanSpec)
+      : SelectiveColumnReader(requestedType, fileType, params, scanSpec) {}
+
+  void read(
+      int64_t /*offset*/,
+      const RowSet& /*rows*/,
+      const uint64_t* /*incomingNulls*/) override {}
+
+  void getValues(const RowSet& /*rows*/, VectorPtr* /*result*/) override {}
+
+  void prepareOutputNullsForTest(
+      const RowSet& rows,
+      bool inputHasNulls,
+      int32_t extraRows = 0) {
+    prepareOutputNulls(rows, inputHasNulls, extraRows);
+  }
+
+  const BufferPtr& storedResultNullsForTest() const {
+    return resultNulls_;
+  }
+
+  const uint64_t* rawResultNullsForTest() const {
+    return rawResultNulls_;
+  }
+
+  bool returnReaderNullsForTest() const {
+    return returnReaderNulls_;
+  }
+};
+
+class TestValueHook : public ValueHook {
+ public:
+  void addValue(vector_size_t /*row*/, const void* /*value*/) override {}
+};
+
+enum class TestFilterKind { kNone, kIsNotNull, kIsNull, kBigintRange };
+
+std::unique_ptr<common::Filter> makeTestFilter(TestFilterKind kind) {
+  switch (kind) {
+    case TestFilterKind::kNone:
+      return nullptr;
+    case TestFilterKind::kIsNotNull:
+      return std::make_unique<common::IsNotNull>();
+    case TestFilterKind::kIsNull:
+      return std::make_unique<common::IsNull>();
+    case TestFilterKind::kBigintRange:
+      return std::make_unique<common::BigintRange>(0, 10, false);
+  }
+  BOLT_UNREACHABLE();
+}
+
+struct PrepareOutputNullsCase {
+  const char* name;
+  TypePtr requestedType;
+  TypePtr fileType;
+  TestFilterKind filterKind;
+  bool projectOut{true};
+  bool extractValues{false};
+  bool hasValueHook{false};
+  bool inputHasNulls{true};
+  int32_t extraRows{0};
+  bool expectAllocation{true};
+};
+
+PrepareOutputNullsCase prepareOutputNullsCase(
+    const char* name,
+    TypePtr requestedType,
+    TypePtr fileType,
+    TestFilterKind filterKind,
+    bool expectAllocation,
+    bool projectOut = true,
+    bool extractValues = false,
+    bool hasValueHook = false,
+    bool inputHasNulls = true,
+    int32_t extraRows = 0) {
+  return PrepareOutputNullsCase{
+      name,
+      std::move(requestedType),
+      std::move(fileType),
+      filterKind,
+      projectOut,
+      extractValues,
+      hasValueHook,
+      inputHasNulls,
+      extraRows,
+      expectAllocation};
+}
+
+class PrepareOutputNullsTest
+    : public ReaderTest,
+      public testing::WithParamInterface<PrepareOutputNullsCase> {};
+
+TEST_P(PrepareOutputNullsTest, allocation) {
+  auto testCase = GetParam();
+  common::ScanSpec scanSpec("c0");
+  scanSpec.setProjectOut(testCase.projectOut);
+  scanSpec.setExtractValues(testCase.extractValues);
+  scanSpec.setFilter(makeTestFilter(testCase.filterKind));
+  TestValueHook hook;
+  if (testCase.hasValueHook) {
+    scanSpec.setValueHook(&hook);
+  }
+
+  ColumnReaderStatistics stats;
+  TestFormatParams params(*pool(), stats);
+  auto fileTypeWithId = TypeWithId::create(testCase.fileType);
+  TestSelectiveColumnReader reader(
+      testCase.requestedType, fileTypeWithId, params, scanSpec);
+
+  const std::array<vector_size_t, 4> rowNumbers = {0, 1, 2, 3};
+  RowSet rows(rowNumbers.data(), rowNumbers.size());
+  const auto allocsBefore = pool()->stats().numAllocs;
+  reader.prepareOutputNullsForTest(
+      rows, testCase.inputHasNulls, testCase.extraRows);
+  const auto allocsAfter = pool()->stats().numAllocs;
+
+  if (testCase.expectAllocation) {
+    EXPECT_GT(allocsAfter, allocsBefore);
+  } else {
+    EXPECT_EQ(allocsAfter, allocsBefore);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    IsNotNullNullBufferElision,
+    PrepareOutputNullsTest,
+    testing::Values(
+        prepareOutputNullsCase(
+            "no_filter_may_need_output_nulls",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kNone,
+            true),
+        prepareOutputNullsCase(
+            "bigint_is_not_null_projected",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kIsNotNull,
+            false),
+        prepareOutputNullsCase(
+            "varchar_is_not_null_extracted",
+            VARCHAR(),
+            VARCHAR(),
+            TestFilterKind::kIsNotNull,
+            false,
+            false,
+            true),
+        prepareOutputNullsCase(
+            "varbinary_is_not_null_projected",
+            VARBINARY(),
+            VARBINARY(),
+            TestFilterKind::kIsNotNull,
+            false),
+        prepareOutputNullsCase(
+            "no_input_nulls",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kBigintRange,
+            false,
+            true,
+            false,
+            false,
+            false),
+        prepareOutputNullsCase(
+            "range_filter_may_need_output_nulls",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kBigintRange,
+            true),
+        prepareOutputNullsCase(
+            "is_null_filter_may_need_output_nulls",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kIsNull,
+            true),
+        prepareOutputNullsCase(
+            "is_not_null_filter_only",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kIsNotNull,
+            true,
+            false,
+            false),
+        prepareOutputNullsCase(
+            "is_not_null_with_value_hook",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kIsNotNull,
+            true,
+            true,
+            false,
+            true),
+        prepareOutputNullsCase(
+            "is_not_null_cast_output",
+            INTEGER(),
+            BIGINT(),
+            TestFilterKind::kIsNotNull,
+            true),
+        prepareOutputNullsCase(
+            "is_not_null_complex_output",
+            ARRAY(BIGINT()),
+            ARRAY(BIGINT()),
+            TestFilterKind::kIsNotNull,
+            true),
+        prepareOutputNullsCase(
+            "is_not_null_with_extra_rows",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kIsNotNull,
+            false,
+            true,
+            false,
+            false,
+            true,
+            7),
+        prepareOutputNullsCase(
+            "range_filter_with_extra_rows",
+            BIGINT(),
+            BIGINT(),
+            TestFilterKind::kBigintRange,
+            true,
+            true,
+            false,
+            false,
+            true,
+            7)),
+    [](const testing::TestParamInfo<PrepareOutputNullsCase>& info) {
+      return info.param.name;
+    });
+
+TEST_F(ReaderTest, prepareOutputNullsClearsPreviouslyAllocatedNulls) {
+  common::ScanSpec scanSpec("c0");
+  scanSpec.setProjectOut(true);
+  scanSpec.setFilter(makeTestFilter(TestFilterKind::kBigintRange));
+
+  ColumnReaderStatistics stats;
+  TestFormatParams params(*pool(), stats);
+  auto fileTypeWithId = TypeWithId::create(BIGINT());
+  TestSelectiveColumnReader reader(BIGINT(), fileTypeWithId, params, scanSpec);
+
+  const std::array<vector_size_t, 4> rowNumbers = {0, 1, 2, 3};
+  RowSet rows(rowNumbers.data(), rowNumbers.size());
+  reader.prepareOutputNullsForTest(rows, true);
+  ASSERT_NE(nullptr, reader.storedResultNullsForTest().get());
+  ASSERT_NE(nullptr, reader.rawResultNullsForTest());
+
+  scanSpec.setFilter(makeTestFilter(TestFilterKind::kIsNotNull));
+  const auto allocsBefore = pool()->stats().numAllocs;
+  reader.prepareOutputNullsForTest(rows, true);
+  EXPECT_EQ(allocsBefore, pool()->stats().numAllocs);
+  EXPECT_EQ(nullptr, reader.storedResultNullsForTest().get());
+  EXPECT_EQ(nullptr, reader.rawResultNullsForTest());
+}
+
+TEST_F(ReaderTest, prepareOutputNullsClearsReturnedReaderNulls) {
+  common::ScanSpec scanSpec("c0");
+  scanSpec.setProjectOut(true);
+
+  ColumnReaderStatistics stats;
+  TestFormatParams params(*pool(), stats);
+  auto fileTypeWithId = TypeWithId::create(BIGINT());
+  TestSelectiveColumnReader reader(BIGINT(), fileTypeWithId, params, scanSpec);
+
+  const std::array<vector_size_t, 4> rowNumbers = {0, 1, 2, 3};
+  RowSet rows(rowNumbers.data(), rowNumbers.size());
+  reader.nullsInReadRange() =
+      AlignedBuffer::allocate<bool>(rows.size(), pool(), bits::kNotNull);
+
+  reader.prepareOutputNullsForTest(rows, true);
+  ASSERT_TRUE(reader.returnReaderNullsForTest());
+
+  scanSpec.setFilter(makeTestFilter(TestFilterKind::kIsNotNull));
+  reader.prepareOutputNullsForTest(rows, true);
+  EXPECT_FALSE(reader.returnReaderNullsForTest());
+  EXPECT_EQ(nullptr, reader.storedResultNullsForTest().get());
+  EXPECT_EQ(nullptr, reader.rawResultNullsForTest());
+}
 
 TEST_F(ReaderTest, projectColumnsFilterStruct) {
   constexpr int kSize = 10;

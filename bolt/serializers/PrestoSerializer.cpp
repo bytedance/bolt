@@ -3688,20 +3688,6 @@ std::unique_ptr<BatchVectorSerializer> PrestoVectorSerde::createBatchSerializer(
       pool, prestoOptions.useLosslessTimestamp, prestoOptions.compressionKind);
 }
 
-void PrestoVectorSerde::deprecatedSerializeEncoded(
-    const RowVectorPtr& vector,
-    StreamArena* streamArena,
-    const Options* options,
-    OutputStream* out) {
-  auto prestoOptions = toPrestoOptions(options);
-  auto serializer = std::make_unique<PrestoVectorSerializer>(
-      vector,
-      streamArena,
-      prestoOptions.useLosslessTimestamp,
-      prestoOptions.compressionKind);
-  serializer->flushEncoded(vector, out);
-}
-
 void PrestoVectorSerde::deserialize(
     ByteInputStream* source,
     bolt::memory::MemoryPool* pool,

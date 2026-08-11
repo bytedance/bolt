@@ -11,3 +11,4 @@ services:
     volumes:
       - /etc/hostname:/etc/host-hostname:ro
       - ${HOST_DATA_DIR}/conan-server-data:/data/conan-server-data:r
+      - ${HOST_DATA_DIR}/pre-commit-cache:/data/pre-commit-cache

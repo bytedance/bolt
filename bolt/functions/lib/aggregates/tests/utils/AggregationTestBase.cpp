@@ -926,11 +926,9 @@ void AggregationTestBase::testAggregationsImpl(
     makeSource(builder);
 
     core::PlanNodeId partialNodeId;
-    core::PlanNodeId intermediateNodeId;
     builder.partialAggregation(groupingKeys, aggregates)
         .capturePlanNodeId(partialNodeId)
         .intermediateAggregation()
-        .capturePlanNodeId(intermediateNodeId)
         .finalAggregation();
 
     if (!postAggregationProjections.empty()) {
@@ -948,9 +946,8 @@ void AggregationTestBase::testAggregationsImpl(
     auto taskStats = toPlanStats(task->taskStats());
     auto inputVectors = taskStats.at(partialNodeId).inputVectors;
     auto partialStats = taskStats.at(partialNodeId).customStats;
-    auto intermediateStats = taskStats.at(intermediateNodeId).customStats;
     if (inputVectors > 1) {
-      EXPECT_LT(0, partialStats.at("abandonedPartialAggregation").count);
+      EXPECT_LT(0, partialStats.at("abandonedPartialAggregationRows").sum);
     }
   }
 

@@ -145,6 +145,8 @@ class HiveDataSource : public DataSource {
   std::shared_ptr<io::IoStatistics> ioStats_;
 
  private:
+  void prepareReaderOutputForNextRead();
+
   // Evaluates remainingFilter_ on the specified vector. Returns number of
   // rows passed. Populates filterEvalCtx_.selectedIndices and selectedBits
   // if only some rows passed the filter. If none or all rows passed

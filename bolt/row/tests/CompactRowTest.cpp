@@ -30,6 +30,9 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/row/CompactRow.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -527,6 +530,160 @@ TEST_F(CompactRowTest, row) {
   });
 
   testRoundTrip(data);
+}
+
+TEST_F(CompactRowTest, rejectsOversizedSerializedRow) {
+  constexpr size_t kNumFields = 2'048;
+  auto stringVector = makeFlatVector<std::string>({std::string(1 << 20, 'x')});
+  auto data = makeRowVector(std::vector<VectorPtr>(kNumFields, stringVector));
+
+  CompactRow row(data);
+  BOLT_ASSERT_USER_THROW(
+      row.rowSize(0), "serialized value exceeds the maximum supported size");
+}
+
+TEST_F(CompactRowTest, rejectsMalformedInput) {
+  const auto appendInt32 = [](std::string& data, int32_t value) {
+    data.append(reinterpret_cast<const char*>(&value), sizeof(value));
+  };
+  const auto expectInvalid = [&](const RowTypePtr& type,
+                                 std::string data,
+                                 std::string_view expectedMessage) {
+    std::vector<std::string_view> rows{data};
+    BOLT_ASSERT_RUNTIME_THROW(
+        CompactRow::deserialize(rows, type, pool()), expectedMessage);
+  };
+
+  // Missing row null bitmap and truncated fixed-width field.
+  expectInvalid(ROW({BIGINT()}), "", "row null bitmap");
+  expectInvalid(ROW({BIGINT()}), std::string(1, '\0'), "fixed-width value");
+  expectInvalid(
+      ROW({BIGINT()}), std::string(1, '\1'), "null fixed-width row field");
+
+  // Negative and truncated string lengths.
+  std::string negativeString(1, '\0');
+  appendInt32(negativeString, -1);
+  expectInvalid(
+      ROW({VARCHAR()}), std::move(negativeString), "negative string size");
+
+  std::string truncatedString(1, '\0');
+  appendInt32(truncatedString, 3);
+  truncatedString.push_back('a');
+  expectInvalid(ROW({VARCHAR()}), std::move(truncatedString), "string payload");
+
+  // Negative array cardinality and a fixed-width array with no payload.
+  std::string negativeArray(1, '\0');
+  appendInt32(negativeArray, -1);
+  expectInvalid(
+      ROW({ARRAY(BIGINT())}), std::move(negativeArray), "negative array size");
+
+  std::string truncatedArray(1, '\0');
+  appendInt32(truncatedArray, 1);
+  expectInvalid(
+      ROW({ARRAY(BIGINT())}), std::move(truncatedArray), "array payload");
+
+  // The maximum int32 cardinality must not overflow null-bitmap sizing.
+  std::string hugeUnknownArray(1, '\0');
+  appendInt32(hugeUnknownArray, std::numeric_limits<int32_t>::max());
+  expectInvalid(
+      ROW({ARRAY(UNKNOWN())}),
+      std::move(hugeUnknownArray),
+      "needs 268435456 bytes");
+
+  // Complex arrays reject invalid serialized sizes and offsets.
+  std::string negativeComplexSize(1, '\0');
+  appendInt32(negativeComplexSize, 1);
+  negativeComplexSize.push_back('\0');
+  appendInt32(negativeComplexSize, -1);
+  appendInt32(negativeComplexSize, 0);
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(negativeComplexSize),
+      "negative complex array serialized size");
+
+  std::string undersizedOffsetTable(1, '\0');
+  appendInt32(undersizedOffsetTable, 2);
+  undersizedOffsetTable.push_back('\0');
+  appendInt32(undersizedOffsetTable, sizeof(int32_t));
+  undersizedOffsetTable.append(2 * sizeof(int32_t), '\0');
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(undersizedOffsetTable),
+      "smaller than its 8-byte offset table");
+
+  std::string offsetInsideTable(1, '\0');
+  appendInt32(offsetInsideTable, 1);
+  offsetInsideTable.push_back('\0');
+  appendInt32(offsetInsideTable, sizeof(int32_t));
+  appendInt32(offsetInsideTable, 0);
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(offsetInsideTable),
+      "points into its offset table");
+
+  std::string invalidComplexOffset(1, '\0');
+  appendInt32(invalidComplexOffset, 1);
+  invalidComplexOffset.push_back('\0');
+  appendInt32(invalidComplexOffset, sizeof(int32_t));
+  appendInt32(invalidComplexOffset, sizeof(int32_t) + 1);
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(invalidComplexOffset),
+      "exceeds payload size");
+
+  std::string decreasingComplexOffsets(1, '\0');
+  appendInt32(decreasingComplexOffsets, 2);
+  decreasingComplexOffsets.push_back('\0');
+  appendInt32(decreasingComplexOffsets, 12);
+  appendInt32(decreasingComplexOffsets, 12);
+  appendInt32(decreasingComplexOffsets, 8);
+  decreasingComplexOffsets.append(sizeof(int32_t), '\0');
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(decreasingComplexOffsets),
+      "precedes offset 12");
+
+  // Each complex element is bounded by the next element offset. The first
+  // nested array below declares one BIGINT, but contains only its null byte;
+  // it must not consume bytes belonging to the second nested array.
+  std::string overlappingComplexElements(1, '\0');
+  appendInt32(overlappingComplexElements, 2);
+  overlappingComplexElements.push_back('\0');
+  appendInt32(overlappingComplexElements, 26);
+  appendInt32(overlappingComplexElements, 8);
+  appendInt32(overlappingComplexElements, 13);
+  appendInt32(overlappingComplexElements, 1);
+  overlappingComplexElements.push_back('\0');
+  appendInt32(overlappingComplexElements, 1);
+  overlappingComplexElements.push_back('\0');
+  overlappingComplexElements.append(sizeof(int64_t), '\0');
+  expectInvalid(
+      ROW({ARRAY(ARRAY(BIGINT()))}),
+      std::move(overlappingComplexElements),
+      "array payload");
+
+  // Map key and value arrays must have matching cardinalities.
+  std::string mismatchedMap(1, '\0');
+  appendInt32(mismatchedMap, 0);
+  appendInt32(mismatchedMap, 1);
+  mismatchedMap.push_back('\0');
+  mismatchedMap.append(sizeof(int64_t), '\0');
+  expectInvalid(
+      ROW({MAP(BIGINT(), BIGINT())}),
+      std::move(mismatchedMap),
+      "map has 0 keys but 1 values");
+}
+
+TEST_F(CompactRowTest, acceptsTrailingBytes) {
+  std::string serialized(1, '\0');
+  const int64_t value = 42;
+  serialized.append(reinterpret_cast<const char*>(&value), sizeof(value));
+  serialized.append("trailing bytes");
+
+  std::vector<std::string_view> rows{serialized};
+  auto actual = CompactRow::deserialize(rows, ROW({BIGINT()}), pool());
+  auto expected = makeRowVector({makeFlatVector<int64_t>({value})});
+  assertEqualVectors(expected, actual);
 }
 
 TEST_F(CompactRowTest, fuzz) {

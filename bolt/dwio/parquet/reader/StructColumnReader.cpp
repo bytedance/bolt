@@ -172,6 +172,23 @@ StructColumnReader::findBestLeaf() {
   return best;
 }
 
+namespace {
+void releaseRowGroupReaderRecursive(
+    dwio::common::SelectiveColumnReader* reader) {
+  reader->scanState().clear();
+  reader->formatData().as<ParquetData>().releaseRowGroupReader();
+  for (auto* child : reader->children()) {
+    if (child != nullptr) {
+      releaseRowGroupReaderRecursive(child);
+    }
+  }
+}
+} // namespace
+
+void StructColumnReader::releaseRowGroupReader() {
+  releaseRowGroupReaderRecursive(this);
+}
+
 void StructColumnReader::read(
     int64_t offset,
     const RowSet& rows,
@@ -252,18 +269,37 @@ void StructColumnReader::setNullsFromRepDefs(PageReader& pageReader) {
   }
   auto repDefRange = pageReader.repDefRange();
   int32_t numRepDefs = repDefRange.second - repDefRange.first;
-  dwio::common::ensureCapacity<uint64_t>(
-      nullsInReadRange_, bits::nwords(numRepDefs), &memoryPool_);
-  auto numStructs = pageReader.getLengthsAndNulls(
+  auto bits = prepareRepDefNulls(numRepDefs);
+  bits.values_read = pageReader.getLengthsAndNulls(
       levelMode_,
       levelInfo_,
       repDefRange.first,
       repDefRange.second,
       numRepDefs,
       nullptr,
-      nullsInReadRange()->asMutable<uint64_t>(),
+      reinterpret_cast<uint64_t*>(bits.valid_bits),
       0);
-  formatData_->as<ParquetData>().setNulls(nullsInReadRange(), numStructs);
+  setNullsFromRepDefOutput(bits);
+}
+
+arrow::ValidityBitmapInputOutput StructColumnReader::prepareRepDefNulls(
+    int32_t maxItems) {
+  dwio::common::ensureCapacity<uint64_t>(
+      nullsInReadRange_, bits::nwords(maxItems), &memoryPool_);
+  arrow::ValidityBitmapInputOutput output;
+  output.values_read_upper_bound = maxItems;
+  output.values_read = 0;
+  output.null_count = 0;
+  output.valid_bits =
+      reinterpret_cast<uint8_t*>(nullsInReadRange_->asMutable<uint64_t>());
+  output.valid_bits_offset = 0;
+  return output;
+}
+
+void StructColumnReader::setNullsFromRepDefOutput(
+    const arrow::ValidityBitmapInputOutput& bits) {
+  formatData_->as<ParquetData>().setNulls(
+      nullsInReadRange(), static_cast<int32_t>(bits.values_read));
 }
 
 void StructColumnReader::filterRowGroups(

@@ -822,6 +822,40 @@ TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
   ASSERT_TRUE(assertEqualResults({expected}, {results}));
 }
 
+TEST_F(ParquetTableScanTest, variantReadsAfterReaderOutputReuse) {
+  auto file = TempFilePath::create();
+  WriterOptions writerOptions;
+  auto data = makeVariantParquetBatch(
+      pool(),
+      {1, 2, 3, 4, 5},
+      {R"({"a":10,"name":"aa"})",
+       R"({"a":20,"name":"bb"})",
+       R"({"a":30,"name":"cc"})",
+       R"({"a":40,"name":"dd"})",
+       R"({"a":50,"name":"ee"})"});
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  auto logicalRowType = ROW({"g", "v"}, {BIGINT(), VARIANT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(logicalRowType)
+                  .project(
+                      {"g",
+                       "cast(variant_get(v, '$.a') as bigint) AS a",
+                       "variant_get(v, '$.name') AS name"})
+                  .planNode();
+
+  auto expected = makeRowVector(
+      {"g", "a", "name"},
+      {makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+       makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+       makeFlatVector<std::string>({"aa", "bb", "cc", "dd", "ee"})});
+
+  AssertQueryBuilder(plan)
+      .split(makeSplit(file->getPath()))
+      .config(core::QueryConfig::kMaxOutputBatchRows, "2")
+      .assertResults(expected);
+}
+
 TEST_F(ParquetTableScanTest, nullMap) {
   auto path = getExampleFilePath("null_map.parquet");
   loadData(

@@ -39,6 +39,10 @@ using namespace bytedance::bolt::duckdb;
 
 class BaseDuckWrapperTest : public testing::Test {
  public:
+  static void SetUpTestSuite() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   template <class T>
   void verifyUnaryResult(
       const std::string& query,
@@ -108,7 +112,7 @@ class BaseDuckWrapperTest : public testing::Test {
 
   std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
   std::shared_ptr<memory::MemoryPool> pool_{
-      memory::deprecatedAddDefaultLeafMemoryPool()};
+      memory::memoryManager()->addLeafPool()};
   std::unique_ptr<core::ExecCtx> execCtx_{
       std::make_unique<core::ExecCtx>(pool_.get(), queryCtx_.get())};
   std::unique_ptr<DuckDBWrapper> db_{

@@ -2,6 +2,7 @@
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -9,6 +10,9 @@ HOST_HOSTNAME_PATH = Path("/etc/host-hostname")
 RUNNER_CONFIG_PATH = Path("/actions-runner/.runner")
 RUNNER_CREDENTIALS_PATH = Path("/actions-runner/.credentials")
 RUNNER_RSA_PATH = Path("/actions-runner/.credentials_rsaparams")
+DOCKER_PID_PATH = Path("/var/run/docker.pid")
+DOCKER_READY_TIMEOUT_SECONDS = 60
+DOCKER_READY_POLL_SECONDS = 1
 
 
 def normalize_hostname(value, source):
@@ -80,6 +84,63 @@ def ensure_docker_storage(
     return storage
 
 
+def process_is_running(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def remove_stale_docker_pid(pid_path=DOCKER_PID_PATH):
+    try:
+        pid_text = pid_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RuntimeError(f"Unable to read Docker PID file {pid_path}") from error
+
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        pid = 0
+
+    if pid > 0 and process_is_running(pid):
+        return False
+
+    print(f"Removing stale Docker PID file {pid_path}")
+    pid_path.unlink()
+    return True
+
+
+def wait_for_docker(
+    timeout_seconds=DOCKER_READY_TIMEOUT_SECONDS,
+    poll_seconds=DOCKER_READY_POLL_SECONDS,
+):
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+
+    while True:
+        result = subprocess.run(
+            ["docker", "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+
+        last_error = result.stderr.strip()
+        if time.monotonic() >= deadline:
+            detail = f": {last_error}" if last_error else ""
+            raise RuntimeError(
+                f"Docker did not become ready within {timeout_seconds} seconds{detail}"
+            )
+        time.sleep(poll_seconds)
+
+
 def create_registration_token(token, org_name, repo_name):
     import requests
 
@@ -130,7 +191,14 @@ def main():
     runner_name = f"{host_hostname}-{runner_hostname}"
     org_name = os.environ["ORGANIZATION_NAME"]
     repo_name = os.environ["REPOSITORY_NAME"]
-    runner_labels = os.environ["RUNNER_LABELS"]
+    runner_labels = [
+        label.strip()
+        for label in os.environ["RUNNER_LABELS"].split(",")
+        if label.strip()
+    ]
+    if host_hostname not in runner_labels:
+        runner_labels.append(host_hostname)
+    runner_labels = ",".join(runner_labels)
     docker_data_dir = os.environ["DOCKER_DATA_DIR"]
 
     # allow running as root
@@ -140,7 +208,9 @@ def main():
     # compose isn't capable of editing mounts after startup, so we need to create
     # the directory and symlink it to /var/lib/docker
     ensure_docker_storage(docker_data_dir, runner_hostname)
+    remove_stale_docker_pid()
     subprocess.run(["service", "docker", "start"], check=True)
+    wait_for_docker()
 
     if runner_is_configured():
         print(f"Runner {runner_name} is already configured; reusing its credentials")

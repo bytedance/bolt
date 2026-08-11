@@ -36,6 +36,10 @@ namespace bytedance::bolt::exec {
 
 class HashAggregation : public Operator {
  public:
+  /// Number of rows emitted after partial aggregation was abandoned.
+  static constexpr std::string_view kAbandonedPartialAggregationRows =
+      "abandonedPartialAggregationRows";
+
   HashAggregation(
       int32_t operatorId,
       DriverCtx* driverCtx,

@@ -31,21 +31,488 @@
 #include <gtest/gtest.h>
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 
+#include <algorithm>
+#include <numeric>
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/connectors/hive/HiveDataSource.h"
+#include "bolt/dwio/common/Statistics.h"
 #include "bolt/expression/ExprToSubfieldFilter.h"
+#include "bolt/vector/LazyVector.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
 using namespace bytedance::bolt::common;
 using namespace bytedance::bolt::exec::test;
 
+class TestingHiveDataSource;
+
 class HiveConnectorTest : public exec::test::HiveConnectorTestBase {
  protected:
   std::shared_ptr<memory::MemoryPool> pool_ =
       memory::memoryManager()->addLeafPool();
+
+  RowTypePtr readerOutputReuseRowType() const {
+    return ROW(
+        {"c0", "c1", "c2", "c3", "c4"},
+        {BIGINT(),
+         ROW({"n0"}, {BIGINT()}),
+         ARRAY(BIGINT()),
+         MAP(BIGINT(), BIGINT()),
+         VARCHAR()});
+  }
+
+  std::unique_ptr<TestingHiveDataSource> makeTestingDataSource(
+      const RowTypePtr& rowType);
 };
+
+class FailingVectorLoader : public VectorLoader {
+ public:
+  void loadInternal(
+      RowSet /*rows*/,
+      ValueHook* /*hook*/,
+      vector_size_t /*resultSize*/,
+      VectorPtr* /*result*/) override {
+    ADD_FAILURE() << "Preparing reader output must not load LazyVector";
+  }
+};
+
+VectorPtr takeIfUnique(VectorPtr& vector) {
+  if (vector && vector.use_count() == 1) {
+    return std::move(vector);
+  }
+  return nullptr;
+}
+
+class TrackingSplitReader : public HiveSplitReaderBase {
+ public:
+  TrackingSplitReader(
+      RowTypePtr rowType,
+      memory::MemoryPool* pool,
+      std::vector<vector_size_t> outputSizes = {1, 1},
+      bool expectComplexShellReuse = false,
+      bool outputLazyLeaf = false)
+      : rowType_(std::move(rowType)),
+        pool_(pool),
+        outputSizes_(std::move(outputSizes)),
+        expectComplexShellReuse_(expectComplexShellReuse),
+        outputLazyLeaf_(outputLazyLeaf) {}
+
+  uint64_t next(int64_t /*size*/, VectorPtr& output) override {
+    auto rowOutput = std::dynamic_pointer_cast<RowVector>(output);
+    EXPECT_NE(rowOutput, nullptr);
+    if (rowOutput == nullptr) {
+      return 0;
+    }
+    EXPECT_EQ(rowOutput->children().size(), rowType_->size());
+
+    if (rowType_->size() == 0) {
+      if (calls_ == 0) {
+        backingOutput_ = rowOutput.get();
+      }
+      if (calls_ >= outputSizes_.size()) {
+        return 0;
+      }
+      const auto outputSize = outputSizes_[calls_];
+      rowOutput->unsafeResize(outputSize);
+      ++calls_;
+      return outputSize;
+    }
+
+    if (calls_ > 0) {
+      EXPECT_EQ(rowOutput.get(), backingOutput_);
+      EXPECT_EQ(rowOutput->size(), 0);
+      EXPECT_NE(rowOutput->childAt(0), nullptr);
+      if (rowOutput->childAt(0) == nullptr) {
+        return 0;
+      }
+      EXPECT_FALSE(rowOutput->childAt(0)->isLazy());
+      EXPECT_EQ(rowOutput->childAt(0)->size(), 0);
+      expectFlatBuffersReleased(
+          rowOutput->childAt(0),
+          firstChildValues_.get(),
+          firstChildNulls_.get());
+      auto nestedRow =
+          std::dynamic_pointer_cast<RowVector>(rowOutput->childAt(1));
+      EXPECT_NE(nestedRow, nullptr);
+      if (nestedRow == nullptr) {
+        return 0;
+      }
+      EXPECT_EQ(nestedRow->size(), 0);
+      EXPECT_NE(nestedRow->childAt(0), nullptr);
+      if (nestedRow->childAt(0) == nullptr) {
+        return 0;
+      }
+      EXPECT_EQ(nestedRow->childAt(0)->size(), 0);
+      expectFlatBuffersReleased(
+          nestedRow->childAt(0),
+          firstNestedChildValues_.get(),
+          firstNestedChildNulls_.get());
+      if (expectComplexShellReuse_) {
+        EXPECT_EQ(rowOutput->childAt(2).get(), firstArray_.lock().get());
+        EXPECT_EQ(rowOutput->childAt(3).get(), firstMap_.lock().get());
+        auto* array = rowOutput->childAt(2)->as<ArrayVector>();
+        auto* map = rowOutput->childAt(3)->as<MapVector>();
+        EXPECT_NE(array, nullptr);
+        EXPECT_NE(map, nullptr);
+        if (array == nullptr || map == nullptr) {
+          return 0;
+        }
+        EXPECT_EQ(array->size(), 0);
+        EXPECT_EQ(array->elements()->size(), 0);
+        expectFlatBuffersReleased(
+            array->elements(), firstArrayChildValues_.get(), nullptr);
+        EXPECT_EQ(map->size(), 0);
+        EXPECT_EQ(map->mapKeys()->size(), 0);
+        EXPECT_EQ(map->mapValues()->size(), 0);
+        expectFlatBuffersReleased(
+            map->mapKeys(), firstMapKeyValues_.get(), nullptr);
+        expectFlatBuffersReleased(
+            map->mapValues(), firstMapValueValues_.get(), nullptr);
+        expectStringBuffersReleased(
+            rowOutput->childAt(4),
+            firstStringValues_.get(),
+            firstStringBuffer_.get());
+        if (calls_ > 1) {
+          EXPECT_EQ(rowOutput->childAt(1).get(), nestedShell_);
+          EXPECT_EQ(rowOutput->childAt(2).get(), arrayShell_);
+          EXPECT_EQ(rowOutput->childAt(3).get(), mapShell_);
+        }
+      } else {
+        EXPECT_NE(rowOutput->childAt(2), nullptr);
+        EXPECT_NE(rowOutput->childAt(3), nullptr);
+        auto firstArray = firstArray_.lock();
+        auto firstMap = firstMap_.lock();
+        EXPECT_NE(firstArray, nullptr);
+        EXPECT_NE(firstMap, nullptr);
+        if (firstArray) {
+          EXPECT_NE(rowOutput->childAt(2).get(), firstArray.get());
+          EXPECT_EQ(firstArray.use_count(), 2);
+        }
+        if (firstMap) {
+          EXPECT_NE(rowOutput->childAt(3).get(), firstMap.get());
+          EXPECT_EQ(firstMap.use_count(), 2);
+        }
+      }
+
+      if (!expectComplexShellReuse_) {
+        auto firstChild = firstChild_.lock();
+        EXPECT_NE(firstChild, nullptr);
+        if (firstChild == nullptr) {
+          return 0;
+        }
+        EXPECT_EQ(firstChild.use_count(), 2);
+      }
+    } else {
+      backingOutput_ = rowOutput.get();
+    }
+    if (calls_ >= outputSizes_.size()) {
+      return 0;
+    }
+    const auto outputSize = outputSizes_[calls_];
+
+    auto makeChild = [&](int64_t value) {
+      auto values = AlignedBuffer::allocate<int64_t>(outputSize, pool_);
+      auto nulls = allocateNulls(outputSize, pool_, bits::kNull);
+      for (auto i = 0; i < outputSize; ++i) {
+        values->asMutable<int64_t>()[i] = value + i;
+        bits::setNull(nulls->asMutable<uint64_t>(), i, false);
+      }
+      values->setSize(outputSize * sizeof(int64_t));
+      return std::make_shared<FlatVector<int64_t>>(
+          pool_, BIGINT(), nulls, outputSize, values, std::vector<BufferPtr>{});
+    };
+    auto makeStringChild = [&]() {
+      auto values = AlignedBuffer::allocate<StringView>(outputSize, pool_);
+      auto stringBuffer = AlignedBuffer::allocate<char>(outputSize * 8, pool_);
+      auto* rawStringBuffer = stringBuffer->asMutable<char>();
+      vector_size_t stringOffset = 0;
+      for (auto i = 0; i < outputSize; ++i) {
+        const auto value =
+            "value-" + std::to_string(calls_) + "-" + std::to_string(i);
+        std::copy(value.begin(), value.end(), rawStringBuffer + stringOffset);
+        values->asMutable<StringView>()[i] =
+            StringView(rawStringBuffer + stringOffset, value.size());
+        stringOffset += value.size();
+      }
+      values->setSize(outputSize * sizeof(StringView));
+      stringBuffer->setSize(stringOffset);
+      return std::make_shared<FlatVector<StringView>>(
+          pool_,
+          VARCHAR(),
+          nullptr,
+          outputSize,
+          values,
+          std::vector<BufferPtr>{stringBuffer});
+    };
+    auto child = makeChild(calls_);
+    auto nestedChild = makeChild(calls_ + 10);
+    auto arrayChild = makeChild(calls_ + 20);
+    auto mapKeyChild = makeChild(calls_ + 30);
+    auto mapValueChild = makeChild(calls_ + 40);
+    auto stringChild = makeStringChild();
+
+    rowOutput->unsafeResize(outputSize);
+    if (outputLazyLeaf_) {
+      std::weak_ptr<BaseVector> emptyLeaf = rowOutput->childAt(0);
+      rowOutput->childAt(0) = std::make_shared<LazyVector>(
+          pool_,
+          rowType_->childAt(0),
+          outputSize,
+          std::make_unique<FailingVectorLoader>(),
+          takeIfUnique(rowOutput->childAt(0)));
+      if (auto empty = emptyLeaf.lock()) {
+        EXPECT_EQ(empty.use_count(), 2);
+      }
+    } else {
+      rowOutput->childAt(0) = child;
+    }
+    rowOutput->childAt(4) = stringChild;
+    auto& nestedResult = rowOutput->childAt(1);
+    auto* nestedRow =
+        nestedResult && nestedResult->encoding() == VectorEncoding::Simple::ROW
+        ? nestedResult->as<RowVector>()
+        : nullptr;
+    if (!nestedRow || rowOutput->childAt(1).use_count() != 1) {
+      ++createdRowShells_;
+      rowOutput->childAt(1) = std::make_shared<RowVector>(
+          pool_,
+          rowType_->childAt(1),
+          nullptr,
+          outputSize,
+          std::vector<VectorPtr>{nestedChild});
+    } else {
+      nestedRow->unsafeResize(outputSize);
+      nestedRow->childAt(0) = nestedChild;
+    }
+    auto offsets = AlignedBuffer::allocate<vector_size_t>(outputSize, pool_);
+    auto* rawOffsets = offsets->asMutable<vector_size_t>();
+    std::iota(rawOffsets, rawOffsets + outputSize, 0);
+    auto sizes = AlignedBuffer::allocate<vector_size_t>(outputSize, pool_, 1);
+    auto& arrayResult = rowOutput->childAt(2);
+    auto* array =
+        arrayResult && arrayResult->encoding() == VectorEncoding::Simple::ARRAY
+        ? arrayResult->as<ArrayVector>()
+        : nullptr;
+    if (!array || rowOutput->childAt(2).use_count() != 1) {
+      ++createdArrayShells_;
+      rowOutput->childAt(2) = std::make_shared<ArrayVector>(
+          pool_,
+          rowType_->childAt(2),
+          nullptr,
+          outputSize,
+          offsets,
+          sizes,
+          arrayChild);
+    } else {
+      array->resize(outputSize);
+      auto* rawOffsets =
+          array->mutableOffsets(outputSize)->asMutable<vector_size_t>();
+      auto* rawSizes =
+          array->mutableSizes(outputSize)->asMutable<vector_size_t>();
+      std::iota(rawOffsets, rawOffsets + outputSize, 0);
+      std::fill(rawSizes, rawSizes + outputSize, 1);
+      array->elements() = arrayChild;
+    }
+    auto& mapResult = rowOutput->childAt(3);
+    auto* map =
+        mapResult && mapResult->encoding() == VectorEncoding::Simple::MAP
+        ? mapResult->as<MapVector>()
+        : nullptr;
+    if (!map || rowOutput->childAt(3).use_count() != 1) {
+      ++createdMapShells_;
+      rowOutput->childAt(3) = std::make_shared<MapVector>(
+          pool_,
+          rowType_->childAt(3),
+          nullptr,
+          outputSize,
+          offsets,
+          sizes,
+          mapKeyChild,
+          mapValueChild);
+    } else {
+      map->resize(outputSize);
+      auto* rawOffsets =
+          map->mutableOffsets(outputSize)->asMutable<vector_size_t>();
+      auto* rawSizes =
+          map->mutableSizes(outputSize)->asMutable<vector_size_t>();
+      std::iota(rawOffsets, rawOffsets + outputSize, 0);
+      std::fill(rawSizes, rawSizes + outputSize, 1);
+      map->mapKeys() = mapKeyChild;
+      map->mapValues() = mapValueChild;
+    }
+    if (calls_ == 0) {
+      firstChild_ = child;
+      firstChildValues_ = child->as<FlatVector<int64_t>>()->values();
+      firstChildNulls_ = child->nulls();
+      firstNestedChildValues_ =
+          nestedChild->as<FlatVector<int64_t>>()->values();
+      firstNestedChildNulls_ = nestedChild->nulls();
+      firstArrayChildValues_ = arrayChild->as<FlatVector<int64_t>>()->values();
+      firstMapKeyValues_ = mapKeyChild->as<FlatVector<int64_t>>()->values();
+      firstMapValueValues_ = mapValueChild->as<FlatVector<int64_t>>()->values();
+      firstStringValues_ = stringChild->as<FlatVector<StringView>>()->values();
+      firstStringBuffer_ =
+          stringChild->as<FlatVector<StringView>>()->stringBuffers().front();
+      firstArray_ = rowOutput->childAt(2);
+      firstMap_ = rowOutput->childAt(3);
+      nestedShell_ = rowOutput->childAt(1).get();
+      arrayShell_ = rowOutput->childAt(2).get();
+      mapShell_ = rowOutput->childAt(3).get();
+    }
+    rowOutput->updateContainsLazyNotLoaded();
+    ++calls_;
+    return outputSize;
+  }
+
+  bool allPrefetchIssued() const override {
+    return true;
+  }
+
+  bool emptySplit() const override {
+    return false;
+  }
+
+  void resetFilterCaches() override {}
+
+  int64_t estimatedRowSize() const override {
+    return sizeof(int64_t);
+  }
+
+  void updateRuntimeStats(dwio::common::RuntimeStatistics&) const override {}
+
+  void resetSplit() override {}
+
+  int32_t createdComplexShells() const {
+    return createdRowShells_ + createdArrayShells_ + createdMapShells_;
+  }
+
+ private:
+  void expectFlatBuffersReleased(
+      const VectorPtr& vector,
+      const Buffer* previousValues,
+      const Buffer* previousNulls) const {
+    auto* flat = vector->as<FlatVector<int64_t>>();
+    EXPECT_NE(flat, nullptr);
+    if (flat != nullptr) {
+      EXPECT_NE(flat->values().get(), previousValues);
+      if (previousNulls != nullptr) {
+        EXPECT_NE(vector->nulls().get(), previousNulls);
+      }
+    }
+  }
+
+  void expectStringBuffersReleased(
+      const VectorPtr& vector,
+      const Buffer* previousValues,
+      const Buffer* previousStringBuffer) const {
+    auto* flat = vector->as<FlatVector<StringView>>();
+    EXPECT_NE(flat, nullptr);
+    if (flat != nullptr) {
+      EXPECT_NE(flat->values().get(), previousValues);
+      for (const auto& buffer : flat->stringBuffers()) {
+        EXPECT_NE(buffer.get(), previousStringBuffer);
+      }
+    }
+  }
+
+  RowTypePtr rowType_;
+  memory::MemoryPool* pool_;
+  std::vector<vector_size_t> outputSizes_;
+  bool expectComplexShellReuse_;
+  bool outputLazyLeaf_;
+  int32_t calls_{0};
+  RowVector* backingOutput_{nullptr};
+  BaseVector* nestedShell_{nullptr};
+  BaseVector* arrayShell_{nullptr};
+  BaseVector* mapShell_{nullptr};
+  std::weak_ptr<BaseVector> firstChild_;
+  std::weak_ptr<BaseVector> firstArray_;
+  std::weak_ptr<BaseVector> firstMap_;
+  BufferPtr firstChildValues_;
+  BufferPtr firstChildNulls_;
+  BufferPtr firstNestedChildValues_;
+  BufferPtr firstNestedChildNulls_;
+  BufferPtr firstArrayChildValues_;
+  BufferPtr firstMapKeyValues_;
+  BufferPtr firstMapValueValues_;
+  BufferPtr firstStringValues_;
+  BufferPtr firstStringBuffer_;
+  int32_t createdRowShells_{0};
+  int32_t createdArrayShells_{0};
+  int32_t createdMapShells_{0};
+};
+
+class TestingHiveDataSource : public HiveDataSource {
+ public:
+  TestingHiveDataSource(
+      const RowTypePtr& outputType,
+      const std::shared_ptr<connector::ConnectorTableHandle>& tableHandle,
+      const std::unordered_map<
+          std::string,
+          std::shared_ptr<connector::ColumnHandle>>& columnHandles,
+      FileHandleFactory* fileHandleFactory,
+      const core::QueryConfig& queryConfig,
+      folly::Executor* executor,
+      const std::shared_ptr<ConnectorQueryCtx>& connectorQueryCtx,
+      const std::shared_ptr<HiveConfig>& hiveConfig)
+      : HiveDataSource(
+            outputType,
+            tableHandle,
+            columnHandles,
+            fileHandleFactory,
+            queryConfig,
+            executor,
+            connectorQueryCtx,
+            hiveConfig) {}
+
+  void setSplitReader(std::unique_ptr<HiveSplitReaderBase> splitReader) {
+    splitReader_ = std::move(splitReader);
+  }
+
+  void setSplit(std::shared_ptr<ConnectorSplit> split) {
+    split_ = std::move(split);
+  }
+};
+
+std::unique_ptr<TestingHiveDataSource> HiveConnectorTest::makeTestingDataSource(
+    const RowTypePtr& rowType) {
+  auto tableHandle = makeTableHandle({}, nullptr, "test_table", rowType);
+  ColumnHandleMap assignments;
+  for (const auto& name : rowType->names()) {
+    assignments[name] = regularColumn(name, rowType->findChild(name));
+  }
+  auto hiveConfig =
+      std::make_shared<HiveConfig>(std::make_shared<config::ConfigBase>(
+          std::unordered_map<std::string, std::string>{}));
+  auto connectorQueryCtx = std::make_shared<ConnectorQueryCtx>(
+      pool_.get(),
+      pool_.get(),
+      hiveConfig->config().get(),
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      "query.HiveConnectorTest",
+      "task.HiveConnectorTest",
+      "planNodeId.HiveConnectorTest",
+      0);
+
+  auto dataSource = std::make_unique<TestingHiveDataSource>(
+      rowType,
+      tableHandle,
+      assignments,
+      nullptr,
+      core::QueryConfig(std::unordered_map<std::string, std::string>{}),
+      nullptr,
+      connectorQueryCtx,
+      hiveConfig);
+  dataSource->setSplit(HiveConnectorSplitBuilder("unused")
+                           .connectorId(kHiveConnectorId)
+                           .build());
+  return dataSource;
+}
 
 void validateNullConstant(const ScanSpec& spec, const Type& type) {
   ASSERT_TRUE(spec.isConstant());
@@ -88,6 +555,92 @@ TEST_F(HiveConnectorTest, hiveConfig) {
       HiveConfig::insertExistingPartitionsBehaviorString(
           static_cast<HiveConfig::InsertExistingPartitionsBehavior>(100)),
       "UNKNOWN BEHAVIOR 100");
+}
+
+TEST_F(
+    HiveConnectorTest,
+    prepareReaderOutputReplacesSharedComplexVectorsBeforeNextRead) {
+  auto rowType = readerOutputReuseRowType();
+  auto dataSource = makeTestingDataSource(rowType);
+  auto splitReader =
+      std::make_unique<TrackingSplitReader>(rowType, pool_.get());
+  auto* rawSplitReader = splitReader.get();
+  dataSource->setSplitReader(std::move(splitReader));
+
+  ContinueFuture future;
+  auto first = dataSource->next(1, future);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first.value(), nullptr);
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  EXPECT_EQ(rawSplitReader->createdComplexShells(), 0);
+}
+
+TEST_F(HiveConnectorTest, prepareReaderOutputReusesUniqueComplexVectors) {
+  auto rowType = readerOutputReuseRowType();
+  auto dataSource = makeTestingDataSource(rowType);
+  auto splitReader = std::make_unique<TrackingSplitReader>(
+      rowType, pool_.get(), std::vector<vector_size_t>{1, 1, 1}, true);
+  auto* rawSplitReader = splitReader.get();
+  dataSource->setSplitReader(std::move(splitReader));
+
+  ContinueFuture future;
+  auto first = dataSource->next(1, future);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first.value(), nullptr);
+  EXPECT_EQ(rawSplitReader->createdComplexShells(), 0);
+  first.reset();
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  EXPECT_EQ(rawSplitReader->createdComplexShells(), 0);
+  second.reset();
+
+  auto third = dataSource->next(1, future);
+  ASSERT_TRUE(third.has_value());
+  ASSERT_NE(third.value(), nullptr);
+  EXPECT_EQ(rawSplitReader->createdComplexShells(), 0);
+}
+
+TEST_F(HiveConnectorTest, prepareReaderOutputClearsLazyLeafToEmptyLeaf) {
+  auto rowType = readerOutputReuseRowType();
+  auto dataSource = makeTestingDataSource(rowType);
+  dataSource->setSplitReader(std::make_unique<TrackingSplitReader>(
+      rowType, pool_.get(), std::vector<vector_size_t>{1, 1}, true, true));
+
+  ContinueFuture future;
+  auto first = dataSource->next(1, future);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first.value(), nullptr);
+  first.reset();
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+}
+
+TEST_F(HiveConnectorTest, emptyOutputDoesNotExposeReaderOutput) {
+  auto rowType = ROW({}, {});
+  auto dataSource = makeTestingDataSource(rowType);
+  dataSource->setSplitReader(std::make_unique<TrackingSplitReader>(
+      rowType, pool_.get(), std::vector<vector_size_t>{2, 3}));
+
+  ContinueFuture future;
+  auto first = dataSource->next(1, future);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first.value(), nullptr);
+  EXPECT_EQ(first.value()->childrenSize(), 0);
+  EXPECT_EQ(first.value()->size(), 2);
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  EXPECT_EQ(second.value()->childrenSize(), 0);
+  EXPECT_EQ(second.value()->size(), 3);
+  EXPECT_EQ(first.value()->size(), 2);
 }
 
 TEST_F(HiveConnectorTest, makeScanSpec_requiredSubfields_multilevel) {

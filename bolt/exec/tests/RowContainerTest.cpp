@@ -1529,6 +1529,28 @@ TEST_F(RowContainerTest, mixedFree) {
   data2->checkConsistency();
 }
 
+TEST_F(RowContainerTest, listRowIndexClearReleasesAllocatorStorageBeforeReuse) {
+  constexpr int32_t kRowsToUseHashStringAllocatorPool =
+      HashStringAllocator::kMaxAlloc / sizeof(char*) + 1;
+  auto data = makeRowContainer({SMALLINT()}, {VARCHAR()}, false, true);
+
+  for (int32_t i = 0; i < kRowsToUseHashStringAllocatorPool; ++i) {
+    data->newRow();
+  }
+  ASSERT_GT(
+      data->testingRowPointers().capacity() * sizeof(char*),
+      HashStringAllocator::kMaxAlloc);
+
+  data->clear();
+  ASSERT_TRUE(data->testingRowPointers().empty());
+  ASSERT_EQ(data->testingRowPointers().capacity(), 0);
+
+  for (int32_t i = 0; i < kRowsToUseHashStringAllocatorPool; ++i) {
+    data->newRow();
+  }
+  ASSERT_EQ(data->numRows(), kRowsToUseHashStringAllocatorPool);
+}
+
 TEST_F(RowContainerTest, unknown) {
   std::vector<TypePtr> types = {UNKNOWN()};
   auto rowContainer = std::make_unique<RowContainer>(types, pool_.get());

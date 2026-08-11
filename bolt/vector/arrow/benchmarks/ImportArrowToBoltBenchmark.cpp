@@ -38,6 +38,8 @@ using namespace bytedance::bolt;
 void mockSchemaRelease(ArrowSchema*) {}
 void mockArrayRelease(ArrowArray*) {}
 
+memory::MemoryManager memoryManager;
+
 class ArrowBridgeArrayImportBenchmark {
  protected:
   // Used by this base test class to import Arrow data and create Bolt Vector.
@@ -84,8 +86,7 @@ class ArrowBridgeArrayImportAsOwnerBenchmark
   }
 };
 
-std::shared_ptr<memory::MemoryPool> pool{
-    memory::deprecatedAddDefaultLeafMemoryPool()};
+std::shared_ptr<memory::MemoryPool> pool{memoryManager.addLeafPool()};
 
 void runImportFromArrowAsViewer(
     uint32_t,

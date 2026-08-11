@@ -114,6 +114,14 @@ class MapColumnReader : public dwio::common::SelectiveMapColumnReader {
   /// Sets nulls and lengths of 'this' for the range of top level rows for which
   /// these have been decoded in 'leaf'.
   void setLengthsFromRepDefs(PageReader& leaf);
+  const arrow::LevelInfo& levelInfo() const {
+    return levelInfo_;
+  }
+  BufferPtr prepareRepDefLengths(int32_t maxItems);
+  arrow::ValidityBitmapInputOutput prepareRepDefNulls(int32_t maxItems);
+  void setLengthsFromRepDefOutput(
+      BufferPtr lengths,
+      const arrow::ValidityBitmapInputOutput& bits);
 
   /// advances 'this' to the end of the previously provided lengths/nulls. This
   /// is needed if lists are conditionally read from different structs that all
@@ -173,6 +181,14 @@ class ListColumnReader : public dwio::common::SelectiveListColumnReader {
   /// Sets nulls and lengths of 'this' for the range of top level rows for which
   /// these have been decoded in 'leaf'.
   void setLengthsFromRepDefs(PageReader& leaf);
+  const arrow::LevelInfo& levelInfo() const {
+    return levelInfo_;
+  }
+  BufferPtr prepareRepDefLengths(int32_t maxItems);
+  arrow::ValidityBitmapInputOutput prepareRepDefNulls(int32_t maxItems);
+  void setLengthsFromRepDefOutput(
+      BufferPtr lengths,
+      const arrow::ValidityBitmapInputOutput& bits);
 
   /// advances 'this' to the end of the previously provided lengths/nulls. This
   /// is needed if lists are conditionally read from different structs that all

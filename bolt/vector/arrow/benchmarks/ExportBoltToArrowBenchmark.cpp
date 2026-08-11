@@ -35,9 +35,9 @@ static constexpr int32_t kRowsPerVector = 100'000;
 namespace {
 
 // Boiler plate structures required by vectorMaker.
+memory::MemoryManager memoryManager;
 std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
-std::shared_ptr<memory::MemoryPool> pool_{
-    memory::deprecatedAddDefaultLeafMemoryPool()};
+std::shared_ptr<memory::MemoryPool> pool_{memoryManager.addLeafPool()};
 core::ExecCtx execCtx_{pool_.get(), queryCtx_.get()};
 bytedance::bolt::test::VectorMaker vectorMaker_{execCtx_.pool()};
 

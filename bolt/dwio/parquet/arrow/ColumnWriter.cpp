@@ -100,6 +100,8 @@ using util::CodecOptions;
 namespace {
 
 constexpr int64_t kMaxPageHeaderSize = std::numeric_limits<int32_t>::max();
+constexpr int64_t kDataPageValueCountFlushThreshold =
+    std::numeric_limits<int32_t>::max() / 2;
 
 int32_t checkPageHeaderSize(std::string_view size_name, int64_t size) {
   if (size < 0 || size > kMaxPageHeaderSize) {
@@ -110,6 +112,16 @@ int32_t checkPageHeaderSize(std::string_view size_name, int64_t size) {
         size);
   }
   return static_cast<int32_t>(size);
+}
+
+int32_t checkPageHeaderCount(std::string_view count_name, int64_t count) {
+  if (count < 0 || count > std::numeric_limits<int32_t>::max()) {
+    throw ParquetException(
+        std::string(count_name),
+        " cannot be represented in a Parquet page header int32 field: ",
+        count);
+  }
+  return static_cast<int32_t>(count);
 }
 
 int64_t bufferAllocatedBytes(const std::shared_ptr<Buffer>& buffer) {
@@ -1442,7 +1454,8 @@ void ColumnWriterImpl::BuildDataPageV1(
     compressed_data = std::move(combined);
   }
 
-  int32_t num_values = static_cast<int32_t>(num_buffered_values_);
+  const int32_t num_values =
+      checkPageHeaderCount("DataPageV1 num_values", num_buffered_values_);
   int64_t first_row_index = rows_written_ - num_buffered_rows_;
 
   // Write the page to OutputStream eagerly if there is no dictionary or
@@ -1507,13 +1520,16 @@ void ColumnWriterImpl::BuildDataPageV2(
   page_stats.set_is_signed(SortOrder::SIGNED == descr_->sort_order());
   ResetPageStatistics();
 
-  int32_t num_values = static_cast<int32_t>(num_buffered_values_);
-  int32_t null_count = static_cast<int32_t>(num_buffered_nulls_);
-  int32_t num_rows = static_cast<int32_t>(num_buffered_rows_);
-  int32_t def_levels_byte_length =
-      static_cast<int32_t>(definition_levels_rle_size);
-  int32_t rep_levels_byte_length =
-      static_cast<int32_t>(repetition_levels_rle_size);
+  const int32_t num_values =
+      checkPageHeaderCount("DataPageV2 num_values", num_buffered_values_);
+  const int32_t null_count =
+      checkPageHeaderCount("DataPageV2 null_count", num_buffered_nulls_);
+  const int32_t num_rows =
+      checkPageHeaderCount("DataPageV2 num_rows", num_buffered_rows_);
+  const int32_t def_levels_byte_length =
+      checkPageHeaderSize("Definition levels", definition_levels_rle_size);
+  const int32_t rep_levels_byte_length =
+      checkPageHeaderSize("Repetition levels", repetition_levels_rle_size);
   int64_t first_row_index = rows_written_ - num_buffered_rows_;
 
   // page_stats.null_count is not set when page_statistics_ is nullptr. It is
@@ -1594,71 +1610,125 @@ void ColumnWriterImpl::FlushBufferedDataPages() {
 // ----------------------------------------------------------------------
 // TypedColumnWriter
 
-template <typename Action>
-inline void DoInBatches(int64_t total, int64_t batch_size, Action&& action) {
-  int64_t num_batches = static_cast<int>(total / batch_size);
-  for (int round = 0; round < num_batches; round++) {
-    action(round * batch_size, batch_size, /*check_page_size=*/true);
-  }
-  // Write the remaining values
-  if (total % batch_size > 0) {
-    action(
-        num_batches * batch_size, total % batch_size, /*check_page_size=*/true);
+template <typename Action, typename GetBufferedRows>
+inline void DoInBatchesNonRepeated(
+    int64_t num_levels,
+    int64_t batch_size,
+    int64_t max_rows_per_page,
+    Action&& action,
+    GetBufferedRows&& current_page_buffered_rows) {
+  int64_t offset = 0;
+  while (offset < num_levels) {
+    const int64_t page_buffered_rows = current_page_buffered_rows();
+    DCHECK_LE(page_buffered_rows, max_rows_per_page);
+
+    int64_t max_batch_size = std::min(batch_size, num_levels - offset);
+    max_batch_size =
+        std::min(max_batch_size, max_rows_per_page - page_buffered_rows);
+    if (max_batch_size <= 0) {
+      throw ParquetException(
+          "Non-repeated column batching cannot make progress: batch size ",
+          batch_size,
+          ", buffered rows ",
+          page_buffered_rows,
+          ", maximum rows per page ",
+          max_rows_per_page);
+    }
+    const int64_t end_offset = offset + max_batch_size;
+
+    DCHECK_LE(offset, end_offset);
+    DCHECK_LE(end_offset, num_levels);
+    action(offset, end_offset - offset, /*check_page_limit=*/true);
+    offset = end_offset;
   }
 }
 
-template <typename Action>
+template <typename Action, typename GetBufferedRows>
+inline void DoInBatchesRepeated(
+    const int16_t* def_levels,
+    const int16_t* rep_levels,
+    int64_t num_levels,
+    int64_t batch_size,
+    int64_t max_rows_per_page,
+    bool pages_change_on_record_boundaries,
+    Action&& action,
+    GetBufferedRows&& current_page_buffered_rows) {
+  int64_t offset = 0;
+  while (offset < num_levels) {
+    const int64_t max_batch_size = std::min(batch_size, num_levels - offset);
+    if (max_batch_size <= 0) {
+      throw ParquetException(
+          "Repeated column batching cannot make progress: batch size ",
+          batch_size);
+    }
+    int64_t end_offset = num_levels;
+    int64_t check_page_limit_end_offset = -1;
+    int64_t page_buffered_rows = current_page_buffered_rows();
+    DCHECK_LE(page_buffered_rows, max_rows_per_page);
+
+    // Find a batch ending at a record boundary. A single repeated record may
+    // exceed the row limit in values, but it must not be split across pages
+    // when page indexes or DataPageV2 require record-aligned pages.
+    for (int64_t i = offset; i < num_levels; ++i) {
+      if (rep_levels[i] == 0) {
+        check_page_limit_end_offset = i;
+        if (i - offset >= max_batch_size ||
+            page_buffered_rows >= max_rows_per_page) {
+          end_offset = i;
+          break;
+        }
+        ++page_buffered_rows;
+      }
+    }
+
+    DCHECK_LE(offset, end_offset);
+    DCHECK_LE(check_page_limit_end_offset, end_offset);
+
+    if (check_page_limit_end_offset >= 0) {
+      action(
+          offset,
+          check_page_limit_end_offset - offset,
+          /*check_page_limit=*/true);
+      offset = check_page_limit_end_offset;
+    }
+    if (end_offset > offset) {
+      DCHECK_EQ(end_offset, num_levels);
+      action(
+          offset,
+          end_offset - offset,
+          /*check_page_limit=*/!pages_change_on_record_boundaries);
+    }
+    offset = end_offset;
+  }
+}
+
+template <typename Action, typename GetBufferedRows>
 inline void DoInBatches(
     const int16_t* def_levels,
     const int16_t* rep_levels,
     int64_t num_levels,
     int64_t batch_size,
+    int64_t max_rows_per_page,
+    bool pages_change_on_record_boundaries,
     Action&& action,
-    bool pages_change_on_record_boundaries) {
-  if (!pages_change_on_record_boundaries || !rep_levels) {
-    // If rep_levels is null, then we are writing a non-repeated column.
-    // In this case, every record contains only one level.
-    return DoInBatches(num_levels, batch_size, std::forward<Action>(action));
-  }
-
-  int64_t offset = 0;
-  while (offset < num_levels) {
-    int64_t end_offset = std::min(offset + batch_size, num_levels);
-
-    // Find next record boundary (i.e. ref_level = 0)
-    while (end_offset < num_levels && rep_levels[end_offset] != 0) {
-      end_offset++;
-    }
-
-    if (end_offset < num_levels) {
-      // This is not the last chunk of batch and end_offset is a record
-      // boundary. It is a good chance to check the page size.
-      action(offset, end_offset - offset, /*check_page_size=*/true);
-    } else {
-      DCHECK_EQ(end_offset, num_levels);
-      // This is the last chunk of batch, and we do not know whether end_offset
-      // is a record boundary. Find the offset to beginning of last record in
-      // this chunk, so we can check page size.
-      int64_t last_record_begin_offset = num_levels - 1;
-      while (last_record_begin_offset >= offset &&
-             rep_levels[last_record_begin_offset] != 0) {
-        last_record_begin_offset--;
-      }
-
-      if (offset < last_record_begin_offset) {
-        // We have found the beginning of last record and can check page size.
-        action(
-            offset,
-            last_record_begin_offset - offset,
-            /*check_page_size=*/true);
-        offset = last_record_begin_offset;
-      }
-
-      // There is no record boundary in this chunk and cannot check page size.
-      action(offset, end_offset - offset, /*check_page_size=*/false);
-    }
-
-    offset = end_offset;
+    GetBufferedRows&& current_page_buffered_rows) {
+  if (rep_levels == nullptr) {
+    DoInBatchesNonRepeated(
+        num_levels,
+        batch_size,
+        max_rows_per_page,
+        std::forward<Action>(action),
+        std::forward<GetBufferedRows>(current_page_buffered_rows));
+  } else {
+    DoInBatchesRepeated(
+        def_levels,
+        rep_levels,
+        num_levels,
+        batch_size,
+        max_rows_per_page,
+        pages_change_on_record_boundaries,
+        std::forward<Action>(action),
+        std::forward<GetBufferedRows>(current_page_buffered_rows));
   }
 }
 
@@ -1780,8 +1850,10 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
         rep_levels,
         num_values,
         properties_->write_batch_size(),
+        properties_->max_rows_per_page(),
+        pages_change_on_record_boundaries(),
         WriteChunk,
-        pages_change_on_record_boundaries());
+        [this]() { return num_buffered_rows_; });
     return value_offset;
   }
 
@@ -1841,8 +1913,10 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
         rep_levels,
         num_values,
         properties_->write_batch_size(),
+        properties_->max_rows_per_page(),
+        pages_change_on_record_boundaries(),
         WriteChunk,
-        pages_change_on_record_boundaries());
+        [this]() { return num_buffered_rows_; });
   }
 
   Status WriteArrow(
@@ -2082,6 +2156,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       int64_t num_values,
       const int16_t* def_levels,
       const int16_t* rep_levels) {
+    CheckPageValueCountCanBeBuffered(num_values);
     int64_t values_to_write = 0;
     // If the field is required and non-repeated, there are no definition levels
     if (descr_->max_definition_level() > 0) {
@@ -2191,6 +2266,7 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       int64_t num_levels,
       const int16_t* def_levels,
       const int16_t* rep_levels) {
+    CheckPageValueCountCanBeBuffered(num_levels);
     // If the field is required and non-repeated, there are no definition levels
     if (descr_->max_definition_level() > 0) {
       WriteDefinitionLevels(num_levels, def_levels);
@@ -2217,14 +2293,28 @@ class TypedColumnWriterImpl : public ColumnWriterImpl,
       int64_t num_levels,
       int64_t num_values,
       int64_t num_nulls,
-      bool check_page_size) {
+      bool check_page_limit) {
     num_buffered_values_ += num_levels;
     num_buffered_encoded_values_ += num_values;
     num_buffered_nulls_ += num_nulls;
 
-    if (check_page_size &&
-        current_encoder_->EstimatedDataEncodedSize() >= data_pagesize_) {
+    if (num_buffered_values_ > 0 && check_page_limit &&
+        (current_encoder_->EstimatedDataEncodedSize() >= data_pagesize_ ||
+         num_buffered_rows_ >= properties_->max_rows_per_page() ||
+         num_buffered_values_ >= kDataPageValueCountFlushThreshold)) {
       AddDataPage();
+    }
+  }
+
+  void CheckPageValueCountCanBeBuffered(int64_t num_levels) const {
+    if (num_levels < 0 ||
+        num_levels > kMaxPageHeaderSize - num_buffered_values_) {
+      throw ParquetException(
+          "DataPage num_values cannot be represented in a Parquet page "
+          "header int32 field: buffered ",
+          num_buffered_values_,
+          ", incoming ",
+          num_levels);
     }
   }
 
@@ -2468,8 +2558,10 @@ Status TypedColumnWriterImpl<DType>::WriteArrowDictionary(
       rep_levels,
       num_levels,
       properties_->write_batch_size(),
+      properties_->max_rows_per_page(),
+      pages_change_on_record_boundaries(),
       WriteIndicesChunk,
-      pages_change_on_record_boundaries()));
+      [this]() { return num_buffered_rows_; }));
   return Status::OK();
 }
 
@@ -3338,8 +3430,10 @@ Status TypedColumnWriterImpl<ByteArrayType>::WriteArrowDense(
       rep_levels,
       num_levels,
       properties_->write_batch_size(),
+      properties_->max_rows_per_page(),
+      pages_change_on_record_boundaries(),
       WriteChunk,
-      pages_change_on_record_boundaries()));
+      [this]() { return num_buffered_rows_; }));
   return Status::OK();
 }
 

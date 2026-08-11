@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -238,6 +240,12 @@ class PARQUET_EXPORT ReaderProperties {
 ReaderProperties PARQUET_EXPORT default_reader_properties();
 
 static constexpr int64_t kDefaultDataPageSize = 1024 * 1024;
+// Keep enough headroom for encoded level counts while minimizing changes to
+// existing page layouts. Page count fields are signed int32 in the Parquet
+// format, and RLE run headers encode the count shifted left by one bit.
+static constexpr int64_t kMaxRowsPerPage =
+    std::numeric_limits<int32_t>::max() / 2;
+static constexpr int64_t kDefaultMaxRowsPerPage = kMaxRowsPerPage;
 static constexpr bool DEFAULT_IS_DICTIONARY_ENABLED = true;
 static constexpr int64_t DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT =
     kDefaultDataPageSize;
@@ -377,6 +385,7 @@ class PARQUET_EXPORT WriterProperties {
         : pool_(::arrow::default_memory_pool()),
           write_batch_size_(DEFAULT_WRITE_BATCH_SIZE),
           max_row_group_length_(DEFAULT_MAX_ROW_GROUP_LENGTH),
+          max_rows_per_page_(kDefaultMaxRowsPerPage),
           version_(ParquetVersion::PARQUET_2_6),
           data_page_version_(ParquetDataPageVersion::V1),
           created_by_(DEFAULT_CREATED_BY),
@@ -456,6 +465,10 @@ class PARQUET_EXPORT WriterProperties {
     /// Specify the write batch size while writing batches of Arrow values into
     /// Parquet. Default 1024.
     Builder* write_batch_size(int64_t write_batch_size) {
+      if (write_batch_size <= 0) {
+        throw ParquetException(
+            "Write batch size must be positive: ", write_batch_size);
+      }
       write_batch_size_ = write_batch_size;
       return this;
     }
@@ -487,6 +500,20 @@ class PARQUET_EXPORT WriterProperties {
         const std::shared_ptr<schema::ColumnPath>& path,
         int64_t pg_size) {
       return this->data_pagesize(path->ToDotString(), pg_size);
+    }
+
+    /// Specify the maximum number of rows per data page.
+    /// Default INT32_MAX / 2 rows.
+    Builder* max_rows_per_page(int64_t max_rows) {
+      if (max_rows <= 0 || max_rows > kMaxRowsPerPage) {
+        throw ParquetException(
+            "Maximum rows per data page must be in range [1, ",
+            kMaxRowsPerPage,
+            "]: ",
+            max_rows);
+      }
+      max_rows_per_page_ = max_rows;
+      return this;
     }
 
     /// Specify the data page version.
@@ -858,6 +885,7 @@ class PARQUET_EXPORT WriterProperties {
           pool_,
           write_batch_size_,
           max_row_group_length_,
+          max_rows_per_page_,
           parquet_block_size_,
           version_,
           created_by_,
@@ -874,6 +902,7 @@ class PARQUET_EXPORT WriterProperties {
     MemoryPool* pool_;
     int64_t write_batch_size_;
     int64_t max_row_group_length_;
+    int64_t max_rows_per_page_;
     int64_t parquet_block_size_{-1};
     ParquetVersion::type version_;
     ParquetDataPageVersion data_page_version_;
@@ -909,6 +938,10 @@ class PARQUET_EXPORT WriterProperties {
 
   inline int64_t max_row_group_length() const {
     return max_row_group_length_;
+  }
+
+  inline int64_t max_rows_per_page() const {
+    return max_rows_per_page_;
   }
 
   inline int64_t parquet_block_size() const {
@@ -1049,6 +1082,7 @@ class PARQUET_EXPORT WriterProperties {
       MemoryPool* pool,
       int64_t write_batch_size,
       int64_t max_row_group_length,
+      int64_t max_rows_per_page,
       int64_t parquet_block_size,
       ParquetVersion::type version,
       const std::string& created_by,
@@ -1063,6 +1097,7 @@ class PARQUET_EXPORT WriterProperties {
       : pool_(pool),
         write_batch_size_(write_batch_size),
         max_row_group_length_(max_row_group_length),
+        max_rows_per_page_(max_rows_per_page),
         parquet_block_size_(parquet_block_size),
         parquet_data_page_version_(data_page_version),
         parquet_version_(version),
@@ -1078,6 +1113,7 @@ class PARQUET_EXPORT WriterProperties {
   int64_t dictionary_pagesize_limit_;
   int64_t write_batch_size_;
   int64_t max_row_group_length_;
+  int64_t max_rows_per_page_;
   int64_t pagesize_;
   int64_t parquet_block_size_;
   ParquetDataPageVersion parquet_data_page_version_;

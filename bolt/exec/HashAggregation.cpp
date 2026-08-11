@@ -498,7 +498,6 @@ void HashAggregation::maybeIncreasePartialAggregationMemoryUsage(
   if (shouldAbandon) {
     groupingSet_->abandonPartialAggregation();
     pool()->release();
-    addRuntimeStat("abandonedPartialAggregation", RuntimeCounter(1));
     abandonedPartialAggregation_ = true;
     LOG(INFO) << __FUNCTION__ << " numInputRows_ = " << numInputRows_
               << ", numOutputRows_ = " << numOutputRows_
@@ -563,6 +562,9 @@ RowVectorPtr HashAggregation::getOutput() {
     }
     prepareOutput(input_->size(), false);
     groupingSet_->toIntermediate(input_, output_);
+    addRuntimeStat(
+        std::string(HashAggregation::kAbandonedPartialAggregationRows),
+        RuntimeCounter(input_->size()));
     numOutputRows_ += input_->size();
     input_ = nullptr;
     return output_;

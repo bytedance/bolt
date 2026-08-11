@@ -33,6 +33,7 @@
 #include <type/Type.h>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #ifdef SPARK_COMPATIBLE
 #include "bolt/common/base/tests/GTestUtils.h"
 #endif
@@ -50,6 +51,8 @@
 #include "bolt/functions/sparksql/VariantEncoding.h"
 #include "bolt/functions/sparksql/VariantFunctions.h"
 #include "bolt/vector/BaseVector.h"
+#include "bolt/vector/DictionaryVector.h"
+#include "bolt/vector/LazyVector.h"
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -92,8 +95,53 @@ std::string getVariantFixturePath(const std::string& fileName) {
 }
 } // namespace
 
+namespace bytedance::bolt::parquet {
+struct PageReaderTestPeer {
+  static BufferPtr setAndTakeDecompressedBuffer(
+      PageReader& reader,
+      const std::string& payload) {
+    setBuffer<char>(reader.decompressedData_, reader, payload);
+    return reader.takeOwnedPageBuffer(
+        reader.decompressedData_->as<char>(), payload.size());
+  }
+
+  static BufferPtr setAndTakeDecryptionBuffer(
+      PageReader& reader,
+      const std::string& payload) {
+    setBuffer<uint8_t>(reader.decryptionBuffer_, reader, payload);
+    return reader.takeOwnedPageBuffer(
+        reader.decryptionBuffer_->as<char>(), payload.size());
+  }
+
+  static bool hasDecompressedBuffer(const PageReader& reader) {
+    return reader.decompressedData_ != nullptr;
+  }
+
+  static bool hasDecryptionBuffer(const PageReader& reader) {
+    return reader.decryptionBuffer_ != nullptr;
+  }
+
+  static BufferPtr
+  takeOwnedPageBuffer(PageReader& reader, const char* data, size_t size) {
+    return reader.takeOwnedPageBuffer(data, size);
+  }
+
+ private:
+  template <typename T>
+  static void
+  setBuffer(BufferPtr& buffer, PageReader& reader, const std::string& payload) {
+    buffer = AlignedBuffer::allocate<T>(payload.size(), &reader.pool_);
+    memcpy(buffer->asMutable<char>(), payload.data(), payload.size());
+    buffer->setSize(payload.size());
+  }
+};
+} // namespace bytedance::bolt::parquet
+
 class ParquetReaderTest : public ParquetTestBase {
  public:
+  static constexpr vector_size_t kFusedLevelConversionRows = 12'000;
+  static constexpr uint32_t kFusedLevelConversionSeed = 20260730;
+
   std::unique_ptr<dwio::common::RowReader> createRowReader(
       const std::string& fileName,
       const RowTypePtr& rowType) {
@@ -129,6 +177,85 @@ class ParquetReaderTest : public ParquetTestBase {
     auto reader = createReader(filePath, readerOpts);
     assertReadWithReaderAndFilters(
         std::move(reader), fileName, fileSchema, std::move(filters), expected);
+  }
+
+  RowVectorPtr makeFusedLevelConversionData() {
+    std::mt19937 rng(kFusedLevelConversionSeed);
+    std::uniform_int_distribution<int32_t> lengthDist(0, 12);
+    std::vector<int32_t> arrayLengths(kFusedLevelConversionRows);
+    std::vector<int32_t> mapLengths(kFusedLevelConversionRows);
+    for (vector_size_t row = 0; row < kFusedLevelConversionRows; ++row) {
+      arrayLengths[row] = lengthDist(rng);
+      mapLengths[row] = lengthDist(rng);
+    }
+
+    auto arrays = makeArrayVector<int64_t>(
+        kFusedLevelConversionRows,
+        [&](vector_size_t row) {
+          return row % 17 == 0 || row % 13 == 0 ? 0 : arrayLengths[row];
+        },
+        [&](vector_size_t row, vector_size_t index) {
+          return static_cast<int64_t>(row) * 100 + index;
+        },
+        [&](vector_size_t row) { return row % 17 == 0 || row % 13 == 0; });
+    auto maps = vectorMaker_.mapVector<int32_t, int64_t>(
+        kFusedLevelConversionRows,
+        [&](vector_size_t row) {
+          return row % 19 == 0 || row % 11 == 0 ? 0 : mapLengths[row];
+        },
+        [&](vector_size_t row, vector_size_t index) {
+          return static_cast<int32_t>(index);
+        },
+        [&](vector_size_t row, vector_size_t index) {
+          return static_cast<int64_t>(row) * 1000 + index;
+        },
+        [&](vector_size_t row) { return row % 19 == 0 || row % 11 == 0; });
+
+    auto arrayStruct = makeRowVector(
+        std::vector<std::string>{"items"},
+        std::vector<VectorPtr>{arrays},
+        [&](vector_size_t row) { return row % 13 == 0; });
+    auto mapStruct = makeRowVector(
+        std::vector<std::string>{"items"},
+        std::vector<VectorPtr>{maps},
+        [&](vector_size_t row) { return row % 11 == 0; });
+    return makeRowVector(
+        std::vector<std::string>{"id", "array_struct", "map_struct"},
+        std::vector<VectorPtr>{
+            makeFlatVector<int64_t>(
+                kFusedLevelConversionRows,
+                [](vector_size_t row) { return row; }),
+            arrayStruct,
+            mapStruct});
+  }
+
+  std::shared_ptr<exec::test::TempFilePath> writeFusedLevelConversionData(
+      const RowVectorPtr& data) {
+    auto file = exec::test::TempFilePath::create();
+    auto localWriteFile =
+        std::make_unique<LocalWriteFile>(file->path, true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(localWriteFile), file->path);
+    bytedance::bolt::parquet::WriterOptions options;
+    options.memoryPool = rootPool_.get();
+    options.dataPageSize = 4 * 1024;
+    bytedance::bolt::parquet::Writer writer(
+        std::move(sink), options, asRowType(data->type()));
+    writer.write(data);
+    writer.close();
+    return file;
+  }
+
+  std::unique_ptr<dwio::common::RowReader> makeFusedLevelConversionReader(
+      const std::string& filePath,
+      const RowVectorPtr& data,
+      std::shared_ptr<ScanSpec> scanSpec = nullptr) {
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    auto reader = createReader(filePath, readerOptions);
+    auto rowReaderOptions = getReaderOpts(asRowType(data->type()));
+    rowReaderOptions.setScanSpec(
+        scanSpec ? std::move(scanSpec) : makeScanSpec(asRowType(data->type())));
+    return reader->createRowReader(rowReaderOptions);
   }
 };
 
@@ -1459,6 +1586,206 @@ TEST_F(ParquetReaderTest, prefetchRowGroups) {
   }
 }
 
+TEST_F(ParquetReaderTest, releasesRowGroupReaderStateBeforeLoadingNextWindow) {
+  constexpr int32_t kRowsPerGroup = 128;
+  constexpr int32_t kNumRowGroups = 4;
+  constexpr int32_t kStringBytes = 256 * 1024;
+  auto rowType = ROW({"payload"}, {VARCHAR()});
+
+  auto dataPool = rootPool_->addLeafChild("rowGroupReaderReleaseTestData");
+  BufferPtr values =
+      AlignedBuffer::allocate<StringView>(kRowsPerGroup, dataPool.get());
+  BufferPtr stringBuffer =
+      AlignedBuffer::allocate<char>(kStringBytes, dataPool.get());
+  auto rawString = stringBuffer->asMutable<char>();
+  for (int32_t i = 0; i < kStringBytes; ++i) {
+    rawString[i] = static_cast<char>('a' + (i % 26));
+  }
+  stringBuffer->setSize(kStringBytes);
+  auto rawValues = values->asMutable<StringView>();
+  for (int32_t i = 0; i < kRowsPerGroup; ++i) {
+    rawValues[i] = StringView(rawString, kStringBytes);
+  }
+  auto batch = std::make_shared<RowVector>(
+      dataPool.get(),
+      rowType,
+      nullptr,
+      kRowsPerGroup,
+      std::vector<VectorPtr>{std::make_shared<FlatVector<StringView>>(
+          dataPool.get(),
+          VARCHAR(),
+          nullptr,
+          kRowsPerGroup,
+          values,
+          std::vector<BufferPtr>{stringBuffer})});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  {
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.dictionaryPageSizeLimit = kStringBytes * 2;
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), writerOptions, rowType);
+    for (int32_t i = 0; i < kNumRowGroups; ++i) {
+      writer->write(batch);
+      if (i + 1 < kNumRowGroups) {
+        writer->flush();
+      }
+    }
+    writer->close();
+  }
+
+  constexpr int64_t kReadMemoryLimit = 2 << 20;
+  auto readRootPool = memory::memoryManager()->addRootPool(
+      "rowGroupReaderReleaseRead", kReadMemoryLimit);
+  auto readPool = readRootPool->addLeafChild("leaf");
+
+  dwio::common::ReaderOptions readerOptions{readPool.get()};
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setPrefetchRowGroups(1);
+  auto reader = createReader(tempFile->getPath(), readerOptions);
+  ASSERT_EQ(reader->fileMetaData().numRowGroups(), kNumRowGroups);
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto parquetRowReader = dynamic_cast<ParquetRowReader*>(rowReader.get());
+  ASSERT_NE(parquetRowReader, nullptr);
+
+  VectorPtr result = BaseVector::create(rowType, 0, readPool.get());
+  uint64_t totalRows = 0;
+  for (;;) {
+    auto rows = parquetRowReader->next(kRowsPerGroup, result);
+    if (rows == 0) {
+      break;
+    }
+    totalRows += rows;
+    parquetRowReader->nextRowNumber();
+  }
+
+  EXPECT_EQ(totalRows, kRowsPerGroup * kNumRowGroups);
+  EXPECT_LT(readPool->peakBytes(), kReadMemoryLimit);
+}
+
+TEST_F(ParquetReaderTest, stringDictionaryTakesOwnedPageBuffers) {
+  auto reader = PageReader(
+      nullptr, *leafPool_, thrift::CompressionCodec::UNCOMPRESSED, 0);
+
+  auto assertBufferContent = [](const BufferPtr& buffer,
+                                const std::string& expected) {
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_EQ(buffer->size(), expected.size());
+    ASSERT_EQ(std::string(buffer->as<char>(), buffer->size()), expected);
+  };
+
+  const std::string decompressedPayload{
+      "\x03\x00\x00\x00one\x03\x00\x00\x00two", 2 * sizeof(int32_t) + 6};
+  auto decompressed = PageReaderTestPeer::setAndTakeDecompressedBuffer(
+      reader, decompressedPayload);
+  assertBufferContent(decompressed, decompressedPayload);
+  ASSERT_FALSE(PageReaderTestPeer::hasDecompressedBuffer(reader));
+
+  const std::string decryptedPayload{
+      "\x05\x00\x00\x00three", sizeof(int32_t) + 5};
+  auto decrypted =
+      PageReaderTestPeer::setAndTakeDecryptionBuffer(reader, decryptedPayload);
+  assertBufferContent(decrypted, decryptedPayload);
+  ASSERT_FALSE(PageReaderTestPeer::hasDecryptionBuffer(reader));
+
+  auto external =
+      AlignedBuffer::allocate<char>(decryptedPayload.size(), leafPool_.get());
+  EXPECT_EQ(
+      PageReaderTestPeer::takeOwnedPageBuffer(
+          reader, external->as<char>(), external->size()),
+      nullptr);
+}
+
+TEST_F(
+    ParquetReaderTest,
+    compressedStringDictionaryDoesNotKeepDuplicatePageCopy) {
+  constexpr int32_t kRows = 512;
+  constexpr int32_t kDictionaryValues = 40;
+  constexpr int32_t kStringBytes = 256 * 1024;
+  constexpr int64_t kReadMemoryLimit = 18 << 20;
+  constexpr int64_t kDictionaryPageBytes =
+      int64_t{kDictionaryValues} * (kStringBytes + sizeof(int32_t));
+  auto rowType = ROW({"payload"}, {VARCHAR()});
+
+  auto dataPool = rootPool_->addLeafChild("dictionaryReuseData");
+  std::vector<BufferPtr> stringBuffers;
+  stringBuffers.reserve(kDictionaryValues);
+  std::vector<StringView> dictionary;
+  dictionary.reserve(kDictionaryValues);
+  for (int32_t i = 0; i < kDictionaryValues; ++i) {
+    auto buffer = AlignedBuffer::allocate<char>(kStringBytes, dataPool.get());
+    auto* raw = buffer->asMutable<char>();
+    memset(raw, static_cast<int>('a' + (i % 26)), kStringBytes);
+    raw[kStringBytes - 1] = static_cast<char>('A' + (i % 26));
+    buffer->setSize(kStringBytes);
+    dictionary.emplace_back(raw, kStringBytes);
+    stringBuffers.push_back(std::move(buffer));
+  }
+
+  auto values = AlignedBuffer::allocate<StringView>(kRows, dataPool.get());
+  auto* rawValues = values->asMutable<StringView>();
+  for (int32_t i = 0; i < kRows; ++i) {
+    rawValues[i] = dictionary[i % dictionary.size()];
+  }
+  auto input = std::make_shared<RowVector>(
+      dataPool.get(),
+      rowType,
+      nullptr,
+      kRows,
+      std::vector<VectorPtr>{std::make_shared<FlatVector<StringView>>(
+          dataPool.get(),
+          VARCHAR(),
+          nullptr,
+          kRows,
+          values,
+          std::move(stringBuffers))});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  {
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    bytedance::bolt::parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    writerOptions.enableDictionary = true;
+    writerOptions.dictionaryPageSizeLimit = kDictionaryPageBytes * 2;
+    writerOptions.dataPageSize = 1 << 20;
+    writerOptions.compression = common::CompressionKind_SNAPPY;
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), writerOptions, rowType);
+    writer->write(input);
+    writer->close();
+  }
+
+  auto readRootPool = memory::memoryManager()->addRootPool(
+      "compressedDictionaryReuseRead", kReadMemoryLimit);
+  auto readPool = readRootPool->addLeafChild("leaf");
+  dwio::common::ReaderOptions readerOptions{readPool.get()};
+  readerOptions.setFilePreloadThreshold(0);
+  readerOptions.setPrefetchRowGroups(0);
+
+  auto reader = createReader(tempFile->getPath(), readerOptions);
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr result = BaseVector::create(rowType, 0, readPool.get());
+
+  ASSERT_EQ(rowReader->next(kRows, result), kRows);
+  LazyVector::ensureLoadedRows(result, SelectivityVector(kRows));
+  test::assertEqualVectors(input, result);
+  EXPECT_EQ(rowReader->next(kRows, result), 0);
+  EXPECT_LT(readPool->peakBytes(), kReadMemoryLimit);
+}
+
 TEST_F(ParquetReaderTest, testEmptyRowGroups) {
   // empty_row_groups.parquet contains empty row groups
   const std::string sample(getExampleFilePath("empty_row_groups.parquet"));
@@ -2170,6 +2497,64 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   EXPECT_EQ(decoded.valueAt<int64_t>(2), 300);
   EXPECT_EQ(decoded.valueAt<int64_t>(3), -42);
   EXPECT_EQ(decoded.valueAt<int64_t>(4), 0);
+}
+
+TEST_F(ParquetReaderTest, fusedLevelConversionContinuousReads) {
+  auto data = makeFusedLevelConversionData();
+  auto file = writeFusedLevelConversionData(data);
+
+  for (const vector_size_t batchSize : {1, 31, 1024, 4096}) {
+    auto reader = makeFusedLevelConversionReader(file->path, data);
+    VectorPtr result = BaseVector::create(data->type(), 0, leafPool_.get());
+    vector_size_t offset = 0;
+    while (reader->next(batchSize, result)) {
+      assertEqualVectorPart(data, result, offset);
+      offset += result->size();
+    }
+    EXPECT_EQ(offset, kFusedLevelConversionRows);
+  }
+}
+
+TEST_F(ParquetReaderTest, fusedLevelConversionNonContiguousReads) {
+  auto data = makeFusedLevelConversionData();
+  auto file = writeFusedLevelConversionData(data);
+  auto reader = makeFusedLevelConversionReader(file->path, data);
+  VectorPtr result = BaseVector::create(data->type(), 0, leafPool_.get());
+  vector_size_t offset = 0;
+  for (const auto& [skipSize, readSize] :
+       std::vector<std::pair<vector_size_t, vector_size_t>>{
+           {7, 3}, {101, 17}, {2'047, 33}, {4'096, 127}}) {
+    EXPECT_EQ(reader->skip(skipSize), skipSize);
+    offset += skipSize;
+    ASSERT_GT(reader->next(readSize, result), 0);
+    assertEqualVectorPart(data, result, offset);
+    offset += result->size();
+  }
+}
+
+TEST_F(ParquetReaderTest, fusedLevelConversionTopLevelFilter) {
+  auto data = makeFusedLevelConversionData();
+  auto file = writeFusedLevelConversionData(data);
+  auto scanSpec = makeScanSpec(asRowType(data->type()));
+  scanSpec->getOrCreateChild("id")->setFilter(
+      exec::bigintOr(exec::between(1'000, 1'999), exec::between(7'000, 7'999)));
+  auto reader = makeFusedLevelConversionReader(file->path, data, scanSpec);
+  VectorPtr result = BaseVector::create(data->type(), 0, leafPool_.get());
+  vector_size_t totalRows = 0;
+  while (reader->next(257, result)) {
+    auto* rows = result->as<RowVector>();
+    auto* ids = rows->childAt(0)->as<FlatVector<int64_t>>();
+    for (vector_size_t row = 0; row < rows->size(); ++row) {
+      const auto originalRow = static_cast<vector_size_t>(ids->valueAt(row));
+      ASSERT_TRUE(
+          (originalRow >= 1'000 && originalRow <= 1'999) ||
+          (originalRow >= 7'000 && originalRow <= 7'999));
+      ASSERT_TRUE(data->equalValueAt(result.get(), originalRow, row))
+          << "original row " << originalRow;
+    }
+    totalRows += result->size();
+  }
+  EXPECT_EQ(totalRows, 2'000);
 }
 
 TEST_F(ParquetReaderTest, readVariantParquet) {

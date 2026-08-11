@@ -180,6 +180,7 @@ std::shared_ptr<WriterProperties::Builder> getArrowParquetWriterOptionsBuilder(
   }
   properties = properties->encoding(options.encoding);
   properties = properties->data_pagesize(options.dataPageSize);
+  properties = properties->max_rows_per_page(options.maxRowsPerDataPage);
   for (const auto& [path, dataPageSize] : options.columnDataPageSizeMap) {
     properties = properties->data_pagesize(path, dataPageSize);
   }
@@ -232,6 +233,7 @@ std::string WriterOptionsToString(const WriterOptions& options) {
   oss << "]" << std::endl;
 
   oss << "  dataPageSize: " << options.dataPageSize << std::endl;
+  oss << "  maxRowsPerDataPage: " << options.maxRowsPerDataPage << std::endl;
   oss << "  columnDataPageSizeMap: {";
   for (const auto& [key, value] : options.columnDataPageSizeMap) {
     oss << key << ": " << value << ", ";

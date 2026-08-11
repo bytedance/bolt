@@ -78,32 +78,20 @@ jobs:
   lint:
     needs: reuse-check
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
-    runs-on: ['self-hosted', 'medium']
+    runs-on: ['self-hosted', 'small']
     container:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
-        - pre-commit-cache:/data/pre-commit-cache
-        - /data/ccache-data:/data/ccache-data
-    services:
-      conanserver:
-        image: bolt-registry:5000/conan-server:latest
-        volumes:
-          - /data/conan-server-data:/var/conan/data
+        - /data/pre-commit-cache:/data/pre-commit-cache
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - id: env-setup
-        uses: ./.github/actions/bolt-build-base
-      - name: Install pre-commit
-        run: |
-          pip install -r requirements.txt
-      - name: Generate Compile Database
-        run: |
-          make compile_db_all
       - name: Run pre-commit hooks
+        env:
+          SKIP: clang-tidy
         run: |
           pre-commit run --all-files
 

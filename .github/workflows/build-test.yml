@@ -33,6 +33,7 @@ permissions:
   pull-requests: read
 
 env:
+  PRE_COMMIT_HOME: /data/pre-commit-cache
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
   CI_NUM_THREADS: "16"
@@ -86,16 +87,23 @@ jobs:
         id: filter
         with:
           filters: |
+            # Keep the workflow itself unfiltered so required checks are always
+            # reported; only gate the self-hosted compilation jobs here.
             source_code:
               - 'bolt/**'
               - '!bolt/**/*.md'
               - 'Makefile'
               - 'conanfile.py'
               - 'CMakeLists.txt'
-              - 'bolt/**/CMakeLists.txt'
-              - 'scripts/**'
-              - '.github/workflows/**'
+              - 'scripts/conan/**'
+              - 'scripts/install-bolt-deps.sh'
+              - 'scripts/run-clang-tidy.py'
+              - '.clang-tidy'
+              - '.pre-commit-config.yaml'
+              - '.github/actions/bolt-build-base/**'
+              - '.github/workflows/build-test.yml'
   build-test:
+    name: build-test (${{ matrix.build_type }})
     needs: [reuse-check, changes]
     if: >-
       ${{ needs.reuse-check.outputs.hit != 'true' &&
@@ -105,6 +113,7 @@ jobs:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
+        - /data/pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
     services:
       conanserver:
@@ -113,21 +122,37 @@ jobs:
           - /data/conan-server-data:/var/conan/data
     strategy:
       matrix:
-        build_type: [ release, release_spark ]
+        include:
+          - build_type: release
+            build_target: benchmarks-build
+          - build_type: release_spark
+            build_target: release_spark_with_test
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
+    - name: Configure Conan profile for benchmarks
+      if: ${{ matrix.build_type == 'release' }}
+      run: |
+        echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
+
     - name: Bolt build
       run: |
-        make ${{ matrix.build_type }}_with_test
+        make ${{ matrix.build_target }}
+
+    - name: Run clang-tidy
+      if: ${{ matrix.build_type == 'release_spark' }}
+      run: |
+        CLANG_TIDY_SKIP_MISSING=1 pre-commit run clang-tidy --all-files
 
     - name: Run tests
       run: |
-        make unittest_${{ matrix.build_type }}
+        make ctest_release
 
   build-only:
       needs: [reuse-check, changes]
@@ -147,7 +172,7 @@ jobs:
             - /data/conan-server-data:/var/conan/data
       strategy:
         matrix:
-          build_target: [ benchmarks-build, debug_spark_with_test ]
+          build_target: [ debug_spark_with_test ]
       steps:
       - name: Checkout code
         uses: actions/checkout@v6

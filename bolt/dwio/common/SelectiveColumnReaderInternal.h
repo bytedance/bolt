@@ -102,7 +102,7 @@ void SelectiveColumnReader::prepareRead(
   ensureValuesCapacity<T>(rows.size());
   if (scanSpec_->keepValues() && !scanSpec_->valueHook()) {
     valueRows_.clear();
-    prepareNulls(rows, nullsInReadRange_ != nullptr);
+    prepareOutputNulls(rows, nullsInReadRange_ != nullptr);
   }
 }
 

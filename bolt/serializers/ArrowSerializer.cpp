@@ -1174,14 +1174,6 @@ std::unique_ptr<BatchVectorSerializer> ArrowVectorSerde::createBatchSerializer(
       &arrowSerdeOptions.arrowOptions);
 }
 
-void ArrowVectorSerde::deprecatedSerializeEncoded(
-    const RowVectorPtr& vector,
-    StreamArena* streamArena,
-    const Options* options,
-    OutputStream* out) {
-  BOLT_NYI("ArrowVectorSerde::deprecatedSerializeEncoded");
-}
-
 void ArrowVectorSerde::deserialize(
     ByteInputStream* source,
     bolt::memory::MemoryPool* pool,

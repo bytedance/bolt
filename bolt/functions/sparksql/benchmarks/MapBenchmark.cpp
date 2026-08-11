@@ -30,7 +30,6 @@ namespace {
 class MapBenchmark : public functions::test::FunctionBenchmarkBase {
  public:
   MapBenchmark() {
-    memory::MemoryManager::deprecatedGetInstance({});
     functions::sparksql::registerFunctions();
 
     const auto Size = 10'000;
@@ -162,7 +161,7 @@ BENCHMARK_MULTI(intFlatKeys, n) {
 
 int main(int argc, char** argv) {
   // todo: use folly::Init init after upgrade folly lib
-  memory::MemoryManager::deprecatedGetInstance({});
+  memory::MemoryManager::initialize({});
   folly::init(&argc, &argv);
   folly::runBenchmarks();
   return 0;

@@ -28,7 +28,7 @@ using JsonNativeType = StringView;
 template <typename TKey, typename TValue>
 using Pair = std::pair<TKey, std::optional<TValue>>;
 
-class ToJsonTest : public SparkFunctionBaseTest {
+class ToJsonTest : public FunctionBaseTest {
  protected:
   template <typename T = FlatVector<StringView>>
   void toJsonSimple(
@@ -922,6 +922,17 @@ TEST_F(ToJsonTest, allDataType) {
       {R"({"c0":127,"c1":32767,"c2":2147483647,"c3":9223372036854775807,"c4":1.23E7,"c5":1.23456789,"c6":1234.56,"c7":92233.7203685478,"c8":"example string","c9":"YWJj","c10":true,"c11":[1,2],"c12":[3,4],"c13":[5,6],"c14":[7,8],"c15":[1.1,2.2],"c16":[3.3,4.4],"c17":[55.55,66.66],"c18":[92233.7203685477,92233.7203685478],"c19":["string1","string2"],"c20":["YWJjZA==","YWJjZGU="],"c21":[true,false],"c22":{"key1":1,"key2":2},"c23":{"key1":3,"key2":4},"c24":{"key1":5,"key2":6},"c25":{"key1":9223372036854775806,"key2":9223372036854775807},"c26":{"key1":1.1,"key2":2.2},"c27":{"key1":3.3,"key2":4.4},"c28":{"key1":77.78,"key2":88.89},"c29":{"key1":92233.7203685477,"key2":92233.7203685478},"c30":{"key1":"value1","key2":"value2"},"c31":{"key1":"YWJjZA==","key2":"YWJjZGU="},"c32":{"key1":true,"key2":false},"c33":"2025-04-08"})"},
       VARCHAR());
   toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
+}
+
+TEST_F(ToJsonTest, timestampMapKey) {
+  std::vector<std::vector<Pair<Timestamp, StringView>>> maps{
+      {{{Timestamp(1451606400, 123456000), "value"_sv}}}};
+  auto input =
+      makeMapVector<Timestamp, StringView>(maps, MAP(TIMESTAMP(), VARCHAR()));
+  auto expected = makeNullableFlatVector<JsonNativeType>(
+      {R"({"1451606400123456":"value"})"}, VARCHAR());
+  auto actual = evaluate("to_json(c0)", makeRowVector({input}));
+  ::bytedance::bolt::test::assertEqualVectors(expected, actual);
 }
 
 } // namespace
