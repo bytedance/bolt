@@ -53,24 +53,26 @@ struct custom_equal_to {
 
 template <typename T>
 struct custom_hash {
- private:
-  std::hash<T> hasher_;
-
- public:
   size_t operator()(const T& val) const {
     if constexpr (std::is_same_v<T, float>) {
       const static float Nan = std::nan("");
       if (FOLLY_UNLIKELY(std::isnan(val))) {
-        return hasher_(Nan);
+        return std::hash<T>{}(Nan);
       }
-    }
-    if constexpr (std::is_same_v<T, double>) {
+      return std::hash<T>{}(val);
+    } else if constexpr (std::is_same_v<T, double>) {
       const static double Nan = std::nan("");
       if (FOLLY_UNLIKELY(std::isnan(val))) {
-        return hasher_(Nan);
+        return std::hash<T>{}(Nan);
       }
+      return std::hash<T>{}(val);
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+    } else if constexpr (std::is_same_v<T, int128_t>) {
+      return HugeInt::hash(val);
+#endif
+    } else {
+      return std::hash<T>{}(val);
     }
-    return hasher_(val);
   }
 };
 
@@ -785,10 +787,9 @@ class PercentileAggregate : public exec::Aggregate {
       const std::vector<bool>& isNull) {
     if (!percentiles_) {
       BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
-      percentiles_ = {
-          .values = std::vector<double>(len),
-          .isArray = isArray,
-      };
+      percentiles_.emplace();
+      percentiles_->values.resize(len);
+      percentiles_->isArray = isArray;
       for (vector_size_t i = 0; i < len; ++i) {
         BOLT_USER_CHECK(!isNull[i], "Percentile cannot be null");
         BOLT_USER_CHECK_GE(data[i], 0, "Percentile must be between 0 and 1");

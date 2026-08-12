@@ -43,7 +43,7 @@
 #include <folly/Random.h>
 #include <folly/init/Init.h>
 
-#include <duckdb.hpp> // @manual
+#include "bolt/duckdb/DuckDbCompat.h"
 
 using namespace folly;
 using namespace bytedance::bolt;

@@ -15,7 +15,9 @@
  */
 
 #include "bolt/exec/tests/utils/RowBasedSerde.h"
+#include "bolt/common/base/Portability.h"
 #include "bolt/exec/VariantSerdeDetail.h"
+#include "bolt/type/HugeInt.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/VariantVector.h"
@@ -767,6 +769,15 @@ uint64_t hashOne(ByteInputStream& stream, const Type* /*type*/) {
   using T = typename TypeTraits<Kind>::NativeType;
   return folly::hasher<T>()(stream.read<T>());
 }
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+uint64_t hashOne<TypeKind::HUGEINT>(
+    ByteInputStream& stream,
+    const Type* /*type*/) {
+  return HugeInt::hash(stream.read<int128_t>());
+}
+#endif
 
 template <>
 uint64_t hashOne<TypeKind::VARCHAR>(

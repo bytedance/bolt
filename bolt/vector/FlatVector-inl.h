@@ -102,9 +102,8 @@ std::unique_ptr<SimpleVector<uint64_t>> FlatVector<T>::hashAll() const {
   auto hashData = hashBuffer->asMutable<uint64_t>();
 
   if (rawValues_ != nullptr) { // non all-null case
-    folly::hasher<T> hasher;
     for (size_t i = 0; i < BaseVector::length_; ++i) {
-      hashData[i] = hasher(valueAtFast(i));
+      hashData[i] = vectorHashValue(valueAtFast(i));
     }
   }
 

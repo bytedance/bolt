@@ -28,7 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
-#include <duckdb.hpp>
+#include "bolt/duckdb/DuckDbCompat.h"
 
 #include "bolt/duckdb/conversion/DuckWrapper.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"

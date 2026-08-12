@@ -43,6 +43,7 @@
 
 #include "bolt/common/base/Doubles.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/Portability.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/prestosql/ArithmeticImpl.h"
 #include "folly/CPortability.h"
@@ -577,8 +578,16 @@ struct ToBaseFunction {
       B runningValue = value < 0 ? -1 * value : value;
       B remainder;
       char* resultPtr;
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+      int128_t resultSize =
+          (int128_t)std::floor(
+              std::log(static_cast<long double>(runningValue)) /
+              std::log(static_cast<long double>(radix))) +
+          1;
+#else
       int128_t resultSize =
           (int128_t)std::floor(std::log(runningValue) / std::log(radix)) + 1;
+#endif
       if (value < 0) {
         resultSize += 1;
         result.resize(resultSize);

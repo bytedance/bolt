@@ -29,19 +29,25 @@
  */
 
 #include "bolt/parse/QueryPlanner.h"
+
+#include "bolt/duckdb/DuckDbCompat.h"
 #include "bolt/duckdb/conversion/DuckConversion.h"
 #include "bolt/parse/DuckLogicalOperator.h"
 #include "bolt/vector/VariantToVector.h"
 
-#include <duckdb.hpp> // @manual
 #include <duckdb/function/aggregate_function.hpp> // @manual
+#include <duckdb/parser/statement/select_statement.hpp> // @manual
 #include <duckdb/main/connection.hpp> // @manual
+#include <duckdb/main/database.hpp> // @manual
 #include <duckdb/planner/expression/bound_aggregate_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_cast_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_comparison_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_constant_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_function_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_reference_expression.hpp> // @manual
+
+#include <type_traits>
+
 namespace bytedance::bolt::core {
 
 namespace {
@@ -86,6 +92,22 @@ struct QueryContext {
     return columnNameGenerator.next(prefix);
   }
 };
+
+template <typename T>
+const auto& getColumnIdsImpl(T& logicalGet)
+  requires requires(T& value) { value.GetColumnIds(); }
+{
+  return logicalGet.GetColumnIds();
+}
+
+template <typename T>
+const auto& getColumnIdsImpl(T& logicalGet) {
+  return logicalGet.column_ids;
+}
+
+const auto& getColumnIds(::duckdb::LogicalGet& logicalGet) {
+  return getColumnIdsImpl(logicalGet);
+}
 
 std::string mapScalarFunctionName(const std::string& name) {
   static const std::unordered_map<std::string, std::string> kMapping = {
@@ -206,7 +228,7 @@ PlanNodePtr toBoltPlan(
   BOLT_CHECK_EQ(logicalGet.function.name, "seq_scan");
   BOLT_CHECK_EQ(0, sources.size());
 
-  const auto& columnIds = logicalGet.GetColumnIds();
+  const auto& columnIds = getColumnIds(logicalGet);
   std::vector<std::string> names(columnIds.size());
   std::vector<TypePtr> types(columnIds.size());
 
@@ -540,15 +562,45 @@ static void customScalarFunction(
   BOLT_UNREACHABLE();
 }
 
-::duckdb::idx_t customAggregateState(
+::duckdb::idx_t customAggregateState() {
+  BOLT_UNREACHABLE();
+}
+
+::duckdb::idx_t customAggregateStateWithFunction(
     const ::duckdb::AggregateFunction& /*function*/) {
   BOLT_UNREACHABLE();
 }
 
-void customAggregateInitialize(
+template <typename AggregateSize>
+AggregateSize customAggregateStateFunction() {
+  if constexpr (std::is_same_v<
+                    AggregateSize,
+                    ::duckdb::idx_t (*)()>) {
+    return &customAggregateState;
+  } else {
+    return &customAggregateStateWithFunction;
+  }
+}
+
+void customAggregateInitialize(::duckdb::data_ptr_t /* state */) {
+  BOLT_UNREACHABLE();
+}
+
+void customAggregateInitializeWithFunction(
     const ::duckdb::AggregateFunction& /*function*/,
     ::duckdb::data_ptr_t /* state */) {
   BOLT_UNREACHABLE();
+}
+
+template <typename AggregateInitialize>
+AggregateInitialize customAggregateInitializeFunction() {
+  if constexpr (std::is_same_v<
+                    AggregateInitialize,
+                    void (*)(::duckdb::data_ptr_t)>) {
+    return &customAggregateInitialize;
+  } else {
+    return &customAggregateInitializeWithFunction;
+  }
 }
 
 static void customAggregateUpdate(
@@ -579,6 +631,20 @@ static void customAggregateFinalize(
 
 } // namespace
 
+struct DuckDbQueryPlanner::Impl {
+  explicit Impl(memory::MemoryPool* pool) : conn{db}, pool{pool} {}
+
+  ::duckdb::DuckDB db;
+  ::duckdb::Connection conn;
+  memory::MemoryPool* pool;
+  std::unordered_map<std::string, std::vector<RowVectorPtr>> tables;
+};
+
+DuckDbQueryPlanner::DuckDbQueryPlanner(memory::MemoryPool* pool)
+    : impl_{std::make_unique<Impl>(pool)} {}
+
+DuckDbQueryPlanner::~DuckDbQueryPlanner() = default;
+
 PlanNodePtr parseQuery(
     const std::string& sql,
     memory::MemoryPool* pool,
@@ -597,15 +663,15 @@ void DuckDbQueryPlanner::registerTable(
     const std::string& name,
     const std::vector<RowVectorPtr>& data) {
   BOLT_CHECK_EQ(
-      0, tables_.count(name), "Table is already registered: {}", name);
+      0, impl_->tables.count(name), "Table is already registered: {}", name);
 
   auto createTableSql =
       duckdb::makeCreateTableSql(name, *asRowType(data[0]->type()));
-  auto res = conn_.Query(createTableSql);
+  auto res = impl_->conn.Query(createTableSql);
   BOLT_CHECK(
       !res->HasError(), "Failed to create DuckDB table: {}", res->GetError());
 
-  tables_.insert({name, data});
+  impl_->tables.insert({name, data});
 }
 
 void DuckDbQueryPlanner::registerScalarFunction(
@@ -617,7 +683,7 @@ void DuckDbQueryPlanner::registerScalarFunction(
     argDuckTypes.push_back(duckdb::fromBoltType(type));
   }
 
-  conn_.CreateVectorizedFunction(
+  impl_->conn.CreateVectorizedFunction(
       name,
       argDuckTypes,
       duckdb::fromBoltType(returnType),
@@ -633,12 +699,12 @@ void DuckDbQueryPlanner::registerAggregateFunction(
     argDuckTypes.push_back(duckdb::fromBoltType(type));
   }
 
-  conn_.CreateAggregateFunction(
+  impl_->conn.CreateAggregateFunction(
       name,
       argDuckTypes,
       duckdb::fromBoltType(returnType),
-      customAggregateState,
-      customAggregateInitialize,
+      customAggregateStateFunction<::duckdb::aggregate_size_t>(),
+      customAggregateInitializeFunction<::duckdb::aggregate_initialize_t>(),
       customAggregateUpdate,
       customAggregateCombine,
       customAggregateFinalize);
@@ -647,12 +713,12 @@ void DuckDbQueryPlanner::registerAggregateFunction(
 PlanNodePtr DuckDbQueryPlanner::plan(const std::string& sql) {
   // Disable the optimizer. Otherwise, the filter over table scan gets pushdown
   // as a callback that is impossible to recover.
-  conn_.Query("PRAGMA disable_optimizer");
+  impl_->conn.Query("PRAGMA disable_optimizer");
 
-  auto plan = conn_.ExtractPlan(sql);
+  auto plan = impl_->conn.ExtractPlan(sql);
 
-  QueryContext queryContext{tables_};
-  return toBoltPlan(*plan, pool_, queryContext);
+  QueryContext queryContext{impl_->tables};
+  return toBoltPlan(*plan, impl_->pool, queryContext);
 }
 
 } // namespace bytedance::bolt::core

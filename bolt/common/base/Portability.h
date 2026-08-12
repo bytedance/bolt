@@ -50,6 +50,10 @@ namespace bytedance::bolt {
 #define INLINE_LAMBDA
 #endif
 
+#if defined(__clang__) && defined(__GLIBCXX__) && (__clang_major__ <= 16)
+#define BOLT_CLANG_LIBSTDCXX_INT128_COMPAT 1
+#endif
+
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
 #define TSAN_BUILD 1

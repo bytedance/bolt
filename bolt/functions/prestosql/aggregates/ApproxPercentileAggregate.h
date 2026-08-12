@@ -548,10 +548,9 @@ class ApproxPercentileAggregate : public exec::Aggregate {
       vector_size_t len) {
     if (!percentiles_) {
       BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
-      percentiles_ = {
-          .values = std::vector<double>(len),
-          .isArray = isArray,
-      };
+      percentiles_.emplace();
+      percentiles_->values.resize(len);
+      percentiles_->isArray = isArray;
       for (vector_size_t i = 0; i < len; ++i) {
         BOLT_USER_CHECK(!percentiles.isNullAt(i), "Percentile cannot be null");
         auto value = percentiles.valueAt<double>(offset + i);

@@ -37,7 +37,7 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/vector/ComplexVector.h"
 
-#include <duckdb.hpp> // @manual
+#include "bolt/duckdb/DuckDbCompat.h"
 namespace bytedance::bolt::exec::test {
 
 using MaterializedRow = std::vector<bolt::variant>;

@@ -32,11 +32,24 @@
 
 #include "bolt/common/base/GTestMacros.h"
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/base/Portability.h"
 #include "bolt/dwio/common/BitPackDecoder.h"
 #include "bolt/dwio/common/DecoderUtil.h"
 #include "bolt/dwio/common/TypeUtil.h"
 #include "bolt/dwio/parquet/reader/RleBpDecoder.h"
 namespace bytedance::bolt::parquet {
+
+template <typename T>
+struct RleBpSignedIndexType {
+  using type = std::make_signed_t<T>;
+};
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+struct RleBpSignedIndexType<__uint128_t> {
+  using type = __int128_t;
+};
+#endif
 
 // This class will be used for dictionary Ids or other data that is RLE/BP
 // encoded.
@@ -181,8 +194,8 @@ class RleBpDataDecoder : public bytedance::bolt::parquet::RleBpDecoder {
         (rows[rowIndex + numRows - 1] + 1 - currentRow) * bitWidth_;
 
     using TValues = typename std::remove_reference<decltype(values[0])>::type;
-    using TIndex = typename std::make_signed_t<
-        typename dwio::common::make_index<TValues>::type>;
+    using TIndex = typename RleBpSignedIndexType<
+        typename dwio::common::make_index<TValues>::type>::type;
     bytedance::bolt::dwio::common::unpack(
         reinterpret_cast<const uint64_t*>(super::bufferStart_),
         bitOffset_,

@@ -33,12 +33,17 @@
 #include "bolt/core/PlanNode.h"
 #include "bolt/parse/PlanNodeIdGenerator.h"
 
-#include <duckdb.hpp> // @manual
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 namespace bytedance::bolt::core {
 
 class DuckDbQueryPlanner {
  public:
-  DuckDbQueryPlanner(memory::MemoryPool* pool) : pool_{pool} {}
+  explicit DuckDbQueryPlanner(memory::MemoryPool* pool);
+  ~DuckDbQueryPlanner();
 
   void registerTable(
       const std::string& name,
@@ -60,10 +65,8 @@ class DuckDbQueryPlanner {
   PlanNodePtr plan(const std::string& sql);
 
  private:
-  ::duckdb::DuckDB db_;
-  ::duckdb::Connection conn_{db_};
-  memory::MemoryPool* pool_;
-  std::unordered_map<std::string, std::vector<RowVectorPtr>> tables_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 PlanNodePtr parseQuery(

@@ -89,10 +89,9 @@ void PercentileApproxAggregateBase::checkSetPercentile(
     const std::vector<bool>& isNull) {
   if (!percentiles_) {
     BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
-    percentiles_ = {
-        .values = std::vector<double>(len),
-        .isArray = isArray,
-    };
+    percentiles_.emplace();
+    percentiles_->values.resize(len);
+    percentiles_->isArray = isArray;
     for (vector_size_t i = 0; i < len; ++i) {
       BOLT_USER_CHECK(!isNull[i], "Percentage value must not be null");
       BOLT_USER_CHECK(
