@@ -674,8 +674,7 @@ TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
     dwio::common::ReaderOptions readerOptions{leafPool_.get()};
     readerOptions.setFileSchema(rowType);
     BOLT_ASSERT_THROW(
-        createReader(sample, readerOptions),
-        "ParquetReader::convertType() cannot convert column.");
+        createReader(sample, readerOptions), kParquetTypeMappingErrorPrefix);
   }
 }
 #endif

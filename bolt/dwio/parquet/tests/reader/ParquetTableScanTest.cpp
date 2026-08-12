@@ -1635,7 +1635,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     // Override when a case is rejected by a later layer with a
     // different message (e.g. ParquetColumnReader::matchType in
     // non-Spark builds).
-    const char* errMsg = "ParquetReader::convertType() cannot convert column.";
+    const char* errMsg = kParquetTypeMappingErrorPrefix;
   };
 
   // clang-format off

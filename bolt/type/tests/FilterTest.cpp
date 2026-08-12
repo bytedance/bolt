@@ -240,7 +240,8 @@ TEST(FilterTest, bigintRangeUnsupportedBytesRange) {
       const std::string message = e.what();
       EXPECT_NE(
           message.find(
-              "BigintRange::testBytesRange() is not supported. Filter: "),
+              std::string(common::kBigintRangeTestBytesRangeErrorPrefix) +
+              " Filter: "),
           std::string::npos);
       EXPECT_NE(message.find(filter->toString()), std::string::npos);
     }
