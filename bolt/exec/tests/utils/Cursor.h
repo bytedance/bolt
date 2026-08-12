@@ -38,6 +38,10 @@
 
 namespace bytedance::bolt::exec::test {
 
+/// Returns the maximum number of threads for test executors, capped to avoid
+/// scaling every parallel test process to all CPUs visible on the host.
+unsigned testExecutorConcurrency();
+
 /// Wait up to maxWaitMicros for all the task drivers to finish. The function
 /// returns true if all the drivers have finished, otherwise false.
 ///

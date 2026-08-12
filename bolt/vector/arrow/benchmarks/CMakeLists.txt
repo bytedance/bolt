@@ -45,5 +45,4 @@ target_link_libraries(
   import_arrow_bolt_bridge_benchmark PRIVATE
   bolt_arrow_bridge
   ${BOLT_BENCHMARK_DEPS}
-  arrow::libarrow_testing # TODO: remove this dependency
 )

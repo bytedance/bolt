@@ -33,6 +33,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <random>
@@ -43,7 +44,7 @@
 #include <gtest/gtest.h>
 
 #include "arrow/io/memory.h"
-#include "arrow/testing/util.h"
+#include "arrow/util/pcg_random.h"
 
 #include "bolt/dwio/parquet/arrow/ColumnPage.h"
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
@@ -744,9 +745,21 @@ void inline InitValues<bool>(
     std::vector<uint8_t>& buffer) {
   values = {};
   if (seed == 0) {
-    seed = static_cast<uint32_t>(::arrow::random_seed());
+    seed = static_cast<uint32_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
   }
-  ::arrow::random_is_valid(num_values, 0.5, &values, static_cast<int>(seed));
+  ::arrow::random::pcg32_fast generator(seed);
+  // Preserve Arrow's former random_is_valid sequence without its test helper.
+  constexpr double kGeneratorRange =
+      static_cast<double>(::arrow::random::pcg32_fast::max()) + 1;
+  values.resize(num_values);
+  std::generate(values.begin(), values.end(), [&]() {
+    const double randomValue =
+        (static_cast<double>(generator()) +
+         static_cast<double>(generator()) * kGeneratorRange) /
+        (kGeneratorRange * kGeneratorRange);
+    return randomValue > 0.5;
+  });
 }
 
 template <>

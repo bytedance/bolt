@@ -43,9 +43,8 @@
 #include "arrow/buffer.h"
 #include "arrow/io/file.h"
 #include "arrow/status.h"
-#include "arrow/testing/gtest_util.h"
-#include "arrow/testing/random.h"
 
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/dwio/parquet/arrow/Exception.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
@@ -482,7 +481,7 @@ TYPED_TEST(TestBatchBloomFilter, Basic) {
     batch_insert_filter.WriteTo(sink.get());
     ASSERT_OK_AND_ASSIGN(batch_insert_buffer, sink->Finish());
   }
-  AssertBufferEqual(*buffer, *batch_insert_buffer);
+  ASSERT_TRUE(buffer->Equals(*batch_insert_buffer));
 }
 
 } // namespace test

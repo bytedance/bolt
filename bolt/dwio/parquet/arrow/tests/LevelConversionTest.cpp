@@ -42,7 +42,6 @@
 #include <string>
 #include <vector>
 
-#include "arrow/testing/gtest_compat.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap.h"
 #include "arrow/util/ubsan.h"

@@ -351,7 +351,7 @@ class BoltConan(ConanFile):
             self.options[arrow].with_protobuf = True
             self.options[arrow].with_grpc = True
             self.options[arrow].with_flight_rpc = True
-        self.options[arrow].with_test = True
+        self.options[arrow].with_test = False
         self.options[arrow].with_csv = True
         if self.options.get_safe("enable_jit"):
             self.options[llvm_core].with_libedit = False

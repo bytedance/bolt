@@ -43,10 +43,10 @@
 #include "arrow/array/builder_binary.h"
 #include "arrow/buffer.h"
 #include "arrow/io/buffered.h"
-#include "arrow/testing/gtest_util.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_builders.h"
 
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
 #include "bolt/dwio/parquet/arrow/Encoding.h"
 #include "bolt/dwio/parquet/arrow/EncodingInternal.h"
