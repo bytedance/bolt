@@ -71,10 +71,6 @@ namespace {
   return algo;
 }
 
-// Schema-mismatch checks for ReaderBase::convertType.
-constexpr const char* kTypeMappingErrorFmtStr =
-    "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
-
 std::string parquetSourceTypeName(const thrift::SchemaElement& schemaElement) {
   if (schemaElement.__isset.converted_type) {
     return fmt::format(
@@ -1079,7 +1075,8 @@ TypePtr ReaderBase::convertType(
             isCompatibleFunc(requestedType->asArray().elementType());
         if (!(strictMatch || unannotatedArrayMatch)) {
           BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
-              kTypeMappingErrorFmtStr,
+              "{} Column: [{}], From Kind: {}, To Kind: {}",
+              kParquetTypeMappingErrorPrefix,
               schemaElement.name,
               parquetSourceTypeName(schemaElement),
               mapTypeKindToName(requestedType->kind())));

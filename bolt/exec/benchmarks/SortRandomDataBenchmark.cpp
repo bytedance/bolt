@@ -25,10 +25,13 @@
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_string(temp_file_path, "", "file path of input file");
-DEFINE_bool(enable_sort_spill, false, "enable sort spill");
-DEFINE_string(row_based_spill_mode, "", "row based spill mode");
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_string(bolt_benchmark_temp_file_path, "", "file path of input file");
+DEFINE_bool(bolt_benchmark_enable_sort_spill, false, "enable sort spill");
+DEFINE_string(bolt_benchmark_row_based_spill_mode, "", "row based spill mode");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
@@ -131,11 +134,11 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
          {"str_inline", VARCHAR()},
          {"str_inline_thin", VARCHAR()}});
 
-    if (FLAGS_temp_file_path.empty()) {
+    if (FLAGS_bolt_benchmark_temp_file_path.empty()) {
       VectorFuzzer::Options opts;
       opts.vectorSize = kRowsPerVector;
       opts.nullRatio = 0;
-      VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+      VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
       int thinCount = 3;
       auto getThinVector = [&](TypePtr type) {
@@ -174,7 +177,7 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
       writeToFile(filePath_, vectors);
       std::cout << filePath_ << std::endl;
     } else {
-      filePath_ = FLAGS_temp_file_path;
+      filePath_ = FLAGS_bolt_benchmark_temp_file_path;
     }
   }
 
@@ -289,12 +292,12 @@ class SortRandomDataBenchmark : public HiveConnectorTestBase {
   std::shared_ptr<exec::Task> makeTask(core::PlanFragment plan) {
     auto queryCtx = core::QueryCtx::create(executor_.get());
     std::unordered_map<std::string, std::string> configs;
-    if (FLAGS_enable_sort_spill) {
+    if (FLAGS_bolt_benchmark_enable_sort_spill) {
       configs[core::QueryConfig::kSpillEnabled] = "true";
       configs[core::QueryConfig::kOrderBySpillEnabled] = "true";
       configs[core::QueryConfig::kOrderBySpillMemoryThreshold] = "10000000";
       configs[core::QueryConfig::kRowBasedSpillMode] =
-          FLAGS_row_based_spill_mode;
+          FLAGS_bolt_benchmark_row_based_spill_mode;
     }
     queryCtx->testingOverrideConfigUnsafe(std::move(configs));
     auto task = exec::Task::create(

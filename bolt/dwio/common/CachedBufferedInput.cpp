@@ -34,11 +34,6 @@
 #include "bolt/common/process/TraceContext.h"
 #include "bolt/dwio/common/CacheInputStream.h"
 
-DEFINE_int32(
-    cache_prefetch_min_pct,
-    80,
-    "Minimum percentage of actual uses over references to a column for prefetching. No prefetch if > 100");
-
 using ::bytedance::bolt::common::Region;
 namespace bytedance::bolt::dwio::common {
 

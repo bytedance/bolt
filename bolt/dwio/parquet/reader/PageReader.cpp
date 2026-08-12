@@ -476,18 +476,12 @@ void PageReader::readPageDefLevels() {
   BOLT_CHECK_NOT_NULL(
       wideDefineDecoder_, "parquet read error with maxDefine = {}", maxDefine_);
   wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
-  leafNulls_.resize(bits::nwords(numRepDefsInPage_));
-  numRowsInPage_ = getLengthsAndNulls(
-      LevelMode::kNulls,
-      leafInfo_,
-      0,
-      numRepDefsInPage_,
-      numRepDefsInPage_,
-      nullptr,
-      leafNulls_.data(),
-      0);
-  leafNullsSize_ = numRowsInPage_;
+  leafNullsSize_ = 0;
+  leafNullsAllValidPrefix_ = true;
   numLeafNullsConsumed_ = 0;
+  erasedLeafNullWords_ = 0;
+  numRowsInPage_ = appendLeafNullsFromLevels(0, numRepDefsInPage_);
+  leafNullsSize_ = numRowsInPage_;
 }
 
 void PageReader::updateRowInfoAfterPageSkipped() {
@@ -1033,16 +1027,8 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
       repeatDecoder_->GetBatch(
           repetitionLevels_.data() + begin, numRepDefsInPage_);
     }
-    leafNulls_.resize(bits::nwords(leafNullsSize_ + numRepDefsInPage_));
-    auto numLeaves = getLengthsAndNulls(
-        LevelMode::kNulls,
-        leafInfo_,
-        begin,
-        begin + numRepDefsInPage_,
-        numRepDefsInPage_,
-        nullptr,
-        leafNulls_.data(),
-        leafNullsSize_);
+    auto numLeaves =
+        appendLeafNullsFromLevels(begin, begin + numRepDefsInPage_);
     leafNullsSize_ += numLeaves;
     numLeavesInPage_.push_back(numLeaves);
   }
@@ -1210,7 +1196,8 @@ void PageReader::decodeRepDefsFromBuffer() {
   int64_t erasedBits = erasedLeafNullWords_ * WordBits;
   BOLT_CHECK_LE(numLeafNullsConsumed_, leafNullsSize_ + erasedBits);
   // clear consumed nulls
-  if (numLeafNullsConsumed_ - erasedBits > WordBits) {
+  if (!leafNullsAllValidPrefix_ &&
+      numLeafNullsConsumed_ - erasedBits > WordBits) {
     auto consumedWords = bits::nwords(numLeafNullsConsumed_ - erasedBits) - 1;
     auto totalNullWords = bits::nwords(leafNullsSize_);
     auto unConsumedNullWords = totalNullWords - consumedWords;
@@ -1291,20 +1278,42 @@ void PageReader::decodeRepDefsFromBuffer() {
     defineDecoder.GetBatch(definitionLevels_.data() + begin, numRepDefsInPage);
     rawData += defineLength;
 
-    leafNulls_.resize(bits::nwords(leafNullsSize_ + numRepDefsInPage));
-    auto numLeaves = getLengthsAndNulls(
-        LevelMode::kNulls,
-        leafInfo_,
-        begin,
-        begin + numRepDefsInPage,
-        numRepDefsInPage,
-        nullptr,
-        leafNulls_.data(),
-        leafNullsSize_);
+    auto numLeaves = appendLeafNullsFromLevels(begin, begin + numRepDefsInPage);
     leafNullsSize_ += numLeaves;
     numLeavesInPage_.push_back(numLeaves);
   }
   preloadedRepDefs_.pop_front();
+}
+
+int32_t PageReader::appendLeafNullsFromLevels(int32_t begin, int32_t end) {
+  int64_t valuesRead = 0;
+  if (leafNullsAllValidPrefix_ &&
+      arrow::DefLevelsAreAllValid(
+          definitionLevels_.data() + begin,
+          end - begin,
+          leafInfo_,
+          end - begin,
+          &valuesRead)) {
+    return static_cast<int32_t>(valuesRead);
+  }
+
+  const auto startOffset = leafNullsSize_;
+  leafNulls_.resize(bits::nwords(startOffset + end - begin));
+  if (leafNullsAllValidPrefix_) {
+    if (startOffset > 0) {
+      bits::fillBits(leafNulls_.data(), 0, startOffset, bits::kNotNull);
+    }
+    leafNullsAllValidPrefix_ = false;
+  }
+  return getLengthsAndNulls(
+      LevelMode::kNulls,
+      leafInfo_,
+      begin,
+      end,
+      end - begin,
+      nullptr,
+      leafNulls_.data(),
+      startOffset);
 }
 
 int32_t PageReader::getLengthsAndNulls(
@@ -1491,6 +1500,11 @@ int32_t PageReader::skipNulls(int32_t numValues) {
   if (!defineDecoder_ && isTopLevel_) {
     return numValues;
   }
+  if (!isTopLevel_ && leafNullsAllValidPrefix_) {
+    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    numLeafNullsConsumed_ += numValues;
+    return numValues;
+  }
   BOLT_CHECK(1 == maxDefine_ || !leafNulls_.empty());
   dwio::common::ensureCapacity<bool>(tempNulls_, numValues, &pool_);
   tempNulls_->setSize(0);
@@ -1562,6 +1576,13 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
     defineDecoder_->readBits(
         numValues, buffer->asMutable<uint64_t>(), &allOnes);
     return allOnes ? nullptr : buffer->as<uint64_t>();
+  }
+
+  if (leafNullsAllValidPrefix_) {
+    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    numLeafNullsConsumed_ += numValues;
+    buffer = nullptr;
+    return nullptr;
   }
 
   const int64_t erasedBits = erasedLeafNullWords_ * 64;

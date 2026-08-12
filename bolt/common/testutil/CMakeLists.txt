@@ -24,6 +24,11 @@
 #
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
+if(${BOLT_BUILD_TEST_UTILS})
+  add_library(bolt_test_flags STATIC BoltTestFlags.cpp)
+  target_link_libraries(bolt_test_flags PRIVATE gflags::gflags)
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_library(bolt_debug_util OBJECT ScopedTestTime.cpp TestValue.cpp)
   target_link_libraries(bolt_debug_util PUBLIC bolt_exception)

@@ -70,35 +70,41 @@ jobs:
       - id: env-setup
         uses: ./.github/actions/bolt-build-base
 
-      - name: Install complete CI dependency graph
+      - name: Install Release dependency graph
+        if: ${{ inputs.build_type == 'All' || inputs.build_type == 'Release' }}
         shell: bash
         run: |
-          if [[ "${{ inputs.build_type }}" == "All" ]]; then
-            build_types=(Release Debug)
-          else
-            build_types=("${{ inputs.build_type }}")
-          fi
+          conan install . \
+            -s "llvm-core/*:build_type=Release" \
+            -s "build_type=Release" \
+            -c "bolt/*:tools.build:skip_test=False" \
+            -o "bolt/*:spark_compatible=True" \
+            -o "bolt/*:enable_s3=True" \
+            -o "bolt/*:enable_gcs=True" \
+            -o "bolt/*:enable_testutil=True" \
+            -o "bolt/*:enable_perf=True" \
+            --build=missing
 
-          # Conan does not build the Bolt consumer during install, so a single
-          # feature-superset graph covers the dependency variants used by CI.
-          for build_type in "${build_types[@]}"; do
-            conan install . \
-              -s "llvm-core/*:build_type=Release" \
-              -s "build_type=${build_type}" \
-              -c "bolt/*:tools.build:skip_test=False" \
-              -o "bolt/*:spark_compatible=True" \
-              -o "bolt/*:enable_s3=True" \
-              -o "bolt/*:enable_gcs=True" \
-              -o "bolt/*:enable_testutil=True" \
-              -o "bolt/*:enable_perf=True" \
-              --build=missing
-          done
+      - name: Install Debug dependency graph
+        if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}
+        shell: bash
+        run: |
+          conan install . \
+            -s "llvm-core/*:build_type=Release" \
+            -s "build_type=Debug" \
+            -c "bolt/*:tools.build:skip_test=False" \
+            -o "bolt/*:spark_compatible=True" \
+            -o "bolt/*:enable_s3=True" \
+            -o "bolt/*:enable_gcs=True" \
+            -o "bolt/*:enable_testutil=True" \
+            -o "bolt/*:enable_perf=True" \
+            --build=missing
 
       - name: Upload packages to conan remote
-        if: ${{ always() }}
+        if: ${{ always() && steps.env-setup.outcome == 'success' }}
         env:
           CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_ADMIN_USERNAME }}
           CONAN_PASSWORD: ${{ secrets.CONAN_ADMIN_PASSWORD }}
         run: |
           conan remote auth ci
-          conan upload -r ci --confirm "*"
+          conan upload -r ci --confirm --check "*"

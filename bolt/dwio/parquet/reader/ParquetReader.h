@@ -48,6 +48,9 @@ class BufferedInput;
 } // namespace bytedance::bolt::dwio::common
 namespace bytedance::bolt::parquet {
 
+inline constexpr const char* kParquetTypeMappingErrorPrefix =
+    "ParquetReader::convertType() cannot convert column.";
+
 enum class ParquetMetricsType { HEADER, FILE_METADATA, FILE, BLOCK, TEST };
 
 class StructColumnReader;

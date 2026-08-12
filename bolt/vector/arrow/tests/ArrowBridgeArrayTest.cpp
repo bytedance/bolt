@@ -31,10 +31,10 @@
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
-#include <arrow/testing/gtest_util.h>
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/arrow/Bridge.h"

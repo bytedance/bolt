@@ -35,11 +35,10 @@
 #include <gmock/gmock-matchers.h>
 #include "bolt/common/base/BoltException.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/SharedArbitrator.h"
-
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 
 using namespace ::testing;
 namespace bytedance::bolt::memory {
@@ -135,6 +134,55 @@ TEST_F(MemoryManagerTest, ctor) {
         "freeCapacity 4.00GB freeReservedCapacity 0B] "
         "CONFIG[kind=SHARED;capacity=4.00GB;arbitrationStateCheckCb=(unset);]]]");
   }
+}
+
+TEST_F(MemoryManagerTest, managedPoolState) {
+  MemoryManager manager;
+
+  std::vector<MemoryPool*> pools;
+  manager.visitSystemRootChildren([&](MemoryPool* pool) {
+    pools.push_back(pool);
+    return true;
+  });
+  EXPECT_THAT(
+      pools,
+      UnorderedElementsAre(
+          manager.spillPool(), manager.cachePool(), manager.tracePool()));
+
+  const auto systemPoolState = manager.inspectManagedPoolState();
+  EXPECT_EQ(
+      systemPoolState.kind,
+      MemoryManager::ManagedPoolState::Kind::kOnlySystemPools);
+  EXPECT_EQ(systemPoolState.poolCount, 3);
+  EXPECT_TRUE(systemPoolState.diagnostic.empty());
+
+  auto outstandingPool = manager.addLeafPool("outstanding");
+  const auto outstandingPoolState = manager.inspectManagedPoolState();
+  EXPECT_EQ(
+      outstandingPoolState.kind,
+      MemoryManager::ManagedPoolState::Kind::kHasOutstandingPools);
+  EXPECT_EQ(outstandingPoolState.poolCount, 4);
+  EXPECT_TRUE(outstandingPoolState.diagnostic.empty());
+
+  pools.clear();
+  manager.visitSystemRootChildren([&](MemoryPool* pool) {
+    pools.push_back(pool);
+    return true;
+  });
+  EXPECT_THAT(
+      pools,
+      UnorderedElementsAre(
+          manager.spillPool(),
+          manager.cachePool(),
+          manager.tracePool(),
+          outstandingPool.get()));
+
+  size_t numVisitedPools = 0;
+  manager.visitSystemRootChildren([&](MemoryPool*) {
+    ++numVisitedPools;
+    return false;
+  });
+  EXPECT_EQ(numVisitedPools, 1);
 }
 
 namespace {

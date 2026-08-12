@@ -39,12 +39,12 @@
 
 #include <fmt/format.h>
 #include <folly/Synchronized.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <bolt/common/base/Exceptions.h>
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/SuccinctPrinter.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/memory/MemoryAllocator.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -54,9 +54,6 @@
 #include "folly/Random.h"
 #include "folly/SharedMutex.h"
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
-DECLARE_bool(bolt_memory_pool_debug_enabled);
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 namespace bytedance::bolt::memory {
 #define BOLT_MEM_LOG_PREFIX "[MEM] "
 #define BOLT_MEM_LOG(severity) LOG(severity) << BOLT_MEM_LOG_PREFIX
@@ -76,6 +73,18 @@ namespace bytedance::bolt::memory {
 /// managing the memory pools.
 class MemoryManager {
  public:
+  struct ManagedPoolState {
+    enum class Kind {
+      kOnlySystemPools,
+      kHasOutstandingPools,
+      kInvalidSystemState,
+    };
+
+    Kind kind{Kind::kInvalidSystemState};
+    size_t poolCount{0};
+    std::string diagnostic;
+  };
+
   struct Options {
     Options() {}
     /// Specifies the default memory allocation alignment.
@@ -268,6 +277,15 @@ class MemoryManager {
   /// NOTE: this doesn't count the memory manager's internal default root and
   /// leaf memory pools.
   size_t numPools() const;
+
+  /// Invokes 'visitor' on each direct child of the internal system root pool
+  /// without exposing the root pool itself.
+  void visitSystemRootChildren(
+      const std::function<bool(MemoryPool*)>& visitor) const;
+
+  /// Inspects whether only the internal system pools remain alive. The result
+  /// doesn't prevent pools from being created or destroyed after this call.
+  ManagedPoolState inspectManagedPoolState() const;
 
   MemoryAllocator* allocator();
 

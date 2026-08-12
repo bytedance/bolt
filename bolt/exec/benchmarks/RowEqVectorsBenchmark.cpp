@@ -33,9 +33,12 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_int64(iterations, 1, "run count of each benchmark");
-DEFINE_string(keys, "", "keys to compare equal");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_int64(bolt_benchmark_iterations, 1, "run count of each benchmark");
+DEFINE_string(bolt_benchmark_keys, "", "keys to compare equal");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 
@@ -123,7 +126,7 @@ class rowEqvectorsBenchmark : public OperatorTestBase {
     VectorFuzzer::Options opts;
     opts.vectorSize = kRowsPerVector;
     opts.nullRatio = 0;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
     auto getDictVector = [&](TypePtr type) {
       int dictCount = rand() % kRowsPerVector;
@@ -423,13 +426,21 @@ std::unique_ptr<rowEqvectorsBenchmark> benchmark;
 void doRun(uint32_t it, const std::string& keys, const bool useJit) {
   benchmark->setUseJit(useJit);
   benchmark->prepare(keys);
-  for (int i = 0; i < FLAGS_iterations; i++) {
+  for (int i = 0; i < FLAGS_bolt_benchmark_iterations; i++) {
     benchmark->run();
   }
 }
 
-BENCHMARK_NAMED_PARAM(doRun, rowEQvecBenchmark_noJIT, FLAGS_keys, false);
-BENCHMARK_RELATIVE_NAMED_PARAM(doRun, rowEQvecBenchmark_JIT, FLAGS_keys, true);
+BENCHMARK_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_noJIT,
+    FLAGS_bolt_benchmark_keys,
+    false);
+BENCHMARK_RELATIVE_NAMED_PARAM(
+    doRun,
+    rowEQvecBenchmark_JIT,
+    FLAGS_bolt_benchmark_keys,
+    true);
 BENCHMARK_DRAW_LINE();
 
 // bool_dict

@@ -44,18 +44,33 @@
 #include "bolt/serializers/PrestoSerializer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-DEFINE_int32(width, 16, "Number of parties in shuffle");
-DEFINE_int32(task_width, 4, "Number of threads in each task in shuffle");
+DEFINE_int32(bolt_benchmark_width, 16, "Number of parties in shuffle");
+DEFINE_int32(
+    bolt_benchmark_task_width,
+    4,
+    "Number of threads in each task in shuffle");
 
-DEFINE_int32(num_local_tasks, 8, "Number of concurrent local shuffles");
-DEFINE_int32(num_local_repeat, 8, "Number of repeats of local exchange query");
-DEFINE_int32(flat_batch_mb, 1, "MB in a 10k row flat batch.");
+DEFINE_int32(
+    bolt_benchmark_num_local_tasks,
+    8,
+    "Number of concurrent local shuffles");
+DEFINE_int32(
+    bolt_benchmark_num_local_repeat,
+    8,
+    "Number of repeats of local exchange query");
+DEFINE_int32(bolt_benchmark_flat_batch_mb, 1, "MB in a 10k row flat batch.");
 DEFINE_int64(
-    local_exchange_buffer_mb,
+    bolt_benchmark_local_exchange_buffer_mb,
     32,
     "task-wide buffer in local exchange");
-DEFINE_int64(exchange_buffer_mb, 32, "task-wide buffer in remote exchange");
-DEFINE_int32(dict_pct, 0, "Percentage of columns wrapped in dictionary");
+DEFINE_int64(
+    bolt_benchmark_exchange_buffer_mb,
+    32,
+    "task-wide buffer in remote exchange");
+DEFINE_int32(
+    bolt_benchmark_dict_pct,
+    0,
+    "Percentage of columns wrapped in dictionary");
 // Add the following definitions to allow Clion runs
 DEFINE_bool(gtest_color, false, "");
 DEFINE_string(gtest_filter, "*", "");
@@ -152,7 +167,7 @@ class ExchangeBenchmark : public VectorTestBase {
     BENCHMARK_SUSPEND {
       assert(!vectors.empty());
       configSettings_[core::QueryConfig::kMaxPartitionedOutputBufferSize] =
-          fmt::format("{}", FLAGS_exchange_buffer_mb << 20);
+          fmt::format("{}", FLAGS_bolt_benchmark_exchange_buffer_mb << 20);
       const auto iteration = ++iteration_;
 
       // leafPlan: PartitionedOutput/kPartitioned(1) <-- Values(0)
@@ -284,12 +299,15 @@ class ExchangeBenchmark : public VectorTestBase {
     std::mutex mutex;
     for (int32_t i = 0; i < numTasks; ++i) {
       threads.push_back(std::thread([&]() {
-        for (auto repeat = 0; repeat < FLAGS_num_local_repeat; ++repeat) {
+        for (auto repeat = 0; repeat < FLAGS_bolt_benchmark_num_local_repeat;
+             ++repeat) {
           auto task =
               exec::test::AssertQueryBuilder(plan)
                   .config(
                       core::QueryConfig::kMaxLocalExchangeBufferSize,
-                      fmt::format("{}", FLAGS_local_exchange_buffer_mb << 20))
+                      fmt::format(
+                          "{}",
+                          FLAGS_bolt_benchmark_local_exchange_buffer_mb << 20))
                   .maxDrivers(taskWidth)
                   .assertResults(expected);
           {
@@ -404,7 +422,8 @@ void runBenchmarks() {
   int64_t flatSize = 0;
   // Add enough columns of different types to make a 10K row batch be
   // flat_batch_mb in flat size.
-  while (flatSize * 10000 < static_cast<int64_t>(FLAGS_flat_batch_mb) << 20) {
+  while (flatSize * 10000 <
+         static_cast<int64_t>(FLAGS_bolt_benchmark_flat_batch_mb) << 20) {
     flatNames.push_back(fmt::format("c{}", flatNames.size()));
     assert(!flatNames.empty());
     flatTypes.push_back(typeSelection[flatTypes.size() % typeSelection.size()]);
@@ -442,15 +461,15 @@ void runBenchmarks() {
                 ROW({{"s2_int", INTEGER()}, {"s2_string", VARCHAR()}})))}});
 
   std::vector<RowVectorPtr> flat10k(
-      bm->makeRows(flatType, 10, 10000, FLAGS_dict_pct));
+      bm->makeRows(flatType, 10, 10000, FLAGS_bolt_benchmark_dict_pct));
   std::vector<RowVectorPtr> deep10k(
-      bm->makeRows(deepType, 10, 10000, FLAGS_dict_pct));
+      bm->makeRows(deepType, 10, 10000, FLAGS_bolt_benchmark_dict_pct));
   std::vector<RowVectorPtr> flat50(
-      bm->makeRows(flatType, 2000, 50, FLAGS_dict_pct));
+      bm->makeRows(flatType, 2000, 50, FLAGS_bolt_benchmark_dict_pct));
   std::vector<RowVectorPtr> deep50(
-      bm->makeRows(deepType, 2000, 50, FLAGS_dict_pct));
+      bm->makeRows(deepType, 2000, 50, FLAGS_bolt_benchmark_dict_pct));
   std::vector<RowVectorPtr> struct1k(
-      bm->makeRows(structType, 100, 1000, FLAGS_dict_pct));
+      bm->makeRows(structType, 100, 1000, FLAGS_bolt_benchmark_dict_pct));
 
   int64_t flat10KWallUs;
   PlanNodeStats partitionedOutputStatsFlat10K;
@@ -458,8 +477,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "exchangeFlat10k", [&]() {
     bm->run(
         flat10k,
-        FLAGS_width,
-        FLAGS_task_width,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_task_width,
         flat10KWallUs,
         partitionedOutputStatsFlat10K,
         exchangeStatsFlat10K);
@@ -472,8 +491,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "exchangeFlat50", [&]() {
     bm->run(
         flat50,
-        FLAGS_width,
-        FLAGS_task_width,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_task_width,
         flat50KWallUs,
         partitionedOutputStatsFlat50,
         exchangeStatsFlat50);
@@ -486,8 +505,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "exchangeDeep10k", [&]() {
     bm->run(
         deep10k,
-        FLAGS_width,
-        FLAGS_task_width,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_task_width,
         deep10KWallUs,
         partitionedOutputStatsDeep10K,
         exchangeStatsDeep10K);
@@ -500,8 +519,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "exchangeDeep50", [&]() {
     bm->run(
         deep50,
-        FLAGS_width,
-        FLAGS_task_width,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_task_width,
         deep50KWallUs,
         partitionedOutputStatsDeep50,
         exchangeStatsDeep50);
@@ -514,8 +533,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "exchangeStruct1K", [&]() {
     bm->run(
         struct1k,
-        FLAGS_width,
-        FLAGS_task_width,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_task_width,
         stuct1KWallUs,
         partitionedOutputStatsStruct1K,
         exchangeStatsStruct1K);
@@ -528,8 +547,8 @@ void runBenchmarks() {
   folly::addBenchmark(__FILE__, "localFlat10k", [&]() {
     bm->runLocal(
         flat10k,
-        FLAGS_width,
-        FLAGS_num_local_tasks,
+        FLAGS_bolt_benchmark_width,
+        FLAGS_bolt_benchmark_num_local_tasks,
         localPartitionWallUs,
         localPartitionStatsFlat10K,
         localPartitionWaitStats);

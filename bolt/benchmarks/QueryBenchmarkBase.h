@@ -55,10 +55,10 @@
 #include "bolt/functions/prestosql/registration/RegistrationFunctions.h"
 #include "bolt/parse/TypeResolver.h"
 
-DECLARE_string(test_flags_file);
-DECLARE_bool(include_results);
-DECLARE_bool(include_custom_stats);
-DECLARE_string(data_format);
+DECLARE_string(bolt_benchmark_test_flags_file);
+DECLARE_bool(bolt_benchmark_include_results);
+DECLARE_bool(bolt_benchmark_include_custom_stats);
+DECLARE_string(bolt_benchmark_data_format);
 namespace bytedance::bolt {
 
 struct RunStats {

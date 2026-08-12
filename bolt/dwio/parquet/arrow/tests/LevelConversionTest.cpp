@@ -42,7 +42,6 @@
 #include <string>
 #include <vector>
 
-#include "arrow/testing/gtest_compat.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap.h"
 #include "arrow/util/ubsan.h"
@@ -871,6 +870,67 @@ TEST(NestedListTest, FusedDirectStructListUpperBound) {
           &structOutput),
       ParquetException);
   EXPECT_EQ(lengths[1], -1);
+}
+
+TEST(LevelConversionTest, DefLevelsAreAllValid) {
+  {
+    std::vector<int16_t> def_levels = {3, 3, 3, 3, 3, 3, 3, 3, 3};
+    LevelInfo level_info;
+    level_info.def_level = 3;
+    int64_t values_read = -1;
+    EXPECT_TRUE(DefLevelsAreAllValid(
+        def_levels.data(),
+        def_levels.size(),
+        level_info,
+        def_levels.size(),
+        &values_read));
+    EXPECT_EQ(values_read, def_levels.size());
+  }
+  {
+    std::vector<int16_t> def_levels = {3, 3, 3, 2, 3};
+    LevelInfo level_info;
+    level_info.def_level = 3;
+    int64_t values_read = -1;
+    EXPECT_FALSE(DefLevelsAreAllValid(
+        def_levels.data(),
+        def_levels.size(),
+        level_info,
+        def_levels.size(),
+        &values_read));
+    EXPECT_EQ(values_read, def_levels.size());
+  }
+  {
+    std::vector<int16_t> def_levels = {0, 0, 2, 2, 2, 2, 2, 2, 0, 2};
+    LevelInfo level_info;
+    level_info.rep_level = 1;
+    level_info.repeated_ancestor_def_level = 1;
+    level_info.def_level = 2;
+    int64_t values_read = -1;
+    EXPECT_TRUE(DefLevelsAreAllValid(
+        def_levels.data(), def_levels.size(), level_info, 7, &values_read));
+    EXPECT_EQ(values_read, 7);
+  }
+  {
+    std::vector<int16_t> def_levels = {0, 0, 2, 1, 2, 2, 2, 2};
+    LevelInfo level_info;
+    level_info.rep_level = 1;
+    level_info.repeated_ancestor_def_level = 1;
+    level_info.def_level = 2;
+    int64_t values_read = -1;
+    EXPECT_FALSE(DefLevelsAreAllValid(
+        def_levels.data(), def_levels.size(), level_info, 6, &values_read));
+    EXPECT_EQ(values_read, 6);
+  }
+  {
+    std::vector<int16_t> def_levels = {3, 3, 3};
+    LevelInfo level_info;
+    level_info.def_level = 3;
+    int64_t values_read = -1;
+    EXPECT_THROW(
+        DefLevelsAreAllValid(
+            def_levels.data(), def_levels.size(), level_info, 2, &values_read),
+        ParquetException);
+  }
 }
 
 TEST(TestOnlyExtractBitsSoftware, BasicTest) {

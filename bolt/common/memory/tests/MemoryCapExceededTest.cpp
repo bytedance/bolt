@@ -29,6 +29,7 @@
  */
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MmapAllocator.h"
@@ -40,7 +41,6 @@
 
 #include <re2/re2.h>
 
-DECLARE_bool(bolt_suppress_memory_capacity_exceeding_error_message);
 namespace bytedance::bolt::exec::test {
 namespace {
 

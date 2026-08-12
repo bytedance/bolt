@@ -34,6 +34,7 @@
 #include <gtest/gtest.h>
 
 #include "bolt/common/caching/SsdCache.h"
+#include "bolt/common/testutil/BoltTestFlags.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
@@ -43,7 +44,6 @@
 #include "bolt/vector/tests/utils/VectorMaker.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-DECLARE_bool(bolt_testing_enable_arbitration);
 namespace bytedance::bolt::exec::test {
 class OperatorTestBase : public testing::Test,
                          public bolt::test::VectorTestBase {

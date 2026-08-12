@@ -37,7 +37,6 @@
 #include <gtest/gtest.h>
 
 #include "arrow/api.h"
-#include "arrow/testing/gtest_compat.h"
 
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
 #include "bolt/dwio/parquet/arrow/FileWriter.h"

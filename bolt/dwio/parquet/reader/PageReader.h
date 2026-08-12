@@ -323,6 +323,8 @@ class PageReader {
   // 'hasChunkRepDefs_' is false.
   void readPageDefLevels();
 
+  int32_t appendLeafNullsFromLevels(int32_t begin, int32_t end);
+
   // Returns a pointer to contiguous space for the next 'size' bytes
   // from current position. Copies data into 'copy' if the range
   // straddles buffers. Allocates or resizes 'copy' as needed.
@@ -534,6 +536,8 @@ class PageReader {
 
   // Number of valid bits in 'leafNulls_'
   int64_t leafNullsSize_{0};
+
+  bool leafNullsAllValidPrefix_{true};
 
   // Number of leaf nulls read.
   int64_t numLeafNullsConsumed_{0};

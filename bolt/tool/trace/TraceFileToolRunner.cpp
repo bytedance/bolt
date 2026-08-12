@@ -31,21 +31,22 @@
 #include "bolt/tool/trace/TraceFileToolRunner.h"
 #include "bolt/common/file/FileSystems.h"
 
-DEFINE_string(trace_file_op, "copy", "Operation type of this run");
+DEFINE_string(bolt_trace_file_operation, "copy", "Operation type of this run");
 DEFINE_string(
-    source_root_dir,
+    bolt_trace_file_source_root_dir,
     "",
     "Source root directory of the tracing data, it must be set");
 DEFINE_string(
-    dest_root_dir,
+    bolt_trace_file_destination_root_dir,
     "",
     "Dest root directory, it must be set if the operation type is copy");
-DEFINE_string(trace_query_id, "", "Specify the trace query id");
-DEFINE_string(trace_task_id, "", "Specify the trace task id");
+DEFINE_string(bolt_trace_file_query_id, "", "Specify the trace query id");
+DEFINE_string(bolt_trace_file_task_id, "", "Specify the trace task id");
 namespace bytedance::bolt::tool::trace {
 
 TraceFileToolRunner::TraceFileToolRunner()
-    : sourceRootDir_(FLAGS_source_root_dir), destRootDir_(FLAGS_dest_root_dir) {
+    : sourceRootDir_(FLAGS_bolt_trace_file_source_root_dir),
+      destRootDir_(FLAGS_bolt_trace_file_destination_root_dir) {
   BOLT_USER_CHECK(!sourceRootDir_.empty());
 }
 
@@ -53,38 +54,41 @@ void TraceFileToolRunner::init() {
   filesystems::registerLocalFileSystem();
   sourceFs_ = filesystems::getFileSystem(sourceRootDir_, nullptr);
   BOLT_CHECK_NOT_NULL(sourceFs_);
-  if (FLAGS_trace_file_op == "copy") {
+  if (FLAGS_bolt_trace_file_operation == "copy") {
     BOLT_USER_CHECK(!destRootDir_.empty());
     destFs_ = filesystems::getFileSystem(destRootDir_, nullptr);
     BOLT_CHECK_NOT_NULL(destFs_);
     std::string copyRootDir;
-    if (FLAGS_trace_query_id.empty()) {
+    if (FLAGS_bolt_trace_file_query_id.empty()) {
       BOLT_CHECK(
-          FLAGS_trace_task_id.empty(),
+          FLAGS_bolt_trace_file_task_id.empty(),
           "Trace query ID is empty but trace task ID is not empty");
       copyRootDir = sourceRootDir_;
-    } else if (FLAGS_trace_task_id.empty()) {
-      copyRootDir = fmt::format("{}/{}", sourceRootDir_, FLAGS_trace_query_id);
+    } else if (FLAGS_bolt_trace_file_task_id.empty()) {
+      copyRootDir =
+          fmt::format("{}/{}", sourceRootDir_, FLAGS_bolt_trace_file_query_id);
     } else {
       copyRootDir = fmt::format(
           "{}/{}/{}",
           sourceRootDir_,
-          FLAGS_trace_query_id,
-          FLAGS_trace_task_id);
+          FLAGS_bolt_trace_file_query_id,
+          FLAGS_bolt_trace_file_task_id);
     }
     listFiles(copyRootDir);
   } else {
     BOLT_UNSUPPORTED(
-        "Unsupported trace file operation type {}", FLAGS_trace_file_op);
+        "Unsupported trace file operation type {}",
+        FLAGS_bolt_trace_file_operation);
   }
 }
 
 void TraceFileToolRunner::run() {
-  if (FLAGS_trace_file_op == "copy") {
+  if (FLAGS_bolt_trace_file_operation == "copy") {
     copyFiles();
   } else {
     BOLT_UNSUPPORTED(
-        "Unsupported trace file operation type {}", FLAGS_trace_file_op);
+        "Unsupported trace file operation type {}",
+        FLAGS_bolt_trace_file_operation);
   }
 }
 

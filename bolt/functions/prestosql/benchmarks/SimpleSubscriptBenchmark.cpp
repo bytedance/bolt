@@ -41,9 +41,9 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 size_t static constexpr kIterationCount = 100;
-DEFINE_int32(vector_size, 1000, "vector size");
-DEFINE_double(null_ratio, 0.2, "null ratio");
-DEFINE_int32(container_length, 10, "container length");
+DEFINE_int32(bolt_benchmark_vector_size, 1000, "vector size");
+DEFINE_double(bolt_benchmark_null_ratio, 0.2, "null ratio");
+DEFINE_int32(bolt_benchmark_container_length, 10, "container length");
 namespace bytedance::bolt {
 namespace {
 
@@ -141,15 +141,15 @@ class SimpleSubscriptBenchmark : public functions::test::FunctionBenchmarkBase {
         Array<Varchar>,
         int64_t>({"subscript_simple"});
 
-    opts_.vectorSize = FLAGS_vector_size;
-    opts_.nullRatio = FLAGS_null_ratio;
-    opts_.containerLength = FLAGS_container_length;
+    opts_.vectorSize = FLAGS_bolt_benchmark_vector_size;
+    opts_.nullRatio = FLAGS_bolt_benchmark_null_ratio;
+    opts_.containerLength = FLAGS_bolt_benchmark_container_length;
     opts_.complexElementsMaxSize = 1000000000; // 1GB.
     // We have it false to make sure that we actually generate a valid
     // subscript.
     opts_.containerVariableLength = false;
-    for (int i = 0; i < FLAGS_vector_size; i++) {
-      indicesData_.push_back((i % FLAGS_container_length) + 1);
+    for (int i = 0; i < FLAGS_bolt_benchmark_vector_size; i++) {
+      indicesData_.push_back((i % FLAGS_bolt_benchmark_container_length) + 1);
     }
   }
 

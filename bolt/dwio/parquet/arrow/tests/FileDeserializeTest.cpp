@@ -51,9 +51,11 @@
 
 #include "arrow/io/memory.h"
 #include "arrow/status.h"
-#include "arrow/testing/gtest_util.h"
 #include "arrow/util/compression.h"
 #include "arrow/util/crc32.h"
+
+#include "bolt/common/base/tests/ArrowTestUtils.h"
+
 namespace bytedance::bolt::parquet::arrow {
 
 using ::arrow::io::BufferReader;

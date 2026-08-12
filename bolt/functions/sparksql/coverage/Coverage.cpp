@@ -35,7 +35,10 @@
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/functions/sparksql/window/WindowFunctionsRegistration.h"
 
-DEFINE_bool(all, false, "Generate coverage map for all Spark functions");
+DEFINE_bool(
+    bolt_spark_coverage_all,
+    false,
+    "Generate coverage map for all Spark functions");
 using namespace bytedance::bolt;
 
 int main(int argc, char** argv) {
@@ -50,7 +53,7 @@ int main(int argc, char** argv) {
   // Register Spark window functions.
   functions::window::sparksql::registerWindowFunctions("");
 
-  if (FLAGS_all) {
+  if (FLAGS_bolt_spark_coverage_all) {
     functions::printCoverageMapForAll(":spark");
   } else {
     functions::printBoltFunctions({}, ":spark");

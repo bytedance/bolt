@@ -50,7 +50,7 @@ class DwioFuzzer {
     int32_t steps = 0;
 
     // For how long it should run (in seconds). If zero it executes exactly
-    // --steps iterations and exits.
+    // --bolt_fuzzer_steps iterations and exits.
     int32_t durationSeconds = 0;
 
     bool isAssertArrowData = false;

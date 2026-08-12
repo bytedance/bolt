@@ -39,10 +39,16 @@
 
 #include <iostream>
 
-DEFINE_int64(repeats, 100, "Number of repetitions");
-DEFINE_int64(bytes, 16 * 1024 * 1024, "Bytes to copy in one repetition");
-DEFINE_int64(threads, 8, "Number of threads to use within one copy");
-DEFINE_bool(system_memcpy, true, "Use libc memcpy");
+DEFINE_int64(bolt_testing_repeats, 100, "Number of repetitions");
+DEFINE_int64(
+    bolt_testing_bytes,
+    16 * 1024 * 1024,
+    "Bytes to copy in one repetition");
+DEFINE_int64(
+    bolt_testing_threads,
+    8,
+    "Number of threads to use within one copy");
+DEFINE_bool(bolt_testing_system_memcpy, true, "Use libc memcpy");
 using namespace bytedance::bolt;
 
 uint64_t sum(uint64_t* data, int32_t size) {
@@ -60,7 +66,7 @@ struct CopyCallable {
   Semaphore* FOLLY_NULLABLE sem;
 
   void operator()() {
-    if (FLAGS_system_memcpy) {
+    if (FLAGS_bolt_testing_system_memcpy) {
       memcpy(destination, source, size);
     } else {
       simd::memcpy(destination, source, size);
@@ -74,9 +80,12 @@ int main(int argc, char** argv) {
   // todo: use folly::Init init after upgrade folly lib
   folly::init(&argc, &argv);
   auto chunk = bits::roundUp(
-      std::max<int64_t>(FLAGS_bytes / FLAGS_threads, kAlignment), kAlignment);
-  int64_t bytes = chunk * FLAGS_threads;
-  auto executor = std::make_unique<folly::CPUThreadPoolExecutor>(FLAGS_threads);
+      std::max<int64_t>(
+          FLAGS_bolt_testing_bytes / FLAGS_bolt_testing_threads, kAlignment),
+      kAlignment);
+  int64_t bytes = chunk * FLAGS_bolt_testing_threads;
+  auto executor = std::make_unique<folly::CPUThreadPoolExecutor>(
+      FLAGS_bolt_testing_threads);
   void* other = aligned_alloc(kAlignment, bytes);
   void* source = aligned_alloc(kAlignment, bytes);
   void* destination = aligned_alloc(kAlignment, bytes);
@@ -87,10 +96,10 @@ int main(int argc, char** argv) {
 
   Semaphore sem(0);
   std::vector<CopyCallable> ops;
-  ops.resize(FLAGS_threads);
+  ops.resize(FLAGS_bolt_testing_threads);
   uint64_t totalSum = 0;
   uint64_t totalUsec = 0;
-  for (auto repeat = 0; repeat < FLAGS_repeats; ++repeat) {
+  for (auto repeat = 0; repeat < FLAGS_bolt_testing_repeats; ++repeat) {
     // Read once through 'other' to clear cache effects.
     folly::doNotOptimizeAway(
         totalSum +=
@@ -98,7 +107,7 @@ int main(int argc, char** argv) {
     uint64_t usec = 0;
     {
       MicrosecondTimer timer(&usec);
-      for (auto i = 0; i < FLAGS_threads; ++i) {
+      for (auto i = 0; i < FLAGS_bolt_testing_threads; ++i) {
         int64_t offset1 = chunk * i;
         ops[i].source = reinterpret_cast<char*>(source) + offset1;
         ops[i].destination = reinterpret_cast<char*>(destination) + offset1;
@@ -106,7 +115,7 @@ int main(int argc, char** argv) {
         ops[i].sem = &sem;
         executor->add(ops[i]);
       }
-      for (auto i = 0; i < FLAGS_threads; ++i) {
+      for (auto i = 0; i < FLAGS_bolt_testing_threads; ++i) {
         sem.acquire();
       }
     }
@@ -117,11 +126,12 @@ int main(int argc, char** argv) {
 
   std::cout << fmt::format(
                    "{} repeats {} bytes {} threads: {} usec {} GB/s",
-                   FLAGS_repeats,
+                   FLAGS_bolt_testing_repeats,
                    bytes,
-                   FLAGS_threads,
+                   FLAGS_bolt_testing_threads,
                    totalUsec,
-                   bytes * FLAGS_repeats / static_cast<float>(1 << 30) /
+                   bytes * FLAGS_bolt_testing_repeats /
+                       static_cast<float>(1 << 30) /
                        (static_cast<float>(totalUsec + 1) / 1000000.0))
             << std::endl;
   free(source);

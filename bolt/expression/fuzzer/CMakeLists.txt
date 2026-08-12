@@ -29,10 +29,8 @@ bolt_add_library(bolt_expression_test_utility ArgumentTypeFuzzer.cpp FuzzerToolk
 
 target_link_libraries(bolt_expression_test_utility bolt_type bolt_expression_functions GTest::gtest)
 
-# exclude bolt_expression_fuzzer from bolt_testutils
-# to avoid multiple definition error
 add_library(
-  bolt_expression_fuzzer OBJECT ArgumentTypeFuzzer.cpp ExpressionFuzzer.cpp ExpressionFuzzerVerifier.cpp
+  bolt_expression_fuzzer STATIC ArgumentTypeFuzzer.cpp ExpressionFuzzer.cpp ExpressionFuzzerVerifier.cpp
                          FuzzerRunner.cpp
 )
 
@@ -44,6 +42,7 @@ target_link_libraries(
   bolt_vector_test_lib
   bolt_function_registry
   bolt_expression_test_utility
+  bolt_fuzzer_flags
 )
 
 add_executable(bolt_expression_fuzzer_test ExpressionFuzzerTest.cpp)

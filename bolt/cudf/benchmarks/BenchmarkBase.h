@@ -24,7 +24,7 @@
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
-DEFINE_int32(drivers, 1, "The number of drivers to run a query");
+DEFINE_int32(bolt_benchmark_drivers, 1, "The number of drivers to run a query");
 
 namespace {
 constexpr const double nsToMs(const uint64_t ns) {
@@ -62,7 +62,7 @@ class BenchmarkBase {
     folly::addBenchmark(__FILE__, this->name(), [this]() {
       std::shared_ptr<bytedance::bolt::exec::Task> task;
       bytedance::bolt::exec::test::AssertQueryBuilder(this->plan_)
-          .maxDrivers(FLAGS_drivers)
+          .maxDrivers(FLAGS_bolt_benchmark_drivers)
           .runWithoutResults(task);
 
       folly::BenchmarkSuspender benchSuspender;

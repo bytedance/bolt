@@ -35,6 +35,7 @@
 #include "bolt/common/memory/MmapAllocator.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/exec/Exchange.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/LocalExchangeSource.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
@@ -49,36 +50,6 @@
 
 #include <fstream>
 
-DEFINE_int32(max_tasks_per_stage, 16, "Max number of sources/destinations");
-DEFINE_int32(drivers_per_task, 4, "Number of threads in each task in shuffle");
-DEFINE_int64(shuffle_bytes, 4UL << 30, "Shuffle data volume in each step");
-DEFINE_int32(max_buffer_mb, 20, "Max buffer size for output/exchange per task");
-DEFINE_uint64(seed, 0, "Seed, 0 means random");
-
-DEFINE_int32(steps, 10, "Number of plans to generate and test.");
-
-DEFINE_int32(duration_sec, 0, "Run duration in seconds");
-
-DEFINE_bool(inject_failure, false, "Inject a failure for testing repro");
-
-DEFINE_string(
-    repro_path,
-    ".",
-    "Path for writing repro files in case of failure");
-
-DEFINE_string(
-    replay,
-    "",
-    "File to replay. Files are produced on failure in --repro_path");
-
-DEFINE_bool(
-    enable_oom_injection,
-    false,
-    "When enabled OOMs will randomly be triggered while executing query "
-    "plans. The goal of this mode is to ensure unexpected exceptions "
-    "aren't thrown and the process isn't killed in the process of cleaning "
-    "up after failures. Therefore, results are not compared when this is "
-    "enabled. Note that this option only works in debug builds.");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
@@ -212,7 +183,7 @@ class ExchangeFuzzer : public VectorTestBase {
       ScopedOOMInjector oomInjector(
           []() -> bool { return folly::Random::oneIn(10); },
           10); // Check the condition every 10 ms.
-      if (FLAGS_enable_oom_injection) {
+      if (FLAGS_bolt_fuzzer_enable_oom_injection) {
         oomInjector.enable();
       }
 
@@ -224,11 +195,11 @@ class ExchangeFuzzer : public VectorTestBase {
 
       assertEqualResults({expected}, result);
 
-      if (FLAGS_inject_failure) {
+      if (FLAGS_bolt_fuzzer_inject_failure) {
         BOLT_FAIL("Testing error");
       }
     } catch (const std::exception& e) {
-      if (FLAGS_enable_oom_injection) {
+      if (FLAGS_bolt_fuzzer_enable_oom_injection) {
         // If we enabled OOM injection go through the tasks to see if any threw
         // an exception other than the one we expect the ScopedOOMInjector to
         // have thrown.  We log the first instance of an unexpected exception we
@@ -301,7 +272,7 @@ class ExchangeFuzzer : public VectorTestBase {
   }
 
   /// Runs multiple test cases up to first failure. Duration is either in
-  /// --duratin_sec or --steps.
+  /// --duratin_sec or --bolt_fuzzer_steps.
   void run() {
     auto start = getCurrentTimeMicro();
     for (auto counter = 0;; ++counter) {
@@ -315,14 +286,15 @@ class ExchangeFuzzer : public VectorTestBase {
       allNames.insert(allNames.end(), names.begin(), names.end());
       auto rowType = ROW(std::move(allNames), std::move(allTypes));
       Params params;
-      params.numDriversPerTask = FLAGS_drivers_per_task;
-      params.outputBufferBytes = randInt(4, std::max(5, FLAGS_max_buffer_mb))
-          << 20;
-      params.exchangeBufferBytes = randInt(4, std::max(5, FLAGS_max_buffer_mb))
-          << 20;
+      params.numDriversPerTask = FLAGS_bolt_fuzzer_drivers_per_task;
+      params.outputBufferBytes =
+          randInt(4, std::max(5, FLAGS_bolt_fuzzer_max_buffer_mb)) << 20;
+      params.exchangeBufferBytes =
+          randInt(4, std::max(5, FLAGS_bolt_fuzzer_max_buffer_mb)) << 20;
       params.batchBytes = randInt(100000, 10000000);
-      params.numSourceTasks = randInt(1, FLAGS_max_tasks_per_stage);
-      params.numDestinationTasks = randInt(2, FLAGS_max_tasks_per_stage);
+      params.numSourceTasks = randInt(1, FLAGS_bolt_fuzzer_max_tasks_per_stage);
+      params.numDestinationTasks =
+          randInt(2, FLAGS_bolt_fuzzer_max_tasks_per_stage);
 
       options_.vectorSize = 100;
       options_.nullRatio = 0;
@@ -346,23 +318,24 @@ class ExchangeFuzzer : public VectorTestBase {
 
       // We make a first vector of 100 elements to see the bytes per
       // row. We then make as many vectors as it takes to reach a
-      // shuffle volume of --shuffle_bytes. Each row is produced once
-      // by each Driver in each task of the source
-      // stage. 'shuffledBytesPerRow' is the row size times source
-      // stage task count times drivers per task.
+      // shuffle volume of --bolt_fuzzer_shuffle_bytes. Each row is produced
+      // once by each Driver in each task of the source stage.
+      // 'shuffledBytesPerRow' is the row size times source stage task count
+      // times drivers per task.
       auto row = fuzzer_.fuzzInputRow(rowType);
       size_t shuffleBytes = row->estimateFlatSize();
       size_t shufledBytesPerRow = 20 +
           (shuffleBytes / row->size() * params.numSourceTasks *
-           FLAGS_drivers_per_task);
+           FLAGS_bolt_fuzzer_drivers_per_task);
       std::vector<RowVectorPtr> vectors;
 
       vectors.push_back(row);
       auto maxBatch = std::min<int32_t>(
           10000,
-          std::max<int64_t>(10, FLAGS_shuffle_bytes / shufledBytesPerRow));
+          std::max<int64_t>(
+              10, FLAGS_bolt_fuzzer_shuffle_bytes / shufledBytesPerRow));
 
-      while (shuffleBytes < FLAGS_shuffle_bytes) {
+      while (shuffleBytes < FLAGS_bolt_fuzzer_shuffle_bytes) {
         if (fuzzer_.coinToss(0.2)) {
           options_.nullRatio = 0;
         } else {
@@ -375,7 +348,7 @@ class ExchangeFuzzer : public VectorTestBase {
         auto newRow = fuzzer_.fuzzInputRow(rowType);
         vectors.push_back(newRow);
         auto newSize = newRow->estimateFlatSize() * params.numSourceTasks *
-            FLAGS_drivers_per_task;
+            FLAGS_bolt_fuzzer_drivers_per_task;
         shuffleBytes += newSize;
       }
 
@@ -387,12 +360,13 @@ class ExchangeFuzzer : public VectorTestBase {
                 << succinctBytes(memory::AllocationTraits::pageBytes(
                        memory::memoryManager()->allocator()->numAllocated()));
 
-      if (FLAGS_duration_sec == 0 && FLAGS_steps &&
-          counter + 1 >= FLAGS_steps) {
+      if (FLAGS_bolt_fuzzer_duration_sec == 0 && FLAGS_bolt_fuzzer_steps &&
+          counter + 1 >= FLAGS_bolt_fuzzer_steps) {
         break;
       }
-      if (FLAGS_duration_sec &&
-          (getCurrentTimeMicro() - start) / 1000000 > FLAGS_duration_sec) {
+      if (FLAGS_bolt_fuzzer_duration_sec &&
+          (getCurrentTimeMicro() - start) / 1000000 >
+              FLAGS_bolt_fuzzer_duration_sec) {
         break;
       }
       size_t newSeed = randInt(0, 2000000000);
@@ -404,7 +378,7 @@ class ExchangeFuzzer : public VectorTestBase {
   }
 
   bool replay() {
-    std::ifstream in(FLAGS_replay);
+    std::ifstream in(FLAGS_bolt_fuzzer_replay);
     Params params;
     in >> params.numSourceTasks;
     in >> params.numDestinationTasks;
@@ -437,13 +411,13 @@ class ExchangeFuzzer : public VectorTestBase {
 
  private:
   void saveRepro(const std::vector<RowVectorPtr>& vectors, Params params) {
-    if (!FLAGS_replay.empty()) {
-      LOG(INFO) << "No replay saved since --replay is specified";
+    if (!FLAGS_bolt_fuzzer_replay.empty()) {
+      LOG(INFO) << "No replay saved since --bolt_fuzzer_replay is specified";
       return;
     }
 
-    auto filePath =
-        fmt::format("{}/exchange_fuzzer_repro.{}", FLAGS_repro_path, getpid());
+    auto filePath = fmt::format(
+        "{}/exchange_fuzzer_repro.{}", FLAGS_bolt_fuzzer_repro_path, getpid());
     std::ofstream out(filePath, std::ofstream::binary);
     out << params.numSourceTasks << " " << params.numDestinationTasks << " "
         << params.numDriversPerTask << " " << params.outputBufferBytes << " "
@@ -453,7 +427,7 @@ class ExchangeFuzzer : public VectorTestBase {
       saveVector(*vector, out);
     }
     LOG(ERROR)
-        << "Saved repro. To replay, do bolt_exchange_fuzzer_test --replay "
+        << "Saved repro. To replay, do bolt_exchange_fuzzer_test --bolt_fuzzer_replay "
         << filePath;
   }
 
@@ -553,12 +527,12 @@ int main(int argc, char** argv) {
 
   ExchangeFuzzer fuzzer;
 
-  if (!FLAGS_replay.empty()) {
+  if (!FLAGS_bolt_fuzzer_replay.empty()) {
     return fuzzer.replay() ? 0 : 1;
   }
-  if (FLAGS_seed != 0) {
-    LOG(INFO) << "Starting  from user supplied seed " << FLAGS_seed;
-    fuzzer.seed(FLAGS_seed);
+  if (FLAGS_bolt_fuzzer_seed != 0) {
+    LOG(INFO) << "Starting  from user supplied seed " << FLAGS_bolt_fuzzer_seed;
+    fuzzer.seed(FLAGS_bolt_fuzzer_seed);
   } else {
     size_t seed = getCurrentTimeMicro();
     LOG(INFO) << "Generating initial seed " << seed;

@@ -37,6 +37,7 @@
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 #include "bolt/exec/fuzzer/DuckQueryRunner.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/fuzzer/PrestoQueryRunner.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/expression/SignatureBinder.h"
@@ -44,81 +45,6 @@
 #include "bolt/vector/VectorSaver.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int32(steps, 10, "Number of plans to generate and execute.");
-
-DEFINE_int32(
-    duration_sec,
-    0,
-    "For how long it should run (in seconds). If zero, "
-    "it executes exactly --steps iterations and exits.");
-
-DEFINE_int32(
-    batch_size,
-    100,
-    "The number of elements on each generated vector.");
-
-DEFINE_int32(num_batches, 10, "The number of generated vectors.");
-
-DEFINE_int32(
-    max_num_varargs,
-    5,
-    "The maximum number of variadic arguments fuzzer will generate for "
-    "functions that accept variadic arguments. Fuzzer will generate up to "
-    "max_num_varargs arguments for the variadic list in addition to the "
-    "required arguments by the function.");
-
-DEFINE_double(
-    null_ratio,
-    0.1,
-    "Chance of adding a null constant to the plan, or null value in a vector "
-    "(expressed as double from 0 to 1).");
-
-DEFINE_string(
-    repro_persist_path,
-    "",
-    "Directory path for persistence of data and SQL when fuzzer fails for "
-    "future reproduction. Empty string disables this feature.");
-
-DEFINE_bool(
-    persist_and_run_once,
-    false,
-    "Persist repro info before evaluation and only run one iteration. "
-    "This is to rerun with the seed number and persist repro info upon a "
-    "crash failure. Only effective if repro_persist_path is set.");
-
-DEFINE_bool(
-    log_signature_stats,
-    false,
-    "Log statistics about function signatures");
-
-DEFINE_bool(
-    enable_oom_injection,
-    false,
-    "When enabled OOMs will randomly be triggered while executing query "
-    "plans. The goal of this mode is to ensure unexpected exceptions "
-    "aren't thrown and the process isn't killed in the process of cleaning "
-    "up after failures. Therefore, results are not compared when this is "
-    "enabled. Note that this option only works in debug builds.");
-
-DEFINE_int32(string_length, 100, "The max length of generated strings.");
-
-DEFINE_bool(
-    string_variable_length,
-    false,
-    "Whether to generate variable lengths of strings,"
-    "or all the generated strings should have the same length.");
-
-DEFINE_bool(
-    enable_string_incremental_generation,
-    false,
-    "Whether the generated strings could share common substrings.");
-
-DEFINE_bool(
-    enable_duplicates,
-    false,
-    "Whether to allow duplicated data (i.e., reuse already generated tests).");
-
-DEFINE_bool(enable_dictionary, true, "Whether to allow dictionary encoding.");
 namespace bytedance::bolt::exec::test {
 
 int32_t AggregationFuzzerBase::randInt(int32_t min, int32_t max) {
@@ -234,7 +160,7 @@ AggregationFuzzerBase::pickSignature() {
     signature.name = signatureTemplate.name;
     bolt::fuzzer::ArgumentTypeFuzzer typeFuzzer(
         *signatureTemplate.signature, rng_);
-    BOLT_CHECK(typeFuzzer.fuzzArgumentTypes(FLAGS_max_num_varargs));
+    BOLT_CHECK(typeFuzzer.fuzzArgumentTypes(FLAGS_bolt_fuzzer_max_num_varargs));
     signature.args = typeFuzzer.argumentTypes();
   }
 
@@ -308,7 +234,7 @@ std::vector<RowVectorPtr> AggregationFuzzerBase::generateInputData(
 
   auto inputType = ROW(std::move(names), std::move(types));
   std::vector<RowVectorPtr> input;
-  for (auto i = 0; i < FLAGS_num_batches; ++i) {
+  for (auto i = 0; i < FLAGS_bolt_fuzzer_num_batches; ++i) {
     std::vector<VectorPtr> children;
 
     if (generator != nullptr) {
@@ -344,7 +270,7 @@ std::vector<RowVectorPtr> AggregationFuzzerBase::generateInputDataWithRowNumber(
   auto size = vectorFuzzer_.getOptions().vectorSize;
   bolt::test::VectorMaker vectorMaker{pool_.get()};
   int64_t rowNumber = 0;
-  for (auto j = 0; j < FLAGS_num_batches; ++j) {
+  for (auto j = 0; j < FLAGS_bolt_fuzzer_num_batches; ++j) {
     std::vector<VectorPtr> children;
 
     if (generator != nullptr) {
@@ -391,7 +317,7 @@ AggregationFuzzerBase::PlanWithSplits AggregationFuzzerBase::deserialize(
 }
 
 void AggregationFuzzerBase::printSignatureStats() {
-  if (!FLAGS_log_signature_stats) {
+  if (!FLAGS_bolt_fuzzer_log_signature_stats) {
     return;
   }
 
@@ -461,7 +387,7 @@ bolt::fuzzer::ResultOrError AggregationFuzzerBase::execute(
     ScopedOOMInjector oomInjector(
         []() -> bool { return folly::Random::oneIn(10); },
         10); // Check the condition every 10 ms.
-    if (FLAGS_enable_oom_injection) {
+    if (FLAGS_bolt_fuzzer_enable_oom_injection) {
       oomInjector.enable();
     }
 
@@ -473,7 +399,7 @@ bolt::fuzzer::ResultOrError AggregationFuzzerBase::execute(
     // fuzzer test inputs.
     resultOrError.userExceptionPtr = std::current_exception();
   } catch (BoltRuntimeError& e) {
-    if (FLAGS_enable_oom_injection &&
+    if (FLAGS_bolt_fuzzer_enable_oom_injection &&
         e.errorCode() == bytedance::bolt::error_code::kMemCapExceeded &&
         e.message() == ScopedOOMInjector::kErrorMessage) {
       // If we enabled OOM injection we expect the exception thrown by the
@@ -562,7 +488,7 @@ void AggregationFuzzerBase::compare(
     const std::vector<std::shared_ptr<ResultVerifier>>& customVerifiers,
     const bolt::fuzzer::ResultOrError& expected) {
   // Compare results or exceptions (if any). Fail is anything is different.
-  if (FLAGS_enable_oom_injection) {
+  if (FLAGS_bolt_fuzzer_enable_oom_injection) {
     // If OOM injection is enabled and we've made it this far and the test
     // is considered a success.  We don't bother checking the results.
     return;

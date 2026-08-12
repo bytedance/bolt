@@ -1631,12 +1631,11 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     bool shouldThrow;
     // Substring to match against the thrown error. Defaults to the
     // BoltUserError raised by ReaderBase::convertType via
-    // BOLT_SCHEMA_MISMATCH_ERROR (same error code as DWRF/ORC, same
-    // "Schema mismatch, ..., From Kind: X, To Kind: Y" layout).
+    // BOLT_SCHEMA_MISMATCH_ERROR with a Parquet-specific stable prefix.
     // Override when a case is rejected by a later layer with a
     // different message (e.g. ParquetColumnReader::matchType in
     // non-Spark builds).
-    const char* errMsg = "Schema mismatch";
+    const char* errMsg = kParquetTypeMappingErrorPrefix;
   };
 
   // clang-format off

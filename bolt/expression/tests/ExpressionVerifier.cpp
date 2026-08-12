@@ -255,7 +255,7 @@ fuzzer::ResultOrError ExpressionVerifier::verify(
     // persist repro info for crash failures. But if it hasn't crashed by now,
     // we still don't want another iteration.
     LOG(WARNING)
-        << "Iteration succeeded with --persist_and_run_once flag enabled "
+        << "Iteration succeeded with --bolt_fuzzer_persist_and_run_once flag enabled "
            "(expecting crash failure)";
     exit(0);
   }
@@ -360,17 +360,17 @@ void ExpressionVerifier::persistReproInfo(
   }
 
   std::stringstream ss;
-  ss << "Persisted input: --fuzzer_repro_path " << dirPath.value();
-  ss << " --input_path " << inputPath;
+  ss << "Persisted input: --bolt_testing_fuzzer_repro_path " << dirPath.value();
+  ss << " --bolt_testing_input_path " << inputPath;
   if (resultVector) {
-    ss << " --result_path " << resultPath;
+    ss << " --bolt_testing_result_path " << resultPath;
   }
-  ss << " --sql_path " << sqlPath;
+  ss << " --bolt_testing_sql_path " << sqlPath;
   if (!columnsToWrapInLazy.empty()) {
-    ss << " --lazy_column_list_path " << lazyListPath;
+    ss << " --bolt_testing_lazy_column_list_path " << lazyListPath;
   }
   if (!complexConstants.empty()) {
-    ss << " --complex_constant_path " << complexConstantsPath;
+    ss << " --bolt_testing_complex_constant_path " << complexConstantsPath;
   }
   LOG(INFO) << ss.str();
 }

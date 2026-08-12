@@ -40,6 +40,7 @@
 #include "arrow/util/bit_util.h"
 #include "arrow/util/cpu_info.h"
 #include "arrow/util/logging.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/dwio/parquet/arrow/Exception.h"
 
 #include "bolt/dwio/parquet/arrow/LevelComparison.h"
@@ -295,6 +296,58 @@ void DefRepLevelsToListInfo(
   }
 }
 
+struct AllValidResult {
+  int64_t valuesRead{0};
+  bool allValid{true};
+};
+
+AllValidResult DefLevelsAreAllValidWithRepeatedParent(
+    const int16_t* def_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info) {
+  AllValidResult result;
+  constexpr int64_t kBatch = xsimd::batch<int16_t>::size;
+  const auto ancestorLevel =
+      xsimd::broadcast<int16_t>(level_info.repeated_ancestor_def_level - 1);
+  const auto validLevel = xsimd::broadcast<int16_t>(level_info.def_level - 1);
+  int64_t i = 0;
+  for (; i + kBatch <= num_def_levels; i += kBatch) {
+    const auto levels = xsimd::load_unaligned(def_levels + i);
+    const auto presentMask = simd::toBitMask(levels > ancestorLevel);
+    if (presentMask == 0) {
+      continue;
+    }
+    result.valuesRead += __builtin_popcount(presentMask);
+    result.allValid &=
+        (simd::toBitMask(levels > validLevel) & presentMask) == presentMask;
+  }
+  for (; i < num_def_levels; ++i) {
+    if (def_levels[i] >= level_info.repeated_ancestor_def_level) {
+      result.allValid &= def_levels[i] >= level_info.def_level;
+      ++result.valuesRead;
+    }
+  }
+  return result;
+}
+
+bool DefLevelsAreAllValidNoRepeatedParent(
+    const int16_t* def_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info) {
+  bool allValid = true;
+  constexpr int64_t kBatch = xsimd::batch<int16_t>::size;
+  const auto validLevel = xsimd::broadcast<int16_t>(level_info.def_level - 1);
+  int64_t i = 0;
+  for (; i + kBatch <= num_def_levels; i += kBatch) {
+    const auto levels = xsimd::load_unaligned(def_levels + i);
+    allValid &= simd::toBitMask(levels > validLevel) == ((1 << kBatch) - 1);
+  }
+  for (; i < num_def_levels; ++i) {
+    allValid &= def_levels[i] >= level_info.def_level;
+  }
+  return allValid;
+}
+
 } // namespace
 
 #if defined(ARROW_HAVE_RUNTIME_BMI2)
@@ -326,6 +379,28 @@ void DefLevelsToBitmap(
     internal::standard::DefLevelsToBitmapSimd</*has_repeated_parent=*/false>(
         def_levels, num_def_levels, level_info, output);
   }
+}
+
+bool DefLevelsAreAllValid(
+    const int16_t* def_levels,
+    int64_t num_def_levels,
+    LevelInfo level_info,
+    int64_t values_read_upper_bound,
+    int64_t* values_read) {
+  AllValidResult result;
+  if (level_info.rep_level > 0) {
+    result = DefLevelsAreAllValidWithRepeatedParent(
+        def_levels, num_def_levels, level_info);
+  } else {
+    result.valuesRead = num_def_levels;
+    result.allValid = DefLevelsAreAllValidNoRepeatedParent(
+        def_levels, num_def_levels, level_info);
+  }
+  if (ARROW_PREDICT_FALSE(result.valuesRead > values_read_upper_bound)) {
+    throw ParquetException("Values read exceeded upper bound");
+  }
+  *values_read = result.valuesRead;
+  return result.allValid;
 }
 
 uint64_t TestOnlyExtractBitsSoftware(uint64_t bitmap, uint64_t select_bitmap) {

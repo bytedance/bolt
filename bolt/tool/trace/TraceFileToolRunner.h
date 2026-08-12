@@ -36,11 +36,11 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/file/Utils.h"
 
-DECLARE_string(source_root_dir);
-DECLARE_string(dest_root_dir);
-DECLARE_string(trace_file_op);
-DECLARE_string(trace_query_id);
-DECLARE_string(trace_task_id);
+DECLARE_string(bolt_trace_file_source_root_dir);
+DECLARE_string(bolt_trace_file_destination_root_dir);
+DECLARE_string(bolt_trace_file_operation);
+DECLARE_string(bolt_trace_file_query_id);
+DECLARE_string(bolt_trace_file_task_id);
 namespace bytedance::bolt::tool::trace {
 
 /// The trace replay runner. It is configured through a set of gflags passed

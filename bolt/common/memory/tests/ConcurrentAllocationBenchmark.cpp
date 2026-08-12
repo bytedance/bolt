@@ -35,25 +35,31 @@
 #include "bolt/common/time/Timer.h"
 
 DEFINE_uint64(
-    max_memory_bytes,
+    bolt_benchmark_max_memory_bytes,
     1'000'000'000,
     "The cap of memory size in bytes");
-DEFINE_uint64(allocation_size, 4096, "The memory allocation size in bytes");
-DEFINE_uint32(num_memory_threads, 64, "The number of memory thread");
+DEFINE_uint64(
+    bolt_benchmark_allocation_size,
+    4096,
+    "The memory allocation size in bytes");
 DEFINE_uint32(
-    num_allocations_per_thread,
+    bolt_benchmark_num_memory_threads,
+    64,
+    "The number of memory thread");
+DEFINE_uint32(
+    bolt_benchmark_num_allocations_per_thread,
     50'000,
     "The number of allocations per each memory thread");
 DEFINE_uint32(
-    memory_allocator_type,
+    bolt_benchmark_memory_allocator_type,
     0,
     "The type of memory allocator. 0 is malloc allocator, 1 is mmap allocator");
 DEFINE_uint32(
-    memory_allocation_type,
+    bolt_benchmark_memory_allocation_type,
     0,
     "The type of memory allocation. 0 is small allocation, 1 non-contiguous allocation");
-DEFINE_uint32(
-    num_runs,
+DEFINE_int32(
+    bolt_benchmark_num_runs,
     32,
     "The number of benchmark runs and reports the average results");
 using namespace bytedance::bolt;
@@ -115,7 +121,7 @@ class MemoryOperator {
 
   const uint64_t maxMemory_;
   const size_t allocationBytes_;
-  const uint32_t allocationType_{FLAGS_memory_allocation_type};
+  const uint32_t allocationType_{FLAGS_bolt_benchmark_memory_allocation_type};
   const uint32_t maxOps_;
   const std::shared_ptr<MemoryPool> pool_;
 
@@ -311,15 +317,15 @@ void MemoryAllocationBenchMark::printStats() {
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   MemoryAllocationBenchMark::Options options;
-  options.numThreads = FLAGS_num_memory_threads;
-  options.maxMemory = FLAGS_max_memory_bytes;
-  options.allocationBytes = FLAGS_allocation_size;
-  options.allocatorType = FLAGS_memory_allocator_type == 0
+  options.numThreads = FLAGS_bolt_benchmark_num_memory_threads;
+  options.maxMemory = FLAGS_bolt_benchmark_max_memory_bytes;
+  options.allocationBytes = FLAGS_bolt_benchmark_allocation_size;
+  options.allocatorType = FLAGS_bolt_benchmark_memory_allocator_type == 0
       ? MemoryAllocationBenchMark::Type::kMalloc
       : MemoryAllocationBenchMark::Type::kMmap;
-  options.numOpsPerThread = FLAGS_num_allocations_per_thread;
+  options.numOpsPerThread = FLAGS_bolt_benchmark_num_allocations_per_thread;
   auto benchmark = std::make_unique<MemoryAllocationBenchMark>(options);
-  for (int i = 0; i < FLAGS_num_runs; ++i) {
+  for (int i = 0; i < FLAGS_bolt_benchmark_num_runs; ++i) {
     benchmark->run();
   }
   benchmark->printStats();

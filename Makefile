@@ -79,6 +79,12 @@ BUILD_VERSION ?= main
 PROFILE ?= default
 BUILD_TYPE=Release
 
+# BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
+# empty value disables automatic selection.
+ifneq ($(origin BOLT_LINKER), undefined)
+export BOLT_LINKER
+endif
+
 # Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
 # Control whether to build benchmarks
 BOLT_BUILD_BENCHMARKS ?= "OFF"
@@ -154,7 +160,7 @@ endif
 
 CPU_TARGET ?= "avx"
 
-PYTHON_EXECUTABLE ?= $(shell which python)
+PYTHON_EXECUTABLE ?= $(shell which python3)
 
 all: 			#: Build the release version
 	$(MAKE) release
@@ -177,10 +183,23 @@ conan_install:
 	git rev-parse HEAD && \
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
+	$(PYTHON_EXECUTABLE) ../../scripts/select-conan-linker.py \
+	   --output conan-linker.options -- \
+	   conan profile show \
+	   -pr:h ${PROFILE} \
+	   -pr:h ../../scripts/conan/bolt.profile \
+	   -s llvm-core/*:build_type=Release \
+	   -s "&:build_type=${BUILD_TYPE}" \
+	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	   ${CONAN_OPTIONS} ${CONAN_OVERRIDE} ${CONAN_CONFIG} \
+	   --format=json && \
+	read CONAN_LINKER_OPTIONS < conan-linker.options && \
 	echo " \
 	-pr:h ${PROFILE} \
 	-pr:h ../../scripts/conan/bolt.profile \
-	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
+	${CONAN_OPTIONS} ${CONAN_OVERRIDE} \
+	$${CONAN_LINKER_OPTIONS}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
 	  echo "Conan options and build type unchanged; preserving CMakeCache.txt"; \
@@ -207,6 +226,7 @@ conan_install:
 
 conan_build: conan_install
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
@@ -220,6 +240,7 @@ conan_build: conan_install
 
 _compile_db: conan_install
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
 	NUM_THREADS=$(NUM_THREADS) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
@@ -244,6 +265,7 @@ compile_db_all:
 
 export_base:
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
 	conan export-pkg --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
 	 $${ALL_CONAN_OPTIONS} \

@@ -37,22 +37,21 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include "bolt/exec/TaskTraceReader.h"
 
-DECLARE_string(root_dir);
-DECLARE_bool(summary);
-DECLARE_bool(short_summary);
-DECLARE_string(query_id);
-DECLARE_string(task_id);
-DECLARE_string(node_id);
-DECLARE_int32(driver_id);
-DECLARE_string(driver_ids);
-DECLARE_string(table_writer_output_dir);
-DECLARE_double(hive_connector_executor_hw_multiplier);
-DECLARE_int32(shuffle_serialization_format);
-DECLARE_uint64(query_memory_capacity_mb);
-DECLARE_double(driver_cpu_executor_hw_multiplier);
-DECLARE_string(memory_arbitrator_type);
-DECLARE_bool(copy_results);
-DECLARE_string(function_prefix);
+DECLARE_string(bolt_trace_replay_root_dir);
+DECLARE_bool(bolt_trace_replay_summary);
+DECLARE_bool(bolt_trace_replay_short_summary);
+DECLARE_string(bolt_trace_replay_query_id);
+DECLARE_string(bolt_trace_replay_task_id);
+DECLARE_string(bolt_trace_replay_node_id);
+DECLARE_string(bolt_trace_replay_driver_ids);
+DECLARE_string(bolt_trace_replay_table_writer_output_dir);
+DECLARE_double(bolt_trace_replay_hive_connector_executor_hw_multiplier);
+DECLARE_int32(bolt_trace_replay_shuffle_serialization_format);
+DECLARE_uint64(bolt_trace_replay_query_memory_capacity_mb);
+DECLARE_double(bolt_trace_replay_driver_cpu_executor_hw_multiplier);
+DECLARE_string(bolt_trace_replay_memory_arbitrator_type);
+DECLARE_bool(bolt_trace_replay_copy_results);
+DECLARE_string(bolt_trace_replay_function_prefix);
 namespace bytedance::bolt::tool::trace {
 
 /// The trace replay runner. It is configured through a set of gflags passed

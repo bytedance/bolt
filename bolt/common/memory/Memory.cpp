@@ -41,6 +41,7 @@
 namespace bytedance::bolt::memory {
 namespace {
 constexpr std::string_view kSysRootName{"__sys_root__"};
+constexpr size_t kNumSystemPools{3};
 
 struct SingletonState {
   ~SingletonState() {
@@ -393,6 +394,63 @@ size_t MemoryManager::numPools() const {
     numPools += pools_.size();
   }
   return numPools;
+}
+
+void MemoryManager::visitSystemRootChildren(
+    const std::function<bool(MemoryPool*)>& visitor) const {
+  sysRoot_->visitChildren(visitor);
+}
+
+MemoryManager::ManagedPoolState MemoryManager::inspectManagedPoolState() const {
+  const auto poolCount = numPools();
+  if (poolCount > kNumSystemPools) {
+    return {ManagedPoolState::Kind::kHasOutstandingPools, poolCount, {}};
+  }
+  if (poolCount < kNumSystemPools) {
+    return {
+        ManagedPoolState::Kind::kInvalidSystemState,
+        poolCount,
+        "Unreachable code"};
+  }
+
+  int32_t spillPoolCount = 0;
+  int32_t cachePoolCount = 0;
+  int32_t tracePoolCount = 0;
+  visitSystemRootChildren([&](MemoryPool* child) -> bool {
+    if (child == spillPool_.get()) {
+      ++spillPoolCount;
+    }
+    if (child == cachePool_.get()) {
+      ++cachePoolCount;
+    }
+    if (child == tracePool_.get()) {
+      ++tracePoolCount;
+    }
+    return true;
+  });
+
+  if (spillPoolCount != 1) {
+    return {
+        ManagedPoolState::Kind::kInvalidSystemState,
+        poolCount,
+        fmt::format(
+            "Illegal pool count state: spillPoolCount: {}", spillPoolCount)};
+  }
+  if (cachePoolCount != 1) {
+    return {
+        ManagedPoolState::Kind::kInvalidSystemState,
+        poolCount,
+        fmt::format(
+            "Illegal pool count state: cachePoolCount: {}", cachePoolCount)};
+  }
+  if (tracePoolCount != 1) {
+    return {
+        ManagedPoolState::Kind::kInvalidSystemState,
+        poolCount,
+        fmt::format(
+            "Illegal pool count state: tracePoolCount: {}", tracePoolCount)};
+  }
+  return {ManagedPoolState::Kind::kOnlySystemPools, poolCount, {}};
 }
 
 MemoryAllocator* MemoryManager::allocator() {

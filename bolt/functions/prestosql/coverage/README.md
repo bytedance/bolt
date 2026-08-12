@@ -11,7 +11,7 @@ Bolt documentation.
 Generates a list of Presto functions available in Bolt. The output
 to be copy-pasted into bolt/docs/functions.rst file.
 
-> bolt_prestosql_coverage --all
+> bolt_prestosql_coverage --bolt_presto_coverage_all
 
 Generates coverage map using all Presto functions. The output to be copy-pasted
 into bolt/docs/functions/coverage.rst file. The functions appear in alphabetical order.
@@ -27,7 +27,7 @@ the executable so that these files are picked up correctly.
 
 These files were created using output of SHOW FUNCTIONS Presto command.
 
-> bolt_prestosql_coverage --most_used
+> bolt_prestosql_coverage --bolt_presto_coverage_most_used
 
 Generates coverage map using a subset of most used Presto functions. The output
 to be copy-pasted into bolt/docs/functions/most_used_coverage.rst file. The functions
