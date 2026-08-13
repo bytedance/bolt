@@ -299,7 +299,7 @@ TEST_F(SpillableWindowTest, spillAgg) {
   auto& stats = taskStats.at(windowId);
 
   ASSERT_GT(stats.spilledBytes, 0);
-  ASSERT_GT(stats.spilledRows, 0);
+  ASSERT_GT(stats.spilledRows, data->size());
   ASSERT_GT(stats.spilledFiles, 0);
   ASSERT_GT(stats.spilledPartitions, 0);
 }

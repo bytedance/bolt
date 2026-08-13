@@ -1239,6 +1239,10 @@ bool isCompact(const Vector& vec) {
   return vec.sizeAt(vec.size() - 1) > 0;
 }
 
+bool hasNulls(const BaseVector& vec, vector_size_t size) {
+  return vec.nulls() && BaseVector::countNulls(vec.nulls(), size) > 0;
+}
+
 template <typename Vector>
 void exportOffsets(
     const Vector& vec,
@@ -1250,17 +1254,45 @@ void exportOffsets(
   auto offsets = AlignedBuffer::allocate<vector_size_t>(
       checkedPlus<size_t>(out.length, 1), pool);
   auto rawOffsets = offsets->asMutable<vector_size_t>();
-  if (!rows.changed() && isCompact(vec)) {
+  if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     auto copiedSize = vec.size() > out.length ? out.length : vec.size();
+
     memcpy(rawOffsets, vec.rawOffsets(), sizeof(vector_size_t) * copiedSize);
-    rawOffsets[copiedSize] = copiedSize == 0
+
+    const vector_size_t base = (copiedSize == 0) ? 0 : rawOffsets[0];
+    const vector_size_t end = (copiedSize == 0)
         ? 0
         : vec.offsetAt(copiedSize - 1) + vec.sizeAt(copiedSize - 1);
+
+    if (base != 0) {
+      for (vector_size_t i = 0; i < copiedSize; ++i) {
+        rawOffsets[i] -= base;
+      }
+    }
+    rawOffsets[copiedSize] = end - base;
+
+    vector_size_t childTotal = 0;
+    if constexpr (std::is_same_v<Vector, ArrayVector>) {
+      childTotal = vec.elements()->size();
+    } else {
+      static_assert(
+          std::is_same_v<Vector, MapVector>,
+          "exportOffsets expects ArrayVector or MapVector");
+      childTotal = vec.mapKeys()->size();
+    }
+
+    if (base != 0 || end != childTotal) {
+      childRows.clearAll();
+      if (end > base) {
+        childRows.addRange(base, end - base);
+      }
+    }
   } else {
     childRows.clearAll();
     // j: Index of element we are writing.
     // k: Total size so far.
-    vector_size_t j = 0, k = 0;
+    vector_size_t j = 0;
+    vector_size_t k = 0;
     rows.apply([&](vector_size_t i) {
       rawOffsets[j++] = k;
       if (!vec.isNullAt(i)) {
@@ -1286,7 +1318,7 @@ void exportOffsetsIPC(
   auto offsets = AlignedBuffer::allocate<vector_size_t>(
       checkedPlus<size_t>(out.length, 1), pool);
   auto rawOffsets = offsets->asMutable<vector_size_t>();
-  if (!rows.changed() && isCompact(vec)) {
+  if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     const vector_size_t m = out.length;
     BOLT_DCHECK_EQ(m, vec.size(), "fast path assumes out.length == vec.size()");
 

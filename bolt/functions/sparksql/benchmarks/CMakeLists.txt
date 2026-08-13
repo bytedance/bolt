@@ -92,3 +92,16 @@ target_link_libraries(
   bolt_benchmark_builder
   ${BOLT_BENCHMARK_DEPS}
 )
+
+add_executable(
+  bolt_collect_list_aggregate_bm
+  CollectListAggregateBenchmark.cpp
+)
+
+target_link_libraries(
+  bolt_collect_list_aggregate_bm
+  bolt_engine
+  bolt_functions_spark_aggregates
+  bolt_testutils
+  ${FOLLY_BENCHMARK}
+)
