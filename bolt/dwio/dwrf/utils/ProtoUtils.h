@@ -35,6 +35,9 @@
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::dwrf {
 
+inline constexpr const char* kDwrfDirectInputStreamProtoParseErrorPrefix =
+    "Failed to parse proto from DirectInputStream";
+
 class ProtoUtils final {
  public:
   static void writeType(
