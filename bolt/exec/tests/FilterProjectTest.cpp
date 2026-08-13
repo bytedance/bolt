@@ -70,6 +70,47 @@ class FilterProjectTest : public OperatorTestBase {
   std::shared_ptr<const RowType> rowType_{
       ROW({"c0", "c1", "c2", "c3"},
           {BIGINT(), INTEGER(), SMALLINT(), DOUBLE()})};
+
+  std::shared_ptr<LazyVector> assertDuplicateIdentityProjectionOverLazy(
+      const std::string& filter,
+      vector_size_t expectedLoadSize,
+      std::function<vector_size_t(vector_size_t)> expectedRowAt) {
+    constexpr vector_size_t size = 100;
+    auto valueAt = [](auto row) -> int32_t { return row; };
+    std::optional<std::function<vector_size_t(vector_size_t)>>
+        expectedRowAtOptional{std::move(expectedRowAt)};
+    auto lazyVector = makeLazyFlatVector<int32_t>(
+        size,
+        valueAt,
+        [](vector_size_t /*row*/) { return false; },
+        expectedLoadSize,
+        expectedRowAtOptional);
+    auto lazyVectors = makeRowVector({
+        makeFlatVector<int32_t>(size, valueAt),
+        lazyVector,
+    });
+
+    auto vectors = makeRowVector({
+        makeFlatVector<int32_t>(size, valueAt),
+        makeFlatVector<int32_t>(size, valueAt),
+    });
+
+    createDuckDbTable({vectors});
+
+    PlanBuilder planBuilder;
+    planBuilder.values({lazyVectors});
+    if (!filter.empty()) {
+      planBuilder.filter(filter);
+    }
+    auto plan = planBuilder.project({"c1", "c1"}).planNode();
+
+    auto sql = std::string{"SELECT c1, c1 FROM tmp"};
+    if (!filter.empty()) {
+      sql += " WHERE " + filter;
+    }
+    assertQuery(plan, sql);
+    return lazyVector;
+  }
 };
 
 TEST_F(FilterProjectTest, filter) {
@@ -340,63 +381,15 @@ TEST_F(FilterProjectTest, projectAndIdentityOverLazy) {
 }
 
 TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazy) {
-  vector_size_t size = 100;
-  auto valueAt = [](auto row) -> int32_t { return row; };
-  auto lazyVector = makeLazyFlatVector<int32_t>(
-      size,
-      valueAt,
-      [](vector_size_t /*row*/) { return false; },
-      size / 2,
-      [](vector_size_t index) { return index * 2; });
-  auto lazyVectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      lazyVector,
-  });
-
-  auto vectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      makeFlatVector<int32_t>(size, valueAt),
-  });
-
-  createDuckDbTable({vectors});
-
-  auto plan = PlanBuilder()
-                  .values({lazyVectors})
-                  .filter("c0 % 2 = 0")
-                  .project({"c1", "c1"})
-                  .planNode();
-  assertQuery(plan, "SELECT c1, c1 FROM tmp WHERE c0 % 2 = 0");
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 % 2 = 0", 50, [](vector_size_t index) { return index * 2; });
 }
 
 TEST_F(
     FilterProjectTest,
     duplicateIdentityProjectionOverLazyLoadsSelectedRows) {
-  vector_size_t size = 100;
-  auto valueAt = [](auto row) -> int32_t { return row; };
-  auto lazyVector = makeLazyFlatVector<int32_t>(
-      size,
-      valueAt,
-      [](vector_size_t /*row*/) { return false; },
-      10,
-      [](vector_size_t index) { return index * 10; });
-  auto lazyVectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      lazyVector,
-  });
-
-  auto vectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      makeFlatVector<int32_t>(size, valueAt),
-  });
-
-  createDuckDbTable({vectors});
-
-  auto plan = PlanBuilder()
-                  .values({lazyVectors})
-                  .filter("c0 % 10 = 0")
-                  .project({"c1", "c1"})
-                  .planNode();
-  assertQuery(plan, "SELECT c1, c1 FROM tmp WHERE c0 % 10 = 0");
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 % 10 = 0", 10, [](vector_size_t index) { return index * 10; });
 }
 
 TEST_F(
@@ -446,95 +439,21 @@ TEST_F(
 }
 
 TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazyWithoutFilter) {
-  vector_size_t size = 100;
-  auto valueAt = [](auto row) -> int32_t { return row; };
-  auto lazyVector = makeLazyFlatVector<int32_t>(
-      size,
-      valueAt,
-      [](vector_size_t /*row*/) { return false; },
-      size,
-      [](vector_size_t index) { return index; });
-  auto lazyVectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      lazyVector,
-  });
-
-  auto vectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      makeFlatVector<int32_t>(size, valueAt),
-  });
-
-  createDuckDbTable({vectors});
-
-  auto plan =
-      PlanBuilder().values({lazyVectors}).project({"c1", "c1"}).planNode();
-  assertQuery(plan, "SELECT c1, c1 FROM tmp");
+  assertDuplicateIdentityProjectionOverLazy(
+      "", 100, [](vector_size_t index) { return index; });
 }
 
 TEST_F(
     FilterProjectTest,
     duplicateIdentityProjectionOverLazyAllRowsAfterFilter) {
-  vector_size_t size = 100;
-  auto valueAt = [](auto row) -> int32_t { return row; };
-  auto lazyVector = makeLazyFlatVector<int32_t>(
-      size,
-      valueAt,
-      [](vector_size_t /*row*/) { return false; },
-      size,
-      [](vector_size_t index) { return index; });
-  auto lazyVectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      lazyVector,
-  });
-
-  auto vectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      makeFlatVector<int32_t>(size, valueAt),
-  });
-
-  createDuckDbTable({vectors});
-
-  auto plan = PlanBuilder()
-                  .values({lazyVectors})
-                  .filter("c0 >= 0")
-                  .project({"c1", "c1"})
-                  .planNode();
-  assertQuery(plan, "SELECT c1, c1 FROM tmp WHERE c0 >= 0");
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 >= 0", 100, [](vector_size_t index) { return index; });
 }
 
 TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazyNoRows) {
-  vector_size_t size = 100;
-  auto valueAt = [](auto row) -> int32_t { return row; };
-  bool loaded = false;
-  auto lazyVector = std::make_shared<LazyVector>(
-      pool(),
-      INTEGER(),
-      size,
-      std::make_unique<bytedance::bolt::test::SimpleVectorLoader>(
-          [&](RowSet /*rows*/) {
-            loaded = true;
-            return makeFlatVector<int32_t>(size, valueAt);
-          }));
-  auto lazyVectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      lazyVector,
-  });
-
-  auto vectors = makeRowVector({
-      makeFlatVector<int32_t>(size, valueAt),
-      makeFlatVector<int32_t>(size, valueAt),
-  });
-
-  createDuckDbTable({vectors});
-
-  auto plan = PlanBuilder()
-                  .values({lazyVectors})
-                  .filter("c0 < 0")
-                  .project({"c1", "c1"})
-                  .planNode();
-  assertQuery(plan, "SELECT c1, c1 FROM tmp WHERE c0 < 0");
+  auto lazyVector = assertDuplicateIdentityProjectionOverLazy(
+      "c0 < 0", 0, [](vector_size_t index) { return index; });
   EXPECT_FALSE(lazyVector->isLoaded());
-  EXPECT_FALSE(loaded);
 }
 
 // Verify that nulls on nested parent are propagated to child without copying
