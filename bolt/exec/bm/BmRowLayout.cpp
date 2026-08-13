@@ -1,0 +1,85 @@
+#include "bolt/exec/bm/BmRowLayout.h"
+
+#include "bolt/common/base/BitUtil.h"
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/bm/BmRowContainer.h"
+
+namespace bytedance::bolt::exec::bm {
+namespace {
+
+template <TypeKind Kind>
+uint32_t scalarTypeWidth(const TypePtr& type) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    return sizeof(StringView);
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    BOLT_NYI("BmRowContainer does not support type {}", type->toString());
+  } else {
+    return sizeof(typename TypeTraits<Kind>::NativeType);
+  }
+}
+
+uint32_t typeWidth(const TypePtr& type) {
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      scalarTypeWidth, type->kind(), type);
+}
+
+} // namespace
+
+BmRowLayout::BmRowLayout(
+    const std::vector<TypePtr>& types,
+    const std::vector<bool>& nullable,
+    uint32_t rowBlockSize) {
+  BOLT_CHECK_EQ(types.size(), nullable.size());
+  uint32_t nullBits = 0;
+  for (auto isNullable : nullable) {
+    if (isNullable) {
+      ++nullBits;
+    }
+  }
+  nullBytes_ = bits::nbytes(nullBits);
+  fixedRowSize_ = nullBytes_;
+  columns_.reserve(types.size());
+  stringColumns_.reserve(types.size());
+  storePlans_.reserve(types.size());
+  uint32_t nullOffset = 0;
+  for (auto i = 0; i < types.size(); ++i) {
+    const auto& type = types[i];
+    const auto width = typeWidth(type);
+    const auto kind = type->kind();
+    // Match RowContainer's packed fixed-width layout: key/dependent cells are
+    // laid out by width without per-type alignment padding. This can place
+    // fixed-width cells at non-natural alignment. Like RowContainer, most cell
+    // accesses still use typed pointer dereference and rely on the current
+    // target tolerating unaligned scalar/StringView access. Wide scalars such
+    // as HUGEINT must use HugeInt::serialize/deserialize to avoid alignment
+    // faults.
+    ColumnLayout column{type, fixedRowSize_, width, nullable[i], 0, 0};
+    if (nullable[i]) {
+      column.nullByte = nullOffset / 8;
+      column.nullMask = static_cast<uint8_t>(1u << (nullOffset & 7));
+      ++nullOffset;
+    }
+    columns_.push_back(std::move(column));
+    const auto& stored = columns_.back();
+    storePlans_.push_back(
+        {stored.type,
+         kind,
+         stored.offset,
+         stored.width,
+         stored.nullable,
+         stored.nullByte,
+         stored.nullMask,
+         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY,
+         BmRowContainer::storeFnFor(kind, stored.nullable)});
+    if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+      stringColumns_.push_back(
+          {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
+    }
+    fixedRowSize_ += width;
+  }
+  BOLT_CHECK_LE(fixedRowSize_, rowBlockSize);
+}
+
+} // namespace bytedance::bolt::exec::bm

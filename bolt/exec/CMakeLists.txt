@@ -120,6 +120,10 @@ bolt_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  bm/BmAggregateWindow.cpp
+  bm/BmRangeFrameBounds.cpp
+  bm/BmStreamingWindowBuild.cpp
+  bm/BmWindowPartition.cpp
 )
 
 set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)
@@ -143,6 +147,7 @@ target_link_libraries(
   bolt_expression
   bolt_presto_serializer
   bolt_cpu_usage
+  bolt_memory_bm
   $<TARGET_NAME_IF_EXISTS:bolt_thrustjit>
   gfx::timsort
   arrow::arrow
@@ -165,6 +170,8 @@ if(${BOLT_ENABLE_CUDF})
   target_include_directories(bolt_exec SYSTEM PRIVATE ${cudf_INCLUDE_DIRS})
   target_link_libraries(bolt_exec bolt_cudf_exec cudf::cudf)
 endif()
+
+add_subdirectory(bm)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)

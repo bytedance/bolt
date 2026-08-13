@@ -88,3 +88,5 @@ target_link_libraries(
          arrow::arrow
   PRIVATE re2::re2
 )
+
+add_subdirectory(bm)

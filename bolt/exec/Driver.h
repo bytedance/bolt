@@ -38,6 +38,7 @@
 #include "bolt/common/future/BoltPromise.h"
 #include "bolt/common/process/ThreadDebugInfo.h"
 #include "bolt/common/time/CpuWallTimer.h"
+#include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/core/PlanFragment.h"
 #include "bolt/core/PlanNode.h"
@@ -303,6 +304,8 @@ struct DriverCtx {
   const core::QueryConfig& queryConfig() const;
 
   const std::optional<trace::TraceConfig>& traceConfig() const;
+
+  std::shared_ptr<memory::bm::BufferManager> bufferManager() const;
 
   bolt::memory::MemoryPool* addOperatorPool(
       const core::PlanNodeId& planNodeId,

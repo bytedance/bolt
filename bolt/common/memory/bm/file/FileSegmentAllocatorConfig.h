@@ -1,0 +1,22 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "bolt/common/memory/bm/file/FileSegmentAllocatorTypes.h"
+
+namespace bytedance::bolt::memory::bm {
+
+struct FileSegmentAllocatorConfig {
+  std::string directory;
+  std::vector<int64_t> bucket_sizes;
+  int64_t file_size_limit_bytes{0};
+  uint32_t max_open_files_per_bucket{0};
+};
+
+bool IsFileSegmentAligned(int64_t value);
+
+FileErrorCode ValidateFileSegmentAllocatorConfig(
+    const FileSegmentAllocatorConfig& config);
+
+} // namespace bytedance::bolt::memory::bm
