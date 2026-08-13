@@ -32,6 +32,7 @@
 #include "bolt/core/Expressions.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/FieldReference.h"
+#include "bolt/vector/LazyVector.h"
 #include "bolt/vector/VectorEncoding.h"
 namespace bytedance::bolt::exec {
 namespace {
@@ -56,7 +57,8 @@ bool checkAddIdentityProjection(
 
 void loadReusedLazyVectors(
     const RowVectorPtr& input,
-    const std::vector<column_index_t>& reusedInputChannels) {
+    const std::vector<column_index_t>& reusedInputChannels,
+    const SelectivityVector& rows) {
   if (!input || reusedInputChannels.empty()) {
     return;
   }
@@ -64,7 +66,7 @@ void loadReusedLazyVectors(
   auto& children = input->children();
   for (auto inputChannel : reusedInputChannels) {
     if (isLazyNotLoaded(*children[inputChannel])) {
-      children[inputChannel]->loadedVector();
+      LazyVector::ensureLoadedRows(children[inputChannel], rows);
     }
   }
 }
@@ -266,7 +268,7 @@ RowVectorPtr FilterProject::getOutput() {
     if (isCompositeInput) {
       return fillCompositeOutput(size, results);
     } else {
-      loadReusedLazyVectors(input_, reusedInputChannels_);
+      loadReusedLazyVectors(input_, reusedInputChannels_, *rows);
       return fillOutput(size, nullptr, results);
     }
   }
@@ -289,9 +291,11 @@ RowVectorPtr FilterProject::getOutput() {
       rows->setFromBits(filterEvalCtx_.selectedBits->as<uint64_t>(), size);
     }
     results = project(*rows, evalCtx);
+  } else if (!allRowsSelected) {
+    rows->setFromBits(filterEvalCtx_.selectedBits->as<uint64_t>(), size);
   }
 
-  loadReusedLazyVectors(input_, reusedInputChannels_);
+  loadReusedLazyVectors(input_, reusedInputChannels_, *rows);
   return fillOutput(
       numOut,
       allRowsSelected ? nullptr : filterEvalCtx_.selectedIndices,

@@ -295,9 +295,9 @@ std::vector<VectorPtr> wrapChildren(
     }
     if (nulls == nullptr &&
         children[i]->encoding() == VectorEncoding::Simple::DICTIONARY &&
-        children[i]->rawNulls() == nullptr) {
+        children[i]->rawNulls() == nullptr &&
+        !children[i]->valueVector()->containingLazyAndWrapped()) {
       auto baseValues = children[i]->valueVector();
-      baseValues->clearContainingLazyAndWrapped();
       auto newMapping = old2newMappings.find(children[i]->wrapInfo());
       if (newMapping != old2newMappings.end()) {
         wrappedChildren[i] =

@@ -30,6 +30,7 @@
 
 #include "bolt/exec/OperatorUtils.h"
 #include <gtest/gtest.h>
+#include <array>
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -503,22 +504,26 @@ TEST_F(OperatorUtilsTest, projectDuplicateChildren) {
   }
 }
 
-TEST_F(OperatorUtilsTest, projectDictionaryOverLazyCombinesWrappers) {
+TEST_F(OperatorUtilsTest, projectDictionaryOverLazyKeepsExistingLazyWrapper) {
   auto flatVector =
       makeFlatVector<int64_t>(5, [](vector_size_t row) { return 10 + row; });
   const auto size = flatVector->size();
-  auto lazyVector = std::make_shared<LazyVector>(
-      pool(),
-      BIGINT(),
+  auto lazyVector = makeLazyFlatVector<int64_t>(
       size,
-      std::make_unique<SimpleVectorLoader>(
-          [&](RowSet /*rows*/) { return flatVector; }));
+      [&](vector_size_t row) { return flatVector->valueAt(row); },
+      [](vector_size_t /*row*/) { return false; },
+      3,
+      [](vector_size_t index) {
+        static constexpr std::array<vector_size_t, 3> kExpectedRows{1, 3, 4};
+        return kExpectedRows[index];
+      });
 
   auto innerMapping = makeIndices(size, [](vector_size_t row) {
     return static_cast<vector_size_t>(4 - row);
   });
   auto dictionaryOverLazy =
       BaseVector::wrapInDictionary(nullptr, innerMapping, size, lazyVector);
+  ASSERT_TRUE(lazyVector->containingLazyAndWrapped());
   auto rowVector = makeRowVector({dictionaryOverLazy});
 
   auto outerMapping = makeIndices(size, [](vector_size_t row) {
@@ -534,14 +539,26 @@ TEST_F(OperatorUtilsTest, projectDictionaryOverLazyCombinesWrappers) {
 
   ASSERT_EQ(
       projectedChildren[0]->encoding(), VectorEncoding::Simple::DICTIONARY);
-  ASSERT_EQ(projectedChildren[0]->valueVector().get(), lazyVector.get());
+  ASSERT_EQ(
+      projectedChildren[0]->valueVector().get(), dictionaryOverLazy.get());
+  ASSERT_TRUE(lazyVector->containingLazyAndWrapped());
+  ASSERT_TRUE(isLazyNotLoaded(*dictionaryOverLazy));
+
+  SelectivityVector rows(size, false);
+  rows.setValid(0, true);
+  rows.setValid(2, true);
+  rows.setValid(4, true);
+  rows.updateBounds();
+  LazyVector::ensureLoadedRows(projectedChildren[0], rows);
+  ASSERT_TRUE(lazyVector->isLoaded());
 
   auto expected = makeFlatVector<int64_t>(size, [&](vector_size_t row) {
     auto outer = outerMapping->as<vector_size_t>()[row];
     auto inner = innerMapping->as<vector_size_t>()[outer];
     return flatVector->valueAt(inner);
   });
-  bytedance::bolt::test::assertEqualVectors(expected, projectedChildren[0]);
+  bytedance::bolt::test::assertEqualVectors(
+      expected, projectedChildren[0], rows);
 }
 
 TEST_F(OperatorUtilsTest, reclaimableSectionGuard) {
