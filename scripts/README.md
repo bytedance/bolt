@@ -8,6 +8,7 @@ Developer tooling for the Bolt repo.
 | `install-bolt-deps.sh` | Pulls Bolt's pinned Conan deps into the local Conan cache. |
 | `install-gcc.sh` | Installs the GCC toolchain Bolt builds against (root required). |
 | `run-clang-tidy.py` | Runs clang-tidy on changed lines only; used by pre-commit + CI. |
+| `run-gitleaks.py` | Scans staged changes locally and the CI commit range for secrets. |
 | `launch-spark.sh` | One-click Spark + Gluten + Bolt launcher with a long-lived Connect Server. |
 | `launch-spark/connect.py` | pyspark Connect client used by `launch-spark.sh sql` / `shell`. |
 | `launch-spark/test-queries.sql` | Smoke-test SQL covering scan/agg/join paths for Bolt offload verification. |

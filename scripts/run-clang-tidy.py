@@ -37,6 +37,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
 
+CLANG_TIDY_DIAGNOSTIC_RE = re.compile(
+    r"^(.*):(\d+):(\d+):\s+(error|warning):\s+(.*?)(?:\s+\[([^\]]+)\])?\s*$"
+)
+
+
 class Multimap(dict):
     def __setitem__(self, key, value):
         if key not in self:
@@ -305,13 +310,11 @@ def run_clang_tidy_batch(cmd_base, file_batch):
 def process_gha_output(stdout):
     in_gha = os.environ.get("GITHUB_ACTIONS") is not None
     if in_gha and stdout:
-        clang_tidy_pattern = (
-            r"^(.*):(\d+):(\d+):\s+(error|warning):\s+(.*) $([a-z0-9,\-]+)$\s*$"
-        )
         for stdout_line in stdout.split("\n"):
-            m = re.match(clang_tidy_pattern, stdout_line)
+            m = CLANG_TIDY_DIAGNOSTIC_RE.match(stdout_line)
             if m:
                 file_path, line, col, severity, message, rule = m.groups()
+                rule = rule or "clang-tidy"
                 print(
                     f"::{severity} file={file_path},line={line},col={col},title={rule}::{message}"
                 )
@@ -392,7 +395,7 @@ def tidy(args):
             )
             diff_mode = "base" if base_ref else "staged"
         else:
-            diff_mode = "local"
+            diff_mode = "staged"
 
     if diff_mode == "staged":
         base_ref = base_ref or "HEAD"
@@ -462,18 +465,6 @@ def tidy(args):
         if exclude_re is not None:
             files_to_process = [f for f in files_to_process if not exclude_re.search(f)]
 
-        # Only analyze .cpp files — header files (.h, -inl.h) are not standalone
-        # translation units and cause false errors in clang-tidy when analyzed
-        # independently. Header diagnostics are still checked transitively when
-        # clang-tidy processes .cpp files that include them.
-        before_filter = len(files_to_process)
-        files_to_process = [f for f in files_to_process if f.endswith(".cpp")]
-        header_excluded = before_filter - len(files_to_process)
-        if header_excluded > 0:
-            print(
-                f"Excluded {header_excluded} header file(s) (analyzed transitively via .cpp)."
-            )
-
         if not files_to_process:
             print("No changed C/C++ lines detected for clang-tidy.")
             return 0
@@ -484,6 +475,9 @@ def tidy(args):
         files_to_process = [
             f for f in files_to_process if f.endswith(source_extensions)
         ]
+        header_count = len(all_changed_for_filter) - len(files_to_process)
+        if header_count > 0:
+            print(f"Excluded {header_count} header file(s) as standalone inputs.")
         if not files_to_process:
             print(
                 "Only header changes detected; no source files to run clang-tidy on in this mode."
@@ -625,7 +619,7 @@ def parse_args():
         choices=["auto", "local", "staged", "base", "none"],
         default="auto",
         help=(
-            "Diff mode: auto (GitHub base in CI, local base + staged locally), "
+            "Diff mode: auto (GitHub base in CI, staged changes locally), "
             "local (merge-base to base branch + staged), staged (git diff --cached), "
             "base (git diff <base>...HEAD + staged), none (run on given files)."
         ),
@@ -646,8 +640,8 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude",
-        default="_build/|tests/|test_package/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
-        help="Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
+        default=r"_build/|tests/|test_package/|.*Test\.cpp$|benchmark/|benchmarks/|.*Benchmark\.cpp$|.*Benchmarks\.cpp$|test/|.*\.pb\.cc$|.*\.pb\.h$|(^|/)bolt/python/",
+        help=r"Regular expression to exclude files or paths (e.g. 'tests/|.*Test\.cpp$')",
     )
     parser.add_argument(
         "files",
