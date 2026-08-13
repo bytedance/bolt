@@ -81,8 +81,10 @@ SparkShuffleReader::SparkShuffleReader(
   auto partitioning = toPartitioning(partitioningShortName_);
   isRowBased_ = supportAdaptiveShuffleWriter(partitioning) &&
       ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
-        numPartitions_ >= rowBasePartitionThreshold &&
-        outputType_->size() >= rowBaseColumnNumThreshold) ||
+        ((numPartitions_ >= rowBasePartitionThreshold &&
+          outputType_->size() >= rowBaseColumnNumThreshold) ||
+         static_cast<int64_t>(numPartitions_) * outputType_->size() >
+             shuffleReaderOptions_.rowBasedShuffleThreshold)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
   reuseBufferedInputStream_ = shuffleReaderOptions_.reuseBufferedInputStream;
 }
